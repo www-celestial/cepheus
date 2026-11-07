@@ -652,7 +652,7 @@ let compact v =
   for e = 0 to max_thing v do
     iter_facts v e (fun p w -> push g e p w)
   done;
-  let ns = v.dict.dcount in
+  let ns = v.dict.dnext in
   let b =
     build ~ne:(max_thing v + 1) ~np:(Schema.count v.schema) ~is_link:(is_link v) ~ns ~texts:(text v) g.ge g.gp g.gw g.gn
   in

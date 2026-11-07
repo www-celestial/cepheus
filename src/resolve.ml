@@ -123,11 +123,12 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
           match Schema.find v.schema c.p with
           | Some d when d.unique -> (
             match Store.word v c.v with
-            | Some w ->
+            | Some w when Store.mem v c.e c.p w ->
+              (* unique is a property of the state after the group: a value replaced within it does not count *)
               let others = ref 0 in
               Store.iter_things v c.p w (fun e -> if e <> c.e then incr others);
               if !others > 0 then fail (Not_unique (Printf.sprintf "%s %s is taken" d.name (Value.to_string c.v)))
-            | None -> ())
+            | _ -> ())
           | _ -> ())
       changes;
     (* schema rules for the property things this group touched *)
