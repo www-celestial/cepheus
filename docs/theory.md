@@ -197,12 +197,20 @@ LRU and CLOCK everywhere and better at 25 %, with no lock on a hit; 2Q and W-Tin
 gap that matters more is the layout (below). Picked: S3-FIFO; 2Q's gain would be worth a lock only if hits stayed
 under one domain, which parallel questions break.
 
-**Larger than memory**, 10 M facts (snapshot 245 MB), cache 48 MB, the process capped at 160 MB: open 66 ms (64 MB
-resident), Q1 22 µs, Q2 1.6 µs, Q3 86 ms, Q4 374 ms (the same answers), peak 79 MB. Q5 takes 66 s and reads 18.8 M
-pages: a client's follow links lie among its invoices' rows (the base orders rows by thing), so the triangle question
-reads random pages of all 120 MB of by-thing rows for a few bytes each. A third order of the rows, by property then
-thing (as Hexastore [11] and RDF-3X [12] keep), would make one property of many things local; it costs 10 bytes a fact
-more. To decide on measurements of real workloads.
+**Larger than memory**, 10 M facts (snapshot 245 MB), cache 32 MB, the process capped at 128 MB (benchmarks): open
+67 ms (64 MB resident), Q1 41 µs, Q2 1.8 µs, Q3 89 ms, Q4 385 ms on one core and 247 ms on three (the same answers;
+PostgreSQL with 32 MB of buffers under the same cap: 176 µs, 5.5 µs, 446 ms through its socket, 697 and 658 ms), peak
+79 to 105 MB. Q5 takes 102 s (PostgreSQL 1.05 s): a client's follow links lie among its invoices' rows (the base
+orders rows by thing), so the triangle question reads random pages of all 120 MB of by-thing rows for a few bytes
+each. A third order of the rows, by property then thing (as Hexastore [11] and RDF-3X [12] keep), would make one
+property of many things local; it costs 10 bytes a fact more. To decide on measurements of real workloads.
+
+**What a merge still costs.** A merge builds the new base in memory (arrays for its sort, then its pages) beside the
+old one, and the pages of both live on the OCaml heap, where the collector lets free space reach 120 % of the live
+data: write runs with merges peaked at 1.8 to 3.3 GB at 10 M facts, against 1.7 to 2.5 GB with milestone 1's mapped
+base (six runs of 10 s at 256 clients each). The base a merge replaces leaves the cache at once (`Pages.drop`); the
+remaining cure is a merge written straight to a file, page by page, as a sorted run of an LSM tree [1]: then a merge
+needs no more memory than the cache.
 
 ## 8. What comes next, and why
 

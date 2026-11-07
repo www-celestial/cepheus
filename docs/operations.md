@@ -63,13 +63,13 @@ for the process, `Cepheus.set_cache bytes` (1 GiB by default). A snapshot that f
 every page checked; a larger one is read page by page as questions need it, each page checked against its CRC when it
 arrives. Pages in memory stay under 1.25 times the cache: a full collection runs after each quarter of the cache has
 been evicted, so that the evicted pages go back to the system. Measured at 10 M facts (snapshot 245 MB): with the
-whole base in the cache, 278 MB resident after open; with a 48 MB cache under a 160 MB cap, 64 MB after open and a
-peak of 79 to 100 MB through Q1 to Q5.
+whole base in the cache, 278 MB resident after open; with a 32 MB cache under a 128 MB cap, 64 MB after open and a
+peak of 79 to 105 MB through Q1 to Q5 (benchmarks, Larger than memory).
 
 Besides the base: about 170 bytes for each change since the last merge; a merge starts in the background when the
-changes pass max(200,000, n/16) and still builds the new base in memory (twice the base for a moment, and the arrays
-of the sort: loading 10 M facts peaks at 3.1 GB). Writing merges straight to a file, so that a merge needs no more
-than the cache, is the next step.
+changes pass max(200,000, n/16) and still builds the new base in memory, beside the old one, with the arrays of its
+sort: loading 10 M facts peaks at 3.1 GB, and write runs with merges at 1.8 to 3.3 GB. Give a database that writes
+heavily about 13 times its snapshot's size until merges are written straight to a file (the next step).
 
 ## Disks
 

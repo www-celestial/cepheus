@@ -1,36 +1,156 @@
 # Benchmarks: Cepheus and PostgreSQL
 
-First numbers of the in-memory core (milestone 1), against PostgreSQL 18.6 on the same machine, with the same data
-and the same questions, and the same answers checked on both sides.
+Cepheus against PostgreSQL 18.6 on the same machine, with the same data, the same questions and the same answers
+checked on both sides. Milestone 2 numbers first; milestone 1's below them, for the history.
 
 ## Method
 
-Following Raasveldt et al., "Fair Benchmarking Considered Difficult" (DBTest 2018):
+Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli [Hoefler 2015], Le Boudec
+[Le Boudec 2010] and Tene [Tene 2015] for the statistics:
 
 - **Machine**: Intel i7-4720HQ (4 cores, 8 threads, 2015), 11 GB RAM, no swap, btrfs on a consumer SATA SSD (about 340
   fsync a second). Other jobs share the machine: every measure runs under a shared lock that keeps heavy jobs apart,
-  and both sides run in a systemd scope capped at 3 GB (the page cache counts in the cap).
+  in a systemd scope capped in memory (3 GB unless said; the page cache counts in the cap).
+- **Builds**: Cepheus in dune's release profile (the dev profile passes `-opaque`, which turns off inlining across
+  modules: a slower binary). A change is measured against the binary of the commit before it, built the same way,
+  alternated in the same session.
 - **Data**: one seeded generator (`bench/bench.ml`): 113,636 clients (name, city among 100, unique e-mail, about 5
   follow links to other clients) and 20 invoices each (client link, total in cents, status: 70 % paid, 20 % unpaid,
-  10 % late, a date): 10,000,000 facts; 113,636 client rows, 2,272,720 invoice rows, 567,795 follow rows. Cepheus is
-  loaded through its writer; PostgreSQL by `COPY` from CSV files written from the same generator.
+  10 % late, a date): 10,000,000 facts; 113,636 client rows, 2,272,720 invoice rows, 568,163 follow rows. Cepheus is
+  loaded through its writer; PostgreSQL by `COPY` from CSV files written by the same generator.
 - **PostgreSQL as an expert would set it up** (`bench/pg/pg.sh`): its own cluster (initdb, never the system's), fsync,
   synchronous_commit and full_page_writes on, shared_buffers 1 GB, work_mem 64 MB, the natural tables with primary
   keys, a unique e-mail, indexes on every searched column (`client(city)`, `invoice(client)`, `invoice(status)`,
-  `follows(b, a)`), `VACUUM ANALYZE`, a warm cache, prepared statements.
-- **Two read measures**: what an application sees (Cepheus in its process; PostgreSQL through its Unix socket with
-  pgbench) and the engine alone (PostgreSQL inside the server: a PL/pgSQL loop for point lookups, `EXPLAIN (ANALYZE,
-  TIMING OFF)` execution time for joins). Cepheus: min and median of 5 rounds; PostgreSQL: 3 to 5 runs.
+  `follows(b, a)`), `VACUUM ANALYZE`, a warm cache, prepared statements. The rows its write runs insert are deleted
+  before any read (so that the answers stay the same).
 - **Answers checked**: Q3 city-7: 4,299 rows both sides; Q4: 453,866 unpaid invoices summing to 22,677,088,830 both
   sides; Q5: 114 triangle rotations both sides.
-- **Writes**: a group making a new invoice (4 facts: client, total, status, date) against an `INSERT` of an invoice
-  row (its id and the same 4 columns), with 1, 8, 64 and 256
-  clients for 5 s, both durable (fsync), alternated, 3 rounds.
+- **Equal cores**: a question on 1 core (Cepheus `CEPHEUS_DOMAINS=1`, PostgreSQL `max_parallel_workers_per_gather=0`)
+  and on 3 (3 domains; PostgreSQL 2 workers and its leader: `WORKERS=2`). PostgreSQL decides itself how many workers
+  it launches; the number is printed (it launched only 1 for Q5: 2 processes).
+- **A time is a median with its 95 % interval.** 21 runs a question (`RUNS`), each run timing many calls for the fast
+  questions (200,000 for Q1 and Q2, 100 for Q3) and one call for Q4 and Q5. Times are skewed and often bimodal, so
+  no mean and no normal interval: the median, with the interval between two order statistics, x(j) and x(n+1-j),
+  which covers the true median with probability 1 − 2 P(B ≤ j − 1), B ~ Binomial(n, 1/2), whatever the distribution
+  ([Le Boudec 2010], theorem 2.1; [Hoefler 2015], rule 5). For 21 runs, j = 6: [x(6), x(16)], 97.3 %. The number of
+  runs and the exact coverage are printed with every interval (`bench/stats.ml`, used for both sides: PostgreSQL's
+  times go through `bench.exe stats`).
+- **Latencies from a histogram of every value**, not a sample: log-linear buckets as HdrHistogram does (exact below
+  256 µs, then 128 buckets per power of two: every percentile within 0.8 %). p50, p90, p99, p99.9 and max; the p99
+  with its 95 % interval (the same order statistics, with Binomial(n, 0.99) in its normal approximation, from 1,000
+  values). PostgreSQL's latencies come from pgbench's log of every transaction, into the same histogram.
+- **Two kinds of write loads.** Closed loop: each client writes as soon as its last write was confirmed; it gives the
+  highest throughput, but its latencies are wrong under stalls: a client stalled by a 400 ms fsync sends nothing
+  during the stall, so the writes that would have waited are never measured ("coordinated omission", [Tene 2015]).
+  Open loop: writes are due at a fixed rate (client c's k-th write at t0 + (k C + c) / rate), and a write's latency
+  counts from the time it was due, as wrk2 does; PostgreSQL's side is `pgbench -R`, whose latencies count from the
+  scheduled start (the schedule lag is added). The open loop gives the latencies; the closed loop, the throughput.
+- **Where a write's time goes**: the journal's pwrite and fsync of each frame, the writer's resolution of each batch,
+  and its wait at a merge switch, each in its own histogram (`Journal.write_us`, `Journal.fsync_us`,
+  `Engine.prepare_us`, `Engine.switch_us`); GC collections counted over the run.
+- **Larger than memory**: Cepheus with a cache of 32 MB (`CACHE_MB`) and PostgreSQL with shared_buffers 32 MB
+  (`SHARED`), each process capped at 128 MB, against a database of 245 MB (Cepheus' snapshot) and 284 MB (PostgreSQL's
+  data directory): the same answers, the pages read from the disk, the peak resident memory.
 
-Commands: `bench.exe load DIR CSVDIR 10000000`, `bench.exe read DIR 10000000`, `bench.exe write DIR CLIENTS 5`;
+Commands: `bench.exe load DIR CSVDIR 10000000`, `bench.exe read DIR 10000000 [Q1,..]`, `bench.exe write DIR CLIENTS
+SECS [RATE]`, `bench.exe fsync DIR SECS append|overwrite`, `bench.exe trace ...`, `bench.exe cachesim TRACE`;
 `pg.sh init|start|load|read|write|stop ROOT ...`.
 
-## Results at 10 million facts
+References: [Raasveldt 2018] M. Raasveldt, P. Holanda, T. Gubner, H. Mühleisen, "Fair Benchmarking Considered
+Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefler 2015] T. Hoefler, R. Belli,
+"Scientific Benchmarking of Parallel Computing Systems: Twelve Ways to Tell the Masses when Reporting Performance
+Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
+EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
+wrk2 tools.
+
+## Milestone 2 at 10 million facts
+
+Release build of 804656f (pages and cache), whole base in the cache (1 GiB), 21 runs a question, 2 rounds
+alternated with PostgreSQL; a cell is the median of the round with the higher median, and its 95 % interval.
+
+| question | Cepheus, 1 core | PostgreSQL, 1 process | Cepheus, 3 domains | PostgreSQL, 3 processes |
+|---|---:|---:|---:|---:|
+| Q1 every fact of an invoice, by id | **0.39 µs** [0.38, 0.41] | 4.73 µs [4.69, 4.77] (engine); 26 µs (socket) | 0.39 µs | |
+| Q2 a client by e-mail (unique) | **1.68 µs** [1.66, 1.72] | 5.68 µs [5.65, 5.72] (engine); 26 µs (socket) | 1.66 µs | |
+| Q3 unpaid invoices of a city's clients (4,299 rows) | **4.07 ms** [4.05, 4.10] | 10.55 ms [10.49, 10.79] | 4.06 ms | 14.58 ms [14.43, 14.78] |
+| Q4 unpaid sum per city (453,866 invoices) | **230.7 ms** [228.7, 233.7] | 236.5 ms [235.2, 237.5] | **107.3 ms** [102.5, 112.4] | 109.1 ms [108.3, 109.2] |
+| Q5 triangles of the follow graph (114 rotations) | 1.03 s [1.02, 1.03] | 1.03 s [1.02, 1.04] | **371 ms** [367, 373] | 603 ms [599, 605] (2 processes: 1 worker launched) |
+
+PostgreSQL's Q1 to Q3 through its socket (pgbench, prepared, one client): 26 µs, 26 µs, 14.6 ms (with 2 workers allowed;
+7.4 ms with none: its parallel plan is slower for Q3).
+
+Milestone 2 changed (each measured against the commit before it, alternated):
+- **Parallel questions** (89ec951, c67e52d): Q4 on 3 domains 198 -> 103-107 ms, Q5 955 -> 360-371 ms. The first
+  version gained only 1.7x on Q4: the first level's 453,866 candidates were checked against the other patterns on
+  one domain (42-45 ms of 124, measured; Amdahl's law fitted on 1, 3 and 4 domains gave 78 ms of serial work). Now
+  each slice checks its own, and the domains take slices in turn from a shared counter.
+- **Pages and cache** (804656f): when everything is in memory, Q1 +5 %, Q2 -4 %, Q3 +8 %, Q4 +13 %, Q5 +3 to +8 %
+  against the mapped base (theory, section 7, for why and what was tried).
+- **A bug fixed** (b96dec5): the sorted intersection had sorted every candidate list of a level, so a question could
+  take O(N log N) per binding instead of O(smallest); every question is now checked against the Generic Join bound.
+
+### Durable writes
+
+08e8f98, 3 rounds alternated with PostgreSQL, each round on a fresh copy of the 10 M database (7 runs of 10 s: 1, 8,
+64 and 256 clients as fast as they go, then 256 clients at fixed rates); a Cepheus group makes a new invoice (4 facts),
+PostgreSQL inserts the same invoice row; both durable (fsync). Throughput: the median of the rounds, and each round;
+latencies (from a histogram of every write): the range over the rounds of each percentile.
+
+| durable writes, 3 rounds of 10 s | Cepheus groups/s (median; rounds) | PostgreSQL inserts/s | Cepheus p50 / p99 / p99.9 ms | PostgreSQL p50 / p99 / p99.9 ms |
+|---|---:|---:|---:|---:|
+| 1 client, as fast as they go | 181 (208, 181, 175) | 185 (188, 185, 135) | 3.29-3.65 / 15.8-21.5 / 75.8-268 | 3.18-3.62 / 19.2-53.2 / 130-459 |
+| 8 clients, as fast as they go | 646 (917, 284, 646) | 990 (1,077, 990, 591) | 5.70-6.85 / 32.1-627 / 163-1,998 | 6.08-6.72 / 21.0-153 / 34.3-390 |
+| 64 clients, as fast as they go | 7,147 (7,147, 7,765, 4,185) | 4,625 (7,779, 4,625, 2,439) | 6.14-10.2 / 28.0-135 / 59.6-524 | 6.43-6.56 / 23.0-416 / 307-1,991 |
+| 256 clients, as fast as they go | 14,182 (14,182, 17,192, 14,141) | 19,559 (19,559, 12,742, 20,863) | 9.79-10.9 / 66.0-264 / 326-598 | 9.54-12.6 / 35.8-102 / 309-1,917 |
+| 256 clients at 2,000 a second (open loop) | 1,999 (1,998, 1,999, 1,999) | 1,994 (1,994, 1,999, 1,940) | 5.12-15.6 / 98.8-1,655 / 179-1,745 | 8.89-20.6 / 586-6,128 / 762-6,357 |
+| 256 clients at 5,000 a second (open loop) | 4,997 (4,997, 4,766, 4,997) | 4,957 (5,010, 4,957, 4,747) | 6.24-10.5 / 146-717 / 483-791 | 8.03-68.6 / 442-3,654 / 586-3,785 |
+| 256 clients at 10,000 a second (open loop) | 9,993 (9,993, 9,995, 9,982) | 9,879 (9,879, 9,847, 9,888) | 9.54-24.3 / 202-1,032 / 233-1,044 | 6.66-219 / 774-1,311 / 885-1,352 |
+
+What it says. Throughput is on par, and bound by the disk's fsync rate times the frame size on both sides (theory,
+section 2); this disk was noisy in these rounds (a frame's fsync: p99.9 up to 450 ms, max up to 2.6 s), so a side's
+rounds differ by up to a factor of 3, more than the two sides differ. The latencies that count are the open loop's:
+with writes due at a fixed rate, every write delayed by a stall is measured. There, Cepheus' p99 is lower than
+PostgreSQL's at every rate (at 2,000 a second: 0.1 to 1.7 s against 0.6 to 6.1 s), and its median too (5 to 24 ms
+against 7 to 219 ms). The closed loop's latencies look better than they are: a client stalled by a long fsync sends
+nothing meanwhile, so the writes that would have waited are never counted (coordinated omission).
+Cepheus ran capped at 4 GB here: its merges still build the base in memory (peaks of 0.3 to 2.4 GB in these runs).
+
+### Larger than memory
+
+Cepheus with a cache of 32 MB (`CACHE_MB=32`), PostgreSQL with shared_buffers 32 MB (`SHARED=32MB`, work_mem 64 MB
+as above), each process capped at 128 MB with no swap; the database is 245 MB (Cepheus' snapshot) and 284 MB
+(PostgreSQL's data directory). 5 runs a question (Q5: 1, after one to warm up); the same answers on both sides.
+
+| question | Cepheus, 1 core | PostgreSQL, 1 process | Cepheus, 3 domains | PostgreSQL, 3 processes |
+|---|---:|---:|---:|---:|
+| open | 67 ms, 64 MB resident (1,313 pages read: the offset tables) | | | |
+| Q1 an invoice by id | **41 µs** [41, 42] | 176 µs (engine); 1.18 ms (socket) | 41 µs | 177 µs; 1.23 ms |
+| Q2 a client by e-mail | **1.8 µs** | 5.5 µs; 25 µs | 1.7 µs | 5.4 µs; 27 µs |
+| Q3 unpaid of a city (a different city each call) | **89 ms** [88, 91] | 446 ms (socket, random city) | 88 ms | 326 ms |
+| Q4 unpaid sum per city | **385 ms** [384, 386] | 697 ms [695, 707] | **247 ms** [223, 251] | 658 ms [620, 790] |
+| Q5 triangles | 102 s | **1.05 s** [1.04, 1.13] | 198 s | the server was killed by the cap |
+| peak resident memory | 79 MB | | 105 MB | |
+
+Q1 to Q4 read 3.9 M pages from the disk (each checked against its CRC). PostgreSQL's Q3 "engine only" repeats one city
+(7.8 ms once its pages are in its buffers), so its socket time, with a random city as Cepheus', is the one compared.
+With 2 parallel workers, PostgreSQL's server was killed by the 128 MB cap during Q5 (each worker may take work_mem,
+64 MB, for its hash joins). Q5 is where Cepheus loses, by a factor of 100: its rows are ordered by thing, so a client's
+follow links lie among the rows of its 20 invoices, and the triangle question reads random pages of 120 MB of by-thing
+rows for a few bytes each (18.8 M pages read in 6 runs with a 48 MB cache); PostgreSQL keeps `follows` in a table of
+its own (23 MB with its index), which fits in its 32 MB. A third order of Cepheus' rows (property, thing) would make
+that local (theory, section 7). On 3 domains Q5 is slower than on 1: the misses are read one at a time under the
+cache's lock.
+
+### Where a write's time goes (256 clients, step 4)
+
+5 rounds of 10 s (c67e52d): 15,775 to 19,009 groups a second (median 18,553; PostgreSQL 13,092 to 19,627, median
+18,048). A client's p99 (40 to 62 ms) is about twice the journal's fsync p99 (19 to 30 ms): a frame waits for the one
+being forced, then for its own fsync. The writer's work is small (p99 3.2 to 4.0 ms a batch); GC: about 1,500 minor
+and 10 to 22 major collections in 10 s. The p99.9 (305 to 930 ms) follows the disk's fsync stalls (p99.9 188 to 434
+ms, max 287 to 529 ms), which a loop of fsyncs alone shows too (operations, Disks). The rounds of milestone 1 with
+p99 of 170 to 460 ms were these stalls.
+
+## Milestone 1 at 10 million facts (old method: min and median of 5 rounds, best of 3 for writes)
 
 | question | Cepheus | PostgreSQL, engine only | PostgreSQL, through its socket |
 |---|---:|---:|---:|
@@ -58,7 +178,7 @@ against 22 ms; Q5 63 ms against 50 ms.
 | memory after open / size on disk | 312 MB resident; journal and 2 snapshots on disk | 740 MB data directory |
 | recovery after kill -9 (40 kills, small database) | median 6 ms, max 13.5 ms | |
 
-## What the numbers say
+### What the numbers said then
 
 - **Point lookups and selective joins: Cepheus is 3 to 70 times faster.** A thing's facts are two array reads away
   (dense ids); a question runs in the application's process with no round trip and no plan cache to consult. Through
@@ -76,17 +196,8 @@ against 22 ms; Q5 63 ms against 50 ms.
 - **Recovery** is fast because the journal after the newest snapshot is short; a snapshot at 10 M facts takes 4.7 s
   to write and 0.47 s to verify and map at open.
 
-## Milestone 2 so far
-
-- **Background merges** (theory, section 3): loading 10 M facts through the writer takes 74.3 s instead of 89.5 s
-  (134,600 facts/s). Durable writes at 256 clients, 3 rounds: 11,893, 21,786 and 17,684 groups/s (milestone 1:
-  best 16,277; PostgreSQL best 21,348); the round at 17,684 has a p99 of 29.6 ms, where milestone 1 had 300 to 600 ms
-  pauses. Other rounds still show p99 of 170 to 460 ms: not yet explained (disk noise or GC), to measure with a
-  breakdown of the time in fsync.
-- **Parallel questions and sorted intersection**: built and checked against the naive evaluator (half of the 300
-  random databases run split over 3 domains); the 10 M measurement is not done yet.
-
 ## Not measured yet
 
-Data larger than memory (both sides under a small cap), several databases writing at once, a server-class disk,
-skewed graphs, parallel questions, replication.
+Several databases writing at once, a server-class disk, skewed graphs, replication; a merge that writes its base
+straight to a file (the merges of milestone 2 still build the new base in memory: write runs with merges peaked at 1.8
+to 3.3 GB, against 1.7 to 2.5 GB for milestone 1's mapped base over the same six runs).
