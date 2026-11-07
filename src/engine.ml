@@ -112,10 +112,14 @@ let snapshot t =
   match t.stopped with
   | Some e -> Error e
   | None -> (
-    if t.working.delta.dn > 0 then compact t;
-    match Snapshot.write t.disk (Filename.concat t.dir "snapshots") t.id t.working (Journal.position t.journal) with
+    (* a page of the base that cannot be read: no snapshot, an error, and the writer goes on *)
+    match
+      if t.working.delta.dn > 0 then compact t;
+      Snapshot.write t.disk (Filename.concat t.dir "snapshots") t.id t.working (Journal.position t.journal)
+    with
     | () -> Ok ()
-    | exception Disk.Io m -> Error (Io m))
+    | exception Disk.Io m -> Error (Io m)
+    | exception Pages.Unreadable m -> Error (Damaged m))
 
 let bootstrap_ops =
   List.concat_map
