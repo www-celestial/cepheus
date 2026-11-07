@@ -12,6 +12,11 @@ let ft = 16
 let max_body = 1 lsl 28
 let segment_limit = ref (64 * 1024 * 1024)
 
+(* where the time of an append goes, in microseconds: for the benchmarks (one writer: the syncer) *)
+let write_us = Histogram.create ()
+let fsync_us = Histogram.create ()
+let clock () = int_of_float (Unix.gettimeofday () *. 1e6)
+
 type t = {
   disk : Disk.t;
   dir : string;
@@ -216,8 +221,12 @@ let append j body first count =
   set32 b (t + 4) bc;
   set32 b (t + 8) hc;
   set32 b (t + 12) tail_magic;
+  let t0 = clock () in
   j.disk.pwrite j.fd j.size b 0 n;
+  let t1 = clock () in
   j.disk.fsync j.fd;
+  Histogram.record write_us (t1 - t0);
+  Histogram.record fsync_us (clock () - t1);
   j.size <- j.size + n;
   j.next <- first + count
 

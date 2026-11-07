@@ -5,8 +5,9 @@
 #   pg.sh start ROOT MEM       start the server in a systemd scope capped at MEM (the cache counts in the cap)
 #   pg.sh load ROOT CSVDIR     tables as a PostgreSQL user would write them, COPY, indexes, ANALYZE
 #   pg.sh read ROOT NCLIENTS   Q1-Q5: through the socket (pgbench, prepared) and inside the server (engine only);
-#                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2)
-#   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row
+#                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2);
+#                              QS=Q4,Q5 only those; RUNS runs each (21), summarised by bench.exe stats
+#   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row; RATE=r inserts a second in all (open loop)
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -61,55 +62,74 @@ EOF
   echo "postgres load: $(awk "BEGIN{print $t1 - $t0}") s (COPY, indexes, VACUUM ANALYZE); size $(psql -X -At -c "SELECT pg_size_pretty(pg_database_size('bench'))")"
   ;;
 read)
+  # QS=Q1,Q4 runs only those; RUNS runs a question (21); each summarised as on the Cepheus side (bench.exe stats)
   n=$3
   ninv=$((n * 20))
+  runs=${RUNS:-21}
+  qs=${QS:-Q1,Q2,Q3,Q4,Q5}
+  asked() { case ",$qs," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+  stats() { "$here/../../_build/default/bench/bench.exe" stats "$1"; }
+  q3="SELECT i.id, i.total FROM client c JOIN invoice i ON i.client = c.id WHERE c.city = 'city-7' AND i.status = 'unpaid'"
+  q4="SELECT c.city, sum(i.total), count(*) FROM invoice i JOIN client c ON c.id = i.client WHERE i.status = 'unpaid' GROUP BY c.city"
+  q5="SELECT count(*) FROM follows f1 JOIN follows f2 ON f2.a = f1.b JOIN follows f3 ON f3.a = f2.b AND f3.b = f1.a"
   # warm the cache as the Cepheus side is warm (its snapshot is verified, so read, at open)
   psql_ -c "SELECT count(*) FROM invoice" -c "SELECT count(*) FROM client" -c "SELECT count(*) FROM follows" >/dev/null
   # checks: the same answers as Cepheus
-  echo "Q3 rows city-7: $(psql -X -At -c "SELECT count(*) FROM client c JOIN invoice i ON i.client = c.id WHERE c.city = 'city-7' AND i.status = 'unpaid'")"
+  echo "Q3 rows city-7: $(psql -X -At -c "SELECT count(*) FROM ($q3) x")"
   echo "Q4 count, sum: $(psql -X -At -F' ' -c "SELECT count(*), sum(i.total) FROM invoice i JOIN client c ON c.id = i.client WHERE i.status = 'unpaid'")"
-  echo "Q5 rotations: $(psql -X -At -c "SELECT count(*) FROM follows f1 JOIN follows f2 ON f2.a = f1.b JOIN follows f3 ON f3.a = f2.b AND f3.b = f1.a")"
-  tmp=$(mktemp -d)
-  printf '\\set k random(0, %d)\nSELECT * FROM invoice WHERE id = :k;\n' $((ninv - 1)) > "$tmp/q1.sql"
-  printf '\\set k random(0, %d)\nSELECT * FROM client WHERE email = '"'"'c'"'"' || :k || '"'"'@example.com'"'"';\n' $((n - 1)) > "$tmp/q2.sql"
-  printf '\\set k random(0, 99)\nSELECT i.id, i.total FROM client c JOIN invoice i ON i.client = c.id WHERE c.city = '"'"'city-'"'"' || :k AND i.status = '"'"'unpaid'"'"';\n' > "$tmp/q3.sql"
-  for q in q1 q2 q3; do
-    for r in 1 2 3; do
-      pgbench -n -M prepared -c 1 -j 1 -T 5 -f "$tmp/$q.sql" bench 2>/dev/null | sed -n "s/latency average = \(.*\)/$q through the socket: \1/p"
-    done
+  echo "Q5 rotations: $(psql -X -At -c "$q5")"
+  tmp=$(mktemp -d -p "$root")
+  printf '\\set k random(0, %d)\nSELECT * FROM invoice WHERE id = :k;\n' $((ninv - 1)) > "$tmp/Q1.sql"
+  printf '\\set k random(0, %d)\nSELECT * FROM client WHERE email = '"'"'c'"'"' || :k || '"'"'@example.com'"'"';\n' $((n - 1)) > "$tmp/Q2.sql"
+  printf '\\set k random(0, 99)\nSELECT i.id, i.total FROM client c JOIN invoice i ON i.client = c.id WHERE c.city = '"'"'city-'"'"' || :k AND i.status = '"'"'unpaid'"'"';\n' > "$tmp/Q3.sql"
+  # through the socket: the mean latency of a 2-second pgbench run, one client, prepared statements
+  for q in Q1 Q2 Q3; do
+    asked $q || continue
+    for r in $(seq "$runs"); do
+      pgbench -n -M prepared -c 1 -j 1 -T 2 -f "$tmp/$q.sql" bench 2>/dev/null | sed -n 's/latency average = \([0-9.]*\) ms/\1/p'
+    done | stats "$q through the socket"
   done
-  rm -rf "$tmp"
-  # inside the server: plpgsql loops (cached plans), and EXPLAIN ANALYZE execution times
-  for r in 1 2 3; do
-  psql_ <<EOF
-DO \$\$ DECLARE t0 timestamptz; x record; BEGIN
-  t0 := clock_timestamp();
-  FOR i IN 1..200000 LOOP SELECT * INTO x FROM invoice WHERE id = (i * 7919) % $ninv; END LOOP;
-  RAISE NOTICE 'Q1 engine only: % us', round((extract(epoch FROM clock_timestamp() - t0) * 1e6 / 200000)::numeric, 2);
-  t0 := clock_timestamp();
-  FOR i IN 1..200000 LOOP SELECT * INTO x FROM client WHERE email = 'c' || ((i * 7919) % $n) || '@example.com'; END LOOP;
-  RAISE NOTICE 'Q2 engine only: % us', round((extract(epoch FROM clock_timestamp() - t0) * 1e6 / 200000)::numeric, 2);
-END \$\$;
-EOF
+  rm -r "$tmp"
+  # inside the server: plpgsql loops of 100,000 lookups (cached plans), the time of one
+  for q in Q1 Q2; do
+    asked $q || continue
+    if [ $q = Q1 ]; then look="SELECT * INTO x FROM invoice WHERE id = (i * 7919) % $ninv"
+    else look="SELECT * INTO x FROM client WHERE email = 'c' || ((i * 7919) % $n) || '@example.com'"; fi
+    for r in $(seq "$runs"); do
+      psql -X -q -v ON_ERROR_STOP=1 -c "DO \$\$ DECLARE t0 timestamptz; x record; BEGIN t0 := clock_timestamp();
+        FOR i IN 1..100000 LOOP $look; END LOOP;
+        RAISE NOTICE 'per %', extract(epoch FROM clock_timestamp() - t0) * 1e3 / 100000; END \$\$;" 2>&1 \
+        | sed -n 's/.*per \([0-9.e-]*\).*/\1/p'
+    done | stats "$q engine only"
   done
   # the processes each question used: the leader and the workers it launched
-  for q in "SELECT c.city, sum(i.total), count(*) FROM invoice i JOIN client c ON c.id = i.client WHERE i.status = 'unpaid' GROUP BY c.city" \
-           "SELECT count(*) FROM follows f1 JOIN follows f2 ON f2.a = f1.b JOIN follows f3 ON f3.a = f2.b AND f3.b = f1.a"; do
-    echo "workers launched: $(psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $q" | sed -n 's/.*Workers Launched: //p' | tr '\n' ' ')"
+  for q in Q4 Q5; do
+    asked $q || continue
+    eval "sql=\$$(echo $q | tr Q q)"
+    echo "$q workers launched: $(psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/.*Workers Launched: //p' | tr '\n' ' ')"
   done
-  for r in 1 2 3 4 5; do
-    printf 'Q3 engine only: %s\n' "$(psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) SELECT i.id, i.total FROM client c JOIN invoice i ON i.client = c.id WHERE c.city = 'city-7' AND i.status = 'unpaid'" | sed -n 's/Execution Time: //p')"
-    printf 'Q4 engine only: %s\n' "$(psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) SELECT c.city, sum(i.total), count(*) FROM invoice i JOIN client c ON c.id = i.client WHERE i.status = 'unpaid' GROUP BY c.city" | sed -n 's/Execution Time: //p')"
-    printf 'Q5 engine only: %s\n' "$(psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) SELECT count(*) FROM follows f1 JOIN follows f2 ON f2.a = f1.b JOIN follows f3 ON f3.a = f2.b AND f3.b = f1.a" | sed -n 's/Execution Time: //p')"
+  # EXPLAIN ANALYZE execution times
+  for q in Q3 Q4 Q5; do
+    asked $q || continue
+    eval "sql=\$$(echo $q | tr Q q)"
+    for r in $(seq "$runs"); do
+      psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+    done | stats "$q engine only"
   done
   ;;
 write)
+  # RATE=r: r inserts a second in all (pgbench -R: a latency counts from the scheduled start, so a stall is never
+  # hidden); without it, as fast as the clients go. Latencies of every insert, from pgbench's log, into the histogram.
   n=$3; c=$4; secs=$5
-  tmp=$(mktemp -d)
+  tmp=$(mktemp -d -p "$root")
   printf '\\set c random(0, %d)\n\\set t random(1, 100000)\n\\set d random(0, 3649)\nINSERT INTO invoice (id, client, total, status, date) VALUES (nextval('"'"'invoice_seq'"'"'), :c, :t, '"'"'unpaid'"'"', :d);\n' $((n - 1)) > "$tmp/w.sql"
   j=$c; [ "$j" -gt 8 ] && j=8
-  pgbench -n -M prepared -c "$c" -j "$j" -T "$secs" -f "$tmp/w.sql" bench 2>/dev/null | sed -n "s/^\(tps = [0-9.]*\).*/W1 $c clients: \1/p; s/latency average = \(.*\)/W1 $c clients: latency average \1/p"
-  rm -rf "$tmp"
+  rate=""; [ -n "$RATE" ] && rate="-R $RATE"
+  (cd "$tmp" && pgbench -n -M prepared -c "$c" -j "$j" -T "$secs" $rate -l --log-prefix=lat -f w.sql bench 2>/dev/null) \
+    | sed -n "s/^\(tps = [0-9.]*\).*/W1 $c clients${RATE:+ at $RATE\/s}: \1/p"
+  # a log line: client, transaction, latency (us), script, epoch, us[, schedule lag (us)]
+  cat "$tmp"/lat* | awk '{ print $3 + ($7 == "" ? 0 : $7) }' | "$here/../../_build/default/bench/bench.exe" stats "  insert" us
+  rm -r "$tmp"
   ;;
 stop)
   pg_ctl -D "$root/data" -w stop -m fast >/dev/null

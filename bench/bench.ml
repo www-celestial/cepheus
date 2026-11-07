@@ -3,9 +3,17 @@
 
      bench.exe load DIR CSVDIR FACTS   Cepheus through its writer (64 clients, one group per client and its 20
                                        invoices, then the follow links), a snapshot, and the CSV files
-     bench.exe read DIR FACTS [QS]     open (restart time), then Q1-Q5 (or those named in QS, as Q1,Q4): min and
-                                       median of 5 rounds; CEPHEUS_DOMAINS=d runs a question on up to d domains
-     bench.exe write DIR CLIENTS SECS  durable writes of a new invoice (4 facts) with CLIENTS threads *)
+     bench.exe read DIR FACTS [QS]     open (restart time), then Q1-Q5 (or those named in QS, as Q1,Q4): median
+                                       and its 95 % interval over RUNS runs (21); CEPHEUS_DOMAINS=d runs a question
+                                       on up to d domains
+     bench.exe write DIR CLIENTS SECS [RATE]
+                                       durable writes of a new invoice (4 facts) with CLIENTS threads: as fast as
+                                       they go (closed loop), or RATE groups a second in all (open loop: a write's
+                                       latency counts from the time it was due, so a stall is never hidden)
+     bench.exe fsync DIR SECS MODE     a frame and its fsync in a loop: MODE append grows the file, overwrite writes
+                                       into a file filled with zeros beforehand
+     bench.exe stats NAME [us]         the summary of the numbers on stdin (one a line, in ms; with us, latencies
+                                       in microseconds into a histogram) *)
 
 open Cepheus
 
@@ -95,16 +103,15 @@ let load dir csv facts =
 
 (* ---- reads ---- *)
 
-let rounds = 5
+(* RUNS runs (21 by default); a run times [n] calls and gives the time of one; Stats summarises the runs *)
+let runs = match Sys.getenv_opt "RUNS" with Some r -> int_of_string r | None -> 21
 
 let measure name n f =
-  let per = Array.init rounds (fun _ ->
+  let per = Array.init runs (fun _ ->
       let t = now () in
       for i = 0 to n - 1 do f i done;
       (now () -. t) /. float n) in
-  Array.sort compare per;
-  let unit x = if x < 1e-3 then Printf.sprintf "%.2f us" (x *. 1e6) else Printf.sprintf "%.2f ms" (x *. 1e3) in
-  Printf.printf "%-34s min %s  median %s\n%!" name (unit per.(0)) (unit per.(rounds / 2))
+  Stats.print name per
 
 let rss () =
   let ic = open_in "/proc/self/status" in
@@ -138,7 +145,7 @@ let read dir facts only =
   in
   if asked "Q3" then begin
   let n3 = List.length (ok (find v (q3 "city-7"))) in
-  measure (Printf.sprintf "Q3 unpaid of a city (%d rows)" n3) 200 (fun i ->
+  measure (Printf.sprintf "Q3 unpaid of a city (%d rows)" n3) 100 (fun i ->
       ignore (fold v (q3 (Printf.sprintf "city-%d" (i mod 100))) ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
   end;
   let q4 =
@@ -160,7 +167,7 @@ let read dir facts only =
   if asked "Q4" then begin
   let sums = q4run () in
   let total = Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0 and cnt = Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0 in
-  measure (Printf.sprintf "Q4 unpaid sum by city (%d inv, %d)" cnt total) 5 (fun _ -> q4run ())
+  measure (Printf.sprintf "Q4 unpaid sum by city (%d inv, %d)" cnt total) 1 (fun _ -> ignore (q4run ()))
   end;
   let q5 =
     { vars = 3; ranges = [];
@@ -168,42 +175,99 @@ let read dir facts only =
   in
   if asked "Q5" then begin
   let tri = ok (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )) in
-  measure (Printf.sprintf "Q5 triangles (%d rotations)" tri) 3 (fun _ -> ignore (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
+  measure (Printf.sprintf "Q5 triangles (%d rotations)" tri) 1 (fun _ -> ignore (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
   end;
   close db
 
 (* ---- durable writes ---- *)
 
-let write_bench dir clients secs =
+let write_bench dir clients secs rate =
   let db = ok (open_ dir) in
   let s = schema_of (view db) in
   let v = view db in
   let some_client = match things v s.mail (Text (email 0)) with [ e ] -> e | _ -> failwith "no client 0" in
   let stop = Atomic.make false in
-  let lat = Array.make clients [] and cnt = Array.make clients 0 in
+  let hist = Array.init clients (fun _ -> Histogram.create ()) and cnt = Array.make clients 0 in
+  let t0 = now () +. 0.01 in
   let worker c () =
     let r = Rng.make c in
     while not (Atomic.get stop) do
-      let t = now () in
+      (* open loop: the k-th write of client c is due at t0 + (k clients + c) / rate *)
+      let due = if rate > 0. then t0 +. (float ((cnt.(c) * clients) + c) /. rate) else now () in
+      let wait = due -. now () in
+      if wait > 0. then Thread.delay wait;
       ignore (ok (write db ~by:c ~why:"invoice"
                     [ Add (-1, s.client, Link some_client); Add (-1, s.total, Money (Rng.int r 100000)); Add (-1, s.status, Text "unpaid");
                       Add (-1, s.date, Date (Rng.int r 3650)) ]));
-      if cnt.(c) land 15 = 0 then lat.(c) <- (now () -. t) :: lat.(c);
+      Histogram.record hist.(c) (int_of_float ((now () -. due) *. 1e6));
       cnt.(c) <- cnt.(c) + 1
     done
   in
-  let t0 = now () in
+  let gc0 = Gc.quick_stat () and m0 = Atomic.get Engine.merges and f0 = Atomic.get Engine.frames in
   let ts = List.init clients (fun c -> Thread.create (worker c) ()) in
   Unix.sleepf secs;
   Atomic.set stop true;
   List.iter Thread.join ts;
   let dt = now () -. t0 in
+  let gc1 = Gc.quick_stat () in
   let n = Array.fold_left ( + ) 0 cnt in
-  let l = Array.of_list (List.sort compare (List.concat (Array.to_list lat))) in
-  let pct p = 1000. *. l.(min (Array.length l - 1) (int_of_float (p *. float (Array.length l)))) in
-  Printf.printf "W1 %3d clients: %7.0f durable groups/s, latency median %.1f ms, p99 %.1f ms, %.1f groups a frame\n%!" clients
-    (float n /. dt) (pct 0.5) (pct 0.99) (float n /. float (max 1 (Atomic.get Engine.frames)));
-  close db
+  let h = Histogram.create () in
+  Array.iter (Histogram.merge_into h) hist;
+  let frames = Atomic.get Engine.frames - f0 in
+  Printf.printf "W1 %3d clients%s: %7.0f durable groups/s, %.1f groups a frame, %d merges, GC %d minor %d major\n%!" clients
+    (if rate > 0. then Printf.sprintf " at %.0f/s" rate else "") (float n /. dt) (float n /. float (max 1 frames))
+    (Atomic.get Engine.merges - m0) (gc1.minor_collections - gc0.minor_collections) (gc1.major_collections - gc0.major_collections);
+  Stats.print_latency "  write" h;
+  close db;
+  Stats.print_latency "  journal pwrite" Journal.write_us;
+  Stats.print_latency "  journal fsync" Journal.fsync_us;
+  Stats.print_latency "  writer resolves a batch" Engine.prepare_us;
+  Stats.print_latency "  writer waits for a merge switch" Engine.switch_us
+
+(* the file system alone: a frame of 9,000 bytes (a frame of 125 groups) and its fsync, appended or overwriting zeros
+   written and forced beforehand *)
+let fsync_bench dir secs mode =
+  let path = Filename.concat dir "fsync-test" in
+  let len = 9000 and total = 64 * 1024 * 1024 in
+  let fd = Unix.openfile path [ O_RDWR; O_CREAT; O_TRUNC ] 0o644 in
+  let frame = Bytes.make len 'x' in
+  if mode = "overwrite" then begin
+    let z = Bytes.make (1 lsl 20) '\000' in
+    for _ = 1 to total lsr 20 do ignore (Unix.write fd z 0 (Bytes.length z)) done;
+    Unix.fsync fd;
+    ignore (Unix.lseek fd 0 SEEK_SET)
+  end;
+  let h = Histogram.create () and w = Histogram.create () in
+  let t0 = now () and off = ref 0 in
+  while now () -. t0 < secs && !off + len <= total do
+    let t = now () in
+    ignore (Unix.write fd frame 0 len);
+    let t1 = now () in
+    Unix.fsync fd;
+    let t2 = now () in
+    Histogram.record w (int_of_float ((t1 -. t) *. 1e6));
+    Histogram.record h (int_of_float ((t2 -. t1) *. 1e6));
+    off := !off + len
+  done;
+  Unix.close fd;
+  Unix.unlink path;
+  Printf.printf "%s: %d frames of %d bytes in %.1f s\n" mode (Histogram.total h) len (now () -. t0);
+  Stats.print_latency "  write" w;
+  Stats.print_latency "  fsync" h
+
+(* numbers on stdin, one a line *)
+let stats name us =
+  let xs = ref [] in
+  (try while true do
+       let l = String.trim (input_line stdin) in
+       if l <> "" then xs := float_of_string l :: !xs
+     done with End_of_file -> ());
+  if us then begin
+    let h = Histogram.create () in
+    List.iter (fun x -> Histogram.record h (int_of_float x)) !xs;
+    Stats.print_latency name h
+  end
+  else Stats.print name (Array.of_list (List.rev_map (fun x -> x /. 1e3) !xs))
 
 (* the writer's work alone, without the disk: the same groups into a fork *)
 let cpu dir n =
@@ -226,5 +290,9 @@ let () =
   | [| _; "load"; dir; csv; facts |] -> load dir csv (int_of_string facts)
   | [| _; "read"; dir; facts |] -> read dir (int_of_string facts) None
   | [| _; "read"; dir; facts; qs |] -> read dir (int_of_string facts) (Some qs)
-  | [| _; "write"; dir; clients; secs |] -> write_bench dir (int_of_string clients) (float_of_string secs)
-  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS"; exit 2
+  | [| _; "write"; dir; clients; secs |] -> write_bench dir (int_of_string clients) (float_of_string secs) 0.
+  | [| _; "write"; dir; clients; secs; rate |] -> write_bench dir (int_of_string clients) (float_of_string secs) (float_of_string rate)
+  | [| _; "fsync"; dir; secs; mode |] -> fsync_bench dir (float_of_string secs) mode
+  | [| _; "stats"; name |] -> stats name false
+  | [| _; "stats"; name; "us" |] -> stats name true
+  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | fsync DIR SECS MODE | stats NAME [us] | cpu DIR N"; exit 2

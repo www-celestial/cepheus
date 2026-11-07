@@ -3,6 +3,7 @@ module Crc32c = Crc32c
 module Disk = Disk
 module Engine = Engine
 module Group = Group
+module Histogram = Histogram
 module Journal = Journal
 module Query = Query
 module Resolve = Resolve

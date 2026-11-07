@@ -57,6 +57,10 @@ type batch = {
 let compact_min = ref 200_000
 let frames = Atomic.make 0 (* frames written by this process: for the benchmarks *)
 
+(* for the benchmarks, in microseconds: the writer's resolution of a batch, its wait at a merge switch *)
+let prepare_us = Histogram.create ()
+let switch_us = Histogram.create ()
+
 let needs_compaction (v : Store.view) = v.delta.dn > max !compact_min (v.base.n / 16)
 
 let prepare t (reqs : (Resolve.op list * int * string) array) =
@@ -312,6 +316,7 @@ let finish_merge l =
   match l.merging with
   | None -> ()
   | Some m ->
+    let t0 = Journal.clock () in
     Option.iter Domain.join m.dom;
     l.merging <- None;
     wait_idle l;
@@ -325,7 +330,8 @@ let finish_merge l =
         l.e.working <- v;
         Atomic.set l.e.published v;
         Atomic.incr merges
-    end
+    end;
+    Histogram.record switch_us (Journal.clock () - t0)
 
 let max_batch = 4096
 let max_frame = 8 lsl 20
@@ -357,7 +363,9 @@ let writer l () =
       | Write _ :: _ ->
         let ws, rest = split [] items in
         let reqs = Array.of_list ws in
+        let t0 = Journal.clock () in
         let b = prepare l.e (Array.map (fun r -> r.w) reqs) in
+        Histogram.record prepare_us (Journal.clock () - t0);
         Mutex.lock l.sm;
         (* while the syncer forces the previous frame, the next one grows: everything that arrived meanwhile goes
            into one frame and one fsync (group commit) *)

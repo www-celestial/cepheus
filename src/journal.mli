@@ -52,3 +52,11 @@ val read : Disk.t -> string -> string -> (Group.t -> unit) -> unit
 (** Every group of the journal, in order, without changing a file; raises {!Damaged}. *)
 
 val segment_name : int -> string
+
+val write_us : Histogram.t
+val fsync_us : Histogram.t
+(** Where the time of each append went, in microseconds (the pwrite of the frame, then its fsync): for the
+    benchmarks. *)
+
+val clock : unit -> int
+(** The time in microseconds. *)
