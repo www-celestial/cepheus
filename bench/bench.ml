@@ -3,7 +3,8 @@
 
      bench.exe load DIR CSVDIR FACTS   Cepheus through its writer (64 clients, one group per client and its 20
                                        invoices, then the follow links), a snapshot, and the CSV files
-     bench.exe read DIR FACTS          open (restart time), then Q1-Q5: min and median of 5 rounds
+     bench.exe read DIR FACTS [QS]     open (restart time), then Q1-Q5 (or those named in QS, as Q1,Q4): min and
+                                       median of 5 rounds; CEPHEUS_DOMAINS=d runs a question on up to d domains
      bench.exe write DIR CLIENTS SECS  durable writes of a new invoice (4 facts) with CLIENTS threads *)
 
 open Cepheus
@@ -113,7 +114,8 @@ let rss () =
   close_in ic;
   !r
 
-let read dir facts =
+let read dir facts only =
+  let asked q = match only with None -> true | Some l -> List.mem q (String.split_on_char ',' l) in
   (match Sys.getenv_opt "CEPHEUS_DOMAINS" with Some d -> Query.domains := int_of_string d | None -> ());
   Printf.printf "questions on up to %d domains\n" !Query.domains;
   let nclients = facts / facts_per_client in
@@ -127,16 +129,18 @@ let read dir facts =
   let sample = Array.init 4096 (fun _ -> Rng.int r nclients) in
   let cids = Array.map (fun k -> match things v s.mail (Text (email k)) with [ e ] -> e | _ -> failwith "email") sample in
   (* Q1: all the facts of an invoice (a client's id + 1 + j) *)
-  measure "Q1 an invoice by id" 200_000 (fun i -> ignore (get v (cids.(i land 4095) + 1 + (i mod 20))));
-  measure "Q2 a client by e-mail" 200_000 (fun i -> ignore (things v s.mail (Text (email sample.(i land 4095)))));
+  if asked "Q1" then measure "Q1 an invoice by id" 200_000 (fun i -> ignore (get v (cids.(i land 4095) + 1 + (i mod 20))));
+  if asked "Q2" then measure "Q2 a client by e-mail" 200_000 (fun i -> ignore (things v s.mail (Text (email sample.(i land 4095)))));
   let q3 city =
     { vars = 3; ranges = [];
       where = [ { e = Var 0; p = s.cty; v = Val (Text city) }; { e = Var 1; p = s.client; v = Var 0 };
                 { e = Var 1; p = s.status; v = Val (Text "unpaid") }; { e = Var 1; p = s.total; v = Var 2 } ] }
   in
+  if asked "Q3" then begin
   let n3 = List.length (ok (find v (q3 "city-7"))) in
   measure (Printf.sprintf "Q3 unpaid of a city (%d rows)" n3) 200 (fun i ->
-      ignore (fold v (q3 (Printf.sprintf "city-%d" (i mod 100))) ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )));
+      ignore (fold v (q3 (Printf.sprintf "city-%d" (i mod 100))) ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
+  end;
   let q4 =
     { vars = 4; ranges = [];
       where = [ { e = Var 0; p = s.status; v = Val (Text "unpaid") }; { e = Var 0; p = s.client; v = Var 1 };
@@ -153,15 +157,19 @@ let read dir facts =
               Hashtbl.iter (fun c (x, k) -> let y, m = Option.value (Hashtbl.find_opt a c) ~default:(0, 0) in Hashtbl.replace a c (x + y, k + m)) b;
               a))
   in
+  if asked "Q4" then begin
   let sums = q4run () in
   let total = Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0 and cnt = Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0 in
-  measure (Printf.sprintf "Q4 unpaid sum by city (%d inv, %d)" cnt total) 5 (fun _ -> q4run ());
+  measure (Printf.sprintf "Q4 unpaid sum by city (%d inv, %d)" cnt total) 5 (fun _ -> q4run ())
+  end;
   let q5 =
     { vars = 3; ranges = [];
       where = [ { e = Var 0; p = s.follows; v = Var 1 }; { e = Var 1; p = s.follows; v = Var 2 }; { e = Var 2; p = s.follows; v = Var 0 } ] }
   in
+  if asked "Q5" then begin
   let tri = ok (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )) in
-  measure (Printf.sprintf "Q5 triangles (%d rotations)" tri) 3 (fun _ -> ignore (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )));
+  measure (Printf.sprintf "Q5 triangles (%d rotations)" tri) 3 (fun _ -> ignore (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
+  end;
   close db
 
 (* ---- durable writes ---- *)
@@ -216,6 +224,7 @@ let () =
   match Sys.argv with
   | [| _; "cpu"; dir; n |] -> cpu dir (int_of_string n)
   | [| _; "load"; dir; csv; facts |] -> load dir csv (int_of_string facts)
-  | [| _; "read"; dir; facts |] -> read dir (int_of_string facts)
+  | [| _; "read"; dir; facts |] -> read dir (int_of_string facts) None
+  | [| _; "read"; dir; facts; qs |] -> read dir (int_of_string facts) (Some qs)
   | [| _; "write"; dir; clients; secs |] -> write_bench dir (int_of_string clients) (float_of_string secs)
-  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS | write DIR CLIENTS SECS"; exit 2
+  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS"; exit 2

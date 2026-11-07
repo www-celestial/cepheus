@@ -173,87 +173,123 @@ let fold (v : Store.view) q ~init ~step ~merge =
     let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
     let iv = intervals n limits in
     let in_range x c = match iv.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi in
-    (* one runner per domain: its own bindings and its own count of candidates *)
+    let by_var = Array.map Array.of_list by_var in
+    (* one runner per domain: its own bindings and its own count of candidates; no allocation per binding but the
+       iterators' own *)
     let runner () =
       let env = Array.make n 0 and bound = Array.make n false and w = ref 0 in
       let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
       let accepts x c pt =
         if has x pt.pe && has x pt.pv then Store.mem v c pt.pp c
         else if has x pt.pe then
-          match get pt.pv with Some w -> Store.mem v c pt.pp w | None -> Store.has_value v c pt.pp
-        else match get pt.pe with Some e -> Store.mem v e pt.pp c | None -> Store.count_things v pt.pp c > 0
+          match pt.pv with
+          | W w -> Store.mem v c pt.pp w
+          | V y -> if bound.(y) then Store.mem v c pt.pp env.(y) else Store.has_value v c pt.pp
+        else
+          match pt.pe with
+          | W e -> Store.mem v e pt.pp c
+          | V y -> if bound.(y) then Store.mem v env.(y) pt.pp c else Store.count_things v pt.pp c > 0
+      in
+      (* how many candidates a pattern offers x, exactly *)
+      let count x pt =
+        if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp
+        else if has x pt.pe then match get pt.pv with Some w -> Store.count_things v pt.pp w | None -> Store.count_prop v pt.pp
+        else
+          match get pt.pe, iv.(x) with
+          | Some e, _ -> Store.count_values v e pt.pp
+          | None, Some (lo, hi) -> Store.count_range v pt.pp lo hi
+          | None, None -> Store.count_prop v pt.pp
       in
       let distinct it f =
         let seen = Hashtbl.create 256 in
         it (fun c -> if not (Hashtbl.mem seen c) then (Hashtbl.replace seen c (); f c))
       in
-      (* the candidates a pattern offers x, and how many *)
-      let source x pt =
-        if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp, fun f -> Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
+      (* the candidates themselves *)
+      let iterate x pt f =
+        if has x pt.pe && has x pt.pv then Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
         else if has x pt.pe then
           match get pt.pv with
-          | Some w -> Store.count_things v pt.pp w, fun f -> Store.iter_things v pt.pp w f
+          | Some w -> Store.iter_things v pt.pp w f
           | None ->
-            ( Store.count_prop v pt.pp,
-              if pt.many then distinct (fun f -> Store.iter_prop v pt.pp (fun e _ -> f e))
-              else fun f -> Store.iter_prop v pt.pp (fun e _ -> f e) )
+            if pt.many then distinct (fun f -> Store.iter_prop v pt.pp (fun e _ -> f e)) f
+            else Store.iter_prop v pt.pp (fun e _ -> f e)
         else
           match get pt.pe, iv.(x) with
-          | Some e, _ -> Store.count_values v e pt.pp, fun f -> Store.iter_values v e pt.pp f
+          | Some e, _ -> Store.iter_values v e pt.pp f
           | None, Some (lo, hi) ->
             (* a variable with a range, read off the property's index in value order: only the range *)
-            Store.count_range v pt.pp lo hi, distinct (fun f -> Store.iter_range v pt.pp lo hi (fun _ w -> f w))
-          | None, None -> Store.count_prop v pt.pp, distinct (fun f -> Store.iter_prop v pt.pp (fun _ w -> f w))
+            distinct (fun f -> Store.iter_range v pt.pp lo hi (fun _ w -> f w)) f
+          | None, None -> distinct (fun f -> Store.iter_prop v pt.pp (fun _ w -> f w)) f
       in
-      let candidates i (f : int -> unit) =
+      (* level i: the smallest source, and its size *)
+      let choose i =
+        let ps = by_var.(ord.(i)) in
+        let best = ref (-1) and bc = ref max_int in
+        for j = 0 to Array.length ps - 1 do
+          let c = count ord.(i) ps.(j) in
+          if c < !bc then (bc := c; best := j)
+        done;
+        !best, !bc
+      in
+      let candidates i src (f : int -> unit) =
         let x = ord.(i) and ps = by_var.(ord.(i)) in
-        let best = ref None in
-        List.iter
-          (fun pt -> let c, it = source x pt in match !best with Some (c', _, _) when c' <= c -> () | _ -> best := Some (c, it, pt))
-          ps;
-        match !best with
-        | None -> ()
-        | Some (_, it, src) ->
-          let others = List.filter (fun pt -> pt != src) ps in
-          it (fun c -> incr w; if in_range x c && List.for_all (accepts x c) others then f c)
+        if src >= 0 then
+          iterate x ps.(src) (fun c ->
+              incr w;
+              if in_range x c then begin
+                let ok = ref true and j = ref 0 in
+                while !ok && !j < Array.length ps do
+                  if !j <> src && not (accepts x c ps.(!j)) then ok := false;
+                  incr j
+                done;
+                if !ok then f c
+              end)
       in
       let rec level i acc =
         if i = n then acc := step !acc env
         else begin
           let x = ord.(i) in
+          let src, _ = choose i in
           bound.(x) <- true;
-          candidates i (fun c -> env.(x) <- c; level (i + 1) acc);
+          candidates i src (fun c -> env.(x) <- c; level (i + 1) acc);
           bound.(x) <- false
         end
       in
-      env, bound, candidates, level, w
+      env, bound, choose, candidates, level, w
     in
     if n = 0 then step (init ()) [||]
     else begin
-      let env, bound, candidates, level, w0 = runner () in
-      let first = ref [] and count = ref 0 in
-      candidates 0 (fun c -> first := c :: !first; incr count);
-      let firsts = Array.of_list (List.rev !first) in
+      let env, bound, choose, candidates, level, w0 = runner () in
+      let flush w = ignore (Atomic.fetch_and_add work !w); w := 0 in
       let x0 = ord.(0) in
-      let run_slice (env, bound, level, w) lo hi =
+      let src, size = choose 0 in
+      let d = if size >= !parallel_min then !domains else 1 in
+      if d <= 1 then begin
         let acc = ref (init ()) in
-        bound.(x0) <- true;
-        for k = lo to hi - 1 do
-          env.(x0) <- firsts.(k);
-          level 1 acc
-        done;
-        ignore (Atomic.fetch_and_add work !w);
-        w := 0;
+        level 0 acc;
+        flush w0;
         !acc
-      in
-      let d = if !count >= !parallel_min then !domains else 1 in
-      if d <= 1 then run_slice (env, bound, level, w0) 0 !count
+      end
       else begin
+        (* the first level's candidates, split over d domains; at most [size] of them *)
+        let firsts = Array.make size 0 and count = ref 0 in
+        bound.(x0) <- true;
+        candidates 0 src (fun c -> firsts.(!count) <- c; incr count);
+        let run_slice (env, bound, level, w) lo hi =
+          let acc = ref (init ()) in
+          bound.(x0) <- true;
+          for k = lo to hi - 1 do
+            env.(x0) <- firsts.(k);
+            level 1 acc
+          done;
+          flush w;
+          !acc
+        in
         let chunk = (!count + d - 1) / d in
         let others =
           List.init (d - 1) (fun k ->
               let lo = (k + 1) * chunk and hi = min !count ((k + 2) * chunk) in
-              Domain.spawn (fun () -> let e, b, _, l, w = runner () in run_slice (e, b, l, w) lo (max lo hi)))
+              Domain.spawn (fun () -> let e, b, _, _, l, w = runner () in run_slice (e, b, l, w) lo (max lo hi)))
         in
         let mine = run_slice (env, bound, level, w0) 0 (min chunk !count) in
         List.fold_left (fun acc dm -> merge acc (Domain.join dm)) mine others

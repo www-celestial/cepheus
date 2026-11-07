@@ -80,14 +80,16 @@ let empty_base = let b = layout ~n:0 ~ne:0 ~np:0 ~ns:0 ~sblob:0 () in
 
 (* ---- The base alone ---- *)
 
-(* the first row of thing e at or after (p, w); e must be a thing of the base *)
+(* the first row of thing e at or after (p, w); e must be a thing of the base. A binary search down to a window of
+   8 rows, then a scan: most things have a handful of facts, where the scan is the faster *)
 let base_lower_e b e p w =
   let lo = ref (eoff b e) and hi = ref (eoff b (e + 1)) in
-  while !lo < !hi do
+  while !hi - !lo > 8 do
     let mid = (!lo + !hi) lsr 1 in
     let p' = eap b mid in
     if p' < p || (p' = p && eav b mid < w) then lo := mid + 1 else hi := mid
   done;
+  while !lo < !hi && (let p' = eap b !lo in p' < p || (p' = p && eav b !lo < w)) do incr lo done;
   !lo
 
 let base_iter_ea b e p f =
@@ -99,10 +101,15 @@ let base_iter_ea b e p f =
     done
   end
 
+(* the rows of e for p: a scan of up to 8 rows after the first, a second search beyond *)
 let base_count_ea b e p =
   if e < 0 || e >= b.ne then 0
-  else if p = max_int then 0
-  else base_lower_e b e (p + 1) min_int - base_lower_e b e p min_int
+  else begin
+    let i = base_lower_e b e p min_int and hi = eoff b (e + 1) in
+    let j = ref i in
+    while !j < hi && !j - i < 8 && eap b !j = p do incr j done;
+    if !j < hi && eap b !j = p then base_lower_e b e (p + 1) min_int - i else !j - i
+  end
 
 let base_iter_e b e f =
   if e >= 0 && e < b.ne then

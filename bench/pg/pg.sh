@@ -4,7 +4,8 @@
 #   pg.sh init ROOT            initdb and the configuration
 #   pg.sh start ROOT MEM       start the server in a systemd scope capped at MEM (the cache counts in the cap)
 #   pg.sh load ROOT CSVDIR     tables as a PostgreSQL user would write them, COPY, indexes, ANALYZE
-#   pg.sh read ROOT NCLIENTS   Q1-Q5: through the socket (pgbench, prepared) and inside the server (engine only)
+#   pg.sh read ROOT NCLIENTS   Q1-Q5: through the socket (pgbench, prepared) and inside the server (engine only);
+#                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2)
 #   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row
 #   pg.sh stop ROOT
 set -e
@@ -12,6 +13,8 @@ cmd=$1; root=$2
 here=$(cd "$(dirname "$0")" && pwd)
 export PGHOST="$root/sock" PGPORT=5544 PGDATABASE=bench
 psql_() { psql -X -q -v ON_ERROR_STOP=1 "$@"; }
+
+[ -n "$WORKERS" ] && export PGOPTIONS="-c max_parallel_workers_per_gather=$WORKERS -c max_parallel_workers=$WORKERS"
 
 case "$cmd" in
 init)
@@ -88,6 +91,11 @@ DO \$\$ DECLARE t0 timestamptz; x record; BEGIN
   RAISE NOTICE 'Q2 engine only: % us', round((extract(epoch FROM clock_timestamp() - t0) * 1e6 / 200000)::numeric, 2);
 END \$\$;
 EOF
+  done
+  # the processes each question used: the leader and the workers it launched
+  for q in "SELECT c.city, sum(i.total), count(*) FROM invoice i JOIN client c ON c.id = i.client WHERE i.status = 'unpaid' GROUP BY c.city" \
+           "SELECT count(*) FROM follows f1 JOIN follows f2 ON f2.a = f1.b JOIN follows f3 ON f3.a = f2.b AND f3.b = f1.a"; do
+    echo "workers launched: $(psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $q" | sed -n 's/.*Workers Launched: //p' | tr '\n' ' ')"
   done
   for r in 1 2 3 4 5; do
     printf 'Q3 engine only: %s\n' "$(psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) SELECT i.id, i.total FROM client c JOIN invoice i ON i.client = c.id WHERE c.city = 'city-7' AND i.status = 'unpaid'" | sed -n 's/Execution Time: //p')"
