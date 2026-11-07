@@ -39,10 +39,17 @@ let print name xs =
   Printf.printf "%-34s median %s, CI [%s, %s] (%.1f %%), %d runs, min %s\n%!" name (unit s.median) (unit s.lo)
     (unit s.hi) (100. *. s.coverage) s.n (unit s.min)
 
-(* latencies in microseconds, from a histogram *)
+(* Latencies in microseconds, from a histogram. The p99 comes with its 95 % interval: the values of ranks
+   n q -+ 1.96 sqrt(n q (1 - q)), the same order statistics with the binomial law of parameter q in its normal
+   approximation (good when n q (1 - q) > 10, so from about 1,000 values; Le Boudec 2010, section 2.2.2). *)
 let print_latency name h =
-  let p q = float (Cepheus.Histogram.percentile h q) /. 1e3 in
-  Printf.printf "%s latency ms: p50 %.2f  p90 %.2f  p99 %.2f  p99.9 %.2f  max %.2f  (%d values)\n%!" name (p 0.5)
-    (p 0.9) (p 0.99) (p 0.999)
-    (float (Cepheus.Histogram.max h) /. 1e3)
-    (Cepheus.Histogram.total h)
+  let module H = Cepheus.Histogram in
+  let n = H.total h in
+  let p q = float (H.percentile h q) /. 1e3 in
+  let ci q =
+    let m = float n *. q and d = 1.96 *. sqrt (float n *. q *. (1. -. q)) in
+    if float n *. q *. (1. -. q) < 10. then ""
+    else Printf.sprintf " [%.2f, %.2f]" (p (Float.max 0. ((m -. d) /. float n))) (p (Float.min 1. ((m +. d +. 1.) /. float n)))
+  in
+  Printf.printf "%s latency ms: p50 %.2f  p90 %.2f  p99 %.2f%s  p99.9 %.2f  max %.2f  (%d values)\n%!" name (p 0.5)
+    (p 0.9) (p 0.99) (ci 0.99) (p 0.999) (float (H.max h) /. 1e3) n

@@ -1,9 +1,8 @@
-(* The facts in memory. A view is a base, sorted and columnar, in one byte array off the OCaml heap (never scanned by
-   the GC, the same bytes as a snapshot's body, so a snapshot maps straight into a base), plus a delta of the recent
-   changes in persistent maps, so that a view is a value: taking one is free, keeping one costs nothing, and a fork is
-   a view with its own delta. Thing ids are dense: "by thing" is an array indexed by the id (offsets, then rows);
-   "by property" is one range per property, sorted by value then thing, which also answers "the things that link to
-   t by p" (the rows of value t).
+(* The facts. A view is a base, sorted and columnar, in pages (Pages: the same bytes as a snapshot's body, read from
+   the file through the cache, or built in memory), plus a delta of the recent changes in persistent maps, so that a
+   view is a value: taking one is free, keeping one costs nothing, and a fork is a view with its own delta. Thing ids
+   are dense: "by thing" is an array indexed by the id (offsets, then rows); "by property" is one range per property,
+   sorted by value then thing, which also answers "the things that link to t by p" (the rows of value t).
 
      by thing     eoff[e] .. eoff[e+1]   rows (eap, eav), sorted by property then value
      by property  poff[p] .. poff[p+1]   rows (avv, ave), sorted by value then thing
@@ -14,17 +13,9 @@
 
 open Bigarray
 
-type bigstring = Disk.bigstring
-
-external g64 : bigstring -> int -> int64 = "%caml_bigstring_get64"
-external s64 : bigstring -> int -> int64 -> unit = "%caml_bigstring_set64"
-external g32 : bigstring -> int -> int32 = "%caml_bigstring_get32"
-external s32 : bigstring -> int -> int32 -> unit = "%caml_bigstring_set32"
-external g16 : bigstring -> int -> int = "%caml_bigstring_get16"
-external s16 : bigstring -> int -> int -> unit = "%caml_bigstring_set16"
-
 type base = {
-  buf : bigstring;
+  pg : Pages.t;
+  hot : Bytes.t array;  (* pg's hot table, here so that a read is one load less *)
   n : int;  (* facts *)
   ne : int;  (* thing ids 0 .. ne-1 *)
   np : int;  (* property ids 0 .. np-1 *)
@@ -45,7 +36,7 @@ type base = {
 
 let al x = (x + 7) land lnot 7
 
-let layout ?(buf = Array1.create char c_layout 0) ~n ~ne ~np ~ns ~sblob () =
+let layout ?(pg = Pages.create 0) ~n ~ne ~np ~ns ~sblob () =
   let off = ref 0 in
   let sec bytes = let o = !off in off := al (!off + bytes); o in
   let o_eoff = sec (8 * (ne + 1)) in
@@ -58,13 +49,43 @@ let layout ?(buf = Array1.create char c_layout 0) ~n ~ne ~np ~ns ~sblob () =
   let o_soff = sec (8 * (ns + 1)) in
   let o_sblob = sec sblob in
   let o_ssort = sec (4 * ns) in
-  { buf; n; ne; np; ns; sblob; o_eoff; o_eap; o_eav; o_poff; o_avv; o_ave; o_pdist; o_soff; o_sblob; o_ssort;
+  { pg; hot = pg.Pages.hot; n; ne; np; ns; sblob; o_eoff; o_eap; o_eav; o_poff; o_avv; o_ave; o_pdist; o_soff; o_sblob;
+    o_ssort;
     len = !off }
 
-let[@inline] i64 b o = Int64.to_int (g64 b.buf o)
-let[@inline] u32 b o = Int32.to_int (g32 b.buf o) land 0xFFFFFFFF
+external get64u : Bytes.t -> int -> int64 = "%caml_bytes_get64u"
+external get32u : Bytes.t -> int -> int32 = "%caml_bytes_get32u"
+external get16u : Bytes.t -> int -> int = "%caml_bytes_get16u"
+
+(* Two kinds of readers of the base's pages. A read of a hot page is one load and one comparison either way; they
+   differ in what happens otherwise:
+   - the raising readers (eoff, eap, ...) raise [Miss k]: a lookup that calls nothing (a binary search, a count, a
+     membership test) is run by [pure] or its own wrapper again from its start once page k is in. With no call on
+     its path, OCaml keeps the loop's values in registers (a call would make it save them all on the stack);
+   - the calling readers (ceoff, ceap, ...) bring the page in themselves (Pages.touch), for the loops that call a
+     function per row, which save their registers around that call anyway.
+   A [Miss] never leaves the functions of this section. *)
+exception Miss of int
+
+let fault b k = Pages.fault b.pg k
+
+(* a lookup's end: in trace mode, its pages leave the hot table *)
+let[@inline] ended r = if !Pages.tracing then Pages.cool (); r
+
+let[@inline] frame b o =
+  let k = o lsr Pages.bits in
+  let f = Array.get b.hot k in
+  if f != Pages.absent then f else raise_notrace (Miss k)
+
+let[@inline] framec b o =
+  let k = o lsr Pages.bits in
+  let f = Array.get b.hot k in
+  if f != Pages.absent then f else Pages.touch b.pg k
+
+let[@inline] i64 b o = Int64.to_int (get64u (frame b o) (o land Pages.mask))
+let[@inline] u32 b o = Int32.to_int (get32u (frame b o) (o land Pages.mask)) land 0xFFFFFFFF
 let[@inline] eoff b e = i64 b (b.o_eoff + (8 * e))
-let[@inline] eap b i = g16 b.buf (b.o_eap + (2 * i))
+let[@inline] eap b i = let o = b.o_eap + (2 * i) in get16u (frame b o) (o land Pages.mask)
 let[@inline] eav b i = i64 b (b.o_eav + (8 * i))
 let[@inline] poff b p = i64 b (b.o_poff + (8 * p))
 let[@inline] avv b i = i64 b (b.o_avv + (8 * i))
@@ -73,16 +94,26 @@ let[@inline] pdist b p = i64 b (b.o_pdist + (8 * p))
 let[@inline] soff b i = i64 b (b.o_soff + (8 * i))
 let[@inline] ssort b i = u32 b (b.o_ssort + (4 * i))
 
+let[@inline] ci64 b o = Int64.to_int (get64u (framec b o) (o land Pages.mask))
+let[@inline] cu32 b o = Int32.to_int (get32u (framec b o) (o land Pages.mask)) land 0xFFFFFFFF
+let[@inline] ceoff b e = ci64 b (b.o_eoff + (8 * e))
+let[@inline] ceap b i = let o = b.o_eap + (2 * i) in get16u (framec b o) (o land Pages.mask)
+let[@inline] ceav b i = ci64 b (b.o_eav + (8 * i))
+let[@inline] cpoff b p = ci64 b (b.o_poff + (8 * p))
+let[@inline] cavv b i = ci64 b (b.o_avv + (8 * i))
+let[@inline] cave b i = cu32 b (b.o_ave + (4 * i))
+
+(* [f b x] again until it misses no page; for a raising reader, or a lookup made of them *)
+let rec safe f b x = match f b x with r -> ended r | exception Miss k -> fault b k; safe f b x
+
 let empty_base = let b = layout ~n:0 ~ne:0 ~np:0 ~ns:0 ~sblob:0 () in
-  let buf = Array1.create char c_layout b.len in
-  Array1.fill buf '\000';
-  { b with buf }
+  let pg = Pages.create b.len in { b with pg; hot = pg.Pages.hot }
 
 (* ---- The base alone ---- *)
 
 (* the first row of thing e at or after (p, w); e must be a thing of the base. A binary search down to a window of
    8 rows, then a scan: most things have a handful of facts, where the scan is the faster *)
-let base_lower_e b e p w =
+let lower_e b e p w =
   let lo = ref (eoff b e) and hi = ref (eoff b (e + 1)) in
   while !hi - !lo > 8 do
     let mid = (!lo + !hi) lsr 1 in
@@ -92,37 +123,45 @@ let base_lower_e b e p w =
   while !lo < !hi && (let p' = eap b !lo in p' < p || (p' = p && eav b !lo < w)) do incr lo done;
   !lo
 
+let rec base_lower_e b e p w =
+  match lower_e b e p w with r -> ended r | exception Miss k -> fault b k; base_lower_e b e p w
+
 let base_iter_ea b e p f =
   if e >= 0 && e < b.ne then begin
-    let i = ref (base_lower_e b e p min_int) and hi = eoff b (e + 1) in
-    while !i < hi && eap b !i = p do
-      f (eav b !i);
+    let i = ref (base_lower_e b e p min_int) and hi = ceoff b (e + 1) in
+    while !i < hi && ceap b !i = p do
+      f (ceav b !i);
       incr i
     done
   end
 
 (* the rows of e for p: a scan of up to 8 rows after the first, a second search beyond *)
-let base_count_ea b e p =
+let count_ea b e p =
   if e < 0 || e >= b.ne then 0
   else begin
-    let i = base_lower_e b e p min_int and hi = eoff b (e + 1) in
+    let i = lower_e b e p min_int and hi = eoff b (e + 1) in
     let j = ref i in
     while !j < hi && !j - i < 8 && eap b !j = p do incr j done;
-    if !j < hi && eap b !j = p then base_lower_e b e (p + 1) min_int - i else !j - i
+    if !j < hi && eap b !j = p then lower_e b e (p + 1) min_int - i else !j - i
   end
+
+let rec base_count_ea b e p =
+  match count_ea b e p with r -> ended r | exception Miss k -> fault b k; base_count_ea b e p
 
 let base_iter_e b e f =
   if e >= 0 && e < b.ne then
-    for i = eoff b e to eoff b (e + 1) - 1 do
-      f (eap b i) (eav b i)
+    for i = ceoff b e to ceoff b (e + 1) - 1 do
+      f (ceap b i) (ceav b i)
     done
 
-let base_mem b e p w =
+let mem_e b e p w =
   e >= 0 && e < b.ne
-  && let i = base_lower_e b e p w in
+  && let i = lower_e b e p w in
      i < eoff b (e + 1) && eap b i = p && eav b i = w
 
-let base_lower b p w =
+let rec base_mem b e p w = match mem_e b e p w with r -> ended r | exception Miss k -> fault b k; base_mem b e p w
+
+let lower b p w =
   let lo = ref (poff b p) and hi = ref (poff b (p + 1)) in
   while !lo < !hi do
     let mid = (!lo + !hi) lsr 1 in
@@ -130,62 +169,87 @@ let base_lower b p w =
   done;
   !lo
 
+let rec base_lower b p w = match lower b p w with r -> ended r | exception Miss k -> fault b k; base_lower b p w
+
 let base_iter_av b p w f =
   if p >= 0 && p < b.np then begin
-    let hi = poff b (p + 1) in
+    let hi = cpoff b (p + 1) in
     let i = ref (base_lower b p w) in
-    while !i < hi && avv b !i = w do
-      f (ave b !i);
+    while !i < hi && cavv b !i = w do
+      f (cave b !i);
       incr i
     done
   end
 
-let base_count_av b p w =
+let count_av b p w =
   if p < 0 || p >= b.np then 0
   else begin
     (* two binary searches: the rows of value w are [lower w, lower (w+1)) *)
-    let lo = base_lower b p w in
-    let hi = if w = max_int then poff b (p + 1) else base_lower b p (w + 1) in
+    let lo = lower b p w in
+    let hi = if w = max_int then poff b (p + 1) else lower b p (w + 1) in
     hi - lo
   end
 
+let rec base_count_av b p w =
+  match count_av b p w with r -> ended r | exception Miss k -> fault b k; base_count_av b p w
+
 let base_iter_range b p lo hi f =
   if p >= 0 && p < b.np then begin
-    let stop = poff b (p + 1) in
+    let stop = cpoff b (p + 1) in
     let i = ref (base_lower b p lo) in
-    while !i < stop && avv b !i <= hi do
-      f (ave b !i) (avv b !i);
+    while !i < stop && cavv b !i <= hi do
+      f (cave b !i) (cavv b !i);
       incr i
     done
   end
 
-let base_count_range b p lo hi =
+let count_range b p lo hi =
   if p < 0 || p >= b.np || lo > hi then 0
-  else (if hi = max_int then poff b (p + 1) else base_lower b p (hi + 1)) - base_lower b p lo
+  else (if hi = max_int then poff b (p + 1) else lower b p (hi + 1)) - lower b p lo
 
-let base_count_p b p = if p >= 0 && p < b.np then poff b (p + 1) - poff b p else 0
-let base_text b i = let lo = soff b i and hi = soff b (i + 1) in
-  String.init (hi - lo) (fun k -> Array1.get b.buf (b.o_sblob + lo + k))
+let rec base_count_range b p lo hi =
+  match count_range b p lo hi with r -> ended r | exception Miss k -> fault b k; base_count_range b p lo hi
+
+let base_count_p b p = if p >= 0 && p < b.np then cpoff b (p + 1) - cpoff b p else 0
+
+let[@inline] byte b o = Char.code (Bytes.unsafe_get (frame b o) (o land Pages.mask))
+
+let text_r b i =
+  let lo = b.o_sblob + soff b i in
+  let n = (b.o_sblob + soff b (i + 1)) - lo in
+  if (lo land Pages.mask) + n <= Pages.size then Bytes.sub_string (frame b lo) (lo land Pages.mask) n
+  else String.init n (fun k -> Char.unsafe_chr (byte b (lo + k)))
+
+let rec base_text b i = match text_r b i with r -> ended r | exception Miss k -> fault b k; base_text b i
 
 (* compares s with base text i *)
-let base_cmp b s i =
-  let lo = b.o_sblob + soff b i and len = soff b (i + 1) - soff b i in
+let cmp_r b s i =
+  let lo = b.o_sblob + soff b i in
+  let len = (b.o_sblob + soff b (i + 1)) - lo in
   let n = String.length s in
-  let rec go k =
-    if k = n || k = len then compare n len
-    else
-      let c = compare (Char.code (String.unsafe_get s k)) (Char.code (Array1.get b.buf (lo + k))) in
-      if c <> 0 then c else go (k + 1)
-  in
-  go 0
+  if (lo land Pages.mask) + len <= Pages.size then begin
+    (* the text in one page: compared in place *)
+    let p = frame b lo and at = lo land Pages.mask in
+    let k = ref 0 in
+    while !k < n && !k < len && String.unsafe_get s !k = Bytes.unsafe_get p (at + !k) do incr k done;
+    if !k = n || !k = len then compare n len
+    else compare (Char.code (String.unsafe_get s !k)) (Char.code (Bytes.unsafe_get p (at + !k)))
+  end
+  else begin
+    let k = ref 0 in
+    while !k < n && !k < len && Char.code (String.unsafe_get s !k) = byte b (lo + !k) do incr k done;
+    if !k = n || !k = len then compare n len else compare (Char.code (String.unsafe_get s !k)) (byte b (lo + !k))
+  end
 
-let base_find_text b s =
+let find_text_r b s =
   let lo = ref 0 and hi = ref b.ns in
   while !lo < !hi do
     let mid = (!lo + !hi) lsr 1 in
-    if base_cmp b s (ssort b mid) > 0 then lo := mid + 1 else hi := mid
+    if cmp_r b s (ssort b mid) > 0 then lo := mid + 1 else hi := mid
   done;
-  if !lo < b.ns && base_cmp b s (ssort b !lo) = 0 then Some (ssort b !lo) else None
+  if !lo < b.ns && cmp_r b s (ssort b !lo) = 0 then Some (ssort b !lo) else None
+
+let rec base_find_text b s = match find_text_r b s with r -> ended r | exception Miss k -> fault b k; base_find_text b s
 
 (* ---- Dictionary, delta, views ---- *)
 
@@ -358,18 +422,18 @@ let iter_facts v e f =
   | None -> base_iter_e v.base e f
   | Some td ->
     let b = v.base in
-    let i = ref (if e < b.ne then eoff b e else 0) and hi = if e < b.ne then eoff b (e + 1) else 0 in
+    let i = ref (if e < b.ne then ceoff b e else 0) and hi = if e < b.ne then ceoff b (e + 1) else 0 in
     PW.iter
       (fun (p, w) add ->
-        while !i < hi && (let p' = eap b !i in p' < p || (p' = p && eav b !i < w)) do
-          f (eap b !i) (eav b !i);
+        while !i < hi && (let p' = ceap b !i in p' < p || (p' = p && ceav b !i < w)) do
+          f (ceap b !i) (ceav b !i);
           incr i
         done;
         (* a retraction names a row of the base, which is skipped; an addition is a fact the base lacks *)
-        if add then f p w else if !i < hi && eap b !i = p && eav b !i = w then incr i)
+        if add then f p w else if !i < hi && ceap b !i = p && ceav b !i = w then incr i)
       td.tf;
     while !i < hi do
-      f (eap b !i) (eav b !i);
+      f (ceap b !i) (ceav b !i);
       incr i
     done
 
@@ -385,11 +449,11 @@ let iter_things v p w f =
 let iter_prop v p f =
   let b = v.base in
   match IM.find_opt p v.delta.dav with
-  | None -> if p >= 0 && p < b.np then for i = poff b p to poff b (p + 1) - 1 do f (ave b i) (avv b i) done
+  | None -> if p >= 0 && p < b.np then for i = cpoff b p to cpoff b (p + 1) - 1 do f (cave b i) (cavv b i) done
   | Some pd ->
     if p >= 0 && p < b.np then
-      for i = poff b p to poff b (p + 1) - 1 do
-        let e = ave b i and w = avv b i in
+      for i = cpoff b p to cpoff b (p + 1) - 1 do
+        let e = cave b i and w = cavv b i in
         match IM.find_opt w pd.pm with
         | Some vd when IM.mem e vd.vm -> ()
         | _ -> f e w
@@ -439,7 +503,7 @@ let count_range v p lo hi =
 
 (* an estimate for the planner: the distinct values of p, the base's and the delta's (an upper bound) *)
 let distinct v p =
-  max 1 ((if p >= 0 && p < v.base.np then pdist v.base p else 0)
+  max 1 ((if p >= 0 && p < v.base.np then safe pdist v.base p else 0)
          + match IM.find_opt p v.delta.dav with Some pd -> pd.pk | None -> 0)
 
 (* ---- Changing a view ---- *)
@@ -541,10 +605,9 @@ let build ~ne ~np ~ns ~(texts : int -> string) (fe : ia) (fp : ia) (fw : ia) n =
   let sblob = ref 0 in
   for i = 0 to ns - 1 do sblob := !sblob + String.length (texts i) done;
   let b = layout ~n ~ne ~np ~ns ~sblob:!sblob () in
-  let buf = Array1.create char c_layout (max 1 b.len) in
-  Array1.fill buf '\000';
-  let b = { b with buf } in
-  let set64 o x = s64 buf o (Int64.of_int x) in
+  let pg = Pages.create (max 1 b.len) in
+  let b = { b with pg; hot = pg.Pages.hot } in
+  let set64 o x = Pages.set64 pg o x in
   (* by thing: rows sorted by (p, w) inside each thing; they come sorted from [iter_facts], so the insertion sort
      below only checks, in one pass *)
   let cnt = ia (ne + 1) in
@@ -575,7 +638,7 @@ let build ~ne ~np ~ns ~(texts : int -> string) (fe : ia) (fp : ia) (fw : ia) n =
     done
   done;
   for i = 0 to n - 1 do
-    s16 buf (b.o_eap + (2 * i)) (Array1.unsafe_get tp i);
+    Pages.set16 pg (b.o_eap + (2 * i)) (Array1.unsafe_get tp i);
     set64 (b.o_eav + (8 * i)) (Array1.unsafe_get tw i)
   done;
   (* by property: rows (w, e) sorted by w then e *)
@@ -601,7 +664,7 @@ let build ~ne ~np ~ns ~(texts : int -> string) (fe : ia) (fp : ia) (fw : ia) n =
     for i = lo to hi - 1 do
       if i = lo || Array1.unsafe_get kw i <> Array1.unsafe_get kw (i - 1) then incr d;
       set64 (b.o_avv + (8 * i)) (Array1.unsafe_get kw i);
-      s32 buf (b.o_ave + (4 * i)) (Int32.of_int (Array1.unsafe_get ke i))
+      Pages.set32 pg (b.o_ave + (4 * i)) (Array1.unsafe_get ke i)
     done;
     set64 (b.o_pdist + (8 * p)) !d
   done;
@@ -610,13 +673,13 @@ let build ~ne ~np ~ns ~(texts : int -> string) (fe : ia) (fp : ia) (fw : ia) n =
   for i = 0 to ns - 1 do
     set64 (b.o_soff + (8 * i)) !p;
     let s = texts i in
-    String.iteri (fun k c -> Array1.unsafe_set buf (b.o_sblob + !p + k) c) s;
+    String.iteri (fun k c -> Pages.set8 pg (b.o_sblob + !p + k) c) s;
     p := !p + String.length s
   done;
   set64 (b.o_soff + (8 * ns)) !p;
   let order = Array.init ns Fun.id in
   Array.stable_sort (fun i j -> compare (texts i) (texts j)) order;
-  Array.iteri (fun k i -> s32 buf (b.o_ssort + (4 * k)) (Int32.of_int i)) order;
+  Array.iteri (fun k i -> Pages.set32 pg (b.o_ssort + (4 * k)) i) order;
   b
 
 (* Facts of a view in thing order, as arrays. *)

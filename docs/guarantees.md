@@ -118,16 +118,23 @@ as the residual) and the simulation (random flips in durable segments).
 ## G7 Snapshots
 
 *Promise.* Opening from a snapshot and the journal after it gives the same state as replaying the whole journal. A
-damaged snapshot is detected before the first question and never served; the database falls back on an older
-snapshot or on the journal.
+damaged page of a snapshot is never served: a snapshot that fits in the cache is checked whole before the first
+question, and the database falls back on an older snapshot or on the journal; a page of a larger one is checked each
+time it is read from the disk (also when it was damaged after the open), and the read fails: `find` and `fold` return
+`Damaged`, `get`, `values` and `things` raise `Unreadable`, a write that needed the page fails. Never a wrong answer.
 
 *Proof.* A snapshot is written only from a compacted view with nothing in flight, with the journal position of its
 last group; it is written beside, forced, renamed, and its directory forced. Loading checks the header CRC, the CRC of
-the checksum table, the CRC of every MiB, then the order and bounds of every offset table and every id
-(`Snapshot.check_and_build`); only then is it used. Every access to a base is bounds-checked as well.
+the checksum table, then the order and bounds of every offset table (`Snapshot.check_and_build`). Every page goes
+through `Pages.fill`, which checks its CRC-32C before it enters the frame table: no other path puts a page there.
+Every access to a base is bounds-checked (the frame table, then the page), so a read never leaves the base's bytes.
+For random damage of a page, CRC-32C misses it with probability 2⁻³²; it detects every burst of up to 32 bits
+(Castagnoli, Bräuer, Herrmann 1993).
 
 *Tested by* the simulation (snapshots at random moments, crashes inside their writing, flips in snapshot files) and
-`test/unit.ml` (round trip; a snapshot of another database is refused; a flipped snapshot is set aside).
+`test/unit.ml` (round trip; a snapshot of another database is refused; a flipped snapshot is set aside; a base three
+times larger than the cache, read by three domains, with a bit flipped after the open: the questions answer right or
+return `Damaged`, and exactly the damaged page fails).
 
 ## G8 Forks
 

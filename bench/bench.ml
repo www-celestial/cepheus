@@ -12,6 +12,10 @@
                                        latency counts from the time it was due, so a stall is never hidden)
      bench.exe fsync DIR SECS MODE     a frame and its fsync in a loop: MODE append grows the file, overwrite writes
                                        into a file filled with zeros beforehand
+     bench.exe trace DIR FACTS OUT LAW MIX
+                                       a trace of the page reads of questions on clients drawn by LAW (uniform or
+                                       zipf), MIX: day (with a Q4 and a Q5), points, or scan (points and a Q4)
+     bench.exe cachesim TRACE          the cache policies on a trace, against Belady's optimum
      bench.exe stats NAME [us]         the summary of the numbers on stdin (one a line, in ms; with us, latencies
                                        in microseconds into a histogram) *)
 
@@ -62,6 +66,21 @@ let parallel n f =
 
 let ok = function Ok r -> r | Error e -> failwith (message e)
 
+(* resident memory now, and its peak, in KB *)
+let status field =
+  let ic = open_in "/proc/self/status" in
+  let r = ref 0 and n = String.length field in
+  (try while true do
+       let l = input_line ic in
+       if String.length l > n && String.sub l 0 n = field then Scanf.sscanf (String.sub l n (String.length l - n)) " %d" (fun k -> r := k)
+     done
+   with End_of_file -> ());
+  close_in ic;
+  !r
+
+let rss () = status "VmRSS:"
+let peak () = status "VmHWM:"
+
 let load dir csv facts =
   let nclients = facts / facts_per_client in
   let db = ok (open_ dir) in
@@ -87,8 +106,8 @@ let load dir csv facts =
   ok (snapshot db);
   let t2 = now () in
   let v = view db in
-  Printf.printf "cepheus load: %d clients, %d facts, %.1f s through the writer (%.0f facts/s), snapshot %.2f s\n%!"
-    nclients (Store.facts v) (t1 -. t0) (float (Store.facts v) /. (t1 -. t0)) (t2 -. t1);
+  Printf.printf "cepheus load: %d clients, %d facts, %.1f s through the writer (%.0f facts/s), snapshot %.2f s, peak RSS %d MB\n%!"
+    nclients (Store.facts v) (t1 -. t0) (float (Store.facts v) /. (t1 -. t0)) (t2 -. t1) (peak () / 1024);
   close db;
   (* the same data for PostgreSQL *)
   let oc n = open_out (Filename.concat csv n) in
@@ -113,71 +132,135 @@ let measure name n f =
       (now () -. t) /. float n) in
   Stats.print name per
 
-let rss () =
-  let ic = open_in "/proc/self/status" in
-  let r = ref 0 in
-  (try while true do let l = input_line ic in if String.length l > 6 && String.sub l 0 6 = "VmRSS:" then Scanf.sscanf l "VmRSS: %d" (fun k -> r := k) done
-   with End_of_file -> ());
-  close_in ic;
-  !r
 
-let read dir facts only =
-  let asked q = match only with None -> true | Some l -> List.mem q (String.split_on_char ',' l) in
-  (match Sys.getenv_opt "CEPHEUS_DOMAINS" with Some d -> Query.domains := int_of_string d | None -> ());
-  Printf.printf "questions on up to %d domains\n" !Query.domains;
-  let nclients = facts / facts_per_client in
-  let t0 = now () in
-  let db = ok (open_ dir) in
-  let t1 = now () in
-  let v = view db in
-  Printf.printf "open (restart from the snapshot): %.1f ms, %d facts, RSS %d MB\n%!" ((t1 -. t0) *. 1e3) (Store.facts v) (rss () / 1024);
-  let s = schema_of v in
+(* the five questions on a view: Q1 and Q2 take a client's index, Q3 a city's; each returns a number to check *)
+type questions = { q1 : int -> int; q2 : int -> int; q3 : int -> int; q4 : unit -> int * int; q5 : unit -> int }
+
+let questions v s nclients =
   let r = Rng.make 9 in
   let sample = Array.init 4096 (fun _ -> Rng.int r nclients) in
   let cids = Array.map (fun k -> match things v s.mail (Text (email k)) with [ e ] -> e | _ -> failwith "email") sample in
-  (* Q1: all the facts of an invoice (a client's id + 1 + j) *)
-  if asked "Q1" then measure "Q1 an invoice by id" 200_000 (fun i -> ignore (get v (cids.(i land 4095) + 1 + (i mod 20))));
-  if asked "Q2" then measure "Q2 a client by e-mail" 200_000 (fun i -> ignore (things v s.mail (Text (email sample.(i land 4095)))));
   let q3 city =
     { vars = 3; ranges = [];
       where = [ { e = Var 0; p = s.cty; v = Val (Text city) }; { e = Var 1; p = s.client; v = Var 0 };
                 { e = Var 1; p = s.status; v = Val (Text "unpaid") }; { e = Var 1; p = s.total; v = Var 2 } ] }
   in
-  if asked "Q3" then begin
-  let n3 = List.length (ok (find v (q3 "city-7"))) in
-  measure (Printf.sprintf "Q3 unpaid of a city (%d rows)" n3) 100 (fun i ->
-      ignore (fold v (q3 (Printf.sprintf "city-%d" (i mod 100))) ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
-  end;
   let q4 =
     { vars = 4; ranges = [];
       where = [ { e = Var 0; p = s.status; v = Val (Text "unpaid") }; { e = Var 0; p = s.client; v = Var 1 };
                 { e = Var 1; p = s.cty; v = Var 2 }; { e = Var 0; p = s.total; v = Var 3 } ] }
   in
-  (* per domain: a table city -> (sum, count); merged at the end *)
-  let q4run () =
-    ok (fold v q4 ~init:(fun () -> Hashtbl.create 128)
-          ~step:(fun t env ->
-              let a, n = Option.value (Hashtbl.find_opt t env.(2)) ~default:(0, 0) in
-              Hashtbl.replace t env.(2) (a + env.(3), n + 1);
-              t)
-          ~merge:(fun a b ->
-              Hashtbl.iter (fun c (x, k) -> let y, m = Option.value (Hashtbl.find_opt a c) ~default:(0, 0) in Hashtbl.replace a c (x + y, k + m)) b;
-              a))
-  in
-  if asked "Q4" then begin
-  let sums = q4run () in
-  let total = Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0 and cnt = Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0 in
-  measure (Printf.sprintf "Q4 unpaid sum by city (%d inv, %d)" cnt total) 1 (fun _ -> ignore (q4run ()))
-  end;
   let q5 =
     { vars = 3; ranges = [];
       where = [ { e = Var 0; p = s.follows; v = Var 1 }; { e = Var 1; p = s.follows; v = Var 2 }; { e = Var 2; p = s.follows; v = Var 0 } ] }
   in
-  if asked "Q5" then begin
-  let tri = ok (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )) in
-  measure (Printf.sprintf "Q5 triangles (%d rotations)" tri) 1 (fun _ -> ignore (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
+  let count q = ok (fold v q ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )) in
+  (* Q1: all the facts of an invoice (a client's id + 1 + j) *)
+  { q1 = (fun i -> List.length (get v (cids.(i land 4095) + 1 + (i mod 20))));
+    q2 = (fun i -> List.length (things v s.mail (Text (email sample.(i land 4095)))));
+    q3 = (fun i -> count (q3 (Printf.sprintf "city-%d" (i mod 100))));
+    (* per domain: a table city -> (sum, count); merged at the end *)
+    q4 = (fun () ->
+        let sums =
+          ok (fold v q4 ~init:(fun () -> Hashtbl.create 128)
+                ~step:(fun t env ->
+                    let a, n = Option.value (Hashtbl.find_opt t env.(2)) ~default:(0, 0) in
+                    Hashtbl.replace t env.(2) (a + env.(3), n + 1);
+                    t)
+                ~merge:(fun a b ->
+                    Hashtbl.iter (fun c (x, k) -> let y, m = Option.value (Hashtbl.find_opt a c) ~default:(0, 0) in Hashtbl.replace a c (x + y, k + m)) b;
+                    a))
+        in
+        Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0, Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0);
+    q5 = (fun () -> count q5) }
+
+let cache_from_env () = match Sys.getenv_opt "CACHE_MB" with Some m -> set_cache (int_of_string m * 1024 * 1024) | None -> ()
+
+let read dir facts only =
+  let asked q = match only with None -> true | Some l -> List.mem q (String.split_on_char ',' l) in
+  (match Sys.getenv_opt "CEPHEUS_DOMAINS" with Some d -> Query.domains := int_of_string d | None -> ());
+  cache_from_env ();
+  Printf.printf "questions on up to %d domains, cache %d MB\n" !Query.domains (!Pages.capacity * Pages.size / 1048576);
+  let nclients = facts / facts_per_client in
+  let t0 = now () in
+  let db = ok (open_ dir) in
+  let t1 = now () in
+  let v = view db in
+  Printf.printf "open (restart from the snapshot): %.1f ms, %d facts, RSS %d MB, %d pages read\n%!" ((t1 -. t0) *. 1e3) (Store.facts v)
+    (rss () / 1024) (Atomic.get Pages.misses);
+  let s = schema_of v in
+  let q = questions v s nclients in
+  let miss0 = ref (Atomic.get Pages.misses) in
+  let misses () = let m = Atomic.get Pages.misses in let d = m - !miss0 in miss0 := m; d in
+  if asked "Q1" then measure "Q1 an invoice by id" 200_000 (fun i -> ignore (q.q1 i));
+  if asked "Q2" then measure "Q2 a client by e-mail" 200_000 (fun i -> ignore (q.q2 i));
+  if asked "Q3" then measure (Printf.sprintf "Q3 unpaid of a city (%d rows)" (q.q3 7)) 100 (fun i -> ignore (q.q3 i));
+  if asked "Q4" then begin
+    let cnt, total = q.q4 () in
+    measure (Printf.sprintf "Q4 unpaid sum by city (%d inv, %d)" cnt total) 1 (fun _ -> ignore (q.q4 ()))
   end;
+  if asked "Q5" then measure (Printf.sprintf "Q5 triangles (%d rotations)" (q.q5 ())) 1 (fun _ -> ignore (q.q5 ()));
+  Printf.printf "pages read from the disk by the questions: %d; RSS %d MB, peak %d MB\n" (misses ()) (rss () / 1024) (peak () / 1024);
   close db
+
+(* A trace of page reads for the cache study: a day of the application, point questions on clients drawn uniformly
+   or by a Zipf law of exponent 0.99 (Gray et al. 1994, "Quickly generating billion-record synthetic databases"; YCSB's
+   default, Cooper et al. 2010), with a Q4 and a Q5 among them (an analyst's scans). Written as 8-byte keys. *)
+let trace dir facts out law mix =
+  Query.domains := 1;
+  let nclients = facts / facts_per_client in
+  let db = ok (open_ dir) in
+  let v = view db in
+  let s = schema_of v in
+  let q = questions v s nclients in
+  let r = Rng.make 11 in
+  let zipf =
+    let h = Array.make nclients 0. in
+    let acc = ref 0. in
+    for k = 0 to nclients - 1 do acc := !acc +. (1. /. (float (k + 1) ** 0.99)); h.(k) <- !acc done;
+    fun () ->
+      let u = float (Rng.int r (1 lsl 30)) /. float (1 lsl 30) *. !acc in
+      let lo = ref 0 and hi = ref (nclients - 1) in
+      while !lo < !hi do let m = (!lo + !hi) / 2 in if h.(m) < u then lo := m + 1 else hi := m done;
+      (* rank -> a client spread over the ids *)
+      (!lo * 7919) mod nclients
+  in
+  let pick () = if law = "zipf" then zipf () else Rng.int r nclients in
+  (* MIX: day, 30,000 point questions (a Q3 every 100) with a Q4 at a third and a Q5 at two thirds; points, 100,000
+     point questions (a Q3 every 1,000); scan, the same with a Q4 in the middle *)
+  let n = if mix = "day" then 30_000 else 100_000 and q3_every = if mix = "day" then 100 else 1000 in
+  Pages.tracing := true;
+  for i = 1 to n do
+    (match i mod 10 with
+     | 0 | 1 | 2 | 3 -> ignore (q.q1 (pick ()))
+     | 4 | 5 | 6 -> ignore (q.q2 (pick ()))
+     | _ -> if i mod q3_every = 7 then ignore (q.q3 (pick () mod 100)) else ignore (q.q1 (pick ())));
+    if mix = "day" && i = 10_000 then ignore (q.q4 ());
+    if mix = "day" && i = 20_000 then ignore (q.q5 ());
+    if mix = "scan" && i = n / 2 then ignore (q.q4 ())
+  done;
+  Pages.tracing := false;
+  let oc = open_out_bin out in
+  let b = Bytes.create 8 in
+  for i = 0 to !Pages.traced - 1 do Bytes.set_int64_le b 0 (Int64.of_int !Pages.trace.(i)); output_bytes oc b done;
+  close_out oc;
+  Printf.printf "trace %s: %d page reads\n" out !Pages.traced;
+  close db
+
+let cachesim file =
+  let ic = open_in_bin file in
+  let n = in_channel_length ic / 8 in
+  let b = Bytes.create (8 * 65536) in
+  let tr = Array.make n 0 in
+  let i = ref 0 in
+  while !i < n do
+    let m = min 65536 (n - !i) in
+    really_input ic b 0 (8 * m);
+    for j = 0 to m - 1 do tr.(!i + j) <- Int64.to_int (Bytes.get_int64_le b (8 * j)) done;
+    i := !i + m
+  done;
+  close_in ic;
+  Cachesim.run (Filename.basename file) tr [ 0.02; 0.05; 0.1; 0.25 ]
 
 (* ---- durable writes ---- *)
 
@@ -293,6 +376,8 @@ let () =
   | [| _; "write"; dir; clients; secs |] -> write_bench dir (int_of_string clients) (float_of_string secs) 0.
   | [| _; "write"; dir; clients; secs; rate |] -> write_bench dir (int_of_string clients) (float_of_string secs) (float_of_string rate)
   | [| _; "fsync"; dir; secs; mode |] -> fsync_bench dir (float_of_string secs) mode
+  | [| _; "trace"; dir; facts; out; law; mix |] -> trace dir (int_of_string facts) out law mix
+  | [| _; "cachesim"; file |] -> cachesim file
   | [| _; "stats"; name |] -> stats name false
   | [| _; "stats"; name; "us" |] -> stats name true
-  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | fsync DIR SECS MODE | stats NAME [us] | cpu DIR N"; exit 2
+  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | fsync DIR SECS MODE | stats NAME [us] | trace DIR FACTS OUT uniform|zipf day|points|scan | cachesim TRACE | cpu DIR N"; exit 2

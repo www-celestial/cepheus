@@ -129,11 +129,86 @@ A fork is a pair (view, delta') where delta' starts equal to the view's delta. W
 Datomic's `with` [32] is the same idea on a database value; HyPer [33] forks the process for OLAP snapshots; Rodeh [34]
 does copy-on-write for B-trees.
 
-## 7. What comes next, and why
+## 7. Pages and the cache
 
-- **Larger than memory** (design, section 15): immutable sorted runs (LSM [1], with per-level Bloom filters as in
-  Monkey [5]) read through Cepheus' own cache of verified blocks (LeanStore [7], Umbra [8], vmcache [9]); not mmap for
-  cold data (Crotty et al. [10]).
+The base is read in pages of 16 KiB through one cache for the process (`Pages`; design, section 15, choice 8: own
+cache rather than mmap [10], as LeanStore [7], Umbra [8] and vmcache [9] do).
+
+**A read.** A base keeps a table `hot` with one slot a page: the page's bytes, or a constant "absent". Reading 8 bytes
+at offset o is `hot.(o lsr 14)`, one comparison, then the read in the page: no lock, no hash table, from any domain.
+A page not in `hot` goes the slow way: if it is in memory, one read is counted for the policy and the page goes back
+into `hot`; if not, the cache's lock is taken, room is made, the page is read from its file and checked against its
+CRC-32C before anyone can see it (G7). The slow way is a call, and OCaml saves every live value on the stack around a
+call even when it is not taken; so the lookups that call nothing else (binary searches, counts, membership) use
+readers that raise an exception on a page not hot, and run again from their start once the page is in (they change
+nothing before they return); the loops that call a function per row, which save their values around that call
+anyway, use readers that call. Evicted pages are never reused in place: a reader that raced with the eviction still
+holds the old bytes, which are right, and the GC frees them; a full collection after each quarter of the cache
+evicted keeps the pages in memory under 1.25 times the cache.
+
+**Cost when everything is in memory**, 10 M facts, release build, 11 runs x 2 rounds alternated, against milestone
+2's mapped base (c67e52d): Q1 0.37 to 0.39 µs (+5 %), Q2 1.73 to 1.66 µs (-4 %), Q3 3.67 to 3.98 ms (+8 %), Q4 199 to
+226 ms (+13 %), Q5 0.93-0.95 to 0.97-1.02 s (+3 to +8 %). The rest is the price of the table: one more dependent load
+per read and an exception handler per lookup. 64 KiB pages (a table four times smaller) gave the same times; garbage
+collection is not the cause (18 major collections against 2 over a run, but a space overhead of 400 changes nothing).
+
+**The policy.** S3-FIFO [56]: a page enters a small FIFO (10 % of the room); when it leaves it, it goes to the main FIFO
+if it was read again meanwhile, else out (its key goes to a ghost FIFO, and a page found there on a miss goes straight
+to the main FIFO); a page at the end of the main FIFO is kept if read since the policy last looked at it (its 2-bit
+counter lowered), else out. Its counters need no list to reorder on a hit: here, a read of a hot page tells the
+policy nothing, and the policy takes a page out of `hot` when it looks at it, so the next read counts. That is what a
+cache read by several domains with no lock needs; LRU, 2Q [54] and ARC [55] move a page in a list on every hit, which
+needs a lock or buffers of hits (as Caffeine does for W-TinyLFU [57]).
+
+**Checked on recorded traces**, against Belady's optimum [53] (evict the page read again the farthest in the future;
+with admission, a page read again later than every resident one is not kept: no online policy does better). A trace
+is the sequence of pages read by a day of questions on the 10 M database, one entry a page and lookup
+(`bench.exe trace`, then `bench.exe cachesim`); hit ratios, cache sizes as a share of the 8,612 pages read:
+
+| a day: 30,000 point questions on clients drawn by a Zipf law (0.99), a Q4, a Q5; 91.5 M reads | LRU | CLOCK | 2Q | ARC | SIEVE | S3-FIFO | W-TinyLFU | OPT |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 % (172 pages) | 94.02 | 94.02 | 93.81 | 94.01 | 93.94 | 94.02 | 85.43 | 95.21 |
+| 5 % | 94.43 | 94.45 | 94.65 | 94.46 | 94.48 | 94.47 | 92.85 | 96.06 |
+| 10 % | 94.98 | 95.00 | 95.34 | 95.06 | 95.08 | 95.17 | 94.72 | 96.92 |
+| 25 % | 96.31 | 96.32 | 96.68 | 96.39 | 96.57 | 96.53 | 96.89 | 98.43 |
+
+| point questions only (Zipf), 19.5 M reads, 7,873 pages | LRU | CLOCK | 2Q | ARC | SIEVE | S3-FIFO | W-TinyLFU | OPT |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 % | 97.77 | 97.76 | 97.71 | 97.76 | 97.69 | 97.77 | 91.64 | 98.01 |
+| 5 % | 97.85 | 97.84 | 97.96 | 97.85 | 97.82 | 97.85 | 95.82 | 98.22 |
+| 10 % | 97.91 | 97.91 | 98.13 | 97.91 | 97.90 | 97.93 | 98.15 | 98.43 |
+| 25 % | 98.04 | 98.04 | 98.44 | 98.04 | 98.04 | 98.23 | 98.48 | 99.03 |
+
+| the same with a Q4 scan in the middle, 31.7 M reads, 8,195 pages | LRU | CLOCK | 2Q | ARC | SIEVE | S3-FIFO | W-TinyLFU | OPT |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 % | 98.61 | 98.61 | 98.57 | 98.61 | 98.57 | 98.62 | 94.85 | 98.76 |
+| 5 % | 98.66 | 98.66 | 98.74 | 98.66 | 98.64 | 98.66 | 98.20 | 98.89 |
+| 10 % | 98.70 | 98.70 | 98.84 | 98.70 | 98.70 | 98.71 | 98.85 | 99.03 |
+| 25 % | 98.78 | 98.78 | 99.04 | 98.78 | 98.78 | 98.90 | 99.06 | 99.42 |
+
+(The uniform law gives the same table as the Zipf law for the day, to 0.02 points: Q4 and Q5 make 90 % of its reads.)
+
+What it says. The pages a lookup reads first (the top of a binary search, the offset tables) are read so often that
+2 % of the pages already serve 94 to 98 % of the reads, and the policies differ by less than one point of hit ratio
+but W-TinyLFU at small sizes (its window of 1 % is one or two pages there). In misses the gaps are larger: at 25 %,
+LRU misses 1.96 % of the point reads, S3-FIFO 1.77 %, 2Q 1.56 %, W-TinyLFU 1.52 %, Belady 0.97 %: the best online
+policies miss 12 to 14 % less than S3-FIFO, and the optimum about half as much as any of them. S3-FIFO is as good as
+LRU and CLOCK everywhere and better at 25 %, with no lock on a hit; 2Q and W-TinyLFU reorder a list on every hit. The
+gap that matters more is the layout (below). Picked: S3-FIFO; 2Q's gain would be worth a lock only if hits stayed
+under one domain, which parallel questions break.
+
+**Larger than memory**, 10 M facts (snapshot 245 MB), cache 48 MB, the process capped at 160 MB: open 66 ms (64 MB
+resident), Q1 22 µs, Q2 1.6 µs, Q3 86 ms, Q4 374 ms (the same answers), peak 79 MB. Q5 takes 66 s and reads 18.8 M
+pages: a client's follow links lie among its invoices' rows (the base orders rows by thing), so the triangle question
+reads random pages of all 120 MB of by-thing rows for a few bytes each. A third order of the rows, by property then
+thing (as Hexastore [11] and RDF-3X [12] keep), would make one property of many things local; it costs 10 bytes a fact
+more. To decide on measurements of real workloads.
+
+## 8. What comes next, and why
+
+- **Larger than memory, the rest** (design, section 15): merges written straight to a file as sorted runs (LSM [1],
+  with per-level Bloom filters as in Monkey [5]), so that a merge needs no more memory than the cache; a third order
+  of the rows (property, thing) for workloads that read one property of many things under memory pressure.
 - **Compression of runs**: delta and varint, then PFOR (Zukowski et al. [13], Lemire and Boytsov [13b]); an order-
   preserving dictionary rebuilt at each merge (Binnig et al. [13c]) for ranges over texts.
 - **Rules**: semi-naive evaluation at write time (Bancilhon and Ramakrishnan [22]) and Backward/Forward for
@@ -224,3 +299,14 @@ does copy-on-write for B-trees.
 51. M. Raasveldt, P. Holanda, T. Gubner, H. Mühleisen. Fair Benchmarking Considered Difficult: Common Pitfalls in
     Database Performance Testing. DBTest 2018.
 52. L. Lamport. Specifying Systems. Addison-Wesley, 2002.
+53. L. A. Belady. A Study of Replacement Algorithms for a Virtual-Storage Computer. IBM Systems Journal 5(2), 1966.
+54. T. Johnson, D. Shasha. 2Q: A Low Overhead High Performance Buffer Management Replacement Algorithm. VLDB 1994.
+55. N. Megiddo, D. S. Modha. ARC: A Self-Tuning, Low Overhead Replacement Cache. FAST 2003.
+56. J. Yang, Y. Zhang, Z. Qiu, Y. Yue, R. Vinayak. FIFO Queues are All You Need for Cache Eviction. SOSP 2023.
+57. G. Einziger, R. Friedman, B. Manes. TinyLFU: A Highly Efficient Cache Admission Policy. ACM Transactions on
+    Storage 13(4), 2017.
+58. Y. Zhang, J. Yang, Y. Yue, Y. Vigfusson, K. V. Rashmi. SIEVE is Simpler than LRU: an Efficient Turn-Key Eviction
+    Algorithm for Web Caches. NSDI 2024.
+59. F. J. Corbató. A Paging Experiment with the Multics System. MIT Project MAC Report MAC-M-384, 1968.
+60. G. Castagnoli, S. Bräuer, M. Herrmann. Optimization of Cyclic Redundancy-Check Codes with 24 and 32 Parity Bits.
+    IEEE Transactions on Communications 41(6), 1993.

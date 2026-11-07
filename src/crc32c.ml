@@ -48,21 +48,3 @@ let bytes (b : Bytes.t) off len =
 
 let string s = bytes (Bytes.unsafe_of_string s) 0 (String.length s)
 
-external get32 : (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t -> int -> int32
-  = "%caml_bigstring_get32"
-
-let bigstring b off len =
-  if off < 0 || len < 0 || off + len > Bigarray.Array1.dim b then invalid_arg "Crc32c.bigstring";
-  let c = ref 0xFFFFFFFF and i = ref off in
-  let stop = off + len in
-  while !i + 8 <= stop do
-    let lo = Int32.to_int (get32 b !i) land 0xFFFFFFFF in
-    let hi = Int32.to_int (get32 b (!i + 4)) land 0xFFFFFFFF in
-    c := step8 !c lo hi;
-    i := !i + 8
-  done;
-  while !i < stop do
-    c := Array.unsafe_get t ((!c lxor Char.code (Bigarray.Array1.unsafe_get b !i)) land 0xff) lxor (!c lsr 8);
-    incr i
-  done;
-  !c lxor 0xFFFFFFFF

@@ -114,6 +114,14 @@ type pattern = Query.pattern = { e : term; p : int; v : term }
 type query = Query.t = { vars : int; where : pattern list; ranges : (int * value * value) list }
 (** Variables are numbered from 0 to [vars - 1]; [ranges] keep [lo <= x <= hi] for int, date or money variables. *)
 
+exception Unreadable of string
+(** Raised by {!get}, {!values} and {!things} when a page of the view's base cannot be read from the disk, or does
+    not check against its CRC (it is never served); {!find} and {!fold} return [Error (Damaged _)] instead. *)
+
+val set_cache : int -> unit
+(** The bytes of base pages kept in memory, for every database of the process (1 GiB by default). A base larger
+    than the cache is read page by page as the questions need it. *)
+
 val find : view -> query -> (value array list, error) result
 (** Every binding of the variables that makes all patterns facts of the view, each once (G11). *)
 
@@ -145,6 +153,7 @@ module Crc32c = Crc32c
 module Disk = Disk
 module Engine = Engine
 module Group = Group
+module Pages = Pages
 module Histogram = Histogram
 module Journal = Journal
 module Query = Query

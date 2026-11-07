@@ -10,15 +10,7 @@ let section name = Printf.printf "- %s\n%!" name
 let () =
   section "crc32c";
   C.check (Crc32c.string "123456789" = 0xE3069283) "crc32c of 123456789";
-  C.check (Crc32c.string "" = 0) "crc32c of nothing";
-  let r = Rng.make 1 in
-  for _ = 1 to 200 do
-    let n = Rng.int r 300 in
-    let s = String.init n (fun _ -> Char.chr (Rng.int r 256)) in
-    let b = Bigarray.Array1.create Bigarray.char Bigarray.c_layout n in
-    String.iteri (Bigarray.Array1.set b) s;
-    C.check (Crc32c.bigstring b 0 n = Crc32c.string s) "crc32c bigstring = bytes (%d)" n
-  done
+  C.check (Crc32c.string "" = 0) "crc32c of nothing"
 
 let () =
   section "codec and values";
@@ -232,6 +224,91 @@ let () =
       C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view v')) "seed %d: a damaged snapshot was served" seed
     | _ -> C.fail "seed %d: unexpected snapshot load" seed
   done
+
+(* ---- a base larger than the cache ---- *)
+
+let () =
+  section "a base larger than the cache: pages read and checked as needed, by several domains; damage after open";
+  let cap = !Pages.capacity in
+  Query.domains := 3;
+  let id = "0123456789abcdef" in
+  let at_open = ref 0 and at_read = ref 0 and failed_questions = ref 0 in
+  for seed = 1 to 12 do
+    Pages.set_capacity (16 * Pages.size);
+    Query.parallel_min := (if seed mod 2 = 0 then 1 else 20_000);
+    let r = Rng.make (15000 + seed) in
+    let sim = Sim_disk.create (Rng.split r) in
+    let disk = Sim_disk.disk sim in
+    disk.mkdir "/s";
+    let f = fresh () in
+    let p n = Option.get (property (view f) n) in
+    let small = [| "a"; "b"; "c" |] in
+    let made = Array.make 3000 0 in
+    for k = 0 to 2999 do
+      let friend = if k = 0 then [] else [ Add (-1, p "friend", Link made.(Rng.int r k)) ] in
+      let name = Text (Printf.sprintf "n%d-%d" k (Rng.int r 1000)) in
+      let ops = Add (-1, p "name", name) :: Add (-1, p "score", Int (Rng.int r 5)) :: Add (-1, p "tag", Text small.(k mod 3)) :: friend in
+      made.(k) <- thing (Result.get_ok (write f ops)) (-1)
+    done;
+    let v = Store.compact { (view f) with writer = true } in
+    let npages = Pages.count v.base.pg in
+    Snapshot.write disk "/s" id v { Journal.segment = 1; offset = 40; next = v.group + 1 };
+    let file = "/s/" ^ Snapshot.name v.group in
+    let m0 = Atomic.get Pages.misses in
+    (match Snapshot.load disk "/s" id with
+     | Some (pv, _), [] ->
+       C.check (npages > 2 * !Pages.capacity) "seed %d: the base (%d pages) is not larger than the cache" seed npages;
+       C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view pv)) "seed %d: the paged base lost facts" seed;
+       (* a delta on top of the paged base, and questions split over domains while pages come and go *)
+       let pf = fork pv in
+       for _ = 1 to 30 do ignore (write pf (random_ops r (view pf) ())) done;
+       let pv = view pf in
+       let facts = C.facts_of_view pv in
+       for _ = 1 to 15 do
+         match C.random_query r pv facts qnames with
+         | None -> ()
+         | Some q -> (
+           match find pv q with
+           | Ok rows -> C.check (C.sorted_rows rows = C.naive facts q) "seed %d: a question on the paged base" seed
+           | Error e -> C.fail "seed %d: %s" seed (message e))
+       done;
+       C.check (Atomic.get Pages.misses - m0 > npages) "seed %d: no page was read twice (%d reads, %d pages)" seed
+         (Atomic.get Pages.misses - m0) npages
+     | _ -> C.fail "seed %d: the snapshot did not load" seed);
+    (* a bit flipped on the disk; open again with the small cache: refused at open, or every read of the page fails,
+       never a wrong answer *)
+    (* even seeds: any page; odd seeds: a page of the by-property rows, which the open does not read *)
+    let k =
+      if seed mod 2 = 0 then Rng.int r npages
+      else
+        (* interior pages only: the first and the last share bytes with the offset tables around them *)
+        let lo = (v.base.o_avv / Pages.size) + 1 and hi = (v.base.o_ave + (4 * v.base.n)) / Pages.size in
+        lo + Rng.int r (hi - lo)
+    in
+    ignore (Sim_disk.flip_durable sim file (Snapshot.header + (k * Pages.size)) (Snapshot.header + ((k + 1) * Pages.size)));
+    match Snapshot.load disk "/s" id with
+    | None, [ _ ] -> C.check (seed mod 2 = 0) "seed %d: refused at open, for a page the open does not read" seed; incr at_open
+    | Some (pv, _), _ ->
+      let facts = C.facts_of_view v in
+      for _ = 1 to 15 do
+        match C.random_query r pv facts qnames with
+        | None -> ()
+        | Some q -> (
+          match find pv q with
+          | Ok rows -> C.check (C.sorted_rows rows = C.naive facts q) "seed %d: a damaged base answered wrong" seed
+          | Error (Damaged _) -> incr C.checks; incr failed_questions
+          | Error e -> C.fail "seed %d: %s" seed (message e))
+      done;
+      let seen = ref 0 in
+      for j = 0 to npages - 1 do try ignore (Pages.page pv.base.pg j) with Pages.Unreadable _ -> incr seen done;
+      at_read := !at_read + !seen;
+      (* the damaged page is seen unless it was read at the open (then refused there) or is the padding no read covers *)
+      C.check (!seen = 1) "seed %d: %d pages fail, one was damaged" seed !seen
+    | _ -> C.fail "seed %d: unexpected load" seed
+  done;
+  Printf.printf "  12 flipped bits: %d refused at open, %d found at a read (%d questions failed, none answered wrong)\n"
+    !at_open !at_read !failed_questions;
+  Pages.capacity := cap
 
 (* ---- forks and databases on the real disk ---- *)
 

@@ -76,6 +76,10 @@ val find : view -> query -> (value array list, error) result
 val fold : view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 ```
 
+A view's base is read through the cache of pages (see Operations, Memory): when a page cannot be read from the disk,
+or does not check against its CRC, it is never served: `find` and `fold` return `Damaged`, and `get`, `values` and
+`things` raise `Unreadable of string` (they return plain values). A write that needed the page fails with `Damaged`.
+
 `find` returns every binding of `vars` variables (numbered 0 to vars − 1) that makes every pattern a fact, each once
 (G11). A variable's type comes from where it appears (a thing position is a link); a variable used with two types, or
 in no pattern, is `Invalid`. `ranges` keeps `lo <= x <= hi` for int, date and money variables. `fold` gives index words
@@ -102,6 +106,7 @@ Cepheus.fold v q ~init:(fun () -> Hashtbl.create 100)
 | `snapshot : db -> (unit, error) result` | compacts and writes a snapshot, so the next open replays only what follows |
 | `verify : string -> (int, error) result` | reads a closed database's whole journal and checks every frame and trailer; the number of groups |
 | `notes : db -> string list` | what recovery set aside (a damaged snapshot) |
+| `set_cache : int -> unit` | the bytes of base pages kept in memory, for every database of the process (1 GiB by default) |
 | `open_on : Disk.t -> string -> (db, error) result` | `open_` on another disk, such as `Sim_disk` |
 
 ## Threads and domains

@@ -1,4 +1,3 @@
-type bigstring = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
 type fd = int
 
 exception Io of string
@@ -17,7 +16,6 @@ type t = {
   rename : string -> string -> unit;
   remove : string -> unit;
   sync_dir : string -> unit;
-  map : string -> bigstring;
   lock : string -> bool;
   unlock : string -> unit;
   now : unit -> int;
@@ -51,13 +49,6 @@ let rec read_exact ufd buf pos len path =
     if n = 0 then raise (Io ("read " ^ path ^ ": short file"));
     read_exact ufd buf (pos + n) (len - n) path
   end
-
-let map_file p =
-  let ufd = Unix.openfile p [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0 in
-  Fun.protect ~finally:(fun () -> Unix.close ufd) (fun () ->
-      let n = (Unix.fstat ufd).Unix.st_size in
-      if n = 0 then Bigarray.Array1.create Bigarray.char Bigarray.c_layout 0
-      else Bigarray.array1_of_genarray (Unix.map_file ufd Bigarray.char Bigarray.c_layout false [| n |]))
 
 let take_lock p =
   locked (fun () ->
@@ -121,7 +112,6 @@ let real =
         unix "fsync" p (fun () ->
             let d = Unix.openfile p [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0 in
             Fun.protect ~finally:(fun () -> Unix.close d) (fun () -> Unix.fsync d)));
-    map = (fun p -> unix "mmap" p (fun () -> map_file p));
     lock = (fun p -> unix "lock" p (fun () -> take_lock p));
     unlock =
       (fun p ->

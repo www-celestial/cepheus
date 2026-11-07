@@ -173,19 +173,6 @@ let readdir t d =
   let l = Hashtbl.fold (fun p () acc -> if p <> d && in_dir d p then Filename.basename p :: acc else acc) t.dirs l in
   List.sort compare l
 
-let map t p =
-  match Hashtbl.find_opt t.names p with
-  | None -> io "mmap %s: no such file" p
-  | Some i ->
-    let n = Hashtbl.find t.inodes i in
-    let a = Bigarray.Array1.create Bigarray.char Bigarray.c_layout n.cur_len in
-    for k = 0 to n.cur_len - 1 do
-      Bigarray.Array1.unsafe_set a k (Bytes.unsafe_get n.cur k)
-    done;
-    a
-
-(* ---- A power loss ---- *)
-
 let crash_inode t (n : inode) =
   let r = t.rng in
   let new_len =
@@ -306,7 +293,6 @@ let disk t : Disk.t =
     rename = (fun a b -> tick t; rename t a b);
     remove = tk (remove t);
     sync_dir = tk (sync_dir t);
-    map = map t;
     lock = (fun p -> if Hashtbl.mem t.locks p then false else (Hashtbl.replace t.locks p (); true));
     unlock = (fun p -> Hashtbl.remove t.locks p);
     now = (fun () -> t.clock);

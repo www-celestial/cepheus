@@ -3,6 +3,7 @@ module Crc32c = Crc32c
 module Disk = Disk
 module Engine = Engine
 module Group = Group
+module Pages = Pages
 module Histogram = Histogram
 module Journal = Journal
 module Query = Query
@@ -128,8 +129,14 @@ type term = Query.term = Var of int | Thing of int | Val of value
 type pattern = Query.pattern = { e : term; p : int; v : term }
 type query = Query.t = { vars : int; where : pattern list; ranges : (int * value * value) list }
 
-let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m)
-let fold v q ~init ~step ~merge = try Ok (Query.fold v q ~init ~step ~merge) with Query.Bad m -> Error (Invalid m)
+let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
+
+let fold v q ~init ~step ~merge =
+  try Ok (Query.fold v q ~init ~step ~merge) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
+
+exception Unreadable = Pages.Unreadable
+
+let set_cache = Pages.set_capacity
 
 let snapshot = function
   | Durable l -> Result.map (fun _ -> ()) (Engine.snapshot_live l)

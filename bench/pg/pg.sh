@@ -2,7 +2,8 @@
 # PostgreSQL side of the benchmarks, on a cluster of our own (never the system's): ROOT/data, socket in ROOT/sock,
 # port 5544, fsync, synchronous_commit and full_page_writes on (the defaults).
 #   pg.sh init ROOT            initdb and the configuration
-#   pg.sh start ROOT MEM       start the server in a systemd scope capped at MEM (the cache counts in the cap)
+#   pg.sh start ROOT MEM       start the server in a systemd scope capped at MEM (the cache counts in the cap); SHARED=32MB sets
+#                              shared_buffers for this start
 #   pg.sh load ROOT CSVDIR     tables as a PostgreSQL user would write them, COPY, indexes, ANALYZE
 #   pg.sh read ROOT NCLIENTS   Q1-Q5: through the socket (pgbench, prepared) and inside the server (engine only);
 #                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2);
@@ -35,7 +36,9 @@ full_page_writes = on
 EOF
   ;;
 start)
-  systemd-run --user --scope -q -p MemoryMax="$3" pg_ctl -D "$root/data" -l "$root/log" -w start >/dev/null
+  # SHARED=32MB: shared_buffers for this run (1 GB in the configuration), for a run under a small cap
+  systemd-run --user --scope -q -p MemoryMax="$3" -p MemorySwapMax=0 pg_ctl -D "$root/data" -l "$root/log" -w \
+    ${SHARED:+-o "-c shared_buffers=$SHARED"} start >/dev/null
   createdb bench 2>/dev/null || true
   ;;
 load)

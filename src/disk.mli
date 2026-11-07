@@ -3,8 +3,6 @@
     purpose. A file is durable only after [fsync]; a created, renamed or removed name is durable only after
     [sync_dir] of its directory. Every failure raises {!Io}. *)
 
-type bigstring = (char, Bigarray.int8_unsigned_elt, Bigarray.c_layout) Bigarray.Array1.t
-
 type fd = int
 (** An open file, a number given by the disk. *)
 
@@ -25,14 +23,13 @@ type t = {
   rename : string -> string -> unit;  (** atomic replacement of the target *)
   remove : string -> unit;
   sync_dir : string -> unit;  (** makes the names of a directory durable *)
-  map : string -> bigstring;  (** a whole file, read only *)
   lock : string -> bool;  (** an exclusive lock on a file, held until [unlock] or the process ends *)
   unlock : string -> unit;
   now : unit -> int;  (** the time in milliseconds since 1970; simulated on {!Sim_disk} *)
 }
 
 val real : t
-(** The machine's file system. Writes go through [lseek] and [write]; [map] maps the file (shared pages). *)
+(** The machine's file system. Reads and writes go through [lseek] and [read] or [write]. *)
 
 val read_all : t -> string -> Bytes.t
 (** A whole file. *)

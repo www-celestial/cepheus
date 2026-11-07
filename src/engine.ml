@@ -81,7 +81,8 @@ let prepare t (reqs : (Resolve.op list * int * string) array) =
             groups := g :: !groups;
             incr count;
             Ok { group = n; things = temps }
-          | Error e -> Error (of_resolve e)))
+          | Error e -> Error (of_resolve e)
+          | exception Pages.Unreadable m -> Error (Damaged m)))
       reqs
   in
   { results; groups = !groups; body; first; count = !count; after = t.working }
@@ -199,7 +200,7 @@ let open_ ?(id_source = random_id) disk dir =
         end;
         Ok t
       with
-      | Journal.Damaged m -> release (); Error (Damaged m)
+      | Journal.Damaged m | Pages.Unreadable m -> release (); Error (Damaged m)
       | Disk.Io m -> release (); Error (Io m)
   with
   | Disk.Io m -> Error (Io m)

@@ -58,13 +58,28 @@ the only check that reads the old segments, which an open does not read when a s
 
 ## Memory
 
-A database in memory costs about 31 bytes a fact (the columns, 22 bytes, plus the dictionary of texts and the offset
-tables) and about 170 bytes for each change since the last merge; a merge starts in the background when the changes
-pass max(200,000, n/16), and needs room for a second base while it runs (twice the columns for a moment). 10 M facts: 312 MB resident after open (measured). Larger than memory is the next step (design:
-segments on disk read through Cepheus' own cache).
+A database's base (its facts merged and sorted, about 31 bytes a fact) is read in pages of 16 KiB through one cache
+for the process, `Cepheus.set_cache bytes` (1 GiB by default). A snapshot that fits in the cache is read whole at open,
+every page checked; a larger one is read page by page as questions need it, each page checked against its CRC when it
+arrives. Pages in memory stay under 1.25 times the cache: a full collection runs after each quarter of the cache has
+been evicted, so that the evicted pages go back to the system. Measured at 10 M facts (snapshot 245 MB): with the
+whole base in the cache, 278 MB resident after open; with a 48 MB cache under a 160 MB cap, 64 MB after open and a
+peak of 79 to 100 MB through Q1 to Q5.
+
+Besides the base: about 170 bytes for each change since the last merge; a merge starts in the background when the
+changes pass max(200,000, n/16) and still builds the new base in memory (twice the base for a moment, and the arrays
+of the sort: loading 10 M facts peaks at 3.1 GB). Writing merges straight to a file, so that a merge needs no more
+than the cache, is the next step.
 
 ## Disks
 
 Cepheus relies on `fsync` meaning durable. Consumer disks may acknowledge writes they keep in a volatile cache; use
 disks with power-loss protection for data that matters. Durable writes run at the disk's fsync rate times the frame
 size: on the test machine's SATA SSD about 340 fsync a second.
+
+On btrfs (the test machine), a 9,000-byte frame and its fsync, 10 s a round, 3 rounds: appended, as the journal
+does, p99 19.6 to 152.6 ms (15.7 to 27.7 ms in a directory marked NOCOW, `chattr +C`); written over zeros written and
+forced beforehand, p99 14.3 to 19.3 ms (7.7 to 15.7 NOCOW), and 14 % more fsyncs a second (median of 5 rounds,
+higher in all 5). The journal does not preallocate yet (it needs a segment made ahead in the background, and recovery
+that zeroes a torn tail instead of cutting it). The long stalls (fsyncs of 80 to 450 ms, a few a minute) come in every
+mode: they are the disk's.
