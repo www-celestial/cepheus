@@ -141,7 +141,7 @@ let order (v : Store.view) nvars pats ranges =
 
 (* Questions run as a fold: [init ()] makes an accumulator, [step acc env] adds a binding (the buffer [env] is reused),
    [merge] joins two accumulators. Above [parallel_min] candidates for the first variable, the candidates are split
-   over [domains] domains, each with its own accumulator: a view needs no lock to be read. *)
+   into slices run by [domains] domains, each slice with its own accumulator: a view needs no lock to be read. *)
 let parallel_min = ref 20_000
 let domains = ref (max 1 (min 8 (Domain.recommended_domain_count ())))
 
@@ -231,6 +231,19 @@ let fold (v : Store.view) q ~init ~step ~merge =
         done;
         !best, !bc
       in
+      (* a candidate of level i from source src: in its range, and a fact of every other pattern of the level *)
+      let admits i src c =
+        let x = ord.(i) and ps = by_var.(ord.(i)) in
+        in_range x c
+        &&
+        let ok = ref true and j = ref 0 in
+        while !ok && !j < Array.length ps do
+          if !j <> src && not (accepts x c ps.(!j)) then ok := false;
+          incr j
+        done;
+        !ok
+      in
+      (* the same test as [admits], written out: a call per candidate costs 4 to 7 % of Q4 (no flambda) *)
       let candidates i src (f : int -> unit) =
         let x = ord.(i) and ps = by_var.(ord.(i)) in
         if src >= 0 then
@@ -255,11 +268,11 @@ let fold (v : Store.view) q ~init ~step ~merge =
           bound.(x) <- false
         end
       in
-      env, bound, choose, candidates, level, w
+      env, bound, choose, iterate, admits, level, w
     in
     if n = 0 then step (init ()) [||]
     else begin
-      let env, bound, choose, candidates, level, w0 = runner () in
+      let env, bound, choose, iterate, admits, level, w0 = runner () in
       let flush w = ignore (Atomic.fetch_and_add work !w); w := 0 in
       let x0 = ord.(0) in
       let src, size = choose 0 in
@@ -271,28 +284,45 @@ let fold (v : Store.view) q ~init ~step ~merge =
         !acc
       end
       else begin
-        (* the first level's candidates, split over d domains; at most [size] of them *)
+        (* the first level's source, as it comes (exactly [size] candidates); each slice checks its own against the
+           level's other patterns, so that no domain does the first level alone *)
         let firsts = Array.make size 0 and count = ref 0 in
         bound.(x0) <- true;
-        candidates 0 src (fun c -> firsts.(!count) <- c; incr count);
-        let run_slice (env, bound, level, w) lo hi =
-          let acc = ref (init ()) in
+        iterate x0 by_var.(x0).(src) (fun c -> firsts.(!count) <- c; incr count; incr w0);
+        (* slices of the candidates, taken in turn by the domains from a shared counter (a domain that meets the
+           expensive candidates takes fewer slices), each with its own accumulator, merged in slice order: the answer
+           does not depend on the number of domains nor on which domain ran which slice *)
+        let slices = max 1 (min !count (16 * d)) in
+        let accs = Array.make slices None and next = Atomic.make 0 in
+        let run (env, bound, admits, level, w) =
           bound.(x0) <- true;
-          for k = lo to hi - 1 do
-            env.(x0) <- firsts.(k);
-            level 1 acc
+          let go = ref true in
+          while !go do
+            let s = Atomic.fetch_and_add next 1 in
+            if s >= slices then go := false
+            else begin
+              let acc = ref (init ()) in
+              for k = s * !count / slices to ((s + 1) * !count / slices) - 1 do
+                let c = firsts.(k) in
+                if admits 0 src c then begin
+                  env.(x0) <- c;
+                  level 1 acc
+                end
+              done;
+              accs.(s) <- Some !acc
+            end
           done;
-          flush w;
-          !acc
+          flush w
         in
-        let chunk = (!count + d - 1) / d in
         let others =
-          List.init (d - 1) (fun k ->
-              let lo = (k + 1) * chunk and hi = min !count ((k + 2) * chunk) in
-              Domain.spawn (fun () -> let e, b, _, _, l, w = runner () in run_slice (e, b, l, w) lo (max lo hi)))
+          List.init (d - 1) (fun _ -> Domain.spawn (fun () -> let e, b, _, _, a, l, w = runner () in run (e, b, a, l, w)))
         in
-        let mine = run_slice (env, bound, level, w0) 0 (min chunk !count) in
-        List.fold_left (fun acc dm -> merge acc (Domain.join dm)) mine others
+        (match run (env, bound, admits, level, w0) with
+         | () -> List.iter Domain.join others
+         | exception e -> List.iter (fun dm -> try Domain.join dm with _ -> ()) others; raise e);
+        let acc = ref (Option.get accs.(0)) in
+        for s = 1 to slices - 1 do acc := merge !acc (Option.get accs.(s)) done;
+        !acc
       end
     end
 
