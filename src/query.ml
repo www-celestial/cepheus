@@ -68,11 +68,12 @@ let compile (v : Store.view) q =
 
 let has x = function V y -> x = y | W _ -> false
 
-(* the static order of the variables: the cheapest first, given those before it *)
+(* The order of the variables. [est x bound]: the candidates per binding that the best pattern offers x given the
+   variables already bound. The cost of an order is the sum of the estimated partial bindings after each step (each
+   step multiplies by its candidates); every order is tried for up to 7 variables (with pruning), greedily beyond. *)
 let order (v : Store.view) nvars pats =
-  let bound = Array.make nvars false in
-  let known = function W _ -> true | V y -> bound.(y) in
-  let est x =
+  let est x bound =
+    let known = function W _ -> true | V y -> bound land (1 lsl y) <> 0 in
     List.fold_left
       (fun best pt ->
         let c =
@@ -80,7 +81,7 @@ let order (v : Store.view) nvars pats =
           else if has x pt.pe then
             match pt.pv with
             | W w -> Store.count_things v pt.pp w
-            | V y when bound.(y) -> Store.count_prop v pt.pp / Store.distinct v pt.pp
+            | V y when known (V y) -> max 1 (Store.count_prop v pt.pp / Store.distinct v pt.pp)
             | V _ -> Store.count_prop v pt.pp
           else if has x pt.pv then
             if known pt.pe then (match pt.pe with W e -> Store.count_values v e pt.pp | V _ -> if pt.many then 4 else 1)
@@ -90,19 +91,39 @@ let order (v : Store.view) nvars pats =
         min best c)
       max_int pats
   in
-  let out = Array.make nvars 0 in
-  for k = 0 to nvars - 1 do
-    let best = ref (-1) and bc = ref max_int in
-    for x = 0 to nvars - 1 do
-      if not bound.(x) then begin
-        let c = est x in
-        if !best < 0 || c < !bc then (best := x; bc := c)
-      end
+  let best = ref [||] and best_cost = ref infinity in
+  if nvars <= 7 then begin
+    let cur = Array.make nvars 0 in
+    let rec go k bound size cost =
+      if cost < !best_cost then
+        if k = nvars then (best_cost := cost; best := Array.copy cur)
+        else
+          for x = 0 to nvars - 1 do
+            if bound land (1 lsl x) = 0 then begin
+              let size = size *. float_of_int (max 1 (est x bound)) in
+              cur.(k) <- x;
+              go (k + 1) (bound lor (1 lsl x)) size (cost +. size)
+            end
+          done
+    in
+    go 0 0 1. 0.
+  end;
+  if !best = [||] then begin
+    let out = Array.make nvars 0 and bound = ref 0 in
+    for k = 0 to nvars - 1 do
+      let b = ref (-1) and bc = ref max_int in
+      for x = 0 to nvars - 1 do
+        if !bound land (1 lsl x) = 0 then begin
+          let c = est x !bound in
+          if !b < 0 || c < !bc then (b := x; bc := c)
+        end
+      done;
+      out.(k) <- !b;
+      bound := !bound lor (1 lsl !b)
     done;
-    out.(k) <- !best;
-    bound.(!best) <- true
-  done;
-  out
+    best := out
+  end;
+  !best
 
 let exists_thing (v : Store.view) p w =
   let r = ref false in

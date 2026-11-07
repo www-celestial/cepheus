@@ -128,11 +128,10 @@ let base_iter_av b p w f =
 let base_count_av b p w =
   if p < 0 || p >= b.np then 0
   else begin
-    let hi = poff b (p + 1) in
+    (* two binary searches: the rows of value w are [lower w, lower (w+1)) *)
     let lo = base_lower b p w in
-    let i = ref lo in
-    while !i < hi && avv b !i = w do incr i done;
-    !i - lo
+    let hi = if w = max_int then poff b (p + 1) else base_lower b p (w + 1) in
+    hi - lo
   end
 
 let base_iter_range b p lo hi f =
@@ -398,11 +397,14 @@ let count_values v e p =
     base_iter_ea v.base e p (fun _ -> incr n);
     if is_touched v e then !n + 1 else !n
 
+(* the delta's part of an estimate: its size, but never a long walk *)
+let small_card m = let n = ref 0 in (try IM.iter (fun _ _ -> incr n; if !n >= 64 then raise Exit) m with Exit -> ()); !n
+
 let count_things v p w =
-  base_count_av v.base p w + match delta_av v p w with None -> 0 | Some m -> IM.cardinal m
+  base_count_av v.base p w + match delta_av v p w with None -> 0 | Some m -> small_card m
 
 let count_prop v p =
-  base_count_p v.base p + match IM.find_opt p v.delta.dav with None -> 0 | Some m -> IM.cardinal m
+  base_count_p v.base p + match IM.find_opt p v.delta.dav with None -> 0 | Some m -> small_card m
 
 let distinct v p = if p >= 0 && p < v.base.np then max 1 (pdist v.base p) else 1
 
