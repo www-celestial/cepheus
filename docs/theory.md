@@ -64,9 +64,13 @@ value" serves "all things with this property" too. Memory: 22 bytes a fact plus 
 
 The delta is a set of persistent maps (Driscoll et al. [30], Okasaki [31]): each change copies one path, O(log d), and
 an old version stays valid for free. That is what makes views and forks free. It costs about 170 bytes a change, so
-it is bounded: when it passes max(200,000, n/16) changes, the writer merges it into a new base (compaction, O(n));
-the LSM tree (O'Neil et al. [1]) generalises this to levels, so that a merge rewrites only a small level (planned:
-design, section 15).
+it is bounded: when it passes max(200,000, n/16) changes, a merge starts **in another domain**: it builds a new
+base from the working view of that moment (O(n)), then replays the groups written meanwhile (the writer logs them),
+until it is fewer than 256 groups behind; the writer then waits for the syncer to be idle (at most one fsync),
+replays the rest and switches its views to the new base. Writes never wait for the O(n) part. This is the first
+two levels of an LSM tree (O'Neil et al. [1]): the delta is level 0, the base level 1; the on-disk levels, each
+merged at its own pace so that a merge rewrites only a small level, come with the segments on disk (design,
+section 15).
 
 ## 4. Generic Join
 

@@ -9,6 +9,7 @@ module C = Check
 let clients = 8
 
 let child dir =
+  Engine.compact_min := 50;
   let db = match open_ dir with Ok db -> db | Error e -> prerr_endline (message e); exit 2 in
   let[@warning "-8"] (Ok [ name; seq ]) = declare db [ prop ~unique:true "name" Ttext; prop "seq" Tint ] in
   let m = Mutex.create () in

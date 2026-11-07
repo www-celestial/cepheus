@@ -84,6 +84,12 @@ are answered (`Engine.commit`), and OCaml's atomics order the store before the a
 *Tested by* the bank test (reader domains check every view they take: constant total, numbers never go back) and the
 simulation (the published view equals the model at its number, which is ≥ the last confirmed).
 
+*Background merges* keep G5: a merge builds a new base from a view and replays the logged groups after it, and the
+writer switches to it only when nothing is in flight and the new view holds exactly the same groups; the published
+view is replaced by one atomic store. *Tested by* the bank test, which merges every few dozen changes (156 merges in
+4 s) and compares the facts of the old and the new view at every switch, and by the kill -9 rounds with frequent
+merges.
+
 ## G6 Nothing dropped in silence
 
 *Promise.* Under F3, a change of durable journal bytes is detected by the first read that covers it: a full read

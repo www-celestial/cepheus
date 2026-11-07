@@ -11,6 +11,9 @@ let start = 100
 let () =
   let dir, secs = match Sys.argv with [| _; d; s |] -> d, float_of_string s | _ -> prerr_endline "bank.exe DIR SECONDS"; exit 2 in
   Check.rmrf dir;
+  (* merges in the background, often: each switch to a new base must keep every fact *)
+  Engine.compact_min := 40;
+  Engine.on_merge := (fun a b -> if not (C.F.equal (C.facts_of_view a) (C.facts_of_view b)) then C.fail "a background merge changed the facts");
   let db = Result.get_ok (open_ dir) in
   let[@warning "-8"] (Ok [ bal ]) = declare db [ prop "balance" Tint ] in
   let r = Result.get_ok (write db (List.init accounts (fun i -> Add (-(i + 1), bal, Int start)))) in
@@ -62,5 +65,5 @@ let () =
   C.check (Array.fold_left (fun acc a -> acc + balance (view db) a) 0 ids = accounts * start) "total after reopening";
   close db;
   Check.rmrf dir;
-  Printf.printf "bank: %d transfers, %d conflicts, %d views checked by 2 reader domains\n" (Atomic.get moved) (Atomic.get conflicts) !views;
+  Printf.printf "bank: %d transfers, %d conflicts, %d views checked by 2 reader domains, %d background merges\n" (Atomic.get moved) (Atomic.get conflicts) !views (Atomic.get Engine.merges);
   C.finish "bank"

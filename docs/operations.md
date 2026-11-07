@@ -59,8 +59,8 @@ the only check that reads the old segments, which an open does not read when a s
 ## Memory
 
 A database in memory costs about 31 bytes a fact (the columns, 22 bytes, plus the dictionary of texts and the offset
-tables) and about 170 bytes for each change since the last compaction; the writer compacts when the changes pass
-max(200,000, n/16). 10 M facts: 312 MB resident after open (measured). Larger than memory is the next step (design:
+tables) and about 170 bytes for each change since the last merge; a merge starts in the background when the changes
+pass max(200,000, n/16), and needs room for a second base while it runs (twice the columns for a moment). 10 M facts: 312 MB resident after open (measured). Larger than memory is the next step (design:
 segments on disk read through Cepheus' own cache).
 
 ## Disks

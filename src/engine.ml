@@ -47,6 +47,7 @@ type t = {
 
 type batch = {
   results : (receipt, error) result array;
+  groups : Group.t list;  (* newest first *)
   body : Buffer.t;
   first : int;
   count : int;
@@ -61,7 +62,7 @@ let needs_compaction (v : Store.view) = v.delta.dn > max !compact_min (v.base.n 
 let prepare t (reqs : (Resolve.op list * int * string) array) =
   let body = Buffer.create 1024 in
   let first = t.working.group + 1 in
-  let count = ref 0 in
+  let count = ref 0 and groups = ref [] in
   let results =
     Array.map
       (fun (ops, by, why) ->
@@ -73,12 +74,13 @@ let prepare t (reqs : (Resolve.op list * int * string) array) =
           | Ok (v, g, temps) ->
             t.working <- v;
             Group.encode body g;
+            groups := g :: !groups;
             incr count;
             Ok { group = n; things = temps }
           | Error e -> Error (of_resolve e)))
       reqs
   in
-  { results; body; first; count = !count; after = t.working }
+  { results; groups = !groups; body; first; count = !count; after = t.working }
 
 (* Writes and forces the frame; on failure the database stops, and the batch's writes fail. *)
 let commit t b =
@@ -214,6 +216,53 @@ type req = {
 
 type control = Write of req | Snapshot of req | Stop
 
+(* ---- Merging in the background ----
+   The writer never stops for a compaction: another domain builds the new base from the working view of the moment,
+   then replays the groups written since (the writer keeps them in a log), until it is a few hundred behind; the
+   writer then waits for the syncer to be idle (at most one fsync), replays the rest, and switches both views to
+   the new base. Levels: the delta (level 0, persistent maps) is merged into the base (level 1); the on-disk levels
+   come with the segments on disk. *)
+type merger = {
+  lm : Mutex.t;
+  mutable log : Group.t list;  (* groups prepared since the merge started, newest first *)
+  mutable logn : int;
+  ready : (Store.view * int) option Atomic.t;  (* the new lineage, and how many logged groups it holds *)
+  mutable dom : unit Domain.t option;
+}
+
+let merges = Atomic.make 0 (* finished background merges, for the tests and benchmarks *)
+let on_merge : (Store.view -> Store.view -> unit) ref = ref (fun _ _ -> ())
+let catch_up = 256
+
+(* the [n] logged groups after the first [applied], oldest first *)
+let after_applied m applied =
+  Mutex.lock m.lm;
+  let k = m.logn - applied in
+  let rec take i l acc = if i = 0 then acc else match l with g :: r -> take (i - 1) r (g :: acc) | [] -> acc in
+  let gs = take k m.log [] in
+  Mutex.unlock m.lm;
+  gs, k
+
+let start_merge (from : Store.view) =
+  let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None } in
+  m.dom <-
+    Some
+      (Domain.spawn (fun () ->
+           try
+           let v = ref (Store.compact from) and applied = ref 0 in
+           let go = ref true in
+           while !go do
+             let gs, k = after_applied m !applied in
+             List.iter (fun g -> v := Resolve.replay !v g) gs;
+             applied := !applied + k;
+             if k < catch_up then begin
+               Atomic.set m.ready (Some (!v, !applied));
+               go := false
+             end
+           done
+           with e -> prerr_endline ("cepheus: background merge failed: " ^ Printexc.to_string e)));
+  m
+
 type live = {
   e : t;
   m : Mutex.t;
@@ -225,6 +274,7 @@ type live = {
   mutable syncing : bool;
   mutable domain : unit Domain.t option;
   mutable closed : bool;
+  mutable merging : merger option;
 }
 
 let deliver r res =
@@ -257,6 +307,26 @@ let syncer l () =
       Mutex.unlock l.sm
   done
 
+(* Waits for the merger, then switches to the new base when nothing is in flight. *)
+let finish_merge l =
+  match l.merging with
+  | None -> ()
+  | Some m ->
+    Option.iter Domain.join m.dom;
+    l.merging <- None;
+    wait_idle l;
+    if l.e.stopped = None then begin
+      match Atomic.get m.ready with
+      | None -> ()
+      | Some (v, applied) ->
+        let gs, _ = after_applied m applied in
+        let v = List.fold_left Resolve.replay v gs in
+        !on_merge l.e.working v;
+        l.e.working <- v;
+        Atomic.set l.e.published v;
+        Atomic.incr merges
+    end
+
 let max_batch = 4096
 let max_frame = 8 lsl 20
 
@@ -265,7 +335,8 @@ let merge a b =
   let body = Buffer.create (Buffer.length a.body + Buffer.length b.body) in
   Buffer.add_buffer body a.body;
   Buffer.add_buffer body b.body;
-  { results = Array.append a.results b.results; body; first = a.first; count = a.count + b.count; after = b.after }
+  { results = Array.append a.results b.results; groups = b.groups @ a.groups; body; first = a.first;
+    count = a.count + b.count; after = b.after }
 
 let writer l () =
   let go = ref true in
@@ -298,16 +369,22 @@ let writer l () =
          | Some (b0, r0) -> l.to_sync <- Some (merge b0 b, Array.append r0 reqs));
         Condition.broadcast l.c_sync;
         Mutex.unlock l.sm;
-        if needs_compaction l.e.working then begin
-          wait_idle l;
-          if l.e.stopped = None then compact l.e
-        end;
+        (match l.merging with
+         | Some m ->
+           Mutex.lock m.lm;
+           m.log <- b.groups @ m.log;
+           m.logn <- m.logn + b.count;
+           Mutex.unlock m.lm;
+           if Atomic.get m.ready <> None then finish_merge l
+         | None -> if needs_compaction l.e.working && l.e.stopped = None then l.merging <- Some (start_merge l.e.working));
         handle rest
       | Snapshot r :: rest ->
+        finish_merge l;
         wait_idle l;
         deliver r (Result.map (fun () -> { group = l.e.working.group; things = [] }) (snapshot l.e));
         handle rest
       | Stop :: rest ->
+        finish_merge l;
         wait_idle l;
         List.iter (function Write r | Snapshot r -> deliver r (Error Closed) | Stop -> ()) rest;
         go := false
@@ -322,7 +399,7 @@ let writer l () =
 let start e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
-      to_sync = None; syncing = false; domain = None; closed = false }
+      to_sync = None; syncing = false; domain = None; closed = false; merging = None }
   in
   (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
   l.domain <- Some (Domain.spawn (fun () ->
