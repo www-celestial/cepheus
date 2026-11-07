@@ -135,6 +135,16 @@ let rec make_room () =
       else evict e
   end
 
+(* A base the database no longer uses (replaced by a merge): its pages leave the cache now rather than when the policy
+   gets to them, so that two bases are never held for one. A view that still reads it reads its pages again from the
+   file. Nothing for a base built in memory (the GC frees it with its last view). *)
+let drop b =
+  if b.load <> None then begin
+    Mutex.lock lock;
+    Array.iteri (fun k f -> if f != absent then evict { b; k }) b.frames;
+    Mutex.unlock lock
+  end
+
 (* trace mode, for the policy study: every read of a page of a cached base is recorded, as a key *)
 let tracing = ref false
 let trace = ref (Array.make 0 0)

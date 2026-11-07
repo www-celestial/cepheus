@@ -104,6 +104,7 @@ let commit t b =
 (* With nothing in flight (working = published). *)
 let compact t =
   let v = Store.compact t.working in
+  Pages.drop t.working.base.pg;
   t.working <- v;
   Atomic.set t.published v
 
@@ -178,7 +179,11 @@ let open_ ?(id_source = random_id) disk dir =
         let replay (g : Group.t) =
           if g.n > !v.group then begin
             v := Resolve.replay !v g;
-            if needs_compaction !v then v := Store.compact !v
+            if needs_compaction !v then begin
+              let old = !v in
+              v := Store.compact old;
+              Pages.drop old.base.pg
+            end
           end
         in
         let journal = Journal.recover disk jdir id from replay in
@@ -328,8 +333,10 @@ let finish_merge l =
         let gs, _ = after_applied m applied in
         let v = List.fold_left Resolve.replay v gs in
         !on_merge l.e.working v;
+        let old = l.e.working.base in
         l.e.working <- v;
         Atomic.set l.e.published v;
+        if v.base != old then Pages.drop old.pg;
         Atomic.incr merges
     end;
     Histogram.record switch_us (Journal.clock () - t0)

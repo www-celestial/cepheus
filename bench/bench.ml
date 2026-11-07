@@ -305,7 +305,8 @@ let write_bench dir clients secs rate =
   Stats.print_latency "  journal pwrite" Journal.write_us;
   Stats.print_latency "  journal fsync" Journal.fsync_us;
   Stats.print_latency "  writer resolves a batch" Engine.prepare_us;
-  Stats.print_latency "  writer waits for a merge switch" Engine.switch_us
+  Stats.print_latency "  writer waits for a merge switch" Engine.switch_us;
+  Printf.printf "  peak RSS %d MB\n%!" (peak () / 1024)
 
 (* the file system alone: a frame of 9,000 bytes (a frame of 125 groups) and its fsync, appended or overwriting zeros
    written and forced beforehand *)

@@ -273,7 +273,13 @@ let () =
            | Error e -> C.fail "seed %d: %s" seed (message e))
        done;
        C.check (Atomic.get Pages.misses - m0 > npages) "seed %d: no page was read twice (%d reads, %d pages)" seed
-         (Atomic.get Pages.misses - m0) npages
+         (Atomic.get Pages.misses - m0) npages;
+       (* the base dropped from the cache (as a merge does to the base it replaced): read again from the file *)
+       Pages.drop pv.base.pg;
+       let q = C.random_query r pv facts qnames in
+       Option.iter (fun q -> match find pv q with
+           | Ok rows -> C.check (C.sorted_rows rows = C.naive facts q) "seed %d: a question after the drop" seed
+           | Error e -> C.fail "seed %d: after the drop: %s" seed (message e)) q
      | _ -> C.fail "seed %d: the snapshot did not load" seed);
     (* a bit flipped on the disk; open again with the small cache: refused at open, or every read of the page fails,
        never a wrong answer *)
