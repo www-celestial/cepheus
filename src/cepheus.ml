@@ -128,7 +128,7 @@ type pattern = Query.pattern = { e : term; p : int; v : term }
 type query = Query.t = { vars : int; where : pattern list; ranges : (int * value * value) list }
 
 let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m)
-let iter v q k = try Ok (Query.run v q k) with Query.Bad m -> Error (Invalid m)
+let fold v q ~init ~step ~merge = try Ok (Query.fold v q ~init ~step ~merge) with Query.Bad m -> Error (Invalid m)
 
 let snapshot = function
   | Durable l -> Result.map (fun _ -> ()) (Engine.snapshot_live l)

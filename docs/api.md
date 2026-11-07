@@ -73,14 +73,16 @@ type term = Var of int | Thing of int | Val of value
 type pattern = { e : term; p : int; v : term }
 type query = { vars : int; where : pattern list; ranges : (int * value * value) list }
 val find : view -> query -> (value array list, error) result
-val iter : view -> query -> (int array -> unit) -> (unit, error) result
+val fold : view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 ```
 
 `find` returns every binding of `vars` variables (numbered 0 to vars − 1) that makes every pattern a fact, each once
 (G11). A variable's type comes from where it appears (a thing position is a link); a variable used with two types, or
-in no pattern, is `Invalid`. `ranges` keeps `lo <= x <= hi` for int, date and money variables. `iter` calls back with
-index words (thing numbers for links, the value for ints, dates, money and booleans as 0/1, dictionary numbers for
-texts and floats) in a buffer it reuses; use it for aggregates.
+in no pattern, is `Invalid`. `ranges` keeps `lo <= x <= hi` for int, date and money variables. `fold` gives index words
+(thing numbers for links, the value for ints, dates, money and booleans as 0/1, dictionary numbers for texts and
+floats) in a buffer it reuses; use it for aggregates. A question with at least `Query.parallel_min` (20,000)
+candidates for its first variable runs on up to `Query.domains` domains (default: the machine's, at most 8), each
+with its own accumulator from `init ()`, joined by `merge`; `step` must touch only its accumulator.
 
 Example: the sum of unpaid invoices per city.
 
@@ -88,8 +90,9 @@ Example: the sum of unpaid invoices per city.
 let q = { vars = 4; ranges = [];
           where = [ { e = Var 0; p = status; v = Val (Text "unpaid") }; { e = Var 0; p = client; v = Var 1 };
                     { e = Var 1; p = city; v = Var 2 }; { e = Var 0; p = total; v = Var 3 } ] } in
-let sums = Hashtbl.create 100 in
-Cepheus.iter v q (fun w -> Hashtbl.replace sums w.(2) (w.(3) + Option.value (Hashtbl.find_opt sums w.(2)) ~default:0))
+Cepheus.fold v q ~init:(fun () -> Hashtbl.create 100)
+  ~step:(fun t w -> Hashtbl.replace t w.(2) (w.(3) + Option.value (Hashtbl.find_opt t w.(2)) ~default:0); t)
+  ~merge:(fun a b -> Hashtbl.iter (fun c x -> Hashtbl.replace a c (x + Option.value (Hashtbl.find_opt a c) ~default:0)) b; a)
 ```
 
 ## Operations

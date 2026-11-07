@@ -130,91 +130,160 @@ let exists_thing (v : Store.view) p w =
   (try Store.iter_things v p w (fun _ -> r := true; raise Exit) with Exit -> ());
   !r
 
-let run (v : Store.view) q (k : int array -> unit) =
+(* Questions run as a fold: [init ()] makes an accumulator, [step acc env] adds a binding (the buffer [env] is reused),
+   [merge] joins two accumulators. Above [parallel_min] candidates for the first variable, the candidates are split
+   over [domains] domains, each with its own accumulator: a view needs no lock to be read. *)
+let parallel_min = ref 20_000
+let domains = ref (max 1 (min 8 (Domain.recommended_domain_count ())))
+
+(* the sorted candidates a pattern offers for x when its other side is bound *)
+let sorted_candidates (v : Store.view) get x pt =
+  let buf = ref [] in
+  (if has x pt.pe then
+     match get pt.pv with Some w -> Store.iter_things v pt.pp w (fun e -> buf := e :: !buf) | None -> ()
+   else match get pt.pe with Some e -> Store.iter_values v e pt.pp (fun w -> buf := w :: !buf) | None -> ());
+  let a = Array.of_list !buf in
+  Array.sort compare a;
+  a
+
+let fold (v : Store.view) q ~init ~step ~merge =
   match compile v q with
-  | exception No_answer -> ()
+  | exception No_answer -> init ()
   | _ty, pats, ranges ->
-    let env = Array.make q.vars 0 and bound = Array.make q.vars false in
-    let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
-    (* patterns without variables: checked once *)
-    let ground, pats = List.partition (fun pt -> (match pt.pe with W _ -> true | _ -> false) && match pt.pv with W _ -> true | _ -> false) pats in
-    let ok_ground = List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground in
-    if ok_ground then begin
-      let ord = order v q.vars pats in
-      let by_var = Array.init q.vars (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
-      let rng = Array.make q.vars [] in
+    let ground, pats =
+      List.partition (fun pt -> (match pt.pe with W _ -> true | _ -> false) && match pt.pv with W _ -> true | _ -> false) pats
+    in
+    if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then init ()
+    else begin
+      let n = q.vars in
+      let ord = order v n pats in
+      let pos = Array.make n 0 in
+      Array.iteri (fun i x -> pos.(x) <- i) ord;
+      let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
+      (* at level i: the patterns whose other side is bound already (a constant or an earlier variable) *)
+      let other_bound i x pt =
+        let side = if has x pt.pe then pt.pv else pt.pe in
+        (not (has x pt.pe && has x pt.pv)) && match side with W _ -> true | V y -> pos.(y) < i
+      in
+      let bound_at = Array.init n (fun i -> List.filter (other_bound i ord.(i)) by_var.(ord.(i))) in
+      let rng = Array.make n [] in
       List.iter (fun (x, lo, hi) -> rng.(x) <- (lo, hi) :: rng.(x)) ranges;
-      (* does pattern pt accept x = c, given the bindings so far? *)
-      let accepts x c pt =
-        if has x pt.pe && has x pt.pv then Store.mem v c pt.pp c
-        else if has x pt.pe then
-          match get pt.pv with Some w -> Store.mem v c pt.pp w | None -> Store.has_value v c pt.pp
-        else
-          match get pt.pe with Some e -> Store.mem v e pt.pp c | None -> exists_thing v pt.pp c
-      in
-      (* the candidates pt offers for x: a count and an iterator *)
-      let source x pt =
-        if has x pt.pe && has x pt.pv then
-          Store.count_prop v pt.pp, fun f -> Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
-        else if has x pt.pe then
-          match get pt.pv with
-          | Some w -> Store.count_things v pt.pp w, fun f -> Store.iter_things v pt.pp w f
-          | None ->
-            ( Store.count_prop v pt.pp,
-              fun f ->
-                if pt.many then begin
-                  let seen = Hashtbl.create 256 in
-                  Store.iter_prop v pt.pp (fun e _ -> if not (Hashtbl.mem seen e) then (Hashtbl.replace seen e (); f e))
-                end
-                else Store.iter_prop v pt.pp (fun e _ -> f e) )
-        else
-          match get pt.pe with
-          | Some e -> Store.count_values v e pt.pp, fun f -> Store.iter_values v e pt.pp f
-          | None ->
-            ( Store.count_prop v pt.pp,
-              fun f ->
-                let seen = Hashtbl.create 256 in
-                Store.iter_prop v pt.pp (fun _ w -> if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); f w)) )
-      in
       let in_ranges x c = List.for_all (fun (lo, hi) -> c >= lo && c <= hi) rng.(x) in
-      let rec level i =
-        if i = q.vars then k env
-        else begin
-          let x = ord.(i) in
-          let ps = by_var.(x) in
-          let best = ref None in
-          List.iter
-            (fun pt ->
-              let c, it = source x pt in
-              match !best with Some (c', _, _) when c' <= c -> () | _ -> best := Some (c, it, pt))
-            ps;
-          match !best with
-          | None -> ()
-          | Some (_, it, src) ->
-            let others = List.filter (fun pt -> pt != src) ps in
+      (* one runner per domain: its own bindings *)
+      let runner () =
+        let env = Array.make n 0 and bound = Array.make n false in
+        let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
+        let accepts x c pt =
+          if has x pt.pe && has x pt.pv then Store.mem v c pt.pp c
+          else if has x pt.pe then
+            match get pt.pv with Some w -> Store.mem v c pt.pp w | None -> Store.has_value v c pt.pp
+          else match get pt.pe with Some e -> Store.mem v e pt.pp c | None -> exists_thing v pt.pp c
+        in
+        let source x pt =
+          if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp, fun f -> Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
+          else if has x pt.pe then
+            match get pt.pv with
+            | Some w -> Store.count_things v pt.pp w, fun f -> Store.iter_things v pt.pp w f
+            | None ->
+              ( Store.count_prop v pt.pp,
+                fun f ->
+                  if pt.many then begin
+                    let seen = Hashtbl.create 256 in
+                    Store.iter_prop v pt.pp (fun e _ -> if not (Hashtbl.mem seen e) then (Hashtbl.replace seen e (); f e))
+                  end
+                  else Store.iter_prop v pt.pp (fun e _ -> f e) )
+          else
+            match get pt.pe with
+            | Some e -> Store.count_values v e pt.pp, fun f -> Store.iter_values v e pt.pp f
+            | None ->
+              ( Store.count_prop v pt.pp,
+                fun f ->
+                  let seen = Hashtbl.create 256 in
+                  Store.iter_prop v pt.pp (fun _ w -> if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); f w)) )
+        in
+        (* the candidates of level i, each checked against every pattern on its variable *)
+        let candidates i (f : int -> unit) =
+          let x = ord.(i) and ps = by_var.(ord.(i)) in
+          match bound_at.(i) with
+          | _ :: _ :: _ as bp ->
+            (* two or more sorted lists: intersect them (the Leapfrog idea), then check the rest *)
+            let rest = List.filter (fun pt -> not (List.memq pt bp)) ps in
+            let arrs = Array.of_list (List.map (sorted_candidates v get x) bp) in
+            Array.sort (fun a b -> compare (Array.length a) (Array.length b)) arrs;
+            let k = Array.length arrs in
+            let idx = Array.make k 0 in
+            Array.iter
+              (fun c ->
+                let ok = ref true and j = ref 1 in
+                while !ok && !j < k do
+                  let a = arrs.(!j) in
+                  while idx.(!j) < Array.length a && a.(idx.(!j)) < c do idx.(!j) <- idx.(!j) + 1 done;
+                  if idx.(!j) >= Array.length a || a.(idx.(!j)) <> c then ok := false;
+                  incr j
+                done;
+                if !ok && in_ranges x c && List.for_all (accepts x c) rest then f c)
+              arrs.(0)
+          | _ -> (
+            let best = ref None in
+            List.iter (fun pt -> let c, it = source x pt in match !best with Some (c', _, _) when c' <= c -> () | _ -> best := Some (c, it, pt)) ps;
+            match !best with
+            | None -> ()
+            | Some (_, it, src) ->
+              let others = List.filter (fun pt -> pt != src) ps in
+              it (fun c -> if in_ranges x c && List.for_all (accepts x c) others then f c))
+        in
+        let rec level i acc =
+          if i = n then acc := step !acc env
+          else begin
+            let x = ord.(i) in
             bound.(x) <- true;
-            it (fun c ->
-                if in_ranges x c && List.for_all (accepts x c) others then begin
-                  env.(x) <- c;
-                  level (i + 1)
-                end);
+            candidates i (fun c -> env.(x) <- c; level (i + 1) acc);
             bound.(x) <- false
-        end
+          end
+        in
+        env, bound, candidates, level
       in
-      level 0
+      if n = 0 then step (init ()) [||]
+      else begin
+        let env, bound, candidates, level = runner () in
+        let first = ref [] and count = ref 0 in
+        candidates 0 (fun c -> first := c :: !first; incr count);
+        let firsts = Array.of_list (List.rev !first) in
+        let x0 = ord.(0) in
+        let run_slice (env, bound, level) lo hi =
+          let acc = ref (init ()) in
+          bound.(x0) <- true;
+          for k = lo to hi - 1 do
+            env.(x0) <- firsts.(k);
+            level 1 acc
+          done;
+          !acc
+        in
+        let d = if !count >= !parallel_min then !domains else 1 in
+        if d <= 1 then run_slice (env, bound, level) 0 !count
+        else begin
+          let chunk = (!count + d - 1) / d in
+          let others =
+            List.init (d - 1) (fun k ->
+                let lo = (k + 1) * chunk and hi = min !count ((k + 2) * chunk) in
+                Domain.spawn (fun () -> let e, b, _, l = runner () in run_slice (e, b, l) lo (max lo hi)))
+          in
+          let mine = run_slice (env, bound, level) 0 (min chunk !count) in
+          List.fold_left (fun acc dm -> merge acc (Domain.join dm)) mine others
+        end
+      end
     end
 
 let rows (v : Store.view) q =
   match compile v q with
   | exception No_answer -> []
   | ty, _, _ ->
-    let out = ref [] in
-    run v q (fun env -> out := Array.mapi (fun i w -> Store.value v ty.(i) w) env :: !out);
-    List.rev !out
+    let rows =
+      fold v q ~init:(fun () -> []) ~merge:(fun a b -> b @ a)
+        ~step:(fun acc env -> Array.mapi (fun i w -> Store.value v ty.(i) w) env :: acc)
+    in
+    List.rev rows
 
-let count (v : Store.view) q =
-  let n = ref 0 in
-  run v q (fun _ -> incr n);
-  !n
+let count (v : Store.view) q = fold v q ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )
 
 let var_types = types

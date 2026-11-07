@@ -76,6 +76,16 @@ against 22 ms; Q5 63 ms against 50 ms.
 - **Recovery** is fast because the journal after the newest snapshot is short; a snapshot at 10 M facts takes 4.7 s
   to write and 0.47 s to verify and map at open.
 
+## Milestone 2 so far
+
+- **Background merges** (theory, section 3): loading 10 M facts through the writer takes 74.3 s instead of 89.5 s
+  (134,600 facts/s). Durable writes at 256 clients, 3 rounds: 11,893, 21,786 and 17,684 groups/s (milestone 1:
+  best 16,277; PostgreSQL best 21,348); the round at 17,684 has a p99 of 29.6 ms, where milestone 1 had 300 to 600 ms
+  pauses. Other rounds still show p99 of 170 to 460 ms: not yet explained (disk noise or GC), to measure with a
+  breakdown of the time in fsync.
+- **Parallel questions and sorted intersection**: built and checked against the naive evaluator (half of the 300
+  random databases run split over 3 domains); the 10 M measurement is not done yet.
+
 ## Not measured yet
 
 Data larger than memory (both sides under a small cap), several databases writing at once, a server-class disk,

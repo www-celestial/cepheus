@@ -180,8 +180,10 @@ let random_query r (v : view) =
   | exception Query.Bad _ -> None
 
 let () =
-  section "questions against the naive evaluator";
+  section "questions against the naive evaluator (half of them split over 3 domains)";
+  Query.domains := 3;
   for seed = 1 to 300 do
+    Query.parallel_min := (if seed mod 2 = 0 then 1 else 20_000);
     let r = Rng.make (5000 + seed) in
     let f = fresh () in
     for _ = 1 to 30 do ignore (write f (random_ops r (view f) ())) done;

@@ -114,6 +114,8 @@ let rss () =
   !r
 
 let read dir facts =
+  (match Sys.getenv_opt "CEPHEUS_DOMAINS" with Some d -> Query.domains := int_of_string d | None -> ());
+  Printf.printf "questions on up to %d domains\n" !Query.domains;
   let nclients = facts / facts_per_client in
   let t0 = now () in
   let db = ok (open_ dir) in
@@ -134,30 +136,32 @@ let read dir facts =
   in
   let n3 = List.length (ok (find v (q3 "city-7"))) in
   measure (Printf.sprintf "Q3 unpaid of a city (%d rows)" n3) 200 (fun i ->
-      ignore (iter v (q3 (Printf.sprintf "city-%d" (i mod 100))) (fun _ -> ())));
+      ignore (fold v (q3 (Printf.sprintf "city-%d" (i mod 100))) ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )));
   let q4 =
     { vars = 4; ranges = [];
       where = [ { e = Var 0; p = s.status; v = Val (Text "unpaid") }; { e = Var 0; p = s.client; v = Var 1 };
                 { e = Var 1; p = s.cty; v = Var 2 }; { e = Var 0; p = s.total; v = Var 3 } ] }
   in
-  let sums = Hashtbl.create 128 in
+  (* per domain: a table city -> (sum, count); merged at the end *)
   let q4run () =
-    Hashtbl.reset sums;
-    ok (iter v q4 (fun env ->
-        let c = env.(2) in
-        let a, n = Option.value (Hashtbl.find_opt sums c) ~default:(0, 0) in
-        Hashtbl.replace sums c (a + env.(3), n + 1)))
+    ok (fold v q4 ~init:(fun () -> Hashtbl.create 128)
+          ~step:(fun t env ->
+              let a, n = Option.value (Hashtbl.find_opt t env.(2)) ~default:(0, 0) in
+              Hashtbl.replace t env.(2) (a + env.(3), n + 1);
+              t)
+          ~merge:(fun a b ->
+              Hashtbl.iter (fun c (x, k) -> let y, m = Option.value (Hashtbl.find_opt a c) ~default:(0, 0) in Hashtbl.replace a c (x + y, k + m)) b;
+              a))
   in
-  q4run ();
+  let sums = q4run () in
   let total = Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0 and cnt = Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0 in
   measure (Printf.sprintf "Q4 unpaid sum by city (%d inv, %d)" cnt total) 5 (fun _ -> q4run ());
   let q5 =
     { vars = 3; ranges = [];
       where = [ { e = Var 0; p = s.follows; v = Var 1 }; { e = Var 1; p = s.follows; v = Var 2 }; { e = Var 2; p = s.follows; v = Var 0 } ] }
   in
-  let tri = ref 0 in
-  ignore (iter v q5 (fun _ -> incr tri));
-  measure (Printf.sprintf "Q5 triangles (%d rotations)" !tri) 3 (fun _ -> ignore (iter v q5 (fun _ -> ())));
+  let tri = ok (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )) in
+  measure (Printf.sprintf "Q5 triangles (%d rotations)" tri) 3 (fun _ -> ignore (fold v q5 ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )));
   close db
 
 (* ---- durable writes ---- *)

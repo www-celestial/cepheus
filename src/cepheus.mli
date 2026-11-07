@@ -117,9 +117,12 @@ type query = Query.t = { vars : int; where : pattern list; ranges : (int * value
 val find : view -> query -> (value array list, error) result
 (** Every binding of the variables that makes all patterns facts of the view, each once (G11). *)
 
-val iter : view -> query -> (int array -> unit) -> (unit, error) result
-(** The same, without building values: the callback gets index words (thing ids for links), in a buffer it may
-    not keep. *)
+val fold :
+  view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
+(** The bindings folded into an accumulator, without building values: [step] gets index words (thing ids for links,
+    the value for ints, dates, money, 0/1 for booleans, dictionary numbers for texts and floats) in a buffer it may not
+    keep. A large question runs on several domains, each with its own accumulator from [init ()], joined by [merge];
+    [step] must therefore only touch its accumulator. *)
 
 (** {1 Operations} *)
 
