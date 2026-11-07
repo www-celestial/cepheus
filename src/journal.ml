@@ -70,7 +70,8 @@ let written_after b p size =
   let found = ref false and q = ref (p + 1) in
   while (not !found) && !q + 4 <= size do
     let w = u32 b !q in
-    if w = frame_magic && frame_ok b !q size then found := true
+    (* a frame header that checks, after p: that frame was written after the one at p was forced *)
+    if w = frame_magic && !q + fh <= size && u32 b (!q + 24) = Crc32c.bytes b !q 24 then found := true
     else if w = tail_magic then begin
       (* a trailer whose length and body checksum match the bytes between p and it: the frame was written whole and
          only its header changed; a torn write cannot do that unless it lost the header's sector alone *)

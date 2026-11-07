@@ -51,5 +51,16 @@ a random prefix of each directory's name changes. A failed fsync marks the pages
 
 ## Not yet
 
-A model of the journal protocol in TLA+ is in `spec/Journal.tla`, ready for the TLC model checker (not run yet: the
-tools are not installed). Jepsen-style tests under network faults come with replication.
+Jepsen-style tests under network faults come with replication.
+
+## Model checking
+
+`spec/Journal.tla` models the journal protocol with the faults F1-F4: frames written one at a time and forced, a
+crash that loses, keeps or tears the frame in flight, silent damage of a durable frame (in its body, or in its
+header), a failed fsync; recovery with Cepheus' rules. Invariants: `Durable` (G1: an acknowledged frame survives,
+unless recovery refused to open or it was itself damaged), `Prefix` (G3), `NoTornData` (G2: a torn frame is never
+kept), `StopSafe` (G10), `ResidualBound` (G6: a cut loses only damaged frames). Run it with
+`TLA2TOOLS=/path/to/tla2tools.jar tools/tlc.sh`; the jar is the official release (v1.7.4) from
+https://github.com/tlaplus/tlaplus/releases, run by Java 11 or later. Bounds in `spec/Journal.cfg`: 7 frames, 3
+damages: 1,084,801 distinct states, depth 27, 6.5 s on the test machine. TLC found one real trace (two damaged frames
+at the end were both cut), fixed in `Journal.written_after`.

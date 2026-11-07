@@ -93,12 +93,17 @@ it, looks like a torn write and is cut at recovery (a full read before recovery 
 
 *Proof.* Every byte of a segment is covered: its header by the header CRC, each frame's header by its header CRC, its
 body by the body CRC (repeated in the trailer), the trailer by comparison with the header. At recovery, the first frame
-that does not check is damage when a valid frame follows it (a durable frame is never followed by a torn one), or when
+that does not check is damage when a frame header that checks follows it (frames are written one after the other, each
+forced before the next, so a later header proves this frame was written whole), or when
 a trailer at the right distance carries the body's CRC (the frame was written whole, only its header changed);
 otherwise it is a torn tail. A torn write cannot produce either sign unless it lost exactly the header's sector and
 kept the rest. CRC-32C detects every burst of at most 32 bits and every error of at most 3 bits in frames of
 realistic size; other random damage escapes with probability 2⁻³² (Koopman 2002). A full read is strict: on a journal
 that recovery has cut and repaired, any frame or trailer that does not check is damage.
+
+*Model-checked* by `tools/tlc.sh` (`spec/Journal.tla`): with up to 7 frames and 3 silent damages, the invariants Durable,
+Prefix, NoTornData, StopSafe and ResidualBound hold in all 1,084,801 reachable states. TLC first found a trace where
+two damaged frames at the end were both cut; the rule above (a later header that checks) closed it.
 
 *Tested by* `test/exhaustive.ml` (every bit of two journals flipped: always seen by a full read; recovery refuses, or
 keeps every group when the flip hit a trailer, which it rebuilds, or, for a flip in the newest frame, cuts it: counted

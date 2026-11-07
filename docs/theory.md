@@ -22,7 +22,8 @@ past D's confirmed frames, and everything after it is cut; frames are in group o
 
 **Damage versus tearing.** At the first bad frame at offset p, recovery must decide whether bytes were torn (never
 confirmed: cut) or durable bytes were damaged (F3: refuse). Two signs prove that the frame was written whole and so
-was once durable-shaped: a valid frame after p (I1: a frame after p was written after the one at p was forced), or a
+was once durable-shaped: a frame header that checks after p (I1: a frame after p was written after the one at p was
+forced), or a
 trailer at offset t whose length field equals t − p − 28 and whose body CRC matches the bytes between. A torn write
 leaves neither, except if it lost exactly the sector of the header and kept every later sector of the frame (possible
 only on a device that reorders sector writes); then recovery refuses to open: a false alarm, never a loss. The
