@@ -68,10 +68,19 @@ let compile (v : Store.view) q =
 
 let has x = function V y -> x = y | W _ -> false
 
+(* The interval of each variable: its ranges together, or None. *)
+let intervals nvars ranges =
+  let r = Array.make nvars None in
+  List.iter
+    (fun (x, lo, hi) -> r.(x) <- Some (match r.(x) with None -> lo, hi | Some (a, b) -> max a lo, min b hi))
+    ranges;
+  r
+
 (* The order of the variables. [est x bound]: the candidates per binding that the best pattern offers x given the
    variables already bound. The cost of an order is the sum of the estimated partial bindings after each step (each
    step multiplies by its candidates); every order is tried for up to 7 variables (with pruning), greedily beyond. *)
-let order (v : Store.view) nvars pats =
+let order (v : Store.view) nvars pats ranges =
+  let iv = intervals nvars ranges in
   let est x bound =
     let known = function W _ -> true | V y -> bound land (1 lsl y) <> 0 in
     List.fold_left
@@ -85,7 +94,12 @@ let order (v : Store.view) nvars pats =
             | V _ -> Store.count_prop v pt.pp
           else if has x pt.pv then
             if known pt.pe then (match pt.pe with W e -> Store.count_values v e pt.pp | V _ -> if pt.many then 4 else 1)
-            else Store.distinct v pt.pp
+            else
+              match iv.(x) with
+              | None -> Store.distinct v pt.pp
+              | Some (lo, hi) ->
+                let all = max 1 (Store.count_prop v pt.pp) in
+                max 1 (Store.count_range v pt.pp lo hi * Store.distinct v pt.pp / all)
           else max_int
         in
         min best c)
@@ -125,152 +139,124 @@ let order (v : Store.view) nvars pats =
   end;
   !best
 
-let exists_thing (v : Store.view) p w =
-  let r = ref false in
-  (try Store.iter_things v p w (fun _ -> r := true; raise Exit) with Exit -> ());
-  !r
-
 (* Questions run as a fold: [init ()] makes an accumulator, [step acc env] adds a binding (the buffer [env] is reused),
    [merge] joins two accumulators. Above [parallel_min] candidates for the first variable, the candidates are split
    over [domains] domains, each with its own accumulator: a view needs no lock to be read. *)
 let parallel_min = ref 20_000
 let domains = ref (max 1 (min 8 (Domain.recommended_domain_count ())))
 
-(* the sorted candidates a pattern offers for x when its other side is bound *)
-let sorted_candidates (v : Store.view) get x pt =
-  let buf = ref [] in
-  (if has x pt.pe then
-     match get pt.pv with Some w -> Store.iter_things v pt.pp w (fun e -> buf := e :: !buf) | None -> ()
-   else match get pt.pe with Some e -> Store.iter_values v e pt.pp (fun w -> buf := w :: !buf) | None -> ());
-  let a = Array.of_list !buf in
-  Array.sort compare a;
-  a
+(* the candidates enumerated by every question so far (each runner adds its count when it ends): for the tests,
+   which hold the work of a question to the Generic Join bound, and for the benchmarks *)
+let work = Atomic.make 0
 
-let fold (v : Store.view) q ~init ~step ~merge =
+(* What a question will do: its patterns with a variable, its ranges, and the order of its variables; None when it
+   has no answer (a constant the view has never seen, or a pattern without variables that is not a fact). *)
+type plan = { pats : pat list; limits : (int * int * int) list; ord : int array }
+
+let plan (v : Store.view) q =
   match compile v q with
-  | exception No_answer -> init ()
-  | _ty, pats, ranges ->
+  | exception No_answer -> None
+  | _ty, pats, limits ->
     let ground, pats =
       List.partition (fun pt -> (match pt.pe with W _ -> true | _ -> false) && match pt.pv with W _ -> true | _ -> false) pats
     in
-    if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then init ()
-    else begin
-      let n = q.vars in
-      let ord = order v n pats in
-      let pos = Array.make n 0 in
-      Array.iteri (fun i x -> pos.(x) <- i) ord;
-      let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
-      (* at level i: the patterns whose other side is bound already (a constant or an earlier variable) *)
-      let other_bound i x pt =
-        let side = if has x pt.pe then pt.pv else pt.pe in
-        (not (has x pt.pe && has x pt.pv)) && match side with W _ -> true | V y -> pos.(y) < i
+    if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then None
+    else Some { pats; limits; ord = order v q.vars pats limits }
+
+(* Generic Join: at each level, the pattern with the fewest candidates (exact counts) gives them, and every other
+   pattern on the variable keeps or drops each one with a lookup; nothing is enumerated beyond the smallest set. *)
+let fold (v : Store.view) q ~init ~step ~merge =
+  match plan v q with
+  | None -> init ()
+  | Some { pats; limits; ord } ->
+    let n = q.vars in
+    let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
+    let iv = intervals n limits in
+    let in_range x c = match iv.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi in
+    (* one runner per domain: its own bindings and its own count of candidates *)
+    let runner () =
+      let env = Array.make n 0 and bound = Array.make n false and w = ref 0 in
+      let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
+      let accepts x c pt =
+        if has x pt.pe && has x pt.pv then Store.mem v c pt.pp c
+        else if has x pt.pe then
+          match get pt.pv with Some w -> Store.mem v c pt.pp w | None -> Store.has_value v c pt.pp
+        else match get pt.pe with Some e -> Store.mem v e pt.pp c | None -> Store.count_things v pt.pp c > 0
       in
-      let bound_at = Array.init n (fun i -> List.filter (other_bound i ord.(i)) by_var.(ord.(i))) in
-      let rng = Array.make n [] in
-      List.iter (fun (x, lo, hi) -> rng.(x) <- (lo, hi) :: rng.(x)) ranges;
-      let in_ranges x c = List.for_all (fun (lo, hi) -> c >= lo && c <= hi) rng.(x) in
-      (* one runner per domain: its own bindings *)
-      let runner () =
-        let env = Array.make n 0 and bound = Array.make n false in
-        let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
-        let accepts x c pt =
-          if has x pt.pe && has x pt.pv then Store.mem v c pt.pp c
-          else if has x pt.pe then
-            match get pt.pv with Some w -> Store.mem v c pt.pp w | None -> Store.has_value v c pt.pp
-          else match get pt.pe with Some e -> Store.mem v e pt.pp c | None -> exists_thing v pt.pp c
-        in
-        let source x pt =
-          if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp, fun f -> Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
-          else if has x pt.pe then
-            match get pt.pv with
-            | Some w -> Store.count_things v pt.pp w, fun f -> Store.iter_things v pt.pp w f
-            | None ->
-              ( Store.count_prop v pt.pp,
-                fun f ->
-                  if pt.many then begin
-                    let seen = Hashtbl.create 256 in
-                    Store.iter_prop v pt.pp (fun e _ -> if not (Hashtbl.mem seen e) then (Hashtbl.replace seen e (); f e))
-                  end
-                  else Store.iter_prop v pt.pp (fun e _ -> f e) )
-          else
-            match get pt.pe with
-            | Some e -> Store.count_values v e pt.pp, fun f -> Store.iter_values v e pt.pp f
-            | None ->
-              ( Store.count_prop v pt.pp,
-                fun f ->
-                  let seen = Hashtbl.create 256 in
-                  Store.iter_prop v pt.pp (fun _ w -> if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); f w)) )
-        in
-        (* the candidates of level i, each checked against every pattern on its variable *)
-        let candidates i (f : int -> unit) =
-          let x = ord.(i) and ps = by_var.(ord.(i)) in
-          match bound_at.(i) with
-          | _ :: _ :: _ as bp ->
-            (* two or more sorted lists: intersect them (the Leapfrog idea), then check the rest *)
-            let rest = List.filter (fun pt -> not (List.memq pt bp)) ps in
-            let arrs = Array.of_list (List.map (sorted_candidates v get x) bp) in
-            Array.sort (fun a b -> compare (Array.length a) (Array.length b)) arrs;
-            let k = Array.length arrs in
-            let idx = Array.make k 0 in
-            Array.iter
-              (fun c ->
-                let ok = ref true and j = ref 1 in
-                while !ok && !j < k do
-                  let a = arrs.(!j) in
-                  while idx.(!j) < Array.length a && a.(idx.(!j)) < c do idx.(!j) <- idx.(!j) + 1 done;
-                  if idx.(!j) >= Array.length a || a.(idx.(!j)) <> c then ok := false;
-                  incr j
-                done;
-                if !ok && in_ranges x c && List.for_all (accepts x c) rest then f c)
-              arrs.(0)
-          | _ -> (
-            let best = ref None in
-            List.iter (fun pt -> let c, it = source x pt in match !best with Some (c', _, _) when c' <= c -> () | _ -> best := Some (c, it, pt)) ps;
-            match !best with
-            | None -> ()
-            | Some (_, it, src) ->
-              let others = List.filter (fun pt -> pt != src) ps in
-              it (fun c -> if in_ranges x c && List.for_all (accepts x c) others then f c))
-        in
-        let rec level i acc =
-          if i = n then acc := step !acc env
-          else begin
-            let x = ord.(i) in
-            bound.(x) <- true;
-            candidates i (fun c -> env.(x) <- c; level (i + 1) acc);
-            bound.(x) <- false
-          end
-        in
-        env, bound, candidates, level
+      let distinct it f =
+        let seen = Hashtbl.create 256 in
+        it (fun c -> if not (Hashtbl.mem seen c) then (Hashtbl.replace seen c (); f c))
       in
-      if n = 0 then step (init ()) [||]
-      else begin
-        let env, bound, candidates, level = runner () in
-        let first = ref [] and count = ref 0 in
-        candidates 0 (fun c -> first := c :: !first; incr count);
-        let firsts = Array.of_list (List.rev !first) in
-        let x0 = ord.(0) in
-        let run_slice (env, bound, level) lo hi =
-          let acc = ref (init ()) in
-          bound.(x0) <- true;
-          for k = lo to hi - 1 do
-            env.(x0) <- firsts.(k);
-            level 1 acc
-          done;
-          !acc
-        in
-        let d = if !count >= !parallel_min then !domains else 1 in
-        if d <= 1 then run_slice (env, bound, level) 0 !count
+      (* the candidates a pattern offers x, and how many *)
+      let source x pt =
+        if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp, fun f -> Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
+        else if has x pt.pe then
+          match get pt.pv with
+          | Some w -> Store.count_things v pt.pp w, fun f -> Store.iter_things v pt.pp w f
+          | None ->
+            ( Store.count_prop v pt.pp,
+              if pt.many then distinct (fun f -> Store.iter_prop v pt.pp (fun e _ -> f e))
+              else fun f -> Store.iter_prop v pt.pp (fun e _ -> f e) )
+        else
+          match get pt.pe, iv.(x) with
+          | Some e, _ -> Store.count_values v e pt.pp, fun f -> Store.iter_values v e pt.pp f
+          | None, Some (lo, hi) ->
+            (* a variable with a range, read off the property's index in value order: only the range *)
+            Store.count_range v pt.pp lo hi, distinct (fun f -> Store.iter_range v pt.pp lo hi (fun _ w -> f w))
+          | None, None -> Store.count_prop v pt.pp, distinct (fun f -> Store.iter_prop v pt.pp (fun _ w -> f w))
+      in
+      let candidates i (f : int -> unit) =
+        let x = ord.(i) and ps = by_var.(ord.(i)) in
+        let best = ref None in
+        List.iter
+          (fun pt -> let c, it = source x pt in match !best with Some (c', _, _) when c' <= c -> () | _ -> best := Some (c, it, pt))
+          ps;
+        match !best with
+        | None -> ()
+        | Some (_, it, src) ->
+          let others = List.filter (fun pt -> pt != src) ps in
+          it (fun c -> incr w; if in_range x c && List.for_all (accepts x c) others then f c)
+      in
+      let rec level i acc =
+        if i = n then acc := step !acc env
         else begin
-          let chunk = (!count + d - 1) / d in
-          let others =
-            List.init (d - 1) (fun k ->
-                let lo = (k + 1) * chunk and hi = min !count ((k + 2) * chunk) in
-                Domain.spawn (fun () -> let e, b, _, l = runner () in run_slice (e, b, l) lo (max lo hi)))
-          in
-          let mine = run_slice (env, bound, level) 0 (min chunk !count) in
-          List.fold_left (fun acc dm -> merge acc (Domain.join dm)) mine others
+          let x = ord.(i) in
+          bound.(x) <- true;
+          candidates i (fun c -> env.(x) <- c; level (i + 1) acc);
+          bound.(x) <- false
         end
+      in
+      env, bound, candidates, level, w
+    in
+    if n = 0 then step (init ()) [||]
+    else begin
+      let env, bound, candidates, level, w0 = runner () in
+      let first = ref [] and count = ref 0 in
+      candidates 0 (fun c -> first := c :: !first; incr count);
+      let firsts = Array.of_list (List.rev !first) in
+      let x0 = ord.(0) in
+      let run_slice (env, bound, level, w) lo hi =
+        let acc = ref (init ()) in
+        bound.(x0) <- true;
+        for k = lo to hi - 1 do
+          env.(x0) <- firsts.(k);
+          level 1 acc
+        done;
+        ignore (Atomic.fetch_and_add work !w);
+        w := 0;
+        !acc
+      in
+      let d = if !count >= !parallel_min then !domains else 1 in
+      if d <= 1 then run_slice (env, bound, level, w0) 0 !count
+      else begin
+        let chunk = (!count + d - 1) / d in
+        let others =
+          List.init (d - 1) (fun k ->
+              let lo = (k + 1) * chunk and hi = min !count ((k + 2) * chunk) in
+              Domain.spawn (fun () -> let e, b, _, l, w = runner () in run_slice (e, b, l, w) lo (max lo hi)))
+        in
+        let mine = run_slice (env, bound, level, w0) 0 (min chunk !count) in
+        List.fold_left (fun acc dm -> merge acc (Domain.join dm)) mine others
       end
     end
 

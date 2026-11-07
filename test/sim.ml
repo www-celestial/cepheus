@@ -5,7 +5,8 @@
    its seed; [sim.exe --seed N] replays it exactly.
 
    Checked: G1 durable, G2 all or nothing, G3 prefix, G5 published views are durable, G6 damage detected, G7
-   snapshots, G8 forks, G10 stop after a failed fsync. *)
+   snapshots, G8 forks, G10 stop after a failed fsync, G11 questions (their answers, and their work within the Generic
+   Join bound, on views with a delta and after recoveries). *)
 
 open Cepheus
 module C = Check
@@ -100,7 +101,20 @@ let check_published w =
   let v = Atomic.get e.published in
   if v.group < w.acked then fail w "published group %d is before the acknowledged %d" v.group w.acked;
   let got = C.facts_of_view v and want = model w v.group in
-  if not (C.F.equal got want) then fail w "published view at %d differs from the model: %s" v.group (C.show_diff got want)
+  if not (C.F.equal got want) then fail w "published view at %d differs from the model: %s" v.group (C.show_diff got want);
+  (* questions on the view: the answers of the naive evaluator on the model, within the Generic Join bound (G11) *)
+  for _ = 1 to 3 do
+    match C.random_query w.r v want (List.map (fun (d : prop) -> d.name) props) with
+    | None -> ()
+    | Some q -> (
+      count "questions";
+      match C.work_and_bound v want q (fun () -> find v q) with
+      | Ok rows, work, bound ->
+        let n = List.length rows and m = List.length (C.naive want q) in
+        if C.sorted_rows rows <> C.naive want q then fail w "a question gives %d rows, the naive evaluator %d" n m;
+        if work > bound then fail w "a question enumerated %d candidates, its Generic Join bound is %d" work bound
+      | Error e, _, _ -> fail w "a question failed: %s" (message e))
+  done
 
 let snapshot_files w = List.filter (fun f -> Filename.dirname f = sdir) (Sim_disk.files w.sim)
 

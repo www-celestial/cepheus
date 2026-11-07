@@ -53,17 +53,20 @@ A view is a base B (sorted columns) plus a delta Δ (persistent maps). With n fa
 
 | order | layout | lookup |
 |---|---|---|
-| by thing | `eoff[0..e]`, rows `(p, w)` sorted | facts of a thing: O(1) to find, O(k) to read; one property: O(k) |
-| by property | `poff[0..p]`, rows `(w, thing)` sorted | things with (p, w): O(log n_p) + O(answer) |
-| by link target | `roff[0..e]`, rows `(p, thing)` | things that link to t: O(1) + O(k) |
+| by thing | `eoff[0..e]`, rows `(p, w)` sorted | facts of a thing: O(1) to find, O(k) to read; one property or one fact: O(log k) |
+| by property | `poff[0..p]`, rows `(w, thing)` sorted | things with (p, w), or linking to w by p: O(log n_p) + O(answer); a range of values: the same |
 
-Dense thing numbers turn two orders into arrays indexed by the number (compressed sparse rows), so a thing's facts
+Dense thing numbers turn "by thing" into an array indexed by the number (compressed sparse rows), so a thing's facts
 cost two array reads to locate: 0.35 µs at 10 M facts, measured. Hexastore [11] and RDF-3X [12] keep six orders of
-the triples; Cepheus keeps three because a dense id makes "by thing" and "by target" direct, and "by property then
-value" serves "all things with this property" too. Memory: 22 bytes a fact plus 6 a link, plus the dictionary.
+the triples; Cepheus keeps two because a dense id makes "by thing" direct, and "by property then value" serves "all
+things with this property", "the things that link to t by p" (the rows of value t) and ranges of values. Memory: 22
+bytes a fact, plus the dictionary.
 
 The delta is a set of persistent maps (Driscoll et al. [30], Okasaki [31]): each change copies one path, O(log d), and
-an old version stays valid for free. That is what makes views and forks free. It costs about 170 bytes a change, so
+an old version stays valid for free. That is what makes views and forks free. It is keyed like the base (by thing
+then (property, value); by property then value then thing), so every lookup is a binary search in the base plus a
+search in a map, never a walk of a list, and it keeps the net count of facts beside each map, so that every count the
+planner reads is exact, base and delta together. It costs about 170 bytes a change, so
 it is bounded: when it passes max(200,000, n/16) changes, a merge starts **in another domain**: it builds a new
 base from the working view of that moment (O(n)), then replays the groups written meanwhile (the writer logs them),
 until it is fewer than 256 groups behind; the writer then waits for the syncer to be idle (at most one fsync),
@@ -85,9 +88,16 @@ intermediate rows on some instance (Ngo et al. [15]).
 **Algorithm** (Ngo, Ré, Rudra [17]; Veldhuizen [16] for the iterator form). Fix an order of the variables. To bind
 x_i given x_1..x_{i−1}: among the atoms containing x_i, take the one with the fewest candidates for x_i under the
 current bindings (exact counts read from the indexes), enumerate them, and keep a candidate c only if every other
-atom on x_i accepts it (one index lookup each). Recurse. With lookups in O(log n), the running time is
+atom on x_i accepts it (one index lookup each). Recurse. A variable with a range, on the value side of an atom whose
+thing is free, is enumerated from that property's sorted index over the range only. With lookups in O(log n), the running time is
 O(m · |atoms| · AGM(Q) · log n) (the argument of [17], theorem 4.2: the candidates at each level are bounded by the
-intersection's smallest member, and the sum over levels telescopes to the bound).
+intersection's smallest member, and the sum over levels telescopes to the bound). The bound needs two things of the
+engine: the counts must be exact (an estimate below the truth makes a large set look small) and an atom that is not
+the source must cost a lookup, not a walk of its own candidates. A version of milestone 2 broke the second: it
+materialized and sorted the candidates of every bound atom to intersect them, so at each binding it paid for the
+largest set (a status shared by 450,000 invoices, sorted once per client of a city: the 10 M benchmark never finished
+its third question). Sorted intersection (Leapfrog Triejoin [16]) keeps the bound only with iterators that seek
+inside the indexes; with a by-thing index, a membership test costs O(log k) and is the simpler way.
 
 **Correctness (G11).** *Soundness:* a full binding passed every atom at the level of its last variable, with all
 other variables of the atom bound, so every atom is a fact. *Completeness:* for an answer a, at each level a_i

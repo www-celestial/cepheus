@@ -172,5 +172,14 @@ satisfy every pattern on the variables bound so far, so every output is an answe
 candidates at each level (they satisfy the pattern used as a source and are accepted by the others), so every answer
 is output; candidates at one level are distinct, so no answer comes twice.
 
+*And its cost.* At each level, the candidates enumerated for one partial binding are the smallest set a pattern offers
+(exact counts, on the base and on the delta alike); every other pattern only looks each one up, in O(log n). The
+total is the instance bound of Generic Join (Ngo, Ré, Rudra 2013), within the AGM bound of the question.
+
+*Tested by* the property tests and the simulation: every random question, on views with a delta and after recoveries,
+must give the naive evaluator's answers and enumerate at most the bound that `test/check.ml` computes from the facts
+alone (`Query.work` counts the candidates); and named cases where one list is far larger than the answer (a status
+shared by 20,000 invoices, a hot tag in the delta, a range of 10 scores among 20,000, a thing with 40,000 values).
+
 *Tested by* `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
 ranges) compared with a naive evaluator over all facts, on a base with a delta and on a compacted base.

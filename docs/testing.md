@@ -27,7 +27,9 @@ databases. Every randomized test draws from a seeded generator (`Rng`, SplitMix6
 
 1. **Unit and property tests** (`test/unit.ml`): CRC-32C against known values; codecs round trip on extreme values;
    a group cut at every byte never decodes; 300 random sequences of writes against a reference semantics written
-   independently (a set of facts); 300 random databases × 15 random questions against a naive evaluator; compaction
+   independently (a set of facts); 300 random databases × 15 random questions against a naive evaluator, each within
+   the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`); costs: questions
+   where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; compaction
    keeps every fact and every answer; snapshots round trip, refuse another database's, set aside a damaged one; forks
    change nothing (files compared byte for byte) and accept what the database accepts; a second open is `Busy`; named
    cases (write skew refused, unique, one value, triangles).
@@ -38,7 +40,8 @@ databases. Every randomized test draws from a seeded generator (`Rng`, SplitMix6
 3. **Deterministic simulation** (`test/sim.ml --seeds N`): the engine runs on `Sim_disk`; the seed decides the writes,
    the interleaving of prepare and commit, snapshots, compactions, forks, power losses, crashes inside any disk call
    (`Sim_disk.crash_after`), failed fsyncs, and bit flips in durable files. After every recovery the state is compared
-   with the reference model, and the journal's groups with the written ones. `sim.exe --seed S` replays one seed.
+   with the reference model, and the journal's groups with the written ones; random questions on the published views
+   must give the naive evaluator's answers within the Generic Join bound. `sim.exe --seed S` replays one seed.
 4. **Real crashes** (`test/crash.exe DIR ROUNDS`): a child process writes with 8 threads and prints each confirmation;
    the parent kills it with SIGKILL at a random moment, reopens, and checks every confirmed group's content.
 5. **Concurrency** (`test/bank.exe DIR SECONDS`): transfers with `Expect` from 16 threads, two reader domains checking

@@ -38,20 +38,22 @@ string = length varint | bytes (UTF-8 by convention; Cepheus does not look insid
 ## Snapshot `DIR/snapshots/<last group, 20 digits>.snap`
 
 ```
-header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (1) | 8 database id, 16 bytes
+header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (2) | 8 database id, 16 bytes
   | 24 last group | 32 next thing | 40 journal segment | 48 journal offset | 56 facts n | 64 things ne | 72 properties np
-  | 80 links nr | 88 texts ns | 96 text bytes | 104 body length (all u64)
-  | 112 CRC of the checksum table u32 | 116 CRC of bytes 0..116 u32 | zeros to 4096
+  | 80 texts ns | 88 text bytes | 96 body length (all u64)
+  | 104 CRC of the checksum table u32 | 108 CRC of bytes 0..108 u32 | zeros to 4096
 body (body length bytes): the base, sections aligned to 8 bytes, in this order:
   eoff (ne+1) u64 | eap n u16 | eav n i64 | poff (np+1) u64 | avv n i64 | ave n u32 | pdist np u64
-  | roff (ne+1) u64 | rp nr u16 | re nr u32 | soff (ns+1) u64 | sblob text bytes | ssort ns u32
+  | soff (ns+1) u64 | sblob text bytes | ssort ns u32
 checksum table, at 4096 + body length rounded up to 8: one CRC u32 for each MiB of the body
 ```
 
 `eoff[e]..eoff[e+1]` are the rows of thing e in `eap`/`eav` (property, value word), sorted. `poff[p]..poff[p+1]` are
 the rows of property p in `avv`/`ave` (value word, thing), sorted by value then thing; `pdist[p]` counts its distinct
-values. `roff[t]..roff[t+1]` are the link facts pointing at t, in `rp`/`re` (property, thing). `soff[i]..soff[i+1]` are
+values (the things that link to t by p are the rows of value t). `soff[i]..soff[i+1]` are
 the bytes of text i in `sblob`; `ssort` lists the text ids in byte order. A value word is the value itself for int,
 date, money, link and bool (0/1), a text id for text, and the text id of its 8 IEEE bytes for a float.
 
-The snapshot is the in-memory format: 64-bit little-endian machines only. The journal is the portable format.
+The snapshot is the in-memory format: 64-bit little-endian machines only. The journal is the portable format. Format
+1 also kept the link facts by target (`roff`, `rp`, `re`); a format 1 snapshot is set aside at open (it is a cache)
+and the journal is replayed.

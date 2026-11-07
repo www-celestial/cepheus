@@ -148,36 +148,7 @@ let () =
 
 (* ---- questions against the naive evaluator ---- *)
 
-let random_query r (v : view) =
-  let ps = [| "name"; "tag"; "score"; "friend"; "boss"; "mail" |] in
-  let p n = Option.get (property v n) in
-  let nv = 1 + Rng.int r 3 in
-  let things = v.next_e - Schema.first_thing in
-  let pat () =
-    let name = Rng.pick r ps in
-    let d = Option.get (describe v (p name)) in
-    let e = if Rng.int r 5 = 0 && things > 0 then Thing (Schema.first_thing + Rng.int r things) else Var (Rng.int r nv) in
-    let value () =
-      match d.typ with
-      | Ttext -> Text (Rng.pick r [| "a"; "b"; "c" |])
-      | Tint -> Int (Rng.int r 3)
-      | _ -> Link (Schema.first_thing + Rng.int r (max 1 things))
-    in
-    let vt =
-      if d.typ = Tlink then (if Rng.int r 4 = 0 then Val (value ()) else Var (Rng.int r nv))
-      else if Rng.int r 2 = 0 then Val (value ()) else Var (Rng.int r nv)
-    in
-    { e; p = p name; v = vt }
-  in
-  let where = List.init (1 + Rng.int r 3) (fun _ -> pat ()) in
-  (* every variable must appear, with one type *)
-  let q = { vars = nv; where; ranges = [] } in
-  match Query.var_types v q with
-  | ty -> (
-    let ranges = ref [] in
-    Array.iteri (fun i t -> if t = Tint && Rng.int r 2 = 0 then ranges := (i, Int (Rng.int r 2), Int (1 + Rng.int r 2)) :: !ranges) ty;
-    Some { q with ranges = !ranges })
-  | exception Query.Bad _ -> None
+let qnames = [ "name"; "tag"; "score"; "friend"; "boss"; "mail" ]
 
 let () =
   section "questions against the naive evaluator (half of them split over 3 domains)";
@@ -195,16 +166,17 @@ let () =
     let v = view f in
     let facts = C.facts_of_view v in
     for _ = 1 to 15 do
-      match random_query r v with
+      match C.random_query r v facts qnames with
       | None -> ()
       | Some q -> (
-        match find v q with
-        | Error e -> C.fail "seed %d: %s" seed (message e)
-        | Ok rows ->
+        match C.work_and_bound v facts q (fun () -> find v q) with
+        | Error e, _, _ -> C.fail "seed %d: %s" seed (message e)
+        | Ok rows, work, bound ->
           let want = C.naive facts q in
           let got = C.sorted_rows rows in
           C.check (List.length got = List.length (List.sort_uniq compare got)) "seed %d: a binding came twice" seed;
-          C.check (got = want) "seed %d: %d rows, the naive evaluator gives %d" seed (List.length got) (List.length want))
+          C.check (got = want) "seed %d: %d rows, the naive evaluator gives %d" seed (List.length got) (List.length want);
+          C.check (work <= bound) "seed %d: Generic Join enumerated %d candidates, its bound is %d" seed work bound)
     done
   done
 
@@ -220,8 +192,11 @@ let () =
     (* and the compacted base answers the same questions *)
     let facts = C.facts_of_view c in
     for _ = 1 to 5 do
-      match random_query r c with
-      | Some q -> C.check (C.sorted_rows (Result.get_ok (find c q)) = C.naive facts q) "seed %d: compacted questions" seed
+      match C.random_query r c facts qnames with
+      | Some q ->
+        let rows, work, bound = C.work_and_bound c facts q (fun () -> Result.get_ok (find c q)) in
+        C.check (C.sorted_rows rows = C.naive facts q) "seed %d: compacted questions" seed;
+        C.check (work <= bound) "seed %d: compacted: %d candidates, bound %d" seed work bound
       | None -> ()
     done
   done
@@ -329,5 +304,122 @@ let () =
   let q = { vars = 3; where = [ { e = Var 0; p = follows; v = Var 1 }; { e = Var 1; p = follows; v = Var 2 }; { e = Var 2; p = follows; v = Var 0 } ]; ranges = [] } in
   C.check (List.length (Result.get_ok (find (view f) q)) = 3) "one triangle, three rotations";
   C.check (match find (view f) { q with vars = 4 } with Error (Invalid _) -> true | _ -> false) "an unused variable is invalid"
+
+(* ---- costs: the work of a question and of an index lookup stays within its bound ----
+   Each case is built so that one list is far larger than the answer: an engine that walks it where a lookup or a
+   smaller list would do fails the bound (counted candidates for questions; time, with a margin of 20 or more, for the
+   index lookups, which have no counter in their inner loops). *)
+
+let within secs what f =
+  let best = ref infinity and tries = ref 0 in
+  while !best >= secs && !tries < 3 do
+    let t = Unix.gettimeofday () in
+    f ();
+    best := min !best (Unix.gettimeofday () -. t);
+    incr tries
+  done;
+  C.check (!best < secs) "%s: %.3f s, the bound is %.2f s" what !best secs
+
+let compacted f = fork (Store.compact { (view f) with writer = true })
+
+let () =
+  section "costs: questions stay within the Generic Join bound, lookups within O(log n)";
+  let f = fork empty in
+  let[@warning "-8"] (Ok [ city; client; status; total; _tag; member; score ]) =
+    declare f [ prop "city" Ttext; prop "client" Tlink; prop "status" Ttext; prop "total" Tint; prop ~many:true "tag" Ttext;
+                prop ~many:true "member" Tint; prop "score" Tint ]
+  in
+  (* 40 clients in c1 with 2 unpaid invoices each; one client in c2 with 20,000 unpaid invoices *)
+  let ops = ref [ Add (-1000, city, Text "c2") ] in
+  for k = 1 to 40 do
+    ops := Add (-k, city, Text "c1") :: !ops;
+    for j = 1 to 2 do
+      let i = -((100 * k) + j) in
+      ops := Add (i, client, Link (-k)) :: Add (i, status, Text "unpaid") :: Add (i, total, Int j) :: !ops
+    done
+  done;
+  for j = 1 to 20_000 do
+    let i = -(10_000 + j) in
+    ops := Add (i, client, Link (-1000)) :: Add (i, status, Text "unpaid") :: Add (i, total, Int j) :: !ops
+  done;
+  ignore (Result.get_ok (write f (List.rev !ops)));
+  let q3 = { vars = 3; ranges = [];
+             where = [ { e = Var 0; p = city; v = Val (Text "c1") }; { e = Var 1; p = client; v = Var 0 };
+                       { e = Var 1; p = status; v = Val (Text "unpaid") }; { e = Var 1; p = total; v = Var 2 } ] } in
+  List.iter
+    (fun (name, g) ->
+      let v = view g in
+      let facts = C.facts_of_view v in
+      let rows, work, bound = C.work_and_bound v facts q3 (fun () -> Result.get_ok (find v q3)) in
+      C.check (List.length rows = 80) "%s: the unpaid invoices of c1: %d rows" name (List.length rows);
+      C.check (work <= bound && work <= 400) "%s: unpaid of a city: %d candidates, the bound is %d" name work bound)
+    [ "base", compacted f; "delta", f ];
+  (* exact counts with a delta: 100 things tagged rare in the base, 1,000 tagged hot in the delta, 50 of them rare *)
+  let g = fork empty in
+  let[@warning "-8"] (Ok [ tag ]) = declare g [ prop ~many:true "tag" Ttext ] in
+  let r = Result.get_ok (write g (List.init 100 (fun k -> Add (-(k + 1), tag, Text "rare")))) in
+  let rare = List.map snd r.things in
+  let g = compacted g in
+  ignore (Result.get_ok (write g (List.filteri (fun i _ -> i < 50) rare |> List.map (fun e -> Add (e, tag, Text "hot")))));
+  ignore (Result.get_ok (write g (List.init 950 (fun k -> Add (-(k + 1), tag, Text "hot")))));
+  let v = view g in
+  let q = { vars = 1; ranges = []; where = [ { e = Var 0; p = tag; v = Val (Text "rare") }; { e = Var 0; p = tag; v = Val (Text "hot") } ] } in
+  let rows, work, bound = C.work_and_bound v (C.facts_of_view v) q (fun () -> Result.get_ok (find v q)) in
+  C.check (List.length rows = 50) "rare and hot: %d rows" (List.length rows);
+  C.check (work <= bound && work <= 100) "rare and hot: %d candidates, the bound is %d (counts must be exact with a delta)" work bound;
+  (* a range: 20,000 scores, the question asks for 10 of them *)
+  let h = fork empty in
+  let[@warning "-8"] (Ok [ score1 ]) = declare h [ prop "score" Tint ] in
+  ignore (Result.get_ok (write h (List.init 20_000 (fun k -> Add (-(k + 1), score1, Int k)))));
+  let qr = { vars = 2; where = [ { e = Var 0; p = score1; v = Var 1 } ]; ranges = [ 1, Int 100, Int 109 ] } in
+  List.iter
+    (fun (name, h) ->
+      let v = view h in
+      let rows, work, bound = C.work_and_bound v (C.facts_of_view v) qr (fun () -> Result.get_ok (find v qr)) in
+      C.check (List.length rows = 10) "%s: a range of 10 scores: %d rows" name (List.length rows);
+      C.check (work <= bound && work <= 40) "%s: a range of 10 scores: %d candidates, the bound is %d" name work bound)
+    [ "delta", h; "base", compacted h ];
+  (* one thing with 40,000 values, added one group at a time *)
+  let hub = thing (Result.get_ok (write f [ Add (-1, city, Text "hub") ])) (-1) in
+  let big = ref f in
+  within 1.0 "40,000 values added one group at a time to one thing" (fun () ->
+      let g = fork (view f) in
+      for k = 1 to 40_000 do ignore (Result.get_ok (write g [ Add (hub, member, Int k) ])) done;
+      big := g);
+  ignore (Result.get_ok (write !big [ Add (hub, score, Int 7) ]));
+  (* in the base: 40,000 values, then a property after them; in the delta: 500 more, 100 retracted *)
+  let b = compacted !big in
+  let vb = view b in
+  within 0.3 "20,000 lookups past 40,000 values of a thing (base)" (fun () ->
+      for k = 1 to 20_000 do if not (Store.mem vb hub score 7) || Store.mem vb hub score (k + 7) then C.fail "score lookup" done);
+  for k = 1 to 500 do ignore (Result.get_ok (write b [ Add (hub, member, Int (40_000 + k)) ])) done;
+  for k = 1 to 100 do ignore (Result.get_ok (write b [ Retract (hub, member, Int (k * 10)) ])) done;
+  let vd = view b in
+  within 0.3 "20,000 lookups on a thing with 40,000 values in the base and 600 changes in the delta" (fun () ->
+      for k = 1 to 20_000 do
+        let w = 1 + ((k * 7919) mod 41_000) in
+        let want = w <= 40_500 && not (w <= 1000 && w mod 10 = 0) in
+        if Store.mem vd hub member w <> want then C.fail "member %d: want %b" w want
+      done);
+  C.check (Store.count_values vd hub member = 40_400) "a thing's count with a delta is exact: %d" (Store.count_values vd hub member);
+  C.check (List.length (values vd hub member) = 40_400) "a thing's values with a delta";
+  (* links: 30,000 invoices point at one client by [client], one thing by [boss] *)
+  let l = fork empty in
+  let[@warning "-8"] (Ok [ client; boss ]) = declare l [ prop "client" Tlink; prop "boss" Tlink ] in
+  let r = Result.get_ok (write l [ Add (-1, boss, Link (-1)) ]) in
+  let c0 = thing r (-1) in
+  ignore (Result.get_ok (write l (Add (-30_001, boss, Link c0) :: List.init 30_000 (fun k -> Add (-(k + 1), client, Link c0)))));
+  let vl = view (compacted l) in
+  within 0.3 "20,000 lookups of the one boss link among 30,000 links to a thing" (fun () ->
+      for _ = 1 to 20_000 do if List.length (things vl boss (Link c0)) <> 2 then C.fail "boss links" done);
+  (* compaction of a thing whose 30,000 values arrived out of order *)
+  let o = fork empty in
+  let[@warning "-8"] (Ok [ member ]) = declare o [ prop ~many:true "member" Tint ] in
+  let t = thing (Result.get_ok (write o [ Add (-1, member, Int 0) ])) (-1) in
+  ignore (Result.get_ok (write o (List.init 30_000 (fun k -> Add (t, member, Int (((k + 1) * 7919) mod 30_011))))));
+  within 0.25 "compaction of a thing with 30,000 values out of order" (fun () ->
+      let c = Store.compact { (view o) with writer = true } in
+      if Store.count_values c t member <> 30_001 then C.fail "compacted count");
+  ignore (city, client, status, total, member, score)
 
 let () = C.finish "unit"

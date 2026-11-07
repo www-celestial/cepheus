@@ -1,13 +1,16 @@
 (* The facts in memory. A view is a base, sorted and columnar, in one byte array off the OCaml heap (never scanned by
    the GC, the same bytes as a snapshot's body, so a snapshot maps straight into a base), plus a delta of the recent
    changes in persistent maps, so that a view is a value: taking one is free, keeping one costs nothing, and a fork is
-   a view with its own delta. Thing ids are dense: "by thing" and "by link target" are arrays indexed by the id
-   (offsets, then rows); "by property" is one range per property, sorted by value then thing.
+   a view with its own delta. Thing ids are dense: "by thing" is an array indexed by the id (offsets, then rows);
+   "by property" is one range per property, sorted by value then thing, which also answers "the things that link to
+   t by p" (the rows of value t).
 
      by thing     eoff[e] .. eoff[e+1]   rows (eap, eav), sorted by property then value
      by property  poff[p] .. poff[p+1]   rows (avv, ave), sorted by value then thing
-     by link      roff[t] .. roff[t+1]   rows (rp, re) of the link facts that point at t, by thing
-     dictionary   soff[i] .. soff[i+1]   the bytes of text i in sblob; ssort: the ids sorted by text *)
+     dictionary   soff[i] .. soff[i+1]   the bytes of text i in sblob; ssort: the ids sorted by text
+
+   Every lookup is a binary search plus the answer, on the base and on the delta, and every count is exact: the
+   delta keeps its net counts beside its maps. *)
 
 open Bigarray
 
@@ -25,7 +28,6 @@ type base = {
   n : int;  (* facts *)
   ne : int;  (* thing ids 0 .. ne-1 *)
   np : int;  (* property ids 0 .. np-1 *)
-  nr : int;  (* link facts *)
   ns : int;  (* texts *)
   sblob : int;  (* bytes of all texts *)
   o_eoff : int;
@@ -35,9 +37,6 @@ type base = {
   o_avv : int;
   o_ave : int;
   o_pdist : int;
-  o_roff : int;
-  o_rp : int;
-  o_re : int;
   o_soff : int;
   o_sblob : int;
   o_ssort : int;
@@ -46,7 +45,7 @@ type base = {
 
 let al x = (x + 7) land lnot 7
 
-let layout ?(buf = Array1.create char c_layout 0) ~n ~ne ~np ~nr ~ns ~sblob () =
+let layout ?(buf = Array1.create char c_layout 0) ~n ~ne ~np ~ns ~sblob () =
   let off = ref 0 in
   let sec bytes = let o = !off in off := al (!off + bytes); o in
   let o_eoff = sec (8 * (ne + 1)) in
@@ -56,14 +55,11 @@ let layout ?(buf = Array1.create char c_layout 0) ~n ~ne ~np ~nr ~ns ~sblob () =
   let o_avv = sec (8 * n) in
   let o_ave = sec (4 * n) in
   let o_pdist = sec (8 * np) in
-  let o_roff = sec (8 * (ne + 1)) in
-  let o_rp = sec (2 * nr) in
-  let o_re = sec (4 * nr) in
   let o_soff = sec (8 * (ns + 1)) in
   let o_sblob = sec sblob in
   let o_ssort = sec (4 * ns) in
-  { buf; n; ne; np; nr; ns; sblob; o_eoff; o_eap; o_eav; o_poff; o_avv; o_ave; o_pdist; o_roff; o_rp; o_re; o_soff;
-    o_sblob; o_ssort; len = !off }
+  { buf; n; ne; np; ns; sblob; o_eoff; o_eap; o_eav; o_poff; o_avv; o_ave; o_pdist; o_soff; o_sblob; o_ssort;
+    len = !off }
 
 let[@inline] i64 b o = Int64.to_int (g64 b.buf o)
 let[@inline] u32 b o = Int32.to_int (g32 b.buf o) land 0xFFFFFFFF
@@ -74,27 +70,39 @@ let[@inline] poff b p = i64 b (b.o_poff + (8 * p))
 let[@inline] avv b i = i64 b (b.o_avv + (8 * i))
 let[@inline] ave b i = u32 b (b.o_ave + (4 * i))
 let[@inline] pdist b p = i64 b (b.o_pdist + (8 * p))
-let[@inline] roff b t = i64 b (b.o_roff + (8 * t))
-let[@inline] rp b i = g16 b.buf (b.o_rp + (2 * i))
-let[@inline] re b i = u32 b (b.o_re + (4 * i))
 let[@inline] soff b i = i64 b (b.o_soff + (8 * i))
 let[@inline] ssort b i = u32 b (b.o_ssort + (4 * i))
 
-let empty_base = let b = layout ~n:0 ~ne:0 ~np:0 ~nr:0 ~ns:0 ~sblob:0 () in
+let empty_base = let b = layout ~n:0 ~ne:0 ~np:0 ~ns:0 ~sblob:0 () in
   let buf = Array1.create char c_layout b.len in
   Array1.fill buf '\000';
   { b with buf }
 
 (* ---- The base alone ---- *)
 
+(* the first row of thing e at or after (p, w); e must be a thing of the base *)
+let base_lower_e b e p w =
+  let lo = ref (eoff b e) and hi = ref (eoff b (e + 1)) in
+  while !lo < !hi do
+    let mid = (!lo + !hi) lsr 1 in
+    let p' = eap b mid in
+    if p' < p || (p' = p && eav b mid < w) then lo := mid + 1 else hi := mid
+  done;
+  !lo
+
 let base_iter_ea b e p f =
   if e >= 0 && e < b.ne then begin
-    let i = ref (eoff b e) and hi = eoff b (e + 1) in
-    while !i < hi && eap b !i <= p do
-      if eap b !i = p then f (eav b !i);
+    let i = ref (base_lower_e b e p min_int) and hi = eoff b (e + 1) in
+    while !i < hi && eap b !i = p do
+      f (eav b !i);
       incr i
     done
   end
+
+let base_count_ea b e p =
+  if e < 0 || e >= b.ne then 0
+  else if p = max_int then 0
+  else base_lower_e b e (p + 1) min_int - base_lower_e b e p min_int
 
 let base_iter_e b e f =
   if e >= 0 && e < b.ne then
@@ -103,9 +111,9 @@ let base_iter_e b e f =
     done
 
 let base_mem b e p w =
-  let found = ref false in
-  base_iter_ea b e p (fun w' -> if w' = w then found := true);
-  !found
+  e >= 0 && e < b.ne
+  && let i = base_lower_e b e p w in
+     i < eoff b (e + 1) && eap b i = p && eav b i = w
 
 let base_lower b p w =
   let lo = ref (poff b p) and hi = ref (poff b (p + 1)) in
@@ -144,11 +152,9 @@ let base_iter_range b p lo hi f =
     done
   end
 
-let base_iter_ref b t p f =
-  if t >= 0 && t < b.ne then
-    for i = roff b t to roff b (t + 1) - 1 do
-      if rp b i = p then f (re b i)
-    done
+let base_count_range b p lo hi =
+  if p < 0 || p >= b.np || lo > hi then 0
+  else (if hi = max_int then poff b (p + 1) else base_lower b p (hi + 1)) - base_lower b p lo
 
 let base_count_p b p = if p >= 0 && p < b.np then poff b (p + 1) - poff b p else 0
 let base_text b i = let lo = soff b i and hi = soff b (i + 1) in
@@ -179,20 +185,32 @@ let base_find_text b s =
 module IM = Map.Make (Int)
 module SM = Map.Make (String)
 
+module PW = Map.Make (struct
+  type t = int * int
+
+  let compare ((p : int), (w : int)) (p', w') = if p <> p' then compare p p' else compare w w'
+end)
+
 type chunks = { c0 : int; mutable arr : string array array; mutable count : int }
 
 let chunk_bits = 12
 
 type dict = { chunks : chunks; dcount : int; smap : int SM.t; extra : string IM.t; dnext : int }
 
+(* A change is a difference from the base: [true], a fact the base lacks; [false], a fact of the base retracted.
+   Beside each map, its net count (facts added minus facts retracted), so that every count is exact. *)
+type tdelta = { tf : bool PW.t;  (* (property, value) -> added *) tn : int IM.t  (* property -> net count *) }
+type vdelta = { vn : int; vm : bool IM.t  (* thing -> added *) }
+type pdelta = { pn : int; pk : int  (* values in pm *); pm : vdelta IM.t  (* value -> its things *) }
+
 type delta = {
-  de : (int * int * bool) list IM.t;  (* e -> (p, w, added): a difference from the base *)
-  dav : bool IM.t IM.t IM.t;  (* p -> w -> e -> added *)
-  dr : (int * bool) list IM.t IM.t;  (* target -> e -> (p, added) *)
-  dn : int;
+  de : tdelta IM.t;  (* by thing *)
+  dav : pdelta IM.t;  (* by property, then value *)
+  dn : int;  (* changes made: what a merge folds in *)
+  dnet : int;  (* net count of facts *)
 }
 
-let empty_delta = { de = IM.empty; dav = IM.empty; dr = IM.empty; dn = 0 }
+let empty_delta = { de = IM.empty; dav = IM.empty; dn = 0; dnet = 0 }
 
 type touched = { mutable bits : Bytes.t }
 
@@ -311,149 +329,139 @@ let value v (ty : Value.typ) w : Value.t =
   | Ttext -> Text (text v w)
   | Tfloat -> Float (Int64.float_of_bits (String.get_int64_le (text v w) 0))
 
-let is_link v p = match Schema.find v.schema p with Some { typ = Tlink; _ } -> true | _ -> false
-
 (* ---- Base and delta: what a reader sees ---- *)
 
-let retracted l p w = List.exists (fun (p', w', add) -> (not add) && p' = p && w' = w) l
+let thing_delta v e = if is_touched v e then IM.find_opt e v.delta.de else None
+
+(* the delta's facts of thing e for property p, in value order *)
+let iter_delta_ep (td : tdelta) p f =
+  let rec go s = match s () with Seq.Cons (((p', w), add), s') when p' = p -> f w add; go s' | _ -> () in
+  go (PW.to_seq_from (p, min_int) td.tf)
 
 let iter_values v e p f =
-  if not (is_touched v e) then base_iter_ea v.base e p f
-  else
-    match IM.find_opt e v.delta.de with
-    | None -> base_iter_ea v.base e p f
-    | Some l ->
-      base_iter_ea v.base e p (fun w -> if not (retracted l p w) then f w);
-      List.iter (fun (p', w, add) -> if add && p' = p then f w) l
+  match thing_delta v e with
+  | None -> base_iter_ea v.base e p f
+  | Some td ->
+    base_iter_ea v.base e p (fun w -> if PW.find_opt (p, w) td.tf = None then f w);
+    iter_delta_ep td p (fun w add -> if add then f w)
 
+(* every fact of e, in (property, value) order: the base rows and the delta merged *)
 let iter_facts v e f =
-  if not (is_touched v e) then base_iter_e v.base e f
-  else
-    match IM.find_opt e v.delta.de with
-    | None -> base_iter_e v.base e f
-    | Some l ->
-      base_iter_e v.base e (fun p w -> if not (retracted l p w) then f p w);
-      List.iter (fun (p, w, add) -> if add then f p w) (List.rev l)
+  match thing_delta v e with
+  | None -> base_iter_e v.base e f
+  | Some td ->
+    let b = v.base in
+    let i = ref (if e < b.ne then eoff b e else 0) and hi = if e < b.ne then eoff b (e + 1) else 0 in
+    PW.iter
+      (fun (p, w) add ->
+        while !i < hi && (let p' = eap b !i in p' < p || (p' = p && eav b !i < w)) do
+          f (eap b !i) (eav b !i);
+          incr i
+        done;
+        (* a retraction names a row of the base, which is skipped; an addition is a fact the base lacks *)
+        if add then f p w else if !i < hi && eap b !i = p && eav b !i = w then incr i)
+      td.tf;
+    while !i < hi do
+      f (eap b !i) (eav b !i);
+      incr i
+    done
 
-let delta_av v p w = match IM.find_opt p v.delta.dav with None -> None | Some m -> IM.find_opt w m
+let delta_av v p w = match IM.find_opt p v.delta.dav with None -> None | Some pd -> IM.find_opt w pd.pm
 
 let iter_things v p w f =
-  if is_link v p then begin
-    match IM.find_opt w v.delta.dr with
-    | None -> base_iter_ref v.base w p f
-    | Some m ->
-      base_iter_ref v.base w p (fun e ->
-          match IM.find_opt e m with
-          | Some l when List.exists (fun (p', add) -> p' = p && not add) l -> ()
-          | _ -> f e);
-      IM.iter (fun e l -> List.iter (fun (p', add) -> if add && p' = p then f e) l) m
-  end
-  else
-    match delta_av v p w with
-    | None -> base_iter_av v.base p w f
-    | Some m ->
-      base_iter_av v.base p w (fun e -> match IM.find_opt e m with Some false -> () | _ -> f e);
-      IM.iter (fun e add -> if add then f e) m
+  match delta_av v p w with
+  | None -> base_iter_av v.base p w f
+  | Some vd ->
+    base_iter_av v.base p w (fun e -> if IM.find_opt e vd.vm = None then f e);
+    IM.iter (fun e add -> if add then f e) vd.vm
 
 let iter_prop v p f =
+  let b = v.base in
   match IM.find_opt p v.delta.dav with
-  | None -> if p >= 0 && p < v.base.np then for i = poff v.base p to poff v.base (p + 1) - 1 do f (ave v.base i) (avv v.base i) done
-  | Some m ->
-    if p >= 0 && p < v.base.np then
-      for i = poff v.base p to poff v.base (p + 1) - 1 do
-        let e = ave v.base i and w = avv v.base i in
-        match IM.find_opt w m with
-        | Some ev -> (match IM.find_opt e ev with Some false -> () | _ -> f e w)
-        | None -> f e w
+  | None -> if p >= 0 && p < b.np then for i = poff b p to poff b (p + 1) - 1 do f (ave b i) (avv b i) done
+  | Some pd ->
+    if p >= 0 && p < b.np then
+      for i = poff b p to poff b (p + 1) - 1 do
+        let e = ave b i and w = avv b i in
+        match IM.find_opt w pd.pm with
+        | Some vd when IM.mem e vd.vm -> ()
+        | _ -> f e w
       done;
-    IM.iter (fun w ev -> IM.iter (fun e add -> if add then f e w) ev) m
+    IM.iter (fun w vd -> IM.iter (fun e add -> if add then f e w) vd.vm) pd.pm
 
-(* the facts of p with lo <= value <= hi (by word: meaningful for inline types) *)
+(* the facts of p with lo <= value word <= hi (an order on values for the inline types) *)
 let iter_range v p lo hi f =
   match IM.find_opt p v.delta.dav with
   | None -> base_iter_range v.base p lo hi f
-  | Some m ->
+  | Some pd ->
     base_iter_range v.base p lo hi (fun e w ->
-        match IM.find_opt w m with
-        | Some ev -> (match IM.find_opt e ev with Some false -> () | _ -> f e w)
-        | None -> f e w);
-    IM.iter (fun w ev -> if w >= lo && w <= hi then IM.iter (fun e add -> if add then f e w) ev) m
+        match IM.find_opt w pd.pm with
+        | Some vd when IM.mem e vd.vm -> ()
+        | _ -> f e w);
+    let rec go s =
+      match s () with
+      | Seq.Cons ((w, vd), s') when w <= hi -> IM.iter (fun e add -> if add then f e w) vd.vm; go s'
+      | _ -> ()
+    in
+    if lo <= hi then go (IM.to_seq_from lo pd.pm)
 
 let mem v e p w =
-  let found = ref false in
-  iter_values v e p (fun w' -> if w' = w then found := true);
-  !found
+  match thing_delta v e with
+  | Some td -> (match PW.find_opt (p, w) td.tf with Some add -> add | None -> base_mem v.base e p w)
+  | None -> base_mem v.base e p w
 
-let has_value v e p =
-  let found = ref false in
-  iter_values v e p (fun _ -> found := true);
-  !found
-
-(* estimates for the planner; exact on the base *)
+(* exact counts, from the base's offsets and the delta's net counts *)
 let count_values v e p =
-  if e < 0 || e >= v.base.ne then (if is_touched v e then 1 else 0)
-  else
-    let n = ref 0 in
-    base_iter_ea v.base e p (fun _ -> incr n);
-    if is_touched v e then !n + 1 else !n
+  base_count_ea v.base e p + match thing_delta v e with Some td -> Option.value (IM.find_opt p td.tn) ~default:0 | None -> 0
 
-(* the delta's part of an estimate: its size, but never a long walk *)
-let small_card m = let n = ref 0 in (try IM.iter (fun _ _ -> incr n; if !n >= 64 then raise Exit) m with Exit -> ()); !n
+let has_value v e p = count_values v e p > 0
 
-let count_things v p w =
-  base_count_av v.base p w + match delta_av v p w with None -> 0 | Some m -> small_card m
+let count_things v p w = base_count_av v.base p w + match delta_av v p w with Some vd -> vd.vn | None -> 0
 
-let count_prop v p =
-  base_count_p v.base p + match IM.find_opt p v.delta.dav with None -> 0 | Some m -> small_card m
+let count_prop v p = base_count_p v.base p + match IM.find_opt p v.delta.dav with Some pd -> pd.pn | None -> 0
 
-let distinct v p = if p >= 0 && p < v.base.np then max 1 (pdist v.base p) else 1
+(* the facts of p in a range: exact on the base, and the delta's part walked over the range only *)
+let count_range v p lo hi =
+  let n = ref (base_count_range v.base p lo hi) in
+  (match IM.find_opt p v.delta.dav with
+   | None -> ()
+   | Some pd ->
+     let rec go s = match s () with Seq.Cons ((w, vd), s') when w <= hi -> n := !n + vd.vn; go s' | _ -> () in
+     if lo <= hi then go (IM.to_seq_from lo pd.pm));
+  !n
+
+(* an estimate for the planner: the distinct values of p, the base's and the delta's (an upper bound) *)
+let distinct v p =
+  max 1 ((if p >= 0 && p < v.base.np then pdist v.base p else 0)
+         + match IM.find_opt p v.delta.dav with Some pd -> pd.pk | None -> 0)
 
 (* ---- Changing a view ---- *)
 
+let net = function Some true -> 1 | Some false -> -1 | None -> 0
+
 (* st: Some true, (e p w) is added (not in the base); Some false, removed (in the base); None, as in the base *)
-let change v e p w st link =
+let change v e p w st =
   let d = v.delta in
-  let de =
-    IM.update e
-      (fun o ->
-        let l = List.filter (fun (p', w', _) -> not (p' = p && w' = w)) (Option.value o ~default:[]) in
-        let l = match st with None -> l | Some add -> (p, w, add) :: l in
-        if l = [] then None else Some l)
-      d.de
-  in
-  let dav =
-    IM.update p
-      (fun o ->
-        let m = Option.value o ~default:IM.empty in
-        let m =
-          IM.update w
-            (fun o2 ->
-              let ev = Option.value o2 ~default:IM.empty in
-              let ev = match st with None -> IM.remove e ev | Some add -> IM.add e add ev in
-              if IM.is_empty ev then None else Some ev)
-            m
-        in
-        if IM.is_empty m then None else Some m)
-      d.dav
-  in
-  let dr =
-    if not link then d.dr
+  let td = Option.value (IM.find_opt e d.de) ~default:{ tf = PW.empty; tn = IM.empty } in
+  let diff = net st - net (PW.find_opt (p, w) td.tf) in
+  let tf = match st with None -> PW.remove (p, w) td.tf | Some add -> PW.add (p, w) add td.tf in
+  let tn =
+    if diff = 0 then td.tn
     else
-      IM.update w
-        (fun o ->
-          let m = Option.value o ~default:IM.empty in
-          let m =
-            IM.update e
-              (fun o2 ->
-                let l = List.filter (fun (p', _) -> p' <> p) (Option.value o2 ~default:[]) in
-                let l = match st with None -> l | Some add -> (p, add) :: l in
-                if l = [] then None else Some l)
-              m
-          in
-          if IM.is_empty m then None else Some m)
-        d.dr
+      let k = Option.value (IM.find_opt p td.tn) ~default:0 + diff in
+      if k = 0 then IM.remove p td.tn else IM.add p k td.tn
   in
-  { v with delta = { de; dav; dr; dn = d.dn + 1 } }
+  let de = if PW.is_empty tf then IM.remove e d.de else IM.add e { tf; tn } d.de in
+  let pd = Option.value (IM.find_opt p d.dav) ~default:{ pn = 0; pk = 0; pm = IM.empty } in
+  let old = IM.find_opt w pd.pm in
+  let vd = Option.value old ~default:{ vn = 0; vm = IM.empty } in
+  let vm = match st with None -> IM.remove e vd.vm | Some add -> IM.add e add vd.vm in
+  let pm, pk =
+    if IM.is_empty vm then IM.remove w pd.pm, (if old = None then pd.pk else pd.pk - 1)
+    else IM.add w { vn = vd.vn + diff; vm } pd.pm, if old = None then pd.pk + 1 else pd.pk
+  in
+  let dav = if IM.is_empty pm then IM.remove p d.dav else IM.add p { pn = pd.pn + diff; pk; pm } d.dav in
+  { v with delta = { de; dav; dn = d.dn + 1; dnet = d.dnet + diff } }
 
 (* Adds or retracts (e p w); the view itself when nothing changes. *)
 let apply v add e p w =
@@ -462,7 +470,7 @@ let apply v add e p w =
     let v = touch v e in
     let inbase = base_mem v.base e p w in
     let st = if add then (if inbase then None else Some true) else if inbase then Some false else None in
-    change v e p w st (is_link v p)
+    change v e p w st
 
 (* ---- Building a base: compaction, bulk replay ---- *)
 
@@ -522,17 +530,16 @@ let sort_pairs (keys : ia) (vals : ia) lo hi =
   end
 
 (* The facts fe/fp/fw (n of them, sorted by thing) into a base; [texts] gives the ns texts of the dictionary. *)
-let build ~ne ~np ~(is_link : int -> bool) ~ns ~(texts : int -> string) (fe : ia) (fp : ia) (fw : ia) n =
+let build ~ne ~np ~ns ~(texts : int -> string) (fe : ia) (fp : ia) (fw : ia) n =
   let sblob = ref 0 in
   for i = 0 to ns - 1 do sblob := !sblob + String.length (texts i) done;
-  let nr = ref 0 in
-  for i = 0 to n - 1 do if is_link (Array1.unsafe_get fp i) then incr nr done;
-  let b = layout ~n ~ne ~np ~nr:!nr ~ns ~sblob:!sblob () in
+  let b = layout ~n ~ne ~np ~ns ~sblob:!sblob () in
   let buf = Array1.create char c_layout (max 1 b.len) in
   Array1.fill buf '\000';
   let b = { b with buf } in
   let set64 o x = s64 buf o (Int64.of_int x) in
-  (* by thing: rows sorted by (p, w) inside each thing *)
+  (* by thing: rows sorted by (p, w) inside each thing; they come sorted from [iter_facts], so the insertion sort
+     below only checks, in one pass *)
   let cnt = ia (ne + 1) in
   Array1.fill cnt 0;
   for i = 0 to n - 1 do
@@ -591,31 +598,6 @@ let build ~ne ~np ~(is_link : int -> bool) ~ns ~(texts : int -> string) (fe : ia
     done;
     set64 (b.o_pdist + (8 * p)) !d
   done;
-  (* by link target *)
-  let rc = ia (ne + 1) in
-  Array1.fill rc 0;
-  for i = 0 to n - 1 do
-    if is_link (Array1.unsafe_get tp i) then begin
-      let t = Array1.unsafe_get tw i in
-      if t >= 0 && t < ne then Array1.unsafe_set rc (t + 1) (Array1.unsafe_get rc (t + 1) + 1)
-    end
-  done;
-  for t = 1 to ne do Array1.unsafe_set rc t (Array1.unsafe_get rc t + Array1.unsafe_get rc (t - 1)) done;
-  for t = 0 to ne do set64 (b.o_roff + (8 * t)) (Array1.unsafe_get rc t) done;
-  for e = 0 to ne - 1 do
-    for i = Array1.unsafe_get cnt e to Array1.unsafe_get cnt (e + 1) - 1 do
-      let p = Array1.unsafe_get tp i in
-      if is_link p then begin
-        let t = Array1.unsafe_get tw i in
-        if t >= 0 && t < ne then begin
-          let q = Array1.unsafe_get rc t in
-          s16 buf (b.o_rp + (2 * q)) p;
-          s32 buf (b.o_re + (4 * q)) (Int32.of_int e);
-          Array1.unsafe_set rc t (q + 1)
-        end
-      end
-    done
-  done;
   (* the dictionary: texts by id, and the ids sorted by text *)
   let p = ref 0 in
   for i = 0 to ns - 1 do
@@ -656,12 +638,12 @@ let compact v =
   done;
   let ns = v.dict.dnext in
   let b =
-    build ~ne:(max_thing v + 1) ~np:(Schema.count v.schema) ~is_link:(is_link v) ~ns ~texts:(text v) g.ge g.gp g.gw g.gn
+    build ~ne:(max_thing v + 1) ~np:(Schema.count v.schema) ~ns ~texts:(text v) g.ge g.gp g.gw g.gn
   in
   of_base ~schema:v.schema ~group:v.group ~next_e:v.next_e b
 
 let fork v =
   { v with writer = false; ftouched = (if Bytes.length v.ftouched = 0 then Bytes.empty else Bytes.copy v.ftouched) }
 
-let facts v = v.base.n + v.delta.dn
+let facts v = v.base.n + v.delta.dnet
 let base_bytes b = b.len
