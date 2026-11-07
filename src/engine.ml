@@ -54,6 +54,7 @@ type batch = {
 }
 
 let compact_min = ref 200_000
+let frames = Atomic.make 0 (* frames written by this process: for the benchmarks *)
 
 let needs_compaction (v : Store.view) = v.delta.dn > max !compact_min (v.base.n / 16)
 
@@ -84,7 +85,7 @@ let commit t b =
   match t.stopped with
   | Some e -> Array.map (function Ok _ -> Error e | r -> r) b.results
   | None -> (
-    match if b.count > 0 then Journal.append t.journal b.body b.first b.count with
+    match if b.count > 0 then (Journal.append t.journal b.body b.first b.count; Atomic.incr frames) with
     | () ->
       Atomic.set t.published b.after;
       b.results
@@ -222,7 +223,7 @@ type live = {
   c_sync : Condition.t;
   mutable to_sync : (batch * req array) option;
   mutable syncing : bool;
-  mutable threads : Thread.t list;
+  mutable domain : unit Domain.t option;
   mutable closed : bool;
 }
 
@@ -257,6 +258,14 @@ let syncer l () =
   done
 
 let max_batch = 4096
+let max_frame = 8 lsl 20
+
+(* two batches prepared one after the other, as one frame *)
+let merge a b =
+  let body = Buffer.create (Buffer.length a.body + Buffer.length b.body) in
+  Buffer.add_buffer body a.body;
+  Buffer.add_buffer body b.body;
+  { results = Array.append a.results b.results; body; first = a.first; count = a.count + b.count; after = b.after }
 
 let writer l () =
   let go = ref true in
@@ -279,8 +288,14 @@ let writer l () =
         let reqs = Array.of_list ws in
         let b = prepare l.e (Array.map (fun r -> r.w) reqs) in
         Mutex.lock l.sm;
-        while l.to_sync <> None do Condition.wait l.c_sync l.sm done;
-        l.to_sync <- Some (b, reqs);
+        (* while the syncer forces the previous frame, the next one grows: everything that arrived meanwhile goes
+           into one frame and one fsync (group commit) *)
+        while (match l.to_sync with Some (b0, _) -> Buffer.length b0.body > max_frame | None -> false) do
+          Condition.wait l.c_sync l.sm
+        done;
+        (match l.to_sync with
+         | None -> l.to_sync <- Some (b, reqs)
+         | Some (b0, r0) -> l.to_sync <- Some (merge b0 b, Array.append r0 reqs));
         Condition.broadcast l.c_sync;
         Mutex.unlock l.sm;
         if needs_compaction l.e.working then begin
@@ -307,9 +322,13 @@ let writer l () =
 let start e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
-      to_sync = None; syncing = false; threads = []; closed = false }
+      to_sync = None; syncing = false; domain = None; closed = false }
   in
-  l.threads <- [ Thread.create (writer l) (); Thread.create (syncer l) () ];
+  (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
+  l.domain <- Some (Domain.spawn (fun () ->
+      let a = Thread.create (writer l) () and b = Thread.create (syncer l) () in
+      Thread.join a;
+      Thread.join b));
   l
 
 let submit l c =
@@ -340,5 +359,5 @@ let write l ops by why = call l (fun r -> Write { r with w = (ops, by, why) })
 let snapshot_live l = call l (fun r -> Snapshot r)
 
 let stop l =
-  if submit l Stop then List.iter Thread.join l.threads;
+  if submit l Stop then Option.iter Domain.join l.domain;
   close l.e

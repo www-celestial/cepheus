@@ -189,11 +189,28 @@ let write_bench dir clients secs =
   let n = Array.fold_left ( + ) 0 cnt in
   let l = Array.of_list (List.sort compare (List.concat (Array.to_list lat))) in
   let pct p = 1000. *. l.(min (Array.length l - 1) (int_of_float (p *. float (Array.length l)))) in
-  Printf.printf "W1 %3d clients: %7.0f durable groups/s, latency median %.1f ms, p99 %.1f ms\n%!" clients (float n /. dt) (pct 0.5) (pct 0.99);
+  Printf.printf "W1 %3d clients: %7.0f durable groups/s, latency median %.1f ms, p99 %.1f ms, %.1f groups a frame\n%!" clients
+    (float n /. dt) (pct 0.5) (pct 0.99) (float n /. float (max 1 (Atomic.get Engine.frames)));
+  close db
+
+(* the writer's work alone, without the disk: the same groups into a fork *)
+let cpu dir n =
+  let db = ok (open_ dir) in
+  let s = schema_of (view db) in
+  let c0 = match things (view db) s.mail (Text (email 0)) with [ e ] -> e | _ -> failwith "no client 0" in
+  let f = fork (view db) in
+  let t = now () in
+  for i = 1 to n do
+    ignore (ok (write f [ Add (-1, s.client, Link c0); Add (-1, s.total, Money i); Add (-1, s.status, Text "unpaid");
+                          Add (-1, s.date, Date (i mod 3650)); Add (-1, s.status, Text "unpaid") ]))
+  done;
+  let dt = now () -. t in
+  Printf.printf "writer work alone: %.1f us a group (%.0f groups/s), delta %d changes\n" (dt /. float n *. 1e6) (float n /. dt) (view f).delta.dn;
   close db
 
 let () =
   match Sys.argv with
+  | [| _; "cpu"; dir; n |] -> cpu dir (int_of_string n)
   | [| _; "load"; dir; csv; facts |] -> load dir csv (int_of_string facts)
   | [| _; "read"; dir; facts |] -> read dir (int_of_string facts)
   | [| _; "write"; dir; clients; secs |] -> write_bench dir (int_of_string clients) (float_of_string secs)
