@@ -4,7 +4,7 @@
      bench.exe load DIR CSVDIR FACTS   Cepheus through its writer (64 clients, one group per client and its 20
                                        invoices, then the follow links), a snapshot, and the CSV files
      bench.exe read DIR FACTS          open (restart time), then Q1-Q5: min and median of 5 rounds
-     bench.exe write DIR CLIENTS SECS  durable writes of 5-fact groups (a new invoice) with CLIENTS threads *)
+     bench.exe write DIR CLIENTS SECS  durable writes of a new invoice (4 facts) with CLIENTS threads *)
 
 open Cepheus
 
@@ -175,7 +175,7 @@ let write_bench dir clients secs =
       let t = now () in
       ignore (ok (write db ~by:c ~why:"invoice"
                     [ Add (-1, s.client, Link some_client); Add (-1, s.total, Money (Rng.int r 100000)); Add (-1, s.status, Text "unpaid");
-                      Add (-1, s.date, Date (Rng.int r 3650)); Add (-1, s.status, Text "unpaid") ]));
+                      Add (-1, s.date, Date (Rng.int r 3650)) ]));
       if cnt.(c) land 15 = 0 then lat.(c) <- (now () -. t) :: lat.(c);
       cnt.(c) <- cnt.(c) + 1
     done

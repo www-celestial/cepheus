@@ -23,7 +23,8 @@ Following Raasveldt et al., "Fair Benchmarking Considered Difficult" (DBTest 201
   TIMING OFF)` execution time for joins). Cepheus: min and median of 5 rounds; PostgreSQL: 3 to 5 runs.
 - **Answers checked**: Q3 city-7: 4,299 rows both sides; Q4: 453,866 unpaid invoices summing to 22,677,088,830 both
   sides; Q5: 114 triangle rotations both sides.
-- **Writes**: a group of 5 facts (a new invoice) against an `INSERT` of a 5-column invoice row, with 1, 8, 64 and 256
+- **Writes**: a group making a new invoice (4 facts: client, total, status, date) against an `INSERT` of an invoice
+  row (its id and the same 4 columns), with 1, 8, 64 and 256
   clients for 5 s, both durable (fsync), alternated, 3 rounds.
 
 Commands: `bench.exe load DIR CSVDIR 10000000`, `bench.exe read DIR 10000000`, `bench.exe write DIR CLIENTS 5`;
