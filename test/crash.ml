@@ -1,0 +1,1 @@
+let () = Check.finish "crash"

@@ -1,0 +1,24 @@
+(library
+ (name check)
+ (modules check)
+ (libraries cepheus unix)
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
+
+(executables
+ (names unit sim exhaustive crash bank)
+ (modules unit sim exhaustive crash bank)
+ (libraries cepheus check unix threads.posix)
+ (ocamlopt_flags (:standard -O3))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
+
+(rule
+ (alias runtest)
+ (action (run %{exe:unit.exe})))
+
+(rule
+ (alias runtest)
+ (action (run %{exe:exhaustive.exe})))
+
+(rule
+ (alias runtest)
+ (action (run %{exe:sim.exe} --seeds 200)))

@@ -1,0 +1,344 @@
+(* One database: its directory, its journal, its single writer. The core is deterministic and has no threads:
+   [prepare] resolves a batch of writes on the working view (which runs ahead of the disk), [commit] writes the batch
+   as one frame and makes it durable, [publish] makes it visible. The simulation test drives these steps itself,
+   in an order drawn from a seed; [Live] drives them with two threads, so that the next batch is resolved while the
+   previous one is being forced to disk, and only the clients of a forced frame are woken.
+
+   Files:  DIR/cepheus     the database's id and format (written once, atomically)
+           DIR/lock        held while the database is open (one writer, G9)
+           DIR/journal/    the segments
+           DIR/snapshots/  the newest snapshots *)
+
+type error =
+  | Conflict of string
+  | Invalid of string
+  | Not_unique of string
+  | Damaged of string
+  | Io of string
+  | Busy of string
+  | Closed
+
+let message = function
+  | Conflict m -> "conflict: " ^ m
+  | Invalid m -> "invalid: " ^ m
+  | Not_unique m -> "not unique: " ^ m
+  | Damaged m -> "damaged: " ^ m
+  | Io m -> "input/output error: " ^ m
+  | Busy m -> "busy: " ^ m
+  | Closed -> "the database is closed"
+
+let of_resolve = function
+  | Resolve.Conflict m -> Conflict m
+  | Resolve.Invalid m -> Invalid m
+  | Resolve.Not_unique m -> Not_unique m
+
+type receipt = { group : int; things : (int * int) list }
+
+type t = {
+  disk : Disk.t;
+  dir : string;
+  id : string;
+  journal : Journal.t;
+  mutable working : Store.view;  (* every prepared group, durable or not *)
+  published : Store.view Atomic.t;  (* durable groups only (G5) *)
+  mutable stopped : error option;  (* after a failed write or fsync: nothing more is confirmed (G10) *)
+  mutable notes : string list;  (* what recovery found and did *)
+}
+
+type batch = {
+  results : (receipt, error) result array;
+  body : Buffer.t;
+  first : int;
+  count : int;
+  after : Store.view;
+}
+
+let compact_min = ref 200_000
+
+let needs_compaction (v : Store.view) = v.delta.dn > max !compact_min (v.base.n / 16)
+
+let prepare t (reqs : (Resolve.op list * int * string) array) =
+  let body = Buffer.create 1024 in
+  let first = t.working.group + 1 in
+  let count = ref 0 in
+  let results =
+    Array.map
+      (fun (ops, by, why) ->
+        match t.stopped with
+        | Some e -> Error e
+        | None -> (
+          let n = t.working.group + 1 in
+          match Resolve.resolve t.working ~n ~time:(t.disk.now ()) ~by ~why ops with
+          | Ok (v, g, temps) ->
+            t.working <- v;
+            Group.encode body g;
+            incr count;
+            Ok { group = n; things = temps }
+          | Error e -> Error (of_resolve e)))
+      reqs
+  in
+  { results; body; first; count = !count; after = t.working }
+
+(* Writes and forces the frame; on failure the database stops, and the batch's writes fail. *)
+let commit t b =
+  match t.stopped with
+  | Some e -> Array.map (function Ok _ -> Error e | r -> r) b.results
+  | None -> (
+    match if b.count > 0 then Journal.append t.journal b.body b.first b.count with
+    | () ->
+      Atomic.set t.published b.after;
+      b.results
+    | exception Disk.Io m ->
+      let e = Io m in
+      t.stopped <- Some e;
+      Array.map (function Ok _ -> Error e | r -> r) b.results)
+
+(* With nothing in flight (working = published). *)
+let compact t =
+  let v = Store.compact t.working in
+  t.working <- v;
+  Atomic.set t.published v
+
+let snapshot t =
+  match t.stopped with
+  | Some e -> Error e
+  | None -> (
+    if t.working.delta.dn > 0 then compact t;
+    match Snapshot.write t.disk (Filename.concat t.dir "snapshots") t.id t.working (Journal.position t.journal) with
+    | () -> Ok ()
+    | exception Disk.Io m -> Error (Io m))
+
+let bootstrap_ops =
+  List.concat_map
+    (fun p ->
+      match Schema.system.(p) with
+      | Some d -> List.map (fun (e, q, x) -> Resolve.Add (e, q, x)) (Schema.facts p d)
+      | None -> [])
+    [ 1; 2; 3; 4 ]
+
+let random_id disk =
+  (* 16 bytes from the kernel; on a simulated disk, from its clock (a test's databases differ by directory) *)
+  try
+    let ic = open_in_bin "/dev/urandom" in
+    Fun.protect ~finally:(fun () -> close_in ic) (fun () -> really_input_string ic 16)
+  with Sys_error _ -> Printf.sprintf "%016d" (disk.Disk.now () mod 10_000_000_000_000_000)
+
+let meta_magic = "cepheus database\n"
+
+let rec mkdirs disk d =
+  if not (disk.Disk.exists d) then begin
+    mkdirs disk (Filename.dirname d);
+    disk.mkdir d;
+    disk.sync_dir (Filename.dirname d)
+  end
+
+let read_meta disk dir =
+  let b = Disk.read_all disk (Filename.concat dir "cepheus") in
+  let n = String.length meta_magic in
+  if Bytes.length b <> n + 16 + 4 || Bytes.sub_string b 0 n <> meta_magic
+     || Int32.to_int (Bytes.get_int32_le b (n + 16)) land 0xFFFFFFFF <> Crc32c.bytes b 0 (n + 16)
+  then raise (Journal.Damaged (dir ^ "/cepheus is not a Cepheus database file"))
+  else Bytes.sub_string b n 16
+
+(* Opens or creates the database in [dir]: recovery = newest snapshot that checks, then the journal after it. *)
+let open_ ?(id_source = random_id) disk dir =
+  try
+    mkdirs disk dir;
+    let lock = Filename.concat dir "lock" in
+    if not (disk.lock lock) then Error (Busy (dir ^ " is open in another process"))
+    else
+      let release () = disk.unlock lock in
+      try
+        let meta = Filename.concat dir "cepheus" in
+        let jdir = Filename.concat dir "journal" and sdir = Filename.concat dir "snapshots" in
+        let fresh = not (disk.exists meta) in
+        if fresh then begin
+          let id = id_source disk in
+          let b = Buffer.create 64 in
+          Buffer.add_string b meta_magic;
+          Buffer.add_string b id;
+          let crc = Crc32c.string (Buffer.contents b) in
+          Buffer.add_int32_le b (Int32.of_int crc);
+          Disk.write_file disk meta (Buffer.to_bytes b)
+        end;
+        let id = read_meta disk dir in
+        if not (disk.exists jdir) then (disk.mkdir jdir; disk.sync_dir dir);
+        if not (disk.exists sdir) then (disk.mkdir sdir; disk.sync_dir dir);
+        let loaded, notes = Snapshot.load disk sdir id in
+        let start, from = match loaded with Some (v, pos) -> v, Some pos | None -> Store.empty (), None in
+        let v = ref start in
+        let replay (g : Group.t) =
+          if g.n > !v.group then begin
+            v := Resolve.replay !v g;
+            if needs_compaction !v then v := Store.compact !v
+          end
+        in
+        let journal = Journal.recover disk jdir id from replay in
+        if !v.group < start.group then raise (Journal.Damaged "the journal ends before the snapshot");
+        let t =
+          { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes }
+        in
+        if !v.group = 0 then begin
+          (* a new database: the first group describes the system properties *)
+          let n = 1 in
+          match Resolve.resolve ~bootstrap:true !v ~n ~time:(disk.now ()) ~by:0 ~why:"cepheus: create" bootstrap_ops with
+          | Ok (v', g, _) ->
+            let body = Buffer.create 256 in
+            Group.encode body g;
+            Journal.append journal body 1 1;
+            t.working <- v';
+            Atomic.set t.published v'
+          | Error e -> failwith ("bootstrap: " ^ Resolve.error_message e)
+        end;
+        Ok t
+      with
+      | Journal.Damaged m -> release (); Error (Damaged m)
+      | Disk.Io m -> release (); Error (Io m)
+  with
+  | Disk.Io m -> Error (Io m)
+  | Journal.Damaged m -> Error (Damaged m)
+
+let close t =
+  Journal.close t.journal;
+  t.disk.unlock (Filename.concat t.dir "lock")
+
+(* ---- The threaded driver ---- *)
+
+type req = {
+  w : Resolve.op list * int * string;
+  mutable res : (receipt, error) result option;
+  rm : Mutex.t;
+  rc : Condition.t;
+}
+
+type control = Write of req | Snapshot of req | Stop
+
+type live = {
+  e : t;
+  m : Mutex.t;
+  c_req : Condition.t;
+  mutable queue : control list;  (* newest first *)
+  sm : Mutex.t;
+  c_sync : Condition.t;
+  mutable to_sync : (batch * req array) option;
+  mutable syncing : bool;
+  mutable threads : Thread.t list;
+  mutable closed : bool;
+}
+
+let deliver r res =
+  Mutex.lock r.rm;
+  r.res <- Some res;
+  Condition.signal r.rc;
+  Mutex.unlock r.rm
+
+let wait_idle l =
+  Mutex.lock l.sm;
+  while l.to_sync <> None || l.syncing do Condition.wait l.c_sync l.sm done;
+  Mutex.unlock l.sm
+
+let syncer l () =
+  let go = ref true in
+  while !go do
+    Mutex.lock l.sm;
+    while l.to_sync = None && not l.closed do Condition.wait l.c_sync l.sm done;
+    match l.to_sync with
+    | None -> Mutex.unlock l.sm; go := false
+    | Some (b, reqs) ->
+      l.to_sync <- None;
+      l.syncing <- true;
+      Mutex.unlock l.sm;
+      let results = commit l.e b in
+      Array.iteri (fun i r -> deliver r results.(i)) reqs;
+      Mutex.lock l.sm;
+      l.syncing <- false;
+      Condition.broadcast l.c_sync;
+      Mutex.unlock l.sm
+  done
+
+let max_batch = 4096
+
+let writer l () =
+  let go = ref true in
+  while !go do
+    Mutex.lock l.m;
+    while l.queue = [] do Condition.wait l.c_req l.m done;
+    let items = List.rev l.queue in
+    l.queue <- [];
+    Mutex.unlock l.m;
+    (* writes up to the first control, in order *)
+    let rec split acc = function
+      | Write r :: rest when List.length acc < max_batch -> split (r :: acc) rest
+      | rest -> List.rev acc, rest
+    in
+    let rec handle items =
+      match items with
+      | [] -> ()
+      | Write _ :: _ ->
+        let ws, rest = split [] items in
+        let reqs = Array.of_list ws in
+        let b = prepare l.e (Array.map (fun r -> r.w) reqs) in
+        Mutex.lock l.sm;
+        while l.to_sync <> None do Condition.wait l.c_sync l.sm done;
+        l.to_sync <- Some (b, reqs);
+        Condition.broadcast l.c_sync;
+        Mutex.unlock l.sm;
+        if needs_compaction l.e.working then begin
+          wait_idle l;
+          if l.e.stopped = None then compact l.e
+        end;
+        handle rest
+      | Snapshot r :: rest ->
+        wait_idle l;
+        deliver r (Result.map (fun () -> { group = l.e.working.group; things = [] }) (snapshot l.e));
+        handle rest
+      | Stop :: rest ->
+        wait_idle l;
+        List.iter (function Write r | Snapshot r -> deliver r (Error Closed) | Stop -> ()) rest;
+        go := false
+    in
+    handle items
+  done;
+  Mutex.lock l.sm;
+  l.closed <- true;
+  Condition.broadcast l.c_sync;
+  Mutex.unlock l.sm
+
+let start e =
+  let l =
+    { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
+      to_sync = None; syncing = false; threads = []; closed = false }
+  in
+  l.threads <- [ Thread.create (writer l) (); Thread.create (syncer l) () ];
+  l
+
+let submit l c =
+  Mutex.lock l.m;
+  if l.closed then (Mutex.unlock l.m; false)
+  else begin
+    l.queue <- c :: l.queue;
+    Condition.signal l.c_req;
+    Mutex.unlock l.m;
+    true
+  end
+
+let call l make =
+  let r = { w = ([], 0, ""); res = None; rm = Mutex.create (); rc = Condition.create () } in
+  let r = make r in
+  match r with
+  | Write q | Snapshot q ->
+    if not (submit l r) then Error Closed
+    else begin
+      Mutex.lock q.rm;
+      while q.res = None do Condition.wait q.rc q.rm done;
+      Mutex.unlock q.rm;
+      Option.get q.res
+    end
+  | Stop -> Ok { group = 0; things = [] }
+
+let write l ops by why = call l (fun r -> Write { r with w = (ops, by, why) })
+let snapshot_live l = call l (fun r -> Snapshot r)
+
+let stop l =
+  if submit l Stop then List.iter Thread.join l.threads;
+  close l.e
