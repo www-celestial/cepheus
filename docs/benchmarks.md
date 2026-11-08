@@ -80,6 +80,38 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## The engine fixes (2026-11-08), against the commit before them
+
+Five fixes ([guarantees](guarantees.md#g9-one-writer), [limits](limits.md)): the in-process lock keyed by the lock
+file's device and inode, thing numbers refused past 2³¹ − 1, a second `close` that does nothing, `decode` for `fold`'s
+words, and frames that stay within 256 MiB however many groups arrive. The writer's path changed (a batch may stop
+before a group that would pass the limit, and a large group starts a frame of its own), so the loads and the reads
+were measured against the commit before the fixes (2f37b23), both built in release, alternated in one session under
+the heavy lock, every process in a 3 GB scope.
+
+| | before the fixes (2f37b23) | after | |
+|---|---:|---:|---|
+| 10 M facts in 4 large groups (`GROUP=56818`), 6 runs a side | 10.78 s [9.03, 17.00] | 13.12 s [9.72, 14.16] | the intervals overlap; the CPU part is the same (below) |
+| 1 M facts, a group a client, 64 threads, 6 runs a side | 9.38 s [8.70, 14.20] | 9.55 s [8.66, 15.10] | the same |
+| Q1 an invoice by id, 1 domain | 0.38; 0.38; 0.38 µs | 0.38; 0.37; 0.37 µs | the same |
+| Q2 a client by e-mail | 1.57; 1.58; 1.59 µs | 1.56; 1.57; 1.54 µs | the same |
+| Q3 unpaid of a city | 3.73; 3.77; 3.74 ms | 3.76; 3.70; 3.73 ms | the same |
+| Q4 unpaid sum per city | 233; 233; 231 ms | 232; 230; 234 ms | the same |
+| Q5 triangles | 0.99; 1.02; 0.95 s | 0.96; 0.96; 0.97 s | the same |
+| open (one run, 10 M facts) | 704; 385; 385 ms | 602; 379; 379 ms | the same |
+
+The loads give the median and its 95 % interval over 6 runs (the smallest and the largest, coverage 96.9 %); each read
+cell gives the medians of the 3 rounds (21 runs a question in each process, every interval within 2 % of its median;
+the raw outputs keep them). The reads ran on one database, the one the last load before the fixes made (one run after
+its `snapshot`), copied for each side, so that both read the same bytes. The large-group load was slower after the
+fixes in 5 rounds of 6, by 0.6 to 5.1 s, and faster in the sixth by 6.6 s (a sign test: p = 0.22, two-sided, no
+difference shown); the writer's own histograms say where the time went: the
+CPU part, a large group resolved and sorted, is the same on both sides (its longest 0.93 to 1.00 s before, 0.93 to
+1.10 s after), and the differences are in the merges of the groups into runs (their longest 2.3 to 5.1 s before, 2.6 to
+6.5 s after) and the journal's fsyncs, the disk's time on a machine other jobs were using. The load in 2 large groups
+of the section below needs 2.7 to 3.2 GB: under the 3 GB cap 6 of its 10 runs were killed, so this comparison used 4
+groups (1.7 to 2.5 GB).
+
 ## Levels on disk and large groups (2026-11-08), at 10 million facts
 
 Two changes since the merge written to a file (theory, section 9): the runs on disk are the levels of an LSM tree
