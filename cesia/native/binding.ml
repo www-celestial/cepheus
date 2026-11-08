@@ -291,6 +291,27 @@ let is_local host =
         Fun.protect ~finally:(fun () -> Unix.close s) (fun () -> match Unix.bind s ai.ai_addr with () -> true | exception Unix.Unix_error _ -> false))
       ais
 
+(* [f ()], blocking work, on a domain of its own while the calling fiber is parked; its exceptions come back here. If
+   the fiber is cancelled meanwhile, the result is dropped by [drop] when it comes. *)
+type 'a run = Waiting | Done of ('a, exn) result | Abandoned
+
+let off_domain ctx f ~drop =
+  let state = Atomic.make Waiting in
+  match
+    C.suspend ctx (fun resume ->
+        ignore
+          (Domain.spawn (fun () ->
+               let r = try Ok (f ()) with e -> Error e in
+               if Atomic.compare_and_set state Waiting (Done r) then resume ()
+               else match r with Ok x -> drop x | Error _ -> ())))
+  with
+  | () -> ( match Atomic.get state with Done (Ok x) -> x | Done (Error e) -> raise e | Waiting | Abandoned -> assert false)
+  | exception e ->
+    (* cancelled: whatever comes later is dropped *)
+    if not (Atomic.compare_and_set state Waiting Abandoned) then
+      (match Atomic.get state with Done (Ok x) -> drop x | _ -> ());
+    raise e
+
 (* "auth: the token is unknown" from the client's Hello: its code, when it has one *)
 let split_reason m =
   match String.index_opt m ':' with
@@ -313,7 +334,11 @@ let connect ctx a =
     | None -> Client.Tcp (host, port)
   in
   Option.iter (C.need_read ctx) ca;
-  try
+  let props = List.concat_map props_of (Array.to_list ks) in
+  (* the handshake, the declarations (a write: an fsync) and the Opens wait at the server: in a domain of their own,
+     the calling fiber parked meanwhile, so that the program's other fibers run (a silent peer holds only this call,
+     for the handshake's time) *)
+  let made () =
     let cl =
       match address, ca with
       | Client.Tcp _, None -> refuse "invalid" "%s is reached over the network: give the cluster's certificate authority, ca = \"/etc/cepheus/ca.pem\"" host
@@ -328,7 +353,6 @@ let connect ctx a =
           | code, m -> refuse code "%s" m))
     in
     let fail code m = Client.close cl; refuse code "%s" m in
-    let props = List.concat_map props_of (Array.to_list ks) in
     (* declare reads the schema at the server, and opens the database to read it here once it wrote *)
     let cdb =
       match Client.declare cl dbname props with
@@ -337,8 +361,11 @@ let connect ctx a =
       | Error e -> fail e.code e.message
       | exception Client.Broken m -> fail "unreachable" ("the server stopped answering: " ^ m)
     in
-    C.ok ctx (new_handle (Server { conn = Conn.start cl; cdb; dbname }))
-  with Refused (code, m) -> failure ctx code m
+    cl, cdb
+  in
+  match off_domain ctx made ~drop:(fun (cl, _) -> Client.close cl) with
+  | cl, cdb -> C.ok ctx (new_handle (Server { conn = Conn.start cl; cdb; dbname }))
+  | exception Refused (code, m) -> failure ctx code m
 
 (* ---- Get ---- *)
 

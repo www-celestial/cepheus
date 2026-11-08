@@ -98,6 +98,11 @@ What `Connect` does, in order:
    parallelism, a system thread of its own) applies to a state in the program's memory. From then on `Get` and `Find`
    read that state, with no round trip to the server ([local reads](#local-reads)).
 
+`Connect` waits in its own fiber: its work at the server (the handshake, the declarations, which are a write, and the
+Opens) runs on a domain of the package while the program's other fibers run. A peer that takes the connection and
+does not answer (a hung server, another program on the port) is given up after 5 s for the handshake (connect, TLS,
+Hello), with an `Err` of Code `"unreachable"` ([limits](limits.md#the-server)).
+
 One connection serves every fiber of the program (a **fiber** is one of Cesia's light threads: many run on one core,
 each waiting without holding the others): see [many fibers, one connection](#many-fibers-one-connection).
 `cepheus.Close(db)` ends it; any call on it after gives an `Err` with Code `"closed"`.

@@ -238,7 +238,7 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `H is reached over the network: give the cluster's certificate authority, ca = "/etc/cepheus/ca.pem"` | Connect over TCP without `ca` | the cluster's `ca.pem` (made by `cepheus cluster init`) |
 | `invalid` | `a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server` | Fork of a database reached over the network | fork `cepheus.Empty`, or run on the server's machine |
 | `closed` | `this database was closed` | a call on a database after `cepheus.Close` | Connect again |
-| `unreachable` | `no Cepheus server answers at ADDRESS: REASON` | Connect: nothing listens at the socket or the host's port | start the server, check the address |
+| `unreachable` | `no Cepheus server answers at ADDRESS: REASON` | Connect: nothing listens at the socket or the host's port, or what listens does not answer the handshake within 5 s (REASON `no answer within 5 s`, or `the TLS handshake: Resource temporarily unavailable`) | start the server, check the address |
 | `unreachable` | `the server did not answer for 30 s (REASON): a write in flight was applied once or not at all` | a call after the connection broke and stayed broken for the retry budget | start the server; read before writing again |
 | `protocol` | `an unexpected reply to Get` (Find, Write) | the server answered with another kind of reply: a bug | report it |
 

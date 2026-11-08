@@ -40,16 +40,27 @@ let address_of_string s =
     let h, p = Config.host_port "address" s in
     Tcp (h, p)
 
-let open_socket = function
-  | Unix_socket p ->
-    let fd = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
-    (try Unix.connect fd (Unix.ADDR_UNIX p) with e -> Unix.close fd; raise e);
-    fd
-  | Tcp (h, p) ->
-    let addr = Config.resolve h p in
-    let fd = Unix.socket ~cloexec:true (Unix.domain_of_sockaddr addr) Unix.SOCK_STREAM 0 in
-    (try Unix.setsockopt fd Unix.TCP_NODELAY true; Unix.connect fd addr with e -> Unix.close fd; raise e);
-    fd
+(* How long a connection's handshake may take (connect, TLS, Hello; Follow and its Start for a follow stream) before it
+   is given up as broken, and tried again within the retry budget: a peer that takes the connection and never answers
+   (a hung server, another program on the port) never holds a client for ever. Past the handshake, reads and writes
+   wait as long as they must (a write's fsync, a long Find, an idle connection). *)
+let handshake_timeout = ref 5.0
+
+(* the socket's reads and writes (and connect, on Linux) give up after [t] seconds; 0: never *)
+let set_timeouts fd t = Unix.setsockopt_float fd Unix.SO_RCVTIMEO t; Unix.setsockopt_float fd Unix.SO_SNDTIMEO t
+
+let open_socket address =
+  let fd, addr =
+    match address with
+    | Unix_socket p -> Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0, Unix.ADDR_UNIX p
+    | Tcp (h, p) ->
+      let addr = Config.resolve h p in
+      let fd = Unix.socket ~cloexec:true (Unix.domain_of_sockaddr addr) Unix.SOCK_STREAM 0 in
+      (try Unix.setsockopt fd Unix.TCP_NODELAY true with e -> Unix.close fd; raise e);
+      fd, addr
+  in
+  (try set_timeouts fd !handshake_timeout; Unix.connect fd addr with e -> Unix.close fd; raise e);
+  fd
 
 let write_all = Fdpass.write_all
 
@@ -87,6 +98,8 @@ let next_frame c =
       end;
       let k =
         try io_read c c.inb c.have (Bytes.length c.inb - c.have) with
+        | Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+          raise (Broken (Printf.sprintf "no answer within %g s" !handshake_timeout))
         | Unix.Unix_error (e, _, _) -> raise (Broken (Unix.error_message e))
         | Failure m -> raise (Broken m)
       in
@@ -171,9 +184,12 @@ let reconnect c =
         | Error m -> Error (true, m)
         | Ok ctx -> ( match Tls.handshake ctx fd ~server:false ~host with Ok t -> c.tls <- Some t; Ok () | Error m -> Error (false, m)))
     in
-    match secured with
-    | Error e -> (try Unix.close fd with Unix.Unix_error _ -> ()); c.fd <- None; Error e
-    | Ok () -> ( try hello c with Broken m -> Error (false, m)))
+    let ready = match secured with Error e -> Error e | Ok () -> ( try hello c with Broken m -> Error (false, m)) in
+    match ready with
+    | Ok () -> set_timeouts fd 0.; Ok ()
+    | Error e -> (try Unix.close fd with Unix.Unix_error _ -> ()); c.fd <- None; c.tls <- None; Error e)
+  | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINPROGRESS), _, _) ->
+    Error (false, Printf.sprintf "no answer within %g s" !handshake_timeout)
   | exception Unix.Unix_error (e, _, _) -> Error (false, Unix.error_message e)
 
 (* A write to a connection the server closed fails with EPIPE, never SIGPIPE: every write is a send with MSG_NOSIGNAL
@@ -312,6 +328,8 @@ let follow c handle =
         | Wire.Welcome _ -> (
           match ask 2 (Wire.Follow handle) with
           | Wire.Start st ->
+            (* the handshake is over: the stream waits for the server's groups as long as there are none *)
+            set_timeouts fd 0.;
             let fds = take_fds fc (1 + List.length st.runs) in
             let page = Fun.protect ~finally:(fun () -> Unix.close (List.hd fds)) (fun () -> Fdpass.map_page (List.hd fds)) in
             if not !cache_set then (cache_set := true; Pages.set_capacity !local_cache);

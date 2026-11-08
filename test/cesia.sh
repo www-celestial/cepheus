@@ -66,12 +66,13 @@ cesia run --allow read,write,exec,env "$root/test/cesia-docs.ce" "$root/docs/ces
 
 cp "$root/test/cesia-live.ce" src/live.ce
 export CEPHEUS_URL="cepheus://localhost:$port/local?socket=$tmp/s/r" CEPHEUS_TLS="cepheus://127.0.0.1:$port/tls" CEPHEUS_CA="$tmp/s/ca.pem"
-cesia run --allow native=cepheus,env,read src/live.ce > "$tmp/live.out" 2>&1 || { cat "$tmp/live.out"; exit 1; }
+# each program bounded in time: a hang fails the test instead of holding its caller
+timeout 120 cesia run --allow native=cepheus,env,read,net=:0 src/live.ce < /dev/null > "$tmp/live.out" 2>&1 || { cat "$tmp/live.out"; exit 1; }
 diff "$root/test/cesia-live.expected" "$tmp/live.out" || { echo "cesia live: the output differs from test/cesia-live.expected"; exit 1; }
 
 # kill -9 while the program writes, then a new server on the same data: the client connects again and sends again
 export CEPHEUS_URL="cepheus://localhost:$port/restart?socket=$tmp/s/r"
-cesia run --allow native=cepheus,env,read src/live.ce restart < /dev/null > "$tmp/restart.out" 2>&1 &
+timeout 120 cesia run --allow native=cepheus,env,read src/live.ce restart < /dev/null > "$tmp/restart.out" 2>&1 &
 prog=$!
 for _ in $(seq 200); do grep -q ready "$tmp/restart.out" 2>/dev/null && break; sleep 0.02; done
 sleep 0.2

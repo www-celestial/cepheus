@@ -9,3 +9,4 @@ tls closed: closed
 local: 200 writes by one connection, read at once by another: 200 seen
 local fork: 201 in the fork, 200 in the database
 local 200 fibers: 200 ids, 200 in the database
+silent peer: unreachable within 7 s: true the program ran meanwhile: true

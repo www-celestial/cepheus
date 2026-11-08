@@ -3,11 +3,12 @@
     argument restart, it writes while the script kills the server (kill -9) and starts it again: every write must be
     answered Ok and be in the database once (G14), read here (G15).
 
-    cesia run --allow native=cepheus,env,read src/live.ce [restart] *)
+    cesia run --allow native=cepheus,env,read,net=:0 src/live.ce [restart] *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/fiber
 use std/io
 use std/list
+use std/net
 use std/result
 use std/sys
 use std/value
@@ -68,9 +69,32 @@ defn restart()
   result.Ok(missing)
 end
 
+defn silent()
+  (** A peer that takes the connection and never answers: Connect gives up within the handshake's time, and the
+      program's other fibers run meanwhile. *)
+  l = net.Listen(0)?
+  ticks = fiber.Channel()
+  fiber.Spawn(defn ()
+    for k in 1..20
+      sys.Sleep(0.05)
+      fiber.Send(k, ticks)
+    end
+  end)
+  start = sys.Now()
+  r = cepheus.Connect("cepheus://127.0.0.1:$(net.Port(l))/x", [Note], token = token, ca = sys.Env("CEPHEUS_CA"))
+  took = sys.Now() - start
+  n = 0
+  while result.IsOk(fiber.Receive(ticks, timeout = 0))
+    n += 1
+  end
+  io.Print("silent peer:", r.Error.Code, "within 7 s:", took < 7, "the program ran meanwhile:", n >= 10)
+  result.Ok(missing)
+end
+
 if value.Len(sys.Args) > 0 and sys.Args[1] == "restart"
   result.Unwrap(restart())
 else
   result.Unwrap(overTls())
   result.Unwrap(local())
+  result.Unwrap(silent())
 end
