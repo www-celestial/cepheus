@@ -319,7 +319,7 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
     if !next - 1 > Schema.last_thing then raise Slow;
     (* new texts: numbered in order of first use, as [intern] would: their places k in that order, then their ids
        first + k *)
-    let gtexts = Hashtbl.create 4096 and order = ref [] and m = ref 0 in
+    let gtexts = Hashtbl.create (Array.fold_left (fun n a -> n + Array.length a) 16 fresh) and order = ref [] and m = ref 0 in
     let maps =
       Array.map
         (Array.map (fun s ->

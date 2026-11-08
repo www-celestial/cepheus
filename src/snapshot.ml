@@ -253,7 +253,12 @@ type written = {
   group : int;
   view : Store.view;
   replaced : Store.run list;  (* the runs the new one replaces *)
+  sync : unit -> unit;  (* the file's fsync *)
+  mutable forced : bool;  (* its bytes are durable: [install] forces it first otherwise *)
 }
+
+(* The file of [w] forced, once. *)
+let force w = if not w.forced then (w.sync (); w.forced <- true)
 
 (* ---- the merge of the sources' entries ----
    The sources are a large group's facts (Bulk, all additions: age 0), the delta (age 1) and the merged runs (run j:
@@ -267,11 +272,13 @@ let decide ~newest ~oldest = if newest = oldest then (if newest then 1 else -1) 
 
 (* The merge of [v]'s delta and its [take] newest runs into one run at [level], with [pos] the journal position replay
    starts from (pos.next <= v.group + 1). Written under a temporary name and forced (also on the way, while [busy]
-   says clients write); [install] gives it its name. On a failure of the disk, the file is removed and the failure
+   says clients write; with [~sync:false], not at the end: [force] does it later, or [install]); [install] gives it its
+   name, forced first. On a failure of the disk, the file is removed and the failure
    raised. *)
 let no_bulk = Bulk.empty
 
-let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.view) ~take ~level (pos : Journal.position) =
+let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id (v : Store.view) ~take ~level
+    (pos : Journal.position) =
   if pos.next > v.group + 1 then invalid_arg "Snapshot.merge: the journal position is after the view";
   let rs = v.runs in
   let nr = Array.length rs in
@@ -590,7 +597,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
     Bytes.set_int32_le h 208 (Int32.of_int (Crc32c.bytes crcs 0 (4 * npages)));
     Bytes.set_int32_le h 212 (Int32.of_int (Crc32c.bytes h 0 212));
     disk.pwrite fd 0 h 0 header;
-    disk.fsync fd
+    if sync then disk.fsync fd
   with
   | () ->
     if disk == Disk.real then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
@@ -599,7 +606,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
     let run = { Store.a = Store.dense a; t = Store.dense t; lo; hi = v.group; level; s0 } in
     let runs = Array.append [| run |] (Array.sub rs take (nr - take)) in
     { tmp; path; group = v.group; view = Store.of_runs ~schema:v.schema ~group:v.group ~next_e:v.next_e runs;
-      replaced = Array.to_list src }
+      replaced = Array.to_list src; sync = (fun () -> disk.fsync fd); forced = sync }
   | exception (Disk.Io _ as e) -> failed (); raise e
   | exception (Pages.Unreadable _ as e) -> failed (); raise e
 
@@ -609,6 +616,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
    set aside and its groups replayed from the journal, nothing lost (a space amplification of 1 rather than 2 after a
    full merge: Dong et al., CIDR 2017). *)
 let install disk dir w =
+  force w;
   disk.Disk.rename w.tmp w.path;
   disk.sync_dir dir;
   let live = Array.to_list (Array.map (fun (r : Store.run) -> name r.lo r.hi) w.view.runs) in

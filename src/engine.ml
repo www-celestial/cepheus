@@ -174,7 +174,11 @@ let prepare ?(release = fun (_ : int) -> ()) t (reqs : (Resolve.op list * int * 
             and merge () =
               let t1 = Journal.clock () in
               let take, level = plan ~extra:l.facts.n l.view in
-              let w = Snapshot.merge ~bulk:l.facts t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level (Atomic.get t.at) in
+              (* not forced here: the commit forces it beside the frame's fsync *)
+              let w =
+                Snapshot.merge ~bulk:l.facts ~sync:false t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level
+                  (Atomic.get t.at)
+              in
               Histogram.record large_merge_us (Journal.clock () - t1);
               w
             in
@@ -217,16 +221,21 @@ let prepare ?(release = fun (_ : int) -> ()) t (reqs : (Resolve.op list * int * 
   { results = Array.of_list (List.rev !results); groups = !groups; body; first; count = !count; after = t.working;
     runs = !runs; pending = !pending }
 
-(* Writes and forces the frame; on failure the database stops, and the batch's writes fail. *)
+(* Writes and forces the frame; on failure the database stops, and the batch's writes fail. A large group's run is
+   forced beside its frame (two fsyncs at once, on two files), and named once both are done (G12); if only the run's
+   fsync fails, the group is durable and confirmed, and the database stops (the next open replays it). *)
 let commit t b =
   match t.stopped with
   | Some e ->
     Option.iter (fun p -> try Journal.drop p with Disk.Io _ -> ()) b.pending;
     Array.map (function Ok _ -> Error e | r -> r) b.results
   | None -> (
+    let runs_failed = ref None in
+    let journal () = match b.pending with Some p -> Journal.finish p | None -> Journal.append t.journal b.body b.first b.count in
+    let force () = try List.iter Snapshot.force b.runs with Disk.Io m -> runs_failed := Some m in
     match
       if b.count > 0 then begin
-        (match b.pending with Some p -> Journal.finish p | None -> Journal.append t.journal b.body b.first b.count);
+        (match b.runs with [] -> journal () | _ -> ignore (beside t.disk force journal));
         Atomic.incr frames
       end
     with
@@ -234,6 +243,7 @@ let commit t b =
       if b.count > 0 then Atomic.set t.at (Journal.position t.journal);
       (* the runs of its large groups take their names: their groups are durable now. A failure stops the database
          (the groups are durable; the next open replays them from the journal) *)
+      Option.iter (fun m -> prerr_endline ("cepheus: the run of a large group could not be forced: " ^ m); t.stopped <- Some (Io m)) !runs_failed;
       List.iter
         (fun (w : Snapshot.written) ->
           if t.stopped = None then
