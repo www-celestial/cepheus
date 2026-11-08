@@ -385,6 +385,66 @@ let fdpass () =
   check (Follow.page_path "\001\255" = "/dev/shm/cepheus-01ff.visible") "page: named by the database's id";
   C.rmrf dir
 
+(* A follower of a database with a rule: its derived facts come in the run (bit 63) and in the frames (the journal's
+   kinds); the follower applies them as replay does, never evaluating a rule, and holds exactly the engine's facts
+   and kinds, from its start and after it rests its states on a new base. *)
+let followed_rules () =
+  let ok = function Ok x -> x | Error e -> failwith (Cepheus.message e) in
+  let base = Filename.concat (Option.value (Sys.getenv_opt "CEPHEUS_TMP") ~default:(Filename.get_temp_dir_name ())) (Printf.sprintf "cepheus-rules-%d" (Unix.getpid ())) in
+  C.rmrf base;
+  Unix.mkdir base 0o700;
+  let dir = Filename.concat base "db" in
+  let db = ok (Cepheus.open_ dir) in
+  let ty, parent = match ok (Cepheus.declare db [ prop ~many:true "type" Tlink; prop ~many:true "parent" Tlink ]) with [ a; b ] -> a, b | _ -> assert false in
+  let r = ok (Cepheus.write db [ Add (-1, ty, Link (-1)); Add (-2, ty, Link (-2)); Add (-3, ty, Link (-3)) ]) in
+  let invoice = Cepheus.thing r (-1) and document = Cepheus.thing r (-2) and thing_ = Cepheus.thing r (-3) in
+  ignore (ok (Cepheus.write db [ Add (invoice, parent, Link document); Add (document, parent, Link thing_) ]));
+  let is_a =
+    { Cepheus.name = "is-a"; vars = 3; where = [ { e = Var 0; p = ty; v = Var 1 }; { e = Var 1; p = parent; v = Var 2 } ]; ranges = [];
+      head = Give { e = Var 0; p = ty; v = Var 2 } }
+  in
+  ignore (ok (Cepheus.define db [ is_a ]));
+  let xs = List.init 5 (fun _ -> Cepheus.thing (ok (Cepheus.write db [ Add (-1, ty, Link invoice) ])) (-1)) in
+  (* everything into one run: its derived facts carry their flag *)
+  ok (Cepheus.snapshot db);
+  (* then frames with every kind: derived, asserted over derived, back to derived, premises retracted *)
+  List.iteri
+    (fun i x ->
+      ignore (ok (Cepheus.write db [ Add (x, ty, Link document) ]));
+      if i mod 2 = 0 then ignore (ok (Cepheus.write db [ Retract (x, ty, Link document) ]));
+      if i = 4 then ignore (ok (Cepheus.write db [ Retract (x, ty, Link invoice) ])))
+    xs;
+  ignore (ok (Cepheus.write db [ Add (-1, ty, Link document) ]));
+  let v = Cepheus.view db in
+  (* the follower, as a reader would build it: the run's bytes, then the groups after it from the journal *)
+  let id = Engine.read_meta Disk.real dir in
+  let sdir = Filename.concat dir "snapshots" in
+  let runs = List.sort (fun (_, h, _) (_, h', _) -> compare h' h) (Snapshot.list Disk.real sdir) in
+  let fol =
+    Follower.create ~id ~word:(fun () -> 1) ~names:(List.map (fun (lo, hi, _) -> lo, hi) runs)
+      ~files:(List.map (fun (_, _, n) -> Follower.Mem (Disk.read_all Disk.real (Filename.concat sdir n))) runs)
+  in
+  let top = match runs with (_, hi, _) :: _ -> hi | [] -> 0 in
+  Journal.read_after Disk.real (Filename.concat dir "journal") id top (fun g ->
+      let b = Buffer.create 64 in
+      Group.encode b g;
+      Follower.frame fol ~vseq:0 ~first:g.n ~count:1 (Buffer.to_bytes b));
+  Follower.frame fol ~vseq:1 ~first:0 ~count:0 Bytes.empty;
+  let same what (f : Store.view) =
+    check (f.group = v.group) "%s: at the engine's group (%d, %d)" what f.group v.group;
+    check (C.F.equal (C.facts_of_view f) (C.facts_of_view v)) "%s: the engine's facts" what;
+    check (C.F.equal (C.asserted_facts f) (C.asserted_facts v)) "%s: the engine's asserted facts" what;
+    check (List.length (C.rules_of f) = 1) "%s: the rule in the schema" what
+  in
+  (match Follower.try_view fol with Some f -> same "a follower of a database with a rule" f | None -> check false "the follower holds no state");
+  check (C.F.cardinal (C.user_facts v) > C.F.cardinal (C.asserted_facts v)) "rules: some facts are derived only";
+  (* its states rested on the same run again (as after a merge): rebuilt from its frames *)
+  Follower.runs fol ~vseq:1 ~names:(List.map (fun (lo, hi, _) -> lo, hi) runs)
+    ~files:(List.map (fun (_, _, n) -> Follower.Mem (Disk.read_all Disk.real (Filename.concat sdir n))) runs);
+  (match Follower.try_view fol with Some f -> same "after a new base" f | None -> check false "no state after a new base");
+  Cepheus.close db;
+  C.rmrf base
+
 let () =
   toml ();
   config ();
@@ -393,4 +453,5 @@ let () =
   origins ();
   rights ();
   fdpass ();
+  followed_rules ();
   C.finish "server unit"

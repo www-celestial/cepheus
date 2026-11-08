@@ -156,7 +156,11 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   narrowed, a forged origin, a frame over the limit; and what local readers need from the system: descriptors passed
   over a socket (400 random messages of 1 to 6,000 bytes with up to 8 descriptors, read in random pieces: the bytes
   and the files come out in order, each a new descriptor of the same open file, none left open; more than 64
-  refused) and the visibility page (a store seen at once through the read-only mapping, one mapping a file).
+  refused) and the visibility page (a store seen at once through the read-only mapping, one mapping a file, a
+  second server of the same database refused); and a follower of a database with a rule, from its run and its
+  journal, holds exactly the engine's facts and which of them are asserted, at its start and after it rests on a new
+  base (the derived facts come with their kind, in the run's flag and the frames' kinds, and are applied as replay
+  applies them, never evaluated).
 - `server_sim`: the deterministic simulation of the server over a simulated network, on the simulated disk: clients
   of every right, pipelined, their bytes cut at any byte and delivered late, connections broken (the unanswered
   writes sent again with their serials), the writer's batches, merges, checkpoints, server deaths and power losses

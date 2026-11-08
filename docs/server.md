@@ -394,6 +394,9 @@ Runs   {n, runs}       new runs (a merge, or a large group's run): the reader re
   name, so a reader holding an older state still reads the right bytes. OCaml's `Unix` has no `sendmsg`: the 130
   lines of `server/fdpass_stubs.c` do it, behind one OCaml module (`Fdpass`), tested with random messages and
   descriptors read in random pieces.
+- **Rules** ([rules](rules.md)): derived facts come to the reader as they are on the disk, with their kind (the run's
+  flag, the frame's kinds), and the reader applies them as recovery does; it never evaluates a rule, so its state
+  under a number is the server's, derived facts included.
 - **Frames travel during the fsync.** The reader decodes and applies a frame while the server's disk forces it
   (about 3 ms here), and keeps the state it gives aside, under the number it was sent with. It never shows that state
   before the number says so.
