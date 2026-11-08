@@ -347,6 +347,8 @@ let run seed steps =
       unsure = None }
   in
   Journal.segment_limit := 600 + Rng.int r 4000;
+  (* the journal read through a window smaller than its frames, half the time *)
+  Journal.window := if Rng.chance r 0.5 then 40 + Rng.int r 200 else 4 * 1024 * 1024;
   Engine.compact_min := 5 + Rng.int r 60;
   (* groups of 4 changes and more take the faster path of large groups when they can *)
   Resolve.large_min := 4;

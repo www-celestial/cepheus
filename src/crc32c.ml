@@ -30,9 +30,9 @@ let[@inline] step8 c lo hi =
   lxor Array.unsafe_get t (256 + ((hi lsr 16) land 0xff))
   lxor Array.unsafe_get t ((hi lsr 24) land 0xff)
 
-let bytes (b : Bytes.t) off len =
-  if off < 0 || len < 0 || off + len > Bytes.length b then invalid_arg "Crc32c.bytes";
-  let c = ref 0xFFFFFFFF and i = ref off in
+let extend crc (b : Bytes.t) off len =
+  if off < 0 || len < 0 || off + len > Bytes.length b then invalid_arg "Crc32c.extend";
+  let c = ref (crc lxor 0xFFFFFFFF) and i = ref off in
   let stop = off + len in
   while !i + 8 <= stop do
     let lo = Int32.to_int (Bytes.get_int32_le b !i) land 0xFFFFFFFF in
@@ -45,6 +45,8 @@ let bytes (b : Bytes.t) off len =
     incr i
   done;
   !c lxor 0xFFFFFFFF
+
+let bytes b off len = extend 0 b off len
 
 let string s = bytes (Bytes.unsafe_of_string s) 0 (String.length s)
 

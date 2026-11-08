@@ -20,6 +20,10 @@ module C = Check
 let id = "0123456789abcdef"
 let sector = Sim_disk.sector
 
+(* the journal read through a window of 48 bytes: every frame is longer, checked by pieces and read whole to be
+   decoded, and every header and trailer may straddle the window's edge *)
+let () = Journal.window := 48
+
 let group n text =
   { Group.n; time = n; by = 1; why = "x"; first_new = 65536 + n; count_new = 1;
     changes = [| { Group.add = true; e = 65536 + n; p = 16; v = Value.Text text } |] }

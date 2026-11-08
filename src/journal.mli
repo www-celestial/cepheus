@@ -31,6 +31,10 @@ val max_body : int
 val segment_limit : int ref
 (** A new segment starts once a segment passes this size (64 MB; tests make it small). *)
 
+val window : int ref
+(** The bytes of a segment a scan holds at once (4 MiB; tests make it small, 40 at least): a frame that fits is decoded
+    where it lies, a longer one checked by pieces and read whole only to be decoded. *)
+
 val create : Disk.t -> string -> string -> t
 (** [create disk dir id]: a new journal in [dir] (which exists), for the database [id]; the first group is 1. *)
 

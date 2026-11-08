@@ -30,7 +30,9 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
    journal's directory (a process killed before its fsync left them in the page cache; after a failed fsync the
    page cache may hold bytes the disk does not, G13); then reads the journal from the newest run's position: checks
    every frame, applies every group, and merges into a new run when the changes pass the threshold or the group is a
-   large one, as the writer would have; a journal that ends before the newest run's group is damage;
+   large one, as the writer would have; a journal that ends before the newest run's group is damage. The journal is
+   read through a window of 4 MiB: a frame whose groups the runs already hold is checked by its CRC, piece by piece,
+   and not decoded; a longer frame to replay is read whole (the memory of its group, as when it was written);
 6. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
    `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a run of the
    groups before the damage);
@@ -110,7 +112,9 @@ beside (`snapshot`, recovery) forces once, at the end.
 A large group (20,000 changes and more, all additions: a load) is merged into a run as it is written, from its facts
 sorted in arrays, with no per-fact index update: write a load as a few large groups, not as many small ones. Its
 receipt lists every new thing; read `receipt.things` once into a table rather than calling `thing` for each (a walk of
-the list each time).
+the list each time). A load leaves a few runs (at 10 M facts in two groups: the clients' run and the follows' run);
+questions that join across them read both (Q3 and Q4 about 40 % slower than on one run, benchmarks): after a load,
+`snapshot` puts the base in one run (1.3 to 6.5 s at 10 M facts).
 
 ## Disks
 
