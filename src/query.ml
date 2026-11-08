@@ -174,6 +174,30 @@ let fold (v : Store.view) q ~init ~step ~merge =
     let iv = intervals n limits in
     let in_range x c = match iv.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi in
     let by_var = Array.map Array.of_list by_var in
+    (* how many candidates a pattern offers x, exactly, given [get] for the sides that are bound *)
+    let count_with get x pt =
+      if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp
+      else if has x pt.pe then match get pt.pv with Some w -> Store.count_things v pt.pp w | None -> Store.count_prop v pt.pp
+      else
+        match get pt.pe, iv.(x) with
+        | Some e, _ -> Store.count_values v e pt.pp
+        | None, Some (lo, hi) -> Store.count_range v pt.pp lo hi
+        | None, None -> Store.count_prop v pt.pp
+    in
+    (* the counts that no binding changes, once a question: at level i, a pattern whose other side is a constant or a
+       variable bound only later (Q3's "status = unpaid", the same for each of a city's clients); -1 for the others *)
+    let fixed =
+      Array.init n (fun i ->
+          let x = ord.(i) in
+          let before y = let k = ref 0 in while !k < i && ord.(!k) <> y do incr k done; !k < i in
+          let other pt = if has x pt.pe then pt.pv else pt.pe in
+          Array.map
+            (fun pt ->
+              match other pt with
+              | V y when y <> x && before y -> -1
+              | _ -> count_with (function W w -> Some w | V _ -> None) x pt)
+            by_var.(x))
+    in
     (* one runner per domain: its own bindings and its own count of candidates; no allocation per binding but the
        iterators' own *)
     let runner () =
@@ -190,16 +214,7 @@ let fold (v : Store.view) q ~init ~step ~merge =
           | W e -> Store.mem v e pt.pp c
           | V y -> if bound.(y) then Store.mem v env.(y) pt.pp c else Store.count_things v pt.pp c > 0
       in
-      (* how many candidates a pattern offers x, exactly *)
-      let count x pt =
-        if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp
-        else if has x pt.pe then match get pt.pv with Some w -> Store.count_things v pt.pp w | None -> Store.count_prop v pt.pp
-        else
-          match get pt.pe, iv.(x) with
-          | Some e, _ -> Store.count_values v e pt.pp
-          | None, Some (lo, hi) -> Store.count_range v pt.pp lo hi
-          | None, None -> Store.count_prop v pt.pp
-      in
+      let count x pt = count_with get x pt in
       let distinct it f =
         let seen = Hashtbl.create 256 in
         it (fun c -> if not (Hashtbl.mem seen c) then (Hashtbl.replace seen c (); f c))
@@ -223,10 +238,10 @@ let fold (v : Store.view) q ~init ~step ~merge =
       in
       (* level i: the smallest source, and its size *)
       let choose i =
-        let ps = by_var.(ord.(i)) in
+        let ps = by_var.(ord.(i)) and fx = fixed.(i) in
         let best = ref (-1) and bc = ref max_int in
         for j = 0 to Array.length ps - 1 do
-          let c = count ord.(i) ps.(j) in
+          let c = if fx.(j) >= 0 then fx.(j) else count ord.(i) ps.(j) in
           if c < !bc then (bc := c; best := j)
         done;
         !best, !bc
