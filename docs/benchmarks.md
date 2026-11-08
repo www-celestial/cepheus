@@ -84,6 +84,103 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## The load in parallel and without copies (2026-11-08), at 10 million facts
+
+Step 1 of the plan to beat the giants at loading: a large group is mapped by four domains into compact arrays, numbered
+in one pass, sorted there (not at all when it comes in thing order), and merged into its run while another domain
+writes its frame's body to the journal, forced as it goes; the run is forced beside the frame's last fsync and is not
+copied into the cache; the receipt is made beside the merge ([architecture](architecture.md#large-groups)). With it: no
+run kept outside the chain after a merge, and a question counts once the patterns that no binding changes.
+
+**Method.** main eb120a4's engine against the branch, both built in release, with the same benchmark client, alternated
+(A then B, then B then A) in one hold of the heavy lock, 7 rounds, every process in a 3 GB scope; the load average
+before each side is kept with the raw outputs. The client reads its new ids off the receipt by arithmetic now, not
+through a hash table of its 2.4 M pairs, so both sides do the same, smaller client work (0.7 s less between the two
+groups; with the old client, main measured 7.04 s in the section below). A cell is the median of 7 rounds with its 95 %
+interval by order statistics (for 7 runs, the smallest and the largest: coverage 98.4 %); the last column pairs the
+rounds (the median of the ratios, how many rounds the branch was faster, a two-sided sign test). The questions ran on
+up to 8 domains (the default), 21 runs each in each process: a cell is the median of the 7 rounds' medians.
+
+| 10 M facts | main eb120a4 | branch | branch / main, by round |
+|---|---:|---:|---|
+| load in 2 large groups (9.4 M additions, then 568,163), to confirm every group | 6.18 s [5.65, 7.41] | **4.14 s** [3.67, 4.86] | 0.656 [0.645, 0.686], faster 7 of 7 (p = 0.016) |
+| the same, a second series after the run's fsync went beside the frame's | 6.59 s [6.18, 9.31] | 4.65 s [3.96, 5.43] | 0.677 [0.566, 0.812], 7 of 7 |
+| peak resident memory of that load | 2,595 MB [2,527, 2,620] | **1,461 MB** [1,461, 1,462] | 0.563 |
+| of which the client's own list of operations, once built | 883 MB | 883 MB | |
+| a large group resolved and sorted (the longest of the two) | 1.94 s | 0.64 s (0.59 in the second series) | 0.328 |
+| a large group merged into its run (the second series: without its fsync, now beside the frame's) | 1.57 s (1.76) | 1.59 s (0.32) | |
+| load in 4 large groups (`GROUP=56818`) | 7.62 s [7.14, 11.17] | 5.74 s [5.20, 6.50] | 0.706 [0.540, 0.849], 7 of 7 |
+| its peak | 2,167 MB | 1,184 MB | 0.616 |
+| then `snapshot` | 1.45 s [1.28, 2.25] | 2.06 s [1.44, 2.55] | 1.258 [0.871, 1.747], slower 4 of 7 (p = 1.0: no difference shown) |
+| on disk after it | 553 MB | **330 MB** | 0.597 |
+| open of the database it leaves (one run) | 199 ms [197, 299] | 196 ms [194, 199] | 0.985 [0.648, 1.007] |
+| Q1 an invoice by id | 0.37 µs | 0.36 µs | 1.000 |
+| Q2 a client by e-mail | 1.56 µs | 1.56 µs | 1.013 |
+| Q3 unpaid invoices of a city | 3.80 ms | 3.58 ms | 0.955 [0.939, 0.966], 7 of 7 |
+| Q4 unpaid sum by city | 82.3 ms | 80.5 ms | 0.976, 7 of 7 |
+| Q5 triangles | 252 ms | 245 ms | 0.970 |
+| 1 M facts, a group a client, 64 threads | 8.40 s [7.19, 9.27] | 8.48 s [7.65, 10.84] | 0.947 [0.911, 1.258] (p = 1.0: the same) |
+| its peak | 269 MB | 224 MB | 0.898 |
+
+**Where a load's time goes now** (the writer's phases, one load on a quiet machine): the client builds its 9.4 M
+operations in 1.3 s on 4 domains, its own work; the writer maps and sorts them in 0.59 to 0.64 s (one walk of the list
+0.10 s, the mapping on 4 domains 0.10, the numbering of new things 0.06, of new texts 0.15, the rewrite with the final
+numbers 0.02, the order by thing and the facts twice 0.02, by property 0.16 of which the radix sort on 2 domains with the
+texts sorted beside 0.11, the encoded length 0.03); the merge writes the run in 0.32 s (by thing 0.19, by property 0.11,
+the dictionary 0.02) while another domain encodes the frame and writes its 94 MB (0.7 to 0.8 s, forced every 32 MiB);
+then the run's fsync (234 MB: 0.5 s on a quiet disk, 2.3 s on a busy one) beside the frame's last one (60 to 90 ms, where
+main's was 270 ms); the follows' group 0.45 to 0.9 s. The disk is now the largest part: in the second series both sides
+slowed round after round on a quiet machine (the branch 3.96 to 5.27 s, main 6.18 to 9.31 s). The plan's next steps
+attack it: a coded run (step 2) writes about a fifth of the bytes.
+
+**Where its memory goes** (resident memory at each phase, one load): the client's list 883 MB; mapped +141 MB (14 bytes
+a fact); by property +108 MB (12 bytes a fact); the radix sort's room +53 MB; the receipt +127 MB (2.4 M pairs of a
+list, the API's) to 1,354 MB; the follows' group starts before the collector has freed the first group's arrays: 1,455
+MB at the peak. The engine's own share fell from about 1.7 GB to 0.57 GB. The `snapshot` after a load now reads the
+runs of its large groups from their files, since they no longer enter the cache as they are written: 2.06 s against
+1.45 s at the median, a difference the 7 rounds do not show (slower in 4 of 7).
+
+**Against the targets of step 1.** The load in at most 4 s: met by the quietest runs (3.72 s and 3.96 s), not by the
+medians (4.14 s and 4.65 s) of a disk that varies by half between rounds. A peak of at most 1.1 GB: not met, 1.46 GB, as
+the client's own list measures 0.88 GB where the plan counted 0.7, and the receipt 0.12; loads in chunks (step 4) bound
+both. On disk after `snapshot`: 330 MB (the plan said 319). Q3 at most 3 ms: not met, 3.58 ms: counting the city's
+constant pattern once a question saved 5.8 %; most of the rest is a lookup per client and per invoice, which step 2's
+offsets for links remove. The open, Q1 to Q5 and the load a group a client: no slower.
+
+**Tried and left out, measured.** A full collection right after a large group's operations are let go, so that its
+receipt would reuse their memory: 0.11 s a group, the peak unchanged (1,438 against 1,455 MB), and a pause of the whole
+process that a server would feel. Starting the run's writeback during the merge with Linux's `sync_file_range` (a system
+call OCaml's `Unix` lacks: a C stub in a test program, not in Cepheus): durable after 1.23 s against 1.84 s at the
+median of 7 alternated rounds, 1.5 times, under the 2 times a C file must earn here, and step 2's coded runs shrink the
+same wait. The three passes of the merge on three domains: they take 0.32 s of one core now, so at most 0.2 s to win,
+for a page assembly shared between domains; not done.
+
+**Beside SQLite 3.54 and PostgreSQL 18.6.** The same 10 M facts (the CSV files the benchmark writes), the same
+durability as in the section below: a Cepheus group is confirmed after its frame's fsync; SQLite's `.import` is one
+transaction a table in WAL mode with `synchronous = FULL`, then a checkpoint; PostgreSQL's `COPY` runs with fsync on,
+then `VACUUM ANALYZE` and `CHECKPOINT`. Each giant alternated with the branch round by round, 7 rounds, 3 GB scopes
+(PostgreSQL's server in its own scope), the medians with their 95 % intervals as above. The machine's load average was
+1.4 to 3.5 during the SQLite series and 13.9 falling to 1.7 during the PostgreSQL one (other jobs ending), the same
+for both sides of a round:
+
+| 10 M facts | Cepheus (branch) | SQLite 3.54 | PostgreSQL 18.6 |
+|---|---:|---:|---:|
+| load, until durable | 5.61 s [4.21, 11.67] (beside SQLite); 5.13 s [4.65, 8.08] (beside PostgreSQL) | 9.37 s [7.90, 13.67] | 30.87 s [28.08, 37.13] |
+| Cepheus / the giant, by round | | 0.600 [0.429, 0.923], Cepheus faster 7 of 7 (p = 0.016): SQLite takes 1.7 times as long | 0.168 [0.144, 0.288], 7 of 7: PostgreSQL takes 6 times as long |
+| peak memory | 1.46 GB (0.88 of it the client's list) | **11 MB** | shared_buffers 1 GB and the backend |
+| on disk after the load, after `snapshot` | 335 MB, 330 MB | **131 MB** | 284 MB (675 MB with its WAL) |
+| 1 M facts, a transaction a client (3 rounds) | **13.2 s** [10.2, 15.2] (64 threads) | 174.0 s [170.0, 196.9] (one writer) | not measured (`COPY` is one transaction) |
+
+In this series both Cepheus and SQLite took longer than in the A/B above (the disk was writing the giants' files
+between Cepheus' rounds; one Cepheus round stalled 5.9 s in its follows' group, SQLite's own runs spread from 7.9 to
+13.7 s), which is why each comparison pairs its rounds. At a transaction a client, group commit keeps Cepheus 13 times
+ahead here (16 times in the section below: 10.6 against 166.7 s, on a quieter disk); the A/B shows that this path did
+not change (8.40 against 8.48 s). **Where SQLite wins, and why**: memory, 11 MB against 1.46 GB, because `.import`
+streams rows from the file into B-tree pages and sorts each index in about 2 MB, where a Cepheus group is one
+transaction held whole (the caller's list, 26 bytes a fact of arrays, the receipt); loads in chunks (step 4 of the plan)
+bound it. And disk, 131 against 330 MB: SQLite's records are variable-length, Cepheus' runs 8-byte words; the coded
+run of step 2 aims at 50 MB.
+
 ## CRC-32C by the processor (2026-11-08)
 
 The checksum of every frame and every page was computed by tables in OCaml (slicing by 8); it is now computed by the

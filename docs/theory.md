@@ -355,21 +355,36 @@ ids below the first thing included: 512 KiB a base, even a tiny one). A lookup i
 a popcount, none when the block's 32 things are all there), then the offsets of its slot, as before.
 
 **Large groups.** A group of many additions (`Resolve.large_min`, 20,000) takes a faster path to the same result
-(`Resolve.resolve_large`): its additions go into arrays, sorted by counting (by thing, a dense range for new things;
-by property) and a stable LSD radix sort by value inside each property (11-bit digits, Knuth [Knuth 1998], 5.2.5), and a merge
-reads them as one more source, the newest, beside the delta and the runs; no persistent map is built for them. The
-faster path decides only what it can alone (additions to new or ordinary things, one value per new thing for a
-one-valued property, many-valued additions to existing things, no unique value already taken); on any doubt, the
-group goes through `Resolve.resolve`, which decides as always (errors included). Its result is the same: the same
-changes in the same order, the same thing numbers, the same texts' numbers (each text is interned at its first
-addition, as `Resolve` does), so a fork, which always takes `Resolve`, answers as the database (G8); the unit tests
-compare both paths on random large groups, encoding and facts. At recovery, a group of the journal whose changes are
-all additions (the facts it adds are then absent before it, and distinct: `Resolve` records only effective changes) is
-replayed the same way (`Resolve.replay_large`).
+(`Resolve.resolve_large`): its additions go into compact arrays (Bigarrays: 14 bytes a fact, outside the collector's
+heap), mapped by several domains in chunks taken in turn [Leis 2014]; the new things and texts are numbered by one pass
+in the group's order; the facts are sorted by thing (nothing to do for a group in thing order, else a stable LSD
+radix sort of the indexes) and by property (a counting sort), then by a stable LSD radix sort by value inside each
+property (11-bit digits, Knuth [Knuth 1998], 5.2.5), and a merge reads them as one more source, the newest, beside the
+delta and the runs; no persistent map is built for them. The faster path decides only what it can alone (additions to
+new or ordinary things, one value per new thing for a one-valued property, many-valued additions to existing things,
+no unique value already taken); on any doubt, the group goes through `Resolve.resolve`, which decides as always
+(errors included). Its result is the same: the same changes in the same order, the same thing numbers, the same texts'
+numbers (each text is numbered at its first addition, as `Resolve` interns it), so a fork, which always takes
+`Resolve`, answers as the database (G8).
+
+*Why the numbering is Resolve's, though chunks are mapped in any order.* `Resolve` gives the k-th distinct temporary
+id met in the group's order the number next_e + k - 1 (a link's target after its operation's thing), and the j-th new
+text the next text id. The chunks partition the group's order into consecutive slices; a chunk records, in its own
+order, what it meets, and the numbering pass reads the chunks in their order, each in its own: it meets every first
+use in the group's order, so it assigns the same numbers. The unit tests compare both paths on random large groups
+(chunks of 1 to 9 operations, temporary ids near -1 and far below the group's length, groups in no order and in thing
+order): the encoding byte for byte, the receipt, the facts after the merge and after a replay.
+
+*Cost.* For n facts of a group in thing order, with k domains: the mapping and the rewriting O(n / k) each, the
+numbering O(n) on one domain (an array read a fact), the counting sort by property O(n / k), the radix sort
+O(d n / 2) with d passes (2 at 10 M facts: values below 2²²), the merge O(n) on one domain beside the encoding on
+another. Memory: 14 bytes a fact in the group's order and 12 by property, a radix pass's room for the largest
+property on each of its 2 domains, and the receipt the caller gets (a pair a new thing).
 
 The merge of a large group runs in the writer, when the group is prepared, and writes a run file that is named only
-once the group's frame is durable (the commit installs it, as a background merge's: G12). No background merge runs
-beside it.
+once the group's frame is durable and the run itself forced (the commit forces both at once, on two files, then
+installs the run, as a background merge's: G12). No background merge runs beside it, and its frame, written by pieces
+beside the merge, is the only frame being written.
 
 ## 10. What comes next, and why
 

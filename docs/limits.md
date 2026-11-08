@@ -47,7 +47,7 @@ defaults, and the cache's size (`set_cache`).
 | catch-up | the merge replays the groups written meanwhile until it is fewer than 256 behind; then the writer replays the rest and switches | `Engine.catch_up` |
 | a merge's fsyncs | every 8 MiB while the journal is writing, else once at the end | `Snapshot.sync_every` |
 | after a failed merge | the next one waits until the delta has grown by another threshold | `Engine.finish_merge` |
-| run files kept | the chain from 0 to the newest group, and the newest bottom run outside it (a fallback); a merge's file is one more while it is written | `Snapshot.install` |
+| run files kept | the chain from 0 to the newest group (no fallback outside it: the journal rebuilds any run); a merge's file is one more while it is written | `Snapshot.install` |
 | run header | 4,096 bytes | `Snapshot.header` |
 | page | 16 KiB (16,384 bytes) | `Pages.bits` (14) |
 | CRC table | 4 bytes a page | `Snapshot.merge` |
@@ -66,7 +66,7 @@ defaults, and the cache's size (`set_cache`).
 | pages in memory | under 1.25 times the cache: a full collection after each quarter of the cache evicted (256 pages, 4 MiB, at least) | `Pages.room` |
 | a run read whole at open | when its pages fit in the cache | `Snapshot.check_and_build` |
 | a merge | the cache, at most 2 page buffers for each of the 8 streams of a pass (7 measured), and 21 bytes a page of the new run | [theory](theory.md#8-merges-written-to-a-file) |
-| a large group | its operations, their arrays and its frame at once: 2.5 to 3.2 GB for 9.4 M additions | measured |
+| a large group | the caller's list of operations (72 bytes an `Add` and its value: 883 MB for 9.4 M), 14 bytes a fact in the group's order and 12 by property (Bigarrays), the radix sort's room for its largest property on each of 2 domains, and the receipt (a pair a new thing): 1.46 GB at the peak of a load of 10 M facts in two groups, of which 0.88 GB is the caller's list; the frame is written by pieces of 1 MiB, never built whole | measured ([benchmarks](benchmarks.md#the-load-in-parallel-and-without-copies-2026-11-08-at-10-million-facts)) |
 | the delta | about 170 bytes a change, until the next merge | measured |
 | the runs | about 25 bytes a fact, read through the cache | measured |
 | recovery | each segment through a window of 4 MiB; a frame longer than the window is checked by pieces and read whole only to replay its groups; a frame that does not check is read whole from its offset to the segment's end, to decide torn or damaged | `Journal.window`, `Journal.scan` |

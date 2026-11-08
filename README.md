@@ -52,14 +52,15 @@ facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/ben
 | triangles of a follow graph (568,163 links), 3 cores | 371 ms | 603 ms (2 processes) |
 | durable writes, 256 clients | on par (both bound by the disk's fsync) | |
 | triangles, base of 245 MB read through a 32 MB cache, process capped at 128 MB | 102 s | **1.05 s** (32 MB of buffers) |
-| load of 10 M facts | 7.04 s, in two large groups | 32.3 s (`COPY`, indexes, `VACUUM ANALYZE`) |
+| load of 10 M facts | **5.13 s**, in two large groups, alternated with it | 30.87 s (`COPY`, indexes, `VACUUM ANALYZE`) |
 
 SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core: Cepheus is faster on an
 invoice by id (0.37 µs against 0.68) and on the unpaid sum per city (230 ms against 360), even on the city's unpaid
 invoices and the triangles, slower on a client by e-mail (1.67 µs against 1.52). Loading the 10 M facts, alternated
-ten times, is a tie (Cepheus 7.04 s in two large groups, SQLite 6.97 s), but SQLite does it in 11 MB of memory against
-2.5 to 3.2 GB, into a file of 131 MB against 335 MB; at a transaction a client, Cepheus' group commit loads 1 M facts
-16 times faster (10.6 s against 166.7 s). Where each one wins, and why, and how Cepheus compares by design
+seven times, Cepheus is faster in every round (5.61 s against 9.37 s at the median: SQLite takes 1.7 times as long),
+but SQLite does it in 11 MB of memory against 1.46 GB (0.88 of it the client's own list of operations), into a file of
+131 MB against 330 MB; at a transaction a client, Cepheus' group commit loads 1 M facts 13 to 16 times faster (13.2 s
+against 174.0 s; 10.6 against 166.7 in an earlier series). Where each one wins, and why, and how Cepheus compares by design
 with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison](docs/comparison.md).
 
 ## Build and test

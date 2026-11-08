@@ -20,6 +20,11 @@ the usual one, both are given.
 - **batch** — the writes the writer resolves at once (up to 4,096); several batches can make one frame. [limits](limits.md#writes)
 - **Belady's optimum** (OPT) — the eviction policy that removes the page needed the farthest in the future; no real
   policy can know the future, so it is the yardstick. [theory](theory.md#7-pages-and-the-cache)
+- **Bigarray** — an OCaml array whose elements lie outside the heap the garbage collector manages, in one plain block
+  of memory (`Stdlib.Bigarray`), each element of a fixed kind and size (an int32 in 4 bytes, an unsigned 16-bit int in
+  2): the collector never scans, copies or moves its contents. A large group's facts live in Bigarrays: 14 bytes a fact
+  where an OCaml array of records would take 8 a field and be scanned by every major collection.
+  [architecture](architecture.md#large-groups)
 - **binary join** — a join of two inputs at a time; a plan of them can build more intermediate rows than the answer on
   cyclic questions. [architecture](architecture.md#questions)
 - **binding** — a value for each variable of a question; an answer is a binding that makes every pattern a fact.
@@ -27,7 +32,7 @@ the usual one, both are given.
 - **birthday problem** — the chance that among m people two share a birthday, far higher than intuition says; here,
   the chance that two of m buyers pick the same seat among ten. [case](case-seats.md#a-bound)
 - **bottom run** — a run that rests on nothing (its name starts with 20 zeros): it holds the whole state at its last
-  group and no retraction. The newest bottom run outside the chain is kept as a fallback.
+  group and no retraction.
   [architecture](architecture.md#runs-on-disk)
 - **buffer pool** (the cache) — memory where a database keeps pages of its files, deciding itself what stays; Cepheus'
   holds the runs' 16 KiB pages, 1 GiB by default. [architecture](architecture.md#pages-and-the-cache)
@@ -35,6 +40,9 @@ the usual one, both are given.
   [concepts](concepts.md#properties-and-the-schema)
 - **chain** (of runs) — runs that rest on one another from 0: each holds the groups after the last group of the one
   below it. An open takes the chain that reaches the newest group with the fewest runs. [architecture](architecture.md#runs-on-disk)
+- **chunk** (of a large group) — 65,536 operations of a large group (`Bulk.chunk`), the unit of work that the domains
+  take in turn while the group is mapped, checked and sorted (morsel-driven scheduling, [Leis 2014]).
+  [architecture](architecture.md#large-groups)
 - **checksum**, **CRC**, **CRC-32C** — a short number computed from bytes, which changes if they change; CRC-32C (the
   Castagnoli polynomial, the checksum of iSCSI, RFC 3720) detects every burst of up to 32 bits and lets random damage
   through with probability 2⁻³². Cepheus computes it by the processor's own instruction (SSE4.2 on x86-64, CRC32 on
@@ -55,7 +63,8 @@ the usual one, both are given.
 - **counterexample** — a sequence of steps that leads from an initial state to one where an invariant is false; what
   a model checker prints. [case](case-seats.md#a-formal-model-checked-by-a-machine)
 - **counting sort** — a sort that counts how many items fall on each key, then places each item at its key's place
-  in one pass: O(n + keys), no comparison. A large group's facts are sorted by thing and by property this way.
+  in one pass: O(n + keys), no comparison. A large group's facts are sorted by property this way, in chunks counted
+  and spread at once by several domains.
   [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **cut** (of the journal) — after a failed write or fsync, the writer truncates the journal back to the end of its
   last durable frame and forces it, so that the failed write is gone from memory and disk (G13).
@@ -74,6 +83,9 @@ the usual one, both are given.
   [case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)
 - **deterministic simulation testing** — running the engine on a simulated disk where one seed decides every event, so
   that any failure replays exactly. [testing](testing.md)
+- **dirty page**, **writeback** — a page of the kernel's page cache that a program wrote and the disk does not hold yet
+  is dirty; writeback is the kernel writing it to the disk, at an fsync or in the background. A large group's frame
+  is forced by pieces while its run is made, so that its writeback overlaps the merge. [architecture](architecture.md#large-groups)
 - **dictionary** — the table that numbers each distinct text (and float) once; the rows hold the number.
 - **domain** — OCaml 5's unit of parallelism: a thread of execution on its own core, with its own young heap and
   runtime lock; the threads of one domain take turns. [architecture](architecture.md#one-writer-threads-and-domains)
@@ -128,7 +140,8 @@ the usual one, both are given.
 - **journal window** — the 4 MiB of a segment recovery holds at once: a frame that fits is decoded where it lies, a
   longer one checked by pieces and read whole only to replay it. [architecture](architecture.md#recovery-torn-writes-and-damage)
 - **large group** — a group of 20,000 operations or more, all additions: it takes a faster path to the same result
-  (arrays, a counting sort and a radix sort, a run merged at once). [architecture](architecture.md#large-groups)
+  (its facts in Bigarrays, mapped and sorted by several domains, merged at once into a run while its frame is written
+  beside, by pieces). [architecture](architecture.md#large-groups)
 - **lazy leveling** — tiering at every level but the last, which is leveled (Dayan and Idreos 2018).
   [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **level**, **size ratio** — a place for runs with a capacity in an LSM-tree; each level is T times larger than the
@@ -165,7 +178,8 @@ the usual one, both are given.
 - **question** — Cepheus' query: patterns over variables. [concepts](concepts.md#questions)
 - **radix sort** (least significant digit first) — a sort that sorts by the lowest digit, then the next, each pass a
   stable counting sort, so that the order of the lower digits is kept: O(n × digits). A large group's values inside a
-  property are sorted with 11-bit digits (Knuth, vol. 3, 5.2.5). [theory](theory.md#9-levels-on-disk-and-large-groups)
+  property are sorted with 11-bit digits (Knuth, vol. 3, 5.2.5), each pass from one buffer to the other, and so are
+  its indexes by thing when it does not come in thing order. [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **rank table** (rank directory) — a bit for each thing number and, every 32 bits, how many bits are set before
   them: "is thing e here, and at which slot?" is one word and one popcount (Jacobson 1989). Each part of a run has one.
   [theory](theory.md#3-indexes)
@@ -200,13 +214,16 @@ the usual one, both are given.
 - **snapshot** (the state), **view** — the exact state after one group. [concepts](concepts.md#views)
 - **snapshot isolation** — each transaction reads the state at its start, and fails if another wrote the same item
   meanwhile (first committer wins); it lets write skew through.
-- **space amplification** — disk space used over the size of the data: the chain, the fallback bottom run, and during
-  a full merge a new copy of the base, about three times the base. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
+- **space amplification** — disk space used over the size of the data: the chain alone after a merge (1, as the runs
+  are net), and during a full merge a new copy of the base beside the old one (2). [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **SSE4.2**, **x86-64-v2** — SSE4.2 is a set of instructions of x86-64 processors (Intel since Nehalem, 2008; AMD
   since Bulldozer, 2011), among them `crc32`, which computes CRC-32C 8 bytes at a time; a program sees whether the
   processor has it in bit 20 of a register the `cpuid` instruction fills. x86-64-v2 is the level of x86-64 that
   includes it, with CMPXCHG16B, LAHF-SAHF, POPCNT, SSE3, SSSE3 and SSE4.1 (the table "Micro-Architecture Levels" of
   the x86-64 psABI). Cepheus requires SSE4.2 only. [limits](limits.md#files-and-the-platform)
+- **stable sort** — a sort that keeps equal keys in the order they came: sorting a large group's facts by value, from
+  an order by thing, leaves the facts of one value in thing order, which is the order (property, value, thing) a run
+  needs. [architecture](architecture.md#large-groups)
 - **strict serializability** — serializable in an order that respects real time. [guarantees](guarantees.md#g4-strict-serializability)
 - **structural sharing** — a new version of a persistent structure shares every untouched part with the old one.
 - **syncer** — the thread that writes and forces the frames, beside the writer.

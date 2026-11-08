@@ -69,7 +69,9 @@ small journals), `test/crash.ml` (real `kill -9`, every confirmation checked for
 
 *Proof.* A group is encoded inside one frame; a frame is taken only if its header CRC and its body CRC check and its
 groups decode to the end of the body; otherwise recovery stops before it. A frame torn in the middle fails its body
-CRC except with probability 2⁻³² (for random damage).
+CRC except with probability 2⁻³² (for random damage). A large group's frame, which holds it alone, is written by pieces
+as it is encoded: its whole body first, then its header, then its trailer, then one fsync; until the header is
+written the pieces make no frame (recovery cuts them as a torn tail), and the group is confirmed only after the fsync.
 
 *Tested by* the simulation (groups on disk compared one by one with the written ones) and the exhaustive enumeration.
 
@@ -247,8 +249,11 @@ The `fsync` is never retried.
 merge, a large group's run, `snapshot`) does not stop the database: no group rests on that file (it takes its name
 only once its groups are durable, G12), so the file is removed, the error goes to stderr or to the caller of
 `snapshot`, and the writer goes on with the runs it had; a large group whose run fails returns `Io` for that group
-only. A failure to give a large group's run its name, after its frame is durable, stops the database (the next open
-replays the group from the journal).
+only, and its frame's pieces are taken back off the journal (`Journal.drop`, forced; if that fails, the database
+stops). A failure of the journal's own file while a large group's body is written by pieces stops the database as a
+failed `append` does: the journal is cut back to its last durable frame. A failure to force a large group's run or to
+give it its name, after its frame is durable, stops the database, the group confirmed (the next open replays it from
+the journal).
 
 *Residual at this version.* What happened to the writes answered `Io` is certain only when the writer's cut back to
 the last durable frame succeeded (G13): then they are absent from every later state. If the process died before the
@@ -293,7 +298,8 @@ to be set aside and no merge's file is left. A merge needs no more memory than t
 bytes a page of the new run (see [theory](theory.md), section 8).
 
 *Proof.* (a) A merge writes its file under a temporary name and forces it before the rename: a name, durable or not,
-never points at bytes that are not on the disk. (b) The rename is atomic; under F2 a prefix of the directory's name
+never points at bytes that are not on the disk (a large group's run is forced in its commit, at the same time as its
+frame's fsync, on the other file; `Snapshot.install` forces any run not yet forced before it renames it). (b) The rename is atomic; under F2 a prefix of the directory's name
 changes survives: the new name, or not. (c) A file gets its name only once its group is durable in the journal: the
 install runs with nothing in flight (the writer waited for the syncer), or, for a large group's run, in the commit
 after the group's frame was forced; and only if no fsync failed (G10); the merges a recovery makes while it replays a
@@ -358,8 +364,9 @@ changes nothing. If that `fsync` fails, the open fails and publishes nothing; th
 paper's own advice: re-dirty the pages by writing them back (section 5, #7), and let recovery rest on what the disk
 holds (#8). Nothing is retried blindly (G10): an `fsync` that follows a fresh write of the same bytes is a new write.
 (d) After a clean close no `fsync` had failed: `close` leaves its marker only then. (e) After a power loss, reads show
-the disk. Cost: one `pwrite` of the newest frame (a few KB, at most 8 MB) at an open after a crash; nothing at an open
-after a clean close, nothing on the write path.
+the disk. Cost: one `pwrite` of the newest frame at an open after a crash (a few KB, at most 8 MiB for the frames of
+small groups; a large group's whole frame, up to 256 MiB, when it is the newest, rewritten through the 4 MiB window);
+nothing at an open after a clean close, nothing on the write path.
 
 *Model-checked* by `tools/tlc.sh`: `spec/Journal.tla` models the page cache and the disk apart (written and not
 forced, marked clean by a failed `fsync`, kept or undone in memory, a truncation forced or not), process deaths with
