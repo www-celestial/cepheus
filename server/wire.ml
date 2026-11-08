@@ -21,6 +21,12 @@ let k_write = 5
 let k_ping = 6
 let k_admin = 7
 
+(* the follow stream (local readers, over the Unix socket only): Follow's reply carries the visibility page's and the
+   runs' descriptors (SCM_RIGHTS), then the server pushes (request id 0) frames and runs *)
+let k_follow = 8
+let k_frame = 9
+let k_runs = 10
+
 let f_more = 1
 let f_error = 2
 
@@ -38,6 +44,7 @@ type request =
   | Write of { db : int; serial : int; floor : int; by : int; why : string; ops : Resolve.op list }
   | Ping of string
   | Admin of string
+  | Follow of int  (** a database: this connection becomes its follow stream *)
 
 type reply =
   | Welcome of { server : string; cluster : string; session : int; frame : int; inflight : int }
@@ -47,6 +54,9 @@ type reply =
   | Receipt of Engine.receipt
   | Pong of string
   | Status of (string * string) list
+  | Start of { id : string; vseq : int; runs : (int * int) list }
+      (** Follow's reply: the database's id, the visibility number and the runs (lo, hi) of the state visible under
+          it, newest first; the descriptors of the page and of the runs, in that order, ride on its first byte *)
   | Err of { code : string; message : string }
 
 exception Malformed of string
@@ -157,6 +167,7 @@ let request_kind = function
   | Write _ -> k_write
   | Ping _ -> k_ping
   | Admin _ -> k_admin
+  | Follow _ -> k_follow
 
 let put_request b = function
   | Hello h ->
@@ -174,6 +185,7 @@ let put_request b = function
     List.iter (put_op b) w.ops
   | Ping s -> Buffer.add_string b s
   | Admin what -> Codec.put_string b what
+  | Follow db -> Codec.put_varint b db
 
 let get_request kind (r : Codec.reader) =
   let req =
@@ -206,6 +218,7 @@ let get_request kind (r : Codec.reader) =
       r.pos <- r.stop;
       Ping s)
     else if kind = k_admin then Admin (Codec.get_string r)
+    else if kind = k_follow then Follow (Codec.get_varint r)
     else raise (Malformed (Printf.sprintf "unknown request kind %d" kind))
   in
   if not (Codec.at_end r) then raise (Malformed "bytes after the request");
@@ -228,6 +241,10 @@ let get_prop r =
   let unique = Codec.get_byte r = 1 in
   id, { Schema.name; typ; many; unique }
 
+let put_runs b runs = Codec.put_varint b (List.length runs); List.iter (fun (lo, hi) -> Codec.put_varint b lo; Codec.put_varint b hi) runs
+
+let get_runs r = List.init (count r) (fun _ -> let lo = Codec.get_varint r in let hi = Codec.get_varint r in lo, hi)
+
 let put_reply b = function
   | Welcome w ->
     Codec.put_string b w.server; Codec.put_string b w.cluster; Codec.put_varint b w.session; Codec.put_varint b w.frame;
@@ -249,6 +266,7 @@ let put_reply b = function
     List.iter (fun (t, e) -> Codec.put_int b t; Codec.put_varint b e) r.things
   | Pong s -> Buffer.add_string b s
   | Status l -> Codec.put_varint b (List.length l); List.iter (fun (k, v) -> Codec.put_string b k; Codec.put_string b v) l
+  | Start st -> Codec.put_string b st.id; Codec.put_varint b st.vseq; put_runs b st.runs
   | Err e -> Codec.put_string b e.code; Codec.put_string b e.message
 
 let get_reply kind flags (r : Codec.reader) =
@@ -288,7 +306,21 @@ let get_reply kind flags (r : Codec.reader) =
     Pong s)
   else if kind = k_admin then
     Status (List.init (count r) (fun _ -> let k = Codec.get_string r in let v = Codec.get_string r in k, v))
+  else if kind = k_follow then
+    let id = Codec.get_string r in
+    let vseq = Codec.get_varint r in
+    Start { id; vseq; runs = get_runs r }
   else raise (Malformed (Printf.sprintf "unknown reply kind %d" kind))
+
+(* ---- the follow stream's pushes (request id 0) ----
+     frame = vseq | first | count | the groups' bytes (the journal's coding); a long one continues in frames of the
+             flag more that carry bytes only
+     runs  = vseq | runs (lo, hi), newest first; their descriptors ride on its first byte *)
+
+let put_frame_head b ~vseq ~first ~count = Codec.put_varint b vseq; Codec.put_varint b first; Codec.put_varint b count
+let get_frame_head r = let vseq = Codec.get_varint r in let first = Codec.get_varint r in let count = Codec.get_varint r in vseq, first, count
+let put_runs_push b ~vseq runs = Codec.put_varint b vseq; put_runs b runs
+let get_runs_push r = let vseq = Codec.get_varint r in vseq, get_runs r
 
 (* ---- errors as values: the API's codes and the server's ---- *)
 

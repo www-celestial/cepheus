@@ -515,6 +515,13 @@ let start_merge t (from : Store.view) =
              Atomic.set m.ready (Some Failed)));
   m
 
+(* The follow stream (the server's local readers, server/follow.ml): [before b] as the syncer takes the frame of [b],
+   before it is written; [after ()] once it is durable and published, before its writers are answered. Both run in
+   the syncer, one frame at a time. *)
+type follow = { before : batch -> unit; after : unit -> unit }
+
+let no_follow = { before = ignore; after = ignore }
+
 type live = {
   e : t;
   m : Mutex.t;
@@ -528,6 +535,7 @@ type live = {
   mutable closed : bool;
   mutable merging : merger option;
   mutable retry : int;  (* after a failed merge, the next waits until the delta has this many changes *)
+  follow : follow;
 }
 
 let deliver r res =
@@ -552,7 +560,9 @@ let syncer l () =
       l.to_sync <- None;
       l.syncing <- true;
       Mutex.unlock l.sm;
+      l.follow.before b;
       let results = commit l.e b in
+      l.follow.after ();
       Array.iteri (fun i r -> deliver r results.(i)) reqs;
       Mutex.lock l.sm;
       l.syncing <- false;
@@ -682,10 +692,10 @@ let writer l () =
   Condition.broadcast l.c_sync;
   Mutex.unlock l.sm
 
-let start e =
+let start ?(follow = no_follow) e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
-      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0 }
+      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow }
   in
   (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
   l.domain <- Some (Domain.spawn (fun () ->

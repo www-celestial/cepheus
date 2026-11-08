@@ -711,6 +711,18 @@ let check_and_build disk dir (lo0, hi0, file) id =
   | r -> r
   | exception e -> (try disk.close fd with Disk.Io _ -> ()); raise e
 
+(* The schema of a view of runs, read from the facts of the property things (raises Bad); for the server's local
+   readers too, which build views of the runs they are passed. *)
+let schema_of (v : Store.view) =
+  let schema = ref Schema.initial in
+  for p = Schema.first_prop to min (Store.max_thing v + 1) Schema.first_thing - 1 do
+    if Store.holders v p <> 0 then
+      match Resolve.read_prop v p with
+      | Ok d -> schema := Schema.set !schema p d
+      | Error m -> bad "%s" m
+  done;
+  !schema
+
 (* The newest chain of runs that check, from 0: the newest runs first, the next thing id and the journal position of
    the newest one; the reasons runs were set aside. Among the chains the run names allow (each run resting on the
    group the one below it ends at), the one reaching the newest group, with the fewest runs. *)
@@ -751,16 +763,7 @@ let load disk dir id =
         let runs = Array.of_list (List.map (fun (r, _, _) -> r) built) in
         let _, next_e, pos = List.hd built in
         let v = Store.of_runs ~group:runs.(0).hi ~next_e runs in
-        match
-          let schema = ref Schema.initial in
-          for p = Schema.first_prop to min (Store.max_thing v + 1) Schema.first_thing - 1 do
-            if Store.holders v p <> 0 then
-              match Resolve.read_prop v p with
-              | Ok d -> schema := Schema.set !schema p d
-              | Error m -> bad "%s" m
-          done;
-          !schema
-        with
+        match schema_of v with
         | schema -> Some ({ v with schema }, pos)
         | exception Bad m -> let _, _, n = List.hd chain in aside n m
         | exception Pages.Unreadable m -> let _, _, n = List.hd chain in aside n m))

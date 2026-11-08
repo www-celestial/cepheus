@@ -322,6 +322,26 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — ocaml-tls, the TLS in OCaml weighed against OpenSSL (its ciphers are C too; not an OSS-Fuzz project): OpenSSL kept.
 - **[sd_notify]** systemd. sd_notify(3), the readiness protocol: one datagram (`READY=1`) on `$NOTIFY_SOCKET`.
   https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html
+- **[Lamport 1986]** L. Lamport. On Interprocess Communication. Part I: Basic Formalism; Part II: Algorithms.
+  *Distributed Computing* 1(2), 77–85 and 86–101, 1986. https://doi.org/10.1007/BF01786227,
+  https://doi.org/10.1007/BF01786228
+  — Safe, regular and atomic registers: a regular register lets two reads, one after the other, see a new value and
+  then the old one; an atomic one does not. Local reads are atomic (G15); the design's first lease gave a regular one.
+- **[Gray 1989]** C. G. Gray, D. R. Cheriton. Leases: An Efficient Fault-Tolerant Mechanism for Distributed File Cache
+  Consistency. *SOSP* 1989, 202–210. https://doi.org/10.1145/74850.74870
+  — The lease, a right that ends by itself after a time: what the design first proposed for local reads, left for
+  the visibility number on one machine; it comes back between machines.
+- **[Moraru 2014]** I. Moraru, D. G. Andersen, M. Kaminsky. Paxos Quorum Leases: Fast Reads Without Sacrificing
+  Writes. *SoCC* 2014. https://doi.org/10.1145/2670979.2671001
+  — A lease holder reads locally only after it has assessed "whether an update to any of the leased objects is
+  ongoing (i.e., in the process of being committed), and if not": reads by message-based leases need that wait to
+  be linearizable; one machine's shared memory removes it. The way planned for readers on other machines (step 7).
+- **[unix(7)]** The Linux man-pages project. unix(7): `SCM_RIGHTS`, "Send or receive a set of open file descriptors
+  from another process". https://man7.org/linux/man-pages/man7/unix.7.html
+  — How the server passes a local reader its run files and its visibility page (`server/fdpass_stubs.c`).
+- **[mmap(2)]** The Linux man-pages project. mmap(2): `MAP_SHARED`, "Updates to the mapping are visible to other
+  processes mapping the same region". https://man7.org/linux/man-pages/man2/mmap.2.html
+  — The visibility page, mapped by the server and, read-only (`PROT_READ`), by every local reader.
 - **[socket(7)]** The Linux man-pages project. socket(7): `SO_RCVTIMEO` and `SO_SNDTIMEO`, the timeouts of a socket's
   reads and writes. https://man7.org/linux/man-pages/man7/socket.7.html
   — How a blocked connection thread wakes to apply the idle limit.

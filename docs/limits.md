@@ -113,6 +113,11 @@ defaults, and the cache's size (`set_cache`).
 | peers | exactly one in this version | `Config.of_toml` |
 | TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |
+| a local reader's queue | 64 MiB of frames not yet sent; past it the reader is cut off and follows again | `Follow.max_behind` |
+| descriptors a message | 64 (a database with more runs than that cannot be followed; a database has a few, one a level) | `Fdpass.max_fds` |
+| the visibility page | 4 KiB a database (`/dev/shm/cepheus-ID.visible`), the number in its first 8 bytes | `Fdpass.page_size`, `Follow.page_path` |
+| a local reader's page cache | 256 MiB, set for the process when it follows its first database (`Client.local_cache`) | `Client.follow` |
+| a follow stream's frames | the writer's frame, in wire frames of at most 1 MiB of groups (the flag `more`) | `Net.piece` |
 | connections | `[clients] max_connections`, 1 to 65,536; default 512; over it a new connection is closed at its accept (`too_many_connections` over the Unix socket) | `Config.default_max_connections`, `Net.serve` |
 | an idle connection | `[clients] idle_timeout` seconds, 0 to 604,800 (0: no limit); default 600: a whole request within it from the accept (the TLS handshake included) and from the previous request, and what the server sends taken within it | `Config.default_idle_timeout`, `Net.timeouts` |
 

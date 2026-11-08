@@ -11,6 +11,11 @@ the usual one, both are given.
   G2 anomaly. [case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)
 - **append-only** — a file that is only ever extended, never rewritten in place: the journal's segments.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **atomic register**, **regular register**, **new-old inversion** — Lamport's classes of shared registers (On
+  Interprocess Communication, 1986): a read of a *regular* register returns the last value written before it or one
+  being written meanwhile, so two reads one after the other may see a new value and then the old one (a **new-old
+  inversion**); an *atomic* register forbids it, every read and write appearing at one instant. Linearizable reads
+  are atomic: G15 forbids the inversion; the lease the design first proposed allowed it. [server](server.md#local-reads-g15)
 - **atomic** (all or nothing) — applied entirely or not at all: a group (G2); a rename; the switch to a new view (one
   atomic store). [guarantees](guarantees.md#g2-all-or-nothing)
 - **back-pressure** — a slow side slowing the fast one down instead of being flooded: at its limit of writes in flight
@@ -123,8 +128,15 @@ the usual one, both are given.
   [guarantees](guarantees.md#the-faults)
 - **falsifiable hypothesis** — a claim stated so that an experiment could show it wrong; one that no result could
   contradict says nothing. [case](case-seats.md#3-a-hypothesis-one-can-prove-wrong-and-its-cause)
+- **file descriptor**, **descriptor passing** (`SCM_RIGHTS`) — a descriptor is a process's number for an open file;
+  a Unix-domain socket can carry descriptors to another process, which receives its own descriptors of the same open
+  files (unix(7)). The server passes a local reader its run files and its visibility page this way: the reader needs
+  no permission on the data directory. [server](server.md#local-reads-g15)
 - **floor** — the lowest serial of a session still waiting for its reply, sent with each write: the receipts below it
   are forgotten. [server](server.md#writes-applied-once-sessions-g14)
+- **follow stream**, **follower** — a follow stream is the second connection of a local reader, on which the server
+  sends every frame the writer makes, before its fsync, and the database's runs; the follower is the copy of the
+  database the reader keeps from it, applying each frame as the server did. [server](server.md#local-reads-g15)
 - **fork** — a temporary database started from a view: the same writes and checks, nothing on disk, free to make.
   [concepts](concepts.md#forks)
 - **frame** — the unit of one write and one fsync in the journal: a header, the groups, a trailer.
@@ -169,6 +181,9 @@ the usual one, both are given.
   beside, by pieces). [architecture](architecture.md#large-groups)
 - **lazy leveling** — tiering at every level but the last, which is leveled (Dayan and Idreos 2018).
   [theory](theory.md#9-levels-on-disk-and-large-groups)
+- **lease** — a permission that ends by itself after a time, unless renewed (Gray and Cheriton 1989). The design
+  proposed one for local reads; it was left for the visibility number, which needs no clock (leases come back between
+  machines). [server](server.md#the-rules-the-design-first-had-and-why-they-were-left)
 - **level**, **size ratio** — a place for runs with a capacity in an LSM-tree; each level is T times larger than the
   one above (T, the size ratio, is 4 here): level l holds at most 200,000 × 4^l rows. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **leveling**, **tiering** — the two ways an LSM-tree of several levels merges: under leveling each level holds one
@@ -176,6 +191,8 @@ the usual one, both are given.
   into the next level when full. Leveling writes more and reads fewer runs. [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **linearizability** — each operation appears to take effect at one instant between its call and its return
   (Herlihy and Wing 1990); a group, as a write to one object, is linearizable.
+- **local read** — a read a program makes in its own memory, on the server's machine, from the database it follows:
+  no round trip, linearizable (G15). [server](server.md#local-reads-g15)
 - **loopback** — the network address of the machine itself (127.0.0.1, ::1): TCP that never leaves the machine.
   [server](server.md#what-it-is-and-why)
 - **lost update** — two read-then-writes read the same value and both write, so one change is lost; Cepheus stops it
@@ -260,6 +277,9 @@ the usual one, both are given.
 - **session table** — for each database and session, the receipts of the serials at or above the floor; saved in
   `DATA/NAME/sessions` and rebuilt from it and the journal at start.
   [server](server.md#writes-applied-once-sessions-g14)
+- **shared mapping** (`mmap`, `MAP_SHARED`) — a file's pages placed in a process's memory so that every process that
+  maps them sees one physical copy: a store by one is seen at once by the others. The visibility page is mapped so,
+  read-write by the server and read-only by the readers. [server](server.md#local-reads-g15)
 - **single writer** — one writer thread applies every group of a database, in order. [architecture](architecture.md#one-writer-threads-and-domains)
 - **snapshot** (the operation) — `Cepheus.snapshot`, the full merge: the delta and every run into one run, so that the
   next open replays nothing. The file of earlier versions (format 4 and before, `<group>.snap`) held the whole base;
@@ -306,6 +326,10 @@ the usual one, both are given.
 - **variable** — an unknown of a question, numbered from 0.
 - **varint** (LEB128), **zigzag** — a whole number in 7-bit pieces, small ones short; zigzag maps signed to unsigned
   (0, -1, 1, -2 → 0, 1, 2, 3). [formats](formats.md#a-group)
+- **visibility number**, **visibility page** — the number, in the first 8 bytes of a page of memory
+  (`/dev/shm/cepheus-ID.visible`), under which the newest durable state is visible: the server stores it after each
+  fsync, before it answers the writers; a local read loads it and serves the state held under it. One store makes a
+  group visible to every reader at one instant. [server](server.md#local-reads-g15)
 - **working view** — the writer's state with every resolved group, durable or not; readers never see it.
 - **worst-case optimal join** — a join whose work never exceeds, up to small factors, the largest answer the question
   could have (the AGM bound) (Ngo et al. 2012).

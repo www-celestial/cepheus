@@ -9,7 +9,13 @@ open Cepheus
 
 let log fmt = Printf.ksprintf (fun s -> prerr_endline ("cepheus: " ^ s)) fmt
 
-type database = { core : Core.db; live : Engine.live; mutable checkpointed : int }
+type database = {
+  core : Core.db;
+  live : Engine.live;
+  follow : Follow.t;
+  page : Unix.file_descr;  (* the visibility page, read-only: what every local reader is passed (never closed) *)
+  mutable checkpointed : int;
+}
 
 (* ---- one connection ---- *)
 
@@ -61,6 +67,126 @@ let plain fd = { read = Unix.read fd; write = write_all fd; bye = ignore }
 
 let over_tls (t : Tls.t) = { read = Tls.read t; write = Tls.write t; bye = (fun () -> Tls.close t) }
 
+(* ---- a follow stream (a local reader, over the Unix socket: Follow) ----
+   The connection's thread sends the database's events; another thread waits for the connection's end (the program
+   closed it, or the server stops and shuts every socket down). Each run is passed as a descriptor opened for this
+   reader alone (its own file offset), and the server's copy closed once sent. *)
+
+let open_ro path = Unix.openfile path [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0
+
+(* the runs' files, opened now, in order; a run a merge removed meanwhile fails (the reader connects again) *)
+let run_files (runs : Follow.run list) =
+  let opened = ref [] in
+  match
+    List.iter
+      (fun (r : Follow.run) ->
+        let fd =
+          match r.tmp with
+          | Some tmp -> ( try open_ro tmp with Unix.Unix_error (Unix.ENOENT, _, _) -> open_ro r.path)
+          | None -> open_ro r.path
+        in
+        opened := fd :: !opened)
+      runs
+  with
+  | () -> Ok (List.rev !opened)
+  | exception Unix.Unix_error (e, _, p) -> List.iter Unix.close !opened; Error (p ^ ": " ^ Unix.error_message e)
+
+let close_all = List.iter (fun fd -> try Unix.close fd with Unix.Unix_error _ -> ())
+
+(* one wire frame, the descriptors riding on its first byte *)
+let send_frame fd ~id ~kind ~flags body fds =
+  let f = Buffer.create (Buffer.length body + Wire.header) in
+  Wire.add_frame f ~id ~kind ~flags body;
+  let b = Buffer.to_bytes f in
+  Fdpass.send fd b 0 (Bytes.length b) fds
+
+let piece = 1 lsl 20
+
+let send_event fd = function
+  | Follow.Frame f ->
+    (* the head and the body's first piece, then pieces of the flag more: the last one without it *)
+    let n = Buffer.length f.body in
+    let b = Buffer.create (min n piece + 32) in
+    Wire.put_frame_head b ~vseq:f.vseq ~first:f.first ~count:f.count;
+    let k = min n piece in
+    Buffer.add_string b (Buffer.sub f.body 0 k);
+    send_frame fd ~id:0 ~kind:Wire.k_frame ~flags:(if k < n then Wire.f_more else 0) b [];
+    let o = ref k in
+    while !o < n do
+      let k = min (n - !o) piece in
+      let c = Buffer.create k in
+      Buffer.add_string c (Buffer.sub f.body !o k);
+      o := !o + k;
+      send_frame fd ~id:0 ~kind:Wire.k_frame ~flags:(if !o < n then Wire.f_more else 0) c []
+    done
+  | Follow.Runs r -> (
+    match run_files r.runs with
+    | Error m -> failwith ("a run to pass: " ^ m)
+    | Ok fds ->
+      let b = Buffer.create 64 in
+      Wire.put_runs_push b ~vseq:r.vseq (List.map (fun (x : Follow.run) -> x.lo, x.hi) r.runs);
+      Fun.protect ~finally:(fun () -> close_all fds) (fun () -> send_frame fd ~id:0 ~kind:Wire.k_runs ~flags:0 b fds))
+
+(* The stream checks its token's rights before each batch of events, and every second, as a request would (G16): a
+   token removed, or no longer allowed to read the database, ends it (the reader then reads through the server, and
+   is refused). *)
+let follow_stream (c : Core.conn) (d : database) fd ~id ~stopping =
+  let fol = d.follow in
+  let gone = Atomic.make false in
+  let watcher =
+    Thread.create
+      (fun () ->
+        let b = Bytes.create 64 in
+        let rec go () =
+          match Unix.read fd b 0 64 with
+          | 0 -> ()
+          | _ -> go ()
+          | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINTR), _, _) -> if not (Atomic.get stopping) then go ()
+          | exception Unix.Unix_error _ -> ()
+        in
+        go ();
+        Atomic.set gone true;
+        Follow.wake fol)
+      ()
+  in
+  let allowed () = Core.refresh_rights c; c.token <> None && c.rights.(d.core.index) <> None in
+  (* the stream ends when the program closes it, the server stops, or the token no longer may read (G16: the ticker
+     wakes the stream every second, as the token file is read again) *)
+  let stop () = Atomic.get gone || Atomic.get stopping || not (allowed ()) in
+  (* registered, then the page's and the runs' files opened: a merge may remove a run between the two, then again *)
+  let rec start tries =
+    let f, vseq, vis = Follow.register fol in
+    let runs = Follow.names fol.sdir vis.runs in
+    match run_files runs with
+    | Ok fds -> Ok (f, vseq, vis, runs, fds)
+    | Error m -> Follow.unregister fol f; if tries > 0 && not (stop ()) then start (tries - 1) else Error m
+  in
+  (match start 8 with
+   | Error m ->
+     let b = Buffer.create 64 in
+     Wire.put_reply b (Wire.Err { code = "busy"; message = "the database's files could not be passed: " ^ m });
+     (try send_frame fd ~id ~kind:Wire.k_follow ~flags:Wire.f_error b [] with Unix.Unix_error _ -> ())
+   | Ok (f, vseq, vis, runs, fds) ->
+     (try
+        let b = Buffer.create 256 in
+        Wire.put_reply b (Wire.Start { id = d.live.e.id; vseq; runs = List.map (fun (r : Follow.run) -> r.lo, r.hi) runs });
+        (* the page's descriptor is passed, never closed here (its lock); the runs' copies are closed once sent *)
+        Fun.protect ~finally:(fun () -> close_all fds) (fun () -> send_frame fd ~id ~kind:Wire.k_follow ~flags:0 b (d.page :: fds));
+        (* the groups after the newest run, up to the state visible under the number; then the number *)
+        Follow.catch_up Disk.real d.live.e vis (send_event fd);
+        send_event fd (Follow.Frame { vseq; first = vis.group + 1; count = 0; body = Buffer.create 0 });
+        let rec loop () =
+          match Follow.take ~stop fol f with
+          | [] -> ()
+          | evs -> if not (stop ()) then (List.iter (send_event fd) evs; loop ())
+        in
+        loop ()
+      with Unix.Unix_error _ | Failure _ | Journal.Damaged _ -> ());
+     Follow.unregister fol f);
+  (* the watcher wakes from its read *)
+  (try Unix.shutdown fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ());
+  Thread.join watcher
+
 let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
   Mutex.protect socks.sm (fun () -> Hashtbl.replace socks.open_ fd ());
   (try timeouts fd idle with Unix.Unix_error _ -> ());
@@ -70,12 +196,12 @@ let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
     (* the handshake in the connection's own thread: its computation (milliseconds) without the runtime lock; a
        peer silent for the idle limit in the middle of it makes a read fail (EAGAIN), and the connection closes *)
     match Tls.handshake ctx fd ~server:true ~host:"" with
-    | Ok t -> serve_conn srv dbs socks ~idle fd (over_tls t)
+    | Ok t -> serve_conn ~tls:t srv dbs socks ~idle fd (over_tls t)
     | Error _ ->
       Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
       (try Unix.close fd with Unix.Unix_error _ -> ()))
 
-and serve_conn (srv : Core.t) (dbs : database array) socks ~idle fd io =
+and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
   let dead = ref false in
   let scratch = ref (Bytes.create 65536) in
   let c_ref = ref None in
@@ -133,6 +259,14 @@ and serve_conn (srv : Core.t) (dbs : database array) socks ~idle fd io =
        match why with
        | Core.Shut -> go := false
        | _ when !dead -> go := false
+       | Core.Follow (d, id) ->
+         (* local reads: over the Unix socket only (a descriptor cannot cross machines) *)
+         if tls <> None then begin
+           Core.err c ~id ~kind:Wire.k_follow "denied" "local reads are for programs on the server's machine, over its Unix socket";
+           flush ()
+         end
+         else follow_stream c dbs.(d.index) fd ~id ~stopping:srv.stopping;
+         go := false
        | Core.Full -> Core.wait_room c
        | Core.Need ->
          (* room for the frame begun: its length is known once its first 4 bytes are here *)
@@ -280,12 +414,20 @@ let open_databases (cfg : Config.t) =
         try Ok (Sessions.load Disk.real dir e.id)
         with Journal.Damaged m -> Engine.close e; Error (Printf.sprintf "database %s: %s" name m)
       in
-      Result.map
-        (fun sessions ->
-          let live = Engine.start e in
-          let core = { Core.name; index = i; dir; view = (fun () -> Atomic.get live.e.published); sessions } in
-          { core; live; checkpointed = (Atomic.get e.published).group })
-        sessions
+      match sessions with
+      | Error m -> Error m
+      | Ok sessions -> (
+        match Follow.open_page (Follow.page_path e.id) with
+        | exception Unix.Unix_error (err, _, p) ->
+          Engine.close e;
+          Error (Printf.sprintf "database %s: %s: %s" name p (Unix.error_message err))
+        | exception Failure m -> Engine.close e; Error (Printf.sprintf "database %s: %s" name m)
+        | word, page ->
+          (* the follow stream first: the writer calls it from its first frame *)
+          let follow = Follow.create e word in
+          let live = Engine.start ~follow:(Follow.hooks follow) e in
+          let core = { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions; more = (fun () -> Follow.status follow) } in
+          Ok { core; live; follow; page; checkpointed = (Atomic.get e.published).group })
   in
   (* in parallel, a domain each, at most [domains] at once *)
   let names = Array.of_list cfg.databases in
@@ -357,7 +499,8 @@ let serve (cfg : Config.t) =
           let tcp = Option.map (fun (h, p) -> tcp_listener h p) cfg.listen in
           sock, tcp
         with
-        | exception (Failure m | Unix.Unix_error (_, _, m)) ->
+        | exception ((Failure _ | Unix.Unix_error _) as e) ->
+          let m = match e with Unix.Unix_error (err, call, arg) -> Printf.sprintf "%s %s: %s" call arg (Unix.error_message err) | Failure m -> m | _ -> "" in
           Array.iter (fun d -> Engine.stop d.live) dbs;
           Unix.close lockfd;
           Error m
@@ -428,6 +571,7 @@ let serve (cfg : Config.t) =
                 | Error m -> log "%s not reloaded: %s" tokens_file m
               end;
               Array.iter checkpoint dbs;
+              Array.iter (fun d -> Follow.tick d.follow) dbs;
               Array.iter
                 (fun d -> match d.live.e.stopped with
                    | Some e when Atomic.get failed = None ->
@@ -458,6 +602,7 @@ let serve (cfg : Config.t) =
           Option.iter Unix.close sock;
           Option.iter Unix.close tcp;
           Option.iter (fun p -> try Unix.unlink p with Unix.Unix_error _ -> ()) (Config.socket_path cfg);
+          Array.iter (fun d -> Follow.wake d.follow) dbs;
           let conns = Mutex.protect srv.cm (fun () -> Hashtbl.fold (fun _ c acc -> c :: acc) srv.conns []) in
           List.iter Core.drain conns;
           Atomic.set ticking false;

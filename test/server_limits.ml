@@ -98,7 +98,7 @@ let () =
   C.check (Unix.gettimeofday () -. t1 < 2.5) "the silent connections closed within twice the limit";
   (* room again: a client is served *)
   let c = match Client.connect (Client.Unix_socket sock) tok with Ok c -> c | Error m -> failwith m in
-  let db = match Client.open_db c "main" with Ok db -> db | Error e -> failwith e.message in
+  let db = match Client.open_db ~local:false c "main" with Ok db -> db | Error e -> failwith e.message in
   C.check (match Client.get c db 1 with Ok (_, f) -> f <> [] | Error _ -> false) "a client is served once there is room";
   (* a byte at a time, never a whole request: closed *)
   let fd = unix_conn sock in
@@ -125,7 +125,7 @@ let () =
   (* pings more often than the limit keep a connection (a new one: the first has been idle meanwhile) *)
   Client.close c;
   let c = match Client.connect (Client.Unix_socket sock) tok with Ok c -> c | Error m -> failwith m in
-  let db = match Client.open_db c "main" with Ok db -> db | Error e -> failwith e.message in
+  let db = match Client.open_db ~local:false c "main" with Ok db -> db | Error e -> failwith e.message in
   let ok = ref true in
   for _ = 1 to 8 do
     Thread.delay 0.4;
@@ -138,6 +138,7 @@ let () =
   Client.close c;
   Unix.kill pid Sys.sigterm;
   (match Unix.waitpid [] pid with _, Unix.WEXITED 0 -> C.check true "a clean stop" | _ -> C.check false "not a clean stop");
+  (try Sys.remove (Follow.page_of_dir (Filename.concat a "data/main")) with Sys_error _ -> ());
   C.rmrf dir;
   ignore Value.equal;
   C.finish "server limits"

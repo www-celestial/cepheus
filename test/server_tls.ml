@@ -113,6 +113,7 @@ let () =
         "[cluster]\nname = \"p\"\nid = \"cph-c-0000000000000001\"\nme = \"srv1\"\n[[peer]]\nname = \"srv1\"\naddress = \"127.0.0.1:1\"\n\
          [clients]\nlisten = \"127.0.0.1:7999\"\n[storage]\ndata = \"pdata\"\n[[database]]\nname = \"main\"\n");
   C.check (match Config.load plain with Error _ -> true | Ok _ -> false) "listen without [tls] is refused";
+  (try Sys.remove (Follow.page_of_dir (Filename.concat a "data/main")) with Sys_error _ -> ());
   C.rmrf dir;
   ignore Value.equal;
   C.finish "server tls"

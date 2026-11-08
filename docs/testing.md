@@ -151,18 +151,32 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   constant-time comparison, `tokens.toml` written and read back), the wire (5,000 random requests coded and decoded,
   every cut of their bodies refused; every reply; a count larger than its bytes refused before anything is
   allocated), origins, the session table and its checkpoint (a damaged one refused), and the rights of every token
-  against every request on every database through the server's core (G16), a token removed or narrowed, a forged
-  origin, a frame over the limit.
+  against every request on every database through the server's core (G16, `Follow` with them), a token removed or
+  narrowed, a forged origin, a frame over the limit; and what local readers need from the system: descriptors passed
+  over a socket (400 random messages of 1 to 6,000 bytes with up to 8 descriptors, read in random pieces: the bytes
+  and the files come out in order, each a new descriptor of the same open file, none left open; more than 64
+  refused) and the visibility page (a store seen at once through the read-only mapping, one mapping a file).
 - `server_sim`: the deterministic simulation of the server over a simulated network, on the simulated disk: clients
   of every right, pipelined, their bytes cut at any byte and delivered late, connections broken (the unanswered
   writes sent again with their serials), the writer's batches, merges, checkpoints, server deaths and power losses
   at any disk call, failed fsyncs, clean stops, damaged checkpoints. Checked: G1 to G5, G10, G11 through the protocol,
   G14 (each session and serial in one group at most, every receipt naming it and its new things), G16. Two bugs it
   found are in the server's history: a test that did not force a directory's name, and a refused write applied after
-  a later one when sent again (now answered with its first error).
+  a later one when sent again (now answered with its first error). Local readers (G15) follow the database through
+  the real fan-out and follower code (`Follow`, `Follower`), their events taken by the server's sender and applied
+  by the reader at moments the seed draws (a reader paused, slow, killed and started again), their streams cut when
+  the server dies (what was sent stays readable), the visibility page kept by a server's death and reset by a power
+  loss; in some seeds every group of two to four operations is a large group (a run of its own, passed before its
+  frame is durable). Every read, local or remote, is checked when it returns: it holds every group answered to any
+  client before it started (Fresh), every group any read returned before it started (Ordered), and it is the model's
+  state at its group, durable (Durable): G15, with G5 and G13 for readers. The first runs found one bug of the test
+  (a large group's body, written by pieces, decoded from the empty batch buffer).
 - `server_crash`: a real `cepheus serve`, killed 20 times (kill -9) under four clients writing through the Unix
-  socket; at the end every acknowledged write is in the database once and no write twice (G1, G14); a second server
-  on the same data is refused (G9), `cepheus status`, a token removed while its program is connected, `cepheus stop`.
+  socket; at the end every acknowledged write is in the database once and no write twice (G1, G14); meanwhile two
+  readers read in their own memory, and every read, local or at the server while a follower is made again, holds
+  every write answered and every state returned before it started (G15 with the real clock: millions of reads); a
+  second server on the same data is refused (G9), `cepheus status`, a token removed while its program is connected
+  (refused within the reload, its local reads too: the stream ends), `cepheus stop`.
 - `server_tls`: a real server with TLS: a client of the cluster's CA reads; another cluster's CA, a certificate that
   does not name the host, another cluster id, a TCP client without a CA and a plain client on the TLS port are all
   refused, and the server goes on; TCP without `[tls]` is refused at start.
@@ -208,6 +222,11 @@ a round moves nothing. Two broken copies of the core were caught in under a minu
 byte more than it gave (a read past what the peer wrote), one that gives OpenSSL one byte less than it received (a
 handshake that never ends).
 
+`server/fdpass_stubs.c` (descriptors passed for local reads, and the read-only mapping of the visibility page) is
+property-tested through OCaml in `server_unit`: 400 random messages of 1 to 6,000 bytes with 0 to 8 descriptors,
+read in random pieces: the bytes and the files come out in order, each a new descriptor of the same open file, none
+left open; more than 64 descriptors are refused; the page shows the server's store at once.
+
 ## Not yet
 
 Jepsen-style tests under network faults come with replication.
@@ -252,6 +271,29 @@ too), `AckedDurable` (G1). Bounds in `spec/Merge.cfg` (3 groups: 6 possible runs
 13 s; 4 groups did not end in 12 minutes. Its five rules are constants: set any of `ForceBeforeRename`,
 `InstallWhenDurable`, `ForceAtRecovery`, `MarkerOnlyIfClean`, `RewriteAtRecovery` to FALSE and TLC prints a
 counterexample of 4 or 5 steps.
+
+`spec/LocalReads.tla` models local reads (G15, [the server](server.md#local-reads-g15)): a server that writes frames
+one at a time, sends each to its readers before its fsync and answers its writers after; readers that apply frames
+from a channel that keeps its bytes past the server's death, and notice the death later; programs' reads in each
+reader and at the server, each an interval (it starts, takes a state, returns it). The invariant `Linearizable`
+checks three conditions on every read when it returns, Fresh, Ordered and Durable, with write ids so that a group a
+death lost and a later group of the same number are told apart. The constant `Rule` picks how a group becomes
+visible:
+
+| configuration | rule | bounds | result |
+|---|---|---|---|
+| `LocalReads.cfg` | the one built (the visibility number) | 2 readers (symmetric), remote reads, 3 writes | holds: 3,436,820 distinct states |
+| `LocalReadsCrash.cfg` | the one built | 1 reader, remote reads, 3 writes, a server death (its frame in flight kept or lost) | holds: 210,716 |
+| `LocalReadsLive.cfg` | the one built | 1 reader, 2 writes | `NeverReadsAll` breaks, as it must: reads do return the newest group |
+| `LocalReadsNoSkip.cfg` | no 2 added at a start | 1 reader, 3 writes, a death | breaks Fresh (8 states) |
+| `LocalReadsEarly.cfg` | the number stored before the fsync | 1 reader, 2 writes, a death | breaks Durable (6 states) |
+| `LocalReadsRemoteFirst.cfg` | remote reads moved at the fsync, before the number | 1 reader, 2 writes | breaks Ordered (8 states) |
+| `LocalReadsDesign.cfg` | the design's lease | 1 reader, 2 writes, 4 ticks, leases of 2 | breaks Ordered (7 states) |
+| `LocalReadsDesignFresh.cfg` | the design's lease | the same | `NoStale` (Fresh and Durable) holds: 289,765 |
+| `LocalReadsDraft.cfg` | the design's first draft | the same | breaks `NoStale`: Fresh (12 states) |
+
+`tools/tlc.sh` runs them all and fails unless each that must break does; the three that hold take about two minutes
+on the test machine.
 
 ## Further reading
 

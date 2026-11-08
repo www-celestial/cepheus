@@ -12,8 +12,9 @@ type db = {
   name : string;
   index : int;
   dir : string;
-  view : unit -> Store.view;  (* the newest durable state *)
+  view : unit -> Store.view;  (* the newest durable state, as reads see it *)
   sessions : Sessions.t;
+  more : unit -> (string * string) list;  (* the transport's lines for status (its local readers) *)
 }
 
 type t = {
@@ -188,85 +189,85 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
+(* The answer of a question with its select on [v], the same at the server and in a local reader: its columns, its
+   rows, the type of each column and the index word of each cell (no value built). Raises Query.Bad. *)
+type answer = { cols : int; n : int; typ : int -> Value.typ; word : int -> int -> int }
+
+let answer (v : Store.view) (q : Query.t) (sel : Wire.select) =
+  let ty = Query.types v q in
+  let var x = if x < 0 || x >= q.vars then Query.bad "variable %d out of range" x in
+  match sel with
+  | Wire.Give give ->
+    let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
+    Array.iter var give;
+    let k = Array.length give in
+    let acc =
+      Query.fold v q ~init:(fun () -> { a = [||]; n = 0 }) ~merge:append
+        ~step:(fun acc env -> for i = 0 to k - 1 do push acc env.(give.(i)) done; acc)
+    in
+    { cols = k; n = acc.n / max 1 k; typ = (fun j -> ty.(give.(j))); word = (fun i j -> acc.a.((i * k) + j)) }
+  | Wire.Group (keys, aggs) ->
+    Array.iter var keys;
+    Array.iter
+      (function
+        | Wire.Count -> ()
+        | Wire.Sum x ->
+          var x;
+          (match ty.(x) with Tint | Tmoney _ -> () | t -> Query.bad "a sum of a %s variable" (Value.typ_name t))
+        | Wire.Min x | Wire.Max x ->
+          var x;
+          (match ty.(x) with Tint | Tmoney _ | Tdate -> () | t -> Query.bad "a min or max of a %s variable" (Value.typ_name t)))
+      aggs;
+    let nk = Array.length keys and na = Array.length aggs in
+    (* key words -> aggregate words, a table a domain, joined at the end *)
+    let fresh () = Array.init na (fun i -> match aggs.(i) with Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) in
+    let add (st : int array) env =
+      for i = 0 to na - 1 do
+        match aggs.(i) with
+        | Wire.Count -> st.(i) <- st.(i) + 1
+        | Wire.Sum x -> st.(i) <- st.(i) + env.(x)
+        | Wire.Min x -> if env.(x) < st.(i) then st.(i) <- env.(x)
+        | Wire.Max x -> if env.(x) > st.(i) then st.(i) <- env.(x)
+      done
+    in
+    let join (a : int array) (b : int array) =
+      for i = 0 to na - 1 do
+        match aggs.(i) with
+        | Wire.Count | Wire.Sum _ -> a.(i) <- a.(i) + b.(i)
+        | Wire.Min _ -> a.(i) <- min a.(i) b.(i)
+        | Wire.Max _ -> a.(i) <- max a.(i) b.(i)
+      done
+    in
+    let tbl =
+      Query.fold v q ~init:(fun () -> Hashtbl.create 64)
+        ~merge:(fun a b ->
+          Hashtbl.iter (fun k s -> match Hashtbl.find_opt a k with Some s' -> join s' s | None -> Hashtbl.replace a k s) b;
+          a)
+        ~step:(fun t env ->
+          let k = Array.init nk (fun i -> env.(keys.(i))) in
+          (match Hashtbl.find_opt t k with
+           | Some s -> add s env
+           | None -> let s = fresh () in add s env; Hashtbl.replace t k s);
+          t)
+    in
+    let groups = Array.of_seq (Hashtbl.to_seq tbl) in
+    (* in the order of the keys' words: an answer that does not depend on the number of domains *)
+    Array.sort compare groups;
+    let typ j =
+      if j < nk then ty.(keys.(j))
+      else match aggs.(j - nk) with Wire.Count -> Value.Tint | Wire.Sum y | Wire.Min y | Wire.Max y -> ty.(y)
+    in
+    let word i j = let k, s = groups.(i) in if j < nk then k.(j) else s.(j - nk) in
+    { cols = nk + na; n = Array.length groups; typ; word }
+
 let find c ~id ~kind d (q : Query.t) (sel : Wire.select) =
   let v = d.view () in
-  match Query.types v q with
+  match answer v q sel with
+  | a ->
+    let typs = Array.init a.cols a.typ in
+    send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
-  | ty -> (
-    let var x = if x < 0 || x >= q.vars then Query.bad "variable %d out of range" x in
-    match
-      match sel with
-      | Wire.Give give ->
-        let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
-        Array.iter var give;
-        let k = Array.length give in
-        let acc =
-          Query.fold v q ~init:(fun () -> { a = [||]; n = 0 }) ~merge:append
-            ~step:(fun acc env -> for i = 0 to k - 1 do push acc env.(give.(i)) done; acc)
-        in
-        `Rows (k, fun i b -> for j = 0 to k - 1 do put_word b v ty.(give.(j)) acc.a.((i * k) + j) done), acc.n / max 1 k
-      | Wire.Group (keys, aggs) ->
-        Array.iter var keys;
-        Array.iter
-          (function
-            | Wire.Count -> ()
-            | Wire.Sum x ->
-              var x;
-              (match ty.(x) with Tint | Tmoney _ -> () | t -> Query.bad "a sum of a %s variable" (Value.typ_name t))
-            | Wire.Min x | Wire.Max x ->
-              var x;
-              (match ty.(x) with Tint | Tmoney _ | Tdate -> () | t -> Query.bad "a min or max of a %s variable" (Value.typ_name t)))
-          aggs;
-        let nk = Array.length keys and na = Array.length aggs in
-        (* key words -> aggregate words, a table a domain, joined at the end *)
-        let fresh () = Array.init na (fun i -> match aggs.(i) with Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) in
-        let add (st : int array) env =
-          for i = 0 to na - 1 do
-            match aggs.(i) with
-            | Wire.Count -> st.(i) <- st.(i) + 1
-            | Wire.Sum x -> st.(i) <- st.(i) + env.(x)
-            | Wire.Min x -> if env.(x) < st.(i) then st.(i) <- env.(x)
-            | Wire.Max x -> if env.(x) > st.(i) then st.(i) <- env.(x)
-          done
-        in
-        let join (a : int array) (b : int array) =
-          for i = 0 to na - 1 do
-            match aggs.(i) with
-            | Wire.Count | Wire.Sum _ -> a.(i) <- a.(i) + b.(i)
-            | Wire.Min _ -> a.(i) <- min a.(i) b.(i)
-            | Wire.Max _ -> a.(i) <- max a.(i) b.(i)
-          done
-        in
-        let tbl =
-          Query.fold v q ~init:(fun () -> Hashtbl.create 64)
-            ~merge:(fun a b ->
-              Hashtbl.iter (fun k s -> match Hashtbl.find_opt a k with Some s' -> join s' s | None -> Hashtbl.replace a k s) b;
-              a)
-            ~step:(fun t env ->
-              let k = Array.init nk (fun i -> env.(keys.(i))) in
-              (match Hashtbl.find_opt t k with
-               | Some s -> add s env
-               | None -> let s = fresh () in add s env; Hashtbl.replace t k s);
-              t)
-        in
-        let groups = Array.of_seq (Hashtbl.to_seq tbl) in
-        (* in the order of the keys' words: an answer that does not depend on the number of domains *)
-        Array.sort compare groups;
-        let row i b =
-          let k, s = groups.(i) in
-          Array.iteri (fun j w -> put_word b v ty.(keys.(j)) w) k;
-          Array.iteri
-            (fun j x ->
-              match aggs.(j) with
-              | Wire.Count -> Value.encode b (Int x)
-              | Wire.Sum y | Wire.Min y | Wire.Max y -> put_word b v ty.(y) x)
-            s
-        in
-        `Rows (nk + na, row), Array.length groups
-    with
-    | `Rows (cols, row), n -> send_rows c ~id ~kind v.group cols row n
-    | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
-    | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m)
+  | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
 
 (* ---- writes ---- *)
 
@@ -313,10 +314,14 @@ let status c =
       (fun d ->
         let v = d.view () in
         [ "database." ^ d.name ^ ".group", string_of_int v.group; "database." ^ d.name ^ ".facts", string_of_int (Store.facts v);
-          "database." ^ d.name ^ ".resent", string_of_int d.sessions.resent ])
+          "database." ^ d.name ^ ".resent", string_of_int d.sessions.resent ]
+        @ List.map (fun (k, x) -> "database." ^ d.name ^ "." ^ k, x) (d.more ()))
       (Array.to_list srv.dbs)
 
-type action = Continue | Close
+type action =
+  | Continue
+  | Close
+  | Follows of db * int  (** the connection becomes the database's follow stream (request id): the transport's work *)
 
 (* one complete frame: [r] reads its body *)
 let handle c ~id ~kind (r : Codec.reader) =
@@ -380,9 +385,20 @@ let handle c ~id ~kind (r : Codec.reader) =
           (match writable c ~id ~kind w.db with
            | None -> ()
            | Some d -> write c ~id ~kind d ~serial:w.serial ~floor:w.floor ~by:w.by ~why:w.why w.ops);
-          Continue))
+          Continue
+        | _, Wire.Follow i -> (
+          (* a reader's right is enough (G16); a follow stream carries nothing else *)
+          match readable c ~id ~kind i with
+          | None -> Continue
+          | Some d ->
+            if Mutex.protect c.om (fun () -> c.inflight) > 0 then (err c ~id ~kind "invalid" "Follow on a connection with writes in flight"; Close)
+            else Follows (d, id))))
 
-type input = Need  (** a frame is not whole yet: read more *) | Full  (** the writes in flight reached the limit *) | Shut
+type input =
+  | Need  (** a frame is not whole yet: read more *)
+  | Full  (** the writes in flight reached the limit *)
+  | Shut
+  | Follow of db * int  (** the connection becomes a follow stream (Follows) *)
 
 (* Every complete frame of [buf] from [off] to [stop], until the connection has its limit of writes in flight: the
    offset of the first byte not used, and why it stopped. A frame over the limit closes the connection before its
@@ -403,6 +419,7 @@ let input c buf off stop =
         match handle c ~id ~kind (Codec.reader buf (o + Wire.header) (len - 6)) with
         | Continue -> go (o + 4 + len)
         | Close -> o + 4 + len, Shut
+        | Follows (d, id) -> o + 4 + len, Follow (d, id)
   in
   go off
 

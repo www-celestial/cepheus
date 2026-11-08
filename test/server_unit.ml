@@ -1,6 +1,8 @@
 (* Unit and property tests of the server's parts: TOML, cluster.toml's rules, tokens, the wire codings (every request
-   and reply, round trips of random values), the origin of a group, the session table and its checkpoint, and the
-   rights of every token against every request (G16), through the server's core. *)
+   and reply, round trips of random values), the origin of a group, the session table and its checkpoint, the
+   rights of every token against every request (G16), through the server's core, and what local readers need from
+   the system: descriptors passed over a socket (random messages and descriptors, read in random pieces) and the
+   visibility page shared read-only. *)
 
 open Cepheus
 open Cepheus_server
@@ -107,7 +109,7 @@ let rand_value r =
 let rand_term r = match Rng.int r 3 with 0 -> Query.Var (Rng.int r 4) | 1 -> Query.Thing (Rng.int r 70000) | _ -> Query.Val (rand_value r)
 
 let rand_request r =
-  match Rng.int r 7 with
+  match Rng.int r 8 with
   | 0 -> Wire.Hello { version = Rng.int r 3; token = "cph_" ^ string_of_int (Rng.int r 1000); program = "p"; session = Rng.int r 1_000_000 }
   | 1 -> Wire.Open "shop"
   | 2 -> Wire.Get { db = Rng.int r 4; thing = Rng.int r 1_000_000 }
@@ -125,6 +127,7 @@ let rand_request r =
       | _ -> Resolve.Expect (Rng.int r 100, Rng.int r 40, None) in
     Wire.Write { db = 0; serial = Rng.int r 100; floor = Rng.int r 100; by = Rng.int r 10 - 5; why = "why"; ops = List.init (Rng.int r 5) (fun _ -> op ()) }
   | 5 -> Wire.Ping (String.make (Rng.int r 30) 'p')
+  | 6 -> Wire.Follow (Rng.int r 300)
   | _ -> Wire.Admin "status"
 
 let wire () =
@@ -155,13 +158,15 @@ let wire () =
       Wire.Facts { group = 3; facts = [ 16, Value.Text "x"; 17, Value.Int (-4) ] };
       Wire.Rows { group = 5; cols = 2; rows = [ [| Value.Int 1; Value.Text "a" |]; [| Value.Int 2; Value.Text "b" |] ] };
       Wire.Receipt { group = 4; things = [ -1, 65536; -2, 65537 ] }; Wire.Pong "x"; Wire.Status [ "a", "b" ];
+      Wire.Start { id = "0123456789abcdef"; vseq = 77; runs = [ 40, 90; 0, 40 ] };
       Wire.Err { code = "denied"; message = "no" } ]
   in
   List.iter
     (fun rep ->
       let kind = match rep with
         | Wire.Welcome _ -> Wire.k_hello | Opened _ -> Wire.k_open | Facts _ -> Wire.k_get | Rows _ -> Wire.k_find
-        | Receipt _ -> Wire.k_write | Pong _ -> Wire.k_ping | Status _ -> Wire.k_admin | Err _ -> Wire.k_get in
+        | Receipt _ -> Wire.k_write | Pong _ -> Wire.k_ping | Status _ -> Wire.k_admin | Start _ -> Wire.k_follow
+        | Err _ -> Wire.k_get in
       let flags = match rep with Wire.Err _ -> Wire.f_error | _ -> 0 in
       let b = Buffer.create 64 in
       Wire.put_reply b rep;
@@ -219,7 +224,8 @@ let rights () =
   disk.mkdir "/d";
   let open_db name =
     let e = Result.get_ok (Engine.open_ disk ("/d/" ^ name)) in
-    e, { Core.name; index = (if name = "shop" then 0 else 1); dir = "/d/" ^ name; view = (fun () -> Atomic.get e.published); sessions = Sessions.create () }
+    e, { Core.name; index = (if name = "shop" then 0 else 1); dir = "/d/" ^ name; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+         more = (fun () -> []) }
   in
   let e0, d0 = open_db "shop" and e1, d1 = open_db "stock" in
   let mk name databases admin = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin } in
@@ -281,7 +287,16 @@ let rights () =
       (match ask (Wire.Admin "status") with
        | Some (Wire.Status _) -> check (tok = "a") "rights: status for %s" tok
        | Some (Wire.Err { code = "denied"; _ }) -> check (tok <> "a") "rights: status denied to %s" tok
-       | _ -> check false "rights: status"))
+       | _ -> check false "rights: status");
+      (* Follow: a reader's right is enough; granted, the core answers nothing (the transport takes the connection) *)
+      List.iter
+        (fun db ->
+          let ask = session tok in
+          match ask (Wire.Follow db) with
+          | None -> check (right tok db <> `None) "rights: %s may not follow database %d" tok db
+          | Some (Wire.Err { code = "denied"; _ }) -> check (right tok db = `None) "rights: %s denied following database %d" tok db
+          | Some _ -> check false "rights: a reply to Follow")
+        [ 0; 1 ])
     [ "w"; "r"; "o"; "a" ];
   (* an unknown token, and requests before Hello *)
   let ask = session "nobody" in
@@ -308,6 +323,68 @@ let rights () =
   Bytes.set_int32_le big 0 (Int32.of_int (Wire.max_frame + 1));
   check (snd (Core.input c big 0 10) = Core.Shut) "rights: a frame over 16 MiB closes"
 
+(* ---- what local readers need from the system ---- *)
+
+let open_fds () = Array.length (Sys.readdir "/proc/self/fd")
+
+let fdpass () =
+  let r = Rng.make 23 in
+  let before = open_fds () in
+  let a, b = Unix.socketpair ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  (* the files passed: pipes' read ends, each known by its inode *)
+  let pool = Array.init 8 (fun _ -> let x, y = Unix.pipe ~cloexec:true () in Unix.close y; x) in
+  let ino fd = (Unix.fstat fd).st_ino in
+  let ok = ref true and passed = ref 0 in
+  for _ = 1 to 400 do
+    let n = 1 + Rng.int r 6000 in
+    let msg = Bytes.init n (fun _ -> Char.chr (Rng.int r 256)) in
+    let fds = List.init (Rng.int r 9) (fun _ -> Rng.pick r pool) in
+    let t = Thread.create (fun () -> Fdpass.send a msg 0 n fds) () in
+    let got = Buffer.create n and rfds = ref [] in
+    while Buffer.length got < n do
+      let piece = 1 + Rng.int r 3000 in
+      let buf = Bytes.create (piece + 7) in
+      let m, fs = Fdpass.recv b buf 7 piece in
+      Buffer.add_subbytes got buf 7 m;
+      rfds := !rfds @ fs
+    done;
+    Thread.join t;
+    if Buffer.to_bytes got <> msg then ok := false;
+    if List.map ino !rfds <> List.map ino fds then ok := false;
+    (* each a new descriptor of the same open file, close-on-exec *)
+    List.iter (fun fd -> if List.mem fd fds then ok := false) !rfds;
+    passed := !passed + List.length !rfds;
+    List.iter Unix.close !rfds
+  done;
+  check !ok "fdpass: 400 random messages with up to 8 descriptors, read in random pieces: the bytes and the files in order";
+  check (match Fdpass.send a (Bytes.create 1) 0 1 (List.init 65 (fun _ -> pool.(0))) with _ -> false | exception Invalid_argument _ -> true)
+    "fdpass: more than 64 descriptors are refused";
+  check (match Fdpass.recv b (Bytes.create 4) 2 3 with _ -> false | exception Invalid_argument _ -> true) "fdpass: a range out of the buffer is refused";
+  Array.iter Unix.close pool;
+  Unix.close a;
+  Unix.close b;
+  check (open_fds () = before) "fdpass: no descriptor left open (%d passed)" !passed;
+  (* the visibility page: the server's store is read at once through a read-only mapping, one a file *)
+  let dir = Filename.concat (Option.value (Sys.getenv_opt "CEPHEUS_TMP") ~default:(Filename.get_temp_dir_name ())) (Printf.sprintf "cepheus-page-%d" (Unix.getpid ())) in
+  C.rmrf dir;
+  Unix.mkdir dir 0o700;
+  let path = Filename.concat dir "page" in
+  let word, ro = Follow.open_page path in
+  word.set 12345;
+  (* as a reader maps the read-only descriptor it is passed (here the server's own: closing a copy of it in this
+     process would release the server's lock, as POSIX locks go) *)
+  let p = Fdpass.map_page ro in
+  check (Fdpass.word p = 12345) "page: the reader reads the server's number";
+  word.set 7;
+  check (Fdpass.word p = 7) "page: a store is seen at once";
+  check (Fdpass.map_page ro == p) "page: one mapping a file";
+  (* a second server of the same database (another process) is refused: the page's lock *)
+  (match Unix.fork () with
+   | 0 -> Unix._exit (match Follow.open_page path with _ -> 0 | exception Failure _ -> 3)
+   | pid -> check (match Unix.waitpid [] pid with _, Unix.WEXITED 3 -> true | _ -> false) "page: a second server is refused");
+  check (Follow.page_path "\001\255" = "/dev/shm/cepheus-01ff.visible") "page: named by the database's id";
+  C.rmrf dir
+
 let () =
   toml ();
   config ();
@@ -315,4 +392,5 @@ let () =
   wire ();
   origins ();
   rights ();
+  fdpass ();
   C.finish "server unit"

@@ -14,7 +14,16 @@
    aggregates) are the naive evaluator's on the model at the group it names; G14 each (session, serial) is in the
    journal at most once, and every receipt of it, first or resent, names that group and its new things; G16 a
    request is refused with "denied" exactly when its token lacks the right, and no group comes from a token that
-   may not write. *)
+   may not write.
+
+   Local readers (G15) follow the database through the server's follow stream (Follow, Follower: the same code as
+   the real server and client), with the events taken by the server's sender and applied by the reader at moments
+   the seed draws (a reader paused, slow, or killed and started again; its stream cut when a server dies, with what
+   was sent still readable), and the visibility page a value that a server's death keeps and a power loss resets.
+   Every read, local or remote, is checked when it returns against three conditions, which make reads
+   linearizable (spec/LocalReads.tla): it holds every group answered to any client before it started (Fresh), and
+   every group any read returned before it started (Ordered), and it is the exact state of the journal at its group,
+   durable (Durable: the model's facts at that group). *)
 
 open Cepheus
 open Cepheus_server
@@ -44,10 +53,14 @@ let tokens =
 
 (* ---- the world ---- *)
 
+(* what any client knew when a read started: the newest group answered to any client, the newest group any read
+   returned (Fresh and Ordered) *)
+type known = { answered : int; returned : int }
+
 type pending_req =
   | P_hello
-  | P_get of int * int  (* thing, the client's last confirmed group when sent *)
-  | P_find of Query.t * Wire.select * int
+  | P_get of int * int * known  (* thing, the client's last confirmed group when sent *)
+  | P_find of Query.t * Wire.select * int * known
   | P_write of int  (* serial *)
   | P_other of string
 
@@ -78,10 +91,23 @@ type client = {
 
 type server = {
   e : Engine.t;
+  follow : Follow.t;
   core : Core.t;
   sessions : Sessions.t;
   wq : (Resolve.op list * int * string * ((Engine.receipt, Engine.error) result -> unit)) Queue.t;
   mutable pending : (Engine.batch * ((Engine.receipt, Engine.error) result -> unit) array) option;
+}
+
+(* a local reader: a program on the server's machine; its stream's events in flight (sent by the server, not yet
+   applied), and the run files they pass (their bytes: a passed descriptor keeps a file's content) *)
+type ev = E of Follow.event | R of int * (int * int) list * Follower.file list
+
+type reader = {
+  mutable fol : Follower.t option;
+  mutable sf : Follow.follower option;  (* its queue at the server *)
+  chan : ev Queue.t;
+  mutable cut : bool;  (* its stream ended: once [chan] is applied, it stops *)
+  mutable reading : known option;  (* a read in progress *)
 }
 
 type w = {
@@ -97,9 +123,14 @@ type w = {
   mutable stopped : bool;  (* a failed fsync: nothing may be confirmed until the restart *)
   clients : client array;
   receipts : (int * int, Engine.receipt) Hashtbl.t;  (* (session, serial) -> the first receipt a client saw *)
+  page : int ref;  (* the visibility page's number: a server's death keeps it, a power loss resets it *)
+  mutable returned : int;  (* the newest group a finished read returned *)
+  readers : reader array;
 }
 
 let fail w fmt = Printf.ksprintf (fun s -> C.fail "seed %d: %s" w.seed s) fmt
+
+let known w = { answered = w.acked; returned = w.returned }
 
 let model w k =
   match Hashtbl.find_opt w.models k with
@@ -113,7 +144,9 @@ let model w k =
     build k
 
 let record_batch w (b : Engine.batch) =
-  let r = Codec.reader (Buffer.to_bytes b.body) 0 (Buffer.length b.body) in
+  (* a large group's frame is written by pieces: its body is read back from the journal *)
+  let body = match b.pending with Some p -> Journal.written_body p | None -> Buffer.to_bytes b.body in
+  let r = Codec.reader body 0 (Bytes.length body) in
   for _ = 1 to b.count do
     let g = Group.decode r in
     Hashtbl.replace w.groups g.n g;
@@ -137,13 +170,15 @@ let start_server w =
     | Error e -> fail w "the server does not start: %s" (Engine.message e); raise Over
     | Ok (e, sessions) ->
       Sim_disk.crash_after w.sim (-1);
-      let core_db = { Core.name = "main"; index = 0; dir; view = (fun () -> Atomic.get e.published); sessions } in
+      let follow = Follow.create e { Follow.get = (fun () -> !(w.page)); set = (fun v -> w.page := v) } in
+      let core_db = { Core.name = "main"; index = 0; dir; view = (fun () -> Follow.view follow); sessions;
+                      more = (fun () -> Follow.status follow) } in
       let core =
         Core.create ~server_id:"cph-s-sim" ~cluster_id:"cph-c-0000000000000000" ~dbs:[| core_db |] ~tokens
           ~now:w.disk.now ~new_session:(let n = ref (1000 * (1 + Rng.int w.r 1000)) in fun () -> incr n; !n)
           ~max_inflight:(1 + Rng.int w.r 4) ()
       in
-      w.srv <- Some { e; core; sessions; wq = Queue.create (); pending = None };
+      w.srv <- Some { e; follow; core; sessions; wq = Queue.create (); pending = None };
       e
   in
   let e = go () in
@@ -177,6 +212,12 @@ let start_server w =
 
 let kill_server w ~power =
   w.srv <- None;
+  Array.iter
+    (fun r ->
+      r.sf <- None;
+      if power then (r.fol <- None; Queue.clear r.chan; r.cut <- false; r.reading <- None) else if r.fol <> None then r.cut <- true)
+    w.readers;
+  if power then w.page := Rng.int w.r (1 + !(w.page));
   Array.iter (fun c -> Option.iter (fun sc -> sc.alive <- false) c.conn; c.conn <- None; c.welcomed <- false) w.clients;
   if power then (count "power losses"; Sim_disk.crash w.sim) else (count "server deaths"; Sim_disk.kill w.sim)
 
@@ -206,7 +247,9 @@ let commit w =
   | None -> ()
   | Some (b, ks) ->
     s.pending <- None;
+    Follow.before s.follow b;
     let res = Engine.commit s.e b in
+    Follow.after s.follow;
     Array.iteri
       (fun i r ->
         (match r with
@@ -328,6 +371,14 @@ let origin_group w session serial =
       match Origin.parse g.why with Some (o, _) when o.session = session && o.serial = serial -> n :: acc | _ -> acc)
     w.groups []
 
+(* a read that started knowing [k] returns the state of group [g]: Fresh and Ordered (Durable: its facts against
+   the model, by the caller) *)
+let linearizable w what (k : known) g =
+  if g < k.answered then fail w "%s returned group %d, after group %d was answered (Fresh)" what g k.answered;
+  if g < k.returned then fail w "%s returned group %d, after a read returned group %d (Ordered)" what g k.returned;
+  if g > w.committed then fail w "%s returned group %d, not durable (%d)" what g w.committed;
+  w.returned <- max w.returned g
+
 let on_reply w (cl : client) sc id kind flags body =
   let r = Codec.reader body 0 (Bytes.length body) in
   let rep = try Wire.get_reply kind flags r with Codec.Short -> fail w "a reply does not decode"; raise Over in
@@ -345,20 +396,22 @@ let on_reply w (cl : client) sc id kind flags body =
       let l = List.sort compare (Hashtbl.fold (fun s ops acc -> (s, ops) :: acc) cl.unanswered []) in
       List.iter (fun (s, ops) -> count "writes sent again"; send_write cl sc s ops) l
     | P_hello, Wire.Err e -> fail w "Hello refused: %s %s" e.code e.message
-    | P_get (thing, min_group), Wire.Facts f ->
+    | P_get (thing, min_group, k), Wire.Facts f ->
       if not (allowed_read cl.kind) then fail w "client %s read without the right" (token_of cl.kind);
+      linearizable w "a Get" k f.group;
       if f.group > w.committed then fail w "a Get answered from group %d, not durable (%d)" f.group w.committed;
       if f.group < min_group then fail w "a Get answered from group %d, before the client's confirmed %d" f.group min_group;
       let want = C.F.elements (C.F.filter (fun (e, _, _) -> e = thing) (model w f.group)) |> List.map (fun (_, p, v) -> p, v) in
       if List.sort compare f.facts <> List.sort compare want then fail w "a Get of #%d at group %d is not the model's" thing f.group;
       count "gets checked"
-    | P_find (q, sel, min_group), Wire.Rows rw ->
+    | P_find (q, sel, min_group, k), Wire.Rows rw ->
       let prev = Option.value (Hashtbl.find_opt sc.rows id) ~default:[] in
       let rows = prev @ rw.rows in
       if more then Hashtbl.replace sc.rows id rows
       else begin
         Hashtbl.remove sc.rows id;
         if not (allowed_read cl.kind) then fail w "client %s found without the right" (token_of cl.kind);
+        linearizable w "a Find" k rw.group;
         if rw.group > w.committed then fail w "a Find answered from group %d, not durable" rw.group;
         if rw.group < min_group then fail w "a Find answered from group %d, before the client's confirmed %d" rw.group min_group;
         let naive = C.naive (model w rw.group) q in
@@ -459,6 +512,109 @@ let deliver_to_client w (cl : client) sc =
   Bytes.blit sc.cin !o sc.cin 0 (sc.cin_n - !o);
   sc.cin_n <- sc.cin_n - !o
 
+(* ---- local readers ---- *)
+
+(* a run's bytes, as a descriptor passed now would keep them: the final name, or a large group's temporary one *)
+let run_bytes w (r : Follow.run) =
+  let try_ p = if w.disk.exists p then Some (Disk.read_all w.disk p) else None in
+  match (match r.tmp with Some t -> try_ t | None -> None) with Some b -> Some b | None -> try_ r.path
+
+let reader_connect w r =
+  let s = server w in
+  let f, vseq, vis = Follow.register s.follow in
+  let runs = Follow.names s.follow.sdir vis.runs in
+  let files = List.map (run_bytes w) runs in
+  if List.mem None files then (Follow.unregister s.follow f; count "follows refused: a run removed")
+  else
+    match
+      Follower.create ~id:s.e.id ~word:(fun () -> !(w.page)) ~names:(List.map (fun (x : Follow.run) -> x.lo, x.hi) runs)
+        ~files:(List.map (fun b -> Follower.Mem (Option.get b)) files)
+    with
+    | exception Follower.Stream m -> fail w "a follower does not start: %s" m
+    | fol ->
+      Queue.clear r.chan;
+      Follow.catch_up w.disk s.e vis (fun ev -> Queue.push (E ev) r.chan);
+      Queue.push (E (Follow.Frame { vseq; first = vis.group + 1; count = 0; body = Buffer.create 0 })) r.chan;
+      r.fol <- Some fol;
+      r.sf <- Some f;
+      r.cut <- false;
+      count "follows"
+
+(* the server's sender: what is queued, into the stream; a run gone already cuts the stream (the reader connects
+   again), as a descriptor that cannot be opened does *)
+let reader_send w r =
+  match w.srv, r.sf with
+  | Some s, Some f ->
+    if f.dead then (r.sf <- None; r.cut <- true; count "followers cut off")
+    else
+      List.iter
+        (fun ev ->
+          match ev with
+          | Follow.Frame _ -> Queue.push (E ev) r.chan
+          | Follow.Runs x ->
+            let files = List.map (run_bytes w) x.runs in
+            if List.mem None files then (Follow.unregister s.follow f; r.sf <- None; r.cut <- true; count "streams cut: a run removed")
+            else if r.sf <> None then
+              Queue.push (R (x.vseq, List.map (fun (y : Follow.run) -> y.lo, y.hi) x.runs, List.map (fun b -> Follower.Mem (Option.get b)) files)) r.chan)
+        (Follow.drain s.follow f)
+  | _ -> ()
+
+(* the reader applies the next event; at the end of a cut stream it stops *)
+let reader_apply w r =
+  match r.fol with
+  | None -> ()
+  | Some fol -> (
+    match Queue.take_opt r.chan with
+    | Some ev -> (
+      match
+        match ev with
+        | E (Follow.Frame f) -> Follower.frame fol ~vseq:f.vseq ~first:f.first ~count:f.count (Buffer.to_bytes f.body)
+        | E (Follow.Runs _) -> ()
+        | R (vseq, names, files) -> Follower.runs fol ~vseq ~names ~files
+      with
+      | () -> count "events applied"
+      | exception Follower.Stream m -> fail w "a follower failed: %s" m)
+    | None ->
+      if r.cut then begin
+        Follower.stop fol;
+        r.fol <- None;
+        r.cut <- false;
+        r.reading <- None;
+        count "streams ended"
+      end)
+
+(* a program's read in the reader: it starts, then returns the state visible under the page's number, or waits *)
+let reader_read w r =
+  match r.fol, r.reading with
+  | None, _ -> ()
+  | Some _, None -> r.reading <- Some (known w)
+  | Some fol, Some k -> (
+    match Follower.try_view fol with
+    | None -> count "local reads waiting"
+    | Some v ->
+      r.reading <- None;
+      linearizable w "a local read" k v.group;
+      if not (C.F.equal (C.facts_of_view v) (model w v.group)) then fail w "a local read at group %d is not the model's state" v.group;
+      count "local reads checked")
+
+let reader_step w r =
+  match Rng.int w.r 10 with
+  | 0 -> if r.fol = None && w.srv <> None && not r.cut then reader_connect w r
+  | 1 | 2 -> reader_send w r
+  | 3 | 4 | 5 -> reader_apply w r
+  | 6 | 7 | 8 -> reader_read w r
+  | _ ->
+    if Rng.chance w.r 0.05 then begin
+      (* the reader's process dies *)
+      (match w.srv, r.sf with Some s, Some f -> Follow.unregister s.follow f | _ -> ());
+      r.fol <- None;
+      r.sf <- None;
+      r.cut <- false;
+      r.reading <- None;
+      Queue.clear r.chan;
+      count "readers killed"
+    end
+
 let client_step w (cl : client) =
   let s = server w in
   match cl.conn with
@@ -482,7 +638,7 @@ let client_step w (cl : client) =
         end
       | 4 | 5 ->
         let thing = Schema.first_thing + Rng.int w.r (max 1 (v.next_e - Schema.first_thing + 1)) in
-        send cl sc (Wire.Get { db = 0; thing }) (P_get (thing, cl.confirmed))
+        send cl sc (Wire.Get { db = 0; thing }) (P_get (thing, cl.confirmed, known w))
       | 6 | 7 -> (
         match C.random_query w.r v (C.facts_of_view v) (List.map (fun (d : prop) -> d.name) props) with
         | None -> ()
@@ -499,7 +655,7 @@ let client_step w (cl : client) =
               | x :: _ -> Wire.Group (key, [| Wire.Count; Wire.Sum x; Wire.Min x; Wire.Max x |])
               | [] -> Wire.Group (key, [| Wire.Count |]))
           in
-          send cl sc (Wire.Find { db = 0; query = q; select = sel }) (P_find (q, sel, cl.confirmed)))
+          send cl sc (Wire.Find { db = 0; query = q; select = sel }) (P_find (q, sel, cl.confirmed, known w)))
       | 8 -> send cl sc (Wire.Admin "status") (P_other "status")
       | _ -> send cl sc (Wire.Ping "x") (P_other "ping")
     end
@@ -507,8 +663,9 @@ let client_step w (cl : client) =
 let step w =
   let s = server w in
   match Rng.int w.r 100 with
-  | n when n < 30 -> client_step w (Rng.pick w.r w.clients)
-  | n when n < 50 ->
+  | n when n < 22 -> client_step w (Rng.pick w.r w.clients)
+  | n when n < 36 -> if Array.length w.readers > 0 then reader_step w (Rng.pick w.r w.readers)
+  | n when n < 52 ->
     let cl = Rng.pick w.r w.clients in
     Option.iter (deliver_to_server w) cl.conn
   | n when n < 65 -> let cl = Rng.pick w.r w.clients in Option.iter (deliver_to_client w cl) cl.conn
@@ -519,7 +676,7 @@ let step w =
     let cl = Rng.pick w.r w.clients in
     Option.iter (fun sc -> sc.alive <- false; count "connections broken") cl.conn
   | n when n < 89 ->
-    if s.pending = None && not w.stopped then (match Engine.snapshot s.e with Ok () -> count "merges" | Error _ -> ())
+    if s.pending = None && not w.stopped then (match Engine.snapshot s.e with Ok () -> count "merges"; Follow.tick s.follow | Error _ -> ())
   | n when n < 91 -> (
     (* as the server's ticker: a failed checkpoint is reported, the older one stays *)
     match Sessions.save w.disk dir s.sessions ~published:(Atomic.get s.e.published).group ~now:(w.disk.now ()) with
@@ -536,6 +693,7 @@ let step w =
      | exception Disk.Io _ -> count "checkpoints failed");
     count "clean stops";
     w.srv <- None;
+    Array.iter (fun r -> r.sf <- None; if r.fol <> None then r.cut <- true) w.readers;
     Array.iter (fun c -> Option.iter (fun sc -> sc.alive <- false) c.conn; c.conn <- None) w.clients;
     ignore (start_server w)
   | n when n < 95 -> Sim_disk.crash_after w.sim (Rng.int w.r 20)
@@ -558,10 +716,13 @@ let run seed steps =
                     confirmed = 0; next_id = 1 })
       (Array.sub kinds 0 (2 + Rng.int r 4))
   in
+  let readers = Array.init (if Rng.chance r 0.1 then 0 else 1 + Rng.int r 3) (fun _ -> { fol = None; sf = None; chan = Queue.create (); cut = false; reading = None }) in
   let w =
     { seed; sim; disk = Sim_disk.disk sim; r; srv = None; groups = Hashtbl.create 64; models = Hashtbl.create 64; acked = 0;
-      committed = 0; stopped = false; clients; receipts = Hashtbl.create 64 }
+      committed = 0; stopped = false; clients; receipts = Hashtbl.create 64; page = ref 0; returned = 0; readers }
   in
+  (* large groups (a run of their own, passed before their frame is durable) in some seeds *)
+  Resolve.large_min := if Rng.chance r 0.3 then 2 + Rng.int r 3 else 20_000;
   Journal.segment_limit := 600 + Rng.int r 4000;
   Engine.compact_min := 5 + Rng.int r 60;
   w.disk.mkdir "/data";
@@ -582,6 +743,7 @@ let run seed steps =
          prepare w;
          commit w;
          Array.iter (fun cl -> Option.iter (deliver_to_client w cl) cl.conn) w.clients;
+         Array.iter (fun r -> reader_send w r; reader_apply w r; reader_read w r) w.readers;
          if w.stopped then ignore (restart w ~power:false)
        with Sim_disk.Crash -> ignore (restart w ~power:false)
      done;

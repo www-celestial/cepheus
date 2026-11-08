@@ -2,8 +2,9 @@
 
 Cepheus runs as a server, as PostgreSQL does: one process on a machine holds its databases, and programs connect to
 it. This page is the whole of it: what the server is and why it is built this way, how to run it (`cluster.toml`,
-tokens, the commands, start, stop, crash), the wire protocol byte by byte, security, the two guarantees the server
-adds (G14 and G16), and its speed beside PostgreSQL 18.6, server against server, on one machine.
+tokens, the commands, start, stop, crash), the wire protocol byte by byte, reads in a program's own memory on the
+server's machine, security, the three guarantees the server adds (G14, G15 and G16), and its speed beside
+PostgreSQL 18.6, server against server, on one machine.
 
 Terms are explained at their first use and in the [glossary](glossary.md). The engine inside the server is the one
 the other pages describe ([architecture](architecture.md)); its guarantees G1 to G13 hold through the server
@@ -21,7 +22,7 @@ cepheus serve --config /etc/cepheus/cluster.toml
 ├── listeners     the Unix socket DIR/.s.cepheus.PORT (same machine) and TCP host:port with TLS 1.3
 ├── I/O domains   k OCaml domains; a thread a connection, spread over them
 ├── databases     each declared in cluster.toml: its writer and syncer (a domain of their own), its merges,
-│                 its session table (G14)
+│                 its session table (G14), its follow stream to the local readers and its visibility page (G15)
 ├── tokens        tokens.toml, beside cluster.toml, read again when it changes
 └── one cache     the page cache of every database's runs ([storage] cache)
 ```
@@ -170,6 +171,12 @@ DATA/cepheus.lock          held (lockf) while the server runs: one server a data
 DATA/cepheus.server        the server's id, made at its first start
 DATA/NAME/                 a database: its files as in operations.md, and
 DATA/NAME/sessions         its session table, a checkpoint (G14): written every second while writes come, and at stop
+/dev/shm/cepheus-ID.visible
+                           a database's visibility page (G15; ID: the database's id in hex): 4 KiB of memory (tmpfs),
+                           the first 8 bytes the visibility number, mode 0600; made once, never replaced while the
+                           server or a local reader runs; the server maps it and holds a lock on it (a copy of the data
+                           directory run beside is refused), its local readers map it read-only. A database removed
+                           leaves it until the next reboot (or remove it by hand once no server or reader runs)
 SOCKET/.s.cepheus.PORT     the Unix socket, made at start, removed at stop
 ```
 
@@ -243,6 +250,14 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
+| 8 Follow | handle (over the Unix socket only) | Start: the database's id, the visibility number, count, (lo, hi) of each run, newest first; the descriptors of `visible` and of each run ride on its first byte. The connection is then the database's follow stream ([local reads](#local-reads-g15)) |
+
+On a follow stream the server pushes (request id 0):
+
+| kind | body |
+|---|---|
+| 9 frame | number (0: part of the catch-up, not visible on its own), first group, count, then the groups as the journal codes them; a long one continues in frames of the flag `more` that carry bytes only |
+| 10 runs | number (the reader drops its states under smaller numbers), count, (lo, hi) of each run, newest first; their descriptors ride on its first byte |
 
 - A **question** is data: variables, patterns (thing, property, value, each a variable, a thing or a value) and ranges,
   as `Cepheus.query` ([API](api.md)); no code crosses the wire, and every property is checked against the database's
@@ -295,7 +310,9 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 | `too_many_connections` | a new connection over the Unix socket while the server holds `max_connections` (request id 0; over TCP the connection is closed without a word) | connect later, or raise the limit |
 | `idle` | no whole request for `idle_timeout` seconds (request id 0, then the server closes the connection) | send `Ping` meanwhile, or connect again: the OCaml client does |
 | `refused` | a write sent again after a later write of its session was applied, whose first error was lost when the server started again (its error, when the same server refused it, is given again instead) | it was not applied: decide again |
-| `invalid` | a malformed request (the connection closes), a question that does not check, a serial below its session's floor, a why that starts with the server's marker | fix the request |
+| `invalid` | a malformed request (the connection closes), a question that does not check, a serial below its session's floor, a why that starts with the server's marker, `Follow` on a connection with writes in flight | fix the request |
+| `denied` (Follow) | `Follow` over TCP: local reads are for programs on the server's machine, over its Unix socket | read through the server; the OCaml client does by itself |
+| `busy` (Follow) | `Follow` when the run files could not be opened eight times in a row (merges removing them meanwhile) | follow again: the OCaml client does, within 100 ms |
 
 ## Writes applied once: sessions (G14)
 
@@ -342,6 +359,207 @@ most one group, the receipt names it and its new things; through crashes, power 
 broken connections); `server_crash` (a real server killed 20 times under four writing clients: no value twice, none
 acknowledged missing); `server_unit` (the table: in flight, done, floors, the checkpoint and its CRC).
 
+## Local reads (G15)
+
+A program on the server's machine can read a database in its own memory, with no round trip: a **local read**. It
+costs 0.22 µs where a read through the Unix socket costs 10.2 µs and one of PostgreSQL's 25.5 µs, and it sees
+every write confirmed before it started, exactly as a read at the server does (G15). The program's code is the
+same: the OCaml client follows a database it opens over the Unix socket by itself, and reads through the server
+when it cannot (over TCP, or while its follower is being made again).
+
+### What the program holds, and what it is sent
+
+A **follower** is the copy of a database a local reader keeps: the server's **run files** (the sorted, immutable
+files of the LSM-tree, [architecture](architecture.md)), read through the program's own page cache with every page
+checked by its CRC as it arrives (G7), and a delta of the newest groups, which it applies itself as the server did
+(`Resolve.replay`). The server sends it, over a second connection to the Unix socket (the **follow stream**, opened
+by the request `Follow`):
+
+```
+Follow {db}            the reader's right is checked (G16); then, over this connection only:
+Start  {id, n, runs}   the descriptors of the visibility page and of each run file, passed by the kernel (SCM_RIGHTS)
+Frame  {0, groups}     the groups after the newest run, up to the state visible under n (a catch-up)
+Frame  {n, none}       that state is visible under n
+Frame  {n+1, groups}   each frame the writer makes, sent as the writer takes it, before its fsync
+Runs   {n, runs}       new runs (a merge, or a large group's run): the reader rests its states on them
+```
+
+- **Descriptors, not paths.** A **file descriptor** is a process's handle on an open file; a Unix-domain socket can
+  carry descriptors from one process to another ("SCM_RIGHTS: Send or receive a set of open file descriptors from
+  another process", unix(7)): the receiver gets its own descriptor of the same open file. The program needs no
+  permission on the data directory, and the server decides, after the token, which database it may read (G16). The
+  server opens each run file afresh for each reader (so no other process moves its file offset) and closes its own
+  copy once sent; the visibility page is one read-only descriptor the server keeps open and passes to every reader
+  (it is mapped, never read at an offset). A run file never changes once named, and a descriptor keeps a file readable after a merge removes its
+  name, so a reader holding an older state still reads the right bytes. OCaml's `Unix` has no `sendmsg`: the 130
+  lines of `server/fdpass_stubs.c` do it, behind one OCaml module (`Fdpass`), tested with random messages and
+  descriptors read in random pieces.
+- **Frames travel during the fsync.** The reader decodes and applies a frame while the server's disk forces it
+  (about 3 ms here), and keeps the state it gives aside, under the number it was sent with. It never shows that state
+  before the number says so.
+
+### What a local read sees: one number in shared memory
+
+**Linearizable** reads (Herlihy and Wing 1990) are reads that each appear to happen at one instant between their call
+and their return. For a database whose writes form one order of groups (G4), that is exactly three conditions on
+every read, which `spec/LocalReads.tla` states and checks:
+
+- **Fresh**: a read holds every group whose writer was answered before the read started (no stale read);
+- **Ordered**: a read holds every group that another read returned before this one started (no **new-old
+  inversion**: two readers where the later one sees an older state; Lamport's *atomic* register forbids it, his
+  *regular* register allows it, On Interprocess Communication, 1986);
+- **Durable**: a read returns the exact state after a durable group (G5), never one that a crash can take back.
+
+The rule that gives all three is one number, the **visibility number**, in a page of shared memory: the first 8
+bytes of `/dev/shm/cepheus-ID.visible`, a 4 KiB file of memory (tmpfs) that the server maps read-write and every
+reader maps read-only (`mmap` with `MAP_SHARED`: one physical page, the server's store seen at once by every process;
+the reader cannot write it). In memory rather than on the disk: the number needs no fsync (after a reboot no reader
+is left), it outlives a server's death (the rule below needs it), and a page of tmpfs is never written back to a
+disk, so the server's store into it never waits for one.
+
+  `Unix.map_file` maps read-write (a shared mapping then needs a descriptor open for writing, which would let a
+  reader move the number), and of a private mapping mmap(2) says: "It is unspecified whether changes made to the
+  file after the mmap() call are visible in the mapped region"; the C stub maps `PROT_READ` and `MAP_SHARED`.
+- Each frame is sent tagged with the number it will be visible under: the current one plus 1.
+- Once the frame's fsync returns and it is published, the server stores the new number, then answers the frame's
+  writers, then lets remote reads see it.
+- A read loads the number and serves the state the reader holds under it; if it does not hold it yet (the frame is
+  still on its way, or being applied), it waits for it, and never serves an older one.
+- A server that starts adds 2 to the number before anything else: a reader of the dead server may hold a state under
+  the number the dead server's last frame would have taken, a frame the death may have lost, and the next frame of
+  the new server takes another number.
+
+So a group becomes visible to every reader, local or remote, at one instant: the store of the number. A read that
+starts later loads it; a read that loaded an older number started before. The state under a number is the same for
+every reader (the same groups in the same order), and it is durable before the number is stored (G5, G13).
+
+**G15 Local reads are linearizable.** *Promise.* Every read, in a local reader or at the server, holds every group
+answered to any program before it started, and every group any read returned before it started, and is the exact
+state after a durable group; with the groups' order (G4), groups and reads together are strictly serializable.
+*Under* F1 (the server's or a reader's death: a reader's state survives the server's death, and is served only under
+its own number), slow, paused or stopped readers (a reader holds back its own reads only), broken streams.
+*Conditions*: one machine: the server and its readers share the visibility page, which is never removed or
+replaced while they run (a reader reads the file it was passed: a new file would leave it reading a number nobody
+moves); a reader that falls more than 64 MiB of frames behind is cut off, and follows again. *Not covered*: a view a
+program keeps on purpose reads that view's state, as everywhere (a view never changes, G5). After a
+power loss every reader dies with the machine.
+
+*Proof sketch.* Let w(n) be the instant the server stores number n, and S(n) the state it covers. (1) Durable: the
+server stores n only after the fsync of S(n)'s frame returned; a reader serves S(n) only when it loads n; within one
+server process numbers follow frames one to one, and a new process starts at the last number + 2, so a number a
+reader holds from an earlier process, at most the last number + 1, is never stored again. (2) Fresh: a writer of
+group g in S(n) is answered after w(n); a read that starts after the answer loads a number m ≥ n, and S(m) holds
+S(n). (3) Ordered: a read that returned S(n) loaded n after w(n); a read that starts after it loads m ≥ n.
+Remote reads take the server's view of the current number, which it sets after w(n): the same argument.
+
+*Tests.* `spec/LocalReads.tla`, model-checked by TLC (`tools/tlc.sh`): the rule built holds Fresh, Ordered and
+Durable with two readers, remote reads and three writes (3,436,820 distinct states), and with one reader, remote reads,
+three writes and a server death whose frame in flight is kept or lost (210,716); each part of it removed breaks one,
+and TLC prints the shortest trace: without the 2 at a start, a group the restart made durable is answered while a
+reader serves the state before it under the unchanged number (Fresh, 8 states); the number stored before the fsync
+shows a group that a death then takes back (Durable, 6 states); remote reads moved at the fsync, before the number,
+give a new-old inversion (Ordered, 8 states). `server_sim` (the simulation: local readers that follow the real fan-out and follower code, paused,
+slow, killed and started again, their streams cut when the server dies; every read, local or remote, checked for
+the three conditions against the model's state at its group); `server_crash` (a real server killed 20 times while two
+readers read in their own memory: every read holds every write answered and every state returned before it
+started); `server_unit` (descriptors passed: 400 random messages; the shared page).
+
+### The rules the design first had, and why they were left
+
+The design of 2026-11-08 proposed a **lease** (a permission that expires by itself; Gray and Cheriton, SOSP 1989): the
+server sends `Durable {n, until T}` after the fsync, `T` read on the machine's monotonic clock, a reader serves its
+newest durable state while its clock reads less than `T`, and the server answers group n's writers once every reader
+whose `T` is still ahead acked n. TLC finds that this rule keeps Fresh and Durable (289,765 distinct states with one
+reader, two writes and four ticks of a lease of two) but breaks Ordered, in a trace of 7 states:
+group n is published at its fsync and a remote read returns it; a local reader whose lease runs has not yet applied
+`Durable n`, and a read that starts after the remote one returns n - 1. Two local readers give the same inversion.
+Such reads form a regular register, not an atomic one: linearizability needs one instant at which a group becomes
+visible everywhere, and two processes that each learn of it by a message cannot switch at one instant without
+another round in which reads wait: in Paxos quorum leases a lease holder reads locally only after it has assessed
+"whether an update to any of the leased objects is ongoing (i.e., in the process of being committed), and if not"
+(Moraru, Andersen, Kaminsky, SoCC 2014). On one machine shared memory gives that instant for free. The design's first draft (a reader renewing its own lease when it acks) breaks Fresh as well
+(a trace of 12 states: the reader is slow; its lease lapses, so the server answers the writers of groups 1 and 2
+without its ack; the reader then takes the old `Durable 1`, renews its own lease from that moment, and serves group 1
+to a read that starts after group 2 was answered). Both are kept in the model, each with its configuration, to show they break.
+
+What the number rule changes against the lease: no write waits for any reader (the lease made each write wait one
+round trip to the slowest reader, and up to the lease's length for a reader that stopped); no clock is read on a
+read; no message goes back from the reader; a server that starts waits for nothing (the lease made it wait one lease
+length). With several machines (step 7) a reader elsewhere has no shared page: leases come back there, between
+servers (quorum leases), and the page then holds the end of the local server's own lease.
+
+### What it costs
+
+On the machine of [the benchmarks](benchmarks.md) (i7-4720HQ, 4 cores and 8 threads, 11 GB, a SATA SSD), 2026-11-08,
+the release build of this version with 4 I/O domains, PostgreSQL 18.6 on a cluster of our own (`bench/pg/pg.sh`, port
+5548), the same 1 M facts on both sides (`bench.exe load`, loaded again before these runs); each side alternated with
+the others in every round, every round under the lock that keeps the machine's other heavy jobs away, every process
+under a 3 GB cap; medians and their distribution-free 95 % interval (order statistics), n rounds as given. The same
+answers everywhere: Q3 for city-7, 396 rows; Q4, 45,064 unpaid invoices summing to 2,248,567,111 cents, in a local
+reader, through the socket and in PostgreSQL. A local read is `Client.get` (or `find`) in a program that follows the
+database (`bench/sbench.ml`, `local` and `localq`); through the socket, the same request answered by the server.
+
+| | local read | through the Unix socket | PostgreSQL 18.6, Unix socket |
+|---|---:|---:|---:|
+| point read (an invoice's 4 facts), n = 11 | **0.221 µs** [0.210, 0.293] | 10.17 µs [9.22, 13.83] | 25.48 µs [23.76, 29.19] |
+| Q3, the unpaid invoices of a city (396 rows), n = 11 | **0.461 ms** [0.429, 0.522] | 0.500 ms [0.480, 0.580] | 0.708 ms [0.684, 0.803] |
+| Q4, the unpaid sum and count by city (100 rows), n = 11 | **11.6 ms** [10.2, 16.6] | 12.7 ms [11.7, 15.9] | 22.2 ms [21.4, 23.3] |
+
+- **A point read** in the program's memory is 115 times PostgreSQL's and 46 times a read through the socket: what is
+  left is the engine's own read (the design measured 0.42 µs in the process on another day's build; the load of the
+  number and the choice of the state add a few nanoseconds). The plan's target was 0.5 µs.
+- **Questions** gain less: Q3 and Q4 do their work in the reader as they do in the server; the round trip they skip
+  is small beside it (Q3 loses 39 µs, Q4 about 1 ms of coding and decoding 100 rows).
+
+**What a write pays for its readers.** No write waits for a reader. The writer's whole extra work is the follow
+stream's two hooks a frame: the frame queued for each reader before its write, the number stored and the view moved
+after its fsync. Measured inside the server (the hooks' own clock, n = 11 rounds of 3 s of one client writing):
+
+| | the hooks, a frame | a durable write, one client: median latency |
+|---|---:|---:|
+| no local reader | 1.42 µs [1.10, 1.78] | 3.06 ms [2.88, 3.18] |
+| 8 local readers | 14.97 µs [13.09, 16.90] | 3.13 ms [2.94, 3.50] |
+
+The plan's target was 20 µs for 8 readers; the hooks cost 0.5 % of an fsync of this disk, and the two latencies are
+equal within the disk's noise. The cost grows with the readers (1.4 µs with none): each frame is queued for each
+reader and wakes the thread that sends it.
+
+**What following costs a reader.** One local reader while 256 clients write invoices of 4 facts through the socket
+(n = 7 rounds, its CPU time over 4 s): **32.3 % of a core** [23.3, 38.8] at 17,942 groups a second [12,269,
+22,027], about 4 µs a change applied. The plan's target, 20 % of a core at 18,000 groups a second, is **missed**:
+the design measured 1.72 µs a change to replay a journal alone on a quiet machine; here the reader shares the
+machine's 4 cores and 8 hardware threads with the server and the 256 writers, and each merge of the server makes it
+apply again, onto the new runs, the groups written during the merge. Under that load its memory (Pss) was 273 MB
+[202, 325]: its delta of the groups since the newest run, larger while the writes outrun the merges.
+
+**What eight readers cost the machine.** Eight local readers of the 1 M facts, each having read every invoice of the
+sample once (n = 7): **250 MB of Pss** in all [249, 250], 31 MB each, most of it its own copy of the run pages (the
+database's runs are 24 MB). PostgreSQL's backends serving 8 clients of point reads: 43 MB [43, 44] of Pss in all
+(12 processes), because they share one buffer pool. Each reader keeping its own cache was the design's first choice
+(the engine's code as it is, every page checked); one copy shared by all readers is the later step when a
+deployment's memory asks for it.
+
+**Against the server before step 3** (the same server without local reads, its binaries and ours in turn in every
+round, n = 11; the ratio new / old by round): empty round trip 1.05 [0.90, 1.18], point read through the socket
+0.99 [0.79, 1.34], durable writes of one client 1.21 [0.90, 2.26] times the old rate, of 64 clients 0.97 [0.66,
+1.52]: no difference the measures can see (every interval holds 1).
+
+### Beside the giants (by their documentation)
+
+| | what a plain read sees | its cost |
+|---|---|---|
+| PostgreSQL primary, Read Committed | "a snapshot of the database as of the instant the query begins to run": each statement sees every commit before it | a round trip (25.5 µs over the Unix socket here) |
+| PostgreSQL hot standby | "data on the standby is eventually consistent with the primary"; with `synchronous_commit = remote_apply` the commit waits until the standby "applied it, so that it has become visible to queries on the standby(s)" | a round trip to the standby; each commit waits for its standbys |
+| etcd | linearizable by default ("linearized requests must go through the Raft consensus process"); serializable reads "may access stale data" | a quorum round, or staleness |
+| FoundationDB | "Each transaction will get a read version": a version no less than any committed | a round trip at each transaction's start |
+| Datomic peer | "application processes have their own copy of the query engine and database in local memory"; `sync` gives "a database value guaranteed to include all transactions that were complete at the time sync was called" | local reads; linearizable only after `sync` (a round trip to the transactor) |
+| Cepheus local reader | linearizable, always (G15) | 0.22 µs, no round trip; no write waits for it |
+
+PostgreSQL's standby with `remote_apply` makes the primary's commit wait for the standby; Cepheus's readers make no
+write wait. Datomic's peers read in their own memory but see the newest writes only after `sync`; Cepheus's readers
+always do. What Cepheus does not have here: readers on other machines (a replica, step 6, and Raft with quorum
+leases, step 7), and PostgreSQL's SQL.
+
 ## Security
 
 ### Tokens
@@ -360,13 +578,16 @@ second way, and C for `SO_PEERCRED`).
 **G16 Rights.** *Promise.* A connection does exactly what its token permits: a request on a database whose right
 the token lacks is refused with `denied`, and so is `status` without `admin`; no group is written by a token without
 `write` on its database. A token removed or narrowed in `tokens.toml` holds at the next request of every connection,
-within a second of the file's change. *Conditions*: the token is secret; `tokens.toml` is writable by the server's
-user only. *Proof*: every request passes one check of the connection's rights for its database, recomputed whenever
-the table of tokens changes (one comparison of the table's identity a request); writes carry the token's name in
-their origin. *Tests*: `server_unit` (every token against every request on every database, a removed token, rights
+within a second of the file's change; a local reader's follow stream, which makes no request, checks its token
+before each frame it sends and every second, and ends when the token may no longer read: the reader's states go,
+and its reads go to the server, which refuses them (within about two seconds of the file's change: the reload,
+then a tick). *Conditions*: the token is secret; `tokens.toml` is writable by the server's user only. *Proof*: every
+request passes one check of the connection's rights for its database, recomputed whenever the table of tokens
+changes (one comparison of the table's identity a request); writes carry the token's name in their origin; the
+descriptors of a database's files are passed only after the check of `Follow`. *Tests*: `server_unit` (every token against every request on every database, a removed token, rights
 narrowed, a forged origin refused, a frame over the limit); `server_sim` (random requests of every token checked
 against its rights, and every group of the journal against its token's); `server_crash` (a token removed from the file
-while its program is connected).
+while its program is connected and reads in its own memory).
 
 ### Who may reach the socket
 
@@ -439,7 +660,7 @@ What it says:
   of Ping) and 1.5 µs of the server's work (decoding, the read of the view, coding). PostgreSQL's own floor, `SELECT 1`,
   is 15.2 µs: its work a statement is larger than our whole read. The plan's target was 10 µs; the empty round trip
   on this machine was 8.46 µs when the design measured it and 9.32 today, so 10.8 is the floor plus the same 1.4-1.5
-  µs of work. Only not making the round trip goes below it (local reads, step 3: 0.42 µs).
+  µs of work. Only not making the round trip goes below it ([local reads](#local-reads-g15): 0.22 µs).
 - **Many clients**: the plan's main target, 8 clients at most 4 µs a read (PostgreSQL 6.2 µs when the design measured
   it, 6.5 today), holds: 3.22 µs. With one I/O domain the server answered every 9.6 µs (the prototype): the I/O
   domains are what wins it (3 rounds at each k = 1, 2, 4, 8: 9.1-10.0, 5.3-5.5, 2.9-4.0 and 2.1-3.1 µs; 4, the default,
@@ -481,10 +702,12 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 
 ## What it does not do yet
 
-- Find gathers its answer's index words before it sends them (above); subscriptions (`Watch`), forks and local reads
-  are not on the wire yet.
+- Find gathers its answer's index words before it sends them (above); subscriptions (`Watch`) and forks are not on
+  the wire yet.
+- Local readers on other machines (a replica, step 6; Raft with leases between servers, step 7), and one shared copy
+  of the pages for many readers of one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
 
-Local reads in the program's own memory with leases (step 3), the Cesia client (step 4),
+The Cesia client (step 4),
 subscriptions over the wire and many databases sharing one fsync (step 5), a replica (step 6), Raft on three machines
 (step 7), memory databases with `Expire` and `Incr` (step 8). Until the Cesia client exists, a program written in
 OCaml can still open a database directory in its own process (`Cepheus.open_`), which the tests use; the server is

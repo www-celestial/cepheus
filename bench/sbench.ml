@@ -11,6 +11,13 @@
                                              Q4 the unpaid sum and count by city (aggregates in the server)
      sbench.exe check ADDR FACTS             invoices of the sample as `index client total status date` lines, to compare
                                              with PostgreSQL's rows
+     sbench.exe local ADDR FACTS N           N point reads in this process (the database followed: local reads)
+     sbench.exe localq ADDR FACTS Q3|Q4 N    N runs of a question in this process
+     sbench.exe follow ADDR FACTS SECS       a local reader for SECS seconds, reading every invoice of the sample once at
+                                             the start: its CPU time a second of the period (% of a core), the frames it
+                                             applied, its memory (Pss and RSS of /proc/self/smaps_rollup, kB)
+
+   The other commands open the database for remote reads (the server answers), even over the Unix socket.
 
    ADDR is a socket path or host:port; the token is CEPHEUS_TOKEN. *)
 
@@ -30,10 +37,11 @@ let connect addr =
 
 type setup = { c : Client.t; db : Client.db; cids : int array; sample : int array; p : string -> int }
 
-(* the sample of bench.exe's questions: 4,096 clients drawn with the seed 9, their ids by their e-mail *)
-let setup addr facts =
+(* the sample of bench.exe's questions: 4,096 clients drawn with the seed 9, their ids by their e-mail; [local]: the
+   database followed in this process *)
+let setup ?(local = false) addr facts =
   let c = connect addr in
-  let db = ok (Client.open_db c "main") in
+  let db = ok (Client.open_db ~local c "main") in
   let p n = match Client.prop db n with Some p -> p | None -> failwith ("no property " ^ n) in
   let nclients = facts / facts_per_client in
   let r = Rng.make 9 in
@@ -213,6 +221,78 @@ let question addr facts which n =
   for i = 1 to n do ignore (run i) done;
   Printf.printf "%.3f\n%!" ((now () -. t0) /. float n *. 1e6)
 
+(* ---- local reads ---- *)
+
+let local addr facts n =
+  let s = setup ~local:true addr facts in
+  if s.db.local = None then failwith "the database is not followed (a Unix socket is needed)";
+  (* warm: every invoice of the sample once *)
+  for i = 0 to 81_919 do ignore (ok (Client.get s.c s.db (invoice s i))) done;
+  let t0 = now () in
+  for i = 1 to n do ignore (Client.get s.c s.db (invoice s (i * 7919))) done;
+  Printf.printf "%.4f\n%!" ((now () -. t0) /. float n *. 1e6);
+  Client.close s.c
+
+let localq addr facts which n =
+  let s = setup ~local:true addr facts in
+  if s.db.local = None then failwith "the database is not followed";
+  let p = s.p in
+  let q3 city =
+    { Query.vars = 3; ranges = [];
+      where = [ { e = Var 0; p = p "client/city"; v = Val (Text city) }; { e = Var 1; p = p "invoice/client"; v = Var 0 };
+                { e = Var 1; p = p "invoice/status"; v = Val (Text "unpaid") }; { e = Var 1; p = p "invoice/total"; v = Var 2 } ] }
+  in
+  let q4 =
+    { Query.vars = 4; ranges = [];
+      where = [ { e = Var 0; p = p "invoice/status"; v = Val (Text "unpaid") }; { e = Var 0; p = p "invoice/client"; v = Var 1 };
+                { e = Var 1; p = p "client/city"; v = Var 2 }; { e = Var 0; p = p "invoice/total"; v = Var 3 } ] }
+  in
+  let run i =
+    match which with
+    | "Q3" -> List.length (snd (ok (Client.find s.c s.db ~select:(Wire.Give [| 1; 2 |]) (q3 (Printf.sprintf "city-%d" (i mod 100))))))
+    | _ -> List.length (snd (ok (Client.find s.c s.db ~select:(Wire.Group ([| 2 |], [| Wire.Sum 3; Wire.Count |])) q4)))
+  in
+  (match which with
+   | "Q3" -> Printf.eprintf "local Q3 rows city-7: %d\n%!" (run 7)
+   | _ ->
+     let _, rows = ok (Client.find s.c s.db ~select:(Wire.Group ([||], [| Wire.Count; Wire.Sum 3 |])) q4) in
+     (match rows with [ [| Value.Int n; Value.Money t |] ] -> Printf.eprintf "local Q4 count, sum: %d %d\n%!" n t | _ -> ()));
+  ignore (run 0);
+  let t0 = now () in
+  for i = 1 to n do ignore (run i) done;
+  Printf.printf "%.3f\n%!" ((now () -. t0) /. float n *. 1e6);
+  Client.close s.c
+
+(* this process's Pss and RSS, kB *)
+let memory () =
+  let pss = ref 0 and rss = ref 0 in
+  In_channel.with_open_text "/proc/self/smaps_rollup" (fun ic ->
+      let rec go () =
+        match In_channel.input_line ic with
+        | None -> ()
+        | Some l ->
+          (match String.split_on_char ' ' l |> List.filter (( <> ) "") with
+           | [ "Pss:"; n; "kB" ] -> pss := int_of_string n
+           | [ "Rss:"; n; "kB" ] -> rss := int_of_string n
+           | _ -> ());
+          go ()
+      in
+      go ());
+  !pss, !rss
+
+let cpu () = let t = Unix.times () in t.tms_utime +. t.tms_stime
+
+let follow addr facts secs =
+  let s = setup ~local:true addr facts in
+  let fol = match s.db.local with Some f -> f | None -> failwith "the database is not followed" in
+  for i = 0 to 81_919 do ignore (ok (Client.get s.c s.db (invoice s i))) done;
+  let a0 = fol.applied and c0 = cpu () and t0 = now () in
+  Unix.sleepf secs;
+  let a1 = fol.applied and c1 = cpu () and t1 = now () in
+  let pss, rss = memory () in
+  Printf.printf "cpu %.2f %% of a core, %d frames applied, pss %d kB, rss %d kB\n%!" ((c1 -. c0) /. (t1 -. t0) *. 100.) (a1 - a0) pss rss;
+  Client.close s.c
+
 (* N new connections, each its handshake (TLS on TCP) and Hello, then closed: microseconds a connection *)
 let hs addr n =
   let t0 = now () in
@@ -244,4 +324,10 @@ let () =
   | [| _; "q"; a; f; q; n |] -> question a (int_of_string f) q (int_of_string n)
   | [| _; "check"; a; f |] -> check a (int_of_string f)
   | [| _; "hs"; a; n |] -> hs a (int_of_string n)
-  | _ -> prerr_endline "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS | q ADDR FACTS Q3|Q4 N | check ADDR FACTS"; exit 2
+  | [| _; "local"; a; f; n |] -> local a (int_of_string f) (int_of_string n)
+  | [| _; "localq"; a; f; q; n |] -> localq a (int_of_string f) q (int_of_string n)
+  | [| _; "follow"; a; f; secs |] -> follow a (int_of_string f) (float_of_string secs)
+  | _ ->
+    prerr_endline
+      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS";
+    exit 2

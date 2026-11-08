@@ -46,8 +46,9 @@ connect through a Unix socket or TCP with TLS 1.3, each with a token that grants
 database (G16); a write sent again after a lost reply is applied once (G14). Server against server on the same
 machine and data (1 M facts), a point read costs 10.8 µs over the Unix socket (PostgreSQL 18.6: 26.4), 39.2 µs with
 TLS (49.6); 8 clients at once, 3.22 µs a read in all (6.54); 16 requests in flight on one connection, 1.46 µs a read
-(PostgreSQL's pipeline of 16: 9.11). Everything, from `cluster.toml` to the wire protocol byte by byte: [the
-server](docs/server.md).
+(PostgreSQL's pipeline of 16: 9.11). A program on the server's machine reads in its own memory, linearizably
+(G15): 0.22 µs a point read, no round trip, and no write waits for it. Everything, from `cluster.toml` to the wire
+protocol byte by byte: [the server](docs/server.md).
 
 ## Against the established databases
 

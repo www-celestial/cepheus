@@ -1,7 +1,11 @@
 (* A client of the protocol, in OCaml: for the tests, the benchmarks and the `cepheus` command (the Cesia client of
    step 4 speaks the same protocol). One connection; requests may be pipelined ([send] then [recv]); replies are
    matched by id. Writes are numbered in the connection's session: when the connection breaks, [write] connects
-   again with the same session and sends the write again with the same serial, so it is applied once (G14). *)
+   again with the same session and sends the write again with the same serial, so it is applied once (G14).
+
+   Local reads: a database opened over the Unix socket (the server's machine) is followed in this process (a second
+   connection, Follow, applied by a domain of its own: Follower), and [get] and [find] read it here, linearizably
+   (Follow); over TCP, or when following fails, they ask the server. The program's code is the same. *)
 
 open Cepheus
 
@@ -25,6 +29,7 @@ type t = {
   waiting : (int, unit) Hashtbl.t;  (* serials sent, not yet answered *)
   early : (int, (int * int * Bytes.t) list) Hashtbl.t;  (* replies that came before they were asked for *)
   mutable welcome : Wire.reply option;
+  mutable follows : (Unix.file_descr * unit Domain.t) list;  (* the follow streams of its databases *)
 }
 
 exception Broken of string
@@ -150,7 +155,6 @@ let hello c =
   | Wire.Err e -> Error (List.mem e.code [ "auth"; "version"; "denied" ], e.code ^ ": " ^ e.message)
   | _ -> Error (true, "an unexpected reply to Hello")
 
-
 let reconnect c =
   (match c.fd with Some fd -> (try Unix.close fd with Unix.Unix_error _ -> ()) | None -> ());
   c.fd <- None;
@@ -180,20 +184,170 @@ let connect ?(program = "ocaml") ?(session = 0) ?ca ?cluster address token =
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
   let c =
     { address; token; program; fd = None; tls = None; ca; cluster; inb = Bytes.create 65536; have = 0; next_id = 1; out = Buffer.create 4096;
-      body = Buffer.create 4096; session; serial = 0; waiting = Hashtbl.create 8; early = Hashtbl.create 8; welcome = None }
+      body = Buffer.create 4096; session; serial = 0; waiting = Hashtbl.create 8; early = Hashtbl.create 8; welcome = None;
+      follows = [] }
   in
   match reconnect c with Ok () -> Ok c | Error (_, m) -> Error m
 
 let close c =
-  match c.fd with
-  | Some fd -> c.fd <- None; (try Unix.close fd with Unix.Unix_error _ -> ())
-  | None -> ()
+  (match c.fd with
+   | Some fd -> c.fd <- None; (try Unix.close fd with Unix.Unix_error _ -> ())
+   | None -> ());
+  (* the follow streams end; their domains stop *)
+  List.iter (fun (fd, _) -> try Unix.shutdown fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ()) c.follows;
+  List.iter (fun (_, d) -> Domain.join d) c.follows;
+  c.follows <- []
 
 type error = { code : string; message : string }
 
 let result = function Wire.Err e -> Error { code = e.code; message = e.message } | r -> Ok r
 
-type db = { handle : int; group : int; props : (int * Schema.prop) list }
+type db = {
+  handle : int;
+  group : int;
+  props : (int * Schema.prop) list;
+  mutable local : Follower.t option;  (* followed in this process *)
+  wants_local : bool;
+  mutable retry_at : float;  (* a follower that stopped (the server restarted) is made again from this time on *)
+}
+
+(* ---- local reads: the follow stream ---- *)
+
+(* the page cache of this process's local readers (Pages), set when the first database is followed *)
+let local_cache = ref (256 lsl 20)
+let cache_set = ref false
+
+(* a follow connection's bytes and descriptors, read with recvmsg only: a plain read would drop the descriptors *)
+type fconn = { ffd : Unix.file_descr; mutable fb : Bytes.t; mutable fhave : int; fds : Unix.file_descr Queue.t }
+
+let ffill fc need =
+  while fc.fhave < need do
+    if need > Bytes.length fc.fb then begin
+      let b = Bytes.create (max need (2 * Bytes.length fc.fb)) in
+      Bytes.blit fc.fb 0 b 0 fc.fhave;
+      fc.fb <- b
+    end;
+    let n, fds = Fdpass.recv fc.ffd fc.fb fc.fhave (Bytes.length fc.fb - fc.fhave) in
+    List.iter (fun f -> Queue.push f fc.fds) fds;
+    if n = 0 then raise (Broken "the follow stream ended");
+    fc.fhave <- fc.fhave + n
+  done
+
+let fnext fc =
+  ffill fc 4;
+  let len = Wire.u32 fc.fb 0 in
+  if len < 6 || len > Wire.max_frame then raise (Broken "a malformed frame on the follow stream");
+  ffill fc (4 + len);
+  let id = Wire.u32 fc.fb 4 and kind = Bytes.get_uint8 fc.fb 8 and flags = Bytes.get_uint8 fc.fb 9 in
+  let body = Bytes.sub fc.fb Wire.header (len - 6) in
+  Bytes.blit fc.fb (4 + len) fc.fb 0 (fc.fhave - 4 - len);
+  fc.fhave <- fc.fhave - 4 - len;
+  id, kind, flags, body
+
+let take_fds fc k =
+  if Queue.length fc.fds < k then raise (Broken "the follow stream's descriptors are missing");
+  List.init k (fun _ -> Queue.pop fc.fds)
+
+let fclose fc =
+  (try Unix.close fc.ffd with Unix.Unix_error _ -> ());
+  Queue.iter (fun f -> try Unix.close f with Unix.Unix_error _ -> ()) fc.fds;
+  Queue.clear fc.fds
+
+(* the stream, applied in order until it ends; then nothing more is served locally *)
+let follow_loop fc fol () =
+  (try
+     while true do
+       let _, kind, flags, body = fnext fc in
+       if flags land Wire.f_error <> 0 then raise Exit;
+       let r = Codec.reader body 0 (Bytes.length body) in
+       if kind = Wire.k_frame then begin
+         let vseq, first, count = Wire.get_frame_head r in
+         let data =
+           if flags land Wire.f_more = 0 then Bytes.sub body r.pos (r.stop - r.pos)
+           else begin
+             let b = Buffer.create (4 * Bytes.length body) in
+             Buffer.add_subbytes b body r.pos (r.stop - r.pos);
+             let rec more () =
+               let _, k, fl, part = fnext fc in
+               if k <> Wire.k_frame || fl land Wire.f_error <> 0 then raise Exit;
+               Buffer.add_bytes b part;
+               if fl land Wire.f_more <> 0 then more ()
+             in
+             more ();
+             Buffer.to_bytes b
+           end
+         in
+         Follower.frame fol ~vseq ~first ~count data
+       end
+       else if kind = Wire.k_runs then begin
+         let vseq, runs = Wire.get_runs_push r in
+         let fds = take_fds fc (List.length runs) in
+         Follower.runs fol ~vseq ~names:runs ~files:(List.map (fun f -> Follower.Fd f) fds)
+       end
+     done
+   with
+   | Exit | Broken _ | Unix.Unix_error _ -> ()
+   | e -> prerr_endline ("cepheus client: local reads stopped: " ^ Printexc.to_string e));
+  Follower.stop fol;
+  fclose fc
+
+(* a second connection, Follow on it: the page and the runs passed, the follower made, the rest applied by a domain
+   of its own; None over TCP, or when the server refuses (the reads then go to the server) *)
+let follow c handle =
+  match c.address with
+  | Tcp _ -> None
+  | Unix_socket _ -> (
+    match open_socket c.address with
+    | exception Unix.Unix_error _ -> None
+    | fd -> (
+      let fc = { ffd = fd; fb = Bytes.create 65536; fhave = 0; fds = Queue.create () } in
+      let ask id req =
+        let b = Buffer.create 64 and f = Buffer.create 80 in
+        Wire.put_request b req;
+        Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
+        let s = Buffer.to_bytes f in
+        write_all fd s 0 (Bytes.length s);
+        let _, kind, flags, body = fnext fc in
+        Wire.get_reply kind flags (Codec.reader body 0 (Bytes.length body))
+      in
+      match
+        match ask 1 (Wire.Hello { version = Wire.version; token = c.token; program = c.program ^ " (follow)"; session = 0 }) with
+        | Wire.Welcome _ -> (
+          match ask 2 (Wire.Follow handle) with
+          | Wire.Start st ->
+            let fds = take_fds fc (1 + List.length st.runs) in
+            let page = Fun.protect ~finally:(fun () -> Unix.close (List.hd fds)) (fun () -> Fdpass.map_page (List.hd fds)) in
+            if not !cache_set then (cache_set := true; Pages.set_capacity !local_cache);
+            Some
+              (Follower.create ~id:st.id ~word:(fun () -> Fdpass.word page) ~names:st.runs
+                 ~files:(List.map (fun f -> Follower.Fd f) (List.tl fds)))
+          | _ -> None)
+        | _ -> None
+      with
+      | Some fol ->
+        let d = Domain.spawn (follow_loop fc fol) in
+        c.follows <- (fd, d) :: c.follows;
+        Some fol
+      | None -> fclose fc; None
+      | exception (Broken _ | Follower.Stream _ | Codec.Short | Unix.Unix_error _ | Failure _ | Wire.Malformed _) -> fclose fc; None))
+
+(* the state to read locally, if this database is followed: None when it is not, or no longer; a follower that
+   stopped (its server restarted) is made again, at most every 100 ms while it fails *)
+let local_view c db =
+  match db.local with
+  | Some f when not (Follower.dead f) -> Follower.view f
+  | _ when db.wants_local && Unix.gettimeofday () >= db.retry_at -> (
+    db.local <- follow c db.handle;
+    match db.local with
+    | Some f -> Follower.view f
+    | None -> db.retry_at <- Unix.gettimeofday () +. 0.1; None)
+  | _ -> None
+
+let facts_of (v : Store.view) thing =
+  let l = ref [] in
+  Store.iter_facts v thing (fun p w -> match Schema.find v.schema p with Some d -> l := (p, Store.value v d.typ w) :: !l | None -> ());
+  List.rev !l
+
 (* how long a request keeps trying to reach the server after the connection broke *)
 let retry_budget = ref 30.0
 
@@ -220,22 +374,38 @@ let with_retry c attempt gave_up =
 (* a read (it changes nothing): sent again as it is *)
 let read_call c req = with_retry c (fun () -> call c req) (fun m -> raise (Broken m))
 
-let open_db c name =
+(* [local] false: the reads of this handle go to the server even over the Unix socket (declare's Opens, and the
+   benchmarks of the socket's round trip) *)
+let open_db ?(local = true) c name =
   match read_call c (Wire.Open name) with
-  | Wire.Opened o -> Ok { handle = o.db; group = o.group; props = o.props }
+  | Wire.Opened o ->
+    Ok { handle = o.db; group = o.group; props = o.props; local = (if local then follow c o.db else None); wants_local = local;
+         retry_at = 0. }
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Open" })
 
 let prop db name = List.find_map (fun (p, (d : Schema.prop)) -> if d.name = name then Some p else None) db.props
 
 let get c db thing =
-  match read_call c (Wire.Get { db = db.handle; thing }) with
-  | Wire.Facts f -> Ok (f.group, f.facts)
-  | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" })
+  match local_view c db with
+  | Some v -> ( match facts_of v thing with f -> Ok (v.group, f) | exception Pages.Unreadable m -> Error { code = "damaged"; message = m })
+  | None -> (
+    match read_call c (Wire.Get { db = db.handle; thing }) with
+    | Wire.Facts f -> Ok (f.group, f.facts)
+    | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" }))
 
 let find c db ?(select = Wire.Give [||]) query =
-  match read_call c (Wire.Find { db = db.handle; query; select }) with
-  | Wire.Rows r -> Ok (r.group, r.rows)
-  | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Find" })
+  match local_view c db with
+  | Some v -> (
+    match Core.answer v query select with
+    | a ->
+      let typs = Array.init a.cols a.typ in
+      Ok (v.group, List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))))
+    | exception Query.Bad m -> Error { code = "invalid"; message = m }
+    | exception Pages.Unreadable m -> Error { code = "damaged"; message = m })
+  | None -> (
+    match read_call c (Wire.Find { db = db.handle; query; select }) with
+    | Wire.Rows r -> Ok (r.group, r.rows)
+    | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Find" }))
 
 let floor c = Hashtbl.fold (fun s () m -> min s m) c.waiting (c.serial + 1)
 
@@ -266,7 +436,7 @@ let status c =
 (* the properties' ids for these names, declaring the missing ones in one write (as Cepheus.declare): the schema is
    read with Open again, and a declaration that lost a race for an id is made again *)
 let rec declare c name (props : Schema.prop list) =
-  match open_db c name with
+  match open_db ~local:false c name with
   | Error e -> Error e
   | Ok db ->
     let used = List.map fst db.props in
