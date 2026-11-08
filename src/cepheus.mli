@@ -93,7 +93,7 @@ val prop : ?many:bool -> ?unique:bool -> string -> typ -> prop
 
 val declare : db -> prop list -> (int list, error) result
 (** The property ids for these names, declaring the missing ones in one group. A name declared already with
-    another type or cardinality is {!Invalid}. *)
+    another type, cardinality or unique flag is {!Invalid}. *)
 
 val property : view -> string -> int option
 val describe : view -> int -> prop option
@@ -143,7 +143,7 @@ val verify : string -> (int, error) result
 (** Reads the whole journal of a closed database and checks every frame: the number of groups. *)
 
 val notes : db -> string list
-(** What the last recovery found (a snapshot set aside, a torn tail cut). *)
+(** What the last open set aside: one note for each snapshot that did not check (a torn tail cut is not noted). *)
 
 (** {1 Internals, for the tests and tools} *)
 

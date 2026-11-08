@@ -1,115 +1,284 @@
 # API
 
-The library is `cepheus` (dune). Its interface is `src/cepheus.mli`; every function below is there. The modules listed
-at the end of the interface (`Cepheus.Store`, `Cepheus.Journal`, ...) are internals for the tests and tools: they may
-change.
+The library is `cepheus` (dune); its interface is `src/cepheus.mli`, and every name below is there. The modules it
+also exports (`Cepheus.Journal`, `Cepheus.Store`, ...) are internals for the tests, the tools and the benchmarks; they
+may change: [internals](internals.md). Every error message, where it comes from and what to do:
+[errors](errors.md). Every limit and default: [limits](limits.md). The examples are whole programs; `dune test` runs
+each one and checks the output shown under it.
 
-## Types
+## Values and errors
 
-```ocaml
+```ocaml signature
 type value = Int of int | Float of float | Bool of bool | Text of string | Date of int | Money of int | Link of int
-type typ = Tint | Tfloat | Tbool | Ttext | Tdate | Tmoney of int (* digits *) | Tlink
+type typ = Tint | Tfloat | Tbool | Ttext | Tdate | Tmoney of int | Tlink
 type error =
   | Conflict of string     (* an Expect did not hold *)
-  | Invalid of string      (* a type, an unknown thing or property, a schema rule, a malformed question *)
-  | Not_unique of string   (* a unique value is taken *)
-  | Damaged of string      (* the files lost or changed durable data: the database does not open *)
-  | Io of string           (* the disk failed: the database stopped; reopen it *)
-  | Busy of string         (* open in another process *)
-  | Closed
+  | Invalid of string      (* a wrong type, an unknown thing or property, a schema rule, a malformed question *)
+  | Not_unique of string   (* a value of a unique property is taken *)
+  | Damaged of string      (* the files lost or changed durable data, or a page of the base does not check *)
+  | Io of string           (* the disk failed: the database stopped; close it and open it again *)
+  | Busy of string         (* the database is open in another process *)
+  | Closed                 (* the database was closed *)
 val message : error -> string
 ```
+
+| value | meaning | its index word (see `fold`) |
+|---|---|---|
+| `Int n` | a 63-bit signed integer (OCaml's `int`) | n |
+| `Float f` | an IEEE 754 double; equal means the same 64 bits (so `nan` equals itself, `0.0` differs from `-0.0`) | a dictionary number |
+| `Bool b` | | 0 or 1 |
+| `Text s` | any bytes (UTF-8 by convention; never looked inside) | a dictionary number |
+| `Date ms` | an instant, milliseconds since 1970-01-01 UTC | ms |
+| `Money m` | an exact decimal: m minor units, the number of digits being the property's (`Tmoney 2`: `Money 120000` is 1,200.00) | m |
+| `Link e` | another thing of the same database (a negative e is a new thing of the same group) | e |
+
+A property's type is a `typ`; `Tmoney d` takes 0 to 18 digits. `message e` is the text of an error, its kind first:
+`"conflict: "`, `"invalid: "`, `"not unique: "`, `"damaged: "`, `"input/output error: "`, `"busy: "`, and `"the
+database is closed"`.
 
 ## Databases and views
 
 | function | what it does |
 |---|---|
-| `open_ : string -> (db, error) result` | opens a database directory, creating it if missing; recovers (newest valid snapshot, then the journal). `Busy` if another process holds it. |
-| `close : db -> unit` | waits for writes in flight, closes; nothing for a fork |
-| `view : db -> view` | the newest durable state (a fork: its newest state); free |
+| `open_ : string -> (db, error) result` | opens the database in a directory, creating the directory (and its parents) and the database if missing; after a crash, recovers: the newest snapshot that checks, then the journal after it ([operations](operations.md#opening-and-recovery)). Errors: `Busy` (another process holds it, or this process under the same path), `Damaged` (durable data lost or changed: it does not open), `Io` |
+| `close : db -> unit` | waits for the writes in flight and for a merge under way (it is installed), closes the journal, leaves the clean-close marker if no fsync failed, takes the base's pages out of the cache, releases the lock. Views taken before stay readable (their pages are read again from the file). Call it once. A fork has nothing to close |
+| `view : db -> view` | the newest durable state (for a fork, its newest state). Free: one atomic read |
 | `group : view -> int` | the number of the last group in a view |
-| `fork : view -> db` | a temporary state from a view: same reads, same writes, same checks, no disk (G8) |
-| `empty : view` | the empty state with the system properties; `fork empty` is a database for a unit test |
+| `fork : view -> db` | a temporary state starting at a view: the same reads and writes, the same checks, nothing on any file (G8). Free; a fork of a fork works |
+| `empty : view` | the state of a new database: group 1, the four system properties. `fork empty` is a database for a unit test |
+| `open_on : Disk.t -> string -> (db, error) result` | `open_` on another implementation of the disk, such as the simulated one (`Sim_disk.disk`) |
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = Result.get_ok (open_ "data/shop") in
+  let[@warning "-8"] (Ok [ name ]) = declare db [ prop "client/name" Ttext ] in
+  let r = Result.get_ok (write db ~by:7 ~why:"signup" [ Add (-1, name, Text "Ada") ]) in
+  Printf.printf "receipt: group %d, new things %s\n" r.group
+    (String.concat ", " (List.map (fun (k, id) -> Printf.sprintf "%d -> %d" k id) r.things));
+  Printf.printf "view at group %d\n" (group (view db));
+  (match snapshot db with Ok () -> print_endline "merged into a snapshot" | Error e -> print_endline (message e));
+  Printf.printf "notes: %d\n" (List.length (notes db));
+  close db;
+  (match write db [ Add (thing r (-1), name, Text "Ada M.") ] with
+   | Ok _ -> ()
+   | Error e -> Printf.printf "after close: %s\n" (message e));
+  (match verify "data/shop" with Ok n -> Printf.printf "verify: %d groups\n" n | Error e -> print_endline (message e));
+  let db = Result.get_ok (open_ "data/shop") in
+  Printf.printf "reopened at group %d\n" (group (view db));
+  close db
+```
+
+```output
+receipt: group 3, new things -1 -> 65536
+view at group 3
+merged into a snapshot
+notes: 0
+after close: the database is closed
+verify: 3 groups
+reopened at group 3
+```
 
 ## Writing
 
-```ocaml
+```ocaml signature
 type op =
-  | Add of int * int * value                (* thing, property, value; replaces the old value if one-valued *)
+  | Add of int * int * value               (* thing, property, value; on a one-valued property, retracts the old value *)
   | Retract of int * int * value
-  | Expect of int * int * value option      (* Some v: the fact holds before the group; None: no value *)
-type receipt = { group : int; things : (int * int) list }   (* new things: (-k, id) *)
+  | Expect of int * int * value option     (* Some v: the fact holds before the group; None: the thing has no value *)
+type receipt = { group : int; things : (int * int) list }   (* the group's number; its new things, (-k, id) *)
 val write : db -> ?by:int -> ?why:string -> op list -> (receipt, error) result
 val thing : receipt -> int -> int
 ```
 
-`write` applies a group all or nothing. On a database it returns once the group is durable (G1); on a fork at once.
-Thing numbers below zero are new things of the group: `-1`, `-2`... in a thing position or in a `Link`.
+`write db ~by ~why ops` applies the operations as one group, all or nothing (G2). `by` (0 by default) and `why` (`""`
+by default) are kept with the group in the journal. On a database, `write` blocks the calling thread until the group
+is durable: `Ok` means the group survives any crash (G1), and every view taken afterwards holds it. On a fork, it
+returns at once. The group's number is given when the writer takes it; groups are applied one at a time in that order
+(G4).
 
-Errors: `Conflict` (an `Expect`), `Invalid` (a value of the wrong type, a thing that does not exist, a link to
-nothing, a system property on an ordinary thing, a schema rule), `Not_unique`, and, for a database, `Io` and `Closed`.
+- **New things**: a negative number in a thing position, or inside a `Link`, is a new thing of this group; each
+  distinct negative number gets the next thing number, in the order of first appearance. `thing r (-k)` is the number
+  `-k` was given (`Not_found` if `-k` was not in the group).
+- **One-valued properties**: an `Add` retracts the thing's other values for the property in the same group (the
+  journal records the retraction).
+- **No-ops**: an `Add` of a fact that holds, or a `Retract` of one that does not, records nothing; a group of no-ops
+  still takes a number.
+- **`Expect`** is checked against the state before the group (wherever it sits in the list), by the writer, on the
+  newest state: it is how a read-then-write states what it read ([concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)).
+- **Unique** values are checked on the state after the whole group, so a group may move a unique value from one thing
+  to another.
+
+Errors: `Conflict` (an `Expect`); `Invalid` (a value of the wrong type, a thing that was never made, a link to
+nothing, an `Expect` on a new thing, a property that does not exist, a system property on an ordinary thing, an
+ordinary property on a property thing, a schema rule); `Not_unique`; `Damaged` (a page of the base that the group
+needed could not be read or does not check: the group is not written, the writer goes on); for a database also `Io`
+(the disk failed: this group and every later one fail, until the database is closed and opened again) and `Closed`. On
+a fork, a page that cannot be read raises `Unreadable` instead of returning `Damaged`. The messages: [errors](errors.md).
 
 ## The schema
 
-```ocaml
+```ocaml signature
 type prop = { name : string; typ : typ; many : bool; unique : bool }
-val prop : ?many:bool -> ?unique:bool -> string -> typ -> prop
+val prop : ?many:bool -> ?unique:bool -> string -> typ -> prop      (* many and unique: false by default *)
 val declare : db -> prop list -> (int list, error) result
 val property : view -> string -> int option
 val describe : view -> int -> prop option
 ```
 
-`declare` returns the property numbers for the names, declaring the missing ones in one group; declaring a name again
-with the same description returns its number; with another description, `Invalid`.
+`declare db props` returns the property numbers of the names, in the order given, and declares the missing ones in
+one group (`~why:"cepheus: declare"`), each at the lowest free number from 16 up. A name that exists with the same
+description returns its number and writes nothing; with another type, cardinality or unique flag, the result is
+`Invalid` and nothing is written. If another writer took a number meanwhile, `declare` reads the schema again and
+tries again. `property v name` is the number of a name in a view; `describe v p`, the description of a property.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ email; tag ]) = declare db [ prop ~unique:true "client/email" Ttext; prop ~many:true "client/tag" Ttext ] in
+  let v = view db in
+  Printf.printf "client/email is %d, client/tag is %d\n" email tag;
+  (match describe v tag with
+   | Some d -> Printf.printf "%s: %s, many %b, unique %b\n" d.name (Value.typ_name d.typ) d.many d.unique
+   | None -> ());
+  Printf.printf "client/phone: %s\n" (match property v "client/phone" with Some p -> string_of_int p | None -> "none");
+  (match declare db [ prop ~unique:true "client/email" Ttext ] with Ok [ p ] -> Printf.printf "again: %d\n" p | _ -> ());
+  match declare db [ prop "client/email" Tint ] with Ok _ -> () | Error e -> print_endline (message e)
+```
+
+```output
+client/email is 16, client/tag is 17
+client/tag: text, many true, unique false
+client/phone: none
+again: 16
+invalid: client/email is declared already as another kind of property
+```
 
 ## Reading
 
-```ocaml
-val get : view -> int -> (int * value) list           (* every fact of a thing, by property *)
-val values : view -> int -> int -> value list          (* values v thing property *)
-val things : view -> int -> value -> int list          (* the things with this value *)
+```ocaml signature
+val get : view -> int -> (int * value) list       (* every fact of a thing: (property, value), sorted *)
+val values : view -> int -> int -> value list      (* values v thing property *)
+val things : view -> int -> value -> int list      (* things v property value: the things with this value, sorted *)
+exception Unreadable of string
+```
 
+`get v e` is every fact of thing e, sorted by property then value; `[]` for a number that is no thing. `values v e p`
+is the values of e for p (the order is not specified); `[]` if p is no property. `things v p x` is the things that
+have the value x for p, in increasing order; for a link property, `things v p (Link t)` is the things that link to t
+by p. All three read the base through the cache: when a page cannot be read from the disk or does not check against
+its CRC, it is never served, and they raise `Unreadable` with the file and the page.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; tag; follows ]) =
+    declare db [ prop "client/name" Ttext; prop ~many:true "client/tag" Ttext; prop ~many:true "client/follows" Tlink ]
+  in
+  let r =
+    Result.get_ok
+      (write db [ Add (-1, name, Text "Ada"); Add (-1, tag, Text "vip"); Add (-1, tag, Text "lyon"); Add (-2, name, Text "Bob");
+                  Add (-2, follows, Link (-1)); Add (-2, tag, Text "vip") ])
+  in
+  let ada = thing r (-1) and bob = thing r (-2) in
+  let v = view db in
+  let ints l = String.concat " " (List.map string_of_int l) in
+  Printf.printf "tags of Ada: %s\n" (String.concat " " (List.map Value.to_string (List.sort compare (values v ada tag))));
+  Printf.printf "things tagged vip: %s\n" (ints (things v tag (Text "vip")));
+  Printf.printf "who follows Ada: %s\n" (ints (things v follows (Link ada)));
+  Printf.printf "facts of Bob: %d\n" (List.length (get v bob))
+```
+
+```output
+tags of Ada: "lyon" "vip"
+things tagged vip: 65536 65537
+who follows Ada: 65537
+facts of Bob: 3
+```
+
+## Questions
+
+```ocaml signature
 type term = Var of int | Thing of int | Val of value
-type pattern = { e : term; p : int; v : term }
+type pattern = { e : term; p : int; v : term }      (* thing, property, value *)
 type query = { vars : int; where : pattern list; ranges : (int * value * value) list }
 val find : view -> query -> (value array list, error) result
 val fold : view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 ```
 
-A view's base is read through the cache of pages (see Operations, Memory): when a page cannot be read from the disk,
-or does not check against its CRC, it is never served: `find` and `fold` return `Damaged`, and `get`, `values` and
-`things` raise `Unreadable of string` (they return plain values). A write that needed the page fails with `Damaged`.
+A question has `vars` variables, numbered 0 to `vars - 1`, and patterns whose thing (`e`) and value (`v`) are a
+variable, a thing (`Thing n`) or a value (`Val x`); the property is always a constant. A variable in a thing position
+is a link; a variable's type is the type of the properties it appears with, and must be one type. `ranges` keep
+`lo <= x <= hi` for a variable of a type whose index word is the value (int, date, money, bool, link); several ranges
+on one variable intersect.
 
-`find` returns every binding of `vars` variables (numbered 0 to vars − 1) that makes every pattern a fact, each once
-(G11). A variable's type comes from where it appears (a thing position is a link); a variable used with two types, or
-in no pattern, is `Invalid`. `ranges` keeps `lo <= x <= hi` for int, date and money variables. `fold` gives index words
-(thing numbers for links, the value for ints, dates, money and booleans as 0/1, dictionary numbers for texts and
-floats) in a buffer it reuses; use it for aggregates. A question with at least `Query.parallel_min` (20,000)
-candidates for its first variable runs on up to `Query.domains` domains (default: the machine's, at most 8), each
-with its own accumulator from `init ()`, joined by `merge`; `step` must touch only its accumulator.
+`find v q` returns every binding that makes every pattern a fact of the view, each once (G11), as arrays indexed by
+variable; their order is not specified. A constant the view has never seen (a text never written), or a pattern with
+no variable that is not a fact, makes the answer empty. With `vars = 0`, a question is a yes-or-no test: `[ [||] ]` if
+its patterns are facts, `[]` if not.
 
-Example: the sum of unpaid invoices per city.
+`fold v q ~init ~step ~merge` folds the bindings without building values: `step acc w` gets the index words of a
+binding in `w` (thing numbers for links, the value for ints, dates and money, 0 or 1 for booleans, dictionary numbers
+for texts and floats), in a buffer it reuses, so `step` must not keep `w`. When the first variable has 20,000
+candidates or more (`Query.parallel_min`), the question runs on up to `Query.domains` domains (the machine's
+recommended count, at most 8): the candidates are cut into slices, each slice folded from its own `init ()`, and the
+slices' results joined by `merge` in slice order, so the result does not depend on the number of domains; `step` may
+run on several domains at once and must touch only its accumulator. Below the threshold, `init` is called once and
+`merge` never. A dictionary number is turned back into a value by the internal `Store.value v typ w`.
+
+Errors of both: `Invalid` (an unknown property, a variable out of range or in no pattern or of two types, a constant
+of the wrong type, a range on a text or float variable) and `Damaged` (a page that cannot be read or does not check).
 
 ```ocaml
-let q = { vars = 4; ranges = [];
-          where = [ { e = Var 0; p = status; v = Val (Text "unpaid") }; { e = Var 0; p = client; v = Var 1 };
-                    { e = Var 1; p = city; v = Var 2 }; { e = Var 0; p = total; v = Var 3 } ] } in
-Cepheus.fold v q ~init:(fun () -> Hashtbl.create 100)
-  ~step:(fun t w -> Hashtbl.replace t w.(2) (w.(3) + Option.value (Hashtbl.find_opt t w.(2)) ~default:0); t)
-  ~merge:(fun a b -> Hashtbl.iter (fun c x -> Hashtbl.replace a c (x + Option.value (Hashtbl.find_opt a c) ~default:0)) b; a)
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ score ]) = declare db [ prop "player/score" Tint ] in
+  ignore (write db (List.mapi (fun i s -> Add (-(i + 1), score, Int s)) [ 12; 40; 7; 33; 40 ]));
+  let v = view db in
+  (* the players with a score between 10 and 35 *)
+  let q = { vars = 2; where = [ { e = Var 0; p = score; v = Var 1 } ]; ranges = [ (1, Int 10, Int 35) ] } in
+  (match find v q with
+   | Ok rows -> List.iter (fun r -> Printf.printf "%s %s\n" (Value.to_string r.(0)) (Value.to_string r.(1))) (List.sort compare rows)
+   | Error e -> print_endline (message e));
+  let yes = { vars = 0; where = [ { e = Thing 65537; p = score; v = Val (Int 40) } ]; ranges = [] } in
+  Printf.printf "65537 has 40: %b\n" (find v yes = Ok [ [||] ]);
+  match find v { vars = 1; where = []; ranges = [] } with Ok _ -> () | Error e -> print_endline (message e)
 ```
+
+```output
+#65536 12
+#65539 33
+65537 has 40: true
+invalid: variable 0 appears in no pattern
+```
+
+How a question is answered, and what it costs: [architecture](architecture.md#questions), [theory](theory.md#4-generic-join).
+
+## The cache
+
+`set_cache bytes` sets how many bytes of base pages the process keeps in memory, for all its databases at once (1 GiB
+by default; at least 16 pages of 16 KiB). It takes effect as pages come in (a smaller cache evicts as the next pages
+are read) and at the next open (a snapshot that fits in the cache is read and checked whole at open; a larger one, page
+by page as questions need it). [operations](operations.md#memory).
 
 ## Operations
 
 | function | what it does |
 |---|---|
-| `snapshot : db -> (unit, error) result` | merges now (the delta into a new base and its snapshot file), so the next open replays only what follows; nothing to do if no group came since the last merge |
-| `verify : string -> (int, error) result` | reads a closed database's whole journal and checks every frame and trailer; the number of groups |
-| `notes : db -> string list` | what recovery set aside (a damaged snapshot) |
-| `set_cache : int -> unit` | the bytes of base pages kept in memory, for every database of the process (1 GiB by default) |
-| `open_on : Disk.t -> string -> (db, error) result` | `open_` on another disk, such as `Sim_disk` |
+| `snapshot : db -> (unit, error) result` | merges now: the changes since the last merge and the base into a new base and its snapshot file, so that the next open replays only what follows; it first waits for a merge under way. Nothing to do if no group came since the last merge. Errors: `Io`, `Damaged` (a page of the old base), the error that stopped the database, `Closed`; on a fork, `Invalid "a fork has no files"` |
+| `verify : string -> (int, error) result` | reads the whole journal of a closed database from its first segment and checks every frame, trailer and group number: the number of groups, or `Damaged` naming the first fault, or `Io`. It does not take the lock: never run it on an open database. Snapshots are not read (they are checked at each open, and are caches) |
+| `notes : db -> string list` | what the last open set aside: `"snapshot <name> set aside: <reason>"` for each snapshot that did not check; `[]` for a fork |
 
 ## Threads and domains
 
-A view can be read from any thread or domain at the same time, without locks. `write` can be called from any thread;
-the writer runs in a domain of its own (a writer thread and a syncer thread). A fork's `write` takes the fork's mutex.
+A view can be read from any thread and any domain at the same time, with no lock. `write` can be called from any
+thread of any domain: the writer and the syncer run in a domain of their own, the caller waits on its own condition
+variable. A fork's `write` takes the fork's mutex, so one fork can be written to from several threads. `fold`'s `step`
+and `init` may run on other domains.
