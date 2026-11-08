@@ -160,6 +160,7 @@ val notes : db -> string list
 val open_on : Disk.t -> string -> (db, error) result
 (** [open_] on another disk (the simulated one). *)
 
+module Bulk = Bulk
 module Codec = Codec
 module Crc32c = Crc32c
 module Disk = Disk

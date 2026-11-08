@@ -69,8 +69,11 @@ checks a property on many random inputs against a reference model written indepe
    where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; a merge
    keeps every fact and every answer, and a merge of a run 8 times the cache holds at most a few pages open (7 measured) and never
    more resident pages than the cache; views of up to 4 runs that add and retract give the facts and answers of their
-   full merge; a large group's faster path gives the same encoding, thing numbers and facts as `Resolve`, or leaves
-   the group to it; runs round trip, refuse another database's, set aside a damaged one; forks
+   full merge; a large group's sorts by thing and by property equal a reference sort (300 seeds, chunks of 1 to 50,
+   values at the ends of the integers); a large group's faster path gives the same encoding (byte for byte, and its
+   computed length), thing numbers and facts as `Resolve`, or leaves the group to it, with chunks of 1 to 9 operations,
+   temporary ids far below the group's length, and groups in no order and in thing order, each kind taken at least
+   once; runs round trip, refuse another database's, set aside a damaged one; forks
    change nothing (files compared byte for byte) and accept what the database accepts; a second open is `Busy`; named
    cases (write skew refused, unique, one value, triangles).
 2. **Exhaustive enumeration** (`test/exhaustive.ml`): for journals of a few frames, every crash state of the frame in
@@ -98,9 +101,11 @@ checks a property on many random inputs against a reference model written indepe
    aside but a damaged one, no merge's file left; random questions on the published views must give the naive
    evaluator's answers within the Generic Join bound. `sim.exe --seed S` replays one seed.
 4. **Real crashes** (`test/crash.exe DIR ROUNDS`): a child process writes with 8 threads and prints each confirmation,
-   merging every 50 changes; the parent kills it with SIGKILL at a random moment (it counts the kills that land inside
-   a merge), reopens, and checks every confirmed group's content, that no run was set aside and no merge's file
-   is left.
+   merging every 50 changes, while a ninth thread loads large groups (150 new things, 300 additions, taking the path of
+   large groups from 200 operations here, in chunks of 64, their frames written by pieces beside their merges on two
+   domains and forced every 2 KB); the parent kills it with SIGKILL at a random moment (it counts the kills that land
+   inside a merge), reopens, and checks every confirmed group's content (a large group's first and last things), that
+   no run was set aside and no merge's file is left.
 5. **Concurrency** (`test/bank.exe DIR SECONDS`): transfers with `Expect` from 16 threads, two reader domains checking
    that every view keeps the total and that views never go back.
 6. **A sale of seats under kill -9, with a checker of the history** (`test/seats.exe DIR ROUNDS`): 16 buyers sell 2,000

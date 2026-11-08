@@ -146,8 +146,9 @@ little-endian machines; the journal is the portable format). At open, Cepheus ta
 that reaches the newest group with the fewest runs, and checks each run: the header, the CRC table, the rank tables,
 the order and bounds of every offset table; a run that fits in the cache is read and checked whole before the first
 question, a larger one page by page. A run that does not check is set aside (noted, skipped) and the chain is chosen
-again without it, down to the journal alone. Besides the chain, the newest bottom run outside it is kept as a
-fallback. The snapshot of earlier versions (format 4, `<group>.snap`, the whole base in one file) is set aside at the
+again without it, down to the journal alone. No run is kept outside the chain: the journal holds every group, so a
+damaged run costs a replay, never a fact (until 2026-11-08 the newest bottom run outside the chain was kept as a
+fallback, a second copy of the base after every full merge). The snapshot of earlier versions (format 4, `<group>.snap`, the whole base in one file) is set aside at the
 first open and the journal replayed once ([formats](formats.md)).
 
 ## Merges: a leveled log-structured merge-tree
@@ -187,8 +188,8 @@ the T merges that fill it, and is written again at each later one), and the leve
 for the 10 M load of the benchmarks, 5.8 writes a fact, against 14.5 with the one level of earlier versions (whose
 merges rewrote the whole base each time: up to 17 facts a change). **Read amplification** is the number of runs a read
 visits: at most 3 at 10 M facts (2.1 on average over that load). **Space amplification** (disk space over data size):
-the chain, the fallback bottom run, and during a full merge a new copy of the base: budget about three times the base
-for `snapshots/`.
+the chain alone after a merge, and during a full merge a new copy of the base beside the old one: budget about twice
+the base for `snapshots/` while it runs.
 
 **What it costs the writes.** A merge's writes compete with the journal's fsyncs, which every client waits for. While
 clients write, a merge forces its file every 8 MiB (as RocksDB's `bytes_per_sync` does), so that no journal fsync
@@ -201,18 +202,53 @@ writes sharing the disk.
 ## Large groups
 
 A load is the same `write`, in a few large groups. A group of 20,000 operations or more, all of them `Add`, takes a
-faster path to the same result inside the writer (`Resolve.resolve_large`): its facts go into arrays, sorted by
-counting (by thing, by property) and by a stable radix sort of the values inside each property (Knuth, vol. 3,
-section 5.2.5), and they are merged at once with the delta and the newest runs into a run file, as one more sorted
-input; no persistent map is built for them. The path decides only what it can decide alone (additions to new or
-ordinary things, one value per new thing for a one-valued property, many-valued additions to existing things, no
-unique value already taken); on any doubt the group goes the ordinary way, which decides as always, errors included,
-so a fork, which always goes the ordinary way, answers as the database does (G8). The run file takes its name only
-once the group's frame is durable (G12); no background merge runs beside a large group. A group whose frame would pass
-256 MiB is refused (`Invalid`), and a large group starts a frame of its own, so that the groups resolved together
-never make a frame over that limit. Measured: 10 M facts in two large groups load in 7.04 s [6.52, 7.41] (10 runs),
-SQLite 3.54 in 6.97 s [6.38, 8.00] alternated with it (a tie); the large group needs 2.5 to 3.2 GB at its peak, where
-SQLite needs 11 MB ([benchmarks](benchmarks.md#loading)).
+faster path to the same result inside the writer (`Resolve.resolve_large`). Its facts never become persistent maps:
+they go into compact arrays, are sorted there, and are merged at once with the delta and the newest runs into a run
+file, as one more sorted input. Most of the work is shared by several **domains** (OCaml's unit of parallelism: a
+domain runs on its own core; `Bulk.domains`, 4 here, one a core), in **chunks** of 65,536 operations (`Bulk.chunk`)
+that the domains take in turn from a shared counter, so that a domain that meets slow chunks takes fewer of them (the
+morsel-driven scheduling of [Leis 2014]):
+
+1. **Mapping.** One walk of the list finds the first cell of each chunk. Each chunk's facts go to their own place in
+   three arrays: the thing (4 bytes), the property (2) and the value's index word (8), 14 bytes a fact, in
+   **Bigarrays** (memory outside the heap the garbage collector manages: it never scans, copies or moves them, where
+   an OCaml array costs 8 bytes a field and is scanned by every major collection). Each chunk looks its texts up in
+   the view and lists those that are new, in the order it meets them.
+2. **Numbering.** One pass in the group's order gives the new things their numbers, and the new texts theirs, in their
+   order of first use, exactly as `Resolve` numbers them (a chunk's first uses come before the next chunk's); the
+   chunks are then rewritten with the final numbers, again on several domains.
+3. **Sorting.** By thing: a group in (thing, property, value) order, as a loader writes a thing's facts together,
+   needs no sorting (checked on several domains); any other gets a permutation, by a stable radix sort of its indexes
+   by thing and an insertion sort by (property, value) inside each thing. A fact twice, or already there, is dropped
+   (no change), in the group's order. By property: a counting sort in chunks spread at once, each from its own place,
+   then a stable least-significant-digit radix sort by value inside each property (11-bit digits, [Knuth 1998],
+   5.2.5), the largest properties first on 2 domains, each pass from one buffer to the other (no copy back).
+4. **Writing.** The group gets a frame of its own. Its place is taken at the end of the journal
+   (`Journal.begin_frame`, with its exact length, computed in step 3), and while the writer merges the facts into the
+   run file, another domain encodes the group and writes the frame's body by pieces of 1 MiB, forcing them every 32
+   MiB (`Journal.force_every`), so that the disk writes the frame while the run is made. The commit then writes the
+   frame's header and its trailer and forces the frame, while another domain forces the run (two fsyncs at once, on
+   two files), and names the run only once both are done (G12). The run's pages do not enter
+   the cache as they are written (a load's output is read later, from the file, page by page as questions need it):
+   the cache does not hold a second copy of a run of hundreds of MB for nobody.
+
+The path decides only what it can decide alone (additions to new or ordinary things, one value per new thing for a
+one-valued property, many-valued additions to existing things, no unique value already taken); on any doubt the group
+goes the ordinary way, which decides as always, errors included, so a fork, which always goes the ordinary way, answers
+as the database does (G8). A group whose frame would pass 256 MiB is refused (`Invalid`) before any merge. No
+background merge runs beside a large group, and nothing else is appended to the journal while its frame is written
+(the writer waits for the frame before it, and the frame after it waits for its commit).
+
+What each guarantee needs here: the frame is one frame (G2: all or nothing); its header is written after every byte of
+its body and before its trailer, so that a crash before the header leaves bytes recovery cuts as a torn tail (G3), and
+one after it a whole frame whose trailer recovery rebuilds, never a trailer that checks behind a missing header, which
+recovery would take for damage (G6); the group is confirmed only after the frame's fsync (G1); a failure of the
+journal's file while the body is written stops the database and cuts the journal back to its last durable frame (G10,
+G13), one of the run's file fails the group alone and takes the body back off the journal (`Journal.drop`). On the
+simulated disk the encoding and the merge run one after the other, so that a seed replays the same calls
+(`Disk.parallel`).
+
+Measured: see [benchmarks](benchmarks.md#the-load-in-parallel-and-without-copies-2026-11-08-at-10-million-facts).
 
 ## Pages and the cache
 

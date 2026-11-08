@@ -54,6 +54,34 @@ val append : t -> Buffer.t -> int -> int -> unit
     [Disk.Io], after cutting the journal back to the end of its last durable frame (forced; a failure of the cut is
     reported on stderr); after that the journal refuses every append (the database stops, G10, G13). *)
 
+type pending
+(** A frame being written by pieces (a large group's): its place in the journal is taken, its header not yet written.
+    Nothing else may append to the journal until it is finished or dropped. *)
+
+val begin_frame : t -> int -> int -> int -> pending
+(** [begin_frame j len first count]: the place of a frame of [len] body bytes holding [count] groups from [first], at
+    the end of the journal or at the start of a new segment (made now, with its header forced, when the current
+    segment would pass {!segment_limit}). Raises [Disk.Io]. *)
+
+val force_every : int ref
+(** The body's pieces are forced every this many bytes (32 MiB), so that the disk writes them while the group is
+    merged. *)
+
+val body : pending -> Bytes.t -> int -> int -> unit
+(** [body p buf off n]: the next [n] bytes of the frame's body. *)
+
+val finish : pending -> unit
+(** The frame made whole and durable: its header, then its trailer, then an fsync; the journal ends after it. A
+    failure of [body] or [finish] raises [Disk.Io] after cutting the journal back to its last durable frame, as
+    {!append} does, and the journal refuses every write after it. *)
+
+val drop : pending -> unit
+(** The frame's pieces removed from the file (its segment, when it began one), forced: the journal is as before
+    {!begin_frame}. Raises [Disk.Io] as {!finish}. *)
+
+val written_body : pending -> Bytes.t
+(** The body's bytes written so far, read back from the file: for the simulation, which checks every group. *)
+
 val next_group : t -> int
 val position : t -> position
 (** Where the next frame goes. *)

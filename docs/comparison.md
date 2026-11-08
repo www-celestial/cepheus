@@ -29,7 +29,7 @@ Cepheus' reads on one run measured since then are within a few percent of those 
 | durable writes at a fixed rate of 2,000 a second, p99 | **0.1 to 1.7 s** | 0.6 to 6.1 s | Cepheus, on this noisy disk |
 | larger than memory: Q4, base 245 MB, 32 MB of cache, process capped at 128 MB | **385 ms** | 697 ms | Cepheus |
 | larger than memory: Q5 | 102 s | **1.05 s** | **PostgreSQL**, by 100 times (below) |
-| load of 10 M facts | **7.04 s [6.52, 7.41]** (10 runs), in 2 large groups | 32.3 s [29.6, 34.2] (6 runs; `COPY`, indexes, `VACUUM ANALYZE`) | Cepheus, 4.6 times: a large group is sorted in arrays and merged into a run at once (below) |
+| load of 10 M facts, alternated (7 rounds) | **5.13 s [4.65, 8.08]**, in 2 large groups | 30.87 s [28.08, 37.13] (`COPY`, indexes, `VACUUM ANALYZE`) | Cepheus, 6 times (faster in 7 rounds of 7): a large group is mapped and sorted in compact arrays by several domains and merged into a run at once, its frame written beside (below) |
 | load of 10 M facts, a group a client (227,272 confirmed groups) | 111.8 s [103.1, 124.4] (4 runs) | not measured (`COPY` is one transaction) | |
 
 **Where PostgreSQL wins, and why.**
@@ -41,9 +41,9 @@ Cepheus' reads on one run measured since then are within a few percent of those 
 - *Bulk load, until the levels.* `COPY` writes rows straight into table pages and builds each index once at the end.
   Cepheus loaded through its writer like any write (groups of 83 facts, each frame forced), and its one level on disk
   made each of the 33 merges of a 10 M load rewrite the whole base: 135 to 153 s against PostgreSQL's minute. With the
-  levels and large groups, Cepheus loads the same facts in 7.04 s and `COPY` takes 32.3 s
-  ([architecture](architecture.md#large-groups)); Cepheus pays in memory (2.5 to 3.2 GB at the peak of one 9.4 M
-  group, where PostgreSQL works in its 1 GB of buffers).
+  levels and large groups, and the load in parallel and without copies, Cepheus loads the same facts in 5.13 s and
+  `COPY` takes 30.87 s ([architecture](architecture.md#large-groups)); Cepheus pays in memory (1.46 GB at the peak of
+  one 9.4 M group, 0.88 of it the client's list, where PostgreSQL works in its 1 GB of buffers).
 - *What it has that Cepheus has not built*: SQL, many concurrent writers (row locks), replication and failover, a
   planner for any SQL, decades of tools. And through its socket, any language and any machine can reach it; Cepheus is
   a library inside one process.
@@ -74,9 +74,9 @@ links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both o
 | Q4 unpaid sum per city | **230 ms** | 355 to 366 ms | Cepheus: Generic Join over sorted columns, where SQLite looks each unpaid invoice up by key and groups in a temporary B-tree |
 | Q5 triangles | **969 to 979 ms** | 1.04 s | Cepheus, slightly; on this uniform graph a nested loop is as good as a worst-case optimal join |
 | Q4 and Q5 on 3 cores | **107 ms, 371 ms** | one thread a statement | Cepheus |
-| load 10 M facts, alternated (10 rounds) | 7.04 s [6.52, 7.41], 2 large groups | 6.97 s [6.38, 8.00] (`.import`, indexes after, `ANALYZE`) | even (Cepheus faster in 4 rounds of 10); **SQLite** in memory: 11 MB against 2.5 to 3.2 GB |
+| load 10 M facts, alternated (7 rounds) | **5.61 s [4.21, 11.67]**, 2 large groups | 9.37 s [7.90, 13.67] (`.import`, indexes after, `ANALYZE`) | Cepheus, 1.7 times (faster in 7 rounds of 7; even before 2026-11-08: 7.04 against 6.97 s); **SQLite** in memory: 11 MB against 1.46 GB |
 | load 1 M facts, a transaction a client (22,726 commits) | **10.6 s [9.9, 10.9]**, 64 threads | 166.7 s [138.6, 169.3], one writer | Cepheus, 16 times: group commit puts the groups that arrive during an fsync into the next frame; SQLite forces each commit alone |
-| size on disk after the 10 M load | 335 MB (journal 96, runs 237) | **131 MB**, one file | **SQLite**, 2.6 times: variable-length records, where Cepheus stores 8-byte words |
+| size on disk after the 10 M load | 335 MB (journal 96, runs 237); 330 MB after `snapshot` (553 before 2026-11-08) | **131 MB**, one file | **SQLite**, 2.5 times: variable-length records, where Cepheus stores 8-byte words |
 
 ## By design
 

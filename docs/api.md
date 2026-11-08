@@ -127,9 +127,11 @@ fact ([architecture](architecture.md#large-groups)). The result and the errors a
 (an error, an `Add` of a one-valued property to a thing that exists, two values of a one-valued property for one new
 thing, a unique value taken or given twice) the group goes the ordinary way, which decides as always. Write a load as a
 few large groups (each confirmed once, with one fsync), not as millions of small ones: 10 million facts in two groups
-load in 7.0 s, in 113,636 groups of one client each in 112 s ([benchmarks](benchmarks.md#loading)). A large group holds
-the writer while its run is merged (seconds at 10 million facts) and needs its operations, their arrays and the frame in
-memory at once (2.5 to 3.2 GB for 9.4 million additions).
+load in 4.1 to 5.6 s (the median of a series, depending on the disk), in 113,636 groups of one client each in 112 s
+([benchmarks](benchmarks.md#the-load-in-parallel-and-without-copies-2026-11-08-at-10-million-facts)). A large group
+holds the writer while it is merged (about a second at 10 million facts, most of it the disk), and needs its
+operations and 26 bytes a fact of compact arrays in memory at once (1.46 GB at the peak for 9.4 million additions, 0.88
+of it the caller's list, which `write` lets go once the group is mapped); its frame is written by pieces.
 
 ## The schema
 

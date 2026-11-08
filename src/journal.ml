@@ -373,6 +373,122 @@ let append j body first count =
     cut j;
     raise e
 
+(* ---- A frame written as its body is made ----
+   A large group's body (hundreds of MB) goes to the file by pieces as it is encoded, beside its merge, instead of
+   being built in memory and copied into a frame: [begin_frame] takes the frame's place at the end of the journal (in a
+   new segment when the current one would pass its limit, as [append] does), [body] writes the pieces in order and
+   forces them now and then, so that the disk writes them while the merge runs, [finish] writes the header, then the
+   trailer, and forces the frame; [drop] takes the pieces back off the file. Only the header makes a frame: a crash
+   before it leaves pieces that recovery cuts as a torn tail; a crash after it, a frame whose trailer recovery
+   rebuilds, as after a torn [append]. Nothing else may append between [begin_frame] and [finish] or [drop]. *)
+
+type pending = {
+  pj : t;
+  pfd : Disk.fd;
+  fresh : bool;  (* the frame starts a segment, made by [begin_frame] *)
+  at : int;  (* the frame's offset *)
+  plen : int;
+  pfirst : int;
+  pcount : int;
+  mutable put : int;  (* body bytes written *)
+  mutable crc : int;
+  mutable unforced : int;
+}
+
+(* the body's pieces are forced every [force_every] bytes: the disk works while the merge does *)
+let force_every = ref (32 lsl 20)
+
+let begin_frame j len first count =
+  if j.closed then raise (Disk.Io "journal is closed");
+  if j.failed then raise (Disk.Io "journal: an earlier write failed; reopen the database");
+  if first <> j.next then invalid_arg "Journal.begin_frame: groups out of order";
+  if len > max_body then invalid_arg "Journal.begin_frame: frame too large";
+  let n = fh + len + ft in
+  let base = { pj = j; pfd = j.fd; fresh = false; at = j.size; plen = len; pfirst = first; pcount = count; put = 0;
+               crc = 0; unforced = 0 } in
+  if j.size > seg_header && j.size + n > !segment_limit then
+    (* every frame of the current segment is durable already: the next one is made now, the journal moves to it
+       when the frame is finished *)
+    match write_segment_header j.disk j.dir j.id first with
+    | fd -> { base with pfd = fd; fresh = true; at = seg_header }
+    | exception (Disk.Io _ as e) -> j.failed <- true; cut j; raise e
+  else base
+
+(* a failure of the pending frame's file: the journal is never used again, cut back to its last durable frame *)
+let fail_pending p e =
+  let j = p.pj in
+  j.failed <- true;
+  if p.fresh then (try j.disk.Disk.close p.pfd with Disk.Io _ -> ());
+  cut j;
+  raise e
+
+let body p buf off n =
+  if p.put + n > p.plen then invalid_arg "Journal.body: longer than the frame";
+  match
+    p.pj.disk.Disk.pwrite p.pfd (p.at + fh + p.put) buf off n;
+    p.crc <- Crc32c.extend p.crc buf off n;
+    p.put <- p.put + n;
+    p.unforced <- p.unforced + n;
+    if p.unforced >= !force_every then (p.pj.disk.fsync p.pfd; p.unforced <- 0)
+  with
+  | () -> ()
+  | exception (Disk.Io _ as e) -> fail_pending p e
+
+let finish p =
+  let j = p.pj in
+  if p.put <> p.plen then invalid_arg "Journal.finish: the body is shorter than the frame";
+  let h = Bytes.create fh and t = Bytes.create ft in
+  set32 h 0 frame_magic;
+  set32 h 4 p.plen;
+  Bytes.set_int64_le h 8 (Int64.of_int p.pfirst);
+  set32 h 16 p.pcount;
+  set32 h 20 p.crc;
+  let hc = Crc32c.bytes h 0 24 in
+  set32 h 24 hc;
+  set32 t 0 p.plen;
+  set32 t 4 p.crc;
+  set32 t 8 hc;
+  set32 t 12 tail_magic;
+  match
+    (* the header first: a trailer that checks behind a missing header would read as damage *)
+    let t0 = clock () in
+    j.disk.Disk.pwrite p.pfd p.at h 0 fh;
+    j.disk.pwrite p.pfd (p.at + fh + p.plen) t 0 ft;
+    let t1 = clock () in
+    j.disk.fsync p.pfd;
+    Histogram.record write_us (t1 - t0);
+    Histogram.record fsync_us (clock () - t1)
+  with
+  | () ->
+    if p.fresh then begin
+      j.disk.close j.fd;
+      j.fd <- p.pfd;
+      j.seg <- p.pfirst
+    end;
+    j.size <- p.at + fh + p.plen + ft;
+    j.next <- p.pfirst + p.pcount
+  | exception (Disk.Io _ as e) -> fail_pending p e
+
+(* The pieces taken back: a later frame must never find them behind it. A failure leaves the journal failed. *)
+let drop p =
+  let j = p.pj in
+  try
+    if p.fresh then begin
+      j.disk.Disk.close p.pfd;
+      j.disk.remove (path j.dir p.pfirst);
+      j.disk.sync_dir j.dir
+    end
+    else if p.put > 0 then begin
+      j.disk.truncate j.fd j.size;
+      j.disk.fsync j.fd
+    end
+  with Disk.Io _ as e -> fail_pending { p with fresh = false } e
+
+let written_body p =
+  let b = Bytes.create p.put in
+  p.pj.disk.Disk.pread p.pfd (p.at + fh) b 0 p.put;
+  b
+
 let next_group j = j.next
 let position j = { segment = j.seg; offset = j.size; next = j.next }
 

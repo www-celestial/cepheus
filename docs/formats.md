@@ -41,6 +41,13 @@ would pass it (`Invalid`), and recovery takes a longer length field for a header
 segment through a window of 4 MiB (`Journal.window`): a frame that fits is checked and decoded where it lies, a longer
 one is checked by its CRC piece by piece (`Crc32c.extend`) and read whole only when its groups must be replayed.
 
+A frame is written in one `pwrite` and forced, except a large group's, which is alone in its frame and written by
+pieces as it is encoded, beside its merge: the body first (forced every 32 MiB on the way), then the header, then the
+trailer, then the fsync. The bytes on the disk are the same either way; the order matters for a crash: before the
+header, the pieces do not make a frame and recovery cuts them as a torn tail; after it, the frame checks, and a missing
+trailer is rebuilt from its header. A trailer is never written before its header (behind a header that does not
+check, a trailer that checks would read as damage).
+
 A segment is created with its header, forced, and its directory forced, before any frame goes in. A new segment
 starts when the next frame would take the current one past 64 MiB (67,108,864 bytes); it is made before the old one
 is closed, so that a failure leaves the journal on the old segment.
@@ -99,12 +106,14 @@ written (holes, which read as zeros and whose CRC is that of a page of zeros).
 
 A merge is the one way to write a run (`Snapshot.merge`): the delta, the newest runs of the view, and a large group's
 sorted facts, merged in the order of each section and streamed into `<lo>-<hi>.run.tmp`; a page goes out (its CRC
-computed, written at its place, admitted to the cache) as soon as all its bytes are written. Then the checksum table,
+computed, written at its place, admitted to the cache, but for a large group's run, read later from the file) as soon
+as all its bytes are written. Then the checksum table,
 the header, an fsync (while clients write, the file is also forced every 8 MiB on the way, so that no journal fsync
 waits behind hundreds of MB of a merge's dirty pages), and, once the run's group is durable in the journal, the rename
-to its name and an fsync of the directory; only then are the runs it replaced removed, but the newest bottom run that
-is not in the chain, kept as a fallback (G12). A `.tmp` file found at open is a merge a crash interrupted: it is
-removed.
+to its name and an fsync of the directory; only then are the runs it replaced removed, and every other run outside
+the chain (G12). No run is kept aside as a fallback: the journal holds every group, so a run found damaged at an open
+is set aside and its groups replayed from the journal. A `.tmp` file found at open is a merge a crash interrupted: it
+is removed.
 
 Open takes, among the chains the names allow, the one that reaches the newest group with the fewest runs, and checks
 each run (header, checksum table, rank and offset tables); a run that does not check is set aside and the choice made

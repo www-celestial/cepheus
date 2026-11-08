@@ -20,8 +20,10 @@ venue, volume and year); a work that could not be checked is not listed. The des
   and T·L), from which Cepheus' leveling with ratio 4 is chosen (theory, section 9).
 - **[Dong 2017]** S. Dong, M. Callaghan, L. Galanis, D. Borthakur, T. Savor, M. Stumm. Optimizing Space Amplification
   in RocksDB. *CIDR* 2017. https://cidrdb.org/cidr2017/papers/p82-dong-cidr17.pdf
-  — Space and write amplification in RocksDB; with RocksDB's `bytes_per_sync` option, the reason a merge forces its
-  file every 8 MiB while clients write.
+  — Space and write amplification in RocksDB (with dynamic level sizes and a size ratio of 10, space amplification
+  stays under 1.111); with RocksDB's `bytes_per_sync` option, the reason a merge forces its file every 8 MiB while
+  clients write. A full copy of the base kept beside it makes space amplification 2: why no run is kept outside the
+  chain.
 - **[Balmau 2019]** O. Balmau, F. Dinu, W. Zwaenepoel, K. Gupta, R. Chandhiramoorthi, D. Didona. SILK: Preventing
   Latency Spikes in Log-Structured Merge Key-Value Stores. *USENIX ATC* 2019, 753–766.
   https://www.usenix.org/conference/atc19/presentation/balmau
@@ -176,6 +178,11 @@ venue, volume and year); a work that could not be checked is not listed. The des
   Addison-Wesley, 1998. ISBN 0-201-89685-0.
   — Section 5.2.5, sorting by distribution: the counting sort and the stable least-significant-digit radix sort that
   sort a large group's facts (by thing, by property, then by value inside each property, 11-bit digits).
+- **[Leis 2014]** V. Leis, P. Boncz, A. Kemper, T. Neumann. Morsel-Driven Parallelism: A NUMA-Aware Query
+  Evaluation Framework for the Many-Core Age. *SIGMOD* 2014, 743–754. https://doi.org/10.1145/2588555.2610507
+  — Work cut into small pieces ("morsels") that worker threads take in turn from a shared dispatcher, so that the
+  load balances itself without a plan. A large group's chunks are taken this way by the domains, as are the slices of
+  a question's first variable (`Query.fold`).
 - **[Bentley 1976]** J. L. Bentley, A. C.-C. Yao. An Almost Optimal Algorithm for Unbounded Searching. *Information
   Processing Letters* 5(3), 82–87, 1976. https://doi.org/10.1016/0020-0190(76)90071-5
   — Exponential (galloping) search: a merge places the other runs' texts among the largest run's by searches that

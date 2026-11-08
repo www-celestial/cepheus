@@ -12,7 +12,7 @@ DIR/closed                        left by a clean close (everything durable), re
 DIR/journal/NNNNNNNNNNNNNNNNNNNN.seg   segments named by their first group, 64 MB each, only appended to
 DIR/snapshots/LO-HI.run           the runs (levels of the LSM tree): the changes of groups LO+1..HI on top of the
                                   state at LO (20 digits each); the chain from 0 to the newest group is the base, and
-                                  the newest bottom run outside it (LO = 0) is kept as a fallback
+                                  nothing else is kept (the journal rebuilds any run)
 DIR/snapshots/LO-HI.run.tmp       a merge being written (removed at open if a crash interrupted it)
 ```
 
@@ -114,18 +114,21 @@ page of the new run (theory, section 8): with everything in the cache, the cache
 one it writes, and the replaced ones leave it at the switch; a full merge (`snapshot`) holds the base twice for a
 while. Measured at 10 M facts: write runs at 256 clients with their merges peak at 762 MB [723, 1,300] (1,040 MB with
 the one level, 2,095 MB when merges were built in memory); with a 32 MB cache, a merge of the whole 245 MB base runs in
-a process capped at 128 MB (peak 99 MB). A large group needs its operations, their arrays and its frame at once: 2.5 to
-3.2 GB for 9.4 M additions, 277 to 306 MB for 1 M in two groups.
+a process capped at 128 MB (peak 99 MB). A large group needs its operations (the caller's list: 883 MB for 9.4 M
+additions), 26 bytes a fact of compact arrays and its receipt: 1.46 GB at the peak of a load of 10 M facts in two
+groups (2.6 GB before 2026-11-08); its frame is written by pieces, never built whole. A caller that drops its list
+once `write` has it lets the collector reclaim it while the group is merged.
 
 ## Disk space and merges
 
 The runs are the levels of an LSM tree (theory, section 9): the delta is merged once it holds 200,000 changes, and
 level l holds at most 200,000 x 4^l rows (800,000, 3.2 M, 12.8 M, ...). A merge takes the delta and the newest runs
 down to the first level that can hold them all, writes one run there (about 25 bytes a fact), forces it, renames it,
-and then removes the runs it replaced; the newest bottom run outside the chain is kept as a fallback. A removed
-file's space returns only when no view reads it any longer (the file stays open until the garbage collector frees its
-run). During a full merge (`snapshot`) the directory holds the base twice and the fallback: budget about three times
-the base for `snapshots/`.
+and then removes the runs it replaced, and any other run outside the chain. No run is kept aside: should the newest run
+be found damaged at an open, it is set aside and its groups are replayed from the journal (a slower open, nothing
+lost). A removed file's space returns only when no view reads it any longer (the file stays open until the garbage
+collector frees its run). During a full merge (`snapshot`) the directory holds the base twice, the old and the new:
+budget about twice the base for `snapshots/` while it runs, once the base after it.
 
 A fact is written about (T + 1) / 2 = 2.5 times per level it crosses (T = 4), against up to 17 times with the one level
 before; at 10 M facts, three levels. While clients write, a merge forces its file every 8 MiB, so that the journal's
@@ -133,9 +136,10 @@ fsyncs, which every write waits for, never queue behind hundreds of MB of a merg
 beside (`snapshot`, recovery) forces once, at the end.
 
 A large group (20,000 operations and more, all additions: a load) is merged into a run as it is written, from its
-facts sorted in arrays, with no per-fact index update: write a load as a few large groups, not as many small ones. A
-group whose encoding passes 256 MiB is refused (`Invalid`): split a larger load into groups below it (9.4 M additions
-encode to 113 MB). Several large groups sent at once by several threads are written in frames of their own, each
+facts sorted in arrays on several domains, with no per-fact index update: write a load as a few large groups, not as
+many small ones; a group whose facts come in thing order (each thing's facts together, as a loader writes rows) needs
+no sorting by thing. A group whose encoding passes 256 MiB is refused (`Invalid`) before any merge: split a larger load
+into groups below it (9.4 M additions encode to about 94 MB). Several large groups sent at once by several threads are written in frames of their own, each
 within the limit ([limits](limits.md#writes)). Its
 receipt lists every new thing; read `receipt.things` once into a table rather than calling `thing` for each (a walk of
 the list each time). A load leaves a few runs (at 10 M facts in two groups: the clients' run and the follows' run);
