@@ -1,6 +1,6 @@
 #!/bin/sh
 # PostgreSQL side of the benchmarks, on a cluster of our own (never the system's): ROOT/data, socket in ROOT/sock,
-# port 5544, fsync, synchronous_commit and full_page_writes on (the defaults).
+# port 5544 (PGPORT=n another), fsync, synchronous_commit and full_page_writes on (the defaults).
 #   pg.sh init ROOT            initdb and the configuration
 #   pg.sh start ROOT MEM       start the server in a systemd scope capped at MEM (the cache counts in the cap); SHARED=32MB sets
 #                              shared_buffers for this start
@@ -14,7 +14,7 @@
 set -e
 cmd=$1; root=$2
 here=$(cd "$(dirname "$0")" && pwd)
-export PGHOST="$root/sock" PGPORT=5544 PGDATABASE=bench
+export PGHOST="$root/sock" PGPORT=${PGPORT:-5544} PGDATABASE=bench
 psql_() { psql -X -q -v ON_ERROR_STOP=1 "$@"; }
 
 [ -n "$WORKERS" ] && export PGOPTIONS="-c max_parallel_workers_per_gather=$WORKERS -c max_parallel_workers=$WORKERS"
@@ -26,7 +26,7 @@ init)
   cat >> "$root/data/postgresql.conf" <<EOF
 listen_addresses = ''
 unix_socket_directories = '$root/sock'
-port = 5544
+port = $PGPORT
 shared_buffers = 1GB
 work_mem = 64MB
 max_connections = 300

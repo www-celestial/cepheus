@@ -1,5 +1,20 @@
-(executables
- (names bench reason)
+(executable
+ (name bench)
+ (modules bench cachesim stats)
  (libraries cepheus unix threads.posix)
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
+
+(executable
+ (name reason)
+ (modules reason)
+ (libraries cepheus unix threads.posix)
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
+
+(executable
+ (name sbench)
+ (modules sbench)
+ (libraries cepheus cepheus_server unix threads.posix)
  (ocamlopt_flags (:standard -O3 -inline 200))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

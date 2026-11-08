@@ -8,10 +8,12 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
 2. [How it works](architecture.md): the journal (a write-ahead log), group commit, recovery, the LSM-tree of runs in
    levels and its merges, large groups, the page cache and S3-FIFO, one writer and the domains, Generic Join, how it
    is tested.
-3. [Testing](testing.md): forks for an application's tests, and how Cepheus itself is tested.
-4. [Rules](rules.md): Datalog rules kept by the writer — derived facts, semi-naive evaluation, Backward/Forward for
+3. [The server](server.md): `cepheus serve`, cluster.toml, tokens and rights, the wire protocol byte by byte, sessions
+   (writes applied once, G14), rights (G16), its speed beside PostgreSQL, server against server.
+4. [Testing](testing.md): forks for an application's tests, and how Cepheus itself is tested.
+5. [Rules](rules.md): Datalog rules kept by the writer — derived facts, semi-naive evaluation, Backward/Forward for
    retractions, constraints, the budget, `why`, and what a write with rules costs.
-5. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
+6. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
    to the proof that it is solved (a test, generated schedules, a TLA+ model, kill -9 with a checker of the history,
    the speed beside SQLite and PostgreSQL).
 

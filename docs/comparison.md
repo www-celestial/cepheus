@@ -45,8 +45,21 @@ Cepheus' reads on one run measured since then are within a few percent of those 
   `COPY` takes 30.87 s ([architecture](architecture.md#large-groups)); Cepheus pays in memory (1.46 GB at the peak of
   one 9.4 M group, 0.88 of it the client's list, where PostgreSQL works in its 1 GB of buffers).
 - *What it has that Cepheus has not built*: SQL, many concurrent writers (row locks), replication and failover, a
-  planner for any SQL, decades of tools. And through its socket, any language and any machine can reach it; Cepheus is
-  a library inside one process.
+  planner for any SQL, decades of tools.
+
+**Server against server** (1 M facts, the same rows, both through their own sockets, 2026-11-08; the full table and
+its method: [the server](server.md#speed-beside-postgresql)):
+
+| | Cepheus server | PostgreSQL 18.6 | who wins, and why |
+|---|---:|---:|---|
+| a point read, 1 client, Unix socket | **10.81 µs** | 26.39 µs | Cepheus: 1.5 µs of work over the kernel's round trip (9.32 µs); PostgreSQL's `SELECT 1` alone takes 15.19 µs |
+| the same, TCP + TLS 1.3 | **39.18 µs** | 49.64 µs | Cepheus, by less: OpenSSL works on memory buffers here (16 µs of TLS where OpenSSL alone needs 11) |
+| 16 reads in flight on one connection, a read | **1.46 µs** | 9.11 µs (pipeline of 16) | Cepheus: replies by id, a batch answered in one system call |
+| 8 clients at once, a read | **3.22 µs** | 6.54 µs | Cepheus: 4 I/O domains of threads (one domain: 9.6 µs); PostgreSQL forks a process a connection |
+| 256 clients at once, a read | **2.88 µs** | 12.83 µs | Cepheus: threads stay cheap; PostgreSQL's 256 processes cost more |
+| Q3, Q4 through the socket | **0.487 ms, 12.37 ms** | 0.662 ms, 18.47 ms | Cepheus |
+| a new TLS connection | **2.60 ms** | 4.28 ms | Cepheus: no process to fork |
+| durable writes, 1 to 256 clients | even | even | both wait for the disk's fsync |
 
 **Isolation, by design** ([PostgreSQL 18: transaction isolation](https://www.postgresql.org/docs/18/transaction-iso.html)):
 "Read Committed is the default isolation level in PostgreSQL"; Repeatable Read "is implemented using a technique

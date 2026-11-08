@@ -165,8 +165,10 @@ mode: they are the disk's.
 | tool | what it does | page |
 |---|---|---|
 | `dune build`, `dune test` | builds; runs the unit and property tests, the exhaustive enumeration, 200 seeds of the simulation, and every example of the documentation | [testing](testing.md) |
-| `tools/test.sh` | every test in the release build, the slow ones too: `CEPHEUS_TMP` (scratch directory), `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20) | [testing](testing.md) |
+| `tools/test.sh` | every test in the release build, the slow ones too: `CEPHEUS_TMP` (scratch directory), `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `SERVER_SEEDS` (200), `SERVER_KILLS` (20) | [testing](testing.md) |
 | `tools/tlc.sh` | model-checks `spec/Journal.tla`, `spec/Merge.tla` and `spec/Seats.tla` with TLC, and checks that the naive sale breaks an invariant; `TLA2TOOLS` names `tla2tools.jar` | [testing](testing.md#model-checking) |
+| `cepheus` (`bin/main.exe`) | the server and its commands: `serve`, `stop`, `status`, `token add/list/remove`, `cluster init/cert` | [server](server.md#commands) |
+| `sbench.exe` | the server's benchmarks: `ping`, `get`, `clients`, `write`, `q`, `hs`, `check` | [server](server.md#speed-beside-postgresql) |
 | `bench.exe` | the benchmarks: `load`, `read`, `write`, `merge`, `fsync`, `trace`, `cachesim`, `stats`, `cpu` | [benchmarks](benchmarks.md#commands) |
 | `bench/pg/pg.sh` | PostgreSQL's side: `init`, `start`, `load`, `read`, `write`, `stop` | [benchmarks](benchmarks.md#commands) |
 | `bench/sqlite/sqlite.sh` | SQLite's side: `load`, `read` | [benchmarks](benchmarks.md#commands) |

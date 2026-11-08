@@ -103,3 +103,7 @@ val fsync_us : Histogram.t
 
 val clock : unit -> int
 (** The time in microseconds. *)
+
+val read_after : Disk.t -> string -> string -> int -> (Group.t -> unit) -> unit
+(** [read_after disk dir id n f]: [f] on every group after [n], in order, from the segment that holds group [n + 1]
+    (the frames before it checked by their CRCs, not decoded), without changing a file; raises {!Damaged}. *)

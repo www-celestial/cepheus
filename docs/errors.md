@@ -213,6 +213,12 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 | `Failure "bootstrap: ..."` | `open_` of a new database | the first group, which describes the system properties, was refused: a bug |
 | `Invalid_argument` | internals | a broken invariant, which is a bug: `Journal.append: groups out of order`, `Engine.install: not durable`, `Snapshot.merge: ...` (a section that overflows or does not add up, a retraction with nothing below, a fact of a large group past the things, the journal position after the view, more runs than the view has); `Pages: a page of a base built in memory is missing`; or a misuse of an internal function (`Codec.reader`, `Codec.put_varint` of a negative number, `Crc32c.bytes`, `Crc32c.extend`, `Rng.int`); `Journal.append: frame too large` (the writer never makes a frame over 256 MiB, so this is a bug); and `Cepheus.decode: variable X out of range` or `Cepheus.decode: MSG` (a question `fold` refuses), a misuse of `decode` |
 
+## Through the server
+
+A program connected to the server receives every error above as a value `{code, message}` (`conflict`, `invalid`,
+`unique`, `damaged`, `io`, `busy`, `closed`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
+`unknown_database`, `stopping`, `refused`. Each, when it comes and what to do: [the server](server.md#errors).
+
 ## Lines on the standard error
 
 A merge runs in the background; when it fails, it says so on the standard error, removes its file, and the database
@@ -226,3 +232,7 @@ threshold. Two other lines come from the writer.
 | `cepheus: background merge failed: EXN` | the merge domain met an exception (a disk error, an unreadable page) |
 | `cepheus: a merge could not be installed: MSG` | the rename or the directory's fsync failed |
 | `cepheus: a merge could not catch up: MSG` | a page could not be read while replaying the groups written during the merge |
+| `cepheus: ready in T ms: ...` | the server started: the time of its opens, each database's group, its listeners and domains |
+| `cepheus: FILE reloaded: N tokens` / `cepheus: FILE not reloaded: MSG` | tokens.toml changed; a file that does not parse is not taken, the server keeps the tokens it had |
+| `cepheus: database NAME: the sessions could not be saved: MSG` | the session checkpoint failed (a disk error): the older one stays, and the next start reads more of the journal |
+| `cepheus: stopping` / `cepheus: stopped` | SIGTERM or SIGINT: the stop of [the server](server.md#start-stop-crash) |

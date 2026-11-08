@@ -514,3 +514,12 @@ let verify disk dir id =
   read disk dir id (fun _ -> incr n);
   !n
 
+
+(* The groups after [after], in order, without changing a file: the scan starts at the segment that holds group
+   [after + 1], and the frames before it are checked by their CRCs but not decoded. For a database open in this
+   process, between frames (the server's session tables, rebuilt at its start). *)
+let read_after disk dir id after f =
+  let segs = List.sort compare (segments disk dir) in
+  let start = List.fold_left (fun acc s -> if s <= after + 1 then Some s else acc) None segs in
+  let from = Option.map (fun s -> { segment = s; offset = seg_header; next = s }) start in
+  ignore (scan ~after disk dir id from (fun g -> if g.Group.n > after then f g))

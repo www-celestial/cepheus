@@ -135,3 +135,18 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 | `Bulk` | a large group's facts in Bigarrays (thing int32, property uint16, value int; by property value int and thing int32), in the group's order and by (property, value, thing), with their order by (thing, property, value) (`sorted`, or the permutation `order`); `in_order`, `by_thing` (a stable radix sort of the indexes), `make` (a counting sort by property in chunks, a stable radix sort of 11-bit digits by value); `parallel k f` (f 0 .. f (k-1) taken in turn by `domains` domains, 4: one a core); settings `domains`, `chunk` (65,536 operations; tests make it small) |
 | `Snapshot` | `merge ?busy ?bulk ?sync disk dir id view ~take ~level pos` (the one way to write a run; `~sync:false`: not forced at the end, for a large group's run, which its commit forces beside the frame), `force` (a run's file forced, once), `install` (forces a run not yet forced, then names it), `abandon`, `clean`, `load` (the chain), `check_and_build`, `name lo hi`; setting `sync_every` (8 MiB); counter `open_max` (pages open at once in a merge) |
 | `Pages` | `size` (16,384), `capacity`, `set_capacity`, `drop`; counter `misses` (pages read from the disk); trace mode `tracing`, `trace`, `traced` (the cache study) |
+
+## The server's modules (`server/`, library `cepheus_server`)
+
+| module | what it is |
+|---|---|
+| `Toml` | the part of TOML 1.0 that `cluster.toml` and `tokens.toml` use; an error names its line |
+| `Config` | `cluster.toml` read and checked (`load`), its paths (`socket_path`, `tokens_path`, `database_dir`) |
+| `Tokens` | `tokens.toml`: tokens (`generate`, `check`, `save`), rights (`right`, `can_read`, `can_write`) |
+| `Origin` | the token, session, serial and floor a group carries in its `why` (`wrap`, `parse`, `why`) |
+| `Wire` | the protocol: frames, requests and replies, their codings, the error codes |
+| `Sessions` | the session table of a database (`start`, `finish`, `replay`), its checkpoint (`save`, `load`) |
+| `Core` | the server without sockets: a connection's frames in (`input`), replies out, rights, writes to `submit` |
+| `Net` | the process: listeners, I/O domains, a thread a connection, start, stop (`serve`) |
+| `Client` | a client in OCaml (tests, benchmarks, `cepheus status`): `connect`, `open_db`, `get`, `find`, `write` with its session, `declare`, `status` |
+| `Tls` | TLS 1.3 by OpenSSL on memory buffers (`server_ctx`, `client_ctx`, `handshake`, `read`, `write`, `make_cert`) |

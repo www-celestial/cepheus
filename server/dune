@@ -1,0 +1,7 @@
+(library
+ (name cepheus_server)
+ (libraries cepheus unix threads.posix)
+ (foreign_stubs (language c) (names tls_stubs) (flags (:standard -O2 -Wall)))
+ (c_library_flags (-lssl -lcrypto))
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

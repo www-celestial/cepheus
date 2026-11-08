@@ -335,6 +335,36 @@ venue, volume and year); a work that could not be checked is not listed. The des
   Worst-case Optimal Low-Memory Dataflows. *PVLDB* 11(6), 691–704, 2018. https://doi.org/10.14778/3184470.3184473
   — BiGJoin: Generic Join over many machines, planned.
 
+## The server
+
+- **[Ongaro 2014b]** D. Ongaro. Consensus: Bridging Theory and Practice. PhD dissertation, Stanford University, 2014.
+  https://web.stanford.edu/~ouster/cgi-bin/papers/OngaroPhD.pdf
+  — Section 6.3, client sessions: "Each server's state machine maintains a session for each client ... latest serial
+  number processed ... along with the associated response"; the server's session table (G14), with a floor so that
+  many writes of a session are in flight.
+- **[Terry 1994]** D. B. Terry, A. J. Demers, K. Petersen, M. J. Spreitzer, M. M. Theimer, B. B. Welch. Session
+  Guarantees for Weakly Consistent Replicated Data. *PDIS* 1994, 140–149. https://doi.org/10.1109/PDIS.1994.331722
+  — "Read your writes" and "monotonic writes": what one connection's requests keep.
+- **[RFC 4648]** S. Josefsson. The Base16, Base32, and Base64 Data Encodings. RFC 4648, 2006.
+  https://www.rfc-editor.org/rfc/rfc4648
+  — Section 5, base64url: the text of a token.
+- **[RFC 7693]** M-J. Saarinen, J-P. Aumasson. The BLAKE2 Cryptographic Hash and Message Authentication Code (MAC).
+  RFC 7693, 2015. https://www.rfc-editor.org/rfc/rfc7693
+  — BLAKE2b-256, the hash a token is kept as (OCaml's `Digest.BLAKE256`).
+- **[PostgreSQL 11.2]** PostgreSQL Global Development Group. Release notes of PostgreSQL 11.2 (and 10.7, 9.6.12,
+  9.5.16, 9.4.21), 14 February 2019. https://www.postgresql.org/docs/release/11.2/
+  — A failed fsync stops the server (PANIC) instead of being retried (`data_sync_retry` off): the server stops on a
+  failed disk the same way.
+- **[RFC 8446]** E. Rescorla. The Transport Layer Security (TLS) Protocol Version 1.3. RFC 8446, 2018.
+  https://www.rfc-editor.org/rfc/rfc8446
+  — The only TLS version the server and its clients accept.
+- **[Kaloper-Meršinjak 2015]** D. Kaloper-Meršinjak, H. Mehnert, A. Madhavapeddy, P. Sewell. Not-Quite-So-Broken TLS:
+  Lessons in Re-Engineering a Security Protocol Specification and Implementation. *USENIX Security* 2015.
+  https://www.usenix.org/conference/usenixsecurity15/technical-sessions/presentation/kaloper-mersinjak
+  — ocaml-tls, the TLS in OCaml weighed against OpenSSL (its ciphers are C too; not an OSS-Fuzz project): OpenSSL kept.
+- **[sd_notify]** systemd. sd_notify(3), the readiness protocol: one datagram (`READY=1`) on `$NOTIFY_SOCKET`.
+  https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html
+
 ## Testing and verification
 
 - **[Zhou 2021]** J. Zhou, M. Xu, A. Shraer, B. Namasivayam, A. Miller, E. Tschannen, S. Atherton, A. J. Beamon,

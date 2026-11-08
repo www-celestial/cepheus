@@ -15,6 +15,9 @@ the usual one, both are given.
   of Datalog. A fact can be both asserted and derived. [rules](rules.md#what-the-database-holds-the-least-model)
 - **atomic** (all or nothing) — applied entirely or not at all: a group (G2); a rename; the switch to a new view (one
   atomic store). [guarantees](guarantees.md#g2-all-or-nothing)
+- **back-pressure** — a slow side slowing the fast one down instead of being flooded: at its limit of writes in flight
+  a connection is no longer read, the kernel's buffers fill, and the program's writes wait. Nothing is dropped.
+  [server](server.md#order-pipelining-and-back-pressure)
 - **Backward/Forward** (B/F) — the algorithm that keeps derived facts right when facts go (Motik et al. 2015): a fact
   that lost a derivation is checked backward (is it asserted, or proved by a rule instance whose body facts are
   proved?), each fact once; proofs propagate forward among the facts checked; a fact without proof goes, and the facts
@@ -37,6 +40,8 @@ the usual one, both are given.
   [concepts](concepts.md#questions)
 - **birthday problem** — the chance that among m people two share a birthday, far higher than intuition says; here,
   the chance that two of m buyers pick the same seat among ten. [case](case-seats.md#a-bound)
+- **BLAKE2b** — a cryptographic hash function (RFC 7693): from any bytes, 32 bytes (BLAKE2b-256) from which the input
+  cannot be found again. The server keeps tokens only as their BLAKE2b-256 hash. [server](server.md#tokens)
 - **body** (of a rule) — its patterns and ranges: the question whose answers give the head. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **bottom run** — a run that rests on nothing (its name starts with 20 zeros): it holds the whole state at its last
   group and no retraction.
@@ -45,6 +50,10 @@ the usual one, both are given.
   holds the runs' 16 KiB pages, 1 GiB by default. [architecture](architecture.md#pages-and-the-cache)
 - **cardinality** — how many values a thing may have for a property: one (the default) or many (`~many:true`).
   [concepts](concepts.md#properties-and-the-schema)
+- **certificate** — a public key and a name, signed by a certificate authority: what a server shows in a TLS handshake
+  to prove it is the one the client meant. [server](server.md#tls)
+- **certificate authority** (CA) — the key whose signatures a client trusts; each cluster has its own, made by
+  `cepheus cluster init` (ECDSA, P-256), whose private key belongs offline. [server](server.md#tls)
 - **chain** (of runs) — runs that rest on one another from 0: each holds the groups after the last group of the one
   below it. An open takes the chain that reaches the newest group with the fewest runs. [architecture](architecture.md#runs-on-disk)
 - **checksum**, **CRC**, **CRC-32C** — a short number computed from bytes, which changes if they change; CRC-32C (the
@@ -56,15 +65,21 @@ the usual one, both are given.
   [architecture](architecture.md#large-groups)
 - **clean close**, **marker** — `close` leaves `DIR/closed` once everything is durable, and the next open can skip the
   fsyncs a recovery needs. [operations](operations.md#opening-and-recovery)
+- **client** — a program connected to the server: it proves who it is with a token and sends requests.
+  [server](server.md#what-it-is-and-why)
 - **CLOCK** — an eviction policy that approximates LRU with one bit a page and a moving hand (Corbató 1968).
 - **closed loop**, **open loop** — a load where each client waits for its last write before the next, against one where
   writes are due at a fixed rate whatever happens; only the open loop measures latency under stalls.
   [benchmarks](benchmarks.md#method)
+- **cluster** — the servers that hold the same databases; one machine is a cluster of one peer. Its id (`cph-c-` and
+  16 hex digits) is in `cluster.toml` and in every Welcome. [server](server.md#clustertoml)
 - **compaction** — another name for a merge in an LSM-tree. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **component** — one of the structures of an LSM-tree: the delta in memory (C0), the runs on disk.
 - **confirmed** — a group whose `write` returned `Ok`: it is durable. [guarantees](guarantees.md#the-faults)
 - **conjunctive query** — a question made of patterns that must all hold at once (an AND of facts), over shared
   variables. [concepts](concepts.md#questions)
+- **constant-time comparison** — comparing two secrets byte by byte to the end, whatever the first difference, so that
+  the time taken tells an attacker nothing about how much of a guess was right. [server](server.md#tokens)
 - **constraint** — a rule whose head is `Never`: an answer of its body refuses the group (G18).
   [rules](rules.md#constraints-never)
 - **coordinated omission** — the error of a closed-loop measure: a client stalled by a slow write sends nothing
@@ -133,6 +148,8 @@ the usual one, both are given.
   contradict says nothing. [case](case-seats.md#3-a-hypothesis-one-can-prove-wrong-and-its-cause)
 - **fixpoint** (least) — a set of facts that applying the rules does not change; the least one containing the asserted
   facts is the least model. [rules](rules.md#what-the-database-holds-the-least-model)
+- **floor** — the lowest serial of a session still waiting for its reply, sent with each write: the receipts below it
+  are forgotten. [server](server.md#writes-applied-once-sessions-g14)
 - **fork** — a temporary database started from a view: the same writes and checks, nothing on disk, free to make.
   [concepts](concepts.md#forks)
 - **frame** — the unit of one write and one fsync in the journal: a header, the groups, a trailer.
@@ -154,6 +171,8 @@ the usual one, both are given.
   [concepts](concepts.md#groups-a-write-is-a-transaction)
 - **group commit** — the writes that arrive while one fsync runs share the next one.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **handshake** — the first round trips of a TLS connection, where the two sides agree on keys and the server shows
+  its certificate: about 4.8 ms of computation here, which is why connections live long. [server](server.md#tls)
 - **head** (of a rule) — the pattern it gives for each answer of its body, or `Never`.
   [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **history** — the sequence of every transaction a database applied, with what each read and wrote; Cepheus'
@@ -163,6 +182,8 @@ the usual one, both are given.
 - **instruction** (of the processor), **intrinsic** — one operation the processor executes; an intrinsic is a C
   function that the compiler turns into one given instruction (`_mm_crc32_u64` into `crc32` on x86-64, `__crc32cd`
   into `crc32cx` on arm64). OCaml's compiler has none for these, hence the C file. [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **I/O domain** — one of the k OCaml domains over which the server spreads its connections, each with its own runtime
+  lock, so that k requests run at once. [server](server.md#what-it-is-and-why)
 - **isolation** — what one transaction can see of the others running at the same time.
   [concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)
 - **journal** — Cepheus' write-ahead log: segments of frames of groups. [architecture](architecture.md#the-journal-a-write-ahead-log)
@@ -182,6 +203,8 @@ the usual one, both are given.
   into the next level when full. Leveling writes more and reads fewer runs. [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **linearizability** — each operation appears to take effect at one instant between its call and its return
   (Herlihy and Wing 1990); a group, as a write to one object, is linearizable.
+- **loopback** — the network address of the machine itself (127.0.0.1, ::1): TCP that never leaves the machine.
+  [server](server.md#what-it-is-and-why)
 - **lost update** — two read-then-writes read the same value and both write, so one change is lost; Cepheus stops it
   only when the read is stated with `Expect`.
 - **LSM-tree** (log-structured merge-tree) — recent writes in a small structure in memory, merged in bulk into sorted
@@ -190,14 +213,23 @@ the usual one, both are given.
   other way is to reason at question time (query rewriting, magic sets). [rules](rules.md)
 - **materialize the conflict** — protect a set against phantoms by keeping one fact that every writer of the set
   expects and changes (Fekete et al. 2005).
+- **memory BIO** — an OpenSSL buffer in memory standing for the network: OpenSSL reads the bytes it is given and
+  writes the bytes to send there, never touching the socket, so it never waits. [server](server.md#tls)
 - **merge** — the folding of the delta and the newest runs into one new run file; it runs in the background and is
   atomic (G12); `snapshot` is the full merge, of every run. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **model checking** — visiting every reachable state of a bounded model and checking invariants in each; TLC does it
   for TLA+. [testing](testing.md#model-checking)
+- **monotonic writes** — a session guarantee (Terry et al. 1994): a program's writes are applied in the order it sent
+  them. [server](server.md#order-pipelining-and-back-pressure)
+- **mutual TLS** — TLS where both sides show a certificate of the same CA; between Cepheus servers (with replication),
+  not for programs, which show a token. [server](server.md#tls)
 - **net** (run) — a run adds only facts absent below it and retracts only facts present below it, so every count of a
   view is a sum of exact counts. [architecture](architecture.md#indexes-the-runs-and-the-delta)
 - **optimistic concurrency control** — read without locks, and check at the end that what was read still holds
   (Kung and Robinson 1981): `Expect`.
+- **origin** — the token's name, session, serial and floor that a group written through the server carries in its
+  `why`: which program wrote it, and how a resent write is recognized.
+  [server](server.md#writes-applied-once-sessions-g14)
 - **page** — 16 KiB of a run file, the unit of the cache, checked by its CRC each time it is read from the disk.
 - **page cache** (the kernel's) — the operating system's memory copy of files; what a process crash keeps and a power
   loss loses.
@@ -206,6 +238,8 @@ the usual one, both are given.
 - **persistent data structure** — one that is never changed in place: a change makes a new version and the old one
   stays valid. [architecture](architecture.md#indexes-the-runs-and-the-delta)
 - **phantom** — a new member of a set read earlier (the facts that match a pattern), unseen by a check of single facts.
+- **pipelining** — sending requests without waiting for the replies of the earlier ones: the round trips overlap, and
+  many replies come back in one system call. [server](server.md#order-pipelining-and-back-pressure)
 - **plan** (of a rule) — the rule compiled to closures with one atom matched to a given fact, the others joined in an
   order chosen from the store's counts. [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **population count** (popcount) — the number of bits set in a word; a rank table's lookup is one.
@@ -226,6 +260,8 @@ the usual one, both are given.
   [theory](theory.md#3-indexes)
 - **read amplification** — how many runs a read must visit: one a level under leveling, at most 3 at 10 M facts.
   [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
+- **read your writes** — a session guarantee (Terry et al. 1994): a read sent after a write's receipt arrived sees
+  that write. [server](server.md#order-pipelining-and-back-pressure)
 - **read-then-write** — a client transaction that reads a view, then writes a group; validated by its `Expect`s.
 - **recovery** — what an open does after a crash: the newest chain of runs that checks, then the journal after it,
   whose newest frame it writes again first. [operations](operations.md#opening-and-recovery)
@@ -238,6 +274,10 @@ the usual one, both are given.
 - **rewrite of the newest frame** — at a recovery after anything but a clean close, the journal's newest frame is
   written again before it is forced, so that pages a failed fsync marked clean are dirty again and really written
   (G13). [guarantees](guarantees.md#g13-a-failed-fsync-is-never-trusted)
+- **right** — what a token may do on a database: `read` (Open, Get, Find) or `write` (and Write); `admin`: the
+  server's operations. [server](server.md#rights-g16)
+- **round trip** — a request and its reply: the time between sending one and receiving the other, most of it the
+  kernel's work (system calls, waking the other process). [server](server.md#speed-beside-postgresql)
 - **rule** — a question's patterns and a head: whenever the patterns are facts for some values, the head is a fact for
   the same values. A schema thing (`cepheus/name`, `cepheus/rule`). [rules](rules.md)
 - **run**, **run file** — one sorted structure of the LSM-tree on disk: the changes of a range of groups on top of the
@@ -250,10 +290,19 @@ the usual one, both are given.
 - **segment** — one file of the journal, up to 64 MiB, named by its first group.
 - **semi-naive evaluation** — evaluating rules on what changed only: each round matches the facts new in the round
   before, so every rule instance is found once (Bancilhon, Ramakrishnan 1986). [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
+- **serial** — the number a program's library gives each write of its session: 1, 2, 3... A serial sent twice is
+  applied once (G14). [server](server.md#writes-applied-once-sessions-g14)
 - **serializable** — the result equals some execution of the transactions one at a time.
 - **serializable snapshot isolation** (SSI) — PostgreSQL's SERIALIZABLE: snapshot isolation plus a check of the
   read-write conflicts between transactions, aborting one when two of them follow each other (Cahill, Röhm and Fekete
   2008; Ports and Grittner 2012).
+- **server** — the process that owns the databases' files and answers the requests of programs over sockets: `cepheus
+  serve`. [server](server.md)
+- **session** — a number the server gives a connection (Welcome) and that the program's library keeps across
+  reconnections; its writes are numbered in it. [server](server.md#writes-applied-once-sessions-g14)
+- **session table** — for each database and session, the receipts of the serials at or above the floor; saved in
+  `DATA/NAME/sessions` and rebuilt from it and the journal at start.
+  [server](server.md#writes-applied-once-sessions-g14)
 - **single writer** — one writer thread applies every group of a database, in order. [architecture](architecture.md#one-writer-threads-and-domains)
 - **snapshot** (the operation) — `Cepheus.snapshot`, the full merge: the delta and every run into one run, so that the
   next open replays nothing. The file of earlier versions (format 4 and before, `<group>.snap`) held the whole base;
@@ -261,6 +310,10 @@ the usual one, both are given.
 - **snapshot** (the state), **view** — the exact state after one group. [concepts](concepts.md#views)
 - **snapshot isolation** — each transaction reads the state at its start, and fails if another wrote the same item
   meanwhile (first committer wins); it lets write skew through.
+- **SNI** (Server Name Indication) — the server's name, sent by the client at the start of a TLS handshake.
+  [server](server.md#tls)
+- **socket** — a channel of the kernel between two processes, written and read like a file.
+  [server](server.md#what-it-is-and-why)
 - **space amplification** — disk space used over the size of the data: the chain alone after a merge (1, as the runs
   are net), and during a full merge a new copy of the base beside the old one (2). [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **SSE4.2**, **x86-64-v2** — SSE4.2 is a set of instructions of x86-64 processors (Intel since Nehalem, 2008; AMD
@@ -273,6 +326,8 @@ the usual one, both are given.
   needs. [architecture](architecture.md#large-groups)
 - **strict serializability** — serializable in an order that respects real time. [guarantees](guarantees.md#g4-strict-serializability)
 - **structural sharing** — a new version of a persistent structure shares every untouched part with the old one.
+- **subjectAltName** — the field of a certificate that lists the names (DNS) and addresses (IP) it is valid for; a
+  client checks the host it connected to against it. [server](server.md#tls)
 - **syncer** — the thread that writes and forces the frames, beside the writer.
 - **system property** — `cepheus/name`, `cepheus/type`, `cepheus/many`, `cepheus/unique` (1 to 4).
 - **thing** — the entity of a fact: a number, from 65,536 up. [concepts](concepts.md#facts-the-entityattributevalue-model)
@@ -280,10 +335,16 @@ the usual one, both are given.
   [case](case-seats.md#threats-to-validity)
 - **TLA+**, **TLC** — a language that describes a system's steps as mathematics (Lamport), and its model checker.
   [testing](testing.md#model-checking)
+- **TLS** (Transport Layer Security) — the protocol that encrypts a TCP connection and proves the server's identity by
+  its certificate; version 1.3 (RFC 8446) only. [server](server.md#tls)
+- **token** — the secret a program shows the server to prove who it is: `cph_` and 43 characters, made by `cepheus
+  token add`, shown once. [server](server.md#tokens)
 - **torn write** — a write the disk was doing when the power went, of which only part arrived; recovery cuts it.
 - **trailer** — the last 16 bytes of a frame, repeating its length and CRCs: a sign that the frame was written whole.
 - **transaction** — a unit of work applied entirely or not at all; Cepheus' group.
 - **unique** — a property no two things share a value of, checked after each group.
+- **Unix-domain socket** — a socket between two processes of one machine, named by a path in the file system
+  (`.s.cepheus.7400`); it cannot cross machines. [server](server.md#what-it-is-and-why)
 - **value** — the third part of a fact, atomic and typed.
 - **variable** — an unknown of a question, numbered from 0.
 - **varint** (LEB128), **zigzag** — a whole number in 7-bit pieces, small ones short; zigzag maps signed to unsigned
@@ -303,3 +364,5 @@ the usual one, both are given.
 - **write-ahead log** (WAL) — a file where every change is made durable before it counts, so that a crash loses
   nothing confirmed. [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **writer** — the thread that resolves groups on the working view, the one writer of a database.
+- **zigzag** — a coding of signed integers as unsigned ones (0, -1, 1, -2... to 0, 1, 2, 3...), so that small
+  negatives stay short as varints. [server](server.md#framing)
