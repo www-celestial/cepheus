@@ -1,5 +1,8 @@
 # Operations
 
+Running a database: its files, what an open does, what to do when it reports damage or a disk error, backups,
+verification, memory and disk space, and the tools of the repository.
+
 ## Files
 
 ```
@@ -31,21 +34,31 @@ The journal is the truth: snapshots are caches that can always be rebuilt. Byte 
 6. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
    `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a snapshot of the
    groups before the damage);
-7. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt.
+7. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt; a newest
+   segment torn at its creation (its header does not check and it holds no frame) is removed;
+8. a new database (no group yet) gets group 1, which describes the four system properties.
 
 Recovery time is the snapshot's check plus the replay of the groups after it. Every merge writes a snapshot, so the
 replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`
 merges now, before a planned stop for example.
 
-**When recovery says `Damaged`.** Durable data changed: a disk fault, a mishandled file, a segment missing in the
+## When recovery says `Damaged`
+
+Durable data changed: a disk fault, a mishandled file, a segment missing in the
 middle. Do not delete files. Copy the directory aside; run `Cepheus.verify` on the copy for the full list; restore the
 database from a backup or (later) a replica. The message names the segment and the offset of the first bad frame. If
 and only if you know the damaged part was never confirmed (for example, the frame is the newest one and the machine
 lost power while writing it), the tail can be cut by hand at that offset (`truncate -s OFFSET SEGMENT`): this is a
 human decision, never taken by Cepheus.
 
-**When a write returns `Io`.** The disk failed during a write or an fsync. The database has stopped: every later write
-fails. Close it and reopen it; recovery starts from the journal. Cepheus never retries an fsync (Rebello et al. 2020).
+## When a write returns `Io`
+
+The disk failed during a write or an fsync. The database has stopped: every later write fails with the same error,
+and nothing more is confirmed (G10). Fix the disk (space, permissions, hardware), close the database and open it
+again; recovery starts from the journal. Cepheus never retries an fsync (Rebello et al. 2020). At this version, after
+a failed **fsync**, reboot the machine before opening the database again: Linux may have marked the unwritten pages
+clean, and a reopen in the same boot would replay a frame that is not on the disk (the residual of
+[G10](guarantees.md#g10-stop-on-a-disk-error)). Every message: [errors](errors.md#io-the-disk-failed).
 
 ## Backup and restore
 
@@ -53,12 +66,16 @@ Segments are only appended to and never rewritten, and snapshots are written bes
 needs no stop:
 
 1. copy `DIR/cepheus`;
-2. copy the segments in the order of their names (a segment being written may be copied with a torn end: recovery of
-   the copy cuts it; every group confirmed before the copy of that segment started is in the copy);
-3. optionally copy the newest snapshot (it makes the restore faster; without it, the copy replays the whole journal).
+2. optionally, copy the newest snapshot of `DIR/snapshots/` (it makes the restore faster; without it, the copy replays
+   the whole journal). Copy it **before** the segments: a snapshot is named only once its group is durable in the
+   journal, so the segments copied after it hold its group; a snapshot copied after the segments may be newer than
+   their end, and the copy would refuse to open (`the journal ends at group G, before the snapshot of group S`);
+3. copy the segments of `DIR/journal/` in the order of their names. A segment being written may be copied with a torn
+   end, which the copy's recovery cuts; every group confirmed before the copy of its segment started is in the copy.
 
-To restore: put the files in a new directory and open it. Then verify the copy: `Cepheus.verify` on it, and compare
-`Cepheus.group (Cepheus.view db)` with what you expect. A backup that was never opened and verified is not a backup.
+To restore: put the files in a new directory and open it (its recovery cuts a torn end), compare
+`Cepheus.group (Cepheus.view db)` with what you expect, close it, and run `Cepheus.verify` on it. A backup that was
+never opened and verified is not a backup.
 
 ## Verification (scrubbing)
 
@@ -68,7 +85,7 @@ the only check that reads the old segments, which an open does not read when a s
 
 ## Memory
 
-A database's base (its facts merged and sorted, about 31 bytes a fact) is read in pages of 16 KiB through one cache
+A database's base (its facts merged and sorted, about 25 bytes a fact: 245,824,096 bytes at 10 M facts) is read in pages of 16 KiB through one cache
 for the process, `Cepheus.set_cache bytes` (1 GiB by default). A snapshot that fits in the cache is read whole at open,
 every page checked; a larger one is read page by page as questions need it, each page checked against its CRC when it
 arrives. Pages in memory stay under 1.25 times the cache: a full collection runs after each quarter of the cache has
@@ -108,3 +125,14 @@ forced beforehand, p99 14.3 to 19.3 ms (7.7 to 15.7 NOCOW), and 14 % more fsyncs
 higher in all 5). The journal does not preallocate yet (it needs a segment made ahead in the background, and recovery
 that zeroes a torn tail instead of cutting it). The long stalls (fsyncs of 80 to 450 ms, a few a minute) come in every
 mode: they are the disk's.
+
+## Tools
+
+| tool | what it does | page |
+|---|---|---|
+| `dune build`, `dune test` | builds; runs the unit and property tests, the exhaustive enumeration, 200 seeds of the simulation, and every example of the documentation | [testing](testing.md) |
+| `tools/test.sh` | every test in the release build, the slow ones too: `CEPHEUS_TMP` (scratch directory), `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2) | [testing](testing.md) |
+| `tools/tlc.sh` | model-checks `spec/Journal.tla` and `spec/Merge.tla` with TLC; `TLA2TOOLS` names `tla2tools.jar` | [testing](testing.md#model-checking) |
+| `bench.exe` | the benchmarks: `load`, `read`, `write`, `merge`, `fsync`, `trace`, `cachesim`, `stats`, `cpu` | [benchmarks](benchmarks.md#commands) |
+| `bench/pg/pg.sh` | PostgreSQL's side: `init`, `start`, `load`, `read`, `write`, `stop` | [benchmarks](benchmarks.md#commands) |
+| `bench/sqlite/sqlite.sh` | SQLite's side: `load`, `read` | [benchmarks](benchmarks.md#commands) |
