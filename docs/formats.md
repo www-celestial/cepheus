@@ -1,11 +1,19 @@
 # File formats
 
+Every file of a database, byte by byte, as `src/journal.ml`, `src/group.ml`, `src/value.ml`, `src/codec.ml` and
+`src/snapshot.ml` write it.
+
 All integers little-endian. CRC is CRC-32C (Castagnoli), as an unsigned 32-bit number.
 
 ## `DIR/cepheus`
 
 `"cepheus database\n"` (17 bytes) | id (16 bytes) | CRC of the 33 bytes before (4 bytes). Written once with a
-temporary file, fsync, rename, fsync of the directory.
+temporary file (`DIR/cepheus.tmp`), fsync, rename, fsync of the directory.
+
+## `DIR/lock`
+
+An empty file, created at the first open. An open takes an exclusive `lockf` lock on it (`F_TLOCK`: it fails at once
+rather than wait) and keeps it until `close`, or until the process dies and the kernel releases it.
 
 ## `DIR/closed`
 
@@ -25,7 +33,8 @@ frames, one after the other:
 ```
 
 A segment is created with its header, forced, and its directory forced, before any frame goes in. A new segment
-starts when the current one would pass 64 MB.
+starts when the next frame would take the current one past 64 MiB (67,108,864 bytes); it is made before the old one
+is closed, so that a failure leaves the journal on the old segment.
 
 ## A group
 
