@@ -604,19 +604,15 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
   | exception (Pages.Unreadable _ as e) -> failed (); raise e
 
 (* The file takes its name (G12): renamed over, the directory forced; then every run of the directory that is in no
-   chain to the new state is removed (the runs it replaced, those an earlier crash left), but for the newest bottom
-   run outside the chain, kept as a fallback should the chain's be damaged, and the files of earlier formats. The
-   journal is the truth: runs are caches of it. *)
+   chain to the new state is removed (the runs it replaced, those an earlier crash left), and the files of earlier
+   formats. No run is kept aside: the journal is the truth and keeps every group, so a run found damaged at an open is
+   set aside and its groups replayed from the journal, nothing lost (a space amplification of 1 rather than 2 after a
+   full merge: Dong et al., CIDR 2017). *)
 let install disk dir w =
   disk.Disk.rename w.tmp w.path;
   disk.sync_dir dir;
   let live = Array.to_list (Array.map (fun (r : Store.run) -> name r.lo r.hi) w.view.runs) in
-  let runs = list disk dir in
-  let spare =
-    List.fold_left (fun best (lo, hi, n) -> if lo = 0 && not (List.mem n live) then (match best with Some (h, _) when h >= hi -> best | _ -> Some (hi, n)) else best) None runs
-  in
-  let keep n = List.mem n live || (match spare with Some (_, s) -> s = n | None -> false) in
-  let gone = List.filter (fun n -> not (keep n)) (List.map (fun (_, _, n) -> n) runs) @ old_files disk dir in
+  let gone = List.filter (fun n -> not (List.mem n live)) (List.map (fun (_, _, n) -> n) (list disk dir)) @ old_files disk dir in
   List.iter (fun n -> disk.remove (Filename.concat dir n)) gone;
   if gone <> [] then disk.sync_dir dir
 
