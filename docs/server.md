@@ -249,7 +249,8 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
   receipt is sent once its group is published (G5).
 - **Back-pressure**: at the limit of writes in flight, the server stops reading that socket; the kernel's buffers
   fill and the client's writes wait. Nothing is dropped and no error has to be handled. A Find's rows are sent frame
-  by frame: the next frame is coded once the socket took the previous one.
+  by frame: the next frame is coded once the socket took the previous one (its answer's index words are gathered
+  first, 8 bytes a value, so a very large answer costs its words in the server's memory until it is sent).
 
 ### Beside the protocols of the giants (by their documentation)
 
@@ -460,6 +461,11 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 `q`, `hs`).
 
 ## What it does not do yet
+
+- No idle timeout: a connection that sends nothing (or stops in the middle of its TLS handshake) keeps its thread
+  until it closes; no limit on the number of connections but the system's.
+- Find gathers its answer's index words before it sends them (above); subscriptions (`Watch`), forks and local reads
+  are not on the wire yet.
 
 Local reads in the program's own memory with leases (step 3), the Cesia client (step 4),
 subscriptions over the wire and many databases sharing one fsync (step 5), a replica (step 6), Raft on three machines
