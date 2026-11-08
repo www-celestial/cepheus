@@ -266,10 +266,10 @@ let mat n mode path dir =
   let dir = if dir = "-" then None else Some dir in
   let db, _, _, t, groups = build ~bulk:(path = "bulk") ?dir n rules in
   let all, d = count_derived (view db) in
-  let r = !Reason.seconds in
-  Printf.printf "mat %d %s %s %s: %.3f s, %d groups, %d facts (%d derived), %d derivations; reasoning %.3f s, %.3f M derived/s\n%!" n
+  let r = !Reason.seconds and ix = !Reason.bulk_index_seconds in
+  Printf.printf "mat %d %s %s %s: %.3f s, %d groups, %d facts (%d derived), %d derivations; reasoning %.3f s, %.3f M derived/s; of which the working set's build %.3f s, saturation %.3f M derived/s\n%!" n
     mode path (if dir = None then "memory" else "disk") t groups all d !Reason.derivations r
-    (if r > 0. then float_of_int d /. r /. 1e6 else 0.);
+    (if r > 0. then float_of_int d /. r /. 1e6 else 0.) ix (if r -. ix > 0. then float_of_int d /. (r -. ix) /. 1e6 else 0.);
   close db
 
 (* a graduate student of department d: 10 facts, 6 derived with the rules *)

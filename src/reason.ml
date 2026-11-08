@@ -35,6 +35,7 @@ let budget_per = ref 100
 let derivations = ref 0
 let checked = ref 0
 let seconds = ref 0.
+let bulk_index_seconds = ref 0. (* of [seconds]: a load's facts put into the working set, before the rules run *)
 
 (* ---- hashing ---- *)
 
@@ -135,6 +136,8 @@ type ws = {
   ie : idx;  (* (property, thing) *)
   iw : idx;  (* (property, value) *)
   ip : idx;  (* (property, 0) *)
+  mutable with_ip : bool;  (* [ip] kept: some plan joins an atom with neither side bound (a load whose rules have none
+                              skips it) *)
 }
 
 let ws_create ?(facts = 64) () =
@@ -144,7 +147,7 @@ let ws_create ?(facts = 64) () =
   { n = 0; f3 = ints (3 * c) 0; cap = c; base = Bytes.make c '\000'; now = Bytes.make c '\000';
     mark = Bytes.make c '\000'; round = ints c (-1); rule = ints c (-1); by = [||]; set = ints !size (-1);
     smask = !size - 1; ie = idx_create ~facts:c (); iw = idx_create ~facts:c ();
-    ip = idx_create ~facts:c ~keys:32 () }
+    ip = idx_create ~facts:c ~keys:32 (); with_ip = true }
 
 let[@inline] fe ws x = A.unsafe_get ws.f3 (3 * x)
 let[@inline] fp ws x = A.unsafe_get ws.f3 ((3 * x) + 1)
@@ -225,7 +228,7 @@ let chain ws x =
     let p = fp ws x in
     idx_add ws.ie p (fe ws x) x;
     idx_add ws.iw p (fw ws x) x;
-    idx_add ws.ip p 0 x
+    if ws.with_ip then idx_add ws.ip p 0 x
   end
 
 let set_now ws x s =
@@ -274,6 +277,8 @@ type program = {
   ids : int array;  (* their things *)
   head_p : int array;  (* the property each rule gives, -1 for a constraint *)
   atoms : Query.pattern array array;  (* each rule's body, as an array *)
+  free_free : bool;  (* a plan of a fact joins an atom with neither side bound: the working set keeps the index by
+                        property *)
   np : int;
   reads : Bytes.t;  (* by property: 1 a rule body reads it, 2 a rule head gives it *)
   consts : Value.t array;  (* the texts and floats of the rules, looked up in each view's dictionary *)
@@ -368,15 +373,33 @@ let make_program (v : Store.view) =
       List.iter (fun (a : Query.pattern) -> mark a.p 1; see_const a.v) r.where;
       match r.head with Give h -> mark h.p 2; see_const h.v | Never -> ())
     rules;
-  let orders = Hashtbl.create 64 in
+  let orders = Hashtbl.create 64 and free_free = ref false in
   Array.iteri
     (fun ri (r : Rules.t) ->
       let nb = List.length r.where in
-      for pos = -2 to nb - 1 do Hashtbl.replace orders (ri, pos) (choose_order v r pos) done)
+      let atoms = atoms_of r in
+      for pos = -2 to nb - 1 do
+        let o = choose_order v r pos in
+        Hashtbl.replace orders (ri, pos) o;
+        (* does a plan of a fact (pos >= -1) join an atom with neither side bound *)
+        if pos >= -1 then begin
+          let bound = Array.make (max 1 r.vars) false in
+          let bind = function Query.Var x -> bound.(x) <- true | _ -> () in
+          let known = function Query.Var x -> bound.(x) | _ -> true in
+          (if pos = -1 then match r.head with Give h -> bind h.e; bind h.v | Never -> () else (bind atoms.(pos).e; bind atoms.(pos).v));
+          Array.iter
+            (fun j ->
+              let a = atoms.(j) in
+              if not (known a.e || known a.v) then free_free := true;
+              bind a.e;
+              bind a.v)
+            o
+        end
+      done)
     rules;
   { key = Schema.rules_key v.schema; rules; ids; np; reads; consts = Array.of_list (List.rev !consts);
     head_p = Array.map (fun (r : Rules.t) -> match r.head with Give h -> h.p | Never -> -1) rules; orders;
-    atoms = Array.map atoms_of rules;
+    atoms = Array.map atoms_of rules; free_free = !free_free;
     size = Store.facts v; pool = ref []; pm = Mutex.create () }
 
 (* ---- plans ----
@@ -770,6 +793,7 @@ let take ?facts prog v =
   c.derived <- 0;
   c.limit <- max_int;
   c.vp <- Bytes.empty;
+  c.ws.with_ip <- true;
   Array.fill c.per_rule 0 (Array.length c.per_rule) 0;
   c
 
@@ -1133,6 +1157,7 @@ let bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp : Bu
           prog.consts;
         c.limit <- !budget_base + (!budget_per * n);
         c.vp <- Bytes.init prog.np (fun p -> if Store.count_prop v p > 0 then '\001' else '\000');
+        ws.with_ip <- prog.free_free;
         let first = ints (max 1 n) 0 in
         for i = 0 to n - 1 do
           let x =
@@ -1142,6 +1167,7 @@ let bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp : Bu
           set_round ws (x) 0;
           A.unsafe_set first i x
         done;
+        bulk_index_seconds := !bulk_index_seconds +. (Unix.gettimeofday () -. t0);
         saturate c first n [];
         let nd = ws.n - n in
         let de = Bulk.i32 nd and dp = Bulk.u16 nd and dw = Bulk.ints nd in
