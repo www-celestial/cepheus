@@ -316,6 +316,16 @@ lookups would; on a cycle it stays within the bound. The order of the variables 
 for up to 7 variables (with pruning), greedily beyond. Each answer comes out once (G11). On the follow graph (568,163
 links), the triangles take 1.03 s on one domain and 371 ms on three (PostgreSQL 1.03 s and 603 ms).
 
+## Rules
+
+A rule derives facts from facts (Datalog); the writer keeps the derived facts in the view, as facts, at each group:
+after the group's asserted changes, its retractions are decided by Backward/Forward and its additions run the rules by
+semi-naive evaluation, in a working set of arrays out of the collector's sight; the derived changes join the group's
+frame with a kind byte (2 to 5) and the view in one sorted batch. Replay applies them and evaluates nothing. In a run,
+bit 63 of a fact's value word marks it "only derived" (format 6). A large group with rules reasons over its own facts
+in the working set and appends the derived ones to its arrays, merged into the run with them. The whole of it:
+[rules](rules.md).
+
 ## How it is tested
 
 - **Deterministic simulation testing**: the engine never touches the disk directly; it goes through an interface
@@ -326,6 +336,9 @@ links), the triangles take 1.03 s on one domain and 371 ms on three (PostgreSQL 
   recovered and checked (the method of the ALICE study, pushed to every case).
 - **Real crashes** (`kill -9` at random moments) and the **bank test** (transfers guarded by `Expect`, readers on other
   cores checking that the total never changes).
+- **The rules' property test**: random rules and random writes, after every group the view compared with the least
+  model of its asserted facts computed from scratch by a naive evaluator of the tests' own (G17); every derived fact's
+  proof checked node by node (G20); the simulation defines rules too.
 - **TLA+ and TLC**: TLA+ is a language for describing a system's steps as mathematics (Lamport); TLC is its model
   checker, which visits every reachable state of a bounded model and checks invariants in each. The journal protocol
   and the merge's install are modelled (`spec/`): 3,856,315 and 983,080 states, no violation, and each safety rule,

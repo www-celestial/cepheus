@@ -263,17 +263,59 @@ venue, volume and year); a work that could not be checked is not listed. The des
   https://doi.org/10.1145/1326542.1326544
   — Copy-on-write B-trees (btrfs, the test machine's file system).
 
-## Rules and incremental views (planned)
+## Rules: Datalog, materialisation and its maintenance
 
+- **[Abiteboul 1995]** S. Abiteboul, R. Hull, V. Vianu. *Foundations of Databases*. Addison-Wesley, 1995. Free copy:
+  http://webdam.inria.fr/Alice/
+  — Datalog, its least model and its evaluation (part D, chapters 12-13, semi-naive among them): the semantics of
+  Cepheus' rules (G17).
 - **[Bancilhon 1986]** F. Bancilhon, R. Ramakrishnan. An Amateur's Introduction to Recursive Query Processing
   Strategies. *SIGMOD* 1986, 16–52. https://doi.org/10.1145/16894.16859
-  — Semi-naive evaluation, planned for rules at write time.
+  — Semi-naive evaluation (§3.2.2: the differential instead of the whole at each step): the evaluation of each group's
+  consequences.
+- **[Ramakrishnan 1990]** R. Ramakrishnan, D. Srivastava, S. Sudarshan. Rule Ordering in Bottom-Up Fixpoint
+  Evaluation of Logic Programs. *VLDB* 1990, 359–371.
+  — The semi-naive property, each inference made exactly once: the work bound of a group's reasoning.
+- **[Feeley 1987]** M. Feeley, G. Lapalme. Using Closures for Code Generation. *Computer Languages* 12(1), 47–66, 1987.
+  https://doi.org/10.1016/0096-0551(87)90012-9
+  — Code compiled to closures without generating code: each rule compiled once into its plans.
+- **[Gupta 1993]** A. Gupta, I. S. Mumick, V. S. Subrahmanian. Maintaining Views Incrementally. *SIGMOD* 1993,
+  157–166. https://doi.org/10.1145/170035.170066
+  — Counting (for nonrecursive views) and DRed: the two algorithms B/F was chosen over; counting shown wrong here on
+  inverse properties.
 - **[Motik 2015]** B. Motik, Y. Nenov, R. Piro, I. Horrocks. Incremental Update of Datalog Materialisation: the
-  Backward/Forward Algorithm. *AAAI* 2015. https://doi.org/10.1609/aaai.v29i1.9409
-  — Retractions in a materialized ontology, planned.
+  Backward/Forward Algorithm. *AAAI* 2015, 1560–1568. https://doi.org/10.1609/aaai.v29i1.9409
+  — B/F, the retraction algorithm, and its measured gains over DRed.
+- **[Motik 2019]** B. Motik, Y. Nenov, R. Piro, I. Horrocks. Maintenance of Datalog Materialisations Revisited.
+  *Artificial Intelligence* 269, 76–136, 2019. https://doi.org/10.1016/j.artint.2018.12.004
+  — Counting made correct on recursive rules, and FBF: the later refinements, to be measured before they are taken.
+- **[Motik 2014]** B. Motik, Y. Nenov, R. Piro, I. Horrocks, D. Olteanu. Parallel Materialisation of Datalog Programs
+  in Centralised, Main-Memory RDF Systems. *AAAI* 2014, 129–137. https://doi.org/10.1609/aaai.v28i1.8730
+  — RDFox: the triple table with hash indexes and chains the working set follows; its published rates, the yardstick
+  of the benchmarks.
+- **[Urbani 2016]** J. Urbani, C. Jacobs, M. Krötzsch. Column-Oriented Datalog Materialization for Large Knowledge
+  Graphs. *AAAI* 2016, 258–264. https://doi.org/10.1609/aaai.v30i1.9993
+  — VLog: materialisation over sorted columns; its published one-thread rate, beside ours.
+- **[Scholz 2016]** B. Scholz, H. Jordan, P. Subotić, T. Westmann. On Fast Large-Scale Program Analysis in Datalog.
+  *CC* 2016, 196–206. https://doi.org/10.1145/2892208.2892226
+  — Soufflé, Datalog compiled to C++: its published times, beside ours.
+- **[Zhao 2020]** D. Zhao, P. Subotić, B. Scholz. Debugging Large-scale Datalog: A Scalable Provenance Evaluation
+  Strategy. *ACM TOPLAS* 42(2), 2020. https://doi.org/10.1145/3379446
+  — Provenance stored per fact (rule and proof height) at a published 1.31× run time: the alternative to Cepheus'
+  `why` computed when asked.
+- **[Hu 2019]** P. Hu, B. Motik, I. Horrocks. Modular Materialisation of Datalog Programs. *AAAI* 2019, 2859–2866.
+  https://doi.org/10.1609/aaai.v33i01.33012859
+  — Modules for transitive and symmetric properties: the closure module of the next step.
+- **[Henzinger 2015]** M. Henzinger, S. Krinninger, D. Nanongkai, T. Saranurak. Unifying and Strengthening Hardness
+  for Dynamic Problems via the Online Matrix-Vector Multiplication Conjecture. *STOC* 2015, 21–30.
+  https://doi.org/10.1145/2746539.2746609
+  — Conditional lower bounds for decremental transitive closure: why no retraction algorithm is cheap in the worst case.
+- **[Guo 2005]** Y. Guo, Z. Pan, J. Heflin. LUBM: A Benchmark for OWL Knowledge Base Systems. *Journal of Web
+  Semantics* 3(2–3), 158–182, 2005. https://doi.org/10.1016/j.websem.2005.06.005
+  — The shape of the benchmark's data (universities, departments, people, courses) and its ontology.
 - **[Budiu 2023]** M. Budiu, T. Chajed, F. McSherry, L. Ryzhyk, V. Tannen. DBSP: Automatic Incremental View
   Maintenance for Rich Query Languages. *PVLDB* 16(7), 1601–1614, 2023. https://doi.org/10.14778/3587136.3587137
-  — The delta rules of joins, planned for live questions (subscriptions).
+  — The delta rules of joins, planned for live questions (subscriptions) and the aggregates of rules.
 
 ## Replication and many machines (planned)
 

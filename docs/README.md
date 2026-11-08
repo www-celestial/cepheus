@@ -12,7 +12,9 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
    (writes applied once, G14), local reads in a program's own memory (linearizable, G15), rights (G16), its speed
    beside PostgreSQL, server against server.
 4. [Testing](testing.md): forks for an application's tests, and how Cepheus itself is tested.
-5. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
+5. [Rules](rules.md): Datalog rules kept by the writer — derived facts, semi-naive evaluation, Backward/Forward for
+   retractions, constraints, the budget, `why`, and what a write with rules costs.
+6. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
    to the proof that it is solved (a test, generated schedules, a TLA+ model, kill -9 with a checker of the history,
    the speed beside SQLite and PostgreSQL).
 
@@ -20,7 +22,8 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
 - [API](api.md): every public function and type, with its parameters, result, errors and an example.
 - [Errors](errors.md): every message, where it comes from, what it means, what to do.
 - [Limits and defaults](limits.md): every bound and default value, and where it is set.
-- [Guarantees](guarantees.md): G1 to G16, under which faults, their exact conditions, proofs and tests.
+- [Guarantees](guarantees.md): G1 to G20 (G14 to G16 the server's, G17 to G20 the rules'), under which faults, their
+  exact conditions, proofs and tests.
 - [Operations](operations.md): files, opening and recovery, damage and disk errors, backup, verification, memory, disk
   space, tools.
 - [File formats](formats.md): the journal and run files, byte by byte.

@@ -23,7 +23,10 @@
    only then the runs it replaced are removed. A crash at any point leaves the old runs or the new one, whole. *)
 
 let magic = 0x53485043 (* "CPHS" *)
-let format = 5
+let format = 6
+(* format 6 is format 5 with the flag of a fact only derived in bit 63 of its value words (Store.flag_of): a run of
+   format 5 reads as all asserted *)
+let formats = [ 5; 6 ]
 let header = 4096
 
 let name lo hi = Printf.sprintf "%020d-%020d.run" lo hi
@@ -162,6 +165,8 @@ let[@inline] at s w =
   o
 
 let put64 s x = let o = at s 8 in Bytes.set_int64_le s.a.buf o (Int64.of_int x)
+(* a value word with its flag: [d], only derived *)
+let putw s x d = let o = at s 8 in Bytes.set_int64_le s.a.buf o (Store.flagged x d)
 let put32 s x = let o = at s 4 in Bytes.set_int32_le s.a.buf o (Int32.of_int x)
 let put16 s x = let o = at s 2 in Bytes.set_uint16_le s.a.buf o x
 let put8 s c = let o = at s 1 in Bytes.unsafe_set s.a.buf o c
@@ -191,8 +196,12 @@ let put_words s (b : Bulk.t) r0 r1 =
   let r = ref r0 in
   while !r < r1 do
     let m = min (r1 - !r) (room s 8) and buf = s.a.buf and o = s.pos land Pages.mask and r' = !r in
-    if b.sorted then for k = 0 to m - 1 do set64u buf (o + (8 * k)) (Int64.of_int (Bulk.word b (r' + k))) done
-    else for k = 0 to m - 1 do set64u buf (o + (8 * k)) (Int64.of_int (Bulk.word b (Bulk.row b (r' + k)))) done;
+    if b.sorted then for k = 0 to m - 1 do let i = r' + k in set64u buf (o + (8 * k)) (Store.flagged (Bulk.word b i) (Bulk.derived b i)) done
+    else
+      for k = 0 to m - 1 do
+        let i = Bulk.row b (r' + k) in
+        set64u buf (o + (8 * k)) (Store.flagged (Bulk.word b i) (Bulk.derived b i))
+      done;
     s.pos <- s.pos + (8 * m);
     r := r' + m
   done
@@ -201,7 +210,7 @@ let put_pwords s (b : Bulk.t) r0 r1 =
   let r = ref r0 in
   while !r < r1 do
     let m = min (r1 - !r) (room s 8) and buf = s.a.buf and o = s.pos land Pages.mask and r' = !r in
-    for k = 0 to m - 1 do set64u buf (o + (8 * k)) (Int64.of_int (Bulk.pword b (r' + k))) done;
+    for k = 0 to m - 1 do set64u buf (o + (8 * k)) (Store.flagged (Bulk.pword b (r' + k)) (Bulk.pderived b (r' + k))) done;
     s.pos <- s.pos + (8 * m);
     r := r' + m
   done
@@ -210,7 +219,7 @@ let put_pthings s (b : Bulk.t) r0 r1 =
   let r = ref r0 in
   while !r < r1 do
     let m = min (r1 - !r) (room s 4) and buf = s.a.buf and o = s.pos land Pages.mask and r' = !r in
-    for k = 0 to m - 1 do set32u buf (o + (4 * k)) (Bigarray.Array1.unsafe_get b.pe (r' + k)) done;
+    for k = 0 to m - 1 do set32u buf (o + (4 * k)) (Int32.logand (Bigarray.Array1.unsafe_get b.pe (r' + k)) Int32.max_int) done;
     s.pos <- s.pos + (4 * m);
     r := r' + m
   done
@@ -262,13 +271,16 @@ let force w = if not w.forced then (w.sync (); w.forced <- true)
 
 (* ---- the merge of the sources' entries ----
    The sources are a large group's facts (Bulk, all additions: age 0), the delta (age 1) and the merged runs (run j:
-   age j + 2), each giving a fact as added or retracted.
-   For one fact, the newest entry says whether it is in the new state, and the oldest one whether it was in the state
-   below the merged runs (an addition there means it was not: a run adds only facts absent below it; a retraction
-   means it was). The new run holds an addition if the fact is in the new state and was not below, a retraction in the
-   opposite case, and nothing when the two agree. *)
+   age j + 2), each giving an entry for a fact as the delta writes one (Store.tdelta): bits 0-1 the state it leaves
+   (absent, asserted, only derived), bits 2-3 the state below it. A run's addition is 1 (3 derived): absent below it,
+   for a run adds only facts absent below it, or that it retracts itself; its retraction is 4 (12): present below it.
+   A run that changed a fact's flag holds both: the addition is its newer entry, the retraction its older.
+   For one fact, the newest entry says its state in the new run's view, the oldest one its state below the merged
+   runs; the new run holds nothing when the two agree, else a retraction of the state below (if the fact was there)
+   and an addition of the new one (if it is there): a flag changed is the pair, so that counts stay exact. *)
 
-let decide ~newest ~oldest = if newest = oldest then (if newest then 1 else -1) else 0
+let[@inline] fin c = Store.state_of_entry c
+let[@inline] below c = Store.state_of_entry (c lsr 2)
 
 (* The merge of [v]'s delta and its [take] newest runs into one run at [level], with [pos] the journal position replay
    starts from (pos.next <= v.group + 1). Written under a temporary name and forced (also on the way, while [busy]
@@ -288,7 +300,9 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
   let src = Array.sub rs 0 take in
   (* the delta's additions, retractions and things *)
   let da = ref 0 and dt = ref 0 in
-  Store.IM.iter (fun _ (td : Store.tdelta) -> Store.PW.iter (fun _ add -> if add then incr da else incr dt) td.tf) v.delta.de;
+  Store.IM.iter
+    (fun _ (td : Store.tdelta) -> Store.PW.iter (fun _ st -> if st land 1 <> 0 then incr da; if st land 4 <> 0 then incr dt) td.tf)
+    v.delta.de;
   let dthings = Store.IM.cardinal v.delta.de in
   let ne = Store.max_thing v + 1 and np = Schema.count v.schema in
   let s0 = if take = 0 then v.dict.chunks.c0 else src.(take - 1).s0 in
@@ -334,15 +348,22 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
     let tr = stream o lt.o_erank (8 * (Store.blocks t_ne + 1)) and toff = stream o lt.o_eoff (8 * (t_kcap + 1))
     and tap = stream o lt.o_eap (2 * t_ncap) and tav = stream o lt.o_eav (8 * t_ncap) in
     let abits = ref 0 and arank = ref 0 and tbits = ref 0 and trank = ref 0 in
-    let emit_a e p w =
+    let emit_a e p w d =
       let bit = 1 lsl (e land 31) in
       if !abits land bit = 0 then (abits := !abits lor bit; put64 aoff !na; incr ka);
-      put16 aap p; put64 aav w; incr na
-    and emit_t e p w =
+      put16 aap p; putw aav w d; incr na
+    and emit_t e p w d =
       if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below";
       let bit = 1 lsl (e land 31) in
       if !tbits land bit = 0 then (tbits := !tbits lor bit; put64 toff !nt; incr kt);
-      put16 tap p; put64 tav w; incr nt
+      put16 tap p; putw tav w d; incr nt
+    in
+    (* a fact whose state is [f] in the new view and [b] below the merged runs (0 absent, 1 asserted, 2 derived) *)
+    let out e p w f b =
+      if f <> b then begin
+        if b > 0 then emit_t e p w (b = 2);
+        if f > 0 then emit_a e p w (f = 2)
+      end
     in
     (* the delta's next thing, its changes, the rest *)
     let dnext = ref (Store.IM.to_seq v.delta.de ()) in
@@ -373,30 +394,36 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
       end
       else if !nh = 0 && nb = 0 && Option.is_some td then
         (* the delta alone: its entries, in (p, w) order, as they are *)
-        Store.PW.iter (fun (p, w) add -> if add then emit_a e p w else emit_t e p w) (Option.get td).tf
+        Store.PW.iter (fun (p, w) st -> out e p w (fin st) (below st)) (Option.get td).tf
       else if Option.is_none td && !nh = 1 && nb = 0 then begin
         (* one source: its rows as they are *)
         let j = ref 0 in
         while (!h lsr !j) land 1 = 0 do incr j done;
         let r = src.(!j / 2) in
-        if !j land 1 = 0 then Store.base_iter_e r.a e (fun p w -> emit_a e p w)
-        else Store.base_iter_e r.t e (fun p w -> emit_t e p w)
+        if !j land 1 = 0 then Store.base_iter_ef r.a e (fun p w d -> emit_a e p w d)
+        else Store.base_iter_ef r.t e (fun p w d -> emit_t e p w d)
       end
       else if Option.is_some td || !nh > 0 || nb > 0 then begin
-        (* entries (p, w, age, added), newest first within a fact *)
+        (* entries (p, w, 2 age (+1 for a run's retraction), entry), newest first within a fact *)
         entries := [];
-        for r = b0 to !bi - 1 do let i = Bulk.row bulk r in entries := (Bulk.prop bulk i, Bulk.word bulk i, 0, true) :: !entries done;
-        Option.iter (fun (td : Store.tdelta) -> Store.PW.iter (fun (p, w) add -> entries := (p, w, 1, add) :: !entries) td.tf) td;
+        for r = b0 to !bi - 1 do
+          let i = Bulk.row bulk r in
+          entries := (Bulk.prop bulk i, Bulk.word bulk i, 0, if Bulk.derived bulk i then 3 else 1) :: !entries
+        done;
+        Option.iter (fun (td : Store.tdelta) -> Store.PW.iter (fun (p, w) st -> entries := (p, w, 2, st) :: !entries) td.tf) td;
         for j = 0 to take - 1 do
-          if (!h lsr (2 * j)) land 1 = 1 then Store.base_iter_e src.(j).a e (fun p w -> entries := (p, w, j + 2, true) :: !entries);
-          if (!h lsr ((2 * j) + 1)) land 1 = 1 then Store.base_iter_e src.(j).t e (fun p w -> entries := (p, w, j + 2, false) :: !entries)
+          let age = 2 * (j + 2) in
+          if (!h lsr (2 * j)) land 1 = 1 then
+            Store.base_iter_ef src.(j).a e (fun p w d -> entries := (p, w, age, if d then 3 else 1) :: !entries);
+          if (!h lsr ((2 * j) + 1)) land 1 = 1 then
+            Store.base_iter_ef src.(j).t e (fun p w d -> entries := (p, w, age + 1, if d then 12 else 4) :: !entries)
         done;
         let rec go = function
           | [] -> ()
-          | (p, w, _, add) :: rest ->
-            let rec last oldest = function (p', w', _, a) :: r when p' = p && w' = w -> last a r | r -> oldest, r in
-            let oldest, rest = last add rest in
-            (match decide ~newest:add ~oldest with 1 -> emit_a e p w | -1 -> emit_t e p w | _ -> ());
+          | (p, w, _, c) :: rest ->
+            let rec last oldest = function (p', w', _, c') :: r when p' = p && w' = w -> last c' r | r -> oldest, r in
+            let oldest, rest = last c rest in
+            out e p w (fin c) (below oldest);
             go rest
         in
         go (List.sort compare !entries)
@@ -425,8 +452,8 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
     and tve = stream o lt.o_ave (4 * t_ncap) and tpd = stream o lt.o_pdist (8 * t_np) in
     let ca = ref 0 and ct = ref 0 in
     let adist = ref 0 and alast = ref 0 and tdist = ref 0 and tlast = ref 0 in
-    let out_a w e = if !adist = 0 || w <> !alast then incr adist; alast := w; put64 avv w; put32 ave e; incr ca
-    and out_t w e = if !tdist = 0 || w <> !tlast then incr tdist; tlast := w; put64 tvv w; put32 tve e; incr ct in
+    let out_a w e d = if !adist = 0 || w <> !alast then incr adist; alast := w; putw avv w d; put32 ave e; incr ca
+    and out_t w e d = if !tdist = 0 || w <> !tlast then incr tdist; tlast := w; putw tvv w d; put32 tve e; incr ct in
     (* cursors: 2 a source run (its part a, its part t) *)
     let nsrc = 2 * take in
     let cur = Array.make nsrc 0 and stop = Array.make nsrc 0 and hw = Array.make nsrc 0 and he = Array.make nsrc 0 in
@@ -452,7 +479,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
         | None -> [||]
         | Some pd ->
           let l = ref [] in
-          Store.IM.iter (fun w (vd : Store.vdelta) -> Store.IM.iter (fun e add -> l := (w, e, add) :: !l) vd.vm) pd.pm;
+          Store.IM.iter (fun w (vd : Store.vdelta) -> Store.IM.iter (fun e st -> l := (w, e, st) :: !l) vd.vm) pd.pm;
           Array.of_list (List.rev !l)
       in
       if Array.length dl = 0 && !live = 0 && !bp < bq then begin
@@ -470,8 +497,8 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
         let s = ref 0 in
         while cur.(!s) >= stop.(!s) do incr s done;
         let b = part !s in
-        if !s land 1 = 0 then for i = cur.(!s) to stop.(!s) - 1 do out_a (Store.cavv b i) (Store.cave b i) done
-        else for i = cur.(!s) to stop.(!s) - 1 do out_t (Store.cavv b i) (Store.cave b i) done
+        if !s land 1 = 0 then for i = cur.(!s) to stop.(!s) - 1 do out_a (Store.cavv b i) (Store.cave b i) (Store.cavflag b i) done
+        else for i = cur.(!s) to stop.(!s) - 1 do out_t (Store.cavv b i) (Store.cave b i) (Store.cavflag b i) done
       end
       else begin
         let di = ref 0 in
@@ -485,28 +512,34 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
             if cur.(s) < stop.(s) && (hw.(s) < !bw || (hw.(s) = !bw && he.(s) < !be)) then (bw := hw.(s); be := he.(s))
           done;
           let w = !bw and e = !be in
-          (* its entries, newest first: the delta, then the runs in order *)
-          let newest = ref None and oldest = ref true in
+          (* its entries, newest first: the large group, the delta, then the runs in order (a run's addition before its
+             retraction) *)
+          let newest = ref (-1) and oldest = ref 0 in
           if !bp < bq then begin
-            if Bulk.pword bulk !bp = w && Bulk.pthing bulk !bp = e then (newest := Some true; oldest := true; incr bp)
+            if Bulk.pword bulk !bp = w && Bulk.pthing bulk !bp = e then begin
+              let c = if Bulk.pderived bulk !bp then 3 else 1 in
+              newest := c; oldest := c; incr bp
+            end
           end;
           if !di < Array.length dl then begin
-            let w', e', add = dl.(!di) in
-            if w' = w && e' = e then ((if Option.is_none !newest then newest := Some add); oldest := add; incr di)
+            let w', e', st = dl.(!di) in
+            if w' = w && e' = e then ((if !newest < 0 then newest := st); oldest := st; incr di)
           end;
           for s = 0 to nsrc - 1 do
             if cur.(s) < stop.(s) && hw.(s) = w && he.(s) = e then begin
-              let add = s land 1 = 0 in
-              if Option.is_none !newest then newest := Some add;
-              oldest := add;
+              let d = Store.cavflag (part s) cur.(s) in
+              let c = if s land 1 = 0 then (if d then 3 else 1) else if d then 12 else 4 in
+              if !newest < 0 then newest := c;
+              oldest := c;
               cur.(s) <- cur.(s) + 1;
               if cur.(s) < stop.(s) then head s else decr live
             end
           done;
-          match decide ~newest:(Option.get !newest) ~oldest:!oldest with
-          | 1 -> out_a w e
-          | -1 -> if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below" else out_t w e
-          | _ -> ()
+          let f = fin !newest and b = below !oldest in
+          if f <> b then begin
+            if b > 0 then (if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below" else out_t w e (b = 2));
+            if f > 0 then out_a w e (f = 2)
+          end
         done
       end;
       put64 apd !adist;
@@ -648,7 +681,7 @@ let check_and_build disk dir (lo0, hi0, file) id =
     disk.pread fd 0 h 0 header;
     if u32 h 0 <> magic then bad "not a run";
     if u32 h 212 <> Crc32c.bytes h 0 212 then bad "its header does not check";
-    if u32 h 4 <> format then bad "unknown format %d" (u32 h 4);
+    if not (List.mem (u32 h 4) formats) then bad "unknown format %d" (u32 h 4);
     if Bytes.sub_string h 8 16 <> id then bad "a run of another database";
     let g k = Int64.to_int (Bytes.get_int64_le h (24 + (8 * k))) in
     let hi = g 0 and lo = g 1 and level = g 2 and next_e = g 3 and seg = g 4 and off = g 5 and next = g 6 and s0 = g 7 in
@@ -711,14 +744,14 @@ let check_and_build disk dir (lo0, hi0, file) id =
   | r -> r
   | exception e -> (try disk.close fd with Disk.Io _ -> ()); raise e
 
-(* The schema of a view of runs, read from the facts of the property things (raises Bad); for the server's local
-   readers too, which build views of the runs they are passed. *)
+(* The schema of a view of runs, read from the facts of the schema things (properties, rules; raises Bad); for the
+   server's local readers too, which build views of the runs they are passed. *)
 let schema_of (v : Store.view) =
   let schema = ref Schema.initial in
   for p = Schema.first_prop to min (Store.max_thing v + 1) Schema.first_thing - 1 do
     if Store.holders v p <> 0 then
-      match Resolve.read_prop v p with
-      | Ok d -> schema := Schema.set !schema p d
+      match Resolve.read_thing v p with
+      | Ok _ as t -> schema := Resolve.install_thing !schema p t
       | Error m -> bad "%s" m
   done;
   !schema
@@ -759,7 +792,7 @@ let load disk dir id =
       match check [] (List.rev chain) with
       | Error (n, m) -> aside n m
       | Ok built -> (
-        (* built: the newest first; the schema read from the facts of the property things *)
+        (* built: the newest first; the schema read from the facts of the schema things (properties, rules) *)
         let runs = Array.of_list (List.map (fun (r, _, _) -> r) built) in
         let _, next_e, pos = List.hd built in
         let v = Store.of_runs ~group:runs.(0).hi ~next_e runs in

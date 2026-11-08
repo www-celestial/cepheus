@@ -6,6 +6,10 @@
    compared with the reference model (the recorded groups applied to a set of facts). A failure prints its seed;
    [sim.exe --seed N] replays it exactly.
 
+   The rules of the reasoner are defined by each seed's third group: the published and recovered views and the forks'
+   must hold exactly the least model of their asserted facts (G17), which replay rebuilds from the derived changes
+   the frames hold, never by evaluating a rule.
+
    Checked: G1 durable, G2 all or nothing, G3 prefix, G5 published views are durable (a recovered state too: a later
    power loss must keep it), G6 damage detected, G7 snapshots, G8 forks, G10 stop after a failed fsync, G11 questions
    (their answers, and their work within the Generic Join bound, on views with a delta and after recoveries), G12 a
@@ -72,9 +76,32 @@ let declare_ops (v : Store.view) =
     props;
   !ops
 
+(* rules over the properties, defined by the group after they are declared: a symmetric link, a tag that gives
+   another, a tag a friend's tag gives (a text the reasoner interns) *)
+let sim_rules (v : Store.view) =
+  let p n = Option.get (pid v n) in
+  [ { Rules.name = "sym"; vars = 2; where = [ { e = Var 0; p = p "friend"; v = Var 1 } ]; ranges = [];
+      head = Give { e = Var 1; p = p "friend"; v = Var 0 } };
+    { name = "tagged"; vars = 1; where = [ { e = Var 0; p = p "tag"; v = Val (Text "a") } ]; ranges = [];
+      head = Give { e = Var 0; p = p "tag"; v = Val (Text "b") } };
+    { name = "near"; vars = 2; where = [ { e = Var 0; p = p "friend"; v = Var 1 }; { e = Var 1; p = p "tag"; v = Val (Text "d") } ];
+      ranges = []; head = Give { e = Var 0; p = p "tag"; v = Val (Text "derived") } } ]
+
+let rule_ops (v : Store.view) =
+  let next = ref Schema.first_prop and ops = ref [] in
+  List.iter
+    (fun (r : Rules.t) ->
+      while Schema.find v.schema !next <> None || Schema.rule v.schema !next <> None do incr next done;
+      let id = !next in
+      incr next;
+      ops := !ops @ [ Expect (id, Schema.p_name, None); Add (id, Schema.p_name, Text r.name); Add (id, Schema.p_rule, Text (Rules.to_text r)) ])
+    (sim_rules v);
+  !ops
+
 let gen_ops w (v : Store.view) =
   match declare_ops v with
   | _ :: _ as ops -> ops
+  | [] when not (Schema.has_rules v.schema) -> rule_ops v
   | [] ->
     let p n = Option.get (pid v n) in
     let r = w.r in
@@ -103,6 +130,14 @@ let gen_ops w (v : Store.view) =
 
 let engine w = match w.e with Some e -> e | None -> raise Over
 
+(* G17: a view holds exactly the least model of its asserted facts under its rules *)
+let check_rules w (v : Store.view) what =
+  if Schema.has_rules v.schema then begin
+    count "views checked against the rules";
+    let got = C.user_facts v and want = C.least (C.rules_of v) (C.asserted_facts v) in
+    if not (C.F.equal got want) then fail w "G17: the %s view at %d is not the least model: %s" what v.group (C.show_diff got want)
+  end
+
 (* the facts of the published view must be those of the durable groups (G5) *)
 let check_published w =
   let e = engine w in
@@ -110,6 +145,7 @@ let check_published w =
   if v.group < w.acked then fail w "published group %d is before the acknowledged %d" v.group w.acked;
   let got = C.facts_of_view v and want = model w v.group in
   if not (C.F.equal got want) then fail w "published view at %d differs from the model: %s" v.group (C.show_diff got want);
+  check_rules w v "published";
   (* questions on the view: the answers of the naive evaluator on the model, within the Generic Join bound (G11) *)
   for _ = 1 to 3 do
     match C.random_query w.r v want (List.map (fun (d : prop) -> d.name) props) with
@@ -185,6 +221,7 @@ let rec recover ?(kill = false) ?(close = false) w =
     w.e <- Some e;
     let got = C.facts_of_view e.working and want = model w k in
     if not (C.F.equal got want) then fail w "recovered state at %d differs from the model: %s" k (C.show_diff got want);
+    check_rules w e.working "recovered";
     (* G12: a crash never leaves a merge's file, nor a snapshot that must be set aside *)
     if List.exists (fun f -> Filename.check_suffix f ".tmp") (snapshot_files w) then fail w "a merge's file was left after recovery";
     let expected n = List.exists (fun f -> let k = String.length f in String.length n > 9 + k && String.sub n 9 k = f) w.flipped_snapshots in
@@ -334,6 +371,7 @@ let step w =
     for _ = 1 to 1 + Rng.int w.r 4 do ignore (write f (gen_ops w (view f))) done;
     let f2 = fork (view f) in
     ignore (write f2 (gen_ops w (view f2)));
+    check_rules w (view f2) "fork's";
     if not (C.F.equal facts (C.facts_of_view v)) then fail w "a fork changed the database's view";
     List.iter (fun (p, b) -> if not (Bytes.equal b (Sim_disk.durable_bytes w.sim p)) then fail w "a fork changed %s" p) before;
     count "forks"

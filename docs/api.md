@@ -45,7 +45,7 @@ database is closed"`.
 | `view : db -> view` | the newest durable state (for a fork, its newest state). Free: one atomic read |
 | `group : view -> int` | the number of the last group in a view |
 | `fork : view -> db` | a temporary state starting at a view: the same reads and writes, the same checks, nothing on any file (G8). Free; a fork of a fork works |
-| `empty : view` | the state of a new database: group 1, the four system properties. `fork empty` is a database for a unit test |
+| `empty : view` | the state of a new database: group 1, the five system properties. `fork empty` is a database for a unit test |
 | `open_on : Disk.t -> string -> (db, error) result` | `open_` on another implementation of the disk, such as the simulated one (`Sim_disk.disk`) |
 
 ```ocaml
@@ -171,6 +171,76 @@ client/tag: text, many true, unique false
 client/phone: none
 again: 16
 invalid: client/email is declared already as another kind of property
+```
+
+## Rules
+
+```ocaml signature
+type term = Var of int | Thing of int | Val of value          (* as in questions *)
+type pattern = { e : term; p : int; v : term }
+type head = Give of pattern | Never
+type rule = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
+val define : db -> rule list -> (int list, error) result
+val undefine : db -> string list -> (unit, error) result
+type proof =
+  | Given of { e : int; p : int; v : value }
+  | By of { rule : string; e : int; p : int; v : value; from : proof list }
+val why : view -> int -> int -> value -> proof option
+val rule_budget : int ref * int ref
+```
+
+A rule is a question's patterns and ranges (`where`, `ranges`, variables 0 to `vars - 1`) and a head: `Give pattern`,
+the fact it gives for each answer, or `Never`, a constraint ([rules](rules.md)). `define db rules` returns the rule
+things (in 16 to 65,535, as properties) of the rules, in the order given, and writes in one group
+(`~why:"cepheus: rules"`) the new ones (at the lowest free number) and those whose definition changed (found by
+name); a rule defined already with the same definition writes nothing. The writer checks each rule (range
+restriction, types, the head's property; errors `Invalid "rule NAME: …"`, [errors](errors.md#invalid-the-request-is-wrong))
+and derives in that group what it gives over the whole database, under the budget; a constraint is checked over the
+whole database. A name that is a property's is `Invalid`. If another writer took a number meanwhile, `define` reads
+the schema again and tries again.
+
+`undefine db names` removes the rules of these names in one group: their definitions retracted, and the facts only
+they derived with them (a name that is no rule is ignored).
+
+`why v e p x` is a proof of the fact `(e, p, x)` of view v: `Given` for an asserted fact, `By` for a derived one, with
+the rule's name and the proofs of the facts of its body, in the order of the rule's patterns; `None` when the triple
+is not a fact of v. Computed when called, on the view: nothing is stored at write time (G20).
+
+`rule_budget` is (base, per): a group whose derived changes pass base + per × its asserted changes is refused,
+`Invalid "rule NAME derived more than N facts from a group of K facts"`; (100,000, 100) by default, for every database
+of the process.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ member; member_of ]) =
+    declare db [ prop ~many:true "org/member" Tlink; prop ~many:true "person/memberOf" Tlink ]
+  in
+  (* each of two properties the inverse of the other *)
+  let inverse name a b =
+    { name; vars = 2; where = [ { e = Var 0; p = a; v = Var 1 } ]; ranges = []; head = Give { e = Var 1; p = b; v = Var 0 } }
+  in
+  let ids = Result.get_ok (define db [ inverse "member-inverse" member member_of; inverse "memberOf-inverse" member_of member ]) in
+  Printf.printf "rules %s\n" (String.concat ", " (List.map string_of_int ids));
+  let r = Result.get_ok (write db [ Add (-1, member, Link (-2)) ]) in
+  let club = thing r (-1) and ada = thing r (-2) in
+  Printf.printf "ada is a member of %s\n" (String.concat ", " (List.map Value.to_string (values (view db) ada member_of)));
+  (match why (view db) ada member_of (Link club) with
+   | Some (By { rule; from = [ Given g ]; _ }) -> Printf.printf "by %s, from [#%d %d %s]\n" rule g.e g.p (Value.to_string g.v)
+   | _ -> ());
+  (* the two facts derive each other; with the asserted one gone, both go *)
+  ignore (Result.get_ok (write db [ Retract (club, member, Link ada) ]));
+  Printf.printf "after: %d and %d\n" (List.length (values (view db) club member)) (List.length (values (view db) ada member_of));
+  ignore (Result.get_ok (undefine db [ "member-inverse"; "memberOf-inverse" ]))
+```
+
+```output
+rules 18, 19
+ada is a member of #65536
+by member-inverse, from [#65536 16 #65537]
+after: 0 and 0
 ```
 
 ## Reading

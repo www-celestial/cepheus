@@ -42,13 +42,14 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | command | what it runs | options |
 |---|---|---|
 | `_build/default/test/unit.exe` | the unit and property tests | `CEPHEUS_TMP`: where its databases on the real disk go (the system's temp directory by default) |
+| `reasoning.exe` | the rules: named cases, then G17, G18 and G20 on random sequences (random rules defined, changed and removed; random additions and retractions) against the least model from scratch, plain and over merged runs | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group) |
 | `exhaustive.exe` | every crash state of small journals and inside merges | none |
 | `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
 | `crash.exe DIR ROUNDS [SEED]` | real `kill -9` rounds on a database in DIR | SEED 42 by default |
 | `bank.exe DIR SECONDS` | the bank test for SECONDS | |
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | the sale of seats with kill -9 and a checker of the history ([case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)); `ROUNDS` 0: no kill, the time to sell out | `BUYERS` (16), SEED 42, SEATS 2,000 |
 | `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
-| `tools/test.sh` | `dune build --profile release`, then unit, exhaustive, sim, crash, bank, seats and examples | `CEPHEUS_TMP`, `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20) |
+| `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, crash, bank, seats and examples | `CEPHEUS_TMP`, `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20) |
 | `tools/tlc.sh` | TLC on `spec/Journal.tla`, `spec/Merge.tla` and `spec/Seats.tla`, and the naive sale (`spec/SeatsNaive.cfg`), which must break an invariant | `TLA2TOOLS`: the path of `tla2tools.jar` |
 
 **Deterministic simulation testing** runs the real engine on a simulated disk where one seed decides every event (the

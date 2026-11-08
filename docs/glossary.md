@@ -11,6 +11,8 @@ the usual one, both are given.
   G2 anomaly. [case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)
 - **append-only** — a file that is only ever extended, never rewritten in place: the journal's segments.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **asserted fact** — a fact a program wrote (`Add`), as opposed to one a rule derived; the extensional database (EDB)
+  of Datalog. A fact can be both asserted and derived. [rules](rules.md#what-the-database-holds-the-least-model)
 - **atomic register**, **regular register**, **new-old inversion** — Lamport's classes of shared registers (On
   Interprocess Communication, 1986): a read of a *regular* register returns the last value written before it or one
   being written meanwhile, so two reads one after the other may see a new value and then the old one (a **new-old
@@ -21,6 +23,10 @@ the usual one, both are given.
 - **back-pressure** — a slow side slowing the fast one down instead of being flooded: at its limit of writes in flight
   a connection is no longer read, the kernel's buffers fill, and the program's writes wait. Nothing is dropped.
   [server](server.md#order-pipelining-and-back-pressure)
+- **Backward/Forward** (B/F) — the algorithm that keeps derived facts right when facts go (Motik et al. 2015): a fact
+  that lost a derivation is checked backward (is it asserted, or proved by a rule instance whose body facts are
+  proved?), each fact once; proofs propagate forward among the facts checked; a fact without proof goes, and the facts
+  it gave are checked in turn. [rules](rules.md#retraction-backwardforward)
 - **base** — the runs of a view taken together: the facts as of the last merges, sorted, in columns, in run files read
   through the cache. [architecture](architecture.md#indexes-the-runs-and-the-delta)
 - **baseline** — what is measured before anything changes, so that the change has a number to be compared with.
@@ -41,6 +47,7 @@ the usual one, both are given.
   the chance that two of m buyers pick the same seat among ten. [case](case-seats.md#a-bound)
 - **BLAKE2b** — a cryptographic hash function (RFC 7693): from any bytes, 32 bytes (BLAKE2b-256) from which the input
   cannot be found again. The server keeps tokens only as their BLAKE2b-256 hash. [server](server.md#tokens)
+- **body** (of a rule) — its patterns and ranges: the question whose answers give the head. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **bottom run** — a run that rests on nothing (its name starts with 20 zeros): it holds the whole state at its last
   group and no retraction.
   [architecture](architecture.md#runs-on-disk)
@@ -80,10 +87,15 @@ the usual one, both are given.
   new one over it is closed at its accept. [server](server.md#clustertoml)
 - **constant-time comparison** — comparing two secrets byte by byte to the end, whatever the first difference, so that
   the time taken tells an attacker nothing about how much of a guess was right. [server](server.md#tokens)
+- **constraint** — a rule whose head is `Never`: an answer of its body refuses the group (G18).
+  [rules](rules.md#constraints-never)
 - **coordinated omission** — the error of a closed-loop measure: a client stalled by a slow write sends nothing
   meanwhile, so the writes that would have waited are never counted (Tene 2015). [benchmarks](benchmarks.md#method)
 - **counterexample** — a sequence of steps that leads from an initial state to one where an invariant is false; what
   a model checker prints. [case](case-seats.md#a-formal-model-checked-by-a-machine)
+- **counting** (view maintenance) — keeping for each derived fact the number of its derivations, deleting it at zero
+  (Gupta et al. 1993); exact for nonrecursive rules only: two facts that derive each other keep each other's count
+  above zero. [rules](rules.md#retraction-backwardforward)
 - **counting sort** — a sort that counts how many items fall on each key, then places each item at its key's place
   in one pass: O(n + keys), no comparison. A large group's facts are sorted by property this way, in chunks counted
   and spread at once by several domains.
@@ -93,16 +105,25 @@ the usual one, both are given.
   [guarantees](guarantees.md#g13-a-failed-fsync-is-never-trusted)
 - **damage** — durable bytes that changed (fault F3); recovery refuses to open rather than drop them, unlike a torn
   write. [architecture](architecture.md#recovery-torn-writes-and-damage)
+- **Datalog** — the rule language of deductive databases: rules `H ← B1, …, Bn` over relations, without function
+  symbols; its programs always end and have a least model. Cepheus' rules are Datalog over facts.
+  [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **datom** — Datomic's fact: entity, attribute, value, transaction, added. Cepheus' fact is the first three; the group
   and the add-or-retract flag live in the journal. [concepts](concepts.md#facts-the-entityattributevalue-model)
 - **delta** — the changes since the last merge, in persistent maps; level 0 of the LSM-tree (C0), about 170 bytes a
-  change. [architecture](architecture.md#indexes-the-runs-and-the-delta)
+  change. [architecture](architecture.md#indexes-the-runs-and-the-delta) In the reasoner, Δ is another thing: the
+  facts a group changes, from which semi-naive evaluation derives (round 0 is the group's asserted additions).
+  [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **delta debugging** — shrinking a failing case by removing parts while it still fails, until every part left is
   needed (Zeller and Hildebrandt 2002). [case](case-seats.md#3-a-hypothesis-one-can-prove-wrong-and-its-cause)
 - **dependency graph** (of a history) — the transactions as nodes, and an edge for each way one must come before
   another: ww (it wrote the version the other replaced), wr (the other read what it wrote), rw (an anti-dependency).
   The history is serializable when the graph has no cycle (Adya 1999).
   [case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)
+- **derivation** (rule instance) — a rule with one fact for each body atom, making its body true; it derives its head.
+  A fact can have many derivations. [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
+- **derived fact** — a fact a rule gives; held in the view like any fact, marked "only derived" when no program
+  asserted it (bit 63 of its value word in a run). [rules](rules.md)
 - **deterministic simulation testing** — running the engine on a simulated disk where one seed decides every event, so
   that any failure replays exactly. [testing](testing.md)
 - **dictionary** — the table that numbers each distinct text (and float) once; the rows hold the number.
@@ -111,7 +132,11 @@ the usual one, both are given.
   is forced by pieces while its run is made, so that its writeback overlaps the merge. [architecture](architecture.md#large-groups)
 - **domain** — OCaml 5's unit of parallelism: a thread of execution on its own core, with its own young heap and
   runtime lock; the threads of one domain take turns. [architecture](architecture.md#one-writer-threads-and-domains)
+- **DRed** (delete and rederive) — the maintenance algorithm that deletes every consequence of the deleted facts, then
+  derives again those that still have a proof (Gupta et al. 1993). [rules](rules.md#retraction-backwardforward)
 - **durable** — on the disk itself, not only in the kernel's memory: covered by a finished fsync.
+- **EDB, IDB** — extensional and intensional database: the asserted facts, and the derived ones.
+  [rules](rules.md#what-the-database-holds-the-least-model)
 - **Elle** — the checker Jepsen uses to find isolation anomalies in a database's recorded history, by inferring its
   dependency graph and looking for cycles (Kingsbury and Alvaro 2020).
 - **entity–attribute–value** (EAV) — a model where data is a set of (entity, attribute, value) statements instead of
@@ -132,6 +157,8 @@ the usual one, both are given.
   a Unix-domain socket can carry descriptors to another process, which receives its own descriptors of the same open
   files (unix(7)). The server passes a local reader its run files and its visibility page this way: the reader needs
   no permission on the data directory. [server](server.md#local-reads-g15)
+- **fixpoint** (least) — a set of facts that applying the rules does not change; the least one containing the asserted
+  facts is the least model. [rules](rules.md#what-the-database-holds-the-least-model)
 - **floor** — the lowest serial of a session still waiting for its reply, sent with each write: the receipts below it
   are forgotten. [server](server.md#writes-applied-once-sessions-g14)
 - **follow stream**, **follower** — a follow stream is the second connection of a local reader, on which the server
@@ -160,10 +187,10 @@ the usual one, both are given.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **handshake** — the first round trips of a TLS connection, where the two sides agree on keys and the server shows
   its certificate: about 4.8 ms of computation here, which is why connections live long. [server](server.md#tls)
+- **head** (of a rule) — the pattern it gives for each answer of its body, or `Never`.
+  [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **history** — the sequence of every transaction a database applied, with what each read and wrote; Cepheus'
   journal is one, in group order.
-- **I/O domain** — one of the k OCaml domains over which the server spreads its connections, each with its own runtime
-  lock, so that k requests run at once. [server](server.md#what-it-is-and-why)
 - **idle timeout** — the time a connection may go without a whole request before the server closes it
   (`idle_timeout`, 600 s by default), its TLS handshake included. [server](server.md#clustertoml)
 - **index word** — the 64-bit form of a value in the indexes: the value itself, or a dictionary number for texts and
@@ -171,6 +198,8 @@ the usual one, both are given.
 - **instruction** (of the processor), **intrinsic** — one operation the processor executes; an intrinsic is a C
   function that the compiler turns into one given instruction (`_mm_crc32_u64` into `crc32` on x86-64, `__crc32cd`
   into `crc32cx` on arm64). OCaml's compiler has none for these, hence the C file. [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **I/O domain** — one of the k OCaml domains over which the server spreads its connections, each with its own runtime
+  lock, so that k requests run at once. [server](server.md#what-it-is-and-why)
 - **isolation** — what one transaction can see of the others running at the same time.
   [concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)
 - **journal** — Cepheus' write-ahead log: segments of frames of groups. [architecture](architecture.md#the-journal-a-write-ahead-log)
@@ -184,6 +213,8 @@ the usual one, both are given.
 - **lease** — a permission that ends by itself after a time, unless renewed (Gray and Cheriton 1989). The design
   proposed one for local reads; it was left for the visibility number, which needs no clock (leases come back between
   machines). [server](server.md#the-rules-the-design-first-had-and-why-they-were-left)
+- **least model** — the smallest set of facts containing the asserted ones and closed under the rules: what a
+  database with rules holds (G17). [rules](rules.md#what-the-database-holds-the-least-model)
 - **level**, **size ratio** — a place for runs with a capacity in an LSM-tree; each level is T times larger than the
   one above (T, the size ratio, is 4 here): level l holds at most 200,000 × 4^l rows. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **leveling**, **tiering** — the two ways an LSM-tree of several levels merges: under leveling each level holds one
@@ -199,6 +230,8 @@ the usual one, both are given.
   only when the read is stated with `Expect`.
 - **LSM-tree** (log-structured merge-tree) — recent writes in a small structure in memory, merged in bulk into sorted
   structures on disk (O'Neil et al. 1996). [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
+- **materialisation** — keeping the derived facts stored and up to date, so that questions read them as facts; the
+  other way is to reason at question time (query rewriting, magic sets). [rules](rules.md)
 - **materialize the conflict** — protect a set against phantoms by keeping one fact that every writer of the set
   expects and changes (Fekete et al. 2005).
 - **memory BIO** — an OpenSSL buffer in memory standing for the network: OpenSSL reads the bytes it is given and
@@ -228,13 +261,21 @@ the usual one, both are given.
 - **phantom** — a new member of a set read earlier (the facts that match a pattern), unseen by a check of single facts.
 - **pipelining** — sending requests without waiting for the replies of the earlier ones: the round trips overlap, and
   many replies come back in one system call. [server](server.md#order-pipelining-and-back-pressure)
+- **plan** (of a rule) — the rule compiled to closures with one atom matched to a given fact, the others joined in an
+  order chosen from the store's counts. [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **population count** (popcount) — the number of bits set in a word; a rank table's lookup is one.
+- **proof** — a tree whose leaves are asserted facts and whose nodes are rule instances, each node's children the
+  facts of its body; *well-founded*: every child proved before its parent. `why` returns one (G20).
+  [rules](rules.md#why)
 - **property** — the attribute of a fact; itself a thing (16 to 65,535) with a name, a type and two flags.
+- **provenance** — where a fact comes from: here, a proof of it. [rules](rules.md#why)
 - **question** — Cepheus' query: patterns over variables. [concepts](concepts.md#questions)
 - **radix sort** (least significant digit first) — a sort that sorts by the lowest digit, then the next, each pass a
   stable counting sort, so that the order of the lower digits is kept: O(n × digits). A large group's values inside a
   property are sorted with 11-bit digits (Knuth, vol. 3, 5.2.5), each pass from one buffer to the other, and so are
   its indexes by thing when it does not come in thing order. [theory](theory.md#9-levels-on-disk-and-large-groups)
+- **range restriction** (safety) — every variable of a rule's head appears in its body: a rule gives facts only about
+  what the database holds, and the least model is finite. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **rank table** (rank directory) — a bit for each thing number and, every 32 bits, how many bits are set before
   them: "is thing e here, and at which slot?" is one word and one popcount (Jacobson 1989). Each part of a run has one.
   [theory](theory.md#3-indexes)
@@ -245,6 +286,8 @@ the usual one, both are given.
 - **read-then-write** — a client transaction that reads a view, then writes a group; validated by its `Expect`s.
 - **recovery** — what an open does after a crash: the newest chain of runs that checks, then the journal after it,
   whose newest frame it writes again first. [operations](operations.md#opening-and-recovery)
+- **recursive rule** — a rule whose head's property is read by its own body, directly or through other rules:
+  "every ancestor", at any depth. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **redo log** — a log of changes to apply again after a crash, never to undo; the journal is one.
 - **replay** — applying the journal's groups in order to rebuild a state.
 - **retry** — running a transaction again after the database refused it (a `Conflict` in Cepheus, a serialization
@@ -256,6 +299,8 @@ the usual one, both are given.
   server's operations. [server](server.md#rights-g16)
 - **round trip** — a request and its reply: the time between sending one and receiving the other, most of it the
   kernel's work (system calls, waking the other process). [server](server.md#speed-beside-postgresql)
+- **rule** — a question's patterns and a head: whenever the patterns are facts for some values, the head is a fact for
+  the same values. A schema thing (`cepheus/name`, `cepheus/rule`). [rules](rules.md)
 - **run**, **run file** — one sorted structure of the LSM-tree on disk: the changes of a range of groups on top of the
   runs below it, in a file `DIR/snapshots/<lo>-<hi>.run`. [architecture](architecture.md#runs-on-disk)
 - **S3-FIFO** — the eviction policy of the cache: three FIFO queues (small, main, ghost), nothing moved on a hit (Yang
@@ -264,6 +309,8 @@ the usual one, both are given.
   [case](case-seats.md#correctness-on-generated-inputs)
 - **schema** — the properties and their types; in Cepheus, facts like the rest. [concepts](concepts.md#properties-and-the-schema)
 - **segment** — one file of the journal, up to 64 MiB, named by its first group.
+- **semi-naive evaluation** — evaluating rules on what changed only: each round matches the facts new in the round
+  before, so every rule instance is found once (Bancilhon, Ramakrishnan 1986). [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **serial** — the number a program's library gives each write of its session: 1, 2, 3... A serial sent twice is
   applied once (G14). [server](server.md#writes-applied-once-sessions-g14)
 - **serializable** — the result equals some execution of the transactions one at a time.
@@ -330,6 +377,9 @@ the usual one, both are given.
   (`/dev/shm/cepheus-ID.visible`), under which the newest durable state is visible: the server stores it after each
   fsync, before it answers the writers; a local read loads it and serves the state held under it. One store makes a
   group visible to every reader at one instant. [server](server.md#local-reads-g15)
+- **working set** — the reasoner's arrays for one group: the facts it touched, their states, rounds and marks, in
+  open-addressing tables with chains by (property, thing) and (property, value), out of the collector's sight.
+  [rules](rules.md#large-groups)
 - **working view** — the writer's state with every resolved group, durable or not; readers never see it.
 - **worst-case optimal join** — a join whose work never exceeds, up to small factors, the largest answer the question
   could have (the AGM bound) (Ngo et al. 2012).

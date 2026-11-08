@@ -123,7 +123,7 @@ let () =
       Date (-5); Money 12345; Link 70000 ]
   in
   let g = { Group.n = 7; time = 1700000000000; by = -3; why = "test"; first_new = 65536; count_new = 2;
-            changes = Array.of_list (List.mapi (fun i v -> { Group.add = i mod 2 = 0; e = 65536 + i; p = 16 + i; v }) values) } in
+            changes = Array.of_list (List.mapi (fun i v -> { Group.kind = (match i mod 6 with 0 -> Retracted | 1 -> Added | 2 -> Derived | 3 -> Underived | 4 -> Now_asserted | _ -> Now_derived); e = 65536 + i; p = 16 + i; v }) values) } in
   let b = Buffer.create 64 in
   Group.encode b g;
   let rd = Codec.reader (Buffer.to_bytes b) 0 (Buffer.length b) in

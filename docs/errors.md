@@ -76,6 +76,39 @@ From `write` (the writer's checks, the same on a database and on a fork):
 | `a group of N bytes is over the frame limit of 268435456` | the group's encoding passes 256 MiB, the largest frame body: split it ([limits](limits.md#writes)) |
 | `thing numbers end at 2147483647: this group would make #N` | the group's new things would take thing numbers past 2³¹ − 1, the largest a run holds ([limits](limits.md#things-properties-values)); the database can make no more things |
 
+From `write` with rules (the writer's reasoning, the same on a database and on a fork; [rules](rules.md)):
+
+| message | when |
+|---|---|
+| `[#E P V] is derived by rule R from F and G: retract one of those` | a `Retract` of a fact that is only derived: its premises would derive it again; retract the asserted facts it names (the facts of one proof) |
+| `[#E P V] is derived by a rule` | the same, when no proof of it could be printed |
+| `rule R derived more than N facts from a group of K facts` | the group's derived changes pass the budget, N = base + per × K ([api](api.md#rules), `rule_budget`); R derived the most. Split the write, or raise the budget |
+| `constraint R: FACTS` | the group would make the body of constraint R true: FACTS are the facts of one instance |
+| `rule R gives #E a second value of NAME, which takes one` | a derived value of a one-valued property beside another value |
+| `rule R gives NAME V, which another thing has` | a derived value of a unique property that another thing holds |
+| `rule R gives a fact about #E, which does not exist` | a head names a thing the database never made |
+
+From `define`, or a write of a rule's facts (a rule is checked when it is written):
+
+| message | when |
+|---|---|
+| `NAME is the name of a property` | `define` with a rule named like a property |
+| `rule NAME: its body has no pattern` | `where` is empty |
+| `rule NAME: N variables (at most 64)` | `vars` above 64 |
+| `rule NAME: variable ?K out of range` | a pattern or the head uses K outside 0 to `vars - 1` |
+| `rule NAME: variable ?K appears in no pattern of the body` | a variable below `vars` that no pattern of the body uses |
+| `rule NAME: the thing of a pattern is a variable or a thing` | a pattern's thing is a `Val` |
+| `rule NAME: no property P` / `… no property P in its head` | a pattern or the head names a property that does not exist |
+| `rule NAME: variable X is both a T and a U` | as for a question |
+| `rule NAME: a range needs an int, date or money variable` / `… the bounds of ?X are not of its type` | a range on another type, or bounds of another type |
+| `rule NAME: V is not a T` | a constant of the wrong type for its property |
+| `rule NAME: its head gives a cepheus/ property` | a head on a system property |
+| `rule NAME: ?K is not a thing` / `… the thing of its head is a variable or a thing` / `… its head's thing #T is not an ordinary thing` | the head's thing is not a link variable or an ordinary thing |
+| `rule NAME: ?K is a T, NAME takes a U` / `… NAME takes a T, not a thing` | the head's value does not fit its property |
+| `rule NAME: cannot read its definition at character N` / `… its definition is not in canonical form` | a `cepheus/rule` fact written by hand that is not a rule's canonical text (Rules.to_text) |
+| `rule R takes a name and a definition only` / `rule R needs a name and a definition, and no type` | a rule thing with `cepheus/many`, `cepheus/unique` or `cepheus/type`, or without its name |
+| `NAME is a property: it never becomes a rule` / `a rule never becomes a property (NAME)` | a schema thing changed from one kind to the other |
+
 From `declare` and `snapshot`:
 
 | message | when |

@@ -316,7 +316,7 @@ let bootstrap_ops =
       match Schema.system.(p) with
       | Some d -> List.map (fun (e, q, x) -> Resolve.Add (e, q, x)) (Schema.facts p d)
       | None -> [])
-    [ 1; 2; 3; 4 ]
+    [ 1; 2; 3; 4; 5 ]
 
 let random_id disk =
   (* 16 bytes from the kernel; on a simulated disk, from its clock (a test's databases differ by directory) *)
