@@ -1,0 +1,147 @@
+# Glossary
+
+Every term the documentation uses, in plain words, with the page that explains it. Where Cepheus' name differs from
+the usual one, both are given.
+
+- **AGM bound** — the largest answer a conjunctive query can have, computed from the sizes of its inputs by a
+  fractional edge cover (Atserias, Grohe, Marx 2008): N^1.5 for the triangles of N links. A worst-case optimal join
+  never works much beyond it. [theory](theory.md#4-generic-join)
+- **append-only** — a file that is only ever extended, never rewritten in place: the journal's segments.
+  [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **atomic** (all or nothing) — applied entirely or not at all: a group (G2); a rename; the switch to a new view (one
+  atomic store). [guarantees](guarantees.md#g2-all-or-nothing)
+- **base** — the facts as of the last merge, sorted, in columns, in a snapshot file read through the cache; level 1 of
+  the LSM-tree (C1). [architecture](architecture.md#indexes-the-base-and-the-delta)
+- **batch** — the writes the writer resolves at once (up to 4,096); several batches can make one frame. [limits](limits.md#writes)
+- **Belady's optimum** (OPT) — the eviction policy that removes the page needed the farthest in the future; no real
+  policy can know the future, so it is the yardstick. [theory](theory.md#7-pages-and-the-cache)
+- **binary join** — a join of two inputs at a time; a plan of them can build more intermediate rows than the answer on
+  cyclic questions. [architecture](architecture.md#questions)
+- **binding** — a value for each variable of a question; an answer is a binding that makes every pattern a fact.
+  [concepts](concepts.md#questions)
+- **buffer pool** (the cache) — memory where a database keeps pages of its files, deciding itself what stays; Cepheus'
+  holds the base's 16 KiB pages, 1 GiB by default. [architecture](architecture.md#pages-and-the-cache)
+- **cardinality** — how many values a thing may have for a property: one (the default) or many (`~many:true`).
+  [concepts](concepts.md#properties-and-the-schema)
+- **checksum**, **CRC**, **CRC-32C** — a short number computed from bytes, which changes if they change; CRC-32C (the
+  Castagnoli polynomial) detects every burst of up to 32 bits and lets random damage through with probability 2⁻³².
+  [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **clean close**, **marker** — `close` leaves `DIR/closed` once everything is durable, and the next open can skip the
+  fsyncs a recovery needs. [operations](operations.md#opening-and-recovery)
+- **CLOCK** — an eviction policy that approximates LRU with one bit a page and a moving hand (Corbató 1968).
+- **closed loop**, **open loop** — a load where each client waits for its last write before the next, against one where
+  writes are due at a fixed rate whatever happens; only the open loop measures latency under stalls.
+  [benchmarks](benchmarks.md#method)
+- **compaction** — another name for a merge in an LSM-tree. [architecture](architecture.md#the-merge-a-log-structured-merge-tree-of-two-components)
+- **component**, **level** — one of the structures of an LSM-tree: Cepheus has two, the delta in memory (C0) and the
+  base on disk (C1); more levels on disk are not built.
+- **confirmed** — a group whose `write` returned `Ok`: it is durable. [guarantees](guarantees.md#the-faults)
+- **conjunctive query** — a question made of patterns that must all hold at once (an AND of facts), over shared
+  variables. [concepts](concepts.md#questions)
+- **coordinated omission** — the error of a closed-loop measure: a client stalled by a slow write sends nothing
+  meanwhile, so the writes that would have waited are never counted (Tene 2015). [benchmarks](benchmarks.md#method)
+- **damage** — durable bytes that changed (fault F3); recovery refuses to open rather than drop them, unlike a torn
+  write. [architecture](architecture.md#recovery-torn-writes-and-damage)
+- **datom** — Datomic's fact: entity, attribute, value, transaction, added. Cepheus' fact is the first three; the group
+  and the add-or-retract flag live in the journal. [concepts](concepts.md#facts-the-entityattributevalue-model)
+- **delta** — the changes since the last merge, in persistent maps; level 0 of the LSM-tree (C0), about 170 bytes a
+  change. [architecture](architecture.md#indexes-the-base-and-the-delta)
+- **deterministic simulation testing** — running the engine on a simulated disk where one seed decides every event, so
+  that any failure replays exactly. [testing](testing.md)
+- **dictionary** — the table that numbers each distinct text (and float) once; the rows hold the number.
+- **domain** — OCaml 5's unit of parallelism: a thread of execution on its own core, with its own young heap and
+  runtime lock; the threads of one domain take turns. [architecture](architecture.md#one-writer-threads-and-domains)
+- **durable** — on the disk itself, not only in the kernel's memory: covered by a finished fsync.
+- **entity–attribute–value** (EAV) — a model where data is a set of (entity, attribute, value) statements instead of
+  tables; Cepheus' (thing, property, value). [concepts](concepts.md#facts-the-entityattributevalue-model)
+- **eviction policy** — the rule that picks which page leaves a full cache; Cepheus' is S3-FIFO.
+- **`Expect`** — a precondition of a group: a fact that must hold (or a value that must be absent) just before it; the
+  writer checks it, and the group fails with `Conflict` otherwise. [concepts](concepts.md#groups-a-write-is-a-transaction)
+- **F1, F2, F3, F4** — the faults covered: a process crash, a power loss, silent damage of durable bytes, a failed
+  write or fsync. [guarantees](guarantees.md#the-faults)
+- **fact** — a triple (thing, property, value). [concepts](concepts.md#facts-the-entityattributevalue-model)
+- **fork** — a temporary database started from a view: the same writes and checks, nothing on disk, free to make.
+  [concepts](concepts.md#forks)
+- **frame** — the unit of one write and one fsync in the journal: a header, the groups, a trailer.
+  [formats](formats.md#journal-segment-dirjournalfirst-group-20-digitsseg)
+- **fsync** — the system call that returns once a file's bytes are on the disk.
+- **Generic Join** — the worst-case optimal join Cepheus uses: one variable at a time, the smallest candidate set,
+  each candidate checked against the other patterns (Ngo, Ré, Rudra 2013). [architecture](architecture.md#questions)
+- **ghost queue** — S3-FIFO's memory of pages lately evicted from its small queue; a page asked again soon goes
+  straight to the main queue.
+- **group** — Cepheus' transaction: a list of operations applied all or nothing, with a number, who, when and why.
+  [concepts](concepts.md#groups-a-write-is-a-transaction)
+- **group commit** — the writes that arrive while one fsync runs share the next one.
+  [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **index word** — the 64-bit form of a value in the indexes: the value itself, or a dictionary number for texts and
+  floats; what `fold` gives. [api](api.md#questions)
+- **isolation** — what one transaction can see of the others running at the same time.
+  [concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)
+- **journal** — Cepheus' write-ahead log: segments of frames of groups. [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **leveling**, **tiering** — the two ways an LSM-tree with many levels merges: one sorted run a level, or several;
+  not built here. [theory](theory.md#8-merges-written-to-a-file)
+- **linearizability** — each operation appears to take effect at one instant between its call and its return
+  (Herlihy and Wing 1990); a group, as a write to one object, is linearizable.
+- **lost update** — two read-then-writes read the same value and both write, so one change is lost; Cepheus stops it
+  only when the read is stated with `Expect`.
+- **LSM-tree** (log-structured merge-tree) — recent writes in a small structure in memory, merged in bulk into sorted
+  structures on disk (O'Neil et al. 1996). [architecture](architecture.md#the-merge-a-log-structured-merge-tree-of-two-components)
+- **materialize the conflict** — protect a set against phantoms by keeping one fact that every writer of the set
+  expects and changes (Fekete et al. 2005).
+- **merge** — the folding of the delta into a new base and its snapshot file; it runs in the background and is
+  atomic (G12).
+- **model checking** — visiting every reachable state of a bounded model and checking invariants in each; TLC does it
+  for TLA+. [testing](testing.md#model-checking)
+- **optimistic concurrency control** — read without locks, and check at the end that what was read still holds
+  (Kung and Robinson 1981): `Expect`.
+- **page** — 16 KiB of a snapshot file, the unit of the cache, checked by its CRC each time it is read from the disk.
+- **page cache** (the kernel's) — the operating system's memory copy of files; what a process crash keeps and a power
+  loss loses.
+- **persistent data structure** — one that is never changed in place: a change makes a new version and the old one
+  stays valid. [architecture](architecture.md#indexes-the-base-and-the-delta)
+- **phantom** — a new member of a set read earlier (the facts that match a pattern), unseen by a check of single facts.
+- **property** — the attribute of a fact; itself a thing (16 to 65,535) with a name, a type and two flags.
+- **question** — Cepheus' query: patterns over variables. [concepts](concepts.md#questions)
+- **read-then-write** — a client transaction that reads a view, then writes a group; validated by its `Expect`s.
+- **recovery** — what an open does after a crash: the newest snapshot that checks, then the journal after it.
+  [operations](operations.md#opening-and-recovery)
+- **redo log** — a log of changes to apply again after a crash, never to undo; the journal is one.
+- **replay** — applying the journal's groups in order to rebuild a state.
+- **S3-FIFO** — the eviction policy of the cache: three FIFO queues (small, main, ghost), nothing moved on a hit (Yang
+  et al. 2023). [architecture](architecture.md#pages-and-the-cache)
+- **schema** — the properties and their types; in Cepheus, facts like the rest. [concepts](concepts.md#properties-and-the-schema)
+- **segment** — one file of the journal, up to 64 MiB, named by its first group.
+- **serializable** — the result equals some execution of the transactions one at a time.
+- **single writer** — one writer thread applies every group of a database, in order. [architecture](architecture.md#one-writer-threads-and-domains)
+- **snapshot** (the file) — a file holding a base, so that an open replays only the journal after it.
+  [architecture](architecture.md#snapshots)
+- **snapshot** (the state), **view** — the exact state after one group. [concepts](concepts.md#views)
+- **snapshot isolation** — each transaction reads the state at its start, and fails if another wrote the same item
+  meanwhile (first committer wins); it lets write skew through.
+- **space amplification** — disk space used over the size of the data; during a merge, three bases.
+- **strict serializability** — serializable in an order that respects real time. [guarantees](guarantees.md#g4-strict-serializability)
+- **structural sharing** — a new version of a persistent structure shares every untouched part with the old one.
+- **syncer** — the thread that writes and forces the frames, beside the writer.
+- **system property** — `cepheus/name`, `cepheus/type`, `cepheus/many`, `cepheus/unique` (1 to 4).
+- **thing** — the entity of a fact: a number, from 65,536 up. [concepts](concepts.md#facts-the-entityattributevalue-model)
+- **TLA+**, **TLC** — a language that describes a system's steps as mathematics (Lamport), and its model checker.
+  [testing](testing.md#model-checking)
+- **torn write** — a write the disk was doing when the power went, of which only part arrived; recovery cuts it.
+- **trailer** — the last 16 bytes of a frame, repeating its length and CRCs: a sign that the frame was written whole.
+- **transaction** — a unit of work applied entirely or not at all; Cepheus' group.
+- **unique** — a property no two things share a value of, checked after each group.
+- **value** — the third part of a fact, atomic and typed.
+- **variable** — an unknown of a question, numbered from 0.
+- **varint** (LEB128), **zigzag** — a whole number in 7-bit pieces, small ones short; zigzag maps signed to unsigned
+  (0, -1, 1, -2 → 0, 1, 2, 3). [formats](formats.md#a-group)
+- **working view** — the writer's state with every resolved group, durable or not; readers never see it.
+- **worst-case optimal join** — a join whose work never exceeds, up to small factors, the largest answer the question
+  could have (the AGM bound) (Ngo et al. 2012).
+- **write amplification** — the bytes written to the disk for each byte of data written; for Cepheus' merges, up to
+  17 facts a change. [architecture](architecture.md#the-merge-a-log-structured-merge-tree-of-two-components)
+- **write-ahead log** (WAL) — a file where every change is made durable before it counts, so that a crash loses
+  nothing confirmed. [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **write skew** — two transactions read the same facts and each writes a different one, together breaking a rule
+  (two doctors each go off call); snapshot isolation allows it, `Expect` refuses it.
+  [concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)
+- **writer** — the thread that resolves groups on the working view, the one writer of a database.
