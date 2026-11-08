@@ -108,7 +108,7 @@ type seg = {
 (* Read-only, but for [before]: checks the segments from [from] and calls [on_group] on each group. A torn tail is
    allowed only in the newest segment; a torn header only in a newest segment that holds nothing. [before path b]
    runs on the newest segment's bytes before any of its groups is replayed. *)
-let scan ?(frame = fun _ -> ()) ?(before = fun _ _ -> ()) disk dir id from on_group =
+let scan ?(frame = fun _ -> ()) ?(before = fun _ _ -> ()) ?(after = 0) disk dir id from on_group =
   let all = segments disk dir in
   let segs = match from with None -> all | Some f -> List.filter (fun s -> s >= f.segment) all in
   (match from, segs with
@@ -142,16 +142,21 @@ let scan ?(frame = fun _ -> ()) ?(before = fun _ _ -> ()) disk dir id from on_gr
              let f0 = Int64.to_int (Bytes.get_int64_le b (p + 8)) and count = u32 b (p + 16) in
              if f0 <> !expect then damaged "%s: frame at %d starts at group %d, expected %d" name p f0 !expect;
              frame { segment = s; offset = p; next = f0 };
-             let r = Codec.reader b (p + fh) len in
-             (try
-                for _ = 1 to count do
-                  let g = Group.decode r in
-                  if g.Group.n <> !expect then damaged "%s: group %d where %d was expected" name g.Group.n !expect;
-                  on_group g;
-                  incr expect
-                done
-              with Codec.Short -> damaged "%s: frame at %d does not decode" name p);
-             if not (Codec.at_end r) then damaged "%s: frame at %d has bytes after its groups" name p;
+             if f0 + count - 1 <= after then
+               (* every group of the frame is in the runs already: checked by its CRC, not decoded *)
+               expect := !expect + count
+             else begin
+               let r = Codec.reader b (p + fh) len in
+               (try
+                  for _ = 1 to count do
+                    let g = Group.decode r in
+                    if g.Group.n <> !expect then damaged "%s: group %d where %d was expected" name g.Group.n !expect;
+                    on_group g;
+                    incr expect
+                  done
+                with Codec.Short -> damaged "%s: frame at %d does not decode" name p);
+               if not (Codec.at_end r) then damaged "%s: frame at %d has bytes after its groups" name p
+             end;
              if not (trailer_ok b p) then bad := p :: !bad;
              loop (p + fh + len + ft)
            end
@@ -195,11 +200,11 @@ let rewrite_newest disk dir file b =
       disk.fsync fd);
   disk.sync_dir dir
 
-let recover ?frame ~force disk dir id from on_group =
+let recover ?frame ?after ~force disk dir id from on_group =
   (* Not needed after a clean close ([force] false: the database's marker, Engine.open_), which leaves nothing off the
      disk and no failed fsync. *)
   let before = if force then rewrite_newest disk dir else fun _ _ -> () in
-  let found, torn_header, next = scan ?frame ~before disk dir id from on_group in
+  let found, torn_header, next = scan ?frame ~before ?after disk dir id from on_group in
   (match torn_header with
    | Some s ->
      disk.Disk.remove (path dir s);

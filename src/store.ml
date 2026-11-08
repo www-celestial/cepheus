@@ -446,7 +446,7 @@ let find_text v s =
   | None ->
     let rs = v.runs in
     let r = ref None and j = ref 0 in
-    while !r = None && !j < Array.length rs do
+    while Option.is_none !r && !j < Array.length rs do
       (match base_find_text rs.(!j).a s with Some l -> r := Some (rs.(!j).s0 + l) | None -> ());
       incr j
     done;
@@ -599,12 +599,12 @@ let single h = if h <> 0 && h land (h - 1) = 0 then (let j = ref 0 in while (h l
 
 let iter_values v e p f =
   let rs = v.runs and td = thing_delta v e in
-  if td = None && Array.length rs = 1 then base_iter_ea rs.(0).a e p f
+  if Option.is_none td && Array.length rs = 1 then base_iter_ea rs.(0).a e p f
   else begin
     (* only the runs with facts of p for e matter: a newer run with other facts of e shadows none of these *)
     let h = holders_p v e p in
     let one = single h in
-    if td = None && one >= 0 then base_iter_ea rs.(one).a e p f
+    if Option.is_none td && one >= 0 then base_iter_ea rs.(one).a e p f
     else begin
       for j = 0 to Array.length rs - 1 do
         if (h lsr j) land 1 = 1 then
@@ -618,12 +618,12 @@ let iter_values v e p f =
 (* every fact of e, in (property, value) order *)
 let iter_facts v e f =
   let rs = v.runs and td = thing_delta v e in
-  if td = None && Array.length rs = 1 then base_iter_e rs.(0).a e f
+  if Option.is_none td && Array.length rs = 1 then base_iter_e rs.(0).a e f
   else begin
     let h = holders v e in
     let one = single h in
-    if td = None && one >= 0 then base_iter_e rs.(one).a e f
-    else if td <> None || h <> 0 then begin
+    if Option.is_none td && one >= 0 then base_iter_e rs.(one).a e f
+    else if Option.is_some td || h <> 0 then begin
       let l = ref [] in
       for j = 0 to Array.length rs - 1 do
         if (h lsr j) land 1 = 1 then

@@ -35,9 +35,11 @@ val create : Disk.t -> string -> string -> t
 (** [create disk dir id]: a new journal in [dir] (which exists), for the database [id]; the first group is 1. *)
 
 val recover :
-  ?frame:(position -> unit) -> force:bool -> Disk.t -> string -> string -> position option -> (Group.t -> unit) -> t
+  ?frame:(position -> unit) -> ?after:int -> force:bool -> Disk.t -> string -> string -> position option ->
+  (Group.t -> unit) -> t
 (** [recover ~force disk dir id from on_group]: reads the journal from [from] (the start without it), calls [frame] on
-    the position of each frame and [on_group] on each of its groups, in order, cuts a torn tail durably, and returns
+    the position of each frame and [on_group] on each of its groups, in order (but for the frames whose groups are all
+    [after] or before, checked by their CRCs and not decoded), cuts a torn tail durably, and returns
     the journal ready to append. With [force] (after anything but a clean close), before replaying a group of the
     newest segment, it writes that segment's newest frame again (its header if it holds no frame), forces the segment
     and the directory: what a killed process wrote but did not force, or what a failed fsync left in the page cache

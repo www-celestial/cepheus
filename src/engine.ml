@@ -338,7 +338,7 @@ let open_ ?(id_source = random_id) disk dir =
               drop_runs w.replaced
             end
         in
-        let journal = Journal.recover ~frame ~force:(not clean) disk jdir id from replay in
+        let journal = Journal.recover ~frame ~after:start.group ~force:(not clean) disk jdir id from replay in
         (* a snapshot is installed only once the journal holds its groups durably (G12): a journal that ends before
            it lost durable frames (a damaged newest frame, which would otherwise be cut as torn) *)
         if Journal.next_group journal <= start.group then

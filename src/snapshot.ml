@@ -285,12 +285,12 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
         if Store.base_has src.(j).a e then (h := !h lor (1 lsl (2 * j)); incr nh);
         if Store.base_has src.(j).t e then (h := !h lor (1 lsl ((2 * j) + 1)); incr nh)
       done;
-      if td = None && !nh = 0 && nb > 0 then
+      if Option.is_none td && !nh = 0 && nb > 0 then
         for r = b0 to !bi - 1 do let i = bulk.by_thing.(r) in emit_a e bulk.p.(i) bulk.w.(i) done
-      else if !nh = 0 && nb = 0 && td <> None then
+      else if !nh = 0 && nb = 0 && Option.is_some td then
         (* the delta alone: its entries, in (p, w) order, as they are *)
         Store.PW.iter (fun (p, w) add -> if add then emit_a e p w else emit_t e p w) (Option.get td).tf
-      else if td = None && !nh = 1 && nb = 0 then begin
+      else if Option.is_none td && !nh = 1 && nb = 0 then begin
         (* one source: its rows as they are *)
         let j = ref 0 in
         while (!h lsr !j) land 1 = 0 do incr j done;
@@ -298,7 +298,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
         if !j land 1 = 0 then Store.base_iter_e r.a e (fun p w -> emit_a e p w)
         else Store.base_iter_e r.t e (fun p w -> emit_t e p w)
       end
-      else if td <> None || !nh > 0 || nb > 0 then begin
+      else if Option.is_some td || !nh > 0 || nb > 0 then begin
         (* entries (p, w, age, added), newest first within a fact *)
         entries := [];
         for r = b0 to !bi - 1 do let i = bulk.by_thing.(r) in entries := (bulk.p.(i), bulk.w.(i), 0, true) :: !entries done;
@@ -400,12 +400,12 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
           end;
           if !di < Array.length dl then begin
             let w', e', add = dl.(!di) in
-            if w' = w && e' = e then ((if !newest = None then newest := Some add); oldest := add; incr di)
+            if w' = w && e' = e then ((if Option.is_none !newest then newest := Some add); oldest := add; incr di)
           end;
           for s = 0 to nsrc - 1 do
             if cur.(s) < stop.(s) && hw.(s) = w && he.(s) = e then begin
               let add = s land 1 = 0 in
-              if !newest = None then newest := Some add;
+              if Option.is_none !newest then newest := Some add;
               oldest := add;
               cur.(s) <- cur.(s) + 1;
               if cur.(s) < stop.(s) then head s else decr live
