@@ -1,52 +1,31 @@
-(* CRC-32C, reflected, polynomial 0x82F63B78, slicing by 8: eight table lookups a word of eight bytes. Pure OCaml,
-   about 1.1 GB/s on the test machine (Castagnoli, Braeuer, Herrmann 1993; tables as in Intel's slicing-by-8). *)
+(* CRC-32C, reflected polynomial 0x82F63B78 (Castagnoli, Braeuer, Herrmann 1993), by the processor's instruction: crc32
+   of SSE4.2 on x86-64, the CRC32 instructions of ARMv8 on arm64 (crc32c_stubs.c). About 9 GB/s on the test machine,
+   eight times the table code in OCaml it replaced, which the tests keep as their oracle (test/unit.ml). A processor
+   without the instruction is refused when the program starts: there is one way to compute the checksum. *)
 
-let poly = 0x82F63B78
-let t = Array.make (8 * 256) 0
+external supported : unit -> bool = "cepheus_crc32c_supported" [@@noalloc]
+external run : int -> Bytes.t -> int -> int -> int = "cepheus_crc32c_extend" [@@noalloc]
 
 let () =
-  for i = 0 to 255 do
-    let c = ref i in
-    for _ = 0 to 7 do
-      c := if !c land 1 = 1 then (!c lsr 1) lxor poly else !c lsr 1
-    done;
-    t.(i) <- !c
-  done;
-  for i = 0 to 255 do
-    for k = 1 to 7 do
-      let prev = t.(((k - 1) * 256) + i) in
-      t.((k * 256) + i) <- (prev lsr 8) lxor t.(prev land 0xff)
-    done
-  done
+  if not (supported ()) then
+    failwith
+      "Cepheus needs the processor's CRC-32C instruction (SSE4.2 on x86-64, CRC32 on arm64), and this processor has \
+       none"
 
-let[@inline] step8 c lo hi =
-  let lo = lo lxor c in
-  Array.unsafe_get t ((7 * 256) + (lo land 0xff))
-  lxor Array.unsafe_get t ((6 * 256) + ((lo lsr 8) land 0xff))
-  lxor Array.unsafe_get t ((5 * 256) + ((lo lsr 16) land 0xff))
-  lxor Array.unsafe_get t ((4 * 256) + ((lo lsr 24) land 0xff))
-  lxor Array.unsafe_get t ((3 * 256) + (hi land 0xff))
-  lxor Array.unsafe_get t ((2 * 256) + ((hi lsr 8) land 0xff))
-  lxor Array.unsafe_get t (256 + ((hi lsr 16) land 0xff))
-  lxor Array.unsafe_get t ((hi lsr 24) land 0xff)
+(* a call never stops for the GC: a large frame goes by pieces of 1 MiB (about 0.1 ms), so that another domain asking
+   for a collection waits at most that long *)
+let piece = 1 lsl 20
 
 let extend crc (b : Bytes.t) off len =
-  if off < 0 || len < 0 || off + len > Bytes.length b then invalid_arg "Crc32c.extend";
-  let c = ref (crc lxor 0xFFFFFFFF) and i = ref off in
-  let stop = off + len in
-  while !i + 8 <= stop do
-    let lo = Int32.to_int (Bytes.get_int32_le b !i) land 0xFFFFFFFF in
-    let hi = Int32.to_int (Bytes.get_int32_le b (!i + 4)) land 0xFFFFFFFF in
-    c := step8 !c lo hi;
-    i := !i + 8
+  if off < 0 || len < 0 || off > Bytes.length b - len then invalid_arg "Crc32c.extend";
+  let c = ref crc and o = ref off and n = ref len in
+  while !n > piece do
+    c := run !c b !o piece;
+    o := !o + piece;
+    n := !n - piece
   done;
-  while !i < stop do
-    c := Array.unsafe_get t ((!c lxor Char.code (Bytes.unsafe_get b !i)) land 0xff) lxor (!c lsr 8);
-    incr i
-  done;
-  !c lxor 0xFFFFFFFF
+  run !c b !o !n
 
 let bytes b off len = extend 0 b off len
 
 let string s = bytes (Bytes.unsafe_of_string s) 0 (String.length s)
-

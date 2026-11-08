@@ -7,10 +7,105 @@ let section name = Printf.printf "- %s\n%!" name
 
 (* ---- checksums and codecs ---- *)
 
+(* The oracle: CRC-32C by tables in OCaml (slicing by 8, the engine's code before the processor's instruction),
+   written from the polynomial alone. *)
+module Crc_oracle = struct
+  let poly = 0x82F63B78
+  let t = Array.make (8 * 256) 0
+
+  let () =
+    for i = 0 to 255 do
+      let c = ref i in
+      for _ = 0 to 7 do
+        c := if !c land 1 = 1 then (!c lsr 1) lxor poly else !c lsr 1
+      done;
+      t.(i) <- !c
+    done;
+    for i = 0 to 255 do
+      for k = 1 to 7 do
+        let prev = t.(((k - 1) * 256) + i) in
+        t.((k * 256) + i) <- (prev lsr 8) lxor t.(prev land 0xff)
+      done
+    done
+
+  let step8 c lo hi =
+    let lo = lo lxor c in
+    t.((7 * 256) + (lo land 0xff))
+    lxor t.((6 * 256) + ((lo lsr 8) land 0xff))
+    lxor t.((5 * 256) + ((lo lsr 16) land 0xff))
+    lxor t.((4 * 256) + ((lo lsr 24) land 0xff))
+    lxor t.((3 * 256) + (hi land 0xff))
+    lxor t.((2 * 256) + ((hi lsr 8) land 0xff))
+    lxor t.(256 + ((hi lsr 16) land 0xff))
+    lxor t.((hi lsr 24) land 0xff)
+
+  let extend crc (b : Bytes.t) off len =
+    let c = ref (crc lxor 0xFFFFFFFF) and i = ref off in
+    let stop = off + len in
+    while !i + 8 <= stop do
+      let lo = Int32.to_int (Bytes.get_int32_le b !i) land 0xFFFFFFFF in
+      let hi = Int32.to_int (Bytes.get_int32_le b (!i + 4)) land 0xFFFFFFFF in
+      c := step8 !c lo hi;
+      i := !i + 8
+    done;
+    while !i < stop do
+      c := t.((!c lxor Char.code (Bytes.get b !i)) land 0xff) lxor (!c lsr 8);
+      incr i
+    done;
+    !c lxor 0xFFFFFFFF
+end
+
 let () =
   section "crc32c";
   C.check (Crc32c.string "123456789" = 0xE3069283) "crc32c of 123456789";
-  C.check (Crc32c.string "" = 0) "crc32c of nothing"
+  C.check (Crc32c.string "" = 0) "crc32c of nothing";
+  (* RFC 3720 (iSCSI), appendix B.4, which prints each CRC as four bytes: read little-endian, they are these numbers *)
+  let vector name b crc = C.check (Crc32c.bytes b 0 (Bytes.length b) = crc) "RFC 3720 B.4, %s" name in
+  vector "32 bytes of zeros" (Bytes.make 32 '\x00') 0x8A9136AA;
+  vector "32 bytes of 0xff" (Bytes.make 32 '\xff') 0x62A8AB43;
+  vector "32 bytes rising" (Bytes.init 32 Char.chr) 0x46DD794E;
+  vector "32 bytes falling" (Bytes.init 32 (fun i -> Char.chr (31 - i))) 0x113FDB5C;
+  vector "a SCSI Read (10) command PDU"
+    (Bytes.of_string
+       "\x01\xc0\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x14\x00\x00\x00\x00\x00\x04\x00\
+        \x00\x00\x00\x14\x00\x00\x00\x18\x28\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00")
+    0xD9963A56;
+  (* the processor's CRC against the oracle: every length up to 72 at every offset up to 15 (the 8-byte steps and
+     the tail), then random lengths up to 1 MiB, the pieces of 1 MiB around their edges, random offsets, and [extend]
+     over random cuts in two and three *)
+  let r = Rng.make 11 in
+  let piece = 1 lsl 20 in
+  let size = (3 * piece) + 64 in
+  let buf = Bytes.init size (fun _ -> Char.chr (Rng.int r 256)) in
+  let same off len =
+    let want = Crc_oracle.extend 0 buf off len in
+    C.check (Crc32c.bytes buf off len = want) "crc32c of %d bytes at %d" len off;
+    let k = Rng.int r (len + 1) in
+    let m = k + Rng.int r (len - k + 1) in
+    let two = Crc32c.extend (Crc32c.bytes buf off k) buf (off + k) (len - k) in
+    let three = Crc32c.extend (Crc32c.extend (Crc32c.bytes buf off k) buf (off + k) (m - k)) buf (off + m) (len - m) in
+    C.check (two = want && three = want) "crc32c of %d bytes at %d cut at %d and %d" len off k m
+  in
+  for len = 0 to 72 do
+    for off = 0 to 15 do same off len done
+  done;
+  List.iter (fun len -> same (Rng.int r (size - len + 1)) len)
+    [ piece - 1; piece; piece + 1; (2 * piece) - 7; 2 * piece; (2 * piece) + 13; 3 * piece; size ];
+  for _ = 1 to 5000 do
+    let len =
+      match Rng.int r 4 with
+      | 0 -> Rng.int r 65
+      | 1 -> Rng.int r 4097
+      | _ -> min piece (int_of_float (2. ** (20. *. float (Rng.int r 1_000_001) /. 1e6)))
+    in
+    same (Rng.int r (size - len + 1)) len
+  done;
+  (* the bounds, checked before the processor reads anything *)
+  let refused off len = match Crc32c.bytes buf off len with _ -> false | exception Invalid_argument _ -> true in
+  List.iter
+    (fun (off, len) -> C.check (refused off len) "crc32c refuses %d bytes at %d" len off)
+    [ (-1, 1); (0, -1); (0, size + 1); (size, 1); (1, max_int); (max_int, 1); (min_int, 0) ];
+  C.check (Crc32c.bytes buf size 0 = 0) "crc32c of nothing at the end"
 
 let () =
   section "codec and values";

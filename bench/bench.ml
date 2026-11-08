@@ -446,6 +446,23 @@ let stats name us =
   end
   else Stats.print name (Array.of_list (List.rev_map (fun x -> x /. 1e3) !xs))
 
+(* CRC-32C alone, by the processor's instruction: a frame header, a 4 KiB block, a page, 1 MiB and a 96 MiB frame
+   from an odd offset; a run times enough calls to last 20 ms or more *)
+let crc_bench () =
+  let r = Rng.make 3 in
+  let big = Bytes.init (96 lsl 20) (fun _ -> Char.chr (Rng.int r 256)) in
+  List.iter
+    (fun len ->
+      let calls = max 1 (20_000_000 / len) in
+      let per = Array.init runs (fun _ ->
+          let t = now () in
+          for _ = 1 to calls do ignore (Sys.opaque_identity (Crc32c.bytes big 3 len)) done;
+          (now () -. t) /. float calls) in
+      let s = Stats.summary per in
+      Stats.print (Printf.sprintf "crc32c of %d bytes" len) per;
+      Printf.printf "  %.0f MB/s [%.0f, %.0f]\n%!" (float len /. s.median /. 1e6) (float len /. s.hi /. 1e6) (float len /. s.lo /. 1e6))
+    [ 24; 4096; 16384; 1 lsl 20; (96 lsl 20) - 3 ]
+
 (* the writer's work alone, without the disk: the same groups into a fork *)
 let cpu dir n =
   let db = ok (open_ dir) in
@@ -473,6 +490,7 @@ let () =
   | [| _; "merge"; dir; groups |] -> merge_bench dir (int_of_string groups)
   | [| _; "trace"; dir; facts; out; law; mix |] -> trace dir (int_of_string facts) out law mix
   | [| _; "cachesim"; file |] -> cachesim file
+  | [| _; "crc" |] -> crc_bench ()
   | [| _; "stats"; name |] -> stats name false
   | [| _; "stats"; name; "us" |] -> stats name true
-  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | merge DIR GROUPS | fsync DIR SECS MODE | stats NAME [us] | trace DIR FACTS OUT uniform|zipf day|points|scan | cachesim TRACE | cpu DIR N"; exit 2
+  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | merge DIR GROUPS | fsync DIR SECS MODE | stats NAME [us] | trace DIR FACTS OUT uniform|zipf day|points|scan | cachesim TRACE | cpu DIR N | crc"; exit 2
