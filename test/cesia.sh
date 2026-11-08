@@ -42,6 +42,10 @@ stop() {
   [ -n "$prog" ] && kill "$prog" 2>/dev/null
   kill "$(cat "$tmp/pid")" 2>/dev/null || true
   wait "$(cat "$tmp/pid")" 2>/dev/null || true
+  # the databases' visibility pages (/dev/shm/cepheus-ID.visible, ID the 16 bytes after DIR/cepheus's first line)
+  for d in "$tmp"/s/data/*/; do
+    if [ -f "$d/cepheus" ]; then rm -f "/dev/shm/cepheus-$(od -An -tx1 -j17 -N16 "$d/cepheus" | tr -d ' \n').visible"; fi
+  done
 }
 trap stop EXIT
 trap 'exit 1' INT TERM
