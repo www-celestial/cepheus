@@ -6,6 +6,9 @@ type inode = {
   mutable dur : Bytes.t;  (* what survives a crash for sure *)
   mutable dur_len : int;
   dirty : (int, unit) Hashtbl.t;  (* sectors written since the last fsync *)
+  lost : (int, unit) Hashtbl.t;
+      (* sectors a failed fsync marked clean: reads see their new bytes, the disk may not have them, and no later
+         fsync writes them unless they are written again; a power loss resolves them as it does dirty ones *)
 }
 
 type nsop = Link of string * int | Unlink of string | Mkdir of string
@@ -22,18 +25,21 @@ type t = {
   fds : (int, int * string) Hashtbl.t;
   mutable next_fd : int;
   locks : (string, unit) Hashtbl.t;
-  mutable fail_fsync : bool;
+  mutable fail_in : int;  (* fsyncs left before one fails; -1: none planned *)
+  mutable then_crash : int;  (* the crash planned when it fails, as for [crash_after]; -1: none *)
+  mutable failures : int;  (* fsyncs failed so far *)
+  reverts : bool;  (* a failed fsync undoes the failed writes in memory too (Btrfs), rather than keeping them (ext4, XFS) *)
   mutable clock : int;
   mutable countdown : int;  (* mutating calls left before a crash; -1: none planned *)
 }
 
 exception Crash
 
-let create rng =
+let create ?(reverts = false) rng =
   let t =
     { rng; names = Hashtbl.create 16; dnames = Hashtbl.create 16; dirs = Hashtbl.create 8; ddirs = Hashtbl.create 8;
       pending = Hashtbl.create 8; inodes = Hashtbl.create 16; next_inode = 1; fds = Hashtbl.create 16; next_fd = 1;
-      locks = Hashtbl.create 2; fail_fsync = false; clock = 1_700_000_000_000; countdown = -1 }
+      locks = Hashtbl.create 2; fail_in = -1; then_crash = -1; failures = 0; reverts; clock = 1_700_000_000_000; countdown = -1 }
   in
   Hashtbl.replace t.dirs "." ();
   Hashtbl.replace t.ddirs "." ();
@@ -60,16 +66,18 @@ let ensure (n : inode) len =
     n.cur <- b
   end
 
+(* a sector written again is dirty again, even one a failed fsync marked clean *)
 let mark_dirty (n : inode) off len =
   if len > 0 then
     for s = off / sector to (off + len - 1) / sector do
-      Hashtbl.replace n.dirty s ()
+      Hashtbl.replace n.dirty s ();
+      Hashtbl.remove n.lost s
     done
 
 let new_inode t =
   let i = t.next_inode in
   t.next_inode <- i + 1;
-  Hashtbl.replace t.inodes i { cur = Bytes.create 0; cur_len = 0; dur = Bytes.create 0; dur_len = 0; dirty = Hashtbl.create 8 };
+  Hashtbl.replace t.inodes i { cur = Bytes.create 0; cur_len = 0; dur = Bytes.create 0; dur_len = 0; dirty = Hashtbl.create 8; lost = Hashtbl.create 2 };
   i
 
 let need_dir t p = if not (Hashtbl.mem t.dirs (parent p)) then io "no directory %s" (parent p)
@@ -121,16 +129,46 @@ let truncate t fd len =
   (* a truncation is a change of the size: the sector it ends in counts as written *)
   mark_dirty n (max 0 (len - 1)) 1
 
+(* A failed fsync, as Linux file systems do it (Rebello et al., ATC 2020, section 3.3): the written sectors are marked
+   clean without reaching the disk. ext4 and XFS keep their new bytes in memory (reads see them until a reboot) and
+   ext4 may make the new size durable over sectors never written (they read as zeros after a reboot); Btrfs undoes
+   the failed writes in memory, size included. A successful fsync writes the dirty sectors and the size, nothing
+   else: a sector marked clean stays off the disk until it is written again. *)
 let fsync t fd =
   let n = inode t fd in
-  if t.fail_fsync then begin
-    t.fail_fsync <- false;
+  if t.fail_in > 0 then t.fail_in <- t.fail_in - 1
+  else if t.fail_in = 0 then begin
+    t.fail_in <- -1;
+    t.failures <- t.failures + 1;
+    if t.then_crash >= 0 then (t.countdown <- t.then_crash; t.then_crash <- -1);
+    if t.reverts then begin
+      ensure n n.dur_len;
+      Bytes.blit n.dur 0 n.cur 0 n.dur_len;
+      n.cur_len <- n.dur_len
+    end
+    else begin
+      Hashtbl.iter (fun s () -> Hashtbl.replace n.lost s ()) n.dirty;
+      if Rng.bool t.rng && n.cur_len > n.dur_len then begin
+        let d = Bytes.make n.cur_len '\000' in
+        Bytes.blit n.dur 0 d 0 n.dur_len;
+        n.dur <- d;
+        n.dur_len <- n.cur_len
+      end
+    end;
     Hashtbl.reset n.dirty;
     io "fsync: input/output error (simulated)"
   end;
-  n.dur <- Bytes.sub n.cur 0 n.cur_len;
+  let d = Bytes.make n.cur_len '\000' in
+  Bytes.blit n.dur 0 d 0 (min n.dur_len n.cur_len);
+  Hashtbl.iter
+    (fun s () ->
+      let lo = s * sector in
+      if lo < n.cur_len then Bytes.blit n.cur lo d lo (min n.cur_len (lo + sector) - lo))
+    n.dirty;
+  n.dur <- d;
   n.dur_len <- n.cur_len;
-  Hashtbl.reset n.dirty
+  Hashtbl.reset n.dirty;
+  Hashtbl.filter_map_inplace (fun s () -> if s * sector < n.cur_len then Some () else None) n.lost
 
 let rename t a b =
   match Hashtbl.find_opt t.names a with
@@ -189,7 +227,7 @@ let crash_inode pick path (n : inode) =
   let b = Bytes.make new_len '\000' in
   Bytes.blit n.dur 0 b 0 (min n.dur_len new_len);
   (* in sector order, so that the draws replay *)
-  let dirty = List.sort compare (Hashtbl.fold (fun s () acc -> s :: acc) n.dirty []) in
+  let dirty = List.sort_uniq compare (Hashtbl.fold (fun s () acc -> s :: acc) n.dirty (Hashtbl.fold (fun s () acc -> s :: acc) n.lost [])) in
   List.iter
     (fun s ->
       let lo = s * sector in
@@ -210,7 +248,8 @@ let crash_inode pick path (n : inode) =
   n.cur_len <- new_len;
   n.dur <- Bytes.copy b;
   n.dur_len <- new_len;
-  Hashtbl.reset n.dirty
+  Hashtbl.reset n.dirty;
+  Hashtbl.reset n.lost
 
 let crash ?choose t =
   let pick = match choose with Some c -> fun d n -> max 0 (min (n - 1) (c d n)) | None -> fun _ n -> Rng.int t.rng n in
@@ -245,13 +284,15 @@ let crash ?choose t =
   Hashtbl.reset t.fds;
   Hashtbl.reset t.locks;
   t.countdown <- -1;
-  t.fail_fsync <- false
+  t.fail_in <- -1;
+  t.then_crash <- -1
 
 let kill t =
   Hashtbl.reset t.fds;
   Hashtbl.reset t.locks;
   t.countdown <- -1;
-  t.fail_fsync <- false
+  t.fail_in <- -1;
+  t.then_crash <- -1
 
 let pending_names t d = List.length (Option.value (Hashtbl.find_opt t.pending d) ~default:[])
 
@@ -282,7 +323,9 @@ let durable_bytes t p =
   | None -> Bytes.empty
 
 let files t = List.sort compare (Hashtbl.fold (fun p _ acc -> p :: acc) t.names [])
-let fail_next_fsync t = t.fail_fsync <- true
+let fail_fsync_at ?(crash_after = -1) t n = t.fail_in <- n; t.then_crash <- crash_after
+let fail_next_fsync t = fail_fsync_at t 0
+let failures t = t.failures
 let advance t ms = t.clock <- t.clock + ms
 
 let crash_after t n = t.countdown <- n

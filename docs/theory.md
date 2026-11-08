@@ -30,6 +30,19 @@ only on a device that reorders sector writes); then recovery refuses to open: a 
 exhaustive test enumerates every crash state of small journals and finds no false alarm in practice, because the
 header shares its sector with the start of the body.
 
+**A failed fsync (F4).** I1 rests on a premise Linux breaks: that bytes not covered by a finished `fsync` are at least
+not mistaken for durable ones. After a failed `fsync`, ext4 and XFS mark the pages clean while keeping their new bytes
+in memory; a later `fsync` returns success without writing them, and every read until a reboot sees them (Rebello et
+al. 2020 [47], section 3.3). So the next process, reading the page cache, would see a frame outside D that looks
+whole. Two rules keep D the truth. (W) After a failed `fsync` the writer stops and truncates the file to the end of its
+last durable frame, then forces it (`Journal.cut`): the frame leaves both the page cache and the disk. (R) A recovery
+after anything but a clean close writes its newest frame again before forcing it (`Journal.rewrite_newest`): those
+pages are dirty again, so a successful `fsync` writes them and the frame joins D; if it fails, the open fails. By I1
+and the stop at the first failure, the newest frame is the only one that can lie outside D, so (R) alone suffices for
+safety (no view outside D, G13); (W) makes a failed write's absence certain and spares a later power loss the
+false alarm below. The model `spec/Journal.tla` keeps the page cache and the disk apart and checks both rules: without
+(R), TLC finds the trace write, failed `fsync`, process death before (W), recovery publishing the frame.
+
 **Detection power** (Koopman 2002 [36], Castagnoli et al. 1993 [35]). CRC-32C has Hamming distance 4 for messages up to
 about 2³¹ bits and 6 up to 5,243 bits: every error of at most 3 bits in a frame (5 bits in a frame of up to 655 bytes)
 is detected, every burst of at most 32 bits is detected, and other random errors escape with probability 2⁻³².

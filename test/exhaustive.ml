@@ -10,7 +10,9 @@
       a process death (the page cache kept, then lost at a later power loss), and power losses keeping each prefix
       of each directory's name changes, with the unsynced bytes lost, kept, torn, or kept one sector in two. Recovery
       must open on the old base or the new one, at a state of the reference, with every confirmed group, never set
-      a snapshot aside, never leave a merge's file. *)
+      a snapshot aside, never leave a merge's file;
+   5. each fsync of a small run failing in turn (G10, G13), then deaths at each call after it, reopens and power
+      losses: every view published survives. *)
 
 open Cepheus
 module C = Check
@@ -326,6 +328,127 @@ let () =
   Snapshot.sync_every := 4 * Pages.size;
   List.iter enumerate_merge variants;
   Printf.printf "exhaustive merges: %d crash points, %d crash states recovered\n" !merge_points !merge_states
+
+(* ---- 5. a failed fsync (G10, G13) ----
+   A small database written frame by frame, with segment switches and a merge, on a file system that keeps the bytes
+   of a failed fsync in memory (ext4, XFS) or one that undoes them (Btrfs). Each fsync of the run fails in turn; the
+   process then dies at each of the next disk calls (the writer's cut of the journal), or goes on to the end of the
+   run; then a reopen in the same boot (it reads the page cache, as after a process death or a close) or none, then a
+   power loss keeping all or none of the name changes, with the unforced bytes lost, kept, torn, or kept one sector in
+   two, and a reopen. Every reopen must open at a state of the reference with every confirmed group, and what the
+   first reopen published must survive the power loss. Damage may be reported only at the frame whose fsync failed
+   when its header's sector alone was lost (the false alarm of G6), and only if the process died before its cut. *)
+
+let fs_states = ref 0
+let fs_alarms = ref 0
+
+type frun = { fr : run; mutable unsure : int option (* the offset of a frame no fsync confirmed *) }
+
+let fs_write f ops =
+  let b = prepare f.fr ops in
+  if b.count > 0 && f.fr.e.stopped = None then f.unsure <- Some (Journal.position f.fr.e.journal).offset;
+  let res = Engine.commit f.fr.e b in
+  if Array.for_all (function Error (Engine.Io _) -> false | _ -> true) res then f.unsure <- None;
+  let v = Atomic.get f.fr.e.published in
+  record v;
+  f.fr.acked <- v.group
+
+(* the run, fsync k (counted after the open) failing, the process dying [after] calls later: the run, and whether it
+   died *)
+let fs_run reverts k after =
+  Engine.compact_min := 1_000_000;
+  let sim = Sim_disk.create ~reverts (Rng.make 9) in
+  let disk = Sim_disk.disk sim in
+  let f = { fr = { sim; disk; e = open_db disk; acked = 0 }; unsure = None } in
+  record (Atomic.get f.fr.e.published);
+  f.fr.acked <- (Atomic.get f.fr.e.published).group;
+  Sim_disk.fail_fsync_at ?crash_after:after sim k;
+  match
+    fs_write f (declare_ops f.fr.e.working);
+    for i = 1 to 5 do fs_write f (ops_for f.fr.e.working i) done;
+    ignore (Engine.snapshot f.fr.e);
+    for i = 6 to 9 do fs_write f (ops_for f.fr.e.working i) done
+  with
+  | () -> f, false
+  | exception Sim_disk.Crash -> f, true
+
+let fs_alarm f m =
+  match f.unsure with
+  | Some off ->
+    let s = Printf.sprintf "at offset %d (written whole)" off in
+    let n = String.length s in
+    let rec has i = i + n <= String.length m && (String.sub m i n = s || has (i + 1)) in
+    has 0
+  | None -> false
+
+(* a reopen: the group it opens at, or None after the accepted false alarm *)
+let fs_open what f ~acked ~died =
+  incr fs_states;
+  Engine.compact_min := 1_000_000;
+  match Engine.open_ ~id_source:(fun _ -> id) f.fr.disk mdir with
+  | Ok e ->
+    let k = e.working.group in
+    C.check (k >= acked) "%s: recovered to group %d, %d was confirmed" what k acked;
+    C.check (match Hashtbl.find_opt mstates k with Some s -> C.F.equal s (C.facts_of_view e.working) | None -> false)
+      "%s: the state at group %d is not the reference" what k;
+    f.unsure <- None;
+    Some k
+  | Error (Damaged m) when died && fs_alarm f m -> incr fs_alarms; None
+  | Error e -> C.fail "%s: recovery failed: %s" what (Engine.message e); None
+
+let enumerate_fsync reverts =
+  Hashtbl.reset mstates;
+  Journal.segment_limit := 700;
+  let fsname = if reverts then "a file system that undoes a failed write (Btrfs)" else "one that keeps it (ext4, XFS)" in
+  let states0 = !fs_states and k = ref 0 and go = ref true in
+  while !go do
+    let f, _ = fs_run reverts !k None in
+    if Sim_disk.failures f.fr.sim = 0 then go := false
+    else
+      List.iter
+        (fun after ->
+          List.iter
+            (fun reopen ->
+              List.iter
+                (fun names ->
+                  List.iter
+                    (fun (pname, sector) ->
+                      let f, died = fs_run reverts !k after in
+                      let what =
+                        Printf.sprintf "%s, fsync %d fails%s%s, names %s, bytes %s" fsname !k
+                          (match after with None -> "" | Some j -> Printf.sprintf ", death at call %d after it" j)
+                          (if reopen then ", reopen" else "") (if names then "all" else "none") pname
+                      in
+                      (* the process ends here (dead at the crash point, or at the end of the run) *)
+                      Sim_disk.kill f.fr.sim;
+                      let acked = ref f.fr.acked in
+                      let first = if reopen then fs_open (what ^ " (first reopen)") f ~acked:!acked ~died else Some 0 in
+                      (match first with
+                       | Some k1 ->
+                         acked := max !acked k1;
+                         let choose (d : Sim_disk.draw) n =
+                           match d with
+                           | Names _ -> if names then n - 1 else 0
+                           | Length _ -> if sector = 0 then 0 else 1
+                           | Cut _ | Tear _ -> n / 2
+                           | Sector (_, s) -> if sector >= 0 then sector else if s mod 2 = 0 then 2 else 0
+                         in
+                         Sim_disk.crash ~choose f.fr.sim;
+                         ignore (fs_open what f ~acked:!acked ~died)
+                       | None -> ()))
+                    patterns)
+                [ true; false ])
+            [ true; false ])
+        [ None; Some 0; Some 1; Some 2; Some 3 ];
+    incr k
+  done;
+  Journal.segment_limit := 64 * 1024 * 1024;
+  Printf.printf "  %s: %d fsyncs failed in turn, %d reopens\n" fsname !k (!fs_states - states0)
+
+let () =
+  List.iter enumerate_fsync [ false; true ];
+  Printf.printf "exhaustive fsync failures: %d reopens checked, %d false alarms (an unconfirmed frame's header sector lost alone, the process dead before its cut)\n"
+    !fs_states !fs_alarms
 
 let () =
   List.iter crash_states [ [ 10; 20; 30 ]; [ 400; 900; 1500 ]; [ 2000; 100 ] ];

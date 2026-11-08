@@ -26,6 +26,7 @@ type t = {
   mutable size : int;  (* end of the current segment *)
   mutable next : int;  (* the next group number *)
   mutable closed : bool;
+  mutable failed : bool;  (* a write or fsync failed: never used again (G10) *)
 }
 
 let damaged fmt = Printf.ksprintf (fun s -> raise (Damaged s)) fmt
@@ -48,11 +49,14 @@ let write_segment_header disk dir id first =
   Bytes.set_int64_le b 24 (Int64.of_int first);
   set32 b 36 (Crc32c.bytes b 0 36);
   let fd = disk.Disk.openf (path dir first) true in
-  disk.truncate fd 0;
-  disk.pwrite fd 0 b 0 seg_header;
-  disk.fsync fd;
-  disk.sync_dir dir;
-  fd
+  match
+    disk.truncate fd 0;
+    disk.pwrite fd 0 b 0 seg_header;
+    disk.fsync fd;
+    disk.sync_dir dir
+  with
+  | () -> fd
+  | exception (Disk.Io _ as e) -> (try disk.close fd with Disk.Io _ -> ()); raise e
 
 (* the header of a segment: Some first group if it checks, None if short or bad (torn) *)
 let read_header b id name =
@@ -101,9 +105,10 @@ type seg = {
   bad_trailers : int list;  (* starts of intact frames whose trailer is broken *)
 }
 
-(* Read-only: checks the segments from [from] and calls [on_group] on each group. A torn tail is allowed only in the
-   newest segment; a torn header only in a newest segment that holds nothing. *)
-let scan ?(frame = fun _ -> ()) disk dir id from on_group =
+(* Read-only, but for [before]: checks the segments from [from] and calls [on_group] on each group. A torn tail is
+   allowed only in the newest segment; a torn header only in a newest segment that holds nothing. [before path b]
+   runs on the newest segment's bytes before any of its groups is replayed. *)
+let scan ?(frame = fun _ -> ()) ?(before = fun _ _ -> ()) disk dir id from on_group =
   let all = segments disk dir in
   let segs = match from with None -> all | Some f -> List.filter (fun s -> s >= f.segment) all in
   (match from, segs with
@@ -120,6 +125,7 @@ let scan ?(frame = fun _ -> ()) disk dir id from on_group =
       let size = Bytes.length b in
       let resume = match from with Some f -> f.segment = s | None -> false in
       if s <> !expect && not resume then damaged "journal: %s does not follow group %d (a segment is missing)" name (!expect - 1);
+      if rest = [] then before (path dir s) b;
       (match read_header b id name with
        | None ->
          if rest <> [] then damaged "journal: %s has a broken header" name;
@@ -159,20 +165,41 @@ let scan ?(frame = fun _ -> ()) disk dir id from on_group =
   let found, torn_header = go [] segs in
   found, torn_header, !expect
 
+(* Where the newest frame of a segment starts: the last frame whose header checks, walking the frames by their lengths
+   from the segment's header; 0 if there is none. *)
+let newest_frame b =
+  let size = Bytes.length b in
+  let rec go p last =
+    if size - p >= fh && u32 b p = frame_magic && u32 b (p + 24) = Crc32c.bytes b p 24
+       && u32 b (p + 4) <= max_body && p + fh + u32 b (p + 4) + ft <= size
+    then go (p + fh + u32 b (p + 4) + ft) p
+    else last
+  in
+  if size >= seg_header then go seg_header 0 else 0
+
+(* What the last process may have left off the disk, written again and forced, before anything rests on it (G5, G12,
+   G13). A process killed between the pwrite of a frame and its fsync, or between the creation of a segment and the
+   fsync of its directory, leaves them in the page cache, where recovery reads them and a power loss takes them back.
+   And after a failed fsync, Linux marks the pages clean without writing them (Rebello et al., ATC 2020): ext4 and XFS
+   keep their new bytes in memory, so a later fsync succeeds without writing them, and recovery would read a frame
+   the disk does not hold. Written again, the pages are dirty again, and the fsync writes them (on Btrfs, which undoes
+   a failed write in memory too, the bytes read are the disk's: writing them again changes nothing). Only the newest
+   frame can be off the disk, or the newest segment's header if it holds no frame: frames are written one at a time,
+   each forced before the next, and the writer stops at the first failure (G10); a segment is begun only once every
+   frame of the previous one is durable. *)
+let rewrite_newest disk dir file b =
+  let q = newest_frame b in
+  let fd = disk.Disk.openf file false in
+  Fun.protect ~finally:(fun () -> disk.close fd) (fun () ->
+      if Bytes.length b > q then disk.pwrite fd q b q (Bytes.length b - q);
+      disk.fsync fd);
+  disk.sync_dir dir
+
 let recover ?frame ~force disk dir id from on_group =
-  (* What a killed process wrote but did not force is forced first: a frame between its pwrite and its fsync, or a
-     new segment between its creation and the fsync of its directory, sits in the page cache, where recovery reads
-     it, but not on the disk, where a power loss would take it back. Forced now (the newest segment, then the names
-     of the directory), so that a published view, or a snapshot written while replaying, never rests on a frame that
-     is not durable (G5, G12). The older segments were forced whole before the next one began. Not needed after a
-     clean close ([force] false: the database's marker, Engine.open_). *)
-  (match if force then List.rev (segments disk dir) else [] with
-   | s :: _ ->
-     let fd = disk.Disk.openf (path dir s) false in
-     Fun.protect ~finally:(fun () -> disk.close fd) (fun () -> disk.fsync fd);
-     disk.sync_dir dir
-   | [] -> ());
-  let found, torn_header, next = scan ?frame disk dir id from on_group in
+  (* Not needed after a clean close ([force] false: the database's marker, Engine.open_), which leaves nothing off the
+     disk and no failed fsync. *)
+  let before = if force then rewrite_newest disk dir else fun _ _ -> () in
+  let found, torn_header, next = scan ?frame ~before disk dir id from on_group in
   (match torn_header with
    | Some s ->
      disk.Disk.remove (path dir s);
@@ -196,30 +223,36 @@ let recover ?frame ~force disk dir id from on_group =
         disk.pwrite fd (p + fh + len) t 0 ft)
       last.bad_trailers;
     if last.torn || last.bad_trailers <> [] then disk.fsync fd;
-    { disk; dir; id; fd; seg = last.first; size = last.stop; next; closed = false }
+    { disk; dir; id; fd; seg = last.first; size = last.stop; next; closed = false; failed = false }
   | [] ->
     (* no usable segment: the only one was torn at its creation, before any frame *)
     let fd = write_segment_header disk dir id next in
-    { disk; dir; id; fd; seg = next; size = seg_header; next; closed = false }
+    { disk; dir; id; fd; seg = next; size = seg_header; next; closed = false; failed = false }
 
 let create disk dir id =
   let fd = write_segment_header disk dir id 1 in
-  { disk; dir; id; fd; seg = 1; size = seg_header; next = 1; closed = false }
+  { disk; dir; id; fd; seg = 1; size = seg_header; next = 1; closed = false; failed = false }
+
+(* After a failed write or fsync: the journal back to the end of its last durable frame ([size] grows only after a
+   successful fsync), a segment that a failed switch began removed, the cut and the directory forced. So a write
+   answered with an error is not in the journal, and a power loss cannot leave a part of it that recovery would take
+   for damage (G6: a frame whose header's sector alone was lost). The process may die before the cut, or the cut may
+   fail: the next recovery writes the newest frame again before it forces it ([rewrite_newest]), which is what keeps
+   every view on the disk (G13); the cut only makes the outcome of a failed write certain when it succeeds. *)
+let cut j =
+  try
+    List.iter (fun s -> if s > j.seg then j.disk.Disk.remove (path j.dir s)) (segments j.disk j.dir);
+    j.disk.truncate j.fd j.size;
+    j.disk.fsync j.fd;
+    j.disk.sync_dir j.dir
+  with Disk.Io m -> prerr_endline ("cepheus: the journal could not be cut back after a failed write: " ^ m)
 
 let append j body first count =
   if j.closed then raise (Disk.Io "journal is closed");
+  if j.failed then raise (Disk.Io "journal: an earlier write failed; reopen the database");
   if first <> j.next then invalid_arg "Journal.append: groups out of order";
   let len = Buffer.length body in
   if len > max_body then invalid_arg "Journal.append: frame too large";
-  if j.size > seg_header && j.size + fh + len + ft > !segment_limit then begin
-    (* every frame of the current segment is durable already: start the next one (made first, so that a failure
-       leaves the journal on the old segment, still open) *)
-    let fd = write_segment_header j.disk j.dir j.id first in
-    j.disk.close j.fd;
-    j.fd <- fd;
-    j.seg <- first;
-    j.size <- seg_header
-  end;
   let n = fh + len + ft in
   let b = Bytes.create n in
   set32 b 0 frame_magic;
@@ -236,14 +269,30 @@ let append j body first count =
   set32 b (t + 4) bc;
   set32 b (t + 8) hc;
   set32 b (t + 12) tail_magic;
-  let t0 = clock () in
-  j.disk.pwrite j.fd j.size b 0 n;
-  let t1 = clock () in
-  j.disk.fsync j.fd;
-  Histogram.record write_us (t1 - t0);
-  Histogram.record fsync_us (clock () - t1);
-  j.size <- j.size + n;
-  j.next <- first + count
+  match
+    if j.size > seg_header && j.size + n > !segment_limit then begin
+      (* every frame of the current segment is durable already: start the next one (made first, so that a failure
+         leaves the journal on the old segment, still open) *)
+      let fd = write_segment_header j.disk j.dir j.id first in
+      j.disk.close j.fd;
+      j.fd <- fd;
+      j.seg <- first;
+      j.size <- seg_header
+    end;
+    let t0 = clock () in
+    j.disk.pwrite j.fd j.size b 0 n;
+    let t1 = clock () in
+    j.disk.fsync j.fd;
+    Histogram.record write_us (t1 - t0);
+    Histogram.record fsync_us (clock () - t1)
+  with
+  | () ->
+    j.size <- j.size + n;
+    j.next <- first + count
+  | exception (Disk.Io _ as e) ->
+    j.failed <- true;
+    cut j;
+    raise e
 
 let next_group j = j.next
 let position j = { segment = j.seg; offset = j.size; next = j.next }

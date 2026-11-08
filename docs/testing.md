@@ -41,7 +41,10 @@ databases. Every randomized test draws from a seeded generator (`Rng`, SplitMix6
    mutating disk call of three kinds of merge (now; begun ahead of the disk and installed two frames later; those of a
    recovery replaying a long tail), every crash state: a process death then a power loss, and power losses keeping
    each prefix of each directory's name changes, with the unforced bytes lost, kept, torn or kept one sector in two
-   (`Sim_disk.crash ~choose` makes the choices a power loss would draw): 393 crash points, 3,918 states.
+   (`Sim_disk.crash ~choose` makes the choices a power loss would draw): 394 crash points, 3,924 states; and each fsync
+   of a small run failing in turn (G13), on a file system that keeps the failed bytes in memory and on one that undoes
+   them, then a process death at each of the next four disk calls or none, a reopen in the same boot or none, a power
+   loss with each pattern, and a reopen: 2,880 reopens checked.
 3. **Deterministic simulation** (`test/sim.ml --seeds N`): the engine runs on `Sim_disk`; the seed decides the writes,
    the interleaving of prepare and commit, snapshots, merges (now, or begun from a view ahead of the disk and
    installed steps later), forks, clean closes and reopens, power losses, process deaths (`Sim_disk.kill`: the page cache stays, to be lost at
@@ -61,8 +64,12 @@ What the simulated disk does (`src/sim_disk.ml`): it keeps, per file, the curren
 sectors written since the last fsync; per directory, the name changes since its last sync. A power loss resolves each
 unsynced sector at random (lost, kept, torn inside), picks a length between the durable and the current size, and keeps
 a random prefix of each directory's name changes; a test may make each of those choices itself (`~choose`). A process
-death closes the files and keeps everything as it is. A failed fsync marks the pages clean without making them
-durable.
+death closes the files and keeps everything as it is. A failed fsync does what the paper measured (Rebello et al.,
+ATC 2020): the written sectors are marked clean without reaching the disk, their bytes kept in memory (ext4, XFS; the
+new size made durable at random, as ext4 may) or undone (Btrfs, `Sim_disk.create ~reverts`); a later fsync writes
+only the sectors written since, so a sector marked clean stays off the disk until it is written again or a power loss
+resolves it. Until this was modelled, the simulated fsync copied every byte in memory to the disk, and the hole G13
+closes went unseen.
 
 ## Not yet
 
@@ -70,21 +77,26 @@ Jepsen-style tests under network faults come with replication.
 
 ## Model checking
 
-`spec/Journal.tla` models the journal protocol with the faults F1-F4: frames written one at a time and forced, a
-crash that loses, keeps or tears the frame in flight, silent damage of a durable frame (in its body, or in its
-header), a failed fsync; recovery with Cepheus' rules. Invariants: `Durable` (G1: an acknowledged frame survives,
-unless recovery refused to open or it was itself damaged), `Prefix` (G3), `NoTornData` (G2: a torn frame is never
-kept), `StopSafe` (G10), `ResidualBound` (G6: a cut loses only damaged frames). Run it with
+`spec/Journal.tla` models the journal protocol with the faults F1-F4, the page cache and the disk kept apart: frames
+written one at a time and forced; a process death (the page cache stays) and a recovery that reads it; a power loss
+that loses, keeps or tears every frame the disk may not hold; silent damage of a durable frame (in its body, or in its
+header); a failed fsync that marks the pages clean, their bytes kept or undone in memory, a later fsync not writing
+them; the writer's cut after it (forced, failed, or truncated without its fsync); recovery with Cepheus' rules,
+writing its newest frame again. Invariants: `Durable` (G1: an acknowledged frame is in the file and on the disk,
+unless recovery refused to open or it was itself damaged), `RefuseOnlyOnDamage`, `PublishedOnDisk` (G13: what
+readers may see is on the disk), `Prefix` (G3), `NoTornData` (G2: a torn frame is never kept), `StopSafe` (G10),
+`ResidualBound` (G6: a cut loses only damaged frames). Run it with
 `TLA2TOOLS=/path/to/tla2tools.jar tools/tlc.sh`; the jar is the official release (v1.7.4) from
 https://github.com/tlaplus/tlaplus/releases, run by Java 11 or later. Bounds in `spec/Journal.cfg`: 7 frames, 3
-damages: 1,084,801 distinct states, depth 27, 6.5 s on the test machine. TLC found one real trace (two damaged frames
-at the end were both cut), fixed in `Journal.written_after`.
+damages: 3,856,315 distinct states, depth 29, 20 s on the test machine. TLC found one real trace (two damaged frames
+at the end were both cut), fixed in `Journal.written_after`. With `RewriteAtRecovery` FALSE it prints the trace of
+G13 in 4 steps (write, failed fsync, death before the cut, recovery publishing the frame).
 
 `spec/Merge.tla` models how a merge's file becomes the base (G12), with the journal abstracted to the groups written
 and the groups durable, a process death (the page cache kept), a power loss (unforced bytes lost, a prefix of the
 directory's name changes kept), a failed fsync, and the clean-close marker. Invariants: `NoMix` (no snapshot name points at content not whole
 and forced), `SnapshotInJournal` (a snapshot name only for a durable group; recovery never meets one ahead of the
 journal), `PublishedDurable` (G5, after a recovery too), `AckedDurable` (G1), `BaseNamed`. Bounds in `spec/Merge.cfg`
-(5 groups, 2 snapshots kept): 3,808,506 distinct states, depth 43. Its four rules are constants: set any of
-`ForceBeforeRename`, `InstallWhenDurable`, `ForceAtRecovery`, `MarkerOnlyIfClean` to FALSE and TLC prints a
-counterexample of 7 steps.
+(5 groups, 2 snapshots kept): 4,388,859 distinct states, depth 44. Its five rules are constants: set any of
+`ForceBeforeRename`, `InstallWhenDurable`, `ForceAtRecovery`, `MarkerOnlyIfClean`, `RewriteAtRecovery` to FALSE and
+TLC prints a counterexample (7 steps, or 5 for the last).

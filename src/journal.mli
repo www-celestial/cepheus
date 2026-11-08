@@ -33,14 +33,17 @@ val create : Disk.t -> string -> string -> t
 
 val recover :
   ?frame:(position -> unit) -> force:bool -> Disk.t -> string -> string -> position option -> (Group.t -> unit) -> t
-(** [recover ~force disk dir id from on_group]: with [force], forces the newest segment and the directory (what a
-    killed process wrote but did not force is made durable before anything rests on it), reads the journal from [from] (the start without it), calls [frame] on
+(** [recover ~force disk dir id from on_group]: reads the journal from [from] (the start without it), calls [frame] on
     the position of each frame and [on_group] on each of its groups, in order, cuts a torn tail durably, and returns
-    the journal ready to append. Raises {!Damaged}. *)
+    the journal ready to append. With [force] (after anything but a clean close), before replaying a group of the
+    newest segment, it writes that segment's newest frame again (its header if it holds no frame), forces the segment
+    and the directory: what a killed process wrote but did not force, or what a failed fsync left in the page cache
+    but not on the disk, is on the disk before anything rests on it (G5, G13). Raises {!Damaged}, or [Disk.Io]. *)
 
 val append : t -> Buffer.t -> int -> int -> unit
 (** [append j body first count]: one frame of [count] groups from [first], written and made durable. Raises
-    [Disk.Io]; after that the journal must not be used again (the database stops). *)
+    [Disk.Io], after cutting the journal back to the end of its last durable frame (forced; a failure of the cut is
+    reported on stderr); after that the journal refuses every append (the database stops, G10, G13). *)
 
 val next_group : t -> int
 val position : t -> position

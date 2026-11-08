@@ -24,8 +24,9 @@ The journal is the truth: snapshots are caches that can always be rebuilt. Byte 
 4. loads the newest snapshot that checks (header CRC, checksum table, the order and bounds of every table; a page's
    CRC as it is read); a snapshot that does not check is set aside and noted (`Cepheus.notes`), and the next older
    one is tried;
-5. after a crash (no `closed`), forces the newest segment and the journal's directory (a process killed before its
-   fsync left them in the page cache); then reads the journal from the snapshot's position: checks every frame,
+5. after a crash (no `closed`), writes the newest frame of the journal again and forces the newest segment and the
+   journal's directory (a process killed before its fsync left them in the page cache; after a failed fsync the
+   page cache may hold bytes the disk does not, G13); then reads the journal from the snapshot's position: checks every frame,
    applies every group, and merges into a new snapshot file when the changes pass the threshold, as the writer would
    have; a journal that ends before the snapshot's group is damage;
 6. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
@@ -45,7 +46,12 @@ lost power while writing it), the tail can be cut by hand at that offset (`trunc
 human decision, never taken by Cepheus.
 
 **When a write returns `Io`.** The disk failed during a write or an fsync. The database has stopped: every later write
-fails. Close it and reopen it; recovery starts from the journal. Cepheus never retries an fsync (Rebello et al. 2020).
+fails. Cepheus has already cut the journal back to its last durable frame, so the failed writes are not in it (if
+that cut failed too, stderr says so, and the failed writes may or may not come back at the reopen). Look at the
+system log for the disk's error, then close the database and reopen it; recovery starts from the journal and writes
+its newest frame again before trusting it. Cepheus never retries an fsync blindly (Rebello et al. 2020): after a
+failed one, Linux has marked the pages clean, and a second fsync would succeed without writing them. A file system
+that turned read-only after the error (ext4, Btrfs) or shut down (XFS) refuses the reopen until it is repaired.
 
 ## Backup and restore
 
