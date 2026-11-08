@@ -169,7 +169,8 @@ closed`.
 |---|---|---|
 | `Unreadable of string` | `get`, `values`, `things`, a fork's `write` | a page of the base cannot be read or does not check (above) |
 | `Not_found` | `thing r k` | k is not a new thing of the group of receipt r |
-| `Invalid_argument` | internals | a broken invariant, which is a bug: `Journal.append: groups out of order`, `Engine.install: not durable`, `Snapshot.merge: ...` (a section that does not add up); or a misuse of an internal function (`Codec.reader`, `Crc32c.bytes`, `Rng.int`); and `Journal.append: frame too large` when one group encodes to more than 256 MiB ([limits](limits.md)) |
+| `Failure "bootstrap: ..."` | `open_` of a new database | the first group, which describes the system properties, was refused: a bug |
+| `Invalid_argument` | internals | a broken invariant, which is a bug: `Journal.append: groups out of order`, `Engine.install: not durable`, `Snapshot.merge: ...` (a section that does not add up); `Pages: a page of a base built in memory is missing`; or a misuse of an internal function (`Codec.reader`, `Codec.put_varint` of a negative number, `Crc32c.bytes`, `Rng.int`); and `Journal.append: frame too large` when one group encodes to more than 256 MiB ([limits](limits.md)) |
 
 ## Lines on the standard error
 
