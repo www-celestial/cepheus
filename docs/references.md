@@ -299,6 +299,33 @@ venue, volume and year); a work that could not be checked is not listed. The des
   *PVLDB* 14(3), 268–280, 2020. https://doi.org/10.14778/3430915.3430918
   — Jepsen's checker of isolation; the bank test follows Jepsen's, Elle comes with replication.
 
+## Method: solving and measuring
+
+- **[Pólya 1945]** G. Pólya. *How to Solve It: A New Aspect of Mathematical Method*. Princeton University Press, 1945.
+  https://press.princeton.edu/books/paperback/9780691164076/how-to-solve-it
+  — "Understanding the problem" first: the unknown, the data, the condition; the first step of the
+  [case of the seats](case-seats.md).
+- **[Heilmeier]** G. H. Heilmeier. The Heilmeier Catechism, the questions DARPA asks of every proposed research
+  program. https://www.darpa.mil/about/heilmeier-catechism
+  — What are you trying to do, how is it done today, what is new, how will you know you succeeded: the frame of the
+  problem's statement.
+- **[Jain 1991]** R. Jain. *The Art of Computer Systems Performance Analysis: Techniques for Experimental Design,
+  Measurement, Simulation, and Modeling*. Wiley, 1991. ISBN 0-471-50336-3.
+  — An experiment states its workload, metric and factors before it runs; the baseline of the case.
+- **[Georges 2007]** A. Georges, D. Buytaert, L. Eeckhout. Statistically Rigorous Java Performance Evaluation.
+  *OOPSLA* 2007, 57–76. https://doi.org/10.1145/1297027.1297033
+  — Several runs and a confidence interval rather than one number or the best of N.
+- **[Kalibera 2013]** T. Kalibera, R. Jones. Rigorous Benchmarking in Reasonable Time. *ISMM* 2013, 63–74.
+  https://doi.org/10.1145/2464157.2464160
+  — How many runs a measure needs, and where the variation comes from.
+- **[Zeller 2002]** A. Zeller, R. Hildebrandt. Simplifying and Isolating Failure-Inducing Input. *IEEE Transactions on
+  Software Engineering* 28(2), 183–200, 2002. https://doi.org/10.1109/32.988498
+  — Delta debugging: shrink a failing case until every part of it is needed; the double sale shrunk to two buyers,
+  one seat and one view.
+- **[Mytkowicz 2009]** T. Mytkowicz, A. Diwan, M. Hauswirth, P. F. Sweeney. Producing Wrong Data Without Doing
+  Anything Obviously Wrong! *ASPLOS* 2009, 265–276. https://doi.org/10.1145/1508244.1508275
+  — Measurement bias from an innocent change of the set-up: the threats to validity of the case.
+
 ## Benchmarking and statistics
 
 - **[Raasveldt 2018]** M. Raasveldt, P. Holanda, T. Gubner, H. Mühleisen. Fair Benchmarking Considered Difficult:

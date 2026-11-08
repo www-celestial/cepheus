@@ -46,9 +46,10 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
 | `crash.exe DIR ROUNDS [SEED]` | real `kill -9` rounds on a database in DIR | SEED 42 by default |
 | `bank.exe DIR SECONDS` | the bank test for SECONDS | |
+| `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | the sale of seats with kill -9 and a checker of the history ([case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)); `ROUNDS` 0: no kill, the time to sell out | `BUYERS` (16), SEED 42, SEATS 2,000 |
 | `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
-| `tools/test.sh` | `dune build --profile release`, then unit, exhaustive, sim, crash, bank and examples | `CEPHEUS_TMP`, `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2) |
-| `tools/tlc.sh` | TLC on `spec/Journal.tla` and `spec/Merge.tla` | `TLA2TOOLS`: the path of `tla2tools.jar` |
+| `tools/test.sh` | `dune build --profile release`, then unit, exhaustive, sim, crash, bank, seats and examples | `CEPHEUS_TMP`, `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20) |
+| `tools/tlc.sh` | TLC on `spec/Journal.tla`, `spec/Merge.tla` and `spec/Seats.tla`, and the naive sale (`spec/SeatsNaive.cfg`), which must break an invariant | `TLA2TOOLS`: the path of `tla2tools.jar` |
 
 **Deterministic simulation testing** runs the real engine on a simulated disk where one seed decides every event (the
 writes, the order of the writer's steps, crashes, damage), so that a failure is not a rare accident but a seed that
@@ -98,6 +99,10 @@ checks a property on many random inputs against a reference model written indepe
    is left.
 5. **Concurrency** (`test/bank.exe DIR SECONDS`): transfers with `Expect` from 16 threads, two reader domains checking
    that every view keeps the total and that views never go back.
+6. **A sale of seats under kill -9, with a checker of the history** (`test/seats.exe DIR ROUNDS`): 16 buyers sell 2,000
+   seats with `Expect` in a child that is killed at random moments; the checker reads the journal and verifies every
+   confirmed sale, at most one charge a seat, no charge without the seat, and no cycle in the dependency graph of the
+   sales, in the spirit of Elle (Kingsbury and Alvaro 2020). The [case](case-seats.md) tells it.
 
 What the simulated disk does (`src/sim_disk.ml`): it keeps, per file, the current and the durable content and the
 sectors written since the last fsync; per directory, the name changes since its last sync. A power loss resolves each
@@ -136,6 +141,12 @@ https://github.com/tlaplus/tlaplus/releases, run by Java 11 or later. Bounds in 
 damages: 3,856,315 distinct states, depth 29, 20 s on the test machine. TLC found one real trace (two damaged frames
 at the end were both cut), fixed in `Journal.written_after`. With `RewriteAtRecovery` FALSE it prints the trace of
 G13 in 4 steps (write, failed fsync, death before the cut, recovery publishing the frame).
+
+`spec/Seats.tla` models the sale of seats of the [case](case-seats.md): buyers that read a view and pick a free seat,
+groups applied one at a time with or without `Expect (seat, owner, None)`, crashes; invariants `NoDoubleSale` and
+`NoChargeWithoutSeat`. With the `Expect` (`spec/Seats.cfg`, 4 buyers, 3 seats) they hold in all 8,449 states; without
+it (`spec/SeatsNaive.cfg`, 3 buyers, 2 seats) TLC prints a counterexample of 4 steps, and `tools/tlc.sh` fails unless it
+does.
 
 `spec/Merge.tla` models how a merge's file replaces runs (G12), with the journal abstracted to the groups written and
 the groups durable: chains of runs named by their groups, merges of any number of the newest runs, recovery taking the

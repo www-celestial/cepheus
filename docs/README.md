@@ -9,6 +9,9 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
    levels and its merges, large groups, the page cache and S3-FIFO, one writer and the domains, Generic Join, how it
    is tested.
 3. [Testing](testing.md): forks for an application's tests, and how Cepheus itself is tested.
+4. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
+   to the proof that it is solved (a test, generated schedules, a TLA+ model, kill -9 with a checker of the history,
+   the speed beside SQLite and PostgreSQL).
 
 **Reference**
 - [API](api.md): every public function and type, with its parameters, result, errors and an example.

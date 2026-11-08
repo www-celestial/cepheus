@@ -67,6 +67,9 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `bench.exe cpu DIR N` | the writer's work alone: N 5-fact groups into a fork of the database (no disk) |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
+| `test/seats.exe DIR 0 SEED naive\|expect SEATS` | the sale of seats of the [case](case-seats.md): `BUYERS` threads sell out a hall of SEATS seats, the time and what went wrong |
+| `bench/sqlite/seats.py FILE immediate\|naive SEATS BUYERS` | the same sale on SQLite (Python's `sqlite3`, WAL, `synchronous = FULL`) |
+| `bench/pg/pg.sh seats ROOT serializable\|naive SEATS BUYERS` | the same sale on PostgreSQL (pgbench, `--max-tries=1000`, the scripts `bench/pg/seat-*.sql`) |
 
 Environment of `bench.exe`: `RUNS` (21), `CEPHEUS_DOMAINS` (the domains of a question), `CACHE_MB` (the cache),
 `SYNC_MB` (how often a merge forces its file while clients write, 8), `GROUP`, `THREADS`, `SNAPSHOT` and `NOCSV` (the
