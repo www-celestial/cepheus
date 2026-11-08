@@ -5,8 +5,10 @@
 ```
 DIR/cepheus                       the database's id (16 random bytes) and format, written once, atomically, with a CRC
 DIR/lock                          held (lockf) while the database is open: one process at a time
+DIR/closed                        left by a clean close (everything durable), removed by the next open
 DIR/journal/NNNNNNNNNNNNNNNNNNNN.seg   segments named by their first group, 64 MB each, only appended to
-DIR/snapshots/NNNNNNNNNNNNNNNNNNNN.snap   the two newest snapshots, named by their last group
+DIR/snapshots/NNNNNNNNNNNNNNNNNNNN.snap   the two newest snapshots, named by their last group; the newest is the base
+DIR/snapshots/NNNNNNNNNNNNNNNNNNNN.snap.tmp   a merge being written (removed at open if a crash interrupted it)
 ```
 
 The journal is the truth: snapshots are caches that can always be rebuilt. Byte layouts: [formats](formats.md).
@@ -16,16 +18,24 @@ The journal is the truth: snapshots are caches that can always be rebuilt. Byte 
 `Cepheus.open_ DIR` creates the directory and its files if they are missing, else:
 
 1. takes the lock (`Busy` if another process has it);
-2. reads the id;
-3. loads the newest snapshot that checks (header CRC, checksum table, a CRC per MiB, the order and bounds of every
-   table); a snapshot that does not check is set aside and noted (`Cepheus.notes`), and the next older one is tried;
-4. reads the journal from the snapshot's position: checks every frame, applies every group, compacting as needed;
-5. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
-   `Damaged "file: what, at which offset"` and nothing is changed;
-6. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt.
+2. reads the id; if `closed` is there (the last process closed cleanly), removes it; else forces the database's
+   directory;
+3. removes the files of merges a crash interrupted (`.tmp`);
+4. loads the newest snapshot that checks (header CRC, checksum table, the order and bounds of every table; a page's
+   CRC as it is read); a snapshot that does not check is set aside and noted (`Cepheus.notes`), and the next older
+   one is tried;
+5. after a crash (no `closed`), forces the newest segment and the journal's directory (a process killed before its
+   fsync left them in the page cache); then reads the journal from the snapshot's position: checks every frame,
+   applies every group, and merges into a new snapshot file when the changes pass the threshold, as the writer would
+   have; a journal that ends before the snapshot's group is damage;
+6. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
+   `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a snapshot of the
+   groups before the damage);
+7. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt.
 
-Recovery time is the snapshot's check (about 0.47 s for 10 M facts on the test machine) plus the replay of the groups
-after it. Take snapshots regularly (`Cepheus.snapshot`) to keep that short.
+Recovery time is the snapshot's check plus the replay of the groups after it. Every merge writes a snapshot, so the
+replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`
+merges now, before a planned stop for example.
 
 **When recovery says `Damaged`.** Durable data changed: a disk fault, a mishandled file, a segment missing in the
 middle. Do not delete files. Copy the directory aside; run `Cepheus.verify` on the copy for the full list; restore the
@@ -66,10 +76,25 @@ been evicted, so that the evicted pages go back to the system. Measured at 10 M 
 whole base in the cache, 278 MB resident after open; with a 32 MB cache under a 128 MB cap, 64 MB after open and a
 peak of 79 to 105 MB through Q1 to Q5 (benchmarks, Larger than memory).
 
-Besides the base: about 170 bytes for each change since the last merge; a merge starts in the background when the
-changes pass max(200,000, n/16) and still builds the new base in memory, beside the old one, with the arrays of its
-sort: loading 10 M facts peaks at 3.1 GB, and write runs with merges at 1.8 to 3.3 GB. Give a database that writes
-heavily about 13 times its snapshot's size until merges are written straight to a file (the next step).
+Besides the base: about 170 bytes for each change since the last merge. A merge starts in the background when the
+changes pass max(200,000, n/16); it streams the new base into its file and needs only the cache, a few page buffers
+and 21 bytes a page of the new base (theory, section 8): with the whole base in the cache, the cache holds the old
+and the new base during the merge (twice the base, if the cache is large enough), and the old one leaves it at the
+switch. Measured at 10 M facts: write runs at 256 clients with their merges peak at 1.0 to 1.3 GB (1.8 to 3.0 GB when
+merges were built in memory); with a 32 MB cache, a merge of the whole 245 MB base runs in a process capped at 128 MB
+(peak 99 MB).
+
+## Disk space and merges
+
+Each merge writes the whole base into a new file (about 25 bytes a fact), forces it, and renames it; the snapshots
+beyond the newest two are then removed. During a merge the directory holds three bases (the current one, the one
+before it, the new one being written), and a removed file's space returns only when no view reads it any longer (the
+file stays open until the garbage collector frees its base). Budget about four times the base for `snapshots/`.
+
+A merge writes about 17 facts of base for each change (the threshold n/16), so a busy database writes far more bytes
+to its snapshots than to its journal (at 10 M facts, a merge every 625,000 changes writes 245 MB). While clients write,
+a merge forces its file every 8 MiB, so that the journal's fsyncs, which every write waits for, never queue behind
+hundreds of MB of a merge's dirty pages; a merge nobody waits beside (`snapshot`, recovery) forces once, at the end.
 
 ## Disks
 

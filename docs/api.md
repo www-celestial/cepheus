@@ -103,7 +103,7 @@ Cepheus.fold v q ~init:(fun () -> Hashtbl.create 100)
 
 | function | what it does |
 |---|---|
-| `snapshot : db -> (unit, error) result` | compacts and writes a snapshot, so the next open replays only what follows |
+| `snapshot : db -> (unit, error) result` | merges now (the delta into a new base and its snapshot file), so the next open replays only what follows; nothing to do if no group came since the last merge |
 | `verify : string -> (int, error) result` | reads a closed database's whole journal and checks every frame and trailer; the number of groups |
 | `notes : db -> string list` | what recovery set aside (a damaged snapshot) |
 | `set_cache : int -> unit` | the bytes of base pages kept in memory, for every database of the process (1 GiB by default) |

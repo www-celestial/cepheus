@@ -29,28 +29,40 @@ databases. Every randomized test draws from a seeded generator (`Rng`, SplitMix6
    a group cut at every byte never decodes; 300 random sequences of writes against a reference semantics written
    independently (a set of facts); 300 random databases × 15 random questions against a naive evaluator, each within
    the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`); costs: questions
-   where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; compaction
-   keeps every fact and every answer; snapshots round trip, refuse another database's, set aside a damaged one; forks
+   where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; a merge
+   keeps every fact and every answer, and a merge of a base 8 times the cache holds at most a few pages open and never
+   more resident pages than the cache; snapshots round trip, refuse another database's, set aside a damaged one; forks
    change nothing (files compared byte for byte) and accept what the database accepts; a second open is `Busy`; named
    cases (write skew refused, unique, one value, triangles).
 2. **Exhaustive enumeration** (`test/exhaustive.ml`): for journals of a few frames, every crash state of the frame in
    flight (each subset of its sectors kept, each cut length, a tear inside the highest kept sector) must recover to
    exactly the right groups; every single bit of two journals flipped must be detected by a full read and handled by
-   recovery as G6 says; a segment torn at its creation at any byte is dropped.
+   recovery as G6 says; a segment torn at its creation at any byte is dropped; and inside a merge (G12), at every
+   mutating disk call of three kinds of merge (now; begun ahead of the disk and installed two frames later; those of a
+   recovery replaying a long tail), every crash state: a process death then a power loss, and power losses keeping
+   each prefix of each directory's name changes, with the unforced bytes lost, kept, torn or kept one sector in two
+   (`Sim_disk.crash ~choose` makes the choices a power loss would draw): 393 crash points, 3,918 states.
 3. **Deterministic simulation** (`test/sim.ml --seeds N`): the engine runs on `Sim_disk`; the seed decides the writes,
-   the interleaving of prepare and commit, snapshots, compactions, forks, power losses, crashes inside any disk call
-   (`Sim_disk.crash_after`), failed fsyncs, and bit flips in durable files. After every recovery the state is compared
-   with the reference model, and the journal's groups with the written ones; random questions on the published views
-   must give the naive evaluator's answers within the Generic Join bound. `sim.exe --seed S` replays one seed.
-4. **Real crashes** (`test/crash.exe DIR ROUNDS`): a child process writes with 8 threads and prints each confirmation;
-   the parent kills it with SIGKILL at a random moment, reopens, and checks every confirmed group's content.
+   the interleaving of prepare and commit, snapshots, merges (now, or begun from a view ahead of the disk and
+   installed steps later), forks, clean closes and reopens, power losses, process deaths (`Sim_disk.kill`: the page cache stays, to be lost at
+   a later power loss), crashes inside any disk call (`Sim_disk.crash_after`), failed fsyncs, and bit flips in durable
+   files. After every recovery the state is compared with the reference model, and the journal's groups with the
+   written ones; the recovered state counts as confirmed (a later power loss must keep it); no snapshot may be set
+   aside but a damaged one, no merge's file left; random questions on the published views must give the naive
+   evaluator's answers within the Generic Join bound. `sim.exe --seed S` replays one seed.
+4. **Real crashes** (`test/crash.exe DIR ROUNDS`): a child process writes with 8 threads and prints each confirmation,
+   merging every 50 changes; the parent kills it with SIGKILL at a random moment (it counts the kills that land inside
+   a merge), reopens, and checks every confirmed group's content, that no snapshot was set aside and no merge's file
+   is left.
 5. **Concurrency** (`test/bank.exe DIR SECONDS`): transfers with `Expect` from 16 threads, two reader domains checking
    that every view keeps the total and that views never go back.
 
 What the simulated disk does (`src/sim_disk.ml`): it keeps, per file, the current and the durable content and the
 sectors written since the last fsync; per directory, the name changes since its last sync. A power loss resolves each
 unsynced sector at random (lost, kept, torn inside), picks a length between the durable and the current size, and keeps
-a random prefix of each directory's name changes. A failed fsync marks the pages clean without making them durable.
+a random prefix of each directory's name changes; a test may make each of those choices itself (`~choose`). A process
+death closes the files and keeps everything as it is. A failed fsync marks the pages clean without making them
+durable.
 
 ## Not yet
 
@@ -67,3 +79,12 @@ kept), `StopSafe` (G10), `ResidualBound` (G6: a cut loses only damaged frames). 
 https://github.com/tlaplus/tlaplus/releases, run by Java 11 or later. Bounds in `spec/Journal.cfg`: 7 frames, 3
 damages: 1,084,801 distinct states, depth 27, 6.5 s on the test machine. TLC found one real trace (two damaged frames
 at the end were both cut), fixed in `Journal.written_after`.
+
+`spec/Merge.tla` models how a merge's file becomes the base (G12), with the journal abstracted to the groups written
+and the groups durable, a process death (the page cache kept), a power loss (unforced bytes lost, a prefix of the
+directory's name changes kept), a failed fsync, and the clean-close marker. Invariants: `NoMix` (no snapshot name points at content not whole
+and forced), `SnapshotInJournal` (a snapshot name only for a durable group; recovery never meets one ahead of the
+journal), `PublishedDurable` (G5, after a recovery too), `AckedDurable` (G1), `BaseNamed`. Bounds in `spec/Merge.cfg`
+(5 groups, 2 snapshots kept): 3,808,506 distinct states, depth 43. Its four rules are constants: set any of
+`ForceBeforeRename`, `InstallWhenDurable`, `ForceAtRecovery`, `MarkerOnlyIfClean` to FALSE and TLC prints a
+counterexample of 7 steps.

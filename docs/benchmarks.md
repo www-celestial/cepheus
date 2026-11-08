@@ -53,8 +53,8 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
   data directory): the same answers, the pages read from the disk, the peak resident memory.
 
 Commands: `bench.exe load DIR CSVDIR 10000000`, `bench.exe read DIR 10000000 [Q1,..]`, `bench.exe write DIR CLIENTS
-SECS [RATE]`, `bench.exe fsync DIR SECS append|overwrite`, `bench.exe trace ...`, `bench.exe cachesim TRACE`;
-`pg.sh init|start|load|read|write|stop ROOT ...`.
+SECS [RATE]`, `bench.exe merge DIR GROUPS`, `bench.exe fsync DIR SECS append|overwrite`, `bench.exe trace ...`,
+`bench.exe cachesim TRACE`; `pg.sh init|start|load|read|write|stop ROOT ...`.
 
 References: [Raasveldt 2018] M. Raasveldt, P. Holanda, T. Gubner, H. Mühleisen, "Fair Benchmarking Considered
 Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefler 2015] T. Hoefler, R. Belli,
@@ -62,6 +62,92 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## The merge written to a file (2026-11-08), at 10 million facts
+
+A merge now streams the new base into its snapshot file, page by page, instead of building it in memory (theory,
+section 8; G12). Measured against the commit before it (c7f25c0, merges in memory), both built in release, with the
+method above; each side on its own database loaded by its own binary (same facts; format 3 against format 4, the same
+245,824,096-byte snapshot). `bench.exe merge DIR GROUPS` is new: GROUPS invoices written with no merge in the
+background, then one merge of the whole base and the delta (`snapshot`), its time and the process's peak during the
+merge (the peak reset just before it, through `/proc/self/clear_refs`).
+
+**Memory of write runs with their merges** (the method of milestone 2: six runs of 10 s at 256 clients on a fresh
+copy, the peak resident memory of the process sampled every 0.2 s; two rounds a side, alternated: 12 runs a side):
+
+| | peak, median [95 % interval] | min to max | durable groups/s, median [95 % interval] |
+|---|---:|---:|---:|
+| merges in memory (c7f25c0) | 2,589 MB [1,785, 2,796] | 673 to 2,954 MB | 19,126 [15,751, 20,436] |
+| merges to a file | 1,126 MB [993, 1,188] | 948 to 1,307 MB | 19,388 [17,413, 20,966] |
+
+The peak falls by 57 %; the write rate does not change (the intervals overlap widely; one old run fell to 1,749
+groups/s in a disk stall).
+
+**One merge** (`bench.exe merge DIR 100000`: 100,000 invoices, 400,000 facts, written with no merge in the background,
+then one merge of the whole base and the delta into a new file; six rounds a side, alternated; with 6 runs the 95 %
+interval is [min, max], 96.9 %):
+
+| | merge time, median [95 % interval] | peak during the merge, median [95 % interval] |
+|---|---:|---:|
+| merges in memory (c7f25c0) | 3.21 s [2.49, 9.88] | 1,342 MB [1,221, 1,452] |
+| merges to a file, forced once | 2.29 s [2.17, 2.84] | 659 MB [656, 660] |
+| merges to a file, forced every 8 MiB | 9.07 s [4.88, 15.86] | 655 MB [651, 656] |
+
+The process held 409 to 418 MB before the merge on both sides. The streaming merge is faster than the merge in memory
+when forced once (no sort, no arrays), and holds half the memory: the new base's 245 MB of pages, beside the old base
+in the cache. Forced every 8 MiB, each fsync costs on this disk: so a merge forces in steps only while clients write
+beside it (below), and a merge nobody waits beside (`snapshot`, recovery) forces once.
+
+**A merge in a process capped at 128 MB**, cache 32 MB, the same 245 MB base and a delta of 20,000 invoices: the merge
+to a file takes 7.6 s, with 63 MB resident before it and a peak of 99 MB (the cache's 32 MB, a few pages, the tables);
+the merge in memory is killed by the cap (exit 137). That is the bound of theory, section 8: a merge needs the cache,
+not the base.
+
+**Reads, everything in the cache** (21 runs a question, two rounds a side, alternated; the medians with their 95 %
+intervals; the same answers): the read path did not change, and no difference stands out of the noise.
+
+| question | domains | merges in memory (c7f25c0), rounds 1 and 2 | merges to a file, rounds 1 and 2 |
+|---|---:|---|---|
+| Q1 | 1 | 0.40 µs [0.38, 0.51]; 0.39 µs [0.37, 0.44] | 0.39 µs [0.35, 0.66]; 0.36 µs [0.36, 0.37] |
+| Q1 | 3 | 0.37 µs [0.36, 0.38]; 0.38 µs [0.37, 0.39] | 0.39 µs [0.36, 0.67]; 0.38 µs [0.36, 0.41] |
+| Q2 | 1 | 1.68 µs [1.61, 1.74]; 1.62 µs [1.60, 1.65] | 1.63 µs [1.59, 2.00]; 1.63 µs [1.61, 1.80] |
+| Q2 | 3 | 1.64 µs [1.60, 1.81]; 1.64 µs [1.58, 1.98] | 1.91 µs [1.80, 2.21]; 1.63 µs [1.62, 1.68] |
+| Q3 | 1 | 4.13 ms [4.09, 4.28]; 4.09 ms [3.98, 4.30] | 4.11 ms [4.06, 4.42]; 4.10 ms [4.01, 4.48] |
+| Q3 | 3 | 4.09 ms [3.97, 4.24]; 4.09 ms [4.03, 4.44] | 4.34 ms [4.01, 4.79]; 4.02 ms [4.00, 4.26] |
+| Q4 | 1 | 233 ms [230, 237]; 231 ms [230, 235] | 230 ms [229, 248]; 233 ms [230, 245] |
+| Q4 | 3 | 105 ms [103, 119]; 104 ms [102, 108] | 107 ms [102, 112]; 105 ms [102, 113] |
+| Q5 | 1 | 1.02 s [1.01, 1.07]; 1.03 s [1.01, 1.13] | 1.03 s [1.01, 1.10]; 1.02 s [0.97, 1.05] |
+| Q5 | 3 | 370 ms [359, 406]; 382 ms [376, 402] | 373 ms [360, 393]; 377 ms [365, 447] |
+
+Open (restart from the snapshot, 15,000 pages read and checked), four runs a side: 408 to 497 ms against 410 to
+503 ms. After a crash, open now forces the newest segment and two directories (G5); after a clean close it skips them
+(the marker). Seven alternated opens a side, once the marker was in: the 10 M database with a 32 MB cache (1,313 pages
+read) 65 to 72 ms against 65 to 67 ms; a database of 10,000 facts 2.8 to 2.9 ms against 2.8 to 3.0 ms. On this disk an
+fsync of a file or directory that did not change costs under 0.01 ms; while the file system commits other work, it can
+cost tens of ms (one open measured 117 ms against 66 before the marker).
+
+**Reads larger than memory** (cache 32 MB, the process capped at 128 MB, 5 runs a question, 8 domains, the same
+answers): Q1 43.1 µs [41.2, 44.6] against 41.2 µs [39.6, 41.8]; Q2 1.68 µs [1.53, 1.99] against 1.61 µs [1.48, 1.66];
+Q3 91.8 ms [88.7, 94.6] against 88.7 ms [86.4, 90.9]; Q4 678 ms [650, 795] against 678 ms [664, 744]; 3.92 million
+pages read from the disk on both sides; peak 122 MB against 120 MB. (With 5 runs the interval is [min, max], 93.8 %.)
+
+**Loading 10 M facts, and what a merge's writes cost the journal** (`bench.exe load`: 64 clients, groups of 83 facts,
+about 33 merges as the base grows; one run a line, alternated):
+
+| | load | peak | journal fsync p99 | max | merge switch p99 |
+|---|---:|---:|---:|---:|---:|
+| merges in memory (c7f25c0) | 62.5 s; 79.3 s; 70.8 s | 2,841; 2,962; 2,874 MB | 72; 46 ms | 0.84; 0.72 s | 459; 114 ms |
+| merges to a file, forced once | 124.2 s | 1,844 MB | | | |
+| merges to a file, forced every 8 MiB while clients write | 134.7 s; 153.4 s | 1,813; 1,500 MB | 187; 203 ms | 2.96; 3.92 s | 802; 529 ms |
+
+Here the merge to a file loses: a load is all writes, and each of its merges rewrites the whole base, about 3.3 GB in
+all over the load, beside the journal, whose fsyncs every client waits for (a merge in memory writes nothing). At
+3 M facts (one run each): merges in memory 16.4 and 19.5 s; to a file forced once 32.6 s (a journal fsync up to
+4.7 s), forced every 8 MiB 23.5 s, forced every 8 MiB only while the journal writes 20.3 s; pacing the merge's writes
+(a token bucket, as RocksDB's rate limiter) at 32 and 64 MB/s gave 23.8 and 23.3 s, no gain, and was left out. Writes
+at 256 clients with a merge every 10 s or so (above) do not see the difference; a sustained bulk load does, and more
+as the base grows. The remedy is fewer bytes a change: more than one level on disk (theory, section 9), or a higher
+merge threshold (n/8 halves the bytes and doubles the delta's memory).
 
 ## Milestone 2 at 10 million facts
 

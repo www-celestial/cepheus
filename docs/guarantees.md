@@ -5,7 +5,8 @@ it. The tests are in `test/`; `tools/test.sh` runs them all.
 
 ## The faults
 
-- **F1 process crash**: the process stops at any instruction (`kill -9`, a bug, the OOM killer).
+- **F1 process crash**: the process stops at any instruction (`kill -9`, a bug, the OOM killer). What it wrote and
+  did not force stays in the page cache: readable by the next process, and lost at a later power loss.
 - **F2 power loss**: the machine stops at any moment. Data not covered by a finished `fsync` may be lost, kept, kept
   in any order sector by sector (512 bytes), or torn inside a sector; a file created, renamed or removed without an
   `fsync` of its directory may lose that change. Changes of names in one directory survive as a prefix, in order.
@@ -81,10 +82,22 @@ after `write` returned group n, every view taken afterwards has a number ≥ n; 
 changes old ones. The published view is replaced by one atomic store after the frame's `fsync`, before the clients
 are answered (`Engine.commit`), and OCaml's atomics order the store before the answer.
 
-*Tested by* the bank test (reader domains check every view they take: constant total, numbers never go back) and the
-simulation (the published view equals the model at its number, which is ≥ the last confirmed).
+*After a recovery too.* The state a recovery opens on is published at once, so it must be durable: but a process killed
+between the `pwrite` and the `fsync` of a frame, or between the creation of a segment and the `fsync` of its directory,
+leaves them in the page cache, where recovery reads them and a later power loss takes them back. Recovery therefore
+forces the newest segment and the journal's directory before it replays anything (`Journal.recover`), and open forces
+the database's directory, unless the last process closed cleanly: `close` leaves a marker (`DIR/closed`) once every
+frame and name is durable, and only if no fsync failed; an open removes it before it writes anything. So a marker
+seen means that no process wrote since a clean close, or that a power loss came after the writes, and a power loss
+leaves nothing in the page cache; the marker's own creation and removal need no fsync (lost, they only make the next
+open force). PostgreSQL keeps the same state in `pg_control` (shut down, or in production). (Found by the simulation once it could kill a process without a power loss; mutation check:
+without the segment's fsync, 9 of 300 seeds fail, without the directory's, 5.)
 
-*Background merges* keep G5: a merge builds a new base from a view and replays the logged groups after it, and the
+*Tested by* the bank test (reader domains check every view they take: constant total, numbers never go back) and the
+simulation (the published view equals the model at its number, which is ≥ the last confirmed; after a recovery, the
+recovered number counts as confirmed, and process deaths are followed by power losses).
+
+*Background merges* keep G5: a merge writes a new base from a view and replays the logged groups after it, and the
 writer switches to it only when nothing is in flight and the new view holds exactly the same groups; the published
 view is replaced by one atomic store. *Tested by* the bank test, which merges every few dozen changes (156 merges in
 4 s) and compares the facts of the old and the new view at every switch, and by the kill -9 rounds with frequent
@@ -123,18 +136,18 @@ question, and the database falls back on an older snapshot or on the journal; a 
 time it is read from the disk (also when it was damaged after the open), and the read fails: `find` and `fold` return
 `Damaged`, `get`, `values` and `things` raise `Unreadable`, a write that needed the page fails. Never a wrong answer.
 
-*Proof.* A snapshot is written only from a compacted view with nothing in flight, with the journal position of its
-last group; it is written beside, forced, renamed, and its directory forced. Loading checks the header CRC, the CRC of
-the checksum table, then the order and bounds of every offset table (`Snapshot.check_and_build`). Every page goes
-through `Pages.fill`, which checks its CRC-32C before it enters the frame table: no other path puts a page there.
-Every access to a base is bounds-checked (the frame table, then the page), so a read never leaves the base's bytes.
-For random damage of a page, CRC-32C misses it with probability 2⁻³²; it detects every burst of up to 32 bits
-(Castagnoli, Bräuer, Herrmann 1993).
+*Proof.* A snapshot is the file of a merge (G12): the merged facts of a view, with the journal position of the last
+durable frame before the view's group; replay starts there and skips the groups the snapshot holds. Loading checks the
+header CRC, the CRC of the checksum table, then the order and bounds of every offset table
+(`Snapshot.check_and_build`). Every page goes through `Pages.fill`, which checks its CRC-32C before it enters the
+frame table: no other path puts a page there. Every access to a base is bounds-checked (the frame table, then the
+page), so a read never leaves the base's bytes. For random damage of a page, CRC-32C misses it with probability 2⁻³²;
+it detects every burst of up to 32 bits (Castagnoli, Bräuer, Herrmann 1993).
 
-*Tested by* the simulation (snapshots at random moments, crashes inside their writing, flips in snapshot files) and
-`test/unit.ml` (round trip; a snapshot of another database is refused; a flipped snapshot is set aside; a base three
-times larger than the cache, read by three domains, with a bit flipped after the open: the questions answer right or
-return `Damaged`, and exactly the damaged page fails).
+*Tested by* the simulation (snapshots and merges at random moments, crashes inside their writing, flips in snapshot
+files) and `test/unit.ml` (round trip; a snapshot of another database is refused; a flipped snapshot is set aside; a
+base three times larger than the cache, read by three domains, with a bit flipped after the open: the questions answer
+right or return `Damaged`, and exactly the damaged page fails).
 
 ## G8 Forks
 
@@ -190,3 +203,38 @@ shared by 20,000 invoices, a hot tag in the delta, a range of 10 scores among 20
 
 *Tested by* `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
 ranges) compared with a naive evaluator over all facts, on a base with a delta and on a compacted base.
+
+## G12 Merges are atomic
+
+*Promise.* After a crash at any point of a merge (F1, F2, F4), the database opens on the old base or on the new one,
+whole, never a mix; its state is the replay of the journal to the recovered group (G7); no snapshot has to be set
+aside and no merge's file is left. A merge needs no more memory than the cache, a few page buffers and 21 bytes a
+page of the new base (see [theory](theory.md), section 8).
+
+*Proof.* (a) A merge writes its file under a temporary name and forces it before the rename: a name, durable or not,
+never points at bytes that are not on the disk. (b) The rename replaces atomically; under F2 a prefix of the
+directory's name changes survives: the new name, or the old one. (c) A file gets its name only once its group is
+durable in the journal: the install runs with nothing in flight (the writer waited for the syncer) and only if no
+fsync failed (G10); the merges a recovery makes while it replays a long tail come after it forced the journal (G5).
+The journal is never cut below a snapshot: a journal that ends before the newest snapshot's group lost durable frames,
+and the database refuses to open (G6). (d) The older snapshots are removed only after the fsync of the directory that
+made the new name durable, so one valid snapshot is always named. (e) Open removes the `.tmp` files of interrupted
+merges. A failed merge (a disk error while writing) removes its file and the writer goes on with the old base; the
+next merge waits until the delta has grown by another threshold.
+
+*Tested by*
+- the exhaustive enumeration (`test/exhaustive.ml`, part 4): at every mutating disk call of a merge (a merge now; one
+  begun from a view ahead of the disk and installed two frames later; the merges of a recovery replaying a long
+  tail), every crash state: a process death (then a power loss), and power losses keeping each prefix of each
+  directory's name changes, with the unforced bytes lost, kept, torn, or kept one sector in two: 393 crash points,
+  3,918 states, each recovered and checked (state of the reference, every confirmed group, old or new base, nothing set
+  aside, no `.tmp` left);
+- the simulation (merges begun ahead of the disk and installed steps later, abandoned after a failed fsync; process
+  deaths; crashes inside any disk call of a merge; a merge's file forced every 8 pages);
+- the kill -9 rounds (merges every 50 changes; the rounds that kill inside a merge are counted);
+- `spec/Merge.tla`, checked by TLC (`tools/tlc.sh`): the invariants NoMix, SnapshotInJournal, PublishedDurable,
+  AckedDurable over 3.8 million states; each of its four rules (force before the rename, install only when durable,
+  force the journal at recovery without a marker, a marker only if no fsync failed) removed in turn gives a
+  counterexample in 7 steps;
+- `test/unit.ml`: a merge of a base 8 times the cache keeps every fact, holds at most 5 pages open, and never more
+  pages resident than the cache.

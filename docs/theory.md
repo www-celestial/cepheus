@@ -205,17 +205,70 @@ orders rows by thing), so the triangle question reads random pages of all 120 MB
 each. A third order of the rows, by property then thing (as Hexastore [11] and RDF-3X [12] keep), would make one
 property of many things local; it costs 10 bytes a fact more. To decide on measurements of real workloads.
 
-**What a merge still costs.** A merge builds the new base in memory (arrays for its sort, then its pages) beside the
-old one, and the pages of both live on the OCaml heap, where the collector lets free space reach 120 % of the live
-data: write runs with merges peaked at 1.8 to 3.3 GB at 10 M facts, against 1.7 to 2.5 GB with milestone 1's mapped
-base (six runs of 10 s at 256 clients each). The base a merge replaces leaves the cache at once (`Pages.drop`); the
-remaining cure is a merge written straight to a file, page by page, as a sorted run of an LSM tree [1]: then a merge
-needs no more memory than the cache.
+**What a merge cost, until it was written to a file.** A merge built the new base in memory (arrays for its sort,
+then its pages) beside the old one, and the pages of both lived on the OCaml heap: write runs with merges peaked at
+1.8 to 3.3 GB at 10 M facts. Section 8 is the cure.
 
-## 8. What comes next, and why
+## 8. Merges written to a file
 
-- **Larger than memory, the rest** (design, section 15): merges written straight to a file as sorted runs (LSM [1],
-  with per-level Bloom filters as in Monkey [5]), so that a merge needs no more memory than the cache; a third order
+A merge folds the delta (level 0: persistent maps in memory) into the base (level 1: a snapshot file). It is the
+rolling merge of a two-component LSM-tree [1], C0 into C1. Both inputs are already sorted in the order of every
+section of the base (by thing: thing, property, value; by property: property, value, thing; the texts by id and by
+their bytes), so each section of the new base is the merge of two sorted runs, made in one pass with one cursor in
+each (`Store.iter_facts`, `Store.iter_prop_sorted`, `Store.iter_texts_sorted`): O(n + d) comparisons for n facts in
+the base and d changes in the delta, and no sort.
+
+**Streaming.** The new base is written in three passes, in the order of the file: by thing (offsets, properties,
+values), by property (offsets, values, things, distinct counts), the dictionary (offsets, bytes, sorted ids). In a
+pass, the streams of its sections advance side by side, each in its own region of the file. A 16 KiB page is complete
+once all its bytes are written (two sections may share one) and goes out at once: its CRC-32C, a `pwrite` at its
+place, and the cache, which admits it cold (in S3-FIFO's small queue, not hot: a merge's output is a scan, kept only
+if it is read before the queue reaches it). Then the checksum table, the header, an fsync, and the install (G12).
+
+**The memory bound.** Let C be the cache's capacity and P the pages of the new base. During a merge the process holds,
+beyond what it held before (the delta, the log of the groups written meanwhile):
+- the pages of the old base it reads and of the new base it writes, all counted by the cache: at most C, by
+  construction (a page enters only through `Pages.fill` or `Pages.admit`, which make room first);
+- the pages being filled: one under each stream's head and the ones two sections share, at most 5 measured (the
+  bound is 2 per stream of a pass, 8);
+- the tables of the new base: 4 bytes of CRC, two 8-byte slots (frame and hot) and one count a page, 21 bytes for 16
+  KiB, 0.13 % of the base.
+
+So M_merge ≤ C + 8 × 16 KiB + 21 P, independent of the base's size but for the 0.13 %. The merge in memory it replaces
+held 7 words a fact for its sort (560 MB at 10 M facts) and the whole new base outside the cache. Measured
+(benchmarks): with the whole base in a 1 GiB cache, a merge of the 10 M base and a delta of 400,000 facts takes the
+process from 412 MB to a peak of 651 to 656 MB (the new base's 245 MB of pages), against 1,222 to 1,450 MB for the
+merge in memory; with a 32 MB cache, from 63 MB to a peak of 99 MB, under a 128 MB cap that kills the merge in
+memory.
+
+**What it costs in writes.** A merge starts when the delta holds d > max(c, n/16) changes (c = 200,000), and writes
+the whole base: n + d facts for d changes, so each change costs n/d + 1 ≤ 17 facts of writes once n/16 > c (the size
+ratio r = 16 of a two-component LSM-tree, whose amortized merge cost is r + 1 [1]; a leveled tree of L levels of
+ratio T pays O(T L), a tiered one O(L), with slower reads [61]). At 10 M facts, a merge every 625,000 changes writes
+the 245 MB of the base, about 400 bytes a change. Those writes compete with the journal's fsyncs, which every client
+waits for. Forced once at the end, a merge's 100 to 245 MB of dirty pages made a journal fsync wait seconds (a load of
+3 M facts: the journal's fsync p99.9 1.6 s, max 4.7 s; the load 32.6 s against 19.5 s with merges in memory). Forced
+every 8 MiB as it is written (what RocksDB's `bytes_per_sync` does [63]), the tail fell to p99.9 0.43 s, max 1.0 s,
+and the load to 23.5 s. Each fsync costs a merge time, though (a merge of 10 M facts: 2.3 s forced once, 9 s forced
+every 8 MiB), so a merge forces in steps only while the journal is writing, and once otherwise. A sustained load still
+pays for the bytes: 10 M facts load in 135 to 153 s against 63 to 79 s with merges in memory (benchmarks); pacing the
+merge's writes (a token bucket, as RocksDB's rate limiter) did not help on this disk. Writes at 256 clients with a
+merge every 10 s or so show no difference (19,388 against 19,126 groups a second, medians of 12 runs).
+
+**Crash safety.** See G12 in [guarantees](guarantees.md): the file is forced before its rename, it is named only
+once its group is durable in the journal, the older snapshots go only after the new name is durable, and recovery
+forces what a killed process left in the page cache before it replays. `spec/Merge.tla` models the protocol with the
+journal abstracted to its written and durable groups, F1, F2, F4 and the clean-close marker that spares an open its
+fsyncs; TLC checks four invariants over 3.8 million states, and each of the four rules, removed alone, gives a
+counterexample in 7 steps. This is the protocol ALICE [46]
+found many applications get wrong (a rename before the fsync of the data, a file trusted before its directory is
+forced).
+
+## 9. What comes next, and why
+
+- **Larger than memory, the rest** (design, section 15): more than one level on disk, so that a change costs fewer
+  bytes of merges than the 17 facts of one level (tiering or leveling [61], per-level Bloom filters as in Monkey [5];
+  scheduling merges around the clients as SILK [62] does, where a plain rate limit did not help here); a third order
   of the rows (property, thing) for workloads that read one property of many things under memory pressure.
 - **Compression of runs**: delta and varint, then PFOR (Zukowski et al. [13], Lemire and Boytsov [13b]); an order-
   preserving dictionary rebuilt at each merge (Binnig et al. [13c]) for ranges over texts.
@@ -318,3 +371,8 @@ needs no more memory than the cache.
 59. F. J. Corbató. A Paging Experiment with the Multics System. MIT Project MAC Report MAC-M-384, 1968.
 60. G. Castagnoli, S. Bräuer, M. Herrmann. Optimization of Cyclic Redundancy-Check Codes with 24 and 32 Parity Bits.
     IEEE Transactions on Communications 41(6), 1993.
+61. C. Luo, M. J. Carey. LSM-based Storage Techniques: A Survey. The VLDB Journal 29(1), 2020.
+62. O. Balmau, F. Dinu, W. Zwaenepoel, K. Gupta, R. Chandhiramoorthi, D. Didona. SILK: Preventing Latency Spikes in
+    Log-Structured Merge Key-Value Stores. USENIX ATC 2019.
+63. S. Dong, M. Callaghan, L. Galanis, D. Borthakur, T. Savor, M. Strum. Optimizing Space Amplification in RocksDB.
+    CIDR 2017; and the RocksDB options `bytes_per_sync` and `rate_limiter` (RocksDB wiki, "Rate Limiter").
