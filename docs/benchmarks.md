@@ -65,6 +65,7 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `bench.exe cachesim TRACE` | LRU, CLOCK, 2Q, ARC, SIEVE, S3-FIFO, W-TinyLFU and Belady's optimum on a recorded trace |
 | `bench.exe stats NAME [us]` | the summary of numbers read on stdin, one a line, in ms (with `us`: latencies in µs, into a histogram): how the other sides' times go through the same statistics |
 | `bench.exe cpu DIR N` | the writer's work alone: N 5-fact groups into a fork of the database (no disk) |
+| `bench.exe crc` | CRC-32C alone on 24 bytes, 4 KiB, 16 KiB, 1 MiB and 96 MiB from an odd offset: the time of a call and MB/s, median and 95 % interval over `RUNS` runs |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | the sale of seats of the [case](case-seats.md): `BUYERS` threads sell out a hall of SEATS seats, the time and what went wrong |
@@ -82,6 +83,81 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## CRC-32C by the processor (2026-11-08)
+
+The checksum of every frame and every page was computed by tables in OCaml (slicing by 8); it is now computed by the
+processor's own instruction, `crc32` of SSE4.2 on x86-64 ([architecture](architecture.md#the-journal-a-write-ahead-log)),
+through one C file. Measured against 51cf32d, the commit before it, both built in release, alternated in one session
+under the heavy lock, every process in a 3 GB scope.
+
+**The checksum alone.** `bench.exe crc` times the new code; the old one was timed by the same loop in one program
+linking both, alternated with the new run by run: 21 runs a size, each long enough to last 20 ms, from an odd offset
+(3) so that no length is aligned for free.
+
+| bytes | tables in OCaml (51cf32d) | the instruction | ratio, median [95 % interval] |
+|---:|---:|---:|---:|
+| 24 (a frame's header) | 918 MB/s (0.026 µs) | 2,945 MB/s (0.008 µs) | 3.21 [3.18, 3.26] |
+| 4,096 | 1,166 MB/s (3.51 µs) | 9,585 MB/s (0.43 µs) | 8.19 [8.12, 8.25] |
+| 16,384 (a page) | 1,174 MB/s (13.96 µs) | 9,419 MB/s (1.74 µs) | 8.01 [8.00, 8.11] |
+| 1 MiB | 1,171 MB/s (895 µs) | 9,353 MB/s (112 µs) | 7.98 [7.92, 8.00] |
+| 96 MiB (a large group's frame) | 1,133 MB/s (88.8 ms) | 8,561 MB/s (11.8 ms) | 7.59 [7.49, 7.63] |
+
+**Beside the giants**, the same polynomial on the same buffers and machine, the same method (median of 21 runs after
+warm-up):
+
+| bytes | Cepheus | Java 21 `java.util.zip.CRC32C` | Go 1.26 `hash/crc32`, Castagnoli table |
+|---:|---:|---:|---:|
+| 24 | 2,945 MB/s | 3,890 MB/s | 2,436 MB/s |
+| 4,096 | 9,585 MB/s | 21,993 MB/s | 25,003 MB/s |
+| 16,384 | 9,419 MB/s | 23,357 MB/s | 25,832 MB/s |
+| 1 MiB | 9,353 MB/s | 26,359 MB/s | 23,155 MB/s |
+| 96 MiB | 8,561 MB/s | 12,745 MB/s | 12,015 MB/s |
+
+Java and Go are 2.3 to 2.8 times faster from 4 KiB to 1 MiB, and 1.4 to 1.5 times at 96 MiB, where all three come
+near the speed of memory. Go splits the buffer in three, runs the instruction on the three parts at once and
+combines the three CRCs at the end (`castagnoliSSE42Triple`, `src/hash/crc32/crc32_amd64.go`); Java's is compiled by
+HotSpot into machine code of its own (the `UseCRC32CIntrinsics` flag, on by default). Cepheus' code is one chain of
+8-byte steps, each waiting for the result of the one before, so its speed is the instruction's latency, not its
+throughput: the processor could start a step every cycle, but a step's result comes three cycles later (Go's source
+says the same, after Intel's paper on the instruction). Three chains would gain about 1 µs a page read from the disk
+(a cold read costs 41 to 91 µs) and about 25 ms a load: not done, the smallest code first. On a frame's 24-byte
+header Cepheus is faster than Go and slower than Java. PostgreSQL 18 computes its CRC-32C with the same
+instruction in one chain on this processor (`pg_comp_crc32c_sse42` in `src/port/pg_crc32c_sse42.c`), and by AVX-512
+(VPCLMULQDQ) on processors that have it, which this one does not. Python's and Node's standard libraries have no
+CRC-32C (their `zlib.crc32` is zlib's CRC-32, another polynomial).
+
+**End to end**, 9 rounds alternated (the order swapped each round): the 10 M load in 4 large groups (`GROUP=56818`)
+and its snapshot, then the open of the database it leaves (`bench.exe read DIR 10000000 none`: one run of 246 MB, which
+fits the cache, so every one of its 15,038 pages is read and checked at open); the 1 M load a group a client (64
+threads, `SNAPSHOT=0`) and the open of what it leaves (its runs and the journal's tail, 1,214 pages). Median [95 %
+interval, order statistics, 96.1 %]; the ratio is paired by round; the tests are two-sided.
+
+| | 51cf32d | the instruction | ratio | faster in | sign test |
+|---|---:|---:|---:|---:|---:|
+| 10 M facts, 4 large groups, until confirmed | 9.09 s [7.88, 11.68] | 9.43 s [8.18, 10.37] | 1.04 [0.79, 1.18] | 4 of 9 | p = 1 |
+| its snapshot | 1.98 s [1.33, 2.27] | 2.04 s [1.52, 2.65] | 1.07 [0.67, 1.52] | 4 of 9 | p = 1 |
+| **the open of that database** | 432 ms [389, 539] | **202 ms [197, 255]** | **0.49 [0.37, 0.60]** | 9 of 9 | p = 0.004 |
+| 1 M facts, a group a client, until confirmed | 10.24 s [9.37, 11.18] | 10.95 s [9.39, 12.70] | 1.05 [0.85, 1.24] | 4 of 9 | p = 1 |
+| the open of that database | 365 ms [356, 419] | 346 ms [339, 359] | 0.94 [0.82, 1.00] | 8 of 9 | p = 0.039 |
+
+The open of the 10 M database takes half the time: 15,038 pages × 12.2 µs saved a page is 0.18 s of the 0.23 s
+measured. The loads checksum about 330 MB, 0.29 s in OCaml and 0.04 s now; that 0.25 s is inside the disk's spread (the
+old binary alone took 7.44 to 13.19 s for the same load), and 9 rounds do not resolve it: no load got measurably faster
+or slower. A page read from the disk while answering (larger than memory) pays 1.74 µs for its check instead of
+13.96.
+
+**Start-up** of a program linking Cepheus (`bench.exe` without arguments: every module initialised, then exit), the
+spawn and wait timed 2,000 times a side, alternated: 2,039 µs for 51cf32d, +1.0 µs [−7.7, 7.7] with the new library
+alone, +9.9 µs [0.2, 18.4] (0.5 %) for the whole binary with its new `crc` command. The check of the processor is one
+C call; the table of 2,048 numbers the old code built at start is gone. A fresh copy of the same binary started
+17.8 µs [9.4, 28.3] slower than the file the build left, so these compare binaries where the build left them.
+
+**The engine fixes measured again** (the section below), on a quiet machine: 2f37b23 against 51cf32d, the same loads
+and opens, 9 rounds alternated. 10 M in 4 large groups: 9.68 s [8.42, 11.47] against 8.73 s [8.09, 9.61] (ratio 0.97
+[0.77, 1.12], slower in 4 of 9, p = 1); its open 396 against 403 ms (1.02 [0.94, 1.26], p = 0.51); 1 M a group a
+client 9.21 against 9.87 s (1.01 [0.85, 1.16], p = 1); its open 364 against 368 ms (1.00 [0.97, 1.14], p = 0.51). The
+fixes cost nothing measurable: the 13.12 s below was the disk.
 
 ## The engine fixes (2026-11-08), against the commit before them
 

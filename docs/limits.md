@@ -92,7 +92,8 @@ defaults, and the cache's size (`set_cache`).
 | file descriptors | one for the journal's current segment, one for each run file a live view holds (closed when no view holds the run any longer and the garbage collector frees it) | `Snapshot.check_and_build` |
 | run files | 64-bit little-endian machines (the in-memory layout); the journal is portable | [formats](formats.md) |
 | durability | relies on `fsync` meaning durable, for files and for directories (Linux and its usual file systems) | [operations](operations.md#disks) |
-| OCaml | 5 (domains), with `unix` and `threads`; no C | `src/dune` |
+| OCaml | 5 (domains), with `unix` and `threads`, and its C compiler for `src/crc32c_stubs.c` | `src/dune` |
+| processor | x86-64 with SSE4.2 (part of the x86-64-v2 level; Intel since Nehalem, 2008, AMD since Bulldozer, 2011), or arm64 with the CRC32 instructions (optional in ARMv8.0, required from ARMv8.1), on Linux or macOS; another one is refused when the program starts, another architecture does not build | `src/crc32c_stubs.c` |
 
 ## Measurement tools
 

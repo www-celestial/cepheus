@@ -79,6 +79,23 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Castagnoli 1993]** G. Castagnoli, S. Brauer, M. Herrmann. Optimization of Cyclic Redundancy-Check Codes with 24
   and 32 Parity Bits. *IEEE Transactions on Communications* 41(6), 883–892, 1993. https://doi.org/10.1109/26.231911
   — The CRC-32C polynomial (0x1EDC6F41, reflected 0x82F63B78) of every frame and page.
+- **[RFC 3720]** J. Satran, K. Meth, C. Sapuntzakis, M. Chadalapaka, E. Zeidner. Internet Small Computer Systems
+  Interface (iSCSI). *RFC 3720*, IETF, April 2004. https://doi.org/10.17487/RFC3720
+  — The CRC-32C as a standard defines it (section 12.1: the generator polynomial 0x11EDC6F41, citing [Castagnoli 1993];
+  the bits complemented before and after), and five examples with their CRCs (appendix B.4), which `test/unit.ml`
+  checks.
+- **[Intel SDM]** Intel. Intel 64 and IA-32 Architectures Software Developer's Manual, volume 2A, "CRC32 — Accumulate
+  CRC32 Value". https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+  — The instruction Cepheus computes its CRC with on x86-64: the polynomial 11EDC6F41H, 1, 2, 4 or 8 bytes a step,
+  present when CPUID.01H:ECX.SSE4_2 (bit 20) is set, an invalid-opcode fault otherwise.
+- **[Arm ARM]** Arm. Arm Architecture Reference Manual for A-profile architecture (DDI 0487), the instructions CRC32CB
+  to CRC32CX. https://developer.arm.com/documentation/ddi0487/latest; and Arm C Language Extensions (ACLE), "CRC32
+  intrinsics". https://arm-software.github.io/acle/main/acle.html
+  — The arm64 side: the same polynomial, optional in Armv8.0 and mandatory from Armv8.1 (FEAT_CRC32), reached from C
+  by `__crc32cd` and `__crc32cb`; Linux tells a program whether the processor has them (`HWCAP_CRC32`).
+- **[x86-64 psABI]** System V Application Binary Interface, AMD64 Architecture Processor Supplement.
+  https://gitlab.com/x86-psABIs/x86-64-ABI
+  — Its table "Micro-Architecture Levels": x86-64-v2 is CMPXCHG16B, LAHF-SAHF, POPCNT, SSE3, SSE4_1, SSE4_2 and SSSE3.
 - **[Koopman 2002]** P. Koopman. 32-Bit Cyclic Redundancy Codes for Internet Applications. *DSN* 2002, 459–468.
   https://doi.org/10.1109/DSN.2002.1028931
   — What CRC-32C detects for certain (its Hamming distance by length) and with what probability the rest escapes.
@@ -298,6 +315,14 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Kingsbury 2020]** K. Kingsbury, P. Alvaro. Elle: Inferring Isolation Anomalies from Experimental Observations.
   *PVLDB* 14(3), 268–280, 2020. https://doi.org/10.14778/3430915.3430918
   — Jepsen's checker of isolation; the bank test follows Jepsen's, Elle comes with replication.
+
+- **[Serebryany 2012]** K. Serebryany, D. Bruening, A. Potapenko, D. Vyukov. AddressSanitizer: A Fast Address Sanity
+  Checker. *USENIX ATC* 2012, 309–318. https://www.usenix.org/conference/atc12/technical-sessions/presentation/serebryany
+  — The memory checker the C file of the CRC is fuzzed under: a read one byte outside its block stops the run.
+- **[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
+  https://llvm.org/docs/LibFuzzer.html
+  — The fuzzer of `test/fuzz_crc32c.c`: inputs mutated toward new paths of the code, every one checked against the
+  CRC computed bit by bit.
 
 ## Method: solving and measuring
 

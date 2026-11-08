@@ -43,9 +43,12 @@ whole groups only, so a group is in one frame or in none.
 
 **CRC.** A **cyclic redundancy check** is a short checksum computed from a block of bytes: if any byte of the block
 changes, the CRC computed again differs, except with a tiny probability. Cepheus uses CRC-32C (the Castagnoli
-polynomial, written in OCaml, about 1.1 GB/s here): it detects every burst of errors of up to 32 bits, every error of
-up to 3 bits in frames of realistic size, and lets other random damage through with probability 2⁻³² (Koopman 2002).
-The header, the body and every page of a run file carry one.
+polynomial, Castagnoli et al. 1993, the one of iSCSI, RFC 3720): it detects every burst of errors of up to 32 bits,
+every error of up to 3 bits in frames of realistic size, and lets other random damage through with probability 2⁻³²
+(Koopman 2002). The header, the body and every page of a run file carry one. The processor computes it: x86-64 has
+an instruction for this very polynomial (`crc32`, part of SSE4.2), arm64 has two (`crc32cx` for 8 bytes, `crc32cb` for
+one). OCaml cannot emit them, so one small C file does (`src/crc32c_stubs.c`), behind the OCaml module `Crc32c`, at
+9.4 GB/s on a 16 KiB page here instead of 1.17 for the table code in OCaml it replaced, 8 times faster ([benchmarks](benchmarks.md#crc-32c-by-the-processor-2026-11-08)).
 
 **Group commit.** An fsync costs the same for one group as for a thousand, so the groups that arrive while one fsync
 runs wait together and share the next one: that is **group commit**. The writer works in two stages, in a domain of its

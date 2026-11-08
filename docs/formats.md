@@ -3,7 +3,11 @@
 Every file of a database, byte by byte, as `src/journal.ml`, `src/group.ml`, `src/value.ml`, `src/codec.ml` and
 `src/snapshot.ml` write it.
 
-All integers little-endian. CRC is CRC-32C (Castagnoli), as an unsigned 32-bit number.
+All integers little-endian. CRC is CRC-32C (Castagnoli), as an unsigned 32-bit number: the iSCSI checksum of RFC 3720
+(section 12.1), polynomial 0x1EDC6F41 (0x11EDC6F41 with its x³² term, as the RFC writes it), computed bit-reflected
+(0x82F63B78), starting from 0xFFFFFFFF and complemented at the end; the CRC of the 9 bytes `123456789` is 0xE3069283,
+and RFC 3720's examples (appendix B.4) give the values it prints, read as little-endian numbers (`test/unit.ml` checks
+them). The processor's own instruction computes it (`src/crc32c_stubs.c`); the format does not depend on how.
 
 ## `DIR/cepheus`
 

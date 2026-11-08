@@ -58,7 +58,11 @@ small cases: it lists every state the disk can be in after a crash and recovers 
 study (Pillai et al. 2014) pushed to every case. **Property-based testing** (QuickCheck, Claessen and Hughes 2000)
 checks a property on many random inputs against a reference model written independently.
 
-1. **Unit and property tests** (`test/unit.ml`): CRC-32C against known values; codecs round trip on extreme values;
+1. **Unit and property tests** (`test/unit.ml`): CRC-32C against the check value and the five examples of RFC 3720
+   (appendix B.4), and against an oracle, the table code in OCaml it replaced: every length up to 72 bytes at every
+   offset up to 15, 5,000 random lengths up to 1 MiB at random offsets, the edges of its 1 MiB pieces up to 3 MiB,
+   each one whole and `extend`ed over random cuts in two and three, and the bounds refused (an offset plus a length
+   that overflows too); codecs round trip on extreme values;
    a group cut at every byte never decodes; 300 random sequences of writes against a reference semantics written
    independently (a set of facts); 300 random databases × 15 random questions against a naive evaluator, each within
    the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`); costs: questions
@@ -114,6 +118,27 @@ new size made durable at random, as ext4 may) or undone (Btrfs, `Sim_disk.create
 only the sectors written since, so a sector marked clean stays off the disk until it is written again or a power loss
 resolves it. Until this was modelled, the simulated fsync copied every byte in memory to the disk, and the hole G13
 closes went unseen.
+
+### The C file, fuzzed
+
+`src/crc32c_stubs.c` is the only C of Cepheus. Besides the property test above, which runs it through OCaml, it is
+**fuzzed** on its own (`test/fuzz_crc32c.c`, not part of dune's build): libFuzzer (LLVM's fuzzer) feeds it inputs it
+mutates to reach new paths, under AddressSanitizer (a read outside the bytes stops the run) and
+UndefinedBehaviorSanitizer; each input is a CRC to extend from, an offset, a length, a cut and the bytes, kept within
+the bytes as `Crc32c` checks before every call, and the result is compared with the definition computed bit by bit,
+whole and cut in two. Run it with clang:
+
+```
+clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -I "$(ocamlfind ocamlc -where)" \
+  test/fuzz_crc32c.c src/crc32c_stubs.c -o fuzz_crc32c && ./fuzz_crc32c -max_len=65536 -max_total_time=300
+```
+
+On the test machine (2026-11-08, clang 23.1.4): 90,126,874 inputs in 301 s, then 38,048,578 in 121 s with long
+inputs from the start (`-len_control=0`), then 28,944,296 in 121 s from inputs of 1 to 64 KiB, then 632,422 in 61 s
+kept at up to 64 KiB (`-reduce_inputs=0 -shrink=0`): no failure. Two broken copies of the file, one reading a byte
+past the end and one wrong on a 3-byte tail, were caught in under a second each: the harness can fail. The tests and
+the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `getauxval`) was compiled for arm64
+(clang 23, `--target=aarch64-linux-gnu`) but has not yet run on an arm64 processor.
 
 ## Not yet
 

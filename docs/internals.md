@@ -116,7 +116,7 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 |---|---|
 | `Codec.put_varint`, `put_int`, `put_string`, `put_u64` | LEB128 varints (an int ≥ 0 in 1 to 9 bytes), zigzag ints, length-prefixed strings, 8 bytes little-endian |
 | `Codec.reader`, `get_varint`, `get_int`, `get_byte`, `get_string`, `get_u64`, `at_end`, `exception Short` | a bounded reader over bytes; every read past the end raises `Short` |
-| `Crc32c.bytes b off len`, `Crc32c.extend crc b off len`, `Crc32c.string s` | CRC-32C (`extend`: the CRC of the bytes whose CRC is `crc` followed by these, for a frame checked by pieces), reflected polynomial 0x82F63B78, slicing by 8, in OCaml (about 1.1 GB/s here) |
+| `Crc32c.bytes b off len`, `Crc32c.extend crc b off len`, `Crc32c.string s` | CRC-32C (`extend`: the CRC of the bytes whose CRC is `crc` followed by these, for a frame checked by pieces), reflected polynomial 0x82F63B78, by the processor's instruction: the module checks the bounds (`Invalid_argument "Crc32c.extend"` otherwise), then calls `src/crc32c_stubs.c` by pieces of at most 1 MiB, so that another domain asking for a collection waits at most about 0.1 ms (a C call never stops for the GC); about 9 GB/s here. Its initialisation fails with `Failure` on a processor without the instruction |
 | `Histogram.create`, `record`, `merge_into`, `percentile h q`, `total`, `max`, `mean` | log-linear buckets as HdrHistogram: exact below 256, then 128 a power of two; a percentile is rounded up to its bucket's highest value, never above the largest recorded |
 | `Rng.make`, `copy`, `next`, `int r n`, `bool`, `chance r p`, `pick`, `split` | SplitMix64 (Steele, Lea, Flood 2014): the same seed gives the same numbers on every machine; not for cryptography |
 

@@ -36,8 +36,9 @@ the usual one, both are given.
 - **chain** (of runs) — runs that rest on one another from 0: each holds the groups after the last group of the one
   below it. An open takes the chain that reaches the newest group with the fewest runs. [architecture](architecture.md#runs-on-disk)
 - **checksum**, **CRC**, **CRC-32C** — a short number computed from bytes, which changes if they change; CRC-32C (the
-  Castagnoli polynomial) detects every burst of up to 32 bits and lets random damage through with probability 2⁻³².
-  [architecture](architecture.md#the-journal-a-write-ahead-log)
+  Castagnoli polynomial, the checksum of iSCSI, RFC 3720) detects every burst of up to 32 bits and lets random damage
+  through with probability 2⁻³². Cepheus computes it by the processor's own instruction (SSE4.2 on x86-64, CRC32 on
+  arm64). [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **clean close**, **marker** — `close` leaves `DIR/closed` once everything is durable, and the next open can skip the
   fsyncs a recovery needs. [operations](operations.md#opening-and-recovery)
 - **CLOCK** — an eviction policy that approximates LRU with one bit a page and a moving hand (Corbató 1968).
@@ -98,6 +99,11 @@ the usual one, both are given.
 - **frame** — the unit of one write and one fsync in the journal: a header, the groups, a trailer.
   [formats](formats.md#journal-segment-dirjournalfirst-group-20-digitsseg)
 - **fsync** — the system call that returns once a file's bytes are on the disk.
+- **fuzzing**, **libFuzzer**, **sanitizer** — fuzzing runs a function on millions of inputs that a program mutates
+  to reach new paths in the code, and stops at the first that fails; libFuzzer is LLVM's fuzzer. A sanitizer is a
+  check the compiler adds to every memory access (AddressSanitizer: a read or write outside its block) or to every
+  operation C leaves undefined (UndefinedBehaviorSanitizer). The C file of the CRC is fuzzed with both.
+  [testing](testing.md#the-c-file-fuzzed)
 - **galloping search** (exponential search) — a search that tries 1, 2, 4, 8... places ahead before halving, so that
   finding a place k steps away costs O(log k) (Bentley and Yao 1976); a merge places texts this way.
   [theory](theory.md#8-merges-written-to-a-file)
@@ -113,6 +119,9 @@ the usual one, both are given.
   journal is one, in group order.
 - **index word** — the 64-bit form of a value in the indexes: the value itself, or a dictionary number for texts and
   floats; what `fold` gives, and `decode` turns back into the value. [api](api.md#questions)
+- **instruction** (of the processor), **intrinsic** — one operation the processor executes; an intrinsic is a C
+  function that the compiler turns into one given instruction (`_mm_crc32_u64` into `crc32` on x86-64, `__crc32cd`
+  into `crc32cx` on arm64). OCaml's compiler has none for these, hence the C file. [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **isolation** — what one transaction can see of the others running at the same time.
   [concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)
 - **journal** — Cepheus' write-ahead log: segments of frames of groups. [architecture](architecture.md#the-journal-a-write-ahead-log)
@@ -193,6 +202,11 @@ the usual one, both are given.
   meanwhile (first committer wins); it lets write skew through.
 - **space amplification** — disk space used over the size of the data: the chain, the fallback bottom run, and during
   a full merge a new copy of the base, about three times the base. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
+- **SSE4.2**, **x86-64-v2** — SSE4.2 is a set of instructions of x86-64 processors (Intel since Nehalem, 2008; AMD
+  since Bulldozer, 2011), among them `crc32`, which computes CRC-32C 8 bytes at a time; a program sees whether the
+  processor has it in bit 20 of a register the `cpuid` instruction fills. x86-64-v2 is the level of x86-64 that
+  includes it, with CMPXCHG16B, LAHF-SAHF, POPCNT, SSE3, SSSE3 and SSE4.1 (the table "Micro-Architecture Levels" of
+  the x86-64 psABI). Cepheus requires SSE4.2 only. [limits](limits.md#files-and-the-platform)
 - **strict serializability** — serializable in an order that respects real time. [guarantees](guarantees.md#g4-strict-serializability)
 - **structural sharing** — a new version of a persistent structure shares every untouched part with the old one.
 - **syncer** — the thread that writes and forces the frames, beside the writer.
