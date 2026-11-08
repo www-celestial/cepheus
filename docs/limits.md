@@ -9,7 +9,7 @@ defaults, and the cache's size (`set_cache`).
 | what | limit or default | where |
 |---|---|---|
 | thing numbers | from 65,536 up, dense, in the order things are made | `Schema.first_thing` |
-| things in a database | below 2³² (4,294,967,296): the by-property rows store a thing in 4 bytes. Not checked: a database must stay below it | `Store.layout` (`ave`) |
+| thing numbers | at most 2,147,483,647 (2³¹ − 1): a run stores a thing in 4 bytes of its by-property rows, and counts the things it holds in the high 32 bits of a rank table's 64-bit word, read back into OCaml's 63-bit `int` (31 bits). A group that would make a larger number is refused with `Invalid "thing numbers end at 2147483647: this group would make #N"`; nothing wraps | `Schema.last_thing`, `Resolve.resolve` |
 | property numbers | 16 to 65,535 (the by-thing rows store a property in 2 bytes): 65,520 properties a database; `declare` takes the lowest free one | `Schema.first_prop`, `eap` |
 | system properties | 1 `cepheus/name`, 2 `cepheus/type`, 3 `cepheus/many`, 4 `cepheus/unique`; 0 and 5 to 15 reserved | `Schema.system` |
 | `Int`, `Date`, `Money` | 63-bit signed integers: −2⁶² to 2⁶² − 1 | OCaml's `int` |
@@ -25,7 +25,7 @@ defaults, and the cache's size (`set_cache`).
 | what | limit or default | where |
 |---|---|---|
 | one group | its encoding must stay within 256 MiB (268,435,456 bytes, the largest frame body): a larger group is refused with `Invalid "a group of N bytes is over the frame limit of 268435456"`, and the writer goes on | `Journal.max_body`, `Engine.too_large` |
-| several groups at once | the groups resolved together go into one frame, whose body is not checked against 256 MiB at this version: several groups of 100 MiB and more sent at once by several threads can pass it, and the syncer then fails with an exception it does not catch. Send very large groups one at a time | `Engine.writer`, `Journal.append` |
+| several groups at once | the groups resolved together go into one frame only while its body stays within 256 MiB: a group that would pass it waits for the next frame, and a large group starts a frame of its own, so a frame never passes the limit | `Engine.frame_limit`, `Engine.prepare`, `Engine.writer` |
 | a large group | 20,000 operations or more, all `Add`: the faster path (arrays, sorts, a run merged at once); below, or on any doubt, the ordinary path | `Resolve.large_min` |
 | operations in a group | no other limit; every `Expect` is checked against the state before the group | |
 | a batch | up to 4,096 waiting writes resolved at once | `Engine.max_batch` |
@@ -87,7 +87,7 @@ defaults, and the cache's size (`set_cache`).
 
 | what | limit or default | where |
 |---|---|---|
-| processes | one per database: an exclusive `lockf` lock on `DIR/lock`, kept until close or death. Inside one process, a table of held locks keyed by the path as written: open a directory under one spelling only | `Disk.real.lock` |
+| processes | one engine per database: an exclusive `lockf` lock on `DIR/lock`, kept until close or death; inside one process, a table of the held locks keyed by the lock file's device and inode, so every path to the directory is one database | `Disk.real.lock` |
 | `DIR/cepheus` | 37 bytes: 17 of magic, 16 of id, 4 of CRC | `Engine.read_meta` |
 | file descriptors | one for the journal's current segment, one for each run file a live view holds (closed when no view holds the run any longer and the garbage collector frees it) | `Snapshot.check_and_build` |
 | run files | 64-bit little-endian machines (the in-memory layout); the journal is portable | [formats](formats.md) |

@@ -134,6 +134,13 @@ let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m) | P
 let fold v q ~init ~step ~merge =
   try Ok (Query.fold v q ~init ~step ~merge) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
 
+(* the type of variable x comes from the question, as find decodes its words *)
+let decode (v : view) (q : query) x w =
+  if x < 0 || x >= q.vars then invalid_arg (Printf.sprintf "Cepheus.decode: variable %d out of range" x);
+  match Query.types v q with
+  | ty -> Store.value v ty.(x) w
+  | exception Query.Bad m -> invalid_arg ("Cepheus.decode: " ^ m)
+
 exception Unreadable = Pages.Unreadable
 
 let set_cache = Pages.set_capacity

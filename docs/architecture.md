@@ -174,8 +174,9 @@ be idle (at most one fsync), replays the rest, renames the file to its name, for
 replaced, and switches both views to the new runs in one atomic store. A crash at any point leaves the runs before it
 or the runs after it, whole (G12). `snapshot` is the one full merge: the delta and every run into one run.
 
-**Memory.** A merge needs the cache, a few page buffers (at most 8, 5 measured) and 21 bytes a page of the new run
-(0.13 % of it): with a 32 MB cache, a merge of the whole 245 MB base ran in a process capped at 128 MB (peak 99 MB).
+**Memory.** A merge needs the cache, a few page buffers (at most 2 for each of the 8 streams of a pass, 7 measured)
+and 21 bytes a page of the new run (0.13 % of it): with a 32 MB cache, a merge of the whole 245 MB base ran in a
+process capped at 128 MB (peak 99 MB).
 
 **Write amplification** is the number of times a fact is written to the disk for each time a client writes it. Under
 leveling with ratio T, a fact is written about (T + 1)/2 = 2.5 times per level it enters (it enters a level at one of
@@ -205,7 +206,8 @@ ordinary things, one value per new thing for a one-valued property, many-valued 
 unique value already taken); on any doubt the group goes the ordinary way, which decides as always, errors included,
 so a fork, which always goes the ordinary way, answers as the database does (G8). The run file takes its name only
 once the group's frame is durable (G12); no background merge runs beside a large group. A group whose frame would pass
-256 MiB is refused (`Invalid`). Measured: 10 M facts in two large groups load in 7.04 s [6.52, 7.41] (10 runs),
+256 MiB is refused (`Invalid`), and a large group starts a frame of its own, so that the groups resolved together
+never make a frame over that limit. Measured: 10 M facts in two large groups load in 7.04 s [6.52, 7.41] (10 runs),
 SQLite 3.54 in 6.97 s [6.38, 8.00] alternated with it (a tie); the large group needs 2.5 to 3.2 GB at its peak, where
 SQLite needs 11 MB ([benchmarks](benchmarks.md#loading)).
 

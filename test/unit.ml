@@ -524,6 +524,196 @@ let () =
   C.check (List.length (Result.get_ok (find (view f) q)) = 3) "one triangle, three rotations";
   C.check (match find (view f) { q with vars = 4 } with Error (Invalid _) -> true | _ -> false) "an unused variable is invalid"
 
+(* ---- the engine bugs the documentation found, each with its test ---- *)
+
+(* a section that raises fails, and the others still run *)
+let guarded name f = try f () with e -> C.fail "%s: %s" name (Printexc.to_string e)
+
+let () =
+  section "G9: one engine per directory, whatever the spelling of its path";
+  guarded "spellings" @@ fun () ->
+  let dir = C.tmpdir "spell" in
+  let db = Result.get_ok (open_ dir) in
+  let link = dir ^ "-link" in
+  (try Sys.remove link with Sys_error _ -> ());
+  Unix.symlink dir link;
+  let base = Filename.basename dir and parent = Filename.dirname dir in
+  List.iter
+    (fun d ->
+      match open_ d with
+      | Error (Busy _) -> incr C.checks
+      | Ok d2 -> close d2; C.fail "%s opened beside %s: two engines on one directory" d dir
+      | Error e -> C.fail "open %s: %s" d (message e))
+    [ dir; dir ^ "/"; dir ^ "/."; parent ^ "//" ^ base; dir ^ "/../" ^ base; link; link ^ "/" ];
+  close db;
+  (* closed, it opens under any spelling, and the lock follows the directory, not the spelling *)
+  let db = Result.get_ok (open_ link) in
+  C.check (match open_ dir with Error (Busy _) -> true | Ok d -> close d; false | Error _ -> false)
+    "opened through a symlink, the directory is busy under its own name";
+  close db;
+  let db = Result.get_ok (open_ dir) in
+  close db;
+  Sys.remove link;
+  C.rmrf dir
+
+let () =
+  section "thing numbers stop at 2^31 - 1, the largest the run format holds";
+  guarded "thing numbers" @@ fun () ->
+  let last = (1 lsl 31) - 1 in
+  let f = fork empty in
+  let[@warning "-8"] (Ok [ n; l ]) = declare f [ prop "c/n" Tint; prop "c/l" Tlink ] in
+  let v = view f in
+  let at k = { v with next_e = k } in
+  let resolve v ops = Resolve.resolve v ~n:(v.group + 1) ~time:1 ~by:0 ~why:"" ops in
+  let invalid = function Error (Resolve.Invalid _) -> true | _ -> false in
+  C.check (invalid (resolve (at last) [ Add (-1, n, Int 1); Add (-2, n, Int 2) ])) "two new things from the last number: refused";
+  C.check (invalid (resolve (at (last + 1)) [ Add (-1, n, Int 1) ])) "a new thing past the last number: refused";
+  (* five new things from the last number but five, the fifth only the target of a link: the sixth is refused *)
+  C.check (Result.is_ok (resolve (at (last - 4)) [ Add (-1, n, Int 1); Add (-2, n, Int 1); Add (-3, n, Int 1); Add (-4, l, Link (-5)) ]))
+    "five new things up to the last number, one of them only a link's target: given";
+  C.check
+    (invalid (resolve (at (last - 4)) [ Add (-1, n, Int 1); Add (-2, n, Int 1); Add (-3, n, Int 1); Add (-4, l, Link (-5));
+                                       Add (-6, n, Int 1) ]))
+    "a sixth new thing past the last number: refused";
+  (match resolve (at last) [ Add (-1, n, Int 1) ] with
+   | Ok (v', _, [ (-1, e) ]) -> C.check (e = last && v'.next_e = last + 1) "the last number is given"
+   | Ok _ -> C.fail "the last number: an unexpected result"
+   | Error e -> C.fail "the last number refused: %s" (Resolve.error_message e));
+  (* the faster path of a large group never decides it: it leaves the group to Resolve, which refuses *)
+  let large = !Resolve.large_min in
+  Resolve.large_min := 1;
+  let ops = [ Add (-1, n, Int 1); Add (-2, n, Int 2); Add (-3, n, Int 3) ] in
+  C.check (Resolve.resolve_large (at (last - 1)) ~n:(v.group + 1) ~time:1 ~by:0 ~why:"" ops = None)
+    "a large group past the last number goes to Resolve";
+  Resolve.large_min := large;
+  (* through write, on a fork: the same refusal, nothing changed *)
+  let g = fork (at last) in
+  C.check (match write g [ Add (-1, n, Int 1); Add (-2, n, Int 1) ] with Error (Invalid _) -> true | _ -> false) "write refuses it";
+  C.check ((view g).next_e = last && (view g).group = v.group) "the refused write changed nothing"
+
+let () =
+  section "a second close does nothing";
+  guarded "close twice" @@ fun () ->
+  let sim = Sim_disk.create (Rng.make 31) in
+  let disk = Sim_disk.disk sim in
+  let a = Result.get_ok (open_on disk "/db") in
+  let[@warning "-8"] (Ok [ n ]) = declare a [ prop "c/n" Tint ] in
+  ignore (write a [ Add (-1, n, Int 1) ]);
+  close a;
+  C.check (disk.exists "/db/closed") "a clean close leaves its marker";
+  let b = Result.get_ok (open_on disk "/db") in
+  C.check (not (disk.exists "/db/closed")) "an open removes the marker";
+  close a;
+  C.check (not (disk.exists "/db/closed")) "a second close of an old handle left the marker of a database open elsewhere";
+  C.check (match open_on disk "/db" with Error (Busy _) -> true | Ok c -> close c; false | Error _ -> false)
+    "a second close of an old handle released the lock of the engine that holds the database";
+  C.check (match write a [ Add (-1, n, Int 2) ] with Error Closed -> true | _ -> false) "the old handle stays closed";
+  ignore (Result.get_ok (write b [ Add (-1, n, Int 3) ]));
+  close b;
+  close b;
+  C.check (disk.exists "/db/closed") "closed twice, the marker of the clean close stays";
+  let c = Result.get_ok (open_on disk "/db") in
+  C.check (group (view c) = 4) "every confirmed group is there";
+  close c
+
+let () =
+  section "fold: the values of its words, texts included, as find gives them";
+  guarded "fold and decode" @@ fun () ->
+  let f = fork empty in
+  let[@warning "-8"] (Ok [ city; total; ratio; boss ]) =
+    declare f [ prop "c/city" Ttext; prop "c/total" (Tmoney 2); prop "c/ratio" Tfloat; prop "c/boss" Tlink ]
+  in
+  let r = Rng.make 41 in
+  let cities = [| "Lyon"; "Nice"; "Brest"; "" |] in
+  for _ = 1 to 30 do
+    ignore
+      (write f
+         [ Add (-1, city, Text (Rng.pick r cities)); Add (-1, total, Money (Rng.int r 1000));
+           Add (-1, ratio, Float (float (Rng.int r 5) /. 4.)); Add (-2, city, Text (Rng.pick r cities));
+           Add (-1, boss, Link (-2)) ])
+  done;
+  let v = view f in
+  let q = { vars = 5; ranges = [];
+            where = [ { e = Var 0; p = city; v = Var 1 }; { e = Var 0; p = total; v = Var 2 }; { e = Var 0; p = ratio; v = Var 3 };
+                      { e = Var 0; p = boss; v = Var 4 } ] } in
+  let rows = List.sort compare (Result.get_ok (find v q)) in
+  let folded =
+    Result.get_ok (fold v q ~init:(fun () -> []) ~step:(fun acc w -> Array.init 5 (fun x -> decode v q x w.(x)) :: acc) ~merge:( @ ))
+  in
+  C.check (List.sort compare folded = rows) "fold's words decoded are find's values";
+  (* the sum per city, keyed by word in the step, the texts given once per key *)
+  let q2 = { vars = 3; ranges = []; where = [ { e = Var 0; p = city; v = Var 1 }; { e = Var 0; p = total; v = Var 2 } ] } in
+  let sums =
+    Result.get_ok
+      (fold v q2 ~init:(fun () -> Hashtbl.create 8)
+         ~step:(fun t w -> Hashtbl.replace t w.(1) (w.(2) + Option.value (Hashtbl.find_opt t w.(1)) ~default:0); t)
+         ~merge:(fun a b -> Hashtbl.iter (fun k x -> Hashtbl.replace a k (x + Option.value (Hashtbl.find_opt a k) ~default:0)) b; a))
+  in
+  let by_text = List.sort compare (Hashtbl.fold (fun w s acc -> (decode v q2 1 w, s) :: acc) sums []) in
+  let expect = Hashtbl.create 8 in
+  List.iter (fun row -> match row.(1), row.(2) with
+      | x, Money m -> Hashtbl.replace expect x (m + Option.value (Hashtbl.find_opt expect x) ~default:0)
+      | _ -> ()) (Result.get_ok (find v q2));
+  C.check (by_text = List.sort compare (Hashtbl.fold (fun x s acc -> (x, s) :: acc) expect [])) "the sums per city, by their texts";
+  C.check (match decode v q2 7 0 with _ -> false | exception Invalid_argument _ -> true)
+    "a variable out of the question: Invalid_argument"
+
+(* a journal's frames, from its segment files: the body length of each *)
+let frame_bodies disk dir =
+  let jdir = Filename.concat dir "journal" in
+  List.concat_map
+    (fun f ->
+      let b = Disk.read_all disk (Filename.concat jdir f) in
+      let rec go p acc = if p + 28 > Bytes.length b then List.rev acc else
+          let len = Int32.to_int (Bytes.get_int32_le b (p + 4)) land 0xFFFFFFFF in
+          go (p + 28 + len + 16) (len :: acc) in
+      go 40 [])
+    (disk.Disk.readdir jdir)
+
+let () =
+  section "frames stay within the journal's limit, however many groups arrive at once";
+  guarded "frames" @@ fun () ->
+  let limit = !Engine.frame_limit in
+  Engine.frame_limit := 16_384;
+  let text k = Text (String.make 6_000 (Char.chr (97 + (k mod 26)))) in
+  (* one batch of four groups of 6 KB: two frames, not one of 24 KB *)
+  let sim = Sim_disk.create (Rng.make 51) in
+  let disk = Sim_disk.disk sim in
+  let db = Result.get_ok (open_on disk "/f") in
+  let[@warning "-8"] (Ok [ n ]) = declare db [ prop "c/t" Ttext ] in
+  close db;
+  (match Engine.open_ disk "/f" with
+   | Error e -> C.fail "open: %s" (message e)
+   | Ok e ->
+     let reqs = Array.init 4 (fun k -> [ Resolve.Add (-1, n, text k) ], 0, "") in
+     let rec all i acc =
+       if i >= Array.length reqs then List.rev acc
+       else begin
+         let b = Engine.prepare e (Array.sub reqs i (Array.length reqs - i)) in
+         let res = Engine.commit e b in
+         all (i + Array.length res) (List.rev_append (Array.to_list res) acc)
+       end
+     in
+     let res = all 0 [] in
+     C.check (List.length res = 4 && List.for_all Result.is_ok res) "every group of the batch is confirmed";
+     (* a group alone over the limit: refused, the writer goes on *)
+     let b = Engine.prepare e [| [ Resolve.Add (-1, n, Text (String.make 20_000 'z')) ], 0, "" |] in
+     C.check (match Engine.commit e b with [| Error (Invalid _) |] -> true | _ -> false) "a group over the limit is refused";
+     Engine.close e);
+  C.check (List.for_all (fun l -> l <= 16_384) (frame_bodies disk "/f")) "a batch made a frame over the limit";
+  (* the threaded writer: groups from 16 threads at once *)
+  let db = Result.get_ok (open_on disk "/f") in
+  let writes k () = for i = 1 to 10 do ignore (Result.get_ok (write db [ Add (-1, n, text (k + i)) ])) done in
+  let ths = List.init 16 (fun k -> Thread.create (writes k) ()) in
+  List.iter Thread.join ths;
+  let g = group (view db) in
+  close db;
+  C.check (List.for_all (fun l -> l <= 16_384) (frame_bodies disk "/f")) "the writer made a frame over the limit";
+  let db = Result.get_ok (open_on disk "/f") in
+  C.check (group (view db) = g) "every group is there after a reopen";
+  close db;
+  Engine.frame_limit := limit
+
 (* ---- costs: the work of a question and of an index lookup stays within its bound ----
    Each case is built so that one list is far larger than the answer: an engine that walks it where a lookup or a
    smaller list would do fails the bound (counted candidates for questions; time, with a margin of 20 or more, for the

@@ -23,8 +23,10 @@ type t = {
   rename : string -> string -> unit;  (** atomic replacement of the target *)
   remove : string -> unit;
   sync_dir : string -> unit;  (** makes the names of a directory durable *)
-  lock : string -> bool;  (** an exclusive lock on a file, held until [unlock] or the process ends *)
-  unlock : string -> unit;
+  lock : string -> bool;
+      (** an exclusive lock on a file, held until [unlock] or the process ends; refused if another process holds it,
+          or this process under any path that names the same file (on the real disk: the same device and inode) *)
+  unlock : string -> unit;  (** releases the lock taken under this path *)
   now : unit -> int;  (** the time in milliseconds since 1970; simulated on {!Sim_disk} *)
 }
 

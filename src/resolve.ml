@@ -62,6 +62,8 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
         | Add (e, _, x) | Retract (e, _, x) -> see e; (match x with Value.Link t -> see t | _ -> ())
         | Expect (e, _, _) -> if e < 0 then invalid "Expect on a new thing")
       ops;
+    if !next - 1 > Schema.last_thing then
+      invalid "thing numbers end at %d: this group would make #%d" Schema.last_thing (!next - 1);
     let id x = if x < 0 then Hashtbl.find temps x else x in
     let first_new = v0.next_e and count_new = !next - v0.next_e in
     (* Expect: against the state before the group *)
@@ -235,6 +237,8 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
           incr k
         | Retract _ | Expect _ -> raise Slow)
       ops;
+    (* past the last thing number: Resolve refuses it *)
+    if !next - 1 > Schema.last_thing then raise Slow;
     let np = Schema.count v0.schema in
     let b = Bulk.make ~texts:(Array.of_list !added) fe fp fw nops ~np in
     (* the effective additions: a fact already there (an existing thing's) or added twice is no change; a new thing

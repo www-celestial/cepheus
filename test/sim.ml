@@ -255,6 +255,8 @@ let step w =
       if Array.exists (fun (ops, _, _) -> List.compare_length_with ops !Resolve.large_min >= 0) reqs then finish_merge w;
       let b = Engine.prepare e reqs in
       if b.runs <> [] then count "large groups";
+      (* the requests the frame did not take are dropped: the next batch draws new ones *)
+      if Array.length b.results < Array.length reqs then count "batches cut at the frame limit";
       record_batch w b;
       w.pending <- Some b
     end
@@ -352,6 +354,10 @@ let run seed steps =
   Engine.compact_min := 5 + Rng.int r 60;
   (* groups of 4 changes and more take the faster path of large groups when they can *)
   Resolve.large_min := 4;
+  (* a third of the seeds with a frame limit of a few hundred bytes: batches cut into several frames, groups over it
+     refused (drawn apart, so that the other draws of a seed stay as they were) *)
+  (let fr = Rng.make ((seed * 7919) + 1) in
+   Engine.frame_limit := if Rng.chance fr 0.33 then 400 + Rng.int fr 1600 else Journal.max_body);
   (match Engine.open_ ~id_source:(fun _ -> "0123456789abcdef") w.disk dir with
    | Ok e ->
      w.e <- Some e;

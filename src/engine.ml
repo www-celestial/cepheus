@@ -45,10 +45,11 @@ type t = {
   mutable notes : string list;  (* what recovery found and did *)
   at : Journal.position Atomic.t;  (* the journal's end after the last durable frame: where a merge's replay starts *)
   mutable merged : int;  (* the group of the newest run *)
+  closed : bool Atomic.t;  (* close ran: a second one does nothing *)
 }
 
 type batch = {
-  results : (receipt, error) result array;
+  results : (receipt, error) result array;  (* one for each request it took: a prefix of those given to [prepare] *)
   groups : Group.t list;  (* newest first *)
   body : Buffer.t;
   first : int;
@@ -100,71 +101,83 @@ let plan_all (v : Store.view) =
   while cap !l < size do incr l done;
   Array.length rs, !l
 
-(* A group whose frame would pass the journal's limit is refused (Journal.max_body). *)
-let too_large size = Invalid (Printf.sprintf "a group of %d bytes is over the frame limit of %d" size Journal.max_body)
+(* The largest frame body the writer makes: the journal's limit (Journal.max_body); tests make it small. *)
+let frame_limit = ref Journal.max_body
 
-(* The batch's groups resolved on the working view, in order. A large group (Resolve.resolve_large) is merged at
-   once with the delta and the newest runs into a run file, not yet named: the batch carries it, and the commit
-   names it once the frame is durable, as a background merge's (G12). The writer runs no background merge then. *)
+(* A group whose frame would pass the limit is refused. *)
+let too_large size = Invalid (Printf.sprintf "a group of %d bytes is over the frame limit of %d" size !frame_limit)
+
+(* The groups of a prefix of the requests, resolved on the working view, in order, as one frame: the prefix stops at
+   the first group that would take the frame past [frame_limit] (it waits for the next frame, the working view not
+   advanced by it), and before a large group that would not start the frame; the batch's [results] say how many
+   requests it took. A large group (Resolve.resolve_large) is merged at once with the delta and the newest runs into a
+   run file, not yet named: the batch carries it, and the commit names it once the frame is durable, as a background
+   merge's (G12). The writer runs no background merge then. *)
 let prepare t (reqs : (Resolve.op list * int * string) array) =
   let body = Buffer.create 1024 in
   let first = t.working.group + 1 in
   let count = ref 0 and groups = ref [] and runs = ref [] in
   let one = Buffer.create 256 in
-  let results =
-    Array.map
-      (fun (ops, by, why) ->
-        match t.stopped with
-        | Some e -> Error e
+  let results = ref [] and full = ref false and i = ref 0 in
+  while (not !full) && !i < Array.length reqs do
+    let ops, by, why = reqs.(!i) in
+    let large_ops = List.compare_length_with ops !Resolve.large_min >= 0 in
+    (* the result of request i, or None: it waits for the next frame *)
+    let r =
+      match t.stopped with
+      | Some e -> Some (Error e)
+      | None when large_ops && Buffer.length body > 0 -> None
+      | None -> (
+        let n = t.working.group + 1 and time = t.disk.now () in
+        let t0 = Journal.clock () in
+        let large = if large_ops then Resolve.resolve_large t.working ~n ~time ~by ~why ops else None in
+        if large <> None then Histogram.record large_resolve_us (Journal.clock () - t0);
+        match large with
+        | Some l -> (
+          (* the frame's body encoded by another domain while this one merges; the frame holds nothing else yet *)
+          let t1 = Journal.clock () in
+          let enc = Domain.spawn (fun () -> let b = Buffer.create ((16 * l.count) + 64) in l.body b; Journal.clock () - t1, b) in
+          match
+            let take, level = plan ~extra:l.facts.n l.view in
+            Snapshot.merge ~bulk:l.facts t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level (Atomic.get t.at)
+          with
+          | w ->
+            Histogram.record large_merge_us (Journal.clock () - t1);
+            let us, one = Domain.join enc in
+            Histogram.record large_encode_us us;
+            if Buffer.length one > !frame_limit then (Snapshot.abandon t.disk w; Some (Error (too_large (Buffer.length one))))
+            else begin
+              t.working <- w.view;
+              Buffer.add_buffer body one;
+              runs := w :: !runs;
+              incr count;
+              Some (Ok { group = n; things = l.temps })
+            end
+          | exception Disk.Io m -> ignore (Domain.join enc); Some (Error (Io m))
+          | exception Pages.Unreadable m -> ignore (Domain.join enc); Some (Error (Damaged m)))
         | None -> (
-          let n = t.working.group + 1 and time = t.disk.now () in
-          let t0 = Journal.clock () in
-          let large =
-            if List.compare_length_with ops !Resolve.large_min >= 0 then Resolve.resolve_large t.working ~n ~time ~by ~why ops
-            else None
-          in
-          if large <> None then Histogram.record large_resolve_us (Journal.clock () - t0);
-          match large with
-          | Some l -> (
-            (* the frame's body encoded by another domain while this one merges *)
-            let t1 = Journal.clock () in
-            let enc = Domain.spawn (fun () -> let b = Buffer.create ((16 * l.count) + 64) in l.body b; Journal.clock () - t1, b) in
-            match
-              let take, level = plan ~extra:l.facts.n l.view in
-              Snapshot.merge ~bulk:l.facts t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level (Atomic.get t.at)
-            with
-            | w ->
-              Histogram.record large_merge_us (Journal.clock () - t1);
-              let us, one = Domain.join enc in
-              Histogram.record large_encode_us us;
-              if Buffer.length one > Journal.max_body then (Snapshot.abandon t.disk w; Error (too_large (Buffer.length one)))
-              else begin
-                t.working <- w.view;
-                Buffer.add_buffer body one;
-                runs := w :: !runs;
-                incr count;
-                Ok { group = n; things = l.temps }
-              end
-            | exception Disk.Io m -> ignore (Domain.join enc); Error (Io m)
-            | exception Pages.Unreadable m -> ignore (Domain.join enc); Error (Damaged m))
-          | None -> (
-            match Resolve.resolve t.working ~n ~time ~by ~why ops with
-            | Ok (v, g, temps) ->
-              Buffer.clear one;
-              Group.encode one g;
-              if Buffer.length one > Journal.max_body then Error (too_large (Buffer.length one))
-              else begin
-                t.working <- v;
-                Buffer.add_buffer body one;
-                groups := g :: !groups;
-                incr count;
-                Ok { group = n; things = temps }
-              end
-            | Error e -> Error (of_resolve e)
-            | exception Pages.Unreadable m -> Error (Damaged m))))
-      reqs
-  in
-  { results; groups = !groups; body; first; count = !count; after = t.working; runs = !runs }
+          match Resolve.resolve t.working ~n ~time ~by ~why ops with
+          | Ok (v, g, temps) ->
+            Buffer.clear one;
+            Group.encode one g;
+            if Buffer.length one > !frame_limit then Some (Error (too_large (Buffer.length one)))
+            else if Buffer.length body + Buffer.length one > !frame_limit then None
+            else begin
+              t.working <- v;
+              Buffer.add_buffer body one;
+              groups := g :: !groups;
+              incr count;
+              Some (Ok { group = n; things = temps })
+            end
+          | Error e -> Some (Error (of_resolve e))
+          | exception Pages.Unreadable m -> Some (Error (Damaged m))))
+    in
+    match r with
+    | Some r -> results := r :: !results; incr i
+    | None -> full := true
+  done;
+  { results = Array.of_list (List.rev !results); groups = !groups; body; first; count = !count; after = t.working;
+    runs = !runs }
 
 (* Writes and forces the frame; on failure the database stops, and the batch's writes fail. *)
 let commit t b =
@@ -346,7 +359,7 @@ let open_ ?(id_source = random_id) disk dir =
                                     (Journal.next_group journal - 1) start.group));
         let t =
           { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes;
-            at = Atomic.make (Journal.position journal); merged = !merged }
+            at = Atomic.make (Journal.position journal); merged = !merged; closed = Atomic.make false }
         in
         if !v.group = 0 then begin
           (* a new database: the first group describes the system properties *)
@@ -370,13 +383,16 @@ let open_ ?(id_source = random_id) disk dir =
   | Journal.Damaged m -> Error (Damaged m)
 
 (* Every frame and every name is durable now (frames are forced as they are written, names as they change), unless
-   an fsync failed: then no marker, and the next open forces what the page cache holds. The base's pages leave the
-   cache: a view kept after the close reads them again from its file. *)
+   an fsync failed: then no marker, and the next open forces what the page cache holds. The runs' pages leave the
+   cache: a view kept after the close reads them again from its file. Once: a second close does nothing, for the
+   database may be open in another engine by then, whose files a marker or an unlock would betray. *)
 let close t =
-  Journal.close t.journal;
-  if t.stopped = None then t.disk.close (t.disk.openf (Filename.concat t.dir "closed") true);
-  drop_runs (Array.to_list t.working.runs);
-  t.disk.unlock (Filename.concat t.dir "lock")
+  if Atomic.compare_and_set t.closed false true then begin
+    Journal.close t.journal;
+    if t.stopped = None then t.disk.close (t.disk.openf (Filename.concat t.dir "closed") true);
+    drop_runs (Array.to_list t.working.runs);
+    t.disk.unlock (Filename.concat t.dir "lock")
+  end
 
 (* ---- The threaded driver ---- *)
 
@@ -557,10 +573,18 @@ let writer l () =
         let t0 = Journal.clock () in
         let b = prepare l.e (Array.map (fun r -> r.w) reqs) in
         Histogram.record prepare_us (Journal.clock () - t0);
+        (* the requests the frame did not take go first in the next one *)
+        let taken = Array.length b.results in
+        let left = List.filteri (fun i _ -> i >= taken) ws in
+        let reqs = Array.sub reqs 0 taken in
         Mutex.lock l.sm;
         (* while the syncer forces the previous frame, the next one grows: everything that arrived meanwhile goes
-           into one frame and one fsync (group commit) *)
-        while (match l.to_sync with Some (b0, _) -> Buffer.length b0.body > max_frame | None -> false) do
+           into one frame and one fsync (group commit), within the frame limit *)
+        while
+          match l.to_sync with
+          | Some (b0, _) -> Buffer.length b0.body > max_frame || Buffer.length b0.body + Buffer.length b.body > !frame_limit
+          | None -> false
+        do
           Condition.wait l.c_sync l.sm
         done;
         (match l.to_sync with
@@ -578,7 +602,7 @@ let writer l () =
          | None ->
            if needs_compaction l.e.working && l.e.working.delta.dn > l.retry && l.e.stopped = None then
              l.merging <- Some (start_merge l.e l.e.working));
-        handle rest
+        handle (List.map (fun r -> Write r) left @ rest)
       | Snapshot r :: rest ->
         finish_merge l;
         wait_idle l;

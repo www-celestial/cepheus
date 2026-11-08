@@ -135,8 +135,8 @@ beside (`snapshot`, recovery) forces once, at the end.
 A large group (20,000 operations and more, all additions: a load) is merged into a run as it is written, from its
 facts sorted in arrays, with no per-fact index update: write a load as a few large groups, not as many small ones. A
 group whose encoding passes 256 MiB is refused (`Invalid`): split a larger load into groups below it (9.4 M additions
-encode to 113 MB), and send the very large groups one at a time (several sent at once by several threads go into one
-frame, which is not checked against the limit at this version: [limits](limits.md#writes)). Its
+encode to 113 MB). Several large groups sent at once by several threads are written in frames of their own, each
+within the limit ([limits](limits.md#writes)). Its
 receipt lists every new thing; read `receipt.things` once into a table rather than calling `thing` for each (a walk of
 the list each time). A load leaves a few runs (at 10 M facts in two groups: the clients' run and the follows' run);
 questions that join across them read both (Q3 and Q4 about 40 % slower than on one run, benchmarks): after a load,

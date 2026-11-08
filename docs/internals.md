@@ -56,7 +56,7 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 |---|---|
 | `type prop` | `{ name; typ; many; unique }`: `Cepheus.prop` |
 | `p_name`, `p_type`, `p_many`, `p_unique` | 1, 2, 3, 4: the system properties |
-| `first_prop`, `first_thing` | 16 and 65,536 |
+| `first_prop`, `first_thing`, `last_thing` | 16, 65,536 and 2,147,483,647 (2³¹ − 1, the largest thing number a run holds) |
 | `type t`, `initial` | a persistent table of properties (a copy on change); the four system ones |
 | `find`, `by_name`, `count` | a property by number, by name; one more than the largest number the table holds |
 | `is_system p`, `is_prop_space e` | 1 ≤ p < 16; 16 ≤ e < 65,536 |
@@ -93,7 +93,7 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 |---|---|
 | `type fd`, `exception Io of string` | an open file; a failed call (`CALL PATH: REASON`) |
 | `type t` | 16 operations: `exists`, `mkdir`, `readdir` (sorted), `openf path create`, `size`, `pread`, `pwrite` (exactly the bytes asked), `truncate`, `fsync`, `close`, `rename` (atomic), `remove`, `sync_dir` (makes a directory's names durable), `lock`, `unlock`, `now` (ms) |
-| `real` | the machine's file system (`lseek` then `read` or `write`; `lockf` locks) |
+| `real` | the machine's file system (`lseek` then `read` or `write`; `lockf` locks, held in a table keyed by the lock file's device and inode, so that every path to one file is one lock) |
 | `read_all`, `write_file` | a whole file; a file written durably and atomically (beside it, fsync, rename, fsync of the directory) |
 
 ## `Sim_disk`: the simulated disk (`src/sim_disk.mli`)
@@ -124,7 +124,7 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 
 | module | the names tests and tools use |
 |---|---|
-| `Engine` | `open_`, `start`, `stop`, `write`, `snapshot_live`; the deterministic steps the simulation drives: `prepare`, `commit`, `merge_begin` (`~all` for a full merge), `install`, `compact`, `close`; `plan` and `plan_all` (which runs a merge takes, and its level), `cap l` (the capacity of level l); `read_meta disk dir` (the database's id); settings `compact_min` (200,000), `ratio` (4); counters `merges`, `frames`; histograms `prepare_us`, `switch_us`, `merge_us`, `large_resolve_us`, `large_encode_us`, `large_merge_us`; `on_merge` (a hook the bank test uses to compare old and new views at each switch) |
+| `Engine` | `open_`, `start`, `stop`, `write`, `snapshot_live`; the deterministic steps the simulation drives: `prepare`, `commit`, `merge_begin` (`~all` for a full merge), `install`, `compact`, `close`; `plan` and `plan_all` (which runs a merge takes, and its level), `cap l` (the capacity of level l); `read_meta disk dir` (the database's id); settings `compact_min` (200,000), `ratio` (4), `frame_limit` (the largest frame body the writer makes: `Journal.max_body`; tests make it small); counters `merges`, `frames`; histograms `prepare_us`, `switch_us`, `merge_us`, `large_resolve_us`, `large_encode_us`, `large_merge_us`; `on_merge` (a hook the bank test uses to compare old and new views at each switch) |
 | `Store` | the view (`runs`, newest first, each with its parts `a` and `t`, its groups `lo`, `hi` and its `level`; `delta`, `dict`, `schema`, `group`, `next_e`) and its reads: `iter_facts`, `iter_values`, `iter_things`, `iter_prop`, `iter_range`, `mem`, counts; `value v typ w` and `text v i` (a word back to a value); `facts v` (the number of facts); `run_rows r` (a run's rows, which the levels weigh); `of_runs` |
 | `Query` | `plan`, `rows`, `count`, `fold`; settings `parallel_min` (20,000), `domains`; counter `work` (candidates enumerated, held to the Generic Join bound by the tests) |
 | `Resolve` | `resolve` (the one function that checks and resolves a group, for the writer and for forks), `replay` (a journal's group onto a view); `resolve_large` (the faster path of a large group: `Some` the same result, or `None` to go the ordinary way), `replay_large`, setting `large_min` (20,000) |

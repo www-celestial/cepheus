@@ -74,6 +74,7 @@ From `write` (the writer's checks, the same on a database and on a fork):
 | `NAME cannot become unique: two things share a value` | `cepheus/unique` set to true while two things share a value |
 | `NAME still has values` | a property's name and type retracted while things still have values for it |
 | `a group of N bytes is over the frame limit of 268435456` | the group's encoding passes 256 MiB, the largest frame body: split it ([limits](limits.md#writes)) |
+| `thing numbers end at 2147483647: this group would make #N` | the group's new things would take thing numbers past 2³¹ − 1, the largest a run holds ([limits](limits.md#things-properties-values)); the database can make no more things |
 
 From `declare` and `snapshot`:
 
@@ -166,7 +167,7 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 
 | error | message | when | do |
 |---|---|---|---|
-| `Busy` | `DIR is open in another process` | another process holds `DIR/lock`, or this process opened DIR already under the same path | close the other one; one process per database |
+| `Busy` | `DIR is open in another process` | another process holds `DIR/lock`, or this process has the database open already, under this path or any other that names the same directory (a symbolic link, `DIR/.`, `x/../DIR`) | close the other one; one engine per database |
 | `Closed` | `the database is closed` | `write` or `snapshot` after `close` | open the database again |
 
 ## Exceptions
@@ -176,7 +177,7 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 | `Unreadable of string` | `get`, `values`, `things`, a fork's `write` | a page of a run cannot be read or does not check (above) |
 | `Not_found` | `thing r k` | k is not a new thing of the group of receipt r |
 | `Failure "bootstrap: ..."` | `open_` of a new database | the first group, which describes the system properties, was refused: a bug |
-| `Invalid_argument` | internals | a broken invariant, which is a bug: `Journal.append: groups out of order`, `Engine.install: not durable`, `Snapshot.merge: ...` (a section that overflows or does not add up, a retraction with nothing below, a fact of a large group past the things, the journal position after the view, more runs than the view has); `Pages: a page of a base built in memory is missing`; or a misuse of an internal function (`Codec.reader`, `Codec.put_varint` of a negative number, `Crc32c.bytes`, `Crc32c.extend`, `Rng.int`); and `Journal.append: frame too large`, raised in the syncer thread when several groups resolved together pass 256 MiB in one frame ([limits](limits.md#writes)) |
+| `Invalid_argument` | internals | a broken invariant, which is a bug: `Journal.append: groups out of order`, `Engine.install: not durable`, `Snapshot.merge: ...` (a section that overflows or does not add up, a retraction with nothing below, a fact of a large group past the things, the journal position after the view, more runs than the view has); `Pages: a page of a base built in memory is missing`; or a misuse of an internal function (`Codec.reader`, `Codec.put_varint` of a negative number, `Crc32c.bytes`, `Crc32c.extend`, `Rng.int`); `Journal.append: frame too large` (the writer never makes a frame over 256 MiB, so this is a bug); and `Cepheus.decode: variable X out of range` or `Cepheus.decode: MSG` (a question `fold` refuses), a misuse of `decode` |
 
 ## Lines on the standard error
 

@@ -11,6 +11,7 @@ let p_many = 3
 let p_unique = 4
 let first_prop = 16
 let first_thing = 65536
+let last_thing = (1 lsl 31) - 1
 
 let system =
   [| None;

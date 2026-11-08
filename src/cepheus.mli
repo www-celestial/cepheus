@@ -131,8 +131,15 @@ val fold :
   view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 (** The bindings folded into an accumulator, without building values: [step] gets index words (thing ids for links,
     the value for ints, dates, money, 0/1 for booleans, dictionary numbers for texts and floats) in a buffer it may not
-    keep. A large question runs on several domains, each with its own accumulator from [init ()], joined by [merge];
-    [step] must therefore only touch its accumulator. *)
+    keep; {!decode} turns a word back into its value. A large question runs on several domains, each with its own
+    accumulator from [init ()], joined by [merge]; [step] must therefore only touch its accumulator. *)
+
+val decode : view -> query -> int -> int -> value
+(** [decode v q x w]: the value of variable [x] of [q] whose index word, as {!fold} gives it, is [w], the value {!find}
+    would give: a [Text] for a dictionary number of a text variable, a [Float] for a float's, a [Link] for a thing.
+    Call it in [step] or on the keys of the result, on the view the fold read. Raises [Invalid_argument] for a
+    variable out of the question or a question {!fold} refuses, and {!Unreadable} when the text's page cannot be
+    read. *)
 
 (** {1 Operations} *)
 

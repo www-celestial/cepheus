@@ -26,7 +26,11 @@ type t = {
 let table : (int, Unix.file_descr * string) Hashtbl.t = Hashtbl.create 16
 let next = ref 1
 let m = Mutex.create ()
-let locks : (string, Unix.file_descr) Hashtbl.t = Hashtbl.create 4
+(* The locks this process holds, by the identity of the lock file (its device and inode): a POSIX lock belongs to a
+   process and a file, whatever path names the file, so two spellings of one directory (a symlink, a/../a, a/.) are
+   one lock; and, by the spelling each was taken under, its key, for unlock. *)
+let locks : (int * int, Unix.file_descr) Hashtbl.t = Hashtbl.create 4
+let spellings : (string, int * int) Hashtbl.t = Hashtbl.create 4
 let locked f = Mutex.protect m f
 
 let unix name path f =
@@ -50,18 +54,31 @@ let rec read_exact ufd buf pos len path =
     read_exact ufd buf (pos + n) (len - n) path
   end
 
+let key (st : Unix.stats) = st.st_dev, st.st_ino
+
+(* Held already in this process is decided by a stat of the path, before any open: closing a second descriptor of a
+   file that this process has locked would release the lock (POSIX locks go with the process and the file). *)
 let take_lock p =
   locked (fun () ->
-      if Hashtbl.mem locks p then false
+      let held =
+        match Unix.stat p with st -> Hashtbl.mem locks (key st) | exception Unix.Unix_error (Unix.ENOENT, _, _) -> false
+      in
+      if held then false
       else begin
         let ufd = Unix.openfile p [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o644 in
-        match Unix.lockf ufd Unix.F_TLOCK 0 with
-        | () ->
-          Hashtbl.replace locks p ufd;
-          true
-        | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EACCES), _, _) ->
-          Unix.close ufd;
-          false
+        let k = key (Unix.fstat ufd) in
+        (* the file a held lock was taken on, put at this path between the stat and the open: refused, and the
+           descriptor kept open, so that the lock stays *)
+        if Hashtbl.mem locks k then false
+        else
+          match Unix.lockf ufd Unix.F_TLOCK 0 with
+          | () ->
+            Hashtbl.replace locks k ufd;
+            Hashtbl.replace spellings p k;
+            true
+          | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EACCES), _, _) ->
+            Unix.close ufd;
+            false
       end)
 
 let real =
@@ -116,10 +133,14 @@ let real =
     unlock =
       (fun p ->
         locked (fun () ->
-            match Hashtbl.find_opt locks p with
-            | Some ufd ->
-              Hashtbl.remove locks p;
-              (try Unix.close ufd with Unix.Unix_error _ -> ())
+            match Hashtbl.find_opt spellings p with
+            | Some k ->
+              Hashtbl.remove spellings p;
+              (match Hashtbl.find_opt locks k with
+               | Some ufd ->
+                 Hashtbl.remove locks k;
+                 (try Unix.close ufd with Unix.Unix_error _ -> ())
+               | None -> ())
             | None -> ()));
     now = (fun () -> int_of_float (Unix.gettimeofday () *. 1000.));
   }

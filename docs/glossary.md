@@ -91,7 +91,7 @@ the usual one, both are given.
 - **group commit** — the writes that arrive while one fsync runs share the next one.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **index word** — the 64-bit form of a value in the indexes: the value itself, or a dictionary number for texts and
-  floats; what `fold` gives. [api](api.md#questions)
+  floats; what `fold` gives, and `decode` turns back into the value. [api](api.md#questions)
 - **isolation** — what one transaction can see of the others running at the same time.
   [concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)
 - **journal** — Cepheus' write-ahead log: segments of frames of groups. [architecture](architecture.md#the-journal-a-write-ahead-log)

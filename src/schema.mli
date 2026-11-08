@@ -13,6 +13,11 @@ val first_prop : int
 val first_thing : int
 (** 65536: the first id of an ordinary thing. *)
 
+val last_thing : int
+(** 2,147,483,647 (2{^31} - 1): the largest thing id. A run counts the things it holds in 31 bits (the high half of
+    a 64-bit word of its rank table, read back into OCaml's 63-bit int) and stores a thing in 4 bytes; a group that
+    would give a larger id is refused. *)
+
 type t
 
 val initial : t

@@ -15,7 +15,7 @@ the test that checks it. The tests are in `test/`; `tools/test.sh` runs them all
 | G6 | damage to durable journal bytes is detected, never dropped in silence | F3 (one residual) |
 | G7 | an open from the runs on disk equals a replay of the journal; a damaged page is never served | F1 to F3 |
 | G8 | a fork changes nothing of its database | always |
-| G9 | one process at a time opens a database | always (two conditions) |
+| G9 | one engine at a time opens a database, whatever the path that names it | always (the lock is advisory) |
 | G10 | after a failed write or fsync, nothing more is confirmed | F4 (one residual) |
 | G11 | a question returns exactly its answers, each once, within the Generic Join bound | always |
 | G12 | a crash during a merge leaves the runs before it or the runs after it, whole | F1, F2, F4 |
@@ -216,17 +216,26 @@ same writes accept and refuse the same ones and end equal; the journal files are
 
 ## G9 One writer
 
-*Promise.* Two processes cannot open a database at the same time, and one process cannot open it twice.
+*Promise.* Two processes cannot open a database at the same time, and one process cannot open it twice, under any
+path that names its directory: `shop`, `shop/`, `shop/.`, `./shop`, `x/../shop` and a symbolic link to it are one
+database (and so is a bind mount of it, which shows the same device and inode; not tested here).
 
 *Conditions.* The lock is advisory: it stops another Cepheus, not a program that writes the files without taking it
 (a copy, an editor, a second program on another machine through a network file system whose locks do not reach
-here). Inside one process, the table of held locks is keyed by the path as it was written: open a directory under one
-spelling only (`shop` and `./shop` are two keys, and the kernel's `lockf` lets the same process lock twice).
+here).
 
 *Proof.* Opening takes an exclusive `lockf` lock on `DIR/lock`, held until close; the kernel releases it when the
-process dies. Within one process, a table of held locks refuses a second open.
+process dies. A POSIX lock belongs to a process and a file, so the kernel lets the same process lock a file twice:
+within one process, a table of the held locks refuses a second open. It is keyed by the identity of the lock file,
+its device and inode numbers (`st_dev`, `st_ino`), which every path to the file shares, rather than by the path as
+written or by its canonical form (`realpath` resolves symbolic links, but a bind mount still gives a second name). Whether the lock
+is held is decided by a `stat` of the path, before any descriptor is opened: closing a second descriptor of a file the
+process has locked would release the lock. A second `close` of a database does nothing: it neither releases the lock
+again (another engine may hold it by then) nor leaves the clean-close marker in a directory another engine has open.
 
-*Tested by* `test/unit.ml` (a second open returns `Busy`).
+*Tested by* `test/unit.ml` (a second open returns `Busy` under seven spellings of the path and through a symbolic
+link; opened through the link, the directory is busy under its own name; a second close of an old handle leaves the
+lock and the marker of the engine that holds the database).
 
 ## G10 Stop on a disk error
 

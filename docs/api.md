@@ -40,8 +40,8 @@ database is closed"`.
 
 | function | what it does |
 |---|---|
-| `open_ : string -> (db, error) result` | opens the database in a directory, creating the directory (and its parents) and the database if missing; after a crash, recovers: the newest chain of runs that checks, then the journal after it ([operations](operations.md#opening-and-recovery)). Errors: `Busy` (another process holds it, or this process under the same path), `Damaged` (durable data lost or changed: it does not open), `Io` |
-| `close : db -> unit` | waits for the writes in flight and for a merge under way (it is installed), closes the journal, leaves the clean-close marker if no fsync failed, takes the runs' pages out of the cache, releases the lock. Views taken before stay readable (their pages are read again from the files). Call it once. A fork has nothing to close |
+| `open_ : string -> (db, error) result` | opens the database in a directory, creating the directory (and its parents) and the database if missing; after a crash, recovers: the newest chain of runs that checks, then the journal after it ([operations](operations.md#opening-and-recovery)). Errors: `Busy` (another process holds it, or this process under any path that names the same directory: a symbolic link, `DIR/.`, `x/../DIR`), `Damaged` (durable data lost or changed: it does not open), `Io` |
+| `close : db -> unit` | waits for the writes in flight and for a merge under way (it is installed), closes the journal, leaves the clean-close marker if no fsync failed, takes the runs' pages out of the cache, releases the lock. Views taken before stay readable (their pages are read again from the files). A second `close` does nothing (it neither leaves the marker nor releases the lock again: another engine may have the database open by then). A fork has nothing to close |
 | `view : db -> view` | the newest durable state (for a fork, its newest state). Free: one atomic read |
 | `group : view -> int` | the number of the last group in a view |
 | `fork : view -> db` | a temporary state starting at a view: the same reads and writes, the same checks, nothing on any file (G8). Free; a fork of a fork works |
@@ -223,6 +223,7 @@ type pattern = { e : term; p : int; v : term }      (* thing, property, value *)
 type query = { vars : int; where : pattern list; ranges : (int * value * value) list }
 val find : view -> query -> (value array list, error) result
 val fold : view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
+val decode : view -> query -> int -> int -> value
 ```
 
 A question has `vars` variables, numbered 0 to `vars - 1`, and patterns whose thing (`e`) and value (`v`) are a
@@ -243,7 +244,14 @@ candidates or more (`Query.parallel_min`), the question runs on up to `Query.dom
 recommended count, at most 8): the candidates are cut into slices, each slice folded from its own `init ()`, and the
 slices' results joined by `merge` in slice order, so the result does not depend on the number of domains; `step` may
 run on several domains at once and must touch only its accumulator. Below the threshold, `init` is called once and
-`merge` never. A dictionary number is turned back into a value by the internal `Store.value v typ w`.
+`merge` never.
+
+`decode v q x w` is the value of variable `x` of `q` whose index word is `w`: the value `find` would give, a `Text`
+for the dictionary number of a text variable, a `Float` for a float's, a `Link` for a thing, `Int`, `Date`, `Money`
+or `Bool` for the others; the type comes from the question, as for `find`. A fold keyed by words gives its keys their
+texts once each, at the end (or in `step`, at a cost per binding: a dictionary read and a string). It reads the view
+the fold read; it raises `Invalid_argument` for a variable out of the question or a question `fold` refuses, and
+`Unreadable` when the text's page cannot be read.
 
 Errors of both: `Invalid` (an unknown property, a variable out of range or in no pattern or of two types, a constant
 of the wrong type, a range on a text or float variable) and `Damaged` (a page that cannot be read or does not check).
@@ -271,6 +279,40 @@ let () =
 #65539 33
 65537 has 40: true
 invalid: variable 0 appears in no pattern
+```
+
+A sum per city with `fold`, keyed by the city's index word, and the cities' texts given by `decode` once each:
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ city; total ]) = declare db [ prop "invoice/city" Ttext; prop "invoice/total" (Tmoney 2) ] in
+  ignore
+    (write db
+       (List.concat
+          (List.mapi (fun i (c, m) -> [ Add (-(i + 1), city, Text c); Add (-(i + 1), total, Money m) ])
+             [ "Lyon", 1200; "Nice", 500; "Lyon", 300; "Brest", 250; "Nice", 50 ])));
+  let v = view db in
+  let q = { vars = 3; ranges = []; where = [ { e = Var 0; p = city; v = Var 1 }; { e = Var 0; p = total; v = Var 2 } ] } in
+  let add t k x = Hashtbl.replace t k (x + Option.value (Hashtbl.find_opt t k) ~default:0) in
+  match
+    fold v q ~init:(fun () -> Hashtbl.create 8)
+      ~step:(fun t w -> add t w.(1) w.(2); t)
+      ~merge:(fun a b -> Hashtbl.iter (add a) b; a)
+  with
+  | Ok sums ->
+    Hashtbl.fold (fun w m acc -> (Value.to_string (decode v q 1 w), m) :: acc) sums []
+    |> List.sort compare
+    |> List.iter (fun (c, m) -> Printf.printf "%s %d.%02d\n" c (m / 100) (m mod 100))
+  | Error e -> print_endline (message e)
+```
+
+```output
+"Brest" 2.50
+"Lyon" 15.00
+"Nice" 5.50
 ```
 
 How a question is answered, and what it costs: [architecture](architecture.md#questions), [theory](theory.md#4-generic-join).
