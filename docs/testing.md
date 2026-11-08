@@ -48,10 +48,13 @@ databases. Every randomized test draws from a seeded generator (`Rng`, SplitMix6
    small now: a merge of a few facts writes a few pages); and each fsync
    of a small run failing in turn (G13), on a file system that keeps the failed bytes in memory and on one that undoes
    them, then a process death at each of the next four disk calls or none, a reopen in the same boot or none, a power
-   loss with each pattern, and a reopen: 2,880 reopens checked.
+   loss with each pattern, and a reopen: 2,880 reopens checked. The journal is read through a window of 48 bytes
+   here (4 MiB in use): every frame is longer than it, checked by pieces or read whole, and every header and trailer
+   can straddle its edge.
 3. **Deterministic simulation** (`test/sim.ml --seeds N`): the engine runs on `Sim_disk`; the seed decides the writes,
    the interleaving of prepare and commit, snapshots, merges (now, or begun from a view ahead of the disk and
-   installed steps later), forks, clean closes and reopens, power losses, process deaths (`Sim_disk.kill`: the page cache stays, to be lost at
+   installed steps later), forks, clean closes and reopens (half the seeds read the journal through a window of 40
+   to 240 bytes), power losses, process deaths (`Sim_disk.kill`: the page cache stays, to be lost at
    a later power loss), crashes inside any disk call (`Sim_disk.crash_after`), failed fsyncs, and bit flips in durable
    files. After every recovery the state is compared with the reference model, and the journal's groups with the
    written ones; the recovered state counts as confirmed (a later power loss must keep it); no snapshot may be set

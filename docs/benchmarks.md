@@ -1,4 +1,4 @@
-# Benchmarks: Cepheus and PostgreSQL
+# Benchmarks: Cepheus, PostgreSQL and SQLite
 
 Cepheus against PostgreSQL 18.6 on the same machine, with the same data, the same questions and the same answers
 checked on both sides. Milestone 2 numbers first; milestone 1's below them, for the history.
@@ -62,6 +62,154 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## Levels on disk and large groups (2026-11-08), at 10 million facts
+
+Two changes since the merge written to a file (theory, section 9): the runs on disk are the levels of an LSM tree
+(leveling, ratio 4), and a large group (20,000 additions and more) is sorted into a run as it is written, with no
+per-fact index update. Measured against 148ff09 (one level written to a file) and c7f25c0 (one level merged in
+memory), all three built in release and alternated, each on its own database loaded by its own binary; and against
+SQLite 3.54 and PostgreSQL 18.6 loading the same facts from the CSV files the benchmark writes. Every side is durable
+at the end:
+Cepheus confirms a group after the fsync of its frame; SQLite commits in WAL mode with `synchronous = FULL` and
+checkpoints; PostgreSQL commits with fsync on and checkpoints.
+
+### Loading
+
+Two ways to write the same facts. *Large groups*: the 113,636 clients with their invoices in one group (9.4 M
+additions), then their follow links in a second (568,163): what SQLite's `.import` (one transaction a table) and
+PostgreSQL's `COPY` do. *A group a client*: 227,272 groups (a client and its 20 invoices; a client's follows), written
+by 64 threads, each confirmed on its own: what an application does when every client is a transaction. The time runs
+until the last group is confirmed (`bench.exe load`, `GROUP` clients a group; Cepheus' snapshot after it, one run made
+of all, is apart: 1.3 to 6.5 s, depending on the disk).
+
+| 10 M facts | time, median [95 % interval], runs | peak memory | on disk |
+|---|---:|---:|---:|
+| Cepheus, 2 large groups | 7.04 s [6.52, 7.41], 10 | 2.5 to 3.2 GB | 335 MB (journal 96, runs 237); 553 after `snapshot` |
+| SQLite 3.54 as the docs set it up (`.import`, indexes after, `ANALYZE`) | 6.97 s [6.38, 8.00], 10 | 11 MB | 131 MB |
+| PostgreSQL 18.6 `COPY`, indexes, `VACUUM ANALYZE` | 32.3 s [29.6, 34.2], 6 | shared_buffers 1 GB | 284 MB (the cluster with its WAL: 675) |
+| Cepheus, a group a client | 111.8 s [103.1, 124.4], 4 | 1.6 to 1.8 GB | 487 MB |
+| 148ff09, a group a client | 157.5 s [122.0, 179.2], 4 | 1.3 to 2.0 GB | 532 to 550 MB |
+| c7f25c0, a group a client | 74.7 s [70.2, 83.2], 4 | 2.7 to 2.9 GB | 100 MB, then 335 after its snapshot |
+
+**Cepheus and SQLite alternated** (`duel.txt`: 10 rounds, a Cepheus load then a SQLite load, so that both meet the
+same disk): a tie. Cepheus was faster in 4 rounds of 10 (a sign test sees no difference), and the median of the paired
+differences is 0.16 s in SQLite's favour. Both are under the 8.6 s SQLite took when the docs job measured it on a
+busier disk; the series before these, not alternated, gave 8.46 s [6.07, 10.98] (7 runs) for Cepheus and 8.84 s [7.85,
+9.75] (6 runs) for SQLite. The durability is the same: a Cepheus group is durable when it is confirmed (its frame
+forced), a SQLite `.import` is one transaction committed with `synchronous = FULL` in WAL mode, and both end forced
+(Cepheus' runs, SQLite's checkpoint). Cepheus makes its facts in the process (the benchmark's client side, 1.3 s on 4
+domains); SQLite parses them from the CSV files. SQLite keeps the load in 11 MB and 131 MB of disk, Cepheus needs 2.5
+to 3.2 GB and 335 MB.
+
+At the durability of a group a client, SQLite has no group commit: one writer, one fsync a commit. At 1 M facts
+(11,363 clients, 22,726 transactions; `sqlite-small.py` of the job's notes, the indexes made first, as Cepheus keeps its
+own): SQLite 166.7 s [138.6, 169.3] (3 runs; 6 to 7 ms a commit, file 13 MB, peak 111 MB);
+Cepheus, a group a client by 64 threads, 10.6 s [9.9, 10.9] (3 runs; 283 to 322 MB, 42 MB on disk), 16 times less:
+its writer puts the groups that arrive during an fsync into the next frame (group commit), where SQLite's single
+writer forces each commit alone; Cepheus in two large groups 0.94 s [0.86, 1.28] (3 runs; 277 to 306 MB, 33 MB). At
+10 M facts, the same 227,272 commits of SQLite would take about 28 minutes at this rate (not measured).
+
+**The journal's fsync while loading a group a client** (p99 of each load): Cepheus 56 to 102 ms, c7f25c0 40 to 102 ms,
+148ff09 148 to 287 ms: the cure of the last job's regression (its merges of the whole base made each fsync wait).
+The time of that load is another story: 112 s against c7f25c0's 75 s. With a group a client, the load is bound by its
+frames (9,500 to 11,000 fsyncs of 3.7 to 4.5 ms at the median, a frame every 11 ms) and by the merges of the levels,
+whose writes (a fact about 6 times, 1.3 GB at 10 M facts, forced every 8 MiB while the journal writes) share the disk
+with the journal; c7f25c0 kept its merges in memory (2.7 to 2.9 GB at its peak, against 1.6 to 1.8) and wrote nothing
+but the journal until its snapshot.
+
+**Where a large load's time goes** (the writer's histograms, on a quiet disk): the client side makes its 9.4 M
+operations in 1.3 s (4 domains); the writer resolves and sorts them in 1.9 to 2.3 s (one pass over the operations
+1.1 s, the sorts 0.8 s, the radix sorts on 4 domains), encodes the frame (0.4 s, beside the merge, in another domain),
+and merges them into a run in 1.8 s on a quiet disk (by thing 0.5 s, by property 0.7 s, the dictionary 0.2 s, the
+fsync of its 220 MB 0.4 s; 3 to 5.6 s when the disk is busy); the journal's frame of 113 MB takes 0.2 to 0.4 s to
+force; the follows group 0.4 to 1.5 s. The spread of the runs (6.1 to 11 s) is the disk's: the same binary, the same
+data, the merge's fsync from 0.4 to 4 s. What would go further, without bending a guarantee: the three passes of the
+merge in parallel (they write apart in the file: about -0.7 s); the run's fsync and the journal's at once rather than
+one after the other (-0.3 s; the run must still be forced before its name, G12); fewer bytes (a run of 23 bytes a
+fact and a frame of 12, against SQLite's 14 for its table and indexes: delta and varint coding of the sorted columns).
+Memory: the operations of one 9.4 M group, its arrays and its frame are in memory at once (2.5 to 3.2 GB); smaller
+groups need less (1 M facts in one group: 277 MB) but each merges with the runs before it.
+
+### Reads, all in memory
+
+21 runs a question, 2 rounds alternated (each cell: the medians of the 2 rounds; intervals in `read-final.txt` of the
+job's notes, all within a few percent of their median). *new* is the database after its snapshot (one run); *new, 2
+runs* holds the same facts as the load left them: the clients' run and the follows' run (which holds every client).
+
+| 1 domain | Q1 | Q2 | Q3 | Q4 | Q5 | open |
+|---|---:|---:|---:|---:|---:|---:|
+| new, one run | 0.38; 0.38 µs | 1.57; 1.58 µs | 3.82; 3.74 ms | 237; 231 ms | 1.00; 0.95 s | 384; 383 ms |
+| new, 2 runs | 0.38; 0.38 µs | 1.70; 1.76 µs | 5.35; 5.41 ms | 332; 331 ms | 1.01; 1.02 s | 495; 587 ms |
+| 148ff09 | 0.35; 0.34 µs | 1.58; 1.54 µs | 4.10; 4.06 ms | 226; 227 ms | 1.00; 0.94 s | 414; 396 ms |
+| c7f25c0 (the first series) | 0.38; 0.37 µs | 1.58; 1.64 µs | 3.98; 3.94 ms | 229; 227 ms | 0.95; 0.97 s | 397; 421 ms |
+
+| 3 domains | Q1 | Q2 | Q3 | Q4 | Q5 |
+|---|---:|---:|---:|---:|---:|
+| new, one run | 0.37; 0.38 µs | 1.55; 1.57 µs | 3.75; 3.76 ms | 107; 107 ms | 362; 360 ms |
+| new, 2 runs | 0.39; 0.39 µs | 1.75; 1.76 µs | 5.38; 5.42 ms | 143; 144 ms | 370; 368 ms |
+| 148ff09 | 0.36; 0.35 µs | 1.57; 1.59 µs | 4.13; 4.12 ms | 106; 104 ms | 360; 369 ms |
+
+The last binary against 148ff09 once more, 3 rounds alternated, one domain (`read-last.txt`), the medians of each
+round: Q1 0.37, 0.38, 0.38 µs against 0.37, 0.37, 0.36; Q2 1.61, 1.57, 1.64 against 1.62, 1.61, 1.57 µs; Q3 3.79,
+3.78, 3.79 against 4.19, 4.12, 4.13 ms; Q4 234, 239, 231 against 230, 226, 227 ms; Q5 1.02, 1.01, 0.97 against 1.01,
+0.95, 0.97 s; open 381, 383, 440 against 386, 399, 386 ms.
+
+On one run, the questions run as on the one-level base: Q2 and Q5 the same; Q1 0.01 to 0.04 µs slower (3 to 10 %, and
+the difference moves as much between rounds); Q4 2 to 5 % slower; Q3 8 % faster. A lookup reads one word more, a rank,
+except in a part that holds every thing up to its end (a load, a full merge), where the slot is an addition. The first
+measure of the levels was 17 to 23 % slower (Q1 0.42 µs, Q4 286 ms: `read-before-store-fixes.txt`): closures allocated
+per lookup, a rank read for every thing, lists for one run; fixed before these numbers. On two runs, a row of the
+older run is shown only if the newer run has no entry for the same fact: a few bits of the rank tables when the newer
+run does not hold the thing, a lookup when it does (here it holds every client): Q3 +43 %, Q4 +40 % on one domain; a
+run with no row of the property is skipped at once (Q5, the follows, the same as one run). A `snapshot` merges
+everything into one run.
+
+### Larger than memory
+
+Cache 32 MB, the process capped at 128 MB; 5 runs (Q5: 1 run); the first series for 148ff09 and c7f25c0:
+
+| | Q1 | Q2 | Q3 | Q4 | Q5 | Q4, 3 domains |
+|---|---:|---:|---:|---:|---:|---:|
+| new, one run | 39.7 µs | 1.54 µs | 85.8 ms | 383 ms | 96.8 s | 229 ms |
+| 148ff09 | 40.6 µs | 1.65 µs | 89.8 ms | 378 ms | 99.9 s | 278 ms |
+| c7f25c0 | 39.5 µs | 1.50 µs | 85.8 ms | 381 ms | 99.5 s | 243 ms |
+
+The database as the load leaves it (2 runs), the same set-up, alternated with the one-run database, 2 rounds
+(`big-runs.txt`; each cell: round 1; round 2):
+
+| 1 domain | Q1 | Q2 | Q3 | Q4 | open | peak |
+|---|---:|---:|---:|---:|---:|---:|
+| new, 2 runs | 41.9; 40.9 µs | 2.03; 1.83 µs | 91.2; 89.4 ms | 482; 486 ms | 165; 197 ms (54-56 MB) | 58 MB |
+| new, one run | 42.3; 41.6 µs | 1.69; 1.72 µs | 92.8; 90.9 ms | 394; 393 ms | 70; 80 ms (32 MB) | 51 MB |
+
+Before db91dac, the 2-run database did not open under the cap: the open read its journal segment of 94 MB whole,
+although its runs held every frame of it (the segment of the clients' group). The journal is now read through a
+window of 4 MiB, a frame the runs hold checked by its CRC piece by piece. A first measure after the fix gave Q3 613 ms
+on one domain; it did not repeat (89 to 91 ms in both rounds above; 89.5 ms on 3 domains).
+
+### Writes at 256 clients, with their merges
+
+Closed loop, 10 s, 6 runs a side on a fresh copy of each database (alternated); the peak is the process's VmHWM, the
+merge memory of the method of milestone 2:
+
+| | durable groups/s, median [interval] | peak memory, median [interval] | journal fsync p99, the 6 runs |
+|---|---:|---:|---:|
+| new | 18,252 [13,574, 24,383] | 762 MB [723, 1,300] | 16.5 to 131 ms (median 27) |
+| 148ff09 | 18,168 [14,613, 22,488] | 1,040 MB [842, 1,161] | 29 to 50 ms (median 35) |
+| c7f25c0 | 18,546 [17,000, 20,889] | 2,095 MB [1,778, 3,024] | 20 to 39 ms (median 22.5) |
+
+The throughput is the disk's, on every side. A merge now writes a level of a few hundred thousand facts (0.3 s) where
+148ff09 rewrote the base (3.7 s), so the peak falls by a quarter against 148ff09 and by two thirds against c7f25c0.
+
+**Method.** As above: every process under the heavy lock and a memory cap, the sides alternated in one session,
+medians with their distribution-free 95 % intervals (order statistics; with 6 runs the interval is the smallest and
+the largest, coverage 96.9 %; with 4, 87.5 %; with 7, 98.4 %; with 10, the second smallest and the second largest,
+97.9 %), latencies from histograms, the same answers on every side (Q4 453,866 invoices summing to 22,677,088,830; Q5
+114 rotations). Between two processes of the same binary, the medians differ more than their intervals say (Q1 from
+0.34 to 0.47 µs for 148ff09 in one session): the rounds are alternated and each cell shows both. Scripts:
+`bench/bench.ml` (`GROUP`, `THREADS` and `SNAPSHOT` are new), `bench/pg/pg.sh`, the SQLite set-up of the docs
+(`.import`, the indexes after, `ANALYZE`, a checkpoint).
 
 ## The merge written to a file (2026-11-08), at 10 million facts
 
