@@ -187,7 +187,7 @@ let rec recover ?(kill = false) ?(close = false) w =
     if not (C.F.equal got want) then fail w "recovered state at %d differs from the model: %s" k (C.show_diff got want);
     (* G12: a crash never leaves a merge's file, nor a snapshot that must be set aside *)
     if List.exists (fun f -> Filename.check_suffix f ".tmp") (snapshot_files w) then fail w "a merge's file was left after recovery";
-    let expected n = List.exists (fun f -> String.length n > 34 && String.sub n 9 25 = f) w.flipped_snapshots in
+    let expected n = List.exists (fun f -> let k = String.length f in String.length n > 9 + k && String.sub n 9 k = f) w.flipped_snapshots in
     if List.exists (fun n -> String.length n > 8 && String.sub n 0 8 = "snapshot" && not (expected n)) e.notes then
       fail w "a snapshot was set aside after a crash: %s" (String.concat "; " e.notes);
     if w.flipped_journal then (count "damage before the snapshot, not needed"; raise Over)
@@ -251,7 +251,10 @@ let step w =
   | n when n < 45 ->
     if w.pending = None then begin
       let reqs = Array.init (1 + Rng.int w.r 5) (fun _ -> gen_ops w e.working, Rng.int w.r 9, "w") in
+      (* a large group merges at once with the newest runs: a merge begun must end first, as the writer does *)
+      if Array.exists (fun (ops, _, _) -> List.compare_length_with ops !Resolve.large_min >= 0) reqs then finish_merge w;
       let b = Engine.prepare e reqs in
+      if b.runs <> [] then count "large groups";
       record_batch w b;
       w.pending <- Some b
     end
@@ -345,6 +348,8 @@ let run seed steps =
   in
   Journal.segment_limit := 600 + Rng.int r 4000;
   Engine.compact_min := 5 + Rng.int r 60;
+  (* groups of 4 changes and more take the faster path of large groups when they can *)
+  Resolve.large_min := 4;
   (match Engine.open_ ~id_source:(fun _ -> "0123456789abcdef") w.disk dir with
    | Ok e ->
      w.e <- Some e;

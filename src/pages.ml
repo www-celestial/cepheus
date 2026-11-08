@@ -166,8 +166,10 @@ let record b k =
 let room () =
   while !resident >= !capacity && (small.n > 0 || main.n > 0) do make_room () done;
   (* the bytes of evicted pages go back to the system only when a collection finds them: one full collection after
-     each quarter of the cache evicted keeps the pages in memory under 1.25 times the cache *)
-  if !evicted >= max 16 (!capacity / 4) then begin
+     each quarter of the cache evicted keeps the pages in memory under 1.25 times the cache; but never before the
+     evicted bytes reach a quarter of the heap, so that a small cache beside a large heap does not pay a full
+     collection for a few pages *)
+  if !evicted >= !capacity / 4 && !evicted >= (Gc.quick_stat ()).heap_words * (Sys.word_size / 8) / 4 / size then begin
     evicted := 0;
     Gc.full_major ()
   end
@@ -261,14 +263,11 @@ let[@inline] get32 b o = Int32.to_int (get32u (frame b o) (o land mask)) land 0x
 let[@inline] get16 b o = get16u (frame b o) (o land mask)
 let[@inline] get8 b o = Char.code (Bytes.unsafe_get (frame b o) (o land mask))
 
-(* ---- the empty base, the one base built in memory (every page resident, outside the cache) ---- *)
+(* ---- a part with no page (Store.nothing) ---- *)
 
-let create len =
-  let n = pages len in
-  let frames = Array.init n (fun _ -> Bytes.make size '\000') in
-  { id = Atomic.fetch_and_add ids 1; frames; hot = Array.copy frames; freq = Bytes.make n '\003'; len; load = None }
+let empty = { id = -1; frames = [||]; hot = [||]; freq = Bytes.empty; len = 0; load = None }
 
-(* ---- bases read from a file through the cache (every other base) ---- *)
+(* ---- runs read from a file through the cache (every run) ---- *)
 
 let on_file len load =
   let n = pages len in

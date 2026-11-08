@@ -277,7 +277,72 @@ counterexample in 7 steps. This is the protocol ALICE [46]
 found many applications get wrong (a rename before the fsync of the data, a file trusted before its directory is
 forced).
 
-## 9. What comes next, and why
+## 9. Levels on disk, and large groups
+
+**Leveling or tiering.** Let N be the facts, B the changes the delta holds before it is merged (`compact_min`,
+200,000), T the size ratio between levels, L = ⌈log_T(N/B)⌉ the levels on disk. Under leveling [1, 61], each level
+is one sorted run, at most T times the one above it; a run enters a level by a merge with the run already there, so a
+fact is written about (T + 1)/2 times per level: write amplification W ≈ L (T + 1)/2. A read visits one run per level:
+R = L. Under tiering [61], a level holds up to T runs, merged into one run of the next level when full: a fact is
+written once per level, W ≈ L, but a read visits up to T runs per level, R ≈ T L. Lazy leveling (Dostoevsky [64])
+tiers every level but the last: W ≈ L - 1 + (T + 1)/2, R ≈ T (L - 1) + 1. Bloom filters make a point read of a key
+cost about one run's probe whatever R (Monkey [5]), but they help only lookups of a whole key; Cepheus' reads are short
+ranges (the facts of a thing, the things of a value) and exact counts, which visit every run that may hold the key.
+So R weighs as much as W here, and leveling is the pick.
+
+The numbers, from a model of the 10 M load of the benchmarks (`lsm_model.py` in the job's notes: the groups of the
+load in order, the merges each policy makes; the facts each merge writes counted, and the runs a read would visit
+after each group):
+
+```
+policy (B = 200,000)        facts written   amplification   runs at most   runs on average
+one level (before)          145 M           14.5            1              1
+leveling, T = 4              58 M            5.8            3              2.1
+leveling, T = 10             75 M            7.5            2              1.8
+tiering, T = 4               39 M            3.9            8              4.4
+tiering, T = 8               29 M            2.9           12              7.0
+```
+
+T = 4 halves what leveling writes against T = 10 with one run more at 10 M facts (the curve L (T + 1)/2 is flat
+between 3 and 5 and rises beyond; RocksDB's default, 10 [63], weighs a reader that has Bloom filters). Picked:
+leveling, T = 4 (`Engine.ratio`): level l holds at most B 4^l rows. A merge takes the delta and the newest runs down to
+the first level that can hold them all, and writes one run there (`Engine.plan`): the levels it skips are merged in
+the same pass, so a fact crosses them with one write.
+
+**Several runs read as one.** A run holds the changes of a range of groups on top of the runs below it: the facts it
+adds (part a), and the facts of the runs below it that it retracts (part t, empty at the bottom). Its counts are net:
+it adds only facts absent below it and retracts only facts present below it. Then a fact is in a view iff the newest
+entry for it adds it, and every count is the sum, over the runs, of the rows of part a minus those of part t, plus the
+delta's: exact counts stay O(R log n). A merge of sources (the delta, the newest runs) decides each fact from its
+newest and its oldest entry alone: the newest says whether it is in the new state, the oldest whether it was in the
+state below the merged runs (an addition there means it was not); the new run adds it if it is in and was not, retracts
+it if it is not and was, and holds nothing otherwise. A merge into the bottom holds no retraction.
+
+A row of an older run is shown only if no newer run holds an entry for the same fact. Each part has a rank table by
+thing (Jacobson's rank directory [65]: per 32 thing ids, their presence bits and the count before them): one bit says
+whether a part holds a thing at all, so the check costs a few bit tests unless a newer run holds the same thing; and a
+part costs a quarter of a byte a thing id, where the dense table of offsets of the one-level base cost 8 (the 65,536
+ids below the first thing included: 512 KiB a base, even a tiny one). A lookup in a part is its rank (one 8-byte word,
+a popcount, none when the block's 32 things are all there), then the offsets of its slot, as before.
+
+**Large groups.** A group of many additions (`Resolve.large_min`, 20,000) takes a faster path to the same result
+(`Resolve.resolve_large`): its additions go into arrays, sorted by counting (by thing, a dense range for new things;
+by property) and a stable LSD radix sort by value inside each property (11-bit digits, Knuth [66], 5.2.5), and a merge
+reads them as one more source, the newest, beside the delta and the runs; no persistent map is built for them. The
+faster path decides only what it can alone (additions to new or ordinary things, one value per new thing for a
+one-valued property, many-valued additions to existing things, no unique value already taken); on any doubt, the
+group goes through `Resolve.resolve`, which decides as always (errors included). Its result is the same: the same
+changes in the same order, the same thing numbers, the same texts' numbers (each text is interned at its first
+addition, as `Resolve` does), so a fork, which always takes `Resolve`, answers as the database (G8); the unit tests
+compare both paths on random large groups, encoding and facts. At recovery, a group of the journal whose changes are
+all additions (the facts it adds are then absent before it, and distinct: `Resolve` records only effective changes) is
+replayed the same way (`Resolve.replay_large`).
+
+The merge of a large group runs in the writer, when the group is prepared, and writes a run file that is named only
+once the group's frame is durable (the commit installs it, as a background merge's: G12). No background merge runs
+beside it.
+
+## 10. What comes next, and why
 
 - **Larger than memory, the rest** (design, section 15): more than one level on disk, so that a change costs fewer
   bytes of merges than the 17 facts of one level (tiering or leveling [61], per-level Bloom filters as in Monkey [5];
@@ -388,4 +453,11 @@ forced).
 62. O. Balmau, F. Dinu, W. Zwaenepoel, K. Gupta, R. Chandhiramoorthi, D. Didona. SILK: Preventing Latency Spikes in
     Log-Structured Merge Key-Value Stores. USENIX ATC 2019.
 63. S. Dong, M. Callaghan, L. Galanis, D. Borthakur, T. Savor, M. Strum. Optimizing Space Amplification in RocksDB.
-    CIDR 2017; and the RocksDB options `bytes_per_sync` and `rate_limiter` (RocksDB wiki, "Rate Limiter").
+    CIDR 2017; and the RocksDB options `bytes_per_sync`, `rate_limiter` and `max_bytes_for_level_multiplier` (RocksDB
+    wiki, "Rate Limiter", "Leveled Compaction").
+64. N. Dayan, S. Idreos. Dostoevsky: Better Space-Time Trade-Offs for LSM-Tree Based Key-Value Stores via Adaptive
+    Removal of Superfluous Merging. SIGMOD 2018.
+65. G. Jacobson. Space-efficient Static Trees and Graphs. FOCS 1989.
+66. D. E. Knuth. The Art of Computer Programming, vol. 3: Sorting and Searching, 2nd ed. Addison-Wesley, 1998.
+67. J. L. Bentley, A. C.-C. Yao. An Almost Optimal Algorithm for Unbounded Searching. Information Processing Letters
+    5(3), 1976.

@@ -231,6 +231,20 @@ let variants =
           let v = List.fold_left Resolve.replay m.view (List.rev b2.groups) in
           Engine.install r.e m v);
       old_new = (fun r -> Some [ r.e.merged; r.e.working.group + 1 ]) };
+    { vname = "a large group, merged as it is prepared, named once its frame is durable"; tail = 3; before = ignore;
+      run =
+        (fun r ->
+          (* groups of 4 additions and more take the path of large groups; only here, so that the replays of the
+             other variants make no merge of their own *)
+          Resolve.large_min := 4;
+          let p n = Option.get (Schema.by_name r.e.working.schema n) in
+          let ops = List.concat (List.init 3 (fun k -> let t = -(k + 1) in
+              [ Resolve.Add (t, p "name", Text (Printf.sprintf "big%d" k)); Add (t, p "score", Int k); Add (t, p "tag", Text "t") ])) in
+          let b = prepare r ops in
+          if b.runs = [] then failwith "the large group did not take its path";
+          commit r b;
+          Resolve.large_min := 20_000);
+      old_new = (fun r -> Some [ r.e.merged; r.e.working.group + 1 ]) };
     { vname = "the merges of a recovery replaying a long tail"; tail = 12;
       before = (fun r -> Sim_disk.kill r.sim);
       run = (fun r -> Engine.compact_min := 3; r.e <- open_db r.disk);
@@ -244,6 +258,7 @@ let merge_points = ref 0
 (* recovery after the crash: the checks of G1, G7 and G12 *)
 let recovered what r ~acked old_new =
   Engine.compact_min := 1_000_000;
+  Resolve.large_min := 20_000;
   incr merge_states;
   match Engine.open_ ~id_source:(fun _ -> id) r.disk mdir with
   | Error m -> C.fail "%s: recovery failed: %s" what (Engine.message m); None

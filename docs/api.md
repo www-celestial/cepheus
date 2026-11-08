@@ -24,7 +24,7 @@ val message : error -> string
 
 | function | what it does |
 |---|---|
-| `open_ : string -> (db, error) result` | opens a database directory, creating it if missing; recovers (newest valid snapshot, then the journal). `Busy` if another process holds it. |
+| `open_ : string -> (db, error) result` | opens a database directory, creating it if missing; recovers (the newest valid chain of runs, then the journal). `Busy` if another process holds it. |
 | `close : db -> unit` | waits for writes in flight, closes; nothing for a fork |
 | `view : db -> view` | the newest durable state (a fork: its newest state); free |
 | `group : view -> int` | the number of the last group in a view |
@@ -47,7 +47,13 @@ val thing : receipt -> int -> int
 Thing numbers below zero are new things of the group: `-1`, `-2`... in a thing position or in a `Link`.
 
 Errors: `Conflict` (an `Expect`), `Invalid` (a value of the wrong type, a thing that does not exist, a link to
-nothing, a system property on an ordinary thing, a schema rule), `Not_unique`, and, for a database, `Io` and `Closed`.
+nothing, a system property on an ordinary thing, a schema rule, a group whose journal frame would pass 256 MiB),
+`Not_unique`, and, for a database, `Io` and `Closed`.
+
+**Loading.** A load is the same `write`, of large groups: a group of 20,000 changes and more, all additions, takes a
+faster path inside (its facts sorted in arrays and merged into a run at once; theory, section 9), with the same result
+and the same errors as any group. Write a load as a few large groups (each confirmed once, with one fsync), not as
+millions of small ones. `thing r k` walks the receipt's list: for a large group, read `r.things` once into a table.
 
 ## The schema
 
@@ -103,9 +109,9 @@ Cepheus.fold v q ~init:(fun () -> Hashtbl.create 100)
 
 | function | what it does |
 |---|---|
-| `snapshot : db -> (unit, error) result` | merges now (the delta into a new base and its snapshot file), so the next open replays only what follows; nothing to do if no group came since the last merge |
+| `snapshot : db -> (unit, error) result` | merges now: the delta and every run into one run (one base, the fastest to read), so the next open replays nothing; nothing to do if there is one run and no group came since |
 | `verify : string -> (int, error) result` | reads a closed database's whole journal and checks every frame and trailer; the number of groups |
-| `notes : db -> string list` | what recovery set aside (a damaged snapshot) |
+| `notes : db -> string list` | what recovery set aside (a damaged run, a snapshot of an earlier format) |
 | `set_cache : int -> unit` | the bytes of base pages kept in memory, for every database of the process (1 GiB by default) |
 | `open_on : Disk.t -> string -> (db, error) result` | `open_` on another disk, such as `Sim_disk` |
 

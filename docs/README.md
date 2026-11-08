@@ -6,5 +6,5 @@
 - [API](api.md): every function of the OCaml library.
 - [Operations](operations.md): files, opening and recovery, snapshots, backup, restore, verification.
 - [Testing](testing.md): forks for unit tests, and how Cepheus itself is tested.
-- [File formats](formats.md): the journal and snapshot files, byte by byte.
+- [File formats](formats.md): the journal and run files, byte by byte.
 - [Benchmarks](benchmarks.md): Cepheus against PostgreSQL, with the method.

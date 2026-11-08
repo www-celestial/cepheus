@@ -44,7 +44,7 @@ type t = {
   mutable stopped : error option;  (* after a failed write or fsync: nothing more is confirmed (G10) *)
   mutable notes : string list;  (* what recovery found and did *)
   at : Journal.position Atomic.t;  (* the journal's end after the last durable frame: where a merge's replay starts *)
-  mutable merged : int;  (* the group of the newest snapshot, the base's file *)
+  mutable merged : int;  (* the group of the newest run *)
 }
 
 type batch = {
@@ -54,42 +54,117 @@ type batch = {
   first : int;
   count : int;
   after : Store.view;
+  runs : Snapshot.written list;  (* the runs of its large groups, to install once its frame is durable; newest first *)
 }
 
+(* The levels (Store, Snapshot): the delta is merged once it holds [compact_min] changes; level l holds at most
+   compact_min * ratio^l rows. A merge takes the delta and the newest runs, down to the first level that can hold
+   them all, and writes one run there (leveling: Luo, Carey 2020; the theory and the choice of the ratio:
+   docs/theory.md, section 9). *)
 let compact_min = ref 200_000
+let ratio = ref 4
 let frames = Atomic.make 0 (* frames written by this process: for the benchmarks, and a merge's fsyncs *)
 
 (* for the benchmarks, in microseconds: the writer's resolution of a batch, its wait at a merge switch, a background
    merge from its start to its catch-up *)
 let prepare_us = Histogram.create ()
+
+(* a large group's time in the writer, in microseconds: resolved (with its facts sorted), encoded for the journal,
+   merged into a run file *)
+let large_resolve_us = Histogram.create ()
+let large_encode_us = Histogram.create ()
+let large_merge_us = Histogram.create ()
 let switch_us = Histogram.create ()
 let merge_us = Histogram.create ()
 
-let needs_compaction (v : Store.view) = v.delta.dn > max !compact_min (v.base.n / 16)
+let needs_compaction (v : Store.view) = v.delta.dn > !compact_min
 
+let cap l = let c = ref !compact_min in for _ = 1 to l do c := !c * !ratio done; !c
+
+(* which runs a merge of [v] takes (the newest [take]), and the level of the run it writes; [extra]: rows a large
+   group adds *)
+let plan ?(extra = 0) (v : Store.view) =
+  let rs = v.runs in
+  let rec go l j size =
+    let j = ref j and size = ref size in
+    while !j < Array.length rs && rs.(!j).level <= l do size := !size + Store.run_rows rs.(!j); incr j done;
+    if !size <= cap l then !j, l else go (l + 1) !j !size
+  in
+  go 1 0 (v.delta.dn + extra)
+
+(* every run and the delta into one, at a level that holds them *)
+let plan_all (v : Store.view) =
+  let rs = v.runs in
+  let size = Array.fold_left (fun n r -> n + Store.run_rows r) v.delta.dn rs in
+  let l = ref (Array.fold_left (fun l (r : Store.run) -> max l r.level) 1 rs) in
+  while cap !l < size do incr l done;
+  Array.length rs, !l
+
+(* A group whose frame would pass the journal's limit is refused (Journal.max_body). *)
+let too_large size = Invalid (Printf.sprintf "a group of %d bytes is over the frame limit of %d" size Journal.max_body)
+
+(* The batch's groups resolved on the working view, in order. A large group (Resolve.resolve_large) is merged at
+   once with the delta and the newest runs into a run file, not yet named: the batch carries it, and the commit
+   names it once the frame is durable, as a background merge's (G12). The writer runs no background merge then. *)
 let prepare t (reqs : (Resolve.op list * int * string) array) =
   let body = Buffer.create 1024 in
   let first = t.working.group + 1 in
-  let count = ref 0 and groups = ref [] in
+  let count = ref 0 and groups = ref [] and runs = ref [] in
+  let one = Buffer.create 256 in
   let results =
     Array.map
       (fun (ops, by, why) ->
         match t.stopped with
         | Some e -> Error e
         | None -> (
-          let n = t.working.group + 1 in
-          match Resolve.resolve t.working ~n ~time:(t.disk.now ()) ~by ~why ops with
-          | Ok (v, g, temps) ->
-            t.working <- v;
-            Group.encode body g;
-            groups := g :: !groups;
-            incr count;
-            Ok { group = n; things = temps }
-          | Error e -> Error (of_resolve e)
-          | exception Pages.Unreadable m -> Error (Damaged m)))
+          let n = t.working.group + 1 and time = t.disk.now () in
+          let t0 = Journal.clock () in
+          let large =
+            if List.compare_length_with ops !Resolve.large_min >= 0 then Resolve.resolve_large t.working ~n ~time ~by ~why ops
+            else None
+          in
+          if large <> None then Histogram.record large_resolve_us (Journal.clock () - t0);
+          match large with
+          | Some l -> (
+            (* the frame's body encoded by another domain while this one merges *)
+            let t1 = Journal.clock () in
+            let enc = Domain.spawn (fun () -> let b = Buffer.create ((16 * l.count) + 64) in l.body b; Journal.clock () - t1, b) in
+            match
+              let take, level = plan ~extra:l.facts.n l.view in
+              Snapshot.merge ~bulk:l.facts t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level (Atomic.get t.at)
+            with
+            | w ->
+              Histogram.record large_merge_us (Journal.clock () - t1);
+              let us, one = Domain.join enc in
+              Histogram.record large_encode_us us;
+              if Buffer.length one > Journal.max_body then (Snapshot.abandon t.disk w; Error (too_large (Buffer.length one)))
+              else begin
+                t.working <- w.view;
+                Buffer.add_buffer body one;
+                runs := w :: !runs;
+                incr count;
+                Ok { group = n; things = l.temps }
+              end
+            | exception Disk.Io m -> ignore (Domain.join enc); Error (Io m)
+            | exception Pages.Unreadable m -> ignore (Domain.join enc); Error (Damaged m))
+          | None -> (
+            match Resolve.resolve t.working ~n ~time ~by ~why ops with
+            | Ok (v, g, temps) ->
+              Buffer.clear one;
+              Group.encode one g;
+              if Buffer.length one > Journal.max_body then Error (too_large (Buffer.length one))
+              else begin
+                t.working <- v;
+                Buffer.add_buffer body one;
+                groups := g :: !groups;
+                incr count;
+                Ok { group = n; things = temps }
+              end
+            | Error e -> Error (of_resolve e)
+            | exception Pages.Unreadable m -> Error (Damaged m))))
       reqs
   in
-  { results; groups = !groups; body; first; count = !count; after = t.working }
+  { results; groups = !groups; body; first; count = !count; after = t.working; runs = !runs }
 
 (* Writes and forces the frame; on failure the database stops, and the batch's writes fail. *)
 let commit t b =
@@ -99,23 +174,37 @@ let commit t b =
     match if b.count > 0 then (Journal.append t.journal b.body b.first b.count; Atomic.incr frames) with
     | () ->
       if b.count > 0 then Atomic.set t.at (Journal.position t.journal);
+      (* the runs of its large groups take their names: their groups are durable now. A failure stops the database
+         (the groups are durable; the next open replays them from the journal) *)
+      List.iter
+        (fun (w : Snapshot.written) ->
+          if t.stopped = None then
+            match Snapshot.install t.disk (Filename.concat t.dir "snapshots") w with
+            | () -> t.merged <- w.group; List.iter (fun (r : Store.run) -> Pages.drop r.a.pg) w.replaced
+            | exception Disk.Io m ->
+              prerr_endline ("cepheus: the run of a large group could not be named: " ^ m);
+              t.stopped <- Some (Io m))
+        (List.rev b.runs);
       Atomic.set t.published b.after;
       b.results
     | exception Disk.Io m ->
       let e = Io m in
       t.stopped <- Some e;
+      List.iter (Snapshot.abandon t.disk) b.runs;
       Array.map (function Ok _ -> Error e | r -> r) b.results)
 
-(* ---- Merges: the one way to make a base ----
-   A merge writes the view's base and delta into a new snapshot file (Snapshot.merge), which becomes the base. It may
-   start from a view that runs ahead of the disk (a background merge); its file takes its name only when its group
-   is durable, so that a snapshot never holds a group the journal could lose (G12). *)
+(* ---- Merges: the one way to make a run ----
+   A merge writes the view's delta and its newest runs into a new run file (Snapshot.merge), which replaces them. It
+   may start from a view that runs ahead of the disk (a background merge); its file takes its name only when its
+   group is durable, so that a run never holds a group the journal could lose (G12). *)
 
 let sdir t = Filename.concat t.dir "snapshots"
 
-(* the merge of [v] into a file, not yet installed; [Atomic.get t.at] taken with [v]: its first group is <= v.group + 1;
-   [busy]: clients may be writing beside it (a background merge) *)
-let merge_begin ?busy t (v : Store.view) pos = Snapshot.merge ?busy t.disk (sdir t) t.id v pos
+(* the merge of [v] into a file, not yet installed: the runs [plan] says, or all of them; [Atomic.get t.at] taken with
+   [v]: its first group is <= v.group + 1; [busy]: clients may be writing beside it (a background merge) *)
+let merge_begin ?busy ?(all = false) t (v : Store.view) pos =
+  let take, level = if all then plan_all v else plan v in
+  Snapshot.merge ?busy t.disk (sdir t) t.id v ~take ~level pos
 
 (* a frame was written since the last call: the journal is busy, its fsyncs are waited for *)
 let journal_busy () =
@@ -126,20 +215,21 @@ let journal_busy () =
     last := f;
     b
 
+let drop_runs rs = List.iter (fun (r : Store.run) -> Pages.drop r.a.pg) rs
+
 (* The switch, with nothing in flight: [w]'s file takes its name, and [v] (w's view with the groups written since)
-   becomes the working and the published view; the base it replaces leaves the cache. *)
+   becomes the working and the published view; the runs it replaces leave the cache. *)
 let install t (w : Snapshot.written) (v : Store.view) =
   if t.stopped <> None || (Atomic.get t.published).group < w.group then invalid_arg "Engine.install: not durable";
   Snapshot.install t.disk (sdir t) w;
   t.merged <- w.group;
-  let old = t.working.base in
   t.working <- v;
   Atomic.set t.published v;
-  if v.base != old then Pages.drop old.pg
+  drop_runs w.replaced
 
-(* A merge now, with nothing in flight (working = published). *)
+(* A merge now of every run and the delta, with nothing in flight (working = published). *)
 let compact t =
-  let w = merge_begin t t.working (Atomic.get t.at) in
+  let w = merge_begin ~all:true t t.working (Atomic.get t.at) in
   match install t w w.view with () -> () | exception (Disk.Io _ as e) -> Snapshot.abandon t.disk w; raise e
 
 let snapshot t =
@@ -147,7 +237,7 @@ let snapshot t =
   | Some e -> Error e
   | None -> (
     (* a page of the base that cannot be read, or a failed disk: no snapshot, an error, and the writer goes on *)
-    match if t.working.group > t.merged then compact t with
+    match if t.working.group > t.merged || Array.length t.working.runs > 1 then compact t with
     | () -> Ok ()
     | exception Disk.Io m -> Error (Io m)
     | exception Pages.Unreadable m -> Error (Damaged m))
@@ -227,17 +317,26 @@ let open_ ?(id_source = random_id) disk dir =
         let at = ref None in
         let frame pos = at := Some pos in
         let replay (g : Group.t) =
-          if g.n > !v.group then begin
-            v := Resolve.replay !v g;
-            if needs_compaction !v then begin
-              let old = !v in
-              let w = Snapshot.merge disk sdir id old (Option.get !at) in
+          if g.n > !v.group then
+            match Resolve.replay_large !v g with
+            | Some (v', facts) ->
+              (* a large group: merged at once, as the writer did *)
+              let take, level = plan ~extra:facts.n v' in
+              let w = Snapshot.merge ~bulk:facts disk sdir id v' ~take ~level (Option.get !at) in
               Snapshot.install disk sdir w;
               v := w.view;
               merged := w.group;
-              Pages.drop old.base.pg
+              drop_runs w.replaced
+            | None ->
+            v := Resolve.replay !v g;
+            if needs_compaction !v then begin
+              let take, level = plan !v in
+              let w = Snapshot.merge disk sdir id !v ~take ~level (Option.get !at) in
+              Snapshot.install disk sdir w;
+              v := w.view;
+              merged := w.group;
+              drop_runs w.replaced
             end
-          end
         in
         let journal = Journal.recover ~frame ~force:(not clean) disk jdir id from replay in
         (* a snapshot is installed only once the journal holds its groups durably (G12): a journal that ends before
@@ -276,7 +375,7 @@ let open_ ?(id_source = random_id) disk dir =
 let close t =
   Journal.close t.journal;
   if t.stopped = None then t.disk.close (t.disk.openf (Filename.concat t.dir "closed") true);
-  Pages.drop t.working.base.pg;
+  drop_runs (Array.to_list t.working.runs);
   t.disk.unlock (Filename.concat t.dir "lock")
 
 (* ---- The threaded driver ---- *)
@@ -294,8 +393,8 @@ type control = Write of req | Snapshot of req | Stop
    The writer never stops for a merge: another domain writes the new base's file from the working view of the
    moment (Snapshot.merge), then replays the groups written since onto the new base (the writer keeps them in a
    log), until it is a few hundred behind; the writer then waits for the syncer to be idle (at most one fsync), replays
-   the rest, installs the file (its group is durable now) and switches both views to the new base. Levels: the delta
-   (level 0, persistent maps) is merged into the base (level 1, the snapshot file). *)
+   the rest, installs the file (its group is durable now) and switches both views to the new runs. Levels: the delta
+   (level 0, persistent maps) is merged with the newest runs into one run (levels 1, 2, ...: run files). *)
 type ready = Done of Snapshot.written * Store.view * int | Failed
 
 type merger = {
@@ -399,7 +498,7 @@ let finish_merge l =
     Option.iter Domain.join m.dom;
     l.merging <- None;
     wait_idle l;
-    let failed () = l.retry <- l.e.working.delta.dn + max !compact_min (l.e.working.base.n / 16) in
+    let failed () = l.retry <- l.e.working.delta.dn + !compact_min in
     (match Atomic.get m.ready with
      | Some (Done (w, v, applied)) when l.e.stopped = None -> (
        let gs, _ = after_applied m applied in
@@ -431,7 +530,7 @@ let merge a b =
   Buffer.add_buffer body a.body;
   Buffer.add_buffer body b.body;
   { results = Array.append a.results b.results; groups = b.groups @ a.groups; body; first = a.first;
-    count = a.count + b.count; after = b.after }
+    count = a.count + b.count; after = b.after; runs = b.runs @ a.runs }
 
 let writer l () =
   let go = ref true in
@@ -452,6 +551,9 @@ let writer l () =
       | Write _ :: _ ->
         let ws, rest = split [] items in
         let reqs = Array.of_list ws in
+        (* a large group merges at once with the newest runs: no merge may run beside it *)
+        if Array.exists (fun r -> let ops, _, _ = r.w in List.compare_length_with ops !Resolve.large_min >= 0) reqs then
+          finish_merge l;
         let t0 = Journal.clock () in
         let b = prepare l.e (Array.map (fun r -> r.w) reqs) in
         Histogram.record prepare_us (Journal.clock () - t0);

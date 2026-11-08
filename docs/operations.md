@@ -7,11 +7,13 @@ DIR/cepheus                       the database's id (16 random bytes) and format
 DIR/lock                          held (lockf) while the database is open: one process at a time
 DIR/closed                        left by a clean close (everything durable), removed by the next open
 DIR/journal/NNNNNNNNNNNNNNNNNNNN.seg   segments named by their first group, 64 MB each, only appended to
-DIR/snapshots/NNNNNNNNNNNNNNNNNNNN.snap   the two newest snapshots, named by their last group; the newest is the base
-DIR/snapshots/NNNNNNNNNNNNNNNNNNNN.snap.tmp   a merge being written (removed at open if a crash interrupted it)
+DIR/snapshots/LO-HI.run           the runs (levels of the LSM tree): the changes of groups LO+1..HI on top of the
+                                  state at LO (20 digits each); the chain from 0 to the newest group is the base, and
+                                  the newest bottom run outside it (LO = 0) is kept as a fallback
+DIR/snapshots/LO-HI.run.tmp       a merge being written (removed at open if a crash interrupted it)
 ```
 
-The journal is the truth: snapshots are caches that can always be rebuilt. Byte layouts: [formats](formats.md).
+The journal is the truth: runs are caches that can always be rebuilt. Byte layouts: [formats](formats.md).
 
 ## Opening and recovery
 
@@ -21,21 +23,21 @@ The journal is the truth: snapshots are caches that can always be rebuilt. Byte 
 2. reads the id; if `closed` is there (the last process closed cleanly), removes it; else forces the database's
    directory;
 3. removes the files of merges a crash interrupted (`.tmp`);
-4. loads the newest snapshot that checks (header CRC, checksum table, the order and bounds of every table; a page's
-   CRC as it is read); a snapshot that does not check is set aside and noted (`Cepheus.notes`), and the next older
-   one is tried;
+4. takes the chain of runs from 0 that reaches the newest group with the fewest runs, and checks each (header CRC,
+   checksum table, rank tables, the order and bounds of every table; a page's CRC as it is read); a run that does not
+   check is set aside and noted (`Cepheus.notes`), and the choice is made again without it;
 5. after a crash (no `closed`), writes the newest frame of the journal again and forces the newest segment and the
    journal's directory (a process killed before its fsync left them in the page cache; after a failed fsync the
-   page cache may hold bytes the disk does not, G13); then reads the journal from the snapshot's position: checks every frame,
-   applies every group, and merges into a new snapshot file when the changes pass the threshold, as the writer would
-   have; a journal that ends before the snapshot's group is damage;
+   page cache may hold bytes the disk does not, G13); then reads the journal from the newest run's position: checks
+   every frame, applies every group, and merges into a new run when the changes pass the threshold or the group is a
+   large one, as the writer would have; a journal that ends before the newest run's group is damage;
 6. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
-   `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a snapshot of the
+   `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a run of the
    groups before the damage);
 7. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt.
 
-Recovery time is the snapshot's check plus the replay of the groups after it. Every merge writes a snapshot, so the
-replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`
+Recovery time is the runs' check plus the replay of the groups after the newest one. Every merge writes a run, so
+the replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`
 merges now, before a planned stop for example.
 
 **When recovery says `Damaged`.** Durable data changed: a disk fault, a mishandled file, a segment missing in the
@@ -92,15 +94,23 @@ merges were built in memory); with a 32 MB cache, a merge of the whole 245 MB ba
 
 ## Disk space and merges
 
-Each merge writes the whole base into a new file (about 25 bytes a fact), forces it, and renames it; the snapshots
-beyond the newest two are then removed. During a merge the directory holds three bases (the current one, the one
-before it, the new one being written), and a removed file's space returns only when no view reads it any longer (the
-file stays open until the garbage collector frees its base). Budget about four times the base for `snapshots/`.
+The runs are the levels of an LSM tree (theory, section 9): the delta is merged once it holds 200,000 changes, and
+level l holds at most 200,000 x 4^l rows (800,000, 3.2 M, 12.8 M, ...). A merge takes the delta and the newest runs
+down to the first level that can hold them all, writes one run there (about 25 bytes a fact), forces it, renames it,
+and then removes the runs it replaced; the newest bottom run outside the chain is kept as a fallback. A removed
+file's space returns only when no view reads it any longer (the file stays open until the garbage collector frees its
+run). During a full merge (`snapshot`) the directory holds the base twice and the fallback: budget about three times
+the base for `snapshots/`.
 
-A merge writes about 17 facts of base for each change (the threshold n/16), so a busy database writes far more bytes
-to its snapshots than to its journal (at 10 M facts, a merge every 625,000 changes writes 245 MB). While clients write,
-a merge forces its file every 8 MiB, so that the journal's fsyncs, which every write waits for, never queue behind
-hundreds of MB of a merge's dirty pages; a merge nobody waits beside (`snapshot`, recovery) forces once, at the end.
+A fact is written about (T + 1) / 2 = 2.5 times per level it crosses (T = 4), against up to 17 times with the one level
+before; at 10 M facts, three levels. While clients write, a merge forces its file every 8 MiB, so that the journal's
+fsyncs, which every write waits for, never queue behind hundreds of MB of a merge's dirty pages; a merge nobody waits
+beside (`snapshot`, recovery) forces once, at the end.
+
+A large group (20,000 changes and more, all additions: a load) is merged into a run as it is written, from its facts
+sorted in arrays, with no per-fact index update: write a load as a few large groups, not as many small ones. Its
+receipt lists every new thing; read `receipt.things` once into a table rather than calling `thing` for each (a walk of
+the list each time).
 
 ## Disks
 

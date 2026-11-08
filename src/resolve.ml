@@ -169,3 +169,167 @@ let error_message = function
   | Conflict m -> "conflict: " ^ m
   | Invalid m -> "invalid: " ^ m
   | Not_unique m -> "not unique: " ^ m
+
+(* ---- Large groups ----
+   A group of many additions (a load) takes a faster path to the same result: the changes Resolve would record, in
+   the same order, without a persistent map per fact. Its facts come out as arrays (Bulk), which a merge reads as it
+   reads a run. The path takes only what it can decide alone: additions to things the group creates or ordinary
+   things; one value at most per new thing for a one-valued property; for an existing thing, many-valued properties
+   only; nothing unique already taken. Anything else, or any doubt (an error, a value twice), and the group goes
+   through [resolve], which decides as always, errors included: the faster path never accepts or refuses on its own,
+   so a fork, which always takes [resolve], answers exactly as the database (G8). *)
+
+let large_min = ref 20_000
+
+exception Slow
+
+type large = { view : Store.view; body : Buffer.t -> unit; facts : Bulk.t; count : int; temps : (int * int) list }
+
+let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
+  try
+    let nops = List.length ops in
+    (* new things: negative ids, numbered in order of first use; ids -1 .. -nops in an array, others in a table *)
+    let dense = Array.make (nops + 1) (-1) and temps = Hashtbl.create 16 and order = ref [] and next = ref v0.next_e in
+    let id x =
+      if x >= 0 then x
+      else if x >= -nops then (
+        let i = dense.(-x) in
+        if i >= 0 then i else (let i = !next in dense.(-x) <- i; order := x :: !order; incr next; i))
+      else match Hashtbl.find_opt temps x with
+        | Some i -> i
+        | None -> let i = !next in Hashtbl.replace temps x i; order := x :: !order; incr next; i
+    in
+    let fe = Array.make nops 0 and fp = Array.make nops 0 and fw = Array.make nops 0 in
+    (* texts: each looked up once; those the group adds numbered in order of first use, as [intern] would *)
+    let v = ref v0 and texts = Hashtbl.create 4096 and added = ref [] in
+    let text s =
+      match Hashtbl.find_opt texts s with
+      | Some w -> w
+      | None ->
+        let w = match Store.find_text v0 s with
+          | Some w -> w
+          | None -> let v', w = Store.add_text !v s in v := v'; added := (s, w) :: !added; w
+        in
+        Hashtbl.replace texts s w;
+        w
+    in
+    let word (x : Value.t) =
+      match x with
+      | Int n | Date n | Money n | Link n -> n
+      | Bool b -> if b then 1 else 0
+      | Text s -> text s
+      | Float f -> text (Store.float_key f)
+    in
+    let k = ref 0 in
+    List.iter
+      (function
+        | Add (e, p, x) ->
+          (* temporary ids numbered in the order Resolve numbers them: the thing, then a link's target *)
+          let e = id e in
+          let x = match x with Value.Link t when t < 0 -> Value.Link (id t) | x -> x in
+          let d = match Schema.find v0.schema p with Some d -> d | None -> raise Slow in
+          if Schema.is_system p || e < Schema.first_thing || e >= !next || not (Value.has_type d.typ x) then raise Slow;
+          (match x with Value.Link t -> if t < Schema.first_prop || t >= !next then raise Slow | _ -> ());
+          if e < v0.next_e && not d.many then raise Slow;
+          fe.(!k) <- e; fp.(!k) <- p; fw.(!k) <- word x;
+          incr k
+        | Retract _ | Expect _ -> raise Slow)
+      ops;
+    let np = Schema.count v0.schema in
+    let b = Bulk.make ~texts:(Array.of_list !added) fe fp fw nops ~np in
+    (* the effective additions: a fact already there (an existing thing's) or added twice is no change; a new thing
+       with two values for a one-valued property, or a value two things take for a unique one, goes to [resolve] *)
+    let keep = Bytes.make nops '\001' in
+    let prev = ref (-1) in
+    Array.iter
+      (fun i ->
+        (match !prev with
+         | j when j >= 0 && fe.(j) = fe.(i) && fp.(j) = fp.(i) ->
+           if fw.(j) = fw.(i) then Bytes.set keep (max i j) '\000'
+           else if not (Option.get (Schema.find v0.schema fp.(i))).many then raise Slow
+         | _ -> ());
+        prev := i;
+        if fe.(i) < v0.next_e && Store.mem v0 fe.(i) fp.(i) fw.(i) then Bytes.set keep i '\000')
+      b.by_thing;
+    for q = 0 to np - 1 do
+      match Schema.find v0.schema q with
+      | Some d when d.unique ->
+        for r = b.poff.(q) to b.poff.(q + 1) - 1 do
+          if Bytes.get keep b.pi.(r) = '\001' then begin
+            if r > b.poff.(q) && b.pw.(r - 1) = b.pw.(r) && b.pe.(r - 1) <> b.pe.(r) then raise Slow;
+            if Store.count_things v0 q b.pw.(r) > 0 then raise Slow
+          end
+        done
+      | _ -> ()
+    done;
+    (* the facts kept, in the group's order, and sorted again (cheap: they are nearly all of them) *)
+    let count = ref 0 in
+    for i = 0 to nops - 1 do if Bytes.get keep i = '\001' then incr count done;
+    let facts =
+      if !count = nops then b
+      else begin
+        let e = Array.make !count 0 and p = Array.make !count 0 and w = Array.make !count 0 and j = ref 0 in
+        for i = 0 to nops - 1 do
+          if Bytes.get keep i = '\001' then (e.(!j) <- fe.(i); p.(!j) <- fp.(i); w.(!j) <- fw.(i); incr j)
+        done;
+        Bulk.make ~texts:b.texts e p w !count ~np
+      end
+    in
+    let first_new = v0.next_e and count_new = !next - v0.next_e in
+    (* the frame body, as Group.encode writes the group: the operations walked again, links resolved *)
+    let body buf =
+      Codec.put_varint buf n;
+      Codec.put_int buf time;
+      Codec.put_int buf by;
+      Codec.put_string buf why;
+      Codec.put_varint buf first_new;
+      Codec.put_varint buf count_new;
+      Codec.put_varint buf !count;
+      List.iteri
+        (fun i op ->
+          match op with
+          | Add (_, _, x) when Bytes.get keep i = '\001' ->
+            Buffer.add_char buf '\001';
+            Codec.put_varint buf fe.(i);
+            Codec.put_varint buf fp.(i);
+            Value.encode buf (match x with Value.Link t when t < 0 -> Value.Link (id t) | x -> x)
+          | _ -> ())
+        ops
+    in
+    let temps = List.rev_map (fun t -> t, id t) !order in
+    Some { view = { !v with next_e = !next; group = n }; body; facts; count = !count; temps }
+  with Slow -> None
+
+(* A group from the journal that the faster path can replay: every change an addition, no system property (its
+   additions are facts absent before it, distinct: Resolve records only effective changes) *)
+let replay_large (v0 : Store.view) (g : Group.t) =
+  if Array.length g.changes < !large_min
+     || Array.exists (fun (c : Group.change) -> (not c.add) || Schema.is_system c.p || Schema.find v0.schema c.p = None) g.changes
+  then None
+  else begin
+    let n = Array.length g.changes in
+    let fe = Array.make n 0 and fp = Array.make n 0 and fw = Array.make n 0 in
+    let v = ref v0 and texts = Hashtbl.create 4096 and added = ref [] in
+    let text s =
+      match Hashtbl.find_opt texts s with
+      | Some w -> w
+      | None ->
+        let w = match Store.find_text v0 s with
+          | Some w -> w
+          | None -> let v', w = Store.add_text !v s in v := v'; added := (s, w) :: !added; w
+        in
+        Hashtbl.replace texts s w;
+        w
+    in
+    Array.iteri
+      (fun i (c : Group.change) ->
+        fe.(i) <- c.e; fp.(i) <- c.p;
+        fw.(i) <- (match c.v with
+            | Int n | Date n | Money n | Link n -> n
+            | Bool b -> if b then 1 else 0
+            | Text s -> text s
+            | Float f -> text (Store.float_key f)))
+      g.changes;
+    let facts = Bulk.make ~texts:(Array.of_list !added) fe fp fw n ~np:(Schema.count v0.schema) in
+    Some ({ !v with next_e = max v0.next_e (g.first_new + g.count_new); group = g.n }, facts)
+  end

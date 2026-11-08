@@ -170,6 +170,14 @@ let fsync t fd =
   Hashtbl.reset n.dirty;
   Hashtbl.filter_map_inplace (fun s () -> if s * sector < n.cur_len then Some () else None) n.lost
 
+(* an inode no name, no durable name, no name change a power loss may yet keep, and no open file refers to is gone:
+   its bytes are freed *)
+let forget t i =
+  let used = Hashtbl.fold (fun _ j u -> u || j = i) t.names false || Hashtbl.fold (fun _ j u -> u || j = i) t.dnames false
+             || Hashtbl.fold (fun _ (j, _) u -> u || j = i) t.fds false
+             || Hashtbl.fold (fun _ ops u -> u || List.exists (function Link (_, j) -> j = i | _ -> false) ops) t.pending false in
+  if not used then Hashtbl.remove t.inodes i
+
 let rename t a b =
   match Hashtbl.find_opt t.names a with
   | None -> io "rename %s: no such file" a
@@ -182,9 +190,12 @@ let rename t a b =
     note t (parent a) (Unlink a)
 
 let remove t p =
-  if not (Hashtbl.mem t.names p) then io "unlink %s: no such file" p;
-  Hashtbl.remove t.names p;
-  note t (parent p) (Unlink p)
+  match Hashtbl.find_opt t.names p with
+  | None -> io "unlink %s: no such file" p
+  | Some i ->
+    Hashtbl.remove t.names p;
+    note t (parent p) (Unlink p);
+    forget t i
 
 let mkdir t p =
   if Hashtbl.mem t.dirs p then io "mkdir %s: exists" p;
@@ -201,7 +212,10 @@ let sync_dir t d =
   if not (Hashtbl.mem t.dirs d) then io "fsync %s: no such directory" d;
   let ops = List.rev (Option.value (Hashtbl.find_opt t.pending d) ~default:[]) in
   List.iter (apply_durable t) ops;
-  Hashtbl.remove t.pending d
+  Hashtbl.remove t.pending d;
+  List.iter (function Unlink p -> ignore p | _ -> ()) ops;
+  let ids = Hashtbl.fold (fun i _ acc -> i :: acc) t.inodes [] in
+  if List.exists (function Unlink _ -> true | _ -> false) ops then List.iter (forget t) ids
 
 let in_dir d p = parent p = d
 
@@ -349,7 +363,7 @@ let disk t : Disk.t =
     pwrite = (fun fd off b pos len -> tick t; pwrite t fd off b pos len);
     truncate = (fun fd n -> tick t; truncate t fd n);
     fsync = tk (fsync t);
-    close = (fun fd -> ignore (inode t fd); Hashtbl.remove t.fds fd);
+    close = (fun fd -> ignore (inode t fd); let i, _ = Hashtbl.find t.fds fd in Hashtbl.remove t.fds fd; forget t i);
     rename = (fun a b -> tick t; rename t a b);
     remove = tk (remove t);
     sync_dir = tk (sync_dir t);

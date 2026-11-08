@@ -35,7 +35,7 @@ and answers in `Engine.commit`, after `Journal.append`, whose last call is `fsyn
 its header was written, its file forced and its directory forced (`write_segment_header`). So every byte of every
 frame up to the group's is durable; F2 does not touch durable bytes. Recovery (`Journal.scan`) reads frames in order
 and stops only at the first frame that does not check; all frames before a durable frame are durable, hence intact,
-hence read. The snapshot used at recovery is consistent with the journal (G7).
+hence read. The runs used at recovery are consistent with the journal (G7).
 
 *Tested by* `test/sim.ml` (every recovery: "lost acknowledged groups"), `test/exhaustive.ml` (every crash state of
 small journals), `test/crash.ml` (real `kill -9`, every confirmation checked for content).
@@ -58,7 +58,7 @@ is the application of groups 1..k in order.
 *Proof.* Frames are appended in group order (`Journal.append` refuses another order); recovery checks that each frame
 starts at the expected group and each group has the expected number, across segments ("a segment is missing"
 otherwise), and cuts everything after the first frame that does not check. Replay applies the recorded changes in
-order (`Resolve.replay`). If the newest snapshot says group S, a journal that ends before S is damage, not a shorter
+order (`Resolve.replay`). If the newest run says group S, a journal that ends before S is damage, not a shorter
 history.
 
 *Tested by* the simulation: after every recovery the state is compared with the reference model (the recorded groups
@@ -138,24 +138,34 @@ as the residual) and the simulation (random flips in durable segments).
 
 ## G7 Snapshots
 
-*Promise.* Opening from a snapshot and the journal after it gives the same state as replaying the whole journal. A
-damaged page of a snapshot is never served: a snapshot that fits in the cache is checked whole before the first
-question, and the database falls back on an older snapshot or on the journal; a page of a larger one is checked each
-time it is read from the disk (also when it was damaged after the open), and the read fails: `find` and `fold` return
+*Promise.* Opening from the runs on disk and the journal after them gives the same state as replaying the whole
+journal. A damaged page of a run is never served: a run that fits in the cache is checked whole before the first
+question, and the database falls back on other runs or on the journal; a page of a larger one is checked each time it
+is read from the disk (also when it was damaged after the open), and the read fails: `find` and `fold` return
 `Damaged`, `get`, `values` and `things` raise `Unreadable`, a write that needed the page fails. Never a wrong answer.
 
-*Proof.* A snapshot is the file of a merge (G12): the merged facts of a view, with the journal position of the last
-durable frame before the view's group; replay starts there and skips the groups the snapshot holds. Loading checks the
-header CRC, the CRC of the checksum table, then the order and bounds of every offset table
-(`Snapshot.check_and_build`). Every page goes through `Pages.fill`, which checks its CRC-32C before it enters the
-frame table: no other path puts a page there. Every access to a base is bounds-checked (the frame table, then the
-page), so a read never leaves the base's bytes. For random damage of a page, CRC-32C misses it with probability 2⁻³²;
-it detects every burst of up to 32 bits (Castagnoli, Bräuer, Herrmann 1993).
+*Proof.* A run is the file of a merge (G12): the changes of groups lo+1..hi on top of the state at lo, net (it adds
+only facts absent below it, retracts only facts present below it), with the journal position of the last durable frame
+before its group. Open takes a chain of runs from 0, each resting on the end of the one below (any such chain is the
+state at its top, since a run holds the changes of its groups on top of the state at its lo, whatever runs make that
+state); replay starts at the newest run's position and skips the groups it holds. Loading checks the header CRC, the
+CRC of the checksum table, the rank tables (each word's count follows from the bits before it, the last equals the
+things) and the order and bounds of every offset table (`Snapshot.check_and_build`). Every page goes through
+`Pages.fill`, which checks its CRC-32C before it enters the frame table: no other path puts a page there. Every access
+to a run is bounds-checked (the frame table, then the page), so a read never leaves the run's bytes. For random damage
+of a page, CRC-32C misses it with probability 2⁻³²; it detects every burst of up to 32 bits (Castagnoli, Bräuer,
+Herrmann 1993).
 
-*Tested by* the simulation (snapshots and merges at random moments, crashes inside their writing, flips in snapshot
-files) and `test/unit.ml` (round trip; a snapshot of another database is refused; a flipped snapshot is set aside; a
-base three times larger than the cache, read by three domains, with a bit flipped after the open: the questions answer
-right or return `Damaged`, and exactly the damaged page fails).
+*Several runs read as one state.* A fact is in a view iff the newest entry for it (the delta's, or the newest run's
+that has one) adds it; a count is the sum of each run's rows minus its retractions, plus the delta's net count (the
+runs are net, so nothing is counted twice); an iteration shows a row of a run only if no newer run has an entry for the
+same fact (docs/theory.md, section 9). *Tested by* `test/unit.ml` ("several runs": 120 random views of up to 4 runs that
+add and retract, against their full merge and a naive evaluator; "large groups").
+
+*Tested by* the simulation (merges at random moments, crashes inside their writing, flips in run files) and
+`test/unit.ml` (round trip; a run of another database is refused; a flipped run is set aside; a run three times larger
+than the cache, read by three domains, with a bit flipped after the open: the questions answer right or return
+`Damaged`, and exactly the damaged page fails).
 
 ## G8 Forks
 
@@ -214,37 +224,42 @@ ranges) compared with a naive evaluator over all facts, on a base with a delta a
 
 ## G12 Merges are atomic
 
-*Promise.* After a crash at any point of a merge (F1, F2, F4), the database opens on the old base or on the new one,
-whole, never a mix; its state is the replay of the journal to the recovered group (G7); no snapshot has to be set
-aside and no merge's file is left. A merge needs no more memory than the cache, a few page buffers and 21 bytes a
-page of the new base (see [theory](theory.md), section 8).
+*Promise.* After a crash at any point of a merge (F1, F2, F4), the database opens on the runs before it or on the
+runs after it, each whole, never a mix; its state is the replay of the journal to the recovered group (G7); no run has
+to be set aside and no merge's file is left. A merge needs no more memory than the cache, a few page buffers and 21
+bytes a page of the new run (see [theory](theory.md), section 8).
 
 *Proof.* (a) A merge writes its file under a temporary name and forces it before the rename: a name, durable or not,
-never points at bytes that are not on the disk. (b) The rename replaces atomically; under F2 a prefix of the
-directory's name changes survives: the new name, or the old one. (c) A file gets its name only once its group is
-durable in the journal: the install runs with nothing in flight (the writer waited for the syncer) and only if no
-fsync failed (G10); the merges a recovery makes while it replays a long tail come after it forced the journal (G5).
-The journal is never cut below a snapshot: a journal that ends before the newest snapshot's group lost durable frames,
-and the database refuses to open (G6). (d) The older snapshots are removed only after the fsync of the directory that
-made the new name durable, so one valid snapshot is always named. (e) Open removes the `.tmp` files of interrupted
-merges. A failed merge (a disk error while writing) removes its file and the writer goes on with the old base; the
-next merge waits until the delta has grown by another threshold.
+never points at bytes that are not on the disk. (b) The rename is atomic; under F2 a prefix of the directory's name
+changes survives: the new name, or not. (c) A file gets its name only once its group is durable in the journal: the
+install runs with nothing in flight (the writer waited for the syncer), or, for a large group's run, in the commit
+after the group's frame was forced; and only if no fsync failed (G10); the merges a recovery makes while it replays a
+long tail come after it wrote the newest frame again and forced the journal (G5, G13). The journal is never cut below a
+run: a journal that ends before the newest run's group lost durable frames, and the database refuses to open (G6).
+(d) The runs a merge replaced are removed only after the fsync of the directory that made the new name durable, so a
+chain to the newest group is always named. (e) Open removes the `.tmp` files of interrupted merges, and takes the
+chain of named runs from 0 that reaches the newest group with the fewest runs (G7). A failed merge (a disk error while
+writing) removes its file and the writer goes on with the old runs; the next merge waits until the delta has grown by
+another threshold.
 
 *Tested by*
-- the exhaustive enumeration (`test/exhaustive.ml`, part 4): at every mutating disk call of a merge (a merge now; one
-  begun from a view ahead of the disk and installed two frames later; the merges of a recovery replaying a long
-  tail), every crash state: a process death (then a power loss), and power losses keeping each prefix of each
-  directory's name changes, with the unforced bytes lost, kept, torn, or kept one sector in two: 393 crash points,
-  3,918 states, each recovered and checked (state of the reference, every confirmed group, old or new base, nothing set
-  aside, no `.tmp` left);
-- the simulation (merges begun ahead of the disk and installed steps later, abandoned after a failed fsync; process
-  deaths; crashes inside any disk call of a merge; a merge's file forced every 8 pages);
+- the exhaustive enumeration (`test/exhaustive.ml`, part 4): at every mutating disk call of a merge (a merge now of
+  every run; one begun from a view ahead of the disk and installed two frames later; a large group's, merged as it is
+  prepared and named once its frame is durable; the merges of a recovery replaying a long tail), every crash state: a
+  process death (then a power loss), and power losses keeping each prefix of each directory's name changes, with the
+  unforced bytes lost, kept, torn, or kept one sector in two: 194 crash points, 1,944 states, each recovered and
+  checked (state of the reference, every confirmed group, old or new runs, nothing set aside, no `.tmp` left);
+- the simulation (merges of the newest runs at random levels, begun ahead of the disk and installed steps later,
+  abandoned after a failed fsync; large groups; process deaths; crashes inside any disk call of a merge; a merge's
+  file forced every 8 pages);
 - the kill -9 rounds (merges every 50 changes; the rounds that kill inside a merge are counted);
-- `spec/Merge.tla`, checked by TLC (`tools/tlc.sh`): the invariants NoMix, SnapshotInJournal, PublishedDurable,
-  AckedDurable over 3.8 million states; each of its four rules (force before the rename, install only when durable,
-  force the journal at recovery without a marker, a marker only if no fsync failed) removed in turn gives a
-  counterexample in 7 steps;
-- `test/unit.ml`: a merge of a base 8 times the cache keeps every fact, holds at most 5 pages open, and never more
+- `spec/Merge.tla`, checked by TLC (`tools/tlc.sh`): chains of runs named by their groups, merges of any number of
+  the newest runs, recovery taking the chain that reaches the newest group; the invariants NoMix, SnapshotInJournal,
+  ChainNamed (the runs a process reads are named and form a chain from 0), PublishedDurable, AckedDurable over 983,080
+  states (3 groups); each of its five rules (force before the rename, install only when durable, force the journal at
+  recovery without a marker, a marker only if no fsync failed, the newest frame written again at recovery) removed in
+  turn gives a counterexample in 4 or 5 steps;
+- `test/unit.ml`: a merge of a run 8 times the cache keeps every fact, holds at most 7 pages open, and never more
   pages resident than the cache.
 
 ## G13 A failed fsync is never trusted

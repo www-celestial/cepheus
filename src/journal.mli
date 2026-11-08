@@ -25,6 +25,9 @@ type position = {
 
 type t
 
+val max_body : int
+(** The largest frame body, in bytes (256 MiB): recovery takes a longer length field for damage. *)
+
 val segment_limit : int ref
 (** A new segment starts once a segment passes this size (64 MB; tests make it small). *)
 

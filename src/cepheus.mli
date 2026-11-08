@@ -83,7 +83,8 @@ val write : db -> ?by:int -> ?why:string -> op list -> (receipt, error) result
     crash, G1); on a fork, at once. *)
 
 val thing : receipt -> int -> int
-(** [thing r (-1)]: the id the group gave to its new thing [-1]. *)
+(** [thing r (-1)]: the id the group gave to its new thing [-1]; a walk of [r.things] (for a large group, read the list
+    once into a table). *)
 
 (** {1 The schema} *)
 
@@ -136,8 +137,9 @@ val fold :
 (** {1 Operations} *)
 
 val snapshot : db -> (unit, error) result
-(** Merges now: the changes since the last merge and the base into a new base and its snapshot file (merges also run
-    on their own, in the background, as changes accumulate), so that the next open replays only what follows. *)
+(** Merges now: the changes since the last merge and every run into one run, one base (merges also run on their own,
+    in the background, as changes accumulate, into the levels), so that the next open replays nothing and the base is
+    the fastest to read. *)
 
 val verify : string -> (int, error) result
 (** Reads the whole journal of a closed database and checks every frame: the number of groups. *)
