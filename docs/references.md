@@ -358,8 +358,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — The memory checker the C file of the CRC is fuzzed under: a read one byte outside its block stops the run.
 - **[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
   https://llvm.org/docs/LibFuzzer.html
-  — The fuzzer of `test/fuzz_crc32c.c`: inputs mutated toward new paths of the code, every one checked against the
-  CRC computed bit by bit.
+  — The fuzzer of `test/fuzz_crc32c.c` and `test/fuzz_tls.c`: inputs mutated toward new paths of the code, every
+  one checked against the CRC computed bit by bit, or against what the other side of a TLS conversation wrote.
 
 ## Method: solving and measuring
 

@@ -167,9 +167,41 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   does not name the host, another cluster id, a TCP client without a CA and a plain client on the TLS port are all
   refused, and the server goes on; TCP without `[tls]` is refused at start.
 
-`server/tls_stubs.c` is not fuzzed yet: it parses nothing itself (OpenSSL, an OSS-Fuzz project, reads every byte from
-the network), and its offsets and lengths come from `server/tls.ml` alone; a libFuzzer harness that feeds handshakes
-and records through it is the next step.
+### The server's C, fuzzed
+
+`server/tls_stubs.c` is in two parts: a core of plain C on OpenSSL, with no OCaml value (contexts, a connection on
+memory buffers, its handshake steps, the bytes fed in and taken out, plain reads and writes, the peer's name, the
+cluster's certificates), and thin wrappers that convert OCaml's values and raise its errors (`server/tls.ml` checks
+every offset and length, and refuses a string with a NUL byte, before any call). The core is **fuzzed** on its own
+(`test/fuzz_tls.c`, not part of dune's build) under libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer; at
+start the harness makes a CA, a server's certificate for 127.0.0.1 and a client's with the core's own
+`cph_tls_make_cert`, and the first byte of each input chooses what the rest drives:
+
+- a server's connection fed the input as a client's bytes, in pieces whose sizes the input gives;
+- a client's connection (the CA and the host checked) fed the input as a server's bytes;
+- a client and a server talking through memory: the input says, step by step, which side takes a handshake step,
+  moves a piece of its output to the other (with at most one byte of the conversation changed on the way), writes
+  plain bytes, or reads them in pieces of a given size. Checked at every read: what a side reads is a prefix of what
+  the other wrote (TLS authenticates every record, so a changed byte is never read as data); at the end, when nothing
+  was changed, both handshakes have ended, each side has read everything the other wrote, each side names the
+  other's certificate, and a close_notify ends the other side's stream;
+- a certificate signed by the CA for a common name and a subjectAltName taken from the input, which must verify.
+
+The seeds are a ClientHello captured from `openssl s_client`, a server's first flight from `openssl s_server` with
+the test certificates, and whole conversations. Run it with clang:
+
+```
+clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -DCEPHEUS_TLS_CORE_ONLY \
+  test/fuzz_tls.c server/tls_stubs.c -lssl -lcrypto -o fuzz_tls && ./fuzz_tls -max_len=16384 -max_total_time=300
+```
+
+On the test machine (2026-11-08, clang 23.1.4, OpenSSL 3.6.5): 62,439 inputs in 301 s from the seeds and the corpus,
+then 17,445 in 121 s with inputs kept long (`-reduce_inputs=0 -shrink=0 -len_control=0`), about 200 a second (most
+inputs make a handshake: milliseconds of key exchange and signatures): no failure. A first run stopped on a bug of the
+harness itself (its last loop gave up after 64 rounds of 16 KiB, while an input can write 40 MB); fixed, it ends when
+a round moves nothing. Two broken copies of the core were caught in under a minute each: one that says it read one
+byte more than it gave (a read past what the peer wrote), one that gives OpenSSL one byte less than it received (a
+handshake that never ends).
 
 ## Not yet
 

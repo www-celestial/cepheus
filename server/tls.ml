@@ -1,7 +1,8 @@
 (* TLS 1.3 over a blocking socket, by OpenSSL (server/tls_stubs.c). OpenSSL works on memory buffers only: this side
    reads the socket and feeds it, and sends what it wrote; every call on one connection holds its lock [m], and every
    byte sent goes out under [wm] in the order OpenSSL wrote it. So a thread blocked reading the socket holds no lock,
-   and the thread that sends a reply meanwhile never waits for it. *)
+   and the thread that sends a reply meanwhile never waits for it. The C side trusts the offsets and lengths it is
+   given: they are checked here, and every string it reads must hold no NUL byte (C would stop there). *)
 
 type ctx
 type conn
@@ -20,11 +21,17 @@ external close_notify : conn -> unit = "cepheus_tls_close"
 external make_cert_ : string -> string -> string -> string -> int -> string * string -> unit
   = "cepheus_tls_make_cert_bc" "cepheus_tls_make_cert"
 
+let c_string what s = if String.contains s '\000' then failwith (what ^ " holds a NUL byte")
+
+let range what b ofs len = if ofs < 0 || len < 0 || ofs > Bytes.length b - len then invalid_arg ("Tls." ^ what)
+
 (* A server's context: its certificate and key; [verify_peer]: the other side must show a certificate of the CA. *)
-let server_ctx ~ca ~cert ~key ~verify_peer = try Ok (ctx_ true ca cert key verify_peer) with Failure m -> Error m
+let server_ctx ~ca ~cert ~key ~verify_peer =
+  try List.iter (c_string "a path") [ ca; cert; key ]; Ok (ctx_ true ca cert key verify_peer) with Failure m -> Error m
 
 (* A client's context: the CA it trusts; a certificate of its own for mutual TLS (between servers). *)
-let client_ctx ?(cert = "") ?(key = "") ~ca () = try Ok (ctx_ false ca cert key true) with Failure m -> Error m
+let client_ctx ?(cert = "") ?(key = "") ~ca () =
+  try List.iter (c_string "a path") [ ca; cert; key ]; Ok (ctx_ false ca cert key true) with Failure m -> Error m
 
 type t = { c : conn; fd : Unix.file_descr; m : Mutex.t; wm : Mutex.t; raw : Bytes.t; out : Bytes.t }
 
@@ -43,7 +50,7 @@ let send_pending t =
 
 (* the handshake, as the server ([host] "") or as a client that checks the server's name *)
 let handshake ctx fd ~server ~host =
-  match conn_ ctx server host with
+  match c_string "the host" host; conn_ ctx server host with
   | exception Failure m -> Error m
   | c -> (
     let t = { c; fd; m = Mutex.create (); wm = Mutex.create (); raw = Bytes.create 65536; out = Bytes.create 65536 } in
@@ -62,8 +69,9 @@ let handshake ctx fd ~server ~host =
     | exception Failure m -> Error m
     | exception Unix.Unix_error (e, _, _) -> Error ("the TLS handshake: " ^ Unix.error_message e))
 
-(* plain bytes, at most [len]; 0 at the end of the stream *)
+(* plain bytes, at most [len] (> 0); 0 at the end of the stream *)
 let rec read t buf ofs len =
+  range "read" buf ofs len;
   let n, out = Mutex.protect t.m (fun () -> let n = read_plain t.c buf ofs len in n, pending t.c) in
   if out > 0 then Mutex.protect t.wm (fun () -> send_pending t);
   if n > 0 then n
@@ -78,6 +86,7 @@ let rec read t buf ofs len =
   end
 
 let write t buf ofs len =
+  range "write" buf ofs len;
   Mutex.protect t.wm (fun () ->
       Mutex.protect t.m (fun () -> write_plain t.c buf ofs len);
       send_pending t)
@@ -96,4 +105,7 @@ let close t =
    made readable by its owner only. *)
 let make_cert ?ca ~cn ~san ~days ~key ~cert () =
   let ca_cert, ca_key = match ca with Some (c, k) -> c, k | None -> "", "" in
-  try Ok (make_cert_ ca_cert ca_key cn san days (key, cert)) with Failure m -> Error m
+  try
+    List.iter (c_string "a certificate's name or path") [ ca_cert; ca_key; cn; san; key; cert ];
+    Ok (make_cert_ ca_cert ca_key cn san days (key, cert))
+  with Failure m -> Error m

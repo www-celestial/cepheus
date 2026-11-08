@@ -131,7 +131,7 @@ the usual one, both are given.
 - **fuzzing**, **libFuzzer**, **sanitizer** — fuzzing runs a function on millions of inputs that a program mutates
   to reach new paths in the code, and stops at the first that fails; libFuzzer is LLVM's fuzzer. A sanitizer is a
   check the compiler adds to every memory access (AddressSanitizer: a read or write outside its block) or to every
-  operation C leaves undefined (UndefinedBehaviorSanitizer). The C file of the CRC is fuzzed with both.
+  operation C leaves undefined (UndefinedBehaviorSanitizer). The C files of the CRC and of TLS are fuzzed with both.
   [testing](testing.md#the-c-file-fuzzed)
 - **galloping search** (exponential search) — a search that tries 1, 2, 4, 8... places ahead before halving, so that
   finding a place k steps away costs O(log k) (Bentley and Yao 1976); a merge places texts this way.

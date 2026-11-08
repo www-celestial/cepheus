@@ -1,16 +1,11 @@
 /* TLS 1.3 by OpenSSL 3, the system's libssl (security fixes come with the system's updates): contexts, a handshake
-   on a blocking socket, reads and writes, the peer's verified name, and the certificates of a cluster (an ECDSA
-   P-256 CA, and certificates it signs). Every call that waits or computes (handshakes, reads, writes, key
-   generation) releases the OCaml runtime lock; bytes cross through C buffers, since the GC may move OCaml's.
-   The interface is server/tls.mli; nothing here parses a protocol: OpenSSL does. */
+   on memory buffers, reads and writes, the peer's verified name, and the certificates of a cluster (an ECDSA P-256
+   CA, and certificates it signs). Nothing here parses a protocol: OpenSSL does.
 
-#define CAML_NAME_SPACE
-#include <caml/alloc.h>
-#include <caml/custom.h>
-#include <caml/fail.h>
-#include <caml/memory.h>
-#include <caml/mlvalues.h>
-#include <caml/threads.h>
+   Two parts. The core is plain C on OpenSSL, with no OCaml value: test/fuzz_tls.c calls it directly under
+   libFuzzer and the sanitizers. The OCaml wrappers below it only convert values and raise errors; every call that
+   waits or computes (handshakes, key generation) releases the OCaml runtime lock, and bytes cross through the
+   caller's buffers within bounds that server/tls.ml checks. The interface is server/tls.ml. */
 
 #include <openssl/err.h>
 #include <openssl/evp.h>
@@ -21,228 +16,190 @@
 #include <openssl/x509v3.h>
 
 #include <fcntl.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-/* the first error of OpenSSL's queue, or [what] */
-static void tls_fail(const char *what) {
-  char buf[512];
+/* ==== the core ==== */
+
+/* the first error of OpenSSL's queue after [what], into err[0 .. n-1]; the queue is cleared */
+static void cph_err(char *err, size_t n, const char *what) {
   unsigned long e = ERR_get_error();
   if (e != 0) {
     char reason[256];
     ERR_error_string_n(e, reason, sizeof reason);
-    snprintf(buf, sizeof buf, "%s: %s", what, reason);
+    snprintf(err, n, "%s: %s", what, reason);
   } else
-    snprintf(buf, sizeof buf, "%s", what);
+    snprintf(err, n, "%s", what);
   ERR_clear_error();
-  caml_failwith(buf);
 }
-
-/* ---- contexts ---- */
-
-#define Ctx_val(v) (*((SSL_CTX **)Data_custom_val(v)))
-
-static void ctx_finalize(value v) {
-  if (Ctx_val(v) != NULL) SSL_CTX_free(Ctx_val(v));
-}
-
-static struct custom_operations ctx_ops = {"cepheus.tls.ctx", ctx_finalize, custom_compare_default,
-                                           custom_hash_default, custom_serialize_default,
-                                           custom_deserialize_default, custom_compare_ext_default,
-                                           custom_fixed_length_default};
 
 /* [server]: 1 for a server's context. [ca]: the cluster's CA, whose certificates are trusted. [cert], [key]: this
-   side's certificate ("" for none). [verify_peer]: the other side must show a certificate signed by the CA. */
-CAMLprim value cepheus_tls_ctx(value server, value ca, value cert, value key, value verify_peer) {
-  CAMLparam5(server, ca, cert, key, verify_peer);
-  CAMLlocal1(r);
-  SSL_CTX *ctx = SSL_CTX_new(Bool_val(server) ? TLS_server_method() : TLS_client_method());
-  if (ctx == NULL) tls_fail("SSL_CTX_new");
-  if (!SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION)) {
+   side's certificate ("" for none). [verify_peer]: the other side must show a certificate signed by the CA. NULL on
+   failure, with the reason in [err]. */
+SSL_CTX *cph_tls_ctx(int server, const char *ca, const char *cert, const char *key, int verify_peer, char *err,
+                     size_t n) {
+  SSL_CTX *ctx = SSL_CTX_new(server ? TLS_server_method() : TLS_client_method());
+  if (ctx == NULL) {
+    cph_err(err, n, "SSL_CTX_new");
+    return NULL;
+  }
+  const char *what = NULL;
+  if (!SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION))
+    what = "TLS 1.3";
+  else if (SSL_CTX_load_verify_locations(ctx, ca, NULL) != 1)
+    what = ca;
+  else if (cert[0] != '\0' && SSL_CTX_use_certificate_chain_file(ctx, cert) != 1)
+    what = cert;
+  else if (cert[0] != '\0' &&
+           (SSL_CTX_use_PrivateKey_file(ctx, key, SSL_FILETYPE_PEM) != 1 || SSL_CTX_check_private_key(ctx) != 1))
+    what = key;
+  if (what != NULL) {
+    cph_err(err, n, what);
     SSL_CTX_free(ctx);
-    tls_fail("TLS 1.3");
+    return NULL;
   }
-  if (SSL_CTX_load_verify_locations(ctx, String_val(ca), NULL) != 1) {
-    SSL_CTX_free(ctx);
-    tls_fail(String_val(ca));
-  }
-  if (caml_string_length(cert) > 0) {
-    if (SSL_CTX_use_certificate_chain_file(ctx, String_val(cert)) != 1) {
-      SSL_CTX_free(ctx);
-      tls_fail(String_val(cert));
-    }
-    if (SSL_CTX_use_PrivateKey_file(ctx, String_val(key), SSL_FILETYPE_PEM) != 1 || SSL_CTX_check_private_key(ctx) != 1) {
-      SSL_CTX_free(ctx);
-      tls_fail(String_val(key));
-    }
-  }
-  SSL_CTX_set_verify(ctx, Bool_val(verify_peer) ? (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT) : SSL_VERIFY_NONE,
-                     NULL);
+  SSL_CTX_set_verify(ctx, verify_peer ? (SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT) : SSL_VERIFY_NONE, NULL);
   /* no session tickets: a program keeps its connection; nothing to resume */
   SSL_CTX_set_num_tickets(ctx, 0);
   SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
-  r = caml_alloc_custom(&ctx_ops, sizeof(SSL_CTX *), 0, 1);
-  Ctx_val(r) = ctx;
-  CAMLreturn(r);
+  return ctx;
 }
 
-/* ---- connections ----
-   Memory BIOs: OpenSSL never touches the socket and never waits. The OCaml side reads the socket and feeds what
-   came ([feed]), takes what OpenSSL wrote ([take]) and sends it, and serializes every call on one connection (an
-   SSL object is used by one thread at a time); so the thread that reads requests and the one that sends replies
-   never wait for each other inside OpenSSL. */
-
+/* Memory BIOs: OpenSSL never touches the socket and never waits. The caller reads the socket and feeds what came
+   ([cph_tls_feed]), takes what OpenSSL wrote ([cph_tls_take]) and sends it, and uses one connection from one thread
+   at a time; so the thread that reads requests and the one that sends replies never wait for each other inside
+   OpenSSL. */
 typedef struct {
   SSL *ssl;
   BIO *in, *out; /* owned by ssl */
-} conn;
+} cph_tls;
 
-#define Conn_val(v) (*((conn **)Data_custom_val(v)))
+/* A new connection of [ctx]. A client checks the server's certificate against the CA and [host] (an IP address in
+   its subjectAltName, or a DNS name, which is also sent as SNI); "" checks the CA only. NULL on failure. */
+cph_tls *cph_tls_new(SSL_CTX *ctx, int server, const char *host, char *err, size_t n) {
+  cph_tls *c = malloc(sizeof(cph_tls));
+  if (c == NULL) {
+    snprintf(err, n, "out of memory");
+    return NULL;
+  }
+  c->ssl = SSL_new(ctx);
+  c->in = BIO_new(BIO_s_mem());
+  c->out = BIO_new(BIO_s_mem());
+  if (c->ssl == NULL || c->in == NULL || c->out == NULL) {
+    cph_err(err, n, "SSL_new");
+    if (c->ssl) SSL_free(c->ssl);
+    if (c->in) BIO_free(c->in);
+    if (c->out) BIO_free(c->out);
+    free(c);
+    return NULL;
+  }
+  BIO_set_mem_eof_return(c->in, -1);
+  SSL_set_bio(c->ssl, c->in, c->out);
+  if (server)
+    SSL_set_accept_state(c->ssl);
+  else {
+    SSL_set_connect_state(c->ssl);
+    if (host[0] != '\0') {
+      X509_VERIFY_PARAM *p = SSL_get0_param(c->ssl);
+      if (X509_VERIFY_PARAM_set1_ip_asc(p, host) != 1) {
+        ERR_clear_error();
+        if (SSL_set1_host(c->ssl, host) != 1 || SSL_set_tlsext_host_name(c->ssl, host) != 1) {
+          cph_err(err, n, "the server's name");
+          SSL_free(c->ssl);
+          free(c);
+          return NULL;
+        }
+      }
+    }
+  }
+  return c;
+}
 
-static void conn_finalize(value v) {
-  conn *c = Conn_val(v);
+void cph_tls_free(cph_tls *c) {
   if (c != NULL) {
     SSL_free(c->ssl);
     free(c);
   }
 }
 
-static struct custom_operations conn_ops = {"cepheus.tls.conn", conn_finalize, custom_compare_default,
-                                            custom_hash_default, custom_serialize_default,
-                                            custom_deserialize_default, custom_compare_ext_default,
-                                            custom_fixed_length_default};
-
-/* A new connection of [vctx]. A client checks the server's certificate against the CA and [host] (an IP address in
-   its subjectAltName, or a DNS name, which is also sent as SNI); "" checks the CA only. */
-CAMLprim value cepheus_tls_conn(value vctx, value server, value host) {
-  CAMLparam3(vctx, server, host);
-  CAMLlocal1(r);
-  conn *c = malloc(sizeof(conn));
-  if (c == NULL) caml_raise_out_of_memory();
-  c->ssl = SSL_new(Ctx_val(vctx));
-  c->in = BIO_new(BIO_s_mem());
-  c->out = BIO_new(BIO_s_mem());
-  if (c->ssl == NULL || c->in == NULL || c->out == NULL) {
-    if (c->ssl) SSL_free(c->ssl);
-    if (c->in) BIO_free(c->in);
-    if (c->out) BIO_free(c->out);
-    free(c);
-    tls_fail("SSL_new");
-  }
-  BIO_set_mem_eof_return(c->in, -1);
-  SSL_set_bio(c->ssl, c->in, c->out);
-  if (Bool_val(server))
-    SSL_set_accept_state(c->ssl);
-  else {
-    SSL_set_connect_state(c->ssl);
-    if (caml_string_length(host) > 0) {
-      const char *h = String_val(host);
-      X509_VERIFY_PARAM *p = SSL_get0_param(c->ssl);
-      if (X509_VERIFY_PARAM_set1_ip_asc(p, h) != 1) {
-        ERR_clear_error();
-        if (SSL_set1_host(c->ssl, h) != 1 || SSL_set_tlsext_host_name(c->ssl, h) != 1) {
-          SSL_free(c->ssl);
-          free(c);
-          tls_fail("the server's name");
-        }
-      }
-    }
-  }
-  r = caml_alloc_custom(&conn_ops, sizeof(conn *), 0, 1);
-  Conn_val(r) = c;
-  CAMLreturn(r);
-}
-
-static void conn_fail(conn *c, const char *what) {
-  char buf[300];
+/* the reason of a failed handshake, read or write: the certificate's, else OpenSSL's queue */
+static void cph_conn_err(cph_tls *c, char *err, size_t n, const char *what) {
   long v = SSL_get_verify_result(c->ssl);
   if (v != X509_V_OK) {
-    snprintf(buf, sizeof buf, "%s: %s", what, X509_verify_cert_error_string(v));
+    snprintf(err, n, "%s: %s", what, X509_verify_cert_error_string(v));
     ERR_clear_error();
-    caml_failwith(buf);
-  }
-  tls_fail(what);
+  } else
+    cph_err(err, n, what);
 }
 
-/* One step of the handshake: true once it is done; false: it needs bytes from the peer. The computation (key
-   exchange, signatures: milliseconds) runs without the runtime lock. */
-CAMLprim value cepheus_tls_handshake(value vc) {
-  CAMLparam1(vc);
-  conn *c = Conn_val(vc);
-  int r;
-  caml_release_runtime_system();
-  r = SSL_do_handshake(c->ssl);
-  caml_acquire_runtime_system();
-  if (r == 1) CAMLreturn(Val_true);
-  int e = SSL_get_error(c->ssl, r);
-  if (e == SSL_ERROR_WANT_READ) CAMLreturn(Val_false);
-  conn_fail(c, "the TLS handshake");
-  CAMLreturn(Val_false);
+/* One step of the handshake: 1 once it is done; 0: it needs bytes from the peer; -1: it failed. */
+int cph_tls_handshake(cph_tls *c, char *err, size_t n) {
+  int r = SSL_do_handshake(c->ssl);
+  if (r == 1) return 1;
+  if (SSL_get_error(c->ssl, r) == SSL_ERROR_WANT_READ) return 0;
+  cph_conn_err(c, err, n, "the TLS handshake");
+  return -1;
 }
 
-/* bytes from the peer, given to OpenSSL */
-CAMLprim value cepheus_tls_feed(value vc, value buf, value ofs, value len) {
-  conn *c = Conn_val(vc);
-  if (Int_val(len) > 0 && BIO_write(c->in, Bytes_val(buf) + Int_val(ofs), Int_val(len)) != Int_val(len))
-    tls_fail("BIO_write");
-  return Val_unit;
+/* [len] bytes from the peer, given to OpenSSL: 0, or -1 (out of memory) */
+int cph_tls_feed(cph_tls *c, const unsigned char *p, int len) {
+  if (len <= 0) return 0;
+  return BIO_write(c->in, p, len) == len ? 0 : -1;
 }
 
 /* bytes OpenSSL wrote for the peer, at most [len]: their count */
-CAMLprim value cepheus_tls_take(value vc, value buf, value ofs, value len) {
-  conn *c = Conn_val(vc);
-  if (BIO_ctrl_pending(c->out) == 0) return Val_int(0);
-  int n = BIO_read(c->out, Bytes_val(buf) + Int_val(ofs), Int_val(len));
-  return Val_int(n > 0 ? n : 0);
+int cph_tls_take(cph_tls *c, unsigned char *p, int len) {
+  if (len <= 0 || BIO_ctrl_pending(c->out) == 0) return 0;
+  int k = BIO_read(c->out, p, len);
+  return k > 0 ? k : 0;
 }
 
-CAMLprim value cepheus_tls_pending(value vc) { return Val_long(BIO_ctrl_pending(Conn_val(vc)->out)); }
+long cph_tls_pending(cph_tls *c) { return (long)BIO_ctrl_pending(c->out); }
 
-/* at most [len] bytes of plain data: their count; 0: more bytes from the peer are needed; -1: the peer closed */
-CAMLprim value cepheus_tls_read(value vc, value buf, value ofs, value len) {
-  conn *c = Conn_val(vc);
-  int r = SSL_read(c->ssl, Bytes_val(buf) + Int_val(ofs), Int_val(len));
-  if (r > 0) return Val_int(r);
+/* at most [len] plain bytes (len > 0): their count; 0: more bytes from the peer are needed; -1: the peer closed;
+   -2: an error */
+int cph_tls_read(cph_tls *c, unsigned char *p, int len, char *err, size_t n) {
+  if (len <= 0) return 0;
+  int r = SSL_read(c->ssl, p, len);
+  if (r > 0) return r;
   int e = SSL_get_error(c->ssl, r);
-  if (e == SSL_ERROR_WANT_READ) return Val_int(0);
-  if (e == SSL_ERROR_ZERO_RETURN) return Val_int(-1);
-  conn_fail(c, "TLS read");
-  return Val_int(-1);
+  if (e == SSL_ERROR_WANT_READ) return 0;
+  if (e == SSL_ERROR_ZERO_RETURN) return -1;
+  cph_conn_err(c, err, n, "TLS read");
+  return -2;
 }
 
-/* plain data, all of it, encrypted into OpenSSL's output (a memory BIO takes everything) */
-CAMLprim value cepheus_tls_write(value vc, value buf, value ofs, value len) {
-  conn *c = Conn_val(vc);
-  int done = 0, total = Int_val(len);
-  while (done < total) {
-    int r = SSL_write(c->ssl, Bytes_val(buf) + Int_val(ofs) + done, total - done);
-    if (r <= 0) conn_fail(c, "TLS write");
+/* [len] plain bytes, all of them, encrypted into OpenSSL's output (a memory BIO takes everything): 0, or -1 */
+int cph_tls_write(cph_tls *c, const unsigned char *p, int len, char *err, size_t n) {
+  int done = 0;
+  while (done < len) {
+    int r = SSL_write(c->ssl, p + done, len - done);
+    if (r <= 0) {
+      cph_conn_err(c, err, n, "TLS write");
+      return -1;
+    }
     done += r;
   }
-  return Val_unit;
+  return 0;
 }
 
 /* the subject's common name of the peer's verified certificate, or "" */
-CAMLprim value cepheus_tls_peer_name(value vc) {
-  CAMLparam1(vc);
-  char name[256] = "";
-  conn *c = Conn_val(vc);
+void cph_tls_peer_name(cph_tls *c, char *name, size_t n) {
+  name[0] = '\0';
   X509 *x = SSL_get1_peer_certificate(c->ssl);
   if (x != NULL) {
     if (SSL_get_verify_result(c->ssl) == X509_V_OK)
-      X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_commonName, name, sizeof name);
+      X509_NAME_get_text_by_NID(X509_get_subject_name(x), NID_commonName, name, (int)n);
     X509_free(x);
   }
-  CAMLreturn(caml_copy_string(name));
 }
 
 /* a close_notify for the peer (to be taken and sent) */
-CAMLprim value cepheus_tls_close(value vc) {
-  SSL_shutdown(Conn_val(vc)->ssl);
+void cph_tls_close(cph_tls *c) {
+  SSL_shutdown(c->ssl);
   ERR_clear_error();
-  return Val_unit;
 }
 
 /* ---- certificates ---- */
@@ -274,6 +231,45 @@ static int add_ext(X509 *cert, X509 *issuer, int nid, const char *v) {
   return ok;
 }
 
+/* A certificate for the key [k], valid [days] from now, with a random 128-bit serial: a self-signed CA (issuer NULL:
+   basicConstraints CA:TRUE, keyCertSign), or one signed by [issuer] and its key [ik] for [cn], with [san] as its
+   subjectAltName ("DNS:srv1,IP:10.0.1.11"; "" for none), for servers and clients alike. NULL on failure. */
+X509 *cph_tls_cert(EVP_PKEY *k, X509 *issuer, EVP_PKEY *ik, const char *cn, const char *san, int days) {
+  X509 *c = X509_new();
+  if (c == NULL) return NULL;
+  unsigned char serial[16];
+  int ok = RAND_bytes(serial, sizeof serial) == 1;
+  serial[0] &= 0x7F;
+  BIGNUM *bn = BN_bin2bn(serial, sizeof serial, NULL);
+  ASN1_INTEGER *sn = bn == NULL ? NULL : BN_to_ASN1_INTEGER(bn, NULL);
+  ok = ok && sn != NULL && X509_set_version(c, 2) && X509_set_serialNumber(c, sn) &&
+       X509_gmtime_adj(X509_getm_notBefore(c), -300) &&
+       X509_gmtime_adj(X509_getm_notAfter(c), (long)days * 86400L) && X509_set_pubkey(c, k);
+  ASN1_INTEGER_free(sn);
+  BN_free(bn);
+  X509_NAME *name = X509_get_subject_name(c);
+  ok = ok && X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_UTF8, (const unsigned char *)cn, -1, -1, 0);
+  ok = ok && X509_set_issuer_name(c, issuer == NULL ? name : X509_get_subject_name(issuer));
+  if (issuer == NULL) {
+    ok = ok && add_ext(c, c, NID_basic_constraints, "critical,CA:TRUE") &&
+         add_ext(c, c, NID_key_usage, "critical,keyCertSign,cRLSign") &&
+         add_ext(c, c, NID_subject_key_identifier, "hash");
+  } else {
+    ok = ok && add_ext(c, issuer, NID_basic_constraints, "critical,CA:FALSE") &&
+         add_ext(c, issuer, NID_key_usage, "critical,digitalSignature") &&
+         add_ext(c, issuer, NID_ext_key_usage, "serverAuth,clientAuth") &&
+         add_ext(c, issuer, NID_subject_key_identifier, "hash") &&
+         add_ext(c, issuer, NID_authority_key_identifier, "keyid:always") &&
+         (san[0] == '\0' || add_ext(c, issuer, NID_subject_alt_name, san));
+  }
+  ok = ok && X509_sign(c, issuer == NULL ? k : ik, EVP_sha256()) > 0;
+  if (!ok) {
+    X509_free(c);
+    return NULL;
+  }
+  return c;
+}
+
 /* the key file is made readable by its owner only, before any byte of the key is in it */
 static int write_key(const char *path, EVP_PKEY *k) {
   int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -303,62 +299,163 @@ static int write_cert(const char *path, X509 *c) {
   return ok;
 }
 
-/* A new ECDSA P-256 key and its certificate, valid [days] from now, with a random 128-bit serial. [ca_cert] ""
-   makes a self-signed CA (basicConstraints CA:TRUE, keyCertSign); otherwise a certificate signed by the CA for
-   [cn], with [san] as its subjectAltName ("DNS:srv1,IP:10.0.1.11"), for servers and clients alike. Files are made,
-   never replaced. */
-CAMLprim value cepheus_tls_make_cert(value ca_cert, value ca_key, value cn, value san, value days, value paths) {
-  CAMLparam5(ca_cert, ca_key, cn, san, days);
-  CAMLxparam1(paths);
-  const char *key_path = String_val(Field(paths, 0)), *cert_path = String_val(Field(paths, 1));
-  int is_ca = caml_string_length(ca_cert) == 0;
+/* A new ECDSA P-256 key and its certificate (cph_tls_cert), written to [key_path] and [cert_path], which are made,
+   never replaced; [ca_cert] "" makes a self-signed CA, else the CA's certificate and key sign it. 0, or -1 with the
+   reason in [err]. */
+int cph_tls_make_cert(const char *ca_cert, const char *ca_key, const char *cn, const char *san, int days,
+                      const char *key_path, const char *cert_path, char *err, size_t n) {
   EVP_PKEY *k = EVP_EC_gen("P-256");
-  if (k == NULL) tls_fail("the key");
+  if (k == NULL) {
+    cph_err(err, n, "the key");
+    return -1;
+  }
   X509 *issuer = NULL;
   EVP_PKEY *ik = NULL;
-  if (!is_ca) {
-    issuer = read_cert(String_val(ca_cert));
-    ik = read_key(String_val(ca_key));
+  if (ca_cert[0] != '\0') {
+    issuer = read_cert(ca_cert);
+    ik = read_key(ca_key);
     if (issuer == NULL || ik == NULL) {
       EVP_PKEY_free(k);
       if (issuer) X509_free(issuer);
       if (ik) EVP_PKEY_free(ik);
-      tls_fail("the CA's certificate or key");
+      cph_err(err, n, "the CA's certificate or key");
+      return -1;
     }
   }
-  X509 *c = X509_new();
-  unsigned char serial[16];
-  RAND_bytes(serial, sizeof serial);
-  serial[0] &= 0x7F;
-  BIGNUM *bn = BN_bin2bn(serial, sizeof serial, NULL);
-  ASN1_INTEGER *sn = BN_to_ASN1_INTEGER(bn, NULL);
-  int ok = c != NULL && X509_set_version(c, 2) && X509_set_serialNumber(c, sn) &&
-           X509_gmtime_adj(X509_getm_notBefore(c), -300) &&
-           X509_gmtime_adj(X509_getm_notAfter(c), (long)Int_val(days) * 86400L) && X509_set_pubkey(c, k);
-  ASN1_INTEGER_free(sn);
-  BN_free(bn);
-  X509_NAME *name = X509_get_subject_name(c);
-  ok = ok && X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_UTF8, (const unsigned char *)String_val(cn), -1, -1, 0);
-  ok = ok && X509_set_issuer_name(c, is_ca ? name : X509_get_subject_name(issuer));
-  if (is_ca) {
-    ok = ok && add_ext(c, c, NID_basic_constraints, "critical,CA:TRUE") &&
-         add_ext(c, c, NID_key_usage, "critical,keyCertSign,cRLSign") &&
-         add_ext(c, c, NID_subject_key_identifier, "hash");
-  } else {
-    ok = ok && add_ext(c, issuer, NID_basic_constraints, "critical,CA:FALSE") &&
-         add_ext(c, issuer, NID_key_usage, "critical,digitalSignature") &&
-         add_ext(c, issuer, NID_ext_key_usage, "serverAuth,clientAuth") &&
-         add_ext(c, issuer, NID_subject_key_identifier, "hash") &&
-         add_ext(c, issuer, NID_authority_key_identifier, "keyid:always") &&
-         (caml_string_length(san) == 0 || add_ext(c, issuer, NID_subject_alt_name, String_val(san)));
-  }
-  ok = ok && X509_sign(c, is_ca ? k : ik, EVP_sha256()) > 0;
-  ok = ok && write_key(key_path, k) && write_cert(cert_path, c);
+  X509 *c = cph_tls_cert(k, issuer, ik, cn, san, days);
+  int ok = c != NULL && write_key(key_path, k) && write_cert(cert_path, c);
   if (c) X509_free(c);
   EVP_PKEY_free(k);
   if (issuer) X509_free(issuer);
   if (ik) EVP_PKEY_free(ik);
-  if (!ok) tls_fail("the certificate (do its files exist already?)");
+  if (!ok) {
+    cph_err(err, n, "the certificate (do its files exist already?)");
+    return -1;
+  }
+  return 0;
+}
+
+/* ==== the OCaml wrappers ==== */
+
+#ifndef CEPHEUS_TLS_CORE_ONLY
+
+#define CAML_NAME_SPACE
+#include <caml/alloc.h>
+#include <caml/custom.h>
+#include <caml/fail.h>
+#include <caml/memory.h>
+#include <caml/mlvalues.h>
+#include <caml/threads.h>
+
+#define Ctx_val(v) (*((SSL_CTX **)Data_custom_val(v)))
+#define Conn_val(v) (*((cph_tls **)Data_custom_val(v)))
+
+static void ctx_finalize(value v) {
+  if (Ctx_val(v) != NULL) SSL_CTX_free(Ctx_val(v));
+}
+
+static void conn_finalize(value v) { cph_tls_free(Conn_val(v)); }
+
+static struct custom_operations ctx_ops = {"cepheus.tls.ctx", ctx_finalize, custom_compare_default,
+                                           custom_hash_default, custom_serialize_default,
+                                           custom_deserialize_default, custom_compare_ext_default,
+                                           custom_fixed_length_default};
+
+static struct custom_operations conn_ops = {"cepheus.tls.conn", conn_finalize, custom_compare_default,
+                                            custom_hash_default, custom_serialize_default,
+                                            custom_deserialize_default, custom_compare_ext_default,
+                                            custom_fixed_length_default};
+
+CAMLprim value cepheus_tls_ctx(value server, value ca, value cert, value key, value verify_peer) {
+  CAMLparam5(server, ca, cert, key, verify_peer);
+  CAMLlocal1(r);
+  char err[512];
+  SSL_CTX *ctx = cph_tls_ctx(Bool_val(server), String_val(ca), String_val(cert), String_val(key),
+                             Bool_val(verify_peer), err, sizeof err);
+  if (ctx == NULL) caml_failwith(err);
+  r = caml_alloc_custom(&ctx_ops, sizeof(SSL_CTX *), 0, 1);
+  Ctx_val(r) = ctx;
+  CAMLreturn(r);
+}
+
+CAMLprim value cepheus_tls_conn(value vctx, value server, value host) {
+  CAMLparam3(vctx, server, host);
+  CAMLlocal1(r);
+  char err[512];
+  cph_tls *c = cph_tls_new(Ctx_val(vctx), Bool_val(server), String_val(host), err, sizeof err);
+  if (c == NULL) caml_failwith(err);
+  r = caml_alloc_custom(&conn_ops, sizeof(cph_tls *), 0, 1);
+  Conn_val(r) = c;
+  CAMLreturn(r);
+}
+
+/* the computation (key exchange, signatures: milliseconds) runs without the runtime lock; [vc] stays alive (a
+   parameter) and its block does not move (a custom block holds only the pointer, which is read before) */
+CAMLprim value cepheus_tls_handshake(value vc) {
+  CAMLparam1(vc);
+  cph_tls *c = Conn_val(vc);
+  char err[512];
+  caml_release_runtime_system();
+  int r = cph_tls_handshake(c, err, sizeof err);
+  caml_acquire_runtime_system();
+  if (r < 0) caml_failwith(err);
+  CAMLreturn(Val_bool(r == 1));
+}
+
+CAMLprim value cepheus_tls_feed(value vc, value buf, value ofs, value len) {
+  if (cph_tls_feed(Conn_val(vc), Bytes_val(buf) + Long_val(ofs), (int)Long_val(len)) != 0) caml_failwith("BIO_write");
+  return Val_unit;
+}
+
+CAMLprim value cepheus_tls_take(value vc, value buf, value ofs, value len) {
+  return Val_int(cph_tls_take(Conn_val(vc), Bytes_val(buf) + Long_val(ofs), (int)Long_val(len)));
+}
+
+CAMLprim value cepheus_tls_pending(value vc) { return Val_long(cph_tls_pending(Conn_val(vc))); }
+
+CAMLprim value cepheus_tls_read(value vc, value buf, value ofs, value len) {
+  char err[512];
+  int r = cph_tls_read(Conn_val(vc), Bytes_val(buf) + Long_val(ofs), (int)Long_val(len), err, sizeof err);
+  if (r == -2) caml_failwith(err);
+  return Val_int(r);
+}
+
+CAMLprim value cepheus_tls_write(value vc, value buf, value ofs, value len) {
+  char err[512];
+  if (cph_tls_write(Conn_val(vc), Bytes_val(buf) + Long_val(ofs), (int)Long_val(len), err, sizeof err) != 0)
+    caml_failwith(err);
+  return Val_unit;
+}
+
+CAMLprim value cepheus_tls_peer_name(value vc) {
+  CAMLparam1(vc);
+  char name[256];
+  cph_tls_peer_name(Conn_val(vc), name, sizeof name);
+  CAMLreturn(caml_copy_string(name));
+}
+
+CAMLprim value cepheus_tls_close(value vc) {
+  cph_tls_close(Conn_val(vc));
+  return Val_unit;
+}
+
+/* the strings are copied before the runtime lock is released: the GC may move OCaml's */
+CAMLprim value cepheus_tls_make_cert(value ca_cert, value ca_key, value cn, value san, value days, value paths) {
+  CAMLparam5(ca_cert, ca_key, cn, san, days);
+  CAMLxparam1(paths);
+  char err[512];
+  char *s[6] = {strdup(String_val(ca_cert)), strdup(String_val(ca_key)), strdup(String_val(cn)),
+                strdup(String_val(san)), strdup(String_val(Field(paths, 0))), strdup(String_val(Field(paths, 1)))};
+  int r = -1;
+  if (s[0] && s[1] && s[2] && s[3] && s[4] && s[5]) {
+    int d = Int_val(days);
+    caml_release_runtime_system();
+    r = cph_tls_make_cert(s[0], s[1], s[2], s[3], d, s[4], s[5], err, sizeof err);
+    caml_acquire_runtime_system();
+  } else
+    snprintf(err, sizeof err, "out of memory");
+  for (int i = 0; i < 6; i++) free(s[i]);
+  if (r != 0) caml_failwith(err);
   CAMLreturn(Val_unit);
 }
 
@@ -366,3 +463,5 @@ CAMLprim value cepheus_tls_make_cert_bc(value *argv, int argn) {
   (void)argn;
   return cepheus_tls_make_cert(argv[0], argv[1], argv[2], argv[3], argv[4], argv[5]);
 }
+
+#endif
