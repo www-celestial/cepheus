@@ -238,8 +238,9 @@ sum 15000
 
 A **fork** is a temporary state that starts at a view: it is written to with the same `write`, under the same checks
 (the same function resolves its groups), and nothing it does reaches the journal or any file (G8). Making one copies
-nothing: a view is a persistent value, and the fork's writes make new versions beside it (structural sharing: the new
-version shares every part it did not change with the old one). `fork empty` is an empty database for a unit test; a
+nothing but, for a fork of a fork, one bit a thing the parent touched: a view is a persistent value, and the fork's
+writes make new versions beside it (structural sharing: the new version shares every part it did not change with the
+old one). `fork empty` is an empty database for a unit test; a
 fork of a fork works; a fork is never merged back (to keep what was tried, write the same operations to the
 database: one way to write).
 
