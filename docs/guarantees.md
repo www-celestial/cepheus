@@ -4,6 +4,10 @@ Each guarantee states what is promised, under which faults, its exact conditions
 the test that checks it. The tests are in `test/`; `tools/test.sh` runs them all. The words are explained in
 [concepts](concepts.md), [architecture](architecture.md) and the [glossary](glossary.md); the mathematics is in
 [theory](theory.md). Everything here is as of this version: one machine, runs on disk in levels (leveling, ratio 4), no replication.
+G14 and G16 belong to the server: their statements, proofs and tests are in [the server's page](server.md#writes-applied-once-sessions-g14)
+(G15, linearizable local reads, comes with the local reads of a later version). Through the server, G1 to G13 keep
+their statements: a group is confirmed when its receipt is sent, after its fsync, and every read names the durable group
+it was answered from; `server_sim` checks them over a simulated network with the server's crashes.
 
 | | promise, in one line | under |
 |---|---|---|
@@ -20,6 +24,8 @@ the test that checks it. The tests are in `test/`; `tools/test.sh` runs them all
 | G11 | a question returns exactly its answers, each once, within the Generic Join bound | always |
 | G12 | a crash during a merge leaves the runs before it or the runs after it, whole | F1, F2, F4 |
 | G13 | after a failed fsync, no view shows a group a power loss could take back; a write answered `Io` is absent (one residual) | F4 with F1, F2 |
+| G14 | through the server, a write sent with its session and serial is applied at most once; sent again until answered, exactly once, every answer naming the same group | F1, F2, broken connections |
+| G16 | through the server, a connection does exactly what its token's rights permit | always |
 
 ## The faults
 

@@ -95,6 +95,25 @@ defaults, and the cache's size (`set_cache`).
 | OCaml | 5 (domains), with `unix` and `threads`, and its C compiler for `src/crc32c_stubs.c` | `src/dune` |
 | processor | x86-64 with SSE4.2 (part of the x86-64-v2 level; Intel since Nehalem, 2008, AMD since Bulldozer, 2011), or arm64 with the CRC32 instructions (optional in ARMv8.0, required from ARMv8.1), on Linux or macOS; another one is refused when the program starts, another architecture does not build | `src/crc32c_stubs.c` |
 
+## The server
+
+| what | limit or default | where |
+|---|---|---|
+| a frame | at most 16 MiB of body (a length over it is answered `too_large` and the connection closes before the body is read); a header of 10 bytes | `Wire.max_frame`, `Wire.header` |
+| writes in flight a connection | 1,024 (stated in Welcome); at the limit the server stops reading the socket | `Core.create ~max_inflight` |
+| a Find's reply | frames of about 1 MiB of rows (all but the last with the flag more) | `Core.chunk` |
+| variables of a question over the wire | 64 | `Wire.get_query` |
+| a session's receipts | at most 4,096; forgotten an hour after the session's last write | `Sessions.max_receipts`, `Sessions.expiry_ms` |
+| the session checkpoint | written every second while writes come, and at stop | `Net.checkpoint` |
+| tokens.toml | read again within a second of a change | `Net.serve`'s ticker |
+| a token | 32 random bytes, `cph_` and 43 characters of base64url; at most 256 characters are looked at | `Tokens.generate`, `Tokens.check` |
+| I/O domains | `[clients] domains`, 1 to 64; default min(4, cores / 2) | `Config.default_domains` |
+| the page cache | `[storage] cache`, default 1 GiB | `Config.of_toml` |
+| the Unix socket | `.s.cepheus.PORT`, PORT the port of `listen` or 7400 | `Config.socket_name` |
+| peers | exactly one in this version | `Config.of_toml` |
+| TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
+| the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |
+
 ## Measurement tools
 
 | what | value | where |

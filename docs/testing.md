@@ -126,7 +126,7 @@ closes went unseen.
 
 ### The C file, fuzzed
 
-`src/crc32c_stubs.c` is the only C of Cepheus. Besides the property test above, which runs it through OCaml, it is
+`src/crc32c_stubs.c` is the engine's only C (the server's is `server/tls_stubs.c`, below). Besides the property test above, which runs it through OCaml, it is
 **fuzzed** on its own (`test/fuzz_crc32c.c`, not part of dune's build): libFuzzer (LLVM's fuzzer) feeds it inputs it
 mutates to reach new paths, under AddressSanitizer (a read outside the bytes stops the run) and
 UndefinedBehaviorSanitizer; each input is a CRC to extend from, an offset, a length, a cut and the bytes, kept within
@@ -144,6 +144,32 @@ kept at up to 64 KiB (`-reduce_inputs=0 -shrink=0`): no failure. Two broken copi
 past the end and one wrong on a 3-byte tail, were caught in under a second each: the harness can fail. The tests and
 the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `getauxval`) was compiled for arm64
 (clang 23, `--target=aarch64-linux-gnu`) but has not yet run on an arm64 processor.
+
+### The server
+
+- `server_unit`: TOML, every rule of `cluster.toml`, tokens (base64url against RFC 4648's vectors, the hash, the
+  constant-time comparison, `tokens.toml` written and read back), the wire (5,000 random requests coded and decoded,
+  every cut of their bodies refused; every reply; a count larger than its bytes refused before anything is
+  allocated), origins, the session table and its checkpoint (a damaged one refused), and the rights of every token
+  against every request on every database through the server's core (G16), a token removed or narrowed, a forged
+  origin, a frame over the limit.
+- `server_sim`: the deterministic simulation of the server over a simulated network, on the simulated disk: clients
+  of every right, pipelined, their bytes cut at any byte and delivered late, connections broken (the unanswered
+  writes sent again with their serials), the writer's batches, merges, checkpoints, server deaths and power losses
+  at any disk call, failed fsyncs, clean stops, damaged checkpoints. Checked: G1 to G5, G10, G11 through the protocol,
+  G14 (each session and serial in one group at most, every receipt naming it and its new things), G16. Two bugs it
+  found are in the server's history: a test that did not force a directory's name, and a refused write applied after
+  a later one when sent again (now answered with its first error).
+- `server_crash`: a real `cepheus serve`, killed 20 times (kill -9) under four clients writing through the Unix
+  socket; at the end every acknowledged write is in the database once and no write twice (G1, G14); a second server
+  on the same data is refused (G9), `cepheus status`, a token removed while its program is connected, `cepheus stop`.
+- `server_tls`: a real server with TLS: a client of the cluster's CA reads; another cluster's CA, a certificate that
+  does not name the host, another cluster id, a TCP client without a CA and a plain client on the TLS port are all
+  refused, and the server goes on; TCP without `[tls]` is refused at start.
+
+`server/tls_stubs.c` is not fuzzed yet: it parses nothing itself (OpenSSL, an OSS-Fuzz project, reads every byte from
+the network), and its offsets and lengths come from `server/tls.ml` alone; a libFuzzer harness that feeds handshakes
+and records through it is the next step.
 
 ## Not yet
 

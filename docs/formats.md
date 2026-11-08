@@ -130,3 +130,30 @@ snapshot `<group>.snap` holding the whole base, with a dense table of offsets by
 aside at open (they are caches): the journal is replayed, and the first merge removes them. Format 1 also kept the link
 facts by target (`roff`, `rp`, `re`); format 2 had one CRC per MiB and was mapped whole; format 3 had no journal group
 in its header.
+
+## The server's files
+
+**A group's origin** (in its `why`, for groups written through the server; [server](server.md#writes-applied-once-sessions-g14)):
+
+```
+why = "\000cph1\000" (6 bytes) | session varint | serial varint | floor varint | token name (varint length, bytes)
+    | the program's why (the rest)
+```
+
+A `why` that does not start with the 6 bytes is the program's alone. The server refuses a program's `why` that starts
+with them.
+
+**`DATA/NAME/sessions`**, the session table's checkpoint (written beside, forced, renamed, the directory forced):
+
+```
+magic "cepheus sessions\n" (17 bytes) | format varint (1) | group varint (every receipt up to it is here)
+| count varint | each session: id varint | token name (length, bytes) | floor varint | highest applied serial varint
+                 | time of its last write (zigzag, ms) | count varint | each receipt: serial, group, first new thing (varints)
+| CRC-32C u32 LE of everything before
+```
+
+A checkpoint whose CRC does not match is ignored: the journal is read from its start instead.
+
+**`DATA/cepheus.lock`**: the server's pid in decimal and a newline, under an exclusive `lockf` lock while it runs.
+**`DATA/cepheus.server`**: the server's id (`cph-s-` and 16 hex digits) and a newline.
+

@@ -39,6 +39,16 @@ damage to durable bytes is detected, never dropped in silence (G6); a merge leav
 whole (G12); after a failed fsync, no view shows a group a power loss could take back (G13). Each guarantee, its exact conditions, its proof
 and the test that checks it: [guarantees](docs/guarantees.md).
 
+## As a server
+
+`cepheus serve --config cluster.toml` runs Cepheus as PostgreSQL runs: one process holds the databases, programs
+connect through a Unix socket or TCP with TLS 1.3, each with a token that grants it read or write, database by
+database (G16); a write sent again after a lost reply is applied once (G14). Server against server on the same
+machine and data (1 M facts), a point read costs 10.8 µs over the Unix socket (PostgreSQL 18.6: 26.4), 39.2 µs with
+TLS (49.6); 8 clients at once, 3.22 µs a read in all (6.54); 16 requests in flight on one connection, 1.46 µs a read
+(PostgreSQL's pipeline of 16: 9.11). Everything, from `cluster.toml` to the wire protocol byte by byte: [the
+server](docs/server.md).
+
 ## Against the established databases
 
 Measured on one laptop (Intel i7-4720HQ, SATA SSD) against PostgreSQL 18.6 set up as an expert would, 10 million
@@ -72,7 +82,8 @@ with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison]
 
 No dependency but OCaml 5 (`unix`, `threads`) and its C compiler for one small file, `src/crc32c_stubs.c`: the
 checksum by the processor's own instruction (SSE4.2 on x86-64, CRC32 on arm64), 8 times the speed of the table code
-in OCaml it replaced; a processor without it is refused when the program starts.
+in OCaml it replaced; a processor without it is refused when the program starts. The server also links the system's
+OpenSSL 3 (`libssl`, `libcrypto`) through `server/tls_stubs.c`, for TLS.
 
 ## Documentation
 
