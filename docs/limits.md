@@ -113,6 +113,8 @@ defaults, and the cache's size (`set_cache`).
 | peers | exactly one in this version | `Config.of_toml` |
 | TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |
+| connections | `[clients] max_connections`, 1 to 65,536; default 512; over it a new connection is closed at its accept (`too_many_connections` over the Unix socket) | `Config.default_max_connections`, `Net.serve` |
+| an idle connection | `[clients] idle_timeout` seconds, 0 to 604,800 (0: no limit); default 600: a whole request within it from the accept (the TLS handshake included) and from the previous request, and what the server sends taken within it | `Config.default_idle_timeout`, `Net.timeouts` |
 
 ## Measurement tools
 

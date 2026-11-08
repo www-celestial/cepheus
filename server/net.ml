@@ -44,23 +44,38 @@ type sockets = { sm : Mutex.t; open_ : (Unix.file_descr, unit) Hashtbl.t }
 (* how a connection's bytes travel: the socket itself (Unix socket), or TLS over it (TCP) *)
 type io = { read : Bytes.t -> int -> int -> int; write : Bytes.t -> int -> int -> unit; bye : unit -> unit }
 
+(* The idle limit (cluster.toml, [clients] idle_timeout): a connection must send a whole request within [idle]
+   seconds of its accept and of its previous request, its TLS handshake included, and take what the server sends
+   within [idle] seconds; otherwise it is closed. The socket's timeouts wake a blocked read or write at least that
+   often (SO_RCVTIMEO, SO_SNDTIMEO: socket(7)); bytes that trickle in without making a request do not reset the clock.
+   0: no limit. *)
+let timeouts fd idle =
+  if idle > 0 then begin
+    Unix.setsockopt_float fd Unix.SO_RCVTIMEO (float idle);
+    Unix.setsockopt_float fd Unix.SO_SNDTIMEO (float idle)
+  end
+
+exception Idle
+
 let plain fd = { read = Unix.read fd; write = write_all fd; bye = ignore }
 
 let over_tls (t : Tls.t) = { read = Tls.read t; write = Tls.write t; bye = (fun () -> Tls.close t) }
 
-let rec connection (srv : Core.t) (dbs : database array) socks tls fd =
+let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
   Mutex.protect socks.sm (fun () -> Hashtbl.replace socks.open_ fd ());
+  (try timeouts fd idle with Unix.Unix_error _ -> ());
   match tls with
-  | None -> serve_conn srv dbs socks fd (plain fd)
+  | None -> serve_conn srv dbs socks ~idle fd (plain fd)
   | Some ctx -> (
-    (* the handshake in the connection's own thread: its computation (milliseconds) without the runtime lock *)
+    (* the handshake in the connection's own thread: its computation (milliseconds) without the runtime lock; a
+       peer silent for the idle limit in the middle of it makes a read fail (EAGAIN), and the connection closes *)
     match Tls.handshake ctx fd ~server:true ~host:"" with
-    | Ok t -> serve_conn srv dbs socks fd (over_tls t)
+    | Ok t -> serve_conn srv dbs socks ~idle fd (over_tls t)
     | Error _ ->
       Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
       (try Unix.close fd with Unix.Unix_error _ -> ()))
 
-and serve_conn (srv : Core.t) (dbs : database array) socks fd io =
+and serve_conn (srv : Core.t) (dbs : database array) socks ~idle fd io =
   let dead = ref false in
   let scratch = ref (Bytes.create 65536) in
   let c_ref = ref None in
@@ -95,10 +110,23 @@ and serve_conn (srv : Core.t) (dbs : database array) socks fd io =
   c_ref := Some c;
   let buf = ref (Bytes.create 65536) and have = ref 0 in
   let go = ref true in
+  (* the time of the accept, then of each whole request *)
+  let last = ref (Unix.gettimeofday ()) in
+  let read_or_idle b o n =
+    let rec go () =
+      match io.read b o n with
+      | k -> k
+      | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+        if Unix.gettimeofday () -. !last >= float idle then raise Idle else go ()
+    in
+    go ()
+  in
   (try
      while !go do
        (* the frames already here first; a read only when a frame is not whole *)
+       let before = c.requests in
        let used, why = Core.input c !buf 0 !have in
+       if c.requests > before then last := Unix.gettimeofday ();
        Bytes.blit !buf used !buf 0 (!have - used);
        have := !have - used;
        flush ();
@@ -116,10 +144,19 @@ and serve_conn (srv : Core.t) (dbs : database array) socks fd io =
              buf := b
            end
          end;
-         let k = io.read !buf !have (Bytes.length !buf - !have) in
-         if k = 0 then go := false else have := !have + k
+         let k = read_or_idle !buf !have (Bytes.length !buf - !have) in
+         if k = 0 then go := false
+         else begin
+           have := !have + k;
+           (* bytes that trickle in without a whole request do not keep the connection *)
+           if idle > 0 && Unix.gettimeofday () -. !last >= float idle then raise Idle
+         end
      done
-   with Unix.Unix_error _ | Failure _ -> ());
+   with
+   | Idle ->
+     Core.err c ~id:0 ~kind:0 "idle" "no request for %d s (idle_timeout): the connection is closed" idle;
+     flush ()
+   | Unix.Unix_error _ | Failure _ -> ());
   (* the writes in flight are answered (or fail to send) before the connection goes *)
   Core.drain c;
   Mutex.lock w.wm;
@@ -136,8 +173,9 @@ and serve_conn (srv : Core.t) (dbs : database array) socks fd io =
 
 type iod = { m : Mutex.t; cv : Condition.t; fds : (Unix.file_descr * Tls.ctx option) Queue.t; mutable stop : bool; mutable nconn : int }
 
-(* a thread a connection, in this domain; at stop, the domain ends once its connections have *)
-let io_domain srv dbs socks (io : iod) () =
+(* a thread a connection, in this domain; at stop, the domain ends once its connections have; [opened] counts the
+   connections of the server, from their accept to their close *)
+let io_domain srv dbs socks ~idle ~opened (io : iod) () =
   let go = ref true in
   while !go do
     Mutex.lock io.m;
@@ -148,8 +186,10 @@ let io_domain srv dbs socks (io : iod) () =
     match fd with
     | Some (fd, tls) ->
       let run () =
-        Fun.protect (fun () -> connection srv dbs socks tls fd)
-          ~finally:(fun () -> Mutex.protect io.m (fun () -> io.nconn <- io.nconn - 1; Condition.broadcast io.cv))
+        Fun.protect (fun () -> connection srv dbs socks ~idle tls fd)
+          ~finally:(fun () ->
+            Atomic.decr opened;
+            Mutex.protect io.m (fun () -> io.nconn <- io.nconn - 1; Condition.broadcast io.cv))
       in
       ignore (Thread.create run ())
     | None -> go := false
@@ -324,17 +364,46 @@ let serve (cfg : Config.t) =
         | sock, tcp ->
           let ios = Array.init cfg.domains (fun _ -> { m = Mutex.create (); cv = Condition.create (); fds = Queue.create (); stop = false; nconn = 0 }) in
           let socks = { sm = Mutex.create (); open_ = Hashtbl.create 64 } in
-          let doms = Array.map (fun io -> Domain.spawn (io_domain srv dbs socks io)) ios in
+          let opened = Atomic.make 0 in
+          let doms = Array.map (fun io -> Domain.spawn (io_domain srv dbs socks ~idle:cfg.idle_timeout ~opened io)) ios in
           let next = Atomic.make 0 in
           let accepting = Atomic.make true in
+          let refused = Atomic.make 0 and noted = ref 0. in
+          (* At the limit of connections ([clients] max_connections), a new one is closed at once: over the Unix
+             socket after a frame saying why; over TCP with no word, before its TLS handshake, so that a refused
+             connection costs no handshake's computation (milliseconds). The log says so at most once a second. *)
+          let refuse fd tls =
+            Atomic.incr refused;
+            if tls = None then begin
+              let b = Buffer.create 128 in
+              Wire.put_reply b (Wire.Err { code = "too_many_connections";
+                                           message = Printf.sprintf "the server holds its limit of %d connections (max_connections)" cfg.max_connections });
+              let f = Buffer.create 160 in
+              Wire.add_frame f ~id:0 ~kind:0 ~flags:Wire.f_error b;
+              (try Unix.setsockopt_float fd Unix.SO_SNDTIMEO 1.0; ignore (Unix.write fd (Buffer.to_bytes f) 0 (Buffer.length f)) with Unix.Unix_error _ -> ())
+            end;
+            (try Unix.close fd with Unix.Unix_error _ -> ());
+            let now = Unix.gettimeofday () in
+            if now -. !noted >= 1.0 then begin
+              noted := now;
+              log "%d connections refused so far: the limit of %d is reached (max_connections)" (Atomic.get refused) cfg.max_connections
+            end
+          in
           let accept_loop s nodelay tls () =
             while Atomic.get accepting do
               match Unix.accept ~cloexec:true s with
               | fd, _ ->
-                if nodelay then Unix.setsockopt fd Unix.TCP_NODELAY true;
-                let io = ios.(Atomic.fetch_and_add next 1 mod Array.length ios) in
-                Mutex.protect io.m (fun () -> Queue.push (fd, tls) io.fds; Condition.signal io.cv)
+                if Atomic.fetch_and_add opened 1 >= cfg.max_connections then (Atomic.decr opened; refuse fd tls)
+                else begin
+                  if nodelay then Unix.setsockopt fd Unix.TCP_NODELAY true;
+                  let io = ios.(Atomic.fetch_and_add next 1 mod Array.length ios) in
+                  Mutex.protect io.m (fun () -> Queue.push (fd, tls) io.fds; Condition.signal io.cv)
+                end
               | exception Unix.Unix_error ((Unix.EINTR | Unix.ECONNABORTED), _, _) -> ()
+              | exception Unix.Unix_error ((Unix.EMFILE | Unix.ENFILE | Unix.ENOBUFS | Unix.ENOMEM), _, _) ->
+                (* out of descriptors or memory: the connection waits in the backlog; the server goes on *)
+                log "accept: out of file descriptors or memory (raise LimitNOFILE, or lower max_connections)";
+                Thread.delay 0.1
               | exception Unix.Unix_error _ -> Atomic.set accepting false
             done
           in
@@ -369,11 +438,11 @@ let serve (cfg : Config.t) =
             done
           in
           let tk = Thread.create ticker () in
-          log "ready in %.1f ms: %s; %s%s; %d I/O domains; server %s, cluster %s" opened_ms
+          log "ready in %.1f ms: %s; %s%s; %d I/O domains, at most %d connections; server %s, cluster %s" opened_ms
             (String.concat ", " (Array.to_list (Array.map (fun d -> Printf.sprintf "%s at group %d" d.core.name (d.core.view ()).group) dbs)))
             (match Config.socket_path cfg with Some p -> "socket " ^ p | None -> "no socket")
             (match cfg.listen with Some (h, p) -> Printf.sprintf ", tcp %s:%d" h p | None -> "")
-            cfg.domains sid cfg.id;
+            cfg.domains cfg.max_connections sid cfg.id;
           notify "READY=1";
           ignore (Thread.wait_signal sigs);
           (* stop: no new connection, no new request; the writes in flight end and are answered; each database closed

@@ -1,9 +1,9 @@
 #!/bin/sh
 # Every test: unit and property tests, the exhaustive enumeration, the simulation (SEEDS seeds, 300 by default),
 # real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/case-seats.md), and the documentation's
-# examples, and the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), a real server
-# killed SERVER_KILLS times (20) under writing clients. Scratch databases go in $CEPHEUS_TMP (default: the system's
-# temp dir).
+# examples, and the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), TLS and the
+# limits of connections on a real server, a real server killed SERVER_KILLS times (20) under writing clients.
+# Scratch databases go in $CEPHEUS_TMP (default: the system's temp dir).
 set -e
 cd "$(dirname "$0")/.."
 tmp=${CEPHEUS_TMP:-${TMPDIR:-/tmp}}
@@ -19,4 +19,5 @@ CEPHEUS_TMP=$tmp $b/examples.exe | tail -1
 $b/server_unit.exe | tail -1
 $b/server_sim.exe --seeds "${SERVER_SEEDS:-200}" | tail -2
 $b/server_tls.exe "$tmp/cepheus-tls" | tail -1
+$b/server_limits.exe "$tmp/cepheus-limits" | tail -1
 rm -rf "$tmp/cepheus-server" && $b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-server"

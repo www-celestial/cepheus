@@ -64,6 +64,8 @@ address = "127.0.0.1:7401"         # host:port the peers will use (replication, 
 socket = "/run/cepheus"            # the directory of the Unix socket .s.cepheus.PORT (PORT: listen's, or 7400)
 listen = "0.0.0.0:7400"            # TCP for programs, always TLS: needs [tls]
 domains = 4                        # the I/O domains, 1 to 64; default min(4, cores / 2)
+max_connections = 512              # connections open at once (local readers' included), 1 to 65536; default 512
+idle_timeout = 600                 # seconds without a whole request before a connection is closed; 0: never; default 600
 
 [tls]                              # made by `cepheus cluster init` (the CA and srv1) and `cepheus cluster cert`
 ca = "/etc/cepheus/ca.pem"         # the cluster's CA: the certificates it signed are trusted
@@ -86,6 +88,21 @@ name = "stock"
 - An unknown section or key, a missing one, a wrong type, two databases or peers of one name: the server refuses to
   start, and says which line or key (a configuration is never guessed).
 - A database declared and not yet on disk is created at the first start (its directory under `data`).
+- `max_connections` bounds the connections open at once, from their accept to their close (a thread each, and a file
+  descriptor). At the limit a new connection is closed at once: over the Unix socket after an error frame
+  `too_many_connections`, over TCP without a word and before its TLS handshake, so that a refused connection costs the
+  server no handshake (about 5 ms of computation). The log says how many were refused, at most once a second. The
+  default, 512, leaves room under systemd's default limit of 1,024 descriptors a service (`LimitNOFILE`), which the
+  databases' files share (a journal segment, a run file a level); raise both together. A server out of descriptors
+  says so in its log and keeps accepting once some close (`accept` fails with `EMFILE`; the connection waits in the
+  kernel's queue).
+- `idle_timeout`: a connection must send a whole request within this many seconds of its accept (its TLS handshake
+  included) and of its previous request, and must take what the server sends within as long; otherwise the server
+  sends it an error frame `idle` (request id 0) and closes it. Bytes that trickle in without making a request do not
+  keep a connection open. A program's library keeps its connection alive with `Ping`, or connects again: the OCaml
+  client sends a read (Open, Get, Find, Ping, status) again on a new connection after a broken one, within its retry
+  budget, as it does for writes (G14). PostgreSQL's `idle_session_timeout` is off by default and its
+  `authentication_timeout` is one minute; Redis's `timeout` is off by default.
 
 ### tokens.toml
 
@@ -275,6 +292,8 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 | `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |
+| `too_many_connections` | a new connection over the Unix socket while the server holds `max_connections` (request id 0; over TCP the connection is closed without a word) | connect later, or raise the limit |
+| `idle` | no whole request for `idle_timeout` seconds (request id 0, then the server closes the connection) | send `Ping` meanwhile, or connect again: the OCaml client does |
 | `refused` | a write sent again after a later write of its session was applied, whose first error was lost when the server started again (its error, when the same server refused it, is given again instead) | it was not applied: decide again |
 | `invalid` | a malformed request (the connection closes), a question that does not check, a serial below its session's floor, a why that starts with the server's marker | fix the request |
 
@@ -462,8 +481,6 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 
 ## What it does not do yet
 
-- No idle timeout: a connection that sends nothing (or stops in the middle of its TLS handshake) keeps its thread
-  until it closes; no limit on the number of connections but the system's.
 - Find gathers its answer's index words before it sends them (above); subscriptions (`Watch`), forks and local reads
   are not on the wire yet.
 

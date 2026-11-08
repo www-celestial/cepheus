@@ -44,7 +44,8 @@ let config () =
      check (c.data = "/etc/cepheus/data" && c.socket = Some "/etc/cepheus/run") "config: paths beside the file";
      check (c.cache = 64 lsl 20 && c.port = 7400 && c.databases = [ "shop" ]) "config: values";
      check (Config.socket_path c = Some "/etc/cepheus/run/.s.cepheus.7400") "config: the socket's name";
-     check (Config.tokens_path c = "/etc/cepheus/tokens.toml") "config: tokens beside"
+     check (Config.tokens_path c = "/etc/cepheus/tokens.toml") "config: tokens beside";
+     check (c.max_connections = 512 && c.idle_timeout = 600) "config: the limits' defaults"
    | exception Config.Bad m -> check false "config: %s" m);
   let refused edit what =
     let src = edit base in
@@ -66,6 +67,13 @@ let config () =
   refused (fun s -> s ^ "[[peer]]\nname = \"srv2\"\naddress = \"10.0.0.2:7401\"\n") "two peers (no replication yet)";
   refused (fun s -> s ^ "[[database]]\nname = \"shop\"\n") "a database twice";
   refused (repl "cache = \"64M\"" "cache = \"lots\"") "a bad size";
+  (match Config.of_toml "/x/cluster.toml" (Toml.parse (repl "socket = \"run\"" "socket = \"run\"\nmax_connections = 3\nidle_timeout = 0" base)) with
+   | c -> check (c.max_connections = 3 && c.idle_timeout = 0) "config: max_connections, idle_timeout 0 (no limit)"
+   | exception Config.Bad m -> check false "config with limits: %s" m);
+  refused (repl "socket = \"run\"" "socket = \"run\"\nmax_connections = 0") "max_connections 0";
+  refused (repl "socket = \"run\"" "socket = \"run\"\nmax_connections = \"many\"") "max_connections as a string";
+  refused (repl "socket = \"run\"" "socket = \"run\"\nidle_timeout = -1") "a negative idle_timeout";
+  refused (repl "socket = \"run\"" "socket = \"run\"\nidle_timeout = 604801") "an idle_timeout over a week";
   refused (repl "name = \"shop\"\n" "name = \"Shop!\"\n" |> fun f s -> let s = f s in repl "[[database]]\nname = \"shop\"" "[[database]]\nname = \"Shop!\"" s) "a bad database name"
 
 (* ---- tokens ---- *)

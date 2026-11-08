@@ -322,6 +322,9 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — ocaml-tls, the TLS in OCaml weighed against OpenSSL (its ciphers are C too; not an OSS-Fuzz project): OpenSSL kept.
 - **[sd_notify]** systemd. sd_notify(3), the readiness protocol: one datagram (`READY=1`) on `$NOTIFY_SOCKET`.
   https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html
+- **[socket(7)]** The Linux man-pages project. socket(7): `SO_RCVTIMEO` and `SO_SNDTIMEO`, the timeouts of a socket's
+  reads and writes. https://man7.org/linux/man-pages/man7/socket.7.html
+  — How a blocked connection thread wakes to apply the idle limit.
 
 ## Testing and verification
 

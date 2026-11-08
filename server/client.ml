@@ -114,6 +114,9 @@ let rec frames c id =
     List.rev fs
   | _ ->
     let id', kind, flags, body = next_frame c in
+    (* request id 0: the server says why it closes the connection (idle, too many connections) *)
+    if id' = 0 && flags land Wire.f_error <> 0 then
+      raise (Broken (match decode kind flags body with Wire.Err e -> e.code ^ ": " ^ e.message | _ -> "the server closed the connection"));
     let prev = Option.value (Hashtbl.find_opt c.early id') ~default:[] in
     Hashtbl.replace c.early id' ((kind, flags, body) :: prev);
     frames c id
@@ -138,13 +141,15 @@ let call c req =
   flush c;
   recv c id
 
+(* Error (permanent, why): a refusal that trying again will not change (the token, the version, another cluster) *)
 let hello c =
   match call c (Wire.Hello { version = Wire.version; token = c.token; program = c.program; session = c.session }) with
   | Wire.Welcome w when (match c.cluster with Some id -> id <> w.cluster | None -> false) ->
-    Error (Printf.sprintf "the server belongs to cluster %s, not %s" w.cluster (Option.get c.cluster))
+    Error (true, Printf.sprintf "the server belongs to cluster %s, not %s" w.cluster (Option.get c.cluster))
   | Wire.Welcome w as r -> c.session <- w.session; c.welcome <- Some r; Ok ()
-  | Wire.Err e -> Error (e.code ^ ": " ^ e.message)
-  | _ -> Error "an unexpected reply to Hello"
+  | Wire.Err e -> Error (List.mem e.code [ "auth"; "version"; "denied" ], e.code ^ ": " ^ e.message)
+  | _ -> Error (true, "an unexpected reply to Hello")
+
 
 let reconnect c =
   (match c.fd with Some fd -> (try Unix.close fd with Unix.Unix_error _ -> ()) | None -> ());
@@ -158,23 +163,26 @@ let reconnect c =
     let secured =
       match c.address, c.ca with
       | Unix_socket _, _ -> Ok ()
-      | Tcp _, None -> Error "a TCP connection needs the cluster's CA (ca)"
+      | Tcp _, None -> Error (true, "a TCP connection needs the cluster's CA (ca)")
       | Tcp (host, _), Some ca -> (
         match Tls.client_ctx ~ca () with
-        | Error m -> Error m
-        | Ok ctx -> ( match Tls.handshake ctx fd ~server:false ~host with Ok t -> c.tls <- Some t; Ok () | Error m -> Error m))
+        | Error m -> Error (true, m)
+        | Ok ctx -> ( match Tls.handshake ctx fd ~server:false ~host with Ok t -> c.tls <- Some t; Ok () | Error m -> Error (false, m)))
     in
     match secured with
-    | Error m -> (try Unix.close fd with Unix.Unix_error _ -> ()); c.fd <- None; Error m
-    | Ok () -> ( try hello c with Broken m -> Error m))
-  | exception Unix.Unix_error (e, _, _) -> Error (Unix.error_message e)
+    | Error e -> (try Unix.close fd with Unix.Unix_error _ -> ()); c.fd <- None; Error e
+    | Ok () -> ( try hello c with Broken m -> Error (false, m)))
+  | exception Unix.Unix_error (e, _, _) -> Error (false, Unix.error_message e)
 
+(* A write to a connection the server closed must fail with EPIPE, not kill the program: OCaml's Unix cannot ask for
+   MSG_NOSIGNAL, so the library ignores SIGPIPE for the process, as many networked libraries do. *)
 let connect ?(program = "ocaml") ?(session = 0) ?ca ?cluster address token =
+  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
   let c =
     { address; token; program; fd = None; tls = None; ca; cluster; inb = Bytes.create 65536; have = 0; next_id = 1; out = Buffer.create 4096;
       body = Buffer.create 4096; session; serial = 0; waiting = Hashtbl.create 8; early = Hashtbl.create 8; welcome = None }
   in
-  Result.map (fun () -> c) (reconnect c)
+  match reconnect c with Ok () -> Ok c | Error (_, m) -> Error m
 
 let close c =
   match c.fd with
@@ -186,26 +194,48 @@ type error = { code : string; message : string }
 let result = function Wire.Err e -> Error { code = e.code; message = e.message } | r -> Ok r
 
 type db = { handle : int; group : int; props : (int * Schema.prop) list }
+(* how long a request keeps trying to reach the server after the connection broke *)
+let retry_budget = ref 30.0
+
+(* [attempt ()] again on a new connection after a broken one (the server stopped, restarted, or closed an idle
+   connection), until it returns or the budget is spent; then [gave_up ()] *)
+let with_retry c attempt gave_up =
+  let deadline = Unix.gettimeofday () +. !retry_budget in
+  let rec go pause =
+    match attempt () with
+    | r -> r
+    | exception Broken m ->
+      let rec again pause =
+        if Unix.gettimeofday () > deadline then gave_up m
+        else
+          match reconnect c with
+          | Ok () -> go pause
+          | Error (true, m) -> gave_up m
+          | Error (false, _) -> Thread.delay pause; again (min 1.0 (pause *. 2.))
+      in
+      again pause
+  in
+  go 0.01
+
+(* a read (it changes nothing): sent again as it is *)
+let read_call c req = with_retry c (fun () -> call c req) (fun m -> raise (Broken m))
 
 let open_db c name =
-  match call c (Wire.Open name) with
+  match read_call c (Wire.Open name) with
   | Wire.Opened o -> Ok { handle = o.db; group = o.group; props = o.props }
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Open" })
 
 let prop db name = List.find_map (fun (p, (d : Schema.prop)) -> if d.name = name then Some p else None) db.props
 
 let get c db thing =
-  match call c (Wire.Get { db = db.handle; thing }) with
+  match read_call c (Wire.Get { db = db.handle; thing }) with
   | Wire.Facts f -> Ok (f.group, f.facts)
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" })
 
 let find c db ?(select = Wire.Give [||]) query =
-  match call c (Wire.Find { db = db.handle; query; select }) with
+  match read_call c (Wire.Find { db = db.handle; query; select }) with
   | Wire.Rows r -> Ok (r.group, r.rows)
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Find" })
-
-(* how long [write] keeps trying to reach the server after the connection broke *)
-let retry_budget = ref 30.0
 
 let floor c = Hashtbl.fold (fun s () m -> min s m) c.waiting (c.serial + 1)
 
@@ -215,36 +245,21 @@ let write c db ?(by = 0) ?(why = "") ops =
   c.serial <- c.serial + 1;
   let serial = c.serial in
   Hashtbl.replace c.waiting serial ();
-  let deadline = Unix.gettimeofday () +. !retry_budget in
-  let rec attempt pause =
-    match
-      let fl = floor c in
-      call c (Wire.Write { db = db.handle; serial; floor = fl; by; why; ops })
-    with
-    | r ->
+  with_retry c
+    (fun () ->
+      let r = call c (Wire.Write { db = db.handle; serial; floor = floor c; by; why; ops }) in
       Hashtbl.remove c.waiting serial;
-      (match r with
-       | Wire.Receipt rc -> Ok rc
-       | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Write" }))
-    | exception Broken _ ->
-      let rec again pause =
-        if Unix.gettimeofday () > deadline then begin
-          Hashtbl.remove c.waiting serial;
-          Error { code = "unreachable"; message = "the server did not answer in time: the write was applied once or not at all" }
-        end
-        else
-          match reconnect c with
-          | Ok () -> attempt pause
-          | Error _ -> Thread.delay pause; again (min 1.0 (pause *. 2.))
-      in
-      again pause
-  in
-  attempt 0.01
+      match r with
+      | Wire.Receipt rc -> Ok rc
+      | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Write" }))
+    (fun _ ->
+      Hashtbl.remove c.waiting serial;
+      Error { code = "unreachable"; message = "the server did not answer in time: the write was applied once or not at all" })
 
-let ping c s = match call c (Wire.Ping s) with Wire.Pong p -> Ok p | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "Ping" })
+let ping c s = match read_call c (Wire.Ping s) with Wire.Pong p -> Ok p | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "Ping" })
 
 let status c =
-  match call c (Wire.Admin "status") with
+  match read_call c (Wire.Admin "status") with
   | Wire.Status l -> Ok l
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Admin" })
 

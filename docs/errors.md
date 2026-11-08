@@ -184,7 +184,7 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 
 A program connected to the server receives every error above as a value `{code, message}` (`conflict`, `invalid`,
 `unique`, `damaged`, `io`, `busy`, `closed`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
-`unknown_database`, `stopping`, `refused`. Each, when it comes and what to do: [the server](server.md#errors).
+`unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`. Each, when it comes and what to do: [the server](server.md#errors).
 
 ## Lines on the standard error
 

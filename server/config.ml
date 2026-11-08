@@ -18,10 +18,14 @@ type t = {
   data : string;
   cache : int;  (* bytes of run pages kept in memory *)
   domains : int;  (* I/O domains *)
+  max_connections : int;  (* connections open at once, the local readers' included *)
+  idle_timeout : int;  (* seconds a connection may go without a whole request (from its accept); 0: no limit *)
   databases : string list;
 }
 
 let default_port = 7400
+let default_max_connections = 512
+let default_idle_timeout = 600
 
 exception Bad of string
 
@@ -116,7 +120,7 @@ let of_toml file (doc : (string * Toml.value) list) =
     bad "%d peers: a cluster of several machines needs replication, which this version does not have yet (one peer)"
       (List.length peers);
   let clients = Option.value (table "clients") ~default:[] in
-  known "clients" clients [ "listen"; "socket"; "domains" ];
+  known "clients" clients [ "listen"; "socket"; "domains"; "max_connections"; "idle_timeout" ];
   let listen = Option.map (host_port "[clients] listen") (str "clients" clients "listen") in
   let socket = Option.map path (str "clients" clients "socket") in
   if listen = None && socket = None then bad "[clients] needs listen (TCP), socket (a directory for the Unix socket), or both";
@@ -125,6 +129,18 @@ let of_toml file (doc : (string * Toml.value) list) =
     | Some (Toml.Int n) when n >= 1 && n <= 64 -> n
     | Some _ -> bad "[clients] domains must be an integer from 1 to 64"
     | None -> default_domains ()
+  in
+  let max_connections =
+    match List.assoc_opt "max_connections" clients with
+    | Some (Toml.Int n) when n >= 1 && n <= 65536 -> n
+    | Some _ -> bad "[clients] max_connections must be an integer from 1 to 65536"
+    | None -> default_max_connections
+  in
+  let idle_timeout =
+    match List.assoc_opt "idle_timeout" clients with
+    | Some (Toml.Int n) when n >= 0 && n <= 604_800 -> n
+    | Some _ -> bad "[clients] idle_timeout must be a number of seconds from 0 (no limit) to 604800 (a week)"
+    | None -> default_idle_timeout
   in
   let tls =
     match table "tls" with
@@ -156,7 +172,7 @@ let of_toml file (doc : (string * Toml.value) list) =
   if databases = [] then bad "[[database]] is missing: the server holds the databases this file declares";
   if List.length (List.sort_uniq compare databases) <> List.length databases then bad "two [[database]] have the same name";
   let port = match listen with Some (_, p) -> p | None -> default_port in
-  { file; name; id; me; peers; listen; socket; port; tls; data; cache; domains; databases }
+  { file; name; id; me; peers; listen; socket; port; tls; data; cache; domains; max_connections; idle_timeout; databases }
 
 let load file =
   match Toml.parse_file file with

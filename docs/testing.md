@@ -166,6 +166,11 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
 - `server_tls`: a real server with TLS: a client of the cluster's CA reads; another cluster's CA, a certificate that
   does not name the host, another cluster id, a TCP client without a CA and a plain client on the TLS port are all
   refused, and the server goes on; TCP without `[tls]` is refused at start.
+- `server_limits`: a real server with `max_connections = 3` and `idle_timeout = 1`: with three connections open, a
+  fourth over the Unix socket gets `too_many_connections` and one over TCP is closed before any byte; a silent
+  connection, one that trickles a byte at a time without a request, and one that stops in its TLS handshake are
+  closed within twice the limit (the first two after `idle`); a client that pings more often stays; a client idle
+  past the limit reads again, its library connecting again by itself.
 
 ### The server's C, fuzzed
 
