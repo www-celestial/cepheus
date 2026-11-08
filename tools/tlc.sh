@@ -1,5 +1,6 @@
 #!/bin/sh
-# Model-checks spec/Journal.tla and spec/Merge.tla with TLC (bounds in their .cfg files). TLA2TOOLS names
+# Model-checks spec/Journal.tla, spec/Merge.tla and spec/Seats.tla with TLC (bounds in their .cfg files), and checks
+# that the naive sale of spec/Seats.tla (SeatsNaive.cfg) breaks its invariants. TLA2TOOLS names
 # tla2tools.jar, the official release from https://github.com/tlaplus/tlaplus/releases (v1.7.4 used here); Java 11 or
 # later.
 set -e
@@ -8,6 +9,11 @@ cd "$(dirname "$0")/.."
 meta=$(mktemp -d)
 trap 'rm -rf "$meta"' EXIT
 cd spec
-for m in Journal Merge; do
+for m in Journal Merge Seats; do
   java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/$m" -config $m.cfg $m.tla
 done
+# the naive sale must break an invariant: TLC exits with 12 (a safety violation) and prints the counterexample
+rc=0
+java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 1 -metadir "$meta/naive" -config SeatsNaive.cfg Seats.tla || rc=$?
+if [ "$rc" -ne 12 ]; then echo "tlc.sh: the naive sale of spec/Seats.tla should break an invariant (TLC exit $rc)"; exit 1; fi
+echo "tlc.sh: the naive sale breaks an invariant, as it must"

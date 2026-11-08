@@ -9,6 +9,7 @@
 #                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2);
 #                              QS=Q4,Q5 only those; RUNS runs each (21), summarised by bench.exe stats
 #   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row; RATE=r inserts a second in all (open loop)
+#   pg.sh seats ROOT serializable|naive SEATS BUYERS   the sale of docs/case-seats.md (pgbench, --max-tries)
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -133,6 +134,31 @@ write)
   # a log line: client, transaction, latency (us), script, epoch, us[, schedule lag (us)]
   cat "$tmp"/lat* | awk '{ print $3 + ($7 == "" ? 0 : $7) }' | "$here/../../_build/default/bench/bench.exe" stats "  insert" us
   rm -r "$tmp"
+  ;;
+seats)
+  # the sale of docs/case-seats.md: pg.sh seats ROOT serializable|naive SEATS BUYERS. Sold out by BUYERS pgbench
+  # clients, each doing 2 SEATS/BUYERS + 50 transactions (one after the hall is sold out sells nothing); the time runs
+  # from pgbench's start to the last charge's commit (its clock_timestamp)
+  mode=$3; n=$4; c=$5
+  psql_ <<EOS
+DROP TABLE IF EXISTS charge, seat;
+CREATE TABLE seat (id int PRIMARY KEY, owner int NOT NULL DEFAULT 0);
+CREATE TABLE charge (id bigserial PRIMARY KEY, seat int NOT NULL, buyer int NOT NULL, price int NOT NULL,
+                     at timestamptz NOT NULL DEFAULT clock_timestamp());
+INSERT INTO seat (id) SELECT g FROM generate_series(1, $n) g;
+CREATE INDEX seat_free ON seat (id) WHERE owner = 0;
+VACUUM ANALYZE seat;
+CHECKPOINT;
+EOS
+  t0=$(psql -X -At -c "SELECT extract(epoch FROM clock_timestamp())")
+  pgbench -n -c "$c" -j "$c" -t $((2 * n / c + 50)) --max-tries=1000 -f "$here/seat-$mode.sql" > "$root/pgbench-seats.out" 2>&1 || true
+  r=$(psql -X -At -F ' ' -c "SELECT count(*), count(*) - count(DISTINCT seat),
+        (SELECT count(*) FROM charge c JOIN seat s ON s.id = c.seat WHERE s.owner <> c.buyer),
+        (SELECT count(*) FROM seat WHERE owner = 0), round((extract(epoch FROM max(at)) - $t0)::numeric, 3) FROM charge")
+  set -- $r
+  retried=$(sed -n 's/^number of transactions retried: \([0-9]*\).*/\1/p' "$root/pgbench-seats.out")
+  failed=$(sed -n 's/^number of failed transactions: \([0-9]*\).*/\1/p' "$root/pgbench-seats.out")
+  echo "postgres seats ($mode, $c buyers): $n seats, $1 sales, $4 unsold, $2 sold twice or more, $3 charged without the seat; sold out in $5 s; ${retried:-0} transactions retried, ${failed:-0} failed"
   ;;
 stop)
   pg_ctl -D "$root/data" -w stop -m fast >/dev/null
