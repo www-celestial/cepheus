@@ -22,6 +22,26 @@
    (property, value) and property, and per fact its state in the view (base), its state now, its round, its marks. A
    read of the state is the view's read with the working set's entries in front. *)
 
+(* The store's functions, called and not inlined: the library is built with -inline 200, which would copy each of
+   them into every step of every plan, and a larger binary starts more slowly (its frame descriptors and relocations
+   are read at start-up). A call costs a few nanoseconds; a lookup, a hundred or more. *)
+module S = struct
+  let[@inline never] word v x = Store.word v x
+  let[@inline never] state v e p w = Store.state v e p w
+  let[@inline never] mem v e p w = Store.mem v e p w
+  let[@inline never] count_prop v p = Store.count_prop v p
+  let[@inline never] count_things v p w = Store.count_things v p w
+  let[@inline never] set_sorted v es ps ws ss n = Store.set_sorted v es ps ws ss n
+  let[@inline never] facts v = Store.facts v
+  let[@inline never] distinct v p = Store.distinct v p
+  let[@inline never] word_intern v x = Store.word_intern v x
+  let[@inline never] value v t w = Store.value v t w
+  let[@inline never] iter_values v e p f = Store.iter_values v e p f
+  let[@inline never] iter_things v p w f = Store.iter_things v p w f
+  let[@inline never] iter_prop v p f = Store.iter_prop v p f
+  let[@inline never] count_values v e p = Store.count_values v e p
+end
+
 exception Refused of string
 
 let refuse fmt = Printf.ksprintf (fun s -> raise (Refused s)) fmt
@@ -52,7 +72,7 @@ type ints = (int, Bigarray.int_elt, Bigarray.c_layout) A.t
 let ints n v : ints = let a = A.create Bigarray.Int Bigarray.c_layout n in A.fill a v; a
 
 (* [a] (its first [n] cells kept) in [c] cells, the others [v] *)
-let regrow (a : ints) n c v = let b = ints c v in A.blit (A.sub a 0 n) (A.sub b 0 n); b
+let[@inline never] regrow (a : ints) n c v = let b = ints c v in A.blit (A.sub a 0 n) (A.sub b 0 n); b
 
 (* an index: (a, b) -> the newest fact with that key; the older ones chained through [next], per fact. A slot is three
    consecutive cells (key a, key b, head): one cache line a probe *)
@@ -66,7 +86,7 @@ type idx = {
 
 let slots_for facts = let size = ref 64 in while !size < 2 * facts do size := 2 * !size done; !size
 
-let new_slots size = let a = ints (3 * size) 0 in for i = 0 to size - 1 do A.unsafe_set a (3 * i) (-1) done; a
+let[@inline never] new_slots size = let a = ints (3 * size) 0 in for i = 0 to size - 1 do A.unsafe_set a (3 * i) (-1) done; a
 
 (* [keys]: the keys expected, for the size of the table (it grows past them); [facts]: the facts' chains *)
 let idx_create ?(facts = 64) ?(keys = facts) () =
@@ -79,7 +99,7 @@ let[@inline] idx_slot t a b =
   while (let k = A.unsafe_get sl (3 * !i) in k <> -1 && (k <> a || A.unsafe_get sl ((3 * !i) + 1) <> b)) do i := (!i + 1) land mask done;
   !i
 
-let idx_grow t =
+let[@inline never] idx_grow t =
   let old = t.sl and os = t.slots and n = t.used in
   let size = 2 * (t.mask + 1) in
   t.sl <- new_slots size;
@@ -111,7 +131,7 @@ let idx_add t a b x =
 let[@inline] idx_head t a b = if t.used = 0 then -1 else A.unsafe_get t.sl ((3 * idx_slot t a b) + 2)
 let[@inline] idx_next t x = A.unsafe_get t.next x
 
-let idx_clear t =
+let[@inline never] idx_clear t =
   for k = 0 to t.used - 1 do
     let i = A.unsafe_get t.slots k in
     A.unsafe_set t.sl (3 * i) (-1);
@@ -158,7 +178,7 @@ let[@inline] set_round ws x r = A.unsafe_set ws.round x r
 let[@inline] set_rule ws x r = A.unsafe_set ws.rule x r
 let by ws x = if x < Array.length ws.by then ws.by.(x) else [||]
 
-let set_by ws x ids =
+let[@inline never] set_by ws x ids =
   if x >= Array.length ws.by then begin
     let b = Array.make (max (x + 1) ws.cap) [||] in
     Array.blit ws.by 0 b 0 (Array.length ws.by);
@@ -185,7 +205,7 @@ let place ws x =
   while A.unsafe_get ws.set !i <> -1 do i := (!i + 1) land ws.smask done;
   A.unsafe_set ws.set !i x
 
-let grow ws =
+let[@inline never] grow ws =
   let n = ws.n in
   let c = 2 * ws.cap in
   let gb a = let b = Bytes.make c '\000' in Bytes.blit a 0 b 0 n; b in
@@ -195,7 +215,7 @@ let grow ws =
   ws.base <- gb ws.base; ws.now <- gb ws.now; ws.mark <- gb ws.mark;
   List.iter (fun t -> t.next <- regrow t.next n c (-1)) [ ws.ie; ws.iw; ws.ip ]
 
-let grow_set ws =
+let[@inline never] grow_set ws =
   let size = 2 * A.dim ws.set in
   ws.set <- ints size (-1);
   ws.smask <- size - 1;
@@ -235,7 +255,7 @@ let set_now ws x s =
   Bytes.unsafe_set ws.now x (Char.unsafe_chr s);
   if s > 0 && base ws x = 0 then chain ws x
 
-let reset ws =
+let[@inline never] reset ws =
   if ws.n > 0 then begin
     (* the slots of the facts held, cleared (probing past the slots already cleared until its own) *)
     for x = 0 to ws.n - 1 do
@@ -340,11 +360,11 @@ let choose_order (v : Store.view) (r : Rules.t) pos =
     | true, false -> 1, (match Schema.find v.schema a.p with Some d when not d.many -> 1 | _ -> 4)
     | false, true -> (
       match a.v with
-      | Val x when not (is_text_const x) -> 2, Store.count_things v a.p (inline_word x)
-      | Thing c -> 2, Store.count_things v a.p c
-      | Val _ -> 2, max 1 (Store.count_prop v a.p / Store.distinct v a.p)
-      | Var _ -> 1, max 1 (Store.count_prop v a.p / Store.distinct v a.p))
-    | false, false -> 3, Store.count_prop v a.p
+      | Val x when not (is_text_const x) -> 2, S.count_things v a.p (inline_word x)
+      | Thing c -> 2, S.count_things v a.p c
+      | Val _ -> 2, max 1 (S.count_prop v a.p / S.distinct v a.p)
+      | Var _ -> 1, max 1 (S.count_prop v a.p / S.distinct v a.p))
+    | false, false -> 3, S.count_prop v a.p
   in
   let rest = ref (List.filter (fun j -> j <> pos) (List.init nb Fun.id)) and out = ref [] in
   while !rest <> [] do
@@ -400,7 +420,7 @@ let make_program (v : Store.view) =
   { key = Schema.rules_key v.schema; rules; ids; np; reads; consts = Array.of_list (List.rev !consts);
     head_p = Array.map (fun (r : Rules.t) -> match r.head with Give h -> h.p | Never -> -1) rules; orders;
     atoms = Array.map atoms_of rules; free_free = !free_free;
-    size = Store.facts v; pool = ref []; pm = Mutex.create () }
+    size = S.facts v; pool = ref []; pm = Mutex.create () }
 
 (* ---- plans ----
    A plan enumerates the instances of one rule with one atom matched to a given fact (a body atom: forward; the head:
@@ -434,13 +454,13 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
             let w = ctx.cw.(i) in
             if w >= 0 then w
             else begin
-              let v, w = Store.word_intern ctx.v x in
+              let v, w = S.word_intern ctx.v x in
               ctx.v <- v;
               ctx.cw.(i) <- w;
               w
             end
         else fun () -> ctx.cw.(i)
-      | _ -> let c = Option.value (Store.word ctx.v x) ~default:(-1) in fun () -> c
+      | _ -> let c = Option.value (S.word ctx.v x) ~default:(-1) in fun () -> c
   in
   let getter ~head = function
     | Query.Var x -> fun () -> env.(x)
@@ -503,7 +523,7 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
         fun () ->
           let e = ge () and w = gv () in
           let x = find ws e p w in
-          if (if x >= 0 then vis x (lim ()) else in_view p && Store.mem ctx.v e p w) then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
+          if (if x >= 0 then vis x (lim ()) else in_view p && S.mem ctx.v e p w) then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
       | Proved, true, true ->
         fun () -> let e = ge () and w = gv () in if find pt e p w >= 0 then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
       | _, true, false ->
@@ -526,7 +546,7 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
             ce := e;
             cl := lim ();
             pl.be.(j) <- e;
-            if in_view p then Store.iter_values ctx.v e p (if ws.n = 0 then on else filt);
+            if in_view p then S.iter_values ctx.v e p (if ws.n = 0 then on else filt);
             let x = ref (idx_head ws.ie p e) in
             while !x >= 0 do
               let y = !x in
@@ -554,7 +574,7 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
             cw := w;
             cl := lim ();
             pl.bw.(j) <- w;
-            if in_view p then Store.iter_things ctx.v p w (if ws.n = 0 then on else filt);
+            if in_view p then S.iter_things ctx.v p w (if ws.n = 0 then on else filt);
             let x = ref (idx_head ws.iw p w) in
             while !x >= 0 do
               let y = !x in
@@ -586,7 +606,7 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
           let filt e w = let x = find ws e p w in if x < 0 || vis x !cl then on e w in
           fun () ->
             cl := lim ();
-            if in_view p then Store.iter_prop ctx.v p (if ws.n = 0 then on else filt);
+            if in_view p then S.iter_prop ctx.v p (if ws.n = 0 then on else filt);
             let x = ref (idx_head ws.ip p 0) in
             while !x >= 0 do
               let y = !x in
@@ -671,12 +691,12 @@ let run_all d e p w =
 (* ---- the state ---- *)
 
 (* is (e p w) a fact now: the working set's entry, else the view *)
-let present ctx e p w = let x = find ctx.ws e p w in if x >= 0 then now ctx.ws x > 0 else Store.mem ctx.v e p w
+let present ctx e p w = let x = find ctx.ws e p w in if x >= 0 then now ctx.ws x > 0 else S.mem ctx.v e p w
 
 (* the id of a fact of the state in the working set, added with its state in the view if needed *)
-let intern ctx e p w =
+let[@inline never] intern ctx e p w =
   let x = find ctx.ws e p w in
-  if x >= 0 then x else add ctx.ws e p w (Store.state ctx.v e p w)
+  if x >= 0 then x else add ctx.ws e p w (S.state ctx.v e p w)
 
 (* ---- B/F and Why: the backward check, and proofs forward among the proved facts ---- *)
 
@@ -766,7 +786,7 @@ let cache_m = Mutex.create ()
 let program (v : Store.view) =
   let key = Schema.rules_key v.schema in
   Mutex.protect cache_m (fun () ->
-      let size = Store.facts v in
+      let size = S.facts v in
       match Hashtbl.find_opt cache key with
       | Some p when (size <= 2 * p.size + 1024 && 2 * size + 1024 >= p.size) -> p
       | _ ->
@@ -788,7 +808,7 @@ let take ?facts prog v =
   let c = match c with Some c -> c | None -> new_ctx ?facts prog v in
   c.v <- v;
   c.round <- max_int;
-  Array.iteri (fun i x -> c.cw.(i) <- Option.value (Store.word v x) ~default:(-1)) prog.consts;
+  Array.iteri (fun i x -> c.cw.(i) <- Option.value (S.word v x) ~default:(-1)) prog.consts;
   c.nn <- 0;
   c.derived <- 0;
   c.limit <- max_int;
@@ -812,14 +832,14 @@ let with_ctx ?prog ?facts v f =
   | r -> give c; r
   | exception e -> give c; raise e
 
-let push_next c x =
+let[@inline never] push_next c x =
   if c.nn >= A.dim c.next then c.next <- regrow c.next c.nn (2 * c.nn) 0;
   A.unsafe_set c.next c.nn x;
   c.nn <- c.nn + 1
 
 let rule_name c ri = c.prog.rules.(ri).name
 
-let count_derived c ri =
+let[@inline never] count_derived c ri =
   c.derived <- c.derived + 1;
   if ri >= 0 then c.per_rule.(ri) <- c.per_rule.(ri) + 1;
   if c.derived > c.limit then begin
@@ -844,7 +864,7 @@ let emit c pl =
       push_next c x
     end
   end
-  else if not ((Bytes.length c.vp = 0 || Bytes.unsafe_get c.vp p <> '\000') && Store.mem c.v e p w) then begin
+  else if not ((Bytes.length c.vp = 0 || Bytes.unsafe_get c.vp p <> '\000') && S.mem c.v e p w) then begin
     if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c pl.ri) e;
     let x = add ws e p w 0 in
     set_now ws x 2;
@@ -901,7 +921,7 @@ let backward_forward c (cands : int list) =
       if h >= 0 then (if now ws h > 0 && not (has ws h 4) then Queue.add h q)
       else
         (* one lookup: its state, present when above 0 *)
-        let s = Store.state c.v pl.he p pl.hw in
+        let s = S.state c.v pl.he p pl.hw in
         if s > 0 then Queue.add (add ws pl.he p pl.hw s) q);
   while not (Queue.is_empty q) do
     let x = Queue.pop q in
@@ -935,7 +955,7 @@ let instances c ?extra ri (f : plan -> unit) =
   pl.run 0 0
 
 let value_of (v : Store.view) p w =
-  match Schema.find v.schema p with Some d -> Store.value v d.typ w | None -> Value.Int w
+  match Schema.find v.schema p with Some d -> S.value v d.typ w | None -> Value.Int w
 
 let fact_text (v : Store.view) e p w =
   let name = match Schema.find v.schema p with Some d -> d.name | None -> string_of_int p in
@@ -1015,7 +1035,7 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
                   instances c ~extra:r (-1) (fun pl ->
                       let x = find ws pl.he h.p pl.hw in
                       if x >= 0 then cands := x :: !cands
-                      else if Store.state c.v pl.he h.p pl.hw = 2 then cands := add ws pl.he h.p pl.hw 2 :: !cands)))
+                      else if S.state c.v pl.he h.p pl.hw = 2 then cands := add ws pl.he h.p pl.hw 2 :: !cands)))
           removed;
         if !cands <> [] then backward_forward c (List.rev !cands);
         (* the facts an added rule gives over the state: round 1 *)
@@ -1033,7 +1053,7 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
                   if x >= 0 then begin
                     if now ws x = 0 then (set_now ws x 2; set_round ws (x) 1; set_rule ws (x) ri; count_derived c ri; seed := x :: !seed)
                   end
-                  else if not (Store.mem c.v e h.p w) then begin
+                  else if not (S.mem c.v e h.p w) then begin
                     let x = add ws e h.p w 0 in
                     set_now ws x 2;
                     set_round ws (x) 1;
@@ -1079,7 +1099,7 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
             (fun (ch : Group.change) ->
               match ch.kind with
               | Retracted -> (
-                match Store.word c.v ch.v with
+                match S.word c.v ch.v with
                 | Some w ->
                   let x = find ws ch.e ch.p w in
                   if x >= 0 && now ws x = 2 then { ch with kind = Group.Now_derived } else ch
@@ -1087,7 +1107,7 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
               | _ -> ch)
             changes
         in
-        (* the facts whose state changed, put into the view at once, sorted by thing (Store.set_sorted) *)
+        (* the facts whose state changed, put into the view at once, sorted by thing (S.set_sorted) *)
         let todo = ref [] in
         for x = 0 to ws.n - 1 do
           let b = base ws x and n = now ws x in
@@ -1106,7 +1126,7 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
         Array.sort (fun x y -> let c = compare (fe ws (x)) (fe ws (y)) in if c <> 0 then c else let c = compare (fp ws (x)) (fp ws (y)) in if c <> 0 then c else compare (fw ws (x)) (fw ws (y))) xs;
         let m = Array.length xs in
         let v' =
-          Store.set_sorted c.v (Array.map (fun x -> (fe ws (x))) xs) (Array.map (fun x -> (fp ws (x))) xs)
+          S.set_sorted c.v (Array.map (fun x -> (fe ws (x))) xs) (Array.map (fun x -> (fp ws (x))) xs)
             (Array.map (fun x -> (fw ws (x))) xs) (Array.map (fun x -> now ws x) xs) m
         in
         (* the schema's own rules over derived facts: one value for a one-valued property; a unique value once *)
@@ -1115,13 +1135,13 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
             if ch.kind = Group.Derived then
               match Schema.find v'.schema ch.p with
               | Some d ->
-                let x = match Store.word v' ch.v with Some w -> find ws ch.e ch.p w | None -> -1 in
+                let x = match S.word v' ch.v with Some w -> find ws ch.e ch.p w | None -> -1 in
                 let rn = if x >= 0 && (rule ws (x)) >= 0 then rule_name c (rule ws (x)) else "?" in
-                if (not d.many) && Store.count_values v' ch.e ch.p > 1 then
+                if (not d.many) && S.count_values v' ch.e ch.p > 1 then
                   refuse "rule %s gives #%d a second value of %s, which takes one" rn ch.e d.name;
                 if d.unique then begin
-                  match Store.word v' ch.v with
-                  | Some w -> if Store.count_things v' ch.p w > 1 then refuse "rule %s gives %s %s, which another thing has" rn d.name (Value.to_string ch.v)
+                  match S.word v' ch.v with
+                  | Some w -> if S.count_things v' ch.p w > 1 then refuse "rule %s gives %s %s, which another thing has" rn d.name (Value.to_string ch.v)
                   | None -> ()
                 end
               | None -> ())
@@ -1156,7 +1176,7 @@ let bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp : Bu
               | None -> ())
           prog.consts;
         c.limit <- !budget_base + (!budget_per * n);
-        c.vp <- Bytes.init prog.np (fun p -> if Store.count_prop v p > 0 then '\001' else '\000');
+        c.vp <- Bytes.init prog.np (fun p -> if S.count_prop v p > 0 then '\001' else '\000');
         ws.with_ip <- prog.free_free;
         let first = ints (max 1 n) 0 in
         for i = 0 to n - 1 do
@@ -1190,7 +1210,7 @@ type proof =
 
 (* a proof of (e p w) in view v, or None when it is not a fact *)
 let why (v : Store.view) e p w =
-  match Store.state v e p w with
+  match S.state v e p w with
   | 0 -> None
   | 1 -> Some (Given { e; p; v = value_of v p w })
   | _ ->
@@ -1216,7 +1236,7 @@ let derived_message (v : Store.view) e p w =
   | Some (By { rule; from; _ }) ->
     let leaf = function Given g -> (g.e, g.p, g.v) | By b -> (b.e, b.p, b.v) in
     let texts =
-      List.map (fun f -> let e, p, x = leaf f in fact_text v e p (Option.value (Store.word v x) ~default:0)) from
+      List.map (fun f -> let e, p, x = leaf f in fact_text v e p (Option.value (S.word v x) ~default:0)) from
     in
     Printf.sprintf "%s is derived by rule %s from %s: retract one of those" (fact_text v e p w) rule (String.concat " and " texts)
   | _ -> Printf.sprintf "%s is derived by a rule" (fact_text v e p w)

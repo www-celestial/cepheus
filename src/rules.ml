@@ -30,7 +30,7 @@ let value_text (x : Value.t) =
 let term_text = function Query.Var k -> Printf.sprintf "?%d" k | Thing n -> Printf.sprintf "#%d" n | Val x -> value_text x
 let pattern_text (q : Query.pattern) = Printf.sprintf "[%s %d %s]" (term_text q.e) q.p (term_text q.v)
 
-let to_text r =
+let[@inline never] to_text r =
   let b = Buffer.create 64 in
   Printf.bprintf b "vars %d; where" r.vars;
   List.iter (fun q -> Printf.bprintf b " %s" (pattern_text q)) r.where;
@@ -40,7 +40,7 @@ let to_text r =
 
 exception Parse of string
 
-let of_text name text =
+let[@inline never] of_text name text =
   let n = String.length text and i = ref 0 in
   let fail () = raise (Parse (Printf.sprintf "rule %s: cannot read its definition at character %d" name !i)) in
   let peek () = if !i < n then text.[!i] else '\000' in
@@ -133,7 +133,7 @@ let pattern_vars (q : Query.pattern) = List.filter_map (function Query.Var k -> 
 let types (v : Store.view) r =
   Query.types v { Query.vars = r.vars; where = r.where; ranges = r.ranges }
 
-let check (v : Store.view) r =
+let[@inline never] check (v : Store.view) r =
   let bad fmt = Printf.ksprintf (fun s -> raise (Parse (Printf.sprintf "rule %s: %s" r.name s))) fmt in
   try
     if r.where = [] then bad "its body has no pattern";

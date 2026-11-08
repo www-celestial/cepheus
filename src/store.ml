@@ -615,7 +615,7 @@ let newer v h j e p w =
 
 (* the state of (e p w) in the runs, the delta aside: 0 absent, 1 asserted, 2 only derived; the newest run with an
    entry decides (a run that changed a fact's flag holds a retraction and an addition of it: the addition decides) *)
-let runs_state v e p w =
+let[@inline never] runs_state v e p w =
   let rs = v.runs in
   let n = Array.length rs in
   if n = 1 then base_state rs.(0).a e p w
@@ -755,7 +755,7 @@ let mem v e p w =
 (* the state of (e p w) in the view: 0 absent, 1 asserted, 2 only derived *)
 let[@inline] state_of_entry st = if st land 1 = 0 then 0 else if st land 2 = 0 then 1 else 2
 
-let state v e p w =
+let[@inline never] state v e p w =
   match thing_delta v e with
   | Some td -> (match PW.find_opt (p, w) td.tf with Some st -> state_of_entry st | None -> runs_state v e p w)
   | None -> runs_state v e p w
@@ -826,7 +826,7 @@ let[@inline] net st = if st < 0 then 0 else (st land 1) - ((st lsr 2) land 1)
 
 (* the entry of (e p w) becomes [st] (-1: none, the view agrees with the runs); [old], its entry now (-1: none) and
    [td] its thing's entries, found by the caller *)
-let change v e p w ~td ~old st =
+let[@inline never] change v e p w ~td ~old st =
   let d = v.delta in
   let td = match td with Some td -> td | None -> { tf = PW.empty; tn = IM.empty } in
   let diff = net st - net old in
@@ -855,7 +855,7 @@ let[@inline] entry s rs =
 
 (* (e p w) takes state [s] (0 absent, 1 asserted, 2 only derived): the view (itself when nothing changes) and the
    state the fact had, from one lookup *)
-let swap v e p w s =
+let[@inline never] swap v e p w s =
   let td = thing_delta v e in
   let old = match td with Some td -> (match PW.find_opt (p, w) td.tf with Some st -> st | None -> -1) | None -> -1 in
   let cur, rs = if old >= 0 then state_of_entry old, state_of_entry (old lsr 2) else (let r = runs_state v e p w in r, r) in
@@ -867,7 +867,7 @@ let set v e p w s = fst (swap v e p w s)
    1 asserted, 2 only derived) of n facts, distinct, sorted by (thing, property, value). The same result as [set] one
    after the other, with one walk of the map by thing a thing and one of the map by property a property, where [set]
    walks both for each fact: the derived facts of a group come in clusters (a new thing's types, a class's members). *)
-let set_sorted v (es : int array) (ps : int array) (ws : int array) (ss : int array) n =
+let[@inline never] set_sorted v (es : int array) (ps : int array) (ws : int array) (ss : int array) n =
   if n = 0 then v
   else begin
     let d = v.delta in
