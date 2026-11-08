@@ -174,16 +174,22 @@ let fold (v : Store.view) q ~init ~step ~merge =
     let iv = intervals n limits in
     let in_range x c = match iv.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi in
     let by_var = Array.map Array.of_list by_var in
-    (* how many candidates a pattern offers x, exactly, given [get] for the sides that are bound *)
+    (* how many candidates a pattern offers x, given [get] for the sides that are bound, doubled: 2 c for an exact
+       count c, and 1, without a lookup, for a one-valued property of a bound thing, which offers at most one. So such
+       a pattern is taken before any other offering one or more, and after one offering none: it is a smallest
+       source either way (if it has none itself, the level has none), and the work stays within the bound *)
     let count_with get x pt =
+      2
+      *
       if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp
       else if has x pt.pe then match get pt.pv with Some w -> Store.count_things v pt.pp w | None -> Store.count_prop v pt.pp
       else
         match get pt.pe, iv.(x) with
-        | Some e, _ -> Store.count_values v e pt.pp
+        | Some e, _ -> if pt.many then Store.count_values v e pt.pp else -1
         | None, Some (lo, hi) -> Store.count_range v pt.pp lo hi
         | None, None -> Store.count_prop v pt.pp
     in
+    let count_with get x pt = let c = count_with get x pt in if c < 0 then 1 else c in
     (* the counts that no binding changes, once a question: at level i, a pattern whose other side is a constant or a
        variable bound only later (Q3's "status = unpaid", the same for each of a city's clients); -1 for the others *)
     let fixed =
@@ -291,7 +297,7 @@ let fold (v : Store.view) q ~init ~step ~merge =
       let flush w = ignore (Atomic.fetch_and_add work !w); w := 0 in
       let x0 = ord.(0) in
       let src, size = choose 0 in
-      let d = if size >= !parallel_min then !domains else 1 in
+      let d = if size / 2 >= !parallel_min then !domains else 1 in
       if d <= 1 then begin
         let acc = ref (init ()) in
         level 0 acc;
@@ -299,9 +305,10 @@ let fold (v : Store.view) q ~init ~step ~merge =
         !acc
       end
       else begin
-        (* the first level's source, as it comes (exactly [size] candidates); each slice checks its own against the
-           level's other patterns, so that no domain does the first level alone *)
-        let firsts = Array.make size 0 and count = ref 0 in
+        (* the first level's source, as it comes (exactly [size] / 2 candidates, at most 1 for a one-valued
+           property); each slice checks its own against the level's other patterns, so that no domain does the
+           first level alone *)
+        let firsts = Array.make ((size + 1) / 2) 0 and count = ref 0 in
         bound.(x0) <- true;
         iterate x0 by_var.(x0).(src) (fun c -> firsts.(!count) <- c; incr count; incr w0);
         (* slices of the candidates, taken in turn by the domains from a shared counter (a domain that meets the

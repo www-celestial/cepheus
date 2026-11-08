@@ -63,7 +63,6 @@ type t = {
   poff : int array;  (* the rows of property p in pw, pe: poff.(p) .. poff.(p + 1) - 1 *)
   pw : ints;  (* by (p, w, e): the values *)
   pe : i32;  (* the things; bit 31 set: a fact only derived *)
-  texts : (string * int) array;  (* the texts the group adds, with their ids, in text order *)
   d0 : int;  (* facts d0 .. n-1 are only derived (a rule's, appended after the group's own) *)
 }
 
@@ -78,8 +77,7 @@ let[@inline] derived b i = i >= b.d0
 let[@inline] pderived b r = Int32.compare (Array1.unsafe_get b.pe r) 0l < 0
 
 let empty =
-  { n = 0; e = i32 0; p = u16 0; w = ints 0; sorted = true; order = i32 0; poff = [||]; pw = ints 0; pe = i32 0; texts = [||];
-    d0 = 0 }
+  { n = 0; e = i32 0; p = u16 0; w = ints 0; sorted = true; order = i32 0; poff = [||]; pw = ints 0; pe = i32 0; d0 = 0 }
 
 (* ---- by thing ---- *)
 
@@ -217,12 +215,11 @@ let radix (pw : ints) (pe : i32) lo hi (tw : ints) (te : i32) =
     end
   end
 
-(* [make ~sorted ~order e p w n ~np ~texts]: the n facts sorted by property, value, thing (their order by thing given by
-   [sorted] and [order], from [by_thing]); properties below np; [texts]: the texts the group adds (sorted here); facts
-   [d0] .. n-1 only derived (none by default) *)
-let make ?d0 ~sorted ~order e p w n ~np ~texts =
+(* [make ~sorted ~order e p w n ~np]: the n facts sorted by property, value, thing (their order by thing given by
+   [sorted] and [order], from [by_thing]); properties below np; facts [d0] .. n-1 only derived (none by default) *)
+let make ?d0 ~sorted ~order e p w n ~np =
   let d0 = match d0 with Some d -> d | None -> n in
-  let b0 = { n; e; p; w; sorted; order; poff = [||]; pw = ints 0; pe = i32 0; texts; d0 } in
+  let b0 = { n; e; p; w; sorted; order; poff = [||]; pw = ints 0; pe = i32 0; d0 } in
   (* the rows of each property in each chunk of the order by thing, so that the chunks are spread at once, each from
      its own place: a property's rows come in thing order *)
   let nch = max 1 (min (chunks n) (max 1 (n / (np + 1)))) in
@@ -286,10 +283,6 @@ let make ?d0 ~sorted ~order e p w n ~np ~texts =
      property's rows (27 MB at 2.27 M rows): more domains would save a few ms for that memory each *)
   let d = if n < 200_000 then 1 else min (min 2 !domains) np in
   let ds = List.init (d - 1) (fun _ -> Domain.spawn work) in
-  (* the texts sorted beside, on a domain of their own when there are many (227,387 at 10 M facts: about 0.1 s) *)
-  let sort () = Array.stable_sort (fun (a, _) (b, _) -> compare (a : string) b) texts in
-  let st = if Array.length texts >= 10_000 && !domains > 1 then Some (Domain.spawn sort) else (sort (); None) in
   work ();
   List.iter Domain.join ds;
-  Option.iter Domain.join st;
   { b0 with poff; pw; pe }

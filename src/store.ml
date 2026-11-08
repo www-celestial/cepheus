@@ -7,16 +7,22 @@
    are net: a run adds only facts absent below it and retracts only facts present below it, so every count is a sum of
    exact counts.
 
-   A part has three sections:
+   A part has three sections, coded with a frame of reference (Pack: a base and a bit width a block, Goldstein et
+   al. 1998, Zukowski et al. 2006), each value found in O(1) without decoding its neighbours:
      by thing     the things it holds: a rank table (one 64-bit word for 32 thing ids: their presence bits, and how
-                  many things come before), eoff[slot] .. eoff[slot+1] the rows (eap, eav) of the thing in that slot,
-                  sorted by property then value
-     by property  poff[p] .. poff[p+1]   rows (avv, ave), sorted by value then thing
-     dictionary   soff[i] .. soff[i+1]   the bytes of text s0+i in sblob; ssort: the ids sorted by text (part a only:
+                  many things come before) gives a thing's slot; the slots in blocks of 128, a block one entry a
+                  property its slots have, the entry the offsets of each slot's values (c * i + a residual, none when
+                  every slot has c values) and the values, sorted within a slot, in a few bits each from the entry's
+                  base. So a block is a small column store of 128 things (PAX, Ailamaki et al. 2001)
+     by property  the rows (value, thing) of property p sorted by value then thing, in blocks of 128 rows: the values
+                  from the block's first value, the things from the block's least thing; for most properties a value
+                  index: a rank table over the property's value range and the first row of each value present, so
+                  that the rows of (p, w) are found with one rank and two offsets (links, texts, dates, small ints)
+     dictionary   the texts s0 .. s0+ns-1: their offsets, their bytes, and a hash table of their ids (part a only:
                   a run holds the texts interned between the run below it and itself)
 
-   Every lookup is a rank, a binary search and the answer, on each run that holds the thing (the rank table says so
-   with one bit) and on the delta; every count is exact. *)
+   Every lookup is a rank, an offset and the answer, on each run that holds the thing (the rank table says so with
+   one bit) and on the delta; every count is exact. *)
 
 type base = {
   pg : Pages.t;
@@ -27,17 +33,23 @@ type base = {
   np : int;  (* property ids 0 .. np-1 *)
   ns : int;  (* texts *)
   sblob : int;  (* bytes of all texts *)
-  o_erank : int;
-  o_eoff : int;
-  o_eap : int;
-  o_eav : int;
-  o_poff : int;
-  o_avv : int;
-  o_ave : int;
-  o_pdist : int;
-  o_soff : int;
+  hbits : int;  (* the text hash table has 2^hbits slots *)
+  o_erank : int;  (* (blocks ne + 1) words *)
+  o_tdir : int;  (* (thing blocks + 1) u64: the byte offset of each thing block from o_tdata *)
+  o_tdata : int;
+  o_poff : int;  (* (np + 1) u64: the first row of each property *)
+  o_pblk : int;  (* (np + 1) u64: the first row block of each property *)
+  o_pdist : int;  (* np u64: distinct values *)
+  o_pidx : int;  (* np entries of 32 bytes: the value index (vlo, first rank word or -1, words, first offset block) *)
+  o_vdir : int;  (* (row blocks + 1) entries of 16 bytes: the block's byte offset from o_vdata, its first value *)
+  o_vdata : int;
+  o_vrank : int;  (* the value indexes' rank words *)
+  o_vmh : int;  (* their offsets: Mono headers, then bits *)
+  o_vmb : int;
+  o_smh : int;  (* the texts' offsets: Mono headers, then bits *)
+  o_smb : int;
   o_sblob : int;
-  o_ssort : int;
+  o_shash : int;  (* 2^hbits u32: a text's index + 1, or 0 *)
   len : int;  (* the end of the part's sections *)
   d0 : int;  (* every thing from d0 to ne - 1 is held: its slot is r0 + (e - d0), with no rank to read *)
   r0 : int;
@@ -55,27 +67,78 @@ type run = {
 let al x = (x + 7) land lnot 7
 let blocks ne = (ne + 31) lsr 5
 
-(* The sections of a part from offset [at], room for [n_cap] rows and [k_cap] things: a merge knows the counts only
-   once it is done, so it lays a part out by upper bounds, and the bytes past the counts are never written (holes). *)
-let layout ?(pg = Pages.empty) ~at ~n ~n_cap ~ne ~k ~k_cap ~np ~ns ~sblob () =
+(* the block sizes: 128 slots a thing block, 128 rows a row block, 128 offsets a Mono block *)
+let tb = 128
+let blocks128 n = (n + 127) lsr 7
+
+(* bytes of n fields of w bits, and of a Mono (monotone sequence) block of 128 fields of w bits *)
+let pbytes n w = Pack.bytes n w
+
+(* The rooms a merge lays a part out by. A merge knows its counts only once it is done, so it lays a part out by
+   upper bounds, and the bytes past the counts are never written (logical pages no file page holds, Snapshot): what a
+   section's room is, from [n_cap] rows, [k_cap] things, [np] properties, [vb_cap] row blocks (each property's rows
+   start a block), [vwords] rank words and [vm_blocks] offset blocks of the value indexes, [ns] texts of [sblob] bytes. *)
+type rooms = { tdata : int; vdata : int; vmb : int; smb : int }
+
+let wmax = 64
+
+let rooms ~n_cap ~k_cap ~np ~vb_cap ~vm_blocks ~ns ~sblob =
+  let tbn = blocks128 k_cap in
+  let entries = min n_cap (np * tbn) in
+  (* a thing block: 16 bytes, 16 an entry (at most min(rows, np) a block), 129 offsets of at most 32 bits, the
+     records: a count of at most 32 bits an entry a slot (an entry's count bits are at most its rows' in the block,
+     so at most 128 bits a row in all), values of at most 64 bits *)
+  let tdata = (16 * tbn) + (16 * entries) + (tbn * (pbytes (tb + 1) 32 + 8)) + (24 * n_cap) + 8 in
+  (* a row block: 8 bytes, values of at most 64 bits, things of at most 32 *)
+  let vdata = (24 * vb_cap) + (12 * n_cap) + 8 in
+  (* and the rest of a page skipped before a block that does not fit in it: at most a block's size a block *)
+  let tdata = 2 * tdata and vdata = 2 * vdata in
+  { tdata; vdata; vmb = (vm_blocks * pbytes tb (Pack.width (n_cap + 1))) + 8; smb = (blocks128 (ns + 1) * pbytes tb (Pack.width (sblob + 1))) + 8 }
+
+(* The sections of a part from offset [at]. *)
+let layout ?(pg = Pages.empty) ~at ~n ~ne ~k ~k_cap ~np ~ns ~sblob ~hbits ~vb_cap ~vwords ~vm_blocks (r : rooms) () =
   let off = ref at in
   let sec bytes = let o = !off in off := al (!off + bytes); o in
   let o_erank = sec (8 * (blocks ne + 1)) in
-  let o_eoff = sec (8 * (k_cap + 1)) in
-  let o_eap = sec (2 * n_cap) in
-  let o_eav = sec (8 * n_cap) in
+  let o_tdir = sec (8 * (blocks128 k_cap + 1)) in
+  let o_tdata = sec r.tdata in
   let o_poff = sec (8 * (np + 1)) in
-  let o_avv = sec (8 * n_cap) in
-  let o_ave = sec (4 * n_cap) in
+  let o_pblk = sec (8 * (np + 1)) in
   let o_pdist = sec (8 * np) in
-  let o_soff = sec (8 * (ns + 1)) in
-  let o_sblob = sec sblob in
-  let o_ssort = sec (4 * ns) in
-  { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; o_erank; o_eoff; o_eap; o_eav; o_poff; o_avv; o_ave; o_pdist; o_soff;
-    o_sblob; o_ssort; len = !off; d0 = ne; r0 = k }
+  let o_pidx = sec (32 * np) in
+  let o_vdir = sec (16 * (vb_cap + 1)) in
+  let o_vdata = sec r.vdata in
+  let o_vrank = sec (8 * vwords) in
+  let o_vmh = sec (16 * vm_blocks) in
+  let o_vmb = sec r.vmb in
+  let o_smh = sec (16 * blocks128 (ns + 1)) in
+  let o_smb = sec r.smb in
+  let o_sblob = sec (sblob + 8) in
+  let o_shash = sec (if ns = 0 then 0 else 4 lsl hbits) in
+  { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
+    o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; len = !off; d0 = ne; r0 = k }
+
+(* the offsets of a part, as a run's header lists them, and back *)
+let offsets b =
+  [ b.o_erank; b.o_tdir; b.o_tdata; b.o_poff; b.o_pblk; b.o_pdist; b.o_pidx; b.o_vdir; b.o_vdata; b.o_vrank; b.o_vmh;
+    b.o_vmb; b.o_smh; b.o_smb; b.o_sblob; b.o_shash; b.len ]
+
+let of_offsets ~pg ~n ~ne ~k ~np ~ns ~sblob ~hbits = function
+  | [ o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx; o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb;
+      o_sblob; o_shash; len ] ->
+    { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
+      o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; len; d0 = ne; r0 = k }
+  | _ -> invalid_arg "Store.of_offsets"
+
+let noffsets = 17
+
+(* the hash table of ns texts: the least power of two of at least 2 ns slots (load at most 1/2) *)
+let hbits_for ns = let b = ref 0 in while 1 lsl !b < 2 * ns do incr b done; !b
 
 (* a part with nothing: every lookup answers at once, without a page *)
-let nothing = layout ~at:0 ~n:0 ~n_cap:0 ~ne:0 ~k:0 ~k_cap:0 ~np:0 ~ns:0 ~sblob:0 ()
+let nothing =
+  layout ~at:0 ~n:0 ~ne:0 ~k:0 ~k_cap:0 ~np:0 ~ns:0 ~sblob:0 ~hbits:0 ~vb_cap:0 ~vwords:0 ~vm_blocks:0
+    { tdata = 0; vdata = 0; vmb = 0; smb = 0 } ()
 
 external get64u : Bytes.t -> int -> int64 = "%caml_bytes_get64u"
 external get32u : Bytes.t -> int -> int32 = "%caml_bytes_get32u"
@@ -83,10 +146,10 @@ external get16u : Bytes.t -> int -> int = "%caml_bytes_get16u"
 
 (* Two kinds of readers of the base's pages. A read of a hot page is one load and one comparison either way; they
    differ in what happens otherwise:
-   - the raising readers (eoff, eap, ...) raise [Miss k]: a lookup that calls nothing (a binary search, a count, a
+   - the raising readers (i64, field, ...) raise [Miss k]: a lookup that calls nothing (a binary search, a count, a
      membership test) is run by [safe] or its own wrapper again from its start once page k is in. With no call on
      its path, OCaml keeps the loop's values in registers (a call would make it save them all on the stack);
-   - the calling readers (ceoff, ceap, ...) bring the page in themselves (Pages.touch), for the loops that call a
+   - the calling readers (ci64, cfield, ...) bring the page in themselves (Pages.touch), for the loops that call a
      function per row, which save their registers around that call anyway.
    A [Miss] never leaves the functions of this section. *)
 exception Miss of int
@@ -106,17 +169,78 @@ let[@inline] framec b o =
   let f = Array.get b.hot k in
   if f != Pages.absent then f else Pages.touch b.pg k
 
+(* aligned reads: 2, 4 and 8 bytes at a multiple of their size, which never cross a page *)
 let[@inline] i64 b o = Int64.to_int (get64u (frame b o) (o land Pages.mask))
 let[@inline] u32 b o = Int32.to_int (get32u (frame b o) (o land Pages.mask)) land 0xFFFFFFFF
+let[@inline] u16 b o = get16u (frame b o) (o land Pages.mask)
+let[@inline] byte b o = Char.code (Bytes.unsafe_get (frame b o) (o land Pages.mask))
 let[@inline] ci64 b o = Int64.to_int (get64u (framec b o) (o land Pages.mask))
-
-(* A fact only derived (by a rule, not asserted) has bit 63 of its value word flipped, in both orders and both parts.
-   OCaml's ints have 63 bits: Int64.of_int copies bit 62 into bit 63, so the flag is their difference (a run of format
-   5 reads as all asserted), and Int64.to_int, which drops bit 63, reads every value unchanged: no reader of values
-   needs to know the flag. *)
-let[@inline] flag_of (r : int64) = Int64.to_int (Int64.shift_right_logical (Int64.logxor r (Int64.shift_left r 1)) 63) <> 0
-let[@inline] flagged w derived = if derived then Int64.logxor (Int64.of_int w) Int64.min_int else Int64.of_int w
 let[@inline] cu32 b o = Int32.to_int (get32u (framec b o) (o land Pages.mask)) land 0xFFFFFFFF
+let[@inline] cu16 b o = get16u (framec b o) (o land Pages.mask)
+let[@inline] cbyte b o = Char.code (Bytes.unsafe_get (framec b o) (o land Pages.mask))
+
+(* the 8 bytes at o, any alignment, as an int (bit 63 dropped): one load, or byte by byte across a page's end *)
+let[@inline never] w64x b o =
+  let x = ref 0 in
+  for j = 7 downto 0 do x := (!x lsl 8) lor byte b (o + j) done;
+  !x
+
+let[@inline] w64 b o =
+  let f = frame b o and i = o land Pages.mask in
+  if i <= Pages.size - 8 then Int64.to_int (get64u f i) else w64x b o
+
+let[@inline never] cw64x b o =
+  let x = ref 0 in
+  for j = 7 downto 0 do x := (!x lsl 8) lor cbyte b (o + j) done;
+  !x
+
+let[@inline] cw64 b o =
+  let f = framec b o and i = o land Pages.mask in
+  if i <= Pages.size - 8 then Int64.to_int (get64u f i) else cw64x b o
+
+(* The field of w bits (at most 63) at bit [bit] of the bit-packed array at byte o (Pack's layout): one unaligned
+   load, a shift and a mask; a field that reaches past bit 62 of its load takes a ninth byte. *)
+let[@inline never] fieldx b o bit w =
+  let o = o + (bit lsr 3) and sh = bit land 7 in
+  let lo = w64 b o lsr sh in
+  let rest = (byte b (o + 7) lsr 7) lor (byte b (o + 8) lsl 1) in
+  (lo lor (rest lsl (63 - sh))) land Pack.mask w
+
+let[@inline] field b o bit w =
+  if w = 0 then 0
+  else
+    let sh = bit land 7 in
+    if sh + w <= 63 then (w64 b (o + (bit lsr 3)) lsr sh) land Pack.mask w else fieldx b o bit w
+
+let[@inline never] cfieldx b o bit w =
+  let o = o + (bit lsr 3) and sh = bit land 7 in
+  let lo = cw64 b o lsr sh in
+  let rest = (cbyte b (o + 7) lsr 7) lor (cbyte b (o + 8) lsl 1) in
+  (lo lor (rest lsl (63 - sh))) land Pack.mask w
+
+let[@inline] cfield b o bit w =
+  if w = 0 then 0
+  else
+    let sh = bit land 7 in
+    if sh + w <= 63 then (cw64 b (o + (bit lsr 3)) lsr sh) land Pack.mask w else cfieldx b o bit w
+
+(* A monotone sequence (Mono: offsets) in blocks of 128: a header of 16 bytes a block (the base, then the width in
+   the low byte and the offset of the block's bits from [mb] above it), the bits apart; entry q in O(1) *)
+let[@inline] mono b mh mb q =
+  let h = mh + ((q lsr 7) lsl 4) in
+  let x = i64 b (h + 8) in
+  let w = x land 0xFF in
+  i64 b h + field b (mb + (x lsr 8)) ((q land 127) * w) w
+
+let[@inline] cmono b mh mb q =
+  let h = mh + ((q lsr 7) lsl 4) in
+  let x = ci64 b (h + 8) in
+  let w = x land 0xFF in
+  ci64 b h + cfield b (mb + (x lsr 8)) ((q land 127) * w) w
+
+(* A fact only derived (by a rule, not asserted) carries a flag. In the 64-bit value words of runs of formats 5 and 6
+   it was bit 63; in a block of format 7, an entry or a row block with a derived fact keeps each value's flag in the
+   lowest bit of its field, the value in the bits above, and a block with none spends no bit on it. *)
 
 (* the bits set in a 32-bit word (Warren, Hacker's Delight, 5-1) *)
 let[@inline] popcount x =
@@ -141,6 +265,7 @@ let[@inline] cslot b e =
   if e >= b.d0 then (if e < b.ne then b.r0 + (e - b.d0) else -1)
   else if e < 0 then -1
   else rank (ci64 b (b.o_erank + ((e lsr 5) lsl 3))) e
+
 (* d0 and r0 of a part, from its rank table: the longest run of things held up to the end (a part made by a load or a
    full merge holds every thing above the property things: their lookups read no rank) *)
 let dense b =
@@ -166,150 +291,419 @@ let dense b =
     { b with d0 = !d0; r0 }
   end
 
-let[@inline] eoff b s = i64 b (b.o_eoff + (8 * s))
-let[@inline] eap b i = let o = b.o_eap + (2 * i) in get16u (frame b o) (o land Pages.mask)
-let[@inline] eav b i = i64 b (b.o_eav + (8 * i))
-let[@inline] poff b p = i64 b (b.o_poff + (8 * p))
-let[@inline] avv b i = i64 b (b.o_avv + (8 * i))
-let[@inline] ave b i = u32 b (b.o_ave + (4 * i))
-let[@inline] pdist b p = i64 b (b.o_pdist + (8 * p))
-let[@inline] soff b i = i64 b (b.o_soff + (8 * i))
-let[@inline] ssort b i = u32 b (b.o_ssort + (4 * i))
-let[@inline] ceoff b s = ci64 b (b.o_eoff + (8 * s))
-let[@inline] ceap b i = let o = b.o_eap + (2 * i) in get16u (framec b o) (o land Pages.mask)
-let[@inline] ceav b i = ci64 b (b.o_eav + (8 * i))
-let[@inline] cpoff b p = ci64 b (b.o_poff + (8 * p))
-let[@inline] cavv b i = ci64 b (b.o_avv + (8 * i))
-let[@inline] cave b i = cu32 b (b.o_ave + (4 * i))
-let[@inline] eflag b i = let o = b.o_eav + (8 * i) in flag_of (get64u (frame b o) (o land Pages.mask))
-let[@inline] ceflag b i = let o = b.o_eav + (8 * i) in flag_of (get64u (framec b o) (o land Pages.mask))
-let[@inline] cavflag b i = let o = b.o_avv + (8 * i) in flag_of (get64u (framec b o) (o land Pages.mask))
-
 (* [f b x] again until it misses no page; for a raising reader, or a lookup made of them *)
 let rec safe f b x = match f b x with r -> ended r | exception Miss k -> fault b k; safe f b x
 
-(* ---- One part alone ---- *)
+(* ---- By thing: the blocks of 128 slots ----
+   A block holds the rows of up to 128 slots as records, one a slot (a row store: a lookup of a thing reads its
+   record, a few bytes, and the block's header):
+     0 B u16 (slots) | 2 m u16 (entries) | 4 wo u8 (bits of a record's offset; 0: every record is R bits) | 5 zero
+     | 6 cw u16 (bits of a record's counts) | 8 R u32 (wo = 0: every record's bits; else the least record's) | 4 zero
+     | 16 m entries of 16 bytes, by property: p u16 | wv u8 (bits a value, its flag included) | wc u8 (bits 0-6: bits
+       of the entry's count in a record, 0: every slot has c values; bit 7: each value's lowest bit is its derived
+       flag) | c u32 (the least count) | base i64 (the values' least)
+     then, when wo > 0, B + 1 offsets of wo bits: record k starts k R + off k bits after the records' start
+     then the records: the counts (count - c in wc bits, for each entry with wc > 0, in order), then each entry's
+     values in order (count values of wv bits from base, sorted).
+   A block no larger than a page lies in one page (the writer starts it on the next page otherwise). *)
 
-(* the first row of the thing in slot s at or after (p, w). A binary search down to a window of 8 rows, then a
-   scan: most things have a handful of facts, where the scan is the faster *)
-let lower_e b s p w =
-  let lo = ref (eoff b s) and hi = ref (eoff b (s + 1)) in
-  while !hi - !lo > 8 do
-    let mid = (!lo + !hi) lsr 1 in
-    let p' = eap b mid in
-    if p' < p || (p' = p && eav b mid < w) then lo := mid + 1 else hi := mid
+(* bytes [o, o + n) of the run, copied: a header, or a row block, across pages *)
+let[@inline never] assemble b o n =
+  let c = Bytes.make (n + 8) '\000' in
+  let j = ref 0 in
+  while !j < n do
+    let x = o + !j in
+    let m = min (n - !j) (Pages.size - (x land Pages.mask)) in
+    Bytes.blit (frame b x) (x land Pages.mask) c !j m;
+    j := !j + m
   done;
-  while !lo < !hi && (let p' = eap b !lo in p' < p || (p' = p && eav b !lo < w)) do incr lo done;
-  !lo
+  c
 
-let rec base_lower_e b s p w =
-  match lower_e b s p w with r -> ended r | exception Miss k -> fault b k; base_lower_e b s p w
+let[@inline never] cassemble b o n =
+  let c = Bytes.make (n + 8) '\000' in
+  let j = ref 0 in
+  while !j < n do
+    let x = o + !j in
+    let m = min (n - !j) (Pages.size - (x land Pages.mask)) in
+    Bytes.blit (framec b x) (x land Pages.mask) c !j m;
+    j := !j + m
+  done;
+  c
 
-let base_iter_ea b e p f =
-  let s = cslot b e in
-  if s >= 0 then begin
-    let i = ref (base_lower_e b s p min_int) and hi = ceoff b (s + 1) in
-    while !i < hi && ceap b !i = p do
-      f (ceav b !i);
-      incr i
-    done
+let[@inline] g16 f i = Bytes.get_uint16_le f i
+let[@inline] g8 f i = Bytes.get_uint8 f i
+let[@inline] g32 f i = Int32.to_int (Bytes.get_int32_le f i) land 0xFFFFFFFF
+let[@inline] g64 f i = Int64.to_int (Bytes.get_int64_le f i)
+
+(* the block of slot s: its byte offset, and its length (the next block's offset: the directory has one more) *)
+let[@inline] tbo b s = b.o_tdata + i64 b (b.o_tdir + ((s lsr 7) lsl 3))
+let[@inline] ctbo b s = b.o_tdata + ci64 b (b.o_tdir + ((s lsr 7) lsl 3))
+
+(* the next block's offset, from the directory word of slot s's block at d (same page but at a page's last word) *)
+let[@inline] tnext b d = let i = d land Pages.mask in if i <= Pages.size - 16 then Int64.to_int (get64u (frame b d) (i + 8)) else i64 b (d + 8)
+let[@inline] ctnext b d = let i = d land Pages.mask in if i <= Pages.size - 16 then Int64.to_int (get64u (framec b d) (i + 8)) else ci64 b (d + 8)
+let[@inline] tlen b s = let d = b.o_tdir + ((s lsr 7) lsl 3) in tnext b d - i64 b d
+let[@inline] ctlen b s = let d = b.o_tdir + ((s lsr 7) lsl 3) in ctnext b d - ci64 b d
+
+(* A block is read from one page's bytes when it lies in one page (nearly always: a block of an invoice book is under
+   1 KiB, and the writer starts a block on the next page when it would cross one). A block across pages (a thing with
+   thousands of values) has its header copied (a few hundred bytes) and its records read from the pages field by
+   field: a lookup in it reads a few fields, never the whole. [one] says which; [rb] is the records' first bit in f
+   when one, and ro the records' first byte in the run otherwise. *)
+let[@inline] hlen8 x = 16 + (16 * ((x lsr 16) land 0xFFFF)) + let wo = (x lsr 32) land 0xFF in if wo = 0 then 0 else pbytes ((x land 0xFFFF) + 1) wo
+
+let[@inline] rget b ro f rb one bit w = if one then Pack.get f (rb + bit) w else field b ro bit w
+let[@inline] crget b ro f rb one bit w = if one then Pack.get f (rb + bit) w else cfield b ro bit w
+
+(* the entry of property p in the header at i of f: its index, or -1 *)
+let tentry f i p =
+  let m = g16 f (i + 2) in
+  if m <= 8 then begin
+    let j = ref 0 and r = ref (-1) in
+    while !j < m do
+      let q = g16 f (i + 16 + (16 * !j)) in
+      if q >= p then (if q = p then r := !j; j := m) else incr j
+    done;
+    !r
+  end
+  else begin
+    let lo = ref 0 and hi = ref m in
+    while !lo < !hi do
+      let mid = (!lo + !hi) lsr 1 in
+      if g16 f (i + 16 + (16 * mid)) < p then lo := mid + 1 else hi := mid
+    done;
+    if !lo < m && g16 f (i + 16 + (16 * !lo)) = p then !lo else -1
   end
 
-(* the rows of e for p: a scan of up to 8 rows after the first, a second search beyond *)
+(* the bit where record k starts, from the records' start *)
+let[@inline] trec f i k =
+  let wo = g8 f (i + 4) and r = g32 f (i + 8) in
+  if wo = 0 then k * r else (k * r) + Pack.get f (((i + 16 + (16 * g16 f (i + 2))) lsl 3) + (k * wo)) wo
+
+(* ---- One part alone ---- *)
+
+(* Entry j of the record at bit r: its count (c, and the record's count bits of j when its count varies), and the
+   bit where its values start (after the record's counts and the values of the entries before j). A record's counts
+   are read in one load when they fit (cw <= 55 bits: a block of a few properties), else one by one. *)
+let[@inline] tcount b ro f rb one i r j =
+  let cpos = ref 0 in
+  for x = 0 to j - 1 do cpos := !cpos + (g8 f (i + 19 + (16 * x)) land 0x7F) done;
+  let e = i + 16 + (16 * j) in
+  let wc = g8 f (e + 3) land 0x7F in
+  g32 f (e + 4) + if wc = 0 then 0 else rget b ro f rb one (r + !cpos) wc
+
+(* value x of the values at bit va (wv bits each, flagged or not, from base), and its flag *)
+let[@inline] tval b ro f rb one va wv fl base x =
+  if fl = 0 then base + rget b ro f rb one (va + (x * wv)) wv else base + rget b ro f rb one (va + (x * wv) + 1) (wv - 1)
+let[@inline] ctval b ro f rb one va wv fl base x =
+  if fl = 0 then base + crget b ro f rb one (va + (x * wv)) wv else base + crget b ro f rb one (va + (x * wv) + 1) (wv - 1)
+let[@inline] tflag b ro f rb one va wv fl x = fl <> 0 && rget b ro f rb one (va + (x * wv)) 1 = 1
+let[@inline] ctflag b ro f rb one va wv fl x = fl <> 0 && crget b ro f rb one (va + (x * wv)) 1 = 1
+
+(* the place of the first value >= w among values 0 .. n-1 from va: a binary search down to 8, then a scan *)
+let[@inline] tlower b ro f rb one va wv fl base n w =
+  let lo = ref 0 and hi = ref n in
+  while !hi - !lo > 8 do
+    let mid = (!lo + !hi) lsr 1 in
+    if tval b ro f rb one va wv fl base mid < w then lo := mid + 1 else hi := mid
+  done;
+  while !lo < !hi && tval b ro f rb one va wv fl base !lo < w do incr lo done;
+  !lo
+
+(* The block of slot s, read with two page lookups (the directory's page, the block's): f its header's bytes (the
+   page, or a copy of a header across pages), i where it starts in them, one: the whole block lies in that page,
+   ro its records' byte in the run, rb their bit in f. Written out in each lookup below: a function returning them all
+   would allocate. *)
+
+let base_iter_ea b e p fn =
+  let s = cslot b e in
+  if s >= 0 then begin
+    let d = b.o_tdir + ((s lsr 7) lsl 3) in
+    let o0 = ci64 b d in
+    let bo = b.o_tdata + o0 and n = ctnext b d - o0 in
+    let i = bo land Pages.mask in
+    let f = framec b bo in
+    let h = hlen8 (Int64.to_int (get64u f i)) in
+    let one = i + n <= Pages.size and hp = i + h <= Pages.size in
+    let f = if hp then f else cassemble b bo h and i = if hp then i else 0 in
+    let j = tentry f i p in
+    if j >= 0 then begin
+      let ro = bo + h and rb = (i + h) lsl 3 and r = trec f i (s land 127) in
+      let cw = g16 f (i + 6) in
+      let all = if cw <= 55 then crget b ro f rb one r cw else 0 in
+      let cpos = ref 0 and vpos = ref (r + cw) and c = ref 0 in
+      for x = 0 to j do
+        let en = i + 16 + (16 * x) in
+        let wc = g8 f (en + 3) land 0x7F in
+        let k = g32 f (en + 4) + if wc = 0 then 0 else if cw <= 55 then (all lsr !cpos) land Pack.mask wc else crget b ro f rb one (r + !cpos) wc in
+        cpos := !cpos + wc;
+        if x < j then vpos := !vpos + (k * g8 f (en + 2)) else c := k
+      done;
+      if !c > 0 then begin
+        let va = !vpos and en = i + 16 + (16 * j) in
+        let wv = g8 f (en + 2) and fl = g8 f (en + 3) lsr 7 and base = g64 f (en + 8) in
+        for x = 0 to !c - 1 do fn (ctval b ro f rb one va wv fl base x) done
+      end
+    end
+  end
+
 let count_ea b e p =
   let s = slot b e in
   if s < 0 then 0
   else begin
-    let i = lower_e b s p min_int and hi = eoff b (s + 1) in
-    let j = ref i in
-    while !j < hi && !j - i < 8 && eap b !j = p do incr j done;
-    if !j < hi && eap b !j = p then lower_e b s (p + 1) min_int - i else !j - i
+    let d = b.o_tdir + ((s lsr 7) lsl 3) in
+    let o0 = i64 b d in
+    let bo = b.o_tdata + o0 and n = tnext b d - o0 in
+    let i = bo land Pages.mask in
+    let f = frame b bo in
+    let h = hlen8 (Int64.to_int (get64u f i)) in
+    let one = i + n <= Pages.size and hp = i + h <= Pages.size in
+    let f = if hp then f else assemble b bo h and i = if hp then i else 0 in
+    let j = tentry f i p in
+    if j < 0 then 0 else tcount b (bo + h) f ((i + h) lsl 3) one i (trec f i (s land 127)) j
   end
 
 let rec base_count_ea b e p =
   if b.k = 0 then 0 else match count_ea b e p with r -> ended r | exception Miss k -> fault b k; base_count_ea b e p
 
-let base_iter_e b e f =
+(* every row of e, in (property, value) order, with its flag *)
+let base_iter_ef b e fn =
   let s = cslot b e in
-  if s >= 0 then
-    for i = ceoff b s to ceoff b (s + 1) - 1 do
-      f (ceap b i) (ceav b i)
+  if s >= 0 then begin
+    let d = b.o_tdir + ((s lsr 7) lsl 3) in
+    let o0 = ci64 b d in
+    let bo = b.o_tdata + o0 and n = ctnext b d - o0 in
+    let i = bo land Pages.mask in
+    let f = framec b bo in
+    let h = hlen8 (Int64.to_int (get64u f i)) in
+    let one = i + n <= Pages.size and hp = i + h <= Pages.size in
+    let f = if hp then f else cassemble b bo h and i = if hp then i else 0 in
+    let m = g16 f (i + 2) and ro = bo + h and rb = (i + h) lsl 3 in
+    let r = trec f i (s land 127) in
+    let cpos = ref r and vpos = ref (r + g16 f (i + 6)) in
+    for j = 0 to m - 1 do
+      let en = i + 16 + (16 * j) in
+      let wc = g8 f (en + 3) land 0x7F in
+      let c = g32 f (en + 4) + if wc = 0 then 0 else crget b ro f rb one !cpos wc in
+      cpos := !cpos + wc;
+      if c > 0 then begin
+        let p = g16 f en and wv = g8 f (en + 2) and fl = g8 f (en + 3) lsr 7 and base = g64 f (en + 8) in
+        let va = !vpos in
+        for x = 0 to c - 1 do fn p (ctval b ro f rb one va wv fl base x) (ctflag b ro f rb one va wv fl x) done;
+        vpos := va + (c * wv)
+      end
     done
+  end
 
-let mem_e b e p w =
-  let s = slot b e in
-  s >= 0
-  && let i = lower_e b s p w in
-     i < eoff b (s + 1) && eap b i = p && eav b i = w
-
-let rec base_mem b e p w =
-  b.k > 0 && match mem_e b e p w with r -> ended r | exception Miss k -> fault b k; base_mem b e p w
+let base_iter_e b e fn = base_iter_ef b e (fun p w _ -> fn p w)
 
 (* 0: no row of (e p w) in the part; 1: a row, asserted; 2: a row, only derived *)
 let state_e b e p w =
   let s = slot b e in
   if s < 0 then 0
-  else
-    let i = lower_e b s p w in
-    if i < eoff b (s + 1) && eap b i = p && eav b i = w then (if eflag b i then 2 else 1) else 0
+  else begin
+    let d = b.o_tdir + ((s lsr 7) lsl 3) in
+    let o0 = i64 b d in
+    let bo = b.o_tdata + o0 and n = tnext b d - o0 in
+    let i = bo land Pages.mask in
+    let f = frame b bo in
+    let h = hlen8 (Int64.to_int (get64u f i)) in
+    let one = i + n <= Pages.size and hp = i + h <= Pages.size in
+    let f = if hp then f else assemble b bo h and i = if hp then i else 0 in
+    let j = tentry f i p in
+    if j < 0 then 0
+    else begin
+      let ro = bo + h and rb = (i + h) lsl 3 and r = trec f i (s land 127) in
+      let cw = g16 f (i + 6) in
+      let all = if cw <= 55 then rget b ro f rb one r cw else 0 in
+      let cpos = ref 0 and vpos = ref (r + cw) and c = ref 0 in
+      for x = 0 to j do
+        let en = i + 16 + (16 * x) in
+        let wc = g8 f (en + 3) land 0x7F in
+        let k = g32 f (en + 4) + if wc = 0 then 0 else if cw <= 55 then (all lsr !cpos) land Pack.mask wc else rget b ro f rb one (r + !cpos) wc in
+        cpos := !cpos + wc;
+        if x < j then vpos := !vpos + (k * g8 f (en + 2)) else c := k
+      done;
+      let c = !c in
+      if c = 0 then 0
+      else begin
+        let va = !vpos and en = i + 16 + (16 * j) in
+        let wv = g8 f (en + 2) and fl = g8 f (en + 3) lsr 7 and base = g64 f (en + 8) in
+        let x = tlower b ro f rb one va wv fl base c w in
+        if x < c && tval b ro f rb one va wv fl base x = w then (if tflag b ro f rb one va wv fl x then 2 else 1) else 0
+      end
+    end
+  end
 
 let rec base_state b e p w =
   if b.k = 0 then 0 else match state_e b e p w with r -> ended r | exception Miss k -> fault b k; base_state b e p w
 
-(* every row of e with its flag: for the merge *)
-let base_iter_ef b e f =
-  let s = cslot b e in
-  if s >= 0 then
-    for i = ceoff b s to ceoff b (s + 1) - 1 do
-      f (ceap b i) (ceav b i) (ceflag b i)
-    done
+let rec base_mem b e p w = b.k > 0 && match state_e b e p w with r -> ended (r > 0) | exception Miss k -> fault b k; base_mem b e p w
 
 let rec base_has b e = b.k > 0 && match slot b e with s -> ended (s >= 0) | exception Miss k -> fault b k; base_has b e
 
+(* ---- By property: the row blocks of 128 rows, and the value indexes ----
+   A row block: wv u8 (bits a value, its flag included) | fl u8 | wt u8 (bits a thing) | gaps u8 | the least
+   thing u32 | the values (from the block's first value, in the directory), then the things: from the least (gaps 0),
+   or, gaps 1, each from the thing before it when its value is the one before's (minus 1: things of a value differ).
+   A
+   value index of p (pidx: vlo, the first of its rank words, their count, its first offset block): word j tells which
+   of the values vlo + 32j .. vlo + 32j + 31 p takes, and how many it takes below them; offset q is the first row,
+   from p's first, of p's q-th value, and offset pdist the rows of p. *)
+
+let[@inline] poff b p = i64 b (b.o_poff + (8 * p))
+let[@inline] cpoff b p = ci64 b (b.o_poff + (8 * p))
+let[@inline] pdist b p = i64 b (b.o_pdist + (8 * p))
+
+(* the row block j: its bytes and where it starts in them, its first value *)
+let[@inline] vbytes b j =
+  let d = b.o_vdir + (16 * j) in
+  let o0 = i64 b d in
+  let bo = b.o_vdata + o0 and n = i64 b (d + 16) - o0 in
+  let f = frame b bo and i = bo land Pages.mask in
+  if i + n <= Pages.size then f, i else assemble b bo n, 0
+
+let[@inline] cvbytes b j =
+  let d = b.o_vdir + (16 * j) in
+  let o0 = ci64 b d in
+  let bo = b.o_vdata + o0 and n = ci64 b (d + 16) - o0 in
+  let f = framec b bo and i = bo land Pages.mask in
+  if i + n <= Pages.size then f, i else cassemble b bo n, 0
+
+(* the value of row k of a row block (its bytes at i, its first value) *)
+let[@inline] bval f i first k =
+  let wv = g8 f i in
+  if g8 f (i + 1) = 0 then first + Pack.get f (((i + 8) lsl 3) + (k * wv)) wv
+  else first + Pack.get f (((i + 8) lsl 3) + (k * wv) + 1) (wv - 1)
+
+(* the value of row k of the row block j *)
+let rval b j k = let f, i = vbytes b j in bval f i (i64 b (b.o_vdir + (16 * j) + 8)) k
+
+(* the value of row r of p (p0 <= r < p1) *)
+let pvalue b p r = let d = r - poff b p in rval b (i64 b (b.o_pblk + (8 * p)) + (d lsr 7)) (d land 127)
+let rec base_pvalue b p r = match pvalue b p r with x -> ended x | exception Miss k -> fault b k; base_pvalue b p r
+
+(* the rows of p before the first one whose value is >= w (w < vlo: none; w past the range: all) *)
 let lower b p w =
-  let lo = ref (poff b p) and hi = ref (poff b (p + 1)) in
-  while !lo < !hi do
-    let mid = (!lo + !hi) lsr 1 in
-    if avv b mid < w then lo := mid + 1 else hi := mid
-  done;
-  !lo
+  let p0 = poff b p and p1 = poff b (p + 1) in
+  if p0 = p1 then p0
+  else begin
+    let x = b.o_pidx + (32 * p) in
+    let w0 = i64 b (x + 8) in
+    if w0 >= 0 then begin
+      let vlo = i64 b x and words = i64 b (x + 16) in
+      if w <= vlo then p0
+      else
+        let d = w - vlo in
+        if d < 0 || d lsr 5 >= words - 1 then p1
+        else
+          let word = i64 b (b.o_vrank + ((w0 + (d lsr 5)) lsl 3)) in
+          let q = (word lsr 32) + popcount (word land ((1 lsl (d land 31)) - 1)) in
+          p0 + mono b b.o_vmh b.o_vmb ((i64 b (x + 24) lsl 7) + q)
+    end
+    else begin
+      (* the first block whose first value is >= w; the rows before it in the block before *)
+      let j0 = i64 b (b.o_pblk + (8 * p)) and j1 = i64 b (b.o_pblk + (8 * (p + 1))) in
+      let lo = ref j0 and hi = ref j1 in
+      while !lo < !hi do
+        let mid = (!lo + !hi) lsr 1 in
+        if i64 b (b.o_vdir + (16 * mid) + 8) < w then lo := mid + 1 else hi := mid
+      done;
+      if !lo = j0 then p0
+      else begin
+        let j = !lo - 1 in
+        let r0 = p0 + ((j - j0) lsl 7) in
+        let rows = min tb (p1 - r0) in
+        let f, i = vbytes b j and first = i64 b (b.o_vdir + (16 * j) + 8) in
+        let lo = ref 0 and hi = ref rows in
+        while !lo < !hi do
+          let mid = (!lo + !hi) lsr 1 in
+          if bval f i first mid < w then lo := mid + 1 else hi := mid
+        done;
+        r0 + !lo
+      end
+    end
+  end
 
 let rec base_lower b p w = match lower b p w with r -> ended r | exception Miss k -> fault b k; base_lower b p w
 
-let base_iter_av b p w f =
-  if p >= 0 && p < b.np then begin
-    let hi = cpoff b (p + 1) in
-    let i = ref (base_lower b p w) in
-    while !i < hi && cavv b !i = w do
-      f (cave b !i);
-      incr i
-    done
-  end
-
+(* the rows of (p, w) *)
 let count_av b p w =
   if p < 0 || p >= b.np then 0
   else begin
-    (* two binary searches: the rows of value w are [lower w, lower (w+1)) *)
-    let lo = lower b p w in
-    let hi = if w = max_int then poff b (p + 1) else lower b p (w + 1) in
-    hi - lo
+    let x = b.o_pidx + (32 * p) in
+    let w0 = i64 b (x + 8) in
+    if w0 >= 0 then begin
+      let vlo = i64 b x and words = i64 b (x + 16) in
+      let d = w - vlo in
+      if w < vlo || d < 0 || d lsr 5 >= words - 1 then 0
+      else
+        let word = i64 b (b.o_vrank + ((w0 + (d lsr 5)) lsl 3)) in
+        let i = d land 31 in
+        if (word lsr i) land 1 = 0 then 0
+        else
+          let q = (word lsr 32) + popcount (word land ((1 lsl i) - 1)) and q0 = i64 b (x + 24) lsl 7 in
+          mono b b.o_vmh b.o_vmb (q0 + q + 1) - mono b b.o_vmh b.o_vmb (q0 + q)
+    end
+    else
+      let lo = lower b p w in
+      let hi = if w = max_int then poff b (p + 1) else lower b p (w + 1) in
+      hi - lo
   end
 
 let rec base_count_av b p w =
   if b.n = 0 then 0 else match count_av b p w with r -> ended r | exception Miss k -> fault b k; base_count_av b p w
 
-let base_iter_range b p lo hi f =
-  if p >= 0 && p < b.np then begin
-    let stop = cpoff b (p + 1) in
-    let i = ref (base_lower b p lo) in
-    while !i < stop && cavv b !i <= hi do
-      f (cave b !i) (cavv b !i);
-      incr i
+(* rows r0 .. r1-1 of p: f thing value derived, a block's bytes read once *)
+let scan b p r0 r1 fn =
+  if r0 < r1 then begin
+    let p0 = cpoff b p and rows = cpoff b (p + 1) - cpoff b p and j0 = ci64 b (b.o_pblk + (8 * p)) in
+    let r = ref r0 in
+    while !r < r1 do
+      let j = j0 + ((!r - p0) lsr 7) and k0 = (!r - p0) land 127 in
+      let brows = min tb (rows - ((j - j0) lsl 7)) in
+      let k1 = min brows (k0 + (r1 - !r)) in
+      let first = ci64 b (b.o_vdir + (16 * j) + 8) in
+      let f, i = cvbytes b j in
+      let wv = g8 f i and fl = g8 f (i + 1) and wt = g8 f (i + 2) and tl = g32 f (i + 4) in
+      let va = (i + 8) lsl 3 in
+      let ta = (i + 8 + pbytes brows wv) lsl 3 in
+      let value k = if fl = 0 then first + Pack.get f (va + (k * wv)) wv else first + Pack.get f (va + (k * wv) + 1) (wv - 1) in
+      if g8 f (i + 3) = 0 then
+        for k = k0 to k1 - 1 do fn (tl + Pack.get f (ta + (k * wt)) wt) (value k) (fl <> 0 && Pack.get f (va + (k * wv)) 1 = 1) done
+      else begin
+        (* things by gaps: a row's thing is the one before plus 1 plus its field when it has the same value, the
+           least plus its field otherwise; decoded from the block's first row *)
+        let t = ref 0 and pw = ref 0 in
+        for k = 0 to k1 - 1 do
+          let w = value k and x = Pack.get f (ta + (k * wt)) wt in
+          t := if k > 0 && w = !pw then !t + 1 + x else tl + x;
+          pw := w;
+          if k >= k0 then fn !t w (fl <> 0 && Pack.get f (va + (k * wv)) 1 = 1)
+        done
+      end;
+      r := !r + (k1 - k0)
     done
   end
 
-let base_iter_p b p f =
-  if p >= 0 && p < b.np then for i = cpoff b p to cpoff b (p + 1) - 1 do f (cave b i) (cavv b i) done
+let base_iter_av b p w fn =
+  if p >= 0 && p < b.np && b.n > 0 then begin
+    let lo = base_lower b p w in
+    let hi = lo + base_count_av b p w in
+    scan b p lo hi (fun e _ _ -> fn e)
+  end
+
+let base_iter_range b p lo hi fn =
+  if p >= 0 && p < b.np && b.n > 0 && lo <= hi then begin
+    let r0 = base_lower b p lo in
+    let r1 = if hi = max_int then cpoff b (p + 1) else base_lower b p (hi + 1) in
+    scan b p r0 r1 (fun e w _ -> fn e w)
+  end
+
+let base_iter_p b p fn = if p >= 0 && p < b.np && b.n > 0 then scan b p (cpoff b p) (cpoff b (p + 1)) (fun e w _ -> fn e w)
+
+(* every row of p, with its flag: for the merge *)
+let base_iter_pf b p fn = if p >= 0 && p < b.np && b.n > 0 then scan b p (cpoff b p) (cpoff b (p + 1)) fn
 
 let count_range b p lo hi =
   if p < 0 || p >= b.np || lo > hi then 0
@@ -322,7 +716,33 @@ let rec base_count_range b p lo hi =
 let base_count_p b p = if p >= 0 && p < b.np && b.n > 0 then cpoff b (p + 1) - cpoff b p else 0
 let base_pdist b p = if p >= 0 && p < b.np && b.n > 0 then safe pdist b p else 0
 
-let[@inline] byte b o = Char.code (Bytes.unsafe_get (frame b o) (o land Pages.mask))
+(* ---- The dictionary ---- *)
+
+(* The hash of a text, the slot it starts its probe at in a run's table (low bits): 7 bytes at a time
+   (little-endian, the last ones padded with zeros), each mixed in by a multiplication, in 63-bit arithmetic
+   (OCaml's ints: modulo 2^63), then a final mix; the constant is the multiplier of xorshift64* (Vigna 2016). *)
+let hash_k = 0x2545F4914F6CDD1D
+
+let hash (s : string) =
+  let n = String.length s in
+  let h = ref (n * hash_k) and i = ref 0 in
+  while !i < n do
+    let g =
+      if !i + 8 <= n then Int64.to_int (String.get_int64_le s !i) land 0xFFFFFFFFFFFFFF
+      else begin
+        let g = ref 0 in
+        for j = min n (!i + 7) - 1 downto !i do g := (!g lsl 8) lor Char.code (String.unsafe_get s j) done;
+        !g
+      end
+    in
+    h := (!h lxor g) * hash_k;
+    i := !i + 7
+  done;
+  let h = !h lxor (!h lsr 32) in
+  let h = h * hash_k in
+  h lxor (h lsr 29)
+
+let[@inline] soff b i = mono b b.o_smh b.o_smb i
 
 let text_r b i =
   let lo = b.o_sblob + soff b i in
@@ -332,37 +752,38 @@ let text_r b i =
 
 let rec base_text b i = match text_r b i with r -> ended r | exception Miss k -> fault b k; base_text b i
 
-(* compares s with the part's text i *)
-let cmp_r b s i =
+(* is s the part's text i *)
+let eq_r b s i =
   let lo = b.o_sblob + soff b i in
   let len = (b.o_sblob + soff b (i + 1)) - lo in
   let n = String.length s in
+  n = len
+  &&
   if (lo land Pages.mask) + len <= Pages.size then begin
     (* the text in one page: compared in place *)
     let p = frame b lo and at = lo land Pages.mask in
     let k = ref 0 in
-    while !k < n && !k < len && String.unsafe_get s !k = Bytes.unsafe_get p (at + !k) do incr k done;
-    if !k = n || !k = len then compare n len
-    else compare (Char.code (String.unsafe_get s !k)) (Char.code (Bytes.unsafe_get p (at + !k)))
+    while !k < n && String.unsafe_get s !k = Bytes.unsafe_get p (at + !k) do incr k done;
+    !k = n
   end
   else begin
     let k = ref 0 in
-    while !k < n && !k < len && Char.code (String.unsafe_get s !k) = byte b (lo + !k) do incr k done;
-    if !k = n || !k = len then compare n len else compare (Char.code (String.unsafe_get s !k)) (byte b (lo + !k))
+    while !k < n && Char.code (String.unsafe_get s !k) = byte b (lo + !k) do incr k done;
+    !k = n
   end
 
-let find_text_r b s =
-  let lo = ref 0 and hi = ref b.ns in
-  while !lo < !hi do
-    let mid = (!lo + !hi) lsr 1 in
-    if cmp_r b s (ssort b mid) > 0 then lo := mid + 1 else hi := mid
+(* the hash table: open addressing with linear probing (Knuth, TAOCP vol. 3, 6.4), at most half full *)
+let find_text_r b s h =
+  let m = (1 lsl b.hbits) - 1 in
+  let i = ref (h land m) and r = ref (-2) in
+  while !r = -2 do
+    let x = u32 b (b.o_shash + (4 * !i)) in
+    if x = 0 then r := -1 else if eq_r b s (x - 1) then r := x - 1 else i := (!i + 1) land m
   done;
-  if !lo < b.ns && cmp_r b s (ssort b !lo) = 0 then Some (ssort b !lo) else None
+  !r
 
-let rec base_find_text b s =
-  if b.ns = 0 then None else match find_text_r b s with r -> ended r | exception Miss k -> fault b k; base_find_text b s
-
-let rec base_cmp b s i = match cmp_r b s i with r -> ended r | exception Miss k -> fault b k; base_cmp b s i
+let rec base_find_text b s h =
+  if b.ns = 0 then -1 else match find_text_r b s h with r -> ended r | exception Miss k -> fault b k; base_find_text b s h
 
 (* ---- Dictionary, delta, views ---- *)
 
@@ -478,12 +899,18 @@ let find_text v s =
   | Some i -> Some i
   | None ->
     let rs = v.runs in
-    let r = ref None and j = ref 0 in
-    while Option.is_none !r && !j < Array.length rs do
-      (match base_find_text rs.(!j).a s with Some l -> r := Some (rs.(!j).s0 + l) | None -> ());
-      incr j
-    done;
-    !r
+    if Array.length rs = 0 then None
+    else begin
+      (* the hash once, a probe of each run's table *)
+      let h = hash s in
+      let r = ref (-1) and j = ref 0 in
+      while !r < 0 && !j < Array.length rs do
+        let l = base_find_text rs.(!j).a s h in
+        if l >= 0 then r := rs.(!j).s0 + l;
+        incr j
+      done;
+      if !r < 0 then None else Some !r
+    end
 
 let intern v s =
   match find_text v s with
@@ -512,8 +939,8 @@ let intern v s =
       { v with dict = { d with smap = SM.add s i d.smap; extra = IM.add i s d.extra; dnext = i + 1 } }, i
 
 (* The texts a large group adds: their ids, consecutive from the first returned, as [intern] would give them one
-   after the other, but without their entries in the sorted map (the merge of the group, which follows at once, sorts
-   the group's texts itself: Bulk.t.texts), and one new view for all. The view is for that merge. *)
+   after the other, but without their entries in the delta's map (the merge of the group, which follows at once, puts
+   every text of the view in its run's hash table), and one new view for all. The view is for that merge. *)
 let add_texts v (ss : string array) =
   let d = v.dict and n = Array.length ss in
   if v.writer then begin

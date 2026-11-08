@@ -450,7 +450,7 @@ let () =
     let sorted = Bulk.in_order e p w n in
     C.check (sorted = (List.init n Fun.id = by_thing)) "seed %d: in order is %b" seed sorted;
     let order = if sorted then Bulk.i32 0 else Bulk.by_thing e p w n in
-    let b = Bulk.make ~sorted ~order e p w n ~np ~texts:[||] in
+    let b = Bulk.make ~sorted ~order e p w n ~np in
     C.check (List.init n (Bulk.row b) = by_thing) "seed %d: the order by thing" seed;
     let want = List.stable_sort (fun i j -> let a, q, x = facts.(i) and a', q', x' = facts.(j) in compare (q, x, a) (q', x', a')) by_thing in
     let got = ref [] in
@@ -593,7 +593,8 @@ let () =
     let made = Array.make 6000 0 in
     for k = 0 to 5999 do
       let friend = if k = 0 then [] else [ Add (-1, p "friend", Link made.(Rng.int r k)) ] in
-      let name = Text (Printf.sprintf "n%d-%d" k (Rng.int r 1000)) in
+      (* long names: the run is many times the cache (16 pages) although compressed, its texts read by questions *)
+      let name = Text (Printf.sprintf "n%d-%d-%s" k (Rng.int r 1000) (String.init 60 (fun _ -> Char.chr (97 + Rng.int r 26)))) in
       let ops = Add (-1, p "name", name) :: Add (-1, p "score", Int (Rng.int r 5)) :: Add (-1, p "tag", Text small.(k mod 3)) :: friend in
       made.(k) <- thing (Result.get_ok (write f ops)) (-1)
     done;
@@ -604,10 +605,11 @@ let () =
     let npages = Pages.count b.pg in
     let facts0 = C.facts_of_view v in
     let file = "/s/" ^ Snapshot.name 0 v.group in
+    let fpages = Snapshot.file_pages disk file in
     let m0 = Atomic.get Pages.misses in
     (match Snapshot.load disk "/s" id with
      | Some (pv, _), [] ->
-       C.check (npages > 2 * !Pages.capacity) "seed %d: the base (%d pages) is not larger than the cache" seed npages;
+       C.check (fpages > 2 * !Pages.capacity) "seed %d: the base (%d pages) is not larger than the cache" seed fpages;
        C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view pv)) "seed %d: the paged base lost facts" seed;
        (* a delta on top of the paged base, and questions split over domains while pages come and go *)
        let pf = fork pv in
@@ -622,8 +624,8 @@ let () =
            | Ok rows -> C.check (C.sorted_rows rows = C.naive facts q) "seed %d: a question on the paged base" seed
            | Error e -> C.fail "seed %d: %s" seed (message e))
        done;
-       C.check (Atomic.get Pages.misses - m0 > npages) "seed %d: no page was read twice (%d reads, %d pages)" seed
-         (Atomic.get Pages.misses - m0) npages;
+       C.check (Atomic.get Pages.misses - m0 > fpages) "seed %d: no page was read twice (%d reads, %d pages)" seed
+         (Atomic.get Pages.misses - m0) fpages;
        (* the base dropped from the cache (as a merge does to the base it replaced): read again from the file *)
        Pages.drop pv.runs.(0).a.pg;
        let q = C.random_query r pv facts qnames in
@@ -635,11 +637,13 @@ let () =
        never a wrong answer *)
     (* even seeds: any page; odd seeds: a page of the by-property rows, which the open does not read *)
     let k =
-      if seed mod 2 = 0 then Rng.int r npages
-      else
-        (* interior pages only: the first and the last share bytes with the offset tables around them *)
-        let lo = (b.o_avv / Pages.size) + 1 and hi = (b.o_ave + (4 * b.n)) / Pages.size in
-        lo + Rng.int r (hi - lo)
+      if seed mod 2 = 0 then Rng.int r (Snapshot.file_pages disk file)
+      else begin
+        (* interior pages of the rows by property only: the first shares bytes with their directory, read at open *)
+        let ks = List.filter_map (fun k -> if k * Pages.size > b.o_vdata && (k + 1) * Pages.size <= b.o_vrank then Snapshot.file_page disk file k else None)
+            (List.init npages Fun.id) in
+        List.nth ks (Rng.int r (List.length ks))
+      end
     in
     ignore (Sim_disk.flip_durable sim file (Snapshot.header + (k * Pages.size)) (Snapshot.header + ((k + 1) * Pages.size)));
     match Snapshot.load disk "/s" id with
@@ -679,7 +683,7 @@ let () =
     disk.mkdir "/s";
     let f = fresh () in
     let p n = Option.get (property (view f) n) in
-    for k = 0 to 23_999 do
+    for k = 0 to 119_999 do
       ignore (write f [ Add (-1, p "name", Text (Printf.sprintf "n%d-%d" k (Rng.int r 100000))); Add (-1, p "score", Int (Rng.int r 50));
                         Add (-1, p "tag", Text (string_of_int (k mod 7))) ])
     done;
@@ -696,9 +700,10 @@ let () =
     Snapshot.open_max := 0;
     let w2 = Snapshot.merge disk "/s" id v ~take:1 ~level:1 (pos v) in
     Snapshot.install disk "/s" w2;
-    let np = Pages.count w2.view.runs.(0).a.pg in
+    let np = Snapshot.file_pages disk ("/s/" ^ Snapshot.name 0 w2.group) in
     C.check (np > 8 * !Pages.capacity) "seed %d: the base (%d pages) is not 8 times the cache" seed np;
-    C.check (!Snapshot.open_max <= 10) "seed %d: %d pages open at once in a merge" seed !Snapshot.open_max;
+    (* a page under each stream of the pass by property (9 sections a part, two parts) and the pages they share *)
+    C.check (!Snapshot.open_max <= 24) "seed %d: %d pages open at once in a merge" seed !Snapshot.open_max;
     C.check (!Pages.resident <= !Pages.capacity) "seed %d: %d pages resident, the cache holds %d" seed !Pages.resident !Pages.capacity;
     C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view w2.view)) "seed %d: the merge changed the facts" seed;
     (* and the file reads back as it was written *)

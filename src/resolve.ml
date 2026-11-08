@@ -371,7 +371,6 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
     let news = Array.of_list (List.rev !order) in
     let v, first_text = Store.add_texts v0 news in
     Array.iter (fun map -> Array.iteri (fun j k -> map.(j) <- first_text + k) map) maps;
-    let added = Array.mapi (fun k s -> s, first_text + k) news in
     Bulk.parallel nch (fun c ->
         let fl = fars.(c) and fi = ref 0 and map = maps.(c) in
         let id t = if t >= -deep then Int32.to_int (Bigarray.Array1.unsafe_get dense (-t)) else Hashtbl.find farmap t in
@@ -458,7 +457,7 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
           let sorted = Bulk.in_order fe' fp' fw' n in
           { rv with next_e = v.next_e }, fe', fp', fw', n, count, sorted, (if sorted then Bulk.i32 0 else Bulk.by_thing fe' fp' fw' n)
     in
-    let b = Bulk.make ~d0 ~sorted ~order fe fp fw count ~np ~texts:added in
+    let b = Bulk.make ~d0 ~sorted ~order fe fp fw count ~np in
     (* a value two things take for a unique property, or one taken already: to [resolve] *)
     for q = 0 to np - 1 do
       match Schema.find v0.schema q with
@@ -498,18 +497,39 @@ let encode_large (l : large) =
   let np = Array.length kinds in
   let colmap = Array.make np (-1) and cols = ref [] and nc = ref 0 in
   let tags = [| -1; 0; 5; 6; 2; 7; 4; 1 |] in
-  let loc = Bulk.i32 (max 1 b.n) and texts = Hashtbl.create 4096 and tl = ref [] and nt = ref 0 in
+  let loc = Bulk.i32 (max 1 b.n) and tl = ref [] and nt = ref 0 in
+  (* the texts' places in order of first use: a table indexed by text id over the ids the group uses when that range
+     is small (a load's: its own new texts and a few old ones), a hash table otherwise *)
+  let lo = ref max_int and hi = ref min_int and ntext = ref 0 in
   for i = 0 to b.n - 1 do
     let p = Bulk.prop b i in
     if colmap.(p) < 0 then (colmap.(p) <- !nc; cols := (p, tags.(kinds.(p) land 7)) :: !cols; incr nc);
     if kinds.(p) land 7 = 6 then begin
       let w = Bulk.word b i in
-      let k = match Hashtbl.find_opt texts w with
+      incr ntext;
+      if w < !lo then lo := w;
+      if w > !hi then hi := w
+    end
+  done;
+  let place =
+    if !ntext > 0 && !hi - !lo < max 65536 (4 * !ntext) then begin
+      let lo = !lo in
+      let t = Bulk.i32 (!hi - lo + 1) in
+      Bigarray.Array1.fill t (-1l);
+      fun w ->
+        let k = Int32.to_int (Bigarray.Array1.unsafe_get t (w - lo)) in
+        if k >= 0 then k else (let k = !nt in Bigarray.Array1.unsafe_set t (w - lo) (Int32.of_int k); tl := w :: !tl; incr nt; k)
+    end
+    else begin
+      let texts = Hashtbl.create 4096 in
+      fun w ->
+        match Hashtbl.find_opt texts w with
         | Some k -> k
         | None -> let k = !nt in Hashtbl.add texts w k; tl := w :: !tl; incr nt; k
-      in
-      Bigarray.Array1.unsafe_set loc i (Int32.of_int k)
     end
+  in
+  for i = 0 to b.n - 1 do
+    if kinds.(Bulk.prop b i) land 7 = 6 then Bigarray.Array1.unsafe_set loc i (Int32.of_int (place (Bulk.word b i)))
   done;
   let out = Buffer.create (16 + (4 * b.n)) in
   Group.encode_source out ~n:l.n ~time:l.time ~by:l.by ~why:l.why ~first_new:l.first_new ~count_new:l.count_new
@@ -567,9 +587,8 @@ let replay_large (v0 : Store.view) (g : Group.t) =
       let w = Bigarray.Array1.unsafe_get fw i in
       if w < 0 && kinds.(Bigarray.Array1.unsafe_get fp i) land 7 >= 6 then Bigarray.Array1.unsafe_set fw i (first - w - 1)
     done;
-    let added = Array.mapi (fun k s -> s, first + k) news in
     let sorted = Bulk.in_order fe fp fw n in
     let order = if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw n in
-    let facts = Bulk.make ~d0 ~sorted ~order fe fp fw n ~np:(Schema.count v0.schema) ~texts:added in
+    let facts = Bulk.make ~d0 ~sorted ~order fe fp fw n ~np:(Schema.count v0.schema) in
     Some ({ v with next_e = max v0.next_e (g.first_new + g.count_new); group = g.n }, facts)
   end
