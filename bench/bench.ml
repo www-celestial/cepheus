@@ -69,6 +69,10 @@ let parallel n f =
 
 let ok = function Ok r -> r | Error e -> failwith (message e)
 
+let cache_from_env () =
+  (match Sys.getenv_opt "CACHE_MB" with Some m -> set_cache (int_of_string m * 1024 * 1024) | None -> ());
+  match Sys.getenv_opt "SYNC_MB" with Some m -> Snapshot.sync_every := int_of_string m lsl 20 | None -> ()
+
 (* resident memory now, and its peak, in KB *)
 let status field =
   let ic = open_in "/proc/self/status" in
@@ -85,6 +89,7 @@ let rss () = status "VmRSS:"
 let peak () = status "VmHWM:"
 
 let load dir csv facts =
+  cache_from_env ();
   let nclients = facts / facts_per_client in
   let db = ok (open_ dir) in
   let s = schema db in
@@ -180,10 +185,6 @@ let questions v s nclients =
         in
         Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0, Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0);
     q5 = (fun () -> count q5) }
-
-let cache_from_env () =
-  (match Sys.getenv_opt "CACHE_MB" with Some m -> set_cache (int_of_string m * 1024 * 1024) | None -> ());
-  match Sys.getenv_opt "SYNC_MB" with Some m -> Snapshot.sync_every := int_of_string m lsl 20 | None -> ()
 
 let read dir facts only =
   let asked q = match only with None -> true | Some l -> List.mem q (String.split_on_char ',' l) in
