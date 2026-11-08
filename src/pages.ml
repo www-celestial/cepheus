@@ -166,10 +166,9 @@ let record b k =
 let room () =
   while !resident >= !capacity && (small.n > 0 || main.n > 0) do make_room () done;
   (* the bytes of evicted pages go back to the system only when a collection finds them: one full collection after
-     each quarter of the cache evicted keeps the pages in memory under 1.25 times the cache; but never before the
-     evicted bytes reach a quarter of the heap, so that a small cache beside a large heap does not pay a full
-     collection for a few pages *)
-  if !evicted >= !capacity / 4 && !evicted >= (Gc.quick_stat ()).heap_words * (Sys.word_size / 8) / 4 / size then begin
+     each quarter of the cache evicted keeps the pages in memory under 1.25 times the cache (and at least 256 pages,
+     4 MB, for a tiny cache, where a full collection every few pages costs more than the pages) *)
+  if !evicted >= max 256 (!capacity / 4) then begin
     evicted := 0;
     Gc.full_major ()
   end

@@ -537,6 +537,18 @@ let value v (ty : Value.typ) w : Value.t =
 
 let thing_delta v e = if is_touched v e then IM.find_opt e v.delta.de else None
 
+(* does a part hold rows of property p at all (two offsets, on a page every lookup of p reads) *)
+let[@inline] has_p (b : base) p = b.n > 0 && p >= 0 && p < b.np && cpoff b (p + 1) > cpoff b p
+
+(* the runs holding facts of thing e for property p, as bits: run j is bit j *)
+let holders_p v e p =
+  let rs = v.runs and m = ref 0 in
+  for j = 0 to Array.length rs - 1 do
+    let r = rs.(j) in
+    if (has_p r.a p && base_has r.a e) || (has_p r.t p && base_has r.t e) then m := !m lor (1 lsl j)
+  done;
+  !m
+
 (* the runs holding thing e, as bits: run j is bit j *)
 let holders v e =
   let rs = v.runs and m = ref 0 in
@@ -570,7 +582,8 @@ let runs_mem v e p w =
   else begin
     let r = ref 0 and j = ref 0 in
     while !r = 0 && !j < n do
-      if base_mem rs.(!j).a e p w then r := 1 else if base_mem rs.(!j).t e p w then r := 2;
+      let x = rs.(!j) in
+      if has_p x.a p && base_mem x.a e p w then r := 1 else if has_p x.t p && base_mem x.t e p w then r := 2;
       incr j
     done;
     !r = 1
@@ -588,7 +601,8 @@ let iter_values v e p f =
   let rs = v.runs and td = thing_delta v e in
   if td = None && Array.length rs = 1 then base_iter_ea rs.(0).a e p f
   else begin
-    let h = holders v e in
+    (* only the runs with facts of p for e matter: a newer run with other facts of e shadows none of these *)
+    let h = holders_p v e p in
     let one = single h in
     if td = None && one >= 0 then base_iter_ea rs.(one).a e p f
     else begin
@@ -690,7 +704,9 @@ let count_values v e p =
     else begin
       let n = ref 0 in
       for j = 0 to Array.length rs - 1 do
-        n := !n + base_count_ea rs.(j).a e p - base_count_ea rs.(j).t e p
+        let r = rs.(j) in
+        if has_p r.a p then n := !n + base_count_ea r.a e p;
+        if has_p r.t p then n := !n - base_count_ea r.t e p
       done;
       !n
     end
