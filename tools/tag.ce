@@ -1,0 +1,4 @@
+(** The tag of this Cesia's engines, as the file of a native package's engine is named: native/cepheus-TAG.cmxs. *)
+use std/cesia
+use std/io
+io.Print(cesia.Native())

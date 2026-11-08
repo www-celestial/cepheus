@@ -179,7 +179,7 @@ let () =
 
 ```output
 buyer 1: sold, group 4
-buyer 2: conflict: #65536 has a value for property 17
+buyer 2: conflict: #65536 has a value for seat/owner (property 17)
 owner of seat 1: 1; charges for it: 1
 ```
 

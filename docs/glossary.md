@@ -55,6 +55,9 @@ the usual one, both are given.
   holds the runs' 16 KiB pages, 1 GiB by default. [architecture](architecture.md#pages-and-the-cache)
 - **cardinality** — how many values a thing may have for a property: one (the default) or many (`~many:true`).
   [concepts](concepts.md#properties-and-the-schema)
+- **Cesia client** — the package `cesia/cepheus` of this repository: the Cesia functions `Connect`, `Kind`, `Insert`,
+  `Get`, `Update`, `Write`, `Find`, `Fork`, `Close`, over an engine in OCaml (`cesia/native/`) that speaks the
+  protocol and reads locally on the server's machine. [Cesia](cesia.md)
 - **certificate** — a public key and a name, signed by a certificate authority: what a server shows in a TLS handshake
   to prove it is the one the client meant. [server](server.md#tls)
 - **certificate authority** (CA) — the key whose signatures a client trusts; each cluster has its own, made by
@@ -139,6 +142,10 @@ the usual one, both are given.
   [rules](rules.md#what-the-database-holds-the-least-model)
 - **Elle** — the checker Jepsen uses to find isolation anomalies in a database's recorded history, by inferring its
   dependency graph and looking for cycles (Kingsbury and Alvaro 2020).
+- **engine** (of a native package) — the OCaml of a Cesia native package, compiled to machine code in one file
+  (`native/cepheus-TAG.cmxs`, an OCaml plugin: a shared library the running program links to itself) that Cesia loads
+  at the package's first call, and that reaches the program only through Cesia's frozen native interface, `Cesia_v1`.
+  [Cesia](cesia.md#the-package)
 - **entity–attribute–value** (EAV) — a model where data is a set of (entity, attribute, value) statements instead of
   tables; Cepheus' (thing, property, value). [concepts](concepts.md#facts-the-entityattributevalue-model)
 - **eviction policy** — the rule that picks which page leaves a full cache; Cepheus' is S3-FIFO.
@@ -153,6 +160,9 @@ the usual one, both are given.
   [guarantees](guarantees.md#the-faults)
 - **falsifiable hypothesis** — a claim stated so that an experiment could show it wrong; one that no result could
   contradict says nothing. [case](case-seats.md#3-a-hypothesis-one-can-prove-wrong-and-its-cause)
+- **fiber** — one of Cesia's light threads (a green thread, as Go's goroutines): many take turns on one core, each with
+  its own stack, and one that waits (for a reply of the server) lets the others run. Every fiber of a program shares
+  its database's one connection. [Cesia](cesia.md#many-fibers-one-connection)
 - **file descriptor**, **descriptor passing** (`SCM_RIGHTS`) — a descriptor is a process's number for an open file;
   a Unix-domain socket can carry descriptors to another process, which receives its own descriptors of the same open
   files (unix(7)). The server passes a local reader its run files and its visibility page this way: the reader needs
@@ -205,6 +215,9 @@ the usual one, both are given.
 - **journal** — Cepheus' write-ahead log: segments of frames of groups. [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **journal window** — the 4 MiB of a segment recovery holds at once: a frame that fits is decoded where it lies, a
   longer one checked by pieces and read whole only to replay it. [architecture](architecture.md#recovery-torn-writes-and-damage)
+- **kind** (Cesia client) — a sort of thing in a Cesia program: a name and fields, each a property of a type
+  (`client/City` for the field `City` of the kind `client`); `Insert` and `Get` read and write a thing's fields of a
+  kind as a map. [Cesia](cesia.md#kinds-and-the-values-they-hold)
 - **large group** — a group of 20,000 operations or more, all additions: it takes a faster path to the same result
   (its facts in Bigarrays, mapped and sorted by several domains, merged at once into a run while its frame is written
   beside, by pieces). [architecture](architecture.md#large-groups)
@@ -244,6 +257,9 @@ the usual one, both are given.
   them. [server](server.md#order-pipelining-and-back-pressure)
 - **mutual TLS** — TLS where both sides show a certificate of the same CA; between Cepheus servers (with replication),
   not for programs, which show a token. [server](server.md#tls)
+- **native package** — a Cesia package whose functions are, under their Cesia code, an engine in OCaml compiled once:
+  the way Cesia runs OCaml that comes from another project; running one needs the permission `native=LABEL`, total
+  trust, as `ffi=` for C. [Cesia](cesia.md#the-package)
 - **net** (run) — a run adds only facts absent below it and retracts only facts present below it, so every count of a
   view is a sum of exact counts. [architecture](architecture.md#indexes-the-runs-and-the-delta)
 - **optimistic concurrency control** — read without locks, and check at the end that what was read still holds

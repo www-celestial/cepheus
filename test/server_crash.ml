@@ -20,7 +20,7 @@ let bin = Filename.concat (Filename.dirname (Filename.dirname Sys.executable_nam
 let write_file path s = Out_channel.with_open_bin path (fun oc -> output_string oc s)
 
 let start cfg =
-  let pid = Unix.create_process bin [| bin; "serve"; "--config"; cfg |] Unix.stdin Unix.stdout Unix.stderr in
+  let pid = Serve.start bin cfg in
   pid
 
 let wait_ready sock =
@@ -60,8 +60,8 @@ let () =
   let db, p = match Client.declare c0 "main" [ prop "k" Tint ] with Ok (db, [ p ]) -> db, p | _ -> failwith "declare" in
   Client.close c0;
   (* G9: a second server on the same data is refused *)
-  let second = Unix.create_process bin [| bin; "serve"; "--config"; cfg |] Unix.stdin Unix.stdout (Unix.openfile "/dev/null" [ Unix.O_WRONLY ] 0) in
-  (match Unix.waitpid [] second with
+  let second = Serve.start bin cfg in
+  (match Serve.wait second with
    | _, Unix.WEXITED n -> C.check (n <> 0) "a second server on the same data is refused"
    | _ -> C.check false "a second server: killed?");
   (* writers: thread t writes values t * 1_000_000 + i *)
@@ -112,7 +112,7 @@ let () =
   for _ = 1 to rounds do
     Thread.delay (0.05 +. (float (Rng.int r 250) /. 1000.));
     Unix.kill !pid Sys.sigkill;
-    ignore (Unix.waitpid [] !pid);
+    ignore (Serve.wait !pid);
     pid := start cfg;
     wait_ready sock
   done;
@@ -132,7 +132,7 @@ let () =
   (* a clean stop by `cepheus stop`, then a start: everything acknowledged is there, once *)
   let code = Sys.command (Printf.sprintf "%s stop --config %s > /dev/null" bin (Filename.quote cfg)) in
   C.check (code = 0) "cepheus stop";
-  ignore (Unix.waitpid [] !pid);
+  ignore (Serve.wait !pid);
   pid := start cfg;
   wait_ready sock;
   let c = Result.get_ok (Client.connect addr wtext) in
@@ -161,7 +161,7 @@ let () =
   C.check (refused ()) "a removed token is refused within the reload";
   Client.close c;
   Unix.kill !pid Sys.sigterm;
-  (match Unix.waitpid [] !pid with
+  (match Serve.wait !pid with
    | _, Unix.WEXITED 0 -> C.check true "SIGTERM: a clean exit"
    | _ -> C.check false "SIGTERM: not a clean exit");
   C.check (not (Sys.file_exists sock)) "the socket is removed at stop";

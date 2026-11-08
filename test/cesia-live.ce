@@ -1,0 +1,100 @@
+(** The Cesia client against a real server, from a project that holds the package in deps/, as a program uses it:
+    over TLS (CEPHEUS_TLS, with CEPHEUS_CA), and through the Unix socket with local reads (CEPHEUS_URL). With the
+    argument restart, it writes while the script kills the server (kill -9) and starts it again: every write must be
+    answered Ok and be in the database once (G14), read here (G15).
+
+    cesia run --allow native=cepheus,env,read,net=:0 src/live.ce [restart] *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/fiber
+use std/io
+use std/list
+use std/net
+use std/result
+use std/sys
+use std/value
+
+Note = cepheus.Kind("note", {Title: cepheus.Text(), N: cepheus.Int(), Mark: cepheus.Text(unique = true)})
+token = sys.Env("CEPHEUS_TOKEN")
+
+defn count(mark, db)
+  (** The notes of a run, by their N. *)
+  rows = cepheus.Find(2, (x, n) -> {Where: [[x, Note.Title, mark], [x, Note.N, n]], Give: {N: n}}, db)?
+  result.Ok(value.Len(rows))
+end
+
+defn overTls()
+  db = cepheus.Connect(sys.Env("CEPHEUS_TLS"), [Note], token = token, ca = sys.Env("CEPHEUS_CA"))?
+  id = cepheus.Insert(Note, {Title: "tls", N: 1, Mark: "tls-1"}, db)?
+  io.Print("tls get:", cepheus.Get(Note, id, db)?)
+  io.Print("tls unique:", cepheus.Insert(Note, {Title: "tls", N: 2, Mark: "tls-1"}, db).Error.Code)
+  io.Print("tls expect:", cepheus.Write([cepheus.Expect(id, Note.N, 2), cepheus.Add(id, Note.N, 3)], db).Error.Code)
+  io.Print("tls write:", cepheus.Write([cepheus.Expect(id, Note.N, 1), cepheus.Add(id, Note.N, 3)], db)?.Things)
+  io.Print("tls find:", cepheus.Find(1, (n) -> {Where: [[id, Note.N, n]], Give: {N: n}}, db)?)
+  io.Print("tls fork:", cepheus.Fork(db).Error.Code)
+  tasks = [fiber.Spawn(() -> cepheus.Insert(Note, {Title: "tls-many", N: k, Mark: "tls-m$k"}, db)) for k in 1..100]
+  ok = list.Count(result.IsOk, [result.Unwrap(fiber.Wait(t)) for t in tasks])
+  io.Print("tls 100 fibers:", ok, "answered,", count("tls-many", db)?, "in the database")
+  cepheus.Close(db)
+  io.Print("tls closed:", cepheus.Get(Note, id, db).Error.Code)
+  result.Ok(missing)
+end
+
+defn local()
+  a = cepheus.Connect(sys.Env("CEPHEUS_URL"), [Note], token = token)?
+  b = cepheus.Connect(sys.Env("CEPHEUS_URL"), [Note], token = token)?
+  seen = 0
+  for k in 1..200
+    id = cepheus.Insert(Note, {Title: "local", N: k, Mark: "local-$k"}, a)?
+    if cepheus.Get(Note, id, b)?.N == k
+      seen += 1
+    end
+  end
+  io.Print("local: 200 writes by one connection, read at once by another:", seen, "seen")
+  t = cepheus.Fork(b)?
+  cepheus.Insert(Note, {Title: "local", N: 0, Mark: "local-fork"}, t)?
+  io.Print("local fork:", count("local", t)?, "in the fork,", count("local", b)?, "in the database")
+  tasks = [fiber.Spawn(() -> cepheus.Insert(Note, {Title: "local-many", N: k, Mark: "local-m$k"}, a)) for k in 1..200]
+  ids = [result.Unwrap(result.Unwrap(fiber.Wait(t))) for t in tasks]
+  io.Print("local 200 fibers:", value.Len(list.Unique(ids)), "ids,", count("local-many", b)?, "in the database")
+  result.Ok(missing)
+end
+
+defn restart()
+  db = cepheus.Connect(sys.Env("CEPHEUS_URL"), [Note], token = token)?
+  io.Print("ready")
+  worker(w) = list.Count(result.IsOk, [cepheus.Insert(Note, {Title: "restart", N: w * 1000 + k, Mark: "r-$w-$k"}, db) for k in 1..150])
+  tasks = [fiber.Spawn(() -> worker(w)) for w in 1..10]
+  ok = list.Sum([result.Unwrap(fiber.Wait(t)) for t in tasks])
+  io.Print("restart:", ok, "writes answered Ok,", count("restart", db)?, "in the database")
+  result.Ok(missing)
+end
+
+defn silent()
+  (** A peer that takes the connection and never answers: Connect gives up within the handshake's time, and the
+      program's other fibers run meanwhile. *)
+  l = net.Listen(0)?
+  ticks = fiber.Channel()
+  fiber.Spawn(defn ()
+    for k in 1..20
+      sys.Sleep(0.05)
+      fiber.Send(k, ticks)
+    end
+  end)
+  start = sys.Now()
+  r = cepheus.Connect("cepheus://127.0.0.1:$(net.Port(l))/x", [Note], token = token, ca = sys.Env("CEPHEUS_CA"))
+  took = sys.Now() - start
+  n = 0
+  while result.IsOk(fiber.Receive(ticks, timeout = 0))
+    n += 1
+  end
+  io.Print("silent peer:", r.Error.Code, "within 7 s:", took < 7, "the program ran meanwhile:", n >= 10)
+  result.Ok(missing)
+end
+
+if value.Len(sys.Args) > 0 and sys.Args[1] == "restart"
+  result.Unwrap(restart())
+else
+  result.Unwrap(overTls())
+  result.Unwrap(local())
+  result.Unwrap(silent())
+end

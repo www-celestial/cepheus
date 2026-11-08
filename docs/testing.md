@@ -49,7 +49,7 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | `bank.exe DIR SECONDS` | the bank test for SECONDS | |
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | the sale of seats with kill -9 and a checker of the history ([case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)); `ROUNDS` 0: no kill, the time to sell out | `BUYERS` (16), SEED 42, SEATS 2,000 |
 | `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
-| `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, crash, bank, seats and examples | `CEPHEUS_TMP`, `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20) |
+| `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, crash, bank, seats and examples, the server's tests, and the Cesia client's when a Cesia with its native interface is here | `CEPHEUS_TMP` (a short path: a Unix socket's holds 107 bytes), `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `CESIA_NATIVE` (the folder of Cesia's `cesia_v1.cmi`; found from the `cesia` command when unset) |
 | `tools/tlc.sh` | TLC on `spec/Journal.tla`, `spec/Merge.tla` and `spec/Seats.tla`, and the naive sale (`spec/SeatsNaive.cfg`), which must break an invariant | `TLA2TOOLS`: the path of `tla2tools.jar` |
 
 **Deterministic simulation testing** runs the real engine on a simulated disk where one seed decides every event (the
@@ -190,6 +190,23 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   connection, one that trickles a byte at a time without a request, and one that stops in its TLS handshake are
   closed within twice the limit (the first two after `idle`); a client that pings more often stays; a client idle
   past the limit reads again, its library connecting again by itself.
+- Every server these tests start runs in a session of its own (`setsid`) with its output in a `serve.log` beside its
+  `cluster.toml`, and is stopped when its test ends, even when the test fails (`test/serve.ml`); the tests ignore
+  SIGPIPE, so that a write to a connection the server closed is an error, not the death of the test.
+
+### The Cesia client
+
+- `cesia test cesia/tests`, on both of Cesia's paths (`--no-spec` too): every function of the package on forks of
+  `cepheus.Empty`, with no server ([Cesia](cesia.md#tests)): types of values, joins, aggregates, ranges, many
+  values, `Expect`, new things of a group, `unique`, `Update`, the mistakes that are errors, a fork that never changes
+  its origin, `Close`.
+- `test/cesia.sh`: a project of its own holds the package in `deps/` as `cesia pkg` puts it (its engine, its
+  `cesia.lock`); a real server; then every example of [Cepheus from Cesia](cesia.md) runs, block by block with the
+  blocks before it, on a database of its own, and what it prints must be the text under it (`test/cesia-docs.ce`);
+  `test/cesia-live.ce` over TLS and through the Unix socket (200 writes by one connection each read at once by another,
+  local: G15 through the package; 100 and 200 fibers on one connection; a fork; `Close`), its output against
+  `test/cesia-live.expected`; and the server killed with `kill -9` and started again while 10 fibers write 1,500
+  invoices: every write answered `Ok`, each in the database once (G14 through the package).
 
 ### The server's C, fuzzed
 

@@ -68,6 +68,12 @@ let host_port what s =
     | Some p when p > 0 && p < 65536 && h <> "" -> h, p
     | _ -> bad "%s %S: host:port was expected" what s)
 
+(* the first address of a host for a TCP port *)
+let resolve host port =
+  match Unix.getaddrinfo host (string_of_int port) [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ] with
+  | ai :: _ -> ai.Unix.ai_addr
+  | [] -> failwith (Printf.sprintf "%s does not resolve" host)
+
 let default_domains () = max 1 (min 4 (Domain.recommended_domain_count () / 2))
 
 let of_toml file (doc : (string * Toml.value) list) =

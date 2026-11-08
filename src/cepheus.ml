@@ -43,10 +43,7 @@ let close = function Durable l -> Engine.stop l | Temporary _ -> ()
 let view = function Durable l -> Atomic.get l.e.published | Temporary f -> f.fv
 let group (v : view) = v.group
 let fork v = Temporary { fv = Store.fork v; fm = Mutex.create () }
-let empty =
-  match Resolve.resolve ~bootstrap:true (Store.empty ()) ~n:1 ~time:0 ~by:0 ~why:"cepheus: create" Engine.bootstrap_ops with
-  | Ok (v, _, _) -> v
-  | Error _ -> assert false
+let empty = Resolve.empty
 
 type op = Resolve.op = Add of int * int * value | Retract of int * int * value | Expect of int * int * value option
 type receipt = Engine.receipt = { group : int; things : (int * int) list }
@@ -72,39 +69,14 @@ let property (v : view) n = Schema.by_name v.schema n
 let describe (v : view) p = Schema.find v.schema p
 
 let rec declare db props =
-  let v = view db in
-  let next = ref Schema.first_prop in
-  let free () =
-    while Schema.find v.schema !next <> None || Store.has_value v !next Schema.p_name do incr next done;
-    let p = !next in
-    incr next;
-    p
-  in
-  let ops = ref [] and ids = ref [] in
-  let bad = ref None in
-  List.iter
-    (fun (d : prop) ->
-      match Schema.by_name v.schema d.name with
-      | Some p ->
-        let cur = Option.get (Schema.find v.schema p) in
-        if cur.typ <> d.typ || cur.many <> d.many || cur.unique <> d.unique then
-          bad := Some (Invalid (Printf.sprintf "%s is declared already as another kind of property" d.name));
-        ids := p :: !ids
-      | None ->
-        let p = free () in
-        ids := p :: !ids;
-        ops := Expect (p, Schema.p_name, None) :: !ops;
-        List.iter (fun (e, q, x) -> ops := Add (e, q, x) :: !ops) (Schema.facts p d))
-    props;
-  match !bad with
-  | Some e -> Error e
-  | None ->
-    if !ops = [] then Ok (List.rev !ids)
-    else (
-      match write db ~why:"cepheus: declare" (List.rev !ops) with
-      | Ok _ -> Ok (List.rev !ids)
-      | Error (Conflict _) -> declare db props (* another writer took the id meanwhile: read again *)
-      | Error e -> Error e)
+  match Resolve.declare (view db) props with
+  | Error m -> Error (Invalid m)
+  | Ok (ids, []) -> Ok ids
+  | Ok (ids, ops) -> (
+    match write db ~why:"cepheus: declare" ops with
+    | Ok _ -> Ok ids
+    | Error (Conflict _) -> declare db props (* another writer took the id meanwhile: read again *)
+    | Error e -> Error e)
 
 (* ---- rules ---- *)
 

@@ -1,0 +1,133 @@
+(* The package cepheus on forks of Empty: every function, its errors, and what a fork promises (G8), with no server. *)
+use cesia/cepheus
+use std/bug
+use std/list
+use std/result
+use std/value
+
+Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Email: cepheus.Text(unique = true), Tags: cepheus.Text(many = true)})
+Invoice = cepheus.Kind("invoice", {Client: cepheus.Link(), Total: cepheus.Money(2), Status: cepheus.Text(), Due: cepheus.Date(), Paid: cepheus.Bool(), Lines: cepheus.Int()})
+
+defn shop()
+  (** A fork with two clients and three invoices. *)
+  t = cepheus.Fork(cepheus.Empty, [Client, Invoice])?
+  ada = cepheus.Insert(Client, {Name: "Ada", City: "Lyon", Email: "ada@x.fr", Tags: ["vip", "early"]}, t)?
+  bo = cepheus.Insert(Client, {Name: "Bo", City: "Paris", Email: "bo@x.fr"}, t)?
+  cepheus.Insert(Invoice, {Client: ada, Total: 1200, Status: "unpaid", Due: 1794268800, Lines: 3}, t)?
+  cepheus.Insert(Invoice, {Client: ada, Total: 80.5, Status: "unpaid", Due: 1794355200.25, Lines: 1}, t)?
+  cepheus.Insert(Invoice, {Client: bo, Total: 10, Status: "paid", Paid: true, Lines: 1}, t)?
+  result.Ok({Db: t, Ada: ada, Bo: bo})
+end
+
+defn isGetGivesTheFields()
+  s = shop()?
+  value.Equal(cepheus.Get(Client, s.Ada, s.Db)?, {Name: "Ada", City: "Lyon", Email: "ada@x.fr", Tags: ["vip", "early"]})
+end
+
+defn isGetOfNothing()
+  s = shop()?
+  cepheus.Get(Client, 999, s.Db)? == missing
+end
+
+defn isTypesComeBack()
+  s = shop()?
+  rows = cepheus.Find(2, (i, due) -> {Where: [[i, Invoice.Due, due], [i, Invoice.Lines, 1]], Give: {Due: due}}, s.Db)?
+  inv = cepheus.Find(1, (i) -> {Where: [[i, Invoice.Paid, true]], Give: {I: i}}, s.Db)?[1].I
+  got = cepheus.Get(Invoice, inv, s.Db)?
+  bug.Assert(value.Equal(rows, [{Due: 1794355200.25}]), "a date keeps its milliseconds")
+  got.Total == 10.0 and got.Paid == true and got.Due == missing and got.Client == s.Bo
+end
+
+defn isFindJoins()
+  s = shop()?
+  rows = cepheus.Find(3, (c, i, total) -> {
+    Where: [[c, Client.City, "Lyon"], [i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]],
+    Give: {Total: total},
+  }, s.Db)?
+  value.Equal(list.Sort([r.Total for r in rows]), [80.5, 1200.0])
+end
+
+defn isFindAggregates()
+  s = shop()?
+  rows = cepheus.Find(4, (c, i, city, total) -> {
+    Where: [[i, Invoice.Client, c], [c, Client.City, city], [i, Invoice.Total, total]],
+    Give: {City: city, Unpaid: cepheus.Sum(total), Count: cepheus.Count(), Least: cepheus.Min(total), Most: cepheus.Max(total)},
+  }, s.Db)?
+  value.Equal(rows, [{City: "Lyon", Unpaid: 1280.5, Count: 2, Least: 80.5, Most: 1200.0}, {City: "Paris", Unpaid: 10.0, Count: 1, Least: 10.0, Most: 10.0}])
+end
+
+defn isFindRanges()
+  s = shop()?
+  above(v) = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t], cepheus.Above(t, v)], Give: {T: t}}, s.Db)?
+  between = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t], cepheus.Between(t, 10, 80.5)], Give: {T: t}}, s.Db)?
+  below = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t], cepheus.Below(t, 80.5)], Give: {T: t}}, s.Db)?
+  bug.Assert(value.Len(above(80.5)) == 1, "cepheus.Above is strict")
+  bug.Assert(value.Len(between) == 2, "cepheus.Between holds its bounds")
+  value.Equal(below, [{T: 10.0}])
+end
+
+defn isFindManyValues()
+  s = shop()?
+  value.Equal(cepheus.Find(1, (c) -> {Where: [[c, Client.Tags, "vip"]], Give: {C: c}}, s.Db)?, [{C: s.Ada}])
+end
+
+defn isWriteAllOrNothing()
+  s = shop()?
+  t = s.Db
+  inv = cepheus.Find(1, (i) -> {Where: [[i, Invoice.Total, 1200]], Give: {I: i}}, t)?[1].I
+  paid = cepheus.Write([cepheus.Expect(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Status, "paid")], t, by = 7, why = "pay")?
+  again = cepheus.Write([cepheus.Expect(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Status, "paid"), cepheus.Add(inv, Invoice.Lines, 9)], t)
+  bug.Assert(value.Len(paid.Things) == 0, "no new thing")
+  bug.Assert(again.Error.Code == "conflict", "the second payment is refused")
+  got = cepheus.Get(Invoice, inv, t)?
+  got.Status == "paid" and got.Lines == 3
+end
+
+defn isNewThingsOfAGroup()
+  s = shop()?
+  r = cepheus.Write([cepheus.Add(cepheus.New(1), Client.Name, "Cy"), cepheus.Add(cepheus.New(2), Invoice.Client, cepheus.New(1)), cepheus.Add(cepheus.New(2), Invoice.Total, 5)], s.Db)?
+  bug.Assert(value.Len(r.Things) == 2, "two new things")
+  cepheus.Get(Invoice, r.Things[2], s.Db)?.Client == r.Things[1]
+end
+
+defn isUniqueAndRetract()
+  s = shop()?
+  taken = cepheus.Insert(Client, {Name: "Eve", Email: "ada@x.fr"}, s.Db)
+  cepheus.Write([cepheus.Retract(s.Ada, Client.Email, "ada@x.fr")], s.Db)?
+  free = cepheus.Insert(Client, {Name: "Eve", Email: "ada@x.fr"}, s.Db)
+  taken.Error.Code == "unique" and result.IsOk(free)
+end
+
+defn isUpdate()
+  s = shop()?
+  cepheus.Update(Client, s.Bo, {City: "Lyon"}, s.Db)?
+  many = cepheus.Update(Client, s.Bo, {Tags: ["x"]}, s.Db)
+  cepheus.Get(Client, s.Bo, s.Db)?.City == "Lyon" and many.Error.Code == "invalid"
+end
+
+defn isMistakesAreErrors()
+  s = shop()?
+  wrongField = cepheus.Insert(Client, {Nme: "x"}, s.Db)
+  wrongType = cepheus.Insert(Client, {Name: 3}, s.Db)
+  undeclared = cepheus.Fork(cepheus.Empty)?
+  noKind = cepheus.Get(Client, 1, undeclared)
+  list.All([wrongField.Error.Code == "invalid", wrongType.Error.Code == "invalid", noKind.Error.Code == "invalid"])
+end
+
+defn isAForkNeverChangesItsOrigin()
+  s = shop()?
+  t = cepheus.Fork(s.Db)?
+  cepheus.Update(Client, s.Ada, {City: "Nice"}, t)?
+  cepheus.Get(Client, s.Ada, t)?.City == "Nice" and cepheus.Get(Client, s.Ada, s.Db)?.City == "Lyon"
+end
+
+defn isClosed()
+  s = shop()?
+  cepheus.Close(s.Db)
+  cepheus.Get(Client, s.Ada, s.Db).Error.Code == "closed"
+end
+
+defn isConnectNeedsAnAddress()
+  far = cepheus.Connect("cepheus://example.invalid:7400/shop", [Client])
+  far.Error.Code == "invalid"
+end

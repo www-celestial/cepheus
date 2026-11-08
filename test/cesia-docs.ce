@@ -1,0 +1,106 @@
+(** The examples of a chapter for Cesia programmers, run as they are written: block k of cesia runs with every block
+    before it, as one program, on a database of its own (so its numbers are the same at each run), and what it prints
+    after what the blocks before it printed must be the text block that follows it in the chapter.
+
+    cesia run --allow read,write,exec,env test/cesia-docs.ce CHAPTER BEFORE AFTER
+    runs each program in the current folder, a project that holds the package in deps/, with CEPHEUS_URL set to
+    BEFORE k AFTER (cepheus://localhost:PORT/doc then the number, then ?socket=DIR). *)
+use std/io
+use std/list
+use std/result
+use std/sys
+use std/text
+use std/value
+
+defn blocks(lines)
+  (** The cesia blocks of a chapter, each with the text block after it, or missing. *)
+  found = []
+  k = 1
+  n = value.Len(lines)
+  while k <= n
+    if lines[k] == "```cesia" or lines[k] == "```cesia test"
+      isTest = lines[k] == "```cesia test"
+      code = []
+      k += 1
+      while lines[k] != "```"
+        code = list.Append(lines[k], code)
+        k += 1
+      end
+      k += 1
+      while k <= n and lines[k] == ""
+        k += 1
+      end
+      out = missing
+      if k <= n and lines[k] == "```text"
+        out = []
+        k += 1
+        while lines[k] != "```"
+          out = list.Append(lines[k], out)
+          k += 1
+        end
+      end
+      found = list.Append({Code: code, Out: out, Test: isTest}, found)
+    end
+    k += 1
+  end
+  found
+end
+
+chapter = sys.Args[1]
+before = sys.Args[2]
+after = sys.Args[3]
+all = blocks(text.Lines(result.Unwrap(sys.Read(chapter))))
+code = []
+printed = ""
+failed = 0
+defn testBlock(k, b)
+  (** A test file of its own: cesia test runs it, and every test of it passes. *)
+  result.Unwrap(sys.Mkdir("src/test$k"))
+  result.Unwrap(sys.Write("src/test$k/example.test.ce", "$(text.Join("\n", b.Code))\n"))
+  run = result.Unwrap(sys.Run("sh", args = ["-c", "cesia test --allow native=cepheus src/test$k 2>&1"]))
+  lines = text.Lines(run.Out)
+  last = if value.Len(lines) > 0 lines[value.Len(lines)] else "" end
+  passed = text.EndsWith(" passed, 0 failed", last) and not text.StartsWith("0 passed", last)
+  if not passed
+    io.Print("the test of example $k of $chapter failed:")
+    io.Print(run.Out)
+  end
+  passed
+end
+
+for k in 1..value.Len(all)
+  b = all[k]
+  if b.Test
+    if not testBlock(k, b)
+      failed += 1
+    end
+  else
+    code = list.Concat(code, b.Code)
+    result.Unwrap(sys.Write("src/example.ce", "$(text.Join("\n", code))\n"))
+    url = "$before$k$after"
+    run = result.Unwrap(sys.Run("sh", args = ["-c", "CEPHEUS_URL='$url' cesia run --allow native=cepheus,env,read src/example.ce 2>&1"]))
+    if run.Code != 0
+      io.Print("example $k of $chapter stopped:")
+      io.Print(run.Out)
+      failed += 1
+    else if not text.StartsWith(printed, run.Out)
+      io.Print("example $k of $chapter: what the examples before it printed changed")
+      failed += 1
+    else
+      got = if value.Len(run.Out) == value.Len(printed) "" else text.Slice(value.Len(printed) + 1, value.Len(run.Out), run.Out) end
+      want = if value.IsMissing(b.Out) "" else "$(text.Join("\n", b.Out))\n" end
+      if got != want
+        io.Print("example $k of $chapter printed:")
+        io.Print(got)
+        io.Print("where the chapter says:")
+        io.Print(want)
+        failed += 1
+      end
+    end
+    printed = run.Out
+  end
+end
+io.Print("cesia examples: $(value.Len(all) - failed)/$(value.Len(all)) of $chapter")
+if failed > 0
+  sys.Exit(1)
+end

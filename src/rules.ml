@@ -52,6 +52,39 @@ let[@inline never] of_text name text =
     while !i < n && text.[!i] >= '0' && text.[!i] <= '9' do incr i done;
     match int_of_string_opt (String.sub text j (!i - j)) with Some k -> k | None -> fail ()
   in
+  (* a text as Printf's %S writes it (String.escaped between quotes), read without Scanf, which the Cesia client's
+     engine file cannot hold: a definition that is not exactly that fails here or at the canonical check *)
+  let literal () =
+    if peek () <> '"' then fail ();
+    incr i;
+    let b = Buffer.create 16 in
+    let digit k = if k < n && text.[k] >= '0' && text.[k] <= '9' then Char.code text.[k] - 48 else fail () in
+    let rec go () =
+      if !i >= n then fail ();
+      let c = text.[!i] in
+      incr i;
+      if c = '"' then Buffer.contents b
+      else if c <> '\\' then (Buffer.add_char b c; go ())
+      else begin
+        let e = peek () in
+        incr i;
+        (match e with
+         | '"' | '\\' -> Buffer.add_char b e
+         | 'n' -> Buffer.add_char b '\n'
+         | 't' -> Buffer.add_char b '\t'
+         | 'r' -> Buffer.add_char b '\r'
+         | 'b' -> Buffer.add_char b '\b'
+         | '0' .. '9' ->
+           let x = (100 * (Char.code e - 48)) + (10 * digit !i) + digit (!i + 1) in
+           if x > 255 then fail ();
+           Buffer.add_char b (Char.chr x);
+           i := !i + 2
+         | _ -> fail ());
+        go ()
+      end
+    in
+    go ()
+  in
   let value () =
     let c = peek () in
     incr i;
@@ -65,11 +98,7 @@ let[@inline never] of_text name text =
       let j = !i in
       while !i < n && text.[!i] <> ' ' && text.[!i] <> ']' && text.[!i] <> ';' do incr i done;
       (match float_of_string_opt (String.sub text j (!i - j)) with Some f -> Float f | None -> fail ())
-    | 't' -> (
-      (* an OCaml string literal: read with Scanf from here *)
-      match Scanf.sscanf (String.sub text !i (n - !i)) "%S%n" (fun s k -> s, k) with
-      | s, k -> i := !i + k; Text s
-      | exception _ -> fail ())
+    | 't' -> Text (literal ())
     | _ -> fail ()
   in
   let term () =

@@ -116,7 +116,18 @@ let () =
   C.check (values (view db) (thing r (-1)) ty = [ Link invoice ]) "the rule removed: nothing derived";
   ignore (ok (define db [ is_a ]));
   C.check (List.length (values (view db) (thing r (-1)) ty) = 3) "the rule defined again: derived over the database";
-  check_proofs (view db)
+  check_proofs (view db);
+  (* a rule's text reads back as it was written, for a text constant holding every byte; a text that is not
+     exactly what to_text writes is refused *)
+  let all = String.init 256 Char.chr in
+  let named = { is_a with where = [ { e = Var 0; p = ty; v = Var 1 }; { e = Var 1; p = parent; v = Val (Text all) } ]; vars = 2;
+                head = Give { e = Var 0; p = ty; v = Val (Text ("\"\\" ^ all)) } } in
+  C.check (Rules.of_text named.name (Rules.to_text named) = Ok named) "a text of every byte: read back as written";
+  List.iter
+    (fun bad -> C.check (Result.is_error (Rules.of_text "t" bad)) "refused: %S" bad)
+    [ "vars 2; where [?0 1 t\"a]; give never"; "vars 2; where [?0 1 t\"\\q\"]; give never";
+      "vars 2; where [?0 1 t\"\\256\"]; give never"; "vars 2; where [?0 1 t\"\\06\"]; give never";
+      "vars 2; where [?0 1 t\"\\x41\"]; give never" ]
 
 let () =
   section "rules: inverse properties support each other, and fall together (counting would keep them)";

@@ -1,0 +1,32 @@
+; The Cesia client's engine: this folder's modules with the libraries cepheus and cepheus_server, compiled against
+; Cesia's native interface alone (cesia_v1.cmi, in the folder CESIA_NATIVE: lib/native of a release of Cesia), in one
+; file that Cesia loads at the first call of the package. Only the modules the client reaches are linked: never Engine
+; (threads) or the server's. Stripped of its symbol table (the dynamic symbols stay): a fifth smaller, so its
+; fingerprint, checked at each first call, takes 0.7 ms less. tools/test.sh copies it to native/cepheus-TAG.cmxs; built
+; only when CESIA_NATIVE is set.
+
+(rule
+ (targets cepheus.cmxs conn.cmi conn.cmx conn.o binding.cmi binding.cmx binding.o)
+ (enabled_if
+  (<> %{env:CESIA_NATIVE=} ""))
+ (deps
+  conn.ml
+  binding.ml
+  %{env:CESIA_NATIVE=}/cesia_v1.cmi
+  ../../src/cepheus.cmxa
+  ../../src/cepheus.a
+  ../../src/libcepheus_stubs.a
+  ../../server/cepheus_server.cmxa
+  ../../server/cepheus_server.a
+  ../../server/libcepheus_server_stubs.a
+  (glob_files ../../src/.cepheus.objs/byte/*.cmi)
+  (glob_files ../../src/.cepheus.objs/native/*.cmx)
+  (glob_files ../../server/.cepheus_server.objs/byte/*.cmi)
+  (glob_files ../../server/.cepheus_server.objs/native/*.cmx))
+ (action
+  (progn
+  (run %{ocamlopt} -w +a-4-9-40-41-42-44-45-50-70 -inline 200 -I %{env:CESIA_NATIVE=} -I ../../src
+   -I ../../src/.cepheus.objs/byte -I ../../src/.cepheus.objs/native -I ../../server
+   -I ../../server/.cepheus_server.objs/byte -I ../../server/.cepheus_server.objs/native -I +unix -shared -o cepheus.cmxs
+   ../../src/cepheus.cmxa ../../server/cepheus_server.cmxa conn.ml binding.ml)
+  (run strip cepheus.cmxs))))

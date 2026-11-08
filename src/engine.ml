@@ -330,14 +330,6 @@ let snapshot t =
     | exception Disk.Io m -> Error (Io m)
     | exception Pages.Unreadable m -> Error (Damaged m))
 
-let bootstrap_ops =
-  List.concat_map
-    (fun p ->
-      match Schema.system.(p) with
-      | Some d -> List.map (fun (e, q, x) -> Resolve.Add (e, q, x)) (Schema.facts p d)
-      | None -> [])
-    [ 1; 2; 3; 4; 5 ]
-
 let random_id disk =
   (* 16 bytes from the kernel; on a simulated disk, from its clock (a test's databases differ by directory) *)
   try
@@ -441,7 +433,7 @@ let open_ ?(id_source = random_id) disk dir =
         if !v.group = 0 then begin
           (* a new database: the first group describes the system properties *)
           let n = 1 in
-          match Resolve.resolve ~bootstrap:true !v ~n ~time:(disk.now ()) ~by:0 ~why:"cepheus: create" bootstrap_ops with
+          match Resolve.resolve ~bootstrap:true !v ~n ~time:(disk.now ()) ~by:0 ~why:"cepheus: create" Resolve.bootstrap_ops with
           | Ok (v', g, _) ->
             let body = Buffer.create 256 in
             Group.encode body g;

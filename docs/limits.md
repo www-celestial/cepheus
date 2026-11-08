@@ -122,6 +122,8 @@ defaults, and the cache's size (`set_cache`).
 | a follow stream's frames | the writer's frame, in wire frames of at most 1 MiB of groups (the flag `more`) | `Net.piece` |
 | connections | `[clients] max_connections`, 1 to 65,536; default 512; over it a new connection is closed at its accept (`too_many_connections` over the Unix socket) | `Config.default_max_connections`, `Net.serve` |
 | an idle connection | `[clients] idle_timeout` seconds, 0 to 604,800 (0: no limit); default 600: a whole request within it from the accept (the TLS handshake included) and from the previous request, and what the server sends taken within it | `Config.default_idle_timeout`, `Net.timeouts` |
+| a client's handshake | 5 s for connect, TLS and Hello (and a follow stream's Follow and Start), then the socket waits as long as it must; past it the attempt is given up as broken and tried again within the retry budget | `Client.handshake_timeout` |
+| a client's retry budget | 30 s of tries to connect again after a broken connection; then `unreachable` (a write in flight was applied once or not at all) | `Client.retry_budget` |
 
 ## Measurement tools
 
