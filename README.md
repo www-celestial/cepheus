@@ -53,8 +53,11 @@ facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/ben
 | triangles, base of 245 MB read through a 32 MB cache, process capped at 128 MB | 102 s | **1.05 s** (32 MB of buffers) |
 | bulk load of 10 M facts | 135 to 153 s | **about 1 min** (`COPY`) |
 
-Where PostgreSQL wins, and why, and how Cepheus compares by design with SQLite, Oracle, Datomic, RocksDB, Neo4j,
-FoundationDB and CockroachDB: [comparison](docs/comparison.md).
+SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core: Cepheus is faster on an
+invoice by id (0.37 µs against 0.68) and on the unpaid sum per city (230 ms against 360), even on the city's unpaid
+invoices and the triangles, slower on a client by e-mail (1.67 µs against 1.52); SQLite loads the 10 M facts 12 times
+faster (8.6 s) into a file half the size (131 MB). Where each one wins, and why, and how Cepheus compares by design
+with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison](docs/comparison.md).
 
 ## Build and test
 

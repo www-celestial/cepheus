@@ -53,6 +53,24 @@ occur", [WAL configuration](https://www.postgresql.org/docs/18/wal-configuration
 query: `max_parallel_workers_per_gather` defaults to 2
 ([resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html)), hence "3 processes" above.
 
+## Measured: SQLite 3.54
+
+SQLite is a library in the application's process, as Cepheus is: the fairest engine-to-engine comparison. The same
+10 million facts and answers, SQLite set up as an expert would (`INTEGER PRIMARY KEY`, a `WITHOUT ROWID` table for the
+links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both on one core, two rounds alternated
+([benchmarks](benchmarks.md#sqlite-354-at-10-million-facts-2026-11-08)):
+
+| | Cepheus | SQLite | who wins, and why |
+|---|---:|---:|---|
+| Q1 an invoice by id | **0.36 to 0.38 µs** | 0.67 to 0.68 µs (about 0.45 µs without the loop that drives the lookups) | Cepheus: an array access by dense id, where SQLite descends its table's B-tree |
+| Q2 a client by e-mail | 1.66 to 1.67 µs | **1.52 µs** (about 1.22 µs without the driving loop), reading the whole row | **SQLite**: its B-tree reaches the e-mail in 3 or 4 pages; Cepheus binary-searches its sorted dictionary (about 18 steps), then the rows |
+| Q3 unpaid invoices of a city's clients | 4.17 to 4.19 ms | 4.13 to 4.19 ms | even |
+| Q4 unpaid sum per city | **230 ms** | 355 to 366 ms | Cepheus: Generic Join over sorted columns, where SQLite looks each unpaid invoice up by key and groups in a temporary B-tree |
+| Q5 triangles | **969 to 979 ms** | 1.04 s | Cepheus, slightly; on this uniform graph a nested loop is as good as a worst-case optimal join |
+| Q4 and Q5 on 3 cores | **107 ms, 371 ms** | one thread a statement | Cepheus |
+| load 10 M facts | 107 s | **8.6 s** | **SQLite**, 12 times: it writes B-tree pages once and builds each index by sorting |
+| size on disk | 245.8 MB base (+ a previous snapshot), 101 MB journal | **131 MB**, one file | **SQLite**: variable-length records, where Cepheus stores 8-byte words |
+
 ## By design
 
 | | data model | writes | isolation | storage | questions |
