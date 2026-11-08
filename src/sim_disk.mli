@@ -20,8 +20,25 @@ exception Crash
 val crash_after : t -> int -> unit
 (** [crash_after t n]: the [n+1]-th mutating call from now raises {!Crash} instead of running. *)
 
-val crash : t -> unit
-(** A power loss now: every open file is closed, every lock released, and the unsynced state resolved at random. *)
+type draw =
+  | Names of string  (** how many of a directory's name changes since its last sync survive (a prefix) *)
+  | Length of string  (** a grown file: its durable size (0), its current one (1), or a cut between (2, 3) *)
+  | Cut of string  (** where, for a cut *)
+  | Sector of string * int  (** a sector written since the last fsync: lost (0, 1), kept (2-4), torn (5) *)
+  | Tear of string * int  (** how many bytes of a torn sector *)
+(** The choices a power loss makes, each named by what it decides (a file by one of its paths at the crash). *)
+
+val crash : ?choose:(draw -> int -> int) -> t -> unit
+(** A power loss now: every open file is closed, every lock released, and the unsynced state resolved: at random, or
+    by [choose d n] (a number in [0, n)) for each choice [d], in a fixed order, so that a test can enumerate the
+    states a crash can leave. *)
+
+val kill : t -> unit
+(** The process dies, the machine stays up: files are closed and locks released, and what was written but not forced
+    stays as it is (in the page cache), readable now and still to be lost at a later {!crash}. *)
+
+val pending_names : t -> string -> int
+(** The name changes of a directory since its last [sync_dir]. *)
 
 val flip_durable : t -> string -> int -> int -> int option
 (** [flip_durable t path lo hi] flips one random bit of the durable content of [path] at an offset in [lo, hi) (cut to

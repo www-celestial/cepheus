@@ -173,52 +173,57 @@ let readdir t d =
   let l = Hashtbl.fold (fun p () acc -> if p <> d && in_dir d p then Filename.basename p :: acc else acc) t.dirs l in
   List.sort compare l
 
-let crash_inode t (n : inode) =
-  let r = t.rng in
+type draw = Names of string | Length of string | Cut of string | Sector of string * int | Tear of string * int
+
+let crash_inode pick path (n : inode) =
   let new_len =
     if n.cur_len = n.dur_len then n.dur_len
     else
-      match Rng.int r 4 with
+      match pick (Length path) 4 with
       | 0 -> n.dur_len
       | 1 -> n.cur_len
       | _ ->
         let lo = min n.dur_len n.cur_len and hi = max n.dur_len n.cur_len in
-        lo + Rng.int r (hi - lo + 1)
+        lo + pick (Cut path) (hi - lo + 1)
   in
   let b = Bytes.make new_len '\000' in
   Bytes.blit n.dur 0 b 0 (min n.dur_len new_len);
-  Hashtbl.iter
-    (fun s () ->
+  (* in sector order, so that the draws replay *)
+  let dirty = List.sort compare (Hashtbl.fold (fun s () acc -> s :: acc) n.dirty []) in
+  List.iter
+    (fun s ->
       let lo = s * sector in
       let hi = min new_len (lo + sector) in
       let cur_hi = min hi n.cur_len in
       if lo < hi then
-        match Rng.int r 6 with
+        match pick (Sector (path, s)) 6 with
         | 0 | 1 -> ()  (* the sector never reached the disk *)
         | 2 | 3 | 4 -> if lo < cur_hi then Bytes.blit n.cur lo b lo (cur_hi - lo)  (* it did *)
         | _ ->
           (* torn inside the sector: a prefix of the new bytes *)
           if lo < cur_hi then begin
-            let k = Rng.int r (cur_hi - lo + 1) in
+            let k = pick (Tear (path, s)) (cur_hi - lo + 1) in
             Bytes.blit n.cur lo b lo k
           end)
-    n.dirty;
+    dirty;
   n.cur <- b;
   n.cur_len <- new_len;
   n.dur <- Bytes.copy b;
   n.dur_len <- new_len;
   Hashtbl.reset n.dirty
 
-let crash t =
+let crash ?choose t =
+  let pick = match choose with Some c -> fun d n -> max 0 (min (n - 1) (c d n)) | None -> fun _ n -> Rng.int t.rng n in
   (* names: per directory, a random prefix of its changes since its last sync survives, in order *)
-  Hashtbl.iter
-    (fun _ ops ->
-      let ops = Array.of_list (List.rev ops) in
-      let k = Rng.int t.rng (Array.length ops + 1) in
+  let dirs = List.sort compare (Hashtbl.fold (fun d _ acc -> d :: acc) t.pending []) in
+  List.iter
+    (fun d ->
+      let ops = Array.of_list (List.rev (Hashtbl.find t.pending d)) in
+      let k = pick (Names d) (Array.length ops + 1) in
       for j = 0 to k - 1 do
         apply_durable t ops.(j)
       done)
-    t.pending;
+    dirs;
   Hashtbl.reset t.pending;
   (* a directory whose creation was lost takes its files with it *)
   let rec dir_ok d = d = "." || d = "/" || (Hashtbl.mem t.ddirs d && dir_ok (parent d)) in
@@ -230,13 +235,25 @@ let crash t =
   t.names <- Hashtbl.copy names;
   t.ddirs <- dirs;
   t.dirs <- Hashtbl.copy dirs;
-  (* contents, in a fixed order so that the draws replay *)
+  (* contents, in a fixed order so that the draws replay; a file is named by one of its current paths *)
   let ids = List.sort compare (Hashtbl.fold (fun i _ acc -> i :: acc) t.inodes []) in
-  List.iter (fun i -> crash_inode t (Hashtbl.find t.inodes i)) ids;
+  let path_of = Hashtbl.create 16 in
+  Hashtbl.iter (fun p i -> Hashtbl.replace path_of i p) t.names;
+  List.iter
+    (fun i -> crash_inode pick (Option.value (Hashtbl.find_opt path_of i) ~default:"") (Hashtbl.find t.inodes i))
+    ids;
   Hashtbl.reset t.fds;
   Hashtbl.reset t.locks;
   t.countdown <- -1;
   t.fail_fsync <- false
+
+let kill t =
+  Hashtbl.reset t.fds;
+  Hashtbl.reset t.locks;
+  t.countdown <- -1;
+  t.fail_fsync <- false
+
+let pending_names t d = List.length (Option.value (Hashtbl.find_opt t.pending d) ~default:[])
 
 let flip_durable t p lo hi =
   match Hashtbl.find_opt t.names p with

@@ -43,6 +43,8 @@ type t = {
   published : Store.view Atomic.t;  (* durable groups only (G5) *)
   mutable stopped : error option;  (* after a failed write or fsync: nothing more is confirmed (G10) *)
   mutable notes : string list;  (* what recovery found and did *)
+  at : Journal.position Atomic.t;  (* the journal's end after the last durable frame: where a merge's replay starts *)
+  mutable merged : int;  (* the group of the newest snapshot, the base's file *)
 }
 
 type batch = {
@@ -94,6 +96,7 @@ let commit t b =
   | None -> (
     match if b.count > 0 then (Journal.append t.journal b.body b.first b.count; Atomic.incr frames) with
     | () ->
+      if b.count > 0 then Atomic.set t.at (Journal.position t.journal);
       Atomic.set t.published b.after;
       b.results
     | exception Disk.Io m ->
@@ -101,22 +104,38 @@ let commit t b =
       t.stopped <- Some e;
       Array.map (function Ok _ -> Error e | r -> r) b.results)
 
-(* With nothing in flight (working = published). *)
-let compact t =
-  let v = Store.compact t.working in
-  Pages.drop t.working.base.pg;
+(* ---- Merges: the one way to make a base ----
+   A merge writes the view's base and delta into a new snapshot file (Snapshot.merge), which becomes the base. It may
+   start from a view that runs ahead of the disk (a background merge); its file takes its name only when its group
+   is durable, so that a snapshot never holds a group the journal could lose (G12). *)
+
+let sdir t = Filename.concat t.dir "snapshots"
+
+(* the merge of [v] into a file, not yet installed; [Atomic.get t.at] taken with [v]: its first group is <= v.group + 1 *)
+let merge_begin t (v : Store.view) pos = Snapshot.merge t.disk (sdir t) t.id v pos
+
+(* The switch, with nothing in flight: [w]'s file takes its name, and [v] (w's view with the groups written since)
+   becomes the working and the published view; the base it replaces leaves the cache. *)
+let install t (w : Snapshot.written) (v : Store.view) =
+  if t.stopped <> None || (Atomic.get t.published).group < w.group then invalid_arg "Engine.install: not durable";
+  Snapshot.install t.disk (sdir t) w;
+  t.merged <- w.group;
+  let old = t.working.base in
   t.working <- v;
-  Atomic.set t.published v
+  Atomic.set t.published v;
+  if v.base != old then Pages.drop old.pg
+
+(* A merge now, with nothing in flight (working = published). *)
+let compact t =
+  let w = merge_begin t t.working (Atomic.get t.at) in
+  match install t w w.view with () -> () | exception (Disk.Io _ as e) -> Snapshot.abandon t.disk w; raise e
 
 let snapshot t =
   match t.stopped with
   | Some e -> Error e
   | None -> (
-    (* a page of the base that cannot be read: no snapshot, an error, and the writer goes on *)
-    match
-      if t.working.delta.dn > 0 then compact t;
-      Snapshot.write t.disk (Filename.concat t.dir "snapshots") t.id t.working (Journal.position t.journal)
-    with
+    (* a page of the base that cannot be read, or a failed disk: no snapshot, an error, and the writer goes on *)
+    match if t.working.group > t.merged then compact t with
     | () -> Ok ()
     | exception Disk.Io m -> Error (Io m)
     | exception Pages.Unreadable m -> Error (Damaged m))
@@ -175,25 +194,41 @@ let open_ ?(id_source = random_id) disk dir =
           Disk.write_file disk meta (Buffer.to_bytes b)
         end;
         let id = read_meta disk dir in
+        (* the database's own names forced, as the journal's are at recovery: a killed process may have left them
+           in the page cache *)
+        disk.sync_dir dir;
         if not (disk.exists jdir) then (disk.mkdir jdir; disk.sync_dir dir);
         if not (disk.exists sdir) then (disk.mkdir sdir; disk.sync_dir dir);
+        Snapshot.clean disk sdir;
         let loaded, notes = Snapshot.load disk sdir id in
         let start, from = match loaded with Some (v, pos) -> v, Some pos | None -> Store.empty (), None in
-        let v = ref start in
+        let v = ref start and merged = ref start.group in
+        (* a long tail is merged as it is replayed, into files, as the writer would have: the newest segment is
+           forced before the replay (Journal.recover), so each group replayed is durable *)
+        let at = ref None in
+        let frame pos = at := Some pos in
         let replay (g : Group.t) =
           if g.n > !v.group then begin
             v := Resolve.replay !v g;
             if needs_compaction !v then begin
               let old = !v in
-              v := Store.compact old;
+              let w = Snapshot.merge disk sdir id old (Option.get !at) in
+              Snapshot.install disk sdir w;
+              v := w.view;
+              merged := w.group;
               Pages.drop old.base.pg
             end
           end
         in
-        let journal = Journal.recover disk jdir id from replay in
-        if !v.group < start.group then raise (Journal.Damaged "the journal ends before the snapshot");
+        let journal = Journal.recover ~frame disk jdir id from replay in
+        (* a snapshot is installed only once the journal holds its groups durably (G12): a journal that ends before
+           it lost durable frames (a damaged newest frame, which would otherwise be cut as torn) *)
+        if Journal.next_group journal <= start.group then
+          raise (Journal.Damaged (Printf.sprintf "the journal ends at group %d, before the snapshot of group %d"
+                                    (Journal.next_group journal - 1) start.group));
         let t =
-          { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes }
+          { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes;
+            at = Atomic.make (Journal.position journal); merged = !merged }
         in
         if !v.group = 0 then begin
           (* a new database: the first group describes the system properties *)
@@ -203,6 +238,7 @@ let open_ ?(id_source = random_id) disk dir =
             let body = Buffer.create 256 in
             Group.encode body g;
             Journal.append journal body 1 1;
+            Atomic.set t.at (Journal.position journal);
             t.working <- v';
             Atomic.set t.published v'
           | Error e -> failwith ("bootstrap: " ^ Resolve.error_message e)
@@ -215,8 +251,10 @@ let open_ ?(id_source = random_id) disk dir =
   | Disk.Io m -> Error (Io m)
   | Journal.Damaged m -> Error (Damaged m)
 
+(* the base's pages leave the cache: a view kept after the close reads them again from its file *)
 let close t =
   Journal.close t.journal;
+  Pages.drop t.working.base.pg;
   t.disk.unlock (Filename.concat t.dir "lock")
 
 (* ---- The threaded driver ---- *)
@@ -231,16 +269,18 @@ type req = {
 type control = Write of req | Snapshot of req | Stop
 
 (* ---- Merging in the background ----
-   The writer never stops for a compaction: another domain builds the new base from the working view of the moment,
-   then replays the groups written since (the writer keeps them in a log), until it is a few hundred behind; the
-   writer then waits for the syncer to be idle (at most one fsync), replays the rest, and switches both views to
-   the new base. Levels: the delta (level 0, persistent maps) is merged into the base (level 1); the on-disk levels
-   come with the segments on disk. *)
+   The writer never stops for a merge: another domain writes the new base's file from the working view of the
+   moment (Snapshot.merge), then replays the groups written since onto the new base (the writer keeps them in a
+   log), until it is a few hundred behind; the writer then waits for the syncer to be idle (at most one fsync), replays
+   the rest, installs the file (its group is durable now) and switches both views to the new base. Levels: the delta
+   (level 0, persistent maps) is merged into the base (level 1, the snapshot file). *)
+type ready = Done of Snapshot.written * Store.view * int | Failed
+
 type merger = {
   lm : Mutex.t;
   mutable log : Group.t list;  (* groups prepared since the merge started, newest first *)
   mutable logn : int;
-  ready : (Store.view * int) option Atomic.t;  (* the new lineage, and how many logged groups it holds *)
+  ready : ready option Atomic.t;  (* the file and the new lineage, and how many logged groups it holds *)
   mutable dom : unit Domain.t option;
 }
 
@@ -257,24 +297,28 @@ let after_applied m applied =
   Mutex.unlock m.lm;
   gs, k
 
-let start_merge (from : Store.view) =
+let start_merge t (from : Store.view) =
+  let pos = Atomic.get t.at in
   let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None } in
   m.dom <-
     Some
       (Domain.spawn (fun () ->
            try
-           let v = ref (Store.compact from) and applied = ref 0 in
-           let go = ref true in
-           while !go do
-             let gs, k = after_applied m !applied in
-             List.iter (fun g -> v := Resolve.replay !v g) gs;
-             applied := !applied + k;
-             if k < catch_up then begin
-               Atomic.set m.ready (Some (!v, !applied));
-               go := false
-             end
-           done
-           with e -> prerr_endline ("cepheus: background merge failed: " ^ Printexc.to_string e)));
+             let w = merge_begin t from pos in
+             let v = ref w.view and applied = ref 0 in
+             let go = ref true in
+             while !go do
+               let gs, k = after_applied m !applied in
+               List.iter (fun g -> v := Resolve.replay !v g) gs;
+               applied := !applied + k;
+               if k < catch_up then begin
+                 Atomic.set m.ready (Some (Done (w, !v, !applied)));
+                 go := false
+               end
+             done
+           with e ->
+             prerr_endline ("cepheus: background merge failed: " ^ Printexc.to_string e);
+             Atomic.set m.ready (Some Failed)));
   m
 
 type live = {
@@ -289,6 +333,7 @@ type live = {
   mutable domain : unit Domain.t option;
   mutable closed : bool;
   mutable merging : merger option;
+  mutable retry : int;  (* after a failed merge, the next waits until the delta has this many changes *)
 }
 
 let deliver r res =
@@ -330,19 +375,27 @@ let finish_merge l =
     Option.iter Domain.join m.dom;
     l.merging <- None;
     wait_idle l;
-    if l.e.stopped = None then begin
-      match Atomic.get m.ready with
-      | None -> ()
-      | Some (v, applied) ->
-        let gs, _ = after_applied m applied in
-        let v = List.fold_left Resolve.replay v gs in
-        !on_merge l.e.working v;
-        let old = l.e.working.base in
-        l.e.working <- v;
-        Atomic.set l.e.published v;
-        if v.base != old then Pages.drop old.pg;
-        Atomic.incr merges
-    end;
+    let failed () = l.retry <- l.e.working.delta.dn + max !compact_min (l.e.working.base.n / 16) in
+    (match Atomic.get m.ready with
+     | Some (Done (w, v, applied)) when l.e.stopped = None -> (
+       let gs, _ = after_applied m applied in
+       match
+         let v = List.fold_left Resolve.replay v gs in
+         !on_merge l.e.working v;
+         install l.e w v
+       with
+       | () -> l.retry <- 0; Atomic.incr merges
+       | exception Disk.Io msg ->
+         prerr_endline ("cepheus: a merge could not be installed: " ^ msg);
+         Snapshot.abandon l.e.disk w;
+         failed ()
+       | exception Pages.Unreadable msg ->
+         prerr_endline ("cepheus: a merge could not catch up: " ^ msg);
+         Snapshot.abandon l.e.disk w;
+         failed ())
+     | Some (Done (w, _, _)) -> Snapshot.abandon l.e.disk w
+     | Some Failed -> failed ()
+     | None -> ());
     Histogram.record switch_us (Journal.clock () - t0)
 
 let max_batch = 4096
@@ -396,7 +449,9 @@ let writer l () =
            m.logn <- m.logn + b.count;
            Mutex.unlock m.lm;
            if Atomic.get m.ready <> None then finish_merge l
-         | None -> if needs_compaction l.e.working && l.e.stopped = None then l.merging <- Some (start_merge l.e.working));
+         | None ->
+           if needs_compaction l.e.working && l.e.working.delta.dn > l.retry && l.e.stopped = None then
+             l.merging <- Some (start_merge l.e l.e.working));
         handle rest
       | Snapshot r :: rest ->
         finish_merge l;
@@ -419,7 +474,7 @@ let writer l () =
 let start e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
-      to_sync = None; syncing = false; domain = None; closed = false; merging = None }
+      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0 }
   in
   (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
   l.domain <- Some (Domain.spawn (fun () ->

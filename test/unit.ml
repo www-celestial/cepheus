@@ -152,7 +152,7 @@ let () =
     for _ = 1 to 30 do ignore (write f (random_ops r (view f) ())) done;
     if seed mod 3 = 0 then begin
       (* the same questions on a compacted base and on a base plus delta *)
-      let v = Store.compact { (view f) with writer = true } in
+      let v = C.compact (view f) in
       for _ = 1 to 10 do ignore (Store.facts v) done
     end;
     let v = view f in
@@ -179,7 +179,7 @@ let () =
     let f = fresh () in
     for _ = 1 to 40 do ignore (write f (random_ops r (view f) ())) done;
     let v = view f in
-    let c = Store.compact { v with writer = true } in
+    let c = C.compact v in
     C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view c)) "seed %d: compaction changed the facts" seed;
     (* and the compacted base answers the same questions *)
     let facts = C.facts_of_view c in
@@ -204,9 +204,10 @@ let () =
     disk.mkdir "/s";
     let f = fresh () in
     for _ = 1 to 30 do ignore (write f (random_ops r (view f) ())) done;
-    let v = Store.compact { (view f) with writer = true } in
-    let pos = { Journal.segment = 1; offset = 40; next = v.group + 1 } in
-    Snapshot.write disk "/s" "0123456789abcdef" v pos;
+    let pos = { Journal.segment = 1; offset = 40; next = (view f).group + 1 } in
+    let w = Snapshot.merge disk "/s" "0123456789abcdef" (view f) pos in
+    Snapshot.install disk "/s" w;
+    let v = w.view in
     (match Snapshot.load disk "/s" "0123456789abcdef" with
      | Some (v', _), [] ->
        C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view v')) "seed %d: snapshot round trip" seed;
@@ -250,9 +251,10 @@ let () =
       let ops = Add (-1, p "name", name) :: Add (-1, p "score", Int (Rng.int r 5)) :: Add (-1, p "tag", Text small.(k mod 3)) :: friend in
       made.(k) <- thing (Result.get_ok (write f ops)) (-1)
     done;
-    let v = Store.compact { (view f) with writer = true } in
+    let w = Snapshot.merge disk "/s" id (view f) { Journal.segment = 1; offset = 40; next = (view f).group + 1 } in
+    Snapshot.install disk "/s" w;
+    let v = w.view in
     let npages = Pages.count v.base.pg in
-    Snapshot.write disk "/s" id v { Journal.segment = 1; offset = 40; next = v.group + 1 };
     let file = "/s/" ^ Snapshot.name v.group in
     let m0 = Atomic.get Pages.misses in
     (match Snapshot.load disk "/s" id with
@@ -314,6 +316,46 @@ let () =
   done;
   Printf.printf "  12 flipped bits: %d refused at open, %d found at a read (%d questions failed, none answered wrong)\n"
     !at_open !at_read !failed_questions;
+  Pages.capacity := cap
+
+(* ---- a merge holds the cache and a few pages ---- *)
+
+let () =
+  section "a merge of a base 8 times the cache: a few pages open, never more resident than the cache, every fact kept";
+  let cap = !Pages.capacity in
+  let id = "0123456789abcdef" in
+  for seed = 1 to 4 do
+    Pages.set_capacity (16 * Pages.size);
+    let r = Rng.make (17000 + seed) in
+    let disk = Sim_disk.disk (Sim_disk.create (Rng.split r)) in
+    disk.mkdir "/s";
+    let f = fresh () in
+    let p n = Option.get (property (view f) n) in
+    for k = 0 to 23_999 do
+      ignore (write f [ Add (-1, p "name", Text (Printf.sprintf "n%d-%d" k (Rng.int r 100000))); Add (-1, p "score", Int (Rng.int r 50));
+                        Add (-1, p "tag", Text (string_of_int (k mod 7))) ])
+    done;
+    let pos v = { Journal.segment = 1; offset = 40; next = (v : view).group + 1 } in
+    let w1 = Snapshot.merge disk "/s" id (view f) (pos (view f)) in
+    Snapshot.install disk "/s" w1;
+    (* a delta on the paged base: changes, retractions, new things *)
+    let g = fork w1.view in
+    for _ = 1 to 200 do ignore (write g (random_ops r (view g) ())) done;
+    let v = view g in
+    Snapshot.open_max := 0;
+    let w2 = Snapshot.merge disk "/s" id v (pos v) in
+    Snapshot.install disk "/s" w2;
+    let np = Pages.count w2.view.base.pg in
+    C.check (np > 8 * !Pages.capacity) "seed %d: the base (%d pages) is not 8 times the cache" seed np;
+    C.check (!Snapshot.open_max <= 10) "seed %d: %d pages open at once in a merge" seed !Snapshot.open_max;
+    C.check (!Pages.resident <= !Pages.capacity) "seed %d: %d pages resident, the cache holds %d" seed !Pages.resident !Pages.capacity;
+    C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view w2.view)) "seed %d: the merge changed the facts" seed;
+    (* and the file reads back as it was written *)
+    match Snapshot.load disk "/s" id with
+    | Some (lv, _), [] -> C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view lv)) "seed %d: the merged file reads back" seed
+    | _ -> C.fail "seed %d: the merged file did not load" seed
+  done;
+  Printf.printf "  at most %d pages open in a merge\n" !Snapshot.open_max;
   Pages.capacity := cap
 
 (* ---- forks and databases on the real disk ---- *)
@@ -403,7 +445,7 @@ let within secs what f =
   done;
   C.check (!best < secs) "%s: %.3f s, the bound is %.2f s" what !best secs
 
-let compacted f = fork (Store.compact { (view f) with writer = true })
+let compacted f = fork (C.compact (view f))
 
 let () =
   section "costs: questions stay within the Generic Join bound, lookups within O(log n)";
@@ -501,7 +543,7 @@ let () =
   let t = thing (Result.get_ok (write o [ Add (-1, member, Int 0) ])) (-1) in
   ignore (Result.get_ok (write o (List.init 30_000 (fun k -> Add (t, member, Int (((k + 1) * 7919) mod 30_011))))));
   within 0.25 "compaction of a thing with 30,000 values out of order" (fun () ->
-      let c = Store.compact { (view o) with writer = true } in
+      let c = C.compact (view o) in
       if Store.count_values c t member <> 30_001 then C.fail "compacted count");
   ignore (city, client, status, total, member, score)
 

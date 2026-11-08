@@ -162,35 +162,52 @@ let record b k =
     incr traced
   end
 
+(* under the lock: room for one more page *)
+let room () =
+  while !resident >= !capacity && (small.n > 0 || main.n > 0) do make_room () done;
+  (* the bytes of evicted pages go back to the system only when a collection finds them: one full collection after
+     each quarter of the cache evicted keeps the pages in memory under 1.25 times the cache *)
+  if !evicted >= max 16 (!capacity / 4) then begin
+    evicted := 0;
+    Gc.full_major ()
+  end
+
+(* under the lock: page k of b, resident now, enters the policy's FIFOs with a count of 0 *)
+let enter b k f =
+  b.frames.(k) <- f;
+  Bytes.unsafe_set b.freq k '\000';
+  incr resident;
+  let e = { b; k } in
+  if Hashtbl.mem ghosts (key e) then Ring.push main e else Ring.push small e;
+  e
+
 let fill b k load =
   Mutex.lock lock;
   match
     if b.frames.(k) != absent then b.frames.(k)
     else begin
-      while !resident >= !capacity && (small.n > 0 || main.n > 0) do make_room () done;
-      (* the bytes of evicted pages go back to the system only when a collection finds them: one full collection
-         after each quarter of the cache evicted keeps the pages in memory under 1.25 times the cache *)
-      if !evicted >= max 16 (!capacity / 4) then begin
-        evicted := 0;
-        Gc.full_major ()
-      end;
+      room ();
       let f = load k in
       Atomic.incr misses;
-      b.frames.(k) <- f;
-      Bytes.unsafe_set b.freq k '\000';
-      incr resident;
-      let e = { b; k } in
+      let e = enter b k f in
       (* the page read before this one leaves the hot table: its next read will count *)
       let p = !fresh in
       if p.b.id >= 0 && freq p = 0 then p.b.hot.(p.k) <- absent;
       fresh := e;
       if not !tracing then b.hot.(k) <- f;
-      let g = key e in
-      if Hashtbl.mem ghosts g then Ring.push main e else Ring.push small e;
       f
     end
   with
   | f -> Mutex.unlock lock; f
+  | exception ex -> Mutex.unlock lock; raise ex
+
+(* A page a merge has just written (and checked by its CRC) enters the cache cold: in the small FIFO, not hot, so that
+   the policy keeps it only if it is read before the FIFO reaches it (a merge's output is a scan). Counted as resident
+   like every page: a merge holds no more than the cache. *)
+let admit b k f =
+  Mutex.lock lock;
+  match if b.frames.(k) == absent then (room (); ignore (enter b k f)) with
+  | () -> Mutex.unlock lock
   | exception ex -> Mutex.unlock lock; raise ex
 
 (* the slow path of a read of a page that is not hot: one read counted and the page hot again, or a miss *)
@@ -236,9 +253,6 @@ let[@inline] frame b o =
 external get64u : Bytes.t -> int -> int64 = "%caml_bytes_get64u"
 external get32u : Bytes.t -> int -> int32 = "%caml_bytes_get32u"
 external get16u : Bytes.t -> int -> int = "%caml_bytes_get16u"
-external set64u : Bytes.t -> int -> int64 -> unit = "%caml_bytes_set64u"
-external set32u : Bytes.t -> int -> int32 -> unit = "%caml_bytes_set32u"
-external set16u : Bytes.t -> int -> int -> unit = "%caml_bytes_set16u"
 
 (* reads of 2, 4 and 8 bytes are aligned to their size (every section starts at a multiple of 8), so none crosses a
    page *)
@@ -247,25 +261,19 @@ let[@inline] get32 b o = Int32.to_int (get32u (frame b o) (o land mask)) land 0x
 let[@inline] get16 b o = get16u (frame b o) (o land mask)
 let[@inline] get8 b o = Char.code (Bytes.unsafe_get (frame b o) (o land mask))
 
-(* ---- bases built in memory, every page resident, outside the cache ---- *)
+(* ---- the empty base, the one base built in memory (every page resident, outside the cache) ---- *)
 
 let create len =
   let n = pages len in
   let frames = Array.init n (fun _ -> Bytes.make size '\000') in
   { id = Atomic.fetch_and_add ids 1; frames; hot = Array.copy frames; freq = Bytes.make n '\003'; len; load = None }
 
-let set64 b o x = set64u b.frames.(o lsr bits) (o land mask) (Int64.of_int x)
-let set32 b o x = set32u b.frames.(o lsr bits) (o land mask) (Int32.of_int x)
-let set16 b o x = set16u b.frames.(o lsr bits) (o land mask) x
-let set8 b o c = Bytes.set b.frames.(o lsr bits) (o land mask) c
+(* ---- bases read from a file through the cache (every other base) ---- *)
 
-(* ---- bases read from a file through the cache ---- *)
-
-let on_file len load = let n = pages len in
-  { id = Atomic.fetch_and_add ids 1; frames = Array.make n absent; hot = Array.make n absent;
-    freq = Bytes.make n '\000';
+let on_file len load =
+  let n = pages len in
+  { id = Atomic.fetch_and_add ids 1; frames = Array.make n absent; hot = Array.make n absent; freq = Bytes.make n '\000';
     len; load = Some load }
-
 
 (* page k as it is (from the cache or the disk), for writing a base out *)
 let page b k = frame b (k lsl bits)

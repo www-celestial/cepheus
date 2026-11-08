@@ -33,6 +33,16 @@ let facts_of_view (v : Store.view) =
   done;
   !s
 
+(* A merge of a view (its base and delta) into a snapshot file of a simulated disk, the new base read through the
+   cache: what every compaction is *)
+let merge_disk = lazy (let d = Sim_disk.disk (Sim_disk.create (Rng.make 1)) in d.mkdir "/merge"; d)
+
+let compact (v : Store.view) =
+  let d = Lazy.force merge_disk in
+  let w = Snapshot.merge d "/merge" "0123456789abcdef" v { Journal.segment = 1; offset = 40; next = v.group + 1 } in
+  Snapshot.install d "/merge" w;
+  w.view
+
 let apply_group s (g : Group.t) =
   Array.fold_left (fun s (c : Group.change) -> if c.add then F.add (c.e, c.p, c.v) s else F.remove (c.e, c.p, c.v) s) s g.changes
 

@@ -1,12 +1,15 @@
 (* Deterministic simulation. One seed decides everything: the writes, the order of prepare and commit (the writer
-   runs one batch ahead of the disk, as the threaded writer does), snapshots, compactions, forks, power losses,
-   crashes in the middle of any disk call, failing fsyncs, and bits flipped in durable files. After every recovery
-   the state is compared with the reference model (the recorded groups applied to a set of facts). A failure prints
-   its seed; [sim.exe --seed N] replays it exactly.
+   runs one batch ahead of the disk, as the threaded writer does), snapshots, merges (written to a file now, or begun
+   from a view ahead of the disk and installed steps later, as the background merge does), forks, power losses,
+   process deaths that leave the page cache to a later power loss, crashes in the middle of any disk call (inside a
+   merge's stream of pages too), failing fsyncs, and bits flipped in durable files. After every recovery the state is
+   compared with the reference model (the recorded groups applied to a set of facts). A failure prints its seed;
+   [sim.exe --seed N] replays it exactly.
 
-   Checked: G1 durable, G2 all or nothing, G3 prefix, G5 published views are durable, G6 damage detected, G7
-   snapshots, G8 forks, G10 stop after a failed fsync, G11 questions (their answers, and their work within the Generic
-   Join bound, on views with a delta and after recoveries). *)
+   Checked: G1 durable, G2 all or nothing, G3 prefix, G5 published views are durable (a recovered state too: a later
+   power loss must keep it), G6 damage detected, G7 snapshots, G8 forks, G10 stop after a failed fsync, G11 questions
+   (their answers, and their work within the Generic Join bound, on views with a delta and after recoveries), G12 a
+   merge leaves the old base or the new one (no snapshot is ever set aside after a crash, no merge file is left). *)
 
 open Cepheus
 module C = Check
@@ -32,6 +35,8 @@ type w = {
   mutable flipped_journal : bool;
   mutable in_newest_frame : bool;  (* the flip hit the newest frame: the known residual (docs/guarantees.md, G6) *)
   mutable stopped : bool;  (* a failed fsync: the engine must refuse everything until restart *)
+  mutable merge : Snapshot.written option;  (* a merge begun, not installed *)
+  mutable flipped_snapshots : string list;  (* snapshots damaged on purpose: setting them aside is right *)
 }
 
 let stats = Hashtbl.create 16
@@ -118,12 +123,15 @@ let check_published w =
 
 let snapshot_files w = List.filter (fun f -> Filename.dirname f = sdir) (Sim_disk.files w.sim)
 
-let rec recover w =
+let rec recover ?(kill = false) w =
   count "recoveries";
   w.e <- None;
   w.pending <- None;
   w.stopped <- false;
-  Sim_disk.crash w.sim;
+  w.merge <- None;
+  (* a process death leaves what was written to the page cache, to be read by recovery and lost by a later power
+     loss; a power loss resolves it now *)
+  if kill then (count "process deaths"; Sim_disk.kill w.sim) else Sim_disk.crash w.sim;
   if Rng.chance w.r 0.15 then Sim_disk.crash_after w.sim (Rng.int w.r 12);
   match Engine.open_ ~id_source:(fun _ -> "0123456789abcdef") w.disk dir with
   | exception Sim_disk.Crash -> count "crash during recovery"; recover w
@@ -152,9 +160,16 @@ let rec recover w =
     if k >= 1 && not (Hashtbl.mem w.groups 1) then fail w "no record of group 1";
     Hashtbl.filter_map_inplace (fun n g -> if n <= k then Some g else None) w.groups;
     w.prepared <- k;
+    (* the recovered state is published: from now on it must survive any crash (G5) *)
+    w.acked <- k;
     w.e <- Some e;
     let got = C.facts_of_view e.working and want = model w k in
     if not (C.F.equal got want) then fail w "recovered state at %d differs from the model: %s" k (C.show_diff got want);
+    (* G12: a crash never leaves a merge's file, nor a snapshot that must be set aside *)
+    if List.exists (fun f -> Filename.check_suffix f ".tmp") (snapshot_files w) then fail w "a merge's file was left after recovery";
+    let expected n = List.exists (fun f -> String.length n > 34 && String.sub n 9 25 = f) w.flipped_snapshots in
+    if List.exists (fun n -> String.length n > 8 && String.sub n 0 8 = "snapshot" && not (expected n)) e.notes then
+      fail w "a snapshot was set aside after a crash: %s" (String.concat "; " e.notes);
     if w.flipped_journal then (count "damage before the snapshot, not needed"; raise Over)
 
 let record_batch w (b : Engine.batch) =
@@ -183,6 +198,31 @@ let commit_pending w =
         | Error _ -> count "refused")
       res
 
+(* The background merge, in steps: begun from the working view (which may hold a batch not yet durable), installed
+   later with nothing in flight, the groups written meanwhile replayed onto it; abandoned if the database stopped. *)
+let begin_merge w =
+  let e = engine w in
+  match Engine.merge_begin e e.working (Atomic.get e.at) with
+  | m -> w.merge <- Some m; count "merges begun ahead"
+  | exception Disk.Io _ -> count "failed merges"
+
+let finish_merge w =
+  match w.merge with
+  | None -> ()
+  | Some m ->
+    w.merge <- None;
+    commit_pending w;
+    let e = engine w in
+    if e.stopped <> None then Snapshot.abandon w.disk m
+    else begin
+      let v = ref m.view in
+      for n = m.group + 1 to e.working.group do v := Resolve.replay !v (Hashtbl.find w.groups n) done;
+      if not (C.F.equal (C.facts_of_view e.working) (C.facts_of_view !v)) then fail w "a merge changed the facts";
+      match Engine.install e m !v with
+      | () -> count "merges installed later"
+      | exception Disk.Io _ -> Snapshot.abandon w.disk m; count "failed merges"
+    end
+
 let step w =
   let e = engine w in
   match Rng.int w.r 100 with
@@ -195,13 +235,21 @@ let step w =
     end
     else commit_pending w
   | n when n < 60 -> commit_pending w
-  | n when n < 66 ->
+  | n when n < 64 ->
+    finish_merge w;
     commit_pending w;
     if not w.stopped then begin
-      match Engine.snapshot e with Ok () -> count "snapshots" | Error _ -> ()
+      match Engine.snapshot e with Ok () -> count "snapshots" | Error _ -> count "failed snapshots"
     end
-  | n when n < 70 -> commit_pending w; if not w.stopped then Engine.compact e
-  | n when n < 74 -> count "power losses"; recover w
+  | n when n < 67 ->
+    finish_merge w;
+    commit_pending w;
+    if not w.stopped then begin
+      match Engine.compact e with () -> count "merges" | exception Disk.Io _ -> count "failed merges"
+    end
+  | n when n < 70 -> if w.merge = None then (if not w.stopped then begin_merge w) else finish_merge w
+  | n when n < 72 -> count "power losses"; recover w
+  | n when n < 74 -> recover ~kill:true w
   | n when n < 77 -> Sim_disk.crash_after w.sim (Rng.int w.r 20)
   | n when n < 79 -> Sim_disk.fail_next_fsync w.sim
   | n when n < 81 ->
@@ -235,6 +283,7 @@ let step w =
     | fs ->
       let f = List.nth fs (Rng.int w.r (List.length fs)) in
       if Sim_disk.flip_durable w.sim f 0 (Sim_disk.durable_size w.sim f) <> None then count "snapshot flips";
+      w.flipped_snapshots <- Filename.basename f :: w.flipped_snapshots;
       recover w)
   | n when n < 90 ->
     (* forks: written to at will, they change nothing for the database or its files (G8) *)
@@ -255,7 +304,7 @@ let run seed steps =
   let sim = Sim_disk.create (Rng.split r) in
   let w =
     { seed; sim; disk = Sim_disk.disk sim; r; e = None; groups = Hashtbl.create 64; acked = 0; prepared = 0; pending = None;
-      flipped_journal = false; in_newest_frame = false; stopped = false }
+      flipped_journal = false; in_newest_frame = false; stopped = false; merge = None; flipped_snapshots = [] }
   in
   Journal.segment_limit := 600 + Rng.int r 4000;
   Engine.compact_min := 5 + Rng.int r 60;
@@ -267,7 +316,7 @@ let run seed steps =
    | Error m -> fail w "create: %s" (Engine.message m));
   (try
      for _ = 1 to steps do
-       try step w with Sim_disk.Crash -> count "crash points"; recover w
+       try step w with Sim_disk.Crash -> count "crash points"; recover ~kill:(Rng.chance w.r 0.3) w
      done;
      commit_pending w;
      if not w.stopped then check_published w;
@@ -281,6 +330,8 @@ let () =
     [ "--seeds", Arg.Set_int seeds, "N  run seeds 1..N"; "--seed", Arg.Int (fun s -> one := Some s), "S  run one seed";
       "--steps", Arg.Set_int steps, "N  steps a seed" ]
     (fun _ -> ()) "sim.exe [--seeds N | --seed S] [--steps N]";
+  (* a cache of 32 MB: pages come and go, and a crashed run's pages (and its simulated disk) do not stay *)
+  Pages.set_capacity (32 lsl 20);
   (match !one with Some s -> run s !steps | None -> for s = 1 to !seeds do run s !steps done);
   let l = List.sort compare (Hashtbl.fold (fun k v acc -> (k, v) :: acc) stats []) in
   Printf.printf "simulation: %s\n" (String.concat ", " (List.map (fun (k, v) -> Printf.sprintf "%d %s" v k) l));

@@ -103,7 +103,7 @@ type seg = {
 
 (* Read-only: checks the segments from [from] and calls [on_group] on each group. A torn tail is allowed only in the
    newest segment; a torn header only in a newest segment that holds nothing. *)
-let scan disk dir id from on_group =
+let scan ?(frame = fun _ -> ()) disk dir id from on_group =
   let all = segments disk dir in
   let segs = match from with None -> all | Some f -> List.filter (fun s -> s >= f.segment) all in
   (match from, segs with
@@ -135,6 +135,7 @@ let scan disk dir id from on_group =
              let len = u32 b (p + 4) in
              let f0 = Int64.to_int (Bytes.get_int64_le b (p + 8)) and count = u32 b (p + 16) in
              if f0 <> !expect then damaged "%s: frame at %d starts at group %d, expected %d" name p f0 !expect;
+             frame { segment = s; offset = p; next = f0 };
              let r = Codec.reader b (p + fh) len in
              (try
                 for _ = 1 to count do
@@ -158,8 +159,19 @@ let scan disk dir id from on_group =
   let found, torn_header = go [] segs in
   found, torn_header, !expect
 
-let recover disk dir id from on_group =
-  let found, torn_header, next = scan disk dir id from on_group in
+let recover ?frame disk dir id from on_group =
+  (* What a killed process wrote but did not force is forced first: a frame between its pwrite and its fsync, or a
+     new segment between its creation and the fsync of its directory, sits in the page cache, where recovery reads
+     it, but not on the disk, where a power loss would take it back. Forced now (the newest segment, then the names
+     of the directory), so that a published view, or a snapshot written while replaying, never rests on a frame that
+     is not durable (G5, G12). The older segments were forced whole before the next one began. *)
+  (match List.rev (segments disk dir) with
+   | s :: _ ->
+     let fd = disk.Disk.openf (path dir s) false in
+     Fun.protect ~finally:(fun () -> disk.close fd) (fun () -> disk.fsync fd);
+     disk.sync_dir dir
+   | [] -> ());
+  let found, torn_header, next = scan ?frame disk dir id from on_group in
   (match torn_header with
    | Some s ->
      disk.Disk.remove (path dir s);

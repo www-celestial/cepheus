@@ -11,8 +11,6 @@
    Every lookup is a binary search plus the answer, on the base and on the delta, and every count is exact: the
    delta keeps its net counts beside its maps. *)
 
-open Bigarray
-
 type base = {
   pg : Pages.t;
   hot : Bytes.t array;  (* pg's hot table, here so that a read is one load less *)
@@ -543,174 +541,55 @@ let apply v add e p w =
     let st = if add then (if inbase then None else Some true) else if inbase then Some false else None in
     change v e p w st
 
-(* ---- Building a base: compaction, bulk replay ---- *)
-
-type ia = (int, int_elt, c_layout) Array1.t
-
-let ia n : ia = Array1.create int c_layout (max n 1)
-
-(* Stable LSD radix sort of keys.(lo..hi) with vals, 11 bits a pass; falls back to a comparison sort on a huge span. *)
-let sort_pairs (keys : ia) (vals : ia) lo hi =
-  let n = hi - lo in
-  if n > 1 then begin
-    let mx = ref min_int and mn = ref max_int in
-    for i = lo to hi - 1 do
-      let k = Array1.unsafe_get keys i in
-      if k > !mx then mx := k;
-      if k < !mn then mn := k
-    done;
-    let span = !mx - !mn in
-    if span < 0 then begin
-      let a = Array.init n (fun i -> Array1.get keys (lo + i), Array1.get vals (lo + i)) in
-      Array.stable_sort compare a;
-      Array.iteri (fun i (k, x) -> Array1.set keys (lo + i) k; Array1.set vals (lo + i) x) a
-    end
-    else if span > 0 then begin
-      let base = !mn in
-      let sk = ref (Array.init n (fun i -> Array1.unsafe_get keys (lo + i))) in
-      let sv = ref (Array.init n (fun i -> Array1.unsafe_get vals (lo + i))) in
-      let dk = ref (Array.make n 0) and dv = ref (Array.make n 0) in
-      let count = Array.make 2049 0 in
-      let shift = ref 0 in
-      while span lsr !shift > 0 do
-        Array.fill count 0 2049 0;
-        let a = !sk and av = !sv and b = !dk and bv = !dv and sh = !shift in
-        for i = 0 to n - 1 do
-          let d = ((Array.unsafe_get a i - base) lsr sh) land 2047 in
-          Array.unsafe_set count (d + 1) (Array.unsafe_get count (d + 1) + 1)
-        done;
-        for d = 1 to 2048 do
-          Array.unsafe_set count d (Array.unsafe_get count d + Array.unsafe_get count (d - 1))
-        done;
-        for i = 0 to n - 1 do
-          let k = Array.unsafe_get a i in
-          let d = ((k - base) lsr sh) land 2047 in
-          let p = Array.unsafe_get count d in
-          Array.unsafe_set b p k;
-          Array.unsafe_set bv p (Array.unsafe_get av i);
-          Array.unsafe_set count d (p + 1)
-        done;
-        sk := b; sv := bv; dk := a; dv := av;
-        shift := sh + 11
-      done;
-      for i = 0 to n - 1 do
-        Array1.unsafe_set keys (lo + i) (Array.unsafe_get !sk i);
-        Array1.unsafe_set vals (lo + i) (Array.unsafe_get !sv i)
-      done
-    end
-  end
-
-(* The facts fe/fp/fw (n of them, sorted by thing) into a base; [texts] gives the ns texts of the dictionary. *)
-let build ~ne ~np ~ns ~(texts : int -> string) (fe : ia) (fp : ia) (fw : ia) n =
-  let sblob = ref 0 in
-  for i = 0 to ns - 1 do sblob := !sblob + String.length (texts i) done;
-  let b = layout ~n ~ne ~np ~ns ~sblob:!sblob () in
-  let pg = Pages.create (max 1 b.len) in
-  let b = { b with pg; hot = pg.Pages.hot } in
-  let set64 o x = Pages.set64 pg o x in
-  (* by thing: rows sorted by (p, w) inside each thing; they come sorted from [iter_facts], so the insertion sort
-     below only checks, in one pass *)
-  let cnt = ia (ne + 1) in
-  Array1.fill cnt 0;
-  for i = 0 to n - 1 do
-    let e = Array1.unsafe_get fe i in
-    Array1.unsafe_set cnt (e + 1) (Array1.unsafe_get cnt (e + 1) + 1)
-  done;
-  for e = 1 to ne do Array1.unsafe_set cnt e (Array1.unsafe_get cnt e + Array1.unsafe_get cnt (e - 1)) done;
-  for e = 0 to ne do set64 (b.o_eoff + (8 * e)) (Array1.unsafe_get cnt e) done;
-  let tp = ia n and tw = ia n in
-  for i = 0 to n - 1 do
-    Array1.unsafe_set tp i (Array1.unsafe_get fp i);
-    Array1.unsafe_set tw i (Array1.unsafe_get fw i)
-  done;
-  for e = 0 to ne - 1 do
-    let lo = Array1.unsafe_get cnt e and hi = Array1.unsafe_get cnt (e + 1) in
-    for i = lo + 1 to hi - 1 do
-      let p = Array1.unsafe_get tp i and w = Array1.unsafe_get tw i in
-      let j = ref (i - 1) in
-      while !j >= lo && (let p' = Array1.unsafe_get tp !j in p' > p || (p' = p && Array1.unsafe_get tw !j > w)) do
-        Array1.unsafe_set tp (!j + 1) (Array1.unsafe_get tp !j);
-        Array1.unsafe_set tw (!j + 1) (Array1.unsafe_get tw !j);
-        decr j
-      done;
-      Array1.unsafe_set tp (!j + 1) p;
-      Array1.unsafe_set tw (!j + 1) w
-    done
-  done;
-  for i = 0 to n - 1 do
-    Pages.set16 pg (b.o_eap + (2 * i)) (Array1.unsafe_get tp i);
-    set64 (b.o_eav + (8 * i)) (Array1.unsafe_get tw i)
-  done;
-  (* by property: rows (w, e) sorted by w then e *)
-  let pc = Array.make (np + 1) 0 in
-  for i = 0 to n - 1 do let p = Array1.unsafe_get tp i in pc.(p + 1) <- pc.(p + 1) + 1 done;
-  for p = 1 to np do pc.(p) <- pc.(p) + pc.(p - 1) done;
-  for p = 0 to np do set64 (b.o_poff + (8 * p)) pc.(p) done;
-  let cur = Array.sub pc 0 (max 1 np) in
-  let kw = ia n and ke = ia n in
-  for e = 0 to ne - 1 do
-    for i = Array1.unsafe_get cnt e to Array1.unsafe_get cnt (e + 1) - 1 do
-      let p = Array1.unsafe_get tp i in
-      let q = cur.(p) in
-      Array1.unsafe_set kw q (Array1.unsafe_get tw i);
-      Array1.unsafe_set ke q e;
-      cur.(p) <- q + 1
-    done
-  done;
-  for p = 0 to np - 1 do
-    let lo = pc.(p) and hi = pc.(p + 1) in
-    sort_pairs kw ke lo hi;
-    let d = ref 0 in
-    for i = lo to hi - 1 do
-      if i = lo || Array1.unsafe_get kw i <> Array1.unsafe_get kw (i - 1) then incr d;
-      set64 (b.o_avv + (8 * i)) (Array1.unsafe_get kw i);
-      Pages.set32 pg (b.o_ave + (4 * i)) (Array1.unsafe_get ke i)
-    done;
-    set64 (b.o_pdist + (8 * p)) !d
-  done;
-  (* the dictionary: texts by id, and the ids sorted by text *)
-  let p = ref 0 in
-  for i = 0 to ns - 1 do
-    set64 (b.o_soff + (8 * i)) !p;
-    let s = texts i in
-    String.iteri (fun k c -> Pages.set8 pg (b.o_sblob + !p + k) c) s;
-    p := !p + String.length s
-  done;
-  set64 (b.o_soff + (8 * ns)) !p;
-  let order = Array.init ns Fun.id in
-  Array.stable_sort (fun i j -> compare (texts i) (texts j)) order;
-  Array.iteri (fun k i -> Pages.set32 pg (b.o_ssort + (4 * k)) i) order;
-  b
-
-(* Facts of a view in thing order, as arrays. *)
-type grow = { mutable ge : ia; mutable gp : ia; mutable gw : ia; mutable gn : int }
-
-let grow () = { ge = ia 1024; gp = ia 1024; gw = ia 1024; gn = 0 }
-
-let push g e p w =
-  if g.gn = Array1.dim g.ge then begin
-    let cap = 2 * g.gn in
-    let cp a = let a' = ia cap in Array1.blit a (Array1.sub a' 0 g.gn); a' in
-    g.ge <- cp g.ge; g.gp <- cp g.gp; g.gw <- cp g.gw
-  end;
-  Array1.unsafe_set g.ge g.gn e;
-  Array1.unsafe_set g.gp g.gn p;
-  Array1.unsafe_set g.gw g.gn w;
-  g.gn <- g.gn + 1
+(* ---- What a merge reads: the view's facts in the orders of the base's sections ----
+   Each is a merge of two sorted runs, the base's rows and the delta's maps, so that a merge streams its output in
+   file order and holds nothing but the page it writes (O'Neil et al. 1996: a level merge is a merge of sorted runs). *)
 
 let max_thing v = max (v.next_e - 1) (v.base.ne - 1)
 
-(* Compaction: the visible facts of a view into a new base; a fresh writer lineage. *)
-let compact v =
-  let g = grow () in
-  for e = 0 to max_thing v do
-    iter_facts v e (fun p w -> push g e p w)
-  done;
-  let ns = v.dict.dnext in
-  let b =
-    build ~ne:(max_thing v + 1) ~np:(Schema.count v.schema) ~ns ~texts:(text v) g.ge g.gp g.gw g.gn
-  in
-  of_base ~schema:v.schema ~group:v.group ~next_e:v.next_e b
+(* every fact of p in (value, thing) order, as the by-property rows are sorted: the base rows and the delta merged *)
+let iter_prop_sorted v p f =
+  let b = v.base in
+  let i = ref (if p < b.np then cpoff b p else 0) and hi = if p < b.np then cpoff b (p + 1) else 0 in
+  (match IM.find_opt p v.delta.dav with
+   | None -> ()
+   | Some pd ->
+     IM.iter
+       (fun w vd ->
+         IM.iter
+           (fun e add ->
+             while !i < hi && (let w' = cavv b !i in w' < w || (w' = w && cave b !i < e)) do
+               f (cave b !i) (cavv b !i);
+               incr i
+             done;
+             (* a retraction names a row of the base, which is skipped; an addition is a fact the base lacks *)
+             if add then f e w else if !i < hi && cavv b !i = w && cave b !i = e then incr i)
+           vd.vm)
+       pd.pm);
+  while !i < hi do
+    f (cave b !i) (cavv b !i);
+    incr i
+  done
+
+let rec base_cmp b s i = match cmp_r b s i with r -> ended r | exception Miss k -> fault b k; base_cmp b s i
+
+(* the ids of every text, in text order: the base's sorted ids and the delta's sorted map merged (the delta's texts
+   are those interned since the base, none equal to a base text) *)
+let iter_texts_sorted v f =
+  let b = v.base in
+  let k = ref 0 in
+  SM.iter
+    (fun s id ->
+      while !k < b.ns && base_cmp b s (safe ssort b !k) > 0 do
+        f (safe ssort b !k);
+        incr k
+      done;
+      f id)
+    v.dict.smap;
+  while !k < b.ns do
+    f (safe ssort b !k);
+    incr k
+  done
 
 let fork v =
   { v with writer = false; ftouched = (if Bytes.length v.ftouched = 0 then Bytes.empty else Bytes.copy v.ftouched) }
