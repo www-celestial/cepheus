@@ -31,9 +31,10 @@ val segment_limit : int ref
 val create : Disk.t -> string -> string -> t
 (** [create disk dir id]: a new journal in [dir] (which exists), for the database [id]; the first group is 1. *)
 
-val recover : ?frame:(position -> unit) -> Disk.t -> string -> string -> position option -> (Group.t -> unit) -> t
-(** [recover disk dir id from on_group]: forces the newest segment (what a killed process wrote but did not force is
-    made durable before anything rests on it), reads the journal from [from] (the start without it), calls [frame] on
+val recover :
+  ?frame:(position -> unit) -> force:bool -> Disk.t -> string -> string -> position option -> (Group.t -> unit) -> t
+(** [recover ~force disk dir id from on_group]: with [force], forces the newest segment and the directory (what a
+    killed process wrote but did not force is made durable before anything rests on it), reads the journal from [from] (the start without it), calls [frame] on
     the position of each frame and [on_group] on each of its groups, in order, cuts a torn tail durably, and returns
     the journal ready to append. Raises {!Damaged}. *)
 

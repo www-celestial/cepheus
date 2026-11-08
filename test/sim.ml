@@ -123,21 +123,26 @@ let check_published w =
 
 let snapshot_files w = List.filter (fun f -> Filename.dirname f = sdir) (Sim_disk.files w.sim)
 
-let rec recover ?(kill = false) w =
+let rec recover ?(kill = false) ?(close = false) w =
   count "recoveries";
   w.e <- None;
   w.pending <- None;
   w.stopped <- false;
   w.merge <- None;
   (* a process death leaves what was written to the page cache, to be read by recovery and lost by a later power
-     loss; a power loss resolves it now *)
-  if kill then (count "process deaths"; Sim_disk.kill w.sim) else Sim_disk.crash w.sim;
+     loss; a power loss resolves it now; after a clean close, nothing happens to the disk *)
+  if close then ()
+  else if kill then (count "process deaths"; Sim_disk.kill w.sim)
+  else Sim_disk.crash w.sim;
   if Rng.chance w.r 0.15 then Sim_disk.crash_after w.sim (Rng.int w.r 12);
   match Engine.open_ ~id_source:(fun _ -> "0123456789abcdef") w.disk dir with
   | exception Sim_disk.Crash -> count "crash during recovery"; recover w
   | Error (Damaged m) ->
     if w.flipped_journal then (count "damage refused at open"; raise Over)
     else (fail w "recovery says damaged: %s" m; raise Over)
+  | Error (Io _) ->
+    (* an fsync failed at open (one planned before a clean close): the database refuses, and opens again (G10) *)
+    count "io error at open"; recover w
   | Error e -> fail w "recovery failed: %s" (Engine.message e); raise Over
   | Ok e ->
     Sim_disk.crash_after w.sim (-1);
@@ -202,7 +207,7 @@ let commit_pending w =
    later with nothing in flight, the groups written meanwhile replayed onto it; abandoned if the database stopped. *)
 let begin_merge w =
   let e = engine w in
-  match Engine.merge_begin e e.working (Atomic.get e.at) with
+  match Engine.merge_begin ~busy:(fun () -> true) e e.working (Atomic.get e.at) with
   | m -> w.merge <- Some m; count "merges begun ahead"
   | exception Disk.Io _ -> count "failed merges"
 
@@ -249,7 +254,16 @@ let step w =
     end
   | n when n < 70 -> if w.merge = None then (if not w.stopped then begin_merge w) else finish_merge w
   | n when n < 72 -> count "power losses"; recover w
-  | n when n < 74 -> recover ~kill:true w
+  | n when n < 73 -> recover ~kill:true w
+  | n when n < 74 ->
+    (* a clean close, then a reopen: the marker spares the open its fsyncs; later crashes must still find
+       everything (G5) *)
+    finish_merge w;
+    commit_pending w;
+    (* after a failed fsync too, as the operations guide says: close, reopen *)
+    Engine.close e;
+    count (if w.stopped then "closes after an io error" else "clean closes");
+    recover ~close:true w
   | n when n < 77 -> Sim_disk.crash_after w.sim (Rng.int w.r 20)
   | n when n < 79 -> Sim_disk.fail_next_fsync w.sim
   | n when n < 81 ->
@@ -332,6 +346,7 @@ let () =
     (fun _ -> ()) "sim.exe [--seeds N | --seed S] [--steps N]";
   (* a cache of 32 MB: pages come and go, and a crashed run's pages (and its simulated disk) do not stay *)
   Pages.set_capacity (32 lsl 20);
+  Snapshot.sync_every := 8 * Pages.size;
   (match !one with Some s -> run s !steps | None -> for s = 1 to !seeds do run s !steps done);
   let l = List.sort compare (Hashtbl.fold (fun k v acc -> (k, v) :: acc) stats []) in
   Printf.printf "simulation: %s\n" (String.concat ", " (List.map (fun (k, v) -> Printf.sprintf "%d %s" v k) l));

@@ -6,14 +6,16 @@
 
    A merge writes the file of the working view's group under a temporary name (in the page cache), forces it, renames
    it to its name only when its group is durable and nothing failed, forces the directory, and then removes the
-   snapshots beyond the newest Keep. Recovery forces the journal first (what a killed process wrote and did not force:
-   ForceAtRecovery), removes the temporary files, loads the newest snapshot, replays the journal after it.
+   snapshots beyond the newest Keep. A clean close leaves a marker (not forced) once everything is durable, and only
+   if no fsync failed (MarkerOnlyIfClean). Recovery removes the marker if it is there; if it is not, it forces the
+   journal first (what a killed process wrote and did not force: ForceAtRecovery); then it loads the newest snapshot
+   and replays the journal after it.
 
-   Checked by tools/tlc.sh (bounds in Merge.cfg). With ForceAtRecovery = FALSE, or InstallWhenDurable = FALSE, or
-   ForceBeforeRename = FALSE, TLC finds a counterexample: each of the three rules is needed. *)
+   Checked by tools/tlc.sh (bounds in Merge.cfg). With any one of ForceAtRecovery, InstallWhenDurable,
+   ForceBeforeRename, MarkerOnlyIfClean set to FALSE, TLC finds a counterexample: each of the four rules is needed. *)
 EXTENDS Naturals, Sequences, FiniteSets
 
-CONSTANTS MaxGroups, Keep, ForceAtRecovery, InstallWhenDurable, ForceBeforeRename
+CONSTANTS MaxGroups, Keep, ForceAtRecovery, InstallWhenDurable, ForceBeforeRename, MarkerOnlyIfClean
 
 VARIABLES
   work,       \* the working view's group (prepared, runs ahead of the journal)
@@ -31,9 +33,13 @@ VARIABLES
   pc,         \* where the install is: "idle", "renamed", "pruning"
   base,       \* the group of the snapshot the process reads (0: the empty base)
   setaside,   \* recovery met a snapshot name whose content is not whole (a mix): G12 is broken
-  refused     \* recovery found a snapshot newer than the journal: G12 is broken
+  refused,    \* recovery found a snapshot newer than the journal: G12 is broken
+  mk,         \* the clean-close marker, as a reader sees the directory
+  dmk         \* the marker as a power loss would leave it
 
-vars == <<work, jw, jd, acked, published, stopped, up, tmp, cont, names, dnames, pending, pc, base, setaside, refused>>
+markers == <<mk, dmk>>
+vars == <<work, jw, jd, acked, published, stopped, up, tmp, cont, names, dnames, pending, pc, base, setaside, refused,
+          mk, dmk>>
 
 Groups == 1..MaxGroups
 
@@ -46,28 +52,34 @@ Max(S) == IF S = {} THEN 0 ELSE CHOOSE g \in S : \A h \in S : h <= g
 
 Init == /\ work = 0 /\ jw = 0 /\ jd = 0 /\ acked = 0 /\ published = 0 /\ stopped = FALSE /\ up = TRUE
         /\ tmp = 0 /\ cont = [g \in Groups |-> "none"] /\ names = {} /\ dnames = {} /\ pending = << >>
-        /\ pc = "idle" /\ base = 0 /\ setaside = FALSE /\ refused = FALSE
+        /\ pc = "idle" /\ base = 0 /\ setaside = FALSE /\ refused = FALSE /\ mk = FALSE /\ dmk = FALSE
 
 Prepare == /\ up /\ ~stopped /\ work < MaxGroups /\ work' = work + 1
            /\ UNCHANGED <<jw, jd, acked, published, stopped, up, tmp, cont, names, dnames, pending, pc, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 (* a frame of every prepared group, written; forced by Sync *)
 WriteFrame == /\ up /\ ~stopped /\ jw = jd /\ jw < work /\ jw' = work
           /\ UNCHANGED <<work, jd, acked, published, stopped, up, tmp, cont, names, dnames, pending, pc, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 Sync == /\ up /\ ~stopped /\ jd < jw /\ jd' = jw /\ acked' = jw /\ published' = jw
         /\ UNCHANGED <<work, jw, stopped, up, tmp, cont, names, dnames, pending, pc, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 SyncFails == /\ up /\ ~stopped /\ jd < jw /\ stopped' = TRUE
              /\ UNCHANGED <<work, jw, jd, acked, published, up, tmp, cont, names, dnames, pending, pc, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 (* a merge from the working view, which may hold groups not yet durable; one file per group *)
 Begin == /\ up /\ tmp = 0 /\ pc = "idle" /\ work > base /\ work \notin names \cup dnames
          /\ tmp' = work /\ cont' = [cont EXCEPT ![work] = "cache"]
          /\ UNCHANGED <<work, jw, jd, acked, published, stopped, up, names, dnames, pending, pc, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 Force == /\ up /\ tmp /= 0 /\ cont[tmp] = "cache" /\ cont' = [cont EXCEPT ![tmp] = "durable"]
          /\ UNCHANGED <<work, jw, jd, acked, published, stopped, up, tmp, names, dnames, pending, pc, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 (* the install: with nothing in flight and nothing failed, so that the merge's group is durable *)
 Rename == /\ up /\ tmp /= 0 /\ pc = "idle"
@@ -76,10 +88,12 @@ Rename == /\ up /\ tmp /= 0 /\ pc = "idle"
           /\ names' = names \cup {tmp} /\ pending' = Append(pending, <<"link", {tmp}>>)
           /\ base' = tmp /\ tmp' = 0 /\ pc' = "renamed"
           /\ UNCHANGED <<work, jw, jd, acked, published, stopped, up, cont, dnames, setaside, refused>>
+           /\ UNCHANGED markers
 
 (* the database stopped: the merge is abandoned (its file removed) *)
 Abandon == /\ up /\ tmp /= 0 /\ stopped /\ tmp' = 0
            /\ UNCHANGED <<work, jw, jd, acked, published, stopped, up, cont, names, dnames, pending, pc, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 (* the directory forced; after the rename, the snapshots beyond the newest Keep are removed (their removal made
    durable by the next fsync of the directory): only once the new name is durable *)
@@ -90,22 +104,34 @@ SyncDir == /\ up /\ pc \in {"renamed", "pruning"}
               THEN /\ names' = names \ old /\ pending' = <<<<"unlink", old>>>> /\ pc' = "pruning"
               ELSE /\ names' = names /\ pending' = << >> /\ pc' = "idle"
            /\ UNCHANGED <<work, jw, jd, acked, published, stopped, up, tmp, cont, base, setaside, refused>>
+           /\ UNCHANGED markers
 
 (* F1: the process dies; written bytes and name changes stay in the page cache *)
 Kill == /\ up /\ up' = FALSE /\ tmp' = 0 /\ pc' = "idle"
         /\ UNCHANGED <<work, jw, jd, acked, published, stopped, cont, names, dnames, pending, base, setaside, refused>>
+           /\ UNCHANGED markers
 
-(* F2: a power loss; frames written and not forced may or may not reach the disk; a prefix of the name changes *)
-PowerLoss == /\ \E kept \in jd..jw, k \in 0..Len(pending) :
+(* a close, once the syncer is idle and no merge is under way: every frame written is forced, unless an fsync failed
+   (stopped: its frame stays unforced); the marker only then if not MarkerOnlyIfClean; its creation is not forced *)
+Close == /\ up /\ (jd = jw \/ stopped) /\ tmp = 0 /\ pc = "idle"
+         /\ mk' = (~stopped \/ ~MarkerOnlyIfClean) /\ up' = FALSE
+         /\ UNCHANGED <<work, jw, jd, acked, published, stopped, tmp, cont, names, dnames, pending, pc, base, setaside, refused, dmk>>
+
+(* F2: a power loss; frames written and not forced may or may not reach the disk; a prefix of the name changes; the
+   marker's last change kept or not *)
+PowerLoss == /\ \E m \in {mk, dmk} : mk' = m /\ dmk' = m
+             /\ \E kept \in jd..jw, k \in 0..Len(pending) :
                   /\ jw' = kept /\ jd' = kept
                   /\ dnames' = Apply(dnames, SubSeq(pending, 1, k)) /\ names' = Apply(dnames, SubSeq(pending, 1, k))
              /\ cont' = [g \in Groups |-> IF cont[g] = "cache" THEN "garbage" ELSE cont[g]]
              /\ pending' = << >> /\ up' = FALSE /\ tmp' = 0 /\ pc' = "idle"
              /\ UNCHANGED <<work, acked, published, stopped, base, setaside, refused>>
 
-(* recovery: the journal forced, the newest snapshot loaded, the journal replayed after it *)
+(* recovery: the marker removed if there (its removal not forced), else the journal forced; the newest snapshot
+   loaded, the journal replayed after it *)
 Recover == /\ ~up
-           /\ LET jd2 == IF ForceAtRecovery THEN jw ELSE jd
+           /\ mk' = FALSE /\ UNCHANGED dmk
+           /\ LET jd2 == IF ForceAtRecovery /\ ~mk THEN jw ELSE jd
                   s == Max(names)
               IN /\ jd' = jd2
                  /\ setaside' = (setaside \/ (s /= 0 /\ cont[s] /= "durable"))
@@ -115,7 +141,7 @@ Recover == /\ ~up
            /\ UNCHANGED <<jw, acked, cont, names, dnames, pending>>
 
 Next == Prepare \/ WriteFrame \/ Sync \/ SyncFails \/ Begin \/ Force \/ Rename \/ Abandon \/ SyncDir
-        \/ Kill \/ PowerLoss \/ Recover
+        \/ Kill \/ Close \/ PowerLoss \/ Recover
 
 Spec == Init /\ [][Next]_vars
 

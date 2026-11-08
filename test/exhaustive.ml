@@ -51,7 +51,7 @@ let recover_bytes b =
   disk.fsync fd;
   disk.sync_dir "/j";
   let got = ref [] in
-  match Journal.recover disk "/j" id None (fun g -> got := g.n :: !got) with
+  match Journal.recover ~force:true disk "/j" id None (fun g -> got := g.n :: !got) with
   | j -> Journal.close j; Ok (List.length !got), disk
   | exception Journal.Damaged m -> Error m, disk
 
@@ -154,7 +154,7 @@ let torn_segment () =
     put "/j/00000000000000000005.seg" (Bytes.sub seg2 0 k);
     disk.sync_dir "/j";
     let n = ref 0 in
-    match Journal.recover disk "/j" id None (fun _ -> incr n) with
+    match Journal.recover ~force:true disk "/j" id None (fun _ -> incr n) with
     | j ->
       C.check (!n = 4 && Journal.next_group j = 5) "torn segment header at %d: %d groups" k !n;
       Journal.close j
@@ -222,7 +222,7 @@ let variants =
       run =
         (fun r ->
           let b1 = prepare r (ops_for r.e.working 20) in
-          let m = Engine.merge_begin r.e r.e.working (Atomic.get r.e.at) in
+          let m = Engine.merge_begin ~busy:(fun () -> true) r.e r.e.working (Atomic.get r.e.at) in
           commit r b1;
           let b2 = prepare r (ops_for r.e.working 21) in
           commit r b2;
@@ -322,6 +322,8 @@ let enumerate_merge (v : variant) =
 let () =
   (* a small cache: the pages of a crashed run (and through them its simulated disk) stay only until evicted *)
   Pages.set_capacity (8 lsl 20);
+  (* a merge forces its file every 4 pages: crash points between those fsyncs too *)
+  Snapshot.sync_every := 4 * Pages.size;
   List.iter enumerate_merge variants;
   Printf.printf "exhaustive merges: %d crash points, %d crash states recovered\n" !merge_points !merge_states
 

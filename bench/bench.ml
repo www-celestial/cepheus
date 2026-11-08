@@ -10,6 +10,9 @@
                                        durable writes of a new invoice (4 facts) with CLIENTS threads: as fast as
                                        they go (closed loop), or RATE groups a second in all (open loop: a write's
                                        latency counts from the time it was due, so a stall is never hidden)
+     bench.exe merge DIR GROUPS        GROUPS new invoices with no merge in the background, then one merge of the
+                                       whole base and the delta into a new file (snapshot): its time and the peak
+                                       resident memory of the merge alone; CACHE_MB sets the cache
      bench.exe fsync DIR SECS MODE     a frame and its fsync in a loop: MODE append grows the file, overwrite writes
                                        into a file filled with zeros beforehand
      bench.exe trace DIR FACTS OUT LAW MIX
@@ -108,7 +111,11 @@ let load dir csv facts =
   let v = view db in
   Printf.printf "cepheus load: %d clients, %d facts, %.1f s through the writer (%.0f facts/s), snapshot %.2f s, peak RSS %d MB\n%!"
     nclients (Store.facts v) (t1 -. t0) (float (Store.facts v) /. (t1 -. t0)) (t2 -. t1) (peak () / 1024);
+  Printf.printf "  %d merges in the background\n" (Atomic.get Engine.merges);
+  Stats.print_latency "  writer waits for a merge switch" Engine.switch_us;
+  Stats.print_latency "  journal fsync" Journal.fsync_us;
   close db;
+  if Sys.getenv_opt "NOCSV" <> None then exit 0;
   (* the same data for PostgreSQL *)
   let oc n = open_out (Filename.concat csv n) in
   let cl = oc "client.csv" and iv = oc "invoice.csv" and fo = oc "follows.csv" in
@@ -174,7 +181,9 @@ let questions v s nclients =
         Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0, Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0);
     q5 = (fun () -> count q5) }
 
-let cache_from_env () = match Sys.getenv_opt "CACHE_MB" with Some m -> set_cache (int_of_string m * 1024 * 1024) | None -> ()
+let cache_from_env () =
+  (match Sys.getenv_opt "CACHE_MB" with Some m -> set_cache (int_of_string m * 1024 * 1024) | None -> ());
+  match Sys.getenv_opt "SYNC_MB" with Some m -> Snapshot.sync_every := int_of_string m lsl 20 | None -> ()
 
 let read dir facts only =
   let asked q = match only with None -> true | Some l -> List.mem q (String.split_on_char ',' l) in
@@ -265,6 +274,7 @@ let cachesim file =
 (* ---- durable writes ---- *)
 
 let write_bench dir clients secs rate =
+  cache_from_env ();
   let db = ok (open_ dir) in
   let s = schema_of (view db) in
   let v = view db in
@@ -306,7 +316,36 @@ let write_bench dir clients secs rate =
   Stats.print_latency "  journal fsync" Journal.fsync_us;
   Stats.print_latency "  writer resolves a batch" Engine.prepare_us;
   Stats.print_latency "  writer waits for a merge switch" Engine.switch_us;
+  Stats.print_latency "  a background merge" Engine.merge_us;
   Printf.printf "  peak RSS %d MB\n%!" (peak () / 1024)
+
+(* One merge, timed: GROUPS new invoices (4 facts each) written through the writer by 64 clients, with no merge in
+   the background, then [snapshot], which merges the delta into a new base and its file. The peak resident memory
+   of the merge alone: the process's peak is reset (/proc/self/clear_refs, 5) just before it. *)
+let merge_bench dir groups =
+  cache_from_env ();
+  Engine.compact_min := max_int;
+  let t0 = now () in
+  let db = ok (open_ dir) in
+  let t1 = now () in
+  let s = schema_of (view db) in
+  let some_client = match things (view db) s.mail (Text (email 0)) with [ e ] -> e | _ -> failwith "no client 0" in
+  parallel groups (fun k ->
+      ignore (ok (write db ~by:1 ~why:"invoice"
+                    [ Add (-1, s.client, Link some_client); Add (-1, s.total, Money (1 + (k mod 100_000))); Add (-1, s.status, Text "unpaid");
+                      Add (-1, s.date, Date (k mod 3650)) ])));
+  let t2 = now () in
+  let before = rss () in
+  Printf.printf "merge: %d groups written in %.1f s, RSS %d MB; merging\n%!" groups (t2 -. t1) (before / 1024);
+  let oc = open_out "/proc/self/clear_refs" in
+  output_string oc "5";
+  close_out oc;
+  let t3 = now () in
+  ok (snapshot db);
+  let t4 = now () in
+  Printf.printf "merge: %d facts, open %.2f s, %d groups written in %.1f s, merge of the delta %.2f s, RSS before %d MB, peak during the merge %d MB, after %d MB\n%!"
+    (Store.facts (view db)) (t1 -. t0) groups (t2 -. t1) (t4 -. t3) (before / 1024) (peak () / 1024) (rss () / 1024);
+  close db
 
 (* the file system alone: a frame of 9,000 bytes (a frame of 125 groups) and its fsync, appended or overwriting zeros
    written and forced beforehand *)
@@ -377,8 +416,9 @@ let () =
   | [| _; "write"; dir; clients; secs |] -> write_bench dir (int_of_string clients) (float_of_string secs) 0.
   | [| _; "write"; dir; clients; secs; rate |] -> write_bench dir (int_of_string clients) (float_of_string secs) (float_of_string rate)
   | [| _; "fsync"; dir; secs; mode |] -> fsync_bench dir (float_of_string secs) mode
+  | [| _; "merge"; dir; groups |] -> merge_bench dir (int_of_string groups)
   | [| _; "trace"; dir; facts; out; law; mix |] -> trace dir (int_of_string facts) out law mix
   | [| _; "cachesim"; file |] -> cachesim file
   | [| _; "stats"; name |] -> stats name false
   | [| _; "stats"; name; "us" |] -> stats name true
-  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | fsync DIR SECS MODE | stats NAME [us] | trace DIR FACTS OUT uniform|zipf day|points|scan | cachesim TRACE | cpu DIR N"; exit 2
+  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | merge DIR GROUPS | fsync DIR SECS MODE | stats NAME [us] | trace DIR FACTS OUT uniform|zipf day|points|scan | cachesim TRACE | cpu DIR N"; exit 2

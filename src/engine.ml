@@ -57,11 +57,13 @@ type batch = {
 }
 
 let compact_min = ref 200_000
-let frames = Atomic.make 0 (* frames written by this process: for the benchmarks *)
+let frames = Atomic.make 0 (* frames written by this process: for the benchmarks, and a merge's fsyncs *)
 
-(* for the benchmarks, in microseconds: the writer's resolution of a batch, its wait at a merge switch *)
+(* for the benchmarks, in microseconds: the writer's resolution of a batch, its wait at a merge switch, a background
+   merge from its start to its catch-up *)
 let prepare_us = Histogram.create ()
 let switch_us = Histogram.create ()
+let merge_us = Histogram.create ()
 
 let needs_compaction (v : Store.view) = v.delta.dn > max !compact_min (v.base.n / 16)
 
@@ -111,8 +113,18 @@ let commit t b =
 
 let sdir t = Filename.concat t.dir "snapshots"
 
-(* the merge of [v] into a file, not yet installed; [Atomic.get t.at] taken with [v]: its first group is <= v.group + 1 *)
-let merge_begin t (v : Store.view) pos = Snapshot.merge t.disk (sdir t) t.id v pos
+(* the merge of [v] into a file, not yet installed; [Atomic.get t.at] taken with [v]: its first group is <= v.group + 1;
+   [busy]: clients may be writing beside it (a background merge) *)
+let merge_begin ?busy t (v : Store.view) pos = Snapshot.merge ?busy t.disk (sdir t) t.id v pos
+
+(* a frame was written since the last call: the journal is busy, its fsyncs are waited for *)
+let journal_busy () =
+  let last = ref (Atomic.get frames) in
+  fun () ->
+    let f = Atomic.get frames in
+    let b = f <> !last in
+    last := f;
+    b
 
 (* The switch, with nothing in flight: [w]'s file takes its name, and [v] (w's view with the groups written since)
    becomes the working and the published view; the base it replaces leaves the cache. *)
@@ -194,9 +206,16 @@ let open_ ?(id_source = random_id) disk dir =
           Disk.write_file disk meta (Buffer.to_bytes b)
         end;
         let id = read_meta disk dir in
-        (* the database's own names forced, as the journal's are at recovery: a killed process may have left them
-           in the page cache *)
-        disk.sync_dir dir;
+        (* After a crash, what the dead process wrote and did not force may sit in the page cache: the database's
+           names, the journal's newest frames and names. They are forced before anything rests on them (G5, G12),
+           unless the last process closed cleanly: [close] leaves a marker once everything is durable, and an open
+           removes it before it writes anything, so a marker seen means that no process wrote since a clean close,
+           or that a power loss came after, which leaves nothing in the page cache (PostgreSQL keeps the same state in
+           pg_control: shut down, or in production). The marker's own changes need no fsync: lost, they only make
+           the next open force. *)
+        let marker = Filename.concat dir "closed" in
+        let clean = disk.exists marker in
+        if clean then disk.remove marker else disk.sync_dir dir;
         if not (disk.exists jdir) then (disk.mkdir jdir; disk.sync_dir dir);
         if not (disk.exists sdir) then (disk.mkdir sdir; disk.sync_dir dir);
         Snapshot.clean disk sdir;
@@ -220,7 +239,7 @@ let open_ ?(id_source = random_id) disk dir =
             end
           end
         in
-        let journal = Journal.recover ~frame disk jdir id from replay in
+        let journal = Journal.recover ~frame ~force:(not clean) disk jdir id from replay in
         (* a snapshot is installed only once the journal holds its groups durably (G12): a journal that ends before
            it lost durable frames (a damaged newest frame, which would otherwise be cut as torn) *)
         if Journal.next_group journal <= start.group then
@@ -251,9 +270,12 @@ let open_ ?(id_source = random_id) disk dir =
   | Disk.Io m -> Error (Io m)
   | Journal.Damaged m -> Error (Damaged m)
 
-(* the base's pages leave the cache: a view kept after the close reads them again from its file *)
+(* Every frame and every name is durable now (frames are forced as they are written, names as they change), unless
+   an fsync failed: then no marker, and the next open forces what the page cache holds. The base's pages leave the
+   cache: a view kept after the close reads them again from its file. *)
 let close t =
   Journal.close t.journal;
+  if t.stopped = None then t.disk.close (t.disk.openf (Filename.concat t.dir "closed") true);
   Pages.drop t.working.base.pg;
   t.disk.unlock (Filename.concat t.dir "lock")
 
@@ -304,7 +326,8 @@ let start_merge t (from : Store.view) =
     Some
       (Domain.spawn (fun () ->
            try
-             let w = merge_begin t from pos in
+             let t0 = Journal.clock () in
+             let w = merge_begin ~busy:(journal_busy ()) t from pos in
              let v = ref w.view and applied = ref 0 in
              let go = ref true in
              while !go do
@@ -312,6 +335,7 @@ let start_merge t (from : Store.view) =
                List.iter (fun g -> v := Resolve.replay !v g) gs;
                applied := !applied + k;
                if k < catch_up then begin
+                 Histogram.record merge_us (Journal.clock () - t0);
                  Atomic.set m.ready (Some (Done (w, !v, !applied)));
                  go := false
                end

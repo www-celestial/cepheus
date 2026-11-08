@@ -50,7 +50,8 @@ val open_ : string -> (db, error) result
     the journal). One process at a time ({!Busy} otherwise). *)
 
 val close : db -> unit
-(** Waits for the writes in flight, then closes. A fork has nothing to close. *)
+(** Waits for the writes in flight (and a merge under way), then closes; the base's pages leave the cache. A fork has
+    nothing to close. *)
 
 val view : db -> view
 (** The newest durable state (for a fork, its newest state). *)
@@ -135,7 +136,8 @@ val fold :
 (** {1 Operations} *)
 
 val snapshot : db -> (unit, error) result
-(** Writes a snapshot now, so that the next open replays only what follows. *)
+(** Merges now: the changes since the last merge and the base into a new base and its snapshot file (merges also run
+    on their own, in the background, as changes accumulate), so that the next open replays only what follows. *)
 
 val verify : string -> (int, error) result
 (** Reads the whole journal of a closed database and checks every frame: the number of groups. *)

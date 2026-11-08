@@ -159,13 +159,14 @@ let scan ?(frame = fun _ -> ()) disk dir id from on_group =
   let found, torn_header = go [] segs in
   found, torn_header, !expect
 
-let recover ?frame disk dir id from on_group =
+let recover ?frame ~force disk dir id from on_group =
   (* What a killed process wrote but did not force is forced first: a frame between its pwrite and its fsync, or a
      new segment between its creation and the fsync of its directory, sits in the page cache, where recovery reads
      it, but not on the disk, where a power loss would take it back. Forced now (the newest segment, then the names
      of the directory), so that a published view, or a snapshot written while replaying, never rests on a frame that
-     is not durable (G5, G12). The older segments were forced whole before the next one began. *)
-  (match List.rev (segments disk dir) with
+     is not durable (G5, G12). The older segments were forced whole before the next one began. Not needed after a
+     clean close ([force] false: the database's marker, Engine.open_). *)
+  (match if force then List.rev (segments disk dir) else [] with
    | s :: _ ->
      let fd = disk.Disk.openf (path dir s) false in
      Fun.protect ~finally:(fun () -> disk.close fd) (fun () -> disk.fsync fd);
@@ -211,9 +212,11 @@ let append j body first count =
   let len = Buffer.length body in
   if len > max_body then invalid_arg "Journal.append: frame too large";
   if j.size > seg_header && j.size + fh + len + ft > !segment_limit then begin
-    (* every frame of the current segment is durable already: start the next one *)
+    (* every frame of the current segment is durable already: start the next one (made first, so that a failure
+       leaves the journal on the old segment, still open) *)
+    let fd = write_segment_header j.disk j.dir j.id first in
     j.disk.close j.fd;
-    j.fd <- write_segment_header j.disk j.dir j.id first;
+    j.fd <- fd;
     j.seg <- first;
     j.size <- seg_header
   end;
