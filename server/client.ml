@@ -62,7 +62,8 @@ let io_write c b o n = match c.tls with Some t -> Tls.write t b o n | None -> wr
 (* queue a request: it leaves at the next [flush] *)
 let send c req =
   let id = c.next_id in
-  c.next_id <- (c.next_id + 1) land 0x7FFF_FFFF;
+  (* 1 to 2^31 - 1, then 1 again: 0 is the server's own id, for a frame that says why it closes the connection *)
+  c.next_id <- (if c.next_id >= 0x7FFF_FFFF then 1 else c.next_id + 1);
   Buffer.clear c.body;
   Wire.put_request c.body req;
   Wire.add_frame c.out ~id ~kind:(Wire.request_kind req) ~flags:0 c.body;

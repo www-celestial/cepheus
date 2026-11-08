@@ -445,6 +445,22 @@ let followed_rules () =
   Cepheus.close db;
   C.rmrf base
 
+(* ---- the client's request ids: 0 is the server's own id (a frame that says why it closes a connection), never a
+   request's, even after 2^31 requests on one connection ---- *)
+
+let request_ids () =
+  match Client.connect (Client.Unix_socket "/nonexistent/.s.cepheus.1") "t" with
+  | Ok _ -> check false "ids: a connection to nothing"
+  | Error _ ->
+    let c =
+      { Client.address = Client.Unix_socket "/nonexistent"; token = ""; program = "unit"; fd = None; tls = None; ca = None;
+        cluster = None; inb = Bytes.create 16; have = 0; next_id = 0x7FFF_FFFE; out = Buffer.create 64; body = Buffer.create 64;
+        session = 0; serial = 0; waiting = Hashtbl.create 1; early = Hashtbl.create 1; welcome = None; follows = [] }
+    in
+    let ids = List.init 4 (fun _ -> Client.send c (Wire.Ping "")) in
+    check (not (List.mem 0 ids) && List.length (List.sort_uniq compare ids) = 4) "ids: no request takes id 0 when they wrap (%s)"
+      (String.concat ", " (List.map string_of_int ids))
+
 let () =
   toml ();
   config ();
@@ -454,4 +470,5 @@ let () =
   rights ();
   fdpass ();
   followed_rules ();
+  request_ids ();
   C.finish "server unit"
