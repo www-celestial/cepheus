@@ -343,20 +343,28 @@ let why_bench dir n reps =
       end)
     kinds
 
-(* Store.set of new facts into a view whose delta holds [n] changes: the cost of a derived fact in the view *)
+(* derived facts put into a view whose delta holds [n] changes, 6 a thing (a new thing's derived types, say): one
+   Store.set a fact, then Store.set_sorted a batch of a thing's 6, as the reasoner puts a group's derived facts *)
 let apply_bench n =
   let db = fork empty in
   let p = List.hd (ok (declare db [ prop ~many:true "x" Tlink ])) in
   let v = ref (view db) in
-  let next = ref Schema.first_thing in
-  for _ = 1 to n do v := Store.set !v !next p (!next + 1) 1; incr next done;
+  for i = 0 to n - 1 do v := Store.set !v (Schema.first_thing + i) p (Schema.first_thing + i + 1) 1 done;
   let v0 = !v in
-  let reps = 100_000 in
+  let k = 100_000 in
   let t0 = now () in
   let v = ref v0 in
-  for i = 0 to reps - 1 do v := Store.set !v (Schema.first_thing + (i * 7919 mod n)) p (i + 3) 2 done;
-  let t = now () -. t0 in
-  Printf.printf "apply: a fact into a delta of %d changes: %.2f us\n%!" n (t /. float_of_int reps *. 1e6)
+  for i = 0 to k - 1 do v := Store.set !v (Schema.first_thing + n + (i / 6)) p (Schema.first_thing + (i mod 6)) 2 done;
+  let t1 = now () in
+  let v = ref v0 in
+  let ws = Array.init 6 (fun j -> Schema.first_thing + j) and ss = Array.make 6 2 in
+  for t = 0 to (k / 6) - 1 do
+    let e = Schema.first_thing + n + t in
+    v := Store.set_sorted !v (Array.make 6 e) (Array.make 6 p) ws ss 6
+  done;
+  let t2 = now () in
+  Printf.printf "apply: a derived fact into a delta of %d changes: %.3f us one by one, %.3f us in sorted batches of 6\n%!" n
+    ((t1 -. t0) /. float k *. 1e6) ((t2 -. t1) /. float (6 * (k / 6)) *. 1e6)
 
 let () =
   match Array.to_list Sys.argv |> List.tl with

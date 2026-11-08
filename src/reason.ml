@@ -273,6 +273,7 @@ type program = {
   rules : Rules.t array;
   ids : int array;  (* their things *)
   head_p : int array;  (* the property each rule gives, -1 for a constraint *)
+  atoms : Query.pattern array array;  (* each rule's body, as an array *)
   np : int;
   reads : Bytes.t;  (* by property: 1 a rule body reads it, 2 a rule head gives it *)
   consts : Value.t array;  (* the texts and floats of the rules, looked up in each view's dictionary *)
@@ -375,6 +376,7 @@ let make_program (v : Store.view) =
     rules;
   { key = Schema.rules_key v.schema; rules; ids; np; reads; consts = Array.of_list (List.rev !consts);
     head_p = Array.map (fun (r : Rules.t) -> match r.head with Give h -> h.p | Never -> -1) rules; orders;
+    atoms = Array.map atoms_of rules;
     size = Store.facts v; pool = ref []; pm = Mutex.create () }
 
 (* ---- plans ----
@@ -657,7 +659,7 @@ let intern ctx e p w =
 
 let no_dispatch = { byp = [||]; kp = [| -1 |]; kw = [| 0 |]; kv = [| [||] |]; kmask = 0; kn = 0 }
 
-let rec plans_at ctx d =
+let rec plans ctx d =
   if d >= Array.length ctx.bwd then begin
     let n = Array.length ctx.bwd in
     let fwd = Array.make (d + 1) (no_dispatch, no_dispatch) and bwd = Array.make (d + 1) no_dispatch in
@@ -672,16 +674,14 @@ let rec plans_at ctx d =
       ctx.fwd.(k) <- (f0, fp);
       ctx.bwd.(k) <- dispatch ctx ~backward:true State give (fun pl -> backward_instance ctx k pl)
     done
-  end;
-  ctx.fwd.(d), ctx.bwd.(d)
+  end
 
 (* an instance among the proved facts: its head, if checked and not yet proved, is proved now *)
 and proved_instance ctx d pl =
   let p = ctx.prog.head_p.(pl.ri) in
   let h = find ctx.ws pl.he p pl.hw in
   if h >= 0 && has ctx.ws h 1 && not (has ctx.ws h 2) then begin
-    let r = ctx.prog.rules.(pl.ri) in
-    let ats = atoms_of r in
+    let ats = ctx.prog.atoms.(pl.ri) in
     set_rule ctx.ws (h) pl.ri;
     set_by ctx.ws h (Array.mapi (fun j (a : Query.pattern) -> find ctx.ws pl.be.(j) a.p pl.bw.(j)) ats);
     prove ctx (d + 1) h
@@ -689,8 +689,7 @@ and proved_instance ctx d pl =
 
 (* an instance of a rule whose head is the fact being checked: its body facts checked; all proved, it proves it *)
 and backward_instance ctx d pl =
-  let r = ctx.prog.rules.(pl.ri) in
-  let ats = atoms_of r in
+  let ats = ctx.prog.atoms.(pl.ri) in
   let ids = Array.mapi (fun j (a : Query.pattern) -> intern ctx pl.be.(j) a.p pl.bw.(j)) ats in
   let ws = ctx.ws in
   Array.iter (fun y -> check ctx (d + 1) y) ids;
@@ -713,7 +712,8 @@ and prove ctx d x =
       set_rule pt (y) x;
       chain pt y
     end;
-    let _, fp = fst (plans_at ctx d) in
+    plans ctx d;
+    let fp = snd (Array.unsafe_get ctx.fwd d) in
     run_all fp e p w
   end
 
@@ -726,7 +726,8 @@ and check ctx d x =
     else begin
       let p = (fp ws (x)) in
       if p < ctx.prog.np && Char.code (Bytes.unsafe_get ctx.prog.reads p) land 2 <> 0 then begin
-        let _, bwd = plans_at ctx d in
+        plans ctx d;
+        let bwd = Array.unsafe_get ctx.bwd d in
         try run_all bwd (fe ws (x)) p (fw ws (x)) with Exit -> ()
       end
     end
@@ -834,7 +835,8 @@ let emit c pl =
    out of the collector's sight *)
 let saturate c (first : ints) nf (seed : int list) =
   let ws = c.ws in
-  let f0, _ = fst (plans_at c 0) in
+  plans c 0;
+  let f0 = fst c.fwd.(0) in
   c.on_fwd <- emit c;
   (* the seeds of round 1 wait in the next round's list from the start *)
   c.nn <- 0;
@@ -865,14 +867,18 @@ let backward_forward c (cands : int list) =
   let ws = c.ws in
   let q = Queue.create () in
   List.iter (fun x -> Queue.add x q) cands;
-  let f0, _ = fst (plans_at c 0) in
+  plans c 0;
+  let f0 = fst c.fwd.(0) in
   c.round <- max_int;
   c.on_fwd <-
     (fun pl ->
       let p = c.prog.head_p.(pl.ri) in
       let h = find ws pl.he p pl.hw in
       if h >= 0 then (if now ws h > 0 && not (has ws h 4) then Queue.add h q)
-      else if Store.mem c.v pl.he p pl.hw then Queue.add (add ws pl.he p pl.hw (Store.state c.v pl.he p pl.hw)) q);
+      else
+        (* one lookup: its state, present when above 0 *)
+        let s = Store.state c.v pl.he p pl.hw in
+        if s > 0 then Queue.add (add ws pl.he p pl.hw s) q);
   while not (Queue.is_empty q) do
     let x = Queue.pop q in
     if not (has ws x 4) then begin
