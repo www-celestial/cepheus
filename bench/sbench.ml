@@ -22,7 +22,11 @@ let token () = match Sys.getenv_opt "CEPHEUS_TOKEN" with Some t -> t | None -> f
 let facts_per_client = 88
 let ok = function Ok x -> x | Error (e : Client.error) -> failwith (e.code ^ ": " ^ e.message)
 
-let connect addr = match Client.connect ~program:"sbench" (Client.address_of_string addr) (token ()) with Ok c -> c | Error m -> failwith m
+(* TCP is TLS: the cluster's CA in CEPHEUS_CA *)
+let connect addr =
+  match Client.connect ~program:"sbench" ?ca:(Sys.getenv_opt "CEPHEUS_CA") (Client.address_of_string addr) (token ()) with
+  | Ok c -> c
+  | Error m -> failwith m
 
 type setup = { c : Client.t; db : Client.db; cids : int array; sample : int array; p : string -> int }
 
@@ -47,12 +51,11 @@ let setup addr facts =
 (* the invoice of read i, as bench.exe's Q1: client i mod 4096, its invoice i mod 20 *)
 let invoice s i = s.cids.(i land 4095) + 1 + (i mod 20)
 
-(* raw frames: requests coded once into a buffer, replies decoded as a client must *)
-let rec write_all fd b o n = if n > 0 then let k = Unix.write fd b o n in write_all fd b (o + k) (n - k)
+(* raw frames: requests coded once into a buffer, replies decoded as a client must; through the client's socket or
+   its TLS *)
+type raw = { c : Client.t; buf : Bytes.t; mutable have : int; out : Buffer.t; body : Buffer.t }
 
-type raw = { fd : Unix.file_descr; buf : Bytes.t; mutable have : int; out : Buffer.t; body : Buffer.t }
-
-let raw (c : Client.t) = { fd = Option.get c.fd; buf = Bytes.create (1 lsl 20); have = 0; out = Buffer.create 65536; body = Buffer.create 64 }
+let raw (c : Client.t) = { c; buf = Bytes.create (1 lsl 20); have = 0; out = Buffer.create 65536; body = Buffer.create 64 }
 
 let queue r id req =
   Buffer.clear r.body;
@@ -62,7 +65,7 @@ let queue r id req =
 let send r =
   let b = Buffer.to_bytes r.out in
   Buffer.clear r.out;
-  write_all r.fd b 0 (Bytes.length b)
+  Client.io_write r.c b 0 (Bytes.length b)
 
 (* reads until [want] replies have come; each decoded *)
 let replies r want =
@@ -82,7 +85,7 @@ let replies r want =
     Bytes.blit r.buf !o r.buf 0 (r.have - !o);
     r.have <- r.have - !o;
     if !got < want then begin
-      let k = Unix.read r.fd r.buf r.have (Bytes.length r.buf - r.have) in
+      let k = Client.io_read r.c r.buf r.have (Bytes.length r.buf - r.have) in
       if k = 0 then failwith "the server closed";
       r.have <- r.have + k
     end
@@ -210,6 +213,12 @@ let question addr facts which n =
   for i = 1 to n do ignore (run i) done;
   Printf.printf "%.3f\n%!" ((now () -. t0) /. float n *. 1e6)
 
+(* N new connections, each its handshake (TLS on TCP) and Hello, then closed: microseconds a connection *)
+let hs addr n =
+  let t0 = now () in
+  for _ = 1 to n do Client.close (connect addr) done;
+  Printf.printf "%.3f\n%!" ((now () -. t0) /. float n *. 1e6)
+
 let check addr facts =
   let s = setup addr facts in
   let pc = s.p "invoice/client" and pt = s.p "invoice/total" and ps = s.p "invoice/status" and pd = s.p "invoice/date" in
@@ -234,4 +243,5 @@ let () =
   | [| _; "write"; a; f; c; secs |] -> write a (int_of_string f) (int_of_string c) (float_of_string secs)
   | [| _; "q"; a; f; q; n |] -> question a (int_of_string f) q (int_of_string n)
   | [| _; "check"; a; f |] -> check a (int_of_string f)
+  | [| _; "hs"; a; n |] -> hs a (int_of_string n)
   | _ -> prerr_endline "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS | q ADDR FACTS Q3|Q4 N | check ADDR FACTS"; exit 2

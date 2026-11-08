@@ -64,9 +64,6 @@ let host_port what s =
     | Some p when p > 0 && p < 65536 && h <> "" -> h, p
     | _ -> bad "%s %S: host:port was expected" what s)
 
-let loopback h =
-  h = "localhost" || h = "::1" || (String.length h > 4 && String.sub h 0 4 = "127.")
-
 let default_domains () = max 1 (min 4 (Domain.recommended_domain_count () / 2))
 
 let of_toml file (doc : (string * Toml.value) list) =
@@ -137,8 +134,7 @@ let of_toml file (doc : (string * Toml.value) list) =
       Some { ca = path (need "tls" t "ca"); cert = path (need "tls" t "cert"); key = path (need "tls" t "key") }
   in
   (match listen, tls with
-   | Some (h, _), None when not (loopback h) ->
-     bad "[clients] listen = %S without [tls]: plain TCP is only for a loopback address (127.x.x.x, ::1, localhost)" h
+   | Some (h, _), None -> bad "[clients] listen = %S needs [tls]: programs reach the server over TCP with TLS only" h
    | _ -> ());
   let st = match table "storage" with Some t -> t | None -> bad "[storage] is missing" in
   known "storage" st [ "data"; "cache" ];

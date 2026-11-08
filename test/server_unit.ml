@@ -36,7 +36,7 @@ let toml () =
 
 let base =
   "[cluster]\nname = \"shop\"\nid = \"cph-c-0123456789abcdef\"\nme = \"srv1\"\n[[peer]]\nname = \"srv1\"\naddress = \"127.0.0.1:7401\"\n\
-   [clients]\nsocket = \"run\"\nlisten = \"127.0.0.1:7400\"\n[storage]\ndata = \"data\"\ncache = \"64M\"\n[[database]]\nname = \"shop\"\n"
+   [clients]\nsocket = \"run\"\n[storage]\ndata = \"data\"\ncache = \"64M\"\n[[database]]\nname = \"shop\"\n"
 
 let config () =
   (match Config.of_toml "/etc/cepheus/cluster.toml" (Toml.parse base) with
@@ -57,7 +57,10 @@ let config () =
   in
   refused (repl "me = \"srv1\"" "me = \"srv2\"") "me naming no peer";
   refused (repl "cph-c-0123456789abcdef" "cph-c-xyz") "a bad id";
-  refused (repl "127.0.0.1:7400" "0.0.0.0:7400") "plain TCP off loopback";
+  refused (repl "socket = \"run\"" "socket = \"run\"\nlisten = \"127.0.0.1:7400\"") "TCP without [tls], even on loopback";
+  (match Config.of_toml "/x/cluster.toml" (Toml.parse (repl "[storage]" "listen = \"127.0.0.1:7401\"\n[tls]\nca = \"ca.pem\"\ncert = \"s.pem\"\nkey = \"s.key\"\n[storage]" base)) with
+   | c -> check (c.port = 7401 && c.tls = Some { Config.ca = "/x/ca.pem"; cert = "/x/s.pem"; key = "/x/s.key" }) "config: TCP with TLS, and the socket named by its port"
+   | exception Config.Bad m -> check false "config with tls: %s" m);
   refused (repl "[[database]]\nname = \"shop\"\n" "") "no database";
   refused (repl "me = \"srv1\"\n[[peer]]" "me = \"srv1\"\nextra = 1\n[[peer]]") "an unknown key";
   refused (fun s -> s ^ "[[peer]]\nname = \"srv2\"\naddress = \"10.0.0.2:7401\"\n") "two peers (no replication yet)";

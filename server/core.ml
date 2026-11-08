@@ -79,7 +79,10 @@ let disconnect c =
 
 (* ---- replies ---- *)
 
-let send_body c ~id ~kind ~flags body = Mutex.protect c.om (fun () -> Wire.add_frame c.out ~id ~kind ~flags body)
+let send_body c ~id ~kind ~flags body =
+  Mutex.lock c.om;
+  Wire.add_frame c.out ~id ~kind ~flags body;
+  Mutex.unlock c.om
 
 let reply c ~id ~kind r =
   Buffer.clear c.body;
@@ -304,6 +307,7 @@ let status c =
   let conns, reqs = Mutex.protect srv.cm (fun () -> Hashtbl.length srv.conns, Hashtbl.fold (fun _ c n -> n + c.requests) srv.conns 0) in
   [ "server", srv.server_id; "cluster", srv.cluster_id; "uptime_ms", string_of_int (srv.now () - srv.started);
     "connections", string_of_int conns; "requests", string_of_int (reqs + Atomic.get srv.served);
+    "gc_minor", string_of_int (Gc.quick_stat ()).minor_collections; "gc_major", string_of_int (Gc.quick_stat ()).major_collections;
     "stopping", string_of_bool (Atomic.get srv.stopping) ]
   @ List.concat_map
       (fun d ->

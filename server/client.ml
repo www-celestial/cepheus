@@ -12,6 +12,9 @@ type t = {
   token : string;
   program : string;
   mutable fd : Unix.file_descr option;
+  mutable tls : Tls.t option;
+  ca : string option;  (* the cluster's CA: TCP needs it *)
+  cluster : string option;  (* the cluster id the server must have *)
   mutable inb : Bytes.t;
   mutable have : int;
   mutable next_id : int;
@@ -50,6 +53,10 @@ let rec write_all fd b o n =
 
 let fd c = match c.fd with Some fd -> fd | None -> raise (Broken "not connected")
 
+(* the connection's bytes: TLS when it has it *)
+let io_read c b o n = match c.tls with Some t -> Tls.read t b o n | None -> Unix.read (fd c) b o n
+let io_write c b o n = match c.tls with Some t -> Tls.write t b o n | None -> write_all (fd c) b o n
+
 (* queue a request: it leaves at the next [flush] *)
 let send c req =
   let id = c.next_id in
@@ -62,7 +69,9 @@ let send c req =
 let flush c =
   let s = Buffer.to_bytes c.out in
   Buffer.clear c.out;
-  try write_all (fd c) s 0 (Bytes.length s) with Unix.Unix_error (e, _, _) -> raise (Broken (Unix.error_message e))
+  try io_write c s 0 (Bytes.length s) with
+  | Unix.Unix_error (e, _, _) -> raise (Broken (Unix.error_message e))
+  | Failure m -> raise (Broken m)
 
 (* the next frame: id, kind, flags, body *)
 let next_frame c =
@@ -73,7 +82,11 @@ let next_frame c =
         Bytes.blit c.inb 0 b 0 c.have;
         c.inb <- b
       end;
-      let k = try Unix.read (fd c) c.inb c.have (Bytes.length c.inb - c.have) with Unix.Unix_error (e, _, _) -> raise (Broken (Unix.error_message e)) in
+      let k =
+        try io_read c c.inb c.have (Bytes.length c.inb - c.have) with
+        | Unix.Unix_error (e, _, _) -> raise (Broken (Unix.error_message e))
+        | Failure m -> raise (Broken m)
+      in
       if k = 0 then raise (Broken "the server closed the connection");
       c.have <- c.have + k;
       fill need
@@ -127,6 +140,8 @@ let call c req =
 
 let hello c =
   match call c (Wire.Hello { version = Wire.version; token = c.token; program = c.program; session = c.session }) with
+  | Wire.Welcome w when (match c.cluster with Some id -> id <> w.cluster | None -> false) ->
+    Error (Printf.sprintf "the server belongs to cluster %s, not %s" w.cluster (Option.get c.cluster))
   | Wire.Welcome w as r -> c.session <- w.session; c.welcome <- Some r; Ok ()
   | Wire.Err e -> Error (e.code ^ ": " ^ e.message)
   | _ -> Error "an unexpected reply to Hello"
@@ -134,15 +149,29 @@ let hello c =
 let reconnect c =
   (match c.fd with Some fd -> (try Unix.close fd with Unix.Unix_error _ -> ()) | None -> ());
   c.fd <- None;
+  c.tls <- None;
   c.have <- 0;
   Hashtbl.reset c.early;
   match open_socket c.address with
-  | fd -> ( c.fd <- Some fd; try hello c with Broken m -> Error m)
+  | fd -> (
+    c.fd <- Some fd;
+    let secured =
+      match c.address, c.ca with
+      | Unix_socket _, _ -> Ok ()
+      | Tcp _, None -> Error "a TCP connection needs the cluster's CA (ca)"
+      | Tcp (host, _), Some ca -> (
+        match Tls.client_ctx ~ca () with
+        | Error m -> Error m
+        | Ok ctx -> ( match Tls.handshake ctx fd ~server:false ~host with Ok t -> c.tls <- Some t; Ok () | Error m -> Error m))
+    in
+    match secured with
+    | Error m -> (try Unix.close fd with Unix.Unix_error _ -> ()); c.fd <- None; Error m
+    | Ok () -> ( try hello c with Broken m -> Error m))
   | exception Unix.Unix_error (e, _, _) -> Error (Unix.error_message e)
 
-let connect ?(program = "ocaml") ?(session = 0) address token =
+let connect ?(program = "ocaml") ?(session = 0) ?ca ?cluster address token =
   let c =
-    { address; token; program; fd = None; inb = Bytes.create 65536; have = 0; next_id = 1; out = Buffer.create 4096;
+    { address; token; program; fd = None; tls = None; ca; cluster; inb = Bytes.create 65536; have = 0; next_id = 1; out = Buffer.create 4096;
       body = Buffer.create 4096; session; serial = 0; waiting = Hashtbl.create 8; early = Hashtbl.create 8; welcome = None }
   in
   Result.map (fun () -> c) (reconnect c)

@@ -18,4 +18,5 @@ rm -rf "$tmp/cepheus-seats" && $b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-
 CEPHEUS_TMP=$tmp $b/examples.exe | tail -1
 $b/server_unit.exe | tail -1
 $b/server_sim.exe --seeds "${SERVER_SEEDS:-200}" | tail -2
+$b/server_tls.exe "$tmp/cepheus-tls" | tail -1
 rm -rf "$tmp/cepheus-server" && $b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-server"
