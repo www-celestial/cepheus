@@ -1,7 +1,8 @@
 (* Real crashes. A child process writes with several client threads and prints each confirmation; the parent kills
    it with SIGKILL at a random moment, reopens the database (recovery), and checks that every confirmed group is there
-   with its exact content (G1-G3), on the real disk and the real threads. Then it starts the next child on the same
-   database. Usage: crash.exe DIR ROUNDS [SEED]. *)
+   with its exact content (G1-G3), on the real disk and the real threads; merges run every 50 changes, so that many
+   kills land inside one: recovery must set no snapshot aside and leave no merge's file (G12). Then it starts the next
+   child on the same database. Usage: crash.exe DIR ROUNDS [SEED]. *)
 
 open Cepheus
 module C = Check
@@ -31,7 +32,9 @@ let child dir =
 
 let parent dir rounds seed =
   let r = Rng.make seed in
-  let total = ref 0 and recov = ref [] in
+  let total = ref 0 and recov = ref [] and in_merge = ref 0 in
+  let sdir = Filename.concat dir "snapshots" in
+  let tmps () = if Sys.file_exists sdir then List.filter (fun f -> Filename.check_suffix f ".tmp") (Array.to_list (Sys.readdir sdir)) else [] in
   for round = 1 to rounds do
     let rd, wr = Unix.pipe ~cloexec:true () in
     let pid = Unix.create_process Sys.executable_name [| Sys.executable_name; "--child"; dir |] Unix.stdin wr Unix.stderr in
@@ -52,11 +55,15 @@ let parent dir rounds seed =
     ignore (Unix.waitpid [] pid);
     Thread.join reader;
     close_in ic;
+    if tmps () <> [] then incr in_merge;
     let t0 = Unix.gettimeofday () in
     match open_ dir with
     | Error e -> C.fail "round %d: recovery failed: %s" round (message e)
     | Ok db ->
       recov := (Unix.gettimeofday () -. t0) :: !recov;
+      C.check (not (List.exists (fun n -> String.length n > 8 && String.sub n 0 8 = "snapshot") (notes db)))
+        "round %d: a snapshot was set aside: %s" round (String.concat "; " (notes db));
+      C.check (tmps () = []) "round %d: a merge's file was left" round;
       let v = view db in
       let name = Option.get (property v "name") and seq = Option.get (property v "seq") in
       List.iter
@@ -71,8 +78,8 @@ let parent dir rounds seed =
   done;
   let a = Array.of_list (List.sort compare !recov) in
   let n = Array.length a in
-  Printf.printf "crash: %d kills, %d confirmed groups checked, recovery median %.1f ms, max %.1f ms\n" rounds !total
-    (1000. *. a.(n / 2)) (1000. *. a.(n - 1));
+  Printf.printf "crash: %d kills (%d inside a merge), %d confirmed groups checked, recovery median %.1f ms, max %.1f ms\n"
+    rounds !in_merge !total (1000. *. a.(n / 2)) (1000. *. a.(n - 1));
   C.finish "crash"
 
 let () =

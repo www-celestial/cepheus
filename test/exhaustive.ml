@@ -4,7 +4,13 @@
    2. every single bit flipped anywhere in the durable journal is detected by a full read, and recovery either
       refuses, or keeps every group (a flipped trailer, rebuilt), or is the documented residual (a flip in the newest
       frame, cut as torn: docs/guarantees.md, G6);
-   3. a segment whose creation was torn at any byte is dropped, and the journal continues. *)
+   3. a segment whose creation was torn at any byte is dropped, and the journal continues;
+   4. inside a merge (G12): at every mutating disk call of a merge (a merge now, one begun from a view ahead of the
+      disk and installed after two more frames, the merges of a recovery replaying a long tail), every crash state:
+      a process death (the page cache kept, then lost at a later power loss), and power losses keeping each prefix
+      of each directory's name changes, with the unsynced bytes lost, kept, torn, or kept one sector in two. Recovery
+      must open on the old base or the new one, at a state of the reference, with every confirmed group, never set
+      a snapshot aside, never leave a merge's file. *)
 
 open Cepheus
 module C = Check
@@ -154,6 +160,170 @@ let torn_segment () =
       Journal.close j
     | exception Journal.Damaged m -> C.fail "torn segment header at %d: %s" k m
   done
+
+(* ---- 4. inside a merge ---- *)
+
+let mdir = "/db"
+let mprops = [ prop "name" Ttext; prop ~many:true "tag" Ttext; prop "score" Tint ]
+
+type run = { sim : Sim_disk.t; disk : Disk.t; mutable e : Engine.t; mutable acked : int }
+
+(* the facts of every group a run made, published or only prepared: the reference *)
+let mstates : (int, C.F.t) Hashtbl.t = Hashtbl.create 64
+
+let open_db disk =
+  match Engine.open_ ~id_source:(fun _ -> id) disk mdir with Ok e -> e | Error m -> failwith (Engine.message m)
+
+let declare_ops (v : Store.view) =
+  List.concat (List.mapi (fun i (d : prop) -> List.map (fun (e, q, x) -> Resolve.Add (e, q, x)) (Schema.facts (Schema.first_prop + i) d)) mprops)
+  |> fun ops -> if Schema.by_name v.schema "name" = None then ops else []
+
+let ops_for (v : Store.view) i =
+  let p n = Option.get (Schema.by_name v.schema n) in
+  let old = Schema.first_thing + (i mod max 1 (v.next_e - Schema.first_thing)) in
+  [ Resolve.Add (-1, p "name", Text (Printf.sprintf "n%d" i)); Add (-1, p "score", Int i); Add (-1, p "tag", Text "t") ]
+  @ if i > 3 then [ Add (old, p "tag", Text (Printf.sprintf "u%d" i)); Retract (old, p "tag", Text "t") ] else []
+
+(* a variant makes the same groups at every replay: each group's facts computed once *)
+let record (v : Store.view) = if not (Hashtbl.mem mstates v.group) then Hashtbl.replace mstates v.group (C.facts_of_view v)
+
+let prepare r ops = let b = Engine.prepare r.e [| ops, 1, "x" |] in record r.e.working; b
+
+let commit r b =
+  ignore (Engine.commit r.e b);
+  let v = Atomic.get r.e.published in
+  record v;
+  r.acked <- v.group
+
+let write r ops = commit r (prepare r ops)
+
+(* a database with two snapshots and a tail: the state just before the merge under test *)
+let setup tail =
+  Engine.compact_min := 1_000_000;
+  let sim = Sim_disk.create (Rng.make 7) in
+  let disk = Sim_disk.disk sim in
+  let r = { sim; disk; e = open_db disk; acked = 0 } in
+  record (Atomic.get r.e.published);
+  r.acked <- (Atomic.get r.e.published).group;
+  write r (declare_ops r.e.working);
+  for i = 1 to 5 do write r (ops_for r.e.working i) done;
+  Engine.compact r.e;
+  for i = 6 to 9 do write r (ops_for r.e.working i) done;
+  Engine.compact r.e;
+  for i = 10 to 10 + tail do write r (ops_for r.e.working i) done;
+  r
+
+type variant = { vname : string; tail : int; before : run -> unit; run : run -> unit; old_new : run -> int list option }
+
+let variants =
+  [ { vname = "a merge now"; tail = 3; before = ignore; run = (fun r -> Engine.compact r.e);
+      old_new = (fun r -> Some [ r.e.merged; r.e.working.group ]) };
+    { vname = "a merge begun ahead of the disk, installed two frames later"; tail = 3; before = ignore;
+      run =
+        (fun r ->
+          let b1 = prepare r (ops_for r.e.working 20) in
+          let m = Engine.merge_begin r.e r.e.working (Atomic.get r.e.at) in
+          commit r b1;
+          let b2 = prepare r (ops_for r.e.working 21) in
+          commit r b2;
+          let v = List.fold_left Resolve.replay m.view (List.rev b2.groups) in
+          Engine.install r.e m v);
+      old_new = (fun r -> Some [ r.e.merged; r.e.working.group + 1 ]) };
+    { vname = "the merges of a recovery replaying a long tail"; tail = 12;
+      before = (fun r -> Sim_disk.kill r.sim);
+      run = (fun r -> Engine.compact_min := 3; r.e <- open_db r.disk);
+      old_new = (fun _ -> None) } ]
+
+let patterns = [ "lost", 0; "kept", 2; "torn", 5; "one in two", -1 ]
+
+let merge_states = ref 0
+let merge_points = ref 0
+
+(* recovery after the crash: the checks of G1, G7 and G12 *)
+let recovered what r ~acked old_new =
+  Engine.compact_min := 1_000_000;
+  incr merge_states;
+  match Engine.open_ ~id_source:(fun _ -> id) r.disk mdir with
+  | Error m -> C.fail "%s: recovery failed: %s" what (Engine.message m); None
+  | Ok e ->
+    let k = e.working.group in
+    C.check (k >= acked) "%s: recovered to group %d, %d was confirmed" what k acked;
+    C.check (match Hashtbl.find_opt mstates k with Some f -> C.F.equal f (C.facts_of_view e.working) | None -> false)
+      "%s: the state at group %d is not the reference" what k;
+    C.check (not (List.exists (fun n -> String.length n > 8 && String.sub n 0 8 = "snapshot") e.notes))
+      "%s: a snapshot was set aside: %s" what (String.concat "; " e.notes);
+    C.check (not (List.exists (fun f -> Filename.check_suffix f ".tmp") (Sim_disk.files r.sim))) "%s: a merge's file was left" what;
+    (match old_new with
+     | Some l -> C.check (List.mem e.merged l) "%s: the base is of group %d, neither the old nor the new one" what e.merged
+     | None -> ());
+    Engine.close e;
+    Some k
+
+let enumerate_merge (v : variant) =
+  (* the crash points: every mutating call of the run, until the run ends without reaching one *)
+  Hashtbl.reset mstates;
+  let points0 = !merge_points and states0 = !merge_states in
+  let reach k =
+    let r = setup v.tail in
+    let before = v.old_new r in
+    let acked0 = r.acked in
+    v.before r;
+    Sim_disk.crash_after r.sim k;
+    match v.run r with
+    | () -> Sim_disk.crash_after r.sim (-1); None
+    | exception Sim_disk.Crash -> Some (r, before, max acked0 r.acked)
+  in
+  let k = ref 0 and go = ref true in
+  while !go do
+    (match reach !k with
+     | None -> go := false
+     | Some (r, _, _) ->
+       incr merge_points;
+       let dirs = List.filter (fun d -> Sim_disk.pending_names r.sim d > 0) [ mdir; mdir ^ "/journal"; mdir ^ "/snapshots" ] in
+       let rec prefixes = function
+         | [] -> [ [] ]
+         | d :: rest ->
+           List.concat_map (fun j -> List.map (fun l -> (d, j) :: l) (prefixes rest)) (List.init (Sim_disk.pending_names r.sim d + 1) Fun.id)
+       in
+       let what = Printf.sprintf "%s, crash at call %d" v.vname !k in
+       (* a process death: recovery reads the page cache; a later power loss must keep what it published *)
+       (match reach !k with
+        | Some (r, before, acked) -> (
+          Sim_disk.kill r.sim;
+          match recovered (what ^ ", process death") r ~acked before with
+          | Some k1 ->
+            Sim_disk.crash ~choose:(fun _ _ -> 0) r.sim;
+            ignore (recovered (what ^ ", process death then power loss") r ~acked:k1 None)
+          | None -> ())
+        | None -> ());
+       List.iter
+         (fun prefix ->
+           List.iter
+             (fun (pname, sector) ->
+               match reach !k with
+               | Some (r, before, acked) ->
+                 let choose (d : Sim_disk.draw) n =
+                   match d with
+                   | Names dir -> List.assoc dir prefix
+                   | Length _ -> if sector = 0 then 0 else 1
+                   | Cut _ | Tear _ -> n / 2
+                   | Sector (_, s) -> if sector >= 0 then sector else if s mod 2 = 0 then 2 else 0
+                 in
+                 Sim_disk.crash ~choose r.sim;
+                 let names = String.concat "," (List.map (fun (d, j) -> Printf.sprintf "%s:%d" (Filename.basename d) j) prefix) in
+                 ignore (recovered (Printf.sprintf "%s, names %s, bytes %s" what names pname) r ~acked before)
+               | None -> C.fail "%s: the crash point moved" what)
+             patterns)
+         (prefixes dirs));
+    incr k
+  done;
+  Printf.printf "  %s: %d crash points, %d states\n" v.vname (!merge_points - points0) (!merge_states - states0)
+
+let () =
+  (* a small cache: the pages of a crashed run (and through them its simulated disk) stay only until evicted *)
+  Pages.set_capacity (8 lsl 20);
+  List.iter enumerate_merge variants;
+  Printf.printf "exhaustive merges: %d crash points, %d crash states recovered\n" !merge_points !merge_states
 
 let () =
   List.iter crash_states [ [ 10; 20; 30 ]; [ 400; 900; 1500 ]; [ 2000; 100 ] ];
