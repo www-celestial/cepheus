@@ -81,7 +81,8 @@ copy, the peak resident memory of the process sampled every 0.2 s; two rounds a 
 | merges to a file | 1,126 MB [993, 1,188] | 948 to 1,307 MB | 19,388 [17,413, 20,966] |
 
 The peak falls by 57 %; the write rate does not change (the intervals overlap widely; one old run fell to 1,749
-groups/s in a disk stall).
+groups/s in a disk stall). A later round of six runs on the new side (the merge's own histogram): each background
+merge of the 245 MB base took 3.6 to 4.2 s beside the writes (5 merges), and the writer's switch to it 44 to 210 ms.
 
 **One merge** (`bench.exe merge DIR 100000`: 100,000 invoices, 400,000 facts, written with no merge in the background,
 then one merge of the whole base and the delta into a new file; six rounds a side, alternated; with 6 runs the 95 %
@@ -100,7 +101,8 @@ beside it (below), and a merge nobody waits beside (`snapshot`, recovery) forces
 
 **A merge in a process capped at 128 MB**, cache 32 MB, the same 245 MB base and a delta of 20,000 invoices: the merge
 to a file takes 7.6 s, with 63 MB resident before it and a peak of 99 MB (the cache's 32 MB, a few pages, the tables);
-the merge in memory is killed by the cap (exit 137). That is the bound of theory, section 8: a merge needs the cache,
+the merge in memory is killed by the cap (exit 137) once it starts (it had written the 20,000 groups with 64 MB
+resident). That is the bound of theory, section 8: a merge needs the cache,
 not the base.
 
 **Reads, everything in the cache** (21 runs a question, two rounds a side, alternated; the medians with their 95 %
