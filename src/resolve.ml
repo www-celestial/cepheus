@@ -81,13 +81,13 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
     List.iter
       (function
         | Expect (e, p, None) ->
-          ignore (desc v0 p);
-          if Store.has_value v0 e p then fail (Conflict (Printf.sprintf "#%d has a value for property %d" e p))
+          let d = desc v0 p in
+          if Store.has_value v0 e p then fail (Conflict (Printf.sprintf "#%d has a value for %s (property %d)" e d.name p))
         | Expect (e, p, Some x) ->
           let d = desc v0 p in
           if not (Value.has_type d.typ x) then invalid "Expect: %s is not a %s" (Value.to_string x) (Value.typ_name d.typ);
           let ok = match Store.word v0 x with Some w -> Store.mem v0 e p w | None -> false in
-          if not ok then fail (Conflict (Printf.sprintf "#%d does not have %s for property %d" e (Value.to_string x) p))
+          if not ok then fail (Conflict (Printf.sprintf "#%d does not have %s for %s (property %d)" e (Value.to_string x) d.name p))
         | _ -> ())
       ops;
     let v = ref { v0 with next_e = !next } and out = ref [] and outw = ref [] in
@@ -604,3 +604,48 @@ let replay_large (v0 : Store.view) (g : Group.t) =
     let facts = Bulk.make ~d0 ~sorted ~order fe fp fw n ~np:(Schema.count v0.schema) ~texts:added in
     Some ({ v with next_e = max v0.next_e (g.first_new + g.count_new); group = g.n }, facts)
   end
+
+(* ---- a new database, and a schema's declarations: one coding for the engine, its forks and the clients ---- *)
+
+(* the facts of the system properties, the first group of every database *)
+let bootstrap_ops =
+  List.concat_map
+    (fun p ->
+      match Schema.system.(p) with
+      | Some d -> List.map (fun (e, q, x) -> Add (e, q, x)) (Schema.facts p d)
+      | None -> [])
+    [ 1; 2; 3; 4; 5 ]
+
+(* the empty state with only the system properties *)
+let empty =
+  match resolve ~bootstrap:true (Store.empty ()) ~n:1 ~time:0 ~by:0 ~why:"cepheus: create" bootstrap_ops with
+  | Ok (v, _, _) -> v
+  | Error _ -> assert false
+
+(* The property ids for these names on [v], and the operations that declare the missing ones (each with an Expect
+   that its id is still free, so that a declaration that lost a race for an id is refused and made again); Error for
+   a name declared already with another type, cardinality or unique flag. *)
+let declare (v : Store.view) (props : Schema.prop list) =
+  let next = ref Schema.first_prop in
+  let free () =
+    while Schema.find v.schema !next <> None || Store.has_value v !next Schema.p_name do incr next done;
+    let p = !next in
+    incr next;
+    p
+  in
+  let ops = ref [] and ids = ref [] and bad = ref None in
+  List.iter
+    (fun (d : Schema.prop) ->
+      match Schema.by_name v.schema d.name with
+      | Some p ->
+        let cur = Option.get (Schema.find v.schema p) in
+        if cur.typ <> d.typ || cur.many <> d.many || cur.unique <> d.unique then
+          bad := Some (Printf.sprintf "%s is declared already as another kind of property" d.name);
+        ids := p :: !ids
+      | None ->
+        let p = free () in
+        ids := p :: !ids;
+        ops := Expect (p, Schema.p_name, None) :: !ops;
+        List.iter (fun (e, q, x) -> ops := Add (e, q, x) :: !ops) (Schema.facts p d))
+    props;
+  match !bad with Some m -> Error m | None -> Ok (List.rev !ids, List.rev !ops)

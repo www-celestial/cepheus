@@ -46,15 +46,12 @@ let open_socket = function
     (try Unix.connect fd (Unix.ADDR_UNIX p) with e -> Unix.close fd; raise e);
     fd
   | Tcp (h, p) ->
-    let addr = Net.resolve h p in
+    let addr = Config.resolve h p in
     let fd = Unix.socket ~cloexec:true (Unix.domain_of_sockaddr addr) Unix.SOCK_STREAM 0 in
     (try Unix.setsockopt fd Unix.TCP_NODELAY true; Unix.connect fd addr with e -> Unix.close fd; raise e);
     fd
 
-let rec write_all fd b o n =
-  if n > 0 then
-    let k = Unix.write fd b o n in
-    write_all fd b (o + k) (n - k)
+let write_all = Fdpass.write_all
 
 let fd c = match c.fd with Some fd -> fd | None -> raise (Broken "not connected")
 
@@ -178,10 +175,9 @@ let reconnect c =
     | Ok () -> ( try hello c with Broken m -> Error (false, m)))
   | exception Unix.Unix_error (e, _, _) -> Error (false, Unix.error_message e)
 
-(* A write to a connection the server closed must fail with EPIPE, not kill the program: OCaml's Unix cannot ask for
-   MSG_NOSIGNAL, so the library ignores SIGPIPE for the process, as many networked libraries do. *)
+(* A write to a connection the server closed fails with EPIPE, never SIGPIPE: every write is a send with MSG_NOSIGNAL
+   (Fdpass.write_all), so the library leaves the process's signals alone. *)
 let connect ?(program = "ocaml") ?(session = 0) ?ca ?cluster address token =
-  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
   let c =
     { address; token; program; fd = None; tls = None; ca; cluster; inb = Bytes.create 65536; have = 0; next_id = 1; out = Buffer.create 4096;
       body = Buffer.create 4096; session; serial = 0; waiting = Hashtbl.create 8; early = Hashtbl.create 8; welcome = None;
@@ -365,7 +361,7 @@ let with_retry c attempt gave_up =
           match reconnect c with
           | Ok () -> go pause
           | Error (true, m) -> gave_up m
-          | Error (false, _) -> Thread.delay pause; again (min 1.0 (pause *. 2.))
+          | Error (false, _) -> Unix.sleepf pause; again (min 1.0 (pause *. 2.))
       in
       again pause
   in
@@ -396,7 +392,7 @@ let get c db thing =
 let find c db ?(select = Wire.Give [||]) query =
   match local_view c db with
   | Some v -> (
-    match Core.answer v query select with
+    match Answer.answer v query select with
     | a ->
       let typs = Array.init a.cols a.typ in
       Ok (v.group, List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))))

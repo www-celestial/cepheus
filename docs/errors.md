@@ -27,7 +27,7 @@ not unique: client/email "ada@example.com" is taken
 invalid: "forty" is not a int (property client/age)
 invalid: no thing #65537
 ok, group 4
-conflict: #65536 has a value for property 17
+conflict: #65536 has a value for client/age (property 17)
 invalid: no property 99
 ```
 
@@ -41,8 +41,8 @@ loop of optimistic concurrency).
 
 | message | when |
 |---|---|
-| `#E has a value for property P` | `Expect (E, P, None)`, and E has a value for P |
-| `#E does not have V for property P` | `Expect (E, P, Some V)`, and the fact (E, P, V) does not hold |
+| `#E has a value for N (property P)` | `Expect (E, P, None)`, and E has a value for P, whose name is N |
+| `#E does not have V for N (property P)` | `Expect (E, P, Some V)`, and the fact (E, P, V) does not hold; N is P's name |
 
 ## `Not_unique`
 
@@ -218,6 +218,39 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 A program connected to the server receives every error above as a value `{code, message}` (`conflict`, `invalid`,
 `unique`, `damaged`, `io`, `busy`, `closed`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
 `unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`. Each, when it comes and what to do: [the server](server.md#errors).
+
+## In a Cesia program
+
+The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and the server's, as a value
+`result.Err({Kind: "cepheus", Code, Message})`, with the codes in lower case (`conflict`, `unique`, `invalid`,
+`damaged`, `io`, `busy`, `closed`, and the server's), and adds its own:
+
+| Code | Message | when | do |
+|---|---|---|---|
+| `invalid` | `P needs a Text` (an Int, a number, a Bool, a date in seconds since 1970, an amount), `not V` | a value given for the property P is not of its type | give a value of the property's type |
+| `invalid` | `P needs an amount that fits` | a Money value past 63 bits once in minor units | a smaller amount |
+| `invalid` | `the kind K has no field F` | a field given to Insert or Update that the kind does not declare | correct the field's name (it is never dropped in silence) |
+| `invalid` | `P is not declared in this database: give its kind to Connect (or Fork)` | a kind used on a database that was not given it | add the kind to Connect's list, or Fork's |
+| `invalid` | `P is a T in this database, not a U` | the database declares the property with another type | the kind must match the database's schema |
+| `invalid` | `Insert needs at least one field of K`, `Update needs at least one field of K`, `Update needs the id of a thing, not N`, `a group needs at least one operation` | an empty write | write something |
+| `invalid` | `P holds several values: change them with Write, Add and Retract` | Update of a field of many values | `cepheus.Write` with `Add` and `Retract` |
+| `invalid` | `Above, Below and Between are for ints, dates and money, not a T`; `a variable of Above, Below or Between appears in no pattern` | a range on another type, or on a variable of no pattern | filter the rows in Cesia (`list.Filter`) |
+| `invalid` | `H is reached over the network: give the cluster's certificate authority, ca = "/etc/cepheus/ca.pem"` | Connect over TCP without `ca` | the cluster's `ca.pem` (made by `cepheus cluster init`) |
+| `invalid` | `a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server` | Fork of a database reached over the network | fork `cepheus.Empty`, or run on the server's machine |
+| `closed` | `this database was closed` | a call on a database after `cepheus.Close` | Connect again |
+| `unreachable` | `no Cepheus server answers at ADDRESS: REASON` | Connect: nothing listens at the socket or the host's port | start the server, check the address |
+| `unreachable` | `the server did not answer for 30 s (REASON): a write in flight was applied once or not at all` | a call after the connection broke and stayed broken for the retry budget | start the server; read before writing again |
+| `protocol` | `an unexpected reply to Get` (Find, Write) | the server answered with another kind of reply: a bug | report it |
+
+A mistake in the shape of a call is a bug of the program, not an error value: it stops the fiber, as `bug.Panic`,
+with Cesia's message, as `cepheus.Get needs a database, as cepheus.Connect or Fork gives it, not the number 3.`
+Those of the package: a database, a kind (`as cepheus.Kind made it`), a property (`as Client.City`), a map, a list,
+an operation (`as cepheus.Add, Retract or Expect makes it`), a question (`{Where: [patterns], Give: {Name:
+variable}}`), a pattern (`[thing, property, value], or Above, Below or Between`), a variable or a thing's id first in a
+pattern, a variable or an aggregate in Give; and at `cepheus.Kind`: a name that is not small letters, digits, `_` and
+`-`, no field, a field named `kind`, a type that is none of `Text()`, `Int()`, `Float()`, `Bool()`, `Date()`,
+`Link()`, `Money(scale)`, a scale outside 0 to 18; at `cepheus.Connect`: an address that is not
+`cepheus://host:port/database` (with `?socket=DIR` its only parameter); at `cepheus.Find`: more than 12 variables.
 
 ## Lines on the standard error
 

@@ -1,0 +1,10 @@
+[project]
+name = "cepheus"
+src = ["cesia"]
+
+[native]
+package = "cesia/cepheus"
+natives = ["kind", "connect", "get", "insert", "update", "write", "variables", "find", "fork", "close"]
+
+[test]
+allow = ["native=cepheus"]

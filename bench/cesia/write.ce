@@ -1,0 +1,41 @@
+(** Durable writes through the Cesia client: f fibers share the one connection, each inserting an invoice of 4 fields
+    (as sbench's write) after the other, for s seconds. Prints the inserts a second and the median latency of one in
+    milliseconds.
+
+    cesia run --allow native=cepheus,env,read bench/cesia/write.ce F S *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/fiber
+use std/io
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Invoice = cepheus.Kind("invoice", {client: cepheus.Link(), total: cepheus.Money(2), status: cepheus.Text(), date: cepheus.Date()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Invoice], token = sys.Env("CEPHEUS_TOKEN"), ca = sys.Env("CEPHEUS_CA")))
+f = text.Number(sys.Args[1])
+s = text.Number(sys.Args[2])
+stop = sys.Now() + s
+defn worker(w)
+  times = []
+  k = 0
+  while sys.Now() < stop
+    t0 = sys.Now()
+    result.Unwrap(cepheus.Insert(Invoice, {client: 65536 + w, total: k, status: "unpaid", date: 1794268800}, db))
+    times = list.Append(sys.Now() - t0, times)
+    k += 1
+  end
+  times
+end
+start = sys.Now()
+tasks = [fiber.Spawn(() -> worker(w)) for w in 1..f]
+all = []
+for t in tasks
+  all = list.Concat(all, result.Unwrap(fiber.Wait(t)))
+end
+elapsed = sys.Now() - start
+all = list.Sort(all)
+n = value.Len(all)
+io.Print(n / elapsed, all[1 + math.Div(n, 2)] * 1000)

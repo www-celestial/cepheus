@@ -1,0 +1,131 @@
+(** Cepheus, a database of facts, from Cesia. A program connects to a database at a Cepheus server, declares its kinds,
+    writes maps of their fields, reads them back, asks questions and writes groups of facts, all or nothing. On the
+    server's machine its reads are served from its own memory, and still see every write confirmed before them. A fork
+    is a database in the program's memory, for a test that needs no server. Errors are values: an Err of
+    {Kind: "cepheus", Code, Message}. As everywhere in Cesia, the database comes last: db then cepheus.Get(Client, id). *)
+use std/bug
+
+(** A text property: a field of a kind. unique: no two things share a value; many: a list of values.
+
+      Text().Type --> "text" *)
+Text(unique = false, many = false) = {Type: "text", Unique: unique, Many: many}
+
+(** A whole number of 63 bits. *)
+Int(unique = false, many = false) = {Type: "int", Unique: unique, Many: many}
+
+(** A 64-bit float. *)
+Float(unique = false, many = false) = {Type: "float", Unique: unique, Many: many}
+
+(** true or false. *)
+Bool(unique = false, many = false) = {Type: "bool", Unique: unique, Many: many}
+
+(** An instant, as the seconds since 1970 in UTC that sys.Now gives, kept to the millisecond. *)
+Date(unique = false, many = false) = {Type: "date", Unique: unique, Many: many}
+
+(** Another thing of the database: its id. *)
+Link(unique = false, many = false) = {Type: "link", Unique: unique, Many: many}
+
+(** An exact decimal of scale digits after the point, as Money(2) for cents: read as a Float, kept in minor units. *)
+Money(scale, unique = false, many = false) = {Type: "money", Scale: scale, Unique: unique, Many: many}
+
+(** A kind of thing: its name, in small letters, and its fields, each a property of a type. It gives a map of its fields,
+    each a property to name in a question (Client.City), and the field kind, which the package keeps for itself. The
+    property of a field is the kind's name, a slash and the field's: client/City.
+
+      Client = Kind("client", {Name: Text(), City: Text()}) *)
+Kind(name, fields) = kind(name, fields)
+
+(** A database at a Cepheus server, with these kinds declared in it (those it lacks are added, in one group): an Ok of
+    the database, to give to every other function, or an Err. The address is cepheus://host:port/database; on the
+    server's machine, where the server's Unix socket is in /run/cepheus, the connection goes through it and the reads
+    are served here; elsewhere it is TLS to host:port, which needs ca, the certificate of the cluster's authority.
+    ?socket=DIR names another folder of the Unix socket. token is the program's secret, made by cepheus token add. *)
+Connect(url, kinds, token = missing, ca = missing) = connect(url, kinds, token, ca)
+
+(** The map of a thing's fields of a kind: an Ok of it, missing for a field it has no value of, a list for a field of
+    many values (empty when it has none); an Ok of missing when the thing has none of the kind's facts. *)
+Get(kind, id, db) = get(db, kind, id)
+
+(** A new thing with these fields, in one group: an Ok of its id. by is the id of who writes, why says why: both stay
+    with the group in the history. *)
+Insert(kind, fields, db, by = 0, why = "") = insert(db, kind, fields, by, why)
+
+(** New values for these fields of a thing, in one group, each replacing the field's value: an Ok of the group's
+    number. A field of many values changes with Write. *)
+Update(kind, id, fields, db, by = 0, why = "") = update(db, kind, id, fields, by, why)
+
+(** An operation of Write: the fact that thing has this value of a property, added. *)
+Add(thing, property, value) = {Op: "add", Thing: thing, Property: property, Value: value}
+
+(** An operation of Write: the fact removed. *)
+Retract(thing, property, value) = {Op: "retract", Thing: thing, Property: property, Value: value}
+
+(** An operation of Write: the whole group is refused, with Code "conflict", unless the thing has this value of the
+    property before it; with value missing, unless it has none. *)
+Expect(thing, property, value = missing) = {Op: "expect", Thing: thing, Property: property, Value: value}
+
+(** The thing that the group makes as its k-th new thing, in Add, Retract and Expect: New(1), New(2)... *)
+New(k) = -k
+
+(** A group of operations, all or nothing: an Ok of {Group, Things}, its number and the ids of its new things, New(1)
+    first. A write over the network is answered once it is on the server's disk, and applied once even when the
+    connection broke and the package sent it again. *)
+Write(ops, db, by = 0, why = "") = write(db, ops, by, why)
+
+(** An aggregate of Give: the sum of a variable, of the answers of a group. *)
+Sum(x) = {Sum: x}
+
+(** An aggregate of Give: the smallest value of a variable. *)
+Min(x) = {Min: x}
+
+(** An aggregate of Give: the largest value of a variable. *)
+Max(x) = {Max: x}
+
+(** An aggregate of Give: the number of answers of a group. *)
+Count() = {Count: true}
+
+(** A condition of Where: x above v, for an int, a date or money. *)
+Above(x, v) = {Range: x, Low: v, Open: "low"}
+
+(** A condition of Where: x below v. *)
+Below(x, v) = {Range: x, High: v, Open: "high"}
+
+(** A condition of Where: lo <= x <= hi. *)
+Between(x, lo, hi) = {Range: x, Low: lo, High: hi}
+
+defn ask(n, question)
+  (** The question called with n variables. *)
+  v = variables(n)
+  match n
+    1 -> question(v[1])
+    2 -> question(v[1], v[2])
+    3 -> question(v[1], v[2], v[3])
+    4 -> question(v[1], v[2], v[3], v[4])
+    5 -> question(v[1], v[2], v[3], v[4], v[5])
+    6 -> question(v[1], v[2], v[3], v[4], v[5], v[6])
+    7 -> question(v[1], v[2], v[3], v[4], v[5], v[6], v[7])
+    8 -> question(v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8])
+    9 -> question(v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9])
+    10 -> question(v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10])
+    11 -> question(v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11])
+    12 -> question(v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9], v[10], v[11], v[12])
+    else -> bug.Panic("cepheus.Find: a question has 1 to 12 variables, not $n.")
+  end
+end
+
+(** The answers of a question: an Ok of a list of maps, one an answer, with the fields of Give. The question is a
+    function of n variables that gives {Where, Give}: Where a list of patterns [thing, property, value], each a fact
+    that must hold, where any part but the property may be a variable, and of conditions (Above, Below, Between); Give
+    a map of the variables, or of aggregates of them, to give. Each answer comes once. *)
+Find(n, question, db) = find(db, ask(n, question), n)
+
+(** The empty database, to fork for a test. *)
+Empty = "cepheus.Empty"
+
+(** A database in this program's memory that starts as another (Empty, a fork, or a database read on the server's
+    machine), with these kinds declared: an Ok of it. It reads and writes as a database, with the same checks, and
+    nothing it writes goes anywhere: the database it started from doesn't change. *)
+Fork(from, kinds = []) = fork(from, kinds)
+
+(** Ends a connection, or forgets a fork. *)
+Close(db) = close(db)

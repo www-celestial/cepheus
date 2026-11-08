@@ -1,0 +1,32 @@
+(** The Cesia client's point read, beside sbench's (the OCaml client): cepheus.Get of an invoice of bench.exe's
+    database, a kind of 4 fields (client, total, status, date), over the invoices of sbench's sample in the order of
+    its reads. The ids come from sbench.exe ids, in the file of the first argument; the database is CEPHEUS_URL.
+    Prints the microseconds a Get, then those of the loop alone (the same loop calling a Cesia function of the same
+    arguments), each over n reads after a warm pass over the sample.
+
+    cesia run --allow native=cepheus,env,read bench/cesia/get.ce IDS N *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/io
+use std/math
+use std/result
+use std/sys
+use std/text
+
+Invoice = cepheus.Kind("invoice", {client: cepheus.Link(), total: cepheus.Money(2), status: cepheus.Text(), date: cepheus.Date()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Invoice], token = sys.Env("CEPHEUS_TOKEN"), ca = sys.Env("CEPHEUS_CA")))
+ids = [text.Number(l) for l in text.Lines(result.Unwrap(sys.Read(sys.Args[1])))]
+n = text.Number(sys.Args[2])
+for id in ids
+  result.Unwrap(cepheus.Get(Invoice, id, db))
+end
+same(kind, id, d) = id
+start = sys.Now()
+for i in 1..n
+  cepheus.Get(Invoice, ids[1 + math.Mod(i * 7919, 81920)], db)
+end
+get = (sys.Now() - start) / n * 1e6
+start = sys.Now()
+for i in 1..n
+  same(Invoice, ids[1 + math.Mod(i * 7919, 81920)], db)
+end
+io.Print(get, (sys.Now() - start) / n * 1e6)

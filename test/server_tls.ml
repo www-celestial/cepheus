@@ -60,7 +60,7 @@ let () =
   let token = Filename.concat a "app.token" in
   C.check (Sys.command (Printf.sprintf "%s token add app --database main=write --config %s > %s" bin (Filename.quote cfg) (Filename.quote token)) = 0) "token add";
   let tok = String.trim (In_channel.with_open_bin token In_channel.input_all) in
-  let pid = Unix.create_process bin [| bin; "serve"; "--config"; cfg |] Unix.stdin Unix.stdout Unix.stderr in
+  let pid = Serve.start bin cfg in
   wait_port port;
   let ca_a = Filename.concat a "ca.pem" and ca_b = Filename.concat b "ca.pem" in
   let good host =
@@ -96,16 +96,16 @@ let () =
    Unix.close fd);
   good "127.0.0.1";
   Unix.kill pid Sys.sigterm;
-  ignore (Unix.waitpid [] pid);
+  ignore (Serve.wait pid);
   (* the same CA, another name: srv2's certificate is for 10.9.9.9 only; a client that names 127.0.0.1 refuses it *)
   C.check (run [ "cluster"; "cert"; "srv2"; "--dir"; a; "--host"; "10.9.9.9" ] = 0) "cluster cert srv2";
   let s = In_channel.with_open_bin cfg In_channel.input_all in
   Out_channel.with_open_bin cfg (fun oc -> output_string oc (replace (replace s "srv1.pem" "srv2.pem") "srv1.key" "srv2.key"));
-  let pid = Unix.create_process bin [| bin; "serve"; "--config"; cfg |] Unix.stdin Unix.stdout Unix.stderr in
+  let pid = Serve.start bin cfg in
   wait_port port;
   refused "a certificate without the name the client uses is refused" (fun () -> Client.connect ~ca:ca_a (Client.Tcp ("127.0.0.1", port)) tok);
   Unix.kill pid Sys.sigterm;
-  ignore (Unix.waitpid [] pid);
+  ignore (Serve.wait pid);
   (* listen without [tls] *)
   let plain = Filename.concat dir "plain.toml" in
   Out_channel.with_open_bin plain (fun oc ->

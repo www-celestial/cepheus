@@ -76,7 +76,7 @@ let () =
   let token = Filename.concat a "app.token" in
   C.check (Sys.command (Printf.sprintf "%s token add app --database main=write --config %s > %s" bin (Filename.quote cfg) (Filename.quote token)) = 0) "token add";
   let tok = String.trim (In_channel.with_open_bin token In_channel.input_all) in
-  let pid = Unix.create_process bin [| bin; "serve"; "--config"; cfg |] Unix.stdin Unix.stdout Unix.stderr in
+  let pid = Serve.start bin cfg in
   let sock = Filename.concat a (Printf.sprintf "run/.s.cepheus.%d" port) in
   let t0 = Unix.gettimeofday () in
   while not (Sys.file_exists sock) && Unix.gettimeofday () -. t0 < 30. do Thread.delay 0.01 done;
@@ -137,7 +137,7 @@ let () =
   C.check (match Client.get c db 1 with Ok (_, f) -> f <> [] | Error _ -> false | exception Client.Broken _ -> false) "a read after the idle limit: the library connects again";
   Client.close c;
   Unix.kill pid Sys.sigterm;
-  (match Unix.waitpid [] pid with _, Unix.WEXITED 0 -> C.check true "a clean stop" | _ -> C.check false "not a clean stop");
+  (match Serve.wait pid with _, Unix.WEXITED 0 -> C.check true "a clean stop" | _ -> C.check false "not a clean stop");
   (try Sys.remove (Follow.page_of_dir (Filename.concat a "data/main")) with Sys_error _ -> ());
   C.rmrf dir;
   ignore Value.equal;

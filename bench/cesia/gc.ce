@@ -1,0 +1,27 @@
+(** What the client's domains cost the rest of a program: a loop that makes maps (minor collections all along), timed
+    alone, then with a database open (its reader, and on the server's machine its follower, are domains of the process:
+    OCaml 5 stops every domain at each minor collection, and the follower's state lives in the same major heap). Each
+    side is the best of three loops, the second after half a second for the follower to catch up. Prints the
+    milliseconds of the loop, without then with the connection.
+
+    cesia run --allow native=cepheus,env,read bench/cesia/gc.ce *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/io
+use std/list
+use std/result
+use std/sys
+
+defn work()
+  start = sys.Now()
+  total = 0
+  for k in 1..2000000
+    m = {A: k, B: k + 1, C: "x"}
+    total += m.B - m.A
+  end
+  (sys.Now() - start) * 1000
+end
+alone = list.Min([work(), work(), work()])
+Invoice = cepheus.Kind("invoice", {client: cepheus.Link(), total: cepheus.Money(2), status: cepheus.Text(), date: cepheus.Date()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Invoice], token = sys.Env("CEPHEUS_TOKEN"), ca = sys.Env("CEPHEUS_CA")))
+sys.Sleep(0.5)
+io.Print(alone, list.Min([work(), work(), work()]))

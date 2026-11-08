@@ -13,16 +13,23 @@ let max_fds = 64
 
 let range what b ofs len = if ofs < 0 || len < 0 || ofs > Bytes.length b - len then invalid_arg ("Fdpass." ^ what)
 
+(* All [len] bytes from [ofs] on a socket, sent with MSG_NOSIGNAL: a write to a connection the peer closed fails with
+   EPIPE instead of raising SIGPIPE, so a client needs no change to the process's signals (the Cesia client runs in a
+   program's process, whose signals are not its own). *)
+let write_all sock b ofs len =
+  range "write_all" b ofs len;
+  let rec go o n = if n > 0 then let k = send_ sock b o n [||] in go (o + k) (n - k) in
+  go ofs len
+
 (* All [len] bytes from [ofs], the descriptors [fds] riding on the first byte; the kernel gives each a new
    descriptor in the receiver, for the same open file. *)
 let send sock b ofs len fds =
   range "send" b ofs len;
   if List.length fds > max_fds then invalid_arg "Fdpass.send: more than 64 descriptors";
   if len = 0 && fds <> [] then invalid_arg "Fdpass.send: descriptors need a byte to ride on";
-  let rec rest o n = if n > 0 then let k = Unix.write sock b o n in rest (o + k) (n - k) in
   if len > 0 then begin
     let k = send_ sock b ofs len (Array.of_list fds) in
-    rest (ofs + k) (len - k)
+    write_all sock b (ofs + k) (len - k)
   end
 
 (* At most [len] bytes into [ofs], and the descriptors that came with them, in their order (close-on-exec); 0 bytes

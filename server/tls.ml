@@ -35,16 +35,11 @@ let client_ctx ?(cert = "") ?(key = "") ~ca () =
 
 type t = { c : conn; fd : Unix.file_descr; m : Mutex.t; wm : Mutex.t; raw : Bytes.t; out : Bytes.t }
 
-let rec write_all fd b o n =
-  if n > 0 then
-    let k = Unix.write fd b o n in
-    write_all fd b (o + k) (n - k)
-
 (* what OpenSSL wrote, sent in its order; the caller holds [wm] *)
 let send_pending t =
   let rec go () =
     let n = Mutex.protect t.m (fun () -> take t.c t.out 0 (Bytes.length t.out)) in
-    if n > 0 then (write_all t.fd t.out 0 n; go ())
+    if n > 0 then (Fdpass.write_all t.fd t.out 0 n; go ())
   in
   go ()
 

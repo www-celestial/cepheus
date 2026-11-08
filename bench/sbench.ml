@@ -13,6 +13,8 @@
                                              with PostgreSQL's rows
      sbench.exe local ADDR FACTS N           N point reads in this process (the database followed: local reads)
      sbench.exe localq ADDR FACTS Q3|Q4 N    N runs of a question in this process
+     sbench.exe ids ADDR FACTS               the 81,920 invoices of the sample, one id a line, in the order of their reads
+                                             (invoice i): the reads of bench/get.ce, the Cesia client's, are these
      sbench.exe follow ADDR FACTS SECS       a local reader for SECS seconds, reading every invoice of the sample once at
                                              the start: its CPU time a second of the period (% of a core), the frames it
                                              applied, its memory (Pss and RSS of /proc/self/smaps_rollup, kB)
@@ -233,6 +235,11 @@ let local addr facts n =
   Printf.printf "%.4f\n%!" ((now () -. t0) /. float n *. 1e6);
   Client.close s.c
 
+let ids addr facts =
+  let s = setup addr facts in
+  for i = 0 to 81_919 do Printf.printf "%d\n" (invoice s i) done;
+  Client.close s.c
+
 let localq addr facts which n =
   let s = setup ~local:true addr facts in
   if s.db.local = None then failwith "the database is not followed";
@@ -327,7 +334,8 @@ let () =
   | [| _; "local"; a; f; n |] -> local a (int_of_string f) (int_of_string n)
   | [| _; "localq"; a; f; q; n |] -> localq a (int_of_string f) q (int_of_string n)
   | [| _; "follow"; a; f; secs |] -> follow a (int_of_string f) (float_of_string secs)
+  | [| _; "ids"; a; f |] -> ids a (int_of_string f)
   | _ ->
     prerr_endline
-      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS";
+      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS";
     exit 2

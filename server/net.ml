@@ -375,13 +375,8 @@ let unix_listener path =
   Unix.listen s 256;
   s
 
-let resolve host port =
-  match Unix.getaddrinfo host (string_of_int port) [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ] with
-  | ai :: _ -> ai.Unix.ai_addr
-  | [] -> failwith (Printf.sprintf "%s does not resolve" host)
-
 let tcp_listener host port =
-  let addr = resolve host port in
+  let addr = Config.resolve host port in
   let s = Unix.socket ~cloexec:true (Unix.domain_of_sockaddr addr) Unix.SOCK_STREAM 0 in
   Unix.setsockopt s Unix.SO_REUSEADDR true;
   Unix.bind s addr;

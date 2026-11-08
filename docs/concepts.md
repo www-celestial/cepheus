@@ -181,7 +181,7 @@ let () =
 
 ```output
 group 4
-conflict: #65536 does not have true for property 16
+conflict: #65536 does not have true for doctor/on-call (property 16)
 ```
 
 ## Questions
