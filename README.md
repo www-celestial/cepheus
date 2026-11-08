@@ -53,6 +53,26 @@ TLS (49.6); 8 clients at once, 3.22 µs a read in all (6.54); 16 requests in fli
 (G15): 0.22 µs a point read, no round trip, and no write waits for it. Everything, from `cluster.toml` to the wire
 protocol byte by byte: [the server](docs/server.md).
 
+## From Cesia
+
+A [Cesia](https://github.com/www-celestial/cesia) program reaches a database through the server, with the package
+`cesia/cepheus` of this repository: one function to connect, and on the server's machine its reads are served from its
+own memory, as linearizable as the server's ([Cepheus from Cesia](docs/cesia.md)):
+
+```text
+use deps/www-celestial/cepheus/cesia/cepheus
+
+Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Email: cepheus.Text(unique = true)})
+db = cepheus.Connect("cepheus://srv1:7400/shop", [Client], token = sys.Env("CEPHEUS_TOKEN"), ca = "/etc/cepheus/ca.pem")?
+ada = cepheus.Insert(Client, {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"}, db, by = 7, why = "signup")?
+cepheus.Get(Client, ada, db)?               (* {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"} *)
+lyon = cepheus.Find(1, (c) -> {Where: [[c, Client.City, "Lyon"]], Give: {Client: c}}, db)?
+```
+
+On the server's machine a `cepheus.Get` of 4 fields costs 0.77 µs from Cesia (PostgreSQL 18.6 through its socket,
+from C: 26.4 µs); over TLS 51.6 µs (PostgreSQL's 49.6); 64 fibers on one connection write as fast as 64 connections.
+Nothing loads before the package's first call, which costs 13 ms once a process.
+
 ## Against the established databases
 
 Measured on one laptop (Intel i7-4720HQ, SATA SSD) against PostgreSQL 18.6 set up as an expert would, 10 million

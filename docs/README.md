@@ -11,10 +11,13 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
 3. [The server](server.md): `cepheus serve`, cluster.toml, tokens and rights, the wire protocol byte by byte, sessions
    (writes applied once, G14), local reads in a program's own memory (linearizable, G15), rights (G16), its speed
    beside PostgreSQL, server against server.
-4. [Testing](testing.md): forks for an application's tests, and how Cepheus itself is tested.
-5. [Rules](rules.md): Datalog rules kept by the writer — derived facts, semi-naive evaluation, Backward/Forward for
+4. [Cepheus from Cesia](cesia.md): the Cesia client, a native package: `Connect`, kinds and their values, `Insert`,
+   `Get`, `Update`, `Write` with `Expect`, questions with `Find`, forks for tests, local reads, many fibers on one
+   connection, its errors and its speed beside the OCaml client and PostgreSQL.
+5. [Testing](testing.md): forks for an application's tests, and how Cepheus itself is tested.
+6. [Rules](rules.md): Datalog rules kept by the writer — derived facts, semi-naive evaluation, Backward/Forward for
    retractions, constraints, the budget, `why`, and what a write with rules costs.
-6. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
+7. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
    to the proof that it is solved (a test, generated schedules, a TLA+ model, kill -9 with a checker of the history,
    the speed beside SQLite and PostgreSQL).
 

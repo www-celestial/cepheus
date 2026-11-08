@@ -713,8 +713,8 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 - Local readers on other machines (a replica, step 6; Raft with leases between servers, step 7), and one shared copy
   of the pages for many readers of one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
 
-The Cesia client (step 4),
-subscriptions over the wire and many databases sharing one fsync (step 5), a replica (step 6), Raft on three machines
-(step 7), memory databases with `Expire` and `Incr` (step 8). Until the Cesia client exists, a program written in
-OCaml can still open a database directory in its own process (`Cepheus.open_`), which the tests use; the server is
-the one way for everything else.
+The Cesia client is step 4 ([Cepheus from Cesia](cesia.md)): a Cesia program reaches a database through a server only,
+by `cepheus.Connect`, and reads locally on the server's machine. Next: subscriptions over the wire and many databases
+sharing one fsync (step 5), a replica (step 6), Raft on three machines (step 7), memory databases with `Expire` and
+`Incr` (step 8). The OCaml library still opens a database directory in its own process (`Cepheus.open_`): it is the
+engine the server runs, and what its tests and benchmarks drive; programs, in Cesia, go through the server.
