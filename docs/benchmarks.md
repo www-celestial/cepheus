@@ -1,7 +1,7 @@
-# Benchmarks: Cepheus and PostgreSQL
+# Benchmarks: Cepheus, PostgreSQL and SQLite
 
-Cepheus against PostgreSQL 18.6 on the same machine, with the same data, the same questions and the same answers
-checked on both sides. Milestone 2 numbers first; milestone 1's below them, for the history.
+Cepheus against PostgreSQL 18.6 and SQLite 3.54 on the same machine, with the same data, the same questions and the
+same answers checked on every side. The newest numbers first; milestone 1's at the end, for the history.
 
 ## Method
 
@@ -52,9 +52,25 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
   (`SHARED`), each process capped at 128 MB, against a database of 245 MB (Cepheus' snapshot) and 284 MB (PostgreSQL's
   data directory): the same answers, the pages read from the disk, the peak resident memory.
 
-Commands: `bench.exe load DIR CSVDIR 10000000`, `bench.exe read DIR 10000000 [Q1,..]`, `bench.exe write DIR CLIENTS
-SECS [RATE]`, `bench.exe merge DIR GROUPS`, `bench.exe fsync DIR SECS append|overwrite`, `bench.exe trace ...`,
-`bench.exe cachesim TRACE`; `pg.sh init|start|load|read|write|stop ROOT ...`.
+### Commands
+
+| command | what it measures |
+|---|---|
+| `bench.exe load DIR CSVDIR FACTS` | loads FACTS facts through the writer (64 clients, one group a client and its 20 invoices, then the follow links), merges once (`snapshot`), and writes the same data as CSV files for the other sides (`NOCSV=1`: no CSV) |
+| `bench.exe read DIR FACTS [Q1,Q4,..]` | the open (restart from the snapshot), then Q1 to Q5 or the ones named: median and 95 % interval over `RUNS` runs |
+| `bench.exe write DIR CLIENTS SECS [RATE]` | durable writes of a new invoice (4 facts) by CLIENTS threads: as fast as they go, or RATE groups a second in all (open loop) |
+| `bench.exe merge DIR GROUPS` | GROUPS invoices with no background merge, then one merge (`snapshot`): its time and the peak memory of the merge alone |
+| `bench.exe fsync DIR SECS append\|overwrite` | the file system alone: a 9,000-byte frame and its fsync in a loop, appended or written over zeros forced beforehand |
+| `bench.exe trace DIR FACTS OUT uniform\|zipf day\|points\|scan` | records the page reads of a day of questions, for the cache study |
+| `bench.exe cachesim TRACE` | LRU, CLOCK, 2Q, ARC, SIEVE, S3-FIFO, W-TinyLFU and Belady's optimum on a recorded trace |
+| `bench.exe stats NAME [us]` | the summary of numbers read on stdin, one a line, in ms (with `us`: latencies in µs, into a histogram): how the other sides' times go through the same statistics |
+| `bench.exe cpu DIR N` | the writer's work alone: N 5-fact groups into a fork of the database (no disk) |
+| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop) |
+| `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
+
+Environment of `bench.exe`: `RUNS` (21), `CEPHEUS_DOMAINS` (the domains of a question), `CACHE_MB` (the cache),
+`SYNC_MB` (how often a merge forces its file while clients write, 8), `NOCSV`. The statistics are `bench/stats.ml`,
+the cache policies `bench/cachesim.ml`.
 
 References: [Raasveldt 2018] M. Raasveldt, P. Holanda, T. Gubner, H. Mühleisen, "Fair Benchmarking Considered
 Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefler 2015] T. Hoefler, R. Belli,
@@ -62,6 +78,44 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## SQLite 3.54 at 10 million facts (2026-11-08)
+
+SQLite is, like Cepheus, a library inside the application's process, so this is the fairest comparison of the two
+engines: no socket on either side. Same data (the CSV files of `bench.exe load`), same questions, same answers (Q3
+city-7: 4,299 rows; Q4: 453,866 invoices, 22,677,088,830; Q5: 114 rotations). SQLite set up as an expert would
+(`bench/sqlite/sqlite.sh`): `INTEGER PRIMARY KEY` tables (the key is the row's address in its B-tree), `follows` as a
+`WITHOUT ROWID` table keyed by (a, b), a unique index on the e-mail, indexes on `client(city)`, `invoice(client)`,
+`invoice(status)`, `follows(b, a)`, `ANALYZE`; a page cache of 1 GiB (`PRAGMA cache_size`, as Cepheus' cache; the
+default is 2 MB), `temp_store = MEMORY`, warmed by one pass of every question. Its plans, from `EXPLAIN QUERY PLAN`:
+Q3 the city index then `invoice(client)`; Q4 the status index, then each invoice's client by its key, and a temporary
+B-tree for the GROUP BY; Q5 nested loops over the two covering indexes of `follows`. The questions are timed in the
+process by Python's `sqlite3` module (`bench/sqlite/read.py`): Q1 and Q2 run 100,000 lookups inside one statement,
+driven by a recursive CTE (the "engine only" measure, as PostgreSQL's PL/pgSQL loop), Q3 one statement per city (100
+a run), Q4 and Q5 one statement a run. 21 runs a question, two rounds alternated with Cepheus (release build of
+`docs-full`, the engine of 148ff09, one domain, `CEPHEUS_DOMAINS=1`), each process under the heavy lock and a 3 GB cap.
+Raw output: the median and its 95 % interval of each round.
+
+| question | Cepheus, 1 domain, rounds 1 and 2 | SQLite, rounds 1 and 2 | |
+|---|---|---|---|
+| Q1 every fact of an invoice, by id | 0.36 µs [0.36, 0.36]; 0.38 µs [0.37, 0.40] | 0.67 µs [0.67, 0.68]; 0.68 µs [0.68, 0.70] (about 0.45 µs without the CTE's 0.23 µs a row) | Cepheus, 1.2 times |
+| Q2 a client by e-mail | 1.67 µs [1.64, 1.71]; 1.66 µs [1.62, 1.83] | 1.52 µs [1.50, 1.57]; 1.52 µs [1.51, 1.58] (about 1.22 µs without the CTE and the e-mail's concatenation, 0.30 µs a row) | **SQLite**, 1.1 to 1.4 times |
+| Q3 unpaid invoices of a city's clients | 4.17 ms [4.15, 4.22]; 4.19 ms [4.12, 4.33] | 4.13 ms [4.10, 4.16]; 4.19 ms [4.15, 4.23] | even |
+| Q4 unpaid sum per city | 230 ms [229, 232]; 230 ms [226, 232] | 355 ms [352, 364]; 366 ms [359, 369] | Cepheus, 1.55 times |
+| Q5 triangles | 979 ms [957, 986]; 969 ms [967, 1,020] | 1.04 s [1.03, 1.08]; 1.04 s [1.04, 1.05] | Cepheus, 1.07 times |
+| load 10 M facts | 107 s through the writer (31 merges) | **8.6 s** (`.import`, indexes, `ANALYZE`) | **SQLite**, 12 times |
+| size on disk | base 245.8 MB (and the previous snapshot, 233.6 MB, kept), journal 101 MB | **131 MB**, one file | **SQLite** |
+
+The CTE's own cost was measured alone (`WITH RECURSIVE` over 100,000 rows, the same arithmetic, no lookup): 0.227 µs a
+row [0.224, 0.234], 0.295 µs [0.293, 0.297] with the e-mail's concatenation; the "without" figures subtract those
+medians, so they are estimates. Q2 reads the client's row on SQLite's side (as on PostgreSQL's) and only the client's
+number on Cepheus' side, and SQLite is still faster: Cepheus finds a text by a binary search of its dictionary's sorted
+list (about 18 steps for 227,387 texts, each step a text compared in another part of memory), then the rows of that
+text by a second binary search, where SQLite's B-tree reaches the e-mail in 3 or 4 pages. With 3 domains, Cepheus'
+Q4 and Q5 take 107 ms and 371 ms; SQLite runs a statement on one thread. A one-time load is where SQLite's design (write
+B-tree pages once, build each index by sorting) beats Cepheus', which loads through its writer and rewrites its whole
+base at each of its merges; and SQLite's records (variable-length integers in B-tree pages) are about half the size
+of Cepheus' 8-byte words. Not measured on SQLite's side: durable writes, and reads larger than memory.
 
 ## The merge written to a file (2026-11-08), at 10 million facts
 
@@ -286,6 +340,6 @@ against 22 ms; Q5 63 ms against 50 ms.
 
 ## Not measured yet
 
-Several databases writing at once, a server-class disk, skewed graphs, replication; a merge that writes its base
-straight to a file (the merges of milestone 2 still build the new base in memory: write runs with merges peaked at 1.8
-to 3.3 GB, against 1.7 to 2.5 GB for milestone 1's mapped base over the same six runs).
+Several databases writing at once, a server-class disk, skewed graphs, replication; SQLite's durable writes and its
+reads larger than memory; Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB, which are not installed on the
+test machine (compared by design on the [comparison](comparison.md) page).
