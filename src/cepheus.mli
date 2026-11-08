@@ -99,6 +99,47 @@ val declare : db -> prop list -> (int list, error) result
 val property : view -> string -> int option
 val describe : view -> int -> prop option
 
+(** {1 Rules}
+
+    A rule derives facts from facts: for every answer of its body (a question's patterns and ranges), the fact of its
+    head, or, for [Never], a refusal of the group. The writer keeps the derived facts up to date at each group, as
+    facts like any other (G17): questions read them at the speed of any fact. A rule is a schema thing, defined and
+    versioned in the journal like a property; [docs/rules.md] tells the whole of it. *)
+
+type term = Query.term = Var of int | Thing of int | Val of value
+type pattern = Query.pattern = { e : term; p : int; v : term }
+
+type head = Rules.head = Give of pattern | Never
+
+type rule = Rules.t = {
+  name : string;  (** unique among the schema's names, properties' included *)
+  vars : int;
+  where : pattern list;
+  ranges : (int * value * value) list;
+  head : head;
+}
+
+val define : db -> rule list -> (int list, error) result
+(** The rule things for these rules, found by name, writing in one group the new ones and those whose definition
+    changed. The writer checks each one (types, range restriction, its head's property) and derives at once what it
+    gives over the whole database, under the budget. *)
+
+val undefine : db -> string list -> (unit, error) result
+(** Removes these rules (by name) in one group: the facts that only they derived go with them. *)
+
+type proof = Reason.proof =
+  | Given of { e : int; p : int; v : value }  (** an asserted fact *)
+  | By of { rule : string; e : int; p : int; v : value; from : proof list }
+      (** a fact derived by [rule] from the facts of [from], each proved before it *)
+
+val why : view -> int -> int -> value -> proof option
+(** [why v thing property value]: a well-founded proof of a fact of the view, its leaves asserted facts of the view
+    (G20); [None] when the triple is not a fact of the view. Computed when asked: nothing is stored at write time. *)
+
+val rule_budget : int ref * int ref
+(** The budget of a write: its derived changes may not pass [fst + snd * its asserted changes] (100,000 + 100 x); a
+    group past it is refused, naming the rule that derived the most. *)
+
 (** {1 Reading} *)
 
 val get : view -> int -> (int * value) list
@@ -109,9 +150,6 @@ val values : view -> int -> int -> value list
 
 val things : view -> int -> value -> int list
 (** [things v property value]: the things that have this value (by link for a link property). *)
-
-type term = Query.term = Var of int | Thing of int | Val of value
-type pattern = Query.pattern = { e : term; p : int; v : term }
 
 type query = Query.t = { vars : int; where : pattern list; ranges : (int * value * value) list }
 (** Variables are numbered from 0 to [vars - 1]; [ranges] keep [lo <= x <= hi] for int, date or money variables. *)
@@ -170,7 +208,9 @@ module Pages = Pages
 module Histogram = Histogram
 module Journal = Journal
 module Query = Query
+module Reason = Reason
 module Resolve = Resolve
+module Rules = Rules
 module Rng = Rng
 module Schema = Schema
 module Sim_disk = Sim_disk

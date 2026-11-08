@@ -15,38 +15,49 @@ exception Fail of error
 let fail e = raise (Fail e)
 let invalid fmt = Printf.ksprintf (fun s -> fail (Invalid s)) fmt
 
-(* The descriptor of a property thing from its facts in v. *)
-let read_prop (v : Store.view) p =
+(* What a schema thing is, from its facts in v: a property (a name and a type), a rule (a name and a definition), or
+   nothing yet. *)
+type thing = Prop of Schema.prop | Rule of string * string | Nothing
+
+let read_thing (v : Store.view) p =
   let one q = let r = ref None in Store.iter_values v p q (fun w -> r := Some w); !r in
-  match one Schema.p_name, one Schema.p_type with
-  | Some nw, Some tw -> (
+  match one Schema.p_name, one Schema.p_type, one Schema.p_rule with
+  | Some nw, Some tw, None -> (
     match Value.of_code tw with
     | None -> Error (Printf.sprintf "property %d has an unknown type code %d" p tw)
     | Some typ ->
       let flag q = match one q with Some w -> w <> 0 | None -> false in
-      Ok (Some { Schema.name = Store.text v nw; typ; many = flag Schema.p_many; unique = flag Schema.p_unique }))
-  | None, None -> if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then Error "half" else Ok None
+      Ok (Prop { Schema.name = Store.text v nw; typ; many = flag Schema.p_many; unique = flag Schema.p_unique }))
+  | Some nw, None, Some rw ->
+    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then
+      Error (Printf.sprintf "rule %d takes a name and a definition only" p)
+    else Ok (Rule (Store.text v nw, Store.text v rw))
+  | None, None, None ->
+    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then Error "half" else Ok Nothing
+  | _, _, Some _ -> Error (Printf.sprintf "rule %d needs a name and a definition, and no type" p)
   | _ -> Error (Printf.sprintf "property %d needs both a name and a type" p)
 
-let refresh (v : Store.view) p =
-  match read_prop v p with
-  | Ok d -> { v with schema = Schema.set v.schema p d }
-  | Error _ -> { v with schema = Schema.set v.schema p None }
+let install_thing schema p = function
+  | Ok (Prop d) -> Schema.set_rule (Schema.set schema p (Some d)) p None
+  | Ok (Rule (n, t)) -> Schema.set_rule (Schema.set schema p None) p (Some (n, t))
+  | Ok Nothing | Error _ -> Schema.set_rule (Schema.set schema p None) p None
+
+let refresh (v : Store.view) p = { v with schema = install_thing v.schema p (read_thing v p) }
 
 let desc (v : Store.view) p =
   match Schema.find v.schema p with Some d -> d | None -> invalid "no property %d" p
 
-(* Applies one change and keeps the schema in step. *)
+(* Applies one change (the state its kind leaves) and keeps the schema in step. *)
 let apply_change (v : Store.view) (c : Group.change) =
-  let d = desc v c.p in
+  ignore (desc v c.p);
+  let s = Group.after c.kind in
   let v, w =
-    if c.add then Store.word_intern v c.v
+    if s > 0 then Store.word_intern v c.v
     else match Store.word v c.v with Some w -> v, w | None -> v, min_int
   in
   if w = min_int then v, false
   else begin
-    let v' = Store.apply v c.add c.e c.p w in
-    ignore d;
+    let v' = Store.set v c.e c.p w s in
     let v' = if Schema.is_system c.p && Schema.is_prop_space c.e && v' != v then refresh v' c.e else v' in
     v', v' != v
   end
@@ -79,12 +90,35 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
           if not ok then fail (Conflict (Printf.sprintf "#%d does not have %s for property %d" e (Value.to_string x) p))
         | _ -> ())
       ops;
-    let v = ref { v0 with next_e = !next } and out = ref [] in
-    let record (c : Group.change) =
-      let v', changed = apply_change !v c in
-      v := v';
-      if changed then out := c :: !out
+    let v = ref { v0 with next_e = !next } and out = ref [] and outw = ref [] in
+    (* an asserted change, with the state the fact had (one lookup does both): an addition of a fact a rule derives
+       makes it asserted too; a retraction of a fact only derived is refused, naming the rule (choice 10.4 of the
+       reasoner design) *)
+    let v_before = v0 in
+    let assert_change add e p x =
+      let v0 = !v in
+      let vi, w = if add then Store.word_intern v0 x else (v0, match Store.word v0 x with Some w -> w | None -> min_int) in
+      if w <> min_int then begin
+        let v1, prev = Store.swap vi e p w (if add then 1 else 0) in
+        let kind : Group.kind option =
+          match add, prev with
+          | true, 0 -> Some Added
+          | true, 2 -> Some Now_asserted
+          | false, 1 -> Some Retracted
+          | false, 2 ->
+            (* derived in the state before the group (Resolve changes asserted facts only): its proof is that state's *)
+            invalid "%s" (Reason.derived_message v_before e p w)
+          | _ -> None
+        in
+        match kind with
+        | None -> v := vi
+        | Some kind ->
+          v := if Schema.is_system p && Schema.is_prop_space e then refresh v1 e else v1;
+          out := { Group.kind; e; p; v = x } :: !out;
+          outw := w :: !outw
+      end
     in
+    let assert_add e p x = assert_change true e p x and assert_retract e p x = assert_change false e p x in
     let check_thing e p =
       if e >= Schema.first_thing then (if e >= !next then invalid "no thing #%d" e)
       else if Schema.is_prop_space e then (if not (Schema.is_system p) then invalid "a property thing takes only cepheus/ properties")
@@ -105,23 +139,46 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
             let olds = ref [] in
             let w = Store.word !v x in
             Store.iter_values !v e p (fun w' -> if Some w' <> w then olds := w' :: !olds);
-            List.iter (fun w' -> record { add = false; e; p; v = Store.value !v d.typ w' }) !olds
+            List.iter (fun w' -> assert_retract e p (Store.value !v d.typ w')) !olds
           end;
-          record { add = true; e; p; v = x }
+          assert_add e p x
         | Retract (e, p, x) ->
           let e = id e and x = (match x with Value.Link t -> Value.Link (id t) | x -> x) in
           let d = desc !v p in
           check_thing e p;
           if not (Value.has_type d.typ x) then invalid "%s is not a %s (property %s)" (Value.to_string x) (Value.typ_name d.typ) d.name;
-          record { add = false; e; p; v = x }
+          assert_retract e p x
         | Expect _ -> ())
       ops;
     let changes = Array.of_list (List.rev !out) in
-    let v = !v in
+    (* the schema things this group touched: properties checked below, rules here, before they run *)
+    let touched = Hashtbl.create 2 in
+    Array.iter (fun (c : Group.change) -> if Schema.is_prop_space c.e then Hashtbl.replace touched c.e ()) changes;
+    Hashtbl.iter
+      (fun p () ->
+        match read_thing !v p, Schema.find v0.schema p, Schema.rule v0.schema p with
+        | Error m, _, _ -> invalid "%s" m
+        | Ok (Rule _), Some a, _ -> invalid "%s is a property: it never becomes a rule" a.name
+        | Ok (Prop d), _, Some _ -> invalid "a rule never becomes a property (%s)" d.name
+        | _ -> ())
+      touched;
+    if Schema.rules_key !v.schema <> Schema.rules_key v0.schema || Hashtbl.length touched > 0 then
+      List.iter
+        (fun (_, (name, text)) ->
+          match Rules.of_text name text with
+          | Error m -> invalid "%s" m
+          | Ok r -> (match Rules.check !v r with Error m -> invalid "%s" m | Ok () -> ()))
+        (Schema.rules !v.schema);
+    (* the rules: what they derive from this group, and what they no longer derive *)
+    let v, changes =
+      match Reason.run ~v0 !v changes (Array.of_list (List.rev !outw)) with
+      | r -> r
+      | exception Reason.Refused m -> invalid "%s" m
+    in
     (* unique values, after the whole group *)
     Array.iter
       (fun (c : Group.change) ->
-        if c.add then
+        if c.kind = Added then
           match Schema.find v.schema c.p with
           | Some d when d.unique -> (
             match Store.word v c.v with
@@ -134,11 +191,8 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
           | _ -> ())
       changes;
     (* schema rules for the property things this group touched *)
-    let touched = Hashtbl.create 2 in
-    Array.iter (fun (c : Group.change) -> if Schema.is_prop_space c.e then Hashtbl.replace touched c.e ()) changes;
     Hashtbl.iter
       (fun p () ->
-        (match read_prop v p with Error m -> invalid "%s" m | Ok _ -> ());
         match Schema.find v0.schema p, Schema.find v.schema p with
         | Some a, Some b ->
           if a.typ <> b.typ || a.many <> b.many then invalid "the type and the cardinality of %s never change" a.name;
@@ -247,6 +301,8 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
     let nch = Array.length starts in
     let kinds = kinds v0 in
     let np = Array.length kinds in
+    (* the properties some rule reads or gives: the group's facts reasoned in bulk, below *)
+    let ruled = Reason.reads v0 in
     let fe = Bulk.i32 nops and fp = Bulk.u16 nops and fw = Bulk.ints nops in
     (* each chunk: the texts it adds in its order (the word of the j-th is -j-1 until renumbered), its temporary ids
        below -nops in its order, the largest of its others *)
@@ -362,7 +418,11 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
             if thing j = e && Bigarray.Array1.unsafe_get fp j = p then
               if Bigarray.Array1.unsafe_get fw j = w then d := i :: !d else if kinds.(p) land 8 = 0 then raise Slow
           end;
-          if e < v0.next_e && Store.mem v0 e p w then d := i :: !d
+          if e < v0.next_e && Store.mem v0 e p w then begin
+            (* a fact a rule derives already, asserted now: a change of its flag, for [resolve] *)
+            if p < Bytes.length ruled && Bytes.unsafe_get ruled p <> '\000' && Store.state v0 e p w = 2 then raise Slow;
+            d := i :: !d
+          end
         done;
         drops.(c) <- !d);
     let count, sorted, order =
@@ -384,7 +444,37 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
         !k, sorted, if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw !k
       end
     in
-    let b = Bulk.make ~sorted ~order fe fp fw count ~np ~texts:added in
+    (* the rules: the facts they derive from the group's, appended after them (Bulk.d0), in the order found *)
+    let touches_rules =
+      Bytes.length ruled > 0
+      &&
+      let t = ref false in
+      for i = 0 to count - 1 do
+        let p = Bigarray.Array1.unsafe_get fp i in
+        if p < Bytes.length ruled && Bytes.unsafe_get ruled p <> '\000' then t := true
+      done;
+      !t
+    in
+    let v, fe, fp, fw, count, d0, sorted, order =
+      if not touches_rules then v, fe, fp, fw, count, count, sorted, order
+      else
+        let rv = { v with next_e = !next } in
+        (* the group's own texts are not in the dictionary's map yet: a rule's text the group adds is found here, so
+           that a pattern on it matches, and a head that gives it does not intern it twice *)
+        let own s = match Hashtbl.find_opt gtexts s with Some k -> Some (first_text + k) | None -> None in
+        match (try Reason.bulk ~own rv fe fp fw count with Reason.Refused _ -> None) with
+        | None -> raise Slow
+        | Some (rv, de, dp, dw, nd) ->
+          let n = count + nd in
+          let fe' = Bulk.i32 n and fp' = Bulk.u16 n and fw' = Bulk.ints n in
+          let blit a b = Bigarray.Array1.blit (Bigarray.Array1.sub a 0 count) (Bigarray.Array1.sub b 0 count) in
+          let blit2 a b = Bigarray.Array1.blit a (Bigarray.Array1.sub b count nd) in
+          blit fe fe'; blit fp fp'; blit fw fw';
+          blit2 de fe'; blit2 dp fp'; blit2 dw fw';
+          let sorted = Bulk.in_order fe' fp' fw' n in
+          { rv with next_e = v.next_e }, fe', fp', fw', n, count, sorted, (if sorted then Bulk.i32 0 else Bulk.by_thing fe' fp' fw' n)
+    in
+    let b = Bulk.make ~d0 ~sorted ~order fe fp fw count ~np ~texts:added in
     (* a value two things take for a unique property, or one taken already: to [resolve] *)
     for q = 0 to np - 1 do
       match Schema.find v0.schema q with
@@ -450,7 +540,7 @@ let encode_large (l : large) (out : Bytes.t -> int -> int -> unit) =
     let k = kinds.(p) land 7 in
     let s = if k >= 6 then Store.text l.view w else "" in
     need (32 + String.length s);
-    byte 1;
+    byte (if Bulk.derived b i then 2 else 1);
     varint (Bulk.thing b i);
     varint p;
     match k with
@@ -464,11 +554,18 @@ let encode_large (l : large) (out : Bytes.t -> int -> int -> unit) =
   done;
   flush ()
 
-(* A group from the journal that the faster path can replay: every change an addition, no system property (its
-   additions are facts absent before it, distinct: Resolve records only effective changes) *)
+(* A group from the journal that the faster path can replay: every change an addition, the asserted ones first and
+   the derived after (a large group's frame), no system property (its additions are facts absent before it,
+   distinct: Resolve records only effective changes) *)
 let replay_large (v0 : Store.view) (g : Group.t) =
+  let d0 =
+    let k = ref 0 in
+    while !k < Array.length g.changes && g.changes.(!k).kind = Added do incr k done;
+    !k
+  in
   if Array.length g.changes < !large_min
-     || Array.exists (fun (c : Group.change) -> (not c.add) || Schema.is_system c.p || Schema.find v0.schema c.p = None) g.changes
+     || Array.exists (fun (c : Group.change) -> Schema.is_system c.p || Schema.find v0.schema c.p = None) g.changes
+     || Array.exists (fun (c : Group.change) -> c.kind <> Derived) (Array.sub g.changes d0 (Array.length g.changes - d0))
   then None
   else begin
     let n = Array.length g.changes in
@@ -504,6 +601,6 @@ let replay_large (v0 : Store.view) (g : Group.t) =
     let added = Array.mapi (fun k s -> s, first + k) news in
     let sorted = Bulk.in_order fe fp fw n in
     let order = if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw n in
-    let facts = Bulk.make ~sorted ~order fe fp fw n ~np:(Schema.count v0.schema) ~texts:added in
+    let facts = Bulk.make ~d0 ~sorted ~order fe fp fw n ~np:(Schema.count v0.schema) ~texts:added in
     Some ({ v with next_e = max v0.next_e (g.first_new + g.count_new); group = g.n }, facts)
   end

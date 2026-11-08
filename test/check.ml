@@ -64,7 +64,7 @@ let layered r (v0 : Store.view) rounds write =
   !v
 
 let apply_group s (g : Group.t) =
-  Array.fold_left (fun s (c : Group.change) -> if c.add then F.add (c.e, c.p, c.v) s else F.remove (c.e, c.p, c.v) s) s g.changes
+  Array.fold_left (fun s (c : Group.change) -> if Group.present c then F.add (c.e, c.p, c.v) s else F.remove (c.e, c.p, c.v) s) s g.changes
 
 let show_diff a b =
   let only_a = F.diff a b and only_b = F.diff b a in
@@ -121,6 +121,53 @@ let naive (facts : F.t) (q : Query.t) =
   List.sort_uniq compare !out
 
 let sorted_rows l = List.sort compare l
+
+(* ---- The rules' reference: the least model, naively ---- *)
+
+(* the facts a rule's body gives a head for, over a set of facts *)
+let heads (r : Rules.t) (facts : F.t) =
+  let q = { vars = r.vars; where = r.where; ranges = r.ranges } in
+  let rows = naive facts q in
+  match r.head with
+  | Never -> List.map (fun _ -> None) rows
+  | Give h ->
+    let term row = function Var x -> row.(x) | Thing t -> Link t | Val x -> x in
+    List.map
+      (fun row ->
+        let e = match term row h.e with Link t -> t | _ -> assert false in
+        Some (e, h.p, term row h.v))
+      rows
+
+(* the least fixpoint of the facts under the rules (naive evaluation: every rule over everything, until nothing new) *)
+let least (rules : Rules.t list) (facts : F.t) =
+  let s = ref facts and go = ref true in
+  while !go do
+    go := false;
+    List.iter
+      (fun r ->
+        List.iter
+          (function Some f when not (F.mem f !s) -> s := F.add f !s; go := true | _ -> ())
+          (heads r !s))
+      rules
+  done;
+  !s
+
+let violated (rules : Rules.t list) (m : F.t) = List.exists (fun (r : Rules.t) -> r.head = Never && heads r m <> []) rules
+
+(* the facts of a view that are not about schema things, and those asserted *)
+let user_facts (v : Store.view) =
+  F.filter (fun (e, _, _) -> e >= Schema.first_thing) (facts_of_view v)
+
+let asserted_facts (v : Store.view) =
+  F.filter
+    (fun (e, p, x) -> match Store.word v x with Some w -> Store.state v e p w = 1 | None -> false)
+    (user_facts v)
+
+let rules_of (v : Store.view) =
+  List.filter_map
+    (fun (_, (name, text)) -> match Rules.of_text name text with Ok r -> Some r | Error _ -> None)
+    (Schema.rules v.schema)
+
 
 (* ---- The Generic Join bound of a question, from the facts alone ----
    For the order the engine chose: the sum, over the levels and over the partial bindings that reach each level, of

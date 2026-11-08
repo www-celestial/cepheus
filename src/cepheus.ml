@@ -8,7 +8,9 @@ module Pages = Pages
 module Histogram = Histogram
 module Journal = Journal
 module Query = Query
+module Reason = Reason
 module Resolve = Resolve
+module Rules = Rules
 module Rng = Rng
 module Schema = Schema
 module Sim_disk = Sim_disk
@@ -103,6 +105,73 @@ let rec declare db props =
       | Error (Conflict _) -> declare db props (* another writer took the id meanwhile: read again *)
       | Error e -> Error e)
 
+(* ---- rules ---- *)
+
+type term = Query.term = Var of int | Thing of int | Val of value
+type pattern = Query.pattern = { e : term; p : int; v : term }
+type head = Rules.head = Give of pattern | Never
+type rule = Rules.t = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
+
+let rec define db (rules : rule list) =
+  let v = view db in
+  let next = ref Schema.first_prop in
+  let free () =
+    while Schema.find v.schema !next <> None || Store.has_value v !next Schema.p_name do incr next done;
+    let p = !next in
+    incr next;
+    p
+  in
+  let ops = ref [] and ids = ref [] and bad = ref None in
+  List.iter
+    (fun (r : rule) ->
+      let text = Rules.to_text r in
+      match Schema.rule_by_name v.schema r.name with
+      | Some id ->
+        ids := id :: !ids;
+        (match Schema.rule v.schema id with
+         | Some (_, t) when t = text -> ()
+         | _ -> ops := Add (id, Schema.p_rule, Text text) :: !ops)
+      | None ->
+        if Schema.by_name v.schema r.name <> None then bad := Some (Invalid (Printf.sprintf "%s is the name of a property" r.name))
+        else begin
+          let id = free () in
+          ids := id :: !ids;
+          ops := Add (id, Schema.p_rule, Text text) :: Add (id, Schema.p_name, Text r.name) :: Expect (id, Schema.p_name, None) :: !ops
+        end)
+    rules;
+  match !bad with
+  | Some e -> Error e
+  | None ->
+    if !ops = [] then Ok (List.rev !ids)
+    else (
+      match write db ~why:"cepheus: rules" (List.rev !ops) with
+      | Ok _ -> Ok (List.rev !ids)
+      | Error (Conflict _) -> define db rules
+      | Error e -> Error e)
+
+let undefine db names =
+  let v = view db in
+  let ops =
+    List.concat_map
+      (fun n ->
+        match Schema.rule_by_name v.schema n with
+        | Some id -> (
+          match Schema.rule v.schema id with
+          | Some (_, t) -> [ Retract (id, Schema.p_rule, Text t); Retract (id, Schema.p_name, Text n) ]
+          | None -> [])
+        | None -> [])
+      names
+  in
+  if ops = [] then Ok () else Result.map (fun _ -> ()) (write db ~why:"cepheus: rules" ops)
+
+type proof = Reason.proof =
+  | Given of { e : int; p : int; v : value }
+  | By of { rule : string; e : int; p : int; v : value; from : proof list }
+
+let why (v : view) e p x = match Store.word v x with None -> None | Some w -> Reason.why v e p w
+
+let rule_budget = Reason.budget_base, Reason.budget_per
+
 let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ | None -> None
 
 let get (v : view) e =
@@ -126,8 +195,6 @@ let things (v : view) p x =
     Store.iter_things v p w (fun e -> out := e :: !out);
     List.sort compare !out
 
-type term = Query.term = Var of int | Thing of int | Val of value
-type pattern = Query.pattern = { e : term; p : int; v : term }
 type query = Query.t = { vars : int; where : pattern list; ranges : (int * value * value) list }
 
 let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)

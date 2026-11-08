@@ -4,7 +4,9 @@
    kills land inside one: recovery must set no snapshot aside and leave no merge's file (G12). One more thread loads:
    large groups of 150 new things (300 additions, the path of large groups from 200 here, in chunks of 64), whose
    frames are written by pieces beside their merges and forced every 2 KB, so that kills land inside them too; its
-   first and last things are checked. Then it starts the next child on the same database. Usage: crash.exe DIR ROUNDS
+   first and last things are checked. A rule marks each client's thing in the client's own group: the mark must come
+   back with it (a derived fact is durable with its group, replayed from the frame). Then it starts the next child on
+   the same database. Usage: crash.exe DIR ROUNDS
    [SEED]. *)
 
 open Cepheus
@@ -20,14 +22,18 @@ let child dir =
   Bulk.chunk := 64;
   Journal.force_every := 2048;
   let db = match open_ dir with Ok db -> db | Error e -> prerr_endline (message e); exit 2 in
-  let[@warning "-8"] (Ok [ name; seq ]) = declare db [ prop ~unique:true "name" Ttext; prop "seq" Tint ] in
+  let[@warning "-8"] (Ok [ name; seq; by; mark ]) =
+    declare db [ prop ~unique:true "name" Ttext; prop "seq" Tint; prop "by" Tint; prop "mark" Tbool ] in
+  (* a rule: each client's thing is marked, by the writer, in the client's group (the loader's things are not) *)
+  ignore (define db [ { name = "marked"; vars = 2; where = [ { e = Var 0; p = by; v = Var 1 } ]; ranges = [];
+                        head = Give { e = Var 0; p = mark; v = Val (Bool true) } } ]);
   let m = Mutex.create () in
   let run c =
     let k = ref 0 in
     while true do
       incr k;
       let label = Printf.sprintf "%d-%d-%d" (Unix.getpid ()) c !k in
-      match write db ~by:c ~why:"crash" [ Add (-1, name, Text label); Add (-1, seq, Int !k) ] with
+      match write db ~by:c ~why:"crash" [ Add (-1, name, Text label); Add (-1, seq, Int !k); Add (-1, by, Int c) ] with
       | Ok r ->
         Mutex.lock m;
         Printf.printf "%d %s %d\n%!" r.group label !k;
@@ -87,13 +93,17 @@ let parent dir rounds seed =
         "round %d: a snapshot was set aside: %s" round (String.concat "; " (notes db));
       C.check (tmps () = []) "round %d: a merge's file was left" round;
       let v = view db in
-      let name = Option.get (property v "name") and seq = Option.get (property v "seq") in
+      let name = Option.get (property v "name") and seq = Option.get (property v "seq") and mark = Option.get (property v "mark") in
       List.iter
         (fun (g, label, k) ->
           incr total;
           C.check (group v >= g) "round %d: group %d confirmed, recovered up to %d" round g (group v);
+          let loaded = String.contains label 'L' in
           match things v name (Text label) with
-          | [ e ] -> C.check (values v e seq = [ Int k ]) "round %d: %s has the wrong content" round label
+          | [ e ] ->
+            C.check (values v e seq = [ Int k ]) "round %d: %s has the wrong content" round label;
+            (* the derived fact came back with its group, from the frame: G1 for derived facts *)
+            C.check (values v e mark = (if loaded then [] else [ Bool true ])) "round %d: %s has the wrong mark" round label
           | l -> C.fail "round %d: confirmed %s (group %d) found %d times" round label g (List.length l))
         !acks;
       close db

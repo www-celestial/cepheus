@@ -109,6 +109,13 @@ let[@inline] framec b o =
 let[@inline] i64 b o = Int64.to_int (get64u (frame b o) (o land Pages.mask))
 let[@inline] u32 b o = Int32.to_int (get32u (frame b o) (o land Pages.mask)) land 0xFFFFFFFF
 let[@inline] ci64 b o = Int64.to_int (get64u (framec b o) (o land Pages.mask))
+
+(* A fact only derived (by a rule, not asserted) has bit 63 of its value word flipped, in both orders and both parts.
+   OCaml's ints have 63 bits: Int64.of_int copies bit 62 into bit 63, so the flag is their difference (a run of format
+   5 reads as all asserted), and Int64.to_int, which drops bit 63, reads every value unchanged: no reader of values
+   needs to know the flag. *)
+let[@inline] flag_of (r : int64) = Int64.to_int (Int64.shift_right_logical (Int64.logxor r (Int64.shift_left r 1)) 63) <> 0
+let[@inline] flagged w derived = if derived then Int64.logxor (Int64.of_int w) Int64.min_int else Int64.of_int w
 let[@inline] cu32 b o = Int32.to_int (get32u (framec b o) (o land Pages.mask)) land 0xFFFFFFFF
 
 (* the bits set in a 32-bit word (Warren, Hacker's Delight, 5-1) *)
@@ -174,6 +181,9 @@ let[@inline] ceav b i = ci64 b (b.o_eav + (8 * i))
 let[@inline] cpoff b p = ci64 b (b.o_poff + (8 * p))
 let[@inline] cavv b i = ci64 b (b.o_avv + (8 * i))
 let[@inline] cave b i = cu32 b (b.o_ave + (4 * i))
+let[@inline] eflag b i = let o = b.o_eav + (8 * i) in flag_of (get64u (frame b o) (o land Pages.mask))
+let[@inline] ceflag b i = let o = b.o_eav + (8 * i) in flag_of (get64u (framec b o) (o land Pages.mask))
+let[@inline] cavflag b i = let o = b.o_avv + (8 * i) in flag_of (get64u (framec b o) (o land Pages.mask))
 
 (* [f b x] again until it misses no page; for a raising reader, or a lookup made of them *)
 let rec safe f b x = match f b x with r -> ended r | exception Miss k -> fault b k; safe f b x
@@ -234,6 +244,25 @@ let mem_e b e p w =
 
 let rec base_mem b e p w =
   b.k > 0 && match mem_e b e p w with r -> ended r | exception Miss k -> fault b k; base_mem b e p w
+
+(* 0: no row of (e p w) in the part; 1: a row, asserted; 2: a row, only derived *)
+let state_e b e p w =
+  let s = slot b e in
+  if s < 0 then 0
+  else
+    let i = lower_e b s p w in
+    if i < eoff b (s + 1) && eap b i = p && eav b i = w then (if eflag b i then 2 else 1) else 0
+
+let rec base_state b e p w =
+  if b.k = 0 then 0 else match state_e b e p w with r -> ended r | exception Miss k -> fault b k; base_state b e p w
+
+(* every row of e with its flag: for the merge *)
+let base_iter_ef b e f =
+  let s = cslot b e in
+  if s >= 0 then
+    for i = ceoff b s to ceoff b (s + 1) - 1 do
+      f (ceap b i) (ceav b i) (ceflag b i)
+    done
 
 let rec base_has b e = b.k > 0 && match slot b e with s -> ended (s >= 0) | exception Miss k -> fault b k; base_has b e
 
@@ -352,10 +381,14 @@ let chunk_bits = 12
 
 type dict = { chunks : chunks; dcount : int; smap : int SM.t; extra : string IM.t; dnext : int }
 
-(* A change is a difference from the runs' state: [true], a fact they lack; [false], a fact of theirs retracted.
-   Beside each map, its net count (facts added minus facts retracted), so that every count is exact. *)
-type tdelta = { tf : bool PW.t;  (* (property, value) -> added *) tn : int IM.t  (* property -> net count *) }
-type vdelta = { vn : int; vm : bool IM.t  (* thing -> added *) }
+(* An entry is a difference from the runs' state, as a small int: bit 0, the fact is in the view; bit 1, it is only
+   derived there; bit 2, it is in the runs; bit 3, it is only derived there. So 1 (or 3, derived) is a fact the runs
+   lack, 4 (or 12) a fact of theirs retracted, 5, 7, 13 a fact of theirs whose flag changed. Beside each map, its net
+   count (facts added minus facts retracted), so that every count is exact. *)
+type tdelta = { tf : int PW.t;  (* (property, value) -> entry *) tn : int IM.t  (* property -> net count *) }
+type vdelta = { vn : int; vm : int IM.t  (* thing -> entry *) }
+
+let[@inline] present st = st land 1 <> 0
 type pdelta = { pn : int; pk : int  (* values in pm *); pm : vdelta IM.t  (* value -> its things *) }
 
 type delta = {
@@ -580,6 +613,23 @@ let newer v h j e p w =
     !found
   end
 
+(* the state of (e p w) in the runs, the delta aside: 0 absent, 1 asserted, 2 only derived; the newest run with an
+   entry decides (a run that changed a fact's flag holds a retraction and an addition of it: the addition decides) *)
+let runs_state v e p w =
+  let rs = v.runs in
+  let n = Array.length rs in
+  if n = 1 then base_state rs.(0).a e p w
+  else begin
+    let r = ref (-1) and j = ref 0 in
+    while !r < 0 && !j < n do
+      let x = rs.(!j) in
+      if has_p x.a p then (let s = base_state x.a e p w in if s > 0 then r := s);
+      if !r < 0 && has_p x.t p && base_mem x.t e p w then r := 0;
+      incr j
+    done;
+    max 0 !r
+  end
+
 (* is (e p w) in the state of the runs (the delta aside): the newest run with an entry decides *)
 let runs_mem v e p w =
   let rs = v.runs in
@@ -597,7 +647,7 @@ let runs_mem v e p w =
 
 (* the delta's facts of thing e for property p, in value order *)
 let iter_delta_ep (td : tdelta) p f =
-  let rec go s = match s () with Seq.Cons (((p', w), add), s') when p' = p -> f w add; go s' | _ -> () in
+  let rec go s = match s () with Seq.Cons (((p', w), st), s') when p' = p -> f w st; go s' | _ -> () in
   go (PW.to_seq_from (p, min_int) td.tf)
 
 (* the one run of h when it has one bit, else -1 *)
@@ -617,7 +667,7 @@ let iter_values v e p f =
           base_iter_ea rs.(j).a e p (fun w ->
               if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then f w)
       done;
-      Option.iter (fun td -> iter_delta_ep td p (fun w add -> if add then f w)) td
+      Option.iter (fun td -> iter_delta_ep td p (fun w st -> if present st then f w)) td
     end
   end
 
@@ -637,7 +687,7 @@ let iter_facts v e f =
               if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then
                 l := (p, w) :: !l)
       done;
-      Option.iter (fun td -> PW.iter (fun pw add -> if add then l := pw :: !l) td.tf) td;
+      Option.iter (fun td -> PW.iter (fun pw st -> if present st then l := pw :: !l) td.tf) td;
       List.iter (fun (p, w) -> f p w) (List.sort compare !l)
     end
   end
@@ -656,7 +706,7 @@ let iter_things v p w f =
       base_iter_av rs.(j).a p w (fun e ->
           if (match vd with Some vd -> not (IM.mem e vd.vm) | None -> true) && shown v j e p w then f e)
     done;
-    Option.iter (fun vd -> IM.iter (fun e add -> if add then f e) vd.vm) vd
+    Option.iter (fun vd -> IM.iter (fun e st -> if present st then f e) vd.vm) vd
 
 let iter_prop v p f =
   let rs = v.runs in
@@ -671,7 +721,7 @@ let iter_prop v p f =
           in
           if (not in_delta) && shown v j e p w then f e w)
     done;
-    Option.iter (fun pd -> IM.iter (fun w vd -> IM.iter (fun e add -> if add then f e w) vd.vm) pd.pm) pd
+    Option.iter (fun pd -> IM.iter (fun w vd -> IM.iter (fun e st -> if present st then f e w) vd.vm) pd.pm) pd
 
 (* the facts of p with lo <= value word <= hi (an order on values for the inline types) *)
 let iter_range v p lo hi f =
@@ -692,15 +742,23 @@ let iter_range v p lo hi f =
     | Some pd ->
       let rec go s =
         match s () with
-        | Seq.Cons ((w, vd), s') when w <= hi -> IM.iter (fun e add -> if add then f e w) vd.vm; go s'
+        | Seq.Cons ((w, vd), s') when w <= hi -> IM.iter (fun e st -> if present st then f e w) vd.vm; go s'
         | _ -> ()
       in
       if lo <= hi then go (IM.to_seq_from lo pd.pm)
 
 let mem v e p w =
   match thing_delta v e with
-  | Some td -> (match PW.find_opt (p, w) td.tf with Some add -> add | None -> runs_mem v e p w)
+  | Some td -> (match PW.find_opt (p, w) td.tf with Some st -> present st | None -> runs_mem v e p w)
   | None -> runs_mem v e p w
+
+(* the state of (e p w) in the view: 0 absent, 1 asserted, 2 only derived *)
+let[@inline] state_of_entry st = if st land 1 = 0 then 0 else if st land 2 = 0 then 1 else 2
+
+let state v e p w =
+  match thing_delta v e with
+  | Some td -> (match PW.find_opt (p, w) td.tf with Some st -> state_of_entry st | None -> runs_state v e p w)
+  | None -> runs_state v e p w
 
 (* exact counts: each run's rows minus its retractions, and the delta's net counts *)
 let count_values v e p =
@@ -763,14 +821,16 @@ let distinct v p =
 
 (* ---- Changing a view ---- *)
 
-let net = function Some true -> 1 | Some false -> -1 | None -> 0
+(* an entry's net count against the runs: in the view, minus in the runs; -1 is no entry *)
+let[@inline] net st = if st < 0 then 0 else (st land 1) - ((st lsr 2) land 1)
 
-(* st: Some true, (e p w) is added (not in the runs); Some false, removed (in the runs); None, as in the runs *)
-let change v e p w st =
+(* the entry of (e p w) becomes [st] (-1: none, the view agrees with the runs); [old], its entry now (-1: none) and
+   [td] its thing's entries, found by the caller *)
+let change v e p w ~td ~old st =
   let d = v.delta in
-  let td = Option.value (IM.find_opt e d.de) ~default:{ tf = PW.empty; tn = IM.empty } in
-  let diff = net st - net (PW.find_opt (p, w) td.tf) in
-  let tf = match st with None -> PW.remove (p, w) td.tf | Some add -> PW.add (p, w) add td.tf in
+  let td = match td with Some td -> td | None -> { tf = PW.empty; tn = IM.empty } in
+  let diff = net st - net old in
+  let tf = if st < 0 then PW.remove (p, w) td.tf else PW.add (p, w) st td.tf in
   let tn =
     if diff = 0 then td.tn
     else
@@ -778,25 +838,108 @@ let change v e p w st =
       if k = 0 then IM.remove p td.tn else IM.add p k td.tn
   in
   let de = if PW.is_empty tf then IM.remove e d.de else IM.add e { tf; tn } d.de in
-  let pd = Option.value (IM.find_opt p d.dav) ~default:{ pn = 0; pk = 0; pm = IM.empty } in
-  let old = IM.find_opt w pd.pm in
-  let vd = Option.value old ~default:{ vn = 0; vm = IM.empty } in
-  let vm = match st with None -> IM.remove e vd.vm | Some add -> IM.add e add vd.vm in
+  let pd = match IM.find_opt p d.dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = IM.empty } in
+  let vold = IM.find_opt w pd.pm in
+  let vd = match vold with Some vd -> vd | None -> { vn = 0; vm = IM.empty } in
+  let vm = if st < 0 then IM.remove e vd.vm else IM.add e st vd.vm in
   let pm, pk =
-    if IM.is_empty vm then IM.remove w pd.pm, (if old = None then pd.pk else pd.pk - 1)
-    else IM.add w { vn = vd.vn + diff; vm } pd.pm, if old = None then pd.pk + 1 else pd.pk
+    if IM.is_empty vm then IM.remove w pd.pm, (if vold = None then pd.pk else pd.pk - 1)
+    else IM.add w { vn = vd.vn + diff; vm } pd.pm, if vold = None then pd.pk + 1 else pd.pk
   in
   let dav = if IM.is_empty pm then IM.remove p d.dav else IM.add p { pn = pd.pn + diff; pk; pm } d.dav in
   { v with delta = { de; dav; dn = d.dn + 1; dnet = d.dnet + diff } }
 
-(* Adds or retracts (e p w); the view itself when nothing changes. *)
-let apply v add e p w =
-  if mem v e p w = add then v
-  else
-    let v = touch v e in
-    let inruns = runs_mem v e p w in
-    let st = if add then (if inruns then None else Some true) else if inruns then Some false else None in
-    change v e p w st
+(* the entry for a state (0 absent, 1 asserted, 2 only derived) over a state of the runs; -1 when they agree *)
+let[@inline] entry s rs =
+  if s = rs then -1 else (if s = 0 then 0 else if s = 1 then 1 else 3) lor (if rs = 0 then 0 else if rs = 1 then 4 else 12)
+
+(* (e p w) takes state [s] (0 absent, 1 asserted, 2 only derived): the view (itself when nothing changes) and the
+   state the fact had, from one lookup *)
+let swap v e p w s =
+  let td = thing_delta v e in
+  let old = match td with Some td -> (match PW.find_opt (p, w) td.tf with Some st -> st | None -> -1) | None -> -1 in
+  let cur, rs = if old >= 0 then state_of_entry old, state_of_entry (old lsr 2) else (let r = runs_state v e p w in r, r) in
+  if cur = s then v, cur else change (touch v e) e p w ~td ~old (entry s rs), cur
+
+let set v e p w s = fst (swap v e p w s)
+
+(* Many facts set at once: [es], [ps], [ws], [ss] the things, properties, value words and states (0 absent,
+   1 asserted, 2 only derived) of n facts, distinct, sorted by (thing, property, value). The same result as [set] one
+   after the other, with one walk of the map by thing a thing and one of the map by property a property, where [set]
+   walks both for each fact: the derived facts of a group come in clusters (a new thing's types, a class's members). *)
+let set_sorted v (es : int array) (ps : int array) (ws : int array) (ss : int array) n =
+  if n = 0 then v
+  else begin
+    let d = v.delta in
+    let de = ref d.de and dn = ref d.dn and dnet = ref d.dnet in
+    (* the entries changed, for the map by property: (p, w, e, entry, diff) *)
+    let ch = ref [] and v = ref v in
+    let i = ref 0 in
+    while !i < n do
+      let e = es.(!i) in
+      let td0 = if is_touched !v e then IM.find_opt e !de else None in
+      let tf = ref (match td0 with Some t -> t.tf | None -> PW.empty) and tn = ref (match td0 with Some t -> t.tn | None -> IM.empty) in
+      let any = ref false in
+      while !i < n && es.(!i) = e do
+        let p = ps.(!i) and w = ws.(!i) and s = ss.(!i) in
+        let old = match PW.find_opt (p, w) !tf with Some st -> st | None -> -1 in
+        let cur, rs = if old >= 0 then state_of_entry old, state_of_entry (old lsr 2) else (let r = runs_state !v e p w in r, r) in
+        if cur <> s then begin
+          let st = entry s rs in
+          let diff = net st - net old in
+          tf := (if st < 0 then PW.remove (p, w) !tf else PW.add (p, w) st !tf);
+          if diff <> 0 then begin
+            let k = Option.value (IM.find_opt p !tn) ~default:0 + diff in
+            tn := if k = 0 then IM.remove p !tn else IM.add p k !tn
+          end;
+          ch := (p, w, e, st, diff) :: !ch;
+          incr dn;
+          dnet := !dnet + diff;
+          any := true
+        end;
+        incr i
+      done;
+      if !any then begin
+        v := touch !v e;
+        de := if PW.is_empty !tf then IM.remove e !de else IM.add e { tf = !tf; tn = !tn } !de
+      end
+    done;
+    let ch = List.sort (fun (p, w, e, _, _) (p', w', e', _, _) -> compare (p, w, e) (p', w', e')) !ch in
+    let dav = ref d.dav in
+    let rec by_p = function
+      | [] -> ()
+      | (p, _, _, _, _) :: _ as l ->
+        let pd = match IM.find_opt p !dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = IM.empty } in
+        let pm = ref pd.pm and pk = ref pd.pk and pn = ref pd.pn in
+        let rec by_w = function
+          | (p', w, _, _, _) :: _ as l when p' = p ->
+            let vold = IM.find_opt w !pm in
+            let vd = match vold with Some vd -> vd | None -> { vn = 0; vm = IM.empty } in
+            let vm = ref vd.vm and vn = ref vd.vn in
+            let rec by_e = function
+              | (p'', w', e, st, diff) :: r when p'' = p && w' = w ->
+                vm := (if st < 0 then IM.remove e !vm else IM.add e st !vm);
+                vn := !vn + diff;
+                pn := !pn + diff;
+                by_e r
+              | r -> r
+            in
+            let rest = by_e l in
+            if IM.is_empty !vm then (pm := IM.remove w !pm; if vold <> None then decr pk)
+            else (pm := IM.add w { vn = !vn; vm = !vm } !pm; if vold = None then incr pk);
+            by_w rest
+          | r -> r
+        in
+        let rest = by_w l in
+        dav := (if IM.is_empty !pm then IM.remove p !dav else IM.add p { pn = !pn; pk = !pk; pm = !pm } !dav);
+        by_p rest
+    in
+    by_p ch;
+    { !v with delta = { de = !de; dav = !dav; dn = !dn; dnet = !dnet } }
+  end
+
+(* Adds (asserted) or retracts (e p w); the view itself when nothing changes. *)
+let apply v add e p w = set v e p w (if add then 1 else 0)
 
 let max_thing v =
   Array.fold_left (fun m r -> max m (max r.a.ne r.t.ne - 1)) (v.next_e - 1) v.runs

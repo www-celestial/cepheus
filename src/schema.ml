@@ -9,6 +9,7 @@ let p_name = 1
 let p_type = 2
 let p_many = 3
 let p_unique = 4
+let p_rule = 5
 let first_prop = 16
 let first_thing = 65536
 let last_thing = (1 lsl 31) - 1
@@ -18,16 +19,22 @@ let system =
      Some { name = "cepheus/name"; typ = Value.Ttext; many = false; unique = true };
      Some { name = "cepheus/type"; typ = Value.Tint; many = false; unique = false };
      Some { name = "cepheus/many"; typ = Value.Tbool; many = false; unique = false };
-     Some { name = "cepheus/unique"; typ = Value.Tbool; many = false; unique = false } |]
+     Some { name = "cepheus/unique"; typ = Value.Tbool; many = false; unique = false };
+     Some { name = "cepheus/rule"; typ = Value.Ttext; many = false; unique = false } |]
 
 module SM = Map.Make (String)
 
-type t = { props : prop option array; names : int SM.t }
+module IM = Map.Make (Int)
+
+(* rules: rule thing -> (name, definition) *)
+type t = { props : prop option array; names : int SM.t; rules : (string * string) IM.t; rkey : int }
+
+let keys = Atomic.make 0
 
 let initial =
   let names = ref SM.empty in
   Array.iteri (fun i -> function Some p -> names := SM.add p.name i !names | None -> ()) system;
-  { props = Array.append system (Array.make (first_prop - Array.length system) None); names = !names }
+  { props = Array.append system (Array.make (first_prop - Array.length system) None); names = !names; rules = IM.empty; rkey = 0 }
 
 let find s p = if p >= 0 && p < Array.length s.props then Array.unsafe_get s.props p else None
 let by_name s n = SM.find_opt n s.names
@@ -47,7 +54,21 @@ let set s p d =
   let names = match props.(p) with Some old -> SM.remove old.name s.names | None -> s.names in
   props.(p) <- d;
   let names = match d with Some d -> SM.add d.name p names | None -> names in
-  { props; names }
+  { s with props; names }
+
+let rules s = IM.bindings s.rules
+let rules_key s = s.rkey
+let has_rules s = not (IM.is_empty s.rules)
+let rule s p = IM.find_opt p s.rules
+let rule_by_name s n = IM.fold (fun p (n', _) acc -> if n' = n then Some p else acc) s.rules None
+
+let set_rule s p r =
+  match IM.find_opt p s.rules, r with
+  | Some a, Some b when a = b -> s
+  | None, None -> s
+  | _ ->
+    let rules = match r with Some r -> IM.add p r s.rules | None -> IM.remove p s.rules in
+    { s with rules; rkey = 1 + Atomic.fetch_and_add keys 1 }
 
 (* The facts that declare property [p]. *)
 let facts p d =

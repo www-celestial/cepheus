@@ -26,7 +26,7 @@ let () = Journal.window := 48
 
 let group n text =
   { Group.n; time = n; by = 1; why = "x"; first_new = 65536 + n; count_new = 1;
-    changes = [| { Group.add = true; e = 65536 + n; p = 16; v = Value.Text text } |] }
+    changes = [| { Group.kind = Added; e = 65536 + n; p = 16; v = Value.Text text } |] }
 
 (* A journal of frames, each of a few groups with texts of the given sizes; the bytes and the frame ends. *)
 let build sizes =
