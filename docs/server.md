@@ -510,7 +510,10 @@ database (`bench/sbench.ml`, `local` and `localq`); through the socket, the same
 
 - **A point read** in the program's memory is 115 times PostgreSQL's and 46 times a read through the socket: what is
   left is the engine's own read (the design measured 0.42 µs in the process on another day's build; the load of the
-  number and the choice of the state add a few nanoseconds). The plan's target was 0.5 µs.
+  number and the choice of the state add a few nanoseconds). The plan's target was 0.5 µs. Measured again after the
+  rules came in (run format 6, a flag in each value word), on the same database grown by the write measurements below
+  to 1.56 M groups, n = 11: 0.245 µs [0.231, 0.251] in the program, 9.93 µs [9.49, 11.27] through the socket,
+  PostgreSQL 24.49 µs [24.11, 28.89].
 - **Questions** gain less: Q3 and Q4 do their work in the reader as they do in the server; the round trip they skip
   is small beside it (Q3 loses 39 µs, Q4 about 1 ms of coding and decoding 100 rows).
 
