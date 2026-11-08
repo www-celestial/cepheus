@@ -7,7 +7,9 @@
 
 type t
 
-val create : Rng.t -> t
+val create : ?reverts:bool -> Rng.t -> t
+(** [reverts]: a failed fsync undoes the failed writes in memory, as Btrfs does; by default it keeps them, as ext4
+    and XFS do (see {!fail_next_fsync}). *)
 val disk : t -> Disk.t
 (** The [Disk.t] that the engine uses. *)
 
@@ -45,8 +47,18 @@ val flip_durable : t -> string -> int -> int -> int option
     the durable size): the offset, or None if there is no such byte. The change is silent: reads see it. *)
 
 val fail_next_fsync : t -> unit
-(** The next fsync fails with [Disk.Io]; as Linux does, the written pages are then marked clean without reaching the
-    disk (Rebello et al., ATC 2020), so a later fsync would succeed without making them durable. *)
+(** The next fsync fails with [Disk.Io]. As Linux file systems do (Rebello et al., ATC 2020), the sectors written
+    since the last fsync are marked clean without reaching the disk: a later fsync succeeds without writing them,
+    unless they are written again. ext4 and XFS keep their new bytes in memory, readable until a reboot, and ext4 may
+    make the new size durable over them (a draw here); Btrfs ([reverts]) undoes them in memory. A power loss resolves
+    them as it does unforced sectors: lost, kept, or torn. *)
+
+val fail_fsync_at : ?crash_after:int -> t -> int -> unit
+(** [fail_fsync_at t n]: the [n+1]-th fsync from now fails, as {!fail_next_fsync} says; with [crash_after c], the
+    process then dies at the [c+1]-th mutating call after the failure (as {!crash_after}). *)
+
+val failures : t -> int
+(** The fsyncs that failed so far. *)
 
 val advance : t -> int -> unit
 (** Moves the simulated clock by some milliseconds. *)

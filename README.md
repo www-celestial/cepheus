@@ -35,7 +35,8 @@ group 3 made thing 65536
 When `write` returns `Ok`, the group is on the disk: it survives a crash of the process or a power loss (G1). A group
 is all or nothing (G2); the groups after a recovery are a prefix 1..k of the history (G3); the writes are strictly
 serializable, one writer applying them one at a time (G4); a view never changes and shows only durable groups (G5);
-damage to durable bytes is detected, never dropped in silence (G6). Each guarantee, its exact conditions, its proof
+damage to durable bytes is detected, never dropped in silence (G6); a merge leaves the old runs or the new ones,
+whole (G12); after a failed fsync, no view shows a group a power loss could take back (G13). Each guarantee, its exact conditions, its proof
 and the test that checks it: [guarantees](docs/guarantees.md).
 
 ## Against the established databases
@@ -51,12 +52,14 @@ facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/ben
 | triangles of a follow graph (568,163 links), 3 cores | 371 ms | 603 ms (2 processes) |
 | durable writes, 256 clients | on par (both bound by the disk's fsync) | |
 | triangles, base of 245 MB read through a 32 MB cache, process capped at 128 MB | 102 s | **1.05 s** (32 MB of buffers) |
-| bulk load of 10 M facts | 135 to 153 s | **about 1 min** (`COPY`) |
+| load of 10 M facts | 7.04 s, in two large groups | 32.3 s (`COPY`, indexes, `VACUUM ANALYZE`) |
 
 SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core: Cepheus is faster on an
 invoice by id (0.37 µs against 0.68) and on the unpaid sum per city (230 ms against 360), even on the city's unpaid
-invoices and the triangles, slower on a client by e-mail (1.67 µs against 1.52); SQLite loads the 10 M facts 12 times
-faster (8.6 s) into a file half the size (131 MB). Where each one wins, and why, and how Cepheus compares by design
+invoices and the triangles, slower on a client by e-mail (1.67 µs against 1.52). Loading the 10 M facts, alternated
+ten times, is a tie (Cepheus 7.04 s in two large groups, SQLite 6.97 s), but SQLite does it in 11 MB of memory against
+2.5 to 3.2 GB, into a file of 131 MB against 335 MB; at a transaction a client, Cepheus' group commit loads 1 M facts
+16 times faster (10.6 s against 166.7 s). Where each one wins, and why, and how Cepheus compares by design
 with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison](docs/comparison.md).
 
 ## Build and test

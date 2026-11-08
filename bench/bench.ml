@@ -2,7 +2,8 @@
    for PostgreSQL's COPY. Method and results: docs/benchmarks.md.
 
      bench.exe load DIR CSVDIR FACTS   Cepheus through its writer (64 clients, one group per client and its 20
-                                       invoices, then the follow links), a snapshot, and the CSV files
+                                       invoices, then the follow links; GROUP=N clients a group, THREADS=T), a
+                                       snapshot, and the CSV files
      bench.exe read DIR FACTS [QS]     open (restart time), then Q1-Q5 (or those named in QS, as Q1,Q4): median
                                        and its 95 % interval over RUNS runs (21); CEPHEUS_DOMAINS=d runs a question
                                        on up to d domains
@@ -56,7 +57,7 @@ let client_data nclients k =
   let inv = List.init 20 (fun _ -> 1 + Rng.int r 100_000, statuses.(Rng.int r 10), Rng.int r 3650) in
   c, fol, inv
 
-let parallel n f =
+let parallel_n threads n f =
   let next = Atomic.make 0 in
   let worker () =
     let go = ref true in
@@ -65,7 +66,9 @@ let parallel n f =
       if k >= n then go := false else f k
     done
   in
-  List.iter Thread.join (List.init 64 (fun _ -> Thread.create worker ()))
+  List.iter Thread.join (List.init threads (fun _ -> Thread.create worker ()))
+
+let parallel n f = parallel_n 64 n f
 
 let ok = function Ok r -> r | Error e -> failwith (message e)
 
@@ -88,36 +91,86 @@ let status field =
 let rss () = status "VmRSS:"
 let peak () = status "VmHWM:"
 
+(* the bytes of a directory's files, recursively *)
+let rec du path =
+  if Sys.is_directory path then Array.fold_left (fun n f -> n + du (Filename.concat path f)) 0 (Sys.readdir path)
+  else (Unix.stat path).Unix.st_size
+
+(* GROUP clients a group (1: a group per client, through 64 threads, as an application writing one invoice book at
+   a time; more: large groups, a load), THREADS clients writing at once (64, or 1 with large groups) *)
 let load dir csv facts =
   cache_from_env ();
   let nclients = facts / facts_per_client in
+  let per = match Sys.getenv_opt "GROUP" with Some g -> max 1 (int_of_string g) | None -> 1 in
+  let threads = match Sys.getenv_opt "THREADS" with Some t -> int_of_string t | None -> if per > 1 then 1 else 64 in
   let db = ok (open_ dir) in
   let s = schema db in
   let cid = Array.make nclients 0 in
+  let nbatch = (nclients + per - 1) / per in
+  let gc0 = Gc.quick_stat () and f0 = Atomic.get Engine.frames in
   let t0 = now () in
-  parallel nclients (fun k ->
-      let c, _, inv = client_data nclients k in
-      let ops =
-        [ Add (-1, s.name, Text (Printf.sprintf "client-%d" k)); Add (-1, s.cty, Text c); Add (-1, s.mail, Text (email k)) ]
-        @ List.concat
-            (List.mapi
-               (fun j (total, st, d) ->
-                 let i = -(j + 2) in
-                 [ Add (i, s.client, Link (-1)); Add (i, s.total, Money total); Add (i, s.status, Text st); Add (i, s.date, Date d) ])
-               inv)
-      in
-      cid.(k) <- thing (ok (write db ~by:1 ~why:"load" ops)) (-1));
-  parallel nclients (fun k ->
-      let _, fol, _ = client_data nclients k in
-      ignore (ok (write db ~by:1 ~why:"follows" (List.map (fun f -> Add (cid.(k), s.follows, Link cid.(f))) fol))));
+  (* a large group's operations made by several domains, each its share of the clients, as a loader would parse its
+     input in parallel *)
+  let build k0 k1 =
+    let part lo hi =
+      let ops = ref [] in
+      for k = hi - 1 downto lo do
+        let c, _, inv = client_data nclients k in
+        let base = -1 - (21 * (k - k0)) in
+        ops :=
+          [ Add (base, s.name, Text (Printf.sprintf "client-%d" k)); Add (base, s.cty, Text c); Add (base, s.mail, Text (email k)) ]
+          @ List.concat
+              (List.mapi
+                 (fun j (total, st, d) ->
+                   let i = base - 1 - j in
+                   [ Add (i, s.client, Link base); Add (i, s.total, Money total); Add (i, s.status, Text st); Add (i, s.date, Date d) ])
+                 inv)
+          @ !ops
+      done;
+      !ops
+    in
+    let d = if k1 - k0 >= 1000 then 4 else 1 in
+    let cut i = k0 + ((k1 - k0) * i / d) in
+    let doms = List.init d (fun i -> Domain.spawn (fun () -> part (cut i) (cut (i + 1)))) in
+    List.concat (List.map Domain.join doms)
+  in
+  parallel_n threads nbatch (fun b ->
+      let k0 = b * per and k1 = min nclients ((b + 1) * per) in
+      let ops = build k0 k1 in
+      let r = ok (write db ~by:1 ~why:"load" ops) in
+      (* the new ids, read once (thing r t walks the list) *)
+      let ids = Hashtbl.create (List.length r.things) in
+      List.iter (fun (t, e) -> Hashtbl.replace ids t e) r.things;
+      for k = k0 to k1 - 1 do cid.(k) <- Hashtbl.find ids (-1 - (21 * (k - k0))) done);
   let t1 = now () in
-  ok (snapshot db);
+  parallel_n threads nbatch (fun b ->
+      let k0 = b * per and k1 = min nclients ((b + 1) * per) in
+      let ops = ref [] in
+      for k = k1 - 1 downto k0 do
+        let _, fol, _ = client_data nclients k in
+        ops := List.map (fun f -> Add (cid.(k), s.follows, Link cid.(f))) fol @ !ops
+      done;
+      ignore (ok (write db ~by:1 ~why:"follows" !ops)));
   let t2 = now () in
+  let gc1 = Gc.quick_stat () in
+  let size1 = du dir and runs_before = Array.length (view db).runs in
+  (* SNAPSHOT=0 leaves the runs as the load made them (for the reads across runs) *)
+  if Sys.getenv_opt "SNAPSHOT" <> Some "0" then ok (snapshot db);
+  let t3 = now () in
   let v = view db in
-  Printf.printf "cepheus load: %d clients, %d facts, %.1f s through the writer (%.0f facts/s), snapshot %.2f s, peak RSS %d MB\n%!"
-    nclients (Store.facts v) (t1 -. t0) (float (Store.facts v) /. (t1 -. t0)) (t2 -. t1) (peak () / 1024);
-  Printf.printf "  %d merges in the background\n" (Atomic.get Engine.merges);
+  Printf.printf "cepheus load: %d clients, %d facts in groups of %d clients by %d threads: %.2f s to confirm every group (clients %.2f s, follows %.2f s; %.0f facts/s), peak RSS %d MB, on disk %d MB (journal and runs)\n%!"
+    nclients (Store.facts v) per threads (t2 -. t0) (t1 -. t0) (t2 -. t1) (float (Store.facts v) /. (t2 -. t0)) (peak () / 1024) (size1 / 1048576);
+  Printf.printf "  then snapshot (every run merged into one) %.2f s, on disk %d MB; %d runs before it\n" (t3 -. t2) (du dir / 1048576) runs_before;
+  Printf.printf "  %d frames, %d merges in the background; GC: %.0f M words minor, %.0f M major, %d major collections\n"
+    (Atomic.get Engine.frames - f0) (Atomic.get Engine.merges) ((gc1.minor_words -. gc0.minor_words) /. 1e6)
+    ((gc1.major_words -. gc0.major_words) /. 1e6) (gc1.major_collections - gc0.major_collections);
+  Stats.print_latency "  writer resolves a batch" Engine.prepare_us;
+  Stats.print_latency "  a large group resolved and sorted" Engine.large_resolve_us;
+  Stats.print_latency "  a large group encoded" Engine.large_encode_us;
+  Stats.print_latency "  a large group merged into a run" Engine.large_merge_us;
   Stats.print_latency "  writer waits for a merge switch" Engine.switch_us;
+  Stats.print_latency "  a background merge" Engine.merge_us;
+  Stats.print_latency "  journal pwrite" Journal.write_us;
   Stats.print_latency "  journal fsync" Journal.fsync_us;
   close db;
   if Sys.getenv_opt "NOCSV" <> None then exit 0;

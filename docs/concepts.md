@@ -16,7 +16,7 @@ facts that are true at its group.
 
 - A **thing** (the entity) is a number and nothing else: it has no table and no columns, only the facts about it.
   The database gives thing numbers densely, from 65,536 up, in the order things are made. Dense numbers make "every
-  fact of a thing" an array access, not a search ([architecture](architecture.md#indexes-the-base-and-the-delta)).
+  fact of a thing" an array access, not a search ([architecture](architecture.md#indexes-the-runs-and-the-delta)).
 - A **property** (the attribute) is itself a thing, numbered from 16 to 65,535, with a name such as `client/city`, a
   type, and two flags (below). Numbers 1 to 4 are the four system properties that describe properties.
 - A **value** is atomic and typed: `Int` (a 63-bit signed integer), `Float`, `Bool`, `Text` (bytes; UTF-8 by
@@ -129,7 +129,7 @@ after n. It never changes once taken, taking one is free (one atomic read), and 
 thread or domain (an OCaml 5 domain is a thread of execution that runs in parallel with the others on its own core).
 `view db` is the newest **durable** state: it holds only groups whose journal frame is on the disk. A view stays valid
 as long as it is held, however many groups come after it; the memory it keeps is only what differs from the newer
-views (a persistent data structure, [architecture](architecture.md#indexes-the-base-and-the-delta)).
+views (a persistent data structure, [architecture](architecture.md#indexes-the-runs-and-the-delta)).
 
 ## Isolation: exactly what a reader and a writer see
 
@@ -264,8 +264,8 @@ fork: "paid", database: "unpaid"
 
 ## Databases
 
-A database is a directory: its journal, its snapshots (copies of the state that spare a restart most of the journal),
-and a lock. One process at a time opens it (G9); another open gets `Busy`. A server may hold many databases; what a
+A database is a directory: its journal, its runs (sorted copies of the state, in levels, that spare a restart most of
+the journal), and a lock. One process at a time opens it (G9); another open gets `Busy`. A server may hold many databases; what a
 database is for (an application, a customer, a data set) is the application's choice. A question reads one database.
 
 ```ocaml

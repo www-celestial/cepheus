@@ -11,7 +11,10 @@ compared only on what their own documentation says, quoted with its link; no num
 The test machine: Intel i7-4720HQ (4 cores, 8 threads), 11 GB of memory, a consumer SATA SSD (about 340 fsync a
 second), btrfs. 10 million facts: 113,636 clients, 2,272,720 invoices, 568,163 follow links. PostgreSQL in its own
 cluster, set up as an expert would (primary keys, an index on every searched column, `VACUUM ANALYZE`, prepared
-statements, fsync and `synchronous_commit` on, 1 GB of `shared_buffers`); Cepheus with a 1 GiB cache.
+statements, fsync and `synchronous_commit` on, 1 GB of `shared_buffers`); Cepheus with a 1 GiB cache. The reads and
+writes were measured side by side at milestone 2 (the one-level base); the loads after the levels and large groups.
+Cepheus' reads on one run measured since then are within a few percent of those below (Q1 0.38 µs, Q2 1.57 µs, Q3
+3.74 to 3.82 ms, Q4 231 to 237 ms, Q5 0.95 to 1.00 s: [benchmarks](benchmarks.md#reads-all-in-memory)).
 
 | | Cepheus | PostgreSQL | who wins, and why |
 |---|---:|---:|---|
@@ -26,7 +29,8 @@ statements, fsync and `synchronous_commit` on, 1 GB of `shared_buffers`); Cepheu
 | durable writes at a fixed rate of 2,000 a second, p99 | **0.1 to 1.7 s** | 0.6 to 6.1 s | Cepheus, on this noisy disk |
 | larger than memory: Q4, base 245 MB, 32 MB of cache, process capped at 128 MB | **385 ms** | 697 ms | Cepheus |
 | larger than memory: Q5 | 102 s | **1.05 s** | **PostgreSQL**, by 100 times (below) |
-| bulk load of 10 M facts | 135 to 153 s | **about 1 min** (`COPY`, indexes, `VACUUM ANALYZE`) | **PostgreSQL** (below) |
+| load of 10 M facts | **7.04 s [6.52, 7.41]** (10 runs), in 2 large groups | 32.3 s [29.6, 34.2] (6 runs; `COPY`, indexes, `VACUUM ANALYZE`) | Cepheus, 4.6 times: a large group is sorted in arrays and merged into a run at once (below) |
+| load of 10 M facts, a group a client (227,272 confirmed groups) | 111.8 s [103.1, 124.4] (4 runs) | not measured (`COPY` is one transaction) | |
 
 **Where PostgreSQL wins, and why.**
 - *Q5 larger than memory.* Cepheus orders a base's rows by thing, so a client's follow links lie among the rows of its
@@ -34,10 +38,12 @@ statements, fsync and `synchronous_commit` on, 1 GB of `shared_buffers`); Cepheu
   in 6 runs with a 48 MB cache). PostgreSQL keeps `follows` in a table of its own, 23 MB with its index, which fits in
   its 32 MB of buffers. A third order of Cepheus' rows (property, then thing) would make one property of many things
   local, at 10 bytes a fact more; it waits for real workloads to decide ([theory](theory.md#7-pages-and-the-cache)).
-- *Bulk load.* `COPY` writes rows straight into table pages and builds each index once at the end. Cepheus loads
-  through its writer like any write (groups of 83 facts, each frame forced), and its one level on disk makes each of
-  the 33 merges of a 10 M load rewrite the whole base: about 3.3 GB, beside the journal's fsyncs that every client
-  waits for ([architecture](architecture.md#the-merge-a-log-structured-merge-tree-of-two-components)).
+- *Bulk load, until the levels.* `COPY` writes rows straight into table pages and builds each index once at the end.
+  Cepheus loaded through its writer like any write (groups of 83 facts, each frame forced), and its one level on disk
+  made each of the 33 merges of a 10 M load rewrite the whole base: 135 to 153 s against PostgreSQL's minute. With the
+  levels and large groups, Cepheus loads the same facts in 7.04 s and `COPY` takes 32.3 s
+  ([architecture](architecture.md#large-groups)); Cepheus pays in memory (2.5 to 3.2 GB at the peak of one 9.4 M
+  group, where PostgreSQL works in its 1 GB of buffers).
 - *What it has that Cepheus has not built*: SQL, many concurrent writers (row locks), replication and failover, a
   planner for any SQL, decades of tools. And through its socket, any language and any machine can reach it; Cepheus is
   a library inside one process.
@@ -58,7 +64,7 @@ query: `max_parallel_workers_per_gather` defaults to 2
 SQLite is a library in the application's process, as Cepheus is: the fairest engine-to-engine comparison. The same
 10 million facts and answers, SQLite set up as an expert would (`INTEGER PRIMARY KEY`, a `WITHOUT ROWID` table for the
 links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both on one core, two rounds alternated
-([benchmarks](benchmarks.md#sqlite-354-at-10-million-facts-2026-11-08)):
+([benchmarks](benchmarks.md#sqlite-354-at-10-million-facts-the-reads-2026-11-08)):
 
 | | Cepheus | SQLite | who wins, and why |
 |---|---:|---:|---|
@@ -68,14 +74,15 @@ links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both o
 | Q4 unpaid sum per city | **230 ms** | 355 to 366 ms | Cepheus: Generic Join over sorted columns, where SQLite looks each unpaid invoice up by key and groups in a temporary B-tree |
 | Q5 triangles | **969 to 979 ms** | 1.04 s | Cepheus, slightly; on this uniform graph a nested loop is as good as a worst-case optimal join |
 | Q4 and Q5 on 3 cores | **107 ms, 371 ms** | one thread a statement | Cepheus |
-| load 10 M facts | 107 s | **8.6 s** | **SQLite**, 12 times: it writes B-tree pages once and builds each index by sorting |
-| size on disk | 245.8 MB base (+ a previous snapshot), 101 MB journal | **131 MB**, one file | **SQLite**: variable-length records, where Cepheus stores 8-byte words |
+| load 10 M facts, alternated (10 rounds) | 7.04 s [6.52, 7.41], 2 large groups | 6.97 s [6.38, 8.00] (`.import`, indexes after, `ANALYZE`) | even (Cepheus faster in 4 rounds of 10); **SQLite** in memory: 11 MB against 2.5 to 3.2 GB |
+| load 1 M facts, a transaction a client (22,726 commits) | **10.6 s [9.9, 10.9]**, 64 threads | 166.7 s [138.6, 169.3], one writer | Cepheus, 16 times: group commit puts the groups that arrive during an fsync into the next frame; SQLite forces each commit alone |
+| size on disk after the 10 M load | 335 MB (journal 96, runs 237) | **131 MB**, one file | **SQLite**, 2.6 times: variable-length records, where Cepheus stores 8-byte words |
 
 ## By design
 
 | | data model | writes | isolation | storage | questions |
 |---|---|---|---|---|---|
-| **Cepheus** | facts (thing, property, value) | one writer per database, group commit | groups strictly serializable; read-then-write validated by `Expect` | a journal + a two-component LSM-tree (delta in memory, one sorted base on disk), own page cache | conjunctive queries, Generic Join (worst-case optimal) |
+| **Cepheus** | facts (thing, property, value) | one writer per database, group commit | groups strictly serializable; read-then-write validated by `Expect` | a journal + an LSM-tree, leveled with ratio 4 (delta in memory, sorted runs on disk), own page cache | conjunctive queries, Generic Join (worst-case optimal) |
 | **SQLite** | tables | one writer at a time | serializable | B-trees in one file; a rollback journal or a WAL | SQL |
 | **PostgreSQL** | tables | many writers, row locks | read committed by default; SI; SSI | heap + B-trees; WAL | SQL, binary joins, parallel |
 | **Oracle** | tables | many writers, row locks | read committed by default; serializable is transaction-level read consistency | undo + redo logs | SQL |
@@ -148,11 +155,13 @@ journal the added and retracted flags.
   database"; the tuning guide's worked example gives "approximately 1 + 2 + 10 + 10 + 10 = 33", and "the usual write
   amplification of leveled compaction [...] is often larger than 10"
   ([tuning guide](https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide),
-  [leveled compaction](https://github.com/facebook/rocksdb/wiki/Leveled-Compaction)). Cepheus' one level costs up to
-  17 facts of merge writes per change, but each merge rewrites the whole base at once and needs up to three bases of
-  disk while it runs; RocksDB's levels compact small files, a few at a time.
-- *Where RocksDB wins*: levels (merges proportional to the change, not to the base), compression, column families,
-  years of production; transactions of both kinds ("Optimistic Transactions do not take any locks [...] they rely on
+  [leveled compaction](https://github.com/facebook/rocksdb/wiki/Leveled-Compaction)). Cepheus levels too, with a
+  ratio of 4 rather than RocksDB's default of 10 (`max_bytes_for_level_multiplier`): 5.8 writes a fact for its 10 M
+  load, by its own count ([theory](theory.md#9-levels-on-disk-and-large-groups)). A Cepheus merge writes a whole run
+  of the target level at once; RocksDB splits each level into files of a few tens of MB and compacts a few at a time,
+  so a compaction is short whatever the level's size.
+- *Where RocksDB wins*: compaction by files (short merges at every level), Bloom filters, compression, column
+  families, years of production; transactions of both kinds ("Optimistic Transactions do not take any locks [...] they rely on
   doing conflict-detection at commit time", [transactions](https://github.com/facebook/rocksdb/wiki/Transactions)).
   RocksDB has no query language: Cepheus' joins would be written by hand on top of it.
 

@@ -15,7 +15,7 @@ type error =
   | Conflict of string     (* an Expect did not hold *)
   | Invalid of string      (* a wrong type, an unknown thing or property, a schema rule, a malformed question *)
   | Not_unique of string   (* a value of a unique property is taken *)
-  | Damaged of string      (* the files lost or changed durable data, or a page of the base does not check *)
+  | Damaged of string      (* the files lost or changed durable data, or a page of a run does not check *)
   | Io of string           (* the disk failed: the database stopped; close it and open it again *)
   | Busy of string         (* the database is open in another process *)
   | Closed                 (* the database was closed *)
@@ -40,8 +40,8 @@ database is closed"`.
 
 | function | what it does |
 |---|---|
-| `open_ : string -> (db, error) result` | opens the database in a directory, creating the directory (and its parents) and the database if missing; after a crash, recovers: the newest snapshot that checks, then the journal after it ([operations](operations.md#opening-and-recovery)). Errors: `Busy` (another process holds it, or this process under the same path), `Damaged` (durable data lost or changed: it does not open), `Io` |
-| `close : db -> unit` | waits for the writes in flight and for a merge under way (it is installed), closes the journal, leaves the clean-close marker if no fsync failed, takes the base's pages out of the cache, releases the lock. Views taken before stay readable (their pages are read again from the file). Call it once. A fork has nothing to close |
+| `open_ : string -> (db, error) result` | opens the database in a directory, creating the directory (and its parents) and the database if missing; after a crash, recovers: the newest chain of runs that checks, then the journal after it ([operations](operations.md#opening-and-recovery)). Errors: `Busy` (another process holds it, or this process under the same path), `Damaged` (durable data lost or changed: it does not open), `Io` |
+| `close : db -> unit` | waits for the writes in flight and for a merge under way (it is installed), closes the journal, leaves the clean-close marker if no fsync failed, takes the runs' pages out of the cache, releases the lock. Views taken before stay readable (their pages are read again from the files). Call it once. A fork has nothing to close |
 | `view : db -> view` | the newest durable state (for a fork, its newest state). Free: one atomic read |
 | `group : view -> int` | the number of the last group in a view |
 | `fork : view -> db` | a temporary state starting at a view: the same reads and writes, the same checks, nothing on any file (G8). Free; a fork of a fork works |
@@ -100,7 +100,8 @@ returns at once. The group's number is given when the writer takes it; groups ar
 
 - **New things**: a negative number in a thing position, or inside a `Link`, is a new thing of this group; each
   distinct negative number gets the next thing number, in the order of first appearance. `thing r (-k)` is the number
-  `-k` was given (`Not_found` if `-k` was not in the group).
+  `-k` was given (`Not_found` if `-k` was not in the group); it walks the receipt's list `r.things`, so for a large
+  group read the list once into a table.
 - **One-valued properties**: an `Add` retracts the thing's other values for the property in the same group (the
   journal records the retraction).
 - **No-ops**: an `Add` of a fact that holds, or a `Retract` of one that does not, records nothing; a group of no-ops
@@ -112,10 +113,23 @@ returns at once. The group's number is given when the writer takes it; groups ar
 
 Errors: `Conflict` (an `Expect`); `Invalid` (a value of the wrong type, a thing that was never made, a link to
 nothing, an `Expect` on a new thing, a property that does not exist, a system property on an ordinary thing, an
-ordinary property on a property thing, a schema rule); `Not_unique`; `Damaged` (a page of the base that the group
-needed could not be read or does not check: the group is not written, the writer goes on); for a database also `Io`
-(the disk failed: this group and every later one fail, until the database is closed and opened again) and `Closed`. On
-a fork, a page that cannot be read raises `Unreadable` instead of returning `Damaged`. The messages: [errors](errors.md).
+ordinary property on a property thing, a schema rule, a group whose journal frame would pass 256 MiB); `Not_unique`;
+`Damaged` (a page of a run that the group needed could not be read or does not check: the group is not written, the
+writer goes on); for a database also `Io` (the disk failed: this group and every later one fail, until the database
+is closed and opened again; for a large group, a disk error while its run file is written fails that group only, and
+the writer goes on) and `Closed`. On a fork, a page that cannot be read raises `Unreadable` instead of returning
+`Damaged`. The messages: [errors](errors.md).
+
+**Loading.** A load is the same `write`, of large groups. A group of 20,000 operations and more, all of them `Add`,
+none of a system property, takes a faster path inside the writer: its facts are sorted in arrays (a counting sort and a
+stable radix sort) and merged at once with the delta and the newest runs into a run file, without a persistent map per
+fact ([architecture](architecture.md#large-groups)). The result and the errors are those of any group: on any doubt
+(an error, an `Add` of a one-valued property to a thing that exists, two values of a one-valued property for one new
+thing, a unique value taken or given twice) the group goes the ordinary way, which decides as always. Write a load as a
+few large groups (each confirmed once, with one fsync), not as millions of small ones: 10 million facts in two groups
+load in 7.0 s, in 113,636 groups of one client each in 112 s ([benchmarks](benchmarks.md#loading)). A large group holds
+the writer while its run is merged (seconds at 10 million facts) and needs its operations, their arrays and the frame in
+memory at once (2.5 to 3.2 GB for 9.4 million additions).
 
 ## The schema
 
@@ -169,7 +183,7 @@ exception Unreadable of string
 `get v e` is every fact of thing e, sorted by property then value; `[]` for a number that is no thing. `values v e p`
 is the values of e for p (the order is not specified); `[]` if p is no property. `things v p x` is the things that
 have the value x for p, in increasing order; for a link property, `things v p (Link t)` is the things that link to t
-by p. All three read the base through the cache: when a page cannot be read from the disk or does not check against
+by p. All three read the runs through the cache: when a page cannot be read from the disk or does not check against
 its CRC, it is never served, and they raise `Unreadable` with the file and the page.
 
 ```ocaml
@@ -263,18 +277,18 @@ How a question is answered, and what it costs: [architecture](architecture.md#qu
 
 ## The cache
 
-`set_cache bytes` sets how many bytes of base pages the process keeps in memory, for all its databases at once (1 GiB
+`set_cache bytes` sets how many bytes of run pages the process keeps in memory, for all its databases at once (1 GiB
 by default; at least 16 pages of 16 KiB). It takes effect as pages come in (a smaller cache evicts as the next pages
-are read) and at the next open (a snapshot that fits in the cache is read and checked whole at open; a larger one, page
+are read) and at the next open (a run that fits in the cache is read and checked whole at open; a larger one, page
 by page as questions need it). [operations](operations.md#memory).
 
 ## Operations
 
 | function | what it does |
 |---|---|
-| `snapshot : db -> (unit, error) result` | merges now: the changes since the last merge and the base into a new base and its snapshot file, so that the next open replays only what follows; it first waits for a merge under way. Nothing to do if no group came since the last merge. Errors: `Io`, `Damaged` (a page of the old base), the error that stopped the database, `Closed`; on a fork, `Invalid "a fork has no files"` |
-| `verify : string -> (int, error) result` | reads the whole journal of a closed database from its first segment and checks every frame, trailer and group number: the number of groups, or `Damaged` naming the first fault, or `Io`. It does not take the lock: never run it on an open database. Snapshots are not read (they are checked at each open, and are caches) |
-| `notes : db -> string list` | what the last open set aside: `"snapshot <name> set aside: <reason>"` for each snapshot that did not check; `[]` for a fork |
+| `snapshot : db -> (unit, error) result` | merges now: the delta (the changes since the last merge) and every run into one run, one base, the fastest to read, so that the next open replays nothing; it first waits for a merge under way. Nothing to do if there is one run and no group came since the last merge. Errors: `Io`, `Damaged` (a page of a run), the error that stopped the database, `Closed`; on a fork, `Invalid "a fork has no files"` |
+| `verify : string -> (int, error) result` | reads the whole journal of a closed database from its first segment and checks every frame, trailer and group number: the number of groups, or `Damaged` naming the first fault, or `Io`. It does not take the lock: never run it on an open database. Run files are not read (they are checked at each open, and are caches of the journal) |
+| `notes : db -> string list` | what the last open set aside: `"snapshot <name> set aside: <reason>"` for each run file that did not check, or that has an earlier format (`<name>.snap`: the journal is replayed); `[]` for a fork |
 
 ## Threads and domains
 

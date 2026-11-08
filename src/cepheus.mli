@@ -46,11 +46,11 @@ type view = Store.view
 (** The state after one group. *)
 
 val open_ : string -> (db, error) result
-(** Opens the database in a directory, creating it if needed; recovers after a crash (newest valid snapshot, then
-    the journal). One process at a time ({!Busy} otherwise). *)
+(** Opens the database in a directory, creating it if needed; recovers after a crash (the newest chain of runs that
+    checks, then the journal). One process at a time ({!Busy} otherwise). *)
 
 val close : db -> unit
-(** Waits for the writes in flight (and a merge under way), then closes; the base's pages leave the cache. A fork has
+(** Waits for the writes in flight (and a merge under way), then closes; the runs' pages leave the cache. A fork has
     nothing to close. *)
 
 val view : db -> view
@@ -83,7 +83,8 @@ val write : db -> ?by:int -> ?why:string -> op list -> (receipt, error) result
     crash, G1); on a fork, at once. *)
 
 val thing : receipt -> int -> int
-(** [thing r (-1)]: the id the group gave to its new thing [-1]. *)
+(** [thing r (-1)]: the id the group gave to its new thing [-1]; a walk of [r.things] (for a large group, read the list
+    once into a table). *)
 
 (** {1 The schema} *)
 
@@ -116,11 +117,11 @@ type query = Query.t = { vars : int; where : pattern list; ranges : (int * value
 (** Variables are numbered from 0 to [vars - 1]; [ranges] keep [lo <= x <= hi] for int, date or money variables. *)
 
 exception Unreadable of string
-(** Raised by {!get}, {!values} and {!things} when a page of the view's base cannot be read from the disk, or does
-    not check against its CRC (it is never served); {!find} and {!fold} return [Error (Damaged _)] instead. *)
+(** Raised by {!get}, {!values} and {!things} when a page of one of the view's runs cannot be read from the disk, or
+    does not check against its CRC (it is never served); {!find} and {!fold} return [Error (Damaged _)] instead. *)
 
 val set_cache : int -> unit
-(** The bytes of base pages kept in memory, for every database of the process (1 GiB by default). A base larger
+(** The bytes of run pages kept in memory, for every database of the process (1 GiB by default). A run larger
     than the cache is read page by page as the questions need it. *)
 
 val find : view -> query -> (value array list, error) result
@@ -136,14 +137,16 @@ val fold :
 (** {1 Operations} *)
 
 val snapshot : db -> (unit, error) result
-(** Merges now: the changes since the last merge and the base into a new base and its snapshot file (merges also run
-    on their own, in the background, as changes accumulate), so that the next open replays only what follows. *)
+(** Merges now: the changes since the last merge and every run into one run, one base (merges also run on their own,
+    in the background, as changes accumulate, into the levels), so that the next open replays nothing and the base is
+    the fastest to read. *)
 
 val verify : string -> (int, error) result
 (** Reads the whole journal of a closed database and checks every frame: the number of groups. *)
 
 val notes : db -> string list
-(** What the last open set aside: one note for each snapshot that did not check (a torn tail cut is not noted). *)
+(** What the last open set aside: one note for each run file that did not check or has an earlier format (a torn
+    tail cut is not noted). *)
 
 (** {1 Internals, for the tests and tools} *)
 

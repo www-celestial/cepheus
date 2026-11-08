@@ -193,6 +193,95 @@ let () =
     done
   done
 
+let () =
+  section "several runs: a delta on runs that add and retract, the same facts and answers as one run";
+  Query.domains := 3;
+  let most = ref 0 in
+  for seed = 1 to 120 do
+    Query.parallel_min := (if seed mod 2 = 0 then 1 else 20_000);
+    let r = Rng.make (9500 + seed) in
+    let f = fresh () in
+    (* rounds of writes, each ended by a merge of the delta alone, of the delta and the newest run, or of all *)
+    let v = C.layered r (view f) (2 + Rng.int r 4) (fun g -> for _ = 1 to 15 do ignore (write g (random_ops r (view g) ())) done; view g) in
+    most := max !most (Array.length v.runs);
+    let facts = C.facts_of_view v in
+    let one = C.compact v in
+    C.check (C.F.equal facts (C.facts_of_view one)) "seed %d: the runs and their full merge differ" seed;
+    C.check (Store.facts v = C.F.cardinal facts) "seed %d: the count of facts across runs" seed;
+    for _ = 1 to 10 do
+      match C.random_query r v facts qnames with
+      | None -> ()
+      | Some q -> (
+        match C.work_and_bound v facts q (fun () -> find v q) with
+        | Error e, _, _ -> C.fail "seed %d: %s" seed (message e)
+        | Ok rows, work, bound ->
+          C.check (C.sorted_rows rows = C.naive facts q) "seed %d: a question across runs" seed;
+          C.check (work <= bound) "seed %d: across runs, %d candidates, bound %d" seed work bound)
+    done
+  done;
+  Printf.printf "  up to %d runs\n" !most
+
+(* ---- large groups ---- *)
+
+let () =
+  section "large groups: the faster path gives what Resolve gives, or leaves the group to it";
+  let large = !Resolve.large_min in
+  Resolve.large_min := 1;
+  let fast = ref 0 and slow = ref 0 in
+  for seed = 1 to 200 do
+    let r = Rng.make (11000 + seed) in
+    let f = fresh () in
+    let v = C.layered r (view f) (1 + Rng.int r 3) (fun g -> for _ = 1 to 10 do ignore (write g (random_ops r (view g) ())) done; view g) in
+    let p n = Option.get (property v n) in
+    let things = v.next_e - Schema.first_thing in
+    let old () = Schema.first_thing + Rng.int r (max 1 things) in
+    let small = [| "a"; "b"; "c"; "d" |] in
+    (* many new things with their facts, links between them and to old things, many-valued facts on old things,
+       and now and then what the faster path must leave to Resolve: a second value, a taken mail, a bad type *)
+    let ops =
+      List.concat
+        (List.init (5 + Rng.int r 40) (fun k ->
+             let t = -(k + 1) in
+             [ Add (t, p "name", Text ("n" ^ Rng.pick r small)); Add (t, p "score", Int (Rng.int r 4)) ]
+             @ (if Rng.int r 3 = 0 then [ Add (t, p "tag", Text (Rng.pick r small)); Add (t, p "tag", Text (Rng.pick r small)) ] else [])
+             @ (if k > 0 && Rng.bool r then [ Add (t, p "friend", Link (-(Rng.int r k + 1))) ] else [])
+             @ (if things > 0 && Rng.int r 3 = 0 then [ Add (old (), p "tag", Text (Rng.pick r small)) ] else [])
+             @ (if things > 0 && Rng.int r 4 = 0 then [ Add (t, p "boss", Link (old ())) ] else [])
+             @ (if Rng.int r 30 = 0 then [ Add (t, p "score", Int 9) ] else [])
+             @ (if Rng.int r 30 = 0 then [ Add (t, p "mail", Text (Rng.pick r small ^ "@x")) ] else [])
+             @ (if Rng.int r 60 = 0 then [ Add (t, p "score", Text "x") ] else [])
+             @ (if Rng.int r 60 = 0 && things > 0 then [ Add (old (), p "name", Text "z") ] else [])))
+    in
+    let n = v.group + 1 in
+    let slow_r = Resolve.resolve v ~n ~time:5 ~by:1 ~why:"w" ops in
+    match Resolve.resolve_large v ~n ~time:5 ~by:1 ~why:"w" ops, slow_r with
+    | None, _ -> incr slow
+    | Some _, Error e -> C.fail "seed %d: the faster path took a group Resolve refuses: %s" seed (Resolve.error_message e)
+    | Some l, Ok (v', g, temps) ->
+      incr fast;
+      let b1 = Buffer.create 64 and b2 = Buffer.create 64 in
+      l.body b1;
+      Group.encode b2 g;
+      C.check (Buffer.contents b1 = Buffer.contents b2) "seed %d: the group is not encoded as Resolve's" seed;
+      C.check (l.temps = temps) "seed %d: the new things are numbered otherwise" seed;
+      C.check (l.view.next_e = v'.next_e) "seed %d: the next thing differs" seed;
+      let want = C.facts_of_view v' in
+      (* the facts merged as a run, as the writer does; and replayed from the journal's form *)
+      let d = Lazy.force C.merge_disk in
+      let take = Rng.int r (Array.length v.runs + 1) in
+      let w = Snapshot.merge ~bulk:l.facts d "/merge" "0123456789abcdef" l.view ~take ~level:(1 + take)
+          { Journal.segment = 1; offset = 40; next = n } in
+      C.check (C.F.equal want (C.facts_of_view w.view)) "seed %d: the merged large group differs from Resolve's state" seed;
+      (match Resolve.replay_large v g with
+       | Some (rv, facts) ->
+         let w = Snapshot.merge ~bulk:facts d "/merge" "0123456789abcdef" rv ~take:(Array.length v.runs) ~level:1
+             { Journal.segment = 1; offset = 40; next = n } in
+         C.check (C.F.equal want (C.facts_of_view w.view)) "seed %d: the large group replayed differs" seed
+       | None -> C.fail "seed %d: the group could not be replayed by the faster path" seed)
+  done;
+  Printf.printf "  %d large groups by the faster path, %d left to Resolve\n" !fast !slow;
+  Resolve.large_min := large
+
 (* ---- snapshots ---- *)
 
 let () =
@@ -205,7 +294,7 @@ let () =
     let f = fresh () in
     for _ = 1 to 30 do ignore (write f (random_ops r (view f) ())) done;
     let pos = { Journal.segment = 1; offset = 40; next = (view f).group + 1 } in
-    let w = Snapshot.merge disk "/s" "0123456789abcdef" (view f) pos in
+    let w = Snapshot.merge disk "/s" "0123456789abcdef" (view f) ~take:0 ~level:1 pos in
     Snapshot.install disk "/s" w;
     let v = w.view in
     (match Snapshot.load disk "/s" "0123456789abcdef" with
@@ -216,7 +305,7 @@ let () =
     (match Snapshot.load disk "/s" "another database" with
      | None, [ _ ] -> incr C.checks
      | _ -> C.fail "seed %d: a snapshot of another database was taken" seed);
-    let file = "/s/" ^ Snapshot.name v.group in
+    let file = "/s/" ^ Snapshot.name 0 v.group in
     ignore (Sim_disk.flip_durable sim file 0 (Sim_disk.durable_size sim file));
     match Snapshot.load disk "/s" "0123456789abcdef" with
     | None, [ _ ] -> incr C.checks
@@ -244,18 +333,20 @@ let () =
     let f = fresh () in
     let p n = Option.get (property (view f) n) in
     let small = [| "a"; "b"; "c" |] in
-    let made = Array.make 3000 0 in
-    for k = 0 to 2999 do
+    let made = Array.make 6000 0 in
+    for k = 0 to 5999 do
       let friend = if k = 0 then [] else [ Add (-1, p "friend", Link made.(Rng.int r k)) ] in
       let name = Text (Printf.sprintf "n%d-%d" k (Rng.int r 1000)) in
       let ops = Add (-1, p "name", name) :: Add (-1, p "score", Int (Rng.int r 5)) :: Add (-1, p "tag", Text small.(k mod 3)) :: friend in
       made.(k) <- thing (Result.get_ok (write f ops)) (-1)
     done;
-    let w = Snapshot.merge disk "/s" id (view f) { Journal.segment = 1; offset = 40; next = (view f).group + 1 } in
+    let w = Snapshot.merge disk "/s" id (view f) ~take:0 ~level:1 { Journal.segment = 1; offset = 40; next = (view f).group + 1 } in
     Snapshot.install disk "/s" w;
     let v = w.view in
-    let npages = Pages.count v.base.pg in
-    let file = "/s/" ^ Snapshot.name v.group in
+    let b = v.runs.(0).a in
+    let npages = Pages.count b.pg in
+    let facts0 = C.facts_of_view v in
+    let file = "/s/" ^ Snapshot.name 0 v.group in
     let m0 = Atomic.get Pages.misses in
     (match Snapshot.load disk "/s" id with
      | Some (pv, _), [] ->
@@ -277,7 +368,7 @@ let () =
        C.check (Atomic.get Pages.misses - m0 > npages) "seed %d: no page was read twice (%d reads, %d pages)" seed
          (Atomic.get Pages.misses - m0) npages;
        (* the base dropped from the cache (as a merge does to the base it replaced): read again from the file *)
-       Pages.drop pv.base.pg;
+       Pages.drop pv.runs.(0).a.pg;
        let q = C.random_query r pv facts qnames in
        Option.iter (fun q -> match find pv q with
            | Ok rows -> C.check (C.sorted_rows rows = C.naive facts q) "seed %d: a question after the drop" seed
@@ -290,14 +381,14 @@ let () =
       if seed mod 2 = 0 then Rng.int r npages
       else
         (* interior pages only: the first and the last share bytes with the offset tables around them *)
-        let lo = (v.base.o_avv / Pages.size) + 1 and hi = (v.base.o_ave + (4 * v.base.n)) / Pages.size in
+        let lo = (b.o_avv / Pages.size) + 1 and hi = (b.o_ave + (4 * b.n)) / Pages.size in
         lo + Rng.int r (hi - lo)
     in
     ignore (Sim_disk.flip_durable sim file (Snapshot.header + (k * Pages.size)) (Snapshot.header + ((k + 1) * Pages.size)));
     match Snapshot.load disk "/s" id with
     | None, [ _ ] -> C.check (seed mod 2 = 0) "seed %d: refused at open, for a page the open does not read" seed; incr at_open
     | Some (pv, _), _ ->
-      let facts = C.facts_of_view v in
+      let facts = facts0 in
       for _ = 1 to 15 do
         match C.random_query r pv facts qnames with
         | None -> ()
@@ -308,7 +399,7 @@ let () =
           | Error e -> C.fail "seed %d: %s" seed (message e))
       done;
       let seen = ref 0 in
-      for j = 0 to npages - 1 do try ignore (Pages.page pv.base.pg j) with Pages.Unreadable _ -> incr seen done;
+      for j = 0 to npages - 1 do try ignore (Pages.page pv.runs.(0).a.pg j) with Pages.Unreadable _ -> incr seen done;
       at_read := !at_read + !seen;
       (* the damaged page is seen unless it was read at the open (then refused there) or is the padding no read covers *)
       C.check (!seen = 1) "seed %d: %d pages fail, one was damaged" seed !seen
@@ -336,16 +427,19 @@ let () =
                         Add (-1, p "tag", Text (string_of_int (k mod 7))) ])
     done;
     let pos v = { Journal.segment = 1; offset = 40; next = (v : view).group + 1 } in
-    let w1 = Snapshot.merge disk "/s" id (view f) (pos (view f)) in
+    let w1 = Snapshot.merge disk "/s" id (view f) ~take:0 ~level:1 (pos (view f)) in
     Snapshot.install disk "/s" w1;
-    (* a delta on the paged base: changes, retractions, new things *)
+    (* a delta on the paged base: changes, retractions, new things (written with a larger cache: each write reads a
+       few pages, and with 16 the test would spend its time reading them again) *)
     let g = fork w1.view in
+    Pages.set_capacity (4096 * Pages.size);
     for _ = 1 to 200 do ignore (write g (random_ops r (view g) ())) done;
+    Pages.set_capacity (16 * Pages.size);
     let v = view g in
     Snapshot.open_max := 0;
-    let w2 = Snapshot.merge disk "/s" id v (pos v) in
+    let w2 = Snapshot.merge disk "/s" id v ~take:1 ~level:1 (pos v) in
     Snapshot.install disk "/s" w2;
-    let np = Pages.count w2.view.base.pg in
+    let np = Pages.count w2.view.runs.(0).a.pg in
     C.check (np > 8 * !Pages.capacity) "seed %d: the base (%d pages) is not 8 times the cache" seed np;
     C.check (!Snapshot.open_max <= 10) "seed %d: %d pages open at once in a merge" seed !Snapshot.open_max;
     C.check (!Pages.resident <= !Pages.capacity) "seed %d: %d pages resident, the cache holds %d" seed !Pages.resident !Pages.capacity;

@@ -11,12 +11,13 @@ venue, volume and year); a work that could not be checked is not listed. The des
 
 - **[O'Neil 1996]** P. O'Neil, E. Cheng, D. Gawlick, E. O'Neil. The Log-Structured Merge-Tree (LSM-Tree). *Acta
   Informatica* 33(4), 351–385, 1996. https://doi.org/10.1007/s002360050048
-  — The structure of the store: changes in a small component in memory, merged in bulk into a sorted component on
-  disk by a merge of sorted runs (the "rolling merge" of C0 into C1); the cost of a merge as the size ratio plus one.
+  — The structure of the store: changes in a small component in memory, merged in bulk into sorted components on
+  disk by a merge of sorted runs (the "rolling merge" of C0 into C1, and of each component into the next); the cost
+  of a merge as the size ratio plus one.
 - **[Luo 2020]** C. Luo, M. J. Carey. LSM-based Storage Techniques: A Survey. *The VLDB Journal* 29(1), 393–418, 2020.
   https://doi.org/10.1007/s00778-019-00555-y
-  — The vocabulary and the costs of leveling and tiering (write amplification O(T·L) and O(L)), against which the
-  one level of Cepheus is weighed.
+  — The vocabulary and the costs of leveling and tiering (write amplification O(T·L) and O(L), runs a read visits L
+  and T·L), from which Cepheus' leveling with ratio 4 is chosen (theory, section 9).
 - **[Dong 2017]** S. Dong, M. Callaghan, L. Galanis, D. Borthakur, T. Savor, M. Stumm. Optimizing Space Amplification
   in RocksDB. *CIDR* 2017. https://cidrdb.org/cidr2017/papers/p82-dong-cidr17.pdf
   — Space and write amplification in RocksDB; with RocksDB's `bytes_per_sync` option, the reason a merge forces its
@@ -39,7 +40,12 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — Keep large values out of the sorted runs: Cepheus' texts live in a dictionary and the rows hold their numbers.
 - **[Dayan 2017]** N. Dayan, M. Athanassoulis, S. Idreos. Monkey: Optimal Navigable Key-Value Store. *SIGMOD* 2017,
   79–94. https://doi.org/10.1145/3035918.3064054
-  — Bloom filters tuned per level; planned with several levels on disk.
+  — Bloom filters tuned per level make a point lookup of a whole key cost about one run's probe; not built:
+  Cepheus' reads are short ranges and exact counts, which visit every run that may hold the key (theory, section 9).
+- **[Dayan 2018]** N. Dayan, S. Idreos. Dostoevsky: Better Space-Time Trade-Offs for LSM-Tree Based Key-Value Stores
+  via Adaptive Removal of Superfluous Merging. *SIGMOD* 2018, 505–520. https://doi.org/10.1145/3183713.3196927
+  — Leveling, tiering and lazy leveling (tiering above, leveling at the last level) weighed by the cost of writes,
+  point reads, range reads and space: the comparison Cepheus' choice of leveling rests on.
 
 ## Logging, recovery and crash consistency
 
@@ -62,8 +68,10 @@ venue, volume and year); a work that could not be checked is not listed. The des
   rename and a directory after a name changes, and its exhaustive test enumerates every crash state in that spirit.
 - **[Rebello 2020]** A. Rebello, Y. Patel, R. Alagappan, A. C. Arpaci-Dusseau, R. H. Arpaci-Dusseau. Can Applications
   Recover from fsync Failures? *USENIX ATC* 2020, 753–767. https://www.usenix.org/conference/atc20/presentation/rebello
-  — After a failed fsync, Linux may mark the pages clean: retrying is wrong. Cepheus stops and never retries (G10);
-  its simulated disk drops the pages the same way.
+  — After a failed fsync, ext4 and XFS mark the pages clean and keep their new bytes in memory, Btrfs undoes them;
+  retrying is wrong, and recovery must rest on what the disk holds. Cepheus stops and never retries (G10), cuts the
+  journal back to its last durable frame, and writes the newest frame again at recovery so that its fsync really
+  writes it, the paper's own advice (G13); its simulated disk does what the paper measured.
 - **[Zheng 2013]** M. Zheng, J. Tucek, F. Qin, M. Lillibridge. Understanding the Robustness of SSDs under Power Fault.
   *FAST* 2013, 271–284. https://www.usenix.org/conference/fast13/technical-sessions/presentation/zheng
   — Real SSDs lose and tear data at a power cut: why the fault model includes torn and reordered sectors, and why
@@ -141,6 +149,20 @@ venue, volume and year); a work that could not be checked is not listed. The des
   Main Memory Column Stores. *SIGMOD* 2009, 283–296. https://doi.org/10.1145/1559845.1559877
   — An order-preserving dictionary would allow ranges and prefixes on texts; today the dictionary keeps a sorted list
   of its ids (`ssort`) for lookups only.
+
+- **[Jacobson 1989]** G. Jacobson. Space-efficient Static Trees and Graphs. *FOCS* 1989, 549–554.
+  https://doi.org/10.1109/SFCS.1989.63533
+  — The rank directory: a bit vector with counts stored every few words answers "how many ones before position i" in
+  constant time. Each part of a run keeps one by thing (presence bits for 32 thing ids and the count before them, a
+  quarter of a byte a thing id).
+- **[Knuth 1998]** D. E. Knuth. *The Art of Computer Programming, Volume 3: Sorting and Searching*, 2nd edition.
+  Addison-Wesley, 1998. ISBN 0-201-89685-0.
+  — Section 5.2.5, sorting by distribution: the counting sort and the stable least-significant-digit radix sort that
+  sort a large group's facts (by thing, by property, then by value inside each property, 11-bit digits).
+- **[Bentley 1976]** J. L. Bentley, A. C.-C. Yao. An Almost Optimal Algorithm for Unbounded Searching. *Information
+  Processing Letters* 5(3), 82–87, 1976. https://doi.org/10.1016/0020-0190(76)90071-5
+  — Exponential (galloping) search: a merge places the other runs' texts among the largest run's by searches that
+  gallop from the last place, so that the largest run's texts are read only where another text falls.
 
 ## Joins
 

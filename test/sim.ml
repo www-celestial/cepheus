@@ -37,6 +37,9 @@ type w = {
   mutable stopped : bool;  (* a failed fsync: the engine must refuse everything until restart *)
   mutable merge : Snapshot.written option;  (* a merge begun, not installed *)
   mutable flipped_snapshots : string list;  (* snapshots damaged on purpose: setting them aside is right *)
+  mutable unsure : Journal.position option;
+      (* where a frame was written that no fsync confirmed (it failed, or the process died first): a power loss may
+         leave its body and trailer without its header's sector, the false alarm G6 accepts *)
 }
 
 let stats = Hashtbl.create 16
@@ -138,14 +141,26 @@ let rec recover ?(kill = false) ?(close = false) w =
   match Engine.open_ ~id_source:(fun _ -> "0123456789abcdef") w.disk dir with
   | exception Sim_disk.Crash -> count "crash during recovery"; recover w
   | Error (Damaged m) ->
+    let at_unsure =
+      match w.unsure with
+      | Some p ->
+        let has sub = let n = String.length sub and k = String.length m in
+          let rec go i = i + n <= k && (String.sub m i n = sub || go (i + 1)) in go 0 in
+        has (Journal.segment_name p.segment) && has (Printf.sprintf "at offset %d (written whole)" p.offset)
+      | None -> false
+    in
     if w.flipped_journal then (count "damage refused at open"; raise Over)
+    else if at_unsure then (count "false alarm: an unconfirmed frame without its header's sector"; raise Over)
     else (fail w "recovery says damaged: %s" m; raise Over)
   | Error (Io _) ->
-    (* an fsync failed at open (one planned before a clean close): the database refuses, and opens again (G10) *)
-    count "io error at open"; recover w
+    (* an fsync failed at open (one planned before a clean close): the database refuses, and opens again (G10), in the
+       same boot (what that open wrote stays in the page cache) or after a power loss *)
+    count "io error at open"; recover ~kill:(Rng.bool w.r) w
   | Error e -> fail w "recovery failed: %s" (Engine.message e); raise Over
   | Ok e ->
     Sim_disk.crash_after w.sim (-1);
+    (* recovery made the newest frame durable or cut it: no frame is unsure any more *)
+    w.unsure <- None;
     let k = e.working.group in
     if Journal.next_group e.journal <> k + 1 then
       fail w "journal next %d after recovery to %d; files %s" (Journal.next_group e.journal) k
@@ -172,7 +187,7 @@ let rec recover ?(kill = false) ?(close = false) w =
     if not (C.F.equal got want) then fail w "recovered state at %d differs from the model: %s" k (C.show_diff got want);
     (* G12: a crash never leaves a merge's file, nor a snapshot that must be set aside *)
     if List.exists (fun f -> Filename.check_suffix f ".tmp") (snapshot_files w) then fail w "a merge's file was left after recovery";
-    let expected n = List.exists (fun f -> String.length n > 34 && String.sub n 9 25 = f) w.flipped_snapshots in
+    let expected n = List.exists (fun f -> let k = String.length f in String.length n > 9 + k && String.sub n 9 k = f) w.flipped_snapshots in
     if List.exists (fun n -> String.length n > 8 && String.sub n 0 8 = "snapshot" && not (expected n)) e.notes then
       fail w "a snapshot was set aside after a crash: %s" (String.concat "; " e.notes);
     if w.flipped_journal then (count "damage before the snapshot, not needed"; raise Over)
@@ -192,7 +207,9 @@ let commit_pending w =
     w.pending <- None;
     let jn = Journal.next_group (engine w).journal in
     if b.count > 0 && b.first <> jn && not w.stopped then fail w "batch starts at %d, journal at %d (stopped %b)" b.first jn ((engine w).stopped <> None);
+    if b.count > 0 && not w.stopped then w.unsure <- Some (Journal.position (engine w).journal);
     let res = Engine.commit (engine w) b in
+    if Array.for_all (function Error (Io _) -> false | _ -> true) res then w.unsure <- None;
     Array.iter
       (function
         | Ok (r : Engine.receipt) ->
@@ -234,7 +251,10 @@ let step w =
   | n when n < 45 ->
     if w.pending = None then begin
       let reqs = Array.init (1 + Rng.int w.r 5) (fun _ -> gen_ops w e.working, Rng.int w.r 9, "w") in
+      (* a large group merges at once with the newest runs: a merge begun must end first, as the writer does *)
+      if Array.exists (fun (ops, _, _) -> List.compare_length_with ops !Resolve.large_min >= 0) reqs then finish_merge w;
       let b = Engine.prepare e reqs in
+      if b.runs <> [] then count "large groups";
       record_batch w b;
       w.pending <- Some b
     end
@@ -265,7 +285,10 @@ let step w =
     count (if w.stopped then "closes after an io error" else "clean closes");
     recover ~close:true w
   | n when n < 77 -> Sim_disk.crash_after w.sim (Rng.int w.r 20)
-  | n when n < 79 -> Sim_disk.fail_next_fsync w.sim
+  | n when n < 79 ->
+    (* sometimes the process dies right after the failure, in the middle of what the writer does about it *)
+    if Rng.chance w.r 0.3 then Sim_disk.fail_fsync_at ~crash_after:(Rng.int w.r 4) w.sim 0
+    else Sim_disk.fail_next_fsync w.sim
   | n when n < 81 ->
     commit_pending w;
     (* a silent change of durable journal bytes, then a restart: must be detected (G6) *)
@@ -315,13 +338,20 @@ let step w =
 
 let run seed steps =
   let r = Rng.make seed in
-  let sim = Sim_disk.create (Rng.split r) in
+  (* a failed fsync keeps the failed bytes in memory (ext4, XFS) or undoes them (Btrfs) *)
+  let reverts = Rng.chance r 0.3 in
+  let sim = Sim_disk.create ~reverts (Rng.split r) in
   let w =
     { seed; sim; disk = Sim_disk.disk sim; r; e = None; groups = Hashtbl.create 64; acked = 0; prepared = 0; pending = None;
-      flipped_journal = false; in_newest_frame = false; stopped = false; merge = None; flipped_snapshots = [] }
+      flipped_journal = false; in_newest_frame = false; stopped = false; merge = None; flipped_snapshots = [];
+      unsure = None }
   in
   Journal.segment_limit := 600 + Rng.int r 4000;
+  (* the journal read through a window smaller than its frames, half the time *)
+  Journal.window := if Rng.chance r 0.5 then 40 + Rng.int r 200 else 4 * 1024 * 1024;
   Engine.compact_min := 5 + Rng.int r 60;
+  (* groups of 4 changes and more take the faster path of large groups when they can *)
+  Resolve.large_min := 4;
   (match Engine.open_ ~id_source:(fun _ -> "0123456789abcdef") w.disk dir with
    | Ok e ->
      w.e <- Some e;

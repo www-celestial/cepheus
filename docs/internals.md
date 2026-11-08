@@ -3,7 +3,7 @@
 `src/cepheus.mli` exports the engine's modules as `Cepheus.Value`, `Cepheus.Journal`, ... for the tests, the tools
 and the benchmarks. They are not the API: they may change from one version to the next. This page lists what each
 one offers. The modules with an interface file (`.mli`) come first, every name of it; the others (`Engine`, `Store`,
-`Query`, `Resolve`, `Snapshot`, `Pages`) expose their whole implementation, and only the names the tests and tools
+`Query`, `Resolve`, `Bulk`, `Snapshot`, `Pages`) expose their whole implementation, and only the names the tests and tools
 use are listed.
 
 ```ocaml
@@ -76,10 +76,12 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 |---|---|
 | `exception Damaged of string` | durable data lost or changed; the message says where ([errors](errors.md#damaged-durable-data-lost-or-changed)) |
 | `type position` | `{ segment; offset; next }`: a segment (by its first group), an offset in it, the group of the frame there |
+| `max_body : int` | 256 MiB (268,435,456): the largest frame body; recovery takes a longer length field for damage |
 | `segment_limit : int ref` | 64 MiB; the tests make it small |
+| `window : int ref` | 4 MiB: the bytes of a segment a scan holds at once; the tests make it small (40 at least) |
 | `create disk dir id` | a new journal, first group 1 |
-| `recover ?frame ~force disk dir id from on_group` | with `force`, forces the newest segment and the directory; reads from `from` (the start without it), calls `frame` on each frame's position and `on_group` on each group, cuts a torn tail durably, rebuilds the trailers of intact frames, returns the journal ready to append |
-| `append j body first count` | one frame of `count` groups from `first`: written, then forced; raises `Disk.Io` (the journal must not be used after) |
+| `recover ?frame ?after ~force disk dir id from on_group` | reads from `from` (the start without it) through the window, calls `frame` on each frame's position and `on_group` on each group, but for the frames whose groups are all `after` or before (checked by their CRCs, not decoded); with `force`, before replaying a group of the newest segment, writes that segment's newest frame again (its header if it holds no frame) and forces the segment and the directory (G13); cuts a torn tail durably, rebuilds the trailers of intact frames, returns the journal ready to append |
+| `append j body first count` | one frame of `count` groups from `first`: written, then forced; on a failure, cuts the journal back to its last durable frame (forced; a failed cut is reported on stderr) and raises `Disk.Io`; every later append raises `Disk.Io` (G10, G13) |
 | `next_group`, `position`, `close` | the next group's number; where the next frame goes; closes |
 | `verify disk dir id`, `read disk dir id f` | a strict full read: the number of groups; every group in order |
 | `segment_name n` | `%020d.seg` |
@@ -98,13 +100,14 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 
 | name | what it is |
 |---|---|
-| `create rng`, `disk t` | a simulated disk drawing from a seeded generator; the `Disk.t` the engine uses |
+| `create ?reverts rng`, `disk t` | a simulated disk drawing from a seeded generator (`reverts`: a failed fsync undoes the failed writes in memory, as Btrfs does; by default it keeps them, as ext4 and XFS do); the `Disk.t` the engine uses |
 | `sector` | 512 bytes: the unit of loss and of tearing |
 | `exception Crash`, `crash_after t n` | the (n+1)-th mutating call from now raises `Crash` instead of running: a crash inside a call |
 | `type draw` | the choices of a power loss: `Names` (how many of a directory's name changes survive, a prefix), `Length` (a grown file's length), `Cut`, `Sector` (lost, kept or torn), `Tear` (how many bytes of a torn sector) |
 | `crash ?choose t` | a power loss: files closed, locks released, each unsynced choice drawn at random or by `choose`, so a test can enumerate every outcome |
 | `kill t` | the process dies, the machine stays up: what was written and not forced stays readable, to be lost at a later `crash` |
-| `pending_names`, `flip_durable`, `fail_next_fsync`, `advance` | the name changes not synced; a silent bit flip in durable bytes (F3); the next fsync fails and its pages are marked clean (F4); the clock moves |
+| `pending_names`, `flip_durable`, `fail_next_fsync`, `advance` | the name changes not synced; a silent bit flip in durable bytes (F3); the next fsync fails and the sectors written since the last fsync are marked clean without reaching the disk: a later fsync does not write them unless they are written again (F4); the clock moves |
+| `fail_fsync_at ?crash_after t n`, `failures t` | the (n+1)-th fsync from now fails as above, and with `crash_after c` the process dies at the (c+1)-th mutating call after it; the fsyncs that failed so far |
 | `durable_size`, `files`, `durable_bytes` | what is durable, for the checks |
 
 ## `Codec`, `Crc32c`, `Histogram`, `Rng`
@@ -113,7 +116,7 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 |---|---|
 | `Codec.put_varint`, `put_int`, `put_string`, `put_u64` | LEB128 varints (an int ≥ 0 in 1 to 9 bytes), zigzag ints, length-prefixed strings, 8 bytes little-endian |
 | `Codec.reader`, `get_varint`, `get_int`, `get_byte`, `get_string`, `get_u64`, `at_end`, `exception Short` | a bounded reader over bytes; every read past the end raises `Short` |
-| `Crc32c.bytes b off len`, `Crc32c.string s` | CRC-32C, reflected polynomial 0x82F63B78, slicing by 8, in OCaml (about 1.1 GB/s here) |
+| `Crc32c.bytes b off len`, `Crc32c.extend crc b off len`, `Crc32c.string s` | CRC-32C (`extend`: the CRC of the bytes whose CRC is `crc` followed by these, for a frame checked by pieces), reflected polynomial 0x82F63B78, slicing by 8, in OCaml (about 1.1 GB/s here) |
 | `Histogram.create`, `record`, `merge_into`, `percentile h q`, `total`, `max`, `mean` | log-linear buckets as HdrHistogram: exact below 256, then 128 a power of two; a percentile is rounded up to its bucket's highest value, never above the largest recorded |
 | `Rng.make`, `copy`, `next`, `int r n`, `bool`, `chance r p`, `pick`, `split` | SplitMix64 (Steele, Lea, Flood 2014): the same seed gives the same numbers on every machine; not for cryptography |
 
@@ -121,9 +124,10 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 
 | module | the names tests and tools use |
 |---|---|
-| `Engine` | `open_`, `start`, `stop`, `write`, `snapshot_live`; the deterministic steps the simulation drives: `prepare`, `commit`, `merge_begin`, `install`, `compact`, `close`; `read_meta disk dir` (the database's id); settings `compact_min` (200,000); counters `merges`, `frames`; histograms `prepare_us`, `switch_us`, `merge_us`; `on_merge` (a hook the bank test uses to compare old and new views at each switch) |
-| `Store` | the view (`base`, `delta`, `dict`, `schema`, `group`, `next_e`) and its reads: `iter_facts`, `iter_values`, `iter_things`, `iter_prop`, `iter_range`, `mem`, counts; `value v typ w` and `text v i` (a word back to a value); `facts v` (the number of facts) |
+| `Engine` | `open_`, `start`, `stop`, `write`, `snapshot_live`; the deterministic steps the simulation drives: `prepare`, `commit`, `merge_begin` (`~all` for a full merge), `install`, `compact`, `close`; `plan` and `plan_all` (which runs a merge takes, and its level), `cap l` (the capacity of level l); `read_meta disk dir` (the database's id); settings `compact_min` (200,000), `ratio` (4); counters `merges`, `frames`; histograms `prepare_us`, `switch_us`, `merge_us`, `large_resolve_us`, `large_encode_us`, `large_merge_us`; `on_merge` (a hook the bank test uses to compare old and new views at each switch) |
+| `Store` | the view (`runs`, newest first, each with its parts `a` and `t`, its groups `lo`, `hi` and its `level`; `delta`, `dict`, `schema`, `group`, `next_e`) and its reads: `iter_facts`, `iter_values`, `iter_things`, `iter_prop`, `iter_range`, `mem`, counts; `value v typ w` and `text v i` (a word back to a value); `facts v` (the number of facts); `run_rows r` (a run's rows, which the levels weigh); `of_runs` |
 | `Query` | `plan`, `rows`, `count`, `fold`; settings `parallel_min` (20,000), `domains`; counter `work` (candidates enumerated, held to the Generic Join bound by the tests) |
-| `Resolve` | `resolve` (the one function that checks and resolves a group, for the writer and for forks), `replay` (a journal's group onto a view) |
-| `Snapshot` | `merge`, `install`, `abandon`, `clean`, `load`, `check_and_build`; setting `sync_every` (8 MiB); counter `open_max` (pages open at once in a merge) |
+| `Resolve` | `resolve` (the one function that checks and resolves a group, for the writer and for forks), `replay` (a journal's group onto a view); `resolve_large` (the faster path of a large group: `Some` the same result, or `None` to go the ordinary way), `replay_large`, setting `large_min` (20,000) |
+| `Bulk` | a large group's facts in arrays, sorted by (thing, property, value) and by (property, value, thing): counting sorts and a stable radix sort of 11-bit digits; `make` |
+| `Snapshot` | `merge ?busy ?bulk disk dir id view ~take ~level pos` (the one way to write a run), `install`, `abandon`, `clean`, `load` (the chain), `check_and_build`, `name lo hi`; setting `sync_every` (8 MiB); counter `open_max` (pages open at once in a merge) |
 | `Pages` | `size` (16,384), `capacity`, `set_capacity`, `drop`; counter `misses` (pages read from the disk); trace mode `tracing`, `trace`, `traced` (the cache study) |

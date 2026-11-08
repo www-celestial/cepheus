@@ -10,11 +10,13 @@ DIR/cepheus                       the database's id (16 random bytes) and format
 DIR/lock                          held (lockf) while the database is open: one process at a time
 DIR/closed                        left by a clean close (everything durable), removed by the next open
 DIR/journal/NNNNNNNNNNNNNNNNNNNN.seg   segments named by their first group, 64 MB each, only appended to
-DIR/snapshots/NNNNNNNNNNNNNNNNNNNN.snap   the two newest snapshots, named by their last group; the newest is the base
-DIR/snapshots/NNNNNNNNNNNNNNNNNNNN.snap.tmp   a merge being written (removed at open if a crash interrupted it)
+DIR/snapshots/LO-HI.run           the runs (levels of the LSM tree): the changes of groups LO+1..HI on top of the
+                                  state at LO (20 digits each); the chain from 0 to the newest group is the base, and
+                                  the newest bottom run outside it (LO = 0) is kept as a fallback
+DIR/snapshots/LO-HI.run.tmp       a merge being written (removed at open if a crash interrupted it)
 ```
 
-The journal is the truth: snapshots are caches that can always be rebuilt. Byte layouts: [formats](formats.md).
+The journal is the truth: runs are caches that can always be rebuilt. Byte layouts: [formats](formats.md).
 
 ## Opening and recovery
 
@@ -24,22 +26,25 @@ The journal is the truth: snapshots are caches that can always be rebuilt. Byte 
 2. reads the id; if `closed` is there (the last process closed cleanly), removes it; else forces the database's
    directory;
 3. removes the files of merges a crash interrupted (`.tmp`);
-4. loads the newest snapshot that checks (header CRC, checksum table, the order and bounds of every table; a page's
-   CRC as it is read); a snapshot that does not check is set aside and noted (`Cepheus.notes`), and the next older
-   one is tried;
-5. after a crash (no `closed`), forces the newest segment and the journal's directory (a process killed before its
-   fsync left them in the page cache); then reads the journal from the snapshot's position: checks every frame,
-   applies every group, and merges into a new snapshot file when the changes pass the threshold, as the writer would
-   have; a journal that ends before the snapshot's group is damage;
+4. takes the chain of runs from 0 that reaches the newest group with the fewest runs, and checks each (header CRC,
+   checksum table, rank tables, the order and bounds of every table; a page's CRC as it is read); a run that does not
+   check is set aside and noted (`Cepheus.notes`), and the choice is made again without it;
+5. after a crash (no `closed`), writes the newest frame of the journal again and forces the newest segment and the
+   journal's directory (a process killed before its fsync left them in the page cache; after a failed fsync the
+   page cache may hold bytes the disk does not, G13); then reads the journal from the newest run's position: checks
+   every frame, applies every group, and merges into a new run when the changes pass the threshold or the group is a
+   large one, as the writer would have; a journal that ends before the newest run's group is damage. The journal is
+   read through a window of 4 MiB: a frame whose groups the runs already hold is checked by its CRC, piece by piece,
+   and not decoded; a longer frame to replay is read whole (the memory of its group, as when it was written);
 6. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
-   `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a snapshot of the
+   `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a run of the
    groups before the damage);
 7. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt; a newest
    segment torn at its creation (its header does not check and it holds no frame) is removed;
 8. a new database (no group yet) gets group 1, which describes the four system properties.
 
-Recovery time is the snapshot's check plus the replay of the groups after it. Every merge writes a snapshot, so the
-replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`
+Recovery time is the runs' check plus the replay of the groups after the newest one. Every merge writes a run, so
+the replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`
 merges now, before a planned stop for example.
 
 ## When recovery says `Damaged`
@@ -53,23 +58,33 @@ human decision, never taken by Cepheus.
 
 ## When a write returns `Io`
 
-The disk failed during a write or an fsync. The database has stopped: every later write fails with the same error,
-and nothing more is confirmed (G10). Fix the disk (space, permissions, hardware), close the database and open it
-again; recovery starts from the journal. Cepheus never retries an fsync (Rebello et al. 2020). At this version, after
-a failed **fsync**, reboot the machine before opening the database again: Linux may have marked the unwritten pages
-clean, and a reopen in the same boot would replay a frame that is not on the disk (the residual of
-[G10](guarantees.md#g10-stop-on-a-disk-error)). Every message: [errors](errors.md#io-the-disk-failed).
+The disk failed during a write or an fsync of the journal. The database has stopped: every later write fails with the
+same error, and nothing more is confirmed (G10). Cepheus has already cut the journal back to its last durable frame
+(truncated, forced), so the failed writes are not in it; if that cut failed too, stderr says so (`cepheus: the
+journal could not be cut back after a failed write: ...`), and the failed writes may or may not come back at the
+reopen, and once seen they stay (G13). Look at the system log for the disk's error, fix the disk (space, permissions,
+hardware), then close the database and open it again: recovery starts from the journal and writes its newest frame
+again before forcing it, so a frame that is only in the page cache reaches the disk before anything rests on it
+(G13). No reboot is needed. Cepheus never retries an fsync blindly (Rebello et al. 2020): after a failed one, Linux
+has marked the pages clean, and a second fsync would succeed without writing them. A file system that turned
+read-only after the error (ext4, Btrfs) or shut down (XFS) refuses the reopen until it is repaired.
+
+A disk error while a merge writes its run file does not stop the database: the file is removed, stderr says so, and
+the merge is tried again once the delta has grown by another threshold; a large group whose run file fails returns
+`Io` for that group only. Every message: [errors](errors.md#io-the-disk-failed).
 
 ## Backup and restore
 
-Segments are only appended to and never rewritten, and snapshots are written beside and renamed, so a consistent copy
+Segments are only appended to and never rewritten, and run files are written beside and renamed, so a consistent copy
 needs no stop:
 
 1. copy `DIR/cepheus`;
-2. optionally, copy the newest snapshot of `DIR/snapshots/` (it makes the restore faster; without it, the copy replays
-   the whole journal). Copy it **before** the segments: a snapshot is named only once its group is durable in the
-   journal, so the segments copied after it hold its group; a snapshot copied after the segments may be newer than
-   their end, and the copy would refuse to open (`the journal ends at group G, before the snapshot of group S`);
+2. optionally, copy the run files of `DIR/snapshots/` (they make the restore faster; without them, the copy replays the
+   whole journal). A merge may remove runs while you copy: copy what is there, and the copy's open takes the chain its
+   names allow (a missing run only means a longer replay). Copy them **before** the segments: a run is named only once
+   its groups are durable in the journal, so the segments copied after it hold them; a run copied after the segments
+   may be newer than their end, and the copy would refuse to open (`the journal ends at group G, before the snapshot
+   of group S`);
 3. copy the segments of `DIR/journal/` in the order of their names. A segment being written may be copied with a torn
    end, which the copy's recovery cuts; every group confirmed before the copy of its segment started is in the copy.
 
@@ -81,37 +96,51 @@ never opened and verified is not a backup.
 
 `Cepheus.verify DIR` on a closed database reads every segment from the start and checks every frame, every trailer and
 every group number: it returns the number of groups or `Damaged`. Run it regularly on databases and on backups: it is
-the only check that reads the old segments, which an open does not read when a snapshot covers them.
+the only check that decodes the old segments, which an open does not read when runs cover them.
 
 ## Memory
 
-A database's base (its facts merged and sorted, about 25 bytes a fact: 245,824,096 bytes at 10 M facts) is read in pages of 16 KiB through one cache
-for the process, `Cepheus.set_cache bytes` (1 GiB by default). A snapshot that fits in the cache is read whole at open,
+A database's runs (its facts merged and sorted, about 25 bytes a fact) are read in pages of 16 KiB through one cache
+for the process, `Cepheus.set_cache bytes` (1 GiB by default). A run that fits in the cache is read whole at open,
 every page checked; a larger one is read page by page as questions need it, each page checked against its CRC when it
 arrives. Pages in memory stay under 1.25 times the cache: a full collection runs after each quarter of the cache has
-been evicted, so that the evicted pages go back to the system. Measured at 10 M facts (snapshot 245 MB): with the
-whole base in the cache, 278 MB resident after open; with a 32 MB cache under a 128 MB cap, 64 MB after open and a
+been evicted, so that the evicted pages go back to the system. Measured at 10 M facts (one run of 245 MB, the one-level
+format of milestone 2; the levels' format holds the same rows): with the whole base in the cache, 278 MB resident after open; with a 32 MB cache under a 128 MB cap, 64 MB after open and a
 peak of 79 to 105 MB through Q1 to Q5 (benchmarks, Larger than memory).
 
-Besides the base: about 170 bytes for each change since the last merge. A merge starts in the background when the
-changes pass max(200,000, n/16); it streams the new base into its file and needs only the cache, a few page buffers
-and 21 bytes a page of the new base (theory, section 8): with the whole base in the cache, the cache holds the old
-and the new base during the merge (twice the base, if the cache is large enough), and the old one leaves it at the
-switch. Measured at 10 M facts: write runs at 256 clients with their merges peak at 1.0 to 1.3 GB (1.8 to 3.0 GB when
-merges were built in memory); with a 32 MB cache, a merge of the whole 245 MB base runs in a process capped at 128 MB
-(peak 99 MB).
+Besides the runs: about 170 bytes for each change since the last merge. A merge starts in the background when the
+changes pass 200,000; it streams the new run into its file and needs only the cache, a few page buffers and 21 bytes a
+page of the new run (theory, section 8): with everything in the cache, the cache holds the runs a merge reads and the
+one it writes, and the replaced ones leave it at the switch; a full merge (`snapshot`) holds the base twice for a
+while. Measured at 10 M facts: write runs at 256 clients with their merges peak at 762 MB [723, 1,300] (1,040 MB with
+the one level, 2,095 MB when merges were built in memory); with a 32 MB cache, a merge of the whole 245 MB base runs in
+a process capped at 128 MB (peak 99 MB). A large group needs its operations, their arrays and its frame at once: 2.5 to
+3.2 GB for 9.4 M additions, 277 to 306 MB for 1 M in two groups.
 
 ## Disk space and merges
 
-Each merge writes the whole base into a new file (about 25 bytes a fact), forces it, and renames it; the snapshots
-beyond the newest two are then removed. During a merge the directory holds three bases (the current one, the one
-before it, the new one being written), and a removed file's space returns only when no view reads it any longer (the
-file stays open until the garbage collector frees its base). Budget about four times the base for `snapshots/`.
+The runs are the levels of an LSM tree (theory, section 9): the delta is merged once it holds 200,000 changes, and
+level l holds at most 200,000 x 4^l rows (800,000, 3.2 M, 12.8 M, ...). A merge takes the delta and the newest runs
+down to the first level that can hold them all, writes one run there (about 25 bytes a fact), forces it, renames it,
+and then removes the runs it replaced; the newest bottom run outside the chain is kept as a fallback. A removed
+file's space returns only when no view reads it any longer (the file stays open until the garbage collector frees its
+run). During a full merge (`snapshot`) the directory holds the base twice and the fallback: budget about three times
+the base for `snapshots/`.
 
-A merge writes about 17 facts of base for each change (the threshold n/16), so a busy database writes far more bytes
-to its snapshots than to its journal (at 10 M facts, a merge every 625,000 changes writes 245 MB). While clients write,
-a merge forces its file every 8 MiB, so that the journal's fsyncs, which every write waits for, never queue behind
-hundreds of MB of a merge's dirty pages; a merge nobody waits beside (`snapshot`, recovery) forces once, at the end.
+A fact is written about (T + 1) / 2 = 2.5 times per level it crosses (T = 4), against up to 17 times with the one level
+before; at 10 M facts, three levels. While clients write, a merge forces its file every 8 MiB, so that the journal's
+fsyncs, which every write waits for, never queue behind hundreds of MB of a merge's dirty pages; a merge nobody waits
+beside (`snapshot`, recovery) forces once, at the end.
+
+A large group (20,000 operations and more, all additions: a load) is merged into a run as it is written, from its
+facts sorted in arrays, with no per-fact index update: write a load as a few large groups, not as many small ones. A
+group whose encoding passes 256 MiB is refused (`Invalid`): split a larger load into groups below it (9.4 M additions
+encode to 113 MB), and send the very large groups one at a time (several sent at once by several threads go into one
+frame, which is not checked against the limit at this version: [limits](limits.md#writes)). Its
+receipt lists every new thing; read `receipt.things` once into a table rather than calling `thing` for each (a walk of
+the list each time). A load leaves a few runs (at 10 M facts in two groups: the clients' run and the follows' run);
+questions that join across them read both (Q3 and Q4 about 40 % slower than on one run, benchmarks): after a load,
+`snapshot` puts the base in one run (1.3 to 6.5 s at 10 M facts).
 
 ## Disks
 

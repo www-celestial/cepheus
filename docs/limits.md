@@ -24,7 +24,9 @@ defaults, and the cache's size (`set_cache`).
 
 | what | limit or default | where |
 |---|---|---|
-| one group | its encoding must stay under 256 MiB (the largest frame body). A larger group raises `Invalid_argument` in the syncer thread, which is not caught: the database stops answering. Keep groups to what one event is | `Journal.max_body` |
+| one group | its encoding must stay within 256 MiB (268,435,456 bytes, the largest frame body): a larger group is refused with `Invalid "a group of N bytes is over the frame limit of 268435456"`, and the writer goes on | `Journal.max_body`, `Engine.too_large` |
+| several groups at once | the groups resolved together go into one frame, whose body is not checked against 256 MiB at this version: several groups of 100 MiB and more sent at once by several threads can pass it, and the syncer then fails with an exception it does not catch. Send very large groups one at a time | `Engine.writer`, `Journal.append` |
+| a large group | 20,000 operations or more, all `Add`: the faster path (arrays, sorts, a run merged at once); below, or on any doubt, the ordinary path | `Resolve.large_min` |
 | operations in a group | no other limit; every `Expect` is checked against the state before the group | |
 | a batch | up to 4,096 waiting writes resolved at once | `Engine.max_batch` |
 | a frame | the batches resolved during an fsync join the waiting frame until its body passes 8 MiB; then the writer waits for the fsync | `Engine.max_frame` |
@@ -33,20 +35,23 @@ defaults, and the cache's size (`set_cache`).
 | segment header | 40 bytes | `Journal.seg_header` |
 | writers | one per database (the writer thread of its domain) | `Engine.start` |
 
-## Merges and snapshots
+## Merges and runs
 
 | what | limit or default | where |
 |---|---|---|
-| when a merge starts | when the changes since the last merge pass max(200,000, n/16), n being the facts of the base | `Engine.compact_min` (200,000), `Engine.needs_compaction` |
+| when a merge starts | when the changes since the last merge pass 200,000 | `Engine.compact_min` (200,000), `Engine.needs_compaction` |
+| levels | level l (1, 2, 3, ...) holds at most 200,000 × 4^l rows: 800,000, 3.2 M, 12.8 M, 51.2 M, ...; a run's rows are its additions and its retractions | `Engine.ratio` (4), `Engine.cap` |
+| what a merge takes | the delta and the newest runs, down to the first level whose capacity holds them all; one run is written there | `Engine.plan` |
+| `snapshot` | the delta and every run into one run, at the deepest level among the runs or deeper if they do not fit there; nothing if there is one run and no group since the last merge | `Engine.plan_all`, `Engine.snapshot` |
 | what counts as a change | every addition or retraction applied since the last merge (one undone later counts twice) | `Store.change` (`dn`) |
 | catch-up | the merge replays the groups written meanwhile until it is fewer than 256 behind; then the writer replays the rest and switches | `Engine.catch_up` |
 | a merge's fsyncs | every 8 MiB while the journal is writing, else once at the end | `Snapshot.sync_every` |
 | after a failed merge | the next one waits until the delta has grown by another threshold | `Engine.finish_merge` |
-| snapshots kept | the newest 2 (a merge's file is the third while it is written) | `Snapshot.keep` |
-| snapshot header | 4,096 bytes | `Snapshot.header` |
+| run files kept | the chain from 0 to the newest group, and the newest bottom run outside it (a fallback); a merge's file is one more while it is written | `Snapshot.install` |
+| run header | 4,096 bytes | `Snapshot.header` |
 | page | 16 KiB (16,384 bytes) | `Pages.bits` (14) |
 | CRC table | 4 bytes a page | `Snapshot.merge` |
-| snapshot format | 4; formats 1 to 3 are set aside at open and rebuilt from the journal | `Snapshot.format` |
+| run format | 5; the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
 | journal format | 1 | `Journal.format` |
 
 ## Memory and the cache
@@ -58,13 +63,14 @@ defaults, and the cache's size (`set_cache`).
 | S3-FIFO's small queue | a tenth of the cache | `Pages.make_room` |
 | ghost queue | as many keys as the cache has pages | `Pages.make_room` |
 | a page's counter | 2 bits (0 to 3) | `Pages.touch` |
-| pages in memory | under 1.25 times the cache: a full collection after each quarter of the cache evicted (16 pages at least) | `Pages.room` |
-| a snapshot read whole at open | when its pages fit in the cache | `Snapshot.check_and_build` |
-| a merge | the cache, at most 8 page buffers, and 21 bytes a page of the new base | [theory](theory.md#8-merges-written-to-a-file) |
+| pages in memory | under 1.25 times the cache: a full collection after each quarter of the cache evicted (256 pages, 4 MiB, at least) | `Pages.room` |
+| a run read whole at open | when its pages fit in the cache | `Snapshot.check_and_build` |
+| a merge | the cache, at most 2 page buffers for each of the 8 streams of a pass (7 measured), and 21 bytes a page of the new run | [theory](theory.md#8-merges-written-to-a-file) |
+| a large group | its operations, their arrays and its frame at once: 2.5 to 3.2 GB for 9.4 M additions | measured |
 | the delta | about 170 bytes a change, until the next merge | measured |
-| the base | about 25 bytes a fact (245,824,096 bytes at 10 M facts), read through the cache | measured |
-| recovery | each segment after the snapshot's position is read whole into memory, one at a time (up to 64 MiB) | `Journal.scan` |
-| `verify` | every segment read whole, one at a time | `Journal.read` |
+| the runs | about 25 bytes a fact, read through the cache | measured |
+| recovery | each segment through a window of 4 MiB; a frame longer than the window is checked by pieces and read whole only to replay its groups; a frame that does not check is read whole from its offset to the segment's end, to decide torn or damaged | `Journal.window`, `Journal.scan` |
+| `verify` | the same window; every frame decoded, a longer one read whole | `Journal.read` |
 
 ## Questions
 
@@ -83,8 +89,8 @@ defaults, and the cache's size (`set_cache`).
 |---|---|---|
 | processes | one per database: an exclusive `lockf` lock on `DIR/lock`, kept until close or death. Inside one process, a table of held locks keyed by the path as written: open a directory under one spelling only | `Disk.real.lock` |
 | `DIR/cepheus` | 37 bytes: 17 of magic, 16 of id, 4 of CRC | `Engine.read_meta` |
-| file descriptors | one for the journal's current segment, one for each snapshot file a live view holds (closed when the view's base is collected) | `Snapshot.check_and_build` |
-| snapshots | 64-bit little-endian machines (the in-memory layout); the journal is portable | [formats](formats.md) |
+| file descriptors | one for the journal's current segment, one for each run file a live view holds (closed when no view holds the run any longer and the garbage collector frees it) | `Snapshot.check_and_build` |
+| run files | 64-bit little-endian machines (the in-memory layout); the journal is portable | [formats](formats.md) |
 | durability | relies on `fsync` meaning durable, for files and for directories (Linux and its usual file systems) | [operations](operations.md#disks) |
 | OCaml | 5 (domains), with `unix` and `threads`; no C | `src/dune` |
 

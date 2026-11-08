@@ -25,22 +25,34 @@ type position = {
 
 type t
 
+val max_body : int
+(** The largest frame body, in bytes (256 MiB): recovery takes a longer length field for damage. *)
+
 val segment_limit : int ref
 (** A new segment starts once a segment passes this size (64 MB; tests make it small). *)
+
+val window : int ref
+(** The bytes of a segment a scan holds at once (4 MiB; tests make it small, 40 at least): a frame that fits is decoded
+    where it lies, a longer one checked by pieces and read whole only to be decoded. *)
 
 val create : Disk.t -> string -> string -> t
 (** [create disk dir id]: a new journal in [dir] (which exists), for the database [id]; the first group is 1. *)
 
 val recover :
-  ?frame:(position -> unit) -> force:bool -> Disk.t -> string -> string -> position option -> (Group.t -> unit) -> t
-(** [recover ~force disk dir id from on_group]: with [force], forces the newest segment and the directory (what a
-    killed process wrote but did not force is made durable before anything rests on it), reads the journal from [from] (the start without it), calls [frame] on
-    the position of each frame and [on_group] on each of its groups, in order, cuts a torn tail durably, and returns
-    the journal ready to append. Raises {!Damaged}. *)
+  ?frame:(position -> unit) -> ?after:int -> force:bool -> Disk.t -> string -> string -> position option ->
+  (Group.t -> unit) -> t
+(** [recover ~force disk dir id from on_group]: reads the journal from [from] (the start without it), calls [frame] on
+    the position of each frame and [on_group] on each of its groups, in order (but for the frames whose groups are all
+    [after] or before, checked by their CRCs and not decoded), cuts a torn tail durably, and returns
+    the journal ready to append. With [force] (after anything but a clean close), before replaying a group of the
+    newest segment, it writes that segment's newest frame again (its header if it holds no frame), forces the segment
+    and the directory: what a killed process wrote but did not force, or what a failed fsync left in the page cache
+    but not on the disk, is on the disk before anything rests on it (G5, G13). Raises {!Damaged}, or [Disk.Io]. *)
 
 val append : t -> Buffer.t -> int -> int -> unit
 (** [append j body first count]: one frame of [count] groups from [first], written and made durable. Raises
-    [Disk.Io]; after that the journal must not be used again (the database stops). *)
+    [Disk.Io], after cutting the journal back to the end of its last durable frame (forced; a failure of the cut is
+    reported on stderr); after that the journal refuses every append (the database stops, G10, G13). *)
 
 val next_group : t -> int
 val position : t -> position

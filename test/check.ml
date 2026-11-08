@@ -33,15 +33,35 @@ let facts_of_view (v : Store.view) =
   done;
   !s
 
-(* A merge of a view (its base and delta) into a snapshot file of a simulated disk, the new base read through the
-   cache: what every compaction is *)
+(* A merge of a view (its runs and delta) into one run file of a simulated disk, read through the cache: what every
+   full merge is *)
 let merge_disk = lazy (let d = Sim_disk.disk (Sim_disk.create (Rng.make 1)) in d.mkdir "/merge"; d)
 
-let compact (v : Store.view) =
+let merge_runs (v : Store.view) take =
   let d = Lazy.force merge_disk in
-  let w = Snapshot.merge d "/merge" "0123456789abcdef" v { Journal.segment = 1; offset = 40; next = v.group + 1 } in
+  let w = Snapshot.merge d "/merge" "0123456789abcdef" v ~take ~level:(1 + take) { Journal.segment = 1; offset = 40; next = v.group + 1 } in
   Snapshot.install d "/merge" w;
   w.view
+
+let compact (v : Store.view) = merge_runs v (Array.length v.runs)
+
+(* the delta alone into a new run on top of the others *)
+let push (v : Store.view) = merge_runs v 0
+
+(* a view of several runs and a delta, for the tests of reads across runs: [rounds] of [write v] calls on forks,
+   each round ending in a merge of the delta alone (a new top run), of the delta and the top run, or of all, as [r]
+   draws *)
+let layered r (v0 : Store.view) rounds write =
+  let v = ref v0 in
+  for i = 1 to rounds do
+    v := write (Cepheus.fork !v);
+    if i < rounds then
+      v := (match Rng.int r 4 with
+            | 0 -> compact !v
+            | 1 when Array.length !v.runs > 0 -> merge_runs !v 1
+            | _ -> push !v)
+  done;
+  !v
 
 let apply_group s (g : Group.t) =
   Array.fold_left (fun s (c : Group.change) -> if c.add then F.add (c.e, c.p, c.v) s else F.remove (c.e, c.p, c.v) s) s g.changes
