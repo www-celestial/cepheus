@@ -1,20 +1,33 @@
 # Testing
 
+How to test an application with forks, and how Cepheus itself is tested: what each test does, its options, and what
+it proves.
+
 ## Testing your application with forks
 
 A fork is a temporary database: the same reads, the same writes, the same checks as a real one, and nothing on disk.
 
 ```ocaml
-(* a unit test with no files at all *)
-let db = Cepheus.fork Cepheus.empty in
-let[@warning "-8"] Ok [ name; status ] =
-  Cepheus.declare db [ Cepheus.prop "client/name" Ttext; Cepheus.prop "invoice/status" Ttext ] in
-let r = Result.get_ok (Cepheus.write db [ Add (-1, name, Text "Ada") ]) in
-assert (Cepheus.values (Cepheus.view db) (Cepheus.thing r (-1)) name = [ Text "Ada" ])
+open Cepheus
 
-(* a test against a copy of real data: fork it, write freely, the database never changes *)
-let t = Cepheus.fork (Cepheus.view prod) in
-...
+(* a fixture made once: a schema and one client *)
+let fixture =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; status ]) = declare db [ prop "client/name" Ttext; prop "invoice/status" Ttext ] in
+  ignore (write db [ Add (-1, name, Text "Ada") ]);
+  view db, name, status
+
+let () =
+  let v, name, _ = fixture in
+  (* each test forks the fixture: writes stay in the fork *)
+  let t1 = fork v and t2 = fork v in
+  ignore (write t1 [ Add (65536, name, Text "Ada Durand") ]);
+  let show t = Value.to_string (List.hd (values (view t) 65536 name)) in
+  Printf.printf "test 1 sees %s, test 2 sees %s\n" (show t1) (show t2)
+```
+
+```output
+test 1 sees "Ada Durand", test 2 sees "Ada"
 ```
 
 Forks are free to make, so make one per test. A fork of a fork works, so a fixture can be prepared once and forked by
@@ -22,8 +35,27 @@ each test. A what-if question is the same thing: fork, write the hypothesis, ask
 
 ## How Cepheus is tested
 
-`dune test` runs the first three; `tools/test.sh` runs everything (release build); set `CEPHEUS_TMP` for the scratch
-databases. Every randomized test draws from a seeded generator (`Rng`, SplitMix64), so a failure replays exactly.
+`dune test` runs the unit and property tests, the exhaustive enumeration, 200 seeds of the simulation, and the
+documentation's examples; `tools/test.sh` runs everything in the release build, the slow tests too. Every randomized
+test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its seed and replays exactly.
+
+| command | what it runs | options |
+|---|---|---|
+| `_build/default/test/unit.exe` | the unit and property tests | `CEPHEUS_TMP`: where its databases on the real disk go (the system's temp directory by default) |
+| `exhaustive.exe` | every crash state of small journals and inside merges | none |
+| `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
+| `crash.exe DIR ROUNDS [SEED]` | real `kill -9` rounds on a database in DIR | SEED 42 by default |
+| `bank.exe DIR SECONDS` | the bank test for SECONDS | |
+| `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
+| `tools/test.sh` | `dune build --profile release`, then unit, exhaustive, sim, crash, bank and examples | `CEPHEUS_TMP`, `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2) |
+| `tools/tlc.sh` | TLC on `spec/Journal.tla` and `spec/Merge.tla` | `TLA2TOOLS`: the path of `tla2tools.jar` |
+
+**Deterministic simulation testing** runs the real engine on a simulated disk where one seed decides every event (the
+writes, the order of the writer's steps, crashes, damage), so that a failure is not a rare accident but a seed that
+replays it exactly; FoundationDB is tested this way (Zhou et al. 2021). **Exhaustive enumeration** goes further on
+small cases: it lists every state the disk can be in after a crash and recovers each one, the method of the ALICE
+study (Pillai et al. 2014) pushed to every case. **Property-based testing** (QuickCheck, Claessen and Hughes 2000)
+checks a property on many random inputs against a reference model written independently.
 
 1. **Unit and property tests** (`test/unit.ml`): CRC-32C against known values; codecs round trip on extreme values;
    a group cut at every byte never decodes; 300 random sequences of writes against a reference semantics written
@@ -70,6 +102,12 @@ Jepsen-style tests under network faults come with replication.
 
 ## Model checking
 
+**TLA+** is a language for describing a system as a set of states and the steps between them, in mathematics
+(Lamport 2002); a **model checker** visits every state a bounded model can reach and checks the invariants (the
+properties that must hold) in each one. **TLC** is TLA+'s model checker (Yu, Manolios, Lamport 1999). Tests try the
+cases someone thought of or a seed drew; TLC tries all of them, within its bounds, and prints the shortest sequence of
+steps that breaks an invariant.
+
 `spec/Journal.tla` models the journal protocol with the faults F1-F4: frames written one at a time and forced, a
 crash that loses, keeps or tears the frame in flight, silent damage of a durable frame (in its body, or in its
 header), a failed fsync; recovery with Cepheus' rules. Invariants: `Durable` (G1: an acknowledged frame survives,
@@ -88,3 +126,10 @@ journal), `PublishedDurable` (G5, after a recovery too), `AckedDurable` (G1), `B
 (5 groups, 2 snapshots kept): 3,808,506 distinct states, depth 43. Its four rules are constants: set any of
 `ForceBeforeRename`, `InstallWhenDurable`, `ForceAtRecovery`, `MarkerOnlyIfClean` to FALSE and TLC prints a
 counterexample of 7 steps.
+
+## Further reading
+
+Zhou et al., FoundationDB (SIGMOD 2021); Pillai et al., ALICE (OSDI 2014); Bornholt et al., lightweight formal methods
+in Amazon S3 (SOSP 2021); Claessen and Hughes, QuickCheck (ICFP 2000); Lamport, Specifying Systems (2002); Yu,
+Manolios, Lamport, TLC (CHARME 1999); Newcombe et al. (CACM 2015); Kingsbury and Alvaro, Elle (PVLDB 2020); Steele,
+Lea, Flood, SplitMix (OOPSLA 2014). Entries: [references](references.md#testing-and-verification).
