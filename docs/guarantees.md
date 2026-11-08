@@ -1,7 +1,24 @@
 # Guarantees
 
-Each guarantee states what is promised, under which faults, why it holds (a proof sketch), and the test that checks
-it. The tests are in `test/`; `tools/test.sh` runs them all.
+Each guarantee states what is promised, under which faults, its exact conditions, why it holds (a proof sketch), and
+the test that checks it. The tests are in `test/`; `tools/test.sh` runs them all. The words are explained in
+[concepts](concepts.md), [architecture](architecture.md) and the [glossary](glossary.md); the mathematics is in
+[theory](theory.md). Everything here is as of this version: one machine, one level on disk, no replication.
+
+| | promise, in one line | under |
+|---|---|---|
+| G1 | a confirmed group survives every crash and recovery | F1, F2 |
+| G2 | a group is all or nothing | F1, F2 |
+| G3 | after recovery, the groups are a prefix 1..k of the history, k ≥ the last confirmed | F1, F2 |
+| G4 | the groups are strictly serializable | always |
+| G5 | a view never changes and holds only durable groups; views never go back | F1, F2 (residual under F4: G10) |
+| G6 | damage to durable journal bytes is detected, never dropped in silence | F3 (one residual) |
+| G7 | an open from a snapshot equals a replay of the journal; a damaged page is never served | F1 to F3 |
+| G8 | a fork changes nothing of its database | always |
+| G9 | one process at a time opens a database | always (two conditions) |
+| G10 | after a failed write or fsync, nothing more is confirmed | F4 (one residual) |
+| G11 | a question returns exactly its answers, each once, within the Generic Join bound | always |
+| G12 | a crash during a merge leaves the old base or the new one, whole | F1, F2, F4 |
 
 ## The faults
 
@@ -24,6 +41,11 @@ A group is **confirmed** when `write` returned `Ok`.
 
 *Promise.* Under F1 and F2, a confirmed group is present after any sequence of crashes and recoveries, with exactly
 its changes.
+
+*Conditions.* The disk keeps what an `fsync` reported done (consumer disks with a volatile write cache may not:
+[operations](operations.md#disks)); the confirmed group's own frame is not damaged afterwards (that is F3, G6). The
+promise is for groups whose `write` returned `Ok`: a group whose `write` returned an error, or that was still in flight,
+may be present or absent.
 
 *Proof.* `write` returns after the syncer's `fsync` of the frame that holds the group returned (the writer publishes
 and answers in `Engine.commit`, after `Journal.append`, whose last call is `fsync`). A new segment is used only after
@@ -64,6 +86,12 @@ history.
 *Promise.* The history of groups is equivalent to their execution one at a time in the order of their numbers, and
 that order respects real time: if `write a` returned before `write b` started, a's number is smaller.
 
+*Exactly what it covers.* The groups, each with its `Expect`s as its only reads. A read-then-write (a view read,
+then a group) is serializable only for the facts and absences its group states with `Expect`: a fact read and not
+stated can be overwritten by another group meanwhile (a lost update), and a set read through a question can gain a
+member meanwhile (a phantom), unless a fact standing for the set is expected and changed by every writer of it
+([concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see), [theory](theory.md#5-serializability-and-isolation)).
+
 *Proof.* There is one writer per database (G9), and it resolves group n on the working state S(n-1), producing S(n):
 the execution is serial by construction (Papadimitriou 1979). A number is given when the writer takes a group, which
 is after it was submitted; if a returned, its number was given before b was submitted. Reads of a group's `Expect`
@@ -77,6 +105,10 @@ end) and the named write-skew case in `test/unit.ml`.
 
 *Promise.* A view is the exact state after one group; it never changes; the database's view shows only durable groups;
 after `write` returned group n, every view taken afterwards has a number ≥ n; the views one thread takes never go back.
+
+*Conditions.* On a database, not on a fork (a fork has no disk: its view holds its writes at once). "Never go back"
+holds for the views one thread takes in turn with `view db`; two threads may hold views of different groups. After an
+fsync failure and a reopen without a reboot, see the residual of G10.
 
 *Proof.* A view is a persistent value (an immutable base and persistent maps); the writer builds new views and never
 changes old ones. The published view is replaced by one atomic store after the frame's `fsync`, before the clients
@@ -165,7 +197,12 @@ same writes accept and refuse the same ones and end equal; the journal files are
 
 ## G9 One writer
 
-*Promise.* Two processes cannot open a database at the same time.
+*Promise.* Two processes cannot open a database at the same time, and one process cannot open it twice.
+
+*Conditions.* The lock is advisory: it stops another Cepheus, not a program that writes the files without taking it
+(a copy, an editor, a second program on another machine through a network file system whose locks do not reach
+here). Inside one process, the table of held locks is keyed by the path as it was written: open a directory under one
+spelling only (`shop` and `./shop` are two keys, and the kernel's `lockf` lets the same process lock twice).
 
 *Proof.* Opening takes an exclusive `lockf` lock on `DIR/lock`, held until close; the kernel releases it when the
 process dies. Within one process, a table of held locks refuses a second open.
@@ -176,6 +213,14 @@ process dies. Within one process, a table of held locks refuses a second open.
 
 *Promise.* Under F4, after a failed write or `fsync`, no further group is confirmed; the database must be reopened,
 and recovery starts from the journal. The `fsync` is never retried.
+
+*Residual at this version.* After a failed fsync, Linux may mark the pages it could not write as clean (F4). The
+frame stays in the page cache: a reopen without a reboot replays it and publishes its groups (whose writers got `Io`,
+so none was confirmed), and the fsyncs of recovery do not write it. If the machine later loses power, that frame is
+lost: with nothing written after it, its groups vanish from a state readers saw; with frames forced after it,
+recovery meets a bad frame followed by valid ones and refuses to open (`Damaged`), although no confirmed group was
+lost. Until the journal is cut back to its last durable frame when the writer stops, reboot the machine after an `Io`
+before opening the database again (a reboot empties the page cache).
 
 *Proof.* `Engine.commit` catches the error, marks the engine stopped, fails the batch; `prepare` fails every later
 request while stopped. Retrying an `fsync` after a failure could confirm data the kernel dropped (Rebello et al. 2020).
