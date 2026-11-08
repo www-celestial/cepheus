@@ -39,6 +39,8 @@ type base = {
   o_sblob : int;
   o_ssort : int;
   len : int;  (* the end of the part's sections *)
+  d0 : int;  (* every thing from d0 to ne - 1 is held: its slot is r0 + (e - d0), with no rank to read *)
+  r0 : int;
 }
 
 type run = {
@@ -70,7 +72,7 @@ let layout ?(pg = Pages.empty) ~at ~n ~n_cap ~ne ~k ~k_cap ~np ~ns ~sblob () =
   let o_sblob = sec sblob in
   let o_ssort = sec (4 * ns) in
   { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; o_erank; o_eoff; o_eap; o_eav; o_poff; o_avv; o_ave; o_pdist; o_soff;
-    o_sblob; o_ssort; len = !off }
+    o_sblob; o_ssort; len = !off; d0 = ne; r0 = k }
 
 (* a part with nothing: every lookup answers at once, without a page *)
 let nothing = layout ~at:0 ~n:0 ~n_cap:0 ~ne:0 ~k:0 ~k_cap:0 ~np:0 ~ns:0 ~sblob:0 ()
@@ -123,8 +125,40 @@ let[@inline] rank w e =
   if (bits lsr i) land 1 = 0 then -1
   else (w lsr 32) + if bits = 0xFFFFFFFF then i else popcount (bits land ((1 lsl i) - 1))
 
-let[@inline] slot b e = if e < 0 || e >= b.ne then -1 else rank (i64 b (b.o_erank + ((e lsr 5) lsl 3))) e
-let[@inline] cslot b e = if e < 0 || e >= b.ne then -1 else rank (ci64 b (b.o_erank + ((e lsr 5) lsl 3))) e
+let[@inline] slot b e =
+  if e >= b.d0 then (if e < b.ne then b.r0 + (e - b.d0) else -1)
+  else if e < 0 then -1
+  else rank (i64 b (b.o_erank + ((e lsr 5) lsl 3))) e
+
+let[@inline] cslot b e =
+  if e >= b.d0 then (if e < b.ne then b.r0 + (e - b.d0) else -1)
+  else if e < 0 then -1
+  else rank (ci64 b (b.o_erank + ((e lsr 5) lsl 3))) e
+(* d0 and r0 of a part, from its rank table: the longest run of things held up to the end (a part made by a load or a
+   full merge holds every thing above the property things: their lookups read no rank) *)
+let dense b =
+  if b.ne = 0 then b
+  else begin
+    let word j = ci64 b (b.o_erank + (j lsl 3)) in
+    let d0 = ref b.ne and go = ref true and j = ref ((b.ne - 1) lsr 5) in
+    while !go && !j >= 0 do
+      let lo = !j lsl 5 in
+      let hi = min b.ne (lo + 32) in
+      let mask = (1 lsl (hi - lo)) - 1 in
+      let bits = word !j land mask in
+      if bits = mask then (d0 := lo; decr j)
+      else begin
+        (* the highest thing not held, in this block *)
+        let x = ref (hi - lo - 1) in
+        while (bits lsr !x) land 1 = 1 do decr x done;
+        d0 := lo + !x + 1;
+        go := false
+      end
+    done;
+    let r0 = if !d0 >= b.ne then b.k else rank (word (!d0 lsr 5)) !d0 in
+    { b with d0 = !d0; r0 }
+  end
+
 let[@inline] eoff b s = i64 b (b.o_eoff + (8 * s))
 let[@inline] eap b i = let o = b.o_eap + (2 * i) in get16u (frame b o) (o land Pages.mask)
 let[@inline] eav b i = i64 b (b.o_eav + (8 * i))
@@ -411,8 +445,12 @@ let find_text v s =
   | Some i -> Some i
   | None ->
     let rs = v.runs in
-    let rec go j = if j = Array.length rs then None else match base_find_text rs.(j).a s with Some l -> Some (rs.(j).s0 + l) | None -> go (j + 1) in
-    go 0
+    let r = ref None and j = ref 0 in
+    while !r = None && !j < Array.length rs do
+      (match base_find_text rs.(!j).a s with Some l -> r := Some (rs.(!j).s0 + l) | None -> ());
+      incr j
+    done;
+    !r
 
 let intern v s =
   match find_text v s with
@@ -508,54 +546,81 @@ let holders v e =
   done;
   !m
 
-(* an entry for (e p w) in a run newer than j (h: the holders of e) *)
+(* an entry for (e p w) in a run newer than j (h: the holders of e); loops, not closures: these run per row *)
 let newer v h j e p w =
   h land ((1 lsl j) - 1) <> 0
-  &&
-  let rec go i = i < j && ((h lsr i) land 1 = 1 && (base_mem v.runs.(i).a e p w || base_mem v.runs.(i).t e p w) || go (i + 1)) in
-  go 0
+  && begin
+    let found = ref false and i = ref 0 in
+    while (not !found) && !i < j do
+      let r = v.runs.(!i) in
+      (* a run with no row of p at all says no without a lookup by thing *)
+      if (h lsr !i) land 1 = 1
+         && ((base_count_p r.a p > 0 && base_mem r.a e p w) || (base_count_p r.t p > 0 && base_mem r.t e p w))
+      then found := true;
+      incr i
+    done;
+    !found
+  end
 
 (* is (e p w) in the state of the runs (the delta aside): the newest run with an entry decides *)
 let runs_mem v e p w =
   let rs = v.runs in
-  let rec go j = j < Array.length rs && (base_mem rs.(j).a e p w || ((not (base_mem rs.(j).t e p w)) && go (j + 1))) in
-  go 0
+  let n = Array.length rs in
+  if n = 1 then base_mem rs.(0).a e p w
+  else begin
+    let r = ref 0 and j = ref 0 in
+    while !r = 0 && !j < n do
+      if base_mem rs.(!j).a e p w then r := 1 else if base_mem rs.(!j).t e p w then r := 2;
+      incr j
+    done;
+    !r = 1
+  end
 
 (* the delta's facts of thing e for property p, in value order *)
 let iter_delta_ep (td : tdelta) p f =
   let rec go s = match s () with Seq.Cons (((p', w), add), s') when p' = p -> f w add; go s' | _ -> () in
   go (PW.to_seq_from (p, min_int) td.tf)
 
+(* the one run of h when it has one bit, else -1 *)
+let single h = if h <> 0 && h land (h - 1) = 0 then (let j = ref 0 in while (h lsr !j) land 1 = 0 do incr j done; !j) else -1
+
 let iter_values v e p f =
-  let rs = v.runs in
-  match thing_delta v e with
-  | None when Array.length rs = 1 -> base_iter_ea rs.(0).a e p f
-  | td ->
+  let rs = v.runs and td = thing_delta v e in
+  if td = None && Array.length rs = 1 then base_iter_ea rs.(0).a e p f
+  else begin
     let h = holders v e in
-    for j = 0 to Array.length rs - 1 do
-      if (h lsr j) land 1 = 1 then
-        base_iter_ea rs.(j).a e p (fun w ->
-            if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then f w)
-    done;
-    Option.iter (fun td -> iter_delta_ep td p (fun w add -> if add then f w)) td
+    let one = single h in
+    if td = None && one >= 0 then base_iter_ea rs.(one).a e p f
+    else begin
+      for j = 0 to Array.length rs - 1 do
+        if (h lsr j) land 1 = 1 then
+          base_iter_ea rs.(j).a e p (fun w ->
+              if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then f w)
+      done;
+      Option.iter (fun td -> iter_delta_ep td p (fun w add -> if add then f w)) td
+    end
+  end
 
 (* every fact of e, in (property, value) order *)
 let iter_facts v e f =
-  let rs = v.runs in
-  match thing_delta v e with
-  | None when Array.length rs = 1 -> base_iter_e rs.(0).a e f
-  | None when holders v e = 0 -> ()
-  | td ->
+  let rs = v.runs and td = thing_delta v e in
+  if td = None && Array.length rs = 1 then base_iter_e rs.(0).a e f
+  else begin
     let h = holders v e in
-    let l = ref [] in
-    for j = 0 to Array.length rs - 1 do
-      if (h lsr j) land 1 = 1 then
-        base_iter_e rs.(j).a e (fun p w ->
-            if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then
-              l := (p, w) :: !l)
-    done;
-    Option.iter (fun td -> PW.iter (fun pw add -> if add then l := pw :: !l) td.tf) td;
-    List.iter (fun (p, w) -> f p w) (List.sort compare !l)
+    let one = single h in
+    if td = None && one >= 0 then base_iter_e rs.(one).a e f
+    else if td <> None || h <> 0 then begin
+      let l = ref [] in
+      for j = 0 to Array.length rs - 1 do
+        if (h lsr j) land 1 = 1 then
+          base_iter_e rs.(j).a e (fun p w ->
+              if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then
+                l := (p, w) :: !l)
+      done;
+      Option.iter (fun td -> PW.iter (fun pw add -> if add then l := pw :: !l) td.tf) td;
+      List.iter (fun (p, w) -> f p w) (List.sort compare !l)
+    end
+  end
 
 let delta_av v p w = match IM.find_opt p v.delta.dav with None -> None | Some pd -> IM.find_opt w pd.pm
 
@@ -619,20 +684,34 @@ let mem v e p w =
 
 (* exact counts: each run's rows minus its retractions, and the delta's net counts *)
 let count_values v e p =
-  let rs = v.runs and n = ref 0 in
-  for j = 0 to Array.length rs - 1 do
-    n := !n + base_count_ea rs.(j).a e p - base_count_ea rs.(j).t e p
-  done;
-  !n + match thing_delta v e with Some td -> Option.value (IM.find_opt p td.tn) ~default:0 | None -> 0
+  let rs = v.runs in
+  let n =
+    if Array.length rs = 1 then base_count_ea rs.(0).a e p
+    else begin
+      let n = ref 0 in
+      for j = 0 to Array.length rs - 1 do
+        n := !n + base_count_ea rs.(j).a e p - base_count_ea rs.(j).t e p
+      done;
+      !n
+    end
+  in
+  n + match thing_delta v e with Some td -> Option.value (IM.find_opt p td.tn) ~default:0 | None -> 0
 
 let has_value v e p = count_values v e p > 0
 
 let count_things v p w =
-  let rs = v.runs and n = ref 0 in
-  for j = 0 to Array.length rs - 1 do
-    n := !n + base_count_av rs.(j).a p w - base_count_av rs.(j).t p w
-  done;
-  !n + match delta_av v p w with Some vd -> vd.vn | None -> 0
+  let rs = v.runs in
+  let n =
+    if Array.length rs = 1 then base_count_av rs.(0).a p w
+    else begin
+      let n = ref 0 in
+      for j = 0 to Array.length rs - 1 do
+        n := !n + base_count_av rs.(j).a p w - base_count_av rs.(j).t p w
+      done;
+      !n
+    end
+  in
+  n + match delta_av v p w with Some vd -> vd.vn | None -> 0
 
 let count_prop v p =
   let rs = v.runs and n = ref 0 in

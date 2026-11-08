@@ -287,6 +287,9 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
       done;
       if td = None && !nh = 0 && nb > 0 then
         for r = b0 to !bi - 1 do let i = bulk.by_thing.(r) in emit_a e bulk.p.(i) bulk.w.(i) done
+      else if !nh = 0 && nb = 0 && td <> None then
+        (* the delta alone: its entries, in (p, w) order, as they are *)
+        Store.PW.iter (fun (p, w) add -> if add then emit_a e p w else emit_t e p w) (Option.get td).tf
       else if td = None && !nh = 1 && nb = 0 then begin
         (* one source: its rows as they are *)
         let j = ref 0 in
@@ -494,7 +497,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
     if disk == Disk.real then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
     let a = Store.layout ~pg ~at:0 ~n:!na ~n_cap:a_ncap ~ne ~k:!ka ~k_cap:a_kcap ~np ~ns:(s1 - s0) ~sblob:!sblob () in
     let t = Store.layout ~pg ~at:a.len ~n:!nt ~n_cap:t_ncap ~ne:t_ne ~k:!kt ~k_cap:t_kcap ~np:t_np ~ns:0 ~sblob:0 () in
-    let run = { Store.a; t; lo; hi = v.group; level; s0 } in
+    let run = { Store.a = Store.dense a; t = Store.dense t; lo; hi = v.group; level; s0 } in
     let runs = Array.append [| run |] (Array.sub rs take (nr - take)) in
     { tmp; path; group = v.group; view = Store.of_runs ~schema:v.schema ~group:v.group ~next_e:v.next_e runs;
       replaced = Array.to_list src }
@@ -600,7 +603,7 @@ let check_and_build disk dir (lo0, hi0, file) id =
         if b.np > 0 then mono (Store.safe Store.poff b) b.np b.n ("the property offsets of " ^ what))
       [ a, "its additions"; t, "its retractions" ];
     mono (Store.safe Store.soff a) a.ns a.sblob "the text offsets";
-    { Store.a; t; lo; hi; level; s0 }, next_e, { Journal.segment = seg; offset = off; next }
+    { Store.a = Store.dense a; t = Store.dense t; lo; hi; level; s0 }, next_e, { Journal.segment = seg; offset = off; next }
   with
   | r -> r
   | exception e -> (try disk.close fd with Disk.Io _ -> ()); raise e

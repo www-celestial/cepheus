@@ -31,17 +31,21 @@ databases. Every randomized test draws from a seeded generator (`Rng`, SplitMix6
    the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`); costs: questions
    where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; a merge
    keeps every fact and every answer, and a merge of a base 8 times the cache holds at most a few pages open and never
-   more resident pages than the cache; snapshots round trip, refuse another database's, set aside a damaged one; forks
+   more resident pages than the cache; views of up to 4 runs that add and retract give the facts and answers of their
+   full merge; a large group's faster path gives the same encoding, thing numbers and facts as `Resolve`, or leaves
+   the group to it; runs round trip, refuse another database's, set aside a damaged one; forks
    change nothing (files compared byte for byte) and accept what the database accepts; a second open is `Busy`; named
    cases (write skew refused, unique, one value, triangles).
 2. **Exhaustive enumeration** (`test/exhaustive.ml`): for journals of a few frames, every crash state of the frame in
    flight (each subset of its sectors kept, each cut length, a tear inside the highest kept sector) must recover to
    exactly the right groups; every single bit of two journals flipped must be detected by a full read and handled by
    recovery as G6 says; a segment torn at its creation at any byte is dropped; and inside a merge (G12), at every
-   mutating disk call of three kinds of merge (now; begun ahead of the disk and installed two frames later; those of a
-   recovery replaying a long tail), every crash state: a process death then a power loss, and power losses keeping
-   each prefix of each directory's name changes, with the unforced bytes lost, kept, torn or kept one sector in two
-   (`Sim_disk.crash ~choose` makes the choices a power loss would draw): 394 crash points, 3,924 states; and each fsync
+   mutating disk call of four kinds of merge (now, of every run; begun ahead of the disk and installed two frames
+   later; a large group's, merged as it is prepared and named once its frame is durable; those of a recovery
+   replaying a long tail), every crash state: a process death then a power loss, and power losses keeping each prefix
+   of each directory's name changes, with the unforced bytes lost, kept, torn or kept one sector in two
+   (`Sim_disk.crash ~choose` makes the choices a power loss would draw): 194 crash points, 1,944 states (the runs are
+   small now: a merge of a few facts writes a few pages); and each fsync
    of a small run failing in turn (G13), on a file system that keeps the failed bytes in memory and on one that undoes
    them, then a process death at each of the next four disk calls or none, a reopen in the same boot or none, a power
    loss with each pattern, and a reopen: 2,880 reopens checked.
@@ -92,11 +96,14 @@ damages: 3,856,315 distinct states, depth 29, 20 s on the test machine. TLC foun
 at the end were both cut), fixed in `Journal.written_after`. With `RewriteAtRecovery` FALSE it prints the trace of
 G13 in 4 steps (write, failed fsync, death before the cut, recovery publishing the frame).
 
-`spec/Merge.tla` models how a merge's file becomes the base (G12), with the journal abstracted to the groups written
-and the groups durable, a process death (the page cache kept), a power loss (unforced bytes lost, a prefix of the
-directory's name changes kept), a failed fsync, and the clean-close marker. Invariants: `NoMix` (no snapshot name points at content not whole
-and forced), `SnapshotInJournal` (a snapshot name only for a durable group; recovery never meets one ahead of the
-journal), `PublishedDurable` (G5, after a recovery too), `AckedDurable` (G1), `BaseNamed`. Bounds in `spec/Merge.cfg`
-(5 groups, 2 snapshots kept): 4,388,859 distinct states, depth 44. Its five rules are constants: set any of
-`ForceBeforeRename`, `InstallWhenDurable`, `ForceAtRecovery`, `MarkerOnlyIfClean`, `RewriteAtRecovery` to FALSE and
-TLC prints a counterexample (7 steps, or 5 for the last).
+`spec/Merge.tla` models how a merge's file replaces runs (G12), with the journal abstracted to the groups written and
+the groups durable: chains of runs named by their groups, merges of any number of the newest runs, recovery taking the
+chain of named runs that reaches the newest group with the fewest runs; a process death (the page cache kept), a power
+loss (unforced bytes lost, a prefix of the directory's name changes kept), a failed fsync (its frames marked clean),
+the writer's cut, and the clean-close marker. Invariants: `NoMix` (no run name points at content not whole and
+forced), `SnapshotInJournal` (a run name only for durable groups; recovery never meets one ahead of the journal),
+`ChainNamed` (the runs a process reads are named and form a chain from 0), `PublishedDurable` (G5, after a recovery
+too), `AckedDurable` (G1). Bounds in `spec/Merge.cfg` (3 groups: 6 possible runs): 983,080 distinct states, depth 51,
+13 s; 4 groups did not end in 12 minutes. Its five rules are constants: set any of `ForceBeforeRename`,
+`InstallWhenDurable`, `ForceAtRecovery`, `MarkerOnlyIfClean`, `RewriteAtRecovery` to FALSE and TLC prints a
+counterexample of 4 or 5 steps.
