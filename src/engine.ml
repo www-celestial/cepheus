@@ -153,50 +153,70 @@ let prepare ?(release = fun (_ : int) -> ()) t (reqs : (Resolve.op list * int * 
         (match large with Ok (Some _) -> Histogram.record large_resolve_us (Journal.clock () - t0) | _ -> ());
         match large with
         | Error m -> Some (Error (Damaged m))
-        | Ok (Some l) when l.len > !frame_limit -> Some (Error (too_large l.len))
         | Ok (Some l) -> (
           (* the operations are mapped: let them go, so that the collector may reuse their memory (millions of
              blocks) while the group is merged, unless the caller keeps them *)
           reqs.(!i) <- ([], by, why);
           release !i;
-          match Journal.begin_frame t.journal l.len n 1 with
-          | exception Disk.Io m -> t.stopped <- Some (Io m); Some (Error (Io m))
-          | p -> (
-            (* the frame's body written by another domain while this one merges; a failure of the journal stops the
-               database (G10), one of the run's file fails the group only *)
-            let failed = ref None and things = ref [] in
-            let encode () =
-              let t1 = Journal.clock () in
-              (try Resolve.encode_large l (Journal.body p) with Disk.Io m -> failed := Some m);
+          (* beside the merge, on another domain: the group coded (in memory: a few bytes a fact), its frame begun
+             at the end of the journal and its body written by pieces, then the receipt. A failure of the journal
+             stops the database (G10), one of the run's file fails the group only; a group whose coding passes the
+             frame limit is refused, its run abandoned *)
+          let failed = ref None and things = ref [] and big = ref None and pend = ref None in
+          let encode () =
+            let t1 = Journal.clock () in
+            let body = Resolve.encode_large l in
+            let len = Buffer.length body in
+            if len > !frame_limit then big := Some len
+            else begin
+              (match Journal.begin_frame t.journal len n 1 with
+               | p ->
+                 pend := Some p;
+                 let bytes = Buffer.to_bytes body and piece = 1 lsl 20 in
+                 let o = ref 0 in
+                 (try
+                    while !o < len do
+                      let k = min piece (len - !o) in
+                      Journal.body p bytes !o k;
+                      o := !o + k
+                    done
+                  with Disk.Io m -> failed := Some m)
+               | exception Disk.Io m -> failed := Some m);
               Histogram.record large_encode_us (Journal.clock () - t1);
               (* the receipt, a pair a new thing, made here beside the merge *)
               if Option.is_none !failed then things := Resolve.receipt l
-            and merge () =
-              let t1 = Journal.clock () in
-              let take, level = plan ~extra:l.facts.n l.view in
-              (* not forced here: the commit forces it beside the frame's fsync *)
-              let w =
-                Snapshot.merge ~bulk:l.facts ~sync:false t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level
-                  (Atomic.get t.at)
-              in
-              Histogram.record large_merge_us (Journal.clock () - t1);
-              w
+            end
+          and merge () =
+            let t1 = Journal.clock () in
+            let take, level = plan ~extra:l.facts.n l.view in
+            (* not forced here: the commit forces it beside the frame's fsync *)
+            let w =
+              Snapshot.merge ~bulk:l.facts ~sync:false t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level
+                (Atomic.get t.at)
             in
-            let stop m = t.stopped <- Some (Io m); Some (Error (Io m)) in
-            let lost e = match Journal.drop p with () -> Some (Error e) | exception Disk.Io m -> stop m in
-            match beside t.disk encode merge with
-            | (), w -> (
-              match !failed with
-              | Some m -> Snapshot.abandon t.disk w; stop m
-              | None ->
-                t.working <- w.view;
-                runs := w :: !runs;
-                pending := Some p;
-                incr count;
-                full := true;
-                Some (Ok { group = n; things = !things }))
-            | exception Disk.Io m -> (match !failed with Some m -> stop m | None -> lost (Io m))
-            | exception Pages.Unreadable m -> (match !failed with Some m -> stop m | None -> lost (Damaged m))))
+            Histogram.record large_merge_us (Journal.clock () - t1);
+            w
+          in
+          let stop m = t.stopped <- Some (Io m); Some (Error (Io m)) in
+          let lost e =
+            match !pend with
+            | None -> Some (Error e)
+            | Some p -> (match Journal.drop p with () -> Some (Error e) | exception Disk.Io m -> stop m)
+          in
+          match beside t.disk encode merge with
+          | (), w -> (
+            match !failed, !big, !pend with
+            | Some m, _, _ -> Snapshot.abandon t.disk w; stop m
+            | None, Some len, _ -> Snapshot.abandon t.disk w; Some (Error (too_large len))
+            | None, None, p ->
+              t.working <- w.view;
+              runs := w :: !runs;
+              pending := p;
+              incr count;
+              full := true;
+              Some (Ok { group = n; things = !things }))
+          | exception Disk.Io m -> (match !failed with Some m -> stop m | None -> lost (Io m))
+          | exception Pages.Unreadable m -> (match !failed with Some m -> stop m | None -> lost (Damaged m)))
         | Ok None -> (
           match Resolve.resolve t.working ~n ~time ~by ~why ops with
           | Ok (v, g, temps) ->
@@ -376,6 +396,8 @@ let open_ ?(id_source = random_id) disk dir =
         if clean then disk.remove marker else disk.sync_dir dir;
         if not (disk.exists jdir) then (disk.mkdir jdir; disk.sync_dir dir);
         if not (disk.exists sdir) then (disk.mkdir sdir; disk.sync_dir dir);
+        (* a journal of format 1 coded in columns once, before anything reads it *)
+        ignore (Journal.convert disk jdir id);
         Snapshot.clean disk sdir;
         let loaded, notes = Snapshot.load disk sdir id in
         let start, from = match loaded with Some (v, pos) -> v, Some pos | None -> Store.empty (), None in

@@ -3,8 +3,9 @@
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
      flags  = bit 0: more (a reply in several frames: the rows of a Find), bit 1: error (the body is an error)
 
-   A reply carries its request's id and kind; replies may come out of order (choice 7), matched by id. Values are coded
-   as in the journal (Value.encode: a tag byte, then varints and strings): one coding of values everywhere. *)
+   A reply carries its request's id and kind; replies may come out of order (choice 7), matched by id. A value is
+   coded alone by Value.encode (a tag byte, then varints and strings), as a value is everywhere one goes alone (the
+   journal codes a group's values in columns, Group). *)
 
 open Cepheus
 

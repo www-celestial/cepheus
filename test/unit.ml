@@ -136,6 +136,120 @@ let () =
     | exception Codec.Short -> incr C.checks
   done
 
+(* ---- bit packing, and the journal's coding of groups in columns ---- *)
+
+let () =
+  section "bit packing: fields of every width, against a bit-by-bit reference";
+  let r = Rng.make 21 in
+  for round = 1 to 300 do
+    let n = 1 + Rng.int r 300 in
+    let ws = Array.init n (fun _ -> Rng.int r 64) in
+    let xs = Array.init n (fun i -> let w = ws.(i) in if w = 0 then 0 else Rng.next r land Pack.mask w) in
+    let bits = Array.fold_left ( + ) 0 ws in
+    (* sometimes no room after the last field: the reads and writes near the end take the byte-by-byte path *)
+    let b = Bytes.make (((bits + 7) / 8) + (if round mod 2 = 0 then 0 else 8)) '\000' in
+    let at = ref 0 in
+    Array.iteri (fun i w -> Pack.put b !at xs.(i) w; at := !at + w) ws;
+    let bit k = (Char.code (Bytes.get b (k / 8)) lsr (k mod 8)) land 1 in
+    let at = ref 0 and ok = ref true in
+    Array.iteri
+      (fun i w ->
+        let x = ref 0 in
+        for k = w - 1 downto 0 do x := (!x lsl 1) lor bit (!at + k) done;
+        if !x <> xs.(i) || Pack.get b !at w <> xs.(i) then ok := false;
+        at := !at + w)
+      ws;
+    C.check !ok "round %d: a packed field reads back otherwise" round
+  done;
+  List.iter (fun (x, w) -> C.check (Pack.width x = w) "width %d" x) [ 0, 0; 1, 1; 2, 2; 255, 8; 256, 9; max_int, 62; -1, 63; min_int, 63 ];
+  (* columns: every block mode, extreme values, lengths around 128 *)
+  for round = 1 to 300 do
+    let n = Rng.int r 400 in
+    let gen = match round mod 5 with
+      | 0 -> (fun _ -> Rng.next r)
+      | 1 -> (let b = Rng.next r in fun i -> b + (3 * i) + Rng.int r 3)
+      | 2 -> (fun i -> if i mod 7 = 0 then max_int else if i mod 7 = 1 then min_int else Rng.int r 10)
+      | 3 -> (let c = Rng.next r in fun _ -> c)
+      | _ -> (fun i -> -i * 1000)
+    in
+    let a = Array.init n gen in
+    let buf = Buffer.create 64 in
+    Pack.put_ints buf n (Array.get a);
+    Buffer.add_string buf "tail";
+    let bytes = Buffer.to_bytes buf in
+    let rd = Codec.reader bytes 0 (Bytes.length bytes) in
+    let out = Array.make n 0 in
+    Pack.get_ints rd n out 0;
+    C.check (out = a && Codec.get_byte rd = Char.code 't') "round %d: a column of %d ints reads back otherwise" round n
+  done
+
+(* the coding of journal format 1, as the engine wrote it before format 2: what Journal.convert reads *)
+let encode_v1 b (g : Group.t) =
+  Codec.put_varint b g.n;
+  Codec.put_int b g.time;
+  Codec.put_int b g.by;
+  Codec.put_string b g.why;
+  Codec.put_varint b g.first_new;
+  Codec.put_varint b g.count_new;
+  Codec.put_varint b (Array.length g.changes);
+  Array.iter
+    (fun (f : Group.change) ->
+      Buffer.add_char b (Char.unsafe_chr (Group.code f.kind));
+      Codec.put_varint b f.e;
+      Codec.put_varint b f.p;
+      Value.encode b f.v)
+    g.changes
+
+let random_group r n =
+  let kinds = [| Group.Retracted; Added; Derived; Underived; Now_asserted; Now_derived |] in
+  let props = Array.init (1 + Rng.int r 6) (fun _ -> 16 + Rng.int r 40) in
+  let texts = Array.init (1 + Rng.int r 5) (fun i -> if i = 0 then "" else String.init (Rng.int r 30) (fun _ -> Char.chr (Rng.int r 256))) in
+  let value p : Value.t =
+    match (p + Rng.int r 2) mod 8 with
+    | 0 -> Int (if Rng.int r 4 = 0 then Rng.next r else Rng.int r 100)
+    | 1 -> Float (match Rng.int r 4 with 0 -> nan | 1 -> -0.0 | 2 -> infinity | _ -> Int64.float_of_bits (Int64.of_int (Rng.next r)))
+    | 2 -> Bool (Rng.int r 2 = 0)
+    | 3 -> Text texts.(Rng.int r (Array.length texts))
+    | 4 -> Date (Rng.int r 3650 - 100)
+    | 5 -> Money (if Rng.int r 8 = 0 then min_int else Rng.int r 1_000_000)
+    | _ -> Link (65536 + Rng.int r 1_000_000)
+  in
+  let e0 = 65536 + Rng.int r 100_000 in
+  let changes =
+    Array.init (match Rng.int r 4 with 0 -> 0 | 1 -> 1 + Rng.int r 3 | 2 -> 120 + Rng.int r 20 | _ -> Rng.int r 600)
+      (fun i ->
+        let p = props.(Rng.int r (Array.length props)) in
+        { Group.kind = kinds.(Rng.int r 6); e = (if Rng.int r 3 = 0 then Rng.int r 1_000_000 else e0 + (i / 4)); p; v = value p })
+  in
+  (* a fact twice, as a group that adds then retracts it holds *)
+  let changes = if Array.length changes > 2 then Array.append changes [| changes.(0) |] else changes in
+  { Group.n; time = Rng.next r; by = Rng.int r 1000 - 500; why = String.make (Rng.int r 3) 'w'; first_new = 65536 + Rng.int r 1000;
+    count_new = Rng.int r 50; changes }
+
+let () =
+  section "groups in columns: random groups read back, cut ones never read";
+  let r = Rng.make 22 in
+  for seed = 1 to 400 do
+    let g = random_group r seed in
+    let b = Buffer.create 64 in
+    Group.encode b g;
+    let bytes = Buffer.to_bytes b in
+    let rd = Codec.reader bytes 0 (Bytes.length bytes) in
+    C.check (match Group.decode rd with g' -> Group.equal g g' && Codec.at_end rd | exception Codec.Short -> false)
+      "seed %d: a group of %d changes reads back otherwise" seed (Array.length g.changes);
+    (* the same group in format 1 *)
+    let b1 = Buffer.create 64 in
+    encode_v1 b1 g;
+    let rd1 = Codec.reader (Buffer.to_bytes b1) 0 (Buffer.length b1) in
+    C.check (Group.equal g (Group.decode_v1 rd1)) "seed %d: format 1 reads back otherwise" seed;
+    if seed mod 20 = 0 then
+      for cut = 0 to Bytes.length bytes - 1 do
+        match Group.decode (Codec.reader bytes 0 cut) with
+        | _ -> C.fail "seed %d: a group cut at %d decoded" seed cut
+        | exception Codec.Short -> incr C.checks
+      done
+  done
+
 (* ---- the reference semantics of a write, written independently of Resolve ---- *)
 
 type model = { mutable facts : C.F.t; mutable next : int }
@@ -400,9 +514,7 @@ let () =
       incr fast;
       if not l.facts.sorted then incr unsorted;
       if List.exists (fun (t, _) -> t < -1_000_000) temps then incr fars;
-      let b1 = Buffer.create 64 and b2 = Buffer.create 64 in
-      Resolve.encode_large l (Buffer.add_subbytes b1);
-      C.check (Buffer.length b1 = l.len) "seed %d: the length of the group is not its encoded length" seed;
+      let b1 = Resolve.encode_large l and b2 = Buffer.create 64 in
       Group.encode b2 g;
       C.check (Buffer.contents b1 = Buffer.contents b2) "seed %d: the group is not encoded as Resolve's" seed;
       C.check (Resolve.receipt l = temps) "seed %d: the new things are numbered otherwise" seed;
@@ -858,6 +970,101 @@ let () =
   C.check (group (view db) = g) "every group is there after a reopen";
   close db;
   Engine.frame_limit := limit
+
+(* ---- a journal of format 1, converted once at open ---- *)
+
+(* a segment of format 1 holding [frames] (lists of groups), coded a change after the other *)
+let segment_v1 id first frames =
+  let b = Buffer.create 4096 in
+  let h = Bytes.make 40 '\000' in
+  Bytes.set_int32_le h 0 0x4A485043l;
+  Bytes.set_int32_le h 4 1l;
+  Bytes.blit_string id 0 h 8 16;
+  Bytes.set_int64_le h 24 (Int64.of_int first);
+  Bytes.set_int32_le h 36 (Int32.of_int (Crc32c.bytes h 0 36));
+  Buffer.add_bytes b h;
+  List.iter
+    (fun gs ->
+      let body = Buffer.create 256 in
+      List.iter (encode_v1 body) gs;
+      let n = Buffer.length body and g0 = (List.hd gs).Group.n in
+      let f = Bytes.make (28 + n + 16) '\000' in
+      Bytes.set_int32_le f 0 0x46485043l;
+      Bytes.set_int32_le f 4 (Int32.of_int n);
+      Bytes.set_int64_le f 8 (Int64.of_int g0);
+      Bytes.set_int32_le f 16 (Int32.of_int (List.length gs));
+      Buffer.blit body 0 f 28 n;
+      let bc = Crc32c.bytes f 28 n in
+      Bytes.set_int32_le f 20 (Int32.of_int bc);
+      let hc = Crc32c.bytes f 0 24 in
+      Bytes.set_int32_le f 24 (Int32.of_int hc);
+      Bytes.set_int32_le f (28 + n) (Int32.of_int n);
+      Bytes.set_int32_le f (28 + n + 4) (Int32.of_int bc);
+      Bytes.set_int32_le f (28 + n + 8) (Int32.of_int hc);
+      Bytes.set_int32_le f (28 + n + 12) 0x54485043l;
+      Buffer.add_bytes b f)
+    frames;
+  Buffer.to_bytes b
+
+let () =
+  section "journal format 1: converted at open, a torn tail cut, damage refused";
+  guarded "convert" @@ fun () ->
+  for seed = 1 to 30 do
+    let r = Rng.make (13000 + seed) in
+    let disk = Sim_disk.disk (Sim_disk.create (Rng.make seed)) in
+    (* a database of format 2 written as usual, its groups read back, and its journal written again in format 1, in
+       two segments; its runs removed (a database of format 1 has runs of formats 5 and 6, which open sets aside) *)
+    let db = Result.get_ok (open_on disk "/v") in
+    let[@warning "-8"] (Ok [ name; score; friend ]) = declare db [ prop "c/name" Ttext; prop ~many:true "c/score" Tint; prop ~many:true "c/friend" Tlink ] in
+    let ids = ref [] in
+    for _ = 1 to 5 + Rng.int r 20 do
+      let ops = List.init (1 + Rng.int r 6) (fun k ->
+          match Rng.int r 3, !ids with
+          | 0, _ | _, [] -> Add (-1 - k, name, Text (Printf.sprintf "n%d" (Rng.int r 50)))
+          | 1, l -> Add (List.nth l (Rng.int r (List.length l)), score, Int (Rng.int r 1000 - 500))
+          | _, l -> Add (-1 - k, friend, Link (List.nth l (Rng.int r (List.length l))))) in
+      match write db ops with Ok rc -> ids := List.map snd rc.things @ !ids | Error _ -> ()
+    done;
+    let want = C.facts_of_view (view db) and top = group (view db) in
+    close db;
+    let id = Engine.read_meta disk "/v" in
+    let gs = ref [] in
+    Journal.read disk "/v/journal" id (fun g -> gs := g :: !gs);
+    let gs = List.rev !gs in
+    List.iter (fun n -> disk.remove (Filename.concat "/v/journal" n)) (disk.readdir "/v/journal");
+    List.iter (fun n -> disk.remove (Filename.concat "/v/snapshots" n)) (disk.readdir "/v/snapshots");
+    let cut = 1 + Rng.int r (List.length gs - 1) in
+    let a = List.filteri (fun i _ -> i < cut) gs and b = List.filteri (fun i _ -> i >= cut) gs in
+    let frames l = List.map (fun g -> [ g ]) l in
+    let s1 = segment_v1 id 1 (frames a) and s2 = segment_v1 id (cut + 1) (frames b) in
+    (* the newest segment's tail: a frame torn by a crash (a header, part of a body), cut by the conversion *)
+    let torn = Rng.bool r in
+    let s2 = if torn then Bytes.cat s2 (Bytes.sub (segment_v1 id (top + 1) [ [ List.hd gs ] ]) 40 30) else s2 in
+    Disk.write_file disk (Filename.concat "/v/journal" (Journal.segment_name 1)) s1;
+    Disk.write_file disk (Filename.concat "/v/journal" (Journal.segment_name (cut + 1))) s2;
+    (* a conversion a crash cut short left its file beside the segment: removed *)
+    Disk.write_file disk (Filename.concat "/v/journal" (Journal.segment_name 1 ^ ".tmp")) (Bytes.of_string "half");
+    (match open_on disk "/v" with
+     | Error e -> C.fail "seed %d: a journal of format 1 does not open: %s" seed (message e)
+     | Ok db ->
+       C.check (group (view db) = top && C.F.equal want (C.facts_of_view (view db))) "seed %d: the converted journal holds other facts" seed;
+       close db);
+    C.check (List.for_all (fun n -> Filename.check_suffix n ".seg") (disk.readdir "/v/journal")) "seed %d: a file left beside the segments" seed;
+    (* every segment is of format 2 now: a second open converts nothing *)
+    C.check (Journal.convert disk "/v/journal" id = 0) "seed %d: a second conversion found segments of format 1" seed;
+    (* damage in a segment that is not the newest: refused, before and after a conversion alike *)
+    if seed mod 3 = 0 then begin
+      List.iter (fun n -> disk.remove (Filename.concat "/v/journal" n)) (disk.readdir "/v/journal");
+      List.iter (fun n -> disk.remove (Filename.concat "/v/snapshots" n)) (disk.readdir "/v/snapshots");
+      let s1 = Bytes.copy s1 in
+      let k = 40 + 28 + 1 in
+      Bytes.set s1 k (Char.chr (Char.code (Bytes.get s1 k) lxor 1));
+      Disk.write_file disk (Filename.concat "/v/journal" (Journal.segment_name 1)) s1;
+      Disk.write_file disk (Filename.concat "/v/journal" (Journal.segment_name (cut + 1))) s2;
+      C.check (match open_on disk "/v" with Error (Damaged _) -> true | Ok db -> close db; false | Error _ -> false)
+        "seed %d: a damaged frame of format 1 is not refused" seed
+    end
+  done
 
 (* ---- costs: the work of a question and of an index lookup stays within its bound ----
    Each case is built so that one list is far larger than the answer: an engine that walks it where a lookup or a

@@ -5,7 +5,9 @@ type position = { segment : int; offset : int; next : int }
 let seg_magic = 0x4A485043 (* "CPHJ" *)
 let frame_magic = 0x46485043 (* "CPHF" *)
 let tail_magic = 0x54485043 (* "CPHT" *)
-let format = 1
+(* format 2: groups coded in columns (Group.encode); a journal of format 1 (a change after the other) is converted
+   once at open (convert) *)
+let format = 2
 let seg_header = 40
 let fh = 28
 let ft = 16
@@ -59,9 +61,9 @@ let write_segment_header disk dir id first =
   | exception (Disk.Io _ as e) -> (try disk.close fd with Disk.Io _ -> ()); raise e
 
 (* the header of a segment: Some first group if it checks, None if short or bad (torn) *)
-let read_header b id name =
+let read_header ?(fmt = format) b id name =
   if Bytes.length b < seg_header || u32 b 0 <> seg_magic || u32 b 36 <> Crc32c.bytes b 0 36 then None
-  else if u32 b 4 <> format then damaged "%s: unknown format %d" name (u32 b 4)
+  else if u32 b 4 <> fmt then damaged "%s: unknown format %d" name (u32 b 4)
   else if Bytes.sub_string b 8 16 <> id then damaged "%s: a segment of another database" name
   else Some (Int64.to_int (Bytes.get_int64_le b 24))
 
@@ -132,6 +134,8 @@ let body r p len bc =
     r.disk.pread r.fd (p + fh) b 0 len;
     if Crc32c.bytes b 0 len = bc then Some (b, 0) else None
   end
+
+let frame_body = body
 
 let trailer_at r p len bc hc =
   let o = get r (p + fh + len) ft in
@@ -523,3 +527,99 @@ let read_after disk dir id after f =
   let start = List.fold_left (fun acc s -> if s <= after + 1 then Some s else acc) None segs in
   let from = Option.map (fun s -> { segment = s; offset = seg_header; next = s }) start in
   ignore (scan ~after disk dir id from (fun g -> if g.Group.n > after then f g))
+
+(* ---- Format 1, converted once ----
+   A segment of format 1 codes its groups a change after the other (Group.decode_v1). At open, before anything reads
+   the journal, each such segment is rewritten in format 2, its frames as they were (the same groups, first group and
+   count each), their bodies coded again: the new segment is written beside the old one (NAME.seg.tmp), forced,
+   renamed over it, and the directory forced, so that a crash leaves either segment whole, and the next open goes on
+   with the segments left. Its frames are read as recovery reads them: a frame that does not check ends the segment if
+   it is the newest one and nothing written after it checks (a torn tail, cut), and is damage otherwise. Runs older
+   than the conversion (formats 5 and 6) name offsets of the old segments; they are set aside anyway (Snapshot.load),
+   and the conversion happens before any run of format 7 exists. Returns the segments converted. *)
+let convert disk dir id =
+  let segs = List.sort compare (segments disk dir) in
+  let newest = List.fold_left (fun _ s -> s) 0 segs in
+  let converted = ref 0 in
+  List.iter
+    (fun s ->
+      let name = segment_name s and file = path dir s in
+      let fd = disk.Disk.openf file false in
+      let out =
+        Fun.protect ~finally:(fun () -> try disk.close fd with Disk.Io _ -> ()) @@ fun () ->
+        let r = reader disk fd in
+        let size = r.size in
+        if size < seg_header then None
+        else begin
+          let hb = Bytes.sub r.buf (get r 0 seg_header) seg_header in
+          if Bytes.length hb < seg_header || u32 hb 0 <> seg_magic || u32 hb 36 <> Crc32c.bytes hb 0 36 || u32 hb 4 <> 1 then None
+          else begin
+            ignore (read_header ~fmt:1 hb id name);
+            let o = Buffer.create (min size (16 lsl 20)) in
+            let h = Bytes.copy hb in
+            set32 h 4 format;
+            set32 h 36 (Crc32c.bytes h 0 36);
+            Buffer.add_bytes o h;
+            let gbuf = Buffer.create 4096 in
+            let broken p =
+              let tail = Bytes.create (size - p) in
+              disk.pread fd p tail 0 (size - p);
+              if written_after tail 0 (size - p) then damaged "%s: damaged frame at offset %d (written whole)" name p
+              else if s <> newest then damaged "%s: segment ends with a broken frame at %d" name p
+            in
+            let rec loop p =
+              if p < size then
+                match header_at r p with
+                | None -> broken p
+                | Some (len, f0, count, bc, _) -> (
+                  match frame_body r p len bc with
+                  | None -> broken p
+                  | Some (b, bo) ->
+                    let rd = Codec.reader b bo len in
+                    Buffer.clear gbuf;
+                    (try for _ = 1 to count do Group.encode gbuf (Group.decode_v1 rd) done
+                     with Codec.Short -> damaged "%s: frame at %d does not decode" name p);
+                    if not (Codec.at_end rd) then damaged "%s: frame at %d has bytes after its groups" name p;
+                    let n = Buffer.length gbuf in
+                    if n > max_body then damaged "%s: frame at %d is over %d bytes in format 2" name p max_body;
+                    let f = Bytes.create (fh + n + ft) in
+                    set32 f 0 frame_magic;
+                    set32 f 4 n;
+                    Bytes.set_int64_le f 8 (Int64.of_int f0);
+                    set32 f 16 count;
+                    Buffer.blit gbuf 0 f fh n;
+                    let c = Crc32c.bytes f fh n in
+                    set32 f 20 c;
+                    let hc = Crc32c.bytes f 0 24 in
+                    set32 f 24 hc;
+                    set32 f (fh + n) n;
+                    set32 f (fh + n + 4) c;
+                    set32 f (fh + n + 8) hc;
+                    set32 f (fh + n + 12) tail_magic;
+                    Buffer.add_bytes o f;
+                    loop (p + fh + len + ft))
+            in
+            loop seg_header;
+            Some o
+          end
+        end
+      in
+      match out with
+      | None -> ()
+      | Some o ->
+        let tmp = file ^ ".tmp" in
+        let tfd = disk.openf tmp true in
+        (match
+           disk.truncate tfd 0;
+           disk.pwrite tfd 0 (Buffer.to_bytes o) 0 (Buffer.length o);
+           disk.fsync tfd
+         with
+         | () -> disk.close tfd
+         | exception (Disk.Io _ as e) -> (try disk.close tfd with Disk.Io _ -> ()); raise e);
+        disk.rename tmp file;
+        disk.sync_dir dir;
+        incr converted)
+    segs;
+  (* a conversion a crash interrupted leaves its .tmp: the old segment is still there, whole *)
+  List.iter (fun n -> if Filename.check_suffix n ".seg.tmp" then disk.Disk.remove (Filename.concat dir n)) (disk.readdir dir);
+  !converted

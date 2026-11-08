@@ -249,7 +249,6 @@ type large = {
   view : Store.view;
   facts : Bulk.t;  (* the effective changes, all additions, in the group's order: what the journal keeps *)
   count : int;
-  len : int;  (* bytes of the group as Group.encode writes it *)
   dense : Bulk.i32;  (* the number of temporary id -t, for 1 <= t <= deep, or -1: what [receipt] reads *)
   farmap : (int, int) Hashtbl.t;  (* the numbers of the temporary ids below -nops *)
   n : int;
@@ -274,21 +273,6 @@ let kinds (v : Store.view) =
 
 (* in [Bulk.t.e]: a new thing whose temporary id is below -n (n operations), found in its chunk's list *)
 let far = Int32.to_int Int32.min_int
-
-let[@inline] vlen n = if n < 0x80 then 1 else if n < 0x4000 then 2 else if n < 0x200000 then 3 else if n < 0x10000000 then 4 else
-    let k = ref 5 and x = ref (n lsr 35) in while !x > 0 do incr k; x := !x lsr 7 done; !k
-let[@inline] zlen n = let z = (n lsl 1) lxor (n asr 62) in if z land lnot 0x7f = 0 then 1 else
-    let k = ref 1 and x = ref (z lsr 7) in while !x > 0 do incr k; x := !x lsr 7 done; !k
-
-(* the bytes of fact i's change, as Group.encode writes it *)
-let change_len (v : Store.view) kinds (b : Bulk.t) i =
-  let p = Bulk.prop b i and w = Bulk.word b i in
-  1 + vlen (Bulk.thing b i) + vlen p
-  + match kinds.(p) land 7 with
-    | 4 -> 1
-    | 6 -> let l = String.length (Store.text v w) in 1 + vlen l + l
-    | 7 -> 9
-    | _ -> 1 + zlen w
 
 let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
   try
@@ -490,17 +474,7 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
     done;
     let first_new = v0.next_e and count_new = !next - v0.next_e in
     let view = { v with next_e = !next; group = n } in
-    (* the length of the group as Group.encode writes it *)
-    let lens = Array.make (Bulk.chunks count) 0 in
-    Bulk.parallel (Bulk.chunks count) (fun c ->
-        let s = ref 0 in
-        for i = c * ch to min count ((c + 1) * ch) - 1 do s := !s + change_len view kinds b i done;
-        lens.(c) <- !s);
-    let len =
-      Array.fold_left ( + ) 0 lens + vlen n + zlen time + zlen by + vlen (String.length why) + String.length why
-      + vlen first_new + vlen count_new + vlen count
-    in
-    Some { view; facts = b; count; len; dense; farmap; n; time; by; why; first_new; count_new }
+    Some { view; facts = b; count; dense; farmap; n; time; by; why; first_new; count_new }
   with Slow -> None
 
 (* The receipt's new things, (temporary id, number) in the order of numbering, as [resolve] lists them: a pair a new
@@ -516,43 +490,38 @@ let receipt (l : large) =
   for k = l.count_new - 1 downto 0 do temps := (Bigarray.Array1.unsafe_get tmp_of k, l.first_new + k) :: !temps done;
   !temps
 
-(* The group of [l] as Group.encode writes it, in pieces of at most 1 MiB (but a longer text) handed to [out] in order:
-   for the journal, which writes them as they come. *)
-let encode_large (l : large) (out : Bytes.t -> int -> int -> unit) =
+(* The group of [l] as Group.encode codes it (one coding: Group.encode_source), from the large group's arrays: its
+   changes in the group's order, the asserted ones then the derived (Bulk.d0); a property's column is its type's tag;
+   the texts each once, in order of first use. *)
+let encode_large (l : large) =
   let kinds = kinds l.view and b = l.facts in
-  let cap = 1 lsl 20 in
-  let buf = ref (Bytes.create (cap + 64)) and pos = ref 0 in
-  let flush () = if !pos > 0 then (out !buf 0 !pos; pos := 0) in
-  let need k = if !pos + k > cap then flush (); if k > Bytes.length !buf then buf := Bytes.create k in
-  let byte c = Bytes.unsafe_set !buf !pos (Char.unsafe_chr c); incr pos in
-  let varint n = let n = ref n in while !n >= 0x80 do byte (!n land 0x7f lor 0x80); n := !n lsr 7 done; byte !n in
-  let int n =
-    let n = ref ((n lsl 1) lxor (n asr 62)) in
-    while !n land lnot 0x7f <> 0 do byte (!n land 0x7f lor 0x80); n := !n lsr 7 done;
-    byte !n
-  in
-  let bytes s = Bytes.blit_string s 0 !buf !pos (String.length s); pos := !pos + String.length s in
-  need (64 + String.length l.why);
-  varint l.n; int l.time; int l.by; varint (String.length l.why); bytes l.why;
-  varint l.first_new; varint l.count_new; varint l.count;
-  for i = 0 to l.count - 1 do
-    let p = Bulk.prop b i and w = Bulk.word b i in
-    let k = kinds.(p) land 7 in
-    let s = if k >= 6 then Store.text l.view w else "" in
-    need (32 + String.length s);
-    byte (if Bulk.derived b i then 2 else 1);
-    varint (Bulk.thing b i);
-    varint p;
-    match k with
-    | 1 -> byte 0; int w
-    | 2 -> byte 5; int w
-    | 3 -> byte 6; int w
-    | 4 -> byte (if w <> 0 then 3 else 2)
-    | 5 -> byte 7; int w
-    | 6 -> byte 4; varint (String.length s); bytes s
-    | _ -> byte 1; bytes s
+  let np = Array.length kinds in
+  let colmap = Array.make np (-1) and cols = ref [] and nc = ref 0 in
+  let tags = [| -1; 0; 5; 6; 2; 7; 4; 1 |] in
+  let loc = Bulk.i32 (max 1 b.n) and texts = Hashtbl.create 4096 and tl = ref [] and nt = ref 0 in
+  for i = 0 to b.n - 1 do
+    let p = Bulk.prop b i in
+    if colmap.(p) < 0 then (colmap.(p) <- !nc; cols := (p, tags.(kinds.(p) land 7)) :: !cols; incr nc);
+    if kinds.(p) land 7 = 6 then begin
+      let w = Bulk.word b i in
+      let k = match Hashtbl.find_opt texts w with
+        | Some k -> k
+        | None -> let k = !nt in Hashtbl.add texts w k; tl := w :: !tl; incr nt; k
+      in
+      Bigarray.Array1.unsafe_set loc i (Int32.of_int k)
+    end
   done;
-  flush ()
+  let out = Buffer.create (16 + (4 * b.n)) in
+  Group.encode_source out ~n:l.n ~time:l.time ~by:l.by ~why:l.why ~first_new:l.first_new ~count_new:l.count_new
+    { count = b.n;
+      kinds = (fun i -> if Bulk.derived b i then 2 else 1);
+      things = (fun i -> Bulk.thing b i);
+      col = (fun i -> Array.unsafe_get colmap (Bulk.prop b i));
+      cols = Array.of_list (List.rev !cols);
+      num = (fun i -> if Array.unsafe_get kinds (Bulk.prop b i) land 7 = 6 then Int32.to_int (Bigarray.Array1.unsafe_get loc i) else Bulk.word b i);
+      float = (fun i -> String.get_int64_le (Store.text l.view (Bulk.word b i)) 0);
+      texts = Array.of_list (List.rev_map (fun w -> Store.text l.view w) !tl) };
+  out
 
 (* A group from the journal that the faster path can replay: every change an addition, the asserted ones first and
    the derived after (a large group's frame), no system property (its additions are facts absent before it,

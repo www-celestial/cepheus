@@ -4,6 +4,7 @@ module Crc32c = Crc32c
 module Disk = Disk
 module Engine = Engine
 module Group = Group
+module Pack = Pack
 module Pages = Pages
 module Histogram = Histogram
 module Journal = Journal

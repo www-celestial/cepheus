@@ -33,6 +33,31 @@ type t = {
   changes : change array;
 }
 
+(** What the journal's coding reads of a group's changes: from {!t}'s array, or from a large group's arrays
+    (Resolve.encode_large), so that both write the same bytes. [col i] is change i's column, in order of first use,
+    whose (property, tag) [cols] lists (the tag is the value's constructor, as {!Value.encode}'s byte, both booleans
+    2); [num i] the number its value is coded by (the int of an Int, a Date, a Money or a Link, 0 or 1 for a Bool, the
+    place of a Text in [texts]); [float i] the bits of a Float. *)
+type source = {
+  count : int;
+  kinds : int -> int;
+  things : int -> int;
+  col : int -> int;
+  cols : (int * int) array;
+  num : int -> int;
+  float : int -> int64;
+  texts : string array;  (** the group's texts, each once, in order of first use *)
+}
+
+val encode_source : Buffer.t -> n:int -> time:int -> by:int -> why:string -> first_new:int -> count_new:int -> source -> unit
+
 val encode : Buffer.t -> t -> unit
+(** The journal's coding of a group (format 2, docs/formats.md): its header, its texts once each, then its changes
+    in columns, in their order. *)
+
 val decode : Codec.reader -> t
+(** Raises {!Codec.Short} on bytes that are not a group. *)
+
+val decode_v1 : Codec.reader -> t
+(** The coding of journal format 1 (a change after the other), read only to convert such a journal once. *)
 val equal : t -> t -> bool

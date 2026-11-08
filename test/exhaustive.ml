@@ -98,7 +98,9 @@ let crash_states sizes =
                 end
               done;
               incr states;
-              let whole = Bytes.length b >= hi && Bytes.sub b lo (hi - lo) = Bytes.sub full lo (hi - lo) in
+              (* the frame counts once its header and body reached the disk and the file reaches its end: a torn
+                 trailer alone is rebuilt from the header (G6) *)
+              let whole = Bytes.length b >= hi && Bytes.sub b lo (hi - lo - 16) = Bytes.sub full lo (hi - lo - 16) in
               match recover_bytes b with
               | Ok n, _ ->
                 let want = 2 * if whole then m + 1 else m in

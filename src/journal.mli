@@ -107,3 +107,9 @@ val clock : unit -> int
 val read_after : Disk.t -> string -> string -> int -> (Group.t -> unit) -> unit
 (** [read_after disk dir id n f]: [f] on every group after [n], in order, from the segment that holds group [n + 1]
     (the frames before it checked by their CRCs, not decoded), without changing a file; raises {!Damaged}. *)
+
+val convert : Disk.t -> string -> string -> int
+(** [convert disk dir id]: every segment of format 1 (a change after the other) rewritten in format 2 (groups in
+    columns), its frames as they were, each segment written beside, forced and renamed over the old one, the directory
+    forced; a frame that does not check is a torn tail in the newest segment (cut) and damage elsewhere ({!Damaged}).
+    Run once at open, before anything reads the journal; returns the number of segments converted. *)
