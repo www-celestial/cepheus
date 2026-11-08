@@ -19,6 +19,7 @@ type t = {
   lock : string -> bool;
   unlock : string -> unit;
   now : unit -> int;
+  parallel : bool;
 }
 
 (* ---- The real file system ---- *)
@@ -143,6 +144,7 @@ let real =
                | None -> ())
             | None -> ()));
     now = (fun () -> int_of_float (Unix.gettimeofday () *. 1000.));
+    parallel = true;
   }
 
 let read_all d path =

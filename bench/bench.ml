@@ -134,14 +134,16 @@ let load dir csv facts =
     let doms = List.init d (fun i -> Domain.spawn (fun () -> part (cut i) (cut (i + 1)))) in
     List.concat (List.map Domain.join doms)
   in
+  let built = ref 0 in
   parallel_n threads nbatch (fun b ->
       let k0 = b * per and k1 = min nclients ((b + 1) * per) in
       let ops = build k0 k1 in
+      (* what the client's own list of operations holds, before the engine sees it *)
+      if b = 0 then built := rss ();
       let r = ok (write db ~by:1 ~why:"load" ops) in
-      (* the new ids, read once (thing r t walks the list) *)
-      let ids = Hashtbl.create (List.length r.things) in
-      List.iter (fun (t, e) -> Hashtbl.replace ids t e) r.things;
-      for k = k0 to k1 - 1 do cid.(k) <- Hashtbl.find ids (-1 - (21 * (k - k0))) done);
+      (* the clients' new ids, read off the receipt in one walk (thing r t walks the list): client k of the group is
+         the temporary id -1 - 21 (k - k0), its invoices the 20 after it *)
+      List.iter (fun (t, e) -> let x = -1 - t in if x mod 21 = 0 then cid.(k0 + (x / 21)) <- e) r.things);
   let t1 = now () in
   parallel_n threads nbatch (fun b ->
       let k0 = b * per and k1 = min nclients ((b + 1) * per) in
@@ -152,6 +154,7 @@ let load dir csv facts =
       done;
       ignore (ok (write db ~by:1 ~why:"follows" !ops)));
   let t2 = now () in
+  let peak_load = peak () in
   let gc1 = Gc.quick_stat () in
   let size1 = du dir and runs_before = Array.length (view db).runs in
   (* SNAPSHOT=0 leaves the runs as the load made them (for the reads across runs) *)
@@ -159,8 +162,9 @@ let load dir csv facts =
   let t3 = now () in
   let v = view db in
   Printf.printf "cepheus load: %d clients, %d facts in groups of %d clients by %d threads: %.2f s to confirm every group (clients %.2f s, follows %.2f s; %.0f facts/s), peak RSS %d MB, on disk %d MB (journal and runs)\n%!"
-    nclients (Store.facts v) per threads (t2 -. t0) (t1 -. t0) (t2 -. t1) (float (Store.facts v) /. (t2 -. t0)) (peak () / 1024) (size1 / 1048576);
-  Printf.printf "  then snapshot (every run merged into one) %.2f s, on disk %d MB; %d runs before it\n" (t3 -. t2) (du dir / 1048576) runs_before;
+    nclients (Store.facts v) per threads (t2 -. t0) (t1 -. t0) (t2 -. t1) (float (Store.facts v) /. (t2 -. t0)) (peak_load / 1024) (size1 / 1048576);
+  Printf.printf "  the client's operations of the first group built: RSS %d MB\n" (!built / 1024);
+  Printf.printf "  then snapshot (every run merged into one) %.2f s, on disk %d MB; %d runs before it; peak RSS with it %d MB\n" (t3 -. t2) (du dir / 1048576) runs_before (peak () / 1024);
   Printf.printf "  %d frames, %d merges in the background; GC: %.0f M words minor, %.0f M major, %d major collections\n"
     (Atomic.get Engine.frames - f0) (Atomic.get Engine.merges) ((gc1.minor_words -. gc0.minor_words) /. 1e6)
     ((gc1.major_words -. gc0.major_words) /. 1e6) (gc1.major_collections - gc0.major_collections);

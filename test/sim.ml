@@ -193,7 +193,8 @@ let rec recover ?(kill = false) ?(close = false) w =
     if w.flipped_journal then (count "damage before the snapshot, not needed"; raise Over)
 
 let record_batch w (b : Engine.batch) =
-  let r = Codec.reader (Buffer.to_bytes b.body) 0 (Buffer.length b.body) in
+  let body = match b.pending with Some p -> Journal.written_body p | None -> Buffer.to_bytes b.body in
+  let r = Codec.reader body 0 (Bytes.length body) in
   for _ = 1 to b.count do
     let g = Group.decode r in
     Hashtbl.replace w.groups g.n g;

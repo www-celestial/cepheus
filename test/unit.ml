@@ -319,33 +319,77 @@ let () =
 (* ---- large groups ---- *)
 
 let () =
+  section "large groups: the orders by thing and by property, against a sort";
+  let chunk = !Bulk.chunk in
+  for seed = 1 to 300 do
+    let r = Rng.make (10500 + seed) in
+    Bulk.chunk := 1 + Rng.int r 50;
+    let n = Rng.int r 400 and np = 1 + Rng.int r 6 in
+    (* facts in thing order (as a loader writes them), or not *)
+    let sorted_in = Rng.bool r in
+    let facts = Array.init n (fun _ -> 65536 + Rng.int r (1 + Rng.int r 300), Rng.int r np,
+                                    match Rng.int r 12 with 0 -> max_int - Rng.int r 3 | 1 -> min_int + Rng.int r 3 | 2 -> -Rng.int r (1 lsl 40) | _ -> Rng.int r 50) in
+    if sorted_in then Array.sort compare facts;
+    let e = Bulk.i32 n and p = Bulk.u16 n and w = Bulk.ints n in
+    Array.iteri (fun i (a, b, c) -> e.{i} <- Int32.of_int a; p.{i} <- b; w.{i} <- c) facts;
+    let by_thing = List.stable_sort (fun i j -> compare facts.(i) facts.(j)) (List.init n Fun.id) in
+    let sorted = Bulk.in_order e p w n in
+    C.check (sorted = (List.init n Fun.id = by_thing)) "seed %d: in order is %b" seed sorted;
+    let order = if sorted then Bulk.i32 0 else Bulk.by_thing e p w n in
+    let b = Bulk.make ~sorted ~order e p w n ~np ~texts:[||] in
+    C.check (List.init n (Bulk.row b) = by_thing) "seed %d: the order by thing" seed;
+    let want = List.stable_sort (fun i j -> let a, q, x = facts.(i) and a', q', x' = facts.(j) in compare (q, x, a) (q', x', a')) by_thing in
+    let got = ref [] in
+    for q = np - 1 downto 0 do
+      for k = b.poff.(q + 1) - 1 downto b.poff.(q) do got := (Bulk.pthing b k, q, Bulk.pword b k) :: !got done
+    done;
+    C.check (!got = List.map (fun i -> let a, q, x = facts.(i) in a, q, x) want) "seed %d: the order by property" seed
+  done;
+  Bulk.chunk := chunk
+
+let () =
   section "large groups: the faster path gives what Resolve gives, or leaves the group to it";
-  let large = !Resolve.large_min in
+  let large = !Resolve.large_min and chunk = !Bulk.chunk in
   Resolve.large_min := 1;
-  let fast = ref 0 and slow = ref 0 in
+  let fast = ref 0 and slow = ref 0 and unsorted = ref 0 and fars = ref 0 in
   for seed = 1 to 200 do
     let r = Rng.make (11000 + seed) in
+    (* chunks of a few operations, so that a group spans many, mapped by several domains *)
+    Bulk.chunk := 1 + Rng.int r 9;
     let f = fresh () in
     let v = C.layered r (view f) (1 + Rng.int r 3) (fun g -> for _ = 1 to 10 do ignore (write g (random_ops r (view g) ())) done; view g) in
     let p n = Option.get (property v n) in
     let things = v.next_e - Schema.first_thing in
     let old () = Schema.first_thing + Rng.int r (max 1 things) in
     let small = [| "a"; "b"; "c"; "d" |] in
+    (* new things by temporary ids near -1 and, now and then, far below the group's length *)
+    let far = Rng.int r 3 = 0 in
+    let tmp k = if far && k mod 3 = 1 then -(k + 1) - 1_000_000_000 else -(k + 1) in
     (* many new things with their facts, links between them and to old things, many-valued facts on old things,
        and now and then what the faster path must leave to Resolve: a second value, a taken mail, a bad type *)
     let ops =
       List.concat
         (List.init (5 + Rng.int r 40) (fun k ->
-             let t = -(k + 1) in
+             let t = tmp k in
              [ Add (t, p "name", Text ("n" ^ Rng.pick r small)); Add (t, p "score", Int (Rng.int r 4)) ]
              @ (if Rng.int r 3 = 0 then [ Add (t, p "tag", Text (Rng.pick r small)); Add (t, p "tag", Text (Rng.pick r small)) ] else [])
-             @ (if k > 0 && Rng.bool r then [ Add (t, p "friend", Link (-(Rng.int r k + 1))) ] else [])
+             @ (if k > 0 && Rng.bool r then [ Add (t, p "friend", Link (tmp (Rng.int r k))) ] else [])
              @ (if things > 0 && Rng.int r 3 = 0 then [ Add (old (), p "tag", Text (Rng.pick r small)) ] else [])
              @ (if things > 0 && Rng.int r 4 = 0 then [ Add (t, p "boss", Link (old ())) ] else [])
              @ (if Rng.int r 30 = 0 then [ Add (t, p "score", Int 9) ] else [])
              @ (if Rng.int r 30 = 0 then [ Add (t, p "mail", Text (Rng.pick r small ^ "@x")) ] else [])
              @ (if Rng.int r 60 = 0 then [ Add (t, p "score", Text "x") ] else [])
              @ (if Rng.int r 60 = 0 && things > 0 then [ Add (old (), p "name", Text "z") ] else [])))
+    in
+    (* and now and then in no order at all, or in the order of the things and properties, as a loader writes *)
+    let key = function
+      | Add (e, q, _) | Retract (e, q, _) | Expect (e, q, _) ->
+        (if e >= 0 then e else if e < -1_000_000_000 then v.next_e - e - 1_000_000_001 else v.next_e - e - 1), q
+    in
+    let ops = match Rng.int r 4 with
+      | 0 -> List.map snd (List.sort compare (List.map (fun o -> Rng.int r 1_000_000, o) ops))
+      | 1 -> List.stable_sort (fun a b -> compare (key a) (key b)) ops
+      | _ -> ops
     in
     let n = v.group + 1 in
     let slow_r = Resolve.resolve v ~n ~time:5 ~by:1 ~why:"w" ops in
@@ -354,11 +398,14 @@ let () =
     | Some _, Error e -> C.fail "seed %d: the faster path took a group Resolve refuses: %s" seed (Resolve.error_message e)
     | Some l, Ok (v', g, temps) ->
       incr fast;
+      if not l.facts.sorted then incr unsorted;
+      if List.exists (fun (t, _) -> t < -1_000_000) temps then incr fars;
       let b1 = Buffer.create 64 and b2 = Buffer.create 64 in
-      l.body b1;
+      Resolve.encode_large l (Buffer.add_subbytes b1);
+      C.check (Buffer.length b1 = l.len) "seed %d: the length of the group is not its encoded length" seed;
       Group.encode b2 g;
       C.check (Buffer.contents b1 = Buffer.contents b2) "seed %d: the group is not encoded as Resolve's" seed;
-      C.check (l.temps = temps) "seed %d: the new things are numbered otherwise" seed;
+      C.check (Resolve.receipt l = temps) "seed %d: the new things are numbered otherwise" seed;
       C.check (l.view.next_e = v'.next_e) "seed %d: the next thing differs" seed;
       let want = C.facts_of_view v' in
       (* the facts merged as a run, as the writer does; and replayed from the journal's form *)
@@ -374,8 +421,11 @@ let () =
          C.check (C.F.equal want (C.facts_of_view w.view)) "seed %d: the large group replayed differs" seed
        | None -> C.fail "seed %d: the group could not be replayed by the faster path" seed)
   done;
-  Printf.printf "  %d large groups by the faster path, %d left to Resolve\n" !fast !slow;
-  Resolve.large_min := large
+  Printf.printf "  %d large groups by the faster path (%d out of thing order, %d with far ids), %d left to Resolve\n" !fast
+    !unsorted !fars !slow;
+  C.check (!unsorted > 0 && !unsorted < !fast && !fars > 0) "the faster path never took a group in thing order, or out of it, or with far ids";
+  Resolve.large_min := large;
+  Bulk.chunk := chunk
 
 (* ---- snapshots ---- *)
 

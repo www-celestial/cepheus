@@ -478,29 +478,35 @@ let intern v s =
       let i = d.dnext in
       { v with dict = { d with smap = SM.add s i d.smap; extra = IM.add i s d.extra; dnext = i + 1 } }, i
 
-(* A text a large group adds: its id, as [intern] would give it, but without its entry in the sorted map (the merge
-   of the group, which follows at once, sorts the group's texts itself: Bulk.t.texts). The view is for that merge. *)
-let add_text v s =
-  let d = v.dict in
+(* The texts a large group adds: their ids, consecutive from the first returned, as [intern] would give them one
+   after the other, but without their entries in the sorted map (the merge of the group, which follows at once, sorts
+   the group's texts itself: Bulk.t.texts), and one new view for all. The view is for that merge. *)
+let add_texts v (ss : string array) =
+  let d = v.dict and n = Array.length ss in
   if v.writer then begin
     let c = d.chunks in
     if c.count > d.dcount then c.count <- d.dcount;
-    let k = c.count - c.c0 in
-    let ci = k lsr chunk_bits in
-    if ci >= Array.length c.arr then begin
-      let a = Array.make (max 4 (2 * Array.length c.arr)) [||] in
-      Array.blit c.arr 0 a 0 (Array.length c.arr);
-      c.arr <- a
-    end;
-    if Array.length c.arr.(ci) = 0 then c.arr.(ci) <- Array.make (1 lsl chunk_bits) "";
-    c.arr.(ci).(k land ((1 lsl chunk_bits) - 1)) <- s;
-    let i = c.count in
-    c.count <- i + 1;
-    { v with dict = { d with dcount = i + 1; dnext = i + 1 } }, i
+    let first = c.count in
+    Array.iter
+      (fun s ->
+        let k = c.count - c.c0 in
+        let ci = k lsr chunk_bits in
+        if ci >= Array.length c.arr then begin
+          let a = Array.make (max 4 (2 * Array.length c.arr)) [||] in
+          Array.blit c.arr 0 a 0 (Array.length c.arr);
+          c.arr <- a
+        end;
+        if Array.length c.arr.(ci) = 0 then c.arr.(ci) <- Array.make (1 lsl chunk_bits) "";
+        c.arr.(ci).(k land ((1 lsl chunk_bits) - 1)) <- s;
+        c.count <- c.count + 1)
+      ss;
+    { v with dict = { d with dcount = first + n; dnext = first + n } }, first
   end
-  else
-    let i = d.dnext in
-    { v with dict = { d with extra = IM.add i s d.extra; dnext = i + 1 } }, i
+  else begin
+    let first = d.dnext and extra = ref d.extra in
+    Array.iteri (fun k s -> extra := IM.add (first + k) s !extra) ss;
+    { v with dict = { d with extra = !extra; dnext = first + n } }, first
+  end
 
 let float_key f = let b = Bytes.create 8 in Bytes.set_int64_le b 0 (Int64.bits_of_float f); Bytes.unsafe_to_string b
 

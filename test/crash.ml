@@ -1,16 +1,24 @@
 (* Real crashes. A child process writes with several client threads and prints each confirmation; the parent kills
    it with SIGKILL at a random moment, reopens the database (recovery), and checks that every confirmed group is there
    with its exact content (G1-G3), on the real disk and the real threads; merges run every 50 changes, so that many
-   kills land inside one: recovery must set no snapshot aside and leave no merge's file (G12). Then it starts the next
-   child on the same database. Usage: crash.exe DIR ROUNDS [SEED]. *)
+   kills land inside one: recovery must set no snapshot aside and leave no merge's file (G12). One more thread loads:
+   large groups of 150 new things (300 additions, the path of large groups from 200 here, in chunks of 64), whose
+   frames are written by pieces beside their merges and forced every 2 KB, so that kills land inside them too; its
+   first and last things are checked. Then it starts the next child on the same database. Usage: crash.exe DIR ROUNDS
+   [SEED]. *)
 
 open Cepheus
 module C = Check
 
 let clients = 8
 
+let loaded = 150
+
 let child dir =
   Engine.compact_min := 50;
+  Resolve.large_min := 200;
+  Bulk.chunk := 64;
+  Journal.force_every := 2048;
   let db = match open_ dir with Ok db -> db | Error e -> prerr_endline (message e); exit 2 in
   let[@warning "-8"] (Ok [ name; seq ]) = declare db [ prop ~unique:true "name" Ttext; prop "seq" Tint ] in
   let m = Mutex.create () in
@@ -27,7 +35,21 @@ let child dir =
       | Error e -> prerr_endline (message e); exit 3
     done
   in
-  let ts = List.init clients (fun c -> Thread.create run c) in
+  let load () =
+    let k = ref 0 in
+    while true do
+      incr k;
+      let label = Printf.sprintf "%d-L-%d" (Unix.getpid ()) !k in
+      let ops = List.concat (List.init loaded (fun j -> [ Add (-j - 1, name, Text (Printf.sprintf "%s-%d" label j)); Add (-j - 1, seq, Int !k) ])) in
+      match write db ~by:clients ~why:"load" ops with
+      | Ok r ->
+        Mutex.lock m;
+        Printf.printf "%d %s-0 %d\n%d %s-%d %d\n%!" r.group label !k r.group label (loaded - 1) !k;
+        Mutex.unlock m
+      | Error e -> prerr_endline (message e); exit 3
+    done
+  in
+  let ts = Thread.create load () :: List.init clients (fun c -> Thread.create run c) in
   List.iter Thread.join ts
 
 let parent dir rounds seed =

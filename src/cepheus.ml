@@ -1,3 +1,4 @@
+module Bulk = Bulk
 module Codec = Codec
 module Crc32c = Crc32c
 module Disk = Disk

@@ -28,6 +28,9 @@ type t = {
           or this process under any path that names the same file (on the real disk: the same device and inode) *)
   unlock : string -> unit;  (** releases the lock taken under this path *)
   now : unit -> int;  (** the time in milliseconds since 1970; simulated on {!Sim_disk} *)
+  parallel : bool;
+      (** calls may come from several domains at once, each on its own files (the real disk); [false]: one call at a
+          time, in an order a seed replays ({!Sim_disk}), so the engine makes them one after the other *)
 }
 
 val real : t

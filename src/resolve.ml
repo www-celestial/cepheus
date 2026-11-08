@@ -174,135 +174,295 @@ let error_message = function
 
 (* ---- Large groups ----
    A group of many additions (a load) takes a faster path to the same result: the changes Resolve would record, in
-   the same order, without a persistent map per fact. Its facts come out as arrays (Bulk), which a merge reads as it
-   reads a run. The path takes only what it can decide alone: additions to things the group creates or ordinary
+   the same order, without a persistent map per fact. Its facts come out as compact arrays (Bulk), which a merge reads
+   as it reads a run. The path takes only what it can decide alone: additions to things the group creates or ordinary
    things; one value at most per new thing for a one-valued property; for an existing thing, many-valued properties
    only; nothing unique already taken. Anything else, or any doubt (an error, a value twice), and the group goes
    through [resolve], which decides as always, errors included: the faster path never accepts or refuses on its own,
-   so a fork, which always takes [resolve], answers exactly as the database (G8). *)
+   so a fork, which always takes [resolve], answers exactly as the database (G8).
+
+   The operations are cut into chunks (Bulk.chunk) mapped by several domains at once: each chunk's facts go to its
+   own place of the arrays, its texts are looked up in the view and those it adds are listed in the order it meets
+   them. One pass in the group's order then numbers the new things and the new texts in their order of first use,
+   exactly as [resolve] numbers them (a chunk's first uses come before the next chunk's), and the chunks are rewritten
+   with the final numbers, again at once. *)
 
 let large_min = ref 20_000
 
 exception Slow
 
-type large = { view : Store.view; body : Buffer.t -> unit; facts : Bulk.t; count : int; temps : (int * int) list }
+type large = {
+  view : Store.view;
+  facts : Bulk.t;  (* the effective changes, all additions, in the group's order: what the journal keeps *)
+  count : int;
+  len : int;  (* bytes of the group as Group.encode writes it *)
+  dense : Bulk.i32;  (* the number of temporary id -t, for 1 <= t <= deep, or -1: what [receipt] reads *)
+  farmap : (int, int) Hashtbl.t;  (* the numbers of the temporary ids below -nops *)
+  n : int;
+  time : int;
+  by : int;
+  why : string;
+  first_new : int;
+  count_new : int;
+}
+
+(* a property for the faster path: its type (bits 0-2: 1 int, 2 date, 3 money, 4 bool, 5 link, 6 text, 7 float),
+   many-valued (bit 3); 0: not for this path *)
+let kind_of (d : Schema.prop) =
+  let t = match d.typ with
+    | Value.Tint -> 1 | Tdate -> 2 | Tmoney _ -> 3 | Tbool -> 4 | Tlink -> 5 | Ttext -> 6 | Tfloat -> 7
+  in
+  t lor if d.many then 8 else 0
+
+let kinds (v : Store.view) =
+  Array.init (Schema.count v.schema) (fun q ->
+      match Schema.find v.schema q with Some d when not (Schema.is_system q) -> kind_of d | _ -> 0)
+
+(* in [Bulk.t.e]: a new thing whose temporary id is below -n (n operations), found in its chunk's list *)
+let far = Int32.to_int Int32.min_int
+
+let[@inline] vlen n = if n < 0x80 then 1 else if n < 0x4000 then 2 else if n < 0x200000 then 3 else if n < 0x10000000 then 4 else
+    let k = ref 5 and x = ref (n lsr 35) in while !x > 0 do incr k; x := !x lsr 7 done; !k
+let[@inline] zlen n = let z = (n lsl 1) lxor (n asr 62) in if z land lnot 0x7f = 0 then 1 else
+    let k = ref 1 and x = ref (z lsr 7) in while !x > 0 do incr k; x := !x lsr 7 done; !k
+
+(* the bytes of fact i's change, as Group.encode writes it *)
+let change_len (v : Store.view) kinds (b : Bulk.t) i =
+  let p = Bulk.prop b i and w = Bulk.word b i in
+  1 + vlen (Bulk.thing b i) + vlen p
+  + match kinds.(p) land 7 with
+    | 4 -> 1
+    | 6 -> let l = String.length (Store.text v w) in 1 + vlen l + l
+    | 7 -> 9
+    | _ -> 1 + zlen w
 
 let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
   try
-    let nops = List.length ops in
-    (* new things: negative ids, numbered in order of first use; ids -1 .. -nops in an array, others in a table *)
-    let dense = Array.make (nops + 1) (-1) and temps = Hashtbl.create 16 and order = ref [] and next = ref v0.next_e in
-    let id x =
-      if x >= 0 then x
-      else if x >= -nops then (
-        let i = dense.(-x) in
-        if i >= 0 then i else (let i = !next in dense.(-x) <- i; order := x :: !order; incr next; i))
-      else match Hashtbl.find_opt temps x with
-        | Some i -> i
-        | None -> let i = !next in Hashtbl.replace temps x i; order := x :: !order; incr next; i
-    in
-    let fe = Array.make nops 0 and fp = Array.make nops 0 and fw = Array.make nops 0 in
-    (* texts: each looked up once; those the group adds numbered in order of first use, as [intern] would *)
-    let v = ref v0 and texts = Hashtbl.create 4096 and added = ref [] in
-    let text s =
-      match Hashtbl.find_opt texts s with
-      | Some w -> w
-      | None ->
-        let w = match Store.find_text v0 s with
+    let ch = !Bulk.chunk in
+    (* the chunks of the list: their first cells, found by one walk *)
+    let starts = ref [] and nops = ref 0 in
+    let rec walk l i = match l with [] -> nops := i | _ :: r -> if i mod ch = 0 then starts := l :: !starts; walk r (i + 1) in
+    walk ops 0;
+    let starts = Array.of_list (List.rev !starts) and nops = !nops in
+    let nch = Array.length starts in
+    let kinds = kinds v0 in
+    let np = Array.length kinds in
+    let fe = Bulk.i32 nops and fp = Bulk.u16 nops and fw = Bulk.ints nops in
+    (* each chunk: the texts it adds in its order (the word of the j-th is -j-1 until renumbered), its temporary ids
+       below -nops in its order, the largest of its others *)
+    let fresh = Array.make nch [||] and fars = Array.make nch [||] and deeps = Array.make nch 0 in
+    Bulk.parallel nch (fun c ->
+        let l = ref starts.(c) in
+        let local = Hashtbl.create 256 and added = ref [] and na = ref 0 and fl = ref [] and deep = ref 0 in
+        let text s =
+          match Hashtbl.find_opt local s with
           | Some w -> w
-          | None -> let v', w = Store.add_text !v s in v := v'; added := (s, w) :: !added; w
+          | None ->
+            let w = match Store.find_text v0 s with Some w -> w | None -> added := s :: !added; incr na; - !na in
+            Hashtbl.add local s w;
+            w
         in
-        Hashtbl.replace texts s w;
-        w
+        for i = c * ch to min nops ((c + 1) * ch) - 1 do
+          match !l with
+          | Add (e, p, x) :: rest ->
+            l := rest;
+            if p < 0 || p >= np then raise Slow;
+            let k = Array.unsafe_get kinds p in
+            if k = 0 then raise Slow;
+            let e =
+              if e >= 0 then (if e < Schema.first_thing || e >= v0.next_e || k land 8 = 0 then raise Slow; e)
+              else if e >= -nops then ((if -e > !deep then deep := -e); e)
+              else (fl := e :: !fl; far)
+            in
+            let w =
+              match k land 7, x with
+              | 1, Int n | 2, Date n | 3, Money n -> n
+              | 4, Bool b -> if b then 1 else 0
+              | 5, Link t ->
+                if t >= 0 then (if t < Schema.first_prop || t >= v0.next_e then raise Slow)
+                else if t >= -nops && -t > !deep then deep := -t;
+                t
+              | 6, Text s -> text s
+              | 7, Float f -> text (Store.float_key f)
+              | _ -> raise Slow
+            in
+            Bigarray.Array1.unsafe_set fe i (Int32.of_int e);
+            Bigarray.Array1.unsafe_set fp i p;
+            Bigarray.Array1.unsafe_set fw i w
+          | _ -> raise Slow
+        done;
+        fresh.(c) <- Array.of_list (List.rev !added);
+        fars.(c) <- Array.of_list (List.rev !fl);
+        deeps.(c) <- !deep);
+    (* new things: numbered in order of first use, the thing of an operation before its link's target *)
+    let deep = Array.fold_left max 0 deeps in
+    let dense = Bulk.i32 (deep + 1) in
+    Bigarray.Array1.fill dense (-1l);
+    let farmap = Hashtbl.create 16 and next = ref v0.next_e in
+    let see t =
+      if t >= -deep then begin
+        if Bigarray.Array1.unsafe_get dense (-t) < 0l then (Bigarray.Array1.unsafe_set dense (-t) (Int32.of_int !next); incr next)
+      end
+      else if not (Hashtbl.mem farmap t) then (Hashtbl.add farmap t !next; incr next)
     in
-    let word (x : Value.t) =
-      match x with
-      | Int n | Date n | Money n | Link n -> n
-      | Bool b -> if b then 1 else 0
-      | Text s -> text s
-      | Float f -> text (Store.float_key f)
-    in
-    let k = ref 0 in
-    List.iter
-      (function
-        | Add (e, p, x) ->
-          (* temporary ids numbered in the order Resolve numbers them: the thing, then a link's target *)
-          let e = id e in
-          let x = match x with Value.Link t when t < 0 -> Value.Link (id t) | x -> x in
-          let d = match Schema.find v0.schema p with Some d -> d | None -> raise Slow in
-          if Schema.is_system p || e < Schema.first_thing || e >= !next || not (Value.has_type d.typ x) then raise Slow;
-          (match x with Value.Link t -> if t < Schema.first_prop || t >= !next then raise Slow | _ -> ());
-          if e < v0.next_e && not d.many then raise Slow;
-          fe.(!k) <- e; fp.(!k) <- p; fw.(!k) <- word x;
-          incr k
-        | Retract _ | Expect _ -> raise Slow)
-      ops;
+    for c = 0 to nch - 1 do
+      let fl = fars.(c) and fi = ref 0 in
+      for i = c * ch to min nops ((c + 1) * ch) - 1 do
+        let x = Int32.to_int (Bigarray.Array1.unsafe_get fe i) in
+        if x < 0 then if x = far then (see fl.(!fi); incr fi) else see x;
+        if kinds.(Bigarray.Array1.unsafe_get fp i) land 7 = 5 then
+          let t = Bigarray.Array1.unsafe_get fw i in
+          if t < 0 then see t
+      done
+    done;
     (* past the last thing number: Resolve refuses it *)
     if !next - 1 > Schema.last_thing then raise Slow;
-    let np = Schema.count v0.schema in
-    let b = Bulk.make ~texts:(Array.of_list !added) fe fp fw nops ~np in
+    (* new texts: numbered in order of first use, as [intern] would: their places k in that order, then their ids
+       first + k *)
+    let gtexts = Hashtbl.create 4096 and order = ref [] and m = ref 0 in
+    let maps =
+      Array.map
+        (Array.map (fun s ->
+             match Hashtbl.find_opt gtexts s with
+             | Some k -> k
+             | None -> let k = !m in Hashtbl.add gtexts s k; order := s :: !order; incr m; k))
+        fresh
+    in
+    let news = Array.of_list (List.rev !order) in
+    let v, first_text = Store.add_texts v0 news in
+    Array.iter (fun map -> Array.iteri (fun j k -> map.(j) <- first_text + k) map) maps;
+    let added = Array.mapi (fun k s -> s, first_text + k) news in
+    Bulk.parallel nch (fun c ->
+        let fl = fars.(c) and fi = ref 0 and map = maps.(c) in
+        let id t = if t >= -deep then Int32.to_int (Bigarray.Array1.unsafe_get dense (-t)) else Hashtbl.find farmap t in
+        for i = c * ch to min nops ((c + 1) * ch) - 1 do
+          let x = Int32.to_int (Bigarray.Array1.unsafe_get fe i) in
+          if x < 0 then
+            Bigarray.Array1.unsafe_set fe i (Int32.of_int (if x = far then (let t = fl.(!fi) in incr fi; Hashtbl.find farmap t) else id x));
+          let k = kinds.(Bigarray.Array1.unsafe_get fp i) land 7 in
+          if k >= 5 then
+            let t = Bigarray.Array1.unsafe_get fw i in
+            if t < 0 then Bigarray.Array1.unsafe_set fw i (if k = 5 then id t else map.(-t - 1))
+        done);
     (* the effective additions: a fact already there (an existing thing's) or added twice is no change; a new thing
-       with two values for a one-valued property, or a value two things take for a unique one, goes to [resolve] *)
-    let keep = Bytes.make nops '\001' in
-    let prev = ref (-1) in
-    Array.iter
-      (fun i ->
-        (match !prev with
-         | j when j >= 0 && fe.(j) = fe.(i) && fp.(j) = fp.(i) ->
-           if fw.(j) = fw.(i) then Bytes.set keep (max i j) '\000'
-           else if not (Option.get (Schema.find v0.schema fp.(i))).many then raise Slow
-         | _ -> ());
-        prev := i;
-        if fe.(i) < v0.next_e && Store.mem v0 fe.(i) fp.(i) fw.(i) then Bytes.set keep i '\000')
-      b.by_thing;
+       with two values for a one-valued property goes to [resolve]. Read in the order by thing, where the facts of a
+       thing and property are together, and a fact twice keeps the group's order *)
+    let sorted = Bulk.in_order fe fp fw nops in
+    let order = if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw nops in
+    let row r = if sorted then r else Int32.to_int (Bigarray.Array1.unsafe_get order r) in
+    let thing i = Int32.to_int (Bigarray.Array1.unsafe_get fe i) in
+    let drops = Array.make nch [] in
+    Bulk.parallel nch (fun c ->
+        let d = ref [] in
+        for r = c * ch to min nops ((c + 1) * ch) - 1 do
+          let i = row r in
+          let e = thing i and p = Bigarray.Array1.unsafe_get fp i and w = Bigarray.Array1.unsafe_get fw i in
+          if r > 0 then begin
+            let j = row (r - 1) in
+            if thing j = e && Bigarray.Array1.unsafe_get fp j = p then
+              if Bigarray.Array1.unsafe_get fw j = w then d := i :: !d else if kinds.(p) land 8 = 0 then raise Slow
+          end;
+          if e < v0.next_e && Store.mem v0 e p w then d := i :: !d
+        done;
+        drops.(c) <- !d);
+    let count, sorted, order =
+      if Array.for_all (fun d -> d = []) drops then nops, sorted, order
+      else begin
+        (* the facts kept, in the group's order *)
+        let keep = Bytes.make nops '\001' in
+        Array.iter (List.iter (fun i -> Bytes.unsafe_set keep i '\000')) drops;
+        let k = ref 0 in
+        for i = 0 to nops - 1 do
+          if Bytes.unsafe_get keep i = '\001' then begin
+            Bigarray.Array1.unsafe_set fe !k (Bigarray.Array1.unsafe_get fe i);
+            Bigarray.Array1.unsafe_set fp !k (Bigarray.Array1.unsafe_get fp i);
+            Bigarray.Array1.unsafe_set fw !k (Bigarray.Array1.unsafe_get fw i);
+            incr k
+          end
+        done;
+        let sorted = Bulk.in_order fe fp fw !k in
+        !k, sorted, if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw !k
+      end
+    in
+    let b = Bulk.make ~sorted ~order fe fp fw count ~np ~texts:added in
+    (* a value two things take for a unique property, or one taken already: to [resolve] *)
     for q = 0 to np - 1 do
       match Schema.find v0.schema q with
       | Some d when d.unique ->
-        for r = b.poff.(q) to b.poff.(q + 1) - 1 do
-          if Bytes.get keep b.pi.(r) = '\001' then begin
-            if r > b.poff.(q) && b.pw.(r - 1) = b.pw.(r) && b.pe.(r - 1) <> b.pe.(r) then raise Slow;
-            if Store.count_things v0 q b.pw.(r) > 0 then raise Slow
-          end
-        done
+        let lo = b.poff.(q) and hi = b.poff.(q + 1) in
+        Bulk.parallel (Bulk.chunks (hi - lo)) (fun c ->
+            for r = lo + (c * ch) to min hi (lo + ((c + 1) * ch)) - 1 do
+              let w = Bulk.pword b r in
+              if r > lo && Bulk.pword b (r - 1) = w && Bulk.pthing b (r - 1) <> Bulk.pthing b r then raise Slow;
+              if Store.count_things v0 q w > 0 then raise Slow
+            done)
       | _ -> ()
     done;
-    (* the facts kept, in the group's order, and sorted again (cheap: they are nearly all of them) *)
-    let count = ref 0 in
-    for i = 0 to nops - 1 do if Bytes.get keep i = '\001' then incr count done;
-    let facts =
-      if !count = nops then b
-      else begin
-        let e = Array.make !count 0 and p = Array.make !count 0 and w = Array.make !count 0 and j = ref 0 in
-        for i = 0 to nops - 1 do
-          if Bytes.get keep i = '\001' then (e.(!j) <- fe.(i); p.(!j) <- fp.(i); w.(!j) <- fw.(i); incr j)
-        done;
-        Bulk.make ~texts:b.texts e p w !count ~np
-      end
-    in
     let first_new = v0.next_e and count_new = !next - v0.next_e in
-    (* the frame body, as Group.encode writes the group: the operations walked again, links resolved *)
-    let body buf =
-      Codec.put_varint buf n;
-      Codec.put_int buf time;
-      Codec.put_int buf by;
-      Codec.put_string buf why;
-      Codec.put_varint buf first_new;
-      Codec.put_varint buf count_new;
-      Codec.put_varint buf !count;
-      List.iteri
-        (fun i op ->
-          match op with
-          | Add (_, _, x) when Bytes.get keep i = '\001' ->
-            Buffer.add_char buf '\001';
-            Codec.put_varint buf fe.(i);
-            Codec.put_varint buf fp.(i);
-            Value.encode buf (match x with Value.Link t when t < 0 -> Value.Link (id t) | x -> x)
-          | _ -> ())
-        ops
+    let view = { v with next_e = !next; group = n } in
+    (* the length of the group as Group.encode writes it *)
+    let lens = Array.make (Bulk.chunks count) 0 in
+    Bulk.parallel (Bulk.chunks count) (fun c ->
+        let s = ref 0 in
+        for i = c * ch to min count ((c + 1) * ch) - 1 do s := !s + change_len view kinds b i done;
+        lens.(c) <- !s);
+    let len =
+      Array.fold_left ( + ) 0 lens + vlen n + zlen time + zlen by + vlen (String.length why) + String.length why
+      + vlen first_new + vlen count_new + vlen count
     in
-    let temps = List.rev_map (fun t -> t, id t) !order in
-    Some { view = { !v with next_e = !next; group = n }; body; facts; count = !count; temps }
+    Some { view; facts = b; count; len; dense; farmap; n; time; by; why; first_new; count_new }
   with Slow -> None
+
+(* The receipt's new things, (temporary id, number) in the order of numbering, as [resolve] lists them: a pair a new
+   thing (2.4 M for a load of 10 M facts), made beside the merge, off the writer's way. *)
+let receipt (l : large) =
+  let tmp_of = Bulk.ints l.count_new in
+  for t = 1 to Bigarray.Array1.dim l.dense - 1 do
+    let x = Int32.to_int (Bigarray.Array1.unsafe_get l.dense t) in
+    if x >= 0 then Bigarray.Array1.unsafe_set tmp_of (x - l.first_new) (-t)
+  done;
+  Hashtbl.iter (fun t x -> Bigarray.Array1.unsafe_set tmp_of (x - l.first_new) t) l.farmap;
+  let temps = ref [] in
+  for k = l.count_new - 1 downto 0 do temps := (Bigarray.Array1.unsafe_get tmp_of k, l.first_new + k) :: !temps done;
+  !temps
+
+(* The group of [l] as Group.encode writes it, in pieces of at most 1 MiB (but a longer text) handed to [out] in order:
+   for the journal, which writes them as they come. *)
+let encode_large (l : large) (out : Bytes.t -> int -> int -> unit) =
+  let kinds = kinds l.view and b = l.facts in
+  let cap = 1 lsl 20 in
+  let buf = ref (Bytes.create (cap + 64)) and pos = ref 0 in
+  let flush () = if !pos > 0 then (out !buf 0 !pos; pos := 0) in
+  let need k = if !pos + k > cap then flush (); if k > Bytes.length !buf then buf := Bytes.create k in
+  let byte c = Bytes.unsafe_set !buf !pos (Char.unsafe_chr c); incr pos in
+  let varint n = let n = ref n in while !n >= 0x80 do byte (!n land 0x7f lor 0x80); n := !n lsr 7 done; byte !n in
+  let int n =
+    let n = ref ((n lsl 1) lxor (n asr 62)) in
+    while !n land lnot 0x7f <> 0 do byte (!n land 0x7f lor 0x80); n := !n lsr 7 done;
+    byte !n
+  in
+  let bytes s = Bytes.blit_string s 0 !buf !pos (String.length s); pos := !pos + String.length s in
+  need (64 + String.length l.why);
+  varint l.n; int l.time; int l.by; varint (String.length l.why); bytes l.why;
+  varint l.first_new; varint l.count_new; varint l.count;
+  for i = 0 to l.count - 1 do
+    let p = Bulk.prop b i and w = Bulk.word b i in
+    let k = kinds.(p) land 7 in
+    let s = if k >= 6 then Store.text l.view w else "" in
+    need (32 + String.length s);
+    byte 1;
+    varint (Bulk.thing b i);
+    varint p;
+    match k with
+    | 1 -> byte 0; int w
+    | 2 -> byte 5; int w
+    | 3 -> byte 6; int w
+    | 4 -> byte (if w <> 0 then 3 else 2)
+    | 5 -> byte 7; int w
+    | 6 -> byte 4; varint (String.length s); bytes s
+    | _ -> byte 1; bytes s
+  done;
+  flush ()
 
 (* A group from the journal that the faster path can replay: every change an addition, no system property (its
    additions are facts absent before it, distinct: Resolve records only effective changes) *)
@@ -312,28 +472,38 @@ let replay_large (v0 : Store.view) (g : Group.t) =
   then None
   else begin
     let n = Array.length g.changes in
-    let fe = Array.make n 0 and fp = Array.make n 0 and fw = Array.make n 0 in
-    let v = ref v0 and texts = Hashtbl.create 4096 and added = ref [] in
+    let fe = Bulk.i32 n and fp = Bulk.u16 n and fw = Bulk.ints n in
+    (* the texts the view has, by their ids; those it lacks by -(k + 1), k their place in order of first use, until
+       they are added *)
+    let texts = Hashtbl.create 4096 and order = ref [] and m = ref 0 in
     let text s =
       match Hashtbl.find_opt texts s with
       | Some w -> w
       | None ->
-        let w = match Store.find_text v0 s with
-          | Some w -> w
-          | None -> let v', w = Store.add_text !v s in v := v'; added := (s, w) :: !added; w
-        in
+        let w = match Store.find_text v0 s with Some w -> w | None -> let k = !m in order := s :: !order; incr m; -k - 1 in
         Hashtbl.replace texts s w;
         w
     in
     Array.iteri
       (fun i (c : Group.change) ->
-        fe.(i) <- c.e; fp.(i) <- c.p;
-        fw.(i) <- (match c.v with
+        Bigarray.Array1.unsafe_set fe i (Int32.of_int c.e);
+        Bigarray.Array1.unsafe_set fp i c.p;
+        Bigarray.Array1.unsafe_set fw i (match c.v with
             | Int n | Date n | Money n | Link n -> n
             | Bool b -> if b then 1 else 0
             | Text s -> text s
             | Float f -> text (Store.float_key f)))
       g.changes;
-    let facts = Bulk.make ~texts:(Array.of_list !added) fe fp fw n ~np:(Schema.count v0.schema) in
-    Some ({ !v with next_e = max v0.next_e (g.first_new + g.count_new); group = g.n }, facts)
+    let news = Array.of_list (List.rev !order) in
+    let v, first = Store.add_texts v0 news in
+    let kinds = kinds v0 in
+    for i = 0 to n - 1 do
+      let w = Bigarray.Array1.unsafe_get fw i in
+      if w < 0 && kinds.(Bigarray.Array1.unsafe_get fp i) land 7 >= 6 then Bigarray.Array1.unsafe_set fw i (first - w - 1)
+    done;
+    let added = Array.mapi (fun k s -> s, first + k) news in
+    let sorted = Bulk.in_order fe fp fw n in
+    let order = if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw n in
+    let facts = Bulk.make ~sorted ~order fe fp fw n ~np:(Schema.count v0.schema) ~texts:added in
+    Some ({ v with next_e = max v0.next_e (g.first_new + g.count_new); group = g.n }, facts)
   end

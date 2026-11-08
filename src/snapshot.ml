@@ -61,9 +61,12 @@ type out = {
   len : int;  (* body bytes *)
   crcs : Bytes.t;  (* one CRC-32C a page, the table at the end of the file and the loader's check *)
   pg : Pages.t;
+  admit : bool;  (* the pages enter the cache as they are written *)
   open_pages : (int, acc) Hashtbl.t;
   mutable done_pages : (int * Bytes.t) list;  (* complete, not yet written *)
   mutable ndone : int;
+  wbuf : Bytes.t;  (* neighbours written together, copied here *)
+  mutable free : Bytes.t list;  (* pages written and not admitted: their buffers again *)
 }
 
 let open_max = ref 0 (* the most pages open at once in a merge of this process: for the tests *)
@@ -83,7 +86,7 @@ let zero_crc = Crc32c.bytes (Bytes.make Pages.size '\000') 0 Pages.size
 let batch = 32
 
 let flush o =
-  let l = List.sort (fun (a, _) (b, _) -> compare a b) o.done_pages in
+  let l = List.sort (fun ((a : int), _) (b, _) -> compare a b) o.done_pages in
   o.done_pages <- [];
   o.ndone <- 0;
   let rec go = function
@@ -93,9 +96,10 @@ let flush o =
       let rec run m = function (k', b) :: r when k' = k + m -> let bs, r = run (m + 1) r in b :: bs, r | r -> [], r in
       let bs, rest = run 0 l in
       let m = List.length bs in
-      let buf = if m = 1 then List.hd bs else Bytes.concat Bytes.empty bs in
+      let buf = if m = 1 then List.hd bs else (List.iteri (fun i b -> Bytes.blit b 0 o.wbuf (i * Pages.size) Pages.size) bs; o.wbuf) in
       o.disk.Disk.pwrite o.fd (header + (k * Pages.size)) buf 0 (m * Pages.size);
       o.unforced <- o.unforced + (m * Pages.size);
+      if not o.admit then List.iter (fun b -> o.free <- b :: o.free) bs;
       go rest
   in
   go l;
@@ -109,8 +113,8 @@ let complete o k a =
   Bytes.set_int32_le o.crcs (4 * k) (Int32.of_int (Crc32c.bytes a.buf 0 Pages.size));
   o.done_pages <- (k, a.buf) :: o.done_pages;
   o.ndone <- o.ndone + 1;
-  if o.ndone >= batch then flush o;
-  Pages.admit o.pg k a.buf
+  if o.admit then Pages.admit o.pg k a.buf;
+  if o.ndone >= batch then flush o
 
 let need o k = min Pages.size (o.len - (k lsl Pages.bits))
 
@@ -118,7 +122,8 @@ let page_acc o k =
   match Hashtbl.find_opt o.open_pages k with
   | Some a -> a
   | None ->
-    let a = { buf = Bytes.make Pages.size '\000'; filled = 0 } in
+    let buf = match o.free with b :: r -> o.free <- r; Bytes.fill b 0 Pages.size '\000'; b | [] -> Bytes.make Pages.size '\000' in
+    let a = { buf; filled = 0 } in
     Hashtbl.replace o.open_pages k a;
     if Hashtbl.length o.open_pages > !open_max then open_max := Hashtbl.length o.open_pages;
     a
@@ -160,6 +165,67 @@ let put64 s x = let o = at s 8 in Bytes.set_int64_le s.a.buf o (Int64.of_int x)
 let put32 s x = let o = at s 4 in Bytes.set_int32_le s.a.buf o (Int32.of_int x)
 let put16 s x = let o = at s 2 in Bytes.set_uint16_le s.a.buf o x
 let put8 s c = let o = at s 1 in Bytes.unsafe_set s.a.buf o c
+
+external set16u : Bytes.t -> int -> int -> unit = "%caml_bytes_set16u"
+external set32u : Bytes.t -> int -> int32 -> unit = "%caml_bytes_set32u"
+external set64u : Bytes.t -> int -> int64 -> unit = "%caml_bytes_set64u"
+
+(* the values of [w] bytes that fit in the rest of s's page, the page entered *)
+let[@inline] room s w =
+  if s.pos lsr Pages.bits <> s.k then enter s;
+  (Pages.size - (s.pos land Pages.mask)) / w
+
+(* A large group's rows r0 .. r1-1 written as they are, a page's worth at a time: by thing, their properties (2
+   bytes) and values (8); by property, values (8) and things (4) *)
+let put_props s (b : Bulk.t) r0 r1 =
+  let r = ref r0 in
+  while !r < r1 do
+    let m = min (r1 - !r) (room s 2) and buf = s.a.buf and o = s.pos land Pages.mask and r' = !r in
+    if b.sorted then for k = 0 to m - 1 do set16u buf (o + (2 * k)) (Bulk.prop b (r' + k)) done
+    else for k = 0 to m - 1 do set16u buf (o + (2 * k)) (Bulk.prop b (Bulk.row b (r' + k))) done;
+    s.pos <- s.pos + (2 * m);
+    r := r' + m
+  done
+
+let put_words s (b : Bulk.t) r0 r1 =
+  let r = ref r0 in
+  while !r < r1 do
+    let m = min (r1 - !r) (room s 8) and buf = s.a.buf and o = s.pos land Pages.mask and r' = !r in
+    if b.sorted then for k = 0 to m - 1 do set64u buf (o + (8 * k)) (Int64.of_int (Bulk.word b (r' + k))) done
+    else for k = 0 to m - 1 do set64u buf (o + (8 * k)) (Int64.of_int (Bulk.word b (Bulk.row b (r' + k)))) done;
+    s.pos <- s.pos + (8 * m);
+    r := r' + m
+  done
+
+let put_pwords s (b : Bulk.t) r0 r1 =
+  let r = ref r0 in
+  while !r < r1 do
+    let m = min (r1 - !r) (room s 8) and buf = s.a.buf and o = s.pos land Pages.mask and r' = !r in
+    for k = 0 to m - 1 do set64u buf (o + (8 * k)) (Int64.of_int (Bulk.pword b (r' + k))) done;
+    s.pos <- s.pos + (8 * m);
+    r := r' + m
+  done
+
+let put_pthings s (b : Bulk.t) r0 r1 =
+  let r = ref r0 in
+  while !r < r1 do
+    let m = min (r1 - !r) (room s 4) and buf = s.a.buf and o = s.pos land Pages.mask and r' = !r in
+    for k = 0 to m - 1 do set32u buf (o + (4 * k)) (Bigarray.Array1.unsafe_get b.pe (r' + k)) done;
+    s.pos <- s.pos + (4 * m);
+    r := r' + m
+  done
+
+(* a text's bytes, as many as fit in each page at once *)
+let put_string s t =
+  let n = String.length t and i = ref 0 in
+  while !i < n do
+    if s.pos lsr Pages.bits <> s.k then enter s;
+    let o = s.pos land Pages.mask in
+    let m = min (n - !i) (Pages.size - o) in
+    Bytes.blit_string t !i s.a.buf o m;
+    s.pos <- s.pos + m;
+    i := !i + m
+  done
 
 (* the end of a section: the rest of its room counts as written, zeros. Only its first and last pages can hold bytes
    of another section; a page all inside the rest is never written (a hole: it reads as zeros, which its CRC says) *)
@@ -203,7 +269,7 @@ let decide ~newest ~oldest = if newest = oldest then (if newest then 1 else -1) 
    starts from (pos.next <= v.group + 1). Written under a temporary name and forced (also on the way, while [busy]
    says clients write); [install] gives it its name. On a failure of the disk, the file is removed and the failure
    raised. *)
-let no_bulk = Bulk.make [||] [||] [||] 0 ~np:0
+let no_bulk = Bulk.empty
 
 let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.view) ~take ~level (pos : Journal.position) =
   if pos.next > v.group + 1 then invalid_arg "Snapshot.merge: the journal position is after the view";
@@ -246,7 +312,11 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
     p
   in
   let pg = Pages.on_file len load in
-  let o = { disk; fd; unforced = 0; busy; len; crcs; pg; open_pages = Hashtbl.create 16; done_pages = []; ndone = 0 } in
+  (* a large group's run is a load's: its pages are read later, from the file, rather than held now *)
+  let o =
+    { disk; fd; unforced = 0; busy; len; crcs; pg; admit = bulk.n = 0; open_pages = Hashtbl.create 16; done_pages = [];
+      ndone = 0; wbuf = Bytes.create (batch * Pages.size); free = [] }
+  in
   let failed () = (try disk.close fd with Disk.Io _ -> ()); (try disk.remove tmp with Disk.Io _ -> ()) in
   let na = ref 0 and ka = ref 0 and nt = ref 0 and kt = ref 0 in
   match
@@ -267,26 +337,33 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
       if !tbits land bit = 0 then (tbits := !tbits lor bit; put64 toff !nt; incr kt);
       put16 tap p; put64 tav w; incr nt
     in
-    let de = ref (Store.IM.to_seq v.delta.de) in
+    (* the delta's next thing, its changes, the rest *)
+    let dnext = ref (Store.IM.to_seq v.delta.de ()) in
     let entries = ref [] in
     let bi = ref 0 in
     for e = 0 to ne - 1 do
       let td =
-        match !de () with
-        | Seq.Cons ((e', td), rest) when e' = e -> de := rest; Some td
+        match !dnext with
+        | Seq.Cons ((e', td), rest) when e' = e -> dnext := rest (); Some td
         | _ -> None
       in
       (* the large group's rows of e: bulk.by_thing.(b0 .. !bi - 1) *)
       let b0 = !bi in
-      while !bi < bulk.n && bulk.e.(bulk.by_thing.(!bi)) = e do incr bi done;
+      while !bi < bulk.n && Bulk.thing bulk (Bulk.row bulk !bi) = e do incr bi done;
       let nb = !bi - b0 in
       let h = ref 0 and nh = ref 0 in
       for j = 0 to take - 1 do
         if Store.base_has src.(j).a e then (h := !h lor (1 lsl (2 * j)); incr nh);
         if Store.base_has src.(j).t e then (h := !h lor (1 lsl ((2 * j) + 1)); incr nh)
       done;
-      if Option.is_none td && !nh = 0 && nb > 0 then
-        for r = b0 to !bi - 1 do let i = bulk.by_thing.(r) in emit_a e bulk.p.(i) bulk.w.(i) done
+      if Option.is_none td && !nh = 0 && nb > 0 then begin
+        (* the large group's rows alone, as they are *)
+        let bit = 1 lsl (e land 31) in
+        if !abits land bit = 0 then (abits := !abits lor bit; put64 aoff !na; incr ka);
+        put_props aap bulk b0 !bi;
+        put_words aav bulk b0 !bi;
+        na := !na + nb
+      end
       else if !nh = 0 && nb = 0 && Option.is_some td then
         (* the delta alone: its entries, in (p, w) order, as they are *)
         Store.PW.iter (fun (p, w) add -> if add then emit_a e p w else emit_t e p w) (Option.get td).tf
@@ -301,7 +378,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
       else if Option.is_some td || !nh > 0 || nb > 0 then begin
         (* entries (p, w, age, added), newest first within a fact *)
         entries := [];
-        for r = b0 to !bi - 1 do let i = bulk.by_thing.(r) in entries := (bulk.p.(i), bulk.w.(i), 0, true) :: !entries done;
+        for r = b0 to !bi - 1 do let i = Bulk.row bulk r in entries := (Bulk.prop bulk i, Bulk.word bulk i, 0, true) :: !entries done;
         Option.iter (fun (td : Store.tdelta) -> Store.PW.iter (fun (p, w) add -> entries := (p, w, 1, add) :: !entries) td.tf) td;
         for j = 0 to take - 1 do
           if (!h lsr (2 * j)) land 1 = 1 then Store.base_iter_e src.(j).a e (fun p w -> entries := (p, w, j + 2, true) :: !entries);
@@ -371,8 +448,16 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
           Store.IM.iter (fun w (vd : Store.vdelta) -> Store.IM.iter (fun e add -> l := (w, e, add) :: !l) vd.vm) pd.pm;
           Array.of_list (List.rev !l)
       in
-      if Array.length dl = 0 && !live = 0 && !bp < bq then
-        for r = !bp to bq - 1 do out_a bulk.pw.(r) bulk.pe.(r) done
+      if Array.length dl = 0 && !live = 0 && !bp < bq then begin
+        (* the large group's rows alone, as they are *)
+        let d = ref 1 in
+        for r = !bp + 1 to bq - 1 do if Bulk.pword bulk r <> Bulk.pword bulk (r - 1) then incr d done;
+        adist := !d;
+        alast := Bulk.pword bulk (bq - 1);
+        put_pwords avv bulk !bp bq;
+        put_pthings ave bulk !bp bq;
+        ca := !ca + (bq - !bp)
+      end
       else if Array.length dl = 0 && !live = 1 && !bp = bq then begin
         (* one source: its rows as they are *)
         let s = ref 0 in
@@ -387,7 +472,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
         while more () do
           (* the smallest (value, thing) among the heads *)
           let bw = ref max_int and be = ref max_int in
-          if !bp < bq then (bw := bulk.pw.(!bp); be := bulk.pe.(!bp));
+          if !bp < bq then (bw := Bulk.pword bulk !bp; be := Bulk.pthing bulk !bp);
           if !di < Array.length dl then (let w, e, _ = dl.(!di) in if w < !bw || (w = !bw && e < !be) then (bw := w; be := e));
           for s = 0 to nsrc - 1 do
             if cur.(s) < stop.(s) && (hw.(s) < !bw || (hw.(s) = !bw && he.(s) < !be)) then (bw := hw.(s); be := he.(s))
@@ -396,7 +481,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
           (* its entries, newest first: the delta, then the runs in order *)
           let newest = ref None and oldest = ref true in
           if !bp < bq then begin
-            if bulk.pw.(!bp) = w && bulk.pe.(!bp) = e then (newest := Some true; oldest := true; incr bp)
+            if Bulk.pword bulk !bp = w && Bulk.pthing bulk !bp = e then (newest := Some true; oldest := true; incr bp)
           end;
           if !di < Array.length dl then begin
             let w', e', add = dl.(!di) in
@@ -430,7 +515,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
     for i = s0 to s1 - 1 do
       put64 soff !off;
       let t = Store.text v i in
-      String.iter (put8 sb) t;
+      put_string sb t;
       off := !off + String.length t
     done;
     put64 soff !off;
@@ -440,14 +525,28 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) disk dir id (v : Store.vie
        its texts, read in text order at random places, are read only where an other text falls *)
     let big = ref (-1) in
     for j = 0 to take - 1 do if !big < 0 || src.(j).a.ns > src.(!big).a.ns then big := j done;
-    let others = ref (Array.to_list bulk.texts) in
-    Store.SM.iter (fun t i -> others := (t, i) :: !others) v.dict.smap;
+    (* the large group's texts and the delta's come sorted: merged; the other runs' are sorted with them *)
+    let rest = ref [] in
     for j = 0 to take - 1 do
       if j <> !big then
-        for l = 0 to src.(j).a.ns - 1 do others := (Store.base_text src.(j).a l, src.(j).s0 + l) :: !others done
+        for l = 0 to src.(j).a.ns - 1 do rest := (Store.base_text src.(j).a l, src.(j).s0 + l) :: !rest done
     done;
-    let others = Array.of_list !others in
-    Array.sort (fun (a, _) (b, _) -> compare a b) others;
+    let rest = Array.of_list !rest in
+    Array.sort (fun ((a : string), _) (b, _) -> compare a b) rest;
+    let merged a b =
+      let na = Array.length a and nb = Array.length b in
+      if nb = 0 then a else if na = 0 then b
+      else begin
+        let out = Array.make (na + nb) a.(0) and i = ref 0 and j = ref 0 in
+        for k = 0 to na + nb - 1 do
+          if !j >= nb || (!i < na && (fst a.(!i) : string) < fst b.(!j)) then (out.(k) <- a.(!i); incr i)
+          else (out.(k) <- b.(!j); incr j)
+        done;
+        out
+      end
+    in
+    let delta = Array.of_list (Store.SM.bindings v.dict.smap) in
+    let others = merged (merged bulk.texts delta) rest in
     let c = ref 0 in
     let emit i = put32 ssort (i - s0); incr c in
     if !big < 0 then Array.iter (fun (_, i) -> emit i) others

@@ -370,4 +370,5 @@ let disk t : Disk.t =
     lock = (fun p -> if Hashtbl.mem t.locks p then false else (Hashtbl.replace t.locks p (); true));
     unlock = (fun p -> Hashtbl.remove t.locks p);
     now = (fun () -> t.clock);
+    parallel = false;
   }
