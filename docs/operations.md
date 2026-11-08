@@ -41,7 +41,8 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
    groups before the damage);
 7. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt; a newest
    segment torn at its creation (its header does not check and it holds no frame) is removed;
-8. a new database (no group yet) gets group 1, which describes the four system properties.
+8. a new database (no group yet) gets group 1, which describes the five system properties (a database made before
+   `cepheus/rule` existed lacks the description of that one: its rules work all the same).
 
 Recovery time is the runs' check plus the replay of the groups after the newest one. Every merge writes a run, so
 the replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`

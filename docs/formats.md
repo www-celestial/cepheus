@@ -59,7 +59,9 @@ Varints are LEB128 (7 bits a byte, low first); "int" is a zigzag varint (0, -1, 
 ```
 number varint | time int (ms) | by int | why string | first new thing varint | count of new things varint
 | count of changes varint | changes
-change = kind byte (1 add, 0 retract) | thing varint | property varint | value
+change = kind byte | thing varint | property varint | value
+kind   = 0 an asserted fact retracted | 1 a fact asserted | 2 a fact derived by a rule | 3 a derived fact without a
+         proof any more | 4 a derived fact now asserted too | 5 an asserted fact retracted that a rule still derives
 value  = tag byte, then:  0 Int: int | 1 Float: 8 bytes (IEEE bits) | 2 false | 3 true | 4 Text: string
                           | 5 Date: int | 6 Money: int | 7 Link: int
 string = length varint | bytes (UTF-8 by convention; Cepheus does not look inside)
@@ -72,7 +74,7 @@ at hi). The database's state on disk is a chain of runs from 0, each resting on 
 journal after the newest one.
 
 ```
-header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (5) | 8 database id, 16 bytes
+header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (6; 5 is read) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0 | part a: rows n, thing range ne, things k, properties np, texts ns, text bytes, room
     for rows, room for things | part t: rows n, thing range ne, things k, properties np, room for rows, room for
@@ -124,6 +126,13 @@ damage (the run's group was durable before its file got its name).
 
 A page is the unit of the cache: it is read from the file whole (16,384 bytes at 4096 + 16384 k), checked against its
 CRC, and only then served. Every 2-, 4- or 8-byte field is aligned to its size, so none crosses a page.
+
+**Format 6** is format 5 with one more meaning: in every value word of the four row sections (`eav`, `avv`, of both
+parts), bit 63 set apart from bit 62 marks a fact that is only derived (a rule's, not asserted). A value is a 63-bit
+OCaml integer: written by `Int64.of_int`, its bit 63 is a copy of bit 62, so a reader of values (`Int64.to_int`) drops
+the mark and reads the value unchanged, and a run of format 5 reads as all asserted. A run that changes the mark of a
+fact held below it holds a retraction (the old mark) and an addition (the new one) of that fact: counts stay a − t.
+Runs of formats 5 and 6 are read; format 6 is written.
 
 The run is the in-memory format: 64-bit little-endian machines only. The journal is the portable format. Format 4 (one
 snapshot `<group>.snap` holding the whole base, with a dense table of offsets by thing) and the earlier ones are set

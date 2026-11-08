@@ -138,9 +138,12 @@ journal the added and retracted flags.
   EAVT, AEVT, AVET, VAET. Cepheus keeps two orders: by thing (EAVT) and by property then value (AVET, which also gives
   VAET for links); dense thing numbers make the first an array. Datomic queries the past ("as-of", "since", "history",
   [filters](https://docs.datomic.com/cloud/time/filters.html)); Cepheus keeps every group in its journal but cannot
-  query the past yet. Datomic's queries are Datalog; Cepheus' are conjunctive queries answered by a worst-case optimal
-  join.
-- *Where Datomic wins*: time travel, rules in Datalog, a peer cache model over distributed storage.
+  query the past yet. Datomic's queries are Datalog, its rules sets of clauses passed to a query and evaluated with
+  it; Cepheus' questions are conjunctive queries answered by a worst-case optimal join, and its rules
+  ([rules](rules.md)) are Datalog kept materialised by the writer: a question reads derived facts as facts, a write
+  pays their derivation.
+- *Where Datomic wins*: time travel, recursive rules evaluated at the question (no memory for derived facts, no cost
+  at the write), a peer cache model over distributed storage.
 
 ### RocksDB
 

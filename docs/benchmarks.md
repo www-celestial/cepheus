@@ -84,6 +84,70 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Rules (2026-11-08)
+
+The first step of the reasoner ([rules](rules.md)): Datalog rules kept by the writer, semi-naive evaluation for
+additions, Backward/Forward for retractions, `why` on demand.
+
+**Method.** `bench/reason.exe` (release build): LUBM-shaped data (Guo, Pan, Heflin [Guo 2005]: universities,
+departments, people, courses, publications, generated from the published ranges of the UBA generator; not its
+official output) with the univ-bench ontology as 94 rules, one an axiom (39 subclass, 21 domain, 18 range, 5
+subproperty, 4 inverse, 1 transitive, 6 for the defined classes). Ten universities: 1,354,654 asserted facts, 532,205
+derived, 2,024,788 derivations (3.8 a derived fact): the derived facts and the derivations of the design's prototype, exactly. A student: a graduate
+student's 10 facts in one group, 6 facts derived (3 types, the department's member, a degree, the university's
+alumnus), then the same 10 retracted in one group; 2,000 of each, on a fork of the view of a database of one
+university merged into one run (a fork never merges: written to with the whole load, its persistent maps would hold
+every fact). The same groups without rules on main 85e72ac's binary and on this one (the same benchmark source), for
+the write path without rules. Seven rounds, alternated, in one hold of the heavy lock, every process in a 3 GB scope;
+a cell is the median of the rounds with the interval [x(1), x(7)] (98.4 %). Commands:
+`reason.exe student 1 2000 DIR`, `reason.exe why 1 2000 DIR`, `reason.exe mat 10 rules|none bulk DIR`,
+`reason.exe apply 200000`.
+
+| | rules | no rules | |
+|---|---:|---:|---|
+| write a student (median of 2,000 groups) | **23.1 µs** [21.9, 24.1] | 9.1 µs [9.1, 13.8] | 2.5× |
+| retract it | **34.1 µs** [33.1, 54.8] | 6.9 µs [6.0, 9.1] | 4.9× |
+| `why`: a type Person (a proof of 5 facts) / Employee (8) / Student (2) / Organization (2) / Faculty (7) | 1.9 / 2.1 / 1.2 / 3.1 / 2.1 µs | | |
+| load 10 universities in one group, durable | 2.48 s [2.27, 5.13] | 1.20 s [1.04, 2.26] | |
+| its reasoning | 1.030 s [1.003, 1.088]: 0.52 M derived/s | | |
+| of which the working set's build (1.35 M facts indexed; another 7 rounds) | 0.581 s [0.550, 0.644] | | |
+| the saturation alone (the same 7 rounds) | **1.036 M derived/s** [0.977, 1.053] | | |
+| the same at one university (150,343 facts, 60,526 derived) | reasoning 0.100 s [0.099, 0.106]: 0.60 M derived/s | | |
+| a department a group, in memory (the ordinary path), one university | reasoning 0.238 s [0.228, 0.276]: 0.25 M derived/s | | |
+| a derived fact into a view whose delta holds 200,000 changes, 6 a thing | **0.83 µs** [0.82, 1.33] in sorted batches; 1.12 µs one by one | | |
+
+| without rules, the same groups | main 85e72ac | this branch |
+|---|---:|---:|
+| write a student | 9.06 µs [9.06, 10.01] | 9.06 µs [9.06, 10.97] |
+| retract it | 7.15 µs [6.20, 9.06] | 6.20 µs [5.96, 8.82] |
+| load one university, a group a department, durable | 1.23 s [1.05, 1.98] | 1.25 s [0.86, 4.38] |
+| `Store.apply` of a fact (main's function, the same test) | 1.16 µs [1.12, 1.37] | 1.14 µs [1.13, 1.21] |
+
+**Start-up.** A program that links Cepheus and exits at once (`bench.exe` without arguments: every module initialised,
+nothing else), main 85e72ac against this branch, 1,000 runs each, alternated, under the lock: 2.294 ms [2.279, 2.306]
+against 2.313 ms [2.296, 2.330], the paired ratio 1.022 (95 % intervals by order statistics). The reasoner adds about
+225 KB of code, and the OCaml runtime reads a binary's frame descriptors and the loader its relocations at start-up
+(frame tables 821 KB → 942 KB, relocations 23,141 → 26,212): 2 % more. A first version, which let the compiler
+(`-inline 200`) copy the store's lookups into every step of every plan, took 2.353 ms against 2.222 (+6 %); the
+reasoner calls the store through functions it does not inline since.
+
+The design's prototype (over hash tables of its own, the same data and rules) gave 0.96 M derived facts/s on one core
+for the saturation of ten universities, 7.9 µs of reasoning for a student's write and 19.1 µs for its retraction:
+the engine's saturation passes it (1.04 M/s); a student's write costs 23.1 µs in all (the store's work for its 10
+asserted and 6 derived facts included), its retraction 34.1 µs, of which B/F's checks over the store's maps and runs
+are the largest part. The design measured 3.9 to 5.1 µs for a derived fact put into the view, with a delta of 600,000
+changes; at the database's merge threshold (200,000 changes) main's `Store.apply` takes 1.16 µs, and the sorted batch
+0.83 µs.
+
+**Beside the giants** (their papers; their machines and data; *computed*: ours, from their tables). RDFox (Motik et al.
+[Motik 2014], LUBM-L 1K, 133.6 M → 182.4 M facts): 73 s on one thread of a 2.0 GHz Xeon E5-2650, 0.67 M derived/s
+(computed), 7.0 M/s on 32 threads. VLog (Urbani et al. [Urbani 2016], the same data): 38 s on one thread of a 2.2 GHz
+laptop, about 1.28 M derived/s (computed). Soufflé (Scholz et al. [Scholz 2016]): a points-to analysis of OpenJDK 7,
+about 840 M tuples, 75 s sequential, 35 s on 4 cores (another workload). RDFox's B/F (Motik et al. [Motik 2015]):
+100 deletions on LUBM-1k-L in "0.0 s". Read plainly: at one core, Cepheus' saturation is at RDFox 2014's rate and
+behind VLog's by 1.2×; with the indexing of a load's facts counted, behind VLog by 2.5×; in parallel, not measured
+yet (RDFox scales to 32 threads); small writes cost microseconds, which no giant publishes.
+
 ## The load in parallel and without copies (2026-11-08), at 10 million facts
 
 Step 1 of the plan to beat the giants at loading: a large group is mapped by four domains into compact arrays, numbered

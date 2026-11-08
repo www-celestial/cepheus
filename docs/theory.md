@@ -386,7 +386,30 @@ once the group's frame is durable and the run itself forced (the commit forces b
 installs the run, as a background merge's: G12). No background merge runs beside it, and its frame, written by pieces
 beside the merge, is the only frame being written.
 
-## 10. What comes next, and why
+## 10. Rules
+
+The rules are Datalog; what a database with rules holds is the least model of its asserted facts ([Abiteboul 1995]).
+Four facts make the writer's maintenance exact and its cost what it is ([rules](rules.md) tells the algorithms):
+
+- **The work of a group** is Θ(D) for D rule instances that involve a fact the group changed: semi-naive evaluation
+  enumerates each instance once, at its newest fact, the atoms before the matched one over older rounds and those after
+  over rounds up to its own (the semi-naive property, [Ramakrishnan 1990]). The cost model of a group is
+  D × c_d + N × c_i: c_d a derivation (the joins of its body and the test of its head), c_i a new fact put into the
+  view. Every fact has at least one derivation, so D ≥ N; LUBM-shaped data has D ≈ 3.7 N.
+- **Insertion is complete**: an instance of a rule over the state after the group either involves a fact the group
+  made present, and semi-naive finds it in that fact's round, or involves only older facts, and the group before found
+  it (induction on groups; a rule added is evaluated once over the whole state).
+- **Retraction removes exactly the facts without a proof** (Backward/Forward, [Motik 2015]): a fact is kept only if
+  the backward check proves it from facts not disproved; a fact is disproved only after its check, which explores every
+  instance of every rule that gives it. The check runs over the state before the disproved facts go (a deleted fact may
+  fill several atoms of one instance), and the group's retracted facts stay in the state, no longer asserted, until
+  they are decided: the conditions under which the algorithm is exact.
+- **No maintenance algorithm is cheap in the worst case**: a materialised transitive relation answers reachability,
+  and decremental transitive closure has no algorithm much better than recomputing under the OMv conjecture
+  ([Henzinger 2015]); B/F's worst case is a recomputation of the facts it reaches. Measured on LUBM-shaped
+  data, small retractions stay in microseconds ([benchmarks](benchmarks.md#rules-2026-11-08)).
+
+## 11. What comes next, and why
 
 - **Larger than memory, the rest** (design, section 15): filters per run for the lookups by value (Bloom filters
   sized per level as in Monkey [Dayan 2017]) if reads across runs need them; scheduling merges around the clients as SILK [Balmau 2019]
@@ -394,8 +417,10 @@ beside the merge, is the only frame being written.
   pressure.
 - **Compression of runs**: delta and varint, then PFOR (Zukowski et al. [Zukowski 2006], Lemire and Boytsov [Lemire 2015]); an order-
   preserving dictionary rebuilt at each merge (Binnig et al. [Binnig 2009]) for ranges over texts.
-- **Rules**: semi-naive evaluation at write time (Bancilhon and Ramakrishnan [Bancilhon 1986]) and Backward/Forward for
-  retractions (Motik et al. [Motik 2015]); subscriptions by the delta rules of DBSP (Budiu et al. [Budiu 2023]).
+- **Rules, the next steps** ([rules](rules.md#what-is-not-here-yet)): the closure module for transitive properties
+  (Hu, Motik and Horrocks' modular materialisation, [Hu 2019]), rules specialised by the ontology, sorted parallel derivations,
+  stratified negation and aggregates (aggregates kept by DBSP's rule for linear operators, Budiu et al. [Budiu 2023]),
+  equality by rewriting; subscriptions by the delta rules of DBSP.
 - **Replication**: Raft [Ongaro 2014] with protocol-aware recovery [Alagappan 2018]; the journal is the only replicated thing (Aurora [Verbitski 2017]).
 - **Many machines**: databases spread over machines, then storage on object stores (Socrates [Antonopoulos 2019]), then a database
   partitioned by thing with a deterministic order of cross-partition groups (Calvin [Thomson 2012]) and distributed Generic Join

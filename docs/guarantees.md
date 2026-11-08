@@ -3,7 +3,7 @@
 Each guarantee states what is promised, under which faults, its exact conditions, why it holds (a proof sketch), and
 the test that checks it. The tests are in `test/`; `tools/test.sh` runs them all. The words are explained in
 [concepts](concepts.md), [architecture](architecture.md) and the [glossary](glossary.md); the mathematics is in
-[theory](theory.md). Everything here is as of this version: one machine, runs on disk in levels (leveling, ratio 4), no replication.
+[theory](theory.md). Everything here is as of this version: one machine, runs on disk in levels (leveling, ratio 4), no replication; rules as [rules](rules.md) tells.
 
 | | promise, in one line | under |
 |---|---|---|
@@ -20,6 +20,12 @@ the test that checks it. The tests are in `test/`; `tools/test.sh` runs them all
 | G11 | a question returns exactly its answers, each once, within the Generic Join bound | always |
 | G12 | a crash during a merge leaves the runs before it or the runs after it, whole | F1, F2, F4 |
 | G13 | after a failed fsync, no view shows a group a power loss could take back; a write answered `Io` is absent (one residual) | F4 with F1, F2 |
+| G17 | every view holds exactly the least model of its asserted facts under its rules, and marks exactly those asserted | always (with G1-G3 under F1, F2) |
+| G18 | no confirmed group leaves an instance of a constraint (`Never`) | always |
+| G19 | a rule change takes effect at one group | always |
+| G20 | `why` returns a well-founded proof of a fact of the view, or nothing for a non-fact | always |
+
+(G14 to G16 are numbered for the server, which is not in this version; the rules' guarantees follow them.)
 
 ## The faults
 
@@ -391,3 +397,79 @@ has the same rule (RewriteAtRecovery); without it, a published group is not dura
   lost, kept, torn or kept one sector in two; every reopen must give a state of the reference with every confirmed
   group, and what the first reopen published must survive: 13 fsyncs, 2,880 reopens, no failure. With the rewrite
   removed, 44 of them fail (the deaths between the failed fsync and the cut).
+
+## G17 Exact materialisation
+
+*Promise.* Every view — of any group, in any process, after any crash and recovery, of a fork — holds exactly the
+**least model** of its asserted facts under the rules defined at its group: a fact is in the view if and only if it is
+asserted or it has a proof (a finite tree of rule instances whose leaves are asserted facts). And a fact is marked
+asserted in the view if and only if it is asserted.
+
+*Conditions.* Rules as this version has them: Datalog without negation, aggregates or new things in heads, each
+rule range-restricted and typed (checked when it is written). A group refused (by its budget, a constraint, a schema
+rule) leaves nothing.
+
+*Proof.* (1) *Insertion.* Semi-naive evaluation from the group's asserted additions reaches the least fixpoint of the
+rules over the state after the retractions: every rule instance with a fact of round r is enumerated in round r
+(the atoms before the matched one over rounds below r, those after over rounds up to r), so every instance that
+involves a new fact is found, each once ([Bancilhon 1986], [Ramakrishnan 1990]); instances over older facts only were
+found by the groups before (induction on groups). (2) *Retraction.* Backward/Forward removes exactly the facts left
+without a proof ([Motik 2015]), under three conditions this implementation keeps and the tests
+check: a deleted fact's lost instances are enumerated over the state before it goes; the group's retracted facts
+leave the asserted set at once and the state only when disproved; a fact retracted then asserted again is asserted.
+(3) *Rule changes.* A rule added is evaluated over the whole state (its instances over older facts), then with the
+others by semi-naive; a rule removed gives B/F its heads as candidates. (4) *Durability.* The derived changes are in
+the group's own frame, written and forced with it (G1, G2); replay applies them by kind and evaluates nothing, so a
+recovered view, a replica's or the past's is the writer's, byte for byte of facts. (5) *Runs.* A merge keeps each
+fact's flag: for each fact, the newest entry gives its state in the new view and the oldest its state below the merged
+runs; a flag changed is a retraction and an addition in the new run.
+
+*Tested by* `test/reasoning.ml` (after every group of random sequences of 60 groups, 60 seeds plain and 60 with the
+facts merged into runs between groups in `tools/test.sh`, `RULES_SEEDS` for more: random safe typed rules defined, changed and removed, random additions and
+retractions of asserted, derived and both, the view equal to the least model of its asserted facts computed from
+scratch by naive evaluation with the checker's own evaluator, `Check.least`, and its asserted facts equal to the
+model's); the simulation (three rules from each seed's third group: the published,
+recovered and fork views equal to the least model, after crashes in every disk call, power losses, damaged files,
+merges begun ahead); `test/crash.ml` (a rule marks each client's thing; after each `kill -9`, every confirmed thing
+has its mark, the loader's none).
+
+## G18 Constraints hold
+
+*Promise.* No confirmed group leaves an instance of a constraint (a rule whose head is `Never`); a group that would is
+refused whole, `Invalid "constraint NAME: …"`; a constraint is defined only over a state without an instance of it.
+
+*Proof.* Rules without negation are monotone: a new instance of a constraint's body needs a fact the group made
+present. After the fixpoint, the constraint's plans run on each such fact (each body atom matched to it, the others
+over the final state); a constraint added runs over the whole state. A group that finds an instance raises before
+its frame is made.
+
+*Tested by* `test/reasoning.ml` (random constraints among the random rules: a group is refused exactly when the least model
+after it has an instance of one, checked from scratch; the named case: the refused group changes nothing).
+
+## G19 A rule change takes effect at one group
+
+*Promise.* Defining, changing or removing rules takes effect at the group that writes it: every view before it holds
+the least model under the old rules, every view from it the least model under the new.
+
+*Conditions.* This version reasons inline, in the group that changes the rules, under the budget; the design's
+background path for very large changes comes later and keeps the same promise.
+
+*Proof.* The rule's facts and the derived changes they cause are one group: G2 makes them all visible at once or not.
+
+*Tested by* `test/reasoning.ml` (rules defined, changed and removed at random among the writes; G17 checked on the view
+of every group).
+
+## G20 `why` returns a proof
+
+*Promise.* `why v e p x` on a fact of v returns a well-founded proof: its leaves are asserted facts of v, its nodes
+instances of rules defined at v whose body facts are its children, every child proved before its parent; on a triple
+that is not a fact of v it returns `None`.
+
+*Proof.* The proof is built by B/F's backward check on v, nothing deleted: a fact is proved when it is asserted, or when
+an instance whose body facts are all proved has it as head; the instance that proved each fact is kept at that moment,
+so each node's children were proved before it, and the tree has no cycle. By G17 every derived fact of v has a
+proof, which the check finds: it explores every instance of every rule that gives the fact, until one is proved.
+
+*Tested by* `test/reasoning.ml` (every fifth group of each random sequence: every derived fact's proof checked node by
+node — each node's rule exists, its body atoms bind consistently to the children's facts in order, its head is the
+node's fact, its ranges hold, every leaf is asserted in the view — and the named case of a two-step proof).

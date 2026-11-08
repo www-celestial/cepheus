@@ -5,7 +5,8 @@ entity–attribute–value model that Datomic calls a datom. A write is a **grou
 or nothing, with who and why; the group is the event, and the journal keeps every group for ever. A reader takes a
 **view**, the exact state after one group, and reads it with no lock. A **fork** is a temporary state started from a
 view: written to like the database, with the same checks, and never written to disk; it is the base of unit tests and
-what-if questions.
+what-if questions. **Rules** (Datalog) derive facts from facts: the writer keeps the derived facts in every view, as
+facts, at each group, and `why` gives the proof of one ([rules](docs/rules.md)).
 
 ```ocaml
 open Cepheus
@@ -36,7 +37,9 @@ When `write` returns `Ok`, the group is on the disk: it survives a crash of the 
 is all or nothing (G2); the groups after a recovery are a prefix 1..k of the history (G3); the writes are strictly
 serializable, one writer applying them one at a time (G4); a view never changes and shows only durable groups (G5);
 damage to durable bytes is detected, never dropped in silence (G6); a merge leaves the old runs or the new ones,
-whole (G12); after a failed fsync, no view shows a group a power loss could take back (G13). Each guarantee, its exact conditions, its proof
+whole (G12); after a failed fsync, no view shows a group a power loss could take back (G13). With rules, every view holds exactly
+what its rules derive from its asserted facts (G17), constraints hold (G18), a rule change takes effect at one group
+(G19), and `why` returns a true proof (G20). Each guarantee, its exact conditions, its proof
 and the test that checks it: [guarantees](docs/guarantees.md).
 
 ## Against the established databases

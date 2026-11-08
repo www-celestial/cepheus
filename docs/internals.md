@@ -55,18 +55,20 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 | name | what it is |
 |---|---|
 | `type prop` | `{ name; typ; many; unique }`: `Cepheus.prop` |
-| `p_name`, `p_type`, `p_many`, `p_unique` | 1, 2, 3, 4: the system properties |
+| `p_name`, `p_type`, `p_many`, `p_unique`, `p_rule` | 1, 2, 3, 4, 5: the system properties |
 | `first_prop`, `first_thing`, `last_thing` | 16, 65,536 and 2,147,483,647 (2³¹ − 1, the largest thing number a run holds) |
-| `type t`, `initial` | a persistent table of properties (a copy on change); the four system ones |
+| `type t`, `initial` | a persistent table of properties and rules (a copy on change); the five system properties |
 | `find`, `by_name`, `count` | a property by number, by name; one more than the largest number the table holds |
 | `is_system p`, `is_prop_space e` | 1 ≤ p < 16; 16 ≤ e < 65,536 |
-| `set`, `facts`, `system` | a changed table; the four facts that declare a property; the descriptions of 1 to 4 |
+| `set`, `facts`, `system` | a changed table; the four facts that declare a property; the descriptions of 1 to 5 |
+| `rules`, `rule`, `rule_by_name`, `set_rule`, `has_rules`, `rules_key` | the rules (thing -> name and canonical text); a key that changes when they change, by which their compiled form is cached |
 
 ## `Group`: the event (`src/group.mli`)
 
 | name | what it is |
 |---|---|
-| `type change` | `{ add; e; p; v }`: an addition (`add = true`) or a retraction of the fact (e, p, v) |
+| `type kind` | `Retracted` 0, `Added` 1, `Derived` 2, `Underived` 3, `Now_asserted` 4, `Now_derived` 5: what a change does to its fact, the journal's kind byte ([rules](rules.md#derived-facts-are-in-the-journal)) |
+| `type change` | `{ kind; e; p; v }`; `after kind` the state it leaves (0 absent, 1 asserted, 2 only derived), `present c` |
 | `type t` | `{ n; time; by; why; first_new; count_new; changes }`: the group's number, the database's clock in ms, who, why, the first new thing and how many, the resolved changes |
 | `encode`, `decode`, `equal` | the journal form ([formats](formats.md#a-group)) |
 
