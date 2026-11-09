@@ -8,6 +8,8 @@
 # cesia_v1.cmi (CESIA_NATIVE, its folder; found from the cesia command when unset: lib/native of a release, or the
 # build's), the package's tests on forks on both paths of Cesia, and test/cesia.sh against a real server.
 set -e
+# A test piped into tail fails the script: without pipefail the pipeline's status is tail's, and a failure passes.
+set -o pipefail
 cd "$(dirname "$0")/.."
 tmp=${CEPHEUS_TMP:-${TMPDIR:-/tmp}}
 if [ -z "$CESIA_NATIVE" ] && command -v cesia > /dev/null; then
