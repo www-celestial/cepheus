@@ -1071,6 +1071,30 @@ let () =
     end
   done
 
+let () =
+  section "an open after a snapshot reads the journal's headers, not its frames";
+  guarded "open reads" @@ fun () ->
+  let disk = Sim_disk.disk (Sim_disk.create (Rng.make 41)) in
+  let db = Result.get_ok (open_on disk "/o") in
+  let[@warning "-8"] (Ok [ name ]) = declare db [ prop "c/name" Ttext ] in
+  for i = 1 to 300 do ignore (write db [ Add (-1, name, Text (String.make 200 'x' ^ string_of_int i)) ]) done;
+  ignore (Result.get_ok (snapshot db));
+  let want = C.facts_of_view (view db) in
+  close db;
+  let size = List.fold_left (fun a n -> a + Bytes.length (Disk.read_all disk (Filename.concat "/o/journal" n))) 0 (disk.readdir "/o/journal") in
+  (* the bytes read from the segments, counted by a disk wrapped around the simulated one *)
+  let segment = Hashtbl.create 4 and read = ref 0 in
+  let counting =
+    { disk with
+      openf = (fun p c -> let fd = disk.openf p c in (if Filename.check_suffix p ".seg" then Hashtbl.replace segment fd () else Hashtbl.remove segment fd); fd);
+      pread = (fun fd o b bo n -> if Hashtbl.mem segment fd then read := !read + n; disk.pread fd o b bo n) }
+  in
+  let db = Result.get_ok (open_on counting "/o") in
+  C.check (C.F.equal want (C.facts_of_view (view db))) "the reopened database holds other facts";
+  close db;
+  (* the conversion's look at the header and the scan's: 40 bytes each *)
+  C.check (size > 60_000 && !read <= 2 * 40) "an open read %d bytes of a journal of %d bytes that the runs hold" !read size
+
 (* ---- costs: the work of a question and of an index lookup stays within its bound ----
    Each case is built so that one list is far larger than the answer: an engine that walks it where a lookup or a
    smaller list would do fails the bound (counted candidates for questions; time, with a margin of 20 or more, for the

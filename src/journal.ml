@@ -193,7 +193,8 @@ let scan ?(frame = fun _ -> ()) ?(before = fun (_ : reader) -> ()) ?(after = 0) 
         let r = reader disk fd in
         let size = r.size in
         if rest = [] then before r;
-        let hb = if size < seg_header then Bytes.empty else Bytes.sub r.buf (get r 0 seg_header) seg_header in
+        (* the header by itself: the frames are read from where the scan starts, often the segment's end *)
+        let hb = if size < seg_header then Bytes.empty else (let b = Bytes.create seg_header in disk.pread fd 0 b 0 seg_header; b) in
         match read_header hb id name with
         | None ->
           if rest <> [] then damaged "journal: %s has a broken header" name;
@@ -547,14 +548,16 @@ let convert disk dir id =
       let fd = disk.Disk.openf file false in
       let out =
         Fun.protect ~finally:(fun () -> try disk.close fd with Disk.Io _ -> ()) @@ fun () ->
-        let r = reader disk fd in
-        let size = r.size in
+        let size = disk.Disk.size fd in
         if size < seg_header then None
         else begin
-          let hb = Bytes.sub r.buf (get r 0 seg_header) seg_header in
-          if Bytes.length hb < seg_header || u32 hb 0 <> seg_magic || u32 hb 36 <> Crc32c.bytes hb 0 36 || u32 hb 4 <> 1 then None
+          (* the header alone: a segment of format 2 is left without reading its frames *)
+          let hb = Bytes.create seg_header in
+          disk.pread fd 0 hb 0 seg_header;
+          if u32 hb 0 <> seg_magic || u32 hb 36 <> Crc32c.bytes hb 0 36 || u32 hb 4 <> 1 then None
           else begin
             ignore (read_header ~fmt:1 hb id name);
+            let r = reader disk fd in
             let o = Buffer.create (min size (16 lsl 20)) in
             let h = Bytes.copy hb in
             set32 h 4 format;
