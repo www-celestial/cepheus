@@ -81,7 +81,8 @@ let merge_us = Histogram.create ()
 
 let needs_compaction (v : Store.view) = v.delta.dn > !compact_min
 
-let cap l = let c = ref !compact_min in for _ = 1 to l do c := !c * !ratio done; !c
+(* saturated: a [compact_min] near max_int (the merge benchmark turns merges off so) must not wrap around *)
+let cap l = let c = ref !compact_min in for _ = 1 to l do c := if !c > max_int / !ratio then max_int else !c * !ratio done; !c
 
 (* which runs a merge of [v] takes (the newest [take]), and the level of the run it writes; [extra]: rows a large
    group adds *)

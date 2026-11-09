@@ -1095,6 +1095,20 @@ let () =
   (* the conversion's look at the header and the scan's: 40 bytes each *)
   C.check (size > 60_000 && !read <= 2 * 40) "an open read %d bytes of a journal of %d bytes that the runs hold" !read size
 
+let () =
+  section "a snapshot with merges turned off (compact_min at max_int) ends";
+  guarded "no merges" @@ fun () ->
+  let saved = !Engine.compact_min in
+  Fun.protect ~finally:(fun () -> Engine.compact_min := saved) @@ fun () ->
+  Engine.compact_min := max_int;
+  let disk = Sim_disk.disk (Sim_disk.create (Rng.make 43)) in
+  let db = Result.get_ok (open_on disk "/m") in
+  let[@warning "-8"] (Ok [ n ]) = declare db [ prop "c/n" Tint ] in
+  for i = 1 to 50 do ignore (write db [ Add (-1, n, Int i) ]) done;
+  C.check (Result.is_ok (snapshot db)) "the snapshot failed";
+  C.check (Store.facts (view db) >= 50) "the snapshot lost facts";
+  close db
+
 (* ---- costs: the work of a question and of an index lookup stays within its bound ----
    Each case is built so that one list is far larger than the answer: an engine that walks it where a lookup or a
    smaller list would do fails the bound (counted candidates for questions; time, with a margin of 20 or more, for the
