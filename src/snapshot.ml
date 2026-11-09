@@ -285,9 +285,11 @@ let tblocks ~np rk dir data =
     bp = Array.make 1024 0; bw = Array.make 1024 0; bd = Bytes.make 1024 '\000'; nr = 0; ent = Array.make (max 1 np) (-1);
     tsc = { sb = Bytes.create 65536 }; cnt = Array.make (Store.tb + 1) 0 }
 
-(* The block under way coded and written, as Store reads it: its entries by property (the least count, the bits of
-   a count, the values' base and bits, the flag bit only in an entry that has a derived value), then a record a slot
-   (the counts that vary, then the values), and the records' offsets unless every record has the same length. *)
+(* The block under way coded and written, as Store reads it: its entries by property, each either a fixed field of
+   every slot's record (a property every slot has at most once, when that is shorter: its value, a bit "present" when
+   some slot lacks it, the derived flag when some value has one) or a column of its own (its slots' offsets, c i + a
+   residual, and its values); then the records, R bits each (a bit "has values in a column" first when there are
+   columns), then the columns' data. *)
 let tblock_flush t =
   if t.bs > 0 then begin
     let nr = t.nr and b = t.bs in
@@ -298,12 +300,10 @@ let tblock_flush t =
     let m = Array.length props in
     if m > 0xFFFF then invalid_arg "Snapshot.merge: a block of more than 65535 properties";
     Array.iteri (fun j p -> t.ent.(p) <- j) props;
-    (* each entry: its counts' least and greatest, its values' least and greatest, a derived value *)
     let cmin = Array.make m max_int and cmax = Array.make m 0 and lo = Array.make m max_int and hi = Array.make m min_int
-    and fl = Array.make m 0 in
-    let cnt = Array.make m 0 in
-    let first = Array.make (b + 1) 0 in
-    (* the rows of slot k: first.(k) .. first.(k + 1) - 1 (rows come by slot) *)
+    and fl = Array.make m 0 and total = Array.make m 0 in
+    let cnt = Array.make m 0 and first = Array.make (b + 1) 0 in
+    (* the rows of slot k: first.(k) .. first.(k + 1) - 1 (rows come by slot, then property, then value) *)
     let r = ref 0 in
     for k = 0 to b - 1 do
       first.(k) <- !r;
@@ -318,76 +318,97 @@ let tblock_flush t =
       done;
       for j = 0 to m - 1 do
         if cnt.(j) < cmin.(j) then cmin.(j) <- cnt.(j);
-        if cnt.(j) > cmax.(j) then cmax.(j) <- cnt.(j)
+        if cnt.(j) > cmax.(j) then cmax.(j) <- cnt.(j);
+        total.(j) <- total.(j) + cnt.(j)
       done
     done;
     first.(b) <- nr;
-    let wc = Array.init m (fun j -> Pack.width (cmax.(j) - cmin.(j))) in
     let wv = Array.init m (fun j -> min 64 (Pack.width (hi.(j) - lo.(j)) + fl.(j))) in
-    Array.iteri (fun j c -> if c > 0xFFFFFFFF || cmax.(j) > 0xFFFFFFFF || wc.(j) > 32 then invalid_arg "Snapshot.merge: a thing with too many values") cmin;
-    let cw = Array.fold_left ( + ) 0 wc in
-    if cw > 0xFFFF then invalid_arg "Snapshot.merge: a block of too many counts";
-    (* each record's bits *)
-    let rbits = Array.make b cw in
-    for k = 0 to b - 1 do
-      for x = first.(k) to first.(k + 1) - 1 do let j = t.ent.(t.bp.(x)) in rbits.(k) <- rbits.(k) + wv.(j) done
-    done;
-    let rmin = Array.fold_left min max_int rbits in
-    let same = Array.for_all (fun x -> x = rmin) rbits in
-    (* offsets: record k at k rmin + off k *)
-    let off = Array.make (b + 1) 0 in
-    for k = 1 to b do off.(k) <- off.(k - 1) + rbits.(k - 1) - rmin done;
-    let wo = if same then 0 else Pack.width off.(b) in
-    if rmin > 0xFFFFFFFF || wo > 63 then invalid_arg "Snapshot.merge: a block too large";
-    let head = 16 + (16 * m) in
-    let offb = if same then 0 else Store.pbytes (b + 1) wo in
-    let recb = Store.pbytes ((b * rmin) + off.(b)) 1 in
-    let total = Store.al (head + offb + recb) in
-    room t.tsc total;
+    let res j = total.(j) - (cmin.(j) * b) in
+    let wr = Array.init m (fun j -> if cmax.(j) = cmin.(j) then 0 else Pack.width (res j)) in
+    Array.iteri (fun j c -> if c > 0xFFFFFFFF || res j > 0xFFFFFFFF then invalid_arg "Snapshot.merge: a thing with too many values") cmin;
+    let colbits j = (if wr.(j) = 0 then 0 else 8 * Store.pbytes (b + 1) wr.(j)) + (8 * Store.pbytes total.(j) wv.(j)) in
+    (* a fixed field when the property is at most once a slot, fits a field, and takes no more bits than a column *)
+    let fw j = wv.(j) + if cmin.(j) = 0 then 1 else 0 in
+    let fixed = Array.init m (fun j -> cmax.(j) <= 1 && fw j <= 63 && b * fw j <= colbits j) in
+    let hv = Array.exists not fixed in
+    let pos = Array.make m 0 and rbits = ref (if hv then 1 else 0) in
+    for j = 0 to m - 1 do if fixed.(j) then (pos.(j) <- !rbits; rbits := !rbits + fw j) done;
+    let rr = !rbits in
+    if rr > 0xFFFFFFFF then invalid_arg "Snapshot.merge: a block too large";
+    let head = Store.al (16 + (20 * m)) in
+    let recb = Store.pbytes (b * rr) 1 in
+    let doff = Array.make m 0 and d = ref (head + recb) in
+    for j = 0 to m - 1 do if not fixed.(j) then (doff.(j) <- !d; d := !d + (colbits j / 8)) done;
+    let total_bytes = Store.al !d in
+    room t.tsc total_bytes;
     let sb = t.tsc.sb in
-    Bytes.fill sb 0 (total + 8) '\000';
+    Bytes.fill sb 0 (total_bytes + 8) '\000';
     Bytes.set_uint16_le sb 0 b;
     Bytes.set_uint16_le sb 2 m;
-    Bytes.set_uint8 sb 4 wo;
-    Bytes.set_uint16_le sb 6 cw;
-    Bytes.set_int32_le sb 8 (Int32.of_int rmin);
+    Bytes.set_uint8 sb 4 (if hv then 1 else 0);
+    Bytes.set_int32_le sb 8 (Int32.of_int rr);
     for j = 0 to m - 1 do
       let e = 16 + (16 * j) in
       Bytes.set_uint16_le sb e props.(j);
       Bytes.set_uint8 sb (e + 2) wv.(j);
-      Bytes.set_uint8 sb (e + 3) (wc.(j) lor (fl.(j) lsl 7));
-      Bytes.set_int32_le sb (e + 4) (Int32.of_int cmin.(j));
-      Bytes.set_int64_le sb (e + 8) (Int64.of_int lo.(j))
+      let mode =
+        (fl.(j) lsl 7) lor if fixed.(j) then 0x40 lor (if cmin.(j) = 0 then 0x20 else 0) else wr.(j)
+      in
+      Bytes.set_uint8 sb (e + 3) mode;
+      Bytes.set_int32_le sb (e + 4) (Int32.of_int (if fixed.(j) then pos.(j) else cmin.(j)));
+      Bytes.set_int64_le sb (e + 8) (Int64.of_int lo.(j));
+      Bytes.set_int32_le sb (16 + (16 * m) + (4 * j)) (Int32.of_int doff.(j))
     done;
-    if not same then for k = 0 to b do Pack.put sb ((head * 8) + (k * wo)) off.(k) wo done;
-    let rec0 = (head + offb) * 8 in
+    (* a value in w bits at bit [at]: the flag in the lowest bit when the entry has one *)
+    let put_value at j x =
+      let w = wv.(j) in
+      if fl.(j) = 0 then Pack.put sb at (t.bw.(x) - lo.(j)) w
+      else begin
+        if Bytes.unsafe_get t.bd x <> '\000' then Pack.put sb at 1 1;
+        Pack.put sb (at + 1) (t.bw.(x) - lo.(j)) (w - 1)
+      end
+    in
+    (* the records *)
+    let rec0 = head * 8 in
     for k = 0 to b - 1 do
-      let at = rec0 + (k * rmin) + off.(k) in
-      (* the counts that vary *)
-      Array.fill cnt 0 m 0;
-      for x = first.(k) to first.(k + 1) - 1 do let j = t.ent.(t.bp.(x)) in cnt.(j) <- cnt.(j) + 1 done;
-      let pos = ref at in
-      for j = 0 to m - 1 do
-        if wc.(j) > 0 then Pack.put sb !pos (cnt.(j) - cmin.(j)) wc.(j);
-        pos := !pos + wc.(j)
-      done;
-      (* the values, by entry (the rows of a slot come by property, then value) *)
+      let at = rec0 + (k * rr) in
+      let anyv = ref false in
       for x = first.(k) to first.(k + 1) - 1 do
         let j = t.ent.(t.bp.(x)) in
-        let w = wv.(j) in
-        if fl.(j) = 0 then Pack.put sb !pos (t.bw.(x) - lo.(j)) w
-        else begin
-          if Bytes.unsafe_get t.bd x <> '\000' then Pack.put sb !pos 1 1;
-          Pack.put sb (!pos + 1) (t.bw.(x) - lo.(j)) (w - 1)
-        end;
-        pos := !pos + w
-      done
+        if fixed.(j) then begin
+          let fa = at + pos.(j) in
+          if cmin.(j) = 0 then (Pack.put sb fa 1 1; put_value (fa + 1) j x) else put_value fa j x
+        end
+        else anyv := true
+      done;
+      if hv && !anyv then Pack.put sb at 1 1
+    done;
+    (* the columns: offsets (residuals) and values *)
+    for j = 0 to m - 1 do
+      if not fixed.(j) then begin
+        let base = doff.(j) * 8 in
+        let w = wr.(j) and c = cmin.(j) in
+        let vbase = base + if w = 0 then 0 else 8 * Store.pbytes (b + 1) w in
+        let acc = ref 0 and v = ref 0 in
+        for k = 0 to b - 1 do
+          if w > 0 then Pack.put sb (base + (k * w)) (!acc - (c * k)) w;
+          for x = first.(k) to first.(k + 1) - 1 do
+            if t.ent.(t.bp.(x)) = j then begin
+              put_value (vbase + (!v * wv.(j))) j x;
+              incr v;
+              incr acc
+            end
+          done
+        done;
+        if w > 0 then Pack.put sb (base + (b * w)) (!acc - (c * b)) w
+      end
     done;
     Array.iter (fun p -> t.ent.(p) <- -1) props;
-    t.doff <- t.doff + align_block t.data total;
+    t.doff <- t.doff + align_block t.data total_bytes;
     put64 t.dir t.doff;
-    put_sub t.data sb 0 total;
-    t.doff <- t.doff + total;
+    put_sub t.data sb 0 total_bytes;
+    t.doff <- t.doff + total_bytes;
     t.bs <- 0;
     t.nr <- 0
   end
@@ -1148,10 +1169,11 @@ let check_and_build disk dir (lo0, hi0, file) id =
       done;
       if get count <> total then bad "%s does not end at %d" what total
     in
-    (* in order, from 0, and within a room *)
+    (* in order, and within a room (the first block may start after the rest of a page: a block that would cross a
+       page starts on the next one) *)
     let upto get count room what =
       let prev = ref 0 in
-      if get 0 <> 0 then bad "%s do not start at 0" what;
+      if get 0 < 0 || get 0 >= Pages.size then bad "%s do not start at their section's start" what;
       for i = 0 to count do
         let x = get i in
         if x < !prev || x > room then bad "%s are out of order" what;

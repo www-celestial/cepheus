@@ -85,10 +85,10 @@ let wmax = 64
 let rooms ~n_cap ~k_cap ~np ~vb_cap ~vm_blocks ~ns ~sblob =
   let tbn = blocks128 k_cap in
   let entries = min n_cap (np * tbn) in
-  (* a thing block: 16 bytes, 16 an entry (at most min(rows, np) a block), 129 offsets of at most 32 bits, the
-     records: a count of at most 32 bits an entry a slot (an entry's count bits are at most its rows' in the block,
-     so at most 128 bits a row in all), values of at most 64 bits *)
-  let tdata = (16 * tbn) + (16 * entries) + (tbn * (pbytes (tb + 1) 32 + 8)) + (24 * n_cap) + 8 in
+  (* a thing block: 16 bytes and 20 an entry (at most min(rows, np) a block), the records' first bits, and each entry's
+     data as a column would take it (a field is chosen only when it takes no more): 129 residuals of at most 32 bits,
+     values of at most 64 bits *)
+  let tdata = (16 * tbn) + (24 * entries) + (entries * (pbytes (tb + 1) 32 + 8)) + (tbn * 24) + (8 * n_cap) + 8 in
   (* a row block: 8 bytes, values of at most 64 bits, things of at most 32 *)
   let vdata = (24 * vb_cap) + (12 * n_cap) + 8 in
   (* and the rest of a page skipped before a block that does not fit in it: at most a block's size a block *)
@@ -295,17 +295,21 @@ let dense b =
 let rec safe f b x = match f b x with r -> ended r | exception Miss k -> fault b k; safe f b x
 
 (* ---- By thing: the blocks of 128 slots ----
-   A block holds the rows of up to 128 slots as records, one a slot (a row store: a lookup of a thing reads its
-   record, a few bytes, and the block's header):
-     0 B u16 (slots) | 2 m u16 (entries) | 4 wo u8 (bits of a record's offset; 0: every record is R bits) | 5 zero
-     | 6 cw u16 (bits of a record's counts) | 8 R u32 (wo = 0: every record's bits; else the least record's) | 4 zero
-     | 16 m entries of 16 bytes, by property: p u16 | wv u8 (bits a value, its flag included) | wc u8 (bits 0-6: bits
-       of the entry's count in a record, 0: every slot has c values; bit 7: each value's lowest bit is its derived
-       flag) | c u32 (the least count) | base i64 (the values' least)
-     then, when wo > 0, B + 1 offsets of wo bits: record k starts k R + off k bits after the records' start
-     then the records: the counts (count - c in wc bits, for each entry with wc > 0, in order), then each entry's
-     values in order (count values of wv bits from base, sorted).
-   A block no larger than a page lies in one page (the writer starts it on the next page otherwise). *)
+   A block holds the rows of up to 128 slots (things). A property that every slot has at most once is a fixed field
+   of each slot's record, when that takes no more bits than a column of its own: a lookup of it reads the record's
+   field. The others are columns: their slots' offsets (c k + residual k) and their values.
+     0 B u16 (slots) | 2 m u16 (entries) | 4 hv u8 (1: a record's first bit says the slot has values in a column)
+     | 5 three zero bytes | 8 R u32 (bits of a record) | 12 zero u32
+     | 16 m entries of 16 bytes, by property: p u16 | wv u8 (bits a value, its flag included) | mode u8 (bit 7: each
+       value's lowest bit is its derived flag; bit 6: a fixed field, bit 5: with a bit "present" first; otherwise
+       bits 0-5: bits of a residual, 0 when every slot has c values) | c u32 (a field: its bit in the record; a
+       column: the least count) | base i64 (the values' least)
+     | m u32: a column's data, its byte from the block's start (0 for a field)
+     | at 8-aligned 16 + 20 m: B records of R bits | the columns' data: B + 1 residuals of wr bits (when wr > 0),
+       then the values, sorted within a slot
+   A block no larger than a page lies in one page (the writer starts it on the next page otherwise): its fields are
+   read from that page's bytes; a block across pages (a thing with thousands of values) has its header copied and
+   the rest read from the pages field by field, so a lookup reads a few fields, never the whole. *)
 
 (* bytes [o, o + n) of the run, copied: a header, or a row block, across pages *)
 let[@inline never] assemble b o n =
@@ -335,25 +339,17 @@ let[@inline] g8 f i = Bytes.get_uint8 f i
 let[@inline] g32 f i = Int32.to_int (Bytes.get_int32_le f i) land 0xFFFFFFFF
 let[@inline] g64 f i = Int64.to_int (Bytes.get_int64_le f i)
 
-(* the block of slot s: its byte offset, and its length (the next block's offset: the directory has one more) *)
-let[@inline] tbo b s = b.o_tdata + i64 b (b.o_tdir + ((s lsr 7) lsl 3))
-let[@inline] ctbo b s = b.o_tdata + ci64 b (b.o_tdir + ((s lsr 7) lsl 3))
-
-(* the next block's offset, from the directory word of slot s's block at d (same page but at a page's last word) *)
+(* the next block's offset, from the directory word at d (the same page but at a page's last word) *)
 let[@inline] tnext b d = let i = d land Pages.mask in if i <= Pages.size - 16 then Int64.to_int (get64u (frame b d) (i + 8)) else i64 b (d + 8)
 let[@inline] ctnext b d = let i = d land Pages.mask in if i <= Pages.size - 16 then Int64.to_int (get64u (framec b d) (i + 8)) else ci64 b (d + 8)
-let[@inline] tlen b s = let d = b.o_tdir + ((s lsr 7) lsl 3) in tnext b d - i64 b d
-let[@inline] ctlen b s = let d = b.o_tdir + ((s lsr 7) lsl 3) in ctnext b d - ci64 b d
 
-(* A block is read from one page's bytes when it lies in one page (nearly always: a block of an invoice book is under
-   1 KiB, and the writer starts a block on the next page when it would cross one). A block across pages (a thing with
-   thousands of values) has its header copied (a few hundred bytes) and its records read from the pages field by
-   field: a lookup in it reads a few fields, never the whole. [one] says which; [rb] is the records' first bit in f
-   when one, and ro the records' first byte in the run otherwise. *)
-let[@inline] hlen8 x = 16 + (16 * ((x lsr 16) land 0xFFFF)) + let wo = (x lsr 32) land 0xFF in if wo = 0 then 0 else pbytes ((x land 0xFFFF) + 1) wo
+(* a block's header length, from its first word (B, m) *)
+let[@inline] hlen8 x = al (16 + (20 * ((x lsr 16) land 0xFFFF)))
 
-let[@inline] rget b ro f rb one bit w = if one then Pack.get f (rb + bit) w else field b ro bit w
-let[@inline] crget b ro f rb one bit w = if one then Pack.get f (rb + bit) w else cfield b ro bit w
+(* bit [bit] (from the block's start) of the block: from f's bytes when the whole block is there (one), from the pages
+   otherwise (bo the block's byte in the run) *)
+let[@inline] rget b bo f rb one bit w = if one then Pack.get f (rb + bit) w else field b bo bit w
+let[@inline] crget b bo f rb one bit w = if one then Pack.get f (rb + bit) w else cfield b bo bit w
 
 (* the entry of property p in the header at i of f: its index, or -1 *)
 let tentry f i p =
@@ -375,45 +371,34 @@ let tentry f i p =
     if !lo < m && g16 f (i + 16 + (16 * !lo)) = p then !lo else -1
   end
 
-(* the bit where record k starts, from the records' start *)
-let[@inline] trec f i k =
-  let wo = g8 f (i + 4) and r = g32 f (i + 8) in
-  if wo = 0 then k * r else (k * r) + Pack.get f (((i + 16 + (16 * g16 f (i + 2))) lsl 3) + (k * wo)) wo
-
 (* ---- One part alone ---- *)
 
-(* Entry j of the record at bit r: its count (c, and the record's count bits of j when its count varies), and the
-   bit where its values start (after the record's counts and the values of the entries before j). A record's counts
-   are read in one load when they fit (cw <= 55 bits: a block of a few properties), else one by one. *)
-let[@inline] tcount b ro f rb one i r j =
-  let cpos = ref 0 in
-  for x = 0 to j - 1 do cpos := !cpos + (g8 f (i + 19 + (16 * x)) land 0x7F) done;
-  let e = i + 16 + (16 * j) in
-  let wc = g8 f (e + 3) land 0x7F in
-  g32 f (e + 4) + if wc = 0 then 0 else rget b ro f rb one (r + !cpos) wc
-
 (* value x of the values at bit va (wv bits each, flagged or not, from base), and its flag *)
-let[@inline] tval b ro f rb one va wv fl base x =
-  if fl = 0 then base + rget b ro f rb one (va + (x * wv)) wv else base + rget b ro f rb one (va + (x * wv) + 1) (wv - 1)
-let[@inline] ctval b ro f rb one va wv fl base x =
-  if fl = 0 then base + crget b ro f rb one (va + (x * wv)) wv else base + crget b ro f rb one (va + (x * wv) + 1) (wv - 1)
-let[@inline] tflag b ro f rb one va wv fl x = fl <> 0 && rget b ro f rb one (va + (x * wv)) 1 = 1
-let[@inline] ctflag b ro f rb one va wv fl x = fl <> 0 && crget b ro f rb one (va + (x * wv)) 1 = 1
+let[@inline] tval b bo f rb one va wv fl base x =
+  if fl = 0 then base + rget b bo f rb one (va + (x * wv)) wv else base + rget b bo f rb one (va + (x * wv) + 1) (wv - 1)
+let[@inline] ctval b bo f rb one va wv fl base x =
+  if fl = 0 then base + crget b bo f rb one (va + (x * wv)) wv else base + crget b bo f rb one (va + (x * wv) + 1) (wv - 1)
+let[@inline] tflag b bo f rb one va wv fl x = fl <> 0 && rget b bo f rb one (va + (x * wv)) 1 = 1
+let[@inline] ctflag b bo f rb one va wv fl x = fl <> 0 && crget b bo f rb one (va + (x * wv)) 1 = 1
 
-(* the place of the first value >= w among values 0 .. n-1 from va: a binary search down to 8, then a scan *)
-let[@inline] tlower b ro f rb one va wv fl base n w =
-  let lo = ref 0 and hi = ref n in
+(* the place of the first value >= w among values lo .. hi-1 from va: a binary search down to 8, then a scan *)
+let[@inline] tlower b bo f rb one va wv fl base lo hi w =
+  let lo = ref lo and hi = ref hi in
   while !hi - !lo > 8 do
     let mid = (!lo + !hi) lsr 1 in
-    if tval b ro f rb one va wv fl base mid < w then lo := mid + 1 else hi := mid
+    if tval b bo f rb one va wv fl base mid < w then lo := mid + 1 else hi := mid
   done;
-  while !lo < !hi && tval b ro f rb one va wv fl base !lo < w do incr lo done;
+  while !lo < !hi && tval b bo f rb one va wv fl base !lo < w do incr lo done;
   !lo
 
+(* A column's offset of slot k (its data at byte d of the block, from the block's start), and where its values start *)
+let[@inline] toff b bo f rb one c wr d k = if wr = 0 then c * k else (c * k) + rget b bo f rb one ((d lsl 3) + (k * wr)) wr
+let[@inline] ctoff b bo f rb one c wr d k = if wr = 0 then c * k else (c * k) + crget b bo f rb one ((d lsl 3) + (k * wr)) wr
+let[@inline] tvals nb wr d = (d + if wr = 0 then 0 else pbytes (nb + 1) wr) lsl 3
+
 (* The block of slot s, read with two page lookups (the directory's page, the block's): f its header's bytes (the
-   page, or a copy of a header across pages), i where it starts in them, one: the whole block lies in that page,
-   ro its records' byte in the run, rb their bit in f. Written out in each lookup below: a function returning them all
-   would allocate. *)
+   page, or a copy of a header across pages), i where it starts in them, one: the whole block lies in that page.
+   Written out in each lookup below: a function returning them all would allocate. *)
 
 let base_iter_ea b e p fn =
   let s = cslot b e in
@@ -428,21 +413,19 @@ let base_iter_ea b e p fn =
     let f = if hp then f else cassemble b bo h and i = if hp then i else 0 in
     let j = tentry f i p in
     if j >= 0 then begin
-      let ro = bo + h and rb = (i + h) lsl 3 and r = trec f i (s land 127) in
-      let cw = g16 f (i + 6) in
-      let all = if cw <= 55 then crget b ro f rb one r cw else 0 in
-      let cpos = ref 0 and vpos = ref (r + cw) and c = ref 0 in
-      for x = 0 to j do
-        let en = i + 16 + (16 * x) in
-        let wc = g8 f (en + 3) land 0x7F in
-        let k = g32 f (en + 4) + if wc = 0 then 0 else if cw <= 55 then (all lsr !cpos) land Pack.mask wc else crget b ro f rb one (r + !cpos) wc in
-        cpos := !cpos + wc;
-        if x < j then vpos := !vpos + (k * g8 f (en + 2)) else c := k
-      done;
-      if !c > 0 then begin
-        let va = !vpos and en = i + 16 + (16 * j) in
-        let wv = g8 f (en + 2) and fl = g8 f (en + 3) lsr 7 and base = g64 f (en + 8) in
-        for x = 0 to !c - 1 do fn (ctval b ro f rb one va wv fl base x) done
+      let en = i + 16 + (16 * j) and rb = i lsl 3 and k = s land 127 in
+      let wv = g8 f (en + 2) and mode = g8 f (en + 3) and base = g64 f (en + 8) in
+      let fl = mode lsr 7 in
+      if mode land 0x40 <> 0 then begin
+        let at = (h lsl 3) + (k * g32 f (i + 8)) + g32 f (en + 4) in
+        if mode land 0x20 = 0 then fn (ctval b bo f rb one at wv fl base 0)
+        else if crget b bo f rb one at 1 = 1 then fn (ctval b bo f rb one (at + 1) wv fl base 0)
+      end
+      else begin
+        let c = g32 f (en + 4) and wr = mode land 0x3F and dd = g32 f (i + 16 + (16 * g16 f (i + 2)) + (4 * j)) in
+        let lo = ctoff b bo f rb one c wr dd k and hi = ctoff b bo f rb one c wr dd (k + 1) in
+        let va = tvals (g16 f i) wr dd in
+        for x = lo to hi - 1 do fn (ctval b bo f rb one va wv fl base x) done
       end
     end
   end
@@ -460,13 +443,26 @@ let count_ea b e p =
     let one = i + n <= Pages.size and hp = i + h <= Pages.size in
     let f = if hp then f else assemble b bo h and i = if hp then i else 0 in
     let j = tentry f i p in
-    if j < 0 then 0 else tcount b (bo + h) f ((i + h) lsl 3) one i (trec f i (s land 127)) j
+    if j < 0 then 0
+    else begin
+      let en = i + 16 + (16 * j) and rb = i lsl 3 and k = s land 127 in
+      let mode = g8 f (en + 3) in
+      if mode land 0x40 <> 0 then begin
+        if mode land 0x20 = 0 then 1
+        else rget b bo f rb one ((h lsl 3) + (k * g32 f (i + 8)) + g32 f (en + 4)) 1
+      end
+      else begin
+        let c = g32 f (en + 4) and wr = mode land 0x3F and dd = g32 f (i + 16 + (16 * g16 f (i + 2)) + (4 * j)) in
+        toff b bo f rb one c wr dd (k + 1) - toff b bo f rb one c wr dd k
+      end
+    end
   end
 
 let rec base_count_ea b e p =
   if b.k = 0 then 0 else match count_ea b e p with r -> ended r | exception Miss k -> fault b k; base_count_ea b e p
 
-(* every row of e, in (property, value) order, with its flag *)
+(* every row of e, in (property, value) order, with its flag; a record whose first bit says it has no values in a
+   column reads no column *)
 let base_iter_ef b e fn =
   let s = cslot b e in
   if s >= 0 then begin
@@ -478,19 +474,23 @@ let base_iter_ef b e fn =
     let h = hlen8 (Int64.to_int (get64u f i)) in
     let one = i + n <= Pages.size and hp = i + h <= Pages.size in
     let f = if hp then f else cassemble b bo h and i = if hp then i else 0 in
-    let m = g16 f (i + 2) and ro = bo + h and rb = (i + h) lsl 3 in
-    let r = trec f i (s land 127) in
-    let cpos = ref r and vpos = ref (r + g16 f (i + 6)) in
+    let m = g16 f (i + 2) and rb = i lsl 3 and k = s land 127 in
+    let rec_at = (h lsl 3) + (k * g32 f (i + 8)) in
+    let cols = g8 f (i + 4) = 0 || crget b bo f rb one rec_at 1 = 1 in
     for j = 0 to m - 1 do
       let en = i + 16 + (16 * j) in
-      let wc = g8 f (en + 3) land 0x7F in
-      let c = g32 f (en + 4) + if wc = 0 then 0 else crget b ro f rb one !cpos wc in
-      cpos := !cpos + wc;
-      if c > 0 then begin
-        let p = g16 f en and wv = g8 f (en + 2) and fl = g8 f (en + 3) lsr 7 and base = g64 f (en + 8) in
-        let va = !vpos in
-        for x = 0 to c - 1 do fn p (ctval b ro f rb one va wv fl base x) (ctflag b ro f rb one va wv fl x) done;
-        vpos := va + (c * wv)
+      let p = g16 f en and wv = g8 f (en + 2) and mode = g8 f (en + 3) and base = g64 f (en + 8) in
+      let fl = mode lsr 7 in
+      if mode land 0x40 <> 0 then begin
+        let at = rec_at + g32 f (en + 4) in
+        if mode land 0x20 = 0 then fn p (ctval b bo f rb one at wv fl base 0) (ctflag b bo f rb one at wv fl 0)
+        else if crget b bo f rb one at 1 = 1 then fn p (ctval b bo f rb one (at + 1) wv fl base 0) (ctflag b bo f rb one (at + 1) wv fl 0)
+      end
+      else if cols then begin
+        let c = g32 f (en + 4) and wr = mode land 0x3F and dd = g32 f (i + 16 + (16 * m) + (4 * j)) in
+        let lo = ctoff b bo f rb one c wr dd k and hi = ctoff b bo f rb one c wr dd (k + 1) in
+        let va = tvals (g16 f i) wr dd in
+        for x = lo to hi - 1 do fn p (ctval b bo f rb one va wv fl base x) (ctflag b bo f rb one va wv fl x) done
       end
     done
   end
@@ -513,24 +513,20 @@ let state_e b e p w =
     let j = tentry f i p in
     if j < 0 then 0
     else begin
-      let ro = bo + h and rb = (i + h) lsl 3 and r = trec f i (s land 127) in
-      let cw = g16 f (i + 6) in
-      let all = if cw <= 55 then rget b ro f rb one r cw else 0 in
-      let cpos = ref 0 and vpos = ref (r + cw) and c = ref 0 in
-      for x = 0 to j do
-        let en = i + 16 + (16 * x) in
-        let wc = g8 f (en + 3) land 0x7F in
-        let k = g32 f (en + 4) + if wc = 0 then 0 else if cw <= 55 then (all lsr !cpos) land Pack.mask wc else rget b ro f rb one (r + !cpos) wc in
-        cpos := !cpos + wc;
-        if x < j then vpos := !vpos + (k * g8 f (en + 2)) else c := k
-      done;
-      let c = !c in
-      if c = 0 then 0
+      let en = i + 16 + (16 * j) and rb = i lsl 3 and k = s land 127 in
+      let wv = g8 f (en + 2) and mode = g8 f (en + 3) and base = g64 f (en + 8) in
+      let fl = mode lsr 7 in
+      if mode land 0x40 <> 0 then begin
+        let at = (h lsl 3) + (k * g32 f (i + 8)) + g32 f (en + 4) in
+        let at = if mode land 0x20 = 0 then at else if rget b bo f rb one at 1 = 1 then at + 1 else -1 in
+        if at >= 0 && tval b bo f rb one at wv fl base 0 = w then (if tflag b bo f rb one at wv fl 0 then 2 else 1) else 0
+      end
       else begin
-        let va = !vpos and en = i + 16 + (16 * j) in
-        let wv = g8 f (en + 2) and fl = g8 f (en + 3) lsr 7 and base = g64 f (en + 8) in
-        let x = tlower b ro f rb one va wv fl base c w in
-        if x < c && tval b ro f rb one va wv fl base x = w then (if tflag b ro f rb one va wv fl x then 2 else 1) else 0
+        let c = g32 f (en + 4) and wr = mode land 0x3F and dd = g32 f (i + 16 + (16 * g16 f (i + 2)) + (4 * j)) in
+        let lo = toff b bo f rb one c wr dd k and hi = toff b bo f rb one c wr dd (k + 1) in
+        let va = tvals (g16 f i) wr dd in
+        let x = tlower b bo f rb one va wv fl base lo hi w in
+        if x < hi && tval b bo f rb one va wv fl base x = w then (if tflag b bo f rb one va wv fl x then 2 else 1) else 0
       end
     end
   end
