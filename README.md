@@ -88,12 +88,18 @@ facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/ben
 | triangles, base of 245 MB read through a 32 MB cache, process capped at 128 MB | 102 s | **1.05 s** (32 MB of buffers) |
 | load of 10 M facts | **5.13 s**, in two large groups, alternated with it | 30.87 s (`COPY`, indexes, `VACUUM ANALYZE`) |
 
-SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core: Cepheus is faster on an
-invoice by id (0.37 µs against 0.68) and on the unpaid sum per city (230 ms against 360), even on the city's unpaid
+SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core (before run format 7): Cepheus
+is faster on an invoice by id (0.37 µs against 0.68) and on the unpaid sum per city (230 ms against 360), even on the city's unpaid
 invoices and the triangles, slower on a client by e-mail (1.67 µs against 1.52). Loading the 10 M facts, alternated
 seven times, Cepheus is faster in every round (5.61 s against 9.37 s at the median: SQLite takes 1.7 times as long),
-but SQLite does it in 11 MB of memory against 1.46 GB (0.88 of it the client's own list of operations), into a file of
-131 MB against 330 MB; at a transaction a client, Cepheus' group commit loads 1 M facts 13 to 16 times faster (13.2 s
+but SQLite does it in 11 MB of memory against 1.46 GB (0.88 of it the client's own list of operations). Since run
+format 7 and journal format 2 (2026-11-09), the 10 M facts take 76.0 MB on disk with their whole history, against
+SQLite's 136 MB file, which keeps none, and load in 3.45 s against 7.22 s; on one core a client by e-mail takes
+0.66 µs against 1.37, a city's unpaid invoices 3.97 ms against 4.11, the triangles 1.08 s against 1.03; cold, each
+process capped at 48 MB so that neither file fits, Cepheus answers the first four questions 1.7 to 5.4 times faster
+and loses the triangles by more than 100 times (more than 2.5 minutes a run against 1.02 s: SQLite's follow links fit
+in its cache in a table of their own)
+([benchmarks](docs/benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)); at a transaction a client, Cepheus' group commit loads 1 M facts 13 to 16 times faster (13.2 s
 against 174.0 s; 10.6 against 166.7 in an earlier series). Where each one wins, and why, and how Cepheus compares by design
 with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison](docs/comparison.md).
 

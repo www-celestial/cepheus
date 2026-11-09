@@ -25,10 +25,13 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
 1. takes the lock (`Busy` if another process has it);
 2. reads the id; if `closed` is there (the last process closed cleanly), removes it; else forces the database's
    directory;
-3. removes the files of merges a crash interrupted (`.tmp`);
+3. converts a journal of format 1 to format 2, once (each segment written beside, forced, renamed over the old one;
+   a crash in the middle leaves each segment whole, and the next open goes on), and removes the files of merges a
+   crash interrupted (`.tmp`);
 4. takes the chain of runs from 0 that reaches the newest group with the fewest runs, and checks each (header CRC,
-   checksum table, rank tables, the order and bounds of every table; a page's CRC as it is read); a run that does not
-   check is set aside and noted (`Cepheus.notes`), and the choice is made again without it;
+   page table, rank tables, the order and bounds of every table; a page's CRC as it is read); a run that does not
+   check, or of an earlier format (5 and 6: "an earlier format (6), the journal is replayed"), is set aside and noted
+   (`Cepheus.notes`), and the choice is made again without it;
 5. after a crash (no `closed`), writes the newest frame of the journal again and forces the newest segment and the
    journal's directory (a process killed before its fsync left them in the page cache; after a failed fsync the
    page cache may hold bytes the disk does not, G13); then reads the journal from the newest run's position: checks
@@ -101,13 +104,15 @@ the only check that decodes the old segments, which an open does not read when r
 
 ## Memory
 
-A database's runs (its facts merged and sorted, about 25 bytes a fact) are read in pages of 16 KiB through one cache
+A database's runs (its facts merged, sorted and coded, about 5.4 bytes a fact at 10 M facts) are read in pages of 16
+KiB through one cache
 for the process, `Cepheus.set_cache bytes` (1 GiB by default). A run that fits in the cache is read whole at open,
 every page checked; a larger one is read page by page as questions need it, each page checked against its CRC when it
 arrives. Pages in memory stay under 1.25 times the cache: a full collection runs after each quarter of the cache has
 been evicted, so that the evicted pages go back to the system. Measured at 10 M facts (one run of 245 MB, the one-level
 format of milestone 2; the levels' format holds the same rows): with the whole base in the cache, 278 MB resident after open; with a 32 MB cache under a 128 MB cap, 64 MB after open and a
-peak of 79 to 105 MB through Q1 to Q5 (benchmarks, Larger than memory).
+peak of 79 to 105 MB through Q1 to Q5 (benchmarks, Larger than memory). With format 7 the same base is a run of 54.4 MB
+and the process holds 66 MB after its open with the 1 GiB cache ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)).
 
 Besides the runs: about 170 bytes for each change since the last merge. A merge starts in the background when the
 changes pass 200,000; it streams the new run into its file and needs only the cache, a few page buffers and 21 bytes a
@@ -124,7 +129,7 @@ once `write` has it lets the collector reclaim it while the group is merged.
 
 The runs are the levels of an LSM tree (theory, section 9): the delta is merged once it holds 200,000 changes, and
 level l holds at most 200,000 x 4^l rows (800,000, 3.2 M, 12.8 M, ...). A merge takes the delta and the newest runs
-down to the first level that can hold them all, writes one run there (about 25 bytes a fact), forces it, renames it,
+down to the first level that can hold them all, writes one run there (about 5 bytes a fact), forces it, renames it,
 and then removes the runs it replaced, and any other run outside the chain. No run is kept aside: should the newest run
 be found damaged at an open, it is set aside and its groups are replayed from the journal (a slower open, nothing
 lost). A removed file's space returns only when no view reads it any longer (the file stays open until the garbage

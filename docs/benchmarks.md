@@ -84,6 +84,166 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Compressed runs and journal (2026-11-09), at 10 million facts
+
+Step 2 of the plan to beat the giants: run format 7 (every section coded by a frame of reference in blocks of 128; in
+the thing blocks a record a thing for its one-valued properties and columns for the others; rows by property with
+their things by gaps where shorter; a value index for links, texts, dates and small ints; a hash table of the texts;
+only the written pages in the file, with a page table) and journal format 2 (each group in columns)
+([formats](formats.md), [theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)).
+
+**Method.** main 0ecc09e against the branch (b96c7e0, main d23a222 merged in), both built in release, the same
+benchmark client, alternated (A then B, then B then A) in one hold of the heavy lock, 7 rounds, every process in a
+3 GB scope; a cell is the median of 7 rounds with its 95 % interval by order statistics
+(for 7 runs, the smallest and the largest: coverage 98.4 %); the last column pairs the rounds (the median of the
+ratios, how many rounds the branch was the larger, a two-sided sign test). Questions: 11 runs each in each process,
+on up to 8 domains and on 1; a cell is the median of the 7 rounds' medians. Sizes are bytes of the files (`du -b`).
+The machine was shared with other jobs (load average 1.2 to 2.2).
+
+| 10 M facts | main 0ecc09e | branch | branch / main, by round |
+|---|---:|---:|---|
+| load in 2 large groups, to confirm every group | 4.26 s [3.82, 4.62] | **3.44 s** [3.32, 4.48] | 0.855, faster 7 of 7 (p = 0.016) |
+| load in 4 large groups (`GROUP=56818`) | 5.74 s [5.22, 8.70] | **4.64 s** [4.42, 6.32] | 0.803, faster 6 of 7 (p = 0.13) |
+| peak resident memory, 2 groups | 1,460 MB | 1,600 MB | 1.096 (the frame coded in memory, 21.6 MB, and the coder's buffers) |
+| peak resident memory, 4 groups | 1,196 MB [860, 1,389] | **984 MB** [878, 1,080] | 0.804 |
+| the journal | 99.6 MB | **21.8 MB** | 0.219 |
+| the runs after `snapshot` (one run) | 246.4 MB | **54.4 MB** | 0.221 |
+| journal and runs after `snapshot` | 346.1 MB | **76.2 MB** | 0.220 |
+| `snapshot` (a full merge) | 1.99 s [1.51, 2.70] | 1.62 s [1.54, 2.64] | 0.811 (p = 0.45) |
+| open of the database it leaves | 197 ms [194, 240] | **53.5 ms** [52.8, 54.3] | 0.271, faster 7 of 7 |
+| Q1 an invoice by id | 0.36 µs [0.34, 0.40] | 0.38 µs [0.36, 0.39] | 1.056 (p = 0.45: no difference shown) |
+| Q2 a client by e-mail | 1.58 µs [1.53, 1.64] | **0.65 µs** [0.64, 0.66] | 0.411, faster 7 of 7 |
+| Q3 unpaid invoices of a city | **3.59 ms** [3.56, 3.78] | 3.97 ms [3.92, 4.01] | 1.095, slower 7 of 7 |
+| Q4 unpaid sum by city, 8 domains | **79.9 ms** [78.8, 80.6] | 82.4 ms [81.9, 83.0] | 1.031, slower 7 of 7 |
+| Q5 triangles, 8 domains | **248 ms** [243, 257] | 264 ms [262, 266] | 1.072, slower 7 of 7 |
+| Q4, 1 domain | **231 ms** [230, 236] | 241 ms [239, 243] | 1.038, slower 7 of 7 |
+| Q5, 1 domain | **1.02 s** [0.98, 1.05] | 1.10 s [1.07, 1.14] | 1.098, slower 7 of 7 |
+| 1 M facts, a group a client, 64 threads | 8.25 s [7.94, 9.10] | 7.93 s [7.23, 9.05] | 0.962 (p = 0.45: the same) |
+| its peak | 235 MB | 204 MB | 0.834 |
+
+**Where the load's time goes now.** The large group's coding for the journal takes 0.64 s on its domain (0.89 s
+before, the change-by-change coding written by pieces) and its merge 1.07 s (0.35 s before: the blocks are coded as
+they fill, about 100 ns a fact), side by side; then fsyncs of 21.6 MB of frame and 54 MB of run instead of 94 and
+234 MB. The disk work that dominated step 1 shrank about 4.5 times; the merge's coding is now the longest part, a
+single domain's work (its two passes, by thing and by property, could go to two domains: the next lever).
+
+**The reads.** The order by property became faster where a value index replaces a binary search (Q2: 2.4 times),
+and an open reads 4.6 times fewer bytes. A lookup by thing costs a little more than format 6's: on consecutive
+invoices (the joins' pattern) 46 to 61 ns against 37 to 41 (`count_values` 49, `mem` 61, `iter_values` 58 ns; the
+block's header is read and the property's entry found among the block's before its field), so Q3, Q4 and Q5, made of
+such lookups, stay a little slower; the planner no longer counts a one-valued property of a bound thing (one lookup
+of two saved). Two layouts were measured before this one on the same data, one round each, one domain: a column a
+property in each block (PAX: Q1 0.79 µs, Q3 4.8 ms, Q4 357 ms) and a record a thing holding every value with a
+count a property (Q1 0.43 µs, Q3 5.8 ms, Q4 316 ms, Q5 1.22 s; its 7-round series and the giants' are kept with the
+job's raw outputs); the kept one, fields for the one-valued properties and columns for the others, read Q1 in
+0.39 µs, Q3 in 3.9 ms, Q4 in 241 ms ([theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)).
+
+**Beside SQLite 3.54 and PostgreSQL 18.6.** The same CSV files; a Cepheus load and a SQLite load in turn, 7 rounds,
+then Q1-Q5 resident, 11 runs each, a process of each in turn, 7 rounds, all under one hold of the lock (Cepheus on one
+domain, on its snapshot's one run; SQLite in WAL mode with synchronous FULL, its indexes on every searched column).
+PostgreSQL ran in the same way an hour before, alternated with the variant of format 7 measured first (records with
+counts), on a cluster of the job's own, fsync on, deleted at the end.
+
+| 10 M facts | Cepheus (branch) | SQLite 3.54 | PostgreSQL 18.6 |
+|---|---:|---:|---:|
+| load to durable | **3.45 s** [3.37, 3.75] | 7.22 s [6.83, 7.82] | 31.7 s [30.5, 34.4] |
+| its peak resident memory | 1,600 MB (883 the client's list) | **11 MB** | |
+| on disk after it | **74.7 MB** (journal 21.6, two runs 53.1) | 136.4 MB | 707 MB (284 tables and indexes, the rest WAL) |
+| on disk with `snapshot` (one run) | **76.0 MB** (journal 21.6, run 54.4), the whole history included | 136.4 MB, no history | |
+| Q1 an invoice by id | **0.38 µs** [0.37, 0.39] | 0.68 µs [0.68, 0.70] (engine) | 4.85 µs (in the server); 26 µs through its socket |
+| Q2 a client by e-mail | **0.66 µs** [0.64, 0.68] | 1.37 µs [1.33, 1.42] | 5.69 µs; 26 µs |
+| Q3 unpaid of a city | **3.97 ms** [3.91, 4.05] | 4.11 ms [4.06, 4.17] | 13.8 ms; 14.7 ms |
+| Q4 unpaid sum by city | 240 ms [240, 245] | 356 ms [347, 362] | **108 ms** (3 processes) |
+| Q5 triangles | 1.08 s [1.04, 1.12] | **1.03 s** [1.02, 1.05] | 596 ms (2 processes) |
+
+Cepheus loads 2.1 times faster than SQLite and 9 times faster than PostgreSQL, and its state with the whole history
+takes 0.56 times SQLite's file (which keeps no history); SQLite still loads in 11 MB of memory. On one core Cepheus
+is faster on Q1 (1.8 times), Q2 (2.1), Q4 (1.5) and Q3 (1.04); SQLite on Q5 (1.05 times: nested loops over two
+covering indexes do on this uniform graph the work of Generic Join, and its B-tree pages are read without decoding).
+PostgreSQL's parallel plans (3 and 2 processes) win Q4 and Q5 against one domain; Cepheus on 8 domains takes 82 and
+264 ms.
+
+**Larger than memory.** Each process in a scope capped at 128 MB, a cache of 32 MB on each side (Cepheus' pages,
+SQLite's `cache_size`), one domain; before each side the files' pages are dropped from the kernel's page cache
+(`posix_fadvise(DONTNEED)`), so every side starts cold; the three sides in turn, their order turned each round,
+7 rounds of 5 runs (Q5: once a side at the end, 3 runs, stopped after 10 minutes); a cell is the median of the 7
+rounds with the smallest and the largest round.
+
+| 10 M facts, 128 MB | Cepheus b96c7e0 | main 0ecc09e | SQLite 3.54 |
+|---|---:|---:|---:|
+| what is read | run 54.4 MB | run 246.4 MB | file 136.4 MB |
+| open, cold | 109 ms [93, 115] | **86 ms** [86, 120] | |
+| Q1 an invoice by id | **0.38 µs** [0.37, 0.40] | 70.8 µs [65.7, 79.3] | 0.87 µs [0.85, 5.38] |
+| Q2 a client by e-mail | **0.65 µs** [0.65, 0.67] | 1.50 µs [1.43, 1.53] | 1.40 µs [1.33, 1.42] |
+| Q3 unpaid of a city | **4.02 ms** [4.00, 4.06] | 542 ms [528, 550] | 97.5 ms [72.5, 110] |
+| Q4 unpaid sum by city | **240 ms** [239, 243] | 483 ms [454, 501] | 496 ms [462, 577] |
+| Q5 triangles | 1.10 s (one series) | more than 600 s (stopped) | **1.04 s** [1.02, 1.06] |
+
+At 10 M facts the compressed run fits under the cap beside the process (16 MB after the open, the 32 MB cache): its
+pages, read once from the disk, stay in the kernel's page cache within the scope, and the reads run as if resident.
+Format 6's run, 4.5 times larger, does not fit: each miss of the cache goes to the SSD (Q3 135 times slower, Q5
+stopped). SQLite's file does not fit either.
+
+**The open, cold.** In the table above (b96c7e0) a cold open of the compressed run took 22 ms more than format 6's.
+The cause: to see whether a segment was of format 1, the open read it through the recovery's window of 4 MiB, and the
+scan read the window again at the start of the newest segment, which here holds the whole history (21.6 MB; format
+6's newest segment held 5.5 MB). Both now read the segment's 40-byte header alone. Measured apart (the open only, 32 MB
+caches, 128 MB scopes, 7 rounds, the three builds in turn, the files' pages dropped before each cold open):
+
+| open of the 10 M-fact database | main 0ecc09e | b96c7e0 | 676676a |
+|---|---:|---:|---:|
+| cold | 85.5 ms [84.9, 86.8], 45.8 MB read | 104.2 ms [93.2, 139.2], 27.6 MB | **80.8 ms** [67.0, 84.0], 16.1 MB |
+| warm (the files in the kernel's page cache) | 40.6 ms [40.4, 41.4] | 16.4 ms [15.1, 18.4] | **12.4 ms** [12.1, 13.4] |
+
+676676a opens faster than main in each of the 7 rounds, cold and warm. With the default cache of 1 GiB an open of
+main reads 205.6 MB from the disk where the branch reads 38.3 MB (438 ms against 126 ms, in fresh scopes).
+
+**Smaller than both files.** The same set-up with each process capped at 48 MB and caches of 16 MB, Cepheus and
+SQLite in turn, 7 rounds (Q5 for Cepheus once at the end, stopped after 10 minutes): neither the run (54.4 MB) nor
+SQLite's file (136.4 MB) fits.
+
+| 10 M facts, 48 MB | Cepheus b96c7e0 | SQLite 3.54 |
+|---|---:|---:|
+| open, cold | 103 ms [97, 109] | |
+| Q1 an invoice by id | **23.3 µs** [20.8, 25.5] | 40.7 µs [38.4, 43.6] |
+| Q2 a client by e-mail | **0.66 µs** [0.62, 0.70] | 1.37 µs [1.31, 1.57] |
+| Q3 unpaid of a city | **82.5 ms** [79.0, 84.2] | 444 ms [434, 480] |
+| Q4 unpaid sum by city | **300 ms** [283, 305] | 1.22 s [1.14, 1.27] |
+| Q5 triangles | 4 runs not done in 10 minutes (more than 2.5 minutes a run) | **1.02 s** [1.02, 1.05] |
+
+Cepheus is faster on Q1 to Q4 (1.7 to 5.4 times): its run is 2.5 times smaller than SQLite's file, so more of what a
+question needs stays in the cache. SQLite wins Q5 by more than 100 times: it keeps the follow links in a table and a
+covering index of their own (7.4 and 6.5 MB, `dbstat`), which fit in its 16 MB of cache, while Cepheus finds a client's
+links in its thing block, among the records of the invoices numbered after it (a block of 128 things holds about 6
+clients and 122 invoices), so the triangles touch the 23.5 MB of thing blocks at random. Reading Q5 from the rows
+by property, where the 568,163 follow links lie together, is step 3 of the plan (the column order and a join that
+walks them, [theory](theory.md#12-what-comes-next-and-why)).
+
+The series before this one (milestone 2 and the levels, below) did not drop the files' pages, and their numbers are
+not comparable with these. The kernel charges a page of its page cache to the control group that read it first, and
+leaves it there ("A memory area is charged to the cgroup which instantiated it and stays charged to the cgroup until
+the area is released", [Linux cgroup v2](references.md#buffer-management-and-caching)), so pages read before a
+measure, by the load or an earlier run, could stay in memory outside the 128 MB of the scope that measured: the most
+likely reason why the one-run database of the levels' series read Q3 in 85.8 ms and Q5 in 96.8 s, and main here in
+542 ms and more than 10 minutes.
+
+**Local readers and writes through the server** (1 M facts, the server of each build in turn, started and stopped
+for each round, each round from a copy of the database as its load left it, 7 rounds; [server](server.md)):
+
+| 1 M facts | main 0ecc09e | branch | |
+|---|---:|---:|---|
+| 8 local readers, each having read every invoice of the sample once: Pss in all | 252.4 MB [251.5, 253.0] | **106.5 MB** [105.6, 107.1] | 0.42: each reader's copy of the run pages shrank with the runs (24.7 MB against 5.7 MB) |
+| their RSS in all | 290.8 MB [290.2, 291.1] | **144.3 MB** [144.0, 144.6] | |
+| one local reader while 256 clients write: CPU | 34.9 % of a core [29.2, 38.5] | 35.9 % [22.8, 43.9] | no difference shown |
+| its Pss meanwhile | 180.7 MB [167.6, 195.5] | **108.8 MB** [101.0, 119.8] | |
+| 256 clients writing durable groups of 4 facts through the socket, no reader | 18,992 groups/s [15,989, 24,534] | 19,330 [8,290, 22,152] | the same at the median; two rounds of the branch fell to 8,290 and 8,858 with a p99 of 375 and 836 ms |
+| the same in the process (`bench write`, 9 s, 3 merges each) | 19,047 [16,283, 22,389] | 20,119 [16,664, 22,136] | 1.02 by round, slower in 3 of 7: the same; a background merge 169 ms at the median on both |
+| its peak resident memory | 205 MB | **143 MB** | |
+
+The two slow rounds through the socket did not repeat in the process, where the merges and the writer's waits are
+timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
+disk whose fsyncs vary that much from round to round.
+
 ## Rules (2026-11-08)
 
 The first step of the reasoner ([rules](rules.md)): Datalog rules kept by the writer, semi-naive evaluation for

@@ -38,6 +38,11 @@ Cepheus' reads on one run measured since then are within a few percent of those 
   in 6 runs with a 48 MB cache). PostgreSQL keeps `follows` in a table of its own, 23 MB with its index, which fits in
   its 32 MB of buffers. A third order of Cepheus' rows (property, then thing) would make one property of many things
   local, at 10 bytes a fact more; it waits for real workloads to decide ([theory](theory.md#7-pages-and-the-cache)).
+  Measured again on run format 7 (2026-11-09), cold (the files' pages dropped before each side, which the series
+  above did not do), beside SQLite 3.54, PostgreSQL not run again: under a 128 MB cap the run of 54.4 MB fits beside
+  the process and the triangles take 1.10 s (SQLite 1.04 s; format 6 did not end in 10 minutes); under 48 MB, where
+  neither file fits, more than 2.5 minutes a run against SQLite's 1.02 s, whose follow links fit in its cache
+  ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)).
 - *Bulk load, until the levels.* `COPY` writes rows straight into table pages and builds each index once at the end.
   Cepheus loaded through its writer like any write (groups of 83 facts, each frame forced), and its one level on disk
   made each of the 33 merges of a 10 M load rewrite the whole base: 135 to 153 s against PostgreSQL's minute. With the
@@ -89,7 +94,11 @@ links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both o
 | Q4 and Q5 on 3 cores | **107 ms, 371 ms** | one thread a statement | Cepheus |
 | load 10 M facts, alternated (7 rounds) | **5.61 s [4.21, 11.67]**, 2 large groups | 9.37 s [7.90, 13.67] (`.import`, indexes after, `ANALYZE`) | Cepheus, 1.7 times (faster in 7 rounds of 7; even before 2026-11-08: 7.04 against 6.97 s); **SQLite** in memory: 11 MB against 1.46 GB |
 | load 1 M facts, a transaction a client (22,726 commits) | **10.6 s [9.9, 10.9]**, 64 threads | 166.7 s [138.6, 169.3], one writer | Cepheus, 16 times: group commit puts the groups that arrive during an fsync into the next frame; SQLite forces each commit alone |
-| size on disk after the 10 M load | 335 MB (journal 96, runs 237); 330 MB after `snapshot` (553 before 2026-11-08) | **131 MB**, one file | **SQLite**, 2.5 times: variable-length records, where Cepheus stores 8-byte words |
+| size on disk after the 10 M load (2026-11-09, run format 7, journal format 2) | **74.7 MB** (journal 21.6, runs 53.1); 76.0 MB after `snapshot`, the whole history included | 136.4 MB, one file, no history | Cepheus, 1.8 times: every value coded in the bits its block needs; before format 7, 335 MB (8-byte words) |
+| load 10 M facts with format 7, alternated (7 rounds, 2026-11-09) | **3.45 s** [3.37, 3.75] | 7.22 s [6.83, 7.82] | Cepheus, 2.1 times |
+| Q1, Q2, Q3, Q4, Q5 with run format 7, one core (2026-11-09) | **0.38 µs**, **0.66 µs**, **3.97 ms**, **240 ms**, 1.08 s | 0.68 µs, 1.37 µs, 4.11 ms, 356 ms, **1.03 s** | Cepheus on Q1 to Q4 (a hash of the texts and a value index make Q2 2.1 times faster); **SQLite** on Q5 by 5 % ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)) |
+| larger than memory, cold, 128 MB cap, 32 MB caches, Q1 to Q5 (2026-11-09) | **0.38 µs**, **0.65 µs**, **4.02 ms**, **240 ms**, 1.10 s | 0.87 µs, 1.40 µs, 97.5 ms, 496 ms, **1.04 s** | Cepheus on Q1 to Q4: its run of 54.4 MB fits under the cap, SQLite's file of 136.4 MB does not; **SQLite** on Q5 by 6 % |
+| the same at a 48 MB cap, 16 MB caches, where neither file fits | **23.3 µs**, **0.66 µs**, **82.5 ms**, **300 ms**, more than 2.5 min | 40.7 µs, 1.37 µs, 444 ms, 1.22 s, **1.02 s** | Cepheus on Q1 to Q4 (1.7 to 5.4 times); **SQLite** on Q5 by more than 100 times: its follow links fit in its cache in a table and an index of their own, where Cepheus reads them from its thing blocks, among the invoices |
 
 ## By design
 

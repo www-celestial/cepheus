@@ -149,6 +149,11 @@ venue, volume and year); a work that could not be checked is not listed. The des
   1968; in *In Honor of Philip M. Morse*, H. Feshbach and K. U. Ingard (eds.), MIT Press, 1969, 217–228.
   https://multicians.org/paging-experiment.pdf
   — CLOCK, the reference bit and the hand; S3-FIFO's main queue keeps a page the same way.
+- **[Linux cgroup v2]** The Linux Kernel documentation, Control Group v2, section "Memory Ownership".
+  https://docs.kernel.org/admin-guide/cgroup-v2.html
+  — A page of the page cache stays charged to the control group that brought it in; `POSIX_FADV_DONTNEED` gives it
+  up. Why the measures larger than memory drop the files' pages before each side
+  ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)).
 
 ## Indexes and compression
 
@@ -158,16 +163,45 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Neumann 2008]** T. Neumann, G. Weikum. RDF-3X: a RISC-style Engine for RDF. *PVLDB* 1(1), 647–659, 2008.
   https://doi.org/10.14778/1453856.1453927
   — Sorted triple orders, compressed; the third order (property, thing) is weighed for data larger than memory.
+- **[Goldstein 1998]** J. Goldstein, R. Ramakrishnan, U. Shaft. Compressing Relations and Indexes. *ICDE* 1998,
+  370–379. https://doi.org/10.1109/ICDE.1998.655800
+  — The frame of reference: the values of a page stored from their least, each in the bits its range needs, any one
+  decoded alone. Every block of a run of format 7 and every column of the journal's format 2 is coded so.
 - **[Zukowski 2006]** M. Zukowski, S. Héman, N. Nes, P. Boncz. Super-Scalar RAM-CPU Cache Compression. *ICDE* 2006, 59.
   https://doi.org/10.1109/ICDE.2006.150
-  — PFOR compression of sorted integers: planned for the runs.
+  — PFOR and PFOR-DELTA: the frame of reference in blocks of 128 values for columns, decoded in a few cycles a value,
+  the rare outliers patched apart. Cepheus takes the blocks of 128 and the frame of reference, without patching (a
+  value is read in O(1), never by walking the exceptions), and deltas where they code shorter.
 - **[Lemire 2015]** D. Lemire, L. Boytsov. Decoding Billions of Integers per Second through Vectorization. *Software:
   Practice and Experience* 45(1), 1–29, 2015. https://doi.org/10.1002/spe.2203
-  — The same, vectorized: planned.
+  — Binary packing of blocks, its scalar and vectorized decoders measured: Cepheus' fields are read the scalar way, one
+  unaligned 8-byte load, a shift and a mask (OCaml has no SIMD), as their non-vectorized binary packing does.
+- **[Kuschewski 2023]** M. Kuschewski, D. Sauerwein, A. Alhomssi, V. Leis. BtrBlocks: Efficient Columnar Compression
+  for Data Lakes. *Proc. ACM Manag. Data* 1(2), article 118 (SIGMOD 2023). https://doi.org/10.1145/3589263
+  — The coding chosen per block by what makes it shortest: the journal's columns take a frame of reference or deltas
+  block by block, the row blocks their things from the least or by gaps.
+- **[Ailamaki 2001]** A. Ailamaki, D. J. DeWitt, M. D. Hill, M. Skounakis. Weaving Relations for Cache Performance.
+  *VLDB* 2001, 169–180. http://www.vldb.org/conf/2001/P169.pdf
+  — PAX: inside a page, the values of each attribute together. Measured for the thing blocks (a column a property in a
+  block of 128 things): a lookup of a thing touched one cache line a property. The blocks keep a record a thing for
+  the properties each thing has at most once (the row store PAX compares against) and columns only for the others;
+  the order by property is the columns.
+- **[Vigna 2013]** S. Vigna. Quasi-Succinct Indices. *WSDM* 2013, 83–92. https://doi.org/10.1145/2433396.2433409
+  — Elias-Fano coding of a sorted list of n values below u in at most 2 + ⌈log2(u/n)⌉ bits each: the bound used to
+  weigh the order by property against the information in the data (theory, section 11).
+- **[Vigna 2016]** S. Vigna. An Experimental Exploration of Marsaglia's xorshift Generators, Scrambled. *ACM
+  Transactions on Mathematical Software* 42(4), article 30, 2016. https://arxiv.org/abs/1402.6246 (the extended
+  version)
+  — Its multiplier M32 = 2685821657736338717 (0x2545F4914F6CDD1D, table IV, the one of xorshift64*) is the constant of
+  the text hash of the runs' dictionaries.
+- **[Neumann 2011]** T. Neumann, G. Moerkotte. Characteristic Sets: Accurate Cardinality Estimation for RDF Queries
+  with Multiple Joins. *ICDE* 2011, 984–994. https://doi.org/10.1109/ICDE.2011.5767868
+  — Things grouped by the set of properties they have: a way, not taken yet, to cut thing blocks by kind of thing so
+  that a block of invoices holds no absent field.
 - **[Binnig 2009]** C. Binnig, S. Hildenbrand, F. Färber. Dictionary-based Order-preserving String Compression for
   Main Memory Column Stores. *SIGMOD* 2009, 283–296. https://doi.org/10.1145/1559845.1559877
-  — An order-preserving dictionary would allow ranges and prefixes on texts; today the dictionary keeps a sorted list
-  of its ids (`ssort`) for lookups only.
+  — An order-preserving dictionary would allow ranges and prefixes on texts; the runs' dictionaries find a text by a
+  hash table and keep no order (format 6's sorted list of ids is gone with format 7).
 
 - **[Jacobson 1989]** G. Jacobson. Space-efficient Static Trees and Graphs. *FOCS* 1989, 549–554.
   https://doi.org/10.1109/SFCS.1989.63533
@@ -176,7 +210,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   quarter of a byte a thing id).
 - **[Knuth 1998]** D. E. Knuth. *The Art of Computer Programming, Volume 3: Sorting and Searching*, 2nd edition.
   Addison-Wesley, 1998. ISBN 0-201-89685-0.
-  — Section 5.2.5, sorting by distribution: the counting sort and the stable least-significant-digit radix sort that
+  — Section 6.4, hashing with linear probing: the runs' text tables, at most half full (about 1.5 probes for a text
+  that is there, 2.5 for one that is not). Section 5.2.5, sorting by distribution: the counting sort and the stable least-significant-digit radix sort that
   sort a large group's facts (by thing, by property, then by value inside each property, 11-bit digits).
 - **[Leis 2014]** V. Leis, P. Boncz, A. Kemper, T. Neumann. Morsel-Driven Parallelism: A NUMA-Aware Query
   Evaluation Framework for the Many-Core Age. *SIGMOD* 2014, 743–754. https://doi.org/10.1145/2588555.2610507
@@ -185,8 +220,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   a question's first variable (`Query.fold`).
 - **[Bentley 1976]** J. L. Bentley, A. C.-C. Yao. An Almost Optimal Algorithm for Unbounded Searching. *Information
   Processing Letters* 5(3), 82–87, 1976. https://doi.org/10.1016/0020-0190(76)90071-5
-  — Exponential (galloping) search: a merge places the other runs' texts among the largest run's by searches that
-  gallop from the last place, so that the largest run's texts are read only where another text falls.
+  — Exponential (galloping) search: until format 7, a merge placed the other runs' texts among the largest run's
+  sorted list by searches that galloped from the last place; format 7 keeps no sorted list of texts.
 
 ## Joins
 

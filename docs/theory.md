@@ -69,21 +69,23 @@ two orders of its rows. With n rows in a part, e thing ids and p properties:
 
 | order | layout | lookup |
 |---|---|---|
-| by thing | a rank table (one 64-bit word for 32 thing ids: their presence bits and the number of things held before them), `eoff[0..k]` by slot, rows `(p, w)` sorted | facts of a thing: a rank (one word read, one popcount) and two offsets, O(1) a part, O(k) to read; one property or one fact: O(log k) |
-| by property | `poff[0..p]`, rows `(w, thing)` sorted | things with (p, w), or linking to w by p: O(log n_p) + O(answer); a range of values: the same |
+| by thing | a rank table (one 64-bit word for 32 thing ids: their presence bits and the number of things held before them), the slots in blocks of 128, a record a slot with its values by property, sorted | facts of a thing: a rank (one word read, one popcount), the block's header and the record, O(1) a part, O(k) to read; one property: O(m) for the block's m properties; one fact: O(m + log k) |
+| by property | `poff[0..p]`, rows `(w, thing)` sorted, in blocks of 128; a value index (rank words over p's values, the first row of each) for most properties | things with (p, w), or linking to w by p: O(1) with a value index, else O(log n_p), + O(answer); a range of values: the same |
 
 A **rank table** (Jacobson's rank directory [Jacobson 1989]) answers "is thing e in this part, and if so at which
 slot?" with one word: bit e mod 32 of word e / 32 says whether e is held, and its slot is the count stored in the word
 plus the bits set below bit e. It costs a quarter of a byte a thing id, where a dense table of offsets (one entry a
 thing id, held or not: the one-level base before levels) cost 8; a part that holds every thing from some id to its end
-(a load, a full merge) reads no rank there, its slot being an addition. So a thing's facts cost a rank and two offset
-reads a run to locate: 0.38 µs at 10 M facts on one run ([benchmarks](benchmarks.md#reads-all-in-memory)). Hexastore
+(a load, a full merge) reads no rank there, its slot being an addition. So a thing's facts cost a rank, a block's
+header and its record a run to locate: about 0.4 µs at 10 M facts on one run
+([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)). Hexastore
 [Weiss 2008] and RDF-3X [Neumann 2008] keep six orders of the triples; Cepheus keeps two because a dense id makes "by
 thing" direct, and "by property then value" serves "all things with this property", "the things that link to t by p"
-(the rows of value t) and ranges of values. Size of a part: 22 bytes a row (2 + 8 by thing, 8 + 4 by property), 8 bytes
-a thing it holds (its offset), a quarter of a byte a thing id (the rank table), 16 bytes a property (its offset and its
-count of distinct values), and the dictionary (8 bytes of offset and 4 of sorted id a text, and its bytes): 24.6 bytes
-a fact at 10 M facts, dictionary included.
+(the rows of value t) and ranges of values. Size of a part (format 7, section 11): each value in as many bits as its
+block of 128 needs from its least, a quarter of a byte a thing id for the rank table, 8 bytes a block of 128 things
+and 16 a block of 128 rows, the value indexes, and the dictionary (its texts' bytes, their offsets in a few bits each,
+a hash table of two 4-byte slots a text): 5.4 bytes a fact at 10 M facts, against 24.6 in format 6 (22 bytes a row in
+fixed words, 8 bytes a thing, 12 bytes a text).
 
 The delta is a set of persistent maps (Driscoll et al. [Driscoll 1989], Okasaki [Okasaki 1998]): each change copies
 one path, O(log d), and an old version stays valid for free. That is what makes views and forks free. It is keyed like
@@ -242,33 +244,38 @@ then its pages) beside the old one, and the pages of both lived on the OCaml hea
 
 A merge folds the delta (level 0: persistent maps in memory) and the newest runs on disk into one run (section 9):
 the rolling merge of an LSM-tree [O'Neil 1996], several components into the next. Every input is already sorted in the order of
-every section of a run (by thing: thing, property, value; by property: property, value, thing; the texts by id and by
-their bytes), so each section of the new run is a merge of sorted inputs, made in one pass with one cursor in each:
-O(n + d) steps for n rows in the runs and d changes, and no sort; the texts of all but the largest run are merged in
-memory and placed among the largest run's by galloping searches [Bentley 1976], so that the largest run's texts are read only
-where another text falls.
+every section of a run (by thing: thing, property, value; by property: property, value, thing; the texts by id), so
+each section of the new run is a merge of sorted inputs, made in one pass with one cursor in each: O(n + d) steps for
+n rows in the runs and d changes, and no sort. The sources are read a block at a time (a thing's record, a row block
+of 128 decoded into a small array), and the new run's blocks are coded as they fill: 128 things, or 128 rows of a
+property (section 11).
 
-**Streaming.** The new run is written in three passes, in the order of the file, each for both its parts: by thing
-(rank tables, offsets, properties, values), by property (offsets, values, things, distinct counts), the dictionary
-(offsets, bytes, sorted ids; part a only). A part is laid out by upper bounds of its counts (a merge knows them only
-once it is done): the room its streams do not reach counts as written zeros, and a page wholly inside that room is
-never written (a hole in the file, which reads as zeros and checks against the CRC of a zero page). In a
-pass, the streams of its sections advance side by side, each in its own region of the file. A 16 KiB page is complete
-once all its bytes are written (two sections may share one) and goes out at once: its CRC-32C, a `pwrite` at its
-place, and the cache, which admits it cold (in S3-FIFO's small queue, not hot: a merge's output is a scan, kept only
-if it is read before the queue reaches it). Then the checksum table, the header, an fsync, and the install (G12).
+**Streaming.** The new run is written in three passes, each for both its parts: by thing (rank tables, the thing
+blocks and their directory), by property (offsets, row blocks and their directory, the value indexes, distinct
+counts), the dictionary (offsets, bytes, the hash table, built in memory: 4 bytes a slot; part a only). A part is laid
+out by upper bounds of its counts (a merge knows them only once it is done): the room its streams do not reach counts
+as written zeros, and a page wholly inside that room is never written: the file holds only the pages written, in the
+order they complete, and a page table at its end maps each page of the layout to its page of the file (a page of the
+layout that none holds reads as zeros). In a pass, the streams of its sections advance side by side, each in its own
+region of the layout. A 16 KiB page is complete once all its bytes are written (two sections may share one) and goes
+out at once: its CRC-32C, a `pwrite` as the next page of the file, and the cache, which admits it cold (in S3-FIFO's
+small queue, not hot: a merge's output is a scan, kept only if it is read before the queue reaches it). Then the page
+table, the header, an fsync, and the install (G12).
 
 **The memory bound.** Let C be the cache's capacity and P the pages of the new run. During a merge the process holds,
 beyond what it held before (the delta, the log of the groups written meanwhile):
 - the pages of the runs it reads and of the new run it writes, all counted by the cache: at most C, by construction (a
   page enters only through `Pages.fill` or `Pages.admit`, which make room first);
 - the pages being filled: the page under each stream's head, and the first page of a section while it waits for the
-  section before it to end there: at most 2 for each of the 8 streams of a pass, 16; 7 measured (the unit test's
-  bound is 10);
-- the tables of the new run: 4 bytes of CRC, two 8-byte slots (frame and hot) and one count a page, 21 bytes for 16
-  KiB, 0.13 % of the run.
+  section before it to end there: at most 2 for each of the 18 streams of the pass by property, 36; 11 measured (the
+  unit test's bound is 24);
+- the tables of the new run: 4 bytes of CRC, 4 of its place in the file, two 8-byte slots (frame and hot) and one
+  count a page of its layout, 25 bytes for 16 KiB of layout (the layout of a coded run is loose: 1,118 MB for the
+  10 M bottom run's 54.4 MB, so 1.7 MB of tables, 3.1 % of the run);
+- the blocks being coded (128 things or 128 rows, with their scratch buffer: a few KiB, more only for a thing with
+  very many values) and the text hash table (4 bytes a slot, two slots a text of the new run).
 
-So M_merge ≤ C + 16 × 16 KiB + 21 P, independent of the runs' size but for the 0.13 %. The merge in memory it replaced
+So M_merge ≤ C + 36 × 16 KiB + 25 P + 8 ns, independent of the runs' size but for the tables. The merge in memory it replaced
 held 7 words a fact for its sort (560 MB at 10 M facts) and the whole new base outside the cache. Measured on the one
 level (benchmarks, the merge written to a file): with the whole base in a 1 GiB cache, a merge of the 10 M base and a delta of 400,000 facts takes the
 process from 412 MB to a peak of 651 to 656 MB (the new base's 245 MB of pages), against 1,222 to 1,450 MB for the
@@ -409,14 +416,92 @@ Four facts make the writer's maintenance exact and its cost what it is ([rules](
   ([Henzinger 2015]); B/F's worst case is a recomputation of the facts it reaches. Measured on LUBM-shaped
   data, small retractions stay in microseconds ([benchmarks](benchmarks.md#rules-2026-11-08)).
 
-## 11. What comes next, and why
+## 11. Compressed runs and journal: the coding and its bound
+
+**Frame of reference.** A block of n integers x1 .. xn is stored as its least value b and, for each, xi − b in w =
+⌈log2(max − b + 1)⌉ bits, packed one after the other (Goldstein, Ramakrishnan, Shaft [Goldstein 1998] for pages of
+tuples; Zukowski et al. [Zukowski 2006] for columns, there with the outliers patched apart). Field i is at bit i·w:
+it is read with one unaligned 8-byte load, a shift and a mask (the scalar unpacking of Lemire and Boytsov
+[Lemire 2015]; no SIMD in OCaml), so any value of a block costs O(1) and decodes nothing else. A block of sorted
+values costs w ≈ log2(range of the block) bits a value; the coder of the journal also tries **deltas** (the first
+value, the least difference d, then each difference minus d), which wins when values grow steadily (the things of a
+load: differences 0 and 1, 1 bit each), and takes whichever block is shorter, a choice made per block as BtrBlocks
+does [Kuschewski 2023]. Differences are modulo 2^63 (OCaml's 63-bit integers), so every value comes back exactly.
+
+**What the format holds, against what the data holds.** At 10 M facts (the bench's 113,636 clients and 2.27 M
+invoices), the information the data holds is 13-18 MB (totals uniform over 100,000 values, 16.6 bits; dates over
+3,650, 11.8 bits; statuses 70/20/10 %, 1.16 bits of entropy; a city one of 100, 6.6 bits; a follow one of 113,636
+clients, 15.4 bits a link for 5 distinct ones; names and e-mails 3.4 MB of bytes), and the lists of things by value
+add about 18 MB at the Elias-Fano bound of 2 + ⌈log2(u/n)⌉ bits an element [Vigna 2013]: a store that indexes every
+property both ways has a floor near 31-36 MB. The run of format 7 takes 54.4 MB, 1.5 to 1.8 times that floor, against
+24.6 bytes a fact (246 MB) in format 6 (sizes in MB of 10^6 bytes, each section the file pages that hold it):
+
+| section | bytes | a fact | where the bits go |
+|---|---:|---:|---|
+| by thing: blocks | 23.5 MB | 2.35 B | an invoice's record of fields (client 7 bits, date 12, status 2, total 17, each after a bit "present" in blocks that mix clients and invoices); the clients' properties and follows as small columns |
+| by thing: rank table and directory | 0.8 MB | 0.08 B | 32 thing ids a word; 8 bytes a block of 128 things |
+| by property: row blocks | 20.3 MB | 2.0 B | things in 7-22 bits (random things over 2.27 M ids take 21-22: the order by value is a permutation), values in 0-10 bits (sorted); things by gaps where a value repeats (status 3.6 bits a row instead of 8.7, date 16.2 instead of 19.8) |
+| by property: directory and value indexes | 3.4 MB | 0.34 B | 16 bytes a block of 128 rows; a rank word for 32 values of each property's range and the first row of each value |
+| dictionary | 5.9 MB | 0.59 B | the texts' bytes (3.4 MB), their offsets (0.4 MB), the hash table (2.1 MB, two slots a text) |
+| page table | 0.5 MB | 0.05 B | 8 bytes a page of the layout (68,231 pages) |
+
+The two largest terms are inherent to the design: every fact is held twice (by thing and by property, each order
+answering its own lookups in O(1) or O(log n)), and the order by property of a random property is a permutation of its
+things, at the information bound log2(n!)/n ≈ log2 n − 1.44 bits a row for n rows (Stirling), which the gaps reach
+only where a value repeats. The rest is within a factor 1.5 of the bound.
+
+**Fields and columns by thing.** Three layouts of a thing block were measured on the same 10 M facts (one domain):
+a column a property (PAX, Ailamaki et al. [Ailamaki 2001]): a lookup of an invoice touched about 16 cache lines in
+blocks that mix clients and invoices (8 properties, each its own column and offsets), Q1 0.79 µs; a record a thing
+with every value and a count a property (a row store, as NSM pages): Q1 0.43 µs, but a lookup of one property skipped
+the values of the properties before it, 65 to 120 ns on consecutive invoices against format 6's 37 to 41 (Q3 5.8 ms,
+Q4 316 ms); and the kept one, a record of **fields** for the properties every thing of the block has at most once,
+when that takes no more bits than a column, and columns for the others: a lookup of an invoice's status is the
+entry's search among the block's 8 and one field (46 to 61 ns), Q1 0.39 µs, Q3 3.9 ms, Q4 241 ms, for 1.9 MB more
+than the records at 10 M facts (absent fields and their "present" bits in blocks that mix clients and invoices).
+Scans by property read the row blocks, which are columns already.
+
+**Lookups.** A thing's slot: one rank word. Its block: the directory word, the header (the entries of its
+properties, 16 bytes each: a search among the block's m). A field: one load at k R plus the field's bit. A column: two
+offsets (c k + residual k) and a binary search among the thing's values of that property (sorted, of one width). By property with a value
+index: O(1) (a rank word, two offsets); without: O(log b) over the property's b blocks, then O(log 128) in a block.
+
+**Pages and holes.** A merge lays a run out by bounds (it knows its counts at the end), which for coded sections are
+loose (the 10 M bottom run: a layout of 1,118 MB for 54.4 MB of bytes). A page table maps each page of the layout to
+the page of the file that holds it, so the file holds only written pages, and a page never written reads as zeros;
+the cost is 8 bytes a page of the layout in the file (0.5 MB here) and 17 bytes a page in memory for the cache's
+tables of an open run (1.2 MB). A block no larger than a page starts on the next page when it would cross one, so a lookup reads its
+fields from one page's bytes (the skipped ends cost about 3 % of the blocks' bytes).
+
+**Texts.** Each run's texts are found by an open-addressing hash table with linear probing, at most half full: an
+expected 1.5 probes for a text that is there and 2.5 for one that is not (Knuth [Knuth 1998], 6.4), each probe a slot
+and a comparison of the text in its page. The hash mixes 7 bytes at a time by multiplication with the multiplier of
+xorshift64* [Vigna 2016]. Q2 (a client by e-mail) goes from a binary search of 18 steps (1.6 µs) to one probe and
+the value index of the e-mail property (0.65 µs).
+
+**The journal's columns.** A group is coded change by change in its order (replay applies changes in order: a fact
+added then retracted in one group, an undeclared property's facts before its declaration), but by columns: the
+kinds, the things, the column of each change (its property and constructor), then each column's values, each in
+blocks of 128 coded as above, the group's texts once each. The load's group of 9.4 M changes: kinds 0 bits (one
+value), things 1-2 bits (deltas 0 and 1), columns 3 bits, values by property (client by deltas, date 12 bits, status
+2, total 17), texts 3.4 MB once: 21.6 MB, 2.3 bytes a change, where format 1's varints took 10. The zstd command at
+level 19 makes 29.4 MB of the same 94 MB frame (measured here, 2026-11-08; LZ4 at level 1, 56.6 MB): a coding that
+knows the structure beats the general compressors, with no C.
+
+## 12. What comes next, and why
 
 - **Larger than memory, the rest** (design, section 15): filters per run for the lookups by value (Bloom filters
   sized per level as in Monkey [Dayan 2017]) if reads across runs need them; scheduling merges around the clients as SILK [Balmau 2019]
   does; a third order of the rows (property, thing) for workloads that read one property of many things under memory
-  pressure.
-- **Compression of runs**: delta and varint, then PFOR (Zukowski et al. [Zukowski 2006], Lemire and Boytsov [Lemire 2015]); an order-
-  preserving dictionary rebuilt at each merge (Binnig et al. [Binnig 2009]) for ranges over texts.
+  pressure. Measured on run format 7 with each process capped at 48 MB: the triangles take more than 2.5 minutes a
+  run, against SQLite's 1.02 s, whose follow links fit in its cache in a table and a covering index of their own
+  ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)).
+- **Lookups by thing as fast as format 6's** (section 11: 46 to 61 ns on consecutive invoices against 37 to 41, so Q3
+  to Q5 stay 3 to 10 % slower): the entry of a property found without a search among the block's (a small table by
+  property a run), blocks cut by kind of thing (characteristic sets [Neumann 2011]) so that a block of
+  invoices has no absent field; and the third order (property, thing) of the next step, which serves Q4 and Q5 from
+  columns. The merge's coding (about 100 ns a fact, now the longest part of a load) on two domains, one a pass. An
+  order-preserving dictionary rebuilt at each merge (Binnig et al. [Binnig 2009]) for ranges over texts.
 - **Rules, the next steps** ([rules](rules.md#what-is-not-here-yet)): the closure module for transitive properties
   (Hu, Motik and Horrocks' modular materialisation, [Hu 2019]), rules specialised by the ontology, sorted parallel derivations,
   stratified negation and aggregates (aggregates kept by DBSP's rule for linear operators, Budiu et al. [Budiu 2023]),

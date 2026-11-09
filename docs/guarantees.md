@@ -195,10 +195,13 @@ only facts absent below it, retracts only facts present below it), with the jour
 before its group. Open takes a chain of runs from 0, each resting on the end of the one below (any such chain is the
 state at its top, since a run holds the changes of its groups on top of the state at its lo, whatever runs make that
 state); replay starts at the newest run's position and skips the groups it holds. Loading checks the header CRC, the
-CRC of the checksum table, the rank tables (each word's count follows from the bits before it, the last equals the
-things) and the order and bounds of every offset table (`Snapshot.check_and_build`). Every page goes through
-`Pages.fill`, which checks its CRC-32C before it enters the frame table: no other path puts a page there. Every access
-to a run is bounds-checked (the frame table, then the page), so a read never leaves the run's bytes. For random damage
+CRC of the page table and that it maps each page of the file at most once, the order of the sections, the rank tables
+(each word's count follows from the bits before it, the last equals the things) and the order and bounds of every
+offset table and directory (`Snapshot.check_and_build`). Every page goes through `Pages.fill`, which reads the file
+page the page table names and checks the CRC-32C the table gives before it enters the frame table: no other path puts
+a page there. Every access to a run is bounds-checked (the frame table, then the page's bytes or a block's copy), so
+a read never leaves the run's bytes. The coding of format 7 (blocks by a frame of reference, a page table) changes
+what a page holds, not this argument: a value is decoded only from a page that checked. For random damage
 of a page, CRC-32C misses it with probability 2⁻³²; it detects every burst of up to 32 bits (Castagnoli, Bräuer,
 Herrmann 1993).
 
@@ -291,7 +294,12 @@ is output; candidates at one level are distinct, so no answer comes twice.
 
 *And its cost.* At each level, the candidates enumerated for one partial binding are the smallest set a pattern offers
 (exact counts, on the base and on the delta alike); every other pattern only looks each one up, in O(log n). The
-total is the instance bound of Generic Join (Ngo, Ré, Rudra 2013), within the AGM bound of the question.
+total is the instance bound of Generic Join (Ngo, Ré, Rudra 2013), within the AGM bound of the question. A pattern of
+a one-valued property whose thing is bound offers at most one candidate; its count is not looked up: it is taken
+before every pattern that offers one or more and after one that offers none (`Query.count_with` compares 2c for an
+exact count c against 1 for it). Either way the level enumerates at most the smallest exact count: if the pattern has
+no value, it gives nothing, and if another offers none, that one is taken. So the bound is unchanged, and the unit
+tests' exact bound still holds.
 
 *Tested by* the property tests and the simulation: every random question, on views with a delta and after recoveries,
 must give the naive evaluator's answers and enumerate at most the bound that `test/check.ml` computes from the facts

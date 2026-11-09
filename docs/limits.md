@@ -9,14 +9,15 @@ defaults, and the cache's size (`set_cache`).
 | what | limit or default | where |
 |---|---|---|
 | thing numbers | from 65,536 up, dense, in the order things are made | `Schema.first_thing` |
-| thing numbers | at most 2,147,483,647 (2³¹ − 1): a run stores a thing in 4 bytes of its by-property rows, and counts the things it holds in the high 32 bits of a rank table's 64-bit word, read back into OCaml's 63-bit `int` (31 bits). A group that would make a larger number is refused with `Invalid "thing numbers end at 2147483647: this group would make #N"`; nothing wraps | `Schema.last_thing`, `Resolve.resolve` |
-| property numbers | 16 to 65,535 (the by-thing rows store a property in 2 bytes): 65,520 properties a database; `declare` takes the lowest free one | `Schema.first_prop`, `eap` |
+| thing numbers | at most 2,147,483,647 (2³¹ − 1): a run stores a row block's least thing in 4 bytes, a large group a thing in 4 bytes, and a part counts the things it holds in the high 32 bits of a rank table's 64-bit word, read back into OCaml's 63-bit `int` (31 bits). A group that would make a larger number is refused with `Invalid "thing numbers end at 2147483647: this group would make #N"`; nothing wraps | `Schema.last_thing`, `Resolve.resolve` |
+| property numbers | 16 to 65,535 (a thing block's entry stores its property in 2 bytes): 65,520 properties a database; `declare` takes the lowest free one | `Schema.first_prop`, `Snapshot.tblock_flush` |
 | system properties | 1 `cepheus/name`, 2 `cepheus/type`, 3 `cepheus/many`, 4 `cepheus/unique`, 5 `cepheus/rule`; 0 and 6 to 15 reserved | `Schema.system` |
 | `Int`, `Date`, `Money` | 63-bit signed integers: −2⁶² to 2⁶² − 1 | OCaml's `int` |
 | `Money` digits | 0 to 18 (`Tmoney 19` is refused: unknown type code) | `Value.of_code` |
 | `Float` | any IEEE double; each distinct value takes a dictionary entry of 8 bytes | `Store.float_key` |
 | `Text` | any bytes, any length a group can hold (below) | |
-| distinct texts and floats | below 2³² (dictionary numbers in 4 bytes in the sorted list) | `ssort` |
+| distinct texts and floats | below 2³² a run (a run's hash table holds a text's place in 4 bytes) | `Snapshot.merge` |
+| values of one thing for one property | below 2³² in a run (a thing block's entry counts in 4 bytes); a merge that would pass it fails with `Invalid_argument` | `Snapshot.tblock_flush` |
 | `by` | any `int` (0 by default) | `Cepheus.write` |
 | `why` | any text (`""` by default) | `Cepheus.write` |
 
@@ -52,9 +53,10 @@ defaults, and the cache's size (`set_cache`).
 | run files kept | the chain from 0 to the newest group (no fallback outside it: the journal rebuilds any run); a merge's file is one more while it is written | `Snapshot.install` |
 | run header | 4,096 bytes | `Snapshot.header` |
 | page | 16 KiB (16,384 bytes) | `Pages.bits` (14) |
-| CRC table | 4 bytes a page | `Snapshot.merge` |
-| run format | 5; the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
-| journal format | 1 | `Journal.format` |
+| page table | 8 bytes a page of the run's layout (the file page that holds it, its CRC) | `Snapshot.merge` |
+| thing block, row block, offsets block | 128 things, 128 rows of a property, 128 offsets | `Store.tb` |
+| run format | 7; runs of formats 5 and 6 and the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
+| journal format | 2; a journal of format 1 is converted once at open | `Journal.format`, `Journal.convert` |
 
 ## Memory and the cache
 
@@ -67,10 +69,10 @@ defaults, and the cache's size (`set_cache`).
 | a page's counter | 2 bits (0 to 3) | `Pages.touch` |
 | pages in memory | under 1.25 times the cache: a full collection after each quarter of the cache evicted (256 pages, 4 MiB, at least) | `Pages.room` |
 | a run read whole at open | when its pages fit in the cache | `Snapshot.check_and_build` |
-| a merge | the cache, at most 2 page buffers for each of the 8 streams of a pass (7 measured), and 21 bytes a page of the new run | [theory](theory.md#8-merges-written-to-a-file) |
-| a large group | the caller's list of operations (72 bytes an `Add` and its value: 883 MB for 9.4 M), 14 bytes a fact in the group's order and 12 by property (Bigarrays), the radix sort's room for its largest property on each of 2 domains, and the receipt (a pair a new thing): 1.46 GB at the peak of a load of 10 M facts in two groups, of which 0.88 GB is the caller's list; the frame is written by pieces of 1 MiB, never built whole | measured ([benchmarks](benchmarks.md#the-load-in-parallel-and-without-copies-2026-11-08-at-10-million-facts)) |
+| a merge | the cache, at most 2 page buffers for each of the 18 streams of the pass by property (11 measured), 25 bytes a page of the new run's layout, the block being coded, and the new run's text hash table (8 bytes a text) | [theory](theory.md#8-merges-written-to-a-file) |
+| a large group | the caller's list of operations (72 bytes an `Add` and its value: 883 MB for 9.4 M), 14 bytes a fact in the group's order and 12 by property (Bigarrays), the radix sort's room for its largest property on each of 2 domains, and the receipt (a pair a new thing), the group's journal coding (21.6 MB at 9.4 M facts, built in memory, then written by pieces of 1 MiB): about 1.5 GB at the peak of a load of 10 M facts in two groups, of which 0.88 GB is the caller's list | measured ([benchmarks](benchmarks.md#the-load-in-parallel-and-without-copies-2026-11-08-at-10-million-facts)) |
 | the delta | about 170 bytes a change, until the next merge | measured |
-| the runs | about 25 bytes a fact, read through the cache | measured |
+| the runs | about 5.4 bytes a fact at 10 M facts (the bench's data), read through the cache; 17 bytes a page of a run's layout for the cache's tables | measured |
 | recovery | each segment through a window of 4 MiB; a frame longer than the window is checked by pieces and read whole only to replay its groups; a frame that does not check is read whole from its offset to the segment's end, to decide torn or damaged | `Journal.window`, `Journal.scan` |
 | `verify` | the same window; every frame decoded, a longer one read whole | `Journal.read` |
 

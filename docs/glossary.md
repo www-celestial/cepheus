@@ -13,13 +13,13 @@ the usual one, both are given.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **asserted fact** — a fact a program wrote (`Add`), as opposed to one a rule derived; the extensional database (EDB)
   of Datalog. A fact can be both asserted and derived. [rules](rules.md#what-the-database-holds-the-least-model)
+- **atomic** (all or nothing) — applied entirely or not at all: a group (G2); a rename; the switch to a new view (one
+  atomic store). [guarantees](guarantees.md#g2-all-or-nothing)
 - **atomic register**, **regular register**, **new-old inversion** — Lamport's classes of shared registers (On
   Interprocess Communication, 1986): a read of a *regular* register returns the last value written before it or one
   being written meanwhile, so two reads one after the other may see a new value and then the old one (a **new-old
   inversion**); an *atomic* register forbids it, every read and write appearing at one instant. Linearizable reads
   are atomic: G15 forbids the inversion; the lease the design first proposed allowed it. [server](server.md#local-reads-g15)
-- **atomic** (all or nothing) — applied entirely or not at all: a group (G2); a rename; the switch to a new view (one
-  atomic store). [guarantees](guarantees.md#g2-all-or-nothing)
 - **back-pressure** — a slow side slowing the fast one down instead of being flooded: at its limit of writes in flight
   a connection is no longer read, the kernel's buffers fill, and the program's writes wait. Nothing is dropped.
   [server](server.md#order-pipelining-and-back-pressure)
@@ -45,8 +45,16 @@ the usual one, both are given.
   [concepts](concepts.md#questions)
 - **birthday problem** — the chance that among m people two share a birthday, far higher than intuition says; here,
   the chance that two of m buyers pick the same seat among ten. [case](case-seats.md#a-bound)
+- **bit packing** — numbers of w bits stored one after the other with no byte between them: field i is bits i·w to
+  i·w + w − 1, read with one 8-byte load, a shift and a mask. With a frame of reference, how runs and the journal
+  store numbers. [formats](formats.md#a-group)
 - **BLAKE2b** — a cryptographic hash function (RFC 7693): from any bytes, 32 bytes (BLAKE2b-256) from which the input
   cannot be found again. The server keeps tokens only as their BLAKE2b-256 hash. [server](server.md#tokens)
+- **block** (thing block, row block) — the unit a run's values are coded in: 128 things (by thing: a header with a
+  base and a width for each property, then a record a thing with its one-valued properties, and columns for the
+  others) or 128 rows of a property (by property: values and
+  things); any value of a block is read without decoding the others.
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **body** (of a rule) — its patterns and ranges: the question whose answers give the head. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **bottom run** — a run that rests on nothing (its name starts with 20 zeros): it holds the whole state at its last
   group and no retraction.
@@ -55,13 +63,13 @@ the usual one, both are given.
   holds the runs' 16 KiB pages, 1 GiB by default. [architecture](architecture.md#pages-and-the-cache)
 - **cardinality** — how many values a thing may have for a property: one (the default) or many (`~many:true`).
   [concepts](concepts.md#properties-and-the-schema)
-- **Cesia client** — the package `cesia/cepheus` of this repository: the Cesia functions `Connect`, `Kind`, `Insert`,
-  `Get`, `Update`, `Write`, `Find`, `Fork`, `Close`, over an engine in OCaml (`cesia/native/`) that speaks the
-  protocol and reads locally on the server's machine. [Cesia](cesia.md)
 - **certificate** — a public key and a name, signed by a certificate authority: what a server shows in a TLS handshake
   to prove it is the one the client meant. [server](server.md#tls)
 - **certificate authority** (CA) — the key whose signatures a client trusts; each cluster has its own, made by
   `cepheus cluster init` (ECDSA, P-256), whose private key belongs offline. [server](server.md#tls)
+- **Cesia client** — the package `cesia/cepheus` of this repository: the Cesia functions `Connect`, `Kind`, `Insert`,
+  `Get`, `Update`, `Write`, `Find`, `Fork`, `Close`, over an engine in OCaml (`cesia/native/`) that speaks the
+  protocol and reads locally on the server's machine. [Cesia](cesia.md)
 - **chain** (of runs) — runs that rest on one another from 0: each holds the groups after the last group of the one
   below it. An open takes the chain that reaches the newest group with the fewest runs. [architecture](architecture.md#runs-on-disk)
 - **checksum**, **CRC**, **CRC-32C** — a short number computed from bytes, which changes if they change; CRC-32C (the
@@ -81,6 +89,9 @@ the usual one, both are given.
   [benchmarks](benchmarks.md#method)
 - **cluster** — the servers that hold the same databases; one machine is a cluster of one peer. Its id (`cph-c-` and
   16 hex digits) is in `cluster.toml` and in every Welcome. [server](server.md#clustertoml)
+- **columns** (columnar coding) — storing the values of one field together rather than record by record, so that
+  alike values sit side by side and code in few bits: the journal codes a group's kinds, things and each property's
+  values as columns; a run's order by property is a column of each property. [formats](formats.md#a-group)
 - **compaction** — another name for a merge in an LSM-tree. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **component** — one of the structures of an LSM-tree: the delta in memory (C0), the runs on disk.
 - **confirmed** — a group whose `write` returned `Ok`: it is durable. [guarantees](guarantees.md#the-faults)
@@ -119,6 +130,9 @@ the usual one, both are given.
   [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **delta debugging** — shrinking a failing case by removing parts while it still fails, until every part left is
   needed (Zeller and Hildebrandt 2002). [case](case-seats.md#3-a-hypothesis-one-can-prove-wrong-and-its-cause)
+- **deltas** (delta coding) — numbers stored as their differences from the number before: a growing sequence (the
+  things of a load: 0 and 1) takes a bit or two a number. The journal's columns take it block by block when it is
+  shorter than the frame of reference. [formats](formats.md#a-group)
 - **dependency graph** (of a history) — the transactions as nodes, and an edge for each way one must come before
   another: ww (it wrote the version the other replaced), wr (the other read what it wrote), rw (an anti-dependency).
   The history is serializable when the graph has no cycle (Adya 1999).
@@ -129,7 +143,8 @@ the usual one, both are given.
   asserted it (bit 63 of its value word in a run). [rules](rules.md)
 - **deterministic simulation testing** — running the engine on a simulated disk where one seed decides every event, so
   that any failure replays exactly. [testing](testing.md)
-- **dictionary** — the table that numbers each distinct text (and float) once; the rows hold the number.
+- **dictionary** — the table that numbers each distinct text (and float) once; the rows hold the number. A run keeps
+  its texts' bytes, their offsets and a hash table of them.
 - **dirty page**, **writeback** — a page of the kernel's page cache that a program wrote and the disk does not hold yet
   is dirty; writeback is the kernel writing it to the disk, at an fsync or in the background. A large group's frame
   is forced by pieces while its run is made, so that its writeback overlaps the merge. [architecture](architecture.md#large-groups)
@@ -178,6 +193,10 @@ the usual one, both are given.
   [concepts](concepts.md#forks)
 - **frame** — the unit of one write and one fsync in the journal: a header, the groups, a trailer.
   [formats](formats.md#journal-segment-dirjournalfirst-group-20-digitsseg)
+- **frame of reference** (FOR) — a block of numbers stored as their least value (the base) and, for each, its
+  difference from the base in as many bits as the largest difference needs: values between 20,000 and 23,650 take
+  12 bits each, not 64 (Goldstein et al. 1998; PFOR, its patched form, Zukowski et al. 2006).
+  [theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)
 - **fsync** — the system call that returns once a file's bytes are on the disk.
 - **fuzzing**, **libFuzzer**, **sanitizer** — fuzzing runs a function on millions of inputs that a program mutates
   to reach new paths in the code, and stops at the first that fails; libFuzzer is LLVM's fuzzer. A sanitizer is a
@@ -187,6 +206,9 @@ the usual one, both are given.
 - **galloping search** (exponential search) — a search that tries 1, 2, 4, 8... places ahead before halving, so that
   finding a place k steps away costs O(log k) (Bentley and Yao 1976); a merge places texts this way.
   [theory](theory.md#8-merges-written-to-a-file)
+- **gaps** — in a row block, the things of a value stored as the difference from the thing before (minus one):
+  "the invoices that are unpaid", close together, take 3-4 bits each instead of 9-10.
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **Generic Join** — the worst-case optimal join Cepheus uses: one variable at a time, the smallest candidate set,
   each candidate checked against the other patterns (Ngo, Ré, Rudra 2013). [architecture](architecture.md#questions)
 - **ghost queue** — S3-FIFO's memory of pages lately evicted from its small queue; a page asked again soon goes
@@ -197,6 +219,10 @@ the usual one, both are given.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **handshake** — the first round trips of a TLS connection, where the two sides agree on keys and the server shows
   its certificate: about 4.8 ms of computation here, which is why connections live long. [server](server.md#tls)
+- **hash table** (open addressing, linear probing) — a table of slots where a key goes at the slot its hash names, or
+  the next free one after it; a lookup probes from that slot until it finds the key or an empty slot. At most half
+  full, about 1.5 probes for a key that is there (Knuth, 6.4). Each run's texts are found by one.
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **head** (of a rule) — the pattern it gives for each answer of its body, or `Never`.
   [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **history** — the sequence of every transaction a database applied, with what each read and wrote; Cepheus'
@@ -205,6 +231,9 @@ the usual one, both are given.
   (`idle_timeout`, 600 s by default), its TLS handshake included. [server](server.md#clustertoml)
 - **index word** — the 64-bit form of a value in the indexes: the value itself, or a dictionary number for texts and
   floats; what `fold` gives, and `decode` turns back into the value. [api](api.md#questions)
+- **information bound** (entropy) — the fewest bits any coding needs for some data, from how many different values it
+  could have taken: a status that is "paid" 70 % of the time, "unpaid" 20 % and "late" 10 % needs 1.16 bits on
+  average, not 2. [theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)
 - **instruction** (of the processor), **intrinsic** — one operation the processor executes; an intrinsic is a C
   function that the compiler turns into one given instruction (`_mm_crc32_u64` into `crc32` on x86-64, `__crc32cd`
   into `crc32cx` on arm64). OCaml's compiler has none for these, hence the C file. [architecture](architecture.md#the-journal-a-write-ahead-log)
@@ -253,6 +282,9 @@ the usual one, both are given.
   atomic (G12); `snapshot` is the full merge, of every run. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **model checking** — visiting every reachable state of a bounded model and checking invariants in each; TLC does it
   for TLA+. [testing](testing.md#model-checking)
+- **monotone sequence** — numbers that never decrease (offsets), stored in blocks of 128 as a frame of reference with
+  each block's header apart, so that entry q is one header and one field.
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **monotonic writes** — a session guarantee (Terry et al. 1994): a program's writes are applied in the order it sent
   them. [server](server.md#order-pipelining-and-back-pressure)
 - **mutual TLS** — TLS where both sides show a certificate of the same CA; between Cepheus servers (with replication),
@@ -270,8 +302,15 @@ the usual one, both are given.
 - **page** — 16 KiB of a run file, the unit of the cache, checked by its CRC each time it is read from the disk.
 - **page cache** (the kernel's) — the operating system's memory copy of files; what a process crash keeps and a power
   loss loses.
+- **page table** (of a run) — at the end of a run's file, for each page of the run's layout, the page of the file that
+  holds it and its CRC: a run is laid out by upper bounds, and only the pages that hold bytes are written.
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **part** (of a run) — a run has two: the facts it adds (part a) and the facts of the runs below it that it retracts
   (part t). [architecture](architecture.md#indexes-the-runs-and-the-delta)
+- **PAX** (Partition Attributes Across) — a page layout that keeps, inside each page, the values of each attribute
+  together (Ailamaki et al. 2001): columns inside a page. Measured for the thing blocks and set aside: a lookup of a
+  thing touched one cache line a property; a block keeps a record a thing for its one-valued properties.
+  [theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)
 - **persistent data structure** — one that is never changed in place: a change makes a new version and the old one
   stays valid. [architecture](architecture.md#indexes-the-runs-and-the-delta)
 - **phantom** — a new member of a set read earlier (the facts that match a pattern), unseen by a check of single facts.
@@ -315,6 +354,11 @@ the usual one, both are given.
   server's operations. [server](server.md#rights-g16)
 - **round trip** — a request and its reply: the time between sending one and receiving the other, most of it the
   kernel's work (system calls, waking the other process). [server](server.md#speed-beside-postgresql)
+- **row store**, **column store** — a row store keeps each record's fields together (a lookup of a record reads one
+  place), a column store each field's values together (a scan of a field reads one place). A run is both: by thing a
+  record a thing for its one-valued properties (with small columns for the others), by property a column of each
+  property.
+  [theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)
 - **rule** — a question's patterns and a head: whenever the patterns are facts for some values, the head is a fact for
   the same values. A schema thing (`cepheus/name`, `cepheus/rule`). [rules](rules.md)
 - **run**, **run file** — one sorted structure of the LSM-tree on disk: the changes of a range of groups on top of the
@@ -386,6 +430,10 @@ the usual one, both are given.
 - **Unix-domain socket** — a socket between two processes of one machine, named by a path in the file system
   (`.s.cepheus.7400`); it cannot cross machines. [server](server.md#what-it-is-and-why)
 - **value** — the third part of a fact, atomic and typed.
+- **value index** — in a run's order by property, a rank table over the values a property takes and the first row
+  of each: the rows of "city = Lyon" or "client = #c" in one rank and two offsets, however many rows. Kept for a
+  property when it takes at most 2 bytes a row (links, texts, dates, small ints).
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **variable** — an unknown of a question, numbered from 0.
 - **varint** (LEB128), **zigzag** — a whole number in 7-bit pieces, small ones short; zigzag maps signed to unsigned
   (0, -1, 1, -2 → 0, 1, 2, 3). [formats](formats.md#a-group)

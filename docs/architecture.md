@@ -38,8 +38,12 @@ test machine one fsync takes about 3 ms: about 340 fsync a second.
 
 **Frames.** The journal is a sequence of **frames**. A frame is the unit of one write and one fsync: a 28-byte
 header (a magic number, the body's length, its first group, the number of groups, the CRC of the body, the CRC of the
-header), the body (the encoded groups), and a 16-byte trailer that repeats the length and both CRCs. A frame holds
-whole groups only, so a group is in one frame or in none.
+header), the body (the groups), and a 16-byte trailer that repeats the length and both CRCs. A frame holds whole
+groups only, so a group is in one frame or in none. A group is coded in **columns** (journal format 2): its texts
+once each, then its changes' kinds, things, and values each as a column of numbers in blocks of 128, each block a
+frame of reference (a base and a bit width) or deltas, whichever is shorter; the changes keep their order. A load of
+10 M facts takes 21.6 MB of journal, where the change-by-change coding of format 1 took 94 MB
+([formats](formats.md#a-group)).
 
 **CRC.** A **cyclic redundancy check** is a short checksum computed from a block of bytes: if any byte of the block
 changes, the CRC computed again differs, except with a tiny probability. Cepheus uses CRC-32C (the Castagnoli
@@ -100,7 +104,9 @@ newest frame (at most 8 MiB) at an open after a crash, nothing on the write path
 
 **Reading through a window.** Recovery reads each segment through a window of 4 MiB: a frame that fits is checked and
 decoded where it lies; a longer one (a large group's frame passes 100 MB) is checked by its CRC piece by piece, and read
-whole only when its groups must be replayed. A frame whose groups the runs already hold is checked and not decoded. So
+whole only when its groups must be replayed. A frame whose groups the runs already hold is checked and not decoded. The
+segment's 40-byte header is read by itself, and the window starts where the scan starts (after a snapshot, often the
+segment's end). So
 an open holds the window and the largest frame it must replay, whatever the size of the segment: the database a 10 M
 load leaves (its newest segment 94 MB) opens in 165 to 207 ms with 54 to 56 MB resident, under a 128 MB cap.
 
@@ -108,18 +114,22 @@ load leaves (its newest segment 94 MB) opens in 165 to 207 ms with 54 to 56 MB r
 
 A view is two things:
 
-- the **runs**: the facts as of the last merges, sorted and stored in columns (one array per field, rather than one
-  record per fact), in files on disk read through the cache, newest first. A run holds the changes of a range of
-  groups on top of the runs below it, in two **parts**: the facts it adds (part a), and the facts of the runs below it
-  that it retracts (part t, empty in the bottom run). In each part, by thing, a **rank table** says which things the
-  part holds: one 64-bit word for 32 thing numbers, with a presence bit for each and the count of things held before
-  them, so thing e's slot is that count plus the bits set below e's (one word read and one population count); the
-  slot's two offsets give where its rows (property, value) are, sorted. A part that holds every thing from some number
-  to its end (a load, a full merge) reads no rank there. By property, `poff[p]` to `poff[p+1]` are p's rows (value,
-  thing) sorted by value then thing: "the things whose city is Lyon", "the invoices that link to client c" (the rows of
-  value c), and ranges of values are binary searches. Texts and floats are numbered by a **dictionary** (each distinct
-  text stored once, the rows hold its number); every other value is its own 64-bit word. A run is about 25 bytes a
-  fact;
+- the **runs**: the facts as of the last merges, sorted and **compressed**, in files on disk read through the cache,
+  newest first. A run holds the changes of a range of groups on top of the runs below it, in two **parts**: the facts
+  it adds (part a), and the facts of the runs below it that it retracts (part t, empty in the bottom run). In each
+  part, by thing, a **rank table** says which things the part holds: one 64-bit word for 32 thing numbers, with a
+  presence bit for each and the count of things held before them, so thing e's slot is that count plus the bits set
+  below e's (one word read and one population count). The slots go by 128 into **thing blocks**: a property that
+  every thing of the block has at most once is a field of each thing's record (an invoice's client, date, status and
+  total), any other a small column of the block (its things' offsets and values); each value is its difference from
+  the property's least value in the block, in as few bits as the block needs (a **frame of reference**: a base and a
+  bit width, so any value is read without decoding its neighbours). By property, p's rows (value, thing) are sorted by value then thing and cut into
+  blocks of 128 rows coded the same way; most properties also have a **value index** (a rank table over the values
+  the property takes, and the first row of each), so "the things whose city is Lyon", "the invoices that link to
+  client c" are one rank and two offsets, and ranges of values are a binary search. Texts and floats are numbered by
+  a **dictionary** (each distinct text stored once, found by a hash table; the rows hold its number); every other
+  value is its own number. A run is about 5.4 bytes a fact at 10 M facts, dictionary included (format 6 took 24.6:
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun));
 - the **delta**: the changes since the last merge, in **persistent maps** (balanced trees that are never changed in
   place: a change makes a new version that shares every untouched node with the old one, at a cost of O(log d) for d
   changes). The delta is keyed like a run (by thing, then property and value; by property, then value and thing) and
@@ -131,25 +141,29 @@ counts (each run's additions minus its retractions, plus the delta's). A read lo
 may hold the key, by binary search, never by a walk of a list; a row of an older run is shown only if no newer run has
 an entry for the same fact, which the rank tables answer with a few bit tests unless a newer run holds the same thing.
 Because the delta is persistent and runs never change, a view is a value: keeping one costs nothing, and a fork is a
-view with its own delta. Reading the facts of an invoice by its number takes 0.38 µs at 10 M facts on one run; on the
-two runs a load leaves, the joins that read both cost 40 % more (Q3, Q4), and `snapshot` makes one run again.
+view with its own delta. Reading the facts of an invoice by its number takes about 0.4 µs at 10 M facts on one run
+([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)); on the two runs a load
+leaves, the joins that read both cost more (Q3, Q4), and `snapshot` makes one run again.
 
 ## Runs on disk
 
 A **run file** holds one run: `DIR/snapshots/<lo>-<hi>.run` (20 digits each) holds the changes of groups lo+1 to hi
 on top of the state at lo; a run with lo = 0 is a **bottom run**, the whole state at hi. A file is a 4 KiB header
-(the groups, the level, the journal position where replay must resume), the two parts' sections in 16 KiB pages, and
-a table of one CRC-32C per page. The runs of a database form a **chain** from 0: each rests on the group the one below
-it ends at. Runs are caches of the journal: they spare a restart the replay of everything before them, and they can
-always be rebuilt from the journal. A run is the in-memory format, read with no decoding (it is only for 64-bit
-little-endian machines; the journal is the portable format). At open, Cepheus takes the chain of named runs from 0
-that reaches the newest group with the fewest runs, and checks each run: the header, the CRC table, the rank tables,
-the order and bounds of every offset table; a run that fits in the cache is read and checked whole before the first
-question, a larger one page by page. A run that does not check is set aside (noted, skipped) and the chain is chosen
-again without it, down to the journal alone. No run is kept outside the chain: the journal holds every group, so a
-damaged run costs a replay, never a fact (until 2026-11-08 the newest bottom run outside the chain was kept as a
-fallback, a second copy of the base after every full merge). The snapshot of earlier versions (format 4, `<group>.snap`, the whole base in one file) is set aside at the
-first open and the journal replayed once ([formats](formats.md)).
+(the groups, the level, the journal position where replay must resume, where each section starts), the pages of 16
+KiB that hold bytes, and a **page table**: for each page of the run's layout, the file page that holds it and its
+CRC-32C. A merge lays a run out by upper bounds of its sections (it knows its counts only at the end), so most of the
+layout is room never written; the page table lets the file hold only the pages written, in the order the merge
+finished them (the 10 M-fact bottom run: 54.4 MB of file for 1,118 MB of layout). The runs of a database form a
+**chain** from 0: each rests on the group the one below it ends at. Runs are caches of the journal: they spare a
+restart the replay of everything before them, and they can always be rebuilt from the journal. A run is the
+in-memory format, read in place, a value decoded where it is needed (it is only for 64-bit little-endian machines;
+the journal is the portable format). At open, Cepheus takes the chain of named runs from 0 that reaches the newest
+group with the fewest runs, and checks each run: the header, the page table, the rank tables, the order and bounds of
+every offset table; a run that fits in the cache is read and checked whole before the first question, a larger one
+page by page. A run that does not check is set aside (noted, skipped) and the chain is chosen again without it, down
+to the journal alone. No run is kept outside the chain: the journal holds every group, so a damaged run costs a
+replay, never a fact. Runs of earlier formats (format 4, `<group>.snap`, the whole base in one file; formats 5 and 6,
+fixed 8-byte words) are set aside at the first open and the journal replayed once ([formats](formats.md)).
 
 ## Merges: a leveled log-structured merge-tree
 
@@ -322,7 +336,8 @@ A rule derives facts from facts (Datalog); the writer keeps the derived facts in
 after the group's asserted changes, its retractions are decided by Backward/Forward and its additions run the rules by
 semi-naive evaluation, in a working set of arrays out of the collector's sight; the derived changes join the group's
 frame with a kind byte (2 to 5) and the view in one sorted batch. Replay applies them and evaluates nothing. In a run,
-bit 63 of a fact's value word marks it "only derived" (format 6). A large group with rules reasons over its own facts
+a fact's value carries a flag "only derived" in the lowest bit of its field, in the blocks that hold a derived fact
+(format 7; format 6 used bit 63 of a value word). A large group with rules reasons over its own facts
 in the working set and appends the derived ones to its arrays, merged into the run with them. The whole of it:
 [rules](rules.md).
 

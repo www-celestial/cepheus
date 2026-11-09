@@ -31,7 +31,7 @@ Why a server rather than a library opened by each program:
 
 - **One writer, without a lock between programs.** A database has one writer ([G9](guarantees.md#g9-one-writer)).
   In a server, every program's writes reach that writer through the socket, and their groups share its fsyncs (group
-  commit across programs, [architecture](architecture.md#group-commit)).
+  commit across programs, [architecture](architecture.md#the-journal-a-write-ahead-log)).
 - **Rights.** A program receives exactly the rights of its token, database by database (G16); it needs no permission
   on the data's files.
 - **The path to several machines.** Replication and Raft (steps 6 and 7 of the plan) are server to server; a program
@@ -543,7 +543,9 @@ sample once (n = 7): **250 MB of Pss** in all [249, 250], 31 MB each, most of it
 database's runs are 24 MB). PostgreSQL's backends serving 8 clients of point reads: 43 MB [43, 44] of Pss in all
 (12 processes), because they share one buffer pool. Each reader keeping its own cache was the design's first choice
 (the engine's code as it is, every page checked); one copy shared by all readers is the later step when a
-deployment's memory asks for it.
+deployment's memory asks for it. With run format 7 (2026-11-09) the same eight readers take **106.5 MB of Pss**
+[105.6, 107.1] against 252.4 [251.5, 253.0] on main 0ecc09e, alternated in 7 rounds: each reader's copy of the
+run pages shrank with the runs ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)).
 
 **Against the server before step 3** (the same server without local reads, its binaries and ours in turn in every
 round, n = 11; the ratio new / old by round): empty round trip 1.05 [0.90, 1.18], point read through the socket

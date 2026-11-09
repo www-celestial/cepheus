@@ -63,23 +63,37 @@ checks a property on many random inputs against a reference model written indepe
    (appendix B.4), and against an oracle, the table code in OCaml it replaced: every length up to 72 bytes at every
    offset up to 15, 5,000 random lengths up to 1 MiB at random offsets, the edges of its 1 MiB pieces up to 3 MiB,
    each one whole and `extend`ed over random cuts in two and three, and the bounds refused (an offset plus a length
-   that overflows too); codecs round trip on extreme values;
-   a group cut at every byte never decodes; 300 random sequences of writes against a reference semantics written
+   that overflows too); codecs round trip on extreme values; bit packing: 300 rounds of fields of every width from 0 to
+   63 at every position, written and read back against a bit-by-bit reference, with and without room after the last
+   field (the byte-by-byte path); 300 columns of up to 400 ints of every shape (random, steady, the ends of the
+   integers, constant, decreasing) read back; 400 random groups (every kind and constructor, extreme ints, floats nan
+   and -0, empty and binary texts, up to 600 changes, a fact twice) read back in format 2, and in format 1 by its
+   reader, and a group cut at every byte never decodes; a journal of format 1 (written by the test's own coder in two
+   segments, with or without a torn tail, a leftover `.seg.tmp`) converted at open to the same facts, a second
+   conversion finding nothing, a damaged frame of format 1 in the older segment refused (30 seeds); an open after a
+   snapshot reading 80 bytes of a journal of more than 60 KB (the two looks at its header) through a disk that counts; a snapshot
+   with merges turned off (`compact_min` at `max_int`) that ends; 300 random sequences of writes against a reference semantics written
    independently (a set of facts); 300 random databases × 15 random questions against a naive evaluator, each within
    the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`); costs: questions
    where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; a merge
-   keeps every fact and every answer, and a merge of a run 8 times the cache holds at most a few pages open (7 measured) and never
-   more resident pages than the cache; views of up to 4 runs that add and retract give the facts and answers of their
+   keeps every fact and every answer, and a merge of a run 8 times the cache (its pages in the file, 120,000 things)
+   holds at most a few pages open (11 measured, bound 24: the 18 streams of the pass by property) and never more
+   resident pages than the cache; a run many times the 16-page cache (6,000 things with names of 60 random letters:
+   compressed, it must still pass the cache) read by questions on 3 domains, a bit flipped in a page of the file (any
+   page, or an interior page of the rows by property found through the page table): refused at open or failing every
+   read of that page, never a wrong answer; views of up to 4 runs that add and retract give the facts and answers of their
    full merge; a large group's sorts by thing and by property equal a reference sort (300 seeds, chunks of 1 to 50,
-   values at the ends of the integers); a large group's faster path gives the same encoding (byte for byte, and its
-   computed length), thing numbers and facts as `Resolve`, or leaves the group to it, with chunks of 1 to 9 operations,
+   values at the ends of the integers); a large group's faster path gives the same coding (byte for byte: its arrays
+   coded by the same function as the group `Resolve` makes), thing numbers and facts as `Resolve`, or leaves the group to it, with chunks of 1 to 9 operations,
    temporary ids far below the group's length, and groups in no order and in thing order, each kind taken at least
    once; runs round trip, refuse another database's, set aside a damaged one; forks
    change nothing (files compared byte for byte) and accept what the database accepts; a second open is `Busy`; named
    cases (write skew refused, unique, one value, triangles).
 2. **Exhaustive enumeration** (`test/exhaustive.ml`): for journals of a few frames, every crash state of the frame in
    flight (each subset of its sectors kept, each cut length, a tear inside the highest kept sector) must recover to
-   exactly the right groups; every single bit of two journals flipped must be detected by a full read and handled by
+   exactly the right groups (the frame counts when its header and body reached the disk and the file reaches its end:
+   a torn trailer alone is rebuilt, G6; format 2's shorter frames put a sector boundary between a body and its
+   trailer, a case the oracle missed before); every single bit of two journals flipped must be detected by a full read and handled by
    recovery as G6 says; a segment torn at its creation at any byte is dropped; and inside a merge (G12), at every
    mutating disk call of four kinds of merge (now, of every run; begun ahead of the disk and installed two frames
    later; a large group's, merged as it is prepared and named once its frame is durable; those of a recovery
