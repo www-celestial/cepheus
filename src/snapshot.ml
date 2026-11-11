@@ -77,6 +77,7 @@ type out = {
   mutable ndone : int;
   wbuf : Bytes.t;  (* neighbours written together, copied here *)
   mutable free : Bytes.t list;  (* pages written and not admitted: their buffers again *)
+  olock : Mutex.t;  (* the columns' domain writes beside the pass by thing: a stream enters and closes pages under it *)
 }
 
 let open_max = ref 0 (* the most pages open at once in a merge of this process: for the tests *)
@@ -160,11 +161,16 @@ let leave s =
   end
 
 let[@inline never] enter s =
-  leave s;
   if s.pos >= s.stop then invalid_arg "Snapshot.merge: a section overflows";
-  s.k <- s.pos lsr Pages.bits;
-  s.a <- page_acc s.o s.k;
-  s.from <- s.pos
+  Mutex.lock s.o.olock;
+  match
+    leave s;
+    s.k <- s.pos lsr Pages.bits;
+    s.a <- page_acc s.o s.k;
+    s.from <- s.pos
+  with
+  | () -> Mutex.unlock s.o.olock
+  | exception e -> Mutex.unlock s.o.olock; raise e
 
 (* writes of 2, 4 and 8 bytes are aligned to their size in a section that starts at a multiple of 8: none crosses a
    page *)
@@ -204,7 +210,7 @@ let align_block s n =
 
 (* the end of a section: the rest of its room counts as written, zeros. Only its first and last pages can hold bytes
    of another section; a page all inside the rest is never written (no page of the file holds it) *)
-let close s =
+let close_in s =
   if s.pos > s.stop then invalid_arg "Snapshot.merge: a section is longer than its room";
   let p = s.pos in
   leave s;
@@ -221,6 +227,10 @@ let close s =
     if last <> first then part last
   end;
   s.pos <- s.stop
+
+let close s =
+  Mutex.lock s.o.olock;
+  match close_in s with () -> Mutex.unlock s.o.olock | exception e -> Mutex.unlock s.o.olock; raise e
 
 (* ---- the coders of the sections: a scratch buffer of bits, then the bytes to a stream ---- *)
 
@@ -440,6 +450,75 @@ let columns_end o (l : Store.base) (cols, ats, none) =
   done;
   List.iter close [ cp; rk ]
 
+(* The columns' domain. The pass by thing hands it a part's rows in chunks of 8192, in order; it fills that part's
+   columns while the pass goes on (with a disk that is not parallel, the simulation's, the pass fills them itself). At
+   most 8 chunks wait: the memory stays bounded. *)
+let chunk_rows = 8192
+
+type chunk = { he : int array; hp : int array; hw : int array; hd : Bytes.t; mutable hn : int; hcols : column array }
+
+type feed = {
+  par : bool;
+  fm : Mutex.t;
+  fc : Condition.t;
+  chunks : chunk Queue.t;
+  mutable spare : chunk list;
+  mutable ended : bool;
+  mutable failed : exn option;
+}
+
+let chunk cols =
+  { he = Array.make chunk_rows 0; hp = Array.make chunk_rows 0; hw = Array.make chunk_rows 0;
+    hd = Bytes.make chunk_rows '\000'; hn = 0; hcols = cols }
+
+let feed par = { par; fm = Mutex.create (); fc = Condition.create (); chunks = Queue.create (); spare = []; ended = false; failed = None }
+
+(* a full chunk to the columns' domain, and an empty one back for the same part *)
+let hand f (c : chunk) =
+  Mutex.lock f.fm;
+  while Queue.length f.chunks >= 8 && f.failed = None do Condition.wait f.fc f.fm done;
+  (match f.failed with Some e -> Mutex.unlock f.fm; raise e | None -> ());
+  Queue.push c f.chunks;
+  let mine, others = List.partition (fun x -> x.hcols == c.hcols) f.spare in
+  let fresh = match mine with x :: rest -> f.spare <- rest @ others; x.hn <- 0; Some x | [] -> None in
+  Condition.broadcast f.fc;
+  Mutex.unlock f.fm;
+  match fresh with Some x -> x | None -> chunk c.hcols
+
+(* the columns' domain: every chunk in order, until the pass ends *)
+let columns_domain f =
+  let rec next () =
+    Mutex.lock f.fm;
+    while Queue.is_empty f.chunks && not f.ended do Condition.wait f.fc f.fm done;
+    let c = if Queue.is_empty f.chunks then None else Some (Queue.pop f.chunks) in
+    Condition.broadcast f.fc;
+    Mutex.unlock f.fm;
+    match c with
+    | None -> ()
+    | Some c ->
+      for k = 0 to c.hn - 1 do
+        col_add (Array.unsafe_get c.hcols (Array.unsafe_get c.hp k)) (Array.unsafe_get c.he k) (Array.unsafe_get c.hw k)
+          (Bytes.unsafe_get c.hd k <> '\000')
+      done;
+      Mutex.lock f.fm;
+      f.spare <- c :: f.spare;
+      Mutex.unlock f.fm;
+      next ()
+  in
+  match next () with
+  | () -> ()
+  | exception e -> Mutex.lock f.fm; f.failed <- Some e; Condition.broadcast f.fc; Mutex.unlock f.fm
+
+(* the pass is over, or failed: the last chunks handed (none after a failure), the domain joined, its failure raised *)
+let feed_end f dom last =
+  Mutex.lock f.fm;
+  List.iter (fun c -> if c.hn > 0 then Queue.push c f.chunks) last;
+  f.ended <- true;
+  Condition.broadcast f.fc;
+  Mutex.unlock f.fm;
+  Domain.join dom;
+  match f.failed with Some e -> raise e | None -> ()
+
 (* A part's things, as a merge emits their rows in (thing, property, value) order: the rank table, a block of 128
    slots at a time (Store's layout), its offset in the directory. *)
 type tblocks = {
@@ -463,12 +542,14 @@ type tblocks = {
   tsc : scratch;
   cnt : int array;  (* a slot's values of one entry *)
   cols : column array;  (* the part's columns, a property each *)
+  feed : feed;
+  mutable ch : chunk;  (* the rows under way to the columns' domain *)
 }
 
-let tblocks ~np ~cols rk dir data =
+let tblocks ~np ~cols ~feed rk dir data =
   { rk; dir; data; doff = 0; bits = 0; rank = 0; things = 0; rows = 0; last = -1; bs = 0; si = Array.make 1024 0;
     bp = Array.make 1024 0; bw = Array.make 1024 0; bd = Bytes.make 1024 '\000'; nr = 0; ent = Array.make (max 1 np) (-1);
-    tsc = { sb = Bytes.create 65536 }; cnt = Array.make (Store.tb + 1) 0; cols }
+    tsc = { sb = Bytes.create 65536 }; cnt = Array.make (Store.tb + 1) 0; cols; feed; ch = (if feed.par then chunk cols else chunk [||]) }
 
 (* The block under way coded and written, as Store reads it: its entries by property, each either a fixed field of
    every slot's record (a property every slot has at most once, when that is shorter: its value, a bit "present" when
@@ -632,7 +713,17 @@ let[@inline] row t e p w d =
   Bytes.unsafe_set t.bd r (if d then '\001' else '\000');
   t.nr <- r + 1;
   t.rows <- t.rows + 1;
-  col_add (Array.unsafe_get t.cols p) e w d
+  if not t.feed.par then col_add (Array.unsafe_get t.cols p) e w d
+  else begin
+    let c = t.ch in
+    let k = c.hn in
+    Array.unsafe_set c.he k e;
+    Array.unsafe_set c.hp k p;
+    Array.unsafe_set c.hw k w;
+    Bytes.unsafe_set c.hd k (if d then '\001' else '\000');
+    c.hn <- k + 1;
+    if k + 1 = chunk_rows then t.ch <- hand t.feed c
+  end
 
 (* the part's end: the last block, the rank words up to ne, the directory's end *)
 let tblocks_end t ne =
@@ -992,96 +1083,107 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
   let pg = Pages.on_file len load in
   (* a large group's run is a load's: its pages are read later, from the file, rather than held now *)
   let o =
-    { disk; fd; unforced = 0; busy; len; map; crcs; next = 0; pg; admit = bulk.n = 0; open_pages = Hashtbl.create 16;
+    { olock = Mutex.create (); disk; fd; unforced = 0; busy; len; map; crcs; next = 0; pg; admit = bulk.n = 0; open_pages = Hashtbl.create 16;
       done_pages = []; ndone = 0; wbuf = Bytes.create (batch * Pages.size); free = [] }
   in
   let failed () = (try disk.close fd with Disk.Io _ -> ()); (try disk.remove tmp with Disk.Io _ -> ()) in
   let ca = columns o la caps_a and ct = columns o lt caps_t in
+  let fd_cols = feed (disk.parallel && a_ncap + t_ncap >= 4 * chunk_rows) in
   let ta =
-    tblocks ~np ~cols:(let c, _, _ = ca in c) (stream o la.o_erank (8 * (Store.blocks ne + 1)))
+    tblocks ~np ~cols:(let c, _, _ = ca in c) ~feed:fd_cols (stream o la.o_erank (8 * (Store.blocks ne + 1)))
       (stream o la.o_tdir (8 * (Store.blocks128 a_kcap + 1))) (stream o la.o_tdata ra.tdata)
   and tt =
-    tblocks ~np:t_np ~cols:(let c, _, _ = ct in c) (stream o lt.o_erank (8 * (Store.blocks t_ne + 1)))
+    tblocks ~np:t_np ~cols:(let c, _, _ = ct in c) ~feed:fd_cols (stream o lt.o_erank (8 * (Store.blocks t_ne + 1)))
       (stream o lt.o_tdir (8 * (Store.blocks128 t_kcap + 1))) (stream o lt.o_tdata rt.tdata)
   in
   let na = ref 0 and nt = ref 0 in
   match
     disk.truncate fd 0;
-    (* ---- by thing: the rank tables, the blocks of 128 things held, their directory ---- *)
-    let emit_a e p w d = row ta e p w d
-    and emit_t e p w d = if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below"; row tt e p w d in
-    (* a fact whose state is [f] in the new view and [b] below the merged runs (0 absent, 1 asserted, 2 derived) *)
-    let out e p w f b =
-      if f <> b then begin
-        if b > 0 then emit_t e p w (b = 2);
-        if f > 0 then emit_a e p w (f = 2)
-      end
-    in
-    (* the delta's next thing, its changes, the rest *)
-    let dnext = ref (Store.IM.to_seq v.delta.de ()) in
-    let entries = ref [] in
-    let bi = ref 0 in
-    for e = 0 to ne - 1 do
-      let td =
-        match !dnext with
-        | Seq.Cons ((e', td), rest) when e' = e -> dnext := rest (); Some td
-        | _ -> None
+    (* ---- by thing: the pass, its columns filled beside it by the columns' domain ---- *)
+    let dom = if fd_cols.par then Some (Domain.spawn (fun () -> columns_domain fd_cols)) else None in
+    let pass () =
+      (* ---- by thing: the rank tables, the blocks of 128 things held, their directory ---- *)
+      let emit_a e p w d = row ta e p w d
+      and emit_t e p w d = if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below"; row tt e p w d in
+      (* a fact whose state is [f] in the new view and [b] below the merged runs (0 absent, 1 asserted, 2 derived) *)
+      let out e p w f b =
+        if f <> b then begin
+          if b > 0 then emit_t e p w (b = 2);
+          if f > 0 then emit_a e p w (f = 2)
+        end
       in
-      (* the large group's rows of e: bulk.by_thing.(b0 .. !bi - 1) *)
-      let b0 = !bi in
-      while !bi < bulk.n && Bulk.thing bulk (Bulk.row bulk !bi) = e do incr bi done;
-      let nb = !bi - b0 in
-      let h = ref 0 and nh = ref 0 in
-      for j = 0 to take - 1 do
-        if Store.base_has src.(j).a e then (h := !h lor (1 lsl (2 * j)); incr nh);
-        if Store.base_has src.(j).t e then (h := !h lor (1 lsl ((2 * j) + 1)); incr nh)
-      done;
-      if Option.is_none td && !nh = 0 && nb > 0 then
-        (* the large group's rows alone, as they are *)
-        for r = b0 to !bi - 1 do
-          let i = Bulk.row bulk r in
-          row ta e (Bulk.prop bulk i) (Bulk.word bulk i) (Bulk.derived bulk i)
-        done
-      else if !nh = 0 && nb = 0 && Option.is_some td then
-        (* the delta alone: its entries, in (p, w) order, as they are *)
-        Store.PW.iter (fun (p, w) st -> out e p w (fin st) (below st)) (Option.get td).tf
-      else if Option.is_none td && !nh = 1 && nb = 0 then begin
-        (* one source: its rows as they are *)
-        let j = ref 0 in
-        while (!h lsr !j) land 1 = 0 do incr j done;
-        let r = src.(!j / 2) in
-        if !j land 1 = 0 then Store.base_iter_ef r.a e (fun p w d -> emit_a e p w d)
-        else Store.base_iter_ef r.t e (fun p w d -> emit_t e p w d)
-      end
-      else if Option.is_some td || !nh > 0 || nb > 0 then begin
-        (* entries (p, w, 2 age (+1 for a run's retraction), entry), newest first within a fact *)
-        entries := [];
-        for r = b0 to !bi - 1 do
-          let i = Bulk.row bulk r in
-          entries := (Bulk.prop bulk i, Bulk.word bulk i, 0, if Bulk.derived bulk i then 3 else 1) :: !entries
-        done;
-        Option.iter (fun (td : Store.tdelta) -> Store.PW.iter (fun (p, w) st -> entries := (p, w, 2, st) :: !entries) td.tf) td;
-        for j = 0 to take - 1 do
-          let age = 2 * (j + 2) in
-          if (!h lsr (2 * j)) land 1 = 1 then
-            Store.base_iter_ef src.(j).a e (fun p w d -> entries := (p, w, age, if d then 3 else 1) :: !entries);
-          if (!h lsr ((2 * j) + 1)) land 1 = 1 then
-            Store.base_iter_ef src.(j).t e (fun p w d -> entries := (p, w, age + 1, if d then 12 else 4) :: !entries)
-        done;
-        let rec go = function
-          | [] -> ()
-          | (p, w, _, c) :: rest ->
-            let rec last oldest = function (p', w', _, c') :: r when p' = p && w' = w -> last c' r | r -> oldest, r in
-            let oldest, rest = last c rest in
-            out e p w (fin c) (below oldest);
-            go rest
+      (* the delta's next thing, its changes, the rest *)
+      let dnext = ref (Store.IM.to_seq v.delta.de ()) in
+      let entries = ref [] in
+      let bi = ref 0 in
+      for e = 0 to ne - 1 do
+        let td =
+          match !dnext with
+          | Seq.Cons ((e', td), rest) when e' = e -> dnext := rest (); Some td
+          | _ -> None
         in
-        go (List.sort compare !entries)
-      end
-    done;
-    if !bi <> bulk.n then invalid_arg "Snapshot.merge: a fact of the large group is past the things";
-    tblocks_end ta ne;
-    tblocks_end tt t_ne;
+        (* the large group's rows of e: bulk.by_thing.(b0 .. !bi - 1) *)
+        let b0 = !bi in
+        while !bi < bulk.n && Bulk.thing bulk (Bulk.row bulk !bi) = e do incr bi done;
+        let nb = !bi - b0 in
+        let h = ref 0 and nh = ref 0 in
+        for j = 0 to take - 1 do
+          if Store.base_has src.(j).a e then (h := !h lor (1 lsl (2 * j)); incr nh);
+          if Store.base_has src.(j).t e then (h := !h lor (1 lsl ((2 * j) + 1)); incr nh)
+        done;
+        if Option.is_none td && !nh = 0 && nb > 0 then
+          (* the large group's rows alone, as they are *)
+          for r = b0 to !bi - 1 do
+            let i = Bulk.row bulk r in
+            row ta e (Bulk.prop bulk i) (Bulk.word bulk i) (Bulk.derived bulk i)
+          done
+        else if !nh = 0 && nb = 0 && Option.is_some td then
+          (* the delta alone: its entries, in (p, w) order, as they are *)
+          Store.PW.iter (fun (p, w) st -> out e p w (fin st) (below st)) (Option.get td).tf
+        else if Option.is_none td && !nh = 1 && nb = 0 then begin
+          (* one source: its rows as they are *)
+          let j = ref 0 in
+          while (!h lsr !j) land 1 = 0 do incr j done;
+          let r = src.(!j / 2) in
+          if !j land 1 = 0 then Store.base_iter_ef r.a e (fun p w d -> emit_a e p w d)
+          else Store.base_iter_ef r.t e (fun p w d -> emit_t e p w d)
+        end
+        else if Option.is_some td || !nh > 0 || nb > 0 then begin
+          (* entries (p, w, 2 age (+1 for a run's retraction), entry), newest first within a fact *)
+          entries := [];
+          for r = b0 to !bi - 1 do
+            let i = Bulk.row bulk r in
+            entries := (Bulk.prop bulk i, Bulk.word bulk i, 0, if Bulk.derived bulk i then 3 else 1) :: !entries
+          done;
+          Option.iter (fun (td : Store.tdelta) -> Store.PW.iter (fun (p, w) st -> entries := (p, w, 2, st) :: !entries) td.tf) td;
+          for j = 0 to take - 1 do
+            let age = 2 * (j + 2) in
+            if (!h lsr (2 * j)) land 1 = 1 then
+              Store.base_iter_ef src.(j).a e (fun p w d -> entries := (p, w, age, if d then 3 else 1) :: !entries);
+            if (!h lsr ((2 * j) + 1)) land 1 = 1 then
+              Store.base_iter_ef src.(j).t e (fun p w d -> entries := (p, w, age + 1, if d then 12 else 4) :: !entries)
+          done;
+          let rec go = function
+            | [] -> ()
+            | (p, w, _, c) :: rest ->
+              let rec last oldest = function (p', w', _, c') :: r when p' = p && w' = w -> last c' r | r -> oldest, r in
+              let oldest, rest = last c rest in
+              out e p w (fin c) (below oldest);
+              go rest
+          in
+          go (List.sort compare !entries)
+        end
+      done;
+      if !bi <> bulk.n then invalid_arg "Snapshot.merge: a fact of the large group is past the things";
+      tblocks_end ta ne;
+      tblocks_end tt t_ne;
+    in
+    (match dom with
+     | None -> pass ()
+     | Some d -> (
+       match pass () with
+       | () -> feed_end fd_cols d [ ta.ch; tt.ch ]
+       | exception e -> (try feed_end fd_cols d [] with _ -> ()); raise e));
     columns_end o la ca;
     columns_end o lt ct;
     na := ta.rows;
