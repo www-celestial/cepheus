@@ -905,7 +905,14 @@ let () =
   (* through write, on a fork: the same refusal, nothing changed *)
   let g = fork (at last) in
   C.check (match write g [ Add (-1, n, Int 1); Add (-2, n, Int 1) ] with Error (Invalid _) -> true | _ -> false) "write refuses it";
-  C.check ((view g).next_e = last && (view g).group = v.group) "the refused write changed nothing"
+  C.check ((view g).next_e = last && (view g).group = v.group) "the refused write changed nothing";
+  (* a property whose name and type are retracted while its many and unique stay: refused, with what is left *)
+  let half = [ Retract (n, Schema.p_name, Text "c/n"); Retract (n, Schema.p_type, Int (Value.code Tint)) ] in
+  C.check
+    (match resolve v half with
+     | Error (Resolve.Invalid m) -> m = Printf.sprintf "property %d keeps cepheus/many or cepheus/unique without a name and a type" n
+     | _ -> false)
+    "a property left with many and unique alone: its message"
 
 let () =
   section "a second close does nothing";

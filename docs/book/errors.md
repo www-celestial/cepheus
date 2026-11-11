@@ -68,7 +68,7 @@ From `write` (the writer's checks, the same on a database and on a fork):
 | `a property thing takes only cepheus/ properties` | an ordinary property written on a property thing (16 to 65,535) |
 | `cepheus/ properties describe property things only` | `cepheus/name`, `type`, `many` or `unique` written on an ordinary thing |
 | `property P needs both a name and a type` | a group left property thing P with a name and no type, or the reverse |
-| `half` | a group left property thing P with `cepheus/many` or `cepheus/unique` but neither a name nor a type |
+| `property P keeps cepheus/many or cepheus/unique without a name and a type` | a group left property thing P with `cepheus/many` or `cepheus/unique` but neither a name nor a type |
 | `property P has an unknown type code C` | `cepheus/type` holds a code no type has (`Tmoney` with more than 18 digits) |
 | `the type and the cardinality of NAME never change` | a group changed a property's type or `many` flag; declare another property |
 | `NAME cannot become unique: two things share a value` | `cepheus/unique` set to true while two things share a value |
@@ -139,7 +139,7 @@ From `open_` (recovery) and `verify`; `SEG` is the segment's name, an offset is 
 | message | what it means |
 |---|---|
 | `DIR/cepheus is not a Cepheus database file` | the database's id file is not 37 bytes, or its magic or its CRC is wrong |
-| `SEG: unknown format F` | a segment header that checks but has a format other than 1 |
+| `SEG: unknown format F` | a segment header that checks but has a format other than 2, the journal's (a segment of format 1 is converted at open) |
 | `SEG: a segment of another database` | the segment's database id is not this database's (files of two databases mixed) |
 | `journal: segment SEG, where the snapshot starts, is missing` | the newest run resumes in a segment that is not there |
 | `journal: the first segment starts at group G` | no run, and the oldest segment does not start at group 1 |

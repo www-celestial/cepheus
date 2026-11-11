@@ -69,7 +69,7 @@ Depuis `write` (les vérifications du writer, les mêmes sur une base et sur un 
 | `a property thing takes only cepheus/ properties` | une propriété ordinaire écrite sur une chose propriété (16 à 65 535) |
 | `cepheus/ properties describe property things only` | `cepheus/name`, `type`, `many` ou `unique` écrit sur une chose ordinaire |
 | `property P needs both a name and a type` | un groupe a laissé la chose propriété P avec un nom et pas de type, ou l'inverse |
-| `half` | un groupe a laissé la chose propriété P avec `cepheus/many` ou `cepheus/unique` mais ni nom ni type |
+| `property P keeps cepheus/many or cepheus/unique without a name and a type` | un groupe a laissé la chose propriété P avec `cepheus/many` ou `cepheus/unique` mais ni nom ni type |
 | `property P has an unknown type code C` | `cepheus/type` tient un code qu'aucun type n'a (`Tmoney` avec plus de 18 chiffres) |
 | `the type and the cardinality of NAME never change` | un groupe a changé le type ou le drapeau `many` d'une propriété ; déclarez une autre propriété |
 | `NAME cannot become unique: two things share a value` | `cepheus/unique` mis à true alors que deux choses partagent une valeur |
@@ -143,7 +143,7 @@ en octets depuis le début du segment :
 | message | ce qu'il veut dire |
 |---|---|
 | `DIR/cepheus is not a Cepheus database file` | le fichier d'identifiant de la base ne fait pas 37 octets, ou son nombre magique ou son CRC est faux |
-| `SEG: unknown format F` | un en-tête de segment qui se vérifie mais a un format autre que 1 |
+| `SEG: unknown format F` | un en-tête de segment qui se vérifie mais a un format autre que 2, celui du journal (un segment de format 1 est converti à l'ouverture) |
 | `SEG: a segment of another database` | l'identifiant de base du segment n'est pas celui de cette base (fichiers de deux bases mélangés) |
 | `journal: segment SEG, where the snapshot starts, is missing` | le run le plus récent reprend dans un segment qui n'est pas là |
 | `journal: the first segment starts at group G` | aucun run, et le segment le plus ancien ne commence pas au groupe 1 |
@@ -219,7 +219,7 @@ premier échec).
 |---|---|---|
 | `Unreadable of string` | `get`, `values`, `things`, le `write` d'un fork | une page d'un run ne peut pas être lue ou ne se vérifie pas (plus haut) |
 | `Not_found` | `thing r k` | k n'est pas une nouvelle chose du groupe du reçu r |
-| `Failure "Cepheus needs the processor's CRC-32C instruction (SSE4.2 on x86-64, CRC32 on arm64), and this processor has none"` | le démarrage du programme, avant que son propre code tourne (l'initialisation de `Crc32c`) | le processeur n'a pas l'instruction qu'utilise chaque somme de contrôle ([limites](limits.md#les-fichiers-et-la-plateforme)) : un x86-64 plus ancien que le niveau x86-64-v2, ou un arm64 ARMv8.0 sans les instructions CRC32 optionnelles. Lancez-le sur une autre machine ; rien n'a été lu ni écrit |
+| `Failure "Cepheus needs the processor's CRC-32C instruction (SSE4.2 on x86-64, CRC32 on arm64), and this processor has none"` | le démarrage du programme, avant que son propre code tourne (l'initialisation de `Crc32c`) | le processeur n'a pas l'instruction qu'utilise chaque checksum ([limites](limits.md#les-fichiers-et-la-plateforme)) : un x86-64 plus ancien que le niveau x86-64-v2, ou un arm64 ARMv8.0 sans les instructions CRC32 optionnelles. Lancez-le sur une autre machine ; rien n'a été lu ni écrit |
 | `Failure "bootstrap: ..."` | `open_` d'une nouvelle base | le premier groupe, qui décrit les propriétés système, a été refusé : un bug |
 | `Invalid_argument` | internals | un invariant cassé, ce qui est un bug : `Journal.append: groups out of order`, `Engine.install: not durable`, `Snapshot.merge: ...` (une section qui déborde ou dont les comptes ne tombent pas juste, un retrait sans rien en dessous, un fait d'un grand groupe au-delà des choses, la position du journal après la vue, plus de runs que n'en a la vue) ; `Pages: a page of a base built in memory is missing` ; ou un mauvais usage d'une fonction interne (`Codec.reader`, `Codec.put_varint` d'un nombre négatif, `Crc32c.bytes`, `Crc32c.extend`, `Rng.int`) ; `Journal.append: frame too large` (le writer ne fait jamais de frame au-delà de 256 MiB, c'est donc un bug) ; et `Cepheus.decode: variable X out of range` ou `Cepheus.decode: MSG` (une question que `fold` refuse), un mauvais usage de `decode` |
 
