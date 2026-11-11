@@ -1322,7 +1322,7 @@ let check_and_build disk dir (lo0, hi0, file) id =
         end
         else if f <> -1 then bad "its page table is not a map of its pages")
       map;
-    let load k =
+    let load_from fd k =
       let f = map.(k) in
       if f < 0 then Bytes.make Pages.size '\000'
       else begin
@@ -1333,12 +1333,30 @@ let check_and_build disk dir (lo0, hi0, file) id =
         p
       end
     in
-    let pg = Pages.on_file len load in
+    let pg = Pages.on_file len (load_from fd) in
     if disk == Disk.real then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
     let a = Store.of_offsets ~pg ~n:an ~ne:ane ~k:ak ~np:anp ~ns:ans ~sblob:asb ~hbits aoffs in
     let t = Store.of_offsets ~pg ~n:tn ~ne:tne ~k:tk ~np:tnp ~ns:0 ~sblob:0 ~hbits:0 toffs in
-    (* small enough: every page that the file holds read and checked now, and the cache warm *)
-    if phys <= !Pages.capacity then Array.iteri (fun k f -> if f >= 0 then ignore (Pages.page pg k)) map;
+    (* small enough: every page that the file holds read and checked now, and the cache warm. A large run's pages are
+       read and checked by up to 4 domains, each with its own descriptor (the CRC is most of an open: 14 us a page),
+       then enter the cache *)
+    if phys <= !Pages.capacity then begin
+      let d = if disk.parallel && phys >= 512 then max 1 (min 4 (Domain.recommended_domain_count ())) else 1 in
+      if d = 1 then Array.iteri (fun k f -> if f >= 0 then ignore (Pages.page pg k)) map
+      else begin
+        let got = Array.make npages Bytes.empty in
+        let part i () =
+          let fd' = disk.openf path false in
+          Fun.protect ~finally:(fun () -> try disk.close fd' with Disk.Io _ -> ()) @@ fun () ->
+          for k = i * npages / d to ((i + 1) * npages / d) - 1 do if map.(k) >= 0 then got.(k) <- load_from fd' k done
+        in
+        let others = List.init (d - 1) (fun i -> Domain.spawn (part (i + 1))) in
+        let mine = match part 0 () with () -> None | exception e -> Some e in
+        let theirs = List.filter_map (fun dm -> match Domain.join dm with () -> None | exception e -> Some e) others in
+        (match mine, theirs with Some e, _ | None, e :: _ -> raise e | None, [] -> ());
+        Array.iteri (fun k f -> if f >= 0 then (Pages.admit pg k got.(k); Atomic.incr Pages.misses)) map
+      end
+    end;
     (* bounds: the rank tables count right, every offset table in order and within its rows and its room; a row's
        ids are checked by its page's CRC, and a read out of a run's pages fails, it never reads outside *)
     let ranks (b : Store.base) what =

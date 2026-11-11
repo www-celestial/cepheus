@@ -587,6 +587,45 @@ let () =
     | _ -> C.fail "seed %d: unexpected snapshot load" seed
   done
 
+(* a run of 600 pages and more on the real disk: its pages read and checked at open by several domains, each with
+   its own descriptor; a damaged page sets it aside *)
+let () =
+  section "a large run on the disk: its pages checked at open by several domains, damage set aside";
+  let dir = C.tmpdir "bigopen" in
+  let disk = Disk.real in
+  disk.mkdir dir;
+  let f = fresh () in
+  let p n = Option.get (property (view f) n) in
+  let r = Rng.make 77 in
+  for g = 0 to 39 do
+    ignore
+      (Result.get_ok
+         (write f
+            (List.init 2500 (fun k ->
+                 Add (-1 - k, p "name", Text (Printf.sprintf "%d-%d-%s" g k (String.init 90 (fun _ -> Char.chr (97 + Rng.int r 26)))))))))
+  done;
+  let pos = { Journal.segment = 1; offset = 40; next = (view f).group + 1 } in
+  let w = Snapshot.merge disk dir "0123456789abcdef" (view f) ~take:0 ~level:1 pos in
+  Snapshot.install disk dir w;
+  let file = Filename.concat dir (Snapshot.name 0 w.view.group) in
+  let pages = Snapshot.file_pages disk file in
+  C.check (pages >= 512) "a large run: %d pages (the parallel check starts at 512)" pages;
+  (match Snapshot.load disk dir "0123456789abcdef" with
+   | Some (v', _), [] -> C.check (C.F.equal (C.facts_of_view w.view) (C.facts_of_view v')) "a large run: its facts after an open"
+   | _ -> C.fail "a large run did not load");
+  (* one byte of a page in the second half flipped: the domain that reads it finds it *)
+  let fd = disk.openf file true in
+  let b = Bytes.create 1 in
+  let at = Snapshot.header + ((pages * 3 / 4) * Pages.size) + 100 in
+  disk.pread fd at b 0 1;
+  Bytes.set b 0 (Char.chr (Char.code (Bytes.get b 0) lxor 0x10));
+  disk.pwrite fd at b 0 1;
+  disk.close fd;
+  (match Snapshot.load disk dir "0123456789abcdef" with
+   | None, [ _ ] -> incr C.checks
+   | _ -> C.fail "a large run with a damaged page was taken");
+  C.rmrf dir
+
 (* ---- a base larger than the cache ---- *)
 
 let () =
