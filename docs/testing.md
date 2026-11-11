@@ -74,10 +74,11 @@ checks a property on many random inputs against a reference model written indepe
    snapshot reading 80 bytes of a journal of more than 60 KB (the two looks at its header) through a disk that counts; a snapshot
    with merges turned off (`compact_min` at `max_int`) that ends; 300 random sequences of writes against a reference semantics written
    independently (a set of facts); 300 random databases × 15 random questions against a naive evaluator, each within
-   the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`); costs: questions
+   the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`; the leapfrog's slices
+   counted where it may read them); costs: questions
    where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; a merge
    keeps every fact and every answer, and a merge of a run 8 times the cache (its pages in the file, 120,000 things)
-   holds at most a few pages open (11 measured, bound 24: the 18 streams of the pass by property) and never more
+   holds at most a few pages open (19 measured, bound 24: the 18 streams of the pass by property, and the column order's) and never more
    resident pages than the cache; a run many times the 16-page cache (6,000 things with names of 60 random letters:
    compressed, it must still pass the cache) read by questions on 3 domains, a bit flipped in a page of the file (any
    page, or an interior page of the rows by property found through the page table): refused at open or failing every
@@ -86,7 +87,9 @@ checks a property on many random inputs against a reference model written indepe
    values at the ends of the integers); a large group's faster path gives the same coding (byte for byte: its arrays
    coded by the same function as the group `Resolve` makes), thing numbers and facts as `Resolve`, or leaves the group to it, with chunks of 1 to 9 operations,
    temporary ids far below the group's length, and groups in no order and in thing order, each kind taken at least
-   once; runs round trip, refuse another database's, set aside a damaged one; forks
+   once; runs round trip, refuse another database's, set aside a damaged one and one of format 7; a run of 600 pages
+   and more on the real disk, checked at open by several domains, round trips, and is set aside with one byte of a
+   page flipped; forks
    change nothing (files compared byte for byte) and accept what the database accepts; a second open is `Busy`; named
    cases (write skew refused, unique, one value, triangles).
 2. **Exhaustive enumeration** (`test/exhaustive.ml`): for journals of a few frames, every crash state of the frame in

@@ -113,20 +113,22 @@ segments are never used.
 
 A run holds the changes of groups lo+1 .. hi on top of the state at group lo (lo = 0: a bottom run, the whole state
 at hi). The database's state on disk is a chain of runs from 0, each resting on the end of the one below it, plus the
-journal after the newest one. Format 7 codes every section with a **frame of reference** (Goldstein et al. 1998,
+journal after the newest one. Format 8 holds each fact three times: by thing, by property and value, and by property
+and thing (the **column order**: each property's rows apart, in thing order). It codes every section with a **frame
+of reference** (Goldstein et al. 1998,
 Zukowski et al. 2006): a block of values is stored as a base and, for each value, its difference from the base in as
 many bits as the block's largest difference needs (the bit packing of the journal's columns, above); any value is
 read in O(1) without decoding its neighbours.
 
 ```
-header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (7) | 8 database id, 16 bytes
+header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (8) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0
-  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 17 section
+  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 23 section
     offsets (below, the last one the part's end)
-  | part t: rows n | thing range ne | things k | properties np | its 17 section offsets
+  | part t: rows n | thing range ne | things k | properties np | its 23 section offsets
   | layout length | file pages P
-  | 464 CRC of the page table u32 | 468 CRC of bytes 0..468 u32 | zeros to 4096
+  | 560 CRC of the page table u32 | 564 CRC of bytes 0..564 u32 | zeros to 4096
 pages: P pages of 16 KiB at 4096 + 16384 f
 page table, at 4096 + 16384 P: for each page k of the layout (ceil(layout length / 16384) of them), 8 bytes: the file
   page f that holds it (u32; 0xFFFFFFFF: none, the page reads as zeros) | the page's CRC-32C (u32)
@@ -159,6 +161,12 @@ smh     16 bytes a block          the texts' byte offsets (a monotone sequence):
 smb                               their bits
 sblob   text bytes + 8            the texts, one after the other
 shash   4 x 2^hash bits           the texts' hash table (u32: a text's index from s0, plus 1; 0: empty)
+cp      np x 64 bytes             each property's column: tlo | rank | words | q0 | dir | data | mh | mb (u64 each)
+crank   u64 words                 the columns' rank tables
+cdir    16 bytes a block          the columns' block directories
+cdata                             the columns' values
+cmh     16 bytes a block          the columns' row offsets (a monotone sequence): headers
+cmb                               their bits
 ```
 
 Part a holds the facts the run adds, part t the facts of the runs below it that it retracts (empty in a bottom run);
@@ -220,6 +228,34 @@ offset block) is the first row, from `poff[p]`, of p's q-th distinct value, and 
 rows of (p, w) are found with one rank word and two offsets, O(1), whatever the rows; without an index, by a binary
 search of the row blocks' first values, then one inside a block.
 
+**By column (the column order).** Each property's rows (thing, value) apart from the others', in thing order, the
+values of one thing sorted: vertical partitioning (Abadi, Marcus, Madden, Hollenbach, VLDB 2007), a column of the
+property alone. Every lookup of a thing's property in a part (its values, their count, a membership test) reads here;
+the thing blocks serve "every fact of a thing" (one block, all its properties) and the merges. Entry `cp[p]`:
+
+```
+tlo    the thing of bit 0 of p's first rank word (a multiple of 32)
+rank   the byte (in the run) of p's first rank word; -1: p has no rows in the part (the other fields unused)
+words  its rank words: word j holds which of the things tlo + 32j .. tlo + 32j + 31 hold p (low 32 bits) and how
+       many things of p come before them (high 32 bits); the last word holds the things of p (its bits 0)
+q0     the first thing of p (by rank, from 0) that has several values; the things of p when none has
+dir    the byte of p's block directory: block j (rows 128j .. 128j + 127): u64 (its byte from data) lsl 16 | mode
+       lsl 8 | wv, then its base i64; mode bit 0: each value's lowest bit is its derived flag; bit 1: the values are
+       coded from their thing (value - thing); wv the bits a value, its flag included
+data   the byte of p's values, bit-packed block after block
+mh mb  p's row offsets, a monotone sequence (below) of things - q0 + 1 entries, from 0 to rows - q0; unused when q0
+       is the things of p
+```
+
+The q-th thing of p has the row q alone while q < q0; from q0 on, its rows are q0 + m(q - q0) .. q0 + m(q - q0 + 1)
+- 1. So a property whose things all have one value (an invoice's client, total, status, date) has no offsets at all:
+its row is its thing's rank. Row r of p is field r mod 128 of block r / 128: its value is the block's base plus the
+field (plus the thing, in a block coded from the thing: an invoice's client is its own id minus 1 to 20, 5 bits
+instead of 8). Properties held by the same things share one rank table (`rank` the same byte): the 10 M-fact run has
+two, the clients' and the invoices'. The column order takes 13.9 MB of that run (values 11.4, rank tables 1.2,
+directories 1.25, offsets 0.01): a lookup of an invoice's client reads one rank word, one directory entry and one
+field.
+
 **A monotone sequence** (offsets that never decrease) is stored in blocks of 128: a header of 16 bytes a block (its
 first value i64, then a u64 holding the width w in its low byte and the byte offset of the block's bits above it),
 and the block's bits apart; entry q is the header of block q / 128 plus field q mod 128 of w bits.
@@ -241,7 +277,10 @@ probes for a text that is there (Knuth 6.4, at half load). Nothing reads the tex
 list of ids (`ssort`) is gone.
 
 **Writing.** A merge is the one way to write a run (`Snapshot.merge`): the delta, the newest runs of the view, and a
-large group's sorted facts, merged in the order of each section and streamed into `<lo>-<hi>.run.tmp`; a page of the
+large group's sorted facts, merged in the order of each section and streamed into `<lo>-<hi>.run.tmp`. The columns
+are written by the pass by thing (its rows arrive in thing order for each property); the presence of each property's
+things is kept as one bit a thing until the pass ends, then written as rank tables, one for the properties held by the
+same things; a page of the
 layout goes out (its CRC computed, written as the next file page, admitted to the cache, but for a large group's run,
 read later from the file) as soon as all its bytes are written. Then the page table, the header, an fsync (while
 clients write, the file is also forced every 8 MiB on the way, so that no journal fsync waits behind hundreds of MB
@@ -254,7 +293,11 @@ replayed from the journal. A `.tmp` file found at open is a merge a crash interr
 runs, and checks each run: its header, its page table (by its CRC, and that it maps each file page at most once),
 the order of its sections, its rank tables, the thing blocks' directory (in order, within its room), the property
 offsets, the row blocks (as many as each property's rows need, in order), the value indexes (within their room), the
-text offsets; a run that does not check is set aside and the choice made again without it. Replay starts at the
+text offsets, and each column (its entry within its sections, its rank table's counts, its offsets from 0 to its rows
+each larger than the one before, its blocks in order and within their room, its rows those of the property by value);
+a run that does not check is set aside and the choice made again without it. A run that fits in the cache is read and
+checked whole at open, by up to 4 domains when it has 512 pages or more (each its own descriptor; the CRC is most of
+an open's time). Replay starts at the
 journal position of the newest run's header, whose group may come before the run's own: a background merge starts
 from a view that runs ahead of the disk, and its position is the end of the last durable frame. The groups up to the
 run's are read and skipped. A journal that ends before the newest run's group is damage (the run's group was durable
@@ -264,11 +307,14 @@ A page is the unit of the cache: it is read from the file whole (16,384 bytes at
 table), checked against its CRC, and only then served. A field of 2, 4 or 8 bytes in a table is aligned to its size,
 so none crosses a page; a bit-packed field may, and is then read from both pages.
 
+**Format 7** (format 8 without the column order) is set aside at open in the same way: its groups replayed from
+the journal (a 10 M-fact database: 5.2 s, once), the first merge writing format 8.
+
 **Formats 5 and 6** (every fact twice in fixed words: by thing a u16 property and an i64 value, by property an i64
 value and a u32 thing, a dense u64 offset a thing slot; format 6 the flag of a derived fact in bit 63 of the value
 words; 24.6 bytes a fact at 10 M facts) are set aside at open, as formats 1 to 4 were: the runs are caches of the
 journal, which holds every group, so their groups are replayed (a 10 M-fact database replays in about the time of its
-load) and the first merge writes format 7.
+load) and the first merge writes the current format.
 
 The run is the in-memory format: 64-bit little-endian machines only. The journal is the portable format. Format 4 (one
 snapshot `<group>.snap` holding the whole base, with a dense table of offsets by thing) and the earlier ones are set

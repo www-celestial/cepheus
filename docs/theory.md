@@ -65,12 +65,13 @@ during an `fsync` are merged into the waiting frame, so a frame holds everything
 
 A view is a stack of runs R1 (newest) .. Rk (sorted columns in pages, section 9) plus a delta Δ (persistent maps).
 Each run has two parts: the facts it adds (a) and the facts of the runs below it that it retracts (t). Each part keeps
-two orders of its rows. With n rows in a part, e thing ids and p properties:
+three orders of its rows (run format 8). With n rows in a part, e thing ids and p properties:
 
 | order | layout | lookup |
 |---|---|---|
 | by thing | a rank table (one 64-bit word for 32 thing ids: their presence bits and the number of things held before them), the slots in blocks of 128, a record a slot with its values by property, sorted | facts of a thing: a rank (one word read, one popcount), the block's header and the record, O(1) a part, O(k) to read; one property: O(m) for the block's m properties; one fact: O(m + log k) |
 | by property | `poff[0..p]`, rows `(w, thing)` sorted, in blocks of 128; a value index (rank words over p's values, the first row of each) for most properties | things with (p, w), or linking to w by p: O(1) with a value index, else O(log n_p), + O(answer); a range of values: the same |
+| column order | each property's rows `(thing, w)` apart, in thing order, in blocks of 128; a rank table over its things (shared by the properties held by the same things); offsets only from its first thing of several values | one property of a thing: a rank, O(1), then O(1) for a one-valued property, O(log k) for one fact among k values; a thing's values of p as a sorted slice; the things of p in order, each once |
 
 A **rank table** (Jacobson's rank directory [Jacobson 1989]) answers "is thing e in this part, and if so at which
 slot?" with one word: bit e mod 32 of word e / 32 says whether e is held, and its slot is the count stored in the word
@@ -81,7 +82,11 @@ header and its record a run to locate: about 0.4 µs at 10 M facts on one run
 ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)). Hexastore
 [Weiss 2008] and RDF-3X [Neumann 2008] keep six orders of the triples; Cepheus keeps two because a dense id makes "by
 thing" direct, and "by property then value" serves "all things with this property", "the things that link to t by p"
-(the rows of value t) and ranges of values. Size of a part (format 7, section 11): each value in as many bits as its
+(the rows of value t) and ranges of values; format 8 adds the **column order** (vertical partitioning, Abadi et al.
+[Abadi 2007]): a lookup of one property of a thing reads that property's bytes alone (a rank word, a directory entry,
+a field: 20 to 40 ns on consecutive invoices against 46 to 61 in a thing's block), and a question over a few
+properties reads only theirs (the triangles read `follows`: 2.2 MB of a 70 MB run). It costs 13.9 MB at 10 M facts,
+1.4 bytes a fact. Size of a part (format 7, section 11, before the column order): each value in as many bits as its
 block of 128 needs from its least, a quarter of a byte a thing id for the rank table, 8 bytes a block of 128 things
 and 16 a block of 128 rows, the value indexes, and the dictionary (its texts' bytes, their offsets in a few bits each,
 a hash table of two 4-byte slots a text): 5.4 bytes a fact at 10 M facts, against 24.6 in format 6 (22 bytes a row in
@@ -121,7 +126,34 @@ the source must cost a lookup, not a walk of its own candidates. A version of mi
 materialized and sorted the candidates of every bound atom to intersect them, so at each binding it paid for the
 largest set (a status shared by 450,000 invoices, sorted once per client of a city: the 10 M benchmark never finished
 its third question). Sorted intersection (Leapfrog Triejoin [Veldhuizen 2014]) keeps the bound only with iterators that seek
-inside the indexes; with a by-thing index, a membership test costs O(log k) and is the simpler way.
+inside the indexes, or with sets of comparable sizes.
+
+**Leapfrog (run format 8).** A pattern whose other side is known at its level is a **slice**: a thing's values of a
+property (the column order) or the things of a value (the order by property), contiguous and sorted in a run. When the
+source of a level is a slice of at least 2 candidates, every other slice of the level whose count is at most 8 times
+the source's is read too, into a buffer (sorted again only if the view's runs or delta gave it out of order), and the
+buffers are intersected by **leapfrogging** [Veldhuizen 2014]: the iterators in the order of their keys, each in turn
+seeks the largest key by galloping [Bentley 1976] (O(log d) for d places), a key all of them reach is a candidate,
+checked against the level's other patterns. The level reads m + Σ n_j ≤ (1 + 8 (k − 1)) m rows for a source of m and
+k slices, and compares O(m log(n/m)): within a constant of Generic Join's work, so within the AGM bound up to that
+constant and the log factor. A slice's count and its first row come from one rank and one offset header and are kept
+for the known side they were read for (the triangles' "who follows a" is read once for every b that a follows). On
+the triangles this replaces five membership lookups an edge, each a random place in the column of `follows`, by two
+reads of a few contiguous rows: 1.16 s → 0.26 s on one core (benchmarks).
+
+**One value, and checks left to the next level.** A pattern (y, p, x) of a one-valued property p with y bound offers x
+at most one candidate; its count is not looked up (1 against 2c for an exact count c, see G11). When it is the first
+such pattern of its level and every other pattern there has a fixed count of 1 or more (a constant other side, or one
+bound only later), `choose` would take it for every binding: the level reads that one value (`Store.value1`) and
+skips the counting. A pattern whose other side is the next level's variable is not checked at its own level (a thing
+without that property): at the next level it offers that binding no candidate and is then its source, so the
+bindings, the answers and the candidates counted are the same. Q4 reads an invoice's client, the client's city and the
+invoice's total as three single values: 247 → 127 ms on one core.
+
+**The tested bound.** `Check.gj_bound` sums, over the levels and the partial bindings that reach each, the smallest
+offer m and, where m ≥ 2, the size of every slice offer of at most 8 m (the rows the leapfrog may read); every random
+question of the tests and the simulation enumerates at most that (`Query.work` counts the candidates of a source and
+the rows read into the buffers).
 
 **Correctness (G11).** *Soundness:* a full binding passed every atom at the level of its last variable, with all
 other variables of the atom bound, so every atom is a fact. *Completeness:* for an answer a, at each level a_i
@@ -491,17 +523,16 @@ knows the structure beats the general compressors, with no C.
 ## 12. What comes next, and why
 
 - **Larger than memory, the rest** (design, section 15): filters per run for the lookups by value (Bloom filters
-  sized per level as in Monkey [Dayan 2017]) if reads across runs need them; scheduling merges around the clients as SILK [Balmau 2019]
-  does; a third order of the rows (property, thing) for workloads that read one property of many things under memory
-  pressure. Measured on run format 7 with each process capped at 48 MB: the triangles take more than 2.5 minutes a
-  run, against SQLite's 1.02 s, whose follow links fit in its cache in a table and a covering index of their own
-  ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)).
-- **Lookups by thing as fast as format 6's** (section 11: 46 to 61 ns on consecutive invoices against 37 to 41, so Q3
-  to Q5 stay 3 to 10 % slower): the entry of a property found without a search among the block's (a small table by
-  property a run), blocks cut by kind of thing (characteristic sets [Neumann 2011]) so that a block of
-  invoices has no absent field; and the third order (property, thing) of the next step, which serves Q4 and Q5 from
-  columns. The merge's coding (about 100 ns a fact, now the longest part of a load) on two domains, one a pass. An
-  order-preserving dictionary rebuilt at each merge (Binnig et al. [Binnig 2009]) for ranges over texts.
+  sized per level as in Monkey [Dayan 2017]) if reads across runs need them; scheduling merges around the clients as
+  SILK [Balmau 2019] does. The column order (run format 8) took the triangles at a 48 MB cap from more than 2.5 minutes
+  a run (format 7) to 0.26 s on one core, against SQLite's 1.02 s ([benchmarks](benchmarks.md)).
+- **Questions closer to the kernels** (the prototype's 5 ms for Q4 and 90 ms for Q5, against 129 and 259 ms on one
+  core): a level's candidates looked up a batch at a time (vectorized execution) where the per-binding
+  calls now cost more than the reads; slices galloped inside the run rather than read into buffers (a gap-coded block
+  can only be entered at a value's first row). The merge's coding (about 100 ns a fact) on two domains, one a pass,
+  once a helper domain no longer slows the GC's cycles (measured: a domain beside the pass by thing, idle or busy,
+  kept 300 MB more of heap at the 4-group load's peak). An order-preserving dictionary rebuilt at each merge (Binnig
+  et al. [Binnig 2009]) for ranges over texts.
 - **Rules, the next steps** ([rules](rules.md#what-is-not-here-yet)): the closure module for transitive properties
   (Hu, Motik and Horrocks' modular materialisation, [Hu 2019]), rules specialised by the ontology, sorted parallel derivations,
   stratified negation and aggregates (aggregates kept by DBSP's rule for linear operators, Budiu et al. [Budiu 2023]),

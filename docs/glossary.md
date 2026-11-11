@@ -89,6 +89,10 @@ the usual one, both are given.
   [benchmarks](benchmarks.md#method)
 - **cluster** — the servers that hold the same databases; one machine is a cluster of one peer. Its id (`cph-c-` and
   16 hex digits) is in `cluster.toml` and in every Welcome. [server](server.md#clustertoml)
+- **column order** (vertical partitioning) — the third order of a run (format 8): each property's rows (thing, value)
+  apart from the others', in thing order, a thing's values sorted (Abadi et al. 2007). A lookup of a thing's property
+  reads one rank word, one directory entry and one field of that property's bytes alone; a question over a few
+  properties reads only theirs. [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **columns** (columnar coding) — storing the values of one field together rather than record by record, so that
   alike values sit side by side and code in few bits: the journal codes a group's kinds, things and each property's
   values as columns; a run's order by property is a column of each property. [formats](formats.md#a-group)
@@ -204,7 +208,7 @@ the usual one, both are given.
   operation C leaves undefined (UndefinedBehaviorSanitizer). The C files of the CRC and of TLS are fuzzed with both.
   [testing](testing.md#the-c-file-fuzzed)
 - **galloping search** (exponential search) — a search that tries 1, 2, 4, 8... places ahead before halving, so that
-  finding a place k steps away costs O(log k) (Bentley and Yao 1976); a merge places texts this way.
+  finding a place k steps away costs O(log k) (Bentley and Yao 1976); the leapfrog seeks so.
   [theory](theory.md#8-merges-written-to-a-file)
 - **gaps** — in a row block, the things of a value stored as the difference from the thing before (minus one):
   "the invoices that are unpaid", close together, take 3-4 bits each instead of 9-10.
@@ -252,6 +256,10 @@ the usual one, both are given.
   beside, by pieces). [architecture](architecture.md#large-groups)
 - **lazy leveling** — tiering at every level but the last, which is leveled (Dayan and Idreos 2018).
   [theory](theory.md#9-levels-on-disk-and-large-groups)
+- **leapfrog** (leapfrog intersection) — the intersection of sorted lists by seeks: the lists in the order of their
+  current keys, each in turn jumps to the first key at least the largest (by galloping), and a key all reach is in
+  every list (Veldhuizen 2014). A question's level intersects its slices so instead of looking each candidate up.
+  [theory](theory.md)
 - **lease** — a permission that ends by itself after a time, unless renewed (Gray and Cheriton 1989). The design
   proposed one for local reads; it was left for the visibility number, which needs no clock (leases come back between
   machines). [server](server.md#the-rules-the-design-first-had-and-why-they-were-left)
@@ -388,6 +396,9 @@ the usual one, both are given.
   maps them sees one physical copy: a store by one is seen at once by the others. The visibility page is mapped so,
   read-write by the server and read-only by the readers. [server](server.md#local-reads-g15)
 - **single writer** — one writer thread applies every group of a database, in order. [architecture](architecture.md#one-writer-threads-and-domains)
+- **slice** — the candidates a pattern offers a variable when its other side is known: a thing's values of a
+  property, or the things that hold one value. In a run it is a stretch of rows, sorted: two of them on one level are
+  intersected by leapfrogging. [theory](theory.md)
 - **snapshot** (the operation) — `Cepheus.snapshot`, the full merge: the delta and every run into one run, so that the
   next open replays nothing. The file of earlier versions (format 4 and before, `<group>.snap`) held the whole base;
   a run file has replaced it. [api](api.md#operations)

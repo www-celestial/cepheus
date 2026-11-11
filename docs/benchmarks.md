@@ -84,6 +84,128 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## The column order and leapfrog intersections (2026-11-11), at 10 million facts
+
+Step 3 of the plan to beat the giants: run format 8 adds a third order to each part of a run, the **column order**
+(each property's rows apart, in thing order: vertical partitioning, Abadi et al. 2007), read by every lookup of a
+thing's property; questions intersect two sorted slices of a level by **leapfrogging** (Veldhuizen 2014) instead of a
+lookup per candidate, read a one-valued property of a bound thing as its one value, and leave to the next level the
+checks it makes ([formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun),
+[theory](theory.md#4-generic-join)). The journal's format is unchanged; a database of format 7 replays its journal
+once at its first open (5.2 s at 10 M facts) and gives the same answers (checked on a database written by main's
+binary: Q3 4,299 rows, Q4 453,866 invoices summing 22,677,088,830, Q5 114 rotations).
+
+**Method.** main d747635 against the branch (its final state: 43afeac with the columns' domain of that commit
+taken out again, below), both built in release, the same benchmark client, alternated (A then B, then B then A) in one
+hold of the heavy lock, 7 rounds, every process in a 3 GB scope; a cell is the median of 7 rounds with its 95 %
+interval by order statistics (for 7 runs, the smallest and the largest: coverage 98.4 %); the last column pairs the
+rounds (the median of the ratios, how many rounds the branch was the larger, a two-sided sign test). Questions: 11
+runs each in each process, on up to 8 domains and on 1. Load average 1.8 to 2.7 (the machine was shared).
+
+| 10 M facts | main d747635 | branch | branch / main, by round |
+|---|---:|---:|---|
+| load in 2 large groups, to confirm every group | 3.86 s [3.33, 5.80] | 3.93 s [3.71, 4.33] | 1.005 (p = 1.0: no difference shown) |
+| load in 4 large groups (`GROUP=56818`) | 5.62 s [4.83, 6.16] | 5.75 s [5.04, 7.14] | 0.967 (p = 1.0) |
+| a large group merged into a run (the longest) | 1.13 s [1.10, 1.39] | 1.33 s [1.31, 1.48] | 1.173, slower 6 of 7 (p = 0.13) |
+| peak resident memory, 2 groups | 1,599 MB | 1,590 MB | 0.994 |
+| peak resident memory, 4 groups | 953 MB [860, 1,130] | 911 MB [872, 994] | 0.956 (p = 0.45) |
+| the runs after `snapshot` (one run) | 54.4 MB | 69.6 MB | 1.280: +15.2 MB (the column order 13.9 MB) |
+| the journal | 21.8 MB | 21.8 MB | the same |
+| `snapshot` (a full merge) | 1.65 s [1.53, 1.83] | 2.00 s [1.90, 2.46] | 1.242, slower 7 of 7 (p = 0.016) |
+| open of the database it leaves | 54.0 ms [51.5, 58.3] | **46.1 ms** [38.7, 52.1] | 0.795, faster 6 of 7 (p = 0.13) |
+| Q1 an invoice by id | 0.44 µs [0.40, 0.46] | 0.46 µs [0.39, 0.61] | 1.095 (p = 1.0) |
+| Q2 a client by e-mail | 0.74 µs [0.67, 0.80] | 0.69 µs [0.63, 0.80] | 0.940 (p = 0.45) |
+| Q3 unpaid invoices of a city | 4.28 ms [4.13, 4.44] | **2.92 ms** [2.84, 3.24] | 0.688, faster 7 of 7 (p = 0.016) |
+| Q4 unpaid sum by city, 8 domains | 88.7 ms [84.9, 104] | **44.0 ms** [42.6, 44.5] | 0.500, faster 7 of 7 |
+| Q5 triangles, 8 domains | 294 ms [266, 325] | **68.5 ms** [64.2, 87.9] | 0.233, faster 7 of 7 |
+| Q4, 1 domain | 253 ms [248, 285] | **131 ms** [129, 133] | 0.518, faster 7 of 7 |
+| Q5, 1 domain | 1.18 s [1.15, 1.28] | **0.271 s** [0.256, 0.297] | 0.224, faster 7 of 7 |
+| 1 M facts, a group a client, 64 threads | 8.01 s [7.64, 9.24] | 8.06 s [7.27, 9.92] | 1.006 (p = 1.0) |
+| its peak | 200 MB [175, 222] | 212 MB [194, 224] | 1.053, larger 6 of 7 (p = 0.13) |
+
+**The columns' domain, tried and taken out.** The columns are written by the merge's pass by thing; they cost about
+20 ns a row (the large group's merge +0.2 s, a full merge +0.35 s). Filling them on a domain of their own beside the
+pass (its rows handed in chunks) brought the large group's merge back to main's 1.11 s, but the 4-group load's peak
+rose from 906 to 1,190 MB in 6 rounds of 7: OCaml 5 completed fewer major collections (9 against 14, the heap's top
+45 M words higher) whenever a helper domain lived beside the pass, idle on a condition, spinning, or doing major
+slices of its own (measured each way). So the pass fills them itself; the load's time shows no difference.
+
+**Where the reads' time went.** A lookup of one property of a thing reads its column: a rank word, a directory
+entry and a field (20 ns for a count, 42 ns for a value, on sorted invoices; 46 to 61 ns in a thing's block before).
+Q5 was five membership lookups an edge at random places of the 200 MB of thing blocks (step 2's profile: 35 % of its
+time); it is now two reads of a few contiguous rows (an out-list of the 1.6 MB column of `follows`, an in-list of the
+rows by value, read once for every b that a follows) and a merge of two lists of about five: 0.26 s on one domain.
+Q4 reads an invoice's client, the client's city and the invoice's total as three single values, and leaves the check
+"has a client" to the next level. Of Q4's 129 ms, 29 ms are the benchmark's own fold (an OCaml `Hashtbl` updated with
+a fresh tuple for each of the 453,866 invoices, measured alone): the plan's target of 40 ms on one core is out of
+reach while the question is written so; the engine's part is about 100 ms (220 ns an invoice). The open checks a
+run's pages on up to 4 domains: 20 % faster than main although the run has 28 % more pages.
+
+**What got worse.** The run grows by 15.2 MB (13.9 MB of column order: values 11.4, rank tables 1.2, directories
+1.25), 1.2 MB above the plan's budget of 14. A full merge takes 24 % longer (the third order is written in the pass
+by thing). A merge holds one bit a thing a property until its pass ends (2.4 MB at 10 M facts). A cold open of a run
+larger than the cache reads the column order's tables (below).
+
+**Beside SQLite 3.54.** The same CSV files; a Cepheus load (two large groups) and a SQLite load (`.import`, indexes,
+ANALYZE, WAL, synchronous FULL) in turn, 7 rounds, then Q1-Q5 resident, 11 runs each, a process of each in turn,
+7 rounds (Cepheus on one domain, on its snapshot's one run). This series and the two below ran 43afeac (the columns'
+domain in, which changes neither the reads nor the load's time).
+
+| 10 M facts, one core | Cepheus, format 8 | SQLite 3.54 | who wins |
+|---|---:|---:|---|
+| load, to durable | **3.96 s** [3.59, 5.85] | 7.98 s [6.48, 8.86] | Cepheus, 2.0 times |
+| on disk after the load (journal and runs) | **90.5 MB** | 136.4 MB | Cepheus, 1.5 times smaller (with its whole history) |
+| peak memory of the load | 1,591 MB | **11 MB** | SQLite, 145 times (one group of 9.4 M facts in memory) |
+| Q1 an invoice by id | **0.39 µs** [0.38, 0.42] | 0.69 µs [0.68, 0.73] | Cepheus, 1.8 times |
+| Q2 a client by e-mail | **0.64 µs** [0.61, 0.71] | 1.42 µs [1.36, 1.55] | Cepheus, 2.2 times |
+| Q3 unpaid of a city | **2.87 ms** [2.76, 3.12] | 4.18 ms [4.05, 4.43] | Cepheus, 1.5 times |
+| Q4 unpaid sum by city | **130 ms** [125, 136] | 369 ms [353, 387] | Cepheus, 2.8 times |
+| Q5 triangles | **256 ms** [244, 331] | 1.05 s [1.03, 1.10] | Cepheus, 4.1 times |
+
+**Beside PostgreSQL 18.6, on several cores.** Q4 and Q5 at 1, 2, 3, 4 and 8 domains (Cepheus, 11 runs each, 5
+rounds) and PostgreSQL with 0 to 3 parallel workers (1 to 4 processes, `max_parallel_workers_per_gather`), inside
+the server (`EXPLAIN ANALYZE`'s execution time: no socket), 11 runs each, 5 rounds, on a cluster of the job's own
+(COPY, indexes, ANALYZE, fsync on: 707 MB of data), deleted at the end. A cell: the median of the rounds' medians
+[the smallest, the largest] (93.8 %).
+
+| | 1 core | 2 | 3 | 4 | 8 |
+|---|---:|---:|---:|---:|---:|
+| Q4, Cepheus format 8 | **128 ms** [124, 130] | **81.6** [75.2, 83.0] | **57.8** [57.0, 60.1] | **47.8** [44.4, 51.0] | **42.4** [42.4, 45.1] |
+| Q4, Cepheus main | 244 [242, 250] | 156 [154, 159] | 109 [106, 121] | 92.4 [86.0, 102] | 85.3 [84.1, 181] |
+| Q4, PostgreSQL (processes) | 233 [230, 254] | 141 [140, 146] | 107 [106, 111] | 87.7 [87.2, 92.5] | |
+| Q5, Cepheus format 8 | **250 ms** [248, 253] | **149** [146, 154] | **100** [98.9, 108] | **77.3** [74.8, 83.2] | **66.3** [63.9, 75.5] |
+| Q5, Cepheus main | 1,140 [1,120, 1,170] | 592 [572, 597] | 409 [406, 447] | 354 [322, 412] | 280 [262, 310] |
+| Q5, PostgreSQL (processes) | 1,010 [996, 1,070] | 604 [600, 625] | 602 [599, 629] | 616 [600, 635] | |
+
+PostgreSQL launches one worker at most for Q5 (its plan has one parallel scan), so its Q5 stops at 2 processes;
+its Q4 scales to 4 (87.7 ms) where Cepheus takes 47.8 ms on 4 domains. Main lost to PostgreSQL on Q4 at 2 to 4
+processes; format 8 wins at every count, by 1.8 times on Q4 and 4 to 8 times on Q5.
+
+**Larger than memory.** Each process capped at 128 MB, 32 MB caches, the files' pages dropped from the kernel's page
+cache before each side (all start cold), sides in turn, 5 rounds, 5 runs a question (a cell: the median of the
+rounds' medians [the smallest, the largest], 93.8 %). Main's Q5 is from the series of 2026-11-09 (the same format 7).
+
+| 128 MB cap, cold | format 8, 1 domain | format 8, 3 domains | main, 1 domain | SQLite 3.54 |
+|---|---:|---:|---:|---:|
+| open | 138 ms [117, 161] | 161 ms [124, 170] | **88.2 ms** [75.8, 91.3] | (a file) |
+| Q1 an invoice by id | 0.44 µs [0.42, 0.61] | **0.42 µs** [0.38, 0.44] | 0.47 µs [0.39, 0.67] | 2.89 µs [0.87, 6.40] |
+| Q2 a client by e-mail | 0.69 µs [0.69, 0.78] | **0.66 µs** [0.61, 0.70] | 0.70 µs [0.70, 0.75] | 1.48 µs [1.41, 1.63] |
+| Q3 unpaid of a city | 3.13 ms [2.96, 3.50] | **2.97 ms** [2.88, 3.19] | 4.29 ms [4.10, 4.36] | 112 ms [105, 136] |
+| Q4 unpaid sum by city | 129 ms [126, 133] | **58.9 ms** [56.7, 64.6] | 249 ms [244, 266] | 552 ms [469, 592] |
+| Q5 triangles | 263 ms [241, 279] | **114 ms** [113, 127] | 1.10 s | 1.14 s [1.10, 1.21] |
+
+At 48 MB (16 MB caches), where neither file fits, format 8's triangles take **260 ms** [249, 274] on 1 domain and
+**113 ms** [105, 119] on 3 (5 runs, cold), against more than 2.5 minutes a run for format 7 and 1.02 s for SQLite
+(2026-11-09): the question reads the column of `follows` (1.6 MB) and its rows by value, not the thing blocks where
+its rows sat among the invoices. The run of 69.6 MB still fits under 128 MB beside the cache, so the questions read
+as resident there. The cold open is slower than main's (138 ms against 88): a run larger than the cache is not read
+whole, and the open's checks of the column order (rank tables, directories: 2.5 MB) read pages that main's open did
+not (the first questions would read them anyway).
+
+**Where the giants still win.** SQLite loads in 11 MB of memory against 1.6 GB (chunked loads are step 4). Its cold
+open is a file open. PostgreSQL does not win a question here any more; it is a server with its own processes, which
+Cepheus' numbers above do not include (Cepheus' server is measured in [server](server.md)).
+
 ## Compressed runs and journal (2026-11-09), at 10 million facts
 
 Step 2 of the plan to beat the giants: run format 7 (every section coded by a frame of reference in blocks of 128; in

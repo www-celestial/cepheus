@@ -81,11 +81,11 @@ facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/ben
 | | Cepheus | PostgreSQL |
 |---|---:|---:|
 | every fact of an invoice, by id | 0.39 µs | 4.73 µs in the server; 26 µs through its socket |
-| the unpaid invoices of a city's clients (4,299 rows) | 4.07 ms | 10.55 ms |
-| the unpaid sum per city (453,866 invoices), 3 cores | 107 ms | 109 ms |
-| triangles of a follow graph (568,163 links), 3 cores | 371 ms | 603 ms (2 processes) |
+| the unpaid invoices of a city's clients (4,299 rows) | 2.87 ms | 13.9 ms |
+| the unpaid sum per city (453,866 invoices), 3 cores | 57.8 ms | 107 ms (3 processes) |
+| triangles of a follow graph (568,163 links), 3 cores | 100 ms | 602 ms (2 processes: its most) |
 | durable writes, 256 clients | on par (both bound by the disk's fsync) | |
-| triangles, base of 245 MB read through a 32 MB cache, process capped at 128 MB | 102 s | **1.05 s** (32 MB of buffers) |
+| triangles, read through a 32 MB cache, process capped at 128 MB, cold, 1 core | **263 ms** (114 ms on 3 cores; 260 ms capped at 48 MB) | 1.05 s (32 MB of buffers) |
 | load of 10 M facts | **5.13 s**, in two large groups, alternated with it | 30.87 s (`COPY`, indexes, `VACUUM ANALYZE`) |
 
 SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core (before run format 7): Cepheus
@@ -99,7 +99,11 @@ SQLite's 136 MB file, which keeps none, and load in 3.45 s against 7.22 s; on on
 process capped at 48 MB so that neither file fits, Cepheus answers the first four questions 1.7 to 5.4 times faster
 and loses the triangles by more than 100 times (more than 2.5 minutes a run against 1.02 s: SQLite's follow links fit
 in its cache in a table of their own)
-([benchmarks](docs/benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)); at a transaction a client, Cepheus' group commit loads 1 M facts 13 to 16 times faster (13.2 s
+([benchmarks](docs/benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)). With run format 8
+(2026-11-11: each property's rows also apart, in thing order, and sorted lists intersected by leapfrogging) Cepheus
+wins all five on one core: 0.39 µs against 0.69, 0.64 µs against 1.42, 2.87 ms against 4.18, 130 ms against 369 and
+the triangles in 256 ms against 1.05 s, and at a 48 MB cap the triangles in 260 ms
+([benchmarks](docs/benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)); at a transaction a client, Cepheus' group commit loads 1 M facts 13 to 16 times faster (13.2 s
 against 174.0 s; 10.6 against 166.7 in an earlier series). Where each one wins, and why, and how Cepheus compares by design
 with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison](docs/comparison.md).
 

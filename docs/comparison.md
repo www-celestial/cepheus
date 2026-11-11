@@ -29,11 +29,15 @@ Cepheus' reads on one run measured since then are within a few percent of those 
 | durable writes at a fixed rate of 2,000 a second, p99 | **0.1 to 1.7 s** | 0.6 to 6.1 s | Cepheus, on this noisy disk |
 | larger than memory: Q4, base 245 MB, 32 MB of cache, process capped at 128 MB | **385 ms** | 697 ms | Cepheus |
 | larger than memory: Q5 | 102 s | **1.05 s** | **PostgreSQL**, by 100 times (below) |
+| with run format 8 (2026-11-11): Q4 at 1, 2, 3, 4 cores | **128, 81.6, 57.8, 47.8 ms** | 233, 141, 107, 87.7 ms (1 to 4 processes) | Cepheus, 1.8 times at every count: three single values an invoice read from the columns of client, city and total |
+| with run format 8: Q5 at 1, 2, 3, 4 cores | **250, 149, 100, 77.3 ms** | 1,010, 604, 602, 616 ms (it launches 1 worker at most) | Cepheus, 4 to 8 times: the column of `follows` and leapfrog intersections |
+| with run format 8: Q5 larger than memory, 128 MB cap, 32 MB cache, cold | **263 ms** (114 ms on 3 cores; 260 ms at a 48 MB cap) | 1.05 s (2026-11-08) | Cepheus, 4 times: `follows` is now a column of its own, 1.6 MB |
 | load of 10 M facts, alternated (7 rounds) | **5.13 s [4.65, 8.08]**, in 2 large groups | 30.87 s [28.08, 37.13] (`COPY`, indexes, `VACUUM ANALYZE`) | Cepheus, 6 times (faster in 7 rounds of 7): a large group is mapped and sorted in compact arrays by several domains and merged into a run at once, its frame written beside (below) |
 | load of 10 M facts, a group a client (227,272 confirmed groups) | 111.8 s [103.1, 124.4] (4 runs) | not measured (`COPY` is one transaction) | |
 
 **Where PostgreSQL wins, and why.**
-- *Q5 larger than memory.* Cepheus orders a base's rows by thing, so a client's follow links lie among the rows of its
+- *Q5 larger than memory, until run format 8 (2026-11-11), which keeps each property's rows apart in a third order
+  and takes the triangles at a 48 MB cap to 0.26 s (rows above).* Cepheus orders a base's rows by thing, so a client's follow links lie among the rows of its
   20 invoices; the triangle question reads random pages of 120 MB of rows for a few bytes each (18.8 million pages read
   in 6 runs with a 48 MB cache). PostgreSQL keeps `follows` in a table of its own, 23 MB with its index, which fits in
   its 32 MB of buffers. A third order of Cepheus' rows (property, then thing) would make one property of many things
@@ -98,6 +102,8 @@ links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both o
 | load 10 M facts with format 7, alternated (7 rounds, 2026-11-09) | **3.45 s** [3.37, 3.75] | 7.22 s [6.83, 7.82] | Cepheus, 2.1 times |
 | Q1, Q2, Q3, Q4, Q5 with run format 7, one core (2026-11-09) | **0.38 µs**, **0.66 µs**, **3.97 ms**, **240 ms**, 1.08 s | 0.68 µs, 1.37 µs, 4.11 ms, 356 ms, **1.03 s** | Cepheus on Q1 to Q4 (a hash of the texts and a value index make Q2 2.1 times faster); **SQLite** on Q5 by 5 % ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)) |
 | larger than memory, cold, 128 MB cap, 32 MB caches, Q1 to Q5 (2026-11-09) | **0.38 µs**, **0.65 µs**, **4.02 ms**, **240 ms**, 1.10 s | 0.87 µs, 1.40 µs, 97.5 ms, 496 ms, **1.04 s** | Cepheus on Q1 to Q4: its run of 54.4 MB fits under the cap, SQLite's file of 136.4 MB does not; **SQLite** on Q5 by 6 % |
+| Q1, Q2, Q3, Q4, Q5 with run format 8, one core (2026-11-11) | **0.39 µs**, **0.64 µs**, **2.87 ms**, **130 ms**, **256 ms** | 0.69 µs, 1.42 µs, 4.18 ms, 369 ms, 1.05 s | Cepheus on all five, Q5 by 4.1 times: the column order and leapfrog intersections ([benchmarks](benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)) |
+| larger than memory with run format 8, cold, 128 MB cap, 32 MB caches, Q1 to Q5 | **0.44 µs**, **0.69 µs**, **3.13 ms**, **129 ms**, **263 ms** | 2.89 µs, 1.48 µs, 112 ms, 552 ms, 1.14 s | Cepheus on all five; at a 48 MB cap its triangles take 260 ms against SQLite's 1.02 s |
 | the same at a 48 MB cap, 16 MB caches, where neither file fits | **23.3 µs**, **0.66 µs**, **82.5 ms**, **300 ms**, more than 2.5 min | 40.7 µs, 1.37 µs, 444 ms, 1.22 s, **1.02 s** | Cepheus on Q1 to Q4 (1.7 to 5.4 times); **SQLite** on Q5 by more than 100 times: its follow links fit in its cache in a table and an index of their own, where Cepheus reads them from its thing blocks, among the invoices |
 
 ## By design

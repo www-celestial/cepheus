@@ -55,7 +55,7 @@ defaults, and the cache's size (`set_cache`).
 | page | 16 KiB (16,384 bytes) | `Pages.bits` (14) |
 | page table | 8 bytes a page of the run's layout (the file page that holds it, its CRC) | `Snapshot.merge` |
 | thing block, row block, offsets block | 128 things, 128 rows of a property, 128 offsets | `Store.tb` |
-| run format | 7; runs of formats 5 and 6 and the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
+| run format | 8; runs of formats 5, 6 and 7 and the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
 | journal format | 2; a journal of format 1 is converted once at open | `Journal.format`, `Journal.convert` |
 
 ## Memory and the cache

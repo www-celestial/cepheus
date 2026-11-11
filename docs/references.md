@@ -220,8 +220,15 @@ venue, volume and year); a work that could not be checked is not listed. The des
   a question's first variable (`Query.fold`).
 - **[Bentley 1976]** J. L. Bentley, A. C.-C. Yao. An Almost Optimal Algorithm for Unbounded Searching. *Information
   Processing Letters* 5(3), 82–87, 1976. https://doi.org/10.1016/0020-0190(76)90071-5
-  — Exponential (galloping) search: until format 7, a merge placed the other runs' texts among the largest run's
-  sorted list by searches that galloped from the last place; format 7 keeps no sorted list of texts.
+  — Exponential (galloping) search: the seeks of the leapfrog intersection (`Query.gallop`): steps of 1, 2, 4, ...
+  from the last place, then a binary search, O(log d) for a place d further. Until format 7, a merge also placed the
+  other runs' texts among the largest run's sorted list this way.
+
+- **[Abadi 2007]** D. J. Abadi, A. Marcus, S. R. Madden, K. Hollenbach. Scalable Semantic Web Data Management Using
+  Vertical Partitioning. *VLDB* 2007, 411–422. https://www.vldb.org/conf/2007/papers/research/p411-abadi.pdf
+  — Vertical partitioning of triples: one two-column table (subject, object) a property, sorted by subject. Run format
+  8's column order: each property's rows apart, in thing order, so a lookup reads one property's bytes and the
+  triangles read `follows` alone (2.2 MB of a 70 MB run).
 
 ## Joins
 
@@ -237,8 +244,10 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — Generic Join, the algorithm of every question, and the argument for its bound.
 - **[Veldhuizen 2014]** T. L. Veldhuizen. Leapfrog Triejoin: A Simple, Worst-Case Optimal Join Algorithm. *ICDT* 2014,
   96–106. https://doi.org/10.5441/002/icdt.2014.13
-  — The iterator form over sorted indexes; why a sorted intersection keeps the bound only with seeks, and a lookup per
-  candidate is the simpler way here.
+  — The leapfrog intersection of a level's sorted slices (a thing's values, a value's things): the iterators in key
+  order, each seeking the largest key in turn; run format 8's columns give the slices in order (`Query.leapfrog`).
+  The bound with seeks within a log factor of AGM; the engine reads a slice only when it is at most 8 times the
+  smallest, so the tested bound stays within a constant of Generic Join's.
 - **[Aberger 2016]** C. R. Aberger, S. Tu, K. Olukotun, C. Ré. EmptyHeaded: A Relational Engine for Graph Processing.
   *SIGMOD* 2016, 431–446. https://doi.org/10.1145/2882903.2915213
   — A worst-case optimal engine for graph queries.

@@ -128,8 +128,12 @@ A view is two things:
   the property takes, and the first row of each), so "the things whose city is Lyon", "the invoices that link to
   client c" are one rank and two offsets, and ranges of values are a binary search. Texts and floats are numbered by
   a **dictionary** (each distinct text stored once, found by a hash table; the rows hold its number); every other
-  value is its own number. A run is about 5.4 bytes a fact at 10 M facts, dictionary included (format 6 took 24.6:
-  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun));
+  value is its own number. A third order, the **column order** (run format 8), keeps each property's rows (thing,
+  value) apart, in thing order, with a rank table over its things (one for the properties held by the same things)
+  and offsets only from its first thing of several values: every lookup of one property of a thing reads there (a
+  rank word, a directory entry, a field), so a question over a few properties reads only their bytes, while "every
+  fact of a thing" reads its block. A run is about 7 bytes a fact at 10 M facts, dictionary and column order included
+  (format 6 took 24.6: [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun));
 - the **delta**: the changes since the last merge, in **persistent maps** (balanced trees that are never changed in
   place: a change makes a new version that shares every untouched node with the old one, at a cost of O(log d) for d
   changes). The delta is keyed like a run (by thing, then property and value; by property, then value and thing) and

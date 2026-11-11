@@ -197,11 +197,14 @@ state at its top, since a run holds the changes of its groups on top of the stat
 state); replay starts at the newest run's position and skips the groups it holds. Loading checks the header CRC, the
 CRC of the page table and that it maps each page of the file at most once, the order of the sections, the rank tables
 (each word's count follows from the bits before it, the last equals the things) and the order and bounds of every
-offset table and directory (`Snapshot.check_and_build`). Every page goes through `Pages.fill`, which reads the file
+offset table and directory, the columns' among them (each column within its sections, its rank table's counts, its
+row offsets each larger than the one before up to its rows, its blocks in order: `Snapshot.check_and_build`). A run
+that fits in the cache is read and checked whole, by up to 4 domains for a run of 512 pages or more, each with its
+own descriptor, before it is taken. Every page goes through `Pages.fill`, which reads the file
 page the page table names and checks the CRC-32C the table gives before it enters the frame table: no other path puts
 a page there. Every access to a run is bounds-checked (the frame table, then the page's bytes or a block's copy), so
-a read never leaves the run's bytes. The coding of format 7 (blocks by a frame of reference, a page table) changes
-what a page holds, not this argument: a value is decoded only from a page that checked. For random damage
+a read never leaves the run's bytes. The coding of formats 7 and 8 (blocks by a frame of reference, a page table, the
+column order) changes what a page holds, not this argument: a value is decoded only from a page that checked. For random damage
 of a page, CRC-32C misses it with probability 2⁻³²; it detects every burst of up to 32 bits (Castagnoli, Bräuer,
 Herrmann 1993).
 
@@ -299,7 +302,11 @@ a one-valued property whose thing is bound offers at most one candidate; its cou
 before every pattern that offers one or more and after one that offers none (`Query.count_with` compares 2c for an
 exact count c against 1 for it). Either way the level enumerates at most the smallest exact count: if the pattern has
 no value, it gives nothing, and if another offers none, that one is taken. So the bound is unchanged, and the unit
-tests' exact bound still holds.
+tests' exact bound still holds. A check left to the next level (a pattern whose other side is the next variable)
+changes no count: a binding that fails it reaches the next level, where that pattern offers nothing and is the
+source. The leapfrog (run format 8, [theory](theory.md#4-generic-join)) reads, at a level whose source is a slice
+of m ≥ 2, every other slice of at most 8 m: the tested bound adds those slices' sizes, at most 1 + 8 (k − 1) times
+Generic Join's for k slices.
 
 *Tested by* the property tests and the simulation: every random question, on views with a delta and after recoveries,
 must give the naive evaluator's answers and enumerate at most the bound that `test/check.ml` computes from the facts
