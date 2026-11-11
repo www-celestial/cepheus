@@ -138,12 +138,14 @@ let fold_fixed (v : Store.view) (q : Query.t) asg ~drop (k : int array -> unit) 
   match fix q asg ~drop with
   | None -> ()
   | Some (q', back) ->
-    let full = Array.make q.vars 0 in
+    (* a large question runs on several domains: each gathers its own bindings, given to [k] once the fold is done *)
+    let base = Array.make q.vars 0 in
     let known = ref true in
-    Array.iteri (fun x a -> match a with Some y -> (match Store.word v y with Some w -> full.(x) <- w | None -> known := false) | None -> ()) asg;
+    Array.iteri (fun x a -> match a with Some y -> (match Store.word v y with Some w -> base.(x) <- w | None -> known := false) | None -> ()) asg;
     if !known then
-      Query.fold v q' ~init:(fun () -> ()) ~merge:(fun () () -> ())
-        ~step:(fun () env -> Array.iteri (fun i w -> full.(back.(i)) <- w) env; k full)
+      Query.fold v q' ~init:(fun () -> []) ~merge:List.rev_append
+        ~step:(fun acc env -> let full = Array.copy base in Array.iteri (fun i w -> full.(back.(i)) <- w) env; full :: acc)
+      |> List.iter k
 
 (* ---- templates ---- *)
 
@@ -226,11 +228,27 @@ let answer (v : Store.view) (s : sub) =
   end
   else begin
     Hashtbl.reset s.keys;
-    Query.fold v s.q ~init:(fun () -> ()) ~merge:(fun () () -> ())
-      ~step:(fun () b ->
-        let kv = values v t b t.give in
-        let k = match Hashtbl.find_opt s.keys kv with Some k -> k | None -> let k = { n = 0; acc = agg_start t } in Hashtbl.replace s.keys kv k; k in
-        agg_add t k b);
+    (* a table a domain, joined at the end *)
+    let combine (a : key) (b : key) =
+      a.n <- a.n + b.n;
+      Array.iteri
+        (fun i g ->
+          match g with
+          | Wire.Count | Sum _ -> a.acc.(i) <- a.acc.(i) + b.acc.(i)
+          | Min _ -> a.acc.(i) <- min a.acc.(i) b.acc.(i)
+          | Max _ -> a.acc.(i) <- max a.acc.(i) b.acc.(i))
+        t.aggs
+    in
+    let tbl =
+      Query.fold v s.q ~init:(fun () -> Hashtbl.create 16)
+        ~merge:(fun a b -> Hashtbl.iter (fun kv k -> match Hashtbl.find_opt a kv with Some k' -> combine k' k | None -> Hashtbl.replace a kv k) b; a)
+        ~step:(fun tbl b ->
+          let kv = values v t b t.give in
+          let k = match Hashtbl.find_opt tbl kv with Some k -> k | None -> let k = { n = 0; acc = agg_start t } in Hashtbl.replace tbl kv k; k in
+          agg_add t k b;
+          tbl)
+    in
+    Hashtbl.iter (fun kv k -> Hashtbl.replace s.keys kv k) tbl;
     let rows = Hashtbl.fold (fun kv k acc -> match key_row t kv k with Some r -> r :: acc | None -> acc) s.keys [] in
     List.sort compare rows
   end
