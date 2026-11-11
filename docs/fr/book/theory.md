@@ -9,7 +9,7 @@ récit en mots simples des mêmes parties est dans [architecture](architecture.m
 **Modèle.** Le journal est une suite de frames F1, F2, ... (une frame : un bloc du journal écrit d'un seul tenant, qui
 porte des groupes et se vérifie par ses CRC) ajoutées à la fin de fichiers de segment (les fichiers successifs du
 journal). Chaque frame contient des groupes de numéros consécutifs. Soit $D$ le préfixe durable du fichier (les octets
-couverts par un `fsync` terminé ; `fsync` est l'appel système qui attend que les octets écrits soient vraiment sur le
+couverts par un `fsync` terminé ; fsync est l'appel système qui attend que les octets écrits soient vraiment sur le
 disque). Un crash (F1, F2) remplace le fichier par $D$ suivi de quelques octets $R$ venus des écritures pas encore
 synchronisées (n'importe quel sous-ensemble de leurs secteurs, peut-être torn, c'est-à-dire écrits en partie
 seulement). La recovery (la relecture du journal à l'ouverture, qui rebâtit l'état après un crash) lit les frames depuis
@@ -68,7 +68,7 @@ erreurs aléatoires échappent avec une probabilité $2^{-32}$.
 
 ## 2. Group commit
 
-Le group commit consiste à confirmer plusieurs groupes par un seul `fsync`. Avec un seul writer et un `fsync` de durée
+Le group commit consiste à confirmer plusieurs groupes par un seul fsync. Avec un seul writer et un `fsync` de durée
 $f$, un système fermé (closed loop : chaque client attend sa réponse avant d'envoyer la suite) de $N$ clients qui
 écrivent chacun un groupe à la fois atteint un régime stable où chaque frame contient les groupes arrivés pendant le
 `fsync` précédent. Par la loi de Little
@@ -78,7 +78,7 @@ $\lambda \approx N / (1{,}5 f)$ jusqu'à la limite CPU $C$ du writer (les groupe
 Sur la machine de test, $f \approx 3$ ms (environ 340 fsync/s) et $C \approx 146\,000$ groupes/s pour des groupes de 5 faits (mesuré) : 8
 clients donnent au plus ~1 800 groupes/s, 256 clients ~57 000 ; les chiffres mesurés sont dans les
 [benchmarks](benchmarks.md).
-Le writer résout la frame suivante pendant que le syncer (le thread qui fait les `fsync` du journal) force la
+Le writer résout la frame suivante pendant que le syncer (le thread qui fait les fsyncs du journal) force la
 précédente (deux étages), et les groupes qui arrivent pendant un `fsync` sont fusionnés dans la frame en attente : une
 frame contient donc tout ce qui est arrivé entre-temps ([DeWitt 1984], [Helland 1987]).
 
