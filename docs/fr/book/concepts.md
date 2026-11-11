@@ -218,7 +218,7 @@ chacune, n'énumère que le plus petit ensemble de candidats qu'offre un pattern
 autres patterns. Il est **worst-case optimal** (optimal dans le pire cas) : son travail est borné par la plus grande
 réponse que la question pourrait avoir sur des données de cette taille (l'AGM bound), même pour des patterns cycliques
 comme les triangles, où un plan de joins deux à deux peut construire bien plus de lignes intermédiaires que la réponse
-([architecture](architecture.md#les-questions), [théorie](theory.md#4-generic-join)).
+([architecture](architecture.md#questions), [théorie](theory.md#4-generic-join)).
 
 ```ocaml
 open Cepheus

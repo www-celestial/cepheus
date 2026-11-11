@@ -80,7 +80,7 @@ lecture seule après l'erreur (ext4, Btrfs) ou arrêté (XFS) refuse la réouver
 
 Une erreur du disque pendant qu'un merge écrit son fichier de run n'arrête pas la base : le fichier est supprimé,
 stderr le dit, et le merge est retenté une fois que le delta a grandi d'un seuil de plus ; un grand groupe dont le
-fichier de run échoue renvoie `Io` pour ce groupe seulement. Chaque message : [erreurs](errors.md#io--le-disque-a-échoué).
+fichier de run échoue renvoie `Io` pour ce groupe seulement. Chaque message : [erreurs](errors.md#io--le-disque-a-lâché).
 
 ## Sauvegarde et restauration
 

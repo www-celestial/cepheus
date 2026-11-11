@@ -502,7 +502,7 @@ threads) ; les petites écritures coûtent des microsecondes, un chiffre qu'aucu
 compacts, numéroté en une passe, trié sur place (pas du tout quand il arrive dans l'ordre des choses), et fusionné dans
 son run pendant qu'un autre domain écrit le corps de sa frame dans le journal, forcé sur le disque au fur et à mesure ;
 le run est forcé à côté du dernier fsync de la frame et n'est pas copié dans le cache ; le reçu (la réponse qui donne
-les numéros des nouvelles choses) est fait à côté du merge ([architecture](architecture.md#les-grands-groupes)). Avec
+les numéros des nouvelles choses) est fait à côté du merge ([architecture](architecture.md#grands-groupes)). Avec
 cela : aucun run gardé hors de la chaîne (les runs posés les uns sur les autres) après un merge, et une question compte
 une seule fois les patterns (les triplets de la question) qu'aucun binding (une valeur pour chaque variable) ne change.
 

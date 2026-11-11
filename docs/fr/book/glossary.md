@@ -11,12 +11,12 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **anti-dependency** (rw edge) — dans une history (un historique de transactions), une arête d'une transaction qui a
   lu une version d'une donnée vers la transaction qui a écrit la version suivante : le lecteur a vu l'état d'avant
   l'écrivain. Un cycle qui passe par une telle arête est l'anomalie G2 d'Adya.
-  [cas](case-seats.md#des-crashs-réels-et-un-vérificateur-de-tout-lhistorique)
+  [cas](case-seats.md#de-vrais-crashs-et-un-vérificateur-de-tout-lhistorique)
 - **append-only** — un fichier qu'on ne fait jamais qu'allonger, sans jamais le réécrire sur place : les segments du
   journal. [architecture](architecture.md#le-journal--un-write-ahead-log)
 - **asserted fact** (un fait affirmé) — un fait qu'un programme a écrit (`Add`), par opposition à un fait qu'une règle
   a dérivé ; l'extensional database (EDB) de Datalog. Un fait peut être à la fois affirmé et dérivé.
-  [règles](rules.md#ce-que-contient-la-base--le-least-model)
+  [règles](rules.md#ce-que-tient-la-base--le-least-model)
 - **atomic** (tout ou rien ; atomique) — appliqué entièrement ou pas du tout : un groupe (G2) ; un renommage ; le
   passage à une nouvelle vue (une seule écriture atomique en mémoire). [garanties](guarantees.md#g2-tout-ou-rien)
 - **atomic register**, **regular register**, **new-old inversion** — les classes de registres partagés de Lamport (On
@@ -37,7 +37,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **base** — les runs d'une vue pris ensemble : les faits tels qu'ils sont aux derniers merges, triés, en colonnes,
   dans des fichiers de runs lus à travers le cache. [architecture](architecture.md#les-index--les-runs-et-le-delta)
 - **baseline** — ce qu'on mesure avant que rien ne change, pour que le changement ait un nombre auquel être comparé.
-  [cas](case-seats.md#2-mesurer-avant-de-changer-quoi-que-ce-soit)
+  [cas](case-seats.md#2-mesurer-avant-de-rien-changer)
 - **batch** — les écritures que le writer résout d'un coup (jusqu'à 4 096) ; plusieurs batches peuvent faire une seule
   frame. [limites](limits.md#les-écritures)
 - **Belady's optimum** (OPT) — la politique d'éviction (le choix de la page à retirer du cache) qui retire la page dont
@@ -48,9 +48,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   d'une sorte et d'une taille fixes (un int32 sur 4 octets, un entier non signé de 16 bits sur 2) : le collector ne
   parcourt, ne copie ni ne déplace jamais son contenu. Les faits d'un grand groupe vivent dans des Bigarrays : 14 octets
   par fait, là où un tableau OCaml de records prendrait 8 octets par champ et serait parcouru par chaque collection
-  majeure. [architecture](architecture.md#les-grands-groupes)
+  majeure. [architecture](architecture.md#grands-groupes)
 - **binary join** — un join de deux entrées à la fois ; un plan fait de tels joins peut construire plus de lignes
-  intermédiaires que la réponse sur des questions cycliques. [architecture](architecture.md#les-questions)
+  intermédiaires que la réponse sur des questions cycliques. [architecture](architecture.md#questions)
 - **binding** — une valeur pour chaque variable d'une question ; une réponse est un binding qui fait de chaque pattern
   un fait. [concepts](concepts.md#les-questions)
 - **birthday problem** (le paradoxe des anniversaires) — la probabilité que parmi m personnes deux aient le même
@@ -66,12 +66,12 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   (par chose : un en-tête avec une base et une largeur pour chaque propriété, puis un record par chose avec ses
   propriétés à une valeur, et des colonnes pour les autres) ou 128 lignes d'une propriété (par propriété : valeurs et
   choses) ; n'importe quelle valeur d'un bloc se lit sans décoder les autres.
-  [formats](formats.md#run-dirsnapshotslo-20-chiffres-hi-20-chiffresrun)
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **body** (d'une règle ; le corps) — ses patterns et ses intervalles : la question dont les réponses donnent la tête.
   [règles](rules.md#une-règle-est-une-question-avec-une-conclusion)
 - **bottom run** — un run qui ne repose sur rien (son nom commence par 20 zéros) : il contient tout l'état à son
   dernier groupe et aucun retrait.
-  [architecture](architecture.md#les-runs-sur-le-disque)
+  [architecture](architecture.md#les-runs-sur-disque)
 - **buffer pool** (le cache) — la mémoire où une base garde des pages de ses fichiers, en décidant elle-même ce qui
   reste ; celui de Cepheus contient les pages de 16 KiB des runs, 1 GiB par défaut.
   [architecture](architecture.md#les-pages-et-le-cache)
@@ -87,7 +87,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   parle le protocole et lit en local sur la machine du serveur. [Cesia](cesia.md)
 - **chain** (de runs ; une chaîne) — des runs posés les uns sur les autres depuis 0 : chacun contient les groupes qui
   suivent le dernier groupe de celui d'en dessous. Une ouverture prend la chaîne qui atteint le groupe le plus récent
-  avec le moins de runs. [architecture](architecture.md#les-runs-sur-le-disque)
+  avec le moins de runs. [architecture](architecture.md#les-runs-sur-disque)
 - **checksum**, **CRC**, **CRC-32C** — un nombre court calculé à partir d'octets, qui change s'ils changent ; CRC-32C
   (le polynôme de Castagnoli, le checksum d'iSCSI, RFC 3720) détecte toute rafale d'au plus 32 bits et laisse passer un
   dommage aléatoire avec une probabilité $2^{-32}$. Cepheus le calcule par l'instruction même du processeur (SSE4.2 sur
@@ -95,7 +95,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **chunk** (d'un grand groupe) — 65 536 opérations d'un grand groupe (`Bulk.chunk`), l'unité de travail que les
   domains prennent à tour de rôle pendant que le groupe est rangé dans ses tableaux, vérifié et trié (morsel-driven
   scheduling, le partage du travail en petits morceaux, [Leis 2014]).
-  [architecture](architecture.md#les-grands-groupes)
+  [architecture](architecture.md#grands-groupes)
 - **clean close**, **marker** (une fermeture propre, le marqueur) — `close` laisse `DIR/closed` une fois que tout est
   durable, et l'ouverture suivante peut sauter les fsyncs dont une recovery a besoin.
   [exploitation](operations.md#louverture-et-la-recovery)
@@ -113,13 +113,13 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   chaque propriété à part de celles des autres, dans l'ordre des choses, les valeurs d'une chose triées (Abadi et al.
   2007). Chercher une propriété d'une chose lit un mot de rank, une entrée de répertoire et un champ des seuls octets de
   cette propriété ; une question sur quelques propriétés ne lit que les leurs.
-  [formats](formats.md#run-dirsnapshotslo-20-chiffres-hi-20-chiffresrun)
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **columns** (columnar coding ; les colonnes) — ranger ensemble les valeurs d'un même champ plutôt qu'enregistrement
   par enregistrement, pour que des valeurs semblables soient côte à côte et se codent en peu de bits : le journal code
   en colonnes les sortes, les choses et les valeurs de chaque propriété d'un groupe ; l'ordre par propriété d'un run
   est une colonne de chaque propriété. [formats](formats.md#un-groupe)
 - **compaction** — un autre nom pour un merge dans un LSM-tree.
-  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-en-niveaux)
+  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **component** — une des structures d'un LSM-tree : le delta en mémoire (C0), les runs sur le disque.
 - **confirmed** (confirmé) — un groupe dont le `write` a renvoyé `Ok` : il est durable.
   [garanties](guarantees.md#les-pannes)
@@ -144,7 +144,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **counting sort** — un tri qui compte combien d'éléments tombent sur chaque clé, puis place chaque élément à la place
   de sa clé en une passe : $O(n + \text{clés})$, sans comparaison. Les faits d'un grand groupe sont triés par propriété
   de cette façon, en chunks comptés et répartis en même temps par plusieurs domains.
-  [théorie](theory.md#9-les-niveaux-sur-le-disque-et-les-grands-groupes)
+  [théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes)
 - **cut** (du journal ; la coupe) — après une écriture ou un fsync qui a échoué, le writer tronque le journal jusqu'à
   la fin de sa dernière frame durable et le force, pour que l'écriture échouée ait disparu de la mémoire et du disque
   (G13). [garanties](guarantees.md#g13-on-ne-se-fie-jamais-à-un-fsync-qui-a-échoué)
@@ -161,7 +161,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [architecture](architecture.md#les-index--les-runs-et-le-delta) Dans le reasoner (la partie qui applique les
   règles), $\Delta$ est autre chose : les faits qu'un groupe change, à partir desquels la semi-naive evaluation dérive
   (le tour 0, ce sont les ajouts affirmés du groupe).
-  [règles](rules.md#comment-le-writer-le-tient--la-semi-naive-evaluation)
+  [règles](rules.md#comment-le-writer-la-tient-à-jour--la-semi-naive-evaluation)
 - **delta debugging** — réduire un cas qui échoue en en retirant des parties tant qu'il échoue encore, jusqu'à ce que
   chaque partie restante soit nécessaire (Zeller et Hildebrandt 2002).
   [cas](case-seats.md#3-une-hypothèse-quon-peut-réfuter-et-sa-cause)
@@ -172,10 +172,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   chaque raison pour laquelle l'une doit venir avant une autre : ww (elle a écrit la version que l'autre a remplacée),
   wr (l'autre a lu ce qu'elle a écrit), rw (une anti-dependency). La history est serializable quand le graphe n'a pas
   de cycle (Adya 1999).
-  [cas](case-seats.md#des-crashs-réels-et-un-vérificateur-de-tout-lhistorique)
+  [cas](case-seats.md#de-vrais-crashs-et-un-vérificateur-de-tout-lhistorique)
 - **derivation** (rule instance ; une dérivation) — une règle avec un fait pour chaque atome du corps, qui rend son
   corps vrai ; elle dérive sa tête. Un fait peut avoir beaucoup de dérivations.
-  [règles](rules.md#comment-le-writer-le-tient--la-semi-naive-evaluation)
+  [règles](rules.md#comment-le-writer-la-tient-à-jour--la-semi-naive-evaluation)
 - **derived fact** (un fait dérivé) — un fait que donne une règle ; tenu dans la vue comme n'importe quel fait, marqué
   « seulement dérivé » quand aucun programme ne l'a affirmé (le bit 63 de son mot de valeur dans un run).
   [règles](rules.md)
@@ -187,16 +187,16 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **dirty page**, **writeback** — une page du page cache du noyau qu'un programme a écrite et que le disque ne contient
   pas encore est dirty ; le writeback, c'est le noyau qui l'écrit sur le disque, à un fsync ou en arrière-plan. La frame
   d'un grand groupe est forcée par morceaux pendant que son run est fait, pour que son writeback se fasse en même temps
-  que le merge. [architecture](architecture.md#les-grands-groupes)
+  que le merge. [architecture](architecture.md#grands-groupes)
 - **domain** — l'unité de parallélisme d'OCaml 5 : un fil d'exécution sur son propre cœur, avec son propre jeune tas
   et son propre runtime lock ; les threads d'un même domain se relaient.
-  [architecture](architecture.md#un-seul-writer-les-threads-et-les-domains)
+  [architecture](architecture.md#un-seul-writer-threads-et-domains)
 - **DRed** (delete and rederive) — l'algorithme de maintenance qui supprime toutes les conséquences des faits
   supprimés, puis dérive de nouveau celles qui ont encore une preuve (Gupta et al. 1993).
   [règles](rules.md#le-retrait--backwardforward)
 - **durable** — sur le disque lui-même, pas seulement dans la mémoire du noyau : couvert par un fsync terminé.
 - **EDB, IDB** — extensional et intensional database : les faits affirmés, et les faits dérivés.
-  [règles](rules.md#ce-que-contient-la-base--le-least-model)
+  [règles](rules.md#ce-que-tient-la-base--le-least-model)
 - **Elle** — le vérificateur qu'utilise Jepsen pour trouver des anomalies d'isolation dans l'historique enregistré
   d'une base, en déduisant son dependency graph et en y cherchant des cycles (Kingsbury et Alvaro 2020).
 - **engine** (d'un package natif ; le moteur) — l'OCaml d'un package natif de Cesia, compilé en code machine dans un
@@ -233,7 +233,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   le répertoire des données. [serveur](server.md#lectures-locales-g15)
 - **fixpoint** (least ; le plus petit point fixe) — un ensemble de faits que l'application des règles ne change pas ;
   le plus petit qui contient les faits affirmés est le least model.
-  [règles](rules.md#ce-que-contient-la-base--le-least-model)
+  [règles](rules.md#ce-que-tient-la-base--le-least-model)
 - **floor** — le plus petit numéro de série d'une session qui attend encore sa réponse, envoyé avec chaque écriture :
   les reçus en dessous sont oubliés. [serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)
 - **follow stream**, **follower** — un follow stream est la seconde connexion d'un lecteur local, sur laquelle le
@@ -243,11 +243,11 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **fork** — une base temporaire qui part d'une vue : les mêmes écritures et les mêmes vérifications, rien sur le
   disque, rien à payer pour en faire un. [concepts](concepts.md#les-forks)
 - **frame** — l'unité d'une écriture et d'un fsync dans le journal : un en-tête, les groupes, un trailer.
-  [formats](formats.md#segment-du-journal-dirjournalpremier-groupe-20-chiffresseg)
+  [formats](formats.md#segment-de-journal-dirjournalfirst-group-20-digitsseg)
 - **frame of reference** (FOR) — un bloc de nombres rangés sous la forme de leur plus petite valeur (la base) et, pour
   chacun, sa différence avec la base sur autant de bits qu'en demande la plus grande différence : des valeurs entre
   20 000 et 23 650 prennent 12 bits chacune, pas 64 (Goldstein et al. 1998 ; PFOR, sa forme patched, Zukowski et al.
-  2006). [théorie](theory.md#11-les-runs-et-le-journal-compressés--le-codage-et-sa-borne)
+  2006). [théorie](theory.md#11-runs-et-journal-compressés--le-codage-et-sa-borne)
 - **fsync** — l'appel système qui revient une fois que les octets d'un fichier sont sur le disque.
 - **fuzzing**, **libFuzzer**, **sanitizer** — le fuzzing fait tourner une fonction sur des millions d'entrées qu'un
   programme modifie pour atteindre de nouveaux chemins dans le code, et s'arrête à la première qui échoue ; libFuzzer
@@ -257,13 +257,13 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [tester](testing.md#le-fichier-c-fuzzé)
 - **galloping search** (exponential search) — une recherche qui essaie 1, 2, 4, 8... places plus loin avant de couper
   en deux, pour que trouver une place à $k$ pas coûte $O(\log k)$ (Bentley et Yao 1976) ; c'est ainsi que cherche le
-  leapfrog. [théorie](theory.md#8-les-merges-écrits-dans-un-fichier)
+  leapfrog. [théorie](theory.md#8-merges-écrits-dans-un-fichier)
 - **gaps** — dans un row block, les choses d'une valeur rangées sous la forme de leur différence avec la chose d'avant
   (moins un) : « les factures impayées », proches les unes des autres, prennent 3-4 bits chacune au lieu de 9-10.
-  [formats](formats.md#run-dirsnapshotslo-20-chiffres-hi-20-chiffresrun)
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **Generic Join** — le worst-case optimal join qu'utilise Cepheus : une variable à la fois, le plus petit ensemble de
   candidats, chaque candidat vérifié contre les autres patterns (Ngo, Ré, Rudra 2013).
-  [architecture](architecture.md#les-questions)
+  [architecture](architecture.md#questions)
 - **ghost queue** — la mémoire qu'a S3-FIFO des pages récemment évincées de sa petite file ; une page redemandée bientôt
   va directement dans la file principale.
 - **group** (un groupe) — la transaction de Cepheus : une liste d'opérations appliquées tout ou rien, avec un numéro,
@@ -277,7 +277,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   que nomme son hash, ou au premier slot libre après lui ; une recherche sonde à partir de ce slot jusqu'à trouver la
   clé ou un slot vide. Remplie au plus à moitié, environ 1,5 sonde pour une clé qui s'y trouve (Knuth, 6.4). Les textes
   de chaque run se trouvent par une telle table.
-  [formats](formats.md#run-dirsnapshotslo-20-chiffres-hi-20-chiffresrun)
+  [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **head** (d'une règle ; la tête) — le pattern qu'elle donne pour chaque réponse de son corps, ou `Never`.
   [règles](rules.md#une-règle-est-une-question-avec-une-conclusion)
 - **history** (l'historique) — la suite de toutes les transactions qu'une base a appliquées, avec ce que chacune a lu
@@ -286,11 +286,11 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   ferme (`idle_timeout`, 600 s par défaut), son handshake TLS compris. [serveur](server.md#clustertoml)
 - **index word** — la forme sur 64 bits d'une valeur dans les index : la valeur elle-même, ou un numéro du dictionnaire
   pour les textes et les floats ; ce que donne `fold`, et que `decode` change de nouveau en valeur.
-  [api](api.md#les-questions)
+  [api](api.md#questions)
 - **information bound** (entropy ; l'entropie) — le plus petit nombre de bits dont un codage quelconque a besoin pour
   des données, d'après le nombre de valeurs différentes qu'elles auraient pu prendre : un statut qui vaut "paid" 70 % du
   temps, "unpaid" 20 % et "late" 10 % demande 1,16 bit en moyenne, pas 2.
-  [théorie](theory.md#11-les-runs-et-le-journal-compressés--le-codage-et-sa-borne)
+  [théorie](theory.md#11-runs-et-journal-compressés--le-codage-et-sa-borne)
 - **instruction** (du processeur), **intrinsic** — une opération qu'exécute le processeur ; un intrinsic est une
   fonction C que le compilateur change en une instruction donnée (`_mm_crc32_u64` en `crc32` sur x86-64, `__crc32cd`
   en `crc32cx` sur arm64). Le compilateur d'OCaml n'en a pas pour celles-ci, d'où le fichier C.
@@ -306,13 +306,13 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [architecture](architecture.md#la-recovery--torn-writes-et-dommages)
 - **kind** (client Cesia) — une sorte de chose dans un programme Cesia : un nom et des champs, chacun une propriété d'un
   type (`client/City` pour le champ `City` du kind `client`) ; `Insert` et `Get` écrivent et lisent les champs d'une
-  chose pour un kind sous la forme d'une map. [Cesia](cesia.md#les-kinds-et-les-valeurs-quils-contiennent)
+  chose pour un kind sous la forme d'une map. [Cesia](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)
 - **large group** (un grand groupe) — un groupe de 20 000 opérations ou plus, toutes des ajouts : il prend un chemin
   plus rapide vers le même résultat (ses faits dans des Bigarrays, rangés et triés par plusieurs domains, fusionnés
   d'un coup en un run pendant que sa frame s'écrit à côté, par morceaux).
-  [architecture](architecture.md#les-grands-groupes)
+  [architecture](architecture.md#grands-groupes)
 - **lazy leveling** — du tiering à chaque niveau sauf le dernier, qui est en leveling (Dayan et Idreos 2018).
-  [théorie](theory.md#9-les-niveaux-sur-le-disque-et-les-grands-groupes)
+  [théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes)
 - **leapfrog** (leapfrog intersection) — l'intersection de listes triées par des sauts : les listes dans l'ordre de
   leurs clés courantes, chacune saute à son tour jusqu'à la première clé au moins égale à la plus grande (par
   galloping), et une clé que toutes atteignent est dans chaque liste (Veldhuizen 2014). Un niveau d'une question
@@ -322,14 +322,14 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   qui n'a besoin d'aucune horloge (les leases reviendront entre machines).
   [serveur](server.md#les-règles-quavait-dabord-la-conception-et-pourquoi-elles-ont-été-laissées)
 - **least model** — le plus petit ensemble de faits qui contient les faits affirmés et qui est clos par les règles : ce
-  que contient une base avec des règles (G17). [règles](rules.md#ce-que-contient-la-base--le-least-model)
+  que contient une base avec des règles (G17). [règles](rules.md#ce-que-tient-la-base--le-least-model)
 - **level**, **size ratio** — un niveau : une place pour des runs avec une capacité dans un LSM-tree ; chaque niveau
   est $T$ fois plus grand que celui du dessus ($T$, le size ratio, vaut 4 ici) : le niveau $l$ contient au plus
-  $200\,000 \times 4^l$ lignes. [architecture](architecture.md#les-merges--un-log-structured-merge-tree-en-niveaux)
+  $200\,000 \times 4^l$ lignes. [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **leveling**, **tiering** — les deux façons dont un LSM-tree de plusieurs niveaux fait ses merges : en leveling,
   chaque niveau contient un seul run, et un run qui descend est fusionné avec lui (Cepheus) ; en tiering, un niveau
   contient jusqu'à T runs, fusionnés ensemble dans le niveau suivant quand il est plein. Le leveling écrit plus et lit
-  moins de runs. [théorie](theory.md#9-les-niveaux-sur-le-disque-et-les-grands-groupes)
+  moins de runs. [théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes)
 - **linearizability** — chaque opération semble prendre effet à un seul instant entre son appel et son retour
   (Herlihy et Wing 1990) ; un groupe, en tant qu'écriture sur un seul objet, est linearizable.
 - **local read** (une lecture locale) — une lecture qu'un programme fait dans sa propre mémoire, sur la machine du
@@ -341,7 +341,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   perdu ; Cepheus ne l'empêche que quand la lecture est énoncée avec `Expect`.
 - **LSM-tree** (log-structured merge-tree) — les écritures récentes dans une petite structure en mémoire, fusionnées
   en masse dans des structures triées sur le disque (O'Neil et al. 1996).
-  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-en-niveaux)
+  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **materialisation** (la matérialisation) — garder les faits dérivés stockés et à jour, pour que les questions les
   lisent comme des faits ; l'autre façon est de raisonner au moment de la question (query rewriting, magic sets).
   [règles](rules.md)
@@ -351,12 +351,12 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   y écrit les octets à envoyer, sans jamais toucher au socket, donc il n'attend jamais. [serveur](server.md#tls)
 - **merge** — la fusion du delta et des runs les plus récents en un seul nouveau fichier de run ; il tourne en
   arrière-plan et il est atomique (G12) ; `snapshot` est le merge complet, de tous les runs.
-  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-en-niveaux)
+  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **model checking** — visiter chaque état atteignable d'un modèle borné et vérifier des invariants dans chacun ; TLC
   le fait pour TLA+. [tester](testing.md#model-checking)
 - **monotone sequence** (une suite monotone) — des nombres qui ne décroissent jamais (des offsets), rangés par blocs de
   128 sous forme de frame of reference avec l'en-tête de chaque bloc à part, pour que l'entrée q soit un en-tête et un
-  champ. [formats](formats.md#run-dirsnapshotslo-20-chiffres-hi-20-chiffresrun)
+  champ. [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **monotonic writes** — une session guarantee (une garantie donnée à une session ; Terry et al. 1994) : les écritures
   d'un programme sont appliquées dans l'ordre où il les a envoyées.
   [serveur](server.md#lordre-le-pipelining-et-la-back-pressure)
@@ -379,14 +379,14 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   crash du processus garde et qu'une coupure de courant perd.
 - **page table** (d'un run ; la table des pages) — à la fin du fichier d'un run, pour chaque page de la disposition du
   run, la page du fichier qui la contient et son CRC : un run est disposé d'après des bornes supérieures, et seules les
-  pages qui contiennent des octets sont écrites. [formats](formats.md#run-dirsnapshotslo-20-chiffres-hi-20-chiffresrun)
+  pages qui contiennent des octets sont écrites. [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **part** (d'un run ; une partie) — un run en a deux : les faits qu'il ajoute (la partie a) et les faits des runs en
   dessous de lui qu'il retire (la partie t). [architecture](architecture.md#les-index--les-runs-et-le-delta)
 - **PAX** (Partition Attributes Across) — une disposition de page qui garde ensemble, à l'intérieur de chaque page, les
   valeurs de chaque attribut (Ailamaki et al. 2001) : des colonnes à l'intérieur d'une page. Mesurée pour les thing
   blocks et mise de côté : chercher une chose touchait une cache line (le bloc de 64 octets que le processeur lit d'un
   coup) par propriété ; un bloc garde un record par chose pour ses propriétés à une valeur.
-  [théorie](theory.md#11-les-runs-et-le-journal-compressés--le-codage-et-sa-borne)
+  [théorie](theory.md#11-runs-et-journal-compressés--le-codage-et-sa-borne)
 - **persistent data structure** — une structure qui n'est jamais changée sur place : un changement fait une nouvelle
   version et l'ancienne reste valide. [architecture](architecture.md#les-index--les-runs-et-le-delta)
 - **phantom** — un nouveau membre d'un ensemble lu plus tôt (les faits qui correspondent à un pattern), que ne voit pas
@@ -396,29 +396,29 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [serveur](server.md#lordre-le-pipelining-et-la-back-pressure)
 - **plan** (d'une règle) — la règle compilée en closures (des fonctions qui gardent les valeurs qu'elles utilisent)
   avec un atome mis en correspondance avec un fait donné, les autres joints dans un ordre choisi d'après les comptes du
-  stockage. [règles](rules.md#comment-le-writer-le-tient--la-semi-naive-evaluation)
+  stockage. [règles](rules.md#comment-le-writer-la-tient-à-jour--la-semi-naive-evaluation)
 - **population count** (popcount) — le nombre de bits à 1 dans un mot ; une recherche dans une rank table en fait un.
 - **proof** (une preuve) — un arbre dont les feuilles sont des faits affirmés et dont les nœuds sont des instances de
   règles, les enfants de chaque nœud étant les faits de son corps ; *well-founded* (bien fondée) : chaque enfant prouvé
-  avant son parent. `why` en renvoie une (G20). [règles](rules.md#pourquoi)
+  avant son parent. `why` en renvoie une (G20). [règles](rules.md#why)
 - **property** (une propriété) — l'attribut d'un fait ; elle-même une chose (de 16 à 65 535) avec un nom, un type et
   deux indicateurs.
-- **provenance** — l'origine d'un fait : ici, une preuve de ce fait. [règles](rules.md#pourquoi)
+- **provenance** — l'origine d'un fait : ici, une preuve de ce fait. [règles](rules.md#why)
 - **question** — la query (la requête) de Cepheus : des patterns sur des variables.
   [concepts](concepts.md#les-questions)
 - **radix sort** (least significant digit first) — un tri qui trie selon le chiffre le plus bas, puis le suivant,
   chaque passe étant un counting sort stable, pour que l'ordre des chiffres plus bas soit gardé :
   $O(n \times \text{chiffres})$. Les valeurs d'un grand groupe à l'intérieur d'une propriété sont triées avec des
   chiffres de 11 bits (Knuth, vol. 3, 5.2.5), chaque passe d'un buffer à l'autre, et ses index par chose aussi quand il
-  n'arrive pas dans l'ordre des choses. [théorie](theory.md#9-les-niveaux-sur-le-disque-et-les-grands-groupes)
+  n'arrive pas dans l'ordre des choses. [théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes)
 - **range restriction** (safety) — chaque variable de la tête d'une règle apparaît dans son corps : une règle ne donne
   de faits que sur ce que contient la base, et le least model est fini.
   [règles](rules.md#une-règle-est-une-question-avec-une-conclusion)
 - **rank table** (rank directory) — un bit pour chaque numéro de chose et, tous les 32 bits, combien de bits sont à 1
   avant eux : « la chose e est-elle là, et à quel slot ? », c'est un mot et un popcount (Jacobson 1989). Chaque partie
-  d'un run en a une. [théorie](theory.md#3-les-index)
+  d'un run en a une. [théorie](theory.md#3-index)
 - **read amplification** — combien de runs une lecture doit visiter : un par niveau en leveling, au plus 3 à 10 M de
-  faits. [architecture](architecture.md#les-merges--un-log-structured-merge-tree-en-niveaux)
+  faits. [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **read your writes** — une session guarantee (Terry et al. 1994) : une lecture envoyée après l'arrivée du reçu d'une
   écriture voit cette écriture. [serveur](server.md#lordre-le-pipelining-et-la-back-pressure)
 - **read-then-write** — une transaction d'un client qui lit une vue, puis écrit un groupe ; validée par ses `Expect`.
@@ -445,23 +445,23 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   enregistrement lit un seul endroit), un column store les valeurs de chaque champ (parcourir un champ lit un seul
   endroit). Un run est les deux : par chose, un record par chose pour ses propriétés à une valeur (avec de petites
   colonnes pour les autres), par propriété, une colonne de chaque propriété.
-  [théorie](theory.md#11-les-runs-et-le-journal-compressés--le-codage-et-sa-borne)
+  [théorie](theory.md#11-runs-et-journal-compressés--le-codage-et-sa-borne)
 - **rule** (une règle) — les patterns d'une question et une tête : chaque fois que les patterns sont des faits pour
   certaines valeurs, la tête est un fait pour les mêmes valeurs. Une chose du schéma (`cepheus/name`, `cepheus/rule`).
   [règles](rules.md)
 - **run**, **run file** — une structure triée du LSM-tree sur le disque : les changements d'un intervalle de groupes
   par-dessus les runs en dessous de lui, dans un fichier `DIR/snapshots/<lo>-<hi>.run`.
-  [architecture](architecture.md#les-runs-sur-le-disque)
+  [architecture](architecture.md#les-runs-sur-disque)
 - **S3-FIFO** — la politique d'éviction du cache : trois files FIFO (small, main, ghost), rien n'est déplacé sur un hit
   (quand la page est déjà dans le cache ; Yang et al. 2023). [architecture](architecture.md#les-pages-et-le-cache)
 - **schedule** (un ordonnancement) — un ordre dans lequel s'entrelacent les pas de transactions concurrentes.
-  [cas](case-seats.md#la-justesse-sur-des-entrées-générées)
+  [cas](case-seats.md#correction-sur-des-entrées-générées)
 - **schema** (le schéma) — les propriétés et leurs types ; dans Cepheus, des faits comme le reste.
   [concepts](concepts.md#les-propriétés-et-le-schéma)
 - **segment** — un fichier du journal, jusqu'à 64 MiB, nommé par son premier groupe.
 - **semi-naive evaluation** — évaluer les règles seulement sur ce qui a changé : chaque tour met en correspondance les
   faits nouveaux du tour d'avant, donc chaque instance de règle est trouvée une fois (Bancilhon, Ramakrishnan 1986).
-  [règles](rules.md#comment-le-writer-le-tient--la-semi-naive-evaluation)
+  [règles](rules.md#comment-le-writer-la-tient-à-jour--la-semi-naive-evaluation)
 - **serial** (le numéro de série) — le numéro que la bibliothèque d'un programme donne à chaque écriture de sa
   session : 1, 2, 3... Un numéro de série envoyé deux fois est appliqué une fois (G14).
   [serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)
@@ -482,13 +482,13 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   La page de visibilité est mappée ainsi, en lecture-écriture par le serveur et en lecture seule par les lecteurs.
   [serveur](server.md#lectures-locales-g15)
 - **single writer** (un seul writer) — un seul thread writer applique chaque groupe d'une base, dans l'ordre.
-  [architecture](architecture.md#un-seul-writer-les-threads-et-les-domains)
+  [architecture](architecture.md#un-seul-writer-threads-et-domains)
 - **slice** — les candidats qu'un pattern offre à une variable quand son autre côté est connu : les valeurs d'une
   propriété pour une chose, ou les choses qui ont une valeur. Dans un run, c'est une suite de lignes, triée : deux
   d'entre elles à un même niveau sont intersectées par leapfrog. [théorie](theory.md)
 - **snapshot** (l'opération) — `Cepheus.snapshot`, le merge complet : le delta et tous les runs en un seul run, pour
   que l'ouverture suivante ne rejoue rien. Le fichier des versions antérieures (format 4 et avant, `<group>.snap`)
-  contenait toute la base ; un fichier de run l'a remplacé. [api](api.md#les-opérations)
+  contenait toute la base ; un fichier de run l'a remplacé. [api](api.md#opérations)
 - **snapshot** (l'état), **view** (une vue) — l'état exact après un groupe. [concepts](concepts.md#les-vues)
 - **snapshot isolation** — chaque transaction lit l'état à son début, et échoue si une autre a écrit la même donnée
   entre-temps (first committer wins, le premier qui valide gagne) ; elle laisse passer le write skew.
@@ -498,7 +498,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [serveur](server.md#ce-que-cest-et-pourquoi)
 - **space amplification** — l'espace disque utilisé divisé par la taille des données : la chaîne seule après un merge
   (1, puisque les runs sont nets), et pendant un merge complet une nouvelle copie de la base à côté de l'ancienne (2).
-  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-en-niveaux)
+  [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **SSE4.2**, **x86-64-v2** — SSE4.2 est un ensemble d'instructions des processeurs x86-64 (Intel depuis Nehalem,
   2008 ; AMD depuis Bulldozer, 2011), dont `crc32`, qui calcule CRC-32C 8 octets à la fois ; un programme voit si le
   processeur l'a au bit 20 d'un registre que remplit l'instruction `cpuid`. x86-64-v2 est le niveau de x86-64 qui
@@ -507,7 +507,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **stable sort** (un tri stable) — un tri qui garde les clés égales dans l'ordre où elles sont venues : trier par
   valeur les faits d'un grand groupe, à partir d'un ordre par chose, laisse les faits d'une même valeur dans l'ordre
   des choses, qui est l'ordre (propriété, valeur, chose) dont un run a besoin.
-  [architecture](architecture.md#les-grands-groupes)
+  [architecture](architecture.md#grands-groupes)
 - **strict serializability** — serializable dans un ordre qui respecte le temps réel.
   [garanties](guarantees.md#g4-strict-serializability)
 - **structural sharing** — une nouvelle version d'une structure persistante partage avec l'ancienne chaque partie non
@@ -520,7 +520,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **thing** (une chose) — l'entité d'un fait : un numéro, à partir de 65 536.
   [concepts](concepts.md#les-faits--le-modèle-entityattributevalue)
 - **threat to validity** (une menace sur la validité) — une façon dont la preuve ou la mesure pourrait être fausse, à
-  nommer et à écarter. [cas](case-seats.md#les-menaces-sur-la-validité)
+  nommer et à écarter. [cas](case-seats.md#menaces-sur-la-validité)
 - **TLA+**, **TLC** — un langage qui décrit les pas d'un système en mathématiques (Lamport), et son model checker.
   [tester](testing.md#model-checking)
 - **TLS** (Transport Layer Security) — le protocole qui chiffre une connexion TCP et prouve l'identité du serveur par
@@ -540,7 +540,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **value index** — dans l'ordre par propriété d'un run, une rank table sur les valeurs que prend une propriété et la
   première ligne de chacune : les lignes de « city = Lyon » ou de « client = #c » en un rank et deux offsets, quel que
   soit le nombre de lignes. Gardé pour une propriété quand elle prend au plus 2 octets par ligne (des liens, des
-  textes, des dates, de petits entiers). [formats](formats.md#run-dirsnapshotslo-20-chiffres-hi-20-chiffresrun)
+  textes, des dates, de petits entiers). [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **variable** — une inconnue d'une question, numérotée à partir de 0.
 - **varint** (LEB128), **zigzag** — un nombre entier en morceaux de 7 bits, les petits étant courts ; zigzag fait
   correspondre les nombres signés aux non signés (0, -1, 1, -2 → 0, 1, 2, 3). [formats](formats.md#un-groupe)
@@ -551,13 +551,13 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   lecteurs au même instant. [serveur](server.md#lectures-locales-g15)
 - **working set** — les tableaux du reasoner pour un groupe : les faits qu'il a touchés, leurs états, leurs tours et
   leurs marques, dans des tables en open addressing avec des chaînes par (propriété, chose) et (propriété, valeur), hors
-  de la vue du collector. [règles](rules.md#les-grands-groupes)
+  de la vue du collector. [règles](rules.md#grands-groupes)
 - **working view** — l'état du writer avec chaque groupe résolu, durable ou non ; les lecteurs ne le voient jamais.
 - **worst-case optimal join** — un join dont le travail ne dépasse jamais, à de petits facteurs près, la plus grande
   réponse que la question pourrait avoir (l'AGM bound) (Ngo et al. 2012).
 - **write amplification** — combien de fois un fait est écrit sur le disque par les merges pour une écriture d'un
   client : environ $(T + 1)/2$ par niveau en leveling, 5,8 pour le chargement de 10 M de faits (14,5 avec l'unique
-  niveau des versions antérieures). [architecture](architecture.md#les-merges--un-log-structured-merge-tree-en-niveaux)
+  niveau des versions antérieures). [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **write skew** — deux transactions lisent les mêmes faits et chacune en écrit un différent, ce qui ensemble brise une
   règle (deux médecins quittent chacun la garde) ; la snapshot isolation le permet, `Expect` le refuse.
   [concepts](concepts.md#lisolation--exactement-ce-que-voient-un-lecteur-et-un-writer)
