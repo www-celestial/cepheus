@@ -160,7 +160,7 @@ $O(m \cdot |\text{atomes}| \cdot \text{AGM}(Q) \cdot \log n)$ (l'argument de [Ng
 le plus petit membre de l'intersection, et la somme sur les niveaux se télescope jusqu'à la borne). La borne demande
 deux choses au moteur : les comptes doivent être exacts (une estimation sous la vérité fait passer un grand ensemble
 pour un petit), et un atome qui n'est pas la source doit coûter une recherche, pas le parcours de ses propres
-candidats. Une version du milestone 2 cassait la seconde : elle matérialisait et triait les candidats de chaque atome
+candidats. Une version du jalon 2 cassait la seconde : elle matérialisait et triait les candidats de chaque atome
 lié pour les intersecter, et payait donc à chaque binding pour le plus grand ensemble (un statut partagé par 450 000
 factures, trié une fois par client d'une ville : le benchmark à 10 M n'a jamais fini sa troisième question).
 L'intersection triée (Leapfrog Triejoin [Veldhuizen 2014]) ne garde la borne qu'avec des itérateurs qui sautent
@@ -260,7 +260,7 @@ mémoire que plus rien n'utilise) les libère ; une collection complète après 
 pages en mémoire sous 1,25 fois le cache.
 
 **Le coût quand tout est en mémoire**, 10 M de faits, build de release, 11 exécutions x 2 tours alternés, contre la
-base mappée du milestone 2 (c67e52d) : Q1 0,37 à 0,39 µs (+5 %), Q2 1,73 à 1,66 µs (-4 %), Q3 3,67 à 3,98 ms (+8 %),
+base mappée du jalon 2 (c67e52d) : Q1 0,37 à 0,39 µs (+5 %), Q2 1,73 à 1,66 µs (-4 %), Q3 3,67 à 3,98 ms (+8 %),
 Q4 199 à 226 ms (+13 %), Q5 0,93-0,95 à 0,97-1,02 s (+3 à +8 %). Le reste est le prix de la table : un chargement
 dépendant de plus par lecture et un gestionnaire d'exception par recherche. Des pages de 64 KiB (une table quatre fois
 plus petite) ont donné les mêmes temps ; le garbage collector n'est pas en cause (18 collections majeures contre 2 sur
@@ -318,7 +318,7 @@ sur un hit ; 2Q et W-TinyLFU réordonnent une liste à chaque hit. L'écart qui 
 données (plus bas). Choisi : S3-FIFO ; le gain de 2Q ne vaudrait un lock que si les hits restaient dans un seul
 domain, ce que les questions en parallèle cassent.
 
-**Plus grand que la mémoire**, 10 M de faits (une base de 245 MB au milestone 2), cache de 32 MB, le processus limité
+**Plus grand que la mémoire**, 10 M de faits (une base de 245 MB au jalon 2), cache de 32 MB, le processus limité
 à 128 MB (benchmarks) : ouverture 67 ms (64 MB résidents), Q1 41 µs, Q2 1,8 µs, Q3 89 ms, Q4 385 ms sur un cœur et
 247 ms sur trois (les mêmes réponses ; PostgreSQL avec 32 MB de buffers sous la même limite : 176 µs, 5,5 µs, 446 ms
 par son socket, 697 et 658 ms), pic de 79 à 105 MB ; sur un seul run des niveaux depuis, Q1 39,7 µs, Q2 1,54 µs, Q3

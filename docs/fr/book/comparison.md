@@ -15,7 +15,7 @@ fsync par seconde ; fsync : l'appel système qui attend que les octets écrits s
 10 millions de faits : 113 636 clients, 2 272 720 factures, 568 163 liens follow. PostgreSQL dans son propre cluster,
 réglé comme le ferait un expert (clés primaires, un index sur chaque colonne cherchée, `VACUUM ANALYZE`, des prepared
 statements, fsync et `synchronous_commit` activés, 1 GB de `shared_buffers`) ; Cepheus avec un cache de 1 GiB. Les
-lectures et les écritures ont été mesurées côte à côte au milestone 2 (la base à un seul niveau) ; les chargements
+lectures et les écritures ont été mesurées côte à côte au jalon 2 (la base à un seul niveau) ; les chargements
 après les niveaux et les grands groupes. Les lectures de Cepheus sur un seul run mesurées depuis sont à quelques pour
 cent de celles ci-dessous (Q1 0,38 µs, Q2 1,57 µs, Q3 3,74 à 3,82 ms, Q4 231 à 237 ms, Q5 0,95 à 1,00 s :
 [benchmarks](benchmarks.md#les-lectures-tout-en-mémoire)).
