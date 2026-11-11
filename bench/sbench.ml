@@ -5,8 +5,10 @@
      sbench.exe ping ADDR N                  N empty round trips (Ping), one in flight
      sbench.exe get ADDR FACTS DEPTH N       N point reads (Get of an invoice: its 4 facts), DEPTH in flight
      sbench.exe clients ADDR FACTS C N       C processes, a connection each, N reads each, one in flight: wall time a read
-     sbench.exe write ADDR FACTS C SECS      C connections (threads), durable writes of a new invoice (4 facts): groups/s,
-                                             and the latencies
+     sbench.exe write ADDR FACTS C SECS [W]  C connections (threads), durable writes of a new invoice (4 facts): groups/s,
+                                             and the latencies; with W, while W watches of the written client's unpaid
+                                             invoices, each on a connection of its own read by a thread, get every
+                                             change (the writers' cost of the watches)
      sbench.exe q ADDR FACTS Q3|Q4 N         N runs of a question through Find: Q3 the unpaid invoices of a city (rows),
                                              Q4 the unpaid sum and count by city (aggregates in the server)
      sbench.exe check ADDR FACTS             invoices of the sample as `index client total status date` lines, to compare
@@ -21,7 +23,7 @@
                                              time, and the time from its receipt to its change (us, p50 and p99)
      sbench.exe stall ADDR FACTS N SECS S    N watches of one question, each on a connection of its own read by a
                                              thread, and S connections that watch and never read, while one writer
-                                             writes groups of 200 invoices for SECS: the changes' times after their
+                                             writes groups of 20 invoices for SECS: the changes' times after their
                                              receipts (p50, p99), the share delivered, and the server's memory
                                              (CEPHEUS_PID: VmRSS and VmHWM, kB)
      sbench.exe livecpu DIR SCREENS GROUPS   in this process, a database directory not served (a copy): SCREENS
@@ -32,6 +34,9 @@
      sbench.exe follow ADDR FACTS SECS       a local reader for SECS seconds, reading every invoice of the sample once at
                                              the start: its CPU time a second of the period (% of a core), the frames it
                                              applied, its memory (Pss and RSS of /proc/self/smaps_rollup, kB)
+
+     sbench.exe mwrite ADDR D C SECS        D databases d1 .. dD of the server (empty ones), C writers each, one fact a
+                                             durable group: groups/s in all and the latencies
 
    The other commands open the database for remote reads (the server answers), even over the Unix socket.
 
@@ -178,11 +183,30 @@ let clients addr facts nconn n =
   (* every request in the wall time: the warm-up's too *)
   Printf.printf "%.3f\n%!" (dt /. float (nproc * per * (n + min n 1000)) *. 1e6)
 
-let write addr facts nclients secs =
+let write addr facts nclients secs watchers =
   let s = setup addr facts in
   let some_client = s.cids.(0) in
   let pc = s.p "invoice/client" and pt = s.p "invoice/total" and ps = s.p "invoice/status" and pd = s.p "invoice/date" in
   let stop = Atomic.make false in
+  let q = { Query.vars = 2; where = [ { Query.e = Var 0; p = pc; v = Val (Link some_client) }; { e = Var 0; p = ps; v = Val (Text "unpaid") }; { e = Var 0; p = pt; v = Var 1 } ]; ranges = [] } in
+  let changes = Atomic.make 0 in
+  (* the watches' connections are left to the process's end *)
+  let _watching =
+    List.init watchers (fun _ ->
+        let c = connect addr in
+        let db = ok (Client.open_db ~local:false c "main") in
+        let id = Client.watch c db q in
+        let rec loop () =
+          match Client.next_push c id with
+          | Client.Pushed (Wire.Change _) -> Atomic.incr changes; loop ()
+          | Client.Pushed _ -> loop ()
+          | Client.Ended e -> prerr_endline ("watch ended: " ^ e.code)
+          | exception Client.Broken _ -> ()
+        in
+        c, Thread.create loop ())
+  in
+  if watchers > 0 then Unix.sleepf 0.5;
+  let c0 = Atomic.get changes in
   let hist = Array.init nclients (fun _ -> Histogram.create ()) and cnt = Array.make nclients 0 in
   let worker k () =
     let c = connect addr in
@@ -206,8 +230,9 @@ let write addr facts nclients secs =
   let n = Array.fold_left ( + ) 0 cnt in
   let h = Histogram.create () in
   Array.iter (Histogram.merge_into h) hist;
-  Printf.printf "%.1f groups/s p50 %.2f p99 %.2f ms\n%!" (float n /. dt) (float (Histogram.percentile h 0.5) /. 1e3)
+  Printf.printf "%.1f groups/s p50 %.2f p99 %.2f ms%s\n%!" (float n /. dt) (float (Histogram.percentile h 0.5) /. 1e3)
     (float (Histogram.percentile h 0.99) /. 1e3)
+    (if watchers = 0 then "" else Printf.sprintf "; %d watches got %d changes" watchers (Atomic.get changes - c0))
 
 let question addr facts which n =
   let s = setup addr facts in
@@ -416,7 +441,7 @@ let stall addr facts n secs stalled =
   let receipts = Hashtbl.create 1024 in
   let t_end = now () +. secs in
   while now () < t_end do
-    let r = ok (Client.write s.c s.db (new_invoice s client 200)) in
+    let r = ok (Client.write s.c s.db (new_invoice s client 20)) in
     Hashtbl.replace receipts r.group (now ())
   done;
   Unix.sleepf 1.0;
@@ -528,6 +553,42 @@ let livecpu dir screens groups =
     screens (t_sub *. 1e3) (pct times 0.5) (pct times 0.99) mean !pushes reask redash !ok_rows screens
     (if sorted dwant = sorted !drow then "equal to" else "NOT equal to")
 
+(* D databases d1 .. dD of one server, C writers each (a connection each), each writing one fact a group for SECS:
+   groups a second in all, and the latency of a write (each database forces its own journal) *)
+let mwrite addr dbs per secs =
+  let stop = Atomic.make false in
+  let n = dbs * per in
+  let hist = Array.init n (fun _ -> Histogram.create ()) and cnt = Array.make n 0 in
+  let worker k () =
+    let c = connect addr in
+    let name = Printf.sprintf "d%d" (1 + (k mod dbs)) in
+    let db, p =
+      match Client.declare c name [ { Schema.name = "n/k"; typ = Value.Tint; many = false; unique = false } ] with
+      | Ok (db, [ p ]) -> db, p
+      | Ok _ -> failwith "declare"
+      | Error e -> failwith (e.code ^ ": " ^ e.message)
+    in
+    let i = ref 0 in
+    while not (Atomic.get stop) do
+      let t = now () in
+      ignore (ok (Client.write c db [ Resolve.Add (-1, p, Int !i) ]));
+      incr i;
+      Histogram.record hist.(k) (int_of_float ((now () -. t) *. 1e6));
+      cnt.(k) <- cnt.(k) + 1
+    done;
+    Client.close c
+  in
+  let t0 = now () in
+  let ts = List.init n (fun k -> Thread.create (worker k) ()) in
+  Unix.sleepf secs;
+  Atomic.set stop true;
+  List.iter Thread.join ts;
+  let dt = now () -. t0 in
+  let h = Histogram.create () in
+  Array.iter (Histogram.merge_into h) hist;
+  Printf.printf "%d databases, %d writers each: %.1f groups/s p50 %.2f p99 %.2f ms\n%!" dbs per (float (Array.fold_left ( + ) 0 cnt) /. dt)
+    (float (Histogram.percentile h 0.5) /. 1e3) (float (Histogram.percentile h 0.99) /. 1e3)
+
 (* N new connections, each its handshake (TLS on TCP) and Hello, then closed: microseconds a connection *)
 let hs addr n =
   let t0 = now () in
@@ -555,7 +616,8 @@ let () =
   | [| _; "ping"; a; n |] -> ping a (int_of_string n)
   | [| _; "get"; a; f; d; n |] -> get a (int_of_string f) (int_of_string d) (int_of_string n)
   | [| _; "clients"; a; f; c; n |] -> clients a (int_of_string f) (int_of_string c) (int_of_string n)
-  | [| _; "write"; a; f; c; secs |] -> write a (int_of_string f) (int_of_string c) (float_of_string secs)
+  | [| _; "write"; a; f; c; secs |] -> write a (int_of_string f) (int_of_string c) (float_of_string secs) 0
+  | [| _; "write"; a; f; c; secs; w |] -> write a (int_of_string f) (int_of_string c) (float_of_string secs) (int_of_string w)
   | [| _; "q"; a; f; q; n |] -> question a (int_of_string f) q (int_of_string n)
   | [| _; "check"; a; f |] -> check a (int_of_string f)
   | [| _; "hs"; a; n |] -> hs a (int_of_string n)
@@ -565,8 +627,9 @@ let () =
   | [| _; "ids"; a; f |] -> ids a (int_of_string f)
   | [| _; "wlat"; a; f; m; n |] -> wlat a (int_of_string f) m (int_of_string n)
   | [| _; "stall"; a; f; n; secs; st |] -> stall a (int_of_string f) (int_of_string n) (float_of_string secs) (int_of_string st)
+  | [| _; "mwrite"; a; d; c; secs |] -> mwrite a (int_of_string d) (int_of_string c) (float_of_string secs)
   | [| _; "livecpu"; d; n; g |] -> livecpu d (int_of_string n) (int_of_string g)
   | _ ->
     prerr_endline
-      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS";
+      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS [W] | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS | wlat ADDR FACTS local|remote N | stall ADDR FACTS N SECS S | livecpu DIR SCREENS GROUPS | mwrite ADDR D C SECS";
     exit 2

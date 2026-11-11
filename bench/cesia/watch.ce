@@ -1,0 +1,78 @@
+(** The fan-out of one live question in one Cesia program: n fibers watch the same question (the unpaid invoices of one
+    client: the package shares one watch between them), while the program writes g invoices of that client, one after
+    the other, each its own group, with a pause of p seconds after each. A delivery is the time from a write's receipt
+    (its group durable) to a fiber's message of that group: on the server's machine the program's follower computes the
+    changes itself, so a delivery can come before the receipt (a negative time). Prints, in microseconds: the deliveries'
+    p50 and p99, the last fiber's (of each group, the latest delivery) p50 and p99, and the time the n watches took to
+    start.
+
+    cesia run --allow native=cepheus,env,read bench/cesia/watch.ce N G P *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/fiber
+use std/io
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+Invoice = cepheus.Kind("invoice", {client: cepheus.Link(), total: cepheus.Money(2), status: cepheus.Text(), date: cepheus.Date()})
+Client = cepheus.Kind("client", {email: cepheus.Text(unique = true)})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Invoice, Client], token = sys.Env("CEPHEUS_TOKEN"), ca = sys.Env("CEPHEUS_CA")))
+n = text.Number(sys.Args[1])
+g = text.Number(sys.Args[2])
+p = text.Number(sys.Args[3])
+(* a new client, of no invoice yet: the answer starts empty *)
+client = result.Unwrap(cepheus.Insert(Client, {email: "fan-out-$(sys.Now())@example.com"}, db))
+unpaid = (i, t) -> {Where: [[i, Invoice.client, client], [i, Invoice.status, "unpaid"], [i, Invoice.total, t]], Give: {I: i, T: t}}
+
+defn screen(w)
+  (** The answer, then the messages of g groups: each group's time. *)
+  result.Unwrap(fiber.Receive(w.Changes, timeout = 120))
+  got = {}
+  k = 0
+  while k < g
+    m = result.Unwrap(fiber.Receive(w.Changes, timeout = 120))
+    got[m.Group] = sys.Now()
+    k += 1
+  end
+  got
+end
+
+t0 = sys.Now()
+watches = [result.Unwrap(cepheus.Watch(2, unpaid, db)) for k in 1..n]
+started = sys.Now() - t0
+screens = [fiber.Spawn(() -> screen(w)) for w in watches]
+sys.Sleep(0.5)
+receipts = {}
+groups = []
+for k in 1..g
+  r = result.Unwrap(cepheus.Write([cepheus.Add(cepheus.New(1), Invoice.client, client), cepheus.Add(cepheus.New(1), Invoice.status, "unpaid"),
+    cepheus.Add(cepheus.New(1), Invoice.total, k), cepheus.Add(cepheus.New(1), Invoice.date, 1794268800)], db))
+  receipts[r.Group] = sys.Now()
+  groups = list.Append(r.Group, groups)
+  sys.Sleep(p)
+end
+got = [result.Unwrap(fiber.Wait(s)) for s in screens]
+all = []
+last = []
+for gr in groups
+  worst = -1000000000
+  for s in got
+    d = (s[gr] - receipts[gr]) * 1000000
+    all = list.Append(d, all)
+    worst = list.Max(worst, d)
+  end
+  last = list.Append(worst, last)
+end
+defn pct(xs, q)
+  s = list.Sort(xs)
+  s[1 + list.Min(value.Len(s) - 1, math.Floor(q * value.Len(s)))]
+end
+io.Print("$n watchers, $g groups: a delivery p50", math.Round(pct(all, 0.5)), "p99", math.Round(pct(all, 0.99)), "us; the last watcher p50",
+  math.Round(pct(last, 0.5)), "p99", math.Round(pct(last, 0.99)), "us; started in", math.Round(started * 1000), "ms")
+for w in watches
+  cepheus.Close(w)
+end
+cepheus.Close(db)
