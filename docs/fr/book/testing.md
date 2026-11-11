@@ -64,7 +64,7 @@ en relisant le journal), la méthode de l'étude ALICE (Pillai et al. 2014) pous
 **property-based testing** (les tests de propriété : QuickCheck, Claessen et Hughes 2000) vérifie une propriété sur
 beaucoup d'entrées aléatoires contre un modèle de référence écrit indépendamment.
 
-1. **Tests unitaires et de propriété** (`test/unit.ml`) : CRC-32C (une somme de contrôle : un nombre calculé sur les
+1. **Tests unitaires et de propriété** (`test/unit.ml`) : CRC-32C (un checksum : un nombre calculé sur les
    octets, qui change dès qu'un octet change) contre la valeur de contrôle et les cinq exemples de la RFC 3720
    (annexe B.4), et contre un oracle, le code à table en OCaml qu'il a remplacé : chaque longueur jusqu'à 72 octets à
    chaque offset (la position en octets) jusqu'à 15, 5 000 longueurs aléatoires jusqu'à 1 MiB à des offsets

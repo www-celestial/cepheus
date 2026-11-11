@@ -58,8 +58,8 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
   écriture est confirmée : c'est ce qui donne le plus haut throughput (le nombre d'écritures par seconde), mais ses
   latences sont fausses quand tout s'arrête un moment : un client arrêté par un fsync de 400 ms n'envoie rien pendant ce
   temps, si bien que les écritures qui auraient attendu ne sont jamais mesurées (la « coordinated omission », l'omission
-  coordonnée, [Tene 2015]). En open loop (boucle ouverte), les écritures sont dues à une cadence fixe (la $k$-ième
-  écriture du client $c$ à $t_0 + (k C + c) / \text{cadence}$), et la latence d'une écriture compte depuis l'instant où
+  coordonnée, [Tene 2015]). En open loop (boucle ouverte), les écritures sont dues à une cadence fixe, tous les clients
+  ensemble (avec $C$ clients, la $k$-ième écriture du client $c$ à $t_0 + (k C + c) / \text{cadence}$), et la latence d'une écriture compte depuis l'instant où
   elle était due, comme le fait wrk2 ; du côté de PostgreSQL, c'est `pgbench -R`, dont les latences comptent depuis le
   départ prévu (le retard sur ce calendrier est ajouté). L'open loop donne les latences ; la closed loop, le throughput.
 - **Où va le temps d'une écriture** : le pwrite (l'appel système qui écrit des octets à une place d'un fichier) et le
@@ -173,7 +173,7 @@ un tuple neuf pour chacune des 453 866 factures, mesurée seule) : la cible du p
 portée tant que la question est écrite ainsi ; la part du moteur est d'environ 100 ms (220 ns par facture). L'ouverture
 vérifie les pages d'un run sur 4 domains au plus : 20 % plus vite que main, bien que le run ait 28 % de pages en plus.
 
-**Ce qui a empiré.** Le run grossit de 15,2 MB (13,9 MB de column order : valeurs 11,4, tables de rank 1,2, répertoires
+**Ce qui a empiré.** Le run grossit de 15,2 MB (13,9 MB de column order : valeurs 11,4, rank tables 1,2, répertoires
 1,25), 1,2 MB au-dessus du budget de 14 du plan. Un merge complet prend 24 % de temps en plus (le troisième ordre est
 écrit dans la passe par chose). Un merge garde un bit par chose et par propriété jusqu'à la fin de sa passe (2,4 MB à 10
 M de faits). Une ouverture à froid (rien n'est encore en mémoire) d'un run plus grand que le cache lit les tables du
@@ -236,7 +236,7 @@ exécution pour le format 7 et 1,02 s pour SQLite (2026-11-09) : la question lit
 lignes par valeur, et non les blocs de choses où ses lignes étaient mêlées aux factures. Le run de 69,6 MB tient encore
 sous 128 MB à côté du cache, si bien que les questions y lisent comme avec tout en mémoire. L'ouverture à froid est plus
 lente que celle de main (138 ms contre 88) : un run plus grand que le cache n'est pas lu en entier, et les vérifications
-du column order que fait l'ouverture (tables de rank, répertoires : 2,5 MB) lisent des pages que l'ouverture de main ne
+du column order que fait l'ouverture (rank tables, répertoires : 2,5 MB) lisent des pages que l'ouverture de main ne
 lisait pas (les premières questions les liraient de toute façon).
 
 **Où les géants gagnent encore.** SQLite charge avec 11 MB de mémoire, contre 1,6 GB pour Cepheus (les chargements par
@@ -681,9 +681,11 @@ nombres que l'ancien code construisait au démarrage a disparu. Une copie neuve 
 [9,4 ; 28,3] plus lentement que le fichier laissé par le build, si bien que ces mesures comparent des binaires à
 l'endroit où le build les a laissés.
 
-**Les corrections du moteur mesurées à nouveau** (la section plus bas), sur une machine calme : 2f37b23 contre 51cf32d,
-les mêmes chargements et les mêmes ouvertures, 9 tours en alternance. 10 M en 4 grands groupes : 9,68 s [8,42 ; 11,47]
-contre 8,73 s [8,09 ; 9,61] (rapport 0,97 [0,77 ; 1,12], plus lent dans 4 tours sur 9, $p = 1$) ; son ouverture 396
+**Les corrections du moteur mesurées à nouveau** (la section plus bas), sur une machine calme : 2f37b23 (avant les
+corrections) contre 51cf32d (après), les mêmes chargements et les mêmes ouvertures, 9 tours en alternance. Chaque
+rapport est après sur avant, la médiane des rapports des 9 tours et son intervalle, qui n'est pas forcément le rapport
+des deux médianes. 10 M en 4 grands groupes : 9,68 s [8,42 ; 11,47] contre 8,73 s [8,09 ; 9,61] (rapport 0,97
+[0,77 ; 1,12], après plus lent dans 4 tours sur 9, $p = 1$) ; son ouverture 396
 contre 403 ms (1,02 [0,94 ; 1,26], $p = 0{,}51$) ; 1 M à un groupe par client 9,21 contre 9,87 s (1,01 [0,85 ; 1,16],
 $p = 1$) ; son ouverture 364 contre 368 ms (1,00 [0,97 ; 1,14], $p = 0{,}51$). Les corrections ne coûtent rien de
 mesurable : les 13,12 s plus bas venaient du disque.
@@ -830,7 +832,7 @@ chargement, un merge complet), où la place se calcule par une addition. La prem
 de 17 à 23 % (Q1 0,42 µs, Q4 286 ms : `read-before-store-fixes.txt`) : des closures (des fonctions qui gardent des
 valeurs de leur contexte) allouées à chaque recherche, un rank lu pour chaque chose, des listes pour un seul run ;
 corrigé avant ces chiffres. Sur deux runs, une ligne du run le plus ancien n'est montrée que si le run le plus récent
-n'a pas d'entrée pour le même fait : quelques bits des tables de rank quand le run le plus récent ne contient pas la
+n'a pas d'entrée pour le même fait : quelques bits des rank tables quand le run le plus récent ne contient pas la
 chose, une recherche quand il la contient (ici il contient chaque client) : Q3 +43 %, Q4 +40 % sur un domain ; un run
 sans aucune ligne de la propriété est sauté d'emblée (Q5, les follows, comme avec un seul run). Un `snapshot` fusionne
 tout en un seul run.
@@ -928,8 +930,8 @@ fait jeu égal avec le `.import` de SQLite (la section plus haut). Les enregistr
 variable dans des pages de B-tree) restent environ deux fois plus petits que les mots de 8 octets de Cepheus, et SQLite
 charge avec 11 MB là où un grand groupe demande 2,5 à 3,2 GB. Pas mesuré du côté de SQLite : les écritures durables
 concurrentes (SQLite a un seul writer à la fois), et les lectures plus grandes que la mémoire. Les lectures ci-dessus
-ont été mesurées sur le moteur de 148ff09 ; sur un seul run, les niveaux lisent à la même vitesse (la section suivante),
-donc la comparaison tient.
+ont été mesurées sur le moteur de 148ff09 ; sur un seul run, les niveaux lisent à la même vitesse
+([Les lectures, tout en mémoire](#les-lectures-tout-en-mémoire), plus haut), donc la comparaison tient.
 
 ## Le merge écrit dans un fichier (2026-11-08), à 10 millions de faits
 
@@ -1008,8 +1010,8 @@ disque, il peut coûter des dizaines de ms (une ouverture mesurée à 117 ms con
 exécutions, l'intervalle est [min ; max], 93,8 %.)
 
 **Le chargement de 10 M de faits, et ce que les écritures d'un merge coûtent au journal** (`bench.exe load` : 64
-clients, des groupes de 83 faits, environ 33 merges à mesure que la base grandit ; une exécution par ligne, en
-alternance) :
+clients, des groupes de 83 faits, environ 33 merges à mesure que la base grandit ; chaque case donne toutes les exécutions,
+séparées par des points-virgules, les exécutions en alternance) :
 
 | | chargement | pic | p99 du fsync du journal | max | p99 du switch de merge |
 |---|---:|---:|---:|---:|---:|
@@ -1160,7 +1162,7 @@ arrêts.
   (l'aller-retour d'une requête et de sa réponse sur le réseau) ni plan cache (le cache des plans de requêtes déjà
   calculés) à consulter. Par le socket, ce que paie une application de PostgreSQL, l'écart est de 15 à 70 fois.
 - **Grands parcours et agrégats (Q4), et la requête des triangles (Q5) : PostgreSQL est plus rapide, parce qu'il utilise
-  trois processus pour une requête.** Sur un cœur, il est 1,2 fois plus lent que Cepheus sur Q4, et à égalité sur Q5.
+  trois processus pour une requête.** Sur un cœur, il est 1,2 fois plus lent que Cepheus sur Q4, et à égalité sur Q5 (1 000 ms contre 968).
   Cepheus répond aujourd'hui à une question sur un seul cœur ; les questions en parallèle (des domains OCaml sur une
   vue, qui n'a besoin d'aucun lock) sont l'étape suivante. Le graphe de Q5 est uniforme (5 liens par client), et les
   joins deux par deux y restent petits ; l'avantage de Generic Join se montre sur des graphes déséquilibrés (où quelques

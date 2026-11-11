@@ -237,8 +237,7 @@ Ok([{Invoice: 65538, Total: 80.5}])
 ```
 
 `n` is the number of the question's variables (here 3: `c`, `i` and `total`). Cesia does not let a package ask a
-function how many parameters it has, so the program says it; when Cesia does, `n` goes (see choice 1 of this step,
-in the progress of the server's plan).
+function how many parameters it has, so the program says it.
 
 **How it is answered.** The question is joined variable by variable, not pattern by pattern (**Generic Join**, Ngo,
 Ré and Rudra 2013): for each variable, the pattern that gives it the fewest candidates (exact counts read in the
@@ -294,7 +293,7 @@ Ok({Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"})
 ```
 
 A fork of a database read at the server (a program on another machine) is not built yet: it gives an `Err` with Code
-`"invalid"` (the design puts such forks in the server, a later step).
+`"invalid"`: see [What is not built yet](#what-is-not-built-yet).
 
 ### Tests
 
@@ -345,7 +344,7 @@ How, in short ([server](server.md#local-reads-g15) tells it whole):
 The follow stream is open when `Connect` returns; the first local read may wait for the follower to apply the groups
 written since the database's newest run (its catch-up), and later ones only, now and then, the microseconds of a
 frame on its way. What it costs: a domain of the program applies every group the server writes, by any program (1.7 µs
-a change alone, about 4 µs under 18,000 groups a second, measured in the server's step 3), and the program holds a
+a change alone, about 4.5 µs under 18,000 groups a second, measured at the server), and the program holds a
 cache of the database's pages (256 MB at most) and the changes since the last merge ([server](server.md#what-it-costs)).
 
 If the follow stream ends (the server restarted), the package reads at the server meanwhile and follows again, at most
@@ -398,20 +397,21 @@ prepared` (C, libpq) reading `SELECT * FROM invoice WHERE id = $1`, the same row
 | | Cesia client | OCaml client | PostgreSQL 18.6 |
 |---|---:|---:|---:|
 | on the server's machine: a local read | **0.77** [0.76, 0.82] | 0.24 [0.22, 0.36] | 26.4 [23.9, 32.3] through its Unix socket |
-| over TCP and TLS 1.3 (loopback) | 51.6 [44.1, 63.4] | 37.1 [31.3, 46.8] | 49.6 in the server's step 2 ([server](server.md#speed-beside-postgresql)) |
+| over TCP and TLS 1.3 (loopback) | 51.6 [44.1, 63.4] | 37.1 [31.3, 46.8] | 49.6, in other rounds ([server](server.md#speed-beside-postgresql)) |
 | at the server through its Unix socket | (not a path of the Cesia client: it reads locally there) | 8.9 [8.0, 9.6] | |
 
-- The local read is 34 times PostgreSQL's through its socket, and 3.2 times the OCaml client's: the 0.53 µs between
+- The local read is 34 times faster than PostgreSQL's through its socket, and 3.2 times slower than the OCaml
+  client's: the 0.53 µs between
   them are Cesia's side of the call, measured apart on a fork: the call of a package's native (a Cesia function, the
   native's stub, its 3 arguments converted) about 0.10 µs; finding the database and the kind, 0.05; making the map of
   4 fields and its `Ok` through Cesia's native interface, about 0.17; the loop of the benchmark itself, 0.08 (in the
-  number above: a loop that calls a Cesia function of the same arguments). The design's bound was 1 µs: met.
+  number above: a loop that calls a Cesia function of the same arguments). The target set before it was built, 1 µs, is met.
 - Over TLS a read pays the round trip, the encryption (about 11 µs a round trip in C with OpenSSL here) and the
   server's work. The Cesia client reads its reply itself when nothing else is in flight (the window of three round
   trips, [many fibers](#many-fibers-one-connection)): without it, a reply crossed from the package's reader domain to
   Cesia's through a pipe, and a read cost 74.1 µs [51.2, 101.7] in the same rounds (the fast path: 0.67 times that, the
   median of the rounds' ratios). The 14 µs left over the OCaml client is the wake-up of Cesia's scheduler and the
-  values made for Cesia; the design's bound, 11 µs at the server through its Unix socket, is the OCaml client's path,
+  values made for Cesia; the target of 11 µs at the server through its Unix socket is for the OCaml client's path,
   which a Cesia program on the server's machine does not take (it reads locally).
 
 **Durable writes**, $n = 7$ rounds of 3 s (each write an invoice of 4 facts, its group forced to the disk):
@@ -457,9 +457,8 @@ linearizable without it.
 
 ## What is not built yet
 
-- `cepheus.Watch`, a question whose changes come as they happen, in a channel: the server pushes them in step 5 of
-  the server's plan.
-- Forks of a database read at the server: in the server, a later step.
+- `cepheus.Watch`, a question whose changes come as they happen, in a channel, pushed by the server.
+- Forks of a database read at the server, which the server will make.
 - `Not`, `Or`, `Prefix` and `In` in questions: not in the engine.
 - A program reaches one database a connection: `Connect` again for another.
 

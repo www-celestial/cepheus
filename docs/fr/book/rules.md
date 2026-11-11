@@ -245,7 +245,7 @@ la base a été. Un fait dérivé coûte ses octets dans la frame : sa sorte dan
 changement, ou aucun dans un bloc d'une seule sorte), sa chose et sa valeur dans leurs colonnes
 ([formats](formats.md#un-groupe)).
 
-Dans un run (format 7, [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)), le drapeau « seulement
+Dans un run (formats 7 et 8, [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)), le drapeau « seulement
 dérivé » est le bit le plus bas du champ de la valeur, dans les deux ordres, dans les blocs qui tiennent un fait dérivé
 (l'entrée d'un thing block, un row block) ; un bloc qui n'en a pas n'y dépense aucun bit, donc une base sans règles ne
 paie rien. Le format 6 le gardait dans le bit 63 de chaque mot de valeur de 8 octets. Un run qui change le drapeau d'un
@@ -349,7 +349,7 @@ mention contraire.
 - **Un fait dérivé ne peut pas être retiré** : pas d'opération sans effet silencieuse ; le message nomme la règle et les
   faits à retirer.
 - **Le drapeau dans le champ de la valeur** (le bit 63 du mot de valeur au format 6, le bit le plus bas du champ dans
-  les blocs du format 7 qui tiennent un fait dérivé) : pas un octet de plus sans règles ; un run d'un format plus
+  les blocs des formats 7 et 8 qui tiennent un fait dérivé) : pas un octet de plus sans règles ; un run d'un format plus
   récent n'est pas lu par un binaire plus ancien, qui rejoue le journal à la place.
 - **Le budget proportionné au groupe** ($100\,000 + 100 \times \text{ses changements affirmés}$) : un chargement dérive en proportion, une règle qui
   s'emballe est arrêtée et nommée.

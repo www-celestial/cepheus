@@ -211,13 +211,13 @@ Herrmann 1993).
 *Several runs read as one state.* A fact is in a view iff the newest entry for it (the delta's, or the newest run's
 that has one) adds it; a count is the sum of each run's rows minus its retractions, plus the delta's net count (the
 runs are net, so nothing is counted twice); an iteration shows a row of a run only if no newer run has an entry for the
-same fact (docs/book/theory.md, section 9). *Tested by* `test/unit.ml` ("several runs": 120 random views of up to 4 runs that
-add and retract, against their full merge and a naive evaluator; "large groups").
+same fact ([theory](theory.md#9-levels-on-disk-and-large-groups), section 9).
 
 *Tested by* the simulation (merges at random moments, crashes inside their writing, flips in run files) and
 `test/unit.ml` (round trip; a run of another database is refused; a flipped run is set aside; a run three times larger
 than the cache, read by three domains, with a bit flipped after the open: the questions answer right or return
-`Damaged`, and exactly the damaged page fails).
+`Damaged`, and exactly the damaged page fails; "several runs": 120 random views of up to 4 runs that add and retract,
+against their full merge and a naive evaluator; "large groups").
 
 ## G8 Forks
 
@@ -312,8 +312,7 @@ Generic Join's for $k$ slices.
 must give the naive evaluator's answers and enumerate at most the bound that `test/check.ml` computes from the facts
 alone (`Query.work` counts the candidates); and named cases where one list is far larger than the answer (a status
 shared by 20,000 invoices, a hot tag in the delta, a range of 10 scores among 20,000, a thing with 40,000 values).
-
-*Tested by* `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
+And by `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
 ranges) compared with a naive evaluator over all facts, on a base with a delta and on a compacted base.
 
 ## G12 Merges are atomic

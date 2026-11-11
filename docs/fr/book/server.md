@@ -106,8 +106,9 @@ name = "stock"
   socket ouvert). À la limite, une nouvelle connexion est fermée aussitôt : sur le Unix socket après une frame
   d'erreur (un message du protocole qui porte une erreur) `too_many_connections`, sur TCP sans un mot et avant son
   handshake TLS (les premiers échanges, où les deux côtés s'accordent sur des clés), pour qu'une connexion refusée ne
-  coûte au serveur aucun handshake (environ 5 ms de calcul). Le log dit combien ont été refusées, au plus une fois par
-  seconde. La valeur par défaut, 512, laisse de la place sous la limite par défaut de systemd, 1 024 descriptors par
+  coûte au serveur aucun handshake (son échange de clés et sa signature : une nouvelle connexion TLS entière coûte
+  2,6 ms, des deux côtés, [mesurées plus bas](#la-vitesse-à-côté-de-postgresql)). Le log dit combien ont été refusées,
+  au plus une fois par seconde. La valeur par défaut, 512, laisse de la place sous la limite par défaut de systemd, 1 024 descriptors par
   service (`LimitNOFILE`), que se partagent les fichiers des bases (un segment de journal, un fichier de run par
   niveau) ; relevez les deux ensemble. Un serveur à court de descriptors le dit dans son log et recommence à accepter
   dès que des connexions se ferment (`accept` échoue avec `EMFILE` ; la connexion attend dans la file du noyau).
@@ -293,7 +294,7 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
 - **select** : `Give [x...]` donne ces variables de chaque réponse, dans cet ordre (aucune : toutes) ;
   `Group ([k...], [a...])` donne une ligne par clé distincte : les variables de la clé, puis les agrégats `Count`,
   `Sum x` (int, money), `Min x`, `Max x` (int, money, date), calculés dans le serveur sans construire les réponses (Q4
-  plus bas : 100 lignes au lieu de 453 866).
+  plus bas : 100 lignes au lieu de 45 064).
 - Une **opération** : 0 Add, 1 Retract, 2 Expect une valeur, 3 Expect aucune ; puis la chose (en zigzag : un id
   négatif est une nouvelle chose du groupe), la propriété, la valeur.
 - Chaque lecture nomme le groupe de la vue qui lui a répondu, chaque reçu (Receipt, la réponse à une écriture) son
@@ -371,7 +372,7 @@ le doute.
   foi pour la table.
 - La table est sauvegardée dans `DATA/NAME/sessions` chaque seconde tant que des écritures arrivent, et à l'arrêt
   (écrite à côté, forcée sur le disque, renommée). Au démarrage : le checkpoint, puis le journal après son groupe
-  (`Journal.read_after`). Un checkpoint qui ne passe pas la vérification (son CRC, une somme de contrôle qui change si
+  (`Journal.read_after`). Un checkpoint qui ne passe pas la vérification (son CRC, un checksum qui change si
   les octets changent) est ignoré : le journal est lu depuis son début, plus lentement, jamais faux.
 - Une session oublie ses reçus une heure après sa dernière écriture ; une session garde au plus 4 096 reçus (une
   bibliothèque qui n'avance jamais son floor perd les plus anciens).
@@ -475,11 +476,13 @@ numéro n'a besoin d'aucun fsync (après un reboot il ne reste aucun lecteur), i
 règle plus bas en a besoin), et une page de tmpfs n'est jamais réécrite sur un disque, si bien que l'écriture du
 serveur dans cette page n'en attend jamais un.
 
-  `Unix.map_file` mappe en lecture-écriture (un mapping partagé demande alors un descriptor ouvert en écriture, qui
-  laisserait un lecteur déplacer le numéro), et d'un mapping privé mmap(2) dit : « It is unspecified whether changes
-  made to the file after the mmap() call are visible in the mapped region » (on ne sait pas si les changements faits
-  au fichier après l'appel à mmap() sont visibles dans la région mappée) ; le stub C mappe `PROT_READ` et
-  `MAP_SHARED`.
+Un lecteur mappe la page par un petit stub C (une fonction écrite en C qu'OCaml appelle), avec `PROT_READ` et
+`MAP_SHARED`, plutôt qu'avec `Unix.map_file`, qui mappe en lecture-écriture (un mapping partagé demande alors un
+descriptor ouvert en écriture, qui laisserait un lecteur déplacer le numéro) ; et d'un mapping privé mmap(2) dit :
+« It is unspecified whether changes made to the file after the mmap() call are visible in the mapped region » (on ne
+sait pas si les changements faits au fichier après l'appel à mmap() sont visibles dans la région mappée). La règle,
+pas à pas :
+
 - Chaque frame est envoyée marquée du numéro sous lequel elle sera visible : le numéro courant plus 1.
 - Une fois que le fsync de la frame est revenu et qu'elle est publiée, le serveur écrit le nouveau numéro, puis répond
   aux auteurs de la frame, puis laisse les lectures distantes (celles qui passent par le serveur) la voir.
@@ -605,7 +608,7 @@ file pour chaque lecteur et réveille le thread qui l'envoie.
 
 **Ce que suivre coûte à un lecteur.** Un lecteur local pendant que 256 clients écrivent des factures de 4 faits par le
 socket ($n = 7$ tours, son temps CPU sur 4 s) : **32,3 % d'un cœur** [23,3 ; 38,8] à 17 942 groupes par seconde
-[12 269 ; 22 027], environ 4 µs par changement appliqué. La cible du plan, 20 % d'un cœur à 18 000 groupes par
+[12 269 ; 22 027], environ 4,5 µs par changement appliqué. La cible du plan, 20 % d'un cœur à 18 000 groupes par
 seconde, est **manquée** : la conception mesurait 1,72 µs par changement pour rejouer un journal seul sur une machine
 calme ; ici le lecteur partage les 4 cœurs et les 8 threads matériels de la machine avec le serveur et les 256 clients
 qui écrivent, et chaque merge du serveur lui fait appliquer à nouveau, sur les nouveaux runs, les groupes écrits

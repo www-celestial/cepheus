@@ -251,8 +251,7 @@ Ok([{Invoice: 65538, Total: 80.5}])
 ```
 
 `n` est le nombre de variables de la question (ici 3 : `c`, `i` et `total`). Cesia ne laisse pas un package demander à
-une fonction combien de paramètres elle a ; le programme le dit donc ; quand Cesia le permettra, `n` partira (voir le
-choix 1 de cette étape, dans la progression du plan du serveur).
+une fonction combien de paramètres elle a ; le programme le dit donc.
 
 **Comment on y répond.** La question est jointe variable par variable, pas pattern par pattern (**Generic Join**, Ngo,
 Ré et Rudra 2013) : pour chaque variable, le pattern qui lui donne le moins de candidats (des comptes exacts lus dans
@@ -309,7 +308,7 @@ Ok({Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"})
 ```
 
 Un fork d'une base lue au serveur (un programme sur une autre machine) n'est pas encore construit : il donne un `Err` de
-Code `"invalid"` (la conception met de tels forks dans le serveur, une étape ultérieure).
+Code `"invalid"` : voir [Ce qui n'est pas encore construit](#ce-qui-nest-pas-encore-construit).
 
 ### Tests
 
@@ -358,13 +357,13 @@ Comment, en bref ([le serveur](server.md#lectures-locales-g15) le raconte en ent
   mappe en lecture seule, dit quel état est visible : le serveur l'écrit après chaque fsync et avant de répondre aux
   writers. Une lecture le charge et sert l'état tenu sous lui, ou attend les microsecondes qu'il faut pour que cet état
   soit appliqué. Aucune écriture n'attend un lecteur.
-- Chaque page lue dans un fichier de run est vérifiée par son CRC (sa somme de contrôle) à son arrivée (G7).
+- Chaque page lue dans un fichier de run est vérifiée par son CRC (son checksum, un nombre calculé sur ses octets) à son arrivée (G7).
 
 Le follow stream est ouvert quand `Connect` revient ; la première lecture locale peut attendre que le follower (le
 lecteur qui suit la base) applique les groupes écrits depuis le run le plus récent de la base (son rattrapage), et les
 suivantes seulement, de temps en temps, les microsecondes d'une frame en route. Ce que cela coûte : un domain du
 programme applique chaque groupe qu'écrit le serveur, quel que soit le programme qui l'écrit (1,7 µs par changement
-seul, environ 4 µs sous 18 000 groupes par seconde, mesuré à l'étape 3 du serveur), et le programme tient un cache des
+seul, environ 4,5 µs sous 18 000 groupes par seconde, mesuré au serveur), et le programme tient un cache des
 pages de la base (256 MB au plus) et les changements depuis le dernier merge
 ([serveur](server.md#ce-que-cela-coûte)).
 
@@ -421,7 +420,7 @@ prepared` (C, libpq) qui lit `SELECT * FROM invoice WHERE id = $1`, les mêmes l
 | | client Cesia | client OCaml | PostgreSQL 18.6 |
 |---|---:|---:|---:|
 | sur la machine du serveur : une lecture locale | **0,77** [0,76 ; 0,82] | 0,24 [0,22 ; 0,36] | 26,4 [23,9 ; 32,3] par son socket Unix |
-| par TCP et TLS 1.3 (loopback) | 51,6 [44,1 ; 63,4] | 37,1 [31,3 ; 46,8] | 49,6 à l'étape 2 du serveur ([serveur](server.md#la-vitesse-à-côté-de-postgresql)) |
+| par TCP et TLS 1.3 (loopback) | 51,6 [44,1 ; 63,4] | 37,1 [31,3 ; 46,8] | 49,6, dans d'autres tours ([serveur](server.md#la-vitesse-à-côté-de-postgresql)) |
 | au serveur par son socket Unix | (pas un chemin du client Cesia : il y lit en local) | 8,9 [8,0 ; 9,6] | |
 
 - La lecture locale est 34 fois plus rapide que celle de PostgreSQL par son socket, et 3,2 fois plus lente que celle
@@ -429,15 +428,15 @@ prepared` (C, libpq) qui lit `SELECT * FROM invoice WHERE id = $1`, les mêmes l
   la native d'un package (une fonction Cesia, le stub de la native, ses 3 arguments convertis) environ 0,10 µs ; trouver
   la base et le kind, 0,05 ; faire la map de 4 champs et son `Ok` par l'interface native de Cesia, environ 0,17 ; la
   boucle du benchmark elle-même, 0,08 (dans le chiffre ci-dessus : une boucle qui appelle une fonction Cesia avec les
-  mêmes arguments). La borne de la conception était 1 µs : tenue.
+  mêmes arguments). La cible fixée avant de le construire, 1 µs, est tenue.
 - Par TLS, une lecture paie le round trip, le chiffrement (environ 11 µs par round trip en C avec OpenSSL ici) et le
   travail du serveur. Le client Cesia lit sa réponse lui-même quand rien d'autre n'est en vol (la fenêtre de trois round
   trips, [beaucoup de fibers](#beaucoup-de-fibers-une-seule-connexion)) : sans cela, une réponse passait du domain
   lecteur du package à celui de Cesia par un pipe, et une lecture coûtait 74,1 µs [51,2 ; 101,7] dans les mêmes tours
   (le chemin rapide : 0,67 fois cela, la médiane des rapports des tours). Les 14 µs qui restent au-dessus du client
-  OCaml sont le réveil de l'ordonnanceur de Cesia et les valeurs faites pour Cesia ; la borne de la conception, 11 µs
-  au serveur par son socket Unix, est le chemin du client OCaml, que ne prend pas un programme Cesia sur la machine du
-  serveur (il lit en local).
+  OCaml sont le réveil du scheduler de Cesia (la partie qui choisit quelle fiber tourne) et les valeurs faites pour
+  Cesia ; la cible de 11 µs au serveur par son socket Unix vaut pour le chemin du client OCaml, que ne prend pas un
+  programme Cesia sur la machine du serveur (il lit en local).
 
 **Écritures durables**, $n = 7$ tours de 3 s (chaque écriture une facture de 4 faits, son groupe forcé sur le disque) :
 
@@ -488,8 +487,8 @@ linearizable sans cela.
 ## Ce qui n'est pas encore construit
 
 - `cepheus.Watch`, une question dont les changements arrivent à mesure qu'ils se produisent, dans un channel (un canal
-  qui porte des valeurs d'une fiber à une autre) : le serveur les pousse à l'étape 5 du plan du serveur.
-- Les forks d'une base lue au serveur : dans le serveur, une étape ultérieure.
+  qui porte des valeurs d'une fiber à une autre), poussés par le serveur.
+- Les forks d'une base lue au serveur, que le serveur fera.
 - `Not`, `Or`, `Prefix` et `In` dans les questions : pas dans le moteur.
 - Un programme atteint une seule base par connexion : `Connect` à nouveau pour une autre.
 

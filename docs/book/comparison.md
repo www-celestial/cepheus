@@ -79,7 +79,8 @@ serialization failures". Cepheus has one level: groups strictly serializable, re
 on its own ("When commit_delay is set to zero (the default), it is still possible for a form of group commit to
 occur", [WAL configuration](https://www.postgresql.org/docs/18/wal-configuration.html)), as Cepheus does. Parallel
 query: `max_parallel_workers_per_gather` defaults to 2
-([resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html)), hence "3 processes" above.
+([resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html)), hence the rows on 3 cores above:
+the leader and its 2 workers, 3 processes (on Q5 it launched 1 worker, so 2 processes).
 
 ## Measured: SQLite 3.54
 

@@ -6,7 +6,7 @@ the same parts is [architecture](architecture.md).
 
 ## 1. The journal and recovery
 
-**Model.** The journal is a sequence of frames F1, F2, ... appended to segment files. Each frame holds groups with
+**Model.** The journal is a sequence of frames $f_1, f_2, \dots$ appended to segment files. Each frame holds groups with
 consecutive numbers. Let $D$ be the durable prefix of the file (the bytes covered by a finished `fsync`). A crash (F1,
 F2) replaces the file by $D$ followed by some bytes $R$ from the unsynced writes (any subset of their sectors, possibly
 torn). Recovery reads frames from the start and stops at the first index $j$ where the bytes do not form a valid frame.
@@ -41,7 +41,7 @@ after anything but a clean close writes its newest frame again before forcing it
 pages are dirty again, so a successful `fsync` writes them and the frame joins $D$; if it fails, the open fails. By I1
 and the stop at the first failure, the newest frame is the only one that can lie outside $D$, so (R) alone suffices for
 safety (no view outside $D$, G13); (W) makes a failed write's absence certain and spares a later power loss the
-false alarm below. The model `spec/Journal.tla` keeps the page cache and the disk apart and checks both rules: without
+false alarm above. The model `spec/Journal.tla` keeps the page cache and the disk apart and checks both rules: without
 (R), TLC finds the trace write, failed `fsync`, process death before (W), recovery publishing the frame.
 
 **Detection power** ([Koopman 2002], [Castagnoli 1993]). CRC-32C has Hamming distance 4 for messages up to
@@ -299,15 +299,17 @@ beyond what it held before (the delta, the log of the groups written meanwhile):
 - the pages of the runs it reads and of the new run it writes, all counted by the cache: at most $C$, by construction (a
   page enters only through `Pages.fill` or `Pages.admit`, which make room first);
 - the pages being filled: the page under each stream's head, and the first page of a section while it waits for the
-  section before it to end there: at most 2 for each of the 18 streams of the pass by property, 36; 11 measured (the
-  unit test's bound is 24);
+  section before it to end there: at most 2 for each stream of the pass, $2s$ for $s$ streams: 18 in the pass by
+  property; in the pass by thing, run format 8 adds 4 for each property's column, so $s$ grows with the properties of
+  the schema (19 pages measured in the unit test, whose bound is 24);
 - the tables of the new run: 4 bytes of CRC, 4 of its place in the file, two 8-byte slots (frame and hot) and one
   count a page of its layout, 25 bytes for 16 KiB of layout (the layout of a coded run is loose: 1,118 MB for the
   10 M bottom run's 54.4 MB, so 1.7 MB of tables, 3.1 % of the run);
 - the blocks being coded (128 things or 128 rows, with their scratch buffer: a few KiB, more only for a thing with
   very many values) and the text hash table (4 bytes a slot, two slots a text of the new run).
 
-So $M_{\text{merge}} \le C + 36 \times 16\ \text{KiB} + 25 P + 8\, \mathit{ns}$ ($\mathit{ns}$ the texts of the new run), independent of the runs' size but for the tables. The merge in memory it replaced
+So $M_{\text{merge}} \le C + 2s \times 16\ \text{KiB} + 25 P + 8\, \mathit{ns}$ ($s$ the streams of the larger pass,
+$\mathit{ns}$ the texts of the new run), independent of the runs' size but for the tables. The merge in memory it replaced
 held 7 words a fact for its sort (560 MB at 10 M facts) and the whole new base outside the cache. Measured on the one
 level (benchmarks, the merge written to a file): with the whole base in a 1 GiB cache, a merge of the 10 M base and a delta of 400,000 facts takes the
 process from 412 MB to a peak of 651 to 656 MB (the new base's 245 MB of pages), against 1,222 to 1,450 MB for the

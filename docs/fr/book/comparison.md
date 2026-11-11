@@ -89,8 +89,8 @@ puis écrire selon ce qu'on a lu) validés par `Expect`
 groupe ses commits de lui-même (« When commit_delay is set to zero (the default), it is still possible for a form of
 group commit to occur », [WAL configuration](https://www.postgresql.org/docs/18/wal-configuration.html)), comme le fait
 Cepheus. Les requêtes parallèles : `max_parallel_workers_per_gather` vaut 2 par défaut
-([resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html)), d'où les « 3 processus »
-ci-dessus.
+([resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html)), d'où les lignes sur 3 cœurs
+ci-dessus : le leader et ses 2 workers, 3 processus (sur Q5, il n'a lancé qu'un worker, donc 2 processus).
 
 ## Mesuré : SQLite 3.54
 

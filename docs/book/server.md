@@ -92,7 +92,8 @@ name = "stock"
 - `max_connections` bounds the connections open at once, from their accept to their close (a thread each, and a file
   descriptor). At the limit a new connection is closed at once: over the Unix socket after an error frame
   `too_many_connections`, over TCP without a word and before its TLS handshake, so that a refused connection costs the
-  server no handshake (about 5 ms of computation). The log says how many were refused, at most once a second. The
+  server no handshake (its key exchange and signature: a whole new TLS connection costs 2.6 ms, both sides,
+  [measured below](#speed-beside-postgresql)). The log says how many were refused, at most once a second. The
   default, 512, leaves room under systemd's default limit of 1,024 descriptors a service (`LimitNOFILE`), which the
   databases' files share (a journal segment, a run file a level); raise both together. A server out of descriptors
   says so in its log and keeps accepting once some close (`accept` fails with `EMFILE`; the connection waits in the
@@ -264,7 +265,7 @@ On a follow stream the server pushes (request id 0):
   schema.
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
-  (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 453,866).
+  (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
 - An **operation**: 0 Add, 1 Retract, 2 Expect a value, 3 Expect none; then the thing (zigzag: a negative id is a new
   thing of the group), the property, the value.
 - Every read names the group of the view it was answered from, every receipt its group: a program can check what it
@@ -420,9 +421,11 @@ the reader cannot write it). In memory rather than on the disk: the number needs
 is left), it outlives a server's death (the rule below needs it), and a page of tmpfs is never written back to a
 disk, so the server's store into it never waits for one.
 
-  `Unix.map_file` maps read-write (a shared mapping then needs a descriptor open for writing, which would let a
-  reader move the number), and of a private mapping mmap(2) says: "It is unspecified whether changes made to the
-  file after the mmap() call are visible in the mapped region"; the C stub maps `PROT_READ` and `MAP_SHARED`.
+A reader maps the page through a small C stub, with `PROT_READ` and `MAP_SHARED`, rather than with `Unix.map_file`,
+which maps read-write (a shared mapping then needs a descriptor open for writing, which would let a reader move the
+number); and of a private mapping mmap(2) says: "It is unspecified whether changes made to the file after the mmap()
+call are visible in the mapped region". The rule, step by step:
+
 - Each frame is sent tagged with the number it will be visible under: the current one plus 1.
 - Once the frame's fsync returns and it is published, the server stores the new number, then answers the frame's
   writers, then lets remote reads see it.
@@ -532,7 +535,7 @@ reader and wakes the thread that sends it.
 
 **What following costs a reader.** One local reader while 256 clients write invoices of 4 facts through the socket
 ($n = 7$ rounds, its CPU time over 4 s): **32.3 % of a core** [23.3, 38.8] at 17,942 groups a second [12,269,
-22,027], about 4 µs a change applied. The plan's target, 20 % of a core at 18,000 groups a second, is **missed**:
+22,027], about 4.5 µs a change applied. The plan's target, 20 % of a core at 18,000 groups a second, is **missed**:
 the design measured 1.72 µs a change to replay a journal alone on a quiet machine; here the reader shares the
 machine's 4 cores and 8 hardware threads with the server and the 256 writers, and each merge of the server makes it
 apply again, onto the new runs, the groups written during the merge. Under that load its memory (Pss) was 273 MB

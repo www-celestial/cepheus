@@ -408,6 +408,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — ocaml-tls, the TLS in OCaml weighed against OpenSSL (its ciphers are C too; not an OSS-Fuzz project): OpenSSL kept.
 - **[sd_notify]** systemd. sd_notify(3), the readiness protocol: one datagram (`READY=1`) on `$NOTIFY_SOCKET`.
   https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html
+  — The server sends `READY=1` once its databases are open and its listeners listen, and `STOPPING=1` when it stops: a
+  unit of `Type=notify` counts it started only then.
 - **[Lamport 1986]** L. Lamport. On Interprocess Communication. Part I: Basic Formalism; Part II: Algorithms.
   *Distributed Computing* 1(2), 77–85 and 86–101, 1986. https://doi.org/10.1007/BF01786227,
   https://doi.org/10.1007/BF01786228

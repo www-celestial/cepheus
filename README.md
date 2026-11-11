@@ -89,8 +89,8 @@ facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/boo
 | load of 10 M facts | **5.13 s**, in two large groups, alternated with it | 30.87 s (`COPY`, indexes, `VACUUM ANALYZE`) |
 
 SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core (before run format 7): Cepheus
-is faster on an invoice by id (0.37 µs against 0.68) and on the unpaid sum per city (230 ms against 360), even on the city's unpaid
-invoices and the triangles, slower on a client by e-mail (1.67 µs against 1.52). Loading the 10 M facts, alternated
+is faster on an invoice by id (0.37 µs against 0.68), on the unpaid sum per city (230 ms against 360) and on the triangles
+(0.97 s against 1.04), tied on the city's unpaid invoices, slower on a client by e-mail (1.67 µs against 1.52). Loading the 10 M facts, alternated
 seven times, Cepheus is faster in every round (5.61 s against 9.37 s at the median: SQLite takes 1.7 times as long),
 but SQLite does it in 11 MB of memory against 1.46 GB (0.88 of it the client's own list of operations). Since run
 format 7 and journal format 2 (2026-11-09), the 10 M facts take 76.0 MB on disk with their whole history, against

@@ -4,7 +4,7 @@ Chaque fichier d'une base, octet par octet, tel que l'écrivent `src/journal.ml`
 `src/codec.ml` et `src/snapshot.ml`.
 
 Tous les entiers sont little-endian (l'octet de poids faible d'abord). CRC est CRC-32C (Castagnoli), sous forme d'un
-nombre de 32 bits non signé : la somme de contrôle d'iSCSI de la RFC 3720 (section 12.1), polynôme 0x1EDC6F41
+nombre de 32 bits non signé : le checksum d'iSCSI de la RFC 3720 (section 12.1), polynôme 0x1EDC6F41
 (0x11EDC6F41 avec son terme en $x^{32}$, comme l'écrit la RFC), calculée bit-reflected (bits pris dans l'ordre inverse :
 0x82F63B78), en partant de 0xFFFFFFFF et complémentée à la fin ; le CRC des 9 octets `123456789` est 0xE3069283, et les
 exemples de la RFC 3720 (annexe B.4) donnent les valeurs qu'elle affiche, lues comme des nombres little-endian

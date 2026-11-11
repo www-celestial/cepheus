@@ -243,13 +243,14 @@ dommage aléatoire d'une page, CRC-32C le manque avec une probabilité $2^{-32}$
 concerne (celle du delta, ou celle du run le plus récent qui en a une) l'ajoute ; un compte est la somme des lignes de
 chaque run moins ses retraits, plus le compte net du delta (les runs sont nets, donc rien n'est compté deux fois) ; une
 itération ne montre une ligne d'un run que si aucun run plus récent n'a d'entrée pour le même fait
-(docs/book/theory.md, section 9). *Testé par* `test/unit.ml` ("several runs" : 120 vues aléatoires de jusqu'à 4 runs qui
-ajoutent et retirent, comparées à leur merge complet et à un évaluateur naïf ; "large groups").
+([théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes), section 9).
 
 *Testé par* la simulation (des merges à des moments aléatoires, des crashs pendant leur écriture, des inversions de bits
 dans les fichiers de runs) et `test/unit.ml` (aller-retour ; un run d'une autre base est refusé ; un run aux bits
 inversés est mis de côté ; un run trois fois plus grand que le cache, lu par trois domains, avec un bit inversé après
-l'ouverture : les questions répondent juste ou renvoient `Damaged`, et c'est exactement la page abîmée qui échoue).
+l'ouverture : les questions répondent juste ou renvoient `Damaged`, et c'est exactement la page abîmée qui échoue ;
+"several runs" : 120 vues aléatoires de jusqu'à 4 runs qui ajoutent et retirent, comparées à leur merge complet et à un
+évaluateur naïf ; "large groups").
 
 ## G8 Les forks
 
@@ -355,9 +356,7 @@ slices, au plus $1 + 8 (k - 1)$ fois celle de Generic Join pour $k$ slices.
 des recoverys, doit donner les réponses de l'évaluateur naïf et énumérer au plus la borne que `test/check.ml` calcule à
 partir des seuls faits (`Query.work` compte les candidats) ; et des cas nommés où une liste est bien plus grande que la
 réponse (un statut partagé par 20 000 factures, un tag très fréquent dans le delta, un intervalle de 10 scores parmi
-20 000, une chose avec 40 000 valeurs).
-
-*Testé par* `test/unit.ml` : 300 bases aléatoires et 15 questions aléatoires pour chacune (jusqu'à 3 patterns, des
+20 000, une chose avec 40 000 valeurs). Et par `test/unit.ml` : 300 bases aléatoires et 15 questions aléatoires pour chacune (jusqu'à 3 patterns, des
 constantes, des liens, des intervalles) comparées à un évaluateur naïf sur tous les faits, sur une base avec un delta
 et sur une base compactée.
 

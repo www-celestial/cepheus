@@ -42,9 +42,10 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 - **Two kinds of write loads.** Closed loop: each client writes as soon as its last write was confirmed; it gives the
   highest throughput, but its latencies are wrong under stalls: a client stalled by a 400 ms fsync sends nothing
   during the stall, so the writes that would have waited are never measured ("coordinated omission", [Tene 2015]).
-  Open loop: writes are due at a fixed rate (client $c$'s $k$-th write at $t_0 + (k C + c) / \text{rate}$), and a write's latency
-  counts from the time it was due, as wrk2 does; PostgreSQL's side is `pgbench -R`, whose latencies count from the
-  scheduled start (the schedule lag is added). The open loop gives the latencies; the closed loop, the throughput.
+  Open loop: writes are due at a fixed rate, all clients together (with $C$ clients, client $c$'s $k$-th write at
+  $t_0 + (k C + c) / \text{rate}$), and a write's latency counts from the time it was due, as wrk2 does; PostgreSQL's
+  side is `pgbench -R`, whose latencies count from the scheduled start (the schedule lag is added). The open loop gives
+  the latencies; the closed loop, the throughput.
 - **Where a write's time goes**: the journal's pwrite and fsync of each frame, the writer's resolution of each batch,
   and its wait at a merge switch, each in its own histogram (`Journal.write_us`, `Journal.fsync_us`,
   `Engine.prepare_us`, `Engine.switch_us`); GC collections counted over the run.
@@ -596,9 +597,10 @@ alone, +9.9 µs [0.2, 18.4] (0.5 %) for the whole binary with its new `crc` comm
 C call; the table of 2,048 numbers the old code built at start is gone. A fresh copy of the same binary started
 17.8 µs [9.4, 28.3] slower than the file the build left, so these compare binaries where the build left them.
 
-**The engine fixes measured again** (the section below), on a quiet machine: 2f37b23 against 51cf32d, the same loads
-and opens, 9 rounds alternated. 10 M in 4 large groups: 9.68 s [8.42, 11.47] against 8.73 s [8.09, 9.61] (ratio 0.97
-[0.77, 1.12], slower in 4 of 9, $p = 1$); its open 396 against 403 ms (1.02 [0.94, 1.26], $p = 0.51$); 1 M a group a
+**The engine fixes measured again** (the section below), on a quiet machine: 2f37b23 (before the fixes) against
+51cf32d (after), the same loads and opens, 9 rounds alternated. Each ratio is after over before, the median of the 9
+rounds' ratios and its interval, which need not equal the ratio of the two medians. 10 M in 4 large groups: 9.68 s
+[8.42, 11.47] against 8.73 s [8.09, 9.61] (ratio 0.97 [0.77, 1.12], after slower in 4 of 9, $p = 1$); its open 396 against 403 ms (1.02 [0.94, 1.26], $p = 0.51$); 1 M a group a
 client 9.21 against 9.87 s (1.01 [0.85, 1.16], $p = 1$); its open 364 against 368 ms (1.00 [0.97, 1.14], $p = 0.51$). The
 fixes cost nothing measurable: the 13.12 s below was the disk.
 
@@ -820,8 +822,8 @@ rewrote its whole base at each of its 31 merges. With the levels and the large g
 groups ties SQLite's `.import` (the section above). SQLite's records (variable-length integers in B-tree pages) stay
 about half the size of Cepheus' 8-byte words, and SQLite loads in 11 MB where a large group needs 2.5 to 3.2 GB. Not
 measured on SQLite's side: concurrent durable writes (SQLite has one writer at a time), and reads larger than memory.
-The reads above were measured on the engine of 148ff09; on one run, the levels read at the same speed (the next
-section), so the comparison holds.
+The reads above were measured on the engine of 148ff09; on one run, the levels read at the same speed
+([Reads, all in memory](#reads-all-in-memory), above), so the comparison holds.
 
 ## The merge written to a file (2026-11-08), at 10 million facts
 
@@ -894,7 +896,7 @@ Q3 91.8 ms [88.7, 94.6] against 88.7 ms [86.4, 90.9]; Q4 678 ms [650, 795] again
 pages read from the disk on both sides; peak 122 MB against 120 MB. (With 5 runs the interval is [min, max], 93.8 %.)
 
 **Loading 10 M facts, and what a merge's writes cost the journal** (`bench.exe load`: 64 clients, groups of 83 facts,
-about 33 merges as the base grows; one run a line, alternated):
+about 33 merges as the base grows; each cell gives every run, separated by semicolons, the runs alternated):
 
 | | load | peak | journal fsync p99 | max | merge switch p99 |
 |---|---:|---:|---:|---:|---:|
@@ -1032,7 +1034,7 @@ against 22 ms; Q5 63 ms against 50 ms.
   (dense ids); a question runs in the application's process with no round trip and no plan cache to consult. Through
   the socket, which is what an application of PostgreSQL pays, the gap is 15 to 70 times.
 - **Large scans and aggregates (Q4) and the triangle query (Q5): PostgreSQL is faster, because it uses three processes
-  for one query.** On one core it is 1.2 times slower than Cepheus on Q4 and even on Q5. Cepheus answers a question on
+  for one query.** On one core it is 1.2 times slower than Cepheus on Q4 and tied on Q5 (1,000 ms against 968). Cepheus answers a question on
   one core today; parallel questions (OCaml domains over a view, which needs no lock) are the next step. Q5's graph is
   uniform (5 links a client), where joins two at a time stay small; Generic Join's advantage shows on skewed graphs,
   not measured yet. Sorted intersection of the candidate lists (Leapfrog style) would also cut Q5's lookups.

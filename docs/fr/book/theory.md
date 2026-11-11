@@ -6,7 +6,7 @@ récit en mots simples des mêmes parties est dans [architecture](architecture.m
 
 ## 1. Le journal et la recovery
 
-**Modèle.** Le journal est une suite de frames F1, F2, ... (une frame : un bloc du journal écrit d'un seul tenant, qui
+**Modèle.** Le journal est une suite de frames $f_1, f_2, \dots$ (une frame : un bloc du journal écrit d'un seul tenant, qui
 porte des groupes et se vérifie par ses CRC) ajoutées à la fin de fichiers de segment (les fichiers successifs du
 journal). Chaque frame contient des groupes de numéros consécutifs. Soit $D$ le préfixe durable du fichier (les octets
 couverts par un `fsync` terminé ; fsync est l'appel système qui attend que les octets écrits soient vraiment sur le
@@ -24,7 +24,7 @@ confirmé est donc dans $D$.
 **Théorème (G1-G3).** Sous F1 et F2, la recovery rend les groupes $1, \dots, k$ avec $k \ge$ tout groupe confirmé,
 chacun intact.
 *Preuve.* Par I1 et I2, les frames des groupes confirmés sont dans $D$ ; le crash ne change pas $D$ ; chacune de ces
-frames se vérifie (CRC de l'en-tête et du corps ; un CRC est une somme de contrôle, un nombre calculé sur les octets qui
+frames se vérifie (CRC de l'en-tête et du corps ; un CRC est un checksum, un nombre calculé sur les octets qui
 change dès qu'un octet change), donc la lecture les passe. La lecture s'arrête à la première frame qui ne se vérifie
 pas, qui se trouve après les frames confirmées de $D$, et tout ce qui la suit est coupé ; les frames sont dans l'ordre
 des groupes, donc le résultat est un préfixe. ∎
@@ -55,7 +55,7 @@ forcer (`Journal.rewrite_newest`) : ces pages redeviennent dirty (modifiées en 
 disque), donc un `fsync` réussi les écrit et la frame entre dans $D$ ; s'il échoue, l'ouverture échoue. Par I1 et
 l'arrêt au premier échec, la frame la plus récente est la seule qui peut se trouver hors de $D$ ; (R) seule suffit donc
 pour la sûreté (aucune vue hors de $D$, G13) ; (W) rend certaine l'absence d'une écriture qui a échoué et épargne à une
-coupure de courant ultérieure la fausse alarme ci-dessous. Le modèle `spec/Journal.tla` (écrit en TLA+, un langage pour
+coupure de courant ultérieure la fausse alarme ci-dessus. Le modèle `spec/Journal.tla` (écrit en TLA+, un langage pour
 décrire un système et ses états) sépare le page cache du disque et vérifie les deux règles : sans (R), TLC (le model
 checker de TLA+, qui parcourt tous les états du modèle) trouve la trace écriture, `fsync` qui échoue, mort du processus
 avant (W), recovery qui publie la frame.
@@ -361,8 +361,9 @@ tient, en plus de ce qu'il tenait avant (le delta, le log des groupes écrits en
 - les pages des runs qu'il lit et du nouveau run qu'il écrit, toutes comptées par le cache : au plus $C$, par
   construction (une page n'entre que par `Pages.fill` ou `Pages.admit`, qui font de la place d'abord) ;
 - les pages en cours de remplissage : la page sous la tête de chaque flux, et la première page d'une section pendant
-  qu'elle attend que la section d'avant y finisse : au plus 2 pour chacun des 18 flux de la passe par propriété, 36 ;
-  11 mesurées (la borne du test unitaire est 24) ;
+  qu'elle attend que la section d'avant y finisse : au plus 2 pour chaque flux de la passe, $2s$ pour $s$ flux : 18 dans
+  la passe par propriété ; dans la passe par chose, le run format 8 en ajoute 4 pour la colonne de chaque propriété, si
+  bien que $s$ grandit avec les propriétés du schéma (19 pages mesurées dans le test unitaire, dont la borne est 24) ;
 - les tables du nouveau run : 4 octets de CRC, 4 de sa place dans le fichier, deux slots de 8 octets (frame et hot) et
   un compte par page de sa disposition, 25 octets pour 16 KiB de disposition (la disposition d'un run codé est
   lâche : 1 118 MB pour les 54,4 MB du bottom run de 10 M, le run du niveau le plus bas, donc 1,7 MB de tables, 3,1 %
@@ -371,7 +372,8 @@ tient, en plus de ce qu'il tenait avant (le delta, le log des groupes écrits en
   pour une chose qui a énormément de valeurs) et la hash table des textes (4 octets par slot, deux slots par texte du
   nouveau run).
 
-Donc $M_{\text{merge}} \le C + 36 \times 16\ \text{KiB} + 25 P + 8\, \mathit{ns}$ ($\mathit{ns}$ les textes du nouveau run), indépendant de la taille des runs, à part les tables. Le
+Donc $M_{\text{merge}} \le C + 2s \times 16\ \text{KiB} + 25 P + 8\, \mathit{ns}$ ($s$ les flux de la plus grande
+passe, $\mathit{ns}$ les textes du nouveau run), indépendant de la taille des runs, à part les tables. Le
 merge en mémoire qu'il a remplacé tenait 7 mots par fait pour son tri (560 MB à 10 M de faits) et toute la nouvelle
 base hors du cache. Mesuré sur le niveau unique (benchmarks, le merge écrit dans un fichier) : avec toute la base dans
 un cache de 1 GiB, un merge de la base de 10 M et d'un delta de 400 000 faits fait passer le processus de 412 MB à un

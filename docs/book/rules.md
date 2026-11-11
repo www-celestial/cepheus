@@ -227,7 +227,7 @@ reader, the past need no reasoner, and a later change of the reasoner's code nev
 database was. A derived fact costs its bytes in the frame: its kind in the kinds column (a few bits a change, or none
 in a block of one kind), its thing and its value in their columns ([formats](formats.md#a-group)).
 
-In a run (format 7, [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)), the flag "only derived" is
+In a run (formats 7 and 8, [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)), the flag "only derived" is
 the lowest bit of the value's field, in both orders, in the blocks that hold a derived fact (a thing block's entry, a
 row block); a block without one spends no bit on it, so a database without rules pays nothing. Format 6 kept it in
 bit 63 of each 8-byte value word. A run that changes the flag of a fact held by a run below it holds a retraction (the
@@ -319,8 +319,8 @@ Each was weighed against the others in the design; the measurements are the desi
   the reasoner's code never changes the past; the frame carries the derived facts (+40 % bytes on LUBM).
 - **`why` computed when asked, not stored**: nothing paid at write time; a proof, not the shortest one.
 - **A derived fact cannot be retracted**: no silent no-op; the message names the rule and the facts to retract.
-- **The flag in the value's field** (bit 63 of the value word in format 6, the lowest bit of the field in format 7's
-  blocks that hold a derived fact): no byte more without rules; a run of a newer format is not read by an older
+- **The flag in the value's field** (bit 63 of the value word in format 6, the lowest bit of the field in the
+  blocks of formats 7 and 8 that hold a derived fact): no byte more without rules; a run of a newer format is not read by an older
   binary, which replays the journal instead.
 - **The budget scaled by the group** ($100{,}000 + 100 \times \text{its asserted changes}$): a load derives in proportion, a runaway
   rule is stopped and named.

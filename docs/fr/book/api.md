@@ -262,7 +262,7 @@ exception Unreadable of string
 chose. `values v e p` est les valeurs de e pour p (l'ordre n'est pas spécifié) ; `[]` si p n'est pas une propriété.
 `things v p x` est les choses qui ont la valeur x pour p, dans l'ordre croissant ; pour une propriété de lien,
 `things v p (Link t)` est les choses qui pointent vers t par p. Les trois lisent les runs à travers le cache : quand une
-page ne peut pas être lue sur le disque ou ne se vérifie pas contre son CRC (sa somme de contrôle), elle n'est jamais
+page ne peut pas être lue sur le disque ou ne se vérifie pas contre son CRC (son checksum, un nombre calculé sur ses octets), elle n'est jamais
 servie, et ils lèvent `Unreadable` avec le fichier et la page.
 
 ```ocaml

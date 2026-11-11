@@ -100,9 +100,9 @@ Mesuré sur un ordinateur portable (Intel i7-4720HQ, SSD SATA) contre PostgreSQL
 | chargement de 10 M de faits | **5,13 s**, en deux grands groupes, en alternance avec lui | 30,87 s (`COPY`, index, `VACUUM ANALYZE`) |
 
 SQLite 3.54, une bibliothèque dans le processus comme l'est Cepheus, mesuré de la même façon sur un cœur (avant le run
-format 7) : Cepheus est plus rapide sur une facture par id (0,37 µs contre 0,68) et sur la somme impayée par ville
-(230 ms contre 360), à égalité sur les factures impayées d'une ville et sur les triangles, plus lent sur un client par
-e-mail (1,67 µs contre 1,52). Pour charger les 10 M de faits, en alternance sept fois, Cepheus est plus rapide à chaque
+format 7) : Cepheus est plus rapide sur une facture par id (0,37 µs contre 0,68), sur la somme impayée par ville
+(230 ms contre 360) et sur les triangles (0,97 s contre 1,04), à égalité sur les factures impayées d'une ville, plus lent
+sur un client par e-mail (1,67 µs contre 1,52). Pour charger les 10 M de faits, en alternance sept fois, Cepheus est plus rapide à chaque
 tour (5,61 s contre 9,37 s à la médiane : SQLite met 1,7 fois plus de temps), mais SQLite le fait en 11 MB de mémoire
 contre 1,46 GB (dont 0,88 pour la liste d'opérations du client lui-même). Depuis le run format 7 et le journal format 2
 (2026-11-09), les 10 M de faits prennent 76,0 MB sur le disque avec tout leur historique, contre un fichier de 136 MB

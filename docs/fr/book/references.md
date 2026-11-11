@@ -440,6 +440,8 @@ est citée dans la page [comparaison](comparison.md).
 - **[sd_notify]** systemd. sd_notify(3), le protocole de readiness (le signal « prêt ») : un seul datagramme
   (`READY=1`) sur `$NOTIFY_SOCKET`.
   https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html
+  — Le serveur envoie `READY=1` une fois ses bases ouvertes et ses listeners à l'écoute, et `STOPPING=1` quand il
+  s'arrête : une unité systemd de `Type=notify` ne le compte démarré qu'à ce moment-là.
 - **[Lamport 1986]** L. Lamport. On Interprocess Communication. Part I: Basic Formalism; Part II: Algorithms.
   *Distributed Computing* 1(2), 77–85 and 86–101, 1986. https://doi.org/10.1007/BF01786227,
   https://doi.org/10.1007/BF01786228

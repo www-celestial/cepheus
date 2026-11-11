@@ -48,7 +48,7 @@ largeur en bits) ou en deltas (les différences d'une valeur à la suivante), se
 changements gardent leur ordre. Un chargement de 10 M de faits prend 21,6 MB de journal, là où le codage changement
 par changement du format 1 prenait 94 MB ([formats](formats.md#un-groupe)).
 
-**CRC.** Un **cyclic redundancy check** (CRC) est une courte somme de contrôle calculée sur un bloc d'octets : si un
+**CRC.** Un **cyclic redundancy check** (CRC) est un court checksum calculé sur un bloc d'octets : si un
 octet du bloc change, le CRC calculé à nouveau diffère, sauf avec une probabilité minuscule. Cepheus utilise CRC-32C (le
 polynôme de Castagnoli, Castagnoli et al. 1993, celui d'iSCSI, RFC 3720) : il détecte toute erreur en rafale (burst :
 des bits faux qui se suivent) d'au plus 32 bits, toute erreur d'au plus 3 bits dans des frames de taille réaliste, et
@@ -225,7 +225,9 @@ une seule écriture atomique. Un crash à n'importe quel moment laisse les runs 
 (G12). `snapshot` est le seul merge complet : le delta et tous les runs en un seul run.
 
 **Mémoire.** Un merge a besoin du cache, de quelques buffers de page (des zones de mémoire de travail : au plus 2 pour
-chacun des 8 flux d'une passe, 7 mesurés) et de 21 octets par page du nouveau run (0,13 % de celui-ci) : avec un cache
+chaque flux d'une passe ; 19 mesurés dans le test unitaire, dont la borne est 24) et de 25 octets pour chaque 16 KiB de
+la disposition du nouveau run (3,1 % du run de 10 M, dont la disposition codée est lâche ;
+[théorie](theory.md#8-merges-écrits-dans-un-fichier)) : avec un cache
 de 32 MB, un merge de toute la base de 245 MB a tourné dans un processus limité à 128 MB (pic de 99 MB).
 
 La **write amplification** est le nombre de fois qu'un fait est écrit sur le disque pour chaque fois qu'un client
@@ -387,7 +389,7 @@ chaque tour, ne joint que les faits nouveaux du tour précédent), dans un worki
 tableaux hors de la vue du collector ; les changements dérivés rejoignent la frame du groupe avec un octet de sorte
 (2 à 5) et la vue en un seul lot trié. Le replay les applique et n'évalue rien. Dans un run, la valeur d'un fait porte
 un drapeau « seulement dérivé » dans le bit le plus bas de son champ, dans les blocs qui tiennent un fait dérivé
-(format 7 ; le format 6 utilisait le bit 63 d'un mot de valeur). Un grand groupe avec des règles raisonne sur ses
+(formats 7 et 8 ; le format 6 utilisait le bit 63 d'un mot de valeur). Un grand groupe avec des règles raisonne sur ses
 propres faits dans le working set et ajoute les faits dérivés à ses tableaux, fusionnés avec eux dans le run. Le tout :
 [règles](rules.md).
 

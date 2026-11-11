@@ -196,8 +196,9 @@ be idle (at most one fsync), replays the rest, renames the file to its name, for
 replaced, and switches both views to the new runs in one atomic store. A crash at any point leaves the runs before it
 or the runs after it, whole (G12). `snapshot` is the one full merge: the delta and every run into one run.
 
-**Memory.** A merge needs the cache, a few page buffers (at most 2 for each of the 8 streams of a pass, 7 measured)
-and 21 bytes a page of the new run (0.13 % of it): with a 32 MB cache, a merge of the whole 245 MB base ran in a
+**Memory.** A merge needs the cache, a few page buffers (at most 2 for each stream of a pass; 19 measured in the unit
+test, whose bound is 24) and 25 bytes for each 16 KiB of the new run's layout (3.1 % of the 10 M run, whose coded
+layout is loose; [theory](theory.md#8-merges-written-to-a-file)): with a 32 MB cache, a merge of the whole 245 MB base ran in a
 process capped at 128 MB (peak 99 MB).
 
 **Write amplification** is the number of times a fact is written to the disk for each time a client writes it. Under
@@ -341,7 +342,7 @@ after the group's asserted changes, its retractions are decided by Backward/Forw
 semi-naive evaluation, in a working set of arrays out of the collector's sight; the derived changes join the group's
 frame with a kind byte (2 to 5) and the view in one sorted batch. Replay applies them and evaluates nothing. In a run,
 a fact's value carries a flag "only derived" in the lowest bit of its field, in the blocks that hold a derived fact
-(format 7; format 6 used bit 63 of a value word). A large group with rules reasons over its own facts
+(formats 7 and 8; format 6 used bit 63 of a value word). A large group with rules reasons over its own facts
 in the working set and appends the derived ones to its arrays, merged into the run with them. The whole of it:
 [rules](rules.md).
 
