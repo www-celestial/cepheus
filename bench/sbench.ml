@@ -15,6 +15,20 @@
      sbench.exe localq ADDR FACTS Q3|Q4 N    N runs of a question in this process
      sbench.exe ids ADDR FACTS               the 81,920 invoices of the sample, one id a line, in the order of their reads
                                              (invoice i): the reads of bench/get.ce, the Cesia client's, are these
+     sbench.exe wlat ADDR FACTS local|remote N   N writes of an unpaid invoice of one client, one after the other, each
+                                             seen by a watch of that client's unpaid invoices (in this process's
+                                             follower, or at the server over a connection of its own): the write's
+                                             time, and the time from its receipt to its change (us, p50 and p99)
+     sbench.exe stall ADDR FACTS N SECS S    N watches of one question, each on a connection of its own read by a
+                                             thread, and S connections that watch and never read, while one writer
+                                             writes groups of 200 invoices for SECS: the changes' times after their
+                                             receipts (p50, p99), the share delivered, and the server's memory
+                                             (CEPHEUS_PID: VmRSS and VmHWM, kB)
+     sbench.exe livecpu DIR SCREENS GROUPS   in this process, a database directory not served (a copy): SCREENS
+                                             watches of the unpaid invoices of a client (one client each) and a
+                                             dashboard (the unpaid sum and count), then GROUPS random groups: the
+                                             hub's time a group (us, p50, p99, mean), beside asking again the screens
+                                             a group touches and the dashboard; checked against Find at the end
      sbench.exe follow ADDR FACTS SECS       a local reader for SECS seconds, reading every invoice of the sample once at
                                              the start: its CPU time a second of the period (% of a core), the frames it
                                              applied, its memory (Pss and RSS of /proc/self/smaps_rollup, kB)
@@ -300,6 +314,220 @@ let follow addr facts secs =
   Printf.printf "cpu %.2f %% of a core, %d frames applied, pss %d kB, rss %d kB\n%!" ((c1 -. c0) /. (t1 -. t0) *. 100.) (a1 - a0) pss rss;
   Client.close s.c
 
+(* ---- live questions ---- *)
+
+let pct (a : float array) q =
+  let a = Array.copy a in
+  Array.sort compare a;
+  if Array.length a = 0 then nan else a.(min (Array.length a - 1) (int_of_float (q *. float (Array.length a))))
+
+let unpaid_of s client =
+  let pc = s.p "invoice/client" and pt = s.p "invoice/total" and ps = s.p "invoice/status" in
+  { Query.vars = 2;
+    where = [ { Query.e = Var 0; p = pc; v = Val (Link client) }; { e = Var 0; p = ps; v = Val (Text "unpaid") }; { e = Var 0; p = pt; v = Var 1 } ];
+    ranges = [] }
+
+(* each group's change, as it comes: its time *)
+type arrivals = { am : Mutex.t; ac : Condition.t; at : (int, float) Hashtbl.t }
+
+let arrivals () = { am = Mutex.create (); ac = Condition.create (); at = Hashtbl.create 1024 }
+let note a g = Mutex.protect a.am (fun () -> Hashtbl.replace a.at g (now ()); Condition.broadcast a.ac)
+
+let wait_for a g limit =
+  let deadline = now () +. limit in
+  Mutex.protect a.am (fun () ->
+      while (not (Hashtbl.mem a.at g)) && now () < deadline do
+        Mutex.unlock a.am;
+        Thread.delay 0.00002;
+        Mutex.lock a.am
+      done;
+      Hashtbl.find_opt a.at g)
+
+(* a remote watch on a connection of its own, read by a thread: each change's time *)
+let remote_watch addr q a =
+  let c = connect addr in
+  let db = ok (Client.open_db ~local:false c "main") in
+  let id = Client.watch c db q in
+  let rec loop () =
+    match Client.next_push c id with
+    | Client.Pushed (Wire.Change ch) -> note a ch.group; loop ()
+    | Client.Pushed _ -> loop ()
+    | Client.Ended e -> prerr_endline ("watch ended: " ^ e.code)
+    | exception Client.Broken _ -> ()
+  in
+  Thread.create loop ()
+
+let new_invoice s client k =
+  let pc = s.p "invoice/client" and pt = s.p "invoice/total" and ps = s.p "invoice/status" and pd = s.p "invoice/date" in
+  List.concat
+    (List.init k (fun j ->
+         [ Resolve.Add (-(j + 1), pc, Link client); Add (-(j + 1), pt, Money (100 + j)); Add (-(j + 1), ps, Text "unpaid"); Add (-(j + 1), pd, Date 1) ]))
+
+let wlat addr facts mode n =
+  let s = setup ~local:(mode = "local") addr facts in
+  let client = s.cids.(1) in
+  let q = unpaid_of s client in
+  let a = arrivals () in
+  (match mode with
+   | "local" -> (
+     match Client.local_hub s.c s.db with
+     | Some hub -> ignore (Live.subscribe hub q (Wire.Give [||]) ~from:0 ~emit:(function Live.Change ch -> note a ch.group; true | _ -> true))
+     | None -> failwith "not followed here")
+   | _ -> ignore (remote_watch addr q a));
+  Unix.sleepf 0.2;
+  let commit = Array.make n 0. and after = Array.make n 0. in
+  for i = 0 to n - 1 do
+    let t0 = now () in
+    let r = ok (Client.write s.c s.db (new_invoice s client 1)) in
+    let t1 = now () in
+    match wait_for a r.group 5. with
+    | Some t2 -> commit.(i) <- (t1 -. t0) *. 1e6; after.(i) <- (t2 -. t1) *. 1e6
+    | None -> failwith "a change did not come"
+  done;
+  Printf.printf "commit p50 %.1f p99 %.1f us; change after the receipt p50 %.1f p99 %.1f us
+%!" (pct commit 0.5) (pct commit 0.99)
+    (pct after 0.5) (pct after 0.99);
+  Client.close s.c
+
+let proc_kb pid key =
+  match In_channel.with_open_text (Printf.sprintf "/proc/%d/status" pid) In_channel.input_all with
+  | t ->
+    List.find_map
+      (fun l -> if String.length l > String.length key && String.sub l 0 (String.length key) = key then Scanf.sscanf (String.sub l (String.length key) (String.length l - String.length key)) " %d" (fun x -> Some x) else None)
+      (String.split_on_char '\n' t)
+    |> Option.value ~default:0
+  | exception Sys_error _ -> 0
+
+let stall addr facts n secs stalled =
+  let s = setup addr facts in
+  let client = s.cids.(2) in
+  let q = unpaid_of s client in
+  let watchers = Array.init n (fun _ -> arrivals ()) in
+  Array.iter (fun a -> ignore (remote_watch addr q a)) watchers;
+  (* connections that watch and never read *)
+  let silent =
+    List.init stalled (fun _ ->
+        let c = connect addr in
+        let db = ok (Client.open_db ~local:false c "main") in
+        ignore (Client.watch c db q);
+        c)
+  in
+  Unix.sleepf 0.5;
+  let receipts = Hashtbl.create 1024 in
+  let t_end = now () +. secs in
+  while now () < t_end do
+    let r = ok (Client.write s.c s.db (new_invoice s client 200)) in
+    Hashtbl.replace receipts r.group (now ())
+  done;
+  Unix.sleepf 1.0;
+  let lat = ref [] and got = ref 0 and want = ref 0 in
+  Hashtbl.iter
+    (fun g t ->
+      Array.iter
+        (fun a ->
+          incr want;
+          match Mutex.protect a.am (fun () -> Hashtbl.find_opt a.at g) with
+          | Some t2 -> incr got; lat := ((t2 -. t) *. 1e6) :: !lat
+          | None -> ())
+        watchers)
+    receipts;
+  let l = Array.of_list !lat in
+  let pid = match Sys.getenv_opt "CEPHEUS_PID" with Some p -> int_of_string p | None -> 0 in
+  Printf.printf "%d watchers, %d silent: %d groups, %.1f %% delivered, after the receipt p50 %.0f p99 %.0f us; server rss %d kB hwm %d kB
+%!"
+    n stalled (Hashtbl.length receipts) (100. *. float !got /. float (max 1 !want)) (pct l 0.5) (pct l 0.99) (proc_kb pid "VmRSS:")
+    (proc_kb pid "VmHWM:");
+  List.iter Client.close silent;
+  Client.close s.c
+
+(* the hub alone, in this process, on a database directory nobody serves *)
+let livecpu dir screens groups =
+  let db = match Cepheus.open_ dir with Ok d -> d | Error e -> failwith (Cepheus.message e) in
+  let v = ref (Cepheus.view db) in
+  let p n = match Cepheus.property !v n with Some p -> p | None -> failwith n in
+  let pc = p "invoice/client" and pt = p "invoice/total" and ps = p "invoice/status" and pd = p "invoice/date" and mail = p "client/email" in
+  let nclients = Store.facts !v / facts_per_client in
+  let cid k =
+    match Cepheus.find !v { vars = 1; where = [ { e = Var 0; p = mail; v = Val (Text (Printf.sprintf "c%d@example.com" k)) } ]; ranges = [] } with
+    | Ok [ [| Value.Link e |] ] -> e
+    | _ -> failwith "email"
+  in
+  let clients = Array.init screens (fun k -> cid (k * (nclients / screens))) in
+  let unpaid c = { Query.vars = 2; where = [ { Query.e = Var 0; p = pc; v = Val (Link c) }; { e = Var 0; p = ps; v = Val (Text "unpaid") }; { e = Var 0; p = pt; v = Var 1 } ]; ranges = [] } in
+  let dash = { Query.vars = 2; where = [ { Query.e = Var 0; p = ps; v = Val (Text "unpaid") }; { e = Var 0; p = pt; v = Var 1 } ]; ranges = [] } in
+  let dsel = Wire.Group ([||], [| Wire.Count; Wire.Sum 1 |]) in
+  let hub = Live.create !v ~tag:!v.group ~durable:!v.group in
+  let rows = Array.make screens [] and drow = ref [] and pushes = ref 0 in
+  let t0 = now () in
+  Array.iteri
+    (fun i c ->
+      ignore
+        (Live.subscribe hub (unpaid c) (Wire.Give [||]) ~from:0 ~emit:(fun m ->
+             (match m with
+              | Live.Answer a -> rows.(i) <- a.rows
+              | Change ch ->
+                incr pushes;
+                rows.(i) <- ch.added @ List.filter (fun r -> not (List.mem r ch.removed)) rows.(i)
+              | _ -> ());
+             true)))
+    clients;
+  ignore
+    (Live.subscribe hub dash dsel ~from:0 ~emit:(fun m ->
+         (match m with Live.Answer a -> drow := a.rows | Change ch -> drow := ch.added | _ -> ());
+         true));
+  let t_sub = now () -. t0 in
+  (* the invoices of the watched clients: those the groups change *)
+  let inv = Array.map (fun c -> Array.of_list (Cepheus.things !v pc (Link c))) clients in
+  let r = Rng.make 11 in
+  let times = Array.make groups 0. in
+  let touched = Array.make groups [] in
+  for k = 0 to groups - 1 do
+    let i = Rng.int r screens in
+    let c = clients.(i) in
+    let ops =
+      match Rng.int r 5 with
+      | 0 | 1 -> [ Resolve.Add (-1, pc, Link c); Add (-1, pt, Money (Rng.int r 100000)); Add (-1, ps, Text "unpaid"); Add (-1, pd, Date 1) ]
+      | 2 | 3 ->
+        let x = inv.(i).(Rng.int r (Array.length inv.(i))) in
+        [ Add (x, ps, Text (if Rng.bool r then "paid" else "unpaid")) ]
+      | _ -> let x = inv.(i).(Rng.int r (Array.length inv.(i))) in [ Add (x, pt, Money (Rng.int r 100000)) ]
+    in
+    touched.(k) <- [ i ];
+    match Resolve.resolve !v ~n:(!v.group + 1) ~time:0 ~by:0 ~why:"" ops with
+    | Ok (v', g, _) ->
+      let t = now () in
+      Live.frame hub ~tag:v'.group [ g ] v';
+      Live.durable hub v'.group;
+      times.(k) <- (now () -. t) *. 1e6;
+      v := v'
+    | Error e -> failwith (Engine.message (Engine.of_resolve e))
+  done;
+  (* asking again instead: the screen a group touches, and the dashboard *)
+  let m = min groups 1000 in
+  let t = now () in
+  for k = 0 to m - 1 do List.iter (fun i -> ignore (Answer.answer !v (unpaid clients.(i)) (Wire.Give [||]))) touched.(k) done;
+  let reask = (now () -. t) /. float m *. 1e6 in
+  let t = now () in
+  for _ = 1 to 20 do ignore (Answer.answer !v dash dsel) done;
+  let redash = (now () -. t) /. 20. *. 1e6 in
+  (* checked: every screen and the dashboard are Find's answers now *)
+  let sorted l = List.sort compare l in
+  let ok_rows = ref 0 in
+  Array.iteri
+    (fun i c ->
+      let a = Answer.answer !v (unpaid c) (Wire.Give [||]) in
+      let want = List.init a.n (fun j -> Array.init a.cols (fun x -> Store.value !v (a.typ x) (a.word j x))) in
+      if sorted want = sorted rows.(i) then incr ok_rows)
+    clients;
+  let a = Answer.answer !v dash dsel in
+  let dwant = List.init a.n (fun j -> Array.init a.cols (fun x -> Store.value !v (a.typ x) (a.word j x))) in
+  let mean = Array.fold_left ( +. ) 0. times /. float groups in
+  Printf.printf
+    "%d screens + a dashboard (subscribed in %.0f ms): a group %.2f us p50, %.2f p99, %.2f mean; %d changes given; asking again the screen a group touches %.1f us and the dashboard %.0f us; %d/%d screens and the dashboard %s Find's
+%!"
+    screens (t_sub *. 1e3) (pct times 0.5) (pct times 0.99) mean !pushes reask redash !ok_rows screens
+    (if sorted dwant = sorted !drow then "equal to" else "NOT equal to")
+
 (* N new connections, each its handshake (TLS on TCP) and Hello, then closed: microseconds a connection *)
 let hs addr n =
   let t0 = now () in
@@ -335,6 +563,9 @@ let () =
   | [| _; "localq"; a; f; q; n |] -> localq a (int_of_string f) q (int_of_string n)
   | [| _; "follow"; a; f; secs |] -> follow a (int_of_string f) (float_of_string secs)
   | [| _; "ids"; a; f |] -> ids a (int_of_string f)
+  | [| _; "wlat"; a; f; m; n |] -> wlat a (int_of_string f) m (int_of_string n)
+  | [| _; "stall"; a; f; n; secs; st |] -> stall a (int_of_string f) (int_of_string n) (float_of_string secs) (int_of_string st)
+  | [| _; "livecpu"; d; n; g |] -> livecpu d (int_of_string n) (int_of_string g)
   | _ ->
     prerr_endline
       "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS";
