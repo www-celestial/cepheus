@@ -7,7 +7,7 @@
    are net: a run adds only facts absent below it and retracts only facts present below it, so every count is a sum of
    exact counts.
 
-   A part has three sections, coded with a frame of reference (Pack: a base and a bit width a block, Goldstein et
+   A part has four sections, coded with a frame of reference (Pack: a base and a bit width a block, Goldstein et
    al. 1998, Zukowski et al. 2006), each value found in O(1) without decoding its neighbours:
      by thing     the things it holds: a rank table (one 64-bit word for 32 thing ids: their presence bits, and how
                   many things come before) gives a thing's slot; the slots in blocks of 128, a block one entry a
@@ -20,6 +20,8 @@
                   that the rows of (p, w) are found with one rank and two offsets (links, texts, dates, small ints)
      dictionary   the texts s0 .. s0+ns-1: their offsets, their bytes, and a hash table of their ids (part a only:
                   a run holds the texts interned between the run below it and itself)
+     columns      each property's rows (thing, value) apart, in thing order (the column order, below): every lookup
+                  of a thing's property reads there
 
    Every lookup is a rank, an offset and the answer, on each run that holds the thing (the rank table says so with
    one bit) and on the delta; every count is exact. *)

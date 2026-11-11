@@ -295,8 +295,6 @@ let fold (v : Store.view) q ~init ~step ~merge =
       and cell2 = [| 0; 0 |] in
       (* a slice's exact count, and where its rows start when they can be read straight (Store.slice_values) *)
       let slice_count x pt =
-        let xi = x in
-        ignore xi;
         if has x pt.pe then begin
           match get pt.pv with
           | Some w -> let c = Store.slice_things v pt.pp w cell2 in if c >= 0 then (cell2.(1), 2 * c) else (-1, count x pt)
