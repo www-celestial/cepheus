@@ -1,7 +1,8 @@
 #!/bin/sh
 # Every test: unit and property tests, the rules' property tests (G17, G18, G20), the exhaustive enumeration, the simulation (SEEDS seeds, 300 by default),
 # real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/case-seats.md), and the documentation's
-# examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), TLS and the
+# examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), live questions
+# against the naive evaluator (LIVE_SEEDS seeds, 100 by default), TLS and the
 # limits of connections on a real server, a real server killed SERVER_KILLS times (20) under writing clients.
 # Scratch databases go in $CEPHEUS_TMP (default: the system's temp dir).
 # The Cesia client, when a Cesia with its native interface is here: its engine, built against that Cesia's
@@ -31,6 +32,7 @@ rm -rf "$tmp/cepheus-seats" && $b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-
 CEPHEUS_TMP=$tmp $b/examples.exe | tail -1
 CEPHEUS_TMP=$tmp $b/server_unit.exe | tail -1
 $b/server_sim.exe --seeds "${SERVER_SEEDS:-200}" | tail -2
+$b/live_sim.exe --seeds "${LIVE_SEEDS:-100}" | tail -2
 $b/server_tls.exe "$tmp/cepheus-tls" | tail -1
 $b/server_limits.exe "$tmp/cepheus-limits" | tail -1
 rm -rf "$tmp/cepheus-server" && $b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-server"
