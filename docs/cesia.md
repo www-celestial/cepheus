@@ -495,7 +495,8 @@ alone 3.09 [3.04, 3.13]; the same with the package used but not called 3.51 [3.4
 
 - Nothing of the engine loads before the first call: the 0.42 ms of a program that uses the package are its Cesia code
   read and compiled, as for any package (`std/csv`, 40 lines, about 0.2 ms; `std/sql` about 3 ms, measured the same
-  way but without the lock).
+  way but without the lock). `Watch` made the package's code 41 lines longer: 0.13 ms more (3.66 ms [3.60, 3.75]
+  against 3.53 [3.48, 3.59] before it, n = 51 alternated).
 - The first call costs 13 ms more (the engine stripped of its symbol table, as built now: 17.8 ms [17.6, 18.0] against
   20.3 [20.2, 20.5] before, n = 55; that run's process with the package unused: 4.5): checking the engine's
   fingerprint (BLAKE2 of 2.3 MB, 3.9 ms), loading the system's OpenSSL (1.3 ms), and linking 1.4 MB of machine code
@@ -507,6 +508,32 @@ program's heap. A loop that makes 2 million maps (`bench/cesia/gc.ce`, the best 
 131.7] alone, 126.9 [125.1, 129.0] with a local connection open; over TLS 124.9 and 128.2 with it; while 64 writers
 write and the follower applies their groups, 140.7 ms alone and 149.4 with it (the intervals overlap; the writers'
 server and the benchmark share the machine's cores). Idle, a connection costs the program nothing measurable.
+
+**A live question's fan-out**, µs from a write's receipt to a fiber's change (`bench/cesia/watch.ce`: N fibers watch
+the unpaid invoices of one client, one shared watch, while the program writes 50 invoices of that client one after the
+other, each its own group; the program on the server's machine, so its follower computes the changes; n = 5 rounds,
+a server started from the same database for each):
+
+| fibers watching | a delivery, p50 | the last fiber of each group, p50 | its p99 |
+|---:|---:|---:|---:|
+| 1 | 19 [7, 21] | 19 | 68 |
+| 100 | 359 [300, 556] | 475 [390, 790] | 2,505 |
+| 1,000 | 3,756 [3,262, 4,325] | 5,420 [4,206, 7,141] | 15,204 |
+| 2,500 | 12,901 [11,846, 16,575] | 17,597 [16,626, 21,970] | 35,810 |
+| 10,000 | 66,073 [63,702, 71,294] | 90,119 [86,154, 101,859] | 129,904 |
+
+- One fiber gets its change 19 µs after the write's receipt: the follower computed it during the fsync. The changes of
+  one group cost the same for 1 or 10,000 watches of a question (one evaluation, [server](server.md#what-a-watch-costs));
+  what grows is the delivery to each fiber, about 9 µs a fiber at 10,000: a wake from the follower's domain, the
+  package's fiber that feeds the channel, and the channel to the watching fiber. Cesia's own channels alone (one
+  sender, 10,000 fibers each reading its channel) take 57 ms to reach the last fiber: the package's path costs about
+  twice that.
+- Beside PostgreSQL's `LISTEN`/`NOTIFY` with a Go server (the multiplayer study, from the commit to the screen, its
+  WebSocket included): 137 µs at 1 screen, 538 at 100, 2,822 at 1,000. At 1 and 100 the Cesia program has its change
+  sooner, before any WebSocket; at 1,000 Go is ahead, its fan-out on 4 cores against one Cesia domain.
+- 10,000 screens of one program: 90 ms to the last fiber, before their WebSockets. A server program with
+  `cesia run --workers 4` holds 2,500 screens a process, each process its own connection and watch: 17.6 ms to the
+  last fiber.
 
 **Beside the giants.** No Cesia client of PostgreSQL exists (Cesia's `std/sql` speaks SQLite), so PostgreSQL is
 measured through its C library, the fastest client it has: a Cesia program on the server's machine reads a row 34

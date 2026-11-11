@@ -329,6 +329,37 @@ same   = 2 | group                                                 nothing the q
   model-checked in `spec/Watch.tla` (no gap, no repeat, the rows never older than the last message: 1,015,657 states;
   without the touch test or the ring's bound, TLC finds a counterexample).
 
+### What a watch costs
+
+Measured on the machine of the other benchmarks (4 cores, 8 threads, SATA SSD, Linux), release builds, the database of
+1 M facts (`bench.exe load`), each side of a comparison on a server started from the same copy of it, every run under
+the lock that keeps the machine's other benchmarks out; medians with their distribution-free 95 % interval.
+`sbench.exe`'s commands `wlat`, `stall`, `write ... W` and `livecpu`.
+
+| | measured | beside |
+|---|---|---|
+| a change after its write's receipt, at the server, over its Unix socket (n = 7, 200 writes each) | p50 16.0 µs [11.0, 26.9], p99 68 | PostgreSQL `NOTIFY` with a Go server, from the commit to the screen, its WebSocket included: 137 µs [128, 148] (the multiplayer study) |
+| the same, in the program's follower on the server's machine | p50 −6.9 µs [−14.8, −1.0]: before the receipt; p99 19.8 | |
+| the write itself (its fsync) | p50 3,409 µs [2,970, 5,879] | PostgreSQL's insert with its fsync: 3,317 µs [3,122, 3,438] (study) |
+| 100 watches, each on a connection read by a thread, one writer of 20-invoice groups for 10 s, without / with a connection that watches and never reads (n = 7) | delivered 100 % / 100 %; after the receipt p50 1,314 µs [1,259, 1,348] / 1,341 [1,186, 1,582], p99 4,880 [3,862, 7,126] / 5,747 [4,852, 96,319]; the server's peak memory 111 / 107 MB | the study's stalled screen among 100: Node `ws` and Go `gorilla` 100 % (p99 113 ms and 4.3 ms); a hub of one fiber that waits on each socket, 50.6 % |
+| the hub alone (`livecpu`, in one process, n = 5): S screens, each watching the unpaid invoices of its client, and a dashboard (the unpaid sum and count), then 20,000 random groups (new invoices, payments, changed totals) | a group, the dashboard included, at 100 / 1,000 / 10,000 screens: p50 16.0 µs [16.0, 21.0] / 13.1 [12.2, 19.1] / 12.2 [12.2, 12.9], mean 17.2 / 14.6 / 14.5; every screen and the dashboard equal to `Find`'s at the end | asking again instead: the dashboard's sum 10.0 ms [9.7, 11.6] a group at 10,000 screens; the screen a group touches 8.1 µs |
+| 16 writers for 5 s without / with 100 watches of what they write, the watches read by another process (n = 7) | 1,844 groups a second [568, 2,058] / 1,598 [977, 1,981]; the ratio within each round 1.20 [0.29, 2.09] | PostgreSQL, 16 writers with a trigger's `NOTIFY`: 8.6 times fewer inserts [6.1, 22.2] (its committers queue on `NOTIFY`'s lock, `async.c`) |
+
+- A change leaves about 16 µs after its write's receipt, which itself leaves about 5 µs after the group is durable
+  (half the empty round trip): about 20 µs after durable at the server, a few µs in the follower, which computes it
+  during the fsync. The design's bound was 50 µs after durable.
+- A group's changes cost the hub about the same for 100 or 10,000 watches (one evaluation a question's template, its
+  rows routed by the client's value), and 12 µs at 10,000 against 10 ms to ask the dashboard again: the design's bound
+  was 20 µs a group at 10,000 screens. Asking again only the screen a group touches costs about as much as the
+  difference (8.1 µs); the difference wins on aggregates, and it knows which screens changed without asking any.
+- A connection that never reads costs the others nothing measurable, and its unsent messages stop at 8 MiB (its watch
+  then ends `lagging`); its intervals' upper ends are the disk's noise (one round of each side had a slow fsync).
+- What the 100 watches cost the 16 writers is not measurable here (the ratio's interval holds 1): the writer and the
+  syncer hand each frame to a queue. PostgreSQL's `NOTIFY` serializes its committers.
+- Where PostgreSQL + Go win: their fan-out to many screens uses every core (at 1,000 screens 2,822 µs from the commit to
+  a screen, the median, its WebSocket included, against 3,756 µs to a fiber of one Cesia program before any WebSocket,
+  [Cesia](cesia.md#what-it-costs)).
+
 ### Errors
 
 Every reply is a value or an error `{code, message}`. The engine's codes: `conflict`, `invalid`, `unique`, `damaged`,
@@ -746,11 +777,19 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 ## What it does not do yet
 
 - Find gathers its answer's index words before it sends them (above); forks are not on the wire yet.
+- **Many databases do not share an fsync yet**: each forces its own journal. Written at once, one writer each, 5 s
+  (`sbench.exe mwrite`, n = 5), 1 / 4 / 16 / 64 databases make 218 / 508 / 1,209 / 2,308 groups a second, a write
+  waiting 3.07 / 6.24 / 10.3 / 24.1 ms at the median [20.9, 29.7 at 64]. PostgreSQL 18.6's databases share one WAL:
+  1 / 4 / 16 / 64 clients inserting a row a transaction (`pgbench`, n = 5) make 182 / 477 / 1,760 / 3,463 a second,
+  18.5 ms on average at 64. PostgreSQL wins at 16 and 64 (1.5 times the writes at 64), where one database of Cepheus
+  with 64 writers makes 4,828 to 7,021 a second (the OCaml and the Cesia clients, [Cesia](cesia.md#what-it-costs)): the
+  fsyncs of separate files do not group as the writes of one journal do. The design's answer, one forced log for the server's rounds and each journal
+  forced at its checkpoints, is the next step.
 - Local readers on other machines (a replica, step 6; Raft with leases between servers, step 7), and one shared copy
   of the pages for many readers of one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
 
 The Cesia client is step 4 ([Cepheus from Cesia](cesia.md)): a Cesia program reaches a database through a server only,
-by `cepheus.Connect`, and reads locally on the server's machine. Next: subscriptions over the wire and many databases
-sharing one fsync (step 5), a replica (step 6), Raft on three machines (step 7), memory databases with `Expire` and
+by `cepheus.Connect`, and reads locally on the server's machine. Live questions are on the wire (step 5,
+[above](#live-questions-watch)). Next: many databases sharing one fsync (the rest of step 5), a replica (step 6), Raft on three machines (step 7), memory databases with `Expire` and
 `Incr` (step 8). The OCaml library still opens a database directory in its own process (`Cepheus.open_`): it is the
 engine the server runs, and what its tests and benchmarks drive; programs, in Cesia, go through the server.

@@ -84,6 +84,28 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Live questions (2026-11-11), at 1 million facts
+
+`cepheus.Watch` and `Watch` on the wire, against main before them (the commit of the column order), on the server's
+database of 1 M facts, each side on a server started from the same copy of it, n = 7 rounds alternated (method above).
+The whole tables are in [server](server.md#what-a-watch-costs) and [Cesia](cesia.md#what-it-costs).
+
+| | before | after | the ratio within each round, after / before |
+|---|---:|---:|---:|
+| the server's start (ready), ms | 174 [122, 847] | 143 [126, 178] | 0.91 [0.15, 1.09] |
+| an empty round trip (Ping), µs | 8.86 [7.55, 11.13] | 9.40 [7.93, 11.47] | 0.93 [0.76, 1.50] |
+| a point read at the server (Get), µs | 8.79 [7.64, 12.27] | 8.85 [7.70, 9.49] | 1.00 [0.64, 1.16] |
+
+A program that uses the package without calling it (`cesia run` of `io.Print(1)` with the package's `use`, n = 51
+alternated): 3.53 ms [3.48, 3.59] before, 3.66 [3.60, 3.75] after: the package's Cesia code is 41 lines longer (`Watch`
+and `Close` of a watch), which Cesia reads and compiles at the start, 0.13 ms more. The engine still loads only at the
+first call.
+
+Nothing that was there before costs more. What is new: a change reaches a program 16 µs after its write's receipt at
+the server, and before the receipt in the program's follower; a group costs the hub 12.2 µs at 10,000 watching screens
+and a dashboard; a connection that never reads holds nobody; 100 watches cost 16 writers nothing measurable, where
+PostgreSQL's `NOTIFY` divides them by 8.6; one Cesia program gives a change to 10,000 fibers in 90 ms (the last one).
+
 ## The column order and leapfrog intersections (2026-11-11), at 10 million facts
 
 Step 3 of the plan to beat the giants: run format 8 adds a third order to each part of a run, the **column order**
