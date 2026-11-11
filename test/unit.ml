@@ -563,6 +563,21 @@ let () =
      | None, [ _ ] -> incr C.checks
      | _ -> C.fail "seed %d: a snapshot of another database was taken" seed);
     let file = "/s/" ^ Snapshot.name 0 v.group in
+    (* a run of an earlier format (7: no column order) is set aside, its groups to be replayed from the journal *)
+    if seed = 1 then begin
+      let fd = disk.openf file true in
+      let b = Bytes.create 4 in
+      disk.pread fd 4 b 0 4;
+      let fmt = Bytes.get_int32_le b 0 in
+      Bytes.set_int32_le b 0 7l;
+      disk.pwrite fd 4 b 0 4;
+      (match Snapshot.load disk "/s" "0123456789abcdef" with
+       | None, [ note ] -> C.check (let k = String.length "an earlier format (7)" in let rec at i = i + k <= String.length note && (String.sub note i k = "an earlier format (7)" || at (i + 1)) in at 0) "a run of format 7: %s" note
+       | _ -> C.fail "a run of format 7 was taken");
+      Bytes.set_int32_le b 0 fmt;
+      disk.pwrite fd 4 b 0 4;
+      disk.close fd
+    end;
     ignore (Sim_disk.flip_durable sim file 0 (Sim_disk.durable_size sim file));
     match Snapshot.load disk "/s" "0123456789abcdef" with
     | None, [ _ ] -> incr C.checks

@@ -29,7 +29,7 @@ let magic = 0x53485043 (* "CPHS" *)
 (* format 7: the sections coded in blocks by a frame of reference, a page table; formats 5 and 6 (fixed 8-byte value
    words, the flag of a derived fact in bit 63 in format 6) are set aside at open, their groups replayed from the
    journal, as formats 1 to 4 were *)
-let format = 7
+let format = 8
 let header = 4096
 
 let name lo hi = Printf.sprintf "%020d-%020d.run" lo hi
@@ -256,6 +256,190 @@ let mono_add m x =
   m.mn <- m.mn + 1;
   if m.mn = Store.tb then mono_cut m
 
+(* ---- The column order (Store's layout) ----
+   Written in the pass by thing, which emits a part's rows in (thing, property, value) order: each property's rows come
+   in thing order. A column a property: its blocks of 128 rows and their directory as they fill, its offsets from its
+   first thing of several values on, and the presence of its things as bits until the pass ends, when the properties
+   held by the same things share one rank table (a bit a thing between its first and its last, held while the pass
+   runs). *)
+type column = {
+  cdir : stream;
+  cdata : stream;
+  coff : mono;
+  mutable cdoff : int;  (* bytes of values written *)
+  mutable crows : int;
+  mutable cthings : int;
+  mutable clast : int;  (* the thing of the last row, or -1 *)
+  mutable cfirst : int;  (* the first row of the last thing *)
+  mutable q0 : int;  (* the first thing of several values, or -1 *)
+  mutable tlo : int;  (* the first thing, rounded down to 32 *)
+  mutable pres : Bytes.t;  (* bit i: thing tlo + i holds the property *)
+  cw : int array;
+  ce : int array;
+  cd : Bytes.t;
+  mutable cn : int;
+  csc : scratch;
+}
+
+let column cdir cdata coff =
+  { cdir; cdata; coff; cdoff = 0; crows = 0; cthings = 0; clast = -1; cfirst = 0; q0 = -1; tlo = 0; pres = Bytes.empty;
+    cw = Array.make Store.tb 0; ce = Array.make Store.tb 0; cd = Bytes.make Store.tb '\000'; cn = 0;
+    csc = { sb = Bytes.create 1100 } }
+
+(* the block under way coded: from its least value, or from each row's thing when that takes fewer bits *)
+let col_flush c =
+  let n = c.cn in
+  if n > 0 then begin
+    let fl = ref 0 and lw = ref max_int and hw = ref min_int and lr = ref max_int and hr = ref min_int in
+    for k = 0 to n - 1 do
+      if Bytes.unsafe_get c.cd k <> '\000' then fl := 1;
+      let w = c.cw.(k) in
+      let r = w - c.ce.(k) in
+      if w < !lw then lw := w;
+      if w > !hw then hw := w;
+      if r < !lr then lr := r;
+      if r > !hr then hr := r
+    done;
+    let wp = Pack.width (!hw - !lw) and wr = Pack.width (!hr - !lr) in
+    let rel = wr < wp in
+    let base = if rel then !lr else !lw in
+    let wv = min 64 ((if rel then wr else wp) + !fl) in
+    let nb = Store.pbytes n wv in
+    room c.csc nb;
+    let sb = c.csc.sb in
+    Bytes.fill sb 0 (nb + 8) '\000';
+    for k = 0 to n - 1 do
+      let x = (if rel then c.cw.(k) - c.ce.(k) else c.cw.(k)) - base in
+      if !fl = 0 then Pack.put sb (k * wv) x wv
+      else begin
+        if Bytes.unsafe_get c.cd k <> '\000' then Pack.put sb (k * wv) 1 1;
+        Pack.put sb ((k * wv) + 1) x (wv - 1)
+      end
+    done;
+    put64 c.cdir ((c.cdoff lsl 16) lor (((if rel then 2 else 0) lor !fl) lsl 8) lor wv);
+    put64 c.cdir base;
+    put_sub c.cdata sb 0 nb;
+    c.cdoff <- c.cdoff + nb;
+    c.cn <- 0
+  end
+
+(* the last thing's values are all there: its offset, from the first thing of several values on *)
+let col_end_thing c =
+  if c.clast >= 0 then begin
+    let q = c.cthings - 1 in
+    if c.q0 >= 0 then mono_add c.coff (c.crows - c.q0)
+    else if c.crows - c.cfirst <> 1 then begin
+      c.q0 <- q;
+      mono_add c.coff 0;
+      mono_add c.coff (c.crows - q)
+    end
+  end
+
+let col_thing c e =
+  col_end_thing c;
+  if c.clast < 0 then (c.tlo <- e land lnot 31; c.pres <- Bytes.make 64 '\000');
+  let i = e - c.tlo in
+  if (i lsr 3) + 8 >= Bytes.length c.pres then begin
+    let b = Bytes.make (max (2 * Bytes.length c.pres) ((i lsr 3) + 64)) '\000' in
+    Bytes.blit c.pres 0 b 0 (Bytes.length c.pres);
+    c.pres <- b
+  end;
+  Bytes.unsafe_set c.pres (i lsr 3) (Char.unsafe_chr (Char.code (Bytes.unsafe_get c.pres (i lsr 3)) lor (1 lsl (i land 7))));
+  c.cthings <- c.cthings + 1;
+  c.clast <- e;
+  c.cfirst <- c.crows
+
+let[@inline] col_add c e w d =
+  if e <> c.clast then col_thing c e;
+  let k = c.cn in
+  Array.unsafe_set c.cw k w;
+  Array.unsafe_set c.ce k e;
+  Bytes.unsafe_set c.cd k (if d then '\001' else '\000');
+  c.cn <- k + 1;
+  c.crows <- c.crows + 1;
+  if k + 1 = Store.tb then col_flush c
+
+(* The columns of a part [l] for the rows' bounds [caps]: each property's rooms in its sections, in property order; a
+   property with no room shares [none], whose streams have none: a row of it is a bug of the bounds *)
+let columns o (l : Store.base) caps =
+  let d = ref l.o_cdir and v = ref l.o_cdata and h = ref l.o_cmh and m = ref l.o_cmb in
+  let ats = Array.make (Array.length caps) (0, 0, 0, 0) in
+  let z = stream o 0 0 in
+  let none = column z z (mono z z) in
+  let cols =
+    Array.mapi
+      (fun p cap ->
+        if cap = 0 then none
+        else begin
+          ats.(p) <- (!d, !v, !h, !m);
+          let c =
+            column (stream o !d (Store.cdir_room cap)) (stream o !v (Store.cdata_room cap))
+              (mono (stream o !h (Store.cmh_room cap)) (stream o !m (Store.cmb_room cap)))
+          in
+          d := !d + Store.al (Store.cdir_room cap);
+          v := !v + Store.al (Store.cdata_room cap);
+          h := !h + Store.al (Store.cmh_room cap);
+          m := !m + Store.al (Store.cmb_room cap);
+          c
+        end)
+      caps
+  in
+  cols, ats, none
+
+(* The pass by thing is over: each column's last block and offsets, the rank tables (one for the properties held by
+   the same things), the entries. *)
+let columns_end o (l : Store.base) (cols, ats, none) =
+  let np = Array.length cols in
+  if none.crows > 0 then invalid_arg "Snapshot.merge: a row of a property without room";
+  let cp = stream o l.o_cp (64 * np) and rk = stream o l.o_crank (l.o_cdir - l.o_crank) in
+  let rank_at = Array.make np (-1) and words = Array.make np 0 in
+  let same c c' =
+    c'.cthings = c.cthings && c'.tlo = c.tlo && c'.clast = c.clast
+    && begin
+      let n = ((c.clast - c.tlo) lsr 3) + 1 in
+      let i = ref 0 in
+      while !i < n && Bytes.unsafe_get c.pres !i = Bytes.unsafe_get c'.pres !i do incr i done;
+      !i = n
+    end
+  in
+  for p = 0 to np - 1 do
+    let c = cols.(p) in
+    if c != none then begin
+      col_end_thing c;
+      col_flush c;
+      if c.q0 < 0 then c.q0 <- c.cthings else mono_cut c.coff;
+      List.iter close [ c.cdir; c.cdata; c.coff.mh; c.coff.mb ];
+      if c.cthings > 0 then begin
+        let rep = ref (-1) and q = ref 0 in
+        while !rep < 0 && !q < p do
+          if rank_at.(!q) >= 0 && same c cols.(!q) then rep := !q;
+          incr q
+        done;
+        if !rep >= 0 then (rank_at.(p) <- rank_at.(!rep); words.(p) <- words.(!rep))
+        else begin
+          let nw = ((c.clast - c.tlo) lsr 5) + 2 in
+          rank_at.(p) <- rk.pos;
+          words.(p) <- nw;
+          let count = ref 0 in
+          for j = 0 to nw - 2 do
+            let bits = Int32.to_int (Bytes.get_int32_le c.pres (4 * j)) land 0xFFFFFFFF in
+            put64 rk (bits lor (!count lsl 32));
+            count := !count + Store.popcount bits
+          done;
+          put64 rk (!count lsl 32)
+        end
+      end
+    end
+  done;
+  Array.iter (fun c -> c.pres <- Bytes.empty) cols;
+  for p = 0 to np - 1 do
+    let c = cols.(p) in
+    let d, v, h, m = ats.(p) in
+    if c == none || c.cthings = 0 then List.iter (put64 cp) [ 0; -1; 0; 0; d; v; h; m ]
+    else List.iter (put64 cp) [ c.tlo; rank_at.(p); words.(p); c.q0; d; v; h; m ]
+  done;
+  List.iter close [ cp; rk ]
+
 (* A part's things, as a merge emits their rows in (thing, property, value) order: the rank table, a block of 128
    slots at a time (Store's layout), its offset in the directory. *)
 type tblocks = {
@@ -278,12 +462,13 @@ type tblocks = {
   ent : int array;  (* property -> its entry in the block, or -1 *)
   tsc : scratch;
   cnt : int array;  (* a slot's values of one entry *)
+  cols : column array;  (* the part's columns, a property each *)
 }
 
-let tblocks ~np rk dir data =
+let tblocks ~np ~cols rk dir data =
   { rk; dir; data; doff = 0; bits = 0; rank = 0; things = 0; rows = 0; last = -1; bs = 0; si = Array.make 1024 0;
     bp = Array.make 1024 0; bw = Array.make 1024 0; bd = Bytes.make 1024 '\000'; nr = 0; ent = Array.make (max 1 np) (-1);
-    tsc = { sb = Bytes.create 65536 }; cnt = Array.make (Store.tb + 1) 0 }
+    tsc = { sb = Bytes.create 65536 }; cnt = Array.make (Store.tb + 1) 0; cols }
 
 (* The block under way coded and written, as Store reads it: its entries by property, each either a fixed field of
    every slot's record (a property every slot has at most once, when that is shorter: its value, a bit "present" when
@@ -446,7 +631,8 @@ let[@inline] row t e p w d =
   Array.unsafe_set t.bw r w;
   Bytes.unsafe_set t.bd r (if d then '\001' else '\000');
   t.nr <- r + 1;
-  t.rows <- t.rows + 1
+  t.rows <- t.rows + 1;
+  col_add (Array.unsafe_get t.cols p) e w d
 
 (* the part's end: the last block, the rank words up to ne, the directory's end *)
 let tblocks_end t ne =
@@ -775,8 +961,9 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
   in
   let a_vb, a_vw, a_vm = vcap ba idx_a np and t_vb, t_vw, t_vm = vcap bt idx_t t_np in
   let hbits = Store.hbits_for ns in
-  let ra = Store.rooms ~n_cap:a_ncap ~k_cap:a_kcap ~np ~vb_cap:a_vb ~vm_blocks:a_vm ~ns ~sblob:!sblob in
-  let rt = Store.rooms ~n_cap:t_ncap ~k_cap:t_kcap ~np:t_np ~vb_cap:t_vb ~vm_blocks:t_vm ~ns:0 ~sblob:0 in
+  let caps_a = Array.init np (fun p -> ba.rows.(p)) and caps_t = Array.init t_np (fun p -> bt.rows.(p)) in
+  let ra = Store.rooms ~n_cap:a_ncap ~k_cap:a_kcap ~np ~vb_cap:a_vb ~vm_blocks:a_vm ~ns ~sblob:!sblob ~ne ~caps:caps_a in
+  let rt = Store.rooms ~n_cap:t_ncap ~k_cap:t_kcap ~np:t_np ~vb_cap:t_vb ~vm_blocks:t_vm ~ns:0 ~sblob:0 ~ne:t_ne ~caps:caps_t in
   let la =
     Store.layout ~at:0 ~n:0 ~ne ~k:0 ~k_cap:a_kcap ~np ~ns ~sblob:!sblob ~hbits ~vb_cap:a_vb ~vwords:a_vw ~vm_blocks:a_vm ra ()
   in
@@ -809,11 +996,12 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
       done_pages = []; ndone = 0; wbuf = Bytes.create (batch * Pages.size); free = [] }
   in
   let failed () = (try disk.close fd with Disk.Io _ -> ()); (try disk.remove tmp with Disk.Io _ -> ()) in
+  let ca = columns o la caps_a and ct = columns o lt caps_t in
   let ta =
-    tblocks ~np (stream o la.o_erank (8 * (Store.blocks ne + 1))) (stream o la.o_tdir (8 * (Store.blocks128 a_kcap + 1)))
-      (stream o la.o_tdata ra.tdata)
+    tblocks ~np ~cols:(let c, _, _ = ca in c) (stream o la.o_erank (8 * (Store.blocks ne + 1)))
+      (stream o la.o_tdir (8 * (Store.blocks128 a_kcap + 1))) (stream o la.o_tdata ra.tdata)
   and tt =
-    tblocks ~np:t_np (stream o lt.o_erank (8 * (Store.blocks t_ne + 1)))
+    tblocks ~np:t_np ~cols:(let c, _, _ = ct in c) (stream o lt.o_erank (8 * (Store.blocks t_ne + 1)))
       (stream o lt.o_tdir (8 * (Store.blocks128 t_kcap + 1))) (stream o lt.o_tdata rt.tdata)
   in
   let na = ref 0 and nt = ref 0 in
@@ -894,6 +1082,8 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
     if !bi <> bulk.n then invalid_arg "Snapshot.merge: a fact of the large group is past the things";
     tblocks_end ta ne;
     tblocks_end tt t_ne;
+    columns_end o la ca;
+    columns_end o lt ct;
     na := ta.rows;
     nt := tt.rows;
     List.iter close [ ta.rk; ta.dir; ta.data; tt.rk; tt.dir; tt.data ];
@@ -1046,7 +1236,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
   with
   | () ->
     if disk == Disk.real then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
-    let part (l : Store.base) ~n ~k = Store.dense { l with pg; hot = pg.Pages.hot; n; k; r0 = k } in
+    let part (l : Store.base) ~n ~k = Store.ready { l with pg; hot = pg.Pages.hot; n; k; r0 = k } in
     let a = part la ~n:!na ~k:ta.things and t = part lt ~n:!nt ~k:tt.things in
     let run = { Store.a; t; lo; hi = v.group; level; s0 } in
     let runs = Array.append [| run |] (Array.sub rs take (nr - take)) in
@@ -1200,8 +1390,38 @@ let check_and_build disk dir (lo0, hi0, file) id =
           upto (fun j -> Store.safe Store.i64 b (b.o_vdir + (16 * j))) !blocks (b.o_vrank - b.o_vdata) ("the row blocks of " ^ what)
         end)
       [ a, "its additions"; t, "its retractions" ];
+    (* the columns: each property's entry within its sections, its rank table (once for the properties that share
+       it), its offsets, its blocks; its rows those of the property by value *)
+    List.iter
+      (fun ((b : Store.base), what) ->
+        let ranks = Hashtbl.create 8 in
+        for p = 0 to b.np - 1 do
+          let x = b.o_cp + (64 * p) in
+          let g k = Store.safe Store.i64 b (x + (8 * k)) in
+          let tlo = g 0 and at = g 1 and words = g 2 and q0 = g 3 and dir = g 4 and data = g 5 and mh = g 6 and mb = g 7 in
+          let rows = Store.safe Store.i64 b (b.o_poff + (8 * (p + 1))) - Store.safe Store.i64 b (b.o_poff + (8 * p)) in
+          let col fmt = Printf.ksprintf (fun m -> bad "the column %d of %s %s" p what m) fmt in
+          if at < 0 then (if rows <> 0 then col "has no rows")
+          else begin
+            if tlo < 0 || tlo land 31 <> 0 || words < 2 || at < b.o_crank || at land 7 <> 0 || at + (8 * words) > b.o_cdir
+               || dir < b.o_cdir || dir + (16 * Store.blocks128 rows) > b.o_cdata || data < b.o_cdata || data > b.o_cmh
+            then col "is out of its sections";
+            let things =
+              match Hashtbl.find_opt ranks at with
+              | Some (w, k) -> if w <> words then col "shares a rank table of another length"; k
+              | None -> let k = Store.check_rank b at words in Hashtbl.replace ranks at (words, k); k
+            in
+            if things < 1 || things > rows || q0 < 0 || q0 > things then col "has a rank table out of order";
+            if q0 = things then (if rows <> things then col "has rows of no thing")
+            else if mh < b.o_cmh || mh + (16 * Store.blocks128 (things - q0 + 1)) > b.o_cmb || mb < b.o_cmb || mb > b.len
+                    || not (Store.check_offsets b mh mb (things - q0) (rows - q0))
+            then col "has offsets out of order";
+            if not (Store.check_blocks b dir rows (b.o_cmh - data)) then col "has blocks out of order"
+          end
+        done)
+      [ a, "its additions"; t, "its retractions" ];
     if a.ns > 0 then mono (fun i -> Store.safe (fun b i -> Store.soff b i) a i) a.ns a.sblob "the text offsets";
-    { Store.a = Store.dense a; t = Store.dense t; lo; hi; level; s0 }, next_e, { Journal.segment = seg; offset = off; next }
+    { Store.a = Store.ready a; t = Store.ready t; lo; hi; level; s0 }, next_e, { Journal.segment = seg; offset = off; next }
   with
   | r -> r
   | exception e -> (try disk.close fd with Disk.Io _ -> ()); raise e
