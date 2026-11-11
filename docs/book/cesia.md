@@ -54,7 +54,7 @@ engine and of OpenSSL's libraries, once a process.
 
 ## Connect
 
-```cesia
+```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/io
 use std/result
@@ -136,7 +136,7 @@ round.
 
 ## Insert, Get, Update
 
-```cesia
+```cesia norun
 ada = result.Unwrap(cepheus.Insert(Client, {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"}, db, by = 7, why = "signup"))
 io.Print(ada)
 io.Print(cepheus.Get(Client, ada, db))
@@ -159,7 +159,7 @@ Ok({Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"})
 
 As everywhere in Cesia, the database comes last: `db then cepheus.Get(Client, ada)` reads the same.
 
-```cesia
+```cesia norun
 for total in [1200, 80.5]
   result.Unwrap(cepheus.Insert(Invoice, {Client: ada, Total: total, Status: "unpaid"}, db))
 end
@@ -190,7 +190,7 @@ the group's number and the ids of the things it made, or an `Err` and nothing wr
 - `cepheus.New(k)`: the k-th new thing of the group, in any place a thing goes: `New(1)`, `New(2)`... `Things[k]` is
   its id.
 
-```cesia
+```cesia norun
 first = cepheus.Find(1, (i) -> {Where: [[i, Invoice.Total, 1200]], Give: {Invoice: i}}, db)
 inv = result.Unwrap(first)[1].Invoice
 pay = [cepheus.Expect(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Status, "paid")]
@@ -224,7 +224,7 @@ of **patterns** `[thing, property, value]`, each a fact that must hold, where th
 or constants (the property is always a kind's field); `Give` is a map of what to give, each a variable or an
 aggregate. `cepheus.Find(n, question, db)` gives an `Ok` of a list of maps, one an answer.
 
-```cesia
+```cesia norun
 unpaid = cepheus.Find(3, (c, i, total) -> {
   Where: [[c, Client.City, "Lyon"], [i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]],
   Give: {Invoice: i, Total: total},
@@ -256,7 +256,7 @@ by the other fields of `Give`, as SQL's `GROUP BY` does; `Count()` counts the an
 where the question runs (in the program on the server's machine, else at the server), so a total over 400,000
 invoices crosses the network as one row.
 
-```cesia
+```cesia norun
 byCity = cepheus.Find(4, (c, i, city, total) -> {
   Where: [[i, Invoice.Client, c], [c, Client.City, city], [i, Invoice.Total, total], cepheus.Above(total, 50)],
   Give: {City: city, Total: cepheus.Sum(total), Invoices: cepheus.Count()},
@@ -281,7 +281,7 @@ from (a **persistent** structure: a change makes new nodes and keeps the old one
 no server), of another fork, or of a database read on the server's machine (its local state now), with these kinds
 declared in it:
 
-```cesia
+```cesia norun
 what = result.Unwrap(cepheus.Fork(db))
 result.Unwrap(cepheus.Update(Client, ada, {City: "Nice"}, what))
 io.Print(cepheus.Get(Client, ada, what))
@@ -301,7 +301,7 @@ A fork of a database read at the server (a program on another machine) is not bu
 A test of `cesia test` needs no server: it forks `cepheus.Empty` with the kinds it uses. A test file sits beside the
 code it tests (`shop.test.ce` beside `shop.ce`), and its functions are named `is` and a capital:
 
-```cesia test
+```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/result
 

@@ -14,7 +14,7 @@ rm -rf "$tmp"
 mkdir -p "$tmp"
 B=$root/_build/default/bin/main.exe
 tag=$(cesia run tools/tag.ce)
-n=$(grep -c '^```cesia' docs/book/cesia.md)
+n=$(grep -c '^```cesia norun$' docs/book/cesia.md)
 port=$((20000 + $$ % 20000))
 
 # the server: one database an example, one for TLS, one for the local reads, one for the restart

@@ -13,13 +13,13 @@ use std/text
 use std/value
 
 defn blocks(lines)
-  (** The cesia blocks of a chapter, each with the text block after it, or missing. *)
+  (** The cesia blocks of a chapter, each with the text block after it, or missing. They are norun for cesia doc --site,
+      which has no server to run them on; a block whose text block is a cesia test command is a test file. *)
   found = []
   k = 1
   n = value.Len(lines)
   while k <= n
-    if lines[k] == "```cesia" or lines[k] == "```cesia test"
-      isTest = lines[k] == "```cesia test"
+    if lines[k] == "```cesia norun"
       code = []
       k += 1
       while lines[k] != "```"
@@ -39,6 +39,7 @@ defn blocks(lines)
           k += 1
         end
       end
+      isTest = value.IsSome(out) and value.Len(out) > 0 and text.StartsWith("cesia test", out[1])
       found = list.Append({Code: code, Out: out, Test: isTest}, found)
     end
     k += 1

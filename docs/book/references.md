@@ -465,7 +465,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Serebryany 2012]** K. Serebryany, D. Bruening, A. Potapenko, D. Vyukov. AddressSanitizer: A Fast Address Sanity
   Checker. *USENIX ATC* 2012, 309–318. https://www.usenix.org/conference/atc12/technical-sessions/presentation/serebryany
   — The memory checker the C file of the CRC is fuzzed under: a read one byte outside its block stops the run.
-- **[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
+- **\[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
   https://llvm.org/docs/LibFuzzer.html
   — The fuzzer of `test/fuzz_crc32c.c` and `test/fuzz_tls.c`: inputs mutated toward new paths of the code, every
   one checked against the CRC computed bit by bit, or against what the other side of a TLS conversation wrote.
@@ -476,7 +476,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
   https://press.princeton.edu/books/paperback/9780691164076/how-to-solve-it
   — "Understanding the problem" first: the unknown, the data, the condition; the first step of the
   [case of the seats](case-seats.md).
-- **[Heilmeier]** G. H. Heilmeier. The Heilmeier Catechism, the questions DARPA asks of every proposed research
+- **\[Heilmeier]** G. H. Heilmeier. The Heilmeier Catechism, the questions DARPA asks of every proposed research
   program. https://www.darpa.mil/about/heilmeier-catechism
   — What are you trying to do, how is it done today, what is new, how will you know you succeeded: the frame of the
   problem's statement.

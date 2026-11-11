@@ -51,7 +51,7 @@ is a persistent value ([concepts](concepts.md#views)). The measured effect is in
 The configuration of a server, the same file on every machine of a cluster but for `me` (a single machine is a
 cluster of one peer). Every key, and every rule it is checked against before anything opens:
 
-```toml
+```toml norun
 [cluster]
 name = "shop-prod"                 # lower-case letters, digits, '_', '-'
 id = "cph-c-6f1e9a2b7d40c381"      # made by `cepheus cluster init`; checked at every connection (Welcome)
@@ -110,7 +110,7 @@ name = "stock"
 The tokens of the programs, beside `cluster.toml`, readable by the server's user only (mode 0600). It holds hashes,
 never tokens; the commands below write it.
 
-```toml
+```toml norun
 [[token]]
 name = "shop-web"
 hash = "blake2b-256:9f4c...e1"
