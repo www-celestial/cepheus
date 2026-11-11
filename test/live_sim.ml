@@ -6,7 +6,7 @@
    later; watches that fall behind (their queue full), resume from their group (Same or the answer), or end with a
    large group. At every message a watch gets, its rows must be the naive answer of its question on the facts of the
    view of the message's group, as a multiset (G11 of live questions); and no message is given before its frame is
-   durable. A failure prints its seed; [live.exe --seed N] replays it. *)
+   durable. A failure prints its seed; [live_sim.exe --seed N] replays it. *)
 
 open Cepheus
 open Cepheus_server
@@ -250,7 +250,7 @@ let run seed =
 
 let () =
   let seeds = ref 400 and one = ref None in
-  Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "N" ] ignore "live.exe";
+  Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "N" ] ignore "live_sim.exe";
   (match !one with Some s -> run s | None -> for s = 1 to !seeds do run s done);
   Printf.printf "live: %d messages checked (%d same, %d lagging)\n" !messages !sames !laggings;
   C.finish "live"

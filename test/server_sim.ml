@@ -23,7 +23,15 @@
    Every read, local or remote, is checked when it returns against three conditions, which make reads
    linearizable (spec/LocalReads.tla): it holds every group answered to any client before it started (Fresh), and
    every group any read returned before it started (Ordered), and it is the exact state of the journal at its group,
-   durable (Durable: the model's facts at that group). *)
+   durable (Durable: the model's facts at that group).
+
+   Live questions (Watch) ride the same network: a client watches random questions (Give, projecting, aggregates),
+   its pushes cut at any byte like replies, its connection broken at any message (it watches again from the group of
+   its last message on the next connection: Same or the answer), the server's hub evaluating its frames late or at
+   once, a watch falling behind (lagging: watched again), unwatched while its pushes are in flight; local readers
+   watch on their follower, their stream cut by a server's death. At every message a watch gets its rows must be the
+   naive evaluator's answer on the model at the message's group, a durable group, never older than its last
+   message's (no gap, no duplicate, nothing shown before it is durable). *)
 
 open Cepheus
 open Cepheus_server
@@ -57,7 +65,19 @@ let tokens =
    returned (Fresh and Ordered) *)
 type known = { answered : int; returned : int }
 
+(* a client's watch: its rows as its messages left them *)
+type cwatch = {
+  wq : Query.t;
+  wsel : Wire.select;
+  mutable wid : int option;  (* the id of its Watch on the current connection *)
+  mutable wrows : Value.t array list;
+  mutable wgroup : int;
+  mutable wstarted : bool;
+  mutable wparts : Wire.push option;  (* a message in several frames, so far *)
+}
+
 type pending_req =
+  | P_watch of cwatch
   | P_hello
   | P_get of int * int * known  (* thing, the client's last confirmed group when sent *)
   | P_find of Query.t * Wire.select * int * known
@@ -75,6 +95,7 @@ type sconn = {
   mutable alive : bool;
   outstanding : (int, pending_req) Hashtbl.t;  (* by request id *)
   rows : (int, Value.t array list) Hashtbl.t;  (* the rows of a Find in several frames, so far *)
+  unwatched : (int, unit) Hashtbl.t;  (* watches ended by Unwatch: their pushes still in flight are dropped *)
 }
 
 type client = {
@@ -87,6 +108,7 @@ type client = {
   unanswered : (int, Resolve.op list) Hashtbl.t;  (* serial -> ops *)
   mutable confirmed : int;  (* the newest group of a receipt it got *)
   mutable next_id : int;
+  mutable watches : cwatch list;
 }
 
 type server = {
@@ -96,13 +118,22 @@ type server = {
   sessions : Sessions.t;
   wq : (Resolve.op list * int * string * ((Engine.receipt, Engine.error) result -> unit)) Queue.t;
   mutable pending : (Engine.batch * ((Engine.receipt, Engine.error) result -> unit) array) option;
+  mutable hub : Live.hub option;  (* made at the first Watch, as the real server's *)
+  mutable last : Store.view * int;  (* the state after the newest frame taken, and its tag *)
+  hq : [ `Frame of int * Group.t list * Store.view | `Large of int * Store.view | `Durable of int ] Queue.t;
+      (* what the syncer gave the hub's thread, not yet evaluated *)
 }
 
 (* a local reader: a program on the server's machine; its stream's events in flight (sent by the server, not yet
    applied), and the run files they pass (their bytes: a passed descriptor keeps a file's content) *)
 type ev = E of Follow.event | R of int * (int * int) list * Follower.file list
 
+(* a watch of a local reader, on its follower *)
+type lwatch = { lq : Query.t; lsel : Wire.select; mutable lrows : Value.t array list; mutable lgroup : int; mutable lstarted : bool;
+                mutable lsub : Live.sub option }
+
 type reader = {
+  mutable lw : lwatch list;
   mutable fol : Follower.t option;
   mutable sf : Follow.follower option;  (* its queue at the server *)
   chan : ev Queue.t;
@@ -171,14 +202,29 @@ let start_server w =
     | Ok (e, sessions) ->
       Sim_disk.crash_after w.sim (-1);
       let follow = Follow.create e { Follow.get = (fun () -> !(w.page)); set = (fun v -> w.page := v) } in
+      let srv_ref = ref None in
+      (* the hub, made at the first Watch at the newest frame taken (Watch.hub) *)
+      let hub () =
+        let s = Option.get !srv_ref in
+        match s.hub with
+        | Some h -> h
+        | None ->
+          let v, tag = s.last in
+          let h = Live.create v ~tag ~durable:(Atomic.get s.e.published).group in
+          s.hub <- Some h;
+          h
+      in
       let core_db = { Core.name = "main"; index = 0; dir; view = (fun () -> Follow.view follow); sessions;
-                      more = (fun () -> Follow.status follow); hub = (fun () -> failwith "no watch yet") } in
+                      more = (fun () -> Follow.status follow); hub } in
       let core =
         Core.create ~server_id:"cph-s-sim" ~cluster_id:"cph-c-0000000000000000" ~dbs:[| core_db |] ~tokens
           ~now:w.disk.now ~new_session:(let n = ref (1000 * (1 + Rng.int w.r 1000)) in fun () -> incr n; !n)
           ~max_inflight:(1 + Rng.int w.r 4) ()
       in
-      w.srv <- Some { e; follow; core; sessions; wq = Queue.create (); pending = None };
+      let p = Atomic.get e.published in
+      let srv = { e; follow; core; sessions; wq = Queue.create (); pending = None; hub = None; last = p, p.group; hq = Queue.create () } in
+      srv_ref := Some srv;
+      w.srv <- Some srv;
       e
   in
   let e = go () in
@@ -248,8 +294,15 @@ let commit w =
   | Some (b, ks) ->
     s.pending <- None;
     Follow.before s.follow b;
+    (* Watch.before and after: the frame to the hub's thread, then the durable group *)
+    if b.count > 0 then begin
+      let tag = b.first + b.count - 1 in
+      s.last <- b.after, tag;
+      if s.hub <> None then Queue.push (if b.runs <> [] then `Large (tag, b.after) else `Frame (tag, List.rev b.groups, b.after)) s.hq
+    end;
     let res = Engine.commit s.e b in
     Follow.after s.follow;
+    if s.hub <> None then Queue.push (`Durable (Atomic.get s.e.published).group) s.hq;
     Array.iteri
       (fun i r ->
         (match r with
@@ -260,6 +313,26 @@ let commit w =
          | Error _ -> ());
         ks.(i) r)
       res
+
+(* the hub's thread: what the syncer gave it, evaluated at a moment the seed draws (at once, or frames later) *)
+let hub_step w =
+  let s = server w in
+  match s.hub with
+  | None -> ()
+  | Some h ->
+    for _ = 1 to 1 + Rng.int w.r 3 do
+      match Queue.take_opt s.hq with
+      | Some (`Frame (tag, gs, v)) -> Live.frame h ~tag gs v
+      | Some (`Large (tag, v)) -> count "watches reset by a large group"; Live.reset h v ~tag
+      | Some (`Durable g) -> Live.durable h g
+      | None -> ()
+    done
+
+(* the transport's pusher: the pushes of every connection into its output *)
+let push_step w =
+  Array.iter
+    (fun cl -> match cl.conn with Some { cc = Some c; alive = true; _ } -> if Core.move_pushes c then c.flush () | _ -> ())
+    w.clients
 
 (* ---- the network ---- *)
 
@@ -328,7 +401,8 @@ let new_conn w (cl : client) =
   let s = server w in
   let sc =
     { cc = None; to_server = Buffer.create 256; sin = Bytes.create 256; sin_n = 0; to_client = Buffer.create 256;
-      cin = Bytes.create 256; cin_n = 0; alive = true; outstanding = Hashtbl.create 8; rows = Hashtbl.create 2 }
+      cin = Bytes.create 256; cin_n = 0; alive = true; outstanding = Hashtbl.create 8; rows = Hashtbl.create 2;
+      unwatched = Hashtbl.create 2 }
   in
   let flush c () =
     if sc.alive then Buffer.add_buffer sc.to_client c.Core.out;
@@ -379,7 +453,105 @@ let linearizable w what (k : known) g =
   if g > w.committed then fail w "%s returned group %d, not durable (%d)" what g w.committed;
   w.returned <- max w.returned g
 
+(* the naive evaluator's answer of a question with its select, on the model at group [g] *)
+let expected w g (q : Query.t) (sel : Wire.select) =
+  let naive = C.naive (model w g) q in
+  match sel with
+  | Wire.Give [||] -> naive
+  | Wire.Give give -> List.map (fun row -> Array.map (fun x -> row.(x)) give) naive
+  | Wire.Group (keys, aggs) ->
+    let t = Hashtbl.create 8 in
+    List.iter
+      (fun row ->
+        let k = Array.map (fun x -> row.(x)) keys in
+        Hashtbl.replace t k (row :: Option.value (Hashtbl.find_opt t k) ~default:[]))
+      naive;
+    Hashtbl.fold
+      (fun k rs acc ->
+        let num = function Value.Int n | Value.Money n | Value.Date n -> n | _ -> 0 in
+        let mk x n = match List.hd rs |> fun row -> row.(x) with Value.Money _ -> Value.Money n | Value.Date _ -> Value.Date n | _ -> Value.Int n in
+        let a =
+          Array.map
+            (function
+              | Wire.Count -> Value.Int (List.length rs)
+              | Wire.Sum x -> mk x (List.fold_left (fun s row -> s + num row.(x)) 0 rs)
+              | Wire.Min x -> mk x (List.fold_left (fun s row -> min s (num row.(x))) max_int rs)
+              | Wire.Max x -> mk x (List.fold_left (fun s row -> max s (num row.(x))) min_int rs))
+            aggs
+        in
+        Array.append k a :: acc)
+      t []
+
+let rec remove_one x = function [] -> None | y :: r when y = x -> Some r | y :: r -> Option.map (fun r -> y :: r) (remove_one x r)
+
+(* a message of a watch, applied to its rows: then they must be the model's answer at its group *)
+let watch_message w what rows group0 started (m : Wire.push) =
+  let g = match m with Wire.Answer a -> a.group | Change c -> c.group | Same g -> g in
+  if g > w.committed then fail w "%s: a message of group %d, not durable (%d)" what g w.committed;
+  (match m with
+   | Wire.Change _ -> if not started || g <= group0 then fail w "%s: a change of group %d after %d" what g group0
+   | Same _ -> if not started || g < group0 then fail w "%s: same %d after %d" what g group0
+   | Answer _ -> if g < group0 then fail w "%s: an answer of group %d after %d" what g group0);
+  let rows =
+    match m with
+    | Wire.Answer a -> a.rows
+    | Same _ -> rows
+    | Change c ->
+      let rows = List.fold_left (fun rows x -> match remove_one x rows with Some r -> r | None -> fail w "%s: a row removed that it does not hold" what; rows) rows c.removed in
+      c.added @ rows
+  in
+  rows, g
+
+let check_watch w what rows g q sel =
+  if C.sorted_rows rows <> C.sorted_rows (expected w g q sel) then
+    fail w "%s at group %d: %d rows, the naive evaluator %d" what g (List.length rows) (List.length (expected w g q sel))
+  else count (what ^ "es checked")
+
+let send_watch (cl : client) sc cw =
+  let from = if cw.wstarted then cw.wgroup else 0 in
+  cw.wparts <- None;
+  let id = cl.next_id in
+  cl.next_id <- cl.next_id + 1;
+  let body = Buffer.create 64 in
+  Wire.put_request body (Wire.Watch { db = 0; query = cw.wq; select = cw.wsel; from });
+  Wire.add_frame sc.to_server ~id ~kind:Wire.k_watch ~flags:0 body;
+  Hashtbl.replace sc.outstanding id (P_watch cw);
+  cw.wid <- Some id
+
+let on_watch w (cl : client) sc id flags body cw =
+  let r = Codec.reader body 0 (Bytes.length body) in
+  if cw.wid <> Some id then ()
+  else if flags land Wire.f_error <> 0 then begin
+    Hashtbl.remove sc.outstanding id;
+    cw.wid <- None;
+    match Wire.get_reply Wire.k_watch flags r with
+    | Wire.Err { code = "lagging"; _ } -> count "watches lagging"; send_watch cl sc cw
+    | Wire.Err e ->
+      denied_ok w cl "a watch" e.code (allowed_read cl.kind);
+      if e.code <> "denied" && e.code <> "invalid" then fail w "a watch failed: %s %s" e.code e.message;
+      cl.watches <- List.filter (fun x -> x != cw) cl.watches
+    | _ -> fail w "a watch's error does not decode"
+  end
+  else begin
+    let part = try Wire.get_push r with Codec.Short -> fail w "a push does not decode"; raise Over in
+    let m = match cw.wparts with Some p -> Wire.join_push p part | None -> part in
+    if flags land Wire.f_more <> 0 then cw.wparts <- Some m
+    else begin
+      cw.wparts <- None;
+      if not (allowed_read cl.kind) then fail w "client %s watched without the right" (token_of cl.kind);
+      let rows, g = watch_message w "a watch" cw.wrows cw.wgroup cw.wstarted m in
+      cw.wrows <- rows;
+      cw.wgroup <- g;
+      cw.wstarted <- true;
+      check_watch w "a watch" rows g cw.wq cw.wsel
+    end
+  end
+
 let on_reply w (cl : client) sc id kind flags body =
+  match Hashtbl.find_opt sc.outstanding id with
+  | Some (P_watch cw) when kind = Wire.k_watch -> on_watch w cl sc id flags body cw
+  | None when Hashtbl.mem sc.unwatched id -> ()
+  | _ ->
   let r = Codec.reader body 0 (Bytes.length body) in
   let rep = try Wire.get_reply kind flags r with Codec.Short -> fail w "a reply does not decode"; raise Over in
   match Hashtbl.find_opt sc.outstanding id with
@@ -394,7 +566,9 @@ let on_reply w (cl : client) sc id kind flags body =
       cl.welcomed <- true;
       (* the writes still unanswered, again, with their serials, in order *)
       let l = List.sort compare (Hashtbl.fold (fun s ops acc -> (s, ops) :: acc) cl.unanswered []) in
-      List.iter (fun (s, ops) -> count "writes sent again"; send_write cl sc s ops) l
+      List.iter (fun (s, ops) -> count "writes sent again"; send_write cl sc s ops) l;
+      (* the watches again, each from the group of its last message *)
+      List.iter (fun cw -> if cw.wstarted then count "watches resumed"; send_watch cl sc cw) cl.watches
     | P_hello, Wire.Err e -> fail w "Hello refused: %s %s" e.code e.message
     | P_get (thing, min_group, k), Wire.Facts f ->
       if not (allowed_read cl.kind) then fail w "client %s read without the right" (token_of cl.kind);
@@ -484,6 +658,7 @@ let on_reply w (cl : client) sc id kind flags body =
     | P_other "status", Wire.Status _ -> if cl.kind <> Admin then fail w "status without the admin right"; count "status"
     | P_other "status", Wire.Err e -> denied_ok w cl "status" e.code (cl.kind = Admin)
     | P_other "ping", Wire.Pong _ -> count "pongs"
+    | P_other "unwatch", Wire.Unwatched -> count "unwatched"
     | _, Wire.Err e -> fail w "an unexpected error %s: %s" e.code e.message
     | _ -> fail w "an unexpected reply")
 
@@ -598,8 +773,65 @@ let reader_read w r =
       if not (C.F.equal (C.facts_of_view v) (model w v.group)) then fail w "a local read at group %d is not the model's state" v.group;
       count "local reads checked")
 
+(* a local watch on the reader's follower, from the group of its last message *)
+let local_subscribe w r (lw : lwatch) =
+  match r.fol with
+  | Some fol when lw.lsub = None && Follower.try_view fol <> None -> (
+    match Follower.hub fol with
+    | None -> ()
+    | Some h -> (
+      let emit (m : Live.msg) =
+        (match m with
+         | Live.Ended _ -> lw.lsub <- None
+         | _ ->
+           let p =
+             match m with
+             | Live.Answer a -> Wire.Answer { group = a.group; cols = 0; rows = a.rows }
+             | Change c -> Wire.Change { group = c.group; cols = 0; added = c.added; removed = c.removed }
+             | Same s -> Wire.Same s.group
+             | Ended _ -> assert false
+           in
+           let rows, g = watch_message w "a local watch" lw.lrows lw.lgroup lw.lstarted p in
+           lw.lrows <- rows;
+           lw.lgroup <- g;
+           lw.lstarted <- true;
+           check_watch w "a local watch" rows g lw.lq lw.lsel);
+        true
+      in
+      match Live.subscribe h lw.lq lw.lsel ~from:(if lw.lstarted then lw.lgroup else 0) ~emit with
+      | sub -> lw.lsub <- Some sub; count "local watches"
+      | exception Failure m -> count ("local watches refused: " ^ m)
+      | exception Query.Bad m -> fail w "a local watch refused: %s" m))
+  | _ -> ()
+
+let reader_watch w r =
+  match r.fol with
+  | Some fol when Follower.try_view fol <> None ->
+    List.iter (local_subscribe w r) r.lw;
+    if List.length r.lw < 2 then (
+      (* the question from the server's schema, as a program has it from Connect *)
+      match Option.map (fun s -> Atomic.get s.e.published) w.srv with
+      | Some v -> (
+        let facts = C.facts_of_view v in
+        let rec ask k = match C.random_query w.r v facts (List.map (fun (d : prop) -> d.name) props) with None when k > 0 -> ask (k - 1) | q -> q in
+        match ask 20 with
+        | None -> ()
+        | Some q ->
+          let lsel = if Rng.bool w.r then Wire.Give [||] else Wire.Give (Array.init (1 + Rng.int w.r q.vars) (fun _ -> Rng.int w.r q.vars)) in
+          let lw = { lq = q; lsel; lrows = []; lgroup = 0; lstarted = false; lsub = None } in
+          r.lw <- lw :: r.lw;
+          local_subscribe w r lw)
+      | None -> ())
+  | _ -> ()
+
 let reader_step w r =
-  match Rng.int w.r 10 with
+  match Rng.int w.r 13 with
+  | 10 | 11 | 12 -> if r.fol = None && w.srv <> None && not r.cut then reader_connect w r else begin
+      (* the reader catches up with its stream, then watches *)
+      reader_send w r;
+      while r.fol <> None && not (Queue.is_empty r.chan) do reader_apply w r done;
+      reader_watch w r
+    end
   | 0 -> if r.fol = None && w.srv <> None && not r.cut then reader_connect w r
   | 1 | 2 -> reader_send w r
   | 3 | 4 | 5 -> reader_apply w r
@@ -608,6 +840,8 @@ let reader_step w r =
     if Rng.chance w.r 0.05 then begin
       (* the reader's process dies *)
       (match w.srv, r.sf with Some s, Some f -> Follow.unregister s.follow f | _ -> ());
+      Option.iter Follower.stop r.fol;
+      r.lw <- [];
       r.fol <- None;
       r.sf <- None;
       r.cut <- false;
@@ -657,14 +891,49 @@ let client_step w (cl : client) =
               | [] -> Wire.Group (key, [| Wire.Count |]))
           in
           send cl sc (Wire.Find { db = 0; query = q; select = sel }) (P_find (q, sel, cl.confirmed, known w)))
-      | 8 -> send cl sc (Wire.Admin "status") (P_other "status")
+      | 8 when Rng.bool w.r -> send cl sc (Wire.Admin "status") (P_other "status")
+      | 8 -> (
+        (* a watch: a new one, or one unwatched *)
+        match cl.watches with
+        | cw :: rest when List.length cl.watches >= 3 || Rng.chance w.r 0.2 ->
+          (match cw.wid with
+           | Some id ->
+             Hashtbl.remove sc.outstanding id;
+             Hashtbl.replace sc.unwatched id ();
+             send cl sc (Wire.Unwatch id) (P_other "unwatch")
+           | None -> ());
+          cl.watches <- rest
+        | _ -> (
+          match C.random_query w.r v (C.facts_of_view v) (List.map (fun (d : prop) -> d.name) props) with
+          | None -> ()
+          | Some q ->
+            let sel =
+              match Rng.int w.r 3 with
+              | 0 -> Wire.Give [||]
+              | 1 -> Wire.Give (Array.init (1 + Rng.int w.r q.vars) (fun _ -> Rng.int w.r q.vars))
+              | _ -> (
+                let ty = Query.types v q in
+                let nums = List.filter (fun x -> match ty.(x) with Tint | Tmoney _ -> true | _ -> false) (List.init q.vars Fun.id) in
+                let key = if q.vars > 1 then [| Rng.int w.r q.vars |] else [||] in
+                match nums with
+                | x :: _ -> Wire.Group (key, [| Wire.Count; Wire.Sum x; Wire.Min x; Wire.Max x |])
+                | [] -> Wire.Group (key, [| Wire.Count |]))
+            in
+            let cw = { wq = q; wsel = sel; wid = None; wrows = []; wgroup = 0; wstarted = false; wparts = None } in
+            cl.watches <- cl.watches @ [ cw ];
+            count "watches";
+            send_watch cl sc cw))
       | _ -> send cl sc (Wire.Ping "x") (P_other "ping")
     end
 
 let step w =
   let s = server w in
   match Rng.int w.r 100 with
-  | n when n < 22 -> client_step w (Rng.pick w.r w.clients)
+  | n when n < 19 -> client_step w (Rng.pick w.r w.clients)
+  | n when n < 21 -> hub_step w
+  | n when n < 22 -> push_step w;
+    (* a watch falls behind: the next push finds its connection's queue full *)
+    if Rng.chance w.r 0.05 then (Core.max_pushes := 0; push_step w; hub_step w; Core.max_pushes := 8 lsl 20)
   | n when n < 36 -> if Array.length w.readers > 0 then reader_step w (Rng.pick w.r w.readers)
   | n when n < 52 ->
     let cl = Rng.pick w.r w.clients in
@@ -714,10 +983,10 @@ let run seed steps =
   let clients =
     Array.mapi
       (fun i k -> { kind = k; cname = i; conn = None; session = 0; welcomed = false; serial = 0; unanswered = Hashtbl.create 8;
-                    confirmed = 0; next_id = 1 })
+                    confirmed = 0; next_id = 1; watches = [] })
       (Array.sub kinds 0 (2 + Rng.int r 4))
   in
-  let readers = Array.init (if Rng.chance r 0.1 then 0 else 1 + Rng.int r 3) (fun _ -> { fol = None; sf = None; chan = Queue.create (); cut = false; reading = None }) in
+  let readers = Array.init (if Rng.chance r 0.1 then 0 else 1 + Rng.int r 3) (fun _ -> { lw = []; fol = None; sf = None; chan = Queue.create (); cut = false; reading = None }) in
   let w =
     { seed; sim; disk = Sim_disk.disk sim; r; srv = None; groups = Hashtbl.create 64; models = Hashtbl.create 64; acked = 0;
       committed = 0; stopped = false; clients; receipts = Hashtbl.create 64; page = ref 0; returned = 0; readers }
@@ -743,6 +1012,9 @@ let run seed steps =
          Array.iter (fun cl -> client_step w cl; Option.iter (deliver_to_server w) cl.conn) w.clients;
          prepare w;
          commit w;
+         hub_step w;
+         hub_step w;
+         push_step w;
          Array.iter (fun cl -> Option.iter (deliver_to_client w cl) cl.conn) w.clients;
          Array.iter (fun r -> reader_send w r; reader_apply w r; reader_read w r) w.readers;
          if w.stopped then ignore (restart w ~power:false)

@@ -48,8 +48,8 @@
  (action (run %{exe:examples.exe})))
 
 (executables
- (names server_sim server_unit server_crash server_tls server_limits live)
- (modules server_sim server_unit server_crash server_tls server_limits serve live)
+ (names server_sim server_unit server_crash server_tls server_limits live_sim)
+ (modules server_sim server_unit server_crash server_tls server_limits serve live_sim)
  (libraries cepheus cepheus_server check unix threads.posix)
  (ocamlopt_flags (:standard -O3))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
