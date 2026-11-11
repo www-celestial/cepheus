@@ -128,7 +128,7 @@ once `write` has it lets the collector reclaim it while the group is merged.
 ## Disk space and merges
 
 The runs are the levels of an LSM tree (theory, section 9): the delta is merged once it holds 200,000 changes, and
-level l holds at most 200,000 x 4^l rows (800,000, 3.2 M, 12.8 M, ...). A merge takes the delta and the newest runs
+level $l$ holds at most $200{,}000 \times 4^l$ rows (800,000, 3.2 M, 12.8 M, ...). A merge takes the delta and the newest runs
 down to the first level that can hold them all, writes one run there (about 5 bytes a fact), forces it, renames it,
 and then removes the runs it replaced, and any other run outside the chain. No run is kept aside: should the newest run
 be found damaged at an open, it is set aside and its groups are replayed from the journal (a slower open, nothing
@@ -136,7 +136,7 @@ lost). A removed file's space returns only when no view reads it any longer (the
 collector frees its run). During a full merge (`snapshot`) the directory holds the base twice, the old and the new:
 budget about twice the base for `snapshots/` while it runs, once the base after it.
 
-A fact is written about (T + 1) / 2 = 2.5 times per level it crosses (T = 4), against up to 17 times with the one level
+A fact is written about $(T + 1) / 2 = 2.5$ times per level it crosses ($T = 4$), against up to 17 times with the one level
 before; at 10 M facts, three levels. While clients write, a merge forces its file every 8 MiB, so that the journal's
 fsyncs, which every write waits for, never queue behind hundreds of MB of a merge's dirty pages; a merge nobody waits
 beside (`snapshot`, recovery) forces once, at the end.

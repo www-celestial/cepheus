@@ -247,8 +247,8 @@ the largest answer the patterns could have (the **AGM bound**), where a plan of 
 makes, can do much more on a graph ([theory](theory.md#4-generic-join)). Each answer comes once: answers are a set
 (G11).
 
-**Conditions.** `cepheus.Above(x, v)` (x > v), `cepheus.Below(x, v)` (x < v) and `cepheus.Between(x, lo, hi)`
-(lo ≤ x ≤ hi), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
+**Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) and `cepheus.Between(x, lo, hi)`
+($\mathit{lo} \le x \le \mathit{hi}$), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
 filters after it. Any other condition is Cesia's, on the rows it gives (`list.Filter`).
 
 **Aggregates.** In `Give`, `cepheus.Sum(x)`, `cepheus.Min(x)`, `cepheus.Max(x)` and `cepheus.Count()` group the answers
@@ -393,7 +393,7 @@ benchmarks' (`bench.exe load`, 1 M facts, [benchmarks](benchmarks.md)); a read i
 (`bench/cesia/get.ce`, `sbench.exe ids`); the OCaml client is `sbench.exe`, PostgreSQL 18.6 is driven by `pgbench -M
 prepared` (C, libpq) reading `SELECT * FROM invoice WHERE id = $1`, the same rows.
 
-**A point read**, µs (n = 11 rounds):
+**A point read**, µs ($n = 11$ rounds):
 
 | | Cesia client | OCaml client | PostgreSQL 18.6 |
 |---|---:|---:|---:|
@@ -414,7 +414,7 @@ prepared` (C, libpq) reading `SELECT * FROM invoice WHERE id = $1`, the same row
   values made for Cesia; the design's bound, 11 µs at the server through its Unix socket, is the OCaml client's path,
   which a Cesia program on the server's machine does not take (it reads locally).
 
-**Durable writes**, n = 7 rounds of 3 s (each write an invoice of 4 facts, its group forced to the disk):
+**Durable writes**, $n = 7$ rounds of 3 s (each write an invoice of 4 facts, its group forced to the disk):
 
 | | Cesia client, one connection | OCaml client |
 |---|---:|---:|
@@ -425,7 +425,7 @@ The intervals are wide: the disk's fsync takes 2 to 3 times as long from one run
 [benchmarks](server.md#speed-beside-postgresql) saw the same). What they show: 64 fibers on one connection write as fast as 64
 connections, since their writes leave pipelined and share the server's fsyncs.
 
-**Start-up and the first call**, ms a whole process (`cesia run`, n = 101 runs of each, alternated): `io.Print(1)`
+**Start-up and the first call**, ms a whole process (`cesia run`, $n = 101$ runs of each, alternated): `io.Print(1)`
 alone 3.09 [3.04, 3.13]; the same with the package used but not called 3.51 [3.49, 3.54]; with one call 18.7 [18.6,
 18.8].
 
@@ -433,13 +433,13 @@ alone 3.09 [3.04, 3.13]; the same with the package used but not called 3.51 [3.4
   read and compiled, as for any package (`std/csv`, 40 lines, about 0.2 ms; `std/sql` about 3 ms, measured the same
   way but without the lock).
 - The first call costs 13 ms more (the engine stripped of its symbol table, as built now: 17.8 ms [17.6, 18.0] against
-  20.3 [20.2, 20.5] before, n = 55; that run's process with the package unused: 4.5): checking the engine's
+  20.3 [20.2, 20.5] before, $n = 55$; that run's process with the package unused: 4.5): checking the engine's
   fingerprint (BLAKE2 of 2.3 MB, 3.9 ms), loading the system's OpenSSL (1.3 ms), and linking 1.4 MB of machine code
   into the process. Once a process: a program connects once, at its start.
 
 **The rest of the program.** The package's reader and, on the server's machine, its follower are domains of the
 program's process, and OCaml 5 stops every domain at each minor collection, while the follower's state lives in the
-program's heap. A loop that makes 2 million maps (`bench/cesia/gc.ce`, the best of three, n = 7): 125.8 ms [124.8,
+program's heap. A loop that makes 2 million maps (`bench/cesia/gc.ce`, the best of three, $n = 7$): 125.8 ms [124.8,
 131.7] alone, 126.9 [125.1, 129.0] with a local connection open; over TLS 124.9 and 128.2 with it; while 64 writers
 write and the follower applies their groups, 140.7 ms alone and 149.4 with it (the intervals overlap; the writers'
 server and the benchmark share the machine's cores). Idle, a connection costs the program nothing measurable.

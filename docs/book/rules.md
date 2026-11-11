@@ -115,15 +115,15 @@ can retract.
 ## How the writer keeps it: semi-naive evaluation
 
 Recomputing the least model after each write would cost the whole database at each write. The writer instead works
-on what each group changes, the **delta** (Δ) of the group, and derives only what the change makes derivable.
+on what each group changes, the **delta** ($\Delta$) of the group, and derives only what the change makes derivable.
 
 **Insertion, by semi-naive evaluation** (Bancilhon and Ramakrishnan 1986 [Bancilhon 1986], §3.2.2: evaluate "the
-differential … instead of the entire" set at each step). The group's asserted additions are round 0. In round r, each
-fact of round r is matched to each body atom of each rule where it fits; the other atoms are joined over the facts:
-those before the matched atom over facts of rounds before r, those after it over facts up to r. Every rule instance
+differential … instead of the entire" set at each step). The group's asserted additions are round 0. In round $r$, each
+fact of round $r$ is matched to each body atom of each rule where it fits; the other atoms are joined over the facts:
+those before the matched atom over facts of rounds before $r$, those after it over facts up to $r$. Every rule instance
 (a rule with a fact for each of its atoms) is so enumerated exactly once, at its newest fact — the *semi-naive
 property* (Ramakrishnan, Srivastava, Sudarshan 1990 [Ramakrishnan 1990]) — and the heads that are not facts yet make
-round r + 1. When a round makes nothing new, the group's derived facts are complete.
+round $r + 1$. When a round makes nothing new, the group's derived facts are complete.
 
 ```text
 round 0   x type GraduateStudent              (asserted)
@@ -136,9 +136,9 @@ round 2   u hasAlumnus x                      hasAlumnus is the inverse of degre
           ...
 ```
 
-The work is the number of rule instances found, each paid once: Θ(D) for D derivations. The cost model of a group is
-then D × (the cost of a derivation: its joins and the test of its head) + the new facts × (putting a fact into the
-view); [benchmarks](benchmarks.md#rules-2026-11-08) measures both.
+The work is the number of rule instances found, each paid once: $\Theta(D)$ for $D$ derivations. The cost model of a group is
+then $D \times (\text{the cost of a derivation: its joins and the test of its head}) + \text{the new facts} \times (\text{putting a fact into the view})$;
+[benchmarks](benchmarks.md#rules-2026-11-08) measures both.
 
 **How a plan joins.** Each rule is compiled once, when the rules change, into one closure per body atom (a *plan*:
 the atom matched to a given fact, the others joined in a fixed order), as Feeley and Lapalme compile code to closures
@@ -168,7 +168,7 @@ When a fact goes, the facts derived from it may go, unless they have another pro
 Three details make it exact here, each found by the property test of G17 before it was right (the test compares
 every view with the least model computed from scratch):
 1. The instances a deleted fact loses are enumerated over the facts *before* it goes (it may fill two atoms of one
-   instance: `[y, a, x], [x, a, y]` with x = y).
+   instance: `[y, a, x], [x, a, y]` with $x = y$).
 2. A fact the group retracts is no longer asserted at once, but stays among the facts until B/F decides about it: two
    retracted facts may be the two premises of one derived fact.
 3. A fact retracted and asserted again in one group is asserted, and never a candidate.
@@ -201,7 +201,7 @@ or a value of a unique property another thing holds, refuses the group and names
 ## The budget
 
 A rule can derive a great deal from a small write (every pair of members of a club). The writer refuses a group
-whose derived changes pass **100,000 + 100 × its asserted changes**: `Invalid "rule NAME derived more than N facts
+whose derived changes pass **$100{,}000 + 100 \times \text{its asserted changes}$**: `Invalid "rule NAME derived more than N facts
 from a group of K facts"`, naming the rule that derived the most. The scaled part lets a load derive in proportion;
 the fixed part bounds what a small write can cost the other writers, who wait for it (about 0.1 s of reasoning at
 the budget). `rule_budget` holds the two numbers.
@@ -267,7 +267,7 @@ does not hold yet (the simulation found that case: without it, a pattern on such
 Measured on this laptop (Intel i7-4720HQ, 2.6 GHz, 4 cores; OCaml 5.5 without flambda), on LUBM-shaped data
 (universities, departments, people, courses, generated from the published ranges of the LUBM generator [Guo 2005],
 not its official output) with the univ-bench ontology as 94 rules, one an axiom. Seven rounds, alternated, each
-process capped at 3 GB, nothing else running; the median and the interval [x(1), x(7)] of the rounds (98.4 %
+process capped at 3 GB, nothing else running; the median and the interval $[x(1), x(7)]$ of the rounds (98.4 %
 coverage). The method and every number: [benchmarks](benchmarks.md#rules-2026-11-08).
 
 | what | with the rules | without | |
@@ -322,7 +322,7 @@ Each was weighed against the others in the design; the measurements are the desi
 - **The flag in the value's field** (bit 63 of the value word in format 6, the lowest bit of the field in format 7's
   blocks that hold a derived fact): no byte more without rules; a run of a newer format is not read by an older
   binary, which replays the journal instead.
-- **The budget scaled by the group** (100,000 + 100 × its asserted changes): a load derives in proportion, a runaway
+- **The budget scaled by the group** ($100{,}000 + 100 \times \text{its asserted changes}$): a load derives in proportion, a runaway
   rule is stopped and named.
 
 ## What is not here yet

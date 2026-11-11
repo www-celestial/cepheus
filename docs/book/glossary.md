@@ -4,7 +4,7 @@ Every term the documentation uses, in plain words, with the page that explains i
 the usual one, both are given.
 
 - **AGM bound** — the largest answer a conjunctive query can have, computed from the sizes of its inputs by a
-  fractional edge cover (Atserias, Grohe, Marx 2008): N^1.5 for the triangles of N links. A worst-case optimal join
+  fractional edge cover (Atserias, Grohe, Marx 2008): $N^{1.5}$ for the triangles of $N$ links. A worst-case optimal join
   never works much beyond it. [theory](theory.md#4-generic-join)
 - **anti-dependency** (rw edge) — in a history, an edge from a transaction that read a version of an item to the
   transaction that wrote the next version: the reader saw the state before the writer. A cycle through one is Adya's
@@ -45,8 +45,8 @@ the usual one, both are given.
   [concepts](concepts.md#questions)
 - **birthday problem** — the chance that among m people two share a birthday, far higher than intuition says; here,
   the chance that two of m buyers pick the same seat among ten. [case](case-seats.md#a-bound)
-- **bit packing** — numbers of w bits stored one after the other with no byte between them: field i is bits i·w to
-  i·w + w − 1, read with one 8-byte load, a shift and a mask. With a frame of reference, how runs and the journal
+- **bit packing** — numbers of $w$ bits stored one after the other with no byte between them: field $i$ is bits $i \cdot w$ to
+  $i \cdot w + w - 1$, read with one 8-byte load, a shift and a mask. With a frame of reference, how runs and the journal
   store numbers. [formats](formats.md#a-group)
 - **BLAKE2b** — a cryptographic hash function (RFC 7693): from any bytes, 32 bytes (BLAKE2b-256) from which the input
   cannot be found again. The server keeps tokens only as their BLAKE2b-256 hash. [server](server.md#tokens)
@@ -74,7 +74,7 @@ the usual one, both are given.
   below it. An open takes the chain that reaches the newest group with the fewest runs. [architecture](architecture.md#runs-on-disk)
 - **checksum**, **CRC**, **CRC-32C** — a short number computed from bytes, which changes if they change; CRC-32C (the
   Castagnoli polynomial, the checksum of iSCSI, RFC 3720) detects every burst of up to 32 bits and lets random damage
-  through with probability 2⁻³². Cepheus computes it by the processor's own instruction (SSE4.2 on x86-64, CRC32 on
+  through with probability $2^{-32}$. Cepheus computes it by the processor's own instruction (SSE4.2 on x86-64, CRC32 on
   arm64). [architecture](architecture.md#the-journal-a-write-ahead-log)
 - **chunk** (of a large group) — 65,536 operations of a large group (`Bulk.chunk`), the unit of work that the domains
   take in turn while the group is mapped, checked and sorted (morsel-driven scheduling, [Leis 2014]).
@@ -115,7 +115,7 @@ the usual one, both are given.
   (Gupta et al. 1993); exact for nonrecursive rules only: two facts that derive each other keep each other's count
   above zero. [rules](rules.md#retraction-backwardforward)
 - **counting sort** — a sort that counts how many items fall on each key, then places each item at its key's place
-  in one pass: O(n + keys), no comparison. A large group's facts are sorted by property this way, in chunks counted
+  in one pass: $O(n + \text{keys})$, no comparison. A large group's facts are sorted by property this way, in chunks counted
   and spread at once by several domains.
   [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **cut** (of the journal) — after a failed write or fsync, the writer truncates the journal back to the end of its
@@ -129,7 +129,7 @@ the usual one, both are given.
 - **datom** — Datomic's fact: entity, attribute, value, transaction, added. Cepheus' fact is the first three; the group
   and the add-or-retract flag live in the journal. [concepts](concepts.md#facts-the-entityattributevalue-model)
 - **delta** — the changes since the last merge, in persistent maps; level 0 of the LSM-tree (C0), about 170 bytes a
-  change. [architecture](architecture.md#indexes-the-runs-and-the-delta) In the reasoner, Δ is another thing: the
+  change. [architecture](architecture.md#indexes-the-runs-and-the-delta) In the reasoner, $\Delta$ is another thing: the
   facts a group changes, from which semi-naive evaluation derives (round 0 is the group's asserted additions).
   [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **delta debugging** — shrinking a failing case by removing parts while it still fails, until every part left is
@@ -208,7 +208,7 @@ the usual one, both are given.
   operation C leaves undefined (UndefinedBehaviorSanitizer). The C files of the CRC and of TLS are fuzzed with both.
   [testing](testing.md#the-c-file-fuzzed)
 - **galloping search** (exponential search) — a search that tries 1, 2, 4, 8... places ahead before halving, so that
-  finding a place k steps away costs O(log k) (Bentley and Yao 1976); the leapfrog seeks so.
+  finding a place $k$ steps away costs $O(\log k)$ (Bentley and Yao 1976); the leapfrog seeks so.
   [theory](theory.md#8-merges-written-to-a-file)
 - **gaps** — in a row block, the things of a value stored as the difference from the thing before (minus one):
   "the invoices that are unpaid", close together, take 3-4 bits each instead of 9-10.
@@ -265,8 +265,8 @@ the usual one, both are given.
   machines). [server](server.md#the-rules-the-design-first-had-and-why-they-were-left)
 - **least model** — the smallest set of facts containing the asserted ones and closed under the rules: what a
   database with rules holds (G17). [rules](rules.md#what-the-database-holds-the-least-model)
-- **level**, **size ratio** — a place for runs with a capacity in an LSM-tree; each level is T times larger than the
-  one above (T, the size ratio, is 4 here): level l holds at most 200,000 × 4^l rows. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
+- **level**, **size ratio** — a place for runs with a capacity in an LSM-tree; each level is $T$ times larger than the
+  one above ($T$, the size ratio, is 4 here): level $l$ holds at most $200{,}000 \times 4^l$ rows. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **leveling**, **tiering** — the two ways an LSM-tree of several levels merges: under leveling each level holds one
   run, and a run coming down is merged with it (Cepheus); under tiering a level holds up to T runs, merged together
   into the next level when full. Leveling writes more and reads fewer runs. [theory](theory.md#9-levels-on-disk-and-large-groups)
@@ -334,7 +334,7 @@ the usual one, both are given.
 - **provenance** — where a fact comes from: here, a proof of it. [rules](rules.md#why)
 - **question** — Cepheus' query: patterns over variables. [concepts](concepts.md#questions)
 - **radix sort** (least significant digit first) — a sort that sorts by the lowest digit, then the next, each pass a
-  stable counting sort, so that the order of the lower digits is kept: O(n × digits). A large group's values inside a
+  stable counting sort, so that the order of the lower digits is kept: $O(n \times \text{digits})$. A large group's values inside a
   property are sorted with 11-bit digits (Knuth, vol. 3, 5.2.5), each pass from one buffer to the other, and so are
   its indexes by thing when it does not come in thing order. [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **range restriction** (safety) — every variable of a rule's head appears in its body: a rule gives facts only about
@@ -459,7 +459,7 @@ the usual one, both are given.
 - **worst-case optimal join** — a join whose work never exceeds, up to small factors, the largest answer the question
   could have (the AGM bound) (Ngo et al. 2012).
 - **write amplification** — how many times a fact is written to the disk by merges for one write by a client: about
-  (T + 1)/2 a level under leveling, 5.8 for the 10 M load (14.5 with the one level of earlier versions).
+  $(T + 1)/2$ a level under leveling, 5.8 for the 10 M load (14.5 with the one level of earlier versions).
   [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **write skew** — two transactions read the same facts and each writes a different one, together breaking a rule
   (two doctors each go off call); snapshot isolation allows it, `Expect` refuses it.

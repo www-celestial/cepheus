@@ -340,11 +340,11 @@ sale with `Expect` would prove nothing. `tools/test.sh` runs the sale with `Expe
 
 ### A bound
 
-How often should the naive sale fail? A back-of-the-envelope model gives a number to compare with section 2: when m
+How often should the naive sale fail? A back-of-the-envelope model gives a number to compare with section 2: when $m$
 buyers read the same view and each picks one of the ten best free seats at random, the chance that two pick the same
-one is the birthday problem's, 1 − (10 × 9 × ... × (10 − m + 1)) / 10^m: 10 % for 2 buyers, 50 % for 4, and certain
-for 16 (more buyers than seats to choose from). The m picks then cover 10 (1 − 0.9^m) distinct seats on average (each
-seat is missed by all m with probability 0.9^m), so the share of sales too many is 1 − (10/m) (1 − 0.9^m): 5 % for 2
+one is the birthday problem's, $1 - (10 \times 9 \times \dots \times (10 - m + 1)) / 10^m$: 10 % for 2 buyers, 50 % for 4, and certain
+for 16 (more buyers than seats to choose from). The $m$ picks then cover $10 (1 - 0.9^m)$ distinct seats on average (each
+seat is missed by all $m$ with probability $0.9^m$), so the share of sales too many is $1 - (10/m) (1 - 0.9^m)$: 5 % for 2
 buyers, 14 % for 4, 49 % for 16. Measured (the table of section 2): 199 of 2,199 sales, 9.0 %; 463 of 2,463, 18.8 %;
 2,199 of 4,199, 52.4 %. The model predicts the growth and, for 16 buyers, the rate; it is below for 2 and 4 buyers
 because a buyer also collides with sales still in flight, written but not yet in any view (a frame being forced),
