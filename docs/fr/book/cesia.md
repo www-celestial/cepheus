@@ -58,7 +58,7 @@ l'édition de liens dynamique du moteur et des bibliothèques d'OpenSSL, une foi
 
 ## Connect
 
-```cesia
+```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/io
 use std/result
@@ -145,7 +145,7 @@ demi-unité) ; au-delà, ses derniers chiffres s'arrondissent.
 
 ## Insert, Get, Update
 
-```cesia
+```cesia norun
 ada = result.Unwrap(cepheus.Insert(Client, {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"}, db, by = 7, why = "signup"))
 io.Print(ada)
 io.Print(cepheus.Get(Client, ada, db))
@@ -170,7 +170,7 @@ Ok({Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"})
 
 Comme partout en Cesia, la base vient en dernier : `db then cepheus.Get(Client, ada)` lit la même chose.
 
-```cesia
+```cesia norun
 for total in [1200, 80.5]
   result.Unwrap(cepheus.Insert(Invoice, {Client: ada, Total: total, Status: "unpaid"}, db))
 end
@@ -201,7 +201,7 @@ le numéro du groupe et les identifiants des choses qu'il a créées, ou un `Err
 - `cepheus.New(k)` : la k-ième nouvelle chose du groupe, à toute place où va une chose : `New(1)`, `New(2)`...
   `Things[k]` est son identifiant.
 
-```cesia
+```cesia norun
 first = cepheus.Find(1, (i) -> {Where: [[i, Invoice.Total, 1200]], Give: {Invoice: i}}, db)
 inv = result.Unwrap(first)[1].Invoice
 pay = [cepheus.Expect(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Status, "paid")]
@@ -238,7 +238,7 @@ tenir, où la chose et la valeur peuvent être des variables ou des constantes (
 kind) ; `Give` est une map de ce qu'il faut donner, chacun une variable ou un agrégat. `cepheus.Find(n, question, db)`
 donne un `Ok` d'une liste de maps, une par réponse.
 
-```cesia
+```cesia norun
 unpaid = cepheus.Find(3, (c, i, total) -> {
   Where: [[c, Client.City, "Lyon"], [i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]],
   Give: {Invoice: i, Total: total},
@@ -270,7 +270,7 @@ réponses par les autres champs de `Give`, comme le fait le `GROUP BY` de SQL ; 
 groupe. Ils sont calculés là où tourne la question (dans le programme sur la machine du serveur, sinon au serveur), si
 bien qu'un total sur 400 000 factures traverse le réseau comme une seule ligne.
 
-```cesia
+```cesia norun
 byCity = cepheus.Find(4, (c, i, city, total) -> {
   Where: [[i, Invoice.Client, c], [c, Client.City, city], [i, Invoice.Total, total], cepheus.Above(total, 50)],
   Give: {City: city, Total: cepheus.Sum(total), Invoices: cepheus.Count()},
@@ -296,7 +296,7 @@ restent lisibles).
 d'aucun serveur), d'un autre fork, ou d'une base lue sur la machine du serveur (son état local en ce moment), avec ces
 kinds déclarés dedans :
 
-```cesia
+```cesia norun
 what = result.Unwrap(cepheus.Fork(db))
 result.Unwrap(cepheus.Update(Client, ada, {City: "Nice"}, what))
 io.Print(cepheus.Get(Client, ada, what))
@@ -317,7 +317,7 @@ Un test de `cesia test` n'a besoin d'aucun serveur : il fait un fork de `cepheus
 Un fichier de test se tient à côté du code qu'il teste (`shop.test.ce` à côté de `shop.ce`), et ses fonctions sont
 nommées `is` suivi d'une majuscule :
 
-```cesia test
+```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/result
 

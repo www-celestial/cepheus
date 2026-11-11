@@ -504,7 +504,7 @@ est citée dans la page [comparaison](comparison.md).
   Checker. *USENIX ATC* 2012, 309–318. https://www.usenix.org/conference/atc12/technical-sessions/presentation/serebryany
   — Le vérificateur de mémoire sous lequel le fichier C du CRC est fuzzé : une lecture d'un seul octet hors de son bloc
   arrête l'exécution.
-- **[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
+- **\[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
   https://llvm.org/docs/LibFuzzer.html
   — Le fuzzer de `test/fuzz_crc32c.c` et de `test/fuzz_tls.c` : des entrées modifiées vers de nouveaux chemins du code,
   chacune vérifiée contre le CRC calculé bit par bit, ou contre ce qu'a écrit l'autre côté d'une conversation TLS.
@@ -515,7 +515,7 @@ est citée dans la page [comparaison](comparison.md).
   https://press.princeton.edu/books/paperback/9780691164076/how-to-solve-it
   — "Understanding the problem" (comprendre le problème) d'abord : l'inconnue, les données, la condition ; le premier
   pas du [cas des places](case-seats.md).
-- **[Heilmeier]** G. H. Heilmeier. The Heilmeier Catechism, the questions DARPA asks of every proposed research
+- **\[Heilmeier]** G. H. Heilmeier. The Heilmeier Catechism, the questions DARPA asks of every proposed research
   program. https://www.darpa.mil/about/heilmeier-catechism
   — Qu'essayez-vous de faire, comment est-ce fait aujourd'hui, qu'est-ce qui est nouveau, comment saurez-vous que vous
   avez réussi : le cadre de l'énoncé du problème.

@@ -62,7 +62,7 @@ La configuration d'un serveur, le même fichier sur chaque machine d'un cluster 
 bases) sauf pour `me` (une seule machine est un cluster d'un seul peer, un peer étant l'un de ces serveurs). Chaque
 clé, et chaque règle contre laquelle elle est vérifiée avant que rien ne s'ouvre :
 
-```toml
+```toml norun
 [cluster]
 name = "shop-prod"                 # lower-case letters, digits, '_', '-'
 id = "cph-c-6f1e9a2b7d40c381"      # made by `cepheus cluster init`; checked at every connection (Welcome)
@@ -127,7 +127,7 @@ Le fichier des tokens des programmes, à côté de `cluster.toml`, lisible par l
 0600). Il contient des hashs (une empreinte calculée à partir de chaque token, dont on ne peut pas retrouver le
 token), jamais des tokens ; les commandes plus bas l'écrivent.
 
-```toml
+```toml norun
 [[token]]
 name = "shop-web"
 hash = "blake2b-256:9f4c...e1"

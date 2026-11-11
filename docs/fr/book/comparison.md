@@ -81,8 +81,8 @@ tableau complet et sa méthode : [le serveur](server.md#la-vitesse-à-côté-de-
 
 **L'isolation, par conception** ([PostgreSQL 18: transaction isolation](https://www.postgresql.org/docs/18/transaction-iso.html)) :
 « Read Committed is the default isolation level in PostgreSQL » ; Repeatable Read « is implemented using a technique
-known [...] as Snapshot Isolation » et permet des anomalies de sérialisation ; Serializable « is implemented using
-[...] Serializable Snapshot Isolation », et « applications using this level must be prepared to retry transactions due
+known \[...] as Snapshot Isolation » et permet des anomalies de sérialisation ; Serializable « is implemented using
+\[...] Serializable Snapshot Isolation », et « applications using this level must be prepared to retry transactions due
 to serialization failures ». Cepheus a un seul niveau : des groupes strictly serializable, des read-then-writes (lire,
 puis écrire selon ce qu'on a lu) validés par `Expect`
 ([concepts](concepts.md#lisolation--exactement-ce-que-voient-un-lecteur-et-un-writer)). Le group commit : PostgreSQL
@@ -203,7 +203,7 @@ transaction, son journal les drapeaux ajouté et retiré.
   Cepheus ([IO](https://github.com/facebook/rocksdb/wiki/IO)).
 - *Write amplification* (le nombre de fois qu'un octet est réécrit) : « Write amplification is the ratio of bytes
   written to storage versus bytes written to the database » ; l'exemple détaillé du guide de réglage donne
-  « approximately 1 + 2 + 10 + 10 + 10 = 33 », et « the usual write amplification of leveled compaction [...] is often
+  « approximately 1 + 2 + 10 + 10 + 10 = 33 », et « the usual write amplification of leveled compaction \[...] is often
   larger than 10 » ([tuning guide](https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide),
   [leveled compaction](https://github.com/facebook/rocksdb/wiki/Leveled-Compaction)). Cepheus fait aussi du leveling,
   avec un ratio de 4 plutôt que le défaut de 10 de RocksDB (`max_bytes_for_level_multiplier`) : 5,8 écritures par fait
@@ -213,7 +213,7 @@ transaction, son journal les drapeaux ajouté et retiré.
   taille du niveau.
 - *Là où RocksDB gagne* : la compaction par fichiers (des merges courts à chaque niveau), les Bloom filters, la
   compression, les column families, des années de production ; des transactions des deux sortes (« Optimistic
-  Transactions do not take any locks [...] they rely on doing conflict-detection at commit time »,
+  Transactions do not take any locks \[...] they rely on doing conflict-detection at commit time »,
   [transactions](https://github.com/facebook/rocksdb/wiki/Transactions)). RocksDB n'a pas de langage de requête : les
   joins de Cepheus devraient être écrits à la main au-dessus.
 
@@ -224,7 +224,7 @@ transaction, son journal les drapeaux ajouté et retiré.
   « index-free adjacency » : « Link every data element directly to its incoming and outgoing relationships »
   ([15 rules](https://neo4j.com/blog/cypher-and-gql/15-rules-native-graph-database/)). Cepheus trouve « qui pointe vers
   t » par une recherche dichotomique dans les lignes par propriété, pas en suivant un pointeur.
-- L'isolation : read-committed est le défaut, et « Explicit locking of nodes and relationships [...] allows for
+- L'isolation : read-committed est le défaut, et « Explicit locking of nodes and relationships \[...] allows for
   simulating the effects of higher levels of isolation »
   ([concurrent data access](https://neo4j.com/docs/operations-manual/5/database-internals/concurrent-data-access/)).
   Les groupes de Cepheus sont strictly serializable sans aucun lock.

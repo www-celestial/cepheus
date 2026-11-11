@@ -17,7 +17,7 @@ où ils apparaissent pour la première fois, et dans le [glossaire](glossary.md)
 La première règle de Pólya pour résoudre un problème est de le comprendre : quelle est l'inconnue, quelles sont les
 données, quelle est la condition ([Pólya 1945]). Le catéchisme de Heilmeier, à la DARPA, demande la même chose d'un
 projet de recherche, en mots simples : qu'essayez-vous de faire, comment le fait-on aujourd'hui, qu'est-ce qui est
-nouveau, et comment saurez-vous que vous avez réussi ([Heilmeier]). Ici :
+nouveau, et comment saurez-vous que vous avez réussi (\[Heilmeier]). Ici :
 
 - **Qui a ce problème** : quiconque vend un stock limité à beaucoup de gens à la fois : des places, des billets, des
   chambres, des rendez-vous.
@@ -465,7 +465,7 @@ changement innocent de l'installation peut changer un résultat mesuré, [Mytkow
 
 ## Pour aller plus loin
 
-[Pólya 1945] ; [Heilmeier] ; [Jain 1991] ; [Georges 2007] ; [Kalibera 2013] ; [Zeller 2002] ; [Berenson 1995] ;
+[Pólya 1945] ; \[Heilmeier] ; [Jain 1991] ; [Georges 2007] ; [Kalibera 2013] ; [Zeller 2002] ; [Berenson 1995] ;
 [Papadimitriou 1979] ; [Herlihy 1990] ; [Adya 1999] ; [Cahill 2008] ; [Ports 2012] ; [Kung 1981] ; [Fekete 2005] ;
 [Claessen 2000] ; [Lamport 2002] ; [Newcombe 2015] ; [Kingsbury 2020] ; [Mytkowicz 2009]. Les entrées, avec leurs liens
 et ce que ce chapitre a pris de chacune : [références](references.md).
