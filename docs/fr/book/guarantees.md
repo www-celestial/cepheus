@@ -234,7 +234,7 @@ propre descripteur, avant d'être pris. Chaque page passe par `Pages.fill`, qui 
 table des pages et vérifie le CRC-32C que donne la table avant que la page entre dans la frame table (la table des
 emplacements de pages du cache) : aucun autre chemin n'y met une page. Chaque accès à un run vérifie ses bornes (la
 frame table, puis les octets de la page ou la copie d'un bloc), donc une lecture ne sort jamais des octets du run. Le
-codage des formats 7 et 8 (des blocs par frame of reference, une table des pages, l'ordre par colonne) change ce que
+codage des formats 7 et 8 (des blocs par frame of reference, une table des pages, le column order) change ce que
 contient une page, pas cet argument : une valeur n'est décodée que depuis une page qui a passé la vérification. Pour un
 dommage aléatoire d'une page, CRC-32C le manque avec une probabilité $2^{-32}$ ; il détecte toute rafale d'au plus
 32 bits (Castagnoli, Bräuer, Herrmann 1993).
@@ -280,12 +280,12 @@ les locks n'arrivent pas jusqu'ici).
 
 *Preuve.* L'ouverture prend un lock exclusif `lockf` sur `DIR/lock`, tenu jusqu'à la fermeture ; le noyau le libère
 quand le processus meurt. Un lock POSIX appartient à un processus et à un fichier, donc le noyau laisse le même
-processus verrouiller deux fois un fichier : à l'intérieur d'un processus, une table des locks tenus refuse une seconde
+processus prendre deux fois un lock sur un fichier : à l'intérieur d'un processus, une table des locks tenus refuse une seconde
 ouverture. Elle est indexée par l'identité du fichier de lock, ses numéros de device et d'inode (`st_dev`, `st_ino`),
 que partagent tous les chemins vers le fichier, plutôt que par le chemin tel qu'il est écrit ou par sa forme canonique
 (`realpath` résout les liens symboliques, mais un bind mount donne encore un second nom). Le fait que le lock soit tenu
 est décidé par un `stat` du chemin, avant qu'aucun descripteur soit ouvert : fermer un second descripteur d'un fichier
-que le processus a verrouillé libérerait le lock. Un second `close` d'une base ne fait rien : il ne libère pas de
+sur lequel le processus a un lock libérerait le lock. Un second `close` d'une base ne fait rien : il ne libère pas de
 nouveau le lock (un autre moteur peut le tenir entre-temps) et ne laisse pas le marqueur de fermeture propre dans un
 répertoire qu'un autre moteur a ouvert.
 
