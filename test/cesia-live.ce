@@ -59,13 +59,50 @@ defn local()
   result.Ok(missing)
 end
 
+defn follow(w, title, want)
+  (** The rows of a watch, taken from its channel until there are [want] of them: the groups of its messages must
+      only grow, and the rows be Find's at the last one. *)
+  first = fiber.Receive(w.Changes, timeout = 30)?
+  rows = first.Rows
+  group = first.Group
+  growing = true
+  while value.Len(rows) < want
+    c = fiber.Receive(w.Changes, timeout = 30)?
+    growing = growing and c.Group > group
+    group = c.Group
+    rows = if value.IsMissing(c.Rows) list.Concat(list.Filter(r -> list.Count(x -> value.Equal(x, r), c.Removed) == 0, rows), c.Added) else c.Rows end
+  end
+  result.Ok({Rows: rows, Group: group, Growing: growing})
+end
+
+defn watching(url, ca, what)
+  (** A watch of the notes of a run, while another connection writes them: its rows at the end are the 20 notes. *)
+  db = cepheus.Connect(url, [Note], token = token, ca = ca)?
+  other = cepheus.Connect(url, [Note], token = token, ca = ca)?
+  w = cepheus.Watch(2, (x, n) -> {Where: [[x, Note.Title, what], [x, Note.N, n]], Give: {N: n}}, db)?
+  writer = fiber.Spawn(() -> [cepheus.Insert(Note, {Title: what, N: k, Mark: "$what-$k"}, other) for k in 1..20])
+  got = follow(w, what, 20)?
+  fiber.Wait(writer)
+  cepheus.Close(w)
+  ns = list.Sort([r.N for r in got.Rows])
+  found = list.Sort([r.N for r in cepheus.Find(2, (x, n) -> {Where: [[x, Note.Title, what], [x, Note.N, n]], Give: {N: n}}, db)?])
+  io.Print("$what watch:", value.Len(ns), "rows, groups growing:", got.Growing, "the same as Find:", value.Equal(ns, found))
+  cepheus.Close(db)
+  cepheus.Close(other)
+  result.Ok(missing)
+end
+
 defn restart()
   db = cepheus.Connect(sys.Env("CEPHEUS_URL"), [Note], token = token)?
+  (* a watch of the writes, which goes on through the restart *)
+  w = cepheus.Watch(2, (x, n) -> {Where: [[x, Note.Title, "restart"], [x, Note.N, n]], Give: {N: n}}, db)?
   io.Print("ready")
   worker(w) = list.Count(result.IsOk, [cepheus.Insert(Note, {Title: "restart", N: w * 1000 + k, Mark: "r-$w-$k"}, db) for k in 1..150])
   tasks = [fiber.Spawn(() -> worker(w)) for w in 1..10]
   ok = list.Sum([result.Unwrap(fiber.Wait(t)) for t in tasks])
   io.Print("restart:", ok, "writes answered Ok,", count("restart", db)?, "in the database")
+  got = follow(w, "restart", 1500)?
+  io.Print("restart watch:", value.Len(got.Rows), "rows, groups growing:", got.Growing)
   result.Ok(missing)
 end
 
@@ -96,5 +133,7 @@ if value.Len(sys.Args) > 0 and sys.Args[1] == "restart"
 else
   result.Unwrap(overTls())
   result.Unwrap(local())
+  result.Unwrap(watching(sys.Env("CEPHEUS_TLS"), sys.Env("CEPHEUS_CA"), "tls-live"))
+  result.Unwrap(watching(sys.Env("CEPHEUS_URL"), missing, "local-live"))
   result.Unwrap(silent())
 end

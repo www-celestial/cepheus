@@ -82,7 +82,8 @@ serve
 wait $prog || { prog=""; cat "$tmp/restart.out"; exit 1; }
 prog=""
 grep -q '^restart: 1500 writes answered Ok, 1500 in the database$' "$tmp/restart.out" || { cat "$tmp/restart.out"; exit 1; }
-echo "cesia live: TLS, local reads and a kill -9 of the server: $(grep -c . "$root/test/cesia-live.expected") lines as expected, 1500 writes once each"
+grep -q '^restart watch: 1500 rows, groups growing: true$' "$tmp/restart.out" || { cat "$tmp/restart.out"; exit 1; }
+echo "cesia live: TLS, local reads, watches and a kill -9 of the server: $(grep -c . "$root/test/cesia-live.expected") lines as expected, 1500 writes once each, watched through the restart"
 cd "$root"
 stop
 trap - EXIT

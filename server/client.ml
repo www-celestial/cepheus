@@ -292,6 +292,7 @@ let follow_loop fc fol () =
          in
          Follower.frame fol ~vseq ~first ~count data
        end
+       else if kind = Wire.k_durable then Follower.durable fol (Codec.get_varint r)
        else if kind = Wire.k_runs then begin
          let vseq, runs = Wire.get_runs_push r in
          let fds = take_fds fc (List.length runs) in

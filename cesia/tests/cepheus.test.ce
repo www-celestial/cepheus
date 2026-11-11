@@ -1,6 +1,7 @@
 (* The package cepheus on forks of Empty: every function, its errors, and what a fork promises (G8), with no server. *)
 use cesia/cepheus
 use std/bug
+use std/fiber
 use std/list
 use std/result
 use std/value
@@ -130,4 +131,65 @@ end
 defn isConnectNeedsAnAddress()
   far = cepheus.Connect("cepheus://example.invalid:7400/shop", [Client])
   far.Error.Code == "invalid"
+end
+
+defn isWatchGivesTheAnswerThenChanges()
+  s = shop()?
+  w = cepheus.Watch(2, (i, total) -> {Where: [[i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]], Give: {Invoice: i, Total: total}}, s.Db)?
+  first = fiber.Receive(w.Changes)?
+  id = cepheus.Insert(Invoice, {Client: s.Bo, Total: 90, Status: "unpaid"}, s.Db)?
+  added = fiber.Receive(w.Changes)?
+  cepheus.Update(Invoice, id, {Status: "paid"}, s.Db)?
+  removed = fiber.Receive(w.Changes)?
+  cepheus.Close(w)
+  closed = fiber.Receive(w.Changes)
+  bug.Assert(value.Len(first.Rows) == 2, "the answer first")
+  bug.Assert(value.Equal(added.Added, [{Invoice: id, Total: 90.0}]) and value.Len(added.Removed) == 0, "a row added")
+  bug.Assert(value.Equal(removed.Removed, [{Invoice: id, Total: 90.0}]) and value.Len(removed.Added) == 0, "a row removed")
+  bug.Assert(removed.Group == added.Group + 1, "each change has its group")
+  closed.Error.Kind == "closed"
+end
+
+defn isWatchSharedByFibers()
+  s = shop()?
+  q = (i) -> {Where: [[i, Invoice.Status, "unpaid"]], Give: {Invoice: i}}
+  a = cepheus.Watch(1, q, s.Db)?
+  b = cepheus.Watch(1, q, s.Db)?
+  fiber.Receive(a.Changes)?
+  fiber.Receive(b.Changes)?
+  id = cepheus.Insert(Invoice, {Client: s.Bo, Total: 5, Status: "unpaid"}, s.Db)?
+  x = fiber.Receive(a.Changes)?
+  y = fiber.Receive(b.Changes)?
+  cepheus.Close(a)
+  cepheus.Close(b)
+  value.Equal(x.Added, [{Invoice: id}]) and value.Equal(y.Added, [{Invoice: id}])
+end
+
+defn isWatchSumsByDifference()
+  s = shop()?
+  w = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Status, "unpaid"], [i, Invoice.Total, t]], Give: {Unpaid: cepheus.Sum(t), N: cepheus.Count()}}, s.Db)?
+  first = fiber.Receive(w.Changes)?
+  cepheus.Insert(Invoice, {Client: s.Bo, Total: 19.5, Status: "unpaid"}, s.Db)?
+  c = fiber.Receive(w.Changes)?
+  cepheus.Close(w)
+  value.Equal(first.Rows, [{Unpaid: 1280.5, N: 2}]) and value.Equal(c.Added, [{Unpaid: 1300.0, N: 3}]) and value.Equal(c.Removed, [{Unpaid: 1280.5, N: 2}])
+end
+
+defn isASlowWatcherGetsTheAnswerAgain()
+  s = shop()?
+  w = cepheus.Watch(1, (i) -> {Where: [[i, Invoice.Lines, 7]], Give: {Invoice: i}}, s.Db, size = 1)?
+  first = fiber.Receive(w.Changes)?
+  for k in 1..400
+    cepheus.Insert(Invoice, {Client: s.Bo, Total: k, Status: "x", Lines: 7}, s.Db)?
+  end
+  again = fiber.Receive(w.Changes)?
+  again = if value.IsMissing(again.Rows) fiber.Receive(w.Changes)? else again end
+  cepheus.Close(w)
+  value.Len(first.Rows) == 0 and value.Len(again.Rows) == 400
+end
+
+defn isWatchRefusesAMistake()
+  s = shop()?
+  bad = cepheus.Watch(1, (i) -> {Where: [[i, Invoice.Total, "lots"]], Give: {I: i}}, s.Db)
+  bad.Error.Code == "invalid"
 end

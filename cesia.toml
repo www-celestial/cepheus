@@ -4,7 +4,7 @@ src = ["cesia"]
 
 [native]
 package = "cesia/cepheus"
-natives = ["kind", "connect", "get", "insert", "update", "write", "variables", "find", "fork", "close"]
+natives = ["kind", "connect", "get", "insert", "update", "write", "variables", "find", "fork", "close", "watch", "next"]
 
 [test]
 allow = ["native=cepheus"]

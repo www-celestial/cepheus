@@ -190,7 +190,7 @@ type resolved = { ids : int array; typs : Value.typ array; slot : int array (* p
 
 type source =
   | Server of { conn : Conn.t; mutable cdb : Client.db; dbname : string }
-  | Fork of { mutable fv : Store.view }
+  | Fork of { mutable fv : Store.view; mutable fhub : Live.hub option (* its watches, made at the first *) }
 
 type db = { src : source; mutable resolved : resolved option array (* by kind *) }
 
@@ -198,6 +198,11 @@ type db = { src : source; mutable resolved : resolved option array (* by kind *)
 let dbs : db table = table ()
 
 let new_handle src = C.Handle ("cepheus.database", add dbs { src; resolved = [||] })
+
+(* a fork's watches: each of its writes is a frame, durable at once (a fork has no disk) *)
+let fork_hub = function
+  | Fork f -> (match f.fhub with Some h -> h | None -> let h = Live.create f.fv ~tag:f.fv.group ~durable:f.fv.group in f.fhub <- Some h; h)
+  | Server _ -> invalid_arg "fork_hub"
 
 (* handles are never given twice: one no longer in the table was closed *)
 let db_of ctx name = function
@@ -434,7 +439,10 @@ let commit ctx d ~by ~why ops =
   | Fork f -> (
     let v = f.fv in
     match Resolve.resolve v ~n:(v.group + 1) ~time:(Disk.real.now ()) ~by ~why ops with
-    | Ok (v', _, temps) -> f.fv <- v'; v'.group, temps
+    | Ok (v', g, temps) ->
+      f.fv <- v';
+      Option.iter (fun h -> Live.frame h ~tag:v'.group [ g ] v'; Live.durable h v'.group) f.fhub;
+      v'.group, temps
     | Error e -> let code, m = resolve_code e in refuse code "%s" m)
   | Server s -> (
     match Conn.write (park ctx) s.conn ~db:s.cdb.handle ~by ~why ops with
@@ -526,16 +534,16 @@ let aggregate_keys = C.keys [| "Sum"; "Min"; "Max"; "Count" |]
 
 type column = Var of int | Agg of Wire.agg
 
-let find ctx a =
-  let name = "cepheus.Find" in
-  try
-    let d = db_of ctx name a.(0) in
-    let nvars = int ctx name a.(2) in
-    let q = map_of ctx name a.(1) in
+(* a question as the program gives it: its patterns and ranges, its select, and for each field of Give its name, its
+   column in the answer and its type *)
+type question = { query : Query.t; select : Wire.select; qkeys : C.keys; at : int array; typs : Value.typ array }
+
+let question ctx name d qv nvars =
+    let q = map_of ctx name qv in
     let where, give =
       match C.fields question_keys q with
       | [| C.List w; C.Map g |] | [| C.List w; C.Struct g |] -> Array.init (C.length w) (C.item ctx w), g
-      | _ -> C.need ctx name "a question {Where: [patterns], Give: {Name: variable}}" a.(1)
+      | _ -> C.need ctx name "a question {Where: [patterns], Give: {Name: variable}}" qv
     in
     let var = function C.Handle ("cepheus.variable", k) when k < nvars -> Some k | _ -> None in
     let vtyp = Array.make nvars None in
@@ -604,12 +612,24 @@ let find ctx a =
     Array.iteri (fun i c -> match c with Var _ -> at.(i) <- !ki; incr ki | Agg _ -> at.(i) <- nk + !ai; incr ai) cols;
     let ctyp i = match cols.(i) with Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j) -> (match vtyp.(j) with Some t -> t | None -> Value.Tint) | Agg Wire.Count -> Value.Tint in
     let typs = Array.init (Array.length cols) ctyp in
-    let keys = C.keys names in
+    { query; select; qkeys = C.keys names; at; typs }
+
+(* a row of the answer (values) as the program's map *)
+let record_of_row ctx qn (row : Value.t array) = C.record ctx qn.qkeys (Array.init (Array.length qn.at) (fun i -> to_cesia qn.typs.(i) row.(qn.at.(i))))
+
+let find ctx a =
+  let name = "cepheus.Find" in
+  try
+    let d = db_of ctx name a.(0) in
+    let nvars = int ctx name a.(2) in
+    let qn = question ctx name d a.(1) nvars in
+    let query = qn.query and select = qn.select and at = qn.at and typs = qn.typs and keys = qn.qkeys in
+    let ncols = Array.length at in
     let rows =
       match local_state d with
       | Some v -> (
         match Answer.answer v query select with
-        | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init (Array.length cols) (fun i -> of_word v typs.(i) (ans.word r at.(i)))))
+        | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init ncols (fun i -> of_word v typs.(i) (ans.word r at.(i)))))
         | exception Query.Bad m -> refuse "invalid" "%s" m
         | exception Pages.Unreadable m -> refuse "damaged" "%s" m)
       | None -> (
@@ -617,13 +637,96 @@ let find ctx a =
         | Fork _ -> assert false
         | Server s -> (
           match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select }) with
-          | Wire.Rows rw ->
-            Array.of_list (List.map (fun row -> C.record ctx keys (Array.init (Array.length cols) (fun i -> to_cesia typs.(i) row.(at.(i))))) rw.rows)
+          | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
           | rep -> server_error rep "Find"))
     in
     C.pay ctx (Array.length rows);
     C.ok ctx (C.list ctx rows)
   with Refused (code, m) -> failure ctx code m
+
+(* ---- Watch: a live question; its messages taken one at a time by the package's fiber (cepheus.ce) ---- *)
+
+type watch = { c : Conn.consumer; wdb : db; qn : question }
+
+let watches : watch table = table ()
+
+(* every watch of the program, by its database and question: one source each *)
+let shared : (string, Conn.shared) Hashtbl.t = Hashtbl.create 16
+
+(* both messages have the four fields: an answer's Rows, a change's Added and Removed; the others missing *)
+let message_keys = C.keys [| "Group"; "Rows"; "Added"; "Removed" |]
+
+(* a new source for a watch: the local reader's hub, the fork's, or the server; from the group of its last message *)
+let find_source d (sh : Conn.shared) =
+  let from = if sh.started then sh.group else 0 in
+  let local hub =
+    match Live.subscribe hub sh.query sh.select ~from ~emit:(fun m -> Conn.deliver sh m; true) with
+    | sub -> Mutex.protect sh.sm (fun () -> sh.src <- Local (hub, sub)); true
+    | exception Query.Bad m -> Conn.finish sh "invalid" m; true
+    | exception Pages.Unreadable m -> Conn.finish sh "damaged" m; true
+    | exception Failure _ -> false
+  in
+  match d.src with
+  | Fork _ -> local (fork_hub d.src)
+  | Server s -> (
+    match Client.local_hub s.conn.cl s.cdb with
+    | Some hub when local hub -> true
+    | _ ->
+      Mutex.protect sh.sm (fun () -> sh.src <- Remote);
+      Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from }))
+
+(* a watch's source stops: the server's watch, or the hub's *)
+let stop_source d (sh : Conn.shared) =
+  Hashtbl.remove shared sh.key;
+  match Mutex.protect sh.sm (fun () -> let s = sh.src in sh.src <- Nothing; s) with
+  | Local (hub, sub) -> Live.unsubscribe hub sub
+  | Remote -> (match d.src with Server s -> Conn.unwatch s.conn sh | Fork _ -> ())
+  | Nothing -> ()
+
+let message ctx qn = function
+  | Conn.M_answer (g, rows) ->
+    C.pay ctx (List.length rows);
+    C.ok ctx (C.record ctx message_keys [| Int g; C.list ctx (Array.of_list (List.map (record_of_row ctx qn) rows)); C.Missing; C.Missing |])
+  | M_change (g, added, removed) ->
+    C.pay ctx (List.length added + List.length removed);
+    let l rows = C.list ctx (Array.of_list (List.map (record_of_row ctx qn) rows)) in
+    C.ok ctx (C.record ctx message_keys [| Int g; C.Missing; l added; l removed |])
+  | M_end (code, m) -> failure ctx code m
+
+let watch ctx a =
+  let name = "cepheus.Watch" in
+  try
+    let d = db_of ctx name a.(0) in
+    let nvars = int ctx name a.(2) in
+    let qn = question ctx name d a.(1) nvars in
+    let b = Buffer.create 64 in
+    Wire.put_query b qn.query;
+    Wire.put_select b qn.select;
+    let key = string_of_int (match a.(0) with C.Handle (_, i) -> i | _ -> -1) ^ ":" ^ Buffer.contents b in
+    let sh = match Hashtbl.find_opt shared key with Some sh when sh.ended = None -> sh | _ -> let sh = Conn.new_shared key qn.query qn.select in Hashtbl.replace shared key sh; sh in
+    let c = Conn.join sh in
+    (* the first message waited for here: the answer, or why there is none; it is given again by the first next *)
+    match Conn.next (park ctx) (find_source d) c with
+    | Conn.M_end (code, m) -> if Conn.leave c then stop_source d sh; refuse code "%s" m
+    | first ->
+      Conn.push_front c first;
+      C.ok ctx (C.Handle ("cepheus.watch", add watches { c; wdb = d; qn }))
+  with Refused (code, m) -> failure ctx code m
+
+let watch_of ctx name = function
+  | C.Handle ("cepheus.watch", i) as v -> (match entry watches i with Some w -> w | None -> C.need ctx name "a watch" v)
+  | v -> C.need ctx name "a watch, as cepheus.Watch made it" v
+
+let next ctx a =
+  let w = watch_of ctx "cepheus.Watch" a.(0) in
+  message ctx w.qn (Conn.next (park ctx) (find_source w.wdb) w.c)
+
+let close_watch i =
+  match entry watches i with
+  | Some w ->
+    watches.items.(i) <- None;
+    if Conn.leave w.c then stop_source w.wdb w.c.sh
+  | None -> ()
 
 (* ---- forks and Close ---- *)
 
@@ -650,21 +753,36 @@ let fork ctx a =
         | Ok (v, _, _) -> v
         | Error e -> let code, m = resolve_code e in refuse code "%s" m)
     in
-    C.ok ctx (new_handle (Fork { fv = v }))
+    C.ok ctx (new_handle (Fork { fv = v; fhub = None }))
   with Refused (code, m) -> failure ctx code m
 
+let watch_field = C.keys [| "Watch" |]
+
+(* Close of a database (its watches end too), or of a watch: "watch" then, so that the package's code takes what the
+   watch's channel holds (its fiber ends) *)
 let close ctx a =
   match a.(0) with
   | C.Handle ("cepheus.database", i) -> (
     match entry dbs i with
     | Some d ->
       dbs.items.(i) <- None;
+      for k = 0 to watches.count - 1 do
+        match entry watches k with
+        | Some w when w.wdb == d -> Conn.finish w.c.sh "closed" "the database was closed"; watches.items.(k) <- None; ignore (Conn.leave w.c); stop_source d w.c.sh
+        | _ -> ()
+      done;
       (match d.src with Server s -> Conn.close s.conn | Fork _ -> ());
       C.Missing
     | None -> C.Missing)
-  | v -> C.need ctx "cepheus.Close" "a database" v
+  | C.Handle ("cepheus.watch", i) -> close_watch i; C.Text "watch"
+  | (C.Map m | C.Struct m) as v -> (
+    match C.fields watch_field m with
+    | [| C.Handle ("cepheus.watch", i) |] -> close_watch i; C.Text "watch"
+    | _ -> C.need ctx "cepheus.Close" "a database or a watch" v)
+  | v -> C.need ctx "cepheus.Close" "a database or a watch" v
 
 let () =
   C.register
     [ "kind", 2, 2, kind; "connect", 4, 4, connect; "get", 3, 3, get; "insert", 5, 5, insert; "update", 6, 6, update;
-      "write", 4, 4, write; "variables", 1, 1, variables; "find", 3, 3, find; "fork", 2, 2, fork; "close", 1, 1, close ]
+      "write", 4, 4, write; "variables", 1, 1, variables; "find", 3, 3, find; "fork", 2, 2, fork; "close", 1, 1, close;
+      "watch", 3, 3, watch; "next", 1, 1, next ]

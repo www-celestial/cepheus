@@ -4,6 +4,8 @@
     is a database in the program's memory, for a test that needs no server. Errors are values: an Err of
     {Kind: "cepheus", Code, Message}. As everywhere in Cesia, the database comes last: db then cepheus.Get(Client, id). *)
 use std/bug
+use std/fiber
+use std/result
 
 (** A text property: a field of a kind. unique: no two things share a value; many: a list of values.
 
@@ -127,5 +129,40 @@ Empty = "cepheus.Empty"
     nothing it writes goes anywhere: the database it started from doesn't change. *)
 Fork(from, kinds = []) = fork(from, kinds)
 
-(** Ends a connection, or forgets a fork. *)
-Close(db) = close(db)
+defn feed(w, changes)
+  (** Each message of a watch into its channel, until the watch ends. *)
+  got = next(w)
+  while result.IsOk(got)
+    fiber.Send(got.Value, changes)
+    got = next(w)
+  end
+  fiber.Close(changes)
+end
+
+defn Watch(n, question, db, size = 64)
+  (** A live question: an Ok of {Changes, Watch}, Changes a channel of its messages, which holds size of them at most.
+      The first is the answer, {Group, Rows}: the rows Find gives at group Group. Each next one is a change,
+      {Group, Added, Removed}: the rows that came and the rows that went with group Group, so that the rows are then
+      Find's at that group. A change comes only when the rows change, and only once its group is on the server's disk.
+      When the connection breaks or the server restarts, the watch goes on by itself from its last group: no change
+      is lost, none comes twice. A fiber that reads its channel too slowly gets the whole answer again, {Group, Rows},
+      rather than every change it missed. Every fiber that watches the same question shares one watch at the server,
+      and on the server's machine the changes are computed here, from the writes this program follows. The channel
+      closes when the watch ends: Close(w), or a token that may no longer read the database. *)
+  w = watch(db, ask(n, question), n)
+  if result.IsErr(w)
+    return w
+  end
+  changes = fiber.Channel(size = size)
+  fiber.Spawn(() -> feed(w.Value, changes))
+  result.Ok({Changes: changes, Watch: w.Value})
+end
+
+defn Close(x)
+  (** Ends a connection, a watch, or forgets a fork. A watch's channel closes once its last message is taken. *)
+  if close(x) == "watch"
+    while result.IsOk(fiber.Receive(x.Changes, timeout = 0))
+    end
+  end
+  missing
+end
