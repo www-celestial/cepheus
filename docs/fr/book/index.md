@@ -11,13 +11,13 @@ exacte.
    Join, comment tout cela est testé.
 3. [Le serveur](server.md) : `cepheus serve`, cluster.toml, les tokens et les droits, le wire protocol octet par octet,
    les sessions (une écriture appliquée une seule fois, G14), les lectures locales dans la mémoire même du programme
-   (linéarisables, G15), les droits (G16), sa vitesse à côté de PostgreSQL, serveur contre serveur.
+   (linearizable, G15), les droits (G16), sa vitesse à côté de PostgreSQL, serveur contre serveur.
 4. [Cepheus depuis Cesia](cesia.md) : le client Cesia, un package natif : `Connect`, les kinds et leurs valeurs,
    `Insert`, `Get`, `Update`, `Write` avec `Expect`, les questions avec `Find`, les forks pour les tests, les lectures
    locales, beaucoup de fibers sur une seule connexion, ses erreurs et sa vitesse à côté du client OCaml et de
    PostgreSQL.
 5. [Tester](testing.md) : les forks pour les tests d'une application, et comment Cepheus lui-même est testé.
-6. [Règles](rules.md) : les règles Datalog tenues par le writer — les faits dérivés, l'évaluation semi-naive,
+6. [Règles](rules.md) : les règles Datalog tenues par le writer — les faits dérivés, la semi-naive evaluation,
    Backward/Forward pour les retraits, les contraintes, le budget, `why`, et ce que coûte une écriture avec des règles.
 7. [Un cas : ne jamais vendre deux fois la même place](case-seats.md) : un vrai problème résolu pas à pas, de son
    énoncé jusqu'à la preuve qu'il est résolu (un test, des ordonnancements générés, un modèle TLA+, kill -9 avec un

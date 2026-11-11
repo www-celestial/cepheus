@@ -19,7 +19,7 @@ durable à partir duquel elle a été répondue ; `server_sim` les vérifie sur 
 | G4 | les groupes sont strictly serializable | toujours |
 | G5 | une vue ne change jamais et ne contient que des groupes durables ; les vues ne reculent jamais | F1, F2, F4 (avec G13) |
 | G6 | un dommage aux octets durables du journal est détecté, jamais écarté en silence | F3 (un cas résiduel) |
-| G7 | une ouverture depuis les runs sur le disque est égale à un rejeu du journal ; une page abîmée n'est jamais servie | F1 à F3 |
+| G7 | une ouverture depuis les runs sur le disque est égale à un replay du journal ; une page abîmée n'est jamais servie | F1 à F3 |
 | G8 | un fork ne change rien de sa base | toujours |
 | G9 | un seul moteur à la fois ouvre une base, quel que soit le chemin qui la nomme | toujours (le lock est consultatif) |
 | G10 | après une écriture ou un fsync qui a échoué, plus rien n'est confirmé | F4 (un cas résiduel) |
@@ -27,7 +27,7 @@ durable à partir duquel elle a été répondue ; `server_sim` les vérifie sur 
 | G12 | un crash pendant un merge laisse les runs d'avant ou les runs d'après, entiers | F1, F2, F4 |
 | G13 | après un fsync qui a échoué, aucune vue ne montre un groupe qu'une coupure de courant pourrait reprendre ; une écriture qui a reçu `Io` est absente (un cas résiduel) | F4 avec F1, F2 |
 | G14 | à travers le serveur, une écriture envoyée avec sa session et son numéro de série est appliquée au plus une fois ; renvoyée jusqu'à avoir une réponse, exactement une fois, chaque réponse nommant le même groupe | F1, F2, connexions coupées |
-| G15 | chaque lecture, dans un lecteur local ou au serveur, contient chaque groupe répondu et chaque état lu avant son début, et est l'état exact après un groupe durable : les lectures sont linéarisables | F1, lecteurs lents, en pause ou tués, flux coupés |
+| G15 | chaque lecture, dans un lecteur local ou au serveur, contient chaque groupe répondu et chaque état lu avant son début, et est l'état exact après un groupe durable : les lectures sont linearizable | F1, lecteurs lents, en pause ou tués, flux coupés |
 | G16 | à travers le serveur, une connexion fait exactement ce que permettent les droits de son token | toujours |
 | G17 | chaque vue contient exactement le plus petit modèle de ses faits affirmés sous ses règles, et marque exactement ceux qui sont affirmés | toujours (avec G1-G3 sous F1, F2) |
 | G18 | aucun groupe confirmé ne laisse une instance d'une contrainte (`Never`) | toujours |
@@ -105,7 +105,7 @@ groupe confirmé, et l'état est l'application des groupes $1, \dots, k$ dans l'
 
 *Preuve.* Les frames sont ajoutées dans l'ordre des groupes (`Journal.append` refuse un autre ordre) ; la recovery
 vérifie que chaque frame commence au groupe attendu et que chaque groupe a le numéro attendu, d'un segment à l'autre
-("a segment is missing" sinon), et coupe tout ce qui suit la première frame qui ne passe pas la vérification. Le rejeu
+("a segment is missing" sinon), et coupe tout ce qui suit la première frame qui ne passe pas la vérification. Le replay
 applique les changements enregistrés dans l'ordre (`Resolve.replay`). Si le run le plus récent dit groupe S, un journal
 qui finit avant S est un dommage, pas un historique plus court.
 
@@ -222,7 +222,7 @@ la page échoue. Jamais une réponse fausse.
 (il n'ajoute que des faits absents en dessous de lui, ne retire que des faits présents en dessous de lui), avec la
 position dans le journal de la dernière frame durable avant son groupe. L'ouverture prend une chaîne de runs depuis 0,
 chacun posé sur la fin de celui d'en dessous (une telle chaîne est toujours l'état à son sommet, puisqu'un run contient
-les changements de ses groupes par-dessus l'état à son lo, quels que soient les runs qui font cet état) ; le rejeu
+les changements de ses groupes par-dessus l'état à son lo, quels que soient les runs qui font cet état) ; le replay
 commence à la position du run le plus récent et saute les groupes qu'il contient. Le chargement vérifie le CRC de
 l'en-tête, le CRC de la table des pages et le fait qu'elle place chaque page du fichier au plus une fois, l'ordre des
 sections, les rank tables (les tables de rangs : le compte de chaque mot découle des bits qui le précèdent, le dernier
@@ -364,7 +364,7 @@ et sur une base compactée.
 ## G12 Les merges sont atomiques
 
 *Promesse.* Après un crash à n'importe quel point d'un merge (F1, F2, F4), la base s'ouvre sur les runs d'avant ou sur
-les runs d'après, chacun entier, jamais un mélange ; son état est le rejeu du journal jusqu'au groupe rétabli (G7) ;
+les runs d'après, chacun entier, jamais un mélange ; son état est le replay du journal jusqu'au groupe rétabli (G7) ;
 aucun run n'a à être mis de côté et aucun fichier de merge ne reste. Un merge n'a pas besoin de plus de mémoire que le
 cache, quelques buffers de page et 21 octets par page du nouveau run (voir [théorie](theory.md), section 8).
 
@@ -489,7 +489,7 @@ dans la vue si et seulement s'il est affirmé.
 choses dans les têtes, chaque règle range-restricted (chaque variable de la tête apparaît dans le corps) et typée
 (vérifié quand elle est écrite). Un groupe refusé (par son budget, une contrainte, une règle du schéma) ne laisse rien.
 
-*Preuve.* (1) *Insertion.* L'évaluation semi-naive à partir des ajouts affirmés du groupe atteint le plus petit point
+*Preuve.* (1) *Insertion.* La semi-naive evaluation à partir des ajouts affirmés du groupe atteint le plus petit point
 fixe des règles sur l'état après les retraits : chaque instance de règle avec un fait du tour r est énumérée au tour r
 (les atomes avant celui qui correspond, sur les tours en dessous de r, ceux d'après sur les tours jusqu'à r), donc
 chaque instance qui met en jeu un nouveau fait est trouvée, chacune une fois ([Bancilhon 1986], [Ramakrishnan 1990]) ;
@@ -499,9 +499,9 @@ conditions que cette implémentation respecte et que les tests vérifient : les 
 énumérées sur l'état d'avant son départ ; les faits retirés du groupe quittent tout de suite l'ensemble des faits
 affirmés, et l'état seulement quand leur preuve est réfutée ; un fait retiré puis affirmé de nouveau est affirmé.
 (3) *Changements de règles.* Une règle ajoutée est évaluée sur tout l'état (ses instances sur des faits plus anciens),
-puis avec les autres par l'évaluation semi-naive ; une règle supprimée donne ses têtes à B/F comme candidats.
+puis avec les autres par la semi-naive evaluation ; une règle supprimée donne ses têtes à B/F comme candidats.
 (4) *Durabilité.* Les changements dérivés sont dans la frame même du groupe, écrits et forcés avec elle (G1, G2) ; le
-rejeu les applique selon leur sorte et n'évalue rien, donc une vue rétablie, celle d'une réplique ou celle du passé est
+replay les applique selon leur sorte et n'évalue rien, donc une vue rétablie, celle d'une réplique ou celle du passé est
 celle du writer, octet pour octet de faits. (5) *Runs.* Un merge garde l'indicateur de chaque fait : pour chaque fait,
 l'entrée la plus récente donne son état dans la nouvelle vue et la plus ancienne son état en dessous des runs
 fusionnés ; un indicateur changé est un retrait et un ajout dans le nouveau run.
