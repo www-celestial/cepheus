@@ -3,7 +3,7 @@
       each cut length, each sector torn inside) must recover to exactly m or m+1 groups, never lose one;
    2. every single bit flipped anywhere in the durable journal is detected by a full read, and recovery either
       refuses, or keeps every group (a flipped trailer, rebuilt), or is the documented residual (a flip in the newest
-      frame, cut as torn: docs/guarantees.md, G6);
+      frame, cut as torn: docs/book/guarantees.md, G6);
    3. a segment whose creation was torn at any byte is dropped, and the journal continues;
    4. inside a merge (G12): at every mutating disk call of a merge (a merge now, one begun from a view ahead of the
       disk and installed after two more frames, the merges of a recovery replaying a long tail), every crash state:

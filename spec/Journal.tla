@@ -1,5 +1,5 @@
 ---------------------------- MODULE Journal ----------------------------
-(* The journal protocol of one database (docs/theory.md, section 1), under the faults of docs/guarantees.md:
+(* The journal protocol of one database (docs/book/theory.md, section 1), under the faults of docs/book/guarantees.md:
    F1 a process death (what it wrote stays in the page cache, readable by the next process, lost at a later power
    loss), F2 a power loss (what the disk may not hold is lost, kept, or torn), F3 a durable frame damaged in silence,
    F4 a failed fsync as Linux file systems do it (Rebello et al., ATC 2020): the pages are marked clean without

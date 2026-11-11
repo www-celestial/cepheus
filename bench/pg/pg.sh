@@ -9,7 +9,7 @@
 #                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2);
 #                              QS=Q4,Q5 only those; RUNS runs each (21), summarised by bench.exe stats
 #   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row; RATE=r inserts a second in all (open loop)
-#   pg.sh seats ROOT serializable|naive SEATS BUYERS   the sale of docs/case-seats.md (pgbench, --max-tries)
+#   pg.sh seats ROOT serializable|naive SEATS BUYERS   the sale of docs/book/case-seats.md (pgbench, --max-tries)
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -136,7 +136,7 @@ write)
   rm -r "$tmp"
   ;;
 seats)
-  # the sale of docs/case-seats.md: pg.sh seats ROOT serializable|naive SEATS BUYERS. Sold out by BUYERS pgbench
+  # the sale of docs/book/case-seats.md: pg.sh seats ROOT serializable|naive SEATS BUYERS. Sold out by BUYERS pgbench
   # clients, each doing 2 SEATS/BUYERS + 50 transactions (one after the hall is sold out sells nothing); the time runs
   # from pgbench's start to the last charge's commit (its clock_timestamp)
   mode=$3; n=$4; c=$5

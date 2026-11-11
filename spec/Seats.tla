@@ -1,5 +1,5 @@
 ------------------------------- MODULE Seats -------------------------------
-(* Selling concert seats with many buyers at once, as docs/case-seats.md tells it.
+(* Selling concert seats with many buyers at once, as docs/book/case-seats.md tells it.
 
    Each buyer reads a view (the owners of the seats as of one group), picks a seat that is free in it, and writes the
    sale: the seat's owner and the buyer's charge, in one group (atomic, G2). The single writer applies the groups one

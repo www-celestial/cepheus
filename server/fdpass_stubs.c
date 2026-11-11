@@ -1,4 +1,4 @@
-/* What OCaml's Unix lacks for local readers (docs/server.md, "Local reads"): sending open file descriptors to
+/* What OCaml's Unix lacks for local readers (docs/book/server.md, "Local reads"): sending open file descriptors to
    another process over a Unix-domain socket and receiving them (sendmsg and recvmsg with one SCM_RIGHTS control
    message, unix(7)), and mapping a file's first page read-only and shared (mmap with PROT_READ and MAP_SHARED: the
    server's later stores to the page are seen at once, and the reader cannot write it). The interface is

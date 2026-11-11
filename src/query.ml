@@ -3,7 +3,7 @@
    the pattern that offers the fewest candidates (exact counts, read from the indexes for the bindings so far) gives
    them, and every other pattern on that variable keeps or drops each one with an index lookup. The work stays within
    the AGM bound of the question (Atserias, Grohe, Marx 2008) up to the cost of a lookup; on a chain of patterns it
-   is the plain nested index lookup. Each binding comes out once (G11; proof in docs/theory.md). *)
+   is the plain nested index lookup. Each binding comes out once (G11; proof in docs/book/theory.md). *)
 
 (* min and max of ints: Stdlib's are polymorphic, a call to the C comparison each time *)
 let[@inline] min (a : int) b = if a <= b then a else b

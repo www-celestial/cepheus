@@ -1,5 +1,5 @@
 (* Benchmarks of the server, the client's side: requests over the Unix socket or TCP to a running `cepheus serve`, on
-   a database made by `bench.exe load` (method and results: docs/benchmarks.md, the server's section). Each command
+   a database made by `bench.exe load` (method and results: docs/book/benchmarks.md, the server's section). Each command
    prints one number a run: microseconds a request, or groups a second.
 
      sbench.exe ping ADDR N                  N empty round trips (Ping), one in flight

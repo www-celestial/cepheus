@@ -1,4 +1,4 @@
-(* The follow stream of one database: what its local readers receive (docs/server.md, "Local reads").
+(* The follow stream of one database: what its local readers receive (docs/book/server.md, "Local reads").
 
    A local reader is a program on the server's machine that reads the database in its own memory: the server passes
    it the run files and sends it every frame the writer makes, which it applies as the server did (Follower). What a

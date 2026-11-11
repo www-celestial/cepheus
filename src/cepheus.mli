@@ -11,7 +11,7 @@
       ...
     ]}
 
-    The guarantees and their proofs: [docs/guarantees.md]. *)
+    The guarantees and their proofs: [docs/book/guarantees.md]. *)
 
 (** {1 Values and errors} *)
 
@@ -104,7 +104,7 @@ val describe : view -> int -> prop option
     A rule derives facts from facts: for every answer of its body (a question's patterns and ranges), the fact of its
     head, or, for [Never], a refusal of the group. The writer keeps the derived facts up to date at each group, as
     facts like any other (G17): questions read them at the speed of any fact. A rule is a schema thing, defined and
-    versioned in the journal like a property; [docs/rules.md] tells the whole of it. *)
+    versioned in the journal like a property; [docs/book/rules.md] tells the whole of it. *)
 
 type term = Query.term = Var of int | Thing of int | Val of value
 type pattern = Query.pattern = { e : term; p : int; v : term }

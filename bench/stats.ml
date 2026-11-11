@@ -1,4 +1,4 @@
-(* Statistics of the benchmarks; method in docs/benchmarks.md.
+(* Statistics of the benchmarks; method in docs/book/benchmarks.md.
 
    A time is the median of n runs, with a 95 % confidence interval that assumes nothing about the distribution of the
    runs (times are skewed and often bimodal, so no mean and no normal interval): the interval between the j-th

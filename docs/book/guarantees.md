@@ -211,7 +211,7 @@ Herrmann 1993).
 *Several runs read as one state.* A fact is in a view iff the newest entry for it (the delta's, or the newest run's
 that has one) adds it; a count is the sum of each run's rows minus its retractions, plus the delta's net count (the
 runs are net, so nothing is counted twice); an iteration shows a row of a run only if no newer run has an entry for the
-same fact (docs/theory.md, section 9). *Tested by* `test/unit.ml` ("several runs": 120 random views of up to 4 runs that
+same fact (docs/book/theory.md, section 9). *Tested by* `test/unit.ml` ("several runs": 120 random views of up to 4 runs that
 add and retract, against their full merge and a naive evaluator; "large groups").
 
 *Tested by* the simulation (merges at random moments, crashes inside their writing, flips in run files) and

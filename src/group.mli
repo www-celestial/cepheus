@@ -52,7 +52,7 @@ type source = {
 val encode_source : Buffer.t -> n:int -> time:int -> by:int -> why:string -> first_new:int -> count_new:int -> source -> unit
 
 val encode : Buffer.t -> t -> unit
-(** The journal's coding of a group (format 2, docs/formats.md): its header, its texts once each, then its changes
+(** The journal's coding of a group (format 2, docs/book/formats.md): its header, its texts once each, then its changes
     in columns, in their order. *)
 
 val decode : Codec.reader -> t

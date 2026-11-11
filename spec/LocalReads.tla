@@ -1,5 +1,5 @@
 ----------------------------- MODULE LocalReads -----------------------------
-(* Reads in a program's own memory on the server's machine (docs/server.md, "Local reads"), and the rules that were
+(* Reads in a program's own memory on the server's machine (docs/book/server.md, "Local reads"), and the rules that were
    considered for them. The server writes groups one frame at a time; it sends each frame to every local reader as
    soon as the frame is written, and the frame becomes durable at its fsync. Readers apply frames in their own
    process; programs read there, and remote programs read at the server. A read is an interval: it starts, it takes a
