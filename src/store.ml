@@ -71,6 +71,10 @@ type run = {
   s0 : int;  (* the id of its first text *)
 }
 
+(* min and max of ints: Stdlib's are polymorphic, a call to the C comparison each time *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 let al x = (x + 7) land lnot 7
 let blocks ne = (ne + 31) lsr 5
 
@@ -501,15 +505,6 @@ let[@inline] ccthing b p e =
     let d = e - ce b p 0 in
     if d < 0 || d lsr 5 >= ce b p 2 - 1 then -1 else rank (ci64 b (ra + ((d lsr 5) lsl 3))) d
 
-(* the first row of the q-th thing of p (q = things: the rows of p) *)
-let[@inline] crow b p q =
-  let q0 = ce b p 3 in
-  if q <= q0 then q else q0 + mono b (ce b p 6) (ce b p 7) (q - q0)
-
-let[@inline] ccrow b p q =
-  let q0 = ce b p 3 in
-  if q <= q0 then q else q0 + cmono b (ce b p 6) (ce b p 7) (q - q0)
-
 (* the value of row r of p, of thing e *)
 let[@inline] cval b p e r =
   let d = ce b p 4 + ((r lsr 7) lsl 4) in
@@ -537,18 +532,87 @@ let[@inline] cflag b p r =
 
 let[@inline] has_col b p = p >= 0 && p < b.np && b.n > 0
 
+(* the rows of the q-th thing of p: its first, and in cell.(0) its end; the two offsets of one Mono block read with
+   one header *)
+let[@inline] crows b p q (cell : int array) =
+  let q0 = ce b p 3 in
+  if q < q0 then (Array.unsafe_set cell 0 (q + 1); q)
+  else begin
+    let i = q - q0 and mh = ce b p 6 and mb = ce b p 7 in
+    if (i + 1) land 127 = 0 then (Array.unsafe_set cell 0 (q0 + mono b mh mb (i + 1)); q0 + mono b mh mb i)
+    else begin
+      let h = mh + ((i lsr 7) lsl 4) in
+      let x = i64 b (h + 8) in
+      let w = x land 0xFF and base = i64 b h and at = mb + (x lsr 8) in
+      let k = (i land 127) * w in
+      Array.unsafe_set cell 0 (q0 + base + field b at (k + w) w);
+      q0 + base + field b at k w
+    end
+  end
+
+let[@inline] ccrows b p q (cell : int array) =
+  let q0 = ce b p 3 in
+  if q < q0 then (Array.unsafe_set cell 0 (q + 1); q)
+  else begin
+    let i = q - q0 and mh = ce b p 6 and mb = ce b p 7 in
+    if (i + 1) land 127 = 0 then (Array.unsafe_set cell 0 (q0 + cmono b mh mb (i + 1)); q0 + cmono b mh mb i)
+    else begin
+      let h = mh + ((i lsr 7) lsl 4) in
+      let x = ci64 b (h + 8) in
+      let w = x land 0xFF and base = ci64 b h and at = mb + (x lsr 8) in
+      let k = (i land 127) * w in
+      Array.unsafe_set cell 0 (q0 + base + cfield b at (k + w) w);
+      q0 + base + cfield b at k w
+    end
+  end
+
+(* rows lo .. hi-1 of p, of thing e: a block's directory entry read once for its rows *)
+let cloop b p e lo hi fn =
+  let r = ref lo in
+  while !r < hi do
+    let j = !r lsr 7 in
+    let d = ce b p 4 + (j lsl 4) in
+    let h = ci64 b d in
+    let base = ci64 b (d + 8) + (if (h lsr 9) land 1 = 0 then 0 else e) in
+    let wv = h land 0xFF and fl = (h lsr 8) land 1 and at = ce b p 5 + (h lsr 16) in
+    let stop = min hi ((j + 1) lsl 7) in
+    for r' = !r to stop - 1 do fn (base + cfield b at (((r' land 127) * wv) + fl) (wv - fl)) done;
+    r := stop
+  done
+
 let base_iter_ea b e p fn =
   if has_col b p then begin
     let q = ccthing b p e in
     if q >= 0 then begin
-      let lo = ccrow b p q and hi = ccrow b p (q + 1) in
-      for r = lo to hi - 1 do fn (ccval b p e r) done
+      let cell = [| 0 |] in
+      let lo = ccrows b p q cell in
+      cloop b p e lo cell.(0) fn
     end
   end
 
+(* the rows of (e, p): their count, their first in cell.(1) *)
+let range_ea b e p (cell : int array) =
+  let q = cthing b p e in
+  if q < 0 then 0 else (let lo = crows b p q cell in Array.unsafe_set cell 1 lo; Array.unsafe_get cell 0 - lo)
+
+let rec base_range_ea b e p cell =
+  if not (has_col b p) then 0 else match range_ea b e p cell with r -> ended r | exception Miss k -> fault b k; base_range_ea b e p cell
+
 let count_ea b e p =
   let q = cthing b p e in
-  if q < 0 then 0 else crow b p (q + 1) - crow b p q
+  if q < 0 then 0
+  else if q < ce b p 3 then 1
+  else begin
+    let i = q - ce b p 3 and mh = ce b p 6 and mb = ce b p 7 in
+    if (i + 1) land 127 = 0 then mono b mh mb (i + 1) - mono b mh mb i
+    else begin
+      let h = mh + ((i lsr 7) lsl 4) in
+      let x = i64 b (h + 8) in
+      let w = x land 0xFF and at = mb + (x lsr 8) in
+      let k = (i land 127) * w in
+      field b at (k + w) w - field b at k w
+    end
+  end
 
 let rec base_count_ea b e p =
   if not (has_col b p) then 0 else match count_ea b e p with r -> ended r | exception Miss k -> fault b k; base_count_ea b e p
@@ -559,8 +623,10 @@ let state_e b e p w =
   let q = cthing b p e in
   if q < 0 then 0
   else begin
-    let stop = crow b p (q + 1) in
-    let lo = ref (crow b p q) and hi = ref stop in
+    let cell = [| 0 |] in
+    let lo = ref (crows b p q cell) in
+    let stop = cell.(0) in
+    let hi = ref stop in
     while !hi - !lo > 8 do
       let mid = (!lo + !hi) lsr 1 in
       if cval b p e mid < w then lo := mid + 1 else hi := mid
@@ -598,8 +664,8 @@ let value1 b e p (cell : int array) =
   let q = cthing b p e in
   if q < 0 then 0
   else begin
-    let lo = crow b p q in
-    match crow b p (q + 1) - lo with
+    let lo = crows b p q cell in
+    match Array.unsafe_get cell 0 - lo with
     | 1 -> Array.unsafe_set cell 0 (cval b p e lo); 1
     | 0 -> 0
     | _ -> 2
@@ -756,6 +822,50 @@ let count_av b p w =
 let rec base_count_av b p w =
   if b.n = 0 then 0 else match count_av b p w with r -> ended r | exception Miss k -> fault b k; base_count_av b p w
 
+(* the rows of (p, w): their count, their first in cell.(1) (one rank and one Mono header with a value index) *)
+let range_av b p w (cell : int array) =
+  let p0 = poff b p in
+  Array.unsafe_set cell 1 p0;
+  if p < 0 || p >= b.np then 0
+  else begin
+    let x = b.o_pidx + (32 * p) in
+    let w0 = i64 b (x + 8) in
+    if w0 >= 0 then begin
+      let vlo = i64 b x and words = i64 b (x + 16) in
+      let d = w - vlo in
+      if w < vlo || d < 0 || d lsr 5 >= words - 1 then 0
+      else
+        let word = i64 b (b.o_vrank + ((w0 + (d lsr 5)) lsl 3)) in
+        let i = d land 31 in
+        if (word lsr i) land 1 = 0 then 0
+        else begin
+          let q = (i64 b (x + 24) lsl 7) + (word lsr 32) + popcount (word land ((1 lsl i) - 1)) in
+          let m0, m1 =
+            if (q + 1) land 127 = 0 then mono b b.o_vmh b.o_vmb q, mono b b.o_vmh b.o_vmb (q + 1)
+            else begin
+              let h = b.o_vmh + ((q lsr 7) lsl 4) in
+              let y = i64 b (h + 8) in
+              let wd = y land 0xFF and base = i64 b h and at = b.o_vmb + (y lsr 8) in
+              let k = (q land 127) * wd in
+              base + field b at k wd, base + field b at (k + wd) wd
+            end
+          in
+          Array.unsafe_set cell 1 (p0 + m0);
+          m1 - m0
+        end
+    end
+    else begin
+      let lo = lower b p w in
+      let hi = if w = max_int then poff b (p + 1) else lower b p (w + 1) in
+      Array.unsafe_set cell 1 lo;
+      hi - lo
+    end
+  end
+
+let rec base_range_av b p w cell =
+  if b.n = 0 || p < 0 || p >= b.np then (Array.unsafe_set cell 1 0; 0)
+  else match range_av b p w cell with r -> ended r | exception Miss k -> fault b k; base_range_av b p w cell
+
 (* rows r0 .. r1-1 of p: f thing value derived, a block's bytes read once *)
 let scan b p r0 r1 fn =
   if r0 < r1 then begin
@@ -775,11 +885,20 @@ let scan b p r0 r1 fn =
         for k = k0 to k1 - 1 do fn (tl + Pack.get f (ta + (k * wt)) wt) (value k) (fl <> 0 && Pack.get f (va + (k * wv)) 1 = 1) done
       else begin
         (* things by gaps: a row's thing is the one before plus 1 plus its field when it has the same value, the
-           least plus its field otherwise; decoded from the block's first row *)
+           least plus its field otherwise; so a value's first row in the block needs no row before it, and the rows
+           are decoded from the first row of row k0's value (a binary search: the values are sorted) *)
+        let s =
+          if k0 = 0 then 0
+          else begin
+            let w0 = value k0 and lo = ref 0 and hi = ref k0 in
+            while !lo < !hi do let mid = (!lo + !hi) lsr 1 in if value mid < w0 then lo := mid + 1 else hi := mid done;
+            !lo
+          end
+        in
         let t = ref 0 and pw = ref 0 in
-        for k = 0 to k1 - 1 do
+        for k = s to k1 - 1 do
           let w = value k and x = Pack.get f (ta + (k * wt)) wt in
-          t := if k > 0 && w = !pw then !t + 1 + x else tl + x;
+          t := if k > s && w = !pw then !t + 1 + x else tl + x;
           pw := w;
           if k >= k0 then fn !t w (fl <> 0 && Pack.get f (va + (k * wv)) 1 = 1)
         done
@@ -1312,6 +1431,73 @@ let has_value v e p =
 (* the value of (e, p) when e has exactly one in a view of one run that has no change of e: 1 and the value in
    cell.(0); 0: none; 2: otherwise (several values, or several runs, or a delta: read them by [iter_values]) *)
 let value1 v e p cell = if Array.length v.runs = 1 && not (is_touched v e) then base_value1 v.runs.(0).a e p cell else 2
+
+(* A slice read straight into a buffer, for the leapfrog: in a view of one run with no change of e (or of p), the
+   rows of (e, p) or (p, w): their count, their first row in cell.(1); -1 otherwise (count and read them as any) *)
+let slice_values v e p cell = if Array.length v.runs = 1 && not (is_touched v e) then base_range_ea v.runs.(0).a e p cell else -1
+let slice_things v p w cell = if Array.length v.runs = 1 && not (IM.mem p v.delta.dav) then base_range_av v.runs.(0).a p w cell else -1
+
+(* rows lo .. lo+n-1 of a slice into buf.(0 .. n-1) *)
+let read_values v e p lo n (buf : int array) =
+  let b = v.runs.(0).a and hi = lo + n in
+  let r = ref lo in
+  while !r < hi do
+    let j = !r lsr 7 in
+    let d = ce b p 4 + (j lsl 4) in
+    let h = ci64 b d in
+    let base = ci64 b (d + 8) + (if (h lsr 9) land 1 = 0 then 0 else e) in
+    let wv = h land 0xFF and fl = (h lsr 8) land 1 and at = ce b p 5 + (h lsr 16) in
+    let stop = min hi ((j + 1) lsl 7) in
+    for r' = !r to stop - 1 do
+      Array.unsafe_set buf (r' - lo) (base + cfield b at (((r' land 127) * wv) + fl) (wv - fl))
+    done;
+    r := stop
+  done
+
+let read_things v p lo n (buf : int array) =
+  let b = v.runs.(0).a and r1 = lo + n in
+  if lo < r1 then begin
+    let p0 = cpoff b p in
+    let rows = cpoff b (p + 1) - p0 and j0 = ci64 b (b.o_pblk + (8 * p)) in
+    let r = ref lo in
+    while !r < r1 do
+      let j = j0 + ((!r - p0) lsr 7) and k0 = (!r - p0) land 127 in
+      let brows = min tb (rows - ((j - j0) lsl 7)) in
+      let k1 = min brows (k0 + (r1 - !r)) in
+      let d = b.o_vdir + (16 * j) in
+      let o0 = ci64 b d in
+      let bo = b.o_vdata + o0 and len = ci64 b (d + 16) - o0 in
+      let f0 = framec b bo and i0 = bo land Pages.mask in
+      let f = if i0 + len <= Pages.size then f0 else cassemble b bo len and i = if i0 + len <= Pages.size then i0 else 0 in
+      let wv = g8 f i and wt = g8 f (i + 2) and tl = g32 f (i + 4) in
+      let ta = (i + 8 + pbytes brows wv) lsl 3 in
+      let out = !r - lo - k0 in
+      if g8 f (i + 3) = 0 then
+        for k = k0 to k1 - 1 do Array.unsafe_set buf (out + k) (tl + Pack.get f (ta + (k * wt)) wt) done
+      else begin
+        (* things by gaps (as [scan]): the rows of one value, from its first row in the block, which a slice of
+           (p, w) starts at or continues from the block's first row *)
+        let fl = g8 f (i + 1) and va = (i + 8) lsl 3 in
+        let value k = if fl = 0 then Pack.get f (va + (k * wv)) wv else Pack.get f (va + (k * wv) + 1) (wv - 1) in
+        let s =
+          if k0 = 0 then 0
+          else begin
+            let w0 = value k0 and lo = ref 0 and hi = ref k0 in
+            while !lo < !hi do let mid = (!lo + !hi) lsr 1 in if value mid < w0 then lo := mid + 1 else hi := mid done;
+            !lo
+          end
+        in
+        let t = ref 0 and pw = ref 0 in
+        for k = s to k1 - 1 do
+          let w = value k and x = Pack.get f (ta + (k * wt)) wt in
+          t := if k > s && w = !pw then !t + 1 + x else tl + x;
+          pw := w;
+          if k >= k0 then Array.unsafe_set buf (out + k) !t
+        done
+      end;
+      r := !r + (k1 - k0)
+    done
+  end
 
 (* the things that hold p, each once: in thing order from the column of a view of one run with no change of p;
    otherwise as the facts come, seen once through a table *)

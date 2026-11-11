@@ -5,6 +5,10 @@
    the AGM bound of the question (Atserias, Grohe, Marx 2008) up to the cost of a lookup; on a chain of patterns it
    is the plain nested index lookup. Each binding comes out once (G11; proof in docs/theory.md). *)
 
+(* min and max of ints: Stdlib's are polymorphic, a call to the C comparison each time *)
+let[@inline] min (a : int) b = if a <= b then a else b
+let[@inline] max (a : int) b = if a >= b then a else b
+
 type term = Var of int | Thing of int | Val of Value.t
 
 type pattern = { e : term; p : int; v : term }
@@ -284,11 +288,41 @@ let fold (v : Store.view) q ~init ~step ~merge =
       in
       (* level i: the smallest source, and its size; each pattern's count kept for the leapfrog *)
       let counts = Array.map (fun ps -> Array.make (Array.length ps) 0) by_var in
+      (* a slice's count, kept for the known side it was counted for (Q5's "who follows a", the same for each b) *)
+      let ckeys = Array.map (fun ps -> Array.make (Array.length ps) 0) by_var
+      and cvals = Array.map (fun ps -> Array.make (Array.length ps) (-1)) by_var
+      and clos = Array.map (fun ps -> Array.make (Array.length ps) (-1)) by_var
+      and cell2 = [| 0; 0 |] in
+      (* a slice's exact count, and where its rows start when they can be read straight (Store.slice_values) *)
+      let slice_count x pt =
+        let xi = x in
+        ignore xi;
+        if has x pt.pe then begin
+          match get pt.pv with
+          | Some w -> let c = Store.slice_things v pt.pp w cell2 in if c >= 0 then (cell2.(1), 2 * c) else (-1, count x pt)
+          | None -> -1, count x pt
+        end
+        else if pt.many then begin
+          match get pt.pe with
+          | Some e -> let c = Store.slice_values v e pt.pp cell2 in if c >= 0 then (cell2.(1), 2 * c) else (-1, count x pt)
+          | None -> -1, count x pt
+        end
+        else -1, count x pt
+      in
       let choose i =
-        let ps = by_var.(ord.(i)) and fx = fixed.(i) and cs = counts.(ord.(i)) in
+        let x = ord.(i) in
+        let ps = by_var.(x) and fx = fixed.(i) and cs = counts.(x) and sl = slice.(i) in
         let best = ref (-1) and bc = ref max_int in
         for j = 0 to Array.length ps - 1 do
-          let c = if fx.(j) >= 0 then fx.(j) else count ord.(i) ps.(j) in
+          let c =
+            if fx.(j) >= 0 then fx.(j)
+            else if sl.(j) then begin
+              let key = match other x ps.(j) with W w -> w | V y -> env.(y) in
+              if cvals.(x).(j) >= 0 && ckeys.(x).(j) = key then cvals.(x).(j)
+              else (let lo, c = slice_count x ps.(j) in cvals.(x).(j) <- c; ckeys.(x).(j) <- key; clos.(x).(j) <- lo; c)
+            end
+            else count x ps.(j)
+          in
           cs.(j) <- c;
           if c < !bc then (bc := c; best := j)
         done;
@@ -333,6 +367,15 @@ let fold (v : Store.view) q ~init ~step ~merge =
         let xi = ord.(i) in
         if lens.(xi).(j) < 0 || keys.(xi).(j) <> key then begin
           let b = bufs.(xi).(j) and m = ref 0 and sorted = ref true in
+          if clos.(xi).(j) >= 0 && ckeys.(xi).(j) = key && cvals.(xi).(j) >= 0 then begin
+            (* its rows, straight from the run: sorted *)
+            let n = cvals.(xi).(j) / 2 in
+            if Array.length !b < n then b := Array.make (max 16 (2 * n)) 0;
+            if has x pt.pe then Store.read_things v pt.pp clos.(xi).(j) n !b
+            else Store.read_values v (match pt.pe with W e -> e | V y -> env.(y)) pt.pp clos.(xi).(j) n !b;
+            m := n
+          end
+          else
           iterate x pt (fun c ->
               if !m = Array.length !b then (let nb = Array.make (max 16 (2 * !m)) 0 in Array.blit !b 0 nb 0 !m; b := nb);
               if !m > 0 && Array.unsafe_get !b (!m - 1) >= c then sorted := false;
@@ -396,7 +439,23 @@ let fold (v : Store.view) q ~init ~step ~merge =
             pos.(q) <- 0;
             if lens.(xi).(parts.(q)) = 0 then empty := true
           done;
-          if not !empty then begin
+          if not !empty && k = 2 then begin
+            (* two slices: leapfrogging is a merge whose steps gallop *)
+            let a = !(bufs.(xi).(parts.(0))) and na = lens.(xi).(parts.(0))
+            and b = !(bufs.(xi).(parts.(1))) and nb = lens.(xi).(parts.(1)) in
+            let ia = ref 0 and jb = ref 0 in
+            while !ia < na && !jb < nb do
+              let u = Array.unsafe_get a !ia and t = Array.unsafe_get b !jb in
+              if u = t then begin
+                if in_range x u && others i src lf u then (env.(x) <- u; level (i + 1) acc);
+                incr ia;
+                incr jb
+              end
+              else if u < t then ia := (if !ia + 1 < na && Array.unsafe_get a (!ia + 1) >= t then !ia + 1 else gallop a na (!ia + 1) t)
+              else jb := (if !jb + 1 < nb && Array.unsafe_get b (!jb + 1) >= u then !jb + 1 else gallop b nb (!jb + 1) u)
+            done
+          end
+          else if not !empty then begin
             let key q = Array.unsafe_get !(bufs.(xi).(parts.(q))) pos.(q) in
             (* the iterators in the order of their first keys (insertion sort: a few) *)
             for a = 1 to k - 1 do
@@ -415,12 +474,12 @@ let fold (v : Store.view) q ~init ~step ~merge =
                 if in_range x xk && others i src lf xk then (env.(x) <- xk; level (i + 1) acc);
                 pos.(!p) <- pos.(!p) + 1;
                 if pos.(!p) >= lens.(xi).(parts.(!p)) then stop := true
-                else (hi := key !p; p := (!p + 1) mod k)
+                else (hi := key !p; p := if !p + 1 = k then 0 else !p + 1)
               end
               else begin
                 let a = !(bufs.(xi).(parts.(!p))) and len = lens.(xi).(parts.(!p)) in
                 pos.(!p) <- gallop a len pos.(!p) !hi;
-                if pos.(!p) >= len then stop := true else (hi := key !p; p := (!p + 1) mod k)
+                if pos.(!p) >= len then stop := true else (hi := key !p; p := if !p + 1 = k then 0 else !p + 1)
               end
             done
           end
