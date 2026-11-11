@@ -105,7 +105,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   par page et une aiguille qui tourne (Corbató 1968).
 - **closed loop**, **open loop** — une charge où chaque client attend sa dernière écriture avant la suivante, contre
   une charge où les écritures sont dues à un rythme fixe quoi qu'il arrive ; seule l'open loop mesure la latence
-  pendant les blocages. [benchmarks](benchmarks.md#la-méthode)
+  pendant les blocages. [benchmarks](benchmarks.md#méthode)
 - **cluster** — les serveurs qui tiennent les mêmes bases ; une machine seule est un cluster d'un seul peer (un
   membre). Son id (`cph-c-` et 16 chiffres hexadécimaux) est dans `cluster.toml` et dans chaque Welcome.
   [serveur](server.md#clustertoml)
@@ -135,7 +135,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   (G18). [règles](rules.md#les-contraintes--never)
 - **coordinated omission** — l'erreur d'une mesure en closed loop : un client bloqué par une écriture lente n'envoie
   rien pendant ce temps, donc les écritures qui auraient attendu ne sont jamais comptées (Tene 2015).
-  [benchmarks](benchmarks.md#la-méthode)
+  [benchmarks](benchmarks.md#méthode)
 - **counterexample** (un contre-exemple) — une suite de pas qui mène d'un état initial à un état où un invariant est
   faux ; ce qu'affiche un model checker. [cas](case-seats.md#un-modèle-formel-vérifié-par-une-machine)
 - **counting** (view maintenance) — garder pour chaque fait dérivé le nombre de ses dérivations, et le supprimer à zéro

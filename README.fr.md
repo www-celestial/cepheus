@@ -116,7 +116,7 @@ format 8 (2026-11-11 : les lignes de chaque propriété aussi à part, dans l'or
 intersectées par leapfrog, des sauts de liste en liste) Cepheus gagne les cinq sur un cœur : 0,39 µs contre 0,69,
 0,64 µs contre 1,42, 2,87 ms contre 4,18, 130 ms contre 369 et les triangles en 256 ms contre 1,05 s, et avec une
 limite de 48 MB les triangles en 260 ms
-([benchmarks](docs/fr/book/benchmarks.md#lordre-par-colonne-et-les-intersections-en-leapfrog-2026-11-11-à-10-millions-de-faits)) ;
+([benchmarks](docs/fr/book/benchmarks.md#le-column-order-et-les-intersections-en-leapfrog-2026-11-11-à-10-millions-de-faits)) ;
 à une transaction par client, le group commit de Cepheus (plusieurs groupes confirmés par un seul fsync) charge 1 M de
 faits de 13 à 16 fois plus vite (13,2 s contre 174,0 s ; 10,6 contre 166,7 dans une série antérieure). Où chacun gagne,
 et pourquoi, et comment Cepheus se compare par sa conception à Oracle, Datomic, RocksDB, Neo4j, FoundationDB et

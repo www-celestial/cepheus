@@ -192,7 +192,7 @@ sont ceux du disque.
 | `tools/tlc.sh` | vérifie par model checking `spec/Journal.tla`, `spec/Merge.tla` et `spec/Seats.tla` avec TLC, et vérifie que la vente naïve brise un invariant ; `TLA2TOOLS` nomme `tla2tools.jar` | [tester](testing.md#model-checking) |
 | `cepheus` (`bin/main.exe`) | le serveur et ses commandes : `serve`, `stop`, `status`, `token add/list/remove`, `cluster init/cert` | [serveur](server.md#les-commandes) |
 | `sbench.exe` | les benchmarks du serveur : `ping`, `get`, `clients`, `write`, `q`, `hs`, `check` | [serveur](server.md#la-vitesse-à-côté-de-postgresql) |
-| `bench.exe` | les benchmarks : `load`, `read`, `write`, `merge`, `fsync`, `trace`, `cachesim`, `stats`, `cpu` | [benchmarks](benchmarks.md#les-commandes) |
-| `bench/pg/pg.sh` | le côté de PostgreSQL : `init`, `start`, `load`, `read`, `write`, `stop` | [benchmarks](benchmarks.md#les-commandes) |
-| `bench/sqlite/sqlite.sh` | le côté de SQLite : `load`, `read` | [benchmarks](benchmarks.md#les-commandes) |
+| `bench.exe` | les benchmarks : `load`, `read`, `write`, `merge`, `fsync`, `trace`, `cachesim`, `stats`, `cpu` | [benchmarks](benchmarks.md#commandes) |
+| `bench/pg/pg.sh` | le côté de PostgreSQL : `init`, `start`, `load`, `read`, `write`, `stop` | [benchmarks](benchmarks.md#commandes) |
+| `bench/sqlite/sqlite.sh` | le côté de SQLite : `load`, `read` | [benchmarks](benchmarks.md#commandes) |
 | `bench/sqlite/seats.py`, `bench/pg/pg.sh seats` | les côtés de SQLite et de PostgreSQL de la vente de places | [cas](case-seats.md#la-vitesse-à-côté-des-géants) |
