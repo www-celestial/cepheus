@@ -37,7 +37,7 @@ nouveau, et comment saurez-vous que vous avez réussi ([Heilmeier]). Ici :
 Le modèle de données, en faits de Cepheus (chose, propriété, valeur) : une place est une chose avec un `seat/number` ;
 son propriétaire est une propriété à une seule valeur, `seat/owner` (le numéro de l'acheteur) ; un débit est une chose
 avec `charge/seat` (un lien vers la place) et `charge/buyer`. Une vente est un seul groupe (une transaction,
-[concepts](concepts.md#groupes-une-écriture-est-une-transaction)) : le propriétaire de la place et le débit ensemble,
+[concepts](concepts.md#les-groupes--une-écriture-est-une-transaction)) : le propriétaire de la place et le débit ensemble,
 tout ou rien (G2) ; la propriété 2 ne peut donc pas casser par une moitié de vente.
 
 ## 2. Mesurer avant de rien changer
@@ -79,7 +79,7 @@ du moteur*. L'expérience qui pourrait la réfuter : rendre le cas qui échoue a
 delta debugging pour une entrée qui fait échouer un programme ([Zeller 2002]), en retirant acheteurs, places, threads
 et disque tant que l'échec reste. Si l'hypothèse était fausse, l'échec disparaîtrait avec le disque ou les threads. Ce
 qui reste, c'est deux acheteurs, une place, une vue, aucun thread et aucun disque (un fork, un état temporaire où l'on
-écrit sans rien écrire sur le disque, [concepts](concepts.md#forks)), et cela échoue encore :
+écrit sans rien écrire sur le disque, [concepts](concepts.md#les-forks)), et cela échoue encore :
 
 ```ocaml
 open Cepheus
@@ -122,14 +122,14 @@ second `Add` de la propriété à une seule valeur a remplacé le premier propri
 Son cousin est le **write skew** (le A5B de Berenson) : deux transactions lisent les mêmes éléments et chacune en écrit
 un différent, cassant ensemble une règle que chacune respectait seule (deux médecins qui quittent chacun leur garde
 parce que l'autre est de garde,
-[concepts](concepts.md#isolation-exactement-ce-que-voient-un-lecteur-et-un-writer)). Une règle sur plusieurs places,
+[concepts](concepts.md#lisolation--exactement-ce-que-voient-un-lecteur-et-un-writer)). Une règle sur plusieurs places,
 comme quatre places au plus par acheteur, serait cassée par le write skew ; la section 7 y revient.
 
 La cause, précisément : chaque groupe est appliqué seul et dans l'ordre (G4), mais la lecture de l'acheteur a eu lieu
 hors du groupe, dans une vue prise plus tôt. Rien n'a dit au writer (le seul thread qui applique les groupes, un à la
 fois) ce que l'acheteur avait lu ; rien ne l'a donc vérifié.
 
-## 4. La recherche, ce qui résout ce genre de problème
+## 4. La recherche : ce qui résout ce genre de problème
 
 - **Serializability** (Papadimitriou, [Papadimitriou 1979]) : un ensemble de transactions exécutées en même temps est
   correct si son résultat est égal au résultat de leur exécution une à une dans un certain ordre. Un read-then-write
@@ -453,7 +453,7 @@ changement innocent de l'installation peut changer un résultat mesuré, [Mytkow
 - L'`Expect` protège ce qu'il nomme : le propriétaire de la place. Une règle sur un ensemble (pas plus de quatre places
   par acheteur) demande un fait que chaque vente de l'acheteur attend et change, comme un compte des places de
   l'acheteur : la technique « materialize the conflict » (matérialiser le conflit, [Fekete 2005],
-  [concepts](concepts.md#isolation-exactement-ce-que-voient-un-lecteur-et-un-writer)).
+  [concepts](concepts.md#lisolation--exactement-ce-que-voient-un-lecteur-et-un-writer)).
 - Un acheteur en conflit lit une nouvelle vue et réessaie : sous une forte concurrence pour quelques places, beaucoup
   d'essais sont perdus (2 211 conflits pour 2 000 ventes ci-dessus). Une place tenue une minute pendant que l'acheteur
   paie (une réservation avec une expiration) est la réponse habituelle ; c'est un autre groupe, avec son propre

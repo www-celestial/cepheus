@@ -22,7 +22,7 @@ a merge domain: the delta and the newest runs, merged in order ─► DIR/snapsh
                 one run, at the first level that holds them all; the runs it replaced are removed
 ```
 
-## Le journal, un write-ahead log
+## Le journal : un write-ahead log
 
 Un **write-ahead log** (WAL) est un fichier où chaque changement est écrit, et rendu durable, avant de compter : après
 un crash, la base le rejoue et ne perd rien de ce qui a été confirmé. Le log de Cepheus est le **journal** : un par
@@ -71,7 +71,7 @@ seconde, jusqu'à ce que le writer peut résoudre ([théorie](theory.md#2-group-
 seconde pour 1 client, 7 147 pour 64, 14 141 à 17 192 pour 256 (le disque est la limite ; les insertions de PostgreSQL
 sont au même niveau).
 
-## Recovery, torn writes et dommages
+## La recovery : torn writes et dommages
 
 La **recovery** est ce que fait une ouverture après un crash : elle rebâtit l'état à partir des runs sur disque et du
 journal après le plus récent d'entre eux. Elle lit les frames dans l'ordre et vérifie les CRC de chacune ; tout ce qui
@@ -122,7 +122,7 @@ une ouverture tient la fenêtre et la plus grande frame qu'elle doit rejouer, qu
 base que laisse un chargement de 10 M (son segment le plus récent fait 94 MB) s'ouvre en 165 à 207 ms avec 54 à 56 MB
 résidents, sous une limite de 128 MB.
 
-## Index, les runs et le delta
+## Les index : les runs et le delta
 
 Une vue, c'est deux choses :
 
@@ -194,7 +194,7 @@ jamais un fait. Les runs des formats plus anciens (format 4, `<group>.snap`, tou
 et 6, des mots fixes de 8 octets) sont mis de côté à la première ouverture et le journal est rejoué une fois
 ([formats](formats.md)).
 
-## Merges, un log-structured merge-tree à leveling
+## Les merges : un log-structured merge-tree à leveling
 
 Un **log-structured merge-tree** (LSM-tree, O'Neil et al. 1996) garde les écritures récentes dans une petite structure
 en mémoire et les déplace en bloc dans de grandes structures triées sur disque, en fusionnant des runs triés au lieu
@@ -360,7 +360,7 @@ prend 231 ms sur un domain et 107 ms sur trois (PostgreSQL 236 ms sur un process
 
 ## Questions
 
-Une question est une requête conjonctive : des patterns joints sur leurs variables ([concepts](concepts.md#questions)).
+Une question est une requête conjonctive : des patterns joints sur leurs variables ([concepts](concepts.md#les-questions)).
 La façon habituelle d'y répondre est un plan de **binary joins** (deux entrées à la fois, le résultat joint avec
 l'entrée suivante ; un join associe les lignes de ses entrées par leurs valeurs communes). Sur une question cyclique
 comme les triangles d'un graphe ($a$ suit $b$, $b$ suit $c$, $c$ suit $a$), un tel plan peut construire bien plus de lignes

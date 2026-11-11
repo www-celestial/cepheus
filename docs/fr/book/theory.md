@@ -530,7 +530,7 @@ algorithmes) :
   données en forme de LUBM, les petites retraites restent dans les microsecondes
   ([benchmarks](benchmarks.md#règles-2026-11-08)).
 
-## 11. Runs et journal compressés, le codage et sa borne
+## 11. Runs et journal compressés : le codage et sa borne
 
 **Frame of reference.** Un bloc de $n$ entiers $x_1, \dots, x_n$ est rangé comme sa plus petite valeur $b$ et, pour chacun, $x_i - b$ en
 $w = \lceil \log_2(\max - b + 1) \rceil$ bits, serrés l'un après l'autre (Goldstein, Ramakrishnan, Shaft [Goldstein 1998] pour des pages
