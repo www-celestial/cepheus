@@ -118,7 +118,7 @@ L'hypothèse résiste au test : deux acheteurs et une vue partagée suffisent, e
 que possède l'acheteur 2. Son nom dans la littérature est le **lost update** (la mise à jour perdue, [Berenson 1995],
 phénomène P4) : deux transactions lisent le même élément, et chacune écrit une valeur calculée d'après ce qu'elle a
 lu ; la seconde écriture remplace la première, qui est perdue. Ici, l'élément est le propriétaire de la place, et le
-second `Add` de la propriété à une seule valeur a remplacé le premier propriétaire (le journal enregistre la retraite).
+second `Add` de la propriété à une seule valeur a remplacé le premier propriétaire (le journal enregistre le retrait).
 Son cousin est le **write skew** (le A5B de Berenson) : deux transactions lisent les mêmes éléments et chacune en écrit
 un différent, cassant ensemble une règle que chacune respectait seule (deux médecins qui quittent chacun leur garde
 parce que l'autre est de garde,

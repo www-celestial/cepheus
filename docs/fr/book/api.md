@@ -103,7 +103,7 @@ applique les groupes, un à la fois) le prend ; les groupes sont appliqués un �
   `thing r (-k)` est le numéro qu'a reçu `-k` (`Not_found` si `-k` n'était pas dans le groupe) ; il parcourt la liste du
   reçu `r.things` ; pour un grand groupe, lisez donc la liste une fois dans une table.
 - **Propriétés à une seule valeur** : un `Add` retire les autres valeurs de la chose pour la propriété dans le même
-  groupe (le journal enregistre la retraite).
+  groupe (le journal enregistre le retrait).
 - **Opérations sans effet** : un `Add` d'un fait qui tient, ou un `Retract` d'un fait qui ne tient pas, n'enregistre
   rien ; un groupe d'opérations sans effet prend quand même un numéro.
 - **`Expect`** est vérifié contre l'état d'avant le groupe (quelle que soit sa place dans la liste), par le writer, sur

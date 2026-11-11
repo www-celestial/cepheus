@@ -45,7 +45,7 @@ générateur, et une seed donne toujours la même suite) : un échec affiche don
 | commande | ce qu'elle lance | options |
 |---|---|---|
 | `_build/default/test/unit.exe` | les tests unitaires et de propriété | `CEPHEUS_TMP` : où vont ses bases sur le vrai disque (le répertoire temporaire du système par défaut) |
-| `reasoning.exe` | les règles : des cas nommés, puis G17, G18 et G20 sur des suites aléatoires (des règles aléatoires définies, changées et retirées ; des additions et des retraites aléatoires) contre le least model calculé de zéro, seul et sur des runs fusionnés | `RULES_SEEDS` (60), `RULES_SEED` (une seule seed, affichée groupe par groupe) |
+| `reasoning.exe` | les règles : des cas nommés, puis G17, G18 et G20 sur des suites aléatoires (des règles aléatoires définies, changées et retirées ; des additions et des retraits aléatoires) contre le least model calculé de zéro, seul et sur des runs fusionnés | `RULES_SEEDS` (60), `RULES_SEED` (une seule seed, affichée groupe par groupe) |
 | `exhaustive.exe` | chaque état de crash de petits journaux et à l'intérieur des merges | aucune |
 | `sim.exe` | la simulation déterministe | `--seeds N` (les seeds 1 à N ; 100 par défaut), `--seed S` (une seule seed), `--steps N` (étapes par seed, 150) |
 | `crash.exe DIR ROUNDS [SEED]` | de vrais tours de `kill -9` sur une base dans DIR | SEED 42 par défaut |

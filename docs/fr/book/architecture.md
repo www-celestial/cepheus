@@ -28,7 +28,7 @@ Un **write-ahead log** (WAL) est un fichier où chaque changement est écrit, et
 un crash, la base le rejoue et ne perd rien de ce qui a été confirmé. Le log de Cepheus est le **journal** : un par
 base, en fichiers de **segment** d'au plus 64 MiB (`DIR/journal/<first group>.seg`), auxquels on ne fait jamais
 qu'ajouter. C'est un redo log (un log qu'on rejoue vers l'avant) de changements résolus : chaque groupe est écrit une
-fois, déjà vérifié et résolu (un `Add` qui a remplacé une valeur est écrit comme une retraite et une addition), et rien
+fois, déjà vérifié et résolu (un `Add` qui a remplacé une valeur est écrit comme un retrait et une addition), et rien
 n'est jamais défait ; la recovery (la relecture du journal à l'ouverture, qui rebâtit l'état après un crash) ne fait
 donc qu'appliquer les groupes dans l'ordre.
 
@@ -161,7 +161,7 @@ Une vue, c'est deux choses :
 Un fait est dans une vue quand son entrée la plus récente (celle du delta, ou celle du run le plus récent qui en a une)
 l'ajoute. Chaque run est **net** : il n'ajoute que des faits absents en dessous de lui et ne retire que des faits
 présents en dessous de lui ; un compte est donc une somme de comptes exacts (les additions de chaque run moins ses
-retraites, plus celles du delta). Une lecture cherche dans le delta et dans chaque run qui peut tenir la clé, par
+retraits, plus ceux du delta). Une lecture cherche dans le delta et dans chaque run qui peut tenir la clé, par
 recherche dichotomique, jamais par le parcours d'une liste ; une ligne d'un run plus ancien n'est montrée que si aucun
 run plus récent n'a d'entrée pour le même fait, ce à quoi les rank tables répondent par quelques tests de bits, sauf si
 un run plus récent tient la même chose. Comme le delta est persistant et que les runs ne changent jamais, une vue est
@@ -381,7 +381,7 @@ liens), les triangles prennent 1,03 s sur un domain et 371 ms sur trois (Postgre
 ## Règles
 
 Une règle dérive des faits à partir de faits (Datalog, un langage de règles logiques) ; le writer garde les faits
-dérivés dans la vue, comme des faits, à chaque groupe : après les changements affirmés du groupe, ses retraites sont
+dérivés dans la vue, comme des faits, à chaque groupe : après les changements affirmés du groupe, ses retraits sont
 tranchées par Backward/Forward et ses additions font tourner les règles par semi-naive evaluation (l'évaluation qui, à
 chaque tour, ne joint que les faits nouveaux du tour précédent), dans un working set (un ensemble de travail) de
 tableaux hors de la vue du collector ; les changements dérivés rejoignent la frame du groupe avec un octet de sorte

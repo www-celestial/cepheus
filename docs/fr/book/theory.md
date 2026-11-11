@@ -455,7 +455,7 @@ les comptes exacts restent en $O(R \log n)$. Un merge de sources (le delta, les 
 seule entrée la plus récente et sa seule entrée la plus ancienne : la plus récente dit s'il est dans le nouvel état, la
 plus ancienne s'il était dans l'état sous les runs fusionnés (une addition là veut dire qu'il n'y était pas) ; le
 nouveau run l'ajoute s'il y est et n'y était pas, le retire s'il n'y est pas et y était, et ne tient rien sinon. Un
-merge dans le niveau du fond ne tient aucune retraite.
+merge dans le niveau du fond ne tient aucun retrait.
 
 Une ligne d'un run plus ancien n'est montrée que si aucun run plus récent ne tient d'entrée pour le même fait. Chaque
 partie a une rank table par chose (le rank directory de Jacobson [Jacobson 1989] : par 32 numéros de chose, leurs bits
@@ -518,7 +518,7 @@ algorithmes) :
 - **L'insertion est complète** : une instance d'une règle sur l'état après le groupe, soit touche un fait que le groupe
   a rendu présent, et semi-naive la trouve au tour de ce fait, soit ne touche que des faits plus anciens, et le groupe
   d'avant l'a trouvée (récurrence sur les groupes ; une règle ajoutée est évaluée une fois sur tout l'état).
-- **La retraite enlève exactement les faits sans preuve** (Backward/Forward, [Motik 2015]) : un fait n'est gardé que si
+- **Le retrait enlève exactement les faits sans preuve** (Backward/Forward, [Motik 2015]) : un fait n'est gardé que si
   la vérification en arrière le prouve à partir de faits non réfutés ; un fait n'est réfuté qu'après sa vérification,
   qui explore chaque instance de chaque règle qui le donne. La vérification tourne sur l'état d'avant le départ des
   faits réfutés (un fait supprimé peut remplir plusieurs atomes d'une même instance), et les faits retirés par le groupe
@@ -527,7 +527,7 @@ algorithmes) :
 - **Aucun algorithme de maintenance n'est bon marché dans le pire cas** : une relation transitive matérialisée répond à
   l'accessibilité, et la fermeture transitive décrémentale n'a pas d'algorithme beaucoup meilleur que le recalcul, sous
   la conjecture OMv ([Henzinger 2015]) ; le pire cas de B/F est un recalcul des faits qu'il atteint. Mesurées sur des
-  données en forme de LUBM, les petites retraites restent dans les microsecondes
+  données en forme de LUBM, les petits retraits restent dans les microsecondes
   ([benchmarks](benchmarks.md#règles-2026-11-08)).
 
 ## 11. Runs et journal compressés : le codage et sa borne
