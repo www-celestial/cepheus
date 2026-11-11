@@ -7,8 +7,8 @@
      sbench.exe clients ADDR FACTS C N       C processes, a connection each, N reads each, one in flight: wall time a read
      sbench.exe write ADDR FACTS C SECS [W]  C connections (threads), durable writes of a new invoice (4 facts): groups/s,
                                              and the latencies; with W, while W watches of the written client's unpaid
-                                             invoices, each on a connection of its own read by a thread, get every
-                                             change (the writers' cost of the watches)
+                                             invoices, each on a connection of its own read by a thread of another
+                                             process, get every change (the writers' cost of the watches)
      sbench.exe q ADDR FACTS Q3|Q4 N         N runs of a question through Find: Q3 the unpaid invoices of a city (rows),
                                              Q4 the unpaid sum and count by city (aggregates in the server)
      sbench.exe check ADDR FACTS             invoices of the sample as `index client total status date` lines, to compare
@@ -184,29 +184,51 @@ let clients addr facts nconn n =
   Printf.printf "%.3f\n%!" (dt /. float (nproc * per * (n + min n 1000)) *. 1e6)
 
 let write addr facts nclients secs watchers =
+  (* the watches in a process of their own, made before any thread: their reading threads never hold the writers'
+     runtime lock; it says when they are ready, and how many changes they got once asked *)
+  let child =
+    if watchers = 0 then None
+    else begin
+      let ready_r, ready_w = Unix.pipe () and stop_r, stop_w = Unix.pipe () in
+      match Unix.fork () with
+      | 0 ->
+        Unix.close ready_r;
+        Unix.close stop_w;
+        let s = setup addr facts in
+        let pc = s.p "invoice/client" and pt = s.p "invoice/total" and ps = s.p "invoice/status" in
+        let q = { Query.vars = 2; where = [ { Query.e = Var 0; p = pc; v = Val (Link s.cids.(0)) }; { e = Var 0; p = ps; v = Val (Text "unpaid") }; { e = Var 0; p = pt; v = Var 1 } ]; ranges = [] } in
+        let changes = Atomic.make 0 in
+        for _ = 1 to watchers do
+          let c = connect addr in
+          let db = ok (Client.open_db ~local:false c "main") in
+          let id = Client.watch c db q in
+          let rec loop () =
+            match Client.next_push c id with
+            | Client.Pushed (Wire.Change _) -> Atomic.incr changes; loop ()
+            | Client.Pushed _ -> loop ()
+            | Client.Ended e -> prerr_endline ("watch ended: " ^ e.code)
+            | exception Client.Broken _ -> ()
+          in
+          ignore (Thread.create loop ())
+        done;
+        Unix.sleepf 0.5;
+        let c0 = Atomic.get changes in
+        ignore (Unix.write_substring ready_w "r" 0 1);
+        ignore (Unix.read stop_r (Bytes.create 1) 0 1);
+        let m = string_of_int (Atomic.get changes - c0) in
+        ignore (Unix.write_substring ready_w m 0 (String.length m));
+        Unix._exit 0
+      | pid ->
+        Unix.close ready_w;
+        Unix.close stop_r;
+        ignore (Unix.read ready_r (Bytes.create 1) 0 1);
+        Some (pid, ready_r, stop_w)
+    end
+  in
   let s = setup addr facts in
   let some_client = s.cids.(0) in
   let pc = s.p "invoice/client" and pt = s.p "invoice/total" and ps = s.p "invoice/status" and pd = s.p "invoice/date" in
   let stop = Atomic.make false in
-  let q = { Query.vars = 2; where = [ { Query.e = Var 0; p = pc; v = Val (Link some_client) }; { e = Var 0; p = ps; v = Val (Text "unpaid") }; { e = Var 0; p = pt; v = Var 1 } ]; ranges = [] } in
-  let changes = Atomic.make 0 in
-  (* the watches' connections are left to the process's end *)
-  let _watching =
-    List.init watchers (fun _ ->
-        let c = connect addr in
-        let db = ok (Client.open_db ~local:false c "main") in
-        let id = Client.watch c db q in
-        let rec loop () =
-          match Client.next_push c id with
-          | Client.Pushed (Wire.Change _) -> Atomic.incr changes; loop ()
-          | Client.Pushed _ -> loop ()
-          | Client.Ended e -> prerr_endline ("watch ended: " ^ e.code)
-          | exception Client.Broken _ -> ()
-        in
-        c, Thread.create loop ())
-  in
-  if watchers > 0 then Unix.sleepf 0.5;
-  let c0 = Atomic.get changes in
   let hist = Array.init nclients (fun _ -> Histogram.create ()) and cnt = Array.make nclients 0 in
   let worker k () =
     let c = connect addr in
@@ -232,7 +254,14 @@ let write addr facts nclients secs watchers =
   Array.iter (Histogram.merge_into h) hist;
   Printf.printf "%.1f groups/s p50 %.2f p99 %.2f ms%s\n%!" (float n /. dt) (float (Histogram.percentile h 0.5) /. 1e3)
     (float (Histogram.percentile h 0.99) /. 1e3)
-    (if watchers = 0 then "" else Printf.sprintf "; %d watches got %d changes" watchers (Atomic.get changes - c0))
+    (match child with
+     | None -> ""
+     | Some (pid, r, w) ->
+       ignore (Unix.write_substring w "s" 0 1);
+       let b = Bytes.create 32 in
+       let n = Unix.read r b 0 32 in
+       ignore (Unix.waitpid [] pid);
+       Printf.sprintf "; %d watches (another process) got %s changes" watchers (Bytes.sub_string b 0 n))
 
 let question addr facts which n =
   let s = setup addr facts in
