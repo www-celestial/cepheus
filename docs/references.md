@@ -359,7 +359,13 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — The shape of the benchmark's data (universities, departments, people, courses) and its ontology.
 - **[Budiu 2023]** M. Budiu, T. Chajed, F. McSherry, L. Ryzhyk, V. Tannen. DBSP: Automatic Incremental View
   Maintenance for Rich Query Languages. *PVLDB* 16(7), 1601–1614, 2023. https://doi.org/10.14778/3587136.3587137
-  — The delta rules of joins, planned for live questions (subscriptions) and the aggregates of rules.
+  — The delta rules of joins (a bilinear operator's change), which a live question's change is a case of; the
+  aggregates of rules, planned.
+- **[Gjengset 2018]** J. Gjengset, M. Schwarzkopf, J. Behrens, L. T. Araújo, M. Ek, E. Kohler, M. F. Kaashoek,
+  R. Morris. Noria: dynamic, partially-stateful data-flow for high-performance web applications. *OSDI* 2018,
+  213–231. https://www.usenix.org/conference/osdi18/presentation/gjengset
+  — Reads that differ by a parameter sharing one state: the templates of live questions, whose constants are
+  parameters.
 
 ## Replication and many machines (planned)
 
@@ -377,7 +383,9 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — Log, pages and compute separated: the plan for storage on object stores.
 - **[Ammar 2018]** K. Ammar, F. McSherry, S. Salihoglu, M. Joglekar. Distributed Evaluation of Subgraph Queries Using
   Worst-case Optimal Low-Memory Dataflows. *PVLDB* 11(6), 691–704, 2018. https://doi.org/10.14778/3184470.3184473
-  — BiGJoin: Generic Join over many machines, planned.
+  — BiGJoin: Generic Join over many machines, planned; and its delta queries, the change of a join for added or
+  removed facts, each new binding at the first pattern that matches an added fact: how a live question's change is
+  computed (G21).
 
 ## The server
 

@@ -134,6 +134,9 @@ the usual one, both are given.
   [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **delta debugging** — shrinking a failing case by removing parts while it still fails, until every part left is
   needed (Zeller and Hildebrandt 2002). [case](case-seats.md#3-a-hypothesis-one-can-prove-wrong-and-its-cause)
+- **delta query** — the change of a join's answer when facts are added or removed, computed from those facts alone: each
+  new binding found once, at the first pattern that matches an added fact (Ammar et al. 2018). [Cepheus from
+  Cesia](cesia.md#watch-live-questions)
 - **deltas** (delta coding) — numbers stored as their differences from the number before: a growing sequence (the
   things of a load: 0 and 1) takes a bit or two a number. The journal's columns take it block by block when it is
   shorter than the frame of reference. [formats](formats.md#a-group)
@@ -251,6 +254,8 @@ the usual one, both are given.
 - **kind** (Cesia client) — a sort of thing in a Cesia program: a name and fields, each a property of a type
   (`client/City` for the field `City` of the kind `client`); `Insert` and `Get` read and write a thing's fields of a
   kind as a map. [Cesia](cesia.md#kinds-and-the-values-they-hold)
+- **lagging** — the end of a watch whose program fell too far behind (8 MiB of pushes it has not taken, at the server):
+  the package watches again from its last group. [server](server.md#live-questions-watch)
 - **large group** — a group of 20,000 operations or more, all additions: it takes a faster path to the same result
   (its facts in Bigarrays, mapped and sorted by several domains, merged at once into a run while its frame is written
   beside, by pieces). [architecture](architecture.md#large-groups)
@@ -272,6 +277,9 @@ the usual one, both are given.
   into the next level when full. Leveling writes more and reads fewer runs. [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **linearizability** — each operation appears to take effect at one instant between its call and its return
   (Herlihy and Wing 1990); a group, as a write to one object, is linearizable.
+- **live question**, **watch** — a question kept answered: its answer, then the change of its rows at each durable group
+  that changes them (`cepheus.Watch`). [Cepheus from Cesia](cesia.md#watch-live-questions),
+  [G21](guarantees.md#g21-live-questions)
 - **local read** — a read a program makes in its own memory, on the server's machine, from the database it follows:
   no round trip, linearizable (G15). [server](server.md#local-reads-g15)
 - **loopback** — the network address of the machine itself (127.0.0.1, ::1): TCP that never leaves the machine.
@@ -373,6 +381,8 @@ the usual one, both are given.
   runs below it, in a file `DIR/snapshots/<lo>-<hi>.run`. [architecture](architecture.md#runs-on-disk)
 - **S3-FIFO** — the eviction policy of the cache: three FIFO queues (small, main, ghost), nothing moved on a hit (Yang
   et al. 2023). [architecture](architecture.md#pages-and-the-cache)
+- **same** — the server's answer to a watch resumed `from` a group when nothing the question reads changed since: the
+  program's rows are still right, and nothing is sent.
 - **schedule** — one order in which the steps of concurrent transactions interleave.
   [case](case-seats.md#correctness-on-generated-inputs)
 - **schema** — the properties and their types; in Cepheus, facts like the rest. [concepts](concepts.md#properties-and-the-schema)
@@ -425,6 +435,8 @@ the usual one, both are given.
   client checks the host it connected to against it. [server](server.md#tls)
 - **syncer** — the thread that writes and forces the frames, beside the writer.
 - **system property** — `cepheus/name`, `cepheus/type`, `cepheus/many`, `cepheus/unique` (1 to 4).
+- **template** — the questions that differ only by their constants (the unpaid invoices of each client), kept as one
+  with the constants as parameters: a fact's change is computed once and its rows routed by the parameters' values.
 - **thing** — the entity of a fact: a number, from 65,536 up. [concepts](concepts.md#facts-the-entityattributevalue-model)
 - **threat to validity** — a way the proof or the measure could be wrong, to be named and ruled out.
   [case](case-seats.md#threats-to-validity)

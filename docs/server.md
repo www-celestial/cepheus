@@ -251,6 +251,8 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
 | 8 Follow | handle (over the Unix socket only) | Start: the database's id, the visibility number, count, (lo, hi) of each run, newest first; the descriptors of `visible` and of each run ride on its first byte. The connection is then the database's follow stream ([local reads](#local-reads-g15)) |
+| 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
+| 12 Unwatch | the Watch's id | Unwatched |
 
 On a follow stream the server pushes (request id 0):
 
@@ -258,6 +260,7 @@ On a follow stream the server pushes (request id 0):
 |---|---|
 | 9 frame | number (0: part of the catch-up, not visible on its own), first group, count, then the groups as the journal codes them; a long one continues in frames of the flag `more` that carry bytes only |
 | 10 runs | number (the reader drops its states under smaller numbers), count, (lo, hi) of each run, newest first; their descriptors ride on its first byte |
+| 13 durable | number: the frames sent under this number and below are durable (the reader's live questions give their changes); a reader that does not know the kind skips it |
 
 - A **question** is data: variables, patterns (thing, property, value, each a variable, a thing or a value) and ranges,
   as `Cepheus.query` ([API](api.md)); no code crosses the wire, and every property is checked against the database's
@@ -292,7 +295,39 @@ On a follow stream the server pushes (request id 0):
 | Redis RESP2/RESP3 | "The first byte in an RESP-serialized payload always identifies its type"; CRLF-terminated parts, length-prefixed bulk strings | pipelining | in order | RESP3 push type | error type `-` | TCP; slow clients closed |
 | etcd | gRPC ("All etcd APIs are defined in gRPC services") | many calls | each call its own | Watch streams | gRPC status | gRPC's; requests at most 1.5 MiB by default |
 | FoundationDB | the client library is the protocol: programs call its C library (futures) | futures | per future | watches (10,000 a connection by default) | error codes | the library's |
-| Cepheus | length, id, kind, flags; the journal's coding of values | up to the limit Welcome states | **by id, out of order** | (subscriptions: step 5) | `{code, message}` values | TCP, and the server stops reading at the limit |
+| Cepheus | length, id, kind, flags; the journal's coding of values | up to the limit Welcome states | **by id, out of order** | `Watch`: a question's answer, then its exact changes, on the Watch's id | `{code, message}` values | TCP, and the server stops reading at the limit; a watch whose connection holds 8 MiB unsent ends `lagging` |
+
+### Live questions (Watch)
+
+A `Watch` keeps a question answered. Its pushes come on the Watch's id, kind 11, each a message:
+
+```
+answer = 0 | group | cols | count | rows                          the whole answer at group
+change = 1 | group | cols | added: count | rows | removed: count | rows
+same   = 2 | group                                                 nothing the question reads changed since from
+```
+
+- The first push is the answer at the newest durable group, or `same` when `from` is given, the server's ring of recent
+  changes (its last million facts' changes) covers every group after it, and none of them touches the question's
+  patterns (a property and its constants). Then a `change` for each durable group that changes the rows, in group
+  order. A long answer or change continues in frames of about 1 MiB with the flag `more`, each of the same form, its
+  rows added to the message's.
+- **Durable first.** A change is computed while its frame is forced (the syncer hands the frame to the database's hub
+  as it takes it) and pushed once the frame is durable: nothing a crash could undo is ever shown.
+- **An error ends the watch**: `lagging` (the connection holds more than 8 MiB of pushes it has not taken, or the hub
+  fell 65,536 frames behind, or a large group of its own frame changed the database: the program watches again from
+  the group of its last message); `denied` (the token may no longer read the database: G16 is checked at each message,
+  the table of tokens read again only when it changed); `stopping` (the server or the database stops).
+- **Nobody waits for a watch.** The writer and the syncer give each frame to a queue and go on; a hub thread per
+  watched database evaluates it, all the hub threads in a domain of their own (made at the first `Watch`: nothing runs
+  for a database nobody watches); a push goes to its connection's buffer, which a thread of the connection sends, so
+  a program that never reads holds only its own connection (tested: `test/server_limits.ml`; measured below).
+- **The follow stream** carries `durable` (kind 13) after each frame is durable: a local reader computes its own
+  program's live questions from the frames it applies, during the server's fsync, and gives them at `durable`. A
+  reader of an earlier version skips the kind.
+- What a change is, and how it is computed: [Cepheus from Cesia](cesia.md#watch-live-questions); the resume rule is
+  model-checked in `spec/Watch.tla` (no gap, no repeat, the rows never older than the last message: 1,015,657 states;
+  without the touch test or the ring's bound, TLC finds a counterexample).
 
 ### Errors
 
@@ -710,8 +745,7 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 
 ## What it does not do yet
 
-- Find gathers its answer's index words before it sends them (above); subscriptions (`Watch`) and forks are not on
-  the wire yet.
+- Find gathers its answer's index words before it sends them (above); forks are not on the wire yet.
 - Local readers on other machines (a replica, step 6; Raft with leases between servers, step 7), and one shared copy
   of the pages for many readers of one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
 

@@ -31,6 +31,7 @@ it was answered from; `server_sim` checks them over a simulated network with the
 | G18 | no confirmed group leaves an instance of a constraint (`Never`) | always |
 | G19 | a rule change takes effect at one group | always |
 | G20 | `why` returns a well-founded proof of a fact of the view, or nothing for a non-fact | always |
+| G21 | every message of a live question (`Watch`) leaves the program with exactly `Find`'s rows at its group, a durable one; its groups only grow, none skipped that changed the rows | F1, F2, broken connections, slow programs |
 
 ## The faults
 
@@ -493,3 +494,41 @@ proof, which the check finds: it explores every instance of every rule that give
 *Tested by* `test/reasoning.ml` (every fifth group of each random sequence: every derived fact's proof checked node by
 node — each node's rule exists, its body atoms bind consistently to the children's facts in order, its head is the
 node's fact, its ranges hold, every leaf is asserted in the view — and the named case of a two-step proof).
+
+## G21 Live questions
+
+*Promise.* A watch's first message is `Find`'s answer at a durable group; after each next message (a change, or the
+answer again), the rows the program holds, the change applied, are exactly `Find`'s answer at that message's group, a
+durable group (G1: no crash can take it back). The groups of a watch's messages only grow, and every group that
+changed the rows between two messages is in the second one's change: no change is lost, none comes twice, whatever
+breaks in between (the connection, the server by `kill -9`, the program's reading).
+
+*Conditions.* The question is a conjunctive query (`Find`'s patterns and ranges), with `Give` or aggregates. A program
+that reads slower than the changes come gets the answer again rather than every change (it then holds `Find`'s rows at
+the answer's group). A watch ends for good on `Close`, a closed database or a token that may no longer read it (G16).
+
+*Proof.* (1) *A frame's change.* Let S be the facts before a frame and S' after; a binding of the patterns over S' that
+is not one over S uses a fact of S' − S in some pattern. Taking for each such binding the first pattern that matches
+an added fact, the patterns before it over S' without the frame's added facts and those after it over S', gives each
+new binding exactly once (the parts are disjoint and cover them); the removed bindings are the same over S with the
+removed facts ([Ammar 2018]'s delta query; the rule of semi-naive evaluation, G17 (1)). Rows are `Find`'s rows with
+their repeats, so the multiset of rows after the frame is the one before, plus the new bindings' rows, minus the
+removed ones'; `Sum` and `Count` follow by difference, and a `Min` or `Max` whose value went is asked again for its key.
+(2) *Durable.* A change is held until its frame's group is durable (the server's syncer, a reader's `durable` event),
+so its group is one G1 keeps. (3) *Order and resume.* Messages go out in group order on one queue; after a broken
+connection or a `lagging` end the package watches again `from` the group of its last message, and the server answers
+`same` only when its ring of recent changes covers every group since and none touches the question's patterns
+(a property and its constants), else the answer at its newest group, which the package turns into the change from its
+rows: `spec/Watch.tla` checks that the rows are always the answer at their group and never go back, with lagging,
+broken connections, and a watch stopped and started again (1,015,657 states); without the touch test, or without the
+ring's bound, TLC finds a counterexample (`tools/tlc.sh` checks both).
+
+*Tested by* `test/live_sim.ml` (100 seeds in `tools/test.sh`, `LIVE_SEEDS` for more: random groups of adds, removals,
+derived facts and merges into runs, large groups; every message of every watch, plain, projecting and aggregating,
+equal to the naive evaluator's answer at its group; resume by `same` or the answer, lagging); `test/server_sim.ml`
+(watches over the simulated network: pushes cut at any byte, connections broken at any message and watches resumed,
+the hub late or at once, lagging, unwatch with pushes in flight, large groups, the server's crashes: every message's
+rows are the naive answer at a durable group, never older than the last); `test/server_limits.ml` (a watch that never
+reads beside one that reads: the reader gets every change in order, the silent one ends `lagging`); the package's
+tests on forks (`cesia/tests/cepheus.test.ce`); `test/cesia.sh` (a watch over TLS, a local one, and one that goes on
+through a `kill -9` of the server while 1,500 rows are written: its groups only grow and it ends with the 1,500).

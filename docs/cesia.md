@@ -56,6 +56,7 @@ engine and of OpenSSL's libraries, once a process.
 
 ```cesia
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/fiber
 use std/io
 use std/result
 use std/sys
@@ -270,6 +271,69 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted.
 
+## Watch: live questions
+
+A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64)` takes the same question as
+`Find` and gives an `Ok` of `{Changes, Watch}`: `Changes` is a Cesia **channel** (a queue between fibers, read with
+`fiber.Receive` or `for`; Cesia's book, chapter "Fibers") that holds `size` messages at most. Its first message is the
+**answer**, `{Group, Rows}`: the rows `Find` gives at group `Group`. Each next one is a **change**,
+`{Group, Added, Removed}`: the rows that came and the rows that went with group `Group`, so that the rows held, with
+`Added` added and `Removed` taken away, are then `Find`'s rows at that group. Every message has the four fields; the two
+it does not use are `missing`.
+
+```cesia
+unpaidOf(c) = (i, total) -> {
+  Where: [[i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]],
+  Give: {Invoice: i, Total: total},
+}
+w = result.Unwrap(cepheus.Watch(2, unpaidOf(ada), db))
+io.Print(fiber.Receive(w.Changes))
+small = result.Unwrap(cepheus.Insert(Invoice, {Client: ada, Total: 45, Status: "unpaid"}, db))
+result.Unwrap(cepheus.Update(Invoice, small, {Status: "paid"}, db))
+io.Print(fiber.Receive(w.Changes))
+io.Print(fiber.Receive(w.Changes))
+cepheus.Close(w)
+```
+
+```text
+Ok({Group: 10, Rows: [{Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
+Ok({Group: 11, Rows: missing, Added: [{Invoice: 65543, Total: 45.0}], Removed: []})
+Ok({Group: 12, Rows: missing, Added: [], Removed: [{Invoice: 65543, Total: 45.0}]})
+```
+
+- A change comes only when the rows change, and only once its group is on the server's disk (G1): a screen never
+  shows a write that a crash could undo.
+- The rows are `Find`'s, with their repeats: a `Give` that leaves out a variable gives a row for each binding, as
+  `Find` does. Aggregates (`Sum`, `Count`, `Min`, `Max`) are watched too: a change then removes a group's old row and
+  adds its new one.
+- **No gap, no repeat.** When the connection breaks or the server restarts, the watch goes on by itself from the group
+  of its last message: the server answers that nothing the question reads changed since (and nothing comes), or with
+  the answer at its newest group, which the package turns into the change from the rows it holds. The program sees no
+  gap and no message twice.
+- **A slow fiber holds nobody.** Each fiber that watches keeps its own queue of 256 messages in the package; one that
+  falls further behind loses that queue and gets the whole answer again, `{Group, Rows}`, when it reads next, rather
+  than every change it missed. At the server, a connection holding more than 8 MiB of messages it has not taken yet
+  ends its watches with `"lagging"`, and the package watches again from its last group. The writers never wait for a
+  watch.
+- **One watch a question.** Every fiber of the program that watches the same question (the same patterns, constants
+  and `Give`) shares one watch: the server computes its changes once, and the package gives each fiber its copy.
+- **Where it is computed**, as for `Find`: on the server's machine, in the program, from the groups it follows for its
+  local reads (it computes each frame's changes while the server forces it, and gives them once it is durable);
+  elsewhere at the server, which pushes them. A fork's watches are computed in the fork, at each of its writes.
+- `cepheus.Close(w)` ends the watch: its channel closes once its last message is taken. A watch ends by itself only
+  when its database is closed or its token may no longer read the database: the channel closes, and the next
+  `cepheus.Watch` of that question says why.
+
+**How a change is computed.** A question is a join of patterns (a conjunctive query). When a group adds facts, the new
+rows are the bindings that use an added fact in at least one pattern; each is found once, at the first pattern that
+matches an added fact (the patterns before it read the database without the group's facts, those after it with
+them), each part one search of the indexes with that fact fixed: the **delta query** of Ammar, McSherry, Salihoglu and
+Joglekar (2018), run by the same Generic Join as `Find`. Removed facts give the removed rows the same way, over the
+database before the group. `Sum` and `Count` follow by difference; `Min` and `Max` are asked again for the key whose
+extremum went. Questions that differ only by their constants (the unpaid invoices of each client) share one
+**template**: a fact's change is computed once and its rows sent to the watches whose constants they match, so a
+group costs the same with 10 watches or 10,000 ([what it costs](#what-it-costs)).
+
 ## Forks
 
 A **fork** is a database in the program's memory that starts as another one: it reads and writes as a database, with
@@ -457,8 +521,6 @@ linearizable without it.
 
 ## What is not built yet
 
-- `cepheus.Watch`, a question whose changes come as they happen, in a channel: the server pushes them in step 5 of
-  the server's plan.
 - Forks of a database read at the server: in the server, a later step.
 - `Not`, `Or`, `Prefix` and `In` in questions: not in the engine.
 - A program reaches one database a connection: `Connect` again for another.
