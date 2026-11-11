@@ -438,7 +438,7 @@ changement innocent de l'installation peut changer un résultat mesuré, [Mytkow
 - *Les mesures pourraient être du bruit.* Chaque processus a tourné sous le lock qui tient les autres travaux lourds à
   l'écart, les côtés ont alterné, avec des médianes et des intervalles sur plusieurs exécutions ; le disque est un SSD
   grand public dont le temps de fsync varie (un fsync prend 3 ms en médiane, et des blocages de 100 ms et plus arrivent
-  quelques fois par minute, [opérations](operations.md#disques)).
+  quelques fois par minute, [opérations](operations.md#les-disques)).
 - *La comparaison pourrait être injuste.* Chaque côté fait la même vente, durable au commit, avec la même politique
   côté client (l'une des dix meilleures places libres) ; PostgreSQL et SQLite passent par leur client habituel (pgbench,
   le `sqlite3` de Python), qui ajoute un coût par instruction que Cepheus, une bibliothèque dans le processus, ne paie
