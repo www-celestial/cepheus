@@ -6,6 +6,8 @@
      stops in the middle of its TLS handshake are closed within twice the limit (the first two after an error frame
      idle); a client that pings more often than the limit stays connected;
    - a client left idle past the limit reads again: its library connects again by itself.
+   Before the limits, with the defaults: a watch on a connection that never reads holds nobody (the watch beside it
+   gets every change, each within a second of its write), and its unsent pushes are bounded: its watch ends lagging.
 
      server_limits.exe DIR *)
 
@@ -61,6 +63,69 @@ let until_closed fd secs =
   done;
   closed, List.rev !codes, Bytes.length s
 
+(* A watcher that never reads beside one that reads: notes of 4,000 bytes, 50 a group, 60 groups (12 MB of changes, over
+   the 8 MiB a connection may hold unsent). The reader gets every group's change, in order, each within a second of
+   its write's receipt; the silent one, read at the end, has the answer, fewer changes than groups, then lagging. *)
+let stall sock tok =
+  let groups = 60 and text = String.make 4000 'x' in
+  let conn () = match Client.connect (Client.Unix_socket sock) tok with Ok c -> c | Error m -> failwith m in
+  let w = conn () in
+  let prop name typ = { Schema.name; typ; many = false; unique = false } in
+  let db, pt = match Client.declare w "main" [ prop "note/text" Value.Ttext ] with Ok (db, [ p ]) -> db, p | _ -> failwith "declare" in
+  let q = { Query.vars = 2; where = [ { Query.e = Var 0; p = pt; v = Var 1 } ]; ranges = [] } in
+  let watcher () =
+    let c = conn () in
+    let d = match Client.open_db ~local:false c "main" with Ok d -> d | Error e -> failwith e.message in
+    c, Client.watch c d q
+  in
+  let r, rid = watcher () and s, sid = watcher () in
+  let m = Mutex.create () and seen = Hashtbl.create 64 and order = ref true and last = ref 0 in
+  let reader =
+    Thread.create
+      (fun () ->
+        (* a change a group: it stops at the last *)
+        let rec go k =
+          if k > 0 then
+            match Client.next_push r rid with
+            | Client.Pushed (Wire.Change ch) ->
+              Mutex.protect m (fun () -> if ch.group <= !last then order := false; last := ch.group; Hashtbl.replace seen ch.group (Unix.gettimeofday ()));
+              go (k - 1)
+            | Client.Pushed _ -> go k
+            | Client.Ended _ | (exception Client.Broken _) -> ()
+        in
+        go groups)
+      ()
+  in
+  Thread.delay 0.2;
+  let receipts =
+    List.init groups (fun k ->
+        let ops = List.init 50 (fun j -> Resolve.Add (-(j + 1), pt, Value.Text (Printf.sprintf "%d %d %s" k j text))) in
+        match Client.write w db ops with Ok g -> g.group, Unix.gettimeofday () | Error e -> failwith e.message)
+  in
+  let final = fst (List.nth receipts (groups - 1)) in
+  let t0 = Unix.gettimeofday () in
+  while Mutex.protect m (fun () -> !last < final) && Unix.gettimeofday () -. t0 < 10. do Thread.delay 0.01 done;
+  let late =
+    Mutex.protect m (fun () ->
+        List.fold_left (fun acc (g, t) -> match Hashtbl.find_opt seen g with Some t' when t' -. t < 1.0 -> acc | _ -> acc + 1) 0 receipts)
+  in
+  let all = Mutex.protect m (fun () -> !order && late = 0) in
+  C.check all "beside a watcher that never reads, a watcher gets every change in order, each within a second (%d late or missing)" late;
+  let rec silent changes =
+    match Client.next_push s sid with
+    | Client.Pushed (Wire.Change _) -> silent (changes + 1)
+    | Client.Pushed _ -> silent changes
+    | Client.Ended e -> changes, e.code
+    | exception Client.Broken m -> changes, "broken: " ^ m
+  in
+  let changes, code = silent 0 in
+  C.check (changes < groups && code = "lagging") "a watcher that never read: %d changes of %d, then %s (lagging)" changes groups code;
+  (* the reader has stopped at the last group (else the test failed and its thread is left) *)
+  if all then Thread.join reader;
+  Client.close r;
+  Client.close s;
+  Client.close w
+
 let () =
   let dir = match Sys.argv with [| _; d |] -> d | _ -> prerr_endline "server_limits.exe DIR"; exit 2 in
   C.rmrf dir;
@@ -71,15 +136,25 @@ let () =
   let port = 20000 + ((Unix.getpid () + 7) mod 20000) in
   let s = In_channel.with_open_bin cfg In_channel.input_all in
   let s = replace s "127.0.0.1:7400" (Printf.sprintf "127.0.0.1:%d" port) in
-  let s = replace s "[clients]\n" "[clients]\nmax_connections = 3\nidle_timeout = 1\n" in
   Out_channel.with_open_bin cfg (fun oc -> output_string oc s);
   let token = Filename.concat a "app.token" in
   C.check (Sys.command (Printf.sprintf "%s token add app --database main=write --config %s > %s" bin (Filename.quote cfg) (Filename.quote token)) = 0) "token add";
   let tok = String.trim (In_channel.with_open_bin token In_channel.input_all) in
-  let pid = Serve.start bin cfg in
   let sock = Filename.concat a (Printf.sprintf "run/.s.cepheus.%d" port) in
-  let t0 = Unix.gettimeofday () in
-  while not (Sys.file_exists sock) && Unix.gettimeofday () -. t0 < 30. do Thread.delay 0.01 done;
+  let serve () =
+    let pid = Serve.start bin cfg in
+    let t0 = Unix.gettimeofday () in
+    while not (Sys.file_exists sock) && Unix.gettimeofday () -. t0 < 30. do Thread.delay 0.01 done;
+    pid
+  in
+  (* the defaults: a watcher that never reads *)
+  let pid = serve () in
+  stall sock tok;
+  Unix.kill pid Sys.sigterm;
+  (match Serve.wait pid with _, Unix.WEXITED 0 -> () | _ -> C.check false "not a clean stop");
+  (* the limits *)
+  Out_channel.with_open_bin cfg (fun oc -> output_string oc (replace s "[clients]\n" "[clients]\nmax_connections = 3\nidle_timeout = 1\n"));
+  let pid = serve () in
   (* the limit: three connections held, a fourth refused, over the socket with a reason, over TCP before TLS *)
   let held = List.init 3 (fun _ -> unix_conn sock) in
   Thread.delay 0.1;
