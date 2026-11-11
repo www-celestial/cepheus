@@ -15,6 +15,7 @@ type db = {
   view : unit -> Store.view;  (* the newest durable state, as reads see it *)
   sessions : Sessions.t;
   more : unit -> (string * string) list;  (* the transport's lines for status (its local readers) *)
+  hub : unit -> Live.hub;  (* its live questions, made at the first Watch *)
 }
 
 type t = {
@@ -53,6 +54,11 @@ and conn = {
   submit : db -> Resolve.op list -> int -> string -> ((Engine.receipt, Engine.error) result -> unit) -> unit;
       (* to the database's writer, in the order of the calls; the function is called once with the outcome, after the
          group is durable *)
+  pm : Mutex.t;  (* the pushes *)
+  pushes : Buffer.t;  (* the watches' messages, coded, not yet given to the output *)
+  mutable watching : (int * (Live.hub * Live.sub)) list;  (* by the id of the Watch *)
+  mutable closed : bool;  (* pushes are dropped *)
+  wake : unit -> unit;  (* the transport sends what [pushes] holds (it must not wait) *)
 }
 
 let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) () =
@@ -61,19 +67,22 @@ let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight 
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
     max_inflight; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
 
-let connect srv ~flush ~submit =
+let connect ?(wake = ignore) srv ~flush ~submit =
   Mutex.protect srv.cm (fun () ->
       let cid = srv.next_conn in
       srv.next_conn <- cid + 1;
       let c =
         { srv; cid; token = None; seen = Tokens.empty; rights = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
-          inflight = 0; requests = 0; flush; submit }
+          inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = [];
+          closed = false; wake }
       in
       Hashtbl.replace srv.conns cid c;
       c)
 
 let disconnect c =
+  let ws = Mutex.protect c.pm (fun () -> c.closed <- true; Buffer.reset c.pushes; let l = c.watching in c.watching <- []; l) in
+  List.iter (fun (_, (h, s)) -> Live.unsubscribe h s) ws;
   Mutex.protect c.srv.cm (fun () ->
       Hashtbl.remove c.srv.conns c.cid;
       ignore (Atomic.fetch_and_add c.srv.served c.requests))
@@ -216,6 +225,72 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
       let o = { Origin.token = tok.name; session = c.session; serial; floor } in
       c.submit d ops by (Origin.wrap o why) (Sessions.finish d.sessions p)
 
+(* ---- live questions ---- *)
+
+(* the pushes not yet sent, at most: a watch whose connection holds more falls behind (lagging) *)
+let max_pushes = ref (8 lsl 20)
+
+(* the pushes into the output, for the transport's sender: true when there were some *)
+let move_pushes c =
+  let s = Mutex.protect c.pm (fun () -> let s = Buffer.contents c.pushes in Buffer.clear c.pushes; s) in
+  if s = "" then false
+  else begin
+    Mutex.protect c.om (fun () -> Buffer.add_string c.out s);
+    true
+  end
+
+let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from =
+  let tok = Option.get c.token in
+  let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
+  (* G16 at each message: the token may still read the database (the table is read again only when it changed) *)
+  let seen = ref (Atomic.get c.srv.tokens) and reads = ref true in
+  let allowed () =
+    let cur = Atomic.get c.srv.tokens in
+    if cur != !seen then begin
+      seen := cur;
+      reads :=
+        match List.find_opt (fun (t : Tokens.token) -> t.name = tok.name && Tokens.equal_ct t.hash tok.hash) cur.tokens with
+        | Some t -> Tokens.right t d.name <> None
+        | None -> false
+    end;
+    !reads
+  in
+  let emit (m : Live.msg) =
+    let ok =
+      Mutex.protect c.pm (fun () ->
+          if c.closed then true
+          else
+            match m with
+            | Live.Ended e ->
+              let b = Buffer.create 64 in
+              let code = if allowed () then e.code else "denied" in
+              Wire.put_reply b (Wire.Err { code; message = (if code = "denied" then "this token may not read " ^ d.name else e.message) });
+              Wire.add_frame c.pushes ~id ~kind:Wire.k_watch ~flags:Wire.f_error b;
+              true
+            | _ when Buffer.length c.pushes > !max_pushes || not (allowed ()) -> false
+            | Answer a -> Wire.add_push c.pushes ~id (Wire.Answer { group = a.group; cols; rows = a.rows }); true
+            | Change ch -> Wire.add_push c.pushes ~id (Wire.Change { group = ch.group; cols; added = ch.added; removed = ch.removed }); true
+            | Same s -> Wire.add_push c.pushes ~id (Wire.Same s.group); true)
+    in
+    c.wake ();
+    ok
+  in
+  let h = d.hub () in
+  match Live.subscribe h q sel ~from ~emit with
+  | s -> Mutex.protect c.pm (fun () -> c.watching <- (id, (h, s)) :: c.watching)
+  | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
+  | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
+  | exception Failure m -> err c ~id ~kind "stopping" "%s" m
+
+let unwatch c ~id ~kind w =
+  let found = Mutex.protect c.pm (fun () ->
+      let f = List.assoc_opt w c.watching in
+      c.watching <- List.filter (fun (i, _) -> i <> w) c.watching;
+      f)
+  in
+  Option.iter (fun (h, s) -> Live.unsubscribe h s) found;
+  reply c ~id ~kind Wire.Unwatched
+
 (* ---- dispatch ---- *)
 
 let status c =
@@ -301,6 +376,10 @@ let handle c ~id ~kind (r : Codec.reader) =
            | None -> ()
            | Some d -> write c ~id ~kind d ~serial:w.serial ~floor:w.floor ~by:w.by ~why:w.why w.ops);
           Continue
+        | _, Wire.Watch w ->
+          (match readable c ~id ~kind w.db with None -> () | Some d -> watch c ~id ~kind d w.query w.select ~from:w.from);
+          Continue
+        | _, Wire.Unwatch w -> unwatch c ~id ~kind w; Continue
         | _, Wire.Follow i -> (
           (* a reader's right is enough (G16); a follow stream carries nothing else *)
           match readable c ~id ~kind i with

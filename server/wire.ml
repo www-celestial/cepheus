@@ -28,6 +28,12 @@ let k_follow = 8
 let k_frame = 9
 let k_runs = 10
 
+(* live questions: Watch's reply is a stream of pushes on its id (an answer, or same, then changes), until Unwatch, or
+   an error that ends it; the follow stream's Durable says up to which visibility number the frames are durable *)
+let k_watch = 11
+let k_unwatch = 12
+let k_durable = 13
+
 let f_more = 1
 let f_error = 2
 
@@ -46,6 +52,9 @@ type request =
   | Ping of string
   | Admin of string
   | Follow of int  (** a database: this connection becomes its follow stream *)
+  | Watch of { db : int; query : Query.t; select : select; from : int }
+      (** the question kept answered; [from]: the group whose answer the program holds (0: none) *)
+  | Unwatch of int  (** the id of the Watch *)
 
 type reply =
   | Welcome of { server : string; cluster : string; session : int; frame : int; inflight : int }
@@ -58,6 +67,7 @@ type reply =
   | Start of { id : string; vseq : int; runs : (int * int) list }
       (** Follow's reply: the database's id, the visibility number and the runs (lo, hi) of the state visible under
           it, newest first; the descriptors of the page and of the runs, in that order, ride on its first byte *)
+  | Unwatched
   | Err of { code : string; message : string }
 
 exception Malformed of string
@@ -169,6 +179,8 @@ let request_kind = function
   | Ping _ -> k_ping
   | Admin _ -> k_admin
   | Follow _ -> k_follow
+  | Watch _ -> k_watch
+  | Unwatch _ -> k_unwatch
 
 let put_request b = function
   | Hello h ->
@@ -187,6 +199,8 @@ let put_request b = function
   | Ping s -> Buffer.add_string b s
   | Admin what -> Codec.put_string b what
   | Follow db -> Codec.put_varint b db
+  | Watch w -> Codec.put_varint b w.db; put_query b w.query; put_select b w.select; Codec.put_varint b w.from
+  | Unwatch id -> Codec.put_varint b id
 
 let get_request kind (r : Codec.reader) =
   let req =
@@ -220,6 +234,13 @@ let get_request kind (r : Codec.reader) =
       Ping s)
     else if kind = k_admin then Admin (Codec.get_string r)
     else if kind = k_follow then Follow (Codec.get_varint r)
+    else if kind = k_watch then
+      let db = Codec.get_varint r in
+      let query = get_query r in
+      let select = get_select r in
+      let from = Codec.get_varint r in
+      Watch { db; query; select; from }
+    else if kind = k_unwatch then Unwatch (Codec.get_varint r)
     else raise (Malformed (Printf.sprintf "unknown request kind %d" kind))
   in
   if not (Codec.at_end r) then raise (Malformed "bytes after the request");
@@ -268,6 +289,7 @@ let put_reply b = function
   | Pong s -> Buffer.add_string b s
   | Status l -> Codec.put_varint b (List.length l); List.iter (fun (k, v) -> Codec.put_string b k; Codec.put_string b v) l
   | Start st -> Codec.put_string b st.id; Codec.put_varint b st.vseq; put_runs b st.runs
+  | Unwatched -> ()
   | Err e -> Codec.put_string b e.code; Codec.put_string b e.message
 
 let get_reply kind flags (r : Codec.reader) =
@@ -311,6 +333,7 @@ let get_reply kind flags (r : Codec.reader) =
     let id = Codec.get_string r in
     let vseq = Codec.get_varint r in
     Start { id; vseq; runs = get_runs r }
+  else if kind = k_unwatch then Unwatched
   else raise (Malformed (Printf.sprintf "unknown reply kind %d" kind))
 
 (* ---- the follow stream's pushes (request id 0) ----
@@ -322,6 +345,77 @@ let put_frame_head b ~vseq ~first ~count = Codec.put_varint b vseq; Codec.put_va
 let get_frame_head r = let vseq = Codec.get_varint r in let first = Codec.get_varint r in let count = Codec.get_varint r in vseq, first, count
 let put_runs_push b ~vseq runs = Codec.put_varint b vseq; put_runs b runs
 let get_runs_push r = let vseq = Codec.get_varint r in vseq, get_runs r
+
+(* ---- a watch's pushes: on the Watch's id, kind k_watch ----
+     answer = 0 | group | cols | n | rows                     the whole answer at group
+     change = 1 | group | cols | added: n | rows | removed: n | rows
+     same   = 2 | group                                       the answer at group is the one at from
+   A long answer or change continues in frames of the flag more, each of the same form (its rows added to the
+   message's); an error (the flag error) ends the watch: "lagging" asks the program to watch again from its group. *)
+
+type push =
+  | Answer of { group : int; cols : int; rows : Value.t array list }
+  | Change of { group : int; cols : int; added : Value.t array list; removed : Value.t array list }
+  | Same of int
+
+let push_chunk = 1 lsl 20
+
+let put_rows b rows = Codec.put_varint b (List.length rows); List.iter (Array.iter (Value.encode b)) rows
+
+(* the push as frames of about a MiB *)
+let add_push out ~id (p : push) =
+  let body = Buffer.create 256 in
+  let frame ~more = add_frame out ~id ~kind:k_watch ~flags:(if more then f_more else 0) body; Buffer.clear body in
+  (* rows taken while the chunk is under its size *)
+  let rec cut acc size = function
+    | r :: rest when size < push_chunk || acc = [] ->
+      let rb = Buffer.create 64 in
+      Array.iter (Value.encode rb) r;
+      cut (r :: acc) (size + Buffer.length rb) rest
+    | rest -> List.rev acc, rest, size
+  in
+  match p with
+  | Same g -> Buffer.add_char body '\002'; Codec.put_varint body g; frame ~more:false
+  | Answer a ->
+    let rec go rows =
+      let now, rest, _ = cut [] 0 rows in
+      Buffer.add_char body '\000'; Codec.put_varint body a.group; Codec.put_varint body a.cols; put_rows body now;
+      frame ~more:(rest <> []);
+      if rest <> [] then go rest
+    in
+    go a.rows
+  | Change c ->
+    let rec go added removed =
+      let na, ra, size = cut [] 0 added in
+      let nr, rr, _ = if ra = [] then cut [] size removed else [], removed, size in
+      Buffer.add_char body '\001'; Codec.put_varint body c.group; Codec.put_varint body c.cols; put_rows body na; put_rows body nr;
+      let more = ra <> [] || rr <> [] in
+      frame ~more;
+      if more then go ra rr
+    in
+    go c.added c.removed
+
+let get_rows r cols = let n = count r in List.init n (fun _ -> Array.init cols (fun _ -> Value.decode r))
+
+(* one frame of a push *)
+let get_push (r : Codec.reader) =
+  match Codec.get_byte r with
+  | 0 -> let group = Codec.get_varint r in let cols = Codec.get_varint r in Answer { group; cols; rows = get_rows r cols }
+  | 1 ->
+    let group = Codec.get_varint r in
+    let cols = Codec.get_varint r in
+    let added = get_rows r cols in
+    let removed = get_rows r cols in
+    Change { group; cols; added; removed }
+  | 2 -> Same (Codec.get_varint r)
+  | _ -> raise Codec.Short
+
+(* the frames of one push joined *)
+let join_push a b =
+  match a, b with
+  | Answer x, Answer y -> Answer { x with rows = x.rows @ y.rows }
+  | Change x, Change y -> Change { x with added = x.added @ y.added; removed = x.removed @ y.removed }
+  | _, y -> y
 
 (* ---- errors as values: the API's codes and the server's ---- *)
 

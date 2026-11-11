@@ -33,6 +33,9 @@ type event =
   | Runs of { vseq : int; runs : run list }
       (** the database's runs, newest first: the reader drops its states under numbers below [vseq] and rests the others
           on these runs *)
+  | Durable of int
+      (** the frames sent under this number and below are durable (the number is stored): the reader's live questions
+          give their changes (Live) *)
 
 type follower = {
   q : event Queue.t;
@@ -106,7 +109,7 @@ let view t =
   let v = Atomic.get t.visible_a in
   if p.group = v.group then p else v
 
-let size = function Frame f -> 32 + Buffer.length f.body | Runs r -> 32 + (48 * List.length r.runs)
+let size = function Frame f -> 32 + Buffer.length f.body | Runs r -> 32 + (48 * List.length r.runs) | Durable _ -> 16
 
 (* under fm *)
 let push t ev =
@@ -169,6 +172,7 @@ let after t =
         t.visible <- p;
         Atomic.set t.visible_a p;
         t.inflight <- None;
+        push t (Durable v);
         name_runs t p
       | _ -> t.inflight <- None)
 

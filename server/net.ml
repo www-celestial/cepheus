@@ -13,6 +13,7 @@ type database = {
   core : Core.db;
   live : Engine.live;
   follow : Follow.t;
+  watch : Watch.t;  (* its live questions over the wire *)
   page : Unix.file_descr;  (* the visibility page, read-only: what every local reader is passed (never closed) *)
   mutable checkpointed : int;
 }
@@ -119,6 +120,10 @@ let send_event fd = function
       o := !o + k;
       send_frame fd ~id:0 ~kind:Wire.k_frame ~flags:(if !o < n then Wire.f_more else 0) c []
     done
+  | Follow.Durable v ->
+    let b = Buffer.create 16 in
+    Codec.put_varint b v;
+    send_frame fd ~id:0 ~kind:Wire.k_durable ~flags:0 b []
   | Follow.Runs r -> (
     match run_files r.runs with
     | Error m -> failwith ("a run to pass: " ^ m)
@@ -232,7 +237,29 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
     Mutex.unlock w.wm;
     if not (Engine.submit live (Engine.Write r)) then Engine.deliver r (Error Engine.Closed)
   in
-  let c = Core.connect srv ~flush ~submit in
+  (* the watches' pushes: a thread of the connection's sends them as they come, made at the first; the hubs only append
+     to the connection's pushes and wake it, so that a slow program never holds a hub *)
+  let pusher = ref None and pm = Mutex.create () and pc = Condition.create () and pending = ref false and ending = ref false in
+  let push_loop () =
+    let go = ref true in
+    while !go do
+      Mutex.lock pm;
+      while (not !pending) && not !ending do Condition.wait pc pm done;
+      pending := false;
+      let stop = !ending in
+      Mutex.unlock pm;
+      (match !c_ref with Some c -> if Core.move_pushes c then flush () | None -> ());
+      if stop then go := false
+    done
+  in
+  let wake () =
+    Mutex.lock pm;
+    pending := true;
+    if !pusher = None && not !ending then pusher := Some (Thread.create push_loop ());
+    Condition.signal pc;
+    Mutex.unlock pm
+  in
+  let c = Core.connect ~wake srv ~flush ~submit in
   c_ref := Some c;
   let buf = ref (Bytes.create 65536) and have = ref 0 in
   let go = ref true in
@@ -291,14 +318,20 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
      Core.err c ~id:0 ~kind:0 "idle" "no request for %d s (idle_timeout): the connection is closed" idle;
      flush ()
    | Unix.Unix_error _ | Failure _ -> ());
-  (* the writes in flight are answered (or fail to send) before the connection goes *)
+  (* the writes in flight are answered (or fail to send) before the connection goes; its watches end *)
   Core.drain c;
+  Core.disconnect c;
+  Mutex.lock pm;
+  ending := true;
+  Condition.signal pc;
+  let p = !pusher in
+  Mutex.unlock pm;
+  Option.iter Thread.join p;
   Mutex.lock w.wm;
   w.closing <- true;
   Condition.broadcast w.wc;
   Mutex.unlock w.wm;
   Option.iter Thread.join w.thread;
-  Core.disconnect c;
   (try io.bye () with Unix.Unix_error _ | Failure _ -> ());
   Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
   (try Unix.close fd with Unix.Unix_error _ -> ())
@@ -418,11 +451,19 @@ let open_databases (cfg : Config.t) =
           Error (Printf.sprintf "database %s: %s: %s" name p (Unix.error_message err))
         | exception Failure m -> Engine.close e; Error (Printf.sprintf "database %s: %s" name m)
         | word, page ->
-          (* the follow stream first: the writer calls it from its first frame *)
+          (* the follow stream and the live questions first: the writer calls them from its first frame *)
           let follow = Follow.create e word in
-          let live = Engine.start ~follow:(Follow.hooks follow) e in
-          let core = { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions; more = (fun () -> Follow.status follow) } in
-          Ok { core; live; follow; page; checkpointed = (Atomic.get e.published).group })
+          let watch = Watch.create e in
+          let hooks =
+            { Engine.before = (fun b -> Follow.before follow b; Watch.before watch b);
+              after = (fun () -> Follow.after follow; Watch.after watch) }
+          in
+          let live = Engine.start ~follow:hooks e in
+          let core =
+            { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions;
+              more = (fun () -> Follow.status follow @ Watch.status watch); hub = (fun () -> Watch.hub watch) }
+          in
+          Ok { core; live; follow; watch; page; checkpointed = (Atomic.get e.published).group })
   in
   (* in parallel, a domain each, at most [domains] at once *)
   let names = Array.of_list cfg.databases in
@@ -597,7 +638,7 @@ let serve (cfg : Config.t) =
           Option.iter Unix.close sock;
           Option.iter Unix.close tcp;
           Option.iter (fun p -> try Unix.unlink p with Unix.Unix_error _ -> ()) (Config.socket_path cfg);
-          Array.iter (fun d -> Follow.wake d.follow) dbs;
+          Array.iter (fun d -> Follow.wake d.follow; Watch.stop d.watch "stopping" "the server is stopping") dbs;
           let conns = Mutex.protect srv.cm (fun () -> Hashtbl.fold (fun _ c acc -> c :: acc) srv.conns []) in
           List.iter Core.drain conns;
           Atomic.set ticking false;

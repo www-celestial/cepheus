@@ -172,7 +172,7 @@ let start_server w =
       Sim_disk.crash_after w.sim (-1);
       let follow = Follow.create e { Follow.get = (fun () -> !(w.page)); set = (fun v -> w.page := v) } in
       let core_db = { Core.name = "main"; index = 0; dir; view = (fun () -> Follow.view follow); sessions;
-                      more = (fun () -> Follow.status follow) } in
+                      more = (fun () -> Follow.status follow); hub = (fun () -> failwith "no watch yet") } in
       let core =
         Core.create ~server_id:"cph-s-sim" ~cluster_id:"cph-c-0000000000000000" ~dbs:[| core_db |] ~tokens
           ~now:w.disk.now ~new_session:(let n = ref (1000 * (1 + Rng.int w.r 1000)) in fun () -> incr n; !n)
@@ -550,7 +550,7 @@ let reader_send w r =
       List.iter
         (fun ev ->
           match ev with
-          | Follow.Frame _ -> Queue.push (E ev) r.chan
+          | Follow.Frame _ | Follow.Durable _ -> Queue.push (E ev) r.chan
           | Follow.Runs x ->
             let files = List.map (run_bytes w) x.runs in
             if List.mem None files then (Follow.unregister s.follow f; r.sf <- None; r.cut <- true; count "streams cut: a run removed")
@@ -570,6 +570,7 @@ let reader_apply w r =
         match ev with
         | E (Follow.Frame f) -> Follower.frame fol ~vseq:f.vseq ~first:f.first ~count:f.count (Buffer.to_bytes f.body)
         | E (Follow.Runs _) -> ()
+        | E (Follow.Durable v) -> Follower.durable fol v
         | R (vseq, names, files) -> Follower.runs fol ~vseq ~names ~files
       with
       | () -> count "events applied"

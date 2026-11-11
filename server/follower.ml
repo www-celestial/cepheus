@@ -25,6 +25,9 @@ type t = {
   sc : Condition.t;  (* a state published, or the follower stopped *)
   mutable dead : bool;
   mutable applied : int;  (* frames applied, for the tests and benchmarks *)
+  hl : Mutex.t;  (* the newest state and the live questions' hub, between the stream and a new watch *)
+  mutable hub : Live.hub option;  (* the live questions of this program on this database, evaluated here *)
+  mutable last_vseq : int;  (* the number of the newest frame applied *)
 }
 
 exception Stream of string
@@ -123,7 +126,7 @@ let chain t names files =
 let create ~id ~word ~names ~files =
   let t =
     { id; word; built = []; building = Store.empty (); log = []; states = Atomic.make []; sm = Mutex.create (); sc = Condition.create ();
-      dead = false; applied = 0 }
+      dead = false; applied = 0; hl = Mutex.create (); hub = None; last_vseq = 0 }
   in
   t.building <- chain t names files;
   t
@@ -137,8 +140,9 @@ let publish t states =
   Condition.broadcast t.sc;
   Mutex.unlock t.sm
 
-(* the groups of a frame, replayed onto [v]: those it holds already are skipped; a gap is an error *)
-let apply v (first, count, body) ~upto =
+(* the groups of a frame, replayed onto [v]: those it holds already are skipped; a gap is an error. [applied]: each
+   group replayed *)
+let apply ?(applied = ignore) v (first, count, body) ~upto =
   let r = Codec.reader body 0 (Bytes.length body) in
   let v = ref (v : Store.view) in
   for k = 0 to count - 1 do
@@ -146,7 +150,8 @@ let apply v (first, count, body) ~upto =
     if g.n <> first + k then stream "group %d where %d was expected" g.n (first + k);
     if g.n > !v.group && g.n <= upto then begin
       if g.n <> !v.group + 1 then stream "group %d after %d: a gap" g.n !v.group;
-      v := (try Resolve.replay !v g with Journal.Damaged m -> stream "%s" m)
+      v := (try Resolve.replay !v g with Journal.Damaged m -> stream "%s" m);
+      applied g
     end
   done;
   !v
@@ -155,10 +160,22 @@ let apply v (first, count, body) ~upto =
    (0: not on its own) *)
 let frame t ~vseq ~first ~count body =
   let f = first, count, body in
-  t.building <- apply t.building f ~upto:max_int;
+  Mutex.protect t.hl (fun () ->
+      (match t.hub with
+       | None -> t.building <- apply t.building f ~upto:max_int
+       | Some h ->
+         (* the live questions' changes of the frame, computed now, while the server forces it; given once it is
+            durable (Durable) *)
+         let gs = ref [] in
+         t.building <- apply ~applied:(fun g -> gs := g :: !gs) t.building f ~upto:max_int;
+         Live.frame h ~tag:vseq (List.rev !gs) t.building);
+      if vseq > 0 then t.last_vseq <- vseq);
   if count > 0 then t.log <- f :: t.log;
   t.applied <- t.applied + 1;
   if vseq > 0 then publish t ({ vs = vseq; view = t.building } :: Atomic.get t.states)
+
+(* the frames sent under [vseq] and below are durable *)
+let durable t vseq = Option.iter (fun h -> Live.durable h vseq) (Mutex.protect t.hl (fun () -> t.hub))
 
 (* New runs (newest first): the states under [vseq] or later rest on them, if they hold the runs' groups (a merge
    gives the same states on fewer runs); a state before them stays on the runs it has (a large group's run comes
@@ -188,7 +205,16 @@ let runs t ~vseq ~names ~files =
   let targets = List.sort_uniq compare (List.filter (fun g -> g >= h) (t.building.group :: List.map (fun s -> s.view.group) keep)) in
   let rebuilt = rebuild targets in
   let at g = if g < h then None else Some (List.assoc g rebuilt) in
-  t.building <- (match at t.building.group with Some v -> v | None -> base);
+  Mutex.protect t.hl (fun () ->
+      let before = t.building.group in
+      t.building <- (match at t.building.group with Some v -> v | None -> base);
+      match t.hub with
+      | Some hub when t.building.group <> before ->
+        (* a large group: its run is the state, its changes are not sent; every live question is asked again, under
+           the number of the frame that follows *)
+        Live.reset hub t.building ~tag:(vseq + 1)
+      | Some hub -> Live.rebase hub t.building
+      | None -> ());
   let states = List.map (fun s -> match at s.view.group with Some v -> { s with view = v } | None -> s) keep in
   t.log <- List.filter (fun (f0, n, _) -> f0 + n - 1 > h) t.log;
   publish t states
@@ -199,7 +225,8 @@ let stop t =
   t.dead <- true;
   Atomic.set t.states [];
   Condition.broadcast t.sc;
-  Mutex.unlock t.sm
+  Mutex.unlock t.sm;
+  Option.iter (fun h -> Live.stop h "unreachable" "the local reader's stream ended") (Mutex.protect t.hl (fun () -> t.hub))
 
 (* ---- reads ---- *)
 
@@ -228,6 +255,20 @@ let view t =
     r
 
 let dead t = t.dead
+
+(* The hub of this program's live questions on the database, made at the first: at the newest state applied, once the
+   follower holds the state visible now (a watch never starts from a state older than a read could see) *)
+let hub t =
+  match view t with
+  | None -> None
+  | Some _ ->
+    Mutex.protect t.hl (fun () ->
+        match t.hub with
+        | Some h -> Some h
+        | None ->
+          let h = Live.create t.building ~tag:t.last_vseq ~durable:(t.word ()) in
+          t.hub <- Some h;
+          Some h)
 
 (* the state visible now, without waiting: None if the follower does not hold it yet (the simulation) *)
 let try_view t = if t.dead then None else find_state (t.word ()) (Atomic.get t.states)

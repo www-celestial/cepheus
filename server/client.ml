@@ -485,3 +485,46 @@ let rec declare c name (props : Schema.prop list) =
         | Ok _ -> ( match open_db c name with Ok db -> Ok (db, List.rev !ids) | Error e -> Error e)
         | Error { code = "conflict"; _ } -> declare c name props
         | Error e -> Error e)
+
+(* ---- live questions ----
+   A watch at the server: [watch] sends it, [next_push] gives its messages in order: the answer (or same), then the
+   changes; [Ended] once the server ends it ("lagging": watch again from the group of the last message). On the
+   server's machine a program watches its follower instead (Follower.hub, Live.subscribe): no network at all. *)
+
+type pushed = Pushed of Wire.push | Ended of error
+
+let watch c db ?(select = Wire.Give [||]) ?(from = 0) query =
+  let id = send c (Wire.Watch { db = db.handle; query; select; from }) in
+  flush c;
+  id
+
+(* the next message of watch [id], its frames joined *)
+let rec next_push c id =
+  let fs = List.rev (Option.value (Hashtbl.find_opt c.early id) ~default:[]) in
+  let rec split acc = function
+    | ((_, f, _) as x) :: rest -> if f land Wire.f_more = 0 then Some (List.rev (x :: acc), rest) else split (x :: acc) rest
+    | [] -> None
+  in
+  match split [] fs with
+  | Some (mine, rest) -> (
+    if rest = [] then Hashtbl.remove c.early id else Hashtbl.replace c.early id (List.rev rest);
+    match mine with
+    | [ (k, f, b) ] when f land Wire.f_error <> 0 -> (
+      match decode k f b with Wire.Err e -> Ended { code = e.code; message = e.message } | _ -> Ended { code = "protocol"; message = "a watch's end" })
+    | _ ->
+      let parts =
+        List.map (fun (_, _, b) -> try Wire.get_push (Codec.reader b 0 (Bytes.length b)) with Codec.Short -> raise (Broken "a push does not decode")) mine
+      in
+      Pushed (List.fold_left Wire.join_push (List.hd parts) (List.tl parts)))
+  | None ->
+    let id', kind, flags, body = next_frame c in
+    if id' = 0 && flags land Wire.f_error <> 0 then
+      raise (Broken (match decode kind flags body with Wire.Err e -> e.code ^ ": " ^ e.message | _ -> "the server closed the connection"));
+    let prev = Option.value (Hashtbl.find_opt c.early id') ~default:[] in
+    Hashtbl.replace c.early id' ((kind, flags, body) :: prev);
+    next_push c id
+
+let unwatch c id = match call c (Wire.Unwatch id) with Wire.Unwatched -> Ok () | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "Unwatch" })
+
+(* the hub of this program's live questions on a database it follows here: None when it is read at the server *)
+let local_hub c db = match local_view c db with Some _ -> Option.bind db.local Follower.hub | None -> None

@@ -166,7 +166,7 @@ let wire () =
       let kind = match rep with
         | Wire.Welcome _ -> Wire.k_hello | Opened _ -> Wire.k_open | Facts _ -> Wire.k_get | Rows _ -> Wire.k_find
         | Receipt _ -> Wire.k_write | Pong _ -> Wire.k_ping | Status _ -> Wire.k_admin | Start _ -> Wire.k_follow
-        | Err _ -> Wire.k_get in
+        | Unwatched -> Wire.k_unwatch | Err _ -> Wire.k_get in
       let flags = match rep with Wire.Err _ -> Wire.f_error | _ -> 0 in
       let b = Buffer.create 64 in
       Wire.put_reply b rep;
@@ -225,7 +225,7 @@ let rights () =
   let open_db name =
     let e = Result.get_ok (Engine.open_ disk ("/d/" ^ name)) in
     e, { Core.name; index = (if name = "shop" then 0 else 1); dir = "/d/" ^ name; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
-         more = (fun () -> []) }
+         more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) }
   in
   let e0, d0 = open_db "shop" and e1, d1 = open_db "stock" in
   let mk name databases admin = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin } in
