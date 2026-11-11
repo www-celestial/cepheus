@@ -175,7 +175,11 @@ let rules_of (v : Store.view) =
    The size of an offer is what the engine's indexes count: the facts with both sides fixed, all the facts of the
    property when the other side is free (or those inside the variable's ranges, for a value read off the property's
    sorted index). A partial binding reaches the next level when its value passes every pattern on its variable (a
-   fixed other side: the fact exists; a free one: some fact has it) and the ranges. *)
+   fixed other side: the fact exists; a free one: some fact has it) and the ranges.
+   With the leapfrog (Veldhuizen 2014): where the smallest offer m is 2 or more, the engine also reads every slice (an
+   offer whose other side is known: a thing's values, a value's things) of at most 8 m into a buffer and intersects
+   them; the level then costs at most m plus those slices' sizes, at most 1 + 8 (k - 1) times Generic Join's for k
+   slices: the bound adds them. *)
 
 let gj_bound (facts : F.t) (q : Query.t) (ord : int array) =
   (* hashed indexes of the facts, values keyed by their printed form (exact, floats included) *)
@@ -204,32 +208,35 @@ let gj_bound (facts : F.t) (q : Query.t) (ord : int array) =
   let in_ranges x c = List.for_all (fun (lo, hi) -> num c >= lo && num c <= hi) (ranges x) in
   let link = function Value.Link e -> Some e | _ -> None in
   (* what a pattern offers x: its size as the engine counts it, its candidates, and a membership test *)
+  (* what a pattern offers x: its size as the engine counts it, its candidates, a membership test, and whether it is a
+     slice (its other side known) *)
   let offer x (pt : Query.pattern) =
     let all = List.length (get rows_p pt.p) in
-    if has x pt.e && has x pt.v then all, (fun () -> get self_p pt.p), fun c -> F.mem (Option.get (link c), pt.p, c) facts
+    if has x pt.e && has x pt.v then all, (fun () -> get self_p pt.p), (fun c -> F.mem (Option.get (link c), pt.p, c) facts), false
     else if has x pt.e then
       match known pt.v with
-      | Some w -> let l = get by_pw (pt.p, key w) in List.length l, (fun () -> l), fun c -> F.mem (Option.get (link c), pt.p, w) facts
-      | None -> all, (fun () -> get th_p pt.p), fun c -> Hashtbl.mem th_seen (pt.p, Option.get (link c))
+      | Some w -> let l = get by_pw (pt.p, key w) in List.length l, (fun () -> l), (fun c -> F.mem (Option.get (link c), pt.p, w) facts), true
+      | None -> all, (fun () -> get th_p pt.p), (fun c -> Hashtbl.mem th_seen (pt.p, Option.get (link c))), false
     else
       match Option.bind (known pt.e) link with
-      | Some e -> let l = get by_ep (e, pt.p) in List.length l, (fun () -> l), fun c -> F.mem (e, pt.p, c) facts
+      | Some e -> let l = get by_ep (e, pt.p) in List.length l, (fun () -> l), (fun c -> F.mem (e, pt.p, c) facts), true
       | None ->
         let size = if ranges x = [] then all else List.length (List.filter (in_ranges x) (get rows_p pt.p)) in
-        size, (fun () -> get va_p pt.p), fun c -> Hashtbl.mem va_seen (pt.p, key c)
+        size, (fun () -> get va_p pt.p), (fun c -> Hashtbl.mem va_seen (pt.p, key c)), false
   in
   let total = ref 0 in
   let rec level i =
     if i < n then begin
       let x = ord.(i) in
       let offers = List.map (offer x) (List.filter (fun (pt : Query.pattern) -> has x pt.e || has x pt.v) pats) in
-      match List.sort (fun (a, _, _) (b, _, _) -> compare a b) offers with
+      match List.sort (fun (a, _, _, _) (b, _, _, _) -> compare a b) offers with
       | [] -> ()
-      | (size, cands, _) :: rest ->
+      | (size, cands, _, _) :: rest ->
         total := !total + size;
+        if size >= 2 then List.iter (fun (s, _, _, sl) -> if sl && s <= 8 * size then total := !total + s) offers;
         List.iter
           (fun c ->
-            if in_ranges x c && List.for_all (fun (_, _, accepts) -> accepts c) rest then begin
+            if in_ranges x c && List.for_all (fun (_, _, accepts, _) -> accepts c) rest then begin
               env.(x) <- Some c; level (i + 1); env.(x) <- None end)
           (cands ())
     end

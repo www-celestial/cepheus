@@ -163,6 +163,21 @@ let plan (v : Store.view) q =
     if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then None
     else Some { pats; limits; ord = order v q.vars pats limits }
 
+(* the first place from [from] in a.(0 .. n-1), sorted, whose value is >= t: steps of 1, 2, 4, ... then a binary search
+   (galloping: Bentley, Yao 1976), O(log d) for a place d further *)
+let gallop (a : int array) n from t =
+  if from >= n || Array.unsafe_get a from >= t then from
+  else begin
+    let lo = ref from and step = ref 1 in
+    while !lo + !step < n && Array.unsafe_get a (!lo + !step) < t do lo := !lo + !step; step := 2 * !step done;
+    let lo = ref (!lo + 1) and hi = ref (min n (!lo + !step)) in
+    while !lo < !hi do
+      let mid = (!lo + !hi) lsr 1 in
+      if Array.unsafe_get a mid < t then lo := mid + 1 else hi := mid
+    done;
+    !lo
+  end
+
 (* Generic Join: at each level, the pattern with the fewest candidates (exact counts) gives them, and every other
    pattern on the variable keeps or drops each one with a lookup; nothing is enumerated beyond the smallest set. *)
 let fold (v : Store.view) q ~init ~step ~merge =
@@ -204,10 +219,40 @@ let fold (v : Store.view) q ~init ~step ~merge =
               | _ -> count_with (function W w -> Some w | V _ -> None) x pt)
             by_var.(x))
     in
+    (* the plan of each level, beside its counts. [func]: the pattern that gives a one-valued property's value of a thing
+       bound before (count 1, without a lookup), when every other pattern of the level has a fixed count of 1 or more
+       and none before it can tie: [choose] takes it for every binding, so the level reads that value alone, with no
+       count and no iterator. [skip]: a pattern whose other side is the next level's variable is not looked up here: at
+       the next level it offers nothing for a binding it does not hold, and is then the source (no candidate, no work).
+       [slice]: a pattern whose other side is known here gives its candidates in order (a thing's values, or the things
+       of a value): two of them on a level are intersected by leapfrogging *)
+    let level_of y = let k = ref 0 in while ord.(!k) <> y do incr k done; !k in
+    let other x pt = if has x pt.pe then pt.pv else pt.pe in
+    let known_at i = function W _ -> true | V y -> level_of y < i in
+    let single x pt = not (has x pt.pe && has x pt.pv) in
+    let func =
+      Array.init n (fun i ->
+          let x = ord.(i) and ps = by_var.(ord.(i)) and fx = fixed.(i) in
+          let one j = let pt = ps.(j) in has x pt.pv && single x pt && (not pt.many) && known_at i pt.pe in
+          let first = ref (-1) in
+          Array.iteri (fun j _ -> if !first < 0 && one j then first := j) ps;
+          let f = !first in
+          if f < 0 then -1
+          else if
+            Array.for_all Fun.id (Array.mapi (fun j _ -> j = f || (j > f && one j) || (j < f && fx.(j) >= 2) || (j > f && fx.(j) >= 1)) ps)
+          then f
+          else -1)
+    in
+    let skip =
+      Array.init n (fun i ->
+          Array.map (fun pt -> i + 1 < n && single ord.(i) pt && other ord.(i) pt = V ord.(i + 1)) by_var.(ord.(i)))
+    in
+    let slice = Array.init n (fun i -> Array.map (fun pt -> single ord.(i) pt && known_at i (other ord.(i) pt)) by_var.(ord.(i))) in
+    let leap = Array.map (fun s -> Array.fold_left (fun k b -> if b then k + 1 else k) 0 s >= 2) slice in
     (* one runner per domain: its own bindings and its own count of candidates; no allocation per binding but the
        iterators' own *)
     let runner () =
-      let env = Array.make n 0 and bound = Array.make n false and w = ref 0 in
+      let env = Array.make n 0 and bound = Array.make n false and w = ref 0 and cell = [| 0 |] in
       let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
       let accepts x c pt =
         if has x pt.pe && has x pt.pv then Store.mem v c pt.pp c
@@ -221,72 +266,164 @@ let fold (v : Store.view) q ~init ~step ~merge =
           | V y -> if bound.(y) then Store.mem v env.(y) pt.pp c else Store.count_things v pt.pp c > 0
       in
       let count x pt = count_with get x pt in
-      let distinct it f =
-        let seen = Hashtbl.create 256 in
-        it (fun c -> if not (Hashtbl.mem seen c) then (Hashtbl.replace seen c (); f c))
-      in
       (* the candidates themselves *)
       let iterate x pt f =
         if has x pt.pe && has x pt.pv then Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
         else if has x pt.pe then
           match get pt.pv with
           | Some w -> Store.iter_things v pt.pp w f
-          | None ->
-            if pt.many then distinct (fun f -> Store.iter_prop v pt.pp (fun e _ -> f e)) f
-            else Store.iter_prop v pt.pp (fun e _ -> f e)
+          | None -> if pt.many then Store.iter_holders v pt.pp f else Store.iter_prop v pt.pp (fun e _ -> f e)
         else
           match get pt.pe, iv.(x) with
           | Some e, _ -> Store.iter_values v e pt.pp f
           | None, Some (lo, hi) ->
             (* a variable with a range, read off the property's index in value order: only the range *)
-            distinct (fun f -> Store.iter_range v pt.pp lo hi (fun _ w -> f w)) f
-          | None, None -> distinct (fun f -> Store.iter_prop v pt.pp (fun _ w -> f w)) f
+            let seen = Hashtbl.create 256 in
+            Store.iter_range v pt.pp lo hi (fun _ w -> if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); f w))
+          | None, None -> Store.iter_taken v pt.pp f
       in
-      (* level i: the smallest source, and its size *)
+      (* level i: the smallest source, and its size; each pattern's count kept for the leapfrog *)
+      let counts = Array.map (fun ps -> Array.make (Array.length ps) 0) by_var in
       let choose i =
-        let ps = by_var.(ord.(i)) and fx = fixed.(i) in
+        let ps = by_var.(ord.(i)) and fx = fixed.(i) and cs = counts.(ord.(i)) in
         let best = ref (-1) and bc = ref max_int in
         for j = 0 to Array.length ps - 1 do
           let c = if fx.(j) >= 0 then fx.(j) else count ord.(i) ps.(j) in
+          cs.(j) <- c;
           if c < !bc then (bc := c; best := j)
         done;
         !best, !bc
       in
-      (* a candidate of level i from source src: in its range, and a fact of every other pattern of the level *)
-      let admits i src c =
-        let x = ord.(i) and ps = by_var.(ord.(i)) in
-        in_range x c
-        &&
+      (* does every pattern of level i but [src] (and those the leapfrog intersected: [lf] marks them) hold c *)
+      let others i src lf c =
+        let x = ord.(i) and ps = by_var.(ord.(i)) and sk = skip.(i) in
         let ok = ref true and j = ref 0 in
         while !ok && !j < Array.length ps do
-          if !j <> src && not (accepts x c ps.(!j)) then ok := false;
+          if !j <> src && (not sk.(!j)) && (lf = 0 || (lf lsr !j) land 1 = 0) && not (accepts x c ps.(!j)) then ok := false;
           incr j
         done;
         !ok
       in
+      (* a candidate of level i from source src: in its range, and a fact of every other pattern of the level *)
+      let admits i src c = in_range ord.(i) c && others i src 0 c in
       (* the same test as [admits], written out: a call per candidate costs 4 to 7 % of Q4 (no flambda) *)
       let candidates i src (f : int -> unit) =
-        let x = ord.(i) and ps = by_var.(ord.(i)) in
+        let x = ord.(i) and ps = by_var.(ord.(i)) and sk = skip.(i) in
         if src >= 0 then
           iterate x ps.(src) (fun c ->
               incr w;
               if in_range x c then begin
                 let ok = ref true and j = ref 0 in
                 while !ok && !j < Array.length ps do
-                  if !j <> src && not (accepts x c ps.(!j)) then ok := false;
+                  if !j <> src && (not sk.(!j)) && not (accepts x c ps.(!j)) then ok := false;
                   incr j
                 done;
                 if !ok then f c
               end)
       in
+      (* the leapfrog's buffers, a level's pattern each: its candidates, how many, and the known side they were read for *)
+      let bufs = Array.map (fun ps -> Array.map (fun _ -> ref [||]) ps) by_var
+      and lens = Array.map (fun ps -> Array.make (Array.length ps) (-1)) by_var
+      and keys = Array.map (fun ps -> Array.make (Array.length ps) 0) by_var in
+      let partss = Array.init n (fun _ -> Array.make 64 0) and poss = Array.init n (fun _ -> Array.make 64 0) in
+      (* pattern j of level i read into its buffer, sorted, unless it holds it already for the same known side *)
+      let fill i j =
+        let x = ord.(i) and pt = by_var.(ord.(i)).(j) in
+        let key = match other x pt with W w -> w | V y -> env.(y) in
+        let xi = ord.(i) in
+        if lens.(xi).(j) < 0 || keys.(xi).(j) <> key then begin
+          let b = bufs.(xi).(j) and m = ref 0 and sorted = ref true in
+          iterate x pt (fun c ->
+              if !m = Array.length !b then (let nb = Array.make (max 16 (2 * !m)) 0 in Array.blit !b 0 nb 0 !m; b := nb);
+              if !m > 0 && Array.unsafe_get !b (!m - 1) >= c then sorted := false;
+              Array.unsafe_set !b !m c;
+              incr m);
+          w := !w + !m;
+          if not !sorted then (let s = Array.sub !b 0 !m in Array.sort compare s; Array.blit s 0 !b 0 !m);
+          lens.(xi).(j) <- !m;
+          keys.(xi).(j) <- key
+        end
+      in
       let rec level i acc =
         if i = n then acc := step !acc env
         else begin
           let x = ord.(i) in
-          let src, _ = choose i in
-          bound.(x) <- true;
-          candidates i src (fun c -> env.(x) <- c; level (i + 1) acc);
-          bound.(x) <- false
+          let f = func.(i) in
+          if f >= 0 then begin
+            (* the one value of a bound thing's one-valued property *)
+            let pt = by_var.(x).(f) in
+            let e = match pt.pe with W e -> e | V y -> env.(y) in
+            match Store.value1 v e pt.pp cell with
+            | 0 -> ()
+            | 1 ->
+              incr w;
+              let c = cell.(0) in
+              if in_range x c && others i f 0 c then begin
+                bound.(x) <- true;
+                env.(x) <- c;
+                level (i + 1) acc;
+                bound.(x) <- false
+              end
+            | _ -> general i acc
+          end
+          else general i acc
+        end
+      and general i acc =
+        let x = ord.(i) in
+        let src, size = choose i in
+        bound.(x) <- true;
+        (if leap.(i) && src >= 0 && slice.(i).(src) && size >= 4 then leapfrog i src size acc
+         else candidates i src (fun c -> env.(x) <- c; level (i + 1) acc));
+        bound.(x) <- false
+      (* Leapfrog Triejoin's intersection (Veldhuizen 2014): the source and every other slice whose count is at most 8
+         times the source's are read into their buffers, then the iterators, in the order of their keys, each seek the
+         largest key in turn by galloping (Bentley, Yao 1976): a key all reach is a candidate, checked against the
+         level's other patterns. Read: at most 1 + 8 (k - 1) times the source's count; compared: O(m log (n / m)) *)
+      and leapfrog i src size acc =
+        let x = ord.(i) and ps = by_var.(ord.(i)) and cs = counts.(ord.(i)) and xi = ord.(i) in
+        let parts = partss.(i) and pos = poss.(i) in
+        let k = ref 1 and lf = ref (1 lsl src) in
+        parts.(0) <- src;
+        for j = 0 to Array.length ps - 1 do
+          if j <> src && slice.(i).(j) && cs.(j) <= 8 * size && !k < 62 then (parts.(!k) <- j; incr k; lf := !lf lor (1 lsl j))
+        done;
+        let k = !k and lf = !lf in
+        if k < 2 then candidates i src (fun c -> env.(x) <- c; level (i + 1) acc)
+        else begin
+          let empty = ref false in
+          for q = 0 to k - 1 do
+            fill i parts.(q);
+            pos.(q) <- 0;
+            if lens.(xi).(parts.(q)) = 0 then empty := true
+          done;
+          if not !empty then begin
+            let key q = Array.unsafe_get !(bufs.(xi).(parts.(q))) pos.(q) in
+            (* the iterators in the order of their first keys (insertion sort: a few) *)
+            for a = 1 to k - 1 do
+              let b = ref a in
+              while !b > 0 && key (!b - 1) > key !b do
+                let t = parts.(!b) in parts.(!b) <- parts.(!b - 1); parts.(!b - 1) <- t;
+                decr b
+              done
+            done;
+            let p = ref 0 and stop = ref false in
+            let hi = ref (key (k - 1)) in
+            while not !stop do
+              let xk = key !p in
+              if xk = !hi then begin
+                (* every iterator is at the key *)
+                if in_range x xk && others i src lf xk then (env.(x) <- xk; level (i + 1) acc);
+                pos.(!p) <- pos.(!p) + 1;
+                if pos.(!p) >= lens.(xi).(parts.(!p)) then stop := true
+                else (hi := key !p; p := (!p + 1) mod k)
+              end
+              else begin
+                let a = !(bufs.(xi).(parts.(!p))) and len = lens.(xi).(parts.(!p)) in
+                pos.(!p) <- gallop a len pos.(!p) !hi;
+                if pos.(!p) >= len then stop := true else (hi := key !p; p := (!p + 1) mod k)
+              end
+            done
+          end
         end
       in
       env, bound, choose, iterate, admits, level, w

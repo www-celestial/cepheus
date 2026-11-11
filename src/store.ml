@@ -593,6 +593,24 @@ let base_iter_pt b p fn =
     end
   end
 
+(* the value of (e, p) when e has exactly one: 1 and the value in cell.(0); 0: none; 2: several *)
+let value1 b e p (cell : int array) =
+  let q = cthing b p e in
+  if q < 0 then 0
+  else begin
+    let lo = crow b p q in
+    match crow b p (q + 1) - lo with
+    | 1 -> Array.unsafe_set cell 0 (cval b p e lo); 1
+    | 0 -> 0
+    | _ -> 2
+  end
+
+let rec base_value1 b e p cell =
+  if not (has_col b p) then 0 else match value1 b e p cell with r -> ended r | exception Miss k -> fault b k; base_value1 b e p cell
+
+(* does e hold p in the part: one bit of the column's rank table (a thing it counts has a row at least) *)
+let rec base_has_p b e p = has_col b p && match cthing b p e with q -> ended (q >= 0) | exception Miss k -> fault b k; base_has_p b e p
+
 (* The open's checks of a column (Snapshot.check_and_build), on pages that checked: a rank table's counts follow from
    its bits (its last word a count alone): the things it counts, or -1; offsets from 0 to [last], each larger than the
    one before (a thing has a value at least); blocks in order within [room] bytes of values, of widths at most 64. *)
@@ -1288,7 +1306,33 @@ let count_values v e p =
   in
   n + match thing_delta v e with Some td -> Option.value (IM.find_opt p td.tn) ~default:0 | None -> 0
 
-let has_value v e p = count_values v e p > 0
+let has_value v e p =
+  if Array.length v.runs = 1 && not (is_touched v e) then base_has_p v.runs.(0).a e p else count_values v e p > 0
+
+(* the value of (e, p) when e has exactly one in a view of one run that has no change of e: 1 and the value in
+   cell.(0); 0: none; 2: otherwise (several values, or several runs, or a delta: read them by [iter_values]) *)
+let value1 v e p cell = if Array.length v.runs = 1 && not (is_touched v e) then base_value1 v.runs.(0).a e p cell else 2
+
+(* the things that hold p, each once: in thing order from the column of a view of one run with no change of p;
+   otherwise as the facts come, seen once through a table *)
+let iter_holders v p f =
+  if Array.length v.runs = 1 && not (IM.mem p v.delta.dav) then base_iter_pt v.runs.(0).a p f
+  else begin
+    let seen = Hashtbl.create 256 in
+    iter_prop v p (fun e _ -> if not (Hashtbl.mem seen e) then (Hashtbl.replace seen e (); f e))
+  end
+
+(* the values p takes, each once: in value order from the rows by value of a view of one run with no change of p, equal
+   values side by side; otherwise seen once through a table *)
+let iter_taken v p f =
+  if Array.length v.runs = 1 && not (IM.mem p v.delta.dav) then begin
+    let last = ref 0 and first = ref true in
+    base_iter_p v.runs.(0).a p (fun _ w -> if !first || w <> !last then (first := false; last := w; f w))
+  end
+  else begin
+    let seen = Hashtbl.create 256 in
+    iter_prop v p (fun _ w -> if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); f w))
+  end
 
 let count_things v p w =
   let rs = v.runs in
