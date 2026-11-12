@@ -378,7 +378,7 @@ sans hypothèse sur la distribution. Les commandes `wlat`, `stall`, `write ... W
 
 | | mesuré | à côté |
 |---|---|---|
-| un changement après le reçu de son écriture, au serveur, par son socket Unix ($n = 7$, 200 écritures chacun) | p50 16,0 µs [11,0 ; 26,9], p99 68 | `NOTIFY` de PostgreSQL avec un serveur Go, du commit à l'écran, sa WebSocket comprise : 137 µs [128 ; 148] (l'étude multijoueur) |
+| un changement après le reçu de son écriture, au serveur, par son socket Unix ($n = 7$, 200 écritures chacun) | p50 16,0 µs [11,0 ; 26,9], p99 68 | `NOTIFY` de PostgreSQL avec un serveur Go, du commit à l'écran, sa WebSocket comprise : 137 µs [128 ; 148] (mesuré sur la même machine le 2026-11-11 avec PostgreSQL 18.6 et Go 1.26.3, par un banc d'essai hors de ce dépôt) |
 | le même, dans le follower du programme sur la machine du serveur | p50 −6,9 µs [−14,8 ; −1,0] : avant le reçu ; p99 19,8 | |
 | l'écriture elle-même (son fsync) | p50 3 409 µs [2 970 ; 5 879] | l'insert de PostgreSQL avec son fsync : 3 317 µs [3 122 ; 3 438] (l'étude) |
 | 100 watches, chacun sur une connexion lue par un thread, un writer de groupes de 20 factures pendant 10 s, sans / avec une connexion qui suit une question et ne lit jamais ($n = 7$) | livrés 100 % / 100 % ; après le reçu p50 1 314 µs [1 259 ; 1 348] / 1 341 [1 186 ; 1 582], p99 4 880 [3 862 ; 7 126] / 5 747 [4 852 ; 96 319] ; le pic de mémoire du serveur 111 / 107 MB | l'écran bloqué de l'étude parmi 100 : Node `ws` et Go `gorilla` 100 % (p99 113 ms et 4,3 ms) ; un hub d'une seule fiber qui attend sur chaque socket, 50,6 % |

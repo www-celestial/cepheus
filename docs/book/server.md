@@ -339,7 +339,7 @@ the lock that keeps the machine's other benchmarks out; medians with their distr
 
 | | measured | beside |
 |---|---|---|
-| a change after its write's receipt, at the server, over its Unix socket ($n = 7$, 200 writes each) | p50 16.0 µs [11.0, 26.9], p99 68 | PostgreSQL `NOTIFY` with a Go server, from the commit to the screen, its WebSocket included: 137 µs [128, 148] (the multiplayer study) |
+| a change after its write's receipt, at the server, over its Unix socket ($n = 7$, 200 writes each) | p50 16.0 µs [11.0, 26.9], p99 68 | PostgreSQL `NOTIFY` with a Go server, from the commit to the screen, its WebSocket included: 137 µs [128, 148] (measured on the same machine on 2026-11-11 with PostgreSQL 18.6 and Go 1.26.3, a harness outside this repository) |
 | the same, in the program's follower on the server's machine | p50 −6.9 µs [−14.8, −1.0]: before the receipt; p99 19.8 | |
 | the write itself (its fsync) | p50 3,409 µs [2,970, 5,879] | PostgreSQL's insert with its fsync: 3,317 µs [3,122, 3,438] (study) |
 | 100 watches, each on a connection read by a thread, one writer of 20-invoice groups for 10 s, without / with a connection that watches and never reads ($n = 7$) | delivered 100 % / 100 %; after the receipt p50 1,314 µs [1,259, 1,348] / 1,341 [1,186, 1,582], p99 4,880 [3,862, 7,126] / 5,747 [4,852, 96,319]; the server's peak memory 111 / 107 MB | the study's stalled screen among 100: Node `ws` and Go `gorilla` 100 % (p99 113 ms and 4.3 ms); a hub of one fiber that waits on each socket, 50.6 % |

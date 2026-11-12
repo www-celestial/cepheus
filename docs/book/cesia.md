@@ -528,7 +528,7 @@ a server started from the same database for each):
   package's fiber that feeds the channel, and the channel to the watching fiber. Cesia's own channels alone (one
   sender, 10,000 fibers each reading its channel) take 57 ms to reach the last fiber: the package's path costs about
   twice that.
-- Beside PostgreSQL's `LISTEN`/`NOTIFY` with a Go server (measured in an earlier session, from the commit to the
+- Beside PostgreSQL's `LISTEN`/`NOTIFY` with a Go server (measured on the same machine on 2026-11-11 with PostgreSQL 18.6 and Go 1.26.3, a harness outside this repository; from the commit to the
   screen, its WebSocket included): 137 µs at 1 screen, 538 at 100, 2,822 at 1,000. At 1 and 100 the Cesia program has
   its change sooner, before any WebSocket; at 1,000 Go is ahead, its fan-out on 4 cores against one Cesia domain.
 - 10,000 screens of one program: 90 ms to the last fiber, before their WebSockets. A server program with
@@ -538,7 +538,7 @@ a server started from the same database for each):
 **Beside the giants.** No Cesia client of PostgreSQL exists (Cesia's `std/sql` speaks SQLite), so PostgreSQL is
 measured through its C library, the fastest client it has: a Cesia program on the server's machine reads a row 34
 times faster than any client of PostgreSQL can, since it makes no round trip, and over the network the Cesia client is
-within the giant's own cost (51.6 against 49.6 µs, PostgreSQL measured in an earlier session). Where PostgreSQL wins:
+within the giant's own cost (51.6 against 49.6 µs, PostgreSQL's figure from other rounds, [server](server.md#speed-beside-postgresql)). Where PostgreSQL wins:
 its client connects in 2 ms (Unix socket) or 4.3 ms (TLS), where the Cesia client's first call alone costs 13 ms;
 and a program that holds no copy of the data uses less memory than a local reader (31 MB of a database of 1 M facts,
 [server](server.md#what-it-costs)). Datomic's peers read in their own process too ("application processes

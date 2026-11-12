@@ -563,7 +563,7 @@ la même base pour chacun) :
   fiber à 10 000 : un réveil depuis le domain du follower, la fiber du package qui remplit le channel, et le channel
   jusqu'à la fiber qui suit. Les channels de Cesia seuls (un seul envoyeur, 10 000 fibers qui lisent chacune son
   channel) mettent 57 ms à atteindre la dernière fiber : le chemin du package coûte environ le double.
-- À côté de `LISTEN`/`NOTIFY` de PostgreSQL avec un serveur Go (mesuré dans une session précédente, du commit à
+- À côté de `LISTEN`/`NOTIFY` de PostgreSQL avec un serveur Go (mesuré sur la même machine le 2026-11-11 avec PostgreSQL 18.6 et Go 1.26.3, par un banc d'essai hors de ce dépôt ; du commit à
   l'écran, sa WebSocket comprise) : 137 µs pour 1 écran, 538 pour 100, 2 822 pour 1 000. À 1 et à 100, le programme
   Cesia a son changement plus tôt, avant toute WebSocket ; à 1 000, Go passe devant, son fan-out sur 4 cœurs contre un
   seul domain de Cesia.
@@ -574,8 +574,8 @@ la même base pour chacun) :
 **À côté des géants.** Aucun client Cesia de PostgreSQL n'existe (le `std/sql` de Cesia parle à SQLite) ; PostgreSQL est
 donc mesuré par sa bibliothèque C, le client le plus rapide qu'il ait : un programme Cesia sur la machine du serveur lit
 une ligne 34 fois plus vite que n'importe quel client de PostgreSQL ne le peut, puisqu'il ne fait aucun round trip, et
-par le réseau le client Cesia reste dans le coût propre du géant (51,6 contre 49,6 µs, PostgreSQL mesuré dans une
-session précédente). Là où PostgreSQL gagne : son client se connecte en 2 ms (socket Unix) ou 4,3 ms (TLS), là où le
+par le réseau le client Cesia reste dans le coût propre du géant (51,6 contre 49,6 µs, le chiffre de PostgreSQL vient d'autres tours,
+[serveur](server.md#la-vitesse-à-côté-de-postgresql)). Là où PostgreSQL gagne : son client se connecte en 2 ms (socket Unix) ou 4,3 ms (TLS), là où le
 seul premier appel du client Cesia coûte 13 ms ; et un programme qui ne tient aucune copie des données utilise moins de
 mémoire qu'un lecteur local (31 MB pour une base de 1 M de faits, [serveur](server.md#ce-que-cela-coûte)). Les peers
 de Datomic lisent aussi dans leur propre processus (« application processes have their own copy of the query engine
