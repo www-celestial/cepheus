@@ -177,7 +177,7 @@ defn InvoiceView(inv, u)
   lines = text.Join("", ["<tr><td>$(e(l.Label))</td><td class=\"num\">$(l.Quantity)</td><td class=\"num\">$(Money(l.Price))</td><td class=\"num\">$(Money(l.Quantity * l.Price))</td></tr>" for l in inv.Lines])
   open = inv.Status != "paid"
   acts = if open "<form method=\"post\" action=\"/invoices/$(inv.Id)/pay\"><button id=\"pay\">Mark paid</button></form> <a class=\"button\" href=\"/invoices/$(inv.Id)/edit\">Change</a>
-<form method=\"post\" action=\"/invoices/$(inv.Id)/delete\"><button class=\"danger\" id=\"delete\">Delete</button></form>" else "<p>Paid on $(DayText(inv.PaidAt)).</p>" end
+<form method=\"post\" action=\"/invoices/$(inv.Id)/delete\"><button class=\"danger\" id=\"delete\">Delete</button></form>" else "<p id=\"paid-on\">Paid on $(DayText(inv.PaidAt)).</p>" end
   client = if u.Role == "admin" "<a href=\"/clients/$(inv.Client)\">$(e(inv.BillTo))</a>" else e(inv.BillTo) end
   Layout("Invoice $(inv.Number)", u, "<p>Bill to $client · dated $(DayText(inv.Date)) · due $(DayText(inv.Due)) · <span id=\"status\">$(status(inv.Status))</span></p>
 <table><thead><tr><th>Label</th><th class=\"num\">Quantity</th><th class=\"num\">Price</th><th class=\"num\">Amount</th></tr></thead><tbody>$lines</tbody>

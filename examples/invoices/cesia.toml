@@ -7,6 +7,12 @@ from = "github.com/www-celestial/cepheus"
 version = "v0.1.0"
 take = ["cesia/cepheus"]
 
+# Ceti drives Firefox in the end-to-end tests (tests/e2e, tools/e2e.sh).
+[deps.ceti]
+from = "github.com/www-celestial/ceti"
+version = "v0.1.0"
+take = ["src/browser"]
+
 # The server: the package's engine (native=cepheus, which reaches the Cepheus server), libsodium for the passwords
 # and the sessions, its settings, and its port. It reads and writes no file.
 [tasks.serve]
@@ -18,6 +24,14 @@ allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN",
 file = "src/users.ce"
 allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=APP_PASSWORD"]
 
-# The unit tests run on forks of Empty: no server, only the package's engine; and libsodium for the passwords.
+# The unit tests run on forks of Empty: no server, only the package's engine; and libsodium for the passwords. The
+# end-to-end tests share a database, so they run alone, one after the other; Firefox takes a few seconds to start.
 [test]
 allow = ["native=cepheus", "ffi=sodium"]
+serial = ["tests/e2e"]
+timeout = "60"
+
+# cesia do seed: 10,000 clients and 100,000 invoices in an empty database, always the same (the seed 7).
+[tasks.seed]
+file = "src/seed/seed.ce"
+allow = ["native=cepheus", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN"]

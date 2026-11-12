@@ -1,0 +1,101 @@
+(** Fills an empty database with made-up data for trying the app at its size: 10,000 clients and 100,000 invoices of
+    one to five lines over the last year, paid, unpaid or late as their dates make them. The same seed gives the same
+    data: cesia do seed runs it with the seed 7. The invoices go in groups of 20,000 (about 480,000 facts each), which
+    take the path of large groups in the database. Other sizes: seed CLIENTS INVOICES [INVOICES-A-GROUP]. Each draw is
+    a hash of the invoice's number and of what it draws, so the data is the same at every run. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/invoices
+use std/io
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+firsts = ["Ada", "Bo", "Chloé", "David", "Élodie", "Farid", "Grace", "Hugo", "Inès", "Jules", "Karim", "Léa", "Marc", "Nina", "Omar", "Paula", "Quentin", "Rosa", "Sami", "Théo", "Ugo", "Vera", "Wen", "Yanis", "Zoé"]
+lasts = ["Martin", "Bernard", "Dubois", "Thomas", "Robert", "Richard", "Petit", "Durand", "Leroy", "Moreau", "Simon", "Laurent", "Lefebvre", "Michel", "Garcia", "David", "Bertrand", "Roux", "Vincent", "Fournier"]
+cities = ["Lyon", "Paris", "Marseille", "Toulouse", "Nice", "Nantes", "Strasbourg", "Montpellier", "Bordeaux", "Lille", "Rennes", "Reims", "Grenoble", "Dijon", "Angers", "Brest", "Tours", "Limoges", "Metz", "Caen"]
+labels = ["Design", "Hosting", "Support", "Audit", "Training", "Licence", "Consulting", "Development", "Maintenance", "Translation"]
+day = 86400
+
+draw(i, k, lo, hi) = lo + math.Mod(math.Mod((i * 16 + k + 1) * 2654435761, 4294967291), hi - lo + 1)   (** The draw k of the thing i, from lo to hi: a hash. *)
+pick(i, k, xs) = xs[draw(i, k, 1, value.Len(xs))]   (** One of xs, by draw. *)
+
+args = sys.Args
+nClients = if value.Len(args) >= 1 text.Number(args[1]) else 10000 end
+nInvoices = if value.Len(args) >= 2 text.Number(args[2]) else 100000 end
+per = if value.Len(args) >= 3 text.Number(args[3]) else 20000 end
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
+now = sys.Now()
+started = now
+
+defn clients(from, n)
+  (** n clients in one group: an Ok of their ids and names. *)
+  parts = []
+  names = []
+  for k in 1..n
+    i = from + k
+    name = "$(firsts[math.Mod(i, 25) + 1]) $(lasts[math.Mod(math.Div(i, 25), 20) + 1])"
+    names = list.Append(name, names)
+    t = cepheus.New(k)
+    parts = list.Append([cepheus.Add(t, invoices.Client.Name, name), cepheus.Add(t, invoices.Client.Search, invoices.Lower(name)),
+                            cepheus.Add(t, invoices.Client.Email, "client$i@example.com"), cepheus.Add(t, invoices.Client.City, pick(i, 1, cities))], parts)
+  end
+  r = cepheus.Write(list.Flatten(parts), db, why = "seed")?
+  result.Ok({Ids: r.Things, Names: names})
+end
+
+defn invoicesOf(from, n, made)
+  (** n invoices with their lines, numbered after from, in one group: an Ok of how many facts. *)
+  parts = []
+  k = 0
+  for j in 1..n
+    i = from + j
+    c = draw(i, 1, 1, value.Len(made.Ids))
+    date = now - draw(i, 2, 0, 364) * day - draw(i, 3, 0, day - 1)
+    due = date + 30 * day
+    inv = cepheus.New(k + 1)
+    k += 1
+    total = 0
+    lines = draw(i, 4, 1, 5)
+    for p in 1..lines
+      q = draw(i, 4 + p, 1, 10)
+      price = draw(i, 9 + p, 20, 2000) * 5
+      total += q * price
+      k += 1
+      t = cepheus.New(k)
+      parts = list.Append([cepheus.Add(t, invoices.Line.Invoice, inv), cepheus.Add(t, invoices.Line.Position, p), cepheus.Add(t, invoices.Line.Label, pick(i, 4 + p, labels)),
+                              cepheus.Add(t, invoices.Line.Quantity, q), cepheus.Add(t, invoices.Line.Price, price)], parts)
+    end
+    status = if due < now (if draw(i, 15, 1, 100) <= 88 "paid" else "late" end) else (if draw(i, 15, 1, 100) <= 50 "paid" else "unpaid" end) end
+    name = made.Names[c]
+    parts = list.Append([cepheus.Add(inv, invoices.Invoice.Number, i), cepheus.Add(inv, invoices.Invoice.Client, made.Ids[c]), cepheus.Add(inv, invoices.Invoice.BillTo, name),
+                            cepheus.Add(inv, invoices.Invoice.Search, invoices.Lower(name)), cepheus.Add(inv, invoices.Invoice.Date, date), cepheus.Add(inv, invoices.Invoice.Due, due),
+                            cepheus.Add(inv, invoices.Invoice.Status, status), cepheus.Add(inv, invoices.Invoice.Total, total)], parts)
+    if status == "paid"
+      parts = list.Append([cepheus.Add(inv, invoices.Invoice.PaidAt, list.Min([now, date + draw(i, 0, 1, 40) * day]))], parts)
+    end
+  end
+  ops = list.Flatten(parts)
+  cepheus.Write(ops, db, why = "seed")?
+  result.Ok(value.Len(ops))
+end
+
+made = {Ids: [], Names: []}
+for g in 1..math.Div(nClients + 1999, 2000)
+  part = result.Unwrap(clients((g - 1) * 2000, list.Min([2000, nClients - (g - 1) * 2000])))
+  made = {Ids: list.Concat(made.Ids, part.Ids), Names: list.Concat(made.Names, part.Names)}
+end
+io.Print("$(value.Len(made.Ids)) clients in $(text.Decimals(2, sys.Now() - started)) s")
+facts = 0
+t = sys.Now()
+for g in 1..math.Div(nInvoices + per - 1, per)
+  facts += result.Unwrap(invoicesOf((g - 1) * per, list.Min([per, nInvoices - (g - 1) * per]), made))
+end
+io.Print("$nInvoices invoices, $facts facts with their lines, in $(text.Decimals(2, sys.Now() - t)) s")
+(* The rules last: a rule whose head is a one-valued property, or a constraint, sends a large group to the ordinary
+   path of the writer, four times slower here; defined after the load, they derive over it in one group. *)
+t = sys.Now()
+result.Unwrap(cepheus.Define(invoices.Rules, db))
+io.Print("rules defined in $(text.Decimals(2, sys.Now() - t)) s")
