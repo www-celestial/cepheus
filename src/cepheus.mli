@@ -144,6 +144,11 @@ val why : view -> int -> int -> value -> proof option
 (** [why v thing property value]: a well-founded proof of a fact of the view, its leaves asserted facts of the view
     (G20); [None] when the triple is not a fact of the view. Computed when asked: nothing is stored at write time. *)
 
+val sources : view -> int -> int list option
+(** [sources v p]: the properties whose facts the derived facts of property [p] can come from through the rules,
+    transitively; [None] when a rule reads a property that is a variable, so any. A reader allowed some kinds only
+    learns nothing it may not read from [p]'s derived facts when it reads every kind of these. *)
+
 val rule_budget : int ref * int ref
 (** The budget of a write: its derived changes may not pass [fst + snd * its asserted changes] (100,000 + 100 x); a
     group past it is refused, naming the rule that derived the most. *)

@@ -243,6 +243,78 @@ let () =
   C.check (F.equal (user_facts (view db)) (least (rules_of (view db)) (asserted_facts (view db)))) "edges and a fact of the closure added: the least model";
   check_proofs (view db)
 
+let () =
+  section "rules: a closure past the budget is refused, whole and early, on every path of the module";
+  let b0 = !(fst rule_budget) and b1 = !(snd rule_budget) in
+  fst rule_budget := 1000;
+  snd rule_budget := 1;
+  let x = Var 0 and y = Var 1 and z = Var 2 in
+  let refused name f =
+    match f () with
+    | Error (Invalid m) -> C.check (String.length m > 5 && String.sub m 0 5 = "rule ") "%s: refused (%s)" name m
+    | Ok _ -> C.fail "%s: must be refused by the budget" name
+    | Error e -> C.fail "%s: %s" name (message e)
+  in
+  List.iter
+    (fun (form, older) ->
+      let db = fork empty in
+      let ty, parent, member, _, _, _ = schema db in
+      ignore ty;
+      let rules =
+        if form = "trp" then [ { name = "trp"; vars = 3; where = [ { e = x; p = parent; v = y }; { e = y; p = parent; v = z } ]; ranges = []; head = Give { e = x; p = parent; v = z } } ]
+        else
+          [ { name = "base"; vars = 2; where = [ { e = x; p = member; v = y } ]; ranges = []; head = Give { e = x; p = parent; v = y } };
+            { name = "step"; vars = 3; where = [ { e = x; p = member; v = y }; { e = y; p = parent; v = z } ]; ranges = []; head = Give { e = x; p = parent; v = z } } ]
+      in
+      ignore (ok (define db rules));
+      let edge = if form = "trp" then parent else member in
+      let r = ok (write db (List.init 200 (fun i -> Add (-(i + 1), member, Link (-(i + 1)))))) in
+      let n = Array.init 200 (fun i -> thing r (-(i + 1))) in
+      ignore (ok (write db (List.init 200 (fun i -> Retract (n.(i), member, Link n.(i))))));
+      let before = user_facts (view db) in
+      (* a chain of 200 in one group: 19,701 facts of the closure *)
+      refused (Printf.sprintf "%s, a chain of 200 from scratch (%s)" form (if older then "each edge to an older thing" else "to a newer one"))
+        (fun () -> write db (List.init 199 (fun i -> if older then Add (n.(i + 1), edge, Link n.(i)) else Add (n.(i), edge, Link n.(i + 1)))));
+      C.check (F.equal before (user_facts (view db))) "%s: all or nothing" form;
+      (* two chains of 40 under the budget, then the edge that joins them: 1,600 facts at once *)
+      let chain a = List.init 39 (fun i -> Add (n.(a + i), edge, Link n.(a + i + 1))) in
+      ignore (ok (write db (chain 0)));
+      ignore (ok (write db (chain 100)));
+      refused (Printf.sprintf "%s, the edge that joins two chains of 40" form) (fun () -> write db [ Add (n.(39), edge, Link n.(100)) ]);
+      C.check (F.equal (user_facts (view db)) (least (rules_of (view db)) (asserted_facts (view db)))) "%s: the least model after" form)
+    [ "trp", true; "trp", false; "linear", true; "linear", false ];
+  (* the W3C's form, unfolded: a dense result refused the same way *)
+  let db = fork empty in
+  let ty, parent, member, member_of, _, _ = schema db in
+  let meta = List.hd (ok (declare db [ prop ~many:true "meta" Tlink ])) in
+  let r = ok (write db (Add (-1, meta, Link parent) :: List.init 60 (fun i -> Add (-(i + 2), member, Link (-(i + 2)))))) in
+  let a = thing r (-1) and n = Array.init 60 (fun i -> thing r (-(i + 2))) in
+  ignore (ok (write db (List.init 60 (fun i -> Retract (n.(i), member, Link n.(i))))));
+  let w3c = { name = "w3c-trp"; vars = 4; where = [ { e = Thing a; p = meta; v = Var 3 }; { e = x; p = prop_var 3; v = y }; { e = y; p = prop_var 3; v = z } ]; ranges = [];
+              head = Give { e = x; p = prop_var 3; v = z } } in
+  ignore (ok (define db [ w3c ]));
+  (* a chain of 60: 59 edges, 1,711 facts derived *)
+  ignore (ty, member_of);
+  refused "the W3C's form of prp-trp, unfolded, over a chain" (fun () -> write db (List.init 59 (fun i -> Add (n.(i), parent, Link n.(i + 1)))));
+  fst rule_budget := b0;
+  snd rule_budget := b1
+
+let () =
+  section "rules: where a property's derived facts come from (for rights per kind)";
+  let db = fork empty in
+  let ty, parent, member, member_of, status, _ = schema db in
+  let x = Var 0 and y = Var 1 and z = Var 2 in
+  let r1 = { name = "s1"; vars = 2; where = [ { e = x; p = member; v = y } ]; ranges = []; head = Give { e = y; p = member_of; v = x } } in
+  let r2 = { name = "s2"; vars = 3; where = [ { e = x; p = member_of; v = y }; { e = y; p = parent; v = z } ]; ranges = []; head = Give { e = x; p = ty; v = z } } in
+  ignore (ok (define db [ r1; r2 ]));
+  C.check (sources (view db) ty = Some (List.sort compare [ member; member_of; parent ])) "type comes from member, memberOf and parent";
+  C.check (sources (view db) member = Some []) "member is asserted only";
+  let meta = List.hd (ok (declare db [ prop ~many:true "meta" Tlink ])) in
+  let r3 = { name = "s3"; vars = 3; where = [ { e = Var 2; p = meta; v = Var 1 }; { e = x; p = prop_var 1; v = Var 2 } ]; ranges = []; head = Give { e = x; p = status; v = Val (Text "x") } } in
+  ignore (ok (define db [ r3 ]));
+  C.check (sources (view db) status = None) "a rule over a variable property: status may come from any property";
+  ignore meta
+
 (* ---- G17, G18, G20: random sequences against the least model from scratch ---- *)
 
 let debug = match Sys.getenv_opt "RULES_SEED" with Some s -> int_of_string s | None -> 0
@@ -251,6 +323,11 @@ let show_op = function
   | Add (e, p, x) -> Printf.sprintf "+[%d %d %s]" e p (Value.to_string x)
   | Retract (e, p, x) -> Printf.sprintf "-[%d %d %s]" e p (Value.to_string x)
   | Expect _ -> "expect"
+
+(* each group's outcome and view, by (seed, group, merges): a run with the rules always as written must give the
+   unfolded run's, exactly (Reason.specialise) *)
+let outcomes : (int * int * bool, bool * F.t) Hashtbl.t = Hashtbl.create 4096
+let compare_paths = ref false
 
 let random_sequences ~seeds ~groups ~merges =
   let progress = Sys.getenv_opt "RULES_PROGRESS" <> None in
@@ -420,6 +497,12 @@ let random_sequences ~seeds ~groups ~merges =
       let v = view !db in
       let rules = rules_of v in
       let got = user_facts v and asserted = asserted_facts v in
+      (let key = (seed, g, merges) and here = (v.group, got) in
+       if !compare_paths then
+         match Hashtbl.find_opt outcomes key with
+         | Some (_, f) -> C.check (F.equal f got) "seed %d group %d: the rules as written give the unfolded run's view: %s" seed g (C.show_diff f got)
+         | None -> ()
+       else Hashtbl.replace outcomes key (true, snd here));
       let want = least ~ptyp rules asserted in
       C.check (F.equal got want) "seed %d group %d: G17, the view is the least model: %s" seed g (if F.equal got want then "" else C.show_diff got want);
       C.check (not (violated rules got)) "seed %d group %d: G18, no constraint broken" seed g;
@@ -438,7 +521,13 @@ let () =
   let seeds = match Sys.getenv_opt "RULES_SEEDS" with Some s -> int_of_string s | None -> 60 in
   random_sequences ~seeds ~groups:60 ~merges:false;
   section "G17, G18, G20: the same with the facts merged into runs between groups";
-  random_sequences ~seeds ~groups:60 ~merges:true
+  random_sequences ~seeds ~groups:60 ~merges:true;
+  section "the rules always as written (no unfolding): every group's view the same as above";
+  Reason.specialise := false;
+  compare_paths := true;
+  random_sequences ~seeds ~groups:60 ~merges:false;
+  Reason.specialise := true;
+  compare_paths := false
 
 let () =
   Printf.printf "(groups reasoned unfolded %d, as written %d, again as written %d; closures from scratch %d)\n" !Reason.spec_groups

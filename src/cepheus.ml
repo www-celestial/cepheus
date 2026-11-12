@@ -146,6 +146,7 @@ type proof = Reason.proof =
 
 let why (v : view) e p x = match Store.word v x with None -> None | Some w -> Reason.why v e p w
 
+let sources = Reason.sources
 let rule_budget = Reason.budget_base, Reason.budget_per
 
 let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ | None -> None

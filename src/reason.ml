@@ -61,6 +61,7 @@ let gen_groups = ref 0  (* and with the rules as written *)
 let respecs = ref 0  (* groups begun unfolded, then reasoned again as written: a frozen relation's fact changed *)
 let batches = ref 0  (* closure modules run from scratch *)
 let trace = ref false
+let specialise = ref true  (* false: the rules always run as written (the tests compare both paths) *)
 let module_seconds = ref 0. (* of [seconds]: the closure modules' work, their facts found and put aside *)
 
 (* ---- hashing ---- *)
@@ -434,7 +435,9 @@ and ctx = {
   mutable limit : int;
   mutable vp : Bytes.t;  (* by property: 1 when the view may hold facts of it (a load: the view lacks most); empty: all *)
   per_rule : int array;
-  mutable side : ints;  (* the modules' facts that go to the output directly: thing, property, value *)
+  mutable side_e : Bulk.i32;  (* the modules' facts that go to the output directly: things, properties, values *)
+  mutable side_p : Bulk.u16;
+  mutable side_w : ints;
   mutable ns : int;
   mbatch : int array;  (* by module: the round of its batch in this group, -1 none yet, -2 it ran incrementally *)
   mfresh : bool array;  (* by module: the state before the group held no fact of its closure *)
@@ -1357,7 +1360,7 @@ let programs (v : Store.view) =
           Hashtbl.replace cache key en;
           en
       in
-      if (not en.specialisable) || en.nospec then en.gen, None
+      if (not !specialise) || (not en.specialisable) || en.nospec then en.gen, None
       else
         match List.find_opt (fun (p : program) -> spec_holds (Option.get p.spec) v) en.specs with
         | Some p -> en.gen, Some p
@@ -1389,7 +1392,7 @@ let new_ctx ?facts prog v =
   { prog; ws = ws_create ?facts (); pt = ws_create (); v; round = max_int; cw = Array.make (Array.length prog.consts) (-1);
     ins = None; lost = None; cons = None; pf = [||]; bwd = [||]; bfq = Queue.create (); next = ints 64 0;
     spare = ints 64 0; nn = 0; derived = 0; limit = max_int; vp = Bytes.empty;
-    per_rule = Array.make (Array.length prog.rules) 0; side = ints 0 0; ns = 0; mbatch = Array.make nm (-1);
+    per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create () }
 
 let take ?facts prog v =
@@ -1415,7 +1418,7 @@ let take ?facts prog v =
 
 let give c =
   (* a context that held a large group's facts is let go, its memory with it *)
-  if c.ws.cap <= 1 lsl 16 && A.dim c.side <= 3 lsl 16 then begin
+  if c.ws.cap <= 1 lsl 16 && A.dim c.side_w <= 1 lsl 16 then begin
     reset c.ws;
     reset c.pt;
     Mutex.protect c.prog.pm (fun () -> c.prog.pool := c :: !(c.prog.pool))
@@ -1607,13 +1610,27 @@ let derive_new c ri e p w =
   push_next c x
 
 (* or straight into the group's output, when nothing else in the group reads it (closure.m_side) *)
+(* room for k more of them *)
+let side_room c k =
+  if c.ns + k > A.dim c.side_w then begin
+    let cap = max (c.ns + k) (max 1024 (2 * A.dim c.side_w)) in
+    let e = Bulk.i32 cap and p = Bulk.u16 cap and w = ints_raw cap in
+    if c.ns > 0 then begin
+      Bigarray.Array1.blit (Bigarray.Array1.sub c.side_e 0 c.ns) (Bigarray.Array1.sub e 0 c.ns);
+      Bigarray.Array1.blit (Bigarray.Array1.sub c.side_p 0 c.ns) (Bigarray.Array1.sub p 0 c.ns);
+      A.blit (A.sub c.side_w 0 c.ns) (A.sub w 0 c.ns)
+    end;
+    c.side_e <- e;
+    c.side_p <- p;
+    c.side_w <- w
+  end
+
 let derive_side c ri e p w =
   check_frozen c p w;
-  if (3 * c.ns) + 3 > A.dim c.side then c.side <- regrow c.side (3 * c.ns) (max 3072 (2 * A.dim c.side)) 0;
-  let i = 3 * c.ns in
-  A.unsafe_set c.side i e;
-  A.unsafe_set c.side (i + 1) p;
-  A.unsafe_set c.side (i + 2) w;
+  side_room c 1;
+  Bigarray.Array1.unsafe_set c.side_e c.ns (Int32.of_int e);
+  Bigarray.Array1.unsafe_set c.side_p c.ns p;
+  A.unsafe_set c.side_w c.ns w;
   c.ns <- c.ns + 1;
   count_derived c ri
 
@@ -1717,13 +1734,16 @@ let rows n k (src : ints) (dst : ints) =
   let off = ints (n + 1) 0 in
   for i = 0 to k - 1 do let s = A.unsafe_get src i in A.unsafe_set off (s + 1) (A.unsafe_get off (s + 1) + 1) done;
   for u = 0 to n - 1 do A.unsafe_set off (u + 1) (A.unsafe_get off (u + 1) + A.unsafe_get off u) done;
-  let fill = ints (max 1 n) 0 and adj = ints_raw (max 1 k) in
+  (* each edge at its source's next place, the places then moved back by one source *)
+  let adj = ints_raw (max 1 k) in
   for i = 0 to k - 1 do
     let s = A.unsafe_get src i in
-    let j = A.unsafe_get off s + A.unsafe_get fill s in
-    A.unsafe_set fill s (A.unsafe_get fill s + 1);
+    let j = A.unsafe_get off s in
+    A.unsafe_set off s (j + 1);
     A.unsafe_set adj j (A.unsafe_get dst i)
   done;
+  for u = n downto 1 do A.unsafe_set off u (A.unsafe_get off (u - 1)) done;
+  A.unsafe_set off 0 0;
   off, adj
 
 (* The module from scratch, at its first work in a group whose state before held none of its closure's facts (or
@@ -1742,9 +1762,12 @@ let[@inline never] count_many c ri k =
 let batch c mi =
   let m = c.prog.modules.(mi) in
   let trp = m.m_base < 0 in
-  let es = buf_create 1024 and ed = buf_create 1024 and bs = buf_create 16 and bd = buf_create 16 in
   let tt0 = Unix.gettimeofday () in
   let lap name = if !trace then Printf.printf "    [batch %s %.4f]\n%!" name (Unix.gettimeofday () -. tt0) in
+  (* the facts counted first, for buffers of their size *)
+  let count p = let k = ref 0 in iter_all c p (fun _ _ -> incr k); !k in
+  let ke = count m.m_e and kb = if trp then 0 else count m.m_t in
+  let es = buf_create ke and ed = buf_create ke and bs = buf_create kb and bd = buf_create kb in
   iter_all c m.m_e (fun e w -> buf_push es e; buf_push ed w);
   if not trp then iter_all c m.m_t (fun e w -> buf_push bs e; buf_push bd w);
   let ne = es.bn and nb = bs.bn in
@@ -1755,35 +1778,104 @@ let batch c mi =
     let lo = ref max_int and hi = ref min_int in
     let span (q : buf) = for i = 0 to q.bn - 1 do let x = A.unsafe_get q.b i in if x < !lo then lo := x; if x > !hi then hi := x done in
     span es; span ed; span bs; span bd;
-    let things = buf_create (2 * (ne + nb)) in
-    let local =
-      if !hi - !lo < (4 * (ne + nb)) + 1024 then begin
-        let lo = !lo in
-        let map = ints (!hi - lo + 1) (-1) in
-        fun x ->
-          let i = x - lo in
-          let l = A.unsafe_get map i in
-          if l >= 0 then l else (let l = things.bn in A.unsafe_set map i l; buf_push things x; l)
-      end
-      else begin
-        let ids = imap_create (2 * (ne + nb)) in
-        fun x -> let l = imap_id ids x in if l = things.bn then buf_push things x; l
+    let dense = !hi - !lo < (4 * (ne + nb)) + 1024 in
+    let things = buf_create (if dense then 1 else 2 * (ne + nb)) in
+    let base = if dense then !lo else 0 in
+    (if dense then begin
+       (* a thing's id is its offset from the lowest: in the things' order *)
+       let localize (q : buf) = for i = 0 to q.bn - 1 do A.unsafe_set q.b i (A.unsafe_get q.b i - base) done in
+       localize es; localize ed; localize bs; localize bd
+     end
+     else begin
+       let ids = imap_create (2 * (ne + nb)) in
+       let localize (q : buf) =
+         for i = 0 to q.bn - 1 do
+           let x = A.unsafe_get q.b i in
+           let l = imap_id ids x in
+           if l = things.bn then buf_push things x;
+           A.unsafe_set q.b i l
+         done
+       in
+       localize es; localize ed; localize bs; localize bd
+     end);
+    let n = if dense then !hi - !lo + 1 else things.bn in
+    lap "collected, ids";
+    (* a forest drawn from its roots (each thing one edge at most, to an older thing; no fact of B): each thing's
+       targets are the things above it, walked up, with no array of targets at all (a hierarchy, an org chart) *)
+    let forest =
+      dense && nb = 0 && m.m_side
+      && (match c.prog.spec with Some s -> not (m.m_t < Bytes.length s.frozen && Bytes.get s.frozen m.m_t <> '\000') | None -> true)
+      &&
+      let up = ints n (-1) in
+      let ok = ref true and i = ref 0 in
+      while !ok && !i < ne do
+        let a = A.unsafe_get es.b !i and b = A.unsafe_get ed.b !i in
+        if b >= a || A.unsafe_get up a >= 0 then ok := false else A.unsafe_set up a b;
+        incr i
+      done;
+      !ok
+      && begin
+        (* depths from the roots down (a parent is older), then every thing's ancestors *)
+        let depth = ints_raw n and total = ref 0 in
+        for u = 0 to n - 1 do
+          let p = A.unsafe_get up u in
+          let d = if p < 0 then 0 else A.unsafe_get depth p + 1 in
+          A.unsafe_set depth u d;
+          total := !total + d
+        done;
+        (* prp-trp's edges are present already: the first step up is an input *)
+        let skip = if trp then 1 else 0 in
+        let u_out = !total - (if trp then ne else 0) in
+        if c.derived + u_out > c.limit then count_many c m.m_rule (c.limit - c.derived + 1);
+        side_room c u_out;
+        let se = c.side_e and sp = c.side_p and sw = c.side_w and t = m.m_t in
+        let ns = ref c.ns in
+        for u = 0 to n - 1 do
+          let e32 = Int32.of_int (base + u) in
+          let z = ref (A.unsafe_get up u) and k = ref 0 in
+          while !z >= 0 do
+            if !k >= skip then begin
+              Bigarray.Array1.unsafe_set se !ns e32;
+              Bigarray.Array1.unsafe_set sp !ns t;
+              A.unsafe_set sw !ns (base + !z);
+              incr ns
+            end;
+            incr k;
+            z := A.unsafe_get up !z
+          done
+        done;
+        count_many c m.m_rule (!ns - c.ns);
+        c.ns <- !ns;
+        lap "forest";
+        true
       end
     in
-    let localize (q : buf) = for i = 0 to q.bn - 1 do A.unsafe_set q.b i (local (A.unsafe_get q.b i)) done in
-    localize es; localize ed; localize bs; localize bd;
-    let n = things.bn in
-    lap "collected, ids";
+    if not forest then begin
     let off, adj = rows n ne es.b ed.b in
-    let boff, badj = rows n nb bs.b bd.b in
+    let boff, badj = if nb = 0 then ints (n + 1) 0, ints 1 0 else rows n nb bs.b bd.b in
     lap "rows";
-    let nc, comp, members, moff = components n off adj in
-    let moff = moff.b in
+    (* every edge from a thing to an older one (a hierarchy whose things were made from the top, a DAG so drawn): the
+       things' order is a topological one, each thing its own component; else Tarjan's components *)
+    let ordered =
+      dense
+      &&
+      let ok = ref true and i = ref 0 in
+      while !ok && !i < ne do (if A.unsafe_get ed.b !i >= A.unsafe_get es.b !i then ok := false); incr i done;
+      !ok
+    in
+    let nc, comp, members, moff =
+      if ordered then begin
+        let id = ints_raw (n + 1) in
+        for u = 0 to n do A.unsafe_set id u u done;
+        n, id, id, id
+      end
+      else (let nc, comp, members, moff = components n off adj in nc, comp, members, moff.b)
+    in
     lap "components";
     (* each component's targets: through E its successors and their targets (T over E is closed), and its own
        members when it holds a cycle; for the linear form, its members' facts of B too *)
     let mark = ints (max 1 n) (-1) and toff = ints (nc + 1) 0 in
-    let tb = ref (ints_raw (max 1024 (2 * ne))) and tn = ref 0 in
+    let tb = ref (ints_raw ((8 * ne) + nb + 1024)) and tn = ref 0 in
     let reserve k =
       if !tn + k > A.dim !tb then begin
         let b = ints_raw (max (!tn + k) (2 * A.dim !tb)) in
@@ -1792,9 +1884,29 @@ let batch c mi =
       end
     in
     let room = c.limit - c.derived + ne + nb in
+    let cyc = Bytes.make (max 1 nc) '\000' in
     for k = 0 to nc - 1 do
       A.unsafe_set toff k !tn;
       let cyclic = ref false in
+      let m0 = A.unsafe_get moff k in
+      let u0 = A.unsafe_get members m0 in
+      let e0 = A.unsafe_get off u0 in
+      if A.unsafe_get moff (k + 1) = m0 + 1 && A.unsafe_get off (u0 + 1) = e0 + 1 && A.unsafe_get boff (u0 + 1) = A.unsafe_get boff u0
+         && (let kw = A.unsafe_get comp (A.unsafe_get adj e0) in kw <> k && Bytes.unsafe_get cyc kw = '\000')
+      then begin
+        (* one thing, one edge, to a component without a cycle: its targets are the edge's end and that one's, which
+           cannot hold it twice: copied at once *)
+        let w = A.unsafe_get adj e0 in
+        let kw = A.unsafe_get comp w in
+        let a = A.unsafe_get toff kw and b = A.unsafe_get toff (kw + 1) in
+        reserve (b - a + 1);
+        let t = !tb in
+        A.unsafe_set t !tn w;
+        let d = !tn + 1 - a in
+        for i = a to b - 1 do A.unsafe_set t (i + d) (A.unsafe_get t i) done;
+        tn := !tn + 1 + (b - a)
+      end
+      else
       for i = A.unsafe_get moff k to A.unsafe_get moff (k + 1) - 1 do
         let u = A.unsafe_get members i in
         let b0 = A.unsafe_get boff u and b1 = A.unsafe_get boff (u + 1) in
@@ -1821,6 +1933,7 @@ let batch c mi =
         done
       done;
       if !cyclic then begin
+        Bytes.unsafe_set cyc k '\001';
         let m0 = A.unsafe_get moff k and m1 = A.unsafe_get moff (k + 1) in
         reserve (m1 - m0);
         let t = !tb in
@@ -1836,6 +1949,7 @@ let batch c mi =
     lap "targets";
     (* the facts: each source's targets, but those it has as inputs *)
     let inp = ints (max 1 n) (-1) and t = m.m_t and tt = !tb and th = things.b in
+    let[@inline] thing z = if dense then base + z else A.unsafe_get th z in
     let frozen_t = match c.prog.spec with Some s -> t < Bytes.length s.frozen && Bytes.get s.frozen t <> '\000' | None -> false in
     (* the output's room at once: at most each source's targets *)
     if m.m_side && not frozen_t then begin
@@ -1843,11 +1957,7 @@ let batch c mi =
       for k = 0 to nc - 1 do
         u := !u + ((A.unsafe_get moff (k + 1) - A.unsafe_get moff k) * (A.unsafe_get toff (k + 1) - A.unsafe_get toff k))
       done;
-      if 3 * (c.ns + !u) > A.dim c.side then begin
-        let b = ints_raw (3 * (c.ns + !u)) in
-        A.blit (A.sub c.side 0 (3 * c.ns)) (A.sub b 0 (3 * c.ns));
-        c.side <- b
-      end
+      side_room c !u
     end;
     for k = 0 to nc - 1 do
       let t0 = A.unsafe_get toff k and t1 = A.unsafe_get toff (k + 1) in
@@ -1855,18 +1965,17 @@ let batch c mi =
         let s = A.unsafe_get members i in
         (if trp then for j = A.unsafe_get off s to A.unsafe_get off (s + 1) - 1 do A.unsafe_set inp (A.unsafe_get adj j) s done
          else for j = A.unsafe_get boff s to A.unsafe_get boff (s + 1) - 1 do A.unsafe_set inp (A.unsafe_get badj j) s done);
-        let e = A.unsafe_get th s in
+        let e = thing s in
         if m.m_side && not frozen_t then begin
           (* straight into the group's output, its room made above *)
-          let side = c.side and ns0 = c.ns in
-          let ns = ref ns0 in
+          let se = c.side_e and sp = c.side_p and sw = c.side_w and ns0 = c.ns in
+          let ns = ref ns0 and e32 = Int32.of_int e in
           for j = t0 to t1 - 1 do
             let z = A.unsafe_get tt j in
             if A.unsafe_get inp z <> s then begin
-              let o = 3 * !ns in
-              A.unsafe_set side o e;
-              A.unsafe_set side (o + 1) t;
-              A.unsafe_set side (o + 2) (A.unsafe_get th z);
+              Bigarray.Array1.unsafe_set se !ns e32;
+              Bigarray.Array1.unsafe_set sp !ns t;
+              A.unsafe_set sw !ns (thing z);
               incr ns
             end
           done;
@@ -1877,11 +1986,12 @@ let batch c mi =
           for j = t0 to t1 - 1 do
             let z = A.unsafe_get tt j in
             if A.unsafe_get inp z <> s then
-              if m.m_side then derive_side c m.m_rule e t (A.unsafe_get th z) else derive_new c m.m_rule e t (A.unsafe_get th z)
+              if m.m_side then derive_side c m.m_rule e t (thing z) else derive_new c m.m_rule e t (thing z)
           done
       done
     done;
     lap "facts"
+    end
   end
 
 (* a round's facts for module mi: the batch at its first work when it may, else each new edge (and, for the linear
@@ -2171,7 +2281,7 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
         done;
         let in_ws = List.length !out in
         for k = 0 to c.ns - 1 do
-          let e = A.unsafe_get c.side (3 * k) and p = A.unsafe_get c.side ((3 * k) + 1) and w = A.unsafe_get c.side ((3 * k) + 2) in
+          let e = Int32.to_int (Bigarray.Array1.unsafe_get c.side_e k) and p = Bigarray.Array1.unsafe_get c.side_p k and w = A.unsafe_get c.side_w k in
           out := { Group.kind = Derived; e; p; v = value_of c.v p w } :: !out;
           todo := (e, p, w, 2) :: !todo
         done;
@@ -2278,11 +2388,11 @@ and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : B
             Bigarray.Array1.unsafe_set dp k (fp ws x);
             Bigarray.Array1.unsafe_set dw k (fw ws x)
           done;
-          for k = 0 to c.ns - 1 do
-            Bigarray.Array1.unsafe_set de (nd + k) (Int32.of_int (A.unsafe_get c.side (3 * k)));
-            Bigarray.Array1.unsafe_set dp (nd + k) (A.unsafe_get c.side ((3 * k) + 1));
-            Bigarray.Array1.unsafe_set dw (nd + k) (A.unsafe_get c.side ((3 * k) + 2))
-          done;
+          if c.ns > 0 then begin
+            Bigarray.Array1.blit (Bigarray.Array1.sub c.side_e 0 c.ns) (Bigarray.Array1.sub de nd c.ns);
+            Bigarray.Array1.blit (Bigarray.Array1.sub c.side_p 0 c.ns) (Bigarray.Array1.sub dp nd c.ns);
+            Bigarray.Array1.blit (Bigarray.Array1.sub c.side_w 0 c.ns) (Bigarray.Array1.sub dw nd c.ns)
+          end;
           Some (c.v, de, dp, dw, total)
         end)
 
@@ -2290,6 +2400,40 @@ and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : B
 let reads (v : Store.view) =
   if not (Schema.has_rules v.schema) then Bytes.empty
   else match programs v with _, Some p -> p.reads | gen, None -> gen.reads
+
+(* ---- where derived facts come from (for rights) ----
+   The properties whose facts the derived facts of p can come from, through the rules, transitively: the bodies of the
+   rules that give p, and of those that give their properties, and so on; [None] when one of them reads a property
+   that is a variable (any property may be read, as the ontology's facts decide). On the rules as written, so that the
+   answer changes only with the rules. A reader allowed some kinds only must read every kind of these to read p's
+   derived facts without learning, through them, facts it may not read. *)
+let sources (v : Store.view) p =
+  if not (Schema.has_rules v.schema) then Some []
+  else begin
+    let prog = program v in
+    let seen = Hashtbl.create 16 and out = Hashtbl.create 16 and any = ref false in
+    let q = Queue.create () in
+    Queue.add p q;
+    Hashtbl.replace seen p ();
+    while (not !any) && not (Queue.is_empty q) do
+      let x = Queue.pop q in
+      Array.iter
+        (fun (r : Rules.t) ->
+          match r.head with
+          | Give h when h.p = x || h.p < 0 ->
+            List.iter
+              (fun (a : Query.pattern) ->
+                if a.p < 0 then any := true
+                else begin
+                  Hashtbl.replace out a.p ();
+                  if not (Hashtbl.mem seen a.p) then (Hashtbl.replace seen a.p (); Queue.add a.p q)
+                end)
+              r.where
+          | _ -> ())
+        prog.rules
+    done;
+    if !any then None else Some (List.sort compare (Hashtbl.fold (fun k () l -> k :: l) out []))
+  end
 
 (* ---- Why ---- *)
 
