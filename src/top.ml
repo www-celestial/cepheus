@@ -265,6 +265,16 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
     Array.sub acc.a 0 acc.n
   end
 
+(* a property of a pattern that gives x as its value, the one with the fewest facts: the index path reads it *)
+let lead (v : Store.view) (q : Query.t) x =
+  List.fold_left
+    (fun best (pt : Query.pattern) ->
+      match pt.v, best with
+      | Var y, None when y = x -> Some pt.p
+      | Var y, Some b when y = x && Store.count_prop v pt.p < Store.count_prop v b -> Some pt.p
+      | _ -> best)
+    None q.where
+
 (* rows held already (a group's key and aggregates), in the order [o] *)
 let sort_rows (v : Store.view) ~(typs : Value.typ array) (o : order) (rows : int array array) =
   let cols = Array.length typs in

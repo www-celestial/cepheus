@@ -25,15 +25,7 @@ type answer = { cols : int; n : int; typ : int -> Value.typ; word : int -> int -
 let of_rows cols (typs : Value.typ array) (rows : int array array) =
   { cols; n = Array.length rows; typ = (fun j -> typs.(j)); word = (fun i j -> rows.(i).(j)) }
 
-(* a property of a pattern that gives x as its value, the one with the fewest facts: the index path of Sort reads it *)
-let lead (v : Store.view) (q : Query.t) x =
-  List.fold_left
-    (fun best (pt : Query.pattern) ->
-      match pt.v, best with
-      | Var y, None when y = x -> Some pt.p
-      | Var y, Some b when y = x && Store.count_prop v pt.p < Store.count_prop v b -> Some pt.p
-      | _ -> best)
-    None q.where
+let lead = Top.lead
 
 (* the work a question may take at the server, in candidates of its join (each domain's, and its Nots' together): past
    it, Query.Over_budget, and the program is told to ask a narrower question; a program reading in its own memory has
