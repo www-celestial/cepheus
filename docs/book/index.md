@@ -2,6 +2,12 @@
 
 Read in this order to learn Cepheus; jump to the reference pages when you need an exact answer.
 
+**Start**
+- [Quick start](quickstart.md): build Cepheus, start a server, and run a first Cesia program that writes and asks, in
+  about ten minutes.
+- [Production](production.md): a systemd service, nightly backups and a restore drill, what to watch in the status
+  and the log, upgrades, and what to do after a crash or a power loss.
+
 **Learn**
 1. [Concepts](concepts.md): facts and the entity–attribute–value model, the schema, groups (transactions), views,
    isolation exactly, questions, forks, databases.
