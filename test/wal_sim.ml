@@ -320,6 +320,9 @@ let run seed steps =
   Journal.segment_limit := 600 + Rng.int r 4000;
   Journal.window := if Rng.chance r 0.5 then 40 + Rng.int r 200 else 4 * 1024 * 1024;
   Journal.shared_max := 400 + Rng.int r 3000;
+  (* half the seeds force a frame that comes when the buffer is idle in its own journal (from the seed's number: the
+     other draws unchanged) *)
+  Wal.alone := seed mod 2 = 0;
   Wal.limit := 300 + Rng.int r 3000;
   Engine.compact_min := 5 + Rng.int r 60;
   Resolve.large_min := if Rng.chance r 0.5 then 4 else 1_000_000;

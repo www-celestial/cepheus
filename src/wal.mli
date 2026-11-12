@@ -44,6 +44,11 @@ val start : t -> unit
 val attach : t -> string -> Journal.t -> unit
 (** [attach t id j]: the journal of database [id] shares the buffer from now on ([Journal.share]). *)
 
+val alone : bool ref
+(** A frame that comes when the buffer is idle (no round written or waiting) and no journal is forcing one of its own
+    is forced in its own journal (true by default; the tests draw it): a database written alone pays no second
+    write. *)
+
 type _ Effect.t += Wait : unit Effect.t
 (** Performed by a commit of a [manual] buffer: the simulation resumes it after a {!round}. *)
 
@@ -61,4 +66,5 @@ val stop : t -> unit
 (** After every database is closed: the thread ends; both files are emptied if every journal attached is forced. *)
 
 val status : t -> (string * string) list
-(** The rounds and the frames they forced since the start, for the server's status. *)
+(** The rounds, the frames they forced, and the frames forced in their own journal since the start, for the server's
+    status. *)

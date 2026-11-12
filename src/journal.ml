@@ -29,7 +29,7 @@ type t = {
   mutable next : int;  (* the next group number *)
   mutable closed : bool;
   mutable failed : bool;  (* a write or fsync failed: never used again (G10) *)
-  mutable shared : (Bytes.t -> unit) option;  (* the server's commit buffer forces the frames: see [share] *)
+  mutable shared : ((Bytes.t -> bool) * (unit -> unit)) option;  (* the server's commit buffer: see [share] *)
   mutable unforced : bool;  (* frames written since the journal's last fsync (a shared journal's) *)
   lock : Mutex.t;  (* [fd] and [unforced], between the writer and the commit buffer's checkpoints *)
 }
@@ -414,7 +414,7 @@ let cut j =
 (* the longest frame forced by the commit buffer (1 MiB): a longer one is forced in its own journal *)
 let shared_max = ref (1 lsl 20)
 
-let share j f = j.shared <- Some f
+let share j give own_done = j.shared <- Some (give, own_done)
 
 (* under [j.lock] *)
 let force_unforced j =
@@ -475,9 +475,10 @@ let append j body first count =
         j.disk.pwrite j.fd j.size b 0 n;
         if shared <> None then j.unforced <- true);
     let t1 = clock () in
+    let own () = j.disk.fsync j.fd; Mutex.protect j.lock (fun () -> j.unforced <- false) in
     (match shared with
-     | Some f -> f b
-     | None -> j.disk.fsync j.fd; Mutex.protect j.lock (fun () -> j.unforced <- false));
+     | None -> own ()
+     | Some (give, own_done) -> if not (give b) then Fun.protect ~finally:own_done own);
     Histogram.record write_us (t1 - t0);
     Histogram.record fsync_us (clock () - t1)
   with

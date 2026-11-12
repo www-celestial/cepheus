@@ -84,10 +84,11 @@ val drop : pending -> unit
 val written_body : pending -> Bytes.t
 (** The body's bytes written so far, read back from the file: for the simulation, which checks every group. *)
 
-val share : t -> (Bytes.t -> unit) -> unit
-(** [share j f]: from now on, an append writes its frame without an fsync and gives its bytes to [f], which returns
-    once they are durable (the server's commit buffer forced them: {!Wal}) or raises [Disk.Io]; a frame longer than
-    {!shared_max} is still forced in the journal. The journal is forced by {!checkpoint}, when a segment is left, by a
+val share : t -> (Bytes.t -> bool) -> (unit -> unit) -> unit
+(** [share j give own_done]: from now on, an append writes its frame without an fsync and gives its bytes to [give],
+    which returns true once they are durable (the server's commit buffer forced them: {!Wal}), or false at once: the
+    journal forces the frame itself, then calls [own_done]; or raises [Disk.Io]. A frame longer than {!shared_max} is
+    forced in the journal. The journal is forced by {!checkpoint}, when a segment is left, by a
     frame forced in it, and by {!close}. *)
 
 val shared_max : int ref

@@ -612,6 +612,8 @@ let brecovered what r ~acked =
 let enumerate_buffer () =
   Wal.limit := 500;
   Journal.shared_max := 600;
+  (* every frame through the buffer: the run is about its rounds (the frames forced alone are the long ones) *)
+  Wal.alone := false;
   Journal.segment_limit := 1500;
   let reach k =
     let r = bsetup () in
@@ -716,6 +718,7 @@ let enumerate_buffer () =
   done;
   Journal.segment_limit := 64 * 1024 * 1024;
   Journal.shared_max := 1 lsl 20;
+  Wal.alone := true;
   Wal.limit := 64 * 1024 * 1024;
   Printf.printf "exhaustive commit buffer: %d fsyncs failed in turn, %d states recovered\n" !fsyncs !fstates;
   Printf.printf "exhaustive commit buffer: %d crash points, %d crash states recovered, %d false alarms (an unconfirmed frame or round, its header's sector lost alone)\n"

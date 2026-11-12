@@ -48,10 +48,13 @@ type t = {
   dirt : Condition.t;  (* the cleaner: a file to clean, or the buffer stops *)
   mutable pending : client list;  (* newest first *)
   mutable running : bool;
+  mutable busy : bool;  (* a round is being written and forced *)
+  mutable own : int;  (* journals forcing a frame of their own, given to the buffer when it was idle *)
   mutable dom : unit Domain.t option;
   manual : bool;
   nrounds : int Atomic.t;
   nframes : int Atomic.t;
+  nown : int Atomic.t;
 }
 
 type _ Effect.t += Wait : unit Effect.t
@@ -132,7 +135,7 @@ let make ?(manual = false) disk dir =
   let file n = { path = Filename.concat dir n; fd = None; gen = 0; size = 0; rounds = 0; held = Hashtbl.create 16 } in
   { disk; files = Array.map file names; active = 0; dirty = false; stopped = None; recovered = Hashtbl.create 16;
     clients = []; m = Mutex.create (); work = Condition.create (); dirt = Condition.create (); pending = [];
-    running = false; dom = None; manual; nrounds = Atomic.make 0; nframes = Atomic.make 0 }
+    running = false; busy = false; own = 0; dom = None; manual; nrounds = Atomic.make 0; nframes = Atomic.make 0; nown = Atomic.make 0 }
 
 let recover ?manual disk dir =
   let t = make ?manual disk dir in
@@ -280,10 +283,10 @@ let give cs r =
   List.iter (fun c -> c.result <- Some r; c.frame <- Bytes.empty; Condition.signal c.c) cs
 
 let round t =
-  let cs = Mutex.protect t.m (fun () -> take t) in
+  let cs = Mutex.protect t.m (fun () -> let cs = take t in t.busy <- cs <> []; cs) in
   if cs <> [] then begin
     let r = write_round t cs in
-    Mutex.protect t.m (fun () -> give cs r)
+    Mutex.protect t.m (fun () -> give cs r; t.busy <- false)
   end
 
 let clean t =
@@ -300,10 +303,23 @@ let clean t =
     | () -> Mutex.protect t.m (fun () -> Hashtbl.reset f.held; t.dirty <- false)
     | exception Disk.Io m -> stop_with t m)
 
+(* A frame that comes when the buffer is idle (no round written, none waiting) and no journal forces one of its own is
+   forced in its own journal (false: the journal's fsync, then [own_done]), as before the buffer: a database written
+   alone pays no second write, and the frames of the others that come meanwhile share the next round (the model's
+   WriteOwn: a frame confirmed by its journal's fsync). *)
+let alone = ref true
+
+let own_done t () = Mutex.protect t.m (fun () -> t.own <- t.own - 1)
+
 let commit t c frame =
   Mutex.lock t.m;
   match t.stopped with
   | Some m -> Mutex.unlock t.m; raise (Disk.Io m)
+  | None when !alone && t.pending = [] && (not t.busy) && t.own = 0 ->
+    t.own <- t.own + 1;
+    Mutex.unlock t.m;
+    Atomic.incr t.nown;
+    false
   | None ->
     c.frame <- frame;
     c.result <- None;
@@ -318,14 +334,14 @@ let commit t c frame =
       Mutex.unlock t.m
     end;
     match c.result with
-    | Some (Ok ()) -> ()
+    | Some (Ok ()) -> true
     | Some (Error m) -> raise (Disk.Io m)
     | None -> raise (Disk.Io "the commit buffer gave no result")
 
 let attach t id j =
   let c = { id; j; c = Condition.create (); frame = Bytes.empty; result = None } in
   Mutex.protect t.m (fun () -> t.clients <- c :: t.clients);
-  Journal.share j (commit t c)
+  Journal.share j (commit t c) (own_done t)
 
 let rounder t () =
   let go = ref true in
@@ -334,10 +350,11 @@ let rounder t () =
     while t.pending = [] && t.running do Condition.wait t.work t.m done;
     let cs = take t in
     if cs = [] then go := false;
+    t.busy <- cs <> [];
     Mutex.unlock t.m;
     if cs <> [] then begin
       let r = write_round t cs in
-      Mutex.protect t.m (fun () -> give cs r)
+      Mutex.protect t.m (fun () -> give cs r; t.busy <- false)
     end
   done
 
@@ -383,4 +400,5 @@ let stop t =
     (try remove_files t with Disk.Io m -> prerr_endline ("cepheus: the commit buffer could not be emptied: " ^ m))
   else Array.iter (fun f -> Option.iter (fun fd -> f.fd <- None; try t.disk.close fd with Disk.Io _ -> ()) f.fd) t.files
 
-let status t = [ "commit_buffer.rounds", string_of_int (Atomic.get t.nrounds); "commit_buffer.frames", string_of_int (Atomic.get t.nframes) ]
+let status t = [ "commit_buffer.rounds", string_of_int (Atomic.get t.nrounds); "commit_buffer.frames", string_of_int (Atomic.get t.nframes);
+    "commit_buffer.alone", string_of_int (Atomic.get t.nown) ]
