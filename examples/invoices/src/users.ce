@@ -1,0 +1,23 @@
+(** Adds a user of the app: cesia do users add LOGIN admin|accountant, with the password in APP_PASSWORD (never on the
+    command line, where other users of the machine see it). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/invoices
+use std/crypto
+use std/io
+use std/result
+use std/sys
+use std/value
+
+args = sys.Args
+password = if value.IsText(sys.Env("APP_PASSWORD")) sys.Env("APP_PASSWORD") else "" end
+if value.Len(args) != 3 or args[1] != "add"
+  io.PrintError("usage: users add LOGIN admin|accountant, the password in APP_PASSWORD")
+  sys.Exit(2)
+end
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
+added = invoices.AddUser(args[2], password, args[3], result.Unwrap(crypto.Open()), db)
+if result.IsErr(added)
+  io.PrintError("users: $(added.Error.Message)")
+  sys.Exit(1)
+end
+io.Print("user $(args[2]) added, $(args[3])")

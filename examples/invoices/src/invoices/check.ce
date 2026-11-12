@@ -1,0 +1,148 @@
+(* What a visitor sends, checked before anything is written or asked: every field is a text of bounded size, valid
+   UTF-8 without control characters, and numbers, dates and ids are read whole or refused. A check gives an Ok of the
+   values, or an Err of a map from each wrong field to what is wrong, which the form shows beside the field. *)
+use std/date
+use std/dict
+use std/list
+use std/math
+use std/result
+use std/text
+use std/value
+
+MaxLines = 50   (** The lines an invoice may have. *)
+MaxAmount = 1000000000   (** The largest price of a line, and the largest total, in the money of the app. *)
+
+defn field(form, name)
+  (** The text of a field of a form, trimmed; "" when it is absent. *)
+  v = dict.Get(name, form)
+  if value.IsText(v) text.Trim(v) else "" end
+end
+
+defn plain(s, most)
+  (** Is s valid UTF-8 of at most most bytes, without control characters? *)
+  if text.ByteLength(s) > most or not text.IsUtf8(s)
+    return false
+  end
+  not list.Any([b < 32 or b == 127 for b in text.Bytes(s)])
+end
+
+defn Lower(s)
+  (** s in lower case: A to Z, and the letters of Latin-1 written in two bytes (À to Þ but × become à to þ), as the
+      names of the clients of this app are written. text.Lower changes A to Z only. *)
+  bytes = text.Bytes(text.Lower(s))
+  n = value.Len(bytes)
+  for k in 1..n
+    if k < n and bytes[k] == 195 and bytes[k + 1] >= 128 and bytes[k + 1] <= 158 and bytes[k + 1] != 151
+      bytes[k + 1] = bytes[k + 1] + 32
+    end
+  end
+  text.FromBytes(bytes)
+end
+
+defn email(s)
+  (** Is s an e-mail address of the usual form: one @, a part before it, and a domain with a dot after it? *)
+  at = text.Split("@", s)
+  if value.Len(at) != 2 or at[1] == "" or text.Contains(" ", s)
+    return false
+  end
+  parts = text.Split(".", at[2])
+  value.Len(parts) >= 2 and not list.Any([p == "" for p in parts])
+end
+
+defn ClientForm(form)
+  (** A client's fields from a form: an Ok of {Name, Search, Email, City}, or an Err of the wrong fields. *)
+  name = field(form, "name")
+  mail = Lower(field(form, "email"))
+  city = field(form, "city")
+  wrong = {}
+  if name == "" or not plain(name, 120)
+    wrong.Name = "A name of 1 to 120 bytes, without control characters."
+  end
+  if not plain(mail, 254) or not email(mail)
+    wrong.Email = "An e-mail address, as ada@example.com."
+  end
+  if not plain(city, 80)
+    wrong.City = "A city of at most 80 bytes."
+  end
+  if value.Len(wrong) > 0 result.Err(wrong) else result.Ok({Name: name, Search: Lower(name), Email: mail, City: city}) end
+end
+
+defn Id(s)
+  (** The id of a thing from a text of a URL or a form: an Int above 0, or missing. *)
+  if not value.IsText(s) or text.ByteLength(s) > 12
+    return missing
+  end
+  n = text.Number(s)
+  if value.IsInt(n) and n > 0 n else missing end
+end
+
+defn Day(s)
+  (** The seconds since 1970 of a day written 2026-11-13, at 00:00 UTC, or missing. *)
+  if not value.IsText(s) or text.ByteLength(s) != 10
+    return missing
+  end
+  d = date.Parse(s)
+  if result.IsOk(d) date.ToUnix(d.Value) else missing end
+end
+
+defn cents(s)
+  (** A price written with at most two decimals, as 12, 12.5 or 12.50, in cents, or missing. *)
+  if text.ByteLength(s) > 16 or s == ""
+    return missing
+  end
+  x = text.Number(s)
+  if not value.IsNumber(x) or x < 0 or x > MaxAmount
+    return missing
+  end
+  c = math.Round(x * 100)
+  if math.Abs(c - x * 100) > 0.000001 missing else c end
+end
+
+defn InvoiceForm(form)
+  (** An invoice's fields from a form: an Ok of {Client, Date, Due, Lines, Total}, Lines a list of {Label, Quantity,
+      Price} and Total their sum, both in money of two decimals; or an Err of the wrong fields. *)
+  wrong = {}
+  client = Id(field(form, "client"))
+  day = Day(field(form, "date"))
+  due = Day(field(form, "due"))
+  if value.IsMissing(client)
+    wrong.Client = "Choose a client."
+  end
+  if value.IsMissing(day)
+    wrong.Date = "A date, as 2026-11-13."
+  end
+  if value.IsMissing(due) or (not value.IsMissing(day) and due < day)
+    wrong.Due = "A due date, on or after the date."
+  end
+  lines = []
+  total = 0
+  for k in 1..MaxLines
+    label = field(form, "label$k")
+    qty = field(form, "quantity$k")
+    price = field(form, "price$k")
+    if label != "" or qty != "" or price != ""
+      n = text.Number(qty)
+      c = cents(price)
+      if label == "" or not plain(label, 200)
+        wrong["Line$k"] = "Line $k: a label of 1 to 200 bytes."
+      else if not value.IsInt(n) or n < 1 or n > 1000000
+        wrong["Line$k"] = "Line $k: a quantity from 1 to 1,000,000."
+      else if value.IsMissing(c)
+        wrong["Line$k"] = "Line $k: a price from 0 to 1,000,000,000, with at most two decimals."
+      else
+        lines = list.Append({Label: label, Quantity: n, Price: c / 100}, lines)
+        total += n * c
+      end
+    end
+  end
+  if value.Len(lines) == 0 and value.Len(wrong) == 0
+    wrong.Line1 = "An invoice needs at least one line."
+  end
+  if total > MaxAmount * 100
+    wrong.Total = "The total may not pass 1,000,000,000."
+  end
+  if value.Len(wrong) > 0
+    return result.Err(wrong)
+  end
+  result.Ok({Client: client, Date: day, Due: due, Lines: lines, Total: total / 100})
+end

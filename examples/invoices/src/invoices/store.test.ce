@@ -1,0 +1,158 @@
+(* The checks, the clients and the invoices on forks of Empty: no server. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/bug
+use std/dict
+use std/encode
+use std/list
+use std/result
+use std/text
+use std/value
+
+now = 1794528000   (* 2026-11-13 00:00 UTC *)
+day = 86400
+
+defn shop()
+  (** A fork with the app's kinds and rules, two clients, and three invoices of Ada. *)
+  t = cepheus.Fork(cepheus.Empty, Kinds)?
+  cepheus.Define(Rules, t)?
+  ada = AddClient(ClientForm({name: "Ada Martin", email: "Ada@Example.com", city: "Lyon"})?, 0, t)?
+  bo = AddClient(ClientForm({name: "Élodie Bo", email: "bo@example.com", city: "Paris"})?, 0, t)?
+  form = {client: "$ada", date: "2026-10-01", due: "2026-10-31", label1: "Design", quantity1: "3", price1: "400", label2: "Hosting", quantity2: "1", price2: "80.50"}
+  one = AddInvoice(InvoiceForm(form)?, "Ada Martin", 0, t)?
+  form.due = "2026-12-01"
+  two = AddInvoice(InvoiceForm(form)?, "Ada Martin", 0, t)?
+  three = AddInvoice(InvoiceForm(form)?, "Ada Martin", 0, t)?
+  result.Ok({Db: t, Ada: ada, Bo: bo, One: one, Two: two, Three: three})
+end
+
+all = {Statuses: [], Action: false, Open: false, Search: "", Client: missing, Sort: "-number"}
+
+defn isClientChecked()
+  bad = ClientForm({name: "", email: "nobody", city: text3()})
+  ok = ClientForm({name: " Ada ", email: " ADA@Example.COM ", city: "Lyon"})?
+  bug.Assert(value.Equal(list.Sort(dict.Keys(bad.Error)), ["City", "Email", "Name"]), "three wrong fields")
+  ok.Name == "Ada" and ok.Email == "ada@example.com" and ok.Search == "ada"
+end
+
+text3() = text.Repeat(81, "a")
+
+defn isLowerOfLatin()
+  Lower("ÉLODIE Ñ Ü×") == "élodie ñ ü×"
+end
+
+defn isInvoiceChecked()
+  bad = InvoiceForm({client: "x", date: "2026-13-01", due: "", label1: "A", quantity1: "0", price1: "1"})
+  cents = InvoiceForm({client: "7", date: "2026-11-01", due: "2026-11-01", label1: "A", quantity1: "2", price1: "0.1", label3: "B", quantity3: "1", price3: "0.2"})?
+  three = InvoiceForm({client: "7", date: "2026-11-01", due: "2026-11-01", label1: "A", quantity1: "1", price1: "1.005"})
+  bug.Assert(value.Equal(list.Sort(dict.Keys(bad.Error)), ["Client", "Date", "Due", "Line1"]), "four wrong fields")
+  bug.Assert(three.Error.Line1 != missing, "a third decimal is refused")
+  cents.Total == 0.4 and value.Len(cents.Lines) == 2
+end
+
+defn isInvoiceMadeWithItsLines()
+  s = shop()?
+  inv = GetInvoice(s.One.Invoice, s.Db)?
+  bug.Assert(s.One.Number == 1 and s.Two.Number == 2, "numbers follow")
+  inv.Total == 1280.5 and inv.Status == "unpaid" and value.Len(inv.Lines) == 2 and inv.Lines[2].Label == "Hosting"
+end
+
+defn isPaidOnce()
+  s = shop()?
+  PayInvoice(s.One.Invoice, now, 0, s.Db)?
+  again = PayInvoice(s.One.Invoice, now, 0, s.Db)
+  inv = GetInvoice(s.One.Invoice, s.Db)?
+  again.Error.Code == "paid" and inv.Status == "paid" and inv.PaidAt == now
+end
+
+defn isLateAndOverdue()
+  s = shop()?
+  n = MarkLate(now, s.Db)?
+  late = GetInvoice(s.One.Invoice, s.Db)?.Status
+  overdue = GetClient(s.Ada, s.Db)?.Overdue
+  PayInvoice(s.One.Invoice, now, 0, s.Db)?
+  n == 1 and late == "late" and overdue == true and GetClient(s.Ada, s.Db)?.Overdue == missing and MarkLate(now, s.Db)? == 0
+end
+
+defn isEditedWhileNotPaid()
+  s = shop()?
+  f = InvoiceForm({client: "$(s.Ada)", date: "2026-10-02", due: "2026-12-02", label1: "Audit", quantity1: "2", price1: "99.99"})?
+  EditInvoice(s.Two.Invoice, f, now, 0, s.Db)?
+  inv = GetInvoice(s.Two.Invoice, s.Db)?
+  PayInvoice(s.Two.Invoice, now, 0, s.Db)?
+  inv.Total == 199.98 and value.Len(inv.Lines) == 1 and EditInvoice(s.Two.Invoice, f, now, 0, s.Db).Error.Code == "paid"
+end
+
+defn isDeleteChecked()
+  s = shop()?
+  kept = DeleteClient(s.Ada, 0, s.Db)
+  DeleteClient(s.Bo, 0, s.Db)?
+  gone = GetClient(s.Bo, s.Db)?
+  f = InvoiceForm({client: "$(s.Bo)", date: "2026-10-02", due: "2026-12-02", label1: "Audit", quantity1: "2", price1: "1"})?
+  refused = AddInvoice(f, "Élodie Bo", 0, s.Db)
+  bug.Assert(kept.Error.Code == "has_invoices", "a client with invoices stays")
+  bug.Assert(refused.Error.Code == "invalid", "the rule refuses an invoice of a deleted client")
+  PayInvoice(s.One.Invoice, now, 0, s.Db)?
+  DeleteInvoice(s.Two.Invoice, 0, s.Db)?
+  value.IsMissing(gone) and DeleteInvoice(s.One.Invoice, 0, s.Db).Error.Code == "paid" and GetInvoice(s.Two.Invoice, s.Db)? == missing
+end
+
+defn isEmailUnique()
+  s = shop()?
+  AddClient(ClientForm({name: "Other", email: "ada@example.com", city: ""})?, 0, s.Db).Error.Code == "unique"
+end
+
+defn isClientsByPagesAndSearch()
+  t = cepheus.Fork(cepheus.Empty, Kinds)?
+  for k in 1..25
+    AddClient({Name: "Client $(100 + k)", Search: "client $(100 + k)", Email: "c$k@example.com", City: "Lyon"}, 0, t)?
+  end
+  one = ClientsPage("", "name", missing, 10, t)?
+  two = ClientsPage("", "name", one.Next, 10, t)?
+  three = ClientsPage("", "name", two.Next, 10, t)?
+  back = ClientsPage("", "name", three.Prev, 10, t)?
+  found = ClientsPage("client 11", "name", missing, 10, t)?
+  mail = ClientsPage("c2", "name", missing, 10, t)?
+  bug.Assert(one.Prev == missing and one.Rows[1].Name == "Client 101", "the first page")
+  bug.Assert(value.Len(three.Rows) == 5 and three.Next == missing, "the last page")
+  bug.Assert(value.Equal(back.Rows, two.Rows) and back.Prev != missing, "the page before is the one before")
+  bug.Assert(value.Len(found.Rows) == 10 and found.Rows[1].Name == "Client 110", "by the start of the name")
+  value.Len(mail.Rows) == 7 and two.Rows[1].Name == "Client 111"
+end
+
+defn isInvoicesFiltered()
+  s = shop()?
+  MarkLate(now, s.Db)?
+  PayInvoice(s.Three.Invoice, now, 0, s.Db)?
+  page(f) = [r.Number for r in InvoicesPage(f, now, missing, 10, s.Db)?.Rows]
+  f = all
+  f.Statuses = ["late", "unpaid"]
+  open = page(f)
+  f.Statuses = []
+  f.Open = true
+  bug.Assert(value.Equal(open, [2, 1]) and value.Equal(page(f), [2, 1]), "In and Not")
+  f.Open = false
+  f.Action = true
+  soon = page(f)
+  f.Action = false
+  f.Search = "ada m"
+  f.Sort = "number"
+  value.Equal(soon, [1]) and value.Equal(page(f), [1, 2, 3])
+end
+
+defn isBalanceNotPaid()
+  s = shop()?
+  PayInvoice(s.One.Invoice, now, 0, s.Db)?
+  b = Balance(s.Ada, s.Db)?
+  b.Total == 2561.0 and b.Count == 2 and InvoicesOf(s.Ada, s.Db)? == 3
+end
+
+defn isBillToForTheBooks()
+  s = shop()?
+  BillTo(s.Ada, s.Db)? == "Ada Martin" and BillTo(999, s.Db)? == missing
+end
+
+defn isCursorChecked()
+  c = {After: {Client: 65536, Name: "Ada", Email: "a@x.fr", City: "Lyon"}}
+  back = Cursor({after: text.Split("=", Link(c))[2] then encode.UrlDecode})
+  value.Equal(back, c) and Cursor({after: "!!"}) == missing and Cursor({before: "e30"}) != missing
+end

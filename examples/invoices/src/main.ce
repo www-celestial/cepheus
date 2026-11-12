@@ -1,0 +1,68 @@
+(** The server of the app: it connects to Cepheus with its two tokens, defines its rules, marks the late invoices every
+    minute, and serves the pages. Its settings come from its environment: CEPHEUS_URL, the database, as
+    cepheus://localhost:7400/invoices?socket=/run/cepheus; CEPHEUS_TOKEN, the app's token, which writes the database;
+    CEPHEUS_BOOKS_TOKEN, the accountant's token, which reads and adds invoices and their lines only; APP_PORT, the
+    port, 8080 unless given; APP_HOST, the address, 127.0.0.1 unless given; APP_SECURE, 1 when the app is served over
+    https, behind a proxy that holds the certificate. cesia do serve runs it with the permissions it needs, and no
+    other. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/invoices
+use std/crypto
+use std/fiber
+use std/http
+use std/io
+use std/log
+use std/result
+use std/sys
+use std/text
+use std/value
+
+started = sys.Now()
+
+defn setting(name, default = missing)
+  (** A setting of the environment; the program stops with a message when one it needs is absent. *)
+  v = sys.Env(name)
+  if value.IsMissing(v) or v == ""
+    if value.IsMissing(default)
+      io.PrintError("invoices: $name is not set (see src/main.ce)")
+      sys.Exit(2)
+    end
+    return default
+  end
+  v
+end
+
+defn ready(what, x)
+  (** The value of an Ok, or the program stops with what failed: the message of the Err, which holds no token. *)
+  if result.IsErr(x)
+    io.PrintError("invoices: $what: $(x.Error.Message)")
+    sys.Exit(1)
+  end
+  x.Value
+end
+
+url = setting("CEPHEUS_URL")
+full = ready("connect", cepheus.Connect(url, invoices.Kinds, token = setting("CEPHEUS_TOKEN")))
+books = ready("connect for the accountant", cepheus.Connect(url, invoices.Books, token = setting("CEPHEUS_BOOKS_TOKEN")))
+ready("rules", cepheus.Define(invoices.Rules, full))
+env = {Full: full, Books: books, Keys: ready("libsodium", crypto.Open()), Now: () -> sys.Now(), Secure: setting("APP_SECURE", default = "0") == "1"}
+port = text.Number(setting("APP_PORT", default = "8080"))
+
+defn keeping(env)
+  (** Every minute: the unpaid invoices whose due date passed become late, and the sessions that ended go. *)
+  while true
+    late = invoices.MarkLate(env.Now(), env.Full)
+    while result.IsOk(late) and late.Value == 500
+      late = invoices.MarkLate(env.Now(), env.Full)
+    end
+    gone = invoices.EndSessions(env.Now(), env.Full)
+    if result.IsErr(late) or result.IsErr(gone)
+      log.Error("keeping failed", {Error: if result.IsErr(late) late.Error.Message else gone.Error.Message end})
+    end
+    sys.Sleep(60)
+  end
+end
+
+fiber.Spawn(() -> keeping(env))
+log.Info("ready", {Port: port, Ms: (sys.Now() - started) * 1000})
+ready("serve", http.Serve(http.Wrap(http.Logger, invoices.App(env)), port = port, host = setting("APP_HOST", default = "127.0.0.1"), maxBody = invoices.MaxBody))

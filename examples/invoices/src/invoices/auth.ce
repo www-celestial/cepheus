@@ -1,0 +1,86 @@
+(* Users, passwords and sessions. A password is kept as its Argon2id hash only (libsodium, through std/crypto). A
+   session is a secret of 32 random bytes in a cookie: the database keeps its BLAKE2b hash, so a copy of the database
+   opens no session. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/crypto
+use std/encode
+use std/list
+use std/result
+use std/text
+use std/value
+
+Roles = ["admin", "accountant"]   (** The roles of the users: the admin does everything, the accountant reads and adds invoices only. *)
+SessionTime = 28800   (** Seconds a session lasts: 8 hours. *)
+
+defn AddUser(login, password, role, s, db)
+  (** A new user: an Ok of its id, or an Err, as Code "unique" for a login taken. The password has 12 to 128 bytes. *)
+  if value.IsMissing(list.IndexOf(role, Roles))
+    return result.Err({Code: "invalid", Message: "A role is admin or accountant."})
+  end
+  if not plainLogin(login)
+    return result.Err({Code: "invalid", Message: "A login has 1 to 64 small letters, digits, . _ or -."})
+  end
+  if text.ByteLength(password) < 12 or text.ByteLength(password) > 128
+    return result.Err({Code: "invalid", Message: "A password has 12 to 128 bytes."})
+  end
+  cepheus.Insert(User, {Login: login, Hash: crypto.HashPassword(password, s), Role: role}, db, why = "user added")
+end
+
+defn plainLogin(login)
+  (** Is it a login: 1 to 64 bytes of a to z, 0 to 9, ., _ and -? *)
+  n = text.ByteLength(login)
+  n >= 1 and n <= 64 and not list.Any([not ((b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 46 or b == 95 or b == 45) for b in text.Bytes(login)])
+end
+
+(* The hash of a random password nobody knows, made once with crypto.HashPassword: an unknown login is checked against
+   it, so that it takes as long as a wrong password, and the time of a reply tells nobody which logins exist. *)
+decoy = "$$argon2id$$v=19$$m=65536,t=2,p=1$$crNLABulUben0mWFZ8tnXQ$$42BLBYgOif7Au07gDm+Z4J0NtqJ8u7dlYFEZyNpKw5c"
+
+defn SignIn(login, password, now, s, db)
+  (** A new session for a login and its password: an Ok of the secret for its cookie, or an Err of Code "auth" that
+      says nothing of which one was wrong. *)
+  found = if plainLogin(login) and text.ByteLength(password) <= 128 cepheus.Find(3, (u, h, r) -> {Where: [[u, User.Login, login], [u, User.Hash, h], [u, User.Role, r]], Give: {User: u, Hash: h, Role: r}}, db)? else [] end
+  hash = if value.Len(found) == 1 found[1].Hash else decoy end
+  if not crypto.CheckPassword(password, hash, s) or value.Len(found) != 1
+    return result.Err({Code: "auth", Message: "This login and password don't match."})
+  end
+  secret = encode.Hex(crypto.Random(32, s))
+  cepheus.Insert(Session, {Key: keyOf(secret, s), User: found[1].User, Expires: now + SessionTime}, db, by = found[1].User, why = "signed in")?
+  result.Ok(secret)
+end
+
+keyOf(secret, s) = encode.Hex(crypto.Blake2b(secret, s))   (** What the database keeps of a session's secret. *)
+
+defn Visitor(secret, now, s, db)
+  (** The user of a session's secret, while the session lasts: an Ok of {User, Login, Role, Session}, or of missing. *)
+  if not value.IsText(secret) or text.ByteLength(secret) != 64
+    return result.Ok(missing)
+  end
+  rows = cepheus.Find(5, (x, u, e, r, l) -> {
+    Where: [[x, Session.Key, keyOf(secret, s)], [x, Session.User, u], [x, Session.Expires, e], cepheus.Above(e, now), [u, User.Role, r], [u, User.Login, l]],
+    Give: {Session: x, User: u, Role: r, Login: l},
+  }, db)?
+  result.Ok(if value.Len(rows) == 1 rows[1] else missing end)
+end
+
+defn SignOut(secret, s, db)
+  (** Ends a session: its facts are retracted. *)
+  rows = cepheus.Find(3, (x, u, e) -> {Where: [[x, Session.Key, keyOf(secret, s)], [x, Session.User, u], [x, Session.Expires, e]], Give: {Session: x, User: u, Expires: e}}, db)?
+  for r in rows
+    cepheus.Write([cepheus.Retract(r.Session, Session.Key, keyOf(secret, s)), cepheus.Retract(r.Session, Session.User, r.User), cepheus.Retract(r.Session, Session.Expires, r.Expires)], db, why = "signed out")?
+  end
+  result.Ok(missing)
+end
+
+defn EndSessions(now, db, most = 500)
+  (** Retracts the sessions that have ended, at most most of them: an Ok of how many. *)
+  rows = cepheus.Find(4, (x, k, u, e) -> {Where: [[x, Session.Expires, e], cepheus.Below(e, now), [x, Session.Key, k], [x, Session.User, u]], Give: {Session: x, Key: k, User: u, Expires: e}, Sort: [e], Limit: most}, db)?
+  ops = []
+  for r in rows
+    ops = list.Concat([cepheus.Retract(r.Session, Session.Key, r.Key), cepheus.Retract(r.Session, Session.User, r.User), cepheus.Retract(r.Session, Session.Expires, r.Expires)], ops)
+  end
+  if value.Len(ops) > 0
+    cepheus.Write(ops, db, why = "sessions ended")?
+  end
+  result.Ok(value.Len(rows))
+end

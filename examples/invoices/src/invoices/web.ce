@@ -1,0 +1,433 @@
+(* The web app: its routes, the checks every request passes (same origin, session, role), and the live dashboard.
+
+   Each signed-in request reads and writes through the database of its user's role: the admin's through the app's
+   full token, the accountant's through a token that reads and adds invoices only. So a page that would show an
+   accountant a client is refused twice: by the app (403), and, if the app forgot, by the database (denied). *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/csv
+use std/dict
+use std/encode
+use std/http
+use std/list
+use std/live
+use std/log
+use std/result
+use std/text
+use std/value
+
+PageSize = 20   (** Rows a page of a list. *)
+MaxBody = 65536   (** The largest body of a request, in bytes: a form of 50 lines is about 30 KB. *)
+
+defn App(env)
+  (** The application, for http.Serve: env is {Full, Books, Keys, Now, Secure}, Full the database of the app's full
+      token, Books that of the accountant's token, Keys the api of std/crypto, Now() the time, and Secure true when
+      the app is served over https, so that its cookie is sent over https only. *)
+  http.App()
+    then http.Get("/app.css", r -> asset(Style, "text/css; charset=utf-8"))
+    then http.Get("/app.js", r -> asset(Script, "text/javascript; charset=utf-8"))
+    then http.Get("/login", r -> http.Html(SignInPage(missing)))
+    then http.Post("/login", r -> signingIn(r, env))
+    then http.Post("/logout", r -> signingOut(r, env))
+    then http.Get("/", signed(env, "any", (r, u) -> http.Html(Dashboard(u))))
+    then http.Get("/clients", signed(env, "admin", clientsList))
+    then http.Get("/clients/new", signed(env, "admin", (r, u) -> http.Html(ClientEdit(missing, missing, "/clients", u))))
+    then http.Post("/clients", signed(env, "admin", clientAdded))
+    then http.Get("/clients/:id", signed(env, "admin", clientShown))
+    then http.Get("/clients/:id/edit", signed(env, "admin", clientEditing))
+    then http.Post("/clients/:id", signed(env, "admin", clientChanged))
+    then http.Post("/clients/:id/delete", signed(env, "admin", clientDeleted))
+    then http.Get("/invoices", signed(env, "any", invoicesList))
+    then http.Get("/invoices.csv", signed(env, "any", invoicesCsv))
+    then http.Get("/invoices/new", signed(env, "any", invoiceNew))
+    then http.Post("/invoices", signed(env, "any", invoiceAdded))
+    then http.Get("/invoices/:id", signed(env, "any", invoiceShown))
+    then http.Get("/invoices/:id/edit", signed(env, "any", invoiceEditing))
+    then http.Post("/invoices/:id", signed(env, "any", invoiceChanged))
+    then http.Post("/invoices/:id/pay", signed(env, "any", invoicePaid))
+    then http.Post("/invoices/:id/delete", signed(env, "any", invoiceDeleted))
+    then live.Route("/live", s -> screen(s, env))
+    then http.Wrap(sameOrigin)
+    then http.Wrap(guarded)
+end
+
+asset(body, kind) = {Status: 200, Body: body, Headers: [{Name: "content-type", Value: kind}, {Name: "cache-control", Value: "no-cache"}]}   (** A file of the app. *)
+
+defn guarded(next, r)
+  (** A middleware that adds the headers of security to every response: no code but the app's own (no inline script,
+      no other site's), no framing, no sniffing of types, no referrer to other sites, and pages kept by no cache. *)
+  out = next(r)
+  for h in [["content-security-policy", "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"], ["x-content-type-options", "nosniff"], ["referrer-policy", "same-origin"]]
+    out = http.WithHeader(h[1], h[2], out)
+  end
+  if value.IsMissing(http.HeaderValue("cache-control", if "Headers" in out out.Headers else [] end))
+    out = http.WithHeader("cache-control", "no-store", out)
+  end
+  out
+end
+
+defn sameOrigin(next, r)
+  (** A middleware that refuses a request that changes something (any method but GET and HEAD) unless its Origin is
+      the app's own, the scheme and the Host it was sent to: a form of another site, posted with the cookie of a
+      visitor of this one (cross-site request forgery), gets a 403. Browsers send Origin with every such request. *)
+  if r.Method == "GET" or r.Method == "HEAD"
+    return next(r)
+  end
+  origin = http.HeaderValue("origin", r.Headers)
+  host = http.HeaderValue("host", r.Headers)
+  if value.IsMissing(origin) or value.IsMissing(host) or (text.Lower(origin) != "http://$(text.Lower(host))" and text.Lower(origin) != "https://$(text.Lower(host))")
+    return http.Plain("This request comes from another origin than the app's.", status = 403)
+  end
+  next(r)
+end
+
+defn cookie(secret, env, response, age = SessionTime)
+  (** A response that sets the session's cookie: HttpOnly (no script reads it), SameSite=Strict (no other site sends it), Secure over https. *)
+  http.SetCookie("sid", secret, response, options = "Path=/; Max-Age=$age; HttpOnly; SameSite=Strict$(if env.Secure "; Secure" else "" end)")
+end
+
+see(path) = http.Redirect(path, status = 303)   (** After a form: the page to see, by a GET. *)
+
+defn signingIn(r, env)
+  (** The form of the sign-in page: a session and its cookie, or the page again with a message that names neither
+      the login nor the password. *)
+  form = http.Form(r)
+  done = SignIn(field(form, "login"), if value.IsText(dict.Get("password", form)) form["password"] else "" end, env.Now(), env.Keys, env.Full)
+  if result.IsErr(done)
+    if done.Error.Code != "auth"
+      return failed(done.Error, missing)
+    end
+    log.Warn("sign-in refused", {})
+    return http.Html(SignInPage(done.Error.Message), status = 401)
+  end
+  cookie(done.Value, env, see("/"))
+end
+
+defn signingOut(r, env)
+  (** Ends the session of the cookie, and its cookie. *)
+  secret = dict.Get("sid", r.Cookies)
+  if value.IsText(secret) and text.ByteLength(secret) == 64
+    _ = SignOut(secret, env.Keys, env.Full)
+  end
+  cookie("", env, see("/login"), age = 0)
+end
+
+defn signed(env, role, handler)
+  (** A handler for the signed-in users of a role ("admin", or "any"): handler(r, u), u the user {User, Login, Role,
+      Session, Db, Now}, Db the database of its role and Now() the time. Without a session, a GET goes to the sign-in page and anything else
+      gets a 401; a user of another role gets a 403. *)
+  r -> visiting(env, role, handler, r)
+end
+
+defn visiting(env, role, handler, r)
+  (** A request through signed. *)
+  v = Visitor(dict.Get("sid", r.Cookies), env.Now(), env.Keys, env.Full)
+  if result.IsErr(v)
+    return failed(v.Error, missing)
+  end
+  u = v.Value
+  if value.IsMissing(u)
+    return if r.Method == "GET" see("/login") else Problem(401, "Sign in first.", missing) end
+  end
+  if role == "admin" and u.Role != "admin"
+    return Problem(403, "This page is the admin's: an accountant sees invoices only.", u)
+  end
+  u.Db = if u.Role == "admin" env.Full else env.Books end
+  u.Now = env.Now
+  handler(r, u)
+end
+
+defn failed(e, u)
+  (** The page of an Err: its status from its Code. A failure of the server is written in the log, by its code and its
+      message, which hold no secret: the app never puts a password or a session's secret in a message. *)
+  code = dict.Get("Code", e)
+  status = match code
+    "missing" -> 404
+    "denied" -> 403
+    "auth" -> 401
+    "conflict" -> 409
+    "paid" -> 409
+    "has_invoices" -> 409
+    "unique" -> 409
+    "invalid" -> 400
+    else -> 500
+  end
+  if status == 500
+    log.Error("request failed", {Code: code, Message: dict.Get("Message", e)})
+  end
+  message = dict.Get("Message", e)
+  Problem(status, if status == 500 or not value.IsText(message) "Something went wrong on our side: try again." else message end, u)
+end
+
+defn clientsList(r, u)
+  (** The list of clients; ?part=rows gives its rows only, for the search as one types. *)
+  search = Lower(field(r.Query, "q"))
+  if text.ByteLength(search) > 120
+    return Problem(400, "A search has at most 120 bytes.", u)
+  end
+  sort = field(r.Query, "sort")
+  page = ClientsPage(search, sort, Cursor(r.Query), PageSize, u.Db)
+  if result.IsErr(page)
+    return failed(page.Error, u)
+  end
+  if field(r.Query, "part") == "rows" http.Html(ClientRows(page.Value)) else http.Html(ClientsList(page.Value, search, if sort == "" "name" else sort end, u)) end
+end
+
+defn clientAdded(r, u)
+  (** A new client from its form. *)
+  c = ClientForm(http.Form(r))
+  if result.IsErr(c)
+    return http.Html(ClientEdit(http.Form(r) then asClient, c.Error, "/clients", u), status = 400)
+  end
+  id = AddClient(c.Value, u.User, u.Db)
+  if result.IsErr(id) and id.Error.Code == "unique"
+    return http.Html(ClientEdit(c.Value, {Email: "Another client has this e-mail."}, "/clients", u), status = 409)
+  end
+  if result.IsErr(id) failed(id.Error, u) else see("/clients/$(id.Value)") end
+end
+
+asClient(form) = {Name: field(form, "name"), Email: field(form, "email"), City: field(form, "city")}   (** A form's fields, to show them again. *)
+
+defn clientOf(r, u)
+  (** The client of the path: an Ok of {Id, Client}, or an Err for the page. *)
+  id = Id(r.Params.id)
+  c = if value.IsMissing(id) result.Ok(missing) else GetClient(id, u.Db) end
+  if result.IsErr(c)
+    return c
+  end
+  if value.IsMissing(c.Value) result.Err({Code: "missing", Message: "There is no such client."}) else result.Ok({Id: id, Client: c.Value}) end
+end
+
+defn clientShown(r, u)
+  (** A client, its balance and its invoices not paid. *)
+  c = clientOf(r, u)
+  if result.IsErr(c)
+    return failed(c.Error, u)
+  end
+  id = c.Value.Id
+  b = Balance(id, u.Db)
+  open = {Statuses: [], Action: false, Open: true, Search: "", Client: id, Sort: "due"}
+  page = InvoicesPage(open, u.Now(), Cursor(r.Query), PageSize, u.Db)
+  if result.IsErr(b) or result.IsErr(page)
+    return failed(if result.IsErr(b) b.Error else page.Error end, u)
+  end
+  http.Html(ClientView(id, c.Value.Client, b.Value, page.Value, u))
+end
+
+defn clientEditing(r, u)
+  (** The form of a client. *)
+  c = clientOf(r, u)
+  if result.IsErr(c) failed(c.Error, u) else http.Html(ClientEdit(c.Value.Client, missing, "/clients/$(c.Value.Id)", u)) end
+end
+
+defn clientChanged(r, u)
+  (** A client's form, saved. *)
+  c = clientOf(r, u)
+  if result.IsErr(c)
+    return failed(c.Error, u)
+  end
+  id = c.Value.Id
+  f = ClientForm(http.Form(r))
+  if result.IsErr(f)
+    return http.Html(ClientEdit(http.Form(r) then asClient, f.Error, "/clients/$id", u), status = 400)
+  end
+  done = EditClient(id, f.Value, u.User, u.Db)
+  if result.IsErr(done) and done.Error.Code == "unique"
+    return http.Html(ClientEdit(f.Value, {Email: "Another client has this e-mail."}, "/clients/$id", u), status = 409)
+  end
+  if result.IsErr(done) failed(done.Error, u) else see("/clients/$id") end
+end
+
+defn clientDeleted(r, u)
+  (** Deletes a client without invoices. *)
+  id = Id(r.Params.id)
+  done = if value.IsMissing(id) result.Err({Code: "missing", Message: "There is no such client."}) else DeleteClient(id, u.User, u.Db) end
+  if result.IsErr(done) failed(done.Error, u) else see("/clients") end
+end
+
+defn filterOfQuery(q)
+  (** The filter of the list of invoices from its query, and the query again for its links. *)
+  statuses = [s for s in Statuses if field(q, s) == "1"]
+  sort = field(q, "sort")
+  sort = if list.IndexOf(sort, InvoiceSorts) == missing "-number" else sort end
+  f = {Statuses: statuses, Action: field(q, "action") == "1", Open: false, Search: Lower(field(q, "q")), Client: Id(field(q, "client")), Sort: sort}
+  parts = list.Concat(["q=$(encode.UrlEncode(field(q, "q")))", "sort=$sort"], list.Concat(["$s=1" for s in statuses], list.Concat(if f.Action ["action=1"] else [] end, if value.IsMissing(f.Client) [] else ["client=$(f.Client)"] end)))
+  {Filter: f, Query: text.Join("&", parts)}
+end
+
+defn invoicesList(r, u)
+  (** The list of invoices, filtered, in pages. *)
+  fq = filterOfQuery(r.Query)
+  if text.ByteLength(fq.Filter.Search) > 120
+    return Problem(400, "A search has at most 120 bytes.", u)
+  end
+  page = InvoicesPage(fq.Filter, u.Now(), Cursor(r.Query), PageSize, u.Db)
+  if result.IsErr(page) failed(page.Error, u) else http.Html(InvoicesList(page.Value, fq.Filter, fq.Query, u)) end
+end
+
+defn safeCell(s)
+  (** A text for a cell of CSV that a spreadsheet won't run as a formula: one that starts with = + - @, a tab or a
+      carriage return gets a ' in front (OWASP, CSV injection). *)
+  if s != "" and list.IndexOf(text.ByteSlice(1, 1, s), ["=", "+", "-", "@", text.Char(9), text.Char(13)]) != missing "'$s" else s end
+end
+
+defn invoicesCsv(r, u)
+  (** The invoices of the list's filter, every one of them, as CSV: read by pages of 5,000 in the order of their numbers. *)
+  fq = filterOfQuery(r.Query)
+  f = fq.Filter
+  f.Sort = "number"
+  rows = [["number", "date", "due", "bill_to", "status", "total", "paid_at"]]
+  cursor = missing
+  while true
+    page = InvoicesPage(f, u.Now(), cursor, 5000, u.Db)
+    if result.IsErr(page)
+      return failed(page.Error, u)
+    end
+    paid = paidAt([x.Invoice for x in page.Value.Rows], u.Db)
+    for x in page.Value.Rows
+      rows = list.Append([x.Number, DayText(x.Date), DayText(x.Due), safeCell(x.BillTo), x.Status, text.Decimals(2, x.Total), DayText(dict.Get(x.Invoice, paid))], rows)
+    end
+    cursor = page.Value.Next
+    if value.IsMissing(cursor)
+      break
+    end
+  end
+  {Status: 200, Body: csv.Text(rows), Headers: [{Name: "content-type", Value: "text/csv; charset=utf-8"}, {Name: "content-disposition", Value: "attachment; filename=\"invoices.csv\""}]}
+end
+
+defn paidAt(ids, db)
+  (** When each of these invoices was paid, by its id. *)
+  out = dict.Dict()
+  if value.Len(ids) == 0
+    return out
+  end
+  rows = cepheus.Find(2, (i, p) -> {Where: [[i, Invoice.PaidAt, p], cepheus.In(i, ids)], Give: {Invoice: i, PaidAt: p}}, db)
+  if result.IsOk(rows)
+    for x in rows.Value
+      out[x.Invoice] = x.PaidAt
+    end
+  end
+  out
+end
+
+defn invoiceNew(r, u)
+  (** The form of a new invoice for the client of ?client=, dated today and due in 30 days. *)
+  client = Id(field(r.Query, "client"))
+  b = if value.IsMissing(client) result.Ok(missing) else BillTo(client, u.Db) end
+  if result.IsErr(b)
+    return failed(b.Error, u)
+  end
+  if value.IsMissing(b.Value)
+    return Problem(404, "Choose the client from its page, or from one of its invoices.", u)
+  end
+  today = Day(DayText(u.Now()))
+  http.Html(InvoiceEdit({Client: client, Date: today, Due: today + 30 * 86400, Lines: []}, b.Value, missing, "/invoices", u))
+end
+
+defn invoiceAdded(r, u)
+  (** A new invoice from its form. *)
+  form = http.Form(r)
+  f = InvoiceForm(form)
+  client = Id(field(form, "client"))
+  b = if value.IsMissing(client) result.Ok(missing) else BillTo(client, u.Db) end
+  if result.IsErr(b)
+    return failed(b.Error, u)
+  end
+  if value.IsMissing(b.Value)
+    return Problem(400, "There is no such client.", u)
+  end
+  if result.IsErr(f)
+    return http.Html(InvoiceEdit(asInvoice(form), b.Value, f.Error, "/invoices", u), status = 400)
+  end
+  done = AddInvoice(f.Value, b.Value, u.User, u.Db)
+  if result.IsErr(done) failed(done.Error, u) else see("/invoices/$(done.Value.Invoice)") end
+end
+
+defn asInvoice(form)
+  (** A form's fields, to show them again. *)
+  lines = []
+  for k in 1..MaxLines
+    if field(form, "label$k") != "" or field(form, "quantity$k") != "" or field(form, "price$k") != ""
+      lines = list.Append({Label: field(form, "label$k"), Quantity: field(form, "quantity$k"), Price: text.Number(field(form, "price$k"))}, lines)
+    end
+  end
+  {Client: Id(field(form, "client")), Date: Day(field(form, "date")), Due: Day(field(form, "due")), Lines: lines, Number: ""}
+end
+
+defn invoiceOf(r, u)
+  (** The invoice of the path: an Ok of it, or an Err for the page. *)
+  id = Id(r.Params.id)
+  inv = if value.IsMissing(id) result.Ok(missing) else GetInvoice(id, u.Db) end
+  if result.IsErr(inv)
+    return inv
+  end
+  if value.IsMissing(inv.Value) result.Err({Code: "missing", Message: "There is no such invoice."}) else inv end
+end
+
+defn invoiceShown(r, u)
+  (** An invoice. *)
+  inv = invoiceOf(r, u)
+  if result.IsErr(inv) failed(inv.Error, u) else http.Html(InvoiceView(inv.Value, u)) end
+end
+
+defn invoiceEditing(r, u)
+  (** The form of an invoice that is not paid. *)
+  inv = invoiceOf(r, u)
+  if result.IsErr(inv)
+    return failed(inv.Error, u)
+  end
+  if inv.Value.Status == "paid"
+    return Problem(409, "Invoice $(inv.Value.Number) is paid: it stays as it is.", u)
+  end
+  http.Html(InvoiceEdit(inv.Value, inv.Value.BillTo, missing, "/invoices/$(inv.Value.Id)", u))
+end
+
+defn invoiceChanged(r, u)
+  (** An invoice's form, saved. *)
+  inv = invoiceOf(r, u)
+  if result.IsErr(inv)
+    return failed(inv.Error, u)
+  end
+  id = inv.Value.Id
+  form = http.Form(r)
+  form["client"] = "$(inv.Value.Client)"
+  f = InvoiceForm(form)
+  if result.IsErr(f)
+    shown = asInvoice(form)
+    shown.Number = inv.Value.Number
+    return http.Html(InvoiceEdit(shown, inv.Value.BillTo, f.Error, "/invoices/$id", u), status = 400)
+  end
+  done = EditInvoice(id, f.Value, u.Now(), u.User, u.Db)
+  if result.IsErr(done) failed(done.Error, u) else see("/invoices/$id") end
+end
+
+defn invoicePaid(r, u)
+  (** Marks an invoice paid. *)
+  id = Id(r.Params.id)
+  done = if value.IsMissing(id) result.Err({Code: "missing", Message: "There is no such invoice."}) else PayInvoice(id, u.Now(), u.User, u.Db) end
+  if result.IsErr(done) failed(done.Error, u) else see("/invoices/$id") end
+end
+
+defn invoiceDeleted(r, u)
+  (** Deletes an invoice that is not paid. *)
+  id = Id(r.Params.id)
+  done = if value.IsMissing(id) result.Err({Code: "missing", Message: "There is no such invoice."}) else DeleteInvoice(id, u.User, u.Db) end
+  if result.IsErr(done) failed(done.Error, u) else see("/invoices") end
+end
+
+defn screen(s, env)
+  (** The live dashboard of a page, for the user of its cookie: three watches, each ended with the page. The totals
+      are aggregates, which a watch keeps by difference; the payments are those of the last 24 hours. *)
+  u = Visitor(dict.Get("sid", s.Request.Cookies), env.Now(), env.Keys, env.Full)?
+  if value.IsMissing(u)
+    return result.Err({Kind: "auth", Message: "Sign in again."})
+  end
+  db = if u.Role == "admin" env.Full else env.Books end
+  since = env.Now() - 86400
+  unpaid = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
+  late = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Status, "late"], [i, Invoice.Total, t]], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
+  paid = cepheus.Watch(5, (i, p, no, b, t) -> {
+    Where: [[i, Invoice.PaidAt, p], cepheus.Above(p, since), [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Total, t]],
+    Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
+  }, db, until = s.Ended)?
+  [live.Show("unpaid", unpaid.Changes), live.Show("late", late.Changes), live.Show("payments", paid.Changes)]
+end

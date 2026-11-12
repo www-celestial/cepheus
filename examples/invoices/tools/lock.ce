@@ -1,0 +1,47 @@
+(** Writes cesia.lock for what tools/deps.sh put in deps/, as cesia pkg install writes it: the [std] part that cesia new
+    wrote stays, and each dependency in deps/www-celestial gets the fingerprint of every file, which Cesia checks before
+    it loads one. Run with --allow read,write in the app's folder. *)
+use std/cesia
+use std/list
+use std/result
+use std/sys
+use std/text
+
+defn walk(dir)
+  (** The files under a folder, at any depth, in order. *)
+  found = []
+  for name in list.Sort(result.Unwrap(sys.List(dir)))
+    path = "$dir/$name"
+    found = if result.Unwrap(sys.Stat(path)).IsDir list.Concat(found, walk(path)) else list.Append(path, found) end
+  end
+  found
+end
+
+defn kept()
+  (** The lines of the lock before its first [deps.: the header and [std]. *)
+  if not sys.Exists("cesia.lock")
+    return []
+  end
+  out = []
+  for line in text.Lines(result.Unwrap(sys.Read("cesia.lock")))
+    if text.StartsWith("[deps.", line)
+      return out
+    end
+    out = list.Append(line, out)
+  end
+  out
+end
+
+q = text.Char(34)
+lines = kept()
+for repo in ["cepheus", "ceti"]
+  dir = "deps/www-celestial/$repo"
+  if sys.Exists(dir)
+    lines = list.Concat(lines, ["[deps.$repo]", "from = $(q)github.com/www-celestial/$repo$q", "version = $(q)v0.1.0$q", "files = ["])
+    for f in walk(dir)
+      lines = list.Append("  $q$f $(cesia.Fingerprint(result.Unwrap(sys.Read(f))))$q,", lines)
+    end
+    lines = list.Concat(lines, ["]", ""])
+  end
+end
+result.Unwrap(sys.Write("cesia.lock", "$(text.Join(text.Char(10), lines))$(text.Char(10))"))

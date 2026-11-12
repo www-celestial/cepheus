@@ -1,0 +1,6 @@
+std/
+deps/
+site/
+.cesia/
+# made by tools/deps.sh until Cepheus and Ceti have tagged releases
+cesia.lock

@@ -1,0 +1,23 @@
+[project]
+name = "invoices"
+cesia = "1.1"
+
+[deps.cepheus]
+from = "github.com/www-celestial/cepheus"
+version = "v0.1.0"
+take = ["cesia/cepheus"]
+
+# The server: the package's engine (native=cepheus, which reaches the Cepheus server), libsodium for the passwords
+# and the sessions, its settings, and its port. It reads and writes no file.
+[tasks.serve]
+file = "src/main.ce"
+allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=CEPHEUS_BOOKS_TOKEN", "env=APP_PORT", "env=APP_HOST", "env=APP_SECURE", "net=:8080"]
+
+# cesia do users add LOGIN admin|accountant, the password in APP_PASSWORD.
+[tasks.users]
+file = "src/users.ce"
+allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=APP_PASSWORD"]
+
+# The unit tests run on forks of Empty: no server, only the package's engine; and libsodium for the passwords.
+[test]
+allow = ["native=cepheus", "ffi=sodium"]
