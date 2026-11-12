@@ -28,7 +28,8 @@ for d in $(seq "$n" | sed 's/^/doc/') tls local restart; do
   rights="$rights --database $d=write"
 done
 # shellcheck disable=SC2086
-export CEPHEUS_TOKEN=$($B token add docs $rights --config "$cfg" 2>/dev/null)
+CEPHEUS_TOKEN=$($B token add docs $rights --config "$cfg" 2>/dev/null)
+export CEPHEUS_TOKEN
 # the server in a session of its own, its output in a log: it never holds the pipes of the script's caller; stopped
 # when the script ends, whatever ends it
 serve() {

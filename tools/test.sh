@@ -8,6 +8,8 @@
 # The Cesia client, when a Cesia with its native interface is here: its engine, built against that Cesia's
 # cesia_v1.cmi (CESIA_NATIVE, its folder; found from the cesia command when unset: lib/native of a release, or the
 # build's), the package's tests on forks on both paths of Cesia, and test/cesia.sh against a real server.
+# Any failing step stops the script with its status: each step is a command of its own, never inside an && list but
+# last (set -e does not stop on the others), and no command substitution inside another command's arguments.
 set -e
 # A test piped into tail fails the script: without pipefail the pipeline's status is tail's, and a failure passes.
 set -o pipefail
@@ -26,19 +28,26 @@ CEPHEUS_TMP=$tmp $b/unit.exe | tail -1
 $b/reasoning.exe | tail -1
 $b/exhaustive.exe | tail -3
 $b/sim.exe --seeds "${SEEDS:-300}" | tail -2
-rm -rf "$tmp/cepheus-crash" && $b/crash.exe "$tmp/cepheus-crash" "${KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-crash"
+rm -rf "$tmp/cepheus-crash"
+$b/crash.exe "$tmp/cepheus-crash" "${KILLS:-20}" | tail -2
+rm -rf "$tmp/cepheus-crash"
 $b/bank.exe "$tmp/cepheus-bank" "${BANK_SECONDS:-2}" | tail -2
-rm -rf "$tmp/cepheus-seats" && $b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-seats"
+rm -rf "$tmp/cepheus-seats"
+$b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-20}" | tail -2
+rm -rf "$tmp/cepheus-seats"
 CEPHEUS_TMP=$tmp $b/examples.exe | tail -1
 CEPHEUS_TMP=$tmp $b/server_unit.exe | tail -1
 $b/server_sim.exe --seeds "${SERVER_SEEDS:-200}" | tail -2
 $b/live_sim.exe --seeds "${LIVE_SEEDS:-100}" | tail -2
 $b/server_tls.exe "$tmp/cepheus-tls" | tail -1
 $b/server_limits.exe "$tmp/cepheus-limits" | tail -1
-rm -rf "$tmp/cepheus-server" && $b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-server"
+rm -rf "$tmp/cepheus-server"
+$b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}" | tail -2
+rm -rf "$tmp/cepheus-server"
 if [ -n "$CESIA_NATIVE" ]; then
   mkdir -p native
-  install -m 644 _build/default/cesia/native/cepheus.cmxs "native/cepheus-$(cesia run tools/tag.ce).cmxs"
+  tag=$(cesia run tools/tag.ce)
+  install -m 644 _build/default/cesia/native/cepheus.cmxs "native/cepheus-$tag.cmxs"
   for path in "" --no-spec; do
     cesia test $path cesia/tests > "$tmp/cesia-tests.out" 2>&1 || true
     tail -1 "$tmp/cesia-tests.out" | sed "s/^/cesia tests $path: /"
