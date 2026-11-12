@@ -435,8 +435,10 @@ let closure_del kind form dir how =
     match kind with
     | "hierarchy" -> 100_000, tree 100_000 4, 5
     | "dag" -> 5_000, dag 5_000 3 1, 2_500
+    | "chain" -> 500, tree 500 1, 250
     | k -> failwith ("no graph " ^ k)
   in
+  let k = match Sys.getenv_opt "DEL_NODE" with Some s -> int_of_string s | None -> k in
   let db = if dir = "-" then fork empty else ok (open_ dir) in
   let e, t = match ok (declare db [ prop ~many:true "edge" Tlink; prop ~many:true "within" Tlink ]) with [ e; t ] -> e, t | _ -> assert false in
   let x = Var 0 and y = Var 1 and z = Var 2 in

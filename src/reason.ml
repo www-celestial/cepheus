@@ -38,6 +38,7 @@ module S = struct
   let[@inline never] value v t w = Store.value v t w
   let[@inline never] iter_values v e p f = Store.iter_values v e p f
   let[@inline never] iter_things v p w f = Store.iter_things v p w f
+  let[@inline never] iter_values_st v e p f = Store.iter_values_st v e p f
   let[@inline never] iter_prop v p f = Store.iter_prop v p f
   let[@inline never] count_values v e p = Store.count_values v e p
 end
@@ -310,6 +311,11 @@ let rec iset_add s k =
   if A.unsafe_get s.keys !i = k then false
   else (A.unsafe_set s.keys !i k; buf_push s.used !i; true)
 
+let iset_mem s k =
+  let i = ref (mix k land s.imask) in
+  while (let x = A.unsafe_get s.keys !i in x <> -1 && x <> k) do i := (!i + 1) land s.imask done;
+  A.unsafe_get s.keys !i = k
+
 (* a map of non-negative ints to dense ids 0, 1, ..., in their order of arrival *)
 type imap = { mk_keys : ints; mk_vals : ints; mk_mask : int; mutable mk_n : int; mk_of : buf }
 
@@ -408,6 +414,7 @@ type program = {
   in_module : bool array;  (* rules a module runs for insertion *)
   ix_ins : index;  (* forward, the modules' rules aside: insertion *)
   ix_lost : index;  (* forward: the instances a deleted fact loses (B/F) *)
+  ix_lost_walk : index;  (* the same, the rules of closures retracted by walks aside *)
   ix_pf : index;  (* forward among the proved facts *)
   ix_bw : index;  (* backward: the head matched *)
   ix_cons : index;  (* the constraints, forward *)
@@ -427,6 +434,7 @@ and ctx = {
   cw : int array;  (* the words of prog.consts in [v], -1 for a text it lacks *)
   mutable ins : disp option;
   mutable lost : disp option;
+  mutable lost_walk : disp option;
   mutable cons : disp option;
   mutable pf : disp array;  (* by depth *)
   mutable bwd : disp array;  (* by depth *)
@@ -1015,9 +1023,12 @@ let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(rules : R
     rules;
   let give ri = not never.(ri) in
   let ix_lost = build_index np rules ~backward:false give in
+  let walk_rule = Array.make (Array.length rules) false in
+  Array.iter (fun (m : closure) -> if m.m_walk then (walk_rule.(m.m_rule) <- true; if m.m_base >= 0 then walk_rule.(m.m_base) <- true)) modules;
+  let ix_lost_walk = if Array.exists Fun.id walk_rule then build_index np rules ~backward:false (fun ri -> give ri && not walk_rule.(ri)) else ix_lost in
   { key; rules; ids; sty; never; bad_head; atoms = Array.map atoms_of rules; free_free = !free_free; np; reads;
     consts = Array.of_list (List.rev !consts); orders = Hashtbl.create 64; size = S.facts v; modules; in_module;
-    ix_ins = build_index np rules ~backward:false (fun ri -> give ri && not in_module.(ri)); ix_lost; ix_pf = ix_lost;
+    ix_ins = build_index np rules ~backward:false (fun ri -> give ri && not in_module.(ri)); ix_lost; ix_lost_walk; ix_pf = ix_lost;
     ix_bw = build_index np rules ~backward:true give; ix_cons = build_index np rules ~backward:false (fun ri -> never.(ri));
     spec; pool = ref []; pm = Mutex.create () }
 
@@ -1456,7 +1467,7 @@ let [@inline never] choose (v : Store.view) (gen : program) (spec : program opti
 let [@inline never] new_ctx ?facts prog v =
   let nm = Array.length prog.modules in
   { prog; ws = ws_create ?facts (); pt = ws_create (); v; round = max_int; cw = Array.make (Array.length prog.consts) (-1);
-    ins = None; lost = None; cons = None; pf = [||]; bwd = [||]; bfq = Queue.create (); next = ints 64 0;
+    ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; bfq = Queue.create (); next = ints 64 0;
     spare = ints 64 0; nn = 0; derived = 0; limit = max_int; vp = Bytes.empty;
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
@@ -2134,6 +2145,10 @@ let [@inline never] on_lost c pl =
 
 let lost_d c = match c.lost with Some d -> d | None -> let d = make_disp c c.prog.ix_lost State (on_lost c) in c.lost <- Some d; d
 
+(* B/F's dispatch when closures were retracted by walks: their own rules aside (their facts are decided) *)
+let lost_walk_d c =
+  match c.lost_walk with Some d -> d | None -> let d = make_disp c c.prog.ix_lost_walk State (on_lost c) in c.lost_walk <- Some d; d
+
 (* Retraction by walks (the design's section 5.7; Hu, Motik, Horrocks 2022), for a closure no other rule gives T or E
    to: its edges are the facts the group leaves asserted (prp-trp's T) or E's facts, so the group's retractions are
    all that change them. The sources whose targets may shrink are the retracted edges' and facts' ends and what
@@ -2157,13 +2172,19 @@ let module_retract c f0 (cands : int list) =
           if gone_e <> [] || gone_b <> [] then begin
             if Bytes.length c.walked = 0 then c.walked <- Bytes.make c.prog.np '\000';
             Bytes.set c.walked t '\001';
-            (* an edge now: a fact of T asserted after the group (prp-trp), or a fact of E not retracted (linear) *)
-            let state_of e p w = let x = find ws e p w in if x >= 0 then (if has ws x 16 then 0 else base ws x) else S.state c.v e p w in
+
+            (* a thing's facts of T asserted after the group: read with their states (a fact the group touched, by its
+               entry in the working set; one it added is in the view already) *)
+            let asserted_out u f =
+              S.iter_values_st c.v u t (fun w st ->
+                  let x = if ws.n = 0 then -1 else find ws u t w in
+                  if x >= 0 then (if base ws x = 1 && not (has ws x 16) then f w) else if st = 1 then f w)
+            in
             let edge_out u f =
-              if trp then iter_out c u t (fun w -> if state_of u t w = 1 then f w)
+              if trp then asserted_out u f
               else iter_out c u m.m_e (fun w -> let x = find ws u m.m_e w in if x < 0 || not (has ws x 16) then f w)
             in
-            let b_out u f = if not trp then iter_out c u t (fun d -> if state_of u t d = 1 then f d) in
+            let b_out u f = if not trp then asserted_out u f in
             (* the sources: the retracted edges' and facts' starts, and what reaches them *)
             let ids = Hashtbl.create 64 and of_id = buf_create 64 in
             let id x = if not (Hashtbl.mem ids x) then (Hashtbl.replace ids x of_id.bn; buf_push of_id x) in
@@ -2171,7 +2192,27 @@ let module_retract c f0 (cands : int list) =
               if trp then (id a; iter_in c t a id)
               else (reach_back c m a ~with_start:true c.buf_a; for i = 0 to c.buf_a.bn - 1 do id (buf_get c.buf_a i) done)
             in
-            List.iter (fun x -> back (fe ws x)) gone_e;
+            (* prp-trp: an edge (a, b) with another way from a to b, through an edge (a, w) left whose closure holds b and
+               which reaches no retracted edge's start (so its way to b does not use one), changes nothing: every path
+               through it goes the other way (only the edge itself stays, derived) *)
+            let starts = List.map (fun x -> fe ws x) gone_e in
+            let present_t e w = let x = find ws e t w in if x >= 0 then now ws x > 0 else in_view c t && S.mem c.v e t w in
+            let other_way x =
+              let a = fe ws x and b = fw ws x and found = ref false in
+              edge_out a (fun w ->
+                  if (not !found) && w <> b && present_t w b && List.for_all (fun a' -> w <> a' && not (present_t w a')) starts
+                  then found := true);
+              !found
+            in
+            let effective = if trp then List.filter (fun x -> not (other_way x)) gone_e else gone_e in
+            (* what can be lost: the facts toward the retracted edges' ends and what those reach, and the retracted
+               facts' values (a source's other targets do not go through them) *)
+            let down = iset_create () and down_l = buf_create 64 in
+            let add_down z = if iset_add down z then buf_push down_l z in
+            List.iter (fun x -> let b = fw ws x in add_down b; iter_out c b t add_down) effective;
+            List.iter (fun x -> add_down (fw ws x)) gone_b;
+            let in_down z = iset_mem down z in
+            List.iter (fun x -> back (fe ws x)) effective;
             List.iter (fun x -> back (fe ws x)) gone_b;
             let n = of_id.bn in
             let thing i = buf_get of_id i in
@@ -2195,14 +2236,21 @@ let module_retract c f0 (cands : int list) =
             let kept_of w =
               match Hashtbl.find_opt kept w with
               | Some r -> r
-              | None -> let a = kb.bn in iter_out c w t (fun z -> buf_push kb z); let r = (a, kb.bn) in Hashtbl.replace kept w r; r
+              | None ->
+                let a = kb.bn in
+                (* its targets among those that can be lost: by its facts or by the few, whichever is less *)
+                if S.count_values c.v w t <= 4 * down_l.bn then iter_out c w t (fun z -> if in_down z then buf_push kb z)
+                else for i = 0 to down_l.bn - 1 do let z = buf_get down_l i in if present_t w z then buf_push kb z done;
+                let r = (a, kb.bn) in
+                Hashtbl.replace kept w r;
+                r
             in
             (* each component's new targets, its successors first (as a closure from scratch, things by their ids) *)
             let toff = ints (nc + 1) 0 and tb = buf_create 1024 and mark = iset_create () in
             for k = 0 to nc - 1 do
               A.unsafe_set toff k tb.bn;
               iset_clear mark;
-              let add z = if iset_add mark z then buf_push tb z in
+              let add z = if in_down z && iset_add mark z then buf_push tb z in
               let cyclic = ref false in
               for i = A.unsafe_get moff k to A.unsafe_get moff (k + 1) - 1 do
                 let u = A.unsafe_get members i in
@@ -2233,7 +2281,7 @@ let module_retract c f0 (cands : int list) =
               iset_clear mark;
               for i = A.unsafe_get toff k to A.unsafe_get toff (k + 1) - 1 do ignore (iset_add mark (buf_get tb i)) done;
               let lost = ref [] in
-              iter_out c x t (fun z -> if iset_add mark z then lost := z :: !lost);
+              iter_out c x t (fun z -> if in_down z && iset_add mark z then lost := z :: !lost);
               List.iter
                 (fun z ->
                   let y = intern c x t z in
@@ -2261,7 +2309,8 @@ let [@inline never] backward_forward c (cands : int list) =
   plans c 0;
   let f0 = lost_d c in
   c.round <- max_int;
-  let cands = module_retract c f0 cands in
+  let cands = module_retract c (lost_walk_d c) cands in
+  let f0 = if Bytes.length c.walked > 0 then lost_walk_d c else f0 in
   List.iter (fun x -> Queue.add x q) cands;
   while not (Queue.is_empty q) do
     let x = Queue.pop q in

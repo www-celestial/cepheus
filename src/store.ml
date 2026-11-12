@@ -598,6 +598,33 @@ let base_iter_ea b e p fn =
     end
   end
 
+(* the same, with each row's state: 1 asserted, 2 only derived (the flag in its field) *)
+let cloop_st b p e lo hi fn =
+  let r = ref lo in
+  while !r < hi do
+    let j = !r lsr 7 in
+    let d = ce b p 4 + (j lsl 4) in
+    let h = ci64 b d in
+    let base = ci64 b (d + 8) + (if (h lsr 9) land 1 = 0 then 0 else e) in
+    let wv = h land 0xFF and fl = (h lsr 8) land 1 and at = ce b p 5 + (h lsr 16) in
+    let stop = min hi ((j + 1) lsl 7) in
+    for r' = !r to stop - 1 do
+      let o = (r' land 127) * wv in
+      fn (base + cfield b at (o + fl) (wv - fl)) (if fl = 1 && cfield b at o 1 = 1 then 2 else 1)
+    done;
+    r := stop
+  done
+
+let base_iter_ea_st b e p fn =
+  if has_col b p then begin
+    let q = ccthing b p e in
+    if q >= 0 then begin
+      let cell = [| 0 |] in
+      let lo = ccrows b p q cell in
+      cloop_st b p e lo cell.(0) fn
+    end
+  end
+
 (* the rows of (e, p): their count, their first in cell.(1) *)
 let range_ea b e p (cell : int array) =
   let q = cthing b p e in
@@ -1361,6 +1388,24 @@ let iter_values v e p f =
               if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then f w)
       done;
       Option.iter (fun td -> iter_delta_ep td p (fun w st -> if present st then f w)) td
+    end
+  end
+
+(* the values of (e, p) with their states, 1 asserted, 2 only derived, as [iter_values] *)
+let iter_values_st v e p f =
+  let rs = v.runs and td = thing_delta v e in
+  if Option.is_none td && Array.length rs = 1 then base_iter_ea_st rs.(0).a e p f
+  else begin
+    let h = holders_p v e p in
+    let one = single h in
+    if Option.is_none td && one >= 0 then base_iter_ea_st rs.(one).a e p f
+    else begin
+      for j = 0 to Array.length rs - 1 do
+        if (h lsr j) land 1 = 1 then
+          base_iter_ea_st rs.(j).a e p (fun w st ->
+              if (match td with Some td -> not (PW.mem (p, w) td.tf) | None -> true) && not (newer v h j e p w) then f w st)
+      done;
+      Option.iter (fun td -> iter_delta_ep td p (fun w st -> if present st then f w (if st land 2 = 0 then 1 else 2))) td
     end
   end
 
