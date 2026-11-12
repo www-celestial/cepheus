@@ -87,6 +87,9 @@ From `write` with rules (the writer's reasoning, the same on a database and on a
 | `rule R gives #E a second value of NAME, which takes one` | a derived value of a one-valued property beside another value |
 | `rule R gives NAME V, which another thing has` | a derived value of a unique property that another thing holds |
 | `rule R gives a fact about #E, which does not exist` | a head names a thing the database never made |
+| `rule R gives a fact of #P, which is not a property it can give` | a head whose property is a variable gives a thing that is no property of the application (none, or a `cepheus/` one) |
+| `rule R gives NAME a value of another type` | a head gives a value read under a variable property to a property of another type |
+| `rule R gives a fact about a value that is not a thing` | a head's thing is a variable read under a variable property whose values are not links |
 
 From `define`, or a write of a rule's facts (a rule is checked when it is written):
 
@@ -98,6 +101,7 @@ From `define`, or a write of a rule's facts (a rule is checked when it is writte
 | `rule NAME: variable ?K out of range` | a pattern or the head uses K outside 0 to `vars - 1` |
 | `rule NAME: variable ?K appears in no pattern of the body` | a variable below `vars` that no pattern of the body uses |
 | `rule NAME: the thing of a pattern is a variable or a thing` | a pattern's thing is a `Val` |
+| `rule NAME: the property ?K is bound by no pattern whose property is a constant` / `… the property ?K of its head …` | a variable property (`prop_var K`) that no pattern with a constant property has as its thing or its value |
 | `rule NAME: no property P` / `… no property P in its head` | a pattern or the head names a property that does not exist |
 | `rule NAME: variable X is both a T and a U` | as for a question |
 | `rule NAME: a range needs an int, date or money variable` / `… the bounds of ?X are not of its type` | a range on another type, or bounds of another type |

@@ -29,7 +29,9 @@ defaults, and the cache's size (`set_cache`).
 | several groups at once | the groups resolved together go into one frame only while its body stays within 256 MiB: a group that would pass it waits for the next frame, and a large group starts a frame of its own, so a frame never passes the limit | `Engine.frame_limit`, `Engine.prepare`, `Engine.writer` |
 | a large group | 20,000 operations or more, all `Add`: the faster path (arrays, sorts, a run merged at once; with rules, its derived facts appended); below, or on any doubt (a constraint, a rule's head on a one-valued or unique property, a fact derived already now asserted), the ordinary path | `Resolve.large_min`, `Reason.bulk` |
 | derived changes of a group | at most $100{,}000 + 100 \times \text{its asserted changes}$, else refused, naming the rule that derived the most | `rule_budget` (`Reason.budget_base`, `Reason.budget_per`) |
-| a rule | 1 pattern or more, at most 64 variables; a pattern's property a constant | `Rules.check` |
+| a rule | 1 pattern or more, at most 64 variables; a pattern's property a constant, or a variable bound by a pattern whose property is a constant | `Rules.check` |
+| a small relation (unfolded on) | at most 10,000 facts, by exact counts; at most 10,000 rules unfolded from one rule | `Reason.small_limit`, `Reason.unfold_limit` |
+| a closure module | prp-trp, or the linear pair over another property, with distinct variables, no constant, no range; on a property of links that takes many values, none unique; one module a property | `Reason.find_modules` |
 | operations in a group | no other limit; every `Expect` is checked against the state before the group | |
 | a batch | up to 4,096 waiting writes resolved at once | `Engine.max_batch` |
 | a frame | the batches resolved during an fsync join the waiting frame until its body passes 8 MiB; then the writer waits for the fsync | `Engine.max_frame` |

@@ -439,8 +439,9 @@ asserted or it has a proof (a finite tree of rule instances whose leaves are ass
 asserted in the view if and only if it is asserted.
 
 *Conditions.* Rules as this version has them: Datalog without negation, aggregates or new things in heads, each
-rule range-restricted and typed (checked when it is written). A group refused (by its budget, a constraint, a schema
-rule) leaves nothing.
+rule range-restricted and typed (checked when it is written; a pattern's property a constant or a variable bound by a
+pattern whose property is a constant, its values' types those of the property at each instance). A group refused (by
+its budget, a constraint, a schema rule, a derived fact that does not fit its property) leaves nothing.
 
 *Proof.* (1) *Insertion.* Semi-naive evaluation from the group's asserted additions reaches the least fixpoint of the
 rules over the state after the retractions: every rule instance with a fact of round r is enumerated in round r
@@ -456,12 +457,30 @@ the group's own frame, written and forced with it (G1, G2); replay applies them 
 recovered view, a replica's or the past's is the writer's, byte for byte of facts. (5) *Runs.* A merge keeps each
 fact's flag: for each fact, the newest entry gives its state in the new view and the oldest its state below the merged
 runs; a flag changed is a retraction and an addition in the new run.
+(6) *Closure modules.* For prp-trp on $T$ the least model's $T$ is the transitive closure $T^+$ of $T$'s other
+facts; for the linear pair it is $E^* \circ (E \cup B)$, $B$ the facts of $T$ asserted or given by other rules. From
+scratch, the module computes exactly these over the strong components (a component's targets are its successors' with
+them, and its own members when it holds a cycle), and makes every pair not present; incrementally, the state before
+the group holds the closure (G17 for the group before, by induction), so a new edge $(a, b)$ adds exactly
+$(\{a\} \cup \mathrm{pred}(a)) \times (\{b\} \cup \mathrm{succ}(b))$ (for the linear pair: the things that reach $a$
+through $E$, and for a new fact $(c, d)$ of $B$, those that reach $c$, times $d$), each new fact in the next round,
+where the other rules see it. Retraction is B/F with the two rules' ordinary plans, exact by (2).
+(7) *Variable properties and unfolding.* An unfolded rule is the generic one with the variables of its small atoms
+replaced by the words of one of their joint bindings in the view (ranges kept, instances that cannot exist dropped):
+over any state whose small relations hold exactly those facts, the instances of the unfolded rules are the generic
+rule's, one for one. The writer uses the unfolded program only for a group whose state keeps them: the view holds the
+facts it was unfolded on (checked at each group), the group asserts or retracts none of them, and a derivation or a
+deletion of one makes the group start again with the rules as written. A relation is unfolded on only if no chain of
+rules leads from the unfolded rules' heads to it, so its facts' proofs do not pass through the rules unfolded on it:
+the unfolded program's checks (B/F) assume them, which then holds.
 
 *Tested by* `test/reasoning.ml` (after every group of random sequences of 60 groups, 60 seeds plain and 60 with the
 facts merged into runs between groups in `tools/test.sh`, `RULES_SEEDS` for more: random safe typed rules defined, changed and removed, random additions and
 retractions of asserted, derived and both, the view equal to the least model of its asserted facts computed from
 scratch by naive evaluation with the checker's own evaluator, `Check.least`, and its asserted facts equal to the
-model's); the simulation (three rules from each seed's third group: the published,
+model's; among the rules, transitive closures of both shapes and rules over a variable property bound by a small
+relation, which the engine unfolds; and the plain sequences again with unfolding off, every group's view equal to the
+unfolded run's); the simulation (three rules from each seed's third group: the published,
 recovered and fork views equal to the least model, after crashes in every disk call, power losses, damaged files,
 merges begun ahead); `test/crash.ml` (a rule marks each client's thing; after each `kill -9`, every confirmed thing
 has its mark, the loader's none).
@@ -506,6 +525,27 @@ proof, which the check finds: it explores every instance of every rule that give
 *Tested by* `test/reasoning.ml` (every fifth group of each random sequence: every derived fact's proof checked node by
 node — each node's rule exists, its body atoms bind consistently to the children's facts in order, its head is the
 node's fact, its ranges hold, every leaf is asserted in the view — and the named case of a two-step proof).
+
+## Security of the rules
+
+
+- **Bounded work and memory.** Every derived fact counts against the budget ($100{,}000 + 100 \times$ the group's
+  asserted changes) on every path: a plan's instance, each fact a closure module makes incrementally, a batch's
+  targets checked against the budget as they grow (so its memory before a refusal is in proportion to the budget), a
+  forest's facts counted before any is made, and B/F's deletions. A rule set or data whose consequences pass it is
+  refused whole, naming the rule: never a writer that runs out of memory or stalls on a closure of $n^2$ facts.
+  *Tested by* `test/reasoning.ml` ("a closure past the budget": chains of 200 in one group, both rule shapes, edges to
+  older and to newer things; the edge joining two chains of 40; the W3C's prp-trp unfolded over a chain; each refused
+  whole, the view unchanged, the least model after).
+- **The unfolded rules give exactly the rules as written.** Beside the proof of G17 (7), the random sequences run a
+  third time with unfolding off (`Reason.specialise`), and every group's view must equal the unfolded run's, and both
+  the least model computed from scratch: a fault of the unfolding cannot change an answer unseen.
+- **Rights per kind and derived facts.** A derived fact is a fact of its property, read under its kind's rights like
+  any. It can come from facts of other kinds (a rule's body): `sources v p` gives the properties a property's derived
+  facts can come from, transitively, on the rules as written (none known: a variable property reads any). A reader
+  allowed some kinds only learns nothing it may not read from a property's derived facts when it reads every kind of
+  its sources: a check of rights per kind that lets a reader see derived facts must count them. *Tested by*
+`test/reasoning.ml` ("where a property's derived facts come from").
 
 ## G21 Live questions
 

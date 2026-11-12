@@ -349,7 +349,25 @@ venue, volume and year); a work that could not be checked is not listed. The des
   `why` computed when asked.
 - **[Hu 2019]** P. Hu, B. Motik, I. Horrocks. Modular Materialisation of Datalog Programs. *AAAI* 2019, 2859–2866.
   https://doi.org/10.1609/aaai.v33i01.33012859
-  — Modules for transitive and symmetric properties: the closure module of the next step.
+  — Modules for transitive and symmetric properties: the closure module.
+- **[Hu 2022]** P. Hu, B. Motik, I. Horrocks. Modular Materialisation of Datalog Programs. *Artificial Intelligence*
+  308, 103726, 2022. https://doi.org/10.1016/j.artint.2022.103726
+  — The journal version: modules for transitivity, symmetry and chains, LUBM-LE 1,268 s → 339 s with them, small
+  deletions in 1 s against 585 s; the module's insertion here, its retraction by walks not yet.
+- **[Tarjan 1972]** R. Tarjan. Depth-First Search and Linear Graph Algorithms. *SIAM Journal on Computing* 1(2),
+  146–160, 1972. https://doi.org/10.1137/0201010
+  — Strong components in linear time, found in reverse topological order: the order a closure from scratch is computed
+  in.
+- **[Nuutila 1995]** E. Nuutila. *Efficient Transitive Closure Computation in Large Digraphs*. Acta Polytechnica
+  Scandinavica, Mathematics and Computing in Engineering Series No. 74, 1995.
+  — Closure by strong components, a component's reach shared by its members: the union of successors' targets.
+- **[Jones 1993]** N. D. Jones, C. K. Gomard, P. Sestoft. *Partial Evaluation and Automatic Program Generation*.
+  Prentice Hall, 1993.
+  — Partial evaluation, a program specialised on part of its input: the rules unfolded on the ontology's facts.
+- **[W3C 2012]** W3C. OWL 2 Web Ontology Language Profiles (Second Edition). Recommendation, 11 December 2012, §4.3.
+  https://www.w3.org/TR/owl2-profiles/
+  — OWL 2 RL's rules (prp-dom, prp-trp, cax-sco, …), written over the ontology's facts with the property a variable:
+  the form a rule with a variable property takes.
 - **[Henzinger 2015]** M. Henzinger, S. Krinninger, D. Nanongkai, T. Saranurak. Unifying and Strengthening Hardness
   for Dynamic Problems via the Online Matrix-Vector Multiplication Conjecture. *STOC* 2015, 21–30.
   https://doi.org/10.1145/2746539.2746609

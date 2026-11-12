@@ -185,6 +185,7 @@ invalid: client/email is declared already as another kind of property
 type term = Var of int | Thing of int | Val of value          (* as in questions *)
 type pattern = { e : term; p : int; v : term }
 type head = Give of pattern | Never
+val prop_var : int -> int                                     (* a pattern's property as the variable ?k *)
 type rule = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
 val define : db -> rule list -> (int list, error) result
 val undefine : db -> string list -> (unit, error) result
@@ -192,6 +193,7 @@ type proof =
   | Given of { e : int; p : int; v : value }
   | By of { rule : string; e : int; p : int; v : value; from : proof list }
 val why : view -> int -> int -> value -> proof option
+val sources : view -> int -> int list option
 val rule_budget : int ref * int ref
 ```
 
@@ -205,12 +207,22 @@ and derives in that group what it gives over the whole database, under the budge
 whole database. A name that is a property's is `Invalid`. If another writer took a number meanwhile, `define` reads
 the schema again and tries again.
 
+A pattern's property `p` is a property id, or `prop_var k` (a negative number) for the variable `?k`: another pattern of
+the body whose property is a constant has `?k` as its thing or its value. A value read under a variable property has
+that property's type; a head that gives a fact its property cannot take refuses the group (errors `Invalid "rule R
+gives …"`). Such rules run unfolded on the facts of their small relations ([rules](rules.md#specialisation-by-small-relations));
+questions keep constant properties.
+
 `undefine db names` removes the rules of these names in one group: their definitions retracted, and the facts only
 they derived with them (a name that is no rule is ignored).
 
 `why v e p x` is a proof of the fact `(e, p, x)` of view v: `Given` for an asserted fact, `By` for a derived one, with
 the rule's name and the proofs of the facts of its body, in the order of the rule's patterns; `None` when the triple
 is not a fact of v. Computed when called, on the view: nothing is stored at write time (G20).
+
+`sources v p` lists the properties whose facts the derived facts of property `p` can come from through the rules,
+transitively (`Some []` for a property no rule gives), or `None` when a rule on the way reads a variable property:
+what a reader allowed some kinds only must read to read `p`'s derived facts without learning facts it may not read.
 
 `rule_budget` is (base, per): a group whose derived changes pass $\mathit{base} + \mathit{per} \times \text{its asserted changes}$ is refused,
 `Invalid "rule NAME derived more than N facts from a group of K facts"`; (100,000, 100) by default, for every database
