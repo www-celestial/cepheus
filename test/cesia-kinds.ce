@@ -1,0 +1,23 @@
+(** A token with rights per kind, through the Unix socket, as a program uses it: its reads go to the server (it may
+    not follow), it adds and reads the kind note, and may not declare another kind.
+
+    CEPHEUS_URL=... CEPHEUS_TOKEN=... cesia run --allow native=cepheus,env,read src/kinds.ce *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/io
+use std/result
+use std/sys
+use std/value
+
+Note = cepheus.Kind("note", {Title: cepheus.Text(), N: cepheus.Int(), Mark: cepheus.Text(unique = true)})
+Secret = cepheus.Kind("secret", {Text: cepheus.Text()})
+token = sys.Env("CEPHEUS_TOKEN")
+
+io.Print("kinds declare secret:", cepheus.Connect(sys.Env("CEPHEUS_URL"), [Note, Secret], token = token).Error.Code)
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Note], token = token))
+seen = 0
+for k in 1..50
+  id = result.Unwrap(cepheus.Insert(Note, {Title: "kinds", N: k, Mark: "kinds-$k"}, db))
+  seen += if result.Unwrap(cepheus.Get(Note, id, db)).N == k 1 else 0 end
+end
+io.Print("kinds: 50 writes, each read at once:", seen)
+io.Print("kinds find:", value.Len(result.Unwrap(cepheus.Find(1, (x) -> {Where: [[x, Note.Title, "kinds"]], Give: {X: x}}, db))))

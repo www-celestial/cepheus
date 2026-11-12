@@ -640,6 +640,35 @@ let check addr facts =
     | _ -> failwith "an invoice"
   done
 
+(* The cost of the rights per kind a write: Core.unaddable on a group of 4 facts, a schema of 40 properties of 10 kinds,
+   a token that adds 3 of them; ROUNDS rounds of N groups, each round's ns a group *)
+let rights rounds n =
+  let sim = Sim_disk.create (Rng.make 1) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/r";
+  let e = Result.get_ok (Engine.open_ disk "/r/db") in
+  let decl = List.concat (List.init 40 (fun i ->
+      List.map (fun (t, p, v) -> Resolve.Add (t, p, v)) (Schema.facts (16 + i) { Schema.name = Printf.sprintf "k%d/f%d" (i / 4) i; typ = Value.Tint; many = false; unique = false }))) in
+  ignore (Engine.commit e (Engine.prepare e [| decl, 0, "declare" |]));
+  let d = { Core.name = "db"; index = 0; dir = "/r/db"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+  let r = Tokens.Kinds { read = [ "k0"; "k1"; "k2" ]; add = [ "k0"; "k1"; "k2" ] } in
+  let tok = { Tokens.name = "k"; hash = Tokens.hash_of_text "cph_k"; databases = [ "db", r ]; admin = false } in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:(Tokens.with_tokens Tokens.empty [ tok ]) ~now:disk.now ~new_session:(fun () -> 1) () in
+  let c = Core.connect srv ~flush:ignore ~submit:(fun _ _ _ _ _ -> ()) in
+  c.rights <- [| Some r |];
+  c.kinds <- [| None |];
+  let v = d.view () in
+  let ops = [ Resolve.Add (-1, 16, Value.Int 1); Add (-1, 17, Int 2); Add (-1, 21, Int 3); Add (-1, 27, Int 4) ] in
+  for _ = 1 to rounds do
+    let t0 = Unix.gettimeofday () in
+    let bad = ref 0 in
+    for _ = 1 to n do if Core.unaddable c 0 v r ops <> None then incr bad done;
+    let dt = Unix.gettimeofday () -. t0 in
+    if !bad > 0 then failwith "rights: denied";
+    Printf.printf "%.2f\n%!" (dt /. float n *. 1e9)
+  done
+
 let () =
   match Sys.argv with
   | [| _; "ping"; a; n |] -> ping a (int_of_string n)
@@ -658,7 +687,8 @@ let () =
   | [| _; "stall"; a; f; n; secs; st |] -> stall a (int_of_string f) (int_of_string n) (float_of_string secs) (int_of_string st)
   | [| _; "mwrite"; a; d; c; secs |] -> mwrite a (int_of_string d) (int_of_string c) (float_of_string secs)
   | [| _; "livecpu"; d; n; g |] -> livecpu d (int_of_string n) (int_of_string g)
+  | [| _; "rights"; rounds; n |] -> rights (int_of_string rounds) (int_of_string n)
   | _ ->
     prerr_endline
-      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS [W] | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS | wlat ADDR FACTS local|remote N | stall ADDR FACTS N SECS S | livecpu DIR SCREENS GROUPS | mwrite ADDR D C SECS";
+      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS [W] | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS | wlat ADDR FACTS local|remote N | stall ADDR FACTS N SECS S | livecpu DIR SCREENS GROUPS | mwrite ADDR D C SECS | rights ROUNDS N";
     exit 2

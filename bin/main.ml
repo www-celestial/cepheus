@@ -3,7 +3,7 @@
      cepheus serve --config FILE                  run the server of FILE (cluster.toml) until SIGTERM or SIGINT
      cepheus stop --config FILE                   stop it (SIGTERM to the pid its data directory's lock names) and wait
      cepheus status --config FILE                 what it holds and does (an admin token in CEPHEUS_TOKEN)
-     cepheus token add NAME [--database DB=read|write]... [--admin] --config FILE
+     cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE
                                                   a new token, printed once; its hash goes to tokens.toml
      cepheus token list --config FILE             the tokens' names and rights (never the tokens)
      cepheus token remove NAME --config FILE      a token removed: its connections are refused at their next request
@@ -21,7 +21,7 @@ let die fmt = Printf.ksprintf (fun m -> prerr_endline ("cepheus: " ^ m); exit 1)
 let usage () =
   prerr_string
     "usage: cepheus serve|stop|status --config FILE\n\
-    \       cepheus token add NAME [--database DB=read|write]... [--admin] --config FILE\n\
+    \       cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE\n\
     \       cepheus token list|remove [NAME] --config FILE\n\
     \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n";
   exit 2
@@ -108,13 +108,12 @@ let token_add cfg name dbs admin =
     List.map
       (fun d ->
         match String.split_on_char '=' d with
-        | [ db; "read" ] -> db, Tokens.Read
-        | [ db; "write" ] -> db, Tokens.Write
-        | _ -> die "--database %s: DB=read or DB=write" d)
+        | [ db; r ] -> (match Tokens.right_of_name r with Some r -> db, r | None -> die "--database %s: DB=read, DB=write or DB=read:KIND,KIND;add:KIND" d)
+        | _ -> die "--database %s: DB=read, DB=write or DB=read:KIND,KIND;add:KIND" d)
       dbs
   in
   List.iter (fun (db, _) -> if not (List.mem db cfg.databases) then die "%s declares no database %s" cfg.file db) databases;
-  if databases = [] && not admin then die "a token needs --database DB=read|write or --admin";
+  if databases = [] && not admin then die "a token needs --database DB=read|write|read:KIND,...;add:KIND,... or --admin";
   let text, hash = Tokens.generate () in
   Tokens.save file (Tokens.with_tokens t (t.tokens @ [ { Tokens.name; hash; databases; admin } ]));
   print_endline text;
