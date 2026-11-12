@@ -21,7 +21,7 @@ allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN",
 
 # cesia do users add LOGIN admin|accountant, the password in APP_PASSWORD.
 [tasks.users]
-file = "src/users.ce"
+file = "src/users/users.ce"
 allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=APP_PASSWORD"]
 
 # The unit tests run on forks of Empty: no server, only the package's engine; and libsodium for the passwords. The

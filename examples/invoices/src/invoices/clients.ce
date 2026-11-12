@@ -1,5 +1,6 @@
 (* Clients: made, changed, deleted, found, and listed by pages. Each function takes the database last. *)
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/dict
 use std/list
 use std/result
 use std/value
@@ -52,21 +53,34 @@ defn DeleteClient(id, by, db)
 end
 
 defn clientsQuery(search, sort)
-  (** The question of the list of clients, for Page: those whose name or e-mail starts with search (in lower case),
-      or all of them, in the order sort. *)
-  (p) -> ((c, n, e, y, k) -> {
-    Where: list.Concat([[c, Client.Name, n], [c, Client.Email, e], [c, Client.City, y], [c, Client.Search, k]], if search == "" [] else [cepheus.Or(cepheus.Prefix(k, search), cepheus.Prefix(e, search))] end),
-    Give: {Client: c, Name: n, Email: e, City: y},
-    Sort: p.Sort(if sort == "city" [y, n] else [n] end),
-    Limit: p.Limit,
-    After: p.After,
-  })
+  (** The question of a page of clients' keys, for Page: those whose name or e-mail starts with search (in lower
+      case), or all of them, with their name and city, in the order sort: an Ok of {N, Query}. Their e-mail is read
+      after, for the page's rows only: a sorted page costs about each answer's patterns, and a question's variables
+      must all be in a pattern, so the search has a question of its own, of 5 variables, and the whole list one of 3. *)
+  order(n, y) = if sort == "city" [y, n] else [n] end
+  if search == ""
+    return {N: 3, Query: (p) -> ((c, n, y) -> {Where: [[c, Client.Name, n], [c, Client.City, y]], Give: {Client: c, Name: n, City: y}, Sort: p.Sort(order(n, y)), Limit: p.Limit, After: p.After})}
+  end
+  {N: 5, Query: (p) -> ((c, n, y, k, e) -> {
+    Where: [[c, Client.Name, n], [c, Client.City, y], [c, Client.Search, k], [c, Client.Email, e], cepheus.Or(cepheus.Prefix(k, search), cepheus.Prefix(e, search))],
+    Give: {Client: c, Name: n, City: y}, Sort: p.Sort(order(n, y)), Limit: p.Limit, After: p.After,
+  })}
 end
 
 defn ClientsPage(search, sort, cursor, size, db)
-  (** A page of clients, as Page gives it: search is a start of their name or e-mail, in lower case ("" for all), sort
-      one of ClientSorts. *)
-  Page(5, clientsQuery(search, if list.IndexOf(sort, ClientSorts) == missing "name" else sort end), db, size, cursor = cursor)
+  (** A page of clients, as Page gives it, each with its Name, Email and City: search is a start of their name or
+      e-mail, in lower case ("" for all), sort one of ClientSorts. *)
+  q = clientsQuery(search, if list.IndexOf(sort, ClientSorts) == missing "name" else sort end)
+  page = Page(q.N, q.Query, db, size, cursor = cursor)?
+  if value.Len(page.Rows) == 0
+    return result.Ok(page)
+  end
+  mails = cepheus.Find(2, (c, e) -> {Where: [[c, Client.Email, e], cepheus.In(c, [r.Client for r in page.Rows])], Give: {Client: c, Email: e}}, db)?
+  by = dict.Dict()
+  for m in mails
+    by[m.Client] = m.Email
+  end
+  result.Ok({Rows: [{Client: r.Client, Name: r.Name, City: r.City, Email: dict.Get(r.Client, by)} for r in page.Rows], Next: page.Next, Prev: page.Prev})
 end
 
 defn Balance(id, db)

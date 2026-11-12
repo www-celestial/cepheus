@@ -11,6 +11,7 @@ use std/http
 use std/list
 use std/live
 use std/log
+use std/math
 use std/result
 use std/text
 use std/value
@@ -271,42 +272,26 @@ defn safeCell(s)
 end
 
 defn invoicesCsv(r, u)
-  (** The invoices of the list's filter, every one of them, as CSV: read by pages of 5,000 in the order of their numbers. *)
-  fq = filterOfQuery(r.Query)
-  f = fq.Filter
+  (** Every invoice of the list's filter, as CSV, in the order of their numbers. A day is formatted once: an export
+      holds a few hundred distinct days for 100,000 dates. *)
+  f = filterOfQuery(r.Query).Filter
   f.Sort = "number"
-  rows = [["number", "date", "due", "bill_to", "status", "total", "paid_at"]]
-  cursor = missing
-  while true
-    page = InvoicesPage(f, u.Now(), cursor, 5000, u.Db)
-    if result.IsErr(page)
-      return failed(page.Error, u)
-    end
-    paid = paidAt([x.Invoice for x in page.Value.Rows], u.Db)
-    for x in page.Value.Rows
-      rows = list.Append([x.Number, DayText(x.Date), DayText(x.Due), safeCell(x.BillTo), x.Status, text.Decimals(2, x.Total), DayText(dict.Get(x.Invoice, paid))], rows)
-    end
-    cursor = page.Value.Next
-    if value.IsMissing(cursor)
-      break
+  all = AllInvoices(f, u.Now(), u.Db)
+  if result.IsErr(all)
+    return failed(all.Error, u)
+  end
+  days = dict.Dict()
+  for x in all.Value
+    for t in [x.Date, x.Due, x.PaidAt]
+      if not value.IsMissing(t) and not (math.Floor(t / 86400) in days)
+        days[math.Floor(t / 86400)] = DayText(t)
+      end
     end
   end
+  day(t) = if value.IsMissing(t) "" else days[math.Floor(t / 86400)] end
+  rows = list.Concat([["number", "date", "due", "bill_to", "status", "total", "paid_at"]],
+                     [[x.Number, day(x.Date), day(x.Due), safeCell(x.BillTo), x.Status, text.Decimals(2, x.Total), day(x.PaidAt)] for x in all.Value])
   {Status: 200, Body: csv.Text(rows), Headers: [{Name: "content-type", Value: "text/csv; charset=utf-8"}, {Name: "content-disposition", Value: "attachment; filename=\"invoices.csv\""}]}
-end
-
-defn paidAt(ids, db)
-  (** When each of these invoices was paid, by its id. *)
-  out = dict.Dict()
-  if value.Len(ids) == 0
-    return out
-  end
-  rows = cepheus.Find(2, (i, p) -> {Where: [[i, Invoice.PaidAt, p], cepheus.In(i, ids)], Give: {Invoice: i, PaidAt: p}}, db)
-  if result.IsOk(rows)
-    for x in rows.Value
-      out[x.Invoice] = x.PaidAt
-    end
-  end
-  out
 end
 
 defn invoiceNew(r, u)
