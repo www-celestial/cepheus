@@ -220,9 +220,10 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
     let sv = Array.make n [||] and has_set = Array.make n false in
     List.iter (fun (x, a) -> if has_set.(x) then sv.(x) <- Array.of_list (List.filter (in_sorted a) (Array.to_list sv.(x))) else (sv.(x) <- a; has_set.(x) <- true)) sets;
     let any_set = sets <> [] in
-    let in_range x c =
-      (match iv.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi) && ((not any_set) || (not has_set.(x)) || in_sorted sv.(x) c)
-    in
+    (* a variable with a set has an interval, whole if it had none: its set is checked in the interval's branch, so a
+       question without sets runs the test it always ran (small enough to be inlined at every candidate) *)
+    let ivs = if any_set then Array.mapi (fun x r -> if has_set.(x) && r = None then Some (min_int, max_int) else r) iv else iv in
+    let in_range x c = match ivs.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi && ((not any_set) || (not has_set.(x)) || in_sorted sv.(x) c) in
     let by_var = Array.map Array.of_list by_var in
     (* how many candidates a pattern offers x, given [get] for the sides that are bound, doubled: 2 c for an exact
        count c, and 1, without a lookup, for a one-valued property of a bound thing, which offers at most one. So such
