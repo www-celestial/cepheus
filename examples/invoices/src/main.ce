@@ -2,7 +2,7 @@
     minute, and serves the pages. Its settings come from its environment: CEPHEUS_URL, the database, as
     cepheus://localhost:7400/invoices?socket=/run/cepheus; CEPHEUS_TOKEN, the app's token, which writes the database;
     CEPHEUS_BOOKS_TOKEN, the accountant's token, which reads and adds invoices and their lines only; APP_PORT, the
-    port, 8080 unless given; APP_HOST, the address, 127.0.0.1 unless given; APP_CERT and APP_KEY, the paths of a
+    port, 8090 unless given; APP_HOST, the address, 127.0.0.1 unless given; APP_CERT and APP_KEY, the paths of a
     certificate (with its chain) and of its key in PEM, to serve https: its cookie is then sent over https only. cesia
     do serve runs it with the permissions it needs, and no other; cesia do serve-tls, with those of https. *)
 use deps/www-celestial/cepheus/cesia/cepheus
@@ -49,7 +49,7 @@ ready("rules", cepheus.Define(invoices.Rules, full))
 cert = setting("APP_CERT", default = "")
 wrap = if cert == "" missing else ready("https", tls.Server(cert, setting("APP_KEY"), ready("OpenSSL", tls.Open()))) end
 env = {Full: full, Books: books, Keys: ready("libsodium", crypto.Open()), Now: () -> sys.Now(), Secure: cert != ""}
-port = text.Number(setting("APP_PORT", default = "8080"))
+port = text.Number(setting("APP_PORT", default = "8090"))
 
 defn keeping(env)
   (** Every minute: the unpaid invoices whose due date passed become late, and the sessions that ended go. *)

@@ -29,6 +29,9 @@ per = if value.Len(args) >= 3 text.Number(args[3]) else 20000 end
 db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
 now = sys.Now()
 started = now
+(* numbers after those the database holds *)
+top = result.Unwrap(cepheus.Find(2, (i, n) -> {Where: [[i, invoices.Invoice.Number, n]], Give: {N: n}, Sort: [cepheus.Desc(n)], Limit: 1}, db))
+first = if value.Len(top) == 0 0 else top[1].N end
 
 defn clients(from, n)
   (** n clients in one group: an Ok of their ids and names. *)
@@ -91,7 +94,7 @@ io.Print("$(value.Len(made.Ids)) clients in $(text.Decimals(2, sys.Now() - start
 facts = 0
 t = sys.Now()
 for g in 1..math.Div(nInvoices + per - 1, per)
-  facts += result.Unwrap(invoicesOf((g - 1) * per, list.Min([per, nInvoices - (g - 1) * per]), made))
+  facts += result.Unwrap(invoicesOf(first + (g - 1) * per, list.Min([per, nInvoices - (g - 1) * per]), made))
 end
 io.Print("$nInvoices invoices, $facts facts with their lines, in $(text.Decimals(2, sys.Now() - t)) s")
 (* The rules last: a rule whose head is a one-valued property, or a constraint, sends a large group to the ordinary

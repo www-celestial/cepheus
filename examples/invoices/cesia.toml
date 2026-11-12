@@ -17,17 +17,17 @@ take = ["src/browser"]
 # and the sessions, its settings, and its port. It reads and writes no file.
 [tasks.serve]
 file = "src/main.ce"
-allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=CEPHEUS_BOOKS_TOKEN", "env=APP_PORT", "env=APP_HOST", "env=APP_CERT", "env=APP_KEY", "net=:8080"]
+allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=CEPHEUS_BOOKS_TOKEN", "env=APP_PORT", "env=APP_HOST", "env=APP_CERT", "env=APP_KEY", "net=:8090"]
 
 # In production: https on every address, port 8443, its certificate and key in /etc/invoices (OpenSSL: ffi=ssl,crypto).
 [tasks.serve-tls]
 file = "src/main.ce"
 allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=CEPHEUS_BOOKS_TOKEN", "env=APP_PORT", "env=APP_HOST", "env=APP_CERT", "env=APP_KEY", "read=/etc/invoices", "net=0.0.0.0:8443"]
 
-# cesia do users add LOGIN admin|accountant, the password in APP_PASSWORD.
+# APP_LOGIN=ada APP_ROLE=admin APP_PASSWORD=... cesia do users: a user of the app.
 [tasks.users]
 file = "src/users/users.ce"
-allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=APP_PASSWORD"]
+allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=APP_LOGIN", "env=APP_ROLE", "env=APP_PASSWORD"]
 
 # The unit tests run on forks of Empty: no server, only the package's engine; and libsodium for the passwords. The
 # end-to-end tests share a database, so they run alone, one after the other; Firefox takes a few seconds to start.

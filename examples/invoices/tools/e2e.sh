@@ -6,7 +6,7 @@
 set -e
 cd "$(dirname "$0")/.."
 app=$PWD
-B=$app/../../_build/default/bin/main.exe
+B=cepheus
 [ -d deps/www-celestial/ceti ] || { echo "no Ceti in deps/: run CETI=<a checkout of Ceti> tools/deps.sh"; exit 1; }
 tmp=$(mktemp -d "${E2E_TMP:-${TMPDIR:-/tmp}}/e2e.XXXXXX")
 port=$((21000 + $$ % 20000))

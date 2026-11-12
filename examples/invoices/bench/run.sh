@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 out=$(cd "$1" && pwd)
 part=$2
 rounds=${ROUNDS:-21}
-B=$PWD/../../_build/default/bin/main.exe
+B=cepheus
 srv=$out/srv
 port=7463
 app=8093
@@ -30,7 +30,12 @@ serve() {
   for _ in $(seq 200); do [ "$(grep -c ready "$out/serve.log")" -gt "${1:-0}" ] && return 0; sleep 0.02; done
   echo "the server did not start"; exit 1
 }
-stop() { kill "$(cat "$out/serve.pid")" 2>/dev/null || true; while kill -0 "$(cat "$out/serve.pid")" 2>/dev/null; do sleep 0.02; done; }
+stop() {  # the server of this folder only, by its pid and its command
+  p=$(cat "$out/serve.pid")
+  grep -q "$srv/cluster.toml" "/proc/$p/cmdline" 2>/dev/null || return 0
+  kill "$p"
+  while kill -0 "$p" 2>/dev/null; do sleep 0.02; done
+}
 empty() {
   [ -f "$out/serve.pid" ] && stop
   for f in $(visible); do rm -f "$f"; done
@@ -68,8 +73,8 @@ fi
 
 # pages: the seeded database of the seed part, two users, the app
 export CEPHEUS_TOKEN=$(cat "$srv/web.token") CEPHEUS_BOOKS_TOKEN=$(cat "$srv/books.token") APP_PORT=$app
-APP_PASSWORD="bench password 1" cesia run --allow native=cepheus,ffi=sodium,env src/users/users.ce add bench admin > /dev/null 2>&1 || true
-APP_PASSWORD="books password 1" cesia run --allow native=cepheus,ffi=sodium,env src/users/users.ce add books accountant > /dev/null 2>&1 || true
+APP_LOGIN=bench APP_ROLE=admin APP_PASSWORD="bench password 1" cesia run --allow native=cepheus,ffi=sodium,env src/users/users.ce > /dev/null 2>&1 || true
+APP_LOGIN=books APP_ROLE=accountant APP_PASSWORD="books password 1" cesia run --allow native=cepheus,ffi=sodium,env src/users/users.ce > /dev/null 2>&1 || true
 apppid=""
 startapp() {
   setsid cesia run --allow native=cepheus,ffi=sodium,env,net=:$app src/main.ce < /dev/null > "$out/app.log" 2>&1 &
@@ -93,7 +98,7 @@ sid() { curl -s -D - -o /dev/null -H "Origin: $base" -d "login=$1&password=$2" "
 export BENCH_SID=$(sid bench "bench+password+1") BENCH_BOOKS_SID=$(sid books "books+password+1")
 client=$(cesia run --allow native=cepheus,env bench/ids/ids.ce client)
 invoice=$(cesia run --allow native=cepheus,env bench/ids/ids.ce invoice)
-deep=$(printf '{"Invoice":1,"Number":50000,"Status":"","Due":0,"X":0}' | base64 -w0)
+deep=$(printf '{"Invoice":1,"Number":50000,"Status":"","Due":0,"X":0}' | base64 -w0 | sed 's/+/%2B/g; s|/|%2F|g; s/=/%3D/g')
 ab1() {  # ab1 WHAT PATH C N [cookie]
   ab -n "$4" -c "$3" -C "sid=${5:-$BENCH_SID}" -e "$out/ab.csv" "$base$2" > "$out/ab.out" 2>&1 || { cat "$out/ab.out"; exit 1; }
   rps=$(sed -n 's/^Requests per second: *\([0-9.]*\).*/\1/p' "$out/ab.out")
