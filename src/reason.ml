@@ -2491,6 +2491,36 @@ let [@inline never] sources (v : Store.view) p =
     if !any then None else Some (List.sort compare (Hashtbl.fold (fun k () l -> k :: l) out []))
   end
 
+(* The message of a refusal by the rules for a reader that may not see every fact: its rule's name, no fact (a
+   constraint's instance, a derived fact's premises, a derived value may be of kinds it may not read); [None] for a
+   message that is not the rules'. *)
+let public_message m =
+  let word_after prefix =
+    let n = String.length prefix in
+    if String.length m > n && String.sub m 0 n = prefix then
+      let rest = String.sub m n (String.length m - n) in
+      Some (match String.index_opt rest ' ' with Some i -> String.sub rest 0 i | None -> rest)
+    else None
+  in
+  let strip name = if String.length name > 0 && name.[String.length name - 1] = ':' then String.sub name 0 (String.length name - 1) else name in
+  match word_after "constraint " with
+  | Some name -> Some (Printf.sprintf "constraint %s" (strip name))
+  | None -> (
+    match word_after "rule " with
+    | Some name -> Some (Printf.sprintf "rule %s refused the group" (strip name))
+    | None ->
+      if String.length m > 0 && m.[0] = '[' then
+        let key = " is derived by rule " in
+        let k = String.length key in
+        let rec find i = if i + k > String.length m then None else if String.sub m i k = key then Some (i + k) else find (i + 1) in
+        match find 0 with
+        | Some j ->
+          let rest = String.sub m j (String.length m - j) in
+          let name = match String.index_opt rest ' ' with Some i -> String.sub rest 0 i | None -> rest in
+          Some (Printf.sprintf "the fact is derived by rule %s: retract its premises" name)
+        | None -> Some "the fact is derived by a rule"
+      else None)
+
 (* ---- Why ---- *)
 
 type proof =

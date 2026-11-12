@@ -544,8 +544,10 @@ node's fact, its ranges hold, every leaf is asserted in the view — and the nam
   any. It can come from facts of other kinds (a rule's body): `sources v p` gives the properties a property's derived
   facts can come from, transitively, on the rules as written (none known: a variable property reads any). A reader
   allowed some kinds only learns nothing it may not read from a property's derived facts when it reads every kind of
-  its sources: a check of rights per kind that lets a reader see derived facts must count them. *Tested by*
-`test/reasoning.ml` ("where a property's derived facts come from").
+  its sources, and the server's rights per kind count them: such a reader reads a property only when it reads every
+kind of its sources too, and a refusal by the rules names only the rule to it ([server](server.md)). *Tested by*
+`test/reasoning.ml` ("where a property's derived facts come from") and `test/server_unit.ml` ("rules and kinds":
+random rules, facts and tokens, every token's reads against the oracle's own reckoning).
 
 ## G21 Live questions
 

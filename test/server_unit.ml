@@ -424,6 +424,134 @@ let rights_kinds () =
   check (match k (Wire.Open "compta") with Some (Wire.Opened _) -> true | _ -> false) "kinds: Open";
   check (ok (write a [ Add (-1, 17, Int 7) ]) && denied (find a [ 17 ])) "kinds: add only: writes, reads nothing"
 
+(* Rights per kind with rules: a token sees a property's facts, derived ones included, only when it reads the kind
+   of the property and every kind those facts can come from through the rules. Random rules (across kinds, over a
+   variable property too) and random facts, written by a write token; tokens reading some kinds; after every group,
+   each token's Get of each thing and its questions against the oracle's own reckoning from the rules (not
+   Reason.sources). And a refusal by a constraint names only the constraint to such a token. *)
+let rights_derived () =
+  let kinds_of = [| "a"; "a"; "b"; "c"; "c" |] in
+  let names = [| "a/x"; "a/n"; "b/y"; "c/z"; "c/meta" |] in
+  let types = [| Value.Tlink; Tint; Tlink; Tlink; Tlink |] in
+  let readers = [ [ "a" ]; [ "a"; "b" ]; [ "b"; "c" ]; [ "a"; "b"; "c" ]; [] ] in
+  for seed = 1 to 25 do
+    let r = Rng.make (1000 + seed) in
+    let sim = Sim_disk.create (Rng.make seed) in
+    let disk = Sim_disk.disk sim in
+    disk.mkdir "/r";
+    let e = Result.get_ok (Engine.open_ disk "/r/db") in
+    let d = { Core.name = "db"; index = 0; dir = "/r/db"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+              more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+    let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+    let kt i ks = mk (Printf.sprintf "k%d" i) [ "db", Tokens.Kinds { read = ks; add = [ "a" ] } ] in
+    let toks = Tokens.with_tokens Tokens.empty (mk "w" [ "db", Tokens.Write ] :: List.mapi kt readers) in
+    let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+    let submit (_ : Core.db) ops by why k = let b = Engine.prepare e [| ops, by, why |] in k (Engine.commit e b).(0) in
+    let session () =
+      let out = Buffer.create 256 in
+      let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+      let c = Lazy.force c in
+      fun req ->
+        let b = Buffer.create 64 and f = Buffer.create 64 in
+        Wire.put_request b req;
+        Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+        let bytes = Buffer.to_bytes f in
+        ignore (Core.input c bytes 0 (Bytes.length bytes));
+        c.flush ();
+        let s = Buffer.to_bytes out in
+        Buffer.clear out;
+        if Bytes.length s = 0 then None
+        else Some (Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6)))
+    in
+    let hello ask tok = ignore (ask (Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 })); ask in
+    let w = hello (session ()) "w" in
+    let ks = List.mapi (fun i k -> k, hello (session ()) (Printf.sprintf "k%d" i)) readers in
+    let write ask ops = ask (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops }) in
+    let decl = List.concat (List.init 5 (fun i -> List.map (fun (e, p, v) -> Resolve.Add (e, p, v)) (Schema.facts (16 + i) { Schema.name = names.(i); typ = types.(i); many = true; unique = false }))) in
+    ignore (write w decl);
+    let things = match write w (List.init 6 (fun i -> Resolve.Add (-(i + 1), 17, Value.Int i))) with
+      | Some (Wire.Receipt { things; _ }) -> Array.of_list (List.map snd things) | _ -> [||] in
+    (* a constraint's refusal, to a token that may not read every kind: its name only (before any fact of a/x or b/y) *)
+    ignore (write w [ Add (60, Schema.p_name, Text "no-a-b"); Add (60, Schema.p_rule, Text (Rules.to_text
+      { name = "no-a-b"; vars = 2; where = [ { e = Var 0; p = 16; v = Var 1 }; { e = Var 0; p = 18; v = Var 1 } ]; ranges = []; head = Never })) ]);
+    ignore (write w [ Add (things.(0), 18, Link things.(1)) ]);
+    (match write (snd (List.hd ks)) [ Add (things.(0), 16, Link things.(1)) ] with
+     | Some (Wire.Err { code = "invalid"; message }) -> check (message = "constraint no-a-b") "rules and kinds: a constraint's refusal names it only: %s" message
+     | _ -> check false "rules and kinds: the constraint must refuse");
+    ignore (write w [ Retract (things.(0), 18, Link things.(1)); Retract (60, Schema.p_rule, Text (Rules.to_text
+      { name = "no-a-b"; vars = 2; where = [ { e = Var 0; p = 16; v = Var 1 }; { e = Var 0; p = 18; v = Var 1 } ]; ranges = []; head = Never })); Retract (60, Schema.p_name, Text "no-a-b") ]);
+    let thing () = things.(Rng.int r (Array.length things)) in
+    let links = [| 16; 18; 19 |] in
+    let next_rule = ref 30 in
+    let rule () =
+      let pick () = links.(Rng.int r 3) in
+      let x = Query.Var 0 and y = Query.Var 1 and z = Query.Var 2 in
+      let rl : Rules.t =
+        match Rng.int r 4 with
+        | 0 -> { name = "r"; vars = 2; where = [ { e = x; p = pick (); v = y } ]; ranges = []; head = Give { e = x; p = pick (); v = y } }
+        | 1 -> { name = "r"; vars = 3; where = [ { e = x; p = pick (); v = y }; { e = y; p = pick (); v = z } ]; ranges = []; head = Give { e = x; p = pick (); v = z } }
+        | 2 -> { name = "r"; vars = 4; where = [ { e = Var 3; p = 20; v = Var 2 }; { e = x; p = Rules.prop_var 2; v = y } ]; ranges = []; head = Give { e = x; p = pick (); v = y } }
+        | _ -> { name = "r"; vars = 2; where = [ { e = x; p = 17; v = Var 1 } ]; ranges = []; head = Give { e = x; p = pick (); v = x } }
+      in
+      let id = !next_rule in
+      incr next_rule;
+      let name = Printf.sprintf "rule%d" id in
+      ignore (write w [ Add (id, Schema.p_name, Text name); Add (id, Schema.p_rule, Text (Rules.to_text { rl with name })) ])
+    in
+    for _ = 1 to 3 do rule () done;
+    for g = 1 to 25 do
+      if Rng.int r 6 = 0 then rule ()
+      else
+        ignore (write w (List.init (1 + Rng.int r 3) (fun _ ->
+                   match Rng.int r 5 with
+                   | 0 -> Resolve.Add (thing (), 20, Link (16 + Rng.int r 5))
+                   | 1 -> Retract (thing (), links.(Rng.int r 3), Link (thing ()))
+                   | _ -> Add (thing (), links.(Rng.int r 3), Link (thing ())))));
+      let v = Atomic.get e.published in
+      (* the oracle: the properties each property's facts can come from, from the rules' texts *)
+      let rules = List.filter_map (fun (_, (n, t)) -> Result.to_option (Rules.of_text n t)) (Schema.rules v.schema) in
+      let from p =
+        let seen = Hashtbl.create 8 and any = ref false and q = Queue.create () in
+        Queue.add p q;
+        while not (Queue.is_empty q) do
+          let x = Queue.pop q in
+          List.iter
+            (fun (rl : Rules.t) ->
+              match rl.head with
+              | Give h when h.p = x || h.p < 0 ->
+                List.iter (fun (a : Query.pattern) -> if a.p < 0 then any := true else if not (Hashtbl.mem seen a.p) then (Hashtbl.replace seen a.p (); Queue.add a.p q)) rl.where
+              | _ -> ())
+            rules
+        done;
+        if !any then List.init 5 (fun i -> 16 + i) else Hashtbl.fold (fun k () l -> k :: l) seen []
+      in
+      let kind p = if p >= 16 && p < 21 then kinds_of.(p - 16) else "?" in
+      List.iter
+        (fun (kr, ask) ->
+          let may p = List.mem (kind p) kr && List.for_all (fun q -> List.mem (kind q) kr) (from p) in
+          Array.iter
+            (fun t ->
+              let want = ref [] in
+              Store.iter_facts v t (fun p w -> if may p then want := (p, w) :: !want);
+              match ask (Wire.Get { db = 0; thing = t }) with
+              | Some (Wire.Facts f) ->
+                let got = List.sort compare (List.map (fun (p, x) -> p, Option.get (Store.word v x)) f.facts) in
+                check (got = List.sort compare !want) "rules and kinds: seed %d group %d: a token reading %s sees exactly what it may of #%d"
+                  seed g (String.concat "," kr) t
+              | _ -> check false "rules and kinds: Get")
+            things;
+          List.iter
+            (fun p ->
+              let q = { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } in
+              match ask (Wire.Find { db = 0; query = q; select = Wire.Give [||] }) with
+              | Some (Wire.Err { code = "denied"; _ }) -> check (not (may p)) "rules and kinds: seed %d: a question on %d denied only when it may not be read" seed p
+              | Some (Wire.Rows _) -> check (may p) "rules and kinds: seed %d: a question on %d answered only when it may be read" seed p
+              | _ -> check false "rules and kinds: Find")
+            [ 16; 17; 18; 19 ])
+        ks
+    done;
+  done
+
 (* ---- what local readers need from the system ---- *)
 
 let open_fds () = Array.length (Sys.readdir "/proc/self/fd")
@@ -571,6 +699,7 @@ let () =
   rights ();
   tokens_golden ();
   rights_kinds ();
+  rights_derived ();
   fdpass ();
   followed_rules ();
   request_ids ();
