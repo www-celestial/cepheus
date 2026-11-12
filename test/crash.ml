@@ -5,9 +5,10 @@
    large groups of 150 new things (300 additions, the path of large groups from 200 here, in chunks of 64), whose
    frames are written by pieces beside their merges and forced every 2 KB, so that kills land inside them too; its
    first and last things are checked. A rule marks each client's thing in the client's own group: the mark must come
-   back with it (a derived fact is durable with its group, replayed from the frame). Then it starts the next child on
-   the same database. Usage: crash.exe DIR ROUNDS
-   [SEED]. *)
+   back with it (a derived fact is durable with its group, replayed from the frame). A kill may land before the child's
+   declare is durable (while it creates the database or declares): then no property is there, and no group may have
+   been confirmed; the properties come back all together or not at all. Then it starts the next child on the same
+   database. Usage: crash.exe DIR ROUNDS [SEED]. *)
 
 open Cepheus
 module C = Check
@@ -60,7 +61,7 @@ let child dir =
 
 let parent dir rounds seed =
   let r = Rng.make seed in
-  let total = ref 0 and recov = ref [] and in_merge = ref 0 in
+  let total = ref 0 and recov = ref [] and in_merge = ref 0 and early = ref 0 in
   let sdir = Filename.concat dir "snapshots" in
   let tmps () = if Sys.file_exists sdir then List.filter (fun f -> Filename.check_suffix f ".tmp") (Array.to_list (Sys.readdir sdir)) else [] in
   for round = 1 to rounds do
@@ -93,25 +94,31 @@ let parent dir rounds seed =
         "round %d: a snapshot was set aside: %s" round (String.concat "; " (notes db));
       C.check (tmps () = []) "round %d: a merge's file was left" round;
       let v = view db in
-      let name = Option.get (property v "name") and seq = Option.get (property v "seq") and mark = Option.get (property v "mark") in
-      List.iter
-        (fun (g, label, k) ->
-          incr total;
-          C.check (group v >= g) "round %d: group %d confirmed, recovered up to %d" round g (group v);
-          let loaded = String.contains label 'L' in
-          match things v name (Text label) with
-          | [ e ] ->
-            C.check (values v e seq = [ Int k ]) "round %d: %s has the wrong content" round label;
-            (* the derived fact came back with its group, from the frame: G1 for derived facts *)
-            C.check (values v e mark = (if loaded then [] else [ Bool true ])) "round %d: %s has the wrong mark" round label
-          | l -> C.fail "round %d: confirmed %s (group %d) found %d times" round label g (List.length l))
-        !acks;
+      (match List.map (property v) [ "name"; "seq"; "by"; "mark" ] with
+       | [ None; None; None; None ] ->
+         (* killed before the child's declare was durable: no write can have been confirmed *)
+         incr early;
+         C.check (!acks = []) "round %d: %d groups confirmed, but no property is there" round (List.length !acks)
+       | [ Some name; Some seq; Some _; Some mark ] ->
+         List.iter
+           (fun (g, label, k) ->
+             incr total;
+             C.check (group v >= g) "round %d: group %d confirmed, recovered up to %d" round g (group v);
+             let loaded = String.contains label 'L' in
+             match things v name (Text label) with
+             | [ e ] ->
+               C.check (values v e seq = [ Int k ]) "round %d: %s has the wrong content" round label;
+               (* the derived fact came back with its group, from the frame: G1 for derived facts *)
+               C.check (values v e mark = (if loaded then [] else [ Bool true ])) "round %d: %s has the wrong mark" round label
+             | l -> C.fail "round %d: confirmed %s (group %d) found %d times" round label g (List.length l))
+           !acks
+       | _ -> C.fail "round %d: the declare came back in part" round);
       close db
   done;
   let a = Array.of_list (List.sort compare !recov) in
   let n = Array.length a in
-  Printf.printf "crash: %d kills (%d inside a merge), %d confirmed groups checked, recovery median %.1f ms, max %.1f ms\n"
-    rounds !in_merge !total (1000. *. a.(n / 2)) (1000. *. a.(n - 1));
+  Printf.printf "crash: %d kills (%d inside a merge, %d before the declare), %d confirmed groups checked, recovery median %.1f ms, max %.1f ms\n"
+    rounds !in_merge !early !total (1000. *. a.(n / 2)) (1000. *. a.(n - 1));
   C.finish "crash"
 
 let () =

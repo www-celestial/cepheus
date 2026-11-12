@@ -122,8 +122,9 @@ checks a property on many random inputs against a reference model written indepe
    merging every 50 changes, while a ninth thread loads large groups (150 new things, 300 additions, taking the path of
    large groups from 200 operations here, in chunks of 64, their frames written by pieces beside their merges on two
    domains and forced every 2 KB); the parent kills it with SIGKILL at a random moment (it counts the kills that land
-   inside a merge), reopens, and checks every confirmed group's content (a large group's first and last things), that
-   no run was set aside and no merge's file is left.
+   inside a merge, and those before the child's declare is durable: then no group may be confirmed, and the
+   properties come back all together or not at all), reopens, and checks every confirmed group's content (a large
+   group's first and last things), that no run was set aside and no merge's file is left.
 5. **Concurrency** (`test/bank.exe DIR SECONDS`): transfers with `Expect` from 16 threads, two reader domains checking
    that every view keeps the total and that views never go back.
 6. **A sale of seats under kill -9, with a checker of the history** (`test/seats.exe DIR ROUNDS`): 16 buyers sell 2,000
