@@ -1371,25 +1371,56 @@ let check_and_build disk dir (lo0, hi0, file) id =
     if disk == Disk.real then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
     let a = Store.of_offsets ~pg ~n:an ~ne:ane ~k:ak ~np:anp ~ns:ans ~sblob:asb ~hbits aoffs in
     let t = Store.of_offsets ~pg ~n:tn ~ne:tne ~k:tk ~np:tnp ~ns:0 ~sblob:0 ~hbits:0 toffs in
-    (* small enough: every page that the file holds read and checked now, and the cache warm. A large run's pages are
-       read and checked by up to 4 domains, each with its own descriptor (the CRC is most of an open: 14 us a page),
-       then enter the cache *)
-    if phys <= !Pages.capacity then begin
-      let d = if disk.parallel && phys >= 512 then max 1 (min 4 (Domain.recommended_domain_count ())) else 1 in
-      if d = 1 then Array.iteri (fun k f -> if f >= 0 then ignore (Pages.page pg k)) map
-      else begin
-        let got = Array.make npages Bytes.empty in
-        let part i () =
-          let fd' = disk.openf path false in
-          Fun.protect ~finally:(fun () -> try disk.close fd' with Disk.Io _ -> ()) @@ fun () ->
-          for k = i * npages / d to ((i + 1) * npages / d) - 1 do if map.(k) >= 0 then got.(k) <- load_from fd' k done
-        in
-        let others = List.init (d - 1) (fun i -> Domain.spawn (part (i + 1))) in
-        let mine = match part 0 () with () -> None | exception e -> Some e in
-        let theirs = List.filter_map (fun dm -> match Domain.join dm with () -> None | exception e -> Some e) others in
-        (match mine, theirs with Some e, _ | None, e :: _ -> raise e | None, [] -> ());
-        Array.iteri (fun k f -> if f >= 0 then (Pages.admit pg k got.(k); Atomic.incr Pages.misses)) map
-      end
+    (* Pages read and checked now, then into the cache: the pages [ks] (logical numbers) that the file holds, in the
+       file's order, the file pages that follow one another in one read (up to 1 MiB); from 64 pages, by up to 4
+       domains, each with its own descriptor and its share of them: the CRC is most of a warm open (14 us a page),
+       and a cold one waits on the disk, which serves several reads at once *)
+    let read_in ks =
+      let ks = Array.of_list (List.filter (fun k -> map.(k) >= 0) ks) in
+      Array.sort (fun x y -> compare map.(x) map.(y)) ks;
+      let n = Array.length ks in
+      let d = if disk.parallel && n >= 64 then max 1 (min 4 (Domain.recommended_domain_count ())) else 1 in
+      let got = Array.make n Bytes.empty in
+      let part i () =
+        let fd' = if d = 1 then fd else disk.openf path false in
+        Fun.protect ~finally:(fun () -> if d > 1 then try disk.close fd' with Disk.Io _ -> ()) @@ fun () ->
+        let q = ref (i * n / d) and stop = (i + 1) * n / d in
+        while !q < stop do
+          let f0 = map.(ks.(!q)) in
+          let c = ref 1 in
+          while !q + !c < stop && !c < 64 && map.(ks.(!q + !c)) = f0 + !c do incr c done;
+          let c = !c in
+          let buf = Bytes.create (c * Pages.size) in
+          (try disk.pread fd' (header + (f0 * Pages.size)) buf 0 (c * Pages.size) with Disk.Io m -> raise (Pages.Unreadable m));
+          for j = 0 to c - 1 do
+            let k = ks.(!q + j) in
+            if Crc32c.bytes buf (j * Pages.size) Pages.size <> u32 table ((8 * k) + 4) then
+              raise (Pages.Unreadable (Printf.sprintf "run %s: page %d does not check" file k));
+            got.(!q + j) <- (if c = 1 then buf else Bytes.sub buf (j * Pages.size) Pages.size)
+          done;
+          q := !q + c
+        done
+      in
+      let others = List.init (d - 1) (fun i -> Domain.spawn (part (i + 1))) in
+      let mine = match part 0 () with () -> None | exception e -> Some e in
+      let theirs = List.filter_map (fun dm -> match Domain.join dm with () -> None | exception e -> Some e) others in
+      (match mine, theirs with Some e, _ | None, e :: _ -> raise e | None, [] -> ());
+      Array.iteri (fun q k -> Pages.admit pg k got.(q); Atomic.incr Pages.misses) ks
+    in
+    (* small enough: every page that the file holds read and checked now, and the cache warm. Larger: the pages the
+       checks below read (both parts' rank tables, directories and offsets, not their rows), read so beforehand
+       rather than one at a time as the checks come to them, when the cache has room for them all (else they would
+       push one another out before the checks read them) *)
+    if phys <= !Pages.capacity then read_in (List.init npages Fun.id)
+    else begin
+      let want = Bytes.make npages '\000' in
+      let add lo hi = if hi > lo then for k = lo lsr Pages.bits to min (npages - 1) ((hi - 1) lsr Pages.bits) do Bytes.set want k '\001' done in
+      List.iter
+        (fun (b : Store.base) ->
+          add b.o_erank b.o_tdata; add b.o_poff b.o_vdata; add b.o_smh b.o_sblob; add b.o_cp b.o_cdata; add b.o_cmh b.len)
+        [ a; t ];
+      let ks = List.filter (fun k -> Bytes.get want k <> '\000' && map.(k) >= 0) (List.init npages Fun.id) in
+      if List.length ks <= !Pages.capacity - !Pages.resident then read_in ks
     end;
     (* bounds: the rank tables count right, every offset table in order and within its rows and its room; a row's
        ids are checked by its page's CRC, and a read out of a run's pages fails, it never reads outside *)
