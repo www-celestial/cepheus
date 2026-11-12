@@ -473,6 +473,43 @@ extremum went. Questions that differ only by their constants (the unpaid invoice
 **template**: a fact's change is computed once and its rows sent to the watches whose constants they match, so a
 group costs the same with 10 watches or 10,000 ([what it costs](#what-it-costs)).
 
+## Rules
+
+A **rule** derives facts from facts, and the database keeps them up to date at every write: "a client with a late
+invoice is overdue" ([rules](rules.md) tells how, and what it costs). `cepheus.Rule(name, n, rule)` writes one as a
+question: a function of `n` variables that gives `{Where, Then}`, `Where` its patterns (and `Above`, `Below`,
+`Between`), `Then` the fact it gives for each answer. `cepheus.Define(rules, db)` defines them, in one group:
+
+```cesia norun
+Standing = cepheus.Kind("standing", {Overdue: cepheus.Bool()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Standing], token = sys.Env("CEPHEUS_TOKEN")))
+overdue = cepheus.Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Standing.Overdue, true]})
+io.Print(cepheus.Define([overdue], db))
+late = result.Unwrap(cepheus.Insert(Invoice, {Client: bo, Total: 30, Status: "late"}, db))
+io.Print(cepheus.Get(Standing, bo, db))
+result.Unwrap(cepheus.Update(Invoice, late, {Status: "paid"}, db))
+io.Print(cepheus.Get(Standing, bo, db))
+```
+
+```text
+Ok(missing)
+Ok({Overdue: true})
+Ok(missing)
+```
+
+- The derived fact is written in the same group as the invoice that gives it, and goes in the group that pays the
+  invoice, since it has no other proof: a question reads it as any fact (here `Get`), and a `Watch` of it changes
+  with it.
+- `Define` finds each rule by its name: a rule already defined as given writes nothing, one whose definition changed
+  is replaced, so a program defines its rules at each start, after `Connect`. The first definition derives what the
+  rule gives over the facts already there.
+- `Then: cepheus.Never` makes a **constraint**: a group that would give its `Where` an answer is refused whole, with
+  Code `"invalid"` and the rule's name (G18).
+- `Where` takes patterns and `Above`, `Below` and `Between`; `Not`, `Or`, `In` and `Prefix` are for questions (negation
+  in rules is the reasoner's next step, [rules](rules.md#what-is-not-here-yet)). A variable of `Then` must be in a
+  pattern of `Where`, and a rule cannot take the name of a property: both are refused with Code `"invalid"`.
+- Rules are for tokens that write the whole database ([rights](server.md#rights-g16)): a rule reads every kind.
+
 ## Forks
 
 A **fork** is a database in the program's memory that starts as another one: it reads and writes as a database, with
