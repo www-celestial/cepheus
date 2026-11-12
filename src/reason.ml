@@ -60,7 +60,7 @@ let spec_groups = ref 0  (* groups reasoned with the rules unfolded on their sma
 let gen_groups = ref 0  (* and with the rules as written *)
 let respecs = ref 0  (* groups begun unfolded, then reasoned again as written: a frozen relation's fact changed *)
 let batches = ref 0  (* closure modules run from scratch *)
-let trace = ref false
+let trace = ref false  (* the phases of a closure from scratch, printed (the benchmarks) *)
 let specialise = ref true  (* false: the rules always run as written (the tests compare both paths) *)
 let module_seconds = ref 0. (* of [seconds]: the closure modules' work, their facts found and put aside *)
 
@@ -1231,6 +1231,43 @@ let substitute (v : Store.view) (r : Rules.t) (sty : Value.typ option array) (ca
       in
       Some (r', bad)
 
+(* Unfolded over a closed relation (cax-sco over scm-sco's closure: a class to each of its ancestors), the rules
+   [x P a] -> [x P c] give c to an a by every path from a to c, each a derivation. A rule whose head follows from a
+   chain of the others (c reachable from a without it) is dropped: the least model is the same for any facts, since
+   the chain stays, and each such fact is derived once a step (the transitive reduction of their graph, one edge at a
+   time, so that reachability never changes). At most 2,000 such rules are weighed. *)
+let reduce (parts : (int * Rules.t * string) list) =
+  let edge (r : Rules.t) =
+    match r.where, r.head, r.ranges with
+    | [ { e = Var x; p; v = Thing a } ], Rules.Give { e = Var x'; p = p'; v = Thing c }, [] when x = x' && p = p' && p >= 0 && a <> c -> Some (p, a, c)
+    | _ -> None
+  in
+  let edges = List.filter_map (fun (_, r, bad) -> if bad = "" then edge r else None) parts in
+  let n = List.length edges in
+  if n < 2 || n > 2000 then parts
+  else begin
+    let live = Hashtbl.create (2 * n) in
+    List.iter (fun e -> Hashtbl.replace live e ()) edges;
+    let out = Hashtbl.create (2 * n) in
+    List.iter (fun (p, a, c) -> Hashtbl.add out (p, a) c) edges;
+    (* is c reachable from a over the live edges of p, the edge (a, c) aside *)
+    let reach p a c =
+      let seen = Hashtbl.create 16 and stack = ref [ a ] and found = ref false in
+      while (not !found) && !stack <> [] do
+        let u = List.hd !stack in
+        stack := List.tl !stack;
+        List.iter
+          (fun w ->
+            if Hashtbl.mem live (p, u, w) && not (u = a && w = c) then
+              if w = c then found := true else if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); stack := w :: !stack))
+          (Hashtbl.find_all out (p, u))
+      done;
+      !found
+    in
+    List.iter (fun (p, a, c) -> if reach p a c then Hashtbl.remove live (p, a, c)) edges;
+    List.filter (fun (_, r, bad) -> bad <> "" || match edge r with Some e -> Hashtbl.mem live e | None -> true) parts
+  end
+
 (* the program of the generic one's rules unfolded on the view's small relations; None when nothing unfolds *)
 let make_spec ?unstable (v : Store.view) (gen : program) =
   let n = Array.length gen.rules in
@@ -1299,7 +1336,7 @@ let make_spec ?unstable (v : Store.view) (gen : program) =
       { rels; frozen; frozen_ws = Array.map (fun l -> let a = Array.of_list l in Array.sort compare a; a) fws;
         rfacts = Array.map (rel_facts v) rels; sruns = v.runs; stamps = Array.map (fun (p, w) -> Store.stamp v p w) rels }
     in
-    let parts = Array.of_list parts in
+    let parts = Array.of_list (reduce parts) in
     Some
       (build ~also_reads:(Array.map fst rels) v ~key:gen.key ~rules:(Array.map (fun (_, r, _) -> r) parts) ~ids:(Array.map (fun (g, _, _) -> gen.ids.(g)) parts)
          ~bad_head:(Array.map (fun (_, _, b) -> b) parts) ~spec:(Some spec))
@@ -1350,12 +1387,15 @@ let programs (v : Store.view) =
   Mutex.protect cache_m (fun () ->
       let size = S.facts v in
       let en =
-        match Hashtbl.find_opt cache key with
+        let old = Hashtbl.find_opt cache key in
+        match old with
         | Some en when size <= (2 * en.gen.size) + 1024 && (2 * size) + 1024 >= en.gen.size && Schema.count v.schema = en.gen.np -> en
         | _ ->
           let gen = make_gen v in
           let specialisable = Array.exists Fun.id (Array.mapi (fun g r -> small_atoms v ~counts:false r gen.sty.(g) <> None) gen.rules) in
-          let en = { gen; specs = []; nospec = false; specialisable; unstable = [] } in
+          (* the relations found to be the data's stay so while the rules do *)
+          let unstable = match old with Some en -> en.unstable | None -> [] in
+          let en = { gen; specs = []; nospec = false; specialisable; unstable } in
           if Hashtbl.length cache > 16 then Hashtbl.reset cache;
           Hashtbl.replace cache key en;
           en
@@ -1376,14 +1416,31 @@ let program (v : Store.view) = fst (programs v)
 
 (* a group changed the fact (p, w) of a relation the rules were unfolded on: that relation is not unfolded on again
    while this program lasts (until the rules change or the database's size doubles) *)
-let unsettle (v : Store.view) p w =
+let unsettle (v : Store.view) (facts : (int * int) list) =
   Mutex.protect cache_m (fun () ->
       match Hashtbl.find_opt cache (Schema.rules_key v.schema) with
-      | Some en when not (List.mem (p, w) en.unstable) ->
-        en.unstable <- (p, w) :: List.filteri (fun i _ -> i < 63) en.unstable;
-        en.specs <- [];
-        en.nospec <- false
-      | _ -> ())
+      | Some en ->
+        let fresh = List.filter (fun f -> not (List.mem f en.unstable)) (List.sort_uniq compare facts) in
+        if fresh <> [] then begin
+          en.unstable <- List.filteri (fun i _ -> i < 256) (fresh @ en.unstable);
+          en.specs <- [];
+          en.nospec <- false
+        end
+      | None -> ())
+
+(* The program a group runs: the unfolded one, unless the group's asserted facts touch a relation it is unfolded on;
+   then those relations are the data's ([unsettle]), and the rules are unfolded again without them, once; past that,
+   the rules as written. [touched s] lists the group's facts of frozen relations of [s]. *)
+let choose (v : Store.view) (gen : program) (spec : program option) (touched : spec -> (int * int) list) =
+  let rec go spec tries =
+    match spec with
+    | None -> gen
+    | Some (p : program) -> (
+      match touched (Option.get p.spec) with
+      | [] -> p
+      | facts -> unsettle v facts; if tries > 0 then go (snd (programs v)) (tries - 1) else gen)
+  in
+  go spec 1
 
 (* ---- contexts ---- *)
 
@@ -2123,18 +2180,17 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
   else begin
     let gen, spec = programs v in
     let prog =
-      match spec with
-      | Some p when same ->
-        let s = Option.get p.spec in
-        let touched = ref None in
-        Array.iteri (fun i (ch : Group.change) -> if is_frozen s ch.p words.(i) then touched := Some (ch.p, words.(i))) changes;
-        (match !touched with Some (fp, fw) -> unsettle v fp fw; gen | None -> p)
-      | _ -> gen
+      if not same then gen
+      else
+        choose v gen spec (fun s ->
+            let l = ref [] in
+            Array.iteri (fun i (ch : Group.change) -> if is_frozen s ch.p words.(i) then l := (ch.p, words.(i)) :: !l) changes;
+            !l)
     in
     incr (if prog == gen then gen_groups else spec_groups);
     match reason ~v0 v changes words prog same with
     | r -> r
-    | exception Respec (fp, fw) -> incr respecs; unsettle v fp fw; reason ~v0 v changes words gen same
+    | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; reason ~v0 v changes words gen same
   end
 
 and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
@@ -2321,21 +2377,21 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
 let rec bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : Bulk.ints) n =
   let gen, spec = programs v in
   let prog =
-    match spec with
-    | Some p ->
-      let s = Option.get p.spec in
-      let touched = ref None in
-      for i = 0 to n - 1 do
-        let fp = Bigarray.Array1.unsafe_get gp i and fw = Bigarray.Array1.unsafe_get gw i in
-        if is_frozen s fp fw then touched := Some (fp, fw)
-      done;
-      (match !touched with Some (fp, fw) -> unsettle v fp fw; gen | None -> p)
-    | None -> gen
+    choose v gen spec (fun s ->
+        (* a fact of each relation touched: one a property frozen whole, one a value frozen *)
+        let l = ref [] and whole = Bytes.make (Bytes.length s.frozen) '\000' and some = Hashtbl.create 8 in
+        for i = 0 to n - 1 do
+          let fp = Bigarray.Array1.unsafe_get gp i and fw = Bigarray.Array1.unsafe_get gw i in
+          if is_frozen s fp fw then
+            if Bytes.unsafe_get s.frozen fp = '\001' then (if Bytes.unsafe_get whole fp = '\000' then (Bytes.unsafe_set whole fp '\001'; l := (fp, fw) :: !l))
+            else if not (Hashtbl.mem some (fp, fw)) then (Hashtbl.replace some (fp, fw) (); l := (fp, fw) :: !l)
+        done;
+        !l)
   in
   incr (if prog == gen then gen_groups else spec_groups);
   match bulk_with ~own prog v ge gp gw n with
   | r -> r
-  | exception Respec (fp, fw) -> incr respecs; unsettle v fp fw; bulk_with ~own gen v ge gp gw n
+  | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; bulk_with ~own gen v ge gp gw n
 
 and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : Bulk.ints) n =
   let many_only p = match Schema.find v.schema p with Some d -> d.many && not d.unique | None -> false in
