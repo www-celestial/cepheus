@@ -280,6 +280,8 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 6 Ping | des octets quelconques | Pong : les mêmes octets |
 | 7 Admin | "status" | Status : le nombre, (clé, valeur)... |
 | 8 Follow | handle (sur le Unix socket seulement) | Start : l'id de la base, le numéro de visibilité, le nombre, (lo, hi) de chaque run, du plus récent au plus ancien ; les descriptors de `visible` et de chaque run voyagent avec son premier octet. La connexion est alors le follow stream de la base ([lectures locales](#lectures-locales-g15)) |
+| 11 Watch | handle, question, select, from (le groupe de la réponse que tient le programme ; 0 : aucune) | des pushes (des messages que le serveur envoie sans qu'on les lui demande) sur l'id du Watch, jusqu'à Unwatch ou une erreur ([questions vivantes](#les-questions-vivantes-watch)) |
+| 12 Unwatch | l'id du Watch | Unwatched |
 
 Sur un follow stream, le serveur pousse (id de requête 0) :
 
@@ -287,6 +289,7 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
 |---|---|
 | 9 frame | le numéro (0 : une partie du rattrapage, pas visible à elle seule), le premier groupe, le nombre, puis les groupes tels que le journal les code ; une frame longue continue dans des frames du flag `more` qui ne portent que des octets |
 | 10 runs | le numéro (le lecteur abandonne ses états sous des numéros plus petits), le nombre, (lo, hi) de chaque run, du plus récent au plus ancien ; leurs descriptors voyagent avec son premier octet |
+| 13 durable | le numéro : les frames envoyées sous ce numéro et en dessous sont durables (les questions vivantes du lecteur donnent leurs changements) ; un lecteur qui ne connaît pas ce kind le saute |
 
 - Une **question** est une donnée : des variables, des patterns (chose, propriété, valeur, chacune une variable, une
   chose ou une valeur) et des intervalles (ranges), comme `Cepheus.query` ([API](api.md)) ; aucun code ne traverse le
@@ -326,7 +329,79 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
 | Redis RESP2/RESP3 | « The first byte in an RESP-serialized payload always identifies its type » (le premier octet donne toujours le type) ; des parties terminées par CRLF, des bulk strings précédées de leur longueur | pipelining | dans l'ordre | le type push de RESP3 | le type d'erreur `-` | TCP ; les clients lents sont fermés |
 | etcd | gRPC (« All etcd APIs are defined in gRPC services », toutes les API d'etcd sont des services gRPC) | plusieurs appels | chaque appel a la sienne | les streams Watch | le status gRPC | celui de gRPC ; des requêtes d'au plus 1,5 MiB par défaut |
 | FoundationDB | la bibliothèque cliente est le protocole : les programmes appellent sa bibliothèque C (des futures) | des futures | par future | des watches (10 000 par connexion par défaut) | des codes d'erreur | celui de la bibliothèque |
-| Cepheus | longueur, id, kind, flags ; le codage des valeurs du journal | jusqu'à la limite qu'annonce Welcome | **par id, dans le désordre** | (les subscriptions, être prévenu des changements : étape 5) | des valeurs `{code, message}` | TCP, et le serveur cesse de lire à la limite |
+| Cepheus | longueur, id, kind, flags ; le codage des valeurs du journal | jusqu'à la limite qu'annonce Welcome | **par id, dans le désordre** | `Watch` : la réponse d'une question, puis ses changements exacts, sur l'id du Watch | des valeurs `{code, message}` | TCP, et le serveur cesse de lire à la limite ; un watch dont la connexion tient 8 MiB non envoyés se termine par `lagging` |
+
+### Les questions vivantes (Watch)
+
+Un `Watch` tient une question à jour : c'est une question vivante (live question), qu'on appelle aussi un watch. Ses
+pushes arrivent sur l'id du Watch, kind 11, chacun un message :
+
+```
+answer = 0 | group | cols | count | rows                          the whole answer at group
+change = 1 | group | cols | added: count | rows | removed: count | rows
+same   = 2 | group                                                 nothing the question reads changed since from
+```
+
+- Le premier push est la réponse au groupe durable le plus récent, ou `same` (« le même ») quand `from` est donné, que
+  le ring des changements récents du serveur (un anneau qui garde les changements de son dernier million de faits, les
+  plus anciens remplacés par les nouveaux) couvre chaque groupe après lui, et qu'aucun d'eux ne touche les patterns de
+  la question (une propriété et ses constantes). Ensuite un `change` pour chaque groupe durable qui change les lignes,
+  dans l'ordre des groupes. Une longue réponse ou un long changement continue dans des frames d'environ 1 MiB avec le
+  flag `more`, chacune de la même forme, ses lignes ajoutées à celles du message.
+- **Durable d'abord.** Un changement se calcule pendant que sa frame est forcée sur le disque (le syncer passe la frame
+  au hub de la base, le thread qui calcule ses questions vivantes, au moment où il la prend) et part une fois la frame
+  durable : rien de ce qu'un crash pourrait défaire n'est jamais montré.
+- **Une erreur termine le watch** : `lagging` (« en retard » : la connexion tient plus de 8 MiB de pushes qu'elle n'a
+  pas pris, ou le hub a pris 65 536 frames de retard, ou un grand groupe dans sa propre frame a changé la base : le
+  programme relance le watch depuis le groupe de son dernier message) ; `denied` (le token n'a plus le droit de lire la
+  base : G16 se vérifie à chaque message, la table des tokens n'étant relue que quand elle a changé) ; `stopping` (le
+  serveur ou la base s'arrête).
+- **Personne n'attend un watch.** Le writer et le syncer donnent chaque frame à une queue et continuent ; un thread de
+  hub par base suivie l'évalue, tous les threads de hub dans un domain à eux (créé au premier `Watch` : rien ne tourne
+  pour une base que personne ne suit) ; un push va dans le buffer de sa connexion, qu'un thread de la connexion envoie,
+  si bien qu'un programme qui ne lit jamais ne retient que sa propre connexion (testé : `test/server_limits.ml` ;
+  mesuré plus bas).
+- **Le follow stream** porte `durable` (kind 13) après que chaque frame est durable : un lecteur local calcule les
+  questions vivantes de son propre programme à partir des frames qu'il applique, pendant le fsync du serveur, et les
+  donne à `durable`. Un lecteur d'une version plus ancienne saute ce kind.
+- Ce qu'est un changement, et comment il se calcule : [Cepheus depuis Cesia](cesia.md#watch--les-questions-vivantes) ;
+  la règle de reprise est vérifiée par model checking dans `spec/Watch.tla` (pas de trou, pas de répétition, les lignes
+  jamais plus anciennes que le dernier message : 1 015 657 états ; sans le test des patterns touchés ou sans la borne
+  du ring, TLC trouve un contre-exemple).
+
+### Ce que coûte un watch
+
+Mesuré sur la machine des autres benchmarks (4 cœurs, 8 threads, SSD SATA, Linux), builds de release, la base de 1 M
+de faits (`bench.exe load`), chaque côté d'une comparaison sur un serveur démarré de la même copie de celle-ci, chaque
+exécution sous le lock qui tient à l'écart les autres benchmarks de la machine ; des médianes et leur intervalle à 95 %
+sans hypothèse sur la distribution. Les commandes `wlat`, `stall`, `write ... W` et `livecpu` de `sbench.exe`.
+
+| | mesuré | à côté |
+|---|---|---|
+| un changement après le reçu de son écriture, au serveur, par son socket Unix ($n = 7$, 200 écritures chacun) | p50 16,0 µs [11,0 ; 26,9], p99 68 | `NOTIFY` de PostgreSQL avec un serveur Go, du commit à l'écran, sa WebSocket comprise : 137 µs [128 ; 148] (l'étude multijoueur) |
+| le même, dans le follower du programme sur la machine du serveur | p50 −6,9 µs [−14,8 ; −1,0] : avant le reçu ; p99 19,8 | |
+| l'écriture elle-même (son fsync) | p50 3 409 µs [2 970 ; 5 879] | l'insert de PostgreSQL avec son fsync : 3 317 µs [3 122 ; 3 438] (l'étude) |
+| 100 watches, chacun sur une connexion lue par un thread, un writer de groupes de 20 factures pendant 10 s, sans / avec une connexion qui suit une question et ne lit jamais ($n = 7$) | livrés 100 % / 100 % ; après le reçu p50 1 314 µs [1 259 ; 1 348] / 1 341 [1 186 ; 1 582], p99 4 880 [3 862 ; 7 126] / 5 747 [4 852 ; 96 319] ; le pic de mémoire du serveur 111 / 107 MB | l'écran bloqué de l'étude parmi 100 : Node `ws` et Go `gorilla` 100 % (p99 113 ms et 4,3 ms) ; un hub d'une seule fiber qui attend sur chaque socket, 50,6 % |
+| le hub seul (`livecpu`, dans un seul processus, $n = 5$) : S écrans, chacun suivant les factures impayées de son client, et un tableau de bord (la somme et le nombre des impayées), puis 20 000 groupes au hasard (nouvelles factures, paiements, totaux changés) | un groupe, tableau de bord compris, à 100 / 1 000 / 10 000 écrans : p50 16,0 µs [16,0 ; 21,0] / 13,1 [12,2 ; 19,1] / 12,2 [12,2 ; 12,9], moyenne 17,2 / 14,6 / 14,5 ; chaque écran et le tableau de bord égaux à ceux de `Find` à la fin | redemander à la place : la somme du tableau de bord 10,0 ms [9,7 ; 11,6] par groupe à 10 000 écrans ; l'écran que touche un groupe 8,1 µs |
+| 16 writers pendant 5 s sans / avec 100 watches de ce qu'ils écrivent, les watches lus par un autre processus ($n = 7$) | 1 844 groupes par seconde [568 ; 2 058] / 1 598 [977 ; 1 981] ; le rapport dans chaque tour 1,20 [0,29 ; 2,09] | PostgreSQL, 16 writers avec le `NOTIFY` d'un trigger : 8,6 fois moins d'inserts [6,1 ; 22,2] (ses commits font la queue sur le lock de `NOTIFY`, `async.c`) |
+
+- Un changement part environ 16 µs après le reçu de son écriture, qui part lui-même environ 5 µs après que le groupe
+  est durable (la moitié du round trip à vide) : environ 20 µs après durable au serveur, quelques µs dans le follower,
+  qui le calcule pendant le fsync. La borne de la conception était 50 µs après durable.
+- Les changements d'un groupe coûtent au hub à peu près autant pour 100 ou 10 000 watches (une seule évaluation par
+  template, le modèle commun des questions qui ne diffèrent que par leurs constantes, ses lignes routées par la valeur
+  du client), et 12 µs à 10 000 contre 10 ms pour redemander le tableau de bord : la borne de la conception était 20 µs
+  par groupe à 10 000 écrans. Redemander seulement l'écran que touche un groupe coûte à peu près autant que la
+  différence (8,1 µs) ; la différence gagne sur les agrégats, et elle sait quels écrans ont changé sans en redemander
+  aucun.
+- Une connexion qui ne lit jamais ne coûte rien de mesurable aux autres, et ses messages non envoyés s'arrêtent à
+  8 MiB (son watch se termine alors par `lagging`) ; les bornes hautes de ses intervalles sont le bruit du disque (un
+  tour de chaque côté a eu un fsync lent).
+- Ce que coûtent les 100 watches aux 16 writers n'est pas mesurable ici (l'intervalle du rapport contient 1) : le
+  writer et le syncer passent chaque frame à une queue. Le `NOTIFY` de PostgreSQL fait passer ses commits un par un.
+- Là où PostgreSQL + Go gagnent : leur fan-out (la distribution d'un changement à chaque lecteur) vers beaucoup
+  d'écrans utilise chaque cœur (à 1 000 écrans 2 822 µs du commit à un écran, la médiane, sa WebSocket comprise, contre
+  3 756 µs jusqu'à une fiber d'un seul programme Cesia avant toute WebSocket, [Cesia](cesia.md#ce-que-cela-coûte)).
 
 ### Erreurs
 
@@ -808,15 +883,26 @@ Les nombres bruts et les scripts : les fichiers de mesure de ce travail (pas dan
 
 ## Ce qu'il ne fait pas encore
 
-- Find rassemble les index words de sa réponse avant de les envoyer (plus haut) ; les subscriptions (`Watch`) et les
-  forks ne passent pas encore par le protocole.
+- Find rassemble les index words de sa réponse avant de les envoyer (plus haut) ; les forks ne passent pas encore par
+  le protocole.
+- **Plusieurs bases ne partagent pas encore un fsync** : chacune force son propre journal. Écrites en même temps, un
+  writer chacune, 5 s (`sbench.exe mwrite`, $n = 5$), 1 / 4 / 16 / 64 bases font 218 / 508 / 1 209 / 2 308 groupes par
+  seconde, une écriture attendant 3,07 / 6,24 / 10,3 / 24,1 ms en médiane [20,9 ; 29,7 à 64]. Les bases de
+  PostgreSQL 18.6 partagent un seul WAL (write-ahead log : le journal où PostgreSQL écrit avant de toucher ses
+  données) : 1 / 4 / 16 / 64 clients qui insèrent une ligne par transaction (`pgbench`, $n = 5$) font 182 / 477 /
+  1 760 / 3 463 par seconde, 18,5 ms en moyenne à 64. PostgreSQL gagne à 16 et 64 (1,5 fois les écritures à 64), là où
+  une seule base de Cepheus avec 64 writers fait 4 828 à 7 021 par seconde (les clients OCaml et Cesia,
+  [Cesia](cesia.md#ce-que-cela-coûte)) : les fsyncs de fichiers séparés ne se groupent pas comme le font les écritures
+  d'un seul journal. La réponse de la conception, un seul log forcé pour les tours du serveur et chaque journal forcé à
+  ses checkpoints (des points où il est mis sur le disque), est l'étape suivante.
 - Des lecteurs locaux sur d'autres machines (une replica, étape 6 ; Raft avec des leases entre serveurs, étape 7), et
   une seule copie partagée des pages pour beaucoup de lecteurs d'une même machine (chaque lecteur garde son propre
   cache : [ce que cela coûte](#ce-que-cela-coûte)).
 
 Le client Cesia est l'étape 4 ([Cepheus depuis Cesia](cesia.md)) : un programme Cesia atteint une base par un serveur
-seulement, par `cepheus.Connect`, et lit localement sur la machine du serveur. Ensuite : les subscriptions par le
-réseau et plusieurs bases qui partagent un même fsync (étape 5), une replica (étape 6), Raft sur trois machines
-(étape 7), des bases en mémoire avec `Expire` et `Incr` (étape 8). La bibliothèque OCaml ouvre encore un répertoire de
-base dans son propre processus (`Cepheus.open_`) : c'est le moteur que fait tourner le serveur, et ce que pilotent ses
-tests et ses benchmarks ; les programmes, en Cesia, passent par le serveur.
+seulement, par `cepheus.Connect`, et lit localement sur la machine du serveur. Les questions vivantes passent par le
+protocole (étape 5, [plus haut](#les-questions-vivantes-watch)). Ensuite : plusieurs bases qui partagent un même fsync
+(le reste de l'étape 5), une replica (étape 6), Raft sur trois machines (étape 7), des bases en mémoire avec `Expire`
+et `Incr` (étape 8). La bibliothèque OCaml ouvre encore un répertoire de base dans son propre processus
+(`Cepheus.open_`) : c'est le moteur que fait tourner le serveur, et ce que pilotent ses tests et ses benchmarks ; les
+programmes, en Cesia, passent par le serveur.

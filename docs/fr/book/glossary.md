@@ -165,6 +165,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **delta debugging** — réduire un cas qui échoue en en retirant des parties tant qu'il échoue encore, jusqu'à ce que
   chaque partie restante soit nécessaire (Zeller et Hildebrandt 2002).
   [cas](case-seats.md#3-une-hypothèse-quon-peut-réfuter-et-sa-cause)
+- **delta query** (la requête du changement) — le changement de la réponse d'un join quand des faits sont ajoutés ou
+  retirés, calculé à partir de ces faits seuls : chaque nouveau binding trouvé une fois, au premier pattern qui
+  correspond à un fait ajouté (Ammar et al. 2018). [Cepheus depuis Cesia](cesia.md#watch--les-questions-vivantes)
 - **deltas** (delta coding) — des nombres rangés sous la forme de leur différence avec le nombre d'avant : une suite
   croissante (les choses d'un chargement : 0 et 1) prend un bit ou deux par nombre. Les colonnes du journal le prennent
   bloc par bloc quand c'est plus court que le frame of reference. [formats](formats.md#un-groupe)
@@ -307,6 +310,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **kind** (client Cesia) — une sorte de chose dans un programme Cesia : un nom et des champs, chacun une propriété d'un
   type (`client/City` pour le champ `City` du kind `client`) ; `Insert` et `Get` écrivent et lisent les champs d'une
   chose pour un kind sous la forme d'une map. [Cesia](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)
+- **lagging** (« en retard ») — la fin d'un watch dont le programme a pris trop de retard (8 MiB de pushes qu'il n'a
+  pas pris, au serveur) : le package relance le watch depuis son dernier groupe.
+  [serveur](server.md#les-questions-vivantes-watch)
 - **large group** (un grand groupe) — un groupe de 20 000 opérations ou plus, toutes des ajouts : il prend un chemin
   plus rapide vers le même résultat (ses faits dans des Bigarrays, rangés et triés par plusieurs domains, fusionnés
   d'un coup en un run pendant que sa frame s'écrit à côté, par morceaux).
@@ -332,6 +338,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   moins de runs. [théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes)
 - **linearizability** — chaque opération semble prendre effet à un seul instant entre son appel et son retour
   (Herlihy et Wing 1990) ; un groupe, en tant qu'écriture sur un seul objet, est linearizable.
+- **live question** (une question vivante), **watch** (un watch) — une question tenue à jour : sa réponse, puis le
+  changement de ses lignes à chaque groupe durable qui les change (`cepheus.Watch`).
+  [Cepheus depuis Cesia](cesia.md#watch--les-questions-vivantes), [G21](guarantees.md#g21-les-questions-vivantes)
 - **local read** (une lecture locale) — une lecture qu'un programme fait dans sa propre mémoire, sur la machine du
   serveur, à partir de la base qu'il suit : aucun round trip, linearizable (G15).
   [serveur](server.md#lectures-locales-g15)
@@ -454,6 +463,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [architecture](architecture.md#les-runs-sur-disque)
 - **S3-FIFO** — la politique d'éviction du cache : trois files FIFO (small, main, ghost), rien n'est déplacé sur un hit
   (quand la page est déjà dans le cache ; Yang et al. 2023). [architecture](architecture.md#les-pages-et-le-cache)
+- **same** (« le même ») — la réponse du serveur à un watch repris `from` un groupe quand rien de ce que lit la
+  question n'a changé depuis : les lignes du programme sont toujours justes, et rien n'est envoyé.
 - **schedule** (un ordonnancement) — un ordre dans lequel s'entrelacent les pas de transactions concurrentes.
   [cas](case-seats.md#correction-sur-des-entrées-générées)
 - **schema** (le schéma) — les propriétés et leurs types ; dans Cepheus, des faits comme le reste.
@@ -517,6 +528,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **syncer** — le thread qui écrit et force les frames, à côté du writer.
 - **system property** (une propriété système) — `cepheus/name`, `cepheus/type`, `cepheus/many`, `cepheus/unique` (de
   1 à 4).
+- **template** (un modèle de question) — les questions qui ne diffèrent que par leurs constantes (les factures
+  impayées de chaque client), gardées comme une seule dont les constantes sont des paramètres : le changement d'un
+  fait se calcule une fois et ses lignes sont routées par les valeurs des paramètres.
 - **thing** (une chose) — l'entité d'un fait : un numéro, à partir de 65 536.
   [concepts](concepts.md#les-faits--le-modèle-entityattributevalue)
 - **threat to validity** (une menace sur la validité) — une façon dont la preuve ou la mesure pourrait être fausse, à

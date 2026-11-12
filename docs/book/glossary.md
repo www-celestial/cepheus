@@ -135,8 +135,8 @@ the usual one, both are given.
 - **delta debugging** — shrinking a failing case by removing parts while it still fails, until every part left is
   needed (Zeller and Hildebrandt 2002). [case](case-seats.md#3-a-hypothesis-one-can-prove-wrong-and-its-cause)
 - **delta query** — the change of a join's answer when facts are added or removed, computed from those facts alone: each
-  new binding found once, at the first pattern that matches an added fact (Ammar et al. 2018). [Cepheus from
-  Cesia](cesia.md#watch-live-questions)
+  new binding found once, at the first pattern that matches an added fact (Ammar et al. 2018).
+  [Cepheus from Cesia](cesia.md#watch-live-questions)
 - **deltas** (delta coding) — numbers stored as their differences from the number before: a growing sequence (the
   things of a load: 0 and 1) takes a bit or two a number. The journal's columns take it block by block when it is
   shorter than the frame of reference. [formats](formats.md#a-group)

@@ -107,6 +107,31 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
 
+## Les questions vivantes (2026-11-11), à 1 million de faits
+
+`cepheus.Watch` et `Watch` dans le protocole, contre main d'avant eux (le commit du column order), sur la base de 1 M de
+faits du serveur, chaque côté sur un serveur démarré de la même copie de celle-ci, $n = 7$ tours alternés (la méthode
+plus haut). Les tableaux entiers sont dans [serveur](server.md#ce-que-coûte-un-watch) et
+[Cesia](cesia.md#ce-que-cela-coûte).
+
+| | avant | après | le rapport dans chaque tour, après / avant |
+|---|---:|---:|---:|
+| le démarrage du serveur (prêt), ms | 174 [122 ; 847] | 143 [126 ; 178] | 0,91 [0,15 ; 1,09] |
+| un round trip à vide (Ping), µs | 8,86 [7,55 ; 11,13] | 9,40 [7,93 ; 11,47] | 0,93 [0,76 ; 1,50] |
+| une lecture d'un point au serveur (Get), µs | 8,79 [7,64 ; 12,27] | 8,85 [7,70 ; 9,49] | 1,00 [0,64 ; 1,16] |
+
+Un programme qui utilise le package sans l'appeler (`cesia run` de `io.Print(1)` avec le `use` du package, $n = 51$
+exécutions alternées) : 3,53 ms [3,48 ; 3,59] avant, 3,66 [3,60 ; 3,75] après : le code Cesia du package a 41 lignes de
+plus (`Watch` et le `Close` d'un watch), que Cesia lit et compile au démarrage, 0,13 ms de plus. Le moteur ne se charge
+toujours qu'au premier appel.
+
+Rien de ce qui existait avant ne coûte plus. Ce qui est nouveau : un changement atteint un programme 16 µs après le
+reçu de son écriture au serveur, et avant le reçu dans le follower du programme ; un groupe coûte au hub (le thread qui
+calcule les questions vivantes d'une base) 12,2 µs à 10 000 écrans qui suivent une question et un tableau de bord ; une
+connexion qui ne lit jamais ne retient personne ; 100 watches ne coûtent rien de mesurable à 16 writers, là où le
+`NOTIFY` de PostgreSQL les divise par 8,6 ; un programme Cesia donne un changement à 10 000 fibers en 90 ms (la
+dernière).
+
 ## Le column order et les intersections en leapfrog (2026-11-11), à 10 millions de faits
 
 Étape 3 du plan pour battre les géants : le format de run 8 ajoute un troisième ordre à chaque partie d'un run, le

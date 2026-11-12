@@ -389,7 +389,13 @@ est citée dans la page [comparaison](comparison.md).
   — La forme des données du benchmark (universités, départements, personnes, cours) et son ontologie.
 - **[Budiu 2023]** M. Budiu, T. Chajed, F. McSherry, L. Ryzhyk, V. Tannen. DBSP: Automatic Incremental View
   Maintenance for Rich Query Languages. *PVLDB* 16(7), 1601–1614, 2023. https://doi.org/10.14778/3587136.3587137
-  — Les règles delta des joins, prévues pour les questions vivantes (des abonnements) et les agrégats des règles.
+  — Les règles delta des joins (le changement d'un opérateur bilinéaire), dont le changement d'une question vivante
+  est un cas ; les agrégats des règles, prévus.
+- **[Gjengset 2018]** J. Gjengset, M. Schwarzkopf, J. Behrens, L. T. Araújo, M. Ek, E. Kohler, M. F. Kaashoek,
+  R. Morris. Noria: dynamic, partially-stateful data-flow for high-performance web applications. *OSDI* 2018,
+  213–231. https://www.usenix.org/conference/osdi18/presentation/gjengset
+  — Des lectures qui ne diffèrent que par un paramètre et partagent un seul état : les templates des questions
+  vivantes, dont les constantes sont des paramètres.
 
 ## La réplication et plusieurs machines (prévu)
 
@@ -407,7 +413,9 @@ est citée dans la page [comparaison](comparison.md).
   — Le log, les pages et le calcul séparés : le plan pour le stockage sur des object stores.
 - **[Ammar 2018]** K. Ammar, F. McSherry, S. Salihoglu, M. Joglekar. Distributed Evaluation of Subgraph Queries Using
   Worst-case Optimal Low-Memory Dataflows. *PVLDB* 11(6), 691–704, 2018. https://doi.org/10.14778/3184470.3184473
-  — BiGJoin : Generic Join sur beaucoup de machines, prévu.
+  — BiGJoin : Generic Join sur beaucoup de machines, prévu ; et ses delta queries, le changement d'un join pour des
+  faits ajoutés ou retirés, chaque nouveau binding au premier pattern qui correspond à un fait ajouté : la façon dont
+  se calcule le changement d'une question vivante (G21).
 
 ## Le serveur
 

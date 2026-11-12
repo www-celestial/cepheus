@@ -60,6 +60,7 @@ l'édition de liens dynamique du moteur et des bibliothèques d'OpenSSL, une foi
 
 ```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/fiber
 use std/io
 use std/result
 use std/sys
@@ -283,6 +284,75 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 La facture de 10 est sous 50 : la ville de Bo est maintenant Lyon, et sa seule facture n'est pas comptée.
 
+## Watch : les questions vivantes
+
+Une **question vivante** (live question) est un `Find` qui reste ouvert. `cepheus.Watch(n, question, db, size = 64)`
+prend la même question que `Find` et donne un `Ok` de `{Changes, Watch}` : `Changes` est un **channel** de Cesia (une
+queue entre fibers, c'est-à-dire une file qui porte des valeurs d'une fiber à une autre, lue par `fiber.Receive` ou
+`for` ; le livre de Cesia, chapitre « Fibers ») qui tient au plus `size` messages. Ce que donne `cepheus.Watch` est un
+**watch** (de l'anglais « surveiller » : la question tenue ouverte). Son premier message est la **réponse**,
+`{Group, Rows}` : les lignes que donne `Find` au groupe `Group`. Chaque message suivant est un **changement**,
+`{Group, Added, Removed}` : les lignes venues et les lignes parties avec le groupe `Group`, si bien que les lignes
+tenues, `Added` ajoutées et `Removed` retirées, sont alors les lignes de `Find` à ce groupe. Chaque message a les quatre
+champs ; les deux qu'il n'utilise pas sont `missing`.
+
+```cesia norun
+unpaidOf(c) = (i, total) -> {
+  Where: [[i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]],
+  Give: {Invoice: i, Total: total},
+}
+w = result.Unwrap(cepheus.Watch(2, unpaidOf(ada), db))
+io.Print(fiber.Receive(w.Changes))
+small = result.Unwrap(cepheus.Insert(Invoice, {Client: ada, Total: 45, Status: "unpaid"}, db))
+result.Unwrap(cepheus.Update(Invoice, small, {Status: "paid"}, db))
+io.Print(fiber.Receive(w.Changes))
+io.Print(fiber.Receive(w.Changes))
+cepheus.Close(w)
+```
+
+```text
+Ok({Group: 10, Rows: [{Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
+Ok({Group: 11, Rows: missing, Added: [{Invoice: 65543, Total: 45.0}], Removed: []})
+Ok({Group: 12, Rows: missing, Added: [], Removed: [{Invoice: 65543, Total: 45.0}]})
+```
+
+- Un changement ne vient que quand les lignes changent, et seulement une fois son groupe sur le disque du serveur (G1) :
+  un écran ne montre jamais une écriture qu'un crash pourrait défaire.
+- Les lignes sont celles de `Find`, avec leurs répétitions : un `Give` qui laisse de côté une variable donne une ligne
+  pour chaque binding, comme le fait `Find`. Les agrégats (`Sum`, `Count`, `Min`, `Max`) se suivent aussi : un
+  changement retire alors l'ancienne ligne d'un groupe et ajoute la nouvelle.
+- **Pas de trou, pas de répétition.** Quand la connexion casse ou que le serveur redémarre, le watch reprend de
+  lui-même au groupe de son dernier message : le serveur répond que rien de ce que lit la question n'a changé depuis
+  (et rien ne vient), ou par la réponse à son groupe le plus récent, que le package transforme en changement à partir
+  des lignes qu'il tient. Le programme ne voit ni trou ni message deux fois.
+- **Une fiber lente ne retient personne.** Chaque fiber qui suit une question garde sa propre queue de 256 messages
+  dans le package ; celle qui prend plus de retard perd cette queue et reçoit à nouveau la réponse entière,
+  `{Group, Rows}`, à sa prochaine lecture, plutôt que chaque changement manqué. Au serveur, une connexion qui tient
+  plus de 8 MiB de messages qu'elle n'a pas encore pris termine ses watches par `"lagging"` (« en retard »), et le
+  package relance le watch depuis son dernier groupe. Les écritures n'attendent jamais un watch.
+- **Un seul watch par question.** Toutes les fibers du programme qui suivent la même question (les mêmes patterns,
+  constantes et `Give`) partagent un seul watch : le serveur calcule ses changements une fois, et le package donne à
+  chaque fiber sa copie.
+- **Où c'est calculé**, comme pour `Find` : sur la machine du serveur, dans le programme, à partir des groupes qu'il
+  suit pour ses lectures locales (il calcule les changements de chaque frame pendant que le serveur la force sur le
+  disque, et les donne une fois qu'elle est durable) ; ailleurs au serveur, qui les pousse. Les watches d'un fork se
+  calculent dans le fork, à chacune de ses écritures.
+- `cepheus.Close(w)` termine le watch : son channel se ferme une fois son dernier message pris. Un watch ne se termine
+  de lui-même que quand sa base est fermée ou que son token n'a plus le droit de lire la base : le channel se ferme, et
+  le `cepheus.Watch` suivant de cette question dit pourquoi.
+
+**Comment un changement se calcule.** Une question est un join de patterns (une conjunctive query, une requête faite de
+conditions qui doivent toutes être vraies). Quand un groupe ajoute des faits, les nouvelles lignes sont les bindings
+qui utilisent un fait ajouté dans au moins un pattern ; chacun est trouvé une fois, au premier pattern qui correspond à
+un fait ajouté (les patterns d'avant lui lisent la base sans les faits du groupe, ceux d'après avec eux), chaque partie
+une seule recherche dans les index, ce fait fixé : la **delta query** (la requête du changement) d'Ammar, McSherry,
+Salihoglu et Joglekar (2018), menée par le même Generic Join que `Find`. Les faits retirés donnent de la même façon les
+lignes retirées, sur la base d'avant le groupe. `Sum` et `Count` suivent par différence ; `Min` et `Max` sont
+redemandés pour la clé dont l'extremum est parti. Les questions qui ne diffèrent que par leurs constantes (les factures
+impayées de chaque client) partagent un seul **template** (un modèle de question, dont les constantes deviennent des
+paramètres) : le changement d'un fait se calcule une fois et ses lignes vont aux watches dont les constantes leur
+correspondent, si bien qu'un groupe coûte autant avec 10 watches qu'avec 10 000 ([ce que cela coûte](#ce-que-cela-coûte)).
+
 ## Les forks
 
 Un **fork** est une base dans la mémoire du programme qui part d'une autre : il lit et écrit comme une base, avec chaque
@@ -456,7 +526,8 @@ appel 18,7 [18,6 ; 18,8].
 
 - Rien du moteur ne se charge avant le premier appel : les 0,42 ms d'un programme qui utilise le package sont son code
   Cesia lu et compilé, comme pour tout package (`std/csv`, 40 lignes, environ 0,2 ms ; `std/sql` environ 3 ms, mesurés
-  de la même façon mais sans le lock).
+  de la même façon mais sans le lock). `Watch` a allongé le code du package de 41 lignes : 0,13 ms de plus (3,66 ms
+  [3,60 ; 3,75] contre 3,53 [3,48 ; 3,59] avant lui, $n = 51$ exécutions alternées).
 - Le premier appel coûte 13 ms de plus (le moteur sans sa table des symboles, tel qu'il est construit maintenant :
   17,8 ms [17,6 ; 18,0] contre 20,3 [20,2 ; 20,5] avant, $n = 55$ ; le processus de cette exécution avec le package non
   utilisé : 4,5) : la vérification de l'empreinte du moteur (BLAKE2 de 2,3 MB, 3,9 ms), le chargement de l'OpenSSL du
@@ -472,6 +543,34 @@ fait 2 millions de maps (`bench/cesia/gc.ce`, la meilleure de trois, $n = 7$) : 
 recouvrent ; le serveur des writers et le benchmark se partagent les cœurs de la machine). Au repos, une connexion ne
 coûte rien de mesurable au programme.
 
+**Le fan-out d'une question vivante** (sa distribution à beaucoup de lecteurs), en µs entre le reçu d'une écriture et
+le changement d'une fiber (`bench/cesia/watch.ce` : N fibers suivent les factures impayées d'un client, un seul watch
+partagé, pendant que le programme écrit 50 factures de ce client l'une après l'autre, chacune son propre groupe ; le
+programme sur la machine du serveur, donc son follower calcule les changements ; $n = 5$ tours, un serveur démarré de
+la même base pour chacun) :
+
+| fibers qui suivent | une livraison, p50 | la dernière fiber de chaque groupe, p50 | son p99 |
+|---:|---:|---:|---:|
+| 1 | 19 [7 ; 21] | 19 | 68 |
+| 100 | 359 [300 ; 556] | 475 [390 ; 790] | 2 505 |
+| 1 000 | 3 756 [3 262 ; 4 325] | 5 420 [4 206 ; 7 141] | 15 204 |
+| 2 500 | 12 901 [11 846 ; 16 575] | 17 597 [16 626 ; 21 970] | 35 810 |
+| 10 000 | 66 073 [63 702 ; 71 294] | 90 119 [86 154 ; 101 859] | 129 904 |
+
+- Une fiber reçoit son changement 19 µs après le reçu de l'écriture : le follower l'a calculé pendant le fsync. Les
+  changements d'un groupe coûtent autant pour 1 ou 10 000 watches d'une question (une seule évaluation,
+  [serveur](server.md#ce-que-coûte-un-watch)) ; ce qui grandit, c'est la livraison à chaque fiber, environ 9 µs par
+  fiber à 10 000 : un réveil depuis le domain du follower, la fiber du package qui remplit le channel, et le channel
+  jusqu'à la fiber qui suit. Les channels de Cesia seuls (un seul envoyeur, 10 000 fibers qui lisent chacune son
+  channel) mettent 57 ms à atteindre la dernière fiber : le chemin du package coûte environ le double.
+- À côté de `LISTEN`/`NOTIFY` de PostgreSQL avec un serveur Go (mesuré dans une session précédente, du commit à
+  l'écran, sa WebSocket comprise) : 137 µs pour 1 écran, 538 pour 100, 2 822 pour 1 000. À 1 et à 100, le programme
+  Cesia a son changement plus tôt, avant toute WebSocket ; à 1 000, Go passe devant, son fan-out sur 4 cœurs contre un
+  seul domain de Cesia.
+- 10 000 écrans d'un seul programme : 90 ms jusqu'à la dernière fiber, avant leurs WebSockets. Un programme serveur
+  lancé par `cesia run --workers 4` tient 2 500 écrans par processus, chaque processus avec sa propre connexion et son
+  watch : 17,6 ms jusqu'à la dernière fiber.
+
 **À côté des géants.** Aucun client Cesia de PostgreSQL n'existe (le `std/sql` de Cesia parle à SQLite) ; PostgreSQL est
 donc mesuré par sa bibliothèque C, le client le plus rapide qu'il ait : un programme Cesia sur la machine du serveur lit
 une ligne 34 fois plus vite que n'importe quel client de PostgreSQL ne le peut, puisqu'il ne fait aucun round trip, et
@@ -486,8 +585,6 @@ linearizable sans cela.
 
 ## Ce qui n'est pas encore construit
 
-- `cepheus.Watch`, une question dont les changements arrivent à mesure qu'ils se produisent, dans un channel (un canal
-  qui porte des valeurs d'une fiber à une autre), poussés par le serveur.
 - Les forks d'une base lue au serveur, que le serveur fera.
 - `Not`, `Or`, `Prefix` et `In` dans les questions : pas dans le moteur.
 - Un programme atteint une seule base par connexion : `Connect` à nouveau pour une autre.

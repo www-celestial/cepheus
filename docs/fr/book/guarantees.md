@@ -33,6 +33,7 @@ durable à partir duquel elle a été répondue ; `server_sim` les vérifie sur 
 | G18 | aucun groupe confirmé ne laisse une instance d'une contrainte (`Never`) | toujours |
 | G19 | un changement de règle prend effet à un seul groupe | toujours |
 | G20 | `why` renvoie une preuve bien fondée d'un fait de la vue, ou rien pour un non-fait | toujours |
+| G21 | chaque message d'une question vivante (`Watch`) laisse au programme exactement les lignes de `Find` à son groupe, un groupe durable ; ses groupes ne font que croître, sans en sauter un qui a changé les lignes | F1, F2, connexions coupées, programmes lents |
 
 ## Les pannes
 
@@ -560,3 +561,49 @@ de chaque règle qui donne le fait, jusqu'à ce que l'une soit prouvée.
 vérifiée nœud par nœud — la règle de chaque nœud existe, les atomes de son corps se lient de façon cohérente aux faits
 des enfants dans l'ordre, sa tête est le fait du nœud, ses intervalles tiennent, chaque feuille est affirmée dans la
 vue — et le cas nommé d'une preuve en deux étapes).
+
+## G21 Les questions vivantes
+
+*Promesse.* Le premier message d'un watch (une question vivante, ouverte par `cepheus.Watch`) est la réponse de `Find`
+à un groupe durable ; après chaque message suivant (un changement, ou à nouveau la réponse), les lignes que tient le
+programme, le changement appliqué, sont exactement la réponse de `Find` au groupe de ce message, un groupe durable
+(G1 : aucun crash ne peut le reprendre). Les groupes des messages d'un watch ne font que croître, et chaque groupe qui a
+changé les lignes entre deux messages est dans le changement du second : aucun changement n'est perdu, aucun ne vient
+deux fois, quoi qu'il casse entre-temps (la connexion, le serveur par `kill -9`, la lecture du programme).
+
+*Conditions.* La question est une conjunctive query (les patterns et les intervalles de `Find`), avec `Give` ou des
+agrégats. Un programme qui lit plus lentement que n'arrivent les changements reçoit à nouveau la réponse plutôt que
+chaque changement (il tient alors les lignes de `Find` au groupe de la réponse). Un watch se termine pour de bon à
+`Close`, à une base fermée ou à un token qui n'a plus le droit de la lire (G16).
+
+*Preuve.* (1) *Le changement d'une frame.* Soit $S$ les faits avant une frame et $S'$ après ; un binding des patterns
+sur $S'$ qui n'en est pas un sur $S$ utilise un fait de $S' - S$ dans un pattern au moins. Prendre pour chacun de ces
+bindings le premier pattern qui correspond à un fait ajouté, les patterns d'avant lui sur $S'$ sans les faits ajoutés
+de la frame et ceux d'après lui sur $S'$, donne chaque nouveau binding exactement une fois (les parties sont disjointes
+et les couvrent) ; les bindings retirés s'obtiennent de même sur $S$ avec les faits retirés (la delta query, la
+requête du changement, de [Ammar 2018] ; la règle de la semi-naive evaluation, G17 (1)). Les lignes sont celles de `Find` avec leurs
+répétitions, donc le multiset des lignes après la frame (un ensemble où un élément peut revenir plusieurs fois) est
+celui d'avant, plus les lignes des nouveaux bindings, moins celles des bindings retirés ; `Sum` et `Count` suivent par
+différence, et un `Min` ou un `Max` dont la valeur est partie est redemandé pour sa clé. (2) *Durable.* Un changement
+est retenu jusqu'à ce que le groupe de sa frame soit durable (le syncer du serveur, l'événement `durable` d'un
+lecteur), si bien que son groupe est un de ceux que garde G1. (3) *Ordre et reprise.* Les messages partent dans l'ordre
+des groupes sur une seule queue ; après une connexion coupée ou une fin `lagging` (« en retard »), le package relance
+le watch `from` le groupe de son dernier message, et le serveur ne répond `same` que quand son ring des changements
+récents (un anneau qui garde les derniers changements) couvre chaque groupe depuis et qu'aucun ne touche les patterns
+de la question (une propriété et ses constantes), sinon par la réponse à son groupe le plus récent, que le package
+transforme en changement à partir de ses lignes : `spec/Watch.tla` vérifie que les lignes sont toujours la réponse à
+leur groupe et ne reviennent jamais en arrière, avec le lagging, les connexions coupées, et un watch arrêté puis
+relancé (1 015 657 états) ; sans le test des patterns touchés, ou sans la borne du ring, TLC trouve un contre-exemple
+(`tools/tlc.sh` vérifie les deux).
+
+*Testé par* `test/live_sim.ml` (100 seeds dans `tools/test.sh`, `LIVE_SEEDS` pour plus : des groupes au hasard
+d'ajouts, de retraits, de faits dérivés et de merges en runs, des grands groupes ; chaque message de chaque watch,
+simple, qui projette ou qui agrège, égal à la réponse de l'évaluateur naïf à son groupe ; la reprise par `same` ou par
+la réponse, le lagging) ; `test/server_sim.ml` (des watches sur le réseau simulé : des pushes coupés à n'importe quel
+octet, des connexions coupées à n'importe quel message et des watches repris, le hub en retard ou tout de suite, le
+lagging, unwatch avec des pushes en route, des grands groupes, les crashes du serveur : les lignes de chaque message
+sont la réponse naïve à un groupe durable, jamais plus ancienne que la dernière) ; `test/server_limits.ml` (un watch
+qui ne lit jamais à côté d'un qui lit : le lecteur reçoit chaque changement dans l'ordre, le silencieux se termine par
+`lagging`) ; les tests du package sur des forks (`cesia/tests/cepheus.test.ce`) ; `test/cesia.sh` (un watch par TLS,
+un local, et un qui continue à travers un `kill -9` du serveur pendant que 1 500 lignes s'écrivent : ses groupes ne
+font que croître et il finit avec les 1 500).
