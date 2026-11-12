@@ -370,12 +370,12 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 1 Hello | version varint (1), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
-| 4 Find | handle, question, select, then, only when the question has them, its order: a byte 1, its operators (a count; 0), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
+| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
 | 8 Follow | handle (over the Unix socket only) | Start: the database's id, the visibility number, count, (lo, hi) of each run, newest first; the descriptors of `visible` and of each run ride on its first byte. The connection is then the database's follow stream ([local reads](#local-reads-g15)) |
-| 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
+| 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none), then its operators as Find codes them, when it has some (no Sort, Limit or After) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
 | 12 Unwatch | the Watch's id | Unwatched |
 
 On a follow stream the server pushes (request id 0):

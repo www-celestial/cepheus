@@ -23,6 +23,10 @@
    Aggregates (Group): a row a key, kept by difference: the count and the sums add and subtract; a minimum or a
    maximum that a removal takes away is asked again for its key only.
 
+   Not, Or and In (Ask): a watch whose question has them is answered again, whole, at each frame that changes a fact
+   of one of the properties it names, and its change is the difference of the two answers (multisets): its rows are
+   Find's rows all the same, at a cost of the whole question a frame that touches it.
+
    Messages are held until their frame is durable (G5, G13: never shown before a crash can no longer take it back):
    the hub evaluates a frame while it is forced, and gives its messages once it is durable. *)
 
@@ -51,6 +55,7 @@ type sub = {
   mutable touched : bool;
   mutable plus : row list;
   mutable minus : row list;
+  mutable wrows : row list;  (* a question with Not, Or or In: its rows *)
   net : (row, int) Hashtbl.t;  (* a projecting Give: rows added minus removed *)
   before : (row, row option) Hashtbl.t;  (* Group: a touched key's row before the frame *)
   dirty : (row, unit) Hashtbl.t;  (* Group: a key whose minimum or maximum was removed *)
@@ -69,6 +74,7 @@ and template = {
   subs : (row, sub list) Hashtbl.t;  (* by parameters *)
   slots : (Value.t, int) Hashtbl.t array;  (* each parameter's values among the watches, counted *)
   mutable count : int;
+  extra : Ask.item list;  (* Not, Or and In: the question answered whole at each frame that touches it *)
 }
 
 type held = { tag : int; out : (sub * msg) list }
@@ -170,7 +176,23 @@ let new_template (v : Store.view) key tq nq (sel : Wire.select) =
   let q0 = { tq with vars = nq } in
   { tkey = key; tq; nq; np = tq.vars - nq; pats = Array.of_list tq.where; typs; give; aggs;
     projecting = (Array.length aggs = 0 && projecting q0 give); subs = Hashtbl.create 64;
-    slots = Array.init (tq.vars - nq) (fun _ -> Hashtbl.create 8); count = 0 }
+    slots = Array.init (tq.vars - nq) (fun _ -> Hashtbl.create 8); count = 0; extra = [] }
+
+(* every pattern of a question with Not, Or and In, theirs too: the properties a frame must touch *)
+let all_patterns (q : Query.t) extra =
+  let rec of_item = function
+    | Ask.Pattern p -> [ p ]
+    | Range _ | In _ -> []
+    | Not l -> List.concat_map of_item l
+    | Or alts -> List.concat_map (List.concat_map of_item) alts
+  in
+  q.where @ List.concat_map of_item extra
+
+let whole_template (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =
+  let a = Ask.compile v q extra in
+  let give, aggs = match sel with Wire.Give g -> (if Array.length g = 0 then Array.init q.vars Fun.id else g), [||] | Group (k, a) -> k, a in
+  { tkey = key; tq = q; nq = q.vars; np = 0; pats = Array.of_list (all_patterns q extra); typs = Ask.typs_of a; give; aggs;
+    projecting = false; subs = Hashtbl.create 4; slots = [||]; count = 0; extra }
 
 (* ---- the state of a watch ---- *)
 
@@ -221,7 +243,15 @@ let recount (v : Store.view) (s : sub) kv =
 (* the watch's answer now, and its state (the keys of an aggregate) *)
 let answer (v : Store.view) (s : sub) =
   let t = s.t in
-  if Array.length t.aggs = 0 then begin
+  if t.extra <> [] then begin
+    let sel = if Array.length t.aggs = 0 then Wire.Give t.give else Wire.Group (t.give, t.aggs) in
+    let a = Answer.answer ~extra:t.extra v s.q sel in
+    let typs = Array.init a.cols a.typ in
+    let rows = List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))) in
+    s.wrows <- rows;
+    rows
+  end
+  else if Array.length t.aggs = 0 then begin
     let a = Answer.answer v s.q (Wire.Give t.give) in
     let typs = Array.init a.cols a.typ in
     List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
@@ -398,6 +428,17 @@ let net_changes (groups : Group.t list) =
 
 let give h tag out = if out <> [] then h.held <- h.held @ [ { tag; out } ]
 
+(* the rows added and removed from [a] to [b], as multisets *)
+let diff (a : row list) (b : row list) =
+  let key r = let buf = Buffer.create 32 in Array.iter (Value.encode buf) r; Buffer.contents buf in
+  let n = Hashtbl.create 64 in
+  List.iter (fun r -> let k = key r in Hashtbl.replace n k (match Hashtbl.find_opt n k with Some (c, _) -> c - 1, r | None -> -1, r)) a;
+  List.iter (fun r -> let k = key r in Hashtbl.replace n k (match Hashtbl.find_opt n k with Some (c, _) -> c + 1, r | None -> 1, r)) b;
+  Hashtbl.fold
+    (fun _ (c, r) (ad, rm) ->
+      if c > 0 then (List.init c (fun _ -> r) @ ad, rm) else if c < 0 then (ad, List.init (-c) (fun _ -> r) @ rm) else (ad, rm))
+    n ([], [])
+
 let remove h s =
   if not s.gone then s.gone <- true;
   let t = s.t in
@@ -479,18 +520,34 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
         let ts = Hashtbl.create 8 in
         Hashtbl.iter (fun p () -> List.iter (fun (t, _) -> Hashtbl.replace ts t.tkey t) (Option.value (Hashtbl.find_opt h.by_prop p) ~default:[])) props;
         let dplus = lazy (words v1 plus) and dminus = lazy (words v0 minus) in
+        let wholes = ref [] in
         (match
            Hashtbl.iter
              (fun _ t ->
-               if plus <> [] then side_bindings v1 t plus (Lazy.force dplus) 1 touched;
-               if minus <> [] then side_bindings v0 t minus (Lazy.force dminus) (-1) touched)
+               if t.extra <> [] then
+                 Hashtbl.iter
+                   (fun _ ss ->
+                     List.iter
+                       (fun s ->
+                         if not s.gone then begin
+                           let before = s.wrows in
+                           let after = answer v1 s in
+                           let added, removed = diff before after in
+                           if added <> [] || removed <> [] then wholes := (s, Change { group = v1.group; added; removed }) :: !wholes
+                         end)
+                       ss)
+                   t.subs
+               else begin
+                 if plus <> [] then side_bindings v1 t plus (Lazy.force dplus) 1 touched;
+                 if minus <> [] then side_bindings v0 t minus (Lazy.force dminus) (-1) touched
+               end)
              ts
          with
         | () ->
           let out =
             List.filter_map (fun s -> match finish v1 s with Some (added, removed) -> Some (s, Change { group = v1.group; added; removed }) | None -> None) (List.rev !touched)
           in
-          give h tag out
+          give h tag (out @ List.rev !wholes)
         | exception (Pages.Unreadable m | Query.Bad m) -> end_all h "damaged" m)
       end;
       h.view <- v1;
@@ -534,19 +591,34 @@ let touched_since h (q : Query.t) n =
    the question), held until that state is durable; then a change after each frame that changes its rows. [emit] is
    called under the hub's lock and must not wait. Raises Query.Bad for a question that is not valid, and
    Pages.Unreadable. *)
-let subscribe h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
+let subscribe ?(extra = []) h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
   Mutex.protect h.hm (fun () ->
       (match h.stopped with Some (code, m) -> raise (Failure (code ^ ": " ^ m)) | None -> ());
       let v = h.view in
-      check v q sel;
-      let tq, key, params = templatize q sel in
-      let t = match Hashtbl.find_opt h.templates key with Some t -> t | None -> new_template v key tq q.vars sel in
+      let tq, key, params =
+        if extra = [] then (check v q sel; templatize q sel)
+        else begin
+          (* a question with Not, Or or In: one template a question, its constants its own *)
+          let b = Buffer.create 64 in
+          Buffer.add_char b 'W';
+          Wire.put_query b q;
+          Wire.put_select b sel;
+          Wire.put_order b ~extra Top.none;
+          q, Buffer.contents b, [||]
+        end
+      in
+      let t =
+        match Hashtbl.find_opt h.templates key with
+        | Some t -> t
+        | None -> if extra = [] then new_template v key tq q.vars sel else whole_template v key q sel extra
+      in
       let s =
-        { sid = h.next; t; params; q; emit; gone = false; keys = Hashtbl.create 8; touched = false; plus = []; minus = [];
+        { sid = h.next; t; params; q; emit; gone = false; keys = Hashtbl.create 8; touched = false; plus = []; minus = []; wrows = [];
           net = Hashtbl.create 8; before = Hashtbl.create 8; dirty = Hashtbl.create 8 }
       in
       let first =
-        if from > 0 && from >= h.ring_from && from <= v.group && not (touched_since h q from) then begin
+        if from > 0 && from >= h.ring_from && from <= v.group && not (touched_since h { q with where = all_patterns q extra } from) then begin
+          if extra <> [] then ignore (answer v s);
           (* the keys of an aggregate are needed for the changes to come *)
           if Array.length t.aggs > 0 then ignore (answer v s);
           Same { group = v.group }

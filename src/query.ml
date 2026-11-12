@@ -84,8 +84,10 @@ let intervals nvars ranges =
    given the variables already bound. The cost of an order is the sum of the estimated partial bindings after each step
    (each step multiplies by its candidates); every order is tried for up to 7 variables (with pruning), greedily
    beyond. *)
-let order (v : Store.view) nvars pats ranges =
+let order ?(sets = []) (v : Store.view) nvars pats ranges =
   let iv = intervals nvars ranges in
+  let set_len = Array.make nvars max_int in
+  List.iter (fun (x, a) -> set_len.(x) <- min set_len.(x) (Array.length a)) sets;
   let est x bound =
     let known = function W _ -> true | V y -> bound land (1 lsl y) <> 0 in
     List.fold_left
@@ -108,7 +110,7 @@ let order (v : Store.view) nvars pats ranges =
           else max_int
         in
         min best c)
-      max_int pats
+      set_len.(x) pats
   in
   let best = ref [||] and best_cost = ref infinity in
   if nvars <= 7 then begin
@@ -161,7 +163,8 @@ let work = Atomic.make 0
    has no answer (a constant the view has never seen, or a pattern without variables that is not a fact). *)
 type plan = { pats : pat list; limits : (int * int * int) list; ord : int array; cost : float }
 
-let plan (v : Store.view) q =
+(* [sets]: for some variables, the index words they may take, sorted and distinct (In and Prefix) *)
+let plan ?(sets = []) (v : Store.view) q =
   match compile v q with
   | exception No_answer -> None
   | _ty, pats, limits ->
@@ -169,7 +172,8 @@ let plan (v : Store.view) q =
       List.partition (fun pt -> (match pt.pe with W _ -> true | _ -> false) && match pt.pv with W _ -> true | _ -> false) pats
     in
     if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then None
-    else (let ord, cost = order v q.vars pats limits in Some { pats; limits; ord; cost })
+    else if List.exists (fun (_, a) -> Array.length a = 0) sets then None
+    else (let ord, cost = order ~sets v q.vars pats limits in Some { pats; limits; ord; cost })
 
 (* the first place from [from] in a.(0 .. n-1), sorted, whose value is >= t: steps of 1, 2, 4, ... then a binary search
    (galloping: Bentley, Yao 1976), O(log d) for a place d further *)
@@ -187,19 +191,35 @@ let gallop (a : int array) n from t =
   end
 
 (* The planner's estimate of a question's work, in candidates (the cost of its order); 0 when it has no answer *)
-let estimate (v : Store.view) q = match plan v q with None -> 0. | Some p -> p.cost
+let estimate ?sets (v : Store.view) q = match plan ?sets v q with None -> 0. | Some p -> p.cost
+
+(* is c in the sorted array a *)
+let in_sorted (a : int array) c =
+  let lo = ref 0 and hi = ref (Array.length a) in
+  while !lo < !hi do
+    let mid = (!lo + !hi) lsr 1 in
+    if Array.unsafe_get a mid < c then lo := mid + 1 else hi := mid
+  done;
+  !lo < Array.length a && Array.unsafe_get a !lo = c
 
 (* Generic Join: at each level, the pattern with the fewest candidates (exact counts) gives them, and every other
    pattern on the variable keeps or drops each one with a lookup; nothing is enumerated beyond the smallest set.
-   [seq]: on this domain alone, the bindings in the engine's order, so that [step] may stop the fold by an exception. *)
-let fold ?(seq = false) (v : Store.view) q ~init ~step ~merge =
-  match plan v q with
+   [seq]: on this domain alone, the bindings in the engine's order, so that [step] may stop the fold by an exception.
+   [sets]: the words some variables may take (In, Prefix): a set is a source of its variable's candidates when it is
+   the smallest (a relation of one column, which the AGM bound counts as one), else a check of each candidate. *)
+let fold ?(seq = false) ?(sets = []) (v : Store.view) q ~init ~step ~merge =
+  match plan ~sets v q with
   | None -> init ()
   | Some { pats; limits; ord; cost = _ } ->
     let n = q.vars in
     let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
     let iv = intervals n limits in
-    let in_range x c = match iv.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi in
+    let sv = Array.make n [||] and has_set = Array.make n false in
+    List.iter (fun (x, a) -> if has_set.(x) then sv.(x) <- Array.of_list (List.filter (in_sorted a) (Array.to_list sv.(x))) else (sv.(x) <- a; has_set.(x) <- true)) sets;
+    let any_set = sets <> [] in
+    let in_range x c =
+      (match iv.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi) && ((not any_set) || (not has_set.(x)) || in_sorted sv.(x) c)
+    in
     let by_var = Array.map Array.of_list by_var in
     (* how many candidates a pattern offers x, given [get] for the sides that are bound, doubled: 2 c for an exact
        count c, and 1, without a lookup, for a one-valued property of a bound thing, which offers at most one. So such
@@ -332,6 +352,7 @@ let fold ?(seq = false) (v : Store.view) q ~init ~step ~merge =
           cs.(j) <- c;
           if c < !bc then (bc := c; best := j)
         done;
+        if any_set && has_set.(x) && 2 * Array.length sv.(x) < !bc then (bc := 2 * Array.length sv.(x); best := -2);
         !best, !bc
       in
       (* does every pattern of level i but [src] (and those the leapfrog intersected: [lf] marks them) hold c *)
@@ -349,7 +370,20 @@ let fold ?(seq = false) (v : Store.view) q ~init ~step ~merge =
       (* the same test as [admits], written out: a call per candidate costs 4 to 7 % of Q4 (no flambda) *)
       let candidates i src (f : int -> unit) =
         let x = ord.(i) and ps = by_var.(ord.(i)) and sk = skip.(i) in
-        if src >= 0 then
+        if src = -2 then
+          Array.iter
+            (fun c ->
+              incr w;
+              if in_range x c then begin
+                let ok = ref true and j = ref 0 in
+                while !ok && !j < Array.length ps do
+                  if (not sk.(!j)) && not (accepts x c ps.(!j)) then ok := false;
+                  incr j
+                done;
+                if !ok then f c
+              end)
+            sv.(x)
+        else if src >= 0 then
           iterate x ps.(src) (fun c ->
               incr w;
               if in_range x c then begin
@@ -512,7 +546,8 @@ let fold ?(seq = false) (v : Store.view) q ~init ~step ~merge =
            first level alone *)
         let firsts = Array.make ((size + 1) / 2) 0 and count = ref 0 in
         bound.(x0) <- true;
-        iterate x0 by_var.(x0).(src) (fun c -> firsts.(!count) <- c; incr count; incr w0);
+        if src = -2 then Array.iter (fun c -> firsts.(!count) <- c; incr count; incr w0) sv.(x0)
+        else iterate x0 by_var.(x0).(src) (fun c -> firsts.(!count) <- c; incr count; incr w0);
         (* slices of the candidates, taken in turn by the domains from a shared counter (a domain that meets the
            expensive candidates takes fewer slices), each with its own accumulator, merged in slice order: the answer
            does not depend on the number of domains nor on which domain ran which slice *)

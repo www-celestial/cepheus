@@ -105,6 +105,39 @@ defn isFindSortRefusals()
   list.All([notGiven.Error.Code == "invalid", noSort.Error.Code == "invalid", short.Error.Code == "invalid", watch.Error.Code == "invalid"])
 end
 
+defn isFindNot()
+  s = shop()?
+  (* the clients with no unpaid invoice: i is the Not's own *)
+  clear = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Bo"], cepheus.Not([i, Invoice.Client, c], [i, Invoice.Status, "unpaid"])], Give: {C: c}}, s.Db)?
+  owing = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Ada"], cepheus.Not([i, Invoice.Client, c], [i, Invoice.Status, "unpaid"])], Give: {C: c}}, s.Db)?
+  untagged = cepheus.Find(2, (c, t) -> {Where: [[c, Client.Email, t], cepheus.Not([c, Client.Tags, "vip"])], Give: {C: c}}, s.Db)?
+  value.Equal(clear, [{C: s.Bo}]) and value.Len(owing) == 0 and value.Equal(untagged, [{C: s.Bo}])
+end
+
+defn isFindOr()
+  s = shop()?
+  (* Ada by her tag, Bo by his city, each once though Ada is both *)
+  rows = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.Tags, "vip"], [c, Client.City, "Paris"], [c, Client.Name, "Ada"])], Give: {C: c}}, s.Db)?
+  big = cepheus.Find(2, (i, t) -> {Where: [cepheus.Or([i, Invoice.Paid, true], cepheus.And([i, Invoice.Total, t], cepheus.Above(t, 1000)))], Give: {I: i}}, s.Db)?
+  bug.Assert(value.Equal(list.Sort([r.C for r in rows]), list.Sort([s.Ada, s.Bo])), "each client once")
+  value.Len(big) == 2
+end
+
+defn isFindIn()
+  s = shop()?
+  rows = cepheus.Find(2, (i, st) -> {Where: [[i, Invoice.Status, st], cepheus.In(st, ["paid", "late"])], Give: {I: i}}, s.Db)?
+  mine = cepheus.Find(2, (i, c) -> {Where: [[i, Invoice.Client, c], cepheus.In(c, [s.Bo, 99999])], Give: {I: i}}, s.Db)?
+  value.Len(rows) == 1 and value.Equal(rows, mine)
+end
+
+defn isFindOperatorRefusals()
+  s = shop()?
+  andTop = cepheus.Find(1, (c) -> {Where: [cepheus.And([c, Client.Name, "Ada"])], Give: {C: c}}, s.Db)
+  inCase = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.City, "Lyon"], [c, Client.City, "Paris"])], Give: {C: c}}, s.Db)
+  own = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Ada"], cepheus.Not([i, Invoice.Client, c])], Give: {I: i}}, s.Db)
+  list.All([andTop.Error.Code == "invalid", inCase.Error.Code == "invalid", own.Error.Code == "invalid"])
+end
+
 defn isFindManyValues()
   s = shop()?
   value.Equal(cepheus.Find(1, (c) -> {Where: [[c, Client.Tags, "vip"]], Give: {C: c}}, s.Db)?, [{C: s.Ada}])

@@ -270,6 +270,59 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted.
 
+## Not, Or and In
+
+Three conditions of `Where` say what must not hold, what may hold in several ways, and which values a variable may
+take:
+
+```cesia norun
+clear = cepheus.Find(2, (c, i) -> {
+  Where: [[c, Client.City, "Lyon"], cepheus.Not([i, Invoice.Client, c], [i, Invoice.Status, "unpaid"])],
+  Give: {Client: c},
+}, db)
+io.Print(clear)
+either = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.Name, "Cy"], [c, Client.Email, "bo@example.com"])], Give: {Client: c}}, db)
+io.Print(either)
+some = cepheus.Find(2, (i, s) -> {Where: [[i, Invoice.Status, s], cepheus.In(s, ["paid", "late"])], Give: {Invoice: i}}, db)
+io.Print(some)
+```
+
+```text
+Ok([{Client: 65539}])
+Ok([{Client: 65541}, {Client: 65539}])
+Ok([{Invoice: 65537}, {Invoice: 65540}])
+```
+
+- `cepheus.Not(a, b, c, d)`: 1 to 4 patterns and conditions; the binding is kept when no value of the Not's own
+  variables makes them all hold. A variable is the Not's own when it appears in no other place of the question: here
+  `i`, so the first question reads "the clients of Lyon with no invoice that is theirs and unpaid". Its other
+  variables must be bound by a pattern of the question.
+- `cepheus.Or(a, b, c, d)`: 2 to 4 alternatives, each a pattern, a condition, or `cepheus.And(...)` of 1 to 4 of them;
+  at least one holds. A variable in every alternative is bound by the Or (`c` above); one in some of them only is
+  each alternative's own ("there is a value of it"), and may not be given. Each answer comes once, even when several
+  alternatives hold for it. `And` is for an alternative only: `Where` is already all of its items. An `Or` of one
+  pattern whose alternatives differ only in their value is refused: that is `In`.
+- `cepheus.In(x, values)`: x is one of the values, of its type (ids for a link: the invoices of these clients). A
+  value the database does not hold is no candidate; an empty list has no answer.
+
+**Exact meaning.** Each operator reads the facts of the view the question is answered at, the facts the rules derive
+included: they are in every view, exactly (G17), so a `Not` reads a complete set of facts. (A `Not` in a *rule*'s
+body is the reasoner's next step, stratified negation, with this same function.) `Not` and `Or` may not hold a
+`Not` or an `Or`: name a deeper condition with a rule, as a derived fact.
+
+**How it is answered.** `In` is a relation of one column for Generic Join: its values are the candidates of x when
+they are fewer than every pattern's, else each candidate is checked against them. `Not` is an **anti-join**: a
+binding passes when a lookup finds nothing (one pattern: is the fact there, does the thing have a value, does the
+value have a thing), or, for several items, when the Not's own question, its other variables fixed, has no answer
+(asked up to its first). `Or` is asked once for each alternative, with the alternatives before it as `Not`s, so the
+answers of the alternatives are disjoint and none needs to be kept to remove copies (but those of an alternative with
+variables of its own, which may give a binding once for each of their values).
+
+A `Watch` keeps `Not`, `Or` and `In`: its question is answered again, whole, at each frame that changes a fact of one
+of the properties it names, and its change is the difference of the two answers. Its rows are `Find`'s rows, at the
+cost of the whole question a frame that touches it (a watch of patterns alone keeps only the bindings the frame's
+facts change).
+
 ## Sort, Limit and After: pages
 
 Three more keys of the question sort its rows, cut them, and give the page after a row:
@@ -603,7 +656,7 @@ linearizable without it.
 ## What is not built yet
 
 - Forks of a database read at the server, which the server will make.
-- `Not`, `Or`, `Prefix` and `In` in questions: not in the engine.
+- `Prefix` in questions: not in the engine.
 - A program reaches one database a connection: `Connect` again for another.
 
 ## References

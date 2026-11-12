@@ -409,17 +409,17 @@ let get c db thing =
     | Wire.Facts f -> Ok (f.group, f.facts)
     | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" }))
 
-let find c db ?(select = Wire.Give [||]) ?(order = Top.none) query =
+let find c db ?(select = Wire.Give [||]) ?(extra = []) ?(order = Top.none) query =
   match local_view c db with
   | Some v -> (
-    match Answer.answer ~order v query select with
+    match Answer.answer ~order ~extra v query select with
     | a ->
       let typs = Array.init a.cols a.typ in
       Ok (v.group, List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))))
     | exception Query.Bad m -> Error { code = "invalid"; message = m }
     | exception Pages.Unreadable m -> Error { code = "damaged"; message = m })
   | None -> (
-    match read_call c (Wire.Find { db = db.handle; query; select; order }) with
+    match read_call c (Wire.Find { db = db.handle; query; select; extra; order }) with
     | Wire.Rows r -> Ok (r.group, r.rows)
     | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Find" }))
 
@@ -494,8 +494,8 @@ let rec declare c name (props : Schema.prop list) =
 
 type pushed = Pushed of Wire.push | Ended of error
 
-let watch c db ?(select = Wire.Give [||]) ?(from = 0) query =
-  let id = send c (Wire.Watch { db = db.handle; query; select; from }) in
+let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) query =
+  let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra }) in
   flush c;
   id
 

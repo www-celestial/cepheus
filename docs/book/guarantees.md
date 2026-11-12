@@ -329,6 +329,19 @@ shared by 20,000 invoices, a hot tag in the delta, a range of 10 scores among 20
 And by `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
 ranges) compared with a naive evaluator over all facts, on a base with a delta and on a compacted base.
 
+*With Not, Or and In* ([Cepheus from Cesia](cesia.md#not-or-and-in)) the promise is over the question's own variables:
+the bindings of them that make its patterns and conditions hold, an alternative of each `Or` hold for some value of
+its own variables, and no value of each `Not`'s own make its items hold, each once. `In` restricts candidates, `Not`
+only removes bindings, and an `Or` is a disjoint union (alternative j with the alternatives before it as `Not`s: a
+binding holds for a least j, is an answer of question j and of no other), so each comes once; an alternative with
+variables of its own keeps the bindings it gave. With Sort, Limit and After, the rows are the select's in the order,
+cut as the chapter says. *Tested by* `test/questions.ml`: random states (every type, floats with nan and -0, a rule's
+derived facts, retractions, runs merged at random) and random questions with patterns, ranges, `Not`, `Or`, `And` and
+`In` and a random select, Sort, Limit and After, answered by a brute-force oracle over every fact (the bindings, the
+groups, the order value by value, the cursor, the ties), and by the engine on the heap path, the index path and its own
+choice, before and after a trip through the wire: the same rows, in the same order; and live questions with `Not`,
+`Or` and `In` checked against the oracle after every frame.
+
 ## G12 Merges are atomic
 
 *Promise.* After a crash at any point of a merge (F1, F2, F4), the database opens on the runs before it or on the

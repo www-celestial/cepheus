@@ -216,6 +216,7 @@ module Rng = Rng
 module Schema = Schema
 module Sim_disk = Sim_disk
 module Snapshot = Snapshot
+module Ask = Ask
 module Store = Store
 module Top = Top
 module Value = Value

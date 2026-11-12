@@ -60,6 +60,55 @@ let bindings (fl : (int * int * Value.t) list) (q : Query.t) =
   go q.where;
   !out
 
+(* every binding of a question with Not, Or and In over the facts: of its variables ([outer]), each once *)
+let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.item list) (outer : bool array) =
+  let n = q.vars in
+  let key env = let b = Buffer.create 16 in Array.iter (function Some x -> Buffer.add_char b '\001'; Value.encode b x | None -> Buffer.add_char b '\000') env; Buffer.contents b in
+  (* every extension of env that makes the items hold: patterns first, then the conditions *)
+  let rec holds env (items : Ask.item list) k =
+    let pats = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) items
+    and conds = List.filter (function Ask.Range _ | In _ -> true | _ -> false) items in
+    let env = Array.copy env in
+    let bind t (x : Value.t) k =
+      match t with
+      | Query.Var i -> (match env.(i) with None -> env.(i) <- Some x; k (); env.(i) <- None | Some y -> if Value.equal x y then k ())
+      | Thing e -> if Value.equal x (Link e) then k ()
+      | Val y -> if Value.equal x y then k ()
+    in
+    let rec go = function
+      | [] ->
+        if List.for_all
+            (function
+              | Ask.Range (x, lo, hi) -> (match env.(x) with Some w -> int_of w >= int_of lo && int_of w <= int_of hi | None -> false)
+              | In (x, l) -> (match env.(x) with Some w -> List.exists (Value.equal w) l | None -> false)
+              | _ -> true)
+            conds
+        then k (Array.copy env)
+      | (pt : Query.pattern) :: rest -> List.iter (fun (e, p, x) -> if p = pt.p then bind pt.e (Link e) (fun () -> bind pt.v x (fun () -> go rest))) fl
+    in
+    ignore holds;
+    go pats
+  in
+  let project env = Array.mapi (fun i x -> if outer.(i) then x else None) env in
+  let dedup l = let t = Hashtbl.create 16 in List.filter (fun e -> let k = key e in if Hashtbl.mem t k then false else (Hashtbl.replace t k (); true)) l in
+  let top = List.map (fun p -> Ask.Pattern p) q.where in
+  let start = ref [] in
+  holds (Array.make n None) top (fun e -> start := project e :: !start);
+  let envs =
+    List.fold_left
+      (fun envs it ->
+        match it with
+        | Ask.Or alts ->
+          dedup (List.concat_map (fun env -> List.concat_map (fun a -> let out = ref [] in holds env a (fun e -> out := project e :: !out); !out) alts) envs)
+        | _ -> envs)
+      (dedup !start) extra
+  in
+  (* the conditions of the question, then its Nots *)
+  let conds = List.filter (function Ask.Range _ | In _ -> true | _ -> false) (List.map (fun (x, lo, hi) -> Ask.Range (x, lo, hi)) q.ranges @ extra) in
+  let envs = List.filter (fun env -> let ok = ref false in holds env conds (fun _ -> ok := true); !ok) envs in
+  let envs = List.filter (fun env -> List.for_all (function Ask.Not l -> let found = ref false in holds env l (fun _ -> found := true); not !found | _ -> true) extra) envs in
+  List.map (Array.map (function Some x -> x | None -> Value.Int 0)) envs
+
 (* the rows of a select, with their columns' types *)
 let rows_of (typs : Value.typ array) bs (sel : Wire.select) =
   match sel with
@@ -109,25 +158,25 @@ let oracle cols rows (o : Top.order) =
 
 (* ---- the engine ---- *)
 
-let engine v q sel o =
-  let a = Answer.answer ~order:o v q sel in
+let engine ?(extra = []) v q sel o =
+  let a = Answer.answer ~order:o ~extra v q sel in
   let typs = Array.init a.cols a.typ in
   List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
 
 (* the request through the wire: coded, read back *)
-let wired q sel (o : Top.order) =
+let wired q extra sel (o : Top.order) =
   let b = Buffer.create 64 in
-  Wire.put_request b (Wire.Find { db = 0; query = q; select = sel; order = o });
+  Wire.put_request b (Wire.Find { db = 0; query = q; select = sel; extra; order = o });
   let s = Buffer.contents b in
   match Wire.get_request Wire.k_find (Codec.reader (Bytes.of_string s) 0 (String.length s)) with
-  | Wire.Find f -> f.query, f.select, f.order
+  | Wire.Find f -> f.query, f.extra, f.select, f.order
   | _ -> assert false
 
 let same a b = List.length a = List.length b && List.for_all2 (fun x y -> Array.for_all2 Value.equal x y) a b
 
 let show rows = String.concat " | " (List.map (fun r -> String.concat "," (Array.to_list (Array.map Value.to_string r))) rows)
 
-let questions = ref 0 and with_order = ref 0 and empties = ref 0
+let questions = ref 0 and with_order = ref 0 and empties = ref 0 and with_ops = ref 0
 
 let run seed =
   let r = Rng.make seed in
@@ -227,16 +276,76 @@ let run seed =
           else []
         in
         let q = { Query.vars = nv; where; ranges } in
+        (* Not, Or and In half of the time: their own variables numbered after the question's *)
+        let ty_of k = match k with 7 -> Value.Ttext | 8 -> Tlink | 9 -> Tbool | k -> tv k in
+        let q, extra, typs, outer =
+          if Rng.int r 2 = 0 then q, [], typs, Array.make nv true
+          else begin
+            let nvars = ref nv and more = ref [] and bound_by_or = ref [] in
+            let fresh ty = let x = !nvars in incr nvars; more := !more @ [ ty ]; x in
+            let value_of p = match List.filter (fun (_, p', _) -> p' = p) fl with [] -> None | l -> let _, _, x = List.nth l (Rng.int r (List.length l)) in Some x in
+            let pat k =
+              (* a pattern on x0, of property k: its value a constant of the data, or a variable of its own *)
+              let p = prop_of.(k) in
+              match value_of p with
+              | Some x when Rng.int r 3 = 0 -> Ask.Pattern { Query.e = Var 0; p; v = Val x }
+              | _ -> Ask.Pattern { Query.e = Var 0; p; v = Var (fresh (ty_of k)) }
+            in
+            let last_var () = !nvars - 1 in
+            let cond_on x ty =
+              match ty with
+              | Value.Tint -> [ Ask.Range (x, Int (Rng.int r 30 - 10), Int (Rng.int r 30)) ]
+              | Ttext -> [ Ask.In (x, List.init (1 + Rng.int r 3) (fun _ -> Value.Text names.(Rng.int r 6))) ]
+              | _ -> []
+            in
+            let items = ref [] in
+            for _ = 1 to 1 + Rng.int r 2 do
+              match Rng.int r 4 with
+              | 0 ->
+                (* In on a variable of the question *)
+                let x = Rng.int r nv in
+                let p = List.find_map (fun (pt : Query.pattern) -> match pt.v with Var y when y = x -> Some pt.p | _ -> None) where in
+                let vals = match p with
+                  | Some p -> List.filter_map (fun _ -> value_of p) (List.init (1 + Rng.int r 3) Fun.id)
+                  | None -> List.init (1 + Rng.int r 3) (fun _ -> Value.Link (65536 + Rng.int r (n + 2))) in
+                let vals = if Rng.int r 4 = 0 then (match typs.(x) with Ttext -> Value.Text "none of them" :: vals | Tlink -> Link 999_999 :: vals | _ -> vals) else vals in
+                if vals <> [] then items := Ask.In (x, vals) :: !items
+              | 1 ->
+                (* Not: a pattern of x0, and now and then a condition on the Not's own variable *)
+                let k = Rng.int r 10 in
+                let it = pat k in
+                let extra = match it with Ask.Pattern { v = Var y; _ } when Rng.bool r -> cond_on y (ty_of k) | _ -> [] in
+                items := Ask.Not (it :: extra) :: !items
+              | 2 ->
+                (* Or of patterns of x0 of different properties, or of And *)
+                let ks = List.sort_uniq compare (List.init (2 + Rng.int r 2) (fun _ -> Rng.int r 10)) in
+                let ks = if List.length ks < 2 then [ 0; 7 ] else ks in
+                items := Ask.Or (List.map (fun k -> let it = pat k in match it with Ask.Pattern { v = Var y; _ } when Rng.bool r -> it :: cond_on y (ty_of k) | _ -> [ it ]) ks) :: !items
+              | _ ->
+                (* an Or that binds a variable of the question: the score of x0, in one range or another *)
+                let y = fresh Value.Tint in
+                bound_by_or := y :: !bound_by_or;
+                let alt () = [ Ask.Pattern { Query.e = Var 0; p = score; v = Var y }; Ask.Range (y, Int (Rng.int r 30 - 10), Int (Rng.int r 40)) ] in
+                ignore last_var;
+                items := Ask.Or [ alt (); alt () ] :: !items
+            done;
+            let typs = Array.append typs (Array.of_list !more) in
+            let outer = Array.init !nvars (fun x -> x < nv || List.mem x !bound_by_or) in
+            { q with vars = !nvars }, List.rev !items, typs, outer
+          end
+        in
+        let outs = List.filter (fun x -> outer.(x)) (List.init q.vars Fun.id) in
         let sel =
           match Rng.int r 3 with
-          | 0 -> Wire.Give (Array.init nv Fun.id)
-          | 1 -> let g = List.filter (fun _ -> Rng.int r 2 = 0) (List.init nv Fun.id) in Wire.Give (Array.of_list (if g = [] then [ 0 ] else g))
+          | 0 -> Wire.Give (Array.of_list outs)
+          | 1 -> let g = List.filter (fun _ -> Rng.int r 2 = 0) outs in Wire.Give (Array.of_list (if g = [] then [ 0 ] else g))
           | _ ->
-            let keys = Array.of_list (List.filter (fun _ -> Rng.int r 2 = 0) (List.init nv Fun.id)) in
-            let aggs = List.filter_map (fun x -> if Rng.int r 3 = 0 && (match typs.(x) with Tint | Tmoney _ -> true | _ -> false) then Some (Wire.Sum x) else if Rng.int r 4 = 0 && (match typs.(x) with Tint | Tmoney _ | Tdate -> true | _ -> false) then Some (if Rng.bool r then Wire.Min x else Max x) else None) (List.init nv Fun.id) in
+            let keys = Array.of_list (List.filter (fun _ -> Rng.int r 2 = 0) outs) in
+            let aggs = List.filter_map (fun x -> if Rng.int r 3 = 0 && (match typs.(x) with Tint | Tmoney _ -> true | _ -> false) then Some (Wire.Sum x) else if Rng.int r 4 = 0 && (match typs.(x) with Tint | Tmoney _ | Tdate -> true | _ -> false) then Some (if Rng.bool r then Wire.Min x else Max x) else None) outs in
             Wire.Group (keys, Array.of_list (Wire.Count :: aggs))
         in
-        let ctyp, rows = rows_of typs (bindings fl q) sel in
+        if extra <> [] then incr with_ops;
+        let ctyp, rows = rows_of typs (if extra = [] then bindings fl q else bindings_ask fl q extra outer) sel in
         let cols = Array.length ctyp in
         if rows = [] then incr empties;
         let o =
@@ -271,21 +380,97 @@ let run seed =
         in
         let run_path p name =
           Top.path := p;
-          match engine v q sel o with
+          match engine ~extra v q sel o with
           | got -> check name got
           | exception Query.Bad m -> C.fail "seed %d: %s refused: %s" seed name m
         in
         run_path Top.Heap "heap"; run_path Top.Index "index"; run_path Top.Auto "auto";
-        let q', sel', o' = wired q sel o in
+        let q', extra', sel', o' = wired q extra sel o in
         Top.path := Auto;
-        (match engine v q' sel' o' with got -> check "wired" got | exception Query.Bad m -> C.fail "seed %d: wired refused: %s" seed m)
+        (match engine ~extra:extra' v q' sel' o' with got -> check "wired" got | exception Query.Bad m -> C.fail "seed %d: wired refused: %s" seed m)
       done)
     views
+
+(* ---- live questions with Not, Or and In: after every frame, a watch's rows are the oracle's at its view ---- *)
+
+let live_checks = ref 0
+
+let live seed =
+  let r = Rng.make (seed + 1_000_000) in
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; tag; score; _; _; _; _; owner; _; _ ]) = declare db props in
+  let v = ref (view db) in
+  let hub = Live.create !v ~tag:!v.group ~durable:!v.group in
+  let things = ref [||] in
+  let pick () = if Array.length !things = 0 then Store.max_thing !v + 1 else !things.(Rng.int r (Array.length !things)) in
+  let tags = [| "hot"; "cold" |] in
+  let forms =
+    [| (fun () -> { Query.vars = 2; where = [ { e = Var 0; p = name; v = Var 1 } ]; ranges = [] }, [ Ask.Not [ Pattern { e = Var 0; p = tag; v = Val (Text tags.(Rng.int r 2)) } ] ], Wire.Give [| 0; 1 |]);
+       (fun () -> { Query.vars = 2; where = []; ranges = [] },
+                  [ Ask.Or [ [ Pattern { e = Var 0; p = tag; v = Val (Text "hot") } ]; [ Pattern { e = Var 0; p = score; v = Var 1 }; Range (1, Int 10, Int 50) ] ] ], Wire.Give [| 0 |]);
+       (fun () -> { Query.vars = 2; where = [ { e = Var 0; p = score; v = Var 1 } ]; ranges = [] }, [ Ask.In (1, List.init 3 (fun _ -> Value.Int (Rng.int r 60))) ], Wire.Give [| 0; 1 |]);
+       (fun () -> { Query.vars = 3; where = [ { e = Var 0; p = name; v = Var 1 } ]; ranges = [] }, [ Ask.Not [ Pattern { e = Var 2; p = owner; v = Var 0 } ] ], Wire.Group ([| 1 |], [| Wire.Count |]));
+       (fun () -> { Query.vars = 2; where = [ { e = Var 0; p = owner; v = Var 1 } ]; ranges = [] }, [ Ask.In (1, List.init 2 (fun _ -> Value.Link (pick ()))) ], Wire.Give [| 0 |]) |]
+  in
+  let watches = ref [] in
+  let add () =
+    let q, extra, sel = forms.(Rng.int r (Array.length forms)) () in
+    let rows = ref None in
+    let emit (m : Live.msg) =
+      (match m with
+       | Answer a -> rows := Some a.rows
+       | Change c ->
+         let cur = Option.value !rows ~default:[] in
+         let rec remove x = function [] -> C.fail "seed %d: live: a row removed that is not there" seed; [] | y :: rest -> if Array.for_all2 Value.equal x y then rest else y :: remove x rest in
+         rows := Some (c.added @ List.fold_left (fun acc x -> remove x acc) cur c.removed)
+       | Same _ | Ended _ -> ());
+      true
+    in
+    match Live.subscribe ~extra hub q sel ~from:0 ~emit with
+    | _ -> watches := (q, extra, sel, rows) :: !watches
+    | exception Query.Bad m -> C.fail "seed %d: live: refused: %s" seed m
+  in
+  for _ = 1 to 4 do add () done;
+  for _ = 1 to 40 do
+    let n = !v.group + 1 in
+    let x = pick () in
+    let ops =
+      match Rng.int r 6 with
+      | 0 -> [ Resolve.Add (-1, name, Text names.(Rng.int r 4)); Add (-1, score, Int (Rng.int r 60)); Add (-1, owner, Link (pick ())) ]
+      | 1 -> [ Add (x, tag, Text tags.(Rng.int r 2)) ]
+      | 2 -> (match Cepheus.values !v x tag with t :: _ -> [ Retract (x, tag, t) ] | [] -> [ Add (x, score, Int (Rng.int r 60)) ])
+      | 3 -> [ Add (x, owner, Link (pick ())) ]
+      | 4 -> (match Cepheus.values !v x owner with o :: _ -> [ Retract (x, owner, o) ] | [] -> [ Add (x, name, Text names.(Rng.int r 4)) ])
+      | _ -> [ Add (x, score, Int (Rng.int r 60)) ]
+    in
+    (match Resolve.resolve !v ~n ~time:n ~by:0 ~why:"" ops with
+     | Ok (v', g, temps) ->
+       v := v';
+       List.iter (fun (_, e) -> things := Array.append !things [| e |]) temps;
+       Live.frame hub ~tag:v'.group [ g ] v';
+       Live.durable hub v'.group
+     | Error _ -> ());
+    if Rng.int r 8 = 0 then add ();
+    let fl = C.F.elements (C.facts_of_view !v) in
+    List.iter
+      (fun (q, extra, sel, rows) ->
+        incr live_checks;
+        let a = Ask.compile !v q extra in
+        let typs = Ask.typs_of a in
+        let _, want = rows_of typs (bindings_ask fl q extra a.outer) sel in
+        let key r = let b = Buffer.create 16 in Array.iter (Value.encode b) r; Buffer.contents b in
+        let norm l = List.sort compare (List.map key l) in
+        match !rows with
+        | Some got -> if norm got <> norm want then C.fail "seed %d: live, group %d: %d rows, %d expected" seed !v.group (List.length got) (List.length want) else C.check true ""
+        | None -> C.fail "seed %d: live: no answer" seed)
+      !watches
+  done
 
 let () =
   let seeds = ref 300 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "S" ] (fun _ -> ()) "questions.exe";
-  (match !one with Some s -> run s | None -> for s = 1 to !seeds do run s done);
-  Printf.printf "questions: %d questions (%d with an order, %d empty), %d windows of the index path, %d given up for the heap path\n"
-    !questions !with_order !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
+  (match !one with Some s -> run s; live s | None -> for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
+  Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path, %d given up for the heap path\n"
+    !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
+  Printf.printf "questions: %d checks of live questions with Not, Or and In after a frame\n" !live_checks;
   C.finish "questions"

@@ -185,9 +185,9 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
-let find c ~id ~kind d (q : Query.t) (sel : Wire.select) order =
+let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
   let v = d.view () in
-  match Answer.answer ~order v q sel with
+  match Answer.answer ~order ~extra v q sel with
   | a ->
     let typs = Array.init a.cols a.typ in
     send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n
@@ -240,7 +240,7 @@ let move_pushes c =
     true
   end
 
-let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from =
+let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
   let tok = Option.get c.token in
   let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
   (* G16 at each message: the token may still read the database (the table is read again only when it changed) *)
@@ -277,7 +277,7 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from =
     ok
   in
   let h = d.hub () in
-  match Live.subscribe h q sel ~from ~emit with
+  match Live.subscribe ~extra h q sel ~from ~emit with
   | s -> Mutex.protect c.pm (fun () -> c.watching <- (id, (h, s)) :: c.watching)
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
   | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
@@ -371,7 +371,7 @@ let handle c ~id ~kind (r : Codec.reader) =
            | Some d -> ( try get c ~id ~kind d g.thing with Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m));
           Continue
         | _, Wire.Find f ->
-          (match readable c ~id ~kind f.db with None -> () | Some d -> find c ~id ~kind d f.query f.select f.order);
+          (match readable c ~id ~kind f.db with None -> () | Some d -> find c ~id ~kind d f.query f.select f.extra f.order);
           Continue
         | _, Wire.Write w ->
           (match writable c ~id ~kind w.db with
@@ -379,7 +379,7 @@ let handle c ~id ~kind (r : Codec.reader) =
            | Some d -> write c ~id ~kind d ~serial:w.serial ~floor:w.floor ~by:w.by ~why:w.why w.ops);
           Continue
         | _, Wire.Watch w ->
-          (match readable c ~id ~kind w.db with None -> () | Some d -> watch c ~id ~kind d w.query w.select ~from:w.from);
+          (match readable c ~id ~kind w.db with None -> () | Some d -> watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra);
           Continue
         | _, Wire.Unwatch w -> unwatch c ~id ~kind w; Continue
         | _, Wire.Follow i -> (

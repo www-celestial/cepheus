@@ -122,7 +122,7 @@ let rand_request r =
       if Rng.bool r then Top.none
       else { Top.keys = List.init (Rng.int r 3) (fun _ -> { Top.col = Rng.int r 3; desc = Rng.bool r }); limit = Rng.int r 5;
              after = (if Rng.bool r then None else Some (Array.init (Rng.int r 3) (fun _ -> rand_value r))) } in
-    Wire.Find { db = 0; query = q; select; order }
+    Wire.Find { db = 0; query = q; select; extra = []; order }
   | 4 ->
     let op () = match Rng.int r 4 with
       | 0 -> Resolve.Add (Rng.int r 100 - 50, Rng.int r 40, rand_value r)
@@ -273,7 +273,7 @@ let rights () =
   let q = { Query.vars = 1; where = [ { Query.e = Var 0; p = Schema.p_name; v = Val (Text "cepheus/name") } ]; ranges = [] } in
   let requests db =
     [ "Open", Wire.Open (if db = 0 then "shop" else "stock"), `Read; "Get", Wire.Get { db; thing = 1 }, `Read;
-      "Find", Wire.Find { db; query = q; select = Wire.Give [||]; order = Top.none }, `Read;
+      "Find", Wire.Find { db; query = q; select = Wire.Give [||]; extra = []; order = Top.none }, `Read;
       "Write", Wire.Write { db; serial = 0; floor = 0; by = 0; why = "t"; ops = [] }, `Write ]
   in
   let right tok db = match tok, db with "w", 0 -> `Write | "r", 0 -> `Read | "o", 1 -> `Write | _ -> `None in
@@ -315,10 +315,10 @@ let rights () =
      let a = Answer.answer ~order (d0.view ()) q (Wire.Give [| 1 |]) in
      List.init a.n (fun i -> [| Store.value (d0.view ()) (a.typ 0) (a.word i 0) |])
    in
-   (match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; order }) with
+   (match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order }) with
     | Some (Wire.Rows r) -> check (List.length want = 2 && r.rows = want) "order: the server's rows are the engine's, sorted and cut"
     | _ -> check false "order: no rows");
-   match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; order = { Top.none with after = Some [| Value.Text "a" |] } }) with
+   match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order = { Top.none with after = Some [| Value.Text "a" |] } }) with
    | Some (Wire.Err { code = "invalid"; _ }) -> check true ""
    | _ -> check false "order: After without Sort is refused");
   (* an unknown token, and requests before Hello *)
