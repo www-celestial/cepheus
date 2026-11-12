@@ -298,7 +298,8 @@ intervals between the smallest and the largest value, 98.4 %):
 - At 64 databases one fsync confirms the frames of many: 2.2 times the writes, a write waiting a third as long.
 - At 16, the median wait falls by a third, but the writes a second do not rise: the slowest writes wait longer (p99
   27.0 / 35.6 ms), and the ratio's interval holds 1. A round then holds 8 frames on average (`cepheus status` after
-  2 s: 441 rounds, 3,526 frames, 1 frame alone).
+  2 s: 441 rounds, 3,526 frames, 1 frame alone). These 16 databases ran right after the 64: the measure below,
+  in the other order, finds 1.55 times the writes.
 - A database written alone has its frames forced in its own journal (the rule above; `cepheus status`: no round).
   The first version of the buffer, without that rule, made one database's 16 writers 18 % slower (2,240 / 1,843
   groups a second, the median wait higher in 7 rounds of 7); with it, the difference is within the noise (each
@@ -308,6 +309,27 @@ intervals between the smallest and the largest value, 98.4 %):
 - A start after a clean stop (64 databases, $n = 7$): 215 / 199 ms (ratio 1.10 [0.23, 1.62]). The first start of
   this version on databases made before it writes a `shared` marker in each, with an fsync of its directory: at 64
   databases 849 / 1,250 ms, once.
+
+**Measured again** with the chunked loads and the open's reads in the file's order (537d03a against main 1b12c35,
+the same method), the cases in the other order: one database first, then 16, then 64, so that no case starts while
+the disk still writes back what a run of 64 databases left. $n = 8$ rounds (21 were planned; a power loss cut the
+9th, and only whole rounds are kept), intervals between the smallest and the largest value, 99.2 %:
+
+| written | groups a second, before / with | ratio by round | wait at the median, before / with |
+|---|---|---|---|
+| 1 database, 1 writer | 261 / 277 | 1.10 [0.59, 1.73], higher in 5 rounds of 8 | 3.17 / 2.94 ms |
+| 1 database, 16 writers | 2,283 / 2,374 | 1.03 [0.80, 1.22], higher in 5 of 8 | 5.94 / 5.76 ms |
+| 16 databases, 1 writer each | 1,284 / 2,049 | 1.55 [1.17, 2.10], higher in 8 of 8 | 10.4 / 6.48 ms (lower in 8 of 8); p99 29.7 / 23.9 ms |
+| 64 databases, 1 writer each | 2,841 / 6,356 | 2.25 [1.64, 4.17], higher in 8 of 8 | 21.9 / 7.56 ms; p99 47.0 / 29.6 ms |
+
+- The order makes the difference at 16 databases. The buffer writes each frame twice: once in the buffer, forced to
+  the disk, and once in its database's journal, left in the system's memory until the system writes it out (these
+  pages in memory not yet on the disk are the dirty pages, `Dirty` in `/proc/meminfo`). After a run of 64 databases
+  the next run starts with 3.4 to 10.3 MB of dirty pages, against 0.3 to 0.9 MB before the buffer, and the file
+  system writes them out during that run (a btrfs commit of 814 ms fell in one). Run first, 16 databases get 1.55
+  times the writes and a lower p99, in 8 rounds of 8 (sign test: p = 0.008).
+- A database written alone: no cost in either order (16 writers right after 64 databases, $n = 7$: ratio 0.97
+  [0.82, 1.19]; first, above: 1.10 and 1.03). A cost smaller than the noise of these rounds is not ruled out.
 
 **Tested by** `test/wal_sim.ml` (three databases sharing one buffer whose files alternate after 300 to 3,300 bytes:
 writes, rounds, cleanings, merges, large groups and long frames, process deaths, power losses, crashes inside any disk
