@@ -270,6 +270,143 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted.
 
+## Not, Or and In
+
+Three conditions of `Where` say what must not hold, what may hold in several ways, and which values a variable may
+take:
+
+```cesia norun
+clear = cepheus.Find(2, (c, i) -> {
+  Where: [[c, Client.City, "Lyon"], cepheus.Not([i, Invoice.Client, c], [i, Invoice.Status, "unpaid"])],
+  Give: {Client: c},
+}, db)
+io.Print(clear)
+either = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.Name, "Cy"], [c, Client.Email, "bo@example.com"])], Give: {Client: c}}, db)
+io.Print(either)
+some = cepheus.Find(2, (i, s) -> {Where: [[i, Invoice.Status, s], cepheus.In(s, ["paid", "late"])], Give: {Invoice: i}}, db)
+io.Print(some)
+```
+
+```text
+Ok([{Client: 65539}])
+Ok([{Client: 65541}, {Client: 65539}])
+Ok([{Invoice: 65537}, {Invoice: 65540}])
+```
+
+- `cepheus.Not(a, b, c, d)`: 1 to 4 patterns and conditions; the binding is kept when no value of the Not's own
+  variables makes them all hold. A variable is the Not's own when it appears in no other place of the question: here
+  `i`, so the first question reads "the clients of Lyon with no invoice that is theirs and unpaid". Its other
+  variables must be bound by a pattern of the question.
+- `cepheus.Or(a, b, c, d)`: 2 to 4 alternatives, each a pattern, a condition, or `cepheus.And(...)` of 1 to 4 of them;
+  at least one holds. A variable in every alternative is bound by the Or (`c` above); one in some of them only is
+  each alternative's own ("there is a value of it"), and may not be given. Each answer comes once, even when several
+  alternatives hold for it. `And` is for an alternative only: `Where` is already all of its items. An `Or` of one
+  pattern whose alternatives differ only in their value is refused: that is `In`.
+- `cepheus.In(x, values)`: x is one of the values, of its type (ids for a link: the invoices of these clients). A
+  value the database does not hold is no candidate; an empty list has no answer.
+
+**Exact meaning.** Each operator reads the facts of the view the question is answered at, the facts the rules derive
+included: they are in every view, exactly (G17), so a `Not` reads a complete set of facts. (A `Not` in a *rule*'s
+body is the reasoner's next step, stratified negation, with this same function.) `Not` and `Or` may not hold a
+`Not` or an `Or`: name a deeper condition with a rule, as a derived fact.
+
+**How it is answered.** `In` is a relation of one column for Generic Join: its values are the candidates of x when
+they are fewer than every pattern's, else each candidate is checked against them. `Not` is an **anti-join**: a
+binding passes when a lookup finds nothing (one pattern: is the fact there, does the thing have a value, does the
+value have a thing), or, for several items, when the Not's own question, its other variables fixed, has no answer
+(asked up to its first). `Or` is asked once for each alternative, with the alternatives before it as `Not`s, so the
+answers of the alternatives are disjoint and none needs to be kept to remove copies (but those of an alternative with
+variables of its own, which may give a binding once for each of their values).
+
+A `Watch` keeps `Not`, `Or`, `In` and `Prefix`, and a change sends only the rows it adds or removes. A frame's fact
+can change only the answers that agree with it at one of the question's patterns, wherever the pattern is: for a
+pattern that holds variables of the question, the answers with those values; for one inside a `Not` or an
+alternative whose variables are all its own, the answers its other items reach from the fact (an invoice paid: its
+client). For each such set of values, the question is answered again with them fixed, before and after the frame, and
+the difference is the change. So a fact added under a `Not` removes the rows it now excludes, a fact removed may give
+rows back, an alternative is read with the ones before it, and `In` and `Prefix` filter the values the fact gives. The
+cost of a frame is that of the answers it touches, not of the whole question (a fact that no variable of the question
+reaches, as a `Not` over a whole property, is the whole question again).
+
+## Prefix: the start of a text
+
+`cepheus.Prefix(x, text)`: the text x starts with these bytes. With Sort and Limit, it is a search as one types:
+
+```cesia norun
+found = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "B")], Give: {Client: c, Name: n}, Sort: [n], Limit: 10}, db)
+io.Print(found)
+```
+
+```text
+Ok([{Client: 65539, Name: "Bo Lind"}])
+```
+
+- The comparison is of bytes: `"Ad"` matches "Ada", not "ada" nor "Ädam". A search without case keeps a field of its
+  own in the form it searches (the name in lower case, written with the name).
+- x is a text variable that a pattern gives as its value; the prefix has 1 to 1,024 bytes.
+
+**How it is answered.** Each run holds, for each text property, its distinct texts in the order of their bytes (run
+format 9, [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)): the texts that start with the prefix
+are one stretch of it, found by two binary searches; with the few texts written since the last merge, they are the
+candidates of x, as an `In` of them. The work is that of the matching texts and their things, not of every text of
+the database; and it reads the texts of x's property only.
+
+## Sort, Limit and After: pages
+
+Three more keys of the question sort its rows, cut them, and give the page after a row:
+
+```cesia norun
+page = (after) -> ((i, t) -> {
+  Where: [[i, Invoice.Total, t]],
+  Give: {Invoice: i, Total: t},
+  Sort: [cepheus.Desc(t)],
+  Limit: 2,
+  After: after,
+})
+first = result.Unwrap(cepheus.Find(2, page(missing), db))
+io.Print(first)
+io.Print(cepheus.Find(2, page(first[2]), db))
+```
+
+```text
+[{Invoice: 65537, Total: 1200.0}, {Invoice: 65538, Total: 80.5}]
+Ok([{Invoice: 65540, Total: 10.0}])
+```
+
+- `Sort: [key, ...]`: each key is a field of `Give`, its variable or its aggregate (`cepheus.Desc(cepheus.Sum(t))`
+  when `Give` holds `cepheus.Sum(t)`), ascending, or `cepheus.Desc(key)` for the largest first. Rows equal in the keys
+  are ordered by the other fields of `Give`, by name, so two rows are equal in the order only when they are the same
+  row. Values compare within their type: numbers, dates and money as numbers; `false` before `true`; links by their
+  id, the order the things were made in; texts by their bytes (UTF-8: the order of their code points, so "Z" comes
+  before "a" and "é" after "z", not a language's order); floats by IEEE 754's totalOrder.
+- `Limit: k`: the first k rows, and the copies of the k-th when `Give` leaves out a variable (a page never splits
+  identical rows). Without `Sort`, k rows of the answer, in the engine's order.
+- `After: row`: the rows that come after this row in the order: the next page. It needs `Sort`, and a value for
+  every field of `Give`; the row need not be in the database any more.
+
+**The previous page** is the same question with each key reversed (`Desc` added or taken away) and `After` the first
+row of the current page; reverse its rows (`list.Reverse`). There is no offset ("skip the first 4,000"): a page after
+a row costs the same at any depth, where an offset counts every row it skips, and a row written between two pages
+moves them by one. A row that is unchanged at both pages' groups comes once; one written between them shows at its
+place, if that place is after the cursor.
+
+**How it is answered.** Two ways give the same rows ([theory](theory.md#4-generic-join)):
+
+- by a **heap**: every answer of the question, kept in a buffer of about twice k rows, sorted and cut back to its
+  first k each time it fills: the work of the question itself plus $O(N \log k)$ comparisons, with $k$ rows held,
+  and k rows sent instead of $N$;
+- **in the index's order**, when the first key is an int, a date, money or a link that a pattern gives as its value:
+  the question is asked again on windows of that variable's values read from the property's index, from the cursor
+  on, each window holding twice as many facts as the one before, until k rows are found: the work of the rows the
+  page needs. Its budget is the planner's estimate of the heap's work; past it, the heap answers, so this way never
+  costs more than about twice the other (the rule of the ski-rental problem: rent until the rent reaches the price,
+  then buy).
+
+`Watch` refuses `Sort`, `Limit` and `After` (a watch keeps every row of its question): sort the rows it gives with
+`list.SortBy`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
+`Give`, `Sort`, `Limit` and `After`: a misspelt `After` would otherwise give the first page again and again (a
+question without them is read as before, its other keys left aside).
+
 ## Watch: live questions
 
 A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64, until = missing)` takes the same question as
@@ -553,7 +690,6 @@ linearizable without it.
 ## What is not built yet
 
 - Forks of a database read at the server, which the server will make.
-- `Not`, `Or`, `Prefix` and `In` in questions: not in the engine.
 - A program reaches one database a connection: `Connect` again for another.
 
 ## References

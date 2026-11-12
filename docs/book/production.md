@@ -322,7 +322,9 @@ What a new version may do at its first start, once:
 
 - **Runs of an earlier format** are set aside and their groups replayed from the journal, which holds them all: a
   slower open (5.2 s for 10 M facts from format 7), and the first merge writes the new format
-  ([runs](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)).
+  ([runs](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)). Run format 9 (the text order of `Prefix`) came
+  this way after format 8; an earlier version sets runs of format 9 aside in turn and replays the journal: going back
+  costs one slow open, and loses nothing.
 
 What goes one way only, so that going back to an earlier version needs a backup taken before the upgrade:
 

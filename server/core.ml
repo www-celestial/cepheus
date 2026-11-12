@@ -7,6 +7,7 @@
    token removed from tokens.toml, or whose rights change, takes effect at the next request). *)
 
 open Cepheus
+module Ask = Question.Ask
 
 type db = {
   name : string;
@@ -179,9 +180,10 @@ let kinds_table c i (v : Store.view) r =
 let bit t p b = p < Bytes.length t && Char.code (Bytes.unsafe_get t p) land b <> 0
 let kind_name (v : Store.view) p = match Schema.find v.schema p with Some d -> Tokens.kind_of d.name | None -> string_of_int p
 
-(* the kind of the first pattern of a question that the token may not read, if any *)
-let unreadable t (v : Store.view) (q : Query.t) =
-  match List.find_opt (fun (pt : Query.pattern) -> not (bit t pt.p 1)) q.where with Some pt -> Some (kind_name v pt.p) | None -> None
+(* the kind of the first pattern of a question that the token may not read, if any: every pattern, those inside Not
+   and Or too (an absence, or an alternative, of a fact of a kind is a read of that kind) *)
+let unreadable t (v : Store.view) (q : Query.t) extra =
+  match List.find_opt (fun (pt : Query.pattern) -> not (bit t pt.p 1)) (Ask.patterns q extra) with Some pt -> Some (kind_name v pt.p) | None -> None
 
 (* the kind of the first fact of a group that the token may not add, if any: a fact of a property, or the declaration
    of a property (its name, type, many or unique), of the property's kind, by its name in the schema or in this group;
@@ -203,11 +205,11 @@ let unaddable c i (v : Store.view) r ops =
     ops
 
 (* a question that a token with rights per kind may not read: denied, when it arrives *)
-let kinds_read c ~id ~kind d q =
+let kinds_read c ~id ~kind d q extra =
   match c.rights.(d.index) with
   | Some (Tokens.Kinds _ as r) -> (
     let v = d.view () in
-    match unreadable (kinds_table c d.index v r) v q with
+    match unreadable (kinds_table c d.index v r) v q extra with
     | Some k -> err c ~id ~kind "denied" "this token may not read the kind %s of %s" k d.name; false
     | None -> true)
   | _ -> true
@@ -262,13 +264,15 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
-let find c ~id ~kind d (q : Query.t) (sel : Wire.select) =
+let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
   let v = d.view () in
-  match Answer.answer v q sel with
+  match Answer.answer ~order ~extra ~budget:!Answer.question_budget v q sel with
   | a ->
     let typs = Array.init a.cols a.typ in
     send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
+  | exception Query.Over_budget n ->
+    err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
   | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
 
 (* ---- writes ---- *)
@@ -329,7 +333,7 @@ let move_pushes c =
     true
   end
 
-let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from =
+let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
   let tok = Option.get c.token in
   let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
   (* G16 at each message: the token may still read the database (the table is read again only when it changed) *)
@@ -346,7 +350,7 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from =
           | Some (Tokens.Read | Tokens.Write) -> true
           | Some (Tokens.Kinds _ as r) ->
             let v = d.view () in
-            List.for_all (fun (pt : Query.pattern) -> reads_prop v r pt.p) q.where)
+            List.for_all (fun (pt : Query.pattern) -> reads_prop v r pt.p) (Ask.patterns q extra))
         | None -> false
     end;
     !reads
@@ -372,9 +376,11 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from =
     ok
   in
   let h = d.hub () in
-  match Live.subscribe h q sel ~from ~emit with
+  match Live.subscribe ~extra h q sel ~from ~emit with
   | s -> Mutex.protect c.pm (fun () -> c.watching <- (id, (h, s)) :: c.watching)
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
+  | exception Query.Over_budget n ->
+    err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
   | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
   | exception Failure m -> err c ~id ~kind "stopping" "%s" m
 
@@ -388,6 +394,9 @@ let unwatch c ~id ~kind w =
   reply c ~id ~kind Wire.Unwatched
 
 (* ---- dispatch ---- *)
+
+(* the newest version of the protocol this server speaks (a test makes it 1, to stand for an older server) *)
+let speaks = ref Wire.version
 
 let status c =
   let srv = c.srv in
@@ -422,7 +431,8 @@ let handle c ~id ~kind (r : Codec.reader) =
     else
       match req with
       | Wire.Hello h ->
-        if h.version <> Wire.version then (err c ~id ~kind "version" "protocol %d is not spoken here (%d is)" h.version Wire.version; Close)
+        if h.version < Wire.oldest || h.version > !speaks then
+          (err c ~id ~kind "version" "protocol %d is not spoken here (%d to %d are)" h.version Wire.oldest !speaks; Close)
         else (
           let tokens = Atomic.get c.srv.tokens in
           match Tokens.check tokens h.token with
@@ -467,7 +477,9 @@ let handle c ~id ~kind (r : Codec.reader) =
            | Some d -> ( try get c ~id ~kind d g.thing with Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m));
           Continue
         | _, Wire.Find f ->
-          (match readable c ~id ~kind f.db with None -> () | Some d -> if kinds_read c ~id ~kind d f.query then find c ~id ~kind d f.query f.select);
+          (match readable c ~id ~kind f.db with
+           | None -> ()
+           | Some d -> if kinds_read c ~id ~kind d f.query f.extra then find c ~id ~kind d f.query f.select f.extra f.order);
           Continue
         | _, Wire.Write w ->
           (match writable c ~id ~kind w.db with
@@ -477,7 +489,7 @@ let handle c ~id ~kind (r : Codec.reader) =
         | _, Wire.Watch w ->
           (match readable c ~id ~kind w.db with
            | None -> ()
-           | Some d -> if kinds_read c ~id ~kind d w.query then watch c ~id ~kind d w.query w.select ~from:w.from);
+           | Some d -> if kinds_read c ~id ~kind d w.query w.wextra then watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra);
           Continue
         | _, Wire.Unwatch w -> unwatch c ~id ~kind w; Continue
         | _, Wire.Follow i -> (

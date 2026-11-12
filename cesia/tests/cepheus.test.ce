@@ -67,6 +67,89 @@ defn isFindRanges()
   value.Equal(below, [{T: 10.0}])
 end
 
+defn isFindSorts()
+  s = shop()?
+  q(after) = (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, Total: t}, Sort: [cepheus.Desc(t)], Limit: 2, After: after}
+  first = cepheus.Find(2, q(missing), s.Db)?
+  next = cepheus.Find(2, q(first[2]), s.Db)?
+  last = cepheus.Find(2, q(next[1]), s.Db)?
+  bug.Assert(value.Equal([r.Total for r in first], [1200.0, 80.5]), "the largest first, two rows")
+  bug.Assert(value.Equal([r.Total for r in next], [10.0]), "the page after the last row seen")
+  value.Len(last) == 0
+end
+
+defn isFindSortsGroups()
+  s = shop()?
+  rows = cepheus.Find(4, (c, i, t, n) -> {
+    Where: [[i, Invoice.Client, c], [c, Client.Name, n], [i, Invoice.Total, t]],
+    Give: {Name: n, Owed: cepheus.Sum(t)},
+    Sort: [cepheus.Desc(cepheus.Sum(t))],
+    Limit: 1,
+  }, s.Db)?
+  value.Equal(rows, [{Name: "Ada", Owed: 1280.5}])
+end
+
+defn isFindLimitKeepsCopies()
+  s = shop()?
+  (* Ada's two invoices give her name twice: a page never splits the copies of its last row *)
+  rows = cepheus.Find(3, (c, i, n) -> {Where: [[i, Invoice.Client, c], [c, Client.Name, n]], Give: {Name: n}, Sort: [n], Limit: 1}, s.Db)?
+  value.Equal(rows, [{Name: "Ada"}, {Name: "Ada"}])
+end
+
+defn isFindSortRefusals()
+  s = shop()?
+  notGiven = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i}, Sort: [t]}, s.Db)
+  noSort = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, After: {T: 10}}, s.Db)
+  short = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, T: t}, Sort: [t], After: {T: 10}}, s.Db)
+  watch = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t]}, s.Db)
+  misspelt = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t], Afer: {T: 10}}, s.Db)
+  old = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Note: "kept"}, s.Db)
+  bug.Assert(misspelt.Error.Code == "invalid" and result.IsOk(old), "an unknown key beside Sort is refused, and only there")
+  list.All([notGiven.Error.Code == "invalid", noSort.Error.Code == "invalid", short.Error.Code == "invalid", watch.Error.Code == "invalid"])
+end
+
+defn isFindNot()
+  s = shop()?
+  (* the clients with no unpaid invoice: i is the Not's own *)
+  clear = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Bo"], cepheus.Not([i, Invoice.Client, c], [i, Invoice.Status, "unpaid"])], Give: {C: c}}, s.Db)?
+  owing = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Ada"], cepheus.Not([i, Invoice.Client, c], [i, Invoice.Status, "unpaid"])], Give: {C: c}}, s.Db)?
+  untagged = cepheus.Find(2, (c, t) -> {Where: [[c, Client.Email, t], cepheus.Not([c, Client.Tags, "vip"])], Give: {C: c}}, s.Db)?
+  value.Equal(clear, [{C: s.Bo}]) and value.Len(owing) == 0 and value.Equal(untagged, [{C: s.Bo}])
+end
+
+defn isFindOr()
+  s = shop()?
+  (* Ada by her tag, Bo by his city, each once though Ada is both *)
+  rows = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.Tags, "vip"], [c, Client.City, "Paris"], [c, Client.Name, "Ada"])], Give: {C: c}}, s.Db)?
+  big = cepheus.Find(2, (i, t) -> {Where: [cepheus.Or([i, Invoice.Paid, true], cepheus.And([i, Invoice.Total, t], cepheus.Above(t, 1000)))], Give: {I: i}}, s.Db)?
+  bug.Assert(value.Equal(list.Sort([r.C for r in rows]), list.Sort([s.Ada, s.Bo])), "each client once")
+  value.Len(big) == 2
+end
+
+defn isFindIn()
+  s = shop()?
+  rows = cepheus.Find(2, (i, st) -> {Where: [[i, Invoice.Status, st], cepheus.In(st, ["paid", "late"])], Give: {I: i}}, s.Db)?
+  mine = cepheus.Find(2, (i, c) -> {Where: [[i, Invoice.Client, c], cepheus.In(c, [s.Bo, 99999])], Give: {I: i}}, s.Db)?
+  value.Len(rows) == 1 and value.Equal(rows, mine)
+end
+
+defn isFindPrefix()
+  s = shop()?
+  a = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "A")], Give: {C: c}}, s.Db)?
+  none = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "a")], Give: {C: c}}, s.Db)?
+  inNot = cepheus.Find(2, (c, e) -> {Where: [[c, Client.City, "Lyon"], cepheus.Not([c, Client.Email, e], cepheus.Prefix(e, "ada@"))], Give: {C: c}}, s.Db)?
+  empty = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "")], Give: {C: c}}, s.Db)
+  list.All([value.Equal(a, [{C: s.Ada}]), value.Len(none) == 0, value.Len(inNot) == 0, empty.Error.Code == "invalid"])
+end
+
+defn isFindOperatorRefusals()
+  s = shop()?
+  andTop = cepheus.Find(1, (c) -> {Where: [cepheus.And([c, Client.Name, "Ada"])], Give: {C: c}}, s.Db)
+  inCase = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.City, "Lyon"], [c, Client.City, "Paris"])], Give: {C: c}}, s.Db)
+  own = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Ada"], cepheus.Not([i, Invoice.Client, c])], Give: {I: i}}, s.Db)
+  list.All([andTop.Error.Code == "invalid", inCase.Error.Code == "invalid", own.Error.Code == "invalid"])
+end
+
 defn isFindManyValues()
   s = shop()?
   value.Equal(cepheus.Find(1, (c) -> {Where: [[c, Client.Tags, "vip"]], Give: {C: c}}, s.Db)?, [{C: s.Ada}])

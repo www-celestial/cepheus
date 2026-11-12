@@ -5,6 +5,8 @@
    visibility page shared read-only. *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 open Cepheus_server
 module C = Check
 
@@ -118,7 +120,11 @@ let rand_request r =
               ranges = List.init (Rng.int r 2) (fun _ -> Rng.int r 3, rand_value r, rand_value r) } in
     let select = if Rng.bool r then Wire.Give (Array.init (Rng.int r 3) (fun _ -> Rng.int r 3))
       else Wire.Group ([| Rng.int r 3 |], [| Wire.Count; Wire.Sum 1; Wire.Min 0; Wire.Max 2 |]) in
-    Wire.Find { db = 0; query = q; select }
+    let order =
+      if Rng.bool r then Top.none
+      else { Top.keys = List.init (Rng.int r 3) (fun _ -> { Top.col = Rng.int r 3; desc = Rng.bool r }); limit = Rng.int r 5;
+             after = (if Rng.bool r then None else Some (Array.init (Rng.int r 3) (fun _ -> rand_value r))) } in
+    Wire.Find { db = 0; query = q; select; extra = []; order }
   | 4 ->
     let op () = match Rng.int r 4 with
       | 0 -> Resolve.Add (Rng.int r 100 - 50, Rng.int r 40, rand_value r)
@@ -147,11 +153,62 @@ let wire () =
     if n > 0 && (match q with Wire.Ping _ -> false | _ -> true) then begin
       let k = Rng.int r n in
       match Wire.get_request (Wire.request_kind q) (Codec.reader bytes 0 k) with
+      (* a Find cut where its Sort, Limit and After begin is the same question without them: the section is optional,
+         so that a server that does not know it reads every other question as before (a frame's length tells where
+         its body ends: no connection cuts one) *)
+      | Wire.Find f' when (match q with Wire.Find f -> f.order <> Top.none && f'.order = Top.none && f'.query = f.query && f'.select = f.select | _ -> false) -> ()
       | _ -> ok := false
       | exception (Codec.Short | Wire.Malformed _) -> ()
     end
   done;
   check !ok "wire: 5,000 random requests round trip, every cut refused";
+  (* the question's extension fuzzed: random operators, Sort, Limit and After round trip; every byte flipped, every
+     cut, bytes inserted, huge counts: the request is read, or refused (Short, Malformed), never anything else; a
+     question without them is coded byte for byte as before them *)
+  let r = Rng.make 13 in
+  let rec item depth =
+    match Rng.int r (if depth > 1 then 3 else 5) with
+    | 0 -> Ask.Pattern { Query.e = rand_term r; p = Rng.int r 40; v = rand_term r }
+    | 1 -> Range (Rng.int r 4, rand_value r, rand_value r)
+    | 2 -> In (Rng.int r 4, List.init (Rng.int r 4) (fun _ -> rand_value r))
+    | 3 -> Not (List.init (1 + Rng.int r 3) (fun _ -> item (depth + 1)))
+    | _ -> Or (List.init (2 + Rng.int r 2) (fun _ -> List.init (1 + Rng.int r 2) (fun _ -> item (depth + 1))))
+  in
+  let fine = ref true and outcomes = ref 0 in
+  for _ = 1 to 3000 do
+    let q = { Query.vars = 1 + Rng.int r 3; where = List.init (Rng.int r 3) (fun _ -> { Query.e = rand_term r; p = Rng.int r 40; v = rand_term r }); ranges = [] } in
+    let extra = List.init (Rng.int r 3) (fun _ -> item 0) in
+    let order = if Rng.bool r then Top.none else { Top.keys = [ { col = Rng.int r 3; desc = Rng.bool r } ]; limit = Rng.int r 9; after = if Rng.bool r then Some [| rand_value r |] else None } in
+    let req = Wire.Find { db = 0; query = q; select = Wire.Give [| 0 |]; extra; order } in
+    let b = Buffer.create 64 in
+    Wire.put_request b req;
+    let bytes = Buffer.to_bytes b in
+    (match Wire.get_request Wire.k_find (Codec.reader bytes 0 (Bytes.length bytes)) with
+     | back -> if back <> req then fine := false
+     | exception _ -> fine := false);
+    if extra = [] && order = Top.none then begin
+      let old = Buffer.create 64 in
+      Codec.put_varint old 0; Wire.put_query old q; Wire.put_select old (Wire.Give [| 0 |]);
+      if Buffer.contents old <> Bytes.to_string bytes then fine := false
+    end;
+    for _ = 1 to 8 do
+      let m = Bytes.copy bytes in
+      let n = Bytes.length m in
+      let m =
+        match Rng.int r 4 with
+        | 0 when n > 0 -> let i = Rng.int r n in Bytes.set m i (Char.chr (Rng.int r 256)); m
+        | 1 when n > 0 -> Bytes.sub m 0 (Rng.int r n)
+        | 2 -> let i = Rng.int r (n + 1) in Bytes.cat (Bytes.sub m 0 i) (Bytes.cat (Bytes.make (1 + Rng.int r 9) (Char.chr (Rng.int r 256))) (Bytes.sub m i (n - i)))
+        | _ -> Bytes.cat m (Bytes.of_string "\001\255\255\255\255\015")
+      in
+      incr outcomes;
+      match Wire.get_request Wire.k_find (Codec.reader m 0 (Bytes.length m)) with
+      | _ -> ()
+      | exception (Codec.Short | Wire.Malformed _) -> ()
+      | exception e -> fine := false; Printf.printf "fuzz: %s\n" (Printexc.to_string e)
+    done
+  done;
+  check !fine "wire: %d fuzzed questions with operators and an order: read or refused, never more; the plain ones coded as before" !outcomes;
   let replies =
     [ Wire.Welcome { server = "s"; cluster = "c"; session = 9; frame = 16; inflight = 3 };
       Wire.Opened { db = 1; group = 7; props = [ 16, { Schema.name = "a"; typ = Tmoney 2; many = true; unique = false } ] };
@@ -265,7 +322,7 @@ let rights () =
   let q = { Query.vars = 1; where = [ { Query.e = Var 0; p = Schema.p_name; v = Val (Text "cepheus/name") } ]; ranges = [] } in
   let requests db =
     [ "Open", Wire.Open (if db = 0 then "shop" else "stock"), `Read; "Get", Wire.Get { db; thing = 1 }, `Read;
-      "Find", Wire.Find { db; query = q; select = Wire.Give [||] }, `Read;
+      "Find", Wire.Find { db; query = q; select = Wire.Give [||]; extra = []; order = Top.none }, `Read;
       "Write", Wire.Write { db; serial = 0; floor = 0; by = 0; why = "t"; ops = [] }, `Write ]
   in
   let right tok db = match tok, db with "w", 0 -> `Write | "r", 0 -> `Read | "o", 1 -> `Write | _ -> `None in
@@ -298,6 +355,21 @@ let rights () =
           | Some _ -> check false "rights: a reply to Follow")
         [ 0; 1 ])
     [ "w"; "r"; "o"; "a" ];
+  (* Sort, Limit and After through the server: the rows the engine gives on the same view, in its order, and an After
+     without Sort refused *)
+  (let ask = session "r" in
+   let q = { Query.vars = 2; where = [ { Query.e = Var 0; p = Schema.p_name; v = Var 1 } ]; ranges = [] } in
+   let order = { Top.keys = [ { col = 0; desc = true } ]; limit = 2; after = None } in
+   let want =
+     let a = Answer.answer ~order (d0.view ()) q (Wire.Give [| 1 |]) in
+     List.init a.n (fun i -> [| Store.value (d0.view ()) (a.typ 0) (a.word i 0) |])
+   in
+   (match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order }) with
+    | Some (Wire.Rows r) -> check (List.length want = 2 && r.rows = want) "order: the server's rows are the engine's, sorted and cut"
+    | _ -> check false "order: no rows");
+   match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order = { Top.none with after = Some [| Value.Text "a" |] } }) with
+   | Some (Wire.Err { code = "invalid"; _ }) -> check true ""
+   | _ -> check false "order: After without Sort is refused");
   (* an unknown token, and requests before Hello *)
   let ask = session "nobody" in
   check (match ask (Wire.Get { db = 0; thing = 1 }) with Some (Wire.Err { code = "auth"; _ }) -> true | _ -> false) "rights: an unknown token";
@@ -401,8 +473,8 @@ let rights_kinds () =
   check (ok made) "kinds: facts of three kinds";
   let thing = match made with Some (Wire.Receipt { things = (_, t) :: _; _ }) -> t | _ -> 0 in
   let q ps = { Query.vars = 2; where = List.map (fun p -> { Query.e = Var 0; p; v = Var 1 }) ps; ranges = [] } in
-  let find ask ps = ask (Wire.Find { db = 0; query = q ps; select = Wire.Give [||] }) in
-  let watch ask ps = ask (Wire.Watch { db = 0; query = q ps; select = Wire.Give [||]; from = 0 }) in
+  let find ask ps = ask (Wire.Find { db = 0; query = q ps; select = Wire.Give [||]; extra = []; order = Top.none }) in
+  let watch ask ps = ask (Wire.Watch { db = 0; query = q ps; select = Wire.Give [||]; from = 0; wextra = [] }) in
   check (match find k [ 17 ] with Some (Wire.Rows _) -> true | _ -> false) "kinds: a question on a kind read";
   check (denied (find k [ 18 ]) && denied (find k [ 16; 18 ])) "kinds: a question that touches a kind not read is denied";
   check (denied (watch k [ 18 ])) "kinds: a watch too, when it arrives";
@@ -422,7 +494,60 @@ let rights_kinds () =
   check (denied (k (Wire.Follow 0))) "kinds: no local reads";
   check (not (denied (w (Wire.Follow 0)))) "kinds: a write token still follows";
   check (match k (Wire.Open "compta") with Some (Wire.Opened _) -> true | _ -> false) "kinds: Open";
-  check (ok (write a [ Add (-1, 17, Int 7) ]) && denied (find a [ 17 ])) "kinds: add only: writes, reads nothing"
+  check (ok (write a [ Add (-1, 17, Int 7) ]) && denied (find a [ 17 ])) "kinds: add only: writes, reads nothing";
+  (* every operator under rights per kind, on random questions: denied when any pattern, those inside Not and Or too,
+     names a kind the token may not read (16 and 17 read, 18 not); else the rows a write token gets, in the same
+     order, whatever Sort, Limit and After a client sends (a cursor made by hand included) *)
+  for i = 1 to 30 do ignore (write w [ Add (-1, 16, Text (Printf.sprintf "n%d" (i mod 7))); Add (-1, 17, Int (i mod 5)); Add (-1, 18, Text (Printf.sprintf "s%d" (i mod 3))) ]) done;
+  let r = Rng.make 41 in
+  let leaks = ref 0 and denials = ref 0 and answered = ref 0 in
+  let typ p = if p = 17 then Value.Tint else Ttext in
+  let sample p = if p = 17 then Value.Int (Rng.int r 6) else if p = 16 then Text (Printf.sprintf "n%d" (Rng.int r 8)) else Text (Printf.sprintf "s%d" (Rng.int r 4)) in
+  for _ = 1 to 600 do
+    let pk () = 16 + Rng.int r 3 in
+    let top = pk () and np = pk () and oa = pk () and ob = pk () in
+    let uses = ref [ top ] in
+    let extra = ref [] and vars = ref 2 in
+    let fresh () = let x = !vars in incr vars; x in
+    if Rng.bool r then (uses := np :: !uses; extra := Ask.Not [ Pattern { e = Var 0; p = np; v = Val (sample np) } ] :: !extra);
+    if Rng.bool r && oa <> ob then begin
+      uses := oa :: ob :: !uses;
+      let a = fresh () and b = fresh () in
+      extra := Ask.Or [ [ Pattern { e = Var 0; p = oa; v = Var a } ]; [ Pattern { e = Var 0; p = ob; v = Var b } ] ] :: !extra
+    end;
+    if Rng.bool r then extra := Ask.In (1, List.init (1 + Rng.int r 3) (fun _ -> sample top)) :: !extra;
+    let q = { Query.vars = !vars; where = [ { e = Var 0; p = top; v = Var 1 } ]; ranges = [] } in
+    let order =
+      if Rng.bool r then Top.none
+      else { Top.keys = [ { col = 1; desc = Rng.bool r } ]; limit = Rng.int r 4;
+             after = (if Rng.bool r then Some [| Value.Link (65536 + Rng.int r 100); sample top |] else None) } in
+    let req = Wire.Find { db = 0; query = q; select = Wire.Give [| 0; 1 |]; extra = !extra; order } in
+    let readable = List.for_all (fun p -> p <> 18) !uses in
+    ignore typ;
+    match k req, w req with
+    | Some (Wire.Err { code = "denied"; _ }), _ -> incr denials; if readable then incr leaks
+    | Some (Wire.Rows a), Some (Wire.Rows b) -> incr answered; if (not readable) || a.rows <> b.rows then incr leaks
+    | Some (Wire.Err e), Some (Wire.Err e') -> if e.code <> e'.code then incr leaks
+    | _ -> incr leaks
+  done;
+  check (!leaks = 0 && !denials > 100 && !answered > 100) "kinds: every operator, Sort and After under rights per kind (%d denied, %d answered, %d wrong)" !denials !answered !leaks;
+  check (denied (k (Wire.Watch { db = 0; query = q [ 16 ]; select = Wire.Give [||]; from = 0; wextra = [ Ask.Not [ Pattern { e = Var 0; p = 18; v = Var 2 } ] ] })))
+    "kinds: a watch with a Not over a kind not read is denied";
+  (* the bounds, each with its error; the work budget; a cursor by hand that is not a row *)
+  let invalid = function Some (Wire.Err { code = "invalid"; _ }) -> true | _ -> false in
+  let fq ?(extra = []) ?(order = Top.none) () = w (Wire.Find { db = 0; query = q [ 16 ]; select = Wire.Give [||]; extra; order }) in
+  check (invalid (fq ~order:{ Top.keys = [ { col = 0; desc = false } ]; limit = Top.max_limit + 1; after = None } ())) "bounds: Limit";
+  check (invalid (fq ~extra:[ Ask.In (1, List.init (Ask.max_in + 1) (fun i -> Value.Text (string_of_int i))) ] ())) "bounds: In's values";
+  check (invalid (fq ~extra:(List.init 4 (fun _ -> Ask.Or [ [ Pattern { e = Var 0; p = 16; v = Var 1 } ]; [ Pattern { e = Var 0; p = 17; v = Var 2 } ];
+                                                        [ Pattern { e = Var 0; p = 18; v = Var 3 } ] ])) ())) "bounds: the Ors' product";
+  check (invalid (fq ~extra:(List.init 70 (fun _ -> Ask.Not [ Pattern { e = Var 0; p = 18; v = Val (Text "x") } ])) ())) "bounds: operators";
+  check (invalid (fq ~order:{ Top.keys = [ { col = 0; desc = false } ]; limit = 2; after = Some [| Value.Text "not a link"; Text "a" |] } ())) "bounds: a cursor of other types";
+  check (invalid (fq ~order:{ Top.keys = [ { col = 0; desc = false } ]; limit = 2; after = Some [| Value.Link 1 |] } ())) "bounds: a cursor short of a column";
+  let saved = !Answer.question_budget in
+  Answer.question_budget := 10;
+  check (match fq () with Some (Wire.Err { code = "too_large"; _ }) -> true | _ -> false) "bounds: the question's work budget";
+  Answer.question_budget := saved;
+  check (match fq () with Some (Wire.Rows _) -> true | _ -> false) "bounds: within its budget"
 
 (* Rights per kind with rules: a token sees a property's facts, derived ones included, only when it reads the kind
    of the property and every kind those facts can come from through the rules. Random rules (across kinds, over a
@@ -543,7 +668,7 @@ let rights_derived () =
           List.iter
             (fun p ->
               let q = { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } in
-              match ask (Wire.Find { db = 0; query = q; select = Wire.Give [||] }) with
+              match ask (Wire.Find { db = 0; query = q; select = Wire.Give [||]; extra = []; order = Top.none }) with
               | Some (Wire.Err { code = "denied"; _ }) -> check (not (may p)) "rules and kinds: seed %d: a question on %d denied only when it may not be read" seed p
               | Some (Wire.Rows _) -> check (may p) "rules and kinds: seed %d: a question on %d answered only when it may be read" seed p
               | _ -> check false "rules and kinds: Find")
@@ -684,15 +809,92 @@ let request_ids () =
     let c =
       { Client.address = Client.Unix_socket "/nonexistent"; token = ""; program = "unit"; fd = None; tls = None; ca = None;
         cluster = None; inb = Bytes.create 16; have = 0; next_id = 0x7FFF_FFFE; out = Buffer.create 64; body = Buffer.create 64;
-        session = 0; serial = 0; waiting = Hashtbl.create 1; early = Hashtbl.create 1; welcome = None; follows = [] }
+        session = 0; serial = 0; waiting = Hashtbl.create 1; early = Hashtbl.create 1; welcome = None; follows = []; spoken = Wire.version }
     in
     let ids = List.init 4 (fun _ -> Client.send c (Wire.Ping "")) in
     check (not (List.mem 0 ids) && List.length (List.sort_uniq compare ids) = 4) "ids: no request takes id 0 when they wrap (%s)"
       (String.concat ", " (List.map string_of_int ids))
 
+(* ---- protocol 2 beside protocol 1 ----
+   A server speaks 1 and 2 and refuses the others; a program speaks 2, and with a server of protocol 1 only (here a
+   small one of its own on a Unix socket, which refuses Hello 2 as such a server does, then welcomes Hello 1) it
+   connects again in 1, and asks no question with the extension there. *)
+let versions () =
+  let sim = Sim_disk.create (Rng.make 7) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/v";
+  let e = Result.get_ok (Engine.open_ disk "/v/shop") in
+  let d = { Core.name = "shop"; index = 0; dir = "/v/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+  let toks = Tokens.with_tokens Tokens.empty [ { Tokens.name = "r"; hash = Tokens.hash_of_text "cph_r"; databases = [ "shop", Tokens.Read ]; admin = false } ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(fun () -> 1) () in
+  let hello version =
+    let out = Buffer.create 64 in
+    let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit:(fun _ _ _ _ _ -> ())) in
+    let c = Lazy.force c in
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_request b (Wire.Hello { version; token = "cph_r"; program = "t"; session = 0 });
+    Wire.add_frame f ~id:1 ~kind:Wire.k_hello ~flags:0 b;
+    let bytes = Buffer.to_bytes f in
+    ignore (Core.input c bytes 0 (Bytes.length bytes));
+    c.flush ();
+    let s = Buffer.to_bytes out in
+    Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
+  in
+  let welcome = function Wire.Welcome _ -> true | _ -> false in
+  check (welcome (hello 1) && welcome (hello 2)) "versions: a server speaks 1 and 2";
+  check (match hello 3 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 3";
+  (* a program against a server of protocol 1 *)
+  let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
+  let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
+  (try Unix.unlink path with Unix.Unix_error _ -> ());
+  let sock = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Unix.bind sock (Unix.ADDR_UNIX path);
+  Unix.listen sock 4;
+  let seen = ref [] in
+  let rec read_all fd b o n = if n > 0 then (let k = Unix.read fd b o n in if k = 0 then raise End_of_file; read_all fd b (o + k) (n - k)) in
+  let reply fd ~id ~flags rep =
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_reply b rep;
+    Wire.add_frame f ~id ~kind:Wire.k_hello ~flags b;
+    let s = Buffer.to_bytes f in
+    ignore (Unix.write fd s 0 (Bytes.length s))
+  in
+  let old = Thread.create (fun () ->
+      for _ = 1 to 2 do
+        let fd, _ = Unix.accept ~cloexec:true sock in
+        (try
+           let h = Bytes.create Wire.header in
+           read_all fd h 0 Wire.header;
+           let body = Bytes.create (Wire.u32 h 0 - 6) in
+           read_all fd body 0 (Bytes.length body);
+           let id = Wire.u32 h 4 in
+           match Wire.get_request Wire.k_hello (Codec.reader body 0 (Bytes.length body)) with
+           | Wire.Hello hh ->
+             seen := hh.version :: !seen;
+             if hh.version <> 1 then reply fd ~id ~flags:Wire.f_error (Wire.Err { code = "version"; message = "protocol 2 is not spoken here (1 is)" })
+             else begin
+               reply fd ~id ~flags:0 (Wire.Welcome { server = "old"; cluster = "c"; session = 3; frame = Wire.max_frame; inflight = 16 });
+               (* until the program closes *)
+               (try while Unix.read fd (Bytes.create 64) 0 64 > 0 do () done with Unix.Unix_error _ -> ())
+             end
+           | _ -> ()
+         with End_of_file | Unix.Unix_error _ -> ());
+        Unix.close fd
+      done) () in
+  (match Client.connect (Client.Unix_socket path) "cph_r" with
+   | Ok c ->
+     check (c.spoken = 1 && List.rev !seen = [ 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     Client.close c
+   | Error m -> check false "versions: no connection to a server of 1: %s" m);
+  Thread.join old;
+  Unix.close sock;
+  (try Unix.unlink path with Unix.Unix_error _ -> ())
+
 let () =
   toml ();
   config ();
+  versions ();
   tokens ();
   wire ();
   origins ();

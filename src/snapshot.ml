@@ -13,8 +13,8 @@
                       state at lo (lo = 0: a bottom run, the whole state at hi)
      header (4096 B)  magic "CPHS" | format | database id | hi | lo | level | next thing | journal segment | journal
                       offset | journal group at that offset | first text | part a: rows, things range, things,
-                      properties, texts, text bytes, hash bits, its 23 section offsets | part t: rows, things range,
-                      things, properties, its 23 section offsets | layout length | file pages | crc of the page table
+                      properties, texts, text bytes, hash bits, its 24 section offsets | part t: rows, things range,
+                      things, properties, its 24 section offsets | layout length | file pages | crc of the page table
                       | crc of the header
 
    Recovery takes the newest chain of runs whose ranges follow one another from 0 (Snapshot.load), then replays the
@@ -26,11 +26,11 @@
 
 let magic = 0x53485043 (* "CPHS" *)
 
-(* format 8: format 7 and the column order; format 7: the sections coded in blocks by a frame of reference, a page
-   table. Format 7 is set aside at open and its groups replayed, as formats 5 and 6 (fixed 8-byte value
-   words, the flag of a derived fact in bit 63 in format 6) are set aside at open, their groups replayed from the
-   journal, as formats 1 to 4 were *)
-let format = 8
+(* format 9: format 8 and the text order (Prefix); format 8: format 7 and the column order; format 7: the sections
+   coded in blocks by a frame of reference, a page table. Formats 7 and 8 are set aside at open and their groups
+   replayed, as formats 5 and 6 (fixed 8-byte value words, the flag of a derived fact in bit 63 in format 6) are set
+   aside at open, their groups replayed from the journal, as formats 1 to 4 were *)
+let format = 9
 let header = 4096
 
 let name lo hi = Printf.sprintf "%020d-%020d.run" lo hi
@@ -176,6 +176,7 @@ let[@inline] at s w =
   o
 
 let put64 s x = let o = at s 8 in Bytes.set_int64_le s.a.buf o (Int64.of_int x)
+let put32 s x = let o = at s 4 in Bytes.set_int32_le s.a.buf o (Int32.of_int x)
 
 (* bytes, as many as fit in each page at once *)
 let put_sub s (src : Bytes.t) off n =
@@ -1099,11 +1100,19 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
         (stream o l.o_vrank (8 * vw)) (mono (stream o l.o_vmh (16 * vm)) (stream o l.o_vmb r.vmb))
     in
     let va = vb la ra np a_vb a_vw a_vm and vt = vb lt rt t_np t_vb t_vw t_vm in
-    let out_a w e d = vrow va w e d and out_t w e d = vrow vt w e d in
+    (* the text order: each text property's distinct words in part a, as its rows come in value order *)
+    let tw = Array.make np [||] and tcur = ref [] and tlast = ref min_int and is_text = ref false in
+    let out_a w e d =
+      vrow va w e d;
+      if !is_text && w <> !tlast then (tlast := w; tcur := w :: !tcur)
+    and out_t w e d = vrow vt w e d in
     (* cursors: 2 a source run (its part a, its part t) *)
     let nsrc = 2 * take in
     let part s = if s land 1 = 0 then src.(s / 2).a else src.(s / 2).t in
     for p = 0 to np - 1 do
+      is_text := (match Schema.find v.schema p with Some d -> d.typ = Value.Ttext | None -> false);
+      tcur := [];
+      tlast := min_int;
       vprop va ~idx:idx_a.(p);
       if not bottom then vprop vt ~idx:idx_t.(p);
       let cs = Array.init nsrc (fun s -> cursor (part s) p) in
@@ -1211,6 +1220,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
         done
       end;
       vprop_end va;
+      if !tcur <> [] then tw.(p) <- Array.of_list (List.rev !tcur);
       if not bottom then vprop_end vt
     done;
     vblocks_end va;
@@ -1244,6 +1254,29 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
     List.iter close [ soff.mh; soff.mb; sb; sh ];
     (* the part t's dictionary sections: empty *)
     List.iter close [ stream o lt.o_smh (16 * Store.blocks128 1); stream o lt.o_smb rt.smb; stream o lt.o_sblob 8; stream o lt.o_shash 0 ];
+    (* ---- the text order: each text property's words sorted by their texts' bytes (each text read once) ---- *)
+    let ts = stream o la.o_tord ra.tord in
+    let sorted =
+      Array.map
+        (fun ws ->
+          if Array.length ws < 2 then ws
+          else begin
+            let a = Array.map (fun w -> Store.text v w, w) ws in
+            Array.stable_sort (fun (x, _) (y, _) -> String.compare x y) a;
+            Array.map snd a
+          end)
+        tw
+    in
+    let at = ref 0 in
+    for p = 0 to np do
+      put64 ts !at;
+      if p < np then at := !at + Array.length sorted.(p)
+    done;
+    Array.iter (Array.iter (fun w -> if w < 0 || w > 0xFFFFFFFF then invalid_arg "Snapshot.merge: a text id past 32 bits"; put32 ts w)) sorted;
+    close ts;
+    let tz = stream o lt.o_tord rt.tord in
+    for _ = 0 to t_np do put64 tz 0 done;
+    close tz;
     if Hashtbl.length o.open_pages <> 0 then invalid_arg "Snapshot.merge: a page was left unwritten";
     flush o;
     (* the page table, the header, and the file forced *)
@@ -1496,7 +1529,7 @@ let check_and_build disk dir (lo0, hi0, file) id =
             in
             if things < 1 || things > rows || q0 < 0 || q0 > things then col "has a rank table out of order";
             if q0 = things then (if rows <> things then col "has rows of no thing")
-            else if mh < b.o_cmh || mh + (16 * Store.blocks128 (things - q0 + 1)) > b.o_cmb || mb < b.o_cmb || mb > b.len
+            else if mh < b.o_cmh || mh + (16 * Store.blocks128 (things - q0 + 1)) > b.o_cmb || mb < b.o_cmb || mb > b.o_tord
                     || not (Store.check_offsets b mh mb (things - q0) (rows - q0))
             then col "has offsets out of order";
             if not (Store.check_blocks b dir rows (b.o_cmh - data)) then col "has blocks out of order"

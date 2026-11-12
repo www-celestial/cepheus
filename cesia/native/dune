@@ -25,7 +25,7 @@
   (glob_files ../../server/.cepheus_server.objs/native/*.cmx))
  (action
   (progn
-  (run %{ocamlopt} -w +a-4-9-40-41-42-44-45-50-70 -inline 200 -I %{env:CESIA_NATIVE=} -I ../../src
+  (run %{ocamlopt} -w +a-4-9-40-41-42-44-45-50-70 -no-alias-deps -inline 200 -I %{env:CESIA_NATIVE=} -I ../../src
    -I ../../src/.cepheus.objs/byte -I ../../src/.cepheus.objs/native -I ../../server
    -I ../../server/.cepheus_server.objs/byte -I ../../server/.cepheus_server.objs/native -I +unix -shared -o cepheus.cmxs
    ../../src/cepheus.cmxa ../../server/cepheus_server.cmxa conn.ml binding.ml)

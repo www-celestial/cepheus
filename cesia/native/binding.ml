@@ -528,7 +528,9 @@ let variables ctx a =
   let n = int ctx "cepheus.Find" a.(0) in
   C.list ctx (Array.init n (fun k -> C.Handle ("cepheus.variable", k)))
 
-let question_keys = C.keys [| "Where"; "Give" |]
+let question_keys = C.keys [| "Where"; "Give"; "Sort"; "Limit"; "After" |]
+let desc_keys = C.keys [| "Desc" |]
+let op_keys = C.keys [| "Not"; "Or"; "And"; "In"; "Values"; "Prefix"; "Text" |]
 let range_keys = C.keys [| "Range"; "Low"; "High"; "Open" |]
 let aggregate_keys = C.keys [| "Sum"; "Min"; "Max"; "Count" |]
 
@@ -536,53 +538,107 @@ type column = Var of int | Agg of Wire.agg
 
 (* a question as the program gives it: its patterns and ranges, its select, and for each field of Give its name, its
    column in the answer and its type *)
-type question = { query : Query.t; select : Wire.select; qkeys : C.keys; at : int array; typs : Value.typ array }
+type question = {
+  query : Query.t;
+  extra : Question.Ask.item list;  (* Not, Or and In *)
+  select : Wire.select;
+  qkeys : C.keys;
+  at : int array;
+  typs : Value.typ array;
+  order : Question.Top.order;
+}
 
 let question ctx name d qv nvars =
     let q = map_of ctx name qv in
-    let where, give =
+    let where, give, sort, limit, after =
       match C.fields question_keys q with
-      | [| C.List w; C.Map g |] | [| C.List w; C.Struct g |] -> Array.init (C.length w) (C.item ctx w), g
+      | [| C.List w; (C.Map g | C.Struct g); sort; limit; after |] -> Array.init (C.length w) (C.item ctx w), g, sort, limit, after
       | _ -> C.need ctx name "a question {Where: [patterns], Give: {Name: variable}}" qv
     in
     let var = function C.Handle ("cepheus.variable", k) when k < nvars -> Some k | _ -> None in
     let vtyp = Array.make nvars None in
-    let patterns = ref [] and ranges = ref [] in
-    (* patterns first: they give the variables their types, which ranges need *)
-    let filters = ref [] in
-    Array.iter
-      (fun item ->
-        match item with
-        | C.List l when C.length l = 3 ->
-          let e = C.item ctx l 0 and p = C.item ctx l 1 and x = C.item ctx l 2 in
-          let k, i = property_of ctx name p in
-          let f = k.fields.(i) in
-          let pid = (resolve_kind d k).ids.(i) in
-          let e = match var e, e with Some j, _ -> vtyp.(j) <- Some Value.Tlink; Query.Var j | None, C.Int t -> Query.Thing t | _ -> C.need ctx name "a variable or a thing's id first in a pattern" e in
-          let x = match var x with Some j -> vtyp.(j) <- Some f.typ; Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x) in
-          patterns := { Query.e; p = pid; v = x } :: !patterns
-        | C.Map m -> filters := m :: !filters
-        | v -> C.need ctx name "a pattern [thing, property, value], or Above, Below or Between" v)
-      where;
-    List.iter
-      (fun m ->
-        match C.fields range_keys m with
-        | [| x; lo; hi; strict |] -> (
+    let what = "a pattern [thing, property, value], or Above, Below, Between, In, Not or Or" in
+    let pattern_of l =
+      let e = C.item ctx l 0 and p = C.item ctx l 1 and x = C.item ctx l 2 in
+      let k, i = property_of ctx name p in
+      let f = k.fields.(i) in
+      let pid = (resolve_kind d k).ids.(i) in
+      let e = match var e, e with Some j, _ -> vtyp.(j) <- Some Value.Tlink; Query.Var j | None, C.Int t -> Query.Thing t | _ -> C.need ctx name "a variable or a thing's id first in a pattern" e in
+      let x = match var x with Some j -> vtyp.(j) <- Some f.typ; Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x) in
+      { Query.e; p = pid; v = x }
+    in
+    (* a list's items; Not, Or and And give their four arguments, those left out missing *)
+    let list_of v = match v with C.List l -> List.filter (fun x -> x <> C.Missing) (List.init (C.length l) (C.item ctx l)) | C.Missing -> [] | v -> C.need ctx name "a list" v in
+    (* patterns first, nested ones too: they give the variables their types, which ranges and In need *)
+    let rec walk item =
+      match item with
+      | C.List l when C.length l = 3 -> ignore (pattern_of l)
+      | C.Map m | C.Struct m -> (
+        match C.fields op_keys m with
+        | [| n; o; a; _; _; _; _ |] -> List.iter walk (list_of n @ list_of a); List.iter walk (list_of o)
+        | _ -> ())
+      | _ -> ()
+    in
+    Array.iter walk where;
+    let range_of m =
+      match C.fields range_keys m with
+      | [| x; lo; hi; strict |] -> (
+        match var x with
+        | Some j -> (
+          match vtyp.(j) with
+          | Some ((Tint | Tdate | Tmoney _) as t) ->
+            let word v = match of_cesia "a range" t v with Int i | Date i | Money i -> i | _ -> 0 in
+            (* Above and Below are strict: one minor unit (a millisecond, a cent) past the bound, on whole words *)
+            let lo = if lo = C.Missing then min_int else word lo + (if strict = C.Text "low" then 1 else 0) in
+            let hi = if hi = C.Missing then max_int else word hi - (if strict = C.Text "high" then 1 else 0) in
+            let mk w = match t with Tdate -> Value.Date w | Tmoney _ -> Money w | _ -> Int w in
+            j, mk lo, mk hi
+          | Some t -> refuse "invalid" "Above, Below and Between are for ints, dates and money, not a %s" (Value.typ_name t)
+          | None -> refuse "invalid" "a variable of Above, Below or Between appears in no pattern")
+        | None -> C.need ctx name "a variable first in Above, Below or Between" x)
+      | _ -> C.need ctx name what (C.Map m)
+    in
+    (* an item: [top] at the top of Where; [alt] an alternative of Or, which And may write *)
+    let rec item_of ~top ~alt it : Question.Ask.item list =
+      match it with
+      | C.List l when C.length l = 3 -> [ Question.Ask.Pattern (pattern_of l) ]
+      | C.Map m | C.Struct m -> (
+        match C.fields op_keys m with
+        | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] -> let j, lo, hi = range_of m in [ Question.Ask.Range (j, lo, hi) ]
+        | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; x; t |] -> (
+          match var x, t with
+          | Some j, C.Text p -> [ Question.Ask.Prefix (j, p) ]
+          | Some _, v -> C.need ctx name "a text for Prefix" v
+          | None, _ -> C.need ctx name "a variable first in Prefix" x)
+        | [| n; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
+          if not top then refuse "invalid" "Not takes patterns and conditions: no Not or Or inside it";
+          [ Question.Ask.Not (List.concat_map (item_of ~top:false ~alt:false) (list_of n)) ]
+        | [| C.Missing; o; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
+          if not top then refuse "invalid" "Or takes patterns, conditions and And: no Not or Or inside it";
+          [ Question.Ask.Or (List.map (fun a -> item_of ~top:false ~alt:true a) (list_of o)) ]
+        | [| C.Missing; C.Missing; a; C.Missing; C.Missing; C.Missing; C.Missing |] ->
+          if not alt then refuse "invalid" "And is for an alternative of Or: Where is already all of its items";
+          List.concat_map (item_of ~top:false ~alt:false) (list_of a)
+        | [| C.Missing; C.Missing; C.Missing; x; vs; C.Missing; C.Missing |] -> (
           match var x with
           | Some j -> (
             match vtyp.(j) with
-            | Some ((Tint | Tdate | Tmoney _) as t) ->
-              let word v = match of_cesia "a range" t v with Int i | Date i | Money i -> i | _ -> 0 in
-              (* Above and Below are strict: one minor unit (a millisecond, a cent) past the bound, on whole words *)
-              let lo = if lo = C.Missing then min_int else word lo + (if strict = C.Text "low" then 1 else 0) in
-              let hi = if hi = C.Missing then max_int else word hi - (if strict = C.Text "high" then 1 else 0) in
-              let mk w = match t with Tdate -> Value.Date w | Tmoney _ -> Money w | _ -> Int w in
-              ranges := (j, mk lo, mk hi) :: !ranges
-            | Some t -> refuse "invalid" "Above, Below and Between are for ints, dates and money, not a %s" (Value.typ_name t)
-            | None -> refuse "invalid" "a variable of Above, Below or Between appears in no pattern")
-          | None -> C.need ctx name "a variable first in Above, Below or Between" x)
-        | _ -> ())
-      !filters;
+            | Some t -> [ Question.Ask.In (j, List.map (of_cesia "In" t) (list_of vs)) ]
+            | None -> refuse "invalid" "a variable of In appears in no pattern")
+          | None -> C.need ctx name "a variable first in In" x)
+        | _ -> C.need ctx name what it)
+      | v -> C.need ctx name what v
+    in
+    let patterns = ref [] and ranges = ref [] and extra = ref [] in
+    Array.iter
+      (fun it ->
+        List.iter
+          (function
+            | Question.Ask.Pattern p -> patterns := p :: !patterns
+            | Range (j, lo, hi) -> ranges := (j, lo, hi) :: !ranges
+            | x -> extra := x :: !extra)
+          (item_of ~top:true ~alt:false it))
+      where;
     let names = C.names give and gvals = C.values give in
     let cols =
       Array.map
@@ -612,7 +668,55 @@ let question ctx name d qv nvars =
     Array.iteri (fun i c -> match c with Var _ -> at.(i) <- !ki; incr ki | Agg _ -> at.(i) <- nk + !ai; incr ai) cols;
     let ctyp i = match cols.(i) with Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j) -> (match vtyp.(j) with Some t -> t | None -> Value.Tint) | Agg Wire.Count -> Value.Tint in
     let typs = Array.init (Array.length cols) ctyp in
-    { query; select; qkeys = C.keys names; at; typs }
+    (* Sort: each key a field of Give (its variable or its aggregate), Desc for descending; then every other field by
+       name, so that rows equal in the order are the same row. After: a row with every field of Give. *)
+    let field_of k =
+      let col_of g = match var g with Some j -> Some (Var j) | None -> (match g with C.Map m | C.Struct m -> (match C.fields aggregate_keys m with
+          | [| s; C.Missing; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Sum (Option.get (var s))))
+          | [| C.Missing; s; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Min (Option.get (var s))))
+          | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> Some (Agg (Wire.Max (Option.get (var s))))
+          | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> Some (Agg Wire.Count)
+          | _ -> None) | _ -> None) in
+      let desc, g = match k with (C.Map m | C.Struct m) when (match C.fields desc_keys m with [| C.Missing |] -> false | _ -> true) -> true, (C.fields desc_keys m).(0) | _ -> false, k in
+      match col_of g with
+      | Some c -> (match List.find_opt (fun i -> cols.(i) = c) (List.init (Array.length cols) Fun.id) with
+          | Some i -> i, desc
+          | None -> refuse "invalid" "Sort's keys are fields of Give: a variable or an aggregate that Give gives")
+      | None -> C.need ctx name "a key of Sort: a variable or an aggregate of Give, or Desc of one" k
+    in
+    let order =
+      if sort = C.Missing && limit = C.Missing && after = C.Missing then Question.Top.none
+      else begin
+        (* a question that uses the newer keys is newer code: a key the package does not know is a mistake there (a
+           misspelt After would give the first page for ever), and no question that worked before is refused *)
+        Array.iter
+          (fun k -> if not (List.mem k [ "Where"; "Give"; "Sort"; "Limit"; "After" ]) then refuse "invalid" "a question has no key %s: Where, Give, Sort, Limit and After" k)
+          (C.names q);
+        let user = match sort with C.Missing -> [] | C.List l -> List.init (C.length l) (fun i -> field_of (C.item ctx l i)) | v -> C.need ctx name "a list of keys for Sort" v in
+        let keys =
+          if user = [] then []
+          else begin
+            let rest = List.filter (fun i -> not (List.mem_assoc i user)) (List.init (Array.length cols) Fun.id) in
+            let rest = List.sort (fun a b -> compare names.(a) names.(b)) rest in
+            List.map (fun (i, desc) -> { Question.Top.col = at.(i); desc }) user @ List.map (fun i -> { Question.Top.col = at.(i); desc = false }) rest
+          end
+        in
+        let limit = match limit with C.Missing -> 0 | C.Int k when k >= 1 -> k | v -> C.need ctx name "a Limit of 1 row or more" v in
+        let after =
+          match after with
+          | C.Missing -> None
+          | C.Map m | C.Struct m ->
+            if user = [] then refuse "invalid" "After needs Sort: the rows after a row, in an order";
+            let vals = C.fields (C.keys names) m in
+            let a = Array.make (Array.length cols) (Value.Int 0) in
+            Array.iteri (fun i x -> if x = C.Missing then refuse "invalid" "After needs every field of Give: %s is missing" names.(i); a.(at.(i)) <- of_cesia names.(i) typs.(i) x) vals;
+            Some a
+          | v -> C.need ctx name "a row of Give for After" v
+        in
+        { Question.Top.keys; limit; after }
+      end
+    in
+    { query; extra = List.rev !extra; select; qkeys = C.keys names; at; typs; order }
 
 (* a row of the answer (values) as the program's map *)
 let record_of_row ctx qn (row : Value.t array) = C.record ctx qn.qkeys (Array.init (Array.length qn.at) (fun i -> to_cesia qn.typs.(i) row.(qn.at.(i))))
@@ -628,15 +732,16 @@ let find ctx a =
     let rows =
       match local_state d with
       | Some v -> (
-        match Answer.answer v query select with
+        match Answer.answer ~order:qn.order ~extra:qn.extra v query select with
         | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init ncols (fun i -> of_word v typs.(i) (ans.word r at.(i)))))
         | exception Query.Bad m -> refuse "invalid" "%s" m
         | exception Pages.Unreadable m -> refuse "damaged" "%s" m)
       | None -> (
         match d.src with
         | Fork _ -> assert false
+        | Server s when (qn.extra <> [] || qn.order <> Question.Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
         | Server s -> (
-          match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select }) with
+          match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order }) with
           | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
           | rep -> server_error rep "Find"))
     in
@@ -660,7 +765,7 @@ let message_keys = C.keys [| "Group"; "Rows"; "Added"; "Removed" |]
 let find_source d (sh : Conn.shared) =
   let from = if sh.started then sh.group else 0 in
   let local hub =
-    match Live.subscribe hub sh.query sh.select ~from ~emit:(fun m -> Conn.deliver sh m; true) with
+    match Live.subscribe ~extra:sh.extra hub sh.query sh.select ~from ~emit:(fun m -> Conn.deliver sh m; true) with
     | sub -> Mutex.protect sh.sm (fun () -> sh.src <- Local (hub, sub)); true
     | exception Query.Bad m -> Conn.finish sh "invalid" m; true
     | exception Pages.Unreadable m -> Conn.finish sh "damaged" m; true
@@ -671,9 +776,10 @@ let find_source d (sh : Conn.shared) =
   | Server s -> (
     match Client.local_hub s.conn.cl s.cdb with
     | Some hub when local hub -> true
+    | _ when sh.extra <> [] && s.conn.cl.spoken < 2 -> Conn.finish sh "invalid" Client.older; true
     | _ ->
       Mutex.protect sh.sm (fun () -> sh.src <- Remote);
-      Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from }))
+      Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from; wextra = sh.extra }))
 
 (* a watch's source stops: the server's watch, or the hub's *)
 let stop_source d (sh : Conn.shared) =
@@ -699,11 +805,13 @@ let watch ctx a =
     let d = db_of ctx name a.(0) in
     let nvars = int ctx name a.(2) in
     let qn = question ctx name d a.(1) nvars in
+    if qn.order <> Question.Top.none then refuse "invalid" "a watch keeps every row of its question: Sort, Limit and After are for Find";
     let b = Buffer.create 64 in
     Wire.put_query b qn.query;
     Wire.put_select b qn.select;
+    if qn.extra <> [] then Wire.put_order b ~extra:qn.extra Question.Top.none;
     let key = string_of_int (match a.(0) with C.Handle (_, i) -> i | _ -> -1) ^ ":" ^ Buffer.contents b in
-    let sh = match Hashtbl.find_opt shared key with Some sh when sh.ended = None -> sh | _ -> let sh = Conn.new_shared key qn.query qn.select in Hashtbl.replace shared key sh; sh in
+    let sh = match Hashtbl.find_opt shared key with Some sh when sh.ended = None -> sh | _ -> let sh = Conn.new_shared ~extra:qn.extra key qn.query qn.select in Hashtbl.replace shared key sh; sh in
     let c = Conn.join sh in
     (* the first message waited for here: the answer, or why there is none; it is given again by the first next *)
     match Conn.next (park ctx) (find_source d) c with

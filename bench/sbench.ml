@@ -669,8 +669,74 @@ let rights rounds n =
     Printf.printf "%.2f\n%!" (dt /. float n *. 1e9)
   done
 
+(* A change under a watch of each operator, in a hub of its own, against the question answered again in full: on the
+   data of the benchmarks (10 M facts), changes made in memory one at a time (no disk), the frame of each timed
+   (Live.frame: the keys it touches, their questions before and after) and the whole answer after it. 21 changes. *)
+let watches dir =
+  let module Ask = Question.Ask in
+  let db = match Cepheus.open_ dir with Ok db -> db | Error e -> failwith (Cepheus.message e) in
+  let v = ref (Cepheus.view db) in
+  let p n = Option.get (Cepheus.property !v n) in
+  let cty = p "client/city" and mail = p "client/email" and client = p "invoice/client" and status = p "invoice/status" in
+  let pat e p x = { Query.e; p; v = x } in
+  let forms =
+    [ "Not: the clients of city-7 with no unpaid invoice",
+      { Query.vars = 2; where = [ pat (Var 0) cty (Val (Text "city-7")) ]; ranges = [] },
+      [ Ask.Not [ Pattern (pat (Var 1) client (Var 0)); Pattern (pat (Var 1) status (Val (Text "unpaid"))) ] ], Wire.Give [| 0 |];
+      "Or: the clients of city-7, or of one e-mail",
+      { Query.vars = 1; where = []; ranges = [] },
+      [ Ask.Or [ [ Pattern (pat (Var 0) cty (Val (Text "city-7"))) ]; [ Pattern (pat (Var 0) mail (Val (Text "c5@example.com"))) ] ] ], Wire.Give [| 0 |];
+      "In: the clients of city-7 or city-8",
+      { Query.vars = 2; where = [ pat (Var 0) cty (Var 1) ]; ranges = [] }, [ Ask.In (1, [ Text "city-7"; Text "city-8" ]) ], Wire.Give [| 0 |];
+      "Prefix: the clients whose e-mail starts with c1234",
+      { Query.vars = 2; where = [ pat (Var 0) mail (Var 1) ]; ranges = [] }, [ Ask.Prefix (1, "c1234") ], Wire.Give [| 0; 1 |] ]
+  in
+  (* the changes that touch each watch: an invoice of a city-7 client paid, then unpaid again (Not); a client moved to
+     city-7 (Or), to city-8 (In); an e-mail changed to c1234... (Prefix) *)
+  let ids q = List.map (fun r -> match r.(0) with Value.Link e -> e | _ -> 0) (Result.get_ok (Cepheus.find !v q)) in
+  let c7 = ids { vars = 1; ranges = []; where = [ pat (Var 0) cty (Val (Text "city-7")) ] } in
+  let inv = Array.of_list (List.concat_map (fun c -> ids { vars = 1; ranges = []; where = [ pat (Var 0) client (Val (Link c)) ] }) (List.filteri (fun i _ -> i < 30) c7)) in
+  let c3 = Array.of_list (ids { vars = 1; ranges = []; where = [ pat (Var 0) cty (Val (Text "city-3")) ] }) in
+  (* a client of the Not's answer (no unpaid invoice): one of its invoices unpaid, then paid again *)
+  let clear = List.filter_map (fun r -> match r.(0) with Value.Link e -> Some e | _ -> None)
+      (match Answer.answer ~extra:(let _, _, e, _ = List.hd forms in e) !v (let _, q, _, _ = List.hd forms in q) (Wire.Give [| 0 |]) with
+       | a -> List.init a.n (fun i -> [| Value.Link (a.word i 0) |])) in
+  let its = Array.of_list (ids { vars = 1; ranges = []; where = [ pat (Var 0) client (Val (Link (List.hd clear))) ] }) in
+  ignore inv;
+  let change = [| (fun k -> [ Resolve.Add (its.(0), status, Text (if k mod 2 = 1 then "unpaid" else "paid")) ]);
+                  (fun k -> [ Resolve.Add (c3.(k), cty, Text "city-7") ]);
+                  (fun k -> [ Resolve.Add (c3.(100 + k), cty, Text "city-8") ]);
+                  (fun k -> [ Resolve.Add (c3.(200 + k), mail, Text (Printf.sprintf "c1234%d@example.com" (900000 + k))) ]) |] in
+  List.iteri
+    (fun i (name, q, extra, sel) ->
+      let h = Live.create !v ~tag:!v.group ~durable:!v.group in
+      let changes = ref 0 in
+      ignore (Live.subscribe ~extra h q sel ~from:0 ~emit:(function Live.Change _ -> incr changes; true | _ -> true));
+      let tc = ref [] and ta = ref [] in
+      for k = 1 to 21 do
+        let n = !v.group + 1 in
+        match Resolve.resolve !v ~n ~time:n ~by:0 ~why:"" (change.(i) k) with
+        | Ok (v', g, _) ->
+          let t = now () in
+          Live.frame h ~tag:v'.group [ g ] v';
+          tc := (now () -. t) :: !tc;
+          Live.durable h v'.group;
+          let t = now () in
+          ignore (Answer.answer ~extra v' q sel);
+          ta := (now () -. t) :: !ta;
+          v := v'
+        | Error _ -> failwith "the change was refused"
+      done;
+      let show what l = let l = List.sort compare l in Printf.printf "%-60s %s median %8.1f us, min %8.1f us\n" name what (1e6 *. List.nth l 10) (1e6 *. List.hd l) in
+      show "a change    " !tc;
+      show "again, whole" !ta;
+      Printf.printf "%-60s %d changes of 21 changed its rows\n%!" name !changes)
+    forms;
+  Cepheus.close db
+
 let () =
   match Sys.argv with
+  | [| _; "watches"; dir |] -> watches dir
   | [| _; "ping"; a; n |] -> ping a (int_of_string n)
   | [| _; "get"; a; f; d; n |] -> get a (int_of_string f) (int_of_string d) (int_of_string n)
   | [| _; "clients"; a; f; c; n |] -> clients a (int_of_string f) (int_of_string c) (int_of_string n)

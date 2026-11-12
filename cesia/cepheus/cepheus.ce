@@ -86,6 +86,9 @@ Max(x) = {Max: x}
 (** An aggregate of Give: the number of answers of a group. *)
 Count() = {Count: true}
 
+(** A key of Sort, in descending order: the largest first. A key without it is ascending. *)
+Desc(key) = {Desc: key}
+
 (** A condition of Where: x above v, for an int, a date or money. *)
 Above(x, v) = {Range: x, Low: v, Open: "low"}
 
@@ -94,6 +97,24 @@ Below(x, v) = {Range: x, High: v, Open: "high"}
 
 (** A condition of Where: lo <= x <= hi. *)
 Between(x, lo, hi) = {Range: x, Low: lo, High: hi}
+
+(** A condition of Where: none of the facts these patterns name holds, with these conditions. Its variables in no
+    other place of the question are its own: there is no value of them that makes every item hold. 1 to 4 patterns
+    and conditions. *)
+Not(a, b = missing, c = missing, d = missing) = {Not: [a, b, c, d]}
+
+(** A condition of Where: at least one of these alternatives holds, each a pattern, a condition, or And of several.
+    A variable in every alternative is the question's; one in some only is the alternative's own. 2 to 4. *)
+Or(a, b, c = missing, d = missing) = {Or: [a, b, c, d]}
+
+(** An alternative of Or that is several patterns and conditions, all holding. 1 to 4. *)
+And(a, b = missing, c = missing, d = missing) = {And: [a, b, c, d]}
+
+(** A condition of Where: x is one of these values, of its type (ids for a link). *)
+In(x, values) = {In: x, Values: values}
+
+(** A condition of Where: the text x starts with these bytes ("Ad" matches "Ada", not "ada"). *)
+Prefix(x, text) = {Prefix: x, Text: text}
 
 defn ask(n, question)
   (** The question called with n variables. *)
@@ -117,8 +138,12 @@ end
 
 (** The answers of a question: an Ok of a list of maps, one an answer, with the fields of Give. The question is a
     function of n variables that gives {Where, Give}: Where a list of patterns [thing, property, value], each a fact
-    that must hold, where any part but the property may be a variable, and of conditions (Above, Below, Between); Give
-    a map of the variables, or of aggregates of them, to give. Each answer comes once. *)
+    that must hold, where any part but the property may be a variable, and of conditions (Above, Below, Between, In,
+    Prefix, Not, Or); Give
+    a map of the variables, or of aggregates of them, to give. Each answer comes once. Optional: Sort, a list of
+    fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name; Limit, at
+    most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in Sort's
+    order: the next page. *)
 Find(n, question, db) = find(db, ask(n, question), n)
 
 (** The empty database, to fork for a test. *)

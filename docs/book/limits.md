@@ -59,7 +59,7 @@ defaults, and the cache's size (`set_cache`).
 | page | 16 KiB (16,384 bytes) | `Pages.bits` (14) |
 | page table | 8 bytes a page of the run's layout (the file page that holds it, its CRC) | `Snapshot.merge` |
 | thing block, row block, offsets block | 128 things, 128 rows of a property, 128 offsets | `Store.tb` |
-| run format | 8; runs of formats 5, 6 and 7 and the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
+| run format | 9; runs of formats 5 to 8 and the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
 | journal format | 2; a journal of format 1 is converted once at open | `Journal.format`, `Journal.convert` |
 
 ## Memory and the cache
@@ -91,6 +91,12 @@ defaults, and the cache's size (`set_cache`).
 | domains of a question | the machine's recommended count, at most 8 | `Query.domains` |
 | slices | $\min(\text{candidates}, 16 \times \text{domains})$, taken in turn from a shared counter | `Query.fold` |
 | the property of a pattern | a constant: no variable in the property position | `Query.pattern` |
+| Sort, Limit, After | keys: columns of the select, one a column at most; Limit 1 to 100,000 rows a page (0 on the wire: none), plus the copies of its last row; After needs Sort and a value of its type for every column, else `invalid` | `Top.check`, `Top.max_limit` |
+| Prefix | 1 to 1,024 bytes; a text variable that a pattern gives as its value | `Ask.max_prefix` |
+| Not, Or, And, In | Not and And: 1 to 4 patterns and conditions; Or: 2 to 4 alternatives; In: at most 10,000 values; at most 64 operators and their items in a question, and its Ors at most 64 questions to ask (the product of their alternatives); no Not or Or inside Not and Or | `Ask.compile`, `Ask.max_in`, `Ask.max_operators`, `Ask.max_conjunctions` |
+| a question's work at the server | 1,000,000,000 candidates of its join a domain, its Nots' own questions together counted against it: past it, `too_large` ("the question passed the server's budget"); a watch past it at a frame ends with `too_large`; a program reading in its own memory has none | `Answer.question_budget`, `Query.Over_budget` |
+| the heap path | a buffer of at most $\max(64, 2k)$ rows a domain before it is sorted and cut back to $k$ | `Top.push` |
+| the index path | the first key an int, a date, money or a link that a pattern gives as its value; windows of $2k$, $4k$, ... facts; a budget of the planner's estimate of the question (`Query.estimate`), past which the heap path answers; taken when the estimate is over $4k$ | `Top.give` |
 
 ## Files and the platform
 

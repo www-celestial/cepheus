@@ -52,13 +52,14 @@ and shared = {
   mutable parts : Wire.push option;  (* a push in several frames, so far *)
   query : Query.t;
   select : Wire.select;
+  extra : Question.Ask.item list;
 }
 
 let queue_max = 256
 
-let new_shared key query select =
+let new_shared ?(extra = []) key query select =
   { key; sm = Mutex.create (); rows = Hashtbl.create 16; group = 0; started = false; consumers = []; src = Nothing; lost = true;
-    finding = false; ended = None; parts = None; query; select }
+    finding = false; ended = None; parts = None; query; select; extra }
 
 let row_list sh = Hashtbl.fold (fun r n acc -> let rec go k acc = if k = 0 then acc else go (k - 1) (r :: acc) in go n acc) sh.rows []
 

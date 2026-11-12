@@ -178,6 +178,14 @@ val set_cache : int -> unit
 val find : view -> query -> (value array list, error) result
 (** Every binding of the variables that makes all patterns facts of the view, each once (G11). *)
 
+(** {2 Questions with operators, an order and pages} *)
+
+(** The question of {!ask}: its own names, apart, so that [open Cepheus] adds only [Question] and [ask]. *)
+module Question = Question
+
+val ask : view -> Question.t -> (value array list, error) result
+(** The rows of the question, each a binding of its variables once (G11), in the order asked. *)
+
 val fold :
   view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 (** The bindings folded into an accumulator, without building values: [step] gets index words (thing ids for links,

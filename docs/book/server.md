@@ -374,15 +374,15 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | request body | reply body |
 |---|---|---|
-| 1 Hello | version varint (1), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
+| 1 Hello | version varint (1 or 2), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
-| 4 Find | handle, question, select | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
+| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
 | 8 Follow | handle (over the Unix socket only) | Start: the database's id, the visibility number, count, (lo, hi) of each run, newest first; the descriptors of `visible` and of each run ride on its first byte. The connection is then the database's follow stream ([local reads](#local-reads-g15)) |
-| 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
+| 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none), then its operators as Find codes them, when it has some (no Sort, Limit or After) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
 | 12 Unwatch | the Watch's id | Unwatched |
 
 On a follow stream the server pushes (request id 0):
@@ -399,6 +399,15 @@ On a follow stream the server pushes (request id 0):
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
   (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
+- **Versions.** Version 2 adds the question's operators and order (below) and nothing else; a server speaks 1 and
+  2, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+  and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
+  one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
+  protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2
+  exactly as before.
+- **order**: Sort, Limit and After over the select's columns ([pages](cesia.md#sort-limit-and-after-pages)). It
+  follows the select only when the question has it, so that every other question is coded as before; a server that
+  does not know it refuses such a Find ("bytes after the request") rather than answer it unsorted.
 - An **operation**: 0 Add, 1 Retract, 2 Expect a value, 3 Expect none; then the thing (zigzag: a negative id is a new
   thing of the group), the property, the value.
 - Every read names the group of the view it was answered from, every receipt its group: a program can check what it
@@ -500,7 +509,7 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 |---|---|---|
 | `auth` | Hello with an unknown token; a request before Hello; a token removed since | check the token; the connection closes |
 | `denied` | the token lacks the right for this database or operation; a session of another token | a token with the right |
-| `version` | Hello with another protocol version | the server and the library of one release |
+| `version` | Hello with a protocol version the server does not speak (it speaks 1 and 2) | a library connects again in the version before; else a server and a library of the same release |
 | `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |
@@ -792,9 +801,14 @@ then a tick). *Conditions*: the token is secret; `tokens.toml` is writable by th
 request passes one check of the connection's rights for its database, recomputed whenever the table of tokens
 changes (one comparison of the table's identity a request); writes carry the token's name in their origin; the
 descriptors of a database's files are passed only after the check of `Follow`; for a token per kind, each fact of a `Get`, each pattern of a `Find` or a
-`Watch` and each fact of a `Write` is checked against one byte a property, made again when the schema changes. *Tests*: `server_unit` (every token against every request on every database, a removed token, rights
-narrowed, a forged origin refused, a frame over the limit, every request of a token per kind, `tokens.toml` written
-back byte for byte); `server_sim` (random requests of every token checked
+`Watch` (those inside `Not` and `Or` too: an absence or an alternative of a fact of a kind reads that kind) and each
+fact of a `Write` is checked against one byte a property, made again when the schema changes. `In`, `Prefix`, Sort,
+Limit and After then act on the rows of a question of kinds read only, so the rows, their order, their count and a
+page after a cursor made by hand reveal nothing a question of those kinds could not, and a `Prefix` reads the order of
+the texts of its own property only (its time depends on that property's texts, no other's). *Tests*: `server_unit` (every token against every request on every database, a removed token, rights
+narrowed, a forged origin refused, a frame over the limit, every request of a token per kind, 600 random questions
+with `Not`, `Or`, `In`, Sort, Limit and After (cursors made by hand) of a token per kind against a write token's
+answers, `tokens.toml` written back byte for byte); `server_sim` (random requests of every token checked
 against its rights, and every group of the journal against its token's); `server_crash` (a token removed from the file
 while its program is connected and reads in its own memory).
 

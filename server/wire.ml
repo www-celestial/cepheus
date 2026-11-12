@@ -1,4 +1,7 @@
-(* The wire protocol, version 1. A connection carries frames both ways:
+(* The wire protocol, versions 1 and 2. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+   After: below), and nothing else: a server speaks both, a program says in Hello the version it speaks, and against a
+   server that speaks 1 only a program speaks 1 (Client.hello) and asks no question with the extension. A connection
+   carries frames both ways:
 
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
      flags  = bit 0: more (a reply in several frames: the rows of a Find), bit 1: error (the body is an error)
@@ -8,8 +11,13 @@
    journal codes a group's values in columns, Group). *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 
-let version = 1
+let version = 2
+
+(* the oldest version a server still speaks *)
+let oldest = 1
 let header = 10
 let max_frame = 16 lsl 20
 
@@ -47,12 +55,13 @@ type request =
   | Hello of { version : int; token : string; program : string; session : int }
   | Open of string
   | Get of { db : int; thing : int }
-  | Find of { db : int; query : Query.t; select : select }
+  | Find of { db : int; query : Query.t; select : select; extra : Ask.item list; order : Top.order }
+      (** [extra]: Not, Or and In; [order]: Sort, Limit and After; with neither, the request is coded as before them *)
   | Write of { db : int; serial : int; floor : int; by : int; why : string; ops : Resolve.op list }
   | Ping of string
   | Admin of string
   | Follow of int  (** a database: this connection becomes its follow stream *)
-  | Watch of { db : int; query : Query.t; select : select; from : int }
+  | Watch of { db : int; query : Query.t; select : select; from : int; wextra : Ask.item list }
       (** the question kept answered; [from]: the group whose answer the program holds (0: none) *)
   | Unwatch of int  (** the id of the Watch *)
 
@@ -136,6 +145,58 @@ let put_select b : select -> unit = function
 
 let get_vars r = Array.init (count r) (fun _ -> Codec.get_varint r)
 
+(* What a question asks beyond its patterns, ranges and select, after them in a Find (and a Watch): a byte 1, then its
+   operators (a count, then each: 0 a pattern, 1 a range, 2 In (variable, count, values), 3 Not (count, items), 4 Or
+   (count of alternatives, each a count and its items), 5 Prefix (variable, text)), its Sort (a count, then each key's column and a byte 1 when
+   descending), its Limit (0: none) and its After (a byte 0, or 1 then a count and the values). A question without
+   them is coded as before them, so that a server that does not know them reads every other question as it did, and
+   refuses this one (bytes after the request). *)
+let rec put_item b = function
+  | Ask.Pattern (p : Query.pattern) -> Buffer.add_char b '\000'; put_term b p.e; Codec.put_varint b p.p; put_term b p.v
+  | Range (x, lo, hi) -> Buffer.add_char b '\001'; Codec.put_varint b x; Value.encode b lo; Value.encode b hi
+  | In (x, l) -> Buffer.add_char b '\002'; Codec.put_varint b x; Codec.put_varint b (List.length l); List.iter (Value.encode b) l
+  | Prefix (x, p) -> Buffer.add_char b '\005'; Codec.put_varint b x; Codec.put_string b p
+  | Not l -> Buffer.add_char b '\003'; Codec.put_varint b (List.length l); List.iter (put_item b) l
+  | Or alts -> Buffer.add_char b '\004'; Codec.put_varint b (List.length alts); List.iter (fun a -> Codec.put_varint b (List.length a); List.iter (put_item b) a) alts
+
+let rec get_item depth r =
+  if depth > 2 then raise (Malformed "operators nested too deep");
+  match Codec.get_byte r with
+  | 0 -> let e = get_term r in let p = Codec.get_varint r in let v = get_term r in Ask.Pattern { Query.e; p; v }
+  | 1 -> let x = Codec.get_varint r in let lo = Value.decode r in let hi = Value.decode r in Range (x, lo, hi)
+  | 2 -> let x = Codec.get_varint r in In (x, List.init (count r) (fun _ -> Value.decode r))
+  | 3 -> Not (List.init (count r) (fun _ -> get_item (depth + 1) r))
+  | 4 -> Or (List.init (count r) (fun _ -> List.init (count r) (fun _ -> get_item (depth + 1) r)))
+  | 5 -> let x = Codec.get_varint r in Prefix (x, Codec.get_string r)
+  | _ -> raise (Malformed "an operator this server does not know")
+
+let put_order b ?(extra = []) (o : Top.order) =
+  Buffer.add_char b '\001';
+  Codec.put_varint b (List.length extra);
+  List.iter (put_item b) extra;
+  Codec.put_varint b (List.length o.keys);
+  List.iter (fun (k : Top.key) -> Codec.put_varint b k.col; Buffer.add_char b (if k.desc then '\001' else '\000')) o.keys;
+  Codec.put_varint b o.limit;
+  match o.after with
+  | None -> Buffer.add_char b '\000'
+  | Some a -> Buffer.add_char b '\001'; Codec.put_varint b (Array.length a); Array.iter (Value.encode b) a
+
+let get_order r : Ask.item list * Top.order =
+  if Codec.at_end r then [], Top.none
+  else begin
+    if Codec.get_byte r <> 1 then raise (Malformed "an unknown extension of a question");
+    let extra = List.init (count r) (fun _ -> get_item 0 r) in
+    let keys =
+      List.init (count r) (fun _ ->
+          let col = Codec.get_varint r in
+          let desc = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
+          { Top.col; desc })
+    in
+    let limit = Codec.get_varint r in
+    let after = match Codec.get_byte r with 0 -> None | 1 -> Some (Array.init (count r) (fun _ -> Value.decode r)) | _ -> raise Codec.Short in
+    extra, { keys; limit; after }
+  end
+
 let get_select r : select =
   match Codec.get_byte r with
   | 0 -> Give (get_vars r)
@@ -187,7 +248,9 @@ let put_request b = function
     Codec.put_varint b h.version; Codec.put_string b h.token; Codec.put_string b h.program; Codec.put_varint b h.session
   | Open name -> Codec.put_string b name
   | Get g -> Codec.put_varint b g.db; Codec.put_varint b g.thing
-  | Find f -> Codec.put_varint b f.db; put_query b f.query; put_select b f.select
+  | Find f ->
+    Codec.put_varint b f.db; put_query b f.query; put_select b f.select;
+    if f.extra <> [] || f.order <> Top.none then put_order b ~extra:f.extra f.order
   | Write w ->
     Codec.put_varint b w.db;
     Codec.put_varint b w.serial;
@@ -199,7 +262,9 @@ let put_request b = function
   | Ping s -> Buffer.add_string b s
   | Admin what -> Codec.put_string b what
   | Follow db -> Codec.put_varint b db
-  | Watch w -> Codec.put_varint b w.db; put_query b w.query; put_select b w.select; Codec.put_varint b w.from
+  | Watch w ->
+    Codec.put_varint b w.db; put_query b w.query; put_select b w.select; Codec.put_varint b w.from;
+    if w.wextra <> [] then put_order b ~extra:w.wextra Top.none
   | Unwatch id -> Codec.put_varint b id
 
 let get_request kind (r : Codec.reader) =
@@ -219,7 +284,8 @@ let get_request kind (r : Codec.reader) =
       let db = Codec.get_varint r in
       let query = get_query r in
       let select = get_select r in
-      Find { db; query; select }
+      let extra, order = get_order r in
+      Find { db; query; select; extra; order }
     else if kind = k_write then
       let db = Codec.get_varint r in
       let serial = Codec.get_varint r in
@@ -239,7 +305,9 @@ let get_request kind (r : Codec.reader) =
       let query = get_query r in
       let select = get_select r in
       let from = Codec.get_varint r in
-      Watch { db; query; select; from }
+      let wextra, order = get_order r in
+      if order <> Top.none then raise (Malformed "a watch keeps every row of its question: Sort, Limit and After are for Find");
+      Watch { db; query; select; from; wextra }
     else if kind = k_unwatch then Unwatch (Codec.get_varint r)
     else raise (Malformed (Printf.sprintf "unknown request kind %d" kind))
   in

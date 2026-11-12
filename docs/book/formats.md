@@ -121,22 +121,23 @@ segments are never used.
 
 A run holds the changes of groups lo+1 .. hi on top of the state at group lo (lo = 0: a bottom run, the whole state
 at hi). The database's state on disk is a chain of runs from 0, each resting on the end of the one below it, plus the
-journal after the newest one. Format 8 holds each fact three times: by thing, by property and value, and by property
-and thing (the **column order**: each property's rows apart, in thing order). It codes every section with a **frame
+journal after the newest one. Format 9 holds each fact three times: by thing, by property and value, and by property
+and thing (the **column order**: each property's rows apart, in thing order), and, for each text property, its
+distinct texts in the order of their bytes (the **text order**: `Prefix`). It codes every section with a **frame
 of reference** (Goldstein et al. 1998,
 Zukowski et al. 2006): a block of values is stored as a base and, for each value, its difference from the base in as
 many bits as the block's largest difference needs (the bit packing of the journal's columns, above); any value is
 read in $O(1)$ without decoding its neighbours.
 
 ```
-header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (8) | 8 database id, 16 bytes
+header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (9) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0
-  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 23 section
+  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 24 section
     offsets (below, the last one the part's end)
-  | part t: rows n | thing range ne | things k | properties np | its 23 section offsets
+  | part t: rows n | thing range ne | things k | properties np | its 24 section offsets
   | layout length | file pages P
-  | 560 CRC of the page table u32 | 564 CRC of bytes 0..564 u32 | zeros to 4096
+  | 576 CRC of the page table u32 | 580 CRC of bytes 0..580 u32 | zeros to 4096
 pages: P pages of 16 KiB at 4096 + 16384 f
 page table, at 4096 + 16384 P: for each page k of the layout (ceil(layout length / 16384) of them), 8 bytes: the file
   page f that holds it (u32; 0xFFFFFFFF: none, the page reads as zeros) | the page's CRC-32C (u32)
@@ -175,7 +176,17 @@ cdir    16 bytes a block          the columns' block directories
 cdata                             the columns' values
 cmh     16 bytes a block          the columns' row offsets (a monotone sequence): headers
 cmb                               their bits
+tord    (np + 1) u64, then u32s   the text order: each property's first entry (the last, the count of all), then the
+                                  distinct texts of each text property's rows in the part, as text ids, in the order
+                                  of their bytes (part t: only the np + 1 zeros)
 ```
+
+**The text order** (format 9). The merge gathers each text property's distinct text ids as it writes that property's
+rows (in value order, so each id once), reads each text once, sorts them by their bytes (UTF-8: the order of their
+code points), and writes the ids. The texts that start with a prefix are one stretch of it, found by two binary
+searches, each step a text read through the cache; a view's texts with a prefix are the union of every run's stretch
+and of the delta's texts of the property (at most a merge's threshold of them, looked at one by one): a superset of
+the texts its facts hold, which the join then checks. Four bytes a distinct text a run.
 
 Part a holds the facts the run adds, part t the facts of the runs below it that it retracts (empty in a bottom run);
 a run adds only facts absent below it and retracts only facts present below it, so every count of a view is a sum of
@@ -317,8 +328,10 @@ A page is the unit of the cache: it is read from the file whole (16,384 bytes at
 table), checked against its CRC, and only then served. A field of 2, 4 or 8 bytes in a table is aligned to its size,
 so none crosses a page; a bit-packed field may, and is then read from both pages.
 
-**Format 7** (format 8 without the column order) is set aside at open in the same way: its groups replayed from
-the journal (a 10 M-fact database: 5.2 s, once), the first merge writing format 8.
+**Format 8** (format 9 without the text order) and **format 7** (format 8 without the column order) are set aside
+at open in the same way: their groups replayed from the journal (a 10 M-fact database from format 7: 5.2 s, once),
+the first merge writing format 9. A version that reads format 8 sets a run of format 9 aside the same way (it says
+"an earlier format (9)") and replays the journal, whose format did not change.
 
 **Formats 5 and 6** (every fact twice in fixed words: by thing a u16 property and an i64 value, by property an i64
 value and a u32 thing, a dense u64 offset a thing slot; format 6 the flag of a derived fact in bit 63 of the value

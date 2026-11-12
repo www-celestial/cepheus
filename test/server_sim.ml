@@ -34,6 +34,7 @@
    message's (no gap, no duplicate, nothing shown before it is durable). *)
 
 open Cepheus
+module Top = Question.Top
 open Cepheus_server
 module C = Check
 
@@ -513,7 +514,7 @@ let send_watch (cl : client) sc cw =
   let id = cl.next_id in
   cl.next_id <- cl.next_id + 1;
   let body = Buffer.create 64 in
-  Wire.put_request body (Wire.Watch { db = 0; query = cw.wq; select = cw.wsel; from });
+  Wire.put_request body (Wire.Watch { db = 0; query = cw.wq; select = cw.wsel; from; wextra = [] });
   Wire.add_frame sc.to_server ~id ~kind:Wire.k_watch ~flags:0 body;
   Hashtbl.replace sc.outstanding id (P_watch cw);
   cw.wid <- Some id
@@ -890,7 +891,7 @@ let client_step w (cl : client) =
               | x :: _ -> Wire.Group (key, [| Wire.Count; Wire.Sum x; Wire.Min x; Wire.Max x |])
               | [] -> Wire.Group (key, [| Wire.Count |]))
           in
-          send cl sc (Wire.Find { db = 0; query = q; select = sel }) (P_find (q, sel, cl.confirmed, known w)))
+          send cl sc (Wire.Find { db = 0; query = q; select = sel; extra = []; order = Top.none }) (P_find (q, sel, cl.confirmed, known w)))
       | 8 when Rng.bool w.r -> send cl sc (Wire.Admin "status") (P_other "status")
       | 8 -> (
         (* a watch: a new one, or one unwatched *)

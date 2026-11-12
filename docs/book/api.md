@@ -407,6 +407,52 @@ let () =
 
 How a question is answered, and what it costs: [architecture](architecture.md#questions), [theory](theory.md#4-generic-join).
 
+## Questions with operators, an order and pages
+
+```ocaml signature
+module Question : sig
+  type item = Pattern of pattern | Range of int * value * value | In of int * value list | Prefix of int * string
+            | Not of item list | Or of item list list
+  type key = { col : int; desc : bool }
+  type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
+end
+val ask : view -> Question.t -> (value array list, error) result
+```
+
+Its names are in the module `Question`, so that `open Cepheus` brings only `Question` and `ask` beside the names it
+always brought (a program's own `Not` or `Pattern` stays its own); `Question.[ ... ]` opens it for a list of items.
+`ask v q` answers a question with `Not`, `Or`, `In` and `Prefix` beside its patterns and ranges, and gives its rows
+sorted, cut and paged: the same meaning and the same bounds as from Cesia ([Not, Or and In](cesia.md#not-or-and-in),
+[Prefix](cesia.md#prefix-the-start-of-a-text), [pages](cesia.md#sort-limit-and-after-pages)). `give` names the
+variables of each row (empty: every variable of the question); a key's `col` is a column of `give`; `limit` 0 gives
+every row; `after` is a row of `give`'s columns. `find` and `query` are unchanged: a question of patterns and ranges,
+given every variable, has the rows `find` gives.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = Result.get_ok (open_ "asks") in
+  let[@warning "-8"] (Ok [ name; city ]) = declare db [ prop "client/name" Ttext; prop "client/city" Ttext ] in
+  List.iter (fun (n, c) -> ignore (write db [ Add (-1, name, Text n); Add (-1, city, Text c) ]))
+    [ "Ada", "Lyon"; "Bo", "Paris"; "Abel", "Lyon"; "Ali", "Paris"; "Cy", "Nice" ];
+  (* the names that start with A, of clients not in Paris, the largest first *)
+  let q =
+    { Question.vars = 2;
+      items = Question.[ Pattern { e = Var 0; p = name; v = Var 1 }; Prefix (1, "A"); Not [ Pattern { e = Var 0; p = city; v = Val (Text "Paris") } ] ];
+      give = [| 1 |]; sort = [ { Question.col = 0; desc = true } ]; limit = 10; after = None }
+  in
+  (match ask (view db) q with
+   | Ok rows -> List.iter (fun r -> print_endline (Value.to_string r.(0))) rows
+   | Error e -> print_endline (message e));
+  close db
+```
+
+```output
+"Ada"
+"Abel"
+```
+
 ## The cache
 
 `set_cache bytes` sets how many bytes of run pages the process keeps in memory, for all its databases at once (1 GiB
