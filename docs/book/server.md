@@ -370,7 +370,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 1 Hello | version varint (1), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
-| 4 Find | handle, question, select | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
+| 4 Find | handle, question, select, then, only when the question has them, its order: a byte 1, its operators (a count; 0), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
@@ -392,6 +392,9 @@ On a follow stream the server pushes (request id 0):
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
   (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
+- **order**: Sort, Limit and After over the select's columns ([pages](cesia.md#sort-limit-and-after-pages)). It
+  follows the select only when the question has it, so that every other question is coded as before; a server that
+  does not know it refuses such a Find ("bytes after the request") rather than answer it unsorted.
 - An **operation**: 0 Add, 1 Retract, 2 Expect a value, 3 Expect none; then the thing (zigzag: a negative id is a new
   thing of the group), the property, the value.
 - Every read names the group of the view it was answered from, every receipt its group: a program can check what it

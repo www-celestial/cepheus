@@ -217,5 +217,6 @@ module Schema = Schema
 module Sim_disk = Sim_disk
 module Snapshot = Snapshot
 module Store = Store
+module Top = Top
 module Value = Value
 module Wal = Wal

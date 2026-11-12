@@ -80,9 +80,10 @@ let intervals nvars ranges =
     ranges;
   r
 
-(* The order of the variables. [est x bound]: the candidates per binding that the best pattern offers x given the
-   variables already bound. The cost of an order is the sum of the estimated partial bindings after each step (each
-   step multiplies by its candidates); every order is tried for up to 7 variables (with pruning), greedily beyond. *)
+(* The order of the variables, and its cost. [est x bound]: the candidates per binding that the best pattern offers x
+   given the variables already bound. The cost of an order is the sum of the estimated partial bindings after each step
+   (each step multiplies by its candidates); every order is tried for up to 7 variables (with pruning), greedily
+   beyond. *)
 let order (v : Store.view) nvars pats ranges =
   let iv = intervals nvars ranges in
   let est x bound =
@@ -127,7 +128,7 @@ let order (v : Store.view) nvars pats ranges =
     go 0 0 1. 0.
   end;
   if !best = [||] then begin
-    let out = Array.make nvars 0 and bound = ref 0 in
+    let out = Array.make nvars 0 and bound = ref 0 and size = ref 1. and cost = ref 0. in
     for k = 0 to nvars - 1 do
       let b = ref (-1) and bc = ref max_int in
       for x = 0 to nvars - 1 do
@@ -137,11 +138,14 @@ let order (v : Store.view) nvars pats ranges =
         end
       done;
       out.(k) <- !b;
-      bound := !bound lor (1 lsl !b)
+      bound := !bound lor (1 lsl !b);
+      size := !size *. float_of_int (max 1 !bc);
+      cost := !cost +. !size
     done;
-    best := out
+    best := out;
+    best_cost := !cost
   end;
-  !best
+  !best, !best_cost
 
 (* Questions run as a fold: [init ()] makes an accumulator, [step acc env] adds a binding (the buffer [env] is reused),
    [merge] joins two accumulators. Above [parallel_min] candidates for the first variable, the candidates are split
@@ -155,7 +159,7 @@ let work = Atomic.make 0
 
 (* What a question will do: its patterns with a variable, its ranges, and the order of its variables; None when it
    has no answer (a constant the view has never seen, or a pattern without variables that is not a fact). *)
-type plan = { pats : pat list; limits : (int * int * int) list; ord : int array }
+type plan = { pats : pat list; limits : (int * int * int) list; ord : int array; cost : float }
 
 let plan (v : Store.view) q =
   match compile v q with
@@ -165,7 +169,7 @@ let plan (v : Store.view) q =
       List.partition (fun pt -> (match pt.pe with W _ -> true | _ -> false) && match pt.pv with W _ -> true | _ -> false) pats
     in
     if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then None
-    else Some { pats; limits; ord = order v q.vars pats limits }
+    else (let ord, cost = order v q.vars pats limits in Some { pats; limits; ord; cost })
 
 (* the first place from [from] in a.(0 .. n-1), sorted, whose value is >= t: steps of 1, 2, 4, ... then a binary search
    (galloping: Bentley, Yao 1976), O(log d) for a place d further *)
@@ -182,12 +186,16 @@ let gallop (a : int array) n from t =
     !lo
   end
 
+(* The planner's estimate of a question's work, in candidates (the cost of its order); 0 when it has no answer *)
+let estimate (v : Store.view) q = match plan v q with None -> 0. | Some p -> p.cost
+
 (* Generic Join: at each level, the pattern with the fewest candidates (exact counts) gives them, and every other
-   pattern on the variable keeps or drops each one with a lookup; nothing is enumerated beyond the smallest set. *)
-let fold (v : Store.view) q ~init ~step ~merge =
+   pattern on the variable keeps or drops each one with a lookup; nothing is enumerated beyond the smallest set.
+   [seq]: on this domain alone, the bindings in the engine's order, so that [step] may stop the fold by an exception. *)
+let fold ?(seq = false) (v : Store.view) q ~init ~step ~merge =
   match plan v q with
   | None -> init ()
-  | Some { pats; limits; ord } ->
+  | Some { pats; limits; ord; cost = _ } ->
     let n = q.vars in
     let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
     let iv = intervals n limits in
@@ -491,7 +499,7 @@ let fold (v : Store.view) q ~init ~step ~merge =
       let flush w = ignore (Atomic.fetch_and_add work !w); w := 0 in
       let x0 = ord.(0) in
       let src, size = choose 0 in
-      let d = if size / 2 >= !parallel_min then !domains else 1 in
+      let d = if (not seq) && size / 2 >= !parallel_min then !domains else 1 in
       if d <= 1 then begin
         let acc = ref (init ()) in
         level 0 acc;

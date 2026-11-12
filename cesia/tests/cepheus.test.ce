@@ -67,6 +67,44 @@ defn isFindRanges()
   value.Equal(below, [{T: 10.0}])
 end
 
+defn isFindSorts()
+  s = shop()?
+  q(after) = (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, Total: t}, Sort: [cepheus.Desc(t)], Limit: 2, After: after}
+  first = cepheus.Find(2, q(missing), s.Db)?
+  next = cepheus.Find(2, q(first[2]), s.Db)?
+  last = cepheus.Find(2, q(next[1]), s.Db)?
+  bug.Assert(value.Equal([r.Total for r in first], [1200.0, 80.5]), "the largest first, two rows")
+  bug.Assert(value.Equal([r.Total for r in next], [10.0]), "the page after the last row seen")
+  value.Len(last) == 0
+end
+
+defn isFindSortsGroups()
+  s = shop()?
+  rows = cepheus.Find(4, (c, i, t, n) -> {
+    Where: [[i, Invoice.Client, c], [c, Client.Name, n], [i, Invoice.Total, t]],
+    Give: {Name: n, Owed: cepheus.Sum(t)},
+    Sort: [cepheus.Desc(cepheus.Sum(t))],
+    Limit: 1,
+  }, s.Db)?
+  value.Equal(rows, [{Name: "Ada", Owed: 1280.5}])
+end
+
+defn isFindLimitKeepsCopies()
+  s = shop()?
+  (* Ada's two invoices give her name twice: a page never splits the copies of its last row *)
+  rows = cepheus.Find(3, (c, i, n) -> {Where: [[i, Invoice.Client, c], [c, Client.Name, n]], Give: {Name: n}, Sort: [n], Limit: 1}, s.Db)?
+  value.Equal(rows, [{Name: "Ada"}, {Name: "Ada"}])
+end
+
+defn isFindSortRefusals()
+  s = shop()?
+  notGiven = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i}, Sort: [t]}, s.Db)
+  noSort = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, After: {T: 10}}, s.Db)
+  short = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, T: t}, Sort: [t], After: {T: 10}}, s.Db)
+  watch = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t]}, s.Db)
+  list.All([notGiven.Error.Code == "invalid", noSort.Error.Code == "invalid", short.Error.Code == "invalid", watch.Error.Code == "invalid"])
+end
+
 defn isFindManyValues()
   s = shop()?
   value.Equal(cepheus.Find(1, (c) -> {Where: [[c, Client.Tags, "vip"]], Give: {C: c}}, s.Db)?, [{C: s.Ada}])

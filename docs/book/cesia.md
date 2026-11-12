@@ -270,6 +270,60 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted.
 
+## Sort, Limit and After: pages
+
+Three more keys of the question sort its rows, cut them, and give the page after a row:
+
+```cesia norun
+page = (after) -> ((i, t) -> {
+  Where: [[i, Invoice.Total, t]],
+  Give: {Invoice: i, Total: t},
+  Sort: [cepheus.Desc(t)],
+  Limit: 2,
+  After: after,
+})
+first = result.Unwrap(cepheus.Find(2, page(missing), db))
+io.Print(first)
+io.Print(cepheus.Find(2, page(first[2]), db))
+```
+
+```text
+[{Invoice: 65537, Total: 1200.0}, {Invoice: 65538, Total: 80.5}]
+Ok([{Invoice: 65540, Total: 10.0}])
+```
+
+- `Sort: [key, ...]`: each key is a field of `Give`, its variable or its aggregate (`cepheus.Desc(cepheus.Sum(t))`
+  when `Give` holds `cepheus.Sum(t)`), ascending, or `cepheus.Desc(key)` for the largest first. Rows equal in the keys
+  are ordered by the other fields of `Give`, by name, so two rows are equal in the order only when they are the same
+  row. Values compare within their type: numbers, dates and money as numbers; `false` before `true`; links by their
+  id, the order the things were made in; texts by their bytes (UTF-8: the order of their code points, so "Z" comes
+  before "a" and "é" after "z", not a language's order); floats by IEEE 754's totalOrder.
+- `Limit: k`: the first k rows, and the copies of the k-th when `Give` leaves out a variable (a page never splits
+  identical rows). Without `Sort`, k rows of the answer, in the engine's order.
+- `After: row`: the rows that come after this row in the order: the next page. It needs `Sort`, and a value for
+  every field of `Give`; the row need not be in the database any more.
+
+**The previous page** is the same question with each key reversed (`Desc` added or taken away) and `After` the first
+row of the current page; reverse its rows (`list.Reverse`). There is no offset ("skip the first 4,000"): a page after
+a row costs the same at any depth, where an offset counts every row it skips, and a row written between two pages
+moves them by one. A row that is unchanged at both pages' groups comes once; one written between them shows at its
+place, if that place is after the cursor.
+
+**How it is answered.** Two ways give the same rows ([theory](theory.md#4-generic-join)):
+
+- by a **heap**: every answer of the question, kept in a buffer of about twice k rows, sorted and cut back to its
+  first k each time it fills: the work of the question itself plus $O(N \log k)$ comparisons, with $k$ rows held,
+  and k rows sent instead of $N$;
+- **in the index's order**, when the first key is an int, a date, money or a link that a pattern gives as its value:
+  the question is asked again on windows of that variable's values read from the property's index, from the cursor
+  on, each window holding twice as many facts as the one before, until k rows are found: the work of the rows the
+  page needs. Its budget is the planner's estimate of the heap's work; past it, the heap answers, so this way never
+  costs more than about twice the other (the rule of the ski-rental problem: rent until the rent reaches the price,
+  then buy).
+
+`Watch` refuses `Sort`, `Limit` and `After` (a watch keeps every row of its question): sort the rows it gives with
+`list.SortBy`.
+
 ## Watch: live questions
 
 A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64)` takes the same question as

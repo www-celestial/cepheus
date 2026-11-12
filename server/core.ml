@@ -185,9 +185,9 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
-let find c ~id ~kind d (q : Query.t) (sel : Wire.select) =
+let find c ~id ~kind d (q : Query.t) (sel : Wire.select) order =
   let v = d.view () in
-  match Answer.answer v q sel with
+  match Answer.answer ~order v q sel with
   | a ->
     let typs = Array.init a.cols a.typ in
     send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n
@@ -371,7 +371,7 @@ let handle c ~id ~kind (r : Codec.reader) =
            | Some d -> ( try get c ~id ~kind d g.thing with Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m));
           Continue
         | _, Wire.Find f ->
-          (match readable c ~id ~kind f.db with None -> () | Some d -> find c ~id ~kind d f.query f.select);
+          (match readable c ~id ~kind f.db with None -> () | Some d -> find c ~id ~kind d f.query f.select f.order);
           Continue
         | _, Wire.Write w ->
           (match writable c ~id ~kind w.db with

@@ -89,6 +89,9 @@ defaults, and the cache's size (`set_cache`).
 | domains of a question | the machine's recommended count, at most 8 | `Query.domains` |
 | slices | $\min(\text{candidates}, 16 \times \text{domains})$, taken in turn from a shared counter | `Query.fold` |
 | the property of a pattern | a constant: no variable in the property position | `Query.pattern` |
+| Sort, Limit, After | keys: columns of the select; Limit 1 or more (0 on the wire: none), plus the copies of its last row; After needs Sort and a value for every column | `Top.check` |
+| the heap path | a buffer of at most $\max(64, 2k)$ rows a domain before it is sorted and cut back to $k$ | `Top.push` |
+| the index path | the first key an int, a date, money or a link that a pattern gives as its value; windows of $2k$, $4k$, ... facts; a budget of the planner's estimate of the question (`Query.estimate`), past which the heap path answers; taken when the estimate is over $4k$ | `Top.give` |
 
 ## Files and the platform
 

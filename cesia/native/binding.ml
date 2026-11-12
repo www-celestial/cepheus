@@ -528,7 +528,8 @@ let variables ctx a =
   let n = int ctx "cepheus.Find" a.(0) in
   C.list ctx (Array.init n (fun k -> C.Handle ("cepheus.variable", k)))
 
-let question_keys = C.keys [| "Where"; "Give" |]
+let question_keys = C.keys [| "Where"; "Give"; "Sort"; "Limit"; "After" |]
+let desc_keys = C.keys [| "Desc" |]
 let range_keys = C.keys [| "Range"; "Low"; "High"; "Open" |]
 let aggregate_keys = C.keys [| "Sum"; "Min"; "Max"; "Count" |]
 
@@ -536,13 +537,13 @@ type column = Var of int | Agg of Wire.agg
 
 (* a question as the program gives it: its patterns and ranges, its select, and for each field of Give its name, its
    column in the answer and its type *)
-type question = { query : Query.t; select : Wire.select; qkeys : C.keys; at : int array; typs : Value.typ array }
+type question = { query : Query.t; select : Wire.select; qkeys : C.keys; at : int array; typs : Value.typ array; order : Top.order }
 
 let question ctx name d qv nvars =
     let q = map_of ctx name qv in
-    let where, give =
+    let where, give, sort, limit, after =
       match C.fields question_keys q with
-      | [| C.List w; C.Map g |] | [| C.List w; C.Struct g |] -> Array.init (C.length w) (C.item ctx w), g
+      | [| C.List w; (C.Map g | C.Struct g); sort; limit; after |] -> Array.init (C.length w) (C.item ctx w), g, sort, limit, after
       | _ -> C.need ctx name "a question {Where: [patterns], Give: {Name: variable}}" qv
     in
     let var = function C.Handle ("cepheus.variable", k) when k < nvars -> Some k | _ -> None in
@@ -612,7 +613,50 @@ let question ctx name d qv nvars =
     Array.iteri (fun i c -> match c with Var _ -> at.(i) <- !ki; incr ki | Agg _ -> at.(i) <- nk + !ai; incr ai) cols;
     let ctyp i = match cols.(i) with Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j) -> (match vtyp.(j) with Some t -> t | None -> Value.Tint) | Agg Wire.Count -> Value.Tint in
     let typs = Array.init (Array.length cols) ctyp in
-    { query; select; qkeys = C.keys names; at; typs }
+    (* Sort: each key a field of Give (its variable or its aggregate), Desc for descending; then every other field by
+       name, so that rows equal in the order are the same row. After: a row with every field of Give. *)
+    let field_of k =
+      let col_of g = match var g with Some j -> Some (Var j) | None -> (match g with C.Map m | C.Struct m -> (match C.fields aggregate_keys m with
+          | [| s; C.Missing; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Sum (Option.get (var s))))
+          | [| C.Missing; s; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Min (Option.get (var s))))
+          | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> Some (Agg (Wire.Max (Option.get (var s))))
+          | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> Some (Agg Wire.Count)
+          | _ -> None) | _ -> None) in
+      let desc, g = match k with (C.Map m | C.Struct m) when (match C.fields desc_keys m with [| C.Missing |] -> false | _ -> true) -> true, (C.fields desc_keys m).(0) | _ -> false, k in
+      match col_of g with
+      | Some c -> (match List.find_opt (fun i -> cols.(i) = c) (List.init (Array.length cols) Fun.id) with
+          | Some i -> i, desc
+          | None -> refuse "invalid" "Sort's keys are fields of Give: a variable or an aggregate that Give gives")
+      | None -> C.need ctx name "a key of Sort: a variable or an aggregate of Give, or Desc of one" k
+    in
+    let order =
+      if sort = C.Missing && limit = C.Missing && after = C.Missing then Top.none
+      else begin
+        let user = match sort with C.Missing -> [] | C.List l -> List.init (C.length l) (fun i -> field_of (C.item ctx l i)) | v -> C.need ctx name "a list of keys for Sort" v in
+        let keys =
+          if user = [] then []
+          else begin
+            let rest = List.filter (fun i -> not (List.mem_assoc i user)) (List.init (Array.length cols) Fun.id) in
+            let rest = List.sort (fun a b -> compare names.(a) names.(b)) rest in
+            List.map (fun (i, desc) -> { Top.col = at.(i); desc }) user @ List.map (fun i -> { Top.col = at.(i); desc = false }) rest
+          end
+        in
+        let limit = match limit with C.Missing -> 0 | C.Int k when k >= 1 -> k | v -> C.need ctx name "a Limit of 1 row or more" v in
+        let after =
+          match after with
+          | C.Missing -> None
+          | C.Map m | C.Struct m ->
+            if user = [] then refuse "invalid" "After needs Sort: the rows after a row, in an order";
+            let vals = C.fields (C.keys names) m in
+            let a = Array.make (Array.length cols) (Value.Int 0) in
+            Array.iteri (fun i x -> if x = C.Missing then refuse "invalid" "After needs every field of Give: %s is missing" names.(i); a.(at.(i)) <- of_cesia names.(i) typs.(i) x) vals;
+            Some a
+          | v -> C.need ctx name "a row of Give for After" v
+        in
+        { Top.keys; limit; after }
+      end
+    in
+    { query; select; qkeys = C.keys names; at; typs; order }
 
 (* a row of the answer (values) as the program's map *)
 let record_of_row ctx qn (row : Value.t array) = C.record ctx qn.qkeys (Array.init (Array.length qn.at) (fun i -> to_cesia qn.typs.(i) row.(qn.at.(i))))
@@ -628,7 +672,7 @@ let find ctx a =
     let rows =
       match local_state d with
       | Some v -> (
-        match Answer.answer v query select with
+        match Answer.answer ~order:qn.order v query select with
         | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init ncols (fun i -> of_word v typs.(i) (ans.word r at.(i)))))
         | exception Query.Bad m -> refuse "invalid" "%s" m
         | exception Pages.Unreadable m -> refuse "damaged" "%s" m)
@@ -636,7 +680,7 @@ let find ctx a =
         match d.src with
         | Fork _ -> assert false
         | Server s -> (
-          match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select }) with
+          match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; order = qn.order }) with
           | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
           | rep -> server_error rep "Find"))
     in
@@ -699,6 +743,7 @@ let watch ctx a =
     let d = db_of ctx name a.(0) in
     let nvars = int ctx name a.(2) in
     let qn = question ctx name d a.(1) nvars in
+    if qn.order <> Top.none then refuse "invalid" "a watch keeps every row of its question: Sort, Limit and After are for Find";
     let b = Buffer.create 64 in
     Wire.put_query b qn.query;
     Wire.put_select b qn.select;

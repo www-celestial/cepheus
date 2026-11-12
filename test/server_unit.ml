@@ -118,7 +118,11 @@ let rand_request r =
               ranges = List.init (Rng.int r 2) (fun _ -> Rng.int r 3, rand_value r, rand_value r) } in
     let select = if Rng.bool r then Wire.Give (Array.init (Rng.int r 3) (fun _ -> Rng.int r 3))
       else Wire.Group ([| Rng.int r 3 |], [| Wire.Count; Wire.Sum 1; Wire.Min 0; Wire.Max 2 |]) in
-    Wire.Find { db = 0; query = q; select }
+    let order =
+      if Rng.bool r then Top.none
+      else { Top.keys = List.init (Rng.int r 3) (fun _ -> { Top.col = Rng.int r 3; desc = Rng.bool r }); limit = Rng.int r 5;
+             after = (if Rng.bool r then None else Some (Array.init (Rng.int r 3) (fun _ -> rand_value r))) } in
+    Wire.Find { db = 0; query = q; select; order }
   | 4 ->
     let op () = match Rng.int r 4 with
       | 0 -> Resolve.Add (Rng.int r 100 - 50, Rng.int r 40, rand_value r)
@@ -147,6 +151,10 @@ let wire () =
     if n > 0 && (match q with Wire.Ping _ -> false | _ -> true) then begin
       let k = Rng.int r n in
       match Wire.get_request (Wire.request_kind q) (Codec.reader bytes 0 k) with
+      (* a Find cut where its Sort, Limit and After begin is the same question without them: the section is optional,
+         so that a server that does not know it reads every other question as before (a frame's length tells where
+         its body ends: no connection cuts one) *)
+      | Wire.Find f' when (match q with Wire.Find f -> f.order <> Top.none && f'.order = Top.none && f'.query = f.query && f'.select = f.select | _ -> false) -> ()
       | _ -> ok := false
       | exception (Codec.Short | Wire.Malformed _) -> ()
     end
@@ -265,7 +273,7 @@ let rights () =
   let q = { Query.vars = 1; where = [ { Query.e = Var 0; p = Schema.p_name; v = Val (Text "cepheus/name") } ]; ranges = [] } in
   let requests db =
     [ "Open", Wire.Open (if db = 0 then "shop" else "stock"), `Read; "Get", Wire.Get { db; thing = 1 }, `Read;
-      "Find", Wire.Find { db; query = q; select = Wire.Give [||] }, `Read;
+      "Find", Wire.Find { db; query = q; select = Wire.Give [||]; order = Top.none }, `Read;
       "Write", Wire.Write { db; serial = 0; floor = 0; by = 0; why = "t"; ops = [] }, `Write ]
   in
   let right tok db = match tok, db with "w", 0 -> `Write | "r", 0 -> `Read | "o", 1 -> `Write | _ -> `None in
@@ -298,6 +306,21 @@ let rights () =
           | Some _ -> check false "rights: a reply to Follow")
         [ 0; 1 ])
     [ "w"; "r"; "o"; "a" ];
+  (* Sort, Limit and After through the server: the rows the engine gives on the same view, in its order, and an After
+     without Sort refused *)
+  (let ask = session "r" in
+   let q = { Query.vars = 2; where = [ { Query.e = Var 0; p = Schema.p_name; v = Var 1 } ]; ranges = [] } in
+   let order = { Top.keys = [ { col = 0; desc = true } ]; limit = 2; after = None } in
+   let want =
+     let a = Answer.answer ~order (d0.view ()) q (Wire.Give [| 1 |]) in
+     List.init a.n (fun i -> [| Store.value (d0.view ()) (a.typ 0) (a.word i 0) |])
+   in
+   (match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; order }) with
+    | Some (Wire.Rows r) -> check (List.length want = 2 && r.rows = want) "order: the server's rows are the engine's, sorted and cut"
+    | _ -> check false "order: no rows");
+   match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; order = { Top.none with after = Some [| Value.Text "a" |] } }) with
+   | Some (Wire.Err { code = "invalid"; _ }) -> check true ""
+   | _ -> check false "order: After without Sort is refused");
   (* an unknown token, and requests before Hello *)
   let ask = session "nobody" in
   check (match ask (Wire.Get { db = 0; thing = 1 }) with Some (Wire.Err { code = "auth"; _ }) -> true | _ -> false) "rights: an unknown token";

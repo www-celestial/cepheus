@@ -251,6 +251,9 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `Insert needs at least one field of K`, `Update needs at least one field of K`, `Update needs the id of a thing, not N`, `a group needs at least one operation` | an empty write | write something |
 | `invalid` | `P holds several values: change them with Write, Add and Retract` | Update of a field of many values | `cepheus.Write` with `Add` and `Retract` |
 | `invalid` | `Above, Below and Between are for ints, dates and money, not a T`; `a variable of Above, Below or Between appears in no pattern` | a range on another type, or on a variable of no pattern | filter the rows in Cesia (`list.Filter`) |
+| `invalid` | `Sort's keys are fields of Give: a variable or an aggregate that Give gives` | a key of Sort that Give does not give | add it to Give (After is a row: it holds every key) |
+| `invalid` | `After needs Sort: the rows after a row, in an order`; `After needs every field of Give: F is missing`; `After's N needs a T, not V` | a cursor without an order, or not a whole row of Give | give Sort, and a row of an earlier answer |
+| `invalid` | `a watch keeps every row of its question: Sort, Limit and After are for Find` | `Watch` with Sort, Limit or After | watch without them, and sort the rows in Cesia (`list.SortBy`) |
 | `invalid` | `H is reached over the network: give the cluster's certificate authority, ca = "/etc/cepheus/ca.pem"` | Connect over TCP without `ca` | the cluster's `ca.pem` (made by `cepheus cluster init`) |
 | `invalid` | `a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server` | Fork of a database reached over the network | fork `cepheus.Empty`, or run on the server's machine |
 | `closed` | `this database was closed` | a call on a database after `cepheus.Close` | Connect again |

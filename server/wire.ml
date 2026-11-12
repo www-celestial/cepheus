@@ -47,7 +47,8 @@ type request =
   | Hello of { version : int; token : string; program : string; session : int }
   | Open of string
   | Get of { db : int; thing : int }
-  | Find of { db : int; query : Query.t; select : select }
+  | Find of { db : int; query : Query.t; select : select; order : Top.order }
+      (** [order]: Sort, Limit and After; Top.none: none, and the request is coded as before them *)
   | Write of { db : int; serial : int; floor : int; by : int; why : string; ops : Resolve.op list }
   | Ping of string
   | Admin of string
@@ -136,6 +137,37 @@ let put_select b : select -> unit = function
 
 let get_vars r = Array.init (count r) (fun _ -> Codec.get_varint r)
 
+(* What a question asks beyond its patterns, ranges and select, after them in a Find: a byte 1, then its operators
+   (none yet: a count of 0), its Sort (a count, then each key's column and a byte 1 when descending), its Limit (0:
+   none) and its After (a byte 0, or 1 then a count and the values). A question without them is coded as before
+   them, so that a server that does not know them reads every other question as it did, and refuses this one (bytes
+   after the request). *)
+let put_order b (o : Top.order) =
+  Buffer.add_char b '\001';
+  Codec.put_varint b 0;
+  Codec.put_varint b (List.length o.keys);
+  List.iter (fun (k : Top.key) -> Codec.put_varint b k.col; Buffer.add_char b (if k.desc then '\001' else '\000')) o.keys;
+  Codec.put_varint b o.limit;
+  match o.after with
+  | None -> Buffer.add_char b '\000'
+  | Some a -> Buffer.add_char b '\001'; Codec.put_varint b (Array.length a); Array.iter (Value.encode b) a
+
+let get_order r : Top.order =
+  if Codec.at_end r then Top.none
+  else begin
+    if Codec.get_byte r <> 1 then raise (Malformed "an unknown extension of a question");
+    if Codec.get_varint r <> 0 then raise (Malformed "an operator this server does not know");
+    let keys =
+      List.init (count r) (fun _ ->
+          let col = Codec.get_varint r in
+          let desc = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
+          { Top.col; desc })
+    in
+    let limit = Codec.get_varint r in
+    let after = match Codec.get_byte r with 0 -> None | 1 -> Some (Array.init (count r) (fun _ -> Value.decode r)) | _ -> raise Codec.Short in
+    { keys; limit; after }
+  end
+
 let get_select r : select =
   match Codec.get_byte r with
   | 0 -> Give (get_vars r)
@@ -187,7 +219,7 @@ let put_request b = function
     Codec.put_varint b h.version; Codec.put_string b h.token; Codec.put_string b h.program; Codec.put_varint b h.session
   | Open name -> Codec.put_string b name
   | Get g -> Codec.put_varint b g.db; Codec.put_varint b g.thing
-  | Find f -> Codec.put_varint b f.db; put_query b f.query; put_select b f.select
+  | Find f -> Codec.put_varint b f.db; put_query b f.query; put_select b f.select; if f.order <> Top.none then put_order b f.order
   | Write w ->
     Codec.put_varint b w.db;
     Codec.put_varint b w.serial;
@@ -219,7 +251,8 @@ let get_request kind (r : Codec.reader) =
       let db = Codec.get_varint r in
       let query = get_query r in
       let select = get_select r in
-      Find { db; query; select }
+      let order = get_order r in
+      Find { db; query; select; order }
     else if kind = k_write then
       let db = Codec.get_varint r in
       let serial = Codec.get_varint r in

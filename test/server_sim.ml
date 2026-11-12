@@ -890,7 +890,7 @@ let client_step w (cl : client) =
               | x :: _ -> Wire.Group (key, [| Wire.Count; Wire.Sum x; Wire.Min x; Wire.Max x |])
               | [] -> Wire.Group (key, [| Wire.Count |]))
           in
-          send cl sc (Wire.Find { db = 0; query = q; select = sel }) (P_find (q, sel, cl.confirmed, known w)))
+          send cl sc (Wire.Find { db = 0; query = q; select = sel; order = Top.none }) (P_find (q, sel, cl.confirmed, known w)))
       | 8 when Rng.bool w.r -> send cl sc (Wire.Admin "status") (P_other "status")
       | 8 -> (
         (* a watch: a new one, or one unwatched *)

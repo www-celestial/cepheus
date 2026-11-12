@@ -21,10 +21,39 @@ let append a b = for i = 0 to b.n - 1 do push a b.a.(i) done; a
    rows, the type of each column and the index word of each cell (no value built). Raises Query.Bad. *)
 type answer = { cols : int; n : int; typ : int -> Value.typ; word : int -> int -> int }
 
-let answer (v : Store.view) (q : Query.t) (sel : Wire.select) =
+(* the answer from rows held whole (sorted, cut) *)
+let of_rows cols (typs : Value.typ array) (rows : int array array) =
+  { cols; n = Array.length rows; typ = (fun j -> typs.(j)); word = (fun i j -> rows.(i).(j)) }
+
+(* a property of a pattern that gives x as its value, the one with the fewest facts: the index path of Sort reads it *)
+let lead (v : Store.view) (q : Query.t) x =
+  List.fold_left
+    (fun best (pt : Query.pattern) ->
+      match pt.v, best with
+      | Var y, None when y = x -> Some pt.p
+      | Var y, Some b when y = x && Store.count_prop v pt.p < Store.count_prop v b -> Some pt.p
+      | _ -> best)
+    None q.where
+
+let answer ?(order = Top.none) (v : Store.view) (q : Query.t) (sel : Wire.select) =
   let ty = Query.types v q in
   let var x = if x < 0 || x >= q.vars then Query.bad "variable %d out of range" x in
   match sel with
+  | Wire.Give give when order <> Top.none ->
+    let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
+    Array.iter var give;
+    let typs = Array.map (fun x -> ty.(x)) give in
+    let src =
+      { Top.fold =
+          (fun range ~seq ~init ~step ~merge ->
+            let q = match range with None -> q | Some r -> { q with ranges = r :: q.ranges } in
+            Query.fold ~seq v q ~init ~step ~merge);
+        project = (fun env -> Array.map (fun x -> env.(x)) give);
+        var = (fun c -> Some give.(c));
+        lead = lead v q;
+        estimate = (fun () -> Query.estimate v q) }
+    in
+    of_rows (Array.length give) typs (Top.give v ~typs src order)
   | Wire.Give give ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;
@@ -85,5 +114,12 @@ let answer (v : Store.view) (q : Query.t) (sel : Wire.select) =
       if j < nk then ty.(keys.(j))
       else match aggs.(j - nk) with Wire.Count -> Value.Tint | Wire.Sum y | Wire.Min y | Wire.Max y -> ty.(y)
     in
-    let word i j = let k, s = groups.(i) in if j < nk then k.(j) else s.(j - nk) in
-    { cols = nk + na; n = Array.length groups; typ; word }
+    if order = Top.none then begin
+      let word i j = let k, s = groups.(i) in if j < nk then k.(j) else s.(j - nk) in
+      { cols = nk + na; n = Array.length groups; typ; word }
+    end
+    else begin
+      let typs = Array.init (nk + na) typ in
+      let rows = Array.map (fun (k, s) -> Array.append k s) groups in
+      of_rows (nk + na) typs (Top.sort_rows v ~typs order rows)
+    end
