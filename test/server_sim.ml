@@ -34,7 +34,6 @@
    message's (no gap, no duplicate, nothing shown before it is durable). *)
 
 open Cepheus
-module Ask = Question.Ask
 module Top = Question.Top
 open Cepheus_server
 module C = Check

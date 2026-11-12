@@ -318,10 +318,15 @@ value have a thing), or, for several items, when the Not's own question, its oth
 answers of the alternatives are disjoint and none needs to be kept to remove copies (but those of an alternative with
 variables of its own, which may give a binding once for each of their values).
 
-A `Watch` keeps `Not`, `Or` and `In`: its question is answered again, whole, at each frame that changes a fact of one
-of the properties it names, and its change is the difference of the two answers. Its rows are `Find`'s rows, at the
-cost of the whole question a frame that touches it (a watch of patterns alone keeps only the bindings the frame's
-facts change).
+A `Watch` keeps `Not`, `Or`, `In` and `Prefix`, and a change sends only the rows it adds or removes. A frame's fact
+can change only the answers that agree with it at one of the question's patterns, wherever the pattern is: for a
+pattern that holds variables of the question, the answers with those values; for one inside a `Not` or an
+alternative whose variables are all its own, the answers its other items reach from the fact (an invoice paid: its
+client). For each such set of values, the question is answered again with them fixed, before and after the frame, and
+the difference is the change. So a fact added under a `Not` removes the rows it now excludes, a fact removed may give
+rows back, an alternative is read with the ones before it, and `In` and `Prefix` filter the values the fact gives. The
+cost of a frame is that of the answers it touches, not of the whole question (a fact that no variable of the question
+reaches, as a `Not` over a whole property, is the whole question again).
 
 ## Prefix: the start of a text
 

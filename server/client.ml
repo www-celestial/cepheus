@@ -8,7 +8,6 @@
    (Follow); over TCP, or when following fails, they ask the server. The program's code is the same. *)
 
 open Cepheus
-module Ask = Question.Ask
 module Top = Question.Top
 
 type address = Unix_socket of string | Tcp of string * int

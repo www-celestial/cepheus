@@ -69,6 +69,7 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `bench.exe stats NAME [us]` | the summary of numbers read on stdin, one a line, in ms (with `us`: latencies in µs, into a histogram): how the other sides' times go through the same statistics |
 | `bench.exe cpu DIR N` | the writer's work alone: N 5-fact groups into a fork of the database (no disk) |
 | `bench.exe crc` | CRC-32C alone on 24 bytes, 4 KiB, 16 KiB, 1 MiB and 96 MiB from an odd offset: the time of a call and MB/s, median and 95 % interval over `RUNS` runs |
+| `sbench.exe watches DIR` | a change under a watch of `Not`, `Or`, `In` and `Prefix` (one hub each, the changes made in memory), against the question answered again in full: 21 changes each |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | the sale of seats of the [case](case-seats.md): `BUYERS` threads sell out a hall of SEATS seats, the time and what went wrong |
@@ -118,6 +119,13 @@ the socket.
   of the rounds go both ways (Q5 115.4 / 85.5 ms, Q4 58.3 / 59.1 ms), on a machine that other work shared. A first
   build made the test of a candidate's range larger and Q5 10 % slower in two rounds of three: the test of a variable
   with no range is again the one it was (an `In` or a `Prefix` gives its variable a range of its own).
+- **Watches.** A change under a watch of each operator, against the question answered again in full (`sbench.exe
+  watches`: one hub a watch, 21 changes made in memory, each of which changes the watch's rows; medians): `Not` (the
+  clients of city-7 with no unpaid invoice; an invoice of one of them unpaid, then paid again) 46 µs against 3.45 ms;
+  `Or` (city-7 or one e-mail; a client moved to city-7) 14.1 µs against 104 µs; `In` (city-7 or city-8) 20.0 µs
+  against 223 µs; `Prefix` (e-mails starting with c1234; one changed to such an e-mail) 13.1 µs against 17.9 µs, its
+  whole answer being 11 rows. A change costs the answers it touches: the frame finds the clients the fact reaches,
+  answers the question for them before and after, and sends the difference.
 - **Its cost.** The text order adds 4 bytes a distinct text to a run: the 10 M-fact run 68 MB against 67 MB in
   format 8. A full merge of the base: 2.3 s. The first open of data of format 8 sets its runs aside and replays the
   journal: 5.9 s, once.

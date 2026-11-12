@@ -311,7 +311,15 @@ let dense ?range (v : Store.view) (t : t) (c : conj) =
       ranges = List.map (fun (x, lo, hi) -> dense.(x), lo, hi) ranges }
   in
   let pats = List.map (fun pt -> Pattern pt) c.pats in
-  q, dense, back, List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix_set v pats x p) c.prefixes
+  (* a Prefix on a variable an In fixes already (a watch's key): the In's texts that start with it, no search *)
+  let prefix x p =
+    match List.find_opt (fun (y, _) -> y = x) c.ins with
+    | Some (_, l) ->
+      let n = String.length p in
+      Array.of_list (List.filter (fun w -> let t = Store.text v w in String.length t >= n && String.sub t 0 n = p) (Array.to_list (words_of v typs.(x) l)))
+    | None -> prefix_set v pats x p
+  in
+  q, dense, back, List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes
 
 let fold ?(seq = false) ?(budget = max_int) ?range (v : Store.view) (t : t) ~init ~step ~merge =
   let spent = Atomic.make 0 in

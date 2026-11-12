@@ -420,7 +420,19 @@ let live seed =
                   [ Ask.Or [ [ Pattern { e = Var 0; p = tag; v = Val (Text "hot") } ]; [ Pattern { e = Var 0; p = score; v = Var 1 }; Range (1, Int 10, Int 50) ] ] ], Wire.Give [| 0 |]);
        (fun () -> { Query.vars = 2; where = [ { e = Var 0; p = score; v = Var 1 } ]; ranges = [] }, [ Ask.In (1, List.init 3 (fun _ -> Value.Int (Rng.int r 60))) ], Wire.Give [| 0; 1 |]);
        (fun () -> { Query.vars = 3; where = [ { e = Var 0; p = name; v = Var 1 } ]; ranges = [] }, [ Ask.Not [ Pattern { e = Var 2; p = owner; v = Var 0 } ] ], Wire.Group ([| 1 |], [| Wire.Count |]));
-       (fun () -> { Query.vars = 2; where = [ { e = Var 0; p = owner; v = Var 1 } ]; ranges = [] }, [ Ask.In (1, List.init 2 (fun _ -> Value.Link (pick ()))) ], Wire.Give [| 0 |]) |]
+       (fun () -> { Query.vars = 2; where = [ { e = Var 0; p = owner; v = Var 1 } ]; ranges = [] }, [ Ask.In (1, List.init 2 (fun _ -> Value.Link (pick ()))) ], Wire.Give [| 0 |]);
+       (* Prefix, on a text of the question *)
+       (fun () -> { Query.vars = 2; where = [ { e = Var 0; p = name; v = Var 1 } ]; ranges = [] }, [ Ask.Prefix (1, prefixes.(Rng.int r 3)) ], Wire.Give [| 0; 1 |]);
+       (* a Not whose own variable has a condition, and a Prefix inside it; a chain through the Not's own thing *)
+       (fun () -> { Query.vars = 4; where = [ { e = Var 0; p = name; v = Var 1 } ]; ranges = [] },
+                  [ Ask.Not [ Pattern { e = Var 2; p = owner; v = Var 0 }; Pattern { e = Var 2; p = score; v = Var 3 }; Range (3, Int 20, Int 60) ] ], Wire.Give [| 0 |]);
+       (fun () -> { Query.vars = 3; where = [ { e = Var 0; p = score; v = Var 1 } ]; ranges = [] },
+                  [ Ask.Not [ Pattern { e = Var 0; p = name; v = Var 2 }; Prefix (2, prefixes.(Rng.int r 3)) ] ], Wire.Give [| 0; 1 |]);
+       (* an Or that binds a variable of the question, with an alternative of its own variable, and a sum over it *)
+       (fun () -> { Query.vars = 3; where = []; ranges = [] },
+                  [ Ask.Or [ [ Pattern { e = Var 0; p = score; v = Var 1 }; Range (1, Int 0, Int 30) ];
+                             [ Pattern { e = Var 0; p = score; v = Var 1 }; Pattern { e = Var 0; p = owner; v = Var 2 } ] ] ],
+       Wire.Group ([||], [| Wire.Count; Wire.Sum 1 |])) |]
   in
   let watches = ref [] in
   let add () =
@@ -462,12 +474,19 @@ let live seed =
      | Error _ -> ());
     if Rng.int r 8 = 0 then add ();
     let fl = C.F.elements (C.facts_of_view !v) in
+    (* a token that may read every kind but the owner's: its watch is denied when a pattern names it (inside Not and
+       Or too), and otherwise its rows are the answer over the facts it may read *)
+    let table = Bytes.make (Schema.count !v.schema) '\001' in
+    Bytes.set table owner '\000';
+    let readable = List.filter (fun (_, p, _) -> p <> owner) fl in
     List.iter
       (fun (q, extra, sel, rows) ->
         incr live_checks;
         let a = Ask.compile !v q extra in
         let typs = Ask.typs_of a in
-        let _, want = rows_of typs (bindings_ask fl q extra a.outer) sel in
+        let denied = Core.unreadable table !v q extra <> None in
+        C.check (denied = List.exists (fun (pt : Query.pattern) -> pt.p = owner) (Ask.patterns q extra)) "seed %d: live: the token's right" seed;
+        let _, want = rows_of typs (bindings_ask (if denied then fl else readable) q extra a.outer) sel in
         let key r = let b = Buffer.create 16 in Array.iter (Value.encode b) r; Buffer.contents b in
         let norm l = List.sort compare (List.map key l) in
         match !rows with
@@ -482,5 +501,6 @@ let () =
   (match !one with Some s -> run s; live s | None -> for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
   Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path, %d given up for the heap path\n"
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
-  Printf.printf "questions: %d checks of live questions with Not, Or and In after a frame\n" !live_checks;
+  Printf.printf "questions: %d checks of live questions with Not, Or, In and Prefix after a frame (%d frames answered by their keys, %d by the whole question)\n"
+    !live_checks (Atomic.get Live.keyed) (Atomic.get Live.whole);
   C.finish "questions"

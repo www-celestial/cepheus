@@ -8,7 +8,6 @@
 
 open Cepheus
 module Ask = Question.Ask
-module Top = Question.Top
 
 type db = {
   name : string;

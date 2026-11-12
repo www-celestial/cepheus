@@ -527,9 +527,12 @@ answer again), the rows the program holds, the change applied, are exactly `Find
 durable group (G1: no crash can take it back). The groups of a watch's messages only grow, and every group that
 changed the rows between two messages is in the second one's change: no change is lost, none comes twice, whatever
 breaks in between (the connection, the server by `kill -9`, the program's reading). A watch of a question with `Not`, `Or`, `In` or
-`Prefix` keeps the promise by answering its question again, whole, at each frame that changes a fact of one of the
-properties it names, and sending the difference (multisets); `test/questions.ml` checks its rows against the oracle
-after every frame.
+`Prefix` keeps the promise by its keys: a binding whose membership a frame changes agrees with one of the frame's facts
+at a pattern of the question (a binding that agrees with none reads no changed fact), so the bindings with the values
+those facts give (or, for a pattern whose variables are all a `Not`'s or an alternative's own, the values its other
+items reach, before and after the frame) are answered again before and after, and the change is their difference;
+`test/questions.ml` checks its rows against the oracle after every frame, and a restricted token's against the
+oracle over the facts it may read.
 
 *Conditions.* The question is a conjunctive query (`Find`'s patterns and ranges), with `Give` or aggregates. A program
 that reads slower than the changes come gets the answer again rather than every change (it then holds `Find`'s rows at

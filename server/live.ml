@@ -23,9 +23,15 @@
    Aggregates (Group): a row a key, kept by difference: the count and the sums add and subtract; a minimum or a
    maximum that a removal takes away is asked again for its key only.
 
-   Not, Or and In (Ask): a watch whose question has them is answered again, whole, at each frame that changes a fact
-   of one of the properties it names, and its change is the difference of the two answers (multisets): its rows are
-   Find's rows all the same, at a cost of the whole question a frame that touches it.
+   Not, Or, In and Prefix (Ask): the bindings a frame may change are those that agree with one of its facts at a
+   pattern of the question, wherever the pattern is: for a pattern of the question, or one inside a Not or an
+   alternative that holds a variable of the question, the values of those variables (a key); for one whose variables
+   are all the Not's or the alternative's own, the keys its other items give with the fact's values, before and after
+   the frame. A binding that agrees with no fact reads no changed fact, and holds after the frame as before. For each
+   key, the question is answered again with those values fixed (an In of one value a variable), before and after; the
+   bindings added are those after that were not before, the bindings removed the other way, taken as the plain watches'
+   are. The cost of a frame is that of its keys' questions; a fact of a pattern with no variable of the question in its
+   group (a ground fact, a Not with no variable of the question) is the whole question again.
 
    Messages are held until their frame is durable (G5, G13: never shown before a crash can no longer take it back):
    the hub evaluates a frame while it is forced, and gives its messages once it is durable. *)
@@ -57,7 +63,6 @@ type sub = {
   mutable touched : bool;
   mutable plus : row list;
   mutable minus : row list;
-  mutable wrows : row list;  (* a question with Not, Or or In: its rows *)
   net : (row, int) Hashtbl.t;  (* a projecting Give: rows added minus removed *)
   before : (row, row option) Hashtbl.t;  (* Group: a touched key's row before the frame *)
   dirty : (row, unit) Hashtbl.t;  (* Group: a key whose minimum or maximum was removed *)
@@ -76,7 +81,9 @@ and template = {
   subs : (row, sub list) Hashtbl.t;  (* by parameters *)
   slots : (Value.t, int) Hashtbl.t array;  (* each parameter's values among the watches, counted *)
   mutable count : int;
-  extra : Ask.item list;  (* Not, Or and In: the question answered whole at each frame that touches it *)
+  extra : Ask.item list;  (* Not, Or, In and Prefix: the question kept by the keys a frame touches *)
+  outer : bool array;  (* with them: the question's variables (not a Not's or an alternative's own) *)
+  occ : (Query.pattern * Ask.item list option) array;  (* every pattern, and the items of its Not or alternative *)
 }
 
 type held = { tag : int; out : (sub * msg) list }
@@ -178,16 +185,33 @@ let new_template (v : Store.view) key tq nq (sel : Wire.select) =
   let q0 = { tq with vars = nq } in
   { tkey = key; tq; nq; np = tq.vars - nq; pats = Array.of_list tq.where; typs; give; aggs;
     projecting = (Array.length aggs = 0 && projecting q0 give); subs = Hashtbl.create 64;
-    slots = Array.init (tq.vars - nq) (fun _ -> Hashtbl.create 8); count = 0; extra = [] }
+    slots = Array.init (tq.vars - nq) (fun _ -> Hashtbl.create 8); count = 0; extra = []; outer = [||]; occ = [||] }
 
 (* every pattern of a question with Not, Or and In, theirs too: the properties a frame must touch *)
 let all_patterns = Ask.patterns
 
+(* every pattern of a question with operators, with the items of the Not or the alternative it is in (None: the
+   question's own) *)
+let occurrences (q : Query.t) extra =
+  let group l = List.filter_map (function Ask.Pattern p -> Some (p, Some l) | _ -> None) l in
+  let rec of_item = function Ask.Not l -> group l | Or alts -> List.concat_map group alts | _ -> [] in
+  Array.of_list (List.map (fun p -> p, None) q.where @ List.concat_map of_item extra)
+
 let whole_template (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =
   let a = Ask.compile v q extra in
-  let give, aggs = match sel with Wire.Give g -> (if Array.length g = 0 then Array.init q.vars Fun.id else g), [||] | Group (k, a) -> k, a in
+  let give, aggs =
+    match sel with
+    | Wire.Give g -> (if Array.length g = 0 then Array.of_list (List.filter (fun x -> a.outer.(x)) (List.init q.vars Fun.id)) else g), [||]
+    | Group (k, a) -> k, a
+  in
+  let projecting = Array.length aggs = 0 && Array.exists Fun.id (Array.mapi (fun x o -> o && not (Array.mem x give)) a.outer) in
   { tkey = key; tq = q; nq = q.vars; np = 0; pats = Array.of_list (all_patterns q extra); typs = Ask.typs_of a; give; aggs;
-    projecting = false; subs = Hashtbl.create 4; slots = [||]; count = 0; extra }
+    projecting; subs = Hashtbl.create 4; slots = [||]; count = 0; extra; outer = a.outer; occ = occurrences q extra }
+
+(* the bindings of a question with operators that hold these values (an In of one value a variable) *)
+let fixed_bindings (v : Store.view) (q : Query.t) extra (fixes : (int * Value.t) list) =
+  let a = Ask.compile v q (extra @ List.map (fun (x, y) -> Ask.In (x, [ y ])) fixes) in
+  Ask.fold ~budget:!Answer.question_budget v a ~init:(fun () -> []) ~merge:List.rev_append ~step:(fun acc b -> b :: acc)
 
 (* ---- the state of a watch ---- *)
 
@@ -229,6 +253,12 @@ let key_row (t : template) kv (k : key) = if k.n <= 0 then None else Some (Array
 (* the key's state asked again on [v]: its bindings only (the question with the key fixed) *)
 let recount (v : Store.view) (s : sub) kv =
   let t = s.t in
+  if t.extra <> [] then begin
+    let k = { n = 0; acc = agg_start t } in
+    List.iter (fun b -> agg_add t k b) (fixed_bindings v s.q t.extra (Array.to_list (Array.mapi (fun i x -> x, kv.(i)) t.give)));
+    k
+  end
+  else
   let asg = Array.make s.q.vars None in
   Array.iteri (fun i x -> asg.(x) <- Some kv.(i)) t.give;
   let k = { n = 0; acc = agg_start t } in
@@ -238,16 +268,8 @@ let recount (v : Store.view) (s : sub) kv =
 (* the watch's answer now, and its state (the keys of an aggregate) *)
 let answer (v : Store.view) (s : sub) =
   let t = s.t in
-  if t.extra <> [] then begin
-    let sel = if Array.length t.aggs = 0 then Wire.Give t.give else Wire.Group (t.give, t.aggs) in
-    let a = Answer.answer ~extra:t.extra ~budget:!Answer.question_budget v s.q sel in
-    let typs = Array.init a.cols a.typ in
-    let rows = List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))) in
-    s.wrows <- rows;
-    rows
-  end
-  else if Array.length t.aggs = 0 then begin
-    let a = Answer.answer v s.q (Wire.Give t.give) in
+  if Array.length t.aggs = 0 then begin
+    let a = if t.extra = [] then Answer.answer v s.q (Wire.Give t.give) else Answer.answer ~extra:t.extra ~budget:!Answer.question_budget v s.q (Wire.Give t.give) in
     let typs = Array.init a.cols a.typ in
     List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
   end
@@ -264,8 +286,12 @@ let answer (v : Store.view) (s : sub) =
           | Max _ -> a.acc.(i) <- max a.acc.(i) b.acc.(i))
         t.aggs
     in
+    let fold ~init ~merge ~step =
+      if t.extra = [] then Query.fold v s.q ~init ~merge ~step
+      else Ask.fold ~budget:!Answer.question_budget v (Ask.compile v s.q t.extra) ~init ~merge ~step
+    in
     let tbl =
-      Query.fold v s.q ~init:(fun () -> Hashtbl.create 16)
+      fold ~init:(fun () -> Hashtbl.create 16)
         ~merge:(fun a b -> Hashtbl.iter (fun kv k -> match Hashtbl.find_opt a kv with Some k' -> combine k' k | None -> Hashtbl.replace a kv k) b; a)
         ~step:(fun tbl b ->
           let kv = values v t b t.give in
@@ -402,6 +428,82 @@ let side_bindings (v : Store.view) (t : template) (facts : (int * int * Value.t)
         t.pats)
     facts
 
+(* ---- a frame's change of a question with operators ---- *)
+
+(* the values a fact gives a pattern's variables, if it is a fact of that pattern *)
+let assign (pt : Query.pattern) fe (fx : Value.t) =
+  let asg = ref [] and ok = ref true in
+  let set x y = match List.assoc_opt x !asg with Some z -> if not (Value.equal y z) then ok := false | None -> asg := (x, y) :: !asg in
+  (match pt.e with Query.Var x -> set x (Value.Link fe) | Thing c -> if c <> fe then ok := false | Val y -> if not (Value.equal y (Link fe)) then ok := false);
+  (match pt.v with Query.Var x -> set x fx | Thing c -> if not (Value.equal (Link c) fx) then ok := false | Val y -> if not (Value.equal y fx) then ok := false);
+  if !ok then Some !asg else None
+
+(* the keys a group's own question gives (the items of a Not or of an alternative, the fact's values fixed), in each
+   view: the values of the question's variables of the group; None when they cannot be asked alone *)
+let group_keys (vs : Store.view list) (t : template) items asg outer_asg gout =
+  let used = List.sort_uniq compare (List.concat_map Ask.vars_of_item items) in
+  let dense = Array.make t.tq.vars (-1) in
+  List.iteri (fun i x -> dense.(x) <- i) used;
+  let ren = function Query.Var x -> Query.Var dense.(x) | t -> t in
+  let where = List.filter_map (function Ask.Pattern (p : Query.pattern) -> Some { p with Query.e = ren p.e; v = ren p.v } | _ -> None) items in
+  let ranges = List.filter_map (function Ask.Range (x, lo, hi) -> Some (dense.(x), lo, hi) | _ -> None) items in
+  let conds = List.filter_map (function Ask.In (x, l) -> Some (Ask.In (dense.(x), l)) | Prefix (x, p) -> Some (Ask.Prefix (dense.(x), p)) | _ -> None) items in
+  let q = { Query.vars = List.length used; where; ranges } in
+  let fixes = List.map (fun (x, y) -> Ask.In (dense.(x), [ y ])) asg in
+  match
+    List.concat_map
+      (fun (v : Store.view) ->
+        let a = Ask.compile v q (conds @ fixes) in
+        let bs = Ask.fold ~budget:!Answer.question_budget v a ~init:(fun () -> []) ~merge:List.rev_append ~step:(fun acc b -> b :: acc) in
+        List.map (fun b -> outer_asg @ List.filter_map (fun x -> if List.mem_assoc x outer_asg then None else Some (x, Store.value v t.typs.(x) b.(dense.(x)))) gout) bs)
+      vs
+  with
+  | keys -> Some keys
+  | exception Query.Bad _ -> None
+
+(* frames of questions with operators answered by their keys, and those that took the whole question: for the tests *)
+let keyed = Atomic.make 0
+let whole = Atomic.make 0
+
+(* the bindings a frame adds to and removes from a question with operators, as words of v1 and v0 *)
+let whole_delta (v0 : Store.view) (v1 : Store.view) (t : template) (facts : (int * int * Value.t) list) =
+  let keys = Hashtbl.create 16 and all = ref false in
+  let enc k = let b = Buffer.create 32 in List.iter (fun (x, y) -> Codec.put_varint b x; Value.encode b y) (List.sort compare k); Buffer.contents b in
+  let add k = Hashtbl.replace keys (enc k) k in
+  List.iter
+    (fun (fe, fp, fx) ->
+      Array.iter
+        (fun ((pt : Query.pattern), grp) ->
+          if (not !all) && pt.p = fp then
+            match assign pt fe fx with
+            | None -> ()
+            | Some asg -> (
+              let outer_asg = List.filter (fun (x, _) -> t.outer.(x)) asg in
+              match grp with
+              | None -> if outer_asg = [] then all := true else add outer_asg
+              | Some items -> (
+                let gout = List.filter (fun x -> t.outer.(x)) (List.sort_uniq compare (List.concat_map Ask.vars_of_item items)) in
+                if gout = [] then all := true
+                else if List.for_all (fun x -> List.mem_assoc x outer_asg) gout then add outer_asg
+                else match group_keys [ v0; v1 ] t items asg outer_asg gout with Some ks -> List.iter add ks | None -> all := true)))
+        t.occ)
+    facts;
+  let bkey b = let buf = Buffer.create 32 in Array.iteri (fun x w -> if t.outer.(x) then Codec.put_int buf w) b; Buffer.contents buf in
+  let set (v : Store.view) =
+    let h = Hashtbl.create 64 in
+    let put b = Hashtbl.replace h (bkey b) b in
+    if !all then List.iter put (fixed_bindings v t.tq t.extra [])
+    else Hashtbl.iter (fun _ k -> List.iter put (fixed_bindings v t.tq t.extra k)) keys;
+    h
+  in
+  if Hashtbl.length keys = 0 && not !all then [], []
+  else begin
+    Atomic.incr (if !all then whole else keyed);
+    let r0 = set v0 and r1 = set v1 in
+    let minus a b = Hashtbl.fold (fun k x acc -> if Hashtbl.mem b k then acc else x :: acc) a [] in
+    minus r1 r0, minus r0 r1
+  end
+
 (* the facts whose presence the groups change, with the sign of the change: a fact added and then retracted in one
    frame changes nothing *)
 let net_changes (groups : Group.t list) =
@@ -422,17 +524,6 @@ let net_changes (groups : Group.t list) =
   List.filter_map (fun k -> let d = Hashtbl.find net k in if d = 0 then None else Some (k, d)) (List.rev !order)
 
 let give h tag out = if out <> [] then h.held <- h.held @ [ { tag; out } ]
-
-(* the rows added and removed from [a] to [b], as multisets *)
-let diff (a : row list) (b : row list) =
-  let key r = let buf = Buffer.create 32 in Array.iter (Value.encode buf) r; Buffer.contents buf in
-  let n = Hashtbl.create 64 in
-  List.iter (fun r -> let k = key r in Hashtbl.replace n k (match Hashtbl.find_opt n k with Some (c, _) -> c - 1, r | None -> -1, r)) a;
-  List.iter (fun r -> let k = key r in Hashtbl.replace n k (match Hashtbl.find_opt n k with Some (c, _) -> c + 1, r | None -> 1, r)) b;
-  Hashtbl.fold
-    (fun _ (c, r) (ad, rm) ->
-      if c > 0 then (List.init c (fun _ -> r) @ ad, rm) else if c < 0 then (ad, List.init (-c) (fun _ -> r) @ rm) else (ad, rm))
-    n ([], [])
 
 let remove h s =
   if not s.gone then s.gone <- true;
@@ -519,22 +610,18 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
         (match
            Hashtbl.iter
              (fun _ t ->
-               if t.extra <> [] then
-                 Hashtbl.iter
-                   (fun _ ss ->
-                     List.iter
-                       (fun s ->
-                         if not s.gone then begin
-                           let before = s.wrows in
-                           match answer v1 s with
-                           | after ->
-                             let added, removed = diff before after in
-                             if added <> [] || removed <> [] then wholes := (s, Change { group = v1.group; added; removed }) :: !wholes
-                           | exception Query.Over_budget n ->
-                             wholes := (s, Ended { code = "too_large"; message = Printf.sprintf "the question passed the server's budget of %d candidates" n }) :: !wholes
-                         end)
-                       ss)
-                   t.subs
+               if t.extra <> [] then begin
+                 let each f = Hashtbl.iter (fun _ ss -> List.iter (fun s -> if not s.gone then f s) ss) t.subs in
+                 match whole_delta v0 v1 t (List.map fst changes) with
+                 | added, removed ->
+                   if added <> [] || removed <> [] then
+                     each (fun s ->
+                         if not s.touched then touched := s :: !touched;
+                         List.iter (take v1 s 1) added;
+                         List.iter (take v0 s (-1)) removed)
+                 | exception Query.Over_budget n ->
+                   each (fun s -> wholes := (s, Ended { code = "too_large"; message = Printf.sprintf "the question passed the server's budget of %d candidates" n }) :: !wholes)
+               end
                else begin
                  if plus <> [] then side_bindings v1 t plus (Lazy.force dplus) 1 touched;
                  if minus <> [] then side_bindings v0 t minus (Lazy.force dminus) (-1) touched
@@ -611,12 +698,12 @@ let subscribe ?(extra = []) h (q : Query.t) (sel : Wire.select) ~from ~(emit : m
         | None -> if extra = [] then new_template v key tq q.vars sel else whole_template v key q sel extra
       in
       let s =
-        { sid = h.next; t; params; q; emit; gone = false; keys = Hashtbl.create 8; touched = false; plus = []; minus = []; wrows = [];
+        { sid = h.next; t; params; q; emit; gone = false; keys = Hashtbl.create 8; touched = false; plus = []; minus = [];
           net = Hashtbl.create 8; before = Hashtbl.create 8; dirty = Hashtbl.create 8 }
       in
       let first =
         if from > 0 && from >= h.ring_from && from <= v.group && not (touched_since h { q with where = all_patterns q extra } from) then begin
-          if extra <> [] then ignore (answer v s);
+          if extra <> [] && Array.length t.aggs > 0 then ignore (answer v s);
           (* the keys of an aggregate are needed for the changes to come *)
           if Array.length t.aggs > 0 then ignore (answer v s);
           Same { group = v.group }

@@ -24,7 +24,6 @@
                                        in microseconds into a histogram) *)
 
 open Cepheus
-module Ask = Question.Ask
 module Top = Question.Top
 
 let now = Unix.gettimeofday
