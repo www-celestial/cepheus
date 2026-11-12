@@ -220,7 +220,7 @@ type db = {
   group : int;
   props : (int * Schema.prop) list;
   mutable local : Follower.t option;  (* followed in this process *)
-  wants_local : bool;
+  mutable wants_local : bool;
   mutable retry_at : float;  (* a follower that stopped (the server restarted) is made again from this time on *)
 }
 
@@ -305,6 +305,9 @@ let follow_loop fc fol () =
   Follower.stop fol;
   fclose fc
 
+(* the server refuses to follow for this token: one that may not read every kind *)
+exception Not_followed
+
 (* a second connection, Follow on it: the page and the runs passed, the follower made, the rest applied by a domain
    of its own; None over TCP, or when the server refuses (the reads then go to the server) *)
 let follow c handle =
@@ -328,6 +331,7 @@ let follow c handle =
         match ask 1 (Wire.Hello { version = Wire.version; token = c.token; program = c.program ^ " (follow)"; session = 0 }) with
         | Wire.Welcome _ -> (
           match ask 2 (Wire.Follow handle) with
+          | Wire.Err { code = "denied"; _ } -> raise Not_followed
           | Wire.Start st ->
             (* the handshake is over: the stream waits for the server's groups as long as there are none *)
             set_timeouts fd 0.;
@@ -345,6 +349,7 @@ let follow c handle =
         c.follows <- (fd, d) :: c.follows;
         Some fol
       | None -> fclose fc; None
+      | exception Not_followed -> fclose fc; raise Not_followed
       | exception (Broken _ | Follower.Stream _ | Codec.Short | Unix.Unix_error _ | Failure _ | Wire.Malformed _) -> fclose fc; None))
 
 (* the state to read locally, if this database is followed: None when it is not, or no longer; a follower that
@@ -353,7 +358,8 @@ let local_view c db =
   match db.local with
   | Some f when not (Follower.dead f) -> Follower.view f
   | _ when db.wants_local && Unix.gettimeofday () >= db.retry_at -> (
-    db.local <- follow c db.handle;
+    (* a token that may not read every kind is never followed: its reads stay at the server *)
+    (db.local <- try follow c db.handle with Not_followed -> db.wants_local <- false; None);
     match db.local with
     | Some f -> Follower.view f
     | None -> db.retry_at <- Unix.gettimeofday () +. 0.1; None)
@@ -395,8 +401,8 @@ let read_call c req = with_retry c (fun () -> call c req) (fun m -> raise (Broke
 let open_db ?(local = true) c name =
   match read_call c (Wire.Open name) with
   | Wire.Opened o ->
-    Ok { handle = o.db; group = o.group; props = o.props; local = (if local then follow c o.db else None); wants_local = local;
-         retry_at = 0. }
+    let fol, wants = if local then (match follow c o.db with f -> f, true | exception Not_followed -> None, false) else None, false in
+    Ok { handle = o.db; group = o.group; props = o.props; local = fol; wants_local = wants; retry_at = 0. }
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Open" })
 
 let prop db name = List.find_map (fun (p, (d : Schema.prop)) -> if d.name = name then Some p else None) db.props

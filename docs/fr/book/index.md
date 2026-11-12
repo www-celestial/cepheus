@@ -3,6 +3,13 @@
 Lisez les pages dans cet ordre pour apprendre Cepheus ; allez aux pages de référence quand il vous faut une réponse
 exacte.
 
+**Commencer**
+- [Démarrage rapide](quickstart.md) : construire Cepheus, lancer un serveur, et faire tourner un premier programme
+  Cesia qui écrit et pose une question, en une dizaine de minutes.
+- [En production](production.md) : un service systemd, une sauvegarde chaque nuit et un exercice de restauration, ce
+  qu'il faut surveiller dans le status et le log, les mises à jour, et que faire après une panne ou une coupure de
+  courant.
+
 **Apprendre**
 1. [Concepts](concepts.md) : les faits et le modèle entity–attribute–value, le schéma, les groupes (les transactions),
    les vues, l'isolation exactement, les questions, les forks, les bases de données.
