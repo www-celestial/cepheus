@@ -1,4 +1,7 @@
-(* The wire protocol, version 1. A connection carries frames both ways:
+(* The wire protocol, versions 1 and 2. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+   After: below), and nothing else: a server speaks both, a program says in Hello the version it speaks, and against a
+   server that speaks 1 only a program speaks 1 (Client.hello) and asks no question with the extension. A connection
+   carries frames both ways:
 
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
      flags  = bit 0: more (a reply in several frames: the rows of a Find), bit 1: error (the body is an error)
@@ -9,7 +12,10 @@
 
 open Cepheus
 
-let version = 1
+let version = 2
+
+(* the oldest version a server still speaks *)
+let oldest = 1
 let header = 10
 let max_frame = 16 lsl 20
 

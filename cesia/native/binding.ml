@@ -734,6 +734,7 @@ let find ctx a =
       | None -> (
         match d.src with
         | Fork _ -> assert false
+        | Server s when (qn.extra <> [] || qn.order <> Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
         | Server s -> (
           match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order }) with
           | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
@@ -770,6 +771,7 @@ let find_source d (sh : Conn.shared) =
   | Server s -> (
     match Client.local_hub s.conn.cl s.cdb with
     | Some hub when local hub -> true
+    | _ when sh.extra <> [] && s.conn.cl.spoken < 2 -> Conn.finish sh "invalid" Client.older; true
     | _ ->
       Mutex.protect sh.sm (fun () -> sh.src <- Remote);
       Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from; wextra = sh.extra }))

@@ -374,7 +374,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | request body | reply body |
 |---|---|---|
-| 1 Hello | version varint (1), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
+| 1 Hello | version varint (1 or 2), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
 | 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
@@ -399,6 +399,12 @@ On a follow stream the server pushes (request id 0):
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
   (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
+- **Versions.** Version 2 adds the question's operators and order (below) and nothing else; a server speaks 1 and
+  2, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+  and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
+  one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
+  protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2
+  exactly as before.
 - **order**: Sort, Limit and After over the select's columns ([pages](cesia.md#sort-limit-and-after-pages)). It
   follows the select only when the question has it, so that every other question is coded as before; a server that
   does not know it refuses such a Find ("bytes after the request") rather than answer it unsorted.
@@ -503,7 +509,7 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 |---|---|---|
 | `auth` | Hello with an unknown token; a request before Hello; a token removed since | check the token; the connection closes |
 | `denied` | the token lacks the right for this database or operation; a session of another token | a token with the right |
-| `version` | Hello with another protocol version | the server and the library of one release |
+| `version` | Hello with a protocol version the server does not speak (it speaks 1 and 2) | a library connects again in the version before; else a server and a library of the same release |
 | `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |

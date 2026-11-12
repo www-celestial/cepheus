@@ -30,7 +30,11 @@ type t = {
   early : (int, (int * int * Bytes.t) list) Hashtbl.t;  (* replies that came before they were asked for *)
   mutable welcome : Wire.reply option;
   mutable follows : (Unix.file_descr * unit Domain.t) list;  (* the follow streams of its databases *)
+  mutable spoken : int;  (* the protocol's version this connection speaks: 2, or 1 with a server that speaks no more *)
 }
+
+(* a question with Not, Or, In, Prefix, Sort, Limit or After, on a connection to a server of protocol 1 *)
+let older = "this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2"
 
 exception Broken of string
 
@@ -159,14 +163,18 @@ let call c req =
 
 (* Error (permanent, why): a refusal that trying again will not change (the token, the version, another cluster) *)
 let hello c =
-  match call c (Wire.Hello { version = Wire.version; token = c.token; program = c.program; session = c.session }) with
+  match call c (Wire.Hello { version = c.spoken; token = c.token; program = c.program; session = c.session }) with
   | Wire.Welcome w when (match c.cluster with Some id -> id <> w.cluster | None -> false) ->
     Error (true, Printf.sprintf "the server belongs to cluster %s, not %s" w.cluster (Option.get c.cluster))
   | Wire.Welcome w as r -> c.session <- w.session; c.welcome <- Some r; Ok ()
+  | Wire.Err e when e.code = "version" && c.spoken > Wire.oldest ->
+    (* an older server: the connection is made again in the version before (it closed this one) *)
+    c.spoken <- c.spoken - 1;
+    Error (false, "retry")
   | Wire.Err e -> Error (List.mem e.code [ "auth"; "version"; "denied" ], e.code ^ ": " ^ e.message)
   | _ -> Error (true, "an unexpected reply to Hello")
 
-let reconnect c =
+let rec reconnect c =
   (match c.fd with Some fd -> (try Unix.close fd with Unix.Unix_error _ -> ()) | None -> ());
   c.fd <- None;
   c.tls <- None;
@@ -187,6 +195,7 @@ let reconnect c =
     let ready = match secured with Error e -> Error e | Ok () -> ( try hello c with Broken m -> Error (false, m)) in
     match ready with
     | Ok () -> set_timeouts fd 0.; Ok ()
+    | Error (false, "retry") -> (try Unix.close fd with Unix.Unix_error _ -> ()); c.fd <- None; c.tls <- None; reconnect c
     | Error e -> (try Unix.close fd with Unix.Unix_error _ -> ()); c.fd <- None; c.tls <- None; Error e)
   | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINPROGRESS), _, _) ->
     Error (false, Printf.sprintf "no answer within %g s" !handshake_timeout)
@@ -198,7 +207,7 @@ let connect ?(program = "ocaml") ?(session = 0) ?ca ?cluster address token =
   let c =
     { address; token; program; fd = None; tls = None; ca; cluster; inb = Bytes.create 65536; have = 0; next_id = 1; out = Buffer.create 4096;
       body = Buffer.create 4096; session; serial = 0; waiting = Hashtbl.create 8; early = Hashtbl.create 8; welcome = None;
-      follows = [] }
+      follows = []; spoken = Wire.version }
   in
   match reconnect c with Ok () -> Ok c | Error (_, m) -> Error m
 
@@ -328,7 +337,7 @@ let follow c handle =
         Wire.get_reply kind flags (Codec.reader body 0 (Bytes.length body))
       in
       match
-        match ask 1 (Wire.Hello { version = Wire.version; token = c.token; program = c.program ^ " (follow)"; session = 0 }) with
+        match ask 1 (Wire.Hello { version = c.spoken; token = c.token; program = c.program ^ " (follow)"; session = 0 }) with
         | Wire.Welcome _ -> (
           match ask 2 (Wire.Follow handle) with
           | Wire.Err { code = "denied"; _ } -> raise Not_followed
@@ -424,6 +433,7 @@ let find c db ?(select = Wire.Give [||]) ?(extra = []) ?(order = Top.none) query
       Ok (v.group, List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))))
     | exception Query.Bad m -> Error { code = "invalid"; message = m }
     | exception Pages.Unreadable m -> Error { code = "damaged"; message = m })
+  | None when (extra <> [] || order <> Top.none) && c.spoken < 2 -> Error { code = "invalid"; message = older }
   | None -> (
     match read_call c (Wire.Find { db = db.handle; query; select; extra; order }) with
     | Wire.Rows r -> Ok (r.group, r.rows)
@@ -501,6 +511,7 @@ let rec declare c name (props : Schema.prop list) =
 type pushed = Pushed of Wire.push | Ended of error
 
 let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) query =
+  if extra <> [] && c.spoken < 2 then invalid_arg older;
   let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra }) in
   flush c;
   id

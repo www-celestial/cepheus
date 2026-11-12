@@ -370,6 +370,9 @@ let unwatch c ~id ~kind w =
 
 (* ---- dispatch ---- *)
 
+(* the newest version of the protocol this server speaks (a test makes it 1, to stand for an older server) *)
+let speaks = ref Wire.version
+
 let status c =
   let srv = c.srv in
   let conns, reqs = Mutex.protect srv.cm (fun () -> Hashtbl.length srv.conns, Hashtbl.fold (fun _ c n -> n + c.requests) srv.conns 0) in
@@ -403,7 +406,8 @@ let handle c ~id ~kind (r : Codec.reader) =
     else
       match req with
       | Wire.Hello h ->
-        if h.version <> Wire.version then (err c ~id ~kind "version" "protocol %d is not spoken here (%d is)" h.version Wire.version; Close)
+        if h.version < Wire.oldest || h.version > !speaks then
+          (err c ~id ~kind "version" "protocol %d is not spoken here (%d to %d are)" h.version Wire.oldest !speaks; Close)
         else (
           let tokens = Atomic.get c.srv.tokens in
           match Tokens.check tokens h.token with

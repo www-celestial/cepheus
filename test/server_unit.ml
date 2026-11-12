@@ -679,15 +679,92 @@ let request_ids () =
     let c =
       { Client.address = Client.Unix_socket "/nonexistent"; token = ""; program = "unit"; fd = None; tls = None; ca = None;
         cluster = None; inb = Bytes.create 16; have = 0; next_id = 0x7FFF_FFFE; out = Buffer.create 64; body = Buffer.create 64;
-        session = 0; serial = 0; waiting = Hashtbl.create 1; early = Hashtbl.create 1; welcome = None; follows = [] }
+        session = 0; serial = 0; waiting = Hashtbl.create 1; early = Hashtbl.create 1; welcome = None; follows = []; spoken = Wire.version }
     in
     let ids = List.init 4 (fun _ -> Client.send c (Wire.Ping "")) in
     check (not (List.mem 0 ids) && List.length (List.sort_uniq compare ids) = 4) "ids: no request takes id 0 when they wrap (%s)"
       (String.concat ", " (List.map string_of_int ids))
 
+(* ---- protocol 2 beside protocol 1 ----
+   A server speaks 1 and 2 and refuses the others; a program speaks 2, and with a server of protocol 1 only (here a
+   small one of its own on a Unix socket, which refuses Hello 2 as such a server does, then welcomes Hello 1) it
+   connects again in 1, and asks no question with the extension there. *)
+let versions () =
+  let sim = Sim_disk.create (Rng.make 7) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/v";
+  let e = Result.get_ok (Engine.open_ disk "/v/shop") in
+  let d = { Core.name = "shop"; index = 0; dir = "/v/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+  let toks = Tokens.with_tokens Tokens.empty [ { Tokens.name = "r"; hash = Tokens.hash_of_text "cph_r"; databases = [ "shop", Tokens.Read ]; admin = false } ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(fun () -> 1) () in
+  let hello version =
+    let out = Buffer.create 64 in
+    let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit:(fun _ _ _ _ _ -> ())) in
+    let c = Lazy.force c in
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_request b (Wire.Hello { version; token = "cph_r"; program = "t"; session = 0 });
+    Wire.add_frame f ~id:1 ~kind:Wire.k_hello ~flags:0 b;
+    let bytes = Buffer.to_bytes f in
+    ignore (Core.input c bytes 0 (Bytes.length bytes));
+    c.flush ();
+    let s = Buffer.to_bytes out in
+    Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
+  in
+  let welcome = function Wire.Welcome _ -> true | _ -> false in
+  check (welcome (hello 1) && welcome (hello 2)) "versions: a server speaks 1 and 2";
+  check (match hello 3 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 3";
+  (* a program against a server of protocol 1 *)
+  let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
+  let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
+  (try Unix.unlink path with Unix.Unix_error _ -> ());
+  let sock = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Unix.bind sock (Unix.ADDR_UNIX path);
+  Unix.listen sock 4;
+  let seen = ref [] in
+  let rec read_all fd b o n = if n > 0 then (let k = Unix.read fd b o n in if k = 0 then raise End_of_file; read_all fd b (o + k) (n - k)) in
+  let reply fd ~id ~flags rep =
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_reply b rep;
+    Wire.add_frame f ~id ~kind:Wire.k_hello ~flags b;
+    let s = Buffer.to_bytes f in
+    ignore (Unix.write fd s 0 (Bytes.length s))
+  in
+  let old = Thread.create (fun () ->
+      for _ = 1 to 2 do
+        let fd, _ = Unix.accept ~cloexec:true sock in
+        (try
+           let h = Bytes.create Wire.header in
+           read_all fd h 0 Wire.header;
+           let body = Bytes.create (Wire.u32 h 0 - 6) in
+           read_all fd body 0 (Bytes.length body);
+           let id = Wire.u32 h 4 in
+           match Wire.get_request Wire.k_hello (Codec.reader body 0 (Bytes.length body)) with
+           | Wire.Hello hh ->
+             seen := hh.version :: !seen;
+             if hh.version <> 1 then reply fd ~id ~flags:Wire.f_error (Wire.Err { code = "version"; message = "protocol 2 is not spoken here (1 is)" })
+             else begin
+               reply fd ~id ~flags:0 (Wire.Welcome { server = "old"; cluster = "c"; session = 3; frame = Wire.max_frame; inflight = 16 });
+               (* until the program closes *)
+               (try while Unix.read fd (Bytes.create 64) 0 64 > 0 do () done with Unix.Unix_error _ -> ())
+             end
+           | _ -> ()
+         with End_of_file | Unix.Unix_error _ -> ());
+        Unix.close fd
+      done) () in
+  (match Client.connect (Client.Unix_socket path) "cph_r" with
+   | Ok c ->
+     check (c.spoken = 1 && List.rev !seen = [ 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     Client.close c
+   | Error m -> check false "versions: no connection to a server of 1: %s" m);
+  Thread.join old;
+  Unix.close sock;
+  (try Unix.unlink path with Unix.Unix_error _ -> ())
+
 let () =
   toml ();
   config ();
+  versions ();
   tokens ();
   wire ();
   origins ();
