@@ -15,7 +15,6 @@
    other requests are in flight (many fibers: pipelined, the reader reads), the fiber is parked as any other. *)
 
 open Cepheus
-module Ask = Question.Ask
 open Cepheus_server
 
 (* ---- live questions: one watch a question and database, shared by the program's fibers ----
@@ -53,7 +52,7 @@ and shared = {
   mutable parts : Wire.push option;  (* a push in several frames, so far *)
   query : Query.t;
   select : Wire.select;
-  extra : Ask.item list;
+  extra : Question.Ask.item list;
 }
 
 let queue_max = 256

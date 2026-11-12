@@ -11,8 +11,6 @@
 
 module C = Cesia_v1
 open Cepheus
-module Ask = Question.Ask
-module Top = Question.Top
 open Cepheus_server
 
 (* ---- reading the arguments: a match each, and Cesia's message for a wrong one ---- *)
@@ -542,12 +540,12 @@ type column = Var of int | Agg of Wire.agg
    column in the answer and its type *)
 type question = {
   query : Query.t;
-  extra : Ask.item list;  (* Not, Or and In *)
+  extra : Question.Ask.item list;  (* Not, Or and In *)
   select : Wire.select;
   qkeys : C.keys;
   at : int array;
   typs : Value.typ array;
-  order : Top.order;
+  order : Question.Top.order;
 }
 
 let question ctx name d qv nvars =
@@ -601,23 +599,23 @@ let question ctx name d qv nvars =
       | _ -> C.need ctx name what (C.Map m)
     in
     (* an item: [top] at the top of Where; [alt] an alternative of Or, which And may write *)
-    let rec item_of ~top ~alt it : Ask.item list =
+    let rec item_of ~top ~alt it : Question.Ask.item list =
       match it with
-      | C.List l when C.length l = 3 -> [ Ask.Pattern (pattern_of l) ]
+      | C.List l when C.length l = 3 -> [ Question.Ask.Pattern (pattern_of l) ]
       | C.Map m | C.Struct m -> (
         match C.fields op_keys m with
-        | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] -> let j, lo, hi = range_of m in [ Ask.Range (j, lo, hi) ]
+        | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] -> let j, lo, hi = range_of m in [ Question.Ask.Range (j, lo, hi) ]
         | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; x; t |] -> (
           match var x, t with
-          | Some j, C.Text p -> [ Ask.Prefix (j, p) ]
+          | Some j, C.Text p -> [ Question.Ask.Prefix (j, p) ]
           | Some _, v -> C.need ctx name "a text for Prefix" v
           | None, _ -> C.need ctx name "a variable first in Prefix" x)
         | [| n; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
           if not top then refuse "invalid" "Not takes patterns and conditions: no Not or Or inside it";
-          [ Ask.Not (List.concat_map (item_of ~top:false ~alt:false) (list_of n)) ]
+          [ Question.Ask.Not (List.concat_map (item_of ~top:false ~alt:false) (list_of n)) ]
         | [| C.Missing; o; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
           if not top then refuse "invalid" "Or takes patterns, conditions and And: no Not or Or inside it";
-          [ Ask.Or (List.map (fun a -> item_of ~top:false ~alt:true a) (list_of o)) ]
+          [ Question.Ask.Or (List.map (fun a -> item_of ~top:false ~alt:true a) (list_of o)) ]
         | [| C.Missing; C.Missing; a; C.Missing; C.Missing; C.Missing; C.Missing |] ->
           if not alt then refuse "invalid" "And is for an alternative of Or: Where is already all of its items";
           List.concat_map (item_of ~top:false ~alt:false) (list_of a)
@@ -625,7 +623,7 @@ let question ctx name d qv nvars =
           match var x with
           | Some j -> (
             match vtyp.(j) with
-            | Some t -> [ Ask.In (j, List.map (of_cesia "In" t) (list_of vs)) ]
+            | Some t -> [ Question.Ask.In (j, List.map (of_cesia "In" t) (list_of vs)) ]
             | None -> refuse "invalid" "a variable of In appears in no pattern")
           | None -> C.need ctx name "a variable first in In" x)
         | _ -> C.need ctx name what it)
@@ -636,7 +634,7 @@ let question ctx name d qv nvars =
       (fun it ->
         List.iter
           (function
-            | Ask.Pattern p -> patterns := p :: !patterns
+            | Question.Ask.Pattern p -> patterns := p :: !patterns
             | Range (j, lo, hi) -> ranges := (j, lo, hi) :: !ranges
             | x -> extra := x :: !extra)
           (item_of ~top:true ~alt:false it))
@@ -687,7 +685,7 @@ let question ctx name d qv nvars =
       | None -> C.need ctx name "a key of Sort: a variable or an aggregate of Give, or Desc of one" k
     in
     let order =
-      if sort = C.Missing && limit = C.Missing && after = C.Missing then Top.none
+      if sort = C.Missing && limit = C.Missing && after = C.Missing then Question.Top.none
       else begin
         (* a question that uses the newer keys is newer code: a key the package does not know is a mistake there (a
            misspelt After would give the first page for ever), and no question that worked before is refused *)
@@ -700,7 +698,7 @@ let question ctx name d qv nvars =
           else begin
             let rest = List.filter (fun i -> not (List.mem_assoc i user)) (List.init (Array.length cols) Fun.id) in
             let rest = List.sort (fun a b -> compare names.(a) names.(b)) rest in
-            List.map (fun (i, desc) -> { Top.col = at.(i); desc }) user @ List.map (fun i -> { Top.col = at.(i); desc = false }) rest
+            List.map (fun (i, desc) -> { Question.Top.col = at.(i); desc }) user @ List.map (fun i -> { Question.Top.col = at.(i); desc = false }) rest
           end
         in
         let limit = match limit with C.Missing -> 0 | C.Int k when k >= 1 -> k | v -> C.need ctx name "a Limit of 1 row or more" v in
@@ -715,7 +713,7 @@ let question ctx name d qv nvars =
             Some a
           | v -> C.need ctx name "a row of Give for After" v
         in
-        { Top.keys; limit; after }
+        { Question.Top.keys; limit; after }
       end
     in
     { query; extra = List.rev !extra; select; qkeys = C.keys names; at; typs; order }
@@ -741,7 +739,7 @@ let find ctx a =
       | None -> (
         match d.src with
         | Fork _ -> assert false
-        | Server s when (qn.extra <> [] || qn.order <> Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
+        | Server s when (qn.extra <> [] || qn.order <> Question.Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
         | Server s -> (
           match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order }) with
           | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
@@ -807,11 +805,11 @@ let watch ctx a =
     let d = db_of ctx name a.(0) in
     let nvars = int ctx name a.(2) in
     let qn = question ctx name d a.(1) nvars in
-    if qn.order <> Top.none then refuse "invalid" "a watch keeps every row of its question: Sort, Limit and After are for Find";
+    if qn.order <> Question.Top.none then refuse "invalid" "a watch keeps every row of its question: Sort, Limit and After are for Find";
     let b = Buffer.create 64 in
     Wire.put_query b qn.query;
     Wire.put_select b qn.select;
-    if qn.extra <> [] then Wire.put_order b ~extra:qn.extra Top.none;
+    if qn.extra <> [] then Wire.put_order b ~extra:qn.extra Question.Top.none;
     let key = string_of_int (match a.(0) with C.Handle (_, i) -> i | _ -> -1) ^ ":" ^ Buffer.contents b in
     let sh = match Hashtbl.find_opt shared key with Some sh when sh.ended = None -> sh | _ -> let sh = Conn.new_shared ~extra:qn.extra key qn.query qn.select in Hashtbl.replace shared key sh; sh in
     let c = Conn.join sh in

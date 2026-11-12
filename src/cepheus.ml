@@ -173,22 +173,7 @@ type query = Query.t = { vars : int; where : pattern list; ranges : (int * value
 
 let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
 
-module Question = struct
-  type item = Ask.item =
-    | Pattern of pattern
-    | Range of int * value * value
-    | In of int * value list
-    | Prefix of int * string
-    | Not of item list
-    | Or of item list list
-
-  type key = Top.key = { col : int; desc : bool }
-
-  type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
-
-  module Ask = Ask
-  module Top = Top
-end
+module Question = Question
 
 let ask v (q : Question.t) =
   try
