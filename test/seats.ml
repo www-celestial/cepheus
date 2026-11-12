@@ -1,4 +1,4 @@
-(* Never sell the same seat twice (docs/case-seats.md). Real kill -9 in the middle of a sale of seats, then a check of
+(* Never sell the same seat twice (docs/book/case-seats.md). Real kill -9 in the middle of a sale of seats, then a check of
    the whole history.
 
    A child process sells the seats of a hall to buyers in 16 threads. A buyer takes a view, picks one of the ten best

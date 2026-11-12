@@ -27,14 +27,14 @@
  (alias runtest)
  (action (run %{exe:sim.exe} --seeds 200)))
 
-; the documentation's examples: every ```ocaml block of README.md and docs/*.md, compiled and run (test/extract.ml)
+; the documentation's examples: every ```ocaml block of README.md and docs/book/*.md, compiled and run (test/extract.ml)
 (executable
  (name extract)
  (modules extract))
 
 (rule
  (targets examples.ml)
- (deps (:docs ../README.md (glob_files ../docs/*.md)))
+ (deps (:docs ../README.md (glob_files ../docs/book/*.md)))
  (action (with-stdout-to %{targets} (run %{exe:extract.exe} %{docs}))))
 
 (executable

@@ -15,7 +15,7 @@ are explained where they first appear, and in the [glossary](glossary.md); the w
 
 Pólya's first rule for solving a problem is to understand it: what is the unknown, what are the data, what is the
 condition ([Pólya 1945]). DARPA's Heilmeier catechism asks the same of a research project in plain words: what are you
-trying to do, how is it done today, what is new, and how will you know you succeeded ([Heilmeier]). Here:
+trying to do, how is it done today, what is new, and how will you know you succeeded (\[Heilmeier]). Here:
 
 - **Who has it**: anyone who sells a limited stock to many people at once: seats, tickets, rooms, appointments.
 - **What is done today, and what goes wrong**: a buyer's screen shows the free seats; the buyer clicks one; the
@@ -340,11 +340,11 @@ sale with `Expect` would prove nothing. `tools/test.sh` runs the sale with `Expe
 
 ### A bound
 
-How often should the naive sale fail? A back-of-the-envelope model gives a number to compare with section 2: when m
+How often should the naive sale fail? A back-of-the-envelope model gives a number to compare with section 2: when $m$
 buyers read the same view and each picks one of the ten best free seats at random, the chance that two pick the same
-one is the birthday problem's, 1 − (10 × 9 × ... × (10 − m + 1)) / 10^m: 10 % for 2 buyers, 50 % for 4, and certain
-for 16 (more buyers than seats to choose from). The m picks then cover 10 (1 − 0.9^m) distinct seats on average (each
-seat is missed by all m with probability 0.9^m), so the share of sales too many is 1 − (10/m) (1 − 0.9^m): 5 % for 2
+one is the birthday problem's, $1 - (10 \times 9 \times \dots \times (10 - m + 1)) / 10^m$: 10 % for 2 buyers, 50 % for 4, and certain
+for 16 (more buyers than seats to choose from). The $m$ picks then cover $10 (1 - 0.9^m)$ distinct seats on average (each
+seat is missed by all $m$ with probability $0.9^m$), so the share of sales too many is $1 - (10/m) (1 - 0.9^m)$: 5 % for 2
 buyers, 14 % for 4, 49 % for 16. Measured (the table of section 2): 199 of 2,199 sales, 9.0 %; 463 of 2,463, 18.8 %;
 2,199 of 4,199, 52.4 %. The model predicts the growth and, for 16 buyers, the rate; it is below for 2 and 4 buyers
 because a buyer also collides with sales still in flight, written but not yet in any view (a frame being forced),
@@ -426,7 +426,7 @@ can change a measured result, [Mytkowicz 2009]):
 
 ## Further reading
 
-[Pólya 1945]; [Heilmeier]; [Jain 1991]; [Georges 2007]; [Kalibera 2013]; [Zeller 2002]; [Berenson 1995];
+[Pólya 1945]; \[Heilmeier]; [Jain 1991]; [Georges 2007]; [Kalibera 2013]; [Zeller 2002]; [Berenson 1995];
 [Papadimitriou 1979]; [Herlihy 1990]; [Adya 1999]; [Cahill 2008]; [Ports 2012]; [Kung 1981]; [Fekete 2005];
 [Claessen 2000]; [Lamport 2002]; [Newcombe 2015]; [Kingsbury 2020]; [Mytkowicz 2009]. Entries, with links and what this
 chapter took from each: [references](references.md).

@@ -6,7 +6,7 @@ or nothing, with who and why; the group is the event, and the journal keeps ever
 **view**, the exact state after one group, and reads it with no lock. A **fork** is a temporary state started from a
 view: written to like the database, with the same checks, and never written to disk; it is the base of unit tests and
 what-if questions. **Rules** (Datalog) derive facts from facts: the writer keeps the derived facts in every view, as
-facts, at each group, and `why` gives the proof of one ([rules](docs/rules.md)).
+facts, at each group, and `why` gives the proof of one ([rules](docs/book/rules.md)).
 
 ```ocaml
 open Cepheus
@@ -40,7 +40,7 @@ damage to durable bytes is detected, never dropped in silence (G6); a merge leav
 whole (G12); after a failed fsync, no view shows a group a power loss could take back (G13). With rules, every view holds exactly
 what its rules derive from its asserted facts (G17), constraints hold (G18), a rule change takes effect at one group
 (G19), and `why` returns a true proof (G20). Each guarantee, its exact conditions, its proof
-and the test that checks it: [guarantees](docs/guarantees.md).
+and the test that checks it: [guarantees](docs/book/guarantees.md).
 
 ## As a server
 
@@ -51,13 +51,13 @@ machine and data (1 M facts), a point read costs 10.8 µs over the Unix socket (
 TLS (49.6); 8 clients at once, 3.22 µs a read in all (6.54); 16 requests in flight on one connection, 1.46 µs a read
 (PostgreSQL's pipeline of 16: 9.11). A program on the server's machine reads in its own memory, linearizably
 (G15): 0.22 µs a point read, no round trip, and no write waits for it. Everything, from `cluster.toml` to the wire
-protocol byte by byte: [the server](docs/server.md).
+protocol byte by byte: [the server](docs/book/server.md).
 
 ## From Cesia
 
 A [Cesia](https://github.com/www-celestial/cesia) program reaches a database through the server, with the package
 `cesia/cepheus` of this repository: one function to connect, and on the server's machine its reads are served from its
-own memory, as linearizable as the server's ([Cepheus from Cesia](docs/cesia.md)):
+own memory, as linearizable as the server's ([Cepheus from Cesia](docs/book/cesia.md)):
 
 ```text
 use deps/www-celestial/cepheus/cesia/cepheus
@@ -76,7 +76,7 @@ Nothing loads before the package's first call, which costs 13 ms once a process.
 ## Against the established databases
 
 Measured on one laptop (Intel i7-4720HQ, SATA SSD) against PostgreSQL 18.6 set up as an expert would, 10 million
-facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/benchmarks.md)):
+facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/book/benchmarks.md)):
 
 | | Cepheus | PostgreSQL |
 |---|---:|---:|
@@ -89,8 +89,8 @@ facts, the same answers on both sides, medians of 21 runs ([benchmarks](docs/ben
 | load of 10 M facts | **5.13 s**, in two large groups, alternated with it | 30.87 s (`COPY`, indexes, `VACUUM ANALYZE`) |
 
 SQLite 3.54, a library in the process as Cepheus is, measured the same way on one core (before run format 7): Cepheus
-is faster on an invoice by id (0.37 µs against 0.68) and on the unpaid sum per city (230 ms against 360), even on the city's unpaid
-invoices and the triangles, slower on a client by e-mail (1.67 µs against 1.52). Loading the 10 M facts, alternated
+is faster on an invoice by id (0.37 µs against 0.68), on the unpaid sum per city (230 ms against 360) and on the triangles
+(0.97 s against 1.04), tied on the city's unpaid invoices, slower on a client by e-mail (1.67 µs against 1.52). Loading the 10 M facts, alternated
 seven times, Cepheus is faster in every round (5.61 s against 9.37 s at the median: SQLite takes 1.7 times as long),
 but SQLite does it in 11 MB of memory against 1.46 GB (0.88 of it the client's own list of operations). Since run
 format 7 and journal format 2 (2026-11-09), the 10 M facts take 76.0 MB on disk with their whole history, against
@@ -99,13 +99,13 @@ SQLite's 136 MB file, which keeps none, and load in 3.45 s against 7.22 s; on on
 process capped at 48 MB so that neither file fits, Cepheus answers the first four questions 1.7 to 5.4 times faster
 and loses the triangles by more than 100 times (more than 2.5 minutes a run against 1.02 s: SQLite's follow links fit
 in its cache in a table of their own)
-([benchmarks](docs/benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)). With run format 8
+([benchmarks](docs/book/benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)). With run format 8
 (2026-11-11: each property's rows also apart, in thing order, and sorted lists intersected by leapfrogging) Cepheus
 wins all five on one core: 0.39 µs against 0.69, 0.64 µs against 1.42, 2.87 ms against 4.18, 130 ms against 369 and
 the triangles in 256 ms against 1.05 s, and at a 48 MB cap the triangles in 260 ms
-([benchmarks](docs/benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)); at a transaction a client, Cepheus' group commit loads 1 M facts 13 to 16 times faster (13.2 s
+([benchmarks](docs/book/benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)); at a transaction a client, Cepheus' group commit loads 1 M facts 13 to 16 times faster (13.2 s
 against 174.0 s; 10.6 against 166.7 in an earlier series). Where each one wins, and why, and how Cepheus compares by design
-with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison](docs/comparison.md).
+with Oracle, Datomic, RocksDB, Neo4j, FoundationDB and CockroachDB: [comparison](docs/book/comparison.md).
 
 ## Build and test
 
@@ -121,5 +121,5 @@ OpenSSL 3 (`libssl`, `libcrypto`) through `server/tls_stubs.c`, for TLS.
 
 ## Documentation
 
-Start with [concepts](docs/concepts.md), then [how it works](docs/architecture.md). The whole map:
-[docs/](docs/README.md).
+Start with [concepts](docs/book/concepts.md), then [how it works](docs/book/architecture.md). The whole map:
+[docs/book/](docs/book/index.md).

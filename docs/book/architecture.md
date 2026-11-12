@@ -48,7 +48,7 @@ frame of reference (a base and a bit width) or deltas, whichever is shorter; the
 **CRC.** A **cyclic redundancy check** is a short checksum computed from a block of bytes: if any byte of the block
 changes, the CRC computed again differs, except with a tiny probability. Cepheus uses CRC-32C (the Castagnoli
 polynomial, Castagnoli et al. 1993, the one of iSCSI, RFC 3720): it detects every burst of errors of up to 32 bits,
-every error of up to 3 bits in frames of realistic size, and lets other random damage through with probability 2⁻³²
+every error of up to 3 bits in frames of realistic size, and lets other random damage through with probability $2^{-32}$
 (Koopman 2002). The header, the body and every page of a run file carry one. The processor computes it: x86-64 has
 an instruction for this very polynomial (`crc32`, part of SSE4.2), arm64 has two (`crc32cx` for 8 bytes, `crc32cb` for
 one). OCaml cannot emit them, so one small C file does (`src/crc32c_stubs.c`), behind the OCaml module `Crc32c`, at
@@ -59,8 +59,8 @@ runs wait together and share the next one: that is **group commit**. The writer 
 own: a *writer* thread resolves the waiting writes (up to 4,096 at a time) on the **working view**, the state with
 every resolved group whether durable or not; a *syncer* thread writes the batch as one frame (`pwrite`), forces it
 (`fsync`), then publishes the new view and wakes the clients of that frame only. While the syncer forces a frame, the
-writer resolves the next batches and merges them into the frame that waits, until it holds 8 MiB. With N clients
-writing one group at a time and an fsync of f, the rate approaches N / (1.5 f) groups a second, up to what the writer
+writer resolves the next batches and merges them into the frame that waits, until it holds 8 MiB. With $N$ clients
+writing one group at a time and an fsync of $f$, the rate approaches $N / (1.5 f)$ groups a second, up to what the writer
 can resolve ([theory](theory.md#2-group-commit)). Measured: 181 groups a second for 1 client, 7,147 for 64, 14,141 to
 17,192 for 256 (the disk is the limit; PostgreSQL's inserts are on par).
 
@@ -135,7 +135,7 @@ A view is two things:
   fact of a thing" reads its block. A run is about 7 bytes a fact at 10 M facts, dictionary and column order included
   (format 6 took 24.6: [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun));
 - the **delta**: the changes since the last merge, in **persistent maps** (balanced trees that are never changed in
-  place: a change makes a new version that shares every untouched node with the old one, at a cost of O(log d) for d
+  place: a change makes a new version that shares every untouched node with the old one, at a cost of $O(\log d)$ for $d$
   changes). The delta is keyed like a run (by thing, then property and value; by property, then value and thing) and
   keeps exact counts beside each map. It costs about 170 bytes a change.
 
@@ -174,21 +174,21 @@ fixed 8-byte words) are set aside at the first open and the journal replayed onc
 A **log-structured merge-tree** (LSM-tree, O'Neil et al. 1996) keeps recent writes in a small structure in memory and
 moves them in bulk into large sorted structures on disk, by merging sorted runs instead of updating pages in place.
 Its **components** are the memory part and the runs on disk; moving data from one to the next is a **merge**, also
-called **compaction**. A **level** is a place in the tree with a capacity; the **size ratio** T is how many times larger
-each level is than the one above. Cepheus' delta is level 0; its runs are at levels 1, 2, 3, ...; level l holds at most
-200,000 × 4^l rows (800,000, 3.2 M, 12.8 M, ...).
+called **compaction**. A **level** is a place in the tree with a capacity; the **size ratio** $T$ is how many times larger
+each level is than the one above. Cepheus' delta is level 0; its runs are at levels 1, 2, 3, ...; level $l$ holds at most
+$200{,}000 \times 4^l$ rows (800,000, 3.2 M, 12.8 M, ...).
 
 **Leveling.** Under **leveling**, each level holds one run; under **tiering**, up to T runs, merged together when the
 level is full. Leveling writes more (a fact is merged again each time the level above spills into its level) and reads
 less (one run per level); tiering the opposite (Luo and Carey, VLDB Journal 2020; Dayan and Idreos, Dostoevsky, SIGMOD
 2018). Cepheus' reads are short ranges (the facts of a thing, the things of a value) and exact counts, which visit every
-run that may hold the key, so the number of runs weighs as much as the writes: leveling, with T = 4
+run that may hold the key, so the number of runs weighs as much as the writes: leveling, with $T = 4$
 ([theory](theory.md#9-levels-on-disk-and-large-groups)).
 
 **When.** A merge starts when the delta holds more than 200,000 changes (`Engine.compact_min`). It takes the delta and
 the newest runs, down to the first level that can hold them all, and writes one run there (`Engine.plan`). It runs in
 a domain of its own, beside the writes: its inputs are already sorted in the order of every section, so each section of
-the new run is one pass with one cursor in each (O(n + d) steps, no sort), and it streams the result into
+the new run is one pass with one cursor in each ($O(n + d)$ steps, no sort), and it streams the result into
 `<lo>-<hi>.run.tmp`, page by page: a 16 KiB page goes out (its CRC, a `pwrite` at its place, the cache) as soon as its
 bytes are written. Then the CRC table, the header, an fsync. Meanwhile the writer logs the groups it resolves; the
 merge replays them onto the new runs until it is fewer than 256 groups behind; then the writer waits for the syncer to
@@ -196,13 +196,14 @@ be idle (at most one fsync), replays the rest, renames the file to its name, for
 replaced, and switches both views to the new runs in one atomic store. A crash at any point leaves the runs before it
 or the runs after it, whole (G12). `snapshot` is the one full merge: the delta and every run into one run.
 
-**Memory.** A merge needs the cache, a few page buffers (at most 2 for each of the 8 streams of a pass, 7 measured)
-and 21 bytes a page of the new run (0.13 % of it): with a 32 MB cache, a merge of the whole 245 MB base ran in a
+**Memory.** A merge needs the cache, a few page buffers (at most 2 for each stream of a pass; 19 measured in the unit
+test, whose bound is 24) and 25 bytes for each 16 KiB of the new run's layout (3.1 % of the 10 M run, whose coded
+layout is loose; [theory](theory.md#8-merges-written-to-a-file)): with a 32 MB cache, a merge of the whole 245 MB base ran in a
 process capped at 128 MB (peak 99 MB).
 
 **Write amplification** is the number of times a fact is written to the disk for each time a client writes it. Under
-leveling with ratio T, a fact is written about (T + 1)/2 = 2.5 times per level it enters (it enters a level at one of
-the T merges that fill it, and is written again at each later one), and the levels a merge skips cost no extra write:
+leveling with ratio $T$, a fact is written about $(T + 1)/2 = 2.5$ times per level it enters (it enters a level at one of
+the $T$ merges that fill it, and is written again at each later one), and the levels a merge skips cost no extra write:
 for the 10 M load of the benchmarks, 5.8 writes a fact, against 14.5 with the one level of earlier versions (whose
 merges rewrote the whole base each time: up to 17 facts a change). **Read amplification** is the number of runs a read
 visits: at most 3 at 10 M facts (2.1 on average over that load). **Space amplification** (disk space over data size):
@@ -320,16 +321,16 @@ view needs no lock to be read, which is what makes this split free. The unpaid s
 
 A question is a conjunctive query: patterns joined on their variables ([concepts](concepts.md#questions)). The usual
 way to answer one is a plan of **binary joins** (two inputs at a time, the result joined with the next input). On a
-cyclic question such as the triangles of a graph (a follows b, b follows c, c follows a), any such plan can build far
-more intermediate rows than the answer: for N links, Θ(N²) pairs a → b → c before checking c → a, while at most N^1.5
-triangles exist. That N^1.5 is the **AGM bound** (Atserias, Grohe, Marx 2008): the largest answer a question can have,
+cyclic question such as the triangles of a graph ($a$ follows $b$, $b$ follows $c$, $c$ follows $a$), any such plan can build far
+more intermediate rows than the answer: for $N$ links, $\Theta(N^2)$ pairs $a \to b \to c$ before checking $c \to a$, while at most $N^{1.5}$
+triangles exist. That $N^{1.5}$ is the **AGM bound** (Atserias, Grohe, Marx 2008): the largest answer a question can have,
 computed from the sizes of its inputs. A **worst-case optimal join** never does more work than that bound, up to
 small factors (Ngo, Porat, Ré, Rudra 2012).
 
 Cepheus answers with **Generic Join** (Ngo, Ré, Rudra 2013), the simplest worst-case optimal join: fix an order of the
 variables; to bind the next variable, take the pattern that offers the fewest candidates for it given the variables
 bound so far (exact counts, read from the indexes), enumerate those, and keep each candidate only if every other
-pattern on the variable accepts it (one index lookup each, O(log n)). On a chain of patterns it does what nested index
+pattern on the variable accepts it (one index lookup each, $O(\log n)$). On a chain of patterns it does what nested index
 lookups would; on a cycle it stays within the bound. The order of the variables is chosen from the counts: every order
 for up to 7 variables (with pruning), greedily beyond. Each answer comes out once (G11). On the follow graph (568,163
 links), the triangles take 1.03 s on one domain and 371 ms on three (PostgreSQL 1.03 s and 603 ms).
@@ -341,7 +342,7 @@ after the group's asserted changes, its retractions are decided by Backward/Forw
 semi-naive evaluation, in a working set of arrays out of the collector's sight; the derived changes join the group's
 frame with a kind byte (2 to 5) and the view in one sorted batch. Replay applies them and evaluates nothing. In a run,
 a fact's value carries a flag "only derived" in the lowest bit of its field, in the blocks that hold a derived fact
-(format 7; format 6 used bit 63 of a value word). A large group with rules reasons over its own facts
+(formats 7 and 8; format 6 used bit 63 of a value word). A large group with rules reasons over its own facts
 in the working set and appends the derived ones to its arrays, merged into the run with them. The whole of it:
 [rules](rules.md).
 

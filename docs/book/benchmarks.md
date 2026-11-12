@@ -30,9 +30,9 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
   it launches; the number is printed (it launched only 1 for Q5: 2 processes).
 - **A time is a median with its 95 % interval.** 21 runs a question (`RUNS`), each run timing many calls for the fast
   questions (200,000 for Q1 and Q2, 100 for Q3) and one call for Q4 and Q5. Times are skewed and often bimodal, so
-  no mean and no normal interval: the median, with the interval between two order statistics, x(j) and x(n+1-j),
-  which covers the true median with probability 1 − 2 P(B ≤ j − 1), B ~ Binomial(n, 1/2), whatever the distribution
-  ([Le Boudec 2010], theorem 2.1; [Hoefler 2015], rule 5). For 21 runs, j = 6: [x(6), x(16)], 97.3 %. The number of
+  no mean and no normal interval: the median, with the interval between two order statistics, $x(j)$ and $x(n+1-j)$,
+  which covers the true median with probability $1 - 2 P(B \le j - 1)$, $B \sim \text{Binomial}(n, 1/2)$, whatever the distribution
+  ([Le Boudec 2010], theorem 2.1; [Hoefler 2015], rule 5). For 21 runs, $j = 6$: $[x(6), x(16)]$, 97.3 %. The number of
   runs and the exact coverage are printed with every interval (`bench/stats.ml`, used for both sides: PostgreSQL's
   times go through `bench.exe stats`).
 - **Latencies from a histogram of every value**, not a sample: log-linear buckets as HdrHistogram does (exact below
@@ -42,9 +42,10 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 - **Two kinds of write loads.** Closed loop: each client writes as soon as its last write was confirmed; it gives the
   highest throughput, but its latencies are wrong under stalls: a client stalled by a 400 ms fsync sends nothing
   during the stall, so the writes that would have waited are never measured ("coordinated omission", [Tene 2015]).
-  Open loop: writes are due at a fixed rate (client c's k-th write at t0 + (k C + c) / rate), and a write's latency
-  counts from the time it was due, as wrk2 does; PostgreSQL's side is `pgbench -R`, whose latencies count from the
-  scheduled start (the schedule lag is added). The open loop gives the latencies; the closed loop, the throughput.
+  Open loop: writes are due at a fixed rate, all clients together (with $C$ clients, client $c$'s $k$-th write at
+  $t_0 + (k C + c) / \text{rate}$), and a write's latency counts from the time it was due, as wrk2 does; PostgreSQL's
+  side is `pgbench -R`, whose latencies count from the scheduled start (the schedule lag is added). The open loop gives
+  the latencies; the closed loop, the throughput.
 - **Where a write's time goes**: the journal's pwrite and fsync of each frame, the writer's resolution of each batch,
   and its wait at a merge switch, each in its own histogram (`Journal.write_us`, `Journal.fsync_us`,
   `Engine.prepare_us`, `Engine.switch_us`); GC collections counted over the run.
@@ -87,7 +88,7 @@ wrk2 tools.
 ## Live questions (2026-11-11), at 1 million facts
 
 `cepheus.Watch` and `Watch` on the wire, against main before them (the commit of the column order), on the server's
-database of 1 M facts, each side on a server started from the same copy of it, n = 7 rounds alternated (method above).
+database of 1 M facts, each side on a server started from the same copy of it, $n = 7$ rounds alternated (method above).
 The whole tables are in [server](server.md#what-a-watch-costs) and [Cesia](cesia.md#what-it-costs).
 
 | | before | after | the ratio within each round, after / before |
@@ -96,7 +97,7 @@ The whole tables are in [server](server.md#what-a-watch-costs) and [Cesia](cesia
 | an empty round trip (Ping), µs | 8.86 [7.55, 11.13] | 9.40 [7.93, 11.47] | 0.93 [0.76, 1.50] |
 | a point read at the server (Get), µs | 8.79 [7.64, 12.27] | 8.85 [7.70, 9.49] | 1.00 [0.64, 1.16] |
 
-A program that uses the package without calling it (`cesia run` of `io.Print(1)` with the package's `use`, n = 51
+A program that uses the package without calling it (`cesia run` of `io.Print(1)` with the package's `use`, $n = 51$
 alternated): 3.53 ms [3.48, 3.59] before, 3.66 [3.60, 3.75] after: the package's Cesia code is 41 lines longer (`Watch`
 and `Close` of a watch), which Cesia reads and compiles at the start, 0.13 ms more. The engine still loads only at the
 first call.
@@ -126,24 +127,24 @@ runs each in each process, on up to 8 domains and on 1. Load average 1.8 to 2.7 
 
 | 10 M facts | main d747635 | branch | branch / main, by round |
 |---|---:|---:|---|
-| load in 2 large groups, to confirm every group | 3.86 s [3.33, 5.80] | 3.93 s [3.71, 4.33] | 1.005 (p = 1.0: no difference shown) |
-| load in 4 large groups (`GROUP=56818`) | 5.62 s [4.83, 6.16] | 5.75 s [5.04, 7.14] | 0.967 (p = 1.0) |
-| a large group merged into a run (the longest) | 1.13 s [1.10, 1.39] | 1.33 s [1.31, 1.48] | 1.173, slower 6 of 7 (p = 0.13) |
+| load in 2 large groups, to confirm every group | 3.86 s [3.33, 5.80] | 3.93 s [3.71, 4.33] | 1.005 ($p = 1.0$: no difference shown) |
+| load in 4 large groups (`GROUP=56818`) | 5.62 s [4.83, 6.16] | 5.75 s [5.04, 7.14] | 0.967 ($p = 1.0$) |
+| a large group merged into a run (the longest) | 1.13 s [1.10, 1.39] | 1.33 s [1.31, 1.48] | 1.173, slower 6 of 7 ($p = 0.13$) |
 | peak resident memory, 2 groups | 1,599 MB | 1,590 MB | 0.994 |
-| peak resident memory, 4 groups | 953 MB [860, 1,130] | 911 MB [872, 994] | 0.956 (p = 0.45) |
+| peak resident memory, 4 groups | 953 MB [860, 1,130] | 911 MB [872, 994] | 0.956 ($p = 0.45$) |
 | the runs after `snapshot` (one run) | 54.4 MB | 69.6 MB | 1.280: +15.2 MB (the column order 13.9 MB) |
 | the journal | 21.8 MB | 21.8 MB | the same |
-| `snapshot` (a full merge) | 1.65 s [1.53, 1.83] | 2.00 s [1.90, 2.46] | 1.242, slower 7 of 7 (p = 0.016) |
-| open of the database it leaves | 54.0 ms [51.5, 58.3] | **46.1 ms** [38.7, 52.1] | 0.795, faster 6 of 7 (p = 0.13) |
-| Q1 an invoice by id | 0.44 µs [0.40, 0.46] | 0.46 µs [0.39, 0.61] | 1.095 (p = 1.0) |
-| Q2 a client by e-mail | 0.74 µs [0.67, 0.80] | 0.69 µs [0.63, 0.80] | 0.940 (p = 0.45) |
-| Q3 unpaid invoices of a city | 4.28 ms [4.13, 4.44] | **2.92 ms** [2.84, 3.24] | 0.688, faster 7 of 7 (p = 0.016) |
+| `snapshot` (a full merge) | 1.65 s [1.53, 1.83] | 2.00 s [1.90, 2.46] | 1.242, slower 7 of 7 ($p = 0.016$) |
+| open of the database it leaves | 54.0 ms [51.5, 58.3] | **46.1 ms** [38.7, 52.1] | 0.795, faster 6 of 7 ($p = 0.13$) |
+| Q1 an invoice by id | 0.44 µs [0.40, 0.46] | 0.46 µs [0.39, 0.61] | 1.095 ($p = 1.0$) |
+| Q2 a client by e-mail | 0.74 µs [0.67, 0.80] | 0.69 µs [0.63, 0.80] | 0.940 ($p = 0.45$) |
+| Q3 unpaid invoices of a city | 4.28 ms [4.13, 4.44] | **2.92 ms** [2.84, 3.24] | 0.688, faster 7 of 7 ($p = 0.016$) |
 | Q4 unpaid sum by city, 8 domains | 88.7 ms [84.9, 104] | **44.0 ms** [42.6, 44.5] | 0.500, faster 7 of 7 |
 | Q5 triangles, 8 domains | 294 ms [266, 325] | **68.5 ms** [64.2, 87.9] | 0.233, faster 7 of 7 |
 | Q4, 1 domain | 253 ms [248, 285] | **131 ms** [129, 133] | 0.518, faster 7 of 7 |
 | Q5, 1 domain | 1.18 s [1.15, 1.28] | **0.271 s** [0.256, 0.297] | 0.224, faster 7 of 7 |
-| 1 M facts, a group a client, 64 threads | 8.01 s [7.64, 9.24] | 8.06 s [7.27, 9.92] | 1.006 (p = 1.0) |
-| its peak | 200 MB [175, 222] | 212 MB [194, 224] | 1.053, larger 6 of 7 (p = 0.13) |
+| 1 M facts, a group a client, 64 threads | 8.01 s [7.64, 9.24] | 8.06 s [7.27, 9.92] | 1.006 ($p = 1.0$) |
+| its peak | 200 MB [175, 222] | 212 MB [194, 224] | 1.053, larger 6 of 7 ($p = 0.13$) |
 
 **The columns' domain, tried and taken out.** The columns are written by the merge's pass by thing; they cost about
 20 ns a row (the large group's merge +0.2 s, a full merge +0.35 s). Filling them on a domain of their own beside the
@@ -246,23 +247,23 @@ The machine was shared with other jobs (load average 1.2 to 2.2).
 
 | 10 M facts | main 0ecc09e | branch | branch / main, by round |
 |---|---:|---:|---|
-| load in 2 large groups, to confirm every group | 4.26 s [3.82, 4.62] | **3.44 s** [3.32, 4.48] | 0.855, faster 7 of 7 (p = 0.016) |
-| load in 4 large groups (`GROUP=56818`) | 5.74 s [5.22, 8.70] | **4.64 s** [4.42, 6.32] | 0.803, faster 6 of 7 (p = 0.13) |
+| load in 2 large groups, to confirm every group | 4.26 s [3.82, 4.62] | **3.44 s** [3.32, 4.48] | 0.855, faster 7 of 7 ($p = 0.016$) |
+| load in 4 large groups (`GROUP=56818`) | 5.74 s [5.22, 8.70] | **4.64 s** [4.42, 6.32] | 0.803, faster 6 of 7 ($p = 0.13$) |
 | peak resident memory, 2 groups | 1,460 MB | 1,600 MB | 1.096 (the frame coded in memory, 21.6 MB, and the coder's buffers) |
 | peak resident memory, 4 groups | 1,196 MB [860, 1,389] | **984 MB** [878, 1,080] | 0.804 |
 | the journal | 99.6 MB | **21.8 MB** | 0.219 |
 | the runs after `snapshot` (one run) | 246.4 MB | **54.4 MB** | 0.221 |
 | journal and runs after `snapshot` | 346.1 MB | **76.2 MB** | 0.220 |
-| `snapshot` (a full merge) | 1.99 s [1.51, 2.70] | 1.62 s [1.54, 2.64] | 0.811 (p = 0.45) |
+| `snapshot` (a full merge) | 1.99 s [1.51, 2.70] | 1.62 s [1.54, 2.64] | 0.811 ($p = 0.45$) |
 | open of the database it leaves | 197 ms [194, 240] | **53.5 ms** [52.8, 54.3] | 0.271, faster 7 of 7 |
-| Q1 an invoice by id | 0.36 µs [0.34, 0.40] | 0.38 µs [0.36, 0.39] | 1.056 (p = 0.45: no difference shown) |
+| Q1 an invoice by id | 0.36 µs [0.34, 0.40] | 0.38 µs [0.36, 0.39] | 1.056 ($p = 0.45$: no difference shown) |
 | Q2 a client by e-mail | 1.58 µs [1.53, 1.64] | **0.65 µs** [0.64, 0.66] | 0.411, faster 7 of 7 |
 | Q3 unpaid invoices of a city | **3.59 ms** [3.56, 3.78] | 3.97 ms [3.92, 4.01] | 1.095, slower 7 of 7 |
 | Q4 unpaid sum by city, 8 domains | **79.9 ms** [78.8, 80.6] | 82.4 ms [81.9, 83.0] | 1.031, slower 7 of 7 |
 | Q5 triangles, 8 domains | **248 ms** [243, 257] | 264 ms [262, 266] | 1.072, slower 7 of 7 |
 | Q4, 1 domain | **231 ms** [230, 236] | 241 ms [239, 243] | 1.038, slower 7 of 7 |
 | Q5, 1 domain | **1.02 s** [0.98, 1.05] | 1.10 s [1.07, 1.14] | 1.098, slower 7 of 7 |
-| 1 M facts, a group a client, 64 threads | 8.25 s [7.94, 9.10] | 7.93 s [7.23, 9.05] | 0.962 (p = 0.45: the same) |
+| 1 M facts, a group a client, 64 threads | 8.25 s [7.94, 9.10] | 7.93 s [7.23, 9.05] | 0.962 ($p = 0.45$: the same) |
 | its peak | 235 MB | 204 MB | 0.834 |
 
 **Where the load's time goes now.** The large group's coding for the journal takes 0.64 s on its domain (0.89 s
@@ -403,7 +404,7 @@ alumnus), then the same 10 retracted in one group; 2,000 of each, on a fork of t
 university merged into one run (a fork never merges: written to with the whole load, its persistent maps would hold
 every fact). The same groups without rules on main 85e72ac's binary and on this one (the same benchmark source), for
 the write path without rules. Seven rounds, alternated, in one hold of the heavy lock, every process in a 3 GB scope;
-a cell is the median of the rounds with the interval [x(1), x(7)] (98.4 %). Commands:
+a cell is the median of the rounds with the interval $[x(1), x(7)]$ (98.4 %). Commands:
 `reason.exe student 1 2000 DIR`, `reason.exe why 1 2000 DIR`, `reason.exe mat 10 rules|none bulk DIR`,
 `reason.exe apply 200000`.
 
@@ -471,7 +472,7 @@ up to 8 domains (the default), 21 runs each in each process: a cell is the media
 
 | 10 M facts | main eb120a4 | branch | branch / main, by round |
 |---|---:|---:|---|
-| load in 2 large groups (9.4 M additions, then 568,163), to confirm every group | 6.18 s [5.65, 7.41] | **4.14 s** [3.67, 4.86] | 0.656 [0.645, 0.686], faster 7 of 7 (p = 0.016) |
+| load in 2 large groups (9.4 M additions, then 568,163), to confirm every group | 6.18 s [5.65, 7.41] | **4.14 s** [3.67, 4.86] | 0.656 [0.645, 0.686], faster 7 of 7 ($p = 0.016$) |
 | the same, a second series after the run's fsync went beside the frame's | 6.59 s [6.18, 9.31] | 4.65 s [3.96, 5.43] | 0.677 [0.566, 0.812], 7 of 7 |
 | peak resident memory of that load | 2,595 MB [2,527, 2,620] | **1,461 MB** [1,461, 1,462] | 0.563 |
 | of which the client's own list of operations, once built | 883 MB | 883 MB | |
@@ -479,7 +480,7 @@ up to 8 domains (the default), 21 runs each in each process: a cell is the media
 | a large group merged into its run (the second series: without its fsync, now beside the frame's) | 1.57 s (1.76) | 1.59 s (0.32) | |
 | load in 4 large groups (`GROUP=56818`) | 7.62 s [7.14, 11.17] | 5.74 s [5.20, 6.50] | 0.706 [0.540, 0.849], 7 of 7 |
 | its peak | 2,167 MB | 1,184 MB | 0.616 |
-| then `snapshot` | 1.45 s [1.28, 2.25] | 2.06 s [1.44, 2.55] | 1.258 [0.871, 1.747], slower 4 of 7 (p = 1.0: no difference shown) |
+| then `snapshot` | 1.45 s [1.28, 2.25] | 2.06 s [1.44, 2.55] | 1.258 [0.871, 1.747], slower 4 of 7 ($p = 1.0$: no difference shown) |
 | on disk after it | 553 MB | **330 MB** | 0.597 |
 | open of the database it leaves (one run) | 199 ms [197, 299] | 196 ms [194, 199] | 0.985 [0.648, 1.007] |
 | Q1 an invoice by id | 0.37 µs | 0.36 µs | 1.000 |
@@ -487,7 +488,7 @@ up to 8 domains (the default), 21 runs each in each process: a cell is the media
 | Q3 unpaid invoices of a city | 3.80 ms | 3.58 ms | 0.955 [0.939, 0.966], 7 of 7 |
 | Q4 unpaid sum by city | 82.3 ms | 80.5 ms | 0.976, 7 of 7 |
 | Q5 triangles | 252 ms | 245 ms | 0.970 |
-| 1 M facts, a group a client, 64 threads | 8.40 s [7.19, 9.27] | 8.48 s [7.65, 10.84] | 0.947 [0.911, 1.258] (p = 1.0: the same) |
+| 1 M facts, a group a client, 64 threads | 8.40 s [7.19, 9.27] | 8.48 s [7.65, 10.84] | 0.947 [0.911, 1.258] ($p = 1.0$: the same) |
 | its peak | 269 MB | 224 MB | 0.898 |
 
 **Where a load's time goes now** (the writer's phases, one load on a quiet machine): the client builds its 9.4 M
@@ -534,7 +535,7 @@ for both sides of a round:
 | 10 M facts | Cepheus (branch) | SQLite 3.54 | PostgreSQL 18.6 |
 |---|---:|---:|---:|
 | load, until durable | 5.61 s [4.21, 11.67] (beside SQLite); 5.13 s [4.65, 8.08] (beside PostgreSQL) | 9.37 s [7.90, 13.67] | 30.87 s [28.08, 37.13] |
-| Cepheus / the giant, by round | | 0.600 [0.429, 0.923], Cepheus faster 7 of 7 (p = 0.016): SQLite takes 1.7 times as long | 0.168 [0.144, 0.288], 7 of 7: PostgreSQL takes 6 times as long |
+| Cepheus / the giant, by round | | 0.600 [0.429, 0.923], Cepheus faster 7 of 7 ($p = 0.016$): SQLite takes 1.7 times as long | 0.168 [0.144, 0.288], 7 of 7: PostgreSQL takes 6 times as long |
 | peak memory | 1.46 GB (0.88 of it the client's list) | **11 MB** | shared_buffers 1 GB and the backend |
 | on disk after the load, after `snapshot` | 335 MB, 330 MB | **131 MB** | 284 MB (675 MB with its WAL) |
 | 1 M facts, a transaction a client (3 rounds) | **13.2 s** [10.2, 15.2] (64 threads) | 174.0 s [170.0, 196.9] (one writer) | not measured (`COPY` is one transaction) |
@@ -600,11 +601,11 @@ interval, order statistics, 96.1 %]; the ratio is paired by round; the tests are
 
 | | 51cf32d | the instruction | ratio | faster in | sign test |
 |---|---:|---:|---:|---:|---:|
-| 10 M facts, 4 large groups, until confirmed | 9.09 s [7.88, 11.68] | 9.43 s [8.18, 10.37] | 1.04 [0.79, 1.18] | 4 of 9 | p = 1 |
-| its snapshot | 1.98 s [1.33, 2.27] | 2.04 s [1.52, 2.65] | 1.07 [0.67, 1.52] | 4 of 9 | p = 1 |
-| **the open of that database** | 432 ms [389, 539] | **202 ms [197, 255]** | **0.49 [0.37, 0.60]** | 9 of 9 | p = 0.004 |
-| 1 M facts, a group a client, until confirmed | 10.24 s [9.37, 11.18] | 10.95 s [9.39, 12.70] | 1.05 [0.85, 1.24] | 4 of 9 | p = 1 |
-| the open of that database | 365 ms [356, 419] | 346 ms [339, 359] | 0.94 [0.82, 1.00] | 8 of 9 | p = 0.039 |
+| 10 M facts, 4 large groups, until confirmed | 9.09 s [7.88, 11.68] | 9.43 s [8.18, 10.37] | 1.04 [0.79, 1.18] | 4 of 9 | $p = 1$ |
+| its snapshot | 1.98 s [1.33, 2.27] | 2.04 s [1.52, 2.65] | 1.07 [0.67, 1.52] | 4 of 9 | $p = 1$ |
+| **the open of that database** | 432 ms [389, 539] | **202 ms [197, 255]** | **0.49 [0.37, 0.60]** | 9 of 9 | $p = 0.004$ |
+| 1 M facts, a group a client, until confirmed | 10.24 s [9.37, 11.18] | 10.95 s [9.39, 12.70] | 1.05 [0.85, 1.24] | 4 of 9 | $p = 1$ |
+| the open of that database | 365 ms [356, 419] | 346 ms [339, 359] | 0.94 [0.82, 1.00] | 8 of 9 | $p = 0.039$ |
 
 The open of the 10 M database takes half the time: 15,038 pages × 12.2 µs saved a page is 0.18 s of the 0.23 s
 measured. The loads checksum about 330 MB, 0.29 s in OCaml and 0.04 s now; that 0.25 s is inside the disk's spread (the
@@ -618,16 +619,17 @@ alone, +9.9 µs [0.2, 18.4] (0.5 %) for the whole binary with its new `crc` comm
 C call; the table of 2,048 numbers the old code built at start is gone. A fresh copy of the same binary started
 17.8 µs [9.4, 28.3] slower than the file the build left, so these compare binaries where the build left them.
 
-**The engine fixes measured again** (the section below), on a quiet machine: 2f37b23 against 51cf32d, the same loads
-and opens, 9 rounds alternated. 10 M in 4 large groups: 9.68 s [8.42, 11.47] against 8.73 s [8.09, 9.61] (ratio 0.97
-[0.77, 1.12], slower in 4 of 9, p = 1); its open 396 against 403 ms (1.02 [0.94, 1.26], p = 0.51); 1 M a group a
-client 9.21 against 9.87 s (1.01 [0.85, 1.16], p = 1); its open 364 against 368 ms (1.00 [0.97, 1.14], p = 0.51). The
+**The engine fixes measured again** (the section below), on a quiet machine: 2f37b23 (before the fixes) against
+51cf32d (after), the same loads and opens, 9 rounds alternated. Each ratio is after over before, the median of the 9
+rounds' ratios and its interval, which need not equal the ratio of the two medians. 10 M in 4 large groups: 9.68 s
+[8.42, 11.47] against 8.73 s [8.09, 9.61] (ratio 0.97 [0.77, 1.12], after slower in 4 of 9, $p = 1$); its open 396 against 403 ms (1.02 [0.94, 1.26], $p = 0.51$); 1 M a group a
+client 9.21 against 9.87 s (1.01 [0.85, 1.16], $p = 1$); its open 364 against 368 ms (1.00 [0.97, 1.14], $p = 0.51$). The
 fixes cost nothing measurable: the 13.12 s below was the disk.
 
 ## The engine fixes (2026-11-08), against the commit before them
 
 Five fixes ([guarantees](guarantees.md#g9-one-writer), [limits](limits.md)): the in-process lock keyed by the lock
-file's device and inode, thing numbers refused past 2³¹ − 1, a second `close` that does nothing, `decode` for `fold`'s
+file's device and inode, thing numbers refused past $2^{31} - 1$, a second `close` that does nothing, `decode` for `fold`'s
 words, and frames that stay within 256 MiB however many groups arrive. The writer's path changed (a batch may stop
 before a group that would pass the limit, and a large group starts a frame of its own), so the loads and the reads
 were measured against the commit before the fixes (2f37b23), both built in release, alternated in one session under
@@ -648,7 +650,7 @@ The loads give the median and its 95 % interval over 6 runs (the smallest and th
 cell gives the medians of the 3 rounds (21 runs a question in each process, every interval within 2 % of its median;
 the raw outputs keep them). The reads ran on one database, the one the last load before the fixes made (one run after
 its `snapshot`), copied for each side, so that both read the same bytes. The large-group load was slower after the
-fixes in 5 rounds of 6, by 0.6 to 5.1 s, and faster in the sixth by 6.6 s (a sign test: p = 0.22, two-sided, no
+fixes in 5 rounds of 6, by 0.6 to 5.1 s, and faster in the sixth by 6.6 s (a sign test: $p = 0.22$, two-sided, no
 difference shown); the writer's own histograms say where the time went: the
 CPU part, a large group resolved and sorted, is the same on both sides (its longest 0.93 to 1.00 s before, 0.93 to
 1.10 s after), and the differences are in the merges of the groups into runs (their longest 2.3 to 5.1 s before, 2.6 to
@@ -842,8 +844,8 @@ rewrote its whole base at each of its 31 merges. With the levels and the large g
 groups ties SQLite's `.import` (the section above). SQLite's records (variable-length integers in B-tree pages) stay
 about half the size of Cepheus' 8-byte words, and SQLite loads in 11 MB where a large group needs 2.5 to 3.2 GB. Not
 measured on SQLite's side: concurrent durable writes (SQLite has one writer at a time), and reads larger than memory.
-The reads above were measured on the engine of 148ff09; on one run, the levels read at the same speed (the next
-section), so the comparison holds.
+The reads above were measured on the engine of 148ff09; on one run, the levels read at the same speed
+([Reads, all in memory](#reads-all-in-memory), above), so the comparison holds.
 
 ## The merge written to a file (2026-11-08), at 10 million facts
 
@@ -916,7 +918,7 @@ Q3 91.8 ms [88.7, 94.6] against 88.7 ms [86.4, 90.9]; Q4 678 ms [650, 795] again
 pages read from the disk on both sides; peak 122 MB against 120 MB. (With 5 runs the interval is [min, max], 93.8 %.)
 
 **Loading 10 M facts, and what a merge's writes cost the journal** (`bench.exe load`: 64 clients, groups of 83 facts,
-about 33 merges as the base grows; one run a line, alternated):
+about 33 merges as the base grows; each cell gives every run, separated by semicolons, the runs alternated):
 
 | | load | peak | journal fsync p99 | max | merge switch p99 |
 |---|---:|---:|---:|---:|---:|
@@ -931,7 +933,7 @@ all over the load, beside the journal, whose fsyncs every client waits for (a me
 (a token bucket, as RocksDB's rate limiter) at 32 and 64 MB/s gave 23.8 and 23.3 s, no gain, and was left out. Writes
 at 256 clients with a merge every 10 s or so (above) do not see the difference; a sustained bulk load does, and more
 as the base grows. The remedy is fewer bytes a change: more than one level on disk (theory, section 9), or a higher
-merge threshold (n/8 halves the bytes and doubles the delta's memory).
+merge threshold ($n/8$ halves the bytes and doubles the delta's memory).
 
 ## Milestone 2 at 10 million facts
 
@@ -957,7 +959,7 @@ Milestone 2 changed (each measured against the commit before it, alternated):
 - **Pages and cache** (804656f): when everything is in memory, Q1 +5 %, Q2 -4 %, Q3 +8 %, Q4 +13 %, Q5 +3 to +8 %
   against the mapped base (theory, section 7, for why and what was tried).
 - **A bug fixed** (b96dec5): the sorted intersection had sorted every candidate list of a level, so a question could
-  take O(N log N) per binding instead of O(smallest); every question is now checked against the Generic Join bound.
+  take $O(N \log N)$ per binding instead of $O(\text{smallest})$; every question is now checked against the Generic Join bound.
 
 ### Durable writes
 
@@ -1054,7 +1056,7 @@ against 22 ms; Q5 63 ms against 50 ms.
   (dense ids); a question runs in the application's process with no round trip and no plan cache to consult. Through
   the socket, which is what an application of PostgreSQL pays, the gap is 15 to 70 times.
 - **Large scans and aggregates (Q4) and the triangle query (Q5): PostgreSQL is faster, because it uses three processes
-  for one query.** On one core it is 1.2 times slower than Cepheus on Q4 and even on Q5. Cepheus answers a question on
+  for one query.** On one core it is 1.2 times slower than Cepheus on Q4 and tied on Q5 (1,000 ms against 968). Cepheus answers a question on
   one core today; parallel questions (OCaml domains over a view, which needs no lock) are the next step. Q5's graph is
   uniform (5 links a client), where joins two at a time stay small; Generic Join's advantage shows on skewed graphs,
   not measured yet. Sorted intersection of the candidate lists (Leapfrog style) would also cut Q5's lookups.

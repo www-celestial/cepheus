@@ -1,5 +1,5 @@
 ----------------------------- MODULE Merge -----------------------------
-(* The protocol by which a merge's file replaces runs (docs/theory.md, sections 8 and 9; G12 in docs/guarantees.md),
+(* The protocol by which a merge's file replaces runs (docs/book/theory.md, sections 8 and 9; G12 in docs/book/guarantees.md),
    with the journal abstracted to the groups written (in the page cache) and the groups durable. The state on disk
    is a chain of runs, each the changes of groups lo+1..hi on top of the state at lo, named by its (lo, hi). Faults: F1
    a process death (the page cache stays, to be lost at a later power loss), F2 a power loss (unforced bytes lost, a

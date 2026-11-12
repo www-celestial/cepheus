@@ -62,7 +62,7 @@ type batch = {
 (* The levels (Store, Snapshot): the delta is merged once it holds [compact_min] changes; level l holds at most
    compact_min * ratio^l rows. A merge takes the delta and the newest runs, down to the first level that can hold
    them all, and writes one run there (leveling: Luo, Carey 2020; the theory and the choice of the ratio:
-   docs/theory.md, section 9). *)
+   docs/book/theory.md, section 9). *)
 let compact_min = ref 200_000
 let ratio = ref 4
 let frames = Atomic.make 0 (* frames written by this process: for the benchmarks, and a merge's fsyncs *)

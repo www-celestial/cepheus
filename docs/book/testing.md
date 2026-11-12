@@ -48,7 +48,7 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | `crash.exe DIR ROUNDS [SEED]` | real `kill -9` rounds on a database in DIR | SEED 42 by default |
 | `bank.exe DIR SECONDS` | the bank test for SECONDS | |
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | the sale of seats with kill -9 and a checker of the history ([case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)); `ROUNDS` 0: no kill, the time to sell out | `BUYERS` (16), SEED 42, SEATS 2,000 |
-| `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
+| `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/book/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
 | `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, crash, bank, seats and examples, the server's tests, and the Cesia client's when a Cesia with its native interface is here | `CEPHEUS_TMP` (a short path: a Unix socket's holds 107 bytes), `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `CESIA_NATIVE` (the folder of Cesia's `cesia_v1.cmi`; found from the `cesia` command when unset) |
 | `tools/tlc.sh` | TLC on `spec/Journal.tla`, `spec/Merge.tla` and `spec/Seats.tla`, and the naive sale (`spec/SeatsNaive.cfg`), which must break an invariant | `TLA2TOOLS`: the path of `tla2tools.jar` |
 

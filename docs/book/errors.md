@@ -68,13 +68,13 @@ From `write` (the writer's checks, the same on a database and on a fork):
 | `a property thing takes only cepheus/ properties` | an ordinary property written on a property thing (16 to 65,535) |
 | `cepheus/ properties describe property things only` | `cepheus/name`, `type`, `many` or `unique` written on an ordinary thing |
 | `property P needs both a name and a type` | a group left property thing P with a name and no type, or the reverse |
-| `half` | a group left property thing P with `cepheus/many` or `cepheus/unique` but neither a name nor a type |
+| `property P keeps cepheus/many or cepheus/unique without a name and a type` | a group left property thing P with `cepheus/many` or `cepheus/unique` but neither a name nor a type |
 | `property P has an unknown type code C` | `cepheus/type` holds a code no type has (`Tmoney` with more than 18 digits) |
 | `the type and the cardinality of NAME never change` | a group changed a property's type or `many` flag; declare another property |
 | `NAME cannot become unique: two things share a value` | `cepheus/unique` set to true while two things share a value |
 | `NAME still has values` | a property's name and type retracted while things still have values for it |
 | `a group of N bytes is over the frame limit of 268435456` | the group's encoding passes 256 MiB, the largest frame body: split it ([limits](limits.md#writes)) |
-| `thing numbers end at 2147483647: this group would make #N` | the group's new things would take thing numbers past 2³¹ − 1, the largest a run holds ([limits](limits.md#things-properties-values)); the database can make no more things |
+| `thing numbers end at 2147483647: this group would make #N` | the group's new things would take thing numbers past $2^{31} - 1$, the largest a run holds ([limits](limits.md#things-properties-values)); the database can make no more things |
 
 From `write` with rules (the writer's reasoning, the same on a database and on a fork; [rules](rules.md)):
 
@@ -82,7 +82,7 @@ From `write` with rules (the writer's reasoning, the same on a database and on a
 |---|---|
 | `[#E P V] is derived by rule R from F and G: retract one of those` | a `Retract` of a fact that is only derived: its premises would derive it again; retract the asserted facts it names (the facts of one proof) |
 | `[#E P V] is derived by a rule` | the same, when no proof of it could be printed |
-| `rule R derived more than N facts from a group of K facts` | the group's derived changes pass the budget, N = base + per × K ([api](api.md#rules), `rule_budget`); R derived the most. Split the write, or raise the budget |
+| `rule R derived more than N facts from a group of K facts` | the group's derived changes pass the budget, $N = \mathit{base} + \mathit{per} \times K$ ([api](api.md#rules), `rule_budget`); R derived the most. Split the write, or raise the budget |
 | `constraint R: FACTS` | the group would make the body of constraint R true: FACTS are the facts of one instance |
 | `rule R gives #E a second value of NAME, which takes one` | a derived value of a one-valued property beside another value |
 | `rule R gives NAME V, which another thing has` | a derived value of a unique property that another thing holds |
@@ -139,7 +139,7 @@ From `open_` (recovery) and `verify`; `SEG` is the segment's name, an offset is 
 | message | what it means |
 |---|---|
 | `DIR/cepheus is not a Cepheus database file` | the database's id file is not 37 bytes, or its magic or its CRC is wrong |
-| `SEG: unknown format F` | a segment header that checks but has a format other than 1 |
+| `SEG: unknown format F` | a segment header that checks but has a format other than 2, the journal's (a segment of format 1 is converted at open) |
 | `SEG: a segment of another database` | the segment's database id is not this database's (files of two databases mixed) |
 | `journal: segment SEG, where the snapshot starts, is missing` | the newest run resumes in a segment that is not there |
 | `journal: the first segment starts at group G` | no run, and the oldest segment does not start at group 1 |

@@ -1,7 +1,7 @@
 #!/bin/sh
 # The Cesia client against a real server, as a program uses it: a project of its own that holds the package in
 # deps/www-celestial/cepheus (its cesia.toml, its Cesia files and its engine), under the label cepheus, with the
-# cesia.lock that cesia pkg would write. Then: the examples of docs/cesia.md (test/cesia-docs.ce: each block with the
+# cesia.lock that cesia pkg would write. Then: the examples of docs/book/cesia.md (test/cesia-docs.ce: each block with the
 # blocks before it, on a database of its own); the client over TLS and through the Unix socket with local reads
 # (test/cesia-live.ce); and the server killed with kill -9 and started again while the program writes: every write
 # answered Ok is in the database once.
@@ -14,7 +14,7 @@ rm -rf "$tmp"
 mkdir -p "$tmp"
 B=$root/_build/default/bin/main.exe
 tag=$(cesia run tools/tag.ce)
-n=$(grep -c '^```cesia' docs/cesia.md)
+n=$(grep -c '^```cesia norun$' docs/book/cesia.md)
 port=$((20000 + $$ % 20000))
 
 # the server: one database an example, one for TLS, one for the local reads, one for the restart
@@ -62,7 +62,7 @@ printf '[project]\nname = "app"\nsrc = ["src"]\n\n[deps.cepheus]\nfrom = "github
 cd "$app"
 cesia run --allow read,write "$root/tools/lock.ce"
 
-cesia run --allow read,write,exec,env "$root/test/cesia-docs.ce" "$root/docs/cesia.md" "cepheus://localhost:$port/doc" "?socket=$tmp/s/r"
+cesia run --allow read,write,exec,env "$root/test/cesia-docs.ce" "$root/docs/book/cesia.md" "cepheus://localhost:$port/doc" "?socket=$tmp/s/r"
 
 cp "$root/test/cesia-live.ce" src/live.ce
 export CEPHEUS_URL="cepheus://localhost:$port/local?socket=$tmp/s/r" CEPHEUS_TLS="cepheus://127.0.0.1:$port/tls" CEPHEUS_CA="$tmp/s/ca.pem"

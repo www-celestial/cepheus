@@ -1,6 +1,6 @@
 #!/bin/sh
 # Every test: unit and property tests, the rules' property tests (G17, G18, G20), the exhaustive enumeration, the simulation (SEEDS seeds, 300 by default),
-# real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/case-seats.md), and the documentation's
+# real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/book/case-seats.md), and the documentation's
 # examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), live questions
 # against the naive evaluator (LIVE_SEEDS seeds, 100 by default), TLS and the
 # limits of connections on a real server, a real server killed SERVER_KILLS times (20) under writing clients.

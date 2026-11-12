@@ -1,4 +1,4 @@
-# The sale of docs/case-seats.md on SQLite: a hall of SEATS seats sold out by BUYERS threads, each with its own
+# The sale of docs/book/case-seats.md on SQLite: a hall of SEATS seats sold out by BUYERS threads, each with its own
 # connection. A buyer reads the ten best free seats, picks one at random, and writes the owner and the charge in one
 # transaction, durable at commit (WAL, synchronous = FULL).
 #   immediate: BEGIN IMMEDIATE, the read, the writes, COMMIT: the write lock is taken first, so no other writer

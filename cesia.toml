@@ -8,3 +8,9 @@ natives = ["kind", "connect", "get", "insert", "update", "write", "variables", "
 
 [test]
 allow = ["native=cepheus"]
+
+# cesia doc --site: the site of Cepheus, its book and the reference of its Cesia package.
+[site]
+title = "Cepheus"
+source = "https://github.com/www-celestial/cepheus/blob/main/"
+color = "#0c8599"

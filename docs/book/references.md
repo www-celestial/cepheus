@@ -16,8 +16,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   of a merge as the size ratio plus one.
 - **[Luo 2020]** C. Luo, M. J. Carey. LSM-based Storage Techniques: A Survey. *The VLDB Journal* 29(1), 393–418, 2020.
   https://doi.org/10.1007/s00778-019-00555-y
-  — The vocabulary and the costs of leveling and tiering (write amplification O(T·L) and O(L), runs a read visits L
-  and T·L), from which Cepheus' leveling with ratio 4 is chosen (theory, section 9).
+  — The vocabulary and the costs of leveling and tiering (write amplification $O(T \cdot L)$ and $O(L)$, runs a read visits $L$
+  and $T \cdot L$), from which Cepheus' leveling with ratio 4 is chosen (theory, section 9).
 - **[Dong 2017]** S. Dong, M. Callaghan, L. Galanis, D. Borthakur, T. Savor, M. Stumm. Optimizing Space Amplification
   in RocksDB. *CIDR* 2017. https://cidrdb.org/cidr2017/papers/p82-dong-cidr17.pdf
   — Space and write amplification in RocksDB (with dynamic level sizes and a size ratio of 10, space amplification
@@ -171,7 +171,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
   https://doi.org/10.1109/ICDE.2006.150
   — PFOR and PFOR-DELTA: the frame of reference in blocks of 128 values for columns, decoded in a few cycles a value,
   the rare outliers patched apart. Cepheus takes the blocks of 128 and the frame of reference, without patching (a
-  value is read in O(1), never by walking the exceptions), and deltas where they code shorter.
+  value is read in $O(1)$, never by walking the exceptions), and deltas where they code shorter.
 - **[Lemire 2015]** D. Lemire, L. Boytsov. Decoding Billions of Integers per Second through Vectorization. *Software:
   Practice and Experience* 45(1), 1–29, 2015. https://doi.org/10.1002/spe.2203
   — Binary packing of blocks, its scalar and vectorized decoders measured: Cepheus' fields are read the scalar way, one
@@ -187,7 +187,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
   the properties each thing has at most once (the row store PAX compares against) and columns only for the others;
   the order by property is the columns.
 - **[Vigna 2013]** S. Vigna. Quasi-Succinct Indices. *WSDM* 2013, 83–92. https://doi.org/10.1145/2433396.2433409
-  — Elias-Fano coding of a sorted list of n values below u in at most 2 + ⌈log2(u/n)⌉ bits each: the bound used to
+  — Elias-Fano coding of a sorted list of $n$ values below $u$ in at most $2 + \lceil \log_2(u/n) \rceil$ bits each: the bound used to
   weigh the order by property against the information in the data (theory, section 11).
 - **[Vigna 2016]** S. Vigna. An Experimental Exploration of Marsaglia's xorshift Generators, Scrambled. *ACM
   Transactions on Mathematical Software* 42(4), article 30, 2016. https://arxiv.org/abs/1402.6246 (the extended
@@ -221,7 +221,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Bentley 1976]** J. L. Bentley, A. C.-C. Yao. An Almost Optimal Algorithm for Unbounded Searching. *Information
   Processing Letters* 5(3), 82–87, 1976. https://doi.org/10.1016/0020-0190(76)90071-5
   — Exponential (galloping) search: the seeks of the leapfrog intersection (`Query.gallop`): steps of 1, 2, 4, ...
-  from the last place, then a binary search, O(log d) for a place d further. Until format 7, a merge also placed the
+  from the last place, then a binary search, $O(\log d)$ for a place $d$ further. Until format 7, a merge also placed the
   other runs' texts among the largest run's sorted list this way.
 
 - **[Abadi 2007]** D. J. Abadi, A. Marcus, S. R. Madden, K. Hollenbach. Scalable Semantic Web Data Management Using
@@ -235,7 +235,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Atserias 2008]** A. Atserias, M. Grohe, D. Marx. Size Bounds and Query Plans for Relational Joins. *FOCS* 2008,
   739–748. https://doi.org/10.1109/FOCS.2008.43 ; *SIAM Journal on Computing* 42(4), 1737–1767, 2013.
   https://doi.org/10.1137/110859440
-  — The AGM bound: the largest answer of a conjunctive query from the sizes of its inputs (N^1.5 for a triangle).
+  — The AGM bound: the largest answer of a conjunctive query from the sizes of its inputs ($N^{1.5}$ for a triangle).
 - **[Ngo 2012]** H. Q. Ngo, E. Porat, C. Ré, A. Rudra. Worst-case Optimal Join Algorithms. *PODS* 2012, 37–48.
   https://doi.org/10.1145/2213556.2213565 ; *Journal of the ACM* 65(3), 2018. https://doi.org/10.1145/3180143
   — The first join algorithm that meets the AGM bound, and the proof that binary-join plans cannot.
@@ -416,6 +416,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — ocaml-tls, the TLS in OCaml weighed against OpenSSL (its ciphers are C too; not an OSS-Fuzz project): OpenSSL kept.
 - **[sd_notify]** systemd. sd_notify(3), the readiness protocol: one datagram (`READY=1`) on `$NOTIFY_SOCKET`.
   https://www.freedesktop.org/software/systemd/man/latest/sd_notify.html
+  — The server sends `READY=1` once its databases are open and its listeners listen, and `STOPPING=1` when it stops: a
+  unit of `Type=notify` counts it started only then.
 - **[Lamport 1986]** L. Lamport. On Interprocess Communication. Part I: Basic Formalism; Part II: Algorithms.
   *Distributed Computing* 1(2), 77–85 and 86–101, 1986. https://doi.org/10.1007/BF01786227,
   https://doi.org/10.1007/BF01786228
@@ -473,7 +475,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Serebryany 2012]** K. Serebryany, D. Bruening, A. Potapenko, D. Vyukov. AddressSanitizer: A Fast Address Sanity
   Checker. *USENIX ATC* 2012, 309–318. https://www.usenix.org/conference/atc12/technical-sessions/presentation/serebryany
   — The memory checker the C file of the CRC is fuzzed under: a read one byte outside its block stops the run.
-- **[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
+- **\[libFuzzer]** The LLVM Project. libFuzzer – a library for coverage-guided fuzz testing.
   https://llvm.org/docs/LibFuzzer.html
   — The fuzzer of `test/fuzz_crc32c.c` and `test/fuzz_tls.c`: inputs mutated toward new paths of the code, every
   one checked against the CRC computed bit by bit, or against what the other side of a TLS conversation wrote.
@@ -484,7 +486,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
   https://press.princeton.edu/books/paperback/9780691164076/how-to-solve-it
   — "Understanding the problem" first: the unknown, the data, the condition; the first step of the
   [case of the seats](case-seats.md).
-- **[Heilmeier]** G. H. Heilmeier. The Heilmeier Catechism, the questions DARPA asks of every proposed research
+- **\[Heilmeier]** G. H. Heilmeier. The Heilmeier Catechism, the questions DARPA asks of every proposed research
   program. https://www.darpa.mil/about/heilmeier-catechism
   — What are you trying to do, how is it done today, what is new, how will you know you succeeded: the frame of the
   problem's statement.
@@ -522,7 +524,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — Coordinated omission and open-loop loads; log-linear histograms of every latency (`Histogram`).
 - **[Little 1961]** J. D. C. Little. A Proof for the Queuing Formula: L = λW. *Operations Research* 9(3), 383–387,
   1961. https://doi.org/10.1287/opre.9.3.383
-  — The throughput of group commit, λ = N / W.
+  — The throughput of group commit, $\lambda = N / W$.
 - **[Gray 1994]** J. Gray, P. Sundaresan, S. Englert, K. Baclawski, P. J. Weinberger. Quickly Generating
   Billion-Record Synthetic Databases. *SIGMOD* 1994, 243–252. https://doi.org/10.1145/191839.191886
   — Zipf-distributed keys for the traces of the cache study.

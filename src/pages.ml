@@ -8,7 +8,7 @@
    bytes once no reader holds them, so a reader that raced with the eviction still reads the right bytes.
 
    Policy: S3-FIFO (Yang, Zhang, Qiu, Yue, Vinayak, "FIFO queues are all you need for cache eviction", SOSP 2023),
-   checked on recorded traces against LRU, CLOCK, 2Q, ARC, SIEVE, W-TinyLFU and Belady's optimum (docs/theory.md):
+   checked on recorded traces against LRU, CLOCK, 2Q, ARC, SIEVE, W-TinyLFU and Belady's optimum (docs/book/theory.md):
    a page enters a small FIFO (a tenth of the room) and goes to the main FIFO only if it was read again meanwhile, so
    a scan does not push out the pages read again and again; in the main FIFO a page read since the policy last looked
    at it is kept (its 2-bit counter lowered), as a CLOCK keeps a page whose bit is set. A ghost FIFO remembers the

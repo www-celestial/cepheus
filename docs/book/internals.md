@@ -56,10 +56,10 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 |---|---|
 | `type prop` | `{ name; typ; many; unique }`: `Cepheus.prop` |
 | `p_name`, `p_type`, `p_many`, `p_unique`, `p_rule` | 1, 2, 3, 4, 5: the system properties |
-| `first_prop`, `first_thing`, `last_thing` | 16, 65,536 and 2,147,483,647 (2³¹ − 1, the largest thing number a run holds) |
+| `first_prop`, `first_thing`, `last_thing` | 16, 65,536 and 2,147,483,647 ($2^{31} - 1$, the largest thing number a run holds) |
 | `type t`, `initial` | a persistent table of properties and rules (a copy on change); the five system properties |
 | `find`, `by_name`, `count` | a property by number, by name; one more than the largest number the table holds |
-| `is_system p`, `is_prop_space e` | 1 ≤ p < 16; 16 ≤ e < 65,536 |
+| `is_system p`, `is_prop_space e` | $1 \le p < 16$; $16 \le e < 65{,}536$ |
 | `set`, `facts`, `system` | a changed table; the four facts that declare a property; the descriptions of 1 to 5 |
 | `rules`, `rule`, `rule_by_name`, `set_rule`, `has_rules`, `rules_key` | the rules (thing -> name and canonical text); a key that changes when they change, by which their compiled form is cached |
 
@@ -109,21 +109,21 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 |---|---|
 | `create ?reverts rng`, `disk t` | a simulated disk drawing from a seeded generator (`reverts`: a failed fsync undoes the failed writes in memory, as Btrfs does; by default it keeps them, as ext4 and XFS do); the `Disk.t` the engine uses |
 | `sector` | 512 bytes: the unit of loss and of tearing |
-| `exception Crash`, `crash_after t n` | the (n+1)-th mutating call from now raises `Crash` instead of running: a crash inside a call |
+| `exception Crash`, `crash_after t n` | the $(n+1)$-th mutating call from now raises `Crash` instead of running: a crash inside a call |
 | `type draw` | the choices of a power loss: `Names` (how many of a directory's name changes survive, a prefix), `Length` (a grown file's length), `Cut`, `Sector` (lost, kept or torn), `Tear` (how many bytes of a torn sector) |
 | `crash ?choose t` | a power loss: files closed, locks released, each unsynced choice drawn at random or by `choose`, so a test can enumerate every outcome |
 | `kill t` | the process dies, the machine stays up: what was written and not forced stays readable, to be lost at a later `crash` |
 | `pending_names`, `flip_durable`, `fail_next_fsync`, `advance` | the name changes not synced; a silent bit flip in durable bytes (F3); the next fsync fails and the sectors written since the last fsync are marked clean without reaching the disk: a later fsync does not write them unless they are written again (F4); the clock moves |
-| `fail_fsync_at ?crash_after t n`, `failures t` | the (n+1)-th fsync from now fails as above, and with `crash_after c` the process dies at the (c+1)-th mutating call after it; the fsyncs that failed so far |
+| `fail_fsync_at ?crash_after t n`, `failures t` | the $(n+1)$-th fsync from now fails as above, and with `crash_after c` the process dies at the $(c+1)$-th mutating call after it; the fsyncs that failed so far |
 | `durable_size`, `files`, `durable_bytes` | what is durable, for the checks |
 
 ## `Codec`, `Crc32c`, `Histogram`, `Rng`
 
 | name | what it is |
 |---|---|
-| `Codec.put_varint`, `put_int`, `put_string`, `put_u64` | LEB128 varints (an int ≥ 0 in 1 to 9 bytes), zigzag ints, length-prefixed strings, 8 bytes little-endian |
+| `Codec.put_varint`, `put_int`, `put_string`, `put_u64` | LEB128 varints (an int $\ge 0$ in 1 to 9 bytes), zigzag ints, length-prefixed strings, 8 bytes little-endian |
 | `Codec.reader`, `get_varint`, `get_int`, `get_byte`, `get_string`, `get_u64`, `at_end`, `exception Short` | a bounded reader over bytes; every read past the end raises `Short` |
-| `Pack.width x`, `Pack.mask w`, `Pack.bytes n w`, `Pack.get b bit w`, `Pack.put b bit x w` | bit packing: the bits of x read as an unsigned 63-bit number (0 for 0, 63 for a negative); fields of w ≤ 63 bits one after the other, little-endian (field i at bit i·w), read by one unaligned 8-byte load, a shift and a mask when the field fits in it (w ≤ 55), byte by byte otherwise and near the end of the bytes; `put` writes into zero bits |
+| `Pack.width x`, `Pack.mask w`, `Pack.bytes n w`, `Pack.get b bit w`, `Pack.put b bit x w` | bit packing: the bits of $x$ read as an unsigned 63-bit number (0 for 0, 63 for a negative); fields of $w \le 63$ bits one after the other, little-endian (field $i$ at bit $i \cdot w$), read by one unaligned 8-byte load, a shift and a mask when the field fits in it ($w \le 55$), byte by byte otherwise and near the end of the bytes; `put` writes into zero bits |
 | `Pack.put_ints out n f`, `Pack.get_ints r n a at` | a column of n ints in blocks of 128, each a frame of reference or deltas, whichever is shorter ([formats](formats.md#a-group)); `get_ints` raises `Codec.Short` on bytes that are not a column |
 | `Crc32c.bytes b off len`, `Crc32c.extend crc b off len`, `Crc32c.string s` | CRC-32C (`extend`: the CRC of the bytes whose CRC is `crc` followed by these, for a frame checked by pieces), reflected polynomial 0x82F63B78, by the processor's instruction: the module checks the bounds (`Invalid_argument "Crc32c.extend"` otherwise), then calls `src/crc32c_stubs.c` by pieces of at most 1 MiB, so that another domain asking for a collection waits at most about 0.1 ms (a C call never stops for the GC); about 9 GB/s here. Its initialisation fails with `Failure` on a processor without the instruction |
 | `Histogram.create`, `record`, `merge_into`, `percentile h q`, `total`, `max`, `mean` | log-linear buckets as HdrHistogram: exact below 256, then 128 a power of two; a percentile is rounded up to its bucket's highest value, never above the largest recorded |

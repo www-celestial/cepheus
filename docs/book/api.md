@@ -206,7 +206,7 @@ they derived with them (a name that is no rule is ignored).
 the rule's name and the proofs of the facts of its body, in the order of the rule's patterns; `None` when the triple
 is not a fact of v. Computed when called, on the view: nothing is stored at write time (G20).
 
-`rule_budget` is (base, per): a group whose derived changes pass base + per × its asserted changes is refused,
+`rule_budget` is (base, per): a group whose derived changes pass $\mathit{base} + \mathit{per} \times \text{its asserted changes}$ is refused,
 `Invalid "rule NAME derived more than N facts from a group of K facts"`; (100,000, 100) by default, for every database
 of the process.
 

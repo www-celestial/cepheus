@@ -6,27 +6,27 @@ the same parts is [architecture](architecture.md).
 
 ## 1. The journal and recovery
 
-**Model.** The journal is a sequence of frames F1, F2, ... appended to segment files. Each frame holds groups with
-consecutive numbers. Let D be the durable prefix of the file (the bytes covered by a finished `fsync`). A crash (F1,
-F2) replaces the file by D followed by some bytes R from the unsynced writes (any subset of their sectors, possibly
-torn). Recovery reads frames from the start and stops at the first index j where the bytes do not form a valid frame.
+**Model.** The journal is a sequence of frames $f_1, f_2, \dots$ appended to segment files. Each frame holds groups with
+consecutive numbers. Let $D$ be the durable prefix of the file (the bytes covered by a finished `fsync`). A crash (F1,
+F2) replaces the file by $D$ followed by some bytes $R$ from the unsynced writes (any subset of their sectors, possibly
+torn). Recovery reads frames from the start and stops at the first index $j$ where the bytes do not form a valid frame.
 
 **Invariant I1** (append discipline): a frame is written only after the previous frame's `fsync` returned, so at any
-time at most one frame is partly unsynced, and every frame before it lies inside D.
+time at most one frame is partly unsynced, and every frame before it lies inside $D$.
 
 **Invariant I2** (acknowledgement): a group is confirmed only after the `fsync` of its frame returned, so a confirmed
-group lies in D.
+group lies in $D$.
 
-**Theorem (G1-G3).** Under F1 and F2, recovery yields groups 1..k with k ≥ every confirmed group, each intact.
-*Proof.* By I1 and I2, the frames of confirmed groups are in D; D is unchanged by the crash; each such frame checks
+**Theorem (G1-G3).** Under F1 and F2, recovery yields groups $1, \dots, k$ with $k \ge$ every confirmed group, each intact.
+*Proof.* By I1 and I2, the frames of confirmed groups are in $D$; $D$ is unchanged by the crash; each such frame checks
 (header and body CRC), so the scan passes them. The scan stops at the first frame that does not check, which lies
-past D's confirmed frames, and everything after it is cut; frames are in group order, so the result is a prefix. ∎
+past $D$'s confirmed frames, and everything after it is cut; frames are in group order, so the result is a prefix. ∎
 
-**Damage versus tearing.** At the first bad frame at offset p, recovery must decide whether bytes were torn (never
+**Damage versus tearing.** At the first bad frame at offset $p$, recovery must decide whether bytes were torn (never
 confirmed: cut) or durable bytes were damaged (F3: refuse). Two signs prove that the frame was written whole and so
-was once durable-shaped: a frame header that checks after p (I1: a frame after p was written after the one at p was
+was once durable-shaped: a frame header that checks after $p$ (I1: a frame after $p$ was written after the one at $p$ was
 forced), or a
-trailer at offset t whose length field equals t − p − 28 and whose body CRC matches the bytes between. A torn write
+trailer at offset $t$ whose length field equals $t - p - 28$ and whose body CRC matches the bytes between. A torn write
 leaves neither, except if it lost exactly the sector of the header and kept every later sector of the frame (possible
 only on a device that reorders sector writes); then recovery refuses to open: a false alarm, never a loss. The
 exhaustive test enumerates every crash state of small journals and finds no false alarm in practice, because the
@@ -34,28 +34,28 @@ header shares its sector with the start of the body.
 
 **A failed fsync (F4).** I1 rests on a premise Linux breaks: that bytes not covered by a finished `fsync` are at least
 not mistaken for durable ones. After a failed `fsync`, ext4 and XFS mark the pages clean while keeping their new bytes
-in memory; a later `fsync` returns success without writing them, and every read until a reboot sees them ([Rebello 2020], section 3.3). So the next process, reading the page cache, would see a frame outside D that looks
-whole. Two rules keep D the truth. (W) After a failed `fsync` the writer stops and truncates the file to the end of its
+in memory; a later `fsync` returns success without writing them, and every read until a reboot sees them ([Rebello 2020], section 3.3). So the next process, reading the page cache, would see a frame outside $D$ that looks
+whole. Two rules keep $D$ the truth. (W) After a failed `fsync` the writer stops and truncates the file to the end of its
 last durable frame, then forces it (`Journal.cut`): the frame leaves both the page cache and the disk. (R) A recovery
 after anything but a clean close writes its newest frame again before forcing it (`Journal.rewrite_newest`): those
-pages are dirty again, so a successful `fsync` writes them and the frame joins D; if it fails, the open fails. By I1
-and the stop at the first failure, the newest frame is the only one that can lie outside D, so (R) alone suffices for
-safety (no view outside D, G13); (W) makes a failed write's absence certain and spares a later power loss the
-false alarm below. The model `spec/Journal.tla` keeps the page cache and the disk apart and checks both rules: without
+pages are dirty again, so a successful `fsync` writes them and the frame joins $D$; if it fails, the open fails. By I1
+and the stop at the first failure, the newest frame is the only one that can lie outside $D$, so (R) alone suffices for
+safety (no view outside $D$, G13); (W) makes a failed write's absence certain and spares a later power loss the
+false alarm above. The model `spec/Journal.tla` keeps the page cache and the disk apart and checks both rules: without
 (R), TLC finds the trace write, failed `fsync`, process death before (W), recovery publishing the frame.
 
 **Detection power** ([Koopman 2002], [Castagnoli 1993]). CRC-32C has Hamming distance 4 for messages up to
-about 2³¹ bits and 6 up to 5,243 bits: every error of at most 3 bits in a frame (5 bits in a frame of up to 655 bytes)
-is detected, every burst of at most 32 bits is detected, and other random errors escape with probability 2⁻³².
+about $2^{31}$ bits and 6 up to 5,243 bits: every error of at most 3 bits in a frame (5 bits in a frame of up to 655 bytes)
+is detected, every burst of at most 32 bits is detected, and other random errors escape with probability $2^{-32}$.
 
 ## 2. Group commit
 
-With one writer and an `fsync` of duration f, a closed system of N clients each writing one group at a time reaches a
+With one writer and an `fsync` of duration $f$, a closed system of $N$ clients each writing one group at a time reaches a
 steady state where each frame holds the groups that arrived during the previous `fsync`. By Little's law
-(L = λW [Little 1961]), with N clients in the system and a response time W, the throughput is λ = N / W. If every group waits
-for at most the rest of the current `fsync` and its own, f/2 ≤ W − f ≤ f on average, so
-λ ≈ N / (1.5 f) up to the writer's CPU limit C (groups a second the writer can resolve): λ ≈ min(N / (1.5 f), C).
-On the test machine f ≈ 3 ms (about 340 fsync/s) and C ≈ 146,000 groups/s for 5-fact groups (measured): 8 clients
+($L = \lambda W$ [Little 1961]), with $N$ clients in the system and a response time $W$, the throughput is $\lambda = N / W$. If every group waits
+for at most the rest of the current `fsync` and its own, $f/2 \le W - f \le f$ on average, so
+$\lambda \approx N / (1.5 f)$ up to the writer's CPU limit $C$ (groups a second the writer can resolve): $\lambda \approx \min(N / (1.5 f), C)$.
+On the test machine $f \approx 3$ ms (about 340 fsync/s) and $C \approx 146{,}000$ groups/s for 5-fact groups (measured): 8 clients
 give at most ~1,800 groups/s, 256 clients ~57,000; the measured numbers are in [benchmarks](benchmarks.md).
 The writer resolves the next frame while the syncer forces the previous one (two stages), and groups that arrive
 during an `fsync` are merged into the waiting frame, so a frame holds everything that arrived meanwhile ([DeWitt 1984],
@@ -63,19 +63,19 @@ during an `fsync` are merged into the waiting frame, so a frame holds everything
 
 ## 3. Indexes
 
-A view is a stack of runs R1 (newest) .. Rk (sorted columns in pages, section 9) plus a delta Δ (persistent maps).
+A view is a stack of runs $R_1$ (newest) .. $R_k$ (sorted columns in pages, section 9) plus a delta $\Delta$ (persistent maps).
 Each run has two parts: the facts it adds (a) and the facts of the runs below it that it retracts (t). Each part keeps
-three orders of its rows (run format 8). With n rows in a part, e thing ids and p properties:
+three orders of its rows (run format 8). With $n$ rows in a part, $e$ thing ids and $p$ properties:
 
 | order | layout | lookup |
 |---|---|---|
-| by thing | a rank table (one 64-bit word for 32 thing ids: their presence bits and the number of things held before them), the slots in blocks of 128, a record a slot with its values by property, sorted | facts of a thing: a rank (one word read, one popcount), the block's header and the record, O(1) a part, O(k) to read; one property: O(m) for the block's m properties; one fact: O(m + log k) |
-| by property | `poff[0..p]`, rows `(w, thing)` sorted, in blocks of 128; a value index (rank words over p's values, the first row of each) for most properties | things with (p, w), or linking to w by p: O(1) with a value index, else O(log n_p), + O(answer); a range of values: the same |
-| column order | each property's rows `(thing, w)` apart, in thing order, in blocks of 128; a rank table over its things (shared by the properties held by the same things); offsets only from its first thing of several values | one property of a thing: a rank, O(1), then O(1) for a one-valued property, O(log k) for one fact among k values; a thing's values of p as a sorted slice; the things of p in order, each once |
+| by thing | a rank table (one 64-bit word for 32 thing ids: their presence bits and the number of things held before them), the slots in blocks of 128, a record a slot with its values by property, sorted | facts of a thing: a rank (one word read, one popcount), the block's header and the record, $O(1)$ a part, $O(k)$ to read; one property: $O(m)$ for the block's $m$ properties; one fact: $O(m + \log k)$ |
+| by property | `poff[0..p]`, rows `(w, thing)` sorted, in blocks of 128; a value index (rank words over p's values, the first row of each) for most properties | things with $(p, w)$, or linking to $w$ by $p$: $O(1)$ with a value index, else $O(\log n_p)$, $+ O(\text{answer})$; a range of values: the same |
+| column order | each property's rows `(thing, w)` apart, in thing order, in blocks of 128; a rank table over its things (shared by the properties held by the same things); offsets only from its first thing of several values | one property of a thing: a rank, $O(1)$, then $O(1)$ for a one-valued property, $O(\log k)$ for one fact among $k$ values; a thing's values of $p$ as a sorted slice; the things of $p$ in order, each once |
 
-A **rank table** (Jacobson's rank directory [Jacobson 1989]) answers "is thing e in this part, and if so at which
-slot?" with one word: bit e mod 32 of word e / 32 says whether e is held, and its slot is the count stored in the word
-plus the bits set below bit e. It costs a quarter of a byte a thing id, where a dense table of offsets (one entry a
+A **rank table** (Jacobson's rank directory [Jacobson 1989]) answers "is thing $e$ in this part, and if so at which
+slot?" with one word: bit $e \bmod 32$ of word $\lfloor e / 32 \rfloor$ says whether $e$ is held, and its slot is the count stored in the word
+plus the bits set below bit $e$. It costs a quarter of a byte a thing id, where a dense table of offsets (one entry a
 thing id, held or not: the one-level base before levels) cost 8; a part that holds every thing from some id to its end
 (a load, a full merge) reads no rank there, its slot being an addition. So a thing's facts cost a rank, a block's
 header and its record a run to locate: about 0.4 µs at 10 M facts on one run
@@ -93,33 +93,33 @@ a hash table of two 4-byte slots a text): 5.4 bytes a fact at 10 M facts, agains
 fixed words, 8 bytes a thing, 12 bytes a text).
 
 The delta is a set of persistent maps (Driscoll et al. [Driscoll 1989], Okasaki [Okasaki 1998]): each change copies
-one path, O(log d), and an old version stays valid for free. That is what makes views and forks free. It is keyed like
+one path, $O(\log d)$, and an old version stays valid for free. That is what makes views and forks free. It is keyed like
 a run (by thing then (property, value); by property then value then thing), so every lookup is a binary search in each
 run that may hold the key plus a search in a map, never a walk of a list, and it keeps the net count of facts beside
 each map, so that every count the planner reads is exact, runs and delta together (section 9). It costs about 170
 bytes a change, so it is bounded: when it passes 200,000 changes (`Engine.compact_min`), a merge starts **in another
-domain**: it streams the delta and the newest runs, merged in order, into a new run file (O(n + d), section 8), then
+domain**: it streams the delta and the newest runs, merged in order, into a new run file ($O(n + d)$, section 8), then
 replays the groups written meanwhile (the writer logs them), until it is fewer than 256 groups behind; the writer then
 waits for the syncer to be idle (at most one fsync), replays the rest and switches its views to the new runs. Writes
-never wait for the O(n) part. This is an LSM-tree [O'Neil 1996]: the delta is the component in memory (C0, level 0),
+never wait for the $O(n)$ part. This is an LSM-tree [O'Neil 1996]: the delta is the component in memory (C0, level 0),
 the runs the components on disk, in levels (section 9).
 
 ## 4. Generic Join
 
-A question is a conjunctive query Q over variables x1..xm and atoms R_j (each pattern is a relation of two columns,
+A question is a conjunctive query $Q$ over variables $x_1, \dots, x_m$ and atoms $R_j$ (each pattern is a relation of two columns,
 the thing and the value, restricted to one property and to its constants).
 
-**AGM bound** (Atserias, Grohe, Marx [Atserias 2008]). For any fractional edge cover u of the variables by the atoms
-(Σ_{j ∋ x} u_j ≥ 1 for every variable x), |Q| ≤ Π_j |R_j|^{u_j}. For the triangle R(a,b), S(b,c), T(c,a) with N facts
-each, u = (½, ½, ½) gives |Q| ≤ N^{3/2}, and some instances reach it. Any plan of joins two at a time can build Θ(N²)
+**AGM bound** (Atserias, Grohe, Marx [Atserias 2008]). For any fractional edge cover $u$ of the variables by the atoms
+($\sum_{j \ni x} u_j \ge 1$ for every variable $x$), $|Q| \le \prod_j |R_j|^{u_j}$. For the triangle $R(a, b)$, $S(b, c)$, $T(c, a)$ with $N$ facts
+each, $u = (\frac{1}{2}, \frac{1}{2}, \frac{1}{2})$ gives $|Q| \le N^{3/2}$, and some instances reach it. Any plan of joins two at a time can build $\Theta(N^2)$
 intermediate rows on some instance (Ngo et al. [Ngo 2012]).
 
 **Algorithm** (Ngo, Ré, Rudra [Ngo 2013]; Veldhuizen [Veldhuizen 2014] for the iterator form). Fix an order of the variables. To bind
-x_i given x_1..x_{i−1}: among the atoms containing x_i, take the one with the fewest candidates for x_i under the
-current bindings (exact counts read from the indexes), enumerate them, and keep a candidate c only if every other
-atom on x_i accepts it (one index lookup each). Recurse. A variable with a range, on the value side of an atom whose
-thing is free, is enumerated from that property's sorted index over the range only. With lookups in O(log n), the running time is
-O(m · |atoms| · AGM(Q) · log n) (the argument of [Ngo 2013], theorem 4.2: the candidates at each level are bounded by the
+$x_i$ given $x_1, \dots, x_{i-1}$: among the atoms containing $x_i$, take the one with the fewest candidates for $x_i$ under the
+current bindings (exact counts read from the indexes), enumerate them, and keep a candidate $c$ only if every other
+atom on $x_i$ accepts it (one index lookup each). Recurse. A variable with a range, on the value side of an atom whose
+thing is free, is enumerated from that property's sorted index over the range only. With lookups in $O(\log n)$, the running time is
+$O(m \cdot |\text{atoms}| \cdot \text{AGM}(Q) \cdot \log n)$ (the argument of [Ngo 2013], theorem 4.2: the candidates at each level are bounded by the
 intersection's smallest member, and the sum over levels telescopes to the bound). The bound needs two things of the
 engine: the counts must be exact (an estimate below the truth makes a large set look small) and an atom that is not
 the source must cost a lookup, not a walk of its own candidates. A version of milestone 2 broke the second: it
@@ -133,16 +133,16 @@ property (the column order) or the things of a value (the order by property), co
 source of a level is a slice of at least 2 candidates, every other slice of the level whose count is at most 8 times
 the source's is read too, into a buffer (sorted again only if the view's runs or delta gave it out of order), and the
 buffers are intersected by **leapfrogging** [Veldhuizen 2014]: the iterators in the order of their keys, each in turn
-seeks the largest key by galloping [Bentley 1976] (O(log d) for d places), a key all of them reach is a candidate,
-checked against the level's other patterns. The level reads m + Σ n_j ≤ (1 + 8 (k − 1)) m rows for a source of m and
-k slices, and compares O(m log(n/m)): within a constant of Generic Join's work, so within the AGM bound up to that
+seeks the largest key by galloping [Bentley 1976] ($O(\log d)$ for $d$ places), a key all of them reach is a candidate,
+checked against the level's other patterns. The level reads $m + \sum n_j \le (1 + 8 (k - 1))\, m$ rows for a source of $m$ and
+$k$ slices, and compares $O(m \log(n/m))$: within a constant of Generic Join's work, so within the AGM bound up to that
 constant and the log factor. A slice's count and its first row come from one rank and one offset header and are kept
-for the known side they were read for (the triangles' "who follows a" is read once for every b that a follows). On
+for the known side they were read for (the triangles' "who follows $a$" is read once for every $b$ that $a$ follows). On
 the triangles this replaces five membership lookups an edge, each a random place in the column of `follows`, by two
 reads of a few contiguous rows: 1.16 s → 0.26 s on one core (benchmarks).
 
-**One value, and checks left to the next level.** A pattern (y, p, x) of a one-valued property p with y bound offers x
-at most one candidate; its count is not looked up (1 against 2c for an exact count c, see G11). When it is the first
+**One value, and checks left to the next level.** A pattern $(y, p, x)$ of a one-valued property $p$ with $y$ bound offers $x$
+at most one candidate; its count is not looked up (1 against $2c$ for an exact count $c$, see G11). When it is the first
 such pattern of its level and every other pattern there has a fixed count of 1 or more (a constant other side, or one
 bound only later), `choose` would take it for every binding: the level reads that one value (`Store.value1`) and
 skips the counting. A pattern whose other side is the next level's variable is not checked at its own level (a thing
@@ -151,12 +151,12 @@ bindings, the answers and the candidates counted are the same. Q4 reads an invoi
 invoice's total as three single values: 247 → 127 ms on one core.
 
 **The tested bound.** `Check.gj_bound` sums, over the levels and the partial bindings that reach each, the smallest
-offer m and, where m ≥ 2, the size of every slice offer of at most 8 m (the rows the leapfrog may read); every random
+offer $m$ and, where $m \ge 2$, the size of every slice offer of at most $8m$ (the rows the leapfrog may read); every random
 question of the tests and the simulation enumerates at most that (`Query.work` counts the candidates of a source and
 the rows read into the buffers).
 
 **Correctness (G11).** *Soundness:* a full binding passed every atom at the level of its last variable, with all
-other variables of the atom bound, so every atom is a fact. *Completeness:* for an answer a, at each level a_i
+other variables of the atom bound, so every atom is a fact. *Completeness:* for an answer $a$, at each level $a_i$
 satisfies the source atom (so it is enumerated) and every other atom (so it is kept). *No duplicates:* the candidates
 of one level are distinct (each index yields a set: a part of a run holds each fact once, a row of an older run is
 shown only if no newer run and not the delta have an entry for the same fact, and the delta adds only facts absent
@@ -169,8 +169,8 @@ matter most in practice; the measured cost of each question is in [benchmarks](b
 
 ## 5. Serializability and isolation
 
-Define a history H as the sequence of confirmed groups with their reads (`Expect`) and writes. The writer executes
-groups one at a time, each on the state left by the previous, so H is serial (Papadimitriou [Papadimitriou 1979]); hence it is
+Define a history $H$ as the sequence of confirmed groups with their reads (`Expect`) and writes. The writer executes
+groups one at a time, each on the state left by the previous, so $H$ is serial (Papadimitriou [Papadimitriou 1979]); hence it is
 conflict-serializable, and with numbers assigned after submission, strictly serializable (linearizable as a single
 object, Herlihy and Wing [Herlihy 1990]). In Adya's terms [Adya 1999], no cycle G0, G1 or G2 can form among groups. A client
 transaction that reads a view and then writes is a group with preconditions: if it states every fact it read as an
@@ -186,8 +186,8 @@ Oracle's "serializable" is snapshot isolation, which admits write skew (Fekete e
 
 ## 6. Forks
 
-A fork is a pair (view, delta') where delta' starts equal to the view's delta. Writes produce new persistent versions
-(path copying), so the original view is unchanged by construction; a fork is O(1) to make and costs O(log d) per change.
+A fork is a pair $(\text{view}, \text{delta}')$ where $\text{delta}'$ starts equal to the view's delta. Writes produce new persistent versions
+(path copying), so the original view is unchanged by construction; a fork is $O(1)$ to make and costs $O(\log d)$ per change.
 Datomic's `with` ([comparison](comparison.md#datomic)) is the same idea on a database value; HyPer [Kemper 2011] forks the process for OLAP snapshots; Rodeh [Rodeh 2008]
 does copy-on-write for B-trees.
 
@@ -277,8 +277,8 @@ then its pages) beside the old one, and the pages of both lived on the OCaml hea
 A merge folds the delta (level 0: persistent maps in memory) and the newest runs on disk into one run (section 9):
 the rolling merge of an LSM-tree [O'Neil 1996], several components into the next. Every input is already sorted in the order of
 every section of a run (by thing: thing, property, value; by property: property, value, thing; the texts by id), so
-each section of the new run is a merge of sorted inputs, made in one pass with one cursor in each: O(n + d) steps for
-n rows in the runs and d changes, and no sort. The sources are read a block at a time (a thing's record, a row block
+each section of the new run is a merge of sorted inputs, made in one pass with one cursor in each: $O(n + d)$ steps for
+$n$ rows in the runs and $d$ changes, and no sort. The sources are read a block at a time (a thing's record, a row block
 of 128 decoded into a small array), and the new run's blocks are coded as they fill: 128 things, or 128 rows of a
 property (section 11).
 
@@ -294,20 +294,22 @@ out at once: its CRC-32C, a `pwrite` as the next page of the file, and the cache
 small queue, not hot: a merge's output is a scan, kept only if it is read before the queue reaches it). Then the page
 table, the header, an fsync, and the install (G12).
 
-**The memory bound.** Let C be the cache's capacity and P the pages of the new run. During a merge the process holds,
+**The memory bound.** Let $C$ be the cache's capacity and $P$ the pages of the new run. During a merge the process holds,
 beyond what it held before (the delta, the log of the groups written meanwhile):
-- the pages of the runs it reads and of the new run it writes, all counted by the cache: at most C, by construction (a
+- the pages of the runs it reads and of the new run it writes, all counted by the cache: at most $C$, by construction (a
   page enters only through `Pages.fill` or `Pages.admit`, which make room first);
 - the pages being filled: the page under each stream's head, and the first page of a section while it waits for the
-  section before it to end there: at most 2 for each of the 18 streams of the pass by property, 36; 11 measured (the
-  unit test's bound is 24);
+  section before it to end there: at most 2 for each stream of the pass, $2s$ for $s$ streams: 18 in the pass by
+  property; in the pass by thing, run format 8 adds 4 for each property's column, so $s$ grows with the properties of
+  the schema (19 pages measured in the unit test, whose bound is 24);
 - the tables of the new run: 4 bytes of CRC, 4 of its place in the file, two 8-byte slots (frame and hot) and one
   count a page of its layout, 25 bytes for 16 KiB of layout (the layout of a coded run is loose: 1,118 MB for the
   10 M bottom run's 54.4 MB, so 1.7 MB of tables, 3.1 % of the run);
 - the blocks being coded (128 things or 128 rows, with their scratch buffer: a few KiB, more only for a thing with
   very many values) and the text hash table (4 bytes a slot, two slots a text of the new run).
 
-So M_merge ≤ C + 36 × 16 KiB + 25 P + 8 ns, independent of the runs' size but for the tables. The merge in memory it replaced
+So $M_{\text{merge}} \le C + 2s \times 16\ \text{KiB} + 25 P + 8\, \mathit{ns}$ ($s$ the streams of the larger pass,
+$\mathit{ns}$ the texts of the new run), independent of the runs' size but for the tables. The merge in memory it replaced
 held 7 words a fact for its sort (560 MB at 10 M facts) and the whole new base outside the cache. Measured on the one
 level (benchmarks, the merge written to a file): with the whole base in a 1 GiB cache, a merge of the 10 M base and a delta of 400,000 facts takes the
 process from 412 MB to a peak of 651 to 656 MB (the new base's 245 MB of pages), against 1,222 to 1,450 MB for the
@@ -315,8 +317,8 @@ merge in memory; with a 32 MB cache, from 63 MB to a peak of 99 MB, under a 128 
 memory.
 
 **What it costs in writes.** With one level (before section 9), a merge wrote the whole base each time the delta
-passed max(200,000, n/16) changes: up to 17 facts of writes per change (the size ratio r = 16 of a two-component
-LSM-tree, amortized cost r + 1 [O'Neil 1996]), 245 MB a merge at 10 M facts, about 400 bytes a change. Those writes compete with
+passed $\max(200{,}000, n/16)$ changes: up to 17 facts of writes per change (the size ratio $r = 16$ of a two-component
+LSM-tree, amortized cost $r + 1$ [O'Neil 1996]), 245 MB a merge at 10 M facts, about 400 bytes a change. Those writes compete with
 the journal's fsyncs, which every client waits for. Forced once at the end, a merge's 100 to 245 MB of dirty pages made
 a journal fsync wait seconds (a load of 3 M facts: the journal's fsync p99.9 1.6 s, max 4.7 s); forced every 8 MiB as
 it is written (what RocksDB's `bytes_per_sync` does [Dong 2017]), the tail fell to p99.9 0.43 s, max 1.0 s. Each fsync costs
@@ -337,24 +339,24 @@ forced).
 ## 9. Levels on disk, and large groups
 
 **The words.** A **run** is one sorted file of the LSM-tree; a **level** is a place for runs with a capacity, each level
-T times larger than the one above (T is the **size ratio**). **Write amplification** W is how many times a fact is
-written to the disk by merges over its life, for one write by a client; **read amplification** R is how many runs a
+$T$ times larger than the one above ($T$ is the **size ratio**). **Write amplification** $W$ is how many times a fact is
+written to the disk by merges over its life, for one write by a client; **read amplification** $R$ is how many runs a
 read must visit. Under **leveling**, each level holds one run, and a run that comes down is merged with the one already
-there; under **tiering**, a level holds up to T runs, merged together into the next level when it is full. One trades
+there; under **tiering**, a level holds up to $T$ runs, merged together into the next level when it is full. One trades
 against the other: fewer runs to read for more rewriting.
 
-**Leveling or tiering.** Let N be the facts, B the changes the delta holds before it is merged (`compact_min`,
-200,000), T the size ratio between levels, L = ⌈log_T(N/B)⌉ the levels on disk. Under leveling [O'Neil 1996], [Luo 2020], each level
-is one sorted run, at most T times the one above it; a run enters a level by a merge with the run already there. A
-level fills in about T merges from the level above; a fact that comes down at the k-th of them is written then and
-again at each of the T − k later ones, T − k + 1 times, and the average over k = 1..T is (T + 1)/2. So a fact is
-written about (T + 1)/2 times per level: write amplification W ≈ L (T + 1)/2. A read visits one run per level:
-R = L. Under tiering [Luo 2020], a level holds up to T runs, merged into one run of the next level when full: a fact is
-written once per level, W ≈ L, but a read visits up to T runs per level, R ≈ T L. Lazy leveling (Dostoevsky [Dayan 2018])
-tiers every level but the last: W ≈ L - 1 + (T + 1)/2, R ≈ T (L - 1) + 1. Bloom filters make a point read of a key
-cost about one run's probe whatever R (Monkey [Dayan 2017]), but they help only lookups of a whole key; Cepheus' reads are short
+**Leveling or tiering.** Let $N$ be the facts, $B$ the changes the delta holds before it is merged (`compact_min`,
+200,000), $T$ the size ratio between levels, $L = \lceil \log_T(N/B) \rceil$ the levels on disk. Under leveling [O'Neil 1996], [Luo 2020], each level
+is one sorted run, at most $T$ times the one above it; a run enters a level by a merge with the run already there. A
+level fills in about $T$ merges from the level above; a fact that comes down at the $k$-th of them is written then and
+again at each of the $T - k$ later ones, $T - k + 1$ times, and the average over $k = 1, \dots, T$ is $(T + 1)/2$. So a fact is
+written about $(T + 1)/2$ times per level: write amplification $W \approx L (T + 1)/2$. A read visits one run per level:
+$R = L$. Under tiering [Luo 2020], a level holds up to $T$ runs, merged into one run of the next level when full: a fact is
+written once per level, $W \approx L$, but a read visits up to $T$ runs per level, $R \approx T L$. Lazy leveling (Dostoevsky [Dayan 2018])
+tiers every level but the last: $W \approx L - 1 + (T + 1)/2$, $R \approx T (L - 1) + 1$. Bloom filters make a point read of a key
+cost about one run's probe whatever $R$ (Monkey [Dayan 2017]), but they help only lookups of a whole key; Cepheus' reads are short
 ranges (the facts of a thing, the things of a value) and exact counts, which visit every run that may hold the key.
-So R weighs as much as W here, and leveling is the pick.
+So $R$ weighs as much as $W$ here, and leveling is the pick.
 
 The numbers, from a model of the 10 M load of the benchmarks (a short script kept with the raw outputs, outside the
 repository: the groups of the load in order, small groups of a client each, the merges each policy makes; the facts
@@ -369,11 +371,11 @@ tiering, T = 4               39 M            3.9            8              4.4
 tiering, T = 8               29 M            2.9           12              7.0
 ```
 
-T = 4 writes 23 % less than T = 10 (58 M facts against 75 M) for one run more at most at 10 M facts (3 against 2).
-The formula agrees: at N/B = 50 it gives L (T + 1)/2 = 8, 7.5 and 9 writes a fact for T = 3, 4 and 5 (L = 4, 3, 3),
-and 11 for T = 10 (L = 2); the model writes less than the formula because the last level is far from full. RocksDB's
+$T = 4$ writes 23 % less than $T = 10$ (58 M facts against 75 M) for one run more at most at 10 M facts (3 against 2).
+The formula agrees: at $N/B = 50$ it gives $L (T + 1)/2 = 8$, 7.5 and 9 writes a fact for $T = 3$, 4 and 5 ($L = 4$, 3, 3),
+and 11 for $T = 10$ ($L = 2$); the model writes less than the formula because the last level is far from full. RocksDB's
 default ratio, 10 (its `max_bytes_for_level_multiplier`), suits a reader that has Bloom filters. Picked:
-leveling, T = 4 (`Engine.ratio`): level l holds at most B 4^l rows. A merge takes the delta and the newest runs down to
+leveling, $T = 4$ (`Engine.ratio`): level $l$ holds at most $B \cdot 4^l$ rows. A merge takes the delta and the newest runs down to
 the first level that can hold them all, and writes one run there (`Engine.plan`): the levels it skips are merged in
 the same pass, so a fact crosses them with one write.
 
@@ -381,7 +383,7 @@ the same pass, so a fact crosses them with one write.
 adds (part a), and the facts of the runs below it that it retracts (part t, empty at the bottom). Its counts are net:
 it adds only facts absent below it and retracts only facts present below it. Then a fact is in a view iff the newest
 entry for it adds it, and every count is the sum, over the runs, of the rows of part a minus those of part t, plus the
-delta's: exact counts stay O(R log n). A merge of sources (the delta, the newest runs) decides each fact from its
+delta's: exact counts stay $O(R \log n)$. A merge of sources (the delta, the newest runs) decides each fact from its
 newest and its oldest entry alone: the newest says whether it is in the new state, the oldest whether it was in the
 state below the merged runs (an addition there means it was not); the new run adds it if it is in and was not, retracts
 it if it is not and was, and holds nothing otherwise. A merge into the bottom holds no retraction.
@@ -406,17 +408,17 @@ no unique value already taken); on any doubt, the group goes through `Resolve.re
 numbers (each text is numbered at its first addition, as `Resolve` interns it), so a fork, which always takes
 `Resolve`, answers as the database (G8).
 
-*Why the numbering is Resolve's, though chunks are mapped in any order.* `Resolve` gives the k-th distinct temporary
-id met in the group's order the number next_e + k - 1 (a link's target after its operation's thing), and the j-th new
+*Why the numbering is Resolve's, though chunks are mapped in any order.* `Resolve` gives the $k$-th distinct temporary
+id met in the group's order the number $\mathit{next}_e + k - 1$ (a link's target after its operation's thing), and the $j$-th new
 text the next text id. The chunks partition the group's order into consecutive slices; a chunk records, in its own
 order, what it meets, and the numbering pass reads the chunks in their order, each in its own: it meets every first
 use in the group's order, so it assigns the same numbers. The unit tests compare both paths on random large groups
 (chunks of 1 to 9 operations, temporary ids near -1 and far below the group's length, groups in no order and in thing
 order): the encoding byte for byte, the receipt, the facts after the merge and after a replay.
 
-*Cost.* For n facts of a group in thing order, with k domains: the mapping and the rewriting O(n / k) each, the
-numbering O(n) on one domain (an array read a fact), the counting sort by property O(n / k), the radix sort
-O(d n / 2) with d passes (2 at 10 M facts: values below 2²²), the merge O(n) on one domain beside the encoding on
+*Cost.* For $n$ facts of a group in thing order, with $k$ domains: the mapping and the rewriting $O(n / k)$ each, the
+numbering $O(n)$ on one domain (an array read a fact), the counting sort by property $O(n / k)$, the radix sort
+$O(d n / 2)$ with $d$ passes (2 at 10 M facts: values below $2^{22}$), the merge $O(n)$ on one domain beside the encoding on
 another. Memory: 14 bytes a fact in the group's order and 12 by property, a radix pass's room for the largest
 property on each of its 2 domains, and the receipt the caller gets (a pair a new thing).
 
@@ -430,11 +432,11 @@ beside the merge, is the only frame being written.
 The rules are Datalog; what a database with rules holds is the least model of its asserted facts ([Abiteboul 1995]).
 Four facts make the writer's maintenance exact and its cost what it is ([rules](rules.md) tells the algorithms):
 
-- **The work of a group** is Θ(D) for D rule instances that involve a fact the group changed: semi-naive evaluation
+- **The work of a group** is $\Theta(D)$ for $D$ rule instances that involve a fact the group changed: semi-naive evaluation
   enumerates each instance once, at its newest fact, the atoms before the matched one over older rounds and those after
   over rounds up to its own (the semi-naive property, [Ramakrishnan 1990]). The cost model of a group is
-  D × c_d + N × c_i: c_d a derivation (the joins of its body and the test of its head), c_i a new fact put into the
-  view. Every fact has at least one derivation, so D ≥ N; LUBM-shaped data has D ≈ 3.7 N.
+  $D \times c_d + N \times c_i$: $c_d$ a derivation (the joins of its body and the test of its head), $c_i$ a new fact put into the
+  view, for $N$ new facts. Every fact has at least one derivation, so $D \ge N$; LUBM-shaped data has $D \approx 3.7 N$.
 - **Insertion is complete**: an instance of a rule over the state after the group either involves a fact the group
   made present, and semi-naive finds it in that fact's round, or involves only older facts, and the group before found
   it (induction on groups; a rule added is evaluated once over the whole state).
@@ -450,23 +452,23 @@ Four facts make the writer's maintenance exact and its cost what it is ([rules](
 
 ## 11. Compressed runs and journal: the coding and its bound
 
-**Frame of reference.** A block of n integers x1 .. xn is stored as its least value b and, for each, xi − b in w =
-⌈log2(max − b + 1)⌉ bits, packed one after the other (Goldstein, Ramakrishnan, Shaft [Goldstein 1998] for pages of
-tuples; Zukowski et al. [Zukowski 2006] for columns, there with the outliers patched apart). Field i is at bit i·w:
+**Frame of reference.** A block of $n$ integers $x_1, \dots, x_n$ is stored as its least value $b$ and, for each, $x_i - b$ in
+$w = \lceil \log_2(\max - b + 1) \rceil$ bits, packed one after the other (Goldstein, Ramakrishnan, Shaft [Goldstein 1998] for pages of
+tuples; Zukowski et al. [Zukowski 2006] for columns, there with the outliers patched apart). Field $i$ is at bit $i \cdot w$:
 it is read with one unaligned 8-byte load, a shift and a mask (the scalar unpacking of Lemire and Boytsov
-[Lemire 2015]; no SIMD in OCaml), so any value of a block costs O(1) and decodes nothing else. A block of sorted
-values costs w ≈ log2(range of the block) bits a value; the coder of the journal also tries **deltas** (the first
-value, the least difference d, then each difference minus d), which wins when values grow steadily (the things of a
+[Lemire 2015]; no SIMD in OCaml), so any value of a block costs $O(1)$ and decodes nothing else. A block of sorted
+values costs $w \approx \log_2(\text{range of the block})$ bits a value; the coder of the journal also tries **deltas** (the first
+value, the least difference $d$, then each difference minus $d$), which wins when values grow steadily (the things of a
 load: differences 0 and 1, 1 bit each), and takes whichever block is shorter, a choice made per block as BtrBlocks
-does [Kuschewski 2023]. Differences are modulo 2^63 (OCaml's 63-bit integers), so every value comes back exactly.
+does [Kuschewski 2023]. Differences are modulo $2^{63}$ (OCaml's 63-bit integers), so every value comes back exactly.
 
 **What the format holds, against what the data holds.** At 10 M facts (the bench's 113,636 clients and 2.27 M
 invoices), the information the data holds is 13-18 MB (totals uniform over 100,000 values, 16.6 bits; dates over
 3,650, 11.8 bits; statuses 70/20/10 %, 1.16 bits of entropy; a city one of 100, 6.6 bits; a follow one of 113,636
 clients, 15.4 bits a link for 5 distinct ones; names and e-mails 3.4 MB of bytes), and the lists of things by value
-add about 18 MB at the Elias-Fano bound of 2 + ⌈log2(u/n)⌉ bits an element [Vigna 2013]: a store that indexes every
+add about 18 MB at the Elias-Fano bound of $2 + \lceil \log_2(u/n) \rceil$ bits an element [Vigna 2013]: a store that indexes every
 property both ways has a floor near 31-36 MB. The run of format 7 takes 54.4 MB, 1.5 to 1.8 times that floor, against
-24.6 bytes a fact (246 MB) in format 6 (sizes in MB of 10^6 bytes, each section the file pages that hold it):
+24.6 bytes a fact (246 MB) in format 6 (sizes in MB of $10^6$ bytes, each section the file pages that hold it):
 
 | section | bytes | a fact | where the bits go |
 |---|---:|---:|---|
@@ -478,8 +480,8 @@ property both ways has a floor near 31-36 MB. The run of format 7 takes 54.4 MB,
 | page table | 0.5 MB | 0.05 B | 8 bytes a page of the layout (68,231 pages) |
 
 The two largest terms are inherent to the design: every fact is held twice (by thing and by property, each order
-answering its own lookups in O(1) or O(log n)), and the order by property of a random property is a permutation of its
-things, at the information bound log2(n!)/n ≈ log2 n − 1.44 bits a row for n rows (Stirling), which the gaps reach
+answering its own lookups in $O(1)$ or $O(\log n)$), and the order by property of a random property is a permutation of its
+things, at the information bound $\log_2(n!)/n \approx \log_2 n - 1.44$ bits a row for $n$ rows (Stirling), which the gaps reach
 only where a value repeats. The rest is within a factor 1.5 of the bound.
 
 **Fields and columns by thing.** Three layouts of a thing block were measured on the same 10 M facts (one domain):
@@ -494,9 +496,9 @@ than the records at 10 M facts (absent fields and their "present" bits in blocks
 Scans by property read the row blocks, which are columns already.
 
 **Lookups.** A thing's slot: one rank word. Its block: the directory word, the header (the entries of its
-properties, 16 bytes each: a search among the block's m). A field: one load at k R plus the field's bit. A column: two
-offsets (c k + residual k) and a binary search among the thing's values of that property (sorted, of one width). By property with a value
-index: O(1) (a rank word, two offsets); without: O(log b) over the property's b blocks, then O(log 128) in a block.
+properties, 16 bytes each: a search among the block's $m$). A field: one load at $k R$ plus the field's bit. A column: two
+offsets ($c k + \text{residual}_k$) and a binary search among the thing's values of that property (sorted, of one width). By property with a value
+index: $O(1)$ (a rank word, two offsets); without: $O(\log b)$ over the property's $b$ blocks, then $O(\log 128)$ in a block.
 
 **Pages and holes.** A merge lays a run out by bounds (it knows its counts at the end), which for coded sections are
 loose (the 10 M bottom run: a layout of 1,118 MB for 54.4 MB of bytes). A page table maps each page of the layout to

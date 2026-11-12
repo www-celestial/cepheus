@@ -37,7 +37,7 @@ type w = {
   mutable prepared : int;
   mutable pending : Engine.batch option;
   mutable flipped_journal : bool;
-  mutable in_newest_frame : bool;  (* the flip hit the newest frame: the known residual (docs/guarantees.md, G6) *)
+  mutable in_newest_frame : bool;  (* the flip hit the newest frame: the known residual (docs/book/guarantees.md, G6) *)
   mutable stopped : bool;  (* a failed fsync: the engine must refuse everything until restart *)
   mutable merge : Snapshot.written option;  (* a merge begun, not installed *)
   mutable flipped_snapshots : string list;  (* snapshots damaged on purpose: setting them aside is right *)

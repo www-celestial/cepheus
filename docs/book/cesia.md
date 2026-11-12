@@ -54,7 +54,7 @@ engine and of OpenSSL's libraries, once a process.
 
 ## Connect
 
-```cesia
+```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/fiber
 use std/io
@@ -137,7 +137,7 @@ round.
 
 ## Insert, Get, Update
 
-```cesia
+```cesia norun
 ada = result.Unwrap(cepheus.Insert(Client, {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"}, db, by = 7, why = "signup"))
 io.Print(ada)
 io.Print(cepheus.Get(Client, ada, db))
@@ -160,7 +160,7 @@ Ok({Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"})
 
 As everywhere in Cesia, the database comes last: `db then cepheus.Get(Client, ada)` reads the same.
 
-```cesia
+```cesia norun
 for total in [1200, 80.5]
   result.Unwrap(cepheus.Insert(Invoice, {Client: ada, Total: total, Status: "unpaid"}, db))
 end
@@ -191,7 +191,7 @@ the group's number and the ids of the things it made, or an `Err` and nothing wr
 - `cepheus.New(k)`: the k-th new thing of the group, in any place a thing goes: `New(1)`, `New(2)`... `Things[k]` is
   its id.
 
-```cesia
+```cesia norun
 first = cepheus.Find(1, (i) -> {Where: [[i, Invoice.Total, 1200]], Give: {Invoice: i}}, db)
 inv = result.Unwrap(first)[1].Invoice
 pay = [cepheus.Expect(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Status, "paid")]
@@ -225,7 +225,7 @@ of **patterns** `[thing, property, value]`, each a fact that must hold, where th
 or constants (the property is always a kind's field); `Give` is a map of what to give, each a variable or an
 aggregate. `cepheus.Find(n, question, db)` gives an `Ok` of a list of maps, one an answer.
 
-```cesia
+```cesia norun
 unpaid = cepheus.Find(3, (c, i, total) -> {
   Where: [[c, Client.City, "Lyon"], [i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]],
   Give: {Invoice: i, Total: total},
@@ -238,8 +238,7 @@ Ok([{Invoice: 65538, Total: 80.5}])
 ```
 
 `n` is the number of the question's variables (here 3: `c`, `i` and `total`). Cesia does not let a package ask a
-function how many parameters it has, so the program says it; when Cesia does, `n` goes (see choice 1 of this step,
-in the progress of the server's plan).
+function how many parameters it has, so the program says it.
 
 **How it is answered.** The question is joined variable by variable, not pattern by pattern (**Generic Join**, Ngo,
 Ré and Rudra 2013): for each variable, the pattern that gives it the fewest candidates (exact counts read in the
@@ -248,8 +247,8 @@ the largest answer the patterns could have (the **AGM bound**), where a plan of 
 makes, can do much more on a graph ([theory](theory.md#4-generic-join)). Each answer comes once: answers are a set
 (G11).
 
-**Conditions.** `cepheus.Above(x, v)` (x > v), `cepheus.Below(x, v)` (x < v) and `cepheus.Between(x, lo, hi)`
-(lo ≤ x ≤ hi), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
+**Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) and `cepheus.Between(x, lo, hi)`
+($\mathit{lo} \le x \le \mathit{hi}$), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
 filters after it. Any other condition is Cesia's, on the rows it gives (`list.Filter`).
 
 **Aggregates.** In `Give`, `cepheus.Sum(x)`, `cepheus.Min(x)`, `cepheus.Max(x)` and `cepheus.Count()` group the answers
@@ -257,7 +256,7 @@ by the other fields of `Give`, as SQL's `GROUP BY` does; `Count()` counts the an
 where the question runs (in the program on the server's machine, else at the server), so a total over 400,000
 invoices crosses the network as one row.
 
-```cesia
+```cesia norun
 byCity = cepheus.Find(4, (c, i, city, total) -> {
   Where: [[i, Invoice.Client, c], [c, Client.City, city], [i, Invoice.Total, total], cepheus.Above(total, 50)],
   Give: {City: city, Total: cepheus.Sum(total), Invoices: cepheus.Count()},
@@ -281,7 +280,7 @@ A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db,
 `Added` added and `Removed` taken away, are then `Find`'s rows at that group. Every message has the four fields; the two
 it does not use are `missing`.
 
-```cesia
+```cesia norun
 unpaidOf(c) = (i, total) -> {
   Where: [[i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, total]],
   Give: {Invoice: i, Total: total},
@@ -345,7 +344,7 @@ from (a **persistent** structure: a change makes new nodes and keeps the old one
 no server), of another fork, or of a database read on the server's machine (its local state now), with these kinds
 declared in it:
 
-```cesia
+```cesia norun
 what = result.Unwrap(cepheus.Fork(db))
 result.Unwrap(cepheus.Update(Client, ada, {City: "Nice"}, what))
 io.Print(cepheus.Get(Client, ada, what))
@@ -358,14 +357,14 @@ Ok({Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"})
 ```
 
 A fork of a database read at the server (a program on another machine) is not built yet: it gives an `Err` with Code
-`"invalid"` (the design puts such forks in the server, a later step).
+`"invalid"`: see [What is not built yet](#what-is-not-built-yet).
 
 ### Tests
 
 A test of `cesia test` needs no server: it forks `cepheus.Empty` with the kinds it uses. A test file sits beside the
 code it tests (`shop.test.ce` beside `shop.ce`), and its functions are named `is` and a capital:
 
-```cesia test
+```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/result
 
@@ -409,7 +408,7 @@ How, in short ([server](server.md#local-reads-g15) tells it whole):
 The follow stream is open when `Connect` returns; the first local read may wait for the follower to apply the groups
 written since the database's newest run (its catch-up), and later ones only, now and then, the microseconds of a
 frame on its way. What it costs: a domain of the program applies every group the server writes, by any program (1.7 µs
-a change alone, about 4 µs under 18,000 groups a second, measured in the server's step 3), and the program holds a
+a change alone, about 4.5 µs under 18,000 groups a second, measured at the server), and the program holds a
 cache of the database's pages (256 MB at most) and the changes since the last merge ([server](server.md#what-it-costs)).
 
 If the follow stream ends (the server restarted), the package reads at the server meanwhile and follows again, at most
@@ -457,28 +456,29 @@ benchmarks' (`bench.exe load`, 1 M facts, [benchmarks](benchmarks.md)); a read i
 (`bench/cesia/get.ce`, `sbench.exe ids`); the OCaml client is `sbench.exe`, PostgreSQL 18.6 is driven by `pgbench -M
 prepared` (C, libpq) reading `SELECT * FROM invoice WHERE id = $1`, the same rows.
 
-**A point read**, µs (n = 11 rounds):
+**A point read**, µs ($n = 11$ rounds):
 
 | | Cesia client | OCaml client | PostgreSQL 18.6 |
 |---|---:|---:|---:|
 | on the server's machine: a local read | **0.77** [0.76, 0.82] | 0.24 [0.22, 0.36] | 26.4 [23.9, 32.3] through its Unix socket |
-| over TCP and TLS 1.3 (loopback) | 51.6 [44.1, 63.4] | 37.1 [31.3, 46.8] | 49.6 in the server's step 2 ([server](server.md#speed-beside-postgresql)) |
+| over TCP and TLS 1.3 (loopback) | 51.6 [44.1, 63.4] | 37.1 [31.3, 46.8] | 49.6, in other rounds ([server](server.md#speed-beside-postgresql)) |
 | at the server through its Unix socket | (not a path of the Cesia client: it reads locally there) | 8.9 [8.0, 9.6] | |
 
-- The local read is 34 times PostgreSQL's through its socket, and 3.2 times the OCaml client's: the 0.53 µs between
+- The local read is 34 times faster than PostgreSQL's through its socket, and 3.2 times slower than the OCaml
+  client's: the 0.53 µs between
   them are Cesia's side of the call, measured apart on a fork: the call of a package's native (a Cesia function, the
   native's stub, its 3 arguments converted) about 0.10 µs; finding the database and the kind, 0.05; making the map of
   4 fields and its `Ok` through Cesia's native interface, about 0.17; the loop of the benchmark itself, 0.08 (in the
-  number above: a loop that calls a Cesia function of the same arguments). The design's bound was 1 µs: met.
+  number above: a loop that calls a Cesia function of the same arguments). The target set before it was built, 1 µs, is met.
 - Over TLS a read pays the round trip, the encryption (about 11 µs a round trip in C with OpenSSL here) and the
   server's work. The Cesia client reads its reply itself when nothing else is in flight (the window of three round
   trips, [many fibers](#many-fibers-one-connection)): without it, a reply crossed from the package's reader domain to
   Cesia's through a pipe, and a read cost 74.1 µs [51.2, 101.7] in the same rounds (the fast path: 0.67 times that, the
   median of the rounds' ratios). The 14 µs left over the OCaml client is the wake-up of Cesia's scheduler and the
-  values made for Cesia; the design's bound, 11 µs at the server through its Unix socket, is the OCaml client's path,
+  values made for Cesia; the target of 11 µs at the server through its Unix socket is for the OCaml client's path,
   which a Cesia program on the server's machine does not take (it reads locally).
 
-**Durable writes**, n = 7 rounds of 3 s (each write an invoice of 4 facts, its group forced to the disk):
+**Durable writes**, $n = 7$ rounds of 3 s (each write an invoice of 4 facts, its group forced to the disk):
 
 | | Cesia client, one connection | OCaml client |
 |---|---:|---:|
@@ -489,29 +489,29 @@ The intervals are wide: the disk's fsync takes 2 to 3 times as long from one run
 [benchmarks](server.md#speed-beside-postgresql) saw the same). What they show: 64 fibers on one connection write as fast as 64
 connections, since their writes leave pipelined and share the server's fsyncs.
 
-**Start-up and the first call**, ms a whole process (`cesia run`, n = 101 runs of each, alternated): `io.Print(1)`
+**Start-up and the first call**, ms a whole process (`cesia run`, $n = 101$ runs of each, alternated): `io.Print(1)`
 alone 3.09 [3.04, 3.13]; the same with the package used but not called 3.51 [3.49, 3.54]; with one call 18.7 [18.6,
 18.8].
 
 - Nothing of the engine loads before the first call: the 0.42 ms of a program that uses the package are its Cesia code
   read and compiled, as for any package (`std/csv`, 40 lines, about 0.2 ms; `std/sql` about 3 ms, measured the same
   way but without the lock). `Watch` made the package's code 41 lines longer: 0.13 ms more (3.66 ms [3.60, 3.75]
-  against 3.53 [3.48, 3.59] before it, n = 51 alternated).
+  against 3.53 [3.48, 3.59] before it, $n = 51$ alternated).
 - The first call costs 13 ms more (the engine stripped of its symbol table, as built now: 17.8 ms [17.6, 18.0] against
-  20.3 [20.2, 20.5] before, n = 55; that run's process with the package unused: 4.5): checking the engine's
+  20.3 [20.2, 20.5] before, $n = 55$; that run's process with the package unused: 4.5): checking the engine's
   fingerprint (BLAKE2 of 2.3 MB, 3.9 ms), loading the system's OpenSSL (1.3 ms), and linking 1.4 MB of machine code
   into the process. Once a process: a program connects once, at its start.
 
 **The rest of the program.** The package's reader and, on the server's machine, its follower are domains of the
 program's process, and OCaml 5 stops every domain at each minor collection, while the follower's state lives in the
-program's heap. A loop that makes 2 million maps (`bench/cesia/gc.ce`, the best of three, n = 7): 125.8 ms [124.8,
+program's heap. A loop that makes 2 million maps (`bench/cesia/gc.ce`, the best of three, $n = 7$): 125.8 ms [124.8,
 131.7] alone, 126.9 [125.1, 129.0] with a local connection open; over TLS 124.9 and 128.2 with it; while 64 writers
 write and the follower applies their groups, 140.7 ms alone and 149.4 with it (the intervals overlap; the writers'
 server and the benchmark share the machine's cores). Idle, a connection costs the program nothing measurable.
 
 **A live question's fan-out**, µs from a write's receipt to a fiber's change (`bench/cesia/watch.ce`: N fibers watch
 the unpaid invoices of one client, one shared watch, while the program writes 50 invoices of that client one after the
-other, each its own group; the program on the server's machine, so its follower computes the changes; n = 5 rounds,
+other, each its own group; the program on the server's machine, so its follower computes the changes; $n = 5$ rounds,
 a server started from the same database for each):
 
 | fibers watching | a delivery, p50 | the last fiber of each group, p50 | its p99 |
@@ -528,9 +528,9 @@ a server started from the same database for each):
   package's fiber that feeds the channel, and the channel to the watching fiber. Cesia's own channels alone (one
   sender, 10,000 fibers each reading its channel) take 57 ms to reach the last fiber: the package's path costs about
   twice that.
-- Beside PostgreSQL's `LISTEN`/`NOTIFY` with a Go server (the multiplayer study, from the commit to the screen, its
-  WebSocket included): 137 µs at 1 screen, 538 at 100, 2,822 at 1,000. At 1 and 100 the Cesia program has its change
-  sooner, before any WebSocket; at 1,000 Go is ahead, its fan-out on 4 cores against one Cesia domain.
+- Beside PostgreSQL's `LISTEN`/`NOTIFY` with a Go server (measured in an earlier session, from the commit to the
+  screen, its WebSocket included): 137 µs at 1 screen, 538 at 100, 2,822 at 1,000. At 1 and 100 the Cesia program has
+  its change sooner, before any WebSocket; at 1,000 Go is ahead, its fan-out on 4 cores against one Cesia domain.
 - 10,000 screens of one program: 90 ms to the last fiber, before their WebSockets. A server program with
   `cesia run --workers 4` holds 2,500 screens a process, each process its own connection and watch: 17.6 ms to the
   last fiber.
@@ -548,7 +548,7 @@ linearizable without it.
 
 ## What is not built yet
 
-- Forks of a database read at the server: in the server, a later step.
+- Forks of a database read at the server, which the server will make.
 - `Not`, `Or`, `Prefix` and `In` in questions: not in the engine.
 - A program reaches one database a connection: `Connect` again for another.
 

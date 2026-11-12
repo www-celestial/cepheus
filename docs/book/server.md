@@ -51,7 +51,7 @@ is a persistent value ([concepts](concepts.md#views)). The measured effect is in
 The configuration of a server, the same file on every machine of a cluster but for `me` (a single machine is a
 cluster of one peer). Every key, and every rule it is checked against before anything opens:
 
-```toml
+```toml norun
 [cluster]
 name = "shop-prod"                 # lower-case letters, digits, '_', '-'
 id = "cph-c-6f1e9a2b7d40c381"      # made by `cepheus cluster init`; checked at every connection (Welcome)
@@ -92,7 +92,8 @@ name = "stock"
 - `max_connections` bounds the connections open at once, from their accept to their close (a thread each, and a file
   descriptor). At the limit a new connection is closed at once: over the Unix socket after an error frame
   `too_many_connections`, over TCP without a word and before its TLS handshake, so that a refused connection costs the
-  server no handshake (about 5 ms of computation). The log says how many were refused, at most once a second. The
+  server no handshake (its key exchange and signature: a whole new TLS connection costs 2.6 ms, both sides,
+  [measured below](#speed-beside-postgresql)). The log says how many were refused, at most once a second. The
   default, 512, leaves room under systemd's default limit of 1,024 descriptors a service (`LimitNOFILE`), which the
   databases' files share (a journal segment, a run file a level); raise both together. A server out of descriptors
   says so in its log and keeps accepting once some close (`accept` fails with `EMFILE`; the connection waits in the
@@ -110,7 +111,7 @@ name = "stock"
 The tokens of the programs, beside `cluster.toml`, readable by the server's user only (mode 0600). It holds hashes,
 never tokens; the commands below write it.
 
-```toml
+```toml norun
 [[token]]
 name = "shop-web"
 hash = "blake2b-256:9f4c...e1"
@@ -267,7 +268,7 @@ On a follow stream the server pushes (request id 0):
   schema.
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
-  (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 453,866).
+  (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
 - An **operation**: 0 Add, 1 Retract, 2 Expect a value, 3 Expect none; then the thing (zigzag: a negative id is a new
   thing of the group), the property, the value.
 - Every read names the group of the view it was answered from, every receipt its group: a program can check what it
@@ -338,12 +339,12 @@ the lock that keeps the machine's other benchmarks out; medians with their distr
 
 | | measured | beside |
 |---|---|---|
-| a change after its write's receipt, at the server, over its Unix socket (n = 7, 200 writes each) | p50 16.0 µs [11.0, 26.9], p99 68 | PostgreSQL `NOTIFY` with a Go server, from the commit to the screen, its WebSocket included: 137 µs [128, 148] (the multiplayer study) |
+| a change after its write's receipt, at the server, over its Unix socket ($n = 7$, 200 writes each) | p50 16.0 µs [11.0, 26.9], p99 68 | PostgreSQL `NOTIFY` with a Go server, from the commit to the screen, its WebSocket included: 137 µs [128, 148] (the multiplayer study) |
 | the same, in the program's follower on the server's machine | p50 −6.9 µs [−14.8, −1.0]: before the receipt; p99 19.8 | |
 | the write itself (its fsync) | p50 3,409 µs [2,970, 5,879] | PostgreSQL's insert with its fsync: 3,317 µs [3,122, 3,438] (study) |
-| 100 watches, each on a connection read by a thread, one writer of 20-invoice groups for 10 s, without / with a connection that watches and never reads (n = 7) | delivered 100 % / 100 %; after the receipt p50 1,314 µs [1,259, 1,348] / 1,341 [1,186, 1,582], p99 4,880 [3,862, 7,126] / 5,747 [4,852, 96,319]; the server's peak memory 111 / 107 MB | the study's stalled screen among 100: Node `ws` and Go `gorilla` 100 % (p99 113 ms and 4.3 ms); a hub of one fiber that waits on each socket, 50.6 % |
-| the hub alone (`livecpu`, in one process, n = 5): S screens, each watching the unpaid invoices of its client, and a dashboard (the unpaid sum and count), then 20,000 random groups (new invoices, payments, changed totals) | a group, the dashboard included, at 100 / 1,000 / 10,000 screens: p50 16.0 µs [16.0, 21.0] / 13.1 [12.2, 19.1] / 12.2 [12.2, 12.9], mean 17.2 / 14.6 / 14.5; every screen and the dashboard equal to `Find`'s at the end | asking again instead: the dashboard's sum 10.0 ms [9.7, 11.6] a group at 10,000 screens; the screen a group touches 8.1 µs |
-| 16 writers for 5 s without / with 100 watches of what they write, the watches read by another process (n = 7) | 1,844 groups a second [568, 2,058] / 1,598 [977, 1,981]; the ratio within each round 1.20 [0.29, 2.09] | PostgreSQL, 16 writers with a trigger's `NOTIFY`: 8.6 times fewer inserts [6.1, 22.2] (its committers queue on `NOTIFY`'s lock, `async.c`) |
+| 100 watches, each on a connection read by a thread, one writer of 20-invoice groups for 10 s, without / with a connection that watches and never reads ($n = 7$) | delivered 100 % / 100 %; after the receipt p50 1,314 µs [1,259, 1,348] / 1,341 [1,186, 1,582], p99 4,880 [3,862, 7,126] / 5,747 [4,852, 96,319]; the server's peak memory 111 / 107 MB | the study's stalled screen among 100: Node `ws` and Go `gorilla` 100 % (p99 113 ms and 4.3 ms); a hub of one fiber that waits on each socket, 50.6 % |
+| the hub alone (`livecpu`, in one process, $n = 5$): S screens, each watching the unpaid invoices of its client, and a dashboard (the unpaid sum and count), then 20,000 random groups (new invoices, payments, changed totals) | a group, the dashboard included, at 100 / 1,000 / 10,000 screens: p50 16.0 µs [16.0, 21.0] / 13.1 [12.2, 19.1] / 12.2 [12.2, 12.9], mean 17.2 / 14.6 / 14.5; every screen and the dashboard equal to `Find`'s at the end | asking again instead: the dashboard's sum 10.0 ms [9.7, 11.6] a group at 10,000 screens; the screen a group touches 8.1 µs |
+| 16 writers for 5 s without / with 100 watches of what they write, the watches read by another process ($n = 7$) | 1,844 groups a second [568, 2,058] / 1,598 [977, 1,981]; the ratio within each round 1.20 [0.29, 2.09] | PostgreSQL, 16 writers with a trigger's `NOTIFY`: 8.6 times fewer inserts [6.1, 22.2] (its committers queue on `NOTIFY`'s lock, `async.c`) |
 
 - A change leaves about 16 µs after its write's receipt, which itself leaves about 5 µs after the group is durable
   (half the empty round trip): about 20 µs after durable at the server, a few µs in the follower, which computes it
@@ -414,8 +415,8 @@ answer every networked database gives for a commit whose reply was lost.
 *Proof sketch.* (1) Within one server process, the table is consulted and the write marked in flight under one lock,
 before it is sent to the writer: a second copy finds it in flight or done, so one copy runs. (2) Across a crash: the
 receipt of every write at or before the checkpoint's group is in the checkpoint, because the checkpoint's group is
-min(the published group, the published group when each write in flight was sent), and a write sent when the published
-group was P takes a group after P; every write after the checkpoint's group is in the journal with its origin, read
+$\min(\text{the published group}, \text{the published group when each write in flight was sent})$, and a write sent when the published
+group was $P$ takes a group after $P$; every write after the checkpoint's group is in the journal with its origin, read
 at start. A durable group is therefore always found, and a write that was not durable was not applied (G1, G3), so
 sending it again applies it once. (3) The new things' ids are recomputed from the group's first new id and the order
 of first use in the operations, the rule the engine numbers them by.
@@ -486,9 +487,11 @@ the reader cannot write it). In memory rather than on the disk: the number needs
 is left), it outlives a server's death (the rule below needs it), and a page of tmpfs is never written back to a
 disk, so the server's store into it never waits for one.
 
-  `Unix.map_file` maps read-write (a shared mapping then needs a descriptor open for writing, which would let a
-  reader move the number), and of a private mapping mmap(2) says: "It is unspecified whether changes made to the
-  file after the mmap() call are visible in the mapped region"; the C stub maps `PROT_READ` and `MAP_SHARED`.
+A reader maps the page through a small C stub, with `PROT_READ` and `MAP_SHARED`, rather than with `Unix.map_file`,
+which maps read-write (a shared mapping then needs a descriptor open for writing, which would let a reader move the
+number); and of a private mapping mmap(2) says: "It is unspecified whether changes made to the file after the mmap()
+call are visible in the mapped region". The rule, step by step:
+
 - Each frame is sent tagged with the number it will be visible under: the current one plus 1.
 - Once the frame's fsync returns and it is published, the server stores the new number, then answers the frame's
   writers, then lets remote reads see it.
@@ -513,13 +516,13 @@ moves); a reader that falls more than 64 MiB of frames behind is cut off, and fo
 program keeps on purpose reads that view's state, as everywhere (a view never changes, G5). After a
 power loss every reader dies with the machine.
 
-*Proof sketch.* Let w(n) be the instant the server stores number n, and S(n) the state it covers. (1) Durable: the
-server stores n only after the fsync of S(n)'s frame returned; a reader serves S(n) only when it loads n; within one
+*Proof sketch.* Let $w(n)$ be the instant the server stores number $n$, and $S(n)$ the state it covers. (1) Durable: the
+server stores $n$ only after the fsync of $S(n)$'s frame returned; a reader serves $S(n)$ only when it loads $n$; within one
 server process numbers follow frames one to one, and a new process starts at the last number + 2, so a number a
 reader holds from an earlier process, at most the last number + 1, is never stored again. (2) Fresh: a writer of
-group g in S(n) is answered after w(n); a read that starts after the answer loads a number m ≥ n, and S(m) holds
-S(n). (3) Ordered: a read that returned S(n) loaded n after w(n); a read that starts after it loads m ≥ n.
-Remote reads take the server's view of the current number, which it sets after w(n): the same argument.
+group $g$ in $S(n)$ is answered after $w(n)$; a read that starts after the answer loads a number $m \ge n$, and $S(m)$ holds
+$S(n)$. (3) Ordered: a read that returned $S(n)$ loaded $n$ after $w(n)$; a read that starts after it loads $m \ge n$.
+Remote reads take the server's view of the current number, which it sets after $w(n)$: the same argument.
 
 *Tests.* `spec/LocalReads.tla`, model-checked by TLC (`tools/tlc.sh`): the rule built holds Fresh, Ordered and
 Durable with two readers, remote reads and three writes (3,436,820 distinct states), and with one reader, remote reads,
@@ -540,8 +543,8 @@ server sends `Durable {n, until T}` after the fsync, `T` read on the machine's m
 newest durable state while its clock reads less than `T`, and the server answers group n's writers once every reader
 whose `T` is still ahead acked n. TLC finds that this rule keeps Fresh and Durable (289,765 distinct states with one
 reader, two writes and four ticks of a lease of two) but breaks Ordered, in a trace of 7 states:
-group n is published at its fsync and a remote read returns it; a local reader whose lease runs has not yet applied
-`Durable n`, and a read that starts after the remote one returns n - 1. Two local readers give the same inversion.
+group $n$ is published at its fsync and a remote read returns it; a local reader whose lease runs has not yet applied
+`Durable n`, and a read that starts after the remote one returns $n - 1$. Two local readers give the same inversion.
 Such reads form a regular register, not an atomic one: linearizability needs one instant at which a group becomes
 visible everywhere, and two processes that each learn of it by a message cannot switch at one instant without
 another round in which reads wait: in Paxos quorum leases a lease holder reads locally only after it has assessed
@@ -570,22 +573,22 @@ database (`bench/sbench.ml`, `local` and `localq`); through the socket, the same
 
 | | local read | through the Unix socket | PostgreSQL 18.6, Unix socket |
 |---|---:|---:|---:|
-| point read (an invoice's 4 facts), n = 11 | **0.221 µs** [0.210, 0.293] | 10.17 µs [9.22, 13.83] | 25.48 µs [23.76, 29.19] |
-| Q3, the unpaid invoices of a city (396 rows), n = 11 | **0.461 ms** [0.429, 0.522] | 0.500 ms [0.480, 0.580] | 0.708 ms [0.684, 0.803] |
-| Q4, the unpaid sum and count by city (100 rows), n = 11 | **11.6 ms** [10.2, 16.6] | 12.7 ms [11.7, 15.9] | 22.2 ms [21.4, 23.3] |
+| point read (an invoice's 4 facts), $n = 11$ | **0.221 µs** [0.210, 0.293] | 10.17 µs [9.22, 13.83] | 25.48 µs [23.76, 29.19] |
+| Q3, the unpaid invoices of a city (396 rows), $n = 11$ | **0.461 ms** [0.429, 0.522] | 0.500 ms [0.480, 0.580] | 0.708 ms [0.684, 0.803] |
+| Q4, the unpaid sum and count by city (100 rows), $n = 11$ | **11.6 ms** [10.2, 16.6] | 12.7 ms [11.7, 15.9] | 22.2 ms [21.4, 23.3] |
 
 - **A point read** in the program's memory is 115 times PostgreSQL's and 46 times a read through the socket: what is
   left is the engine's own read (the design measured 0.42 µs in the process on another day's build; the load of the
   number and the choice of the state add a few nanoseconds). The plan's target was 0.5 µs. Measured again after the
   rules came in (run format 6, a flag in each value word), on the same database grown by the write measurements below
-  to 1.56 M groups, n = 11: 0.245 µs [0.231, 0.251] in the program, 9.93 µs [9.49, 11.27] through the socket,
+  to 1.56 M groups, $n = 11$: 0.245 µs [0.231, 0.251] in the program, 9.93 µs [9.49, 11.27] through the socket,
   PostgreSQL 24.49 µs [24.11, 28.89].
 - **Questions** gain less: Q3 and Q4 do their work in the reader as they do in the server; the round trip they skip
   is small beside it (Q3 loses 39 µs, Q4 about 1 ms of coding and decoding 100 rows).
 
 **What a write pays for its readers.** No write waits for a reader. The writer's whole extra work is the follow
 stream's two hooks a frame: the frame queued for each reader before its write, the number stored and the view moved
-after its fsync. Measured inside the server (the hooks' own clock, n = 11 rounds of 3 s of one client writing):
+after its fsync. Measured inside the server (the hooks' own clock, $n = 11$ rounds of 3 s of one client writing):
 
 | | the hooks, a frame | a durable write, one client: median latency |
 |---|---:|---:|
@@ -597,15 +600,15 @@ equal within the disk's noise. The cost grows with the readers (1.4 µs with non
 reader and wakes the thread that sends it.
 
 **What following costs a reader.** One local reader while 256 clients write invoices of 4 facts through the socket
-(n = 7 rounds, its CPU time over 4 s): **32.3 % of a core** [23.3, 38.8] at 17,942 groups a second [12,269,
-22,027], about 4 µs a change applied. The plan's target, 20 % of a core at 18,000 groups a second, is **missed**:
+($n = 7$ rounds, its CPU time over 4 s): **32.3 % of a core** [23.3, 38.8] at 17,942 groups a second [12,269,
+22,027], about 4.5 µs a change applied. The plan's target, 20 % of a core at 18,000 groups a second, is **missed**:
 the design measured 1.72 µs a change to replay a journal alone on a quiet machine; here the reader shares the
 machine's 4 cores and 8 hardware threads with the server and the 256 writers, and each merge of the server makes it
 apply again, onto the new runs, the groups written during the merge. Under that load its memory (Pss) was 273 MB
 [202, 325]: its delta of the groups since the newest run, larger while the writes outrun the merges.
 
 **What eight readers cost the machine.** Eight local readers of the 1 M facts, each having read every invoice of the
-sample once (n = 7): **250 MB of Pss** in all [249, 250], 31 MB each, most of it its own copy of the run pages (the
+sample once ($n = 7$): **250 MB of Pss** in all [249, 250], 31 MB each, most of it its own copy of the run pages (the
 database's runs are 24 MB). PostgreSQL's backends serving 8 clients of point reads: 43 MB [43, 44] of Pss in all
 (12 processes), because they share one buffer pool. Each reader keeping its own cache was the design's first choice
 (the engine's code as it is, every page checked); one copy shared by all readers is the later step when a
@@ -614,7 +617,7 @@ deployment's memory asks for it. With run format 7 (2026-11-09) the same eight r
 run pages shrank with the runs ([benchmarks](benchmarks.md#compressed-runs-and-journal-2026-11-09-at-10-million-facts)).
 
 **Against the server before step 3** (the same server without local reads, its binaries and ours in turn in every
-round, n = 11; the ratio new / old by round): empty round trip 1.05 [0.90, 1.18], point read through the socket
+round, $n = 11$; the ratio new / old by round): empty round trip 1.05 [0.90, 1.18], point read through the socket
 0.99 [0.79, 1.34], durable writes of one client 1.21 [0.90, 2.26] times the old rate, of 64 clients 0.97 [0.66,
 1.52]: no difference the measures can see (every interval holds 1).
 
@@ -714,19 +717,19 @@ point read is an invoice by its id: `Get` of its 4 facts against `SELECT * FROM 
 
 | | Cepheus | PostgreSQL 18.6 | ratio |
 |---|---:|---:|---:|
-| empty round trip, Unix socket (Ping; `SELECT 1`), n = 21 | 9.32 µs [8.75, 9.77] | 15.19 µs [14.57, 16.30] | 1.6× |
-| point read, 1 client, Unix socket, n = 21 | **10.81 µs** [10.36, 11.15] | 26.39 µs [25.22, 27.78] | 2.4× |
-| point read, 1 client, TCP + TLS 1.3, n = 21 | **39.18 µs** [36.24, 44.59] | 49.64 µs [48.31, 50.61] | 1.3× |
-| point read, TCP without TLS (PostgreSQL), n = 21 | (no plain TCP: TLS always) | 35.81 µs [34.54, 37.71] | |
-| point reads, 16 in flight on one connection (a pipeline of 16), per read, n = 11 | **1.46 µs** [1.34, 2.06] | 9.11 µs [8.78, 10.45] | 6.2× |
-| point reads, 128 in flight, per read, n = 11 | 1.31 µs [1.29, 1.36] | | |
-| 8 clients, one read in flight each: wall time per read, n = 11 | **3.22 µs** [2.96, 3.47] | 6.54 µs [6.17, 7.39] | 2.0× |
-| 64 clients, n = 11 | 3.14 µs [2.99, 3.71] | 7.00 µs [6.78, 7.68] | 2.2× |
-| 256 clients, n = 11 | 2.88 µs [2.73, 3.94] | 12.83 µs [11.96, 13.75] | 4.5× |
-| Q3, the unpaid invoices of a city (city-7: 396 rows of 2 values), n = 11 | 0.487 ms [0.474, 0.526] | 0.662 ms [0.656, 0.699] | 1.4× |
-| Q4, the unpaid sum and count by city (100 rows, aggregated in the server), n = 11 | 12.37 ms [11.35, 13.87] | 18.47 ms [18.36, 19.23] | 1.5× |
-| a new connection with TLS and its first request, n = 7 | 2.60 ms [2.53, 2.76] | 4.28 ms [4.24, 4.56] | 1.6× |
-| a new connection, Unix socket (PostgreSQL's fork of a backend), n = 7 | | 2.03 ms [2.01, 2.04] | |
+| empty round trip, Unix socket (Ping; `SELECT 1`), $n = 21$ | 9.32 µs [8.75, 9.77] | 15.19 µs [14.57, 16.30] | 1.6× |
+| point read, 1 client, Unix socket, $n = 21$ | **10.81 µs** [10.36, 11.15] | 26.39 µs [25.22, 27.78] | 2.4× |
+| point read, 1 client, TCP + TLS 1.3, $n = 21$ | **39.18 µs** [36.24, 44.59] | 49.64 µs [48.31, 50.61] | 1.3× |
+| point read, TCP without TLS (PostgreSQL), $n = 21$ | (no plain TCP: TLS always) | 35.81 µs [34.54, 37.71] | |
+| point reads, 16 in flight on one connection (a pipeline of 16), per read, $n = 11$ | **1.46 µs** [1.34, 2.06] | 9.11 µs [8.78, 10.45] | 6.2× |
+| point reads, 128 in flight, per read, $n = 11$ | 1.31 µs [1.29, 1.36] | | |
+| 8 clients, one read in flight each: wall time per read, $n = 11$ | **3.22 µs** [2.96, 3.47] | 6.54 µs [6.17, 7.39] | 2.0× |
+| 64 clients, $n = 11$ | 3.14 µs [2.99, 3.71] | 7.00 µs [6.78, 7.68] | 2.2× |
+| 256 clients, $n = 11$ | 2.88 µs [2.73, 3.94] | 12.83 µs [11.96, 13.75] | 4.5× |
+| Q3, the unpaid invoices of a city (city-7: 396 rows of 2 values), $n = 11$ | 0.487 ms [0.474, 0.526] | 0.662 ms [0.656, 0.699] | 1.4× |
+| Q4, the unpaid sum and count by city (100 rows, aggregated in the server), $n = 11$ | 12.37 ms [11.35, 13.87] | 18.47 ms [18.36, 19.23] | 1.5× |
+| a new connection with TLS and its first request, $n = 7$ | 2.60 ms [2.53, 2.76] | 4.28 ms [4.24, 4.56] | 1.6× |
+| a new connection, Unix socket (PostgreSQL's fork of a backend), $n = 7$ | | 2.03 ms [2.01, 2.04] | |
 
 What it says:
 
@@ -737,14 +740,14 @@ What it says:
   µs of work. Only not making the round trip goes below it ([local reads](#local-reads-g15): 0.22 µs).
 - **Many clients**: the plan's main target, 8 clients at most 4 µs a read (PostgreSQL 6.2 µs when the design measured
   it, 6.5 today), holds: 3.22 µs. With one I/O domain the server answered every 9.6 µs (the prototype): the I/O
-  domains are what wins it (3 rounds at each k = 1, 2, 4, 8: 9.1-10.0, 5.3-5.5, 2.9-4.0 and 2.1-3.1 µs; 4, the default,
+  domains are what wins it (3 rounds at each $k = 1, 2, 4, 8$: 9.1-10.0, 5.3-5.5, 2.9-4.0 and 2.1-3.1 µs; 4, the default,
   keeps 16 in flight at 1.3-1.5 µs where 8 domains gave 1.5-2.1). PostgreSQL's
   process a connection pays more as connections grow (12.8 µs at 256); our threads in 4 domains do not.
 - **Pipelining** (several requests in flight on one connection, the replies matched by id): 1.46 µs a read with 16 in
   flight, 6.2 times PostgreSQL's pipeline of 16, where the backend still answers in order and parses each statement.
 - **TLS** costs us 28.4 µs more than the Unix socket (39.2 against 10.8); OpenSSL's own TLS round trip in C on this
   machine (64 bytes each way, the design's prototype) costs 27.06 µs against 16.04 in plain TCP: 11.0 µs of TLS. Ours
-  adds about 16 µs over plain TCP (23.2 µs, step 1's server, n = 11): the memory buffers through which OpenSSL works
+  adds about 16 µs over plain TCP (23.2 µs, step 1's server, $n = 11$): the memory buffers through which OpenSSL works
   here (a copy into them and one out, and more OpenSSL calls a read) cost the rest. Both sides use OpenSSL's default
   TLS 1.3 cipher (AES-256-GCM); the C prototype, AES-128-GCM. The plan's target was 36 µs: missed by 3 µs; still
   1.3 times PostgreSQL with TLS. A new TLS connection costs 2.6 ms (one ECDSA signature by the server, the client's
@@ -754,7 +757,7 @@ What it says:
   city-7, and 45,064 unpaid invoices summing to 2,248,567,111 cents (a fresh load of the same seeded data,
   `bench.exe read`; PostgreSQL on its rows), and the same 100 invoices (`sbench.exe check` against `psql`).
 
-**Durable writes** (a new invoice of 4 facts a write, each answered after its fsync; groups a second, n = 7, 3 s a
+**Durable writes** (a new invoice of 4 facts a write, each answered after its fsync; groups a second, $n = 7$, 3 s a
 run; PostgreSQL: `INSERT` of a row, `synchronous_commit = on`):
 
 | clients | Cepheus through the server | PostgreSQL 18.6 | Cepheus in the process (`bench.exe write`) |
@@ -778,9 +781,9 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 
 - Find gathers its answer's index words before it sends them (above); forks are not on the wire yet.
 - **Many databases do not share an fsync yet**: each forces its own journal. Written at once, one writer each, 5 s
-  (`sbench.exe mwrite`, n = 5), 1 / 4 / 16 / 64 databases make 218 / 508 / 1,209 / 2,308 groups a second, a write
+  (`sbench.exe mwrite`, $n = 5$), 1 / 4 / 16 / 64 databases make 218 / 508 / 1,209 / 2,308 groups a second, a write
   waiting 3.07 / 6.24 / 10.3 / 24.1 ms at the median [20.9, 29.7 at 64]. PostgreSQL 18.6's databases share one WAL:
-  1 / 4 / 16 / 64 clients inserting a row a transaction (`pgbench`, n = 5) make 182 / 477 / 1,760 / 3,463 a second,
+  1 / 4 / 16 / 64 clients inserting a row a transaction (`pgbench`, $n = 5$) make 182 / 477 / 1,760 / 3,463 a second,
   18.5 ms on average at 64. PostgreSQL wins at 16 and 64 (1.5 times the writes at 64), where one database of Cepheus
   with 64 writers makes 4,828 to 7,021 a second (the OCaml and the Cesia clients, [Cesia](cesia.md#what-it-costs)): the
   fsyncs of separate files do not group as the writes of one journal do. The design's answer, one forced log for the server's rounds and each journal

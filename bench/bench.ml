@@ -1,5 +1,5 @@
 (* Benchmarks, the Cepheus side. One seeded generator makes the data for both sides: groups for Cepheus, CSV files
-   for PostgreSQL's COPY. Method and results: docs/benchmarks.md.
+   for PostgreSQL's COPY. Method and results: docs/book/benchmarks.md.
 
      bench.exe load DIR CSVDIR FACTS   Cepheus through its writer (64 clients, one group per client and its 20
                                        invoices, then the follow links; GROUP=N clients a group, THREADS=T), a

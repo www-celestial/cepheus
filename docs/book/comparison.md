@@ -72,14 +72,15 @@ its method: [the server](server.md#speed-beside-postgresql)):
 
 **Isolation, by design** ([PostgreSQL 18: transaction isolation](https://www.postgresql.org/docs/18/transaction-iso.html)):
 "Read Committed is the default isolation level in PostgreSQL"; Repeatable Read "is implemented using a technique
-known [...] as Snapshot Isolation" and allows serialization anomalies; Serializable "is implemented using [...]
+known \[...] as Snapshot Isolation" and allows serialization anomalies; Serializable "is implemented using \[...]
 Serializable Snapshot Isolation", and "applications using this level must be prepared to retry transactions due to
 serialization failures". Cepheus has one level: groups strictly serializable, read-then-writes validated by `Expect`
 ([concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)). Group commit: PostgreSQL groups commits
 on its own ("When commit_delay is set to zero (the default), it is still possible for a form of group commit to
 occur", [WAL configuration](https://www.postgresql.org/docs/18/wal-configuration.html)), as Cepheus does. Parallel
 query: `max_parallel_workers_per_gather` defaults to 2
-([resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html)), hence "3 processes" above.
+([resource settings](https://www.postgresql.org/docs/18/runtime-config-resource.html)), hence the rows on 3 cores above:
+the leader and its 2 workers, 3 processes (on Q5 it launched 1 worker, so 2 processes).
 
 ## Measured: SQLite 3.54
 
@@ -184,7 +185,7 @@ journal the added and retracted flags.
   `bytes_per_sync`, which Cepheus' merge copies ([IO](https://github.com/facebook/rocksdb/wiki/IO)).
 - *Write amplification*: "Write amplification is the ratio of bytes written to storage versus bytes written to the
   database"; the tuning guide's worked example gives "approximately 1 + 2 + 10 + 10 + 10 = 33", and "the usual write
-  amplification of leveled compaction [...] is often larger than 10"
+  amplification of leveled compaction \[...] is often larger than 10"
   ([tuning guide](https://github.com/facebook/rocksdb/wiki/RocksDB-Tuning-Guide),
   [leveled compaction](https://github.com/facebook/rocksdb/wiki/Leveled-Compaction)). Cepheus levels too, with a
   ratio of 4 rather than RocksDB's default of 10 (`max_bytes_for_level_multiplier`): 5.8 writes a fact for its 10 M
@@ -192,7 +193,7 @@ journal the added and retracted flags.
   of the target level at once; RocksDB splits each level into files of a few tens of MB and compacts a few at a time,
   so a compaction is short whatever the level's size.
 - *Where RocksDB wins*: compaction by files (short merges at every level), Bloom filters, compression, column
-  families, years of production; transactions of both kinds ("Optimistic Transactions do not take any locks [...] they rely on
+  families, years of production; transactions of both kinds ("Optimistic Transactions do not take any locks \[...] they rely on
   doing conflict-detection at commit time", [transactions](https://github.com/facebook/rocksdb/wiki/Transactions)).
   RocksDB has no query language: Cepheus' joins would be written by hand on top of it.
 
@@ -203,7 +204,7 @@ journal the added and retracted flags.
   "index-free adjacency": "Link every data element directly to its incoming and outgoing relationships"
   ([15 rules](https://neo4j.com/blog/cypher-and-gql/15-rules-native-graph-database/)). Cepheus finds "who links to t"
   with a binary search in the by-property rows, not by following a pointer.
-- Isolation: read-committed is the default, and "Explicit locking of nodes and relationships [...] allows for
+- Isolation: read-committed is the default, and "Explicit locking of nodes and relationships \[...] allows for
   simulating the effects of higher levels of isolation"
   ([concurrent data access](https://neo4j.com/docs/operations-manual/5/database-internals/concurrent-data-access/)).
   Cepheus' groups are strictly serializable with no lock.

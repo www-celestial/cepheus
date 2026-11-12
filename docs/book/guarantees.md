@@ -13,7 +13,7 @@ it was answered from; `server_sim` checks them over a simulated network with the
 |---|---|---|
 | G1 | a confirmed group survives every crash and recovery | F1, F2 |
 | G2 | a group is all or nothing | F1, F2 |
-| G3 | after recovery, the groups are a prefix 1..k of the history, k ≥ the last confirmed | F1, F2 |
+| G3 | after recovery, the groups are a prefix $1, \dots, k$ of the history, $k \ge$ the last confirmed | F1, F2 |
 | G4 | the groups are strictly serializable | always |
 | G5 | a view never changes and holds only durable groups; views never go back | F1, F2, F4 (with G13) |
 | G6 | damage to durable journal bytes is detected, never dropped in silence | F3 (one residual) |
@@ -81,7 +81,7 @@ small journals), `test/crash.ml` (real `kill -9`, every confirmation checked for
 
 *Proof.* A group is encoded inside one frame; a frame is taken only if its header CRC and its body CRC check and its
 groups decode to the end of the body; otherwise recovery stops before it. A frame torn in the middle fails its body
-CRC except with probability 2⁻³² (for random damage). A large group's frame, which holds it alone, is written by pieces
+CRC except with probability $2^{-32}$ (for random damage). A large group's frame, which holds it alone, is written by pieces
 as it is encoded: its whole body first, then its header, then its trailer, then one fsync; until the header is
 written the pieces make no frame (recovery cuts them as a torn tail), and the group is confirmed only after the fsync.
 
@@ -89,8 +89,8 @@ written the pieces make no frame (recovery cuts them as a torn tail), and the gr
 
 ## G3 Prefix
 
-*Promise.* After recovery the groups present are exactly 1..k for some k ≥ the last confirmed group, and the state
-is the application of groups 1..k in order.
+*Promise.* After recovery the groups present are exactly $1, \dots, k$ for some $k \ge$ the last confirmed group, and the state
+is the application of groups $1, \dots, k$ in order.
 
 *Proof.* Frames are appended in group order (`Journal.append` refuses another order); recovery checks that each frame
 starts at the expected group and each group has the expected number, across segments ("a segment is missing"
@@ -112,10 +112,10 @@ stated can be overwritten by another group meanwhile (a lost update), and a set 
 member meanwhile (a phantom), unless a fact standing for the set is expected and changed by every writer of it
 ([concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see), [theory](theory.md#5-serializability-and-isolation)).
 
-*Proof.* There is one writer per database (G9), and it resolves group n on the working state S(n-1), producing S(n):
+*Proof.* There is one writer per database (G9), and it resolves group $n$ on the working state $S(n-1)$, producing $S(n)$:
 the execution is serial by construction (Papadimitriou 1979). A number is given when the writer takes a group, which
-is after it was submitted; if a returned, its number was given before b was submitted. Reads of a group's `Expect`
-are evaluated against S(n-1) inside the writer, so a read-modify-write that states what it read with `Expect` is
+is after it was submitted; if $a$ returned, its number was given before $b$ was submitted. Reads of a group's `Expect`
+are evaluated against $S(n-1)$ inside the writer, so a read-modify-write that states what it read with `Expect` is
 serializable (optimistic validation, Kung and Robinson 1981); one that does not is not protected against a lost update.
 
 *Tested by* `test/bank.ml` (transfers with `Expect` from 16 threads; the total is constant in every view and at the
@@ -124,7 +124,7 @@ end) and the named write-skew case in `test/unit.ml`.
 ## G5 Stable, durable views
 
 *Promise.* A view is the exact state after one group; it never changes; the database's view shows only durable groups;
-after `write` returned group n, every view taken afterwards has a number ≥ n; the views one thread takes never go back.
+after `write` returned group $n$, every view taken afterwards has a number $\ge n$; the views one thread takes never go back.
 
 *Conditions.* On a database, not on a fork (a fork has no disk: its view holds its writes at once). "Never go back"
 holds for the views one thread takes in turn with `view db`; two threads may hold views of different groups. After an
@@ -147,7 +147,7 @@ open force). PostgreSQL keeps the same state in `pg_control` (shut down, or in p
 without the segment's fsync, 9 of 300 seeds fail, without the directory's, 5.)
 
 *Tested by* the bank test (reader domains check every view they take: constant total, numbers never go back) and the
-simulation (the published view equals the model at its number, which is ≥ the last confirmed; after a recovery, the
+simulation (the published view equals the model at its number, which is $\ge$ the last confirmed; after a recovery, the
 recovered number counts as confirmed, and process deaths are followed by power losses).
 
 *Background merges* keep G5: a merge writes a new run from a view and replays the logged groups after it, and the
@@ -171,7 +171,7 @@ a trailer at the right distance carries the body's CRC (the frame was written wh
 otherwise it is a torn tail. A torn write cannot produce either sign unless it lost exactly the header's sector and
 kept the rest (after a failed fsync this is likelier, the sectors of the failed write reaching the disk or not one by
 one: the writer's cut, G13, removes the frame before a power loss can leave it so). CRC-32C detects every burst of at most 32 bits and every error of at most 3 bits in frames of
-realistic size; other random damage escapes with probability 2⁻³² (Koopman 2002). A full read is strict: on a journal
+realistic size; other random damage escapes with probability $2^{-32}$ (Koopman 2002). A full read is strict: on a journal
 that recovery has cut and repaired, any frame or trailer that does not check is damage.
 
 *Model-checked* by `tools/tlc.sh` (`spec/Journal.tla`): with up to 7 frames and 3 silent damages, process deaths and
@@ -206,19 +206,19 @@ page the page table names and checks the CRC-32C the table gives before it enter
 a page there. Every access to a run is bounds-checked (the frame table, then the page's bytes or a block's copy), so
 a read never leaves the run's bytes. The coding of formats 7 and 8 (blocks by a frame of reference, a page table, the
 column order) changes what a page holds, not this argument: a value is decoded only from a page that checked. For random damage
-of a page, CRC-32C misses it with probability 2⁻³²; it detects every burst of up to 32 bits (Castagnoli, Bräuer,
+of a page, CRC-32C misses it with probability $2^{-32}$; it detects every burst of up to 32 bits (Castagnoli, Bräuer,
 Herrmann 1993).
 
 *Several runs read as one state.* A fact is in a view iff the newest entry for it (the delta's, or the newest run's
 that has one) adds it; a count is the sum of each run's rows minus its retractions, plus the delta's net count (the
 runs are net, so nothing is counted twice); an iteration shows a row of a run only if no newer run has an entry for the
-same fact (docs/theory.md, section 9). *Tested by* `test/unit.ml` ("several runs": 120 random views of up to 4 runs that
-add and retract, against their full merge and a naive evaluator; "large groups").
+same fact ([theory](theory.md#9-levels-on-disk-and-large-groups), section 9).
 
 *Tested by* the simulation (merges at random moments, crashes inside their writing, flips in run files) and
 `test/unit.ml` (round trip; a run of another database is refused; a flipped run is set aside; a run three times larger
 than the cache, read by three domains, with a bit flipped after the open: the questions answer right or return
-`Damaged`, and exactly the damaged page fails).
+`Damaged`, and exactly the damaged page fails; "several runs": 120 random views of up to 4 runs that add and retract,
+against their full merge and a naive evaluator; "large groups").
 
 ## G8 Forks
 
@@ -297,24 +297,23 @@ candidates at each level (they satisfy the pattern used as a source and are acce
 is output; candidates at one level are distinct, so no answer comes twice.
 
 *And its cost.* At each level, the candidates enumerated for one partial binding are the smallest set a pattern offers
-(exact counts, on the base and on the delta alike); every other pattern only looks each one up, in O(log n). The
+(exact counts, on the base and on the delta alike); every other pattern only looks each one up, in $O(\log n)$. The
 total is the instance bound of Generic Join (Ngo, Ré, Rudra 2013), within the AGM bound of the question. A pattern of
 a one-valued property whose thing is bound offers at most one candidate; its count is not looked up: it is taken
-before every pattern that offers one or more and after one that offers none (`Query.count_with` compares 2c for an
-exact count c against 1 for it). Either way the level enumerates at most the smallest exact count: if the pattern has
+before every pattern that offers one or more and after one that offers none (`Query.count_with` compares $2c$ for an
+exact count $c$ against 1 for it). Either way the level enumerates at most the smallest exact count: if the pattern has
 no value, it gives nothing, and if another offers none, that one is taken. So the bound is unchanged, and the unit
 tests' exact bound still holds. A check left to the next level (a pattern whose other side is the next variable)
 changes no count: a binding that fails it reaches the next level, where that pattern offers nothing and is the
 source. The leapfrog (run format 8, [theory](theory.md#4-generic-join)) reads, at a level whose source is a slice
-of m ≥ 2, every other slice of at most 8 m: the tested bound adds those slices' sizes, at most 1 + 8 (k − 1) times
-Generic Join's for k slices.
+of $m \ge 2$, every other slice of at most $8m$: the tested bound adds those slices' sizes, at most $1 + 8 (k - 1)$ times
+Generic Join's for $k$ slices.
 
 *Tested by* the property tests and the simulation: every random question, on views with a delta and after recoveries,
 must give the naive evaluator's answers and enumerate at most the bound that `test/check.ml` computes from the facts
 alone (`Query.work` counts the candidates); and named cases where one list is far larger than the answer (a status
 shared by 20,000 invoices, a hot tag in the delta, a range of 10 scores among 20,000, a thing with 40,000 values).
-
-*Tested by* `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
+And by `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
 ranges) compared with a naive evaluator over all facts, on a base with a delta and on a compacted base.
 
 ## G12 Merges are atomic
@@ -507,11 +506,11 @@ breaks in between (the connection, the server by `kill -9`, the program's readin
 that reads slower than the changes come gets the answer again rather than every change (it then holds `Find`'s rows at
 the answer's group). A watch ends for good on `Close`, a closed database or a token that may no longer read it (G16).
 
-*Proof.* (1) *A frame's change.* Let S be the facts before a frame and S' after; a binding of the patterns over S' that
-is not one over S uses a fact of S' − S in some pattern. Taking for each such binding the first pattern that matches
-an added fact, the patterns before it over S' without the frame's added facts and those after it over S', gives each
-new binding exactly once (the parts are disjoint and cover them); the removed bindings are the same over S with the
-removed facts ([Ammar 2018]'s delta query; the rule of semi-naive evaluation, G17 (1)). Rows are `Find`'s rows with
+*Proof.* (1) *A frame's change.* Let $S$ be the facts before a frame and $S'$ after; a binding of the patterns over $S'$
+that is not one over $S$ uses a fact of $S' - S$ in some pattern. Taking for each such binding the first pattern that
+matches an added fact, the patterns before it over $S'$ without the frame's added facts and those after it over $S'$,
+gives each new binding exactly once (the parts are disjoint and cover them); the removed bindings are the same over
+$S$ with the removed facts ([Ammar 2018]'s delta query; the rule of semi-naive evaluation, G17 (1)). Rows are `Find`'s rows with
 their repeats, so the multiset of rows after the frame is the one before, plus the new bindings' rows, minus the
 removed ones'; `Sum` and `Count` follow by difference, and a `Min` or `Max` whose value went is asked again for its key.
 (2) *Durable.* A change is held until its frame's group is durable (the server's syncer, a reader's `durable` event),

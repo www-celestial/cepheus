@@ -4,7 +4,7 @@ Every file of a database, byte by byte, as `src/journal.ml`, `src/group.ml`, `sr
 `src/snapshot.ml` write it.
 
 All integers little-endian. CRC is CRC-32C (Castagnoli), as an unsigned 32-bit number: the iSCSI checksum of RFC 3720
-(section 12.1), polynomial 0x1EDC6F41 (0x11EDC6F41 with its x³² term, as the RFC writes it), computed bit-reflected
+(section 12.1), polynomial 0x1EDC6F41 (0x11EDC6F41 with its $x^{32}$ term, as the RFC writes it), computed bit-reflected
 (0x82F63B78), starting from 0xFFFFFFFF and complemented at the end; the CRC of the 9 bytes `123456789` is 0xE3069283,
 and RFC 3720's examples (appendix B.4) give the values it prints, read as little-endian numbers (`test/unit.ml` checks
 them). The processor's own instruction computes it (`src/crc32c_stubs.c`); the format does not depend on how.
@@ -85,13 +85,13 @@ string = length varint | bytes (UTF-8 by convention; Cepheus does not look insid
 **An int column** of m numbers is coded in blocks of 128 (the last one shorter). Each block is a byte (bits 0-6 the
 bit width w, at most 63; bit 7 the mode), then:
 
-- mode 0, a **frame of reference**: the block's least value b (an int), then each value minus b in w bits;
-- mode 1, **deltas**: the first value (an int), the least difference d between a value and the one before it (an
-  int), then for each later value its difference from the one before minus d, in w bits.
+- mode 0, a **frame of reference**: the block's least value $b$ (an int), then each value minus $b$ in $w$ bits;
+- mode 1, **deltas**: the first value (an int), the least difference $d$ between a value and the one before it (an
+  int), then for each later value its difference from the one before minus $d$, in $w$ bits.
 
-The coder takes the mode that makes the block shorter. Fields of w bits follow one another, little-endian: field i
-holds bits i·w .. i·w + w − 1 of the block's bit stream, bit k of the stream being bit k mod 8 of byte k / 8; the
-block ends at its last whole byte. Differences are taken modulo 2^63, as the engine's 63-bit integers wrap, so any
+The coder takes the mode that makes the block shorter. Fields of $w$ bits follow one another, little-endian: field $i$
+holds bits $i \cdot w$ .. $i \cdot w + w - 1$ of the block's bit stream, bit $k$ of the stream being bit $k \bmod 8$ of byte $\lfloor k / 8 \rfloor$; the
+block ends at its last whole byte. Differences are taken modulo $2^{63}$, as the engine's 63-bit integers wrap, so any
 values come back exactly (a block that holds both the least and the greatest int takes 63 bits a value).
 
 A large group's frame is coded by the same function from the group's arrays, so its bytes are those `Group.encode`
@@ -118,7 +118,7 @@ and thing (the **column order**: each property's rows apart, in thing order). It
 of reference** (Goldstein et al. 1998,
 Zukowski et al. 2006): a block of values is stored as a base and, for each value, its difference from the base in as
 many bits as the block's largest difference needs (the bit packing of the journal's columns, above); any value is
-read in O(1) without decoding its neighbours.
+read in $O(1)$ without decoding its neighbours.
 
 ```
 header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (8) | 8 database id, 16 bytes
@@ -175,9 +175,9 @@ the runs' counts. Part t has no texts (ns 0). A run holds the texts s0 .. s0+ns-
 below it and itself. A value word is the value itself for int, date, money, link and bool (0/1), a text id for text,
 and the text id of its 8 IEEE bytes for a float.
 
-**By thing.** `erank` is a rank table (Jacobson 1989): word j holds, in its low 32 bits, which of the things 32j ..
-32j+31 the part holds, and in its high 32 bits how many things it holds below 32j; the last word holds k. The slot of
-thing e is its rank. The slots are grouped in **thing blocks** of 128 (slot s is in block s / 128). In a block, a
+**By thing.** `erank` is a rank table (Jacobson 1989): word $j$ holds, in its low 32 bits, which of the things $32j$ ..
+$32j + 31$ the part holds, and in its high 32 bits how many things it holds below $32j$; the last word holds $k$. The slot of
+thing $e$ is its rank. The slots are grouped in **thing blocks** of 128 (slot $s$ is in block $\lfloor s / 128 \rfloor$). In a block, a
 property that every slot has at most once is a **field** of each slot's record when that takes no more bits than a
 column of its own (an invoice's client, date, status and total: a lookup reads one field of the invoice's record);
 any other property is a **column** of the block (its slots' offsets and its values: a client's follows, or the
@@ -198,12 +198,12 @@ page otherwise):
 ```
 
 A field is its value's difference from the entry's base, after a bit "present" when some slot lacks the property.
-A column's slot k has the values c k + res k .. c (k+1) + res (k+1) − 1 of the column (no residuals when every slot
-has c values). A value flagged as derived (a rule's, not asserted: [rules](rules.md)) keeps its flag in the lowest
+A column's slot $k$ has the values $c k + \mathit{res}_k$ .. $c (k+1) + \mathit{res}_{k+1} - 1$ of the column (no residuals when every slot
+has $c$ values). A value flagged as derived (a rule's, not asserted: [rules](rules.md)) keeps its flag in the lowest
 bit of its value bits; an entry with no derived value spends no bit on it. Values of a slot for one property are
 contiguous and sorted, so a membership test is a binary search on fields of fixed width. A thing with thousands of
 values makes a block larger than a page: its header (a few hundred bytes) is copied once a lookup and the rest read
-from the pages field by field, so a lookup stays O(log n).
+from the pages field by field, so a lookup stays $O(\log n)$.
 
 **By property.** `poff[p]..poff[p+1]` are the rows of property p (value word, thing), sorted by value then thing;
 `pdist[p]` counts its distinct values. Each property's rows are cut in **row blocks** of 128 (property p's first is
@@ -221,11 +221,11 @@ row block (at vdata + vdir[j].offset; its first value vdir[j].first):
 ```
 
 A property has a **value index** when its rank table takes at most 2 bytes a row (or 4 KiB): links, texts, dates,
-small ints. `pidx[p]` gives vlo, the least value the merge could meet for p, and its rank words in `vrank`: word j
-tells which of the values vlo + 32j .. vlo + 32j + 31 p takes (low 32 bits) and how many it takes below them (high
-32 bits); the last word holds pdist. Offset q of p's offsets (a monotone sequence starting at block `pidx[p]` first
-offset block) is the first row, from `poff[p]`, of p's q-th distinct value, and offset pdist the rows of p. So the
-rows of (p, w) are found with one rank word and two offsets, O(1), whatever the rows; without an index, by a binary
+small ints. `pidx[p]` gives vlo, the least value the merge could meet for $p$, and its rank words in `vrank`: word $j$
+tells which of the values $\mathit{vlo} + 32j$ .. $\mathit{vlo} + 32j + 31$ $p$ takes (low 32 bits) and how many it takes below them (high
+32 bits); the last word holds pdist. Offset $q$ of $p$'s offsets (a monotone sequence starting at block `pidx[p]` first
+offset block) is the first row, from `poff[p]`, of $p$'s $q$-th distinct value, and offset pdist the rows of $p$. So the
+rows of $(p, w)$ are found with one rank word and two offsets, $O(1)$, whatever the rows; without an index, by a binary
 search of the row blocks' first values, then one inside a block.
 
 **By column (the column order).** Each property's rows (thing, value) apart from the others', in thing order, the
@@ -247,9 +247,9 @@ mh mb  p's row offsets, a monotone sequence (below) of things - q0 + 1 entries, 
        is the things of p
 ```
 
-The q-th thing of p has the row q alone while q < q0; from q0 on, its rows are q0 + m(q - q0) .. q0 + m(q - q0 + 1)
-- 1. So a property whose things all have one value (an invoice's client, total, status, date) has no offsets at all:
-its row is its thing's rank. Row r of p is field r mod 128 of block r / 128: its value is the block's base plus the
+The $q$-th thing of $p$ has the row $q$ alone while $q < q_0$; from $q_0$ on, its rows are
+$q_0 + m(q - q_0)$ .. $q_0 + m(q - q_0 + 1) - 1$. So a property whose things all have one value (an invoice's client, total, status, date) has no offsets at all:
+its row is its thing's rank. Row $r$ of $p$ is field $r \bmod 128$ of block $\lfloor r / 128 \rfloor$: its value is the block's base plus the
 field (plus the thing, in a block coded from the thing: an invoice's client is its own id minus 1 to 20, 5 bits
 instead of 8). Properties held by the same things share one rank table (`rank` the same byte): the 10 M-fact run has
 two, the clients' and the invoices'. The column order takes 13.9 MB of that run (values 11.4, rank tables 1.2,
@@ -257,13 +257,13 @@ directories 1.25, offsets 0.01): a lookup of an invoice's client reads one rank 
 field.
 
 **A monotone sequence** (offsets that never decrease) is stored in blocks of 128: a header of 16 bytes a block (its
-first value i64, then a u64 holding the width w in its low byte and the byte offset of the block's bits above it),
-and the block's bits apart; entry q is the header of block q / 128 plus field q mod 128 of w bits.
+first value i64, then a u64 holding the width $w$ in its low byte and the byte offset of the block's bits above it),
+and the block's bits apart; entry $q$ is the header of block $\lfloor q / 128 \rfloor$ plus field $q \bmod 128$ of $w$ bits.
 
 **The dictionary.** `soff` (a monotone sequence of ns + 1 offsets) gives the bytes of text s0+i: `sblob[soff i ..
-soff (i+1))`. `shash` is an open-addressing hash table with linear probing (Knuth, TAOCP vol. 3, 6.4) of 2^b slots
-(b the least with 2^b >= 2 ns: at most half full): a text's slot is the low b bits of its hash, the next one when it
-is taken. The hash of a text s of n bytes, in 63-bit arithmetic (OCaml's ints: modulo 2^63), with K =
+soff (i+1))`. `shash` is an open-addressing hash table with linear probing (Knuth, TAOCP vol. 3, 6.4) of $2^b$ slots
+($b$ the least with $2^b \ge 2\, \mathit{ns}$: at most half full): a text's slot is the low $b$ bits of its hash, the next one when it
+is taken. The hash of a text $s$ of $n$ bytes, in 63-bit arithmetic (OCaml's ints: modulo $2^{63}$), with $K =$
 0x2545F4914F6CDD1D (the multiplier of xorshift64*, Vigna 2016):
 
 ```

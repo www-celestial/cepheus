@@ -33,7 +33,9 @@ let read_thing (v : Store.view) p =
       Error (Printf.sprintf "rule %d takes a name and a definition only" p)
     else Ok (Rule (Store.text v nw, Store.text v rw))
   | None, None, None ->
-    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then Error "half" else Ok Nothing
+    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then
+      Error (Printf.sprintf "property %d keeps cepheus/many or cepheus/unique without a name and a type" p)
+    else Ok Nothing
   | _, _, Some _ -> Error (Printf.sprintf "rule %d needs a name and a definition, and no type" p)
   | _ -> Error (Printf.sprintf "property %d needs both a name and a type" p)
 

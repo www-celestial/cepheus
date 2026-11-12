@@ -9,15 +9,15 @@ defaults, and the cache's size (`set_cache`).
 | what | limit or default | where |
 |---|---|---|
 | thing numbers | from 65,536 up, dense, in the order things are made | `Schema.first_thing` |
-| thing numbers | at most 2,147,483,647 (2³¹ − 1): a run stores a row block's least thing in 4 bytes, a large group a thing in 4 bytes, and a part counts the things it holds in the high 32 bits of a rank table's 64-bit word, read back into OCaml's 63-bit `int` (31 bits). A group that would make a larger number is refused with `Invalid "thing numbers end at 2147483647: this group would make #N"`; nothing wraps | `Schema.last_thing`, `Resolve.resolve` |
+| thing numbers | at most 2,147,483,647 ($2^{31} - 1$): a run stores a row block's least thing in 4 bytes, a large group a thing in 4 bytes, and a part counts the things it holds in the high 32 bits of a rank table's 64-bit word, read back into OCaml's 63-bit `int` (31 bits). A group that would make a larger number is refused with `Invalid "thing numbers end at 2147483647: this group would make #N"`; nothing wraps | `Schema.last_thing`, `Resolve.resolve` |
 | property numbers | 16 to 65,535 (a thing block's entry stores its property in 2 bytes): 65,520 properties a database; `declare` takes the lowest free one | `Schema.first_prop`, `Snapshot.tblock_flush` |
 | system properties | 1 `cepheus/name`, 2 `cepheus/type`, 3 `cepheus/many`, 4 `cepheus/unique`, 5 `cepheus/rule`; 0 and 6 to 15 reserved | `Schema.system` |
-| `Int`, `Date`, `Money` | 63-bit signed integers: −2⁶² to 2⁶² − 1 | OCaml's `int` |
+| `Int`, `Date`, `Money` | 63-bit signed integers: $-2^{62}$ to $2^{62} - 1$ | OCaml's `int` |
 | `Money` digits | 0 to 18 (`Tmoney 19` is refused: unknown type code) | `Value.of_code` |
 | `Float` | any IEEE double; each distinct value takes a dictionary entry of 8 bytes | `Store.float_key` |
 | `Text` | any bytes, any length a group can hold (below) | |
-| distinct texts and floats | below 2³² a run (a run's hash table holds a text's place in 4 bytes) | `Snapshot.merge` |
-| values of one thing for one property | below 2³² in a run (a thing block's entry counts in 4 bytes); a merge that would pass it fails with `Invalid_argument` | `Snapshot.tblock_flush` |
+| distinct texts and floats | below $2^{32}$ a run (a run's hash table holds a text's place in 4 bytes) | `Snapshot.merge` |
+| values of one thing for one property | below $2^{32}$ in a run (a thing block's entry counts in 4 bytes); a merge that would pass it fails with `Invalid_argument` | `Snapshot.tblock_flush` |
 | `by` | any `int` (0 by default) | `Cepheus.write` |
 | `why` | any text (`""` by default) | `Cepheus.write` |
 
@@ -28,7 +28,7 @@ defaults, and the cache's size (`set_cache`).
 | one group | its encoding must stay within 256 MiB (268,435,456 bytes, the largest frame body): a larger group is refused with `Invalid "a group of N bytes is over the frame limit of 268435456"`, and the writer goes on | `Journal.max_body`, `Engine.too_large` |
 | several groups at once | the groups resolved together go into one frame only while its body stays within 256 MiB: a group that would pass it waits for the next frame, and a large group starts a frame of its own, so a frame never passes the limit | `Engine.frame_limit`, `Engine.prepare`, `Engine.writer` |
 | a large group | 20,000 operations or more, all `Add`: the faster path (arrays, sorts, a run merged at once; with rules, its derived facts appended); below, or on any doubt (a constraint, a rule's head on a one-valued or unique property, a fact derived already now asserted), the ordinary path | `Resolve.large_min`, `Reason.bulk` |
-| derived changes of a group | at most 100,000 + 100 × its asserted changes, else refused, naming the rule that derived the most | `rule_budget` (`Reason.budget_base`, `Reason.budget_per`) |
+| derived changes of a group | at most $100{,}000 + 100 \times \text{its asserted changes}$, else refused, naming the rule that derived the most | `rule_budget` (`Reason.budget_base`, `Reason.budget_per`) |
 | a rule | 1 pattern or more, at most 64 variables; a pattern's property a constant | `Rules.check` |
 | operations in a group | no other limit; every `Expect` is checked against the state before the group | |
 | a batch | up to 4,096 waiting writes resolved at once | `Engine.max_batch` |
@@ -43,7 +43,7 @@ defaults, and the cache's size (`set_cache`).
 | what | limit or default | where |
 |---|---|---|
 | when a merge starts | when the changes since the last merge pass 200,000 | `Engine.compact_min` (200,000), `Engine.needs_compaction` |
-| levels | level l (1, 2, 3, ...) holds at most 200,000 × 4^l rows: 800,000, 3.2 M, 12.8 M, 51.2 M, ...; a run's rows are its additions and its retractions | `Engine.ratio` (4), `Engine.cap` |
+| levels | level $l$ (1, 2, 3, ...) holds at most $200{,}000 \times 4^l$ rows: 800,000, 3.2 M, 12.8 M, 51.2 M, ...; a run's rows are its additions and its retractions | `Engine.ratio` (4), `Engine.cap` |
 | what a merge takes | the delta and the newest runs, down to the first level whose capacity holds them all; one run is written there | `Engine.plan` |
 | `snapshot` | the delta and every run into one run, at the deepest level among the runs or deeper if they do not fit there; nothing if there is one run and no group since the last merge | `Engine.plan_all`, `Engine.snapshot` |
 | what counts as a change | every addition or retraction applied since the last merge (one undone later counts twice) | `Store.change` (`dn`) |
@@ -84,7 +84,7 @@ defaults, and the cache's size (`set_cache`).
 | variable orders tried | every order for up to 7 variables (with pruning); greedy beyond | `Query.order` |
 | parallel questions | when the first variable has 20,000 candidates or more | `Query.parallel_min` |
 | domains of a question | the machine's recommended count, at most 8 | `Query.domains` |
-| slices | min(candidates, 16 × domains), taken in turn from a shared counter | `Query.fold` |
+| slices | $\min(\text{candidates}, 16 \times \text{domains})$, taken in turn from a shared counter | `Query.fold` |
 | the property of a pattern | a constant: no variable in the property position | `Query.pattern` |
 
 ## Files and the platform
@@ -111,7 +111,7 @@ defaults, and the cache's size (`set_cache`).
 | the session checkpoint | written every second while writes come, and at stop | `Net.checkpoint` |
 | tokens.toml | read again within a second of a change | `Net.serve`'s ticker |
 | a token | 32 random bytes, `cph_` and 43 characters of base64url; at most 256 characters are looked at | `Tokens.generate`, `Tokens.check` |
-| I/O domains | `[clients] domains`, 1 to 64; default min(4, cores / 2) | `Config.default_domains` |
+| I/O domains | `[clients] domains`, 1 to 64; default $\min(4, \text{cores} / 2)$ | `Config.default_domains` |
 | the page cache | `[storage] cache`, default 1 GiB | `Config.of_toml` |
 | the Unix socket | `.s.cepheus.PORT`, PORT the port of `listen` or 7400 | `Config.socket_name` |
 | peers | exactly one in this version | `Config.of_toml` |
@@ -133,4 +133,4 @@ defaults, and the cache's size (`set_cache`).
 |---|---|---|
 | `Histogram` | exact below 256 µs, then 128 buckets per power of two: every percentile within 1/128 (0.8 %); 3,584 counters | `src/histogram.ml` |
 | the simulated disk's sector | 512 bytes, the unit of loss and of tearing | `Sim_disk.sector` |
-| benchmark runs | 21 (`RUNS`), median and its 95 % interval [x(6), x(16)], coverage 97.3 % | `bench/stats.ml` |
+| benchmark runs | 21 (`RUNS`), median and its 95 % interval $[x(6), x(16)]$, coverage 97.3 % | `bench/stats.ml` |
