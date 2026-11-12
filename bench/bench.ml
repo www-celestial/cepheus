@@ -243,6 +243,59 @@ let questions v s nclients =
         Hashtbl.fold (fun _ (_, n) acc -> acc + n) sums 0, Hashtbl.fold (fun _ (a, _) acc -> acc + a) sums 0);
     q5 = (fun () -> count q5) }
 
+(* The questions with operators and an order, on the same data: a page of 20 of the 453,866 unpaid invoices, the
+   largest totals first, by the index path and by the heap path, the first page and the 101st (after the 2,000th row);
+   the whole answer, sorted by the program, as a program had to before; the clients of a city with no unpaid invoice
+   (Not of two patterns), against the two questions and the difference a program made before; the clients whose
+   e-mail starts with c1234 (Prefix), against every e-mail filtered. RUNS runs of [n] calls each. *)
+let pages dir facts =
+  cache_from_env ();
+  let db = ok (open_ dir) in
+  let v = view db in
+  let s = schema_of v in
+  ignore facts;
+  let unpaid = Pattern { e = Var 0; p = s.status; v = Val (Text "unpaid") } and total = Pattern { e = Var 0; p = s.total; v = Var 1 } in
+  let page after = { qvars = 2; items = [ unpaid; total ]; give = [| 0; 1 |]; sort = [ { col = 1; desc = true } ]; limit = 20; after } in
+  let rows q = match ask v q with Ok r -> r | Error e -> failwith (message e) in
+  let deep = List.nth (rows { (page None) with limit = 2000 }) 1999 in
+  let first = rows (page None) in
+  Top.path := Top.Heap;
+  if rows (page None) <> first then failwith "the two paths differ";
+  Top.path := Top.Auto;
+  Printf.printf "a page of 20 of %d unpaid invoices, the largest totals first\n%!"
+    (List.length (rows { qvars = 2; items = [ unpaid; total ]; give = [||]; sort = []; limit = 0; after = None }));
+  List.iter
+    (fun (name, path, after) ->
+      Top.path := path;
+      measure name 1 (fun _ -> ignore (rows (page after))))
+    [ "  page 1, index path", Top.Index, None; "  page 1, heap path", Top.Heap, None; "  page 101, index path", Top.Index, Some deep;
+      "  page 101, heap path", Top.Heap, Some deep; "  page 1, chosen", Top.Auto, None ];
+  Top.path := Top.Auto;
+  let q = { vars = 2; ranges = []; where = [ { e = Var 0; p = s.status; v = Val (Text "unpaid") }; { e = Var 0; p = s.total; v = Var 1 } ] } in
+  measure "  before: the whole answer, sorted by the program, first 20" 1 (fun _ ->
+      let all = ok (find v q) in
+      ignore (List.filteri (fun i _ -> i < 20) (List.sort (fun a b -> compare b.(1) a.(1)) all)));
+  (* Not: the clients of city-7 with no unpaid invoice *)
+  let city = Pattern { e = Var 0; p = s.cty; v = Val (Text "city-7") } in
+  let clear = { qvars = 2; items = [ city; Not [ Pattern { e = Var 1; p = s.client; v = Var 0 }; Pattern { e = Var 1; p = s.status; v = Val (Text "unpaid") } ] ];
+                give = [| 0 |]; sort = []; limit = 0; after = None } in
+  Printf.printf "the clients of city-7 with no unpaid invoice: %d\n%!" (List.length (rows clear));
+  measure "  Not" 1 (fun _ -> ignore (rows clear));
+  measure "  before: two questions and their difference" 1 (fun _ ->
+      let all = ok (find v { vars = 1; ranges = []; where = [ { e = Var 0; p = s.cty; v = Val (Text "city-7") } ] }) in
+      let owing = ok (find v { vars = 2; ranges = []; where = [ { e = Var 0; p = s.cty; v = Val (Text "city-7") }; { e = Var 1; p = s.client; v = Var 0 }; { e = Var 1; p = s.status; v = Val (Text "unpaid") } ] }) in
+      let o = Hashtbl.create 1024 in
+      List.iter (fun r -> Hashtbl.replace o r.(0) ()) owing;
+      ignore (List.filter (fun r -> not (Hashtbl.mem o r.(0))) all));
+  (* Prefix: the clients whose e-mail starts with c1234 *)
+  let pre = { qvars = 2; items = [ Pattern { e = Var 0; p = s.mail; v = Var 1 }; Prefix (1, "c1234") ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } in
+  Printf.printf "the clients whose e-mail starts with c1234: %d\n%!" (List.length (rows pre));
+  measure "  Prefix" 1 (fun _ -> ignore (rows pre));
+  measure "  before: every e-mail, filtered" 1 (fun _ ->
+      let all = ok (find v { vars = 2; ranges = []; where = [ { e = Var 0; p = s.mail; v = Var 1 } ] }) in
+      ignore (List.filter (function [| _; Value.Text m |] -> String.starts_with ~prefix:"c1234" m | _ -> false) all));
+  close db
+
 let read dir facts only =
   let asked q = match only with None -> true | Some l -> List.mem q (String.split_on_char ',' l) in
   (match Sys.getenv_opt "CEPHEUS_DOMAINS" with Some d -> Query.domains := int_of_string d | None -> ());
@@ -486,6 +539,14 @@ let () =
   match Sys.argv with
   | [| _; "cpu"; dir; n |] -> cpu dir (int_of_string n)
   | [| _; "load"; dir; csv; facts |] -> load dir csv (int_of_string facts)
+  | [| _; "pages"; dir; facts |] -> pages dir (int_of_string facts)
+  | [| _; "snapshot"; dir |] ->
+    (* the whole base in one run, timed *)
+    let db = ok (open_ dir) in
+    let t = now () in
+    ok (snapshot db);
+    Printf.printf "snapshot: %.0f ms, %d runs\n" ((now () -. t) *. 1e3) (Array.length (view db).runs);
+    close db
   | [| _; "read"; dir; facts |] -> read dir (int_of_string facts) None
   | [| _; "read"; dir; facts; qs |] -> read dir (int_of_string facts) (Some qs)
   | [| _; "write"; dir; clients; secs |] -> write_bench dir (int_of_string clients) (float_of_string secs) 0.
@@ -497,4 +558,4 @@ let () =
   | [| _; "crc" |] -> crc_bench ()
   | [| _; "stats"; name |] -> stats name false
   | [| _; "stats"; name; "us" |] -> stats name true
-  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | write DIR CLIENTS SECS [RATE] | merge DIR GROUPS | fsync DIR SECS MODE | stats NAME [us] | trace DIR FACTS OUT uniform|zipf day|points|scan | cachesim TRACE | cpu DIR N | crc"; exit 2
+  | _ -> prerr_endline "bench.exe load DIR CSVDIR FACTS | read DIR FACTS [Q1,Q2,..] | pages DIR FACTS | snapshot DIR | write DIR CLIENTS SECS [RATE] | merge DIR GROUPS | fsync DIR SECS MODE | stats NAME [us] | trace DIR FACTS OUT uniform|zipf day|points|scan | cachesim TRACE | cpu DIR N | crc"; exit 2

@@ -59,6 +59,8 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 |---|---|
 | `bench.exe load DIR CSVDIR FACTS` | loads FACTS facts through the writer: `GROUP` clients a group (1 by default: a client and its 20 invoices a group, then a client's follow links a group, by `THREADS` threads, 64 by default; `GROUP=113636` at 10 M facts: two large groups, by 1 thread), times until the last group is confirmed, then merges once (`snapshot`; `SNAPSHOT=0`: not, the runs left as the load made them), and writes the same data as CSV files for the other sides (`NOCSV=1`: no CSV). It prints the writer's histograms (a batch resolved; a large group resolved, encoded, merged; a merge switch; a background merge; the journal's pwrite and fsync) |
 | `bench.exe read DIR FACTS [Q1,Q4,..]` | the open (restart from the snapshot), then Q1 to Q5 or the ones named: median and 95 % interval over `RUNS` runs |
+| `bench.exe pages DIR FACTS` | the questions with operators and an order: a page of 20 of the unpaid invoices, the largest totals first, by the index path and by the heap path, the first page and the 101st, against the whole answer sorted by the program; `Not` and `Prefix`, each against what a program did before them |
+| `bench.exe snapshot DIR` | a full merge of a database (`snapshot`), timed: every run of it in one |
 | `bench.exe write DIR CLIENTS SECS [RATE]` | durable writes of a new invoice (4 facts) by CLIENTS threads: as fast as they go, or RATE groups a second in all (open loop) |
 | `bench.exe merge DIR GROUPS` | GROUPS invoices with no background merge, then one merge (`snapshot`): its time and the peak memory of the merge alone |
 | `bench.exe fsync DIR SECS append\|overwrite` | the file system alone: a 9,000-byte frame and its fsync in a loop, appended or written over zeros forced beforehand |
@@ -84,6 +86,41 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## Questions with operators, an order and pages (2026-11-12), at 10 million facts
+
+**Method.** The data of the other benchmarks (10 M facts: 113,636 clients and their 2,272,720 invoices, of which
+453,866 unpaid), one run (a full merge); this branch's release build; `bench.exe pages`, `RUNS` = 21, each a call;
+medians, and the least of the 21. The "before" of each is what a program had to do without the operator, in the same
+process (no network), so the gain shown is the engine's alone; through the server, the whole answer would also cross
+the socket.
+
+| question | with the operator | before it | |
+|---|---:|---:|---|
+| a page of 20 of the 453,866 unpaid invoices, the largest totals first: index path | 47.0 µs (min 44.1) | 698.6 ms (min 541.1): the whole answer, sorted by the program | 14,900 times |
+| the same page by the heap path | 55.8 ms (min 48.4) | | |
+| page 101 (after the 2,000th row): index path / heap path | 51.0 µs / 72.3 ms | | |
+| the page, the path chosen | 51.0 µs (the index path) | | |
+| the 13 clients of city-7 with no unpaid invoice (`Not` of two patterns) | 2.84 ms (min 2.70) | 3.10 ms (min 2.62): two questions and their difference | the same |
+| the 11 clients whose e-mail starts with c1234 (`Prefix`) | 10.0 µs (min 8.8) | 30.6 ms (min 26.7): every e-mail, filtered | 3,050 times |
+
+- **The page.** The index path reads the totals' index from the largest down, in windows of 40, 80, ... facts, and
+  answers each window's question; the heap path answers the whole question (453,866 bindings) and keeps 20. A page
+  deeper costs the same by either: the 101st, 51.0 µs against 47.0. The heap path still saves the sort and the copy of
+  the whole answer (55.8 ms against 698.6).
+- **Not** reads one lookup a client of the city (about 1,140): a city's clients are few, and the two questions before it
+  cost about the same; its gain is one question instead of two, and no answer held to subtract.
+- **Prefix** reads the 11 matching e-mails off the text order, two binary searches in the run, against every one of
+  the 113,636 e-mails.
+- **The questions of before** are not slower: Q1 to Q5 of e333a31's build against this one's, on the same data
+  (each a run of its own format), alternated, 3 rounds of 21 runs (Q1 and Q2, 6 more): the least of each, old /
+  new: Q1 0.38 / 0.36 µs, Q2 0.61 / 0.60 µs, Q3 2.93 / 3.04 ms, Q4 44.97 / 43.20 ms, Q5 63.3 / 63.7 ms; the medians
+  of the rounds go both ways (Q5 115.4 / 85.5 ms, Q4 58.3 / 59.1 ms), on a machine that other work shared. A first
+  build made the test of a candidate's range larger and Q5 10 % slower in two rounds of three: the test of a variable
+  with no range is again the one it was (an `In` or a `Prefix` gives its variable a range of its own).
+- **Its cost.** The text order adds 4 bytes a distinct text to a run: the 10 M-fact run 68 MB against 67 MB in
+  format 8. A full merge of the base: 2.3 s. The first open of data of format 8 sets its runs aside and replays the
+  journal: 5.9 s, once.
 
 ## The open's reads in the file's order (2026-11-12), at 10 million facts
 
