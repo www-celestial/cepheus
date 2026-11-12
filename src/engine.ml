@@ -95,6 +95,26 @@ let plan ?(extra = 0) (v : Store.view) =
   in
   go 1 0 (v.delta.dn + extra)
 
+(* A large group's merge (lazy leveling: Dostoevsky, Dayan and Idreos 2018). Its run takes the delta and the newest
+   runs of the levels below the one that holds them, and stays beside the runs of that level, the large groups' before
+   it, rather than merging with them, until [tier] of them would lie side by side: then all are merged in this one pass
+   ([plan]). So a load written as many large groups writes each fact about twice (its group's run, the tier's merge),
+   not once a level; reads meanwhile visit up to [tier] runs of the level. A large group never leaves more than [tier]
+   runs; the delta's merges add at most one a level: far below the 31 a merge may take (Snapshot.max_take). *)
+let tier = ref 16
+
+let plan_large ~extra (v : Store.view) =
+  let rs = v.runs in
+  let rec fit l j size =
+    let j = ref j and size = ref size in
+    while !j < Array.length rs && rs.(!j).level < l do size := !size + Store.run_rows rs.(!j); incr j done;
+    if !size <= cap l then !j, l else fit (l + 1) !j !size
+  in
+  let j, l = fit 1 0 (v.delta.dn + extra) in
+  let k = ref 0 in
+  while j + !k < Array.length rs && rs.(j + !k).level = l do incr k done;
+  if !k + 1 >= !tier || Array.length rs - j + 1 > !tier then plan ~extra v else j, l
+
 (* every run and the delta into one, at a level that holds them *)
 let plan_all (v : Store.view) =
   let rs = v.runs in
@@ -189,7 +209,7 @@ let prepare ?(release = fun (_ : int) -> ()) t (reqs : (Resolve.op list * int * 
             end
           and merge () =
             let t1 = Journal.clock () in
-            let take, level = plan ~extra:l.facts.n l.view in
+            let take, level = plan_large ~extra:l.facts.n l.view in
             (* not forced here: the commit forces it beside the frame's fsync *)
             let w =
               Snapshot.merge ~bulk:l.facts ~sync:false t.disk (Filename.concat t.dir "snapshots") t.id l.view ~take ~level
@@ -424,7 +444,7 @@ let open_ ?(id_source = random_id) ?buffer disk dir =
             match Resolve.replay_large !v g with
             | Some (v', facts) ->
               (* a large group: merged at once, as the writer did *)
-              let take, level = plan ~extra:facts.n v' in
+              let take, level = plan_large ~extra:facts.n v' in
               let w = Snapshot.merge ~bulk:facts disk sdir id v' ~take ~level (Option.get !at) in
               Snapshot.install disk sdir w;
               v := w.view;

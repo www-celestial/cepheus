@@ -393,6 +393,9 @@ let run seed steps =
   Engine.compact_min := 5 + Rng.int r 60;
   (* groups of 4 changes and more take the faster path of large groups when they can *)
   Resolve.large_min := 4;
+  (* the large groups' runs merged when 2 to 6 of them lie side by side (Engine.plan_large), from the seed's number so
+     that its draws stay as they were *)
+  Engine.tier := 2 + (seed mod 5);
   (* a third of the seeds with a frame limit of a few hundred bytes: batches cut into several frames, groups over it
      refused (drawn apart, so that the other draws of a seed stay as they were) *)
   (let fr = Rng.make ((seed * 7919) + 1) in

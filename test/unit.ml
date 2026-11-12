@@ -1287,4 +1287,36 @@ let () =
       if Store.count_values c t member <> 30_001 then C.fail "compacted count");
   ignore (city, client, status, total, member, score)
 
+let () =
+  section "large groups: their runs stay side by side until a tier of them, then merge once (lazy leveling)";
+  let large = !Resolve.large_min and cmin = !Engine.compact_min and tier = !Engine.tier in
+  Resolve.large_min := 50;
+  Engine.compact_min := 1_000;
+  Engine.tier := 4;
+  let disk = Sim_disk.disk (Sim_disk.create (Rng.make 77)) in
+  let db = Result.get_ok (open_on disk "/tier") in
+  let[@warning "-8"] (Ok [ k ]) = declare db [ prop "k" Tint ] in
+  (* nine groups of 100 new things each: level 1 holds them all, so leveling would keep one run; the tier keeps each
+     group's run beside the others until the fourth, which merges the three before it with itself *)
+  let counts =
+    List.init 9 (fun g ->
+        ignore (Result.get_ok (write db (List.init 100 (fun i -> Add (-(i + 1), k, Int ((g * 100) + i))))));
+        Array.length (view db).runs)
+  in
+  C.check (counts = [ 1; 2; 3; 1; 2; 3; 1; 2; 3 ]) "runs after each large group: %s" (String.concat " " (List.map string_of_int counts));
+  let all v = List.length (things v k (Int 0)) + List.length (things v k (Int 899)) in
+  C.check (all (view db) = 2) "a value of the first group and of the last, read across the runs";
+  C.check (Store.facts (view db) >= 900) "the nine groups' facts: %d" (Store.facts (view db));
+  let before = Store.facts (view db) in
+  ignore (Result.get_ok (snapshot db));
+  C.check (Array.length (view db).runs = 1 && Store.facts (view db) = before) "snapshot: one run, the same facts";
+  close db;
+  (* reopened: the journal replays nothing the runs hold, and the facts are the same *)
+  let db = Result.get_ok (open_on disk "/tier") in
+  C.check (Store.facts (view db) = before) "reopened: %d facts, %d before" (Store.facts (view db)) before;
+  close db;
+  Resolve.large_min := large;
+  Engine.compact_min := cmin;
+  Engine.tier := tier
+
 let () = C.finish "unit"

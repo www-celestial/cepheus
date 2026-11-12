@@ -902,6 +902,9 @@ let index_of bd p =
     let words = ((hi - lo) lsr 5) + 2 in
     if 8 * words <= max 4096 (2 * rows) then Some (lo, words) else None
 
+(* the most runs a merge takes: the pass by thing keeps a thing's sources in the bits of an int, two a run *)
+let max_take = 31
+
 (* The merge of [v]'s delta and its [take] newest runs into one run at [level], with [pos] the journal position replay
    starts from (pos.next <= v.group + 1). Written under a temporary name and forced (also on the way, while [busy]
    says clients write; with [~sync:false], not at the end: [force] does it later, or [install]); [install] gives it its
@@ -914,6 +917,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
   let rs = v.runs in
   let nr = Array.length rs in
   if take < 0 || take > nr then invalid_arg "Snapshot.merge: more runs than the view has";
+  if take > max_take then invalid_arg "Snapshot.merge: more runs than a merge takes";
   let bottom = take = nr in
   let lo = if bottom then 0 else rs.(take).hi in
   let src = Array.sub rs 0 take in
@@ -1130,7 +1134,30 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
       end
       else begin
         let di = ref 0 in
-        let more () = Array.exists live cs || !di < Array.length dl || !bp < bq in
+        (* the live cursors in a binary heap by (head value, head thing, source): the next row of the k-way merge in
+           O(log k) steps rather than a look at every source (Knuth, TAOCP 3, 5.4.1); the sources whose heads are
+           equal come out in their order, newest first *)
+        let hp = Array.make (max 1 nsrc) 0 and hn = ref 0 in
+        let before a b =
+          let ca = cs.(a) and cb = cs.(b) in
+          let wa = ca.cw.(ca.ck) and wb = cb.cw.(cb.ck) in
+          wa < wb || (wa = wb && (let ea = ca.ce.(ca.ck) and eb = cb.ce.(cb.ck) in ea < eb || (ea = eb && a < b)))
+        in
+        let rec down i =
+          let l = (2 * i) + 1 in
+          if l < !hn then begin
+            let m = if l + 1 < !hn && before hp.(l + 1) hp.(l) then l + 1 else l in
+            if before hp.(m) hp.(i) then begin
+              let x = hp.(i) in
+              hp.(i) <- hp.(m);
+              hp.(m) <- x;
+              down m
+            end
+          end
+        in
+        for s = 0 to nsrc - 1 do if live cs.(s) then (hp.(!hn) <- s; incr hn) done;
+        for i = (!hn / 2) - 1 downto 0 do down i done;
+        let more () = !hn > 0 || !di < Array.length dl || !bp < bq in
         while more () do
           (* the smallest (value, thing) among the heads *)
           let bw = ref max_int and be = ref max_int and any = ref false in
@@ -1139,13 +1166,11 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
             let w, e, _ = dl.(!di) in
             if (not !any) || w < !bw || (w = !bw && e < !be) then (bw := w; be := e; any := true)
           end;
-          for s = 0 to nsrc - 1 do
-            let c = cs.(s) in
-            if live c then begin
-              let hw = c.cw.(c.ck) and he = c.ce.(c.ck) in
-              if (not !any) || hw < !bw || (hw = !bw && he < !be) then (bw := hw; be := he; any := true)
-            end
-          done;
+          if !hn > 0 then begin
+            let c = cs.(hp.(0)) in
+            let hw = c.cw.(c.ck) and he = c.ce.(c.ck) in
+            if (not !any) || hw < !bw || (hw = !bw && he < !be) then (bw := hw; be := he; any := true)
+          end;
           let w = !bw and e = !be in
           (* its entries, newest first: the large group, the delta, then the runs in order (a run's addition before its
              retraction) *)
@@ -1160,15 +1185,23 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
             let w', e', st = dl.(!di) in
             if w' = w && e' = e then ((if !newest < 0 then newest := st); oldest := st; incr di)
           end;
-          for s = 0 to nsrc - 1 do
+          let again = ref true in
+          while !again && !hn > 0 do
+            let s = hp.(0) in
             let c = cs.(s) in
-            if live c && c.cw.(c.ck) = w && c.ce.(c.ck) = e then begin
+            if c.cw.(c.ck) = w && c.ce.(c.ck) = e then begin
               let d = Bytes.unsafe_get c.cd c.ck <> '\000' in
               let code = if s land 1 = 0 then (if d then 3 else 1) else if d then 12 else 4 in
               if !newest < 0 then newest := code;
               oldest := code;
-              advance c
+              advance c;
+              if not (live c) then begin
+                decr hn;
+                hp.(0) <- hp.(!hn)
+              end;
+              down 0
             end
+            else again := false
           done;
           let f = fin !newest and b = below !oldest in
           if f <> b then begin

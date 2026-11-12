@@ -326,6 +326,7 @@ let run seed steps =
   Wal.limit := 300 + Rng.int r 3000;
   Engine.compact_min := 5 + Rng.int r 60;
   Resolve.large_min := if Rng.chance r 0.5 then 4 else 1_000_000;
+  Engine.tier := 2 + (seed mod 5);
   w.disk.mkdir data;
   w.disk.sync_dir "/";
   (try
