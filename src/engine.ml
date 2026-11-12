@@ -310,6 +310,9 @@ let drop_runs rs = List.iter (fun (r : Store.run) -> Pages.drop r.a.pg) rs
    becomes the working and the published view; the runs it replaces leave the cache. *)
 let install t (w : Snapshot.written) (v : Store.view) =
   if t.stopped <> None || (Atomic.get t.published).group < w.group then invalid_arg "Engine.install: not durable";
+  (* a run holds the groups up to its position in the journal, which the next open reads from: a shared journal is
+     forced first, so that no run rests on frames the commit buffer alone holds *)
+  Journal.checkpoint t.journal;
   Snapshot.install t.disk (sdir t) w;
   t.merged <- w.group;
   t.working <- v;
@@ -347,6 +350,8 @@ let rec mkdirs disk d =
     disk.sync_dir (Filename.dirname d)
   end
 
+exception Refused of string
+
 let read_meta disk dir =
   let b = Disk.read_all disk (Filename.concat dir "cepheus") in
   let n = String.length meta_magic in
@@ -355,8 +360,10 @@ let read_meta disk dir =
   then raise (Journal.Damaged (dir ^ "/cepheus is not a Cepheus database file"))
   else Bytes.sub_string b n 16
 
-(* Opens or creates the database in [dir]: recovery = newest snapshot that checks, then the journal after it. *)
-let open_ ?(id_source = random_id) disk dir =
+(* Opens or creates the database in [dir]: recovery = newest snapshot that checks, then the journal after it.
+   [buffer]: the database is opened by a server whose commit buffer (Wal) will force its journal; given the database's
+   id, the frames the buffer holds for it, which recovery writes again into the journal. *)
+let open_ ?(id_source = random_id) ?buffer disk dir =
   try
     mkdirs disk dir;
     let lock = Filename.concat dir "lock" in
@@ -386,7 +393,20 @@ let open_ ?(id_source = random_id) disk dir =
            the next open force. *)
         let marker = Filename.concat dir "closed" in
         let clean = disk.exists marker in
-        if clean then disk.remove marker else disk.sync_dir dir;
+        (* [shared]: a server's commit buffer forces the journal (made durable before its first frame; removed by the
+           next open without the buffer, after a clean close). Without a clean close, the newest confirmed frames may
+           be in that buffer alone: an open without it would cut them as a torn tail, or take their holes for damage *)
+        let shared = Filename.concat dir "shared" in
+        let was_shared = disk.exists shared in
+        if was_shared && (not clean) && buffer = None then
+          raise (Refused (dir ^ " was written through a server's commit buffer and not closed cleanly: its newest "
+                          ^ "writes may be in the server's DATA/server.wal.1 or .2 alone; start the server on its data "
+                          ^ "directory, which writes them into the journal, and stop it"));
+        if clean then disk.remove marker;
+        let mark = buffer <> None && not was_shared and unmark = buffer = None && was_shared in
+        if mark then disk.close (disk.openf shared true);
+        if unmark then disk.remove shared;
+        if (not clean) || mark || unmark then disk.sync_dir dir;
         if not (disk.exists jdir) then (disk.mkdir jdir; disk.sync_dir dir);
         if not (disk.exists sdir) then (disk.mkdir sdir; disk.sync_dir dir);
         (* a journal of format 1 coded in columns once, before anything reads it *)
@@ -421,7 +441,8 @@ let open_ ?(id_source = random_id) disk dir =
               drop_runs w.replaced
             end
         in
-        let journal = Journal.recover ~frame ~after:start.group ~force:(not clean) disk jdir id from replay in
+        let copy = match buffer with Some f -> f id | None -> [] in
+        let journal = Journal.recover ~frame ~after:start.group ~copy ~force:(not clean) disk jdir id from replay in
         (* a snapshot is installed only once the journal holds its groups durably (G12): a journal that ends before
            it lost durable frames (a damaged newest frame, which would otherwise be cut as torn) *)
         if Journal.next_group journal <= start.group then
@@ -448,18 +469,26 @@ let open_ ?(id_source = random_id) disk dir =
       with
       | Journal.Damaged m | Pages.Unreadable m -> release (); Error (Damaged m)
       | Disk.Io m -> release (); Error (Io m)
+      | Refused m -> release (); Error (Busy m)
   with
   | Disk.Io m -> Error (Io m)
   | Journal.Damaged m -> Error (Damaged m)
 
-(* Every frame and every name is durable now (frames are forced as they are written, names as they change), unless
-   an fsync failed: then no marker, and the next open forces what the page cache holds. The runs' pages leave the
+(* Every frame and every name is durable now (frames are forced as they are written, or here when a server's commit
+   buffer forced them; names as they change), unless an fsync failed: then no marker, and the next open forces what
+   the page cache holds. The runs' pages leave the
    cache: a view kept after the close reads them again from its file. Once: a second close does nothing, for the
    database may be open in another engine by then, whose files a marker or an unlock would betray. *)
 let close t =
   if Atomic.compare_and_set t.closed false true then begin
-    Journal.close t.journal;
-    if t.stopped = None then t.disk.close (t.disk.openf (Filename.concat t.dir "closed") true);
+    (* a shared journal's checkpoint may have failed in the commit buffer's thread, unknown to the writer: no marker
+       then either *)
+    let forced =
+      match Journal.close t.journal with
+      | () -> Journal.forced t.journal
+      | exception Disk.Io m -> prerr_endline ("cepheus: the journal could not be forced at close: " ^ m); false
+    in
+    if t.stopped = None && forced then t.disk.close (t.disk.openf (Filename.concat t.dir "closed") true);
     drop_runs (Array.to_list t.working.runs);
     t.disk.unlock (Filename.concat t.dir "lock")
   end

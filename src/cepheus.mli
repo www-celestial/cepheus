@@ -218,3 +218,4 @@ module Sim_disk = Sim_disk
 module Snapshot = Snapshot
 module Store = Store
 module Value = Value
+module Wal = Wal

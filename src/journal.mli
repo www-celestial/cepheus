@@ -39,15 +39,17 @@ val create : Disk.t -> string -> string -> t
 (** [create disk dir id]: a new journal in [dir] (which exists), for the database [id]; the first group is 1. *)
 
 val recover :
-  ?frame:(position -> unit) -> ?after:int -> force:bool -> Disk.t -> string -> string -> position option ->
-  (Group.t -> unit) -> t
+  ?frame:(position -> unit) -> ?after:int -> ?copy:Bytes.t list -> force:bool -> Disk.t -> string -> string ->
+  position option -> (Group.t -> unit) -> t
 (** [recover ~force disk dir id from on_group]: reads the journal from [from] (the start without it), calls [frame] on
     the position of each frame and [on_group] on each of its groups, in order (but for the frames whose groups are all
     [after] or before, checked by their CRCs and not decoded), cuts a torn tail durably, and returns
     the journal ready to append. With [force] (after anything but a clean close), before replaying a group of the
     newest segment, it writes that segment's newest frame again (its header if it holds no frame), forces the segment
     and the directory: what a killed process wrote but did not force, or what a failed fsync left in the page cache
-    but not on the disk, is on the disk before anything rests on it (G5, G13). Raises {!Damaged}, or [Disk.Io]. *)
+    but not on the disk, is on the disk before anything rests on it (G5, G13). [copy]: the frames the server's commit
+    buffer holds for this journal (whole, oldest first: {!Wal}), written again where they go before the read, and
+    forced; between them, every frame the journal holds must check (it was forced). Raises {!Damaged}, or [Disk.Io]. *)
 
 val append : t -> Buffer.t -> int -> int -> unit
 (** [append j body first count]: one frame of [count] groups from [first], written and made durable. Raises
@@ -82,11 +84,28 @@ val drop : pending -> unit
 val written_body : pending -> Bytes.t
 (** The body's bytes written so far, read back from the file: for the simulation, which checks every group. *)
 
+val share : t -> (Bytes.t -> unit) -> unit
+(** [share j f]: from now on, an append writes its frame without an fsync and gives its bytes to [f], which returns
+    once they are durable (the server's commit buffer forced them: {!Wal}) or raises [Disk.Io]; a frame longer than
+    {!shared_max} is still forced in the journal. The journal is forced by {!checkpoint}, when a segment is left, by a
+    frame forced in it, and by {!close}. *)
+
+val shared_max : int ref
+(** The longest frame a shared journal gives to the commit buffer (1 MiB). *)
+
+val checkpoint : t -> unit
+(** Forces what a shared journal wrote since its last fsync. Raises [Disk.Io], after which the journal refuses every
+    append (G10). *)
+
+val forced : t -> bool
+(** Nothing written is waiting for an fsync, and no write or fsync failed. *)
+
 val next_group : t -> int
 val position : t -> position
 (** Where the next frame goes. *)
 
 val close : t -> unit
+(** Forces a shared journal first; a failure of that fsync is raised ([Disk.Io]) once the file is closed. *)
 
 val verify : Disk.t -> string -> string -> int
 (** Reads every segment from the start and checks every frame: the number of groups, or {!Damaged}. *)

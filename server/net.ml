@@ -432,10 +432,10 @@ let notify msg =
 
 let file_stamp path = match Unix.stat path with st -> Some (st.st_mtime, st.st_size, st.st_ino) | exception Unix.Unix_error _ -> None
 
-let open_databases (cfg : Config.t) =
+let open_databases (cfg : Config.t) wal =
   let one i name =
     let dir = Config.database_dir cfg name in
-    match Engine.open_ Disk.real dir with
+    match Engine.open_ ~buffer:(Wal.frames wal) Disk.real dir with
     | Error e -> Error (Printf.sprintf "database %s: %s" name (Engine.message e))
     | Ok e ->
       let sessions =
@@ -506,15 +506,30 @@ let serve (cfg : Config.t) =
     | Error m -> Error m
     | Ok tokens -> (
       let t0 = Unix.gettimeofday () in
-      match open_databases cfg with
+      (* the commit buffer's frames, which each database's open writes again into its journal; then the buffer is
+         emptied, and every journal shares it *)
+      let opened =
+        match Wal.recover Disk.real cfg.data with
+        | exception Journal.Damaged m -> Error m
+        | exception Disk.Io m -> Error m
+        | wal -> (
+          match open_databases cfg wal with
+          | Error m -> Error m
+          | Ok dbs -> (
+            match Wal.start wal with
+            | () -> Array.iter (fun d -> Wal.attach wal d.live.e.id d.live.e.journal) dbs; Ok (wal, dbs)
+            | exception (Journal.Damaged m | Disk.Io m) -> Array.iter (fun d -> Engine.stop d.live) dbs; Error m))
+      in
+      match opened with
       | Error m -> Error m
-      | Ok dbs -> (
+      | Ok (wal, dbs) -> (
         let opened_ms = (Unix.gettimeofday () -. t0) *. 1e3 in
         let sid = server_id cfg.data in
+        let stop_all () = Array.iter (fun d -> Engine.stop d.live) dbs; Wal.stop wal in
         let srv =
           Core.create ~server_id:sid ~cluster_id:cfg.id ~dbs:(Array.map (fun d -> d.core) dbs) ~tokens ~now:Disk.real.now
             ~new_session:(fun () -> 1 + (Int64.to_int (String.get_int64_le (Tokens.random 8) 0) land 0x3FFF_FFFF_FFFF_FFFF))
-            ()
+            ~more:(fun () -> Wal.status wal) ()
         in
         (* TLS for TCP: the server's certificate and key; programs show no certificate (a token) *)
         match
@@ -526,7 +541,7 @@ let serve (cfg : Config.t) =
             cfg.tls
         with
         | exception Failure m ->
-          Array.iter (fun d -> Engine.stop d.live) dbs;
+          stop_all ();
           Unix.close lockfd;
           Error m
         | tls_ctx ->
@@ -537,7 +552,7 @@ let serve (cfg : Config.t) =
         with
         | exception ((Failure _ | Unix.Unix_error _) as e) ->
           let m = match e with Unix.Unix_error (err, call, arg) -> Printf.sprintf "%s %s: %s" call arg (Unix.error_message err) | Failure m -> m | _ -> "" in
-          Array.iter (fun d -> Engine.stop d.live) dbs;
+          stop_all ();
           Unix.close lockfd;
           Error m
         | sock, tcp ->
@@ -643,7 +658,7 @@ let serve (cfg : Config.t) =
           List.iter Core.drain conns;
           Atomic.set ticking false;
           Thread.join tk;
-          Array.iter (fun d -> Engine.stop d.live) dbs;
+          stop_all ();
           Array.iter (fun d -> d.checkpointed <- -1; checkpoint d) dbs;
           (* the connections' threads wake from their reads and end *)
           Mutex.protect socks.sm (fun () ->

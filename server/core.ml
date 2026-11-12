@@ -28,6 +28,7 @@ type t = {
   now : unit -> int;  (* ms *)
   new_session : unit -> int;
   max_inflight : int;
+  more : unit -> (string * string) list;  (* server-wide lines of the status (the commit buffer's) *)
   started : int;
   served : int Atomic.t;  (* requests of closed connections *)
   conns : (int, conn) Hashtbl.t;  (* open connections, for status and stop *)
@@ -61,11 +62,11 @@ and conn = {
   wake : unit -> unit;  (* the transport sends what [pushes] holds (it must not wait) *)
 }
 
-let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) () =
+let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> []) () =
   let by_name = Hashtbl.create 8 in
   Array.iter (fun d -> Hashtbl.replace by_name d.name d) dbs;
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
-    max_inflight; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
+    max_inflight; more; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
 
 let connect ?(wake = ignore) srv ~flush ~submit =
   Mutex.protect srv.cm (fun () ->
@@ -300,6 +301,7 @@ let status c =
     "connections", string_of_int conns; "requests", string_of_int (reqs + Atomic.get srv.served);
     "gc_minor", string_of_int (Gc.quick_stat ()).minor_collections; "gc_major", string_of_int (Gc.quick_stat ()).major_collections;
     "stopping", string_of_bool (Atomic.get srv.stopping) ]
+  @ srv.more ()
   @ List.concat_map
       (fun d ->
         let v = d.view () in

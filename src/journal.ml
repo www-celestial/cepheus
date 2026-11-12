@@ -29,6 +29,9 @@ type t = {
   mutable next : int;  (* the next group number *)
   mutable closed : bool;
   mutable failed : bool;  (* a write or fsync failed: never used again (G10) *)
+  mutable shared : (Bytes.t -> unit) option;  (* the server's commit buffer forces the frames: see [share] *)
+  mutable unforced : bool;  (* frames written since the journal's last fsync (a shared journal's) *)
+  lock : Mutex.t;  (* [fd] and [unforced], between the writer and the commit buffer's checkpoints *)
 }
 
 let damaged fmt = Printf.ksprintf (fun s -> raise (Damaged s)) fmt
@@ -279,7 +282,76 @@ let rewrite_newest disk dir r =
   disk.fsync r.fd;
   disk.sync_dir dir
 
-let recover ?frame ?after ~force disk dir id from on_group =
+(* ---- The commit buffer's frames, written again (the recovery of a shared journal) ----
+   After a power loss, the frames a shared journal wrote after its last fsync may each be lost, kept or torn, so its own
+   rule (a torn tail; damage when a frame that checks follows one that does not) cannot be trusted there. The server's
+   commit buffer holds, whole, every frame the journal may not have forced (Wal): from the snapshot's position, at
+   each group, a frame the buffer holds is written again where it goes (at the start of the segment named by its first
+   group when there is one: the writer began that segment, forced, before the frame), and every other frame must check,
+   since it was forced (a frame of its own, or one of a buffer's file recycled once its journals were forced). The
+   journal's own rule then takes the rest: at most the frame being written at the crash. *)
+let repair disk dir (from : position option) frames =
+  let info b = Int64.to_int (Bytes.get_int64_le b 8), u32 b 16 in
+  let start = match from with Some f -> f.next | None -> 1 in
+  match List.filter (fun b -> let f0, c = info b in f0 + c - 1 >= start) frames with
+  | [] -> ()
+  | frames ->
+    let segs = Hashtbl.create 16 in
+    List.iter (fun s -> Hashtbl.replace segs s ()) (segments disk dir);
+    let seg, off = match from with Some f -> f.segment, f.offset | None -> 1, seg_header in
+    if not (Hashtbl.mem segs seg) then damaged "journal: segment %s, where the commit buffer's frames go, is missing" (segment_name seg);
+    let s = ref seg and fd = ref (disk.Disk.openf (path dir seg) false) and written = ref false in
+    let r = ref None and p = ref off and g = ref start in
+    let leave () = if !written then disk.fsync !fd; disk.close !fd in
+    (* the frame of group !g starts a segment: the one before it ends here *)
+    let next_segment () =
+      if !g <> !s && Hashtbl.mem segs !g then begin
+        leave ();
+        s := !g;
+        fd := disk.openf (path dir !g) false;
+        written := false;
+        r := None;
+        p := seg_header
+      end
+    in
+    let reader () = match !r with Some x -> x | None -> let x = reader disk !fd in r := Some x; x in
+    (match
+       List.iter
+         (fun b ->
+           let f0, c = info b in
+           while !g < f0 do
+             next_segment ();
+             let rd = reader () in
+             match header_at rd !p with
+             | Some (len, f1, count, bc, _) when f1 = !g && body_checks rd !p len bc -> p := !p + fh + len + ft; g := !g + count
+             | _ -> damaged "%s: the frame at %d (group %d) does not check, before the commit buffer's frames from group %d"
+                      (segment_name !s) !p !g f0
+           done;
+           if !g <> f0 then damaged "journal: the commit buffer's frame of group %d does not start where a frame does (group %d)" f0 !g;
+           next_segment ();
+           (* what the journal holds there: the same frame (whole, or torn), or bytes that do not make a frame; a
+              header that checks and is another frame's means the journal was written without the buffer since (an
+              open by a version that does not read it): never written over. The frame is written even when the
+              bytes read are its own: a failed fsync may have marked those pages clean, the page cache showing what
+              the disk lacks, and only a write makes them dirty again, so that the fsync below writes them (G13) *)
+           let n = Bytes.length b and size = disk.size !fd in
+           let hn = max 0 (min fh (size - !p)) in
+           let have = Bytes.create hn in
+           if hn > 0 then disk.pread !fd !p have 0 hn;
+           if hn = fh && u32 have 0 = frame_magic && u32 have 24 = Crc32c.bytes have 0 24 && not (Bytes.equal have (Bytes.sub b 0 fh))
+           then damaged "%s: the frame at %d is not the one the commit buffer holds for group %d (the database was written without its server's buffer after a crash)" (segment_name !s) !p f0;
+           disk.pwrite !fd !p b 0 n;
+           written := true;
+           r := None;
+           p := !p + n;
+           g := !g + c)
+         frames
+     with
+     | () -> leave ()
+     | exception e -> (try disk.close !fd with Disk.Io _ -> ()); raise e)
+
+let recover ?frame ?after ?(copy = []) ~force disk dir id from on_group =
+  repair disk dir from copy;
   (* Not needed after a clean close ([force] false: the database's marker, Engine.open_), which leaves nothing off the
      disk and no failed fsync. *)
   let before = if force then rewrite_newest disk dir else fun _ -> () in
@@ -307,15 +379,18 @@ let recover ?frame ?after ~force disk dir id from on_group =
         disk.pwrite fd (p + fh + len) t 0 ft)
       last.bad_trailers;
     if last.torn || last.bad_trailers <> [] then disk.fsync fd;
-    { disk; dir; id; fd; seg = last.first; size = last.stop; next; closed = false; failed = false }
+    { disk; dir; id; fd; seg = last.first; size = last.stop; next; closed = false; failed = false; shared = None; unforced = false;
+      lock = Mutex.create () }
   | [] ->
     (* no usable segment: the only one was torn at its creation, before any frame *)
     let fd = write_segment_header disk dir id next in
-    { disk; dir; id; fd; seg = next; size = seg_header; next; closed = false; failed = false }
+    { disk; dir; id; fd; seg = next; size = seg_header; next; closed = false; failed = false; shared = None; unforced = false;
+      lock = Mutex.create () }
 
 let create disk dir id =
   let fd = write_segment_header disk dir id 1 in
-  { disk; dir; id; fd; seg = 1; size = seg_header; next = 1; closed = false; failed = false }
+  { disk; dir; id; fd; seg = 1; size = seg_header; next = 1; closed = false; failed = false; shared = None; unforced = false;
+      lock = Mutex.create () }
 
 (* After a failed write or fsync: the journal back to the end of its last durable frame ([size] grows only after a
    successful fsync), a segment that a failed switch began removed, the cut and the directory forced. So a write
@@ -330,6 +405,33 @@ let cut j =
     j.disk.fsync j.fd;
     j.disk.sync_dir j.dir
   with Disk.Io m -> prerr_endline ("cepheus: the journal could not be cut back after a failed write: " ^ m)
+
+(* ---- A journal that shares the server's commit buffer ----
+   Its frames are written to its segment without an fsync, and forced by the buffer's round (one fsync for every
+   database of the server: Wal); the journal itself is forced when the buffer recycles its file (checkpoint), when
+   a segment is left, by a frame of its own (a large group, a long frame), before a run is named, and at close. *)
+
+(* the longest frame forced by the commit buffer (1 MiB): a longer one is forced in its own journal *)
+let shared_max = ref (1 lsl 20)
+
+let share j f = j.shared <- Some f
+
+(* under [j.lock] *)
+let force_unforced j =
+  if j.unforced then begin
+    j.disk.Disk.fsync j.fd;
+    j.unforced <- false
+  end
+
+let checkpoint j =
+  Mutex.protect j.lock (fun () ->
+      if j.failed then raise (Disk.Io "journal: an earlier write failed; reopen the database");
+      if not j.closed then
+        match force_unforced j with
+        | () -> ()
+        | exception (Disk.Io _ as e) -> j.failed <- true; raise e)
+
+let forced j = Mutex.protect j.lock (fun () -> not (j.unforced || j.failed))
 
 let append j body first count =
   if j.closed then raise (Disk.Io "journal is closed");
@@ -353,20 +455,29 @@ let append j body first count =
   set32 b (t + 4) bc;
   set32 b (t + 8) hc;
   set32 b (t + 12) tail_magic;
+  (* a frame of a shared journal is forced by the commit buffer's round, but for a long one, forced here: written
+     twice, it would cost more than its own fsync *)
+  let shared = match j.shared with Some f when n <= !shared_max -> Some f | _ -> None in
   match
-    if j.size > seg_header && j.size + n > !segment_limit then begin
-      (* every frame of the current segment is durable already: start the next one (made first, so that a failure
-         leaves the journal on the old segment, still open) *)
-      let fd = write_segment_header j.disk j.dir j.id first in
-      j.disk.close j.fd;
-      j.fd <- fd;
-      j.seg <- first;
-      j.size <- seg_header
-    end;
     let t0 = clock () in
-    j.disk.pwrite j.fd j.size b 0 n;
+    Mutex.protect j.lock (fun () ->
+        if j.size > seg_header && j.size + n > !segment_limit then begin
+          (* every frame of the current segment is durable already, forced in it before it is left when the
+             commit buffer forced them: start the next one (made first, so that a failure leaves the journal on the
+             old segment, still open) *)
+          force_unforced j;
+          let fd = write_segment_header j.disk j.dir j.id first in
+          j.disk.close j.fd;
+          j.fd <- fd;
+          j.seg <- first;
+          j.size <- seg_header
+        end;
+        j.disk.pwrite j.fd j.size b 0 n;
+        if shared <> None then j.unforced <- true);
     let t1 = clock () in
-    j.disk.fsync j.fd;
+    (match shared with
+     | Some f -> f b
+     | None -> j.disk.fsync j.fd; Mutex.protect j.lock (fun () -> j.unforced <- false));
     Histogram.record write_us (t1 - t0);
     Histogram.record fsync_us (clock () - t1)
   with
@@ -412,9 +523,9 @@ let begin_frame j len first count =
   let base = { pj = j; pfd = j.fd; fresh = false; at = j.size; plen = len; pfirst = first; pcount = count; put = 0;
                crc = 0; unforced = 0 } in
   if j.size > seg_header && j.size + n > !segment_limit then
-    (* every frame of the current segment is durable already: the next one is made now, the journal moves to it
-       when the frame is finished *)
-    match write_segment_header j.disk j.dir j.id first with
+    (* every frame of the current segment is durable already (forced in it now, when the commit buffer forced them):
+       the next one is made now, the journal moves to it when the frame is finished *)
+    match Mutex.protect j.lock (fun () -> force_unforced j); write_segment_header j.disk j.dir j.id first with
     | fd -> { base with pfd = fd; fresh = true; at = seg_header }
     | exception (Disk.Io _ as e) -> j.failed <- true; cut j; raise e
   else base
@@ -465,11 +576,14 @@ let finish p =
     Histogram.record fsync_us (clock () - t1)
   with
   | () ->
-    if p.fresh then begin
-      j.disk.close j.fd;
-      j.fd <- p.pfd;
-      j.seg <- p.pfirst
-    end;
+    (* its fsync forced every frame before it in its segment *)
+    Mutex.protect j.lock (fun () ->
+        if p.fresh then begin
+          j.disk.close j.fd;
+          j.fd <- p.pfd;
+          j.seg <- p.pfirst
+        end;
+        j.unforced <- false);
     j.size <- p.at + fh + p.plen + ft;
     j.next <- p.pfirst + p.pcount
   | exception (Disk.Io _ as e) -> fail_pending p e
@@ -497,10 +611,17 @@ let written_body p =
 let next_group j = j.next
 let position j = { segment = j.seg; offset = j.size; next = j.next }
 
+(* A shared journal is forced first; a failure of that fsync is raised once the file is closed. *)
 let close j =
   if not j.closed then begin
-    j.closed <- true;
-    j.disk.close j.fd
+    let forced =
+      Mutex.protect j.lock (fun () ->
+          j.closed <- true;
+          let r = if j.failed then Ok () else match force_unforced j with () -> Ok () | exception (Disk.Io _ as e) -> Error e in
+          j.disk.close j.fd;
+          r)
+    in
+    match forced with Ok () -> () | Error e -> j.failed <- true; raise e
   end
 
 (* A full read, for a closed database: recovery rebuilds the trailer of an intact newest frame (a crash can tear

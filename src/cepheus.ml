@@ -18,6 +18,7 @@ module Sim_disk = Sim_disk
 module Snapshot = Snapshot
 module Store = Store
 module Value = Value
+module Wal = Wal
 
 type value = Value.t = Int of int | Float of float | Bool of bool | Text of string | Date of int | Money of int | Link of int
 type typ = Value.typ = Tint | Tfloat | Tbool | Ttext | Tdate | Tmoney of int | Tlink
