@@ -15,12 +15,15 @@
      the thing have a value of it, or does the value have a thing (a count); otherwise the Not's own question, asked
      until its first answer.
    - In x [values]: x is one of the values, a set of index words that the join takes as a source of x's candidates
-     when it is the smallest, else as a check of each (Query.fold ~sets). *)
+     when it is the smallest, else as a check of each (Query.fold ~sets).
+   - Prefix x p: the text x starts with the bytes of p: the words of the texts of x's property that do, found by two
+     binary searches in each run's text order (run format 9, Store.prefix_words), and then a set as In's. *)
 
 type item =
   | Pattern of Query.pattern
   | Range of int * Value.t * Value.t
   | In of int * Value.t list
+  | Prefix of int * string  (** the text starts with these bytes *)
   | Not of item list  (** patterns and conditions *)
   | Or of item list list  (** alternatives, each its patterns and conditions (And) *)
 
@@ -28,14 +31,14 @@ let bad = Query.bad
 
 let vars_of_item = function
   | Pattern pt -> (match pt.e with Var x -> [ x ] | _ -> []) @ (match pt.v with Var x -> [ x ] | _ -> [])
-  | Range (x, _, _) | In (x, _) -> [ x ]
+  | Range (x, _, _) | In (x, _) | Prefix (x, _) -> [ x ]
   | Not _ | Or _ -> []
 
 (* every pattern of a question, those inside Not and Or too *)
 let patterns (q : Query.t) extra =
   let rec of_item = function
     | Pattern p -> [ p ]
-    | Range _ | In _ -> []
+    | Range _ | In _ | Prefix _ -> []
     | Not l -> List.concat_map of_item l
     | Or alts -> List.concat_map (List.concat_map of_item) alts
   in
@@ -45,7 +48,7 @@ let flat_vars items = List.sort_uniq compare (List.concat_map vars_of_item items
 
 let pattern_vars items = List.sort_uniq compare (List.concat_map (function Pattern _ as i -> vars_of_item i | _ -> []) items)
 
-let simple = function Pattern _ | Range _ | In _ -> true | Not _ | Or _ -> false
+let simple = function Pattern _ | Range _ | In _ | Prefix _ -> true | Not _ | Or _ -> false
 
 (* ---- what the question is: its variables, its types, and its conjunctions ---- *)
 
@@ -56,6 +59,7 @@ type conj = {
   pats : Query.pattern list;
   ranges : (int * Value.t * Value.t) list;
   ins : (int * Value.t list) list;
+  prefixes : (int * string) list;
   nots : not_ list;
   free : int list;  (* the variables of its alternatives' own: its bindings are kept, to give each binding once *)
 }
@@ -66,6 +70,8 @@ type t = {
   typs : Value.typ option array;
   conjs : conj list;
 }
+
+let max_prefix = 1024
 
 let typ_of (v : Store.view) p = match Schema.find v.schema p with Some d -> d | None -> bad "no property %d" p
 
@@ -83,7 +89,7 @@ let types (v : Store.view) nvars items =
       let d = typ_of v pt.p in
       (match pt.e with Var x -> set x Value.Tlink | _ -> ());
       (match pt.v with Var x -> set x d.typ | Val x when not (Value.has_type d.typ x) -> bad "%s is not a %s" (Value.to_string x) (Value.typ_name d.typ) | _ -> ())
-    | Range (x, _, _) | In (x, _) -> if x < 0 || x >= nvars then bad "variable %d out of range" x
+    | Range (x, _, _) | In (x, _) | Prefix (x, _) -> if x < 0 || x >= nvars then bad "variable %d out of range" x
     | Not l -> List.iter go l
     | Or alts -> List.iter (List.iter go) alts
   in
@@ -91,6 +97,9 @@ let types (v : Store.view) nvars items =
   (* a range is for an int, a date or money (and links and bools, inside the engine) *)
   let rec ranges = function
     | Range (x, _, _) -> (match ty.(x) with Some t when Value.inline t -> () | _ -> bad "a range needs an int, date or money variable")
+    | Prefix (x, p) ->
+      (match ty.(x) with Some Ttext | None -> () | Some t -> bad "Prefix is for a text, not a %s" (Value.typ_name t));
+      if String.length p < 1 || String.length p > max_prefix then bad "Prefix takes 1 to %d bytes, not %d" max_prefix (String.length p)
     | Not l -> List.iter ranges l
     | Or alts -> List.iter (List.iter ranges) alts
     | Pattern _ | In _ -> ()
@@ -158,7 +167,7 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
       match it with
       | Not l -> List.iter (fun x -> claim x (`Not k)) (flat_vars l)
       | Or alts -> List.iter (fun a -> List.iter (fun x -> claim x (`Or k)) (flat_vars a)) alts
-      | Range (x, _, _) | In (x, _) -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x
+      | Range (x, _, _) | In (x, _) | Prefix (x, _) -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x
       | Pattern _ -> ())
     extra;
   List.iter (fun (x, _, _) -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x) q.ranges;
@@ -173,6 +182,7 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
   let not_of l = { items = l; own = List.filter (fun x -> not outer.(x)) (flat_vars l) } in
   let base =
     { pats = q.where; ranges = q.ranges; ins = List.filter_map (function In (x, l) -> Some (x, l) | _ -> None) extra;
+      prefixes = List.filter_map (function Prefix (x, p) -> Some (x, p) | _ -> None) extra;
       nots = List.filter_map (function Not l -> Some (not_of l) | _ -> None) extra; free = [] }
   in
   if q.where = [] && not (List.exists (function Or _ -> true | _ -> false) extra) then bad "a question needs a pattern outside Not";
@@ -182,6 +192,7 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
         | Pattern pt -> { c with pats = c.pats @ [ pt ] }
         | Range (x, lo, hi) -> { c with ranges = c.ranges @ [ (x, lo, hi) ] }
         | In (x, l) -> { c with ins = c.ins @ [ (x, l) ] }
+        | Prefix (x, p) -> { c with prefixes = c.prefixes @ [ (x, p) ] }
         | Not _ | Or _ -> c)
       c a
   in
@@ -212,6 +223,12 @@ let words_of (v : Store.view) (ty : Value.typ) l =
   Array.of_list (List.sort_uniq compare (List.filter_map (Store.word v) l))
 
 exception Found
+
+(* the words a Prefix lets x take: those of the texts of the property of a pattern that gives x as its value *)
+let prefix_set (v : Store.view) items x pre =
+  match List.find_map (function Pattern (pt : Query.pattern) when pt.v = Query.Var x -> Some pt.p | _ -> None) items with
+  | Some p -> Store.prefix_words v p pre
+  | None -> bad "variable %d of Prefix is the value of no pattern" x
 
 (* a Not compiled: [holds env] on the conjunction's words (renumbered by [at]) is true when the Not's items have an
    answer, the binding then dropped *)
@@ -255,6 +272,9 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
           | In (x, l) ->
             let ws = words_of v typs.(x) l in
             if local x >= 0 then sets := (local x, ws) :: !sets else if not (Query.in_sorted ws env.(at x)) then ok := false
+          | Prefix (x, pre) ->
+            if local x >= 0 then sets := (local x, prefix_set v items x pre) :: !sets
+            else (let t = Store.text v env.(at x) in if not (String.length t >= String.length pre && String.sub t 0 (String.length pre) = pre) then ok := false)
           | Not _ | Or _ -> ())
         items;
       !ok
@@ -290,7 +310,8 @@ let dense ?range (v : Store.view) (t : t) (c : conj) =
     { Query.vars = !k; where = List.map (fun (pt : Query.pattern) -> { pt with Query.e = ren pt.e; v = ren pt.v }) c.pats;
       ranges = List.map (fun (x, lo, hi) -> dense.(x), lo, hi) ranges }
   in
-  q, dense, back, List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins
+  let pats = List.map (fun pt -> Pattern pt) c.pats in
+  q, dense, back, List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix_set v pats x p) c.prefixes
 
 let fold ?(seq = false) ?(budget = max_int) ?range (v : Store.view) (t : t) ~init ~step ~merge =
   let spent = Atomic.make 0 in

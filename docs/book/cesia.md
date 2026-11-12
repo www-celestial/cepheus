@@ -323,6 +323,29 @@ of the properties it names, and its change is the difference of the two answers.
 cost of the whole question a frame that touches it (a watch of patterns alone keeps only the bindings the frame's
 facts change).
 
+## Prefix: the start of a text
+
+`cepheus.Prefix(x, text)`: the text x starts with these bytes. With Sort and Limit, it is a search as one types:
+
+```cesia norun
+found = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "B")], Give: {Client: c, Name: n}, Sort: [n], Limit: 10}, db)
+io.Print(found)
+```
+
+```text
+Ok([{Client: 65539, Name: "Bo Lind"}])
+```
+
+- The comparison is of bytes: `"Ad"` matches "Ada", not "ada" nor "Ädam". A search without case keeps a field of its
+  own in the form it searches (the name in lower case, written with the name).
+- x is a text variable that a pattern gives as its value; the prefix has 1 to 1,024 bytes.
+
+**How it is answered.** Each run holds, for each text property, its distinct texts in the order of their bytes (run
+format 9, [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)): the texts that start with the prefix
+are one stretch of it, found by two binary searches; with the few texts written since the last merge, they are the
+candidates of x, as an `In` of them. The work is that of the matching texts and their things, not of every text of
+the database; and it reads the texts of x's property only.
+
 ## Sort, Limit and After: pages
 
 Three more keys of the question sort its rows, cut them, and give the page after a row:
@@ -660,7 +683,6 @@ linearizable without it.
 ## What is not built yet
 
 - Forks of a database read at the server, which the server will make.
-- `Prefix` in questions: not in the engine.
 - A program reaches one database a connection: `Connect` again for another.
 
 ## References

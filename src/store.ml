@@ -22,6 +22,9 @@
                   a run holds the texts interned between the run below it and itself)
      columns      each property's rows (thing, value) apart, in thing order (the column order, below): every lookup
                   of a thing's property reads there
+     text order   (run format 9) for each text property, the distinct texts of its rows in the part, in the order of
+                  their bytes: a start for each property, then u32 text ids, so that the texts with a prefix are one
+                  stretch of it, found by two binary searches (Prefix, and Sort on a text)
 
    Every lookup is a rank, an offset and the answer, on each run that holds the thing (the rank table says so with
    one bit) and on the delta; every count is exact. *)
@@ -58,6 +61,7 @@ type base = {
   o_cdata : int;  (* their values *)
   o_cmh : int;  (* their offsets for things of several values: Mono headers, then bits *)
   o_cmb : int;
+  o_tord : int;  (* (np + 1) u64: each text property's first entry; then u32 text ids, each property's in byte order *)
   len : int;  (* the end of the part's sections *)
   d0 : int;  (* every thing from d0 to ne - 1 is held: its slot is r0 + (e - d0), with no rank to read *)
   r0 : int;
@@ -91,7 +95,7 @@ let pbytes n w = Pack.bytes n w
    upper bounds, and the bytes past the counts are never written (logical pages no file page holds, Snapshot): what a
    section's room is, from [n_cap] rows, [k_cap] things, [np] properties, [vb_cap] row blocks (each property's rows
    start a block), [vwords] rank words and [vm_blocks] offset blocks of the value indexes, [ns] texts of [sblob] bytes. *)
-type rooms = { tdata : int; vdata : int; vmb : int; smb : int; crank : int; cdir : int; cdata : int; cmh : int; cmb : int }
+type rooms = { tdata : int; vdata : int; vmb : int; smb : int; crank : int; cdir : int; cdata : int; cmh : int; cmb : int; tord : int }
 
 let wmax = 64
 
@@ -117,7 +121,8 @@ let rooms ~n_cap ~k_cap ~np ~vb_cap ~vm_blocks ~ns ~sblob ~ne ~caps =
   let tdata = 2 * tdata and vdata = 2 * vdata in
   let sum f = Array.fold_left (fun n cap -> if cap > 0 then n + al (f cap) else n) 0 caps in
   { tdata; vdata; vmb = (vm_blocks * pbytes tb (Pack.width (n_cap + 1))) + 8; smb = (blocks128 (ns + 1) * pbytes tb (Pack.width (sblob + 1))) + 8;
-    crank = sum (fun _ -> crank_room ne); cdir = sum cdir_room; cdata = sum cdata_room; cmh = sum cmh_room; cmb = sum cmb_room }
+    crank = sum (fun _ -> crank_room ne); cdir = sum cdir_room; cdata = sum cdata_room; cmh = sum cmh_room; cmb = sum cmb_room;
+    tord = (8 * (np + 1)) + (4 * n_cap) + 8 }
 
 (* The sections of a part from offset [at]. *)
 let layout ?(pg = Pages.empty) ~at ~n ~ne ~k ~k_cap ~np ~ns ~sblob ~hbits ~vb_cap ~vwords ~vm_blocks (r : rooms) () =
@@ -145,24 +150,25 @@ let layout ?(pg = Pages.empty) ~at ~n ~ne ~k ~k_cap ~np ~ns ~sblob ~hbits ~vb_ca
   let o_cdata = sec r.cdata in
   let o_cmh = sec r.cmh in
   let o_cmb = sec r.cmb in
+  let o_tord = sec r.tord in
   { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
     o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb;
-    len = !off; d0 = ne; r0 = k; cols = [||] }
+    o_tord; len = !off; d0 = ne; r0 = k; cols = [||] }
 
 (* the offsets of a part, as a run's header lists them, and back *)
 let offsets b =
   [ b.o_erank; b.o_tdir; b.o_tdata; b.o_poff; b.o_pblk; b.o_pdist; b.o_pidx; b.o_vdir; b.o_vdata; b.o_vrank; b.o_vmh;
-    b.o_vmb; b.o_smh; b.o_smb; b.o_sblob; b.o_shash; b.o_cp; b.o_crank; b.o_cdir; b.o_cdata; b.o_cmh; b.o_cmb; b.len ]
+    b.o_vmb; b.o_smh; b.o_smb; b.o_sblob; b.o_shash; b.o_cp; b.o_crank; b.o_cdir; b.o_cdata; b.o_cmh; b.o_cmb; b.o_tord; b.len ]
 
 let of_offsets ~pg ~n ~ne ~k ~np ~ns ~sblob ~hbits = function
   | [ o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx; o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb;
-      o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb; len ] ->
+      o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb; o_tord; len ] ->
     { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
       o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb;
-      len; d0 = ne; r0 = k; cols = [||] }
+      o_tord; len; d0 = ne; r0 = k; cols = [||] }
   | _ -> invalid_arg "Store.of_offsets"
 
-let noffsets = 23
+let noffsets = 24
 
 (* the hash table of ns texts: the least power of two of at least 2 ns slots (load at most 1/2) *)
 let hbits_for ns = let b = ref 0 in while 1 lsl !b < 2 * ns do incr b done; !b
@@ -170,7 +176,7 @@ let hbits_for ns = let b = ref 0 in while 1 lsl !b < 2 * ns do incr b done; !b
 (* a part with nothing: every lookup answers at once, without a page *)
 let nothing =
   layout ~at:0 ~n:0 ~ne:0 ~k:0 ~k_cap:0 ~np:0 ~ns:0 ~sblob:0 ~hbits:0 ~vb_cap:0 ~vwords:0 ~vm_blocks:0
-    { tdata = 0; vdata = 0; vmb = 0; smb = 0; crank = 0; cdir = 0; cdata = 0; cmh = 0; cmb = 0 } ()
+    { tdata = 0; vdata = 0; vmb = 0; smb = 0; crank = 0; cdir = 0; cdata = 0; cmh = 0; cmb = 0; tord = 0 } ()
 
 external get64u : Bytes.t -> int -> int64 = "%caml_bytes_get64u"
 external get32u : Bytes.t -> int -> int32 = "%caml_bytes_get32u"
@@ -1103,6 +1109,15 @@ let touch v e =
     if b == v.ftouched then v else { v with ftouched = b }
   end
 
+(* ---- the text order (run format 9) ---- *)
+
+(* the first entry and the count of property p's texts in a part's text order *)
+let tord_range b p =
+  if b.n = 0 || p >= b.np || b.o_tord + (8 * (p + 2)) > b.len then 0, 0
+  else let s = ci64 b (b.o_tord + (8 * p)) in s, ci64 b (b.o_tord + (8 * (p + 1))) - s
+
+let tord_word b i = cu32 b (b.o_tord + (8 * (b.np + 1)) + (4 * i))
+
 let text v i =
   if i >= v.dict.chunks.c0 then
     if i < v.dict.dcount then
@@ -1160,6 +1175,34 @@ let intern v s =
     else
       let i = d.dnext in
       { v with dict = { d with smap = SM.add s i d.smap; extra = IM.add i s d.extra; dnext = i + 1 } }, i
+
+(* The words of p's texts that start with [pre], sorted and distinct: in each run, two binary searches in its text
+   order give the stretch (texts compared by their bytes); the delta's texts of p are looked at one by one (at most a
+   merge's threshold of them). A superset of the texts p's facts hold in the view: a word no fact holds any more is a
+   candidate that no pattern accepts. *)
+let prefix_words v p pre =
+  let n = String.length pre in
+  let starts s = String.length s >= n && String.sub s 0 n = pre in
+  let out = ref [] in
+  Array.iter
+    (fun r ->
+      let b = r.a in
+      let first, count = tord_range b p in
+      if count > 0 then begin
+        let word i = tord_word b (first + i) in
+        let lo = ref 0 and hi = ref count in
+        while !lo < !hi do
+          let mid = (!lo + !hi) lsr 1 in
+          if String.compare (text v (word mid)) pre < 0 then lo := mid + 1 else hi := mid
+        done;
+        let i = ref !lo in
+        while !i < count && starts (text v (word !i)) do out := word !i :: !out; incr i done
+      end)
+    v.runs;
+  (match IM.find_opt p v.delta.dav with
+   | Some pd -> IM.iter (fun w _ -> if starts (text v w) then out := w :: !out) pd.pm
+   | None -> ());
+  Array.of_list (List.sort_uniq compare !out)
 
 (* The texts a large group adds: their ids, consecutive from the first returned, as [intern] would give them one
    after the other, but without their entries in the delta's map (the merge of the group, which follows at once, puts

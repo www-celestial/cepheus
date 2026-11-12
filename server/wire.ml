@@ -139,7 +139,7 @@ let get_vars r = Array.init (count r) (fun _ -> Codec.get_varint r)
 
 (* What a question asks beyond its patterns, ranges and select, after them in a Find (and a Watch): a byte 1, then its
    operators (a count, then each: 0 a pattern, 1 a range, 2 In (variable, count, values), 3 Not (count, items), 4 Or
-   (count of alternatives, each a count and its items)), its Sort (a count, then each key's column and a byte 1 when
+   (count of alternatives, each a count and its items), 5 Prefix (variable, text)), its Sort (a count, then each key's column and a byte 1 when
    descending), its Limit (0: none) and its After (a byte 0, or 1 then a count and the values). A question without
    them is coded as before them, so that a server that does not know them reads every other question as it did, and
    refuses this one (bytes after the request). *)
@@ -147,6 +147,7 @@ let rec put_item b = function
   | Ask.Pattern (p : Query.pattern) -> Buffer.add_char b '\000'; put_term b p.e; Codec.put_varint b p.p; put_term b p.v
   | Range (x, lo, hi) -> Buffer.add_char b '\001'; Codec.put_varint b x; Value.encode b lo; Value.encode b hi
   | In (x, l) -> Buffer.add_char b '\002'; Codec.put_varint b x; Codec.put_varint b (List.length l); List.iter (Value.encode b) l
+  | Prefix (x, p) -> Buffer.add_char b '\005'; Codec.put_varint b x; Codec.put_string b p
   | Not l -> Buffer.add_char b '\003'; Codec.put_varint b (List.length l); List.iter (put_item b) l
   | Or alts -> Buffer.add_char b '\004'; Codec.put_varint b (List.length alts); List.iter (fun a -> Codec.put_varint b (List.length a); List.iter (put_item b) a) alts
 
@@ -158,6 +159,7 @@ let rec get_item depth r =
   | 2 -> let x = Codec.get_varint r in In (x, List.init (count r) (fun _ -> Value.decode r))
   | 3 -> Not (List.init (count r) (fun _ -> get_item (depth + 1) r))
   | 4 -> Or (List.init (count r) (fun _ -> List.init (count r) (fun _ -> get_item (depth + 1) r)))
+  | 5 -> let x = Codec.get_varint r in Prefix (x, Codec.get_string r)
   | _ -> raise (Malformed "an operator this server does not know")
 
 let put_order b ?(extra = []) (o : Top.order) =

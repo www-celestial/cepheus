@@ -130,6 +130,15 @@ defn isFindIn()
   value.Len(rows) == 1 and value.Equal(rows, mine)
 end
 
+defn isFindPrefix()
+  s = shop()?
+  a = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "A")], Give: {C: c}}, s.Db)?
+  none = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "a")], Give: {C: c}}, s.Db)?
+  inNot = cepheus.Find(2, (c, e) -> {Where: [[c, Client.City, "Lyon"], cepheus.Not([c, Client.Email, e], cepheus.Prefix(e, "ada@"))], Give: {C: c}}, s.Db)?
+  empty = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "")], Give: {C: c}}, s.Db)
+  list.All([value.Equal(a, [{C: s.Ada}]), value.Len(none) == 0, value.Len(inNot) == 0, empty.Error.Code == "invalid"])
+end
+
 defn isFindOperatorRefusals()
   s = shop()?
   andTop = cepheus.Find(1, (c) -> {Where: [cepheus.And([c, Client.Name, "Ada"])], Give: {C: c}}, s.Db)

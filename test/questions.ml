@@ -17,6 +17,8 @@ let props =
 
 let names = [| "a"; "ab"; "abc"; "Ad"; "ad"; "Ada"; "\195\132d"; "z"; "\195\169"; ""; "b"; "ab\000" |]
 let floats = [| 0.; -0.; 1.5; -2.25; nan; -.nan; infinity; neg_infinity; 1e300; 3. |]
+(* prefixes: of one text, of several, of none, a lone first byte of a two-byte character, a NUL *)
+let prefixes = [| "a"; "ab"; "abc"; "A"; "Ad"; "ad"; "\195"; "\195\132"; "zz"; "b"; "ab\000" |]
 
 let ints r = match Rng.int r 12 with 0 -> max_int | 1 -> min_int | 2 -> 0 | _ -> Rng.int r 40 - 10
 
@@ -67,7 +69,7 @@ let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.it
   (* every extension of env that makes the items hold: patterns first, then the conditions *)
   let rec holds env (items : Ask.item list) k =
     let pats = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) items
-    and conds = List.filter (function Ask.Range _ | In _ -> true | _ -> false) items in
+    and conds = List.filter (function Ask.Range _ | In _ | Prefix _ -> true | _ -> false) items in
     let env = Array.copy env in
     let bind t (x : Value.t) k =
       match t with
@@ -81,6 +83,7 @@ let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.it
             (function
               | Ask.Range (x, lo, hi) -> (match env.(x) with Some w -> int_of w >= int_of lo && int_of w <= int_of hi | None -> false)
               | In (x, l) -> (match env.(x) with Some w -> List.exists (Value.equal w) l | None -> false)
+              | Prefix (x, pre) -> (match env.(x) with Some (Text t) -> String.starts_with ~prefix:pre t | _ -> false)
               | _ -> true)
             conds
         then k (Array.copy env)
@@ -104,7 +107,7 @@ let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.it
       (dedup !start) extra
   in
   (* the conditions of the question, then its Nots *)
-  let conds = List.filter (function Ask.Range _ | In _ -> true | _ -> false) (List.map (fun (x, lo, hi) -> Ask.Range (x, lo, hi)) q.ranges @ extra) in
+  let conds = List.filter (function Ask.Range _ | In _ | Prefix _ -> true | _ -> false) (List.map (fun (x, lo, hi) -> Ask.Range (x, lo, hi)) q.ranges @ extra) in
   let envs = List.filter (fun env -> let ok = ref false in holds env conds (fun _ -> ok := true); !ok) envs in
   let envs = List.filter (fun env -> List.for_all (function Ask.Not l -> let found = ref false in holds env l (fun _ -> found := true); not !found | _ -> true) extra) envs in
   List.map (Array.map (function Some x -> x | None -> Value.Int 0)) envs
@@ -295,12 +298,17 @@ let run seed =
             let cond_on x ty =
               match ty with
               | Value.Tint -> [ Ask.Range (x, Int (Rng.int r 30 - 10), Int (Rng.int r 30)) ]
-              | Ttext -> [ Ask.In (x, List.init (1 + Rng.int r 3) (fun _ -> Value.Text names.(Rng.int r 6))) ]
+              | Ttext -> if Rng.bool r then [ Ask.In (x, List.init (1 + Rng.int r 3) (fun _ -> Value.Text names.(Rng.int r 6))) ] else [ Ask.Prefix (x, prefixes.(Rng.int r (Array.length prefixes))) ]
               | _ -> []
             in
             let items = ref [] in
             for _ = 1 to 1 + Rng.int r 2 do
               match Rng.int r 4 with
+              | 0 when Rng.bool r ->
+                (* Prefix on a text variable of the question *)
+                (match List.filter (fun x -> typs.(x) = Value.Ttext) (List.init nv Fun.id) with
+                 | [] -> ()
+                 | l -> items := Ask.Prefix (List.nth l (Rng.int r (List.length l)), prefixes.(Rng.int r (Array.length prefixes))) :: !items)
               | 0 ->
                 (* In on a variable of the question *)
                 let x = Rng.int r nv in

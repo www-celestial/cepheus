@@ -530,7 +530,7 @@ let variables ctx a =
 
 let question_keys = C.keys [| "Where"; "Give"; "Sort"; "Limit"; "After" |]
 let desc_keys = C.keys [| "Desc" |]
-let op_keys = C.keys [| "Not"; "Or"; "And"; "In"; "Values" |]
+let op_keys = C.keys [| "Not"; "Or"; "And"; "In"; "Values"; "Prefix"; "Text" |]
 let range_keys = C.keys [| "Range"; "Low"; "High"; "Open" |]
 let aggregate_keys = C.keys [| "Sum"; "Min"; "Max"; "Count" |]
 
@@ -575,7 +575,7 @@ let question ctx name d qv nvars =
       | C.List l when C.length l = 3 -> ignore (pattern_of l)
       | C.Map m | C.Struct m -> (
         match C.fields op_keys m with
-        | [| n; o; a; _; _ |] -> List.iter walk (list_of n @ list_of a); List.iter walk (list_of o)
+        | [| n; o; a; _; _; _; _ |] -> List.iter walk (list_of n @ list_of a); List.iter walk (list_of o)
         | _ -> ())
       | _ -> ()
     in
@@ -604,17 +604,22 @@ let question ctx name d qv nvars =
       | C.List l when C.length l = 3 -> [ Ask.Pattern (pattern_of l) ]
       | C.Map m | C.Struct m -> (
         match C.fields op_keys m with
-        | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] -> let j, lo, hi = range_of m in [ Ask.Range (j, lo, hi) ]
-        | [| n; C.Missing; C.Missing; C.Missing; C.Missing |] ->
+        | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] -> let j, lo, hi = range_of m in [ Ask.Range (j, lo, hi) ]
+        | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; x; t |] -> (
+          match var x, t with
+          | Some j, C.Text p -> [ Ask.Prefix (j, p) ]
+          | Some _, v -> C.need ctx name "a text for Prefix" v
+          | None, _ -> C.need ctx name "a variable first in Prefix" x)
+        | [| n; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
           if not top then refuse "invalid" "Not takes patterns and conditions: no Not or Or inside it";
           [ Ask.Not (List.concat_map (item_of ~top:false ~alt:false) (list_of n)) ]
-        | [| C.Missing; o; C.Missing; C.Missing; C.Missing |] ->
+        | [| C.Missing; o; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
           if not top then refuse "invalid" "Or takes patterns, conditions and And: no Not or Or inside it";
           [ Ask.Or (List.map (fun a -> item_of ~top:false ~alt:true a) (list_of o)) ]
-        | [| C.Missing; C.Missing; a; C.Missing; C.Missing |] ->
+        | [| C.Missing; C.Missing; a; C.Missing; C.Missing; C.Missing; C.Missing |] ->
           if not alt then refuse "invalid" "And is for an alternative of Or: Where is already all of its items";
           List.concat_map (item_of ~top:false ~alt:false) (list_of a)
-        | [| C.Missing; C.Missing; C.Missing; x; vs |] -> (
+        | [| C.Missing; C.Missing; C.Missing; x; vs; C.Missing; C.Missing |] -> (
           match var x with
           | Some j -> (
             match vtyp.(j) with

@@ -113,6 +113,9 @@ And(a, b = missing, c = missing, d = missing) = {And: [a, b, c, d]}
 (** A condition of Where: x is one of these values, of its type (ids for a link). *)
 In(x, values) = {In: x, Values: values}
 
+(** A condition of Where: the text x starts with these bytes ("Ad" matches "Ada", not "ada"). *)
+Prefix(x, text) = {Prefix: x, Text: text}
+
 defn ask(n, question)
   (** The question called with n variables. *)
   v = variables(n)
@@ -136,7 +139,7 @@ end
 (** The answers of a question: an Ok of a list of maps, one an answer, with the fields of Give. The question is a
     function of n variables that gives {Where, Give}: Where a list of patterns [thing, property, value], each a fact
     that must hold, where any part but the property may be a variable, and of conditions (Above, Below, Between, In,
-    Not, Or); Give
+    Prefix, Not, Or); Give
     a map of the variables, or of aggregates of them, to give. Each answer comes once. Optional: Sort, a list of
     fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name; Limit, at
     most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in Sort's
