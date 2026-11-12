@@ -11,6 +11,8 @@
    journal codes a group's values in columns, Group). *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 
 let version = 2
 

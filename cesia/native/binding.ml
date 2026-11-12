@@ -11,6 +11,8 @@
 
 module C = Cesia_v1
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 open Cepheus_server
 
 (* ---- reading the arguments: a match each, and Cesia's message for a wrong one ---- *)

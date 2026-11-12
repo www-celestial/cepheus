@@ -24,6 +24,8 @@
                                        in microseconds into a histogram) *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 
 let now = Unix.gettimeofday
 let follows_per_client = 5
@@ -254,8 +256,8 @@ let pages dir facts =
   let v = view db in
   let s = schema_of v in
   ignore facts;
-  let unpaid = Pattern { e = Var 0; p = s.status; v = Val (Text "unpaid") } and total = Pattern { e = Var 0; p = s.total; v = Var 1 } in
-  let page after = { qvars = 2; items = [ unpaid; total ]; give = [| 0; 1 |]; sort = [ { col = 1; desc = true } ]; limit = 20; after } in
+  let unpaid = Question.Pattern { e = Var 0; p = s.status; v = Val (Text "unpaid") } and total = Question.Pattern { e = Var 0; p = s.total; v = Var 1 } in
+  let page after = { Question.vars = 2; items = [ unpaid; total ]; give = [| 0; 1 |]; sort = [ { Question.col = 1; desc = true } ]; limit = 20; after } in
   let rows q = match ask v q with Ok r -> r | Error e -> failwith (message e) in
   let deep = List.nth (rows { (page None) with limit = 2000 }) 1999 in
   let first = rows (page None) in
@@ -263,7 +265,7 @@ let pages dir facts =
   if rows (page None) <> first then failwith "the two paths differ";
   Top.path := Top.Auto;
   Printf.printf "a page of 20 of %d unpaid invoices, the largest totals first\n%!"
-    (List.length (rows { qvars = 2; items = [ unpaid; total ]; give = [||]; sort = []; limit = 0; after = None }));
+    (List.length (rows { Question.vars = 2; items = [ unpaid; total ]; give = [||]; sort = []; limit = 0; after = None }));
   List.iter
     (fun (name, path, after) ->
       Top.path := path;
@@ -276,8 +278,8 @@ let pages dir facts =
       let all = ok (find v q) in
       ignore (List.filteri (fun i _ -> i < 20) (List.sort (fun a b -> compare b.(1) a.(1)) all)));
   (* Not: the clients of city-7 with no unpaid invoice *)
-  let city = Pattern { e = Var 0; p = s.cty; v = Val (Text "city-7") } in
-  let clear = { qvars = 2; items = [ city; Not [ Pattern { e = Var 1; p = s.client; v = Var 0 }; Pattern { e = Var 1; p = s.status; v = Val (Text "unpaid") } ] ];
+  let city = Question.Pattern { e = Var 0; p = s.cty; v = Val (Text "city-7") } in
+  let clear = { Question.vars = 2; items = [ city; Question.Not [ Question.Pattern { e = Var 1; p = s.client; v = Var 0 }; Question.Pattern { e = Var 1; p = s.status; v = Val (Text "unpaid") } ] ];
                 give = [| 0 |]; sort = []; limit = 0; after = None } in
   Printf.printf "the clients of city-7 with no unpaid invoice: %d\n%!" (List.length (rows clear));
   measure "  Not" 1 (fun _ -> ignore (rows clear));
@@ -288,7 +290,7 @@ let pages dir facts =
       List.iter (fun r -> Hashtbl.replace o r.(0) ()) owing;
       ignore (List.filter (fun r -> not (Hashtbl.mem o r.(0))) all));
   (* Prefix: the clients whose e-mail starts with c1234 *)
-  let pre = { qvars = 2; items = [ Pattern { e = Var 0; p = s.mail; v = Var 1 }; Prefix (1, "c1234") ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } in
+  let pre = { Question.vars = 2; items = [ Question.Pattern { e = Var 0; p = s.mail; v = Var 1 }; Question.Prefix (1, "c1234") ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } in
   Printf.printf "the clients whose e-mail starts with c1234: %d\n%!" (List.length (rows pre));
   measure "  Prefix" 1 (fun _ -> ignore (rows pre));
   measure "  before: every e-mail, filtered" 1 (fun _ ->

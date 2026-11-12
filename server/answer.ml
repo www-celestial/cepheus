@@ -2,6 +2,8 @@
    locally (Client): the rows as index words, no value built, so that the server codes them straight onto the wire. *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 
 (* rows as index words, a flat array a domain *)
 type acc = { mutable a : int array; mutable n : int }

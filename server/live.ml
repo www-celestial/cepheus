@@ -31,6 +31,8 @@
    the hub evaluates a frame while it is forced, and gives its messages once it is durable. *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 
 type row = Value.t array
 

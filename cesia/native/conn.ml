@@ -15,6 +15,8 @@
    other requests are in flight (many fibers: pipelined, the reader reads), the fiber is parked as any other. *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 open Cepheus_server
 
 (* ---- live questions: one watch a question and database, shared by the program's fibers ----

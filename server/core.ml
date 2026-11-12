@@ -7,6 +7,8 @@
    token removed from tokens.toml, or whose rights change, takes effect at the next request). *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 
 type db = {
   name : string;

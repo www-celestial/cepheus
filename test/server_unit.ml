@@ -5,6 +5,8 @@
    visibility page shared read-only. *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 open Cepheus_server
 module C = Check
 

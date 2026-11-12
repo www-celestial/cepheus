@@ -8,6 +8,8 @@
    A failure prints its seed; [questions.exe --seed N] replays it. *)
 
 open Cepheus
+module Ask = Question.Ask
+module Top = Question.Top
 open Cepheus_server
 module C = Check
 

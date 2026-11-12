@@ -167,25 +167,32 @@ val find : view -> query -> (value array list, error) result
 
 (** {2 Questions with operators, an order and pages} *)
 
-type item = Ask.item =
-  | Pattern of pattern
-  | Range of int * value * value  (** [lo <= x <= hi], an int, date or money variable *)
-  | In of int * value list  (** x is one of the values (at most 10,000) *)
-  | Prefix of int * string  (** the text x starts with these bytes (1 to 1,024) *)
-  | Not of item list  (** none of these patterns and conditions holds, for any value of its own variables (1 to 4) *)
-  | Or of item list list  (** at least one alternative holds, each a list of patterns and conditions (2 to 4) *)
+(** The question of {!ask}: its own names, apart, so that [open Cepheus] adds only [Question] and [ask]. *)
+module Question : sig
+  type item = Ask.item =
+    | Pattern of pattern
+    | Range of int * value * value  (** [lo <= x <= hi], an int, date or money variable *)
+    | In of int * value list  (** x is one of the values (at most 10,000) *)
+    | Prefix of int * string  (** the text x starts with these bytes (1 to 1,024) *)
+    | Not of item list  (** none of these patterns and conditions holds, for any value of its own variables (1 to 4) *)
+    | Or of item list list  (** at least one alternative holds, each a list of patterns and conditions (2 to 4) *)
 
-type key = Top.key = { col : int; desc : bool }
-(** A key of [sort]: a column of [give], descending when [desc]. *)
+  type key = Top.key = { col : int; desc : bool }
+  (** A key of [sort]: a column of [give], descending when [desc]. *)
 
-type question = { qvars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
-(** Variables 0 to [qvars - 1]: those of its patterns, and those every alternative of an [Or] binds, are the question's;
-    one in a [Not] or some alternatives only is its own. [give]: the variables of each row, in this order (empty:
-    every variable of the question). [sort]: the rows in this order, then by the other columns ascending; [limit]:
-    the first k rows and the copies of the k-th (0: all; at most 100,000); [after]: the rows after this row, in the
-    order. A question of patterns and ranges only, given every variable, is {!find}'s. *)
+  type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
+  (** Variables 0 to [vars - 1]: those of its patterns, and those every alternative of an [Or] binds, are the
+      question's; one in a [Not] or some alternatives only is its own. [give]: the variables of each row, in this order
+      (empty: every variable of the question). [sort]: the rows in this order, then by the other columns ascending;
+      [limit]: the first k rows and the copies of the k-th (0: all; at most 100,000); [after]: the rows after this row,
+      in the order. A question of patterns and ranges only, given every variable, is {!find}'s. *)
 
-val ask : view -> question -> (value array list, error) result
+  module Ask = Ask
+  module Top = Top
+  (** The engine's questions with operators and their order (for the server and the tests). *)
+end
+
+val ask : view -> Question.t -> (value array list, error) result
 (** The rows of the question, each a binding of its variables once (G11), in the order asked. *)
 
 val fold :
@@ -239,8 +246,6 @@ module Rng = Rng
 module Schema = Schema
 module Sim_disk = Sim_disk
 module Snapshot = Snapshot
-module Ask = Ask
 module Store = Store
-module Top = Top
 module Value = Value
 module Wal = Wal

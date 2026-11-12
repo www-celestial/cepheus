@@ -16,9 +16,7 @@ module Rng = Rng
 module Schema = Schema
 module Sim_disk = Sim_disk
 module Snapshot = Snapshot
-module Ask = Ask
 module Store = Store
-module Top = Top
 module Value = Value
 module Wal = Wal
 
@@ -175,27 +173,32 @@ type query = Query.t = { vars : int; where : pattern list; ranges : (int * value
 
 let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
 
-type item = Ask.item =
-  | Pattern of pattern
-  | Range of int * value * value
-  | In of int * value list
-  | Prefix of int * string
-  | Not of item list
-  | Or of item list list
+module Question = struct
+  type item = Ask.item =
+    | Pattern of pattern
+    | Range of int * value * value
+    | In of int * value list
+    | Prefix of int * string
+    | Not of item list
+    | Or of item list list
 
-type key = Top.key = { col : int; desc : bool }
+  type key = Top.key = { col : int; desc : bool }
 
-type question = { qvars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
+  type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
 
-let ask v (q : question) =
+  module Ask = Ask
+  module Top = Top
+end
+
+let ask v (q : Question.t) =
   try
     let where = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) q.items in
     let ranges = List.filter_map (function Ask.Range (x, lo, hi) -> Some (x, lo, hi) | _ -> None) q.items in
     let extra = List.filter (function Ask.Pattern _ | Ask.Range _ -> false | _ -> true) q.items in
-    let base = { Query.vars = q.qvars; where; ranges } in
+    let base = { Query.vars = q.vars; where; ranges } in
     let t = Ask.compile v base extra in
-    let give = if Array.length q.give = 0 then Array.of_list (List.filter (fun x -> t.outer.(x)) (List.init q.qvars Fun.id)) else q.give in
-    Array.iter (fun x -> if x < 0 || x >= q.qvars || not t.outer.(x) then Query.bad "give: variable %d is not one of the question's" x) give;
+    let give = if Array.length q.give = 0 then Array.of_list (List.filter (fun x -> t.outer.(x)) (List.init q.vars Fun.id)) else q.give in
+    Array.iter (fun x -> if x < 0 || x >= q.vars || not t.outer.(x) then Query.bad "give: variable %d is not one of the question's" x) give;
     let ty = Ask.typs_of t in
     let typs = Array.map (fun x -> ty.(x)) give in
     let src =
