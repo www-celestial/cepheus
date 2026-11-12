@@ -161,7 +161,7 @@ defn feed(w, changes)
   fiber.Close(changes)
 end
 
-defn Watch(n, question, db, size = 64)
+defn Watch(n, question, db, size = 64, until = missing)
   (** A live question: an Ok of {Changes, Watch}, Changes a channel of its messages, which holds size of them at most.
       The first is the answer, {Group, Rows}: the rows Find gives at group Group. Each next one is a change,
       {Group, Added, Removed}: the rows that came and the rows that went with group Group, so that the rows are then
@@ -170,14 +170,26 @@ defn Watch(n, question, db, size = 64)
       is lost, none comes twice. A fiber that reads its channel too slowly gets the whole answer again, {Group, Rows},
       rather than every change it missed. Every fiber that watches the same question shares one watch at the server,
       and on the server's machine the changes are computed here, from the writes this program follows. The channel
-      closes when the watch ends: Close(w), or a token that may no longer read the database. *)
+      closes when the watch ends: Close(w), a token that may no longer read the database, or until, a channel, once it
+      closes, as the s.Ended of a screen of std/live: live.Show("unpaid", cepheus.Watch(1, q, db, until = s.Ended)?.Changes). *)
   w = watch(db, ask(n, question), n)
   if result.IsErr(w)
     return w
   end
   changes = fiber.Channel(size = size)
   fiber.Spawn(() -> feed(w.Value, changes))
-  result.Ok({Changes: changes, Watch: w.Value})
+  watched = {Changes: changes, Watch: w.Value}
+  if until != missing
+    fiber.Spawn(() -> closing(until, watched))
+  end
+  result.Ok(watched)
+end
+
+defn closing(until, w)
+  (** Closes a watch once the channel until closes; what is sent on it is not read for anything. *)
+  while result.IsOk(fiber.Receive(until))
+  end
+  Close(w)
 end
 
 defn Close(x)

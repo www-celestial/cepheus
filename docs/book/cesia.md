@@ -379,7 +379,7 @@ place, if that place is after the cursor.
 
 ## Watch: live questions
 
-A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64)` takes the same question as
+A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64, until = missing)` takes the same question as
 `Find` and gives an `Ok` of `{Changes, Watch}`: `Changes` is a Cesia **channel** (a queue between fibers, read with
 `fiber.Receive` or `for`; Cesia's book, chapter "Fibers") that holds `size` messages at most. Its first message is the
 **answer**, `{Group, Rows}`: the rows `Find` gives at group `Group`. Each next one is a **change**,
@@ -429,6 +429,9 @@ Ok({Group: 12, Rows: missing, Added: [], Removed: [{Invoice: 65543, Total: 45.0}
 - `cepheus.Close(w)` ends the watch: its channel closes once its last message is taken. A watch ends by itself only
   when its database is closed or its token may no longer read the database: the channel closes, and the next
   `cepheus.Watch` of that question says why.
+- `until`, a channel, ends the watch once it closes, as `cepheus.Close(w)` does. A live screen of Cesia's `std/live`
+  gives one, `s.Ended`, which closes when its page leaves: its show is then
+  `live.Show("unpaid", cepheus.Watch(1, unpaidOf(c), db, until = s.Ended)?.Changes)`, and the watch ends with the page.
 
 **How a change is computed.** A question is a join of patterns (a conjunctive query). When a group adds facts, the new
 rows are the bindings that use an added fact in at least one pattern; each is found once, at the first pattern that
@@ -504,7 +507,8 @@ How, in short ([server](server.md#local-reads-g15) tells it whole):
 
 - The server passes the program the database's run files, already open (`SCM_RIGHTS`: a Unix socket can carry open
   files from one program to another), so the program needs no right on the server's files, and its token decides what
-  it may read (G16).
+  it may read (G16). A token with [rights per kind](server.md#rights-g16) may not read the whole database: its reads go
+  to the server, which gives it only the kinds it reads.
 - Then the server sends each group's bytes on the follow stream before it forces them to its disk, and the package
   applies them to a new state while the disk works.
 - One number in shared memory, a page of the server's that every local reader maps read-only, says which state is
@@ -548,7 +552,7 @@ not `{Where, Give}`) is a bug: it stops the fiber, as `bug.Panic`, and names wha
 | `damaged` | a page of a run file did not check against its CRC | the server's operations: [operations](operations.md) |
 | `io`, `busy` | the server's disk failed, or another process holds the database | the server's operations |
 | `closed` | the database was closed by `Close` | connect again |
-| `auth`, `denied` | the token is unknown, or lacks the right on this database (G16) | the token's rights: `cepheus token add` |
+| `auth`, `denied` | the token is unknown, or lacks the right on this database or on a kind the call reads or adds to (G16) | the token's rights: `cepheus token add` |
 | `unreachable` | no server answered (at `Connect`), or none for 30 s (a call after) | start the server; a write was applied once or not at all |
 | `unknown_database` | the server has no database of this name | add it to `cluster.toml` |
 | `too_large`, `stopping`, `too_many_connections`, `version` | the server's limits and state ([errors](errors.md)) | as the message says |

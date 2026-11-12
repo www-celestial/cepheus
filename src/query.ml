@@ -19,6 +19,9 @@ type t = { vars : int; where : pattern list; ranges : (int * Value.t * Value.t) 
 exception No_answer
 exception Bad of string
 
+(* a question that passed its budget of candidates (a server's bound: Core.question_budget) *)
+exception Over_budget of int
+
 let bad fmt = Printf.ksprintf (fun s -> raise (Bad s)) fmt
 
 (* internal form: each side a variable or a word *)
@@ -207,7 +210,7 @@ let in_sorted (a : int array) c =
    [seq]: on this domain alone, the bindings in the engine's order, so that [step] may stop the fold by an exception.
    [sets]: the words some variables may take (In, Prefix): a set is a source of its variable's candidates when it is
    the smallest (a relation of one column, which the AGM bound counts as one), else a check of each candidate. *)
-let fold ?(seq = false) ?(sets = []) (v : Store.view) q ~init ~step ~merge =
+let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.view) q ~init ~step ~merge =
   match plan ~sets v q with
   | None -> init ()
   | Some { pats; limits; ord; cost = _ } ->
@@ -374,6 +377,7 @@ let fold ?(seq = false) ?(sets = []) (v : Store.view) q ~init ~step ~merge =
           Array.iter
             (fun c ->
               incr w;
+              if !w > budget then raise (Over_budget budget);
               if in_range x c then begin
                 let ok = ref true and j = ref 0 in
                 while !ok && !j < Array.length ps do
@@ -386,6 +390,7 @@ let fold ?(seq = false) ?(sets = []) (v : Store.view) q ~init ~step ~merge =
         else if src >= 0 then
           iterate x ps.(src) (fun c ->
               incr w;
+              if !w > budget then raise (Over_budget budget);
               if in_range x c then begin
                 let ok = ref true and j = ref 0 in
                 while !ok && !j < Array.length ps do
@@ -422,6 +427,7 @@ let fold ?(seq = false) ?(sets = []) (v : Store.view) q ~init ~step ~merge =
               Array.unsafe_set !b !m c;
               incr m);
           w := !w + !m;
+          if !w > budget then raise (Over_budget budget);
           if not !sorted then (let s = Array.sub !b 0 !m in Array.sort compare s; Array.blit s 0 !b 0 !m);
           lens.(xi).(j) <- !m;
           keys.(xi).(j) <- key
@@ -537,6 +543,7 @@ let fold ?(seq = false) ?(sets = []) (v : Store.view) q ~init ~step ~merge =
       if d <= 1 then begin
         let acc = ref (init ()) in
         level 0 acc;
+        (match account with Some r -> r := !r + !w0 | None -> ());
         flush w0;
         !acc
       end

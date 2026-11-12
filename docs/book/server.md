@@ -119,6 +119,10 @@ name = "shop-web"
 hash = "blake2b-256:9f4c...e1"
 databases = { shop = "write", stock = "read" }
 [[token]]
+name = "billing"
+hash = "blake2b-256:0c7d...a2"
+databases = { shop = { read = ["client", "invoice"], add = ["invoice"] } }
+[[token]]
 name = "ops"
 hash = "blake2b-256:51aa...07"
 admin = true
@@ -126,6 +130,9 @@ admin = true
 
 - `read`: Open, Get, Find on that database. `write`: read and Write. `admin = true`: the server's operations
   (`status`); no data right by itself.
+- **Rights per kind**, `{ read = [...], add = [...] }`: the right to read, and to add to, only the kinds named. A
+  property's **kind** is its name up to its first `/`: `invoice/Total` is of the kind `invoice`, as the Cesia client's
+  `cepheus.Kind("invoice", ...)` names it. See [Rights](#rights-g16).
 - The server reads the file again within a second of a change (its time, size or inode); a token removed, or whose
   rights shrank, takes effect at the next request of every connection that holds it (G16). A file that does not
   parse is not loaded (the server says why, and keeps the tokens it had).
@@ -145,7 +152,7 @@ cepheus cluster cert NAME --dir DIR [--host H]...
 cepheus serve --config FILE              run the server until SIGTERM or SIGINT
 cepheus stop --config FILE               SIGTERM to the server that holds FILE's data, and wait for it to end
 cepheus status --config FILE             what the server holds and does; an admin token in CEPHEUS_TOKEN
-cepheus token add NAME --database DB=read|write ... [--admin] --config FILE
+cepheus token add NAME --database DB=read|write|read:KIND,...;add:KIND,... ... [--admin] --config FILE
                                          a new token, printed once on stdout (cph_ and 43 characters); its hash goes
                                          to tokens.toml
 cepheus token list --config FILE         names and rights (never the tokens)
@@ -787,10 +794,33 @@ and its reads go to the server, which refuses them (within about two seconds of 
 then a tick). *Conditions*: the token is secret; `tokens.toml` is writable by the server's user only. *Proof*: every
 request passes one check of the connection's rights for its database, recomputed whenever the table of tokens
 changes (one comparison of the table's identity a request); writes carry the token's name in their origin; the
-descriptors of a database's files are passed only after the check of `Follow`. *Tests*: `server_unit` (every token against every request on every database, a removed token, rights
-narrowed, a forged origin refused, a frame over the limit); `server_sim` (random requests of every token checked
+descriptors of a database's files are passed only after the check of `Follow`; for a token per kind, each fact of a `Get`, each pattern of a `Find` or a
+`Watch` (those inside `Not` and `Or` too: an absence or an alternative of a fact of a kind reads that kind) and each
+fact of a `Write` is checked against one byte a property, made again when the schema changes. `In`, `Prefix`, Sort,
+Limit and After then act on the rows of a question of kinds read only, so the rows, their order, their count and a
+page after a cursor made by hand reveal nothing a question of those kinds could not, and a `Prefix` reads the order of
+the texts of its own property only (its time depends on that property's texts, no other's). *Tests*: `server_unit` (every token against every request on every database, a removed token, rights
+narrowed, a forged origin refused, a frame over the limit, every request of a token per kind, 600 random questions
+with `Not`, `Or`, `In`, Sort, Limit and After (cursors made by hand) of a token per kind against a write token's
+answers, `tokens.toml` written back byte for byte); `server_sim` (random requests of every token checked
 against its rights, and every group of the journal against its token's); `server_crash` (a token removed from the file
 while its program is connected and reads in its own memory).
+
+A token with **rights per kind** (`{ read = ["client", "invoice"], add = ["invoice"] }`, or
+`--database "shop=read:client,invoice;add:invoice"`) reads and adds only those kinds:
+
+- `Get` gives only the facts of the kinds it reads, as if the thing had no others. A `Find` or a `Watch` with a pattern
+  on a kind it does not read is refused with `denied` when it arrives. `Open` still lists every property's name: the
+  schema is not data.
+- `Write` adds, retracts or expects facts of the kinds it adds only, and declares properties of those kinds only; a
+  group with one fact of another kind is refused whole with `denied`. Rules are for `write` tokens only: a rule reads
+  every kind.
+- It never reads in its own memory: a local reader maps the whole database, so the server refuses its `Follow`, and
+  its reads go to the server. The clients do it by themselves.
+
+The check costs 21.95 ns [21.85, 22.07] a group of 4 facts (`sbench rights`: the median of 21 rounds of a million
+groups, with its 95 % interval; a schema of 40 properties of 10 kinds), beside the tens of microseconds of a write
+through the server; a token `read` or `write` pays one comparison more a request.
 
 ### Who may reach the socket
 

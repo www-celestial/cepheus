@@ -35,7 +35,12 @@ let lead (v : Store.view) (q : Query.t) x =
       | _ -> best)
     None q.where
 
-let answer ?(order = Top.none) ?(extra = []) (v : Store.view) (q : Query.t) (sel : Wire.select) =
+(* the work a question may take at the server, in candidates of its join (each domain's, and its Nots' together): past
+   it, Query.Over_budget, and the program is told to ask a narrower question; a program reading in its own memory has
+   no budget but its own *)
+let question_budget = ref 1_000_000_000
+
+let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view) (q : Query.t) (sel : Wire.select) =
   (* Not, Or and In beside the patterns and ranges: the question goes through Ask *)
   let ask = if extra = [] then None else Some (Ask.compile v q extra) in
   let ty = match ask with None -> Query.types v q | Some a -> Ask.typs_of a in
@@ -47,8 +52,8 @@ let answer ?(order = Top.none) ?(extra = []) (v : Store.view) (q : Query.t) (sel
   in
   let fold ?seq ?range ~init ~step ~merge () =
     match ask with
-    | None -> Query.fold ?seq v (match range with None -> q | Some r -> { q with ranges = r :: q.ranges }) ~init ~step ~merge
-    | Some a -> Ask.fold ?seq ?range v a ~init ~step ~merge
+    | None -> Query.fold ?seq ~budget v (match range with None -> q | Some r -> { q with ranges = r :: q.ranges }) ~init ~step ~merge
+    | Some a -> Ask.fold ?seq ~budget ?range v a ~init ~step ~merge
   in
   match sel with
   | Wire.Give give when order <> Top.none ->

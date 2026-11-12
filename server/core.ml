@@ -42,6 +42,7 @@ and conn = {
   mutable token : Tokens.token option;
   mutable seen : Tokens.t;  (* the token table the rights below come from *)
   mutable rights : Tokens.right option array;  (* by database index *)
+  mutable kinds : (Schema.t * Bytes.t) option array;  (* a token's rights per kind, by property, by database index *)
   mutable session : int;
   om : Mutex.t;  (* the output and the writes in flight *)
   oc : Condition.t;  (* signalled when a write in flight ends *)
@@ -73,7 +74,7 @@ let connect ?(wake = ignore) srv ~flush ~submit =
       let cid = srv.next_conn in
       srv.next_conn <- cid + 1;
       let c =
-        { srv; cid; token = None; seen = Tokens.empty; rights = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
+        { srv; cid; token = None; seen = Tokens.empty; rights = [||]; kinds = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
           inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = [];
           closed = false; wake }
@@ -118,7 +119,8 @@ let refresh_rights c =
       | None -> c.token <- None; c.rights <- [||]
       | Some t ->
         c.token <- Some t;
-        c.rights <- Array.map (fun d -> Tokens.right t d.name) c.srv.dbs)
+        c.rights <- Array.map (fun d -> Tokens.right t d.name) c.srv.dbs;
+        c.kinds <- Array.make (Array.length c.srv.dbs) None)
   end
 
 let db_of c ~id ~kind i =
@@ -133,9 +135,67 @@ let readable c ~id ~kind i =
 let writable c ~id ~kind i =
   match db_of c ~id ~kind i with
   | None -> None
-  | Some d ->
-    if c.rights.(i) = Some Tokens.Write then Some d
-    else (err c ~id ~kind "denied" "this token may not write %s" d.name; None)
+  | Some d -> (
+    match c.rights.(i) with
+    | Some (Tokens.Write | Tokens.Kinds { add = _ :: _; _ }) -> Some d
+    | _ -> err c ~id ~kind "denied" "this token may not write %s" d.name; None)
+
+(* ---- rights per kind ---- *)
+
+(* For a token with rights per kind, a byte a property of the schema: 1 it may read it, 2 add to it; made again only
+   when the schema changes, so that a check costs a load a fact. *)
+let kinds_table c i (v : Store.view) r =
+  match c.kinds.(i) with
+  | Some (s, t) when s == v.schema -> t
+  | _ ->
+    let t = Bytes.make (Schema.count v.schema) '\000' in
+    for p = 0 to Bytes.length t - 1 do
+      match Schema.find v.schema p with
+      | Some d ->
+        let k = Tokens.kind_of d.name in
+        let r = (if Schema.is_system p || Tokens.reads_kind r k then 1 else 0) lor if Tokens.adds_kind r k then 2 else 0 in
+        Bytes.unsafe_set t p (Char.unsafe_chr r)
+      | None -> ()
+    done;
+    c.kinds.(i) <- Some (v.schema, t);
+    t
+
+let bit t p b = p < Bytes.length t && Char.code (Bytes.unsafe_get t p) land b <> 0
+let kind_name (v : Store.view) p = match Schema.find v.schema p with Some d -> Tokens.kind_of d.name | None -> string_of_int p
+
+(* the kind of the first pattern of a question that the token may not read, if any: every pattern, those inside Not
+   and Or too (an absence, or an alternative, of a fact of a kind is a read of that kind) *)
+let unreadable t (v : Store.view) (q : Query.t) extra =
+  match List.find_opt (fun (pt : Query.pattern) -> not (bit t pt.p 1)) (Ask.patterns q extra) with Some pt -> Some (kind_name v pt.p) | None -> None
+
+(* the kind of the first fact of a group that the token may not add, if any: a fact of a property, or the declaration
+   of a property (its name, type, many or unique), of the property's kind, by its name in the schema or in this group;
+   rules are for tokens that write every kind *)
+let unaddable c i (v : Store.view) r ops =
+  let t = kinds_table c i v r in
+  let declared e =
+    match Schema.find v.schema e with
+    | Some d -> Some (Tokens.kind_of d.name)
+    | None ->
+      List.find_map (function Resolve.Add (x, p, Value.Text n) when x = e && p = Schema.p_name -> Some (Tokens.kind_of n) | _ -> None) ops
+  in
+  List.find_map
+    (fun (op : Resolve.op) ->
+      let e, p = match op with Add (e, p, _) | Retract (e, p, _) | Expect (e, p, _) -> e, p in
+      if not (Schema.is_system p) then if bit t p 2 then None else Some (kind_name v p)
+      else if p = Schema.p_rule || Schema.rule v.schema e <> None then Some "rules"
+      else match declared e with Some k when Tokens.adds_kind r k -> None | Some k -> Some k | None -> Some (string_of_int e))
+    ops
+
+(* a question that a token with rights per kind may not read: denied, when it arrives *)
+let kinds_read c ~id ~kind d q extra =
+  match c.rights.(d.index) with
+  | Some (Tokens.Kinds _ as r) -> (
+    let v = d.view () in
+    match unreadable (kinds_table c d.index v r) v q extra with
+    | Some k -> err c ~id ~kind "denied" "this token may not read the kind %s of %s" k d.name; false
+    | None -> true)
+  | _ -> true
 
 (* ---- reads ---- *)
 
@@ -156,10 +216,12 @@ let get c ~id ~kind d thing =
   Buffer.clear b;
   Buffer.clear f;
   let n = ref 0 in
+  (* a token with rights per kind gets the facts of the kinds it reads, as if the thing had no other *)
+  let t = match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> Some (kinds_table c d.index v r) | _ -> None in
   Store.iter_facts v thing (fun p w ->
       match Schema.find v.schema p with
-      | Some dsc -> incr n; Codec.put_varint f p; put_word f v dsc.typ w
-      | None -> ());
+      | Some dsc when (match t with None -> true | Some t -> bit t p 1) -> incr n; Codec.put_varint f p; put_word f v dsc.typ w
+      | _ -> ());
   Codec.put_varint b v.group;
   Codec.put_varint b !n;
   Buffer.add_buffer b f;
@@ -187,11 +249,13 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
 
 let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
   let v = d.view () in
-  match Answer.answer ~order ~extra v q sel with
+  match Answer.answer ~order ~extra ~budget:!Answer.question_budget v q sel with
   | a ->
     let typs = Array.init a.cols a.typ in
     send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
+  | exception Query.Over_budget n ->
+    err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
   | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
 
 (* ---- writes ---- *)
@@ -214,7 +278,11 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
           Condition.broadcast c.oc);
       c.flush ()
     in
-    let published = (d.view ()).group in
+    let v = d.view () in
+    let published = v.group in
+    match match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> unaddable c d.index v r ops | _ -> None with
+    | Some k -> err c ~id ~kind "denied" "this token may not add to the kind %s of %s" k d.name
+    | None ->
     (* counted in flight before the table may hand [answer] to a write that ends at once *)
     Mutex.protect c.om (fun () -> c.inflight <- c.inflight + 1);
     let not_in_flight () = Mutex.protect c.om (fun () -> c.inflight <- c.inflight - 1; Condition.broadcast c.oc) in
@@ -251,7 +319,13 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
       seen := cur;
       reads :=
         match List.find_opt (fun (t : Tokens.token) -> t.name = tok.name && Tokens.equal_ct t.hash tok.hash) cur.tokens with
-        | Some t -> Tokens.right t d.name <> None
+        | Some t -> (
+          match Tokens.right t d.name with
+          | None -> false
+          | Some (Tokens.Read | Tokens.Write) -> true
+          | Some (Tokens.Kinds _ as r) ->
+            let v = d.view () in
+            List.for_all (fun (pt : Query.pattern) -> Schema.is_system pt.p || Tokens.reads_kind r (kind_name v pt.p)) (Ask.patterns q extra))
         | None -> false
     end;
     !reads
@@ -280,6 +354,8 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
   match Live.subscribe ~extra h q sel ~from ~emit with
   | s -> Mutex.protect c.pm (fun () -> c.watching <- (id, (h, s)) :: c.watching)
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
+  | exception Query.Over_budget n ->
+    err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
   | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
   | exception Failure m -> err c ~id ~kind "stopping" "%s" m
 
@@ -336,6 +412,7 @@ let handle c ~id ~kind (r : Codec.reader) =
             c.token <- Some tok;
             c.seen <- tokens;
             c.rights <- Array.map (fun d -> Tokens.right tok d.name) c.srv.dbs;
+            c.kinds <- Array.make (Array.length c.srv.dbs) None;
             c.session <- (if h.session > 0 then h.session else c.srv.new_session ());
             reply c ~id ~kind
               (Wire.Welcome { server = c.srv.server_id; cluster = c.srv.cluster_id; session = c.session; frame = Wire.max_frame;
@@ -371,7 +448,9 @@ let handle c ~id ~kind (r : Codec.reader) =
            | Some d -> ( try get c ~id ~kind d g.thing with Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m));
           Continue
         | _, Wire.Find f ->
-          (match readable c ~id ~kind f.db with None -> () | Some d -> find c ~id ~kind d f.query f.select f.extra f.order);
+          (match readable c ~id ~kind f.db with
+           | None -> ()
+           | Some d -> if kinds_read c ~id ~kind d f.query f.extra then find c ~id ~kind d f.query f.select f.extra f.order);
           Continue
         | _, Wire.Write w ->
           (match writable c ~id ~kind w.db with
@@ -379,13 +458,18 @@ let handle c ~id ~kind (r : Codec.reader) =
            | Some d -> write c ~id ~kind d ~serial:w.serial ~floor:w.floor ~by:w.by ~why:w.why w.ops);
           Continue
         | _, Wire.Watch w ->
-          (match readable c ~id ~kind w.db with None -> () | Some d -> watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra);
+          (match readable c ~id ~kind w.db with
+           | None -> ()
+           | Some d -> if kinds_read c ~id ~kind d w.query w.wextra then watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra);
           Continue
         | _, Wire.Unwatch w -> unwatch c ~id ~kind w; Continue
         | _, Wire.Follow i -> (
           (* a reader's right is enough (G16); a follow stream carries nothing else *)
           match readable c ~id ~kind i with
           | None -> Continue
+          | Some d when (match c.rights.(i) with Some (Tokens.Kinds _) -> true | _ -> false) ->
+            err c ~id ~kind "denied" "local reads need a right to read every kind of %s: this token reads at the server" d.name;
+            Continue
           | Some d ->
             if Mutex.protect c.om (fun () -> c.inflight) > 0 then (err c ~id ~kind "invalid" "Follow on a connection with writes in flight"; Close)
             else Follows (d, id))))

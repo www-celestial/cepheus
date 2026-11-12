@@ -179,14 +179,7 @@ let new_template (v : Store.view) key tq nq (sel : Wire.select) =
     slots = Array.init (tq.vars - nq) (fun _ -> Hashtbl.create 8); count = 0; extra = [] }
 
 (* every pattern of a question with Not, Or and In, theirs too: the properties a frame must touch *)
-let all_patterns (q : Query.t) extra =
-  let rec of_item = function
-    | Ask.Pattern p -> [ p ]
-    | Range _ | In _ -> []
-    | Not l -> List.concat_map of_item l
-    | Or alts -> List.concat_map (List.concat_map of_item) alts
-  in
-  q.where @ List.concat_map of_item extra
+let all_patterns = Ask.patterns
 
 let whole_template (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =
   let a = Ask.compile v q extra in
@@ -245,7 +238,7 @@ let answer (v : Store.view) (s : sub) =
   let t = s.t in
   if t.extra <> [] then begin
     let sel = if Array.length t.aggs = 0 then Wire.Give t.give else Wire.Group (t.give, t.aggs) in
-    let a = Answer.answer ~extra:t.extra v s.q sel in
+    let a = Answer.answer ~extra:t.extra ~budget:!Answer.question_budget v s.q sel in
     let typs = Array.init a.cols a.typ in
     let rows = List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))) in
     s.wrows <- rows;
@@ -531,9 +524,12 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
                        (fun s ->
                          if not s.gone then begin
                            let before = s.wrows in
-                           let after = answer v1 s in
-                           let added, removed = diff before after in
-                           if added <> [] || removed <> [] then wholes := (s, Change { group = v1.group; added; removed }) :: !wholes
+                           match answer v1 s with
+                           | after ->
+                             let added, removed = diff before after in
+                             if added <> [] || removed <> [] then wholes := (s, Change { group = v1.group; added; removed }) :: !wholes
+                           | exception Query.Over_budget n ->
+                             wholes := (s, Ended { code = "too_large"; message = Printf.sprintf "the question passed the server's budget of %d candidates" n }) :: !wholes
                          end)
                        ss)
                    t.subs

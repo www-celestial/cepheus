@@ -375,6 +375,9 @@ the usual one, both are given.
   (G13). [guarantees](guarantees.md#g13-a-failed-fsync-is-never-trusted)
 - **right** — what a token may do on a database: `read` (Open, Get, Find) or `write` (and Write); `admin`: the
   server's operations. [server](server.md#rights-g16)
+- **right per kind** — a token's right on a database that names kinds: to read only the facts of some kinds, and to add
+  only to some (`{ read = ["client", "invoice"], add = ["invoice"] }`); a property's kind is its name up to its first
+  `/`. Such a token reads at the server, never in its own memory. [server](server.md#rights-g16)
 - **round** (of the commit buffer) — the frames of every database that came while the previous round was forced,
   written as one record of the buffer and forced by one fsync; each frame is confirmed after it. One round is in
   flight at a time. [the server](server.md#many-databases-one-fsync-the-commit-buffer)

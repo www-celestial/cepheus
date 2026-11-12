@@ -31,6 +31,16 @@ let vars_of_item = function
   | Range (x, _, _) | In (x, _) -> [ x ]
   | Not _ | Or _ -> []
 
+(* every pattern of a question, those inside Not and Or too *)
+let patterns (q : Query.t) extra =
+  let rec of_item = function
+    | Pattern p -> [ p ]
+    | Range _ | In _ -> []
+    | Not l -> List.concat_map of_item l
+    | Or alts -> List.concat_map (List.concat_map of_item) alts
+  in
+  q.where @ List.concat_map of_item extra
+
 let flat_vars items = List.sort_uniq compare (List.concat_map vars_of_item items)
 
 let pattern_vars items = List.sort_uniq compare (List.concat_map (function Pattern _ as i -> vars_of_item i | _ -> []) items)
@@ -88,8 +98,20 @@ let types (v : Store.view) nvars items =
   List.iter ranges items;
   ty
 
+(* bounds against a question that would cost the server more than its answer is worth *)
+let max_in = 10_000
+let max_operators = 64
+let max_conjunctions = 64
+
 let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
   let n = q.vars in
+  let rec size = function Not l -> 1 + List.fold_left (fun s i -> s + size i) 0 l | Or alts -> 1 + List.fold_left (fun s a -> s + List.fold_left (fun s i -> s + size i) 0 a) 0 alts | _ -> 1 in
+  let ops = List.fold_left (fun s i -> s + size i) 0 extra in
+  if ops > max_operators then bad "a question takes at most %d operators and their items, not %d" max_operators ops;
+  let rec ins = function In (_, l) -> if List.length l > max_in then bad "In takes at most %d values, not %d" max_in (List.length l) | Not l -> List.iter ins l | Or alts -> List.iter (List.iter ins) alts | _ -> () in
+  List.iter ins extra;
+  let conj = List.fold_left (fun c -> function Or alts -> c * max 1 (List.length alts) | _ -> c) 1 extra in
+  if conj > max_conjunctions then bad "a question's Ors make %d questions to ask (the product of their alternatives): at most %d" conj max_conjunctions;
   let top = List.map (fun pt -> Pattern pt) q.where @ List.map (fun (x, lo, hi) -> Range (x, lo, hi)) q.ranges @ extra in
   let typs = types v n top in
   List.iter
@@ -193,7 +215,7 @@ exception Found
 
 (* a Not compiled: [holds env] on the conjunction's words (renumbered by [at]) is true when the Not's items have an
    answer, the binding then dropped *)
-let not_check (v : Store.view) (t : t) at (nt : not_) : int array -> bool =
+let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : not_) : int array -> bool =
   let typs = typs_of t in
   match nt.items, nt.own with
   | [ Pattern { e; p; v = pv } ], [] ->
@@ -238,9 +260,17 @@ let not_check (v : Store.view) (t : t) at (nt : not_) : int array -> bool =
       !ok
       &&
       let q = { Query.vars = Array.length own; where = List.rev !pats; ranges = List.rev !ranges } in
-      match Query.fold ~seq:true ~sets:!sets v q ~init:(fun () -> ()) ~merge:(fun () () -> ()) ~step:(fun () _ -> raise Found) with
-      | () -> false
-      | exception Found -> true
+      (* the Nots' own questions share the question's budget: their work adds up *)
+      let left = budget - Atomic.get spent in
+      if left <= 0 then raise (Query.Over_budget budget);
+      let wk = ref 1 in
+      let found =
+        match Query.fold ~seq:true ~sets:!sets ~budget:left ~account:wk v q ~init:(fun () -> ()) ~merge:(fun () () -> ()) ~step:(fun () _ -> raise Found) with
+        | () -> false
+        | exception Found -> true
+      in
+      ignore (Atomic.fetch_and_add spent !wk);
+      found
 
 (* [fold v t ?range]: every binding of the question's variables, as an array of words a variable (the others' cells
    are 0), each once; [range]: one more range on a variable of the question *)
@@ -262,19 +292,20 @@ let dense ?range (v : Store.view) (t : t) (c : conj) =
   in
   q, dense, back, List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins
 
-let fold ?(seq = false) ?range (v : Store.view) (t : t) ~init ~step ~merge =
+let fold ?(seq = false) ?(budget = max_int) ?range (v : Store.view) (t : t) ~init ~step ~merge =
+  let spent = Atomic.make 0 in
   let run (c : conj) =
     let q, dense, back, sets = dense ?range v t c in
-    let checks = List.map (not_check v t (fun x -> dense.(x))) c.nots in
+    let checks = List.map (not_check ~budget ~spent v t (fun x -> dense.(x))) c.nots in
     let outer = Array.to_list (Array.mapi (fun d x -> d, x) back) |> List.filter (fun (_, x) -> t.outer.(x)) in
     let full env = let b = Array.make t.vars 0 in List.iter (fun (d, x) -> b.(x) <- env.(d)) outer; b in
     let keep env = List.for_all (fun h -> not (h env)) checks in
     if c.free = [] then
-      Query.fold ~seq ~sets v q ~init ~merge ~step:(fun acc env -> if keep env then step acc (full env) else acc)
+      Query.fold ~seq ~sets ~budget v q ~init ~merge ~step:(fun acc env -> if keep env then step acc (full env) else acc)
     else begin
       (* bindings once each, though the alternative's own variables give one for each of their values *)
       let seen = Hashtbl.create 64 in
-      Query.fold ~seq:true ~sets v q ~init ~merge
+      Query.fold ~seq:true ~sets ~budget v q ~init ~merge
         ~step:(fun acc env ->
           if keep env then begin
             let b = full env in

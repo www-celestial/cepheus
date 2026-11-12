@@ -27,6 +27,9 @@ type order = { keys : key list; limit : int; after : Value.t array option }
 
 let none = { keys = []; limit = 0; after = None }
 
+(* the most rows a page: a bound against a question that asks the server to hold its whole answer sorted *)
+let max_limit = 100_000
+
 (* which path answers: Auto chooses; the others are for the tests and the benchmarks *)
 type path = Auto | Heap | Index
 
@@ -142,6 +145,8 @@ exception Enough
 let check cols (typs : Value.typ array) o =
   List.iter (fun k -> if k.col < 0 || k.col >= cols then bad "Sort: column %d out of range" k.col) o.keys;
   if o.limit < 0 then bad "Limit needs a number of rows of 1 or more, not %d" o.limit;
+  if o.limit > max_limit then bad "Limit: at most %d rows a page, not %d" max_limit o.limit;
+  if List.length o.keys > cols then bad "Sort: at most one key a column";
   match o.after with
   | Some a ->
     if o.keys = [] then bad "After needs Sort: the rows after a row, in an order";
