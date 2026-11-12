@@ -315,6 +315,46 @@ let () =
   C.check (sources (view db) status = None) "a rule over a variable property: status may come from any property";
   ignore meta
 
+let () =
+  section "rules: a closure's retractions decided by walks, against the least model and against B/F";
+  let x = Var 0 and y = Var 1 and z = Var 2 in
+  let run walk =
+    Reason.walk_retract := walk;
+    let db = fork empty in
+    let _, parent, member, member_of, status, _ = schema db in
+    let trp = { name = "trp"; vars = 3; where = [ { e = x; p = parent; v = y }; { e = y; p = parent; v = z } ]; ranges = []; head = Give { e = x; p = parent; v = z } } in
+    let base = { name = "base"; vars = 2; where = [ { e = x; p = member; v = y } ]; ranges = []; head = Give { e = x; p = member_of; v = y } } in
+    let step = { name = "step"; vars = 3; where = [ { e = x; p = member; v = y }; { e = y; p = member_of; v = z } ]; ranges = []; head = Give { e = x; p = member_of; v = z } } in
+    (* another rule reads both closures: its facts follow their losses *)
+    let flag = { name = "flag"; vars = 2; where = [ { e = x; p = parent; v = y }; { e = x; p = member_of; v = y } ]; ranges = []; head = Give { e = x; p = status; v = Val (Text "both") } } in
+    ignore (ok (define db [ trp; base; step; flag ]));
+    let r = ok (write db (List.init 40 (fun i -> Add (-(i + 1), status, Text "s")))) in
+    let n = Array.init 40 (fun i -> thing r (-(i + 1))) in
+    let rng = Rng.make 5 in
+    let views = ref [] in
+    for g = 1 to 120 do
+      let a = n.(Rng.int rng 40) and b = n.(Rng.int rng 40) in
+      let p = if Rng.bool rng then parent else member in
+      let v = view db in
+      let ops =
+        match Rng.int rng 3 with
+        | 0 -> (match List.filter (fun (q, w) -> q = p && Store.state v a q (Option.get (Store.word v w)) = 1) (get v a) with
+                | (q, w) :: _ -> [ Retract (a, q, w) ] | [] -> [ Add (a, p, Link b) ])
+        | 1 -> [ Add (a, member_of, Link b) ]
+        | _ -> [ Add (a, p, Link b) ]
+      in
+      ignore (write db ops);
+      let v = view db in
+      if walk then C.check (F.equal (user_facts v) (least (rules_of v) (asserted_facts v))) "walks: group %d: the least model" g;
+      views := user_facts v :: !views
+    done;
+    check_proofs (view db);
+    List.rev !views
+  in
+  let a = run true and b = run false in
+  Reason.walk_retract := true;
+  C.check (List.for_all2 F.equal a b) "walks and B/F: the same view after every group"
+
 (* ---- G17, G18, G20: random sequences against the least model from scratch ---- *)
 
 let debug = match Sys.getenv_opt "RULES_SEED" with Some s -> int_of_string s | None -> 0
@@ -522,11 +562,13 @@ let () =
   random_sequences ~seeds ~groups:60 ~merges:false;
   section "G17, G18, G20: the same with the facts merged into runs between groups";
   random_sequences ~seeds ~groups:60 ~merges:true;
-  section "the rules always as written (no unfolding): every group's view the same as above";
+  section "the rules always as written (no unfolding) and closures retracted by B/F: every group's view the same as above";
   Reason.specialise := false;
+  Reason.walk_retract := false;
   compare_paths := true;
   random_sequences ~seeds ~groups:60 ~merges:false;
   Reason.specialise := true;
+  Reason.walk_retract := true;
   compare_paths := false
 
 let () =

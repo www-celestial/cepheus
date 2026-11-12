@@ -426,6 +426,43 @@ let closure_bench kind form dir =
     !Reason.module_seconds !Reason.bulk_index_seconds;
   close db
 
+(* the retraction of one edge of a closure built as above (the edge of node [k]: in the hierarchy a node of depth 2,
+   its subtree 6,250 things; in the DAG the first edge of node 2,500), by walks or by B/F through the rule's plans:
+   the group's time, its reasoning, the facts lost; the closure after counted *)
+let closure_del kind form dir how =
+  Reason.walk_retract := how = "walk";
+  let n, edges, k =
+    match kind with
+    | "hierarchy" -> 100_000, tree 100_000 4, 5
+    | "dag" -> 5_000, dag 5_000 3 1, 2_500
+    | k -> failwith ("no graph " ^ k)
+  in
+  let db = if dir = "-" then fork empty else ok (open_ dir) in
+  let e, t = match ok (declare db [ prop ~many:true "edge" Tlink; prop ~many:true "within" Tlink ]) with [ e; t ] -> e, t | _ -> assert false in
+  let x = Var 0 and y = Var 1 and z = Var 2 in
+  let edge_p = if form = "linear" then e else t in
+  (match form with
+   | "trp" -> ignore (ok (define db [ { name = "trp"; vars = 3; where = [ { e = x; p = t; v = y }; { e = y; p = t; v = z } ]; ranges = []; head = Give { e = x; p = t; v = z } } ]))
+   | _ ->
+     ignore (ok (define db [ { name = "base"; vars = 2; where = [ { e = x; p = e; v = y } ]; ranges = []; head = Give { e = x; p = t; v = y } };
+                             { name = "step"; vars = 3; where = [ { e = x; p = e; v = y }; { e = y; p = t; v = z } ]; ranges = []; head = Give { e = x; p = t; v = z } } ])));
+  let r = ok (write db (List.init n (fun i -> Add (-(i + 1), e, Link (-(i + 1)))))) in
+  let node = Array.init n (fun i -> thing r (-(i + 1))) in
+  ignore (ok (write db (List.init n (fun i -> Retract (node.(i), e, Link node.(i))))));
+  ignore (ok (write db (List.map (fun (a, b) -> Add (node.(a), edge_p, Link node.(b))) edges)));
+  let a, b = List.find (fun (a, _) -> a = k) edges in
+  let count () = let c = ref 0 in Array.iter (fun x -> Store.iter_values (view db) x t (fun _ -> incr c)) node; !c in
+  let before = count () in
+  Gc.compact ();
+  Reason.seconds := 0.;
+  let t0 = now () in
+  ignore (ok (write db [ Retract (node.(a), edge_p, Link node.(b)) ]));
+  let el = now () -. t0 in
+  let after = count () in
+  Printf.printf "closure-del %s %s %s: the edge %d -> %d retracted in %.4f s, reasoning %.4f s; closure %d -> %d facts (%d lost)\n%!" kind form how a b el
+    !Reason.seconds before after (before - after);
+  close db
+
 (* ---- LUBM with the W3C's form of the rules: the ontology as facts ---- *)
 
 let w3c_props =
@@ -598,5 +635,6 @@ let () =
   | [ "why"; n; r; dir ] -> why_bench dir (int_of_string n) (int_of_string r)
   | [ "apply"; n ] -> apply_bench (int_of_string n)
   | [ "closure"; kind; form; dir ] -> closure_bench kind form dir
+  | [ "closure-del"; kind; form; dir; how ] -> closure_del kind form dir how
   | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2

@@ -62,6 +62,7 @@ let respecs = ref 0  (* groups begun unfolded, then reasoned again as written: a
 let batches = ref 0  (* closure modules run from scratch *)
 let trace = ref false  (* the phases of a closure from scratch, printed (the benchmarks) *)
 let specialise = ref true  (* false: the rules always run as written (the tests compare both paths) *)
+let walk_retract = ref true  (* false: a closure's retractions by B/F through its rules' plans (the tests compare) *)
 let module_seconds = ref 0. (* of [seconds]: the closure modules' work, their facts found and put aside *)
 
 (* ---- hashing ---- *)
@@ -99,7 +100,7 @@ let slots_for facts = let size = ref 64 in while !size < 2 * facts do size := 2 
 let[@inline never] new_slots size = let a = ints (3 * size) 0 in for i = 0 to size - 1 do A.unsafe_set a (3 * i) (-1) done; a
 
 (* [keys]: the keys expected, for the size of the table (it grows past them); [facts]: the facts' chains *)
-let idx_create ?(facts = 64) ?(keys = facts) () =
+let[@inline never] idx_create ?(facts = 64) ?(keys = facts) () =
   let size = slots_for keys in
   { sl = new_slots size; mask = size - 1; used = 0; slots = ints (size / 2) 0; next = ints facts (-1) }
 
@@ -125,7 +126,7 @@ let[@inline never] idx_grow t =
     A.unsafe_set t.slots k i
   done
 
-let idx_add t a b x =
+let[@inline never] idx_add t a b x =
   if 2 * (t.used + 1) > t.mask + 1 then idx_grow t;
   let i = idx_slot t a b in
   if A.unsafe_get t.sl (3 * i) = -1 then begin
@@ -170,7 +171,7 @@ type ws = {
                               skips it) *)
 }
 
-let ws_create ?(facts = 64) () =
+let[@inline never] ws_create ?(facts = 64) () =
   let c = max 64 facts in
   let size = ref 128 in
   while !size < 2 * c do size := 2 * !size done;
@@ -210,7 +211,7 @@ let[@inline] find ws e p w =
     !r
   end
 
-let place ws x =
+let[@inline never] place ws x =
   let i = ref (h3 (fe ws x) (fp ws x) (fw ws x) land ws.smask) in
   while A.unsafe_get ws.set !i <> -1 do i := (!i + 1) land ws.smask done;
   A.unsafe_set ws.set !i x
@@ -232,7 +233,7 @@ let[@inline never] grow_set ws =
   for x = 0 to ws.n - 1 do place ws x done
 
 (* a fact the working set did not hold: its id *)
-let add ws e p w base =
+let[@inline never] add ws e p w base =
   if ws.n >= ws.cap then grow ws;
   if 2 * (ws.n + 1) > A.dim ws.set then grow_set ws;
   let x = ws.n in
@@ -252,7 +253,7 @@ let[@inline] has ws x m = Char.code (Bytes.unsafe_get ws.mark x) land m <> 0
 let[@inline] set_mark ws x m = Bytes.unsafe_set ws.mark x (Char.unsafe_chr (Char.code (Bytes.unsafe_get ws.mark x) lor m))
 
 (* in the chains: a fact the view lacks (base absent) once it is present *)
-let chain ws x =
+let[@inline never] chain ws x =
   if not (has ws x 8) then begin
     set_mark ws x 8;
     let p = fp ws x in
@@ -261,7 +262,7 @@ let chain ws x =
     if ws.with_ip then idx_add ws.ip p 0 x
   end
 
-let set_now ws x s =
+let[@inline never] set_now ws x s =
   Bytes.unsafe_set ws.now x (Char.unsafe_chr s);
   if s > 0 && base ws x = 0 then chain ws x
 
@@ -284,7 +285,7 @@ let[@inline never] reset ws =
 
 type buf = { mutable b : ints; mutable bn : int }
 
-let buf_create n = { b = ints (max 16 n) 0; bn = 0 }
+let[@inline never] buf_create n = { b = ints (max 16 n) 0; bn = 0 }
 let[@inline] buf_push q x = if q.bn >= A.dim q.b then q.b <- regrow q.b q.bn (2 * A.dim q.b) 0; A.unsafe_set q.b q.bn x; q.bn <- q.bn + 1
 let[@inline] buf_get q i = A.unsafe_get q.b i
 
@@ -293,7 +294,7 @@ type iset = { mutable keys : ints; mutable imask : int; used : buf }
 
 let iset_create () = { keys = ints 64 (-1); imask = 63; used = buf_create 32 }
 
-let iset_clear s = for i = 0 to s.used.bn - 1 do A.unsafe_set s.keys (buf_get s.used i) (-1) done; s.used.bn <- 0
+let[@inline never] iset_clear s = for i = 0 to s.used.bn - 1 do A.unsafe_set s.keys (buf_get s.used i) (-1) done; s.used.bn <- 0
 
 let rec iset_add s k =
   if 2 * (s.used.bn + 1) > s.imask + 1 then begin
@@ -312,12 +313,12 @@ let rec iset_add s k =
 (* a map of non-negative ints to dense ids 0, 1, ..., in their order of arrival *)
 type imap = { mk_keys : ints; mk_vals : ints; mk_mask : int; mutable mk_n : int; mk_of : buf }
 
-let imap_create n =
+let[@inline never] imap_create n =
   let size = ref 64 in
   while !size < 2 * n do size := 2 * !size done;
   { mk_keys = ints !size (-1); mk_vals = ints !size 0; mk_mask = !size - 1; mk_n = 0; mk_of = buf_create n }
 
-let imap_id m k =
+let[@inline never] imap_id m k =
   let i = ref (mix k land m.mk_mask) in
   while (let x = A.unsafe_get m.mk_keys !i in x <> -1 && x <> k) do i := (!i + 1) land m.mk_mask done;
   if A.unsafe_get m.mk_keys !i = k then A.unsafe_get m.mk_vals !i
@@ -372,6 +373,8 @@ type closure = {
   m_t : int;
   m_e : int;  (* m_t for prp-trp *)
   m_side : bool;  (* no other rule reads T or gives T or E: a batch's facts go to the group's output directly *)
+  m_walk : bool;  (* no other rule gives T or E: T's edges are its facts asserted (prp-trp) or E's facts (linear), and a
+                     retraction is decided by walks *)
 }
 
 (* The frozen relations of a program specialised on them (the design's section 5.4): its rules unfolded on their
@@ -444,6 +447,8 @@ and ctx = {
   buf_a : buf;  (* the walks' buffers *)
   buf_b : buf;
   seen : iset;  (* a walk's visited things *)
+  seen2 : iset;
+  mutable walked : Bytes.t;  (* by property: 1 its facts are a closure decided by its module's walks in this group *)
 }
 
 exception Respec of int * int
@@ -451,13 +456,13 @@ exception Respec of int * int
 
 let[@inline] is_text_const (x : Value.t) = match x with Text _ | Float _ -> true | _ -> false
 
-let inline_word (x : Value.t) =
+let[@inline never] inline_word (x : Value.t) =
   match x with
   | Int n | Date n | Money n | Link n -> n
   | Bool b -> if b then 1 else 0
   | Text _ | Float _ -> invalid_arg "Reason.inline_word"
 
-let atoms_of (r : Rules.t) = Array.of_list r.where
+let[@inline never] atoms_of (r : Rules.t) = Array.of_list r.where
 
 (* the code of a property's type (Value.code), -1 for no property *)
 let[@inline] ptype (v : Store.view) p = match Schema.find v.schema p with Some d -> Value.code d.typ | None -> -1
@@ -465,7 +470,7 @@ let[@inline] ptype (v : Store.view) p = match Schema.find v.schema p with Some d
 let link_code = Value.code Value.Tlink
 
 (* does a property of type code t take value x *)
-let fits_code t (x : Value.t) =
+let[@inline never] fits_code t (x : Value.t) =
   match x with
   | Int _ -> t = 0
   | Float _ -> t = 1
@@ -578,7 +583,7 @@ let[@inline] go (d : disp) s e p w =
   pl.run e p w
 
 (* every plan whose matched atom fits the fact (e p w), run on it *)
-let run_all (d : disp) e p w =
+let[@inline never] run_all (d : disp) e p w =
   let ix = d.ix in
   if p < Array.length ix.byp then begin
     let a = Array.unsafe_get ix.byp p in
@@ -973,7 +978,11 @@ let [@inline never] find_modules (v : Store.view) (rules : Rules.t array) =
                     && match r.head with Give h -> h.p >= 0 && h.p <> t && h.p <> e | Never -> true)
                rules)
         in
-        { m_rule = ri; m_base = b; m_t = t; m_e = e; m_side = side })
+        let walk =
+          Array.for_all Fun.id
+            (Array.mapi (fun rk (r : Rules.t) -> rk = ri || rk = b || match r.head with Give h -> h.p >= 0 && h.p <> t && h.p <> e | Never -> true) rules)
+        in
+        { m_rule = ri; m_base = b; m_t = t; m_e = e; m_side = side; m_walk = walk })
       !mods
   in
   Array.of_list modules, in_module
@@ -1450,7 +1459,8 @@ let [@inline never] new_ctx ?facts prog v =
     ins = None; lost = None; cons = None; pf = [||]; bwd = [||]; bfq = Queue.create (); next = ints 64 0;
     spare = ints 64 0; nn = 0; derived = 0; limit = max_int; vp = Bytes.empty;
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
-    mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create () }
+    mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
+    seen2 = iset_create (); walked = Bytes.empty }
 
 let [@inline never] take ?facts prog v =
   let c =
@@ -1471,6 +1481,7 @@ let [@inline never] take ?facts prog v =
   Array.fill c.mfresh 0 (Array.length c.mfresh) false;
   Array.fill c.per_rule 0 (Array.length c.per_rule) 0;
   Queue.clear c.bfq;
+  c.walked <- Bytes.empty;
   c
 
 let [@inline never] give c =
@@ -1514,7 +1525,7 @@ let [@inline never] head_refusal c (pl : plan) =
   if b <> "" then b else head_message c.v (rule_name c pl.ri) ~thing:(pl.he <> -1) pl.hp
 
 (* the head of a forward instance, at round r - 1: a fact that is not there yet joins round r *)
-let emit_at c pl r =
+let[@inline never] emit_at c pl r =
   incr derivations;
   if not pl.hok then refuse "%s" (head_refusal c pl);
   let p = pl.hp and e = pl.he and w = pl.hw in
@@ -1550,7 +1561,7 @@ let ins_d c = match c.ins with Some d -> d | None -> let d = make_disp c c.prog.
 let[@inline] in_view c p = Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000')
 
 (* is (e p w) a fact now: the working set's entry, else the view *)
-let present c e p w = let x = find c.ws e p w in if x >= 0 then now c.ws x > 0 else in_view c p && S.mem c.v e p w
+let[@inline never] present c e p w = let x = find c.ws e p w in if x >= 0 then now c.ws x > 0 else in_view c p && S.mem c.v e p w
 
 (* the id of a fact of the state in the working set, added with its state in the view if needed *)
 let[@inline never] intern c e p w =
@@ -1643,6 +1654,9 @@ and check c d x =
     set_mark ws x 1;
     incr checked;
     if base ws x = 1 then prove c d x
+    else if Bytes.length c.walked > 0 && (let p = fp ws x in p < Bytes.length c.walked && Bytes.unsafe_get c.walked p <> '\000') then
+      (* a fact of a closure its module decided in this group: present, it holds *)
+      (if now ws x > 0 then prove c d x)
     else begin
       let p = fp ws x in
       if p < c.prog.np && Char.code (Bytes.unsafe_get c.prog.reads p) land 2 <> 0 then begin
@@ -2106,7 +2120,9 @@ let saturate c (first : ints) nf =
 (* B/F over the candidates (ids in the working set): each one checked; one without a proof deleted, and the facts its
    instances give, still there, checked in turn *)
 let [@inline never] on_lost c pl =
-  if pl.hok then begin
+  (* a closure its module decides gives no candidate through its own rules *)
+  if pl.hok && not (Bytes.length c.walked > 0 && pl.hp >= 0 && pl.hp < Bytes.length c.walked && Bytes.unsafe_get c.walked pl.hp <> '\000'
+                    && c.prog.in_module.(pl.ri)) then begin
     let ws = c.ws in
     let h = find ws pl.he pl.hp pl.hw in
     if h >= 0 then (if now ws h > 0 && not (has ws h 4) then Queue.add h c.bfq)
@@ -2118,13 +2134,135 @@ let [@inline never] on_lost c pl =
 
 let lost_d c = match c.lost with Some d -> d | None -> let d = make_disp c c.prog.ix_lost State (on_lost c) in c.lost <- Some d; d
 
+(* Retraction by walks (the design's section 5.7; Hu, Motik, Horrocks 2022), for a closure no other rule gives T or E
+   to: its edges are the facts the group leaves asserted (prp-trp's T) or E's facts, so the group's retractions are
+   all that change them. The sources whose targets may shrink are the retracted edges' and facts' ends and what
+   reaches them; each walks again over the edges left, a thing it meets that reaches none of them keeping its targets
+   whole (they cannot change), and what it held beyond its new targets goes: exactly the facts left without a path.
+   Their losses reach the other rules as B/F's do; the facts of T decided so are proved, while present, for the rest
+   of B/F. Returns the candidates B/F still decides. *)
+let module_retract c f0 (cands : int list) =
+  let ws = c.ws in
+  let mods = c.prog.modules in
+  if (not !walk_retract) || not (Array.exists (fun (m : closure) -> m.m_walk) mods) then cands
+  else begin
+    let decided = Hashtbl.create 16 in
+    Array.iter
+      (fun (m : closure) ->
+        if m.m_walk then begin
+          let t = m.m_t and trp = m.m_base < 0 in
+          let gone x = has ws x 16 in
+          let gone_e = List.filter (fun x -> gone x && fp ws x = m.m_e) cands in
+          let gone_b = if trp then [] else List.filter (fun x -> gone x && fp ws x = t) cands in
+          if gone_e <> [] || gone_b <> [] then begin
+            if Bytes.length c.walked = 0 then c.walked <- Bytes.make c.prog.np '\000';
+            Bytes.set c.walked t '\001';
+            (* an edge now: a fact of T asserted after the group (prp-trp), or a fact of E not retracted (linear) *)
+            let state_of e p w = let x = find ws e p w in if x >= 0 then (if has ws x 16 then 0 else base ws x) else S.state c.v e p w in
+            let edge_out u f =
+              if trp then iter_out c u t (fun w -> if state_of u t w = 1 then f w)
+              else iter_out c u m.m_e (fun w -> let x = find ws u m.m_e w in if x < 0 || not (has ws x 16) then f w)
+            in
+            let b_out u f = if not trp then iter_out c u t (fun d -> if state_of u t d = 1 then f d) in
+            (* the sources: the retracted edges' and facts' starts, and what reaches them *)
+            let ids = Hashtbl.create 64 and of_id = buf_create 64 in
+            let id x = if not (Hashtbl.mem ids x) then (Hashtbl.replace ids x of_id.bn; buf_push of_id x) in
+            let back a =
+              if trp then (id a; iter_in c t a id)
+              else (reach_back c m a ~with_start:true c.buf_a; for i = 0 to c.buf_a.bn - 1 do id (buf_get c.buf_a i) done)
+            in
+            List.iter (fun x -> back (fe ws x)) gone_e;
+            List.iter (fun x -> back (fe ws x)) gone_b;
+            let n = of_id.bn in
+            let thing i = buf_get of_id i in
+            let local x = match Hashtbl.find_opt ids x with Some i -> i | None -> -1 in
+            (* their edges: to a source (the graph to order), or out of them (whose targets stay: read once) *)
+            let es = buf_create 64 and ed = buf_create 64 and out_src = buf_create 64 and out_w = buf_create 64 in
+            let bs = buf_create 16 and bd = buf_create 16 in
+            for u = 0 to n - 1 do
+              edge_out (thing u) (fun w ->
+                  let l = local w in
+                  if l >= 0 then (buf_push es u; buf_push ed l) else (buf_push out_src u; buf_push out_w w));
+              b_out (thing u) (fun d -> buf_push bs u; buf_push bd d)
+            done;
+            let off, adj = rows n es.bn es.b ed.b in
+            let ooff, oadj = rows n out_src.bn out_src.b out_w.b in
+            let boff, badj = rows n bs.bn bs.b bd.b in
+            let nc, comp, members, moff = components n off adj in
+            let moff = moff.b in
+            (* the targets that stay, of a thing out of the sources: its closure, read once *)
+            let kept = Hashtbl.create 64 and kb = buf_create 256 in
+            let kept_of w =
+              match Hashtbl.find_opt kept w with
+              | Some r -> r
+              | None -> let a = kb.bn in iter_out c w t (fun z -> buf_push kb z); let r = (a, kb.bn) in Hashtbl.replace kept w r; r
+            in
+            (* each component's new targets, its successors first (as a closure from scratch, things by their ids) *)
+            let toff = ints (nc + 1) 0 and tb = buf_create 1024 and mark = iset_create () in
+            for k = 0 to nc - 1 do
+              A.unsafe_set toff k tb.bn;
+              iset_clear mark;
+              let add z = if iset_add mark z then buf_push tb z in
+              let cyclic = ref false in
+              for i = A.unsafe_get moff k to A.unsafe_get moff (k + 1) - 1 do
+                let u = A.unsafe_get members i in
+                for j = A.unsafe_get boff u to A.unsafe_get boff (u + 1) - 1 do add (A.unsafe_get badj j) done;
+                for j = A.unsafe_get off u to A.unsafe_get off (u + 1) - 1 do
+                  let w = A.unsafe_get adj j in
+                  let kw = A.unsafe_get comp w in
+                  if kw = k then cyclic := true
+                  else begin
+                    add (thing w);
+                    for i = A.unsafe_get toff kw to A.unsafe_get toff (kw + 1) - 1 do add (buf_get tb i) done
+                  end
+                done;
+                for j = A.unsafe_get ooff u to A.unsafe_get ooff (u + 1) - 1 do
+                  let w = A.unsafe_get oadj j in
+                  add w;
+                  let a, b = kept_of w in
+                  for i = a to b - 1 do add (buf_get kb i) done
+                done
+              done;
+              (* new targets are old ones (edges only go): no more than the closure held *)
+              if !cyclic then for i = A.unsafe_get moff k to A.unsafe_get moff (k + 1) - 1 do add (thing (A.unsafe_get members i)) done
+            done;
+            A.unsafe_set toff nc tb.bn;
+            (* what each source held beyond its new targets goes *)
+            for u = 0 to n - 1 do
+              let x = thing u and k = A.unsafe_get comp u in
+              iset_clear mark;
+              for i = A.unsafe_get toff k to A.unsafe_get toff (k + 1) - 1 do ignore (iset_add mark (buf_get tb i)) done;
+              let lost = ref [] in
+              iter_out c x t (fun z -> if iset_add mark z then lost := z :: !lost);
+              List.iter
+                (fun z ->
+                  let y = intern c x t z in
+                  if base ws y <> 1 || has ws y 16 then begin
+                    set_mark ws y 4;
+                    let was = now ws y in
+                    set_now ws y 2;
+                    run_all f0 x t z;
+                    set_now ws y 0;
+                    if was > 0 then count_derived c (-1)
+                  end)
+                !lost
+            done;
+            (* the retracted facts of T: decided (gone, or kept as derived) *)
+            List.iter (fun x -> if fp ws x = t then Hashtbl.replace decided x ()) (gone_e @ gone_b)
+          end
+        end)
+      mods;
+    List.filter (fun x -> not (Hashtbl.mem decided x)) cands
+  end
+
 let [@inline never] backward_forward c (cands : int list) =
   let ws = c.ws and q = c.bfq in
   Queue.clear q;
-  List.iter (fun x -> Queue.add x q) cands;
   plans c 0;
   let f0 = lost_d c in
   c.round <- max_int;
+  let cands = module_retract c f0 cands in
+  List.iter (fun x -> Queue.add x q) cands;
   while not (Queue.is_empty q) do
     let x = Queue.pop q in
     check_frozen c (fp ws x) (fw ws x);
@@ -2156,10 +2294,10 @@ let [@inline never] instances c ?extra ri (f : plan -> unit) =
   c.round <- max_int;
   pl.run 0 0 0
 
-let value_of (v : Store.view) p w =
+let[@inline never] value_of (v : Store.view) p w =
   match Schema.find v.schema p with Some d -> S.value v d.typ w | None -> Value.Int w
 
-let fact_text (v : Store.view) e p w =
+let[@inline never] fact_text (v : Store.view) e p w =
   let name = match Schema.find v.schema p with Some d -> d.name | None -> string_of_int p in
   Printf.sprintf "[#%d %s %s]" e name (Value.to_string (value_of v p w))
 
