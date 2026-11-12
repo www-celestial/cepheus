@@ -43,14 +43,15 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 |---|---|---|
 | `_build/default/test/unit.exe` | the unit and property tests | `CEPHEUS_TMP`: where its databases on the real disk go (the system's temp directory by default) |
 | `reasoning.exe` | the rules: named cases, then G17, G18 and G20 on random sequences (random rules defined, changed and removed; random additions and retractions) against the least model from scratch, plain and over merged runs | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group) |
-| `exhaustive.exe` | every crash state of small journals and inside merges | none |
+| `exhaustive.exe` | every crash state of small journals, inside merges, and of two databases sharing a commit buffer | none |
 | `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
+| `wal_sim.exe` | the deterministic simulation of the server's commit buffer: three databases sharing it ([below](#the-commit-buffer)) | `--seeds N` (100 by default), `--seed S`, `--steps N` (200); `WAL_SIM_TRACE` set: each event of a seed on the standard error |
 | `crash.exe DIR ROUNDS [SEED]` | real `kill -9` rounds on a database in DIR | SEED 42 by default |
 | `bank.exe DIR SECONDS` | the bank test for SECONDS | |
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | the sale of seats with kill -9 and a checker of the history ([case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)); `ROUNDS` 0: no kill, the time to sell out | `BUYERS` (16), SEED 42, SEATS 2,000 |
 | `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/book/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
-| `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, crash, bank, seats and examples, the server's tests, and the Cesia client's when a Cesia with its native interface is here | `CEPHEUS_TMP` (a short path: a Unix socket's holds 107 bytes), `SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `CESIA_NATIVE` (the folder of Cesia's `cesia_v1.cmi`; found from the `cesia` command when unset) |
-| `tools/tlc.sh` | TLC on `spec/Journal.tla`, `spec/Merge.tla` and `spec/Seats.tla`, and the naive sale (`spec/SeatsNaive.cfg`), which must break an invariant | `TLA2TOOLS`: the path of `tla2tools.jar` |
+| `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, wal_sim, crash, bank, seats and examples, the server's tests, and the Cesia client's when a Cesia with its native interface is here | `CEPHEUS_TMP` (a short path: a Unix socket's holds 107 bytes), `SEEDS` (300), `BUFFER_SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `CESIA_NATIVE` (the folder of Cesia's `cesia_v1.cmi`; found from the `cesia` command when unset) |
+| `tools/tlc.sh` | TLC on every model of `spec/` (the journal, merges, the sale of seats, local reads, watches, the commit buffer), and every variant that must break an invariant ([model checking](#model-checking)) | `TLA2TOOLS`: the path of `tla2tools.jar` |
 
 **Deterministic simulation testing** runs the real engine on a simulated disk where one seed decides every event (the
 writes, the order of the writer's steps, crashes, damage), so that a failure is not a rare accident but a seed that
@@ -193,8 +194,9 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   client before it started (Fresh), every group any read returned before it started (Ordered), and it is the model's
   state at its group, durable (Durable): G15, with G5 and G13 for readers. The first runs found one bug of the test
   (a large group's body, written by pieces, decoded from the empty batch buffer).
-- `server_crash`: a real `cepheus serve`, killed 20 times (kill -9) under four clients writing through the Unix
-  socket; at the end every acknowledged write is in the database once and no write twice (G1, G14); meanwhile two
+- `server_crash`: a real `cepheus serve` of two databases (their journals forced through its commit buffer, rounds
+  of both), killed 20 times (kill -9) under four clients writing through the Unix socket, half to each database; at
+  the end every acknowledged write is in its database once and no write twice (G1, G14); meanwhile two
   readers read in their own memory, and every read, local or at the server while a follower is made again, holds
   every write answered and every state returned before it started (G15 with the real clock: millions of reads); a
   second server on the same data is refused (G9), `cepheus status`, a token removed while its program is connected
@@ -210,6 +212,45 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
 - Every server these tests start runs in a session of its own (`setsid`) with its output in a `serve.log` beside its
   `cluster.toml`, and is stopped when its test ends, even when the test fails (`test/serve.ml`); the tests ignore
   SIGPIPE, so that a write to a connection the server closed is an error, not the death of the test.
+
+### The commit buffer
+
+- `wal_sim`: three databases on one simulated disk share one commit buffer (`src/wal.ml`), whose files alternate
+  after 300 to 3,300 bytes, their journals' segments 600 to 4,600 bytes long. One seed decides every event: the
+  writes of each database (some of them large groups, forced in their own journal; some frames longer than the
+  buffer takes, forced there too), when each frame reaches its journal and the buffer, the rounds, the cleanings of
+  the file that is not active, merges, process deaths (the page cache kept, lost at a later power loss), power losses,
+  crashes inside any disk call, recovery's too, and failed fsyncs, of the buffer's file or of a journal, as the
+  simulation's disk does them (G13). After every recovery: every confirmed group of every database is there (G1),
+  each journal holds exactly the groups written, in order (G2, G3), what a recovery published survives the next crash
+  (G5), no open refuses but at a frame or a round no fsync confirmed whose header's sector alone was lost (G6), no
+  write is confirmed after a failed fsync (G10). A database opened alone after a crash must be refused, and opened
+  after a clean stop; and now and then a version without the buffer opens a database after a crash and writes to it:
+  the server's next start must refuse that database, never write over its frames. Half the seeds force a frame that comes when the buffer is idle in its own journal
+  (`Wal.alone`). In `tools/test.sh` (300 seeds, 2026-11-12): 29,771 groups confirmed, 12,968 rounds (950 of several
+  databases), 1,726 power losses, 1,044 process deaths, 1,476 crashes inside a disk call and 607 inside a recovery,
+  6,838 `Io` errors, 4,598 opens alone refused and 601 allowed after a clean stop, 155 databases written by a version
+  without the buffer (12 of them refused at the next start, the others had lost nothing); one false alarm of G6 (a
+  round no fsync confirmed, its header's sector lost alone); no failure.
+- `exhaustive.exe`, part 6: two databases share a buffer whose files alternate after 500 bytes, their segments 1,500
+  bytes long, in a fixed run, every frame through the buffer (rounds of one database and of both, long frames forced in their own journal, a segment
+  left, switches of file, a cleaning, a switch over the cleaned file). At each of its 50 mutating disk calls: a
+  process death (then a power loss after the recovery), and power losses keeping each prefix of each directory's name
+  changes, with the unforced bytes lost, kept, torn, or kept one sector in two; then each of its 13 fsyncs failing in
+  turn, followed by a process death, a clean stop or neither, a reopen in the same boot or none, and a power loss
+  keeping all or none: 556 crash states and 156 states after a failed fsync, every confirmed group there, no false
+  alarm.
+- Mutation checks (a part of the rule removed, to see the tests fail; failed checks in 300 seeds of `wal_sim`, every
+  frame through the buffer then, and in the exhaustive part 6): recovery trusting each journal's own rule (no frame written again), 1,914 in 298 seeds,
+  and 185; the cleaning without its checkpoint, 11 in 11 seeds, and 34; a run named without forcing its journal
+  first, 316 in 80 seeds, and none; a segment left without forcing it, 584 in 104 seeds, and none; a frame skipped
+  when the page cache already shows it, 1 (seed 113), and 2. The first version of
+  the recovery skipped a frame whose bytes the page cache already showed: after a failed fsync (pages marked clean)
+  and a reopen in the same boot, the buffer was emptied while the disk lacked the frame, and a power loss lost it.
+  `wal_sim` found it (seed 113 of 300); the exhaustive part did not, because it always lost power before the reopen;
+  it now reopens in the same boot too, and with the skip put back fails twice. A clean close after a checkpoint
+  failed in the buffer's thread left the `closed` marker; it no longer does (`Journal.forced`), though no test tells
+  the two apart: the frames are written again at the start all the same.
 
 ### The Cesia client
 
@@ -331,8 +372,33 @@ visible:
 | `LocalReadsDesignFresh.cfg` | the design's lease | the same | `NoStale` (Fresh and Durable) holds: 289,765 |
 | `LocalReadsDraft.cfg` | the design's first draft | the same | breaks `NoStale`: Fresh (12 states) |
 
-`tools/tlc.sh` runs them all and fails unless each that must break does; the three that hold take about two minutes
-on the test machine.
+`spec/CommitBuffer.tla` models the server's commit buffer ([the server](server.md#many-databases-one-fsync-the-commit-buffer)):
+databases whose syncers write each frame to their journal without an fsync and give it to the buffer, one frame in
+flight a database; rounds of every frame that came meanwhile, appended and forced once, one round in flight; frames
+forced in their own journal (long ones, and one that comes when the buffer is idle); checkpoints forcing a journal; the oldest round dropped once each of its
+frames is checkpointed; F1 (a process death, the page cache kept), F2 (a power loss: each unforced frame of a journal
+lost, kept or torn on its own; the buffer's rounds after the forced ones kept up to some round), F4 (a failed fsync,
+of the buffer or of a journal at a checkpoint, marks its pages clean and stops the buffer); and recovery with the
+rule as built (the buffer's torn newest round cut, each frame it kept written again at its place, every other frame
+before the last of them must check, the journal's own rule after). Invariants: `Durable` (G1: whenever the server
+runs, every confirmed frame is in its journal), `Prefix` (G3), `NeverRefused` (no damage is modelled, so no open may
+refuse: G6), `CheckpointOnDisk` (a checkpoint covers only frames the disk holds). Bounds in `spec/CommitBuffer.cfg`, 2
+databases of 2 frames each: 11,313 distinct states; with 3 frames each (`MaxFrames = 3`, not in `tools/tlc.sh`):
+206,395 distinct states, depth 25, 9 minutes on 4 workers. Each variant that drops a part of the rule breaks:
+
+| configuration | the rule without | breaks |
+|---|---|---|
+| `CommitBufferTrust.cfg` | the buffer's frames at recovery: each journal by its own rule | `Durable` |
+| `CommitBufferEarly.cfg` | the checkpoint: a round dropped once its frames are in their journals' page cache | `Durable` |
+| `CommitBufferCkpt.cfg` | the stop after a failed fsync: a checkpoint after one | `CheckpointOnDisk` |
+| `CommitBufferMany.cfg` | one frame in flight: a database writes its next frame before the last one is confirmed (1 database, 3 frames) | `NeverRefused` |
+
+The model takes recovery's writes as forced, as the code must make them: the code's first version skipped a frame
+whose bytes the page cache already showed, which the model cannot see and the simulation found
+([above](#the-commit-buffer)).
+
+`tools/tlc.sh` runs them all and fails unless each that must break does: 1 min 57 s on the test machine (2026-11-12),
+every model included.
 
 ## Further reading
 

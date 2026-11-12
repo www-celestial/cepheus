@@ -72,8 +72,20 @@ frame up to the group's is durable; F2 does not touch durable bytes. Recovery (`
 and stops only at the first frame that does not check; all frames before a durable frame are durable, hence intact,
 hence read. The runs used at recovery are consistent with the journal (G7).
 
+*With a server's commit buffer* ([the server](server.md#many-databases-one-fsync-the-commit-buffer)), the frame is
+written to the journal without an fsync, and `write` returns after the fsync of the buffer's round that holds a copy
+of it, whole (or, when the buffer was idle, after its journal's own fsync, as without the buffer). Until the journal is forced (a checkpoint), the buffer keeps that copy: a file of the buffer is emptied
+only once every journal with frames in it was forced after them, and a run is named only once its journal is forced
+(`Engine.install`), so no durable state rests on frames the buffer alone holds. A database writes its next frame only
+once the previous one is confirmed, so after a power loss its journal holds, after its last forced frame, frames the
+buffer holds, each whole, lost or torn, and at most one frame no fsync confirmed. Recovery writes each frame the
+buffer holds again at its place before it reads the journal (`Journal.repair`), and every other frame before the last
+of them must check (it was forced); the journal's own rule takes the rest. So every confirmed frame is read.
+
 *Tested by* `test/sim.ml` (every recovery: "lost acknowledged groups"), `test/exhaustive.ml` (every crash state of
-small journals), `test/crash.ml` (real `kill -9`, every confirmation checked for content).
+small journals; part 6, the commit buffer), `test/crash.ml` (real `kill -9`, every confirmation checked for content),
+`test/wal_sim.ml` (three databases sharing a buffer, with every fault), `test/server_crash.ml` (a real server of two
+databases killed). Model-checked: `spec/CommitBuffer.tla`.
 
 ## G2 All or nothing
 

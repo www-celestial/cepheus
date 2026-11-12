@@ -156,6 +156,21 @@ From `open_` (recovery) and `verify`; `SEG` is the segment's name, an offset is 
 | `the journal ends at group G, before the snapshot of group S` | the newest run holds groups the journal lost (a run is named only once its groups are durable) |
 | `group N uses property P, which does not exist` | the replay met a change of a property no group declared |
 
+From a server's start, its commit buffer ([the server](server.md#many-databases-one-fsync-the-commit-buffer); `FILE` is
+`DATA/server.wal.1` or `.2`):
+
+| message | what it means |
+|---|---|
+| `FILE: a broken header` | a file of the buffer whose header does not check (a file takes its name only once its header is durable) |
+| `FILE: unknown format F` | a header that checks, of a format other than 1 |
+| `server.wal.N: damaged round at offset O (written whole)` | a round that does not check, in the older file, or followed by a round written whole: once durable, now damaged |
+| `FILE: round R at O does not hold its entries` / `has bytes after its entries` | a round that checks but whose entries do not add up to its body |
+| `server.wal.1 holds confirmed writes of databases this server did not open (ids ...): open them with it once` | the buffer holds frames of a database `cluster.toml` no longer lists: add it back, start the server, stop it ([operations](operations.md#a-database-of-a-server)) |
+| `journal: segment SEG, where the commit buffer's frames go, is missing` | the newest run resumes in a segment that is not there |
+| `SEG: the frame at O (group G) does not check, before the commit buffer's frames from group N` | a frame the buffer does not hold, before frames it holds: it was forced, and is damaged |
+| `journal: the commit buffer's frame of group G does not start where a frame does (group N)` | the journal's frames and the buffer's do not line up |
+| `SEG: the frame at O is not the one the commit buffer holds for group G (the database was written without its server's buffer after a crash)` | another frame that checks is where the buffer's goes: a version without the buffer opened the database after a crash and wrote to it; never written over ([operations](operations.md#a-database-of-a-server)) |
+
 From `verify` only (a full read is strict: recovery repairs these, so after it they are damage):
 
 | message | what it means |
@@ -201,6 +216,7 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 | error | message | when | do |
 |---|---|---|---|
 | `Busy` | `DIR is open in another process` | another process holds `DIR/lock`, or this process has the database open already, under this path or any other that names the same directory (a symbolic link, `DIR/.`, `x/../DIR`) | close the other one; one engine per database |
+| `Busy` | `DIR was written through a server's commit buffer and not closed cleanly: its newest writes may be in the server's DATA/server.wal.1 or .2 alone; start the server on its data directory, which writes them into the journal, and stop it` | `open_` in a program's own process of a database a server held when it crashed (`DIR/shared` and no `DIR/closed`) | start the server and stop it; the database then opens anywhere ([operations](operations.md#a-database-of-a-server)) |
 | `Closed` | `the database is closed` | `write` or `snapshot` after `close` | open the database again |
 
 ## Exceptions
@@ -256,11 +272,14 @@ pattern, a variable or an aggregate in Give; and at `cepheus.Kind`: a name that 
 
 A merge runs in the background; when it fails, it says so on the standard error, removes its file, and the database
 goes on with its old runs (no error reaches a client); the next merge waits until the delta has grown by another
-threshold. Two other lines come from the writer.
+threshold. Other lines come from the writer and the commit buffer.
 
 | line | when |
 |---|---|
 | `cepheus: the journal could not be cut back after a failed write: MSG` | after a failed write or fsync of the journal, the cut back to the last durable frame failed too: the failed writes may come back at the reopen (G13) |
+| `cepheus: the journal could not be forced at close: MSG` | a shared journal's fsync at close failed: no `closed` marker, and the next open is a recovery |
+| `cepheus: the commit buffer could not be cut back after a failed write: MSG` | after a failed write or fsync of the buffer, its cut back to the last forced round failed too: the failed round may come back at the next start |
+| `cepheus: the commit buffer could not be emptied: MSG` | a clean stop could not remove `DATA/server.wal.1` or `.2`: the next start reads them, and finds their frames in the journals already |
 | `cepheus: the run of a large group could not be named: MSG` | the rename of a large group's run file failed after its frame was durable: the database stops (`Io`), and the next open replays the group from the journal |
 | `cepheus: background merge failed: EXN` | the merge domain met an exception (a disk error, an unreadable page) |
 | `cepheus: a merge could not be installed: MSG` | the rename or the directory's fsync failed |

@@ -9,6 +9,7 @@ verification, memory and disk space, and the tools of the repository.
 DIR/cepheus                       the database's id (16 random bytes) and format, written once, atomically, with a CRC
 DIR/lock                          held (lockf) while the database is open: one process at a time
 DIR/closed                        left by a clean close (everything durable), removed by the next open
+DIR/shared                        the database is opened by a server, whose commit buffer forces its journal
 DIR/journal/NNNNNNNNNNNNNNNNNNNN.seg   segments named by their first group, 64 MB each, only appended to
 DIR/snapshots/LO-HI.run           the runs (levels of the LSM tree): the changes of groups LO+1..HI on top of the
                                   state at LO (20 digits each); the chain from 0 to the newest group is the base, and
@@ -24,7 +25,8 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
 
 1. takes the lock (`Busy` if another process has it);
 2. reads the id; if `closed` is there (the last process closed cleanly), removes it; else forces the database's
-   directory;
+   directory. If `shared` is there and `closed` is not, an open in a program's own process is refused (`Busy`: [a
+   database of a server](#a-database-of-a-server)); after a clean close it removes `shared` and goes on;
 3. converts a journal of format 1 to format 2, once (each segment written beside, forced, renamed over the old one;
    a crash in the middle leaves each segment whole, and the next open goes on), and removes the files of merges a
    crash interrupted (`.tmp`);
@@ -32,24 +34,53 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
    page table, rank tables, the order and bounds of every table; a page's CRC as it is read); a run that does not
    check, or of an earlier format (5 and 6: "an earlier format (6), the journal is replayed"), is set aside and noted
    (`Cepheus.notes`), and the choice is made again without it;
-5. after a crash (no `closed`), writes the newest frame of the journal again and forces the newest segment and the
+5. opened by a server, first writes again into the journal the frames its commit buffer holds for this database
+   ([below](#a-database-of-a-server)), and forces them;
+6. after a crash (no `closed`), writes the newest frame of the journal again and forces the newest segment and the
    journal's directory (a process killed before its fsync left them in the page cache; after a failed fsync the
    page cache may hold bytes the disk does not, G13); then reads the journal from the newest run's position: checks
    every frame, applies every group, and merges into a new run when the changes pass the threshold or the group is a
    large one, as the writer would have; a journal that ends before the newest run's group is damage. The journal is
    read through a window of 4 MiB: a frame whose groups the runs already hold is checked by its CRC, piece by piece,
    and not decoded; a longer frame to replay is read whole (the memory of its group, as when it was written);
-6. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
+7. at the first frame that does not check: a torn tail is cut (truncate, fsync); damage stops the open with
    `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a run of the
    groups before the damage);
-7. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt; a newest
+8. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt; a newest
    segment torn at its creation (its header does not check and it holds no frame) is removed;
-8. a new database (no group yet) gets group 1, which describes the five system properties (a database made before
+9. a new database (no group yet) gets group 1, which describes the five system properties (a database made before
    `cepheus/rule` existed lacks the description of that one: its rules work all the same).
 
 Recovery time is the runs' check plus the replay of the groups after the newest one. Every merge writes a run, so
 the replay is at most a merge threshold of changes (and the groups written while the last merge ran); `Cepheus.snapshot`
 merges now, before a planned stop for example.
+
+## A database of a server
+
+A server forces the journals of all its databases with one fsync a round, through its commit buffer
+(`DATA/server.wal.1` and `.2`: [the server](server.md#many-databases-one-fsync-the-commit-buffer)). Between two
+checkpoints of a journal, its newest confirmed frames may be durable in the buffer alone: the journal holds them in
+the page cache, and a power loss may lose them there. So:
+
+- **The server writes them back at its start.** Before it opens its databases it reads the buffer; each database's
+  open writes the buffer's frames for it again at their place in its journal and forces them; every frame of the
+  journal before the last of them that the buffer does not hold must check (it was forced: else `Damaged`); the
+  journal's own rule takes what follows. Then the buffer is emptied. A start refuses (`Damaged`, naming the ids) when
+  the buffer holds frames of a database that `cluster.toml` no longer lists: add it back, start, stop, and remove it.
+- **A program's own process refuses the database after a crash.** `Cepheus.open_` of a database that has `shared` and
+  no `closed` returns `Busy` (`DIR was written through a server's commit buffer and not closed cleanly: ...`): it
+  would cut the confirmed frames as a torn tail, or take their holes for damage. Start the server on its data
+  directory and stop it: the database is then closed cleanly, and opens anywhere. After a clean close, the open
+  removes `shared` and the database is an ordinary one again.
+- **Going back to an earlier version.** Versions before the commit buffer do not read `server.wal`. Stop the server
+  cleanly first (a clean stop forces every journal and removes both files): the earlier version then opens every
+  database as before. After a crash, start this version once and stop it before going back. If an earlier version
+  opened a database after a crash anyway and wrote to it, this version's next start refuses that database
+  (`Damaged`: `the frame at N is not the one the commit buffer holds for group G`) rather than write over the earlier
+  version's frames; remove `DATA/server.wal.1` and `.2` only if you accept to lose the writes they held.
+- **Backups** are as below: a copy reads the page cache, so the journal's copy holds every frame confirmed before the
+  copy of its segment started. Leave `shared` out of the copy (or remove it): the copy is opened as an ordinary
+  database.
 
 ## When recovery says `Damaged`
 

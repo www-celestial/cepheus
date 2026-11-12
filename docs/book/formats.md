@@ -24,6 +24,14 @@ rather than wait) and keeps it until `close`, or until the process dies and the 
 Empty. Left by a clean close (every frame and name durable, no fsync failed) and removed by the next open, which then
 skips the fsyncs a recovery after a crash needs (G5). Its creation and removal are not forced.
 
+## `DIR/shared`
+
+Empty. Made by the first open of the database by a server, whose commit buffer forces the journal from then on
+([the server](server.md#many-databases-one-fsync-the-commit-buffer)), and kept while a server opens it; removed by an
+open in a program's own process (`Cepheus.open_`) after a clean close. Its creation and its removal are forced (the
+directory's fsync). An open in a program's own process refuses a database that has `shared` and no `closed` (`Busy`):
+its newest confirmed frames may be in the server's `DATA/server.wal.1` or `.2` alone.
+
 ## Journal segment `DIR/journal/<first group, 20 digits>.seg`
 
 ```
@@ -347,4 +355,26 @@ A checkpoint whose CRC does not match is ignored: the journal is read from its s
 
 **`DATA/cepheus.lock`**: the server's pid in decimal and a newline, under an exclusive `lockf` lock while it runs.
 **`DATA/cepheus.server`**: the server's id (`cph-s-` and 16 hex digits) and a newline.
+
+**`DATA/server.wal.1` and `DATA/server.wal.2`**, the commit buffer's two files, which alternate (`src/wal.ml`;
+[the server](server.md#many-databases-one-fsync-the-commit-buffer)):
+
+```
+file   = header, 40 bytes: 0 magic "CPHW" (0x57485043) u32 | 4 format u32 (1) | 8 generation u64 | 16 zero, 20 bytes
+                           | 36 CRC of the 36 bytes before
+       | rounds, from offset 40
+round  = header, 28 bytes: 0 magic "CPHR" (0x52485043) u32 | 4 body length u32 | 8 round number u64 (0, 1, 2... in
+                           its file) | 16 entries u32 | 20 body CRC u32 | 24 CRC of the 24 bytes before
+       | body: entries, each: database id (16 bytes, as in DIR/cepheus) | length u32 | one frame of that database's
+                           journal, whole (header, groups, trailer: the bytes its segment holds)
+       | trailer, 16 bytes: body length u32 | body CRC u32 | header CRC u32 | magic "CPHT" (0x54485043)
+```
+
+A file is begun with its header and its first round together: written beside as `server.wal.N.tmp`, forced, renamed
+to its name, the directory forced, so that a crash leaves either the old file or the new one, whole. The next rounds
+are appended to it, each forced. The newer file has the higher generation. Both files are removed at a server's start
+(once each database's journal holds their frames, forced) and at a clean stop (once every journal is forced): a data
+directory at rest has neither. At recovery, every round of the older file must check; in the newer file, the first
+round that does not check is a torn tail (the round in flight at the crash, never confirmed) if no round written whole
+follows it, and damage otherwise, as in a journal; a file whose header does not check is damage.
 

@@ -72,6 +72,10 @@ the usual one, both are given.
   protocol and reads locally on the server's machine. [Cesia](cesia.md)
 - **chain** (of runs) — runs that rest on one another from 0: each holds the groups after the last group of the one
   below it. An open takes the chain that reaches the newest group with the fewest runs. [architecture](architecture.md#runs-on-disk)
+- **checkpoint** (of a journal, with the commit buffer) — an fsync of a database's journal, which makes durable in it
+  the frames the commit buffer forced; a file of the buffer is emptied only once each journal with frames in it had
+  one. PostgreSQL's checkpoint writes its data pages so that its WAL can be recycled: the same role.
+  [the server](server.md#many-databases-one-fsync-the-commit-buffer)
 - **checksum**, **CRC**, **CRC-32C** — a short number computed from bytes, which changes if they change; CRC-32C (the
   Castagnoli polynomial, the checksum of iSCSI, RFC 3720) detects every burst of up to 32 bits and lets random damage
   through with probability $2^{-32}$. Cepheus computes it by the processor's own instruction (SSE4.2 on x86-64, CRC32 on
@@ -96,6 +100,9 @@ the usual one, both are given.
 - **columns** (columnar coding) — storing the values of one field together rather than record by record, so that
   alike values sit side by side and code in few bits: the journal codes a group's kinds, things and each property's
   values as columns; a run's order by property is a column of each property. [formats](formats.md#a-group)
+- **commit buffer** — the server's own forced log (`DATA/server.wal.1` and `.2`): the frames of all its databases go
+  into it by rounds, one fsync a round for the whole server, as PostgreSQL's databases share its WAL; each database's
+  journal is written at once but forced only at its checkpoints. [the server](server.md#many-databases-one-fsync-the-commit-buffer)
 - **compaction** — another name for a merge in an LSM-tree. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **component** — one of the structures of an LSM-tree: the delta in memory (C0), the runs on disk.
 - **confirmed** — a group whose `write` returned `Ok`: it is durable. [guarantees](guarantees.md#the-faults)
@@ -368,6 +375,9 @@ the usual one, both are given.
   (G13). [guarantees](guarantees.md#g13-a-failed-fsync-is-never-trusted)
 - **right** — what a token may do on a database: `read` (Open, Get, Find) or `write` (and Write); `admin`: the
   server's operations. [server](server.md#rights-g16)
+- **round** (of the commit buffer) — the frames of every database that came while the previous round was forced,
+  written as one record of the buffer and forced by one fsync; each frame is confirmed after it. One round is in
+  flight at a time. [the server](server.md#many-databases-one-fsync-the-commit-buffer)
 - **round trip** — a request and its reply: the time between sending one and receiving the other, most of it the
   kernel's work (system calls, waking the other process). [server](server.md#speed-beside-postgresql)
 - **row store**, **column store** — a row store keeps each record's fields together (a lookup of a record reads one

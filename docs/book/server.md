@@ -2,7 +2,8 @@
 
 Cepheus runs as a server, as PostgreSQL does: one process on a machine holds its databases, and programs connect to
 it. This page is the whole of it: what the server is and why it is built this way, how to run it (`cluster.toml`,
-tokens, the commands, start, stop, crash), the wire protocol byte by byte, reads in a program's own memory on the
+tokens, the commands, start, stop, crash), one fsync for the writes of all its databases (the commit buffer), the
+wire protocol byte by byte, reads in a program's own memory on the
 server's machine, security, the three guarantees the server adds (G14, G15 and G16), and its speed beside
 PostgreSQL 18.6, server against server, on one machine.
 
@@ -23,6 +24,7 @@ cepheus serve --config /etc/cepheus/cluster.toml
 ├── I/O domains   k OCaml domains; a thread a connection, spread over them
 ├── databases     each declared in cluster.toml: its writer and syncer (a domain of their own), its merges,
 │                 its session table (G14), its follow stream to the local readers and its visibility page (G15)
+├── commit buffer DATA/server.wal.1 and .2: one fsync a round for the writes of every database (a domain of its own)
 ├── tokens        tokens.toml, beside cluster.toml, read again when it changes
 └── one cache     the page cache of every database's runs ([storage] cache)
 ```
@@ -172,6 +174,9 @@ DATA/cepheus.lock          held (lockf) while the server runs: one server a data
 DATA/cepheus.server        the server's id, made at its first start
 DATA/NAME/                 a database: its files as in operations.md, and
 DATA/NAME/sessions         its session table, a checkpoint (G14): written every second while writes come, and at stop
+DATA/NAME/shared           the database is the server's: its journal is forced through the commit buffer
+DATA/server.wal.1, .2      the commit buffer (below): two files that alternate; removed at start, once their frames
+                           are in the journals, and at a clean stop
 /dev/shm/cepheus-ID.visible
                            a database's visibility page (G15; ID: the database's id in hex): 4 KiB of memory (tmpfs),
                            the first 8 bytes the visibility number, mode 0600; made once, never replaced while the
@@ -184,18 +189,21 @@ SOCKET/.s.cepheus.PORT     the Unix socket, made at start, removed at stop
 ### Start, stop, crash
 
 **Start.** Read and check `cluster.toml` and `tokens.toml`; take the data directory's lock (a second server on the
-same data is refused: G9 lifted to the server); open every database, in parallel (a domain each, at most `domains` at
-once), each with its recovery ([operations](operations.md#opening-and-recovery)) and its session table (its checkpoint,
-then the journal after it); open the listeners (a socket file left by a server that died is removed; one a live
+same data is refused: G9 lifted to the server); read the commit buffer's files ([below](#many-databases-one-fsync-the-commit-buffer));
+open every database, in parallel (a domain each, at most `domains` at once), each with its recovery
+([operations](operations.md#opening-and-recovery)), which first writes again into its journal the frames the buffer
+holds for it, and its session table (its checkpoint, then the journal after it); empty the buffer and start its
+rounds; open the listeners (a socket file left by a server that died is removed; one a live
 server answers on is refused); start the I/O domains; tell systemd it is ready (`READY=1` on `$NOTIFY_SOCKET`, one
 datagram: `sd_notify(3)`). The server prints one line: the time of the opens, each database's group, the listeners.
 
 **Stop** (`SIGTERM`, `SIGINT`, `cepheus stop`). No new connection; new requests get `Err stopping`; the writes in
-flight become durable and are answered; each database is closed cleanly (its `closed` marker: the next open forces
-nothing) and its session table saved; the socket file is removed; exit 0.
+flight become durable and are answered; each database is closed cleanly (its journal forced, its `closed` marker: the
+next open forces nothing) and its session table saved; the commit buffer's files are removed; the socket file is
+removed; exit 0.
 
-**Crash** (kill -9, power loss). Each database recovers as the engine does at its next start (G1 to G13); the session
-tables are rebuilt from their checkpoints and the journal (G14). A program's library connects again and sends its
+**Crash** (kill -9, power loss). Each database recovers as the engine does at its next start (G1 to G13), with the
+frames the commit buffer kept; the session tables are rebuilt from their checkpoints and the journal (G14). A program's library connects again and sends its
 unanswered writes again: each is applied once.
 
 **A failed disk.** When a database's writer stops on a failed write or fsync ([G10](guarantees.md#g10-stop-on-a-disk-error)),
@@ -216,6 +224,74 @@ Restart=on-failure
 TimeoutStopSec=120
 MemoryMax=8G
 ```
+
+## Many databases, one fsync: the commit buffer
+
+**Why.** A write is confirmed once its frame is durable, and making bytes durable costs an **fsync** (the system call
+that returns once the disk holds what was written to a file: from 3 ms on this machine's SSD). Within one database the
+writes that arrive while an fsync runs share the next one (group commit, [architecture](architecture.md#the-journal-a-write-ahead-log)).
+Across databases they did not while each database forced its own journal: 64 databases written at once made 64
+fsyncs of 64 files, and a write waited 24.1 ms at the median against 3.07 ms with one database written (`sbench.exe
+mwrite`, $n = 5$, before the buffer). PostgreSQL's databases share one **WAL** (write-ahead log: the file where every
+change is made durable before it counts), so the commits of all of them group.
+
+**What it does.** The server keeps one log of its own, the **commit buffer** (`DATA/server.wal.1` and `.2`,
+`src/wal.ml`; byte layout in [formats](formats.md#the-servers-files)):
+
+```
+database d1: frame -> d1's journal (written, no fsync) --+
+database d2: frame -> d2's journal (written, no fsync) --+--> a round: d1's frame | d2's frame | ...
+database dN: frame -> dN's journal (written, no fsync) --+      appended to DATA/server.wal.N, one fsync,
+                                                                then each of its frames is confirmed
+```
+
+Each database's syncer writes its frame to its journal without an fsync, gives a copy to the buffer, and waits for
+that frame's confirmation before it writes its next one (one frame in flight a database: recovery needs it, below). A
+**round** takes every frame that came while the previous round was forced, appends them as one record to the
+buffer's active file, and forces it once; then every frame of the round is confirmed. One round is in flight at a
+time, so at 64 databases written at once, one fsync confirms up to 64 frames. A frame that comes when the buffer is
+idle (no round written or waiting) and no journal is forcing one of its own is forced in its own journal, as before
+the buffer: a database written alone pays no second write, and the frames of the others that come meanwhile share the
+next round. `cepheus status` counts them: `commit_buffer.rounds`, `commit_buffer.frames` (the frames the rounds
+forced) and `commit_buffer.alone` (the frames forced in their own journal).
+
+Each journal stays the truth of its database (its runs, its recovery, its backups and its local readers are as
+before); the buffer holds a second copy of each frame only until a **checkpoint** of its journal (an fsync of it). Its
+two files alternate: when the active one passes 64 MB, the next round goes to the other one, once it is clean; the
+server's cleaner thread forces each journal that has frames in the old file, after which that file may be begun again
+(its header and first round written beside, forced, renamed over it). A journal is also forced when it leaves a
+segment, before a merge names a run (no run rests on frames the buffer alone holds), and at close. A frame longer
+than 1 MiB, and a large group's frame, is forced in its own journal and not copied: written twice, it would cost more
+than its own fsync.
+
+**Recovery.** After a power loss, the frames a journal wrote after its last fsync may each be lost, kept or torn, the
+one independently of the other: a journal's own rule (a torn tail is cut; a frame that checks after one that does not
+is damage) would cut confirmed frames, or take a hole followed by a kept frame for damage. So at start, before it
+opens its databases, the server reads both files of the buffer (the newer one may end with a torn round: the one in
+flight at the crash, never confirmed); each database's open writes the buffer's frames for it again at their place in
+its journal, even where the page cache already shows them (a failed fsync may have marked those pages clean: only a
+write makes them dirty again, [G13](guarantees.md#g13-a-failed-fsync-is-never-trusted)), and forces them; every frame
+before the last of them that the buffer does not hold must check (it was forced: else `Damaged`); the journal's own
+rule then takes what follows, at most the one frame in flight. Then both files are removed and the rounds start. A
+clean stop forces every journal and removes the files: a start after it reads nothing.
+
+**Faults.** A failed write or fsync of the buffer, or of a journal at a checkpoint, stops the buffer: every later
+write fails with `Io` and nothing more is confirmed ([G10](guarantees.md#g10-stop-on-a-disk-error)); the failed round
+is cut back off its file at once; the database whose write failed stops, and the server exits within a second, as
+above. A database opened by a server is refused by a program's own process after a crash, until the server has
+started on it once: [operations](operations.md#a-database-of-a-server), where going back to an earlier version is
+explained too.
+
+@@NUMBERS@@
+
+**Tested by** `test/wal_sim.ml` (three databases sharing one buffer whose files alternate after 300 to 3,300 bytes:
+writes, rounds, cleanings, merges, large groups and long frames, process deaths, power losses, crashes inside any disk
+call, recovery's too, failed fsyncs of the buffer and of the journals, a version without the buffer opening a
+database after a crash; after every recovery each database holds every confirmed group, exactly the groups written,
+in order; `BUFFER_SEEDS`, 300 in `tools/test.sh`), `test/exhaustive.ml` part 6 (every crash point of a fixed run of two
+databases, every fsync of it failing in turn, with a reopen in the same boot), and `test/server_crash.ml` (a real
+server of two databases, killed 20 times under writing clients: every receipt's write is there, once).
+**Model-checked**: `spec/CommitBuffer.tla` ([testing](testing.md#model-checking)).
 
 ## The protocol
 
@@ -780,19 +856,11 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 ## What it does not do yet
 
 - Find gathers its answer's index words before it sends them (above); forks are not on the wire yet.
-- **Many databases do not share an fsync yet**: each forces its own journal. Written at once, one writer each, 5 s
-  (`sbench.exe mwrite`, $n = 5$), 1 / 4 / 16 / 64 databases make 218 / 508 / 1,209 / 2,308 groups a second, a write
-  waiting 3.07 / 6.24 / 10.3 / 24.1 ms at the median [20.9, 29.7 at 64]. PostgreSQL 18.6's databases share one WAL:
-  1 / 4 / 16 / 64 clients inserting a row a transaction (`pgbench`, $n = 5$) make 182 / 477 / 1,760 / 3,463 a second,
-  18.5 ms on average at 64. PostgreSQL wins at 16 and 64 (1.5 times the writes at 64), where one database of Cepheus
-  with 64 writers makes 4,828 to 7,021 a second (the OCaml and the Cesia clients, [Cesia](cesia.md#what-it-costs)): the
-  fsyncs of separate files do not group as the writes of one journal do. The design's answer, one forced log for the server's rounds and each journal
-  forced at its checkpoints, is the next step.
 - Local readers on other machines (a replica, step 6; Raft with leases between servers, step 7), and one shared copy
   of the pages for many readers of one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
 
 The Cesia client is step 4 ([Cepheus from Cesia](cesia.md)): a Cesia program reaches a database through a server only,
 by `cepheus.Connect`, and reads locally on the server's machine. Live questions are on the wire (step 5,
-[above](#live-questions-watch)). Next: many databases sharing one fsync (the rest of step 5), a replica (step 6), Raft on three machines (step 7), memory databases with `Expire` and
+[above](#live-questions-watch)). Many databases share one fsync ([the commit buffer](#many-databases-one-fsync-the-commit-buffer), the rest of step 5). Next: a replica (step 6), Raft on three machines (step 7), memory databases with `Expire` and
 `Incr` (step 8). The OCaml library still opens a database directory in its own process (`Cepheus.open_`): it is the
 engine the server runs, and what its tests and benchmarks drive; programs, in Cesia, go through the server.
