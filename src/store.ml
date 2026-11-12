@@ -1694,3 +1694,20 @@ let facts v = Array.fold_left (fun n r -> n + r.a.n - r.t.n) v.delta.dnet v.runs
 
 (* rows of a run: what the merge policy weighs *)
 let run_rows r = r.a.n + r.t.n
+
+(* What a property's facts (w < 0), or a (property, value)'s things, are in a view, for a comparison by identity: two
+   views of the same runs ([runs] physically equal) whose stamps are physically equal hold the same such facts (the
+   delta's maps are persistent, and a change replaces the entries on its path). Unequal stamps say nothing. *)
+type stamp = No_entry | Of_p of pdelta | Of_pw of vdelta
+
+let stamp v p w =
+  match IM.find_opt p v.delta.dav with
+  | None -> No_entry
+  | Some pd -> if w < 0 then Of_p pd else (match IM.find_opt w pd.pm with None -> No_entry | Some vd -> Of_pw vd)
+
+let same_stamp a b =
+  match a, b with
+  | No_entry, No_entry -> true
+  | Of_p x, Of_p y -> x == y
+  | Of_pw x, Of_pw y -> x == y
+  | _ -> false

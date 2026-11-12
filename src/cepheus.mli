@@ -111,6 +111,14 @@ type pattern = Query.pattern = { e : term; p : int; v : term }
 
 type head = Rules.head = Give of pattern | Never
 
+val prop_var : int -> int
+(** [prop_var k]: in a rule's pattern, the property as the variable [?k] (a negative number, where a property id
+    goes): the W3C's form of OWL 2 RL's rules, [[c, domain, p]; [x, p, y]] gives [[x, type, c]]. Another pattern of
+    the body, whose property is a constant, binds [?k] as its thing or its value; a value read under a variable
+    property has that property's type, and a fact a head gives must fit its property, or the group is refused. The
+    engine runs such a rule unfolded on that pattern's facts when they are few (one rule a fact, the property in
+    place), and as written while a group changes them. Questions keep constant properties. *)
+
 type rule = Rules.t = {
   name : string;  (** unique among the schema's names, properties' included *)
   vars : int;
