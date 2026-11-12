@@ -598,17 +598,5 @@ let () =
   | [ "why"; n; r; dir ] -> why_bench dir (int_of_string n) (int_of_string r)
   | [ "apply"; n ] -> apply_bench (int_of_string n)
   | [ "closure"; kind; form; dir ] -> closure_bench kind form dir
-  | [ "calib" ] ->
-    let n = 100_000 in
-    let src = Reason.ints_raw n and dst = Reason.ints_raw n in
-    for i = 0 to n - 1 do Bigarray.Array1.set src i (i + 1); Bigarray.Array1.set dst i (i / 4) done;
-    for _ = 1 to 5 do
-      let t0 = now () in
-      let off, adj = Reason.rows (n + 1) n src dst in
-      let t1 = now () in
-      let _ = Reason.components (n + 1) off adj in
-      let t2 = now () in
-      Printf.printf "rows %.4f components %.4f\n%!" (t1 -. t0) (t2 -. t1)
-    done
   | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2
