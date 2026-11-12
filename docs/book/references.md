@@ -368,6 +368,9 @@ venue, volume and year); a work that could not be checked is not listed. The des
   https://www.w3.org/TR/owl2-profiles/
   — OWL 2 RL's rules (prp-dom, prp-trp, cax-sco, …), written over the ontology's facts with the property a variable:
   the form a rule with a variable property takes.
+- **[Fan 2019]** Z. Fan, J. Zhu, Z. Zhang, A. Albarghouthi, P. Koutris, J. M. Patel. Scaling-Up In-Memory Datalog
+  Processing: Observations and Techniques. *PVLDB* 12(6), 695–708, 2019. https://doi.org/10.14778/3311880.3311886
+  — Soufflé "runs out of memory when evaluating TC on G80K": transitive closure is where Datalog engines break.
 - **[Henzinger 2015]** M. Henzinger, S. Krinninger, D. Nanongkai, T. Saranurak. Unifying and Strengthening Hardness
   for Dynamic Problems via the Online Matrix-Vector Multiplication Conjecture. *STOC* 2015, 21–30.
   https://doi.org/10.1145/2746539.2746609

@@ -443,6 +443,13 @@ marked *computed* are ours from their tables):
   that lost a derivation against every rule that can give it, each check a lookup in the store's persistent maps or
   runs (34 lookups for one student); the prototype of the design, over hash tables of its own, took 19.1 µs.
 
+**Closures and the W3C's form** (the design's step 2; [benchmarks](benchmarks.md#rules-step-2-closures-and-the-w3cs-form-2026-11-12)):
+the closure module computes the 100,000-node hierarchy's 683,496 new facts in **22.5 ms** (prp-trp as a rule: 0.92 s
+of reasoning) and the random DAG's 1,344,791 in **47.3 ms** (17.6 s), each new fact made once; LUBM-shaped data with
+the ontology as facts and the 10 W3C rules, unfolded, reasons in **1.10×** the time of the 94 rules written one an
+axiom for a load and 1.05× group by group, for the same derived facts of the data (the design's prototype, running
+the W3C rules as written: 2.2×).
+
 ## The choices behind this design
 
 Each was weighed against the others in the design; the measurements are the design's prototype's unless said.
