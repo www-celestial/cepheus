@@ -282,7 +282,32 @@ above. A database opened by a server is refused by a program's own process after
 started on it once: [operations](operations.md#a-database-of-a-server), where going back to an earlier version is
 explained too.
 
-@@NUMBERS@@
+**What it gains and costs** (2026-11-12, the machine of the other benchmarks, release builds; `sbench.exe mwrite`: a
+server of 64 empty databases started on a fresh copy of them, D databases written at once for 5 s, W writers each;
+this version against main 1b12c35, the one before the buffer, alternated in each round, each run under the
+benchmarks' lock and on a quiet machine; $n = 7$ rounds; medians, the ratio with / before within each round, and
+intervals between the smallest and the largest value, 98.4 %):
+
+| written | groups a second, before / with | ratio by round | wait at the median, before / with |
+|---|---|---|---|
+| 64 databases, 1 writer each | 2,637 / 5,870 | 2.20 [1.70, 3.82], higher in 7 rounds of 7 | 22.5 / 8.0 ms |
+| 16 databases, 1 writer each | 1,423 / 1,498 | 0.98 [0.88, 1.46] | 9.98 / 6.75 ms (lower in 7 of 7); p99 27.0 / 35.6 ms |
+| 1 database, 1 writer | 308 / 263 | 0.86 [0.66, 1.21] | 2.86 / 2.99 ms |
+| 1 database, 16 writers | 2,447 / 2,083 | 0.88 [0.27, 1.08] | 5.73 / 6.01 ms |
+
+- At 64 databases one fsync confirms the frames of many: 2.2 times the writes, a write waiting a third as long.
+- At 16, the median wait falls by a third, but the writes a second do not rise: the slowest writes wait longer (p99
+  27.0 / 35.6 ms), and the ratio's interval holds 1. A round then holds 8 frames on average (`cepheus status` after
+  2 s: 441 rounds, 3,526 frames, 1 frame alone).
+- A database written alone has its frames forced in its own journal (the rule above; `cepheus status`: no round).
+  The first version of the buffer, without that rule, made one database's 16 writers 18 % slower (2,240 / 1,843
+  groups a second, the median wait higher in 7 rounds of 7); with it, the difference is within the noise (each
+  ratio's interval holds 1), and so on one database of 1 M facts (`sbench.exe write`, $n = 5$, intervals of 93.8 %): one client 305 / 287 groups a
+  second (ratio 0.95 [0.83, 1.28]), 16 clients 2,296 / 2,145 (0.94 [0.56, 1.43]). The median wait is 4 to 7 % higher
+  in each of these four measures, though: a small cost may remain that these rounds cannot tell from the noise.
+- A start after a clean stop (64 databases, $n = 7$): 215 / 199 ms (ratio 1.10 [0.23, 1.62]). The first start of
+  this version on databases made before it writes a `shared` marker in each, with an fsync of its directory: at 64
+  databases 849 / 1,250 ms, once.
 
 **Tested by** `test/wal_sim.ml` (three databases sharing one buffer whose files alternate after 300 to 3,300 bytes:
 writes, rounds, cleanings, merges, large groups and long frames, process deaths, power losses, crashes inside any disk
