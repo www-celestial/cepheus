@@ -304,8 +304,10 @@ offsets, the row blocks (as many as each property's rows need, in order), the va
 text offsets, and each column (its entry within its sections, its rank table's counts, its offsets from 0 to its rows
 each larger than the one before, its blocks in order and within their room, its rows those of the property by value);
 a run that does not check is set aside and the choice made again without it. A run that fits in the cache is read and
-checked whole at open, by up to 4 domains when it has 512 pages or more (each its own descriptor; the CRC is most of
-an open's time). Replay starts at the
+checked whole at open; a larger one has the pages its checks read (its tables) read and checked first, when the
+cache has room for them all. Either way the pages are read in the file's order, the file pages that follow one another
+in one read (up to 1 MiB), by up to 4 domains from 64 pages (each its own descriptor; the CRC is most of a warm open,
+the disk's latency most of a cold one). Replay starts at the
 journal position of the newest run's header, whose group may come before the run's own: a background merge starts
 from a view that runs ahead of the disk, and its position is the end of the last durable frame. The groups up to the
 run's are read and skipped. A journal that ends before the newest run's group is damage (the run's group was durable

@@ -399,8 +399,8 @@ How a question is answered, and what it costs: [architecture](architecture.md#qu
 
 `set_cache bytes` sets how many bytes of run pages the process keeps in memory, for all its databases at once (1 GiB
 by default; at least 16 pages of 16 KiB). It takes effect as pages come in (a smaller cache evicts as the next pages
-are read) and at the next open (a run that fits in the cache is read and checked whole at open; a larger one, page
-by page as questions need it). [operations](operations.md#memory).
+are read) and at the next open (a run that fits in the cache is read and checked whole at open; a larger one, its
+tables at open and its other pages as questions need them). [operations](operations.md#memory).
 
 ## Operations
 

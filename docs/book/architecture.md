@@ -163,8 +163,8 @@ restart the replay of everything before them, and they can always be rebuilt fro
 in-memory format, read in place, a value decoded where it is needed (it is only for 64-bit little-endian machines;
 the journal is the portable format). At open, Cepheus takes the chain of named runs from 0 that reaches the newest
 group with the fewest runs, and checks each run: the header, the page table, the rank tables, the order and bounds of
-every offset table; a run that fits in the cache is read and checked whole before the first question, a larger one
-page by page. A run that does not check is set aside (noted, skipped) and the chain is chosen again without it, down
+every offset table; a run that fits in the cache is read and checked whole before the first question; a larger one has
+its tables' pages read and checked at open, its rows' pages as questions need them. A run that does not check is set aside (noted, skipped) and the chain is chosen again without it, down
 to the journal alone. No run is kept outside the chain: the journal holds every group, so a damaged run costs a
 replay, never a fact. Runs of earlier formats (format 4, `<group>.snap`, the whole base in one file; formats 5 and 6,
 fixed 8-byte words) are set aside at the first open and the journal replayed once ([formats](formats.md)).

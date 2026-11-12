@@ -85,6 +85,27 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## The open's reads in the file's order (2026-11-12), at 10 million facts
+
+The database of 10 million facts loaded in 4 large groups (`GROUP=56818`, one thread), then `snapshot`: one run of
+69.6 MB (4,212 file pages). With a 32 MB cache the run does not fit, and the open checks its tables: 327 pages (5.4
+MB) in 229 stretches of the file. Before, the checks read them one at a time as they came to them; now they are read
+first, in the file's order, the file pages that follow one another in one read, by 4 domains. A run that fits in the
+cache (the default 1 GiB) is read whole the same way. The open of `bench.exe read` (`CEPHEUS_DOMAINS=1`, a 128 MB
+scope for the 32 MB cache, 3 GB for 1 GiB), cold: the files' pages dropped from the system's cache first; 21 rounds,
+the two binaries in turn; medians with their 95 % interval, and the median of the per-round ratios:
+
+| open | before (3f8d8e8) | after | after / before | after faster |
+|---|---|---|---|---|
+| 32 MB cache, cold | 126.1 ms [120.5, 129.6] | **70.0 ms** [69.3, 71.0] | 0.570 [0.544, 0.593] | 21/21 |
+| 32 MB cache, warm | 18.6 ms [17.8, 20.0] | **17.4 ms** [16.9, 17.7] | 0.933 [0.914, 0.994] | 16/21 |
+| 1 GiB cache, the run read whole (50 to 53 MB from the disk) | 199.5 ms [190.4, 208.2] | **169.4 ms** [167.9, 171.5] | 0.858 [0.806, 0.895] | 21/21 |
+
+The disk reads 16.7 to 19.7 MB for the 5.4 MB the cold open needs: the system's read-ahead. Damage is found where it
+was: every page the open reads is checked by its CRC before it enters the cache, and the checks are the same; a
+damaged page among the tables now sets the run aside even where the checks would not have looked at its bytes (the
+unit tests' 12 flipped bits: 1 refused at open and 11 found at a read, against 0 and 12).
+
 ## Chunked loads (2026-11-12), at 10 million facts
 
 A load written as groups of 5,000 clients (about 415,000 facts a group, 23 groups of clients and 23 of their follows)

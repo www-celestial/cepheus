@@ -212,10 +212,11 @@ CRC of the page table and that it maps each page of the file at most once, the o
 (each word's count follows from the bits before it, the last equals the things) and the order and bounds of every
 offset table and directory, the columns' among them (each column within its sections, its rank table's counts, its
 row offsets each larger than the one before up to its rows, its blocks in order: `Snapshot.check_and_build`). A run
-that fits in the cache is read and checked whole, by up to 4 domains for a run of 512 pages or more, each with its
-own descriptor, before it is taken. Every page goes through `Pages.fill`, which reads the file
-page the page table names and checks the CRC-32C the table gives before it enters the frame table: no other path puts
-a page there. Every access to a run is bounds-checked (the frame table, then the page's bytes or a block's copy), so
+that fits in the cache is read and checked whole before it is taken; a larger one has the pages of its tables read and
+checked first, when the cache has room for them (by up to 4 domains from 64 pages, each with its own descriptor). A
+page read from a run's file enters the frame table only once the CRC-32C its page table gives checks: at open
+(`Snapshot.check_and_build`) or on demand (`Pages.fill`); a page a merge has just written enters from the bytes whose
+CRC it computed (`Pages.admit`). No other path puts a page there. Every access to a run is bounds-checked (the frame table, then the page's bytes or a block's copy), so
 a read never leaves the run's bytes. The coding of formats 7 and 8 (blocks by a frame of reference, a page table, the
 column order) changes what a page holds, not this argument: a value is decoded only from a page that checked. For random damage
 of a page, CRC-32C misses it with probability $2^{-32}$; it detects every burst of up to 32 bits (Castagnoli, Bräuer,

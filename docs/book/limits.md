@@ -71,6 +71,7 @@ defaults, and the cache's size (`set_cache`).
 | a page's counter | 2 bits (0 to 3) | `Pages.touch` |
 | pages in memory | under 1.25 times the cache: a full collection after each quarter of the cache evicted (256 pages, 4 MiB, at least) | `Pages.room` |
 | a run read whole at open | when its pages fit in the cache | `Snapshot.check_and_build` |
+| a larger run's tables read at open | when their pages fit in the room the cache has left; read in the file's order, up to 64 file pages (1 MiB) a read, by up to 4 domains from 64 pages | `Snapshot.check_and_build` |
 | a merge | the cache, at most 2 page buffers for each of the 18 streams of the pass by property (11 measured), 25 bytes a page of the new run's layout, the block being coded, and the new run's text hash table (8 bytes a text) | [theory](theory.md#8-merges-written-to-a-file) |
 | a large group | the caller's list of operations (72 bytes an `Add` and its value: 883 MB for 9.4 M), 14 bytes a fact in the group's order and 12 by property (Bigarrays), the radix sort's room for its largest property on each of 2 domains, and the receipt (a pair a new thing), the group's journal coding (21.6 MB at 9.4 M facts, built in memory, then written by pieces of 1 MiB): about 1.5 GB at the peak of a load of 10 M facts in two groups, of which 0.88 GB is the caller's list | measured ([benchmarks](benchmarks.md#the-load-in-parallel-and-without-copies-2026-11-08-at-10-million-facts)) |
 | the delta | about 170 bytes a change, until the next merge | measured |
