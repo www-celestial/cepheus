@@ -1,5 +1,6 @@
-(* The real server, killed. A `cepheus serve` process runs on a scratch directory; client threads write through its
-   Unix socket, each write a new thing with a value of its own; the server is killed (kill -9) at random moments and
+(* The real server, killed. A `cepheus serve` process runs on a scratch directory with two databases (their frames
+   forced by the server's commit buffer, rounds of both); client threads write through its Unix socket, half to each
+   database, each write a new thing with a value of its own; the server is killed (kill -9) at random moments and
    started again, while the clients go on: their library connects again and sends each unanswered write again with
    its session and serial. At the end (a clean stop, a start, a stop), every write that got a receipt is in the
    database (G1), and no write is there twice (G14). Meanwhile two readers read in their own memory (local reads:
@@ -45,10 +46,10 @@ let () =
   let cfg = Filename.concat dir "cluster.toml" in
   write_file cfg
     "[cluster]\nname = \"crash\"\nid = \"cph-c-00000000000000c1\"\nme = \"srv1\"\n[[peer]]\nname = \"srv1\"\naddress = \"127.0.0.1:7401\"\n\
-     [clients]\nsocket = \"run\"\ndomains = 2\n[storage]\ndata = \"data\"\ncache = \"64M\"\n[[database]]\nname = \"main\"\n";
+     [clients]\nsocket = \"run\"\ndomains = 2\n[storage]\ndata = \"data\"\ncache = \"64M\"\n[[database]]\nname = \"main\"\n[[database]]\nname = \"side\"\n";
   let wtext, whash = Tokens.generate () and atext, ahash = Tokens.generate () in
   let toks = Tokens.with_tokens Tokens.empty
-      [ { Tokens.name = "w"; hash = whash; databases = [ "main", Tokens.Write ]; admin = false };
+      [ { Tokens.name = "w"; hash = whash; databases = [ "main", Tokens.Write; "side", Tokens.Write ]; admin = false };
         { Tokens.name = "a"; hash = ahash; databases = []; admin = true } ] in
   Tokens.save (Filename.concat dir "tokens.toml") toks;
   let sock = Filename.concat dir "run/.s.cepheus.7400" in
@@ -57,7 +58,9 @@ let () =
   wait_ready sock;
   (* the property, declared once *)
   let c0 = Result.get_ok (Client.connect addr wtext) in
-  let db, p = match Client.declare c0 "main" [ prop "k" Tint ] with Ok (db, [ p ]) -> db, p | _ -> failwith "declare" in
+  let declare name = match Client.declare c0 name [ prop "k" Tint ] with Ok (db, [ p ]) -> db, p | _ -> failwith "declare" in
+  let (db, _) as main = declare "main" in
+  let side = declare "side" in
   Client.close c0;
   (* G9: a second server on the same data is refused *)
   let second = Serve.start bin cfg in
@@ -75,11 +78,15 @@ let () =
     | Error m -> C.check false "connect: %s" m
     | Ok c ->
       let i = ref 0 in
+      let wdb, wp = if t mod 2 = 0 then main else side in
       while not (Atomic.get stop) do
         let v = (t * 1_000_000) + !i in
         incr i;
-        match Client.write c db ~why:"crash" [ Resolve.Add (-1, p, Int v) ] with
-        | Ok r -> acked.(t) <- (v, r.group) :: acked.(t); raise_to answered r.group
+        match Client.write c wdb ~why:"crash" [ Resolve.Add (-1, wp, Int v) ] with
+        | Ok r ->
+          acked.(t) <- (v, r.group) :: acked.(t);
+          (* the readers read main: its groups only *)
+          if t mod 2 = 0 then raise_to answered r.group
         | Error { code = "unreachable"; _ } -> Atomic.incr lost
         | Error e -> C.check false "a write failed: %s %s" e.code e.message
       done;
@@ -136,12 +143,12 @@ let () =
   pid := start cfg;
   wait_ready sock;
   let c = Result.get_ok (Client.connect addr wtext) in
-  let q = { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } in
-  (match Client.find c db q with
-   | Error e -> C.check false "find: %s" e.message
-   | Ok (_, rows) ->
+  let found (d, p) = Client.find c d { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } in
+  (match found main, found side with
+   | Error e, _ | _, Error e -> C.check false "find: %s" e.message
+   | Ok (_, rows), Ok (_, rows2) ->
      let seen = Hashtbl.create 1024 in
-     List.iter (fun row -> match row.(1) with Value.Int v -> Hashtbl.replace seen v (1 + Option.value (Hashtbl.find_opt seen v) ~default:0) | _ -> ()) rows;
+     List.iter (fun row -> match row.(1) with Value.Int v -> Hashtbl.replace seen v (1 + Option.value (Hashtbl.find_opt seen v) ~default:0) | _ -> ()) (rows @ rows2);
      let twice = Hashtbl.fold (fun _ n k -> if n > 1 then k + 1 else k) seen 0 in
      let n_acked = Array.fold_left (fun n l -> n + List.length l) 0 acked in
      let missing = Array.fold_left (fun n l -> n + List.length (List.filter (fun (v, _) -> not (Hashtbl.mem seen v)) l)) 0 acked in
@@ -165,6 +172,6 @@ let () =
    | _, Unix.WEXITED 0 -> C.check true "SIGTERM: a clean exit"
    | _ -> C.check false "SIGTERM: not a clean exit");
   C.check (not (Sys.file_exists sock)) "the socket is removed at stop";
-  (try Sys.remove (Follow.page_of_dir (Filename.concat dir "data/main")) with Sys_error _ -> ());
+  List.iter (fun n -> try Sys.remove (Follow.page_of_dir (Filename.concat dir ("data/" ^ n))) with Sys_error _ -> ()) [ "main"; "side" ];
   C.rmrf dir;
   C.finish "server crash"

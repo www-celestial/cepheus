@@ -1,5 +1,6 @@
 #!/bin/sh
 # Every test: unit and property tests, the rules' property tests (G17, G18, G20), the exhaustive enumeration, the simulation (SEEDS seeds, 300 by default),
+# the commit buffer's simulation (BUFFER_SEEDS seeds, 300 by default: three databases sharing one buffer),
 # real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/book/case-seats.md), and the documentation's
 # examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), live questions
 # against the naive evaluator (LIVE_SEEDS seeds, 100 by default), TLS and the
@@ -24,8 +25,10 @@ dune build --profile release 2>&1
 b=_build/default/test
 CEPHEUS_TMP=$tmp $b/unit.exe | tail -1
 $b/reasoning.exe | tail -1
-$b/exhaustive.exe | tail -3
+$b/exhaustive.exe | tail -5
 $b/sim.exe --seeds "${SEEDS:-300}" | tail -2
+# its stderr: the engine reporting the failures it is given (a cut whose fsync failed too)
+$b/wal_sim.exe --seeds "${BUFFER_SEEDS:-300}" 2> /dev/null | tail -2
 rm -rf "$tmp/cepheus-crash" && $b/crash.exe "$tmp/cepheus-crash" "${KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-crash"
 $b/bank.exe "$tmp/cepheus-bank" "${BANK_SECONDS:-2}" | tail -2
 rm -rf "$tmp/cepheus-seats" && $b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-20}" | tail -2 && rm -rf "$tmp/cepheus-seats"

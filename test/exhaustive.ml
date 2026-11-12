@@ -471,6 +471,258 @@ let () =
   Printf.printf "exhaustive fsync failures: %d reopens checked, %d false alarms (an unconfirmed frame's header sector lost alone, the process dead before its cut)\n"
     !fs_states !fs_alarms
 
+(* ---- 6. the commit buffer (src/wal.ml, spec/CommitBuffer.tla) ----
+   Two databases share a buffer whose files alternate after 500 bytes, their journals' segments 1,500 bytes long. A
+   fixed run: rounds of one database and of both, frames forced in their own journal between the buffer's (long ones),
+   a segment left, switches of file, a cleaning, a switch over the cleaned file. At every mutating disk call of the
+   run: a process death (the page cache kept, then lost at a later power loss), and power losses keeping each prefix
+   of each directory's name changes, with the unsynced bytes lost, kept, torn, or kept one sector in two. Recovery
+   (the buffer read, both databases opened with its frames, the buffer emptied) must hold every confirmed group of
+   each database, exactly the groups written, in order (G1, G2, G3), refuse nothing but the residual of G6 (a frame or
+   a round no fsync confirmed, its header's sector lost alone), and what it published must survive a power loss. *)
+
+let bdata = "/data"
+let bnames = [| "/data/a"; "/data/b" |]
+let buffer_states = ref 0
+let buffer_points = ref 0
+let buffer_alarms = ref 0
+
+type bdb = {
+  be : Engine.t;
+  bgroups : (int, Group.t) Hashtbl.t;
+  mutable backed : int;
+  mutable bprepared : int;
+  mutable bwait : (unit, unit) Effect.Deep.continuation option;
+  mutable bunsure : bool;  (* a frame written, not confirmed *)
+  mutable bstopped : bool;  (* an Io error came: nothing more may be confirmed (G10) *)
+}
+
+type brun = { bsim : Sim_disk.t; bdisk : Disk.t; bwal : Wal.t; bdbs : bdb array; mutable runsure : bool }
+
+let bid i = Printf.sprintf "%016d" (i + 1)
+
+let bopen sim disk =
+  let wal = Wal.recover ~manual:true disk bdata in
+  let es = Array.mapi (fun i d -> Engine.open_ ~id_source:(fun _ -> bid i) ~buffer:(Wal.frames wal) disk d) bnames in
+  match Array.to_list es with
+  | [ Ok a; Ok b ] ->
+    Wal.start wal;
+    Wal.attach wal a.id a.journal;
+    Wal.attach wal b.id b.journal;
+    ignore sim;
+    Ok (wal, [| a; b |])
+  | l ->
+    List.iter (function Ok e -> Engine.close e | Error _ -> ()) l;
+    Error (String.concat "; " (List.filter_map (function Error e -> Some (Engine.message e) | Ok _ -> None) l))
+
+let bsetup () =
+  let sim = Sim_disk.create (Rng.make 7) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir bdata;
+  disk.sync_dir "/";
+  match bopen sim disk with
+  | Error m -> failwith m
+  | Ok (wal, es) ->
+    let mk (e : Engine.t) =
+      { be = e; bgroups = Hashtbl.create 16; backed = e.working.group; bprepared = e.working.group; bwait = None; bunsure = false; bstopped = false }
+    in
+    { bsim = sim; bdisk = disk; bwal = wal; bdbs = Array.map mk es; runsure = false }
+
+let bresults d res =
+  Array.iter
+    (function
+      | Ok (r : Engine.receipt) ->
+        C.check (not d.bstopped) "buffer: group %d confirmed after a failed fsync" r.group;
+        d.backed <- max d.backed r.group;
+        d.bunsure <- false
+      | Error (Engine.Io _) -> d.bstopped <- true
+      | Error _ -> ())
+    res
+
+let bwrite r i size =
+  let d = r.bdbs.(i) in
+  let e = d.be in
+  let v = e.working in
+  let ops =
+    match Schema.by_name v.schema "name" with
+    | None -> List.map (fun (e, q, x) -> Add (e, q, x)) (Schema.facts Schema.first_prop (prop "name" Ttext))
+    | Some p -> [ Add (-1, p, Text (String.make size (Char.chr (97 + i)))) ]
+  in
+  let b = Engine.prepare e [| ops, 1, "x" |] in
+  let body = Buffer.to_bytes b.body in
+  let rd = Codec.reader body 0 (Bytes.length body) in
+  for _ = 1 to b.count do
+    let g = Group.decode rd in
+    Hashtbl.replace d.bgroups g.n g;
+    d.bprepared <- max d.bprepared g.n
+  done;
+  d.bunsure <- true;
+  match Engine.commit e b with
+  | res -> bresults d res
+  | effect Wal.Wait, k -> d.bwait <- Some k
+
+let bround r =
+  r.runsure <- true;
+  Wal.round r.bwal;
+  r.runsure <- false;
+  Array.iter (fun d -> match d.bwait with Some k -> d.bwait <- None; Effect.Deep.continue k () | None -> ()) r.bdbs
+
+(* the run: W of database i with a text of n bytes (over 600: forced in its own journal), R a round, C a cleaning *)
+type bstep = W of int * int | R | C
+
+let brun_steps =
+  [ W (0, 10); R; W (0, 20); W (1, 30); R; W (1, 700); W (0, 40); R; W (0, 50); W (1, 60); R; W (1, 70); R; C;
+    W (0, 80); W (1, 90); R; W (0, 100); R; W (1, 650); W (0, 110); R ]
+
+let brun r = List.iter (function W (i, n) -> bwrite r i n | R -> bround r | C -> Wal.clean r.bwal) brun_steps
+
+(* recovery: the checks; the groups each database holds now *)
+let brecovered what r ~acked =
+  incr buffer_states;
+  match bopen r.bsim r.bdisk with
+  | Error m ->
+    let unsure = r.runsure || Array.exists (fun d -> d.bunsure) r.bdbs in
+    let has sub = let n = String.length sub and k = String.length m in
+      let rec go i = i + n <= k && (String.sub m i n = sub || go (i + 1)) in go 0 in
+    if unsure && has "(written whole)" then (incr buffer_alarms; None)
+    else (C.fail "%s: recovery failed: %s" what m; None)
+  | Ok (wal, es) ->
+    let ks =
+      Array.mapi
+        (fun i (e : Engine.t) ->
+          let d = r.bdbs.(i) in
+          let k = e.working.group in
+          C.check (k >= acked.(i)) "%s: database %d lost confirmed groups: %d, confirmed %d" what i k acked.(i);
+          C.check (k <= d.bprepared) "%s: database %d holds %d groups, %d were written" what i k d.bprepared;
+          (match
+             Journal.read r.bdisk (bnames.(i) ^ "/journal") e.id (fun g ->
+                 match Hashtbl.find_opt d.bgroups g.n with
+                 | Some g' -> C.check (Group.equal g g') "%s: database %d, group %d differs from what was written" what i g.n
+                 | None -> C.check (g.n = 1) "%s: database %d, group %d was never written" what i g.n)
+           with
+           | () -> ()
+           | exception Journal.Damaged m -> C.fail "%s: database %d, journal unreadable after recovery: %s" what i m);
+          k)
+        es
+    in
+    Array.iter Engine.close es;
+    Wal.stop wal;
+    Some ks
+
+let enumerate_buffer () =
+  Wal.limit := 500;
+  Journal.shared_max := 600;
+  Journal.segment_limit := 1500;
+  let reach k =
+    let r = bsetup () in
+    Sim_disk.crash_after r.bsim k;
+    match brun r with
+    | () -> Sim_disk.crash_after r.bsim (-1); None
+    | exception Sim_disk.Crash -> Some (r, Array.map (fun d -> d.backed) r.bdbs)
+  in
+  let k = ref 0 and go = ref true in
+  while !go do
+    (match reach !k with
+     | None -> go := false
+     | Some (r, _) ->
+       incr buffer_points;
+       let dirs = List.filter (fun d -> Sim_disk.pending_names r.bsim d > 0) (bdata :: List.concat_map (fun n -> [ n; n ^ "/journal" ]) (Array.to_list bnames)) in
+       let rec prefixes = function
+         | [] -> [ [] ]
+         | d :: rest ->
+           List.concat_map (fun j -> List.map (fun l -> (d, j) :: l) (prefixes rest)) (List.init (Sim_disk.pending_names r.bsim d + 1) Fun.id)
+       in
+       let what = Printf.sprintf "buffer, crash at call %d" !k in
+       (match reach !k with
+        | Some (r, acked) -> (
+          Sim_disk.kill r.bsim;
+          Sim_disk.crash_after r.bsim (-1);
+          match brecovered (what ^ ", process death") r ~acked with
+          | Some ks ->
+            Sim_disk.crash ~choose:(fun _ _ -> 0) r.bsim;
+            Array.iter (fun d -> d.bunsure <- false) r.bdbs;
+            r.runsure <- false;
+            ignore (brecovered (what ^ ", process death then power loss") r ~acked:ks)
+          | None -> ())
+        | None -> ());
+       List.iter
+         (fun prefix ->
+           List.iter
+             (fun (pname, sector) ->
+               match reach !k with
+               | Some (r, acked) ->
+                 let choose (d : Sim_disk.draw) n =
+                   match d with
+                   | Names dir -> List.assoc dir prefix
+                   | Length _ -> if sector = 0 then 0 else n - 1
+                   | Cut _ | Tear _ -> n / 2
+                   | Sector (_, s) -> if sector >= 0 then sector else if s mod 2 = 0 then 2 else 0
+                 in
+                 Sim_disk.crash ~choose r.bsim;
+                 Sim_disk.crash_after r.bsim (-1);
+                 let names = String.concat "," (List.map (fun (d, j) -> Printf.sprintf "%s:%d" d j) prefix) in
+                 ignore (brecovered (Printf.sprintf "%s, names %s, bytes %s" what names pname) r ~acked)
+               | None -> C.fail "%s: the crash point moved" what)
+             patterns)
+         (prefixes dirs));
+    incr k
+  done;
+  (* each fsync of the run failing in turn (a round's, a journal's), the run going on (every later write fails), then
+     a process death, or a clean stop (the server's, every database closed), or neither; then, or after a reopen in
+     the same boot (which reads the page cache: pages the failed fsync marked clean read as written) and its clean
+     stop, a power loss keeping all or none of the unsynced bytes: every group confirmed before the failure is there,
+     none after it was confirmed, and what the reopen published survives *)
+  let fsyncs = ref 0 and fstates = ref 0 in
+  let i = ref 0 and go = ref true in
+  while !go do
+    List.iter
+      (fun (died, reopen, keep) ->
+        let r = bsetup () in
+        let before = Sim_disk.failures r.bsim in
+        Sim_disk.fail_fsync_at r.bsim !i;
+        (match brun r with () -> () | exception Sim_disk.Crash -> ());
+        Array.iter (fun d -> match d.bwait with Some k -> d.bwait <- None; (try Effect.Deep.continue k () with Sim_disk.Crash -> ()) | None -> ()) r.bdbs;
+        if Sim_disk.failures r.bsim = before then go := false
+        else begin
+          if died then Sim_disk.kill r.bsim
+          else if reopen then begin
+            Array.iter (fun d -> Engine.close d.be) r.bdbs;
+            Wal.stop r.bwal
+          end;
+          let what = Printf.sprintf "buffer, fsync %d failed%s" !i (if died then ", process death" else if reopen then ", clean stop" else "") in
+          let acked = Array.map (fun d -> d.backed) r.bdbs in
+          Array.iter (fun d -> d.bunsure <- true) r.bdbs;
+          r.runsure <- true;
+          let acked =
+            if not reopen then Some acked
+            else begin
+              incr fstates;
+              let ks = brecovered (what ^ ", reopened in the same boot") r ~acked in
+              Array.iter (fun d -> d.bunsure <- false) r.bdbs;
+              r.runsure <- false;
+              ks
+            end
+          in
+          match acked with
+          | None -> ()
+          | Some acked ->
+            Sim_disk.crash ~choose:(fun d n -> match d with Sim_disk.Sector _ -> if keep then 2 else 0 | Length _ -> if keep then n - 1 else 0 | _ -> if keep then n - 1 else 0) r.bsim;
+            incr fstates;
+            ignore (brecovered (Printf.sprintf "%s%s, power loss, %s kept" what (if reopen then ", reopened" else "") (if keep then "all" else "nothing")) r ~acked)
+        end)
+      [ false, false, true; false, false, false; true, false, true; true, false, false;
+        false, true, true; false, true, false; true, true, true; true, true, false ];
+    if !go then (incr fsyncs; incr i)
+  done;
+  Journal.segment_limit := 64 * 1024 * 1024;
+  Journal.shared_max := 1 lsl 20;
+  Wal.limit := 64 * 1024 * 1024;
+  Printf.printf "exhaustive commit buffer: %d fsyncs failed in turn, %d states recovered\n" !fsyncs !fstates;
+  Printf.printf "exhaustive commit buffer: %d crash points, %d crash states recovered, %d false alarms (an unconfirmed frame or round, its header's sector lost alone)\n"
+    !buffer_points !buffer_states !buffer_alarms
+
+let () = enumerate_buffer ()
+
 let () =
   List.iter crash_states [ [ 10; 20; 30 ]; [ 400; 900; 1500 ]; [ 2000; 100 ] ];
   List.iter flips [ [ 10; 20; 30 ]; [ 400; 900 ] ];
