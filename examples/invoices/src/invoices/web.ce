@@ -48,15 +48,19 @@ defn App(env)
     then http.Post("/invoices/:id/delete", signed(env, "any", invoiceDeleted))
     then live.Route("/live", s -> screen(s, env))
     then http.Wrap(sameOrigin)
-    then http.Wrap(guarded)
+    then http.Wrap((next, r) -> guarded(next, r, env.Secure))
 end
 
 asset(body, kind) = {Status: 200, Body: body, Headers: [{Name: "content-type", Value: kind}, {Name: "cache-control", Value: "no-cache"}]}   (** A file of the app. *)
 
-defn guarded(next, r)
+defn guarded(next, r, secure)
   (** A middleware that adds the headers of security to every response: no code but the app's own (no inline script,
-      no other site's), no framing, no sniffing of types, no referrer to other sites, and pages kept by no cache. *)
+      no other site's), no framing, no sniffing of types, no referrer to other sites, pages kept by no cache, and over
+      https, https only for a year (HSTS). *)
   out = next(r)
+  if secure
+    out = http.WithHeader("strict-transport-security", "max-age=31536000", out)
+  end
   for h in [["content-security-policy", "default-src 'self'; frame-ancestors 'none'; form-action 'self'; base-uri 'none'"], ["x-content-type-options", "nosniff"], ["referrer-policy", "same-origin"]]
     out = http.WithHeader(h[1], h[2], out)
   end

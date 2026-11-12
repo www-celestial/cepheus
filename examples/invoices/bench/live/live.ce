@@ -1,0 +1,86 @@
+(** How long a payment takes to show on the dashboard of open pages: K pages of Firefox (through Ceti) on the dashboard,
+    signed in as bench; ROUNDS rounds of W payments, each written straight to the database, one after the other. A
+    page notes when its unpaid total changes (performance.timeOrigin + now(), on the machine's clock, as sys.Now();
+    Firefox rounds it to the millisecond); each round prints the median and the 99th percentile, over its payments and
+    pages, of the time from the write's answer (durable) to the change on the page.
+    live BASE K ROUNDS W, with CEPHEUS_URL and CEPHEUS_TOKEN. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/ceti/src/browser
+use src/invoices
+use std/io
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+args = sys.Args
+base = args[1]
+k = text.Number(args[2])
+rounds = text.Number(args[3])
+w = text.Number(args[4])
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
+unpaid = result.Unwrap(cepheus.Find(2, (i, u) -> {Where: [[i, invoices.Invoice.Status, "unpaid"], [i, invoices.Invoice.Due, u]], Give: {Invoice: i, Due: u}, Sort: [cepheus.Desc(u)], Limit: rounds * w}, db))
+
+defn opened(b)
+  (** A page signed in, on the dashboard, live, noting the changes of its unpaid total. *)
+  p = browser.NewPage(b)?
+  browser.Go("$base/login", p)?
+  browser.Type("#login", "bench", p)?
+  browser.Type("#password", "bench password 1", p)?
+  browser.Click("#signin", p)?
+  browser.WaitFor("#dashboard", p)?
+  for t in 1..200
+    if browser.Text("#live-state", p)? == "live" and browser.Text("#unpaid", p)? != "…"
+      break
+    end
+    sys.Sleep(0.02)
+  end
+  browser.Eval("window.seen = []; new MutationObserver(() => window.seen.push(performance.timeOrigin + performance.now())).observe(document.querySelector('#unpaid'), {childList: true, characterData: true, subtree: true}); true", p)?
+  result.Ok(p)
+end
+
+defn seen(p)
+  (** When the page saw its first change since it was cleared, within 3 s: an Ok of the time in ms, or of missing. *)
+  for t in 1..300
+    x = browser.Eval("window.seen.length > 0 ? window.seen[0] : null", p)?
+    if not value.IsMissing(x)
+      return result.Ok(x)
+    end
+    sys.Sleep(0.01)
+  end
+  result.Ok(missing)
+end
+
+at(xs, q) = xs[list.Max([1, math.Round(q * value.Len(xs))])]   (** The quantile q of a sorted list. *)
+
+defn measured(b)
+  (** The rounds. *)
+  pages = [opened(b)? for j in 1..k]
+  next = 1
+  for r in 1..rounds
+    lat = []
+    lost = 0
+    for j in 1..w
+      for p in pages
+        browser.Eval("window.seen = []; true", p)?
+      end
+      i = unpaid[next].Invoice
+      next += 1
+      cepheus.Write([cepheus.Expect(i, invoices.Invoice.Status, "unpaid"), cepheus.Add(i, invoices.Invoice.Status, "paid"), cepheus.Add(i, invoices.Invoice.PaidAt, sys.Now())], db, why = "bench")?
+      done = sys.Now() * 1000
+      for p in pages
+        x = seen(p)?
+        if value.IsMissing(x) lost += 1 else lat = list.Append(x - done, lat) end
+      end
+      sys.Sleep(0.05)
+    end
+    xs = list.Sort(lat)
+    io.Print(json.Text({What: "dashboard change, from the write's answer", C: k, P50: math.Round(at(xs, 0.5) * 100) / 100, P99: math.Round(at(xs, 0.99) * 100) / 100, Failed: lost}))
+  end
+  result.Ok(missing)
+end
+
+result.Unwrap(browser.Firefox(measured, ".cesia/firefox"))

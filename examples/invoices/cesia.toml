@@ -17,7 +17,12 @@ take = ["src/browser"]
 # and the sessions, its settings, and its port. It reads and writes no file.
 [tasks.serve]
 file = "src/main.ce"
-allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=CEPHEUS_BOOKS_TOKEN", "env=APP_PORT", "env=APP_HOST", "env=APP_SECURE", "net=:8080"]
+allow = ["native=cepheus", "ffi=sodium", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=CEPHEUS_BOOKS_TOKEN", "env=APP_PORT", "env=APP_HOST", "env=APP_CERT", "env=APP_KEY", "net=:8080"]
+
+# In production: https on every address, port 8443, its certificate and key in /etc/invoices (OpenSSL: ffi=ssl,crypto).
+[tasks.serve-tls]
+file = "src/main.ce"
+allow = ["native=cepheus", "ffi=sodium", "ffi=ssl", "ffi=crypto", "env=CEPHEUS_URL", "env=CEPHEUS_TOKEN", "env=CEPHEUS_BOOKS_TOKEN", "env=APP_PORT", "env=APP_HOST", "env=APP_CERT", "env=APP_KEY", "read=/etc/invoices", "net=0.0.0.0:8443"]
 
 # cesia do users add LOGIN admin|accountant, the password in APP_PASSWORD.
 [tasks.users]

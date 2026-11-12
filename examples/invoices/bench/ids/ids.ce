@@ -1,0 +1,14 @@
+(** An id for the measures: ids client gives the first client by name, ids invoice the invoice numbered 50,000. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/invoices
+use std/io
+use std/result
+use std/sys
+
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
+rows = if sys.Args[1] == "client"
+  result.Unwrap(cepheus.Find(2, (c, n) -> {Where: [[c, invoices.Client.Name, n]], Give: {Id: c, Name: n}, Sort: [n], Limit: 1}, db))
+else
+  result.Unwrap(cepheus.Find(1, (i) -> {Where: [[i, invoices.Invoice.Number, 50000]], Give: {Id: i}}, db))
+end
+io.Print(rows[1].Id)

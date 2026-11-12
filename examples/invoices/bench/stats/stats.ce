@@ -1,0 +1,52 @@
+(** The medians of the rounds of bench/run.sh: for each measure (its What and C), the median over the rounds of each
+    number of a round (P50, P99, Rps, Ms), with its distribution-free 95 % interval, the order statistics [x(k),
+    x(n+1-k)] of the rounds that cover the median with a probability of at least 95 %. stats FILE.jsonl... *)
+use std/dict
+use std/io
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+defn rank(n)
+  (** The largest k with P(B < k) <= 2.5 %, B binomial (n, 1/2): [x(k), x(n+1-k)] covers the median at 95 %. *)
+  k = 0
+  below = 0
+  term = math.Exp(n * math.Log(0.5))
+  while below + term <= 0.025
+    below += term
+    term = term * (n - k) / (k + 1)
+    k += 1
+  end
+  list.Max([1, k])
+end
+
+show(x) = if x >= 100 text.Decimals(0, x) else if x >= 10 text.Decimals(1, x) else text.Decimals(2, x) end   (** A number as the tables print it. *)
+
+groups = dict.Dict()
+for f in sys.Args
+  for line in text.Lines(result.Unwrap(sys.Read(f)))
+    m = result.Unwrap(json.Parse(line))
+    key = "$(m.What)$(if "C" in m " | $(m.C)" else "" end)"
+    if not (key in groups)
+      groups[key] = []
+    end
+    groups[key] = list.Append(m, groups[key])
+  end
+end
+for key in dict.Keys(groups)
+  ms = groups[key]
+  n = value.Len(ms)
+  k = rank(n)
+  parts = []
+  for field in ["P50", "P99", "Rps", "Ms", "Bytes", "Failed"]
+    if field in ms[1]
+      xs = list.Sort([m[field] for m in ms])
+      parts = list.Append(if field == "Failed" "failed $(list.Sum(xs))" else if n >= 6 "$field $(show(xs[math.Div(n + 1, 2)])) [$(show(xs[k])), $(show(xs[n + 1 - k]))]" else "$field $(show(xs[math.Div(n + 1, 2)]))" end, parts)
+    end
+  end
+  io.Print("$key (n = $n): $(text.Join("; ", parts))")
+end
