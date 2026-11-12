@@ -687,6 +687,11 @@ let question ctx name d qv nvars =
     let order =
       if sort = C.Missing && limit = C.Missing && after = C.Missing then Top.none
       else begin
+        (* a question that uses the newer keys is newer code: a key the package does not know is a mistake there (a
+           misspelt After would give the first page for ever), and no question that worked before is refused *)
+        Array.iter
+          (fun k -> if not (List.mem k [ "Where"; "Give"; "Sort"; "Limit"; "After" ]) then refuse "invalid" "a question has no key %s: Where, Give, Sort, Limit and After" k)
+          (C.names q);
         let user = match sort with C.Missing -> [] | C.List l -> List.init (C.length l) (fun i -> field_of (C.item ctx l i)) | v -> C.need ctx name "a list of keys for Sort" v in
         let keys =
           if user = [] then []

@@ -398,7 +398,9 @@ place, if that place is after the cursor.
   then buy).
 
 `Watch` refuses `Sort`, `Limit` and `After` (a watch keeps every row of its question): sort the rows it gives with
-`list.SortBy`.
+`list.SortBy`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
+`Give`, `Sort`, `Limit` and `After`: a misspelt `After` would otherwise give the first page again and again (a
+question without them is read as before, its other keys left aside).
 
 ## Watch: live questions
 

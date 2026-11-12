@@ -102,6 +102,9 @@ defn isFindSortRefusals()
   noSort = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, After: {T: 10}}, s.Db)
   short = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, T: t}, Sort: [t], After: {T: 10}}, s.Db)
   watch = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t]}, s.Db)
+  misspelt = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t], Afer: {T: 10}}, s.Db)
+  old = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Note: "kept"}, s.Db)
+  bug.Assert(misspelt.Error.Code == "invalid" and result.IsOk(old), "an unknown key beside Sort is refused, and only there")
   list.All([notGiven.Error.Code == "invalid", noSort.Error.Code == "invalid", short.Error.Code == "invalid", watch.Error.Code == "invalid"])
 end
 

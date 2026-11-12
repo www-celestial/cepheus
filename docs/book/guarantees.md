@@ -526,7 +526,10 @@ node's fact, its ranges hold, every leaf is asserted in the view — and the nam
 answer again), the rows the program holds, the change applied, are exactly `Find`'s answer at that message's group, a
 durable group (G1: no crash can take it back). The groups of a watch's messages only grow, and every group that
 changed the rows between two messages is in the second one's change: no change is lost, none comes twice, whatever
-breaks in between (the connection, the server by `kill -9`, the program's reading).
+breaks in between (the connection, the server by `kill -9`, the program's reading). A watch of a question with `Not`, `Or`, `In` or
+`Prefix` keeps the promise by answering its question again, whole, at each frame that changes a fact of one of the
+properties it names, and sending the difference (multisets); `test/questions.ml` checks its rows against the oracle
+after every frame.
 
 *Conditions.* The question is a conjunctive query (`Find`'s patterns and ranges), with `Give` or aggregates. A program
 that reads slower than the changes come gets the answer again rather than every change (it then holds `Find`'s rows at
