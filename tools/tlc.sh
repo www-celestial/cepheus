@@ -1,8 +1,9 @@
 #!/bin/sh
-# Model-checks spec/Journal.tla, spec/Merge.tla, spec/Seats.tla, spec/LocalReads.tla and spec/Watch.tla with TLC (bounds
-# in their .cfg files), and checks that what must break does: the naive sale of spec/Seats.tla (SeatsNaive.cfg), every
-# variant of the local reads' rule that drops a part of it, the design's lease and its first draft (LocalReads*.cfg),
-# and every variant of a watch's resume that drops a part of its rule (Watch*.cfg). TLA2TOOLS names
+# Model-checks spec/Journal.tla, spec/Merge.tla, spec/Seats.tla, spec/LocalReads.tla, spec/Watch.tla and
+# spec/CommitBuffer.tla with TLC (bounds in their .cfg files), and checks that what must break does: the naive sale of
+# spec/Seats.tla (SeatsNaive.cfg), every variant of the local reads' rule that drops a part of it, the design's lease
+# and its first draft (LocalReads*.cfg), every variant of a watch's resume that drops a part of its rule (Watch*.cfg),
+# and every variant of the commit buffer that drops a part of its rule (CommitBuffer*.cfg). TLA2TOOLS names
 # tla2tools.jar, the official release from https://github.com/tlaplus/tlaplus/releases (v1.7.4 used here); Java 11 or
 # later.
 set -e
@@ -23,6 +24,14 @@ for c in WatchNoTouch WatchNoRing; do
   rc=0
   java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 1 -metadir "$meta/$c" -config $c.cfg Watch.tla || rc=$?
   if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/Watch.tla should break an invariant (TLC exit $rc)"; exit 1; fi
+  echo "tlc.sh: $c breaks an invariant, as it must"
+done
+java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/CommitBuffer" -config CommitBuffer.cfg CommitBuffer.tla
+# each variant of the commit buffer that drops a part of its rule must break an invariant
+for c in CommitBufferTrust CommitBufferEarly CommitBufferCkpt CommitBufferMany; do
+  rc=0
+  java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 1 -metadir "$meta/$c" -config $c.cfg CommitBuffer.tla || rc=$?
+  if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/CommitBuffer.tla should break an invariant (TLC exit $rc)"; exit 1; fi
   echo "tlc.sh: $c breaks an invariant, as it must"
 done
 # each must break an invariant: TLC exits with 12 and prints the counterexample
