@@ -85,6 +85,47 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Chunked loads (2026-11-12), at 10 million facts
+
+A load written as groups of 5,000 clients (about 415,000 facts a group, 23 groups of clients and 23 of their follows)
+by two threads (`bench.exe load` with `GROUP=5000 THREADS=2 CACHE_MB=64`), then `snapshot`, against main before the
+change (leveling for large groups, and a merge that looked at every source's head for each row), $n = 7$ rounds
+alternated, each run on a quiet machine (IO and CPU pressure under 5 and 10 %), in a 3 GB scope; the median and its
+interval, here the least and the greatest run (98.4 %):
+
+| | before | after |
+|---|---:|---:|
+| every group confirmed, s | 18.17 [15.26, 27.21] | 9.81 [8.09, 11.37] |
+| of which the clients' groups, s | 10.37 [9.39, 11.78] | 6.44 [5.69, 8.62] |
+| of which their follows, s | 6.40 [5.87, 16.02] | 2.82 [2.27, 4.24] |
+| a large group merged into its run, p50, ms | 122 [119, 142] | 62 [62, 64] |
+| the largest of them, ms | 2,111 [2,061, 9,599] | 1,601 [1,541, 1,775] |
+| runs before the snapshot | 2 | 15 |
+| `snapshot`, s | 2.38 [1.98, 5.09] | 3.18 [2.81, 3.59] |
+| load and snapshot, s | 21.87 [17.24, 29.38] | 12.99 [11.29, 14.40] |
+| peak resident memory, MB | 270 [252, 281] | 292 [258, 306] |
+
+The groups are confirmed 1.9 times faster: each group's run is written once, beside the others, instead of being
+merged again with the runs before it level after level; the 16th group merges the tier in one pass (the largest
+merge, 1.6 s). The snapshot then merges 15 runs instead of 2 and takes 0.8 s more, which the heap of cursors keeps
+small (before it, the first rounds' snapshot of 15 runs took 6.2 s). The peak grows by 22 MB (the 15 runs' tables
+held in memory, most likely; not measured apart). Reads between the load and its snapshot visit every run: at 1 million facts loaded the same way (8 runs
+against 2, $n = 3$), a client by e-mail 1.40 µs against 0.73, the unpaid invoices of a city 763 µs against 425; the
+same answers on both sides, and each binary opens and reads the other's database.
+
+Not reached, of the plan's step 4: a peak of 150 MB whatever the load's size (292 MB here: the two groups' lists of
+operations in flight, about 70 MB each, the 64 MB cache, and the compact arrays of a group), and 10 million facts in 3
+s (each group of 415,000 facts pays its own resolution, merge and fsync: 46 frames; the same 10 million facts in two
+groups load in 4.1 to 5.6 s, at a peak of 1.46 GB: [api](api.md#writing)).
+
+The same 10 million facts in 4 large groups (`GROUP=56818`, one thread), then `snapshot`, $n = 5$ alternated: every
+group confirmed in 5.12 s [4.28, 6.95] against 5.93 [5.58, 6.98], a peak of 862 MB [808, 967] against 987 [929, 1,006];
+the snapshot merges the 4 groups' runs instead of 2 and takes 2.52 s [2.30, 2.71] against 2.14 [2.01, 2.29]. An open
+of the database it leaves, its pages dropped from the system's cache, with a 32 MB cache ($n = 7$): 124 ms [113, 133]
+against 129 [110, 166], reading 16.7 MB both; 19.7 and 19.3 ms when the system's cache holds them, so most of a cold
+open is the disk's latency on the tables' pages, read one at a time. Neither the snapshot's cost of the third order
+nor the cold open changed with this work.
+
 ## Live questions (2026-11-11), at 1 million facts
 
 `cepheus.Watch` and `Watch` on the wire, against main before them (the commit of the column order), on the server's

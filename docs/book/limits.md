@@ -45,6 +45,8 @@ defaults, and the cache's size (`set_cache`).
 | when a merge starts | when the changes since the last merge pass 200,000 | `Engine.compact_min` (200,000), `Engine.needs_compaction` |
 | levels | level $l$ (1, 2, 3, ...) holds at most $200{,}000 \times 4^l$ rows: 800,000, 3.2 M, 12.8 M, 51.2 M, ...; a run's rows are its additions and its retractions | `Engine.ratio` (4), `Engine.cap` |
 | what a merge takes | the delta and the newest runs, down to the first level whose capacity holds them all; one run is written there | `Engine.plan` |
+| a large group's merge | the delta and the newest runs of the levels below the one that holds it; its run stays beside that level's runs until 16 of them would lie side by side, then all are merged | `Engine.tier` (16), `Engine.plan_large` |
+| runs a merge takes | at most 31 (the pass by thing keeps a thing's sources in the bits of an integer, two a run); a database has at most 16 plus one a level | `Snapshot.max_take` |
 | `snapshot` | the delta and every run into one run, at the deepest level among the runs or deeper if they do not fit there; nothing if there is one run and no group since the last merge | `Engine.plan_all`, `Engine.snapshot` |
 | what counts as a change | every addition or retraction applied since the last merge (one undone later counts twice) | `Store.change` (`dn`) |
 | catch-up | the merge replays the groups written meanwhile until it is fewer than 256 behind; then the writer replays the rest and switches | `Engine.catch_up` |
@@ -118,7 +120,7 @@ defaults, and the cache's size (`set_cache`).
 | TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |
 | a local reader's queue | 64 MiB of frames not yet sent; past it the reader is cut off and follows again | `Follow.max_behind` |
-| descriptors a message | 64 (a database with more runs than that cannot be followed; a database has a few, one a level) | `Fdpass.max_fds` |
+| descriptors a message | 64 (a database with more runs than that cannot be followed; a database has at most 16 plus one a level) | `Fdpass.max_fds` |
 | the visibility page | 4 KiB a database (`/dev/shm/cepheus-ID.visible`), the number in its first 8 bytes | `Fdpass.page_size`, `Follow.page_path` |
 | a local reader's page cache | 256 MiB, set for the process when it follows its first database (`Client.local_cache`) | `Client.follow` |
 | a follow stream's frames | the writer's frame, in wire frames of at most 1 MiB of groups (the flag `more`) | `Net.piece` |

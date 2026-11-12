@@ -188,13 +188,28 @@ run that may hold the key, so the number of runs weighs as much as the writes: l
 **When.** A merge starts when the delta holds more than 200,000 changes (`Engine.compact_min`). It takes the delta and
 the newest runs, down to the first level that can hold them all, and writes one run there (`Engine.plan`). It runs in
 a domain of its own, beside the writes: its inputs are already sorted in the order of every section, so each section of
-the new run is one pass with one cursor in each ($O(n + d)$ steps, no sort), and it streams the result into
+the new run is one pass with one cursor in each, no sort: the next row of the order by property comes from a binary
+heap of the cursors by their head (value, thing), $O((n + d) \log k)$ steps for $k$ runs merged (Knuth 1998, 5.4.1:
+a $k$-way merge), and it streams the result into
 `<lo>-<hi>.run.tmp`, page by page: a 16 KiB page goes out (its CRC, a `pwrite` at its place, the cache) as soon as its
 bytes are written. Then the CRC table, the header, an fsync. Meanwhile the writer logs the groups it resolves; the
 merge replays them onto the new runs until it is fewer than 256 groups behind; then the writer waits for the syncer to
 be idle (at most one fsync), replays the rest, renames the file to its name, forces the directory, removes the runs it
 replaced, and switches both views to the new runs in one atomic store. A crash at any point leaves the runs before it
 or the runs after it, whole (G12). `snapshot` is the one full merge: the delta and every run into one run.
+
+**Large groups: tiered at their level (lazy leveling).** A load written as many large groups (a few hundred thousand
+facts each: below) would, under leveling, merge each group's run with the ones before it, level after level: a fact
+is written again each time its level spills, about once a level. So a large group's run takes only the delta and the
+newest runs of the levels below the one that holds it, and stays beside the runs of that level, the large groups'
+before it (tiering at that level: Dayan and Idreos's lazy leveling, Dostoevsky 2018), until 16 of them
+(`Engine.tier`) would lie side by side: then that group's merge takes them all, as `Engine.plan` would, in one
+$k$-way pass. A load then writes each fact about twice (its group's run, the tier's merge, then `snapshot`), and
+reads while it runs visit up to 16 runs of that level; `snapshot` after a load brings them back to one. The runs are
+never more than 16 plus one a level, far below the 31 a merge may take (`Snapshot.max_take`: the pass by thing keeps a
+thing's sources in the bits of an integer, two a run). At 10 million facts in groups of 5,000 clients (about 415,000 facts each) written
+by two threads, every group is confirmed in 9.8 s instead of 18.2, and with the snapshot after it the load takes 13.0
+s instead of 21.9 ([benchmarks](benchmarks.md#chunked-loads-2026-11-12-at-10-million-facts)).
 
 **Memory.** A merge needs the cache, a few page buffers (at most 2 for each stream of a pass; 19 measured in the unit
 test, whose bound is 24) and 25 bytes for each 16 KiB of the new run's layout (3.1 % of the 10 M run, whose coded

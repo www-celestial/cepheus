@@ -132,6 +132,12 @@ load in 4.1 to 5.6 s (the median of a series, depending on the disk), in 113,636
 holds the writer while it is merged (about a second at 10 million facts, most of it the disk), and needs its
 operations and 26 bytes a fact of compact arrays in memory at once (1.46 GB at the peak for 9.4 million additions, 0.88
 of it the caller's list, which `write` lets go once the group is mapped); its frame is written by pieces.
+To bound the memory, write a load as groups of a few hundred thousand facts, from two threads so that one builds its
+next group while the writer takes the other's: each group is atomic (G2 holds a group, not the load), the runs of the
+groups stay side by side until 16 of them merge in one pass ([architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)),
+and `snapshot` at the end leaves one run. At 10 million facts in groups of 5,000 clients (about 415,000 facts) by two
+threads: 9.8 s to confirm every group, 3.2 s for the snapshot, a peak of 292 MB with a 64 MB cache ([benchmarks](benchmarks.md#chunked-loads-2026-11-12-at-10-million-facts));
+until the snapshot a read visits each run (at 1 million facts, a client by e-mail on 8 runs 1.40 µs, on 2 runs 0.73).
 
 ## The schema
 
