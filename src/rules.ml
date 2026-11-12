@@ -249,7 +249,10 @@ let[@inline never] check (v : Store.view) r =
        in
        if q.p >= 0 && Schema.is_system q.p then bad "its head gives a cepheus/ property";
        (match q.e with
-        | Query.Var k -> if k < 0 || k >= r.vars then bad "variable ?%d out of range" k else if sty.(k) <> Some Value.Tlink then bad "?%d is not a thing" k
+        | Query.Var k ->
+          (* a variable without a type of its own is checked a thing at each fact derived *)
+          if k < 0 || k >= r.vars then bad "variable ?%d out of range" k
+          else (match sty.(k) with Some Value.Tlink | None -> () | Some _ -> bad "?%d is not a thing" k)
         | Thing t -> if t < Schema.first_thing then bad "its head's thing #%d is not an ordinary thing" t
         | Val _ -> bad "the thing of its head is a variable or a thing");
        match d with

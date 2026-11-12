@@ -253,7 +253,14 @@ let show_op = function
   | Expect _ -> "expect"
 
 let random_sequences ~seeds ~groups ~merges =
+  let progress = Sys.getenv_opt "RULES_PROGRESS" <> None in
   for seed = (if debug > 0 then debug else 1) to (if debug > 0 then debug else seeds) do
+    if progress then begin
+      let st = if seed mod 10 = 0 then Gc.stat () else Gc.quick_stat () in
+      if seed mod 10 = 0 then Printf.printf "  live %d MB\n" (st.live_words * 8 / 1048576);
+      let rss = try let ic = open_in "/proc/self/statm" in let l = input_line ic in close_in ic; Scanf.sscanf l "%d %d" (fun _ r -> r * 4 / 1024) with _ -> -1 in
+      Printf.printf "seed %d %.1f s heap %d MB rss %d MB\n%!" seed (Unix.gettimeofday ()) (st.heap_words * 8 / 1048576) rss
+    end;
     let r = Rng.make seed in
     let db = ref (fork empty) in
     let a, b, c, ty, n, tag, meta =

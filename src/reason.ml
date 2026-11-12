@@ -60,6 +60,8 @@ let spec_groups = ref 0  (* groups reasoned with the rules unfolded on their sma
 let gen_groups = ref 0  (* and with the rules as written *)
 let respecs = ref 0  (* groups begun unfolded, then reasoned again as written: a frozen relation's fact changed *)
 let batches = ref 0  (* closure modules run from scratch *)
+let trace = ref false
+let module_seconds = ref 0. (* of [seconds]: the closure modules' work, their facts found and put aside *)
 
 (* ---- hashing ---- *)
 
@@ -74,6 +76,9 @@ module A = Bigarray.Array1
 type ints = (int, Bigarray.int_elt, Bigarray.c_layout) A.t
 
 let ints n v : ints = let a = A.create Bigarray.Int Bigarray.c_layout n in A.fill a v; a
+
+(* cells written before they are read: not filled *)
+let ints_raw n : ints = A.create Bigarray.Int Bigarray.c_layout n
 
 (* [a] (its first [n] cells kept) in [c] cells, the others [v] *)
 let[@inline never] regrow (a : ints) n c v = let b = ints c v in A.blit (A.sub a 0 n) (A.sub b 0 n); b
@@ -438,7 +443,8 @@ and ctx = {
   seen : iset;  (* a walk's visited things *)
 }
 
-exception Respec  (* a frozen relation's fact changes: the group is reasoned again with the generic rules *)
+exception Respec of int * int
+(* a frozen relation's fact (property, value) changes: the group is reasoned again with the generic rules *)
 
 let[@inline] is_text_const (x : Value.t) = match x with Text _ | Float _ -> true | _ -> false
 
@@ -678,6 +684,10 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
     | Some a ->
       let ue =
         match a.e with
+        | Query.Var x when not bound.(x) && sty.(x) = None ->
+          (* a head's thing, of a variable the body reads only under variable properties: a link *)
+          bound.(x) <- true;
+          fun e -> env.(x) <- e; dty.(x) <- link_code; in_range x e
         | Query.Var x when not bound.(x) -> bound.(x) <- true; fun e -> env.(x) <- e; in_range x e
         | Query.Var x -> fun e -> env.(x) = e
         | t -> let g = getter ~head:false t in fun e -> e = g ()
@@ -715,7 +725,8 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
     match r.head, pos with
     | Give h, p when p <> -1 ->
       let ge = getter ~head:false h.e and gv = getter ~head:true h.v in
-      let dynamic = h.p < 0 || (match h.v with Query.Var y -> sty.(y) = None | _ -> false) in
+      let dyn = function Query.Var y -> sty.(y) = None | _ -> false in
+      let dynamic = h.p < 0 || dyn h.v || dyn h.e in
       if bad <> "" then fun () -> pl.hok <- false; pl.he <- ge (); pl.hp <- h.p; pl.hw <- 0; k pl
       else if not dynamic then (let hp = h.p in fun () -> pl.he <- ge (); pl.hp <- hp; pl.hw <- gv (); k pl)
       else begin
@@ -726,11 +737,14 @@ let compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
           | Thing _ -> fun t -> t = link_code
           | Val x -> fun t -> fits_code t x
         in
+        (* a thing variable without a type of its own: read under a link property *)
+        let thing_ok = match h.e with Query.Var x when sty.(x) = None -> fun () -> dty.(x) = link_code | _ -> fun () -> true in
         fun () ->
           let p = gp () in
           pl.hp <- p;
-          pl.he <- ge ();
-          let ok = p >= Schema.first_prop && (let t = ptype ctx.v p in t >= 0 && fits t) in
+          let th = thing_ok () in
+          pl.he <- (if th then ge () else -1);
+          let ok = th && p >= Schema.first_prop && (let t = ptype ctx.v p in t >= 0 && fits t) in
           pl.hok <- ok;
           (* a text constant interned only for a head that fits *)
           pl.hw <- (if ok then gv () else 0);
@@ -1003,11 +1017,14 @@ let make_gen (v : Store.view) =
   let rules = Array.of_list (List.map snd parsed) and ids = Array.of_list (List.map fst parsed) in
   build v ~key:(Schema.rules_key v.schema) ~rules ~ids ~bad_head:(Array.make (Array.length rules) "") ~spec:None
 
-(* what a group is refused with when a rule gives a fact that its head's property cannot take *)
-let head_message (v : Store.view) name hp =
-  match if hp >= Schema.first_prop then Schema.find v.schema hp else None with
-  | None -> Printf.sprintf "rule %s gives a fact of #%d, which is not a property it can give" name hp
-  | Some d -> Printf.sprintf "rule %s gives %s a value of another type" name d.name
+(* what a group is refused with when a rule gives a fact that does not fit: its thing not a thing, its property not one
+   a rule can give, or its value not of the property's type *)
+let head_message (v : Store.view) name ~thing hp =
+  if not thing then Printf.sprintf "rule %s gives a fact about a value that is not a thing" name
+  else
+    match if hp >= Schema.first_prop then Schema.find v.schema hp else None with
+    | None -> Printf.sprintf "rule %s gives a fact of #%d, which is not a property it can give" name hp
+    | Some d -> Printf.sprintf "rule %s gives %s a value of another type" name d.name
 
 (* ---- specialisation by small relations (the design's section 5.4) ----
    An atom over a property with few facts (at most [small_limit], by exact counts), whose variables another atom of
@@ -1071,7 +1088,7 @@ let reaches (rules : Rules.t array) (starts : (int * int) list) (targets : (int 
 
 (* rule g's small atoms, if it has some worth unfolding: their variables inline (a word is the value), each other atom
    dispatched on one of their variables *)
-let small_atoms (v : Store.view) ~counts (r : Rules.t) (sty : Value.typ option array) =
+let small_atoms ?(unstable = fun _ -> false) (v : Store.view) ~counts (r : Rules.t) (sty : Value.typ option array) =
   let atoms = atoms_of r in
   let nb = Array.length atoms in
   let vars_of (a : Query.pattern) = List.filter_map (function Query.Var x -> Some x | _ -> None) [ a.e; a.v ] in
@@ -1093,7 +1110,29 @@ let small_atoms (v : Store.view) ~counts (r : Rules.t) (sty : Value.typ option a
         && List.exists (fun x -> List.exists (fun j -> j <> i && dispatches x atoms.(j)) all) (vars_of a))
       all
   in
-  let cand = if counts then List.filter (fun i -> count atoms.(i) <= small_limit) cand else cand in
+  (* a relation a group changed while the rules were unfolded on it is a relation of the data: not unfolded on *)
+  let small i = (not counts) || (count atoms.(i) <= small_limit && not (unstable (rel_of atoms.(i)))) in
+  let cand = List.filter small cand in
+  (* and every other small atom sharing a variable with them: unfolded together ([a sub p1] [a super p2]) *)
+  let cand =
+    let c = ref cand and grew = ref true in
+    while !grew do
+      grew := false;
+      List.iter
+        (fun i ->
+          let a = atoms.(i) in
+          let cv = List.concat_map (fun j -> vars_of atoms.(j)) !c in
+          (* sharing a variable with them, none of theirs in a place it dispatches on (such an atom is one the
+             unfolding serves) *)
+          if (not (List.mem i !c)) && a.p >= 0 && vars_of a <> [] && List.for_all inline_var (vars_of a)
+             && List.exists (fun x -> List.mem x cv) (vars_of a)
+             && (not (List.exists (fun x -> dispatches x a) cv))
+             && small i
+          then (c := i :: !c; grew := true))
+        all
+    done;
+    List.sort compare !c
+  in
   let cvars = List.concat_map (fun i -> vars_of atoms.(i)) cand in
   let rest = List.filter (fun j -> not (List.mem j cand)) all in
   if cand = [] || rest = [] || not (List.for_all (fun j -> List.exists (fun x -> dispatches x atoms.(j)) cvars) rest) then None
@@ -1156,7 +1195,10 @@ let substitute (v : Store.view) (r : Rules.t) (sty : Value.typ option array) (ca
   let atom (a : Query.pattern) = { Query.e = term a.e; p = prop a.p; v = term a.v } in
   let where = List.filteri (fun i _ -> not (List.mem i cand)) r.where |> List.map atom in
   let head = match r.head with Rules.Give h -> Rules.Give (atom h) | Never -> Never in
-  let r' = { r with where; head } in
+  (* a range on a variable now a constant: the binding is inside it, or the rule has no instance *)
+  let inside = List.for_all (fun (x, lo, hi) -> match b.(x) with Some w -> w >= inline_word lo && w <= inline_word hi | None -> true) r.ranges in
+  let ranges = List.filter (fun (x, _, _) -> b.(x) = None) r.ranges in
+  let r' = { r with where; head; ranges } in
   let real (a : Query.pattern) =
     a.p < 0
     || (a.p > 0 && a.p < Schema.first_thing
@@ -1165,7 +1207,7 @@ let substitute (v : Store.view) (r : Rules.t) (sty : Value.typ option array) (ca
         | None -> false
         | Some d -> (match a.v with Thing _ -> d.typ = Value.Tlink | Val x -> Value.has_type d.typ x | Var _ -> true))
   in
-  if not (List.for_all real where) then None
+  if not (inside && List.for_all real where) then None
   else
     match Rules.static_types v r' with
     | exception Rules.Bad _ -> None
@@ -1173,22 +1215,25 @@ let substitute (v : Store.view) (r : Rules.t) (sty : Value.typ option array) (ca
       let bad =
         match head with
         | Never -> ""
-        | Give h when h.p < 0 -> ""
-        | Give h -> (
-          match if h.p >= Schema.first_prop then Schema.find v.schema h.p else None with
-          | None -> head_message v r.name h.p
-          | Some d ->
-            let fits = match h.v with Var y -> (match sty'.(y) with Some t -> t = d.typ | None -> true) | Thing _ -> d.typ = Value.Tlink | Val x -> Value.has_type d.typ x in
-            if fits then "" else head_message v r.name h.p)
+        | Give h ->
+          let thing = match h.e with Var x -> (match sty'.(x) with Some t -> t = Value.Tlink | None -> true) | _ -> true in
+          if not thing then head_message v r.name ~thing h.p
+          else if h.p < 0 then ""
+          else (
+            match if h.p >= Schema.first_prop then Schema.find v.schema h.p else None with
+            | None -> head_message v r.name ~thing h.p
+            | Some d ->
+              let fits = match h.v with Var y -> (match sty'.(y) with Some t -> t = d.typ | None -> true) | Thing _ -> d.typ = Value.Tlink | Val x -> Value.has_type d.typ x in
+              if fits then "" else head_message v r.name ~thing h.p)
       in
       Some (r', bad)
 
 (* the program of the generic one's rules unfolded on the view's small relations; None when nothing unfolds *)
-let make_spec (v : Store.view) (gen : program) =
+let make_spec ?unstable (v : Store.view) (gen : program) =
   let n = Array.length gen.rules in
   let unfold g =
     let r = gen.rules.(g) and sty = gen.sty.(g) in
-    match small_atoms v ~counts:true r sty with
+    match small_atoms ?unstable v ~counts:true r sty with
     | None -> None
     | Some cand -> (
       match small_bindings v r gen.atoms.(g) cand with
@@ -1283,7 +1328,13 @@ let[@inline] is_frozen (s : spec) p w =
 
 (* ---- the programs of a view ---- *)
 
-type entry = { mutable gen : program; mutable specs : program list; mutable nospec : bool; specialisable : bool }
+type entry = {
+  mutable gen : program;
+  mutable specs : program list;
+  mutable nospec : bool;
+  specialisable : bool;
+  mutable unstable : (int * int) list;  (* facts of frozen relations that groups changed: their relations are data *)
+}
 
 let cache : (int, entry) Hashtbl.t = Hashtbl.create 8
 let cache_m = Mutex.create ()
@@ -1301,7 +1352,7 @@ let programs (v : Store.view) =
         | _ ->
           let gen = make_gen v in
           let specialisable = Array.exists Fun.id (Array.mapi (fun g r -> small_atoms v ~counts:false r gen.sty.(g) <> None) gen.rules) in
-          let en = { gen; specs = []; nospec = false; specialisable } in
+          let en = { gen; specs = []; nospec = false; specialisable; unstable = [] } in
           if Hashtbl.length cache > 16 then Hashtbl.reset cache;
           Hashtbl.replace cache key en;
           en
@@ -1311,13 +1362,25 @@ let programs (v : Store.view) =
         match List.find_opt (fun (p : program) -> spec_holds (Option.get p.spec) v) en.specs with
         | Some p -> en.gen, Some p
         | None -> (
-          match make_spec v en.gen with
+          let unstable (rp, rw) = List.exists (fun (p, w) -> p = rp && (rw < 0 || rw = w)) en.unstable in
+          match make_spec ~unstable v en.gen with
           | None -> en.nospec <- true; en.gen, None
           | Some p ->
             en.specs <- p :: List.filteri (fun i _ -> i < 3) en.specs;
             en.gen, Some p))
 
 let program (v : Store.view) = fst (programs v)
+
+(* a group changed the fact (p, w) of a relation the rules were unfolded on: that relation is not unfolded on again
+   while this program lasts (until the rules change or the database's size doubles) *)
+let unsettle (v : Store.view) p w =
+  Mutex.protect cache_m (fun () ->
+      match Hashtbl.find_opt cache (Schema.rules_key v.schema) with
+      | Some en when not (List.mem (p, w) en.unstable) ->
+        en.unstable <- (p, w) :: List.filteri (fun i _ -> i < 63) en.unstable;
+        en.specs <- [];
+        en.nospec <- false
+      | _ -> ())
 
 (* ---- contexts ---- *)
 
@@ -1384,11 +1447,11 @@ let[@inline never] count_derived c ri =
   end
 
 (* a frozen relation's fact about to change: the group is reasoned again with the generic rules *)
-let[@inline] check_frozen c p w = match c.prog.spec with None -> () | Some s -> if is_frozen s p w then raise_notrace Respec
+let[@inline] check_frozen c p w = match c.prog.spec with None -> () | Some s -> if is_frozen s p w then raise_notrace (Respec (p, w))
 
 let head_refusal c (pl : plan) =
   let b = c.prog.bad_head.(pl.ri) in
-  if b <> "" then b else head_message c.v (rule_name c pl.ri) pl.hp
+  if b <> "" then b else head_message c.v (rule_name c pl.ri) ~thing:(pl.he <> -1) pl.hp
 
 (* the head of a forward instance, at round r - 1: a fact that is not there yet joins round r *)
 let emit_at c pl r =
@@ -1599,8 +1662,8 @@ let module_b c (m : closure) c0 d =
    every component it reaches) *)
 let components n (off : ints) (adj : ints) =
   let index = ints n (-1) and low = ints n 0 and comp = ints n (-1) in
-  let stack = ints (max 1 n) 0 and cs_node = ints (max 1 n) 0 and cs_edge = ints (max 1 n) 0 in
-  let members = ints (max 1 n) 0 and moff = buf_create 64 in
+  let stack = ints_raw (max 1 n) and cs_node = ints_raw (max 1 n) and cs_edge = ints_raw (max 1 n) in
+  let members = ints_raw (max 1 n) and moff = buf_create 64 in
   let idx = ref 0 and sp = ref 0 and csp = ref 0 and nm = ref 0 and nc = ref 0 in
   let open_node u =
     A.unsafe_set index u !idx;
@@ -1654,7 +1717,7 @@ let rows n k (src : ints) (dst : ints) =
   let off = ints (n + 1) 0 in
   for i = 0 to k - 1 do let s = A.unsafe_get src i in A.unsafe_set off (s + 1) (A.unsafe_get off (s + 1) + 1) done;
   for u = 0 to n - 1 do A.unsafe_set off (u + 1) (A.unsafe_get off (u + 1) + A.unsafe_get off u) done;
-  let fill = ints (max 1 n) 0 and adj = ints (max 1 k) 0 in
+  let fill = ints (max 1 n) 0 and adj = ints_raw (max 1 k) in
   for i = 0 to k - 1 do
     let s = A.unsafe_get src i in
     let j = A.unsafe_get off s + A.unsafe_get fill s in
@@ -1668,62 +1731,157 @@ let rows n k (src : ints) (dst : ints) =
    form), and the closure is computed over the strong components in reverse topological order, each component's
    targets the union of its successors' (Nuutila 1995; the prototype's "children's closures reused"): each target
    tried once a successor, each new fact found once a source, no hash test. A fact present already is an input
-   fact, skipped by a mark. *)
+   fact, skipped by a mark. The budget is checked as the targets grow, before their facts are made. *)
+let[@inline never] count_many c ri k =
+  if k > 0 then begin
+    c.derived <- c.derived + k - 1;
+    c.per_rule.(ri) <- c.per_rule.(ri) + k - 1;
+    count_derived c ri
+  end
+
 let batch c mi =
   let m = c.prog.modules.(mi) in
   let trp = m.m_base < 0 in
   let es = buf_create 1024 and ed = buf_create 1024 and bs = buf_create 16 and bd = buf_create 16 in
+  let tt0 = Unix.gettimeofday () in
+  let lap name = if !trace then Printf.printf "    [batch %s %.4f]\n%!" name (Unix.gettimeofday () -. tt0) in
   iter_all c m.m_e (fun e w -> buf_push es e; buf_push ed w);
   if not trp then iter_all c m.m_t (fun e w -> buf_push bs e; buf_push bd w);
   let ne = es.bn and nb = bs.bn in
   incr batches;
   if ne + nb > 0 then begin
-    let ids = imap_create (2 * (ne + nb)) in
-    let local (q : buf) = for i = 0 to q.bn - 1 do A.unsafe_set q.b i (imap_id ids (A.unsafe_get q.b i)) done in
-    local es; local ed; local bs; local bd;
-    let n = ids.mk_n in
+    (* dense ids: an array over the things' range when they lie close together (things are given ids in order), else
+       a hash *)
+    let lo = ref max_int and hi = ref min_int in
+    let span (q : buf) = for i = 0 to q.bn - 1 do let x = A.unsafe_get q.b i in if x < !lo then lo := x; if x > !hi then hi := x done in
+    span es; span ed; span bs; span bd;
+    let things = buf_create (2 * (ne + nb)) in
+    let local =
+      if !hi - !lo < (4 * (ne + nb)) + 1024 then begin
+        let lo = !lo in
+        let map = ints (!hi - lo + 1) (-1) in
+        fun x ->
+          let i = x - lo in
+          let l = A.unsafe_get map i in
+          if l >= 0 then l else (let l = things.bn in A.unsafe_set map i l; buf_push things x; l)
+      end
+      else begin
+        let ids = imap_create (2 * (ne + nb)) in
+        fun x -> let l = imap_id ids x in if l = things.bn then buf_push things x; l
+      end
+    in
+    let localize (q : buf) = for i = 0 to q.bn - 1 do A.unsafe_set q.b i (local (A.unsafe_get q.b i)) done in
+    localize es; localize ed; localize bs; localize bd;
+    let n = things.bn in
+    lap "collected, ids";
     let off, adj = rows n ne es.b ed.b in
     let boff, badj = rows n nb bs.b bd.b in
+    lap "rows";
     let nc, comp, members, moff = components n off adj in
+    let moff = moff.b in
+    lap "components";
     (* each component's targets: through E its successors and their targets (T over E is closed), and its own
        members when it holds a cycle; for the linear form, its members' facts of B too *)
-    let mark = ints (max 1 n) (-1) and toff = ints (nc + 1) 0 and tt = buf_create (max 1024 ne) in
+    let mark = ints (max 1 n) (-1) and toff = ints (nc + 1) 0 in
+    let tb = ref (ints_raw (max 1024 (2 * ne))) and tn = ref 0 in
+    let reserve k =
+      if !tn + k > A.dim !tb then begin
+        let b = ints_raw (max (!tn + k) (2 * A.dim !tb)) in
+        A.blit (A.sub !tb 0 !tn) (A.sub b 0 !tn);
+        tb := b
+      end
+    in
+    let room = c.limit - c.derived + ne + nb in
     for k = 0 to nc - 1 do
-      A.unsafe_set toff k tt.bn;
-      let add z = if A.unsafe_get mark z <> k then (A.unsafe_set mark z k; buf_push tt z) in
+      A.unsafe_set toff k !tn;
       let cyclic = ref false in
-      for i = buf_get moff k to buf_get moff (k + 1) - 1 do
+      for i = A.unsafe_get moff k to A.unsafe_get moff (k + 1) - 1 do
         let u = A.unsafe_get members i in
-        for j = A.unsafe_get boff u to A.unsafe_get boff (u + 1) - 1 do add (A.unsafe_get badj j) done;
+        let b0 = A.unsafe_get boff u and b1 = A.unsafe_get boff (u + 1) in
+        reserve (b1 - b0);
+        let t = !tb in
+        for j = b0 to b1 - 1 do
+          let z = A.unsafe_get badj j in
+          if A.unsafe_get mark z <> k then (A.unsafe_set mark z k; A.unsafe_set t !tn z; incr tn)
+        done;
         for j = A.unsafe_get off u to A.unsafe_get off (u + 1) - 1 do
           let w = A.unsafe_get adj j in
           let kw = A.unsafe_get comp w in
           if kw = k then cyclic := true
           else begin
-            add w;
-            for i = A.unsafe_get toff kw to A.unsafe_get toff (kw + 1) - 1 do add (buf_get tt i) done
+            let a = A.unsafe_get toff kw and b = A.unsafe_get toff (kw + 1) in
+            reserve (b - a + 1);
+            let t = !tb in
+            if A.unsafe_get mark w <> k then (A.unsafe_set mark w k; A.unsafe_set t !tn w; incr tn);
+            for i = a to b - 1 do
+              let z = A.unsafe_get t i in
+              if A.unsafe_get mark z <> k then (A.unsafe_set mark z k; A.unsafe_set t !tn z; incr tn)
+            done
           end
         done
       done;
-      if !cyclic then for i = buf_get moff k to buf_get moff (k + 1) - 1 do add (A.unsafe_get members i) done
+      if !cyclic then begin
+        let m0 = A.unsafe_get moff k and m1 = A.unsafe_get moff (k + 1) in
+        reserve (m1 - m0);
+        let t = !tb in
+        for i = m0 to m1 - 1 do
+          let z = A.unsafe_get members i in
+          if A.unsafe_get mark z <> k then (A.unsafe_set mark z k; A.unsafe_set t !tn z; incr tn)
+        done
+      end;
+      (* past the budget already: refused before the facts are made *)
+      if !tn > room then count_many c m.m_rule (c.limit - c.derived + 1)
     done;
-    A.unsafe_set toff nc tt.bn;
+    A.unsafe_set toff nc !tn;
+    lap "targets";
     (* the facts: each source's targets, but those it has as inputs *)
-    let inp = ints (max 1 n) (-1) and t = m.m_t in
-    let thing i = buf_get ids.mk_of i in
+    let inp = ints (max 1 n) (-1) and t = m.m_t and tt = !tb and th = things.b in
+    let frozen_t = match c.prog.spec with Some s -> t < Bytes.length s.frozen && Bytes.get s.frozen t <> '\000' | None -> false in
+    (* the output's room at once: at most each source's targets *)
+    if m.m_side && not frozen_t then begin
+      let u = ref 0 in
+      for k = 0 to nc - 1 do
+        u := !u + ((A.unsafe_get moff (k + 1) - A.unsafe_get moff k) * (A.unsafe_get toff (k + 1) - A.unsafe_get toff k))
+      done;
+      if 3 * (c.ns + !u) > A.dim c.side then begin
+        let b = ints_raw (3 * (c.ns + !u)) in
+        A.blit (A.sub c.side 0 (3 * c.ns)) (A.sub b 0 (3 * c.ns));
+        c.side <- b
+      end
+    end;
     for k = 0 to nc - 1 do
-      for i = buf_get moff k to buf_get moff (k + 1) - 1 do
+      let t0 = A.unsafe_get toff k and t1 = A.unsafe_get toff (k + 1) in
+      for i = A.unsafe_get moff k to A.unsafe_get moff (k + 1) - 1 do
         let s = A.unsafe_get members i in
         (if trp then for j = A.unsafe_get off s to A.unsafe_get off (s + 1) - 1 do A.unsafe_set inp (A.unsafe_get adj j) s done
          else for j = A.unsafe_get boff s to A.unsafe_get boff (s + 1) - 1 do A.unsafe_set inp (A.unsafe_get badj j) s done);
-        let e = thing s in
-        for j = A.unsafe_get toff k to A.unsafe_get toff (k + 1) - 1 do
-          let z = buf_get tt j in
-          if A.unsafe_get inp z <> s then
-            if m.m_side then derive_side c m.m_rule e t (thing z) else derive_new c m.m_rule e t (thing z)
-        done
+        let e = A.unsafe_get th s in
+        if m.m_side && not frozen_t then begin
+          (* straight into the group's output, its room made above *)
+          let side = c.side and ns0 = c.ns in
+          let ns = ref ns0 in
+          for j = t0 to t1 - 1 do
+            let z = A.unsafe_get tt j in
+            if A.unsafe_get inp z <> s then begin
+              let o = 3 * !ns in
+              A.unsafe_set side o e;
+              A.unsafe_set side (o + 1) t;
+              A.unsafe_set side (o + 2) (A.unsafe_get th z);
+              incr ns
+            end
+          done;
+          c.ns <- !ns;
+          count_many c m.m_rule (!ns - ns0)
+        end
+        else
+          for j = t0 to t1 - 1 do
+            let z = A.unsafe_get tt j in
+            if A.unsafe_get inp z <> s then
+              if m.m_side then derive_side c m.m_rule e t (A.unsafe_get th z) else derive_new c m.m_rule e t (A.unsafe_get th z)
+          done
       done
-    done
+    done;
+    lap "facts"
   end
 
 (* a round's facts for module mi: the batch at its first work when it may, else each new edge (and, for the linear
@@ -1740,6 +1898,7 @@ let module_round c mi (d : ints) nd r =
   let any = ref false and i = ref 0 in
   while (not !any) && !i < nd do (if relevant (A.unsafe_get d !i) then any := true); incr i done;
   if !any && r > c.mbatch.(mi) then begin
+    let t0 = Unix.gettimeofday () in
     if c.mbatch.(mi) = -1 && c.mfresh.(mi) then (batch c mi; c.mbatch.(mi) <- r)
     else begin
       if c.mbatch.(mi) = -1 then c.mbatch.(mi) <- -2;
@@ -1747,7 +1906,8 @@ let module_round c mi (d : ints) nd r =
         let x = A.unsafe_get d i in
         if relevant x then if fp ws x = m.m_e then module_edge c m (fe ws x) (fw ws x) else module_b c m (fe ws x) (fw ws x)
       done
-    end
+    end;
+    module_seconds := !module_seconds +. (Unix.gettimeofday () -. t0)
   end
 
 (* semi-naive evaluation: [first] the [nf] facts of round 0, and facts of round 1 already waiting in the next
@@ -1856,15 +2016,15 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
       match spec with
       | Some p when same ->
         let s = Option.get p.spec in
-        let touched = ref false in
-        Array.iteri (fun i (ch : Group.change) -> if is_frozen s ch.p words.(i) then touched := true) changes;
-        if !touched then gen else p
+        let touched = ref None in
+        Array.iteri (fun i (ch : Group.change) -> if is_frozen s ch.p words.(i) then touched := Some (ch.p, words.(i))) changes;
+        (match !touched with Some (fp, fw) -> unsettle v fp fw; gen | None -> p)
       | _ -> gen
     in
     incr (if prog == gen then gen_groups else spec_groups);
     match reason ~v0 v changes words prog same with
     | r -> r
-    | exception Respec -> incr respecs; reason ~v0 v changes words gen same
+    | exception Respec (fp, fw) -> incr respecs; unsettle v fp fw; reason ~v0 v changes words gen same
   end
 
 and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
@@ -1945,7 +2105,9 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
           (fun mi (m : closure) ->
             if List.mem m.m_rule added_idx || (m.m_base >= 0 && List.mem m.m_base added_idx) then begin
               c.round <- 0;
+              let t0 = Unix.gettimeofday () in
               batch c mi;
+              module_seconds := !module_seconds +. (Unix.gettimeofday () -. t0);
               c.mbatch.(mi) <- 0;
               c.round <- max_int
             end)
@@ -2052,15 +2214,18 @@ let rec bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp 
     match spec with
     | Some p ->
       let s = Option.get p.spec in
-      let touched = ref false in
-      for i = 0 to n - 1 do if is_frozen s (Bigarray.Array1.unsafe_get gp i) (Bigarray.Array1.unsafe_get gw i) then touched := true done;
-      if !touched then gen else p
+      let touched = ref None in
+      for i = 0 to n - 1 do
+        let fp = Bigarray.Array1.unsafe_get gp i and fw = Bigarray.Array1.unsafe_get gw i in
+        if is_frozen s fp fw then touched := Some (fp, fw)
+      done;
+      (match !touched with Some (fp, fw) -> unsettle v fp fw; gen | None -> p)
     | None -> gen
   in
   incr (if prog == gen then gen_groups else spec_groups);
   match bulk_with ~own prog v ge gp gw n with
   | r -> r
-  | exception Respec -> incr respecs; bulk_with ~own gen v ge gp gw n
+  | exception Respec (fp, fw) -> incr respecs; unsettle v fp fw; bulk_with ~own gen v ge gp gw n
 
 and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : Bulk.ints) n =
   let many_only p = match Schema.find v.schema p with Some d -> d.many && not d.unique | None -> false in
