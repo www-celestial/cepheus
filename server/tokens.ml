@@ -11,9 +11,15 @@
      hash = "blake2b-256:51aa...07"
      admin = true
 
-   read: Get, Find; write: read and Write; admin: the server's operations (status), no data right by itself. *)
+   read: Get, Find; write: read and Write; admin: the server's operations (status), no data right by itself.
+   A database's right may also name kinds, by the kinds' names (a property client/City is of the kind client):
 
-type right = Read | Write
+     databases = { compta = { read = ["compte", "transaction"], add = ["transaction"] } }
+
+   read: Get, Find and Watch of the facts of those kinds only; add: Write of facts of those kinds, and declaring their
+   properties. Such a token never reads locally (a local reader maps the whole database): its reads go to the server. *)
+
+type right = Read | Write | Kinds of { read : string list; add : string list }
 
 type token = { name : string; hash : string;  (* 32 raw bytes *) databases : (string * right) list; admin : bool }
 
@@ -75,10 +81,38 @@ let check t text =
 
 let right t db = List.assoc_opt db t.databases
 
-let can_read tok db = right tok db <> None
-let can_write tok db = right tok db = Some Write
+(* The kind of a property: its name up to the first '/', or the whole name *)
+let kind_of name = match String.index_opt name '/' with Some i -> String.sub name 0 i | None -> name
 
-let right_name = function Read -> "read" | Write -> "write"
+let reads_kind r k = match r with Read | Write -> true | Kinds x -> List.mem k x.read
+let adds_kind r k = match r with Write -> true | Read -> false | Kinds x -> List.mem k x.add
+
+(* as cepheus token add takes it and token list shows it *)
+let right_name = function
+  | Read -> "read"
+  | Write -> "write"
+  | Kinds { read; add } ->
+    String.concat ";" (List.filter_map (fun (w, l) -> if l = [] then None else Some (w ^ ":" ^ String.concat "," l)) [ "read", read; "add", add ])
+
+(* "read", "write", or "read:K,K;add:K": the right of --database DB=RIGHT *)
+let right_of_name s =
+  match s with
+  | "read" -> Some Read
+  | "write" -> Some Write
+  | _ -> (
+    let parts = List.map (fun p -> String.split_on_char ':' p) (String.split_on_char ';' s) in
+    let kinds w = List.concat_map (function [ x; l ] when x = w -> String.split_on_char ',' l | _ -> []) parts in
+    let known = List.for_all (function [ ("read" | "add"); l ] -> List.for_all Config.valid_name (String.split_on_char ',' l) | _ -> false) parts in
+    match kinds "read", kinds "add" with
+    | [], [] -> None
+    | read, add when known -> Some (Kinds { read; add })
+    | _ -> None)
+
+let right_toml = function
+  | (Read | Write) as r -> Toml.quote (right_name r)
+  | Kinds { read; add } ->
+    let list l = "[" ^ String.concat ", " (List.map Toml.quote l) ^ "]" in
+    "{ " ^ String.concat ", " (List.filter_map (fun (w, l) -> if l = [] then None else Some (w ^ " = " ^ list l)) [ "read", read; "add", add ]) ^ " }"
 
 let of_toml (doc : (string * Toml.value) list) =
   let fail fmt = Printf.ksprintf (fun m -> raise (Config.Bad m)) fmt in
@@ -112,9 +146,21 @@ let of_toml (doc : (string * Toml.value) list) =
                 match v with
                 | Toml.String "read" -> db, Read
                 | Toml.String "write" -> db, Write
-                | _ -> fail "token %s: the right on %s must be \"read\" or \"write\"" name db)
+                | Toml.Table kinds ->
+                  let names w =
+                    match List.assoc_opt w kinds with
+                    | None -> []
+                    | Some (Toml.Array l) ->
+                      List.map (function Toml.String k when Config.valid_name k -> k | _ -> fail "token %s: the kinds of %s on %s are names of kinds" name w db) l
+                    | Some _ -> fail "token %s: %s on %s is a list of kinds" name w db
+                  in
+                  List.iter (fun (k, _) -> if k <> "read" && k <> "add" then fail "token %s: the right on %s takes read and add, not %s" name db k) kinds;
+                  (match names "read", names "add" with
+                   | [], [] -> fail "token %s: the right on %s names no kind" name db
+                   | read, add -> db, Kinds { read; add })
+                | _ -> fail "token %s: the right on %s must be \"read\", \"write\" or { read = [...], add = [...] }" name db)
               l
-          | Some _ -> fail "token %s: databases = { name = \"read\" | \"write\", ... }" name
+          | Some _ -> fail "token %s: databases = { name = \"read\" | \"write\" | { read = [...], add = [...] }, ... }" name
         in
         let admin = match List.assoc_opt "admin" t with Some (Toml.Bool b) -> b | None -> false | Some _ -> fail "token %s: admin must be true or false" name in
         { name; hash; databases; admin })
@@ -145,7 +191,7 @@ let to_toml t =
       Printf.bprintf b "hash = %s\n" (Toml.quote (hash_prefix ^ hex tok.hash));
       if tok.databases <> [] then
         Printf.bprintf b "databases = { %s }\n"
-          (String.concat ", " (List.map (fun (d, r) -> Printf.sprintf "%s = %s" d (Toml.quote (right_name r))) tok.databases));
+          (String.concat ", " (List.map (fun (d, r) -> Printf.sprintf "%s = %s" d (right_toml r)) tok.databases));
       if tok.admin then Buffer.add_string b "admin = true\n")
     t.tokens;
   Buffer.contents b

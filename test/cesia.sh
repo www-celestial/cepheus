@@ -71,6 +71,13 @@ export CEPHEUS_URL="cepheus://localhost:$port/local?socket=$tmp/s/r" CEPHEUS_TLS
 timeout 120 cesia run --allow native=cepheus,env,read,net=:0 src/live.ce < /dev/null > "$tmp/live.out" 2>&1 || { cat "$tmp/live.out"; exit 1; }
 diff "$root/test/cesia-live.expected" "$tmp/live.out" || { echo "cesia live: the output differs from test/cesia-live.expected"; exit 1; }
 
+# a token with rights per kind: its reads go to the server, it may not declare a kind it may not add
+cp "$root/test/cesia-kinds.ce" src/kinds.ce
+kinds=$($B token add kinds --database "local=read:note;add:note" --config "$cfg" 2>/dev/null)
+sleep 1.5
+CEPHEUS_TOKEN=$kinds timeout 60 cesia run --allow native=cepheus,env,read src/kinds.ce < /dev/null > "$tmp/kinds.out" 2>&1 || { cat "$tmp/kinds.out"; exit 1; }
+printf 'kinds declare secret: denied\nkinds: 50 writes, each read at once: 50\nkinds find: 50\n' | diff - "$tmp/kinds.out" || { echo "cesia kinds: the output differs"; exit 1; }
+
 # kill -9 while the program writes, then a new server on the same data: the client connects again and sends again
 export CEPHEUS_URL="cepheus://localhost:$port/restart?socket=$tmp/s/r"
 timeout 120 cesia run --allow native=cepheus,env,read src/live.ce restart < /dev/null > "$tmp/restart.out" 2>&1 &
@@ -84,7 +91,7 @@ wait $prog || { prog=""; cat "$tmp/restart.out"; exit 1; }
 prog=""
 grep -q '^restart: 1500 writes answered Ok, 1500 in the database$' "$tmp/restart.out" || { cat "$tmp/restart.out"; exit 1; }
 grep -q '^restart watch: 1500 rows, groups growing: true$' "$tmp/restart.out" || { cat "$tmp/restart.out"; exit 1; }
-echo "cesia live: TLS, local reads, watches and a kill -9 of the server: $(grep -c . "$root/test/cesia-live.expected") lines as expected, 1500 writes once each, watched through the restart"
+echo "cesia live: TLS, local reads, watches and a kill -9 of the server: $(grep -c . "$root/test/cesia-live.expected") lines as expected, 1500 writes once each, watched through the restart; a token per kind read at the server"
 cd "$root"
 stop
 trap - EXIT

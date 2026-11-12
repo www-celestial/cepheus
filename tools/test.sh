@@ -57,6 +57,18 @@ if [ -n "$CESIA_NATIVE" ]; then
     tail -1 "$tmp/cesia-tests.out" | grep -q ' passed, 0 failed$' || { cat "$tmp/cesia-tests.out"; exit 1; }
   done
   rm -f "$tmp/cesia-tests.out"
+  # A screen of std/live fed by a watch: when this Cesia has std/live.
+  printf 'use std/live\n' > "$tmp/has-live.ce"
+  if cesia check "$tmp/has-live.ce" > /dev/null 2>&1; then
+    for path in "" --no-spec; do
+      cesia test $path cesia/screens > "$tmp/cesia-screens.out" 2>&1 || true
+      tail -1 "$tmp/cesia-screens.out" | sed "s/^/cesia screens $path: /"
+      tail -1 "$tmp/cesia-screens.out" | grep -q ' passed, 0 failed$' || { cat "$tmp/cesia-screens.out"; exit 1; }
+    done
+  else
+    echo "cesia screens: not tested (this Cesia has no std/live)"
+  fi
+  rm -f "$tmp/has-live.ce" "$tmp/cesia-screens.out"
   sh test/cesia.sh "$tmp" > "$tmp/cesia.out" 2>&1 || { cat "$tmp/cesia.out"; exit 1; }
   tail -2 "$tmp/cesia.out"
   rm -f "$tmp/cesia.out"

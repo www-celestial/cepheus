@@ -7,7 +7,7 @@ package = "cesia/cepheus"
 natives = ["kind", "connect", "get", "insert", "update", "write", "variables", "find", "fork", "close", "watch", "next"]
 
 [test]
-allow = ["native=cepheus"]
+allow = ["native=cepheus", "net=own"]
 
 # cesia doc --site: the site of Cepheus, its book and the reference of its Cesia package.
 [site]

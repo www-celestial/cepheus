@@ -193,3 +193,14 @@ defn isWatchRefusesAMistake()
   bad = cepheus.Watch(1, (i) -> {Where: [[i, Invoice.Total, "lots"]], Give: {I: i}}, s.Db)
   bad.Error.Code == "invalid"
 end
+
+defn isWatchEndsWithUntil()
+  (** A watch with until ends once that channel closes: its channel closes after the answer. *)
+  s = shop()?
+  until = fiber.Channel()
+  w = cepheus.Watch(1, (i) -> {Where: [[i, Invoice.Status, "unpaid"]], Give: {Invoice: i}}, s.Db, until = until)?
+  first = fiber.Receive(w.Changes)?
+  fiber.Close(until)
+  value.Len(first.Rows) == 2 and fiber.Receive(w.Changes, timeout = 2).Error.Kind == "closed"
+end
+

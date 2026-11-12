@@ -323,6 +323,107 @@ let rights () =
   Bytes.set_int32_le big 0 (Int32.of_int (Wire.max_frame + 1));
   check (snd (Core.input c big 0 10) = Core.Shut) "rights: a frame over 16 MiB closes"
 
+
+(* Every token file of the old forms reads the same and is written back byte for byte (the writer of main wrote
+   exactly this); the new form of rights per kind, and cepheus token add's DB=read:K,K;add:K. *)
+let tokens_golden () =
+  let h1 = String.make 64 'a' and h2 = String.make 64 'b' and h3 = String.make 64 'c' in
+  let old =
+    "# Cepheus tokens: written by `cepheus token`; the server reloads this file when it changes.\n\n[[token]]\nname = \"shop-web\"\nhash = \"blake2b-256:"
+    ^ h1 ^ "\"\ndatabases = { shop = \"write\", stock = \"read\" }\n\n[[token]]\nname = \"ops\"\nhash = \"blake2b-256:" ^ h2
+    ^ "\"\nadmin = true\n\n[[token]]\nname = \"both\"\nhash = \"blake2b-256:" ^ h3 ^ "\"\ndatabases = { shop = \"read\" }\nadmin = true\n"
+  in
+  let t = Tokens.of_toml (Toml.parse old) in
+  let rights = List.map (fun (k : Tokens.token) -> k.name, k.databases, k.admin) t.tokens in
+  check (rights = [ "shop-web", [ "shop", Tokens.Write; "stock", Tokens.Read ], false; "ops", [], true; "both", [ "shop", Tokens.Read ], true ])
+    "tokens: an old file reads as before";
+  check (Tokens.to_toml t = old) "tokens: an old file is written back byte for byte";
+  let kinds = Tokens.Kinds { read = [ "compte"; "transaction" ]; add = [ "transaction" ] } in
+  let t2 = Tokens.with_tokens Tokens.empty [ { name = "compta-web"; hash = String.make 32 'x'; databases = [ "compta", kinds; "shop", Tokens.Read ]; admin = false } ] in
+  let text = Tokens.to_toml t2 in
+  check (List.exists (fun l -> l = "databases = { compta = { read = [\"compte\", \"transaction\"], add = [\"transaction\"] }, shop = \"read\" }") (String.split_on_char '\n' text))
+    "tokens: rights per kind written as the design says";
+  check ((Tokens.of_toml (Toml.parse text)).tokens = t2.tokens) "tokens: rights per kind round trip";
+  check (Tokens.right_of_name "read:compte,transaction;add:transaction" = Some kinds) "tokens: DB=read:K,K;add:K";
+  check (Tokens.right_name kinds = "read:compte,transaction;add:transaction") "tokens: a right per kind listed as it is given";
+  check (Tokens.right_of_name "add:transaction" = Some (Tokens.Kinds { read = []; add = [ "transaction" ] })) "tokens: add only";
+  check (List.for_all (fun r -> Tokens.right_of_name r = None) [ ""; "reed"; "read:"; "read:A"; "delete:x"; "read:a;;add:b"; "read:a:b" ]) "tokens: bad rights refused";
+  check (Tokens.right_of_name "read" = Some Tokens.Read && Tokens.right_of_name "write" = Some Tokens.Write) "tokens: read and write as before";
+  check (Tokens.kind_of "client/City" = "client" && Tokens.kind_of "plain" = "plain") "tokens: a property's kind";
+  let bad doc = match Tokens.of_toml (Toml.parse doc) with _ -> false | exception Config.Bad _ -> true in
+  let head = "[[token]]\nname = \"x\"\nhash = \"blake2b-256:" ^ h1 ^ "\"\n" in
+  check (bad (head ^ "databases = { compta = { read = [] } }\n")) "tokens: a right per kind of no kind is refused";
+  check (bad (head ^ "databases = { compta = { delete = [\"a\"] } }\n")) "tokens: an unknown right per kind is refused";
+  check (bad (head ^ "databases = { compta = { read = [\"Upper\"] } }\n")) "tokens: a kind's name in small letters";
+  check (bad (head ^ "databases = { compta = { read = \"a\" } }\n")) "tokens: kinds in a list"
+
+(* Rights per kind through the core: questions checked when they arrive, writes at each fact and declaration, Get's
+   facts of the kinds read only, no local reads. *)
+let rights_kinds () =
+  let sim = Sim_disk.create (Rng.make 7) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/k";
+  let e = Result.get_ok (Engine.open_ disk "/k/compta") in
+  let d = { Core.name = "compta"; index = 0; dir = "/k/compta"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+  let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+  let kinds = Tokens.Kinds { read = [ "compte"; "transaction" ]; add = [ "transaction" ] } in
+  let toks = Tokens.with_tokens Tokens.empty
+      [ mk "w" [ "compta", Tokens.Write ]; mk "k" [ "compta", kinds ]; mk "add" [ "compta", Tokens.Kinds { read = []; add = [ "transaction" ] } ] ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+  let submit (_ : Core.db) ops by why k = let b = Engine.prepare e [| ops, by, why |] in k (Engine.commit e b).(0) in
+  let session tok =
+    let out = Buffer.create 256 in
+    let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+    let c = Lazy.force c in
+    let ask req =
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      if Bytes.length s = 0 then None
+      else Some (Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6)))
+    in
+    ignore (ask (Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 }));
+    ask
+  in
+  let declare p name typ = List.map (fun (e, p, v) -> Resolve.Add (e, p, v)) (Schema.facts p { Schema.name; typ; many = false; unique = false }) in
+  let write ask ops = ask (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops }) in
+  let ok = function Some (Wire.Receipt _) -> true | _ -> false in
+  let denied = function Some (Wire.Err { code = "denied"; _ }) -> true | _ -> false in
+  let w = session "w" and k = session "k" and a = session "add" in
+  check (ok (write w (declare 16 "compte/Name" Ttext @ declare 17 "transaction/Amount" Tint @ declare 18 "secret/Note" Ttext))) "kinds: declared by a writer";
+  let made = write w [ Add (-1, 16, Text "Ada"); Add (-1, 17, Int 90); Add (-1, 18, Text "hush") ] in
+  check (ok made) "kinds: facts of three kinds";
+  let thing = match made with Some (Wire.Receipt { things = (_, t) :: _; _ }) -> t | _ -> 0 in
+  let q ps = { Query.vars = 2; where = List.map (fun p -> { Query.e = Var 0; p; v = Var 1 }) ps; ranges = [] } in
+  let find ask ps = ask (Wire.Find { db = 0; query = q ps; select = Wire.Give [||] }) in
+  let watch ask ps = ask (Wire.Watch { db = 0; query = q ps; select = Wire.Give [||]; from = 0 }) in
+  check (match find k [ 17 ] with Some (Wire.Rows _) -> true | _ -> false) "kinds: a question on a kind read";
+  check (denied (find k [ 18 ]) && denied (find k [ 16; 18 ])) "kinds: a question that touches a kind not read is denied";
+  check (denied (watch k [ 18 ])) "kinds: a watch too, when it arrives";
+  check (not (denied (watch k [ 16; 17 ]))) "kinds: a watch of kinds read";
+  (match k (Wire.Get { db = 0; thing }) with
+   | Some (Wire.Facts f) -> check (List.sort compare (List.map fst f.facts) = [ 16; 17 ]) "kinds: Get gives the facts of the kinds read only"
+   | _ -> check false "kinds: Get");
+  (match w (Wire.Get { db = 0; thing }) with
+   | Some (Wire.Facts f) -> check (List.length f.facts = 3) "kinds: a write token's Get as before"
+   | _ -> check false "kinds: Get of w");
+  check (ok (write k [ Add (-1, 17, Int 5) ])) "kinds: a fact of a kind added";
+  check (denied (write k [ Add (-1, 16, Text "Bo") ])) "kinds: a fact of a kind not added is denied";
+  check (denied (write k [ Add (-1, 17, Int 1); Add (-1, 18, Text "x") ])) "kinds: a group with one such fact, all of it";
+  check (ok (write k (declare 19 "transaction/Date" Tdate))) "kinds: declaring a property of a kind added";
+  check (denied (write k (declare 20 "secret/More" Ttext))) "kinds: declaring one of another kind is denied";
+  check (denied (write k [ Add (21, Schema.p_name, Text "r"); Add (21, Schema.p_rule, Text "x") ])) "kinds: rules are for write tokens";
+  check (denied (k (Wire.Follow 0))) "kinds: no local reads";
+  check (not (denied (w (Wire.Follow 0)))) "kinds: a write token still follows";
+  check (match k (Wire.Open "compta") with Some (Wire.Opened _) -> true | _ -> false) "kinds: Open";
+  check (ok (write a [ Add (-1, 17, Int 7) ]) && denied (find a [ 17 ])) "kinds: add only: writes, reads nothing"
+
 (* ---- what local readers need from the system ---- *)
 
 let open_fds () = Array.length (Sys.readdir "/proc/self/fd")
@@ -468,6 +569,8 @@ let () =
   wire ();
   origins ();
   rights ();
+  tokens_golden ();
+  rights_kinds ();
   fdpass ();
   followed_rules ();
   request_ids ();

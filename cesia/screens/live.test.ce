@@ -1,0 +1,60 @@
+(* A screen of std/live whose show is a watch of the package: run by tools/test.sh when the Cesia has std/live. *)
+use cesia/cepheus
+use std/bug
+use std/fiber
+use std/http
+use std/json
+use std/list
+use std/live
+use std/net
+use std/result
+use std/value
+use std/websocket
+
+Client = cepheus.Kind("client", {Name: cepheus.Text()})
+Invoice = cepheus.Kind("invoice", {Client: cepheus.Link(), Total: cepheus.Money(2), Status: cepheus.Text()})
+
+defn shop()
+  (** A fork with two clients and two unpaid invoices. *)
+  t = cepheus.Fork(cepheus.Empty, [Client, Invoice])?
+  ada = cepheus.Insert(Client, {Name: "Ada"}, t)?
+  bo = cepheus.Insert(Client, {Name: "Bo"}, t)?
+  cepheus.Insert(Invoice, {Client: ada, Total: 1200, Status: "unpaid"}, t)?
+  cepheus.Insert(Invoice, {Client: ada, Total: 80.5, Status: "unpaid"}, t)?
+  result.Ok({Db: t, Ada: ada, Bo: bo})
+end
+
+defn frames(c)
+  (** The messages of the next frames of a screen, until n of them have come in a second each. *)
+  got = fiber.Receive(c.Messages, timeout = 2)
+  if result.IsErr(got) [] else json.Parse(got.Value).Value end
+end
+
+defn isLiveScreenOfAWatch()
+  (** A screen of std/live whose show is a watch of a fork, closed with the screen: the page gets the answer, then
+      the change of its own action and its reply, in either order; once the page leaves, the watch ends. *)
+  s = shop()?
+  watches = fiber.Channel(size = 1)
+  screen = defn (sc)
+    w = cepheus.Watch(1, (i) -> {Where: [[i, Invoice.Status, "unpaid"]], Give: {Invoice: i}}, s.Db, until = sc.Ended)?
+    fiber.Send(w, watches)
+    [live.Show("unpaid", w.Changes)]
+  end
+  actions = {Add: (sc, a) -> cepheus.Insert(Invoice, {Client: s.Bo, Total: a.Total, Status: "unpaid"}, s.Db)}
+  l = net.Listen(0)?
+  fiber.Spawn(() -> http.Serve(http.App() then live.Route("/live", screen, actions = actions), listener = l))
+  c = websocket.Dial("ws://127.0.0.1:$(net.Port(l))/live")?
+  websocket.Send(json.Text({Hello: 1}), c)?
+  answer = frames(c)[1]
+  websocket.Send(json.Text({Act: "Add", Id: 1, Args: {Total: 90}}), c)?
+  later = list.Concat(frames(c), frames(c))
+  w = fiber.Receive(watches, timeout = 2)?
+  websocket.Close(c)
+  ended = fiber.Receive(w.Changes, timeout = 2)
+  ended = if result.IsOk(ended) fiber.Receive(w.Changes, timeout = 2) else ended end
+  bug.Assert(value.Len(answer.Rows) == 2, "the answer first")
+  change = list.First([m for m in later if "Added" in m])
+  reply = list.First([m for m in later if "Ack" in m])
+  bug.Assert(change.Added[1].Invoice == reply.Ok, "the change, and the reply with the new id")
+  ended.Error.Kind == "closed"
+end
