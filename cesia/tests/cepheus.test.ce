@@ -4,6 +4,7 @@ use std/bug
 use std/fiber
 use std/list
 use std/result
+use std/text
 use std/value
 
 Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Email: cepheus.Text(unique = true), Tags: cepheus.Text(many = true)})
@@ -148,6 +149,18 @@ defn isFindOperatorRefusals()
   inCase = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.City, "Lyon"], [c, Client.City, "Paris"])], Give: {C: c}}, s.Db)
   own = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Ada"], cepheus.Not([i, Invoice.Client, c])], Give: {I: i}}, s.Db)
   list.All([andTop.Error.Code == "invalid", inCase.Error.Code == "invalid", own.Error.Code == "invalid"])
+end
+
+defn isFindLeavesOutAnUnusedVariable()
+  (** A variable in no item of the question, as an optional filter left out, is left out; one Give names but no
+      pattern binds is refused by its field. *)
+  s = shop()?
+  q(city) = (c, n, y) -> {Where: list.Concat([[c, Client.Name, n]], if city == missing [] else [[c, Client.City, y], cepheus.Prefix(y, city)] end), Give: {Name: n}}
+  all = cepheus.Find(3, q(missing), s.Db)?
+  lyon = cepheus.Find(3, q("Ly"), s.Db)?
+  loose = cepheus.Find(2, (c, n) -> {Where: [[c, Client.City, "Lyon"]], Give: {Name: n}}, s.Db)
+  bug.Assert(loose.Error.Code == "invalid" and text.Contains("Give's Name", loose.Error.Message), loose.Error.Message)
+  value.Equal(list.Sort([r.Name for r in all]), ["Ada", "Bo"]) and value.Equal(lyon, [{Name: "Ada"}])
 end
 
 defn isFindManyValues()
@@ -377,6 +390,16 @@ defn isRuleWithNotAndAggregates()
   cepheus.Update(Bill, b1, {Total: 4}, t)?
   g = cepheus.Get(Ledger, l, t)?
   g.Clean == true and g.Due == 29 and g.Smallest == 4 and g.Largest == 25
+end
+
+defn isRuleLeavesOutAnUnusedVariable()
+  (** A rule's variable in no item of Where and Then is left out too. *)
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  late = cepheus.Rule("late-unused", 3, (a, b, spare) -> {Where: [[b, Bill.Account, a], [b, Bill.Status, "late"]], Then: [a, Account.Late, true]})
+  cepheus.Define([late], t)?
+  a = cepheus.Insert(Account, {Closed: false}, t)?
+  cepheus.Insert(Bill, {Account: a, Status: "late", Total: 3}, t)?
+  cepheus.Get(Account, a, t)?.Late == true
 end
 
 defn isAggregateYoursAlone()

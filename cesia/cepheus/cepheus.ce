@@ -143,7 +143,8 @@ end
     a map of the variables, or of aggregates of them, to give. Each answer comes once. Optional: Sort, a list of
     fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name; Limit, at
     most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in Sort's
-    order: the next page. *)
+    order: the next page. A variable in no item of Where and Give is left out, so a filter can be left out of Where
+    without changing n. *)
 Find(n, question, db) = find(db, ask(n, question), n)
 
 (** A rule of the database: a function of n variables that gives {Where, Then}, Where patterns [thing, property,
