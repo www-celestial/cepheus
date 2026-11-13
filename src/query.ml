@@ -205,17 +205,20 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
     ccost := cost.(m - 1)
   end
   else begin
-    let bound = ref 0 and size = ref 1. in
+    (* placed: a flag a variable, not a bit (the wire's 64th variable has none in an int: its bit, 1 lsl 63, is 0,
+       and [est] only takes it for unbound) *)
+    let bound = ref 0 and size = ref 1. and placed = Array.make nvars false in
     for i = 0 to c - 1 do
       let b = ref (-1) and bc = ref max_int in
       Array.iter
         (fun x ->
-          if !bound land (1 lsl x) = 0 then begin
+          if not placed.(x) then begin
             let e = est x !bound in
             if !b < 0 || e < !bc then (b := x; bc := e)
           end)
         core;
       cord.(i) <- !b;
+      placed.(!b) <- true;
       bound := !bound lor (1 lsl !b);
       ccost := !ccost +. (!size *. float_of_int !bc);
       size := !size *. float_of_int !bc;
@@ -454,7 +457,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
         let x = ord.(i) and ps = by_var.(ord.(i)) and sk = skip.(i) in
         let ok = ref true and j = ref 0 in
         while !ok && !j < Array.length ps do
-          if !j <> src && (not sk.(!j)) && (lf = 0 || (lf lsr !j) land 1 = 0) && not (accepts x c ps.(!j)) then ok := false;
+          if !j <> src && (not sk.(!j)) && (lf = 0 || !j > 61 || (lf lsr !j) land 1 = 0) && not (accepts x c ps.(!j)) then ok := false;
           incr j
         done;
         !ok
@@ -562,10 +565,12 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
       and leapfrog i src size acc =
         let x = ord.(i) and ps = by_var.(ord.(i)) and cs = counts.(ord.(i)) and xi = ord.(i) in
         let parts = partss.(i) and pos = poss.(i) in
-        let k = ref 1 and lf = ref (1 lsl src) in
+        (* [lf]: the intersected patterns but the source (which [others] skips by its place), as bits: only patterns
+           0 to 61 are intersected, a bit each (a shift by 64 or more wraps on x86: pattern 64 would read pattern 0's) *)
+        let k = ref 1 and lf = ref 0 in
         parts.(0) <- src;
         for j = 0 to Array.length ps - 1 do
-          if j <> src && slice.(i).(j) && cs.(j) <= 8 * size && !k < 62 then (parts.(!k) <- j; incr k; lf := !lf lor (1 lsl j))
+          if j <> src && j < 62 && slice.(i).(j) && cs.(j) <= 8 * size && !k < 62 then (parts.(!k) <- j; incr k; lf := !lf lor (1 lsl j))
         done;
         let k = !k and lf = !lf in
         if k < 2 then candidates i src (fun c -> env.(x) <- c; level (i + 1) acc)

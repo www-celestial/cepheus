@@ -85,11 +85,12 @@ defaults, and the cache's size (`set_cache`).
 
 | what | limit or default | where |
 |---|---|---|
-| variables | at most 63 (0 to 62: the planner keeps bound variables in the bits of an `int`) | `Query.order` |
+| variables | at most 64, the wire's bound (below); the planner's estimates keep the bound variables in the bits of an `int`, 0 to 62: the 64th is placed by a flag of its own and estimated as unbound | `Query.order` |
 | the order of the variables | the best order for its estimated work, by a dynamic program over the subsets of the variables that are neither a thing's field nor a constant's (those have a known place), for up to 12 of them ($n 2^{n-1}$ steps); greedy beyond | `Query.order`, `Query.dp_max` |
 | parallel questions | when the first variable has 20,000 candidates or more | `Query.parallel_min` |
 | domains of a question | the machine's recommended count, at most 8 | `Query.domains` |
 | slices | $\min(\text{candidates}, 16 \times \text{domains})$, taken in turn from a shared counter | `Query.fold` |
+| the leapfrog of a level | the slices among a variable's first 62 patterns whose count is at most 8 times the source's; its other patterns are checked one by one | `Query.fold` |
 | the property of a pattern | a constant: no variable in the property position | `Query.pattern` |
 | Sort, Limit, After | keys: columns of the select, one a column at most; Limit 1 to 100,000 rows a page (0 on the wire: none), plus the copies of its last row; After needs Sort and a value of its type for every column, else `invalid` | `Top.check`, `Top.max_limit` |
 | Prefix | 1 to 1,024 bytes; a text variable that a pattern gives as its value | `Ask.max_prefix` |

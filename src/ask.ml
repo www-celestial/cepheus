@@ -267,14 +267,24 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
     (* the Not's own question: its own variables numbered from 0, the others fixed to the binding's values *)
     let own = Array.of_list own in
     let local x = let r = ref (-1) in Array.iteri (fun i y -> if y = x then r := i) own; !r in
-    (* the words of each In and of each Prefix on an own variable: the same for every binding, found once *)
-    let sets_of =
-      List.map
-        (function
-          | In (x, l) -> words_of t v x l
-          | Prefix (x, pre) when local x >= 0 -> prefix_set v items x pre
-          | _ -> [||])
-        items
+    (* the words of each In and of each Prefix on an own variable: the same for every binding, found once, at the
+       first binding (as when they were found at each: a question that never reaches the Not is not refused for
+       them); a race of two domains finds them twice at most *)
+    let known = Atomic.make None in
+    let sets_of () =
+      match Atomic.get known with
+      | Some s -> s
+      | None ->
+        let s =
+          List.map
+            (function
+              | In (x, l) -> words_of t v x l
+              | Prefix (x, pre) when local x >= 0 -> prefix_set v items x pre
+              | _ -> [||])
+            items
+        in
+        Atomic.set known (Some s);
+        s
     in
     fun env ->
       let fixed x = Store.value v typs.(x) env.(at x) in
@@ -303,7 +313,7 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
             if local x >= 0 then sets := (local x, ws) :: !sets
             else (let t = Store.text v env.(at x) in if not (String.length t >= String.length pre && String.sub t 0 (String.length pre) = pre) then ok := false)
           | Not _ | Or _ -> ())
-        items sets_of;
+        items (sets_of ());
       !ok
       &&
       let q = { Query.vars = Array.length own; where = List.rev !pats; ranges = List.rev !ranges } in

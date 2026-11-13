@@ -661,7 +661,41 @@ let planners seeds =
   timed "12 variables, each linked to all" (all 12) 50.;
   timed "13 variables, each linked to all" (all 13) 50.;
   let many = { Query.vars = 12; where = List.concat (List.init 420 (fun _ -> (all 12).where)) |> List.filteri (fun i _ -> i < 5000); ranges = [] } in
-  timed "12 variables in 5,000 patterns" many 100.
+  timed "12 variables in 5,000 patterns" many 100.;
+  timed "a chain of 64 variables, as many as the wire takes" (chain 64) 50.;
+  (* more variables and patterns than an int has bits, answered: 64 variables, the last one planned first (its bit,
+     1 lsl 63, is 0) and placed once; and a variable of 70 patterns, 62 of them intersected by the leapfrog, whose
+     patterns 62 to 69 must each be checked, not taken for intersected ones *)
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ next; mark ]) = declare db [ prop ~many:true "next" Tlink; prop ~many:true "mark" Ttext ] in
+  let tag j = Value.Text (Printf.sprintf "t%d" j) in
+  let ops =
+    [ Resolve.Add (-1, next, Link (-2)); Add (-2, next, Link (-3)); Add (-3, next, Link (-1)); Add (-1, mark, Text "start") ]
+    (* thing -10 holds t0 to t69; -11 to -14 t0 to t68: pattern 69 alone tells them apart; -20 to -59 t64 to t69 *)
+    @ List.init 70 (fun j -> Resolve.Add (-10, mark, tag j))
+    @ List.concat (List.init 4 (fun i -> List.init 69 (fun j -> Resolve.Add (-11 - i, mark, tag j))))
+    @ List.concat (List.init 40 (fun i -> List.init 6 (fun j -> Resolve.Add (-20 - i, mark, tag (64 + j)))))
+  in
+  (match write db ops with Ok _ -> () | Error e -> C.fail "planners: a write failed: %s" (message e));
+  let v = view db in
+  let one q = engine v q (Wire.Give (Array.init q.Query.vars Fun.id)) Top.none in
+  let start = one { Query.vars = 1; where = [ { Query.e = Var 0; p = mark; v = Val (Text "start") } ]; ranges = [] } in
+  let cyc =
+    { Query.vars = 64;
+      where = { Query.e = Var 63; p = mark; v = Val (Text "start") } :: List.init 63 (fun x -> { Query.e = Var x; p = next; v = Var (x + 1) });
+      ranges = [] }
+  in
+  (match start, one cyc with
+   | [ [| a |] ], [ r ] ->
+     let walk = List.for_all (fun x -> Value.equal r.(x) r.(x + 3)) (List.init 61 Fun.id) in
+     let three = not (Value.equal r.(61) r.(62) || Value.equal r.(62) r.(63) || Value.equal r.(61) r.(63)) in
+     C.check (Value.equal r.(63) a && walk && three) "planners: 64 variables around a cycle of 3: %s" (show [ r ])
+   | _, rows -> C.check false "planners: 64 variables around a cycle of 3: %d rows, 1 expected" (List.length rows));
+  let wide = { Query.vars = 1; where = List.init 70 (fun j -> { Query.e = Var 0; p = mark; v = Val (tag j) }); ranges = [] } in
+  let rows = one wide in
+  (* the one thing that holds t0 and t69 holds them all *)
+  let only = one { Query.vars = 1; where = [ { Query.e = Var 0; p = mark; v = Val (tag 0) }; { Query.e = Var 0; p = mark; v = Val (tag 69) } ]; ranges = [] } in
+  C.check (List.length only = 1 && same rows only) "planners: a variable of 70 patterns: %d rows (1 expected): %s" (List.length rows) (show rows)
 
 
 (* In at its bound: 100,000 values, the ids of a page of 100,000 rows; and an In inside a Not, whose words are found
@@ -690,7 +724,17 @@ let ins () =
   let ms = (Unix.gettimeofday () -. t0) *. 1e3 in
   (* t3 .. t6 are in the In: the things of t0, t1 and t2 are kept *)
   let want = List.length (List.filter (fun k -> k mod 7 < 3) (List.init n Fun.id)) in
-  C.check (got = [ [| Value.Int want |] ] && ms < 1000.) "ins: a Not with an In of 10,000 values over %d bindings: %s in %.0f ms" n (show got) ms
+  C.check (got = [ [| Value.Int want |] ] && ms < 1000.) "ins: a Not with an In of 10,000 values over %d bindings: %s in %.0f ms" n (show got) ms;
+  (* a Not's In is read at the Not's first binding, as it always was: one of the wrong type is refused there, and a
+     question that never reaches the Not answers *)
+  let bad_in = [ Ask.Not [ Ask.Pattern { Query.e = Var 0; p = tag; v = Var 1 }; Ask.In (1, [ Value.Int 1 ]) ] ] in
+  let count_of where = engine ~extra:bad_in v { Query.vars = 2; where; ranges = [] } (Wire.Group ([||], [| Wire.Count |])) Top.none in
+  (match count_of [ { Query.e = Var 0; p = num; v = Val (Int (-7)) } ] with
+   | got -> C.check (List.for_all (fun r -> r = [| Value.Int 0 |]) got) "ins: a Not's mistyped In and no binding: %s" (show got)
+   | exception e -> C.check false "ins: a Not's mistyped In and no binding: %s" (Printexc.to_string e));
+  match count_of [ { Query.e = Var 0; p = num; v = Val (Int 7) } ] with
+  | got -> C.check false "ins: a Not's mistyped In reached: answered %s" (show got)
+  | exception Query.Bad _ -> C.check true ""
 
 (* ---- live questions with Not, Or and In: after every frame, a watch's rows are the oracle's at its view ---- *)
 
