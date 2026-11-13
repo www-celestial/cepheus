@@ -664,7 +664,7 @@ let notagg_bench n k reps mode =
         r "count-of" 2 [ { e = i; p = line; v = l } ] { e = i; p = label; v = Val (Text "has lines") };
         r "first-of" 3 (body day) { e = i; p = seen_day; v = x };
         r "last-of" 3 (body day) { e = i; p = seen_day; v = x };
-        r "paid" 3 [ { e = i; p = line; v = l }; { e = i; p = paid; v = x } ] { e = i; p = label; v = Val (Text "paid") } ]
+        r "paid-of" 3 [ { e = i; p = line; v = l }; { e = i; p = paid; v = x } ] { e = i; p = label; v = Val (Text "paid") } ]
     | _ -> []
   in
   ignore (first, last);
