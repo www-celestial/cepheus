@@ -24,7 +24,9 @@ base = args[1]
 what = args[2]
 c = text.Number(args[3])
 n = text.Number(args[4])
-origin = {Name: "origin", Value: base}
+(* The Origin a browser of this page would send. http.Fetch sends Host without its port (Host: 127.0.0.1), and the app
+   compares Origin with Host, so the origin here is the scheme and Host that Fetch sends. *)
+origin = {Name: "origin", Value: "$(text.Split(":", base)[1]):$(text.Split(":", base)[2])"}
 form = {Name: "content-type", Value: "application/x-www-form-urlencoded"}
 admin = {Name: "cookie", Value: "sid=$(sys.Env("BENCH_SID"))"}
 books = {Name: "cookie", Value: "sid=$(sys.Env("BENCH_BOOKS_SID"))"}

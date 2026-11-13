@@ -2,8 +2,8 @@
 # The measures of docs/book/app.md, ROUNDS rounds (21 by default), at the size of the seed (10,000 clients, 100,000
 # invoices), on a Cepheus server of their own in OUT/srv:
 #   bench/run.sh OUT seed      the seed, each round into an empty database; the server's start at that size
-#   bench/run.sh OUT pages     the app's start; each page with 1 client then 50 (ApacheBench), each action
-#                              (bench/load) with 1 then 50; the rounds alternate the pages
+#   bench/run.sh OUT pages     the app's start; each page with 1 client then 50 (ApacheBench); the rounds
+#                              alternate the pages. The actions: bench/actions.sh
 # Each line of OUT/*.jsonl is one measure of one round; bench/stats.ce gives their medians. Run each part alone on the
 # machine (under the machine's lock): another program's work is noise in every number.
 set -e
@@ -105,7 +105,8 @@ ab1() {  # ab1 WHAT PATH C N [cookie]
   bad=$(sed -n 's/^Non-2xx responses: *\([0-9]*\).*/\1/p' "$out/ab.out")
   failed=$(sed -n 's/^Failed requests: *\([0-9]*\).*/\1/p' "$out/ab.out")
   p50=$(sed -n 's/^50,//p' "$out/ab.csv")
-  p99=$(sed -n 's/^99,//p' "$out/ab.csv")
+  # ab's line 99 is wrong for a few requests (below 100): the largest of 98 and 99 then, or 100 if both are below 50
+  p99=$(awk -F, '$1 == 50 { m = $2 } $1 >= 98 && $1 <= 99 && $2 > p { p = $2 } $1 == 100 { x = $2 } END { print (p < m ? x : p) }' "$out/ab.csv")
   echo "{\"What\":\"$1\",\"C\":$3,\"N\":$4,\"Rps\":$rps,\"P50\":$p50,\"P99\":$p99,\"Failed\":$(( ${failed:-0} + ${bad:-0} ))}" >> "$out/pages.jsonl"
 }
 for r in $(seq "$rounds"); do
@@ -125,9 +126,5 @@ for r in $(seq "$rounds"); do
     ab1 "an invoice" "/invoices/$invoice" $c $n
     ab1 "new invoice form" "/invoices/new?client=$client" $c $n
     ab1 "CSV of the late invoices" "/invoices.csv?late=1" $c $([ $c = 1 ] && echo 10 || echo 50)
-    for what in invoice client pay; do
-      cesia run --allow native=cepheus,env,net=127.0.0.1 bench/load/load.ce "$base" $what $c $([ $c = 1 ] && echo 50 || echo 200) >> "$out/pages.jsonl"
-    done
-    cesia run --allow native=cepheus,env,net=127.0.0.1 bench/load/load.ce "$base" signin $c $([ $c = 1 ] && echo 10 || echo 50) >> "$out/pages.jsonl"
   done
 done

@@ -1,0 +1,50 @@
+(** The database's part of the app's pages, alone, as the app asks it (its own functions, reads in its own memory),
+    beside the same questions in PostgreSQL (bench/giants): each question N times one after the other; one line of
+    JSON a question, its median and 99th percentile in microseconds. questions N, with CEPHEUS_URL and CEPHEUS_TOKEN
+    on the database of the seed. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/invoices
+use std/io
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+n = text.Number(sys.Args[1])
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
+all = {Statuses: [], Action: false, Open: false, Search: "", Client: missing, Sort: "-number"}
+ad = {Statuses: [], Action: false, Open: false, Search: "ad", Client: missing, Sort: "-number"}
+deep = {After: {Invoice: 1, Number: 50000, Status: "", Due: 0, X: 0}}
+one = result.Unwrap(cepheus.Find(1, (i) -> {Where: [[i, invoices.Invoice.Number, 50000]], Give: {Id: i}}, db))[1].Id
+ids = result.Unwrap(cepheus.Find(2, (i, no) -> {Where: [[i, invoices.Invoice.Number, no]], Give: {Id: i, N: no}, Sort: [no], Limit: 1000}, db))
+now = sys.Now()
+
+defn timed(what, k, f)
+  (** f() k times: its median and 99th percentile, in microseconds. *)
+  _ = f(1)
+  times = []
+  for j in 1..k
+    t0 = sys.Now()
+    r = f(j)
+    times = list.Append((sys.Now() - t0) * 1000000, times)
+    if result.IsErr(r)
+      io.PrintError("$what: $(r.Error.Message)")
+      sys.Exit(1)
+    end
+  end
+  xs = list.Sort(times)
+  at(q) = xs[list.Max([1, math.Round(q * value.Len(xs))])]
+  io.Print(json.Text({What: "cepheus: $what", C: 1, P50: math.Round(at(0.5) * 10) / 10, P99: math.Round(at(0.99) * 10) / 10}))
+end
+
+timed("a page of invoices", n, (j) -> invoices.InvoicesPage(all, now, missing, 20, db))
+timed("a page 50,000 deep", n, (j) -> invoices.InvoicesPage(all, now, deep, 20, db))
+timed("invoices by bill-to prefix", n, (j) -> invoices.InvoicesPage(ad, now, missing, 20, db))
+timed("clients by name", n, (j) -> invoices.ClientsPage("", "name", missing, 20, db))
+timed("clients by name or e-mail prefix", n, (j) -> invoices.ClientsPage("ma", "name", missing, 20, db))
+timed("the unpaid total", n, (j) -> cepheus.Find(2, (i, t) -> {Where: [[i, invoices.Invoice.Total, t], cepheus.Not([i, invoices.Invoice.Status, "paid"])], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db))
+timed("an invoice with its lines", n, (j) -> invoices.GetInvoice(one, db))
+timed("a durable update of one invoice", list.Min([n, 200]), (j) -> cepheus.Update(invoices.Invoice, ids[math.Mod(j, value.Len(ids)) + 1].Id, {PaidAt: sys.Now()}, db))
