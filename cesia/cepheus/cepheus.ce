@@ -147,11 +147,19 @@ end
 Find(n, question, db) = find(db, ask(n, question), n)
 
 (** A rule of the database: a function of n variables that gives {Where, Then}, Where patterns [thing, property,
-    value] and Above, Below or Between, and Then one pattern, the fact the rule gives for each answer of Where, or
-    Never. The database keeps the facts its rules give up to date at every write, and a question reads them as any
-    fact. Every variable of Then is in a pattern of Where.
+    value], Above, Below or Between, and Not (at most 16), and Then one pattern, the fact the rule gives for each answer
+    of Where, or Never. The database keeps the facts its rules give up to date at every write, and a question reads
+    them as any fact. Every variable of Then is in a pattern of Where outside Not.
 
-      Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Client.Overdue, true]}) *)
+      Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Client.Overdue, true]})
+
+    The value of Then may be Sum(x), Min(x), Max(x) or Count(): the rule gives its thing one fact, the sum, the
+    smallest, the largest value or the number of its answers (none without answers). That property takes one value,
+    no write gives it, and no other rule. Sum is for ints and money, Min and Max for ints, dates and money:
+
+      Rule("total-of", 3, (i, l, x) -> {Where: [[l, Line.Invoice, i], [l, Line.Price, x]], Then: [i, Invoice.Total, Sum(x)]})
+
+    A rule set where a property depends on its own absence (Not) or its own aggregate is refused, naming the cycle. *)
 Rule(name, n, rule) = {Rule: name, Vars: n, Body: ask(n, rule)}
 
 (** The Then of a rule that is a constraint: a group that would give its Where an answer is refused whole, with

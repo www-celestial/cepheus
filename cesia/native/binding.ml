@@ -894,7 +894,27 @@ let rule_of ctx name d v =
     match C.fields body_keys (map_of ctx name body) with
     | [| (C.List _ as w); head |] ->
       let qn = question ctx name d (C.record ctx where_give [| w; C.record ctx (C.keys [||]) [||] |]) n in
-      if qn.extra <> [] then refuse "invalid" "rule %s: a rule's Where holds patterns, Above, Below and Between; Not, Or, In and Prefix are for questions" rname;
+      (* a Not of Where is the rule's k-th Not: its patterns' properties [Rules.absent k p], its conditions the ranges
+         of its own variables *)
+      let nots = ref 0 and npats = ref [] and nranges = ref [] in
+      List.iter
+        (function
+          | Question.Ask.Not items ->
+            let k = !nots in
+            incr nots;
+            List.iter
+              (function
+                | Question.Ask.Pattern (q : Query.pattern) -> npats := { q with p = Rules.absent k q.p } :: !npats
+                | Range (j, lo, hi) ->
+                  (* a condition inside Not is on one of its own variables: on another, it would hold for the rule *)
+                  if List.exists (fun (q : Query.pattern) -> q.e = Query.Var j || q.v = Query.Var j) qn.query.where then
+                    refuse "invalid" "rule %s: a condition inside Not is on a variable of its own (in no pattern outside Not)" rname;
+                  nranges := (j, lo, hi) :: !nranges
+                | _ -> refuse "invalid" "rule %s: a Not of a rule holds patterns, Above, Below and Between" rname)
+              items
+          | _ -> refuse "invalid" "rule %s: a rule's Where holds patterns, Not, Above, Below and Between; Or, In and Prefix are for questions" rname)
+        qn.extra;
+      if !nots > Rules.max_nots then refuse "invalid" "rule %s: at most %d Nots" rname Rules.max_nots;
       let head =
         match head with
         | C.Text "cepheus.Never" -> Rules.Never
@@ -904,11 +924,24 @@ let rule_of ctx name d v =
           let k, i = property_of ctx name p in
           let f = k.fields.(i) in
           let e = match var e, e with Some j, _ -> Query.Var j | None, C.Int t -> Query.Thing t | _ -> C.need ctx name "a variable or a thing's id first in Then" e in
-          let v = match var x with Some j -> Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x) in
-          Rules.Give { Query.e; p = (resolve_kind d k).ids.(i); v }
+          let pid = (resolve_kind d k).ids.(i) in
+          (* Sum, Min, Max of a variable, or Count: the head gives the property that aggregate of its answers *)
+          let agg f = Some f in
+          let a, v =
+            match x with
+            | C.Map m | C.Struct m -> (
+              match C.fields aggregate_keys m with
+              | [| s; C.Missing; C.Missing; C.Missing |] when var s <> None -> agg `Sum, Query.Var (Option.get (var s))
+              | [| C.Missing; s; C.Missing; C.Missing |] when var s <> None -> agg `Min, Query.Var (Option.get (var s))
+              | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> agg `Max, Query.Var (Option.get (var s))
+              | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> agg `Count, Query.Val (Value.Int 0)
+              | _ -> C.need ctx name "a value of Then: a variable, a value, or Sum, Min, Max of a variable, or Count()" x)
+            | _ -> None, (match var x with Some j -> Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x))
+          in
+          Rules.Give { Query.e; p = (match a with Some g -> Rules.aggregate g pid | None -> pid); v }
         | v -> C.need ctx name "Then: a pattern [thing, property, value], or cepheus.Never" v
       in
-      { Rules.name = rname; vars = n; where = qn.query.where; ranges = qn.query.ranges; head }
+      { Rules.name = rname; vars = n; where = qn.query.where @ List.rev !npats; ranges = qn.query.ranges @ List.rev !nranges; head }
     | _ -> C.need ctx name "a rule {Where: [patterns], Then: pattern}" body)
   | _ -> C.need ctx name "a rule, as cepheus.Rule makes it" v
 
