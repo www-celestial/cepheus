@@ -641,7 +641,9 @@ let show_op = function
 let outcomes : (int * int * bool, bool * F.t) Hashtbl.t = Hashtbl.create 4096
 let compare_paths = ref false
 
-let random_sequences ~seeds ~groups ~merges =
+(* [durable]: the sequences on a database on the disk, written through its threaded writer: each change of the rules
+   takes the background path (Engine), and must decide and leave exactly what the model says, as a fork does (G8) *)
+let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
   let progress = Sys.getenv_opt "RULES_PROGRESS" <> None in
   for seed = (if debug > 0 then debug else 1) to (if debug > 0 then debug else seeds) do
     if progress then begin
@@ -651,7 +653,9 @@ let random_sequences ~seeds ~groups ~merges =
       Printf.printf "seed %d %.1f s heap %d MB rss %d MB\n%!" seed (Unix.gettimeofday ()) (st.heap_words * 8 / 1048576) rss
     end;
     let r = Rng.make seed in
-    let db = ref (fork empty) in
+    let dir = Filename.concat (Option.value (Sys.getenv_opt "CEPHEUS_TMP") ~default:(Filename.get_temp_dir_name ())) (Printf.sprintf "cepheus-rules-%d-%d" (Unix.getpid ()) seed) in
+    if durable then C.rmrf dir;
+    let db = ref (if durable then (match open_ dir with Ok db -> db | Error e -> failwith (message e)) else fork empty) in
     let a, b, c, ty, n, tag, meta, total, cnt, lo, hi =
       match declare !db [ prop ~many:true "a" Tlink; prop ~many:true "b" Tlink; prop ~many:true "c" Tlink;
                           prop ~many:true "type" Tlink; prop ~many:true "n" Tint; prop ~many:true "tag" Ttext;
@@ -888,7 +892,16 @@ let random_sequences ~seeds ~groups ~merges =
       if seed = debug then
         Printf.printf "   view: %s\n%!" (String.concat " " (List.map (fun (e, p, x) -> Printf.sprintf "%d.%d.%s%s" e p (Value.to_string x) (if F.mem (e, p, x) asserted then "" else "*")) (F.elements got)));
       if merges && Rng.int r 4 = 0 then db := fork (if Rng.bool r then C.compact v else C.push v)
-    done
+    done;
+    if durable then begin
+      (* and the journal replays to the same view: the changes' frames hold their derived facts *)
+      let last = user_facts (view !db) in
+      close !db;
+      (match open_ dir with
+       | Ok db2 -> C.check (F.equal (user_facts (view db2)) last) "seed %d: the database reopened holds the same facts" seed; close db2
+       | Error e -> C.fail "seed %d: reopen: %s" seed (message e));
+      C.rmrf dir
+    end
   done
 
 let () =
@@ -896,14 +909,17 @@ let () =
   Pages.set_capacity (32 lsl 20);
   section "G17, G18, G20: random rules and writes on forks, against the least model from scratch";
   let seeds = match Sys.getenv_opt "RULES_SEEDS" with Some s -> int_of_string s | None -> 60 in
-  random_sequences ~seeds ~groups:60 ~merges:false;
+  random_sequences ~seeds ~groups:60 ~merges:false ();
   section "G17, G18, G20: the same with the facts merged into runs between groups";
-  random_sequences ~seeds ~groups:60 ~merges:true;
+  random_sequences ~seeds ~groups:60 ~merges:true ();
+  section "G8, G17, G19: the same on databases on the disk: every change of the rules on the background path";
+  random_sequences ~durable:true ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
+  C.check (Atomic.get Engine.changes_done > 0) "the background path installed changes";
   section "the rules always as written (no unfolding) and closures retracted by B/F: every group's view the same as above";
   Reason.specialise := false;
   Reason.walk_retract := false;
   compare_paths := true;
-  random_sequences ~seeds ~groups:60 ~merges:false;
+  random_sequences ~seeds ~groups:60 ~merges:false ();
   Reason.specialise := true;
   Reason.walk_retract := true;
   compare_paths := false

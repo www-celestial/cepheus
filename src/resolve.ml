@@ -63,7 +63,9 @@ let apply_change (v : Store.view) (c : Group.change) =
   if s > 0 then (let v, w = Store.word_intern v c.v in apply_word v c w s)
   else match Store.word v c.v with Some w -> apply_word v c w s | None -> v, false
 
-let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
+(* [reason]: what the rules make of the group's asserted changes (Reason.run; the background path of a change gives
+   its own, Engine) *)
+let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.run ~v0 v changes words) (v0 : Store.view) ~n ~time ~by ~why ops =
   try
     (* new things: negative ids, numbered in order of first use *)
     let temps = Hashtbl.create 4 and order = ref [] in
@@ -199,7 +201,7 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
     end;
     (* the rules: what they derive from this group, and what they no longer derive *)
     let v, changes =
-      match Reason.run ~v0 !v changes (Array.of_list (List.rev !outw)) with
+      match reason ~v0 !v changes (Array.of_list (List.rev !outw)) with
       | r -> r
       | exception Reason.Refused m -> invalid "%s" m
     in
@@ -248,6 +250,65 @@ let replay (v : Store.view) (g : Group.t) =
       | Some _ -> v := fst (apply_change !v c))
     g.changes;
   { !v with group = g.n }
+
+(* A change's catch-up (the background path, Engine): group [g], resolved by the writer under the old rules, applied
+   to [v], a view under the new rules: its asserted changes (their kinds found again against [v]), then the new rules'
+   consequences (Reason.run), the derived changes it had under the old rules dropped. [d]: a view of the writer after
+   [g], whose dictionary has every text of [g] (the background interns none of its own). Every check of a group runs
+   again under the new rules (a constraint, one value, a unique value): a failure raises [Fail], and the change ends
+   with Conflict. Returns the view and the changes, with their states before and after in [v]'s lineage. *)
+let catch_up ?limit ?stop (v : Store.view) (d : Store.view) (g : Group.t) =
+  try
+    let v0 = { v with dict = d.dict; next_e = max v.next_e (g.first_new + g.count_new) } in
+    let v = ref v0 and out = ref [] and outw = ref [] in
+    Array.iter
+      (fun (c : Group.change) ->
+        match c.kind with
+        | Derived | Underived -> ()
+        | k -> (
+          let add = Group.after k = 1 in
+          match Store.word !v c.v with
+          | None -> fail (Conflict "a text of a group written meanwhile is not in the change's view")
+          | Some w ->
+            let v1, prev = Store.swap !v c.e c.p w (if add then 1 else 0) in
+            let kind : Group.kind option =
+              match add, prev with
+              | true, 0 -> Some Added
+              | true, 2 -> Some Now_asserted
+              | false, 1 -> Some Retracted
+              | true, _ | false, 0 -> None
+              | false, _ -> fail (Conflict "a fact retracted meanwhile is not asserted in the change's view")
+            in
+            match kind with
+            | None -> v := v1
+            | Some kind ->
+              v := if Schema.is_system c.p && Schema.is_prop_space c.e then refresh v1 c.e else v1;
+              out := { c with kind } :: !out;
+              outw := w :: !outw))
+      g.changes;
+    let changes = Array.of_list (List.rev !out) in
+    let v, changes =
+      match Reason.run ?limit ?stop ~v0 !v changes (Array.of_list (List.rev !outw)) with
+      | r -> r
+      | exception Reason.Refused m -> fail (Conflict m)
+    in
+    (* the checks of one value and of unique values, for the asserted additions too: the writer checked them under
+       the old rules *)
+    Array.iter
+      (fun (c : Group.change) ->
+        match c.kind with
+        | Added | Now_asserted | Derived -> (
+          match Schema.find v.schema c.p, Store.word v c.v with
+          | Some d, Some w ->
+            if (not d.many) && Store.count_values v c.e c.p > 1 then
+              fail (Conflict (Printf.sprintf "#%d would have two values of %s under the new rules" c.e d.name));
+            if d.unique && Store.count_things v c.p w > 1 then
+              fail (Conflict (Printf.sprintf "%s %s would be taken twice under the new rules" d.name (Value.to_string c.v)))
+          | _ -> ())
+        | _ -> ())
+      changes;
+    Ok ({ v with group = g.n }, changes)
+  with Fail e -> Error e
 
 let error_message = function
   | Conflict m -> "conflict: " ^ m
