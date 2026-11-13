@@ -13,10 +13,10 @@
    Two ways to the same rows (docs/book/cesia.md, "Sort, Limit and After"):
    - the heap path: every binding of the question, kept in a buffer of at most about 2 k rows that is sorted and cut
      back to its first k (and their ties) each time it fills: O(N log k) comparisons, O(k) rows held a domain;
-   - the index path, when the first key is a column of an int, a date, money or a link that a pattern gives as its
-     value (a bool has two values: nothing to gain): the question
-     asked again on windows of that column's values, read off the property's index from the cursor on, each window
-     holding twice as many facts as the one before, until k rows are found. Its budget is the planner's estimate of
+   - the index path, when the first key is a column of an int, a date, money, a link or a text that a pattern gives
+     as its value (a bool has two values: nothing to gain): the question asked again on windows of that column's
+     values, read off the property's index from the cursor on (a text's in the order of its bytes, which each run
+     keeps: Store.text_order), each window holding twice as many facts as the one before, until k rows are found. Its budget is the planner's estimate of
      the heap path: past it, the heap path answers, so the index path never costs more than twice the heap path's
      estimate (the break-even rule of Karlin, Manasse, Rudolph and Sleator 1988). *)
 
@@ -128,12 +128,15 @@ let append cmp cap a b =
 
 (* ---- the answer ---- *)
 
-(* [fold range ~seq ~init ~step ~merge]: the question's bindings (an env of index words a binding), with one more
-   range [lo <= x <= hi] on a variable when [range] is given. [project env]: the row of a binding. [var col]: the
+(* A window of the index path: one more range [lo <= x <= hi] on a variable, or the words it may take (sorted). *)
+type window = Range of int * Value.t * Value.t | Words of int * int array
+
+(* [fold window ~seq ~init ~step ~merge]: the question's bindings (an env of index words a binding), within a window
+   when one is given. [project env]: the row of a binding. [var col]: the
    variable a column gives, if it is one. [lead x]: a property of a pattern that gives x as its value, if any.
    [estimate ()]: the planner's estimate of the question's work. *)
 type source = {
-  fold : 'a. (int * Value.t * Value.t) option -> seq:bool -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> 'a;
+  fold : 'a. window option -> seq:bool -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> 'a;
   project : int array -> int array;
   var : int -> int option;
   lead : int -> int option;
@@ -200,63 +203,99 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
     let estimate = lazy (src.estimate ()) in
     let lead =
       match src.var first.col with
-      | Some x when Value.inline typs.(first.col) && typs.(first.col) <> Tbool -> (match src.lead x with Some p -> Some (x, p) | None -> None)
+      | Some x when (Value.inline typs.(first.col) && typs.(first.col) <> Tbool) || typs.(first.col) = Ttext ->
+        (match src.lead x with Some p -> Some (x, p) | None -> None)
       | _ -> None
     in
-    let index (x, p) =
-      (* the windows of x's values, from the cursor on, each of [m] facts of p, m doubling *)
-      let ty = typs.(first.col) in
-      let mk w = word_value ty w in
-      let start =
-        match o.after with
-        | Some a -> (match cell v ty "" a.(first.col) with W w -> w | _ -> assert false)
-        | None -> if first.desc then max_int else min_int
-      in
+    (* the windows of x's values in the order of the first key, from the cursor on: [next m] gives the next one, of
+       about m facts, its facts and whether it is the last; each window's rows are those of the question asked on it,
+       and every row of a later window comes after every row of an earlier one, so k rows found end the walk *)
+    let windowed next =
       let budget = Lazy.force estimate in
-      let got = fresh () and spent = ref 0 and m = ref (2 * cap) and edge = ref start and over = ref false and found = ref None in
+      let got = fresh () and spent = ref 0 and m = ref (2 * cap) and over = ref false and found = ref None in
       while !found = None && not !over do
-        let lo, hi, last =
-          if first.desc then begin
-            let hi = !edge in
-            let left = Store.count_range v p min_int hi in
-            if left <= !m then (min_int, hi, true)
-            else begin
-              (* the largest lo whose window [lo, hi] holds m facts *)
-              let a = ref min_int and b = ref hi in
-              while !a < !b do
-                let mid = (!a asr 1) + (!b asr 1) + (!a land !b land 1) + 1 in
-                if Store.count_range v p mid hi >= !m then a := mid else b := mid - 1
-              done;
-              (!a, hi, !a = min_int)
-            end
-          end
-          else begin
-            let lo = !edge in
-            let left = Store.count_range v p lo max_int in
-            if left <= !m then (lo, max_int, true)
-            else begin
-              let a = ref lo and b = ref max_int in
-              while !a < !b do
-                let mid = (!a asr 1) + (!b asr 1) + (!a land !b land 1) in
-                if Store.count_range v p lo mid >= !m then b := mid else a := mid + 1
-              done;
-              (lo, !a, !a = max_int)
-            end
-          end
-        in
+        let win, facts, last = next !m in
         Atomic.incr windows;
-        spent := !spent + Store.count_range v p lo hi;
-        let w = heap (Some (x, mk lo, mk hi)) in
-        for i = 0 to w.n - 1 do push cmp cap got w.a.(i) done;
-        sort_cut cmp cap got;
+        spent := !spent + facts;
+        (match win with
+         | Some win ->
+           let w = heap (Some win) in
+           for i = 0 to w.n - 1 do push cmp cap got w.a.(i) done;
+           sort_cut cmp cap got
+         | None -> ());
         if got.n >= cap || last then found := Some got
         else if float_of_int !spent > budget then over := true
-        else begin
-          (if first.desc then edge := lo - 1 else edge := hi + 1);
-          m := 2 * !m
-        end
+        else m := 2 * !m
       done;
       match !found with Some g -> g | None -> Atomic.incr gave_up; heap None
+    in
+    (* an int, a date, money or a link: the values' words keep their order, so a window is a range of words read off
+       p's index, of m facts *)
+    let ranges (x, p) =
+      let ty = typs.(first.col) in
+      let mk w = word_value ty w in
+      let edge =
+        ref
+          (match o.after with
+           | Some a -> (match cell v ty "" a.(first.col) with W w -> w | _ -> assert false)
+           | None -> if first.desc then max_int else min_int)
+      in
+      windowed (fun m ->
+          let lo, hi, last =
+            if first.desc then begin
+              let hi = !edge in
+              let left = Store.count_range v p min_int hi in
+              if left <= m then (min_int, hi, true)
+              else begin
+                (* the largest lo whose window [lo, hi] holds m facts *)
+                let a = ref min_int and b = ref hi in
+                while !a < !b do
+                  let mid = (!a asr 1) + (!b asr 1) + (!a land !b land 1) + 1 in
+                  if Store.count_range v p mid hi >= m then a := mid else b := mid - 1
+                done;
+                (!a, hi, !a = min_int)
+              end
+            end
+            else begin
+              let lo = !edge in
+              let left = Store.count_range v p lo max_int in
+              if left <= m then (lo, max_int, true)
+              else begin
+                let a = ref lo and b = ref max_int in
+                while !a < !b do
+                  let mid = (!a asr 1) + (!b asr 1) + (!a land !b land 1) in
+                  if Store.count_range v p lo mid >= m then b := mid else a := mid + 1
+                done;
+                (lo, !a, !a = max_int)
+              end
+            end
+          in
+          if not last then edge := if first.desc then lo - 1 else hi + 1;
+          (Some (Range (x, mk lo, mk hi)), Store.count_range v p lo hi, last))
+    in
+    (* a text: its words do not keep the order of the bytes, but each run keeps p's texts in that order (run format
+       9): a window is the next texts of that order, merged over the runs and the delta (Store.text_order), until they
+       hold m facts, the question asked with x one of them *)
+    let texts (x, p) =
+      let from = match o.after with Some a -> (match cell v Ttext "" a.(first.col) with S s -> Some s | _ -> assert false) | None -> None in
+      let next = Store.text_order v p ~desc:first.desc ~from in
+      let ended = ref false in
+      windowed (fun m ->
+          let ws = ref [] and facts = ref 0 in
+          while (not !ended) && !facts < m do
+            let w = next () in
+            if w < 0 then ended := true else (ws := w :: !ws; facts := !facts + Store.count_things v p w)
+          done;
+          let ws = Array.of_list !ws in
+          Array.sort compare ws;
+          ((if Array.length ws = 0 then None else Some (Words (x, ws))), !facts, !ended))
+    in
+    let index (x, p) =
+      if typs.(first.col) <> Ttext then ranges (x, p)
+      else if float_of_int (Store.delta_values v p) > Lazy.force estimate then
+        (* the delta's texts of p are sorted before the first window: past the heap's estimate, the heap answers *)
+        (Atomic.incr gave_up; heap None)
+      else texts (x, p)
     in
     let use_index =
       cap > 0

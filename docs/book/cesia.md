@@ -395,10 +395,11 @@ place, if that place is after the cursor.
 - by a **heap**: every answer of the question, kept in a buffer of about twice k rows, sorted and cut back to its
   first k each time it fills: the work of the question itself plus $O(N \log k)$ comparisons, with $k$ rows held,
   and k rows sent instead of $N$;
-- **in the index's order**, when the first key is an int, a date, money or a link that a pattern gives as its value:
-  the question is asked again on windows of that variable's values read from the property's index, from the cursor
-  on, each window holding twice as many facts as the one before, until k rows are found: the work of the rows the
-  page needs. Its budget is the planner's estimate of the heap's work; past it, the heap answers, so this way never
+- **in the index's order**, when the first key is an int, a date, money, a link or a text that a pattern gives as its
+  value: the question is asked again on windows of that variable's values read from the property's index, from the
+  cursor on, each window holding twice as many facts as the one before, until k rows are found: the work of the rows
+  the page needs. A text's window is the next texts in the order of their bytes, which each run on disk keeps for its
+  property (the order `Prefix` reads too), merged over the runs and the changes not yet merged. Its budget is the planner's estimate of the heap's work; past it, the heap answers, so this way never
   costs more than about twice the other (the rule of the ski-rental problem: rent until the rent reaches the price,
   then buy).
 

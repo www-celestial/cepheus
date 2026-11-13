@@ -170,17 +170,22 @@ since each such product bounds them from above. The best order of a set is then 
 variable, followed by that variable: a dynamic program over the subsets, as Selinger et al. [Selinger 1979] choose
 an order of joins, in $n 2^{n-1}$ steps for $n$ variables and exact for this cost.
 
-Two kinds of variables have a known place and stay out of the program. A variable whose only pattern has no other
-variable and offers it at most one candidate (a field of a thing given by its id) comes first: it costs 1 there and
-multiplies nothing, and it costs at least 1 anywhere. A *leaf*, a variable $y$ whose only pattern gives it as the
-value of a one-valued property of a variable $x$, with $d \ge 2$ values in all, comes right after $x$. Proof by
-exchange: the partial bindings never shrink along an order (each step multiplies by at least 1). After $x$, $y$ has
-one candidate a binding: it multiplies nothing, and costs the partial bindings $S$ of that step, the least it can cost
-after $x$. Before $x$, it costs at least 1 and multiplies every later step by $d$: $x$'s own step then costs $d S$
-instead of $S$, so moving $y$ right after $x$ changes the cost by at most $S + S - d S \le 0$, and every step between
-the two places gets cheaper. So the fields of a row (an invoice's number, status, total, dates) are leaves of the
-row's thing, and a page of 7 fields is a program of one or two variables. The program runs over the remaining
-variables, up to 12 of them (24,576 steps, each over at most one entry per other variable: the counts are read once a
+Two kinds of variables have their place chosen before the program, and stay out of it. A variable whose only
+pattern has no other variable and offers it at most one candidate (a field of a thing given by its id) comes first:
+it costs 1 there, the least a step costs, and multiplies nothing (exact). A *leaf*, a variable $y$ whose only pattern
+gives it as the value of a one-valued property of a variable $x$, with $d \ge 2$ values in all, comes right after
+$x$: there it has one candidate a binding, multiplies nothing, and costs the partial bindings $S$ of $x$'s step, the
+least it can cost after $x$ (the partial bindings never shrink along an order). The rule is exact when $x$'s count
+does not depend on $y$ (another pattern of $x$ offers it no more than the leaf's average, $\lfloor N / d \rfloor$ for
+$N$ facts of the property): before $x$, $y$ would cost at least 1 and multiply $x$'s step and every one between by
+$d$, which changes the cost by at most $S + S - d S \le 0$ in favour of after (an exchange argument). Otherwise it
+is a heuristic, within a factor 2 of reading the leaf first at that step: before $x$, the two steps cost about
+$d + N$ a binding of the steps before, after $x$ at most $2 N$. The measures side with it: for the sum of the totals
+of 100,000 invoices (`[i, Total, t]`), the estimate prefers reading the totals value by value ($d + N$) to reading
+them invoice by invoice ($2 N$), and the latter, which the rule gives, takes 16.2 ms against 53.6 ms (five runs on
+disk: each value's invoices cost a search in each run). So the fields of a row (an invoice's number, status, total,
+dates) are leaves of the row's thing, and a page of 7 fields is a program of one or two variables. The program runs
+over the remaining variables, up to 12 of them (24,576 steps, each over at most one entry per other variable: the counts are read once a
 question, merged by the variable on the other side however many patterns there are); beyond 12, the variable of
 fewest candidates next (greedy). The planner before it tried every order for up to 7 variables and went greedy at 8,
 which for a sorted page of an invoice's 7 fields (8 variables) began with the status, of 3 values, and read every

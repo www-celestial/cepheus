@@ -44,10 +44,14 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view
     | Some a when not a.outer.(x) -> Query.bad "variable %d is a Not's or an Or's own: Give and Sort take the question's variables" x
     | _ -> ()
   in
-  let fold ?seq ?range ~init ~step ~merge () =
-    match ask with
-    | None -> Query.fold ?seq ~budget v (match range with None -> q | Some r -> { q with ranges = r :: q.ranges }) ~init ~step ~merge
-    | Some a -> Ask.fold ?seq ~budget ?range v a ~init ~step ~merge
+  let fold ?seq ?window ~init ~step ~merge () =
+    match ask, window with
+    | None, None -> Query.fold ?seq ~budget v q ~init ~step ~merge
+    | None, Some (Top.Range (x, lo, hi)) -> Query.fold ?seq ~budget v { q with ranges = (x, lo, hi) :: q.ranges } ~init ~step ~merge
+    | None, Some (Top.Words (x, ws)) -> Query.fold ?seq ~sets:[ (x, ws) ] ~budget v q ~init ~step ~merge
+    | Some a, None -> Ask.fold ?seq ~budget v a ~init ~step ~merge
+    | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ~budget ~range:(x, lo, hi) v a ~init ~step ~merge
+    | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ~budget ~words:(x, ws) v a ~init ~step ~merge
   in
   match sel with
   | Wire.Give give when order <> Top.none ->
@@ -55,7 +59,7 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view
     Array.iter var give;
     let typs = Array.map (fun x -> ty.(x)) give in
     let src =
-      { Top.fold = (fun range ~seq ~init ~step ~merge -> fold ~seq ?range ~init ~step ~merge ());
+      { Top.fold = (fun window ~seq ~init ~step ~merge -> fold ~seq ?window ~init ~step ~merge ());
         project = (fun env -> Array.map (fun x -> env.(x)) give);
         var = (fun c -> Some give.(c));
         lead = lead v q;

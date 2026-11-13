@@ -1231,6 +1231,64 @@ let prefix_words v p pre =
    | None -> ());
   Array.of_list (List.sort_uniq compare !out)
 
+(* The words of p's texts in the order of their bytes, the smallest first (the largest with [desc]), from the first
+   text >= [from] (<= [from] with [desc]; every text when None): each run's text order (run format 9) from a binary
+   search, and the delta's texts of p sorted once, merged; a text in several runs comes once (a text has one id in a
+   view). As [prefix_words], a superset of the texts p's facts hold in the view: a word no fact holds any more counts
+   no fact. [next ()]: the next word, or -1 at the end. *)
+let text_order v p ~desc ~from =
+  let cmp a b = if desc then String.compare b a else String.compare a b in
+  (* the sources: each run's stretch, then the delta's words; [pos] the next place, [stop] the end *)
+  let runs = List.filter_map (fun r -> let first, count = tord_range r.a p in if count > 0 then Some (r.a, first, count) else None) (Array.to_list v.runs) in
+  let delta =
+    match IM.find_opt p v.delta.dav with
+    | None -> [||]
+    | Some pd ->
+      let ws = Array.of_list (IM.fold (fun w _ acc -> w :: acc) pd.pm []) in
+      let ts = Array.map (fun w -> text v w, w) ws in
+      Array.sort (fun (a, _) (b, _) -> cmp a b) ts;
+      Array.map snd ts
+  in
+  let k = List.length runs + 1 in
+  let word = Array.make k (fun (_ : int) -> 0) and len = Array.make k 0 and pos = Array.make k 0 in
+  List.iteri
+    (fun j (b, first, count) ->
+      (* in a run, the stretch is in ascending order: read backwards when descending *)
+      word.(j) <- (if desc then fun i -> tord_word b (first + count - 1 - i) else fun i -> tord_word b (first + i));
+      len.(j) <- count)
+    runs;
+  word.(k - 1) <- (fun i -> delta.(i));
+  len.(k - 1) <- Array.length delta;
+  (* the first place of each source at or after [from], by a binary search in its order *)
+  (match from with
+   | None -> ()
+   | Some s ->
+     for j = 0 to k - 1 do
+       let lo = ref 0 and hi = ref len.(j) in
+       while !lo < !hi do
+         let mid = (!lo + !hi) lsr 1 in
+         if cmp (text v (word.(j) mid)) s < 0 then lo := mid + 1 else hi := mid
+       done;
+       pos.(j) <- !lo
+     done);
+  (* each source's next text, read once *)
+  let head = Array.make k "" and hw = Array.make k (-1) in
+  let load j = if pos.(j) < len.(j) then (let w = word.(j) pos.(j) in hw.(j) <- w; head.(j) <- text v w) else hw.(j) <- -1 in
+  for j = 0 to k - 1 do load j done;
+  fun () ->
+    let best = ref (-1) in
+    for j = 0 to k - 1 do
+      if hw.(j) >= 0 && (!best < 0 || cmp head.(j) head.(!best) < 0) then best := j
+    done;
+    if !best < 0 then -1
+    else begin
+      let w = hw.(!best) in
+      for j = 0 to k - 1 do
+        if hw.(j) = w then (pos.(j) <- pos.(j) + 1; load j)
+      done;
+      w
+    end
+
 (* The texts a large group adds: their ids, consecutive from the first returned, as [intern] would give them one
    after the other, but without their entries in the delta's map (the merge of the group, which follows at once, puts
    every text of the view in its run's hash table), and one new view for all. The view is for that merge. *)
@@ -1643,6 +1701,9 @@ let count_range v p lo hi =
      let rec go s = match s () with Seq.Cons ((w, vd), s') when w <= hi -> n := !n + vd.vn; go s' | _ -> () in
      if lo <= hi then go (IM.to_seq_from lo pd.pm));
   !n
+
+(* the values of p that the delta holds changes of *)
+let delta_values v p = match IM.find_opt p v.delta.dav with Some pd -> pd.pk | None -> 0
 
 (* an estimate for the planner: the distinct values of p, the runs' and the delta's (an upper bound) *)
 let distinct v p =

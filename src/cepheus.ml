@@ -190,7 +190,12 @@ let ask v (q : Question.t) =
     let ty = Ask.typs_of t in
     let typs = Array.map (fun x -> ty.(x)) give in
     let src =
-      { Top.fold = (fun range ~seq ~init ~step ~merge -> Ask.fold ~seq ?range v t ~init ~step ~merge);
+      { Top.fold =
+          (fun window ~seq ~init ~step ~merge ->
+            match window with
+            | None -> Ask.fold ~seq v t ~init ~step ~merge
+            | Some (Top.Range (x, lo, hi)) -> Ask.fold ~seq ~range:(x, lo, hi) v t ~init ~step ~merge
+            | Some (Top.Words (x, ws)) -> Ask.fold ~seq ~words:(x, ws) v t ~init ~step ~merge);
         project = (fun env -> Array.map (fun x -> env.(x)) give);
         var = (fun c -> Some give.(c));
         lead = Top.lead v base;

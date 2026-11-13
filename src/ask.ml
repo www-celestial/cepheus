@@ -292,11 +292,12 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
       ignore (Atomic.fetch_and_add spent !wk);
       found
 
-(* [fold v t ?range]: every binding of the question's variables, as an array of words a variable (the others' cells
-   are 0), each once; [range]: one more range on a variable of the question *)
+(* [fold v t ?range ?words]: every binding of the question's variables, as an array of words a variable (the others'
+   cells are 0), each once; [range]: one more range on a variable of the question; [words]: the words a variable of
+   the question may take, sorted and distinct (a window of the index path, Top) *)
 (* a conjunction as a question of its own variables, numbered from 0: the question, the number of each variable in
    it (-1: not in it), the variable of each of its numbers, and its sets *)
-let dense ?range (v : Store.view) (t : t) (c : conj) =
+let dense ?range ?words (v : Store.view) (t : t) (c : conj) =
   let typs = typs_of t in
   let used = Array.make t.vars false in
   List.iter (fun (pt : Query.pattern) -> (match pt.e with Var x -> used.(x) <- true | _ -> ()); match pt.v with Var x -> used.(x) <- true | _ -> ()) c.pats;
@@ -319,12 +320,13 @@ let dense ?range (v : Store.view) (t : t) (c : conj) =
       Array.of_list (List.filter (fun w -> let t = Store.text v w in String.length t >= n && String.sub t 0 n = p) (Array.to_list (words_of v typs.(x) l)))
     | None -> prefix_set v pats x p
   in
-  q, dense, back, List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes
+  let window = match words with Some (x, ws) -> [ (dense.(x), ws) ] | None -> [] in
+  q, dense, back, window @ List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes
 
-let fold ?(seq = false) ?(budget = max_int) ?range (v : Store.view) (t : t) ~init ~step ~merge =
+let fold ?(seq = false) ?(budget = max_int) ?range ?words (v : Store.view) (t : t) ~init ~step ~merge =
   let spent = Atomic.make 0 in
   let run (c : conj) =
-    let q, dense, back, sets = dense ?range v t c in
+    let q, dense, back, sets = dense ?range ?words v t c in
     let checks = List.map (not_check ~budget ~spent v t (fun x -> dense.(x))) c.nots in
     let outer = Array.to_list (Array.mapi (fun d x -> d, x) back) |> List.filter (fun (_, x) -> t.outer.(x)) in
     let full env = let b = Array.make t.vars 0 in List.iter (fun (d, x) -> b.(x) <- env.(d)) outer; b in

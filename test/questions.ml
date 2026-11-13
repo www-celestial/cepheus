@@ -183,13 +183,34 @@ let show rows = String.concat " | " (List.map (fun r -> String.concat "," (Array
 
 let questions = ref 0 and with_order = ref 0 and empties = ref 0 and with_ops = ref 0
 
+(* Store.text_order: the texts of p in the order of their bytes, from a text on, merged over the runs and the delta:
+   strictly in order, every text of p's facts at or after the start, none before it *)
+let text_order seed (v : Store.view) fl p =
+  let held = List.sort_uniq compare (List.filter_map (fun (_, p', x) -> match x with Value.Text s when p' = p -> Some s | _ -> None) fl) in
+  List.iter
+    (fun desc ->
+      List.iter
+        (fun from ->
+          let next = Store.text_order v p ~desc ~from in
+          let rec all acc = let w = next () in if w < 0 then List.rev acc else all (Store.text v w :: acc) in
+          let got = all [] in
+          let before a b = if desc then String.compare a b > 0 else String.compare a b < 0 in
+          let rec sorted = function a :: (b :: _ as t) -> before a b && sorted t | _ -> true in
+          let at s = match from with None -> true | Some f -> not (before s f) in
+          C.check
+            (sorted got && List.for_all at got && List.for_all (fun s -> List.mem s got) (List.filter at held))
+            "seed %d: the text order of %d (desc %b, from %s): %s" seed p desc
+            (match from with None -> "-" | Some f -> String.escaped f) (String.concat "," (List.map String.escaped got)))
+        (None :: List.map Option.some [ "a"; "ab"; "Ad"; "\195"; "zz"; "" ]))
+    [ false; true ]
+
 let run seed =
   let r = Rng.make seed in
-  let db = fork empty in
-  let[@warning "-8"] (Ok [ name; tag; score; price; when_; ratio; ok; owner; friend; mark ]) = declare db props in
+  let db = ref (fork empty) in
+  let[@warning "-8"] (Ok [ name; tag; score; price; when_; ratio; ok; owner; friend; mark ]) = declare !db props in
   (* a rule: things whose score is 20 or more are marked (derived facts inside the questions) *)
   ignore
-    (define db
+    (define !db
        [ { name = "high"; vars = 2; where = [ { e = Var 0; p = score; v = Var 1 } ]; ranges = [ (1, Int 20, Int max_int) ];
            head = Give { e = Var 0; p = mark; v = Val (Bool true) } } ]);
   let mdisk = Sim_disk.disk (Sim_disk.create (Rng.make seed)) in
@@ -202,7 +223,7 @@ let run seed =
       List.concat
         (List.init (1 + Rng.int r (n / 2 + 1)) (fun k ->
              let t = if Array.length !things > 0 && Rng.int r 3 = 0 then !things.(Rng.int r (Array.length !things)) else -1 - k in
-             let pick () = if Array.length !things = 0 then Value.Link (Store.max_thing (view db) + 1) else Link !things.(Rng.int r (Array.length !things)) in
+             let pick () = if Array.length !things = 0 then Value.Link (Store.max_thing (view !db) + 1) else Link !things.(Rng.int r (Array.length !things)) in
              List.filter_map Fun.id
                [ (if Rng.int r 4 > 0 then Some (Resolve.Add (t, name, Text names.(Rng.int r (Array.length names)))) else None);
                  (if Rng.int r 2 = 0 then Some (Resolve.Add (t, tag, Text names.(Rng.int r 4))) else None);
@@ -214,24 +235,29 @@ let run seed =
                  (if Rng.int r 2 = 0 then Some (Resolve.Add (t, owner, pick ())) else None);
                  (if Rng.int r 3 = 0 then Some (Resolve.Add (t, friend, pick ())) else None) ]))
     in
-    (match write db ops with
+    (match write !db ops with
      | Ok rc -> things := Array.append !things (Array.of_list (List.map snd rc.things))
      | Error _ -> ());
     (* retractions now and then *)
     (if Array.length !things > 0 && Rng.int r 3 = 0 then
        let t = !things.(Rng.int r (Array.length !things)) in
-       match Cepheus.values (view db) t score with x :: _ -> ignore (write db [ Retract (t, score, x) ]) | [] -> ());
+       match Cepheus.values (view !db) t score with x :: _ -> ignore (write !db [ Retract (t, score, x) ]) | [] -> ());
     if Rng.int r 3 = 0 then begin
-      let v = view db in
-      let w = Snapshot.merge mdisk "/merge" "0123456789abcdef" v ~take:(Array.length v.runs) ~level:(1 + Array.length v.runs) { Journal.segment = 1; offset = 40; next = v.group + 1 } in
+      let v = view !db in
+      (* the delta and some of the runs, the newest: the writes after it go on top of its run *)
+      let take = Rng.int r (Array.length v.runs + 1) in
+      let w = Snapshot.merge mdisk "/merge" "0123456789abcdef" v ~take ~level:(1 + Array.length v.runs) { Journal.segment = 1; offset = 40; next = v.group + 1 } in
       Snapshot.install mdisk "/merge" w;
-      merged := Some w.view
+      merged := Some w.view;
+      db := fork w.view
     end
   done;
-  let views = view db :: (match !merged with Some m -> [ m ] | None -> []) in
+  let views = view !db :: (match !merged with Some m -> [ m ] | None -> []) in
   List.iter
     (fun (v : Store.view) ->
       let fl = C.F.elements (C.facts_of_view v) in
+      text_order seed v fl name;
+      text_order seed v fl tag;
       let tv x = match x with
         | 0 -> Value.Ttext | 1 -> Tint | 2 -> Tmoney 2 | 3 -> Tdate | 4 -> Tfloat | 5 -> Tbool | 6 -> Tlink | _ -> Ttext in
       let prop_of = [| name; score; price; when_; ratio; ok; owner; tag; friend; mark |] in
@@ -429,6 +455,7 @@ let pages () =
   Snapshot.install mdisk "/merge" w;
   let pat p x = { Query.e = Var 0; p; v = Var x } in
   let wide = { Query.vars = 8; where = List.mapi (fun i p -> pat p (i + 1)) (num :: status :: name :: rest); ranges = [] } in
+  let named = { Query.vars = 3; where = [ pat name 1; pat num 2 ]; ranges = [] } in
   List.iter
     (fun (where, (v : Store.view)) ->
       List.iter
@@ -453,7 +480,8 @@ let pages () =
           let work = Atomic.get Query.work - before in
           C.check (same got want && List.length got = 21) "pages, %s, %s, next page: the rows of the heap path" where what;
           C.check (work <= most) "pages, %s, %s, next page: %d candidates, at most %d" where what work most)
-        [ "7 patterns by an int", wide, 1, true, 3_000; "7 patterns by an int ascending", wide, 1, false, 3_000 ])
+        [ "7 patterns by an int", wide, 1, true, 3_000; "7 patterns by an int ascending", wide, 1, false, 3_000;
+          "by a text", named, 1, false, 1_000; "by a text, the largest first", named, 1, true, 1_000 ])
     [ "delta", v0; "a run", w.view ]
 
 (* ---- the planner against main's former one (every order for up to 7 variables, greedily beyond), its code as it was ---- *)

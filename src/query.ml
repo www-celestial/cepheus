@@ -96,10 +96,10 @@ let intervals nvars ranges =
    pattern has no other variable and offers it at most one candidate (a value of a thing given by its id) comes first,
    where it costs 1 and multiplies nothing; a variable whose only pattern gives it as the one value of a thing's
    one-valued property, of 2 or more values in all (an invoice's status, its total), comes right after that thing: it
-   multiplies nothing then (1 candidate), and anywhere else it costs at least as much (an exchange argument:
-   docs/book/theory.md, section 4). So a star of fields (a row's columns) is a program of one variable. The program
-   runs over the others, at most [dp_max] of them ([dp_max] 2^([dp_max] - 1) steps); beyond, the variable of fewest
-   candidates next (greedy). The counts are read once a question, at most one entry a pair of variables however many
+   multiplies nothing then (1 candidate); exact when the thing's count does not depend on it, within a factor 2
+   otherwise (docs/book/theory.md, section 4). So a star of fields (a row's columns) is a program of one variable.
+   The program runs over the others, at most [dp_max] of them ([dp_max] 2^([dp_max] - 1) steps); beyond, the
+   variable of fewest candidates next (greedy). The counts are read once a question, at most one entry a pair of variables however many
    patterns the question has. *)
 let dp_max = 12
 
