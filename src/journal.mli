@@ -133,3 +133,21 @@ val convert : Disk.t -> string -> string -> int
     columns), its frames as they were, each segment written beside, forced and renamed over the old one, the directory
     forced; a frame that does not check is a torn tail in the newest segment (cut) and damage elsewhere ({!Damaged}).
     Run once at open, before anything reads the journal; returns the number of segments converted. *)
+
+type cursor
+(** Where a reader of the frames as they are stands (a replica's sender): before the frame that holds a group. *)
+
+val cursor : Disk.t -> string -> string -> next:int -> cursor
+(** [cursor disk dir id ~next]: before the frame that holds group [next] (its first group may be before [next]), or at
+    the journal's end when no frame holds it yet. The frames before it are passed over by their headers. *)
+
+val cursor_next : cursor -> int
+(** The first group of the next frame the cursor gives. *)
+
+val frames : ?limit:int -> cursor -> upto:int -> (first:int -> count:int -> crc:int -> Bytes.t -> int -> unit) -> unit
+(** [frames c ~upto f]: [f ~first ~count ~crc body len] on each frame from the cursor up to the one that holds group
+    [upto] (at most [limit] frames), which must be durable (every group up to it is whole in the files), in order, across segments; [body] holds
+    the frame's [len] bytes, checked by their CRC [crc], until the next call. Raises {!Damaged} when a durable frame
+    does not check or is missing, and [Disk.Io]. *)
+
+val cursor_close : cursor -> unit

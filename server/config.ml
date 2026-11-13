@@ -124,9 +124,6 @@ let of_toml file (doc : (string * Toml.value) list) =
   if not (List.exists (fun p -> p.pname = me) peers) then bad "[cluster] me = %S names no [[peer]]" me;
   let names = List.map (fun p -> p.pname) peers in
   if List.length (List.sort_uniq compare names) <> List.length names then bad "two [[peer]] have the same name";
-  if List.length peers > 1 then
-    bad "%d peers: a cluster of several machines needs replication, which this version does not have yet (one peer)"
-      (List.length peers);
   let clients = Option.value (table "clients") ~default:[] in
   known "clients" clients [ "listen"; "socket"; "domains"; "max_connections"; "idle_timeout" ];
   let listen = Option.map (host_port "[clients] listen") (str "clients" clients "listen") in
@@ -160,6 +157,8 @@ let of_toml file (doc : (string * Toml.value) list) =
   (match listen, tls with
    | Some (h, _), None -> bad "[clients] listen = %S needs [tls]: programs reach the server over TCP with TLS only" h
    | _ -> ());
+  if List.length peers > 1 && tls = None then
+    bad "%d peers need [tls]: servers reach one another over TCP with mutual TLS only (a replica and its primary)" (List.length peers);
   let st = match table "storage" with Some t -> t | None -> bad "[storage] is missing" in
   known "storage" st [ "data"; "cache" ];
   let data = path (need "storage" st "data") in

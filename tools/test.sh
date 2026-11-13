@@ -7,7 +7,8 @@
 # examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), live questions
 # against the naive evaluator (LIVE_SEEDS seeds, 100 by default), questions with Sort, Limit and After against a
 # brute-force oracle (QUESTION_SEEDS seeds, 300 by default), TLS and the
-# limits of connections on a real server, a real server killed SERVER_KILLS times (20) under writing clients.
+# limits of connections on a real server, a replica (REPLICA_SEEDS simulated seeds, 300 by default, then two real
+# servers), a real server killed SERVER_KILLS times (20) under writing clients.
 # Scratch databases go in $CEPHEUS_TMP (default: the system's temp dir).
 # The Cesia client, when a Cesia with its native interface is here: its engine, built against that Cesia's
 # cesia_v1.cmi (CESIA_NATIVE, its folder; found from the cesia command when unset: lib/native of a release, or the
@@ -52,6 +53,10 @@ $b/live_sim.exe --seeds "${LIVE_SEEDS:-100}" | tail -2
 $b/questions.exe --seeds "${QUESTION_SEEDS:-300}" | tail -2
 $b/server_tls.exe "$tmp/cepheus-tls" | tail -1
 $b/server_limits.exe "$tmp/cepheus-limits" | tail -1
+# a replica: its simulation (REPLICA_SEEDS seeds, 300 by default; its stderr: the failures it gives the engines),
+# then two real servers over mutual TLS (copy, kill -9, refusals, handover, promote, the old primary following)
+$b/replica_sim.exe --seeds "${REPLICA_SEEDS:-300}" 2> /dev/null | tail -2
+$b/server_replica.exe "$tmp/cepheus-replica" | tail -1
 rm -rf "$tmp/cepheus-server"
 $b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}" | tail -2
 rm -rf "$tmp/cepheus-server"

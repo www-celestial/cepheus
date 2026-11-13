@@ -14,8 +14,10 @@ type database = {
   live : Engine.live;
   follow : Follow.t;
   watch : Watch.t;  (* its live questions over the wire *)
-  page : Unix.file_descr;  (* the visibility page, read-only: what every local reader is passed (never closed) *)
+  mutable page : Unix.file_descr option;
+      (* the visibility page, read-only: what every local reader is passed (never closed); none on a replica *)
   mutable checkpointed : int;
+  replica : bool ref;  (* its groups come from a primary (Replica): its session table follows them *)
 }
 
 (* ---- one connection ---- *)
@@ -176,7 +178,7 @@ let follow_stream (c : Core.conn) (d : database) fd ~id ~stopping =
         let b = Buffer.create 256 in
         Wire.put_reply b (Wire.Start { id = d.live.e.id; vseq; runs = List.map (fun (r : Follow.run) -> r.lo, r.hi) runs });
         (* the page's descriptor is passed, never closed here (its lock); the runs' copies are closed once sent *)
-        Fun.protect ~finally:(fun () -> close_all fds) (fun () -> send_frame fd ~id ~kind:Wire.k_follow ~flags:0 b (d.page :: fds));
+        Fun.protect ~finally:(fun () -> close_all fds) (fun () -> send_frame fd ~id ~kind:Wire.k_follow ~flags:0 b (Option.get d.page :: fds));
         (* the groups after the newest run, up to the state visible under the number; then the number *)
         Follow.catch_up Disk.real d.live.e vis (send_event fd);
         send_event fd (Follow.Frame { vseq; first = vis.group + 1; count = 0; body = Buffer.create 0 });
@@ -290,6 +292,11 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
          (* local reads: over the Unix socket only (a descriptor cannot cross machines) *)
          if tls <> None then begin
            Core.err c ~id ~kind:Wire.k_follow "denied" "local reads are for programs on the server's machine, over its Unix socket";
+           flush ()
+         end
+         else if dbs.(d.index).page = None then begin
+           (* a replica's state is behind its primary's: a local read there would not see every confirmed write *)
+           Core.err c ~id ~kind:Wire.k_follow "denied" "this server is a replica: its reads go through the socket";
            flush ()
          end
          else follow_stream c dbs.(d.index) fd ~id ~stopping:srv.stopping;
@@ -432,10 +439,22 @@ let notify msg =
 
 let file_stamp path = match Unix.stat path with st -> Some (st.st_mtime, st.st_size, st.st_ino) | exception Unix.Unix_error _ -> None
 
-let open_databases (cfg : Config.t) wal =
+let open_databases ?(replica = None) (cfg : Config.t) wal =
   let one i name =
     let dir = Config.database_dir cfg name in
-    match Engine.open_ ~buffer:(Wal.frames wal) Disk.real dir with
+    (* a replica's database not copied yet takes its primary's id, and stays empty until its groups come *)
+    let made =
+      match replica with
+      | Some p when not (Sys.file_exists (Filename.concat dir "cepheus")) -> (
+        match Replica.primary_id cfg p name with
+        | Ok id -> Ok (fun _ -> id)
+        | Error m -> Error (Printf.sprintf "database %s: not copied here yet, and its primary does not give it: %s" name m))
+      | _ -> Ok Engine.random_id
+    in
+    match made with
+    | Error m -> Error m
+    | Ok id_source ->
+    match Engine.open_ ~id_source ~buffer:(Wal.frames wal) ~bootstrap:(replica = None) Disk.real dir with
     | Error e -> Error (Printf.sprintf "database %s: %s" name (Engine.message e))
     | Ok e ->
       let sessions =
@@ -445,7 +464,8 @@ let open_databases (cfg : Config.t) wal =
       match sessions with
       | Error m -> Error m
       | Ok sessions -> (
-        match Follow.open_page (Follow.page_path e.id) with
+        (* a replica serves no local reader: its visibility number lives in memory until a promotion *)
+        match if replica = None then (let w, p = Follow.open_page (Follow.page_path e.id) in w, Some p) else Follow.memory_word (), None with
         | exception Unix.Unix_error (err, _, p) ->
           Engine.close e;
           Error (Printf.sprintf "database %s: %s: %s" name p (Unix.error_message err))
@@ -454,17 +474,20 @@ let open_databases (cfg : Config.t) wal =
           (* the follow stream and the live questions first: the writer calls them from its first frame *)
           let follow = Follow.create e word in
           let watch = Watch.create e in
+          let is_replica = ref (replica <> None) in
+          let s_before, s_after = Replica.session_hooks sessions e in
           let hooks =
-            { Engine.before = (fun b -> Follow.before follow b; Watch.before watch b);
-              after = (fun () -> Follow.after follow; Watch.after watch) }
+            { Engine.before = (fun b -> Follow.before follow b; Watch.before watch b; if !is_replica then s_before b);
+              after = (fun () -> Follow.after follow; Watch.after watch; if !is_replica then s_after ()) }
           in
-          let live = Engine.start ~follow:hooks e in
+          let live = Engine.start ~follow:hooks ~replica:(replica <> None) e in
+          let lines = ref (fun () -> []) in
           let core =
             { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions;
-              more = (fun () -> Follow.status follow @ Watch.status watch); hub = (fun () -> Watch.hub watch);
+              more = (fun () -> Follow.status follow @ Watch.status watch @ !lines ()); hub = (fun () -> Watch.hub watch);
               files = Files.cell ~master:(fun () -> Files.master_file (Config.vault_key_path cfg)) (Filename.concat dir "vault") }
           in
-          Ok { core; live; follow; watch; page; checkpointed = (Atomic.get e.published).group })
+          Ok ({ core; live; follow; watch; page; checkpointed = (Atomic.get e.published).group; replica = is_replica }, lines))
   in
   (* in parallel, a domain each, at most [domains] at once *)
   let names = Array.of_list cfg.databases in
@@ -478,7 +501,7 @@ let open_databases (cfg : Config.t) wal =
   done;
   let errs = Array.to_list res |> List.filter_map (function Error m -> Some m | Ok _ -> None) in
   if errs <> [] then begin
-    Array.iter (function Ok d -> Engine.stop d.live | Error _ -> ()) res;
+    Array.iter (function Ok (d, _) -> Engine.stop d.live | Error _ -> ()) res;
     Error (String.concat "; " errs)
   end
   else Ok (Array.map (function Ok d -> d | Error _ -> assert false) res)
@@ -492,6 +515,21 @@ let checkpoint d =
     d.checkpointed <- g
   end
 
+(* The role of the server (Replica): a replica's primary must be another [[peer]]; the epochs a promotion opened are
+   written into the databases' histories (again: a promotion a crash cut is made whole) *)
+let role_of (cfg : Config.t) =
+  match Replica.read_role cfg.data with
+  | Error m -> Error m
+  | Ok role -> (
+    match role with
+    | Replica.Replica_of p when p = cfg.me || Replica.peer_of cfg p = None ->
+      Error (Printf.sprintf "%s: replica_of = %S names no other [[peer]] of %s" (Replica.role_path cfg.data) p cfg.file)
+    | _ -> (
+      match Replica.apply_promoted role ~dir_of:(Config.database_dir cfg) with
+      | () -> Ok role
+      | exception Journal.Damaged m -> Error m
+      | exception (Unix.Unix_error (e, _, p)) -> Error (p ^ ": " ^ Unix.error_message e)))
+
 let serve (cfg : Config.t) =
   Files.log_made := (fun path -> log "made the vault's master key %s: keep a copy apart from the data (without it, no file opens)" path);
   (* SIGTERM and SIGINT are waited for by the main thread: blocked first, so that every thread and domain made from
@@ -502,6 +540,27 @@ let serve (cfg : Config.t) =
   match lock_data cfg.data with
   | Error m -> Error m
   | Ok lockfd -> (
+    match role_of cfg with
+    | Error m -> Unix.close lockfd; Error m
+    | Ok role ->
+    let primary = match role with Replica.Replica_of p -> Replica.peer_of cfg p | _ -> None in
+    (* a primary of a cluster of several peers asks the others, while its databases open, whether one was promoted
+       after it (an old primary started again after a failover must not take writes) *)
+    let several = List.length cfg.peers > 1 in
+    let checked = ref (Ok ()) in
+    let checker =
+      if several && primary = None then
+        Some
+          (Thread.create
+             (fun () ->
+               checked :=
+                 match List.map (fun n -> n, Replica.load_epochs (Config.database_dir cfg n)) cfg.databases with
+                 | mine -> Replica.check_peers cfg mine
+                 | exception Journal.Damaged m -> Error m)
+             ())
+      else None
+    in
+    let join_checker () = Option.iter Thread.join checker; !checked in
     Pages.set_capacity cfg.cache;
     let tokens_file = Config.tokens_path cfg in
     match Tokens.load tokens_file with
@@ -515,23 +574,48 @@ let serve (cfg : Config.t) =
         | exception Journal.Damaged m -> Error m
         | exception Disk.Io m -> Error m
         | wal -> (
-          match open_databases cfg wal with
+          match open_databases ~replica:primary cfg wal with
           | Error m -> Error m
-          | Ok dbs -> (
-            match Wal.start wal with
-            | () -> Array.iter (fun d -> Wal.attach wal d.live.e.id d.live.e.journal) dbs; Ok (wal, dbs)
+          | Ok opened -> (
+            let dbs = Array.map fst opened in
+            match join_checker (), Wal.start wal with
+            | Error m, () -> Array.iter (fun d -> Engine.stop d.live) dbs; Wal.stop wal; Error m
+            | Ok (), () -> Array.iter (fun d -> Wal.attach wal d.live.e.id d.live.e.journal) dbs; Ok (wal, opened)
             | exception (Journal.Damaged m | Disk.Io m) -> Array.iter (fun d -> Engine.stop d.live) dbs; Error m))
       in
       match opened with
-      | Error m -> Error m
-      | Ok (wal, dbs) -> (
+      | Error m -> ignore (join_checker ()); Unix.close lockfd; Error m
+      | Ok (wal, opened) -> (
+        let dbs = Array.map fst opened in
+        match
+          Array.map
+            (fun (d, _) -> Replica.make_db ~name:d.core.name ~dir:d.core.dir ~live:d.live ~follow:d.follow ~sessions:d.core.sessions)
+            opened
+        with
+        | exception Journal.Damaged m -> Array.iter (fun d -> Engine.stop d.live) dbs; Wal.stop wal; Unix.close lockfd; Error m
+        | rdbs -> (
+        let rep = Replica.create cfg role rdbs in
+        Array.iteri (fun i (_, lines) -> lines := fun () -> Replica.status_lines rep rdbs.(i)) opened;
+        (* a promotion opens each database's visibility page (refused if another server on this machine holds it), then
+           lets local readers in *)
+        rep.on_promote <-
+          (fun rd ->
+            let d = Array.to_list dbs |> List.find (fun d -> d.core.name = rd.Replica.name) in
+            match Follow.open_page (Follow.page_path d.live.e.id) with
+            | exception Unix.Unix_error (err, _, p) -> failwith (Printf.sprintf "database %s: %s: %s" d.core.name p (Unix.error_message err))
+            | word, page -> fun () -> Follow.use_page d.follow word; d.page <- Some page; d.replica := false);
         let opened_ms = (Unix.gettimeofday () -. t0) *. 1e3 in
         let sid = server_id cfg.data in
         let stop_all () = Array.iter (fun d -> Files.close d.core.files; Engine.stop d.live) dbs; Wal.stop wal in
+        let ops = function
+          | "promote" -> Some (Replica.promote rep ~force:false)
+          | "promote --force" -> Some (Replica.promote rep ~force:true)
+          | _ -> None
+        in
         let srv =
           Core.create ~server_id:sid ~cluster_id:cfg.id ~dbs:(Array.map (fun d -> d.core) dbs) ~tokens ~now:Disk.real.now
             ~new_session:(fun () -> 1 + (Int64.to_int (String.get_int64_le (Tokens.random 8) 0) land 0x3FFF_FFFF_FFFF_FFFF))
-            ~more:(fun () -> Wal.status wal) ()
+            ~more:(fun () -> Wal.status wal @ Replica.server_lines rep) ~read_only:(fun () -> Replica.read_only rep) ~ops ()
         in
         (* TLS for TCP: the server's certificate and key; programs show no certificate (a token) *)
         match
@@ -547,17 +631,30 @@ let serve (cfg : Config.t) =
           Unix.close lockfd;
           Error m
         | tls_ctx ->
+        (* the peer port, for a cluster of several peers only: mutual TLS, a certificate of the cluster's CA naming a
+           [[peer]] *)
         match
+          let peer_ctx =
+            match cfg.tls with
+            | Some t when several -> (
+              match Tls.server_ctx ~ca:t.ca ~cert:t.cert ~key:t.key ~verify_peer:true with Ok c -> Some c | Error m -> failwith ("[tls]: " ^ m))
+            | _ -> None
+          in
           let sock = Option.map unix_listener (Config.socket_path cfg) in
           let tcp = Option.map (fun (h, p) -> tcp_listener h p) cfg.listen in
-          sock, tcp
+          let peer =
+            match peer_ctx, Replica.peer_of cfg cfg.me with
+            | Some _, Some me -> let h, p = Config.host_port "[[peer]] address" me.address in Some (tcp_listener h p)
+            | _ -> None
+          in
+          sock, tcp, peer, peer_ctx
         with
         | exception ((Failure _ | Unix.Unix_error _) as e) ->
           let m = match e with Unix.Unix_error (err, call, arg) -> Printf.sprintf "%s %s: %s" call arg (Unix.error_message err) | Failure m -> m | _ -> "" in
           stop_all ();
           Unix.close lockfd;
           Error m
-        | sock, tcp ->
+        | sock, tcp, peer, peer_ctx ->
           let ios = Array.init cfg.domains (fun _ -> { m = Mutex.create (); cv = Condition.create (); fds = Queue.create (); stop = false; nconn = 0 }) in
           let socks = { sm = Mutex.create (); open_ = Hashtbl.create 64 } in
           let opened = Atomic.make 0 in
@@ -608,6 +705,7 @@ let serve (cfg : Config.t) =
               [ Option.map (fun s -> Thread.create (accept_loop s false None) ()) sock;
                 Option.map (fun s -> Thread.create (accept_loop s true tls_ctx) ()) tcp ]
           in
+          let peer_acceptor = match peer, peer_ctx with Some s, Some ctx -> Some (Thread.create (Replica.peer_listener rep ctx s) ()) | _ -> None in
           (* every second: tokens.toml reloaded when it changed, the session tables saved, a writer that stopped on a
              failed disk stops the server (G10: systemd starts it again, and recovery decides) *)
           let stamp = ref (file_stamp tokens_file) in
@@ -640,6 +738,8 @@ let serve (cfg : Config.t) =
             (match Config.socket_path cfg with Some p -> "socket " ^ p | None -> "no socket")
             (match cfg.listen with Some (h, p) -> Printf.sprintf ", tcp %s:%d" h p | None -> "")
             cfg.domains cfg.max_connections sid cfg.id;
+          (match role with Replica.Replica_of p -> log "a replica of %s: its writes go to the primary" p | _ -> ());
+          Replica.start_followers rep;
           notify "READY=1";
           ignore (Thread.wait_signal sigs);
           (* stop: no new connection, no new request; the writes in flight end and are answered; each database closed
@@ -648,6 +748,8 @@ let serve (cfg : Config.t) =
           log "stopping";
           Atomic.set srv.stopping true;
           Atomic.set accepting false;
+          (* a replica's followers end, every frame they gave durable *)
+          Replica.stop_followers rep;
           let close_listener s = try Unix.shutdown s Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> () in
           Option.iter close_listener sock;
           Option.iter close_listener tcp;
@@ -661,6 +763,11 @@ let serve (cfg : Config.t) =
           Atomic.set ticking false;
           Thread.join tk;
           stop_all ();
+          (* a primary's replicas get its last groups and its word that it stopped (at most 10 s) *)
+          Replica.handover rep;
+          Option.iter (fun s -> try Unix.shutdown s Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ()) peer;
+          Option.iter Thread.join peer_acceptor;
+          Option.iter Unix.close peer;
           Array.iter (fun d -> d.checkpointed <- -1; checkpoint d) dbs;
           (* the connections' threads wake from their reads and end *)
           Mutex.protect socks.sm (fun () ->
@@ -669,4 +776,4 @@ let serve (cfg : Config.t) =
           Array.iter Domain.join doms;
           Unix.close lockfd;
           log "stopped";
-          match Atomic.get failed with Some m -> Error m | None -> Ok ())))
+          match Atomic.get failed with Some m -> Error m | None -> Ok ()))))

@@ -748,3 +748,103 @@ let convert disk dir id =
   (* a conversion a crash interrupted leaves its .tmp: the old segment is still there, whole *)
   List.iter (fun n -> if Filename.check_suffix n ".seg.tmp" then disk.Disk.remove (Filename.concat dir n)) (disk.readdir dir);
   !converted
+
+(* ---- A reader of the frames as they are: a replica's sender ----
+   The primary sends its frames byte for byte as its journal holds them, read from the files while the writer appends:
+   only the frames whose groups are all at or before a durable group, which are whole; their bodies are checked by
+   their CRCs here and again by the replica. Two reads a frame (its header, its body), into one buffer that grows to
+   the longest body sent. *)
+
+type cursor = {
+  cdisk : Disk.t;
+  cdir : string;
+  cid : string;
+  mutable cseg : int;  (* the first group of the segment read *)
+  mutable cfd : Disk.fd option;
+  mutable coff : int;  (* where the next frame starts *)
+  mutable cnext : int;  (* its first group *)
+  mutable cbuf : Bytes.t;
+}
+
+let cursor_close c = Option.iter (fun fd -> try c.cdisk.Disk.close fd with Disk.Io _ -> ()) c.cfd; c.cfd <- None
+
+(* segment [s] opened, its header checked; false if it is not there or its header is torn (being made) *)
+let cursor_open c s =
+  cursor_close c;
+  let file = path c.cdir s in
+  if not (c.cdisk.Disk.exists file) then false
+  else begin
+    let fd = c.cdisk.openf file false in
+    let hb = Bytes.create seg_header in
+    let ok =
+      try
+        if c.cdisk.size fd < seg_header then false
+        else (c.cdisk.pread fd 0 hb 0 seg_header; match read_header hb c.cid (segment_name s) with Some f -> f = s | None -> false)
+      with e -> c.cdisk.close fd; raise e
+    in
+    if ok then (c.cfd <- Some fd; c.cseg <- s; c.coff <- seg_header) else c.cdisk.close fd;
+    ok
+  end
+
+(* the header of the frame at the cursor, if the segment holds one that checks: body length, first, count, body CRC *)
+let cursor_header c =
+  match c.cfd with
+  | None -> None
+  | Some fd ->
+    let size = c.cdisk.Disk.size fd in
+    if size - c.coff < fh then None
+    else begin
+      let h = Bytes.create fh in
+      c.cdisk.pread fd c.coff h 0 fh;
+      let len = u32 h 4 in
+      if u32 h 0 <> frame_magic || u32 h 24 <> Crc32c.bytes h 0 24 || len > max_body || c.coff + fh + len + ft > size then None
+      else Some (len, Int64.to_int (Bytes.get_int64_le h 8), u32 h 16, u32 h 20)
+    end
+
+let cursor disk dir id ~next =
+  let c = { cdisk = disk; cdir = dir; cid = id; cseg = 0; cfd = None; coff = 0; cnext = 1; cbuf = Bytes.create 4096 } in
+  let segs = List.sort compare (segments disk dir) in
+  (match List.fold_left (fun acc s -> if s <= next then Some s else acc) None segs with
+   | None -> ()
+   | Some s ->
+     if cursor_open c s then begin
+       c.cnext <- s;
+       (* the frames that end before [next], by their headers only *)
+       let rec skip () =
+         match cursor_header c with
+         | Some (len, f0, count, _) when f0 = c.cnext && f0 + count <= next ->
+           c.coff <- c.coff + fh + len + ft;
+           c.cnext <- f0 + count;
+           skip ()
+         | _ -> ()
+       in
+       skip ()
+     end);
+  c
+
+let cursor_next c = c.cnext
+
+let frames ?(limit = max_int) c ~upto f =
+  let left = ref limit in
+  let rec go () =
+    if c.cnext <= upto && !left > 0 then
+      match cursor_header c with
+      | Some (len, f0, count, bc) ->
+        if f0 <> c.cnext then damaged "%s: the frame at %d starts at group %d, where %d was expected" (segment_name c.cseg) c.coff f0 c.cnext;
+        if count = 0 || f0 + count - 1 > upto then
+          (* a frame read before it was durable: [upto] is past its groups only once it is *)
+          damaged "%s: the frame at %d (groups %d to %d) is not durable, below group %d" (segment_name c.cseg) c.coff f0 (f0 + count - 1) upto;
+        if Bytes.length c.cbuf < len then c.cbuf <- Bytes.create (max len (2 * Bytes.length c.cbuf));
+        (match c.cfd with Some fd -> c.cdisk.Disk.pread fd (c.coff + fh) c.cbuf 0 len | None -> ());
+        if Crc32c.bytes c.cbuf 0 len <> bc then damaged "%s: the frame at %d (group %d) does not check" (segment_name c.cseg) c.coff f0;
+        f ~first:f0 ~count ~crc:bc c.cbuf len;
+        c.coff <- c.coff + fh + len + ft;
+        c.cnext <- f0 + count;
+        decr left;
+        go ()
+      | None ->
+        (* the segment ends here: the next group is in the segment named by it *)
+        if cursor_open c c.cnext then go ()
+        else damaged "journal: group %d is durable and no frame holds it" c.cnext
+  in
+  go ()

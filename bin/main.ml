@@ -12,7 +12,10 @@
                                                   the certificate of its first peer srv1 (DIR/srv1.pem, .key) for the
                                                   hosts H (default 127.0.0.1 and localhost), DIR/cluster.toml
      cepheus cluster cert NAME --dir DIR [--host H]...
-                                                  a certificate of the cluster's CA for NAME and its hosts *)
+                                                  a certificate of the cluster's CA for NAME and its hosts
+     cepheus replicate PEER --config FILE         this server (stopped) becomes a replica of PEER at its next start
+     cepheus promote [--force] --config FILE      the running replica becomes a primary (an admin token in
+                                                  CEPHEUS_TOKEN); --force without its primary's handover *)
 
 open Cepheus_server
 
@@ -23,10 +26,13 @@ let usage () =
     "usage: cepheus serve|stop|status --config FILE\n\
     \       cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE\n\
     \       cepheus token list|remove [NAME] --config FILE\n\
-    \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n";
+    \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n\
+    \       cepheus replicate PEER --config FILE\n\
+    \       cepheus promote [--force] --config FILE\n";
   exit 2
 
 let hosts = ref []
+let force = ref false
 
 (* --config FILE, --database X (repeated), --admin, --dir DIR, --host H (repeated); the rest positional *)
 let parse args =
@@ -36,6 +42,7 @@ let parse args =
     | "--config" :: f :: r -> config := Some f; go r
     | "--database" :: d :: r -> dbs := d :: !dbs; go r
     | "--admin" :: r -> admin := true; go r
+    | "--force" :: r -> force := true; go r
     | "--dir" :: d :: r -> dir := Some d; go r
     | x :: _ when String.length x > 1 && x.[0] = '-' -> die "unknown option %s" x
     | x :: r -> pos := x :: !pos; go r
@@ -95,6 +102,30 @@ let status cfg =
     match Client.status c with
     | Ok l -> List.iter (fun (k, v) -> Printf.printf "%s: %s\n" k v) l
     | Error e -> die "%s: %s" e.code e.message)
+
+(* the replica that runs on FILE's data becomes a primary *)
+let promote cfg =
+  let token = match Sys.getenv_opt "CEPHEUS_TOKEN" with Some t -> t | None -> die "CEPHEUS_TOKEN must hold an admin token" in
+  match Client.connect ~program:"cepheus promote" (client_address cfg) token with
+  | Error m -> die "%s" m
+  | Ok c -> (
+    match Client.admin c (if !force then "promote --force" else "promote") with
+    | Ok l -> List.iter (fun (k, v) -> Printf.printf "%s: %s\n" k v) l
+    | Error e -> die "%s: %s" e.code e.message)
+
+(* FILE's server, stopped, becomes a replica of PEER: at its next start it copies and follows PEER's databases. Its
+   databases, if it has some, must be a prefix of PEER's (checked at each connection: never merged) *)
+let replicate cfg peer =
+  if peer = cfg.Config.me then die "%s is this server (me)" peer;
+  if Replica.peer_of cfg peer = None then die "%s declares no [[peer]] %s" cfg.file peer;
+  if held cfg then die "a server runs on %s: stop it first (cepheus stop)" cfg.data;
+  (try Unix.mkdir cfg.data 0o700 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  match Replica.read_role cfg.data with
+  | Error m -> die "%s" m
+  | Ok role ->
+    (try Replica.apply_promoted role ~dir_of:(Config.database_dir cfg) with Cepheus.Journal.Damaged m -> die "%s" m);
+    Replica.write_role cfg.data (Replica.Replica_of peer);
+    Printf.printf "%s: a replica of %s from its next start\n" (Replica.role_path cfg.data) peer
 
 let tokens_of cfg =
   let f = Config.tokens_path cfg in
@@ -176,6 +207,8 @@ let () =
     | "serve", [] -> serve (config_of config)
     | "stop", [] -> stop (config_of config)
     | "status", [] -> status (config_of config)
+    | "promote", [] -> promote (config_of config)
+    | "replicate", [ peer ] -> replicate (config_of config) peer
     | "token", [ "add"; name ] -> token_add (config_of config) name dbs admin
     | "token", [ "list" ] -> token_list (config_of config)
     | "token", [ "remove"; name ] -> token_remove (config_of config) name

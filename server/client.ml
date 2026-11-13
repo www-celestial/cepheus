@@ -529,6 +529,13 @@ let status c =
   | Wire.Status l -> Ok l
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Admin" })
 
+(* an admin operation (promote): sent once, never again on a new connection (its effect may be done) *)
+let admin c what =
+  match call c (Wire.Admin what) with
+  | Wire.Status l -> Ok l
+  | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Admin" })
+  | exception Broken m -> Error { code = "unreachable"; message = m ^ ": the operation was done once or not at all (see cepheus status)" }
+
 (* the properties' ids for these names, declaring the missing ones in one write (as Cepheus.declare): the schema is
    read with Open again, and a declaration that lost a race for an id is made again without the ids it tried. Open
    lists the properties only: an id held by a rule (a schema thing too) is found by that conflict, and skipped. *)
