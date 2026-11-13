@@ -1,7 +1,7 @@
-(executable
- (name bench)
- (modules bench cachesim stats)
- (libraries cepheus unix threads.posix)
+(executables
+ (names bench vbench)
+ (modules bench cachesim stats vbench)
+ (libraries cepheus cepheus_vault unix threads.posix)
  (ocamlopt_flags (:standard -O3 -inline 200))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
 

@@ -32,6 +32,9 @@ it was answered from; `server_sim` checks them over a simulated network with the
 | G19 | a rule change takes effect at one group | always |
 | G20 | `why` returns a well-founded proof of a fact of the view, or nothing for a non-fact | always |
 | G21 | every message of a live question (`Watch`) leaves the program with exactly `Find`'s rows at its group, a durable one; its groups only grow, none skipped that changed the rows | F1, F2, broken connections, slow programs |
+| G22 | no fact cites a chunk or node of the vault that is not on the disk | F1, F2 |
+| G23 | the vault serves no byte of a file but the bytes that were put | F3 (any change of the disk) |
+| G24 | after `Erase`, no read of the vault, or of a copy that took its keys since, gives a byte of the owner's files | always |
 
 ## The faults
 
@@ -610,3 +613,50 @@ rows are the naive answer at a durable group, never older than the last); `test/
 reads beside one that reads: the reader gets every change in order, the silent one ends `lagging`); the package's
 tests on forks (`cesia/tests/cepheus.test.ce`); `test/cesia.sh` (a watch over TLS, a local one, and one that goes on
 through a `kill -9` of the server while 1,500 rows are written: its groups only grow and it ends with the 1,500).
+
+## G22 Files are durable before their facts
+
+*Statement.* A fact that cites a file's root names a tree of nodes and chunks that are all on the disk: every chunk and
+node of it reads back after any crash and recovery.
+
+*Proof.* `Vault.finish` forces the pack that holds the file's records, and the directory of a new pack, before it
+returns the root (its own fsync, or one shared with other puts that began after its records were appended: group
+commit); a pack closed earlier was forced before its index was written. The facts are written after `finish`
+returns, as any group (G1). Recovery cuts nothing: a pack with its index is taken as the index says (written after
+the pack was forced); one without is read whole, every record checked by its CRCs, forced (after a `kill -9` its
+records may be in the page cache only, and a new file may find them stored), and closed as it is, never written
+again. A record a crash tore was never forced, so no fact cites it. A chunk found stored is read again and checked
+before a new file cites it, so a damaged one is written anew rather than cited.
+
+*Tested by* `test/vault_unit.ml` (120 seeds of power losses at random calls of puts on the simulated disk, three each: every
+file finished before a crash reads back exact; four threads putting at once, cut by a power loss at a random moment,
+40 seeds; a kill in the middle of a put, the file put again, then a power loss, 30 seeds) and `test/vault_crash.ml` (20 `kill -9` of a process that puts files
+and writes their facts: every cited file reads back exact, every confirmed one is there).
+
+## G23 No wrong byte is served
+
+*Statement.* A byte the vault gives is a byte of the file that was put, at its place; otherwise the read is an error
+(`damaged`, `missing` or `erased`).
+
+*Proof.* A record is used only if its header's CRC checks, it carries the name asked for (its header's name, which the
+tag authenticates), and its AEGIS-256 tag checks over its sealed bytes and its header's fields: a change passes with a
+probability of 2^-256, and a record moved over another carries another name. The raw bytes' CRC-32C, sealed with them,
+is checked after the codec. A node's sizes are checked against its parent's, a chunk's length against its node's.
+
+*Tested by* `test/vault_unit.ml`: bytes changed in packs, a record moved over another, 20,000 records changed at random
+(bytes, cuts, fields with their CRCs made again), each read giving the right bytes or an error.
+
+## G24 Erasure
+
+*Statement.* After `Erase(owner)` returns, no read of the vault gives a byte of a file sealed with the owner's key,
+nor does a read of any copy of the vault's records that took its keys since; no new file names that owner.
+
+*Proof.* The owner's key existed only in the keys' file, sealed by the master key; `Erase` writes the file anew without
+it (beside, forced, renamed over, the directory forced), with a mark that the domain is erased, before it returns. A
+record of the owner then needs a key that no file holds. A copy that takes the keys takes the mark and drops the key.
+Not covered: a copy of the keys' file made before the erasure (a backup) still holds the key; the old file's blocks
+may stay on a flash disk until reused ([the vault](vault.md#erasing-an-owner)).
+
+*Tested by* `test/vault_unit.ml` (an erased domain's files `erased`, after a reopen too; its sealed key absent from the
+keys' file; erased on a copy that took the keys) and `server_unit` (Erase through the server, rights, and a put refused
+after it).

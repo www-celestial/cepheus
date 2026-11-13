@@ -522,6 +522,88 @@ let write ctx a =
     C.ok ctx (C.record ctx receipt_keys [| Int group; C.list ctx (Array.of_list (List.map (fun (_, e) -> C.Int e) things)) |])
   with Refused (code, m) -> failure ctx code m
 
+(* ---- files: a file kind's things, their bytes in the server's vault ---- *)
+
+let file_fields = [ "Name", Value.Ttext; "Size", Value.Tint; "Type", Value.Ttext; "Owner", Value.Tlink; "Content", Value.Ttext ]
+
+(* the field of this name of a file kind (cepheus.Files made it): its index *)
+let file_field ctx name (k : kind) f =
+  let ok = List.for_all (fun (n, t) -> Array.exists (fun (x : field) -> x.fname = n && x.typ = t && not x.many) k.fields) file_fields in
+  if not ok then C.panic ctx (Printf.sprintf "%s: %s is not a kind of files: make it with cepheus.Files(%S)" name k.kname k.kname);
+  let rec find i = if k.fields.(i).fname = f then i else find (i + 1) in
+  find 0
+
+let server_of name d = match d.src with Server s -> s.conn, s.cdb | Fork _ -> refuse "invalid" "%s: a fork holds no file: files are kept in a server's vault" name
+
+let put ctx a =
+  let name = "cepheus.Put" in
+  try
+    let d = db_of ctx name a.(0) in
+    let k = kind_of ctx name a.(1) in
+    ignore (file_field ctx name k "Content");
+    let fname = text ctx name a.(2) and data = text ctx name a.(3) and typ = text ctx name a.(4) in
+    let owner = match a.(5) with C.Missing -> 0 | x -> int ctx name x in
+    let cold = bool ctx name a.(6) and by = int ctx name a.(7) and why = text ctx name a.(8) in
+    if owner < 0 then refuse "invalid" "an owner is the id of a thing, not %d" owner;
+    let conn, cdb = server_of name d in
+    ignore (resolve_kind d k);
+    match Conn.put (park ctx) conn ~db:cdb.handle ~kind:k.kname ~name:fname ~typ ~owner ~cold ~by ~why data with
+    | Wire.Receipt r -> C.ok ctx (Int (List.assoc (-1) r.things))
+    | rep -> server_error rep "Put"
+  with Refused (code, m) -> failure ctx code m
+
+let read ctx a =
+  let name = "cepheus.Read" in
+  try
+    let d = db_of ctx name a.(0) in
+    let k = kind_of ctx name a.(1) in
+    let content = file_field ctx name k "Content" in
+    let thing = int ctx name a.(2) and from = int ctx name a.(3) in
+    let len = match a.(4) with C.Missing -> -1 | x -> int ctx name x in
+    if thing <= 0 then refuse "invalid" "Read needs the id of a thing, not %d" thing;
+    if from < 0 || len < -1 then refuse "invalid" "a range of a file starts at 0 or after and has a length of 0 or more";
+    let conn, cdb = server_of name d in
+    let prop = (resolve_kind d k).ids.(content) in
+    match Conn.read (park ctx) conn (Wire.Load { db = cdb.handle; thing; prop; from; len }) with
+    | Wire.Data b -> C.ok ctx (Text b)
+    | rep -> server_error rep "Read"
+  with Refused (code, m) -> failure ctx code m
+
+(* a file's facts retracted, its Content expected unchanged: its bytes stay where the history cites them *)
+let delete ctx a =
+  let name = "cepheus.Delete" in
+  try
+    let d = db_of ctx name a.(0) in
+    let k = kind_of ctx name a.(1) in
+    let content = file_field ctx name k "Content" in
+    let thing = int ctx name a.(2) in
+    if thing <= 0 then refuse "invalid" "Delete needs the id of a thing, not %d" thing;
+    let conn, cdb = server_of name d in
+    let r = resolve_kind d k in
+    match Conn.read (park ctx) conn (Wire.Get { db = cdb.handle; thing }) with
+    | Wire.Facts fs -> (
+      let mine = List.filter (fun (p, _) -> Array.mem p r.ids) fs.facts in
+      match List.assoc_opt r.ids.(content) mine with
+      | None -> refuse "missing" "thing %d is not a file of the kind %s" thing k.kname
+      | Some c ->
+        let ops = Resolve.Expect (thing, r.ids.(content), Some c) :: List.map (fun (p, x) -> Resolve.Retract (thing, p, x)) mine in
+        let group, _ = commit ctx d ~by:(int ctx name a.(3)) ~why:(text ctx name a.(4)) ops in
+        C.ok ctx (Int group))
+    | rep -> server_error rep "Delete"
+  with Refused (code, m) -> failure ctx code m
+
+let erase ctx a =
+  let name = "cepheus.Erase" in
+  try
+    let d = db_of ctx name a.(0) in
+    let owner = int ctx name a.(1) in
+    if owner <= 0 then refuse "invalid" "Erase needs an owner, the id of a thing, not %d: the database's own key is never erased" owner;
+    let conn, cdb = server_of name d in
+    match Conn.call (park ctx) conn (Wire.Erase { db = cdb.handle; owner }) with
+    | Wire.Erased -> C.ok ctx C.Missing
+    | rep -> server_error rep "Erase"
+  with Refused (code, m) -> failure ctx code m
+
 (* ---- Find: a question as data, its variables the handles "cepheus.variable" ---- *)
 
 let variables ctx a =
@@ -978,4 +1060,5 @@ let () =
   C.register
     [ "kind", 2, 2, kind; "connect", 4, 4, connect; "get", 3, 3, get; "insert", 5, 5, insert; "update", 6, 6, update;
       "write", 4, 4, write; "variables", 1, 1, variables; "find", 3, 3, find; "fork", 2, 2, fork; "close", 1, 1, close;
-      "watch", 3, 3, watch; "next", 1, 1, next; "define", 2, 2, define ]
+      "watch", 3, 3, watch; "next", 1, 1, next; "define", 2, 2, define; "put", 9, 9, put; "read", 5, 5, read;
+      "delete", 5, 5, delete; "erase", 2, 2, erase ]

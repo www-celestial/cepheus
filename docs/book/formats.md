@@ -345,6 +345,10 @@ aside at open (they are caches): the journal is replayed, and the first merge re
 facts by target (`roff`, `rp`, `re`); format 2 had one CRC per MiB and was mapped whole; format 3 had no journal group
 in its header.
 
+## The vault `DIR/vault/`
+
+The keys' file, the packs, their indexes, a record and a node, byte by byte: [the vault](vault.md#formats).
+
 ## The server's files
 
 **A group's origin** (in its `why`, for groups written through the server; [server](server.md#writes-applied-once-sessions-g14)):
