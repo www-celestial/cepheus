@@ -32,6 +32,11 @@ type t = {
   max_inflight : int;
   more : unit -> (string * string) list;  (* server-wide lines of the status (the commit buffer's) *)
   read_only : unit -> string option;  (* Some why: the server takes no write (a replica) *)
+  lead : unit -> (string * string * string) option;
+      (* a Raft cluster: None while this server leads (ready, under its lease); else the code (not_leader, no_leader),
+         why, and the leader's address for programs ("" if none): neither reads nor writes are served *)
+  raft : bool;  (* a member of a Raft cluster: no local reads, no files yet (next steps) *)
+  members : string list;  (* a Raft cluster: every member's address for programs, sent after Welcome's fields *)
   ops : string -> ((string * string) list, string * string) result option;  (* admin operations beyond status *)
   started : int;
   served : int Atomic.t;  (* requests of closed connections *)
@@ -69,11 +74,11 @@ and conn = {
 }
 
 let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> [])
-    ?(read_only = fun () -> None) ?(ops = fun _ -> None) () =
+    ?(read_only = fun () -> None) ?(lead = fun () -> None) ?(raft = false) ?(members = []) ?(ops = fun _ -> None) () =
   let by_name = Hashtbl.create 8 in
   Array.iter (fun d -> Hashtbl.replace by_name d.name d) dbs;
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
-    max_inflight; more; read_only; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
+    max_inflight; more; read_only; lead; raft; members; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
 
 let connect ?(wake = ignore) srv ~flush ~submit =
   Mutex.protect srv.cm (fun () ->
@@ -114,6 +119,15 @@ let err c ~id ~kind code fmt = Printf.ksprintf (fun message -> reply c ~id ~kind
 
 let engine_err c ~id ~kind e = let code, message = Wire.code_of_error e in reply c ~id ~kind (Wire.Err { code; message })
 
+(* a Raft cluster's refusal: the leader's address after the message, which every client's decoder from protocol 1
+   on skips (Wire.put_moved), and this one's follows (Client) *)
+let moved_body b (code, message, address) = Wire.put_moved b ~code ~message ~address
+
+let not_here c ~id ~kind x = Buffer.clear c.body; moved_body c.body x; send_body c ~id ~kind ~flags:Wire.f_error c.body
+
+(* the Raft gate, for a request that reads or writes *)
+let leads c ~id ~kind = match c.srv.lead () with None -> true | Some x -> not_here c ~id ~kind x; false
+
 (* ---- rights ---- *)
 
 let refresh_rights c =
@@ -138,7 +152,8 @@ let db_of c ~id ~kind i =
 let readable c ~id ~kind i =
   match db_of c ~id ~kind i with
   | None -> None
-  | Some d -> if c.rights.(i) <> None then Some d else (err c ~id ~kind "denied" "this token may not read %s" d.name; None)
+  | Some d when c.rights.(i) = None -> err c ~id ~kind "denied" "this token may not read %s" d.name; None
+  | Some d -> if leads c ~id ~kind then Some d else None
 
 let writable c ~id ~kind i =
   match db_of c ~id ~kind i with
@@ -146,7 +161,7 @@ let writable c ~id ~kind i =
   | Some _ when c.srv.read_only () <> None -> err c ~id ~kind "read_only" "%s" (Option.get (c.srv.read_only ())); None
   | Some d -> (
     match c.rights.(i) with
-    | Some (Tokens.Write | Tokens.Kinds { add = _ :: _; _ }) -> Some d
+    | Some (Tokens.Write | Tokens.Kinds { add = _ :: _; _ }) -> if leads c ~id ~kind then Some d else None
     | _ -> err c ~id ~kind "denied" "this token may not write %s" d.name; None)
 
 (* ---- rights per kind ---- *)
@@ -296,6 +311,10 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
           let flags =
             match res with
             | Ok r -> Wire.put_reply b (Wire.Receipt r); 0
+            | Error e when Engine.is_not_leader e ->
+              (* this server stopped leading before the commit: where to send it again *)
+              moved_body b (match c.srv.lead () with Some x -> x | None -> "no_leader", Engine.lost_leadership, "");
+              Wire.f_error
             | Error e ->
               let code, message = Wire.code_of_error e in
               (* a refusal by the rules names its rule only, to a token that may not read every kind *)
@@ -553,9 +572,12 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
             c.rights <- Array.map (fun d -> Tokens.right tok d.name) c.srv.dbs;
             c.kinds <- Array.make (Array.length c.srv.dbs) None;
             c.session <- (if h.session > 0 then h.session else c.srv.new_session ());
-            reply c ~id ~kind
+            Buffer.clear c.body;
+            Wire.put_reply c.body
               (Wire.Welcome { server = c.srv.server_id; cluster = c.srv.cluster_id; session = c.session; frame = Wire.max_frame;
                               inflight = c.srv.max_inflight });
+            if c.srv.members <> [] then Wire.put_members c.body c.srv.members;
+            send_body c ~id ~kind ~flags:0 c.body;
             Continue)
       | _ when c.token = None -> err c ~id ~kind "auth" "Hello comes first"; Close
       | _ -> (
@@ -577,6 +599,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
           (match Hashtbl.find_opt c.srv.by_name name with
            | None -> err c ~id ~kind "unknown_database" "no database %S on this server" name
            | Some d when c.rights.(d.index) = None -> err c ~id ~kind "denied" "this token may not read %s" name
+           | Some _ when not (leads c ~id ~kind) -> ()
            | Some d ->
              let v = d.view () in
              let props = ref [] in
@@ -610,6 +633,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
           let more = flags land Wire.f_more <> 0 in
           (match writable c ~id ~kind p.db with
            | None -> ()
+           | Some d when c.srv.raft -> err c ~id ~kind "invalid" "the files of %s: a Raft cluster holds no files yet" d.name
            | Some d -> put_start c ~id ~more d req);
           Continue
         | _, Wire.Piece data ->
@@ -628,6 +652,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
            | None -> ()
            | Some d when c.rights.(e.db) <> Some Tokens.Write -> err c ~id ~kind "denied" "erasing an owner's files needs a right to write all of %s" d.name
            | Some _ when c.srv.read_only () <> None -> err c ~id ~kind "read_only" "%s" (Option.get (c.srv.read_only ()))
+           | Some d when c.srv.raft -> err c ~id ~kind "invalid" "the files of %s: a Raft cluster holds no files yet" d.name
            | Some _ when e.owner <= 0 -> err c ~id ~kind "invalid" "an erasure names an owner, a thing: the database's own key (0) is never erased"
            | Some d -> (
              match Files.vault d.files with
@@ -643,6 +668,9 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
           (* a reader's right is enough (G16); a follow stream carries nothing else *)
           match readable c ~id ~kind i with
           | None -> Continue
+          | Some d when c.srv.raft ->
+            err c ~id ~kind "denied" "local reads of %s: not in a Raft cluster yet; this connection reads at the server" d.name;
+            Continue
           | Some d when (match c.rights.(i) with Some (Tokens.Kinds _) -> true | _ -> false) ->
             err c ~id ~kind "denied" "local reads need a right to read every kind of %s: this token reads at the server" d.name;
             Continue

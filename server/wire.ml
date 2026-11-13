@@ -437,6 +437,43 @@ let put_reply b = function
   | Erased -> ()
   | Err e -> Codec.put_string b e.code; Codec.put_string b e.message
 
+(* an error that names where to ask instead (a Raft cluster's not_leader): the address after the message, which
+   [get_reply] skips (as every decoder since protocol 1 does: none checks an error's end); [moved] reads it *)
+let put_moved b ~code ~message ~address =
+  Codec.put_string b code;
+  Codec.put_string b message;
+  if address <> "" then Codec.put_string b address
+
+(* a Raft cluster's Welcome: the members' addresses for programs after its fields, which every client's decoder since
+   protocol 1 skips; [members] reads them (none from a single server) *)
+let put_members b l = Codec.put_varint b (List.length l); List.iter (Codec.put_string b) l
+
+let members (r : Codec.reader) =
+  match
+    let _ = Codec.get_string r in
+    let _ = Codec.get_string r in
+    let _ = Codec.get_varint r in
+    let _ = Codec.get_varint r in
+    let _ = Codec.get_varint r in
+    if Codec.at_end r then []
+    else
+      let n = Codec.get_varint r in
+      if n > 64 then [] else List.init n (fun _ -> Codec.get_string r)
+  with
+  | l -> l
+  | exception Codec.Short -> []
+
+let moved flags (r : Codec.reader) =
+  if flags land f_error = 0 then None
+  else
+    match
+      let _ = Codec.get_string r in
+      let _ = Codec.get_string r in
+      if Codec.at_end r then None else Some (Codec.get_string r)
+    with
+    | x -> x
+    | exception Codec.Short -> None
+
 let get_reply kind flags (r : Codec.reader) =
   if flags land f_error <> 0 then
     let code = Codec.get_string r in

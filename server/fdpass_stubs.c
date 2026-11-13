@@ -2,7 +2,8 @@
    another process over a Unix-domain socket and receiving them (sendmsg and recvmsg with one SCM_RIGHTS control
    message, unix(7)), and mapping a file's first page read-only and shared (mmap with PROT_READ and MAP_SHARED: the
    server's later stores to the page are seen at once, and the reader cannot write it). The interface is
-   server/fdpass.ml, which checks every offset and length before a call. */
+   server/fdpass.ml, which checks every offset and length before a call. And the monotonic clock (clock_gettime with
+   CLOCK_MONOTONIC, which a change of the wall clock does not move) for Raft's timeouts and leases (server/raft.ml). */
 
 #define CAML_NAME_SPACE
 #include <caml/alloc.h>
@@ -17,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -130,4 +132,12 @@ CAMLprim value cepheus_fd_map_ro(value fd, value len) {
   void *p = mmap(NULL, l, PROT_READ, MAP_SHARED, Int_val(fd), 0);
   if (p == MAP_FAILED) caml_unix_error(errno, "mmap", Nothing);
   CAMLreturn(caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT | CAML_BA_EXTERNAL, 1, p, (intnat)(l / 8)));
+}
+
+/* milliseconds of the monotonic clock: an immediate int, no allocation */
+value cepheus_monotonic_ms(value unit) {
+  (void)unit;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return Val_long((long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
 }

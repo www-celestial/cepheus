@@ -237,7 +237,10 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 
 A program connected to the server receives every error above as a value `{code, message}` (`conflict`, `invalid`,
 `unique`, `damaged`, `io`, `busy`, `closed`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
-`unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`. Each, when it comes and what to do: [the server](server.md#errors).
+`unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`, `read_only` (a replica), and in a Raft
+cluster `not_leader` (this server follows a leader: its message names it, and its body carries the leader's address,
+which the OCaml library follows by itself) and `no_leader` (an election runs, or the new leader is not ready: try
+again; the OCaml library does, within its retry budget). Each, when it comes and what to do: [the server](server.md#errors).
 
 The file vault's ([the vault](vault.md)), through the server or from `Cepheus_vault.Vault`:
 

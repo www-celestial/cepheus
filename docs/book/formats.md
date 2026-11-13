@@ -397,3 +397,28 @@ directory at rest has neither. At recovery, every round of the older file must c
 round that does not check is a torn tail (the round in flight at the crash, never confirmed) if no round written whole
 follows it, and damage otherwise, as in a journal; a file whose header does not check is damage.
 
+**`DATA/raft/`**, a Raft cluster's log and state (`server/raftlog.ml`; [the server](server.md#a-cluster-of-three-raft)),
+the folder 0700, every file 0600:
+
+```
+state    = magic "cepheus raft state\n" (19 bytes) | term u64 | vote (varint length, a peer's name; empty: none)
+         | repair u64 (0, or the newest index a damaged log may have acknowledged) | CRC-32C u32 of everything before
+log.<first index, 20 digits> = header, 52 bytes: 0 magic "CPHL" (0x4C485043) u32 | 4 format u32 (1)
+                           | 8 first index u64 | 16 term of the entry before it u64 | 24 cluster id (22 bytes)
+                           | 46 two zero bytes | 48 CRC of the 48 bytes before
+         | rounds
+round    = header, 36 bytes: 0 magic "CPHE" (0x45485043) u32 | 4 body length u32 | 8 first index u64 | 16 count u32
+                           | 20 commit index u64 (the one known when its entries were given to the disk, never
+                             past the round's last entry: entries no truncation can remove)
+                           | 28 body CRC u32 | 32 CRC of the 32 bytes before
+         | body: count entries, each: term u64 | length u32 | bytes (empty: a leader's no-op; else 0x01, the
+                           database's id (16 bytes), one frame of its journal, whole)
+         | trailer, 16 bytes: body length u32 | body CRC u32 | header CRC u32 | magic "CPHT" (0x54485043)
+```
+
+`state` is written beside, forced, renamed over and the directory forced; one that does not check refuses the start.
+A round is the entries of one fsync. At recovery, in the newest segment, the first round that does not check is a
+torn tail (cut) if no round header that checks follows it and no trailer puts a whole round there; anything else is
+damage: the segment and those after it are renamed `*.damaged` (kept), the rounds before the damage are written
+again under the segment's name, and `state` records `repair` (the 2018 rule).
+

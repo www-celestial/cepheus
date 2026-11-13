@@ -1,7 +1,7 @@
 (* cluster.toml: what a server is, where it listens, where its data lives, which databases it holds. The same file on
    every machine of a cluster but for [me]. Read once at start; every rule is checked before anything opens. *)
 
-type peer = { pname : string; address : string }
+type peer = { pname : string; address : string; clients : string option  (* where programs reach it (a Raft cluster) *) }
 
 type tls = { ca : string; cert : string; key : string }
 
@@ -70,6 +70,16 @@ let host_port what s =
     | Some p when p > 0 && p < 65536 && h <> "" -> h, p
     | _ -> bad "%s %S: host:port was expected" what s)
 
+(* where programs reach peer [p] (a Raft cluster sends them to its leader): its [clients], or its host at this
+   file's [clients] port *)
+let client_address c p =
+  match p.clients with
+  | Some a -> a
+  | None -> (
+    let h, _ = host_port "[[peer]] address" p.address in
+    let h = if String.contains h ':' then "[" ^ h ^ "]" else h in
+    Printf.sprintf "%s:%d" h c.port)
+
 (* the first address of a host for a TCP port *)
 let resolve host port =
   match Unix.getaddrinfo host (string_of_int port) [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ] with
@@ -114,10 +124,12 @@ let of_toml file (doc : (string * Toml.value) list) =
   let peers =
     List.map
       (fun t ->
-        known "peer" t [ "name"; "address" ];
+        known "peer" t [ "name"; "address"; "clients" ];
         let pname = need "peer" t "name" and address = need "peer" t "address" in
         ignore (host_port "[[peer]] address" address);
-        { pname; address })
+        let clients = str "peer" t "clients" in
+        Option.iter (fun c -> ignore (host_port "[[peer]] clients" c)) clients;
+        { pname; address; clients })
       (tables "peer")
   in
   if peers = [] then bad "[[peer]] is missing: a single machine is a cluster of one peer";

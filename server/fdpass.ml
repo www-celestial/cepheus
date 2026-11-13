@@ -9,6 +9,9 @@ external send_ : Unix.file_descr -> Bytes.t -> int -> int -> Unix.file_descr arr
 external recv_ : Unix.file_descr -> Bytes.t -> int -> int -> int * Unix.file_descr array = "cepheus_fd_recv"
 external map_ro_ : Unix.file_descr -> int -> page = "cepheus_fd_map_ro"
 
+(* the monotonic clock, in milliseconds (Raft's timeouts and leases: a change of the wall clock does not move it) *)
+external monotonic_ms : unit -> int = "cepheus_monotonic_ms" [@@noalloc]
+
 let max_fds = 64
 
 let range what b ofs len = if ofs < 0 || len < 0 || ofs > Bytes.length b - len then invalid_arg ("Fdpass." ^ what)

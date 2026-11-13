@@ -3,7 +3,9 @@
 # spec/CommitBuffer.tla with TLC (bounds in their .cfg files), and checks that what must break does: the naive sale of
 # spec/Seats.tla (SeatsNaive.cfg), every variant of the local reads' rule that drops a part of it, the design's lease
 # and its first draft (LocalReads*.cfg), every variant of a watch's resume that drops a part of its rule (Watch*.cfg),
-# and every variant of the commit buffer that drops a part of its rule (CommitBuffer*.cfg). TLA2TOOLS names
+# and every variant of the commit buffer that drops a part of its rule (CommitBuffer*.cfg); spec/Raft.tla by parts
+# (RaftCore, RaftDamage, RaftLease: exhaustive within their bounds), and each of its variants that drops one rule must
+# break an invariant. TLA2TOOLS names
 # tla2tools.jar, the official release from https://github.com/tlaplus/tlaplus/releases (v1.7.4 used here); Java 11 or
 # later.
 set -e
@@ -39,6 +41,16 @@ for c in LocalReadsLive LocalReadsNoSkip LocalReadsEarly LocalReadsRemoteFirst L
   rc=0
   java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 1 -metadir "$meta/$c" -config $c.cfg LocalReads.tla || rc=$?
   if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/LocalReads.tla should break an invariant (TLC exit $rc)"; exit 1; fi
+  echo "tlc.sh: $c breaks an invariant, as it must"
+done
+# Raft by parts, then each rule removed alone
+for c in RaftCore RaftDamage RaftLease; do
+  java -Xmx1600m -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/$c" -config $c.cfg Raft.tla
+done
+for c in RaftCommitOldTerm RaftVolatileVote RaftAckUnforced RaftNoUpToDate RaftNoAbstain RaftNoStickiness RaftPromiseFirst RaftRestartForgets RaftReadEarly; do
+  rc=0
+  java -Xmx1600m -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/$c" -config $c.cfg Raft.tla || rc=$?
+  if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/Raft.tla should break an invariant (TLC exit $rc)"; exit 1; fi
   echo "tlc.sh: $c breaks an invariant, as it must"
 done
 # the naive sale must break an invariant: TLC exits with 12 (a safety violation) and prints the counterexample

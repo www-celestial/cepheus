@@ -108,6 +108,8 @@ the usual one, both are given.
 - **commit buffer** — the server's own forced log (`DATA/server.wal.1` and `.2`): the frames of all its databases go
   into it by rounds, one fsync a round for the whole server, as PostgreSQL's databases share its WAL; each database's
   journal is written at once but forced only at its checkpoints. [the server](server.md#many-databases-one-fsync-the-commit-buffer)
+- **committed** (Raft) — an entry of a cluster's log that a majority of the servers holds forced, counted by a leader
+  for an entry of its own term; never lost after that. [server](server.md#one-log-for-the-cluster)
 - **compaction** — another name for a merge in an LSM-tree. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **component** — one of the structures of an LSM-tree: the delta in memory (C0), the runs on disk.
 - **confirmed** — a group whose `write` returned `Ok`: it is durable. [guarantees](guarantees.md#the-faults)
@@ -273,6 +275,8 @@ the usual one, both are given.
 - **kind** (Cesia client) — a sort of thing in a Cesia program: a name and fields, each a property of a type
   (`client/City` for the field `City` of the kind `client`); `Insert` and `Get` read and write a thing's fields of a
   kind as a map. [Cesia](cesia.md#kinds-and-the-values-they-hold)
+- **leader**, **follower** — in a Raft cluster, the one server of a term that takes writes and serves reads, and the
+  others, which store its entries and vote. [server](server.md#a-cluster-of-three-raft)
 - **lagging** — the end of a watch whose program fell too far behind (8 MiB of pushes it has not taken, at the server):
   the package watches again from its last group. [server](server.md#live-questions-watch)
 - **large group** — a group of 20,000 operations or more, all additions: it takes a faster path to the same result
@@ -329,6 +333,8 @@ the usual one, both are given.
   trust, as `ffi=` for C. [Cesia](cesia.md#the-package)
 - **net** (run) — a run adds only facts absent below it and retracts only facts present below it, so every count of a
   view is a sum of exact counts. [architecture](architecture.md#indexes-the-runs-and-the-delta)
+- **no-op** (Raft) — a new leader's first entry, empty, of its own term: its commit commits every entry before it.
+  [server](server.md#elections)
 - **optimistic concurrency control** — read without locks, and check at the end that what was read still holds
   (Kung and Robinson 1981): `Expect`.
 - **origin** — the token's name, session, serial and floor that a group written through the server carries in its
@@ -354,6 +360,9 @@ the usual one, both are given.
 - **plan** (of a rule) — the rule compiled to closures with one atom matched to a given fact, the others joined in an
   order chosen from the store's counts. [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **population count** (popcount) — the number of bits set in a word; a rank table's lookup is one.
+- **pre-vote** — a Raft server's question to the others before it stands for election: would you vote for me? It
+  raises its term only with a majority of yeses, so a server cut off and back does not disrupt the cluster (Ongaro's
+  thesis 9.6). [server](server.md#elections)
 - **primary** — the server that takes the writes of a database; its replicas copy its groups. [server](server.md#a-replica)
 - **promotion** — a replica made a primary (`cepheus promote`): a new epoch, and writes taken. [server](server.md#promotion-by-hand)
 - **proof** — a tree whose leaves are asserted facts and whose nodes are rule instances, each node's children the
@@ -382,6 +391,10 @@ the usual one, both are given.
   "every ancestor", at any depth. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **redo log** — a log of changes to apply again after a crash, never to undo; the journal is one.
 - **replay** — applying the journal's groups in order to rebuild a state.
+- **Raft** — the consensus algorithm a cluster of three or more servers runs (Ongaro and Ousterhout 2014): one
+  leader a term, elected by a majority; a write confirmed once a majority holds it forced. [server](server.md#a-cluster-of-three-raft)
+- **Raft log** — a cluster's one log: each entry a database's journal frame, whole, or a leader's no-op, with its
+  index and term; `DATA/raft/`. [formats](formats.md#the-servers-files)
 - **replica** — a server on another machine that keeps a copy of every database of its primary, group for group, in
   its own journal; asynchronous: behind by its lag, the primary never waits for it. [server](server.md#a-replica)
 - **replica lag** — the time from a group durable on the primary to the replica's word that it holds it durably.
@@ -472,6 +485,8 @@ the usual one, both are given.
 - **system property** — `cepheus/name`, `cepheus/type`, `cepheus/many`, `cepheus/unique` (1 to 4).
 - **template** — the questions that differ only by their constants (the unpaid invoices of each client), kept as one
   with the constants as parameters: a fact's change is computed once and its rows routed by the parameters' values.
+- **term** (Raft) — the number of an election; it grows at each one, and a term has at most one leader. A server
+  forces its term and its vote before it answers. [server](server.md#elections)
 - **thing** — the entity of a fact: a number, from 65,536 up. [concepts](concepts.md#facts-the-entityattributevalue-model)
 - **threat to validity** — a way the proof or the measure could be wrong, to be named and ruled out.
   [case](case-seats.md#threats-to-validity)
