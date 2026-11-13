@@ -3,6 +3,8 @@
 Every term the documentation uses, in plain words, with the page that explains it. Where Cepheus' name differs from
 the usual one, both are given.
 
+- **AEGIS-256** — an authenticated encryption (Wu and Preneel, 2013) with a 256-bit key, nonce and tag, fast on the
+  processor's AES instructions: it seals every chunk of the vault. [vault](vault.md#sealed-aegis-256-under-the-owners-key)
 - **AGM bound** — the largest answer a conjunctive query can have, computed from the sizes of its inputs by a
   fractional edge cover (Atserias, Grohe, Marx 2008): $N^{1.5}$ for the triangles of $N$ links. A worst-case optimal join
   never works much beyond it. [theory](theory.md#4-generic-join)

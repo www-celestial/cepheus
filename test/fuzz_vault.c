@@ -2,8 +2,8 @@
    value) with libFuzzer, AddressSanitizer and UndefinedBehaviorSanitizer. Not part of dune's build; run from the
    repository:
      clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -DCEPHEUS_VAULT_CORE_ONLY \
-       test/fuzz_vault.c vault/vault_stubs.c vault/lz4_lib.c vault/zstd_lib.c -lsodium -o fuzz_vault \
-       && ./fuzz_vault -max_len=300000 -max_total_time=300
+       -I vendor/zstd-1.5.7/lib test/fuzz_vault.c vault/vault_stubs.c vault/lz4_lib.c vault/zstd_lib.c -lsodium \
+       -o fuzz_vault && ./fuzz_vault -max_len=300000 -max_total_time=300
    The first byte of an input chooses what the rest is:
      0  an LZ4 block decoded to the length the next 3 bytes give (at most 256 KiB): exactly that many bytes, or a
         refusal, and never a byte read or written outside the buffers (the sanitizers watch, the buffers have no slack)

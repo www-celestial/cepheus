@@ -73,6 +73,14 @@ On the server's machine a `cepheus.Get` of 4 fields costs 0.77 µs from Cesia (P
 from C: 26.4 µs); over TLS 51.6 µs (PostgreSQL's 49.6); 64 fibers on one connection write as fast as 64 connections.
 Nothing loads before the package's first call, which costs 13 ms once a process.
 
+## Files
+
+A database keeps files too: `cepheus.Put(Scans, "2026-11.pdf", bytes, db, owner = ada)` stores one, `cepheus.Read`
+reads it whole or by a range. Its bytes are cut into chunks by their content (FastCDC) and each is stored once,
+compressed (LZ4, or Zstandard for cold files), sealed with AEGIS-256 under its owner's key and checked at every read;
+`cepheus.Erase(ada, db)` destroys the key, and every file she owned is unreadable wherever its bytes went
+([the vault](docs/book/vault.md)).
+
 ## Against the established databases
 
 Measured on one laptop (Intel i7-4720HQ, SATA SSD) against PostgreSQL 18.6 set up as an expert would, 10 million

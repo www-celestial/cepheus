@@ -235,6 +235,17 @@ A program connected to the server receives every error above as a value `{code, 
 `unique`, `damaged`, `io`, `busy`, `closed`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
 `unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`. Each, when it comes and what to do: [the server](server.md#errors).
 
+The file vault's ([the vault](vault.md)), through the server or from `Cepheus_vault.Vault`:
+
+| code | message | when | what to do |
+|---|---|---|---|
+| `missing` | `thing T has no file of this kind`, `chunk H is not in the vault` | a Load of a thing without a file; a record a fact cites that the vault does not hold (a vault copied without its packs) | check the thing; restore the packs |
+| `damaged` | `record H: its tag does not check (the bytes changed on the disk)`, `... its header does not check`, `... the record found there is another one`, `... its bytes do not match their CRC` | a chunk or node changed on the disk | put the same file again (the damaged chunk is written anew), or restore from a copy |
+| `erased` | `the files of domain D were erased (its key is destroyed)` | a Load of a file of an erased owner, or a Put that names it | nothing: it is for good |
+| `invalid` | `the master key does not open the key of domain D (another vault's key?)` | the vault opened with another master key than its own | give the server its own `vault.key` |
+| `damaged` | `keys: the entry at N does not check, and later ones do` | the keys' file changed on the disk before its end | restore `keys` from a copy (a lost key is a domain's files lost) |
+| `busy` | `DIR is open in another process` | a second process opens the same vault | one process a vault |
+
 ## In a Cesia program
 
 The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and the server's, as a value

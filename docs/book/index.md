@@ -23,7 +23,10 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
 5. [Testing](testing.md): forks for an application's tests, and how Cepheus itself is tested.
 6. [Rules](rules.md): Datalog rules kept by the writer — derived facts, semi-naive evaluation, Backward/Forward for
    retractions, constraints, the budget, `why`, and what a write with rules costs.
-7. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
+7. [The file vault](vault.md): files kept in the database: chunks cut by their content (FastCDC), named by a keyed
+   BLAKE2b and stored once, compressed (LZ4 warm, Zstandard cold), sealed (AEGIS-256) under their owner's key, read by
+   ranges and checked at every read; erasing an owner; what a copy lacks, by Merkle trees.
+8. [A case: never sell the same seat twice](case-seats.md): a real problem solved step by step, from its statement
    to the proof that it is solved (a test, generated schedules, a TLA+ model, kill -9 with a checker of the history,
    the speed beside SQLite and PostgreSQL).
 
@@ -31,7 +34,8 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
 - [API](api.md): every public function and type, with its parameters, result, errors and an example.
 - [Errors](errors.md): every message, where it comes from, what it means, what to do.
 - [Limits and defaults](limits.md): every bound and default value, and where it is set.
-- [Guarantees](guarantees.md): G1 to G20 (G14 to G16 the server's, G17 to G20 the rules'), under which faults, their
+- [Guarantees](guarantees.md): G1 to G24 (G14 to G16 the server's, G17 to G20 the rules', G21 live questions', G22 to
+  G24 the vault's), under which faults, their
   exact conditions, proofs and tests.
 - [Operations](operations.md): files, opening and recovery, damage and disk errors, backup, verification, memory, disk
   space, tools.

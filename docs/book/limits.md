@@ -136,6 +136,24 @@ defaults, and the cache's size (`set_cache`).
 | a client's handshake | 5 s for connect, TLS and Hello (and a follow stream's Follow and Start), then the socket waits as long as it must; past it the attempt is given up as broken and tried again within the retry budget | `Client.handshake_timeout` |
 | a client's retry budget | 30 s of tries to connect again after a broken connection; then `unreachable` (a write in flight was applied once or not at all) | `Client.retry_budget` |
 
+## The file vault
+
+| what | limit or default | where |
+|---|---|---|
+| a chunk | 16 KiB to 256 KiB, about 73 KiB on average (FastCDC, normal size 64 KiB); the last of a file shorter | `Chunker.min_size`, `normal`, `max_size` |
+| a node | 1,024 children at most (about 42 KB) | `Vault.fanout` |
+| a pack | closed when its next record would pass 64 MiB | `Vault.pack_limit` |
+| packs open for reading | 64 at once; past it, those not being read are closed | `Vault.max_open` |
+| decoded nodes kept | 32 MiB of them (CLOCK) | `Vault.open_ ?cache` |
+| compression | kept when it saves at least 1/32 of a chunk; warm LZ4 (acceleration 1), cold Zstandard level 9 | `Vault.encode`, `Vault.zstd_level` |
+| a Zstandard frame's window | 1 MiB at most (a frame that asks for more is refused) | `vault_stubs.c` |
+| a file | 1 TiB (2^40 bytes) through the server | `Files.max_size` |
+| files being put at once | 4 a connection | `Files.max_puts` |
+| a file's name, its type | 4,096 bytes, 255 bytes | `Files.max_name`, `Files.max_type` |
+| a Put's pieces, a Load's frames | 1 MiB each (the client's); a frame 16 MiB at most | `Client.piece`, `Core.chunk`, `Wire.max_frame` |
+| the index in memory | about 100 bytes a record | `Vault.index` |
+| the master key | 32 bytes in `vault.key`, mode 0600 (refused if others may read it, or if it is a link) | `Files.master_file` |
+
 ## Measurement tools
 
 | what | value | where |

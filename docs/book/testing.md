@@ -308,6 +308,43 @@ property-tested through OCaml in `server_unit`: 400 random messages of 1 to 6,00
 read in random pieces: the bytes and the files come out in order, each a new descriptor of the same open file, none
 left open; more than 64 descriptors are refused; the page shows the server's store at once.
 
+### The file vault
+
+`test/vault_unit.exe` checks the vault ([the vault](vault.md)):
+
+- its C: LZ4 and Zstandard blocks of 0 to 256 KiB round trip (300 seeds, text and random bytes), refuse an output one
+  byte short or long and a cut block; keyed BLAKE2b-256 and the key derivation against Python's `hashlib` (an
+  implementation of its own); AEGIS-256 refuses any changed bit, key, nonce, associated byte or cut (200 seeds);
+- the chunker: every chunk within 16 and 256 KiB, a mean within 10 % of the formula's 73 KiB, 97 % of an edited
+  copy's bytes found again (fixed chunks: under 30 %);
+- the store: files of 0 bytes to 9 MB at the chunker's bounds, warm and cold, written in random pieces, read whole and
+  in 25 random ranges each; the same file twice writes nothing; an edited copy writes only the chunks near the edit;
+  another domain shares nothing; reopened from the indexes and, every index removed, from the packs;
+- **power losses** on the simulated disk: 120 seeds, three crashes each at a random call of puts of up to 3 MB (some
+  sharing chunks, some cold, an erasure), with sectors lost, kept or torn as a power loss leaves them: the vault opens
+  every time, and every file finished before a crash reads back exact (G22);
+- **damage**: a byte changed in a chunk gives `damaged` for the ranges over it and only those, the same file put
+  again repairs it; a record moved over another is refused (G23);
+- **erasure**: an erased domain's files give `erased`, after a reopen too, its sealed key is gone from the keys' file,
+  no new file names it (G24);
+- **copies**: the records one vault lacks by Merkle comparison are exactly the set difference, found with fewer
+  digests than records; copied, the copy reads every file and has the same root; an erasure follows the keys;
+- a **fuzzed reader**: 20,000 records changed at random (bytes, cuts, fields with their CRCs made again, headers)
+  give the right bytes or an error, nothing else; 20,000 nodes changed at random parse within their rules or are
+  refused.
+
+`test/vault_crash.exe DIR 20` kills, 20 times, a process that puts files of up to 40 MB and writes their facts, then
+checks that every file the facts cite reads back exact and that every confirmed one is there.
+
+The C core is fuzzed alone by `test/fuzz_vault.c` (libFuzzer, AddressSanitizer, UndefinedBehaviorSanitizer; the
+command is in [the vault](vault.md#security)): LZ4 blocks and Zstandard frames of arbitrary bytes decoded into
+buffers of no slack, round trips, and sealed texts forged or changed. 1.1 million runs in 181 s: no failure.
+
+`server_unit` puts and loads files through the core: in pieces, whole and in 20 ranges, sent again with its serial
+(one file), with each kind of token (rights per kind), the bounds (an undeclared kind, an owner that is no thing, a
+name too long, a load by another property, four puts at once), and an erasure; 3,000 random file requests read back
+as written and 24,000 changed ones read or refused.
+
 ## Not yet
 
 Jepsen-style tests under network faults come with replication.

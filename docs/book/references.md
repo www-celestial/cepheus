@@ -387,6 +387,40 @@ venue, volume and year); a work that could not be checked is not listed. The des
   removed facts, each new binding at the first pattern that matches an added fact: how a live question's change is
   computed (G21).
 
+## The file vault
+
+- **[Xia 2016]** W. Xia, Y. Zhou, H. Jiang, D. Feng, Y. Hua, Y. Hu, Q. Liu, Y. Zhang. FastCDC: a Fast and Efficient
+  Content-Defined Chunking Approach for Data Deduplication. *USENIX ATC* 2016, 101–114.
+  https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia
+  — The Gear hash and normalized chunking (level 2, masks of 18 and 14 bits around 64 KiB): the vault's chunks.
+- **[Aumasson 2013]** J.-P. Aumasson, S. Neves, Z. Wilcox-O'Hearn, C. Winnerlein. BLAKE2: simpler, smaller, fast as
+  MD5. *ACNS* 2013, LNCS 7954, 119–135. https://doi.org/10.1007/978-3-642-38980-1_8 ; RFC 7693 (2015).
+  — The keyed hash that names chunks and nodes (libsodium's `crypto_generichash`).
+- **[Wu 2013]** H. Wu, B. Preneel. AEGIS: A Fast Authenticated Encryption Algorithm. *SAC* 2013, LNCS 8282, 185–201.
+  https://doi.org/10.1007/978-3-662-43414-7_10 ; draft-irtf-cfrg-aegis-aead.
+  — AEGIS-256, libsodium's `crypto_aead_aegis256`, which seals every chunk.
+- **[Rogaway 2006]** P. Rogaway, T. Shrimpton. A Provable-Security Treatment of the Key-Wrap Problem. *EUROCRYPT*
+  2006, LNCS 4004, 373–390. https://doi.org/10.1007/11761679_23
+  — SIV, the synthetic nonce: a chunk's nonce is its keyed name, so it is sealed into the same bytes everywhere.
+- **[Collet RFC 8878]** Y. Collet, M. Kucherawy. Zstandard Compression and the 'application/zstd' Media Type. RFC
+  8878, 2021. https://www.rfc-editor.org/rfc/rfc8878 ; LZ4's block format: https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md
+  — The cold and the warm codec, vendored at Zstandard 1.5.7 and LZ4 1.10.0.
+- **[Merkle 1987]** R. C. Merkle. A Digital Signature Based on a Conventional Encryption Function. *CRYPTO* 1987,
+  LNCS 293, 369–378. https://doi.org/10.1007/3-540-48184-2_32
+  — The hash tree over the names of a vault's records, compared to find what a copy lacks.
+- **[DeCandia 2007]** G. DeCandia, D. Hastorun, M. Jampani, G. Kakulapati, A. Lakshman, A. Pilchin, S. Sivasubramanian,
+  P. Vosshall, W. Vogels. Dynamo: Amazon's Highly Available Key-value Store. *SOSP* 2007, 205–220.
+  https://doi.org/10.1145/1294261.1294281
+  — Anti-entropy by Merkle trees: walk the trees where their digests differ.
+- **[Harnik 2010]** D. Harnik, B. Pinkas, A. Shulman-Peleg. Side Channels in Cloud Services: Deduplication in Cloud
+  Storage. *IEEE Security & Privacy* 8(6), 40–47, 2010. https://doi.org/10.1109/MSP.2010.187
+  — Deduplication as an oracle of what others store: why the vault deduplicates inside a key domain only.
+- **[Douceur 2002]** J. R. Douceur, A. Adya, W. J. Bolosky, D. Simon, M. Theimer. Reclaiming Space from Duplicate
+  Files in a Serverless Distributed File System. *ICDCS* 2002, 617–624. https://doi.org/10.1109/ICDCS.2002.1022312
+  — Convergent encryption, which the vault does not use (it would show that two people hold one file).
+- **[Corbató 1968]** F. J. Corbató. A Paging Experiment with the Multics System. MIT Project MAC, MAC-M-384, 1968.
+  — CLOCK, the second chance: the cache of the vault's decoded nodes.
+
 ## The server
 
 - **[Ongaro 2014b]** D. Ongaro. Consensus: Bridging Theory and Practice. PhD dissertation, Stanford University, 2014.

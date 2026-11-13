@@ -40,7 +40,7 @@
 (executable
  (name examples)
  (modules examples example_runner)
- (libraries cepheus unix threads.posix)
+ (libraries cepheus cepheus_vault unix threads.posix)
  (flags (:standard -w +a-4-9-26-27-32..42-44-45-50-60-70)))
 
 (rule
@@ -67,9 +67,9 @@
  (action (run %{exe:server_sim.exe} --seeds 100)))
 
 ; the file vault
-(executable
- (name vault_unit)
- (modules vault_unit)
+(executables
+ (names vault_unit vault_crash)
+ (modules vault_unit vault_crash)
  (libraries cepheus cepheus_vault check unix threads.posix)
  (ocamlopt_flags (:standard -O3))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
