@@ -473,6 +473,24 @@ extremum went. Questions that differ only by their constants (the unpaid invoice
 **template**: a fact's change is computed once and its rows sent to the watches whose constants they match, so a
 group costs the same with 10 watches or 10,000 ([what it costs](#what-it-costs)).
 
+## Files
+
+A **file kind** keeps files in the database: `Scans = cepheus.Files("scan")` is a kind with the fields `Name`,
+`Size`, `Type`, `Owner` and `Content`, given to `Connect` as any other. `cepheus.Put(Scans, name, bytes, db, type,
+owner, cold)` stores a file and gives its id once its bytes and its facts are on the server's disk; `cepheus.Read(Scans,
+id, db, from, len)` gives its bytes, all of them or a range (only the chunks under it are read); `cepheus.List(Scans,
+db)` its files (a `Find`); `cepheus.Delete(Scans, id, db)` retracts its facts; `cepheus.Erase(owner, db)` destroys an
+owner's key, after which every file it owned is unreadable, everywhere its bytes went. The rights of a token on the kind
+are its rights on the files. How the bytes are kept (chunks stored once, compressed, sealed, checked at every read):
+[the vault](vault.md).
+
+```text
+Scans = cepheus.Files("scan")
+db = cepheus.Connect("cepheus://srv1:7400/shop", [Client, Scans], token = sys.Env("CEPHEUS_TOKEN"), ca = "/etc/cepheus/ca.pem")?
+f = cepheus.Put(Scans, "2026-11.pdf", sys.Read("2026-11.pdf")?, db, type = "application/pdf", owner = ada)?
+head = cepheus.Read(Scans, f, db, from = 0, len = 1024)?
+```
+
 ## Forks
 
 A **fork** is a database in the program's memory that starts as another one: it reads and writes as a database, with

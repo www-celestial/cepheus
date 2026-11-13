@@ -37,6 +37,9 @@ type t = {
 (* a question with Not, Or, In, Prefix, Sort, Limit or After, on a connection to a server of protocol 1 *)
 let older = "this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2"
 
+(* a file, on a connection to a server of protocol 1 or 2 *)
+let no_files = "this server speaks protocol 2 or older: files need a server of protocol 3"
+
 exception Broken of string
 
 let address_of_string s =
@@ -75,14 +78,31 @@ let fd c = match c.fd with Some fd -> fd | None -> raise (Broken "not connected"
 let io_read c b o n = match c.tls with Some t -> Tls.read t b o n | None -> Unix.read (fd c) b o n
 let io_write c b o n = match c.tls with Some t -> Tls.write t b o n | None -> write_all (fd c) b o n
 
+(* a Put's bytes go in frames of a MiB: the Put with the first, then Pieces *)
+let piece = 1 lsl 20
+
 (* queue a request: it leaves at the next [flush] *)
 let send c req =
   let id = c.next_id in
   (* 1 to 2^31 - 1, then 1 again: 0 is the server's own id, for a frame that says why it closes the connection *)
   c.next_id <- (if c.next_id >= 0x7FFF_FFFF then 1 else c.next_id + 1);
   Buffer.clear c.body;
-  Wire.put_request c.body req;
-  Wire.add_frame c.out ~id ~kind:(Wire.request_kind req) ~flags:0 c.body;
+  (match req with
+   | Wire.Put p when String.length p.data > piece ->
+     let n = String.length p.data in
+     Wire.put_request c.body (Wire.Put { p with data = String.sub p.data 0 piece });
+     Wire.add_frame c.out ~id ~kind:Wire.k_put ~flags:Wire.f_more c.body;
+     let o = ref piece in
+     while !o < n do
+       let k = min piece (n - !o) in
+       Buffer.clear c.body;
+       Buffer.add_substring c.body p.data !o k;
+       o := !o + k;
+       Wire.add_frame c.out ~id ~kind:Wire.k_piece ~flags:(if !o < n then Wire.f_more else 0) c.body
+     done
+   | _ ->
+     Wire.put_request c.body req;
+     Wire.add_frame c.out ~id ~kind:(Wire.request_kind req) ~flags:0 c.body);
   id
 
 let flush c =
@@ -142,20 +162,25 @@ let rec frames c id =
     Hashtbl.replace c.early id' ((kind, flags, body) :: prev);
     frames c id
 
-(* the reply to [id]: the rows of every frame of a Find joined *)
-let recv c id =
-  match frames c id with
-  | [ (kind, flags, body) ] -> decode kind flags body
-  | fs -> (
-    let parts = List.map (fun (k, f, b) -> decode k f b) fs in
-    match List.find_opt (function Wire.Err _ -> true | _ -> false) parts with
-    | Some e -> e
-    | None ->
+(* a reply in several frames joined: the rows of a Find, the bytes of a Load *)
+let join parts =
+  match List.find_opt (function Wire.Err _ -> true | _ -> false) parts with
+  | Some e -> e
+  | None -> (
+    match parts with
+    | Wire.Data _ :: _ -> Wire.Data (String.concat "" (List.map (function Wire.Data s -> s | _ -> raise (Broken "a reply in parts of two kinds")) parts))
+    | _ ->
       let group = ref 0 and cols = ref 0 in
       let rows =
         List.concat_map (function Wire.Rows r -> group := r.group; cols := r.cols; r.rows | _ -> raise (Broken "a reply in parts that is not rows")) parts
       in
       Wire.Rows { group = !group; cols = !cols; rows })
+
+(* the reply to [id] *)
+let recv c id =
+  match frames c id with
+  | [ (kind, flags, body) ] -> decode kind flags body
+  | fs -> join (List.map (fun (k, f, b) -> decode k f b) fs)
 
 let call c req =
   let id = send c req in
@@ -458,6 +483,44 @@ let write c db ?(by = 0) ?(why = "") ops =
     (fun _ ->
       Hashtbl.remove c.waiting serial;
       Error { code = "unreachable"; message = "the server did not answer in time: the write was applied once or not at all" })
+
+(* A file: its bytes and its facts (kind/Name, Size, Type, Owner, Content), a Put of the session: sent again with the
+   same serial after a broken connection (its bytes then found stored), applied once; its receipt's thing [-1] is
+   the file. [owner]: the thing whose key seals the bytes (0: the database's own); [cold]: Zstandard, for files read
+   seldom. *)
+let put c db ~kind ~name ?(typ = "application/octet-stream") ?(owner = 0) ?(cold = false) ?(by = 0) ?(why = "") data =
+  if c.spoken < 3 then Error { code = "invalid"; message = no_files }
+  else begin
+    c.serial <- c.serial + 1;
+    let serial = c.serial in
+    Hashtbl.replace c.waiting serial ();
+    with_retry c
+      (fun () ->
+        let r = call c (Wire.Put { db = db.handle; serial; floor = floor c; by; why; kind; name; typ; owner; cold; data }) in
+        Hashtbl.remove c.waiting serial;
+        match r with
+        | Wire.Receipt rc -> Ok rc
+        | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Put" }))
+      (fun _ ->
+        Hashtbl.remove c.waiting serial;
+        Error { code = "unreachable"; message = "the server did not answer in time: the file was stored once or not at all" })
+  end
+
+(* the bytes [from, from + len) of a file (len -1: to its end), by its thing and its kind's Content property *)
+let load c db ~thing ~prop ?(from = 0) ?(len = -1) () =
+  if c.spoken < 3 then Error { code = "invalid"; message = no_files }
+  else
+    match read_call c (Wire.Load { db = db.handle; thing; prop; from; len }) with
+    | Wire.Data s -> Ok s
+    | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Load" })
+
+(* the key of an owner destroyed (a right to write the whole database): its files can no longer be read *)
+let erase c db ~owner =
+  if c.spoken < 3 then Error { code = "invalid"; message = no_files }
+  else
+    match read_call c (Wire.Erase { db = db.handle; owner }) with
+    | Wire.Erased -> Ok ()
+    | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Erase" })
 
 let ping c s = match read_call c (Wire.Ping s) with Wire.Pong p -> Ok p | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "Ping" })
 

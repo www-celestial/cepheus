@@ -223,7 +223,7 @@ let wire () =
       let kind = match rep with
         | Wire.Welcome _ -> Wire.k_hello | Opened _ -> Wire.k_open | Facts _ -> Wire.k_get | Rows _ -> Wire.k_find
         | Receipt _ -> Wire.k_write | Pong _ -> Wire.k_ping | Status _ -> Wire.k_admin | Start _ -> Wire.k_follow
-        | Unwatched -> Wire.k_unwatch | Err _ -> Wire.k_get in
+        | Unwatched -> Wire.k_unwatch | Data _ -> Wire.k_load | Erased -> Wire.k_erase | Err _ -> Wire.k_get in
       let flags = match rep with Wire.Err _ -> Wire.f_error | _ -> 0 in
       let b = Buffer.create 64 in
       Wire.put_reply b rep;
@@ -282,7 +282,8 @@ let rights () =
   let open_db name =
     let e = Result.get_ok (Engine.open_ disk ("/d/" ^ name)) in
     e, { Core.name; index = (if name = "shop" then 0 else 1); dir = "/d/" ^ name; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
-         more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) }
+         more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+         files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) ("/d/" ^ name ^ "/vault") }
   in
   let e0, d0 = open_db "shop" and e1, d1 = open_db "stock" in
   let mk name databases admin = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin } in
@@ -437,7 +438,8 @@ let rights_kinds () =
   disk.mkdir "/k";
   let e = Result.get_ok (Engine.open_ disk "/k/compta") in
   let d = { Core.name = "compta"; index = 0; dir = "/k/compta"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
-            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/k/compta/vault" } in
   let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
   let kinds = Tokens.Kinds { read = [ "compte"; "transaction" ]; add = [ "transaction" ] } in
   let toks = Tokens.with_tokens Tokens.empty
@@ -697,7 +699,8 @@ let versions () =
   disk.mkdir "/v";
   let e = Result.get_ok (Engine.open_ disk "/v/shop") in
   let d = { Core.name = "shop"; index = 0; dir = "/v/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
-            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/v/shop/vault" } in
   let toks = Tokens.with_tokens Tokens.empty [ { Tokens.name = "r"; hash = Tokens.hash_of_text "cph_r"; databases = [ "shop", Tokens.Read ]; admin = false } ] in
   let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(fun () -> 1) () in
   let hello version =
@@ -714,8 +717,8 @@ let versions () =
     Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
-  check (welcome (hello 1) && welcome (hello 2)) "versions: a server speaks 1 and 2";
-  check (match hello 3 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 3";
+  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3)) "versions: a server speaks 1, 2 and 3";
+  check (match hello 4 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 4";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -733,7 +736,7 @@ let versions () =
     ignore (Unix.write fd s 0 (Bytes.length s))
   in
   let old = Thread.create (fun () ->
-      for _ = 1 to 2 do
+      for _ = 1 to 3 do
         let fd, _ = Unix.accept ~cloexec:true sock in
         (try
            let h = Bytes.create Wire.header in
@@ -744,7 +747,7 @@ let versions () =
            match Wire.get_request Wire.k_hello (Codec.reader body 0 (Bytes.length body)) with
            | Wire.Hello hh ->
              seen := hh.version :: !seen;
-             if hh.version <> 1 then reply fd ~id ~flags:Wire.f_error (Wire.Err { code = "version"; message = "protocol 2 is not spoken here (1 is)" })
+             if hh.version <> 1 then reply fd ~id ~flags:Wire.f_error (Wire.Err { code = "version"; message = "this protocol is not spoken here (1 is)" })
              else begin
                reply fd ~id ~flags:0 (Wire.Welcome { server = "old"; cluster = "c"; session = 3; frame = Wire.max_frame; inflight = 16 });
                (* until the program closes *)
@@ -756,12 +759,193 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
   Thread.join old;
   Unix.close sock;
   (try Unix.unlink path with Unix.Unix_error _ -> ())
+
+(* ---- files through the core: Put in pieces, Load whole and in ranges, rights per kind, bounds, Erase ---- *)
+
+let files () =
+  let sim = Sim_disk.create (Rng.make 9) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/f";
+  let e = Result.get_ok (Engine.open_ disk "/f/shop") in
+  let d = { Core.name = "shop"; index = 0; dir = "/f/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/f/shop/vault" } in
+  let submit (_ : Core.db) ops by why k = let b = Engine.prepare e [| ops, by, why |] in k (Engine.commit e b).(0) in
+  (* the file kinds scan and other, and a person *)
+  let props = List.concat_map (fun k -> List.map (fun (f, t) -> { Schema.name = k ^ "/" ^ f; typ = t; many = false; unique = false })
+                                   [ "Name", Value.Ttext; "Size", Tint; "Type", Ttext; "Owner", Tlink; "Content", Ttext ]) [ "scan"; "other" ]
+              @ [ { Schema.name = "person/Name"; typ = Ttext; many = false; unique = false } ] in
+  let ids, ops = Result.get_ok (Resolve.declare (Atomic.get e.published) props) in
+  submit d ops 0 "declare" (fun r -> ignore (Result.get_ok r));
+  let pid = List.nth ids 10 in
+  let ada = ref 0 in
+  submit d [ Resolve.Add (-1, pid, Text "Ada") ] 0 "ada" (fun r -> ada := List.assoc (-1) (Result.get_ok r).things);
+  let ada = !ada in
+  let content_of k = Option.get (Schema.by_name (Atomic.get e.published).schema (k ^ "/Content")) in
+  let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+  let toks =
+    Tokens.with_tokens Tokens.empty
+      [ mk "w" [ "shop", Tokens.Write ]; mk "r" [ "shop", Tokens.Read ];
+        mk "k" [ "shop", Tokens.Kinds { read = [ "scan" ]; add = [ "scan" ] } ];
+        mk "kr" [ "shop", Tokens.Kinds { read = [ "scan" ]; add = [] } ];
+        mk "n" [ "shop", Tokens.Kinds { read = [ "other" ]; add = [ "other" ] } ] ]
+  in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+  (* a connection: frames in, every reply frame out, a Load's joined *)
+  let session tok =
+    let out = Buffer.create 256 in
+    let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+    let c = Lazy.force c in
+    let next = ref 1 in
+    let frames req =
+      let f = Buffer.create 64 and b = Buffer.create 64 in
+      let id = !next in
+      incr next;
+      (match req with
+       | Wire.Put p when String.length p.data > 1000 ->
+         let n = String.length p.data in
+         Wire.put_request b (Wire.Put { p with data = String.sub p.data 0 1000 });
+         Wire.add_frame f ~id ~kind:Wire.k_put ~flags:Wire.f_more b;
+         let o = ref 1000 in
+         while !o < n do
+           let k = min (1 + (!o * 7 mod 300_000)) (n - !o) in
+           Buffer.clear b;
+           Buffer.add_substring b p.data !o k;
+           o := !o + k;
+           Wire.add_frame f ~id ~kind:Wire.k_piece ~flags:(if !o < n then Wire.f_more else 0) b
+         done
+       | _ -> Wire.put_request b req; Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b);
+      Buffer.to_bytes f
+    in
+    let ask req =
+      let bytes = frames req in
+      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      let rec parts o acc =
+        if o >= Bytes.length s then List.rev acc
+        else
+          let len = Wire.u32 s o in
+          parts (o + 4 + len) (Wire.get_reply (Bytes.get_uint8 s (o + 8)) (Bytes.get_uint8 s (o + 9)) (Codec.reader s (o + Wire.header) (len - 6)) :: acc)
+      in
+      match parts 0 [] with [] -> None | [ x ] -> Some x | l -> Some (Client.join l)
+    in
+    ignore (ask (Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 }));
+    ask
+  in
+  let r = Rng.make 3 in
+  let data = String.init 3_000_000 (fun i -> if i mod 3 = 0 then Char.chr (Rng.int r 256) else 'a') in
+  let put ?(owner = ada) ?(name = "a.pdf") ?(kind = "scan") ?(serial = 1) ask =
+    ask (Wire.Put { db = 0; serial; floor = serial; by = 7; why = "upload"; kind; name; typ = "application/pdf"; owner; cold = false; data })
+  in
+  let load ask ?(from = 0) ?(len = -1) ?(prop = content_of "scan") thing = ask (Wire.Load { db = 0; thing; prop; from; len }) in
+  let w = session "w" in
+  let f =
+    match put w with
+    | Some (Wire.Receipt rc) -> List.assoc (-1) rc.things
+    | Some (Wire.Err e) -> check false "files: put: %s %s" e.code e.message; 0
+    | _ -> check false "files: put: no receipt"; 0
+  in
+  let facts = Cepheus.get (Atomic.get e.published) f in
+  let named n = Option.get (Schema.by_name (Atomic.get e.published).schema n) in
+  check (List.assoc_opt (named "scan/Name") facts = Some (Text "a.pdf") && List.assoc_opt (named "scan/Size") facts = Some (Int 3_000_000)
+         && List.assoc_opt (named "scan/Owner") facts = Some (Link ada) && List.assoc_opt (named "scan/Type") facts = Some (Text "application/pdf"))
+    "files: a put's facts";
+  check (load w f = Some (Wire.Data data)) "files: loaded whole";
+  for _ = 1 to 20 do
+    let from = Rng.int r 3_000_000 in
+    let len = Rng.int r (min 2_500_000 (3_000_000 - from)) in
+    check (load w ~from ~len f = Some (Wire.Data (String.sub data from len))) "files: a range %d+%d" from len
+  done;
+  check (load w ~from:3_000_000 ~len:0 f = Some (Wire.Data "")) "files: an empty range at the end";
+  check (match load w ~from:2_999_999 ~len:2 f with Some (Wire.Err { code = "invalid"; _ }) -> true | _ -> false) "files: a range past the end";
+  (* sent again with its serial (a broken connection): applied once *)
+  check (match put w with Some (Wire.Receipt rc) -> List.assoc (-1) rc.things = f | _ -> false) "files: a put sent again is answered with its receipt";
+  (* rights per kind *)
+  let code = function Some (Wire.Err e) -> e.code | Some (Wire.Receipt _) -> "receipt" | Some (Wire.Data _) -> "data" | _ -> "none" in
+  List.iter
+    (fun (tok, want_put, want_load) ->
+      let a = session tok in
+      check (code (put ~serial:5 a) = want_put) "files: %s puts: %s" tok want_put;
+      check (code (load a f) = want_load) "files: %s loads: %s" tok want_load)
+    [ "r", "denied", "data"; "k", "receipt", "data"; "kr", "denied", "data"; "n", "denied", "denied" ];
+  (* the bounds and the kind, checked before a byte is stored *)
+  check (code (put ~serial:2 ~kind:"nope" w) = "invalid") "files: an undeclared file kind";
+  check (code (put ~serial:3 ~kind:"person" w) = "invalid") "files: a kind that is not a file kind";
+  check (code (put ~serial:4 ~owner:999_999 w) = "invalid") "files: an owner that is no thing";
+  check (code (put ~serial:6 ~name:(String.make 5000 'x') w) = "too_large") "files: a name too long";
+  check (code (load w ~prop:(named "scan/Name") f) = "invalid") "files: a load by another property than Content";
+  check (code (load w ada) = "missing") "files: a thing without a file";
+  (* at most four files at once on a connection; the pieces of a refused Put are dropped *)
+  let c5 = session "w" in
+  let starts = List.init 5 (fun i ->
+      let b = Buffer.create 64 and fr = Buffer.create 64 in
+      Wire.put_request b (Wire.Put { db = 0; serial = 10 + i; floor = 10; by = 0; why = ""; kind = "scan"; name = "p"; typ = "t"; owner = 0; cold = false; data = "x" });
+      Wire.add_frame fr ~id:(100 + i) ~kind:Wire.k_put ~flags:Wire.f_more b;
+      Buffer.to_bytes fr) in
+  ignore c5;
+  let sess = Core.connect srv ~flush:(fun () -> ()) ~submit in
+  let hb = Buffer.create 64 and hf = Buffer.create 64 in
+  Wire.put_request hb (Wire.Hello { version = Wire.version; token = "cph_w"; program = "t"; session = 0 });
+  Wire.add_frame hf ~id:1 ~kind:Wire.k_hello ~flags:0 hb;
+  let hbytes = Buffer.to_bytes hf in
+  ignore (Core.input sess hbytes 0 (Bytes.length hbytes));
+  List.iter (fun b -> ignore (Core.input sess b 0 (Bytes.length b))) starts;
+  check (Hashtbl.length sess.Core.puts = Files.max_puts) "files: %d puts open at once at most" Files.max_puts;
+  Core.disconnect sess;
+  (* erasing an owner: a right to write the whole database *)
+  let erase tok = code (Some (match (session tok) (Wire.Erase { db = 0; owner = ada }) with Some x -> x | None -> Wire.Err { code = "none"; message = "" })) in
+  check (erase "k" = "denied" && erase "r" = "denied") "files: erasing needs a right to write every kind";
+  check (match (session "w") (Wire.Erase { db = 0; owner = ada }) with Some Wire.Erased -> true | _ -> false) "files: erased";
+  check (code (load w f) = "erased") "files: an erased owner's file: erased";
+  check (code (put ~serial:8 w) = "erased") "files: no new file of an erased owner";
+  Engine.close e
+
+(* every request of the files read back as written, and any change of its bytes read or refused, nothing else *)
+let files_wire () =
+  let r = Rng.make 13 in
+  let rnd n = String.init n (fun _ -> Char.chr (Rng.int r 256)) in
+  let req () =
+    match Rng.int r 4 with
+    | 0 -> Wire.Put { db = Rng.int r 9; serial = Rng.int r 1000; floor = Rng.int r 1000; by = Rng.int r 100 - 50; why = rnd (Rng.int r 9);
+                      kind = rnd (Rng.int r 9); name = rnd (Rng.int r 30); typ = rnd (Rng.int r 9); owner = Rng.int r 100_000;
+                      cold = Rng.int r 2 = 0; data = rnd (Rng.int r 100) }
+    | 1 -> Wire.Piece (rnd (Rng.int r 100))
+    | 2 -> Wire.Load { db = Rng.int r 9; thing = Rng.int r 100_000; prop = Rng.int r 300; from = Rng.int r 1_000_000; len = Rng.int r 1000 - 1 }
+    | _ -> Wire.Erase { db = Rng.int r 9; owner = Rng.int r 100_000 }
+  in
+  let n = ref 0 and m = ref 0 in
+  for _ = 1 to 3000 do
+    let q = req () in
+    let b = Buffer.create 64 in
+    Wire.put_request b q;
+    let s = Buffer.to_bytes b in
+    let kind = Wire.request_kind q in
+    (match Wire.get_request kind (Codec.reader s 0 (Bytes.length s)) with
+     | q' -> if q' = q then incr n else check false "files wire: a request read back otherwise"
+     | exception _ -> check false "files wire: a request does not read back");
+    for _ = 1 to 8 do
+      let t = Bytes.copy s in
+      let t =
+        match Rng.int r 3 with
+        | 0 when Bytes.length t > 0 -> let i = Rng.int r (Bytes.length t) in Bytes.set t i (Char.chr (Rng.int r 256)); t
+        | 1 -> Bytes.sub t 0 (Rng.int r (Bytes.length t + 1))
+        | _ -> Bytes.cat t (Bytes.of_string (rnd (1 + Rng.int r 5)))
+      in
+      match Wire.get_request kind (Codec.reader t 0 (Bytes.length t)) with
+      | _ -> incr m
+      | exception (Codec.Short | Wire.Malformed _) -> incr m
+      | exception e -> check false "files wire: a changed request raised %s" (Printexc.to_string e)
+    done
+  done;
+  check (!n = 3000 && !m = 24000) "files wire: 3000 requests read back, 24000 changed ones read or refused"
 
 let () =
   toml ();
@@ -776,4 +960,6 @@ let () =
   fdpass ();
   followed_rules ();
   request_ids ();
+  files ();
+  files_wire ();
   C.finish "server unit"

@@ -23,7 +23,7 @@ cfg=$tmp/s/cluster.toml
 mkdir -p "$tmp/s/r"
 sed -i "s/127.0.0.1:7400/127.0.0.1:$port/; s/^socket = \"run\"/socket = \"r\"/; /^\[\[database\]\]/,\$d" "$cfg"
 rights=""
-for d in $(seq "$n" | sed 's/^/doc/') tls local restart; do
+for d in $(seq "$n" | sed 's/^/doc/') tls local restart files; do
   printf '[[database]]\nname = "%s"\n' "$d" >> "$cfg"
   rights="$rights --database $d=write"
 done
@@ -78,6 +78,13 @@ sleep 1.5
 CEPHEUS_TOKEN=$kinds timeout 60 cesia run --allow native=cepheus,env,read src/kinds.ce < /dev/null > "$tmp/kinds.out" 2>&1 || { cat "$tmp/kinds.out"; exit 1; }
 printf 'kinds declare secret: denied\nkinds: 50 writes, each read at once: 50\nkinds find: 50\n' | diff - "$tmp/kinds.out" || { echo "cesia kinds: the output differs"; exit 1; }
 
+# files: a file kind, Put, Read whole and by ranges, List, Get, Delete, Erase, and a token of another kind
+cp "$root/test/cesia-files.ce" src/files.ce
+other=$($B token add other --database "files=read:person;add:person" --config "$cfg" 2>/dev/null)
+sleep 1.5
+CEPHEUS_URL="cepheus://localhost:$port/files?socket=$tmp/s/r" CEPHEUS_OTHER=$other timeout 60 cesia run --allow native=cepheus,env,read src/files.ce < /dev/null > "$tmp/files.out" 2>&1 || { cat "$tmp/files.out"; exit 1; }
+printf 'files: read whole: true true\nfiles: a range: 5678901\nfiles: the end: 10\nfiles: past the end: invalid\nfiles: get: log.txt 4000000 text/plain true 64\nfiles: list: 2\nfiles: a fork holds none: invalid\nfiles: another kind'"'"'s token reads: denied\nfiles: deleted, list: 1\nfiles: erased owner: erased erased\n' | diff - "$tmp/files.out" || { echo "cesia files: the output differs"; exit 1; }
+
 # kill -9 while the program writes, then a new server on the same data: the client connects again and sends again
 export CEPHEUS_URL="cepheus://localhost:$port/restart?socket=$tmp/s/r"
 timeout 120 cesia run --allow native=cepheus,env,read src/live.ce restart < /dev/null > "$tmp/restart.out" 2>&1 &
@@ -91,7 +98,7 @@ wait $prog || { prog=""; cat "$tmp/restart.out"; exit 1; }
 prog=""
 grep -q '^restart: 1500 writes answered Ok, 1500 in the database$' "$tmp/restart.out" || { cat "$tmp/restart.out"; exit 1; }
 grep -q '^restart watch: 1500 rows, groups growing: true$' "$tmp/restart.out" || { cat "$tmp/restart.out"; exit 1; }
-echo "cesia live: TLS, local reads, watches and a kill -9 of the server: $(grep -c . "$root/test/cesia-live.expected") lines as expected, 1500 writes once each, watched through the restart; a token per kind read at the server"
+echo "cesia live: TLS, local reads, watches and a kill -9 of the server: $(grep -c . "$root/test/cesia-live.expected") lines as expected, 1500 writes once each, watched through the restart; a token per kind read at the server; files put, read, listed, deleted and erased"
 cd "$root"
 stop
 trap - EXIT

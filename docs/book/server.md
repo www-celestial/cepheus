@@ -182,6 +182,10 @@ DATA/cepheus.server        the server's id, made at its first start
 DATA/NAME/                 a database: its files as in operations.md, and
 DATA/NAME/sessions         its session table, a checkpoint (G14): written every second while writes come, and at stop
 DATA/NAME/shared           the database is the server's: its journal is forced through the commit buffer
+DATA/NAME/vault/           its files' bytes ([the vault](vault.md)), made at its first file
+CONFIG/vault.key           the master key of every vault of the server: 32 random bytes, mode 0600, beside
+                           cluster.toml (never in DATA: a copy of the data opens no file without it), made at the
+                           first file; keep a copy apart from the data, since without it no file opens
 DATA/server.wal.1, .2      the commit buffer (below): two files that alternate; removed at start, once their frames
                            are in the journals, and at a clean stop
 /dev/shm/cepheus-ID.visible
@@ -374,7 +378,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | request body | reply body |
 |---|---|---|
-| 1 Hello | version varint (1 or 2), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
+| 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
 | 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
@@ -384,6 +388,10 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 8 Follow | handle (over the Unix socket only) | Start: the database's id, the visibility number, count, (lo, hi) of each run, newest first; the descriptors of `visible` and of each run ride on its first byte. The connection is then the database's follow stream ([local reads](#local-reads-g15)) |
 | 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none), then its operators as Find codes them, when it has some (no Sort, Limit or After) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
 | 12 Unwatch | the Watch's id | Unwatched |
+| 14 Put (version 3) | handle, serial, floor, by (zigzag), why, the file kind, name, media type, owner (0: the database's own key), cold (a byte), then the file's first bytes; the flag `more` when Pieces follow | Receipt of the group of its facts (kind/Name, Size, Type, Owner, Content), once its bytes and that group are durable ([the vault](vault.md)) |
+| 15 Piece | more bytes of the Put of this id; `more` but on the last | (the Put's reply) |
+| 16 Load | handle, thing, the kind's Content property, from, length (zigzag; -1: to the end) | the bytes, in frames of 1 MiB, all but the last with `more` |
+| 17 Erase | handle, owner (a token that writes the whole database) | Erased |
 
 On a follow stream the server pushes (request id 0):
 
@@ -399,8 +407,10 @@ On a follow stream the server pushes (request id 0):
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
   (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
-- **Versions.** Version 2 adds the question's operators and order (below) and nothing else; a server speaks 1 and
-  2, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+- **Versions.** Version 3 adds the files (Put, Piece, Load, Erase) and nothing else: a program of version 3 connects
+  to a server of 2 in 2 (as below), and a file is refused in the program (`invalid`: "this server speaks protocol 2 or
+  older: files need a server of protocol 3"). Version 2 adds the question's operators and order (below) and nothing
+  else; a server speaks 1, 2 and 3, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
   and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
   one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
   protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2
@@ -509,13 +519,15 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 |---|---|---|
 | `auth` | Hello with an unknown token; a request before Hello; a token removed since | check the token; the connection closes |
 | `denied` | the token lacks the right for this database or operation; a session of another token | a token with the right |
-| `version` | Hello with a protocol version the server does not speak (it speaks 1 and 2) | a library connects again in the version before; else a server and a library of the same release |
+| `version` | Hello with a protocol version the server does not speak (it speaks 1 to 3) | a library connects again in the version before; else a server and a library of the same release |
 | `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |
 | `too_many_connections` | a new connection over the Unix socket while the server holds `max_connections` (request id 0; over TCP the connection is closed without a word) | connect later, or raise the limit |
 | `idle` | no whole request for `idle_timeout` seconds (request id 0, then the server closes the connection) | send `Ping` meanwhile, or connect again: the OCaml client does |
 | `refused` | a write sent again after a later write of its session was applied, whose first error was lost when the server started again (its error, when the same server refused it, is given again instead) | it was not applied: decide again |
+| `missing` | Load of a thing that has no file of the kind; a chunk the vault does not hold | |
+| `erased` | Load, or Put, of an owner whose key was erased | |
 | `invalid` | a malformed request (the connection closes), a question that does not check, a serial below its session's floor, a why that starts with the server's marker, `Follow` on a connection with writes in flight | fix the request |
 | `denied` (Follow) | `Follow` over TCP: local reads are for programs on the server's machine, over its Unix socket | read through the server; the OCaml client does by itself |
 | `busy` (Follow) | `Follow` when the run files could not be opened eight times in a row (merges removing them meanwhile) | follow again: the OCaml client does, within 100 ms |

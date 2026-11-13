@@ -651,7 +651,8 @@ let rights rounds n =
       List.map (fun (t, p, v) -> Resolve.Add (t, p, v)) (Schema.facts (16 + i) { Schema.name = Printf.sprintf "k%d/f%d" (i / 4) i; typ = Value.Tint; many = false; unique = false }))) in
   ignore (Engine.commit e (Engine.prepare e [| decl, 0, "declare" |]));
   let d = { Core.name = "db"; index = 0; dir = "/r/db"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
-            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int) } in
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/r/db/vault" } in
   let r = Tokens.Kinds { read = [ "k0"; "k1"; "k2" ]; add = [ "k0"; "k1"; "k2" ] } in
   let tok = { Tokens.name = "k"; hash = Tokens.hash_of_text "cph_k"; databases = [ "db", r ]; admin = false } in
   let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:(Tokens.with_tokens Tokens.empty [ tok ]) ~now:disk.now ~new_session:(fun () -> 1) () in

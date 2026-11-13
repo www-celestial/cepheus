@@ -216,7 +216,8 @@ let start_server w =
           h
       in
       let core_db = { Core.name = "main"; index = 0; dir; view = (fun () -> Follow.view follow); sessions;
-                      more = (fun () -> Follow.status follow); hub } in
+                      more = (fun () -> Follow.status follow); hub;
+                      files = Files.cell ~disk:w.disk ~master:(fun () -> Ok (String.make 32 'k')) (Filename.concat dir "vault") } in
       let core =
         Core.create ~server_id:"cph-s-sim" ~cluster_id:"cph-c-0000000000000000" ~dbs:[| core_db |] ~tokens
           ~now:w.disk.now ~new_session:(let n = ref (1000 * (1 + Rng.int w.r 1000)) in fun () -> incr n; !n)
