@@ -496,6 +496,103 @@ The two slow rounds through the socket did not repeat in the process, where the 
 timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
 disk whose fsyncs vary that much from round to round.
 
+## Rules, step 2: closures and the W3C's form (2026-11-12)
+
+The second step of the reasoner ([rules](rules.md#transitive-closures-the-closure-module)): transitive properties kept
+by a closure module, and rules over a variable property unfolded on the ontology's facts.
+
+**Method.** `bench/reason.exe` (release build), measured against the binary of 23ac670 (the reasoner's first step,
+where prp-trp runs as a rule), both built from the same benchmark source (the modes the older binary has).
+Seven rounds, alternated (the side that goes first swaps each round), in one hold of the heavy lock, every process in
+a 3 GB scope; a cell is the median of the rounds with $[x(1), x(n)]$; a ratio is the median of the paired ratios
+(new/old, round by round). The same answers on both sides: the closures' facts and the derived facts are equal. The
+graphs are the design's (section 6.4, drawn as its prototype drew them): a hierarchy of 100,000 nodes, 4 children
+each (depth 8); a deep one of 20,000 nodes, 2 each (depth 14); a random DAG of 5,000 nodes, 3 edges down each (OCaml's
+`Random`, seed 1: 14,973 edges); a chain of 500. Every edge in one group, on disk (`closure KIND trp|linear DIR`): the
+hierarchy's 99,999 edges take the path of large groups, the others (under 20,000 operations) the ordinary path.
+"The module" is the closure module's own time (its facts found and laid out for the group), as the prototype measured
+its module; "reasoning" is the whole of it in the group (with, for a large group, the working set's build of its
+facts). LUBM-shaped data as in [Rules (2026-11-08)](#rules-2026-11-08): `mat 10 rules …` the 94 rules written one an
+axiom, `w3c 10 …` the ontology as facts and the 10 W3C rules it needs (cax-sco, scm-sco, prp-dom, prp-rng,
+prp-spo1, prp-inv1, prp-inv2, prp-trp, cls-svf1, cls-int1 over two members), which the engine unfolds.
+Commands: `reason.exe closure hierarchy|deep|dag|chain trp|linear DIR`, `reason.exe mat 10 rules bulk|groups DIR|-`,
+`reason.exe w3c 10 bulk|groups DIR|-`, `reason.exe student 1 2000 DIR`.
+
+**Transitive closures** (median [x(1), x(7)] of 7 rounds; the closures equal on both sides):
+
+| graph (closure facts, derived) | form | the module | reasoning: 23ac670 → this | the write, durable: 23ac670 → this | derivations: 23ac670 |
+|---|---|---:|---:|---:|---:|
+| hierarchy, 100,000 nodes (783,495; 683,496) | prp-trp | **22.5 ms** [21.2, 24.4] | 0.918 s → **0.084 s** (0.091×) | 1.27 s → 0.42 s (0.33×) | 2,706,780 |
+| | linear | 26.3 ms [12.0, 40.9] | 0.606 s → 0.146 s (0.23×) | 1.05 s → 0.61 s (0.58×) | 783,495 |
+| deep, 20,000 nodes (247,248; 227,249) | prp-trp | 9.8 ms [9.4, 15.0] | 1.07 s → 0.58 s (0.54×) | 1.14 s → 0.64 s (0.57×) | 1,438,678 |
+| random DAG, 5,000 nodes (1,359,764; 1,344,791) | prp-trp | **47.3 ms** [41.9, 57.5] | 17.6 s → 3.85 s (0.22×) | 17.8 s → 4.06 s (0.23×) | 77,224,523 |
+| | linear | 44.1 ms [39.7, 48.6] | 6.37 s → 3.88 s (0.61×) | 6.63 s → 4.09 s (0.62×) | 2,449,704 |
+| chain, 500 nodes (124,750; 124,251) | prp-trp | 1.2 ms [1.2, 1.5] | 2.44 s → 0.26 s (0.10×) | 2.46 s → 0.29 s (0.11×) | 20,708,998 |
+| | linear | 1.3 ms [1.2, 1.4] | 0.35 s → 0.26 s (0.75×) | 0.38 s → 0.28 s (0.77×) | 124,750 |
+
+- **The design's targets**: the hierarchy's closure in at most 30 ms (22.5 ms: met; the prototype 11-16 ms, prp-trp as
+  a rule 665 ms there, 918 ms here), the random DAG's in at most 60 ms (47.3 ms: met; the prototype 14-46 ms, prp-trp
+  7.82 s there, 17.6 s here). The module makes each new fact once: 0 derivations, against 3.5 to 166 a fact by the rule.
+- **Where the rest goes**: the hierarchy's 99,999 edges are a large group, whose reasoning also builds the working set
+  of its facts (54 ms of the 84). The DAG's, the deep tree's and the chain's edges are under 20,000 operations: the
+  ordinary path, whose facts go into the view's delta one by one in sorted batches (about 2.8 µs a fact with the
+  group's change records): 3.8 s of the DAG's 3.9. Large derivations from small groups take the large groups' path in
+  the design's step 3.
+- **Measured and set aside**: the module's arrays are Bigarrays, which pace OCaml's major collector by their size
+  (`custom_major_ratio`, 44 % by default): with it at 1,000 the hierarchy's module took 19.5 ms instead of 48.6 ms
+  before the arrays were cut down; the engine does not change the collector's settings of the program it is in.
+- **Beside the giants** (their papers, their machines and data): Hu, Motik and Horrocks [Hu 2022] report LUBM-LE
+  materialised in 339 s with modules against 1,268 s without (3.7×); here the module's own time is 23 to 2,000 times
+  below the rule's reasoning on these graphs (the design's prototype: 60 to over 1,000), and a group's reasoning 1.3 to
+  11 times faster. RDFox has had such modules since 2019 [Hu 2019]: a tie in method. Soufflé, which evaluates the
+  rule, "runs out of memory when evaluating TC on G80K" in Fan et al.'s tests [Fan 2019].
+
+**One edge retracted** (the same binary, by walks against B/F through the rules' plans, `Reason.walk_retract`; 21
+rounds alternated in one hold of the lock, the closure loaded first in each process; medians, $[x(1), x(21)]$, the
+paired ratio's median with its 95 % interval by order statistics $[x(6), x(16)]$; the same closure after on both sides):
+
+| prp-trp | facts lost | by walks | by B/F | walks / B/F |
+|---|---:|---:|---:|---:|
+| hierarchy, the edge of a node of depth 2 (its subtree 6,250 things) | 36,160 | **0.102 s** [0.095, 0.187] | 0.161 s [0.146, 0.255] | 0.64 [0.59, 0.73] |
+| random DAG, the edge 300 → 134 | 102 | **0.090 s** [0.078, 0.357] | 1.766 s [1.448, 2.410] | 0.050 [0.045, 0.055] |
+| chain of 500, the middle edge | 62,500 | **0.163 s** [0.151, 0.254] | 16.11 s [15.03, 20.29] | 0.0099 [0.0096, 0.0105] |
+
+The walks' time is mostly the facts lost put into the view (about 2.5 µs a fact in the hierarchy's case); B/F checks
+each lost fact through the rule's instances (on the chain, every middle point of every pair), which is where 100× go.
+An edge with another way (most edges of the DAG) changes nothing and costs a lookup per edge out of its start.
+
+**LUBM-shaped data, the W3C's form against rules written one an axiom** (ten universities; both on this binary; the
+same 532,205 derived facts of the data):
+
+| | 94 rules, one an axiom | the 10 W3C rules, unfolded | W3C / axiom, paired |
+|---|---:|---:|---:|
+| one group (a load, durable): reasoning | 1.296 s [1.143, 1.625] | 1.367 s [1.297, 1.646] | **1.10** [0.80, 1.27] |
+| a department a group, in memory: reasoning | 2.383 s [2.240, 2.659] | 2.498 s [2.446, 3.459] | **1.05** [0.93, 1.54] |
+| derived facts / derivations | 532,205 / 2,021,310 | 658,865 / 2,147,932 | |
+
+- **The design's target**: within 1.1× of the rules written by hand (the prototype, running the W3C rules as written:
+  2.2×). Met at the median: 1.10 for the load, 1.05 group by group. The W3C form derives more, by its own meaning:
+  126,660 facts more, the types of the six restriction classes (`x` is a member of "some `takesCourse` a `Course`"
+  before it is a `Student`) and the closure of `subClassOf`; the unfolded subclass rules that a chain of the others
+  gives are dropped, so a type is derived once a step, as by hand.
+- Every group ran unfolded but the first that wrote a fact of a relation the rules had been unfolded on while the
+  database was empty (`type`): it unfolded again without it, at once.
+
+**The rules written one an axiom, and the write path, against 23ac670** (the same groups, 7 rounds):
+
+| | 23ac670 | this | paired |
+|---|---:|---:|---:|
+| LUBM-10 in one group: reasoning | 1.283 s [1.130, 1.531] | 1.296 s [1.143, 1.625] | 1.00 [0.90, 1.33] |
+| a department a group, in memory: reasoning | 2.216 s [2.160, 2.387] | 2.383 s [2.240, 2.659] | 1.04 [0.98, 1.22] |
+| write a student, with rules / without | 24.8 / 8.8 µs | 26.0 / 8.8 µs | 1.05 [0.85, 1.20] / 1.00 |
+| retract it, with rules / without | 36.0 / 6.2 µs | 36.0 / 6.9 µs | 1.00 / 1.00 |
+| start-up (`bench.exe`, 21 rounds of 50 runs, medians), against main ca74bbe | 2.913 ms [2.692, 3.062] | 2.938 ms [2.575, 3.368] | 1.00 (0.997, 95 % [0.951, 1.035]) |
+
+The reasoner's code doubled (the closure module and its retraction, unfolding, variable properties: its frame tables
+62 KB to 125 KB, which the runtime reads at start-up): within the noise at 21 rounds, faster in 11 of them; the big and
+cold functions are kept out of line (an earlier build, before that, measured 1.044 against 23ac670). The subOrganizationOf
+closure of the hand rules is the module's too: 3,478 fewer derivations.
+
 ## Rules (2026-11-08)
 
 The first step of the reasoner ([rules](rules.md)): Datalog rules kept by the writer, semi-naive evaluation for

@@ -146,6 +146,24 @@ end
     order: the next page. *)
 Find(n, question, db) = find(db, ask(n, question), n)
 
+(** A rule of the database: a function of n variables that gives {Where, Then}, Where patterns [thing, property,
+    value] and Above, Below or Between, and Then one pattern, the fact the rule gives for each answer of Where, or
+    Never. The database keeps the facts its rules give up to date at every write, and a question reads them as any
+    fact. Every variable of Then is in a pattern of Where.
+
+      Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Client.Overdue, true]}) *)
+Rule(name, n, rule) = {Rule: name, Vars: n, Body: ask(n, rule)}
+
+(** The Then of a rule that is a constraint: a group that would give its Where an answer is refused whole, with
+    Code "invalid" and the rule's name. *)
+Never = "cepheus.Never"
+
+(** Defines rules in a database, in one group: the new ones, and those whose definition changed, found by name; the
+    others are left as they are, so a program defines its rules at each start. The group derives what the rules give
+    over the whole database. An Ok of missing, or an Err with Code "invalid" for a rule the database refuses, as a
+    variable of Then that no pattern binds. *)
+Define(rules, db) = define(db, rules)
+
 (** A kind of files: each of its things is a file, with the fields Name (a Text), Size (an Int: its bytes), Type (a
     Text: a media type, as "application/pdf"), Owner (a Link: the thing whose key seals the bytes) and Content (the
     root of its bytes in the server's vault). Give it to Connect as any kind; the rights of a token on the kind are

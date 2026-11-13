@@ -1,0 +1,93 @@
+(* Clients: made, changed, deleted, found, and listed by pages. Each function takes the database last. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/dict
+use std/list
+use std/result
+use std/value
+
+ClientSorts = ["name", "city"]   (** The orders of the list of clients. *)
+
+defn AddClient(c, by, db)
+  (** A new client from the fields ClientForm checked: an Ok of its id, or an Err, as Code "unique" when another
+      client has the e-mail. *)
+  cepheus.Insert(Client, c, db, by = by, why = "client added")
+end
+
+defn EditClient(id, c, by, db)
+  (** New fields of a client: an Ok of the group's number, or an Err. *)
+  cepheus.Update(Client, id, c, db, by = by, why = "client changed")
+end
+
+defn GetClient(id, db)
+  (** A client's fields: an Ok of them, or of missing for no client of this id (a deleted one included). *)
+  c = cepheus.Get(Client, id, db)?
+  result.Ok(if value.IsMissing(c) or value.IsMissing(c.Name) missing else c end)
+end
+
+defn InvoicesOf(id, db)
+  (** How many invoices a client has. *)
+  rows = cepheus.Find(1, (i) -> {Where: [[i, Invoice.Client, id]], Give: {N: cepheus.Count()}}, db)?
+  result.Ok(if value.Len(rows) == 0 0 else rows[1].N end)
+end
+
+defn DeleteClient(id, by, db)
+  (** Deletes a client that has no invoice: its fields are retracted, each as it was read (a change meanwhile refuses
+      the group), and it is marked Gone, which the rule NoInvoiceOfGone keeps without invoices. An Ok of missing, or an
+      Err: Code "has_invoices", "missing", "conflict", or "invalid" when an invoice came meanwhile. *)
+  c = GetClient(id, db)?
+  if value.IsMissing(c)
+    return result.Err({Code: "missing", Message: "There is no client $id."})
+  end
+  n = InvoicesOf(id, db)?
+  if n > 0
+    return result.Err({Code: "has_invoices", Message: "This client has $n invoices: it stays."})
+  end
+  ops = [cepheus.Add(id, Client.Gone, true)]
+  for f in [{P: Client.Name, V: c.Name}, {P: Client.Search, V: c.Search}, {P: Client.Email, V: c.Email}, {P: Client.City, V: c.City}]
+    if not value.IsMissing(f.V)
+      ops = list.Concat([cepheus.Expect(id, f.P, f.V), cepheus.Retract(id, f.P, f.V)], ops)
+    end
+  end
+  cepheus.Write(ops, db, by = by, why = "client deleted")?
+  result.Ok(missing)
+end
+
+defn clientsQuery(search, sort)
+  (** The question of a page of clients' keys, for Page: those whose name or e-mail starts with search (in lower
+      case), or all of them, with their name and city, in the order sort: an Ok of {N, Query}. Their e-mail is read
+      after, for the page's rows only: a sorted page costs about each answer's patterns, and a question's variables
+      must all be in a pattern, so the search has a question of its own, of 5 variables, and the whole list one of 3. *)
+  order(n, y) = if sort == "city" [y, n] else [n] end
+  if search == ""
+    return {N: 3, Query: (p) -> ((c, n, y) -> {Where: [[c, Client.Name, n], [c, Client.City, y]], Give: {Client: c, Name: n, City: y}, Sort: p.Sort(order(n, y)), Limit: p.Limit, After: p.After})}
+  end
+  {N: 5, Query: (p) -> ((c, n, y, k, e) -> {
+    Where: [[c, Client.Name, n], [c, Client.City, y], [c, Client.Search, k], [c, Client.Email, e], cepheus.Or(cepheus.Prefix(k, search), cepheus.Prefix(e, search))],
+    Give: {Client: c, Name: n, City: y}, Sort: p.Sort(order(n, y)), Limit: p.Limit, After: p.After,
+  })}
+end
+
+defn ClientsPage(search, sort, cursor, size, db)
+  (** A page of clients, as Page gives it, each with its Name, Email and City: search is a start of their name or
+      e-mail, in lower case ("" for all), sort one of ClientSorts. *)
+  q = clientsQuery(search, if list.IndexOf(sort, ClientSorts) == missing "name" else sort end)
+  page = Page(q.N, q.Query, db, size, cursor = cursor)?
+  if value.Len(page.Rows) == 0
+    return result.Ok(page)
+  end
+  mails = cepheus.Find(2, (c, e) -> {Where: [[c, Client.Email, e], cepheus.In(c, [r.Client for r in page.Rows])], Give: {Client: c, Email: e}}, db)?
+  by = dict.Dict()
+  for m in mails
+    by[m.Client] = m.Email
+  end
+  result.Ok({Rows: [{Client: r.Client, Name: r.Name, City: r.City, Email: dict.Get(r.Client, by)} for r in page.Rows], Next: page.Next, Prev: page.Prev})
+end
+
+defn Balance(id, db)
+  (** What a client owes: the sum and the count of its invoices that are not paid. *)
+  rows = cepheus.Find(2, (i, t) -> {
+    Where: [[i, Invoice.Client, id], [i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])],
+    Give: {Total: cepheus.Sum(t), Count: cepheus.Count()},
+  }, db)?
+  result.Ok(if value.Len(rows) == 0 {Total: 0, Count: 0} else rows[1] end)
+end

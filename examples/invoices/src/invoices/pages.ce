@@ -1,0 +1,196 @@
+(* The pages, as HTML made on the server: every value from the database or from a visitor goes in through
+   http.Escape, so that a name such as <script> shows as text. The style and the script are served by the app itself
+   (Style, Script): the pages hold no inline code, and the Content-Security-Policy forbids any. *)
+use std/date
+use std/dict
+use std/encode
+use std/http
+use std/list
+use std/math
+use std/text
+use std/value
+
+e(x) = http.Escape(x)   (** A value escaped for HTML. *)
+
+defn Money(x)
+  (** An amount as 12,345.60. *)
+  s = text.Decimals(2, x)
+  sign = if text.StartsWith("-", s) "-" else "" end
+  whole = text.Split(".", if sign == "" s else text.ByteSlice(2, text.ByteLength(s), s) end)
+  digits = whole[1]
+  out = ""
+  n = text.ByteLength(digits)
+  for k in 1..n
+    out = "$out$(text.ByteSlice(k, k, digits))"
+    if math.Mod(n - k, 3) == 0 and k < n
+      out = "$out,"
+    end
+  end
+  "$sign$out.$(whole[2])"
+end
+
+DayText(t) = if value.IsMissing(t) "" else date.FormatDate(date.FromUnix(t)) end   (** A date as 2026-11-13. *)
+
+defn Layout(title, u, body)
+  (** A whole page: its title, the menu for the user u (missing on the sign-in page), and its body. *)
+  menu = if value.IsMissing(u) "" else
+    clients = if u.Role == "admin" "<a href=\"/clients\">Clients</a>" else "" end
+    "<nav><a href=\"/\">Dashboard</a> <a href=\"/invoices\">Invoices</a> $clients <span class=\"who\">$(e(u.Login)) ($(e(u.Role)))</span> <form method=\"post\" action=\"/logout\"><button>Sign out</button></form></nav>"
+  end
+  "<!doctype html>
+<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<title>$(e(title)) · Invoices</title><link rel=\"stylesheet\" href=\"/app.css\"><script type=\"module\" src=\"/app.js\"></script></head>
+<body>$menu<main><h1>$(e(title))</h1>
+$body</main></body></html>"
+end
+
+defn Problem(status, message, u)
+  (** A page that says what went wrong, with its status. *)
+  http.Html(Layout(http.Reason(status), u, "<p class=\"error\" id=\"problem\">$(e(message))</p>"), status = status)
+end
+
+defn wrongOf(wrong, field)
+  (** The message beside a field of a form. *)
+  m = if value.IsDict(wrong) dict.Get(field, wrong) else missing end
+  if value.IsMissing(m) "" else "<span class=\"error\">$(e(m))</span>" end
+end
+
+defn SignInPage(problem)
+  (** The page to sign in. *)
+  p = if value.IsMissing(problem) "" else "<p class=\"error\" id=\"problem\">$(e(problem))</p>" end
+  Layout("Sign in", missing, "$p<form method=\"post\" action=\"/login\" class=\"card\">
+<label>Login <input name=\"login\" id=\"login\" autocomplete=\"username\" required maxlength=\"64\"></label>
+<label>Password <input name=\"password\" id=\"password\" type=\"password\" autocomplete=\"current-password\" required maxlength=\"128\"></label>
+<button id=\"signin\">Sign in</button></form>")
+end
+
+defn pager(page, base)
+  (** The links to the pages before and after. *)
+  sep = if text.Contains("?", base) "&" else "?" end
+  prev = if value.IsMissing(page.Prev) "" else "<a id=\"prev\" href=\"$(e(base))$sep$(Link(page.Prev))\">← Previous</a>" end
+  next = if value.IsMissing(page.Next) "" else "<a id=\"next\" href=\"$(e(base))$sep$(Link(page.Next))\">Next →</a>" end
+  "<p class=\"pager\">$prev $next</p>"
+end
+
+defn ClientRows(page)
+  (** The rows of a page of clients, which the search as one types puts in place. *)
+  rows = [ "<tr><td><a href=\"/clients/$(r.Client)\">$(e(r.Name))</a></td><td>$(e(r.Email))</td><td>$(e(r.City))</td></tr>" for r in page.Rows]
+  if value.Len(rows) == 0 "<tr><td colspan=\"3\">No client.</td></tr>" else text.Join("", rows) end
+end
+
+defn ClientsList(page, search, sort, u)
+  (** The list of clients, with the search and the order. *)
+  base = "/clients?q=$(encode.UrlEncode(search))&sort=$(encode.UrlEncode(sort))"
+  options = text.Join("", ["<option value=\"$s\"$(if s == sort " selected" else "" end)>by $s</option>" for s in ClientSorts])
+  Layout("Clients", u, "<p><a class=\"button\" id=\"new-client\" href=\"/clients/new\">New client</a></p>
+<form method=\"get\" action=\"/clients\" class=\"bar\"><input id=\"q\" name=\"q\" value=\"$(e(search))\" placeholder=\"Name or e-mail\" autocomplete=\"off\" maxlength=\"120\" data-live=\"/clients\">
+<select name=\"sort\">$options</select><button>Search</button></form>
+<table><thead><tr><th>Name</th><th>E-mail</th><th>City</th></tr></thead><tbody id=\"rows\">$(ClientRows(page))</tbody></table>
+$(pager(page, base))")
+end
+
+
+defn ClientEdit(c, wrong, action, u)
+  (** The form of a client, new (c missing) or to change. *)
+  v(k) = if value.IsDict(c) e(dict.Get(k, c)) else "" end
+  Layout(if value.IsDict(c) "Change $(dict.Get("Name", c))" else "New client" end, u, "<form method=\"post\" action=\"$action\" class=\"card\">
+<label>Name <input name=\"name\" id=\"name\" value=\"$(v("Name"))\" required maxlength=\"120\"></label>$(wrongOf(wrong, "Name"))
+<label>E-mail <input name=\"email\" id=\"email\" type=\"email\" value=\"$(v("Email"))\" required maxlength=\"254\"></label>$(wrongOf(wrong, "Email"))
+<label>City <input name=\"city\" id=\"city\" value=\"$(v("City"))\" maxlength=\"80\"></label>$(wrongOf(wrong, "City"))
+<button id=\"save\">Save</button></form>")
+end
+
+defn status(s)
+  (** A status as a badge. *)
+  "<span class=\"badge $(e(s))\">$(e(s))</span>"
+end
+
+defn InvoiceRows(page)
+  (** The rows of a page of invoices. *)
+  rows = ["<tr><td><a href=\"/invoices/$(r.Invoice)\">$(r.Number)</a></td><td>$(e(r.BillTo))</td><td>$(DayText(r.Date))</td><td>$(DayText(r.Due))</td><td>$(status(r.Status))</td><td class=\"num\">$(Money(r.Total))</td></tr>" for r in page.Rows]
+  if value.Len(rows) == 0 "<tr><td colspan=\"6\">No invoice.</td></tr>" else text.Join("", rows) end
+end
+
+defn InvoiceTable(page, base)
+  (** A table of invoices, with its pages. *)
+  "<table><thead><tr><th>Number</th><th>Bill to</th><th>Date</th><th>Due</th><th>Status</th><th class=\"num\">Total</th></tr></thead><tbody id=\"rows\">$(InvoiceRows(page))</tbody></table>$(pager(page, base))"
+end
+
+defn ClientView(id, c, balance, page, u)
+  (** A client, what it owes, and its invoices that are not paid. *)
+  flag = if c.Overdue == true " <span class=\"badge late\" id=\"overdue\">overdue</span>" else "" end
+  Layout(c.Name, u, "<p>$(e(c.Email)) · $(e(c.City))$flag</p>
+<p id=\"balance\">Owes <strong>$(Money(balance.Total))</strong> on $(balance.Count) invoices not paid.</p>
+<p><a class=\"button\" id=\"new-invoice\" href=\"/invoices/new?client=$id\">New invoice</a> <a class=\"button\" href=\"/clients/$id/edit\">Change</a>
+<a class=\"button\" href=\"/invoices?client=$id\">All its invoices</a></p>
+<form method=\"post\" action=\"/clients/$id/delete\"><button class=\"danger\" id=\"delete\">Delete this client</button></form>
+<h2>Not paid</h2>$(InvoiceTable(page, "/clients/$id"))")
+end
+
+defn InvoicesList(page, f, query, u)
+  (** The list of invoices, with its filters. *)
+  box(s) = "<label><input type=\"checkbox\" name=\"$s\" value=\"1\"$(if list.IndexOf(s, f.Statuses) != missing " checked" else "" end)> $s</label>"
+  options = text.Join("", ["<option value=\"$s\"$(if s == f.Sort " selected" else "" end)>$(sortName(s))</option>" for s in InvoiceSorts])
+  Layout("Invoices", u, "<form method=\"get\" action=\"/invoices\" class=\"bar\" id=\"filters\"><input name=\"q\" value=\"$(e(f.Search))\" placeholder=\"Bill to\" maxlength=\"120\">
+$(box("unpaid")) $(box("late")) $(box("paid"))
+<label><input type=\"checkbox\" name=\"action\" value=\"1\"$(if f.Action " checked" else "" end)> late or due within a week</label>
+<select name=\"sort\">$options</select><button>Show</button> <a href=\"/invoices.csv?$(e(query))\" id=\"csv\">CSV</a></form>
+$(InvoiceTable(page, "/invoices?$query"))")
+end
+
+defn sortName(s)
+  (** The name of an order of the list. *)
+  match s
+    "-number" -> "newest first"
+    "number" -> "oldest first"
+    "-date" -> "by date"
+    "due" -> "by due date"
+    else -> "largest first"
+  end
+end
+
+defn lineRows(lines)
+  (** The inputs of the lines of an invoice: those it has, and three empty ones. *)
+  out = []
+  k = 0
+  for l in list.Concat(lines, [{Label: "", Quantity: "", Price: ""}, {Label: "", Quantity: "", Price: ""}, {Label: "", Quantity: "", Price: ""}])
+    k += 1
+    price = if value.IsNumber(l.Price) text.Decimals(2, l.Price) else "" end
+    out = list.Append("<tr><td><input name=\"label$k\" id=\"label$k\" value=\"$(e(l.Label))\" maxlength=\"200\"></td><td><input name=\"quantity$k\" id=\"quantity$k\" value=\"$(e(l.Quantity))\" inputmode=\"numeric\" size=\"6\"></td><td><input name=\"price$k\" id=\"price$k\" value=\"$price\" inputmode=\"decimal\" size=\"10\"></td></tr>", out)
+  end
+  text.Join("", out)
+end
+
+defn InvoiceEdit(inv, billTo, wrong, action, u)
+  (** The form of an invoice, new or to change: inv has Client, Date, Due and Lines. *)
+  problems = if value.IsDict(wrong) text.Join("", ["<p class=\"error\">$(e(wrong[k]))</p>" for k in dict.Keys(wrong)]) else "" end
+  Layout(if action == "/invoices" "New invoice" else "Change invoice $(inv.Number)" end, u, "$problems<form method=\"post\" action=\"$action\" class=\"card\">
+<input type=\"hidden\" name=\"client\" value=\"$(inv.Client)\"><p>Bill to <strong>$(e(billTo))</strong></p>
+<label>Date <input name=\"date\" id=\"date\" type=\"date\" value=\"$(DayText(inv.Date))\" required></label>
+<label>Due <input name=\"due\" id=\"due\" type=\"date\" value=\"$(DayText(inv.Due))\" required></label>
+<table><thead><tr><th>Label</th><th>Quantity</th><th>Price</th></tr></thead><tbody>$(lineRows(inv.Lines))</tbody></table>
+<button id=\"save\">Save</button></form>")
+end
+
+defn InvoiceView(inv, u)
+  (** An invoice, its lines, and what can be done with it. *)
+  lines = text.Join("", ["<tr><td>$(e(l.Label))</td><td class=\"num\">$(l.Quantity)</td><td class=\"num\">$(Money(l.Price))</td><td class=\"num\">$(Money(l.Quantity * l.Price))</td></tr>" for l in inv.Lines])
+  open = inv.Status != "paid"
+  acts = if open "<form method=\"post\" action=\"/invoices/$(inv.Id)/pay\"><button id=\"pay\">Mark paid</button></form> <a class=\"button\" href=\"/invoices/$(inv.Id)/edit\">Change</a>
+<form method=\"post\" action=\"/invoices/$(inv.Id)/delete\"><button class=\"danger\" id=\"delete\">Delete</button></form>" else "<p id=\"paid-on\">Paid on $(DayText(inv.PaidAt)).</p>" end
+  client = if u.Role == "admin" "<a href=\"/clients/$(inv.Client)\">$(e(inv.BillTo))</a>" else e(inv.BillTo) end
+  Layout("Invoice $(inv.Number)", u, "<p>Bill to $client · dated $(DayText(inv.Date)) · due $(DayText(inv.Due)) · <span id=\"status\">$(status(inv.Status))</span></p>
+<table><thead><tr><th>Label</th><th class=\"num\">Quantity</th><th class=\"num\">Price</th><th class=\"num\">Amount</th></tr></thead><tbody>$lines</tbody>
+<tfoot><tr><th colspan=\"3\">Total</th><th class=\"num\" id=\"total\">$(Money(inv.Total))</th></tr></tfoot></table>
+<div class=\"actions\">$acts <a class=\"button\" href=\"/invoices/new?client=$(inv.Client)\">New invoice for $(e(inv.BillTo))</a></div>")
+end
+
+defn Dashboard(u)
+  (** The dashboard: its numbers come over the live screen, and change in every open page as invoices change. *)
+  Layout("Dashboard", u, "<div class=\"tiles\" id=\"dashboard\" data-live=\"/live\">
+<div class=\"tile\"><h2>Not paid</h2><p class=\"big\" id=\"unpaid\">…</p><p id=\"unpaid-count\"></p></div>
+<div class=\"tile\"><h2>Late</h2><p class=\"big\" id=\"late\">…</p><p id=\"late-count\"></p></div></div>
+<h2>Payments of the last 24 hours</h2>
+<table><thead><tr><th>Number</th><th>Bill to</th><th>Paid</th><th class=\"num\">Total</th></tr></thead><tbody id=\"payments\"></tbody></table>
+<p id=\"live-state\" class=\"muted\">connecting…</p>")
+end

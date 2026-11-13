@@ -1,0 +1,287 @@
+(* Invoices: made with their lines in one group, changed while they are not paid, paid once, deleted while not paid,
+   found, listed by pages with filters, and marked late. Each function takes the database last. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/dict
+use std/fiber
+use std/list
+use std/result
+use std/value
+
+InvoiceSorts = ["-number", "number", "-date", "due", "-total"]   (** The orders of the list of invoices; - is the largest first. *)
+Statuses = ["unpaid", "late", "paid"]   (** The statuses of an invoice. *)
+Week = 604800   (** Seconds in a week. *)
+
+defn nextNumber(db)
+  (** The number after the largest one: read in the index's order, one row. *)
+  top = cepheus.Find(2, (i, n) -> {Where: [[i, Invoice.Number, n]], Give: {N: n}, Sort: [cepheus.Desc(n)], Limit: 1}, db)?
+  result.Ok(if value.Len(top) == 0 1 else top[1].N + 1 end)
+end
+
+defn lineOps(inv, lines, from)
+  (** The facts of an invoice's lines, each a new thing of the group from New(from). *)
+  ops = []
+  k = 0
+  for l in lines
+    k += 1
+    t = cepheus.New(from + k - 1)
+    ops = list.Concat(ops, [cepheus.Add(t, Line.Invoice, inv), cepheus.Add(t, Line.Position, k), cepheus.Add(t, Line.Label, l.Label),
+                            cepheus.Add(t, Line.Quantity, l.Quantity), cepheus.Add(t, Line.Price, l.Price)])
+  end
+  ops
+end
+
+(* One invoice numbered at a time in this process: a channel of one place, which AddInvoice fills while it numbers and
+   writes. Invoice numbers follow each other without a gap, as the law of many countries asks, so each is the largest
+   one plus one; 50 requests at once that each read the largest would all take the same, and all but one retry. *)
+numbering = fiber.Channel(size = 1)
+
+defn AddInvoice(f, billTo, by, db)
+  (** A new unpaid invoice with its lines, in one group: f as InvoiceForm checked it, billTo the client's name now. It
+      takes the next number, one invoice at a time in this process; if another process took the number meanwhile (the
+      group is refused: the number is unique), the next one. An Ok of {Invoice, Number}. *)
+  fiber.Send(true, numbering)
+  done = numbered(f, billTo, by, db)
+  _ = fiber.Receive(numbering)
+  done
+end
+
+defn numbered(f, billTo, by, db)
+  (** AddInvoice, once it may number. *)
+  for attempt in 1..10
+    n = nextNumber(db)?
+    inv = cepheus.New(1)
+    ops = list.Concat([cepheus.Add(inv, Invoice.Number, n), cepheus.Add(inv, Invoice.Client, f.Client), cepheus.Add(inv, Invoice.BillTo, billTo),
+                       cepheus.Add(inv, Invoice.Search, Lower(billTo)), cepheus.Add(inv, Invoice.Date, f.Date), cepheus.Add(inv, Invoice.Due, f.Due),
+                       cepheus.Add(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Total, f.Total)], lineOps(inv, f.Lines, 2))
+    done = cepheus.Write(ops, db, by = by, why = "invoice added")
+    if result.IsOk(done)
+      return result.Ok({Invoice: done.Value.Things[1], Number: n})
+    end
+    if done.Error.Code != "unique"
+      return done
+    end
+  end
+  result.Err({Code: "busy", Message: "Many invoices are being made at once: try again."})
+end
+
+defn GetInvoice(id, db)
+  (** An invoice with its lines, in their order: an Ok of its fields and Lines, or of missing. *)
+  inv = cepheus.Get(Invoice, id, db)?
+  if value.IsMissing(inv) or value.IsMissing(inv.Number)
+    return result.Ok(missing)
+  end
+  lines = cepheus.Find(5, (l, p, a, q, c) -> {
+    Where: [[l, Line.Invoice, id], [l, Line.Position, p], [l, Line.Label, a], [l, Line.Quantity, q], [l, Line.Price, c]],
+    Give: {Line: l, Position: p, Label: a, Quantity: q, Price: c},
+    Sort: [p],
+  }, db)?
+  inv.Id = id
+  inv.Lines = lines
+  result.Ok(inv)
+end
+
+defn linesGone(inv)
+  (** The facts of an invoice's lines, retracted. *)
+  ops = []
+  for l in inv.Lines
+    ops = list.Concat(ops, [cepheus.Retract(l.Line, Line.Invoice, inv.Id), cepheus.Retract(l.Line, Line.Position, l.Position), cepheus.Retract(l.Line, Line.Label, l.Label),
+                            cepheus.Retract(l.Line, Line.Quantity, l.Quantity), cepheus.Retract(l.Line, Line.Price, l.Price)])
+  end
+  ops
+end
+
+defn EditInvoice(id, f, now, by, db)
+  (** New dates and lines for an invoice that is not paid, as it was read (a payment meanwhile refuses the group): its
+      lines are replaced, its total computed again, and a late invoice due again later is unpaid again. *)
+  inv = GetInvoice(id, db)?
+  if value.IsMissing(inv)
+    return result.Err({Code: "missing", Message: "There is no invoice $id."})
+  end
+  if inv.Status == "paid"
+    return result.Err({Code: "paid", Message: "Invoice $(inv.Number) is paid: it stays as it is."})
+  end
+  status = if f.Due < now and inv.Status == "late" "late" else "unpaid" end
+  ops = list.Concat([cepheus.Expect(id, Invoice.Status, inv.Status), cepheus.Add(id, Invoice.Date, f.Date), cepheus.Add(id, Invoice.Due, f.Due),
+                     cepheus.Add(id, Invoice.Total, f.Total), cepheus.Add(id, Invoice.Status, status)], list.Concat(linesGone(inv), lineOps(id, f.Lines, 1)))
+  cepheus.Write(ops, db, by = by, why = "invoice changed")
+end
+
+defn PayInvoice(id, now, by, db)
+  (** Marks an invoice paid at now, once: an Ok of the group's number, or an Err, Code "paid" when it is paid already
+      (by this request or another one). *)
+  inv = cepheus.Get(Invoice, id, db)?
+  if value.IsMissing(inv) or value.IsMissing(inv.Status)
+    return result.Err({Code: "missing", Message: "There is no invoice $id."})
+  end
+  if inv.Status == "paid"
+    return result.Err({Code: "paid", Message: "Invoice $(inv.Number) is paid already."})
+  end
+  done = cepheus.Write([cepheus.Expect(id, Invoice.Status, inv.Status), cepheus.Add(id, Invoice.Status, "paid"), cepheus.Add(id, Invoice.PaidAt, now)], db, by = by, why = "invoice paid")
+  if result.IsErr(done) and done.Error.Code == "conflict"
+    return PayInvoice(id, now, by, db)
+  end
+  result.Ok(done?.Group)
+end
+
+defn DeleteInvoice(id, by, db)
+  (** Deletes an invoice that is not paid, with its lines, as it was read. *)
+  inv = GetInvoice(id, db)?
+  if value.IsMissing(inv)
+    return result.Err({Code: "missing", Message: "There is no invoice $id."})
+  end
+  if inv.Status == "paid"
+    return result.Err({Code: "paid", Message: "Invoice $(inv.Number) is paid: it stays."})
+  end
+  ops = [cepheus.Expect(id, Invoice.Status, inv.Status)]
+  for f in [{P: Invoice.Number, V: inv.Number}, {P: Invoice.Client, V: inv.Client}, {P: Invoice.BillTo, V: inv.BillTo}, {P: Invoice.Search, V: inv.Search},
+            {P: Invoice.Date, V: inv.Date}, {P: Invoice.Due, V: inv.Due}, {P: Invoice.Status, V: inv.Status}, {P: Invoice.Total, V: inv.Total}]
+    if not value.IsMissing(f.V)
+      ops = list.Append(cepheus.Retract(id, f.P, f.V), ops)
+    end
+  end
+  cepheus.Write(list.Concat(ops, linesGone(inv)), db, by = by, why = "invoice deleted")?
+  result.Ok(missing)
+end
+
+defn filterOf(f, i, s, u, now)
+  (** The conditions of a filter on an invoice i, its status s and its due date u: f.Statuses, one or two of
+      "unpaid", "late" and "paid" (In); f.Action, late or due within a week (Or); f.Open, not paid (Not). *)
+  out = []
+  n = value.Len(f.Statuses)
+  if n > 0 and n < 3
+    out = list.Append(cepheus.In(s, f.Statuses), out)
+  end
+  if f.Action
+    out = list.Append(cepheus.Or([i, Invoice.Status, "late"], cepheus.And([i, Invoice.Status, "unpaid"], cepheus.Below(u, now + Week))), out)
+  end
+  if f.Open
+    out = list.Append(cepheus.Not([i, Invoice.Status, "paid"]), out)
+  end
+  out
+end
+
+defn sortKeys(sort, no, d, u, t)
+  (** The keys of Sort for one of InvoiceSorts. *)
+  match sort
+    "number" -> [no]
+    "-date" -> [cepheus.Desc(d)]
+    "due" -> [u]
+    "-total" -> [cepheus.Desc(t)]
+    else -> [cepheus.Desc(no)]
+  end
+end
+
+defn invoicesWhere(f, now, i, no, b, d, u, s, t)
+  (** The patterns and conditions of the list of invoices, without its search. *)
+  list.Concat([[i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, s], [i, Invoice.Total, t]],
+              list.Concat(filterOf(f, i, s, u, now), if value.IsMissing(f.Client) [] else [[i, Invoice.Client, f.Client]] end))
+end
+
+defn invoicesQuery(f, now)
+  (** The question of the list of invoices, for Page: f as InvoicesPage takes it. A search needs a variable more, the
+      bill-to name in lower case: the question has 8 variables then, else 7, since every variable of a question must
+      be in a pattern, and a pattern more costs a sorted page more. An Ok of {N, Query}. *)
+  give(i, no, b, d, u, s, t) = {Invoice: i, Number: no, BillTo: b, Date: d, Due: u, Status: s, Total: t}
+  if f.Search == ""
+    return {N: 7, Query: (p) -> ((i, no, b, d, u, s, t) -> {Where: invoicesWhere(f, now, i, no, b, d, u, s, t), Give: give(i, no, b, d, u, s, t),
+                                                              Sort: p.Sort(sortKeys(f.Sort, no, d, u, t)), Limit: p.Limit, After: p.After})}
+  end
+  {N: 8, Query: (p) -> ((i, no, b, d, u, s, t, k) -> {Where: list.Concat(invoicesWhere(f, now, i, no, b, d, u, s, t), [[i, Invoice.Search, k], cepheus.Prefix(k, f.Search)]),
+                                                        Give: give(i, no, b, d, u, s, t), Sort: p.Sort(sortKeys(f.Sort, no, d, u, t)), Limit: p.Limit, After: p.After})}
+end
+
+defn keysQuery(f, now)
+  (** The question of a page of invoices' keys, for Page: each invoice of the filter with its number, status, due date,
+      and x, the total when the order is by total, else the date. Five patterns (six with a search): a sorted page of a
+      question of eight patterns leaves the order of the index and reads every answer (9 ms at 100,000 invoices,
+      against 0.2 ms for five), so the page's other fields are read after, for its rows only. *)
+  key(no, u, x) = match f.Sort
+    "number" -> [no]
+    "-date" -> [cepheus.Desc(x)]
+    "due" -> [u]
+    "-total" -> [cepheus.Desc(x)]
+    else -> [cepheus.Desc(no)]
+  end
+  xp = if f.Sort == "-total" Invoice.Total else Invoice.Date end
+  base(i, no, s, u, x) = list.Concat([[i, Invoice.Number, no], [i, Invoice.Status, s], [i, Invoice.Due, u], [i, xp, x]],
+                                     list.Concat(filterOf(f, i, s, u, now), if value.IsMissing(f.Client) [] else [[i, Invoice.Client, f.Client]] end))
+  give(i, no, s, u, x) = {Invoice: i, Number: no, Status: s, Due: u, X: x}
+  if f.Search == ""
+    return {N: 5, Query: (p) -> ((i, no, s, u, x) -> {Where: base(i, no, s, u, x), Give: give(i, no, s, u, x), Sort: p.Sort(key(no, u, x)), Limit: p.Limit, After: p.After})}
+  end
+  {N: 6, Query: (p) -> ((i, no, s, u, x, k) -> {Where: list.Concat(base(i, no, s, u, x), [[i, Invoice.Search, k], cepheus.Prefix(k, f.Search)]),
+                                                  Give: give(i, no, s, u, x), Sort: p.Sort(key(no, u, x)), Limit: p.Limit, After: p.After})}
+end
+
+defn rowsOf(keys, db)
+  (** The fields of the invoices of a page, in the page's order: one question, its candidates the page's ids. *)
+  if value.Len(keys) == 0
+    return result.Ok([])
+  end
+  rows = cepheus.Find(7, (i, no, b, d, u, s, t) -> {
+    Where: [[i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, s], [i, Invoice.Total, t], cepheus.In(i, [k.Invoice for k in keys])],
+    Give: {Invoice: i, Number: no, BillTo: b, Date: d, Due: u, Status: s, Total: t},
+  }, db)?
+  by = dict.Dict()
+  for r in rows
+    by[r.Invoice] = r
+  end
+  result.Ok([by[k.Invoice] for k in keys])
+end
+
+defn InvoicesPage(f, now, cursor, size, db)
+  (** A page of invoices, as Page gives it, with every field of each row: f is {Statuses, Action, Open, Search,
+      Client, Sort}, as filterOf reads the first three; Search a start of the bill-to name in lower case ("" for all),
+      Client an id or missing, Sort one of InvoiceSorts. The page's cursors are rows of its keys. *)
+  q = keysQuery(f, now)
+  page = Page(q.N, q.Query, db, size, cursor = cursor)?
+  result.Ok({Rows: rowsOf(page.Rows, db)?, Next: page.Next, Prev: page.Prev})
+end
+
+defn AllInvoices(f, now, db)
+  (** Every invoice of the list's filter f, in the order of their numbers, with PaidAt for those paid: one question
+      for the rows, and one for the dates of payment of each 10,000 of them (In takes at most 10,000 values). *)
+  q = invoicesQuery(f, now)
+  rows = cepheus.Find(q.N, q.Query({Sort: (keys) -> keys, Limit: missing, After: missing}), db)?
+  at = dict.Dict()
+  ids = [r.Invoice for r in rows]
+  from = 1
+  while from <= value.Len(ids)
+    part = list.Take(10000, list.Skip(from - 1, ids))
+    for x in cepheus.Find(2, (i, p) -> {Where: [[i, Invoice.PaidAt, p], cepheus.In(i, part)], Give: {Invoice: i, PaidAt: p}}, db)?
+      at[x.Invoice] = x.PaidAt
+    end
+    from += 10000
+  end
+  result.Ok([{Invoice: r.Invoice, Number: r.Number, BillTo: r.BillTo, Date: r.Date, Due: r.Due, Status: r.Status, Total: r.Total, PaidAt: dict.Get(r.Invoice, at)} for r in rows])
+end
+
+defn MarkLate(now, db, most = 500)
+  (** Marks late the unpaid invoices whose due date has passed, at most most of them, in one group, each as it was read
+      (one paid meanwhile is left for the next round): an Ok of how many. *)
+  due = cepheus.Find(2, (i, u) -> {Where: [[i, Invoice.Status, "unpaid"], [i, Invoice.Due, u], cepheus.Below(u, now)], Give: {Invoice: i, Due: u}, Sort: [u], Limit: most}, db)?
+  if value.Len(due) == 0
+    return result.Ok(0)
+  end
+  ops = []
+  for r in due
+    ops = list.Concat([cepheus.Expect(r.Invoice, Invoice.Status, "unpaid"), cepheus.Add(r.Invoice, Invoice.Status, "late")], ops)
+  end
+  done = cepheus.Write(ops, db, why = "invoices late")
+  if result.IsErr(done) and done.Error.Code == "conflict"
+    return result.Ok(0)
+  end
+  done?
+  result.Ok(value.Len(due))
+end
+
+defn BillTo(client, db)
+  (** The name to bill a client to: its name, or for a token that may not read clients (the accountant's), the bill-to
+      name of its latest invoice. An Ok of it, or of missing for a client the database doesn't know. *)
+  c = GetClient(client, db)
+  if result.IsOk(c) and not value.IsMissing(c.Value)
+    return result.Ok(c.Value.Name)
+  end
+  last = cepheus.Find(3, (i, no, b) -> {Where: [[i, Invoice.Client, client], [i, Invoice.Number, no], [i, Invoice.BillTo, b]], Give: {Number: no, BillTo: b}, Sort: [cepheus.Desc(no)], Limit: 1}, db)?
+  result.Ok(if value.Len(last) == 0 missing else last[1].BillTo end)
+end

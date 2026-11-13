@@ -946,6 +946,91 @@ let fork ctx a =
     C.ok ctx (new_handle (Fork { fv = v; fhub = None }))
   with Refused (code, m) -> failure ctx code m
 
+(* ---- Define: rules, written as Cepheus.define writes them (a rule is a schema thing: its name and its text) ---- *)
+
+let rule_keys = C.keys [| "Rule"; "Vars"; "Body" |]
+let body_keys = C.keys [| "Where"; "Then" |]
+let where_give = C.keys [| "Where"; "Give" |]
+
+(* the schema's named things of a database: (id, name), and the rules' texts: (id, text); read where Find reads *)
+let named ctx d =
+  let rows p =
+    let q = { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } in
+    match local_state d with
+    | Some v ->
+      let a = Answer.answer v q (Wire.Give [| 0; 1 |]) in
+      List.init a.n (fun r -> a.word r 0, Store.text v (a.word r 1))
+    | None -> (
+      match d.src with
+      | Fork _ -> []
+      | Server s -> (
+        match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query = q; select = Wire.Give [| 0; 1 |]; extra = []; order = Question.Top.none }) with
+        | Wire.Rows rw -> List.filter_map (function [| Value.Link e; Value.Text t |] | [| Value.Int e; Value.Text t |] -> Some (e, t) | _ -> None) rw.rows
+        | rep -> server_error rep "Define"))
+  in
+  rows Schema.p_name, rows Schema.p_rule
+
+let rule_of ctx name d v =
+  match C.fields rule_keys (map_of ctx name v) with
+  | [| C.Text rname; C.Int n; body |] -> (
+    match C.fields body_keys (map_of ctx name body) with
+    | [| (C.List _ as w); head |] ->
+      let qn = question ctx name d (C.record ctx where_give [| w; C.record ctx (C.keys [||]) [||] |]) n in
+      if qn.extra <> [] then refuse "invalid" "rule %s: a rule's Where holds patterns, Above, Below and Between; Not, Or, In and Prefix are for questions" rname;
+      let head =
+        match head with
+        | C.Text "cepheus.Never" -> Rules.Never
+        | C.List l when C.length l = 3 ->
+          let var = function C.Handle ("cepheus.variable", k) when k < n -> Some k | _ -> None in
+          let e = C.item ctx l 0 and p = C.item ctx l 1 and x = C.item ctx l 2 in
+          let k, i = property_of ctx name p in
+          let f = k.fields.(i) in
+          let e = match var e, e with Some j, _ -> Query.Var j | None, C.Int t -> Query.Thing t | _ -> C.need ctx name "a variable or a thing's id first in Then" e in
+          let v = match var x with Some j -> Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x) in
+          Rules.Give { Query.e; p = (resolve_kind d k).ids.(i); v }
+        | v -> C.need ctx name "Then: a pattern [thing, property, value], or cepheus.Never" v
+      in
+      { Rules.name = rname; vars = n; where = qn.query.where; ranges = qn.query.ranges; head }
+    | _ -> C.need ctx name "a rule {Where: [patterns], Then: pattern}" body)
+  | _ -> C.need ctx name "a rule, as cepheus.Rule makes it" v
+
+(* the new rules and the changed ones in one group, as Cepheus.define: a name taken by a property is refused, a race
+   for a free id (another program defining at once) is read again *)
+let define ctx a =
+  let name = "cepheus.Define" in
+  try
+    let d = db_of ctx name a.(0) in
+    let rules = Array.to_list (Array.map (rule_of ctx name d) (list_of ctx name a.(1))) in
+    let rec go tries =
+      let names, texts = named ctx d in
+      let next = ref Schema.first_prop in
+      let free () =
+        while List.mem_assoc !next names do incr next done;
+        let p = !next in
+        incr next;
+        p
+      in
+      let ops =
+        List.concat_map
+          (fun (r : Rules.t) ->
+            let text = Rules.to_text r in
+            match List.find_opt (fun (_, n) -> n = r.name) names with
+            | Some (id, _) when List.mem_assoc id texts -> if List.assoc id texts = text then [] else [ Resolve.Add (id, Schema.p_rule, Text text) ]
+            | Some _ -> refuse "invalid" "%s is the name of a property" r.name
+            | None ->
+              let id = free () in
+              [ Resolve.Expect (id, Schema.p_name, None); Add (id, Schema.p_name, Text r.name); Add (id, Schema.p_rule, Text text) ])
+          rules
+      in
+      if ops <> [] then
+        match commit ctx d ~by:0 ~why:"cepheus: rules" ops with
+        | _ -> ()
+        | exception Refused ("conflict", _) when tries > 0 -> go (tries - 1)
+    in
+    go 8;
+    C.ok ctx C.Missing
+  with Refused (code, m) -> failure ctx code m
+
 let watch_field = C.keys [| "Watch" |]
 
 (* Close of a database (its watches end too), or of a watch: "watch" then, so that the package's code takes what the
@@ -975,5 +1060,5 @@ let () =
   C.register
     [ "kind", 2, 2, kind; "connect", 4, 4, connect; "get", 3, 3, get; "insert", 5, 5, insert; "update", 6, 6, update;
       "write", 4, 4, write; "variables", 1, 1, variables; "find", 3, 3, find; "fork", 2, 2, fork; "close", 1, 1, close;
-      "watch", 3, 3, watch; "next", 1, 1, next; "put", 9, 9, put; "read", 5, 5, read; "delete", 5, 5, delete;
-      "erase", 2, 2, erase ]
+      "watch", 3, 3, watch; "next", 1, 1, next; "define", 2, 2, define; "put", 9, 9, put; "read", 5, 5, read;
+      "delete", 5, 5, delete; "erase", 2, 2, erase ]

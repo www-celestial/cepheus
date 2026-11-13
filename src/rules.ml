@@ -6,14 +6,25 @@
    cepheus/name and its cepheus/rule, the canonical text below, written in a group like any fact, so the journal keeps
    every version of it.
 
+   A pattern's property is a property id, or a variable: [prop_var k] (a negative number) for ?k. A variable property
+   is bound by another pattern of the body, whose property is a constant, that has it as its thing or its value
+   ([[c, domain, p], [x, p, y]]: the W3C's form of OWL 2 RL's rules); the engine specialises such rules on the facts
+   of that pattern when they are few (Reason). A variable that appears only as the value of patterns whose property
+   is a variable has no type of its own: it takes the type of the property it is read from, checked when a fact is
+   derived.
+
    The canonical text, one line:
      vars N; where [E P V] [E P V] ...; range ?X LO HI; ...; give [E P V]     (or: give never)
    a term is ?k (a variable), #n (a thing), or a value: iN (int), fH (float, hexadecimal, exact), b0 / b1, t"..."
-   (text, OCaml's escapes), dN (date, ms), mN (money, minor units), lN (link). *)
+   (text, OCaml's escapes), dN (date, ms), mN (money, minor units), lN (link); a property is its id or ?k. *)
 
 type head = Give of Query.pattern | Never
 
 type t = { name : string; vars : int; where : Query.pattern list; ranges : (int * Value.t * Value.t) list; head : head }
+
+(* the property of a pattern as the variable ?k, and back (-1: a constant property) *)
+let prop_var k = -1 - k
+let[@inline] pvar p = if p < 0 then -1 - p else -1
 
 (* ---- the canonical text ---- *)
 
@@ -28,7 +39,8 @@ let value_text (x : Value.t) =
   | Link n -> Printf.sprintf "l%d" n
 
 let term_text = function Query.Var k -> Printf.sprintf "?%d" k | Thing n -> Printf.sprintf "#%d" n | Val x -> value_text x
-let pattern_text (q : Query.pattern) = Printf.sprintf "[%s %d %s]" (term_text q.e) q.p (term_text q.v)
+let prop_text p = if p < 0 then Printf.sprintf "?%d" (-1 - p) else string_of_int p
+let pattern_text (q : Query.pattern) = Printf.sprintf "[%s %s %s]" (term_text q.e) (prop_text q.p) (term_text q.v)
 
 let[@inline never] to_text r =
   let b = Buffer.create 64 in
@@ -112,7 +124,7 @@ let[@inline never] of_text name text =
     word "[";
     let e = term () in
     skip ();
-    let p = int () in
+    let p = if peek () = '?' then (incr i; prop_var (int ())) else int () in
     let v = term () in
     word "]";
     { Query.e; p; v }
@@ -156,11 +168,36 @@ let[@inline never] of_text name text =
 
 (* ---- checks, when a rule is written ---- *)
 
-let pattern_vars (q : Query.pattern) = List.filter_map (function Query.Var k -> Some k | _ -> None) [ q.e; q.v ]
+let pattern_vars (q : Query.pattern) =
+  List.filter_map (function Query.Var k -> Some k | _ -> None) [ q.e; q.v ] @ (if q.p < 0 then [ pvar q.p ] else [])
 
-(* the variables' types, by the questions' rule (a variable has one type, from the patterns it appears in) *)
-let types (v : Store.view) r =
-  Query.types v { Query.vars = r.vars; where = r.where; ranges = r.ranges }
+let has_var_prop r =
+  List.exists (fun (q : Query.pattern) -> q.p < 0) r.where || match r.head with Give h -> h.p < 0 | Never -> false
+
+exception Bad of string
+
+(* the variables' types, by the questions' rule (a variable has one type, from the patterns it appears in), a
+   property variable a link; None for a variable that appears only as the value of patterns with a variable property
+   (its type is the property's, at each instance) *)
+let static_types (v : Store.view) r =
+  let ty = Array.make (max 1 r.vars) None in
+  let set x t =
+    if x < 0 || x >= r.vars then raise (Bad (Printf.sprintf "variable %d out of range" x));
+    match ty.(x) with
+    | None -> ty.(x) <- Some t
+    | Some t' -> if t' <> t then raise (Bad (Printf.sprintf "variable %d is both a %s and a %s" x (Value.typ_name t') (Value.typ_name t)))
+  in
+  List.iter
+    (fun (q : Query.pattern) ->
+      (match q.e with Query.Var x -> set x Value.Tlink | _ -> ());
+      if q.p < 0 then set (pvar q.p) Value.Tlink
+      else
+        match q.v, Schema.find v.schema q.p with
+        | Query.Var x, Some d -> set x d.typ
+        | Query.Var _, None -> raise (Bad (Printf.sprintf "no property %d" q.p))
+        | _ -> ())
+    r.where;
+  ty
 
 let[@inline never] check (v : Store.view) r =
   let bad fmt = Printf.ksprintf (fun s -> raise (Parse (Printf.sprintf "rule %s: %s" r.name s))) fmt in
@@ -172,35 +209,63 @@ let[@inline never] check (v : Store.view) r =
       (fun (q : Query.pattern) ->
         List.iter (fun k -> if k < 0 || k >= r.vars then bad "variable ?%d out of range" k else seen.(k) <- true) (pattern_vars q);
         (match q.e with Query.Val _ -> bad "the thing of a pattern is a variable or a thing" | _ -> ());
-        if Schema.find v.schema q.p = None then bad "no property %d" q.p)
+        if q.p >= 0 && Schema.find v.schema q.p = None then bad "no property %d" q.p)
       r.where;
     Array.iteri (fun k s -> if not s then bad "variable ?%d appears in no pattern of the body" k) seen;
-    let ty = match types v r with t -> t | exception Query.Bad m -> bad "%s" m in
+    (* a variable property is bound by a pattern whose property is a constant: no pattern scans every fact *)
+    let bound_by_const k =
+      List.exists (fun (q : Query.pattern) -> q.p >= 0 && (q.e = Query.Var k || q.v = Query.Var k)) r.where
+    in
+    List.iter
+      (fun (q : Query.pattern) ->
+        if q.p < 0 && not (bound_by_const (pvar q.p)) then
+          bad "the property ?%d is bound by no pattern whose property is a constant" (pvar q.p))
+      r.where;
+    let sty = match static_types v r with t -> t | exception Bad m -> bad "%s" m in
     List.iter
       (fun (x, lo, hi) ->
-        if x < 0 || x >= r.vars || not (Value.inline ty.(x)) then bad "a range needs an int, date or money variable";
-        if not (Value.has_type ty.(x) lo && Value.has_type ty.(x) hi) then bad "the bounds of ?%d are not of its type" x)
+        match if x < 0 || x >= r.vars then None else sty.(x) with
+        | Some t when Value.inline t ->
+          if not (Value.has_type t lo && Value.has_type t hi) then bad "the bounds of ?%d are not of its type" x
+        | _ -> bad "a range needs an int, date or money variable")
       r.ranges;
     List.iter
       (fun (q : Query.pattern) ->
-        match q.v, Schema.find v.schema q.p with
+        match q.v, (if q.p >= 0 then Schema.find v.schema q.p else None) with
         | Val x, Some d when not (Value.has_type d.typ x) -> bad "%s is not a %s" (Value.to_string x) (Value.typ_name d.typ)
         | _ -> ())
       r.where;
     (match r.head with
      | Never -> ()
      | Give q ->
-       let d = match Schema.find v.schema q.p with Some d -> d | None -> bad "no property %d in its head" q.p in
-       if Schema.is_system q.p then bad "its head gives a cepheus/ property";
+       (* a variable head property: its type, and that it is no cepheus/ property, are checked at each fact derived *)
+       let d =
+         if q.p < 0 then begin
+           if not (bound_by_const (pvar q.p)) then
+             bad "the property ?%d of its head is bound by no pattern whose property is a constant" (pvar q.p);
+           None
+         end
+         else match Schema.find v.schema q.p with Some d -> Some d | None -> bad "no property %d in its head" q.p
+       in
+       if q.p >= 0 && Schema.is_system q.p then bad "its head gives a cepheus/ property";
        (match q.e with
-        | Query.Var k -> if k < 0 || k >= r.vars then bad "variable ?%d out of range" k else if ty.(k) <> Value.Tlink then bad "?%d is not a thing" k
+        | Query.Var k ->
+          (* a variable without a type of its own is checked a thing at each fact derived *)
+          if k < 0 || k >= r.vars then bad "variable ?%d out of range" k
+          else (match sty.(k) with Some Value.Tlink | None -> () | Some _ -> bad "?%d is not a thing" k)
         | Thing t -> if t < Schema.first_thing then bad "its head's thing #%d is not an ordinary thing" t
         | Val _ -> bad "the thing of its head is a variable or a thing");
-       (match q.v with
-        | Query.Var k ->
-          if k < 0 || k >= r.vars then bad "variable ?%d out of range" k
-          else if ty.(k) <> d.typ then bad "?%d is a %s, %s takes a %s" k (Value.typ_name ty.(k)) d.name (Value.typ_name d.typ)
-        | Thing t -> if d.typ <> Value.Tlink then bad "%s takes a %s, not a thing" d.name (Value.typ_name d.typ) else ignore t
-        | Val x -> if not (Value.has_type d.typ x) then bad "%s is not a %s" (Value.to_string x) (Value.typ_name d.typ)));
+       match d with
+       | None -> (match q.v with Query.Var k when k < 0 || k >= r.vars -> bad "variable ?%d out of range" k | _ -> ())
+       | Some d -> (
+         match q.v with
+         | Query.Var k ->
+           if k < 0 || k >= r.vars then bad "variable ?%d out of range" k
+           else (
+             match sty.(k) with
+             | Some t when t <> d.typ -> bad "?%d is a %s, %s takes a %s" k (Value.typ_name t) d.name (Value.typ_name d.typ)
+             | _ -> ())
+         | Thing t -> if d.typ <> Value.Tlink then bad "%s takes a %s, not a thing" d.name (Value.typ_name d.typ) else ignore t
+         | Val x -> if not (Value.has_type d.typ x) then bad "%s is not a %s" (Value.to_string x) (Value.typ_name d.typ)));
     Ok ()
   with Parse m -> Error m

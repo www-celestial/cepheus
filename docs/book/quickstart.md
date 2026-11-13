@@ -201,6 +201,7 @@ stop closed the database, so the start replayed nothing.
 
 ## Next
 
+- [A real app](app.md): an app of invoices and clients on this stack, built step by step and run in production.
 - [Concepts](concepts.md): facts, groups, views, questions, forks.
 - [Cepheus from Cesia](cesia.md): every call of the client, `Write` with `Expect`, aggregates, live questions
   (`Watch`), forks for tests, reads in the program's own memory.

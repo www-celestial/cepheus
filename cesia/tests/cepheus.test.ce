@@ -288,6 +288,73 @@ defn isWatchEndsWithUntil()
 end
 
 
+Account = cepheus.Kind("account", {Late: cepheus.Bool(), Closed: cepheus.Bool()})
+Bill = cepheus.Kind("bill", {Account: cepheus.Link(), Status: cepheus.Text(), Total: cepheus.Money(2)})
+
+lateAccount = cepheus.Rule("late-account", 2, (a, b) -> {Where: [[b, Bill.Account, a], [b, Bill.Status, "late"]], Then: [a, Account.Late, true]})
+noBillOfClosed = cepheus.Rule("no-bill-of-closed", 2, (a, b) -> {Where: [[b, Bill.Account, a], [a, Account.Closed, true]], Then: cepheus.Never})
+
+defn isRuleDerivesAndRetracts()
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  cepheus.Define([lateAccount], t)?
+  a = cepheus.Insert(Account, {Closed: false}, t)?
+  b = cepheus.Insert(Bill, {Account: a, Status: "late", Total: 10}, t)?
+  c = cepheus.Insert(Bill, {Account: a, Status: "late", Total: 20}, t)?
+  late = cepheus.Get(Account, a, t)?.Late
+  cepheus.Update(Bill, b, {Status: "paid"}, t)?
+  still = cepheus.Get(Account, a, t)?.Late
+  cepheus.Update(Bill, c, {Status: "paid"}, t)?
+  late == true and still == true and cepheus.Get(Account, a, t)?.Late == missing
+end
+
+defn isRuleDerivesWhatIsThere()
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  a = cepheus.Insert(Account, {Closed: false}, t)?
+  cepheus.Insert(Bill, {Account: a, Status: "late", Total: 10}, t)?
+  cepheus.Define([lateAccount], t)?
+  rows = cepheus.Find(1, (x) -> {Where: [[x, Account.Late, true]], Give: {Account: x}}, t)?
+  value.Equal(rows, [{Account: a}])
+end
+
+defn isConstraintRefuses()
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  cepheus.Define([noBillOfClosed], t)?
+  open = cepheus.Insert(Account, {Closed: false}, t)?
+  shut = cepheus.Insert(Account, {Closed: true}, t)?
+  cepheus.Insert(Bill, {Account: open, Status: "unpaid", Total: 5}, t)?
+  refused = cepheus.Insert(Bill, {Account: shut, Status: "unpaid", Total: 5}, t)
+  closing = cepheus.Update(Account, open, {Closed: true}, t)
+  bug.Assert(refused.Error.Code == "invalid", "a bill of a closed account is refused")
+  closing.Error.Code == "invalid" and cepheus.Get(Account, open, t)?.Closed == false
+end
+
+defn isDefineAgainWritesNothing()
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  cepheus.Define([lateAccount, noBillOfClosed], t)?
+  before = cepheus.Update(Account, cepheus.Insert(Account, {Closed: false}, t)?, {Closed: false}, t)?
+  cepheus.Define([noBillOfClosed, lateAccount], t)?
+  after = cepheus.Insert(Account, {Closed: false}, t)
+  cepheus.Update(Account, after?, {Closed: false}, t)? == before + 2
+end
+
+defn isRuleChanged()
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  cepheus.Define([lateAccount], t)?
+  a = cepheus.Insert(Account, {Closed: false}, t)?
+  cepheus.Insert(Bill, {Account: a, Status: "unpaid", Total: 10}, t)?
+  unpaid = cepheus.Rule("late-account", 2, (a, b) -> {Where: [[b, Bill.Account, a], [b, Bill.Status, "unpaid"]], Then: [a, Account.Late, true]})
+  cepheus.Define([unpaid], t)?
+  cepheus.Get(Account, a, t)?.Late == true
+end
+
+defn isRuleRefusedWithItsReason()
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  loose = cepheus.Rule("loose", 3, (a, b, x) -> {Where: [[b, Bill.Account, a]], Then: [x, Account.Late, true]})
+  inside = cepheus.Rule("inside", 2, (a, b) -> {Where: [[b, Bill.Account, a], cepheus.Not([b, Bill.Status, "paid"])], Then: [a, Account.Late, true]})
+  named = cepheus.Rule("bill/Status", 2, (a, b) -> {Where: [[b, Bill.Account, a]], Then: [a, Account.Late, true]})
+  value.Equal([cepheus.Define([loose], t).Error.Code, cepheus.Define([inside], t).Error.Code, cepheus.Define([named], t).Error.Code], ["invalid", "invalid", "invalid"])
+end
+
 Scans = cepheus.Files("scan")
 
 defn isAFileKindAKind()

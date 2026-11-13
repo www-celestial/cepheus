@@ -1,0 +1,24 @@
+(** Adds a user of the app: APP_LOGIN=ada APP_ROLE=admin APP_PASSWORD=... cesia do users. The role is admin or
+    accountant. The password comes from the environment, never from the command line, where other users of the
+    machine see it; and cesia do passes no arguments to a task, so the login and the role come from it too. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/invoices
+use std/crypto
+use std/io
+use std/result
+use std/sys
+use std/value
+
+defn setting(name)
+  (** A setting of the environment, or "". *)
+  v = sys.Env(name)
+  if value.IsText(v) v else "" end
+end
+
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
+added = invoices.AddUser(setting("APP_LOGIN"), setting("APP_PASSWORD"), setting("APP_ROLE"), result.Unwrap(crypto.Open()), db)
+if result.IsErr(added)
+  io.PrintError("users: $(added.Error.Message)")
+  sys.Exit(1)
+end
+io.Print("user $(setting("APP_LOGIN")) added, $(setting("APP_ROLE"))")

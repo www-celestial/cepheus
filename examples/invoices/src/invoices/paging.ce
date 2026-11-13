@@ -1,0 +1,61 @@
+(* Pages of a question, by the row they come after: never an offset, so a page costs the same at any depth, and a row
+   written between two pages moves none of them. A cursor is the last row of a page (or the first, for the page
+   before), carried in the page's links as Base64 of its JSON; a cursor made by hand is checked as any input. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/dict
+use std/encode
+use std/json
+use std/list
+use std/result
+use std/text
+use std/value
+
+defn flip(keys)
+  (** The keys of a Sort, each in the other direction. *)
+  [if value.IsDict(k) and "Desc" in k k.Desc else cepheus.Desc(k) end for k in keys]
+end
+
+defn Page(n, query, db, size, cursor = missing)
+  (** A page of a question of n variables: query(p) gives the question, with Sort: p.Sort(keys), Limit: p.Limit and
+      After: p.After. cursor is missing for the first page, {After: row} for the page after a row, {Before: row} for
+      the page before it. An Ok of {Rows, Next, Prev}: the rows, then the cursors of the next page and of the one
+      before, each missing at an end. *)
+  back = value.IsDict(cursor) and "Before" in cursor
+  from = if back cursor.Before else if value.IsDict(cursor) cursor.After else missing end
+  p = {Limit: size + 1, After: from, Sort: if back flip else (keys) -> keys end}
+  rows = cepheus.Find(n, query(p), db)?
+  more = value.Len(rows) > size
+  rows = list.Take(size, rows)
+  if back
+    rows = list.Reverse(rows)
+  end
+  empty = value.Len(rows) == 0
+  next = if empty missing else if back or more {After: rows[value.Len(rows)]} else missing end
+  prev = if empty missing else if (back and more) or (not back and value.IsDict(cursor)) {Before: rows[1]} else missing end
+  result.Ok({Rows: rows, Next: next, Prev: prev})
+end
+
+defn Cursor(form)
+  (** The cursor of a page from its query: after= or before=, Base64 of a JSON object of at most 2 KB; missing for the
+      first page, or for a cursor that isn't one (the first page then). *)
+  for way in ["after", "before"]
+    s = dict.Get(way, form)
+    if value.IsText(s) and s != "" and text.ByteLength(s) <= 2048
+      bytes = encode.Unbase64(s)
+      row = if result.IsOk(bytes) json.Parse(bytes.Value) else bytes end
+      if result.IsOk(row) and value.IsDict(row.Value)
+        return if way == "after" {After: row.Value} else {Before: row.Value} end
+      end
+    end
+  end
+  missing
+end
+
+defn Link(cursor)
+  (** The query part of a link to the page of a cursor: after=... or before=..., URL-encoded. *)
+  if "After" in cursor
+    "after=$(encode.UrlEncode(encode.Base64(json.Text(cursor.After))))"
+  else
+    "before=$(encode.UrlEncode(encode.Base64(json.Text(cursor.Before))))"
+  end
+end

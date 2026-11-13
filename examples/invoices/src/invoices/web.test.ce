@@ -1,0 +1,139 @@
+(* The web app through http.Handler, on a fork of Empty: no network, no server. A fork has no tokens, so the
+   accountant's refusals tested here are the app's; the database's own (denied) are tested end to end. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use std/bug
+use std/crypto
+use std/http
+use std/list
+use std/result
+use std/text
+use std/value
+
+now = 1794528000   (* 2026-11-13 00:00 UTC *)
+
+defn app()
+  (** The app on a fork, with an admin, ada, and an accountant, bo. *)
+  t = cepheus.Fork(cepheus.Empty, Kinds)?
+  cepheus.Define(Rules, t)?
+  s = crypto.Open()?
+  AddUser("ada", "correct horse battery", "admin", s, t)?
+  AddUser("bo", "another long secret", "accountant", s, t)?
+  env = {Full: t, Books: t, Keys: s, Now: () -> now, Secure: false}
+  result.Ok({Handle: http.Handler(App(env)), Db: t})
+end
+
+defn ask(a, method, target, body = "", sid = missing, origin = "http://shop.test")
+  (** A request to the app, as a browser at http://shop.test sends it. *)
+  parts = text.Split("?", target)
+  headers = [{Name: "host", Value: "shop.test"}]
+  if not value.IsMissing(origin)
+    headers = list.Append({Name: "origin", Value: origin}, headers)
+  end
+  if not value.IsMissing(sid)
+    headers = list.Append({Name: "cookie", Value: "sid=$sid"}, headers)
+  end
+  a.Handle({Method: method, Path: parts[1], Query: if value.Len(parts) > 1 parts[2] else "" end, Headers: headers, Body: body})
+end
+
+defn cookieOf(response)
+  (** The session's secret that a response sets, or missing. *)
+  for h in response.Headers
+    if h.Name == "set-cookie" and text.StartsWith("sid=", h.Value)
+      return text.Split(";", text.ByteSlice(5, text.ByteLength(h.Value), h.Value))[1]
+    end
+  end
+  missing
+end
+
+signIn(a, login, password) = cookieOf(ask(a, "POST", "/login", body = "login=$login&password=$(text.Replace(" ", "+", password))"))   (** A session's secret. *)
+
+header(name, response) = http.HeaderValue(name, response.Headers)   (** A header of a response. *)
+
+idOf(response) = text.Number(text.Split("/", header("location", response))[3])   (** The id at the end of a redirect's path. *)
+
+defn isSignInNeeded()
+  a = app()?
+  page = ask(a, "GET", "/")
+  post = ask(a, "POST", "/clients", body = "name=X")
+  page.Status == 303 and header("location", page) == "/login" and post.Status == 401
+end
+
+defn isSignedIn()
+  a = app()?
+  wrong = ask(a, "POST", "/login", body = "login=ada&password=nope")
+  unknown = ask(a, "POST", "/login", body = "login=nobody&password=correct+horse+battery")
+  good = ask(a, "POST", "/login", body = "login=ada&password=correct+horse+battery")
+  sid = cookieOf(good)
+  set = header("set-cookie", good)
+  bug.Assert(wrong.Status == 401 and unknown.Status == 401 and text.Contains("don&#39;t match", unknown.Body), "both refused the same way")
+  bug.Assert(text.Contains("HttpOnly", set) and text.Contains("SameSite=Strict", set), "the cookie's flags")
+  ask(a, "GET", "/", sid = sid).Status == 200 and ask(a, "POST", "/logout", sid = sid).Status == 303 and ask(a, "GET", "/", sid = sid).Status == 303
+end
+
+defn isOtherOriginRefused()
+  a = app()?
+  sid = signIn(a, "ada", "correct horse battery")
+  forged = ask(a, "POST", "/clients", body = "name=Mallory&email=m@evil.example", sid = sid, origin = "http://evil.example")
+  none = ask(a, "POST", "/clients", body = "name=Mallory&email=m@evil.example", sid = sid, origin = missing)
+  login = ask(a, "POST", "/login", body = "login=ada&password=correct+horse+battery", origin = "http://evil.example")
+  forged.Status == 403 and none.Status == 403 and login.Status == 403 and value.Len(ClientsPage("", "name", missing, 10, a.Db)?.Rows) == 0
+end
+
+defn isAccountantSeesInvoicesOnly()
+  a = app()?
+  sid = signIn(a, "bo", "another long secret")
+  [ask(a, "GET", "/clients", sid = sid).Status, ask(a, "GET", "/clients/new", sid = sid).Status, ask(a, "GET", "/invoices", sid = sid).Status] then value.Equal([403, 403, 200])
+end
+
+defn isClientMadeAndEscaped()
+  a = app()?
+  sid = signIn(a, "ada", "correct horse battery")
+  made = ask(a, "POST", "/clients", body = "name=%3Cscript%3Ealert(1)%3C%2Fscript%3E&email=Eve%40Example.com&city=Lyon", sid = sid)
+  shown = ask(a, "GET", "/clients/$(idOf(made))", sid = sid)
+  again = ask(a, "POST", "/clients", body = "name=Other&email=eve%40example.com", sid = sid)
+  bad = ask(a, "POST", "/clients", body = "name=&email=nope", sid = sid)
+  bug.Assert(made.Status == 303 and shown.Status == 200, "made and shown")
+  bug.Assert(text.Contains("&lt;script&gt;alert(1)&lt;/script&gt;", shown.Body) and not text.Contains("<script>alert", shown.Body), "escaped")
+  again.Status == 409 and text.Contains("Another client has this e-mail", again.Body) and bad.Status == 400
+end
+
+defn isInvoicePaidThroughTheForms()
+  a = app()?
+  sid = signIn(a, "ada", "correct horse battery")
+  c = idOf(ask(a, "POST", "/clients", body = "name=Ada+Martin&email=ada%40example.com&city=Lyon", sid = sid))
+  form = ask(a, "GET", "/invoices/new?client=$c", sid = sid)
+  made = ask(a, "POST", "/invoices", body = "client=$c&date=2026-11-01&due=2026-12-01&label1=Design&quantity1=3&price1=400", sid = sid)
+  inv = idOf(made)
+  paid = ask(a, "POST", "/invoices/$inv/pay", sid = sid)
+  twice = ask(a, "POST", "/invoices/$inv/pay", sid = sid)
+  shown = ask(a, "GET", "/invoices/$inv", sid = sid)
+  bug.Assert(form.Status == 200 and text.Contains("Ada Martin", form.Body), "the form of a new invoice")
+  made.Status == 303 and paid.Status == 303 and twice.Status == 409 and text.Contains("1,200.00", shown.Body) and text.Contains("Paid on 2026-11-13", shown.Body)
+end
+
+defn isCsvOfTheFilter()
+  a = app()?
+  sid = signIn(a, "ada", "correct horse battery")
+  c = idOf(ask(a, "POST", "/clients", body = "name=%3DHYPERLINK(1)&email=x%40example.com", sid = sid))
+  for k in 1..3
+    ask(a, "POST", "/invoices", body = "client=$c&date=2026-11-01&due=2026-12-01&label1=Item&quantity1=$k&price1=10", sid = sid)
+  end
+  out = ask(a, "GET", "/invoices.csv?unpaid=1", sid = sid)
+  lines = text.Lines(out.Body)
+  bug.Assert(header("content-type", out) == "text/csv; charset=utf-8", "CSV")
+  value.Len(lines) == 4 and lines[1] == "number,date,due,bill_to,status,total,paid_at" and lines[2] == "1,2026-11-01,2026-12-01,'=HYPERLINK(1),unpaid,10.00,"
+end
+
+defn isSecurityHeaders()
+  a = app()?
+  page = ask(a, "GET", "/login")
+  text.Contains("default-src 'self'", header("content-security-policy", page)) and header("x-content-type-options", page) == "nosniff" and header("cache-control", page) == "no-store"
+end
+
+defn isBadCursorRefused()
+  a = app()?
+  sid = signIn(a, "ada", "correct horse battery")
+  junk = ask(a, "GET", "/clients?after=%21%21", sid = sid)
+  typed = ask(a, "GET", "/clients?after=eyJDbGllbnQiOiJ4In0", sid = sid)
+  junk.Status == 200 and typed.Status == 400
+end

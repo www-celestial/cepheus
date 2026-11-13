@@ -1,0 +1,102 @@
+(** The load of one page or action of the app: C clients, each a fiber that sends its next request as soon as its last
+    answer came, N requests in all, each on a connection of its own; it prints one line of JSON: the requests a
+    second, the median and the 99th percentile of the latency in milliseconds, and the requests that failed (an answer
+    other than the one expected). The session's cookie comes in BENCH_SID, the accountant's in BENCH_BOOKS_SID.
+    load BASE WHAT C N, WHAT one of: get:PATH, books:PATH (as the accountant), invoice, pay, client, signin. pay pays
+    the unpaid invoices it reads from the database (CEPHEUS_URL, CEPHEUS_TOKEN), one each; invoice bills the clients
+    it reads there. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use src/invoices
+use std/bug
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+args = sys.Args
+base = args[1]
+what = args[2]
+c = text.Number(args[3])
+n = text.Number(args[4])
+(* The Origin a browser of this page would send. http.Fetch sends Host without its port (Host: 127.0.0.1), and the app
+   compares Origin with Host, so the origin here is the scheme and Host that Fetch sends. *)
+origin = {Name: "origin", Value: "$(text.Split(":", base)[1]):$(text.Split(":", base)[2])"}
+form = {Name: "content-type", Value: "application/x-www-form-urlencoded"}
+admin = {Name: "cookie", Value: "sid=$(sys.Env("BENCH_SID"))"}
+books = {Name: "cookie", Value: "sid=$(sys.Env("BENCH_BOOKS_SID"))"}
+
+defn ids(question, k)
+  (** k ids of the database for a question of one variable, read with the app's token. *)
+  db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
+  rows = result.Unwrap(cepheus.Find(2, question, db))
+  cepheus.Close(db)
+  [r.Id for r in list.Take(k, rows)]
+end
+
+stamp = text.Decimals(0, sys.Now() * 1000)
+targets = if what == "pay" ids((i, u) -> {Where: [[i, invoices.Invoice.Status, "unpaid"], [i, invoices.Invoice.Due, u]], Give: {Id: i, Due: u}, Sort: [u], Limit: n}, n)
+else if what == "invoice" ids((x, m) -> {Where: [[x, invoices.Client.Name, m]], Give: {Id: x, Name: m}, Sort: [m], Limit: 1000}, 1000)
+else [] end
+if what == "pay" and value.Len(targets) < n
+  io.PrintError("load: only $(value.Len(targets)) unpaid invoices for $n payments")
+  sys.Exit(1)
+end
+
+defn request(k)
+  (** The k-th request: {Url, Method, Body, Headers, Expect}. *)
+  if text.StartsWith("get:", what)
+    return {Url: "$base$(text.ByteSlice(5, text.ByteLength(what), what))", Method: "GET", Body: "", Headers: [admin], Expect: 200}
+  end
+  if text.StartsWith("books:", what)
+    return {Url: "$base$(text.ByteSlice(7, text.ByteLength(what), what))", Method: "GET", Body: "", Headers: [books], Expect: 200}
+  end
+  match what
+    "pay" -> {Url: "$base/invoices/$(targets[k])/pay", Method: "POST", Body: "", Headers: [admin, origin], Expect: 303}
+    "invoice" -> {Url: "$base/invoices", Method: "POST", Headers: [admin, origin, form], Expect: 303,
+                  Body: "client=$(targets[math.Mod(k, value.Len(targets)) + 1])&date=2026-11-01&due=2026-12-01&label1=Design&quantity1=3&price1=400&label2=Hosting&quantity2=1&price2=80.50"}
+    "client" -> {Url: "$base/clients", Method: "POST", Headers: [admin, origin, form], Expect: 303, Body: "name=Bench+$k&email=bench-$stamp-$k%40example.com&city=Lyon"}
+    "signin" -> {Url: "$base/login", Method: "POST", Headers: [origin, form], Expect: 303, Body: "login=bench&password=bench+password+1"}
+    else -> bug.Panic("load: no load $what")
+  end
+end
+
+defn client(first, step, out)
+  (** One client: the requests first, first + step, ... up to n, each timed; their times and failures to out. *)
+  times = []
+  failed = 0
+  k = first
+  while k <= n
+    q = request(k)
+    t0 = sys.Now()
+    r = http.Fetch(q.Url, method = q.Method, body = q.Body, headers = q.Headers)
+    times = list.Append((sys.Now() - t0) * 1000, times)
+    if result.IsErr(r) or r.Value.Status != q.Expect
+      failed += 1
+    end
+    k += step
+  end
+  fiber.Send({Times: times, Failed: failed}, out)
+end
+
+out = fiber.Channel()
+start = sys.Now()
+for i in 1..c
+  fiber.Spawn(() -> client(i, c, out))
+end
+times = []
+failed = 0
+for i in 1..c
+  got = result.Unwrap(fiber.Receive(out))
+  times = list.Concat(times, got.Times)
+  failed += got.Failed
+end
+took = sys.Now() - start
+sorted = list.Sort(times)
+at(p) = sorted[list.Max([1, math.Round(p * value.Len(sorted))])]
+io.Print(json.Text({What: what, C: c, N: n, Rps: math.Round(n / took), P50: math.Round(at(0.5) * 1000) / 1000, P99: math.Round(at(0.99) * 1000) / 1000, Failed: failed}))

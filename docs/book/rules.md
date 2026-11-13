@@ -84,8 +84,9 @@ The rules of a rule, checked when it is written (an error is `Invalid`, naming t
   must not be a `cepheus/` property, and must take the head value's type.
 - **No new thing**: a head names variables of the body or existing things. (Datalog with new things in heads,
   *existential rules*, can derive without end; Datalog without them always ends: its *least model* below is finite.)
-- In this version a pattern's property is a constant, as in a question; negation (`Not`), aggregates (`Sum`, `Count`)
-  and the modules for transitive closure are the next steps of the design.
+- A pattern's property is a constant, as in a question, or a variable bound by another pattern
+  ([below](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)); negation (`Not`) and aggregates (`Sum`, `Count`)
+  are the next steps of the design.
 
 ## What the database holds: the least model
 
@@ -148,6 +149,146 @@ rows); a variable bound by an earlier atom usually is (`[x, takesCourse, c]` wit
 dispatched by property, and by (property, value) for an atom whose value is a constant: a fact of `type` starts only
 the plans of its class.
 
+## Transitive closures: the closure module
+
+A **transitive** property relates a thing to everything it reaches: "a research group is part of a department, a
+department part of a university, so the group is part of the university". Two rule shapes say it, and the writer
+recognises both:
+
+```text
+prp-trp (OWL 2 RL's rule):      [x T y] [y T z] -> [x T z]           the edges and the closure in one property
+the linear pair:                [x E y] -> [x T y]
+                                [x E y] [y T z] -> [x T z]           the edges E apart from the closure T
+```
+
+Run as rules, they derive each closure fact many times: prp-trp derives $(x, z)$ once for every $y$ between them, so
+a chain of $n$ things costs about $n^3/6$ derivations for $n^2/2$ facts (166 a fact at $n = 500$, the design's
+measure); the linear rule once for every edge out of $x$ on a path to $z$. A **closure module** (Hu, Motik, Horrocks
+[Hu 2019], [Hu 2022]) finds each new fact of the closure once instead, by walks:
+
+- **From scratch**, at the module's first work in a group whose state before held no fact of T, or when its rules
+  are new: the graph's strong components (Tarjan [Tarjan 1972]), in an order where a component comes after every
+  component it reaches, and each component's targets the union of its successors' with them (the reach of a
+  component is shared by its members: Nuutila [Nuutila 1995]). Each target is tried once for each successor, each
+  new fact made once for each source, with no hash test: the facts present already are exactly the inputs, skipped by
+  a mark.
+- **Incrementally**, for a new edge $(a, b)$ over a closure already in the database: the new facts are the things
+  that reach $a$ (and $a$) times $b$ and what $b$ reaches, minus those present. With prp-trp the closure is closed, so
+  "what reaches $a$" is one lookup of $T$'s facts into $a$; with the linear pair it is a walk back over $E$, and a new
+  fact of $T$ given another way (asserted, or by another rule) reaches back along $E$ the same way.
+- The module's facts join the next round of semi-naive evaluation like any derived fact, so the other rules see them;
+  when nothing else reads $T$ or gives $T$ or $E$, a load's closure goes straight to the group's output.
+- **Retraction by walks**, when no other rule gives $T$ or $E$ (so the edges are exactly the facts the group leaves
+  asserted: prp-trp's $T$, or $E$): the sources whose targets may shrink are the retracted edges' starts and what
+  reaches them; their new targets are computed as from scratch, over their strong components, their successors first,
+  a thing that reaches no retracted edge keeping its targets whole (they cannot change); what a source held beyond its
+  new targets goes, exactly the facts left without a path (Hu, Motik, Horrocks [Hu 2022]: small deletions in 1 s with
+  modules against 585 s by B/F). The losses reach the other rules as B/F's do, and every loss counts against the
+  budget. Otherwise (another rule gives $T$ or $E$) B/F decides, through the two rules' plans: exact for any Datalog
+  program, slower on deep closures.
+
+A property is closed by the module when its rules have exactly one of these shapes (distinct variables, no
+constant, no range), it links things to things, takes many values and none is unique. Another rule on the same
+property runs as a rule beside it.
+
+## A property as a variable: the W3C's form of OWL's rules
+
+OWL 2 RL's rules are written over the ontology's facts, with the property a variable: `prp-dom` says
+"if $p$'s domain is $c$ and $x$ has a value of $p$, $x$ is a $c$" ([W3C 2012], §4.3). A pattern's property may be a
+variable, `prop_var k` for `?k`:
+
+```text
+[c, domainOf, ?p] [x, ?p, y] -> [x, type, c]          prp-dom
+[a, transitive, ?p] [x, ?p, y] [y, ?p, z] -> [x, ?p, z]   prp-trp over the ontology
+```
+
+- **Bound by a constant**: another pattern of the body, whose property is a constant, has `?k` as its thing or its
+  value, so no pattern scans every fact (checked when the rule is written).
+- **Types at the instance**: a value read under a variable property has that property's type; a variable that
+  appears only there takes it, and every other pattern it appears in must agree, or the instance does not exist. A
+  fact a head gives must fit its property (a property of the application, of the value's type, about a thing), or
+  the group is refused, naming the rule: `rule prp-spo1 gives worksFor a value of another type`.
+- In a property thing (ids 16 to 65535) only `cepheus/` facts are kept, so an axiom about a property names it as a
+  value: "the domain of `advisor` is `Person`" is `[Person, domainOf, advisor]`, and "`headOf` is a subproperty of
+  `worksFor`" is a thing of its own, `[a, subProperty, headOf] [a, superProperty, worksFor]`.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ ty; domain_of; advisor; part_of ]) =
+    declare db [ prop ~many:true "thing/type" Tlink; prop ~many:true "onto/domainOf" Tlink;
+                 prop ~many:true "person/advisor" Tlink; prop ~many:true "org/partOf" Tlink ]
+  in
+  let x = Var 0 and y = Var 1 and z = Var 2 in
+  (* prp-dom over the ontology's facts: c is the domain of ?2, x has a value of ?2: x is a c *)
+  let prp_dom =
+    { name = "prp-dom"; vars = 4; where = [ { e = Var 3; p = domain_of; v = Var 2 }; { e = x; p = prop_var 2; v = y } ];
+      ranges = []; head = Give { e = x; p = ty; v = Var 3 } }
+  in
+  (* a transitive property: the closure module keeps it *)
+  let part = { name = "part-of"; vars = 3; where = [ { e = x; p = part_of; v = y }; { e = y; p = part_of; v = z } ];
+               ranges = []; head = Give { e = x; p = part_of; v = z } } in
+  ignore (Result.get_ok (define db [ prp_dom; part ]));
+  (* the class Person, and an axiom about a property: its domain *)
+  let person = thing (Result.get_ok (write db [ Add (-1, domain_of, Link advisor) ])) (-1) in
+  let r = Result.get_ok (write db [ Add (-1, advisor, Link (-2)) ]) in
+  let ada = thing r (-1) in
+  let r = Result.get_ok (write db [ Add (-1, part_of, Link (-2)); Add (-2, part_of, Link (-3)) ]) in
+  let group = thing r (-1) in
+  let v = view db in
+  let show l = String.concat ", " (List.map Value.to_string l) in
+  Printf.printf "ada's types: %s (Person is %d)\n" (show (values v ada ty)) person;
+  Printf.printf "the group is part of: %s\n" (show (List.sort compare (values v group part_of)));
+  match why v ada ty (Link person) with
+  | Some (By { rule; from; _ }) ->
+    let leaf = function Given g -> Printf.sprintf "[#%d %d %s]" g.e g.p (Value.to_string g.v) | By b -> b.rule in
+    Printf.printf "by %s, from %s\n" rule (String.concat " and " (List.map leaf from))
+  | _ -> ()
+```
+
+```output
+ada's types: #65536 (Person is 65536)
+the group is part of: #65540, #65541
+by prp-dom, from [#65536 17 #18] and [#65537 18 #65538]
+```
+
+## Specialisation by small relations
+
+Run as written, such a rule is slow: every fact starts every plan whose property is a variable, and each looks the
+ontology up before anything is found (the design measured 2.2× on LUBM). The writer runs it **unfolded** instead: an
+atom over a relation with few facts (at most 10,000, by the store's exact counts), whose variables another atom of
+the rule dispatches on (its property, or its value under a constant property: a class), is replaced by each of its
+facts, the rule becoming one rule a fact, with the constants in place. This is partial evaluation (Jones, Gomard,
+Sestoft [Jones 1993]) of the rules on the ontology, which RDFox's users do by hand when they translate each axiom
+into its own rule [Motik 2014]:
+
+```text
+[c, domainOf, ?p] [x, ?p, y] -> [x, type, c]      over  [Person, domainOf, advisor]
+                                                  gives [x, advisor, y] -> [x, type, Person]
+```
+
+Atoms over small relations that share a variable are unfolded together (`[a, subProperty, ?p] [a, superProperty, ?q]`
+gives one rule an axiom thing), a range on an unfolded variable keeps only the facts inside it, and an unfolded rule
+that can have no instance (a property that does not take the value) is dropped. An unfolded `prp-trp` is a plain
+transitive rule on one property, which the closure module then runs.
+
+The unfolded rules give the same facts as the generic ones exactly while the relations keep the facts they were
+unfolded on, so those relations are **frozen**:
+- At each group, the writer checks that the view holds those facts: by identity first (the runs, and the delta's
+  entries of each relation, are the same objects as when it checked last: a few pointer comparisons), else by the
+  facts themselves.
+- A group that asserts, retracts, derives or deletes a fact of a frozen relation is reasoned with the rules as
+  written (begun unfolded, it starts again), and the next group unfolds again on the new facts. A relation a group
+  changed is a relation of the data, not of the ontology (an empty database's `type` relation is small at first): it
+  is not unfolded on again while the rules and the database's size stay.
+- A relation is unfolded on only if it does not depend on what the unfolded rules give: no chain of rules leads from
+  their heads to it. Otherwise a fact of it could lose its proof through the rules it was unfolded into, which only
+  the rules as written check (the writer keeps such a rule as written). With that, a fact of a frozen relation
+  changes only through a group that asserts it or derives or deletes it, which the writer sees.
+- `why` uses the rules as written: a proof names the generic rule, and its leaves include the ontology's facts.
+
 ## Retraction: Backward/Forward
 
 When a fact goes, the facts derived from it may go, unless they have another proof. Three algorithms are known:
@@ -204,7 +345,9 @@ A rule can derive a great deal from a small write (every pair of members of a cl
 whose derived changes pass **$100{,}000 + 100 \times \text{its asserted changes}$**: `Invalid "rule NAME derived more than N facts
 from a group of K facts"`, naming the rule that derived the most. The scaled part lets a load derive in proportion;
 the fixed part bounds what a small write can cost the other writers, who wait for it (about 0.1 s of reasoning at
-the budget). `rule_budget` holds the two numbers.
+the budget). `rule_budget` holds the two numbers. Every path counts against it: each rule instance's new fact, each
+fact a closure module makes, a closure's targets as they grow (so that a dense graph's $n^2$ facts are refused before
+they are made, in memory in proportion to the budget), and the facts B/F deletes.
 
 ## Why
 
@@ -240,6 +383,7 @@ the schema's names, properties' included) and `cepheus/rule` (system property 5)
 
 ```text
 vars 3; where [?0 16 ?1] [?1 17 ?2]; give [?0 16 ?2]
+vars 3; where [?0 18 ?1] [?2 ?1 ?3]; give [?2 19 ?0]        (a variable property: ?1 in the property's place)
 ```
 
 So a rule is written in a group like any fact, the journal keeps every version of it, and a fork gets it with the
@@ -305,6 +449,13 @@ marked *computed* are ours from their tables):
   that lost a derivation against every rule that can give it, each check a lookup in the store's persistent maps or
   runs (34 lookups for one student); the prototype of the design, over hash tables of its own, took 19.1 µs.
 
+**Closures and the W3C's form** (the design's step 2; [benchmarks](benchmarks.md#rules-step-2-closures-and-the-w3cs-form-2026-11-12)):
+the closure module computes the 100,000-node hierarchy's 683,496 new facts in **22.5 ms** (prp-trp as a rule: 0.92 s
+of reasoning) and the random DAG's 1,344,791 in **47.3 ms** (17.6 s), each new fact made once; LUBM-shaped data with
+the ontology as facts and the 10 W3C rules, unfolded, reasons in **1.10×** the time of the 94 rules written one an
+axiom for a load and 1.05× group by group, for the same derived facts of the data (the design's prototype, running
+the W3C rules as written: 2.2×).
+
 ## The choices behind this design
 
 Each was weighed against the others in the design; the measurements are the design's prototype's unless said.
@@ -322,17 +473,21 @@ Each was weighed against the others in the design; the measurements are the desi
 - **The flag in the value's field** (bit 63 of the value word in format 6, the lowest bit of the field in the
   blocks of formats 7 and 8 that hold a derived fact): no byte more without rules; a run of a newer format is not read by an older
   binary, which replays the journal instead.
+- **Closures by a module, not by their rules**: each closure fact found once instead of once a path (Hu et al.
+  [Hu 2019]); the two shapes recognised are the only ways the engine closes a property, any other way of writing a
+  closure runs as rules.
+- **Generic rules unfolded by the engine, not written one an axiom by hand**: one way to write rules (the ontology is
+  data), at the unfolded rules' speed; a write to the ontology runs the rules as written for that group.
 - **The budget scaled by the group** ($100{,}000 + 100 \times \text{its asserted changes}$): a load derives in proportion, a runaway
   rule is stopped and named.
 
 ## What is not here yet
 
-The design's plan has six steps; this version is the first.
+The design's plan has six steps; this version has the first two.
 
-- **Step 2**: the closure module for transitive properties (60 to over 1,000 times the rule in the prototype), and
-  rules written generically over the ontology (a variable property, `[p, owl.Domain, c], [x, p, y]`), specialised by
-  the engine into one rule an axiom (2.2 times faster measured). Until then a pattern's property is a constant.
-- **Step 3**: large derivations sorted and parallel, on several domains.
+- **Step 3**: large derivations sorted and parallel, on several domains. Until then a small group whose consequences
+  are large (a graph of 15,000 edges whose closure has 1.3 million facts) puts them into the view's delta one by one
+  in sorted batches, about a microsecond a fact; a group of 20,000 facts or more takes the large groups' path.
 - **Step 4**: stratified negation (`Not`) and aggregates (`Sum`, `Count`, `Min`, `Max`).
 - **Step 5**: rule changes with large consequences computed in the background and installed at one group.
 - **Step 6**: OWL 2 RL as a library of rules, and equality (`owl:sameAs`) by rewriting.
@@ -342,4 +497,5 @@ The design's plan has six steps; this version is the first.
 
 Every work cited here is in [references](references.md#rules-datalog-materialisation-and-its-maintenance), with what
 Cepheus took from it: [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [Feeley 1987], [Gupta 1993],
-[Motik 2015], [Motik 2019], [Motik 2014], [Urbani 2016], [Scholz 2016], [Zhao 2020], [Guo 2005].
+[Motik 2015], [Motik 2019], [Motik 2014], [Urbani 2016], [Scholz 2016], [Zhao 2020], [Guo 2005], [Hu 2019],
+[Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012].

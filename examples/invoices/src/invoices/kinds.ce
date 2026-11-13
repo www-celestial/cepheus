@@ -1,0 +1,43 @@
+(** Invoices and clients, kept in Cepheus and served as live web pages: the kinds of the database, the rules it keeps,
+    the checks of what a visitor sends, the questions, the pages and the routes. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+
+(** A client. Search is its name in lower case, for the search as one types: Prefix compares bytes. Overdue is given
+    by the rule Overdue, never written. Gone marks a client deleted: its other facts are retracted, and the rule
+    NoInvoiceOfGone refuses any invoice of it. *)
+Client = cepheus.Kind("client", {
+  Name: cepheus.Text(), Search: cepheus.Text(), Email: cepheus.Text(unique = true), City: cepheus.Text(),
+  Overdue: cepheus.Bool(), Gone: cepheus.Bool(),
+})
+
+(** An invoice. BillTo is the client's name as it was when the invoice was made, as an invoice keeps it, and Search is
+    BillTo in lower case. Status is "unpaid", "late" or "paid"; Total is the sum of its lines, computed when it is
+    written. *)
+Invoice = cepheus.Kind("invoice", {
+  Number: cepheus.Int(unique = true), Client: cepheus.Link(), BillTo: cepheus.Text(), Search: cepheus.Text(),
+  Date: cepheus.Date(), Due: cepheus.Date(), Status: cepheus.Text(), Total: cepheus.Money(2), PaidAt: cepheus.Date(),
+})
+
+(** A line of an invoice: its place in the invoice, what it bills, how many, and the price of one. *)
+Line = cepheus.Kind("line", {
+  Invoice: cepheus.Link(), Position: cepheus.Int(), Label: cepheus.Text(), Quantity: cepheus.Int(), Price: cepheus.Money(2),
+})
+
+(** A user of the app: its login, the Argon2id hash of its password, and its role, "admin" or "accountant". *)
+User = cepheus.Kind("user", {Login: cepheus.Text(unique = true), Hash: cepheus.Text(), Role: cepheus.Text()})
+
+(** A session: the BLAKE2b hash of the secret its cookie holds (the secret itself is kept nowhere), its user, and when
+    it ends. *)
+Session = cepheus.Kind("session", {Key: cepheus.Text(unique = true), User: cepheus.Link(), Expires: cepheus.Date()})
+
+(** A client with a late invoice is overdue: the database adds the fact when an invoice becomes late, and takes it
+    away when the client's last late invoice is paid. *)
+Overdue = cepheus.Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Client.Overdue, true]})
+
+(** No invoice of a deleted client: the database refuses a group that deletes a client who has an invoice, or that
+    gives an invoice to a deleted one, whatever the order of two programs that do both at once. *)
+NoInvoiceOfGone = cepheus.Rule("no-invoice-of-a-gone-client", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [c, Client.Gone, true]], Then: cepheus.Never})
+
+Kinds = [Client, Invoice, Line, User, Session]   (** Every kind of the app: those of its full token. *)
+Books = [Invoice, Line]   (** The kinds of the accountant's token, which reads and adds invoices only. *)
+Rules = [Overdue, NoInvoiceOfGone]   (** The rules the app defines at its start. *)

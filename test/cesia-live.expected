@@ -4,6 +4,8 @@ tls expect: conflict
 tls write: []
 tls find: [{N: 3}]
 tls fork: invalid
+tls rule: true
+tls a kind declared after a rule: true
 tls 100 fibers: 100 answered, 100 in the database
 tls closed: closed
 local: 200 writes by one connection, read at once by another: 200 seen

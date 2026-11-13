@@ -449,6 +449,25 @@ Four facts make the writer's maintenance exact and its cost what it is ([rules](
   and decremental transitive closure has no algorithm much better than recomputing under the OMv conjecture
   ([Henzinger 2015]); B/F's worst case is a recomputation of the facts it reaches. Measured on LUBM-shaped
   data, small retractions stay in microseconds ([benchmarks](benchmarks.md#rules-2026-11-08)).
+- **A closure's derivations against its facts.** For prp-trp, $T(x, z) \leftarrow T(x, y), T(y, z)$, the closure fact
+  $(x, z)$ is derived once for every $y$ with $(x, y)$ and $(y, z)$ in the closure: $D = \sum_{(x,z) \in T^+}
+  |\{y : (x,y), (y,z) \in T^+\}|$, about $n^3/6$ for $n^2/2$ facts on a chain of $n$ (166 a fact at $n = 500$). The
+  linear rule derives $(x, z)$ once for each edge out of $x$ on a path to $z$. The closure module makes each new fact
+  once: from scratch, over the strong components in reverse topological order, a component's targets are the union
+  of its successors' and their own, so the work is $O(V + E + \sum_{u \to w} |\mathrm{targets}(w)| + |T^+|)$, which
+  is $O(|T^+|)$ on a forest (each thing's targets its parent's and its parent: walked up, no union at all); an edge
+  added to a closure present costs its new facts and the facts met: $(\{a\} \cup \mathrm{pred}(a)) \times
+  (\{b\} \cup \mathrm{succ}(b))$ tested once each (Hu, Motik, Horrocks [Hu 2019], [Hu 2022]; Nuutila
+  [Nuutila 1995]; Tarjan's components [Tarjan 1972]).
+- **Unfolding is exact while its relations hold still.** For a rule $\rho$ with atoms $A$ over relations $R$ and the
+  rest $B$, $\rho$'s instances over a state $S$ are the union, over the joint bindings $\theta$ of $A$ in $S$, of the
+  instances of $B\theta \to H\theta$: partial evaluation of $\rho$ on $R$ ([Jones 1993]). So the unfolded program and
+  $\rho$ have the same least model over any state whose $R$ is the one unfolded on. B/F with the unfolded program
+  assumes $R$'s facts proved; that is sound when no fact of $R$ can lose its proof unseen: $R$ must not depend on
+  what the unfolded rules give (else a cycle through $R$ could keep two facts alive that only support each other, as
+  inverse properties did for counting), and a group that deletes or derives a fact of $R$ is reasoned with $\rho$ as
+  written. Of the cost: a rule over a variable property, as written, starts at every fact; unfolded, at the facts of
+  its properties only, each plan with its constants in place.
 
 ## 11. Compressed runs and journal: the coding and its bound
 

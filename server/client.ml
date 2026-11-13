@@ -530,12 +530,13 @@ let status c =
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Admin" })
 
 (* the properties' ids for these names, declaring the missing ones in one write (as Cepheus.declare): the schema is
-   read with Open again, and a declaration that lost a race for an id is made again *)
-let rec declare c name (props : Schema.prop list) =
+   read with Open again, and a declaration that lost a race for an id is made again without the ids it tried. Open
+   lists the properties only: an id held by a rule (a schema thing too) is found by that conflict, and skipped. *)
+let rec declare ?(avoid = []) c name (props : Schema.prop list) =
   match open_db ~local:false c name with
   | Error e -> Error e
   | Ok db ->
-    let used = List.map fst db.props in
+    let used = avoid @ List.map fst db.props in
     let next = ref Schema.first_prop and ops = ref [] and ids = ref [] and bad = ref None in
     let free () =
       while List.mem !next used do incr next done;
@@ -564,7 +565,9 @@ let rec declare c name (props : Schema.prop list) =
       else
         match write c db ~why:"cepheus: declare" (List.rev !ops) with
         | Ok _ -> ( match open_db c name with Ok db -> Ok (db, List.rev !ids) | Error e -> Error e)
-        | Error { code = "conflict"; _ } -> declare c name props
+        | Error { code = "conflict"; _ } ->
+          let tried = List.filter_map (function Resolve.Expect (p, q, None) when q = Schema.p_name -> Some p | _ -> None) !ops in
+          declare ~avoid:(tried @ avoid) c name props
         | Error e -> Error e)
 
 (* ---- live questions ----

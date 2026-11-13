@@ -84,6 +84,8 @@ let rec declare db props =
 type term = Query.term = Var of int | Thing of int | Val of value
 type pattern = Query.pattern = { e : term; p : int; v : term }
 type head = Rules.head = Give of pattern | Never
+
+let prop_var = Rules.prop_var
 type rule = Rules.t = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
 
 let rec define db (rules : rule list) =
@@ -144,6 +146,7 @@ type proof = Reason.proof =
 
 let why (v : view) e p x = match Store.word v x with None -> None | Some w -> Reason.why v e p w
 
+let sources = Reason.sources
 let rule_budget = Reason.budget_base, Reason.budget_per
 
 let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ | None -> None

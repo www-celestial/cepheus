@@ -1,0 +1,167 @@
+(* The app end to end: a real Cepheus server (tools/e2e.sh starts one and gives its address and tokens), the app served
+   by the test itself on a free port, and Firefox driven by Ceti, as a visitor uses it: forms typed and buttons
+   clicked. Each test makes its own users and clients, so the tests share the database but not their data. *)
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/ceti/src/browser
+use src/invoices
+use std/bug
+use std/crypto
+use std/fiber
+use std/http
+use std/net
+use std/result
+use std/sys
+use std/text
+use std/value
+
+profiles = ".cesia/firefox"
+
+defn served()
+  (** The app on a free port of 127.0.0.1, on the database of tools/e2e.sh: an Ok of {Base, Full, Books, Keys}. *)
+  url = sys.Env("CEPHEUS_URL")
+  full = cepheus.Connect(url, invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN"))?
+  books = cepheus.Connect(url, invoices.Books, token = sys.Env("CEPHEUS_BOOKS_TOKEN"))?
+  cepheus.Define(invoices.Rules, full)?
+  keys = crypto.Open()?
+  env = {Full: full, Books: books, Keys: keys, Now: () -> sys.Now(), Secure: false}
+  l = net.Listen(0)?
+  fiber.Spawn(() -> http.Serve(invoices.App(env), listener = l, maxBody = invoices.MaxBody))
+  result.Ok({Base: "http://127.0.0.1:$(net.Port(l))", Full: full, Books: books, Keys: keys})
+end
+
+defn user(app, role)
+  (** A new user of a role, with a login of its own: its login. *)
+  login = "$role-$(text.Decimals(0, sys.Now() * 1000000))"
+  invoices.AddUser(login, "a long enough password", role, app.Keys, app.Full)?
+  result.Ok(login)
+end
+
+defn signIn(app, login, p)
+  (** Signs a page in, through the form. *)
+  browser.Go("$(app.Base)/login", p)?
+  browser.Type("#login", login, p)?
+  browser.Type("#password", "a long enough password", p)?
+  browser.Click("#signin", p)?
+  browser.WaitFor("#dashboard", p)
+end
+
+defn changed(selector, was, p)
+  (** The text of an element once it is no longer was, within 4 s: an Ok of it, or of missing. *)
+  browser.Eval("new Promise((done) => { const t0 = Date.now(); const tick = () => { const el = document.querySelector('$selector'); if (el && el.textContent !== '$was') done(el.textContent); else if (Date.now() - t0 > 4000) done(null); else setTimeout(tick, 10) }; tick() })", p, timeout = 6)
+end
+
+defn arrived(base, p)
+  (** The text of the page once the page is at base, within 5 s: a form posted elsewhere takes the page to another
+      document, which an Eval started before can't wait for, so each look is an Eval of its own. *)
+  for k in 1..100
+    at = browser.Eval("location.origin", p)
+    if result.IsOk(at) and at.Value == base
+      return browser.Eval("document.body.innerText", p)
+    end
+    sys.Sleep(0.05)
+  end
+  result.Err({Kind: "timeout", Message: "the page never reached $base"})
+end
+
+defn newClient(app, name, email, p)
+  (** Makes a client through its form: an Ok of its page's path. *)
+  browser.Go("$(app.Base)/clients/new", p)?
+  browser.Type("#name", name, p)?
+  browser.Type("#email", email, p)?
+  browser.Type("#city", "Lyon", p)?
+  browser.Click("#save", p)?
+  browser.WaitFor("#balance", p)?
+  browser.Eval("location.pathname", p)
+end
+
+defn newInvoice(app, client, p)
+  (** Makes an invoice of two lines for a client through its form: an Ok of its page's path. *)
+  browser.Go("$(app.Base)$client", p)?
+  browser.Click("#new-invoice", p)?
+  browser.Type("#label1", "Design", p)?
+  browser.Type("#quantity1", "3", p)?
+  browser.Type("#price1", "400", p)?
+  browser.Type("#label2", "Hosting", p)?
+  browser.Type("#quantity2", "1", p)?
+  browser.Type("#price2", "80.50", p)?
+  browser.Click("#save", p)?
+  browser.WaitFor("#pay", p)?
+  browser.Eval("location.pathname", p)
+end
+
+defn isClientInvoicePaid()
+  (** An admin makes a client and an invoice through the forms, and marks it paid. *)
+  app = served()?
+  admin = user(app, "admin")?
+  browser.Firefox(defn (b)
+    p = browser.NewPage(b)?
+    signIn(app, admin, p)?
+    client = newClient(app, "Ada Martin", "ada-$(admin)@example.com", p)?
+    newInvoice(app, client, p)?
+    total = browser.Text("#total", p)?
+    browser.Click("#pay", p)?
+    browser.WaitFor("#paid-on", p)?
+    bug.Assert(total == "1,280.50", "the total of the lines")
+    browser.Text("#status", p)? == "paid"
+  end, profiles)
+end
+
+defn isDashboardLiveInAnotherPage()
+  (** Two pages open: an invoice made and paid in the first changes the dashboard of the second, by itself. *)
+  app = served()?
+  admin = user(app, "admin")?
+  browser.Firefox(defn (b)
+    one = browser.NewPage(b)?
+    two = browser.NewPage(b)?
+    signIn(app, admin, one)?
+    signIn(app, admin, two)?
+    bug.Assert(changed("#live-state", "connecting…", two)? == "live", "the second page is live")
+    client = newClient(app, "Bo Lind", "bo-$(admin)@example.com", one)?
+    before = changed("#unpaid", "…", two)?
+    newInvoice(app, client, one)?
+    after = changed("#unpaid", before, two)?
+    browser.Click("#pay", one)?
+    browser.WaitFor("#paid-on", one)?
+    paid = changed("#unpaid", after, two)?
+    row = browser.Text("#payments tr", two)?
+    bug.Assert(not value.IsMissing(after) and after != before, "the new invoice is counted: $before then $after")
+    paid == before and text.Contains("Bo Lind", row) and text.Contains("1,280.50", row)
+  end, profiles)
+end
+
+defn isAccountantSeesNoClient()
+  (** The accountant has no Clients page, from the app (403) and from the database itself (denied). *)
+  app = served()?
+  books = user(app, "accountant")?
+  denied = cepheus.Find(2, (c, n) -> {Where: [[c, invoices.Client.Name, n]], Give: {Name: n}}, app.Books)
+  bug.Assert(denied.Error.Code == "denied", "the accountant's token may not read clients: $(denied)")
+  browser.Firefox(defn (b)
+    p = browser.NewPage(b)?
+    signIn(app, books, p)?
+    links = browser.Texts("nav a", p)?
+    browser.Go("$(app.Base)/clients", p)?
+    refused = browser.Text("#problem", p)?
+    browser.Go("$(app.Base)/invoices", p)?
+    list = browser.Text("h1", p)?
+    not value.IsMissing(links) and not text.Contains("Clients", text.Join(" ", links)) and text.Contains("accountant sees invoices only", refused) and list == "Invoices"
+  end, profiles)
+end
+
+defn isOtherOriginRefused()
+  (** A page of another origin (another port) posts a form to the app with the signed-in visitor's cookie: refused. *)
+  app = served()?
+  admin = user(app, "admin")?
+  evil = net.Listen(0)?
+  page = "<!doctype html><form method=\"post\" action=\"$(app.Base)/clients\"><input name=\"name\" value=\"Mallory\"><input name=\"email\" value=\"m-$admin@evil.example\"><button id=\"go\">Win a prize</button></form>"
+  fiber.Spawn(() -> http.Serve(http.App() then http.Get("/", r -> http.Html(page)), listener = evil))
+  browser.Firefox(defn (b)
+    p = browser.NewPage(b)?
+    signIn(app, admin, p)?
+    browser.Go("http://127.0.0.1:$(net.Port(evil))/", p)?
+    browser.Click("#go", p)?
+    said = arrived(app.Base, p)?
+    made = invoices.ClientsPage("mallory", "name", missing, 10, app.Full)?.Rows
+    bug.Assert(text.Contains("another origin", said), "refused: $said")
+    value.Len([r for r in made if text.Contains(admin, r.Email)]) == 0
+  end, profiles)
+end

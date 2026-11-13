@@ -10,7 +10,15 @@
                                      each: R graduate students written (10 facts, a group each), then retracted (a
                                      group each), with the rules and without; per group, in microseconds
    reason.exe why N R DIR           the same base with rules: R proofs of derived facts of five kinds
-   reason.exe apply N               the cost of putting a derived fact into the view (Store.set), alone *)
+   reason.exe apply N               the cost of putting a derived fact into the view (Store.set), alone
+   reason.exe closure KIND FORM DIR|-   a graph's edges in one group, with a transitive closure's rules: KIND hierarchy
+                                     (100,000 nodes, 4 children each, depth 8), deep (20,000 nodes, 2 children
+                                     each), dag (5,000 nodes, 3 edges down each, the design's random DAG) or chain (500
+                                     nodes); FORM trp (prp-trp over the edges' property), linear (edges and closure apart)
+                                     or none; on the disk in DIR (the path of large groups) or in memory (-): the time,
+                                     the closure's facts, the reasoning alone
+   reason.exe w3c N groups|bulk DIR|-   as mat N rules, with the univ-bench ontology as facts and the W3C's form of the
+                                     OWL 2 RL rules it needs (10 rules, variable properties), which the engine unfolds *)
 
 open Cepheus
 
@@ -366,10 +374,269 @@ let apply_bench n =
   Printf.printf "apply: a derived fact into a delta of %d changes: %.3f us one by one, %.3f us in sorted batches of 6\n%!" n
     ((t1 -. t0) /. float k *. 1e6) ((t2 -. t1) /. float (6 * (k / 6)) *. 1e6)
 
+(* ---- transitive closures (the design's section 6.4) ---- *)
+
+(* the prototype's graphs: a tree whose node i > 0 has parent (i - 1) / b; a random DAG whose node i links to k nodes
+   below it (OCaml's Random, seed 1, as the prototype drew it) *)
+let tree n b = List.init (n - 1) (fun i -> let c = i + 1 in c, (c - 1) / b)
+
+let dag n k seed =
+  let rng = Random.State.make [| seed |] in
+  List.concat (List.init (n - 1) (fun i -> let c = i + 1 in List.init k (fun _ -> c, Random.State.int rng c)))
+  |> List.sort_uniq compare
+
+let closure_bench kind form dir =
+  Reason.trace := Sys.getenv_opt "TRACE" <> None;
+  let n, edges =
+    match kind with
+    | "hierarchy" -> 100_000, tree 100_000 4
+    | "deep" -> 20_000, tree 20_000 2
+    | "dag" -> 5_000, dag 5_000 3 1
+    | "chain" -> 500, tree 500 1
+    | k -> failwith ("no graph " ^ k)
+  in
+  let db = if dir = "-" then fork empty else ok (open_ dir) in
+  let e, t = match ok (declare db [ prop ~many:true "edge" Tlink; prop ~many:true "within" Tlink ]) with [ e; t ] -> e, t | _ -> assert false in
+  let x = Var 0 and y = Var 1 and z = Var 2 in
+  let edge_p = if form = "linear" then e else t in
+  (match form with
+   | "trp" -> ignore (ok (define db [ { name = "trp"; vars = 3; where = [ { e = x; p = t; v = y }; { e = y; p = t; v = z } ]; ranges = []; head = Give { e = x; p = t; v = z } } ]))
+   | "linear" ->
+     ignore (ok (define db [ { name = "base"; vars = 2; where = [ { e = x; p = e; v = y } ]; ranges = []; head = Give { e = x; p = t; v = y } };
+                             { name = "step"; vars = 3; where = [ { e = x; p = e; v = y }; { e = y; p = t; v = z } ]; ranges = []; head = Give { e = x; p = t; v = z } } ]))
+   | _ -> ());
+  (* the nodes, then the edges in one group *)
+  let r = ok (write db (List.init n (fun i -> Add (-(i + 1), e, Link (-(i + 1)))))) in
+  let node = Array.init n (fun i -> thing r (-(i + 1))) in
+  ignore (ok (write db (List.init n (fun i -> Retract (node.(i), e, Link node.(i))))));
+  let ops = List.map (fun (a, b) -> Add (node.(a), edge_p, Link node.(b))) edges in
+  Gc.compact ();
+  Reason.seconds := 0.;
+  Reason.module_seconds := 0.;
+  Reason.bulk_index_seconds := 0.;
+  Reason.derivations := 0;
+  let t0 = now () in
+  ignore (ok (write db ops));
+  let el = now () -. t0 in
+  let v = view db in
+  let closure = ref 0 and derived = ref 0 in
+  Array.iter (fun a -> Store.iter_values v a t (fun w -> incr closure; if Store.state v a t w = 2 then incr derived)) node;
+  Printf.printf "closure %s %s %s: %d nodes, %d edges: %.4f s, closure %d facts (%d derived), %d derivations; reasoning %.4f s, of which the module %.4f s, the working set's build %.4f s\n%!" kind form
+    (if dir = "-" then "memory" else "disk") n (List.length edges) el !closure !derived !Reason.derivations !Reason.seconds
+    !Reason.module_seconds !Reason.bulk_index_seconds;
+  close db
+
+(* the retraction of one edge of a closure built as above (the edge of node [k]: in the hierarchy a node of depth 2,
+   its subtree 6,250 things; in the DAG the first edge of node 2,500), by walks or by B/F through the rule's plans:
+   the group's time, its reasoning, the facts lost; the closure after counted *)
+let closure_del kind form dir how =
+  Reason.walk_retract := how = "walk";
+  let n, edges, k =
+    match kind with
+    | "hierarchy" -> 100_000, tree 100_000 4, 5
+    | "dag" -> 5_000, dag 5_000 3 1, 2_500
+    | "chain" -> 500, tree 500 1, 250
+    | k -> failwith ("no graph " ^ k)
+  in
+  let k = match Sys.getenv_opt "DEL_NODE" with Some s -> int_of_string s | None -> k in
+  let db = if dir = "-" then fork empty else ok (open_ dir) in
+  let e, t = match ok (declare db [ prop ~many:true "edge" Tlink; prop ~many:true "within" Tlink ]) with [ e; t ] -> e, t | _ -> assert false in
+  let x = Var 0 and y = Var 1 and z = Var 2 in
+  let edge_p = if form = "linear" then e else t in
+  (match form with
+   | "trp" -> ignore (ok (define db [ { name = "trp"; vars = 3; where = [ { e = x; p = t; v = y }; { e = y; p = t; v = z } ]; ranges = []; head = Give { e = x; p = t; v = z } } ]))
+   | _ ->
+     ignore (ok (define db [ { name = "base"; vars = 2; where = [ { e = x; p = e; v = y } ]; ranges = []; head = Give { e = x; p = t; v = y } };
+                             { name = "step"; vars = 3; where = [ { e = x; p = e; v = y }; { e = y; p = t; v = z } ]; ranges = []; head = Give { e = x; p = t; v = z } } ])));
+  let r = ok (write db (List.init n (fun i -> Add (-(i + 1), e, Link (-(i + 1)))))) in
+  let node = Array.init n (fun i -> thing r (-(i + 1))) in
+  ignore (ok (write db (List.init n (fun i -> Retract (node.(i), e, Link node.(i))))));
+  ignore (ok (write db (List.map (fun (a, b) -> Add (node.(a), edge_p, Link node.(b))) edges)));
+  let a, b = List.find (fun (a, _) -> a = k) edges in
+  let count () = let c = ref 0 in Array.iter (fun x -> Store.iter_values (view db) x t (fun _ -> incr c)) node; !c in
+  let before = count () in
+  Gc.compact ();
+  Reason.seconds := 0.;
+  let t0 = now () in
+  ignore (ok (write db [ Retract (node.(a), edge_p, Link node.(b)) ]));
+  let el = now () -. t0 in
+  let after = count () in
+  Printf.printf "closure-del %s %s %s: the edge %d -> %d retracted in %.4f s, reasoning %.4f s; closure %d -> %d facts (%d lost)\n%!" kind form how a b el
+    !Reason.seconds before after (before - after);
+  close db
+
+(* ---- LUBM with the W3C's form of the rules: the ontology as facts ---- *)
+
+let w3c_props =
+  [| "subClassOf"; "domainOf"; "rangeOf"; "subProperty"; "superProperty"; "inverseA"; "inverseB"; "transitive";
+     "onProperty"; "someValuesFrom"; "intersection1"; "intersection2" |]
+
+(* the univ-bench axioms as facts (a property is a link: a property thing takes no other fact, so an axiom about two
+   properties is a thing of its own), and the W3C rules over them (OWL 2 Profiles, section 4.3: cax-sco, scm-sco,
+   prp-dom, prp-rng, prp-spo1, prp-inv1, prp-inv2, prp-trp, cls-svf1, cls-int1 over two members) *)
+let w3c_ontology db ids =
+  let ps = Array.of_list (ok (declare db (Array.to_list (Array.map (fun n -> prop ~many:true n Tlink) w3c_props)))) in
+  let q n = let rec go i = if w3c_props.(i) = n then ps.(i) else go (i + 1) in go 0 in
+  let ty = ids.ty and pr = ids.pr and cls = ids.cls in
+  let ops = ref [] and next = ref 0 in
+  let fresh () = decr next; !next in
+  let add s p o = ops := Add (s, p, Link o) :: !ops in
+  List.iter
+    (fun (a, b) -> add (cls a) (q "subClassOf") (cls b))
+    [ "AdministrativeStaff", "Employee"; "Article", "Publication"; "AssistantProfessor", "Professor";
+      "AssociateProfessor", "Professor"; "Book", "Publication"; "Chair", "Professor"; "ClericalStaff", "AdministrativeStaff";
+      "College", "Organization"; "ConferencePaper", "Article"; "Course", "Work"; "Dean", "Professor";
+      "Department", "Organization"; "Faculty", "Employee"; "FullProfessor", "Professor"; "GraduateCourse", "Course";
+      "GraduateStudent", "Person"; "Institute", "Organization"; "JournalArticle", "Article"; "Lecturer", "Faculty";
+      "Manual", "Publication"; "PostDoc", "Faculty"; "Professor", "Faculty"; "Program", "Organization";
+      "Research", "Work"; "ResearchAssistant", "Person"; "ResearchGroup", "Organization"; "Software", "Publication";
+      "Specification", "Publication"; "SystemsStaff", "AdministrativeStaff"; "TechnicalReport", "Article";
+      "UndergraduateStudent", "Student"; "University", "Organization"; "UnofficialPublication", "Publication";
+      "VisitingProfessor", "Professor"; "Chair", "Person"; "Employee", "Person"; "Student", "Person";
+      "TeachingAssistant", "Person"; "Director", "Person" ];
+  let dom p c = add (cls c) (q "domainOf") (pr p) and rng p c = add (cls c) (q "rangeOf") (pr p) in
+  dom "advisor" "Person"; rng "advisor" "Professor";
+  dom "affiliatedOrganizationOf" "Organization"; rng "affiliatedOrganizationOf" "Organization";
+  dom "affiliateOf" "Organization"; rng "affiliateOf" "Person";
+  dom "age" "Person";
+  dom "degreeFrom" "Person"; rng "degreeFrom" "University";
+  dom "doctoralDegreeFrom" "Person"; rng "doctoralDegreeFrom" "University";
+  dom "emailAddress" "Person";
+  dom "hasAlumnus" "University"; rng "hasAlumnus" "Person";
+  dom "listedCourse" "Schedule"; rng "listedCourse" "Course";
+  dom "mastersDegreeFrom" "Person"; rng "mastersDegreeFrom" "University";
+  dom "member" "Organization"; rng "member" "Person";
+  dom "orgPublication" "Organization"; rng "orgPublication" "Publication";
+  dom "publicationAuthor" "Publication"; rng "publicationAuthor" "Person";
+  dom "publicationResearch" "Publication"; rng "publicationResearch" "Research";
+  dom "researchProject" "ResearchGroup"; rng "researchProject" "Research";
+  dom "softwareDocumentation" "Software"; rng "softwareDocumentation" "Publication";
+  dom "subOrganizationOf" "Organization"; rng "subOrganizationOf" "Organization";
+  dom "teacherOf" "Faculty"; rng "teacherOf" "Course";
+  dom "teachingAssistantOf" "TeachingAssistant"; rng "teachingAssistantOf" "Course";
+  dom "tenured" "Professor";
+  dom "undergraduateDegreeFrom" "Person"; rng "undergraduateDegreeFrom" "University";
+  let two a pa b pb = let x = fresh () in add x (q pa) (pr a); add x (q pb) (pr b) in
+  List.iter (fun (a, b) -> two a "subProperty" b "superProperty")
+    [ "doctoralDegreeFrom", "degreeFrom"; "mastersDegreeFrom", "degreeFrom"; "undergraduateDegreeFrom", "degreeFrom";
+      "headOf", "worksFor"; "worksFor", "memberOf" ];
+  two "member" "inverseA" "memberOf" "inverseB";
+  two "hasAlumnus" "inverseA" "degreeFrom" "inverseB";
+  (let x = fresh () in add x (q "transitive") (pr "subOrganizationOf"));
+  (* C = A and some P D: a restriction r = some P D, and C's two members (or r a subclass of C) *)
+  let define c a p d =
+    let r = fresh () in
+    add r (q "onProperty") (pr p);
+    add r (q "someValuesFrom") (cls d);
+    match a with
+    | Some a -> add (cls c) (q "intersection1") (cls a); ops := Add (cls c, q "intersection2", Link r) :: !ops
+    | None -> ops := Add (r, q "subClassOf", Link (cls c)) :: !ops
+  in
+  define "Chair" (Some "Person") "headOf" "Department";
+  define "Dean" None "headOf" "College";
+  define "Director" (Some "Person") "headOf" "Program";
+  define "Employee" (Some "Person") "worksFor" "Organization";
+  define "Student" (Some "Person") "takesCourse" "Course";
+  define "TeachingAssistant" (Some "Person") "teachingAssistantOf" "Course";
+  ignore (ok (write db (List.rev !ops)));
+  let v n = Var n in
+  let pa s p o = { e = s; p; v = o } in
+  let pv k = prop_var k in
+  let x = v 0 and y = v 1 and z = v 2 and c1 = v 3 and c2 = v 4 and c3 = v 5 and p1 = v 6 and p2 = v 7 and a = v 8 in
+  (* the variables numbered densely, a property variable among them *)
+  let rule name _ where head =
+    let used = Array.make 9 false in
+    let see (q : pattern) = List.iter (function Var k -> used.(k) <- true | _ -> ()) [ q.e; q.v ]; if q.p < 0 then used.(-1 - q.p) <- true in
+    List.iter see where;
+    see head;
+    let map = Array.make 9 (-1) and n = ref 0 in
+    Array.iteri (fun k u -> if u then (map.(k) <- !n; incr n)) used;
+    let t = function Var k -> Var map.(k) | t -> t in
+    let pat (q : pattern) = { e = t q.e; p = (if q.p < 0 then prop_var map.(-1 - q.p) else q.p); v = t q.v } in
+    { name; vars = !n; where = List.map pat where; ranges = []; head = Give (pat head) }
+  in
+  [ rule "cax-sco" 5 [ pa x ty c1; pa c1 (q "subClassOf") c2 ] (pa x ty c2);
+    rule "scm-sco" 6 [ pa c1 (q "subClassOf") c2; pa c2 (q "subClassOf") c3 ] (pa c1 (q "subClassOf") c3);
+    rule "prp-dom" 7 [ pa c1 (q "domainOf") p1; pa x (pv 6) y ] (pa x ty c1);
+    rule "prp-rng" 7 [ pa c1 (q "rangeOf") p1; pa x (pv 6) y ] (pa y ty c1);
+    rule "prp-spo1" 9 [ pa a (q "subProperty") p1; pa a (q "superProperty") p2; pa x (pv 6) y ] (pa x (pv 7) y);
+    rule "prp-inv1" 9 [ pa a (q "inverseA") p1; pa a (q "inverseB") p2; pa x (pv 6) y ] (pa y (pv 7) x);
+    rule "prp-inv2" 9 [ pa a (q "inverseA") p1; pa a (q "inverseB") p2; pa x (pv 7) y ] (pa y (pv 6) x);
+    rule "prp-trp" 9 [ pa a (q "transitive") p1; pa x (pv 6) y; pa y (pv 6) z ] (pa x (pv 6) z);
+    rule "cls-svf1" 9 [ pa a (q "someValuesFrom") c1; pa a (q "onProperty") p1; pa x (pv 6) y; pa y ty c1 ] (pa x ty a);
+    rule "cls-int1" 6 [ pa c3 (q "intersection1") c1; pa c3 (q "intersection2") c2; pa x ty c1; pa x ty c2 ] (pa x ty c3) ],
+  ps
+
+(* the derived facts of the data, not of the ontology's things: what the two forms of the rules must agree on *)
+let data_derived (v : view) ~from_e ~skip =
+  let d = ref 0 in
+  for e = from_e to v.next_e - 1 do
+    Store.iter_facts v e (fun p w -> if Store.state v e p w = 2 && not (skip p w) then incr d)
+  done;
+  !d
+
+let w3c n path dir =
+  Reason.derivations := 0;
+  let dir = if dir = "-" then None else Some dir in
+  let db = match dir with None -> fork empty | Some d -> ok (open_ d) in
+  let ids = setup db in
+  let rules, ps = w3c_ontology db ids in
+  ignore (ok (define db rules));
+  (* the restrictions are things of the ontology: a fact [x type r] is the W3C form's own step *)
+  let restriction = Hashtbl.create 8 in
+  Store.iter_prop (view db) ps.(8) (fun e _ -> Hashtbl.replace restriction e ());
+  let g = { st = (7 * 0x1E3779B97F4A7C15) lor 1; lit = 0 } in
+  let groups = ref 0 in
+  Reason.seconds := 0.;
+  Reason.bulk_index_seconds := 0.;
+  Reason.spec_groups := 0;
+  Reason.gen_groups := 0;
+  let t =
+    if path <> "bulk" then begin
+      let t0 = now () in
+      let trace = Sys.getenv_opt "TRACE" <> None in
+      for u = 0 to n - 1 do
+        university ids g u (fun ops ->
+            incr groups;
+            let g0 = !Reason.gen_groups in
+            ignore (ok (write db ops));
+            if trace && !Reason.gen_groups > g0 then Printf.printf "group %d (%d ops) as written\n%!" !groups (List.length ops))
+      done;
+      now () -. t0
+    end
+    else begin
+      let all = ref [] and off = ref 0 in
+      for u = 0 to n - 1 do
+        university ids g u (fun ops ->
+            let low = ref 0 in
+            let t x = if x < 0 then (low := min !low x; x - !off) else x in
+            List.iter (function Add (e, p, v) -> all := Add (t e, p, (match v with Link l -> Link (t l) | v -> v)) :: !all | o -> all := o :: !all) ops;
+            off := !off - !low)
+      done;
+      let ops = List.rev !all in
+      Gc.compact ();
+      groups := 1;
+      let t0 = now () in
+      ignore (ok (write db ops));
+      now () -. t0
+    end
+  in
+  let v = view db in
+  let all, d = count_derived v in
+  let dd = data_derived v ~from_e:Schema.first_thing ~skip:(fun p w -> Array.mem p ps || (p = ids.ty && Hashtbl.mem restriction w)) in
+  let r = !Reason.seconds and ix = !Reason.bulk_index_seconds in
+  Printf.printf "w3c %d %s %s: %.3f s, %d groups (%d unfolded, %d as written), %d facts (%d derived, %d of the data without the restrictions' types), %d derivations; reasoning %.3f s, %.3f M derived/s; of which the working set's build %.3f s\n%!" n
+    path (if dir = None then "memory" else "disk") t !groups !Reason.spec_groups !Reason.gen_groups all d dd !Reason.derivations r
+    (if r > 0. then float_of_int d /. r /. 1e6 else 0.) ix;
+  close db
+
 let () =
   match Array.to_list Sys.argv |> List.tl with
   | [ "mat"; n; mode; path; dir ] -> mat (int_of_string n) mode path dir
   | [ "student"; n; r; dir ] -> student_bench dir (int_of_string n) (int_of_string r)
   | [ "why"; n; r; dir ] -> why_bench dir (int_of_string n) (int_of_string r)
   | [ "apply"; n ] -> apply_bench (int_of_string n)
+  | [ "closure"; kind; form; dir ] -> closure_bench kind form dir
+  | [ "closure-del"; kind; form; dir; how ] -> closure_del kind form dir how
+  | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2

@@ -14,6 +14,9 @@ use std/sys
 use std/value
 
 Note = cepheus.Kind("note", {Title: cepheus.Text(), N: cepheus.Int(), Mark: cepheus.Text(unique = true)})
+Flag = cepheus.Kind("flag", {Note: cepheus.Link(), Up: cepheus.Bool()})
+Later = cepheus.Kind("later", {Name: cepheus.Text()})
+flagUp = cepheus.Rule("flag-up", 2, (f, n) -> {Where: [[f, Flag.Note, n], [n, Note.N, 3]], Then: [f, Flag.Up, true]})
 token = sys.Env("CEPHEUS_TOKEN")
 
 defn count(mark, db)
@@ -23,7 +26,7 @@ defn count(mark, db)
 end
 
 defn overTls()
-  db = cepheus.Connect(sys.Env("CEPHEUS_TLS"), [Note], token = token, ca = sys.Env("CEPHEUS_CA"))?
+  db = cepheus.Connect(sys.Env("CEPHEUS_TLS"), [Note, Flag], token = token, ca = sys.Env("CEPHEUS_CA"))?
   id = cepheus.Insert(Note, {Title: "tls", N: 1, Mark: "tls-1"}, db)?
   io.Print("tls get:", cepheus.Get(Note, id, db)?)
   io.Print("tls unique:", cepheus.Insert(Note, {Title: "tls", N: 2, Mark: "tls-1"}, db).Error.Code)
@@ -31,6 +34,12 @@ defn overTls()
   io.Print("tls write:", cepheus.Write([cepheus.Expect(id, Note.N, 1), cepheus.Add(id, Note.N, 3)], db)?.Things)
   io.Print("tls find:", cepheus.Find(1, (n) -> {Where: [[id, Note.N, n]], Give: {N: n}}, db)?)
   io.Print("tls fork:", cepheus.Fork(db).Error.Code)
+  cepheus.Define([flagUp], db)?
+  cepheus.Define([flagUp], db)?
+  io.Print("tls rule:", cepheus.Get(Flag, cepheus.Insert(Flag, {Note: id}, db)?, db)?.Up)
+  later = cepheus.Connect(sys.Env("CEPHEUS_TLS"), [Later], token = token, ca = sys.Env("CEPHEUS_CA"))?
+  io.Print("tls a kind declared after a rule:", cepheus.Insert(Later, {Name: "x"}, later)? > 0)
+  cepheus.Close(later)
   tasks = [fiber.Spawn(() -> cepheus.Insert(Note, {Title: "tls-many", N: k, Mark: "tls-m$k"}, db)) for k in 1..100]
   ok = list.Count(result.IsOk, [result.Unwrap(fiber.Wait(t)) for t in tasks])
   io.Print("tls 100 fibers:", ok, "answered,", count("tls-many", db)?, "in the database")
