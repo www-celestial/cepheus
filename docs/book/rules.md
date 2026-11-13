@@ -387,7 +387,8 @@ so that `[?x type Invoice]` and `[?x type Client]` are apart, and a `Not` over o
 - A sum is exact: kept in two words, it refuses the group when the result is past the largest int
   (`Invalid "rule R: the sum of #x is past the largest int"`), never wraps.
 - An aggregate's property takes one value, is given by that rule alone, and no write adds or retracts it: a write of
-  it is refused, and so is defining an aggregate over a property that holds asserted facts.
+  it is refused, and so is defining an aggregate over a property that holds asserted facts, unless the same group
+  retracts them. The group that removes the aggregate may write its property.
 - A thing without answers has no fact (no zero count, no sum of nothing).
 
 **How the writer keeps them.** Each stratum in order, the lower ones complete ([Motik 2019], B/F for stratified
