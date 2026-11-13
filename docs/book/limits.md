@@ -146,7 +146,7 @@ defaults, and the cache's size (`set_cache`).
 | a node | 1,024 children at most (about 42 KB) | `Vault.fanout` |
 | a pack | closed when its next record would pass 64 MiB | `Vault.pack_limit` |
 | packs open for reading | 64 at once; past it, those not being read are closed | `Vault.max_open` |
-| decoded nodes kept | 32 MiB of them (CLOCK) | `Vault.open_ ?cache` |
+| decoded nodes and chunks kept | 96 MiB in all, a third of it for nodes (CLOCK each) | `Vault.open_ ?cache` |
 | compression | kept when it saves at least 1/32 of a chunk; warm LZ4 (acceleration 1), cold Zstandard level 9 | `Vault.encode`, `Vault.zstd_level` |
 | a Zstandard frame's window | 1 MiB at most (a frame that asks for more is refused) | `vault_stubs.c` |
 | a file | 1 TiB (2^40 bytes) through the server | `Files.max_size` |
