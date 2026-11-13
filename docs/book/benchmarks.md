@@ -496,6 +496,74 @@ The two slow rounds through the socket did not repeat in the process, where the 
 timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
 disk whose fsyncs vary that much from round to round.
 
+## Rules, step 5: changes of the rules in the background (2026-11-13)
+
+The fifth step of the reasoner ([rules](rules.md#changes-of-the-rules-in-the-background)): a change of the rules or the
+ontology computed beside the writer, caught up with the groups written meanwhile, installed as one group; rounds of
+20,000 facts and more derived on several domains in the groups the writer reasons itself.
+
+**Method.** `CHANGE=one reason.exe change 10 256 8 2 with|without DIR` (release build): LUBM-shaped data of 10
+universities on the disk with the 94 univ-bench rules (1.89 M facts), merged into one run, copied before each run; 256
+client threads write graduate students (10 facts, a group each, durable) in a closed loop for 8 s; at 2 s, with `with`,
+the change is written (`define` of `[x type Person] -> [x type Schedule]`, a class the data leaves empty: the design's
+Person ⊑ Agent of its choice 10.6); each run records the confirmed groups by 10 ms. 21 pairs (with, without),
+alternated (the side that goes first swaps each pair), each run in the heavy lock and a 3 GB scope; a ratio is a
+pair's: the groups confirmed in the change's window with it, over those confirmed in the same window without it.
+
+| what (21 pairs) | median | min | max |
+|---|---|---|---|
+| the change, from `define` to its answer | 3.09 s | 0.72 s | 6.90 s |
+| its build (its consequences on the state it started from: about 150,000 derived facts) | 0.49 s | 0.35 s | 0.76 s |
+| the build's rate | 0.30 M derived facts/s | 0.20 | 0.40 |
+| the writer's own part at the install (the last groups, the frame) | 54 ms | 42 ms | 103 ms |
+| the clients' throughput in the change's window, with / without | **0.84** | 0.005 | 36 |
+| the same over the whole run from the change's start | **0.89** | 0.10 | 3.8 |
+
+The extremes of the ratios are short windows (under a second) where one side met a stall the other did not (a
+merge's switch, the machine): the medians are the measure. Without the change the clients confirm 8,069 groups a
+second in that window (median); with it, 6,468. Where the difference goes, from the 10 ms bins of the 21 pairs with four domains in the
+background: 0.70 during the build, 0.74 during the catch-up, and still 0.79 in the two seconds after the install,
+when the background is gone: part of the cost is the state the change leaves (one more rule deriving for every person
+written, a delta that grew with no merge beside the change, then that merge), not the background alone.
+
+Variants measured on the way, the same method: the background deriving on four domains (morsels, as the writer's own
+large groups do): 0.78 in the window and 0.79 over the run (21 pairs), so it derives on its own domain only; a minor
+heap of 64 MiB for its domain: 0.735 (7 pairs); a minor heap of 32 MiB for every domain (`OCAMLRUNPARAM=s=4M`): 0.57
+(7 pairs).
+
+**The worst case**, `CHANGE=all`: the base holds no rule and the change defines all 94 (683,000 derived facts with the
+students written before it). Single runs, not 21: build 3.0 s (0.23 M derived facts/s; 1.6 s of it putting the facts
+into the view's delta), then catch-up passes of 35,000 to 66,000 groups taking 3.8 to 7.4 s each (about 110 µs a
+group: every group written meanwhile is reasoned under 94 rules it was not reasoned under, against 10 µs for the
+writer), until the writer waits for the background at 65,536 groups behind; the change took 18 to 25 s, its install
+1.2 to 1.9 s; one run was stopped at the 3 GB cap after the install (both deltas and a frame of 1.6 M changes). The
+catch-up's first version applied the logged groups one at a time: here it never caught up, and the run was stopped at
+the 3 GB cap after 39 s.
+
+**The derivation alone**, `reason.exe define 10` (in memory, the 94 rules defined over the same data loaded without
+them, one change computed in its group on a fork): 3.0 s for 532,205 derived facts, of which the first round of the
+added rules 0.48 s on four domains (1.31 s on one), the later rounds 0.56 s (0.72 s), and putting them into a fork's
+delta, which holds the whole load in persistent maps, 1.2 s.
+
+**Rounds on several domains in a load** (`reason.exe mat 10 rules bulk DIR`: the 10 universities with the 94 rules
+in one group on the disk, the path of large groups; 21 rounds alternated with main 9761e4a): the saturation (the
+rounds alone, the working set built) 0.90 M derived facts/s on main, **1.44 M/s** here (four domains; paired ratio
+1.54); the whole reasoning 1.18 s and 1.02 s; the load, 2.85 s and 2.93 s (the disk's spread, 2.3 to 4.6 s, covers
+it).
+
+**What did not change.** The same student groups in a fork over one university (`reason.exe student 1 2000 DIR`, 21
+rounds alternated with main 9761e4a): without rules, write 9.1 µs and 9.1 µs, retract 6.9 and 6.9; with the rules,
+write 26.0 and 26.0, retract 37.0 and 37.0 (medians; paired ratios 0.96 to 1.00). Start-up (`bench.exe` without
+arguments, 21 rounds of 50 runs): 3.195 ms on main, 3.211 ms here (paired ratio 1.03, within the rounds' spread of
+2.9 to 4.5 ms).
+
+**Against the step's targets.** The clients' durable throughput while a change at LUBM-10 scale runs: 0.84 of its value
+without it in the change's window, 0.89 over the run, against a target of 0.90: missed, narrowly over the run. The
+change's consequences at 2 M derived facts/s on 8 threads: 0.30 M/s measured on the background's one domain: missed by
+far; what remains costs per fact are the view's delta (persistent maps, about 1.5 µs a fact put in) and joins that
+probe the store fact by fact, which the design's step 3 (sorted joins, a change's facts in a run of their own)
+addresses. `spec/RuleChange.tla` checked by TLC: met ([testing](testing.md#model-checking)).
+
 ## Rules, step 2: closures and the W3C's form (2026-11-12)
 
 The second step of the reasoner ([rules](rules.md#transitive-closures-the-closure-module)): transitive properties kept

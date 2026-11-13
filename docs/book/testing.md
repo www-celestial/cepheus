@@ -42,7 +42,8 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | command | what it runs | options |
 |---|---|---|
 | `_build/default/test/unit.exe` | the unit and property tests | `CEPHEUS_TMP`: where its databases on the real disk go (the system's temp directory by default) |
-| `reasoning.exe` | the rules: named cases (closures of both shapes and their budget, a variable property, `sources`), then G17, G18 and G20 on random sequences (random rules defined, changed and removed, transitive closures and rules over a variable property among them; random additions and retractions) against the least model from scratch, plain and over merged runs, and the plain ones again with the rules always as written, every group's view equal to the unfolded run's | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group), `RULES_PROGRESS` (a line a seed) |
+| `reasoning.exe` | the rules: named cases (closures of both shapes and their budget, a variable property, `sources`), then G17, G18 and G20 on random sequences (random rules defined, changed and removed, transitive closures and rules over a variable property among them; random additions and retractions) against the least model from scratch, plain and over merged runs, and the plain ones again with rounds on several domains (from 4 facts a round) and with the rules always as written, every group's view equal to the first run's; and half the seeds on databases on the disk, where every change of the rules takes the background path, with the model's decisions and the database reopened the same | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group), `RULES_PROGRESS` (a line a seed) |
+| `rulechange.exe` | the background path of rule changes on databases on the disk: groups written while a change is held after its build (`Engine.change_pause`), caught up exactly; a group that writes the change's fact, breaks its new constraint or takes its rule's number ends it with `Conflict`; 6 writers, 24 changes and 2 readers checking every view against the least model under its own rules, then the database reopened; the change budget (a cross product refused while a writer goes on) and an ontology change past a data budget accepted the same on the disk and on a fork; close during a change; kill -9 during changes, each recovered view exact | `CHANGE_KILLS` (10, in `tools/test.sh`) |
 | `exhaustive.exe` | every crash state of small journals, inside merges, and of two databases sharing a commit buffer | none |
 | `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
 | `wal_sim.exe` | the deterministic simulation of the server's commit buffer: three databases sharing it ([below](#the-commit-buffer)) | `--seeds N` (100 by default), `--seed S`, `--steps N` (200); `WAL_SIM_TRACE` set: each event of a seed on the standard error |
@@ -51,7 +52,7 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | the sale of seats with kill -9 and a checker of the history ([case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)); `ROUNDS` 0: no kill, the time to sell out | `BUYERS` (16), SEED 42, SEATS 2,000 |
 | `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/book/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
 | `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, wal_sim, crash, bank, seats and examples, the server's tests, and the Cesia client's when a Cesia with its native interface is here | `CEPHEUS_TMP` (a short path: a Unix socket's holds 107 bytes), `SEEDS` (300), `BUFFER_SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `CESIA_NATIVE` (the folder of Cesia's `cesia_v1.cmi`; found from the `cesia` command when unset) |
-| `tools/tlc.sh` | TLC on every model of `spec/` (the journal, merges, the sale of seats, local reads, watches, the commit buffer), and every variant that must break an invariant ([model checking](#model-checking)) | `TLA2TOOLS`: the path of `tla2tools.jar` |
+| `tools/tlc.sh` | TLC on every model of `spec/` (the journal, merges, the sale of seats, local reads, watches, the commit buffer, a rule change's background path), and every variant that must break an invariant ([model checking](#model-checking)) | `TLA2TOOLS`: the path of `tla2tools.jar` |
 
 **Deterministic simulation testing** runs the real engine on a simulated disk where one seed decides every event (the
 writes, the order of the writer's steps, crashes, damage), so that a failure is not a rare accident but a seed that
@@ -447,6 +448,29 @@ databases of 2 frames each: 11,313 distinct states; with 3 frames each (`MaxFram
 The model takes recovery's writes as forced, as the code must make them: the code's first version skipped a frame
 whose bytes the page cache already showed, which the model cannot see and the simulation found
 ([above](#the-commit-buffer)).
+
+`spec/RuleChange.tla` models a change of the rules on the background path ([rules](rules.md#changes-of-the-rules-in-the-background),
+G19): three asserted facts and two derived ones, old rules and new rules (the new ones with a constraint), a writer
+committing groups under its rules as frames of facts with their states after, a change C that also asserts a fact and
+expects another; the build from the working view, the catch-up by batches of any size, the switch by the writer, and
+crashes that keep any prefix of the frames from the durable ones on. Invariants: `ViewsExact` (the working and the
+published views, and the state at every frame of the journal, are the least model of their asserted facts under their
+rules: no view mixes the old rules' facts with the new ones'), `JournalIsWork` (replay gives the working view: C's
+frame is exactly the difference the adopted view holds), `OneSwitch` (the rules change at C's frame), `ConstraintsHold`
+(G18), `Serial` (C's `Expect` held just before it, its asserted fact at it), `NoLostWrite` (C's frame changes no
+asserted fact but its own), `AckedDurable`; and the liveness property `Ends` (under fairness the change is installed,
+answered or lost to a crash). Bounds in `spec/RuleChange.cfg` (4 data groups, 2 crashes, ready 2 groups behind):
+137,889 distinct states, 15 s, everything holds. Each part of the rule is needed:
+
+| configuration | the rule without | breaks |
+|---|---|---|
+| `RuleChangeCopy.cfg` | the derived facts found again: a logged group's frame copied | `ViewsExact` |
+| `RuleChangeLate.cfg` | the writer's last catch-up | `NoLostWrite` |
+| `RuleChangeEarlyExpect.cfg` | the `Expect` checked at the install: at the build | `Serial` |
+| `RuleChangeNoCheck.cfg` | the new rules' check of the caught-up state | `ConstraintsHold` |
+| `RuleChangeOverlap.cfg` | the `Conflict` of a group that touches C's fact | `Serial` |
+| `RuleChangeStale.cfg` | the difference at the install: the build's own changes written | `ViewsExact` |
+| `RuleChangePublished.cfg` | the build from the working view: from the published one | `NoLostWrite` |
 
 `tools/tlc.sh` runs them all and fails unless each that must break does: 1 min 57 s on the test machine (2026-11-12),
 every model included.

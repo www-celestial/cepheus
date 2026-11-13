@@ -415,6 +415,14 @@ the budget). `rule_budget` holds the two numbers. Every path counts against it: 
 fact a closure module makes, a closure's targets as they grow (so that a dense graph's $n^2$ facts are refused before
 they are made, in memory in proportion to the budget), and the facts B/F deletes.
 
+A **change** — a group that changes the rules, or the ontology ([below](#changes-of-the-rules-in-the-background)) —
+applies to the whole database, so its budget grows with it: **$100{,}000 + 100 \times \text{its asserted changes} +
+4 \times \text{the facts of the database before it}$** (`change_budget`, the 4): a change may make the database at
+most five times as large, and a rule whose consequences grow faster (every pair of things, a dense closure) is still
+refused, named: `Invalid "rule NAME derived more than N facts from a change of the rules or the ontology"`. The
+same budget on a fork, in the threaded writer and in the deterministic core, so a fork accepts and refuses exactly
+what the database does (G8).
+
 ## Why
 
 `why view thing property value` returns a **proof**: a tree whose leaves are asserted facts and whose nodes are rule
@@ -456,8 +464,88 @@ So a rule is written in a group like any fact, the journal keeps every version o
 rest. `define db rules` finds each rule by name and writes, in one group, the new rules and the changed ones;
 `undefine db names` removes rules. A group that defines a rule derives what the rule gives over the whole database;
 one that removes a rule retracts what only it derived (by B/F: each fact the rule gave is checked for another proof),
-both under the budget, in that group: a rule change takes effect at one group number, every view before it the
-materialisation under the old rules, every view from it under the new (G19).
+both under a change's budget, in that group: a rule change takes effect at one group number, every view before it the
+materialisation under the old rules, every view from it under the new (G19). In a database on the disk the change is
+computed beside the writer and installed as that group ([next section](#changes-of-the-rules-in-the-background)).
+
+## Changes of the rules in the background
+
+Defining the univ-bench ontology's 94 rules over 10 LUBM-shaped universities derives 532,205 facts; computed in the
+writer, inside the group, it would stop every other writer for seconds. The threaded writer of a database on the disk
+(a server, `open_`) computes a **change** beside it instead, and installs it as one group:
+
+1. **Which groups.** A group that changes the rules (a rule defined, changed or removed), or the **ontology**: a group
+   past a data write's budget that asserts or retracts a fact of a relation the rules are unfolded on in the state
+   before it ([specialisation](#specialisation-by-small-relations); found from the rules and that state alone, never
+   from what earlier groups did, so a fork finds the same). The writer first resolves the group's asserted part as
+   always (types, `Expect`, the rules' own checks: safety, types, strata): an error is answered at once. A change with
+   new things (temporary ids) is computed in the group, as on a fork: its things' numbers are the writer's to give,
+   in order. One change at a time; the next waits for it.
+2. **The build.** A domain of its own resolves the group on a fork of the writer's view of the moment, under the
+   change's budget: the materialisation of that state plus the change, under the new rules, on that domain alone.
+3. **The catch-up.** Meanwhile the writer commits the groups that keep coming, under the old rules, and logs them.
+   The background applies them to its view by batches, all it finds at once: their net asserted changes (a fact's
+   state before the first and after the last), and what the **new** rules make of them; the derived changes they had
+   under the old rules are dropped. Only the state at the end of a batch matters: the derived facts are a function of
+   the asserted ones (the least model is unique, [Abiteboul 1995]), and the states between are ordered before the
+   change, under the old rules. It keeps, fact by fact, the difference between the writer's states and its own.
+4. **The switch.** When the background finds fewer than 64 groups to apply, the writer applies the rest itself,
+   resolves the group's asserted part again against its own view (its `Expect`s are checked then), writes one group:
+   the asserted changes, then the difference as derived changes, and makes the background's view its working view. The
+   write returns once that group is durable, like any write.
+
+What can end a change instead, and what it answers:
+
+| a group written meanwhile | the change answers |
+|---|---|
+| asserts or retracts a fact the change asserts or retracts (they would not commute) | `Conflict` |
+| makes the change's `Expect` false (another writer took the rule's number: `define` tries again) | `Conflict` |
+| changes the rules itself (a change that makes new things, computed in its group) | `Conflict` |
+| breaks, under the new rules, a constraint, a one-valued or a unique property, or the change's budget | `Conflict` |
+| removes a property the new rules read | `Invalid` (the rules' check at the switch) |
+
+`Conflict` means a group ordered before the change interfered: `define` reads the schema again and tries again, and
+the retry decides on the newer state, where a lasting problem gives its `Invalid` at the build (a constraint the
+data breaks: `Invalid "constraint NAME: …"`). A change past its budget is `Invalid` at the build. A close cancels a
+change in flight: it is answered `Closed`, and nothing of it is in the journal.
+
+**Why this keeps the guarantees.** The change is ordered when it is installed: every group it caught up with is
+before it, and its `Expect`s are checked against that state (G4). Its view is the least model of the state at the
+switch under the new rules, because each batch keeps it so (G17 holds for incremental groups) and the change's
+asserted part commutes with the groups logged (no fact in common, checked). The frame of its group is exactly the
+difference between the writer's view and that one, so replay — recovery, a replica, a local reader — gets exactly
+the view the writer adopted. No view before the group holds a fact of the new rules (the background's view is
+published only with the group), every view from it holds all of them (G19). A crash before the group is durable leaves
+nothing: the change was never confirmed. The protocol is checked by TLC (`spec/RuleChange.tla`: the build, batches of
+catch-up, the switch, crashes; every view exact under its rules, one switch, constraints, `Expect` at the switch, no
+write lost, and the change ends), and each of its seven parts is needed: without any one, TLC finds a counterexample
+([testing](testing.md#model-checking)).
+
+**What the writer does meanwhile.** It never waits for the build or the catch-up; no background merge starts while a
+change runs, and a change waits for a merge in flight, so that both views share their runs (the change's derived facts
+reach the view's delta, and the next merge writes them to a run). Its part at the switch is the last groups and the
+frame. If the background falls more than 65,536 groups behind, the writer waits for it, so that the log and the deltas
+stay bounded.
+
+**What it costs** ([benchmarks](benchmarks.md#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13)). On 10
+LUBM-shaped universities with the 94 rules, while 256 clients write durably, adding one axiom (every person is also of
+a class the data leaves empty: about 150,000 derived facts) is installed in 3.1 s (median of 21; its build 0.49 s),
+and the writer's own part at the install is 54 ms. The clients' throughput while it runs is 0.84 of what it is without
+the change, 0.89 over the whole run from its start: the background shares the machine's four cores, its caches and
+its collector with the writer, and the delta grows meanwhile, since no merge runs beside a change. Defining all 94
+rules over the same data without rules is the worst case: every group written meanwhile costs the new rules several
+times what it costs the old ones, the background cannot keep up at full load (about 110 µs a group against the
+writer's 10 to 25), and the writer waits for it at 65,536 groups behind (seconds).
+
+**Rounds on several domains.** In a group the writer reasons itself (a load, a change on a fork or in the
+deterministic core), a round of 20,000 facts or more, and the first round of a change's added rules, is cut into
+morsels (Leis et al. [Leis 2014]) taken in turn by up to four domains, each deriving with plans of its own and keeping
+the heads that are not facts yet; then one domain makes them facts, morsel after morsel, in order, as it would have
+found them alone: the result, the budget and the refusals do not depend on the domains. Rules with `Not` or
+aggregates, and rules whose text constants a group would intern, run on one domain. A change in the background
+derives on its own domain only: measured on four domains there, the clients' throughput during the change fell from
+0.84 to 0.78 of what it is without it. Measured on a load of 10 universities with the 94 rules: the rounds at 1.44 M derived facts/s on four
+domains, 0.90 on one.
 
 The rules are compiled at the first write that needs them, never at open: an open replays frames, which hold the
 derived facts already, so start-up does not grow.
@@ -549,12 +637,13 @@ Each was weighed against the others in the design; the measurements are the desi
 
 ## What is not here yet
 
-The design's plan has six steps; this version has steps 1, 2 and 4.
+The design's plan has six steps; this version has steps 1, 2, 4 and 5.
 
-- **Step 3**: large derivations sorted and parallel, on several domains. Until then a small group whose consequences
-  are large (a graph of 15,000 edges whose closure has 1.3 million facts) puts them into the view's delta one by one
-  in sorted batches, about a microsecond a fact; a group of 20,000 facts or more takes the large groups' path.
-- **Step 5**: rule changes with large consequences computed in the background and installed at one group.
+- **Step 3**: large derivations sorted. Rounds of 20,000 facts and more are derived on several domains (above), but
+  derived facts still reach the view's delta in sorted batches, about a microsecond a fact, and the join of a round
+  probes the store fact by fact; a change's derived facts are not written to a run of their own.
+- **Step 5's rest**: a change with new things is computed in the group; a change's derived facts wait for the next
+  merge to reach a run.
 - **Step 6**: OWL 2 RL as a library of rules, and equality (`owl:sameAs`) by rewriting.
 - The budget as a database setting rather than a number of the process; the group that asserted each leaf of a proof.
 

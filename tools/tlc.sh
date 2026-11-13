@@ -1,5 +1,5 @@
 #!/bin/sh
-# Model-checks spec/Journal.tla, spec/Merge.tla, spec/Seats.tla, spec/LocalReads.tla, spec/Watch.tla and
+# Model-checks spec/Journal.tla, spec/Merge.tla, spec/Seats.tla, spec/LocalReads.tla, spec/Watch.tla,
 # spec/CommitBuffer.tla and spec/RuleChange.tla with TLC (bounds in their .cfg files), and checks that what must break does: the naive sale of
 # spec/Seats.tla (SeatsNaive.cfg), every variant of the local reads' rule that drops a part of it, the design's lease
 # and its first draft (LocalReads*.cfg), every variant of a watch's resume that drops a part of its rule (Watch*.cfg),

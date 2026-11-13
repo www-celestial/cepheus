@@ -195,6 +195,7 @@ type proof =
 val why : view -> int -> int -> value -> proof option
 val sources : view -> int -> int list option
 val rule_budget : int ref * int ref
+val change_budget : int ref
 ```
 
 A rule is a question's patterns and ranges (`where`, `ranges`, variables 0 to `vars - 1`) and a head: `Give pattern`,
@@ -203,9 +204,11 @@ things (in 16 to 65,535, as properties) of the rules, in the order given, and wr
 (`~why:"cepheus: rules"`) the new ones (at the lowest free number) and those whose definition changed (found by
 name); a rule defined already with the same definition writes nothing. The writer checks each rule (range
 restriction, types, the head's property; errors `Invalid "rule NAME: …"`, [errors](errors.md#invalid-the-request-is-wrong))
-and derives in that group what it gives over the whole database, under the budget; a constraint is checked over the
-whole database. A name that is a property's is `Invalid`. If another writer took a number meanwhile, `define` reads
-the schema again and tries again.
+and derives in that group what it gives over the whole database, under a change's budget; a constraint is checked over
+the whole database. A name that is a property's is `Invalid`. If another writer took a number meanwhile, or a group
+written meanwhile interfered with the change, `define` reads the schema again and tries again (`Conflict`). In a
+database on the disk the change is computed beside the writer and returns once installed
+([rules](rules.md#changes-of-the-rules-in-the-background)): a `write` sent meanwhile may be ordered before it.
 
 A pattern's property `p` is a property id, or `prop_var k` (a negative number) for the variable `?k`: another pattern of
 the body whose property is a constant has `?k` as its thing or its value. A value read under a variable property has
@@ -226,7 +229,8 @@ what a reader allowed some kinds only must read to read `p`'s derived facts with
 
 `rule_budget` is (base, per): a group whose derived changes pass $\mathit{base} + \mathit{per} \times \text{its asserted changes}$ is refused,
 `Invalid "rule NAME derived more than N facts from a group of K facts"`; (100,000, 100) by default, for every database
-of the process.
+of the process. A change of the rules or the ontology may also derive `change_budget` (4) times the facts of the
+database before it: `Invalid "rule NAME derived more than N facts from a change of the rules or the ontology"`.
 
 ```ocaml
 open Cepheus
