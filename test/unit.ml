@@ -258,7 +258,12 @@ let model_write (m : model) (v : view) ops =
   let schema p = Option.get (describe v p) in
   let temps = Hashtbl.create 4 and next = ref m.next in
   let see x = if x < 0 && not (Hashtbl.mem temps x) then (Hashtbl.replace temps x !next; incr next) in
-  List.iter (function Add (e, _, x) | Retract (e, _, x) -> see e; (match x with Link t -> see t | _ -> ()) | Expect _ -> ()) ops;
+  List.iter
+    (function
+      | Add (e, _, x) | Retract (e, _, x) -> see e; (match x with Link t -> see t | _ -> ())
+      | Expect _ -> ()
+      | Incr (e, _, _, into) -> see e; Option.iter (fun (t, _) -> see t) into)
+    ops;
   let id x = if x < 0 then Hashtbl.find temps x else x in
   let fix = function Link t -> Link (id t) | x -> x in
   let has f e p = C.F.exists (fun (e', p', _) -> e' = e && p' = p) f in
@@ -271,16 +276,26 @@ let model_write (m : model) (v : view) ops =
         | _ -> ())
       ops;
     let f = ref m.facts and added = ref [] in
+    let add e p x =
+      let d = schema p in
+      if e < Schema.first_thing || e >= !next || not (Value.has_type d.typ x) then raise Exit;
+      (match x with Link t -> if t < Schema.first_prop || t >= !next then raise Exit | _ -> ());
+      if not d.many then f := C.F.filter (fun (e', p', _) -> not (e' = e && p' = p)) !f;
+      f := C.F.add (e, p, x) !f;
+      added := (e, p, x) :: !added
+    in
     List.iter
       (function
-        | Add (e, p, x) ->
-          let e = id e and x = fix x in
-          let d = schema p in
-          if e < Schema.first_thing || e >= !next || not (Value.has_type d.typ x) then raise Exit;
-          (match x with Link t -> if t < Schema.first_prop || t >= !next then raise Exit | _ -> ());
-          if not d.many then f := C.F.filter (fun (e', p', _) -> not (e' = e && p' = p)) !f;
-          f := C.F.add (e, p, x) !f;
-          added := (e, p, x) :: !added
+        | Add (e, p, x) -> add (id e) p (fix x)
+        | Incr (e, p, by, into) ->
+          (* the counter's value now (none: 0) plus by, in the 63 bits; into an int property *)
+          let e = id e and d = schema p in
+          if d.many || d.typ <> Tint then raise Exit;
+          let old = C.F.fold (fun (e', p', x) n -> match x with Int k when e' = e && p' = p -> k | _ -> n) !f 0 in
+          let n = old + by in
+          if (by > 0 && n < old) || (by < 0 && n > old) then raise Exit;
+          add e p (Int n);
+          Option.iter (fun (t, q) -> if (schema q).typ <> Tint then raise Exit; add (id t) q (Int n)) into
         | Retract (e, p, x) ->
           let e = id e and x = fix x in
           let d = schema p in
@@ -299,7 +314,7 @@ let model_write (m : model) (v : view) ops =
 
 let props =
   [ prop "name" Ttext; prop ~many:true "tag" Ttext; prop "score" Tint; prop ~unique:true "mail" Ttext;
-    prop ~many:true "friend" Tlink; prop "boss" Tlink; prop "w" Tfloat ]
+    prop ~many:true "friend" Tlink; prop "boss" Tlink; prop "w" Tfloat; prop ~unique:true "seq" Tint ]
 
 let random_ops r (v : view) ids =
   let p n = Option.get (property v n) in
@@ -308,7 +323,13 @@ let random_ops r (v : view) ids =
   let small = [| "a"; "b"; "c" |] in
   ignore ids;
   List.init (1 + Rng.int r 4) (fun _ ->
-      match Rng.int r 12 with
+      match Rng.int r 16 with
+      | 12 -> Incr (some (), p "score", Rng.int r 5 - 2, None)
+      | 13 -> Incr (some (), p "score", 1, Some (some (), p (if Rng.bool r then "seq" else "score")))
+      (* refused: a many-valued counter, a text one, into a text *)
+      | 14 -> (match Rng.int r 3 with 0 -> Incr (some (), p "tag", 1, None) | 1 -> Incr (some (), p "name", 1, None) | _ -> Incr (some (), p "score", 1, Some (some (), p "name")))
+      (* near the ends of the ints *)
+      | 15 -> Incr (some (), p "score", (if Rng.bool r then max_int - Rng.int r 3 else min_int + Rng.int r 3), None)
       | 0 -> Add (some (), p "name", Text (Rng.pick r small))
       | 1 -> Add (some (), p "tag", Text (Rng.pick r small))
       | 2 -> Retract (some (), p "tag", Text (Rng.pick r small))
@@ -346,6 +367,93 @@ let () =
       m.next <- (view f).next_e
     done
   done
+
+(* ---- Incr: one counter, many groups at once (gap 33: invoice numbers without a gap) ----
+   Batches of 50 groups resolved together by the writer, as 50 programs' writes at once are: each group takes the
+   counter's value at its point and adds one, into its own new invoice; a group refused for another reason (an Expect,
+   a wrong type) leaves the counter as it was. Then a power loss: the journal gives back the same numbers, and the
+   counting goes on from there. *)
+let () =
+  try
+  section "Incr: groups that count with one counter at once, a crash, the ends of the ints, what it refuses";
+  let sim = Sim_disk.create (Rng.make 33) in
+  let disk = Sim_disk.disk sim in
+  let opened () = Result.get_ok (Engine.open_ ~id_source:(fun _ -> "0123456789abcdef") disk "/incr") in
+  let e = ref (opened ()) in
+  let batch reqs = let b = Engine.prepare !e (Array.of_list (List.map (fun ops -> ops, 0, "w") reqs)) in Engine.commit !e b in
+  let one ops = (batch [ ops ]).(0) in
+  let ids, ops = Result.get_ok (Resolve.declare !e.working
+    [ prop "next" Tint; prop ~unique:true "number" Tint; prop "label" Ttext; prop ~many:true "tags" Tint; prop "f" Tfloat ]) in
+  ignore (Result.get_ok (one ops));
+  let[@warning "-8"] [ next; number; label; tags; f ] = ids in
+  let c = List.assoc (-1) (Result.get_ok (one [ Add (-1, label, Text "invoices") ])).things in
+  let counter () = values !e.working c next in
+  (* 4 batches of 50; in each, every 7th group refused by an Expect, every 11th by a wrong type after its Incr *)
+  let got = Hashtbl.create 256 and refused = ref 0 and total = ref 0 in
+  for b = 0 to 3 do
+    let reqs =
+      List.init 50 (fun i ->
+          let k = (b * 50) + i in
+          [ Incr (c, next, 1, Some (-1, number)); Add (-1, label, Text (Printf.sprintf "invoice %d" k)) ]
+          @ (if k mod 7 = 3 then [ Expect (c, label, Some (Text "no")) ] else [])
+          @ if k mod 11 = 5 then [ Add (-1, f, Text "not a float") ] else [])
+    in
+    Array.iteri
+      (fun i r ->
+        let k = (b * 50) + i in
+        match r with
+        | Ok (rc : Engine.receipt) ->
+          incr total;
+          let inv = List.assoc (-1) rc.things in
+          (match values !e.working inv number with
+           | [ Int n ] -> Hashtbl.replace got inv n; C.check (n = !total) "incr: group %d took %d, the %d-th accepted" k n !total
+           | _ -> C.fail "incr: invoice %d has no number" inv)
+        | Error _ -> incr refused; C.check (k mod 7 = 3 || k mod 11 = 5) "incr: group %d refused" k)
+      (batch reqs)
+  done;
+  let numbers = List.sort compare (Hashtbl.fold (fun _ n l -> n :: l) got []) in
+  C.check (numbers = List.init !total (fun i -> i + 1)) "incr: %d groups accepted, numbered 1 to %d, no gap, no double (%d refused)" !total !total !refused;
+  C.check (counter () = [ Int !total ]) "incr: the counter is %d" !total;
+  (* two Incr in one group read each other: the second sees the first *)
+  let rc = Result.get_ok (one [ Incr (c, next, 1, Some (-1, number)); Incr (c, next, 1, Some (-2, number)) ]) in
+  let num t = values !e.working (List.assoc t rc.things) number in
+  C.check (num (-1) = [ Int (!total + 1) ] && num (-2) = [ Int (!total + 2) ]) "incr: two in one group take %d and %d" (!total + 1) (!total + 2);
+  total := !total + 2;
+  (* the journal keeps what Incr did, an Add's retraction and addition: the replay after a power loss gives the same *)
+  let before = C.facts_of_view !e.working in
+  Sim_disk.crash sim;
+  e := opened ();
+  C.check (C.F.equal (C.facts_of_view !e.working) before) "incr: after a power loss, the same %d invoices and numbers" !total;
+  let rc = Result.get_ok (one [ Incr (c, next, 1, Some (-1, number)) ]) in
+  C.check (values !e.working (List.assoc (-1) rc.things) number = [ Int (!total + 1) ]) "incr: after the crash, the next is %d" (!total + 1);
+  (* the ends of the ints: the last value is given, one more refuses the group, which leaves it *)
+  let big = List.assoc (-1) (Result.get_ok (one [ Add (-1, next, Int (max_int - 1)) ])).things in
+  C.check (Result.is_ok (one [ Incr (big, next, 1, None) ])) "incr: to the largest int";
+  C.check (match one [ Incr (big, next, 1, None) ] with Error (Invalid _) -> true | _ -> false) "incr: past the largest int, refused";
+  C.check (match one [ Incr (-1, next, min_int, None); Incr (-1, next, -1, None) ] with Error (Invalid _) -> true | _ -> false) "incr: past the smallest, refused";
+  C.check (values !e.working big next = [ Int max_int ]) "incr: a refused group leaves the counter";
+  (* what it refuses: a counter of many values, of another type, a system property; into another type or a system
+     property; a thing that does not exist *)
+  let refused ops = match one ops with Error (Invalid _) -> true | _ -> false in
+  C.check (refused [ Incr (c, tags, 1, None) ]) "incr: a many-valued counter is refused";
+  C.check (refused [ Incr (c, label, 1, None) ]) "incr: a text counter is refused";
+  C.check (refused [ Incr (c, f, 1, None) ]) "incr: a float counter is refused";
+  C.check (refused [ Incr (next, Schema.p_type, 1, None) ]) "incr: a system property is refused";
+  C.check (refused [ Incr (c, next, 1, Some (-1, label)) ]) "incr: into a text is refused";
+  C.check (refused [ Incr (c, next, 1, Some (next, Schema.p_type)) ]) "incr: into a system property is refused";
+  C.check (refused [ Incr (!e.working.next_e + 5, next, 1, None) ]) "incr: a thing that does not exist is refused";
+  C.check (refused [ Incr (c, 60_000, 1, None) ]) "incr: a property that does not exist is refused";
+  C.check (counter () = [ Int (!total + 1) ]) "incr: the refusals left the counter at %d" (!total + 1);
+  (* into a many-valued int property: added beside the others *)
+  C.check (Result.is_ok (one [ Incr (c, next, 1, Some (c, tags)) ]) && values !e.working c tags = [ Int (!total + 2) ]) "incr: into a many-valued int";
+  (* a fork answers as the database (G8) *)
+  let fk = fork !e.working in
+  let r = write fk [ Incr (c, next, 10, Some (-1, number)) ] in
+  C.check (match r with Ok r -> values (view fk) (thing r (-1)) number = [ Int (!total + 12) ] | Error _ -> false) "incr: a fork counts as the database";
+  C.check (values !e.working c next = [ Int (!total + 2) ]) "incr: and the database does not change";
+  Engine.close !e
+  with ex -> C.fail "incr: %s" (Printexc.to_string ex)
+
 
 (* ---- questions against the naive evaluator ---- *)
 
@@ -497,7 +605,7 @@ let () =
     in
     (* and now and then in no order at all, or in the order of the things and properties, as a loader writes *)
     let key = function
-      | Add (e, q, _) | Retract (e, q, _) | Expect (e, q, _) ->
+      | Add (e, q, _) | Retract (e, q, _) | Expect (e, q, _) | Incr (e, q, _, _) ->
         (if e >= 0 then e else if e < -1_000_000_000 then v.next_e - e - 1_000_000_001 else v.next_e - e - 1), q
     in
     let ops = match Rng.int r 4 with

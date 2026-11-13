@@ -200,12 +200,17 @@ let unaddable c i (v : Store.view) r ops =
     | None ->
       List.find_map (function Resolve.Add (x, p, Value.Text n) when x = e && p = Schema.p_name -> Some (Tokens.kind_of n) | _ -> None) ops
   in
+  let one e p =
+    if not (Schema.is_system p) then if bit t p 2 then None else Some (kind_name v p)
+    else if p = Schema.p_rule || Schema.rule v.schema e <> None then Some "rules"
+    else match declared e with Some k when Tokens.adds_kind r k -> None | Some k -> Some k | None -> Some (string_of_int e)
+  in
   List.find_map
     (fun (op : Resolve.op) ->
-      let e, p = match op with Add (e, p, _) | Retract (e, p, _) | Expect (e, p, _) -> e, p in
-      if not (Schema.is_system p) then if bit t p 2 then None else Some (kind_name v p)
-      else if p = Schema.p_rule || Schema.rule v.schema e <> None then Some "rules"
-      else match declared e with Some k when Tokens.adds_kind r k -> None | Some k -> Some k | None -> Some (string_of_int e))
+      match op with
+      | Add (e, p, _) | Retract (e, p, _) | Expect (e, p, _) | Incr (e, p, _, None) -> one e p
+      (* an Incr adds to its counter's kind and to its into's *)
+      | Incr (e, p, _, Some (t, q)) -> ( match one e p with None -> one t q | k -> k))
     ops
 
 (* a question that a token with rights per kind may not read: denied, when it arrives *)

@@ -74,7 +74,15 @@ type op = Resolve.op =
   | Expect of int * int * value option
       (** [Expect (thing, property, Some v)]: the write fails with {!Conflict} unless the fact holds before the
           group; [None]: unless the thing has no value for the property *)
-(** A negative thing id, in a thing position or in a [Link], is a new thing of this group: [-1], [-2]... *)
+  | Incr of int * int * int * (int * int) option
+      (** [Incr (thing, property, by, into)]: the thing's value of a one-valued int property (none counts 0) grows by
+          [by], read at this point of the group, at the writer: groups that increment one counter never conflict
+          and never skip a value, and a refused group leaves the counter as it was. A value past the ints refuses
+          the group ({!Invalid}). [into = Some (thing', property')] also adds the new value as [(thing', property')],
+          an int property ([thing'] may be a new thing): an invoice gets its number in the group that makes it. The
+          journal keeps what it did, as an [Add]'s retraction and addition. *)
+(** A negative thing id, in a thing position, in a [Link] or in [Incr]'s [into], is a new thing of this group: [-1],
+    [-2]... *)
 
 type receipt = Engine.receipt = { group : int;  (** the group's number *) things : (int * int) list  (** new ids: (-k, id) *) }
 

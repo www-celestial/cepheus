@@ -387,8 +387,10 @@ let gen_ops r (v : Store.view) =
     let some () = if things = 0 then -1 else Schema.first_thing + Rng.int r (things + 2) in
     let small = [| "a"; "b"; "c" |] in
     let one () =
-      match Rng.int r 9 with
+      match Rng.int r 10 with
       | 0 | 1 -> [ Add (-1, p "name", Text ("n" ^ Rng.pick r small)); Add (-1, p "score", Int (Rng.int r 5)) ]
+      (* a counter over the wire: a write sent again is applied once (G14), so it counts once *)
+      | 9 -> [ Incr (some (), p "score", 1, if Rng.bool r then Some (-1, p "score") else None) ]
       | 2 -> [ Add (some (), p "score", Int (Rng.int r 5)) ]
       | 3 -> [ Add (some (), p "tag", Text (Rng.pick r small)) ]
       | 4 -> [ Retract (some (), p "tag", Text (Rng.pick r small)) ]

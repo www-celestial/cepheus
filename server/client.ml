@@ -31,7 +31,7 @@ type t = {
   early : (int, (int * int * Bytes.t) list) Hashtbl.t;  (* replies that came before they were asked for *)
   mutable welcome : Wire.reply option;
   mutable follows : (Unix.file_descr * unit Domain.t) list;  (* the follow streams of its databases *)
-  mutable spoken : int;  (* the protocol's version this connection speaks: 2, or 1 with a server that speaks no more *)
+  mutable spoken : int;  (* the protocol's version this connection speaks: 4, or less with a server that speaks no more *)
 }
 
 (* a question with Not, Or, In, Prefix, Sort, Limit or After, on a connection to a server of protocol 1 *)
@@ -39,6 +39,12 @@ let older = "this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and
 
 (* a file, on a connection to a server of protocol 1 or 2 *)
 let no_files = "this server speaks protocol 2 or older: files need a server of protocol 3"
+
+(* an Incr, on a connection to a server of protocol 3 or older: refused here, never sent (such a server closes the
+   connection on an operation it does not know) *)
+let no_incr = "this server speaks protocol 3 or older: Incr needs a server of protocol 4"
+
+let has_incr ops = List.exists (function Resolve.Incr _ -> true | _ -> false) ops
 
 exception Broken of string
 
@@ -470,19 +476,24 @@ let floor c = Hashtbl.fold (fun s () m -> min s m) c.waiting (c.serial + 1)
 (* A write in the session: sent, and sent again with the same serial after a broken connection, until it is answered
    or the budget is spent: then Error unreachable, and the write was applied once or not at all. *)
 let write c db ?(by = 0) ?(why = "") ops =
-  c.serial <- c.serial + 1;
-  let serial = c.serial in
-  Hashtbl.replace c.waiting serial ();
-  with_retry c
-    (fun () ->
-      let r = call c (Wire.Write { db = db.handle; serial; floor = floor c; by; why; ops }) in
-      Hashtbl.remove c.waiting serial;
-      match r with
-      | Wire.Receipt rc -> Ok rc
-      | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Write" }))
-    (fun _ ->
-      Hashtbl.remove c.waiting serial;
-      Error { code = "unreachable"; message = "the server did not answer in time: the write was applied once or not at all" })
+  (* before the first try only: once sent, the write may be applied, and only the server's answer or the budget
+     tells (a connection made again to an older server, which closes it on the operation, ends as unreachable) *)
+  if c.spoken < 4 && has_incr ops then Error { code = "invalid"; message = no_incr }
+  else begin
+    c.serial <- c.serial + 1;
+    let serial = c.serial in
+    Hashtbl.replace c.waiting serial ();
+    with_retry c
+      (fun () ->
+        let r = call c (Wire.Write { db = db.handle; serial; floor = floor c; by; why; ops }) in
+        Hashtbl.remove c.waiting serial;
+        match r with
+        | Wire.Receipt rc -> Ok rc
+        | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Write" }))
+      (fun _ ->
+        Hashtbl.remove c.waiting serial;
+        Error { code = "unreachable"; message = "the server did not answer in time: the write was applied once or not at all" })
+  end
 
 (* A file: its bytes and its facts (kind/Name, Size, Type, Owner, Content), a Put of the session: sent again with the
    same serial after a broken connection (its bytes then found stored), applied once; its receipt's thing [-1] is
