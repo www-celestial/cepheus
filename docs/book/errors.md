@@ -237,7 +237,7 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 
 A program connected to the server receives every error above as a value `{code, message}` (`conflict`, `invalid`,
 `unique`, `damaged`, `io`, `busy`, `closed`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
-`unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`. Each, when it comes and what to do: [the server](server.md#errors).
+`unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`, `internal`. Each, when it comes and what to do: [the server](server.md#errors).
 
 The file vault's ([the vault](vault.md)), through the server or from `Cepheus_vault.Vault`:
 
@@ -314,3 +314,10 @@ threshold. Other lines come from the writer and the commit buffer.
 | `cepheus: FILE reloaded: N tokens` / `cepheus: FILE not reloaded: MSG` | tokens.toml changed; a file that does not parse is not taken, the server keeps the tokens it had |
 | `cepheus: database NAME: the sessions could not be saved: MSG` | the session checkpoint failed (a disk error): the older one stays, and the next start reads more of the journal |
 | `cepheus: stopping` / `cepheus: stopped` | SIGTERM or SIGINT: the stop of [the server](server.md#start-stop-crash) |
+| `cepheus: connection N (token T), request I of kind K failed: EXN` | a request met what the server did not expect (a bug, memory that ran out): it was answered `internal` and its connection closed ([the server](server.md#a-request-that-makes-the-server-fail)). EXN is the exception's text, cut to 300 bytes, every byte outside printable ASCII written `\ddd` |
+| `cepheus: connection N (token T) failed: EXN` | the same in another thread of the connection (a write's reply, a push) or in its reading loop: `internal` on request id 0, then the connection closes |
+| `cepheus: a watched question at a frame failed: EXN` | a watched question failed at a frame: its watches end `internal`, the other questions go on |
+| `cepheus: the watches of a database failed: EXN` | the hub failed outside one question: every watch of the database ends `internal`, and a new watch starts from the frame's state |
+| `cepheus: a connection's thread failed: EXN` / `cepheus: a connection's start failed: EXN` | what no catch of a connection expected, after its socket was closed; or no thread could be made for a new connection (the system's limit): it is closed at once |
+| `cepheus: a write's reply failed: EXN` / `cepheus: the receipt of a write in its session's table failed: EXN` | a write's outcome could not be handed on, or kept in its session's table (memory): its waiters are answered all the same |
+| `... (and N failures since the line before, not written)` | the lines above come at most once a second: the next one counts those left out |

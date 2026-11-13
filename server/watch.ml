@@ -57,12 +57,18 @@ let run t h () =
           Queue.clear t.q;
           l)
     in
+    (* what an item raises ends the watches, never the thread: a dead thread would freeze every watch of the database *)
     List.iter
-      (function
-        | Frame (tag, gs, v) -> Live.frame h ~tag gs v
-        | Large (tag, v) -> Live.reset h v ~tag
-        | Durable g -> Live.durable h g
-        | Quit -> go := false)
+      (fun item ->
+        match
+          match item with
+          | Frame (tag, gs, v) -> Live.frame h ~tag gs v
+          | Large (tag, v) -> Live.reset h v ~tag
+          | Durable g -> Live.durable h g
+          | Quit -> go := false
+        with
+        | () -> ()
+        | exception e -> Live.broken h e (match item with Frame (tag, _, v) | Large (tag, v) -> Some (v, tag) | Durable _ | Quit -> None))
       items
   done
 

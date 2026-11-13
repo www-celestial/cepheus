@@ -210,6 +210,12 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   connection, one that trickles a byte at a time without a request, and one that stops in its TLS handshake are
   closed within twice the limit (the first two after `idle`); a client that pings more often stays; a client idle
   past the limit reads again, its library connecting again by itself.
+- `server_guard`: connections served by the server's own code over real sockets, on a database whose reads raise
+  when the test says (a bug of a request): a request that raises on a connection with a watch and a write in flight
+  (the write answered, the request `internal`, the connection closed), 200 such connections in a row, and a failure
+  in another thread of a connection while it waits in a read, over a Unix socket and over TCP (`internal` on id 0, no
+  request answered after it); after each, the process's descriptors and threads are what they were, no connection or
+  watch is left, and a new connection is served.
 - Every server these tests start runs in a session of its own (`setsid`) with its output in a `serve.log` beside its
   `cluster.toml`, and is stopped when its test ends, even when the test fails (`test/serve.ml`); the tests ignore
   SIGPIPE, so that a write to a connection the server closed is an error, not the death of the test.

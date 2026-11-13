@@ -467,7 +467,9 @@ same   = 2 | group                                                 nothing the q
 - **An error ends the watch**: `lagging` (the connection holds more than 8 MiB of pushes it has not taken, or the hub
   fell 65,536 frames behind, or a large group of its own frame changed the database: the program watches again from
   the group of its last message); `denied` (the token may no longer read the database: G16 is checked at each message,
-  the table of tokens read again only when it changed); `stopping` (the server or the database stops).
+  the table of tokens read again only when it changed); `stopping` (the server or the database stops); `internal`
+  (the server failed on the watch's question at a frame, which ends that question's watches only, or on the
+  database's watches as a whole, which ends them all: watch again; the log says why).
 - **Nobody waits for a watch.** The writer and the syncer give each frame to a queue and go on; a hub thread per
   watched database evaluates it, all the hub threads in a domain of their own (made at the first `Watch`: nothing runs
   for a database nobody watches); a push goes to its connection's buffer, which a thread of the connection sends, so
@@ -531,6 +533,7 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 | `invalid` | a malformed request (the connection closes), a question that does not check, a serial below its session's floor, a why that starts with the server's marker, `Follow` on a connection with writes in flight | fix the request |
 | `denied` (Follow) | `Follow` over TCP: local reads are for programs on the server's machine, over its Unix socket | read through the server; the OCaml client does by itself |
 | `busy` (Follow) | `Follow` when the run files could not be opened eight times in a row (merges removing them meanwhile) | follow again: the OCaml client does, within 100 ms |
+| `internal` | the server failed on a request, or in another task of the connection (a write's reply, a push), with what it did not expect: a bug, or memory that ran out. On the request's id, or on id 0; then the connection closes, its writes in flight answered first ([below](#a-request-that-makes-the-server-fail)) | connect again (the OCaml client does); report the server's log line |
 
 ## Writes applied once: sessions (G14)
 
@@ -847,6 +850,43 @@ A token with **rights per kind** (`{ read = ["client", "invoice"], add = ["invoi
 The check costs 21.95 ns [21.85, 22.07] a group of 4 facts (`sbench rights`: the median of 21 rounds of a million
 groups, with its 95 % interval; a schema of 40 properties of 10 kinds), beside the tens of microseconds of a write
 through the server; a token `read` or `write` pays one comparison more a request.
+
+### A request that makes the server fail
+
+A request may meet what the server did not expect: a bug (an index out of bounds, a value not found), or memory
+that ran out. It never takes its connection's thread with it, nor the thread of another connection or of the
+database's watches. Each place that serves a peer ends there: the request, a write's reply, a push, the connection's
+own threads, a watched question at a frame.
+
+- **The request** is answered `internal` on its id, with a fixed message: no exception, path or state of the server
+  crosses the wire. A failure in another thread of the connection (its write's reply, its push) says `internal` on
+  id 0, and the connection reads no request after it.
+- **The connection closes**, and lets go of what it held: its writes in flight are answered first, its watches and its
+  unfinished files are dropped, its threads end, its socket is closed. A program that makes the server fail in a loop
+  costs each time its own connection, and exhausts neither descriptors nor threads (tested: 200 connections in a row).
+- **A watched question** that fails at a frame ends its own watches with `internal`; the other questions go on. A
+  failure of the hub outside one question ends every watch of the database with `internal`, and the hub starts again
+  at that frame's state, so that a new watch starts right.
+- **The log** gets one line on the standard error: what failed (the connection's number, its token's name, the
+  request's id and kind) and the exception's text, cut to 300 bytes, every byte outside printable ASCII written
+  `\ddd`, so that a client's bytes in an exception's text can neither make a line of their own nor speak to the
+  terminal that shows the log. At most one such line a second: the next one counts those left out. The lines are in
+  [errors](errors.md#lines-on-the-standard-error).
+- **A frame is whole or not at all**: a reply whose coding fails leaves nothing of itself in the output, a push of
+  several frames is given whole or not at all, and a reply of several frames that fails after some ends with
+  `internal` on its id, which the client takes as its end.
+
+Memory that ran out: OCaml raises `Out_of_memory` when one allocation cannot be had (on Linux, mostly a size past
+what the machine could give, the request's own), and the heap is still sound, so the server goes on. A machine truly
+out of memory has the process killed by the kernel instead; systemd starts it again, and recovery decides what is
+durable. A stack that overflows raises `Stack_overflow` in OCaml 5, which unwinds that thread's stack: the server goes
+on.
+
+*Tested by* `test/server_unit.ml` (eight exceptions raised by a request, a client's bytes in an exception's text, a
+reply cut between its frames, a write whose hand-off fails, a write's reply and a push that fail, a watched question
+and a hub that fail, failures in a loop) and `test/server_guard.ml` (real sockets: a connection with a watch and a
+write in flight, 200 failing connections, a failure in another thread over a Unix socket and over TCP; the process's
+descriptors and threads counted before and after).
 
 ### Who may reach the socket
 

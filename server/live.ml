@@ -575,6 +575,19 @@ let end_all h code message =
   Hashtbl.reset h.templates;
   Hashtbl.reset h.by_prop
 
+(* A question that failed at a frame with what it did not expect (a bug, memory that ran out): logged (Fault), its
+   watches told internal at once and dropped (what they had held is never sent); the other questions go on. *)
+let failed h t e =
+  Fault.log "a watched question at a frame" e;
+  let ss = Hashtbl.fold (fun _ l acc -> List.rev_append l acc) t.subs [] in
+  List.iter
+    (fun s ->
+      if not s.gone then begin
+        remove h s;
+        ignore (s.emit (Ended { code = "internal"; message = "the server failed on this watch's question (its log says why)" }))
+      end)
+    ss
+
 (* A frame: its groups, and the state after them, under [tag]. Its messages are held until [durable] passes the tag. *)
 let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
   Mutex.protect h.hm (fun () ->
@@ -606,33 +619,49 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
         let ts = Hashtbl.create 8 in
         Hashtbl.iter (fun p () -> List.iter (fun (t, _) -> Hashtbl.replace ts t.tkey t) (Option.value (Hashtbl.find_opt h.by_prop p) ~default:[])) props;
         let dplus = lazy (words v1 plus) and dminus = lazy (words v0 minus) in
-        let wholes = ref [] in
+        let wholes = ref [] and broken = ref [] in
+        (* what a question did not expect, in its changes or its rows, ends its own watches (failed); a damaged page
+           ends every watch (below) *)
+        let guard t f =
+          match f () with
+          | () -> ()
+          | exception ((Pages.Unreadable _ | Query.Bad _) as e) -> raise e
+          | exception e -> if not (List.exists (fun (t', _) -> t' == t) !broken) then broken := (t, e) :: !broken
+        in
+        let ok (s : sub) = not (s.gone || List.exists (fun (t, _) -> t == s.t) !broken) in
         (match
            Hashtbl.iter
              (fun _ t ->
-               if t.extra <> [] then begin
-                 let each f = Hashtbl.iter (fun _ ss -> List.iter (fun s -> if not s.gone then f s) ss) t.subs in
-                 match whole_delta v0 v1 t (List.map fst changes) with
-                 | added, removed ->
-                   if added <> [] || removed <> [] then
-                     each (fun s ->
-                         if not s.touched then touched := s :: !touched;
-                         List.iter (take v1 s 1) added;
-                         List.iter (take v0 s (-1)) removed)
-                 | exception Query.Over_budget n ->
-                   each (fun s -> wholes := (s, Ended { code = "too_large"; message = Printf.sprintf "the question passed the server's budget of %d candidates" n }) :: !wholes)
-               end
-               else begin
-                 if plus <> [] then side_bindings v1 t plus (Lazy.force dplus) 1 touched;
-                 if minus <> [] then side_bindings v0 t minus (Lazy.force dminus) (-1) touched
-               end)
-             ts
+               guard t @@ fun () ->
+                 if t.extra <> [] then begin
+                   let each f = Hashtbl.iter (fun _ ss -> List.iter (fun s -> if not s.gone then f s) ss) t.subs in
+                   match whole_delta v0 v1 t (List.map fst changes) with
+                   | added, removed ->
+                     if added <> [] || removed <> [] then
+                       each (fun s ->
+                           if not s.touched then touched := s :: !touched;
+                           List.iter (take v1 s 1) added;
+                           List.iter (take v0 s (-1)) removed)
+                   | exception Query.Over_budget n ->
+                     each (fun s -> wholes := (s, Ended { code = "too_large"; message = Printf.sprintf "the question passed the server's budget of %d candidates" n }) :: !wholes)
+                 end
+                 else begin
+                   if plus <> [] then side_bindings v1 t plus (Lazy.force dplus) 1 touched;
+                   if minus <> [] then side_bindings v0 t minus (Lazy.force dminus) (-1) touched
+                 end)
+             ts;
+           let out = ref [] in
+           List.iter
+             (fun s ->
+               if ok s then
+                 guard s.t @@ fun () ->
+                 match finish v1 s with Some (added, removed) -> out := (s, Change { group = v1.group; added; removed }) :: !out | None -> ())
+             (List.rev !touched);
+           List.rev !out
          with
-        | () ->
-          let out =
-            List.filter_map (fun s -> match finish v1 s with Some (added, removed) -> Some (s, Change { group = v1.group; added; removed }) | None -> None) (List.rev !touched)
-          in
-          give h tag (out @ List.rev !wholes)
+        | out ->
+          List.iter (fun (t, e) -> failed h t e) (List.rev !broken);
+          give h tag (List.filter (fun (s, _) -> not s.gone) (out @ List.rev !wholes))
         | exception (Pages.Unreadable m | Query.Bad m) -> end_all h "damaged" m)
       end;
       h.view <- v1;
@@ -648,15 +677,27 @@ let durable h tag = Mutex.protect h.hm (fun () -> if tag > h.durable then (h.dur
 
 let stop h code message = Mutex.protect h.hm (fun () -> h.stopped <- Some (code, message); end_all h code message)
 
+(* every watch ends with [code], and the hub starts again at [v], its ring empty *)
+let restart h (v : Store.view) ~tag code message =
+  end_all h code message;
+  Queue.clear h.ring;
+  h.ring_n <- 0;
+  h.ring_from <- v.group;
+  h.view <- v;
+  h.tag <- tag
+
 (* a frame whose changes are not given (a large group): every watch is asked again *)
 let reset h (v : Store.view) ~tag =
+  Mutex.protect h.hm (fun () -> restart h v ~tag "lagging" "a large group changed the database: watch again from its group")
+
+(* What the hub's thread did not expect outside one question's work (a bug, memory that ran out): logged, every watch
+   ends internal, and the hub goes on at [at] (the state of the frame that failed; None: its own), so that a watch made
+   after it starts from the right state. *)
+let broken h e at =
+  Fault.log "the watches of a database" e;
   Mutex.protect h.hm (fun () ->
-      end_all h "lagging" "a large group changed the database: watch again from its group";
-      Queue.clear h.ring;
-      h.ring_n <- 0;
-      h.ring_from <- v.group;
-      h.view <- v;
-      h.tag <- tag)
+      let v, tag = match at with Some x -> x | None -> h.view, h.tag in
+      restart h v ~tag "internal" "the server failed on this database's watches (its log says why): watch again")
 
 (* does a change of the ring after group [n] touch the question: a fact of one of its patterns' properties that
    matches its constants *)

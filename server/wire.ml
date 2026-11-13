@@ -113,13 +113,17 @@ exception Malformed of string
 
 let u32 b o = Int32.to_int (Bytes.get_int32_le b o) land 0xFFFF_FFFF
 
-(* the frame header and an already coded body *)
+(* the frame header and an already coded body: whole or not at all (a buffer that cannot grow, memory, leaves [out]
+   as it was: half a frame would make the peer read the next frame as its body) *)
 let add_frame out ~id ~kind ~flags body =
-  Buffer.add_int32_le out (Int32.of_int (6 + Buffer.length body));
-  Buffer.add_int32_le out (Int32.of_int id);
-  Buffer.add_uint8 out kind;
-  Buffer.add_uint8 out flags;
-  Buffer.add_buffer out body
+  let n = Buffer.length out in
+  try
+    Buffer.add_int32_le out (Int32.of_int (6 + Buffer.length body));
+    Buffer.add_int32_le out (Int32.of_int id);
+    Buffer.add_uint8 out kind;
+    Buffer.add_uint8 out flags;
+    Buffer.add_buffer out body
+  with e -> Buffer.truncate out n; raise e
 
 (* ---- codings ---- *)
 

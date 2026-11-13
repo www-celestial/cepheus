@@ -1100,6 +1100,271 @@ let files_wire () =
   done;
   check (!n = 3000 && !m = 24000) "files wire: 3000 requests read back, 24000 changed ones read or refused"
 
+(* ---- what a request does not expect: it ends where the peer is served, never the thread ---- *)
+
+(* an exception whose text is a client's bytes as they came *)
+exception Raw of string
+
+let () = Printexc.register_printer (function Raw s -> Some s | _ -> None)
+
+let internal_message = "the server failed (its log says why): the connection is closed"
+
+(* the frames of [s], each whole: (id, kind, flags, body); None when the bytes do not end at a frame's end *)
+let frames_of s =
+  let rec go o acc =
+    if o = Bytes.length s then Some (List.rev acc)
+    else if Bytes.length s - o < Wire.header then None
+    else
+      let len = Wire.u32 s o in
+      if len < 6 || o + 4 + len > Bytes.length s then None
+      else go (o + 4 + len) ((Wire.u32 s (o + 4), Bytes.get_uint8 s (o + 8), Bytes.get_uint8 s (o + 9), Bytes.sub s (o + Wire.header) (len - 6)) :: acc)
+  in
+  go 0 []
+
+let reply_of (_, kind, flags, body) = try Some (Wire.get_reply kind flags (Codec.reader body 0 (Bytes.length body))) with _ -> None
+let is_internal ~id ((i, _, flags, _) as f) =
+  i = id && flags land Wire.f_more = 0 && match reply_of f with Some (Wire.Err { code = "internal"; message }) -> message = internal_message | _ -> false
+
+let contains s sub =
+  let n = String.length sub in
+  let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in
+  go 0
+
+(* what [f] writes on the standard error *)
+let with_stderr f =
+  let base = Option.value (Sys.getenv_opt "CEPHEUS_TMP") ~default:(Filename.get_temp_dir_name ()) in
+  let path = Filename.concat base (Printf.sprintf "cepheus-guard-%d.err" (Unix.getpid ())) in
+  let fd = Unix.openfile path [ O_WRONLY; O_CREAT; O_TRUNC; O_CLOEXEC ] 0o600 in
+  flush stderr;
+  let saved = Unix.dup ~cloexec:true Unix.stderr in
+  Unix.dup2 fd Unix.stderr;
+  Unix.close fd;
+  let r = Fun.protect ~finally:(fun () -> flush stderr; Unix.dup2 saved Unix.stderr; Unix.close saved) f in
+  let s = In_channel.with_open_bin path In_channel.input_all in
+  Sys.remove path;
+  r, s
+
+type gconn = { gc : Core.conn; send : Wire.request -> int * Core.input option; take : unit -> (int * int * int * Bytes.t) list option;
+               bad_flush : bool ref; bad_wake : bool ref; closed : int ref }
+
+let guard () =
+  let sim = Sim_disk.create (Rng.make 17) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/g";
+  let e = Result.get_ok (Engine.open_ disk "/g/shop") in
+  (* the database's view raises what [boom] holds: a bug of the request that reads it *)
+  let boom = ref None in
+  let view () = (match !boom with Some x -> raise x | None -> ()); Atomic.get e.published in
+  let v0 = Atomic.get e.published in
+  let hub = Live.create v0 ~tag:v0.group ~durable:max_int in
+  let d = { Core.name = "shop"; index = 0; dir = "/g/shop"; view; sessions = Sessions.create (); more = (fun () -> []); hub = (fun () -> hub);
+            files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/g/shop/vault" } in
+  (* the writer, its groups given to the hub at once; [handoff] makes the next hand-off fail before the write is taken *)
+  let handoff = ref None in
+  let submit (_ : Core.db) ops by why k =
+    (match !handoff with Some x -> handoff := None; raise x | None -> ());
+    let b = Engine.prepare e [| ops, by, why |] in
+    let r = (Engine.commit e b).(0) in
+    if b.count > 0 then Live.frame hub ~tag:b.after.group (List.rev b.groups) b.after;
+    k r
+  in
+  let props = [ { Schema.name = "person/name"; typ = Value.Ttext; many = false; unique = false };
+                { Schema.name = "person/score"; typ = Tint; many = false; unique = false } ] in
+  let ids, ops = Result.get_ok (Resolve.declare (Atomic.get e.published) props) in
+  submit d ops 0 "declare" (fun r -> ignore (Result.get_ok r));
+  let pname = List.nth ids 0 and pscore = List.nth ids 1 in
+  let mk name = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases = [ "shop", Tokens.Write ]; admin = false } in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:(Tokens.with_tokens Tokens.empty [ mk "w" ]) ~now:disk.now
+              ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+  let conn ?(session = 0) () =
+    let out = Buffer.create 256 in
+    let bad_flush = ref false and bad_wake = ref false and closed = ref 0 in
+    let rec c =
+      lazy
+        (Core.connect srv
+           ~wake:(fun () -> if !bad_wake then raise (Sys_error "Thread.create: Resource temporarily unavailable"))
+           ~close:(fun () -> incr closed)
+           ~flush:(fun () ->
+             if !bad_flush then (bad_flush := false; raise (Raw "the transport failed"));
+             let cc = Lazy.force c in
+             Buffer.add_buffer out cc.Core.out;
+             Buffer.clear cc.Core.out)
+           ~submit)
+    in
+    let c = Lazy.force c in
+    let next = ref 1 in
+    let send req =
+      let id = !next in
+      incr next;
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      match Core.input c bytes 0 (Bytes.length bytes) with
+      | _, why -> id, Some why
+      | exception x -> check false "guard: request %d raised %s out of Core.input" id (Printexc.to_string x); id, None
+    in
+    (* every frame given since, the pushes too *)
+    let take () =
+      ignore (Core.move_pushes c);
+      Buffer.add_buffer out c.out;
+      Buffer.clear c.out;
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      frames_of s
+    in
+    let g = { gc = c; send; take; bad_flush; bad_wake; closed } in
+    ignore (send (Wire.Hello { version = Wire.version; token = "cph_w"; program = "t"; session }));
+    ignore (take ());
+    g
+  in
+  let get = Wire.Get { db = 0; thing = Schema.first_thing } in
+  (* a request that raises: answered internal on its id, nothing more, the connection closed; the first one's line in
+     the log, escaped *)
+  let crashes =
+    [ Raw "x\ncepheus: a forged line\027[2J"; Invalid_argument "index out of bounds"; Not_found; Division_by_zero; Out_of_memory;
+      Stack_overflow; Sys_error "/secret/data/shop: Permission denied"; Failure "a bug" ]
+  in
+  List.iteri
+    (fun i x ->
+      let g = conn () in
+      boom := Some x;
+      let (id, why), log = with_stderr (fun () -> g.send get) in
+      boom := None;
+      let what = Printexc.to_string x in
+      (match g.take () with
+       | Some [ f ] ->
+         check (is_internal ~id f && why = Some Core.Shut) "guard: a request that raised %s: answered internal, the connection closed" what;
+         let m = match reply_of f with Some (Wire.Err e) -> e.message | _ -> "" in
+         check (not (List.exists (contains m) [ what; "secret"; "forged"; "Raised"; "index"; "memory"; "overflow" ])) "guard: nothing of %s told the client" what
+       | Some fs -> check false "guard: a request that raised %s: %d frames" what (List.length fs)
+       | None -> check false "guard: a request that raised %s: a frame not whole" what);
+      if i = 0 then begin
+        let lines = List.filter (( <> ) "") (String.split_on_char '\n' log) in
+        check
+          (match lines with
+           | [ l ] -> String.starts_with ~prefix:"cepheus: connection" l && contains l "x\\010cepheus: a forged line\\027[2J" && not (String.contains l '\027')
+           | _ -> false)
+          "guard: the failure in one line of the log, the client's bytes escaped (%S)" log
+      end)
+    crashes;
+  (* rows over a MiB, then a failure between two frames of their reply: the frames sent are whole, the error ends them *)
+  let text = String.make 48 'n' in
+  for k = 0 to 24 do
+    submit d (List.init 1000 (fun j -> Resolve.Add (-(j + 1), pname, Value.Text (Printf.sprintf "%s %d %d" text k j)))) 0 "rows" (fun r -> ignore (Result.get_ok r))
+  done;
+  let names = { Query.vars = 2; where = [ { Query.e = Var 0; p = pname; v = Var 1 } ]; ranges = [] } in
+  let g = conn () in
+  g.bad_flush := true;
+  let id, why = g.send (Wire.Find { db = 0; query = names; select = Wire.Give [||]; extra = []; order = Top.none }) in
+  (match g.take () with
+   | Some ((first :: _ :: _) as fs) ->
+     let last = List.nth fs (List.length fs - 1) in
+     let (i1, _, fl1, _) = first in
+     check (i1 = id && fl1 land Wire.f_more <> 0 && is_internal ~id last && why = Some Core.Shut && List.length fs = 2)
+       "guard: a reply cut between its frames: whole frames, then internal on its id (%d frames)" (List.length fs)
+   | Some fs -> check false "guard: a reply cut between its frames: %d frames" (List.length fs)
+   | None -> check false "guard: a reply cut between its frames: a frame not whole");
+  (* a write whose hand-off fails is not taken: the connection's flight and the session's left empty, the write sent
+     again on a new connection applied once *)
+  let a = conn () in
+  let session = a.gc.session in
+  let w = Wire.Write { db = 0; serial = 1; floor = 1; by = 0; why = "once"; ops = [ Resolve.Add (-1, pname, Value.Text "once") ] } in
+  handoff := Some (Sys_error "Thread.create: Resource temporarily unavailable");
+  let id, why = a.send w in
+  handoff := None;
+  (match a.take () with
+   | Some [ f ] -> check (is_internal ~id f && why = Some Core.Shut && a.gc.inflight = 0) "guard: a hand-off that failed: internal, nothing in flight (%d)" a.gc.inflight
+   | _ -> check false "guard: a hand-off that failed: not one frame");
+  let b = conn ~session () in
+  let id, _ = b.send w in
+  (match b.take () with
+   | Some [ f ] -> check (match reply_of f with Some (Wire.Receipt _) -> true | _ -> false) "guard: the write sent again after a failed hand-off is applied"
+   | Some fs -> check false "guard: the write sent again after a failed hand-off: %d frames (none: it waits for a write never taken)" (List.length fs)
+   | None -> check false "guard: the write sent again: a frame not whole");
+  ignore id;
+  let once = { Query.vars = 1; where = [ { Query.e = Var 0; p = pname; v = Val (Value.Text "once") } ]; ranges = [] } in
+  check ((match Cepheus.find (Atomic.get e.published) once with Ok l -> List.length l | Error _ -> -1) = 1) "guard: the write sent again is applied once";
+  (* a write's reply that fails, in the thread that ends the write: that connection ends (internal, at its end), its
+     flight empty; the thread goes on *)
+  let a = conn () in
+  a.bad_flush := true;
+  let id, why = a.send (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "reply"; ops = [ Resolve.Add (-1, pscore, Value.Int 7) ] }) in
+  Core.ending a.gc;
+  (match a.take () with
+   | Some [ r; f ] ->
+     check (match reply_of r with Some (Wire.Receipt _) -> true | _ -> false) "guard: a reply that failed to be sent: its frame whole (id %d)" id;
+     check (is_internal ~id:0 f && !(a.closed) = 1 && a.gc.inflight = 0 && why <> None)
+       "guard: a reply that failed: the connection told internal and closed, nothing in flight (%d closes, %d in flight)" !(a.closed) a.gc.inflight
+   | Some fs -> check false "guard: a reply that failed: %d frames" (List.length fs)
+   | None -> check false "guard: a reply that failed: a frame not whole");
+  (* a push that fails (the thread of its pushes not made) ends its own connection, never the hub: another watch of the
+     question gets every change *)
+  let scores = { Query.vars = 2; where = [ { Query.e = Var 0; p = pscore; v = Var 1 } ]; ranges = [] } in
+  let watch g = ignore (g.send (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = [] })); ignore (g.take ()) in
+  let a = conn () and b = conn () and wr = conn () in
+  watch a;
+  watch b;
+  a.bad_wake := true;
+  let changes g =
+    match g.take () with
+    | Some fs -> List.length (List.filter (fun (_, kind, flags, _) -> kind = Wire.k_watch && flags land Wire.f_error = 0) fs)
+    | None -> -1
+  in
+  let write v = ignore (wr.send (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "push"; ops = [ Resolve.Add (-1, pscore, Value.Int v) ] })) in
+  write 8;
+  check (!(a.closed) = 1) "guard: a push that failed closes its connection (%d)" !(a.closed);
+  Core.ending a.gc;
+  check (match a.take () with Some fs -> List.exists (is_internal ~id:0) fs | None -> false) "guard: a push that failed: internal at the connection's end";
+  let n1 = changes b in
+  write 9;
+  let n2 = changes b in
+  check (n1 = 1 && n2 = 1) "guard: beside a push that failed, the other watch gets every change (%d, %d)" n1 n2;
+  (* a watched question that fails at a frame (a view that lost a text its facts cite: a bug) ends its own watches,
+     internal; the other questions go on *)
+  let ada = ref 0 in
+  submit d [ Resolve.Add (-1, pname, Value.Text "Ada") ] 0 "ada" (fun r -> ada := List.assoc (-1) (Result.get_ok r).things);
+  let v = Atomic.get e.published in
+  let h = Live.create v ~tag:v.group ~durable:max_int in
+  let got1 = ref [] and got2 = ref [] in
+  let q1 = { Query.vars = 3; where = [ { Query.e = Var 0; p = pscore; v = Var 1 }; { Query.e = Var 0; p = pname; v = Var 2 } ]; ranges = [] } in
+  ignore (Live.subscribe h q1 (Wire.Give [| 2 |]) ~from:0 ~emit:(fun m -> got1 := m :: !got1; true));
+  ignore (Live.subscribe h scores (Wire.Give [| 1 |]) ~from:0 ~emit:(fun m -> got2 := m :: !got2; true));
+  let bt = Engine.prepare e [| [ Resolve.Add (!ada, pscore, Value.Int 3) ], 0, "frame" |] in
+  ignore (Engine.commit e bt);
+  let bad = { bt.after with Store.dict = (Store.empty ()).dict } in
+  (match Live.frame h ~tag:bt.after.group (List.rev bt.groups) bad with
+   | () ->
+     check (match !got1 with Live.Ended { code = "internal"; _ } :: _ -> true | _ -> false) "guard: a watched question that failed at a frame: its watch ended internal";
+     check (match !got2 with Live.Change { added = [ [| Value.Int 3 |] ]; _ } :: _ -> true | _ -> false) "guard: beside it, another question's watch gets its change"
+   | exception x -> check false "guard: a watched question's failure at a frame left the hub: %s" (Printexc.to_string x));
+  (* the hub's thread failing outside one question: every watch ends internal, and a watch made after starts at the
+     frame's state, then gets its changes *)
+  got2 := [];
+  let bt = Engine.prepare e [| [ Resolve.Add (!ada, pscore, Value.Int 4) ], 0, "broken" |] in
+  ignore (Engine.commit e bt);
+  ignore (with_stderr (fun () -> Live.broken h (Failure "a bug of the hub") (Some (bt.after, bt.after.group))));
+  check (match !got2 with [ Live.Ended { code = "internal"; _ } ] -> true | _ -> false) "guard: the hub's failure ends its watches internal";
+  let got3 = ref [] in
+  ignore (Live.subscribe h scores (Wire.Give [| 1 |]) ~from:0 ~emit:(fun m -> got3 := m :: !got3; true));
+  let bt = Engine.prepare e [| [ Resolve.Add (!ada, pscore, Value.Int 5) ], 0, "after" |] in
+  ignore (Engine.commit e bt);
+  Live.frame h ~tag:bt.after.group (List.rev bt.groups) bt.after;
+  let rows = function Live.Answer a -> List.sort compare a.rows | Live.Change ch -> List.sort compare ch.added | _ -> [] in
+  check
+    (match List.rev !got3 with
+     | [ a; c ] -> List.mem [| Value.Int 4 |] (rows a) && rows c = [ [| Value.Int 5 |] ]
+     | l -> ignore l; false)
+    "guard: after the hub's failure, a new watch starts at the frame's state and gets the next change (%d messages)" (List.length !got3);
+  (* a client that makes failures in a loop writes a line a second: the next one counts those left out *)
+  let (), log = with_stderr (fun () -> for i = 1 to 50 do Fault.log "a test" (Failure (string_of_int i)) done) in
+  Fault.last := neg_infinity;
+  let (), log2 = with_stderr (fun () -> Fault.log "a test" (Failure "51")) in
+  let lines s = List.filter (( <> ) "") (String.split_on_char '\n' s) in
+  check (List.length (lines log) <= 1 && contains log2 "(and " && List.length (lines log2) = 1)
+    "guard: failures in a loop, at most a line a second, the next one counting those left out (%S, %S)" log log2;
+  Engine.close e
+
 let () =
   toml ();
   config ();
@@ -1116,4 +1381,6 @@ let () =
   request_ids ();
   files ();
   files_wire ();
+  (* last: its questions spawn domains, after which no test may fork *)
+  guard ();
   C.finish "server unit"
