@@ -530,9 +530,9 @@ io.Print(cepheus.Get(Books, ada, db))
 
 ```text
 Ok(missing)
-Ok({Due: 80.5})
-Ok({Clear: true})
-Ok({Clear: true})
+Ok({Due: 80.5, Clear: missing})
+Ok({Due: missing, Clear: true})
+Ok({Due: missing, Clear: true})
 ```
 
 - A rule set where a property depends on its own absence (`Not`) or its own aggregate is refused with Code
