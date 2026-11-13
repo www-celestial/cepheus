@@ -157,8 +157,8 @@ the disk, then its **index** is written beside it (each record's name, offset an
 not the packs. A pack without an index (the one being written when the process died) is read whole at the next open,
 each record checked by its CRCs, forced (a process killed leaves records in the page cache that no fsync covered,
 and a later file may find them stored and cite them), and indexed then; nothing is ever appended to it again, so no
-byte that was written is ever written over. The table of names to places is in memory: about 100 bytes a record (a TB of files at 73 KiB a
-chunk: 1.4 GB of memory; an index on disk is for later).
+byte that was written is ever written over. The table of names to places is in memory: about 100 bytes a record (a
+TB of files at 73 KiB a chunk: 1.4 GB of memory; an index on disk is for later).
 
 ### A file is a tree of nodes
 
@@ -166,7 +166,8 @@ A file's chunks are listed by **nodes**: a node lists up to 1,024 children (a na
 level 0 lists chunks, a node of level k nodes of level k - 1. The **root** names the file: a file of 1 GB is about
 14,000 chunks under 14 nodes under its root. A node is sealed and stored as a chunk is (and found again: two equal
 files share their root). A range is read by walking from the root to the chunks under it, each node choosing its
-children by a binary search of their ends: a 4 KiB read reads one chunk, whatever the file's size. Nodes and chunks
+children by a binary search of their ends: a 4 KiB read reads one chunk (two where it crosses a cut), whatever the
+file's size. Nodes and chunks
 once read are kept in memory, decoded (96 MiB, a third of it for nodes, by CLOCK: Corbató 1968): a chunk read again
 is served without the disk, the tag or the codec, since it was checked when it was read. An erasure empties both, and
 a hit is served only while its domain is not erased (a read that decoded a chunk just before an erasure may add it
@@ -282,7 +283,85 @@ clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -DCEP
 
 ## What it costs
 
-MEASURES
+Measured on the machine of the [benchmarks](benchmarks.md) (Intel i7-4720HQ of 2015, 4 cores, 11 GB, btrfs on a SATA
+SSD), shared with other jobs, by `bench/vbench.exe`, 2026-11-13: 21 runs each, the median and its 97.3 % interval by
+order statistics (as in the [benchmarks](benchmarks.md#method)). The bytes: the first 1 MB, 100 MB and 1 GB of 1 GiB of
+the system's own files laid end to end (`/usr/lib`, `/usr/bin`, documentation, manual pages): programs, libraries and
+text. Each put goes into a vault in use (its domain's key made), and ends when `finish` has forced it to the disk. A
+**cold cache** is the packs' pages dropped from the kernel's page cache and the vault opened again (its own caches
+empty); the file system is the same bytes read from one file by reads of 1 MiB.
+
+**A file put and read whole** (MB/s, but the first two lines):
+
+| | 1 MB | 100 MB | 1 GB |
+|---|---|---|---|
+| on disk, warm (LZ4) | 49.8 % | 55.1 % | 52.0 % |
+| on disk, cold (Zstandard 9) | 33.6 % | 37.7 % | 35.8 % |
+| put warm, 3 workers | 112 [78, 127] | 174 [138, 224] | 137 [111, 143] |
+| put warm, one core | 77 [65, 92] | 111 [88, 125] | 104 [95, 116] |
+| put cold | 44 [27, 56] | 64 [58, 68] | 64 [59, 70] |
+| get warm, page cache | 865 [657, 961] | 1,119 [1,060, 1,183] | 784 [633, 834] |
+| get warm, cold cache | 113 [88, 145] | 791 [676, 829] | 870 [747, 885] |
+| get cold-stored, page cache | 503 [458, 544] | 512 [439, 551] | 541 [517, 578] |
+| get cold-stored, cold cache | 109 [58, 152] | 460 [383, 486] | 546 [502, 574] |
+| file system, page cache | 4,193 [3,626, 4,639] | 5,279 [4,611, 6,506] | 538 [452, 568] |
+| file system, cold cache | 74 [67, 93] | 387 [336, 471] | 533 [409, 541] |
+
+The column of 1 GB comes from the build before the chunk cache and the batches of a full buffer (a later run needs
+more than the 3 GB the bench may take: it holds the whole 1 GiB in memory, which the server never does); at 100 MB that
+build was slower or even on every line (put 144, 108 and 54 MB/s, get 971, 818, 509 and 510).
+
+- **Put**: 100 to 175 MB/s warm, 44 to 64 cold. A put names every chunk by BLAKE2b (0.92 to 1.02 GB/s a core,
+  measured), seals it and appends it; three workers run 1.3 to 1.6 times one core. LZ4 and AEGIS-256 are not what
+  limits it (both several GB/s); Zstandard at level 9 is, for a cold put.
+- **Get from memory**: 0.8 to 1.1 GB/s warm, 0.5 cold-stored (Zstandard's decoder). There **the file system wins**,
+  about 5 times (at 1 MB and 100 MB; the file of 1 GB did not stay in the page cache): a copy from its cache against
+  a tag checked, a decode and a CRC for every byte.
+- **Get from the disk**: the vault reads half the bytes, so at 100 MB and 1 GB it reads faster than the file system
+  (791 against 387 MB/s, 870 against 533). At 1 MB both pay their first reads (113 against 74).
+
+**4 KiB at random places**, 21 runs of 1,000 reads (each run's median and 99th percentile, then their medians):
+
+| | vault | file system (`pread`) |
+|---|---|---|
+| a file of 1 GB in the page cache: median | 80.8 µs [73.9, 94.9] | **2.86 µs** [2.15, 2.86] |
+| its p99 | 451 µs [366, 568] | 508 µs [426, 646] |
+| a file of 1 GB, memory shared (the file mostly out of the page cache): median | **123 µs** [98, 139] | 332 µs [314, 345] |
+| its p99 | 1.14 ms [0.55, 2.95] | 812 µs [764, 879] |
+| the first 8 MiB of the file (in the chunk cache): median | **0.95 µs** [0.95, 1.19] | 1.91 µs [1.91, 1.91] |
+| its p99 | 2.15 µs [2.15, 4.05] | 2.15 µs [2.15, 6.91] |
+
+A 4 KiB read decodes its whole chunk (73 KiB on average: read, tag, codec, CRC): 81 µs where the page cache gives the
+file system's 4 KiB in 2.9 µs, the price of chunks that compress and are stored once. A chunk read again comes from
+the chunk cache, with no system call: 0.95 µs. When memory is short, the vault's packs, half the size of the file, keep
+more of themselves in the page cache: the second row.
+
+**Many small files**: 400 files of 1 to 16 KiB, each put by itself, by 1, 4 and 16 threads at once (files a second):
+
+| threads | an fsync each (before group commit) | group commit |
+|---|---|---|
+| 1 | 147 [125, 218] | 161 [60, 199] |
+| 4 | 160 [113, 191] | 503 [385, 735] |
+| 16 | 143 [115, 224] | **2,155** [1,900, 2,444] |
+
+A put alone waits for its fsync (about 6 ms on this SSD: some 160 puts a second); puts at once share one, and 16
+threads put 13 times as many files as one.
+
+**Space on real files**, each set put into a fresh vault (one run: the bytes do not vary):
+
+| files | bytes | on disk, warm | on disk, cold | chunks found stored |
+|---|---|---|---|---|
+| 1,339 images (PNG, JPEG) of a desktop | 390 MB | 48.0 % | 47.2 % | 2,269 (copies) |
+| 421 logs | 50.5 MB | 21.0 % | 12.6 % | 216 |
+| 1,408 source files | 7.6 MB | 54.7 % | 36.7 % | 166 |
+
+Images are compressed already: what the vault saves on them is their copies. A small file costs a chunk and a node
+(two records of 64 bytes of header and 32 of tag): for files of a few KiB, that is a few percent.
+
+**What linking the vault costs the rest**: the `cepheus` program starts in 4.68 ms rather than 4.40 (21 rounds of 100
+starts, alternated with the build without the vault: ratio 1.08), half of it libsodium (loaded and started) and half a
+larger program. A server's ready time (11.0 against 10.8 ms), 20,000 pings, and point reads one and 16 in flight are
+even (ratios 0.96 to 1.05, every interval holding 1). Cesia programs do not link the vault.
 
 ### Beside the giants (by their documentation)
 

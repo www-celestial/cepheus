@@ -350,8 +350,7 @@ buffers of no slack, round trips, and sealed texts forged or changed. 1.1 millio
 `server_unit` puts and loads files through the core: in pieces, whole and in 20 ranges, sent again with its serial
 (one file), with each kind of token (rights per kind), a right to write gone in the middle of a put, the bounds (an
 undeclared kind, an owner that is no thing, a name too long, a load by another property, four puts at once), and an
-erasure; 3,000 random file requests read back
-as written and 24,000 changed ones read or refused.
+erasure; 3,000 random file requests read back as written and 24,000 changed ones read or refused.
 
 ## Not yet
 
