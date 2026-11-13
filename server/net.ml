@@ -7,7 +7,9 @@
 
 open Cepheus
 
-let log fmt = Printf.ksprintf (fun s -> prerr_endline ("cepheus: " ^ s)) fmt
+(* never raises: a standard error that cannot be written (its reader gone) must not end the thread that logs (the
+   accepting one, the ticker) *)
+let log fmt = Printf.ksprintf (fun s -> try prerr_endline ("cepheus: " ^ s) with Sys_error _ -> ()) fmt
 
 type database = {
   core : Core.db;
@@ -31,6 +33,8 @@ let rec write_all fd b o n =
     let k = Unix.write fd b o n in
     write_all fd b (o + k) (n - k)
 
+(* a reply that fails ends its connection there (Core.write), and Sessions.finish answers its waiters whatever its
+   table does: what [k] still raises is logged, and the thread goes on to the next write *)
 let wait_loop w () =
   let go = ref true in
   while !go do
@@ -42,7 +46,7 @@ let wait_loop w () =
     | None -> Mutex.unlock w.wm; go := false
     | Some (r, k) ->
       Mutex.unlock w.wm;
-      k (Option.get r.res)
+      (try k (Option.get r.res) with e -> Fault.log "a write's reply" e)
   done
 
 (* the sockets of the open connections, shut down at stop so that their threads wake from their reads *)
@@ -166,12 +170,16 @@ let follow_stream (c : Core.conn) (d : database) fd ~id ~stopping =
     | Ok fds -> Ok (f, vseq, vis, runs, fds)
     | Error m -> Follow.unregister fol f; if tries > 0 && not (stop ()) then start (tries - 1) else Error m
   in
-  (match start 8 with
-   | Error m ->
-     let b = Buffer.create 64 in
-     Wire.put_reply b (Wire.Err { code = "busy"; message = "the database's files could not be passed: " ^ m });
-     (try send_frame fd ~id ~kind:Wire.k_follow ~flags:Wire.f_error b [] with Unix.Unix_error _ -> ())
-   | Ok (f, vseq, vis, runs, fds) ->
+  (* the watcher wakes from its read and ends, whatever ends the stream (what it did not expect goes on to the
+     connection's end: serve_conn) *)
+  Fun.protect ~finally:(fun () -> (try Unix.shutdown fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ()); Thread.join watcher) @@ fun () ->
+  match start 8 with
+  | Error m ->
+    let b = Buffer.create 64 in
+    Wire.put_reply b (Wire.Err { code = "busy"; message = "the database's files could not be passed: " ^ m });
+    (try send_frame fd ~id ~kind:Wire.k_follow ~flags:Wire.f_error b [] with Unix.Unix_error _ -> ())
+  | Ok (f, vseq, vis, runs, fds) ->
+    Fun.protect ~finally:(fun () -> Follow.unregister fol f) @@ fun () ->
      (try
         let b = Buffer.create 256 in
         Wire.put_reply b (Wire.Start { id = d.live.e.id; vseq; runs = List.map (fun (r : Follow.run) -> r.lo, r.hi) runs });
@@ -186,27 +194,27 @@ let follow_stream (c : Core.conn) (d : database) fd ~id ~stopping =
           | evs -> if not (stop ()) then (List.iter (send_event fd) evs; loop ())
         in
         loop ()
-      with Unix.Unix_error _ | Failure _ | Journal.Damaged _ -> ());
-     Follow.unregister fol f);
-  (* the watcher wakes from its read *)
-  (try Unix.shutdown fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ());
-  Thread.join watcher
+      with Unix.Unix_error _ | Failure _ | Journal.Damaged _ -> ())
 
+(* a connection: its socket is closed here, whatever ends it (its TLS handshake failing, its end, what nothing else
+   expected: the thread's end logs that, io_domain) *)
 let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
   Mutex.protect socks.sm (fun () -> Hashtbl.replace socks.open_ fd ());
+  Fun.protect ~finally:(fun () ->
+      Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
+      try Unix.close fd with Unix.Unix_error _ -> ())
+  @@ fun () ->
   (try timeouts fd idle with Unix.Unix_error _ -> ());
   match tls with
-  | None -> serve_conn srv dbs socks ~idle fd (plain fd)
+  | None -> serve_conn srv dbs ~idle fd (plain fd)
   | Some ctx -> (
     (* the handshake in the connection's own thread: its computation (milliseconds) without the runtime lock; a
        peer silent for the idle limit in the middle of it makes a read fail (EAGAIN), and the connection closes *)
     match Tls.handshake ctx fd ~server:true ~host:"" with
-    | Ok t -> serve_conn ~tls:t srv dbs socks ~idle fd (over_tls t)
-    | Error _ ->
-      Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
-      (try Unix.close fd with Unix.Unix_error _ -> ()))
+    | Ok t -> serve_conn ~tls:t srv dbs ~idle fd (over_tls t)
+    | Error _ -> ())
 
-and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
+and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
   let dead = ref false in
   let scratch = ref (Bytes.create 65536) in
   let c_ref = ref None in
@@ -216,25 +224,28 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
     match !c_ref with
     | None -> ()
     | Some (c : Core.conn) ->
-      Mutex.lock c.om;
-      let n = Buffer.length c.out in
-      if n > 0 then begin
-        if n > Bytes.length !scratch then scratch := Bytes.create (max n (2 * Bytes.length !scratch));
-        Buffer.blit c.out 0 !scratch 0 n;
-        Buffer.clear c.out;
-        if not !dead then (try io.write !scratch 0 n with Unix.Unix_error _ | Failure _ -> dead := true)
-      end;
-      Mutex.unlock c.om
+      Mutex.protect c.om (fun () ->
+          let n = Buffer.length c.out in
+          if n > 0 then begin
+            if n > Bytes.length !scratch then scratch := Bytes.create (max n (2 * Bytes.length !scratch));
+            Buffer.blit c.out 0 !scratch 0 n;
+            Buffer.clear c.out;
+            if not !dead then (try io.write !scratch 0 n with Unix.Unix_error _ | Failure _ -> dead := true)
+          end)
   in
+  (* the connection ended from another thread (Core.broke): its reading side shut down, so that the reading thread
+     wakes and runs the end below, which still sends *)
+  let close () = try Unix.shutdown fd Unix.SHUTDOWN_RECEIVE with Unix.Unix_error _ -> () in
   let w = { wm = Mutex.create (); wc = Condition.create (); q = Queue.create (); thread = None; closing = false } in
   let submit (d : Core.db) ops by why k =
     let live = dbs.(d.index).live in
     let r = { Engine.w = (ops, by, why); res = None; rm = w.wm; rc = w.wc } in
-    Mutex.lock w.wm;
-    Queue.push (r, k) w.q;
-    if w.thread = None then w.thread <- Some (Thread.create (wait_loop w) ());
-    Condition.broadcast w.wc;
-    Mutex.unlock w.wm;
+    (* the thread of the replies made before the write is queued: when it cannot be (the system's limit), nothing was
+       taken (Core.write undoes the rest) *)
+    Mutex.protect w.wm (fun () ->
+        if w.thread = None then w.thread <- Some (Thread.create (wait_loop w) ());
+        Queue.push (r, k) w.q;
+        Condition.broadcast w.wc);
     if not (Engine.submit live (Engine.Write r)) then Engine.deliver r (Error Engine.Closed)
   in
   (* the watches' pushes: a thread of the connection's sends them as they come, made at the first; the hubs only append
@@ -248,18 +259,18 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
       pending := false;
       let stop = !ending in
       Mutex.unlock pm;
-      (match !c_ref with Some c -> if Core.move_pushes c then flush () | None -> ());
+      (match !c_ref with Some c -> (match if Core.move_pushes c then flush () with () -> () | exception e -> Core.broke c e) | None -> ());
       if stop then go := false
     done
   in
+  (* the thread of the pushes not made (the system's limit) raises: the push fails (Core.watch) *)
   let wake () =
-    Mutex.lock pm;
-    pending := true;
-    if !pusher = None && not !ending then pusher := Some (Thread.create push_loop ());
-    Condition.signal pc;
-    Mutex.unlock pm
+    Mutex.protect pm (fun () ->
+        pending := true;
+        if !pusher = None && not !ending then pusher := Some (Thread.create push_loop ());
+        Condition.signal pc)
   in
-  let c = Core.connect ~wake srv ~flush ~submit in
+  let c = Core.connect ~wake ~close srv ~flush ~submit in
   c_ref := Some c;
   let buf = ref (Bytes.create 65536) and have = ref 0 in
   let go = ref true in
@@ -274,7 +285,22 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
     in
     go ()
   in
-  (try
+  (* the end runs whatever ended the loop: the peer, the idle limit, a request (Core.input answered it), another
+     thread's failure (Core.broke), or what the loop did not expect (said with request id 0) *)
+  Fun.protect ~finally:(fun () ->
+      (* the writes in flight are answered (or fail to send) before the connection goes; its watches end; then the
+         last word, once no other thread of the connection runs *)
+      Core.drain c;
+      Core.disconnect c;
+      Mutex.protect pm (fun () -> ending := true; Condition.signal pc);
+      Option.iter Thread.join (Mutex.protect pm (fun () -> !pusher));
+      Mutex.protect w.wm (fun () -> w.closing <- true; Condition.broadcast w.wc);
+      Option.iter Thread.join w.thread;
+      Core.ending c;
+      flush ();
+      try io.bye () with Unix.Unix_error _ | Failure _ -> ())
+  @@ fun () ->
+  try
      while !go do
        (* the frames already here first; a read only when a frame is not whole *)
        let before = c.requests in
@@ -317,24 +343,8 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) socks ~idle fd io =
    | Idle ->
      Core.err c ~id:0 ~kind:0 "idle" "no request for %d s (idle_timeout): the connection is closed" idle;
      flush ()
-   | Unix.Unix_error _ | Failure _ -> ());
-  (* the writes in flight are answered (or fail to send) before the connection goes; its watches end *)
-  Core.drain c;
-  Core.disconnect c;
-  Mutex.lock pm;
-  ending := true;
-  Condition.signal pc;
-  let p = !pusher in
-  Mutex.unlock pm;
-  Option.iter Thread.join p;
-  Mutex.lock w.wm;
-  w.closing <- true;
-  Condition.broadcast w.wc;
-  Mutex.unlock w.wm;
-  Option.iter Thread.join w.thread;
-  (try io.bye () with Unix.Unix_error _ | Failure _ -> ());
-  Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
-  (try Unix.close fd with Unix.Unix_error _ -> ())
+   | Unix.Unix_error _ | Failure _ -> ()
+   | e -> Core.fail c ~id:0 ~kind:0 e
 
 (* ---- I/O domains ---- *)
 
@@ -351,14 +361,23 @@ let io_domain srv dbs socks ~idle ~opened (io : iod) () =
     if fd <> None then io.nconn <- io.nconn + 1;
     Mutex.unlock io.m;
     match fd with
-    | Some (fd, tls) ->
-      let run () =
-        Fun.protect (fun () -> connection srv dbs socks ~idle tls fd)
-          ~finally:(fun () ->
-            Atomic.decr opened;
-            Mutex.protect io.m (fun () -> io.nconn <- io.nconn - 1; Condition.broadcast io.cv))
+    | Some (fd, tls) -> (
+      let ended () =
+        Atomic.decr opened;
+        Mutex.protect io.m (fun () -> io.nconn <- io.nconn - 1; Condition.broadcast io.cv)
       in
-      ignore (Thread.create run ())
+      (* the thread's end: what no catch of the connection expected (its socket is closed already) is logged *)
+      let run () =
+        (match connection srv dbs socks ~idle tls fd with () -> () | exception e -> Fault.log "a connection's thread" e);
+        ended ()
+      in
+      match Thread.create run () with
+      | _ -> ()
+      | exception e ->
+        (* no thread for it (the system's limit): closed at once; its program may connect again *)
+        Fault.log "a connection's start" e;
+        (try Unix.close fd with Unix.Unix_error _ -> ());
+        ended ())
     | None -> go := false
   done;
   Mutex.protect io.m (fun () -> while io.nconn > 0 do Condition.wait io.cv io.m done)
@@ -591,7 +610,8 @@ let serve (cfg : Config.t) =
               | fd, _ ->
                 if Atomic.fetch_and_add opened 1 >= cfg.max_connections then (Atomic.decr opened; refuse fd tls)
                 else begin
-                  if nodelay then Unix.setsockopt fd Unix.TCP_NODELAY true;
+                  (* a peer gone already makes it fail: the connection ends at its first read *)
+                  if nodelay then (try Unix.setsockopt fd Unix.TCP_NODELAY true with Unix.Unix_error _ -> ());
                   let io = ios.(Atomic.fetch_and_add next 1 mod Array.length ios) in
                   Mutex.protect io.m (fun () -> Queue.push (fd, tls) io.fds; Condition.signal io.cv)
                 end

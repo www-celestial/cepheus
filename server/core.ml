@@ -63,6 +63,10 @@ and conn = {
   mutable watching : (int * (Live.hub * Live.sub)) list;  (* by the id of the Watch *)
   mutable closed : bool;  (* pushes are dropped *)
   wake : unit -> unit;  (* the transport sends what [pushes] holds (it must not wait) *)
+  close : unit -> unit;
+      (* the transport ends the connection, from any of its threads or a hub's, without waiting: its reading wakes
+         and its end runs ([ending]); called only before that end (by [broke]) *)
+  failed : bool Atomic.t;  (* a thread other than the reading one failed: said at the end *)
   puts : (int, db * Files.put) Hashtbl.t;  (* the files being put, by the id of their Put (the reading thread only) *)
 }
 
@@ -72,7 +76,7 @@ let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight 
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
     max_inflight; more; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
 
-let connect ?(wake = ignore) srv ~flush ~submit =
+let connect ?(wake = ignore) ?(close = ignore) srv ~flush ~submit =
   Mutex.protect srv.cm (fun () ->
       let cid = srv.next_conn in
       srv.next_conn <- cid + 1;
@@ -80,7 +84,7 @@ let connect ?(wake = ignore) srv ~flush ~submit =
         { srv; cid; token = None; seen = Tokens.empty; rights = [||]; kinds = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
           inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = [];
-          closed = false; wake; puts = Hashtbl.create 2 }
+          closed = false; wake; close; failed = Atomic.make false; puts = Hashtbl.create 2 }
       in
       Hashtbl.replace srv.conns cid c;
       c)
@@ -96,10 +100,7 @@ let disconnect c =
 
 (* ---- replies ---- *)
 
-let send_body c ~id ~kind ~flags body =
-  Mutex.lock c.om;
-  Wire.add_frame c.out ~id ~kind ~flags body;
-  Mutex.unlock c.om
+let send_body c ~id ~kind ~flags body = Mutex.protect c.om (fun () -> Wire.add_frame c.out ~id ~kind ~flags body)
 
 let reply c ~id ~kind r =
   Buffer.clear c.body;
@@ -110,6 +111,31 @@ let reply c ~id ~kind r =
 let err c ~id ~kind code fmt = Printf.ksprintf (fun message -> reply c ~id ~kind (Wire.Err { code; message })) fmt
 
 let engine_err c ~id ~kind e = let code, message = Wire.code_of_error e in reply c ~id ~kind (Wire.Err { code; message })
+
+(* What a connection did not expect (a bug, memory that ran out) ends at one place in each thread that serves it: a
+   request in [input], a write's reply in [write], a push in [watch], the transport's own loops. Written in the
+   server's log (Fault: escaped, at most a line a second); the peer gets the code internal and nothing more (no
+   exception, path or state of the server crosses the wire), on the request's id or on id 0 (the connection's); then
+   the connection closes, which lets go of what it held: its writes in flight answered first, its watches and its
+   unfinished files dropped, its threads ended. *)
+let culprit c ~id ~kind =
+  let tok = match c.token with Some t -> Fault.escape t.name | None -> "none" in
+  if id = 0 then Printf.sprintf "connection %d (token %s)" c.cid tok else Printf.sprintf "connection %d (token %s), request %d of kind %d" c.cid tok id kind
+
+let internal c ~id ~kind =
+  (* when even this cannot be coded (memory), the connection closes without a word *)
+  try err c ~id ~kind "internal" "the server failed (its log says why): the connection is closed" with _ -> ()
+
+(* in the reading thread *)
+let fail c ~id ~kind e = Fault.log (culprit c ~id ~kind) e; internal c ~id ~kind
+
+(* in another thread (a write's reply, a push, the hub's): it never waits for the connection (whose reading thread may
+   hold the output, sending to a slow program); the word is said at the end, by the reading thread *)
+let broke c e = Fault.log (culprit c ~id:0 ~kind:0) e; Atomic.set c.failed true; c.close ()
+
+(* the connection's end, in its reading thread, once its other threads have ended: the word a failure of one of them
+   left *)
+let ending c = if Atomic.get c.failed then internal c ~id:0 ~kind:0
 
 (* ---- rights ---- *)
 
@@ -268,12 +294,15 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
+(* a damaged page met while the rows are coded (a text read from its run) ends the reply too, after the frames sent *)
 let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
   let v = d.view () in
-  match Answer.answer ~order ~extra ~budget:!Answer.question_budget v q sel with
-  | a ->
+  match
+    let a = Answer.answer ~order ~extra ~budget:!Answer.question_budget v q sel in
     let typs = Array.init a.cols a.typ in
     send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n
+  with
+  | () -> ()
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
   | exception Query.Over_budget n ->
     err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
@@ -285,27 +314,34 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
   if Origin.has_marker why then err c ~id ~kind "invalid" "a why may not start with the server's marker"
   else
     let tok = Option.get c.token in
+    let not_in_flight () = Mutex.protect c.om (fun () -> c.inflight <- c.inflight - 1; Condition.broadcast c.oc) in
+    (* the reply of a write, in the thread that ends it (it may be another connection's: a write sent again while
+       the first was in flight): its failure ends this connection, never the thread's; out of flight at its end
+       whatever happened, so that the connection's end never waits for it in vain *)
     let answer res =
-      Mutex.protect c.om (fun () ->
-          let b = c.wbody in
-          Buffer.clear b;
-          let flags =
-            match res with
-            | Ok r -> Wire.put_reply b (Wire.Receipt r); 0
-            | Error e ->
-              let code, message = Wire.code_of_error e in
-              (* a refusal by the rules names its rule only, to a token that may not read every kind *)
-              let message =
-                match c.rights.(d.index) with
-                | Some (Tokens.Kinds _) when code = "invalid" -> Option.value (Reason.public_message message) ~default:message
-                | _ -> message
-              in
-              Wire.put_reply b (Wire.Err { code; message }); Wire.f_error
-          in
-          Wire.add_frame c.out ~id ~kind ~flags b;
-          c.inflight <- c.inflight - 1;
-          Condition.broadcast c.oc);
-      c.flush ()
+      (match
+        Mutex.protect c.om (fun () ->
+            let b = c.wbody in
+            Buffer.clear b;
+            let flags =
+              match res with
+              | Ok r -> Wire.put_reply b (Wire.Receipt r); 0
+              | Error e ->
+                let code, message = Wire.code_of_error e in
+                (* a refusal by the rules names its rule only, to a token that may not read every kind *)
+                let message =
+                  match c.rights.(d.index) with
+                  | Some (Tokens.Kinds _) when code = "invalid" -> Option.value (Reason.public_message message) ~default:message
+                  | _ -> message
+                in
+                Wire.put_reply b (Wire.Err { code; message }); Wire.f_error
+            in
+            Wire.add_frame c.out ~id ~kind ~flags b);
+        c.flush ()
+      with
+      | () -> ()
+      | exception e -> broke c e);
+      not_in_flight ()
     in
     let v = d.view () in
     let published = v.group in
@@ -314,14 +350,18 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
     | None ->
     (* counted in flight before the table may hand [answer] to a write that ends at once *)
     Mutex.protect c.om (fun () -> c.inflight <- c.inflight + 1);
-    let not_in_flight () = Mutex.protect c.om (fun () -> c.inflight <- c.inflight - 1; Condition.broadcast c.oc) in
     match Sessions.start d.sessions ~sid:c.session ~token:tok.name ~serial ~floor ~published ~now:(c.srv.now ()) ops answer with
+    | exception e -> not_in_flight (); raise e
     | Sessions.Refuse (code, m) -> not_in_flight (); err c ~id ~kind code "%s" m
     | Sessions.Replay r -> not_in_flight (); reply c ~id ~kind (Wire.Receipt r)
     | Sessions.Wait -> ()
-    | Sessions.Fresh p ->
+    | Sessions.Fresh p -> (
       let o = { Origin.token = tok.name; session = c.session; serial; floor } in
-      c.submit d ops by (Origin.wrap o why) (Sessions.finish d.sessions p)
+      (* a hand-off that fails (the transport could not make the thread of the replies) was never taken: the write
+         leaves the connection's flight and its session's, which may send it again; the request then fails *)
+      match c.submit d ops by (Origin.wrap o why) (Sessions.finish d.sessions p) with
+      | () -> ()
+      | exception e -> Sessions.abandon d.sessions p; not_in_flight (); raise e)
 
 (* ---- files ---- *)
 
@@ -461,26 +501,35 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
     end;
     !reads
   in
-  let emit (m : Live.msg) =
+  (* a push, under the hub's lock (so before the connection's end has dropped its watches), mostly in the hub's
+     thread: its failure (the transport cannot make the thread of the pushes, memory) ends this connection, never the
+     hub *)
+  let push (m : Live.msg) =
     let ok =
       Mutex.protect c.pm (fun () ->
           if c.closed then true
           else
-            match m with
-            | Live.Ended e ->
-              let b = Buffer.create 64 in
-              let code = if allowed () then e.code else "denied" in
-              Wire.put_reply b (Wire.Err { code; message = (if code = "denied" then "this token may not read " ^ d.name else e.message) });
-              Wire.add_frame c.pushes ~id ~kind:Wire.k_watch ~flags:Wire.f_error b;
-              true
-            | _ when Buffer.length c.pushes > !max_pushes || not (allowed ()) -> false
-            | Answer a -> Wire.add_push c.pushes ~id (Wire.Answer { group = a.group; cols; rows = a.rows }); true
-            | Change ch -> Wire.add_push c.pushes ~id (Wire.Change { group = ch.group; cols; added = ch.added; removed = ch.removed }); true
-            | Same s -> Wire.add_push c.pushes ~id (Wire.Same s.group); true)
+            (* a push of several frames whole or not at all: a part of one, then the next, would be joined by the
+               client into rows of neither *)
+            let n0 = Buffer.length c.pushes in
+            try
+              match m with
+              | Live.Ended e ->
+                let b = Buffer.create 64 in
+                let code = if allowed () then e.code else "denied" in
+                Wire.put_reply b (Wire.Err { code; message = (if code = "denied" then "this token may not read " ^ d.name else e.message) });
+                Wire.add_frame c.pushes ~id ~kind:Wire.k_watch ~flags:Wire.f_error b;
+                true
+              | _ when Buffer.length c.pushes > !max_pushes || not (allowed ()) -> false
+              | Answer a -> Wire.add_push c.pushes ~id (Wire.Answer { group = a.group; cols; rows = a.rows }); true
+              | Change ch -> Wire.add_push c.pushes ~id (Wire.Change { group = ch.group; cols; added = ch.added; removed = ch.removed }); true
+              | Same s -> Wire.add_push c.pushes ~id (Wire.Same s.group); true
+            with e -> Buffer.truncate c.pushes n0; raise e)
     in
     c.wake ();
     ok
   in
+  let emit m = match push m with ok -> ok | exception e -> broke c e; true in
   let h = d.hub () in
   match Live.subscribe ~extra h q sel ~from ~emit with
   | s -> Mutex.protect c.pm (fun () -> c.watching <- (id, (h, s)) :: c.watching)
@@ -649,10 +698,13 @@ type input =
 
 (* Every complete frame of [buf] from [off] to [stop], until the connection has its limit of writes in flight: the
    offset of the first byte not used, and why it stopped. A frame over the limit closes the connection before its
-   body is read. *)
+   body is read. A request that raises what it does not expect is answered internal and closes the connection
+   ([fail]): the frames of its reply sent before (a Find's first rows) end with that error, which the client takes
+   as the reply's end. A connection that another of its threads failed ([broke]) reads no more requests. *)
 let input c buf off stop =
   let rec go o =
-    if c.inflight >= c.srv.max_inflight then o, Full
+    if Atomic.get c.failed then o, Shut
+    else if c.inflight >= c.srv.max_inflight then o, Full
     else if stop - o < 4 then o, Need
     else
       let len = Wire.u32 buf o in
@@ -667,6 +719,7 @@ let input c buf off stop =
         | Continue -> go (o + 4 + len)
         | Close -> o + 4 + len, Shut
         | Follows (d, id) -> o + 4 + len, Follow (d, id)
+        | exception e -> fail c ~id ~kind e; o + 4 + len, Shut
   in
   go off
 

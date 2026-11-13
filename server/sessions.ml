@@ -126,19 +126,38 @@ let start t ~sid ~token ~serial ~floor ~published ~now ops k =
               Fresh p)
         end)
 
+(* its waiters are answered whatever the table does (a receipt that cannot be kept, memory: logged), so that no
+   connection waits for them in vain *)
 let finish t p (res : (Engine.receipt, Engine.error) result) =
   let ks =
     Mutex.protect t.m (fun () ->
         if p.p_serial > 0 then begin
           Hashtbl.remove t.inflight (p.p_session, p.p_serial);
-          match res, Hashtbl.find_opt t.sessions p.p_session with
-          | Ok r, Some s -> record s p.p_serial { group = r.group; first_new = first_new r }
-          | Error e, Some s -> if p.p_serial >= s.floor then Hashtbl.replace s.errors p.p_serial e
-          | _ -> ()
+          try
+            match res, Hashtbl.find_opt t.sessions p.p_session with
+            | Ok r, Some s -> record s p.p_serial { group = r.group; first_new = first_new r }
+            | Error e, Some s -> if p.p_serial >= s.floor then Hashtbl.replace s.errors p.p_serial e
+            | _ -> ()
+          with e -> Fault.log (Printf.sprintf "the receipt of serial %d of session %d" p.p_serial p.p_session) e
         end;
         p.waiters)
   in
   List.iter (fun k -> k res) (List.rev ks)
+
+(* A write of [start] that never reached its writer (its hand-off failed): out of the table, as if never sent, so
+   that its session may send it again. Its first sender is answered by its own failure; the others that wait on it
+   (the same serial sent again meanwhile) are told to send it again; a [finish] that would still come calls nobody. *)
+let abandon t p =
+  let ks =
+    Mutex.protect t.m (fun () ->
+        if p.p_serial > 0 then Hashtbl.remove t.inflight (p.p_session, p.p_serial);
+        let ks = p.waiters in
+        p.waiters <- [];
+        ks)
+  in
+  match List.rev ks with
+  | _ :: others -> List.iter (fun k -> k (Error (Engine.Busy "the write was not taken: send it again"))) others
+  | [] -> ()
 
 (* a group of the journal, at start: its origin into the table *)
 let replay t (g : Group.t) =
