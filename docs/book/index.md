@@ -7,6 +7,9 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
   about ten minutes.
 - [Production](production.md): a systemd service, nightly backups and a restore drill, what to watch in the status
   and the log, upgrades, and what to do after a crash or a power loss.
+- [A real app](app.md): invoices and clients in Cesia, step by step from `cesia new` to production: lists in pages,
+  search as one types, a live dashboard, users with an accountant's token that reads invoices only, a rule and a
+  constraint, CSV export, tests in Firefox, and the speed of every page.
 
 **Learn**
 1. [Concepts](concepts.md): facts and the entity–attribute–value model, the schema, groups (transactions), views,
