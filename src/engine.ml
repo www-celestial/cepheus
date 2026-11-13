@@ -250,9 +250,10 @@ let prepare ?(release = fun (_ : int) -> ()) ?(background = false) t (reqs : (Re
           (* a change of the rules or the ontology leaves the batch for the background path ([background]: the
              threaded writer), unless it makes new things (their numbers are the writer's to give, in order) *)
           let reason ~v0 v changes words =
-            if background && not (has_temps ops) then
-              (try Reason.run ~background ~v0 v changes words with Reason.Background -> change := Some v; raise Deferred)
-            else Reason.run ~v0 v changes words
+            if not background then Reason.run ~v0 v changes words
+            else
+              try Reason.run ~background ~v0 v changes words
+              with Reason.Background -> if has_temps ops then Reason.run ~v0 v changes words else (change := Some v; raise Deferred)
           in
           match Resolve.resolve t.working ~n ~time ~by ~why ~reason ops with
           | exception Deferred -> None
@@ -603,10 +604,10 @@ let start_merge ?(wake = ignore) t (from : Store.view) =
    A change (Reason: a group that changes the rules, or the ontology past a data write's budget) leaves the writer's
    batch ([prepare ~background:true]). A domain builds its consequences on a fork of the working view of the moment
    (Resolve.resolve with a change's budget: the materialisation of the state plus the change under the new rules),
-   then catches up with every group the writer prepares meanwhile, which the writer logs (Resolve.catch_up: a group's
-   asserted changes, the new rules' consequences of them), keeping the difference between the writer's states (old
-   rules) and its own (new rules) fact by fact. When it is fewer than [change_behind] groups behind, the writer takes
-   the rest, resolves the change's asserted part again against its own view (its Expects then: Conflict like any
+   then catches up with the groups the writer prepares meanwhile, which the writer logs, by batches of all it finds
+   (Resolve.catch_up: their net asserted changes, the new rules' consequences of them), keeping the difference
+   between the writer's states (old rules) and its own (new rules) fact by fact. When a pass finds fewer than
+   [change_behind] groups or takes less than [change_pass], the writer takes the rest, resolves the change's asserted part again against its own view (its Expects then: Conflict like any
    group's), and writes one group: the asserted changes, then the difference as derived changes, and makes the
    background's view its working view. No view before that group holds a fact of the new rules, every view from it
    holds all of them (G19). A change never runs beside a background merge (they would not share their runs): it waits
@@ -1006,8 +1007,10 @@ let rec poll_change l =
         in
         l.e.working <- w;
         let ch = { creq = r; cops = r.w; stop = Atomic.make false; cm = Mutex.create (); clog = Queue.create (); backlog = 0; out = Atomic.make None; cdom = None } in
-        ch.cdom <- Some (Domain.spawn (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) ch w));
-        l.change <- Some ch
+        (* a domain the runtime cannot give (its limit) answers the change, never stops the writer *)
+        match Domain.spawn (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) ch w) with
+        | d -> ch.cdom <- Some d; l.change <- Some ch
+        | exception e -> deliver r (Error (Busy ("a change of the rules could not start: " ^ Printexc.to_string e))); poll_change l
       end
     | _ -> ())
 

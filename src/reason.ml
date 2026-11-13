@@ -56,8 +56,8 @@ let agg_message (v : Store.view) p =
 let budget_base = ref 100_000
 let budget_per = ref 100
 
-(* A change: a group that changes the rules, or the ontology (a fact of a relation the rules read as one: an atom
-   whose variables another atom of the rule dispatches on, a property's binding or a class). Its budget is a data
+(* A change: a group that changes the rules, or the ontology (a group past a data write's budget that writes a fact of a
+   relation the rules are unfolded on in the state before it: [ontology] below). Its budget is a data
    write's plus [change_per] x the facts of the database before it (the design's section 5.11): a change may derive in
    proportion to the database it applies to, and a runaway rule is still stopped, named. The threaded writer runs a
    change on the background path ([Background]); a fork and the deterministic core run it in the group, with the

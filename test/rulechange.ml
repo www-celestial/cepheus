@@ -66,7 +66,7 @@ let interleavings () =
   section "a change caught up with the groups written meanwhile, ordered after them";
   let d = C.tmpdir "rc-inter" in
   let db = open_db d in
-  let a, b, ty, _ = schema db in
+  let a, b, ty, sub = schema db in
   let t = things db 40 in
   for i = 0 to 38 do ignore (ok (write db [ Add (t.(i), a, Link t.(i + 1)) ])) done;
   Engine.change_pause := 0.3;
@@ -120,6 +120,15 @@ let interleavings () =
      C.check (exact v) "the view is exact under both rules"
    | Ok _ -> C.fail "one id"
    | Error e -> C.fail "define after a Conflict: %s" (message e));
+  section "a change that makes a new thing: computed in its group, its thing numbered in order";
+  let id = free_id (view db) in
+  let text = Rules.to_text (rule "made" [ { e = x; p = sub; v = y } ] (Give { e = x; p = ty; v = y })) in
+  (match write db [ Add (id, Schema.p_name, Text "made"); Add (id, Schema.p_rule, Text text); Add (-1, sub, Link t.(3)) ] with
+   | Ok r ->
+     let v = view db in
+     C.check (thing r (-1) = v.next_e - 1) "the new thing is the newest";
+     C.check (Store.count_things v ty t.(3) > 0 && exact v) "its consequences are there, exact"
+   | Error e -> C.fail "a change with a new thing: %s" (message e));
   Engine.change_pause := 0.;
   close db;
   let db = open_db d in
