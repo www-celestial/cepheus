@@ -8,11 +8,14 @@ cd "$(dirname "$0")/.."
 out=$(cd "$1" && pwd)
 rounds=${ROUNDS:-21}
 app=8093
+srv=$out/srv
+. bench/server.sh
+serve_seeded
 base=http://127.0.0.1:$app
 export CEPHEUS_URL="cepheus://localhost:7463/invoices?socket=$out/srv/run" CEPHEUS_TOKEN=$(cat "$out/srv/web.token") CEPHEUS_BOOKS_TOKEN=$(cat "$out/srv/books.token") APP_PORT=$app
-setsid cesia run --allow native=cepheus,ffi=sodium,env,net=:$app src/main.ce < /dev/null > "$out/actions-app.log" 2>&1 &
+setsid cesia run --allow native=cepheus,ffi=sodium,env,net=:$app src/main.ce < /dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- > "$out/actions-app.log" 2>&1 &
 pid=$!
-trap 'kill $pid 2>/dev/null; while kill -0 $pid 2>/dev/null; do sleep 0.02; done' EXIT
+trap 'kill $pid 2>/dev/null; while kill -0 $pid 2>/dev/null; do sleep 0.02; done; [ -z "$started_here" ] || stop' EXIT
 until (exec 3<>/dev/tcp/127.0.0.1/$app) 2>/dev/null; do sleep 0.01; done
 sid() { curl -s -D - -o /dev/null -H "Origin: $base" -d "login=$1&password=$2" "$base/login" | sed -n 's/^set-cookie: sid=\([0-9a-f]*\);.*/\1/p'; }
 export BENCH_SID=$(sid bench "bench+password+1")

@@ -5,36 +5,25 @@
 #   bench/run.sh OUT pages     the app's start; each page with 1 client then 50 (ApacheBench); the rounds
 #                              alternate the pages. The actions: bench/actions.sh
 # Each line of OUT/*.jsonl is one measure of one round; bench/stats.ce gives their medians. Run each part alone on the
-# machine (under the machine's lock): another program's work is noise in every number.
+# machine (under the machine's lock): another program's work is noise in every number. Each part stops the servers
+# it started (bench/server.sh), so that nothing outlives it.
 set -e
 cd "$(dirname "$0")/.."
 out=$(cd "$1" && pwd)
 part=$2
 rounds=${ROUNDS:-21}
-B=cepheus
 srv=$out/srv
 port=7463
 app=8093
 base=http://127.0.0.1:$app
 url="cepheus://localhost:$port/invoices?socket=$srv/run"
 now() { date +%s%N; }
+. bench/server.sh
 
 visible() {
   for d in "$srv"/data/*/; do
     if [ -f "$d/cepheus" ]; then echo "/dev/shm/cepheus-$(od -An -tx1 -j17 -N16 "$d/cepheus" | tr -d ' \n').visible"; fi
   done
-}
-serve() {
-  setsid $B serve --config "$srv/cluster.toml" < /dev/null >> "$out/serve.log" 2>&1 &
-  echo $! > "$out/serve.pid"
-  for _ in $(seq 200); do [ "$(grep -c ready "$out/serve.log")" -gt "${1:-0}" ] && return 0; sleep 0.02; done
-  echo "the server did not start"; exit 1
-}
-stop() {  # the server of this folder only, by its pid and its command
-  p=$(cat "$out/serve.pid")
-  grep -q "$srv/cluster.toml" "/proc/$p/cmdline" 2>/dev/null || return 0
-  kill "$p"
-  while kill -0 "$p" 2>/dev/null; do sleep 0.02; done
 }
 empty() {
   [ -f "$out/serve.pid" ] && stop
@@ -51,6 +40,7 @@ empty() {
 export CEPHEUS_URL="$url"
 
 if [ "$part" = seed ]; then
+  trap stop EXIT
   : > "$out/seed.jsonl"
   for r in $(seq "$rounds"); do
     empty
@@ -72,16 +62,17 @@ if [ "$part" = seed ]; then
 fi
 
 # pages: the seeded database of the seed part, two users, the app
+serve_seeded
 export CEPHEUS_TOKEN=$(cat "$srv/web.token") CEPHEUS_BOOKS_TOKEN=$(cat "$srv/books.token") APP_PORT=$app
 APP_LOGIN=bench APP_ROLE=admin APP_PASSWORD="bench password 1" cesia run --allow native=cepheus,ffi=sodium,env src/users/users.ce > /dev/null 2>&1 || true
 APP_LOGIN=books APP_ROLE=accountant APP_PASSWORD="books password 1" cesia run --allow native=cepheus,ffi=sodium,env src/users/users.ce > /dev/null 2>&1 || true
 apppid=""
 startapp() {
-  setsid cesia run --allow native=cepheus,ffi=sodium,env,net=:$app src/main.ce < /dev/null > "$out/app.log" 2>&1 &
+  setsid cesia run --allow native=cepheus,ffi=sodium,env,net=:$app src/main.ce < /dev/null 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- > "$out/app.log" 2>&1 &
   apppid=$!
 }
 stopapp() { [ -n "$apppid" ] && kill "$apppid" 2>/dev/null; while [ -n "$apppid" ] && kill -0 "$apppid" 2>/dev/null; do sleep 0.02; done; apppid=""; }
-trap stopapp EXIT
+trap 'stopapp; [ -z "$started_here" ] || stop' EXIT
 : > "$out/pages.jsonl"
 # the app's start: from the command to its port accepting a connection
 for r in $(seq "$rounds"); do

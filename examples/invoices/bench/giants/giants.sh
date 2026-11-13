@@ -16,11 +16,14 @@ if [ ! -f "$pg/data/PG_VERSION" ]; then
   printf "listen_addresses = ''\nunix_socket_directories = '%s'\nport = 5499\nshared_buffers = 256MB\n" "$pg" >> "$pg/data/postgresql.conf"
 fi
 pg_ctl -D "$pg/data" -l "$pg/server.log" -w start > /dev/null
-trap 'pg_ctl -D "$pg/data" -w stop > /dev/null' EXIT
+trap 'pg_ctl -D "$pg/data" -w stop > /dev/null; [ -z "$started_here" ] || stop' EXIT
 if [ "$(psql -tAc "select to_regclass('invoice') is not null")" != t ]; then
   psql -q -v ON_ERROR_STOP=1 -f bench/giants/load.sql > "$out/pg-load.txt"
 fi
 port=7463
+srv=$out/srv
+. bench/server.sh
+serve_seeded
 export CEPHEUS_URL="cepheus://localhost:$port/invoices?socket=$out/srv/run" CEPHEUS_TOKEN=$(cat "$out/srv/web.token")
 : > "$out/giants.jsonl"
 pgq() {  # pgq WHAT FILE N: one client, N transactions, each one's latency from pgbench's log
