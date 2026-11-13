@@ -85,8 +85,8 @@ The rules of a rule, checked when it is written (an error is `Invalid`, naming t
 - **No new thing**: a head names variables of the body or existing things. (Datalog with new things in heads,
   *existential rules*, can derive without end; Datalog without them always ends: its *least model* below is finite.)
 - A pattern's property is a constant, as in a question, or a variable bound by another pattern
-  ([below](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)); negation (`Not`) and aggregates (`Sum`, `Count`)
-  are the next steps of the design.
+  ([below](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)); a body may hold `Not`s and a head an aggregate
+  (`Sum`, `Count`, `Min`, `Max`), with rules of their own ([below](#negation-and-aggregates-strata)).
 
 ## What the database holds: the least model
 
@@ -332,12 +332,77 @@ write db [ Add (x, ty, Link client) ]   (* x is an invoice *)
 → Error (Invalid "constraint invoice-is-not-client: [#65541 thing/type #65536] [#65541 thing/type #65537]")
 ```
 
-After the group's fixpoint, the constraints' plans run on every fact the group made present: an instance of a
-constraint can only appear through a new fact (rules without negation are monotone), so this finds every violation
-the group would make. Defining a constraint checks it over the whole database.
+After the group's fixpoint, the constraints' plans run on every fact the group made present: without negation, an
+instance of a constraint can only appear through a new fact (such rules are monotone). A constraint with a `Not` also
+gains instances through a fact gone (an invoice of a client whose name was retracted): its plans run on those too, as
+the Nots' flips below. This finds every violation the group would make. Defining a constraint checks it over the
+whole database.
 
 The schema's own rules apply to derived facts too: a rule that would give a second value of a one-valued property,
 or a value of a unique property another thing holds, refuses the group and names the rule.
+
+## Negation and aggregates: strata
+
+A pattern of a body may be in a **`Not`**: the rule's answer holds only when no value of the Not's **own** variables
+(those in no pattern outside it) makes all of its patterns facts. In database terms it is an *anti-join*. A head may
+give an **aggregate** of the body's answers: for each thing of the head, one fact whose value is the sum, the number,
+the smallest or the largest value of a variable over that thing's answers. In OCaml both are written into a pattern's
+property, so a rule keeps its fields: `absent k p` is the property `p` in the rule's `k`-th Not, `aggregate f p` the
+property `p` given by the aggregate `f`.
+
+```text
+(* an invoice without any payment is unpaid: ?1 is the Not's own, "there is no ?1 such that [?0 paid_on ?1]" *)
+{ name = "unpaid"; vars = 2;
+  where = [ { e = Var 0; p = ty; v = Thing invoice }; { e = Var 0; p = absent 0 paid_on; v = Var 1 } ];
+  ranges = []; head = Give { e = Var 0; p = status; v = Val (Text "unpaid") } }
+
+(* an invoice's total: the sum of its lines' amounts, one answer a line *)
+{ name = "total"; vars = 3;
+  where = [ { e = Var 1; p = line_of; v = Var 0 }; { e = Var 1; p = amount; v = Var 2 } ];
+  ranges = []; head = Give { e = Var 0; p = aggregate `Sum total; v = Var 2 } }
+```
+
+Their canonical text adds `; not [E P V] ...` before the head and `give sum [E P V]` (or `count`, `min`, `max`); a rule
+without them has the text it had before. In Cesia: `cepheus.Not(...)` in `Where`, and `cepheus.Sum(x)`, `Min(x)`,
+`Max(x)` or `Count()` as the value of `Then` ([rules from Cesia](cesia.md#rules)).
+
+**What they mean.** A rule that reads a property under `Not` needs that property complete first, and so does an
+aggregate. The rules are ordered in **strata**: a rule reads under `Not` or aggregates only what lower strata give,
+and the strata are computed one after the other. The facts held are then the **perfect model** of the rules, the one
+model of a stratified program that does not depend on how its rules are ordered ([Apt 1988], [Przymusinski 1988]);
+aggregates are stratified the same way ([Mumick 1990]). A rule set where a property depends on its own absence, or
+on its own aggregate, has no such order: `define` refuses it and names the cycle; a rule `R` that gives `status`
+and reads it under `Not` is refused with `Invalid "rule R: status depends on its own absence (R -> not R)"`. The strata come from the rules'
+graph (an edge from a rule to each rule that reads its head; negative when it reads it under `Not` or aggregates it),
+its strong components found by [Tarjan 1972]: a negative edge inside a component is a cycle through `Not`; a rule's
+stratum is the largest number of negative edges on a path to it. A node is a property refined by a constant value,
+so that `[?x type Invoice]` and `[?x type Client]` are apart, and a `Not` over one class may depend on another.
+
+**Their rules**, checked at `define`:
+- A `Not` holds 1 to 4 patterns whose properties are constants; a rule has at most 16. A variable in no pattern
+  outside `Not` is the own of one `Not` only, and the head's variables are outside every `Not` (range restriction).
+- `Sum` is for ints and money, `Min` and `Max` for ints, dates and money; `Count`'s value is `Val (Int 0)`, the
+  property an int. The answers are counted once each, over the body's variables: two lines of the same amount are two
+  answers, since their line differs.
+- A sum is exact: kept in two words, it refuses the group when the result is past the largest int
+  (`Invalid "rule R: the sum of #x is past the largest int"`), never wraps.
+- An aggregate's property takes one value, is given by that rule alone, and no write adds or retracts it: a write of
+  it is refused, and so is defining an aggregate over a property that holds asserted facts.
+- A thing without answers has no fact (no zero count, no sum of nothing).
+
+**How the writer keeps them.** Each stratum in order, the lower ones complete ([Motik 2019], B/F for stratified
+rules):
+1. its aggregates, by difference: the answers the group gave and took away are found from the facts it changed below
+   (over the state after the group for a fact made present, before it for a fact gone), each answer once by its facts.
+   `Sum` and `Count` are linear: the change of the sum is the sum of the changes ([Budiu 2023]). `Min` and `Max` read
+   their group again only when its extreme went, so at most the group's size;
+2. the flips of its `Not`s: a fact made present that matches a `Not` takes away the answers that `Not` allowed (B/F's
+   candidates); a fact gone gives the answers its absence now allows (the insertion's);
+3. B/F on its candidates, then semi-naive insertion from every fact made present so far.
+
+A `Not` whose patterns have both sides known is one lookup a candidate. A rule set with `Not` or aggregates runs as
+written (no [specialisation](#specialisation-by-small-relations)), and a load into it takes the ordinary path, not
+the large groups' one. `why` of an aggregate's fact gives the facts of every answer of its group.
 
 ## The budget
 
@@ -483,12 +548,11 @@ Each was weighed against the others in the design; the measurements are the desi
 
 ## What is not here yet
 
-The design's plan has six steps; this version has the first two.
+The design's plan has six steps; this version has steps 1, 2 and 4.
 
 - **Step 3**: large derivations sorted and parallel, on several domains. Until then a small group whose consequences
   are large (a graph of 15,000 edges whose closure has 1.3 million facts) puts them into the view's delta one by one
   in sorted batches, about a microsecond a fact; a group of 20,000 facts or more takes the large groups' path.
-- **Step 4**: stratified negation (`Not`) and aggregates (`Sum`, `Count`, `Min`, `Max`).
 - **Step 5**: rule changes with large consequences computed in the background and installed at one group.
 - **Step 6**: OWL 2 RL as a library of rules, and equality (`owl:sameAs`) by rewriting.
 - The budget as a database setting rather than a number of the process; the group that asserted each leaf of a proof.
@@ -497,5 +561,5 @@ The design's plan has six steps; this version has the first two.
 
 Every work cited here is in [references](references.md#rules-datalog-materialisation-and-its-maintenance), with what
 Cepheus took from it: [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [Feeley 1987], [Gupta 1993],
-[Motik 2015], [Motik 2019], [Motik 2014], [Urbani 2016], [Scholz 2016], [Zhao 2020], [Guo 2005], [Hu 2019],
+[Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016], [Zhao 2020], [Guo 2005], [Hu 2019],
 [Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012].

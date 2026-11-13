@@ -447,11 +447,13 @@ has the same rule (RewriteAtRecovery); without it, a published group is not dura
 ## G17 Exact materialisation
 
 *Promise.* Every view — of any group, in any process, after any crash and recovery, of a fork — holds exactly the
-**least model** of its asserted facts under the rules defined at its group: a fact is in the view if and only if it is
+**least model** of its asserted facts under the rules defined at its group (with `Not` and aggregates: the **perfect
+model** of the stratified rules, [Apt 1988], [Przymusinski 1988]): a fact is in the view if and only if it is
 asserted or it has a proof (a finite tree of rule instances whose leaves are asserted facts). And a fact is marked
 asserted in the view if and only if it is asserted.
 
-*Conditions.* Rules as this version has them: Datalog without negation, aggregates or new things in heads, each
+*Conditions.* Rules as this version has them: Datalog with stratified `Not` and aggregates (`Sum`, `Count`, `Min`,
+`Max`) and without new things in heads, each
 rule range-restricted and typed (checked when it is written; a pattern's property a constant or a variable bound by a
 pattern whose property is a constant, its values' types those of the property at each instance). A group refused (by
 its budget, a constraint, a schema rule, a derived fact that does not fit its property) leaves nothing.
@@ -489,6 +491,17 @@ facts it was unfolded on (checked at each group), the group asserts or retracts 
 deletion of one makes the group start again with the rules as written. A relation is unfolded on only if no chain of
 rules leads from the unfolded rules' heads to it, so its facts' proofs do not pass through the rules unfolded on it:
 the unfolded program's checks (B/F) assume them, which then holds.
+(8) *Strata.* A rule set with a cycle through `Not` or an aggregate is refused at its definition, so every rule reads
+under `Not` and aggregates only what lower strata give. The strata are maintained in order: when stratum $s$ runs,
+the lower ones hold their perfect model of the group's state (induction on $s$), so they are fixed facts for $s$, and
+$s$'s rules are monotone in $s$'s own facts; (1) and (2) apply to them, with the instances the lower strata's changes
+take away and give: a fact made present that a `Not` matches takes away the instances that `Not` allowed (B/F's
+candidates, their lost instances enumerated with the `Not`s read over the state before the group); a fact gone gives
+the instances its absence allows (insertion's round 1) ([Motik 2019]). An aggregate's group changes only through
+answers that hold one of the group's changed facts: each such answer is found once, from that fact (over the state
+after the group if it came, before it if it went), and the sum and the count change by the sum of the answers' changes
+([Budiu 2023]); a minimum or maximum is read again over its whole group when the extreme left it. No write asserts an
+aggregate's property and no other rule gives it, so its facts are exactly the aggregate's values.
 
 *Tested by* `test/reasoning.ml` (after every group of random sequences of 60 groups, 60 seeds plain and 60 with the
 facts merged into runs between groups in `tools/test.sh`, `RULES_SEEDS` for more: random safe typed rules defined, changed and removed, random additions and
@@ -498,6 +511,9 @@ model's; among the rules, transitive closures of both shapes and rules over a va
 relation, which the engine unfolds; and the plain sequences again with unfolding off, every group's view equal to the
 unfolded run's, and with closures retracted by B/F instead of walks; the named case "a closure's retractions decided by
 walks": 120 groups of additions and retractions over both shapes and a rule reading both, the least model after each,
+the random rules with `Not`s and aggregates (`Sum`, `Count`, `Min`, `Max` over one-valued int properties no write
+asserts) against the perfect model computed from scratch, stratum by stratum (`Check.perfect`, strata by longest
+paths), cycles through them refused as predicted,
 and the same views as B/F's); the simulation (three rules from each seed's third group: the published,
 recovered and fork views equal to the least model, after crashes in every disk call, power losses, damaged files,
 merges begun ahead); `test/crash.ml` (a rule marks each client's thing; after each `kill -9`, every confirmed thing
@@ -510,7 +526,9 @@ refused whole, `Invalid "constraint NAME: …"`; a constraint is defined only ov
 
 *Proof.* Rules without negation are monotone: a new instance of a constraint's body needs a fact the group made
 present. After the fixpoint, the constraint's plans run on each such fact (each body atom matched to it, the others
-over the final state); a constraint added runs over the whole state. A group that finds an instance raises before
+over the final state); with a `Not`, an instance also comes from a fact the group took away that the `Not` read, and
+the plans run on each such fact too (its `Not`'s pattern matched to it, the rest over the final state); a constraint
+added runs over the whole state. A group that finds an instance raises before
 its frame is made.
 
 *Tested by* `test/reasoning.ml` (random constraints among the random rules: a group is refused exactly when the least model

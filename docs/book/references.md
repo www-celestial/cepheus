@@ -354,6 +354,16 @@ venue, volume and year); a work that could not be checked is not listed. The des
   308, 103726, 2022. https://doi.org/10.1016/j.artint.2022.103726
   — The journal version: modules for transitivity, symmetry and chains, LUBM-LE 1,268 s → 339 s with them, small
   deletions in 1 s against 585 s; the module's insertion here, its retraction by walks not yet.
+- **[Apt 1988]** K. R. Apt, H. A. Blair, A. Walker. Towards a Theory of Declarative Knowledge. In J. Minker (ed.),
+  *Foundations of Deductive Databases and Logic Programming*, Morgan Kaufmann, 1988, 89–148.
+  https://doi.org/10.1016/B978-0-934613-40-8.50006-3
+  — Stratified programs and their standard model, computed stratum by stratum: what a rule set with `Not` means.
+- **[Przymusinski 1988]** T. C. Przymusinski. On the Declarative Semantics of Deductive Databases and Logic Programs.
+  Same volume, 193–216. https://doi.org/10.1016/B978-0-934613-40-8.50009-9
+  — The perfect model, which is that standard model: the facts Cepheus holds with `Not` and aggregates.
+- **[Mumick 1990]** I. S. Mumick, H. Pirahesh, R. Ramakrishnan. The Magic of Duplicates and Aggregates. *VLDB* 1990,
+  264–277. https://www.vldb.org/conf/1990/P264.PDF
+  — Aggregates in recursive rules, stratified as negation is: an aggregate's body complete before its value.
 - **[Tarjan 1972]** R. Tarjan. Depth-First Search and Linear Graph Algorithms. *SIAM Journal on Computing* 1(2),
   146–160, 1972. https://doi.org/10.1137/0201010
   — Strong components in linear time, found in reverse topological order: the order a closure from scratch is computed
@@ -380,8 +390,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — The shape of the benchmark's data (universities, departments, people, courses) and its ontology.
 - **[Budiu 2023]** M. Budiu, T. Chajed, F. McSherry, L. Ryzhyk, V. Tannen. DBSP: Automatic Incremental View
   Maintenance for Rich Query Languages. *PVLDB* 16(7), 1601–1614, 2023. https://doi.org/10.14778/3587136.3587137
-  — The delta rules of joins (a bilinear operator's change), which a live question's change is a case of; the
-  aggregates of rules, planned.
+  — The delta rules of joins (a bilinear operator's change), which a live question's change is a case of; Sum and
+  Count of rules kept by difference, as linear operators.
 - **[Gjengset 2018]** J. Gjengset, M. Schwarzkopf, J. Behrens, L. T. Araújo, M. Ek, E. Kohler, M. F. Kaashoek,
   R. Morris. Noria: dynamic, partially-stateful data-flow for high-performance web applications. *OSDI* 2018,
   213–231. https://www.usenix.org/conference/osdi18/presentation/gjengset
