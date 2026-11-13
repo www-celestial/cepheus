@@ -101,55 +101,80 @@ let in_order e p w n =
 let digit = 11
 
 (* the fact indexes by (thing, property, value): a stable radix sort by thing, then an insertion sort inside each thing
-   (a handful of rows) *)
+   (a handful of rows). Each pass of the radix sort on several domains: every chunk counts its digits, the counts give
+   each (digit, chunk) its first place in digit-then-chunk order, and every chunk scatters its rows from there: the
+   same stable order as one domain's pass. *)
 let by_thing (e : i32) (p : u16) (w : ints) n =
   let ord = i32 n and tmp = i32 n in
-  for i = 0 to n - 1 do Array1.unsafe_set ord i (Int32.of_int i) done;
   if n > 0 then begin
-    let mn = ref max_int and mx = ref min_int in
-    for i = 0 to n - 1 do
-      let x = Int32.to_int (Array1.unsafe_get e i) in
-      if x < !mn then mn := x;
-      if x > !mx then mx := x
-    done;
-    let range = !mx - !mn and m = (1 lsl digit) - 1 in
-    let cnt = Array.make ((1 lsl digit) + 1) 0 in
+    let nch = chunks n and ch = !chunk in
+    let mins = Array.make nch max_int and maxs = Array.make nch min_int in
+    parallel nch (fun c ->
+        let mn = ref max_int and mx = ref min_int in
+        for i = c * ch to min n ((c + 1) * ch) - 1 do
+          Array1.unsafe_set ord i (Int32.of_int i);
+          let x = Int32.to_int (Array1.unsafe_get e i) in
+          if x < !mn then mn := x;
+          if x > !mx then mx := x
+        done;
+        mins.(c) <- !mn;
+        maxs.(c) <- !mx);
+    let mn = Array.fold_left min max_int mins and mx = Array.fold_left max min_int maxs in
+    let range = mx - mn and m = (1 lsl digit) - 1 in
+    let cnt = Array.init nch (fun _ -> Array.make (1 lsl digit) 0) in
     let src = ref ord and dst = ref tmp and shift = ref 0 in
     while range lsr !shift > 0 do
-      Array.fill cnt 0 (Array.length cnt) 0;
-      let s = !src and d = !dst and sh = !shift and mn = !mn in
-      for r = 0 to n - 1 do
-        let x = ((Int32.to_int (Array1.unsafe_get e (Int32.to_int (Array1.unsafe_get s r))) - mn) lsr sh) land m in
-        cnt.(x + 1) <- cnt.(x + 1) + 1
+      let s = !src and d = !dst and sh = !shift in
+      parallel nch (fun c ->
+          let k = cnt.(c) in
+          Array.fill k 0 (Array.length k) 0;
+          for r = c * ch to min n ((c + 1) * ch) - 1 do
+            let x = ((Int32.to_int (Array1.unsafe_get e (Int32.to_int (Array1.unsafe_get s r))) - mn) lsr sh) land m in
+            k.(x) <- k.(x) + 1
+          done);
+      (* digit by digit, chunk by chunk: each one's first place *)
+      let at = ref 0 in
+      for x = 0 to m do
+        for c = 0 to nch - 1 do
+          let k = cnt.(c).(x) in
+          cnt.(c).(x) <- !at;
+          at := !at + k
+        done
       done;
-      for x = 1 to 1 lsl digit do cnt.(x) <- cnt.(x) + cnt.(x - 1) done;
-      for r = 0 to n - 1 do
-        let i = Array1.unsafe_get s r in
-        let x = ((Int32.to_int (Array1.unsafe_get e (Int32.to_int i)) - mn) lsr sh) land m in
-        Array1.unsafe_set d cnt.(x) i;
-        cnt.(x) <- cnt.(x) + 1
-      done;
+      parallel nch (fun c ->
+          let k = cnt.(c) in
+          for r = c * ch to min n ((c + 1) * ch) - 1 do
+            let i = Array1.unsafe_get s r in
+            let x = ((Int32.to_int (Array1.unsafe_get e (Int32.to_int i)) - mn) lsr sh) land m in
+            Array1.unsafe_set d k.(x) i;
+            k.(x) <- k.(x) + 1
+          done);
       src := d;
       dst := s;
       shift := !shift + digit
     done;
     let ord = !src in
     let th r = Int32.to_int (Array1.unsafe_get e (Int32.to_int (Array1.unsafe_get ord r))) in
-    let s = ref 0 in
-    while !s < n do
-      let t = ref (!s + 1) in
-      while !t < n && th !t = th !s do incr t done;
-      for r = !s + 1 to !t - 1 do
-        let x = Array1.unsafe_get ord r in
-        let j = ref (r - 1) in
-        while !j >= !s && not (before e p w (Int32.to_int (Array1.unsafe_get ord !j)) (Int32.to_int x)) do
-          Array1.unsafe_set ord (!j + 1) (Array1.unsafe_get ord !j);
-          decr j
-        done;
-        Array1.unsafe_set ord (!j + 1) x
-      done;
-      s := !t
-    done;
+    (* inside each thing, by (property, value): chunks of rows from the start of a thing to the start of another *)
+    parallel nch (fun c ->
+        let lo = c * ch and hi = min n ((c + 1) * ch) in
+        (* this chunk's things: those that start in it *)
+        let s = ref lo in
+        while !s < hi && !s > 0 && th !s = th (!s - 1) do incr s done;
+        while !s < hi do
+          let t = ref (!s + 1) in
+          while !t < n && th !t = th !s do incr t done;
+          for r = !s + 1 to !t - 1 do
+            let x = Array1.unsafe_get ord r in
+            let j = ref (r - 1) in
+            while !j >= !s && not (before e p w (Int32.to_int (Array1.unsafe_get ord !j)) (Int32.to_int x)) do
+              Array1.unsafe_set ord (!j + 1) (Array1.unsafe_get ord !j);
+              decr j
+            done;
+            Array1.unsafe_set ord (!j + 1) x
+          done;
+          s := !t
+        done);
     ord
   end
   else ord
@@ -286,3 +311,71 @@ let make ?d0 ~sorted ~order e p w n ~np =
   work ();
   List.iter Domain.join ds;
   { b0 with poff; pw; pe }
+
+(* [b] (a group's own facts) with the [nd] facts only derived from them appended (de, dp, dw): the facts in the
+   group's order then the derived ones (the frame's order), and both orders made by merging the derived facts, sorted
+   alone, into [b]'s, never by sorting all again. A derived fact is never one of [b]'s (the reasoner keeps only facts
+   that are not there). *)
+let add_derived (b : t) (de : i32) (dp : u16) (dw : ints) nd ~np =
+  if nd = 0 then b
+  else begin
+    let n = b.n + nd in
+    let e = i32 n and p = u16 n and w = ints n in
+    let put a x = Array1.blit a (Array1.sub x 0 b.n) in
+    put (Array1.sub b.e 0 b.n) e; put (Array1.sub b.p 0 b.n) p; put (Array1.sub b.w 0 b.n) w;
+    Array1.blit de (Array1.sub e b.n nd);
+    Array1.blit dp (Array1.sub p b.n nd);
+    Array1.blit dw (Array1.sub w b.n nd);
+    (* the derived facts alone, in both orders *)
+    let dsorted = in_order de dp dw nd in
+    let dorder = if dsorted then i32 0 else by_thing de dp dw nd in
+    let d = make ~d0:0 ~sorted:dsorted ~order:dorder de dp dw nd ~np in
+    (* by thing: the two orders merged, as indexes of the whole, in parts cut at the same things in both (each part's
+       rows found by binary search), merged at once by several domains *)
+    let order = i32 n in
+    let ra r = row b r and rd r = b.n + (if dsorted then r else Int32.to_int (Array1.unsafe_get dorder r)) in
+    let th i = Int32.to_int (Array1.unsafe_get e i) in
+    (* the first row of each order whose thing is t or after *)
+    let first_a t = let l = ref 0 and h = ref b.n in while !l < !h do let m = (!l + !h) lsr 1 in if th (ra m) < t then l := m + 1 else h := m done; !l in
+    let first_d t = let l = ref 0 and h = ref nd in while !l < !h do let m = (!l + !h) lsr 1 in if th (rd m) < t then l := m + 1 else h := m done; !l in
+    let parts = max 1 (min (4 * !domains) (n / !chunk)) in
+    let cut_a = Array.make (parts + 1) b.n and cut_d = Array.make (parts + 1) nd in
+    cut_a.(0) <- 0;
+    cut_d.(0) <- 0;
+    for q = 1 to parts - 1 do
+      if b.n > 0 then begin
+        let t = th (ra (q * b.n / parts)) in
+        cut_a.(q) <- max cut_a.(q - 1) (first_a t);
+        cut_d.(q) <- max cut_d.(q - 1) (first_d t)
+      end
+      else (cut_a.(q) <- 0; cut_d.(q) <- nd * q / parts)
+    done;
+    parallel parts (fun q ->
+        let i = ref cut_a.(q) and j = ref cut_d.(q) in
+        let ia = cut_a.(q + 1) and jd = cut_d.(q + 1) in
+        for k = cut_a.(q) + cut_d.(q) to ia + jd - 1 do
+          let take_a = !j >= jd || (!i < ia && before e p w (ra !i) (rd !j)) in
+          if take_a then (Array1.unsafe_set order k (Int32.of_int (ra !i)); incr i)
+          else (Array1.unsafe_set order k (Int32.of_int (rd !j)); incr j)
+        done);
+    (* by property: each property's rows of both, merged by (value, thing) *)
+    let npb = Array.length b.poff - 1 and npd = Array.length d.poff - 1 in
+    let np = max np (max npb npd) in
+    let off (x : t) q = if q < Array.length x.poff then x.poff.(q) else x.n in
+    let poff = Array.init (np + 1) (fun q -> off b q + off d q) in
+    let pw = ints n and pe = i32 n in
+    parallel np (fun q ->
+        let a0 = off b q and a1 = off b (q + 1) and d0 = off d q and d1 = off d (q + 1) in
+        let i = ref a0 and j = ref d0 in
+        for k = poff.(q) to poff.(q + 1) - 1 do
+          let take_a =
+            !j >= d1
+            || !i < a1
+               && (let wa = pword b !i and wd = pword d !j in
+                   wa < wd || (wa = wd && pthing b !i < pthing d !j))
+          in
+          if take_a then (Array1.unsafe_set pw k (pword b !i); Array1.unsafe_set pe k (Array1.unsafe_get b.pe !i); incr i)
+          else (Array1.unsafe_set pw k (pword d !j); Array1.unsafe_set pe k (Array1.unsafe_get d.pe !j); incr j)
+        done);
+    { n; e; p; w; sorted = false; order; poff; pw; pe; d0 = b.n }
+  end

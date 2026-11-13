@@ -1817,14 +1817,17 @@ let set v e p w s = fst (swap v e p w s)
 (* Many facts set at once: [es], [ps], [ws], [ss] the things, properties, value words and states (0 absent,
    1 asserted, 2 only derived) of n facts, distinct, sorted by (thing, property, value). The same result as [set] one
    after the other, with one walk of the map by thing a thing and one of the map by property a property, where [set]
-   walks both for each fact: the derived facts of a group come in clusters (a new thing's types, a class's members). *)
-let[@inline never] set_sorted v (es : int array) (ps : int array) (ws : int array) (ss : int array) n =
+   walks both for each fact: the derived facts of a group come in clusters (a new thing's types, a class's members).
+   [olds]: the facts' states in [v] when the caller knows them (the reasoner does): a fact the delta has no entry for
+   is in that state in the runs, and is not looked up there. *)
+let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : int array) (ss : int array) n =
   if n = 0 then v
   else begin
     let d = v.delta in
     let de = ref d.de and dn = ref d.dn and dnet = ref d.dnet in
-    (* the entries changed, for the map by property: (p, w, e, entry, diff) *)
-    let ch = ref [] and v = ref v in
+    (* the entries changed, for the map by property: (p, w, e, entry, diff), in arrays *)
+    let cp = Array.make n 0 and cw = Array.make n 0 and ce = Array.make n 0 and cst = Array.make n 0 and cdiff = Array.make n 0 in
+    let nc = ref 0 and v = ref v in
     let i = ref 0 in
     while !i < n do
       let e = es.(!i) in
@@ -1834,7 +1837,10 @@ let[@inline never] set_sorted v (es : int array) (ps : int array) (ws : int arra
       while !i < n && es.(!i) = e do
         let p = ps.(!i) and w = ws.(!i) and s = ss.(!i) in
         let old = match PW.find_opt (p, w) !tf with Some st -> st | None -> -1 in
-        let cur, rs = if old >= 0 then state_of_entry old, state_of_entry (old lsr 2) else (let r = runs_state !v e p w in r, r) in
+        let cur, rs =
+          if old >= 0 then state_of_entry old, state_of_entry (old lsr 2)
+          else match olds with Some (o : int array) -> let r = o.(!i) in r, r | None -> let r = runs_state !v e p w in r, r
+        in
         if cur <> s then begin
           let st = entry s rs in
           let diff = net st - net old in
@@ -1843,7 +1849,9 @@ let[@inline never] set_sorted v (es : int array) (ps : int array) (ws : int arra
             let k = Option.value (IM.find_opt p !tn) ~default:0 + diff in
             tn := if k = 0 then IM.remove p !tn else IM.add p k !tn
           end;
-          ch := (p, w, e, st, diff) :: !ch;
+          let c = !nc in
+          cp.(c) <- p; cw.(c) <- w; ce.(c) <- e; cst.(c) <- st; cdiff.(c) <- diff;
+          nc := c + 1;
           incr dn;
           dnet := !dnet + diff;
           any := true
@@ -1855,37 +1863,41 @@ let[@inline never] set_sorted v (es : int array) (ps : int array) (ws : int arra
         de := if PW.is_empty !tf then IM.remove e !de else IM.add e { tf = !tf; tn = !tn } !de
       end
     done;
-    let ch = List.sort (fun (p, w, e, _, _) (p', w', e', _, _) -> compare (p, w, e) (p', w', e')) !ch in
+    (* the changes by (property, value, thing): a sort of their indexes by ints, no tuple *)
+    let m = !nc in
+    let o = Array.init m Fun.id in
+    Array.stable_sort
+      (fun a b ->
+        let x = Array.unsafe_get cp a and y = Array.unsafe_get cp b in
+        if x <> y then compare (x : int) y
+        else
+          let x = Array.unsafe_get cw a and y = Array.unsafe_get cw b in
+          if x <> y then compare (x : int) y else compare (Array.unsafe_get ce a : int) (Array.unsafe_get ce b))
+      o;
     let dav = ref d.dav in
-    let rec by_p = function
-      | [] -> ()
-      | (p, _, _, _, _) :: _ as l ->
-        let pd = match IM.find_opt p !dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = IM.empty } in
-        let pm = ref pd.pm and pk = ref pd.pk and pn = ref pd.pn in
-        let rec by_w = function
-          | (p', w, _, _, _) :: _ as l when p' = p ->
-            let vold = IM.find_opt w !pm in
-            let vd = match vold with Some vd -> vd | None -> { vn = 0; vm = IM.empty } in
-            let vm = ref vd.vm and vn = ref vd.vn in
-            let rec by_e = function
-              | (p'', w', e, st, diff) :: r when p'' = p && w' = w ->
-                vm := (if st < 0 then IM.remove e !vm else IM.add e st !vm);
-                vn := !vn + diff;
-                pn := !pn + diff;
-                by_e r
-              | r -> r
-            in
-            let rest = by_e l in
-            if IM.is_empty !vm then (pm := IM.remove w !pm; if vold <> None then decr pk)
-            else (pm := IM.add w { vn = !vn; vm = !vm } !pm; if vold = None then incr pk);
-            by_w rest
-          | r -> r
-        in
-        let rest = by_w l in
-        dav := (if IM.is_empty !pm then IM.remove p !dav else IM.add p { pn = !pn; pk = !pk; pm = !pm } !dav);
-        by_p rest
-    in
-    by_p ch;
+    let k = ref 0 in
+    while !k < m do
+      let p = cp.(o.(!k)) in
+      let pd = match IM.find_opt p !dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = IM.empty } in
+      let pm = ref pd.pm and pk = ref pd.pk and pn = ref pd.pn in
+      while !k < m && cp.(o.(!k)) = p do
+        let w = cw.(o.(!k)) in
+        let vold = IM.find_opt w !pm in
+        let vd = match vold with Some vd -> vd | None -> { vn = 0; vm = IM.empty } in
+        let vm = ref vd.vm and vn = ref vd.vn in
+        while !k < m && cp.(o.(!k)) = p && cw.(o.(!k)) = w do
+          let j = o.(!k) in
+          let st = cst.(j) and diff = cdiff.(j) in
+          vm := (if st < 0 then IM.remove ce.(j) !vm else IM.add ce.(j) st !vm);
+          vn := !vn + diff;
+          pn := !pn + diff;
+          incr k
+        done;
+        if IM.is_empty !vm then (pm := IM.remove w !pm; if vold <> None then decr pk)
+        else (pm := IM.add w { vn = !vn; vm = !vm } !pm; if vold = None then incr pk)
+      done;
+      dav := (if IM.is_empty !pm then IM.remove p !dav else IM.add p { pn = !pn; pk = !pk; pm = !pm } !dav)
+    done;
     { !v with delta = { de = !de; dav = !dav; dn = !dn; dnet = !dnet } }
   end
 

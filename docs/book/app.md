@@ -526,12 +526,14 @@ rules defined in 0.95 s
 ```
 
 The invoices go in groups of 20,000, about 480,000 facts each, so as to take the path of large groups in the database
-([large groups](architecture.md#large-groups)). But a constraint, or a rule whose head is a property of one value,
-sends a large group to the ordinary path of the writer; and the app, started above, defined its rules. Into a
-database where they are not defined yet, the seed defines them after the load, in one group that derives over all of
-it, and the whole seed takes 4.84 s ([what it costs](#14-what-it-costs)); here it took 12.5 s. Its `Define` then had
-nothing to write, but waited, as the first read after the load, for the program's copy of the database to take in
-the load's groups.
+([large groups](architecture.md#large-groups)). When this run was measured, a constraint, or a rule whose head is a
+property of one value, sent a large group to the ordinary path of the writer; and the app, started above, had defined
+its rules. Into a database where they are not defined yet, the seed defines them after the load, in one group that
+derives over all of it, and the whole seed takes 4.84 s ([what it costs](#14-what-it-costs)); here it took 12.5 s.
+Its `Define` then had nothing to write, but waited, as the first read after the load, for the program's copy of the
+database to take in the load's groups. Since the reasoner's step 3, the path of large groups checks constraints (with
+their `Not`) and one-valued heads after its fixpoint ([rules](rules.md#large-groups)): a load into a database that
+has the app's rules stays on that path (not measured again here).
 
 ## 12. End-to-end tests in Firefox
 
@@ -824,8 +826,6 @@ actions above). A flood of sign-ins is a denial of service until the hash runs b
 
 - A watch with an order and a limit (the latest ten payments): the dashboard watches a window of time and the page
   sorts it.
-- An index order for a sort on a text (the clients by name read every client), and the bulk path for a load into a
-  database with a constraint or a rule whose head is a one-valued property (the seed defines the rules after the
-  load).
+- An index order for a sort on a text (the clients by name read every client).
 - A counter that a group itself increments: invoice numbers without a gap are made one at a time in a process.
 - Argon2id beside the requests: a sign-in holds the app's thread for its 65 ms.

@@ -359,7 +359,9 @@ semi-naive evaluation, in a working set of arrays out of the collector's sight; 
 frame with a kind byte (2 to 5) and the view in one sorted batch. Replay applies them and evaluates nothing. In a run,
 a fact's value carries a flag "only derived" in the lowest bit of its field, in the blocks that hold a derived fact
 (formats 7 and 8; format 6 used bit 63 of a value word). A large group with rules reasons over its own facts
-in the working set and appends the derived ones to its arrays, merged into the run with them. The rules are
+held as a sorted prefix of the working set (no hash chains: a thing's facts are a range, a value's things a range of
+the group's order by property), derives its rounds on several domains, and merges the derived facts into its arrays'
+two orders, written into the run with them. The rules are
 compiled into two programs a rule set: as written, and unfolded on the database's small relations (cached while the
 view holds those relations' facts, checked at each group by identity); a group runs the unfolded one unless it
 changes a frozen relation. A rule's plans are compiled when they first run, one copy a recursion depth of B/F, and

@@ -553,12 +553,31 @@ derived facts already, so start-up does not grow.
 ## Large groups
 
 A group of 20,000 additions and more (a load) takes the path of large groups ([architecture](architecture.md#large-groups)):
-its facts are mapped into compact arrays and merged into a run at once. With rules, its facts are the round 0 of the
-same semi-naive evaluation, in the working set, and the derived facts are appended to the group's arrays: they reach
-the run with the asserted ones, in one merge. A group that the faster path cannot decide alone (a constraint, a head
-on a one-valued or unique property, a fact derived already and now asserted) takes the ordinary path, which decides
-as always. A rule's text that the group itself adds is found among the group's new texts, which the dictionary's map
-does not hold yet (the simulation found that case: without it, a pattern on such a text matched nothing).
+its facts are mapped into compact arrays, sorted in both orders of a run, and merged into a run at once. With rules,
+its facts are the round 0 of the same semi-naive evaluation, held as the design's sorted path has them (after VLog's
+sorted columns [Urbani 2016]) rather than hashed one by one:
+
+- **A sorted prefix, not hash chains.** The group's facts of the properties some rule reads or gives (no rule can
+  match the others) are the working set's first facts, in the order by thing: a thing's facts are a range of them (an
+  offset a new thing), a (property, value)'s things a range of the group's order by property, which its run needs
+  anyway. Only the membership table holds each of them, filled by several domains, each owning a region of the table.
+- **Only the chains a plan reads.** A derived fact joins the chain by (property, thing) only if some plan reads its
+  property with the thing known and the value not, and the chain by (property, value) only the other way round, as the
+  plans' compiled order says (an index selection, in the manner of [Subotic 2018]). A load's derived types, read only
+  with both sides known, join none.
+- **Rounds on several domains.** A round of 20,000 facts or more is derived by morsels; its heads are made facts by
+  regions of the membership table, one domain a region, with the ids, rules and order the one-domain loop gives: the
+  result does not depend on the number of domains.
+- **The derived facts merged into the group's orders**, sorted alone, not sorted again with the group's.
+- **A new thing's facts are not looked up in the view** (it has none); a fact derived already that the group asserts
+  changes its flag in the delta (kind 4 in the frame, before the group's facts) instead of sending the group to the
+  ordinary path, so that a load in chunks (a university a group) stays on this path.
+- **Constraints and one-valued heads are checked after the fixpoint**: the constraints' plans (with their Nots) run
+  from every fact the group made present, and each derived fact of a one-valued or unique property is counted with
+  the group's and the view's. A group that breaks one goes to the ordinary path, which refuses it with its message.
+
+A group whose rules derive with a `Not` or an aggregate takes the ordinary path. A rule's text that the group itself
+adds is found among the group's new texts, which the dictionary's map does not hold yet.
 
 ## What it costs, and against the giants
 
@@ -637,11 +656,10 @@ Each was weighed against the others in the design; the measurements are the desi
 
 ## What is not here yet
 
-The design's plan has six steps; this version has steps 1, 2, 4 and 5.
+The design's plan has six steps; this version has steps 1 to 5.
 
-- **Step 3**: large derivations sorted. Rounds of 20,000 facts and more are derived on several domains (above), but
-  derived facts still reach the view's delta in sorted batches, about a microsecond a fact, and the join of a round
-  probes the store fact by fact; a change's derived facts are not written to a run of their own.
+- **Step 3's rest**: a change of the rules computed in the background still puts its derived facts into the view's
+  delta (not a run of its own), and the joins of its rounds probe the store fact by fact.
 - **Step 5's rest**: a change with new things is computed in the group; a change's derived facts wait for the next
   merge to reach a run.
 - **Step 6**: OWL 2 RL as a library of rules, and equality (`owl:sameAs`) by rewriting.
@@ -651,5 +669,6 @@ The design's plan has six steps; this version has steps 1, 2, 4 and 5.
 
 Every work cited here is in [references](references.md#rules-datalog-materialisation-and-its-maintenance), with what
 Cepheus took from it: [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [Feeley 1987], [Gupta 1993],
-[Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016], [Zhao 2020], [Guo 2005], [Hu 2019],
+[Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016],
+[Subotic 2018], [Zhao 2020], [Guo 2005], [Hu 2019],
 [Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012].

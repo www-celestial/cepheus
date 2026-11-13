@@ -5,7 +5,9 @@
    large groups of 150 new things (300 additions, the path of large groups from 200 here, in chunks of 64), whose
    frames are written by pieces beside their merges and forced every 2 KB, so that kills land inside them too; its
    first and last things are checked. A rule marks each client's thing in the client's own group: the mark must come
-   back with it (a derived fact is durable with its group, replayed from the frame). A kill may land before the child's
+   back with it (a derived fact is durable with its group, replayed from the frame). Another rule derives a fact for
+   each loaded thing (the path of large groups reasons on its sorted prefix): a load comes back whole, every thing with
+   its derived fact, or not at all. A kill may land before the child's
    declare is durable (while it creates the database or declares): then no property is there, and no group may have
    been confirmed; the properties come back all together or not at all. Then it starts the next child on the same
    database. Usage: crash.exe DIR ROUNDS [SEED]. *)
@@ -23,11 +25,15 @@ let child dir =
   Bulk.chunk := 64;
   Journal.force_every := 2048;
   let db = match open_ dir with Ok db -> db | Error e -> prerr_endline (message e); exit 2 in
-  let[@warning "-8"] (Ok [ name; seq; by; mark ]) =
-    declare db [ prop ~unique:true "name" Ttext; prop "seq" Tint; prop "by" Tint; prop "mark" Tbool ] in
-  (* a rule: each client's thing is marked, by the writer, in the client's group (the loader's things are not) *)
+  let[@warning "-8"] (Ok [ name; seq; by; mark; load; of_load ]) =
+    declare db [ prop ~unique:true "name" Ttext; prop "seq" Tint; prop "by" Tint; prop ~many:true "mark" Tbool;
+                 prop ~many:true "load" Tint; prop ~many:true "loaded" Tint ] in
+  (* a rule: each client's thing is marked, by the writer, in the client's group (the loader's things are not); and
+     each loaded thing gets its load's number again, derived *)
   ignore (define db [ { name = "marked"; vars = 2; where = [ { e = Var 0; p = by; v = Var 1 } ]; ranges = [];
-                        head = Give { e = Var 0; p = mark; v = Val (Bool true) } } ]);
+                        head = Give { e = Var 0; p = mark; v = Val (Bool true) } };
+                      { name = "of-a-load"; vars = 2; where = [ { e = Var 0; p = load; v = Var 1 } ]; ranges = [];
+                        head = Give { e = Var 0; p = of_load; v = Var 1 } } ]);
   let m = Mutex.create () in
   let run c =
     let k = ref 0 in
@@ -47,7 +53,12 @@ let child dir =
     while true do
       incr k;
       let label = Printf.sprintf "%d-L-%d" (Unix.getpid ()) !k in
-      let ops = List.concat (List.init loaded (fun j -> [ Add (-j - 1, name, Text (Printf.sprintf "%s-%d" label j)); Add (-j - 1, seq, Int !k) ])) in
+      let ops =
+        List.concat
+          (List.init loaded (fun j ->
+               [ Add (-j - 1, name, Text (Printf.sprintf "%s-%d" label j)); Add (-j - 1, seq, Int !k);
+                 Add (-j - 1, load, Int ((Unix.getpid () * 1_000_000) + !k)) ]))
+      in
       match write db ~by:clients ~why:"load" ops with
       | Ok r ->
         Mutex.lock m;
@@ -94,12 +105,23 @@ let parent dir rounds seed =
         "round %d: a snapshot was set aside: %s" round (String.concat "; " (notes db));
       C.check (tmps () = []) "round %d: a merge's file was left" round;
       let v = view db in
-      (match List.map (property v) [ "name"; "seq"; "by"; "mark" ] with
-       | [ None; None; None; None ] ->
+      (match List.map (property v) [ "name"; "seq"; "by"; "mark"; "load"; "loaded" ] with
+       | [ None; None; None; None; None; None ] ->
          (* killed before the child's declare was durable: no write can have been confirmed *)
          incr early;
          C.check (!acks = []) "round %d: %d groups confirmed, but no property is there" round (List.length !acks)
-       | [ Some name; Some seq; Some _; Some mark ] ->
+       | [ Some name; Some seq; Some _; Some mark; Some load; Some ld ] ->
+         (* every load whole, each thing with its derived fact, or not there *)
+         let per = Hashtbl.create 16 in
+         Store.iter_prop v load (fun e w ->
+             Hashtbl.replace per w (1 + Option.value (Hashtbl.find_opt per w) ~default:0);
+             C.check (values v e ld = [ Int w ]) "round %d: a loaded thing without its derived fact" round);
+         Hashtbl.iter
+           (fun w c ->
+             let t = List.length (things v load (Int w)) in
+             C.check (c = loaded && t = loaded) "round %d: load %d came back with %d things of %d (%d by its value; runs %d)" round w c loaded t
+               (Array.length v.runs))
+           per;
          List.iter
            (fun (g, label, k) ->
              incr total;

@@ -230,7 +230,7 @@ let university ids g u (write : op list -> unit) =
 (* a database with n universities, the rules first when [rules]; in memory (a fork), or on the disk in [dir]; a group a
    department, or with [bulk] all of it in one group (a load: on the disk, the path of large groups; a fork always
    takes the ordinary path) *)
-let build ?(bulk = false) ?dir n rules =
+let build ?(bulk = false) ?(chunks = false) ?dir n rules =
   let db = match dir with None -> fork empty | Some d -> ok (open_ d) in
   let ids = setup db in
   if rules then ignore (ok (define db (ontology_rules ids)));
@@ -240,6 +240,26 @@ let build ?(bulk = false) ?dir n rules =
     let t0 = now () in
     for u = 0 to n - 1 do university ids g u (fun ops -> incr groups; ignore (ok (write db ops))) done;
     db, ids, g, now () -. t0, !groups
+  end
+  else if chunks then begin
+    (* a university a group (a load in chunks: about 135,000 facts a group), its operations made just before it is
+       written; the clock runs only while the groups are written *)
+    let t = ref 0. in
+    for u = 0 to n - 1 do
+      let all = ref [] and off = ref 0 in
+      university ids g u (fun ops ->
+          let low = ref 0 in
+          let tr x = if x < 0 then (low := min !low x; x - !off) else x in
+          List.iter (function Add (e, p, v) -> all := Add (tr e, p, (match v with Link l -> Link (tr l) | v -> v)) :: !all | o -> all := o :: !all) ops;
+          off := !off - !low);
+      let ops = List.rev !all in
+      all := [];
+      let t0 = now () in
+      ignore (ok (write db ops));
+      t := !t +. (now () -. t0);
+      incr groups
+    done;
+    db, ids, g, !t, !groups
   end
   else begin
     (* every department's operations in one list, their new things numbered apart *)
@@ -262,11 +282,19 @@ let build ?(bulk = false) ?dir n rules =
     db, ids, g, now () -. t0, 1
   end
 
+let digest = ref 0
+
+(* every fact counted, and a digest of the facts and their flags (the same database, however it was loaded) *)
 let count_derived (v : view) =
-  let d = ref 0 and all = ref 0 in
+  let d = ref 0 and all = ref 0 and h = ref 0 in
   for e = Schema.first_thing to v.next_e - 1 do
-    Store.iter_facts v e (fun p w -> incr all; if Store.state v e p w = 2 then incr d)
+    Store.iter_facts v e (fun p w ->
+        incr all;
+        let st = Store.state v e p w in
+        if st = 2 then incr d;
+        h := !h + Hashtbl.hash (e, p, w, st))
   done;
+  digest := !h;
   !all, !d
 
 (* the ids of a database [setup] made: the properties declared again (their ids), the class things and the universities
@@ -291,13 +319,26 @@ let mat n mode path dir =
   let rules = mode = "rules" in
   Reason.derivations := 0;
   let dir = if dir = "-" then None else Some dir in
-  let db, _, _, t, groups = build ~bulk:(path = "bulk") ?dir n rules in
+  (match Sys.getenv_opt "CACHE_MB" with Some m -> set_cache (int_of_string m * 1024 * 1024) | None -> ());
+  let db, _, _, t, groups = build ~bulk:(path = "bulk" || path = "chunks") ~chunks:(path = "chunks") ?dir n rules in
   let all, d = count_derived (view db) in
   let r = !Reason.seconds and ix = !Reason.bulk_index_seconds in
   Printf.printf "mat %d %s %s %s: %.3f s, %d groups, %d facts (%d derived), %d derivations; reasoning %.3f s, %.3f M derived/s; of which the working set's build %.3f s, saturation %.3f M derived/s\n%!" n
     mode path (if dir = None then "memory" else "disk") t groups all d !Reason.derivations r
     (if r > 0. then float_of_int d /. r /. 1e6 else 0.) ix (if r -. ix > 0. then float_of_int d /. (r -. ix) /. 1e6 else 0.);
-  close db
+  Printf.printf "  digest %x\n" !digest;
+  Printf.printf "  resolve %.3f encode %.3f merge %.3f\n" (float (Histogram.max Engine.large_resolve_us) /. 1e6) (float (Histogram.max Engine.large_encode_us) /. 1e6) (float (Histogram.max Engine.large_merge_us) /. 1e6);
+  (let ic = open_in "/proc/self/status" in
+   (try while true do let l = input_line ic in if String.length l > 6 && String.sub l 0 6 = "VmHWM:" then print_endline ("  " ^ l) done with End_of_file -> ());
+   close_in ic);
+  close db;
+  (* the bytes on the disk: the runs and the journal, a fact *)
+  match dir with
+  | None -> ()
+  | Some d ->
+    let size sub = let p = Filename.concat d sub in if Sys.file_exists p then Array.fold_left (fun t f -> t + (Unix.stat (Filename.concat p f)).Unix.st_size) 0 (Sys.readdir p) else 0 in
+    let r = size "snapshots" and j = size "journal" in
+    Printf.printf "  disk: runs %d bytes (%.2f a fact), journal %d bytes (%.2f a fact)\n%!" r (float r /. float all) j (float j /. float all)
 
 (* a graduate student of department d: 10 facts, 6 derived with the rules *)
 let student ids g dept course prof =
@@ -755,6 +796,7 @@ let change_bench n clients secs at mode dir =
   in
   let ts = List.init clients (fun k -> Thread.create (worker k) ()) in
   Thread.delay at;
+  Reason.seconds := 0.;
   let c0 = now () in
   if mode = "with" then
     ignore
@@ -787,6 +829,7 @@ let change_bench n clients secs at mode dir =
   ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote run)))
 
 let () =
+  (match Sys.getenv_opt "DOMAINS" with Some d -> Bulk.domains := int_of_string d | None -> ());
   match Array.to_list Sys.argv |> List.tl with
   | [ "define"; n ] -> define_bench (int_of_string n)
   | [ "change"; n; c; secs; at; mode; dir ] -> change_bench (int_of_string n) (int_of_string c) (float_of_string secs) (float_of_string at) mode dir

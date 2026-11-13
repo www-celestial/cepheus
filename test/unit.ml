@@ -462,6 +462,53 @@ let () =
   Bulk.chunk := chunk
 
 let () =
+  section "large groups: derived facts merged into a group's orders (Bulk.add_derived), against a sort";
+  let chunk = !Bulk.chunk in
+  for seed = 1 to 300 do
+    let r = Rng.make (10800 + seed) in
+    Bulk.chunk := 1 + Rng.int r 50;
+    let np = 1 + Rng.int r 6 in
+    (* distinct facts, split into the group's and the derived ones *)
+    let all = Array.of_list (List.sort_uniq compare (List.init (Rng.int r 600) (fun _ -> 65536 + Rng.int r (1 + Rng.int r 300), Rng.int r np,
+                                                                                   match Rng.int r 10 with 0 -> max_int - Rng.int r 3 | 1 -> -Rng.int r (1 lsl 40) | _ -> Rng.int r 50))) in
+    for i = Array.length all - 1 downto 1 do let j = Rng.int r (i + 1) in let t = all.(i) in all.(i) <- all.(j); all.(j) <- t done;
+    let n = Array.length all in
+    let na = if n = 0 then 0 else Rng.int r (n + 1) in
+    let nd = n - na in
+    let arrays lo k = let e = Bulk.i32 k and p = Bulk.u16 k and w = Bulk.ints k in
+      for i = 0 to k - 1 do let a, b, c = all.(lo + i) in e.{i} <- Int32.of_int a; p.{i} <- b; w.{i} <- c done; e, p, w in
+    let e, p, w = arrays 0 na in
+    if Rng.bool r then begin
+      (* the group in thing order now and then *)
+      let s = Array.sub all 0 na in
+      Array.sort compare s;
+      Array.blit s 0 all 0 na;
+      Array.iteri (fun i (a, b, c) -> e.{i} <- Int32.of_int a; p.{i} <- b; w.{i} <- c) s
+    end;
+    let sorted = Bulk.in_order e p w na in
+    let order = if sorted then Bulk.i32 0 else Bulk.by_thing e p w na in
+    let b = Bulk.make ~sorted ~order e p w na ~np in
+    let de, dp, dw = arrays na nd in
+    let b = Bulk.add_derived b de dp dw nd ~np in
+    C.check (b.n = n && b.d0 = (if nd = 0 then n else na)) "seed %d: counts" seed;
+    C.check (List.init n (fun i -> Bulk.thing b i, Bulk.prop b i, Bulk.word b i) = Array.to_list all) "seed %d: the group's order, then the derived" seed;
+    let want = List.sort compare (Array.to_list all) in
+    C.check (List.init n (fun k -> let i = Bulk.row b k in Bulk.thing b i, Bulk.prop b i, Bulk.word b i) = want) "seed %d: the order by thing" seed;
+    let derived = Hashtbl.create 16 in
+    for i = na to n - 1 do Hashtbl.replace derived all.(i) () done;
+    let got = ref [] in
+    for q = np - 1 downto 0 do
+      for k = b.poff.(q + 1) - 1 downto b.poff.(q) do
+        let f = (Bulk.pthing b k, q, Bulk.pword b k) in
+        C.check (Bulk.pderived b k = Hashtbl.mem derived f) "seed %d: the derived bit by property" seed;
+        got := f :: !got
+      done
+    done;
+    C.check (!got = List.sort (fun (a, q, x) (a', q', x') -> compare (q, x, a) (q', x', a')) want) "seed %d: the order by property" seed
+  done;
+  Bulk.chunk := chunk
+
+let () =
   section "large groups: the faster path gives what Resolve gives, or leaves the group to it";
   let large = !Resolve.large_min and chunk = !Bulk.chunk in
   Resolve.large_min := 1;
