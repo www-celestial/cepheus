@@ -143,8 +143,24 @@ let writable c ~id ~kind i =
 
 (* ---- rights per kind ---- *)
 
+(* May a token with rights per kind read property p: it reads p's kind, and every kind the derived facts of p can come
+   from through the rules (Reason.sources; any kind, for a rule over a variable property), so that a derived fact
+   tells it nothing of the facts it may not read. *)
+let reads_prop (v : Store.view) r p =
+  Schema.is_system p
+  ||
+  match Schema.find v.schema p with
+  | None -> false
+  | Some d ->
+    let reads q = Schema.is_system q || match Schema.find v.schema q with Some dq -> Tokens.reads_kind r (Tokens.kind_of dq.name) | None -> true in
+    Tokens.reads_kind r (Tokens.kind_of d.name)
+    &&
+    match Reason.sources v p with
+    | Some qs -> List.for_all reads qs
+    | None -> let ok = ref true in for q = 0 to Schema.count v.schema - 1 do if Schema.find v.schema q <> None && not (reads q) then ok := false done; !ok
+
 (* For a token with rights per kind, a byte a property of the schema: 1 it may read it, 2 add to it; made again only
-   when the schema changes, so that a check costs a load a fact. *)
+   when the schema changes (its rules with it), so that a check costs a load a fact. *)
 let kinds_table c i (v : Store.view) r =
   match c.kinds.(i) with
   | Some (s, t) when s == v.schema -> t
@@ -154,7 +170,7 @@ let kinds_table c i (v : Store.view) r =
       match Schema.find v.schema p with
       | Some d ->
         let k = Tokens.kind_of d.name in
-        let r = (if Schema.is_system p || Tokens.reads_kind r k then 1 else 0) lor if Tokens.adds_kind r k then 2 else 0 in
+        let r = (if reads_prop v r p then 1 else 0) lor if Tokens.adds_kind r k then 2 else 0 in
         Bytes.unsafe_set t p (Char.unsafe_chr r)
       | None -> ()
     done;
@@ -272,7 +288,15 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
           let flags =
             match res with
             | Ok r -> Wire.put_reply b (Wire.Receipt r); 0
-            | Error e -> let code, message = Wire.code_of_error e in Wire.put_reply b (Wire.Err { code; message }); Wire.f_error
+            | Error e ->
+              let code, message = Wire.code_of_error e in
+              (* a refusal by the rules names its rule only, to a token that may not read every kind *)
+              let message =
+                match c.rights.(d.index) with
+                | Some (Tokens.Kinds _) when code = "invalid" -> Option.value (Reason.public_message message) ~default:message
+                | _ -> message
+              in
+              Wire.put_reply b (Wire.Err { code; message }); Wire.f_error
           in
           Wire.add_frame c.out ~id ~kind ~flags b;
           c.inflight <- c.inflight - 1;
@@ -326,7 +350,7 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
           | Some (Tokens.Read | Tokens.Write) -> true
           | Some (Tokens.Kinds _ as r) ->
             let v = d.view () in
-            List.for_all (fun (pt : Query.pattern) -> Schema.is_system pt.p || Tokens.reads_kind r (kind_name v pt.p)) (Ask.patterns q extra))
+            List.for_all (fun (pt : Query.pattern) -> reads_prop v r pt.p) (Ask.patterns q extra))
         | None -> false
     end;
     !reads

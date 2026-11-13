@@ -42,7 +42,7 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | command | what it runs | options |
 |---|---|---|
 | `_build/default/test/unit.exe` | the unit and property tests | `CEPHEUS_TMP`: where its databases on the real disk go (the system's temp directory by default) |
-| `reasoning.exe` | the rules: named cases, then G17, G18 and G20 on random sequences (random rules defined, changed and removed; random additions and retractions) against the least model from scratch, plain and over merged runs | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group) |
+| `reasoning.exe` | the rules: named cases (closures of both shapes and their budget, a variable property, `sources`), then G17, G18 and G20 on random sequences (random rules defined, changed and removed, transitive closures and rules over a variable property among them; random additions and retractions) against the least model from scratch, plain and over merged runs, and the plain ones again with the rules always as written, every group's view equal to the unfolded run's | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group), `RULES_PROGRESS` (a line a seed) |
 | `exhaustive.exe` | every crash state of small journals, inside merges, and of two databases sharing a commit buffer | none |
 | `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
 | `wal_sim.exe` | the deterministic simulation of the server's commit buffer: three databases sharing it ([below](#the-commit-buffer)) | `--seeds N` (100 by default), `--seed S`, `--steps N` (200); `WAL_SIM_TRACE` set: each event of a seed on the standard error |

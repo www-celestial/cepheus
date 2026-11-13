@@ -73,13 +73,16 @@ let show_diff a b =
 
 (* ---- A naive evaluator: every pattern against every fact, in the given order ---- *)
 
-let naive (facts : F.t) (q : Query.t) =
+(* [types]: a rule's variables' own types, when it has a variable property: a variable with one binds only values of
+   it, and one without takes whatever it is first bound to *)
+let naive ?types (facts : F.t) (q : Query.t) =
   let fl = F.elements facts in
   let out = ref [] in
   let env = Array.make q.vars None in
+  let typed i (x : Value.t) = match types with Some (t : Value.typ option array) -> (match t.(i) with Some ty -> Value.has_type ty x | None -> true) | None -> true in
   let matches term (x : Value.t) =
     match term with
-    | Query.Var i -> (match env.(i) with None -> `Bind i | Some y -> if Value.equal x y then `Ok else `No)
+    | Query.Var i -> (match env.(i) with None -> if typed i x then `Bind i else `No | Some y -> if Value.equal x y then `Ok else `No)
     | Query.Thing e -> if Value.equal x (Value.Link e) then `Ok else `No
     | Query.Val y -> if Value.equal x y then `Ok else `No
   in
@@ -96,9 +99,14 @@ let naive (facts : F.t) (q : Query.t) =
     | (pt : Query.pattern) :: rest ->
       List.iter
         (fun (e, p, x) ->
-          if p = pt.p then begin
+          if p = pt.p || pt.p < 0 then begin
             let saved = Array.copy env in
+            let bind t y = match matches t y with `No -> false | `Ok -> true | `Bind i -> env.(i) <- Some y; true in
+            (* a variable property: bound to the fact's, a link to the property thing *)
+            let ok = pt.p >= 0 || bind (Query.Var (-1 - pt.p)) (Value.Link p) in
             let ok =
+              ok
+              &&
               match matches pt.e (Value.Link e) with
               | `No -> false
               | `Ok -> true
@@ -124,22 +132,50 @@ let sorted_rows l = List.sort compare l
 
 (* ---- The rules' reference: the least model, naively ---- *)
 
+(* the type of a property a rule may give ([ptyp]), for rules with a variable property: a fact whose property is none,
+   or whose value is not of its type, refuses its group ([bad] set) *)
+type ptyp = int -> Value.typ option
+
+(* a rule's variables' own types (thing places and property variables are links; a value under a constant property
+   has its type), for a rule with a variable property *)
+let rule_types (ptyp : ptyp) (r : Rules.t) =
+  let t = Array.make (max 1 r.vars) None in
+  List.iter
+    (fun (a : Query.pattern) ->
+      (match a.e with Var x -> t.(x) <- Some Value.Tlink | _ -> ());
+      if a.p < 0 then t.(-1 - a.p) <- Some Value.Tlink
+      else match a.v, ptyp a.p with Var x, Some ty -> t.(x) <- Some ty | _ -> ())
+    r.where;
+  t
+
+let has_var_prop (r : Rules.t) = List.exists (fun (a : Query.pattern) -> a.p < 0) r.where || match r.head with Give h -> h.p < 0 | Never -> false
+
 (* the facts a rule's body gives a head for, over a set of facts *)
-let heads (r : Rules.t) (facts : F.t) =
+let heads ?ptyp ?bad (r : Rules.t) (facts : F.t) =
   let q = { vars = r.vars; where = r.where; ranges = r.ranges } in
-  let rows = naive facts q in
+  let types = match ptyp with Some pt when has_var_prop r -> Some (rule_types pt r) | _ -> None in
+  let rows = naive ?types facts q in
   match r.head with
   | Never -> List.map (fun _ -> None) rows
   | Give h ->
     let term row = function Var x -> row.(x) | Thing t -> Link t | Val x -> x in
-    List.map
+    List.filter_map
       (fun row ->
-        let e = match term row h.e with Link t -> t | _ -> assert false in
-        Some (e, h.p, term row h.v))
+        (* a rule the engine refuses when it is written may give a thing that is not one: no fact, and [bad] *)
+        match term row h.e, (if h.p >= 0 then Value.Link h.p else row.(-1 - h.p)) with
+        | Link e, Link p -> (
+          let x = term row h.v in
+          match ptyp, bad with
+          | Some pt, Some bad when has_var_prop r ->
+            (match if p >= Schema.first_prop then pt p else None with
+             | Some ty when Value.has_type ty x -> Some (Some (e, p, x))
+             | _ -> bad := true; None)
+          | _ -> Some (Some (e, p, x)))
+        | _ -> (match bad with Some b -> b := true | None -> ()); None)
       rows
 
 (* the least fixpoint of the facts under the rules (naive evaluation: every rule over everything, until nothing new) *)
-let least (rules : Rules.t list) (facts : F.t) =
+let least ?ptyp ?bad (rules : Rules.t list) (facts : F.t) =
   let s = ref facts and go = ref true in
   while !go do
     go := false;
@@ -147,7 +183,7 @@ let least (rules : Rules.t list) (facts : F.t) =
       (fun r ->
         List.iter
           (function Some f when not (F.mem f !s) -> s := F.add f !s; go := true | _ -> ())
-          (heads r !s))
+          (heads ?ptyp ?bad r !s))
       rules
   done;
   !s

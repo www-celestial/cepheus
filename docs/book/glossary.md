@@ -91,6 +91,9 @@ the usual one, both are given.
 - **closed loop**, **open loop** — a load where each client waits for its last write before the next, against one where
   writes are due at a fixed rate whatever happens; only the open loop measures latency under stalls.
   [benchmarks](benchmarks.md#method)
+- **closure module** — the writer's way of keeping a transitive property's facts (Hu, Motik, Horrocks 2019): each new
+  fact of the closure found once by walks, instead of once a path by the rule; recognised in two shapes, prp-trp and
+  the linear pair. [rules](rules.md#transitive-closures-the-closure-module)
 - **cluster** — the servers that hold the same databases; one machine is a cluster of one peer. Its id (`cph-c-` and
   16 hex digits) is in `cluster.toml` and in every Welcome. [server](server.md#clustertoml)
 - **column order** (vertical partitioning) — the third order of a run (format 8): each property's rows (thing, value)
@@ -211,6 +214,8 @@ the usual one, both are given.
   difference from the base in as many bits as the largest difference needs: values between 20,000 and 23,650 take
   12 bits each, not 64 (Goldstein et al. 1998; PFOR, its patched form, Zukowski et al. 2006).
   [theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)
+- **frozen relation** — a small relation the rules were unfolded on: while its facts stay those, the unfolded rules
+  run; a group that changes one of them runs the rules as written. [rules](rules.md#specialisation-by-small-relations)
 - **fsync** — the system call that returns once a file's bytes are on the disk.
 - **fuzzing**, **libFuzzer**, **sanitizer** — fuzzing runs a function on millions of inputs that a program mutates
   to reach new paths in the code, and stops at the first that fails; libFuzzer is LLVM's fuzzer. A sanitizer is a
@@ -443,6 +448,8 @@ the usual one, both are given.
   an order by thing, leaves the facts of one value in thing order, which is the order (property, value, thing) a run
   needs. [architecture](architecture.md#large-groups)
 - **strict serializability** — serializable in an order that respects real time. [guarantees](guarantees.md#g4-strict-serializability)
+- **strong component** — a largest set of things that all reach one another through a graph's edges; every member
+  of one reaches the same things. Found by Tarjan's algorithm (1972). [rules](rules.md#transitive-closures-the-closure-module)
 - **structural sharing** — a new version of a persistent structure shares every untouched part with the old one.
 - **subjectAltName** — the field of a certificate that lists the names (DNS) and addresses (IP) it is valid for; a
   client checks the host it connected to against it. [server](server.md#tls)
@@ -462,6 +469,11 @@ the usual one, both are given.
 - **torn write** — a write the disk was doing when the power went, of which only part arrived; recovery cuts it.
 - **trailer** — the last 16 bytes of a frame, repeating its length and CRCs: a sign that the frame was written whole.
 - **transaction** — a unit of work applied entirely or not at all; Cepheus' group.
+- **transitive property** — a property that relates a thing to everything it reaches: a part of a part is a part.
+  Kept by the closure module. [rules](rules.md#transitive-closures-the-closure-module)
+- **unfolding** (specialisation by small relations, partial evaluation) — a rule rewritten as one rule a fact of a
+  small relation of its body, that fact's words in place of its variables: what the engine runs for rules written over
+  the ontology. [rules](rules.md#specialisation-by-small-relations)
 - **unique** — a property no two things share a value of, checked after each group.
 - **Unix-domain socket** — a socket between two processes of one machine, named by a path in the file system
   (`.s.cepheus.7400`); it cannot cross machines. [server](server.md#what-it-is-and-why)
@@ -471,6 +483,8 @@ the usual one, both are given.
   property when it takes at most 2 bytes a row (links, texts, dates, small ints).
   [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **variable** — an unknown of a question, numbered from 0.
+- **variable property** — a rule pattern whose property is a variable (`prop_var k`), bound by another pattern of the
+  body: the W3C's form of OWL 2 RL's rules. [rules](rules.md#a-property-as-a-variable-the-w3cs-form-of-owls-rules)
 - **varint** (LEB128), **zigzag** — a whole number in 7-bit pieces, small ones short; zigzag maps signed to unsigned
   (0, -1, 1, -2 → 0, 1, 2, 3). [formats](formats.md#a-group)
 - **visibility number**, **visibility page** — the number, in the first 8 bytes of a page of memory

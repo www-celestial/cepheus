@@ -823,6 +823,14 @@ A token with **rights per kind** (`{ read = ["client", "invoice"], add = ["invoi
   every kind.
 - It never reads in its own memory: a local reader maps the whole database, so the server refuses its `Follow`, and
   its reads go to the server. The clients do it by themselves.
+- With rules, it reads a property only when it reads the property's kind **and every kind the property's derived
+  facts can come from** through the rules (`sources`, [rules](rules.md#a-property-as-a-variable-the-w3cs-form-of-owls-rules);
+  a rule over a variable property can read any kind): otherwise a derived fact would tell it something of the facts
+  it may not read. Such a property is, for it, a kind it does not read (`Get` leaves its facts out, a question on it
+  is `denied`). A refusal by the rules names only the rule (`constraint NAME`, `rule NAME refused the group`): the
+  constraint's instance or a derived fact's premises may be of kinds it does not read. *Tested by*
+  `test/server_unit.ml` ("rules and kinds": 25 seeds of random rules across three kinds and random facts, five
+  tokens reading some kinds, every `Get` and question after every group against the oracle's reckoning from the rules).
 
 The check costs 21.95 ns [21.85, 22.07] a group of 4 facts (`sbench rights`: the median of 21 rounds of a million
 groups, with its 95 % interval; a schema of 40 properties of 10 kinds), beside the tens of microseconds of a write
