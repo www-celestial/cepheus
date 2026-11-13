@@ -1783,10 +1783,8 @@ let [@inline never] head_refusal c (pl : plan) =
   if b <> "" then b else head_message c.v (rule_name c pl.ri) ~thing:(pl.he <> -1) pl.hp
 
 (* the head of a forward instance, at round r - 1: a fact that is not there yet joins round r *)
-let[@inline never] emit_at c pl r =
-  incr derivations;
-  if not pl.hok then refuse "%s" (head_refusal c pl);
-  let p = pl.hp and e = pl.he and w = pl.hw in
+(* the head (e p w) of an instance of rule ri: a fact at round r, unless it is one already *)
+let[@inline never] emit_fact c ri e p w r =
   let ws = c.ws in
   let x = find ws e p w in
   if x >= 0 then begin
@@ -1794,21 +1792,100 @@ let[@inline never] emit_at c pl r =
       check_frozen c p w;
       set_now ws x 2;
       set_round ws x r;
-      set_rule ws x pl.ri;
-      count_derived c pl.ri;
+      set_rule ws x ri;
+      count_derived c ri;
       push_next c x
     end
   end
   else if not ((Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000')) && S.mem c.v e p w) then begin
-    if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c pl.ri) e;
+    if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c ri) e;
     check_frozen c p w;
     let x = add ws e p w 0 in
     set_now ws x 2;
     set_round ws x r;
-    set_rule ws x pl.ri;
-    count_derived c pl.ri;
+    set_rule ws x ri;
+    count_derived c ri;
     push_next c x
   end
+
+let emit_at c pl r =
+  incr derivations;
+  if not pl.hok then refuse "%s" (head_refusal c pl);
+  emit_fact c pl.ri pl.he pl.hp pl.hw r
+
+(* ---- Large rounds on several domains (the design's section 5.14) ----
+   A round of many facts, or the first round of a change's added rules, is cut into morsels (Leis et al., SIGMOD
+   2014) taken in turn by the domains (Bulk.parallel): each derives with plans of its own in a context of its own,
+   reading the view and the working set, which nobody writes meanwhile, and keeps the heads it finds; then this domain
+   makes them facts, morsel after morsel, in order, exactly as it would have found them alone: the result, the budget
+   and the refusals do not depend on the domains. Only for rules without Not and aggregates, and when every constant
+   of the rules is interned (a plan interns a head's text at its first use). *)
+
+let par_min = ref 20_000  (* a round of at least this many facts runs on several domains *)
+
+let [@inline never] worker_ctx c =
+  { c with ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; ins_s = Array.make c.prog.nstrata None;
+           xplans = Hashtbl.create 8; next = ints 16 0; spare = ints 16 0; nn = 0; per_rule = Array.make (Array.length c.prog.rules) 0;
+           buf_a = buf_create 16; buf_b = buf_create 16; seen = iset_create (); seen2 = iset_create (); pt = ws_create () }
+
+let par_ok c = !Bulk.domains > 1 && (not c.prog.stratified) && Array.for_all (fun w -> w >= 0) c.cw
+
+exception Too_many
+
+(* [k] morsels, [run w m f]: morsel m derived in context w, each instance to f; their heads made facts of round [r].
+   false: the morsels found more heads than the budget leaves room for (the caller derives alone, which refuses
+   exactly where it must) *)
+let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r =
+  let outs = Array.init k (fun _ -> buf_create 64) and fails = Array.make k None in
+  let left = c.limit - c.derived in
+  let room = if left > max_int / 4 then max_int else (2 * left) + 100_000 in
+  let heads = Atomic.make 0 and found_all = Atomic.make 0 in
+  match
+    Bulk.parallel k (fun m ->
+        let w = worker_ctx c and out = outs.(m) and n = ref 0 and nf = ref 0 in
+        let ws = c.ws and vp = c.vp in
+        let found pl =
+          incr nf;
+          if not pl.hok then raise (Refused (head_refusal w pl));
+          let e = pl.he and p = pl.hp and v = pl.hw in
+          (* a head that is a fact already changes nothing (as emit_fact): only the others are kept *)
+          let x = find ws e p v in
+          if (if x >= 0 then now ws x = 0 else not ((Bytes.length vp = 0 || (p < Bytes.length vp && Bytes.unsafe_get vp p <> '\000')) && S.mem w.v e p v))
+          then begin
+            buf_push out e; buf_push out p; buf_push out v; buf_push out pl.ri;
+            incr n;
+            if !n land 1023 = 0 && Atomic.fetch_and_add heads 1024 + 1024 > room then raise Too_many
+          end
+        in
+        (try run w m found with Refused msg -> fails.(m) <- Some msg);
+        ignore (Atomic.fetch_and_add found_all !nf))
+  with
+  | () ->
+    derivations := !derivations + Atomic.get found_all;
+    for m = 0 to k - 1 do
+      let out = outs.(m) in
+      let i = ref 0 in
+      let ws = c.ws in
+      while !i < out.bn do
+        let ri = buf_get out (!i + 3) and e = buf_get out !i and p = buf_get out (!i + 1) and w = buf_get out (!i + 2) in
+        let x = find ws e p w in
+        if x >= 0 then begin
+          if now ws x = 0 then (check_frozen c p w; set_now ws x 2; set_round ws x r; set_rule ws x ri; count_derived c ri; push_next c x)
+        end
+        else begin
+          (* not in the view: its morsel looked *)
+          if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c ri) e;
+          check_frozen c p w;
+          let x = add ws e p w 0 in
+          set_now ws x 2; set_round ws x r; set_rule ws x ri; count_derived c ri; push_next c x
+        end;
+        i := !i + 4
+      done;
+      outs.(m) <- buf_create 0;
+      Option.iter (fun msg -> raise (Refused msg)) fails.(m)
+    done;
+    true
+  | exception Too_many -> false
 
 let emit c pl = emit_at c pl (c.round + 1)
 
@@ -2394,11 +2471,26 @@ let saturate ?(s = 0) c (first : ints) nf =
   let cur = ref first and ncur = ref nf and r = ref 0 in
   while !ncur > 0 || c.nn > 0 do
     c.round <- !r;
-    let d = !cur in
-    for i = 0 to !ncur - 1 do
-      let x = A.unsafe_get d i in
-      if now ws x > 0 && round ws x = !r then run_all ins (fe ws x) (fp ws x) (fw ws x)
-    done;
+    let d = !cur and nc = !ncur and rr = !r in
+    let par =
+      nc >= !par_min && par_ok c
+      &&
+      let k = 4 * !Bulk.domains in
+      let ix = if c.prog.nstrata = 1 then c.prog.ix_ins else c.prog.ix_ins_s.(s) in
+      par_phase c k
+        (fun w m found ->
+          let ins = make_disp w ix State found in
+          for i = m * nc / k to ((m + 1) * nc / k) - 1 do
+            let x = A.unsafe_get d i in
+            if now ws x > 0 && round ws x = rr then run_all ins (fe ws x) (fp ws x) (fw ws x)
+          done)
+        (rr + 1)
+    in
+    if not par then
+      for i = 0 to nc - 1 do
+        let x = A.unsafe_get d i in
+        if now ws x > 0 && round ws x = rr then run_all ins (fe ws x) (fp ws x) (fw ws x)
+      done;
     for mi = 0 to nm - 1 do if c.prog.strat.(c.prog.modules.(mi).m_rule) = s then module_round c mi d !ncur !r done;
     (* this round's buffer takes the next round's facts *)
     let nx = c.next and nn = c.nn in
@@ -3023,11 +3115,11 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
           if cands_s <> [] || not (Queue.is_empty c.bfqs.(s)) then backward_forward c s cands_s;
           (* an added rule: the facts it gives over the state, at round 1; the module of an added closure, from
              scratch *)
-          List.iter
-            (fun ri ->
-              if not (prog.never.(ri) || prog.in_module.(ri) || prog.aggs.(ri) <> None) && prog.strat.(ri) = s then
-                instances c ri (fun pl -> emit_at c pl 1))
-            added_idx;
+          let adding = List.filter (fun ri -> not (prog.never.(ri) || prog.in_module.(ri) || prog.aggs.(ri) <> None) && prog.strat.(ri) = s) added_idx in
+          let adding = Array.of_list adding in
+          if not (Array.length adding > 1 && S.facts v0 >= !par_min && par_ok c
+                  && par_phase c (Array.length adding) (fun w m found -> instances w adding.(m) found) 1)
+          then Array.iter (fun ri -> instances c ri (fun pl -> emit_at c pl 1)) adding;
           Array.iteri
             (fun mi (m : closure) ->
               if prog.strat.(m.m_rule) = s && (List.mem m.m_rule added_idx || (m.m_base >= 0 && List.mem m.m_base added_idx)) then begin
@@ -3060,7 +3152,7 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
             let a = ints (max 1 n) 0 in
             List.iteri (fun i x -> A.unsafe_set a i x) first;
             saturate ~s c a n
-          end
+          end;
         done;
         c.cur <- -1;
         (* the constraints: an instance that involves a fact this group made present refuses it, or whose Not the
@@ -3122,12 +3214,13 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
           todo := (e, p, w, 2) :: !todo
         done;
         let derived = Array.of_list (List.rev !out) in
-        let xs = Array.of_list !todo in
-        Array.sort (fun (e, p, w, _) (e', p', w', _) -> let c = compare (e : int) e' in if c <> 0 then c else let c = compare (p : int) p' in if c <> 0 then c else compare (w : int) w') xs;
-        let m = Array.length xs in
+        let m = List.length !todo in
+        let es = Array.make m 0 and ps = Array.make m 0 and wv = Array.make m 0 and ss = Array.make m 0 in
+        List.iteri (fun i (e, p, w, st) -> es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- st) !todo;
+        let o = Store.fact_order es ps wv m in
         let v' =
-          S.set_sorted c.v (Array.map (fun (e, _, _, _) -> e) xs) (Array.map (fun (_, p, _, _) -> p) xs)
-            (Array.map (fun (_, _, w, _) -> w) xs) (Array.map (fun (_, _, _, s) -> s) xs) m
+          S.set_sorted c.v (Array.map (fun i -> es.(i)) o) (Array.map (fun i -> ps.(i)) o) (Array.map (fun i -> wv.(i)) o)
+            (Array.map (fun i -> ss.(i)) o) m
         in
         (* the schema's own rules over derived facts: one value for a one-valued property; a unique value once (a
            module's facts are of a property that takes many, none unique) *)

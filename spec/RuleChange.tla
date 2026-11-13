@@ -2,6 +2,8 @@
 (* The background path of a change of the rules (docs/book/rules.md, "Changes of the rules"; G19 in
    docs/book/guarantees.md): the change's consequences computed beside the writer, caught up with the groups the
    writer commits meanwhile, and installed as one group. As spec/Merge.tla models a merge.
+   The catch-up takes the logged groups by batches of any size (the code takes all it finds): only the state at the
+   end of a batch is judged by the new rules, since the states between are ordered before the change.
 
    The facts are abstracted to three asserted facts (1, 2, 3) and two derived ones (11, 12). The old rules give 11
    from 1; the new rules give 12 from 2, and hold a constraint: 1 and 2 never both asserted. A view maps each fact to
@@ -14,10 +16,10 @@
    The writer commits data groups (each toggles one asserted fact) under its rules, as frames: a frame is the set of
    the facts it changes with their state after (replay applies states, never a rule). Sync makes every frame written
    durable and publishes the working view. Start begins C: the background builds V = Mat(new, S_k + 3) from the
-   working view of the moment; CatchUp applies a logged group to V: its asserted changes, the derived ones found again
-   under the new rules, and marks C bad if the new state breaks the new constraint or the group touches fact 3 (C's
-   asserted part must commute with the log); Ready when fewer than Behind groups are left; Install (the writer, in one
-   step) applies the rest the same way, checks the Expect against its own state, and either answers Conflict (C ends,
+   working view of the moment; CatchUp applies a batch of logged groups to V: their net asserted changes, the derived
+   facts found again under the new rules, and marks C bad if the state at the end breaks the new constraint or a group
+   touches fact 3 (C's asserted part must commute with the log); Ready when fewer than Behind groups are left; Install
+   (the writer, in one step) applies the rest as one batch, checks the Expect against its own state, and either answers Conflict (C ends,
    nothing written) or writes C's frame, the difference between its working view and V, and adopts V. Crash keeps a
    prefix of the frames from the durable ones on (a kill or a power loss); Recover replays it.
 
@@ -73,13 +75,18 @@ ReplayFrom(v, j, k) == IF j > k THEN v ELSE ReplayFrom(Apply(v, jn[j].fr), j + 1
 Replay(k) == ReplayFrom(Empty, 1, k)
 RulesAt(k) == IF k = 0 THEN "old" ELSE jn[k].r
 
-(* a logged group applied to the background's view: its asserted changes, then its derived ones *)
-NewAsserted(v, fr) == (AssertedOf(v) \ {f \in Asserted : <<f, 0>> \in fr}) \cup {f \in Asserted : <<f, 1>> \in fr}
-Step(v, fr) == IF Rederive THEN Mat("new", NewAsserted(v, fr)) ELSE Apply(v, fr)
-Bad(v, fr) == \/ CheckAtCatchUp /\ Broken("new", NewAsserted(v, fr))
-              \/ CheckOverlap /\ \E s \in {0, 1, 2} : <<Own, s>> \in fr
-RECURSIVE Steps(_, _, _)
-Steps(v, b, fs) == IF fs = << >> THEN <<v, b>> ELSE Steps(Step(v, Head(fs).fr), b \/ Bad(v, Head(fs).fr), Tail(fs))
+(* logged groups applied to the background's view at once (a batch): their net asserted changes, the derived facts
+   found again under the new rules; the state at the end of the batch judged by the new rules *)
+NewA(S, fr) == (S \ {f \in Asserted : <<f, 0>> \in fr}) \cup {f \in Asserted : <<f, 1>> \in fr}
+RECURSIVE Net(_, _)
+Net(S, fs) == IF fs = << >> THEN S ELSE Net(NewA(S, Head(fs).fr), Tail(fs))
+RECURSIVE Copy(_, _)
+Copy(v, fs) == IF fs = << >> THEN v ELSE Copy(Apply(v, Head(fs).fr), Tail(fs))
+Touches(fs) == \E i \in 1..Len(fs) : \E s \in {0, 1, 2} : <<Own, s>> \in fs[i].fr
+Batch(v, fs) == LET S == Net(AssertedOf(v), fs)
+                IN << IF Rederive THEN Mat("new", S) ELSE Copy(v, fs),
+                      \/ CheckAtCatchUp /\ fs /= << >> /\ Broken("new", S)
+                      \/ CheckOverlap /\ Touches(fs) >>
 
 Init == /\ work = Empty /\ wr = "old" /\ jn = << >> /\ jd = 0 /\ pub = Empty /\ pr = "old" /\ ng = 0
         /\ crashes = 0 /\ up = TRUE /\ cs = "none" /\ bv = Empty /\ bpos = 0 /\ bad = FALSE /\ eb = FALSE /\ dk = {}
@@ -107,15 +114,17 @@ Start == /\ up /\ cs = "none" /\ wr = "old" /\ cpos = 0
          /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, cpos, acked>>
 
 CatchUp == /\ up /\ cs = "run" /\ bpos < Len(jn)
-           /\ bv' = Step(bv, jn[bpos + 1].fr) /\ bad' = (bad \/ Bad(bv, jn[bpos + 1].fr)) /\ bpos' = bpos + 1
+           /\ \E k \in 1..(Len(jn) - bpos) :
+                LET r == Batch(bv, SubSeq(jn, bpos + 1, bpos + k))
+                IN bv' = r[1] /\ bad' = (bad \/ r[2]) /\ bpos' = bpos + k
            /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, cs, eb, dk, cpos, acked>>
 
 Ready == /\ up /\ cs = "run" /\ Len(jn) - bpos < Behind /\ cs' = "ready"
          /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, bv, bpos, bad, eb, dk, cpos, acked>>
 
 Install == /\ up /\ cs = "ready"
-           /\ LET r == Steps(bv, bad, IF CatchUpAll THEN SubSeq(jn, bpos + 1, Len(jn)) ELSE << >>)
-                  ok == ~r[2] /\ (IF ExpectAtInstall THEN ExpectOK(AssertedOf(work)) ELSE eb)
+           /\ LET r == Batch(bv, IF CatchUpAll THEN SubSeq(jn, bpos + 1, Len(jn)) ELSE << >>)
+                  ok == ~(bad \/ r[2]) /\ (IF ExpectAtInstall THEN ExpectOK(AssertedOf(work)) ELSE eb)
                   fr == IF TrackDiff THEN Diff(work, r[1]) ELSE dk
               IN IF ok
                  THEN /\ work' = r[1] /\ wr' = "new" /\ jn' = Append(jn, [fr |-> fr, r |-> "new"])

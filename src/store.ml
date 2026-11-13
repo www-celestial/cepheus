@@ -1889,6 +1889,20 @@ let[@inline never] set_sorted v (es : int array) (ps : int array) (ws : int arra
     { !v with delta = { de = !de; dav = !dav; dn = !dn; dnet = !dnet } }
   end
 
+(* the order of n facts by (thing, property, value): a permutation of 0 .. n-1, sorted by comparisons of ints (no
+   tuple is built: a large group's derived facts, a change's frame) *)
+let fact_order (es : int array) (ps : int array) (ws : int array) n =
+  let o = Array.init n Fun.id in
+  Array.stable_sort
+    (fun i j ->
+      let a = Array.unsafe_get es i and b = Array.unsafe_get es j in
+      if a <> b then compare (a : int) b
+      else
+        let a = Array.unsafe_get ps i and b = Array.unsafe_get ps j in
+        if a <> b then compare (a : int) b else compare (Array.unsafe_get ws i : int) (Array.unsafe_get ws j))
+    o;
+  o
+
 (* Adds (asserted) or retracts (e p w); the view itself when nothing changes. *)
 let apply v add e p w = set v e p w (if add then 1 else 0)
 

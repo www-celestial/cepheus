@@ -915,6 +915,13 @@ let () =
   section "G8, G17, G19: the same on databases on the disk: every change of the rules on the background path";
   random_sequences ~durable:true ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
   C.check (Atomic.get Engine.changes_done > 0) "the background path installed changes";
+  section "rounds on several domains (from 4 facts a round): every group's view the same as above";
+  Reason.par_min := 4;
+  compare_paths := true;
+  random_sequences ~seeds ~groups:60 ~merges:false ();
+  random_sequences ~seeds ~groups:60 ~merges:true ();
+  Reason.par_min := 20_000;
+  compare_paths := false;
   section "the rules always as written (no unfolding) and closures retracted by B/F: every group's view the same as above";
   Reason.specialise := false;
   Reason.walk_retract := false;

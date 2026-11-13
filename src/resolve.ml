@@ -251,41 +251,57 @@ let replay (v : Store.view) (g : Group.t) =
     g.changes;
   { !v with group = g.n }
 
-(* A change's catch-up (the background path, Engine): group [g], resolved by the writer under the old rules, applied
-   to [v], a view under the new rules: its asserted changes (their kinds found again against [v]), then the new rules'
-   consequences (Reason.run), the derived changes it had under the old rules dropped. [d]: a view of the writer after
-   [g], whose dictionary has every text of [g] (the background interns none of its own). Every check of a group runs
-   again under the new rules (a constraint, one value, a unique value): a failure raises [Fail], and the change ends
-   with Conflict. Returns the view and the changes, with their states before and after in [v]'s lineage. *)
-let catch_up ?limit ?stop (v : Store.view) (d : Store.view) (g : Group.t) =
+(* A change's catch-up (the background path, Engine): the groups [gs], resolved by the writer under the old rules, oldest
+   first, applied to [v], a view under the new rules, at once: their net asserted changes (a fact's asserted state
+   before the first of them and after the last; their kinds found again against [v]), then the new rules'
+   consequences (Reason.run), the derived changes they had under the old rules dropped. Only the state after the last
+   group matters to the change (its derived facts are a function of the asserted ones: the least model), and every
+   check runs on that state (a constraint, one value, a unique value: a failure raises [Fail], and the change ends with
+   Conflict); the states between, under the old rules, are not the new rules' to judge. [d]: a view of the writer
+   after the groups, whose dictionary has every text of theirs (the background interns none of its own). *)
+let catch_up ?limit ?stop (v : Store.view) (d : Store.view) (gs : Group.t list) =
   try
-    let v0 = { v with dict = d.dict; next_e = max v.next_e (g.first_new + g.count_new) } in
+    let next = List.fold_left (fun n (g : Group.t) -> max n (g.first_new + g.count_new)) v.next_e gs in
+    let v0 = { v with dict = d.dict; next_e = next } in
+    (* each fact's asserted state before the first change and after the last, in the order first met *)
+    let net = Hashtbl.create 256 and order = ref [] in
+    List.iter
+      (fun (g : Group.t) ->
+        Array.iter
+          (fun (c : Group.change) ->
+            match c.kind with
+            | Derived | Underived -> ()
+            | k -> (
+              match Store.word v0 c.v with
+              | None -> fail (Conflict "a text of a group written meanwhile is not in the change's view")
+              | Some w ->
+                let key = (c.e, c.p, w) and after = Group.after k = 1 in
+                match Hashtbl.find_opt net key with
+                | Some (b, _, x) -> Hashtbl.replace net key (b, after, x)
+                | None ->
+                  let before = match k with Retracted | Now_derived -> true | _ -> false in
+                  Hashtbl.replace net key (before, after, c.v);
+                  order := key :: !order))
+          g.changes)
+      gs;
     let v = ref v0 and out = ref [] and outw = ref [] in
-    Array.iter
-      (fun (c : Group.change) ->
-        match c.kind with
-        | Derived | Underived -> ()
-        | k -> (
-          let add = Group.after k = 1 in
-          match Store.word !v c.v with
-          | None -> fail (Conflict "a text of a group written meanwhile is not in the change's view")
-          | Some w ->
-            let v1, prev = Store.swap !v c.e c.p w (if add then 1 else 0) in
-            let kind : Group.kind option =
-              match add, prev with
-              | true, 0 -> Some Added
-              | true, 2 -> Some Now_asserted
-              | false, 1 -> Some Retracted
-              | true, _ | false, 0 -> None
-              | false, _ -> fail (Conflict "a fact retracted meanwhile is not asserted in the change's view")
-            in
-            match kind with
-            | None -> v := v1
-            | Some kind ->
-              v := if Schema.is_system c.p && Schema.is_prop_space c.e then refresh v1 c.e else v1;
-              out := { c with kind } :: !out;
-              outw := w :: !outw))
-      g.changes;
+    List.iter
+      (fun ((e, p, w) as key) ->
+        let before, after, x = Hashtbl.find net key in
+        if before <> after then begin
+          let v1, prev = Store.swap !v e p w (if after then 1 else 0) in
+          let kind : Group.kind =
+            match after, prev with
+            | true, 0 -> Added
+            | true, 2 -> Now_asserted
+            | false, 1 -> Retracted
+            | _ -> fail (Conflict "a fact the groups written meanwhile assert or retract has another state in the change's view")
+          in
+          v := if Schema.is_system p && Schema.is_prop_space e then refresh v1 e else v1;
+          out := { Group.kind; e; p; v = x } :: !out;
+          outw := w :: !outw
+        end)
+      (List.rev !order);
     let changes = Array.of_list (List.rev !out) in
     let v, changes =
       match Reason.run ?limit ?stop ~v0 !v changes (Array.of_list (List.rev !outw)) with
@@ -307,7 +323,8 @@ let catch_up ?limit ?stop (v : Store.view) (d : Store.view) (g : Group.t) =
           | _ -> ())
         | _ -> ())
       changes;
-    Ok ({ v with group = g.n }, changes)
+    let last = List.fold_left (fun n (g : Group.t) -> max n g.n) v.group gs in
+    Ok ({ v with group = last }, changes)
   with Fail e -> Error e
 
 let error_message = function

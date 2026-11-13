@@ -617,10 +617,13 @@ let start_merge ?(wake = ignore) t (from : Store.view) =
    interns a text and its view's text numbers are the writer's: the view can be adopted. *)
 
 let change_behind = 64
+let change_pass = 0.02  (* seconds: a catch-up pass this short makes the background ready *)
+let change_backlog = 65_536  (* groups logged and not yet taken by the background: past it the writer waits for it *)
 let change_pause = ref 0.  (* seconds the background waits after its build, before its catch-up: the tests' interleavings *)
 let changes_done = Atomic.make 0  (* installed changes, for the tests and benchmarks *)
 let change_us = Histogram.create ()  (* a change in the background: from its start to the catch-up *)
 let install_us = Histogram.create ()  (* the writer's part at its install: the last groups, the frame *)
+let build_us = Histogram.create ()  (* a change's build alone: its consequences on the state it started from *)
 
 (* a fact's states in the writer's lineage and in the change's view, where they differ: (thing, property, word) ->
    4 x writer's + change's (0 absent, 1 asserted, 2 only derived) *)
@@ -643,6 +646,7 @@ type change = {
   cm : Mutex.t;
   clog : (Group.t list * Store.view) Queue.t;  (* the batches prepared since the fork and not yet applied: their groups,
                                                    oldest first, and the writer's view after them *)
+  mutable backlog : int;  (* the groups in [clog] *)
   out : outcome option Atomic.t;
   mutable cdom : unit Domain.t option;
 }
@@ -684,29 +688,38 @@ let take_log ch =
   Mutex.protect ch.cm (fun () ->
       let l = List.of_seq (Queue.to_seq ch.clog) in
       Queue.clear ch.clog;
-      l, List.fold_left (fun n (gs, _) -> n + List.length gs) 0 l)
+      let k = ch.backlog in
+      ch.backlog <- 0;
+      l, k)
 
-(* one logged group applied to the change's view; a group that touches a fact the change asserts, or that the new
-   rules refuse, ends the change with Conflict *)
-let step ch b (bv : Store.view) (dv : Store.view) (g : Group.t) =
-  Array.iter
-    (fun (c : Group.change) ->
-      match c.kind with
-      | Derived | Underived -> ()
-      | _ -> (
-        match Store.word dv c.v with
-        | Some x when Hashtbl.mem b.own_keys (c.e, c.p, x) ->
-          raise (Interfered (Conflict (Printf.sprintf "group %d, written meanwhile, changed [#%d %d %s], which the change writes" g.n c.e c.p (Value.to_string c.v))))
-        | _ -> ()))
-    g.changes;
-  let w = fact_states dv g.changes in
-  match Resolve.catch_up ~limit:b.limit ~stop:ch.stop bv dv g with
-  | Error e -> raise (Interfered (of_resolve e))
-  | Ok (bv', cs) ->
-    track b.diff w (fact_states bv' cs);
-    if Hashtbl.length b.diff > b.limit + Array.length b.own then
-      raise (Interfered (Conflict (Printf.sprintf "the change derived more than %d facts with the groups written meanwhile" b.limit)));
-    bv'
+(* the logged batches applied to the change's view at once (Resolve.catch_up); a group that touches a fact the change
+   asserts, or a state the new rules refuse, ends the change with Conflict *)
+let step ch b (bv : Store.view) (batches : (Group.t list * Store.view) list) =
+  match List.rev batches with
+  | [] -> bv
+  | (_, dv) :: _ ->
+    let gs = List.concat_map fst batches in
+    List.iter
+      (fun (g : Group.t) ->
+        Array.iter
+          (fun (c : Group.change) ->
+            match c.kind with
+            | Derived | Underived -> ()
+            | _ -> (
+              match Store.word dv c.v with
+              | Some x when Hashtbl.mem b.own_keys (c.e, c.p, x) ->
+                raise (Interfered (Conflict (Printf.sprintf "group %d, written meanwhile, changed [#%d %d %s], which the change writes" g.n c.e c.p (Value.to_string c.v))))
+              | _ -> ()))
+          g.changes)
+      gs;
+    let w = fact_states dv (Array.concat (List.map (fun (g : Group.t) -> g.changes) gs)) in
+    match Resolve.catch_up ~limit:b.limit ~stop:ch.stop bv dv gs with
+    | Error e -> raise (Interfered (of_resolve e))
+    | Ok (bv', cs) ->
+      track b.diff w (fact_states bv' cs);
+      if Hashtbl.length b.diff > b.limit + Array.length b.own then
+        raise (Interfered (Conflict (Printf.sprintf "the change derived more than %d facts with the groups written meanwhile" b.limit)));
+      bv'
 
 (* the background: the build, then the catch-up until fewer than [change_behind] groups are left *)
 let change_run ~wake ch (w0 : Store.view) =
@@ -722,6 +735,7 @@ let change_run ~wake ch (w0 : Store.view) =
      match Resolve.resolve (Store.fork w0) ~n:(w0.group + 1) ~time:0 ~by ~why ~reason ops with
      | Error e -> ended (of_resolve e)
      | Ok (bv, g, _) ->
+       Histogram.record build_us (Journal.clock () - t0);
        let diff : diff = Hashtbl.create (Array.length g.changes + 16) in
        track diff (Hashtbl.create 1) (fact_states bv g.changes);
        let own = Array.of_list (List.filter (fun (c : Group.change) -> c.kind <> Derived && c.kind <> Underived) (Array.to_list g.changes)) in
@@ -733,9 +747,11 @@ let change_run ~wake ch (w0 : Store.view) =
        while !go do
          if Atomic.get ch.stop then raise (Interfered Closed);
          let batches, k = take_log ch in
-         let bv = List.fold_left (fun bv (gs, dv) -> List.fold_left (fun bv g -> step ch !b bv dv g) bv gs) !b.bv batches in
-         b := { !b with bv };
-         if k < change_behind then go := false
+         let tq = Unix.gettimeofday () in
+         b := { !b with bv = step ch !b !b.bv batches };
+         let dt = Unix.gettimeofday () -. tq in
+         (* ready: few groups left, or a pass short enough that the writer's last one stays short *)
+         if k < change_behind || dt < change_pass then go := false
        done;
        Histogram.record change_us (Journal.clock () - t0);
        Atomic.set ch.out (Some (Built !b))
@@ -878,7 +894,7 @@ let hand l b reqs =
   Condition.broadcast l.c_sync;
   Mutex.unlock l.sm;
   match l.change with
-  | Some ch when b.count > 0 -> Mutex.protect ch.cm (fun () -> Queue.push (List.rev b.groups, b.after) ch.clog)
+  | Some ch when b.count > 0 -> Mutex.protect ch.cm (fun () -> Queue.push (List.rev b.groups, b.after) ch.clog; ch.backlog <- ch.backlog + b.count)
   | _ -> ()
 
 (* The change's install, by the writer: the groups logged since the background was ready, the asserted part again
@@ -892,7 +908,7 @@ let install_change l ch (b : built) =
   | None -> (
     match
       let batches, _ = take_log ch in
-      let bv = List.fold_left (fun bv (gs, dv) -> List.fold_left (fun bv g -> step ch b bv dv g) bv gs) b.bv batches in
+      let bv = step ch b b.bv batches in
       let ops, by, why = ch.cops in
       let n = t.working.group + 1 in
       let reason ~v0:_ (v : Store.view) (asserted : Group.change array) _ =
@@ -927,17 +943,19 @@ let install_change l ch (b : built) =
               | None -> None)
             (Array.to_list b.own)
         in
-        let derived = ref [] and nd = ref 0 in
+        let nd = Hashtbl.fold (fun _ st n -> if st lsr 2 <> 1 && st land 3 <> 1 then n + 1 else n) b.diff 0 in
+        if nd > b.limit then raise (Interfered (Invalid (Printf.sprintf "a change of the rules or the ontology derived more than %d facts" b.limit)));
+        let de = Array.make nd 0 and dp = Array.make nd 0 and dw = Array.make nd 0 and ds = Array.make nd 0 in
+        let i = ref 0 in
         Hashtbl.iter
-          (fun ((e, p, _) as k) st ->
-            if st lsr 2 <> 1 && st land 3 <> 1 then (incr nd; derived := (k, st) :: !derived)
+          (fun ((e, p, w) as k) st ->
+            if st lsr 2 <> 1 && st land 3 <> 1 then (de.(!i) <- e; dp.(!i) <- p; dw.(!i) <- w; ds.(!i) <- st; incr i)
             else if not (Hashtbl.mem b.own_keys k) then
               raise (Interfered (Conflict (Printf.sprintf "the change's view differs on an asserted fact [#%d %d]" e p))))
           b.diff;
-        if !nd > b.limit then raise (Interfered (Invalid (Printf.sprintf "a change of the rules or the ontology derived more than %d facts" b.limit)));
-        let derived = List.sort compare !derived in
-        let frame = List.map (fun ((e, p, w), st) -> { Group.kind = kind st; e; p; v = value p w }) derived in
-        va, Array.of_list (first @ frame)
+        (* in the table's order: replay applies states, and the order of facts of one group does not matter to it *)
+        let frame = Array.init nd (fun j -> { Group.kind = kind ds.(j); e = de.(j); p = dp.(j); v = value dp.(j) dw.(j) }) in
+        va, Array.append (Array.of_list first) frame
       in
       match Resolve.resolve t.working ~n ~time:(t.disk.now ()) ~by ~why ~reason ops with
       | Error e -> Error (of_resolve e)
@@ -987,7 +1005,7 @@ let rec poll_change l =
           List.fold_left (fun v (x : Value.t) -> match x with Text _ | Float _ -> fst (Store.word_intern v x) | _ -> v) l.e.working texts
         in
         l.e.working <- w;
-        let ch = { creq = r; cops = r.w; stop = Atomic.make false; cm = Mutex.create (); clog = Queue.create (); out = Atomic.make None; cdom = None } in
+        let ch = { creq = r; cops = r.w; stop = Atomic.make false; cm = Mutex.create (); clog = Queue.create (); backlog = 0; out = Atomic.make None; cdom = None } in
         ch.cdom <- Some (Domain.spawn (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) ch w));
         l.change <- Some ch
       end
@@ -1049,6 +1067,8 @@ let writer l () =
          | None ->
            if needs_compaction l.e.working && l.e.working.delta.dn > l.retry && l.e.stopped = None && l.change = None && l.waiting = [] then
              l.merging <- Some (start_merge ~wake:(fun () -> ignore (submit l Wake)) l.e l.e.working));
+        (* a change far behind: the writer waits for it, so that its log and the deltas stay bounded *)
+        (match l.change with Some ch when Mutex.protect ch.cm (fun () -> ch.backlog) > change_backlog -> finish_change l | _ -> ());
         poll_change l;
         handle (List.map (fun r -> Write r) left @ rest)
       | Snapshot r :: rest ->
