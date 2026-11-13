@@ -353,7 +353,30 @@ let () =
   in
   let a = run true and b = run false in
   Reason.walk_retract := true;
-  C.check (List.for_all2 F.equal a b) "walks and B/F: the same view after every group"
+  C.check (List.for_all2 F.equal a b) "walks and B/F: the same view after every group";
+  (* a retraction whose losses pass the budget is refused, whole, by walks as by B/F *)
+  List.iter
+    (fun walk ->
+      Reason.walk_retract := walk;
+      let db = fork empty in
+      let _, parent, _, _, status, _ = schema db in
+      ignore (ok (define db [ { name = "trp"; vars = 3; where = [ { e = x; p = parent; v = y }; { e = y; p = parent; v = z } ]; ranges = []; head = Give { e = x; p = parent; v = z } } ]));
+      let r = ok (write db (List.init 100 (fun i -> Add (-(i + 1), status, Text "s")))) in
+      let n = Array.init 100 (fun i -> thing r (-(i + 1))) in
+      ignore (ok (write db (List.init 99 (fun i -> Add (n.(i + 1), parent, Link n.(i))))));
+      let before = user_facts (view db) in
+      let b0 = !(fst rule_budget) and b1 = !(snd rule_budget) in
+      fst rule_budget := 1000;
+      snd rule_budget := 1;
+      (* the middle edge: 2,500 facts lost *)
+      (match write db [ Retract (n.(50), parent, Link n.(49)) ] with
+       | Error (Invalid m) -> C.check (String.length m > 5 && String.sub m 0 5 = "rule ") "%s: a retraction past the budget refused (%s)" (if walk then "walks" else "B/F") m
+       | _ -> C.fail "%s: a retraction of 2,500 facts must pass a budget of 1,001" (if walk then "walks" else "B/F"));
+      fst rule_budget := b0;
+      snd rule_budget := b1;
+      C.check (F.equal before (user_facts (view db))) "%s: all or nothing" (if walk then "walks" else "B/F"))
+    [ true; false ];
+  Reason.walk_retract := true
 
 (* ---- G17, G18, G20: random sequences against the least model from scratch ---- *)
 

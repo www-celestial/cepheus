@@ -547,6 +547,20 @@ Commands: `reason.exe closure hierarchy|deep|dag|chain trp|linear DIR`, `reason.
   11 times faster. RDFox has had such modules since 2019 [Hu 2019]: a tie in method. Soufflé, which evaluates the
   rule, "runs out of memory when evaluating TC on G80K" in Fan et al.'s tests [Fan 2019].
 
+**One edge retracted** (the same binary, by walks against B/F through the rules' plans, `Reason.walk_retract`; 21
+rounds alternated in one hold of the lock, the closure loaded first in each process; medians, $[x(1), x(21)]$, the
+paired ratio's median with its 95 % interval by order statistics $[x(6), x(16)]$; the same closure after on both sides):
+
+| prp-trp | facts lost | by walks | by B/F | walks / B/F |
+|---|---:|---:|---:|---:|
+| hierarchy, the edge of a node of depth 2 (its subtree 6,250 things) | 36,160 | **0.102 s** [0.095, 0.187] | 0.161 s [0.146, 0.255] | 0.64 [0.59, 0.73] |
+| random DAG, the edge 300 → 134 | 102 | **0.090 s** [0.078, 0.357] | 1.766 s [1.448, 2.410] | 0.050 [0.045, 0.055] |
+| chain of 500, the middle edge | 62,500 | **0.163 s** [0.151, 0.254] | 16.11 s [15.03, 20.29] | 0.0099 [0.0096, 0.0105] |
+
+The walks' time is mostly the facts lost put into the view (about 2.5 µs a fact in the hierarchy's case); B/F checks
+each lost fact through the rule's instances (on the chain, every middle point of every pair), which is where 100× go.
+An edge with another way (most edges of the DAG) changes nothing and costs a lookup per edge out of its start.
+
 **LUBM-shaped data, the W3C's form against rules written one an axiom** (ten universities; both on this binary; the
 same 532,205 derived facts of the data):
 

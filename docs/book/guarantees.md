@@ -329,6 +329,19 @@ shared by 20,000 invoices, a hot tag in the delta, a range of 10 scores among 20
 And by `test/unit.ml`: 300 random databases and 15 random questions each (up to 3 patterns, constants, links,
 ranges) compared with a naive evaluator over all facts, on a base with a delta and on a compacted base.
 
+*With Not, Or and In* ([Cepheus from Cesia](cesia.md#not-or-and-in)) the promise is over the question's own variables:
+the bindings of them that make its patterns and conditions hold, an alternative of each `Or` hold for some value of
+its own variables, and no value of each `Not`'s own make its items hold, each once. `In` restricts candidates, `Not`
+only removes bindings, and an `Or` is a disjoint union (alternative j with the alternatives before it as `Not`s: a
+binding holds for a least j, is an answer of question j and of no other), so each comes once; an alternative with
+variables of its own keeps the bindings it gave. With Sort, Limit and After, the rows are the select's in the order,
+cut as the chapter says. *Tested by* `test/questions.ml`: random states (every type, floats with nan and -0, a rule's
+derived facts, retractions, runs merged at random) and random questions with patterns, ranges, `Not`, `Or`, `And` and
+`In` and a random select, Sort, Limit and After, answered by a brute-force oracle over every fact (the bindings, the
+groups, the order value by value, the cursor, the ties), and by the engine on the heap path, the index path and its own
+choice, before and after a trip through the wire: the same rows, in the same order; and live questions with `Not`,
+`Or` and `In` checked against the oracle after every frame.
+
 ## G12 Merges are atomic
 
 *Promise.* After a crash at any point of a merge (F1, F2, F4), the database opens on the runs before it or on the
@@ -464,7 +477,10 @@ them, and its own members when it holds a cycle), and makes every pair not prese
 the group holds the closure (G17 for the group before, by induction), so a new edge $(a, b)$ adds exactly
 $(\{a\} \cup \mathrm{pred}(a)) \times (\{b\} \cup \mathrm{succ}(b))$ (for the linear pair: the things that reach $a$
 through $E$, and for a new fact $(c, d)$ of $B$, those that reach $c$, times $d$), each new fact in the next round,
-where the other rules see it. Retraction is B/F with the two rules' ordinary plans, exact by (2).
+where the other rules see it. Retraction by walks: with no other rule giving $T$ or $E$, the edges are the facts
+the group leaves asserted, so a source's new targets over the edges left are its targets in the least model; a source
+that reaches no retracted edge keeps them (its paths are untouched), so only the sources computed can lose facts, and
+they lose exactly those outside their new targets. Otherwise B/F with the two rules' plans, exact by (2).
 (7) *Variable properties and unfolding.* An unfolded rule is the generic one with the variables of its small atoms
 replaced by the words of one of their joint bindings in the view (ranges kept, instances that cannot exist dropped):
 over any state whose small relations hold exactly those facts, the instances of the unfolded rules are the generic
@@ -480,7 +496,9 @@ retractions of asserted, derived and both, the view equal to the least model of 
 scratch by naive evaluation with the checker's own evaluator, `Check.least`, and its asserted facts equal to the
 model's; among the rules, transitive closures of both shapes and rules over a variable property bound by a small
 relation, which the engine unfolds; and the plain sequences again with unfolding off, every group's view equal to the
-unfolded run's); the simulation (three rules from each seed's third group: the published,
+unfolded run's, and with closures retracted by B/F instead of walks; the named case "a closure's retractions decided by
+walks": 120 groups of additions and retractions over both shapes and a rule reading both, the least model after each,
+and the same views as B/F's); the simulation (three rules from each seed's third group: the published,
 recovered and fork views equal to the least model, after crashes in every disk call, power losses, damaged files,
 merges begun ahead); `test/crash.ml` (a rule marks each client's thing; after each `kill -9`, every confirmed thing
 has its mark, the loader's none).
@@ -555,7 +573,13 @@ random rules, facts and tokens, every token's reads against the oracle's own rec
 answer again), the rows the program holds, the change applied, are exactly `Find`'s answer at that message's group, a
 durable group (G1: no crash can take it back). The groups of a watch's messages only grow, and every group that
 changed the rows between two messages is in the second one's change: no change is lost, none comes twice, whatever
-breaks in between (the connection, the server by `kill -9`, the program's reading).
+breaks in between (the connection, the server by `kill -9`, the program's reading). A watch of a question with `Not`, `Or`, `In` or
+`Prefix` keeps the promise by its keys: a binding whose membership a frame changes agrees with one of the frame's facts
+at a pattern of the question (a binding that agrees with none reads no changed fact), so the bindings with the values
+those facts give (or, for a pattern whose variables are all a `Not`'s or an alternative's own, the values its other
+items reach, before and after the frame) are answered again before and after, and the change is their difference;
+`test/questions.ml` checks its rows against the oracle after every frame, and a restricted token's against the
+oracle over the facts it may read.
 
 *Conditions.* The question is a conjunctive query (`Find`'s patterns and ranges), with `Give` or aggregates. A program
 that reads slower than the changes come gets the answer again rather than every change (it then holds `Find`'s rows at

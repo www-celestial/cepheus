@@ -178,8 +178,14 @@ measure); the linear rule once for every edge out of $x$ on a path to $z$. A **c
   fact of $T$ given another way (asserted, or by another rule) reaches back along $E$ the same way.
 - The module's facts join the next round of semi-naive evaluation like any derived fact, so the other rules see them;
   when nothing else reads $T$ or gives $T$ or $E$, a load's closure goes straight to the group's output.
-- **Retraction** stays B/F's, with the two rules' ordinary plans: correct (B/F is correct for any Datalog program),
-  not yet with the module's walks (the design's section 5.7; [what is not here yet](#what-is-not-here-yet)).
+- **Retraction by walks**, when no other rule gives $T$ or $E$ (so the edges are exactly the facts the group leaves
+  asserted: prp-trp's $T$, or $E$): the sources whose targets may shrink are the retracted edges' starts and what
+  reaches them; their new targets are computed as from scratch, over their strong components, their successors first,
+  a thing that reaches no retracted edge keeping its targets whole (they cannot change); what a source held beyond its
+  new targets goes, exactly the facts left without a path (Hu, Motik, Horrocks [Hu 2022]: small deletions in 1 s with
+  modules against 585 s by B/F). The losses reach the other rules as B/F's do, and every loss counts against the
+  budget. Otherwise (another rule gives $T$ or $E$) B/F decides, through the two rules' plans: exact for any Datalog
+  program, slower on deep closures.
 
 A property is closed by the module when its rules have exactly one of these shapes (distinct variables, no
 constant, no range), it links things to things, takes many values and none is unique. Another rule on the same
@@ -479,9 +485,6 @@ Each was weighed against the others in the design; the measurements are the desi
 
 The design's plan has six steps; this version has the first two.
 
-- **Retraction by the closure module's walks** (the design's section 5.7: the sources that reach a removed edge, each
-  walked again; Hu et al. [Hu 2022]: small deletions in 1 s against 585 s): B/F does it now, exactly, at a cost in
-  proportion to the facts it checks and their derivations.
 - **Step 3**: large derivations sorted and parallel, on several domains. Until then a small group whose consequences
   are large (a graph of 15,000 edges whose closure has 1.3 million facts) puts them into the view's delta one by one
   in sorted batches, about a microsecond a fact; a group of 20,000 facts or more takes the large groups' path.
