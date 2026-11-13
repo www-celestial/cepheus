@@ -64,6 +64,7 @@ type base = {
   o_tord : int;  (* (np + 1) u64: each text property's first entry; then u32 text ids, each property's in byte order *)
   len : int;  (* the end of the part's sections *)
   d0 : int;  (* every thing from d0 to ne - 1 is held: its slot is r0 + (e - d0), with no rank to read *)
+  e_lo : int;  (* no thing below e_lo is held: a run of a load's new things says no for the others without a read *)
   r0 : int;
   cols : int array;  (* the columns' entries (8 ints a property, as o_cp holds them), read once *)
 }
@@ -153,7 +154,7 @@ let layout ?(pg = Pages.empty) ~at ~n ~ne ~k ~k_cap ~np ~ns ~sblob ~hbits ~vb_ca
   let o_tord = sec r.tord in
   { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
     o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb;
-    o_tord; len = !off; d0 = ne; r0 = k; cols = [||] }
+    o_tord; len = !off; d0 = ne; r0 = k; e_lo = 0; cols = [||] }
 
 (* the offsets of a part, as a run's header lists them, and back *)
 let offsets b =
@@ -165,7 +166,7 @@ let of_offsets ~pg ~n ~ne ~k ~np ~ns ~sblob ~hbits = function
       o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb; o_tord; len ] ->
     { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
       o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb;
-      o_tord; len; d0 = ne; r0 = k; cols = [||] }
+      o_tord; len; d0 = ne; r0 = k; e_lo = 0; cols = [||] }
   | _ -> invalid_arg "Store.of_offsets"
 
 let noffsets = 24
@@ -296,12 +297,12 @@ let[@inline] rank w e =
 
 let[@inline] slot b e =
   if e >= b.d0 then (if e < b.ne then b.r0 + (e - b.d0) else -1)
-  else if e < 0 then -1
+  else if e < b.e_lo then -1
   else rank (i64 b (b.o_erank + ((e lsr 5) lsl 3))) e
 
 let[@inline] cslot b e =
   if e >= b.d0 then (if e < b.ne then b.r0 + (e - b.d0) else -1)
-  else if e < 0 then -1
+  else if e < b.e_lo then -1
   else rank (ci64 b (b.o_erank + ((e lsr 5) lsl 3))) e
 
 (* d0 and r0 of a part, from its rank table: the longest run of things held up to the end (a part made by a load or a
@@ -326,7 +327,11 @@ let dense b =
       end
     done;
     let r0 = if !d0 >= b.ne then b.k else rank (word (!d0 lsr 5)) !d0 in
-    { b with d0 = !d0; r0 }
+    (* the first thing held: the rank words below it are empty *)
+    let j = ref 0 and last = (b.ne - 1) lsr 5 in
+    while !j <= last && word !j land 0xFFFFFFFF = 0 do incr j done;
+    let e_lo = if !j > last then b.ne else (!j lsl 5) + (let bits = word !j land 0xFFFFFFFF in let i = ref 0 in while (bits lsr !i) land 1 = 0 do incr i done; !i) in
+    { b with d0 = !d0; r0; e_lo = min e_lo !d0 }
   end
 
 (* a part as it is read: d0 and r0, and its columns' entries in memory (np 64-byte entries: a few KB) *)
@@ -1576,9 +1581,17 @@ let count_values v e p =
 let has_value v e p =
   if Array.length v.runs = 1 && not (is_touched v e) then base_has_p v.runs.(0).a e p else count_values v e p > 0
 
-(* the value of (e, p) when e has exactly one in a view of one run that has no change of e: 1 and the value in
-   cell.(0); 0: none; 2: otherwise (several values, or several runs, or a delta: read them by [iter_values]) *)
-let value1 v e p cell = if Array.length v.runs = 1 && not (is_touched v e) then base_value1 v.runs.(0).a e p cell else 2
+(* the value of (e, p) when e has exactly one, in a view with no change of e whose runs hold facts of e for p in one
+   run at most (as [iter_values], a newer run with other facts of e shadows none of these): 1 and the value in
+   cell.(0); 0: none; 2: otherwise (several values, or several runs holding (e, p), or a delta: read them by
+   [iter_values]). The runs of a load's new things hold disjoint things: one run holds each *)
+let value1 v e p cell =
+  if is_touched v e then 2
+  else if Array.length v.runs = 1 then base_value1 v.runs.(0).a e p cell
+  else begin
+    let h = holders_p v e p in
+    if h = 0 then 0 else (let one = single h in if one >= 0 then base_value1 v.runs.(one).a e p cell else 2)
+  end
 
 (* A slice read straight into a buffer, for the leapfrog: in a view of one run with no change of e (or of p), the
    rows of (e, p) or (p, w): their count, their first row in cell.(1); -1 otherwise (count and read them as any) *)
