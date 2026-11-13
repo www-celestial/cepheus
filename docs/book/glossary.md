@@ -182,6 +182,9 @@ the usual one, both are given.
   [Cesia](cesia.md#the-package)
 - **entity–attribute–value** (EAV) — a model where data is a set of (entity, attribute, value) statements instead of
   tables; Cepheus' (thing, property, value). [concepts](concepts.md#facts-the-entityattributevalue-model)
+- **epoch** — a numbered part of a database's history between two promotions: `DIR/epochs` lists each epoch and its
+  first group (PostgreSQL calls it a timeline). A copy may follow a primary only if its history is a prefix of the
+  primary's. [server](server.md#promotion-by-hand)
 - **eviction policy** — the rule that picks which page leaves a full cache; Cepheus' is S3-FIFO.
 - **`Expect`** — a precondition of a group: a fact that must hold (or a value that must be absent) just before it; the
   writer checks it, and the group fails with `Conflict` otherwise. [concepts](concepts.md#groups-a-write-is-a-transaction)
@@ -238,6 +241,8 @@ the usual one, both are given.
   [concepts](concepts.md#groups-a-write-is-a-transaction)
 - **group commit** — the writes that arrive while one fsync runs share the next one.
   [architecture](architecture.md#the-journal-a-write-ahead-log)
+- **handover** — a primary's clean stop sending its last groups to its replica and waiting for it to hold them: after
+  it, no confirmed group is missing on the replica. [server](server.md#promotion-by-hand)
 - **handshake** — the first round trips of a TLS connection, where the two sides agree on keys and the server shows
   its certificate: about 4.8 ms of computation here, which is why connections live long. [server](server.md#tls)
 - **hash table** (open addressing, linear probing) — a table of slots where a key goes at the slot its hash names, or
@@ -317,8 +322,8 @@ the usual one, both are given.
   [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **monotonic writes** — a session guarantee (Terry et al. 1994): a program's writes are applied in the order it sent
   them. [server](server.md#order-pipelining-and-back-pressure)
-- **mutual TLS** — TLS where both sides show a certificate of the same CA; between Cepheus servers (with replication),
-  not for programs, which show a token. [server](server.md#tls)
+- **mutual TLS** — TLS where both sides show a certificate of the same CA; between Cepheus servers (a primary and its
+  replicas, on the peer port), not for programs, which show a token. [server](server.md#tls)
 - **native package** — a Cesia package whose functions are, under their Cesia code, an engine in OCaml compiled once:
   the way Cesia runs OCaml that comes from another project; running one needs the permission `native=LABEL`, total
   trust, as `ffi=` for C. [Cesia](cesia.md#the-package)
@@ -349,6 +354,8 @@ the usual one, both are given.
 - **plan** (of a rule) — the rule compiled to closures with one atom matched to a given fact, the others joined in an
   order chosen from the store's counts. [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **population count** (popcount) — the number of bits set in a word; a rank table's lookup is one.
+- **primary** — the server that takes the writes of a database; its replicas copy its groups. [server](server.md#a-replica)
+- **promotion** — a replica made a primary (`cepheus promote`): a new epoch, and writes taken. [server](server.md#promotion-by-hand)
 - **proof** — a tree whose leaves are asserted facts and whose nodes are rule instances, each node's children the
   facts of its body; *well-founded*: every child proved before its parent. `why` returns one (G20).
   [rules](rules.md#why)
@@ -375,6 +382,10 @@ the usual one, both are given.
   "every ancestor", at any depth. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **redo log** — a log of changes to apply again after a crash, never to undo; the journal is one.
 - **replay** — applying the journal's groups in order to rebuild a state.
+- **replica** — a server on another machine that keeps a copy of every database of its primary, group for group, in
+  its own journal; asynchronous: behind by its lag, the primary never waits for it. [server](server.md#a-replica)
+- **replica lag** — the time from a group durable on the primary to the replica's word that it holds it durably.
+  [server](server.md#what-a-replica-costs)
 - **retry** — running a transaction again after the database refused it (a `Conflict` in Cepheus, a serialization
   failure in PostgreSQL), from a new read.
 - **rewrite of the newest frame** — at a recovery after anything but a clean close, the journal's newest frame is
@@ -441,6 +452,8 @@ the usual one, both are given.
   [server](server.md#what-it-is-and-why)
 - **space amplification** — disk space used over the size of the data: the chain alone after a merge (1, as the runs
   are net), and during a full merge a new copy of the base beside the old one (2). [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
+- **split brain** — two servers taking writes for one database at once, each unaware of the other's; what a promotion
+  by hand can and cannot prevent: [server](server.md#promotion-by-hand)
 - **SSE4.2**, **x86-64-v2** — SSE4.2 is a set of instructions of x86-64 processors (Intel since Nehalem, 2008; AMD
   since Bulldozer, 2011), among them `crc32`, which computes CRC-32C 8 bytes at a time; a program sees whether the
   processor has it in bit 20 of a register the `cpuid` instruction fills. x86-64-v2 is the level of x86-64 that

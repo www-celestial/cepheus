@@ -3,7 +3,7 @@
 Each guarantee states what is promised, under which faults, its exact conditions, why it holds (a proof sketch), and
 the test that checks it. The tests are in `test/`; `tools/test.sh` runs them all. The words are explained in
 [concepts](concepts.md), [architecture](architecture.md) and the [glossary](glossary.md); the mathematics is in
-[theory](theory.md). Everything here is as of this version: one machine, runs on disk in levels (leveling, ratio 4), no replication; rules as [rules](rules.md) tells.
+[theory](theory.md). Everything here is as of this version: one machine, runs on disk in levels (leveling, ratio 4), an asynchronous replica ([server](server.md#a-replica): its journal a prefix of the primary's durable groups, its promotion by hand); rules as [rules](rules.md) tells.
 G14, G15 and G16 belong to the server: their statements, proofs and tests are in [the server's page](server.md#writes-applied-once-sessions-g14)
 ([G15](server.md#local-reads-g15): reads in a program's own memory on the server's machine). Through the server, G1 to G13 keep
 their statements: a group is confirmed when its receipt is sent, after its fsync, and every read names the durable group

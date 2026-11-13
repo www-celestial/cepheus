@@ -59,9 +59,9 @@ name = "shop-prod"                 # lower-case letters, digits, '_', '-'
 id = "cph-c-6f1e9a2b7d40c381"      # made by `cepheus cluster init`; checked at every connection (Welcome)
 me = "srv1"                        # which [[peer]] this machine is
 
-[[peer]]                           # exactly one in this version (several need replication: refused)
+[[peer]]                           # one; or several: a primary and its replicas (needs [tls], below)
 name = "srv1"
-address = "127.0.0.1:7401"         # host:port the peers will use (replication, later)
+address = "127.0.0.1:7401"         # host:port of this peer's port, mutual TLS, opened only with several peers
 
 [clients]
 socket = "/run/cepheus"            # the directory of the Unix socket .s.cepheus.PORT (PORT: listen's, or 7400)
@@ -157,6 +157,10 @@ cepheus token add NAME --database DB=read|write|read:KIND,...;add:KIND,... ... [
                                          to tokens.toml
 cepheus token list --config FILE         names and rights (never the tokens)
 cepheus token remove NAME --config FILE  removed: its connections are refused at their next request
+cepheus replicate PEER --config FILE     this server, stopped, becomes a replica of PEER at its next start
+                                         (DATA/cepheus.role; [a replica](#a-replica))
+cepheus promote [--force] --config FILE  the running replica becomes a primary; an admin token in CEPHEUS_TOKEN;
+                                         --force without its primary's handover
 ```
 
 A first server on a laptop:
@@ -172,7 +176,7 @@ cepheus serve --config ~/shop/cluster.toml &
 `data/cepheus.server`), `cluster`, `uptime_ms`, `connections`, `requests`, `gc_minor` and `gc_major` (the OCaml
 runtime's collections so far), `stopping`, and for each database
 `database.NAME.group` (its newest durable group), `.facts` and `.resent` (writes answered again from the session
-table, G14).
+table, G14); `role` and the replicas' lines ([a replica](#what-a-replica-serves)).
 
 ### Files of the server
 
@@ -183,6 +187,10 @@ DATA/NAME/                 a database: its files as in operations.md, and
 DATA/NAME/sessions         its session table, a checkpoint (G14): written every second while writes come, and at stop
 DATA/NAME/shared           the database is the server's: its journal is forced through the commit buffer
 DATA/NAME/vault/           its files' bytes ([the vault](vault.md)), made at its first file
+DATA/cepheus.role          the server's role, mode 0600: absent, a primary; replica_of (cepheus replicate), or
+                           promoted_from and the epochs it opened (cepheus promote) ([a replica](#a-replica))
+DATA/NAME/epochs           the database's history of promotions, mode 0600: absent, epoch 1 from group 1
+DATA/NAME/handover         on a replica, the group its primary's clean stop handed over, mode 0600
 CONFIG/vault.key           the master key of every vault of the server: 32 random bytes, mode 0600, beside
                            cluster.toml (never in DATA: a copy of the data opens no file without it), made at the
                            first file; keep a copy apart from the data, since without it no file opens
@@ -531,6 +539,11 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 | `invalid` | a malformed request (the connection closes), a question that does not check, a serial below its session's floor, a why that starts with the server's marker, `Follow` on a connection with writes in flight | fix the request |
 | `denied` (Follow) | `Follow` over TCP: local reads are for programs on the server's machine, over its Unix socket | read through the server; the OCaml client does by itself |
 | `busy` (Follow) | `Follow` when the run files could not be opened eight times in a row (merges removing them meanwhile) | follow again: the OCaml client does, within 100 ms |
+| `read_only` | `Write`, `Put` or `Erase` on a replica; the message names its primary and the primary's address | write to the primary |
+| `denied` (Follow, replica) | `Follow` on a replica: its state is behind its primary's | read through the socket; the OCaml client does by itself |
+| `invalid` (promote) | `promote` on a primary, while the primary still sends, or without its handover and without `--force` | stop the primary cleanly, then promote; `--force` once it cannot write any more |
+| `busy` (promote) | a promotion under way, or a visibility page held by another server of this machine | promote again once it ends |
+| `unreachable` (promote) | the connection broke before the answer: the promotion was made once or not at all | `cepheus status` says which |
 
 ## Writes applied once: sessions (G14)
 
@@ -788,6 +801,195 @@ write wait. Datomic's peers read in their own memory but see the newest writes o
 always do. What Cepheus does not have here: readers on other machines (a replica, step 6, and Raft with quorum
 leases, step 7), and PostgreSQL's SQL.
 
+## A replica
+
+A **replica** is a second server, on another machine, that keeps a copy of every database of a **primary** (the
+server that takes the writes), group for group, in its own journal, forced by its own fsyncs. It gives a second copy
+that survives the loss of the primary's machine, a place to take backups from without touching the primary, and, by
+hand, a new primary when the old one is gone (`cepheus promote`). It is **asynchronous**: the primary confirms a write
+once its own fsync returns and never waits for a replica, so a replica is behind by its lag (measured
+[below](#what-a-replica-costs)), and a write confirmed during that lag is on the primary alone. Raft (step 7) waits for
+a majority before it confirms.
+
+### Setting one up
+
+Both servers share one `cluster.toml` but for `me`, with a `[[peer]]` each and `[tls]`: servers reach one another over
+TCP with mutual TLS only (each shows a certificate of the cluster's CA), so two peers without `[tls]` are refused at
+start.
+
+```toml norun
+[cluster]
+name = "shop"
+id = "cph-c-6f1e9a2b7d40c381"
+me = "srv2"                        # "srv1" on the primary's machine
+
+[[peer]]
+name = "srv1"
+address = "10.0.1.11:7401"         # the peer port: servers only, mutual TLS
+[[peer]]
+name = "srv2"
+address = "10.0.2.11:7401"
+
+[tls]
+ca = "/etc/cepheus/ca.pem"
+cert = "/etc/cepheus/srv2.pem"     # srv2's own: cepheus cluster cert srv2 --host 10.0.2.11
+key = "/etc/cepheus/srv2.key"
+```
+
+```sh
+# on srv1's machine (the CA's key stays there, or offline)
+cepheus cluster cert srv2 --dir /etc/cepheus --host 10.0.2.11     # copy ca.pem, srv2.pem and srv2.key to srv2
+# on srv2's machine, the server stopped, its data directory empty
+cepheus replicate srv1 --config /etc/cepheus/cluster.toml
+systemctl start cepheus
+```
+
+`cepheus replicate PEER` writes `DATA/cepheus.role` (mode 0600, `replica_of = "srv1"`); it refuses a running server, a
+peer the file does not declare, and the server itself. At its start the replica creates each database it does not
+have yet with its primary's id (it asks the primary; the start fails, and says why, when the primary does not answer
+then), and connects to the primary's peer port, once a database. A server whose cluster has one peer opens no peer
+port: an old `cluster.toml` changes nothing. With several peers, every server listens on its own `[[peer]]` address.
+
+### What travels, and why it is safe
+
+The primary's **sender**, a thread a replica and a database, reads the database's journal as its files hold it,
+frame after frame, byte for byte with each frame's CRC, from the group after the replica's newest, and only up to
+the primary's newest **durable** group. It never sends a frame whose fsync has not returned: if that fsync failed, the
+primary would stop, and its next start might not keep the frame ([G10](guarantees.md#g10-stop-on-a-disk-error),
+[G13](guarantees.md#g13-a-failed-fsync-is-never-trusted)), leaving the replica with a group the primary does not have.
+So **a replica's journal is always a prefix of its primary's durable groups**. The sender is woken after each durable
+frame, by the condition the local readers' stream already signals: the writer and the syncer do nothing more for it.
+
+The replica checks each frame's CRC-32C, decodes it (every count bounded by the bytes left), replays its groups as
+recovery does (a large group merged at once into a run, as on the primary), and appends them to its own journal
+through its own writer and syncer: frames that arrive while one is forced share the next fsync, and every database
+of the replica shares its commit buffer. Then it tells the primary up to which group it holds them durably
+(`Applied`). A replica far behind, or stopped for a day, reads from where it stands: catch-up and the live stream are
+one path. The primary holds one frame a replica in memory, however far behind the replica is; the replica holds at
+most 64 MiB of frames given to its writer and not yet durable (always one frame, up to the journal's 256 MiB).
+
+The peer protocol runs on the peer port only, in the frames of [the protocol](#framing), kinds 20 to 26:
+
+| message | from | holds |
+|---|---|---|
+| `PeerHello` | both | the version (1), the cluster's id, the server's name; another cluster id is refused |
+| `Replicate` | replica | the database, its next group, its epochs ([below](#promotion-by-hand)); the reply: the database's id, the primary's newest group, its epochs, or an error (`diverged`, `newer`, `unknown_database`, `not_primary`) |
+| `Epochs` | a starting primary | nothing; the reply: each database's newest group and epochs |
+| `Frame` | primary | first group, count, CRC, length, then the bytes, in pieces of 1 MiB |
+| `Beat` | primary | its newest durable group, each second without a frame |
+| `Stopped` | primary | its clean stop: every group up to this one was sent ([below](#promotion-by-hand)) |
+| `Applied` | replica | it holds every group up to this one durably |
+
+The certificate a peer shows must be signed by the cluster's CA and name a `[[peer]]` other than the server itself;
+a server connecting checks the other's certificate for its address and its name. Each side gives the other 5 s for
+its handshake and Hello, then 30 s of silence before it closes the stream; the replica connects again after 0.1 s,
+then twice as long each time, up to 5 s.
+
+### What a replica serves
+
+Reads (`Open`, `Get`, `Find`, `Watch`): the state after one of its groups, every group before it included, never a
+group its primary did not make durable. A read on a replica is not linearizable: it may miss a write the primary
+confirmed a moment ago (G15 holds on the primary's machine). `Write`, `Put` and `Erase` get `Err read_only`, whose
+message names the primary and its address. `Follow` (local reads) gets `denied`: the OCaml and Cesia clients then
+read through the socket. The files of [the vault](vault.md) are not copied yet: a `Load` on a replica finds no bytes.
+
+`cepheus status` says `role: replica of srv1` and, for each database, `replica_of`, `replica.connected`,
+`replica.primary_group` (the primary's newest group, from its beats), `replica.handover`, `replica.epoch` and, while
+following fails, `replica.error`. On the primary, `role: primary`, each database's `epoch` and, for each replica that
+follows it: `replica.srv2.group` (what it holds durably), `replica.srv2.lag_us_p50`, `_p99`, `_max` and
+`lag_samples`: microseconds from the moment the sender saw a group durable to the replica's `Applied` for it.
+
+### Promotion, by hand
+
+```sh
+cepheus stop --config /etc/cepheus/cluster.toml                            # on srv1: its clean stop hands over
+CEPHEUS_TOKEN=cph_... cepheus promote --config /etc/cepheus/cluster.toml   # on srv2, an admin token
+```
+
+- **The handover.** A primary's clean stop (`SIGTERM`, `cepheus stop`) answers its writes in flight, closes its
+  databases, sends each replica its last frames and `Stopped {group}`, and waits (at most 10 s) for it to say that it
+  holds them; the replica then writes `DIR/handover` (0600). After a handover, **no group the primary confirmed is
+  missing on the replica.**
+- `cepheus promote` is refused while the primary still sends to the replica (it is alive: stop it first), and,
+  without `--force`, unless every database was handed over. With `--force` (the primary is gone: its machine burned,
+  it does not start), the groups it confirmed after the replica's newest are lost; the lag says how many
+  milliseconds of writes that is.
+- Then the followers stop, every frame given to the writer is durable, each database opens a new **epoch** from the
+  group after its newest, `DATA/cepheus.role` says `promoted_from` (the promotion's commit point: a crash after it is
+  made whole at the next start), each database's visibility page is opened (local readers are let in), and writes
+  are taken. The session table followed the groups (G14): a program that sends again, with its session and serial, a
+  write the old primary confirmed gets its first receipt from the new primary.
+- Programs reach the new primary at its own address: a client that names both servers and moves to the next on
+  `read_only` is not there yet.
+
+**Epochs.** Each database keeps the history of its promotions in `DIR/epochs` (0600): a list of (epoch, its first
+group); without the file, epoch 1 from group 1 (every database made before replicas). The idea is PostgreSQL's
+timeline history. When a copy asks to follow a primary, it sends its history and its newest group: its history must
+be a prefix of the primary's, and its newest group must lie within its last epoch on the primary. Otherwise it holds
+groups the primary never had (written by an old primary after the promotion, or never sent to the replica that was
+promoted): it is refused (`diverged`), never merged. A copy whose history is newer than the primary's is refused too
+(`newer`). The old primary becomes a replica of the new one with `cepheus replicate srv2` and catches up from where it
+stopped; once it diverged, copy it again from nothing (an empty data directory).
+
+**Two primaries at once** (a split brain: two servers taking writes for one database). What this version prevents:
+a promotion while the primary talks to its replica; an old primary that starts again (systemd, a reboot) while it
+reaches a server of a newer epoch: at its start, beside its opens, a primary of several peers asks the others for
+their epochs (at most 1 s) and refuses to start if one holds a newer one; and the merge of a diverged history. What
+it cannot prevent: after a forced promotion, an old primary that is cut off from the new one but still reached by
+programs confirms writes that exist on it alone (they are refused as diverged when it is made a replica). Fence it
+before `--force`: stop it, cut it off, or power it off. With Raft (step 7) this cannot happen: a leader confirms
+nothing without a majority.
+
+### Backups from the replica
+
+A replica's data directory holds the files of its primary's databases (their id, their runs, their segments), so
+[the backup script](production.md#backups) copies it while the replica runs, and the primary does no work for it. The
+script copies `epochs` too: a copy without it starts again at epoch 1, and a promoted history refuses it as a
+replica.
+
+### What a replica costs
+
+MEASURES
+
+### How it is tested
+
+- `replica_sim` (a deterministic simulation: one seed decides everything, and `--seed N` replays it): a primary and
+  its replica on two simulated disks; writes in sessions, large groups, merges on both sides; the sender reading the
+  primary's journal a frame at a time into a link of bounded bytes; the link cut anywhere (the replica connects again
+  from its newest durable group) or left down while the primary writes across segments; frames damaged on the way (a
+  bit flipped, cut short: the CRC refuses them) or well formed and wrong (other bytes or other groups under a good
+  CRC: decoding refuses them, and nothing changes); power losses and process deaths of both machines inside any disk
+  call; failed fsyncs on the primary. At every recovery of the replica and at the end, its journal is a prefix of the
+  primary's durable groups, group for group. Then a promotion: after a handover no confirmed group is missing, and
+  every confirmed write of a session gets its first receipt from the promoted replica's table; after a power loss
+  and `--force`, the replica is still a prefix. The promoted replica writes in epoch 2, the old primary sometimes
+  writes on (a split brain), then asks to follow: the epochs accept it only if its journal is truly a prefix of the
+  new primary's, always when it holds nothing past the promotion, and then both journals end identical.
+- `server_replica`: two real servers over mutual TLS on loopback: a copy from nothing while a program writes; the
+  replica killed (kill -9) and catching up; refusals at the peer port (a certificate of another CA, one of the CA
+  for a name no peer has, the server's own name, another cluster id, an unknown database); writes refused on a
+  replica; promotions refused while the primary sends and without a handover; the clean stop's handover and `cepheus
+  promote` (every confirmed group there, a write sent again answered with its first receipt, writes taken in epoch
+  2); an old primary told at start of the newer epoch; the old primary following the new one; the same groups in
+  both journals; the files' modes (0600, the data directory 0700).
+
+### Security
+
+- **Who may connect.** The peer port speaks mutual TLS only: a certificate of the cluster's CA that names another
+  `[[peer]]` (never the server itself), then the cluster's id. A program's token opens nothing there, and a server's
+  certificate opens nothing on the client port.
+- **What a peer sends is checked before it is used.** Each frame's length is checked before anything is allocated
+  for it (16 MiB a message, 256 MiB a journal frame), its CRC-32C before it is decoded, its decoding is bounded by
+  its bytes, and its groups must follow the replica's newest without a gap. A frame that fails any of these is
+  refused, the replica's state unchanged, and the stream starts again. A primary checks a replica's history before it
+  sends anything.
+- **Denial of service.** At most 256 peer connections at once; 5 s for a handshake and its Hello, 30 s of silence on a
+  stream; the replica holds at most 64 MiB of frames in flight, the primary one frame a replica.
+- **Files.** `cepheus.role`, `epochs` and `handover` are written beside (a new name opened with `O_EXCL`, so a link
+  planted there is never followed), forced, renamed and the directory forced, mode 0600; the data directory 0700.
+- **What it does not stop.** A peer whose key is stolen can act as a replica (read every database) or, as a
+  primary, send groups to a replica: keep the peers' keys as the CA's, readable by the server's user only.
+
 ## Security
 
 ### Tokens
@@ -962,11 +1164,15 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 ## What it does not do yet
 
 - Find gathers its answer's index words before it sends them (above); forks are not on the wire yet.
-- Local readers on other machines (a replica, step 6; Raft with leases between servers, step 7), and one shared copy
-  of the pages for many readers of one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
+- Local readers on other machines (a replica serves its reads through its socket; Raft with leases between servers,
+  step 7), and one shared copy of the pages for many readers of one machine (each reader keeps its own cache:
+  [what it costs](#what-it-costs)).
+- A replica does not copy the files of the vault yet, a client does not move to the new primary by itself, and a
+  promotion is made by hand ([a replica](#a-replica)); Raft (step 7) elects a leader by a majority.
 
 The Cesia client is step 4 ([Cepheus from Cesia](cesia.md)): a Cesia program reaches a database through a server only,
 by `cepheus.Connect`, and reads locally on the server's machine. Live questions are on the wire (step 5,
-[above](#live-questions-watch)). Many databases share one fsync ([the commit buffer](#many-databases-one-fsync-the-commit-buffer), the rest of step 5). Next: a replica (step 6), Raft on three machines (step 7), memory databases with `Expire` and
-`Incr` (step 8). The OCaml library still opens a database directory in its own process (`Cepheus.open_`): it is the
+[above](#live-questions-watch)). Many databases share one fsync ([the commit buffer](#many-databases-one-fsync-the-commit-buffer), the rest of step 5). A
+replica follows its primary (step 6, [above](#a-replica)). Next: Raft on three machines (step 7), memory databases with
+`Expire` and `Incr` (step 8). The OCaml library still opens a database directory in its own process (`Cepheus.open_`): it is the
 engine the server runs, and what its tests and benchmarks drive; programs, in Cesia, go through the server.

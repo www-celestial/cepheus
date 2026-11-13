@@ -277,7 +277,7 @@ let decode_frame f =
   match List.init f.count (fun k -> let g = Group.decode r in (if g.n <> f.first + k then raise Codec.Short); g) with
   | gs when Codec.at_end r -> Ok gs
   | _ -> Error (Damaged (Printf.sprintf "the frame of groups %d to %d has bytes after its groups" f.first (f.first + f.count - 1)))
-  | exception Codec.Short ->
+  | exception (Codec.Short | Invalid_argument _) ->
     Error (Damaged (Printf.sprintf "the frame of groups %d to %d does not decode to its groups" f.first (f.first + f.count - 1)))
 
 (* may hold a large group: the writer lets no merge run beside it *)
@@ -315,7 +315,11 @@ let prepare_apply t (f : frame) gs =
           first = (match fresh with g :: _ -> g.n | [] -> start.group + 1); count; after; runs = !runs; pending = None }
     | exception Journal.Damaged m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
     | exception Pages.Unreadable m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
-    | exception Disk.Io m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Io m))
+    | exception Disk.Io m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Io m)
+    | exception e ->
+      (* groups that decode and do not replay (a peer's bug, or worse): refused, the writer goes on *)
+      List.iter (Snapshot.abandon t.disk) !runs;
+      Error (Damaged (Printf.sprintf "the frame of groups %d to %d does not replay: %s" f.first (f.first + f.count - 1) (Printexc.to_string e))))
 
 (* Writes and forces the frame; on failure the database stops, and the batch's writes fail. A large group's run is
    forced beside its frame (two fsyncs at once, on two files), and named once both are done (G12); if only the run's

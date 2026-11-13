@@ -301,6 +301,7 @@ type t = {
   final : bool Atomic.t;  (* the databases are closed: senders send their last groups and Stopped *)
   rm : Mutex.t;
   mutable peers_open : int;
+  promoting : bool Atomic.t;  (* one promotion at a time *)
   mutable on_promote : db -> unit -> unit;
       (* the transport's part of a promotion (the visibility page): prepared before the commit point (Failure if it
          cannot be), done after *)
@@ -320,7 +321,7 @@ let make_db ~name ~dir ~live ~follow ~sessions =
 
 let create cfg role dbs =
   { cfg; role; dbs; stopping = Atomic.make false; final = Atomic.make false; rm = Mutex.create (); peers_open = 0;
-    on_promote = (fun _ () -> ()) }
+    promoting = Atomic.make false; on_promote = (fun _ () -> ()) }
 
 let is_replica t = match t.role with Replica_of _ -> true | _ -> false
 
@@ -466,7 +467,8 @@ let stream t (d : db) l ~peer ~next =
    with
    | Broken m -> log "database %s: the stream to %s ended: %s" d.name peer m
    | Journal.Damaged m -> log "database %s: the stream to %s stopped on its journal: %s" d.name peer m
-   | Disk.Io m -> log "database %s: the stream to %s stopped: %s" d.name peer m);
+   | Disk.Io m -> log "database %s: the stream to %s stopped: %s" d.name peer m
+   | e -> log "database %s: the stream to %s stopped: %s" d.name peer (Printexc.to_string e));
   Option.iter Journal.cursor_close !cur;
   s.over <- true;
   close_link l;
@@ -602,10 +604,8 @@ let connect ?(timeout = !handshake_s) (cfg : Config.t) (p : Config.peer) =
           else
             let b = Buffer.create 64 in
             Codec.put_varint b version; Codec.put_string b cfg.id; Codec.put_string b cfg.me;
-            match send l ~kind:k_hello b; expect l k_hello with
-            | Ok r ->
-              let _ = Codec.get_string r in
-              if Codec.get_string r <> cfg.id then (close_link l; Error (p.pname ^ " is of another cluster")) else Ok l
+            match send l ~kind:k_hello b; Result.map (fun r -> let _ = Codec.get_string r in Codec.get_string r) (expect l k_hello) with
+            | Ok cluster -> if cluster <> cfg.id then (close_link l; Error (p.pname ^ " is of another cluster")) else Ok l
             | Error (c, m) -> close_link l; Error (Printf.sprintf "%s: %s: %s" p.pname c m)
             | exception (Broken m | Failure m) -> close_link l; Error (p.pname ^ ": " ^ m)
             | exception Codec.Short -> close_link l; Error (p.pname ^ ": a bad Hello")))))
@@ -620,8 +620,9 @@ let primary_id cfg (p : Config.peer) name =
   | Error m -> Error m
   | Ok l ->
     Fun.protect ~finally:(fun () -> close_link l) (fun () ->
-        match send l ~kind:k_replicate (replicate_msg ~name ~epochs:first_epochs 1); expect l k_replicate with
-        | Ok r -> Ok (Codec.get_string r)
+        match send l ~kind:k_replicate (replicate_msg ~name ~epochs:first_epochs 1); Result.map Codec.get_string (expect l k_replicate) with
+        | Ok id when String.length id = 16 -> Ok id
+        | Ok _ -> Error "a bad reply"
         | Error (c, m) -> Error (c ^ ": " ^ m)
         | exception (Broken m) -> Error m
         | exception Codec.Short -> Error "a bad reply")
@@ -721,6 +722,7 @@ let receive t d l =
     with
     | Broken m -> Error m
     | Codec.Short -> Error "a frame that does not decode"
+    | e -> Error (Printexc.to_string e)
   in
   shut l;
   wait_all ();
@@ -754,11 +756,15 @@ let follow_loop t d (p : Config.peer) () =
          with
          | exception Codec.Short -> close_link l; note "a bad reply"
          | id, _, _ when id <> d.live.e.id -> close_link l; note (p.pname ^ "'s database of this name is another database (another id)"); pause := 5.
-         | _, g, h ->
-           if h <> d.epochs then (save_epochs d.dir h; d.epochs <- h);
-           if d.handover <> None then (remove_private (handover_path d.dir); d.handover <- None);
+         | _, g, h -> (
+           match
+             if h <> d.epochs then (save_epochs d.dir h; d.epochs <- h);
+             if d.handover <> None then (remove_private (handover_path d.dir); d.handover <- None);
+             timeouts l.fd !stream_s
+           with
+           | exception (Unix.Unix_error (e, _, x)) -> close_link l; note (Printf.sprintf "%s: %s" x (Unix.error_message e))
+           | () ->
            d.primary_group <- g;
-           timeouts l.fd !stream_s;
            Mutex.protect d.dm (fun () -> d.link <- Some l; d.connected <- true; d.connections <- d.connections + 1);
            if !said <> "" then log "database %s: following %s again from group %d" d.name p.pname next;
            said := "";
@@ -766,7 +772,7 @@ let follow_loop t d (p : Config.peer) () =
            pause := 0.1;
            let r = receive t d l in
            Mutex.protect d.dm (fun () -> d.link <- None; d.connected <- false);
-           match r with Ok () -> () | Error m -> note m)));
+           match r with Ok () -> () | Error m -> note m))));
     if not (Atomic.get t.stopping) then begin
       let t0 = Unix.gettimeofday () in
       while (not (Atomic.get t.stopping)) && Unix.gettimeofday () -. t0 < !pause do Thread.delay 0.05 done;
@@ -793,7 +799,11 @@ let stop_followers t =
    without [force], unless the primary handed every database over at its clean stop (so that no group it confirmed is
    missing here). Then: the followers stopped, every frame durable, a new epoch for each database from the group after
    its newest, the role file (the commit point), the histories, writes taken. *)
-let promote t ~force =
+let rec promote t ~force =
+  if not (Atomic.compare_and_set t.promoting false true) then Error ("busy", "a promotion is under way")
+  else Fun.protect ~finally:(fun () -> Atomic.set t.promoting false) (fun () -> promote_once t ~force)
+
+and promote_once t ~force =
   match t.role with
   | Primary | Promoted _ -> Error ("invalid", "this server is a primary already")
   | Replica_of p ->
@@ -856,14 +866,15 @@ let check_s = 1.0
 
 let check_peers (cfg : Config.t) (mine : (string * epochs) list) =
   let others = List.filter (fun (p : Config.peer) -> p.pname <> cfg.me) cfg.peers in
-  let res = Array.make (List.length others) (Ok []) in
+  let res = Array.make (List.length others) (Error "no answer") in
   let ths =
     List.mapi
       (fun i p ->
         Thread.create
           (fun () ->
             res.(i) <-
-              (match connect ~timeout:check_s cfg p with
+              (try
+                match connect ~timeout:check_s cfg p with
                | Error m -> Error m
                | Ok l ->
                  Fun.protect ~finally:(fun () -> close_link l) (fun () ->
@@ -871,7 +882,8 @@ let check_peers (cfg : Config.t) (mine : (string * epochs) list) =
                      | Ok r -> Ok (List.init (Codec.get_varint r) (fun _ -> let n = Codec.get_string r in let g = Codec.get_varint r in n, g, get_epochs r))
                      | Error (c, m) -> Error (c ^ ": " ^ m)
                      | exception (Broken m) -> Error m
-                     | exception Codec.Short -> Error "a bad reply")))
+                     | exception Codec.Short -> Error "a bad reply")
+               with e -> Error (Printexc.to_string e)))
           ())
       others
   in

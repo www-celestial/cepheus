@@ -420,7 +420,8 @@ can change a measured result, [Mytkowicz 2009]):
 - A buyer who conflicts reads a new view and tries again: under heavy contention for a few seats, many tries are
   wasted (2,211 conflicts for 2,000 sales above). A seat held for a minute while the buyer pays (a reservation
   with an expiry) is the usual answer; it is another group with its own `Expect`.
-- One machine: if it is lost, the sale stops until it is back (replication is planned, [comparison](comparison.md)).
+- One machine takes the writes: if it is lost, the sale stops until it is back, or until a [replica](server.md#a-replica)
+  is promoted by hand (the sales confirmed during its lag are then lost; Raft, step 7, would wait for a majority).
 - The payment is outside the database: a sale confirmed by Cepheus and a payment refused by the bank must be undone by
   another group (a compensation), which this chapter does not cover.
 

@@ -807,8 +807,9 @@ let cursor disk dir id ~next =
   (match List.fold_left (fun acc s -> if s <= next then Some s else acc) None segs with
    | None -> ()
    | Some s ->
+     (* a segment whose header is not whole yet is opened again by [frames], once a durable group is in it *)
+     c.cnext <- s;
      if cursor_open c s then begin
-       c.cnext <- s;
        (* the frames that end before [next], by their headers only *)
        let rec skip () =
          match cursor_header c with

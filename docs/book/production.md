@@ -128,7 +128,8 @@ cepheus: ready in 23.9 ms: shop at group 1; socket /run/cepheus/.s.cepheus.7400,
 A database's journal is only appended to and its runs are written beside and renamed, so a copy needs no stop, in
 this order: the database's id, its runs, then its segments ([backup and restore](operations.md#backup-and-restore)).
 The copy holds every group confirmed before the copy of its segment started, the commit buffer's included. It leaves
-out `lock`, `closed`, `shared` and `sessions`: the copy opens as a database of its own.
+out `lock`, `closed`, `shared` and `sessions`: the copy opens as a database of its own. Taken on a
+[replica](server.md#backups-from-the-replica), it costs the primary nothing, and holds the groups the replica held.
 `/usr/local/bin/cepheus-backup`:
 
 ```sh
@@ -142,8 +143,9 @@ for db in "$data"/*/; do
   [ -f "$db/cepheus" ] || continue
   out=$dest/$(basename "$db")
   mkdir -p "$out/snapshots" "$out/journal"
-  # 1. the database's id
+  # 1. the database's id, and its history of promotions if it has one (a replica's: server.md, "A replica")
   cp "$db/cepheus" "$out/"
+  if [ -f "$db/epochs" ]; then cp "$db/epochs" "$out/"; fi
   # 2. the runs, before the segments; a merge may remove one meanwhile: only a run still there must copy
   for f in "$db"/snapshots/*.run; do
     [ -e "$f" ] || continue
