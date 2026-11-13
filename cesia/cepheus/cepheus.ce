@@ -66,7 +66,17 @@ Retract(thing, property, value) = {Op: "retract", Thing: thing, Property: proper
     property before it; with value missing, unless it has none. *)
 Expect(thing, property, value = missing) = {Op: "expect", Thing: thing, Property: property, Value: value}
 
-(** The thing that the group makes as its k-th new thing, in Add, Retract and Expect: New(1), New(2)... *)
+(** An operation of Write: the thing's value of an Int property of one value (none counts 0) grows by by, read at
+    this point of the group by the database, so that groups that count with one counter at once never conflict and
+    never skip a value; a refused group leaves the counter as it was. into = [thing, property] also adds the new
+    value there, an Int property: an invoice gets its number in the group that makes it. A value past the 63 bits
+    refuses the group, Code "invalid".
+
+      cepheus.Write([cepheus.Incr(counter, Counter.Next, into = [cepheus.New(1), Invoice.Number]),
+                     cepheus.Add(cepheus.New(1), Invoice.Client, ada)], db) *)
+Incr(thing, property, by = 1, into = missing) = {Op: "incr", Thing: thing, Property: property, Value: by, Into: into}
+
+(** The thing that the group makes as its k-th new thing, in Add, Retract, Expect and Incr: New(1), New(2)... *)
 New(k) = -k
 
 (** A group of operations, all or nothing: an Ok of {Group, Things}, its number and the ids of its new things, New(1)

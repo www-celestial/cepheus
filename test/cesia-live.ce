@@ -43,6 +43,14 @@ defn overTls()
   tasks = [fiber.Spawn(() -> cepheus.Insert(Note, {Title: "tls-many", N: k, Mark: "tls-m$k"}, db)) for k in 1..100]
   ok = list.Count(result.IsOk, [result.Unwrap(fiber.Wait(t)) for t in tasks])
   io.Print("tls 100 fibers:", ok, "answered,", count("tls-many", db)?, "in the database")
+  (* 50 groups at once, each numbered by one counter: 1 to 50, each once, none refused *)
+  counter = cepheus.Insert(Note, {Title: "tls-counter", N: 0, Mark: "tls-counter"}, db)?
+  numbered(k) = cepheus.Write([cepheus.Incr(counter, Note.N, into = [cepheus.New(1), Note.N]), cepheus.Add(cepheus.New(1), Note.Title, "tls-incr"),
+                               cepheus.Add(cepheus.New(1), Note.Mark, "tls-i$k")], db)
+  tasks = [fiber.Spawn(() -> numbered(k)) for k in 1..50]
+  ok = list.Count(result.IsOk, [result.Unwrap(fiber.Wait(t)) for t in tasks])
+  ns = list.Sort([r.N for r in cepheus.Find(2, (x, n) -> {Where: [[x, Note.Title, "tls-incr"], [x, Note.N, n]], Give: {X: x, N: n}}, db)?])
+  io.Print("tls Incr by 50 fibers:", ok, "answered, numbered 1 to 50 once each:", value.Equal(ns, [k for k in 1..50]), "the counter at", cepheus.Get(Note, counter, db)?.N)
   cepheus.Close(db)
   io.Print("tls closed:", cepheus.Get(Note, id, db).Error.Code)
   result.Ok(missing)
