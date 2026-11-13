@@ -308,7 +308,7 @@ Ok([{Invoice: 65537}, {Invoice: 65540}])
 
 **Exact meaning.** Each operator reads the facts of the view the question is answered at, the facts the rules derive
 included: they are in every view, exactly (G17), so a `Not` reads a complete set of facts. (A `Not` in a *rule*'s
-body is the reasoner's next step, stratified negation, with this same function.) `Not` and `Or` may not hold a
+body is the same function, [rules](#rules).) `Not` and `Or` may not hold a
 `Not` or an `Or`: name a deeper condition with a rule, as a derived fact.
 
 **How it is answered.** `In` is a relation of one column for Generic Join: its values are the candidates of x when
@@ -507,10 +507,41 @@ Ok(missing)
   rule gives over the facts already there.
 - `Then: cepheus.Never` makes a **constraint**: a group that would give its `Where` an answer is refused whole, with
   Code `"invalid"` and the rule's name (G18).
-- `Where` takes patterns and `Above`, `Below` and `Between`; `Not`, `Or`, `In` and `Prefix` are for questions (negation
-  in rules is the reasoner's next step, [rules](rules.md#what-is-not-here-yet)). A variable of `Then` must be in a
-  pattern of `Where`, and a rule cannot take the name of a property: both are refused with Code `"invalid"`.
+- `Where` takes patterns, `Above`, `Below`, `Between` and `Not`; `Or`, `In` and `Prefix` are for questions. A variable
+  of `Then` must be in a pattern of `Where` outside `Not`, and a rule cannot take the name of a property: both are
+  refused with Code `"invalid"`.
 - Rules are for tokens that write the whole database ([rights](server.md#rights-g16)): a rule reads every kind.
+
+A rule's `Where` may hold `cepheus.Not(...)`: an answer holds when no fact matches its patterns, its variables in no
+other pattern being its own ("there is no invoice `j` of `c` that is unpaid"). The value of `Then` may be
+`cepheus.Sum(x)`, `Min(x)`, `Max(x)` or `Count()`: the rule gives its thing one fact, the sum, the smallest, the largest
+value of `x` or the number of answers, kept up to date by difference at each write ([rules](rules.md#negation-and-aggregates-strata)):
+
+```cesia norun
+Books = cepheus.Kind("books", {Due: cepheus.Money(2), Clear: cepheus.Bool()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Books], token = sys.Env("CEPHEUS_TOKEN")))
+dueOf = cepheus.Rule("due-of", 3, (c, i, t) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, t]], Then: [c, Books.Due, cepheus.Sum(t)]})
+clear = cepheus.Rule("clear", 3, (c, i, j) -> {Where: [[i, Invoice.Client, c], cepheus.Not([j, Invoice.Client, c], [j, Invoice.Status, "unpaid"])], Then: [c, Books.Clear, true]})
+io.Print(cepheus.Define([dueOf, clear], db))
+io.Print(cepheus.Get(Books, ada, db))
+io.Print(cepheus.Get(Books, bo, db))
+owed = result.Unwrap(cepheus.Find(1, (i) -> {Where: [[i, Invoice.Client, ada], [i, Invoice.Status, "unpaid"]], Give: {Invoice: i}}, db))
+result.Unwrap(cepheus.Update(Invoice, owed[1].Invoice, {Status: "paid"}, db))
+io.Print(cepheus.Get(Books, ada, db))
+```
+
+```text
+Ok(missing)
+Ok({Due: 80.5, Clear: missing})
+Ok({Due: missing, Clear: true})
+Ok({Due: missing, Clear: true})
+```
+
+- A rule set where a property depends on its own absence (`Not`) or its own aggregate is refused with Code
+  `"invalid"`, naming the cycle: such a rule would make its own premise false.
+- The property of an aggregate takes one value, and only that rule gives it: a write of it is refused. A thing
+  without answers has no fact (Ada's `Due` went with her last unpaid invoice). A sum past the largest int refuses the
+  group; it never wraps.
 
 ## Files
 

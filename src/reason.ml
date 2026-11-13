@@ -47,6 +47,11 @@ exception Refused of string
 
 let refuse fmt = Printf.ksprintf (fun s -> raise (Refused s)) fmt
 
+(* a write of an aggregate's property, refused *)
+let agg_message (v : Store.view) p =
+  Printf.sprintf "%s is given by an aggregate rule: no write adds or retracts it"
+    (match Schema.find v.schema p with Some d -> d.name | None -> string_of_int p)
+
 (* the budget of a data write: derived changes <= base + per x asserted changes (choice 10.7 of the design) *)
 let budget_base = ref 100_000
 let budget_per = ref 100
@@ -158,8 +163,10 @@ type ws = {
   mutable f3 : ints;  (* fact x: f3.(3x) its thing, f3.(3x+1) its property, f3.(3x+2) its value word *)
   mutable cap : int;
   mutable base : Bytes.t;  (* the state in the view the reasoning started from: 0 absent, 1 asserted, 2 only derived *)
+  mutable old : Bytes.t;  (* the state before the group (its asserted changes too): what Not and aggregates compare *)
   mutable now : Bytes.t;  (* the state now *)
-  mutable mark : Bytes.t;  (* B/F and Why: 1 checked, 2 proved, 4 deleted; 8 chained; 16 an asserted retraction *)
+  mutable mark : Bytes.t;  (* B/F and Why: 1 checked, 2 proved, 4 deleted; 8 chained; 16 an asserted retraction;
+                              32 an asserted addition *)
   mutable round : ints;  (* the round it came in: -1 older than the group *)
   mutable rule : ints;  (* the rule that derived it (an index of the program), or -1 *)
   mutable by : int array array;  (* the body facts of the instance that proved it (B/F, Why), grown when used *)
@@ -176,7 +183,7 @@ let[@inline never] ws_create ?(facts = 64) () =
   let c = max 64 facts in
   let size = ref 128 in
   while !size < 2 * c do size := 2 * !size done;
-  { n = 0; f3 = ints (3 * c) 0; cap = c; base = Bytes.make c '\000'; now = Bytes.make c '\000';
+  { n = 0; f3 = ints (3 * c) 0; cap = c; base = Bytes.make c '\000'; old = Bytes.make c '\000'; now = Bytes.make c '\000';
     mark = Bytes.make c '\000'; round = ints c (-1); rule = ints c (-1); by = [||]; set = ints !size (-1);
     smask = !size - 1; ie = idx_create ~facts:c (); iw = idx_create ~facts:c ();
     ip = idx_create ~facts:c ~keys:32 (); with_ip = true }
@@ -224,7 +231,7 @@ let[@inline never] grow ws =
   ws.f3 <- regrow ws.f3 (3 * n) (3 * c) 0;
   ws.cap <- c;
   ws.round <- regrow ws.round n c (-1); ws.rule <- regrow ws.rule n c (-1);
-  ws.base <- gb ws.base; ws.now <- gb ws.now; ws.mark <- gb ws.mark;
+  ws.base <- gb ws.base; ws.old <- gb ws.old; ws.now <- gb ws.now; ws.mark <- gb ws.mark;
   List.iter (fun t -> t.next <- regrow t.next n c (-1)) [ ws.ie; ws.iw; ws.ip ]
 
 let[@inline never] grow_set ws =
@@ -240,6 +247,7 @@ let[@inline never] add ws e p w base =
   let x = ws.n in
   A.unsafe_set ws.f3 (3 * x) e; A.unsafe_set ws.f3 ((3 * x) + 1) p; A.unsafe_set ws.f3 ((3 * x) + 2) w;
   Bytes.unsafe_set ws.base x (Char.unsafe_chr base);
+  Bytes.unsafe_set ws.old x (Char.unsafe_chr base);
   Bytes.unsafe_set ws.now x (Char.unsafe_chr base);
   Bytes.unsafe_set ws.mark x '\000';
   A.unsafe_set ws.round x (-1);
@@ -250,6 +258,7 @@ let[@inline never] add ws e p w base =
 
 let[@inline] now ws x = Char.code (Bytes.unsafe_get ws.now x)
 let[@inline] base ws x = Char.code (Bytes.unsafe_get ws.base x)
+let[@inline] old ws x = Char.code (Bytes.unsafe_get ws.old x)
 let[@inline] has ws x m = Char.code (Bytes.unsafe_get ws.mark x) land m <> 0
 let[@inline] set_mark ws x m = Bytes.unsafe_set ws.mark x (Char.unsafe_chr (Char.code (Bytes.unsafe_get ws.mark x) lor m))
 
@@ -396,7 +405,19 @@ type spec = {
 
 type program = {
   key : int;
-  rules : Rules.t array;  (* an unfolded rule keeps its generic rule's name *)
+  rules : Rules.t array;  (* an unfolded rule keeps its generic rule's name; positive patterns only, a plain head *)
+  src : Rules.t array;  (* the rules as defined, their Nots and aggregates in their patterns (Rules.split) *)
+  natoms : Query.pattern array array;  (* each rule's positive patterns, then its Nots' patterns *)
+  nots : Query.pattern array array array;  (* each rule's Nots, their patterns' properties plain *)
+  own : int list array array;  (* and their own variables *)
+  aggs : Rules.agg option array;
+  strat : int array;  (* each rule's stratum (Rules.strata) *)
+  nstrata : int;
+  stratified : bool;  (* some rule has a Not or an aggregate: strata, Not checks, flips *)
+  pstrat : (int * int) list array;  (* by property: the heads' value words (-1: any) and their strata *)
+  anystrat : int;  (* the stratum of a head whose property is a variable, -1 none *)
+  agg_rule : int array;  (* by property: the aggregate rule that gives it, -1 none *)
+  ix_ins_s : index array;  (* insertion, by stratum ([ix_ins] when there is one) *)
   ids : int array;  (* their things *)
   sty : Value.typ option array array;  (* each rule's static types (Rules.static_types); None: the property's *)
   never : bool array;  (* a constraint *)
@@ -428,6 +449,11 @@ and disp = { ix : index; pa : plan array; mk : int -> plan }
 and ctx = {
   prog : program;
   ws : ws;
+  mutable v0 : Store.view;  (* the state before the group: Not's and aggregates' "before" *)
+  mutable cur : int;  (* the stratum being maintained: the facts of lower ones are decided; -1 none *)
+  bfqs : int Queue.t array;  (* B/F's candidates by stratum ([bfqs.(0) == bfq]) *)
+  ins_s : disp option array;
+  xplans : (int * int * int, plan) Hashtbl.t;  (* the plans of Not flips and aggregates: (rule, atom, kind) *)
   pt : ws;  (* the facts proved, B/F's and Why's: a table of their own; [rule] holds each one's id in [ws] *)
   mutable v : Store.view;
   mutable round : int;  (* the round evaluated; max_int: every fact visible *)
@@ -457,6 +483,7 @@ and ctx = {
   seen : iset;  (* a walk's visited things *)
   seen2 : iset;
   mutable walked : Bytes.t;  (* by property: 1 its facts are a closure decided by its module's walks in this group *)
+  mutable xk : plan -> unit;  (* where the plans of flips and aggregates send their instances *)
 }
 
 exception Respec of int * int
@@ -494,14 +521,15 @@ let[@inline never] fits_code t (x : Value.t) =
    ([x type Person] has thousands of rows, the design's section 2.2: 1,870x more work in the prototype's first
    order): both sides bound (a test), then one side bound by a variable or by a thing in the thing's place, then a
    value bound by a constant, then nothing bound; an atom whose property is a variable not bound yet, last. *)
-let [@inline never] choose_order ?(counts = true) (v : Store.view) (r : Rules.t) pos =
-  let atoms = atoms_of r in
+let [@inline never] choose_order ?(counts = true) ?atoms ?among (v : Store.view) (r : Rules.t) pos =
+  let atoms = match atoms with Some a -> a | None -> atoms_of r in
   let nb = Array.length atoms in
   let bound = Array.make (max 1 r.vars) false in
   let bind_t = function Query.Var x -> bound.(x) <- true | _ -> () in
   let bind (a : Query.pattern) = bind_t a.e; bind_t a.v; if a.p < 0 then bound.(Rules.pvar a.p) <- true in
   (match pos with
    | -1 -> (match r.head with Rules.Give h -> bind h | Never -> ())
+   | -3 -> (match r.head with Rules.Give h -> bind_t h.e | Never -> ())
    | i when i >= 0 -> bind atoms.(i)
    | _ -> ());
   let known = function Query.Var x -> bound.(x) | _ -> true in
@@ -522,7 +550,7 @@ let [@inline never] choose_order ?(counts = true) (v : Store.view) (r : Rules.t)
         | Var _ -> 1, n (fun () -> max 1 (S.count_prop v a.p / S.distinct v a.p)))
       | false, false -> 3, n (fun () -> S.count_prop v a.p)
   in
-  let rest = ref (List.filter (fun j -> j <> pos) (List.init nb Fun.id)) and out = ref [] in
+  let rest = ref (match among with Some l -> l | None -> List.filter (fun j -> j <> pos) (List.init nb Fun.id)) and out = ref [] in
   while !rest <> [] do
     let best = List.fold_left (fun b j -> match b with None -> Some (j, est atoms.(j)) | Some (_, c) -> let c' = est atoms.(j) in if compare c' c < 0 then Some (j, c') else b) None !rest in
     let j, _ = Option.get best in
@@ -617,7 +645,14 @@ let[@inline never] run_all (d : disp) e p w =
    bindings, and runs only when that property's type fits the step's value: its variable's type, or, for a variable
    that has none of its own, the type of the property it was first read from. *)
 
-type source = State | Proved
+type source = State | Proved | Old  (* the state now (the view and the working set), the proved facts, the state before
+                                     the group *)
+
+(* how a plan's Nots are checked: on the state now, or on the state before the group (the instances a group may have
+   taken away were instances before it) *)
+type nmode = Now | Before
+
+exception Witness
 
 let [@inline never] order_of ctx ri pos =
   let prog = ctx.prog in
@@ -626,20 +661,25 @@ let [@inline never] order_of ctx ri pos =
       | Some o -> o
       | None -> let o = choose_order ctx.v prog.rules.(ri) pos in Hashtbl.replace prog.orders (ri, pos) o; o)
 
-let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : plan -> unit) =
+(* [pos]: the matched atom (a positive pattern, or a Not's pattern at [nb] and after: a flip's plan), -1 the head, -3
+   the head's thing only, -2 none. [nmode]: how the Nots are checked; [nsrc]: what a flip's other patterns of its
+   Not read. A removed rule ([extra]) runs without its Nots: its instances are a superset of those it had. *)
+let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc = State) ri pos source (k : plan -> unit) =
   let prog = ctx.prog in
-  let r, sty, bad =
+  let r, sty, bad, atoms, nots, owns =
     match extra with
-    | Some r -> r, (try Rules.static_types ctx.v r with Rules.Bad _ -> Array.make (max 1 r.vars) None), ""
-    | None -> prog.rules.(ri), prog.sty.(ri), prog.bad_head.(ri)
+    | Some r ->
+      let p = (Rules.split r).pos in
+      p, (try Rules.static_types ctx.v r with Rules.Bad _ -> Array.make (max 1 r.vars) None), "", atoms_of p, [||], [||]
+    | None -> prog.rules.(ri), prog.sty.(ri), prog.bad_head.(ri), prog.natoms.(ri), prog.nots.(ri), prog.own.(ri)
   in
-  let atoms = atoms_of r in
-  let nb = Array.length atoms in
+  let nb = List.length r.where in
+  let na = Array.length atoms in
   let nv = max 1 r.vars in
   let env = Array.make nv 0 and bound = Array.make nv false and dty = Array.make nv (-1) in
   let pl =
-    { ri; be = Array.make (max 1 nb) 0; bp = Array.init (max 1 nb) (fun j -> if j < nb then atoms.(j).p else 0);
-      bw = Array.make (max 1 nb) 0; he = 0; hp = 0; hw = 0; hok = true; run = (fun _ _ _ -> ()) }
+    { ri; be = Array.make (max 1 na) 0; bp = Array.init (max 1 na) (fun j -> if j < na then atoms.(j).p else 0);
+      bw = Array.make (max 1 na) 0; he = 0; hp = 0; hw = 0; hok = true; run = (fun _ _ _ -> ()) }
   in
   (* the ranges of each variable, as words *)
   let rng = Array.make nv [] in
@@ -689,10 +729,23 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
   let[@inline] vis x lim = Char.code (Bytes.unsafe_get ws.now x) > 0 && round ws x <= lim in
   (* does the view hold facts of p at all (a load's reasoning reads the working set alone for most properties) *)
   let[@inline] in_view p = Bytes.length ctx.vp = 0 || (p < Bytes.length ctx.vp && Bytes.unsafe_get ctx.vp p <> '\000') in
-  let order = match extra with Some _ -> choose_order ctx.v r pos | None -> if pos = -2 then choose_order ctx.v r pos else order_of ctx ri pos in
+  let order =
+    match extra with
+    | Some _ -> choose_order ctx.v r pos
+    | None ->
+      if pos >= nb then begin
+        (* a flip: the other patterns of its Not, then the positive ones *)
+        let k = let rec f g o = if pos < o + Array.length nots.(g) then g else f (g + 1) (o + Array.length nots.(g)) in f 0 nb in
+        let first = nb + Array.fold_left ( + ) 0 (Array.map Array.length (Array.sub nots 0 k)) in
+        let among = List.init nb Fun.id @ List.filter (fun j -> j <> pos) (List.init (Array.length nots.(k)) (fun i -> first + i)) in
+        choose_order ~atoms ~among ctx.v r pos
+      end
+      else if pos = -2 then choose_order ctx.v r pos
+      else order_of ctx ri pos
+  in
   (* the matched atom binds first *)
   let matched : Query.pattern option =
-    if pos >= 0 then Some atoms.(pos) else if pos = -1 then (match r.head with Give h -> Some h | Never -> None) else None
+    if pos >= 0 then Some atoms.(pos) else if pos = -1 || pos = -3 then (match r.head with Give h -> Some h | Never -> None) else None
   in
   let unify_e, unify_v, unify_p =
     match matched with
@@ -709,6 +762,8 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
         | t -> let g = getter ~head:false t in fun e -> e = g ()
       in
       let uv =
+        if pos = -3 then fun _ -> true
+        else
         match a.v with
         | Query.Var x when not bound.(x) -> bound.(x) <- true; fun w -> env.(x) <- w; in_range x w
         | Query.Var x -> fun w -> env.(x) = w
@@ -717,7 +772,8 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
       (* the property: a variable bound by the fact, its type checked against the value side; a constant's type
          given to a value variable without a type of its own *)
       let up =
-        if a.p >= 0 then
+        if pos = -3 then fun _ -> true
+        else if a.p >= 0 then
           match a.v with
           | Query.Var x when sty.(x) = None -> let t = ptype ctx.v a.p in fun _ -> dty.(x) <- t; true
           | _ -> fun _ -> true
@@ -775,8 +831,9 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
     if xp >= 0 && not bound.(xp) then invalid_arg "Reason.compile: a property variable joined before its binder";
     (* the step's property, read at each call when it is a variable *)
     let cp = ref a.p in
-    let strict = pos >= 0 && j < pos in
-    let lim () = if strict then ctx.round - 1 else ctx.round in
+    let source = if j >= nb then nsrc else source in
+    let strict = pos >= 0 && pos < nb && j < pos in
+    let lim () = if j >= nb then max_int else if strict then ctx.round - 1 else ctx.round in
     let known = function Query.Var x -> bound.(x) | _ -> true in
     let ke = known a.e and kv = known a.v in
     let same = match a.e, a.v with Query.Var x, Query.Var y -> x = y | _ -> false in
@@ -796,10 +853,13 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
           if (if x >= 0 then vis x (lim ()) else in_view p && S.mem ctx.v e p w) then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
       | Proved, true, true ->
         fun () -> let p = !cp in let e = ge () and w = gv () in if find pt e p w >= 0 then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
+      | Old, true, true ->
+        fun () -> let p = !cp in let e = ge () and w = gv () in if S.mem ctx.v0 e p w then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
       | _, true, false ->
         bound.(xv) <- true;
         let on w = if in_range xv w then (env.(xv) <- w; pl.bw.(j) <- w; next ()) in
-        if source = Proved then
+        if source = Old then fun () -> let e = ge () in pl.be.(j) <- e; S.iter_values ctx.v0 e !cp on
+        else if source = Proved then
           fun () ->
             let p = !cp in
             let e = ge () in
@@ -829,7 +889,8 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
       | _, false, true ->
         bound.(xe) <- true;
         let on e = if in_range xe e then (env.(xe) <- e; pl.be.(j) <- e; next ()) in
-        if source = Proved then
+        if source = Old then fun () -> let w = gv () in pl.bw.(j) <- w; S.iter_things ctx.v0 !cp w on
+        else if source = Proved then
           fun () ->
             let p = !cp in
             let w = gv () in
@@ -868,7 +929,8 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
             next ()
           end
         in
-        if source = Proved then
+        if source = Old then fun () -> S.iter_prop ctx.v0 !cp on
+        else if source = Proved then
           fun () ->
             let p = !cp in
             let x = ref (idx_head pt.ip p 0) in
@@ -900,17 +962,121 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
         if t >= 0 && fits t then (cp := p; pl.bp.(j) <- p; s ())
     end
   in
+  (* A Not: no binding of its own variables makes its patterns facts, its outer variables fixed (an anti-join). Its
+     patterns are read each time the one with the most of its sides known, the first fact found ending the search;
+     one pattern with both sides known is one lookup. It reads the lower strata, which are complete: every fact,
+     whatever its round. *)
+  let nn = Array.length nots in
+  let not_check g : unit -> bool =
+    let ps = nots.(g) in
+    let lb = Array.copy bound in
+    List.iter (fun x -> lb.(x) <- false) owns.(g);
+    let known = function Query.Var x -> lb.(x) | _ -> true in
+    let mark = function Query.Var x -> lb.(x) <- true | _ -> () in
+    let rest = ref (Array.to_list ps) and ord = ref [] in
+    while !rest <> [] do
+      let score (q : Query.pattern) = (if known q.e then 2 else 0) + if known q.v then 1 else 0 in
+      let q = List.fold_left (fun b q -> if score q > score b then q else b) (List.hd !rest) !rest in
+      ord := (q, known q.e, known q.v) :: !ord;
+      mark q.e;
+      mark q.v;
+      rest := List.filter (fun q' -> q' != q) !rest
+    done;
+    let before = nmode = Before in
+    let[@inline] now_has e p w =
+      let x = find ws e p w in
+      if x >= 0 then Char.code (Bytes.unsafe_get ws.now x) > 0 else in_view p && S.mem ctx.v e p w
+    in
+    let var = function Query.Var x -> x | _ -> -1 in
+    let rec chain = function
+      | [] -> fun () -> raise_notrace Witness
+      | ((q : Query.pattern), ke, kv) :: rest -> (
+        let p = q.p and next = chain rest in
+        let ge = getter ~head:false q.e and gv = getter ~head:false q.v in
+        let xe = var q.e and xv = var q.v in
+        match ke, kv with
+        | true, true ->
+          if before then (fun () -> if S.mem ctx.v0 (ge ()) p (gv ()) then next ())
+          else fun () -> if now_has (ge ()) p (gv ()) then next ()
+        | true, false ->
+          let on w = if in_range xv w then (env.(xv) <- w; next ()) in
+          if before then fun () -> S.iter_values ctx.v0 (ge ()) p on
+          else
+            fun () ->
+              let e = ge () in
+              if in_view p then S.iter_values ctx.v e p (fun w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on w);
+              let x = ref (idx_head ws.ie p e) in
+              while !x >= 0 do
+                let y = !x in
+                if fe ws y = e && fp ws y = p && now ws y > 0 then on (fw ws y);
+                x := idx_next ws.ie y
+              done
+        | false, true ->
+          let on e = if in_range xe e then (env.(xe) <- e; next ()) in
+          if before then fun () -> S.iter_things ctx.v0 p (gv ()) on
+          else
+            fun () ->
+              let w = gv () in
+              if in_view p then S.iter_things ctx.v p w (fun e -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e);
+              let x = ref (idx_head ws.iw p w) in
+              while !x >= 0 do
+                let y = !x in
+                if fw ws y = w && fp ws y = p && now ws y > 0 then on (fe ws y);
+                x := idx_next ws.iw y
+              done
+        | false, false ->
+          let on e w = if (xe <> xv || e = w) && in_range xe e && in_range xv w then (env.(xe) <- e; env.(xv) <- w; next ()) in
+          if before then fun () -> S.iter_prop ctx.v0 p on
+          else
+            fun () ->
+              if in_view p then S.iter_prop ctx.v p (fun e w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e w);
+              (* the working set's own facts of p: its chain by property (kept but in a load, which refuses Nots) *)
+              let x = ref (idx_head ws.ip p 0) in
+              while !x >= 0 do
+                let y = !x in
+                if fp ws y = p && now ws y > 0 then on (fe ws y) (fw ws y);
+                x := idx_next ws.ip y
+              done)
+    in
+    match List.rev !ord with
+    | [ (q, true, true) ] ->
+      let ge = getter ~head:false q.e and gv = getter ~head:false q.v and p = q.p in
+      if before then fun () -> not (S.mem ctx.v0 (ge ()) p (gv ())) else fun () -> not (now_has (ge ()) p (gv ()))
+    | ord -> let body = chain ord in fun () -> match body () with () -> true | exception Witness -> false
+  in
+  let outer_of = Array.mapi (fun g ps -> List.filter (fun x -> not (List.mem x owns.(g))) (List.sort_uniq compare (List.concat_map (fun (q : Query.pattern) -> List.filter_map (function Query.Var x -> Some x | _ -> None) [ q.e; q.v ]) (Array.to_list ps)))) nots in
+  let placed = Array.make nn false in
+  (* the Nots whose outer variables are bound now; a flip's are checked last (its steps bind a Not's own variables) *)
+  let ready ~last =
+    let l = ref [] in
+    if last || pos < nb then
+      for g = nn - 1 downto 0 do
+        if (not placed.(g)) && (last || List.for_all (fun x -> bound.(x)) outer_of.(g)) then (placed.(g) <- true; l := g :: !l)
+      done;
+    !l
+  in
+  let guard gs (next : unit -> unit) =
+    match List.map not_check gs with
+    | [] -> next
+    | [ c ] -> fun () -> if c () then next ()
+    | cs -> let cs = Array.of_list cs in fun () -> if Array.for_all (fun c -> c ()) cs then next ()
+  in
   (* the steps built from the first, so that each sees the variables the earlier ones bind: [step] marks the
      variables it binds before the rest is built *)
   let rec build = function
-    | [] -> final
+    | [] -> if nn = 0 then final else guard (ready ~last:true) final
     | j :: rest ->
       let s = ref (fun () -> ()) in
       let mk = step j (fun () -> !s ()) in
-      s := build rest;
+      if nn = 0 then s := build rest
+      else begin
+        let gs = ready ~last:false in
+        let b = build rest in
+        s := guard gs b
+      end;
       mk
   in
-  let body = build (Array.to_list order) in
+  let body = if nn = 0 then build (Array.to_list order) else (let gs = ready ~last:false in guard gs (build (Array.to_list order))) in
   pl.run <-
     (fun e p w ->
       if pos = -1 then (pl.he <- e; pl.hp <- p; pl.hw <- w; pl.hok <- true);
@@ -920,9 +1086,9 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ri pos source (k : pla
       end);
   pl
 
-let [@inline never] make_disp ctx (ix : index) source k =
+let [@inline never] make_disp ?nmode ctx (ix : index) source k =
   { ix; pa = Array.make (Array.length ix.slots) dummy;
-    mk = (fun s -> let ri, pos = ix.slots.(s) in compile ctx ri pos source k) }
+    mk = (fun s -> let ri, pos = ix.slots.(s) in compile ctx ?nmode ri pos source k) }
 
 (* ---- making a program ---- *)
 
@@ -933,13 +1099,17 @@ let plain_atom (a : Query.pattern) = a.p >= 0 && (match a.e, a.v with Query.Var 
 let ev (a : Query.pattern) = match a.e, a.v with Query.Var x, Query.Var y -> x, y | _ -> -1, -1
 
 (* the closure modules of a rule set, and the rules they run *)
-let [@inline never] find_modules (v : Store.view) (rules : Rules.t array) =
+let [@inline never] find_modules ?(plain = fun _ -> true) ?dep (v : Store.view) (rules : Rules.t array) =
   let n = Array.length rules in
+  (* what each rule reads: its patterns, its Nots' too *)
+  let dep = match dep with Some d -> d | None -> rules in
   let prop p = Schema.find v.schema p in
   let link p = match prop p with Some d -> d.typ = Value.Tlink | None -> false in
   let closable p = match prop p with Some d -> d.typ = Value.Tlink && d.many && not d.unique | None -> false in
   let shape ri =
     let r = rules.(ri) in
+    if not (plain ri) then None
+    else
     match r.where, r.head, r.ranges with
     | [ a1; a2 ], Rules.Give h, [] when plain_atom a1 && plain_atom a2 && plain_atom h ->
       let hx, hz = ev h in
@@ -982,7 +1152,7 @@ let [@inline never] find_modules (v : Store.view) (rules : Rules.t array) =
             (Array.mapi
                (fun rk (r : Rules.t) ->
                  rk = ri || rk = b
-                 || List.for_all (fun (a : Query.pattern) -> a.p >= 0 && a.p <> t) r.where
+                 || List.for_all (fun (a : Query.pattern) -> a.p >= 0 && a.p <> t) dep.(rk).where
                     && match r.head with Give h -> h.p >= 0 && h.p <> t && h.p <> e | Never -> true)
                rules)
         in
@@ -995,24 +1165,35 @@ let [@inline never] find_modules (v : Store.view) (rules : Rules.t array) =
   in
   Array.of_list modules, in_module
 
-let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(rules : Rules.t array) ~(ids : int array) ~(bad_head : string array) ~spec =
+let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(src : Rules.t array) ~(ids : int array) ~(bad_head : string array) ~spec =
   let np = Schema.count v.schema in
-  let sty = Array.map (fun (r : Rules.t) -> try Rules.static_types v r with Rules.Bad _ -> Array.make (max 1 r.vars) None) rules in
+  let shapes = Array.map Rules.split src in
+  let rules = Array.map (fun (sh : Rules.shape) -> sh.pos) shapes in
+  let nr = Array.length rules in
+  let nots = Array.map (fun (sh : Rules.shape) -> sh.nots) shapes and own = Array.map (fun (sh : Rules.shape) -> sh.own) shapes in
+  let aggs = Array.map (fun (sh : Rules.shape) -> sh.agg) shapes in
+  let natoms = Array.mapi (fun i r -> Array.append (atoms_of r) (Array.concat (Array.to_list nots.(i)))) rules in
+  let stratified = Array.exists (fun (sh : Rules.shape) -> sh.nots <> [||] || sh.agg <> None) shapes in
+  let strat = if not stratified then Array.make nr 0 else match Rules.strata v src with Ok a -> a | Error _ -> Array.make nr 0 in
+  let sty = Array.map (fun (r : Rules.t) -> try Rules.static_types v r with Rules.Bad _ -> Array.make (max 1 r.vars) None) src in
   let never = Array.map (fun (r : Rules.t) -> r.head = Never) rules in
+  let nstrata = 1 + Array.fold_left max 0 (Array.mapi (fun i s -> if never.(i) then 0 else s) strat) in
   let reads = Bytes.make np '\000' and all = ref 0 in
   let mark p b = if p < 0 then all := !all lor b else if p < np then Bytes.set reads p (Char.chr (Char.code (Bytes.get reads p) lor b)) in
   let consts = ref [] in
   let see_const = function Query.Val x when is_text_const x -> if not (List.mem x !consts) then consts := x :: !consts | _ -> () in
-  Array.iter
-    (fun (r : Rules.t) ->
-      List.iter (fun (a : Query.pattern) -> mark a.p 1; see_const a.v) r.where;
+  Array.iteri
+    (fun i (r : Rules.t) ->
+      Array.iter (fun (a : Query.pattern) -> mark a.p 1; see_const a.v) natoms.(i);
       match r.head with Give h -> mark h.p 2; see_const h.v | Never -> ())
     rules;
   (* a variable property reads or gives every property; the relations a program is unfolded on are read by its
      generic rules *)
   if !all <> 0 then Bytes.iteri (fun p c -> Bytes.set reads p (Char.chr (Char.code c lor !all))) reads;
   Array.iter (fun p -> mark p 1) also_reads;
-  let modules, in_module = find_modules v rules in
+  let plain ri = nots.(ri) = [||] && aggs.(ri) = None in
+  let dep = Array.mapi (fun i (r : Rules.t) -> { r with where = Array.to_list natoms.(i) }) rules in
+  let modules, in_module = find_modules ~plain ~dep v rules in
   let free_free = ref false in
   Array.iter
     (fun (r : Rules.t) ->
@@ -1021,16 +1202,41 @@ let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(rules : R
           if (pos >= 0 || r.head <> Never) && joins_free_free v r pos then free_free := true
         done)
     rules;
-  let give ri = not never.(ri) in
+  (* an ordinary rule: one fact an instance (not a constraint, not an aggregate) *)
+  let give ri = not never.(ri) && aggs.(ri) = None in
   let ix_lost = build_index np rules ~backward:false give in
   let walk_rule = Array.make (Array.length rules) false in
   Array.iter (fun (m : closure) -> if m.m_walk then (walk_rule.(m.m_rule) <- true; if m.m_base >= 0 then walk_rule.(m.m_base) <- true)) modules;
   let ix_lost_walk = if Array.exists Fun.id walk_rule then build_index np rules ~backward:false (fun ri -> give ri && not walk_rule.(ri)) else ix_lost in
-  { key; rules; ids; sty; never; bad_head; atoms = Array.map atoms_of rules; free_free = !free_free; np; reads;
+  let ix_ins = build_index np rules ~backward:false (fun ri -> give ri && not in_module.(ri)) in
+  let ix_ins_s =
+    if nstrata = 1 then [| ix_ins |]
+    else Array.init nstrata (fun s -> build_index np rules ~backward:false (fun ri -> give ri && (not in_module.(ri)) && strat.(ri) = s))
+  in
+  let pstrat = Array.make np [] and anystrat = ref (-1) and agg_rule = Array.make np (-1) in
+  Array.iteri
+    (fun i (r : Rules.t) ->
+      match r.head with
+      | Give h when h.p < 0 -> anystrat := strat.(i)
+      | Give h when h.p < np ->
+        pstrat.(h.p) <- ((if aggs.(i) <> None then -1 else Rules.node_word h.v), strat.(i)) :: pstrat.(h.p);
+        if aggs.(i) <> None then agg_rule.(h.p) <- i
+      | _ -> ())
+    rules;
+  { key; rules; src; natoms; nots; own; aggs; strat; nstrata; stratified; pstrat; anystrat = !anystrat; agg_rule; ix_ins_s;
+    ids; sty; never; bad_head; atoms = Array.map atoms_of rules; free_free = !free_free; np; reads;
     consts = Array.of_list (List.rev !consts); orders = Hashtbl.create 64; size = S.facts v; modules; in_module;
-    ix_ins = build_index np rules ~backward:false (fun ri -> give ri && not in_module.(ri)); ix_lost; ix_lost_walk; ix_pf = ix_lost;
+    ix_ins; ix_lost; ix_lost_walk; ix_pf = ix_lost;
     ix_bw = build_index np rules ~backward:true give; ix_cons = build_index np rules ~backward:false (fun ri -> never.(ri));
     spec; pool = ref []; pm = Mutex.create () }
+
+(* the stratum of a fact: the stratum of the rules whose heads give it, -1 when none does *)
+let fact_stratum prog p w =
+  if prog.anystrat >= 0 then prog.anystrat
+  else if p < 0 || p >= Array.length prog.pstrat then -1
+  else
+    let rec f = function [] -> -1 | (w', s) :: rest -> if w' < 0 || w' = w then s else f rest in
+    f (Array.unsafe_get prog.pstrat p)
 
 (* the generic program: the rules as written *)
 let [@inline never] make_gen (v : Store.view) =
@@ -1038,7 +1244,7 @@ let [@inline never] make_gen (v : Store.view) =
     List.filter_map (fun (id, (name, text)) -> match Rules.of_text name text with Ok r -> Some (id, r) | Error _ -> None) (Schema.rules v.schema)
   in
   let rules = Array.of_list (List.map snd parsed) and ids = Array.of_list (List.map fst parsed) in
-  build v ~key:(Schema.rules_key v.schema) ~rules ~ids ~bad_head:(Array.make (Array.length rules) "") ~spec:None
+  build v ~key:(Schema.rules_key v.schema) ~src:rules ~ids ~bad_head:(Array.make (Array.length rules) "") ~spec:None
 
 (* what a group is refused with when a rule gives a fact that does not fit: its thing not a thing, its property not one
    a rule can give, or its value not of the property's type *)
@@ -1358,7 +1564,7 @@ let [@inline never] make_spec ?unstable (v : Store.view) (gen : program) =
     in
     let parts = Array.of_list (reduce parts) in
     Some
-      (build ~also_reads:(Array.map fst rels) v ~key:gen.key ~rules:(Array.map (fun (_, r, _) -> r) parts) ~ids:(Array.map (fun (g, _, _) -> gen.ids.(g)) parts)
+      (build ~also_reads:(Array.map fst rels) v ~key:gen.key ~src:(Array.map (fun (_, r, _) -> r) parts) ~ids:(Array.map (fun (g, _, _) -> gen.ids.(g)) parts)
          ~bad_head:(Array.map (fun (_, _, b) -> b) parts) ~spec:(Some spec))
   end
 
@@ -1412,7 +1618,10 @@ let [@inline never] programs (v : Store.view) =
         | Some en when size <= (2 * en.gen.size) + 1024 && (2 * size) + 1024 >= en.gen.size && Schema.count v.schema = en.gen.np -> en
         | _ ->
           let gen = make_gen v in
-          let specialisable = Array.exists Fun.id (Array.mapi (fun g r -> small_atoms v ~counts:false r gen.sty.(g) <> None) gen.rules) in
+          (* rules with Not or aggregates run as written: their strata are the rules' *)
+          let specialisable =
+            (not gen.stratified) && Array.exists Fun.id (Array.mapi (fun g r -> small_atoms v ~counts:false r gen.sty.(g) <> None) gen.rules)
+          in
           (* the relations found to be the data's stay so while the rules do *)
           let unstable = match old with Some en -> en.unstable | None -> [] in
           let en = { gen; specs = []; nospec = false; specialisable; unstable } in
@@ -1466,12 +1675,15 @@ let [@inline never] choose (v : Store.view) (gen : program) (spec : program opti
 
 let [@inline never] new_ctx ?facts prog v =
   let nm = Array.length prog.modules in
-  { prog; ws = ws_create ?facts (); pt = ws_create (); v; round = max_int; cw = Array.make (Array.length prog.consts) (-1);
-    ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; bfq = Queue.create (); next = ints 64 0;
+  let bfq = Queue.create () in
+  { prog; ws = ws_create ?facts (); pt = ws_create (); v; v0 = v; cur = -1;
+    bfqs = Array.init prog.nstrata (fun s -> if s = 0 then bfq else Queue.create ()); ins_s = Array.make prog.nstrata None;
+    xplans = Hashtbl.create 8; round = max_int; cw = Array.make (Array.length prog.consts) (-1);
+    ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; bfq; next = ints 64 0;
     spare = ints 64 0; nn = 0; derived = 0; limit = max_int; vp = Bytes.empty;
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
-    seen2 = iset_create (); walked = Bytes.empty }
+    seen2 = iset_create (); walked = Bytes.empty; xk = ignore }
 
 let [@inline never] take ?facts prog v =
   let c =
@@ -1491,7 +1703,9 @@ let [@inline never] take ?facts prog v =
   Array.fill c.mbatch 0 (Array.length c.mbatch) (-1);
   Array.fill c.mfresh 0 (Array.length c.mfresh) false;
   Array.fill c.per_rule 0 (Array.length c.per_rule) 0;
-  Queue.clear c.bfq;
+  Array.iter Queue.clear c.bfqs;
+  c.v0 <- v;
+  c.cur <- -1;
   c.walked <- Bytes.empty;
   c
 
@@ -1567,6 +1781,25 @@ let emit c pl = emit_at c pl (c.round + 1)
 
 let ins_d c = match c.ins with Some d -> d | None -> let d = make_disp c c.prog.ix_ins State (emit c) in c.ins <- Some d; d
 
+(* insertion for stratum [s] *)
+let ins_s_d c s =
+  if c.prog.nstrata = 1 then ins_d c
+  else
+    match c.ins_s.(s) with
+    | Some d -> d
+    | None -> let d = make_disp c c.prog.ix_ins_s.(s) State (emit c) in c.ins_s.(s) <- Some d; d
+
+(* The plans of Not flips and aggregates, compiled at their first use in a context, their instances sent to [c.xk]:
+   by the reading of their positive patterns, of their Not's other patterns, and their Nots' check. *)
+let[@inline never] xplan c ri pos (source : source) (nsrc : source) (nmode : nmode) =
+  let code = (match source with State -> 0 | Proved -> 1 | Old -> 2) + (4 * match nsrc with State -> 0 | Proved -> 1 | Old -> 2) + (16 * match nmode with Now -> 0 | Before -> 1) in
+  match Hashtbl.find_opt c.xplans (ri, pos, code) with
+  | Some pl -> pl
+  | None ->
+    let pl = compile c ~nmode ~nsrc ri pos source (fun pl -> c.xk pl) in
+    Hashtbl.replace c.xplans (ri, pos, code) pl;
+    pl
+
 (* ---- the state ---- *)
 
 let[@inline] in_view c p = Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000')
@@ -1609,6 +1842,16 @@ let [@inline never] iter_all c p f =
   done
 
 (* ---- B/F and Why: the backward check, and proofs forward among the proved facts ---- *)
+
+(* is a fact decided for the stratum being maintained: given by rules of a lower stratum (complete), or by an
+   aggregate (its stratum's aggregates are computed first). A fact no rule gives is not: it holds when asserted *)
+let[@inline never] decided c x =
+  let p = fp c.ws x in
+  (p >= 0 && p < Array.length c.prog.agg_rule && c.prog.agg_rule.(p) >= 0)
+  || (let s = fact_stratum c.prog p (fw c.ws x) in s >= 0 && s < c.cur)
+
+(* the queue of B/F's candidates of a rule's stratum *)
+let[@inline] queue_of c ri = if c.prog.nstrata = 1 then c.bfq else Array.unsafe_get c.bfqs (Array.unsafe_get c.prog.strat ri)
 
 let rec plans c d =
   if d >= Array.length c.bwd then begin
@@ -1665,6 +1908,13 @@ and check c d x =
     set_mark ws x 1;
     incr checked;
     if base ws x = 1 then prove c d x
+    else if c.prog.stratified && decided c x then
+      (* a fact of a lower stratum, complete, or of an aggregate, computed before: present, it holds *)
+      (if now ws x > 0 then begin
+         let ri = let p = fp ws x in if p < Array.length c.prog.agg_rule then c.prog.agg_rule.(p) else -1 in
+         if ri >= 0 then (set_rule ws x ri; set_by ws x [||]);
+         prove c d x
+       end)
     else if Bytes.length c.walked > 0 && (let p = fp ws x in p < Bytes.length c.walked && Bytes.unsafe_get c.walked p <> '\000') then
       (* a fact of a closure its module decided in this group: present, it holds *)
       (if now ws x > 0 then prove c d x)
@@ -2104,9 +2354,9 @@ let [@inline never] module_round c mi (d : ints) nd r =
 
 (* semi-naive evaluation: [first] the [nf] facts of round 0, and facts of round 1 already waiting in the next
    round's list. The rounds' facts in two buffers taken in turn, out of the collector's sight *)
-let saturate c (first : ints) nf =
+let saturate ?(s = 0) c (first : ints) nf =
   let ws = c.ws in
-  let ins = ins_d c in
+  let ins = ins_s_d c s in
   let nm = Array.length c.prog.modules in
   let cur = ref first and ncur = ref nf and r = ref 0 in
   while !ncur > 0 || c.nn > 0 do
@@ -2116,7 +2366,7 @@ let saturate c (first : ints) nf =
       let x = A.unsafe_get d i in
       if now ws x > 0 && round ws x = !r then run_all ins (fe ws x) (fp ws x) (fw ws x)
     done;
-    for mi = 0 to nm - 1 do module_round c mi d !ncur !r done;
+    for mi = 0 to nm - 1 do if c.prog.strat.(c.prog.modules.(mi).m_rule) = s then module_round c mi d !ncur !r done;
     (* this round's buffer takes the next round's facts *)
     let nx = c.next and nn = c.nn in
     c.next <- (if d != first then d else c.spare);
@@ -2136,18 +2386,19 @@ let [@inline never] on_lost c pl =
                     && c.prog.in_module.(pl.ri)) then begin
     let ws = c.ws in
     let h = find ws pl.he pl.hp pl.hw in
-    if h >= 0 then (if now ws h > 0 && not (has ws h 4) then Queue.add h c.bfq)
+    if h >= 0 then (if now ws h > 0 && not (has ws h 4) then Queue.add h (queue_of c pl.ri))
     else
       (* one lookup: its state, present when above 0 *)
       let s = S.state c.v pl.he pl.hp pl.hw in
-      if s > 0 then Queue.add (add ws pl.he pl.hp pl.hw s) c.bfq
+      if s > 0 then Queue.add (add ws pl.he pl.hp pl.hw s) (queue_of c pl.ri)
   end
 
-let lost_d c = match c.lost with Some d -> d | None -> let d = make_disp c c.prog.ix_lost State (on_lost c) in c.lost <- Some d; d
+(* the instances a deleted fact took away were instances before the group: their Nots are checked there *)
+let lost_d c = match c.lost with Some d -> d | None -> let d = make_disp ~nmode:Before c c.prog.ix_lost State (on_lost c) in c.lost <- Some d; d
 
 (* B/F's dispatch when closures were retracted by walks: their own rules aside (their facts are decided) *)
 let lost_walk_d c =
-  match c.lost_walk with Some d -> d | None -> let d = make_disp c c.prog.ix_lost_walk State (on_lost c) in c.lost_walk <- Some d; d
+  match c.lost_walk with Some d -> d | None -> let d = make_disp ~nmode:Before c c.prog.ix_lost_walk State (on_lost c) in c.lost_walk <- Some d; d
 
 (* Retraction by walks (the design's section 5.7; Hu, Motik, Horrocks 2022), for a closure no other rule gives T or E
    to: its edges are the facts the group leaves asserted (prp-trp's T) or E's facts, so the group's retractions are
@@ -2303,13 +2554,14 @@ let module_retract c f0 (cands : int list) =
     List.filter (fun x -> not (Hashtbl.mem decided x)) cands
   end
 
-let [@inline never] backward_forward c (cands : int list) =
-  let ws = c.ws and q = c.bfq in
-  Queue.clear q;
+(* B/F for stratum [s] (Motik, Nenov, Piro, Horrocks 2019 for stratified rules: the strata in order, the lower ones
+   complete): its queue holds the candidates the lower strata's deletions and Nots gave it *)
+let [@inline never] backward_forward c s (cands : int list) =
+  let ws = c.ws and q = c.bfqs.(s) in
   plans c 0;
   let f0 = lost_d c in
   c.round <- max_int;
-  let cands = module_retract c (lost_walk_d c) cands in
+  let cands = if s = 0 then module_retract c (lost_walk_d c) cands else cands in
   let f0 = if Bytes.length c.walked > 0 then lost_walk_d c else f0 in
   List.iter (fun x -> Queue.add x q) cands;
   while not (Queue.is_empty q) do
@@ -2334,7 +2586,7 @@ let [@inline never] backward_forward c (cands : int list) =
     if has ws x 2 && now ws x = 0 then set_now ws x 2
   done;
   (* marks of B/F cleared (the proved table too): the insertion that follows reads states only *)
-  for x = 0 to ws.n - 1 do Bytes.unsafe_set ws.mark x (Char.unsafe_chr (Char.code (Bytes.unsafe_get ws.mark x) land 24)) done;
+  for x = 0 to ws.n - 1 do Bytes.unsafe_set ws.mark x (Char.unsafe_chr (Char.code (Bytes.unsafe_get ws.mark x) land 56)) done;
   reset c.pt
 
 (* every instance of a rule (not necessarily the program's: a removed one) over the state *)
@@ -2342,6 +2594,218 @@ let [@inline never] instances c ?extra ri (f : plan -> unit) =
   let pl = compile c ?extra ri (-2) State f in
   c.round <- max_int;
   pl.run 0 0 0
+
+(* ---- Not and aggregates, stratum by stratum ---- *)
+
+(* the facts the group made present and absent so far: in the working set, now against before the group *)
+let[@inline never] changed c =
+  let ws = c.ws in
+  let ins = ref [] and del = ref [] in
+  for x = ws.n - 1 downto 0 do
+    let o = old ws x > 0 and n = now ws x > 0 in
+    if n && not o then ins := x :: !ins else if o && not n then del := x :: !del
+  done;
+  !ins, !del
+
+(* every plan of rule [ri] whose matched pattern (from [first] on, below [upto]) may be the fact [x], run on it *)
+let[@inline never] run_matched c ri x ~first ~upto source nsrc nmode =
+  let ws = c.ws in
+  let atoms = c.prog.natoms.(ri) and p = fp ws x in
+  for j = first to upto - 1 do
+    let a = Array.unsafe_get atoms j in
+    if a.p = p || a.p < 0 then (xplan c ri j source nsrc nmode).run (fe ws x) p (fw ws x)
+  done
+
+(* Not flips for the ordinary rules of stratum [s] whose Nots read [x]: a fact made present that is a Nots' witness
+   takes away the instances whose Not held before the group (B/F's candidates); a fact gone, for [emit]ting, gives the
+   instances whose Not holds now *)
+let[@inline never] flips c s (xs : int list) ~present (k : plan -> unit) =
+  let prog = c.prog in
+  c.xk <- k;
+  c.round <- max_int;
+  Array.iteri
+    (fun ri (nots : Query.pattern array array) ->
+      if nots <> [||] && prog.aggs.(ri) = None && (if s < 0 then prog.never.(ri) else (not prog.never.(ri)) && prog.strat.(ri) = s) then begin
+        let nb = List.length prog.rules.(ri).where in
+        let na = Array.length prog.natoms.(ri) in
+        List.iter
+          (fun x ->
+            if present then run_matched c ri x ~first:nb ~upto:na State State Before
+            else run_matched c ri x ~first:nb ~upto:na State Old Now)
+          xs
+      end)
+    prog.nots
+
+(* an exact sum of ints: hi * 2^61 + lo, lo in [0, 2^61) *)
+let lo_mask = (1 lsl 61) - 1
+
+type acc = {
+  mutable hi : int;
+  mutable lo : int;
+  mutable cnt : int;  (* the answers, added less taken away *)
+  mutable minus : int;  (* the answers taken away *)
+  mutable amin : int;  (* the smallest and largest values added, and taken away *)
+  mutable amax : int;
+  mutable rmin : int;
+  mutable rmax : int;
+}
+
+let new_acc () = { hi = 0; lo = 0; cnt = 0; minus = 0; amin = max_int; amax = min_int; rmin = max_int; rmax = min_int }
+
+let add_sum a t =
+  let lo = a.lo + (t land lo_mask) in
+  if lo > lo_mask then (a.lo <- lo - lo_mask - 1; a.hi <- a.hi + 1 + (t asr 61)) else (a.lo <- lo; a.hi <- a.hi + (t asr 61))
+
+let sub_sum a t =
+  let lo = a.lo - (t land lo_mask) in
+  if lo < 0 then (a.lo <- lo + lo_mask + 1; a.hi <- a.hi - 1 - (t asr 61)) else (a.lo <- lo; a.hi <- a.hi - (t asr 61))
+
+let sum_value a = if a.hi >= -2 && a.hi <= 1 then Some ((a.hi lsl 61) + a.lo) else None
+
+let agg_head c ri = match c.prog.rules.(ri).head with Rules.Give h -> h.p | Never -> invalid_arg "Reason.agg_head"
+
+(* the aggregate's fact of group [k] goes, or comes: its consequences as any derived fact's *)
+let[@inline never] agg_delete c ri k w =
+  let ws = c.ws and p = agg_head c ri in
+  let x = intern c k p w in
+  check_frozen c p w;
+  set_now ws x 2;
+  c.round <- max_int;
+  run_all (lost_d c) k p w;
+  set_now ws x 0;
+  count_derived c ri
+
+let[@inline never] agg_insert c ri k w =
+  let ws = c.ws and p = agg_head c ri in
+  if k >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c ri) k;
+  check_frozen c p w;
+  let x = intern c k p w in
+  set_now ws x 2;
+  set_rule ws x ri;
+  set_round ws x 0;
+  count_derived c ri
+
+(* group [k]'s answers now, each sent to [f] (its value word): the head's thing bound *)
+let group_answers c ri k (f : int -> unit) =
+  c.xk <- (fun pl -> f pl.hw);
+  c.round <- max_int;
+  (xplan c ri (-3) State State Now).run k (agg_head c ri) 0
+
+let[@inline never] group_value c ri k =
+  let f = Option.get c.prog.aggs.(ri) in
+  match f with
+  | `Sum | `Count ->
+    let a = new_acc () in
+    group_answers c ri k (fun t -> a.cnt <- a.cnt + 1; add_sum a t);
+    if a.cnt = 0 then None
+    else if f = `Count then Some a.cnt
+    else (match sum_value a with Some x -> Some x | None -> refuse "rule %s: the sum of #%d is past the largest int" (rule_name c ri) k)
+  | `Min | `Max ->
+    let best = ref None in
+    group_answers c ri k (fun t -> best := Some (match !best with None -> t | Some b -> if f = `Min then min b t else max b t));
+    !best
+
+(* the value of an aggregate's group: [a] the change of its answers, [old] its fact's value before *)
+let[@inline never] new_value c ri k (a : acc) old =
+  let f = Option.get c.prog.aggs.(ri) in
+  match f, old with
+  | `Count, _ -> let n = Option.value old ~default:0 + a.cnt in if n > 0 then Some n else None
+  | `Sum, _ ->
+    (match old with Some w -> add_sum a w | None -> ());
+    if a.minus > 0 && (try group_answers c ri k (fun _ -> raise_notrace Exit); true with Exit -> false) then None
+    else (match sum_value a with Some x -> Some x | None -> refuse "rule %s: the sum of #%d is past the largest int" (rule_name c ri) k)
+  | `Min, Some w when a.minus > 0 && a.rmin <= w -> group_value c ri k
+  | `Max, Some w when a.minus > 0 && a.rmax >= w -> group_value c ri k
+  (* no fact before and no answer added: none now (an answer added may be max_int, or min_int: amin and amax tell
+     nothing alone) *)
+  | (`Min | `Max), None when a.cnt + a.minus = 0 -> None
+  | `Min, _ -> Some (min (Option.value old ~default:max_int) a.amin)
+  | `Max, _ -> Some (max (Option.value old ~default:min_int) a.amax)
+
+(* An aggregate kept up to date by difference (Sum and Count are linear: the change of the sum is the sum of the
+   changes, DBSP's rule, Budiu et al. 2023): the answers its body gained and lost, found from the facts the group
+   changed below it (by a positive pattern over the state now for a fact made present and over the state before for a
+   fact gone; by a Not's pattern the other way round), each once by its facts. Min and Max read their group again
+   when its extreme went, bounded by the group's size. A group without answers has no fact. *)
+let[@inline never] aggregate_rule c ri (ins : int list) (del : int list) =
+  let prog = c.prog and ws = c.ws in
+  let nb = List.length prog.rules.(ri).where and na = Array.length prog.natoms.(ri) in
+  let p = agg_head c ri in
+  let reads x = let q = fp ws x in Array.exists (fun (a : Query.pattern) -> a.p = q || a.p < 0) prog.natoms.(ri) in
+  let ins = List.filter reads ins and del = List.filter reads del in
+  if ins <> [] || del <> [] then begin
+    let groups : (int, acc) Hashtbl.t = Hashtbl.create 8 and seen : (int array, unit) Hashtbl.t = Hashtbl.create 16 in
+    let instance plus (pl : plan) =
+      let key = Array.make ((3 * nb) + 1) (if plus then 1 else 0) in
+      for j = 0 to nb - 1 do
+        key.(3 * j) <- pl.be.(j);
+        key.((3 * j) + 1) <- pl.bp.(j);
+        key.((3 * j) + 2) <- pl.bw.(j)
+      done;
+      if not (Hashtbl.mem seen key) then begin
+        Hashtbl.replace seen key ();
+        if Hashtbl.length seen > c.limit then
+          refuse "rule %s: more than %d answers of its aggregate changed in one group" (rule_name c ri) c.limit;
+        let a = match Hashtbl.find_opt groups pl.he with Some a -> a | None -> let a = new_acc () in Hashtbl.replace groups pl.he a; a in
+        let t = pl.hw in
+        if plus then (a.cnt <- a.cnt + 1; add_sum a t; if t < a.amin then a.amin <- t; if t > a.amax then a.amax <- t)
+        else (a.cnt <- a.cnt - 1; a.minus <- a.minus + 1; sub_sum a t; if t < a.rmin then a.rmin <- t; if t > a.rmax then a.rmax <- t)
+      end
+    in
+    c.round <- max_int;
+    c.xk <- instance true;
+    List.iter (fun x -> run_matched c ri x ~first:0 ~upto:nb State State Now) ins;
+    List.iter (fun x -> run_matched c ri x ~first:nb ~upto:na State Old Now) del;
+    c.xk <- instance false;
+    List.iter (fun x -> run_matched c ri x ~first:0 ~upto:nb Old Old Before) del;
+    List.iter (fun x -> run_matched c ri x ~first:nb ~upto:na Old State Before) ins;
+    (* the groups in the order they came: the same changes on the database and its forks *)
+    let order = Hashtbl.fold (fun k a l -> (k, a) :: l) groups [] |> List.sort (fun (a, _) (b, _) -> compare (a : int) b) in
+    List.iter
+      (fun (k, a) ->
+        let old = ref None in
+        iter_out c k p (fun w -> old := Some w);
+        let nv = new_value c ri k a !old in
+        if nv <> !old then begin
+          (match !old with Some w -> agg_delete c ri k w | None -> ());
+          match nv with Some w -> agg_insert c ri k w | None -> ()
+        end)
+      order
+  end
+
+(* an aggregate defined by the group: every group of its answers over the state, and its facts set to them *)
+let[@inline never] aggregate_all c ri =
+  let f = Option.get c.prog.aggs.(ri) and p = agg_head c ri in
+  let groups : (int, acc) Hashtbl.t = Hashtbl.create 64 in
+  c.round <- max_int;
+  let pl = compile c ri (-2) State (fun pl ->
+      let a = match Hashtbl.find_opt groups pl.he with
+        | Some a -> a
+        | None ->
+          if Hashtbl.length groups >= c.limit then refuse "rule %s derived more than %d facts" (rule_name c ri) c.limit;
+          let a = new_acc () in Hashtbl.replace groups pl.he a; a in
+      let t = pl.hw in
+      a.cnt <- a.cnt + 1; add_sum a t; if t < a.amin then a.amin <- t; if t > a.amax then a.amax <- t) in
+  pl.run 0 0 0;
+  let value k (a : acc) =
+    match f with
+    | `Count -> a.cnt
+    | `Sum -> (match sum_value a with Some x -> x | None -> refuse "rule %s: the sum of #%d is past the largest int" (rule_name c ri) k)
+    | `Min -> a.amin
+    | `Max -> a.amax
+  in
+  let have = ref [] in
+  iter_all c p (fun k w -> have := (k, w) :: !have);
+  let kept = Hashtbl.create 64 in
+  List.iter
+    (fun (k, w) ->
+      match Hashtbl.find_opt groups k with
+      | Some a when value k a = w -> Hashtbl.replace kept k ()
+      | _ -> agg_delete c ri k w)
+    (List.sort compare !have);
+  Hashtbl.fold (fun k a l -> (k, a) :: l) groups []
+  |> List.sort (fun (a, _) (b, _) -> compare (a : int) b)
+  |> List.iter (fun (k, a) -> if not (Hashtbl.mem kept k) then agg_insert c ri k (value k a))
 
 let[@inline never] value_of (v : Store.view) p w =
   match Schema.find v.schema p with Some d -> S.value v d.typ w | None -> Value.Int w
@@ -2382,11 +2846,22 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
 
 and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
     let reads p = if p < prog.np then Char.code (Bytes.unsafe_get prog.reads p) else 0 in
+    (* an aggregate's property holds only what its rule gives: no write asserts it, under the rules after the group (a
+       retraction of its fact, derived only, is refused before, by Resolve, with the same message; a retraction of an
+       asserted fact is one of a property an aggregate defined in this group takes over, which Resolve checks holds
+       none after it) *)
+    if prog.stratified then
+      Array.iter
+        (fun (ch : Group.change) ->
+          if ch.kind <> Retracted && ch.p >= 0 && ch.p < Array.length prog.agg_rule && Array.unsafe_get prog.agg_rule ch.p >= 0 then
+            raise (Refused (agg_message v ch.p)))
+        changes;
     (* nothing the rules read or give: nothing to do *)
     if same && Array.for_all (fun (ch : Group.change) -> reads ch.p = 0) changes then v, changes
     else
     with_ctx ~prog v (fun c ->
         let ws = c.ws in
+        c.v0 <- v0;
         c.limit <- !budget_base + (!budget_per * Array.length changes);
         Array.iteri (fun mi (m : closure) -> c.mfresh.(mi) <- S.count_prop v0 m.m_t = 0) prog.modules;
         (* the rules removed or changed, and added or changed, by this group *)
@@ -2396,13 +2871,21 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
         let added_idx = List.filter_map (fun (id, _) -> let rec f i = if i >= Array.length prog.ids then None else if prog.ids.(i) = id then Some i else f (i + 1) in f 0) added in
         (* the asserted changes the rules may read: round 0, or candidates of B/F *)
         let cands = ref [] and first = ref [] in
-        (* first the state each fact is left in by the group's last change of it, which is its state in [v]: no lookup *)
+        (* first the state each fact is left in by the group's last change of it, which is its state in [v]: no lookup;
+           its state before the group is the one its first change found *)
         Array.iteri
           (fun i (ch : Group.change) ->
             if reads ch.p <> 0 then begin
               let w = words.(i) and s = Group.after ch.kind in
               let x = find ws ch.e ch.p w in
-              if x < 0 then ignore (add ws ch.e ch.p w s)
+              if x < 0 then begin
+                let x = add ws ch.e ch.p w s in
+                match ch.kind with
+                | Added -> Bytes.unsafe_set ws.old x '\000'
+                | Retracted -> Bytes.unsafe_set ws.old x '\001'
+                | Now_asserted -> Bytes.unsafe_set ws.old x '\002'
+                | _ -> ()
+              end
               else (Bytes.unsafe_set ws.base x (Char.unsafe_chr s); Bytes.unsafe_set ws.now x (Char.unsafe_chr s))
             end)
           changes;
@@ -2414,10 +2897,11 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
               match ch.kind with
               | Retracted ->
                 (* no longer asserted, but still in the state until B/F decides (Motik et al. 2015: E loses it at
-                   once, the materialisation only once it is disproved); not when the group asserted it again after *)
+                   once, the materialisation only once it is disproved); not when the group asserted it again after;
+                   with strata, a fact no rule gives is gone at once (no lower stratum may see it present) *)
                 if base ws x = 0 && not (has ws x 16) then begin
                   set_mark ws x 16;
-                  set_now ws x 2;
+                  set_now ws x (if prog.stratified && fact_stratum prog ch.p words.(i) < 0 then 0 else 2);
                   cands := x :: !cands
                 end
               | Added when r land 1 <> 0 && base ws x = 1 && round ws x <> 0 ->
@@ -2426,17 +2910,20 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
               | _ -> ()
             end)
           changes;
-        (* the facts a removed rule gave: each loses a derivation *)
+        (* the facts a removed rule gave: each loses a derivation; an aggregate's, every fact of its property *)
         List.iter
           (fun (_, (name, text)) ->
             match Rules.of_text name text with
             | Error _ -> ()
             | Ok r -> (
-              match r.head with
+              let sh = Rules.split r in
+              match sh.pos.head with
               | Never -> ()
+              | Give h when sh.agg <> None ->
+                if Schema.find c.v.schema h.p <> None then iter_all c h.p (fun e w -> cands := intern c e h.p w :: !cands)
               | Give h ->
                 (* a removed rule over properties that are gone has no instance *)
-                if List.for_all (fun (a : Query.pattern) -> a.p < 0 || Schema.find c.v.schema a.p <> None) r.where
+                if List.for_all (fun (a : Query.pattern) -> a.p < 0 || Schema.find c.v.schema a.p <> None) sh.pos.where
                    && (h.p < 0 || Schema.find c.v.schema h.p <> None)
                 then
                   instances c ~extra:r (-1) (fun pl ->
@@ -2446,33 +2933,73 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
                         else if S.state c.v pl.he pl.hp pl.hw = 2 then cands := add ws pl.he pl.hp pl.hw 2 :: !cands
                       end)))
           removed;
-        if !cands <> [] then backward_forward c (List.rev !cands);
-        (* an added rule: the facts it gives over the state, at round 1; the module of an added closure, from
-           scratch *)
-        List.iter
-          (fun ri ->
-            if not (prog.never.(ri) || prog.in_module.(ri)) then
-              instances c ri (fun pl -> emit_at c pl 1))
-          added_idx;
-        Array.iteri
-          (fun mi (m : closure) ->
-            if List.mem m.m_rule added_idx || (m.m_base >= 0 && List.mem m.m_base added_idx) then begin
-              c.round <- 0;
-              let t0 = Unix.gettimeofday () in
-              batch c mi;
-              module_seconds := !module_seconds +. (Unix.gettimeofday () -. t0);
-              c.mbatch.(mi) <- 0;
-              c.round <- max_int
-            end)
-          prog.modules;
-        if !first <> [] || c.nn > 0 then begin
-          let l = List.rev !first in
-          let n = List.length l in
-          let a = ints (max 1 n) 0 in
-          List.iteri (fun i x -> A.unsafe_set a i x) l;
-          saturate c a n
-        end;
-        (* the constraints: an instance that involves a fact this group made present refuses it *)
+        let cands = List.rev !cands in
+        (* with strata, a candidate no rule gives any more (a removed rule's) and not asserted is gone at once, as an
+           asserted retraction of such a fact is: the strata's aggregates and Nots read it absent; B/F still takes its
+           losses to the rules that read it *)
+        if prog.stratified then
+          List.iter
+            (fun x -> if base ws x <> 1 && now ws x > 0 && fact_stratum prog (fp ws x) (fw ws x) < 0 then (set_now ws x 0; count_derived c (-1)))
+            cands;
+        (* the strata in order: each one's aggregates, its candidates (B/F), then its insertion (semi-naive); with one
+           stratum and no Not and no aggregate, exactly the steps of the rules without them *)
+        let ns = prog.nstrata in
+        let in_stratum s x = ns = 1 || max 0 (fact_stratum prog (fp ws x) (fw ws x)) = s in
+        for s = 0 to ns - 1 do
+          c.cur <- s;
+          let cands_s = if ns = 1 then cands else List.filter (in_stratum s) cands in
+          if prog.stratified then begin
+            let ins, del = changed c in
+            Array.iteri
+              (fun ri a -> if a <> None && prog.strat.(ri) = s then if List.mem ri added_idx then aggregate_all c ri else aggregate_rule c ri ins del)
+              prog.aggs;
+            flips c s ins ~present:true (on_lost c);
+          end;
+          if cands_s <> [] || not (Queue.is_empty c.bfqs.(s)) then backward_forward c s cands_s;
+          (* an added rule: the facts it gives over the state, at round 1; the module of an added closure, from
+             scratch *)
+          List.iter
+            (fun ri ->
+              if not (prog.never.(ri) || prog.in_module.(ri) || prog.aggs.(ri) <> None) && prog.strat.(ri) = s then
+                instances c ri (fun pl -> emit_at c pl 1))
+            added_idx;
+          Array.iteri
+            (fun mi (m : closure) ->
+              if prog.strat.(m.m_rule) = s && (List.mem m.m_rule added_idx || (m.m_base >= 0 && List.mem m.m_base added_idx)) then begin
+                c.round <- 0;
+                let t0 = Unix.gettimeofday () in
+                batch c mi;
+                module_seconds := !module_seconds +. (Unix.gettimeofday () -. t0);
+                c.mbatch.(mi) <- 0;
+                c.round <- max_int
+              end)
+            prog.modules;
+          (* round 0: the group's asserted additions; with strata, every fact the group made present so far (the
+             lower strata's, this stratum's aggregates'), their rounds set to 0 *)
+          let first =
+            if not prog.stratified then List.rev !first
+            else begin
+              let l = ref [] in
+              for x = ws.n - 1 downto 0 do
+                if now ws x > 0 && old ws x = 0 then (set_round ws x 0; l := x :: !l)
+              done;
+              !l
+            end
+          in
+          if prog.stratified then begin
+            let _, del = changed c in
+            flips c s del ~present:false (fun pl -> emit_at c pl 1)
+          end;
+          if first <> [] || c.nn > 0 then begin
+            let n = List.length first in
+            let a = ints (max 1 n) 0 in
+            List.iteri (fun i x -> A.unsafe_set a i x) first;
+            saturate ~s c a n
+          end
+        done;
+        c.cur <- -1;
+        (* the constraints: an instance that involves a fact this group made present refuses it, or whose Not the
+           group made true *)
         if Array.exists Fun.id prog.never then begin
           let violation pl =
             let r = prog.rules.(pl.ri) in
@@ -2491,6 +3018,7 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
           for x = 0 to ws.n - 1 do
             if now ws x > 0 && (base ws x = 0 || round ws x = 0) then run_all cons (fe ws x) (fp ws x) (fw ws x)
           done;
+          if prog.stratified then (let _, del = changed c in flips c (-1) del ~present:false violation);
           List.iter (fun ri -> if prog.never.(ri) then instances c ri violation) added_idx
         end;
         (* the changes: the asserted ones, then the derived, in the order they were found *)
@@ -2583,9 +3111,10 @@ let rec bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp 
 and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : Bulk.ints) n =
   let many_only p = match Schema.find v.schema p with Some d -> d.many && not d.unique | None -> false in
   let plain =
-    Array.for_all2
-      (fun never (r : Rules.t) -> (not never) && match r.head with Give h -> h.p < 0 || many_only h.p | Never -> false)
-      prog.never prog.rules
+    (not prog.stratified)
+    && Array.for_all2
+         (fun never (r : Rules.t) -> (not never) && match r.head with Give h -> h.p < 0 || many_only h.p | Never -> false)
+         prog.never prog.rules
   in
   if not plain then None
   else
@@ -2660,18 +3189,19 @@ let [@inline never] sources (v : Store.view) p =
     Hashtbl.replace seen p ();
     while (not !any) && not (Queue.is_empty q) do
       let x = Queue.pop q in
-      Array.iter
-        (fun (r : Rules.t) ->
+      (* a rule's Nots read their properties too: an absence tells of them *)
+      Array.iteri
+        (fun i (r : Rules.t) ->
           match r.head with
           | Give h when h.p = x || h.p < 0 ->
-            List.iter
+            Array.iter
               (fun (a : Query.pattern) ->
                 if a.p < 0 then any := true
                 else begin
                   Hashtbl.replace out a.p ();
                   if not (Hashtbl.mem seen a.p) then (Hashtbl.replace seen a.p (); Queue.add a.p q)
                 end)
-              r.where
+              prog.natoms.(i)
           | _ -> ())
         prog.rules
     done;
@@ -2729,6 +3259,20 @@ let [@inline never] why (v : Store.view) e p w =
           if base ws x = 1 then Given { e; p; v = value_of v p w }
           else
             match rule ws x, by ws x with
+            | ri, _ when ri >= 0 && c.prog.aggs.(ri) <> None ->
+              (* an aggregate's fact: the facts of every answer of its group, each proved *)
+              let nb = List.length c.prog.rules.(ri).where in
+              let facts = ref [] and seen = Hashtbl.create 16 in
+              c.xk <- (fun pl ->
+                  for j = 0 to nb - 1 do
+                    let y = intern c pl.be.(j) pl.bp.(j) pl.bw.(j) in
+                    if not (Hashtbl.mem seen y) then (Hashtbl.replace seen y (); facts := y :: !facts)
+                  done);
+              c.round <- max_int;
+              (xplan c ri (-3) State State Now).run e p 0;
+              let ys = List.rev !facts in
+              List.iter (fun y -> check c 0 y) ys;
+              By { rule = rule_name c ri; e; p; v = value_of v p w; from = List.map tree ys }
             | ri, ids when ri >= 0 ->
               By { rule = rule_name c ri; e; p; v = value_of v p w; from = Array.to_list (Array.map tree ids) }
             | _ -> failwith (Printf.sprintf "Reason.why: %s has no proof: the materialisation is wrong" (fact_text v e p w))
@@ -2738,6 +3282,9 @@ let [@inline never] why (v : Store.view) e p w =
 
 (* the message of a retraction of a fact only derived (choice 10.4 of the design) *)
 let [@inline never] derived_message (v : Store.view) e p w =
+  let gen, _ = programs v in
+  if p >= 0 && p < Array.length gen.agg_rule && gen.agg_rule.(p) >= 0 then agg_message v p
+  else
   match (try why v e p w with Failure _ -> None) with
   | Some (By { rule; from; _ }) ->
     let leaf = function Given g -> (g.e, g.p, g.v) | By b -> (b.e, b.p, b.v) in

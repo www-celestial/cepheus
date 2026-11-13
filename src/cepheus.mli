@@ -119,6 +119,20 @@ val prop_var : int -> int
     engine runs such a rule unfolded on that pattern's facts when they are few (one rule a fact, the property in
     place), and as written while a group changes them. Questions keep constant properties. *)
 
+val absent : int -> int -> int
+(** [absent k p]: in a rule's pattern, the property [p] of the rule's [k]-th Not (0 to 15). The rule's answers are
+    those for which no binding of the Not's own variables (those in no pattern outside Nots) makes all of its patterns
+    facts: the body [{ e = Var 0; p = ty; v = Thing invoice }; { e = Var 0; p = absent 0 paid_on; v = Var 1 }] reads
+    "?0 is an invoice and has no paid_on" (?1 is the Not's own). A Not
+    takes 1 to 4 patterns, their properties constants; the head's variables are outside Nots. A rule set where a
+    property depends on its own absence is refused at {!define}, naming the cycle. *)
+
+val aggregate : [ `Sum | `Count | `Min | `Max ] -> int -> int
+(** [aggregate f p]: in a rule's head, the property [p] (one-valued) given, for each thing of the head, the sum, the
+    count, the smallest or the largest value over the rule's answers; a thing without answers has no fact. Sum takes
+    ints or money, Min and Max ints, dates or money, Count's value is [Val (Int 0)]; a sum past the ints refuses its
+    group. The property is that rule's alone: no write asserts it and no other rule gives it. *)
+
 type rule = Rules.t = {
   name : string;  (** unique among the schema's names, properties' included *)
   vars : int;

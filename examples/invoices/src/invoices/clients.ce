@@ -32,8 +32,8 @@ end
 
 defn DeleteClient(id, by, db)
   (** Deletes a client that has no invoice: its fields are retracted, each as it was read (a change meanwhile refuses
-      the group), and it is marked Gone, which the rule NoInvoiceOfGone keeps without invoices. An Ok of missing, or an
-      Err: Code "has_invoices", "missing", "conflict", or "invalid" when an invoice came meanwhile. *)
+      the group); without a name, the rule NoInvoiceOfDeleted keeps it without invoices. An Ok of missing, or an Err:
+      Code "has_invoices", "missing", "conflict", or "invalid" when an invoice came meanwhile. *)
   c = GetClient(id, db)?
   if value.IsMissing(c)
     return result.Err({Code: "missing", Message: "There is no client $id."})
@@ -42,7 +42,7 @@ defn DeleteClient(id, by, db)
   if n > 0
     return result.Err({Code: "has_invoices", Message: "This client has $n invoices: it stays."})
   end
-  ops = [cepheus.Add(id, Client.Gone, true)]
+  ops = []
   for f in [{P: Client.Name, V: c.Name}, {P: Client.Search, V: c.Search}, {P: Client.Email, V: c.Email}, {P: Client.City, V: c.City}]
     if not value.IsMissing(f.V)
       ops = list.Concat([cepheus.Expect(id, f.P, f.V), cepheus.Retract(id, f.P, f.V)], ops)

@@ -4,6 +4,7 @@ use std/bug
 use std/fiber
 use std/list
 use std/result
+use std/text
 use std/value
 
 Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Email: cepheus.Text(unique = true), Tags: cepheus.Text(many = true)})
@@ -148,6 +149,18 @@ defn isFindOperatorRefusals()
   inCase = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.City, "Lyon"], [c, Client.City, "Paris"])], Give: {C: c}}, s.Db)
   own = cepheus.Find(2, (c, i) -> {Where: [[c, Client.Name, "Ada"], cepheus.Not([i, Invoice.Client, c])], Give: {I: i}}, s.Db)
   list.All([andTop.Error.Code == "invalid", inCase.Error.Code == "invalid", own.Error.Code == "invalid"])
+end
+
+defn isFindLeavesOutAnUnusedVariable()
+  (** A variable in no item of the question, as an optional filter left out, is left out; one Give names but no
+      pattern binds is refused by its field. *)
+  s = shop()?
+  q(city) = (c, n, y) -> {Where: list.Concat([[c, Client.Name, n]], if city == missing [] else [[c, Client.City, y], cepheus.Prefix(y, city)] end), Give: {Name: n}}
+  all = cepheus.Find(3, q(missing), s.Db)?
+  lyon = cepheus.Find(3, q("Ly"), s.Db)?
+  loose = cepheus.Find(2, (c, n) -> {Where: [[c, Client.City, "Lyon"]], Give: {Name: n}}, s.Db)
+  bug.Assert(loose.Error.Code == "invalid" and text.Contains("Give's Name", loose.Error.Message), loose.Error.Message)
+  value.Equal(list.Sort([r.Name for r in all]), ["Ada", "Bo"]) and value.Equal(lyon, [{Name: "Ada"}])
 end
 
 defn isFindManyValues()
@@ -350,9 +363,53 @@ end
 defn isRuleRefusedWithItsReason()
   t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
   loose = cepheus.Rule("loose", 3, (a, b, x) -> {Where: [[b, Bill.Account, a]], Then: [x, Account.Late, true]})
-  inside = cepheus.Rule("inside", 2, (a, b) -> {Where: [[b, Bill.Account, a], cepheus.Not([b, Bill.Status, "paid"])], Then: [a, Account.Late, true]})
+  inside = cepheus.Rule("inside", 2, (a, b) -> {Where: [[b, Bill.Account, a], cepheus.Or([b, Bill.Status, "paid"], [b, Bill.Status, "late"])], Then: [a, Account.Late, true]})
   named = cepheus.Rule("bill/Status", 2, (a, b) -> {Where: [[b, Bill.Account, a]], Then: [a, Account.Late, true]})
   value.Equal([cepheus.Define([loose], t).Error.Code, cepheus.Define([inside], t).Error.Code, cepheus.Define([named], t).Error.Code], ["invalid", "invalid", "invalid"])
+end
+
+Ledger = cepheus.Kind("ledger", {Name: cepheus.Text(), Bills: cepheus.Int(), Due: cepheus.Money(2), Smallest: cepheus.Money(2), Largest: cepheus.Money(2), Clean: cepheus.Bool()})
+
+dueOf = cepheus.Rule("due-of", 3, (l, b, x) -> {Where: [[b, Bill.Account, l], [b, Bill.Total, x]], Then: [l, Ledger.Due, cepheus.Sum(x)]})
+billsOf = cepheus.Rule("bills-of", 2, (l, b) -> {Where: [[b, Bill.Account, l]], Then: [l, Ledger.Bills, cepheus.Count()]})
+smallestOf = cepheus.Rule("smallest-of", 3, (l, b, x) -> {Where: [[b, Bill.Account, l], [b, Bill.Total, x]], Then: [l, Ledger.Smallest, cepheus.Min(x)]})
+largestOf = cepheus.Rule("largest-of", 3, (l, b, x) -> {Where: [[b, Bill.Account, l], [b, Bill.Total, x]], Then: [l, Ledger.Largest, cepheus.Max(x)]})
+cleanLedger = cepheus.Rule("clean-ledger", 3, (l, n, b) -> {Where: [[l, Ledger.Bills, n], cepheus.Not([b, Bill.Account, l], [b, Bill.Status, "late"])], Then: [l, Ledger.Clean, true]})
+
+defn isRuleWithNotAndAggregates()
+  (** Sum, Count, Min, Max and Not kept up to date at every write, over three strata: the ledger is clean when it has
+      bills and none of them is late. *)
+  t = cepheus.Fork(cepheus.Empty, [Ledger, Bill])?
+  cepheus.Define([dueOf, billsOf, smallestOf, largestOf, cleanLedger], t)?
+  l = cepheus.Insert(Ledger, {Name: "a"}, t)?
+  b1 = cepheus.Insert(Bill, {Account: l, Status: "paid", Total: 10}, t)?
+  b2 = cepheus.Insert(Bill, {Account: l, Status: "late", Total: 25}, t)?
+  first = cepheus.Get(Ledger, l, t)?
+  bug.Assert(first.Bills == 2 and first.Due == 35 and first.Smallest == 10 and first.Largest == 25 and first.Clean == missing, "two bills, one late")
+  cepheus.Update(Bill, b2, {Status: "paid"}, t)?
+  cepheus.Update(Bill, b1, {Total: 4}, t)?
+  g = cepheus.Get(Ledger, l, t)?
+  g.Clean == true and g.Due == 29 and g.Smallest == 4 and g.Largest == 25
+end
+
+defn isRuleLeavesOutAnUnusedVariable()
+  (** A rule's variable in no item of Where and Then is left out too. *)
+  t = cepheus.Fork(cepheus.Empty, [Account, Bill])?
+  late = cepheus.Rule("late-unused", 3, (a, b, spare) -> {Where: [[b, Bill.Account, a], [b, Bill.Status, "late"]], Then: [a, Account.Late, true]})
+  cepheus.Define([late], t)?
+  a = cepheus.Insert(Account, {Closed: false}, t)?
+  cepheus.Insert(Bill, {Account: a, Status: "late", Total: 3}, t)?
+  cepheus.Get(Account, a, t)?.Late == true
+end
+
+defn isAggregateYoursAlone()
+  (** An aggregate's property is its rule's: a write of it is refused, and a rule over its own absence too. *)
+  t = cepheus.Fork(cepheus.Empty, [Ledger, Bill, Account])?
+  cepheus.Define([dueOf], t)?
+  written = cepheus.Insert(Ledger, {Name: "b", Due: 3}, t)
+  cyc = cepheus.Rule("cycle", 2, (a, b) -> {Where: [[b, Bill.Account, a], cepheus.Not([a, Account.Late, true])], Then: [a, Account.Late, true]})
+  bounds = cepheus.Rule("bounds", 3, (a, b, x) -> {Where: [[b, Bill.Account, a], [b, Bill.Total, x], cepheus.Not([b, Bill.Status, "late"], cepheus.Above(x, 5))], Then: [a, Account.Late, true]})
+  value.Equal([written.Error.Code, cepheus.Define([cyc], t).Error.Code, cepheus.Define([bounds], t).Error.Code], ["invalid", "invalid", "invalid"])
 end
 
 Scans = cepheus.Files("scan")

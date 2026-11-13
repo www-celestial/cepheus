@@ -582,7 +582,6 @@ knows the structure beats the general compressors, with no C.
   et al. [Binnig 2009]) for ranges over texts.
 - **Rules, the next steps** ([rules](rules.md#what-is-not-here-yet)): the closure module for transitive properties
   (Hu, Motik and Horrocks' modular materialisation, [Hu 2019]), rules specialised by the ontology, sorted parallel derivations,
-  stratified negation and aggregates (aggregates kept by DBSP's rule for linear operators, Budiu et al. [Budiu 2023]),
   equality by rewriting; subscriptions by the delta rules of DBSP.
 - **Replication**: Raft [Ongaro 2014] with protocol-aware recovery [Alagappan 2018]; the journal is the only replicated thing (Aurora [Verbitski 2017]).
 - **Many machines**: databases spread over machines, then storage on object stores (Socrates [Antonopoulos 2019]), then a database

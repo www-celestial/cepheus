@@ -188,7 +188,211 @@ let least ?ptyp ?bad (rules : Rules.t list) (facts : F.t) =
   done;
   !s
 
-let violated (rules : Rules.t list) (m : F.t) = List.exists (fun (r : Rules.t) -> r.head = Never && heads r m <> []) rules
+(* ---- Not and aggregates: the perfect model of stratified rules, naively ----
+   A rule decoded on its own: its positive patterns, its Nots (their patterns' properties plain), its aggregate. An
+   answer is a binding of the variables of the positive patterns that passes the ranges of those variables and every
+   Not: no binding of the Not's own variables (in its patterns only) passes the Not's patterns and the ranges of its own
+   variables. An aggregate gives each thing of its head the sum, count, smallest or largest value of its answers. The
+   strata are found again here, by longest paths (Bellman-Ford): a rule's stratum is at least that of a rule whose head
+   matches a pattern of its body, one more under a Not or for an aggregate, and equal to that of a rule whose head
+   matches its head; a growth past the number of rules is a cycle through a Not or an aggregate. *)
+
+type decoded = { src : Rules.t; pos : Query.pattern list; dnots : Query.pattern list list; dagg : Rules.agg option; dhead : Rules.head }
+
+let decode (r : Rules.t) =
+  let pos = List.filter (fun (q : Query.pattern) -> not (Rules.is_absent q.p)) r.where in
+  let ks = List.sort_uniq compare (List.filter_map (fun (q : Query.pattern) -> if Rules.is_absent q.p then Some (fst (Rules.absent_of q.p)) else None) r.where) in
+  let dnots =
+    List.map
+      (fun k ->
+        List.filter_map
+          (fun (q : Query.pattern) -> if Rules.is_absent q.p && fst (Rules.absent_of q.p) = k then Some { q with p = snd (Rules.absent_of q.p) } else None)
+          r.where)
+      ks
+  in
+  let dhead, dagg = match r.head with Give h when Rules.is_agg h.p -> let f, p = Rules.agg_of h.p in Give { h with p }, Some f | h -> h, None in
+  { src = r; pos; dnots; dagg; dhead }
+
+let plain_rule (d : decoded) = d.dnots = [] && d.dagg = None
+
+(* the bindings of [where] over the facts, [env] the variables bound before; unbound variables stay None *)
+let bindings ?types (facts : F.t) vars (where : Query.pattern list) ranges (env0 : Value.t option array) =
+  let fl = F.elements facts in
+  let out = ref [] in
+  let env = Array.copy env0 in
+  let typed i (x : Value.t) = match types with Some (t : Value.typ option array) -> (match t.(i) with Some ty -> Value.has_type ty x | None -> true) | None -> true in
+  let bind t (x : Value.t) =
+    match t with
+    | Query.Var i -> (match env.(i) with None -> if typed i x then (env.(i) <- Some x; true) else false | Some y -> Value.equal x y)
+    | Thing e -> Value.equal x (Value.Link e)
+    | Val y -> Value.equal x y
+  in
+  let num = function Value.Int a | Date a | Money a -> Some a | _ -> None in
+  let in_ranges () =
+    List.for_all (fun (i, lo, hi) -> match Option.bind env.(i) num, num lo, num hi with Some x, Some a, Some b -> x >= a && x <= b | _ -> false) ranges
+  in
+  let rec go = function
+    | [] -> if in_ranges () then out := Array.copy env :: !out
+    | (pt : Query.pattern) :: rest ->
+      List.iter
+        (fun (e, p, x) ->
+          if p = pt.p || pt.p < 0 then begin
+            let saved = Array.copy env in
+            if (pt.p >= 0 || bind (Query.Var (-1 - pt.p)) (Value.Link p)) && bind pt.e (Value.Link e) && bind pt.v x then go rest;
+            Array.blit saved 0 env 0 (Array.length env)
+          end)
+        fl
+  in
+  ignore vars;
+  go where;
+  List.sort_uniq compare !out
+
+(* the variables of a decoded rule's positive patterns *)
+let outer_vars (d : decoded) =
+  let outer = Array.make (max 1 d.src.vars) false in
+  List.iter
+    (fun (q : Query.pattern) ->
+      List.iter (function Query.Var x -> outer.(x) <- true | _ -> ()) [ q.e; q.v ];
+      if q.p < 0 then outer.(-1 - q.p) <- true)
+    d.pos;
+  outer
+
+(* does every Not of a decoded rule hold for a binding of its positive patterns, over the facts *)
+let nots_hold (d : decoded) (facts : F.t) (row : Value.t option array) =
+  let outer = outer_vars d in
+  List.for_all
+    (fun ps ->
+      let own = List.concat_map (fun (q : Query.pattern) -> List.filter_map (function Query.Var x when not outer.(x) -> Some x | _ -> None) [ q.e; q.v ]) ps in
+      let rg = List.filter (fun (x, _, _) -> List.mem x own) d.src.ranges in
+      bindings facts d.src.vars ps rg row = [])
+    d.dnots
+
+(* the answers of a decoded rule over the facts (each Not read on the same facts) *)
+let answers ?types (d : decoded) (facts : F.t) =
+  let r = d.src in
+  let outer = outer_vars d in
+  let pos_ranges = List.filter (fun (x, _, _) -> outer.(x)) r.ranges in
+  let rows = bindings ?types facts r.vars d.pos pos_ranges (Array.make (max 1 r.vars) None) in
+  List.filter (nots_hold d facts) rows
+
+(* the head facts of a plain-headed decoded rule's answers ([bad] as [heads]) *)
+let head_facts ?ptyp ?bad (d : decoded) rows =
+  match d.dhead with
+  | Never -> []
+  | Give h ->
+    let term (row : Value.t option array) = function Query.Var x -> row.(x) | Thing t -> Some (Value.Link t) | Val x -> Some x in
+    List.filter_map
+      (fun row ->
+        match term row h.e, (if h.p >= 0 then Some (Value.Link h.p) else row.(-1 - h.p)) with
+        | Some (Link e), Some (Link p) -> (
+          let x = Option.get (term row h.v) in
+          match ptyp, bad with
+          | Some pt, Some bad when has_var_prop d.src ->
+            (match if p >= Schema.first_prop then pt p else None with
+             | Some ty when Value.has_type ty x -> Some (e, p, x)
+             | _ -> bad := true; None)
+          | _ -> Some (e, p, x))
+        | _ -> (match bad with Some b -> b := true | None -> ()); None)
+      rows
+
+(* an aggregate's facts over the facts: one a thing of its head; [bad] when a sum passes the ints *)
+let agg_facts ?bad (d : decoded) rows =
+  match d.dhead, d.dagg with
+  | Give h, Some f ->
+    let groups = Hashtbl.create 8 in
+    let term (row : Value.t option array) = function Query.Var x -> Option.get row.(x) | Thing t -> Value.Link t | Val x -> x in
+    List.iter
+      (fun row ->
+        let k = term row h.e in
+        Hashtbl.replace groups k (term row h.v :: Option.value (Hashtbl.find_opt groups k) ~default:[]))
+      rows;
+    Hashtbl.fold
+      (fun k xs acc ->
+        let e = match k with Value.Link e -> e | _ -> -1 in
+        let num = function Value.Int a | Date a | Money a -> a | _ -> 0 in
+        let mk n = match List.hd xs with Value.Int _ -> Value.Int n | Date _ -> Date n | Money _ -> Money n | x -> x in
+        let value =
+          match f with
+          | `Count -> Value.Int (List.length xs)
+          | `Sum ->
+            (* exact: the high and low 30 bits summed apart, then the int it is, if any *)
+            let hi = List.fold_left (fun s x -> s + (num x asr 30)) 0 xs and lo = List.fold_left (fun s x -> s + (num x land 0x3fffffff)) 0 xs in
+            let hi = hi + (lo asr 30) and lo = lo land 0x3fffffff in
+            if hi >= min_int asr 30 && hi <= max_int asr 30 then mk ((hi lsl 30) + lo) else ((match bad with Some b -> b := true | None -> ()); mk 0)
+          | `Min -> mk (List.fold_left (fun m x -> min m (num x)) max_int xs)
+          | `Max -> mk (List.fold_left (fun m x -> max m (num x)) min_int xs)
+        in
+        (e, h.p, value) :: acc)
+      groups []
+  | _ -> []
+
+(* a term's constant for the strata: a thing or an inline value; texts and floats match any, as variables do *)
+let node_const = function
+  | Query.Thing c -> Some (Value.Link c)
+  | Val (Text _ | Float _) | Var _ -> None
+  | Val x -> Some x
+
+let node_value (x : Value.t) = match x with Int a | Date a | Money a | Link a -> a | Bool b -> if b then 1 else 0 | _ -> 0
+
+let nodes_match (p, v) (p', v') =
+  (p < 0 || p' < 0 || p = p') && match v, v' with Some a, Some b -> node_value a = node_value b | _ -> true
+
+(* each rule's stratum, or None for a cycle through a Not or an aggregate *)
+let strata_of (ds : decoded array) =
+  let n = Array.length ds in
+  let head i = match ds.(i).dhead with Give h -> Some (h.p, if ds.(i).dagg <> None || h.p < 0 then None else node_const h.v) | Never -> None in
+  let pnode (q : Query.pattern) = (q.p, node_const q.v) in
+  let s = Array.make n 0 and changed = ref true and cycle = ref false in
+  while !changed && not !cycle do
+    changed := false;
+    for i = 0 to n - 1 do
+      match head i with
+      | None -> ()
+      | Some hi ->
+        for j = 0 to n - 1 do
+          match head j with
+          | None -> ()
+          | Some hj ->
+            let need = ref s.(j) in
+            if List.exists (fun q -> nodes_match hi (pnode q)) ds.(j).pos then need := max !need (s.(i) + if ds.(j).dagg <> None then 1 else 0);
+            if List.exists (List.exists (fun q -> nodes_match hi (pnode q))) ds.(j).dnots then need := max !need (s.(i) + 1);
+            if i <> j && nodes_match hi hj then need := max !need s.(i);
+            if !need > s.(j) then (s.(j) <- !need; changed := true; if !need > n then cycle := true)
+        done
+    done
+  done;
+  if !cycle then None else Some s
+
+(* the perfect model: stratum by stratum, its aggregates over the strata below, then its rules to their fixpoint; the
+   least model when every rule is plain. Raises [Exit] for rules that are not stratified. *)
+let perfect ?ptyp ?bad (rules : Rules.t list) (facts : F.t) =
+  let ds = Array.of_list (List.map decode rules) in
+  if Array.for_all plain_rule ds then least ?ptyp ?bad rules facts
+  else
+    match strata_of ds with
+    | None -> raise Exit
+    | Some st ->
+      let types d = match ptyp with Some pt when has_var_prop d.src -> Some (rule_types pt { d.src with where = d.pos }) | _ -> None in
+      let m = ref facts in
+      let top = Array.fold_left max 0 st in
+      for s = 0 to top do
+        Array.iteri (fun i d -> if st.(i) = s && d.dagg <> None then List.iter (fun f -> m := F.add f !m) (agg_facts ?bad d (answers d !m))) ds;
+        let go = ref true in
+        while !go do
+          go := false;
+          Array.iteri
+            (fun i d ->
+              if st.(i) = s && d.dagg = None && d.dhead <> Never then
+                List.iter (fun f -> if not (F.mem f !m) then (m := F.add f !m; go := true)) (head_facts ?ptyp ?bad d (answers ?types:(types d) d !m)))
+            ds
+        done
+      done;
+      !m
+
+let stratified (rules : Rules.t list) = strata_of (Array.of_list (List.map decode rules)) <> None
+
+let violated (rules : Rules.t list) (m : F.t) =
+  List.exists (fun (r : Rules.t) -> r.head = Never && (let d = decode r in if plain_rule d then heads r m <> [] else answers d m <> [])) rules
 
 (* the facts of a view that are not about schema things, and those asserted *)
 let user_facts (v : Store.view) =

@@ -628,9 +628,10 @@ type question = {
   at : int array;
   typs : Value.typ array;
   order : Question.Top.order;
+  ren : int array;  (* each variable's number in [query], -1 when left out (in no item) *)
 }
 
-let question ctx name d qv nvars =
+let question ?(uses = []) ctx name d qv nvars =
     let q = map_of ctx name qv in
     let where, give, sort, limit, after =
       match C.fields question_keys q with
@@ -739,9 +740,52 @@ let question ctx name d qv nvars =
             | _ -> C.need ctx name "a variable, or Sum, Min, Max or Count" g))
         gvals
     in
-    let query = { Query.vars = nvars; where = List.rev !patterns; ranges = !ranges } in
-    let keys_v = List.filter_map (function Var j -> Some j | Agg _ -> None) (Array.to_list cols) in
-    let aggs = List.filter_map (function Agg g -> Some g | Var _ -> None) (Array.to_list cols) in
+    (* a variable in no item of Where, of Give, or of [uses] (a rule's Then), as an optional filter left out, is left
+       out: the others numbered again in their order; with every variable used, the question as it is *)
+    Array.iteri
+      (fun i c -> match c with
+        | (Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j)) when vtyp.(j) = None -> refuse "invalid" "Give's %s is a variable in no pattern of Where" names.(i)
+        | _ -> ())
+      cols;
+    let used = Array.make nvars false in
+    let use j = if j >= 0 && j < nvars then used.(j) <- true in
+    let use_t = function Query.Var j -> use j | _ -> () in
+    let rec use_item = function
+      | Question.Ask.Pattern (q : Query.pattern) -> use_t q.e; use_t q.v
+      | Range (j, _, _) | In (j, _) | Prefix (j, _) -> use j
+      | Not l -> List.iter use_item l
+      | Or alts -> List.iter (List.iter use_item) alts
+    in
+    List.iter (fun (q : Query.pattern) -> use_t q.e; use_t q.v) !patterns;
+    List.iter (fun (j, _, _) -> use j) !ranges;
+    List.iter use_item !extra;
+    Array.iter (function Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j) -> use j | Agg Wire.Count -> ()) cols;
+    let rec use_v v = match var v with Some j -> use j | None -> (match v with C.List l -> for i = 0 to C.length l - 1 do use_v (C.item ctx l i) done | C.Map m | C.Struct m -> Array.iter use_v (C.values m) | _ -> ()) in
+    List.iter use_v uses;
+    let ren = Array.make nvars (-1) in
+    let nv = ref 0 in
+    Array.iteri (fun j u -> if u then (ren.(j) <- !nv; incr nv)) used;
+    let nvars', patterns, ranges, extra, wcols =
+      if !nv = nvars then nvars, List.rev !patterns, !ranges, List.rev !extra, cols
+      else begin
+        let r j = ren.(j) in
+        let rt = function Query.Var j -> Query.Var (r j) | t -> t in
+        let rp (q : Query.pattern) = { q with e = rt q.e; v = rt q.v } in
+        let rec ri = function
+          | Question.Ask.Pattern q -> Question.Ask.Pattern (rp q)
+          | Range (j, lo, hi) -> Range (r j, lo, hi)
+          | In (j, l) -> In (r j, l)
+          | Prefix (j, p) -> Prefix (r j, p)
+          | Not l -> Not (List.map ri l)
+          | Or alts -> Or (List.map (List.map ri) alts)
+        in
+        let rc = function Var j -> Var (r j) | Agg (Wire.Sum j) -> Agg (Wire.Sum (r j)) | Agg (Wire.Min j) -> Agg (Wire.Min (r j)) | Agg (Wire.Max j) -> Agg (Wire.Max (r j)) | Agg Wire.Count -> Agg Wire.Count in
+        !nv, List.rev_map rp !patterns, List.map (fun (j, lo, hi) -> r j, lo, hi) !ranges, List.rev_map ri !extra, Array.map rc cols
+      end
+    in
+    let query = { Query.vars = nvars'; where = patterns; ranges } in
+    let keys_v = List.filter_map (function Var j -> Some j | Agg _ -> None) (Array.to_list wcols) in
+    let aggs = List.filter_map (function Agg g -> Some g | Var _ -> None) (Array.to_list wcols) in
     let select = if aggs = [] then Wire.Give (Array.of_list keys_v) else Wire.Group (Array.of_list keys_v, Array.of_list aggs) in
     (* the column of the answer for each field of Give: keys first, then aggregates, in their order *)
     let nk = List.length keys_v in
@@ -798,7 +842,7 @@ let question ctx name d qv nvars =
         { Question.Top.keys; limit; after }
       end
     in
-    { query; extra = List.rev !extra; select; qkeys = C.keys names; at; typs; order }
+    { query; extra; select; qkeys = C.keys names; at; typs; order; ren }
 
 (* a row of the answer (values) as the program's map *)
 let record_of_row ctx qn (row : Value.t array) = C.record ctx qn.qkeys (Array.init (Array.length qn.at) (fun i -> to_cesia qn.typs.(i) row.(qn.at.(i))))
@@ -975,22 +1019,55 @@ let rule_of ctx name d v =
   | [| C.Text rname; C.Int n; body |] -> (
     match C.fields body_keys (map_of ctx name body) with
     | [| (C.List _ as w); head |] ->
-      let qn = question ctx name d (C.record ctx where_give [| w; C.record ctx (C.keys [||]) [||] |]) n in
-      if qn.extra <> [] then refuse "invalid" "rule %s: a rule's Where holds patterns, Above, Below and Between; Not, Or, In and Prefix are for questions" rname;
+      let qn = question ~uses:[ head ] ctx name d (C.record ctx where_give [| w; C.record ctx (C.keys [||]) [||] |]) n in
+      (* a Not of Where is the rule's k-th Not: its patterns' properties [Rules.absent k p], its conditions the ranges
+         of its own variables *)
+      let nots = ref 0 and npats = ref [] and nranges = ref [] in
+      List.iter
+        (function
+          | Question.Ask.Not items ->
+            let k = !nots in
+            incr nots;
+            List.iter
+              (function
+                | Question.Ask.Pattern (q : Query.pattern) -> npats := { q with p = Rules.absent k q.p } :: !npats
+                | Range (j, lo, hi) ->
+                  (* a condition inside Not is on one of its own variables: on another, it would hold for the rule *)
+                  if List.exists (fun (q : Query.pattern) -> q.e = Query.Var j || q.v = Query.Var j) qn.query.where then
+                    refuse "invalid" "rule %s: a condition inside Not is on a variable of its own (in no pattern outside Not)" rname;
+                  nranges := (j, lo, hi) :: !nranges
+                | _ -> refuse "invalid" "rule %s: a Not of a rule holds patterns, Above, Below and Between" rname)
+              items
+          | _ -> refuse "invalid" "rule %s: a rule's Where holds patterns, Not, Above, Below and Between; Or, In and Prefix are for questions" rname)
+        qn.extra;
+      if !nots > Rules.max_nots then refuse "invalid" "rule %s: at most %d Nots" rname Rules.max_nots;
       let head =
         match head with
         | C.Text "cepheus.Never" -> Rules.Never
         | C.List l when C.length l = 3 ->
-          let var = function C.Handle ("cepheus.variable", k) when k < n -> Some k | _ -> None in
+          let var = function C.Handle ("cepheus.variable", k) when k < n -> Some qn.ren.(k) | _ -> None in
           let e = C.item ctx l 0 and p = C.item ctx l 1 and x = C.item ctx l 2 in
           let k, i = property_of ctx name p in
           let f = k.fields.(i) in
           let e = match var e, e with Some j, _ -> Query.Var j | None, C.Int t -> Query.Thing t | _ -> C.need ctx name "a variable or a thing's id first in Then" e in
-          let v = match var x with Some j -> Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x) in
-          Rules.Give { Query.e; p = (resolve_kind d k).ids.(i); v }
+          let pid = (resolve_kind d k).ids.(i) in
+          (* Sum, Min, Max of a variable, or Count: the head gives the property that aggregate of its answers *)
+          let agg f = Some f in
+          let a, v =
+            match x with
+            | C.Map m | C.Struct m -> (
+              match C.fields aggregate_keys m with
+              | [| s; C.Missing; C.Missing; C.Missing |] when var s <> None -> agg `Sum, Query.Var (Option.get (var s))
+              | [| C.Missing; s; C.Missing; C.Missing |] when var s <> None -> agg `Min, Query.Var (Option.get (var s))
+              | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> agg `Max, Query.Var (Option.get (var s))
+              | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> agg `Count, Query.Val (Value.Int 0)
+              | _ -> C.need ctx name "a value of Then: a variable, a value, or Sum, Min, Max of a variable, or Count()" x)
+            | _ -> None, (match var x with Some j -> Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x))
+          in
+          Rules.Give { Query.e; p = (match a with Some g -> Rules.aggregate g pid | None -> pid); v }
         | v -> C.need ctx name "Then: a pattern [thing, property, value], or cepheus.Never" v
       in
-      { Rules.name = rname; vars = n; where = qn.query.where; ranges = qn.query.ranges; head }
+      { Rules.name = rname; vars = qn.query.vars; where = qn.query.where @ List.rev !npats; ranges = qn.query.ranges @ List.rev !nranges; head }
     | _ -> C.need ctx name "a rule {Where: [patterns], Then: pattern}" body)
   | _ -> C.need ctx name "a rule, as cepheus.Rule makes it" v
 
