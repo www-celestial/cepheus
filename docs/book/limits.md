@@ -86,7 +86,7 @@ defaults, and the cache's size (`set_cache`).
 | what | limit or default | where |
 |---|---|---|
 | variables | at most 63 (0 to 62: the planner keeps bound variables in the bits of an `int`) | `Query.order` |
-| variable orders tried | every order for up to 7 variables (with pruning); greedy beyond | `Query.order` |
+| the order of the variables | the best order for its estimated work, by a dynamic program over the subsets of the variables that are neither a thing's field nor a constant's (those have a known place), for up to 12 of them ($n 2^{n-1}$ steps); greedy beyond | `Query.order`, `Query.dp_max` |
 | parallel questions | when the first variable has 20,000 candidates or more | `Query.parallel_min` |
 | domains of a question | the machine's recommended count, at most 8 | `Query.domains` |
 | slices | $\min(\text{candidates}, 16 \times \text{domains})$, taken in turn from a shared counter | `Query.fold` |

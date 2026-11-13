@@ -257,6 +257,11 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Mhedhbi 2019]** A. Mhedhbi, S. Salihoglu. Optimizing Subgraph Queries by Combining Binary and Worst-Case Optimal
   Joins. *PVLDB* 12(11), 1692–1704, 2019. https://doi.org/10.14778/3342263.3342643
   — The cost-based choice of the variable order.
+- **[Selinger 1979]** P. G. Selinger, M. M. Astrahan, D. D. Chamberlin, R. A. Lorie, T. G. Price. Access Path Selection
+  in a Relational Database Management System. *SIGMOD* 1979, 23–34. https://doi.org/10.1145/582095.582099
+  — The dynamic program over subsets that chooses the order of joins: the best plan of a set from the best plans of
+  its subsets, the size of each subset's result estimated once, whatever the order. `Query.order` runs it over the
+  sets of a question's variables.
 - **[Wang 2023]** Y. R. Wang, M. Willsey, D. Suciu. Free Join: Unifying Worst-Case Optimal and Traditional Joins.
   *Proceedings of the ACM on Management of Data* 1(2), 1–23 (SIGMOD 2023). https://doi.org/10.1145/3589295
   — The mix of binary and worst-case optimal joins; Cepheus keeps one way, Generic Join.

@@ -162,8 +162,29 @@ of one level are distinct (each index yields a set: a part of a run holds each f
 shown only if no newer run and not the delta have an entry for the same fact, and the delta adds only facts absent
 below it); distinct prefixes give distinct bindings.
 
-**Order.** For up to 7 variables Cepheus tries every order (with pruning) and keeps the one with the smallest
-estimated sum of partial bindings, each step multiplying by its estimated candidates per binding; beyond, greedily.
+**Order.** Cepheus keeps the order of the variables with the smallest estimated work: the candidates its levels
+enumerate, each level's partial bindings times the next variable's candidates per binding (the best pattern's count,
+given the variables bound before). The partial bindings of a set of variables are the same whatever order bound
+them, so they are estimated once a set: the smallest product of candidates per binding over the orders of the set,
+since each such product bounds them from above. The best order of a set is then the best order of the set less one
+variable, followed by that variable: a dynamic program over the subsets, as Selinger et al. [Selinger 1979] choose
+an order of joins, in $n 2^{n-1}$ steps for $n$ variables and exact for this cost.
+
+Two kinds of variables have a known place and stay out of the program. A variable whose only pattern has no other
+variable and offers it at most one candidate (a field of a thing given by its id) comes first: it costs 1 there and
+multiplies nothing, and it costs at least 1 anywhere. A *leaf*, a variable $y$ whose only pattern gives it as the
+value of a one-valued property of a variable $x$, with $d \ge 2$ values in all, comes right after $x$. Proof by
+exchange: the partial bindings never shrink along an order (each step multiplies by at least 1). After $x$, $y$ has
+one candidate a binding: it multiplies nothing, and costs the partial bindings $S$ of that step, the least it can cost
+after $x$. Before $x$, it costs at least 1 and multiplies every later step by $d$: $x$'s own step then costs $d S$
+instead of $S$, so moving $y$ right after $x$ changes the cost by at most $S + S - d S \le 0$, and every step between
+the two places gets cheaper. So the fields of a row (an invoice's number, status, total, dates) are leaves of the
+row's thing, and a page of 7 fields is a program of one or two variables. The program runs over the remaining
+variables, up to 12 of them (24,576 steps, each over at most one entry per other variable: the counts are read once a
+question, merged by the variable on the other side however many patterns there are); beyond 12, the variable of
+fewest candidates next (greedy). The planner before it tried every order for up to 7 variables and went greedy at 8,
+which for a sorted page of an invoice's 7 fields (8 variables) began with the status, of 3 values, and read every
+invoice in each window of the index path: 8.4 ms against 0.17 ms now (`probe`, 100,000 invoices).
 Freitag et al. [Freitag 2020], Mhedhbi and Salihoglu [Mhedhbi 2019] and Wang et al. [Wang 2023] show the order and the mix with ordinary joins
 matter most in practice; the measured cost of each question is in [benchmarks](benchmarks.md).
 

@@ -346,8 +346,9 @@ Cepheus answers with **Generic Join** (Ngo, Ré, Rudra 2013), the simplest worst
 variables; to bind the next variable, take the pattern that offers the fewest candidates for it given the variables
 bound so far (exact counts, read from the indexes), enumerate those, and keep each candidate only if every other
 pattern on the variable accepts it (one index lookup each, $O(\log n)$). On a chain of patterns it does what nested index
-lookups would; on a cycle it stays within the bound. The order of the variables is chosen from the counts: every order
-for up to 7 variables (with pruning), greedily beyond. Each answer comes out once (G11). On the follow graph (568,163
+lookups would; on a cycle it stays within the bound. The order of the variables is chosen from the counts: the order
+of least estimated work, by a dynamic program over the subsets of variables (Selinger et al. 1979), a thing's fields
+placed right after it and a constant's first, for up to 12 variables in the program, greedily beyond. Each answer comes out once (G11). On the follow graph (568,163
 links), the triangles take 1.03 s on one domain and 371 ms on three (PostgreSQL 1.03 s and 603 ms).
 
 ## Rules

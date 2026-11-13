@@ -196,6 +196,8 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
       acc
     in
     let first = List.hd o.keys in
+    (* the planner's estimate of the heap path's work, once: the index path's budget, and its choice *)
+    let estimate = lazy (src.estimate ()) in
     let lead =
       match src.var first.col with
       | Some x when Value.inline typs.(first.col) && typs.(first.col) <> Tbool -> (match src.lead x with Some p -> Some (x, p) | None -> None)
@@ -210,7 +212,7 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
         | Some a -> (match cell v ty "" a.(first.col) with W w -> w | _ -> assert false)
         | None -> if first.desc then max_int else min_int
       in
-      let budget = src.estimate () in
+      let budget = Lazy.force estimate in
       let got = fresh () and spent = ref 0 and m = ref (2 * cap) and edge = ref start and over = ref false and found = ref None in
       while !found = None && not !over do
         let lo, hi, last =
@@ -259,7 +261,7 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
     let use_index =
       cap > 0
       && lead <> None
-      && match !path with Heap -> false | Index -> true | Auto -> src.estimate () > float_of_int (4 * cap)
+      && match !path with Heap -> false | Index -> true | Auto -> Lazy.force estimate > float_of_int (4 * cap)
     in
     let acc = match lead with Some l when use_index -> index l | _ -> heap None in
     Array.sub acc.a 0 acc.n

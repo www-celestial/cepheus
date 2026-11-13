@@ -83,74 +83,164 @@ let intervals nvars ranges =
     ranges;
   r
 
-(* The order of the variables, and its cost. [est x bound]: the candidates per binding that the best pattern offers x
-   given the variables already bound. The cost of an order is the sum of the estimated partial bindings after each step
-   (each step multiplies by its candidates); every order is tried for up to 7 variables (with pruning), greedily
-   beyond. *)
+(* The order of the variables, and its cost: the candidates its levels are estimated to enumerate. At each level,
+   the partial bindings so far times the next variable's candidates per binding, [est x bound]: the least count that
+   x's patterns offer it given the variables bound (the bits of [bound]): a word on the other side, or a bound
+   variable, gives the exact count or the average per value, an unbound one the property's whole count. The partial
+   bindings of a set of variables are the same whatever order bound them, so they are estimated once a set: the
+   smallest product of candidates per binding over the orders of the set (each product bounds them from above). The
+   cost of the best order of a set is then that of the best order of the set less one variable, plus that variable's
+   step: a dynamic program over the subsets, as Selinger et al. 1979 choose an order of joins, exact for this cost.
+
+   Two kinds of variables have a place known before the program, and are left out of it: a variable whose only
+   pattern has no other variable and offers it at most one candidate (a value of a thing given by its id) comes first,
+   where it costs 1 and multiplies nothing; a variable whose only pattern gives it as the one value of a thing's
+   one-valued property, of 2 or more values in all (an invoice's status, its total), comes right after that thing: it
+   multiplies nothing then (1 candidate), and anywhere else it costs at least as much (an exchange argument:
+   docs/book/theory.md, section 4). So a star of fields (a row's columns) is a program of one variable. The program
+   runs over the others, at most [dp_max] of them ([dp_max] 2^([dp_max] - 1) steps); beyond, the variable of fewest
+   candidates next (greedy). The counts are read once a question, at most one entry a pair of variables however many
+   patterns the question has. *)
+let dp_max = 12
+
 let order ?(sets = []) (v : Store.view) nvars pats ranges =
   let iv = intervals nvars ranges in
-  let set_len = Array.make nvars max_int in
-  List.iter (fun (x, a) -> set_len.(x) <- min set_len.(x) (Array.length a)) sets;
-  let est x bound =
-    let known = function W _ -> true | V y -> bound land (1 lsl y) <> 0 in
-    List.fold_left
-      (fun best pt ->
-        let c =
-          if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp
-          else if has x pt.pe then
-            match pt.pv with
-            | W w -> Store.count_things v pt.pp w
-            | V y when known (V y) -> max 1 (Store.count_prop v pt.pp / Store.distinct v pt.pp)
-            | V _ -> Store.count_prop v pt.pp
-          else if has x pt.pv then
-            if known pt.pe then (match pt.pe with W e -> Store.count_values v e pt.pp | V _ -> if pt.many then 4 else 1)
-            else
-              match iv.(x) with
-              | None -> Store.distinct v pt.pp
-              | Some (lo, hi) ->
-                let all = max 1 (Store.count_prop v pt.pp) in
-                max 1 (Store.count_range v pt.pp lo hi * Store.distinct v pt.pp / all)
-          else max_int
-        in
-        min best c)
-      set_len.(x) pats
-  in
-  let best = ref [||] and best_cost = ref infinity in
-  if nvars <= 7 then begin
-    let cur = Array.make nvars 0 in
-    let rec go k bound size cost =
-      if cost < !best_cost then
-        if k = nvars then (best_cost := cost; best := Array.copy cur)
-        else
-          for x = 0 to nvars - 1 do
-            if bound land (1 lsl x) = 0 then begin
-              let size = size *. float_of_int (max 1 (est x bound)) in
-              cur.(k) <- x;
-              go (k + 1) (bound lor (1 lsl x)) size (cost +. size)
-            end
-          done
+  let base = Array.make nvars max_int and has_set = Array.make nvars false in
+  List.iter (fun (x, a) -> base.(x) <- min base.(x) (Array.length a); has_set.(x) <- true) sets;
+  (* each pattern's offers: to x, (y, kn, un) the count when the variable y on its other side is bound, and when it
+     is not; a word on the other side (or x itself) gives its count to [base] *)
+  let offers = Array.make nvars [] and npat = Array.make nvars 0 and parent = Array.make nvars (-1) in
+  let offer x y k u = if y < 0 then (if k < base.(x) then base.(x) <- k) else offers.(x) <- (y, k, u) :: offers.(x) in
+  List.iter
+    (fun pt ->
+      match pt.pe, pt.pv with
+      | V x, V y when x = y -> npat.(x) <- npat.(x) + 1; offer x (-1) (Store.count_prop v pt.pp) 0
+      | pe, pv ->
+        (match pe, pv with
+         | V x, W w -> npat.(x) <- npat.(x) + 1; offer x (-1) (Store.count_things v pt.pp w) 0
+         | V x, V y -> let all = Store.count_prop v pt.pp in npat.(x) <- npat.(x) + 1; offer x y (max 1 (all / Store.distinct v pt.pp)) all
+         | W _, _ -> ());
+        (match pe, pv with
+         | W e, V y -> npat.(y) <- npat.(y) + 1; offer y (-1) (Store.count_values v e pt.pp) 0
+         | V x, V y ->
+           let un =
+             match iv.(y) with
+             | None -> Store.distinct v pt.pp
+             | Some (lo, hi) ->
+               let all = max 1 (Store.count_prop v pt.pp) in
+               max 1 (Store.count_range v pt.pp lo hi * Store.distinct v pt.pp / all)
+           in
+           npat.(y) <- npat.(y) + 1;
+           if not pt.many then parent.(y) <- x;
+           offer y x (if pt.many then 4 else 1) un
+         | _, W _ -> ()))
+    pats;
+  (* one entry a variable on the other side, its least counts *)
+  let oth = Array.make nvars [||] and kn = Array.make nvars [||] and un = Array.make nvars [||] in
+  for x = 0 to nvars - 1 do
+    let l = List.sort compare offers.(x) in
+    let rec merge = function
+      | (y, k, u) :: (y', k', u') :: t when y = y' -> merge ((y, min k k', min u u') :: t)
+      | e :: t -> e :: merge t
+      | [] -> []
     in
-    go 0 0 1. 0.
-  end;
-  if !best = [||] then begin
-    let out = Array.make nvars 0 and bound = ref 0 and size = ref 1. and cost = ref 0. in
-    for k = 0 to nvars - 1 do
-      let b = ref (-1) and bc = ref max_int in
-      for x = 0 to nvars - 1 do
-        if !bound land (1 lsl x) = 0 then begin
-          let c = est x !bound in
-          if !b < 0 || c < !bc then (b := x; bc := c)
+    let l = Array.of_list (merge l) in
+    oth.(x) <- Array.map (fun (y, _, _) -> y) l;
+    kn.(x) <- Array.map (fun (_, k, _) -> k) l;
+    un.(x) <- Array.map (fun (_, _, u) -> u) l
+  done;
+  let est x bound =
+    let o = oth.(x) and k = kn.(x) and u = un.(x) and best = ref base.(x) in
+    for j = 0 to Array.length o - 1 do
+      let c = if bound land (1 lsl Array.unsafe_get o j) <> 0 then Array.unsafe_get k j else Array.unsafe_get u j in
+      if c < !best then best := c
+    done;
+    if !best < 1 then 1 else !best
+  in
+  (* the variables of known place: first, after their thing, or in the program *)
+  let first = Array.init nvars (fun x -> npat.(x) = 1 && Array.length oth.(x) = 0 && est x 0 <= 1) in
+  let leaf =
+    Array.init nvars (fun x ->
+        npat.(x) = 1 && parent.(x) >= 0 && (not has_set.(x)) && iv.(x) = None && base.(x) = max_int && Array.length oth.(x) = 1
+        && un.(x).(0) >= 2)
+  in
+  let core = Array.of_list (List.filter (fun x -> not (first.(x) || leaf.(x))) (List.init nvars Fun.id)) in
+  let c = Array.length core in
+  (* the core's order, and the partial bindings after each of its steps *)
+  let cord = Array.make c 0 and csize = Array.make c 1. and ccost = ref 0. in
+  if c <= dp_max then begin
+    let m = 1 lsl c in
+    (* the variables' bits of each subset of the core *)
+    let vm = Array.make m 0 in
+    for s = 1 to m - 1 do
+      let low = s land (-s) in
+      let k = ref 0 in
+      while 1 lsl !k <> low do incr k done;
+      vm.(s) <- vm.(s lxor low) lor (1 lsl core.(!k))
+    done;
+    let size = Array.make m 1. and cost = Array.make m 0. and last = Array.make m 0 in
+    for s = 1 to m - 1 do
+      let sz = ref infinity and cs = ref infinity and l = ref 0 in
+      for k = 0 to c - 1 do
+        if s land (1 lsl k) <> 0 then begin
+          let r = s lxor (1 lsl k) in
+          let step = Array.unsafe_get size r *. float_of_int (est core.(k) (Array.unsafe_get vm r)) in
+          if step < !sz then sz := step;
+          (* ties: the largest last, so that the order of equal costs is the variables' own *)
+          let cx = Array.unsafe_get cost r +. step in
+          if cx <= !cs then (cs := cx; l := k)
         end
       done;
-      out.(k) <- !b;
-      bound := !bound lor (1 lsl !b);
-      size := !size *. float_of_int (max 1 !bc);
-      cost := !cost +. !size
+      size.(s) <- !sz;
+      cost.(s) <- !cs;
+      last.(s) <- !l
     done;
-    best := out;
-    best_cost := !cost
+    let s = ref (m - 1) in
+    for i = c - 1 downto 0 do
+      let k = last.(!s) in
+      cord.(i) <- core.(k);
+      csize.(i) <- size.(!s);
+      s := !s lxor (1 lsl k)
+    done;
+    ccost := cost.(m - 1)
+  end
+  else begin
+    let bound = ref 0 and size = ref 1. in
+    for i = 0 to c - 1 do
+      let b = ref (-1) and bc = ref max_int in
+      Array.iter
+        (fun x ->
+          if !bound land (1 lsl x) = 0 then begin
+            let e = est x !bound in
+            if !b < 0 || e < !bc then (b := x; bc := e)
+          end)
+        core;
+      cord.(i) <- !b;
+      bound := !bound lor (1 lsl !b);
+      ccost := !ccost +. (!size *. float_of_int !bc);
+      size := !size *. float_of_int !bc;
+      csize.(i) <- !size
+    done
   end;
-  !best, !best_cost
+  (* the whole order: the first, then the core, each variable followed by its leaves; a variable placed first costs 1,
+     a leaf the partial bindings of its thing's step *)
+  let ord = Array.make nvars 0 and n = ref 0 and cost = ref !ccost in
+  for x = 0 to nvars - 1 do
+    if first.(x) then (ord.(!n) <- x; incr n; cost := !cost +. 1.)
+  done;
+  Array.iteri
+    (fun i x ->
+      ord.(!n) <- x;
+      incr n;
+      for y = 0 to nvars - 1 do
+        if leaf.(y) && parent.(y) = x then (ord.(!n) <- y; incr n; cost := !cost +. csize.(i))
+      done)
+    cord;
+  assert (!n = nvars);
+  ord, !cost
+
+(* the planner of every question: the tests put main's former one in its place, to compare the answers of both *)
+let planner = ref (fun ~sets v nvars pats ranges -> order ~sets v nvars pats ranges)
 
 (* Questions run as a fold: [init ()] makes an accumulator, [step acc env] adds a binding (the buffer [env] is reused),
    [merge] joins two accumulators. Above [parallel_min] candidates for the first variable, the candidates are split
@@ -176,7 +266,7 @@ let plan ?(sets = []) (v : Store.view) q =
     in
     if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then None
     else if List.exists (fun (_, a) -> Array.length a = 0) sets then None
-    else (let ord, cost = order ~sets v q.vars pats limits in Some { pats; limits; ord; cost })
+    else (let ord, cost = !planner ~sets v q.vars pats limits in Some { pats; limits; ord; cost })
 
 (* the first place from [from] in a.(0 .. n-1), sorted, whose value is >= t: steps of 1, 2, 4, ... then a binary search
    (galloping: Bentley, Yao 1976), O(log d) for a place d further *)
