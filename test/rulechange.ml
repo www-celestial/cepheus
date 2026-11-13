@@ -129,6 +129,18 @@ let interleavings () =
      C.check (thing r (-1) = v.next_e - 1) "the new thing is the newest";
      C.check (Store.count_things v ty t.(3) > 0 && exact v) "its consequences are there, exact"
    | Error e -> C.fail "a change with a new thing: %s" (message e));
+  section "a change in its group while another runs in the background: that one ends with Conflict and tries again";
+  Engine.change_pause := 0.3;
+  let res = in_thread (fun () -> define db [ rule "later" [ { e = x; p = ty; v = y } ] (Give { e = y; p = b; v = x }) ]) in
+  Unix.sleepf 0.05;
+  let id = free_id (view db) in
+  let text = Rules.to_text (rule "made2" [ { e = x; p = sub; v = y } ] (Give { e = y; p = a; v = x })) in
+  ignore (ok (write db [ Add (id + 1, Schema.p_name, Text "made2"); Add (id + 1, Schema.p_rule, Text text); Add (-1, sub, Link t.(4)) ]));
+  (match res () with
+   | Ok _ ->
+     let v = view db in
+     C.check (Schema.rule_by_name v.schema "later" <> None && Schema.rule_by_name v.schema "made2" <> None && exact v) "both rules, exact"
+   | Error e -> C.fail "the change after a Conflict: %s" (message e));
   Engine.change_pause := 0.;
   close db;
   let db = open_db d in

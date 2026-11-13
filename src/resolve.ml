@@ -271,6 +271,9 @@ let catch_up ?limit ?stop (v : Store.view) (d : Store.view) (gs : Group.t list) 
           (fun (c : Group.change) ->
             match c.kind with
             | Derived | Underived -> ()
+            | _ when c.p = Schema.p_rule ->
+              (* one change at a time: a change made in its group meanwhile (it makes new things) comes first *)
+              fail (Conflict (Printf.sprintf "group %d, written meanwhile, changed the rules" g.n))
             | k -> (
               match Store.word v0 c.v with
               | None -> fail (Conflict "a text of a group written meanwhile is not in the change's view")
