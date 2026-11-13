@@ -1820,6 +1820,25 @@ let set v e p w s = fst (swap v e p w s)
    walks both for each fact: the derived facts of a group come in clusters (a new thing's types, a class's members).
    [olds]: the facts' states in [v] when the caller knows them (the reasoner does): a fact the delta has no entry for
    is in that state in the runs, and is not looked up there. *)
+(* A map of n keys from [ks] (strictly increasing) with their values [vs], in O(n): its halves built apart and joined
+   by unions of maps whose keys do not interleave (Map's union of such maps follows one spine: O(log^2) a union, so
+   T(n) = 2 T(n/2) + O(log^2 n) = O(n)), where n insertions one by one would copy a path each: O(n log n) blocks *)
+let rec im_of_sorted (ks : int array) (vs : 'a array) lo hi =
+  if hi <= lo then IM.empty
+  else if hi - lo = 1 then IM.singleton ks.(lo) vs.(lo)
+  else begin
+    let mid = (lo + hi) / 2 in
+    let l = IM.add ks.(mid) vs.(mid) (im_of_sorted ks vs lo mid) in
+    IM.union (fun _ a _ -> Some a) l (im_of_sorted ks vs (mid + 1) hi)
+  end
+
+(* [m] with the sorted keys and values added (none of them removals): one by one when they are few, else by a union
+   with the map they make (O(k log(n/k + 1)) for k keys into n) *)
+let im_add_sorted (ks : int array) (vs : 'a array) k (m : 'a IM.t) =
+  if k < 64 then (let m = ref m in for i = 0 to k - 1 do m := IM.add ks.(i) vs.(i) !m done; !m)
+  else if IM.is_empty m then im_of_sorted ks vs 0 k
+  else IM.union (fun _ a _ -> Some a) (im_of_sorted ks vs 0 k) m
+
 let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : int array) (ss : int array) n =
   if n = 0 then v
   else begin
@@ -1828,6 +1847,8 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
     (* the entries changed, for the map by property: (p, w, e, entry, diff), in arrays *)
     let cp = Array.make n 0 and cw = Array.make n 0 and ce = Array.make n 0 and cst = Array.make n 0 and cdiff = Array.make n 0 in
     let nc = ref 0 and v = ref v in
+    (* the things the delta held nothing of, with their entries, in order: added to [de] at once at the end *)
+    let fk = Array.make n 0 and fv = Array.make n { tf = PW.empty; tn = IM.empty } and nf = ref 0 in
     let i = ref 0 in
     while !i < n do
       let e = es.(!i) in
@@ -1860,9 +1881,11 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
       done;
       if !any then begin
         v := touch !v e;
-        de := if PW.is_empty !tf then IM.remove e !de else IM.add e { tf = !tf; tn = !tn } !de
+        if td0 = None && not (PW.is_empty !tf) then (fk.(!nf) <- e; fv.(!nf) <- { tf = !tf; tn = !tn }; incr nf)
+        else de := if PW.is_empty !tf then IM.remove e !de else IM.add e { tf = !tf; tn = !tn } !de
       end
     done;
+    de := im_add_sorted fk fv !nf !de;
     (* the changes by (property, value, thing): a sort of their indexes by ints, no tuple *)
     let m = !nc in
     let o = Array.init m Fun.id in
@@ -1885,14 +1908,26 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
         let vold = IM.find_opt w !pm in
         let vd = match vold with Some vd -> vd | None -> { vn = 0; vm = IM.empty } in
         let vm = ref vd.vm and vn = ref vd.vn in
+        (* the group's entries of (p, w), by thing: added at once when none is a removal *)
+        let k0 = !k in
+        let removal = ref false in
         while !k < m && cp.(o.(!k)) = p && cw.(o.(!k)) = w do
           let j = o.(!k) in
-          let st = cst.(j) and diff = cdiff.(j) in
-          vm := (if st < 0 then IM.remove ce.(j) !vm else IM.add ce.(j) st !vm);
-          vn := !vn + diff;
-          pn := !pn + diff;
+          if cst.(j) < 0 then removal := true;
+          vn := !vn + cdiff.(j);
+          pn := !pn + cdiff.(j);
           incr k
         done;
+        if !removal then
+          for q = k0 to !k - 1 do
+            let j = o.(q) in
+            vm := if cst.(j) < 0 then IM.remove ce.(j) !vm else IM.add ce.(j) cst.(j) !vm
+          done
+        else begin
+          let c = !k - k0 in
+          let ks = Array.init c (fun q -> ce.(o.(k0 + q))) and vs = Array.init c (fun q -> cst.(o.(k0 + q))) in
+          vm := im_add_sorted ks vs c !vm
+        end;
         if IM.is_empty !vm then (pm := IM.remove w !pm; if vold <> None then decr pk)
         else (pm := IM.add w { vn = !vn; vm = !vm } !pm; if vold = None then incr pk)
       done;
