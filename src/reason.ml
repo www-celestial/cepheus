@@ -390,12 +390,12 @@ let[@inline never] b_iter_p ws p f =
    placed after, by the usual probe (which may cross regions): every fact is where [find] looks for it. *)
 let[@inline never] place_prefix ws nb =
   let size = A.dim ws.set in
-  let regions = if nb < 50_000 || !Bulk.domains <= 1 then 1 else (let r = ref 1 in while 2 * !r <= !Bulk.domains && 2 * !r <= size / 1024 do r := 2 * !r done; !r) in
+  let regions = if nb < 50_000 || !Bulk.threads <= 1 then 1 else (let r = ref 1 in while 2 * !r <= !Bulk.threads && 2 * !r <= size / 1024 do r := 2 * !r done; !r) in
   if regions = 1 then for x = 0 to nb - 1 do place ws x done
   else begin
     let per = size / regions in
     let aside = Array.make regions [] in
-    Bulk.parallel regions (fun r ->
+    Bulk.parallel ~d:!Bulk.threads regions (fun r ->
         let lo = r * per and hi = (r + 1) * per and set = ws.set and mask = ws.smask and l = ref [] in
         for x = 0 to nb - 1 do
           let i = h3 (fe ws x) (fp ws x) (fw ws x) land mask in
@@ -1950,7 +1950,7 @@ let [@inline never] worker_ctx c =
 
 (* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
    the other cores while it runs *)
-let par_ok c = !Bulk.domains > 1 && c.stop == never && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
+let par_ok c = !Bulk.threads > 1 && c.stop == never && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
 
 exception Too_many
 
@@ -2017,13 +2017,13 @@ let [@inline never] merge_regions c (outs : buf array) r =
     !fin
   in
   let size = A.dim ws.set in
-  let regions = let rr = ref 1 in while 2 * !rr <= 2 * !Bulk.domains && 2 * !rr <= size / 1024 do rr := 2 * !rr done; !rr in
+  let regions = let rr = ref 1 in while 2 * !rr <= 2 * !Bulk.threads && 2 * !rr <= size / 1024 do rr := 2 * !rr done; !rr in
   let per = size / regions in
   (* each candidate's slot, then the candidates of each region in order (a counting sort by region, morsel by
      morsel), so that a region's domain reads its own candidates only *)
   let home = ints_raw (max 1 total) in
   let cnt = Array.init k (fun _ -> Array.make regions 0) in
-  Bulk.parallel k (fun m ->
+  Bulk.parallel ~d:!Bulk.threads k (fun m ->
       let c = cnt.(m) in
       for g = mbase.(m) to mbase.(m + 1) - 1 do
         let i = h3 (cget g 0) (cget g 1) (cget g 2) land ws.smask in
@@ -2039,7 +2039,7 @@ let [@inline never] merge_regions c (outs : buf array) r =
     for m = 0 to k - 1 do at.(m).(rg) <- !s; s := !s + cnt.(m).(rg) done
   done;
   let byreg = ints_raw (max 1 total) in
-  Bulk.parallel k (fun m ->
+  Bulk.parallel ~d:!Bulk.threads k (fun m ->
       let a = at.(m) in
       for g = mbase.(m) to mbase.(m + 1) - 1 do
         let rg = A.unsafe_get home g / per in
@@ -2047,7 +2047,7 @@ let [@inline never] merge_regions c (outs : buf array) r =
         a.(rg) <- a.(rg) + 1
       done);
   let aside = Array.make regions [] in
-  Bulk.parallel regions (fun rg ->
+  Bulk.parallel ~d:!Bulk.threads regions (fun rg ->
       let hi = (rg + 1) * per and l = ref [] in
       for q = roff.(rg) to roff.(rg + 1) - 1 do
         let g = A.unsafe_get byreg q in
@@ -2066,7 +2066,7 @@ let [@inline never] merge_regions c (outs : buf array) r =
   let cnt = ref n0 in
   for g = 0 to total - 1 do if Bytes.unsafe_get flag g = '\001' then (A.unsafe_set xid g !cnt; incr cnt) done;
   ws.n <- !cnt;
-  Bulk.parallel k (fun m ->
+  Bulk.parallel ~d:!Bulk.threads k (fun m ->
       for g = mbase.(m) to mbase.(m + 1) - 1 do
         match Bytes.unsafe_get flag g with
         | '\001' ->
@@ -2104,7 +2104,7 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
   let room = if left > max_int / 4 then max_int else (2 * left) + 100_000 in
   let heads = Atomic.make 0 and found_all = Atomic.make 0 in
   match
-    Bulk.parallel k (fun m ->
+    Bulk.parallel ~d:!Bulk.threads k (fun m ->
         let w = worker_ctx c and out = outs.(m) and n = ref 0 and nf = ref 0 in
         let ws = c.ws and vp = c.vp and next_e = c.v.next_e and spec = c.prog.spec in
         let found pl =
@@ -2746,7 +2746,7 @@ let saturate ?(s = 0) c (first : ints) nf =
     let par =
       nc >= !par_min && par_ok c
       &&
-      let k = 4 * !Bulk.domains in
+      let k = 4 * !Bulk.threads in
       let ix = if c.prog.nstrata = 1 then c.prog.ix_ins else c.prog.ix_ins_s.(s) in
       par_phase c k
         (fun w m found ->
@@ -3602,13 +3602,13 @@ and[@inline never] fill_prefix ws (b : Bulk.t) ~first_new ~next_e (keep : Bytes.
   (* the rows kept by each chunk of the order by thing, then each chunk's facts at their place *)
   let nch = Bulk.chunks n and ch = !Bulk.chunk in
   let cnt = Array.make (nch + 1) 0 in
-  Bulk.parallel nch (fun k ->
+  Bulk.parallel ~d:!Bulk.threads nch (fun k ->
       let c = ref 0 in
       for r = k * ch to min n ((k + 1) * ch) - 1 do if kept (Bulk.prop b (Bulk.row b r)) then incr c done;
       cnt.(k + 1) <- !c);
   for k = 1 to nch do cnt.(k) <- cnt.(k) + cnt.(k - 1) done;
   let nb = cnt.(nch) in
-  Bulk.parallel nch (fun k ->
+  Bulk.parallel ~d:!Bulk.threads nch (fun k ->
       let x = ref cnt.(k) in
       for r = k * ch to min n ((k + 1) * ch) - 1 do
         let i = Bulk.row b r in

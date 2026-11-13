@@ -22,6 +22,10 @@ let u16 n : u16 = Array1.create Int16_unsigned C_layout n
 (* the domains that share the work of a large group, the writer's own included: one a core (4 here), measured *)
 let domains = ref (max 1 (min 4 (Domain.recommended_domain_count ())))
 
+(* the domains of the reasoner's large rounds: one a hardware thread (8 here). Its work is lookups in tables of
+   hundreds of MB, each a miss of the caches: a second thread on a core runs while the first waits for memory *)
+let threads = ref (max 1 (min 8 (Domain.recommended_domain_count ())))
+
 (* the operations of a chunk: a unit of work; tests make it small *)
 let chunk = ref 65536
 
@@ -29,8 +33,8 @@ let chunks n = if n = 0 then 0 else ((n - 1) / !chunk) + 1
 
 (* [parallel k f]: f 0 .. f (k-1), each once, taken in turn by up to [!domains] domains. The first exception stops
    the others at their next item and is raised once every domain has returned. *)
-let parallel k f =
-  let d = min !domains k in
+let parallel ?(d = !domains) k f =
+  let d = min d k in
   if d <= 1 then for i = 0 to k - 1 do f i done
   else begin
     let next = Atomic.make 0 and failed = Atomic.make None in
