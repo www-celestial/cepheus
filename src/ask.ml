@@ -69,6 +69,8 @@ type t = {
   outer : bool array;  (* the question's variables *)
   typs : Value.typ option array;
   conjs : conj list;
+  words : (Store.view * (int * Value.t list * int array) list) option Atomic.t;
+      (* the words of its Ins' values in the view last asked, found once for all its conjunctions, Nots and windows *)
 }
 
 let max_prefix = 1024
@@ -107,8 +109,9 @@ let types (v : Store.view) nvars items =
   List.iter ranges items;
   ty
 
-(* bounds against a question that would cost the server more than its answer is worth *)
-let max_in = 10_000
+(* bounds against a question that would cost the server more than its answer is worth; In takes as many values as a
+   page has rows at most (Top.max_limit), so that a page's ids go back in one question *)
+let max_in = 100_000
 let max_operators = 64
 let max_conjunctions = 64
 
@@ -213,14 +216,30 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
         | _ -> cs)
       [ base ] extra
   in
-  { vars = n; outer; typs; conjs }
+  { vars = n; outer; typs; conjs; words = Atomic.make None }
 
 let typs_of (t : t) = Array.map (function Some ty -> ty | None -> Value.Tint) t.typs
 
-(* the words of In's values: sorted, distinct; a value the view does not hold is no candidate *)
-let words_of (v : Store.view) (ty : Value.typ) l =
+(* the words of In's values: sorted, distinct; a value the view does not hold is no candidate. O(n log n) for n
+   values, once a question (not once a conjunction, a Not's binding or a window): [words_of] *)
+let sorted_words (v : Store.view) (ty : Value.typ) l =
   List.iter (fun x -> if not (Value.has_type ty x) then bad "In needs values of the variable's type (a %s), not %s" (Value.typ_name ty) (Value.to_string x)) l;
-  Array.of_list (List.sort_uniq compare (List.filter_map (Store.word v) l))
+  let a = Array.of_list (List.filter_map (Store.word v) l) in
+  Array.sort (fun (x : int) y -> compare x y) a;
+  let n = ref 0 in
+  Array.iteri (fun i w -> if i = 0 || w <> a.(!n - 1) then (a.(!n) <- w; incr n)) a;
+  Array.sub a 0 !n
+
+(* the words of the In (x, l) of question t in view v, found once: the cache holds one view's (a race between two
+   readers of t at most finds them twice) *)
+let words_of (t : t) (v : Store.view) x l =
+  let known = match Atomic.get t.words with Some (v', k) when v' == v -> k | _ -> [] in
+  match List.find_opt (fun (y, l', _) -> y = x && l' == l) known with
+  | Some (_, _, ws) -> ws
+  | None ->
+    let ws = sorted_words v (match t.typs.(x) with Some ty -> ty | None -> Value.Tint) l in
+    Atomic.set t.words (Some (v, (x, l, ws) :: known));
+    ws
 
 exception Found
 
@@ -248,6 +267,15 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
     (* the Not's own question: its own variables numbered from 0, the others fixed to the binding's values *)
     let own = Array.of_list own in
     let local x = let r = ref (-1) in Array.iteri (fun i y -> if y = x then r := i) own; !r in
+    (* the words of each In and of each Prefix on an own variable: the same for every binding, found once *)
+    let sets_of =
+      List.map
+        (function
+          | In (x, l) -> words_of t v x l
+          | Prefix (x, pre) when local x >= 0 -> prefix_set v items x pre
+          | _ -> [||])
+        items
+    in
     fun env ->
       let fixed x = Store.value v typs.(x) env.(at x) in
       let term = function
@@ -258,8 +286,9 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
       let term_e = function Query.Var x when local x < 0 -> Query.Thing env.(at x) | t -> term t in
       let ok = ref true in
       let pats = ref [] and ranges = ref [] and sets = ref [] in
-      List.iter
-        (function
+      List.iter2
+        (fun it ws ->
+          match it with
           | Pattern pt -> pats := { pt with Query.e = term_e pt.e; v = term pt.v } :: !pats
           | Range (x, lo, hi) ->
             if local x >= 0 then ranges := (local x, lo, hi) :: !ranges
@@ -269,14 +298,12 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
               | Some a, Some b -> if w < a || w > b then ok := false
               | _ -> ok := false
             end
-          | In (x, l) ->
-            let ws = words_of v typs.(x) l in
-            if local x >= 0 then sets := (local x, ws) :: !sets else if not (Query.in_sorted ws env.(at x)) then ok := false
+          | In (x, _) -> if local x >= 0 then sets := (local x, ws) :: !sets else if not (Query.in_sorted ws env.(at x)) then ok := false
           | Prefix (x, pre) ->
-            if local x >= 0 then sets := (local x, prefix_set v items x pre) :: !sets
+            if local x >= 0 then sets := (local x, ws) :: !sets
             else (let t = Store.text v env.(at x) in if not (String.length t >= String.length pre && String.sub t 0 (String.length pre) = pre) then ok := false)
           | Not _ | Or _ -> ())
-        items;
+        items sets_of;
       !ok
       &&
       let q = { Query.vars = Array.length own; where = List.rev !pats; ranges = List.rev !ranges } in
@@ -298,7 +325,6 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
 (* a conjunction as a question of its own variables, numbered from 0: the question, the number of each variable in
    it (-1: not in it), the variable of each of its numbers, and its sets *)
 let dense ?range ?words (v : Store.view) (t : t) (c : conj) =
-  let typs = typs_of t in
   let used = Array.make t.vars false in
   List.iter (fun (pt : Query.pattern) -> (match pt.e with Var x -> used.(x) <- true | _ -> ()); match pt.v with Var x -> used.(x) <- true | _ -> ()) c.pats;
   let dense = Array.make t.vars (-1) and k = ref 0 in
@@ -317,11 +343,11 @@ let dense ?range ?words (v : Store.view) (t : t) (c : conj) =
     match List.find_opt (fun (y, _) -> y = x) c.ins with
     | Some (_, l) ->
       let n = String.length p in
-      Array.of_list (List.filter (fun w -> let t = Store.text v w in String.length t >= n && String.sub t 0 n = p) (Array.to_list (words_of v typs.(x) l)))
+      Array.of_list (List.filter (fun w -> let t = Store.text v w in String.length t >= n && String.sub t 0 n = p) (Array.to_list (words_of t v x l)))
     | None -> prefix_set v pats x p
   in
   let window = match words with Some (x, ws) -> [ (dense.(x), ws) ] | None -> [] in
-  q, dense, back, window @ List.map (fun (x, l) -> dense.(x), words_of v typs.(x) l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes
+  q, dense, back, window @ List.map (fun (x, l) -> dense.(x), words_of t v x l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes
 
 let fold ?(seq = false) ?(budget = max_int) ?range ?words (v : Store.view) (t : t) ~init ~step ~merge =
   let spent = Atomic.make 0 in

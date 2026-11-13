@@ -663,6 +663,35 @@ let planners seeds =
   let many = { Query.vars = 12; where = List.concat (List.init 420 (fun _ -> (all 12).where)) |> List.filteri (fun i _ -> i < 5000); ranges = [] } in
   timed "12 variables in 5,000 patterns" many 100.
 
+
+(* In at its bound: 100,000 values, the ids of a page of 100,000 rows; and an In inside a Not, whose words are found
+   once a question, not once a binding (10,000 texts over 5,000 bindings) *)
+let ins () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ num; tag ]) = declare db [ prop "num" Tint; prop ~many:true "tag" Ttext ] in
+  let n = 5000 in
+  let ops = List.concat (List.init n (fun k -> [ Resolve.Add (-1 - k, num, Int k); Add (-1 - k, tag, Text (Printf.sprintf "t%d" (k mod 7))) ])) in
+  (match write db ops with Ok _ -> () | Error e -> C.fail "ins: a write failed: %s" (message e));
+  let v = view db in
+  let q = { Query.vars = 2; where = [ { Query.e = Var 0; p = num; v = Var 1 } ]; ranges = [] } in
+  let all = List.init Ask.max_in (fun k -> Value.Int (2 * k)) in
+  let got = engine ~extra:[ Ask.In (1, all) ] v q (Wire.Group ([||], [| Wire.Count |])) Top.none in
+  C.check (got = [ [| Value.Int 2500 |] ]) "ins: In of %d values: %s" Ask.max_in (show got);
+  (* three Ors of 4 alternatives: 64 conjunctions, one In: its words are found once in the view, not 64 times *)
+  let quarter = Ask.Or (List.map (fun (lo, hi) -> [ Ask.Range (1, Value.Int lo, Value.Int hi) ]) [ (0, 999); (1000, 1999); (2000, 2999); (3000, max_int) ]) in
+  let a = Ask.compile v q [ Ask.In (1, all); quarter; quarter; quarter ] in
+  let rows = Ask.fold v a ~init:(fun () -> 0) ~merge:( + ) ~step:(fun n _ -> n + 1) in
+  let cached = match Atomic.get a.Ask.words with Some (_, k) -> List.length k | None -> 0 in
+  C.check (List.length a.Ask.conjs = 64 && rows = 2500 && cached = 1) "ins: 64 conjunctions with one In: %d conjunctions, %d rows, %d sets of words" (List.length a.Ask.conjs) rows cached;
+  let texts = List.init 10_000 (fun k -> Value.Text (Printf.sprintf "t%d" (k + 3))) in
+  let t0 = Unix.gettimeofday () in
+  let got = engine ~extra:[ Ask.Not [ Ask.Pattern { Query.e = Var 0; p = tag; v = Var 2 }; Ask.In (2, texts) ] ] v { q with vars = 3 }
+      (Wire.Group ([||], [| Wire.Count |])) Top.none in
+  let ms = (Unix.gettimeofday () -. t0) *. 1e3 in
+  (* t3 .. t6 are in the In: the things of t0, t1 and t2 are kept *)
+  let want = List.length (List.filter (fun k -> k mod 7 < 3) (List.init n Fun.id)) in
+  C.check (got = [ [| Value.Int want |] ] && ms < 1000.) "ins: a Not with an In of 10,000 values over %d bindings: %s in %.0f ms" n (show got) ms
+
 (* ---- live questions with Not, Or and In: after every frame, a watch's rows are the oracle's at its view ---- *)
 
 let live_checks = ref 0
@@ -760,7 +789,7 @@ let live seed =
 let () =
   let seeds = ref 300 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "S" ] (fun _ -> ()) "questions.exe";
-  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
+  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; ins (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
   Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path, %d given up for the heap path\n"
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"

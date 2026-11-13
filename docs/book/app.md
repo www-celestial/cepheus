@@ -422,7 +422,8 @@ watches are computed at the server, which pushes them.
 ## 10. The CSV export
 
 `/invoices.csv` gives every invoice of the list's filter, in the order of their numbers: one question for the rows
-(no page: no `Limit`), and one for the dates of payment of each 10,000 of them (`In` takes at most 10,000 values).
+(no page: no `Limit`), and one for the dates of payment of each 10,000 of them (an `In` of 10,000 ids a question;
+`In` takes up to 100,000 values).
 A cell that starts with `=`, `+`, `-`, `@`, a tab or a carriage return gets a `'` in front of it, so that a
 spreadsheet never runs a bill-to name as a formula (CSV injection, as OWASP names it). The 100,000 invoices of the
 seed export in about 1.2 s (one request), the 11,006 late ones in 114 ms ([what it costs](#14-what-it-costs)).

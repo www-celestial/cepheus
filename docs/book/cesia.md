@@ -303,7 +303,8 @@ Ok([{Invoice: 65537}, {Invoice: 65540}])
   alternatives hold for it. `And` is for an alternative only: `Where` is already all of its items. An `Or` of one
   pattern whose alternatives differ only in their value is refused: that is `In`.
 - `cepheus.In(x, values)`: x is one of the values, of its type (ids for a link: the invoices of these clients). A
-  value the database does not hold is no candidate; an empty list has no answer.
+  value the database does not hold is no candidate; an empty list has no answer. It takes up to 100,000 values, as
+  many as a page has rows: a page's ids go back in one question ([limits](limits.md#questions)).
 
 **Exact meaning.** Each operator reads the facts of the view the question is answered at, the facts the rules derive
 included: they are in every view, exactly (G17), so a `Not` reads a complete set of facts. (A `Not` in a *rule*'s

@@ -240,7 +240,7 @@ end
 
 defn AllInvoices(f, now, db)
   (** Every invoice of the list's filter f, in the order of their numbers, with PaidAt for those paid: one question
-      for the rows, and one for the dates of payment of each 10,000 of them (In takes at most 10,000 values). *)
+      for the rows, and one for the dates of payment of each 10,000 of them (an In of 10,000 ids a question). *)
   q = invoicesQuery(f, now)
   rows = cepheus.Find(q.N, q.Query({Sort: (keys) -> keys, Limit: missing, After: missing}), db)?
   at = dict.Dict()
