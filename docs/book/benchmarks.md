@@ -586,10 +586,11 @@ same 532,205 derived facts of the data):
 | a department a group, in memory: reasoning | 2.216 s [2.160, 2.387] | 2.383 s [2.240, 2.659] | 1.04 [0.98, 1.22] |
 | write a student, with rules / without | 24.8 / 8.8 µs | 26.0 / 8.8 µs | 1.05 [0.85, 1.20] / 1.00 |
 | retract it, with rules / without | 36.0 / 6.2 µs | 36.0 / 6.9 µs | 1.00 / 1.00 |
-| start-up (`bench.exe`, 21 rounds of 50 runs, medians) | 2.646 ms [2.399, 3.009] | 2.698 ms [2.630, 2.903] | 1.01 [0.90, 1.13] |
+| start-up (`bench.exe`, 21 rounds of 50 runs, medians), against main ca74bbe | 2.913 ms [2.692, 3.062] | 2.938 ms [2.575, 3.368] | 1.00 (0.997, 95 % [0.951, 1.035]) |
 
-The reasoner's code doubled (the closure module, unfolding, variable properties): 1 % more at start-up, the runtime
-reading the larger binary's frame tables; the big and cold functions are kept out of line. The subOrganizationOf
+The reasoner's code doubled (the closure module and its retraction, unfolding, variable properties: its frame tables
+62 KB to 125 KB, which the runtime reads at start-up): within the noise at 21 rounds, faster in 11 of them; the big and
+cold functions are kept out of line (an earlier build, before that, measured 1.044 against 23ac670). The subOrganizationOf
 closure of the hand rules is the module's too: 3,478 fewer derivations.
 
 ## Rules (2026-11-08)
