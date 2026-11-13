@@ -391,7 +391,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 14 Put (version 3) | handle, serial, floor, by (zigzag), why, the file kind, name, media type, owner (0: the database's own key), cold (a byte), then the file's first bytes; the flag `more` when Pieces follow | Receipt of the group of its facts (kind/Name, Size, Type, Owner, Content), once its bytes and that group are durable ([the vault](vault.md)) |
 | 15 Piece | more bytes of the Put of this id; `more` but on the last | (the Put's reply) |
 | 16 Load | handle, thing, the kind's Content property, from, length (zigzag; -1: to the end) | the bytes, in frames of 1 MiB, all but the last with `more` |
-| 17 Erase | handle, owner (a token that writes the whole database) | Erased |
+| 17 Erase | handle, owner (a thing, > 0; a token that writes the whole database) | Erased |
 
 On a follow stream the server pushes (request id 0):
 

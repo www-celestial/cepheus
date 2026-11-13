@@ -900,9 +900,33 @@ let files () =
   List.iter (fun b -> ignore (Core.input sess b 0 (Bytes.length b))) starts;
   check (Hashtbl.length sess.Core.puts = Files.max_puts) "files: %d puts open at once at most" Files.max_puts;
   Core.disconnect sess;
+  (* a token whose right to write goes in the middle of a put: its next piece ends the put, refused *)
+  let out = Buffer.create 64 in
+  let rec cl = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force cl in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+  let cl = Lazy.force cl in
+  let frame ~id ~kind ~flags req =
+    let b = Buffer.create 64 and fr = Buffer.create 64 in
+    (match req with Some r -> Wire.put_request b r | None -> Buffer.add_string b "more bytes");
+    Wire.add_frame fr ~id ~kind ~flags b;
+    let x = Buffer.to_bytes fr in
+    ignore (Core.input cl x 0 (Bytes.length x));
+    cl.flush ()
+  in
+  frame ~id:1 ~kind:Wire.k_hello ~flags:0 (Some (Wire.Hello { version = Wire.version; token = "cph_w"; program = "t"; session = 0 }));
+  frame ~id:7 ~kind:Wire.k_put ~flags:Wire.f_more
+    (Some (Wire.Put { db = 0; serial = 1; floor = 1; by = 0; why = ""; kind = "scan"; name = "n"; typ = "t"; owner = 0; cold = false; data = "x" }));
+  Atomic.set srv.tokens (Tokens.with_tokens Tokens.empty (mk "w" [ "shop", Tokens.Read ] :: List.filter (fun (t : Tokens.token) -> t.name <> "w") toks.tokens));
+  Buffer.clear out;
+  frame ~id:7 ~kind:Wire.k_piece ~flags:0 None;
+  let s = Buffer.to_bytes out in
+  check (Bytes.length s > 10 && Bytes.get_uint8 s 9 land Wire.f_error <> 0 && Hashtbl.length cl.Core.puts = 0)
+    "files: a right to write gone in the middle of a put ends it, refused";
+  Atomic.set srv.tokens toks;
   (* erasing an owner: a right to write the whole database *)
   let erase tok = code (Some (match (session tok) (Wire.Erase { db = 0; owner = ada }) with Some x -> x | None -> Wire.Err { code = "none"; message = "" })) in
   check (erase "k" = "denied" && erase "r" = "denied") "files: erasing needs a right to write every kind";
+  check (code (Some (match (session "w") (Wire.Erase { db = 0; owner = 0 }) with Some x -> x | None -> Wire.Err { code = "none"; message = "" })) = "invalid")
+    "files: the database's own key (owner 0) is never erased";
   check (match (session "w") (Wire.Erase { db = 0; owner = ada }) with Some Wire.Erased -> true | _ -> false) "files: erased";
   check (code (load w f) = "erased") "files: an erased owner's file: erased";
   check (code (put ~serial:8 w) = "erased") "files: no new file of an erased owner";

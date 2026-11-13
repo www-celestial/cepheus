@@ -24,6 +24,7 @@ io.Print("files: past the end:", cepheus.Read(Scans, f, db, from = 3_999_999, le
 meta = result.Unwrap(cepheus.Get(Scans, f, db))
 io.Print("files: get:", meta.Name, meta.Size, meta.Type, meta.Owner == ada, text.ByteLength(meta.Content))
 io.Print("files: list:", value.Len(result.Unwrap(cepheus.List(Scans, db))))
+io.Print("files: no owner, no erasure:", cepheus.Erase(0, db).Error.Code)
 io.Print("files: a fork holds none:", cepheus.Put(Scans, "x", "x", result.Unwrap(cepheus.Fork(cepheus.Empty, [Scans]))).Error.Code)
 other = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [], token = sys.Env("CEPHEUS_OTHER")))
 io.Print("files: another kind's token reads:", cepheus.Read(Scans, f, other).Error.Code)

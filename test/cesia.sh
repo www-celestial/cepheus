@@ -83,7 +83,7 @@ cp "$root/test/cesia-files.ce" src/files.ce
 other=$($B token add other --database "files=read:person;add:person" --config "$cfg" 2>/dev/null)
 sleep 1.5
 CEPHEUS_URL="cepheus://localhost:$port/files?socket=$tmp/s/r" CEPHEUS_OTHER=$other timeout 60 cesia run --allow native=cepheus,env,read src/files.ce < /dev/null > "$tmp/files.out" 2>&1 || { cat "$tmp/files.out"; exit 1; }
-printf 'files: read whole: true true\nfiles: a range: 5678901\nfiles: the end: 10\nfiles: past the end: invalid\nfiles: get: log.txt 4000000 text/plain true 64\nfiles: list: 2\nfiles: a fork holds none: invalid\nfiles: another kind'"'"'s token reads: denied\nfiles: deleted, list: 1\nfiles: erased owner: erased erased\n' | diff - "$tmp/files.out" || { echo "cesia files: the output differs"; exit 1; }
+printf 'files: read whole: true true\nfiles: a range: 5678901\nfiles: the end: 10\nfiles: past the end: invalid\nfiles: get: log.txt 4000000 text/plain true 64\nfiles: list: 2\nfiles: no owner, no erasure: invalid\nfiles: a fork holds none: invalid\nfiles: another kind'"'"'s token reads: denied\nfiles: deleted, list: 1\nfiles: erased owner: erased erased\n' | diff - "$tmp/files.out" || { echo "cesia files: the output differs"; exit 1; }
 
 # kill -9 while the program writes, then a new server on the same data: the client connects again and sends again
 export CEPHEUS_URL="cepheus://localhost:$port/restart?socket=$tmp/s/r"

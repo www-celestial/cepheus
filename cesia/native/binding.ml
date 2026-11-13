@@ -560,6 +560,7 @@ let read ctx a =
     let content = file_field ctx name k "Content" in
     let thing = int ctx name a.(2) and from = int ctx name a.(3) in
     let len = match a.(4) with C.Missing -> -1 | x -> int ctx name x in
+    if thing <= 0 then refuse "invalid" "Read needs the id of a thing, not %d" thing;
     if from < 0 || len < -1 then refuse "invalid" "a range of a file starts at 0 or after and has a length of 0 or more";
     let conn, cdb = server_of name d in
     let prop = (resolve_kind d k).ids.(content) in
@@ -576,6 +577,7 @@ let delete ctx a =
     let k = kind_of ctx name a.(1) in
     let content = file_field ctx name k "Content" in
     let thing = int ctx name a.(2) in
+    if thing <= 0 then refuse "invalid" "Delete needs the id of a thing, not %d" thing;
     let conn, cdb = server_of name d in
     let r = resolve_kind d k in
     match Conn.read (park ctx) conn (Wire.Get { db = cdb.handle; thing }) with
@@ -595,6 +597,7 @@ let erase ctx a =
   try
     let d = db_of ctx name a.(0) in
     let owner = int ctx name a.(1) in
+    if owner <= 0 then refuse "invalid" "Erase needs an owner, the id of a thing, not %d: the database's own key is never erased" owner;
     let conn, cdb = server_of name d in
     match Conn.call (park ctx) conn (Wire.Erase { db = cdb.handle; owner }) with
     | Wire.Erased -> C.ok ctx C.Missing

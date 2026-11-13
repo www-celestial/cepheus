@@ -583,7 +583,11 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
         | _, Wire.Piece data ->
           (* the pieces of a Put that was refused, or failed, are dropped *)
           (match Hashtbl.find_opt c.puts id with
-           | Some (d, st) -> put_feed c ~id ~more:(flags land Wire.f_more <> 0) d st data
+           | Some (d, st) -> (
+             (* G16 at each piece: a token whose right to write went meanwhile ends its put *)
+             match writable c ~id ~kind:Wire.k_put d.index with
+             | Some _ -> put_feed c ~id ~more:(flags land Wire.f_more <> 0) d st data
+             | None -> Hashtbl.remove c.puts id)
            | None -> ());
           Continue
         | _, Wire.Erase e ->
@@ -591,6 +595,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
           (match db_of c ~id ~kind e.db with
            | None -> ()
            | Some d when c.rights.(e.db) <> Some Tokens.Write -> err c ~id ~kind "denied" "erasing an owner's files needs a right to write all of %s" d.name
+           | Some _ when e.owner <= 0 -> err c ~id ~kind "invalid" "an erasure names an owner, a thing: the database's own key (0) is never erased"
            | Some d -> (
              match Files.vault d.files with
              | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name m
