@@ -51,7 +51,8 @@ type agg = [ `Sum | `Count | `Min | `Max ]
 let agg_code : agg -> int = function `Sum -> 0 | `Count -> 1 | `Min -> 2 | `Max -> 3
 let agg_name : agg -> string = function `Sum -> "sum" | `Count -> "count" | `Min -> "min" | `Max -> "max"
 let aggregate (f : agg) p = agg_base + (agg_code f lsl 16) + p
-let[@inline] is_agg p = p >= agg_base
+(* the four codes [aggregate] makes, no other: a larger number is no property, refused as such *)
+let[@inline] is_agg p = p >= agg_base && p < agg_base + (4 lsl 16)
 
 let agg_of p : agg * int =
   (match (p - agg_base) lsr 16 with 0 -> `Sum | 1 -> `Count | 2 -> `Min | _ -> `Max), (p - agg_base) land 0xffff

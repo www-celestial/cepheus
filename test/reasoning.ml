@@ -476,6 +476,8 @@ let () =
     (define db [ { name = "bad2"; vars = 2; where = [ { e = x; p = absent 0 member; v = y } ]; ranges = []; head = Never } ]);
   refused_with "an own variable of two Nots" "the own of one Not only"
     (define db [ { name = "bad3"; vars = 2; where = [ { e = x; p = ty; v = Thing invoice }; { e = x; p = absent 0 member; v = y }; { e = x; p = absent 1 parent; v = y } ]; ranges = []; head = Never } ]);
+  refused_with "an aggregate's code that aggregate does not make" "no property"
+    (define db [ { name = "bad4"; vars = 2; where = [ { e = x; p = member; v = y } ]; ranges = []; head = Give { e = x; p = aggregate `Max member_of + (4 lsl 16); v = y } } ]);
   (* a constraint with a Not: refuses the group that takes away what it needs *)
   let paid_or_open = { name = "invoice-needs-member"; vars = 3; where = [ { e = x; p = ty; v = Thing invoice }; { e = x; p = paid; v = Var 2 }; { e = x; p = absent 0 member_of; v = y } ]; ranges = []; head = Never } in
   ignore (ok (define db [ paid_or_open ]));

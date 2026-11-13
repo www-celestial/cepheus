@@ -1030,8 +1030,12 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
           else
             fun () ->
               if in_view p then S.iter_prop ctx.v p (fun e w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e w);
-              for y = 0 to ws.n - 1 do
-                if fp ws y = p && base ws y = 0 && now ws y > 0 then on (fe ws y) (fw ws y)
+              (* the working set's own facts of p: its chain by property (kept but in a load, which refuses Nots) *)
+              let x = ref (idx_head ws.ip p 0) in
+              while !x >= 0 do
+                let y = !x in
+                if fp ws y = p && now ws y > 0 then on (fe ws y) (fw ws y);
+                x := idx_next ws.ip y
               done)
     in
     match List.rev !ord with
