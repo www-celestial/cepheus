@@ -92,6 +92,8 @@ defn isDeleteChecked()
   refused = AddInvoice(f, "Élodie Bo", 0, s.Db)
   bug.Assert(kept.Error.Code == "has_invoices", "a client with invoices stays")
   bug.Assert(refused.Error.Code == "invalid", "the rule refuses an invoice of a deleted client")
+  raced = cepheus.Write([cepheus.Retract(s.Ada, Client.Name, "Ada Martin")], s.Db)
+  bug.Assert(raced.Error.Code == "invalid", "the rule refuses a delete that comes after an invoice, as a race would")
   PayInvoice(s.One.Invoice, now, 0, s.Db)?
   DeleteInvoice(s.Two.Invoice, 0, s.Db)?
   value.IsMissing(gone) and DeleteInvoice(s.One.Invoice, 0, s.Db).Error.Code == "paid" and GetInvoice(s.Two.Invoice, s.Db)? == missing

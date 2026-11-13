@@ -148,7 +148,7 @@ is a property of the database, as `invoice/Total` ([kinds](cesia.md#kinds-and-th
 ```text
 Client = cepheus.Kind("client", {
   Name: cepheus.Text(), Search: cepheus.Text(), Email: cepheus.Text(unique = true), City: cepheus.Text(),
-  Overdue: cepheus.Bool(), Gone: cepheus.Bool(),
+  Overdue: cepheus.Bool(),
 })
 
 Invoice = cepheus.Kind("invoice", {
@@ -172,23 +172,25 @@ The choices in it:
   so a search without case keeps a field in the form it searches. `text.Lower` changes A to Z only; the app's
   `Lower` (`check.ce`) lowers the accented letters of Latin-1 too, so that "él" finds "Élodie".
 - **`Total`** is computed from the lines when an invoice is written, in cents, exactly: `Money(2)` keeps minor units.
-- **`Gone`** marks a deleted client, and **`Overdue`** is never written by the app: the database derives it.
+- **`Overdue`** is never written by the app: the database derives it. Every client has a **`Name`** (`ClientForm`
+  checks it): a deleted client has none.
 
 The two **rules** ([rules from Cesia](cesia.md#rules)):
 
 ```text
 Overdue = cepheus.Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Client.Overdue, true]})
-NoInvoiceOfGone = cepheus.Rule("no-invoice-of-a-gone-client", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [c, Client.Gone, true]], Then: cepheus.Never})
+NoInvoiceOfDeleted = cepheus.Rule("no-invoice-of-a-deleted-client", 3, (c, i, n) -> {Where: [[i, Invoice.Client, c], cepheus.Not([c, Client.Name, n])], Then: cepheus.Never})
 ```
 
 - `overdue`: a client with a late invoice is overdue. The database adds the fact in the group that makes an invoice
   late, and takes it away in the group that pays the client's last late one, since it then has no proof left: the app
   only reads `Client.Overdue`, on the client's page.
-- `no-invoice-of-a-gone-client` is a **constraint**: a group that would give it an answer is refused whole. Deleting a
-  client checks first that it has no invoice, for a clear message; but between that check and the delete, another
-  request could give it one, and `Expect` checks only a thing's own facts, not that no invoice points to it. So the
-  delete retracts the client's fields and adds `Gone: true`: whichever of the two groups comes second is refused by the
-  database, in either order.
+- `no-invoice-of-a-deleted-client` is a **constraint**: a group that would give it an answer is refused whole. Its
+  `Not` holds when the client has no name at all: `n` is in no other pattern, so it is the Not's own ("there is no
+  `n` such that..."). Deleting a client checks first that it has no invoice, for a clear message; but between that
+  check and the delete, another request could give it one, and `Expect` checks only a thing's own facts, not that no
+  invoice points to it. The delete retracts the client's fields, its name with them: whichever of the two groups
+  comes second is refused by the database, in either order, and so is an invoice of a client that never was.
 
 `src/main.ce` connects with each token and defines the rules at every start: `cepheus.Define` writes only those that
 are new or changed.
@@ -824,6 +826,5 @@ actions above). A flood of sign-ins is a denial of service until the hash runs b
 - An index order for a sort on a text (the clients by name read every client), and the bulk path for a load into a
   database with a constraint or a rule whose head is a one-valued property (the seed defines the rules after the
   load).
-- Negation in rules: the deleted client is a fact (`Gone`), so that the constraint needs no `Not`.
 - A counter that a group itself increments: invoice numbers without a gap are made one at a time in a process.
 - Argon2id beside the requests: a sign-in holds the app's thread for its 65 ms.
