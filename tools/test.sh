@@ -1,7 +1,7 @@
 #!/bin/sh
 # Every test: unit and property tests, the rules' property tests (G17, G18, G20), the exhaustive enumeration, the simulation (SEEDS seeds, 300 by default),
 # the commit buffer's simulation (BUFFER_SEEDS seeds, 300 by default: three databases sharing one buffer),
-# real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/book/case-seats.md), and the documentation's
+# real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/book/case-seats.md), the file vault's C, and the documentation's
 # examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), live questions
 # against the naive evaluator (LIVE_SEEDS seeds, 100 by default), questions with Sort, Limit and After against a
 # brute-force oracle (QUESTION_SEEDS seeds, 300 by default), TLS and the
@@ -39,6 +39,7 @@ $b/bank.exe "$tmp/cepheus-bank" "${BANK_SECONDS:-2}" | tail -2
 rm -rf "$tmp/cepheus-seats"
 $b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-20}" | tail -2
 rm -rf "$tmp/cepheus-seats"
+CEPHEUS_TMP=$tmp $b/vault_unit.exe | tail -1
 CEPHEUS_TMP=$tmp $b/examples.exe | tail -1
 CEPHEUS_TMP=$tmp $b/server_unit.exe | tail -1
 $b/server_sim.exe --seeds "${SERVER_SEEDS:-200}" | tail -2
