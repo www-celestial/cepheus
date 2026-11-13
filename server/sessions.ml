@@ -138,7 +138,7 @@ let finish t p (res : (Engine.receipt, Engine.error) result) =
             | Ok r, Some s -> record s p.p_serial { group = r.group; first_new = first_new r }
             | Error e, Some s -> if p.p_serial >= s.floor then Hashtbl.replace s.errors p.p_serial e
             | _ -> ()
-          with e -> Fault.log (Printf.sprintf "the receipt of serial %d of session %d" p.p_serial p.p_session) e
+          with e -> Fault.log "the receipt of a write in its session's table" e
         end;
         p.waiters)
   in
