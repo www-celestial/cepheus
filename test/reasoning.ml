@@ -528,6 +528,15 @@ let () =
    | _ -> C.fail "Why of a sum");
   ignore (ok (write db [ Retract (inv, line, Link l1); Retract (inv, line, Link l3) ]));
   C.check (state () = (None, None, None, None)) "no line: no fact";
+  (* the extremes of the ints: a Min of max_int alone, a Max of the smallest alone, are values (min_int is no word a
+     write stores) *)
+  List.iter
+    (fun d ->
+      let r = ok (write db [ Add (-1, day, Date d); Add (inv, line, Link (-1)) ]) in
+      C.check (state () = (None, Some (Int 1), Some (Date d), Some (Date d))) "one line of day %d: first and last are it" d;
+      ignore (ok (write db [ Retract (inv, line, Link (thing r (-1))) ])))
+    [ max_int; min_int + 1 ];
+  C.check (state () = (None, None, None, None)) "no line again: no fact";
   C.check (F.equal (user_facts (view db)) (C.perfect (rules_of (view db)) (asserted_facts (view db)))) "the perfect model";
   (* exact sums: past the ints refused; back within them in the same group, accepted *)
   refused_with "a sum past the largest int" "past the largest int"

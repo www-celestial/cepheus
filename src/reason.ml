@@ -2712,8 +2712,11 @@ let[@inline never] new_value c ri k (a : acc) old =
     else (match sum_value a with Some x -> Some x | None -> refuse "rule %s: the sum of #%d is past the largest int" (rule_name c ri) k)
   | `Min, Some w when a.minus > 0 && a.rmin <= w -> group_value c ri k
   | `Max, Some w when a.minus > 0 && a.rmax >= w -> group_value c ri k
-  | `Min, _ -> let m = min (Option.value old ~default:max_int) a.amin in if m = max_int && old = None then None else Some m
-  | `Max, _ -> let m = max (Option.value old ~default:min_int) a.amax in if m = min_int && old = None then None else Some m
+  (* no fact before and no answer added: none now (an answer added may be max_int, or min_int: amin and amax tell
+     nothing alone) *)
+  | (`Min | `Max), None when a.cnt + a.minus = 0 -> None
+  | `Min, _ -> Some (min (Option.value old ~default:max_int) a.amin)
+  | `Max, _ -> Some (max (Option.value old ~default:min_int) a.amax)
 
 (* An aggregate kept up to date by difference (Sum and Count are linear: the change of the sum is the sum of the
    changes, DBSP's rule, Budiu et al. 2023): the answers its body gained and lost, found from the facts the group
