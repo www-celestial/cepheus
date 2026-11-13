@@ -49,20 +49,19 @@ let refresh (v : Store.view) p = { v with schema = install_thing v.schema p (rea
 let desc (v : Store.view) p =
   match Schema.find v.schema p with Some d -> d | None -> invalid "no property %d" p
 
-(* Applies one change (the state its kind leaves) and keeps the schema in step. *)
+(* Applies one change (the state its kind leaves) and keeps the schema in step. No word is kept for "absent": every
+   int is a value's word (min_int is the smallest Int, Date or Money), so a value not in the view is the None of
+   Store.word. *)
+let apply_word (v : Store.view) (c : Group.change) w s =
+  let v' = Store.set v c.e c.p w s in
+  let v' = if Schema.is_system c.p && Schema.is_prop_space c.e && v' != v then refresh v' c.e else v' in
+  v', v' != v
+
 let apply_change (v : Store.view) (c : Group.change) =
   ignore (desc v c.p);
   let s = Group.after c.kind in
-  let v, w =
-    if s > 0 then Store.word_intern v c.v
-    else match Store.word v c.v with Some w -> v, w | None -> v, min_int
-  in
-  if w = min_int then v, false
-  else begin
-    let v' = Store.set v c.e c.p w s in
-    let v' = if Schema.is_system c.p && Schema.is_prop_space c.e && v' != v then refresh v' c.e else v' in
-    v', v' != v
-  end
+  if s > 0 then (let v, w = Store.word_intern v c.v in apply_word v c w s)
+  else match Store.word v c.v with Some w -> apply_word v c w s | None -> v, false
 
 let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
   try
@@ -97,28 +96,30 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
        makes it asserted too; a retraction of a fact only derived is refused, naming the rule (choice 10.4 of the
        reasoner design) *)
     let v_before = v0 in
+    let assert_word add e p x vi w =
+      let v1, prev = Store.swap vi e p w (if add then 1 else 0) in
+      let kind : Group.kind option =
+        match add, prev with
+        | true, 0 -> Some Added
+        | true, 2 -> Some Now_asserted
+        | false, 1 -> Some Retracted
+        | false, 2 ->
+          (* derived in the state before the group (Resolve changes asserted facts only): its proof is that state's *)
+          invalid "%s" (Reason.derived_message v_before e p w)
+        | _ -> None
+      in
+      match kind with
+      | None -> v := vi
+      | Some kind ->
+        v := if Schema.is_system p && Schema.is_prop_space e then refresh v1 e else v1;
+        out := { Group.kind; e; p; v = x } :: !out;
+        outw := w :: !outw
+    in
+    (* a retraction of a value the view has no word for (an unknown text) retracts nothing *)
     let assert_change add e p x =
       let v0 = !v in
-      let vi, w = if add then Store.word_intern v0 x else (v0, match Store.word v0 x with Some w -> w | None -> min_int) in
-      if w <> min_int then begin
-        let v1, prev = Store.swap vi e p w (if add then 1 else 0) in
-        let kind : Group.kind option =
-          match add, prev with
-          | true, 0 -> Some Added
-          | true, 2 -> Some Now_asserted
-          | false, 1 -> Some Retracted
-          | false, 2 ->
-            (* derived in the state before the group (Resolve changes asserted facts only): its proof is that state's *)
-            invalid "%s" (Reason.derived_message v_before e p w)
-          | _ -> None
-        in
-        match kind with
-        | None -> v := vi
-        | Some kind ->
-          v := if Schema.is_system p && Schema.is_prop_space e then refresh v1 e else v1;
-          out := { Group.kind; e; p; v = x } :: !out;
-          outw := w :: !outw
-      end
+      if add then (let vi, w = Store.word_intern v0 x in assert_word add e p x vi w)
+      else match Store.word v0 x with Some w -> assert_word add e p x v0 w | None -> ()
     in
     let assert_add e p x = assert_change true e p x and assert_retract e p x = assert_change false e p x in
     let check_thing e p =

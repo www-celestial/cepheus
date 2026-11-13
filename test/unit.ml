@@ -940,6 +940,27 @@ let () =
   close c
 
 let () =
+  section "the smallest Int, Date and Money are values like any other: written, read, retracted, replayed";
+  guarded "smallest numbers" @@ fun () ->
+  let sim = Sim_disk.create (Rng.make 37) in
+  let disk = Sim_disk.disk sim in
+  let a = Result.get_ok (open_on disk "/db") in
+  let[@warning "-8"] (Ok [ n; d; m ]) = declare a [ prop "c/n" Tint; prop "c/d" Tdate; prop "c/m" (Tmoney 2) ] in
+  let r = Result.get_ok (write a [ Add (-1, n, Int min_int); Add (-1, d, Date min_int); Add (-1, m, Money min_int) ]) in
+  let x = thing r (-1) in
+  let all v = (values v x n, values v x d, values v x m) in
+  C.check (all (view a) = ([ Int min_int ], [ Date min_int ], [ Money min_int ])) "written and read";
+  close a;
+  let b = Result.get_ok (open_on disk "/db") in
+  C.check (all (view b) = ([ Int min_int ], [ Date min_int ], [ Money min_int ])) "replayed from the journal";
+  ignore (Result.get_ok (write b [ Retract (x, n, Int min_int); Retract (x, d, Date min_int); Retract (x, m, Money min_int) ]));
+  C.check (all (view b) = ([], [], [])) "retracted";
+  close b;
+  let c = Result.get_ok (open_on disk "/db") in
+  C.check (all (view c) = ([], [], [])) "the retractions replayed";
+  close c
+
+let () =
   section "fold: the values of its words, texts included, as find gives them";
   guarded "fold and decode" @@ fun () ->
   let f = fork empty in
