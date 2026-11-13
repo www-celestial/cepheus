@@ -47,6 +47,11 @@ exception Refused of string
 
 let refuse fmt = Printf.ksprintf (fun s -> raise (Refused s)) fmt
 
+(* a write of an aggregate's property, refused *)
+let agg_message (v : Store.view) p =
+  Printf.sprintf "%s is given by an aggregate rule: no write adds or retracts it"
+    (match Schema.find v.schema p with Some d -> d.name | None -> string_of_int p)
+
 (* the budget of a data write: derived changes <= base + per x asserted changes (choice 10.7 of the design) *)
 let budget_base = ref 100_000
 let budget_per = ref 100
@@ -1176,7 +1181,7 @@ let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(src : Rul
   Array.iteri
     (fun i (r : Rules.t) ->
       Array.iter (fun (a : Query.pattern) -> mark a.p 1; see_const a.v) natoms.(i);
-      match r.head with Give h -> mark h.p (if aggs.(i) <> None then 6 else 2); see_const h.v | Never -> ())
+      match r.head with Give h -> mark h.p 2; see_const h.v | Never -> ())
     rules;
   (* a variable property reads or gives every property; the relations a program is unfolded on are read by its
      generic rules *)
@@ -2834,6 +2839,16 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
 
 and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
     let reads p = if p < prog.np then Char.code (Bytes.unsafe_get prog.reads p) else 0 in
+    (* an aggregate's property holds only what its rule gives: no write asserts it, under the rules after the group (a
+       retraction of its fact, derived only, is refused before, by Resolve, with the same message; a retraction of an
+       asserted fact is one of a property an aggregate defined in this group takes over, which Resolve checks holds
+       none after it) *)
+    if prog.stratified then
+      Array.iter
+        (fun (ch : Group.change) ->
+          if ch.kind <> Retracted && ch.p >= 0 && ch.p < Array.length prog.agg_rule && Array.unsafe_get prog.agg_rule ch.p >= 0 then
+            raise (Refused (agg_message v ch.p)))
+        changes;
     (* nothing the rules read or give: nothing to do *)
     if same && Array.for_all (fun (ch : Group.change) -> reads ch.p = 0) changes then v, changes
     else
@@ -3260,6 +3275,9 @@ let [@inline never] why (v : Store.view) e p w =
 
 (* the message of a retraction of a fact only derived (choice 10.4 of the design) *)
 let [@inline never] derived_message (v : Store.view) e p w =
+  let gen, _ = programs v in
+  if p >= 0 && p < Array.length gen.agg_rule && gen.agg_rule.(p) >= 0 then agg_message v p
+  else
   match (try why v e p w with Failure _ -> None) with
   | Some (By { rule; from; _ }) ->
     let leaf = function Given g -> (g.e, g.p, g.v) | By b -> (b.e, b.p, b.v) in

@@ -538,6 +538,27 @@ let () =
   (* the aggregate's property: no write asserts it, no other rule gives it *)
   refused_with "a write of an aggregate's property" "given by an aggregate rule" (write db [ Add (inv, total, Int 3) ]);
   refused_with "a retraction of an aggregate's fact" "given by an aggregate rule" (write db [ Retract (inv, total, Int max_int) ]);
+  refused_with "a write of it where the aggregate gives none" "given by an aggregate rule" (write db [ Add (l1, total, Int 3) ]);
+  refused_with "a write of the value the aggregate gives" "given by an aggregate rule" (write db [ Add (inv, total, Int max_int) ]);
+  ignore (ok (write db [ Retract (inv, total, Int 7) ]));
+  C.check (one total = Some (Int max_int) && values (view db) l1 total = []) "a retraction of a value it does not hold: nothing";
+  (* a property with asserted facts: an aggregate over it refused, unless the same group retracts them; the group
+     that removes an aggregate may write its property *)
+  let owed = match declare db [ prop "owed" Tint ] with Ok [ o ] -> o | _ -> assert false in
+  let owed_of = { name = "owed-of"; vars = 3; where = body2 amount; ranges = []; head = Give { e = i; p = aggregate `Sum owed; v = a } } in
+  ignore (ok (write db [ Add (inv, owed, Int 1) ]));
+  refused_with "an aggregate over asserted facts" "holds facts a write asserted" (define db [ owed_of ]);
+  let rule_thing () =
+    let v = view db and id = ref Schema.first_prop in
+    while Schema.find v.schema !id <> None || Store.has_value v !id Schema.p_name do incr id done;
+    !id
+  in
+  let rid = rule_thing () in
+  ignore (ok (write db [ Retract (inv, owed, Int 1); Add (rid, Schema.p_rule, Text (Rules.to_text owed_of)); Add (rid, Schema.p_name, Text "owed-of") ]));
+  C.check (values (view db) inv owed = [ Int max_int ]) "its facts retracted and the aggregate defined in one group";
+  ignore (ok (write db [ Retract (rid, Schema.p_rule, Text (Rules.to_text owed_of)); Retract (rid, Schema.p_name, Text "owed-of"); Add (l1, owed, Int 2) ]));
+  C.check (values (view db) inv owed = [] && values (view db) l1 owed = [ Int 2 ]) "the aggregate removed and its property written in one group";
+  C.check (F.equal (user_facts (view db)) (C.perfect (rules_of (view db)) (asserted_facts (view db)))) "the perfect model, owed asserted";
   refused_with "another rule giving it" "which the aggregate total-of gives"
     (define db [ { name = "also"; vars = 3; where = body2 amount; ranges = []; head = Give { e = i; p = total; v = a } } ]);
   refused_with "a sum of dates" "sum is for ints and money"

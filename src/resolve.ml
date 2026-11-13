@@ -97,11 +97,7 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
        makes it asserted too; a retraction of a fact only derived is refused, naming the rule (choice 10.4 of the
        reasoner design) *)
     let v_before = v0 in
-    let aggs = lazy (Reason.reads v_before) in
     let assert_change add e p x =
-      let rd = Lazy.force aggs in
-      if p < Bytes.length rd && Char.code (Bytes.unsafe_get rd p) land 4 <> 0 then
-        invalid "%s is given by an aggregate rule: no write adds or retracts it" (desc !v p).name;
       let v0 = !v in
       let vi, w = if add then Store.word_intern v0 x else (v0, match Store.word v0 x with Some w -> w | None -> min_int) in
       if w <> min_int then begin
