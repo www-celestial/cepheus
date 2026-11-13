@@ -173,6 +173,46 @@ Never = "cepheus.Never"
     variable of Then that no pattern binds. *)
 Define(rules, db) = define(db, rules)
 
+(** A kind of files: each of its things is a file, with the fields Name (a Text), Size (an Int: its bytes), Type (a
+    Text: a media type, as "application/pdf"), Owner (a Link: the thing whose key seals the bytes) and Content (the
+    root of its bytes in the server's vault). Give it to Connect as any kind; the rights of a token on the kind are
+    its rights on the files: to put one, a right to add to it; to read one, a right to read it.
+
+      Scans = Files("scan") *)
+Files(name) = kind(name, {Name: Text(), Size: Int(), Type: Text(), Owner: Link(), Content: Text()})
+
+(** Stores a file: its bytes go to the server's vault, cut into chunks that are compressed, sealed with the key of
+    owner (the database's own key when owner is 0), and stored once (a chunk the owner's files hold already is not
+    stored again); then one group writes its facts: an Ok of its id, once its bytes and its facts are on the server's
+    disk. cold = true for a file read seldom: smaller on the disk (Zstandard rather than LZ4), slower to store.
+
+      f = cepheus.Put(Scans, "2026-11.pdf", sys.Read("2026-11.pdf")?, db, type = "application/pdf", owner = ada)? *)
+Put(kind, name, content, db, type = "application/octet-stream", owner = 0, cold = false, by = 0, why = "") = put(db, kind, name, content, type, owner, cold, by, why)
+
+(** The bytes of a file: an Ok of a Text of them, all of them, or len of them from the byte from. Only the chunks that
+    hold the range are read; each is checked as it is read (a byte changed on the server's disk is an Err of Code
+    "damaged", never a wrong byte).
+
+      page = cepheus.Read(Scans, f, db, from = 10_000_000, len = 65_536)? *)
+Read(kind, id, db, from = 0, len = missing) = read(db, kind, id, from, len)
+
+(** The files of a kind: an Ok of a list of {Id, Name, Size, Type}. It is the question
+
+      Find(4, (f, n, s, t) -> {Where: [[f, kind.Name, n], [f, kind.Size, s], [f, kind.Type, t]], Give: {Id: f, Name: n, Size: s, Type: t}}, db) *)
+List(kind, db) = Find(4, (f, n, s, t) -> {Where: [[f, kind.Name, n], [f, kind.Size, s], [f, kind.Type, t]], Give: {Id: f, Name: n, Size: s, Type: t}}, db)
+
+(** A file deleted: its facts retracted in one group (an Ok of its number); the group is refused, Code "conflict", if
+    the file changed meanwhile. Its bytes stay in the vault as long as the history cites them; to make them unreadable
+    everywhere, erase its owner's key. *)
+Delete(kind, id, db, by = 0, why = "") = delete(db, kind, id, by, why)
+
+(** The key of an owner destroyed: every file sealed with it can no longer be read, on this server's disk and in
+    every copy of its bytes (replicas, backups), and no new file may name it as its owner. It cannot be undone. Needs a
+    token that writes the whole database. An Ok of missing.
+
+      cepheus.Erase(ada, db)? *)
+Erase(owner, db) = erase(db, owner)
+
 (** The empty database, to fork for a test. *)
 Empty = "cepheus.Empty"
 

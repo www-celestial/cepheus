@@ -17,6 +17,7 @@ type db = {
   sessions : Sessions.t;
   more : unit -> (string * string) list;  (* the transport's lines for status (its local readers) *)
   hub : unit -> Live.hub;  (* its live questions, made at the first Watch *)
+  files : Files.cell;  (* its vault, opened at the first file *)
 }
 
 type t = {
@@ -62,6 +63,7 @@ and conn = {
   mutable watching : (int * (Live.hub * Live.sub)) list;  (* by the id of the Watch *)
   mutable closed : bool;  (* pushes are dropped *)
   wake : unit -> unit;  (* the transport sends what [pushes] holds (it must not wait) *)
+  puts : (int, db * Files.put) Hashtbl.t;  (* the files being put, by the id of their Put (the reading thread only) *)
 }
 
 let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> []) () =
@@ -78,7 +80,7 @@ let connect ?(wake = ignore) srv ~flush ~submit =
         { srv; cid; token = None; seen = Tokens.empty; rights = [||]; kinds = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
           inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = [];
-          closed = false; wake }
+          closed = false; wake; puts = Hashtbl.create 2 }
       in
       Hashtbl.replace srv.conns cid c;
       c)
@@ -86,6 +88,8 @@ let connect ?(wake = ignore) srv ~flush ~submit =
 let disconnect c =
   let ws = Mutex.protect c.pm (fun () -> c.closed <- true; Buffer.reset c.pushes; let l = c.watching in c.watching <- []; l) in
   List.iter (fun (_, (h, s)) -> Live.unsubscribe h s) ws;
+  (* the files not finished are dropped: their chunks stored already are cited by no fact *)
+  Hashtbl.reset c.puts;
   Mutex.protect c.srv.cm (fun () ->
       Hashtbl.remove c.srv.conns c.cid;
       ignore (Atomic.fetch_and_add c.srv.served c.requests))
@@ -319,6 +323,108 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
       let o = { Origin.token = tok.name; session = c.session; serial; floor } in
       c.submit d ops by (Origin.wrap o why) (Sessions.finish d.sessions p)
 
+(* ---- files ---- *)
+
+module Vault = Cepheus_vault.Vault
+
+let vault_err c ~id ~kind e = let code, m = Files.code_of e in err c ~id ~kind code "%s" m
+
+(* the last bytes of a file came: its bytes made durable, then the group of its facts written as any write, in the
+   session (a Put sent again after a broken connection is applied once: its bytes are found stored, its group
+   answered again) *)
+let put_end c ~id d (st : Files.put) =
+  match st.meta with
+  | Wire.Put p -> (
+    match Vault.finish st.w with
+    | Error e -> vault_err c ~id ~kind:Wire.k_put e
+    | Ok (root, size) ->
+      write c ~id ~kind:Wire.k_put d ~serial:p.serial ~floor:p.floor ~by:p.by ~why:p.why
+        (Files.facts st.p ~name:p.name ~typ:p.typ ~owner:p.owner ~size ~root))
+  | _ -> ()
+
+let put_feed c ~id ~more d (st : Files.put) data =
+  st.bytes <- st.bytes + String.length data;
+  if st.bytes > !Files.max_size then begin
+    Hashtbl.remove c.puts id;
+    err c ~id ~kind:Wire.k_put "too_large" "a file has at most %d bytes" !Files.max_size
+  end
+  else
+    match Vault.feed st.w (Bytes.unsafe_of_string data) 0 (String.length data) with
+    | Error e -> Hashtbl.remove c.puts id; vault_err c ~id ~kind:Wire.k_put e
+    | Ok () -> if not more then (Hashtbl.remove c.puts id; put_end c ~id d st)
+
+(* a Put: checked whole before a byte is stored (rights, the kind, the bounds, the owner) *)
+let put_start c ~id ~more d (req : Wire.request) =
+  let kind = Wire.k_put in
+  match req with
+  | Wire.Put p -> (
+    let v = d.view () in
+    let refuse code fmt = Printf.ksprintf (fun m -> err c ~id ~kind code "%s" m) fmt in
+    if Hashtbl.mem c.puts id then refuse "invalid" "a Put on the id of a Put not finished"
+    else if Hashtbl.length c.puts >= Files.max_puts then refuse "too_large" "a connection puts %d files at once at most" Files.max_puts
+    else if String.length p.name > Files.max_name || String.length p.typ > Files.max_type then
+      refuse "too_large" "a file's name has %d bytes at most, its type %d" Files.max_name Files.max_type
+    else if Origin.has_marker p.why then refuse "invalid" "a why may not start with the server's marker"
+    else if not (Config.valid_name p.kind) then refuse "invalid" "a file kind's name: lower-case letters, digits, '_' and '-'"
+    else
+      match Files.props_of v p.kind with
+      | Error m -> refuse "invalid" "%s" m
+      | Ok props -> (
+        let facts = Files.facts props ~name:p.name ~typ:p.typ ~owner:p.owner ~size:0 ~root:(String.make 32 '\000') in
+        match match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> unaddable c d.index v r facts | _ -> None with
+        | Some k -> refuse "denied" "this token may not add to the kind %s of %s" k d.name
+        | None ->
+          if p.owner > 0 && Cepheus.get v p.owner = [] then refuse "invalid" "the owner %d is not a thing of %s" p.owner d.name
+          else
+            match Files.vault d.files with
+            | Error m -> refuse "io" "the vault of %s: %s" d.name m
+            | Ok vt -> (
+              match Vault.writer vt ~domain:p.owner ~cold:p.cold with
+              | Error e -> vault_err c ~id ~kind e
+              | Ok w ->
+                let st = { Files.w; p = props; meta = req; bytes = 0 } in
+                Hashtbl.replace c.puts id (d, st);
+                put_feed c ~id ~more d st p.data)))
+  | _ -> ()
+
+(* a file's bytes from [from], [len] of them (-1: to the end), in frames of a MiB with the flag more but the last;
+   a failure after some frames ends the reply with an error frame *)
+let load c ~id ~kind d ~thing ~prop ~from ~len =
+  let v = d.view () in
+  let readable_kind =
+    match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> bit (kinds_table c d.index v r) prop 1 | _ -> true
+  in
+  if not readable_kind then err c ~id ~kind "denied" "this token may not read the kind %s of %s" (kind_name v prop) d.name
+  else
+    match Files.root_of v thing prop with
+    | Error (code, m) -> err c ~id ~kind code "%s" m
+    | Ok root -> (
+      match Files.vault d.files with
+      | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name m
+      | Ok vt -> (
+        match if len >= 0 then Ok len else Result.map (fun s -> s - from) (Vault.size vt root) with
+        | Error e -> vault_err c ~id ~kind e
+        | Ok len ->
+          let b = c.body in
+          Buffer.clear b;
+          let piece bytes off n =
+            let o = ref off and n = ref n in
+            while !n > 0 do
+              let k = min !n (chunk - Buffer.length b) in
+              Buffer.add_subbytes b bytes !o k;
+              o := !o + k;
+              n := !n - k;
+              if Buffer.length b >= chunk then begin
+                send_body c ~id ~kind ~flags:Wire.f_more b;
+                Buffer.clear b;
+                c.flush ()
+              end
+            done
+          in
+          match Vault.load vt root ~from ~len piece with
+          | Ok () -> send_body c ~id ~kind ~flags:0 b
+          | Error e -> vault_err c ~id ~kind e))
+
 (* ---- live questions ---- *)
 
 (* the pushes not yet sent, at most: a watch whose connection holds more falls behind (lagging) *)
@@ -420,7 +526,7 @@ type action =
   | Follows of db * int  (** the connection becomes the database's follow stream (request id): the transport's work *)
 
 (* one complete frame: [r] reads its body *)
-let handle c ~id ~kind (r : Codec.reader) =
+let handle c ~id ~kind ~flags (r : Codec.reader) =
   c.requests <- c.requests + 1;
   match Wire.get_request kind r with
   | exception (Codec.Short | Wire.Malformed _) ->
@@ -492,6 +598,38 @@ let handle c ~id ~kind (r : Codec.reader) =
            | Some d -> if kinds_read c ~id ~kind d w.query w.wextra then watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra);
           Continue
         | _, Wire.Unwatch w -> unwatch c ~id ~kind w; Continue
+        | _, (Wire.Put p as req) ->
+          let more = flags land Wire.f_more <> 0 in
+          (match writable c ~id ~kind p.db with
+           | None -> ()
+           | Some d -> put_start c ~id ~more d req);
+          Continue
+        | _, Wire.Piece data ->
+          (* the pieces of a Put that was refused, or failed, are dropped *)
+          (match Hashtbl.find_opt c.puts id with
+           | Some (d, st) -> (
+             (* G16 at each piece: a token whose right to write went meanwhile ends its put *)
+             match writable c ~id ~kind:Wire.k_put d.index with
+             | Some _ -> put_feed c ~id ~more:(flags land Wire.f_more <> 0) d st data
+             | None -> Hashtbl.remove c.puts id)
+           | None -> ());
+          Continue
+        | _, Wire.Erase e ->
+          (* irreversible: a right to write every kind of the database *)
+          (match db_of c ~id ~kind e.db with
+           | None -> ()
+           | Some d when c.rights.(e.db) <> Some Tokens.Write -> err c ~id ~kind "denied" "erasing an owner's files needs a right to write all of %s" d.name
+           | Some _ when e.owner <= 0 -> err c ~id ~kind "invalid" "an erasure names an owner, a thing: the database's own key (0) is never erased"
+           | Some d -> (
+             match Files.vault d.files with
+             | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name m
+             | Ok vt -> ( match Vault.erase vt e.owner with Ok () -> reply c ~id ~kind Wire.Erased | Error x -> vault_err c ~id ~kind x)));
+          Continue
+        | _, Wire.Load l ->
+          (match readable c ~id ~kind l.db with
+           | None -> ()
+           | Some d -> load c ~id ~kind d ~thing:l.thing ~prop:l.prop ~from:l.from ~len:l.len);
+          Continue
         | _, Wire.Follow i -> (
           (* a reader's right is enough (G16); a follow stream carries nothing else *)
           match readable c ~id ~kind i with
@@ -524,8 +662,8 @@ let input c buf off stop =
       end
       else if stop - o < 4 + len then o, Need
       else
-        let id = Wire.u32 buf (o + 4) and kind = Bytes.get_uint8 buf (o + 8) in
-        match handle c ~id ~kind (Codec.reader buf (o + Wire.header) (len - 6)) with
+        let id = Wire.u32 buf (o + 4) and kind = Bytes.get_uint8 buf (o + 8) and flags = Bytes.get_uint8 buf (o + 9) in
+        match handle c ~id ~kind ~flags (Codec.reader buf (o + Wire.header) (len - 6)) with
         | Continue -> go (o + 4 + len)
         | Close -> o + 4 + len, Shut
         | Follows (d, id) -> o + 4 + len, Follow (d, id)

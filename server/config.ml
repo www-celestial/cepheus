@@ -34,6 +34,8 @@ let bad fmt = Printf.ksprintf (fun m -> raise (Bad m)) fmt
 let socket_name port = Printf.sprintf ".s.cepheus.%d" port
 let socket_path c = Option.map (fun d -> Filename.concat d (socket_name c.port)) c.socket
 let tokens_path c = Filename.concat (Filename.dirname c.file) "tokens.toml"
+(* the master key of the databases' vaults: beside cluster.toml, never in the data *)
+let vault_key_path c = Filename.concat (Filename.dirname c.file) "vault.key"
 let database_dir c name = Filename.concat c.data name
 
 let valid_name s =

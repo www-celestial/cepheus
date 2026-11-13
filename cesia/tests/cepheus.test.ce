@@ -411,3 +411,16 @@ defn isAggregateYoursAlone()
   bounds = cepheus.Rule("bounds", 3, (a, b, x) -> {Where: [[b, Bill.Account, a], [b, Bill.Total, x], cepheus.Not([b, Bill.Status, "late"], cepheus.Above(x, 5))], Then: [a, Account.Late, true]})
   value.Equal([written.Error.Code, cepheus.Define([cyc], t).Error.Code, cepheus.Define([bounds], t).Error.Code], ["invalid", "invalid", "invalid"])
 end
+
+Scans = cepheus.Files("scan")
+
+defn isAFileKindAKind()
+  (** a file kind's facts are a kind's: written, read and asked as any; its bytes need a server *)
+  t = cepheus.Fork(cepheus.Empty, [Scans])?
+  id = cepheus.Insert(Scans, {Name: "a.pdf", Size: 3, Type: "application/pdf"}, t)?
+  got = cepheus.Get(Scans, id, t)?
+  listed = cepheus.List(Scans, t)?
+  bug.Assert(got.Name == "a.pdf" and got.Size == 3 and got.Content == missing, "the facts of a file")
+  bug.Assert(value.Equal(listed, [{Id: id, Name: "a.pdf", Size: 3, Type: "application/pdf"}]), "List is a Find")
+  cepheus.Put(Scans, "b", "bytes", t).Error.Code == "invalid" and cepheus.Read(Scans, id, t).Error.Code == "invalid"
+end

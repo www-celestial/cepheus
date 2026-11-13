@@ -1,0 +1,24 @@
+; The file vault: content-defined chunks named by their keyed BLAKE2b, stored once in packs, compressed (LZ4 warm,
+; Zstandard cold), sealed with AEGIS-256 under a key per domain. Its C: vault_stubs.c on libsodium, and the vendored
+; LZ4 and Zstandard (vendor/), compiled as two units with their symbols hidden.
+(library
+ (name cepheus_vault)
+ (libraries cepheus unix threads.posix)
+ (foreign_stubs
+  (language c)
+  (names vault_stubs)
+  (flags (:standard -O2 -Wall))
+  (extra_deps ../vendor/lz4-1.10.0/lz4.h ../vendor/zstd-1.5.7/lib/zstd.h ../vendor/zstd-1.5.7/lib/zstd_errors.h))
+ (foreign_stubs
+  (language c)
+  (names lz4_lib zstd_lib)
+  (flags (:standard -O3 -fvisibility=hidden))
+  (extra_deps
+   (glob_files ../vendor/lz4-1.10.0/*)
+   (glob_files ../vendor/zstd-1.5.7/lib/*.h)
+   (glob_files ../vendor/zstd-1.5.7/lib/common/*)
+   (glob_files ../vendor/zstd-1.5.7/lib/compress/*)
+   (glob_files ../vendor/zstd-1.5.7/lib/decompress/*)))
+ (c_library_flags (-lsodium))
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

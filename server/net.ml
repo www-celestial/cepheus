@@ -461,7 +461,8 @@ let open_databases (cfg : Config.t) wal =
           let live = Engine.start ~follow:hooks e in
           let core =
             { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions;
-              more = (fun () -> Follow.status follow @ Watch.status watch); hub = (fun () -> Watch.hub watch) }
+              more = (fun () -> Follow.status follow @ Watch.status watch); hub = (fun () -> Watch.hub watch);
+              files = Files.cell ~master:(fun () -> Files.master_file (Config.vault_key_path cfg)) (Filename.concat dir "vault") }
           in
           Ok { core; live; follow; watch; page; checkpointed = (Atomic.get e.published).group })
   in
@@ -492,6 +493,7 @@ let checkpoint d =
   end
 
 let serve (cfg : Config.t) =
+  Files.log_made := (fun path -> log "made the vault's master key %s: keep a copy apart from the data (without it, no file opens)" path);
   (* SIGTERM and SIGINT are waited for by the main thread: blocked first, so that every thread and domain made from
      here on (the databases' writers too) blocks them and none of them is killed by one *)
   let sigs = [ Sys.sigterm; Sys.sigint ] in
@@ -525,7 +527,7 @@ let serve (cfg : Config.t) =
       | Ok (wal, dbs) -> (
         let opened_ms = (Unix.gettimeofday () -. t0) *. 1e3 in
         let sid = server_id cfg.data in
-        let stop_all () = Array.iter (fun d -> Engine.stop d.live) dbs; Wal.stop wal in
+        let stop_all () = Array.iter (fun d -> Files.close d.core.files; Engine.stop d.live) dbs; Wal.stop wal in
         let srv =
           Core.create ~server_id:sid ~cluster_id:cfg.id ~dbs:(Array.map (fun d -> d.core) dbs) ~tokens ~now:Disk.real.now
             ~new_session:(fun () -> 1 + (Int64.to_int (String.get_int64_le (Tokens.random 8) 0) land 0x3FFF_FFFF_FFFF_FFFF))

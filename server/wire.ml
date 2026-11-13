@@ -1,7 +1,7 @@
-(* The wire protocol, versions 1 and 2. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
-   After: below), and nothing else: a server speaks both, a program says in Hello the version it speaks, and against a
-   server that speaks 1 only a program speaks 1 (Client.hello) and asks no question with the extension. A connection
-   carries frames both ways:
+(* The wire protocol, versions 1 to 3. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+   After: below), version 3 the files of the vault (Put, Piece, Load: below), and nothing else: a server speaks all
+   three, a program says in Hello the version it speaks, and against an older server a program speaks that server's
+   version (Client.hello) and asks nothing that version lacks. A connection carries frames both ways:
 
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
      flags  = bit 0: more (a reply in several frames: the rows of a Find), bit 1: error (the body is an error)
@@ -14,7 +14,7 @@ open Cepheus
 module Ask = Question.Ask
 module Top = Question.Top
 
-let version = 2
+let version = 3
 
 (* the oldest version a server still speaks *)
 let oldest = 1
@@ -42,6 +42,16 @@ let k_watch = 11
 let k_unwatch = 12
 let k_durable = 13
 
+(* files (version 3): a Put (its description and its first bytes), then Pieces on the same id, each frame but the
+   last with the flag more; the reply (on the Put's id and kind) is the receipt of the group that describes the file,
+   written once its bytes are on the disk. A Load's reply is the bytes, in frames of the flag more but the last. *)
+let k_put = 14
+let k_piece = 15
+let k_load = 16
+
+(* the key of an owner destroyed: its files can no longer be read, anywhere their bytes went *)
+let k_erase = 17
+
 let f_more = 1
 let f_error = 2
 
@@ -64,6 +74,22 @@ type request =
   | Watch of { db : int; query : Query.t; select : select; from : int; wextra : Ask.item list }
       (** the question kept answered; [from]: the group whose answer the program holds (0: none) *)
   | Unwatch of int  (** the id of the Watch *)
+  | Put of {
+      db : int;
+      serial : int;
+      floor : int;
+      by : int;
+      why : string;
+      kind : string;  (** the file kind: its facts are kind/Name, kind/Size, kind/Type, kind/Owner, kind/Content *)
+      name : string;
+      typ : string;  (** a media type, as "application/pdf" *)
+      owner : int;  (** the thing whose key the file is sealed with (0: the database's own) *)
+      cold : bool;
+      data : string;  (** its first bytes *)
+    }
+  | Piece of string  (** more bytes of the Put of this id *)
+  | Load of { db : int; thing : int; prop : int; from : int; len : int  (** -1: to the end *) }
+  | Erase of { db : int; owner : int }
 
 type reply =
   | Welcome of { server : string; cluster : string; session : int; frame : int; inflight : int }
@@ -77,6 +103,8 @@ type reply =
       (** Follow's reply: the database's id, the visibility number and the runs (lo, hi) of the state visible under
           it, newest first; the descriptors of the page and of the runs, in that order, ride on its first byte *)
   | Unwatched
+  | Data of string  (** bytes of a file (a Load's reply joins its frames') *)
+  | Erased
   | Err of { code : string; message : string }
 
 exception Malformed of string
@@ -242,6 +270,10 @@ let request_kind = function
   | Follow _ -> k_follow
   | Watch _ -> k_watch
   | Unwatch _ -> k_unwatch
+  | Put _ -> k_put
+  | Piece _ -> k_piece
+  | Load _ -> k_load
+  | Erase _ -> k_erase
 
 let put_request b = function
   | Hello h ->
@@ -266,6 +298,24 @@ let put_request b = function
     Codec.put_varint b w.db; put_query b w.query; put_select b w.select; Codec.put_varint b w.from;
     if w.wextra <> [] then put_order b ~extra:w.wextra Top.none
   | Unwatch id -> Codec.put_varint b id
+  | Put p ->
+    Codec.put_varint b p.db;
+    Codec.put_varint b p.serial;
+    Codec.put_varint b p.floor;
+    Codec.put_int b p.by;
+    Codec.put_string b p.why;
+    Codec.put_string b p.kind;
+    Codec.put_string b p.name;
+    Codec.put_string b p.typ;
+    Codec.put_varint b p.owner;
+    Buffer.add_char b (if p.cold then '\001' else '\000');
+    Buffer.add_string b p.data
+  | Piece s -> Buffer.add_string b s
+  | Load l -> Codec.put_varint b l.db; Codec.put_varint b l.thing; Codec.put_varint b l.prop; Codec.put_varint b l.from; Codec.put_int b l.len
+  | Erase e -> Codec.put_varint b e.db; Codec.put_varint b e.owner
+
+(* the rest of a frame's body *)
+let rest (r : Codec.reader) = let s = Bytes.sub_string r.buf r.pos (r.stop - r.pos) in r.pos <- r.stop; s
 
 let get_request kind (r : Codec.reader) =
   let req =
@@ -309,6 +359,31 @@ let get_request kind (r : Codec.reader) =
       if order <> Top.none then raise (Malformed "a watch keeps every row of its question: Sort, Limit and After are for Find");
       Watch { db; query; select; from; wextra }
     else if kind = k_unwatch then Unwatch (Codec.get_varint r)
+    else if kind = k_put then
+      let db = Codec.get_varint r in
+      let serial = Codec.get_varint r in
+      let floor = Codec.get_varint r in
+      let by = Codec.get_int r in
+      let why = Codec.get_string r in
+      let kind = Codec.get_string r in
+      let name = Codec.get_string r in
+      let typ = Codec.get_string r in
+      let owner = Codec.get_varint r in
+      let cold = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
+      Put { db; serial; floor; by; why; kind; name; typ; owner; cold; data = rest r }
+    else if kind = k_piece then Piece (rest r)
+    else if kind = k_load then
+      let db = Codec.get_varint r in
+      let thing = Codec.get_varint r in
+      let prop = Codec.get_varint r in
+      let from = Codec.get_varint r in
+      let len = Codec.get_int r in
+      if len < -1 then raise (Malformed "a Load's length is -1 (to the end) or more");
+      Load { db; thing; prop; from; len }
+    else if kind = k_erase then
+      let db = Codec.get_varint r in
+      let owner = Codec.get_varint r in
+      Erase { db; owner }
     else raise (Malformed (Printf.sprintf "unknown request kind %d" kind))
   in
   if not (Codec.at_end r) then raise (Malformed "bytes after the request");
@@ -358,6 +433,8 @@ let put_reply b = function
   | Status l -> Codec.put_varint b (List.length l); List.iter (fun (k, v) -> Codec.put_string b k; Codec.put_string b v) l
   | Start st -> Codec.put_string b st.id; Codec.put_varint b st.vseq; put_runs b st.runs
   | Unwatched -> ()
+  | Data s -> Buffer.add_string b s
+  | Erased -> ()
   | Err e -> Codec.put_string b e.code; Codec.put_string b e.message
 
 let get_reply kind flags (r : Codec.reader) =
@@ -402,6 +479,12 @@ let get_reply kind flags (r : Codec.reader) =
     let vseq = Codec.get_varint r in
     Start { id; vseq; runs = get_runs r }
   else if kind = k_unwatch then Unwatched
+  else if kind = k_put then
+    let group = Codec.get_varint r in
+    let things = List.init (count r) (fun _ -> let t = Codec.get_int r in let e = Codec.get_varint r in t, e) in
+    Receipt { group; things }
+  else if kind = k_load then Data (rest r)
+  else if kind = k_erase then Erased
   else raise (Malformed (Printf.sprintf "unknown reply kind %d" kind))
 
 (* ---- the follow stream's pushes (request id 0) ----

@@ -227,19 +227,12 @@ type t = {
 
 let error code message = Wire.Err { code; message }
 
-(* the reply of a request in several frames: the rows of a Find, joined *)
+(* the reply of a request in several frames: the rows of a Find, the bytes of a Load, joined *)
 let assemble parts =
   let decode (k, f, b) = Client.decode k f b in
   match parts with
   | [ p ] -> decode p
-  | ps -> (
-    let replies = List.rev_map decode ps in
-    match List.find_opt (function Wire.Err _ -> true | _ -> false) replies with
-    | Some e -> e
-    | None ->
-      let group = ref 0 and cols = ref 0 in
-      let rows = List.concat_map (function Wire.Rows r -> group := r.group; cols := r.cols; r.rows | _ -> []) replies in
-      Wire.Rows { group = !group; cols = !cols; rows })
+  | ps -> Client.join (List.rev_map decode ps)
 
 (* called with [m] held; gives the resume to call once [m] is released *)
 let answer w r =
@@ -299,6 +292,7 @@ let dispatch t id kind flags body =
       Hashtbl.remove t.by_id id;
       (match w.req with
        | Wire.Write x -> Hashtbl.remove t.unanswered x.serial
+       | Wire.Put x -> Hashtbl.remove t.unanswered x.serial
        | Wire.Get _ -> t.rtt <- (0.875 *. t.rtt) +. (0.125 *. (Unix.gettimeofday () -. w.sent))
        | _ -> ());
       let r = try assemble w.parts with Client.Broken m -> error "protocol" m in
@@ -474,6 +468,16 @@ let write park t ~db ~by ~why ops =
   let floor = Hashtbl.fold (fun s () m -> min s m) t.unanswered serial in
   Mutex.unlock t.m;
   call park t (Wire.Write { db; serial; floor; by; why; ops })
+
+(* a file of the session (Client.put): its serial and floor as a write's; its bytes go in frames of a MiB *)
+let put park t ~db ~kind ~name ~typ ~owner ~cold ~by ~why data =
+  t.serial <- t.serial + 1;
+  let serial = t.serial in
+  Mutex.lock t.m;
+  Hashtbl.replace t.unanswered serial ();
+  let floor = Hashtbl.fold (fun s () m -> min s m) t.unanswered serial in
+  Mutex.unlock t.m;
+  call park t (Wire.Put { db; serial; floor; by; why; kind; name; typ; owner; cold; data })
 
 (* the watch at the server: its pushes go to [sh]; false when the connection is closed *)
 let watch t sh req =
