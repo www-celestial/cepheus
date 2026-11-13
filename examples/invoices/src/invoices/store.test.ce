@@ -53,7 +53,7 @@ end
 defn isInvoiceMadeWithItsLines()
   s = shop()?
   inv = GetInvoice(s.One.Invoice, s.Db)?
-  bug.Assert(s.One.Number == 1 and s.Two.Number == 2, "numbers follow")
+  bug.Assert(inv.Number == 1 and cepheus.Get(Invoice, s.Two.Invoice, s.Db)?.Number == 2, "numbers follow")
   inv.Total == 1280.5 and inv.Status == "unpaid" and value.Len(inv.Lines) == 2 and inv.Lines[2].Label == "Hosting"
 end
 
@@ -166,6 +166,25 @@ defn isNumberedInOrderAtOnce()
   ada = AddClient(ClientForm({name: "Ada", email: "ada@example.com", city: "Lyon"})?, 0, t)?
   f = InvoiceForm({client: "$ada", date: "2026-10-01", due: "2026-10-31", label1: "A", quantity1: "1", price1: "1"})?
   tasks = [fiber.Spawn(() -> AddInvoice(f, "Ada", 0, t)) for k in 1..20]
-  numbers = [result.Unwrap(fiber.Wait(x))?.Number for x in tasks]
+  numbers = [cepheus.Get(Invoice, result.Unwrap(fiber.Wait(x))?.Invoice, t)?.Number for x in tasks]
   value.Equal(list.Sort(numbers), [k for k in 1..20])
+end
+
+defn isNumberedAfterNumbersMadeWithoutTheCounter()
+  (** Invoices numbered without the counter, as the seed does: made after them, the counter starts after them; behind
+      them, the next invoice catches up once; CatchUpNumbers moves it up. *)
+  t = cepheus.Fork(cepheus.Empty, Kinds)?
+  ada = AddClient(ClientForm({name: "Ada", email: "ada@example.com", city: "Lyon"})?, 0, t)?
+  f = InvoiceForm({client: "$ada", date: "2026-10-01", due: "2026-10-31", label1: "A", quantity1: "1", price1: "1"})?
+  byHand(n) = cepheus.Write([cepheus.Add(cepheus.New(1), Invoice.Number, n)], t)
+  byHand(1)?
+  byHand(2)?
+  third = cepheus.Get(Invoice, AddInvoice(f, "Ada", 0, t)?.Invoice, t)?.Number
+  byHand(4)?
+  fifth = cepheus.Get(Invoice, AddInvoice(f, "Ada", 0, t)?.Invoice, t)?.Number
+  byHand(6)?
+  CatchUpNumbers(t)?
+  CatchUpNumbers(t)?
+  seventh = cepheus.Get(Invoice, AddInvoice(f, "Ada", 0, t)?.Invoice, t)?.Number
+  value.Equal([third, fifth, seventh], [3, 5, 7])
 end

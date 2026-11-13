@@ -13,7 +13,7 @@ port=$((21000 + $$ % 20000))
 $B cluster init e2e --dir "$tmp/s" > /dev/null
 sed -i "s/127.0.0.1:7400/127.0.0.1:$port/; s/^cache = \"1G\"/cache = \"128M\"/; s/^name = \"main\"/name = \"invoices\"/" "$tmp/s/cluster.toml"
 CEPHEUS_TOKEN=$($B token add web --database invoices=write --config "$tmp/s/cluster.toml" 2>/dev/null)
-CEPHEUS_BOOKS_TOKEN=$($B token add books --database "invoices=read:invoice,line;add:invoice,line" --config "$tmp/s/cluster.toml" 2>/dev/null)
+CEPHEUS_BOOKS_TOKEN=$($B token add books --database "invoices=read:invoice,line,counter;add:invoice,line,counter" --config "$tmp/s/cluster.toml" 2>/dev/null)
 export CEPHEUS_TOKEN CEPHEUS_BOOKS_TOKEN CEPHEUS_URL="cepheus://localhost:$port/invoices?socket=$tmp/s/run"
 setsid $B serve --config "$tmp/s/cluster.toml" < /dev/null > "$tmp/serve.log" 2>&1 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&- &
 pid=$!

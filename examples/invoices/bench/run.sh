@@ -33,7 +33,7 @@ empty() {
   sed -i "s/127.0.0.1:7400/127.0.0.1:$port/; s/^name = \"main\"/name = \"invoices\"/" "$srv/cluster.toml"
   (umask 077
    $B token add web --database invoices=write --config "$srv/cluster.toml" > "$srv/web.token" 2>/dev/null
-   $B token add books --database "invoices=read:invoice,line;add:invoice,line" --config "$srv/cluster.toml" > "$srv/books.token" 2>/dev/null)
+   $B token add books --database "invoices=read:invoice,line,counter;add:invoice,line,counter" --config "$srv/cluster.toml" > "$srv/books.token" 2>/dev/null)
   : > "$out/serve.log"
   serve 0
 }

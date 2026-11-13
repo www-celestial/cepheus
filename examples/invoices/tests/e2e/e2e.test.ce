@@ -147,6 +147,30 @@ defn isAccountantSeesNoClient()
   end, profiles)
 end
 
+defn isAccountantNumbersInvoicesAtOnce()
+  (** 20 invoices made at once with the accountant's token, through the server: each takes the counter's next number
+      in its own group, so the 20 numbers follow each other, none twice and none skipped. *)
+  app = served()?
+  ada = invoices.AddClient(invoices.ClientForm({name: "Ada", email: "ada-$(text.Decimals(0, sys.Now() * 1000000))@example.com", city: "Lyon"})?, 0, app.Full)?
+  f = invoices.InvoiceForm({client: "$ada", date: "2026-10-01", due: "2026-10-31", label1: "A", quantity1: "1", price1: "1"})?
+  tasks = [fiber.Spawn(() -> invoices.AddInvoice(f, "Ada", 0, app.Books)) for k in 1..20]
+  ids = [result.Unwrap(fiber.Wait(x))?.Invoice for x in tasks]
+  numbers = [cepheus.Get(invoices.Invoice, i, app.Books)?.Number for i in ids]
+  least = numbers[1]
+  most = numbers[1]
+  same = 0
+  for a in numbers
+    least = if a < least a else least end
+    most = if a > most a else most end
+    for b in numbers
+      if a == b
+        same += 1
+      end
+    end
+  end
+  same == 20 and most - least == 19
+end
+
 defn isOtherOriginRefused()
   (** A page of another origin (another port) posts a form to the app with the signed-in visitor's cookie: refused. *)
   app = served()?

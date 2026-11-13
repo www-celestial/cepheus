@@ -72,7 +72,7 @@ Expect(thing, property, value = missing) = {Op: "expect", Thing: thing, Property
     value there, an Int property: an invoice gets its number in the group that makes it. A value past the 63 bits
     refuses the group, Code "invalid".
 
-      cepheus.Write([cepheus.Incr(counter, Counter.Next, into = [cepheus.New(1), Invoice.Number]),
+      cepheus.Write([cepheus.Incr(counter, Counter.Last, into = [cepheus.New(1), Invoice.Number]),
                      cepheus.Add(cepheus.New(1), Invoice.Client, ada)], db) *)
 Incr(thing, property, by = 1, into = missing) = {Op: "incr", Thing: thing, Property: property, Value: by, Into: into}
 
