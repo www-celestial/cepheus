@@ -161,10 +161,12 @@ let recover ?manual disk dir =
   Array.iter (fun f -> f.gen <- newest) t.files;
   t
 
+(* Net opens a server's databases in parallel domains, each taking its frames here: the table is shared. *)
 let frames t id =
-  match Hashtbl.find_opt t.recovered id with
-  | Some l -> Hashtbl.remove t.recovered id; l
-  | None -> []
+  Mutex.protect t.m (fun () ->
+      match Hashtbl.find_opt t.recovered id with
+      | Some l -> Hashtbl.remove t.recovered id; l
+      | None -> [])
 
 (* ---- Rounds ---- *)
 

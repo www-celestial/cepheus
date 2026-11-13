@@ -726,6 +726,57 @@ let enumerate_buffer () =
 
 let () = enumerate_buffer ()
 
+(* A server opens its databases in parallel domains, each taking its frames from the buffer at its open (Net.
+   open_databases): the buffer's table of recovered frames is shared by them. A race there once made a server refuse
+   to start after a kill -9, saying that the buffer held writes of databases it did not open, and naming none. Here
+   [n] databases each leave one frame in the buffer, a process death, then [k] domains take them at once, released
+   together; every database must get its frame, once, and the buffer must start. *)
+let parallel_frames () =
+  let n = 64 and k = 4 and rounds = 40 in
+  Wal.alone := false;
+  let names = Array.init n (fun i -> Printf.sprintf "%s/d%02d" bdata i) in
+  let fails = ref 0 in
+  for round = 1 to rounds do
+    let sim = Sim_disk.create (Rng.make round) in
+    let disk = Sim_disk.disk sim in
+    disk.mkdir bdata;
+    disk.sync_dir "/";
+    let wal = Wal.recover ~manual:true disk bdata in
+    let es = Array.mapi (fun i d -> Result.get_ok (Engine.open_ ~id_source:(fun _ -> bid i) ~buffer:(Wal.frames wal) disk d)) names in
+    Wal.start wal;
+    Array.iter (fun (e : Engine.t) -> Wal.attach wal e.id e.journal) es;
+    let waits : (unit, unit) Effect.Deep.continuation list ref = ref [] in
+    Array.iter
+      (fun e ->
+        let ops = List.map (fun (e, q, x) -> Add (e, q, x)) (Schema.facts Schema.first_prop (prop "name" Ttext)) in
+        match Engine.commit e (Engine.prepare e [| ops, 1, "x" |]) with
+        | _ -> ()
+        | effect Wal.Wait, c -> waits := c :: !waits)
+      es;
+    Wal.round wal;
+    List.iter (fun c -> Effect.Deep.continue c ()) !waits;
+    Sim_disk.kill sim;
+    let wal = Wal.recover ~manual:true disk bdata in
+    let got = Array.make n (-1) and go = Atomic.make false in
+    let take j () =
+      while not (Atomic.get go) do Domain.cpu_relax () done;
+      for i = 0 to n - 1 do if i mod k = j then got.(i) <- List.length (Wal.frames wal (bid i)) done
+    in
+    let ds = List.init k (fun j -> Domain.spawn (take j)) in
+    Atomic.set go true;
+    List.iter Domain.join ds;
+    let ok_frames = Array.for_all (fun c -> c = 1) got in
+    let ok_start = match Wal.start wal with () -> true | exception Journal.Damaged _ -> false in
+    if not (ok_frames && ok_start) then incr fails;
+    C.check ok_frames "round %d: a database got %d frames from the buffer, not 1" round
+      (Array.fold_left (fun a c -> if c <> 1 then c else a) 1 got);
+    C.check ok_start "round %d: the buffer refused to start after every database took its frames" round
+  done;
+  Wal.alone := true;
+  Printf.printf "exhaustive commit buffer: %d databases' frames taken by %d domains at once, %d rounds, %d failed\n" n k rounds !fails
+
+let () = parallel_frames ()
+
 let () =
   List.iter crash_states [ [ 10; 20; 30 ]; [ 400; 900; 1500 ]; [ 2000; 100 ] ];
   List.iter flips [ [ 10; 20; 30 ]; [ 400; 900 ] ];
