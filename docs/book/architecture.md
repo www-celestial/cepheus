@@ -319,9 +319,9 @@ buffers).
 
 Each database has exactly one writer (G9: a lock file, `DIR/lock`, held by one process). One writer means no locks
 between writers, no deadlock, and a total order of the groups with no gap, which is what makes the journal a history
-that can be replayed and, later, replicated. Its cost: a database cannot resolve groups faster than one core (the
-writer resolves a 5-fact group in about 7 µs, so the disk's fsync is the limit long before), and a slow group delays
-the next ones. Separate databases write in parallel.
+that can be replayed and replicated ([a replica](server.md#a-replica) takes its primary's frames as they are). Its
+cost: a database cannot resolve groups faster than one core (the writer resolves a 5-fact group in about 7 µs, so the
+disk's fsync is the limit long before), and a slow group delays the next ones. Separate databases write in parallel.
 
 OCaml 5 runs code in parallel through **domains**: each domain is a thread of execution with its own core, heap for
 young values and runtime lock; the **threads** (systhreads) of one domain share that lock and take turns. Cepheus puts
