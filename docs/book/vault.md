@@ -31,7 +31,8 @@ cepheus.Erase(ada, db)?             (* ada's key destroyed: every file she owned
   it to `Connect`, and ask questions on it as on any kind. `List(kind, db)` is the question
   `Find(4, (f, n, s, t) -> {Where: [[f, kind.Name, n], [f, kind.Size, s], [f, kind.Type, t]], Give: {Id: f, Name: n, Size: s, Type: t}}, db)`.
 - **Rights are the kind's** ([G16](guarantees.md#g16-rights)): a token that may add to `scan` may put a scan; one that
-  may read `scan` may read its bytes; `Erase` needs a token that writes the whole database (it cannot be undone).
+  may read `scan` may read its bytes; `Erase` needs a token that writes the whole database (it cannot be undone), and
+  an owner: the database's own key, under the files of no owner, is never erased (`invalid`).
 - `Put` returns once the bytes and the facts are on the server's disk; sent again after a broken connection, it is
   applied once (G14): its bytes are found stored, its group answered again.
 - `cold = true` stores a file read seldom smaller (Zstandard rather than LZ4), at a slower put.
@@ -86,8 +87,9 @@ h = 2h + G[byte] with G a fixed table of 256 random words: bit k of h depends on
 doubling pushes the older bytes out at the top. A chunk ends after a byte where the bits of h under a mask (bits 44 to
 61: a window of 45 to 62 bytes) are all zero: with a mask of k bits, a chance of 2^-k at each byte. Where a cut falls
 depends on the bytes around it and nowhere else: a byte inserted at the start of a file moves the cuts near it only,
-and every chunk after it is found again (fixed-size chunks would all shift: measured below, 98 % of an edited file's
-bytes found again with FastCDC, under 30 % with fixed 64 KiB chunks).
+and every chunk after it is found again (fixed-size chunks would all shift: in the tests, 24 MB with 100 bytes
+inserted at two places, over 97 % of the copy's bytes are found again with FastCDC, under 30 % with fixed 64 KiB
+chunks).
 
 **Normalized chunking** (the paper's section 3.3, level 2) keeps the sizes close to 64 KiB: no cut in a chunk's first
 16 KiB; a mask of 18 bits up to 64 KiB (a cut is rare); 14 bits after it (soon); a cut at 256 KiB. The chance of a cut
@@ -153,8 +155,9 @@ Records are appended to **packs**, files of 64 MiB at most that are never change
 or restic): a file written in one go is laid out in one sequence, and read in one. A pack that is full is forced to
 the disk, then its **index** is written beside it (each record's name, offset and length): an open reads the indexes,
 not the packs. A pack without an index (the one being written when the process died) is read whole at the next open,
-each record checked by its CRCs, and indexed then; nothing is ever appended to it again, so no byte that was written
-is ever written over. The table of names to places is in memory: about 100 bytes a record (a TB of files at 73 KiB a
+each record checked by its CRCs, forced (a process killed leaves records in the page cache that no fsync covered,
+and a later file may find them stored and cite them), and indexed then; nothing is ever appended to it again, so no
+byte that was written is ever written over. The table of names to places is in memory: about 100 bytes a record (a TB of files at 73 KiB a
 chunk: 1.4 GB of memory; an index on disk is for later).
 
 ### A file is a tree of nodes
@@ -163,8 +166,11 @@ A file's chunks are listed by **nodes**: a node lists up to 1,024 children (a na
 level 0 lists chunks, a node of level k nodes of level k - 1. The **root** names the file: a file of 1 GB is about
 14,000 chunks under 14 nodes under its root. A node is sealed and stored as a chunk is (and found again: two equal
 files share their root). A range is read by walking from the root to the chunks under it, each node choosing its
-children by a binary search of their ends: a 4 KiB read reads one chunk, whatever the file's size. Nodes once read are
-kept in memory (32 MiB of them, by CLOCK, Corbató 1968).
+children by a binary search of their ends: a 4 KiB read reads one chunk, whatever the file's size. Nodes and chunks
+once read are kept in memory, decoded (96 MiB, a third of it for nodes, by CLOCK: Corbató 1968): a chunk read again
+is served without the disk, the tag or the codec, since it was checked when it was read. An erasure empties both, and
+a hit is served only while its domain is not erased (a read that decoded a chunk just before an erasure may add it
+after).
 
 ### Every read is checked
 
@@ -177,7 +183,12 @@ damaged chunk (a chunk found stored is read again and checked before a new file 
 ### Writing a file, and a crash
 
 1. The writer cuts the bytes, names each chunk, and appends the chunks it does not find, then the nodes.
-2. `finish` forces the pack (and, for a new pack, its directory), and only then returns the root.
+2. `finish` forces the pack (and, for a new pack, its directory), and only then returns the root. The fsync is
+   shared by the puts that finish at once (**group commit**, as a database's log: Gray and Reuter, *Transaction
+   Processing*, 1993, 9.4.7): it runs outside the lock that appends, one at a time; a put that finishes while
+   another's fsync runs waits for it, and returns without one of its own when its records were appended before that
+   fsync began. A failed fsync stops the vault (a later fsync may succeed without writing the pages the failed one
+   dropped: Rebello et al., ATC 2020).
 3. The server then writes the file's facts as any group (G1 to G3).
 
 A crash before step 2 ends leaves chunks that no fact cites: they are harmless (and taken back by a later cleaning of
@@ -291,6 +302,5 @@ MEASURES
 - **Replication between servers**: the comparison and the copy are built; the protocol, its TLA+ model (every chunk
   cited present on the replica), and the repair of a damaged chunk from a replica come with the replica of the
   server's step 6.
-- **A cache of decoded chunks**, and **puts on several domains** (the chunks of one file sealed in parallel).
 - **A new master key** (every domain's key sealed again), and the journal's erasure of personal facts.
 - **An index of the names on disk** rather than in memory, for vaults of many terabytes.

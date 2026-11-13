@@ -304,6 +304,93 @@ let () =
   Vault.pack_limit := 64 lsl 20;
   C.check (!total > 300) "%d files read back after crashes" !total
 
+let () =
+  section "store: puts from four threads at once share their fsyncs (group commit); a power loss at any moment: every file confirmed before it reads back";
+  let total = ref 0 and finished = ref 0 and fsyncs = ref 0 in
+  for seed = 1 to 40 do
+    let r = Rng.make (500 + seed) in
+    let sim = Sim_disk.create (Rng.make (2000 + seed)) in
+    let base = Sim_disk.disk sim in
+    (* the simulated disk shared by threads: one call at a time, a yield before each (the threads interleave); an
+       fsync makes durable what was written before it, then lasts a while (others run meanwhile); after the power
+       loss every call fails *)
+    let m = Mutex.create () and dead = ref false in
+    let g f = Thread.yield (); Mutex.protect m (fun () -> if !dead then raise Sim_disk.Crash; f ()) in
+    let disk : Disk.t =
+      { base with
+        exists = (fun p -> g (fun () -> base.exists p));
+        mkdir = (fun p -> g (fun () -> base.mkdir p));
+        readdir = (fun p -> g (fun () -> base.readdir p));
+        openf = (fun p c -> g (fun () -> base.openf p c));
+        size = (fun fd -> g (fun () -> base.size fd));
+        pread = (fun fd o b p n -> g (fun () -> base.pread fd o b p n));
+        pwrite = (fun fd o b p n -> g (fun () -> base.pwrite fd o b p n));
+        truncate = (fun fd n -> g (fun () -> base.truncate fd n));
+        fsync = (fun fd -> g (fun () -> incr fsyncs; base.fsync fd); for _ = 1 to 3 do Thread.yield () done);
+        close = (fun fd -> g (fun () -> base.close fd));
+        rename = (fun a b -> g (fun () -> base.rename a b));
+        remove = (fun p -> g (fun () -> base.remove p));
+        sync_dir = (fun p -> g (fun () -> base.sync_dir p));
+        lock = (fun p -> g (fun () -> base.lock p));
+        unlock = (fun p -> g (fun () -> base.unlock p)) }
+    in
+    (* small packs: a pack is closed while another thread forces it *)
+    Vault.pack_limit := 100_000 + Rng.int r 300_000;
+    let v = ok "open" (Vault.open_ disk "/v" ~master) in
+    let cm = Mutex.create () and cut = ref false and confirmed = ref [] in
+    let threads =
+      List.init 4 (fun k ->
+          let tr = Rng.make ((seed * 10) + k) in
+          Thread.create
+            (fun () ->
+              try
+                for _ = 1 to 12 do
+                  let n = match Rng.int tr 4 with 0 -> Rng.int tr 200_000 | _ -> Rng.int tr 20_000 in
+                  let b = if Rng.int tr 2 = 0 then text tr n else random tr n in
+                  let root, _ = put ~r:tr v (k mod 2) b in
+                  Mutex.protect cm (fun () -> incr finished; if not !cut then confirmed := (b, root) :: !confirmed)
+                done
+              with _ -> ())
+            ())
+    in
+    for _ = 1 to Rng.int r 400 do Thread.yield () done;
+    (* the power loss: after it, no file is confirmed, and the disk takes no call *)
+    Mutex.protect cm (fun () -> cut := true; Mutex.protect m (fun () -> dead := true; Sim_disk.crash sim));
+    List.iter Thread.join threads;
+    (match Vault.open_ base "/v" ~master with
+     | Error e -> C.fail "seed %d: the vault does not open after the power loss: %s" seed (Vault.message e)
+     | Ok v ->
+       List.iter (fun (b, root) -> if whole v root <> Ok b then C.fail "seed %d: a file confirmed before the power loss does not read back" seed) !confirmed;
+       total := !total + List.length !confirmed;
+       Vault.close v)
+  done;
+  Vault.pack_limit := 64 lsl 20;
+  C.check (!total > 100) "%d files confirmed before a power loss read back" !total;
+  C.check (!fsyncs < !finished) "%d puts finished with %d fsyncs (shared)" !finished !fsyncs
+
+let () =
+  section "store: a process killed in the middle of a put, the vault opened again, the file put again, then a power loss: it reads back";
+  for seed = 1 to 30 do
+    let r = Rng.make (700 + seed) in
+    let sim = Sim_disk.create (Rng.make (3000 + seed)) in
+    let disk = Sim_disk.disk sim in
+    let b = random r (6 lsl 20) in
+    let v = ok "open" (Vault.open_ disk "/v" ~master) in
+    let w = ok "writer" (Vault.writer v ~domain:1 ~cold:false) in
+    (* the first 4 MiB of chunks appended, not forced; then the process dies, its pages kept *)
+    ok "feed" (Vault.feed w b 0 (Bytes.length b));
+    Sim_disk.kill sim;
+    let v = ok "reopen" (Vault.open_ disk "/v" ~master) in
+    let root, _ = put ~r v 1 b in
+    let found = Vault.reused v in
+    Vault.close v;
+    Sim_disk.crash sim;
+    let v = ok "open after the power loss" (Vault.open_ disk "/v" ~master) in
+    if found = 0 || whole v root <> Ok b then C.fail "seed %d: a file put again after a kill does not read back after a power loss (%d chunks found)" seed found;
+    Vault.close v
+  done;
+  C.check true "30 seeds: a file whose chunks were found in a pack scanned after a kill reads back after a power loss"
+
 let pack_files dir = List.sort compare (List.filter (fun f -> Filename.check_suffix f ".pack") (Array.to_list (Sys.readdir (Filename.concat dir "packs"))))
 
 let flip path off =
@@ -376,6 +463,8 @@ let () =
   let rx, _ = put v 9 x in
   let ry, _ = put v 10 y in
   let entry9 = List.find (fun e -> Int64.to_int (String.get_int64_le e 8) = 9) (Vault.key_entries v) in
+  (* read first: its chunks and nodes are in the caches, which the erasure must not serve *)
+  C.check (whole v rx = Ok x && whole v rx = Ok x) "read twice (the second from the caches)";
   C.check (ok "erase" (Vault.erase v 9) = ()) "erased";
   C.check (Vault.load v rx ~from:0 ~len:10 (fun _ _ _ -> ()) = Error (Vault.Erased 9)) "its file: erased";
   C.check (whole v ry = Ok y) "another domain's file reads";

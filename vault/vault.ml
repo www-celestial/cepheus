@@ -104,7 +104,19 @@ type keys = { kname : string; knode : string; kenc : string }
 
 type pack_reader = { rm : Mutex.t; mutable rfd : Disk.fd option }
 
-type active = { num : int; fd : Disk.fd; mutable size : int; entries : Buffer.t; mutable count : int; mutable dirty : bool; mutable named : bool }
+(* the pack being written: [synced] its bytes forced, [named] its name forced in packs/; [users] the threads forcing it
+   outside the writers' lock, which keep its descriptor open: a pack closed meanwhile ([retired]) is closed by the last *)
+type active = {
+  num : int;
+  fd : Disk.fd;
+  mutable size : int;
+  entries : Buffer.t;
+  mutable count : int;
+  mutable synced : int;
+  mutable named : bool;
+  mutable users : int;
+  mutable retired : bool;
+}
 
 type node = { level : int; names : string; ends : int array }
 
@@ -114,6 +126,7 @@ type t = {
   packs : string;
   master : string;
   wm : Mutex.t;  (* appends, sealing a pack, the keys' file *)
+  sm : Mutex.t;  (* held by the one thread forcing the pack being written, outside wm (group commit) *)
   im : Mutex.t;  (* the tables below, held for a lookup or a store *)
   index : (string, int) Hashtbl.t;
   keys : (int, keys) Hashtbl.t;
@@ -125,7 +138,9 @@ type t = {
   mutable next_pack : int;
   mutable failed : string option;
   readers : (int, pack_reader) Hashtbl.t;
-  nodes : node Clock.t;
+  (* decoded nodes and chunks (raw bytes), with their domain: read again without the disk, the tag or the codec *)
+  nodes : (int * node) Clock.t;
+  chunks : (int * Bytes.t) Clock.t;
   dctxs : Native.dctx list Atomic.t;
   mutable closed : bool;
   (* counts, for the measures and the status *)
@@ -417,7 +432,9 @@ let load_idx t num =
 
 (* a pack without its index (it was being written at a crash, or its index was lost): every record read and checked,
    header and payload, those that check indexed, up to the first header that does not (the next record cannot be
-   found); then its index is written: it is closed, and nothing is ever written to it again *)
+   found); then the pack is forced (a process killed leaves records in the page cache that no fsync covered: a file
+   that finds them stored must not cite bytes a power loss may take), and its index written: it is closed, and
+   nothing is ever written to it again *)
 let scan_pack t num =
   let b = Disk.read_all t.disk (pack_path t num) in
   let n = Bytes.length b in
@@ -441,6 +458,8 @@ let scan_pack t num =
       in
       go file_header
   in
+  let fd = t.disk.openf (pack_path t num) false in
+  Fun.protect ~finally:(fun () -> t.disk.close fd) (fun () -> t.disk.fsync fd);
   write_idx t num stop entries !count
 
 let pack_header () =
@@ -460,28 +479,25 @@ let active t =
     let fd = t.disk.openf (pack_path t num) true in
     t.disk.truncate fd 0;
     t.disk.pwrite fd 0 (pack_header ()) 0 file_header;
-    let a = { num; fd; size = file_header; entries = Buffer.create 65536; count = 0; dirty = true; named = false } in
+    let a = { num; fd; size = file_header; entries = Buffer.create 65536; count = 0; synced = 0; named = false; users = 0; retired = false } in
     t.active <- Some a;
     a
 
-(* under wm: the pack and its name forced *)
-let sync_active t =
-  match t.active with
-  | Some a when a.dirty || not a.named ->
-    t.disk.fsync a.fd;
-    a.dirty <- false;
-    if not a.named then (t.disk.sync_dir t.packs; a.named <- true)
-  | _ -> ()
-
-(* under wm: the pack closed: forced, its index written; the next record starts another *)
+(* under wm: the pack closed: forced with its name, its index written; the next record starts another. Its
+   descriptor is closed by the last thread forcing it, if one is. *)
 let close_active t =
   match t.active with
   | None -> ()
   | Some a ->
-    sync_active t;
+    if a.synced < a.size || not a.named then begin
+      t.disk.fsync a.fd;
+      if not a.named then t.disk.sync_dir t.packs;
+      a.synced <- a.size;
+      a.named <- true
+    end;
     write_idx t a.num a.size a.entries a.count;
-    t.disk.close a.fd;
-    t.active <- None
+    t.active <- None;
+    if a.users = 0 then t.disk.close a.fd else a.retired <- true
 
 let check_writable t =
   if t.closed then fail (Invalid "the vault is closed");
@@ -496,13 +512,45 @@ let append t name (r : Bytes.t) len =
      t.disk.pwrite a.fd a.size r 0 len;
      add_entry a.entries name a.size len;
      a.count <- a.count + 1;
-     a.dirty <- true;
      let l = loc a.num a.size len in
      a.size <- a.size + len;
      lock_ t.im (fun () -> Hashtbl.replace t.index name l)
    with Disk.Io m as e -> t.failed <- Some m; raise e);
   Atomic.incr t.written;
   ignore (Atomic.fetch_and_add t.stored len)
+
+(* Everything appended so far forced to the disk, with the pack's name: when it returns, every record appended before
+   the call is durable. Group commit (as a database's log: Gray and Reuter, 1993, 9.4.7; Helland et al., HPTS 1987):
+   the fsync is made outside wm, so that other puts append meanwhile, by one thread at a time (sm); a thread that
+   waited finds its records forced by the fsync that ran meanwhile, if they were appended before it began, and
+   returns without one of its own. A failed fsync stops the vault (its pages may be marked clean without reaching
+   the disk: Rebello et al., ATC 2020): no later fsync is trusted. A pack closed meanwhile was forced when closed. *)
+let force t =
+  let target = lock_ t.wm (fun () -> check_writable t; Option.map (fun a -> a, a.size) t.active) in
+  match target with
+  | None -> ()
+  | Some (a, size) ->
+    lock_ t.sm (fun () ->
+        let job =
+          lock_ t.wm (fun () ->
+              check_writable t;
+              if a.synced >= size && a.named then None
+              else begin
+                a.users <- a.users + 1;
+                Some (a.size, not a.named)
+              end)
+        in
+        match job with
+        | None -> ()
+        | Some (upto, dir) ->
+          let r = match t.disk.fsync a.fd; if dir then t.disk.sync_dir t.packs with () -> None | exception Disk.Io m -> Some m in
+          lock_ t.wm (fun () ->
+              a.users <- a.users - 1;
+              (match r with
+               | None -> a.synced <- max a.synced upto; if dir then a.named <- true
+               | Some m -> t.failed <- Some m);
+              if a.retired && a.users = 0 then try t.disk.close a.fd with Disk.Io _ -> ());
+          Option.iter (fun m -> raise (Disk.Io m)) r)
 
 (* the record of a name, if the vault holds it and it checks on the disk (header, name, payload CRC): read again
    before a chunk found stored is used for a new file, so that a damaged chunk is written anew, not cited *)
@@ -581,7 +629,7 @@ let guard f =
 
 (* [open_ disk dir ~master]: the vault in [dir] (made if missing), its keys opened by [master] (32 bytes, kept apart
    from the data: a copy of the data without it opens nothing) *)
-let open_ ?(cache = 32 lsl 20) disk dir ~master =
+let open_ ?(cache = 96 lsl 20) disk dir ~master =
   if String.length master <> 32 then Error (Invalid "a vault's master key is 32 bytes")
   else
     guard (fun () ->
@@ -597,9 +645,9 @@ let open_ ?(cache = 32 lsl 20) disk dir ~master =
         if not (disk.lock lock) then fail (Busy (dir ^ " is open in another process"));
         match
           let t =
-            { disk; dir; packs; master; wm = Mutex.create (); im = Mutex.create (); index = Hashtbl.create 4096; keys = Hashtbl.create 16;
+            { disk; dir; packs; master; wm = Mutex.create (); sm = Mutex.create (); im = Mutex.create (); index = Hashtbl.create 4096; keys = Hashtbl.create 16;
               sealed_keys = Hashtbl.create 16; erased = Hashtbl.create 16; keys_fd = -1; keys_size = 0; active = None; next_pack = 1;
-              failed = None; readers = Hashtbl.create 64; nodes = Clock.create cache; dctxs = Atomic.make []; closed = false;
+              failed = None; readers = Hashtbl.create 64; nodes = Clock.create (cache / 3); chunks = Clock.create (cache - (cache / 3)); dctxs = Atomic.make []; closed = false;
               written = Atomic.make 0; stored = Atomic.make 0; reused = Atomic.make 0 }
           in
           t.keys_size <- load_keys t;
@@ -751,13 +799,13 @@ let feed w (b : Bytes.t) off len =
         o := !o + k;
         n := !n - k;
         while w.fill - w.start >= Chunker.max_size do chunk w (Chunker.cut w.buf w.start (w.fill - w.start)) done;
-        (* the chunks cut are stored before the buffer moves *)
-        if w.fill = buf_size || !n = 0 then flush w
+        (* the chunks cut are stored before the buffer moves: batches of about 55 chunks for the workers *)
+        if w.fill = buf_size then flush w
       done;
       w.total <- w.total + len)
 
 (* the file's root and size, once every record it needs is on the disk (forced, and its pack's name): only then may
-   a fact cite it (V1) *)
+   a fact cite it (G22) *)
 let finish w =
   guard (fun () ->
       if w.finished then fail (Invalid "this file is finished already");
@@ -777,9 +825,7 @@ let finish w =
         end
       in
       let root = close 0 in
-      lock_ w.v.wm (fun () ->
-          check_writable w.v;
-          try sync_active w.v with Disk.Io m as e -> w.v.failed <- Some m; raise e);
+      force w.v;
       root, w.total)
 
 (* ---- reading ---- *)
@@ -813,23 +859,33 @@ let parse_node name (b : Bytes.t) =
     in
     n
 
+(* a domain erased meanwhile: what the caches hold of it is not served (an erasure clears them, but a read that
+   decoded before it may add to them after) *)
+let live t d = if lock_ t.im (fun () -> Hashtbl.mem t.erased d) then fail (Erased d)
+
 let node_of t name =
   match Clock.find t.nodes name with
-  | Some n -> n
+  | Some (d, n) -> live t d; n
   | None ->
     let l = match lock_ t.im (fun () -> Hashtbl.find_opt t.index name) with Some l -> l | None -> failf (fun m -> Missing m) "node %s is not in the vault" (short name) in
     let r = read_record t l in
-    let _, b = decode t r 0 (Bytes.length r) ~kind:k_node ~name in
+    let d, b = decode t r 0 (Bytes.length r) ~kind:k_node ~name in
     let n = parse_node name b in
-    Clock.add t.nodes name n (Bytes.length b + 64);
+    Clock.add t.nodes name (d, n) (Bytes.length b + 64);
     n
 
 let node_size n = let c = Array.length n.ends in if c = 0 then 0 else n.ends.(c - 1)
 
+(* a chunk's raw bytes, from the cache or read and checked; a reader of them never changes them *)
 let chunk_of t name =
-  let l = match lock_ t.im (fun () -> Hashtbl.find_opt t.index name) with Some l -> l | None -> failf (fun m -> Missing m) "chunk %s is not in the vault" (short name) in
-  let r = read_record t l in
-  snd (decode t r 0 (Bytes.length r) ~kind:k_chunk ~name)
+  match Clock.find t.chunks name with
+  | Some (d, b) -> live t d; b
+  | None ->
+    let l = match lock_ t.im (fun () -> Hashtbl.find_opt t.index name) with Some l -> l | None -> failf (fun m -> Missing m) "chunk %s is not in the vault" (short name) in
+    let r = read_record t l in
+    let d, b = decode t r 0 (Bytes.length r) ~kind:k_chunk ~name in
+    Clock.add t.chunks name (d, b) (Bytes.length b + 64);
+    b
 
 let size t root = guard (fun () -> node_size (node_of t root))
 
@@ -894,7 +950,8 @@ let erase t d =
              with Disk.Io m as e -> t.failed <- Some m; raise e);
             t.keys_size <- Buffer.length b;
             lock_ t.im (fun () -> Hashtbl.remove t.keys d; Hashtbl.remove t.sealed_keys d; Hashtbl.replace t.erased d ());
-            Clock.clear t.nodes
+            Clock.clear t.nodes;
+            Clock.clear t.chunks
           end))
 
 (* ---- copies: what replication needs ---- *)
@@ -923,7 +980,7 @@ let add_raw t (r : Bytes.t) =
       let name = Bytes.sub_string r 32 32 in
       lock_ t.wm (fun () -> if not (lock_ t.im (fun () -> Hashtbl.mem t.index name)) then append t name r n))
 
-let sync t = guard (fun () -> lock_ t.wm (fun () -> check_writable t; try sync_active t with Disk.Io m as e -> t.failed <- Some m; raise e))
+let sync t = guard (fun () -> force t)
 
 (* the keys' entries (each domain's key sealed by the master key, and the domains erased), to give a copy that has
    the same master key *)

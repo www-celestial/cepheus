@@ -573,14 +573,17 @@ through a `kill -9` of the server while 1,500 rows are written: its groups only 
 node of it reads back after any crash and recovery.
 
 *Proof.* `Vault.finish` forces the pack that holds the file's records, and the directory of a new pack, before it
-returns the root; a pack closed earlier was forced before its index was written. The facts are written after `finish`
+returns the root (its own fsync, or one shared with other puts that began after its records were appended: group
+commit); a pack closed earlier was forced before its index was written. The facts are written after `finish`
 returns, as any group (G1). Recovery cuts nothing: a pack with its index is taken as the index says (written after
-the pack was forced); one without is read whole, every record checked by its CRCs, and closed as it is, never written
+the pack was forced); one without is read whole, every record checked by its CRCs, forced (after a `kill -9` its
+records may be in the page cache only, and a new file may find them stored), and closed as it is, never written
 again. A record a crash tore was never forced, so no fact cites it. A chunk found stored is read again and checked
 before a new file cites it, so a damaged one is written anew rather than cited.
 
 *Tested by* `test/vault_unit.ml` (120 seeds of power losses at random calls of puts on the simulated disk, three each: every
-file finished before a crash reads back exact) and `test/vault_crash.ml` (20 `kill -9` of a process that puts files
+file finished before a crash reads back exact; four threads putting at once, cut by a power loss at a random moment,
+40 seeds; a kill in the middle of a put, the file put again, then a power loss, 30 seeds) and `test/vault_crash.ml` (20 `kill -9` of a process that puts files
 and writes their facts: every cited file reads back exact, every confirmed one is there).
 
 ## G23 No wrong byte is served

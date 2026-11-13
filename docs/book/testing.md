@@ -323,10 +323,17 @@ left open; more than 64 descriptors are refused; the page shows the server's sto
 - **power losses** on the simulated disk: 120 seeds, three crashes each at a random call of puts of up to 3 MB (some
   sharing chunks, some cold, an erasure), with sectors lost, kept or torn as a power loss leaves them: the vault opens
   every time, and every file finished before a crash reads back exact (G22);
+- **group commit**: four threads put files at once on the simulated disk (one call at a time, the threads
+  interleaved at each, an fsync lasting while the others run, packs closed while another thread forces them), cut
+  by a power loss at a random moment, 40 seeds: every file confirmed before it reads back, with fewer fsyncs than
+  puts;
+- **a kill, then a power loss**: a process killed in the middle of a put of 6 MB (its chunks in the page cache, not
+  forced), the vault opened again, the file put again (its chunks found stored), then a power loss: it reads back,
+  30 seeds;
 - **damage**: a byte changed in a chunk gives `damaged` for the ranges over it and only those, the same file put
   again repairs it; a record moved over another is refused (G23);
-- **erasure**: an erased domain's files give `erased`, after a reopen too, its sealed key is gone from the keys' file,
-  no new file names it (G24);
+- **erasure**: an erased domain's files give `erased` (one read twice before, the second time from the caches, too),
+  after a reopen too, its sealed key is gone from the keys' file, no new file names it (G24);
 - **copies**: the records one vault lacks by Merkle comparison are exactly the set difference, found with fewer
   digests than records; copied, the copy reads every file and has the same root; an erasure follows the keys;
 - a **fuzzed reader**: 20,000 records changed at random (bytes, cuts, fields with their CRCs made again, headers)
@@ -341,8 +348,9 @@ command is in [the vault](vault.md#security)): LZ4 blocks and Zstandard frames o
 buffers of no slack, round trips, and sealed texts forged or changed. 1.1 million runs in 181 s: no failure.
 
 `server_unit` puts and loads files through the core: in pieces, whole and in 20 ranges, sent again with its serial
-(one file), with each kind of token (rights per kind), the bounds (an undeclared kind, an owner that is no thing, a
-name too long, a load by another property, four puts at once), and an erasure; 3,000 random file requests read back
+(one file), with each kind of token (rights per kind), a right to write gone in the middle of a put, the bounds (an
+undeclared kind, an owner that is no thing, a name too long, a load by another property, four puts at once), and an
+erasure; 3,000 random file requests read back
 as written and 24,000 changed ones read or refused.
 
 ## Not yet

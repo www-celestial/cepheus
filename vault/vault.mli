@@ -18,7 +18,8 @@ val message : error -> string
 
 val open_ : ?cache:int -> Cepheus.Disk.t -> string -> master:string -> (t, error) result
 (** [open_ disk dir ~master]: the vault in [dir], made if missing (0700), its domains' keys opened by [master] (32
-    bytes, kept apart from the data). [cache]: the bytes of decoded nodes kept (32 MiB). One process at a time
+    bytes, kept apart from the data). [cache]: the bytes of decoded nodes (a third) and chunks kept (96 MiB in all,
+    by CLOCK): a chunk read again is served from memory, checked when it was read. One process at a time
     ({!Busy}). *)
 
 val close : t -> unit
@@ -42,8 +43,9 @@ val finish : writer -> (string * int, error) result
 val size : t -> string -> (int, error) result
 
 val load : t -> string -> from:int -> len:int -> (Bytes.t -> int -> int -> unit) -> (unit, error) result
-(** [load t root ~from ~len f]: the bytes [from, from + len) in order, in pieces [f b off n] valid during the call;
-    only the chunks under the range are read, each checked before a byte of it is given (G23). *)
+(** [load t root ~from ~len f]: the bytes [from, from + len) in order, in pieces [f b off n] valid during the call
+    and never to be changed (they may be the cache's); only the chunks under the range are read, each checked before
+    a byte of it is given (G23). *)
 
 (** {1 Erasing} *)
 
