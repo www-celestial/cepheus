@@ -949,7 +949,68 @@ replica.
 
 ### What a replica costs
 
-MEASURES
+On the machine of [the benchmarks](benchmarks.md) (i7-4720HQ, 4 cores and 8 threads, 11 GB, a SATA SSD), 2026-11-13,
+the release build; every round under the lock that keeps the machine's other heavy jobs away, every server under a 2
+GB cap; $n = 21$ rounds; medians over the rounds, and for a ratio the median of its round-by-round values with their
+distribution-free 95 % interval (order statistics). The primary `srv1` and its replica `srv2` run on this one machine
+and talk over loopback. The writes are `sbench.exe rate`: a steady rate of groups of one fact each for 4 s, over 16
+connections at 1,000 groups/s and 200 at 10,000 (an open loop: a write that is late goes at once, so that a slow
+server is not given time to breathe). The replica first catches up the groups it missed, then starts again, so that
+its lag counts the measured groups only. **The lag** is the primary's own (`replica.srv2.lag_us_*` in `cepheus
+status`): from the moment its sender sees a group durable to the replica's `Applied` for it, so it holds the frame's
+way over TLS, its checks and replay on the replica, the replica's write and fsync, and the way back.
+
+The replica's data in two places: **in memory** (`/dev/shm`: its fsync costs nothing and it does not share the
+primary's disk, the nearest this one machine comes to a replica on a machine of its own, less that machine's fsync and
+the network), and **on the primary's SSD** (two servers forcing one disk). The last two columns compare the primary's
+write latency, round by round, with the same rate written to a server without a replica.
+
+| | lag p50 | lag p99 | lag max | primary's write p50 / without | its write p99 / without |
+|---|---:|---:|---:|---:|---:|
+| 1,000 groups/s, replica in memory | **0.22 ms** | 1.37 ms | 3.52 ms | 1.13 [0.94, 1.40] | 1.47 [1.19, 2.15] |
+| 10,000 groups/s, replica in memory | **0.67 ms** | 3.50 ms | 7.20 ms | 0.99 [0.94, 1.31] | 1.62 [1.06, 4.27] |
+| 1,000 groups/s, replica on the primary's SSD | 9.21 ms | 34.3 ms | 469 ms | 2.21 [1.99, 2.54] | 1.52 [0.73, 2.51] |
+| 10,000 groups/s, replica on the primary's SSD | 11.1 ms | 40.5 ms | 467 ms | 1.73 [1.62, 2.04] | 1.83 [1.11, 2.69] |
+
+Without a replica the server wrote 998.5 and 9,965 groups/s, its write p50 5.82 and 8.77 ms, its p99 35.1 and 40.2
+ms; with the replica in memory 998.7 and 9,963 groups/s; with the replica on its SSD 908 and 9,350 groups/s (behind
+the rate asked).
+
+- **The lag.** A replica that does not share its primary's disk is less than a millisecond behind at the median, at
+  1,000 as at 10,000 groups/s, and a few milliseconds at its p99: that is how much a `--force` promotion can lose (the
+  writes confirmed during the lag). On a machine of its own, its own fsync adds to it (from 3 ms on this SSD's kind:
+  frames that arrive while one is forced share the next), and so does the network's round trip; not measured here.
+- **The primary's writes** keep their median; their p99 grows by about half (1.47 and 1.62 times), as the sender, its
+  TLS and the whole replica ran on the same 4 cores. How much of that is left when the replica has its own machine is
+  not measured here.
+- **Never on the primary's disk.** Two journals forced on one SSD make the primary's median write 1.7 to 2.2 times
+  longer, put the replica half a second behind once in most runs (its max lag: over 0.4 s in 14 runs of 21 at 1,000
+  groups/s), which the replica in memory never shows, and keep nothing that the loss of that disk would not take with
+  both.
+- **Catch-up.** A new replica in memory took its primary's 648,571 groups in 10 s, about 65,000 groups a second, its
+  databases rebuilt by replay (one run, $n = 1$).
+
+**A server without replicas** (a `cluster.toml` of one peer, as every one before replicas) pays nothing that can be
+seen. Main's binary (923da1b) against this version's, alternated in each round and their order from round to round,
+main's `sbench.exe` the client of both:
+
+| | main | this version | this version / main |
+|---|---:|---:|---:|
+| start of the binary (`cepheus` with no argument, 100 spawns a round): median | 4.864 ms | 4.898 ms | 1.017 [0.976, 1.029] |
+| the same, the minimum of each round | 4.300 ms | 4.399 ms | 1.020 [1.003, 1.053] |
+| the server ready (its `ready in`: the opens of a data directory grown by these runs) | 262 ms | 243 ms | 1.002 [0.946, 1.089] |
+| an empty round trip (`ping`) | 9.35 µs | 10.54 µs | 1.117 [0.969, 1.266] |
+| durable writes, 1 writer, right after the start: p50 | 3.06 ms | 3.12 ms | 1.010 [0.964, 1.106] |
+| the same, 3 s later: p50 | 3.09 ms | 3.13 ms | 0.984 [0.920, 1.189] |
+| durable writes, 16 writers: groups/s | 1,828 | 1,467 | 1.014 [0.655, 1.225] |
+| the same: p50 | 6.08 ms | 7.62 ms | 0.978 [0.689, 1.408] |
+
+The binary grew from 15.09 to 15.46 MB (2.5 %, the replica's code): its fastest start is 2 % (0.1 ms) later, within
+the noise at the median. The one writer was measured twice: first in rounds that alternated with the rate runs
+above, where both sides stalled at times (a p50 over 6 ms: 8 runs of this version, 2 of main) and the ratio came out
+at 1.128 [1.010, 2.990]; then on its own, 21 rounds more, the two rows above, where nothing separates them (stalls: 4
+runs of this version, 3 of main). Nothing on a primary's write path changed beyond a few tests a write and a frame (is
+the server a replica, does a batch hold a large group's run).
 
 ### How it is tested
 
