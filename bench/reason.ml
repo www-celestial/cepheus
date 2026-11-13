@@ -17,6 +17,9 @@
                                      nodes); FORM trp (prp-trp over the edges' property), linear (edges and closure apart)
                                      or none; on the disk in DIR (the path of large groups) or in memory (-): the time,
                                      the closure's facts, the reasoning alone
+   reason.exe notagg N K R agg|plain|none   N invoices of K lines, then R rounds of a line added and retracted, a
+                                     payment added and retracted: aggregates and a Not, against the same bodies as plain
+                                     rules, and without rules; per group, in microseconds
    reason.exe w3c N groups|bulk DIR|-   as mat N rules, with the univ-bench ontology as facts and the W3C's form of the
                                      OWL 2 RL rules it needs (10 rules, variable properties), which the engine unfolds *)
 
@@ -630,6 +633,63 @@ let w3c n path dir =
     (if r > 0. then float_of_int d /. r /. 1e6 else 0.) ix;
   close db
 
+(* ---- Not and aggregates (the reasoner's step 4) ----
+   N invoices of K lines each (an amount, a day), a group an invoice, then R rounds on them in turn: a line added (of
+   the earliest day), that line retracted (Min read again over the K lines), a payment added, then retracted. MODE agg:
+   the rules total = sum of the amounts, count of the lines, first and last day (Min, Max), unpaid (an invoice with no
+   payment, a Not); plain: the same bodies as rules that give one fact an answer (the delta plans alone: what agg costs
+   beyond them) and a rule over the payment instead of its absence; none: no rule. Per group, in microseconds. *)
+let notagg_bench n k reps mode =
+  let db = fork empty in
+  let line, amount, day, total, count, first, last, paid, label, seen, seen_day =
+    match declare db [ prop ~many:true "line" Tlink; prop "amount" Tint; prop "day" Tdate; prop "total" Tint; prop "count" Tint;
+                       prop "first" Tdate; prop "last" Tdate; prop ~many:true "paid" Tdate; prop ~many:true "label" Ttext;
+                       prop ~many:true "seen" Tint; prop ~many:true "seen_day" Tdate ] with
+    | Ok [ a; b; c; d; e; f; g; h; i; j; l ] -> a, b, c, d, e, f, g, h, i, j, l
+    | _ -> assert false
+  in
+  let i = Var 0 and l = Var 1 and x = Var 2 in
+  let body p = [ { e = i; p = line; v = l }; { e = l; p; v = x } ] in
+  let r name vars where head = { name; vars; where; ranges = []; head = Give head } in
+  let rules =
+    match mode with
+    | "agg" ->
+      [ r "total-of" 3 (body amount) { e = i; p = aggregate `Sum total; v = x };
+        r "count-of" 2 [ { e = i; p = line; v = l } ] { e = i; p = aggregate `Count count; v = Val (Int 0) };
+        r "first-of" 3 (body day) { e = i; p = aggregate `Min first; v = x };
+        r "last-of" 3 (body day) { e = i; p = aggregate `Max last; v = x };
+        r "unpaid" 3 [ { e = i; p = line; v = l }; { e = i; p = absent 0 paid; v = x } ] { e = i; p = label; v = Val (Text "unpaid") } ]
+    | "plain" ->
+      [ r "total-of" 3 (body amount) { e = i; p = seen; v = x };
+        r "count-of" 2 [ { e = i; p = line; v = l } ] { e = i; p = label; v = Val (Text "has lines") };
+        r "first-of" 3 (body day) { e = i; p = seen_day; v = x };
+        r "last-of" 3 (body day) { e = i; p = seen_day; v = x };
+        r "paid" 3 [ { e = i; p = line; v = l }; { e = i; p = paid; v = x } ] { e = i; p = label; v = Val (Text "paid") } ]
+    | _ -> []
+  in
+  ignore (first, last);
+  if rules <> [] then ignore (ok (define db rules));
+  let invs =
+    Array.init n (fun u ->
+        let ops = List.concat (List.init k (fun j -> [ Add (-(j + 2), amount, Int (100 + j)); Add (-(j + 2), day, Date (1000 + (u + j) mod 97)); Add (-1, line, Link (-(j + 2))) ])) in
+        thing (ok (write db ops)) (-1))
+  in
+  let f = fork (view db) in
+  let t op = let t0 = now () in ignore (ok (write f op)); (now () -. t0) *. 1e6 in
+  let add = Array.make reps 0. and del = Array.make reps 0. and pay = Array.make reps 0. and unpay = Array.make reps 0. in
+  for q = 0 to reps - 1 do
+    let inv = invs.(q mod n) in
+    let t0 = now () in
+    let rr = ok (write f [ Add (-1, amount, Int 7); Add (-1, day, Date 1); Add (inv, line, Link (-1)) ]) in
+    add.(q) <- (now () -. t0) *. 1e6;
+    let ln = thing rr (-1) in
+    del.(q) <- t [ Retract (inv, line, Link ln) ];
+    pay.(q) <- t [ Add (inv, paid, Date 5) ];
+    unpay.(q) <- t [ Retract (inv, paid, Date 5) ]
+  done;
+  Printf.printf "notagg %d %d %s: add a line median %.2f us p90 %.2f; retract it median %.2f us p90 %.2f; pay median %.2f us p90 %.2f; unpay median %.2f us p90 %.2f\n%!"
+    n k mode (pct add 0.5) (pct add 0.9) (pct del 0.5) (pct del 0.9) (pct pay 0.5) (pct pay 0.9) (pct unpay 0.5) (pct unpay 0.9)
+
 let () =
   match Array.to_list Sys.argv |> List.tl with
   | [ "mat"; n; mode; path; dir ] -> mat (int_of_string n) mode path dir
@@ -639,4 +699,5 @@ let () =
   | [ "closure"; kind; form; dir ] -> closure_bench kind form dir
   | [ "closure-del"; kind; form; dir; how ] -> closure_del kind form dir how
   | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
+  | [ "notagg"; n; k; r; mode ] -> notagg_bench (int_of_string n) (int_of_string k) (int_of_string r) mode
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2

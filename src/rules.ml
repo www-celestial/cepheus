@@ -13,10 +13,20 @@
    is a variable has no type of its own: it takes the type of the property it is read from, checked when a fact is
    derived.
 
+   Negation and aggregates (the reasoner design, section 5.9), written into a pattern's property so that the record
+   keeps its fields (as [prop_var]): a pattern whose property is [absent k p] is a pattern of the rule's k-th Not
+   ("there is no value of the Not's own variables that makes all of its patterns facts"); a head whose property is
+   [aggregate f p] gives p the sum, the count, the smallest or the largest value over the answers of the body, one
+   fact a value of its thing (the group). Their meaning is the perfect model of the stratified rules (Apt, Blair,
+   Walker 1988; Przymusinski 1988), aggregates stratified as Mumick, Pirahesh, Ramakrishnan (1990) and Soufflé have
+   them: a rule set where a property depends on its own absence, or on its own aggregate, is refused ([strata]).
+
    The canonical text, one line:
-     vars N; where [E P V] [E P V] ...; range ?X LO HI; ...; give [E P V]     (or: give never)
-   a term is ?k (a variable), #n (a thing), or a value: iN (int), fH (float, hexadecimal, exact), b0 / b1, t"..."
-   (text, OCaml's escapes), dN (date, ms), mN (money, minor units), lN (link); a property is its id or ?k. *)
+     vars N; where [E P V] [E P V] ...; range ?X LO HI; ...; not [E P V] ...; ...; give [E P V]
+   or give never, or give F [E P V] with F one of sum, count, min, max (count's value is i0); a term is ?k (a
+   variable), #n (a thing), or a value: iN (int), fH (float, hexadecimal, exact), b0 / b1, t"..." (text, OCaml's
+   escapes), dN (date, ms), mN (money, minor units), lN (link); a property is its id or ?k. A text without "not" and
+   aggregates is the text of the rules before them, unchanged. *)
 
 type head = Give of Query.pattern | Never
 
@@ -25,6 +35,59 @@ type t = { name : string; vars : int; where : Query.pattern list; ranges : (int 
 (* the property of a pattern as the variable ?k, and back (-1: a constant property) *)
 let prop_var k = -1 - k
 let[@inline] pvar p = if p < 0 then -1 - p else -1
+
+(* a pattern of the k-th Not (0 to 15) of a rule, property p; an aggregate head of property p. Property ids are
+   below 65,536 (Schema.first_thing): the encodings are above them, and a code that does not decode them reads no
+   property *)
+let absent_base = 0x4000_0000
+let agg_base = 0x8000_0000
+let max_nots = 16
+let absent k p = absent_base + (k lsl 16) + p
+let[@inline] is_absent p = p >= absent_base && p < agg_base
+let absent_of p = (p - absent_base) lsr 16, (p - absent_base) land 0xffff
+
+type agg = [ `Sum | `Count | `Min | `Max ]
+
+let agg_code : agg -> int = function `Sum -> 0 | `Count -> 1 | `Min -> 2 | `Max -> 3
+let agg_name : agg -> string = function `Sum -> "sum" | `Count -> "count" | `Min -> "min" | `Max -> "max"
+let aggregate (f : agg) p = agg_base + (agg_code f lsl 16) + p
+let[@inline] is_agg p = p >= agg_base
+
+let agg_of p : agg * int =
+  (match (p - agg_base) lsr 16 with 0 -> `Sum | 1 -> `Count | 2 -> `Min | _ -> `Max), (p - agg_base) land 0xffff
+
+(* A rule as the engine runs it: its positive patterns (its where without the Nots' patterns), each Not's patterns and
+   own variables (those in no positive pattern), and its aggregate: [pos]'s head has the plain property. *)
+type shape = { pos : t; nots : Query.pattern array array; own : int list array; agg : agg option }
+
+let[@inline never] split r =
+  let positive = List.filter (fun (q : Query.pattern) -> not (is_absent q.p)) r.where in
+  let ks = List.sort_uniq compare (List.filter_map (fun (q : Query.pattern) -> if is_absent q.p then Some (fst (absent_of q.p)) else None) r.where) in
+  let plain (q : Query.pattern) = { q with p = snd (absent_of q.p) } in
+  let nots =
+    Array.of_list
+      (List.map
+         (fun k -> Array.of_list (List.filter_map (fun (q : Query.pattern) -> if is_absent q.p && fst (absent_of q.p) = k then Some (plain q) else None) r.where))
+         ks)
+  in
+  let outer = Array.make (max 1 r.vars) false in
+  let mark = function Query.Var x when x >= 0 && x < r.vars -> outer.(x) <- true | _ -> () in
+  List.iter (fun (q : Query.pattern) -> mark q.e; mark q.v; if q.p < 0 && pvar q.p < r.vars then outer.(pvar q.p) <- true) positive;
+  let own =
+    Array.map
+      (fun ps ->
+        List.sort_uniq compare
+          (List.concat_map (fun (q : Query.pattern) -> List.filter_map (function Query.Var x when x >= 0 && x < r.vars && not outer.(x) -> Some x | _ -> None) [ q.e; q.v ]) (Array.to_list ps)))
+      nots
+  in
+  let head, agg =
+    match r.head with
+    | Give h when is_agg h.p -> let f, p = agg_of h.p in Give { h with p }, Some f
+    | h -> h, None
+  in
+  { pos = { r with where = positive; head }; nots; own; agg }
+
+let is_plain r = List.for_all (fun (q : Query.pattern) -> not (is_absent q.p)) r.where && match r.head with Give h -> not (is_agg h.p) | Never -> true
 
 (* ---- the canonical text ---- *)
 
@@ -43,11 +106,16 @@ let prop_text p = if p < 0 then Printf.sprintf "?%d" (-1 - p) else string_of_int
 let pattern_text (q : Query.pattern) = Printf.sprintf "[%s %s %s]" (term_text q.e) (prop_text q.p) (term_text q.v)
 
 let[@inline never] to_text r =
+  let s = split r in
   let b = Buffer.create 64 in
   Printf.bprintf b "vars %d; where" r.vars;
-  List.iter (fun q -> Printf.bprintf b " %s" (pattern_text q)) r.where;
+  List.iter (fun q -> Printf.bprintf b " %s" (pattern_text q)) s.pos.where;
   List.iter (fun (x, lo, hi) -> Printf.bprintf b "; range ?%d %s %s" x (value_text lo) (value_text hi)) r.ranges;
-  (match r.head with Give q -> Printf.bprintf b "; give %s" (pattern_text q) | Never -> Buffer.add_string b "; give never");
+  Array.iter (fun ps -> Buffer.add_string b "; not"; Array.iter (fun q -> Printf.bprintf b " %s" (pattern_text q)) ps) s.nots;
+  (match s.pos.head, s.agg with
+   | Give q, None -> Printf.bprintf b "; give %s" (pattern_text q)
+   | Give q, Some f -> Printf.bprintf b "; give %s %s" (agg_name f) (pattern_text q)
+   | Never, _ -> Buffer.add_string b "; give never");
   Buffer.contents b
 
 exception Parse of string
@@ -138,11 +206,12 @@ let[@inline never] of_text name text =
     let where = ref [] in
     skip ();
     while peek () = '[' do where := pattern () :: !where; skip () done;
-    let ranges = ref [] and head = ref None in
+    let ranges = ref [] and head = ref None and nots = ref 0 in
+    let at w = !i + String.length w <= n && String.sub text !i (String.length w) = w in
     while !head = None do
       word ";";
       skip ();
-      if !i + 5 <= n && String.sub text !i 5 = "range" then begin
+      if at "range" then begin
         word "range";
         word "?";
         let x = int () in
@@ -152,10 +221,34 @@ let[@inline never] of_text name text =
         let hi = value () in
         ranges := (x, lo, hi) :: !ranges
       end
+      else if at "not " then begin
+        (* a Not's patterns: constant properties *)
+        word "not";
+        let k = !nots in
+        if k >= max_nots then fail ();
+        incr nots;
+        skip ();
+        if peek () <> '[' then fail ();
+        while peek () = '[' do
+          let q = pattern () in
+          if q.p < 0 || q.p >= Schema.first_thing then fail ();
+          where := { q with p = absent k q.p } :: !where;
+          skip ()
+        done
+      end
       else begin
         word "give";
         skip ();
-        if peek () = 'n' then (word "never"; head := Some Never) else head := Some (Give (pattern ()))
+        if at "never" then (word "never"; head := Some Never)
+        else
+          let f = List.find_opt (fun f -> at (agg_name f ^ " ")) [ `Sum; `Count; `Min; `Max ] in
+          match f with
+          | Some f ->
+            word (agg_name f);
+            let q = pattern () in
+            if q.p < 0 || q.p >= Schema.first_thing then fail ();
+            head := Some (Give { q with p = aggregate f q.p })
+          | None -> head := Some (Give (pattern ()))
       end
     done;
     skip ();
@@ -192,9 +285,10 @@ let static_types (v : Store.view) r =
       (match q.e with Query.Var x -> set x Value.Tlink | _ -> ());
       if q.p < 0 then set (pvar q.p) Value.Tlink
       else
-        match q.v, Schema.find v.schema q.p with
+        let p = if is_absent q.p then snd (absent_of q.p) else q.p in
+        match q.v, Schema.find v.schema p with
         | Query.Var x, Some d -> set x d.typ
-        | Query.Var _, None -> raise (Bad (Printf.sprintf "no property %d" q.p))
+        | Query.Var _, None -> raise (Bad (Printf.sprintf "no property %d" p))
         | _ -> ())
     r.where;
   ty
@@ -202,25 +296,41 @@ let static_types (v : Store.view) r =
 let[@inline never] check (v : Store.view) r =
   let bad fmt = Printf.ksprintf (fun s -> raise (Parse (Printf.sprintf "rule %s: %s" r.name s))) fmt in
   try
-    if r.where = [] then bad "its body has no pattern";
     if r.vars < 0 || r.vars > 64 then bad "%d variables (at most 64)" r.vars;
+    List.iter
+      (fun (q : Query.pattern) ->
+        if is_absent q.p then (if fst (absent_of q.p) >= max_nots then bad "at most %d Nots" max_nots)
+        else if is_agg q.p then bad "an aggregate is for its head, not for a pattern of its body")
+      r.where;
+    let sh = split r in
+    let pos = sh.pos in
+    if pos.where = [] then bad "its body has no pattern outside Not";
+    let all = pos.where @ List.concat_map Array.to_list (Array.to_list sh.nots) in
     let seen = Array.make r.vars false in
     List.iter
       (fun (q : Query.pattern) ->
         List.iter (fun k -> if k < 0 || k >= r.vars then bad "variable ?%d out of range" k else seen.(k) <- true) (pattern_vars q);
         (match q.e with Query.Val _ -> bad "the thing of a pattern is a variable or a thing" | _ -> ());
         if q.p >= 0 && Schema.find v.schema q.p = None then bad "no property %d" q.p)
-      r.where;
+      all;
     Array.iteri (fun k s -> if not s then bad "variable ?%d appears in no pattern of the body" k) seen;
-    (* a variable property is bound by a pattern whose property is a constant: no pattern scans every fact *)
+    (* a Not: 1 to 4 patterns; a variable in no positive pattern is the own of one Not *)
+    Array.iter (fun ps -> if Array.length ps > 4 then bad "a Not takes 1 to 4 patterns, not %d" (Array.length ps)) sh.nots;
+    let owner = Array.make r.vars (-1) in
+    Array.iteri
+      (fun k own ->
+        List.iter (fun x -> if owner.(x) >= 0 && owner.(x) <> k then bad "?%d is in no pattern outside Not: it may be the own of one Not only" x else owner.(x) <- k) own)
+      sh.own;
+    let outer x = x >= 0 && x < r.vars && owner.(x) < 0 in
+    (* a variable property is bound by a positive pattern whose property is a constant: no pattern scans every fact *)
     let bound_by_const k =
-      List.exists (fun (q : Query.pattern) -> q.p >= 0 && (q.e = Query.Var k || q.v = Query.Var k)) r.where
+      List.exists (fun (q : Query.pattern) -> q.p >= 0 && (q.e = Query.Var k || q.v = Query.Var k)) pos.where
     in
     List.iter
       (fun (q : Query.pattern) ->
         if q.p < 0 && not (bound_by_const (pvar q.p)) then
           bad "the property ?%d is bound by no pattern whose property is a constant" (pvar q.p))
-      r.where;
+      pos.where;
     let sty = match static_types v r with t -> t | exception Bad m -> bad "%s" m in
     List.iter
       (fun (x, lo, hi) ->
@@ -234,8 +344,8 @@ let[@inline never] check (v : Store.view) r =
         match q.v, (if q.p >= 0 then Schema.find v.schema q.p else None) with
         | Val x, Some d when not (Value.has_type d.typ x) -> bad "%s is not a %s" (Value.to_string x) (Value.typ_name d.typ)
         | _ -> ())
-      r.where;
-    (match r.head with
+      all;
+    (match pos.head with
      | Never -> ()
      | Give q ->
        (* a variable head property: its type, and that it is no cepheus/ property, are checked at each fact derived *)
@@ -248,6 +358,8 @@ let[@inline never] check (v : Store.view) r =
          else match Schema.find v.schema q.p with Some d -> Some d | None -> bad "no property %d in its head" q.p
        in
        if q.p >= 0 && Schema.is_system q.p then bad "its head gives a cepheus/ property";
+       (* the head's variables are bound by the body's positive patterns (range restriction) *)
+       List.iter (fun k -> if k >= 0 && k < r.vars && not (outer k) then bad "?%d of its head is in no pattern outside Not" k) (pattern_vars q);
        (match q.e with
         | Query.Var k ->
           (* a variable without a type of its own is checked a thing at each fact derived *)
@@ -255,9 +367,23 @@ let[@inline never] check (v : Store.view) r =
           else (match sty.(k) with Some Value.Tlink | None -> () | Some _ -> bad "?%d is not a thing" k)
         | Thing t -> if t < Schema.first_thing then bad "its head's thing #%d is not an ordinary thing" t
         | Val _ -> bad "the thing of its head is a variable or a thing");
-       match d with
-       | None -> (match q.v with Query.Var k when k < 0 || k >= r.vars -> bad "variable ?%d out of range" k | _ -> ())
-       | Some d -> (
+       match sh.agg, d with
+       | Some f, Some d -> (
+         (* an aggregate: one value a thing, of the aggregated variable's type (count: an int) *)
+         if d.many then bad "%s takes many values: an aggregate gives a property that takes one" d.name;
+         match f, q.v with
+         | `Count, Query.Val (Value.Int 0) -> if d.typ <> Value.Tint then bad "count gives an int, and %s takes a %s" d.name (Value.typ_name d.typ)
+         | `Count, _ -> bad "count counts the answers: its value is i0"
+         | (`Sum | `Min | `Max), Query.Var k when k >= 0 && k < r.vars -> (
+           match sty.(k), f with
+           | Some ((Value.Tint | Value.Tmoney _) as t), `Sum | Some ((Value.Tint | Value.Tdate | Value.Tmoney _) as t), (`Min | `Max) ->
+             if t <> d.typ then bad "?%d is a %s, %s takes a %s" k (Value.typ_name t) d.name (Value.typ_name d.typ)
+           | Some t, _ -> bad "%s of a %s: sum is for ints and money, min and max for ints, dates and money" (agg_name f) (Value.typ_name t)
+           | None, _ -> bad "%s of ?%d, which has no type of its own" (agg_name f) k)
+         | _, _ -> bad "%s takes a variable of the body" (agg_name f))
+       | Some _, None -> bad "an aggregate gives a constant property"
+       | None, None -> (match q.v with Query.Var k when k < 0 || k >= r.vars -> bad "variable ?%d out of range" k | _ -> ())
+       | None, Some d -> (
          match q.v with
          | Query.Var k ->
            if k < 0 || k >= r.vars then bad "variable ?%d out of range" k
@@ -269,3 +395,110 @@ let[@inline never] check (v : Store.view) r =
          | Val x -> if not (Value.has_type d.typ x) then bad "%s is not a %s" (Value.to_string x) (Value.typ_name d.typ)));
     Ok ()
   with Parse m -> Error m
+
+(* ---- strata (Apt, Blair, Walker 1988), at the level of a property refined by a constant value ----
+   A node is (property, value word), -1 for any: a pattern [x, Type, Invoice] is the node (Type, Invoice), so that a
+   Not over one class may depend on another class without a false cycle. Rule j depends on rule i when i's head
+   matches a pattern of j: positively, or negatively when the pattern is in a Not of j or j is an aggregate (its value
+   needs its body complete). Rules whose heads match each other give one property: they are one predicate, in one
+   stratum. Constraints read the state after every stratum and are in none. The rule set is stratified when no cycle
+   of these dependencies holds a negative one (Tarjan's strong components, 1972); a rule's stratum is the largest
+   number of negative dependencies on a path to it, so that rules without Not and aggregates are all in stratum 0. *)
+
+let node_word (t : Query.term) =
+  match t with
+  | Query.Val (Value.Int n | Date n | Money n | Link n) -> n
+  | Val (Bool b) -> if b then 1 else 0
+  | Thing c -> c
+  | Val (Text _ | Float _) | Var _ -> -1
+
+let node (q : Query.pattern) = (if q.p < 0 then -1 else q.p), node_word q.v
+
+let node_match (p, w) (p', w') = (p < 0 || p' < 0 || p = p') && (w < 0 || w' < 0 || w = w')
+
+let[@inline never] strata (v : Store.view) (rules : t array) =
+  let n = Array.length rules in
+  let sh = Array.map split rules in
+  (* a head whose property is a variable may give any fact: it matches every head, and they are one stratum *)
+  let head_node i = match sh.(i).pos.head with Give h -> Some (if sh.(i).agg <> None || h.p < 0 then (h.p, -1) else node h) | Never -> None in
+  let heads = Array.init n head_node in
+  (* edges i -> j, negative or not *)
+  let adj = Array.make n [] in
+  let edge i j neg = adj.(i) <- (j, neg) :: adj.(i) in
+  for i = 0 to n - 1 do
+    match heads.(i) with
+    | None -> ()
+    | Some hi ->
+      for j = 0 to n - 1 do
+        match heads.(j) with
+        | None -> ()
+        | Some hj ->
+          let agg = sh.(j).agg <> None in
+          let pos = List.exists (fun q -> node_match hi (node q)) sh.(j).pos.where in
+          let neg = Array.exists (Array.exists (fun q -> node_match hi (node q))) sh.(j).nots in
+          if neg || (pos && agg) then edge i j true else if pos then edge i j false;
+          if i <> j && node_match hi hj then edge i j false
+      done
+  done;
+  (* Tarjan's strong components *)
+  let index = Array.make n (-1) and low = Array.make n 0 and on = Array.make n false and comp = Array.make n (-1) in
+  let stack = ref [] and next = ref 0 and ncomp = ref 0 in
+  let rec visit i =
+    index.(i) <- !next;
+    low.(i) <- !next;
+    incr next;
+    stack := i :: !stack;
+    on.(i) <- true;
+    List.iter
+      (fun (j, _) ->
+        if index.(j) < 0 then (visit j; low.(i) <- min low.(i) low.(j)) else if on.(j) then low.(i) <- min low.(i) index.(j))
+      adj.(i);
+    if low.(i) = index.(i) then begin
+      let rec pop () =
+        match !stack with
+        | j :: rest -> stack := rest; on.(j) <- false; comp.(j) <- !ncomp; if j <> i then pop ()
+        | [] -> ()
+      in
+      pop ();
+      incr ncomp
+    end
+  in
+  for i = 0 to n - 1 do if heads.(i) <> None && index.(i) < 0 then visit i done;
+  (* a negative edge inside a component: the cycle named, from the rule that reads under Not back to it *)
+  let cycle = ref None in
+  (* a rule that reads its own head under Not first: the shortest cycle *)
+  for i = 0 to n - 1 do
+    List.iter (fun (j, neg) -> if neg && !cycle = None && i = j then cycle := Some (i, j)) adj.(i)
+  done;
+  for i = 0 to n - 1 do
+    List.iter (fun (j, neg) -> if neg && !cycle = None && comp.(i) = comp.(j) then cycle := Some (i, j)) adj.(i)
+  done;
+  match !cycle with
+  | Some (i, j) ->
+    (* a path j ->* i inside the component, by breadth *)
+    let from = Array.make n (-1) in
+    let q = Queue.create () in
+    Queue.add j q;
+    from.(j) <- j;
+    while from.(i) < 0 && not (Queue.is_empty q) do
+      let x = Queue.pop q in
+      List.iter (fun (y, _) -> if comp.(y) = comp.(i) && from.(y) < 0 then (from.(y) <- x; Queue.add y q)) adj.(x)
+    done;
+    let rec path x acc = if x = j then j :: acc else path from.(x) (x :: acc) in
+    let names = List.map (fun k -> rules.(k).name) (if i = j then [ j ] else path i []) in
+    let pname = match heads.(i) with Some (p, _) when p >= 0 -> (match Schema.find v.schema p with Some d -> d.name | None -> string_of_int p) | _ -> "a property" in
+    let what, word = if sh.(j).agg <> None && not (Array.exists (Array.exists (fun q -> node_match (Option.get heads.(i)) (node q))) sh.(j).nots) then "aggregate", agg_name (Option.get sh.(j).agg) else "absence", "not" in
+    Error
+      (Printf.sprintf "rule %s: %s depends on its own %s (%s -> %s %s)" rules.(j).name pname what (String.concat " -> " names) word
+         rules.(j).name)
+  | None ->
+    (* the components in topological order: Tarjan numbers a component after every component it reaches *)
+    let cs = Array.make !ncomp 0 in
+    let members = Array.make !ncomp [] in
+    Array.iteri (fun i c -> if c >= 0 then members.(c) <- i :: members.(c)) comp;
+    for c = !ncomp - 1 downto 0 do
+      List.iter
+        (fun i -> List.iter (fun (j, neg) -> if comp.(j) <> c then cs.(comp.(j)) <- max cs.(comp.(j)) (cs.(c) + if neg then 1 else 0)) adj.(i))
+        members.(c)
+    done;
+    Ok (Array.init n (fun i -> if comp.(i) < 0 then 0 else cs.(comp.(i))))

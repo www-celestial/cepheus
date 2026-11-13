@@ -97,7 +97,11 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
        makes it asserted too; a retraction of a fact only derived is refused, naming the rule (choice 10.4 of the
        reasoner design) *)
     let v_before = v0 in
+    let aggs = lazy (Reason.reads v_before) in
     let assert_change add e p x =
+      let rd = Lazy.force aggs in
+      if p < Bytes.length rd && Char.code (Bytes.unsafe_get rd p) land 4 <> 0 then
+        invalid "%s is given by an aggregate rule: no write adds or retracts it" (desc !v p).name;
       let v0 = !v in
       let vi, w = if add then Store.word_intern v0 x else (v0, match Store.word v0 x with Some w -> w | None -> min_int) in
       if w <> min_int then begin
@@ -164,13 +168,39 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
         | Ok (Prop d), _, Some _ -> invalid "a rule never becomes a property (%s)" d.name
         | _ -> ())
       touched;
-    if Schema.rules_key !v.schema <> Schema.rules_key v0.schema || Hashtbl.length touched > 0 then
-      List.iter
-        (fun (_, (name, text)) ->
-          match Rules.of_text name text with
-          | Error m -> invalid "%s" m
-          | Ok r -> (match Rules.check !v r with Error m -> invalid "%s" m | Ok () -> ()))
-        (Schema.rules !v.schema);
+    if Schema.rules_key !v.schema <> Schema.rules_key v0.schema || Hashtbl.length touched > 0 then begin
+      let rules =
+        List.map
+          (fun (_, (name, text)) ->
+            match Rules.of_text name text with
+            | Error m -> invalid "%s" m
+            | Ok r -> (match Rules.check !v r with Error m -> invalid "%s" m | Ok () -> r))
+          (Schema.rules !v.schema)
+      in
+      (* the rule set as a whole: an aggregate's property is its rule's alone, and no property depends on its own
+         absence or aggregate (the strata) *)
+      if not (List.for_all Rules.is_plain rules) then begin
+        let rules = Array.of_list rules in
+        let shapes = Array.map Rules.split rules in
+        Array.iteri
+          (fun i (sh : Rules.shape) ->
+            match sh.agg, sh.pos.head with
+            | Some _, Give h ->
+              let name = match Schema.find !v.schema h.p with Some d -> d.name | None -> string_of_int h.p in
+              Array.iteri
+                (fun j (o : Rules.shape) ->
+                  match o.pos.head with
+                  | Give g when j <> i && (g.p = h.p || g.p < 0) -> invalid "rule %s gives %s, which the aggregate %s gives" rules.(j).name name rules.(i).name
+                  | _ -> ())
+                shapes;
+              let mine = ref true in
+              Store.iter_prop !v h.p (fun e w -> if !mine && Store.state !v e h.p w = 1 then mine := false);
+              if not !mine then invalid "rule %s: %s holds facts a write asserted; an aggregate's property holds only what it gives" rules.(i).name name
+            | _ -> ())
+          shapes;
+        match Rules.strata !v rules with Error m -> invalid "%s" m | Ok _ -> ()
+      end
+    end;
     (* the rules: what they derive from this group, and what they no longer derive *)
     let v, changes =
       match Reason.run ~v0 !v changes (Array.of_list (List.rev !outw)) with
