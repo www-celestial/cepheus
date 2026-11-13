@@ -1828,7 +1828,9 @@ let [@inline never] worker_ctx c =
            xplans = Hashtbl.create 8; next = ints 16 0; spare = ints 16 0; nn = 0; per_rule = Array.make (Array.length c.prog.rules) 0;
            buf_a = buf_create 16; buf_b = buf_create 16; seen = iset_create (); seen2 = iset_create (); pt = ws_create () }
 
-let par_ok c = !Bulk.domains > 1 && (not c.prog.stratified) && Array.for_all (fun w -> w >= 0) c.cw
+(* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
+   the other cores while it runs *)
+let par_ok c = !Bulk.domains > 1 && c.stop == never && (not c.prog.stratified) && Array.for_all (fun w -> w >= 0) c.cw
 
 exception Too_many
 
