@@ -1705,6 +1705,52 @@ let count_range v p lo hi =
 (* the values of p that the delta holds changes of *)
 let delta_values v p = match IM.find_opt p v.delta.dav with Some pd -> pd.pk | None -> 0
 
+(* For the windows of the index path (Top): the value of the m-th fact of p from [w] on (from [w] down with [desc]) in
+   each run's index and in the delta, the nearest of them to w; None when none of them holds m. The window from w to
+   that value holds m facts of the source that gave it, less those newer runs retract, and at most m of each other
+   source: a bound of the window of m facts, found in two lookups a run, that the search for that window starts
+   from instead of the whole range of ints *)
+let nth_bound v p w m ~desc =
+  let best = ref None in
+  let keep x = match !best with Some b when (if desc then x <= b else x >= b) -> () | _ -> best := Some x in
+  if m > 0 then begin
+    Array.iter
+      (fun r ->
+        let b = r.a in
+        if has_p b p then begin
+          let p0 = cpoff b p and p1 = cpoff b (p + 1) in
+          if desc then begin
+            let r1 = if w = max_int then p1 else base_lower b p (w + 1) in
+            if r1 - m >= p0 then keep (base_pvalue b p (r1 - m))
+          end
+          else begin
+            let r0 = base_lower b p w in
+            if r0 + m - 1 < p1 then keep (base_pvalue b p (r0 + m - 1))
+          end
+        end)
+      v.runs;
+    match IM.find_opt p v.delta.dav with
+    | None -> ()
+    | Some pd ->
+      (* the delta's additions of p, value after value from w *)
+      let k = ref 0 in
+      if desc then begin
+        let at = ref (Some w) in
+        while !at <> None do
+          match IM.find_last_opt (fun x -> x <= Option.get !at) pd.pm with
+          | None -> at := None
+          | Some (x, vd) ->
+            k := !k + max 0 vd.vn;
+            if !k >= m then (keep x; at := None) else at := if x = min_int then None else Some (x - 1)
+        done
+      end
+      else begin
+        let rec go s = match s () with Seq.Cons ((x, vd), s') -> k := !k + max 0 vd.vn; if !k >= m then keep x else go s' | Seq.Nil -> () in
+        go (IM.to_seq_from w pd.pm)
+      end
+  end;
+  !best
+
 (* an estimate for the planner: the distinct values of p, the runs' and the delta's (an upper bound) *)
 let distinct v p =
   let rs = v.runs and n = ref 0 in

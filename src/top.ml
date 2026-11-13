@@ -247,8 +247,10 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
               let left = Store.count_range v p min_int hi in
               if left <= m then (min_int, hi, true)
               else begin
-                (* the largest lo whose window [lo, hi] holds m facts *)
-                let a = ref min_int and b = ref hi in
+                (* the largest lo whose window [lo, hi] holds m facts: searched from a bound of it (Store.nth_bound)
+                   when the bound's window holds them, from min_int else *)
+                let bot = match Store.nth_bound v p hi m ~desc:true with Some l when Store.count_range v p l hi >= m -> l | _ -> min_int in
+                let a = ref bot and b = ref hi in
                 while !a < !b do
                   let mid = (!a asr 1) + (!b asr 1) + (!a land !b land 1) + 1 in
                   if Store.count_range v p mid hi >= m then a := mid else b := mid - 1
@@ -261,7 +263,9 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
               let left = Store.count_range v p lo max_int in
               if left <= m then (lo, max_int, true)
               else begin
-                let a = ref lo and b = ref max_int in
+                (* the least hi whose window [lo, hi] holds m facts, likewise *)
+                let top = match Store.nth_bound v p lo m ~desc:false with Some u when Store.count_range v p lo u >= m -> u | _ -> max_int in
+                let a = ref lo and b = ref top in
                 while !a < !b do
                   let mid = (!a asr 1) + (!b asr 1) + (!a land !b land 1) in
                   if Store.count_range v p lo mid >= m then b := mid else a := mid + 1
