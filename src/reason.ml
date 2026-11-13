@@ -241,7 +241,8 @@ let[@inline never] set_by ws x ids =
   ws.by.(x) <- ids
 
 let[@inline] find ws e p w =
-  if ws.n = 0 then -1
+  (* a property id is below 65,536 (the packing of f2): any other p is no fact *)
+  if ws.n = 0 || p lsr 16 <> 0 then -1
   else begin
     let set = ws.set and mask = ws.smask and ep = (e lsl 16) lor p in
     let i = ref (h3 e p w land mask) and r = ref (-2) in
@@ -277,6 +278,7 @@ let[@inline never] grow_set ws =
 
 (* a fact the working set did not hold: its id *)
 let[@inline never] add ws e p w base =
+  if p lsr 16 <> 0 || e < 0 then invalid_arg "Reason.add: not a fact";
   if ws.n >= ws.cap then grow ws;
   if 2 * (ws.n + 1) > A.dim ws.set then grow_set ws;
   let x = ws.n in

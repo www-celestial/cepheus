@@ -831,6 +831,12 @@ let change_bench n clients secs at mode dir =
 let () =
   (match Sys.getenv_opt "DOMAINS" with Some d -> Bulk.domains := int_of_string d | None -> ());
   match Array.to_list Sys.argv |> List.tl with
+  | [ "digest"; dir ] ->
+    (* a database opened and read whole: its facts, derived ones, and the digest of every fact and flag *)
+    let db = ok (open_ dir) in
+    let all, d = count_derived (view db) in
+    Printf.printf "digest %s: %d facts (%d derived), digest %x\n" dir all d !digest;
+    close db
   | [ "define"; n ] -> define_bench (int_of_string n)
   | [ "change"; n; c; secs; at; mode; dir ] -> change_bench (int_of_string n) (int_of_string c) (float_of_string secs) (float_of_string at) mode dir
   | [ "mat"; n; mode; path; dir ] -> mat (int_of_string n) mode path dir

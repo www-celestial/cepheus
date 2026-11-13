@@ -584,17 +584,19 @@ adds is found among the group's new texts, which the dictionary's map does not h
 Measured on this laptop (Intel i7-4720HQ, 2.6 GHz, 4 cores; OCaml 5.5 without flambda), on LUBM-shaped data
 (universities, departments, people, courses, generated from the published ranges of the LUBM generator [Guo 2005],
 not its official output) with the univ-bench ontology as 94 rules, one an axiom. Seven rounds, alternated, each
-process capped at 3 GB, nothing else running; the median and the interval $[x(1), x(7)]$ of the rounds (98.4 %
-coverage). The method and every number: [benchmarks](benchmarks.md#rules-2026-11-08).
+process capped at 3 GB; the median and the interval $[x(1), x(7)]$ of the rounds (98.4 % coverage). The method and
+every number: [benchmarks](benchmarks.md#rules-2026-11-08), and for loads
+[the path of loads](benchmarks.md#rules-step-3-the-path-of-loads-sorted-and-parallel-2026-11-14).
 
 | what | with the rules | without | |
 |---|---|---|---|
 | write a graduate student (10 facts; 6 derived) | **23.1 µs** [21.9, 24.1] | 9.1 µs | 2.5× |
 | retract it (B/F: the 6 derived facts go) | **34.1 µs** [33.1, 54.8] | 6.9 µs | 4.9× |
 | `why` of a derived type (a proof of 2 to 8 facts) | **1.2 to 3.1 µs** | | |
-| load 10 universities in one group (1.35 M facts, 532,205 derived, 2,024,788 derivations), durable | 2.48 s | 1.20 s | |
-| its reasoning: the saturation alone | **1.04 M derived facts/s** [0.98, 1.05] on one core | | |
-| its reasoning with the working set's build (1.35 M facts indexed, 0.58 s) | 0.52 M derived facts/s [0.49, 0.53] | | |
+| load 10 universities in one group (1.35 M facts, 532,205 derived, 2,021,310 derivations), durable | **1.78 s** [1.66, 2.27] | 1.06 s | |
+| its reasoning: the rounds alone (saturation), on 8 threads | **1.92 M derived facts/s** [1.58, 2.04] | | |
+| its reasoning whole (the group's facts made ready for the joins, 0.13 s, included) | **1.29 M derived facts/s** (0.41 s) | | |
+| the same load as ten groups, a university each: peak resident memory | **133 MB** | | |
 | a derived fact put into the view (a delta of 200,000 changes) | **0.83 µs** in sorted batches; 1.12 µs one by one | | |
 
 The write path without rules is unchanged: the same student groups on main's binary and this one, 9.06 µs and
@@ -611,12 +613,11 @@ marked *computed* are ours from their tables):
 | RDFox B/F, Motik et al., AAAI 2015 [Motik 2015] | LUBM-1k-L, delete 100 facts | "0.0 s" in its table (below its rounding) |
 | Soufflé, Scholz et al., CC 2016 [Scholz 2016] | a points-to analysis of OpenJDK 7, about 840 M tuples | 75 s sequential, 35 s parallel (4 cores): another workload, given for the order of magnitude |
 
-- **One core, saturation**: 1.04 M derived facts/s here, 0.67 M/s for RDFox 2014, about 1.28 M/s for VLog: the same
-  order; VLog's published rate stays ahead by 1.2×, on another machine and a hundred times more data.
-- **Counting the working set's build** (a load's facts indexed for the joins, which the published rates count in
-  their load), 0.52 M/s: RDFox 2014's level, behind VLog by 2.5×. The next step of the design sorts a load's facts
-  instead of hashing them (VLog's own method).
-- **In parallel**: not yet; RDFox reaches 7.0 M/s on 32 threads.
+- **One core, saturation**: 1.04 M derived facts/s here (step 1), 0.67 M/s for RDFox 2014, about 1.28 M/s for VLog:
+  the same order; VLog's published rate stays ahead by 1.2×, on another machine and a hundred times more data.
+- **In parallel, a load's facts sorted** (step 3): the rounds 1.92 M/s on this laptop's 4 cores (8 threads), the
+  reasoning whole 1.3 to 1.6 M/s, 0.33 to 0.40 M/s a core: close to RDFox 2014's 0.44 M/s a core at 32 threads; RDFox
+  reaches 7.0 M/s in all on its 16 cores.
 - **Small writes**: microseconds, in the process. No giant publishes a per-group latency to compare with.
 - **Where the reasoner costs the most**: a retraction, 4.9 times the same group without rules. B/F checks each fact
   that lost a derivation against every rule that can give it, each check a lookup in the store's persistent maps or

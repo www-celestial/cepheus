@@ -1814,12 +1814,6 @@ let[@inline never] swap v e p w s =
 
 let set v e p w s = fst (swap v e p w s)
 
-(* Many facts set at once: [es], [ps], [ws], [ss] the things, properties, value words and states (0 absent,
-   1 asserted, 2 only derived) of n facts, distinct, sorted by (thing, property, value). The same result as [set] one
-   after the other, with one walk of the map by thing a thing and one of the map by property a property, where [set]
-   walks both for each fact: the derived facts of a group come in clusters (a new thing's types, a class's members).
-   [olds]: the facts' states in [v] when the caller knows them (the reasoner does): a fact the delta has no entry for
-   is in that state in the runs, and is not looked up there. *)
 (* A map of n keys from [ks] (strictly increasing) with their values [vs], in O(n): its halves built apart and joined
    by unions of maps whose keys do not interleave (Map's union of such maps follows one spine: O(log^2) a union, so
    T(n) = 2 T(n/2) + O(log^2 n) = O(n)), where n insertions one by one would copy a path each: O(n log n) blocks *)
@@ -1839,6 +1833,12 @@ let im_add_sorted (ks : int array) (vs : 'a array) k (m : 'a IM.t) =
   else if IM.is_empty m then im_of_sorted ks vs 0 k
   else IM.union (fun _ a _ -> Some a) (im_of_sorted ks vs 0 k) m
 
+(* Many facts set at once: [es], [ps], [ws], [ss] the things, properties, value words and states (0 absent,
+   1 asserted, 2 only derived) of n facts, distinct, sorted by (thing, property, value). The same result as [set] one
+   after the other, with one walk of the map by thing a thing and one of the map by property a property, where [set]
+   walks both for each fact: the derived facts of a group come in clusters (a new thing's types, a class's members).
+   [olds]: the facts' states in [v] when the caller knows them (the reasoner does): a fact the delta has no entry for
+   is in that state in the runs, and is not looked up there. *)
 let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : int array) (ss : int array) n =
   if n = 0 then v
   else begin
