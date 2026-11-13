@@ -105,13 +105,14 @@ sed -i 's/^name = "main"/name = "invoices"/' ~/invoices-db/cluster.toml
 ```
 
 The app shows the server two **tokens**, the secrets that grant rights on a database ([rights](server.md#rights-g16)):
-its own, which writes; and the accountant's, which reads and adds only the kinds `invoice` and `line`:
+its own, which writes; and the accountant's, which reads and adds only the kinds `invoice` and `line`, and `counter`,
+which numbers the invoices:
 
 ```sh
 cd ~/invoices-db
 (umask 077
  cepheus token add web --database invoices=write --config cluster.toml > web.token
- cepheus token add books --database "invoices=read:invoice,line;add:invoice,line" --config cluster.toml > books.token
+ cepheus token add books --database "invoices=read:invoice,line,counter;add:invoice,line,counter" --config cluster.toml > books.token
  cepheus token add ops --admin --config cluster.toml > ops.token)
 cepheus token list --config cluster.toml
 cepheus serve --config ~/invoices-db/cluster.toml &
@@ -122,7 +123,7 @@ cepheus: token web added to ./tokens.toml; it is shown only now
 cepheus: token books added to ./tokens.toml; it is shown only now
 cepheus: token ops added to ./tokens.toml; it is shown only now
 web invoices=write
-books invoices=read:invoice,line;add:invoice,line
+books invoices=read:invoice,line,counter;add:invoice,line,counter
 ops admin
 cepheus: ready in 33.0 ms: invoices at group 1; socket /home/you/invoices-db/run/.s.cepheus.7400, tcp 127.0.0.1:7400; 4 I/O domains, at most 512 connections; server cph-s-9fec02740f6f3f07, cluster cph-c-b13d6097382a6ee2
 ```
@@ -162,6 +163,7 @@ Line = cepheus.Kind("line", {
 
 User = cepheus.Kind("user", {Login: cepheus.Text(unique = true), Hash: cepheus.Text(), Role: cepheus.Text()})
 Session = cepheus.Kind("session", {Key: cepheus.Text(unique = true), User: cepheus.Link(), Expires: cepheus.Date()})
+Counter = cepheus.Kind("counter", {Name: cepheus.Text(unique = true), Last: cepheus.Int()})
 ```
 
 The choices in it:
@@ -172,6 +174,7 @@ The choices in it:
   so a search without case keeps a field in the form it searches. `text.Lower` changes A to Z only; the app's
   `Lower` (`check.ce`) lowers the accented letters of Latin-1 too, so that "él" finds "Élodie".
 - **`Total`** is computed from the lines when an invoice is written, in cents, exactly: `Money(2)` keeps minor units.
+- A **`Counter`** holds the last number it gave; the one named `invoice` numbers the invoices (step 5).
 - **`Overdue`** is never written by the app: the database derives it. Every client has a **`Name`** (`ClientForm`
   checks it): a deleted client has none.
 
@@ -225,30 +228,31 @@ group's k-th new thing, so the lines point to the invoice before it has an id
 
 ```text
 defn AddInvoice(f, billTo, by, db)
-  for attempt in 1..5
-    n = nextNumber(db)?
-    inv = cepheus.New(1)
-    ops = list.Concat([cepheus.Add(inv, Invoice.Number, n), cepheus.Add(inv, Invoice.Client, f.Client), cepheus.Add(inv, Invoice.BillTo, billTo),
-                       cepheus.Add(inv, Invoice.Search, Lower(billTo)), cepheus.Add(inv, Invoice.Date, f.Date), cepheus.Add(inv, Invoice.Due, f.Due),
-                       cepheus.Add(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Total, f.Total)], lineOps(inv, f.Lines, 2))
+  c = invoiceCounter(db)?
+  inv = cepheus.New(1)
+  ops = list.Concat([cepheus.Incr(c, Counter.Last, into = [inv, Invoice.Number]), cepheus.Add(inv, Invoice.Client, f.Client), cepheus.Add(inv, Invoice.BillTo, billTo),
+                     cepheus.Add(inv, Invoice.Search, Lower(billTo)), cepheus.Add(inv, Invoice.Date, f.Date), cepheus.Add(inv, Invoice.Due, f.Due),
+                     cepheus.Add(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Total, f.Total)], lineOps(inv, f.Lines, 2))
+  done = cepheus.Write(ops, db, by = by, why = "invoice added")
+  if result.IsErr(done) and done.Error.Code == "unique"
+    CatchUpNumbers(db)?
     done = cepheus.Write(ops, db, by = by, why = "invoice added")
-    if result.IsOk(done)
-      return result.Ok({Invoice: done.Value.Things[1], Number: n})
-    end
-    if done.Error.Code != "unique"
-      return done
-    end
   end
-  result.Err({Code: "busy", Message: "Many invoices are being made at once: try again."})
+  result.Ok({Invoice: done?.Things[1]})
 end
 ```
 
-- The number is the largest one plus one, read in the index's order (`Sort: [cepheus.Desc(n)], Limit: 1`: one row),
-  so that the numbers follow each other without a gap, as the law of many countries asks of invoices. Two requests
-  that read the largest at once would take the same number: `AddInvoice` numbers one invoice at a time in the process
-  (a channel of one place, `fiber.Send` to take it, `fiber.Receive` to give it back), and `Number` is `unique`, so a
-  group of another process that took the number first refuses this one, which takes the next. The price: the
-  invoices of one process are made one after the other, each waiting for its group to be on the disk.
+- The numbers follow each other without a gap, as the law of many countries asks of invoices. Reading the largest
+  number and writing it plus one would not do: two requests that read it at once take the same, and one of them must
+  try again (50 at once: 2,905 of 4,200 tries failed). The number is the counter's next instead, which the database
+  takes in the group that makes the invoice (`cepheus.Incr`, [Write](cesia.md#write-groups-of-facts-all-or-nothing)):
+  groups that count at the same time never conflict and never skip a number, a refused group takes none, and
+  invoices made at once share the server's fsyncs instead of waiting for each other.
+- `invoiceCounter` finds the counter by its name; the first invoice makes it, from the largest number the database
+  holds, so that a database filled before it goes on from there (its name is `unique`: of two requests that make it
+  at once, one makes it and the other finds it). A program that numbers invoices without the counter, as the seed
+  does, leaves it behind: the next group is refused as `unique` (`Number` is unique), `CatchUpNumbers` moves the
+  counter up to the largest number, and the invoice is written again. The seed calls it once at its end.
 - `by` is the user's id and `why` says what the group did: both stay with the group in the database's history.
 
 Paying is an **optimistic** check: the group is refused unless the status is still the one that was read, so an
@@ -499,14 +503,15 @@ curl -s -b bo.jar $B/invoices.csv
 ```
 
 ```text
-http://127.0.0.1:8090/invoices/65540
+http://127.0.0.1:8090/invoices/65541
 403
-303 http://127.0.0.1:8090/invoices/65540
+303 http://127.0.0.1:8090/invoices/65541
 number,date,due,bill_to,status,total,paid_at
 1,2026-11-02,2026-12-02,Ada Martin,paid,1280.50,2026-11-12
 ```
 
-(The ids are the database's: its first things were the two users and ada's session. The day of payment is the UTC
+(The ids are the database's: its first things were the two users and ada's session, and the first invoice made
+the counter of the numbers before it. The day of payment is the UTC
 day.)
 
 **Data to try it at its size**: `cesia do seed` adds 10,000 clients and 100,000 invoices of one to five lines over
@@ -743,13 +748,17 @@ about 0.35 ms a request more than ApacheBench), each answered once its group is 
 |---|---:|---:|---:|---:|---:|
 | a client made | 3.82 [3.63, 4.40] | 16.2 | 20.0 [17.6, 23.2] | 33.6 | 1,996 |
 | an invoice paid | 3.76 [3.58, 4.25] | 11.2 | 21.3 [18.6, 23.6] | 29.7 | 2,117 |
-| an invoice made, with two lines | 7.50 [5.80, 9.81] | 26.3 | 268 [251, 318] | 415 | 161 |
+| an invoice made, with two lines | 5.72 [4.92, 11.4] | 58.3 | 24.4 [23.3, 29.1] | 41.0 | 1,722 |
 | a sign-in | 70.2 [65.8, 75.5] | 84.6 | 3,062 [2,989, 3,253] | 3,092 | 16 |
 
 - 50 writes at once share the server's fsyncs (group commit, [the server](server.md)): 2,000 a second, against 240
   one after the other.
-- An invoice is numbered one at a time in the process (step 5), so 50 at once wait for each other's fsync: 161 a
-  second. (Before that, 2,905 of 4,200 failed after five tries at a number: each of 50 read the same largest one.)
+- An invoice takes its number in its own group (`Incr`, step 5), so 50 at once share the server's fsyncs as the
+  other writes do: 1,722 a second. The numbering it replaced, one invoice at a time in the process, measured in turn
+  with it on the same server and data (21 rounds each, 2026-11-13): 141 a second, p50 262 ms at 50 clients; the
+  rounds' ratio of invoices a second, new over old, 11.0 [9.4, 15.4], and the same alone (p50 0.99 [0.42, 1.38]: the
+  machine was busy, hence the wide intervals and the p99 alone). Before that queue, 2,905 of 4,200 tries failed: each
+  of 50 read the same largest number.
 - A sign-in is Argon2id, about 65 ms of the app's one thread, on purpose (the cost of guessing a password); 50 at
   once take 3 s, and the requests of that process wait meanwhile.
 
@@ -807,11 +816,11 @@ What the app defends against, how, and the test that shows it:
 | a stolen database copy | passwords as Argon2id hashes, sessions as BLAKE2b hashes of their secret | (by construction) |
 | a stolen session cookie | `HttpOnly`, `SameSite=Strict`, 8 hours, `Secure` over https; sign-out retracts the session | `isSignedIn` |
 | cross-site request forgery | the same-origin check on every request that changes something; `SameSite=Strict` | `isOtherOriginRefused`, both levels |
-| a page that shows what it should not | the role checked by every route; the accountant's token reads invoices and lines only | `isAccountantSeesInvoicesOnly`, `isAccountantSeesNoClient` (denied by the database) |
+| a page that shows what it should not | the role checked by every route; the accountant's token reads invoices, their lines and their counter only | `isAccountantSeesInvoicesOnly`, `isAccountantSeesNoClient` (denied by the database) |
 | cross-site scripting | every value escaped; a Content-Security-Policy that allows the app's own script only; values drawn with `textContent` in the page | `isClientMadeAndEscaped` |
 | CSV injection | a `'` before a cell that a spreadsheet would run | `isCsvOfTheFilter` |
 | input that breaks a check or the memory | every field bounded and checked before use; bodies of 64 KiB at most; cursors of 2 KB, their types checked | `isClientChecked`, `isInvoiceChecked`, `isBadCursorRefused` |
-| two requests at once | `Expect` on the status (paid once), `unique` on the number and the e-mail, the constraint on deleted clients | `isPaidOnce`, `isDeleteChecked`, `isEmailUnique` |
+| two requests at once | `Expect` on the status (paid once), the number taken by the group (`Incr`) and `unique`, `unique` on the e-mail, the constraint on deleted clients | `isPaidOnce`, `isNumberedInOrderAtOnce`, `isAccountantNumbersInvoicesAtOnce`, `isDeleteChecked`, `isEmailUnique` |
 | a secret in the logs | the log holds no query, cookie, body, token, or login typed | (by reading `web.ce`) |
 | the app's own rights | the permissions of step 13, no file written | (the task's `allow`) |
 
@@ -827,5 +836,4 @@ actions above). A flood of sign-ins is a denial of service until the hash runs b
 - An index order for a sort on a text (the clients by name read every client), and the bulk path for a load into a
   database with a constraint or a rule whose head is a one-valued property (the seed defines the rules after the
   load).
-- A counter that a group itself increments: invoice numbers without a gap are made one at a time in a process.
 - Argon2id beside the requests: a sign-in holds the app's thread for its 65 ms.

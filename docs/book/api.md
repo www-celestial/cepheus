@@ -87,6 +87,7 @@ type op =
   | Add of int * int * value               (* thing, property, value; on a one-valued property, retracts the old value *)
   | Retract of int * int * value
   | Expect of int * int * value option     (* Some v: the fact holds before the group; None: the thing has no value *)
+  | Incr of int * int * int * (int * int) option   (* thing, property, by, into: a counter the group increments *)
 type receipt = { group : int; things : (int * int) list }   (* the group's number; its new things, (-k, id) *)
 val write : db -> ?by:int -> ?why:string -> op list -> (receipt, error) result
 val thing : receipt -> int -> int
@@ -110,9 +111,43 @@ returns at once. The group's number is given when the writer takes it; groups ar
   newest state: it is how a read-then-write states what it read ([concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)).
 - **Unique** values are checked on the state after the whole group, so a group may move a unique value from one thing
   to another.
+- **`Incr (thing, property, by, into)`** is a counter that the group increments: the thing's value of a one-valued
+  `Int` property (none counts 0) grows by `by` (negative counts down), read by the writer at that point of the group,
+  so a second `Incr` of the same counter in the group reads the first one's value. `into = Some (thing', property')`
+  also adds the new value as `(thing', property')`, an `Int` property, one-valued or not; `thing'` may be a new thing
+  of the group. Groups that increment one counter at the same time never conflict and never skip a value: each reads
+  the value the group before it left, and a refused group leaves the counter as it was. In the journal it is what it
+  did: the old value retracted and the new one added, as an `Add` would.
+
+An invoice takes the next number in the group that makes it, and a refused group takes none:
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ last; number; status ]) =
+    declare db [ prop "counter/last" Tint; prop ~unique:true "invoice/number" Tint; prop "invoice/status" Ttext ] in
+  let counter = thing (Result.get_ok (write db [ Add (-1, last, Int 0) ])) (-1) in
+  let invoice ops = write db (Incr (counter, last, 1, Some (-1, number)) :: Add (-1, status, Text "unpaid") :: ops) in
+  let a = thing (Result.get_ok (invoice [])) (-1) in
+  (match invoice [ Expect (counter, status, Some (Text "closed")) ] with Error e -> print_endline (message e) | Ok _ -> ());
+  let b = thing (Result.get_ok (invoice [])) (-1) in
+  let v = view db in
+  Printf.printf "numbers %s and %s, the counter at %s\n" (Value.to_string (List.hd (values v a number)))
+    (Value.to_string (List.hd (values v b number))) (Value.to_string (List.hd (values v counter last)));
+  match write db [ Incr (counter, status, 1, None) ] with Error e -> print_endline (message e) | Ok _ -> ()
+```
+
+```output
+conflict: #65536 does not have "closed" for invoice/status (property 18)
+numbers 1 and 2, the counter at 2
+invalid: Incr counts on a one-valued int property of the program's: invoice/status is a text
+```
 
 Errors: `Conflict` (an `Expect`); `Invalid` (a value of the wrong type, a thing that was never made, a link to
-nothing, an `Expect` on a new thing, a property that does not exist, a system property on an ordinary thing, an
+nothing, an `Expect` on a new thing, an `Incr` of a property that is not an `Int` of the program's (one-valued for the
+counter) or whose sum passes the 63 bits of an int, a property that does not exist, a system property on an ordinary thing, an
 ordinary property on a property thing, a schema rule, a group whose journal frame would pass 256 MiB); `Not_unique`;
 `Damaged` (a page of a run that the group needed could not be read or does not check: the group is not written, the
 writer goes on); for a database also `Io` (the disk failed: this group and every later one fail, until the database

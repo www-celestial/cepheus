@@ -74,7 +74,9 @@ checks a property on many random inputs against a reference model written indepe
    conversion finding nothing, a damaged frame of format 1 in the older segment refused (30 seeds); an open after a
    snapshot reading 80 bytes of a journal of more than 60 KB (the two looks at its header) through a disk that counts; a snapshot
    with merges turned off (`compact_min` at `max_int`) that ends; 300 random sequences of writes against a reference semantics written
-   independently (a set of facts); 300 random databases × 15 random questions against a naive evaluator, each within
+   independently (a set of facts); `Incr` (groups that number invoices from one counter, some refused: the accepted
+   ones numbered 1 to n, no gap, no number twice, the same after a power loss; two in one group; to the largest int
+   and past it, past the smallest; every wrong type, kind and thing refused, the counter left as it was); 300 random databases × 15 random questions against a naive evaluator, each within
    the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`; the leapfrog's slices
    counted where it may read them); costs: questions
    where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; a merge
@@ -170,7 +172,8 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
 - `server_unit`: TOML, every rule of `cluster.toml`, tokens (base64url against RFC 4648's vectors, the hash, the
   constant-time comparison, `tokens.toml` written and read back), the wire (5,000 random requests coded and decoded,
   every cut of their bodies refused; every reply; a count larger than its bytes refused before anything is
-  allocated), origins, the session table and its checkpoint (a damaged one refused), and the rights of every token
+  allocated; `Incr` round trips, and Writes with it fuzzed: every byte changed, cuts, bytes inserted, huge numbers,
+  read or refused, never more), origins, the session table and its checkpoint (a damaged one refused), and the rights of every token
   against every request on every database through the server's core (G16, `Follow` with them), a token removed or
   narrowed, a forged origin, a frame over the limit; and what local readers need from the system: descriptors passed
   over a socket (400 random messages of 1 to 6,000 bytes with up to 8 descriptors, read in random pieces: the bytes
@@ -257,13 +260,15 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
 
 - `cesia test cesia/tests`, on both of Cesia's paths (`--no-spec` too): every function of the package on forks of
   `cepheus.Empty`, with no server ([Cesia](cesia.md#tests)): types of values, joins, aggregates, ranges, many
-  values, `Expect`, new things of a group, `unique`, `Update`, the mistakes that are errors, a fork that never changes
-  its origin, `Close`.
+  values, `Expect`, new things of a group, `Incr` (30 fibers numbered 1 to 30; a refused group, a negative `by`, past
+  the ints, the wrong types), `unique`, `Update`, the mistakes that are errors, a fork that never changes its origin,
+  `Close`.
 - `test/cesia.sh`: a project of its own holds the package in `deps/` as `cesia pkg` puts it (its engine, its
   `cesia.lock`); a real server; then every example of [Cepheus from Cesia](cesia.md) runs, block by block with the
   blocks before it, on a database of its own, and what it prints must be the text under it (`test/cesia-docs.ce`);
   `test/cesia-live.ce` over TLS and through the Unix socket (200 writes by one connection each read at once by another,
-  local: G15 through the package; 100 and 200 fibers on one connection; a fork; `Close`), its output against
+  local: G15 through the package; 100 and 200 fibers on one connection; 50 fibers numbered by one `Incr` counter, 1 to
+  50 once each; a fork; `Close`), its output against
   `test/cesia-live.expected`; and the server killed with `kill -9` and started again while 10 fibers write 1,500
   invoices: every write answered `Ok`, each in the database once (G14 through the package).
 

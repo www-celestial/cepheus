@@ -85,6 +85,10 @@ them again and never recomputes anything.
 - `Expect (thing, property, Some value)`: the group fails with `Conflict` unless the fact holds before the group;
   `Expect (thing, property, None)`: unless the thing has no value for the property. Every `Expect` of a group is
   checked against the state just before the group, wherever it sits in the list.
+- `Incr (thing, property, by, into)`: a counter that the group increments. The thing's value of a one-valued `Int`
+  property (none counts 0) grows by `by`, read by the writer at that point of the group, and `into = Some (thing',
+  property')` adds the new value there too; it resolves into the changes an `Add` of the new value makes. Groups that
+  increment one counter at the same time never conflict: each reads what the group before it left.
 
 A negative number in a thing position or inside a `Link` is a **new thing** of this group: `-1`, `-2`, ... are given
 the next thing numbers in the order they first appear, and the receipt says which (`thing receipt (-1)`). An `Add` of
