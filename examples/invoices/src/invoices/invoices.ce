@@ -2,6 +2,7 @@
    found, listed by pages with filters, and marked late. Each function takes the database last. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/dict
+use std/fiber
 use std/list
 use std/result
 use std/value
@@ -29,10 +30,24 @@ defn lineOps(inv, lines, from)
   ops
 end
 
+(* One invoice numbered at a time in this process: a channel of one place, which AddInvoice fills while it numbers and
+   writes. Invoice numbers follow each other without a gap, as the law of many countries asks, so each is the largest
+   one plus one; 50 requests at once that each read the largest would all take the same, and all but one retry. *)
+numbering = fiber.Channel(size = 1)
+
 defn AddInvoice(f, billTo, by, db)
   (** A new unpaid invoice with its lines, in one group: f as InvoiceForm checked it, billTo the client's name now. It
-      takes the next number; if another invoice took it meanwhile, the next again. An Ok of {Invoice, Number}. *)
-  for attempt in 1..5
+      takes the next number, one invoice at a time in this process; if another process took the number meanwhile (the
+      group is refused: the number is unique), the next one. An Ok of {Invoice, Number}. *)
+  fiber.Send(true, numbering)
+  done = numbered(f, billTo, by, db)
+  _ = fiber.Receive(numbering)
+  done
+end
+
+defn numbered(f, billTo, by, db)
+  (** AddInvoice, once it may number. *)
+  for attempt in 1..10
     n = nextNumber(db)?
     inv = cepheus.New(1)
     ops = list.Concat([cepheus.Add(inv, Invoice.Number, n), cepheus.Add(inv, Invoice.Client, f.Client), cepheus.Add(inv, Invoice.BillTo, billTo),

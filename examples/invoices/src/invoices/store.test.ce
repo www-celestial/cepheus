@@ -3,6 +3,7 @@ use deps/www-celestial/cepheus/cesia/cepheus
 use std/bug
 use std/dict
 use std/encode
+use std/fiber
 use std/list
 use std/result
 use std/text
@@ -155,4 +156,14 @@ defn isCursorChecked()
   c = {After: {Client: 65536, Name: "Ada", Email: "a@x.fr", City: "Lyon"}}
   back = Cursor({after: text.Split("=", Link(c))[2] then encode.UrlDecode})
   value.Equal(back, c) and Cursor({after: "!!"}) == missing and Cursor({before: "e30"}) != missing
+end
+
+defn isNumberedInOrderAtOnce()
+  (** 20 invoices made at once by 20 fibers: numbers 1 to 20, each once. *)
+  t = cepheus.Fork(cepheus.Empty, Kinds)?
+  ada = AddClient(ClientForm({name: "Ada", email: "ada@example.com", city: "Lyon"})?, 0, t)?
+  f = InvoiceForm({client: "$ada", date: "2026-10-01", due: "2026-10-31", label1: "A", quantity1: "1", price1: "1"})?
+  tasks = [fiber.Spawn(() -> AddInvoice(f, "Ada", 0, t)) for k in 1..20]
+  numbers = [result.Unwrap(fiber.Wait(x))?.Number for x in tasks]
+  value.Equal(list.Sort(numbers), [k for k in 1..20])
 end
