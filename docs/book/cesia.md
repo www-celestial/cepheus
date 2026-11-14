@@ -639,15 +639,21 @@ Ok([65542]) Ok({Name: missing, Email: ["ada@uni.org"], Advisor: []})
   `Watch` read any thing of a class as that one: the name written on the second record is read on the first. The
   e-mail retracted, they are two things again.
 - **Refusals.** A constraint of OWL 2 RL (`owl/cax-dw` here: no thing in two disjoint classes) refuses its group whole,
-  with Code `"invalid"` and the rule's name. A rule of the program that gives a list of the library's templates
-  (`owl.IntersectionOf`, `owl.UnionOf`, `owl.OneOf`, `owl.HasKey`) is refused by `Define`: only a write changes a list.
+  with Code `"invalid"` and the rule's name. A rule of the program that gives the list of one of the library's
+  templates (`owl.IntersectionOf`, `owl.HasKey`: rules over every member at once) is refused by `Define`: only a
+  write changes such a list.
   No rule beside OWL 2 RL's may hold a `Not` or an aggregate: its rules over a property that is a variable may give
   any property, so such a rule could read its own absence. That is why this example runs on a [fork](#forks): the
   chapter's database holds the rules with `Not` and `Sum` above. `owl.Rl()` without the vocabulary, or a name that is
   no rule of it, is an `Err` of Code `"invalid"`.
 - **Rights.** The rules of OWL 2 RL read properties that are variables, so what they give may come from any kind: a
   token reads it, and `Same`, only when it reads every kind ([rights](server.md#rights-g16)); `Define` needs a token
-  that writes the whole database. A token of some kinds gets a thing's own facts only, and learns no equality.
+  that writes the whole database. A token of some kinds gets `denied` for `Same`, a question and `Define`, and from
+  `Get` none of the facts the rules may give: it learns no equality.
+- **Security.** Nothing new is decoded: the maps of `owl.Rl()` only name rules, which `Define` takes from the engine's
+  library (a name it lacks is an `Err`), and the writer checks them as any rule, under the rules' budgets (an equality
+  storm costs n − 1 facts, never n², [rules](rules.md#equality-classes-of-equal-things)). `Same` over the network
+  asks the server at most two questions, each under its budget of a question.
 
 ## Files
 

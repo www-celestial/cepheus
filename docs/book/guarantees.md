@@ -640,8 +640,10 @@ random rules, facts and tokens, every token's reads against the oracle's own rec
 - **An equality cannot reach what it must not.** Two values, a property thing, or a thing the rules name (owl:Thing, a
   class an unfolded rule names) are never made the same: the group is refused, naming the rule. `cepheus/same` is
   read as a derived fact: a token with rights per kind reads it, and any property of a rule set with equality (whose
-  facts a merge may rewrite), only when it reads every kind the equalities come from. *Tested by* `test/owl.ml`
-  (eq-rep-p, prp-fp over values) and `test/server_unit.ml` ("equality and kinds").
+  facts a merge may rewrite), only when it reads every kind the equalities come from; the server's `Get` reads a
+  thing as its class only for a token that reads `cepheus/same` (another gets the thing's own facts, and learns no
+  equality). *Tested by* `test/owl.ml` (eq-rep-p, prp-fp over values), `test/server_unit.ml` ("equality and kinds")
+  and `test/cesia-live.ce` (OWL 2 RL over TLS, a token of one kind: `Same` and questions denied, `Get` nothing).
 - **Templates are bounded.** A list unfolds into one rule of at most 64 copies of its patterns (a group that makes a
   longer list is refused, naming the rule); a write of a list is a change of the rules, under a change's budget; no
   rule may give a list, so a list changes by writes only, which the writer sees. Nothing new is decoded: a template is

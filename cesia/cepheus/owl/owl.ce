@@ -115,7 +115,7 @@ TargetIndividual = Vocabulary.TargetIndividual
 (** [n, TargetValue, s]: the text the negative assertion n names as the value. *)
 TargetValue = Vocabulary.TargetValue
 (** [t, Builtin, "Thing"] and [t, Builtin, "Nothing"]: owl:Thing, the class of every thing, and owl:Nothing, the class
-    of none, which cepheus.Define makes with the first rules of Rl():
+    of none, which cepheus.Define makes the first time it is given rules of Rl():
 
       thing = cepheus.Find(1, (t) -> {Where: [[t, owl.Builtin, "Thing"]], Give: {T: t}}, db)?[1].T *)
 Builtin = Vocabulary.Builtin

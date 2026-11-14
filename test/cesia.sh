@@ -63,7 +63,7 @@ mkdir -p "$app/src" "$dep/cesia" "$dep/native"
 cp cesia.toml "$dep/"
 cp -R cesia/cepheus "$dep/cesia/"
 cp "native/cepheus-$tag.cmxs" "$dep/native/"
-printf '[project]\nname = "app"\nsrc = ["src"]\n\n[deps.cepheus]\nfrom = "github.com/www-celestial/cepheus"\nversion = "v0.1.0"\ntake = ["cesia/cepheus"]\n' > "$app/cesia.toml"
+printf '[project]\nname = "app"\nsrc = ["src"]\n\n[deps.cepheus]\nfrom = "github.com/www-celestial/cepheus"\nversion = "v0.1.0"\ntake = ["cesia/cepheus", "cesia/cepheus/owl"]\n' > "$app/cesia.toml"
 cd "$app"
 cesia run --allow read,write "$root/tools/lock.ce"
 
