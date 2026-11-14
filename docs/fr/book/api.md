@@ -87,6 +87,7 @@ type op =
   | Add of int * int * value               (* thing, property, value; on a one-valued property, retracts the old value *)
   | Retract of int * int * value
   | Expect of int * int * value option     (* Some v: the fact holds before the group; None: the thing has no value *)
+  | Incr of int * int * int * (int * int) option   (* thing, property, by, into: a counter the group increments *)
 type receipt = { group : int; things : (int * int) list }   (* the group's number; its new things, (-k, id) *)
 val write : db -> ?by:int -> ?why:string -> op list -> (receipt, error) result
 val thing : receipt -> int -> int
@@ -111,9 +112,44 @@ applique les groupes, un à la fois) le prend ; les groupes sont appliqués un �
   lu ([concepts](concepts.md#lisolation--exactement-ce-que-voient-un-lecteur-et-un-writer)).
 - Les valeurs **unique** sont vérifiées sur l'état après tout le groupe ; un groupe peut donc déplacer une valeur unique
   d'une chose à une autre.
+- **`Incr (thing, property, by, into)`** est un compteur que le groupe incrémente : la valeur de la chose pour une
+  propriété `Int` à une seule valeur (pas de valeur compte pour 0) augmente de `by` (négatif, il compte à rebours),
+  lue par le writer à ce point du groupe ; un second `Incr` du même compteur dans le groupe lit donc la valeur du
+  premier. `into = Some (thing', property')` ajoute aussi la nouvelle valeur comme `(thing', property')`, une propriété
+  `Int`, à une seule valeur ou non ; `thing'` peut être une nouvelle chose du groupe. Des groupes qui incrémentent un
+  même compteur en même temps ne sont jamais en conflit et ne sautent jamais une valeur : chacun lit la valeur que le
+  groupe d'avant a laissée, et un groupe refusé laisse le compteur tel qu'il était. Dans le journal, il est ce qu'il a
+  fait : l'ancienne valeur retirée et la nouvelle ajoutée, comme le ferait un `Add`.
+
+Une facture prend le numéro suivant dans le groupe qui la crée, et un groupe refusé n'en prend aucun :
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ last; number; status ]) =
+    declare db [ prop "counter/last" Tint; prop ~unique:true "invoice/number" Tint; prop "invoice/status" Ttext ] in
+  let counter = thing (Result.get_ok (write db [ Add (-1, last, Int 0) ])) (-1) in
+  let invoice ops = write db (Incr (counter, last, 1, Some (-1, number)) :: Add (-1, status, Text "unpaid") :: ops) in
+  let a = thing (Result.get_ok (invoice [])) (-1) in
+  (match invoice [ Expect (counter, status, Some (Text "closed")) ] with Error e -> print_endline (message e) | Ok _ -> ());
+  let b = thing (Result.get_ok (invoice [])) (-1) in
+  let v = view db in
+  Printf.printf "numbers %s and %s, the counter at %s\n" (Value.to_string (List.hd (values v a number)))
+    (Value.to_string (List.hd (values v b number))) (Value.to_string (List.hd (values v counter last)));
+  match write db [ Incr (counter, status, 1, None) ] with Error e -> print_endline (message e) | Ok _ -> ()
+```
+
+```output
+conflict: #65536 does not have "closed" for invoice/status (property 18)
+numbers 1 and 2, the counter at 2
+invalid: Incr counts on a one-valued int property of the program's: invoice/status is a text
+```
 
 Erreurs : `Conflict` (un `Expect`) ; `Invalid` (une valeur du mauvais type, une chose qui n'a jamais été créée, un lien
-vers rien, un `Expect` sur une nouvelle chose, une propriété qui n'existe pas, une propriété système sur une chose
+vers rien, un `Expect` sur une nouvelle chose, un `Incr` d'une propriété qui n'est pas une propriété `Int` du programme
+(à une seule valeur pour le compteur) ou dont la somme dépasse les 63 bits d'un int, une propriété qui n'existe pas, une propriété système sur une chose
 ordinaire, une propriété ordinaire sur une chose propriété, une règle du schéma, un groupe dont la frame du journal
 dépasserait 256 MiB) ; `Not_unique` ; `Damaged` (une page d'un run dont le groupe avait besoin n'a pas pu être lue ou ne
 se vérifie pas : le groupe n'est pas écrit, le writer continue) ; pour une base, aussi `Io` (le disque a lâché : ce
@@ -137,6 +173,15 @@ groupe tient le writer pendant son merge (environ une seconde à 10 millions de 
 la fois de ses opérations et de 26 octets par fait de tableaux compacts en mémoire (1,46 GB au pic pour 9,4 millions
 d'additions, dont 0,88 pour la liste de l'appelant, que `write` relâche une fois le groupe traité) ; sa frame est écrite
 par morceaux.
+Pour borner la mémoire, écrivez un chargement en groupes de quelques centaines de milliers de faits, depuis deux
+threads, pour que l'un construise son groupe suivant pendant que le writer prend celui de l'autre : chaque groupe est
+atomique (G2 tient pour un groupe, pas pour le chargement), les runs des groupes restent côte à côte jusqu'à ce que 16
+d'entre eux fusionnent en une seule passe ([architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)),
+et `snapshot` à la fin laisse un seul run. À 10 millions de faits en groupes de 5 000 clients (environ 415 000 faits)
+par deux threads : 9,8 s pour confirmer tous les groupes, 3,2 s pour le snapshot (le merge de toute la base en un seul
+run), un pic de 292 MB avec un cache de 64 MB ([benchmarks](benchmarks.md#chunked-loads-2026-11-12-at-10-million-facts)) ;
+jusqu'au snapshot, une lecture visite chaque run (à 1 million de faits, un client par e-mail sur 8 runs 1,40 µs, sur
+2 runs 0,73).
 
 ## Le schéma
 
@@ -184,6 +229,8 @@ invalid: client/email is declared already as another kind of property
 type term = Var of int | Thing of int | Val of value          (* as in questions *)
 type pattern = { e : term; p : int; v : term }
 type head = Give of pattern | Never
+val prop_var : int -> int                                     (* a pattern's property as the variable ?k *)
+val every : int -> int                                        (* a template's list: [c, every l, m] *)
 type rule = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
 val define : db -> rule list -> (int list, error) result
 val undefine : db -> string list -> (unit, error) result
@@ -191,7 +238,9 @@ type proof =
   | Given of { e : int; p : int; v : value }
   | By of { rule : string; e : int; p : int; v : value; from : proof list }
 val why : view -> int -> int -> value -> proof option
+val sources : view -> int -> int list option
 val rule_budget : int ref * int ref
+val change_budget : int ref
 ```
 
 Une règle est faite des patterns et des intervalles d'une question (`where`, `ranges`, les variables 0 à `vars - 1`) et
@@ -201,9 +250,25 @@ d'une tête : `Give pattern`, le fait qu'elle donne pour chaque réponse, ou `Ne
 définition a changé (trouvées par leur nom) ; une règle déjà définie avec la même définition n'écrit rien. Le writer
 vérifie chaque règle (la range restriction : chaque variable de la tête apparaît dans le corps ; les types ; la
 propriété de la tête ; erreurs `Invalid "rule NAME: …"`, [erreurs](errors.md#invalid--la-requête-est-fausse)) et dérive
-dans ce groupe ce qu'elle donne sur toute la base, dans les limites du budget ; une contrainte est vérifiée sur toute la
-base. Un nom qui est celui d'une propriété est `Invalid`. Si un autre writer a pris un numéro entre-temps, `define`
-relit le schéma et réessaie.
+dans ce groupe ce qu'elle donne sur toute la base, dans les limites du budget d'un changement ; une contrainte est
+vérifiée sur toute la base. Un nom qui est celui d'une propriété est `Invalid`. Si un autre writer a pris un numéro
+entre-temps, ou si un groupe écrit entre-temps a gêné le changement, `define` relit le schéma et réessaie
+(`Conflict`). Dans une base sur le disque, le changement est calculé à côté du writer et revient une fois installé
+([règles](rules.md#changes-of-the-rules-in-the-background)) : un `write` envoyé entre-temps peut être placé avant lui.
+
+La propriété `p` d'un pattern est l'id d'une propriété, ou `prop_var k` (un nombre négatif) pour la variable `?k` : un
+autre pattern du corps, dont la propriété est une constante, a `?k` pour chose ou pour valeur. Une valeur lue sous une
+propriété variable a le type de cette propriété ; une tête qui donne un fait que sa propriété ne peut pas prendre
+refuse le groupe (erreurs `Invalid "rule R gives …"`). Ces règles tournent dépliées sur les faits de leurs petites
+relations ([règles](rules.md#specialisation-by-small-relations)) ; les questions gardent des propriétés constantes.
+
+Un pattern `[c, every l, m]` est la liste d'un **template** (une règle écrite une fois pour tous les membres d'une
+liste) : « pour chaque valeur m de la propriété l de c », les patterns qui nomment m écrits une fois pour chaque
+membre, les variables qu'eux seuls tiennent nouvelles dans chaque copie (cls-int1 et prp-key d'OWL 2 RL, les règles du
+W3C pour raisonner sur des ontologies, des descriptions de classes, de propriétés et de leurs liens) ; le writer le déplie sur les faits de l, donc une écriture de l est un
+changement des règles, et aucune règle ne peut donner l ([templates](rules.md#templates-rules-over-lists)). Une tête
+`[x, cepheus/same, y]` (`Schema.p_same`, la propriété système 6) fait de x et y une seule chose
+([égalité](rules.md#equality-classes-of-equal-things)).
 
 `undefine db names` retire en un seul groupe les règles de ces noms : leurs définitions retirées, et les faits qu'elles
 seules dérivaient avec elles (un nom qui n'est pas une règle est ignoré).
@@ -212,9 +277,16 @@ seules dérivaient avec elles (un nom qui n'est pas une règle est ignoré).
 avec le nom de la règle et les preuves des faits de son corps, dans l'ordre des patterns de la règle ; `None` quand le
 triplet n'est pas un fait de v. Calculée à l'appel, sur la vue : rien n'est rangé au moment de l'écriture (G20).
 
+`sources v p` liste les propriétés dont les faits peuvent donner, par les règles et de proche en proche, les faits
+dérivés de la propriété `p` (`Some []` pour une propriété qu'aucune règle ne donne), ou `None` quand une règle sur le
+chemin lit une propriété variable : ce qu'un lecteur qui n'a droit qu'à certains kinds (un kind regroupe sous un nom
+les propriétés d'une sorte de chose) doit lire pour lire les faits dérivés de `p` sans apprendre des faits qu'il n'a
+pas le droit de lire.
+
 `rule_budget` est (base, per) : un groupe dont les changements dérivés dépassent $\mathit{base} + \mathit{per} \times \text{ses changements affirmés}$ est refusé,
 `Invalid "rule NAME derived more than N facts from a group of K facts"` ; (100 000, 100) par défaut, pour chaque base du
-processus.
+processus. Un changement des règles ou de l'ontologie peut aussi dériver jusqu'à `change_budget` (4) fois les faits de
+la base d'avant lui : au-delà, `Invalid "rule NAME derived more than N facts from a change of the rules or the ontology"`.
 
 ```ocaml
 open Cepheus
@@ -248,6 +320,31 @@ ada is a member of #65536
 by member-inverse, from [#65536 16 #65537]
 after: 0 and 0
 ```
+
+## OWL 2 RL
+
+```ocaml signature
+module Owl : sig
+  type t = { type_ : int; same_as : int; sub_class_of : int; (* ... a field a property of the vocabulary *) thing : int; nothing : int }
+  val vocabulary : (string * typ * bool * bool) list           (* name, type, many, unique *)
+  val setup : db -> (t, error) result
+  val rl : t -> rule list
+  val description : t -> view -> int -> int option
+  val all_different : t -> int list -> op list
+  val disjoint_classes : t -> int list -> op list
+  val disjoint_properties : t -> (int * int) list -> op list
+end
+val same : view -> int -> int list
+```
+
+`Owl.setup db` déclare le vocabulaire (`owl/Type`, `owl/SubClassOf`, …, en un seul groupe) et crée owl:Thing et
+owl:Nothing (`[t, owl/Builtin, "Thing"]`), une seule fois : une base qui les a les garde, et les ids sont dans le
+record (la valeur de type t qu'il rend). `Owl.rl o` est la liste des règles (`owl/cax-sco`, …) : définissez-les avec
+`define`. `Owl.description o v p` est la chose qui décrit la propriété p (`[d, owl/Property, Link p]`), s'il y en a
+une. `all_different`, `disjoint_classes` et `disjoint_properties` donnent les opérations qui écrivent ces axiomes
+n-aires (qui portent sur n choses à la fois) sous forme de leurs paires. `same v x` est la classe des choses égales à
+x, par id, x compris ([x] quand aucune autre chose ne lui est égale) ; `get`, `values`, `things` et les questions
+lisent une chose qu'ils nomment comme le représentant de sa classe. Le tout : [OWL 2 RL](rules.md#owl-2-rl-a-library-of-rules).
 
 ## Lire
 
@@ -401,12 +498,60 @@ let () =
 Comment on répond à une question, et ce que cela coûte : [architecture](architecture.md#questions),
 [théorie](theory.md#4-generic-join).
 
+## Des questions avec des opérateurs, un ordre et des pages
+
+```ocaml signature
+module Question : sig
+  type item = Pattern of pattern | Range of int * value * value | In of int * value list | Prefix of int * string
+            | Not of item list | Or of item list list
+  type key = { col : int; desc : bool }
+  type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
+end
+val ask : view -> Question.t -> (value array list, error) result
+```
+
+Ses noms sont dans le module `Question`, pour que `open Cepheus` n'apporte que `Question` et `ask` à côté des noms
+qu'il apportait déjà (le `Not` ou le `Pattern` propre d'un programme reste le sien) ; `Question.[ ... ]` l'ouvre pour
+une liste d'items. `ask v q` répond à une question qui a `Not`, `Or`, `In` et `Prefix` à côté de ses patterns et de ses
+intervalles, et rend ses lignes triées, coupées et découpées en pages : le même sens et les mêmes bornes que depuis
+Cesia ([Not, Or et In](cesia.md#not-or-and-in), [Prefix](cesia.md#prefix-the-start-of-a-text),
+[pages](cesia.md#sort-limit-and-after-pages)). `give` nomme les variables de chaque ligne (vide : chaque variable de la
+question) ; le `col` d'une clé est une colonne de `give` ; `limit` 0 rend toutes les lignes ; `after` est une ligne des
+colonnes de `give`. `find` et `query` ne changent pas : une question de patterns et d'intervalles, avec chaque
+variable donnée, a les lignes que rend `find`.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = Result.get_ok (open_ "asks") in
+  let[@warning "-8"] (Ok [ name; city ]) = declare db [ prop "client/name" Ttext; prop "client/city" Ttext ] in
+  List.iter (fun (n, c) -> ignore (write db [ Add (-1, name, Text n); Add (-1, city, Text c) ]))
+    [ "Ada", "Lyon"; "Bo", "Paris"; "Abel", "Lyon"; "Ali", "Paris"; "Cy", "Nice" ];
+  (* the names that start with A, of clients not in Paris, the largest first *)
+  let q =
+    { Question.vars = 2;
+      items = Question.[ Pattern { e = Var 0; p = name; v = Var 1 }; Prefix (1, "A"); Not [ Pattern { e = Var 0; p = city; v = Val (Text "Paris") } ] ];
+      give = [| 1 |]; sort = [ { Question.col = 0; desc = true } ]; limit = 10; after = None }
+  in
+  (match ask (view db) q with
+   | Ok rows -> List.iter (fun r -> print_endline (Value.to_string r.(0))) rows
+   | Error e -> print_endline (message e));
+  close db
+```
+
+```output
+"Ada"
+"Abel"
+```
+
 ## Le cache
 
 `set_cache bytes` fixe combien d'octets de pages de runs le processus garde en mémoire, pour toutes ses bases à la fois
 (1 GiB par défaut ; au moins 16 pages de 16 KiB). Il prend effet à mesure que les pages arrivent (un cache plus petit
 évince à mesure que les pages suivantes sont lues) et à l'ouverture suivante (un run qui tient dans le cache est lu et
-vérifié en entier à l'ouverture ; un plus grand, page par page selon les besoins des questions).
+vérifié en entier à l'ouverture ; un plus grand, ses tables à l'ouverture et ses autres pages selon les besoins des
+questions).
 [opérations](operations.md#la-mémoire).
 
 ## Opérations

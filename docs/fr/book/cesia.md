@@ -199,6 +199,11 @@ le numéro du groupe et les identifiants des choses qu'il a créées, ou un `Err
   lui ; `cepheus.Expect(thing, property)`, sauf si la chose n'a aucune valeur de la propriété. C'est ainsi qu'un
   programme écrit « seulement si personne ne l'a changé depuis que je l'ai lu », une vérification **optimiste** : rien
   n'est verrouillé par un lock ; le groupe qui arrive en second est refusé, et le programme relit.
+- `cepheus.Incr(thing, property, by = 1, into = missing)` : un **compteur** que le groupe incrémente. La valeur de la
+  chose pour une propriété `Int()` à une seule valeur (pas de valeur compte pour 0) augmente de `by` (un `by` négatif
+  compte à rebours), lue par la base à ce point du groupe. `into = [thing, property]` y ajoute aussi la nouvelle
+  valeur, une propriété `Int()` : une facture reçoit son numéro dans le groupe qui la crée. Une valeur au-delà des 63
+  bits d'un Int refuse le groupe, Code `"invalid"`.
 - `cepheus.New(k)` : la k-ième nouvelle chose du groupe, à toute place où va une chose : `New(1)`, `New(2)`...
   `Things[k]` est son identifiant.
 
@@ -222,6 +227,33 @@ base telle qu'elle était après le groupe d'avant, et les groupes d'une base so
 sont **serializable** (leur résultat est celui d'une exécution un par un), et plus encore, **strictly serializable** :
 un groupe qui commence après qu'un autre a été confirmé vient après lui
 ([garanties](guarantees.md#g4-strict-serializability)).
+
+Des numéros qui se suivent sans trou, comme la loi de beaucoup de pays le demande pour les factures, sont un compteur
+que le groupe incrémente lui-même. Lire le plus grand numéro et écrire ce numéro plus un ne suffirait pas : deux
+programmes qui lisent en même temps prennent le même numéro, et l'un d'eux doit réessayer. Avec `Incr`, la base lit le
+compteur quand elle applique le groupe ; des groupes qui comptent en même temps ne sont donc jamais en conflit et ne
+sautent jamais un numéro, et un groupe refusé n'en prend aucun :
+
+```cesia norun
+Counter = cepheus.Kind("counter", {Last: cepheus.Int()})
+Bill = cepheus.Kind("bill", {Number: cepheus.Int(unique = true), Client: cepheus.Link()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Counter, Bill], token = sys.Env("CEPHEUS_TOKEN")))
+counter = result.Unwrap(cepheus.Insert(Counter, {Last: 0}, db))
+bill = [cepheus.Incr(counter, Counter.Last, into = [cepheus.New(1), Bill.Number]), cepheus.Add(cepheus.New(1), Bill.Client, bo)]
+first = result.Unwrap(cepheus.Write(bill, db)).Things[1]
+second = result.Unwrap(cepheus.Write(bill, db)).Things[1]
+io.Print(cepheus.Get(Bill, first, db), cepheus.Get(Bill, second, db))
+refused = cepheus.Write([cepheus.Expect(bo, Client.City, "Rome"), cepheus.Incr(counter, Counter.Last, into = [cepheus.New(1), Bill.Number])], db)
+io.Print(refused.Error.Code, cepheus.Get(Counter, counter, db))
+```
+
+```text
+Ok({Number: 1, Client: 65539}) Ok({Number: 2, Client: 65539})
+conflict Ok({Last: 2})
+```
+
+`Incr` est une opération du groupe, comme `Add` : les autres faits de la facture, ses lignes, sont dans le même
+groupe, tout ou rien.
 
 Une écriture par le réseau reçoit sa réponse une fois son groupe sur le disque du serveur (un fsync, l'appel système
 qui attend que les octets soient vraiment sur le disque, G1) ; les écritures qui arrivent pendant que le disque
@@ -284,12 +316,166 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 La facture de 10 est sous 50 : la ville de Bo est maintenant Lyon, et sa seule facture n'est pas comptée.
 
+## Not, Or et In
+
+Trois conditions de `Where` disent ce qui ne doit pas tenir, ce qui peut tenir de plusieurs façons, et quelles valeurs
+une variable peut prendre :
+
+```cesia norun
+clear = cepheus.Find(2, (c, i) -> {
+  Where: [[c, Client.City, "Lyon"], cepheus.Not([i, Invoice.Client, c], [i, Invoice.Status, "unpaid"])],
+  Give: {Client: c},
+}, db)
+io.Print(clear)
+either = cepheus.Find(1, (c) -> {Where: [cepheus.Or([c, Client.Name, "Cy"], [c, Client.Email, "bo@example.com"])], Give: {Client: c}}, db)
+io.Print(either)
+some = cepheus.Find(2, (i, s) -> {Where: [[i, Invoice.Status, s], cepheus.In(s, ["paid", "late"])], Give: {Invoice: i}}, db)
+io.Print(some)
+```
+
+```text
+Ok([{Client: 65539}])
+Ok([{Client: 65541}, {Client: 65539}])
+Ok([{Invoice: 65537}, {Invoice: 65540}])
+```
+
+- `cepheus.Not(a, b, c, d)` : 1 à 4 patterns et conditions ; le binding (une valeur pour chaque variable de la
+  question) est gardé quand aucune valeur des variables propres au Not ne les rend toutes vraies. Une variable est
+  propre au Not quand elle n'apparaît à aucune autre place de la question : ici `i`, si bien que la première question
+  se lit « les clients de Lyon sans facture qui soit à eux et impayée ». Ses autres variables doivent être liées par
+  un pattern de la question.
+- `cepheus.Or(a, b, c, d)` : 2 à 4 alternatives, chacune un pattern, une condition, ou un `cepheus.And(...)` de 1 à 4
+  d'entre eux ; au moins une tient. Une variable présente dans chaque alternative est liée par le Or (`c` plus haut) ;
+  une variable présente dans certaines seulement est propre à chaque alternative (« il en existe une valeur »), et ne
+  peut pas être donnée. Chaque réponse vient une fois, même quand plusieurs alternatives tiennent pour elle. `And` ne
+  sert qu'à une alternative : `Where` exige déjà tous ses items. Un `Or` d'un seul pattern dont les alternatives ne
+  diffèrent que par leur valeur est refusé : c'est `In`.
+- `cepheus.In(x, values)` : x est l'une des valeurs, de son type (des ids pour un lien : les factures de ces clients).
+  Une valeur que la base ne tient pas n'est pas un candidat ; une liste vide n'a pas de réponse. Il prend jusqu'à
+  100 000 valeurs, autant qu'une page a de lignes : les ids d'une page reviennent en une seule question
+  ([limites](limits.md#questions)).
+
+**Sens exact.** Chaque opérateur lit les faits de la vue à laquelle on répond à la question, y compris les faits que
+dérivent les règles : ils sont dans chaque vue, exactement (G17) ; un `Not` lit donc un ensemble complet de faits. (Un
+`Not` dans le corps d'une *règle* est la même fonction, [règles](#rules).) `Not` et `Or` ne peuvent pas contenir un
+`Not` ou un `Or` : nommez une condition plus profonde avec une règle, comme un fait dérivé.
+
+**Comment on y répond.** `In` est une relation d'une seule colonne pour Generic Join : ses valeurs sont les candidats
+de x quand elles sont moins nombreuses que celles de chaque pattern, sinon chaque candidat est vérifié contre elles.
+`Not` est un **anti-join** (on ne garde que ce qui ne trouve aucun partenaire) : un binding passe quand une recherche
+ne trouve rien (un seul pattern : le fait est-il là, la chose a-t-elle une valeur, la valeur a-t-elle une chose), ou,
+pour plusieurs items, quand la question propre au Not, ses autres variables fixées, n'a pas de réponse (demandée
+jusqu'à sa première). `Or` est demandé une fois pour chaque alternative, avec les alternatives d'avant comme des
+`Not`, si bien que les réponses des alternatives sont disjointes et qu'aucune n'a besoin d'être gardée pour retirer
+les copies (sauf celles d'une alternative qui a ses propres variables, qui peut donner un binding une fois pour
+chacune de leurs valeurs).
+
+Un `Watch` (une question vivante, tenue à jour, plus bas) garde `Not`, `Or`, `In` et `Prefix`, et un changement
+n'envoie que les lignes qu'il ajoute ou retire. Le fait d'une frame (un bloc du journal qui porte un ou plusieurs
+groupes) ne peut changer que les réponses qui s'accordent avec lui à l'un des patterns de la question, où que soit ce
+pattern : pour un pattern qui tient des variables de la question, les réponses avec ces valeurs ; pour un pattern à
+l'intérieur d'un `Not` ou d'une alternative dont toutes les variables lui sont propres, les réponses que ses autres
+items atteignent à partir du fait (une facture payée : son client). Pour chacun de ces ensembles de valeurs, on répond
+de nouveau à la question avec ces valeurs fixées, avant et après la frame, et la différence est le changement. Ainsi
+un fait ajouté sous un `Not` retire les lignes qu'il exclut maintenant, un fait retiré peut rendre des lignes, une
+alternative est lue avec celles d'avant elle, et `In` et `Prefix` filtrent les valeurs que donne le fait. Le coût
+d'une frame est celui des réponses qu'elle touche, pas celui de toute la question (un fait qu'aucune variable de la
+question n'atteint, comme sous un `Not` sur toute une propriété, redemande toute la question).
+
+## Prefix : le début d'un texte
+
+`cepheus.Prefix(x, text)` : le texte x commence par ces octets. Avec Sort et Limit, c'est une recherche pendant qu'on
+tape :
+
+```cesia norun
+found = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "B")], Give: {Client: c, Name: n}, Sort: [n], Limit: 10}, db)
+io.Print(found)
+```
+
+```text
+Ok([{Client: 65539, Name: "Bo Lind"}])
+```
+
+- La comparaison porte sur les octets : `"Ad"` correspond à « Ada », pas à « ada » ni à « Ädam ». Une recherche qui
+  ignore la casse garde un champ à elle sous la forme qu'elle cherche (le nom en minuscules, écrit avec le nom).
+- x est une variable de texte qu'un pattern donne comme sa valeur ; le préfixe a de 1 à 1 024 octets.
+
+**Comment on y répond.** Chaque run (un fichier trié de l'état de la base) tient, pour chaque propriété de texte, ses
+textes distincts dans l'ordre de leurs octets (format de run 9, [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)) :
+les textes qui commencent par le préfixe en forment un seul tronçon, trouvé par deux binary searches (des recherches
+par moitiés successives) ; avec les quelques textes écrits depuis le dernier merge (la fusion des runs en un seul), ils
+sont les candidats de x, comme un `In` d'eux. Le travail est celui des textes qui correspondent et de leurs choses, pas
+de chaque texte de la base ; et il ne lit que les textes de la propriété de x.
+
+## Sort, Limit et After : des pages
+
+Trois autres clés de la question trient ses lignes, les coupent, et donnent la page qui suit une ligne :
+
+```cesia norun
+page = (after) -> ((i, t) -> {
+  Where: [[i, Invoice.Total, t]],
+  Give: {Invoice: i, Total: t},
+  Sort: [cepheus.Desc(t)],
+  Limit: 2,
+  After: after,
+})
+first = result.Unwrap(cepheus.Find(2, page(missing), db))
+io.Print(first)
+io.Print(cepheus.Find(2, page(first[2]), db))
+```
+
+```text
+[{Invoice: 65537, Total: 1200.0}, {Invoice: 65538, Total: 80.5}]
+Ok([{Invoice: 65540, Total: 10.0}])
+```
+
+- `Sort: [key, ...]` : chaque clé est un champ de `Give`, sa variable ou son agrégat (`cepheus.Desc(cepheus.Sum(t))`
+  quand `Give` tient `cepheus.Sum(t)`), dans l'ordre croissant, ou `cepheus.Desc(key)` pour les plus grandes valeurs
+  d'abord. Les lignes égales sur les clés sont rangées par les autres champs de `Give`, par nom, si bien que deux
+  lignes ne sont égales dans l'ordre que lorsqu'elles sont la même ligne. Les valeurs se comparent dans leur type : les
+  nombres, les dates et Money comme des nombres ; `false` avant `true` ; les liens par leur id, l'ordre dans lequel
+  les choses ont été créées ; les textes par leurs octets (UTF-8 : l'ordre de leurs code points, les numéros des
+  caractères dans Unicode, si bien que « Z » vient avant « a » et « é » après « z », pas l'ordre d'une langue) ; les
+  floats par le totalOrder d'IEEE 754.
+- `Limit: k` : les k premières lignes, et les copies de la k-ième quand `Give` laisse de côté une variable (une page ne
+  sépare jamais des lignes identiques). Sans `Sort`, k lignes de la réponse, dans l'ordre du moteur.
+- `After: row` : les lignes qui viennent après cette ligne dans l'ordre : la page suivante. Il demande `Sort`, et une
+  valeur pour chaque champ de `Give` ; la ligne n'a pas besoin d'être encore dans la base.
+
+**La page précédente** est la même question avec chaque clé inversée (`Desc` ajouté ou retiré) et `After` la première
+ligne de la page courante ; inversez ses lignes (`list.Reverse`). Il n'y a pas d'offset (« sauter les 4 000
+premières ») : une page après une ligne coûte la même chose à n'importe quelle profondeur, là où un offset compte
+chaque ligne qu'il saute, et une ligne écrite entre deux pages les décale d'une. Une ligne inchangée aux groupes des
+deux pages vient une fois ; une ligne écrite entre elles se montre à sa place, si cette place est après le curseur (la
+ligne après laquelle commence la page).
+
+**Comment on y répond.** Deux façons donnent les mêmes lignes ([théorie](theory.md#4-generic-join)) :
+
+- par un **heap** (un tas : une structure qui garde à portée les meilleures lignes) : chaque réponse de la question,
+  gardée dans un buffer d'environ deux fois k lignes, trié et ramené à ses k premières chaque fois qu'il se remplit :
+  le travail de la question elle-même plus $O(N \log k)$ comparaisons, avec $k$ lignes gardées, et k lignes envoyées
+  au lieu de $N$ ;
+- **dans l'ordre de l'index**, quand la première clé est un int, une date, Money, un lien ou un texte qu'un pattern
+  donne comme sa valeur : la question est demandée de nouveau sur des fenêtres des valeurs de cette variable lues dans
+  l'index de la propriété, à partir du curseur, chaque fenêtre tenant deux fois plus de faits que la précédente,
+  jusqu'à ce que k lignes soient trouvées : le travail des lignes dont la page a besoin. La fenêtre d'un texte, ce sont
+  les textes suivants dans l'ordre de leurs octets, que chaque run sur le disque garde pour sa propriété (l'ordre que
+  lit aussi `Prefix`), fusionnés sur les runs et les changements pas encore fusionnés. Son budget est l'estimation,
+  par le planner (la partie qui choisit comment répondre à une question), du travail du heap ; au-delà, le heap
+  répond, si bien que cette façon ne coûte jamais plus d'environ deux fois l'autre (la règle du ski-rental problem, le
+  problème de la location de skis : louer jusqu'à ce que la location atteigne le prix, puis acheter).
+
+`Watch` refuse `Sort`, `Limit` et `After` (un watch garde chaque ligne de sa question) : triez les lignes qu'il donne
+avec `list.SortBy`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que
+`Where`, `Give`, `Sort`, `Limit` et `After` : un `After` mal écrit donnerait sinon la première page encore et encore
+(une question sans elles est lue comme avant, ses autres clés laissées de côté).
+
 ## Watch : les questions vivantes
 
-Une **question vivante** (live question) est un `Find` qui reste ouvert. `cepheus.Watch(n, question, db, size = 64)`
+Une **question vivante** (live question) est un `Find` qui reste ouvert. `cepheus.Watch(n, question, db, size = 64, until = missing)`
 prend la même question que `Find` et donne un `Ok` de `{Changes, Watch}` : `Changes` est un **channel** de Cesia (une
 queue entre fibers, c'est-à-dire une file qui porte des valeurs d'une fiber à une autre, lue par `fiber.Receive` ou
-`for` ; le livre de Cesia, chapitre « Fibers ») qui tient au plus `size` messages. Ce que donne `cepheus.Watch` est un
+`for` ; le livre de Cesia, chapitre « Fibers ») qui tient au plus `size` messages. Ce qu'il donne est un
 **watch** (de l'anglais « surveiller » : la question tenue ouverte). Son premier message est la **réponse**,
 `{Group, Rows}` : les lignes que donne `Find` au groupe `Group`. Chaque message suivant est un **changement**,
 `{Group, Added, Removed}` : les lignes venues et les lignes parties avec le groupe `Group`, si bien que les lignes
@@ -311,9 +497,9 @@ cepheus.Close(w)
 ```
 
 ```text
-Ok({Group: 10, Rows: [{Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
-Ok({Group: 11, Rows: missing, Added: [{Invoice: 65543, Total: 45.0}], Removed: []})
-Ok({Group: 12, Rows: missing, Added: [], Removed: [{Invoice: 65543, Total: 45.0}]})
+Ok({Group: 14, Rows: [{Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
+Ok({Group: 15, Rows: missing, Added: [{Invoice: 65546, Total: 45.0}], Removed: []})
+Ok({Group: 16, Rows: missing, Added: [], Removed: [{Invoice: 65546, Total: 45.0}]})
 ```
 
 - Un changement ne vient que quand les lignes changent, et seulement une fois son groupe sur le disque du serveur (G1) :
@@ -340,6 +526,10 @@ Ok({Group: 12, Rows: missing, Added: [], Removed: [{Invoice: 65543, Total: 45.0}
 - `cepheus.Close(w)` termine le watch : son channel se ferme une fois son dernier message pris. Un watch ne se termine
   de lui-même que quand sa base est fermée ou que son token n'a plus le droit de lire la base : le channel se ferme, et
   le `cepheus.Watch` suivant de cette question dit pourquoi.
+- `until`, un channel, termine le watch dès qu'il se ferme, comme le fait `cepheus.Close(w)`. Un écran vivant de
+  `std/live` de Cesia en donne un, `s.Ended`, qui se ferme quand sa page s'en va : son affichage est alors
+  `live.Show("unpaid", cepheus.Watch(1, unpaidOf(c), db, until = s.Ended)?.Changes)`, et le watch se termine avec la
+  page.
 
 **Comment un changement se calcule.** Une question est un join de patterns (une conjunctive query, une requête faite de
 conditions qui doivent toutes être vraies). Quand un groupe ajoute des faits, les nouvelles lignes sont les bindings
@@ -352,6 +542,181 @@ redemandés pour la clé dont l'extremum est parti. Les questions qui ne diffèr
 impayées de chaque client) partagent un seul **template** (un modèle de question, dont les constantes deviennent des
 paramètres) : le changement d'un fait se calcule une fois et ses lignes vont aux watches dont les constantes leur
 correspondent, si bien qu'un groupe coûte autant avec 10 watches qu'avec 10 000 ([ce que cela coûte](#ce-que-cela-coûte)).
+
+## Règles
+
+Une **règle** dérive des faits à partir de faits, et la base les tient à jour à chaque écriture : « un client qui a une
+facture en retard est en retard de paiement » ([règles](rules.md) dit comment, et ce que cela coûte).
+`cepheus.Rule(name, n, rule)` en écrit une comme une question : une fonction de `n` variables qui donne
+`{Where, Then}`, `Where` ses patterns (et `Above`, `Below`, `Between`), `Then` le fait qu'elle donne pour chaque
+réponse. `cepheus.Define(rules, db)` les définit, en un seul groupe :
+
+```cesia norun
+Standing = cepheus.Kind("standing", {Overdue: cepheus.Bool()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Standing], token = sys.Env("CEPHEUS_TOKEN")))
+overdue = cepheus.Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Standing.Overdue, true]})
+io.Print(cepheus.Define([overdue], db))
+late = result.Unwrap(cepheus.Insert(Invoice, {Client: bo, Total: 30, Status: "late"}, db))
+io.Print(cepheus.Get(Standing, bo, db))
+result.Unwrap(cepheus.Update(Invoice, late, {Status: "paid"}, db))
+io.Print(cepheus.Get(Standing, bo, db))
+```
+
+```text
+Ok(missing)
+Ok({Overdue: true})
+Ok(missing)
+```
+
+- Le fait dérivé est écrit dans le même groupe que la facture qui le donne, et s'en va dans le groupe qui paie la
+  facture, puisqu'il n'a pas d'autre preuve : une question le lit comme n'importe quel fait (ici `Get`), et un `Watch`
+  de ce fait change avec lui.
+- `Define` trouve chaque règle par son nom : une règle déjà définie telle qu'elle est donnée n'écrit rien, une règle
+  dont la définition a changé est remplacée ; un programme définit donc ses règles à chaque démarrage, après `Connect`.
+  La première définition dérive ce que la règle donne sur les faits déjà là.
+- `Then: cepheus.Never` fait une **contrainte** : un groupe qui donnerait une réponse à son `Where` est refusé en
+  entier, avec le Code `"invalid"` et le nom de la règle (G18).
+- `Where` prend des patterns, `Above`, `Below`, `Between` et `Not` ; `Or`, `In` et `Prefix` sont pour les questions.
+  Une variable de `Then` doit être dans un pattern de `Where` hors d'un `Not`, et une règle ne peut pas prendre le nom
+  d'une propriété : les deux sont refusés avec le Code `"invalid"`.
+- Les règles sont pour les tokens qui écrivent toute la base ([droits](server.md#rights-g16)) : une règle lit chaque
+  kind.
+
+Le `Where` d'une règle peut tenir `cepheus.Not(...)` : une réponse tient quand aucun fait ne correspond à ses patterns,
+ses variables qui ne sont dans aucun autre pattern lui étant propres (« il n'y a pas de facture `j` de `c` qui soit
+impayée »). La valeur de `Then` peut être `cepheus.Sum(x)`, `Min(x)`, `Max(x)` ou `Count()` : la règle donne à sa
+chose un seul fait, la somme, la plus petite ou la plus grande valeur de `x`, ou le nombre de réponses, tenu à jour
+par différence à chaque écriture ([règles](rules.md#negation-and-aggregates-strata)) :
+
+```cesia norun
+Books = cepheus.Kind("books", {Due: cepheus.Money(2), Clear: cepheus.Bool()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Books], token = sys.Env("CEPHEUS_TOKEN")))
+dueOf = cepheus.Rule("due-of", 3, (c, i, t) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "unpaid"], [i, Invoice.Total, t]], Then: [c, Books.Due, cepheus.Sum(t)]})
+clear = cepheus.Rule("clear", 3, (c, i, j) -> {Where: [[i, Invoice.Client, c], cepheus.Not([j, Invoice.Client, c], [j, Invoice.Status, "unpaid"])], Then: [c, Books.Clear, true]})
+io.Print(cepheus.Define([dueOf, clear], db))
+io.Print(cepheus.Get(Books, ada, db))
+io.Print(cepheus.Get(Books, bo, db))
+owed = result.Unwrap(cepheus.Find(1, (i) -> {Where: [[i, Invoice.Client, ada], [i, Invoice.Status, "unpaid"]], Give: {Invoice: i}}, db))
+result.Unwrap(cepheus.Update(Invoice, owed[1].Invoice, {Status: "paid"}, db))
+io.Print(cepheus.Get(Books, ada, db))
+```
+
+```text
+Ok(missing)
+Ok({Due: 80.5, Clear: missing})
+Ok({Due: missing, Clear: true})
+Ok({Due: missing, Clear: true})
+```
+
+- Un ensemble de règles où une propriété dépend de sa propre absence (`Not`) ou de son propre agrégat est refusé avec
+  le Code `"invalid"`, qui nomme le cycle : une telle règle rendrait fausse sa propre prémisse.
+- La propriété d'un agrégat prend une seule valeur, et seule cette règle la donne : une écriture de cette propriété est
+  refusée. Une chose sans réponse n'a pas de fait (le `Due` d'Ada s'en est allé avec sa dernière facture impayée). Une
+  somme au-delà du plus grand int refuse le groupe ; elle ne repart jamais de l'autre bout.
+
+## OWL 2 RL
+
+**OWL 2** est le langage des **ontologies** du W3C : une ontologie dit ce que veulent dire les mots d'un domaine de
+connaissance, ses **classes** (« un professeur est une personne ») et ses propriétés (« le directeur de thèse, advisor,
+est un professeur », « un e-mail est celui d'une seule personne »). **OWL 2 RL** en est la partie que des règles
+calculent entièrement : le W3C la donne sous forme de 78 règles ([règles](rules.md#owl-2-rl-a-library-of-rules) dit
+comment Cepheus tient chacune). Depuis Cesia, c'est le package `owl`, à côté de `cepheus`, que le programme prend
+aussi :
+
+```toml
+take = ["cesia/cepheus", "cesia/cepheus/owl"]
+```
+
+```cesia norun
+use deps/www-celestial/cepheus/cesia/cepheus/owl
+use std/list
+
+Person = cepheus.Kind("person", {Name: cepheus.Text(), Email: cepheus.Text(many = true), Advisor: cepheus.Link(many = true)})
+Label = cepheus.Kind("label", {Name: cepheus.Text(unique = true)})
+onto = result.Unwrap(cepheus.Fork(cepheus.Empty, [owl.Vocabulary, Person, Label]))
+io.Print(cepheus.Define(owl.Rl(), onto))
+(* the ontology: a professor is a person; an advisor is a professor; an e-mail is one person's *)
+c = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Label.Name, "Person"), cepheus.Add(cepheus.New(2), Label.Name, "Professor"),
+  cepheus.Add(cepheus.New(2), owl.SubClassOf, cepheus.New(1)),
+  cepheus.Add(cepheus.New(3), owl.Property, Person.Advisor), cepheus.Add(cepheus.New(3), owl.Range, cepheus.New(2)),
+  cepheus.Add(cepheus.New(4), owl.Property, Person.Email), cepheus.Add(cepheus.New(4), owl.InverseFunctional, true)], onto)).Things
+(* two records of one professor, the same e-mail in both, and a student whose advisor is the first *)
+r = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Person.Email, "ada@uni.org"), cepheus.Add(cepheus.New(2), Person.Email, "ada@uni.org"),
+  cepheus.Add(cepheus.New(2), Person.Name, "Ada"), cepheus.Add(cepheus.New(3), Person.Advisor, cepheus.New(1))], onto)).Things
+io.Print(cepheus.Same(r[1], onto))
+io.Print(cepheus.Get(Person, r[1], onto))
+io.Print(list.Sort(result.Unwrap(cepheus.Get(owl.Vocabulary, r[2], onto)).Type), "are", c[1], "and", c[2])
+(* a class disjoint from Person: Ada in it is refused *)
+io.Print(cepheus.Write([cepheus.Add(cepheus.New(1), owl.DisjointWith, c[1]), cepheus.Add(r[1], owl.Type, cepheus.New(1))], onto))
+result.Unwrap(cepheus.Write([cepheus.Retract(r[2], Person.Email, "ada@uni.org")], onto))
+io.Print(cepheus.Same(r[1], onto), cepheus.Get(Person, r[1], onto))
+```
+
+```text
+Ok(missing)
+Ok([65542, 65543])
+Ok({Name: "Ada", Email: ["ada@uni.org"], Advisor: []})
+[65538, 65539] are 65538 and 65539
+Err({Kind: "cepheus", Code: "invalid", Message: "constraint owl/cax-dw: [#65545 owl/DisjointWith #65538] [#65542 owl/Type #65545] [#65542 owl/Type #65538]"})
+Ok([65542]) Ok({Name: missing, Email: ["ada@uni.org"], Advisor: []})
+```
+
+- **Le vocabulaire** est un kind comme un autre, nommé `owl` : `owl.Vocabulary`, donné à `Connect` (ou à `Fork`) avec
+  les kinds propres du programme, déclare ses propriétés `owl/Type`, `owl/SubClassOf` et les autres (les mêmes que
+  déclare la bibliothèque du moteur : [le vocabulaire](rules.md#the-vocabulary)), et chacune est un nom du package :
+  `owl.SubClassOf`. Une classe est une chose de la base, comme une autre ; une ontologie est faite de faits, écrits
+  avec `Write`, versionnés comme les autres.
+- **Un axiome sur une propriété** (une affirmation de l'ontologie) est un fait de sa **description**, une chose à part
+  dont l'`owl.Property` est la propriété : `[d, owl.Property, Person.Advisor]`, puis `[d, owl.Range, professor]`. Une
+  propriété d'un kind, écrite là où va un lien, est son id dans la base (relue, elle est cet Int).
+- **`owl.Rl()` est une donnée** : une liste de 63 maps `{Rule, Library}`, une par règle, nommée `owl/` suivi du nom du
+  W3C (`owl/cax-sco`). `Define` prend la définition de chaque règle dans la bibliothèque du moteur, pour cette base,
+  crée une seule fois les choses owl:Thing et owl:Nothing (leur `owl.Builtin` est `"Thing"` et `"Nothing"`), et
+  définit les règles en un seul groupe, comme n'importe quelles règles : un programme les définit à chaque démarrage, et
+  la seconde fois n'écrit rien. C'est une liste comme une autre : `list.Filter` en garde une partie.
+- **Des choses rendues une seule.** `owl/prp-ifp` a fait des deux fiches une seule chose : `cepheus.Same(x, db)` donne
+  la **classe** de x, les choses que les règles ont rendues identiques à x. Les faits d'une classe sont gardés sur
+  l'une d'elles, et `Get`, `Find` et `Watch` lisent n'importe quelle chose d'une classe comme celle-là : le nom écrit
+  sur la seconde fiche se lit sur la première. L'e-mail retiré, ce sont de nouveau deux choses.
+- **Refus.** Une contrainte d'OWL 2 RL (ici `owl/cax-dw` : aucune chose dans deux classes disjointes) refuse son groupe
+  en entier, avec le Code `"invalid"` et le nom de la règle. Une règle du programme qui donne la liste de l'un des
+  templates de la bibliothèque (`owl.IntersectionOf`, `owl.HasKey` : des règles sur tous les membres d'une liste à la
+  fois) est refusée par `Define` : seule une écriture change une telle liste.
+  Aucune règle à côté de celles d'OWL 2 RL ne peut tenir un `Not` ou un agrégat : ses règles sur une propriété qui est
+  une variable peuvent donner n'importe quelle propriété, et une telle règle pourrait donc lire sa propre absence. C'est
+  pourquoi cet exemple tourne sur un [fork](#forks) : la base du chapitre tient les règles avec `Not` et `Sum` plus
+  haut. `owl.Rl()` sans le vocabulaire, ou un nom qui n'est pas l'une de ses règles, est un `Err` de Code `"invalid"`.
+- **Droits.** Les règles d'OWL 2 RL lisent des propriétés qui sont des variables, si bien que ce qu'elles donnent peut
+  venir de n'importe quel kind : un token ne le lit, et ne lit `Same`, que s'il lit chaque kind
+  ([droits](server.md#rights-g16)) ; `Define` demande un token qui écrit toute la base. Un token de certains kinds
+  reçoit `denied` pour `Same`, pour une question et pour `Define`, et ne reçoit de `Get` aucun des faits que les règles
+  peuvent donner : il n'apprend aucune égalité.
+- **Sécurité.** Rien de nouveau n'est décodé : les maps de `owl.Rl()` ne font que nommer des règles, que `Define` prend
+  dans la bibliothèque du moteur (un nom qui lui manque est un `Err`), et le writer (le seul thread qui applique les
+  groupes de la base) les vérifie comme n'importe quelle règle, sous les budgets des règles (une tempête d'égalités
+  coûte n − 1 faits, jamais n², [règles](rules.md#equality-classes-of-equal-things)). `Same` par le réseau pose au
+  serveur au plus deux questions, chacune sous son budget de question.
+
+## Fichiers
+
+Un **kind de fichiers** garde des fichiers dans la base : `Scans = cepheus.Files("scan")` est un kind avec les champs
+`Name`, `Size`, `Type`, `Owner` et `Content`, donné à `Connect` comme n'importe quel autre.
+`cepheus.Put(Scans, name, bytes, db, type, owner, cold)` stocke un fichier et donne son id une fois ses octets et ses
+faits sur le disque du serveur ; `cepheus.Read(Scans, id, db, from, len)` donne ses octets, tous ou un intervalle
+(seuls les chunks, les morceaux du fichier, qui sont sous cet intervalle sont lus) ; `cepheus.List(Scans, db)` ses
+fichiers (un `Find`) ; `cepheus.Delete(Scans, id, db)` retire ses faits ; `cepheus.Erase(owner, db)` détruit la clé
+d'un propriétaire, après quoi chaque fichier qu'il possédait est illisible, partout où ses octets sont allés. Les droits
+d'un token sur le kind sont ses droits sur les fichiers. Comment les octets sont gardés (des chunks stockés une seule
+fois, compressés, scellés, vérifiés à chaque lecture) : [le vault](vault.md).
+
+```text
+Scans = cepheus.Files("scan")
+db = cepheus.Connect("cepheus://srv1:7400/shop", [Client, Scans], token = sys.Env("CEPHEUS_TOKEN"), ca = "/etc/cepheus/ca.pem")?
+f = cepheus.Put(Scans, "2026-11.pdf", sys.Read("2026-11.pdf")?, db, type = "application/pdf", owner = ada)?
+head = cepheus.Read(Scans, f, db, from = 0, len = 1024)?
+```
 
 ## Les forks
 
@@ -420,7 +785,8 @@ Comment, en bref ([le serveur](server.md#lectures-locales-g15) le raconte en ent
 
 - Le serveur passe au programme les fichiers de run de la base, déjà ouverts (`SCM_RIGHTS` : un socket Unix peut porter
   des fichiers ouverts d'un programme à un autre), si bien que le programme n'a besoin d'aucun droit sur les fichiers du
-  serveur, et que son token décide de ce qu'il peut lire (G16).
+  serveur, et que son token décide de ce qu'il peut lire (G16). Un token qui a des [droits par kind](server.md#rights-g16)
+  ne peut pas lire toute la base : ses lectures vont au serveur, qui ne lui donne que les kinds qu'il lit.
 - Ensuite, le serveur envoie les octets de chaque groupe sur le follow stream (le flux qui suit la base) avant de les
   forcer sur son disque, et le package les applique à un nouvel état pendant que le disque travaille.
 - Un seul numéro en shared memory (de la mémoire partagée entre processus), une page du serveur que chaque lecteur local
@@ -469,7 +835,7 @@ attendu.
 | `damaged` | une page d'un fichier de run ne s'est pas vérifiée contre son CRC | l'exploitation du serveur : [opérations](operations.md) |
 | `io`, `busy` | le disque du serveur a lâché, ou un autre processus tient la base | l'exploitation du serveur |
 | `closed` | la base a été fermée par `Close` | se reconnecter |
-| `auth`, `denied` | le token est inconnu, ou n'a pas le droit sur cette base (G16) | les droits du token : `cepheus token add` |
+| `auth`, `denied` | le token est inconnu, ou n'a pas le droit sur cette base ou sur un kind que l'appel lit ou auquel il ajoute (G16) | les droits du token : `cepheus token add` |
 | `unreachable` | aucun serveur n'a répondu (à `Connect`), ou aucun pendant 30 s (à un appel ensuite) | démarrer le serveur ; une écriture a été appliquée une fois ou pas du tout |
 | `unknown_database` | le serveur n'a pas de base de ce nom | l'ajouter à `cluster.toml` |
 | `too_large`, `stopping`, `too_many_connections`, `version` | les limites et l'état du serveur ([erreurs](errors.md)) | comme le dit le message |
@@ -534,6 +900,26 @@ appel 18,7 [18,6 ; 18,8].
   système (1,3 ms), et l'édition de liens de 1,4 MB de code machine dans le processus. Une fois par processus : un
   programme se connecte une fois, à son démarrage.
 
+**OWL 2 RL** (`bench/reason.ml owlprep 1` : LUBM-1, le Lehigh University Benchmark à une université, 150 477 faits
+avec l'ontologie univ-bench dans le vocabulaire d'OWL 2 RL et aucune règle, une copie pour chaque exécution ;
+`Define(owl.Rl())` chronométré dans le programme, `reason.exe owldefine` pour le `define db (Owl.rl o)` d'OCaml ;
+$n = 21$ tours alternés, chacun avec les mêmes 75 560 faits de `owl/Type` après) : au serveur par son socket Unix
+1,26 s [1,20 ; 1,44] contre 0,93 [0,90 ; 1,01] pour OCaml sur la base dans son propre processus, 1,32× [1,22 ; 1,53]
+par les rapports des tours ; dans un fork 0,82 s [0,81 ; 0,84] contre 0,78 [0,76 ; 0,81], 1,06× [0,99 ; 1,10].
+
+- Le serveur raisonne comme OCaml : par TLS, où le programme ne garde aucune copie, `Define` prend 0,84 à 0,94 s
+  (5 tours). Les 0,3 s de plus par le socket sont la copie locale du programme qui applique les 75 560 faits dérivés
+  du changement, pour que ses lectures les voient (un `Define` de nouveau, qui n'écrit rien, l'attend là aussi
+  longtemps, 2 ms par TLS) : le prix des lectures locales pour une écriture aussi grande, payé une fois.
+- Dans un fork, le moteur est le même code dans le processus du programme : les 6 % sont le processus de Cesia autour
+  de lui.
+- Le démarrage ne s'allonge pas : le package `owl` n'est lu que par un programme qui s'en sert. `io.Print(1)` avec le
+  package `cepheus` utilisé, pas appelé, 3,64 ms contre 3,62 avant OWL (1,005 [0,98 ; 1,04], $n = 21$ tours de 30
+  exécutions, alternés) ; le premier appel, qui charge le moteur, 18,87 ms contre 18,78 (1,007 [0,98 ; 1,02]) ;
+  `io.Print(1)` seul, le même programme dans les deux dossiers, 1,013 [1,00 ; 1,05] : le bruit. Le moteur tient les
+  règles d'OWL 2 RL, 58 KB de plus à vérifier à son chargement (4,58 MB) ; le code propre de l'interface native (le
+  binding) est plus petit de 14 KB qu'avant.
+
 **Le reste du programme.** Le lecteur du package et, sur la machine du serveur, son follower sont des domains du
 processus du programme, et OCaml 5 arrête chaque domain à chaque collection mineure du garbage collector (la partie qui
 libère la mémoire que plus rien n'utilise), alors que l'état du follower vit dans le tas du programme. Une boucle qui
@@ -586,7 +972,6 @@ linearizable sans cela.
 ## Ce qui n'est pas encore construit
 
 - Les forks d'une base lue au serveur, que le serveur fera.
-- `Not`, `Or`, `Prefix` et `In` dans les questions : pas dans le moteur.
 - Un programme atteint une seule base par connexion : `Connect` à nouveau pour une autre.
 
 ## Références
