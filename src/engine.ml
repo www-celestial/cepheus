@@ -18,6 +18,13 @@ type error =
   | Busy of string
   | Closed
 
+(* A Raft cluster's server stopped leading before a write's frame was committed: the write was applied once or not
+   at all (Busy with this very string, which the server tells apart by its address, so that the public type does not
+   change) *)
+let lost_leadership = "not leader: this server stopped leading before the write was committed; it was applied once or not at all (send it again in its session)"
+let not_leader = Busy lost_leadership
+let is_not_leader = function Busy m -> m == lost_leadership | _ -> false
+
 let message = function
   | Conflict m -> "conflict: " ^ m
   | Invalid m -> "invalid: " ^ m
@@ -57,6 +64,7 @@ type batch = {
   after : Store.view;
   runs : Snapshot.written list;  (* the runs of its large groups, to install once its frame is durable; newest first *)
   pending : Journal.pending option;  (* a large group's frame, its body written beside its merge: [body] is empty *)
+  own : bool;  (* resolved here (writes), not a frame taken from elsewhere (Apply): in a Raft cluster, proposed *)
 }
 
 (* The levels (Store, Snapshot): the delta is merged once it holds [compact_min] changes; level l holds at most
@@ -260,7 +268,7 @@ let prepare ?(release = fun (_ : int) -> ()) t (reqs : (Resolve.op list * int * 
     | None -> full := true
   done;
   { results = Array.of_list (List.rev !results); groups = !groups; body; first; count = !count; after = t.working;
-    runs = !runs; pending = !pending }
+    runs = !runs; pending = !pending; own = true }
 
 (* ---- A replica's frames ----
    A replica takes its primary's groups as its primary's journal codes them, never resolves a write: [prepare_apply]
@@ -312,7 +320,7 @@ let prepare_apply t (f : frame) gs =
       let count = List.length fresh in
       Ok
         { results = [| Ok { group = after.group; things = [] } |]; groups = List.rev fresh; body;
-          first = (match fresh with g :: _ -> g.n | [] -> start.group + 1); count; after; runs = !runs; pending = None }
+          first = (match fresh with g :: _ -> g.n | [] -> start.group + 1); count; after; runs = !runs; pending = None; own = false }
     | exception Journal.Damaged m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
     | exception Pages.Unreadable m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
     | exception Disk.Io m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Io m)
@@ -443,7 +451,10 @@ let read_meta disk dir =
    [buffer]: the database is opened by a server whose commit buffer (Wal) will force its journal; given the database's
    id, the frames the buffer holds for it, which recovery writes again into the journal. [bootstrap] false: a new
    database stays empty, at group 0 (a replica's copy, whose groups all come from its primary, the first included). *)
-let open_ ?(id_source = random_id) ?buffer ?(bootstrap = true) disk dir =
+let open_ ?(id_source = random_id) ?buffer ?raft ?bootstrap_time ?(bootstrap = true) disk dir =
+  (* a Raft cluster's database: its journal is shared with the Raft log as with a commit buffer (the marker), and
+     [raft id g] gives, for the newest run's group g, the frames to write again and the group to cut the journal at *)
+  let buffer = match raft with Some _ -> Some (fun _ -> []) | None -> buffer in
   try
     mkdirs disk dir;
     let lock = Filename.concat dir "lock" in
@@ -521,8 +532,8 @@ let open_ ?(id_source = random_id) ?buffer ?(bootstrap = true) disk dir =
               drop_runs w.replaced
             end
         in
-        let copy = match buffer with Some f -> f id | None -> [] in
-        let journal = Journal.recover ~frame ~after:start.group ~copy ~force:(not clean) disk jdir id from replay in
+        let copy, cut = match raft, buffer with Some f, _ -> f id start.group | None, Some f -> f id, None | None, None -> [], None in
+        let journal = Journal.recover ~frame ~after:start.group ~copy ?cut ~force:(not clean) disk jdir id from replay in
         (* a snapshot is installed only once the journal holds its groups durably (G12): a journal that ends before
            it lost durable frames (a damaged newest frame, which would otherwise be cut as torn) *)
         if Journal.next_group journal <= start.group then
@@ -535,7 +546,8 @@ let open_ ?(id_source = random_id) ?buffer ?(bootstrap = true) disk dir =
         if !v.group = 0 && bootstrap then begin
           (* a new database: the first group describes the system properties (a replica's copy takes its primary's) *)
           let n = 1 in
-          match Resolve.resolve ~bootstrap:true !v ~n ~time:(disk.now ()) ~by:0 ~why:"cepheus: create" Resolve.bootstrap_ops with
+          let time = match bootstrap_time with Some x -> x | None -> disk.now () in
+          match Resolve.resolve ~bootstrap:true !v ~n ~time ~by:0 ~why:"cepheus: create" Resolve.bootstrap_ops with
           | Ok (v', g, _) ->
             let body = Buffer.create 256 in
             Group.encode body g;
@@ -665,6 +677,11 @@ type live = {
   mutable retry : int;  (* after a failed merge, the next waits until the delta has this many changes *)
   follow : follow;
   mutable replica : bool;  (* takes its primary's frames (Apply) and no write; a promotion ends it *)
+  raft : bool;  (* a member of a Raft cluster: writes and Apply both, each write's frame proposed before it is written *)
+  mutable propose : int -> int -> Bytes.t -> (unit, error) result;
+      (* Raft: the frame of groups [first, first + count), whole, proposed; Ok once committed, Error if this server
+         stopped leading before *)
+  mutable rollback : bool;  (* a proposed frame was not committed: the working view goes back to the published one *)
 }
 
 let deliver r res =
@@ -689,15 +706,34 @@ let syncer l () =
       l.to_sync <- None;
       l.syncing <- true;
       Mutex.unlock l.sm;
-      l.follow.before b;
-      let results = commit l.e b in
-      l.follow.after ();
+      let results =
+        if l.raft && b.own && b.count > 0 && l.e.stopped = None then
+          (* proposed first; written, published and seen by the hooks only once committed *)
+          match l.propose b.first b.count (Journal.frame_bytes b.body b.first b.count) with
+          | Ok () -> l.follow.before b; let r = commit l.e b in l.follow.after (); r
+          | Error e ->
+            Mutex.protect l.sm (fun () -> l.rollback <- true);
+            Array.map (function Ok _ -> Error e | r -> r) b.results
+        else begin
+          l.follow.before b;
+          let r = commit l.e b in
+          l.follow.after ();
+          r
+        end
+      in
       Array.iteri (fun i r -> deliver r results.(i)) reqs;
       Mutex.lock l.sm;
       l.syncing <- false;
       Condition.broadcast l.c_sync;
       Mutex.unlock l.sm
   done
+
+(* Raft: the working view back to the published one, after a proposed frame that was not committed *)
+let roll_back l =
+  if l.rollback then begin
+    l.e.working <- Atomic.get l.e.published;
+    Mutex.protect l.sm (fun () -> l.rollback <- false)
+  end
 
 (* Waits for the merger, then switches to the new base when nothing is in flight. *)
 let finish_merge l =
@@ -710,6 +746,9 @@ let finish_merge l =
     wait_idle l;
     let failed () = l.retry <- l.e.working.delta.dn + !compact_min in
     (match Atomic.get m.ready with
+     | Some (Done (w, _, _)) when l.rollback ->
+       (* it started from groups that were not committed: abandoned (the working view goes back below) *)
+       Snapshot.abandon l.e.disk w
      | Some (Done (w, v, applied)) when l.e.stopped = None -> (
        let gs, _ = after_applied m applied in
        match
@@ -729,7 +768,14 @@ let finish_merge l =
      | Some (Done (w, _, _)) -> Snapshot.abandon l.e.disk w
      | Some Failed -> failed ()
      | None -> ());
+    roll_back l;
     Histogram.record switch_us (Journal.clock () - t0)
+
+(* Raft: nothing in flight, and the working view back if the last proposed frame was not committed (a merge started
+   from it abandoned) *)
+let settle l =
+  wait_idle l;
+  if l.rollback then (match l.merging with Some _ -> finish_merge l | None -> roll_back l)
 
 let max_batch = 4096
 let max_frame = 8 lsl 20
@@ -741,7 +787,7 @@ let merge a b =
   Buffer.add_buffer body a.body;
   Buffer.add_buffer body b.body;
   { results = Array.append a.results b.results; groups = b.groups @ a.groups; body; first = a.first;
-    count = a.count + b.count; after = b.after; runs = b.runs @ a.runs; pending = None }
+    count = a.count + b.count; after = b.after; runs = b.runs @ a.runs; pending = None; own = a.own && b.own }
 
 let writer l () =
   let go = ref true in
@@ -791,10 +837,11 @@ let writer l () =
       | Write r :: rest when l.replica ->
         deliver r (Error (Busy "this database is a replica: it takes its primary's groups, and no write"));
         handle rest
-      | Apply (r, _) :: rest when not l.replica ->
+      | Apply (r, _) :: rest when not (l.replica || l.raft) ->
         deliver r (Error (Busy "this database is not a replica: it takes no frame"));
         handle rest
       | Apply (r, f) :: rest ->
+        if l.raft then settle l;
         (match decode_frame f with
          | Error e -> deliver r (Error e)
          | Ok gs -> (
@@ -805,6 +852,8 @@ let writer l () =
            | Ok b -> enqueue b [| r |]));
         handle rest
       | Write _ :: _ ->
+        (* Raft: nothing in flight, so that a frame that is not committed takes back nothing but itself *)
+        if l.raft then settle l;
         let ws, rest = split [] items in
         let reqs = Array.of_list ws in
         (* a large group merges at once with the newest runs: no merge may run beside it; and it writes its frame as it
@@ -840,10 +889,11 @@ let writer l () =
   Condition.broadcast l.c_sync;
   Mutex.unlock l.sm
 
-let start ?(follow = no_follow) ?(replica = false) e =
+let start ?(follow = no_follow) ?(replica = false) ?(raft = false) e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
-      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow; replica }
+      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow; replica; raft;
+      propose = (fun _ _ _ -> Error (Busy "no Raft yet")); rollback = false }
   in
   (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
   l.domain <- Some (Domain.spawn (fun () ->

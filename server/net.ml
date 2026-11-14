@@ -458,9 +458,10 @@ let notify msg =
 
 let file_stamp path = match Unix.stat path with st -> Some (st.st_mtime, st.st_size, st.st_ino) | exception Unix.Unix_error _ -> None
 
-let open_databases ?(replica = None) (cfg : Config.t) wal =
+let open_databases ?(replica = None) ?raft (cfg : Config.t) wal =
   let one i name =
     let dir = Config.database_dir cfg name in
+    let raft_id = Cluster.database_id cfg.id name in
     (* a replica's database not copied yet takes its primary's id, and stays empty until its groups come *)
     let made =
       match replica with
@@ -468,13 +469,23 @@ let open_databases ?(replica = None) (cfg : Config.t) wal =
         match Replica.primary_id cfg p name with
         | Ok id -> Ok (fun _ -> id)
         | Error m -> Error (Printf.sprintf "database %s: not copied here yet, and its primary does not give it: %s" name m))
-      | _ -> Ok Engine.random_id
+      | _ -> Ok (if raft <> None then fun _ -> raft_id else Engine.random_id)
     in
     match made with
     | Error m -> Error m
     | Ok id_source ->
-    match Engine.open_ ~id_source ~buffer:(Wal.frames wal) ~bootstrap:(replica = None) Disk.real dir with
+    let opened =
+      match raft with
+      | None -> Engine.open_ ~id_source ~buffer:(Wal.frames wal) ~bootstrap:(replica = None) Disk.real dir
+      | Some (o : Cluster.opened) ->
+        (* a Raft cluster's: the same id and first group on every server; its journal written again from the Raft log *)
+        Engine.open_ ~id_source ~raft:(fun id g -> Cluster.frames_for o.rlog ~hint:o.rec_.commit id ~snapshot:g) ~bootstrap_time:0 Disk.real dir
+    in
+    match opened with
     | Error e -> Error (Printf.sprintf "database %s: %s" name (Engine.message e))
+    | Ok e when raft <> None && e.id <> raft_id ->
+      Engine.close e;
+      Error (Printf.sprintf "database %s was not made by this Raft cluster (its id is not the cluster's): a cluster of three starts from empty data directories" name)
     | Ok e ->
       let sessions =
         try Ok (Sessions.load Disk.real dir e.id)
@@ -484,7 +495,7 @@ let open_databases ?(replica = None) (cfg : Config.t) wal =
       | Error m -> Error m
       | Ok sessions -> (
         (* a replica serves no local reader: its visibility number lives in memory until a promotion *)
-        match if replica = None then (let w, p = Follow.open_page (Follow.page_path e.id) in w, Some p) else Follow.memory_word (), None with
+        match if replica = None && raft = None then (let w, p = Follow.open_page (Follow.page_path e.id) in w, Some p) else Follow.memory_word (), None with
         | exception Unix.Unix_error (err, _, p) ->
           Engine.close e;
           Error (Printf.sprintf "database %s: %s: %s" name p (Unix.error_message err))
@@ -493,13 +504,14 @@ let open_databases ?(replica = None) (cfg : Config.t) wal =
           (* the follow stream and the live questions first: the writer calls them from its first frame *)
           let follow = Follow.create e word in
           let watch = Watch.create e in
-          let is_replica = ref (replica <> None) in
+          (* a replica's and a Raft member's session tables follow the groups they apply *)
+          let is_replica = ref (replica <> None || raft <> None) in
           let s_before, s_after = Replica.session_hooks sessions e in
           let hooks =
             { Engine.before = (fun b -> Follow.before follow b; Watch.before watch b; if !is_replica then s_before b);
               after = (fun () -> Follow.after follow; Watch.after watch; if !is_replica then s_after ()) }
           in
-          let live = Engine.start ~follow:hooks ~replica:(replica <> None) e in
+          let live = Engine.start ~follow:hooks ~replica:(replica <> None) ~raft:(raft <> None) e in
           let lines = ref (fun () -> []) in
           let core =
             { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions;
@@ -556,11 +568,20 @@ let serve (cfg : Config.t) =
   let sigs = [ Sys.sigterm; Sys.sigint ] in
   ignore (Thread.sigmask Unix.SIG_BLOCK sigs);
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
+  let raft = Cluster.is_raft cfg in
+  if raft then begin
+    (* a Raft cluster's frames: one wire frame each, never a large group's written by pieces before its commit *)
+    Resolve.large_min := max_int;
+    Engine.frame_limit := Cluster.frame_limit
+  end;
   match lock_data cfg.data with
   | Error m -> Error m
   | Ok lockfd -> (
     match role_of cfg with
     | Error m -> Unix.close lockfd; Error m
+    | Ok role when raft && role <> Replica.Primary ->
+      Unix.close lockfd;
+      Error (Printf.sprintf "%s: a cluster of %d peers elects its leader (Raft); a replica's role file has no place in it" (Replica.role_path cfg.data) (List.length cfg.peers))
     | Ok role ->
     let primary = match role with Replica.Replica_of p -> Replica.peer_of cfg p | _ -> None in
     (* a primary of a cluster of several peers asks the others, while its databases open, whether one was promoted
@@ -568,7 +589,7 @@ let serve (cfg : Config.t) =
     let several = List.length cfg.peers > 1 in
     let checked = ref (Ok ()) in
     let checker =
-      if several && primary = None then
+      if several && primary = None && not raft then
         Some
           (Thread.create
              (fun () ->
@@ -588,19 +609,28 @@ let serve (cfg : Config.t) =
       let t0 = Unix.gettimeofday () in
       (* the commit buffer's frames, which each database's open writes again into its journal; then the buffer is
          emptied, and every journal shares it *)
+      (* a Raft cluster's log and state first: the databases' recovery writes their committed frames again *)
+      let raft_log = if raft then Some (Cluster.recover cfg) else None in
       let opened =
+        match raft_log with
+        | Some (Error m) -> Error m
+        | _ -> (
+        let raft_o = match raft_log with Some (Ok o) -> Some o | _ -> None in
         match Wal.recover Disk.real cfg.data with
         | exception Journal.Damaged m -> Error m
         | exception Disk.Io m -> Error m
         | wal -> (
-          match open_databases ~replica:primary cfg wal with
+          match open_databases ~replica:primary ?raft:raft_o cfg wal with
           | Error m -> Error m
           | Ok opened -> (
             let dbs = Array.map fst opened in
             match join_checker (), Wal.start wal with
             | Error m, () -> Array.iter (fun d -> Engine.stop d.live) dbs; Wal.stop wal; Error m
-            | Ok (), () -> Array.iter (fun d -> Wal.attach wal d.live.e.id d.live.e.journal) dbs; Ok (wal, opened)
-            | exception (Journal.Damaged m | Disk.Io m) -> Array.iter (fun d -> Engine.stop d.live) dbs; Error m))
+            | Ok (), () ->
+              (* a Raft cluster's journals: forced by the Raft log (a committed frame is written without an fsync) *)
+              Array.iter (fun d -> if raft then Journal.share d.live.e.journal (fun _ -> true) ignore else Wal.attach wal d.live.e.id d.live.e.journal) dbs;
+              Ok (wal, opened)
+            | exception (Journal.Damaged m | Disk.Io m) -> Array.iter (fun d -> Engine.stop d.live) dbs; Error m)))
       in
       match opened with
       | Error m -> ignore (join_checker ()); Unix.close lockfd; Error m
@@ -614,7 +644,16 @@ let serve (cfg : Config.t) =
         | exception Journal.Damaged m -> Array.iter (fun d -> Engine.stop d.live) dbs; Wal.stop wal; Unix.close lockfd; Error m
         | rdbs -> (
         let rep = Replica.create cfg role rdbs in
-        Array.iteri (fun i (_, lines) -> lines := fun () -> Replica.status_lines rep rdbs.(i)) opened;
+        let cluster =
+          match raft_log with
+          | Some (Ok o) ->
+            let c = Cluster.create cfg o (Array.to_list (Array.map (fun d -> { Cluster.name = d.core.name; id = d.live.e.id; live = d.live }) dbs)) in
+            rep.on_raft <- Some (Cluster.serve_stream c);
+            Some c
+          | _ -> None
+        in
+        let raft_status () = match cluster with Some c -> Cluster.status c | None -> [] in
+        if not raft then Array.iteri (fun i (_, lines) -> lines := fun () -> Replica.status_lines rep rdbs.(i)) opened;
         (* a promotion opens each database's visibility page (refused if another server on this machine holds it), then
            lets local readers in *)
         rep.on_promote <-
@@ -625,8 +664,14 @@ let serve (cfg : Config.t) =
             | word, page -> fun () -> Follow.use_page d.follow word; d.page <- Some page; d.replica := false);
         let opened_ms = (Unix.gettimeofday () -. t0) *. 1e3 in
         let sid = server_id cfg.data in
-        let stop_all () = Array.iter (fun d -> Files.close d.core.files; Engine.stop d.live) dbs; Wal.stop wal in
+        let stop_all () =
+          Option.iter Cluster.stop cluster;
+          Array.iter (fun d -> Files.close d.core.files; Engine.stop d.live) dbs;
+          Wal.stop wal
+        in
         let ops = function
+          | ("promote" | "promote --force") when raft ->
+            Some (Error ("invalid", "a Raft cluster elects its leader by itself: promote is for a primary and its replica"))
           | "promote" -> Some (Replica.promote rep ~force:false)
           | "promote --force" -> Some (Replica.promote rep ~force:true)
           | _ -> None
@@ -634,7 +679,9 @@ let serve (cfg : Config.t) =
         let srv =
           Core.create ~server_id:sid ~cluster_id:cfg.id ~dbs:(Array.map (fun d -> d.core) dbs) ~tokens ~now:Disk.real.now
             ~new_session:(fun () -> 1 + (Int64.to_int (String.get_int64_le (Tokens.random 8) 0) land 0x3FFF_FFFF_FFFF_FFFF))
-            ~more:(fun () -> Wal.status wal @ Replica.server_lines rep) ~read_only:(fun () -> Replica.read_only rep) ~ops ()
+            ~more:(fun () -> if raft then raft_status () else Wal.status wal @ Replica.server_lines rep)
+            ~read_only:(fun () -> Replica.read_only rep) ?lead:(Option.map Cluster.lead cluster) ~raft
+            ~members:(if raft then List.map (Config.client_address cfg) cfg.peers else []) ~ops ()
         in
         (* TLS for TCP: the server's certificate and key; programs show no certificate (a token) *)
         match
@@ -742,6 +789,13 @@ let serve (cfg : Config.t) =
                 | Error m -> log "%s not reloaded: %s" tokens_file m
               end;
               Array.iter checkpoint dbs;
+              Option.iter
+                (fun c ->
+                  Cluster.checkpoint c;
+                  match Cluster.failed c with
+                  | Some m when Atomic.get failed = None -> Atomic.set failed (Some ("Raft: " ^ m)); Unix.kill (Unix.getpid ()) Sys.sigterm
+                  | _ -> ())
+                cluster;
               Array.iter (fun d -> Follow.tick d.follow) dbs;
               Array.iter
                 (fun d -> match d.live.e.stopped with
@@ -760,6 +814,12 @@ let serve (cfg : Config.t) =
             cfg.domains cfg.max_connections sid cfg.id;
           (match role with Replica.Replica_of p -> log "a replica of %s: its writes go to the primary" p | _ -> ());
           Replica.start_followers rep;
+          Option.iter
+            (fun c ->
+              log "a member of a Raft cluster of %d (%s): an election within %d ms" (List.length cfg.peers)
+                (String.concat ", " (List.map (fun (p : Config.peer) -> p.pname) cfg.peers)) (2 * !Cluster.election_ms);
+              Cluster.start c)
+            cluster;
           notify "READY=1";
           ignore (Thread.wait_signal sigs);
           (* stop: no new connection, no new request; the writes in flight end and are answered; each database closed

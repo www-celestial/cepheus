@@ -180,9 +180,16 @@ let apply_promoted role ~dir_of =
      Frame      first | count | crc32c | length | the first bytes; the rest in frames of the flag more
      Beat       the primary's newest durable group (each second without a frame)
      Stopped    the primary stopped at this group (its clean stop: every group up to it was sent)
-     Applied    the replica holds every group up to this one durably *)
+     Applied    the replica holds every group up to this one durably
+   Version 2 (a Raft cluster, server/cluster.ml) adds:
+     Raft                                          -> Raft (empty), then the connection carries Raft's messages one
+                                                      way, from the certificate's peer, each a frame of kind Msg (id 0)
+   A peer of version 1 is refused with the error version. *)
 
-let version = 1
+let version = 2
+
+(* the version a connection announces (the tests: an older peer) *)
+let version_override = ref None
 let k_hello = 20
 let k_replicate = 21
 let k_epochs = 22
@@ -190,6 +197,8 @@ let k_frame = 23
 let k_beat = 24
 let k_stopped = 25
 let k_applied = 26
+let k_raft = 27
+let k_msg = 28
 let piece = 1 lsl 20
 
 (* the time a peer has for its handshake and Hello, and the stream for a frame or a beat *)
@@ -302,6 +311,7 @@ type t = {
   rm : Mutex.t;
   mutable peers_open : int;
   promoting : bool Atomic.t;  (* one promotion at a time *)
+  mutable on_raft : (string -> link -> unit) option;  (* a Raft cluster: a peer's stream of Raft messages *)
   mutable on_promote : db -> unit -> unit;
       (* the transport's part of a promotion (the visibility page): prepared before the commit point (Failure if it
          cannot be), done after *)
@@ -321,7 +331,7 @@ let make_db ~name ~dir ~live ~follow ~sessions =
 
 let create cfg role dbs =
   { cfg; role; dbs; stopping = Atomic.make false; final = Atomic.make false; rm = Mutex.create (); peers_open = 0;
-    promoting = Atomic.make false; on_promote = (fun _ () -> ()) }
+    promoting = Atomic.make false; on_raft = None; on_promote = (fun _ () -> ()) }
 
 let is_replica t = match t.role with Replica_of _ -> true | _ -> false
 
@@ -539,7 +549,11 @@ let serve_peer t ctx fd =
             (match next_frame l with
              | k, _, r when k = k_replicate -> replicate t l ~peer:name r
              | k, _, _ when k = k_epochs -> epochs_reply t l
-             | _ -> send_err l "invalid" "Replicate or Epochs was expected");
+             | k, _, _ when k = k_raft -> (
+               match t.on_raft with
+               | Some f -> f name l
+               | None -> send_err l "invalid" "this server is not a member of a Raft cluster")
+             | _ -> send_err l "invalid" "Replicate, Epochs or Raft was expected");
             close_link l
           end
       with Broken _ | Codec.Short -> close_link l)
@@ -603,7 +617,7 @@ let connect ?(timeout = !handshake_s) (cfg : Config.t) (p : Config.peer) =
           if Tls.peer_name tls <> p.pname then (close_link l; Error (Printf.sprintf "%s's certificate names %S" p.address (Tls.peer_name tls)))
           else
             let b = Buffer.create 64 in
-            Codec.put_varint b version; Codec.put_string b cfg.id; Codec.put_string b cfg.me;
+            Codec.put_varint b (Option.value !version_override ~default:version); Codec.put_string b cfg.id; Codec.put_string b cfg.me;
             match send l ~kind:k_hello b; Result.map (fun r -> let _ = Codec.get_string r in Codec.get_string r) (expect l k_hello) with
             | Ok cluster -> if cluster <> cfg.id then (close_link l; Error (p.pname ^ " is of another cluster")) else Ok l
             | Error (c, m) -> close_link l; Error (Printf.sprintf "%s: %s: %s" p.pname c m)

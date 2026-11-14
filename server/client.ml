@@ -13,7 +13,7 @@ module Top = Question.Top
 type address = Unix_socket of string | Tcp of string * int
 
 type t = {
-  address : address;
+  mutable address : address;  (* a Raft cluster's follower sends it to its leader (not_leader) *)
   token : string;
   program : string;
   mutable fd : Unix.file_descr option;
@@ -32,6 +32,7 @@ type t = {
   mutable welcome : Wire.reply option;
   mutable follows : (Unix.file_descr * unit Domain.t) list;  (* the follow streams of its databases *)
   mutable spoken : int;  (* the protocol's version this connection speaks: 4, or less with a server that speaks no more *)
+  mutable members : address list;  (* a Raft cluster's servers, from Welcome: where to go when this one is gone *)
 }
 
 (* a question with Not, Or, In, Prefix, Sort, Limit or After, on a connection to a server of protocol 1 *)
@@ -47,6 +48,10 @@ let no_incr = "this server speaks protocol 3 or older: Incr needs a server of pr
 let has_incr ops = List.exists (function Resolve.Incr _ -> true | _ -> false) ops
 
 exception Broken of string
+
+(* a Raft cluster's refusal: Some address, the leader's, to ask instead (not_leader); None, no leader now
+   (no_leader): asked again after a pause. [with_retry] follows both, within the retry budget *)
+exception Moved of string option
 
 let address_of_string s =
   if String.length s > 0 && (s.[0] = '/' || s.[0] = '.') then Unix_socket s
@@ -182,10 +187,14 @@ let join parts =
       in
       Wire.Rows { group = !group; cols = !cols; rows })
 
-(* the reply to [id] *)
+(* the reply to [id]; a Raft cluster's not_leader and no_leader raise Moved *)
 let recv c id =
   match frames c id with
-  | [ (kind, flags, body) ] -> decode kind flags body
+  | [ (kind, flags, body) ] -> (
+    match decode kind flags body with
+    | Wire.Err { code = "not_leader"; _ } -> raise (Moved (Wire.moved flags (Codec.reader body 0 (Bytes.length body))))
+    | Wire.Err { code = "no_leader"; _ } -> raise (Moved None)
+    | r -> r)
   | fs -> join (List.map (fun (k, f, b) -> decode k f b) fs)
 
 let call c req =
@@ -195,7 +204,21 @@ let call c req =
 
 (* Error (permanent, why): a refusal that trying again will not change (the token, the version, another cluster) *)
 let hello c =
-  match call c (Wire.Hello { version = c.spoken; token = c.token; program = c.program; session = c.session }) with
+  let id = send c (Wire.Hello { version = c.spoken; token = c.token; program = c.program; session = c.session }) in
+  flush c;
+  let reply =
+    match frames c id with
+    | [ (kind, flags, body) ] ->
+      let r = decode kind flags body in
+      (match r with
+       | Wire.Welcome _ ->
+         let l = Wire.members (Codec.reader body 0 (Bytes.length body)) in
+         if l <> [] then c.members <- List.filter_map (fun a -> try Some (address_of_string a) with Config.Bad _ -> None) l
+       | _ -> ());
+      r
+    | fs -> join (List.map (fun (k, f, b) -> decode k f b) fs)
+  in
+  match reply with
   | Wire.Welcome w when (match c.cluster with Some id -> id <> w.cluster | None -> false) ->
     Error (true, Printf.sprintf "the server belongs to cluster %s, not %s" w.cluster (Option.get c.cluster))
   | Wire.Welcome w as r -> c.session <- w.session; c.welcome <- Some r; Ok ()
@@ -239,7 +262,7 @@ let connect ?(program = "ocaml") ?(session = 0) ?ca ?cluster address token =
   let c =
     { address; token; program; fd = None; tls = None; ca; cluster; inb = Bytes.create 65536; have = 0; next_id = 1; out = Buffer.create 4096;
       body = Buffer.create 4096; session; serial = 0; waiting = Hashtbl.create 8; early = Hashtbl.create 8; welcome = None;
-      follows = []; spoken = Wire.version }
+      follows = []; spoken = Wire.version; members = [] }
   in
   match reconnect c with Ok () -> Ok c | Error (_, m) -> Error m
 
@@ -418,9 +441,25 @@ let retry_budget = ref 30.0
    connection), until it returns or the budget is spent; then [gave_up ()] *)
 let with_retry c attempt gave_up =
   let deadline = Unix.gettimeofday () +. !retry_budget in
+  (* the pause between two tries doubles up to 1 s; in a Raft cluster (its members known) up to 50 ms: another member
+     answers at once, and an election lasts about a second *)
+  let cap = if c.members <> [] then 0.05 else 1.0 in
   let rec go pause =
     match attempt () with
     | r -> r
+    | exception Moved where ->
+      (* a Raft cluster: to its leader (at once the first time, then after a pause: an address that sends back),
+         or again here after a pause while an election runs *)
+      if Unix.gettimeofday () > deadline then gave_up "no leader answered within the retry budget"
+      else begin
+        let moved = match where with Some a -> (try let a' = address_of_string a in let m = a' <> c.address in c.address <- a'; m with Config.Bad _ -> false) | None -> false in
+        if not moved then Unix.sleepf pause;
+        match if moved then reconnect c else Ok () with
+        | Ok () -> go (if moved then pause else min cap (pause *. 2.))
+        | Error (true, m) ->
+          gave_up (match where with Some a -> Printf.sprintf "not_leader: the leader is at %s, which this connection cannot reach (%s)" a m | None -> m)
+        | Error (false, _) -> Unix.sleepf pause; go (min cap (pause *. 2.))
+      end
     | exception Broken m ->
       let rec again pause =
         if Unix.gettimeofday () > deadline then gave_up m
@@ -428,7 +467,16 @@ let with_retry c attempt gave_up =
           match reconnect c with
           | Ok () -> go pause
           | Error (true, m) -> gave_up m
-          | Error (false, _) -> Unix.sleepf pause; again (min 1.0 (pause *. 2.))
+          | Error (false, _) ->
+            (* a Raft cluster's server gone: the next member (it sends the program on to the leader); over TCP only,
+               the members' addresses being TCP's *)
+            (match c.members, c.ca with
+             | (_ :: _ as l), Some _ ->
+               let rec after = function x :: (y :: _ as rest) -> if x = c.address then y else after rest | _ -> List.hd l in
+               c.address <- after l
+             | _ -> ());
+            Unix.sleepf pause;
+            again (min cap (pause *. 2.))
       in
       again pause
   in

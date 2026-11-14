@@ -350,8 +350,50 @@ let repair disk dir (from : position option) frames =
      | () -> leave ()
      | exception e -> (try disk.close !fd with Disk.Io _ -> ()); raise e)
 
-let recover ?frame ?after ?(copy = []) ~force disk dir id from on_group =
+(* ---- A Raft cluster's journal, cut where what is known committed ends ----
+   In a Raft cluster a journal holds committed frames only, written without an fsync; the Raft log holds them forced
+   until a checkpoint forced the journal past them (server/cluster.ml). At open, the frames known committed are
+   written again by [repair]; every frame from group [g] on is removed (some may have survived a power loss with holes
+   between them): they are applied again from the Raft log once the commit index is known. Frames before [g] must
+   check (they were forced, or written again just before). *)
+let cut_from disk dir (from : position option) g =
+  let segs = List.sort compare (segments disk dir) in
+  let start = match from with Some f -> f.next | None -> 1 in
+  if g > start then begin
+    let seg0 = match from with Some f -> f.segment | None -> (match segs with s :: _ -> s | [] -> 1) in
+    let changed = ref false in
+    (* the segments from g on go whole *)
+    List.iter (fun s -> if s >= g && s > seg0 then (disk.Disk.remove (path dir s); changed := true)) segs;
+    let segs = List.filter (fun s -> s >= seg0 && s < g) segs in
+    let p0 = match from with Some f -> f.offset | None -> seg_header in
+    let at = ref start in
+    List.iteri
+      (fun k s ->
+        if !at < g then begin
+          let fd = disk.openf (path dir s) false in
+          Fun.protect ~finally:(fun () -> disk.close fd) (fun () ->
+              let r = reader disk fd in
+              let p = ref (if k = 0 then p0 else seg_header) and go = ref true in
+              while !go && !at < g do
+                match header_at r !p with
+                | Some (len, f1, count, bc, _) when f1 = !at && body_checks r !p len bc -> p := !p + fh + len + ft; at := !at + count
+                | Some _ | None when !p >= r.size -> go := false
+                | _ -> damaged "%s: the frame at %d (group %d) does not check, before group %d where the journal is cut" (segment_name s) !p !at g
+              done;
+              if !at >= g && !p < r.size then begin
+                if !at > g then damaged "%s: no frame starts at group %d, where the journal is cut" (segment_name s) g;
+                disk.truncate fd !p;
+                disk.fsync fd;
+                changed := true
+              end)
+        end)
+      segs;
+    if !changed then disk.sync_dir dir
+  end
+
+let recover ?frame ?after ?(copy = []) ?cut ~force disk dir id from on_group =
   repair disk dir from copy;
+  Option.iter (cut_from disk dir from) cut;
   (* Not needed after a clean close ([force] false: the database's marker, Engine.open_), which leaves nothing off the
      disk and no failed fsync. *)
   let before = if force then rewrite_newest disk dir else fun _ -> () in
@@ -433,10 +475,8 @@ let checkpoint j =
 
 let forced j = Mutex.protect j.lock (fun () -> not (j.unforced || j.failed))
 
-let append j body first count =
-  if j.closed then raise (Disk.Io "journal is closed");
-  if j.failed then raise (Disk.Io "journal: an earlier write failed; reopen the database");
-  if first <> j.next then invalid_arg "Journal.append: groups out of order";
+(* a frame's bytes, whole: what [append] writes *)
+let frame_bytes body first count =
   let len = Buffer.length body in
   if len > max_body then invalid_arg "Journal.append: frame too large";
   let n = fh + len + ft in
@@ -455,6 +495,26 @@ let append j body first count =
   set32 b (t + 4) bc;
   set32 b (t + 8) hc;
   set32 b (t + 12) tail_magic;
+  b
+
+(* a whole frame's first group, count and body, if its header, body and trailer check (a frame from a peer) *)
+let frame_parts b =
+  let n = Bytes.length b in
+  if n < fh + ft || u32 b 0 <> frame_magic || u32 b 24 <> Crc32c.bytes b 0 24 then None
+  else
+    let len = u32 b 4 in
+    if len <> n - fh - ft || u32 b 20 <> Crc32c.bytes b fh len then None
+    else if u32 b (fh + len) <> len || u32 b (fh + len + 4) <> u32 b 20 || u32 b (fh + len + 8) <> u32 b 24 || u32 b (fh + len + 12) <> tail_magic then None
+    else
+      let first = Int64.to_int (Bytes.get_int64_le b 8) and count = u32 b 16 in
+      if first < 1 || count < 1 then None else Some (first, count, Bytes.sub b fh len)
+
+let append j body first count =
+  if j.closed then raise (Disk.Io "journal is closed");
+  if j.failed then raise (Disk.Io "journal: an earlier write failed; reopen the database");
+  if first <> j.next then invalid_arg "Journal.append: groups out of order";
+  let b = frame_bytes body first count in
+  let n = Bytes.length b in
   (* a frame of a shared journal is forced by the commit buffer's round, but for a long one, forced here: written
      twice, it would cost more than its own fsync *)
   let shared = match j.shared with Some f when n <= !shared_max -> Some f | _ -> None in

@@ -116,6 +116,8 @@ let promote cfg =
 (* FILE's server, stopped, becomes a replica of PEER: at its next start it copies and follows PEER's databases. Its
    databases, if it has some, must be a prefix of PEER's (checked at each connection: never merged) *)
 let replicate cfg peer =
+  if Cluster.is_raft cfg then
+    die "%s declares %d peers: a Raft cluster elects its leader; replicate is for a primary and its replica (2 peers)" cfg.Config.file (List.length cfg.peers);
   if peer = cfg.Config.me then die "%s is this server (me)" peer;
   if Replica.peer_of cfg peer = None then die "%s declares no [[peer]] %s" cfg.file peer;
   if held cfg then die "a server runs on %s: stop it first (cepheus stop)" cfg.data;

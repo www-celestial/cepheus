@@ -52,7 +52,10 @@ TLS (49.6); 8 clients at once, 3.22 µs a read in all (6.54); 16 requests in fli
 (PostgreSQL's pipeline of 16: 9.11). A program on the server's machine reads in its own memory, linearizably
 (G15): 0.22 µs a point read, no round trip, and no write waits for it. A replica on another machine keeps a copy of
 every database over mutual TLS, group for group in its own journal: backups are taken from it, and `cepheus promote`
-makes it the primary, by hand ([a replica](docs/book/server.md#a-replica)). Everything, from `cluster.toml` to the
+makes it the primary, by hand ([a replica](docs/book/server.md#a-replica)). Three servers or more form a Raft
+cluster: a write is confirmed once a majority holds it forced, and when the leader is lost the others elect a new one
+by themselves, losing no confirmed write ([a cluster of three](docs/book/server.md#a-cluster-of-three-raft)).
+Everything, from `cluster.toml` to the
 wire protocol byte by byte: [the server](docs/book/server.md).
 
 ## From Cesia

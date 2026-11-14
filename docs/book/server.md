@@ -1058,6 +1058,252 @@ the server a replica, does a batch hold a large group's run).
 - **What it does not stop.** A peer whose key is stolen can act as a replica (read every database) or, as a
   primary, send groups to a replica: keep the peers' keys as the CA's, readable by the server's user only.
 
+## A cluster of three (Raft)
+
+With three or more `[[peer]]`, the servers form a **Raft cluster** (Ongaro and Ousterhout, *In Search of an
+Understandable Consensus Algorithm*, USENIX ATC 2014; Ongaro's thesis, Stanford 2014). One server, the **leader**,
+takes every write; it confirms a write only once a **majority** of the servers (2 of 3, 3 of 5) hold it forced on
+their disks; when the leader is lost (its machine, its network, its process), the others elect a new one by
+themselves, and no write the old leader confirmed is lost. A cluster of 3 survives the loss of 1 server, 5 of 2.
+
+### Setting one up
+
+The same `cluster.toml` on every machine but `me`, three `[[peer]]` and `[tls]`; each `[[peer]]` may say where
+programs reach it (`clients`; by default its own host at this file's `[clients]` port):
+
+```toml norun
+[cluster]
+name = "shop"
+id = "cph-c-6f1e9a2b7d40c381"
+me = "srv1"                        # "srv2", "srv3" on the other machines
+
+[[peer]]
+name = "srv1"
+address = "10.0.1.11:7401"         # the peer port: servers only, mutual TLS
+clients = "10.0.1.11:7400"         # where programs reach srv1 (a follower sends them there)
+[[peer]]
+name = "srv2"
+address = "10.0.2.11:7401"
+[[peer]]
+name = "srv3"
+address = "10.0.3.11:7401"
+
+[clients]
+listen = "0.0.0.0:7400"
+
+[tls]
+ca = "/etc/cepheus/ca.pem"
+cert = "/etc/cepheus/srv1.pem"
+key = "/etc/cepheus/srv1.key"
+```
+
+The three start from **empty data directories**: each database gets the same id on every server (from the cluster's
+id and the database's name) and the same first group, and every later group comes through the cluster's log. A data
+directory written by a single server is refused (`was not made by this Raft cluster`): growing a server into a
+cluster is a next step. With 1 `[[peer]]` a server is alone, with 2 it is a primary and its replica
+([above](#a-replica)), with 3 or more a Raft cluster: one way to fail over a cluster of each size. In a Raft cluster,
+`cepheus replicate` and `cepheus promote` are refused, and `DATA/cepheus.role` must not exist. An even number of
+servers works, but adds a machine that can fail without adding a failure the cluster survives (a majority of 4 is 3).
+
+### One log for the cluster
+
+The cluster keeps one **log**: each entry is a frame of one database's journal, whole, marked with the database's id
+(or the leader's no-op, below). Its index is the entry's place, its **term** the number of the leader's term that
+made it (a term grows at each election, and has at most one leader). On the leader, each database resolves its writes
+as a single server does (one frame for every write that arrived while the previous one was committed: group commit),
+then **proposes** the frame: the leader appends it to its log and forces it, while it sends it to the followers, each
+of which forces it too and says so. Once a majority holds it forced (the leader's own fsync and one follower's, in
+parallel), the entry is **committed**: the leader writes the frame into the database's journal (without an fsync: the
+log holds it forced), publishes it, and answers the program. Every server then applies each committed frame to its
+own database, in the log's order. A database's journal thus holds **committed frames only**: nothing is ever taken
+back from a journal, a run, or a view.
+
+The log is `DATA/raft/` (0700): segments `log.<first index>` (0600), each a header and **rounds**, a round being the
+entries of one fsync, checked by CRC-32C as a journal's frames are ([formats](formats.md#the-servers-files)); and
+`DATA/raft/state` (0600), the server's term, its vote, and its repair mark, written beside, forced and renamed. Each
+second, once every database's journal is forced, the log's whole segments that every journal holds and every server
+holds are removed. A server that recovers writes the frames the log knows committed again into the journals, cuts each
+journal after them, and applies the rest once it learns how far the cluster committed.
+
+### Elections
+
+A follower that hears nothing from a leader for its **election timeout** (500 ms, then a random time up to 500 ms
+more, so that two servers rarely start at once) asks the others for their **pre-votes** for its next term (thesis
+9.6): a server grants one only if it heard from no leader within the minimum timeout and the asker's log is at least as
+up to date as its own; a pre-vote changes nothing at the voter. With a majority of them, the server raises its term,
+votes for itself (forced before anything leaves) and asks for votes; a server votes at most once a term (its vote
+forced before it answers), for a log at least as up to date as its own, and never within 500 ms of hearing from a
+leader or of its own start (**stickiness**, thesis 4.2.3). A server that won a majority leads: its first entry is a
+**no-op** of its term (Raft section 8), since a leader commits an entry of an earlier term only through one of its
+own (section 5.4.2); it serves programs once its no-op is committed and every entry before it applied. A leader that
+hears from no majority within an election timeout steps down (**CheckQuorum**, thesis 6.2).
+
+Why these times: heartbeats go every 50 ms; a follower answers a heartbeat at once, whatever its disk does (its
+acknowledgement of entries waits for their fsync, a heartbeat's does not), so the timeout covers the network and a
+pause of the process, not a slow fsync. A failover takes the timeout (0.5 to 1 s), a pre-vote and a vote round (one
+fsync for the vote), and the new leader's no-op (one fsync): measured [below](#what-a-cluster-costs). etcd waits
+longer by default ("By default, etcd uses a 100ms heartbeat interval", "By default, etcd uses a 1000ms election
+timeout", its tuning guide for v3.5), and asks that "Election timeouts must be at least 10 times the round-trip time":
+on a LAN (0.1 to 0.5 ms) 500 ms is a thousand round trips.
+
+### Reads, and what a program sees
+
+Only the leader serves reads and writes. A read on the leader is **linearizable** (it sees every write confirmed
+before it began) under the leader's **lease** (thesis 6.4.1): the followers that answered a heartbeat promised to vote
+for no one for 500 ms from its receipt; the leader serves from the time that heartbeat was sent, for 450 ms, so that
+clocks that run up to 10 % apart keep the lease inside the promises. A leader whose lease lapsed (a majority did not
+answer lately) serves nothing until it is renewed.
+
+A follower answers every read and write with `Err not_leader`, whose message names the leader and whose body carries
+the leader's address for programs after the message (every client's decoder, back to protocol 1, skips bytes after
+an error's message: no new protocol version; likewise, a Raft server's `Welcome` carries every member's address for
+programs after its fields). The OCaml library follows it (`Client`, which the `cepheus` command, the
+tests and the benchmarks use): it connects to the leader and sends the request again, a write with its session and
+serial, so that it is applied once (G14). The Cesia client gives the program `not_leader` for now (its message names
+the leader's address): following it there is a next step. While there
+is no leader (an election runs) or the new one is not ready, a server answers `Err no_leader`, and the library tries
+again after a pause (10 ms, doubling up to 50 ms in a cluster, 1 s elsewhere), within its retry budget (30 s); a program whose server is gone tries the next member the server named in its Welcome. A write that was in flight when its
+leader stopped leading gets the same treatment: applied once or not at all, the new leader answers its resend from
+its session table if it was committed.
+
+What is not there yet: local reads (`Follow`) on a cluster's servers (`denied`: the library reads through the
+socket); reads on followers under leases of their own (design 8.4); the vault's files (`Put` and `Erase` are refused);
+watches move to the leader only when the program opens them again.
+
+### A damaged log: the 2018 rule
+
+Alagappan et al. (*Protocol-Aware Recovery for Consensus-Based Storage*, FAST 2018) showed that consensus systems
+"can lose data or become unavailable" when a single sector of a server's log is damaged: a server that takes its
+damaged log for a shorter one may vote for a candidate that lacks entries it had acknowledged, and a committed entry
+is lost. Cepheus tells a torn tail (the round being written at a crash, never acknowledged: cut) from damage (a round
+that does not check followed by one that does, or written whole: refused) as its journal does. On damage, a server
+**never deletes** what it found: the damaged segment and those after it are set aside (renamed `*.damaged`), the rounds
+before the damage are kept, and `DATA/raft/state` records the newest index any header that checks names (the newest
+entry it may have acknowledged). It then **neither votes nor stands for election** until it holds every entry up to
+that index from a leader whose commit index reaches it; meanwhile it stores and acknowledges what the leader sends, as
+any follower. The rule is ours, informed by the paper (whose own recovery, CTRL, fetches the damaged entries from
+the other servers); its proof is the TLA+ model below, where the same server voting as if its log were shorter loses a
+committed entry. The cost is availability, never safety: if a majority is damaged at once, no leader is elected until
+an operator repairs one. A damaged `DATA/raft/state` (its CRC does not match) refuses the start: the server cannot know
+the votes it gave.
+
+### The peer protocol, version 2
+
+On the peer port, in the frames of [the protocol](#framing): `PeerHello` says version 2; a peer of version 1 is
+refused with `version`. `Raft` (kind 27) turns a connection into a stream of Raft's messages, one way, from the
+certificate's peer, each a frame of kind 28 (id 0): `Pre_vote` and `Vote` (a term, the asker's last index and term),
+their replies (granted, a term), `Append` (the leader's term, a number, the index and term before the entries, the
+entries' terms and bytes, the commit index, and the floor: the newest index every server holds), and its reply (ok and
+the newest index held forced, or refused and where to try again). Each server keeps one connection to each other
+server for what it sends; replies come back on the other's. A message older than an election timeout in a sender's
+queue is dropped (Raft sends again what matters).
+
+`cepheus status` says `raft.role` (leader, follower, pre-candidate, candidate), `raft.term`, `raft.leader`,
+`raft.ready` (a leader whose no-op is committed and applied), `raft.commit`, `raft.applied`, `raft.log` (the indexes it holds), `raft.forced`, and on the leader, for each other
+server, `raft.peer.srv2: match M, next N`; `raft.repair` while the 2018 rule holds a server back, `raft.failed` if its
+disk failed (the server then stops, as on any failed disk).
+
+### Security of a cluster
+
+- **Who may speak Raft.** The peer port's mutual TLS ([a replica's](#security)): a certificate of the cluster's CA
+  naming another `[[peer]]`, then the cluster's id; a peer of protocol 1 gets `version`. A Raft stream is taken only
+  from a listed peer, and every message on it is that peer's (its sender is the certificate's name, never a field).
+- **What a peer sends is checked before it is used.** A frame's length before it is read (16 MiB), each message's
+  counts against the bytes left (a message that does not decode closes the stream), each committed frame's header
+  CRC, body CRC and trailer before it is applied, and its database's id against this server's; a leader's entry
+  that contradicts a committed one is refused, never taken.
+- **Promises kept across crashes.** The term and the vote are forced (written beside, fsync, rename, the directory
+  forced) before any message of that term leaves, and an entry is acknowledged only once forced: TLA+ shows a cluster
+  without either losing a committed write or electing two leaders in a term. A damaged log follows the 2018 rule
+  ([above](#a-damaged-log-the-2018-rule)).
+- **Denial of service.** At most 256 peer connections, two Raft streams a peer (an older one is closed), 4,096 messages
+  queued for a peer (then dropped: Raft sends again what matters), messages older than an election timeout dropped.
+- **Files.** `DATA/raft/` 0700, its state and segments 0600.
+- **What it does not stop.** A peer whose key is stolen can disturb elections (a high term) or, elected, write
+  entries: keep the peers' keys as the CA's, readable by the server's user only.
+
+### What a cluster costs
+
+On the machine of [the benchmarks](benchmarks.md) (i7-4720HQ, 4 cores and 8 threads, 11 GB, a SATA SSD), 2026-11-14,
+the release build; every round under the lock that keeps the machine's other heavy jobs away, every server under a 2
+GB cap; $n = 21$ rounds, the sides alternated in a rotating order; medians over the rounds, and for a ratio the median
+of its round-by-round values with its distribution-free 95 % interval. The three servers run on this one machine and
+talk over loopback with mutual TLS, so this is an indication of the protocol's cost, not of three machines: one CPU,
+one disk. **Where the data is matters**: with three servers, a commit waits for the second fastest of three fsyncs.
+
+Durable writes of one fact a group (`sbench mwrite`, 2 s each), by 1 connection and by 16, at the server whose data
+is on the SSD; against a primary and its asynchronous replica (the previous release's way, the primary on the SSD,
+the replica in `/dev/shm`, its writes never waiting for the replica):
+
+| | primary and replica | cluster A: followers in `/dev/shm` | cluster B: one follower on the SSD too |
+|---|---:|---:|---:|
+| 1 connection: a write, median | 3.41 ms | **0.29 ms** (0.085 [0.055, 0.097]) | 6.53 ms (1.81 [1.36, 2.06]) |
+| 1 connection: a write, p99 | 19.8 ms | 6.2 ms | 25.6 ms |
+| 16 connections: groups a second | 1,653 | **18,489** (11.2 [8.6, 12.0]) | 536 (0.28 [0.22, 0.48]) |
+| 16 connections: a write, median | 8.5 ms | 0.80 ms | 23.7 ms |
+
+What they say:
+- **A** shows what Raft itself costs: two followers in memory make a majority by themselves, so a commit waits for no
+  SSD at all: a round trip over loopback with TLS, a follower's fsync in memory, and the hand-offs between the
+  threads: 0.29 ms. It is not a durable commit on three disks.
+- **B** is the pessimistic case of one machine: a commit waits for the second fastest of three fsyncs, two of them on
+  the same SSD at once, which slows both (the replica's primary has that SSD to itself). On three machines, each its
+  own disk, a commit costs the leader's fsync and a follower's (a network round trip later), in parallel: about the
+  primary's figure here plus the round trip.
+- **Throughput.** A leader's database has one frame in flight (its next writes wait, in one frame, until it is
+  committed): so a commit's latency bounds a database's frames a second. Several frames in flight are a next step.
+
+A server without peers is unchanged (this release against the previous one, alternated, $n = 21$): ready 1.03 [0.96,
+1.07] of before (median 129 ms here, the machine loaded), an empty round trip 0.97 [0.87, 1.16], writes by 1
+connection 1.03 [0.95, 1.48] at the median and by 16 0.94 [0.61, 1.76]: no difference. The binary's own start (`cepheus` with no
+argument, 100 spawns a round): 5.28 ms against 5.13, **1.031 [1.020, 1.047]**: 0.15 ms more, for 0.59 MB more of
+code (16.05 MB): the Raft core, its log and its server part.
+
+**Failover** (21 times: three servers on the SSD, a program writing without pause through TCP and TLS, the leader
+killed with `kill -9`): a new leader ready (its no-op committed, every entry before it applied) 893 ms after the kill
+(median; 557 to 1,395 ms); the program's first write committed by it 910 ms after (595 to 1,385). The election
+timeout's draw (500 to 1,000 ms after the last heartbeat) is most of it; then a pre-vote round, a vote (one fsync),
+the no-op (one fsync). With the library's former pause (doubling up to 1 s), the program waited 1,290 ms at the
+median for a leader ready at 772: in a cluster its pause now stops at 50 ms.
+
+### How it is proved
+
+- **TLA+** (`spec/Raft.tla`, checked by `tools/tlc.sh`): the cluster's algorithm with Pre-Vote left free (any server may
+  stand for election: a superset of what pre-votes allow), stickiness, the no-op, durable votes, acknowledgements of
+  forced entries only, restarts that lose what was not forced, the 2018 rule, and the lease. Messages are lost,
+  delayed, reordered and duplicated. Invariants: at most one leader a term, logs that agree on an entry agree before
+  it, every later leader holds every committed entry, no two entries committed at one index, a read under the lease
+  sees every committed entry. Checked by parts, each exhaustively within its bounds (3 servers, terms up to 2, logs
+  of 2 entries, 2 messages in flight; TLC 1.7.4): the elections and the log with a restart that loses what was not
+  forced (14,136,156 distinct states, the whole graph to depth 71), the 2018 rule with a damaged server (5,786,757
+  states, depth 58), and the lease with a restart (5,853,164 states, depth 49): no invariant broken. Each rule removed
+  alone breaks one, TLC printing the steps: committing entries of older terms by counting (LeaderCompleteness, the
+  paper's Figure 8, with terms up to 4: 1,083,149 states), a vote forgotten at a restart (ElectionSafety), an
+  acknowledgement before the fsync (LeaderCompleteness), votes that ignore the logs (LeaderCompleteness), a damaged
+  server that votes as if its log were shorter (LeaderCompleteness: the paper's failure), a promise that ends before
+  the lease it supports, a server that votes right after it starts, votes granted despite a promise, and reads before
+  the no-op is committed (each: ReadFresh, a stale read).
+- **Simulation** (`raft_sim`, 3 and 5 servers, one seed deciding everything, `--seed N` replays it): the server's own
+  Raft core and log, each server on a simulated disk with its own clock (up to 3 % apart); messages lost, duplicated
+  and reordered; partitions (a server alone, a minority, a link cut one way); process deaths, power losses (unforced
+  bytes lost or torn), deaths inside a disk call, a forced byte of the log flipped before a restart, slow fsyncs (up
+  to 300 ms), pauses (up to 400 ms). Checked: at most one leader a term; every entry applied anywhere is the committed
+  log's; every write a client was told committed is in the final log at its index; reads linearizable (a read at
+  index r returns the committed log's state at r, sees every write answered before it began, no write that began after
+  it ended, and no read that ended before it began saw a later index); once the faults stop, one commit and one log
+  everywhere. Seeds 1 to 300 of 3 servers and 1 to 100 of 5: no failure (50,103 and 16,616 checks; `tools/test.sh`
+  runs 100 and 50). Counted apart: 16 runs end with a follower behind its leader's log start, and 5 with a damaged
+  majority electing no leader (both next steps, above). On its way it found six bugs, each fixed before this release:
+  a deposed leader telling a program "committed" for an index a new leader had filled; a commit hint written beside
+  entries that a later truncation replaced, then taken for committed after a crash; damage at the log's last round
+  taken for a torn tail and cut (the 2018 failure itself); a refusal amplified into a storm of probes by duplicated
+  messages; a follower that cut its log past what others still needed; and a pre-vote that a server behind in terms
+  could never win.
+- **Real servers** (`server_raft`): three servers over mutual TLS on loopback; a program connected to a follower writes
+  through the leader; the leader killed (kill -9) while a program writes, a new one elected, every write the program
+  was told committed there, a write sent again in its session answered with its first receipt; the old leader back
+  as a follower, caught up; refusals at the peer port; the files' modes.
+
 ## Security
 
 ### Tokens
@@ -1270,15 +1516,20 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
 ## What it does not do yet
 
 - Find gathers its answer's index words before it sends them (above); forks are not on the wire yet.
-- Local readers on other machines (a replica serves its reads through its socket; Raft with leases between servers,
-  step 7), and one shared copy of the pages for many readers of one machine (each reader keeps its own cache:
-  [what it costs](#what-it-costs)).
+- Local readers on other machines (a replica serves its reads through its socket; in a Raft cluster the leader serves
+  every read, followers none: leases between servers are next), and one shared copy of the pages for many readers of
+  one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
 - A replica does not copy the files of the vault yet, a client does not move to the new primary by itself, and a
-  promotion is made by hand ([a replica](#a-replica)); Raft (step 7) elects a leader by a majority.
+  promotion is made by hand ([a replica](#a-replica)).
+- In a Raft cluster ([above](#a-cluster-of-three-raft)): adding or removing a server (one at a time, learners first),
+  a server that joins with data or falls behind the leader's log start (a catch-up from the journals), local reads,
+  the vault's files, a group over 8 MiB, a damaged server repaired by any peer (not only by a leader), leadership
+  handed over at a clean stop, and the Cesia client following `not_leader`.
 
 The Cesia client is step 4 ([Cepheus from Cesia](cesia.md)): a Cesia program reaches a database through a server only,
 by `cepheus.Connect`, and reads locally on the server's machine. Live questions are on the wire (step 5,
 [above](#live-questions-watch)). Many databases share one fsync ([the commit buffer](#many-databases-one-fsync-the-commit-buffer), the rest of step 5). A
-replica follows its primary (step 6, [above](#a-replica)). Next: Raft on three machines (step 7), memory databases with
+replica follows its primary (step 6, [above](#a-replica)). Three servers elect a leader and confirm writes on a
+majority (step 7, [above](#a-cluster-of-three-raft)). Next: the rest of step 7 (the list above), memory databases with
 `Expire` and `Incr` (step 8). The OCaml library still opens a database directory in its own process (`Cepheus.open_`): it is the
 engine the server runs, and what its tests and benchmarks drive; programs, in Cesia, go through the server.

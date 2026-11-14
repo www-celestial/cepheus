@@ -39,7 +39,7 @@ val create : Disk.t -> string -> string -> t
 (** [create disk dir id]: a new journal in [dir] (which exists), for the database [id]; the first group is 1. *)
 
 val recover :
-  ?frame:(position -> unit) -> ?after:int -> ?copy:Bytes.t list -> force:bool -> Disk.t -> string -> string ->
+  ?frame:(position -> unit) -> ?after:int -> ?copy:Bytes.t list -> ?cut:int -> force:bool -> Disk.t -> string -> string ->
   position option -> (Group.t -> unit) -> t
 (** [recover ~force disk dir id from on_group]: reads the journal from [from] (the start without it), calls [frame] on
     the position of each frame and [on_group] on each of its groups, in order (but for the frames whose groups are all
@@ -49,7 +49,15 @@ val recover :
     and the directory: what a killed process wrote but did not force, or what a failed fsync left in the page cache
     but not on the disk, is on the disk before anything rests on it (G5, G13). [copy]: the frames the server's commit
     buffer holds for this journal (whole, oldest first: {!Wal}), written again where they go before the read, and
-    forced; between them, every frame the journal holds must check (it was forced). Raises {!Damaged}, or [Disk.Io]. *)
+    forced; between them, every frame the journal holds must check (it was forced). [cut]: a Raft cluster's journal,
+    whose frames from this group on are removed once [copy] is written (applied again from the Raft log once their
+    commit is known: server/cluster.ml). Raises {!Damaged}, or [Disk.Io]. *)
+
+val frame_bytes : Buffer.t -> int -> int -> Bytes.t
+(** [frame_bytes body first count]: the frame [append] writes, whole (header, body, trailer). *)
+
+val frame_parts : Bytes.t -> (int * int * Bytes.t) option
+(** A whole frame's first group, count and body, if its header, body and trailer check (a frame from a peer). *)
 
 val append : t -> Buffer.t -> int -> int -> unit
 (** [append j body first count]: one frame of [count] groups from [first], written and made durable. Raises
