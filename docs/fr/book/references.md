@@ -119,7 +119,7 @@ est citée dans la page [comparaison](comparison.md).
   R. H. Arpaci-Dusseau. Protocol-Aware Recovery for Consensus-Based Storage. *FAST* 2018, 15–32.
   https://www.usenix.org/conference/fast18/presentation/alagappan
   — Un seul secteur abîmé peut faire perdre des données confirmées dans des systèmes répliqués ; la règle prévue pour
-  la réplication (une réplique abîmée ne vote pas, elle se répare), et pourquoi une seule machine refuse d'ouvrir
+  la réplication (une replica abîmée ne vote pas, elle se répare), et pourquoi une seule machine refuse d'ouvrir
   plutôt que de couper.
 
 ## La gestion des buffers et le cache
@@ -284,6 +284,11 @@ est citée dans la page [comparaison](comparison.md).
 - **[Mhedhbi 2019]** A. Mhedhbi, S. Salihoglu. Optimizing Subgraph Queries by Combining Binary and Worst-Case Optimal
   Joins. *PVLDB* 12(11), 1692–1704, 2019. https://doi.org/10.14778/3342263.3342643
   — Le choix de l'ordre des variables d'après les coûts.
+- **[Selinger 1979]** P. G. Selinger, M. M. Astrahan, D. D. Chamberlin, R. A. Lorie, T. G. Price. Access Path Selection
+  in a Relational Database Management System. *SIGMOD* 1979, 23–34. https://doi.org/10.1145/582095.582099
+  — La programmation dynamique sur les sous-ensembles qui choisit l'ordre des joins : le meilleur plan d'un ensemble se
+  tire des meilleurs plans de ses sous-ensembles, et la taille du résultat de chaque sous-ensemble n'est estimée
+  qu'une fois, quel que soit l'ordre. `Query.order` l'applique aux ensembles de variables d'une question.
 - **[Wang 2023]** Y. R. Wang, M. Willsey, D. Suciu. Free Join: Unifying Worst-Case Optimal and Traditional Joins.
   *Proceedings of the ACM on Management of Data* 1(2), 1–23 (SIGMOD 2023). https://doi.org/10.1145/3589295
   — Le mélange de binary joins et de joins worst-case optimal ; Cepheus garde une seule façon, Generic Join.
@@ -368,17 +373,80 @@ est citée dans la page [comparaison](comparison.md).
   publiés, l'étalon des benchmarks.
 - **[Urbani 2016]** J. Urbani, C. Jacobs, M. Krötzsch. Column-Oriented Datalog Materialization for Large Knowledge
   Graphs. *AAAI* 2016, 258–264. https://doi.org/10.1609/aaai.v30i1.9993
-  — VLog : la matérialisation sur des colonnes triées ; son débit publié sur un thread, à côté du nôtre.
+  — VLog : la matérialisation sur des colonnes triées, le modèle du préfixe trié d'un chargement (les grands groupes) ;
+  son débit publié sur un thread, à côté du nôtre.
 - **[Scholz 2016]** B. Scholz, H. Jordan, P. Subotić, T. Westmann. On Fast Large-Scale Program Analysis in Datalog.
   *CC* 2016, 196–206. https://doi.org/10.1145/2892208.2892226
   — Soufflé, du Datalog compilé en C++ : ses temps publiés, à côté des nôtres.
+- **[Subotic 2018]** P. Subotić, H. Jordan, L. Chang, A. Fekete, B. Scholz. Automatic Index Selection for Large-Scale
+  Datalog Computation. *PVLDB* 12(2), 141–153, 2018. https://doi.org/10.14778/3282495.3282500
+  — Les index dont un ensemble de règles a besoin, choisis d'après les recherches que font ses plans : dans un grand
+  groupe, un fait dérivé n'entre que dans les chaînes que lit au moins un plan.
 - **[Zhao 2020]** D. Zhao, P. Subotić, B. Scholz. Debugging Large-scale Datalog: A Scalable Provenance Evaluation
   Strategy. *ACM TOPLAS* 42(2), 2020. https://doi.org/10.1145/3379446
   — La provenance stockée par fait (règle et hauteur de preuve) pour un temps d'exécution publié de 1,31× : l'autre voie
   que le `why` de Cepheus, calculé quand on le demande.
 - **[Hu 2019]** P. Hu, B. Motik, I. Horrocks. Modular Materialisation of Datalog Programs. *AAAI* 2019, 2859–2866.
   https://doi.org/10.1609/aaai.v33i01.33012859
-  — Des modules pour les propriétés transitives et symétriques : le module de clôture de la prochaine étape.
+  — Des modules pour les propriétés transitives et symétriques : le module de closure (la transitive closure, ou
+  « fermeture transitive » en mathématiques : tous les couples reliés par un chemin).
+- **[Hu 2022]** P. Hu, B. Motik, I. Horrocks. Modular Materialisation of Datalog Programs. *Artificial Intelligence*
+  308, 103726, 2022. https://doi.org/10.1016/j.artint.2022.103726
+  — La version parue en revue : des modules pour la transitivité, la symétrie et les chaînes, LUBM-LE passe de 1 268 s
+  à 339 s avec eux, et de petites suppressions prennent 1 s contre 585 s ; l'insertion du module est faite ici, son
+  retrait par parcours pas encore.
+- **[Apt 1988]** K. R. Apt, H. A. Blair, A. Walker. Towards a Theory of Declarative Knowledge. In J. Minker (ed.),
+  *Foundations of Deductive Databases and Logic Programming*, Morgan Kaufmann, 1988, 89–148.
+  https://doi.org/10.1016/B978-0-934613-40-8.50006-3
+  — Les programmes stratifiés et leur modèle standard, calculé stratum par stratum (un stratum, des strata : une couche
+  de règles, calculée tout entière avant la suivante) : ce que veut dire un ensemble de règles avec `Not`.
+- **[Przymusinski 1988]** T. C. Przymusinski. On the Declarative Semantics of Deductive Databases and Logic Programs.
+  Same volume, 193–216. https://doi.org/10.1016/B978-0-934613-40-8.50009-9
+  — Le modèle parfait (perfect model), qui est ce même modèle standard : les faits que Cepheus tient avec `Not` et les
+  agrégats.
+- **[Mumick 1990]** I. S. Mumick, H. Pirahesh, R. Ramakrishnan. The Magic of Duplicates and Aggregates. *VLDB* 1990,
+  264–277. https://www.vldb.org/conf/1990/P264.PDF
+  — Les agrégats dans des règles récursives, stratifiés comme l'est la négation : le corps d'un agrégat est complet
+  avant que sa valeur soit calculée.
+- **[Tarjan 1972]** R. Tarjan. Depth-First Search and Linear Graph Algorithms. *SIAM Journal on Computing* 1(2),
+  146–160, 1972. https://doi.org/10.1137/0201010
+  — Les strong components (composantes fortement connexes : des groupes de nœuds qui s'atteignent tous les uns les
+  autres) en temps linéaire, trouvées dans l'ordre topologique inverse : l'ordre dans lequel se calcule une closure
+  depuis zéro.
+- **[Nuutila 1995]** E. Nuutila. *Efficient Transitive Closure Computation in Large Digraphs*. Acta Polytechnica
+  Scandinavica, Mathematics and Computing in Engineering Series No. 74, 1995.
+  — La closure par strong components, ce qu'atteint une composante étant partagé par tous ses membres : l'union des
+  cibles des successeurs.
+- **[Jones 1993]** N. D. Jones, C. K. Gomard, P. Sestoft. *Partial Evaluation and Automatic Program Generation*.
+  Prentice Hall, 1993.
+  — La partial evaluation (l'évaluation partielle), un programme spécialisé sur une partie de ses entrées : les règles
+  dépliées sur les faits de l'ontologie.
+- **[W3C 2012]** W3C. OWL 2 Web Ontology Language Profiles (Second Edition). Recommendation, 11 December 2012, §4.3.
+  https://www.w3.org/TR/owl2-profiles/
+  — Les règles d'OWL 2 RL (prp-dom, prp-trp, cax-sco, …), écrites sur les faits de l'ontologie avec la propriété en
+  variable : la forme que prend une règle dont la propriété est une variable ; ses 78 règles dans les tables 4 à 9,
+  LIST[…] sur les listes RDF : la bibliothèque `Cepheus.Owl`, règle par règle, et ses templates (une règle écrite une
+  fois pour chaque membre d'une liste quand on la déplie).
+- **[Motik 2015b]** B. Motik, Y. Nenov, R. Piro, I. Horrocks. Handling owl:sameAs via Rewriting. *AAAI* 2015, 231–237.
+  https://doi.org/10.1609/aaai.v29i1.9187 (arXiv:1411.3622)
+  — L'égalité par réécriture : un représentant par classe, les faits des autres membres périmés et sautés, les
+  constantes des règles réécrites elles aussi ; une clique de n ressources égales donne n² triplets sameAs en
+  2n³ + n² + n dérivations quand l'égalité est écrite en axiomes ; la réécriture va 31,1× plus vite sur Claros, 2,3×
+  sur UOBM (un thread, table 3). Les classes de choses égales.
+- **[Motik 2015c]** B. Motik, Y. Nenov, R. Piro, I. Horrocks. Combining Rewriting and Incremental Materialisation
+  Maintenance for Datalog Programs with Equality. *IJCAI* 2015, 3127–3133.
+  — B/F≈, le retrait avec l'égalité réécrite : l'algorithme plus fin que le Delete-Rederive d'une classe, dans Cepheus,
+  laisse pour plus tard.
+- **[Tarjan 1975]** R. E. Tarjan. Efficiency of a Good But Not Linear Set Union Algorithm. *JACM* 22(2), 215–225, 1975.
+  https://doi.org/10.1145/321879.321884
+  — L'union par taille : une chose change de classe O(log n) fois au plus, sur toute suite de fusions.
+- **[Ma 2006]** L. Ma, Y. Yang, Z. Qiu, G. T. Xie, Y. Pan, S. Liu. Towards a Complete OWL Ontology Benchmark. *ESWC*
+  2006, 125–139 (as cited by [Motik 2015b]).
+  — UOBM, c'est LUBM avec les axiomes qui rendent des individus égaux : la forme du benchmark à la UOBM.
+- **[Fan 2019]** Z. Fan, J. Zhu, Z. Zhang, A. Albarghouthi, P. Koutris, J. M. Patel. Scaling-Up In-Memory Datalog
+  Processing: Observations and Techniques. *PVLDB* 12(6), 695–708, 2019. https://doi.org/10.14778/3311880.3311886
+  — Soufflé "runs out of memory when evaluating TC on G80K" (manque de mémoire pour calculer la transitive closure du
+  graphe G80K) : la transitive closure est l'endroit où les moteurs Datalog cassent.
 - **[Henzinger 2015]** M. Henzinger, S. Krinninger, D. Nanongkai, T. Saranurak. Unifying and Strengthening Hardness
   for Dynamic Problems via the Online Matrix-Vector Multiplication Conjecture. *STOC* 2015, 21–30.
   https://doi.org/10.1145/2746539.2746609
@@ -390,7 +458,7 @@ est citée dans la page [comparaison](comparison.md).
 - **[Budiu 2023]** M. Budiu, T. Chajed, F. McSherry, L. Ryzhyk, V. Tannen. DBSP: Automatic Incremental View
   Maintenance for Rich Query Languages. *PVLDB* 16(7), 1601–1614, 2023. https://doi.org/10.14778/3587136.3587137
   — Les règles delta des joins (le changement d'un opérateur bilinéaire), dont le changement d'une question vivante
-  est un cas ; les agrégats des règles, prévus.
+  est un cas ; Sum et Count des règles tenus à jour par différence, comme des opérateurs linéaires.
 - **[Gjengset 2018]** J. Gjengset, M. Schwarzkopf, J. Behrens, L. T. Araújo, M. Ek, E. Kohler, M. F. Kaashoek,
   R. Morris. Noria: dynamic, partially-stateful data-flow for high-performance web applications. *OSDI* 2018,
   213–231. https://www.usenix.org/conference/osdi18/presentation/gjengset
@@ -416,6 +484,51 @@ est citée dans la page [comparaison](comparison.md).
   — BiGJoin : Generic Join sur beaucoup de machines, prévu ; et ses delta queries, le changement d'un join pour des
   faits ajoutés ou retirés, chaque nouveau binding au premier pattern qui correspond à un fait ajouté : la façon dont
   se calcule le changement d'une question vivante (G21).
+
+## Le vault de fichiers
+
+- **[Xia 2016]** W. Xia, Y. Zhou, H. Jiang, D. Feng, Y. Hua, Y. Hu, Q. Liu, Y. Zhang. FastCDC: a Fast and Efficient
+  Content-Defined Chunking Approach for Data Deduplication. *USENIX ATC* 2016, 101–114.
+  https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia
+  — Le Gear hash (un hachage roulant, recalculé à chaque octet) et le normalized chunking (qui resserre la taille des
+  morceaux autour de la moyenne ; niveau 2, des masques de 18 et 14 bits autour de 64 KiB) : les chunks du vault (le
+  vault : la partie de la base qui garde des fichiers ; un chunk : un morceau de fichier, coupé selon son contenu).
+- **[Aumasson 2013]** J.-P. Aumasson, S. Neves, Z. Wilcox-O'Hearn, C. Winnerlein. BLAKE2: simpler, smaller, fast as
+  MD5. *ACNS* 2013, LNCS 7954, 119–135. https://doi.org/10.1007/978-3-642-38980-1_8 ; RFC 7693 (2015).
+  — Le hachage à clé qui nomme les chunks et les nœuds (`crypto_generichash` de libsodium).
+- **[Wu 2013]** H. Wu, B. Preneel. AEGIS: A Fast Authenticated Encryption Algorithm. *SAC* 2013, LNCS 8282, 185–201.
+  https://doi.org/10.1007/978-3-662-43414-7_10 ; draft-irtf-cfrg-aegis-aead.
+  — AEGIS-256, `crypto_aead_aegis256` de libsodium, qui scelle chaque chunk (le chiffre et le rend infalsifiable).
+- **[Rogaway 2006]** P. Rogaway, T. Shrimpton. A Provable-Security Treatment of the Key-Wrap Problem. *EUROCRYPT*
+  2006, LNCS 4004, 373–390. https://doi.org/10.1007/11761679_23
+  — SIV, le nonce synthétique (un nonce : le nombre qu'un chiffrement ne doit jamais réutiliser sous une même clé ;
+  synthétique : tiré du contenu lui-même) : le nonce d'un chunk est son nom à clé, si bien qu'il est scellé en les
+  mêmes octets partout.
+- **[Collet RFC 8878]** Y. Collet, M. Kucherawy. Zstandard Compression and the 'application/zstd' Media Type. RFC
+  8878, 2021. https://www.rfc-editor.org/rfc/rfc8878 ; LZ4's block format: https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md
+  — Le codec (le compresseur et son décodeur) des fichiers froids et celui des tièdes, copiés dans les sources de
+  Cepheus (vendored) en Zstandard 1.5.7 et LZ4 1.10.0.
+- **[Merkle 1987]** R. C. Merkle. A Digital Signature Based on a Conventional Encryption Function. *CRYPTO* 1987,
+  LNCS 293, 369–378. https://doi.org/10.1007/3-540-48184-2_32
+  — L'arbre de hachages (un Merkle tree : chaque nœud porte le hachage de ses enfants) sur les noms des records d'un
+  vault, qu'on compare pour trouver ce qui manque à une copie.
+- **[DeCandia 2007]** G. DeCandia, D. Hastorun, M. Jampani, G. Kakulapati, A. Lakshman, A. Pilchin, S. Sivasubramanian,
+  P. Vosshall, W. Vogels. Dynamo: Amazon's Highly Available Key-value Store. *SOSP* 2007, 205–220.
+  https://doi.org/10.1145/1294261.1294281
+  — L'anti-entropy (la remise en accord de deux copies) par Merkle trees : on descend dans les arbres là où leurs
+  digests (les hachages qui résument un sous-arbre) diffèrent.
+- **[Harnik 2010]** D. Harnik, B. Pinkas, A. Shulman-Peleg. Side Channels in Cloud Services: Deduplication in Cloud
+  Storage. *IEEE Security & Privacy* 8(6), 40–47, 2010. https://doi.org/10.1109/MSP.2010.187
+  — La déduplication (des octets identiques gardés une seule fois) comme oracle de ce que les autres stockent :
+  pourquoi le vault ne déduplique qu'à l'intérieur d'un domaine de clé (la chose dont la clé scelle un fichier : son
+  propriétaire, ou la base elle-même).
+- **[Douceur 2002]** J. R. Douceur, A. Adya, W. J. Bolosky, D. Simon, M. Theimer. Reclaiming Space from Duplicate
+  Files in a Serverless Distributed File System. *ICDCS* 2002, 617–624. https://doi.org/10.1109/ICDCS.2002.1022312
+  — Le convergent encryption (chiffrer avec une clé tirée du contenu), que le vault n'utilise pas : il montrerait que
+  deux personnes ont un même fichier.
+- **[Corbató 1968]** F. J. Corbató. A Paging Experiment with the Multics System. MIT Project MAC, MAC-M-384, 1968.
+  — CLOCK, la seconde chance (une page lue depuis le dernier passage de l'aiguille reste un tour de plus) : le cache
+  des nœuds décodés du vault.
 
 ## Le serveur
 

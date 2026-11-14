@@ -81,6 +81,8 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
 |---|---|
 | `bench.exe load DIR CSVDIR FACTS` | charge FACTS faits par le writer : `GROUP` clients par groupe (un groupe est une écriture appliquée tout entière ou pas du tout ; 1 client par défaut : un client et ses 20 factures forment un groupe, puis les liens follow d'un client un autre groupe, envoyés par `THREADS` threads, 64 par défaut ; `GROUP=113636` à 10 M de faits : deux grands groupes, par 1 thread), chronomètre jusqu'à la confirmation du dernier groupe, puis fait un seul merge (`snapshot` ; `SNAPSHOT=0` : aucun, les runs restent tels que le chargement les a faits), et écrit les mêmes données en fichiers CSV pour les autres côtés (`NOCSV=1` : pas de CSV). Elle affiche les histogrammes du writer (un batch résolu ; un grand groupe résolu, encodé, fusionné ; un switch de merge ; un merge en arrière-plan ; le pwrite et le fsync du journal) |
 | `bench.exe read DIR FACTS [Q1,Q4,..]` | l'ouverture (le redémarrage depuis le snapshot), puis Q1 à Q5 ou celles qu'on nomme : médiane et intervalle à 95 % sur `RUNS` exécutions |
+| `bench.exe pages DIR FACTS` | les questions avec des opérateurs et un ordre : une page de 20 des factures impayées, les plus gros totaux d'abord, par le chemin de l'index (qui lit l'index des totaux du plus grand vers le bas) et par le chemin du heap (qui répond à toute la question et garde les 20 meilleures lignes dans un heap, un tas), la première page et la 101e, contre la réponse entière triée par le programme ; `Not` et `Prefix`, chacun contre ce que faisait un programme avant eux |
+| `bench.exe snapshot DIR` | un merge complet d'une base (`snapshot`), chronométré : tous ses runs en un seul |
 | `bench.exe write DIR CLIENTS SECS [RATE]` | des écritures durables (sur le disque même, couvertes par un fsync terminé) d'une nouvelle facture (4 faits) par CLIENTS threads : aussi vite qu'elles vont, ou RATE groupes par seconde en tout (open loop) |
 | `bench.exe merge DIR GROUPS` | GROUPS factures sans merge en arrière-plan, puis un seul merge (`snapshot`) : son temps et le pic de mémoire du merge seul |
 | `bench.exe fsync DIR SECS append\|overwrite` | le système de fichiers seul : une frame de 9 000 octets et son fsync en boucle, ajoutée en fin de fichier ou écrite par-dessus des zéros forcés sur le disque avant |
@@ -89,6 +91,7 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
 | `bench.exe stats NAME [us]` | le résumé des nombres lus sur stdin, un par ligne, en ms (avec `us` : des latences en µs, versées dans un histogramme) : c'est ainsi que les temps des autres côtés passent par les mêmes statistiques |
 | `bench.exe cpu DIR N` | le travail du writer seul : N groupes de 5 faits dans un fork de la base (une copie temporaire de la base, où l'on écrit sans rien écrire sur le disque) |
 | `bench.exe crc` | CRC-32C seul (un checksum : un court nombre calculé à partir d'octets, qui change s'ils changent) sur 24 octets, 4 KiB, 16 KiB, 1 MiB et 96 MiB, depuis un décalage impair : le temps d'un appel et les MB/s, médiane et intervalle à 95 % sur `RUNS` exécutions |
+| `sbench.exe watches DIR` | un changement sous un watch (une question vivante, que le serveur tient à jour) de `Not`, `Or`, `In` et `Prefix` (un hub chacun, le hub étant le thread qui calcule les questions vivantes d'une base ; les changements faits en mémoire), contre la question à laquelle on répond de nouveau en entier : 21 changements chacun |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | le côté SQLite, un seul fichier `ROOT/bench.db` : `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | la vente de places du [cas](case-seats.md) : `BUYERS` threads vendent toutes les places d'une salle de SEATS places ; le temps, et ce qui a mal tourné |
@@ -106,6 +109,121 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
+
+## Les questions avec des opérateurs, un ordre et des pages (2026-11-12), à 10 millions de faits
+
+**Méthode.** Les données des autres benchmarks (10 M de faits : 113 636 clients et leurs 2 272 720 factures, dont
+453 866 impayées), un seul run (un merge complet) ; le build release (compilé avec les optimisations) de cette
+branche ; `bench.exe pages`, `RUNS` = 21, chacune un appel ; les médianes, et la plus petite des 21. L'« avant » de
+chacune est ce qu'un programme devait faire sans l'opérateur, dans le même processus (sans réseau), si bien que le gain
+montré est celui du moteur seul ; à travers le serveur, la réponse entière traverserait aussi le socket.
+
+| question | avec l'opérateur | avant lui | |
+|---|---:|---:|---|
+| une page de 20 des 453 866 factures impayées, les plus gros totaux d'abord : chemin de l'index | 47,0 µs (min 44,1) | 698,6 ms (min 541,1) : la réponse entière, triée par le programme | 14 900 fois |
+| la même page par le chemin du heap | 55,8 ms (min 48,4) | | |
+| la page 101 (après la 2 000e ligne) : chemin de l'index / chemin du heap | 51,0 µs / 72,3 ms | | |
+| la page, le chemin étant choisi | 51,0 µs (le chemin de l'index) | | |
+| les 13 clients de city-7 sans facture impayée (`Not` de deux patterns) | 2,84 ms (min 2,70) | 3,10 ms (min 2,62) : deux questions et leur différence | le même |
+| les 11 clients dont l'e-mail commence par c1234 (`Prefix`) | 10,0 µs (min 8,8) | 30,6 ms (min 26,7) : chaque e-mail, filtré | 3 050 fois |
+
+- **La page.** Le chemin de l'index lit l'index des totaux du plus grand vers le bas, par fenêtres de 40, 80, ... faits,
+  et répond à la question de chaque fenêtre ; le chemin du heap répond à la question entière (453 866 bindings) et en
+  garde 20. Une page plus profonde coûte la même chose par l'un et par l'autre : la 101e, 51,0 µs contre 47,0. Le chemin
+  du heap épargne tout de même le tri et la copie de la réponse entière (55,8 ms contre 698,6).
+- **Not** fait une recherche par client de la ville (environ 1 140) : les clients d'une ville sont peu nombreux, et les
+  deux questions d'avant coûtent à peu près autant ; son gain est une question au lieu de deux, et aucune réponse à
+  garder pour la soustraction.
+- **Prefix** lit les 11 e-mails qui correspondent dans l'ordre des textes, par deux recherches dichotomiques dans le
+  run, au lieu de lire chacun des 113 636 e-mails.
+- **Les questions d'avant** ne sont pas plus lentes : Q1 à Q5 du build de e333a31 contre celui-ci, sur les mêmes
+  données (chacun avec un run de son propre format), en alternance, 3 tours de 21 exécutions (Q1 et Q2 : 6 de plus) :
+  la plus petite de chacune, ancien / nouveau : Q1 0,38 / 0,36 µs, Q2 0,61 / 0,60 µs, Q3 2,93 / 3,04 ms, Q4 44,97 /
+  43,20 ms, Q5 63,3 / 63,7 ms ; les médianes des tours vont dans les deux sens (Q5 115,4 / 85,5 ms, Q4 58,3 / 59,1 ms),
+  sur une machine que d'autres travaux partageaient. Un premier build alourdissait le test de la plage d'un candidat et
+  rendait Q5 10 % plus lente dans deux tours sur trois : le test d'une variable sans plage est redevenu celui qu'il
+  était (un `In` ou un `Prefix` donne à sa variable une plage à elle).
+- **Watches.** Un changement sous un watch de chaque opérateur, contre la question à laquelle on répond de nouveau en
+  entier (`sbench.exe
+  watches` : un hub par watch, 21 changements faits en mémoire, dont chacun change les lignes du watch ; médianes) :
+  `Not` (les clients de city-7 sans facture impayée ; une facture de l'un d'eux rendue impayée, puis payée de nouveau)
+  46 µs contre 3,45 ms ; `Or` (city-7 ou un e-mail ; un client qui déménage à city-7) 14,1 µs contre 104 µs ; `In`
+  (city-7 ou city-8) 20,0 µs contre 223 µs ; `Prefix` (les e-mails qui commencent par c1234 ; l'un changé en un tel
+  e-mail) 13,1 µs contre 17,9 µs, sa réponse entière étant de 11 lignes. Un changement coûte les réponses qu'il
+  touche : la frame trouve les clients qu'atteint le fait, répond à la question pour eux avant et après, et envoie la
+  différence.
+- **Son coût.** L'ordre des textes ajoute 4 octets par texte distinct à un run : le run de 10 M de faits fait 68 MB
+  contre 67 MB au format 8. Un merge complet de la base : 2,3 s. La première ouverture de données au format 8 met ses
+  runs de côté et rejoue le journal : 5,9 s, une seule fois.
+
+## Les lectures de l'ouverture dans l'ordre du fichier (2026-11-12), à 10 millions de faits
+
+La base de 10 millions de faits chargée en 4 grands groupes (`GROUP=56818`, un thread), puis `snapshot` : un run de
+69,6 MB (4 212 pages du fichier). Avec un cache de 32 MB, le run n'y tient pas, et l'ouverture vérifie ses tables :
+327 pages (5,4 MB) en 229 plages contiguës du fichier. Avant, les vérifications les lisaient une par une, à mesure
+qu'elles y arrivaient ; maintenant elles sont lues d'abord, dans l'ordre du fichier, les pages qui se suivent dans le
+fichier en une seule lecture, par 4 domains. Un run qui tient dans le cache (1 GiB par défaut) est lu en entier de la
+même façon. L'ouverture de `bench.exe read` (`CEPHEUS_DOMAINS=1`, un scope de 128 MB pour le cache de 32 MB, de 3 GB
+pour 1 GiB), à froid : les pages des fichiers d'abord retirées du cache du système ; 21 tours, les deux binaires à tour
+de rôle ; les médianes avec leur intervalle à 95 %, et la médiane des rapports de chaque tour :
+
+| ouverture | avant (3f8d8e8) | après | après / avant | après plus rapide |
+|---|---|---|---|---|
+| cache de 32 MB, à froid | 126,1 ms [120,5 ; 129,6] | **70,0 ms** [69,3 ; 71,0] | 0,570 [0,544 ; 0,593] | 21/21 |
+| cache de 32 MB, à chaud | 18,6 ms [17,8 ; 20,0] | **17,4 ms** [16,9 ; 17,7] | 0,933 [0,914 ; 0,994] | 16/21 |
+| cache de 1 GiB, le run lu en entier (50 à 53 MB lus sur le disque) | 199,5 ms [190,4 ; 208,2] | **169,4 ms** [167,9 ; 171,5] | 0,858 [0,806 ; 0,895] | 21/21 |
+
+Le disque lit 16,7 à 19,7 MB pour les 5,4 MB dont l'ouverture à froid a besoin : c'est le read-ahead du système (la
+lecture anticipée des pages qui suivent). Les dommages sont trouvés là où ils l'étaient : chaque page que lit
+l'ouverture est vérifiée par son CRC avant d'entrer dans le cache, et les vérifications sont les mêmes ; une page
+endommagée parmi les tables met maintenant le run de côté même là où les vérifications n'auraient pas regardé ses
+octets (les 12 bits inversés des tests unitaires : 1 refusé à l'ouverture et 11 trouvés à une lecture, contre 0 et 12).
+
+## Les chargements par morceaux (2026-11-12), à 10 millions de faits
+
+Un chargement écrit en groupes de 5 000 clients (environ 415 000 faits par groupe, 23 groupes de clients et 23 de
+leurs follows) par deux threads (`bench.exe load` avec `GROUP=5000 THREADS=2 CACHE_MB=64`), puis `snapshot`, contre
+main d'avant le changement (du leveling pour les grands groupes, c'est-à-dire chaque run fusionné avec le run unique de
+son niveau, et un merge qui regardait la tête de chaque source pour chaque ligne), $n = 7$ tours alternés, chaque
+exécution sur une machine calme (pression d'IO et de CPU sous 5 et 10 %), dans un scope de 3 GB ; la médiane et son
+intervalle, ici la plus petite et la plus grande exécution (98,4 %) :
+
+| | avant | après |
+|---|---:|---:|
+| chaque groupe confirmé, s | 18,17 [15,26 ; 27,21] | 9,81 [8,09 ; 11,37] |
+| dont les groupes des clients, s | 10,37 [9,39 ; 11,78] | 6,44 [5,69 ; 8,62] |
+| dont leurs follows, s | 6,40 [5,87 ; 16,02] | 2,82 [2,27 ; 4,24] |
+| un grand groupe fusionné dans son run, p50, ms | 122 [119 ; 142] | 62 [62 ; 64] |
+| le plus long d'entre eux, ms | 2 111 [2 061 ; 9 599] | 1 601 [1 541 ; 1 775] |
+| runs avant le snapshot | 2 | 15 |
+| `snapshot`, s | 2,38 [1,98 ; 5,09] | 3,18 [2,81 ; 3,59] |
+| chargement et snapshot, s | 21,87 [17,24 ; 29,38] | 12,99 [11,29 ; 14,40] |
+| pic de mémoire résidente, MB | 270 [252 ; 281] | 292 [258 ; 306] |
+
+Les groupes sont confirmés 1,9 fois plus vite : le run de chaque groupe est écrit une seule fois, à côté des autres,
+au lieu d'être fusionné de nouveau avec les runs d'avant lui, niveau après niveau ; le 16e groupe fusionne le tier (les
+runs gardés côte à côte dans un niveau) en une seule passe (le plus grand merge, 1,6 s). Le snapshot fusionne alors
+15 runs au lieu de 2 et prend 0,8 s de plus, ce que le heap de curseurs (un curseur par run, qui avance dans ses
+lignes ; le heap donne à chaque pas la plus petite de leurs têtes) garde petit (avant lui, le snapshot de 15 runs des
+premiers tours prenait 6,2 s). Le pic augmente de 22 MB (les tables des 15 runs gardées en mémoire, très probablement ;
+pas mesuré à part). Les lectures entre le chargement et son snapshot visitent chaque run : à 1 million de faits chargés
+de la même façon (8 runs contre 2, $n = 3$), un client par e-mail 1,40 µs contre 0,73, les factures impayées d'une
+ville 763 µs contre 425 ; les mêmes réponses des deux côtés, et chaque binaire ouvre et lit la base de l'autre.
+
+Pas atteint, de l'étape 4 du plan : un pic de 150 MB quelle que soit la taille du chargement (292 MB ici : les listes
+d'opérations en vol des deux groupes, environ 70 MB chacune, le cache de 64 MB, et les tableaux compacts d'un groupe),
+et 10 millions de faits en 3 s (chaque groupe de 415 000 faits paie sa propre résolution, son merge et son fsync :
+46 frames ; les mêmes 10 millions de faits en deux groupes se chargent en 4,1 à 5,6 s, avec un pic de 1,46 GB :
+[api](api.md#writing)).
+
+Les mêmes 10 millions de faits en 4 grands groupes (`GROUP=56818`, un thread), puis `snapshot`, $n = 5$ alternés :
+chaque groupe confirmé en 5,12 s [4,28 ; 6,95] contre 5,93 [5,58 ; 6,98], un pic de 862 MB [808 ; 967] contre 987
+[929 ; 1 006] ; le snapshot fusionne les runs des 4 groupes au lieu de 2 et prend 2,52 s [2,30 ; 2,71] contre 2,14
+[2,01 ; 2,29]. Une ouverture de la base qu'il laisse, ses pages retirées du cache du système, avec un cache de 32 MB
+($n = 7$) : 124 ms [113 ; 133] contre 129 [110 ; 166], en lisant 16,7 MB des deux côtés ; 19,7 et 19,3 ms quand le
+cache du système les tient, si bien que la plus grande part d'une ouverture à froid est la latence du disque sur les
+pages des tables, lues une à une. Ni le coût du troisième ordre dans le snapshot ni l'ouverture à froid n'ont changé
+avec ce travail.
 
 ## Les questions vivantes (2026-11-11), à 1 million de faits
 
@@ -446,6 +564,405 @@ s, et main ici en 542 ms et en plus de 10 minutes.
 Les deux tours lents par le socket ne se sont pas répétés dans le processus, où les merges et les attentes du writer
 sont chronométrés : la plus longue attente d'un switch de merge a été de 413 ms sur main et de 447 ms sur la branche,
 une fois chacune en 7 tours, sur un disque dont les fsync varient autant d'un tour à l'autre.
+
+## Règles, étape 6 : OWL 2 RL, et l'égalité par réécriture (2026-11-14)
+
+La sixième étape du reasoner (la partie du writer qui déduit des faits nouveaux à partir des règles)
+([règles](rules.md#owl-2-rl-a-library-of-rules)) : OWL 2 RL (la partie d'OWL 2, le langage d'ontologies du W3C, que
+des règles calculent entièrement) comme bibliothèque de règles (`Cepheus.Owl` : son vocabulaire, chaque règle des
+tables du W3C, des templates sur des listes, c'est-à-dire des règles écrites une fois pour chaque membre d'une liste),
+et l'égalité (owl:sameAs) par des classes de choses égales (les choses que les règles rendent identiques, dont un seul
+membre, le représentant, tient les faits) et la réécriture de leurs faits.
+
+**Méthode.** `bench/reason.exe` (build release, compilé avec les optimisations) de la branche de l'étape 3, eb264f0
+(`bulk`, d'où cette étape est partie), et de cette branche, chacune compilée depuis sa propre source. 21 tours alternés
+(l'ordre tourne à chaque tour), un tour pendant une seule prise du lock des travaux lourds, chaque processus dans un
+scope de 3 GB ; une case est la médiane avec $[x(1), x(21)]$ ; un rapport est la médiane des rapports appariés, avec
+leur étendue. La machine était partagée avec les processus d'autres travaux, hors du lock. Commandes :
+`reason.exe w3c|owl 1 groups -` (des données de la forme de LUBM, un benchmark d'universités, de départements, de
+personnes et de cours ; une université, un groupe par département, en mémoire), `reason.exe w3c|owl 10 bulk DIR` (dix
+universités, un seul chargement, durable), `reason.exe uobm 1 rew|ax|plain`, `reason.exe storm N`,
+`reason.exe reads`, `bench.exe` (le démarrage).
+
+**OWL 2 RL entier contre les règles du W3C de l'étape 2** (la cible : aussi rapide). `owl` : l'ontologie univ-bench
+(celle de LUBM) écrite dans le vocabulaire de la bibliothèque, avec les règles de la bibliothèque (63 règles telles
+qu'écrites, dont celles de l'égalité) ; `w3c` : la même ontologie sous forme de faits, avec les dix règles du W3C que
+l'étape 2 a mesurées (cax-sco, scm-sco, prp-dom, prp-rng, prp-spo1, prp-inv1, prp-inv2, prp-trp, cls-svf1, cls-int1
+sur deux membres). Les mêmes 532 205 faits déduits des données des deux côtés.
+
+| de la forme de LUBM | étape 3 eb264f0, w3c | cette branche, w3c | cette branche, owl | owl / w3c |
+|---|---:|---:|---:|---:|
+| une université, un groupe par département (en mémoire) : raisonnement | 0,246 s [0,224 ; 0,279] | 0,247 s [0,226 ; 0,272] | **0,277 s** [0,262 ; 0,359] | 1,15 [1,01 ; 1,34] |
+| la même chose, l'exécution entière (données faites, écrites, raisonnées) | 0,617 s | 0,615 s | 0,638 s | 1,06 [0,92 ; 1,26] |
+| dérivations (une dérivation : une règle avec un fait pour chaque partie de son corps) / faits déduits | 237 731 / 74 710 | 237 731 / 74 710 | 252 120 / 74 768 | |
+| dix universités, un seul chargement, durable : le chargement | 1,795 s [1,709 ; 2,790] | 1,816 s [1,686 ; 2,776] | **1,750 s** [1,691 ; 3,277] | 0,98 [0,61 ; 1,68] |
+| son raisonnement | 0,533 s [0,481 ; 0,920] | 0,543 s [0,484 ; 0,607] | **0,512 s** [0,442 ; 0,532] | 0,92 [0,79 ; 1,09] |
+| dérivations / faits déduits | 2 147 932 / 658 865 | 2 147 932 / 658 865 | 2 274 854 / 658 923 | |
+
+La ligne des groupes vient de la seconde série (21 tours, après le dernier changement du dépliage, la réécriture d'une
+règle en une règle par fait de l'ontologie : prp-npa2, dont la valeur est un texte, ne tourne plus sur chaque fait tant
+que l'ontologie n'a aucune assertion négative ; owl / w3c était à 1,20 avant) ; les lignes des chargements, de la
+première série (21 tours). Sur un chargement, OWL 2 RL entier raisonne plus vite que les dix règles (son programme
+déplié contient moins de règles : les réductions plus bas) ; groupe par groupe, il coûte 15 % de raisonnement de plus,
+6 % de plus sur l'exécution entière : les 6 % de dérivations en plus, et les contraintes (cls-nothing2, eq-diff1), dans
+les plans desquelles on fait passer les faits du groupe après le point fixe (le moment où les règles ne donnent plus
+rien de nouveau).
+
+La bibliothèque déduit quelques faits de plus et fait 6 % de dérivations de plus : cls-int2 donne à chaque membre d'une
+classe définie le type de sa restriction (`Student ⊓ ∃takesCourse.Course`), que cls-svf1 donnait déjà ; les règles du
+W3C que l'étape 2 a mesurées laissent cls-int2 de côté. En chemin, trois sortes de règles dépliées sont maintenant
+écartées, pour les deux formes : une règle dont la tête est l'un de ses patterns (cax-sco sur le `[r subClassOf r]`
+réflexif que scm-svf1 donne à chaque restriction), deux règles qui sont la même arête (cax-sco sur les faits de scm-int
+et cls-int2), et une règle dont la classe découle de celle d'une règle sœur par les arêtes de sous-classe (prp-dom sur
+les domaines de propriété que scm-dom1 ajoute en remontant la hiérarchie) : 3,35 M de dérivations avant, 2,27 M après
+(les règles de l'étape 2 : 2,15 M).
+
+**L'égalité, à la UOBM.** Des données de la forme de LUBM (une université) où un quart des personnes sont enregistrées
+2 à 4 fois (6 558 enregistrements de plus : le même e-mail, la moitié des faits de la personne chacun), l'e-mail étant
+inverse functional (prp-ifp : deux choses qui ont le même e-mail sont la même) ; UOBM (Ma et al. [Ma 2006]) ajoute de
+telles égalités à LUBM, et Motik et al. [Motik 2015b] y ont mesuré la réécriture contre l'égalité axiomatisée (écrite
+en règles qui copient chaque fait sur chaque membre). `rew` : OWL 2 RL entier, l'égalité par les classes ; `ax` : les
+mêmes règles, leurs égalités écrites comme des faits `owl/SameAs`, avec eq-sym, eq-trans, et eq-rep-s et eq-rep-o une
+fois pour chaque propriété (eq-ref laissée de côté : elle ne ferait que grossir `ax`). Lus à travers leurs classes (les
+choses de chaque fait vues comme le plus petit membre de leur classe), les deux donnent les mêmes 217 232 faits (le
+digest de leurs valeurs est égal) : une vérification indépendante de la réécriture, à grande échelle. `plain` : les
+mêmes données sans propriété inverse functional, rien n'étant rendu identique.
+
+| une université, 6 558 enregistrements de plus | rew (réécriture) | ax (axiomatisée) | rew / ax | plain (sans égalité) |
+|---|---:|---:|---:|---:|
+| raisonnement | **1,066 s** [1,040 ; 1,126] | 1,957 s [1,902 ; 2,117] | **0,54** [0,51 ; 0,59] | 0,364 s [0,357 ; 0,452] |
+| les 24 groupes écrits | **1,523 s** [1,484 ; 1,622] | 2,405 s [2,341 ; 2,622] | 0,63 [0,59 ; 0,68] | 0,822 s |
+| dont les fusions (classes faites, faits réécrits) | 0,261 s [0,256 ; 0,270] | | | |
+| dérivations | 402 815 | 1 316 744 | 1 / 3,27 | 310 241 |
+| faits (déduits ; d'égalité) | 255 826 (78 394 ; 6 558) | 358 071 (180 639 ; 41 220) | 1 / 1,40 (2,30 ; 6,29) | 274 665 (97 235 ; 0) |
+
+Face aux gains publiés : Motik et al. ont mesuré la réécriture 2,3× plus rapide que l'égalité axiomatisée sur UOBM (un
+thread, 2 696,7 s → 1 152,7 s ; 3,8× moins de dérivations, 3,2× moins de faits), et 31,1× sur Claros, dont les classes
+sont grandes (85,5× moins de dérivations). Ici 1,84× sur les données à la UOBM, avec 3,27× moins de dérivations : le
+même ordre que leur UOBM, dont les classes sont petites elles aussi (2 à 4 enregistrements ici). Le gain grandit avec
+les classes, comme le montre la tempête plus bas : axiomatisée, une classe de n choses tient n² faits sameAs ; avec
+n = 100, la réécriture prend 0,001 s et l'égalité axiomatisée 0,139 s (1 030 001 dérivations, 20 423 faits), avec
+n = 200, 0,002 s contre 0,343 s (8 120 001 dérivations, 80 523 faits) : 139× et 172× ; avec n = 400, l'égalité
+axiomatisée dépasse le budget (la limite de travail qu'un groupe peut demander aux règles) et son groupe est refusé, en
+nommant prp-fp. La réécriture coûte plus que les mêmes données sans égalité (`plain`, 0,364 s) : les faits de chaque
+enregistrement sont déduits une fois avant sa fusion et déplacés après elle, et les fusions elles-mêmes (0,26 s)
+cherchent chaque propriété qui pourrait nommer la chose fusionnée.
+
+**Une tempête d'égalités** (une propriété fonctionnelle avec n valeurs sur une seule chose : n choses n'en font plus
+qu'une ; un seul groupe, en mémoire) :
+
+| n | raisonnement | dont les fusions | faits de `cepheus/same` |
+|---:|---:|---:|---:|
+| 1 000 | 0,011 s | 0,004 s | 999 |
+| 10 000 | 0,164 s | 0,074 s | 9 999 |
+| 100 000 | 1,42 s | 0,84 s | 99 999 |
+
+(des exécutions uniques ; `reason.exe storm N`)
+
+Linéaire : n − 1 faits de `cepheus/same`, là où l'égalité axiomatisée tient n² faits sameAs déduits 2n³ + n² + n fois
+[Motik 2015b]. Avant, quand les égalités étaient appliquées fait par fait (à la fin d'un tour), 3 000 choses prenaient
+3,95 s (les n² paires de la règle de la propriété fonctionnelle) ; maintenant 0,05 s.
+
+**Lectures et démarrage.** Une lecture par id désigne une chose par le représentant de sa classe : une seule
+comparaison de pointeurs quand la vue ne contient aucune égalité (21 tours, LUBM-1 en mémoire, 2 000 000 de lectures
+chacun) : `get` 2 662 ns sur l'étape 3, 2 647 ns ici (apparié 1,02 [0,93 ; 1,11]) ; `values` 780 et 767 ns (1,00
+[0,85 ; 1,23]). Démarrage (`bench.exe`, 21 tours de 50 exécutions) : 3,226 ms [3,131 ; 3,357] sur l'étape 3,
+**3,217 ms** [3,058 ; 3,371] ici, apparié 1,00 [0,94 ; 1,06] : la bibliothèque et l'égalité n'ajoutent rien au
+démarrage (les règles sont compilées à la première écriture qui en a besoin, jamais à l'ouverture).
+
+**Les anciennes bases.** Une base écrite par main 9761e4a et une écrite par l'étape 3 (LUBM-1 avec les 94 règles, un
+groupe par département) sont lues en entier par le binaire de l'étape 3 et par celui-ci : les mêmes 432 123 faits
+(131 437 déduits), le même digest de chaque fait et de son drapeau (affirmé ou seulement déduit).
+
+## Règles, étape 3 : le chemin des chargements, trié et parallèle (2026-11-14)
+
+La troisième étape du reasoner ([règles](rules.md#large-groups)) : les faits d'un grand groupe raisonnés comme un
+préfixe trié du working set (l'ensemble des faits sur lequel travaille le raisonnement) au lieu de hash chains (des
+chaînes de faits par valeur de hachage), des chaînes gardées seulement là où un plan les lit, les grands tours changés
+en faits sur chaque thread matériel, les faits déduits fusionnés dans les deux ordres du groupe ; les contraintes, les
+têtes à une seule valeur et les faits déjà déduits restent sur ce chemin ; un grand lot de faits déduits entre dans le
+delta de la vue (les changements depuis le dernier merge, gardés en mémoire) par des maps construites en temps
+linéaire.
+
+**Méthode.** `bench/reason.exe` (build release) de main 9761e4a, de la branche de l'étape 5, 0b8c847 (d'où cette
+étape est partie), et de cette branche, chacun compilé depuis sa propre source. Des tours alternés (l'ordre des
+binaires tourne à chaque tour), une série pendant une seule prise du lock des travaux lourds, chaque processus dans un
+scope de 3 GB ; une case est la médiane avec $[x(1), x(n)]$ ; un rapport est la médiane des rapports appariés (tour par
+tour), avec leur étendue. Le pic de mémoire résidente est celui du processus (`getrusage`), les données générées dans
+le processus et sa liste d'opérations comprises. La machine était partagée avec les processus d'autres travaux, hors
+du lock (une charge moyenne de 5 sur 8 threads) : les médianes sont au-dessus des exécutions les plus calmes. Les mêmes
+réponses : 532 205 faits déduits et 2 021 310 dérivations de chaque côté, et sur cette branche le digest de chaque fait
+et de son drapeau égal pour un seul groupe, une université par groupe, et un département par groupe. Commandes :
+`reason.exe mat 10 rules|none bulk|chunks DIR`, `reason.exe student 1 2000 DIR`, `reason.exe define 10`.
+
+**Données de la forme de LUBM, dix universités avec les 94 règles, un seul groupe, durable** (1 354 654 faits
+affirmés ; 7 tours) :
+
+| | main 9761e4a | étape 5 0b8c847 | cette branche | celle-ci / main |
+|---|---:|---:|---:|---:|
+| le chargement, chaque fait durable | 2,90 s [2,72 ; 3,90] | 2,76 s [2,68 ; 3,19] | **1,78 s** [1,66 ; 2,27] | 0,62 [0,42 ; 0,81] |
+| son raisonnement | 1,217 s [1,047 ; 1,285] | 1,015 s [0,870 ; 1,054] | **0,411 s** [0,334 ; 0,465] | 0,33 [0,27 ; 0,44] |
+| dont les faits préparés pour les joins | 0,627 s [0,489 ; 0,693] | 0,603 s [0,478 ; 0,672] | **0,128 s** [0,065 ; 0,142] | 0,21 [0,10 ; 0,26] |
+| les tours seuls (la saturation : le calcul jusqu'au point fixe), faits déduits par seconde | 0,92 M [0,85 ; 0,98] | 1,36 M [1,27 ; 1,44] | **1,92 M** [1,58 ; 2,04] | 2,04 [1,66 ; 2,17] |
+| le raisonnement entier, faits déduits par seconde | 0,44 M | 0,52 M | **1,29 M** (meilleure exécution 1,59 M) | |
+| pic de mémoire résidente | 680 MB [659 ; 753] | 832 MB [804 ; 836] | **557 MB** [494 ; 570] | 0,81 [0,69 ; 0,86] |
+
+**La même chose sans règles** (5 tours) : 1,374 s [1,299 ; 1,717] sur main, **1,059 s** [1,042 ; 1,783] ici (0,82
+[0,74 ; 1,04] : le tri par chose sur plusieurs domains, les nouveaux textes numérotés par une table à adressage
+ouvert), 340 MB et 308 MB.
+
+**Une université par groupe** (dix grands groupes d'environ 135 000 faits, durables ; cette branche seulement, les
+autres n'ont pas ce mode ; 5 tours) : les dix écritures **2,45 s** [2,21 ; 3,04], leur raisonnement 0,61 s, **pic de
+mémoire résidente 133 MB** [131 ; 134]. Avant cette étape, à partir de la deuxième université, chaque groupe allait au
+chemin ordinaire (le type d'une université, déduit des diplômes des universités d'avant, était affirmé de nouveau) :
+8,6 s en une exécution.
+
+**Sur le disque** : le run du chargement avec ses conséquences fait 23,1 MB (12,3 octets par fait, le dictionnaire de
+ses 600 000 textes compris), sans règles 19,9 MB (14,7 par fait) : les 532 205 faits déduits prennent 3,3 MB,
+**6,2 octets chacun** ; dans le journal, 2,8 octets chacun (7,2 MB contre 5,7).
+
+**Ce qui n'a pas changé : le chemin d'un petit groupe** (`student 1 2000` : un étudiant (GraduateStudent) écrit puis
+retiré, 2 000 de chaque, sur un fork d'une université ; 7 tours ; médianes des médianes des tours, rapports appariés
+contre main) :
+
+| | main 9761e4a | étape 5 0b8c847 | cette branche | celle-ci / main |
+|---|---:|---:|---:|---:|
+| sans règles : écrire / retirer | 10,0 / 6,9 µs | 10,0 / 7,2 µs | 10,0 / 7,2 µs | 1,00 [0,50 ; 1,44] / 1,04 [0,72 ; 1,15] |
+| avec les 94 règles : écrire / retirer | 27,9 / 41,0 µs | 28,1 / 42,9 µs | 29,1 / 42,2 µs | 1,03 [0,90 ; 1,17] / 1,00 [0,93 ; 1,76] |
+
+L'horloge à la microseconde de ces médianes et la machine partagée rendent l'étalement des tours plus large que toute
+différence. Démarrage (`bench.exe` sans arguments, 21 tours de 100 exécutions, alternés, chaque binaire en 7 copies
+prises à tour de rôle : la place d'une copie en mémoire déplace un démarrage de 2 % au plus) : 3,023 ms sur 0b8c847,
+2,987 ms ici (apparié 0,989 [0,975 ; 0,992], plus rapide dans 21 tours sur 21). Le code de cette étape ajoute 507
+frame descriptors (ce qui dit au GC où sont les valeurs dans la pile), que le runtime range dans une table à chaque
+démarrage : 0,7 % de plus (1,007 [1,003 ; 1,011]) ; les histogrammes de latence, qui créaient leurs compteurs au
+chargement des modules (8 ici, 230 KB), les créent maintenant à leur première valeur, ce qui rend davantage. Les bases
+écrites par les binaires de main et de 0b8c847 s'ouvrent ici et donnent les mêmes faits et drapeaux (le digest d'une
+université chargée par chacun).
+
+**Un changement des règles** (les deux cibles de l'étape 5, mesurées de nouveau avec cette étape ; la méthode de
+l'[étape 5](#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13) :
+`CHANGE=one reason.exe change 10 256 8 2 with|without DIR`, le changement d'une règle sur LUBM-10 pendant que 256
+clients écrivent ; 7 paires pour chaque binaire, en une seule prise du lock ; et `reason.exe define 10`, les 94 règles
+définies en mémoire sur le chargement, 5 tours) :
+
+| | étape 5 0b8c847 | cette branche |
+|---|---:|---:|
+| la construction du changement à côté de 256 clients qui écrivent (119 000 à 150 000 faits déduits) | 0,531 s [0,388 ; 0,562] : 0,33 M/s | **0,332 s** [0,282 ; 0,391] : **0,45 M/s** |
+| le débit des clients dans la fenêtre du changement, avec / sans | 0,88 [0,52 ; 1,51] | 0,86 [0,48 ; 5,47] |
+| la même chose sur l'exécution, depuis le début du changement | 1,08 [0,77 ; 1,39] | 0,87 [0,54 ; 1,46] |
+| les 94 règles définies en mémoire (532 205 déduits) | 3,35 s [2,64 ; 23,9] | **2,10 s** [1,96 ; 2,62] : 0,25 M/s |
+
+La construction du changement gagne par son delta : un grand lot de faits déduits entre maintenant dans le delta de la
+vue par des maps construites en temps linéaire (0,6 µs par fait au lieu de 1,2). Ses tours lisent toujours la vue fait
+par fait, sur le domain propre du changement (plus de domains y coûtent du débit aux clients qui écrivent : la
+conclusion de l'étape 5), et ses faits vont toujours dans le delta, pas dans un run à eux : la cible de l'étape, 2 M de
+faits déduits par seconde, n'est pas atteinte (0,45 M/s), ni 0,90 pour les clients qui écrivent (0,86 en médiane, dans
+l'étalement des paires du 0,88 de l'étape 5).
+
+- **Face aux cibles de l'étape** : le chargement avec ses conséquences en 1,5 s au plus : 1,78 s en médiane, 1,66 s au
+  mieux (manqué : le chargement sans règles prend 1,06 s ici, et le merge des 532 205 faits déduits dans le run ajoute
+  environ 0,1 s) ; son raisonnement en 0,25 s au plus (2,5 M de faits déduits par seconde sur 8 threads) : 0,41 s en
+  médiane, 0,33 s au mieux, 1,3-1,6 M par seconde (manqué ; les tours seuls atteignent 1,9-2,0 M par seconde) ; la
+  mémoire d'un chargement en 150 MB au plus, par morceaux : 133 MB (atteint) ; 5 octets par fait au plus : 6,2 octets
+  par fait déduit dans le run, 12,3 par fait avec le dictionnaire (manqué : le format du run n'a pas changé dans cette
+  étape).
+- **Où va maintenant le temps du raisonnement** (cette branche, une exécution avec des chronomètres) : le working set
+  alloué 0,03-0,05 s, le préfixe rempli 0,015 s, sa table d'appartenance 0,03 s, les phases de dérivation 0,09-0,14 s
+  (2 021 310 dérivations, chacune une recherche dans une table de dizaines de MB), les têtes changées en faits
+  0,08-0,11 s (dont les recherches dans les régions 0,055-0,08). Chaque pas qui reste est de la latence mémoire ;
+  8 threads contre 4 ont donné 13 % (0,350/0,305 s contre 0,407/0,353 s).
+- **À côté des géants** (leurs articles, leurs machines et leurs données ; *calculé* : par nous, à partir de leurs
+  tables) : RDFox 2014 [Motik 2014] 0,67 M de faits déduits par seconde sur un thread, 6,1-7,0 M sur 16-32 threads de
+  deux Xeon à 8 cœurs (0,44 M par cœur à 32 threads) ; VLog [Urbani 2016] environ 1,28 M sur un thread. Ici 1,9 M par
+  seconde pour les tours et 1,3-1,6 M pour le raisonnement entier sur un seul portable à 4 cœurs (8 threads) :
+  0,33-0,40 M par cœur, proche des 0,44 M par cœur de RDFox 2014 en parallèle et au-dessus de son débit sur un thread ;
+  en dessous des nombres absolus de RDFox en parallèle, qui demandent ses 16 cœurs. Le chargement OWL2-RL documenté de
+  GraphDB, 9,1 k énoncés affirmés par seconde sur 8 cœurs, persistés (d'autres données, une autre machine) : ici
+  1,35 M de faits affirmés avec leurs conséquences rendus durables en 1,78 s, environ 0,76 M par seconde.
+
+## Règles, étape 5 : les changements des règles en arrière-plan (2026-11-13)
+
+La cinquième étape du reasoner ([règles](rules.md#changes-of-the-rules-in-the-background)) : un changement des règles ou
+de l'ontologie calculé à côté du writer, mis à jour des groupes écrits entre-temps, installé comme un seul groupe ; des
+tours de 20 000 faits et plus déduits sur plusieurs domains dans les groupes que le writer raisonne lui-même.
+
+**Méthode.** `CHANGE=one reason.exe change 10 256 8 2 with|without DIR` (build release) : des données de la forme de
+LUBM, 10 universités sur le disque avec les 94 règles d'univ-bench (1,89 M de faits), fusionnées en un seul run,
+copiées avant chaque exécution ; 256 threads clients écrivent des étudiants (GraduateStudent, 10 faits, un groupe
+chacun, durable) en closed loop pendant 8 s ; à 2 s, avec `with`, le changement est écrit (`define` de
+`[x type Person] -> [x type Schedule]`, une classe que les données laissent vide : le Person ⊑ Agent de l'étude de
+conception, à son choix 10.6) ; chaque exécution enregistre les groupes confirmés par tranches de 10 ms. 21 paires
+(avec, sans), alternées (le côté qui passe en premier change à chaque paire), chaque exécution sous le lock des travaux
+lourds et dans un scope de 3 GB ; un rapport est celui d'une paire : les groupes confirmés dans la fenêtre du
+changement avec lui, divisés par ceux confirmés dans la même fenêtre sans lui.
+
+| quoi (21 paires) | médiane | min | max |
+|---|---|---|---|
+| le changement, du `define` à sa réponse | 3,09 s | 0,72 s | 6,90 s |
+| sa construction (ses conséquences sur l'état d'où il est parti : environ 150 000 faits déduits) | 0,49 s | 0,35 s | 0,76 s |
+| le débit de la construction | 0,30 M faits déduits/s | 0,20 | 0,40 |
+| la part propre du writer à l'installation (les derniers groupes, la frame) | 54 ms | 42 ms | 103 ms |
+| le débit des clients dans la fenêtre du changement, avec / sans | **0,84** | 0,005 | 36 |
+| la même chose sur toute l'exécution depuis le début du changement | **0,89** | 0,10 | 3,8 |
+
+Les extrêmes des rapports sont de courtes fenêtres (moins d'une seconde) où un côté a rencontré un blocage que l'autre
+n'a pas eu (le switch d'un merge, la machine) : ce sont les médianes qui mesurent. Sans le changement, les clients
+confirment 8 069 groupes par seconde dans cette fenêtre (médiane) ; avec lui, 6 468. Où va la différence, d'après les
+tranches de 10 ms des 21 paires avec quatre domains en arrière-plan : 0,70 pendant la construction, 0,74 pendant la
+mise à jour, et encore 0,79 dans les deux secondes après l'installation, quand l'arrière-plan n'est plus là : une part
+du coût est l'état que laisse le changement (une règle de plus qui déduit pour chaque personne écrite, un delta qui a
+grandi sans merge à côté du changement, puis ce merge), pas l'arrière-plan seul.
+
+Des variantes mesurées en chemin, avec la même méthode : l'arrière-plan qui déduit sur quatre domains (par morsels, de
+petits morceaux de travail, comme le font les grands groupes du writer lui-même) : 0,78 dans la fenêtre et 0,79 sur
+l'exécution (21 paires), si bien qu'il déduit sur son seul domain ; un minor heap (la zone où OCaml alloue les valeurs
+neuves) de 64 MiB pour son domain : 0,735 (7 paires) ; un minor heap de 32 MiB pour chaque domain
+(`OCAMLRUNPARAM=s=4M`) : 0,57 (7 paires).
+
+**Le pire cas**, `CHANGE=all` : la base ne contient aucune règle et le changement définit les 94 (683 000 faits déduits
+avec les étudiants écrits avant lui). Des exécutions uniques, pas 21 : construction 3,0 s (0,23 M faits déduits/s ;
+dont 1,6 s pour mettre les faits dans le delta de la vue), puis des passes de mise à jour de 35 000 à 66 000 groupes,
+de 3,8 à 7,4 s chacune (environ 110 µs par groupe : chaque groupe écrit entre-temps est raisonné sous 94 règles sous
+lesquelles il ne l'avait pas été, contre 10 µs pour le writer), jusqu'à ce que le writer attende l'arrière-plan, à
+65 536 groupes de retard ; le changement a pris 18 à 25 s, son installation 1,2 à 1,9 s ; une exécution a été arrêtée
+au plafond de 3 GB après l'installation (les deux deltas et une frame de 1,6 M de changements). La première version de
+la mise à jour appliquait les groupes du journal un par un : là, elle ne rattrapait jamais le writer, et l'exécution a
+été arrêtée au plafond de 3 GB après 39 s.
+
+**La dérivation seule**, `reason.exe define 10` (en mémoire, les 94 règles définies sur les mêmes données chargées sans
+elles, un seul changement calculé dans son groupe sur un fork) : 3,0 s pour 532 205 faits déduits, dont le premier tour
+des règles ajoutées 0,48 s sur quatre domains (1,31 s sur un), les tours suivants 0,56 s (0,72 s), et leur mise dans
+le delta d'un fork, qui contient tout le chargement dans des persistent maps (des maps dont chaque modification fait
+une nouvelle version sans détruire l'ancienne), 1,2 s.
+
+**Des tours sur plusieurs domains dans un chargement** (`reason.exe mat 10 rules bulk DIR` : les 10 universités avec
+les 94 règles en un seul groupe sur le disque, le chemin des grands groupes ; 21 tours alternés avec main 9761e4a) : la
+saturation (les tours seuls, le working set construit) 0,90 M faits déduits/s sur main, **1,44 M/s** ici (quatre
+domains ; rapport apparié 1,54) ; le raisonnement entier 1,18 s et 1,02 s ; le chargement, 2,85 s et 2,93 s
+(l'étalement du disque, de 2,3 à 4,6 s, couvre cet écart).
+
+**Ce qui n'a pas changé.** Les mêmes groupes d'étudiants dans un fork sur une université
+(`reason.exe student 1 2000 DIR`, 21 tours alternés avec main 9761e4a) : sans règles, écrire 9,1 µs et 9,1 µs, retirer
+6,9 et 6,9 ; avec les règles, écrire 26,0 et 26,0, retirer 37,0 et 37,0 (médianes ; rapports appariés de 0,96 à 1,00).
+Démarrage (`bench.exe` sans arguments, 21 tours de 50 exécutions) : 3,195 ms sur main, 3,211 ms ici (rapport apparié
+1,03, dans l'étalement des tours, de 2,9 à 4,5 ms).
+
+**Face aux cibles de l'étape.** Le débit durable des clients pendant qu'un changement tourne à l'échelle de LUBM-10 :
+0,84 de sa valeur sans lui dans la fenêtre du changement, 0,89 sur l'exécution, contre une cible de 0,90 : manqué, de
+peu sur l'exécution. Les conséquences du changement à 2 M de faits déduits/s sur 8 threads : 0,30 M/s mesurés sur le
+seul domain de l'arrière-plan : manqué de loin ; ce qui coûte encore par fait, c'est le delta de la vue (des persistent
+maps, environ 1,5 µs par fait mis) et des joins qui sondent le stockage fait par fait, ce que traite l'étape 3 de la
+conception (des joins triés, les faits d'un changement dans un run à eux). `spec/RuleChange.tla` vérifié par TLC (le
+model checker de TLA+, qui parcourt tous les états du modèle) : atteint ([tester](testing.md#model-checking)).
+
+## Règles, étape 2 : les closures et la forme du W3C (2026-11-12)
+
+La deuxième étape du reasoner ([règles](rules.md#transitive-closures-the-closure-module)) : les propriétés transitives
+tenues par un closure module (un module qui calcule la transitive closure, tous les couples reliés par un chemin, sans
+passer par la règle), et les règles sur une propriété variable dépliées sur les faits de l'ontologie.
+
+**Méthode.** `bench/reason.exe` (build release), mesuré contre le binaire de 23ac670 (la première étape du reasoner, où
+prp-trp tourne comme une règle), les deux compilés depuis la même source de benchmark (les modes qu'a le binaire plus
+ancien). Sept tours, alternés (le côté qui passe en premier change à chaque tour), pendant une seule prise du lock des
+travaux lourds, chaque processus dans un scope de 3 GB ; une case est la médiane des tours avec $[x(1), x(n)]$ ; un
+rapport est la médiane des rapports appariés (nouveau/ancien, tour par tour). Les mêmes réponses des deux côtés : les
+faits des closures et les faits déduits sont égaux. Les graphes sont ceux de l'étude de conception (section 6.4, tracés
+comme son prototype les traçait) : une hiérarchie de 100 000 nœuds, 4 enfants chacun (profondeur 8) ; une profonde de
+20 000 nœuds, 2 chacun (profondeur 14) ; un DAG aléatoire (un graphe orienté sans cycle) de 5 000 nœuds, 3 arêtes vers
+le bas chacun (le `Random` d'OCaml, seed 1 : 14 973 arêtes) ; une chaîne de 500. Chaque arête dans un seul groupe, sur
+le disque (`closure KIND trp|linear DIR`) : les 99 999 arêtes de la hiérarchie prennent le chemin des grands groupes,
+les autres (moins de 20 000 opérations) le chemin ordinaire. « Le module » est le temps propre du closure module (ses
+faits trouvés et rangés pour le groupe), comme le prototype mesurait son module ; « raisonnement » est le tout dans le
+groupe (avec, pour un grand groupe, la construction du working set de ses faits). Des données de la forme de LUBM comme
+dans [Règles (2026-11-08)](#rules-2026-11-08) : `mat 10 rules …` les 94 règles écrites une par axiome, `w3c 10 …`
+l'ontologie sous forme de faits et les 10 règles du W3C dont elle a besoin (cax-sco, scm-sco, prp-dom, prp-rng,
+prp-spo1, prp-inv1, prp-inv2, prp-trp, cls-svf1, cls-int1 sur deux membres), que le moteur déplie.
+Commandes : `reason.exe closure hierarchy|deep|dag|chain trp|linear DIR`, `reason.exe mat 10 rules bulk|groups DIR|-`,
+`reason.exe w3c 10 bulk|groups DIR|-`, `reason.exe student 1 2000 DIR`.
+
+**Les transitive closures** (médiane [x(1) ; x(7)] de 7 tours ; les closures égales des deux côtés) :
+
+| graphe (faits de la closure, déduits) | forme | le module | raisonnement : 23ac670 → ici | l'écriture, durable : 23ac670 → ici | dérivations : 23ac670 |
+|---|---|---:|---:|---:|---:|
+| hiérarchie, 100 000 nœuds (783 495 ; 683 496) | prp-trp | **22,5 ms** [21,2 ; 24,4] | 0,918 s → **0,084 s** (0,091×) | 1,27 s → 0,42 s (0,33×) | 2 706 780 |
+| | linear | 26,3 ms [12,0 ; 40,9] | 0,606 s → 0,146 s (0,23×) | 1,05 s → 0,61 s (0,58×) | 783 495 |
+| profonde, 20 000 nœuds (247 248 ; 227 249) | prp-trp | 9,8 ms [9,4 ; 15,0] | 1,07 s → 0,58 s (0,54×) | 1,14 s → 0,64 s (0,57×) | 1 438 678 |
+| DAG aléatoire, 5 000 nœuds (1 359 764 ; 1 344 791) | prp-trp | **47,3 ms** [41,9 ; 57,5] | 17,6 s → 3,85 s (0,22×) | 17,8 s → 4,06 s (0,23×) | 77 224 523 |
+| | linear | 44,1 ms [39,7 ; 48,6] | 6,37 s → 3,88 s (0,61×) | 6,63 s → 4,09 s (0,62×) | 2 449 704 |
+| chaîne, 500 nœuds (124 750 ; 124 251) | prp-trp | 1,2 ms [1,2 ; 1,5] | 2,44 s → 0,26 s (0,10×) | 2,46 s → 0,29 s (0,11×) | 20 708 998 |
+| | linear | 1,3 ms [1,2 ; 1,4] | 0,35 s → 0,26 s (0,75×) | 0,38 s → 0,28 s (0,77×) | 124 750 |
+
+- **Les cibles de la conception** : la closure de la hiérarchie en 30 ms au plus (22,5 ms : atteint ; le prototype
+  11-16 ms, prp-trp comme règle 665 ms là-bas, 918 ms ici), celle du DAG aléatoire en 60 ms au plus (47,3 ms : atteint ;
+  le prototype 14-46 ms, prp-trp 7,82 s là-bas, 17,6 s ici). Le module fait chaque nouveau fait une seule fois :
+  0 dérivation, contre 3,5 à 166 par fait avec la règle.
+- **Où va le reste** : les 99 999 arêtes de la hiérarchie forment un grand groupe, dont le raisonnement construit aussi
+  le working set de ses faits (54 ms sur les 84). Les arêtes du DAG, de l'arbre profond et de la chaîne sont sous les
+  20 000 opérations : le chemin ordinaire, dont les faits vont dans le delta de la vue un par un, par lots triés
+  (environ 2,8 µs par fait avec les enregistrements de changement du groupe) : 3,8 s sur les 3,9 du DAG. Les grandes
+  dérivations venues de petits groupes prennent le chemin des grands groupes à l'étape 3 de la conception.
+- **Mesuré et écarté** : les tableaux du module sont des Bigarrays (des tableaux hors du tas d'OCaml), qui règlent le
+  rythme du major collector d'OCaml (le GC des valeurs anciennes) sur leur taille (`custom_major_ratio`, 44 % par
+  défaut) : avec ce réglage à 1 000, le module de la hiérarchie prenait 19,5 ms au lieu de 48,6 ms, avant que les
+  tableaux soient réduits ; le moteur ne change pas les réglages du collector du programme dans lequel il tourne.
+- **À côté des géants** (leurs articles, leurs machines et leurs données) : Hu, Motik et Horrocks [Hu 2022] rapportent
+  LUBM-LE matérialisé en 339 s avec les modules contre 1 268 s sans (3,7×) ; ici le temps propre du module est 23 à
+  2 000 fois sous le raisonnement de la règle sur ces graphes (le prototype de la conception : 60 à plus de 1 000), et
+  le raisonnement d'un groupe 1,3 à 11 fois plus rapide. RDFox a de tels modules depuis 2019 [Hu 2019] : égalité de
+  méthode. Soufflé, qui évalue la règle, « runs out of memory when evaluating TC on G80K » (manque de mémoire pour
+  calculer la transitive closure de G80K) dans les tests de Fan et al. [Fan 2019].
+
+**Une arête retirée** (le même binaire, par parcours, contre B/F, l'algorithme Backward/Forward qui garde justes les
+faits déduits quand des faits partent, à travers les plans des règles, `Reason.walk_retract` ; 21 tours alternés
+pendant une seule prise du lock, la closure chargée d'abord dans chaque processus ; médianes, $[x(1), x(21)]$, la
+médiane du rapport apparié avec son intervalle à 95 % par statistiques d'ordre $[x(6), x(16)]$ ; la même closure
+après, des deux côtés) :
+
+| prp-trp | faits perdus | par parcours | par B/F | parcours / B/F |
+|---|---:|---:|---:|---:|
+| hiérarchie, l'arête d'un nœud de profondeur 2 (son sous-arbre : 6 250 choses) | 36 160 | **0,102 s** [0,095 ; 0,187] | 0,161 s [0,146 ; 0,255] | 0,64 [0,59 ; 0,73] |
+| DAG aléatoire, l'arête 300 → 134 | 102 | **0,090 s** [0,078 ; 0,357] | 1,766 s [1,448 ; 2,410] | 0,050 [0,045 ; 0,055] |
+| chaîne de 500, l'arête du milieu | 62 500 | **0,163 s** [0,151 ; 0,254] | 16,11 s [15,03 ; 20,29] | 0,0099 [0,0096 ; 0,0105] |
+
+Le temps des parcours est surtout celui des faits perdus mis dans la vue (environ 2,5 µs par fait dans le cas de la
+hiérarchie) ; B/F vérifie chaque fait perdu à travers les instances de la règle (sur la chaîne, chaque point du milieu
+de chaque paire), et c'est là que vont les 100×. Une arête qui a un autre chemin (la plupart des arêtes du DAG) ne
+change rien et coûte une recherche par arête qui part de son début.
+
+**Des données de la forme de LUBM, la forme du W3C contre des règles écrites une par axiome** (dix universités ; les
+deux sur ce binaire ; les mêmes 532 205 faits déduits des données) :
+
+| | 94 règles, une par axiome | les 10 règles du W3C, dépliées | W3C / axiome, apparié |
+|---|---:|---:|---:|
+| un seul groupe (un chargement, durable) : raisonnement | 1,296 s [1,143 ; 1,625] | 1,367 s [1,297 ; 1,646] | **1,10** [0,80 ; 1,27] |
+| un département par groupe, en mémoire : raisonnement | 2,383 s [2,240 ; 2,659] | 2,498 s [2,446 ; 3,459] | **1,05** [0,93 ; 1,54] |
+| faits déduits / dérivations | 532 205 / 2 021 310 | 658 865 / 2 147 932 | |
+
+- **La cible de la conception** : 1,1× au plus des règles écrites à la main (le prototype, qui faisait tourner les
+  règles du W3C telles qu'écrites : 2,2×). Atteinte en médiane : 1,10 pour le chargement, 1,05 groupe par groupe. La
+  forme du W3C déduit davantage, par son propre sens : 126 660 faits de plus, les types des six classes de restriction
+  (`x` est membre de « some `takesCourse` a `Course` » avant d'être un `Student`) et la closure de `subClassOf` ; les
+  règles de sous-classe dépliées que donne une chaîne des autres sont écartées, si bien qu'un type est déduit une fois
+  par pas, comme à la main.
+- Chaque groupe a tourné déplié, sauf le premier qui a écrit un fait d'une relation sur laquelle les règles avaient été
+  dépliées alors que la base était vide (`type`) : les règles ont été dépliées de nouveau sans elle, aussitôt.
+
+**Les règles écrites une par axiome, et le chemin d'écriture, contre 23ac670** (les mêmes groupes, 7 tours) :
+
+| | 23ac670 | ici | apparié |
+|---|---:|---:|---:|
+| LUBM-10 en un seul groupe : raisonnement | 1,283 s [1,130 ; 1,531] | 1,296 s [1,143 ; 1,625] | 1,00 [0,90 ; 1,33] |
+| un département par groupe, en mémoire : raisonnement | 2,216 s [2,160 ; 2,387] | 2,383 s [2,240 ; 2,659] | 1,04 [0,98 ; 1,22] |
+| écrire un étudiant, avec règles / sans | 24,8 / 8,8 µs | 26,0 / 8,8 µs | 1,05 [0,85 ; 1,20] / 1,00 |
+| le retirer, avec règles / sans | 36,0 / 6,2 µs | 36,0 / 6,9 µs | 1,00 / 1,00 |
+| démarrage (`bench.exe`, 21 tours de 50 exécutions, médianes), contre main ca74bbe | 2,913 ms [2,692 ; 3,062] | 2,938 ms [2,575 ; 3,368] | 1,00 (0,997, 95 % [0,951 ; 1,035]) |
+
+Le code du reasoner a doublé (le closure module et son retrait, le dépliage, les propriétés variables : ses frame
+tables de 62 KB à 125 KB, que le runtime lit au démarrage) : dans le bruit à 21 tours, plus rapide dans 11 d'entre eux ;
+les fonctions grosses et froides sont gardées hors ligne (jamais recopiées dans leurs appelants ; un build plus ancien,
+avant cela, mesurait 1,044 contre 23ac670). La closure de subOrganizationOf des règles écrites à la main est elle aussi
+celle du module : 3 478 dérivations de moins.
 
 ## Règles (2026-11-08)
 

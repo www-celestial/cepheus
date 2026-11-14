@@ -9,7 +9,10 @@ temporaire qui part d'une vue : on y écrit comme dans la base, avec les mêmes 
 écrit sur le disque ; c'est la base des tests unitaires et des questions « et si ». Les **règles** (Datalog) dérivent
 des faits à partir de faits : le writer (le seul thread qui applique les écritures d'une base) tient les faits dérivés
 dans chaque vue, comme des faits, à chaque groupe, et `why` donne la preuve de l'un d'eux
-([règles](docs/fr/book/rules.md)).
+([règles](docs/fr/book/rules.md)). OWL 2 RL, les règles d'ontologie du W3C (une ontologie : les classes et les
+propriétés d'un domaine, et leurs axiomes), est une bibliothèque de telles règles (`Cepheus.Owl` ; depuis Cesia, le
+package `owl`), égalité (owl:sameAs) comprise, tenue par des classes de choses égales dont les faits vivent sur un seul
+représentant ([OWL 2 RL](docs/fr/book/rules.md#owl-2-rl-a-library-of-rules)).
 
 ```ocaml
 open Cepheus
@@ -58,7 +61,14 @@ coûte 10,8 µs par le socket Unix (PostgreSQL 18.6 : 26,4), 39,2 µs avec TLS (
 lecture en tout (6,54) ; 16 requêtes en cours sur une seule connexion, 1,46 µs par lecture (le pipeline de 16 de
 PostgreSQL : 9,11). Un programme sur la machine du serveur lit dans sa propre mémoire, de façon linearizable (chaque
 lecture voit tout ce qui a été confirmé avant elle ; G15) : 0,22 µs par lecture ponctuelle, aucun round trip
-(l'aller-retour d'une requête et de sa réponse), et aucune écriture ne l'attend. Tout, de `cluster.toml` au wire
+(l'aller-retour d'une requête et de sa réponse), et aucune écriture ne l'attend. Une replica (une copie tenue à jour)
+sur une autre machine garde une copie de chaque base par mutual TLS (où les deux côtés montrent un certificat), groupe
+pour groupe dans son propre journal : les sauvegardes se prennent sur elle, et `cepheus promote` en fait le primary (le
+serveur qui prend les écritures), à la main ([une replica](docs/fr/book/server.md#a-replica)). Trois serveurs ou plus
+forment un cluster Raft (Raft : un algorithme par lequel plusieurs serveurs s'accordent sur une même suite
+d'écritures) : une écriture est confirmée dès qu'une majorité la tient forcée sur son disque, et quand le leader (le
+serveur qui prend les écritures) est perdu, les autres en élisent un nouveau d'eux-mêmes, sans perdre aucune écriture
+confirmée ([un cluster de trois](docs/fr/book/server.md#a-cluster-of-three-raft)). Tout, de `cluster.toml` au wire
 protocol octet par octet : [le serveur](docs/fr/book/server.md).
 
 ## Depuis Cesia
@@ -82,6 +92,15 @@ Sur la machine du serveur, un `cepheus.Get` de 4 champs coûte 0,77 µs depuis C
 depuis le C : 26,4 µs) ; par TLS, 51,6 µs (49,6 pour PostgreSQL) ; 64 fibers (les threads légers de Cesia) sur une
 seule connexion écrivent aussi vite que 64 connexions. Rien ne se charge avant le premier appel du package, qui coûte
 13 ms une fois par processus.
+
+## Fichiers
+
+Une base garde aussi des fichiers : `cepheus.Put(Scans, "2026-11.pdf", bytes, db, owner = ada)` en stocke un,
+`cepheus.Read` le lit en entier ou par une plage. Ses octets sont coupés en chunks (des morceaux) selon leur contenu
+(FastCDC) et chacun est stocké une seule fois, compressé (LZ4, ou Zstandard pour les fichiers froids, rarement lus),
+scellé avec AEGIS-256 (chiffré et protégé contre toute modification) sous la clé de son propriétaire et vérifié à
+chaque lecture ; `cepheus.Erase(ada, db)` détruit la clé, et chaque fichier qu'elle possédait devient illisible, où que
+soient allés ses octets ([le vault](docs/fr/book/vault.md)).
 
 ## Face aux bases de données établies
 
