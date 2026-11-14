@@ -546,9 +546,11 @@ each, on a fork over one university; 7 rounds; medians of the rounds' medians, p
 | with the 94 rules: write / retract | 27.9 / 41.0 µs | 28.1 / 42.9 µs | 29.1 / 42.2 µs | 1.03 [0.90, 1.17] / 1.00 [0.93, 1.76] |
 
 The microsecond clock of these medians and the shared machine make the rounds' spread wider than any difference.
-Start-up (`bench.exe` without arguments, 21 rounds of 50 runs, alternated): 3.186 ms on 0b8c847, 3.263 ms here
-(paired 1.03 [0.85, 1.11], faster in 1 round of 21): about 3 % more, the code of this step (61 KB of code and frame
-tables: the runtime reads a binary's frame descriptors and relocations at start-up). Databases written by main's and
+Start-up (`bench.exe` without arguments, 21 rounds of 100 runs, alternated, each binary in 7 copies taken in turn: a
+copy's place in memory moves a start-up by up to 2 %): 3.023 ms on 0b8c847, 2.987 ms here (paired 0.989 [0.975, 0.992],
+faster in 21 rounds of 21). The code of this step adds 507 frame descriptors, which the runtime puts in a table at every
+start-up: 0.7 % more (1.007 [1.003, 1.011]); the latency histograms, which made their counters when the modules loaded
+(8 here, 230 KB), now make them at their first value, which gives back more. Databases written by main's and
 by 0b8c847's binaries open here and read the same facts and flags (the digest of one university loaded by each).
 
 **A change of the rules** (step 5's two targets, measured again with this step; [step 5](#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13)'s
