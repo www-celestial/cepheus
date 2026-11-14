@@ -1,0 +1,142 @@
+(** OWL 2 RL from Cesia. OWL 2 is the W3C's language of ontologies: classes ("a professor is a person"), properties
+    and what they mean ("an advisor is a professor", "an e-mail is one person's"). OWL 2 RL is the part of it that
+    rules compute completely, 78 rules in the W3C's tables (OWL 2 Profiles, section 4.3). Here it is the engine's
+    library of rules (Cepheus.Owl): a database gets it by defining its rules, as any rules, and an ontology is then
+    data, facts of the properties below, written with cepheus.Write.
+
+      db = cepheus.Fork(cepheus.Empty, [owl.Vocabulary, Person])?
+      cepheus.Define(owl.Rl(), db)?
+      cepheus.Write([cepheus.Add(cepheus.New(1), owl.SubClassOf, cepheus.New(2))], db)?
+
+    A class is a thing of the database, as any. An axiom about a property is a fact of its description, a thing of
+    its own whose owl.Property is the property: [d, owl.Property, Person.Advisor], then [d, owl.Range, professor].
+    A property of a kind, where a link goes, is its id in the database. *)
+use cesia/cepheus
+
+(** The vocabulary of OWL 2 RL, the kind owl: give it to cepheus.Connect (or Fork) with the program's own kinds. Its
+    fields are the properties below, owl/Type and the others, the same as the engine's library declares. *)
+Vocabulary = cepheus.Kind("owl", {
+  Type: cepheus.Link(many = true), SameAs: cepheus.Link(many = true), DifferentFrom: cepheus.Link(many = true),
+  SubClassOf: cepheus.Link(many = true), EquivalentClass: cepheus.Link(many = true), DisjointWith: cepheus.Link(many = true),
+  ComplementOf: cepheus.Link(many = true), IntersectionOf: cepheus.Link(many = true), UnionOf: cepheus.Link(many = true),
+  OneOf: cepheus.Link(many = true), HasKey: cepheus.Link(many = true), OnProperty: cepheus.Link(many = true),
+  SomeValuesFrom: cepheus.Link(many = true), AllValuesFrom: cepheus.Link(many = true), HasValue: cepheus.Link(many = true),
+  MaxCardinality: cepheus.Int(many = true), MaxQualifiedCardinality: cepheus.Int(many = true), OnClass: cepheus.Link(many = true),
+  Property: cepheus.Link(many = true), Domain: cepheus.Link(many = true), Range: cepheus.Link(many = true),
+  SubPropertyOf: cepheus.Link(many = true), EquivalentProperty: cepheus.Link(many = true), InverseOf: cepheus.Link(many = true),
+  PropertyDisjointWith: cepheus.Link(many = true), Functional: cepheus.Bool(), InverseFunctional: cepheus.Bool(),
+  Transitive: cepheus.Bool(), Symmetric: cepheus.Bool(), Asymmetric: cepheus.Bool(), Irreflexive: cepheus.Bool(),
+  ChainOf: cepheus.Link(many = true), First: cepheus.Link(many = true), Second: cepheus.Link(many = true),
+  SourceIndividual: cepheus.Link(many = true), AssertionProperty: cepheus.Link(many = true),
+  TargetIndividual: cepheus.Link(many = true), TargetValue: cepheus.Text(many = true), Builtin: cepheus.Text(unique = true),
+})
+
+(** [x, Type, c]: the thing x is a member of the class c (rdf:type). *)
+Type = Vocabulary.Type
+(** [x, SameAs, y]: x and y are one thing (owl:sameAs); cepheus.Same(x, db) lists the things made one. *)
+SameAs = Vocabulary.SameAs
+(** [x, DifferentFrom, y]: x and y are never one thing (owl:differentFrom); a write that makes them one is refused. *)
+DifferentFrom = Vocabulary.DifferentFrom
+(** [c, SubClassOf, d]: every member of the class c is a member of d (rdfs:subClassOf). *)
+SubClassOf = Vocabulary.SubClassOf
+(** [c, EquivalentClass, d]: c and d have the same members (owl:equivalentClass). *)
+EquivalentClass = Vocabulary.EquivalentClass
+(** [c, DisjointWith, d]: no thing is a member of both (owl:disjointWith); a write that makes one is refused. *)
+DisjointWith = Vocabulary.DisjointWith
+(** [c, ComplementOf, d]: c holds the things that are not in d (owl:complementOf); a member of both is refused. *)
+ComplementOf = Vocabulary.ComplementOf
+(** [c, IntersectionOf, m], one fact a member m: c holds the things that are in every m (owl:intersectionOf). *)
+IntersectionOf = Vocabulary.IntersectionOf
+(** [c, UnionOf, m], one fact a member m: c holds the things that are in some m (owl:unionOf). *)
+UnionOf = Vocabulary.UnionOf
+(** [c, OneOf, x], one fact a member x: the class c is made of these things (owl:oneOf). *)
+OneOf = Vocabulary.OneOf
+(** [c, HasKey, p], one fact a property p: two members of c with the same values of every p are one thing
+    (owl:hasKey). *)
+HasKey = Vocabulary.HasKey
+(** [r, OnProperty, p]: the restriction r (a class described by a property) is about the property p
+    (owl:onProperty). *)
+OnProperty = Vocabulary.OnProperty
+(** [r, SomeValuesFrom, c]: r holds the things with a value of r's property in the class c (owl:someValuesFrom). *)
+SomeValuesFrom = Vocabulary.SomeValuesFrom
+(** [r, AllValuesFrom, c]: every value of r's property, on a member of r, is in the class c (owl:allValuesFrom). *)
+AllValuesFrom = Vocabulary.AllValuesFrom
+(** [r, HasValue, x]: r holds the things whose value of r's property is the thing x (owl:hasValue). *)
+HasValue = Vocabulary.HasValue
+(** [r, MaxCardinality, n], n 0 or 1: a member of r has at most n values of r's property (owl:maxCardinality). *)
+MaxCardinality = Vocabulary.MaxCardinality
+(** [r, MaxQualifiedCardinality, n], n 0 or 1: at most n values of r's property in the class of OnClass
+    (owl:maxQualifiedCardinality). *)
+MaxQualifiedCardinality = Vocabulary.MaxQualifiedCardinality
+(** [r, OnClass, c]: the class that MaxQualifiedCardinality counts in (owl:onClass). *)
+OnClass = Vocabulary.OnClass
+(** [d, Property, p]: d is the description of the property p, and d's other facts are p's axioms. *)
+Property = Vocabulary.Property
+(** [d, Domain, c]: a thing that has a value of d's property is in the class c (rdfs:domain). *)
+Domain = Vocabulary.Domain
+(** [d, Range, c]: a value of d's property is in the class c (rdfs:range). *)
+Range = Vocabulary.Range
+(** [d, SubPropertyOf, q]: a fact of d's property is a fact of q too (rdfs:subPropertyOf). *)
+SubPropertyOf = Vocabulary.SubPropertyOf
+(** [d, EquivalentProperty, q]: d's property and q have the same facts (owl:equivalentProperty). *)
+EquivalentProperty = Vocabulary.EquivalentProperty
+(** [d, InverseOf, q]: [x, p, y] for d's property p is [y, q, x] (owl:inverseOf). *)
+InverseOf = Vocabulary.InverseOf
+(** [d, PropertyDisjointWith, q]: no two things are linked by both d's property and q (owl:propertyDisjointWith). *)
+PropertyDisjointWith = Vocabulary.PropertyDisjointWith
+(** [d, Functional, true]: a thing has at most one value of d's property: two values are one thing
+    (owl:FunctionalProperty). *)
+Functional = Vocabulary.Functional
+(** [d, InverseFunctional, true]: a value of d's property is one thing's: two things with it are one
+    (owl:InverseFunctionalProperty), as an e-mail. *)
+InverseFunctional = Vocabulary.InverseFunctional
+(** [d, Transitive, true]: [x, p, y] and [y, p, z] give [x, p, z] (owl:TransitiveProperty). *)
+Transitive = Vocabulary.Transitive
+(** [d, Symmetric, true]: [x, p, y] gives [y, p, x] (owl:SymmetricProperty). *)
+Symmetric = Vocabulary.Symmetric
+(** [d, Asymmetric, true]: [x, p, y] and [y, p, x] are never both facts (owl:AsymmetricProperty). *)
+Asymmetric = Vocabulary.Asymmetric
+(** [d, Irreflexive, true]: [x, p, x] is never a fact (owl:IrreflexiveProperty). *)
+Irreflexive = Vocabulary.Irreflexive
+(** [ch, ChainOf, p], with First and Second: a fact of First then one of Second give a fact of p
+    (owl:propertyChainAxiom, of two links; a longer chain is several, through a property of the program's own). *)
+ChainOf = Vocabulary.ChainOf
+(** [ch, First, p1]: the first link of the chain ch. *)
+First = Vocabulary.First
+(** [ch, Second, p2]: the second link of the chain ch. *)
+Second = Vocabulary.Second
+(** [n, SourceIndividual, x]: the thing of the negative assertion n, which says that [x, AssertionProperty's
+    property, TargetIndividual's thing (or TargetValue's text)] is never a fact (owl:NegativePropertyAssertion). *)
+SourceIndividual = Vocabulary.SourceIndividual
+(** [n, AssertionProperty, p]: the property of the negative assertion n. *)
+AssertionProperty = Vocabulary.AssertionProperty
+(** [n, TargetIndividual, y]: the thing the negative assertion n names as the value. *)
+TargetIndividual = Vocabulary.TargetIndividual
+(** [n, TargetValue, s]: the text the negative assertion n names as the value. *)
+TargetValue = Vocabulary.TargetValue
+(** [t, Builtin, "Thing"] and [t, Builtin, "Nothing"]: owl:Thing, the class of every thing, and owl:Nothing, the class
+    of none, which cepheus.Define makes the first time it is given rules of Rl():
+
+      thing = cepheus.Find(1, (t) -> {Where: [[t, owl.Builtin, "Thing"]], Give: {T: t}}, db)?[1].T *)
+Builtin = Vocabulary.Builtin
+
+(** The rules of OWL 2 RL, as data for cepheus.Define: one map a rule, {Rule, Library}, Rule its name, owl/ then the
+    W3C's (owl/cax-sco), which Define takes from the engine's library, for that database. 63 rules: the W3C's that
+    are rules here, a second rule for a W3C rule of two conclusions (owl/scm-eqc1b), and owl/eq; the rest of the 78
+    is held by the engine itself (Cepheus's book, chapter Rules, tells how). A list like any, so a program may define
+    a part of it: list.Filter(r -> r.Rule != "owl/prp-key", owl.Rl()). No rule beside them holds a Not or an
+    aggregate: their rules over a property that is a variable may give any property, so such a rule would read its
+    own absence. *)
+Rl() = [{Rule: name, Library: "owl"} for name in names]
+
+names = [
+  "owl/prp-dom", "owl/prp-rng", "owl/prp-irp", "owl/prp-symp", "owl/prp-asyp", "owl/prp-trp", "owl/prp-spo1",
+  "owl/prp-spo2", "owl/prp-eqp1", "owl/prp-eqp2", "owl/prp-pdw", "owl/prp-inv1", "owl/prp-inv2", "owl/prp-npa1",
+  "owl/prp-npa2", "owl/cls-nothing2", "owl/cls-int1", "owl/cls-int2", "owl/cls-uni", "owl/cls-com", "owl/cls-svf1",
+  "owl/cls-svf2", "owl/cls-avf", "owl/cls-hv1", "owl/cls-hv2", "owl/cls-maxc1", "owl/cls-maxqc1", "owl/cls-maxqc2",
+  "owl/cls-oo", "owl/cax-sco", "owl/cax-eqc1", "owl/cax-eqc2", "owl/cax-dw", "owl/scm-sco", "owl/scm-eqc1",
+  "owl/scm-eqc1b", "owl/scm-eqc2", "owl/scm-spo", "owl/scm-eqp1", "owl/scm-eqp1b", "owl/scm-eqp2", "owl/scm-dom1",
+  "owl/scm-dom2", "owl/scm-rng1", "owl/scm-rng2", "owl/scm-hv", "owl/scm-hvb", "owl/scm-svf1", "owl/scm-svf1b",
+  "owl/scm-svf2", "owl/scm-avf1", "owl/scm-avf1b", "owl/scm-avf2", "owl/scm-int", "owl/scm-uni", "owl/eq",
+  "owl/eq-diff1", "owl/prp-fp", "owl/prp-ifp", "owl/prp-key", "owl/cls-maxc2", "owl/cls-maxqc3", "owl/cls-maxqc4",
+]

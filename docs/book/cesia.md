@@ -575,6 +575,86 @@ Ok({Due: missing, Clear: true})
   without answers has no fact (Ada's `Due` went with her last unpaid invoice). A sum past the largest int refuses the
   group; it never wraps.
 
+## OWL 2 RL
+
+**OWL 2** is the W3C's language of **ontologies**: an ontology says what the words of a domain mean, its **classes**
+("a professor is a person") and its properties ("an advisor is a professor", "an e-mail is one person's"). **OWL 2
+RL** is the part of it that rules compute completely: the W3C gives it as 78 rules ([rules](rules.md#owl-2-rl-a-library-of-rules)
+tells how Cepheus holds each). From Cesia it is the package `owl`, beside `cepheus`, which the program takes too:
+
+```toml
+take = ["cesia/cepheus", "cesia/cepheus/owl"]
+```
+
+```cesia norun
+use deps/www-celestial/cepheus/cesia/cepheus/owl
+use std/list
+
+Person = cepheus.Kind("person", {Name: cepheus.Text(), Email: cepheus.Text(many = true), Advisor: cepheus.Link(many = true)})
+Label = cepheus.Kind("label", {Name: cepheus.Text(unique = true)})
+onto = result.Unwrap(cepheus.Fork(cepheus.Empty, [owl.Vocabulary, Person, Label]))
+io.Print(cepheus.Define(owl.Rl(), onto))
+(* the ontology: a professor is a person; an advisor is a professor; an e-mail is one person's *)
+c = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Label.Name, "Person"), cepheus.Add(cepheus.New(2), Label.Name, "Professor"),
+  cepheus.Add(cepheus.New(2), owl.SubClassOf, cepheus.New(1)),
+  cepheus.Add(cepheus.New(3), owl.Property, Person.Advisor), cepheus.Add(cepheus.New(3), owl.Range, cepheus.New(2)),
+  cepheus.Add(cepheus.New(4), owl.Property, Person.Email), cepheus.Add(cepheus.New(4), owl.InverseFunctional, true)], onto)).Things
+(* two records of one professor, the same e-mail in both, and a student whose advisor is the first *)
+r = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Person.Email, "ada@uni.org"), cepheus.Add(cepheus.New(2), Person.Email, "ada@uni.org"),
+  cepheus.Add(cepheus.New(2), Person.Name, "Ada"), cepheus.Add(cepheus.New(3), Person.Advisor, cepheus.New(1))], onto)).Things
+io.Print(cepheus.Same(r[1], onto))
+io.Print(cepheus.Get(Person, r[1], onto))
+io.Print(list.Sort(result.Unwrap(cepheus.Get(owl.Vocabulary, r[2], onto)).Type), "are", c[1], "and", c[2])
+(* a class disjoint from Person: Ada in it is refused *)
+io.Print(cepheus.Write([cepheus.Add(cepheus.New(1), owl.DisjointWith, c[1]), cepheus.Add(r[1], owl.Type, cepheus.New(1))], onto))
+result.Unwrap(cepheus.Write([cepheus.Retract(r[2], Person.Email, "ada@uni.org")], onto))
+io.Print(cepheus.Same(r[1], onto), cepheus.Get(Person, r[1], onto))
+```
+
+```text
+Ok(missing)
+Ok([65542, 65543])
+Ok({Name: "Ada", Email: ["ada@uni.org"], Advisor: []})
+[65538, 65539] are 65538 and 65539
+Err({Kind: "cepheus", Code: "invalid", Message: "constraint owl/cax-dw: [#65545 owl/DisjointWith #65538] [#65542 owl/Type #65545] [#65542 owl/Type #65538]"})
+Ok([65542]) Ok({Name: missing, Email: ["ada@uni.org"], Advisor: []})
+```
+
+- **The vocabulary** is a kind like any, named `owl`: `owl.Vocabulary`, given to `Connect` (or `Fork`) with the
+  program's own kinds, declares its properties `owl/Type`, `owl/SubClassOf` and the others (the same as the engine's
+  library declares: [the vocabulary](rules.md#the-vocabulary)), and each is a name of the package: `owl.SubClassOf`.
+  A class is a thing of the database, as any; an ontology is facts, written with `Write`, versioned like any.
+- **An axiom about a property** is a fact of its **description**, a thing of its own whose `owl.Property` is the
+  property: `[d, owl.Property, Person.Advisor]`, then `[d, owl.Range, professor]`. A property of a kind, written where
+  a link goes, is its id in the database (read back, it is that Int).
+- **`owl.Rl()` is data**: a list of 63 maps `{Rule, Library}`, one a rule, named `owl/` and the W3C's name
+  (`owl/cax-sco`). `Define` takes each rule's definition from the engine's library, for this database, makes the
+  things owl:Thing and owl:Nothing once (their `owl.Builtin` is `"Thing"` and `"Nothing"`), and defines the rules in
+  one group, as any rules: a program defines them at each start, and the second time writes nothing. A list like any:
+  `list.Filter` keeps a part of it.
+- **Things made one.** `owl/prp-ifp` made the two records one thing: `cepheus.Same(x, db)` gives the **class** of x,
+  the things the rules made the same as it. The facts of a class are kept on one of them, and `Get`, `Find` and
+  `Watch` read any thing of a class as that one: the name written on the second record is read on the first. The
+  e-mail retracted, they are two things again.
+- **Refusals.** A constraint of OWL 2 RL (`owl/cax-dw` here: no thing in two disjoint classes) refuses its group whole,
+  with Code `"invalid"` and the rule's name. A rule of the program that gives the list of one of the library's
+  templates (`owl.IntersectionOf`, `owl.HasKey`: rules over every member at once) is refused by `Define`: only a
+  write changes such a list.
+  No rule beside OWL 2 RL's may hold a `Not` or an aggregate: its rules over a property that is a variable may give
+  any property, so such a rule could read its own absence. That is why this example runs on a [fork](#forks): the
+  chapter's database holds the rules with `Not` and `Sum` above. `owl.Rl()` without the vocabulary, or a name that is
+  no rule of it, is an `Err` of Code `"invalid"`.
+- **Rights.** The rules of OWL 2 RL read properties that are variables, so what they give may come from any kind: a
+  token reads it, and `Same`, only when it reads every kind ([rights](server.md#rights-g16)); `Define` needs a token
+  that writes the whole database. A token of some kinds gets `denied` for `Same`, a question and `Define`, and from
+  `Get` none of the facts the rules may give: it learns no equality.
+- **Security.** Nothing new is decoded: the maps of `owl.Rl()` only name rules, which `Define` takes from the engine's
+  library (a name it lacks is an `Err`), and the writer checks them as any rule, under the rules' budgets (an equality
+  storm costs n − 1 facts, never n², [rules](rules.md#equality-classes-of-equal-things)). `Same` over the network
+  asks the server at most two questions, each under its budget of a question.
+
 ## Files
 
 A **file kind** keeps files in the database: `Scans = cepheus.Files("scan")` is a kind with the fields `Name`,
@@ -762,6 +842,24 @@ alone 3.09 [3.04, 3.13]; the same with the package used but not called 3.51 [3.4
   20.3 [20.2, 20.5] before, $n = 55$; that run's process with the package unused: 4.5): checking the engine's
   fingerprint (BLAKE2 of 2.3 MB, 3.9 ms), loading the system's OpenSSL (1.3 ms), and linking 1.4 MB of machine code
   into the process. Once a process: a program connects once, at its start.
+
+**OWL 2 RL** (`bench/reason.ml owlprep 1`: LUBM-1, 150,477 facts with the univ-bench ontology in OWL 2 RL's
+vocabulary and no rule, a copy for each run; `Define(owl.Rl())` timed in the program, `reason.exe owldefine` for
+OCaml's `define db (Owl.rl o)`; $n = 21$ rounds alternated, each the same 75,560 facts of `owl/Type` after): at the
+server through its Unix socket 1.26 s [1.20, 1.44] against 0.93 [0.90, 1.01] for OCaml on the database in its own
+process, 1.32× [1.22, 1.53] by the rounds' ratios; in a fork 0.82 s [0.81, 0.84] against 0.78 [0.76, 0.81], 1.06×
+[0.99, 1.10].
+
+- The server reasons as OCaml does: over TLS, where the program keeps no copy, `Define` takes 0.84 to 0.94 s (5
+  rounds). The 0.3 s more through the socket are the program's local copy applying the change's 75,560 derived
+  facts, so that its reads see them (a `Define` again, which writes nothing, waits that long for it there, 2 ms over
+  TLS): the price of local reads for a write that large, paid once.
+- In a fork the engine is the same code in the program's process: the 6 % are Cesia's process around it.
+- Start-up does not grow: the package `owl` is read only by a program that uses it. `io.Print(1)` with the package
+  `cepheus` used, not called, 3.64 ms against 3.62 before OWL (1.005 [0.98, 1.04], $n = 21$ rounds of 30 runs,
+  alternated); the first call, which loads the engine, 18.87 ms against 18.78 (1.007 [0.98, 1.02]); `io.Print(1)`
+  alone, the same program in both folders, 1.013 [1.00, 1.05]: the noise. The engine holds OWL 2 RL's rules, 58 KB
+  more to check at its load (4.58 MB); the binding's own code is 14 KB smaller than before.
 
 **The rest of the program.** The package's reader and, on the server's machine, its follower are domains of the
 program's process, and OCaml 5 stops every domain at each minor collection, while the follower's state lives in the

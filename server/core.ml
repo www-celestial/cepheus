@@ -290,6 +290,9 @@ let get c ~id ~kind d thing =
   let n = ref 0 in
   (* a token with rights per kind gets the facts of the kinds it reads, as if the thing had no other *)
   let t = match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> Some (kinds_table c d.index v r) | _ -> None in
+  (* the thing read as its class's representative, as Cepheus.get reads it, for a token that may read the classes
+     (cepheus/same): one that may not gets the thing's own facts, and learns no equality *)
+  let thing = match t with Some t when not (bit t Schema.p_same 1) -> thing | _ -> Query.rep v thing in
   Store.iter_facts v thing (fun p w ->
       match Schema.find v.schema p with
       | Some dsc when (match t with None -> true | Some t -> bit t p 1) -> incr n; Codec.put_varint f p; put_word f v dsc.typ w

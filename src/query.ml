@@ -62,6 +62,11 @@ let rep (v : Store.view) x =
   if x < Schema.first_thing || not (any_same v) then x
   else (let r = ref x in Store.iter_values v x Schema.p_same (fun w -> r := w); !r)
 
+(* the class of x: its representative and the things whose cepheus/same is it, by id (Cepheus.same) *)
+let same (v : Store.view) x =
+  if not (any_same v) then [ x ]
+  else (let r = rep v x in let l = ref [ r ] in Store.iter_things v Schema.p_same r (fun y -> l := y :: !l); List.sort compare !l)
+
 let compile (v : Store.view) q =
   let ty = types v q in
   let side = function

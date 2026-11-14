@@ -317,6 +317,11 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `a watch keeps every row of its question: Sort, Limit and After are for Find` | `Watch` with Sort, Limit or After | watch without them, and sort the rows in Cesia (`list.SortBy`) |
 | `invalid` | `H is reached over the network: give the cluster's certificate authority, ca = "/etc/cepheus/ca.pem"` | Connect over TCP without `ca` | the cluster's `ca.pem` (made by `cepheus cluster init`) |
 | `invalid` | `a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server` | Fork of a database reached over the network | fork `cepheus.Empty`, or run on the server's machine |
+| `invalid` | `OWL 2 RL's rules need its vocabulary: give owl.Vocabulary to Connect (or Fork)` | `Define` of `owl.Rl()` on a database without the kind `owl` | add `owl.Vocabulary` to Connect's list, or Fork's |
+| `invalid` | `P is declared in this database otherwise than in OWL 2 RL's vocabulary` | a property `owl/...` declared with another type, `many` or `unique` | a database whose `owl/` properties are OWL 2 RL's |
+| `invalid` | `N is no rule of OWL 2 RL: owl.Rl() gives its rules` | a map `{Rule, Library: "owl"}` of a name the library does not have | the maps of `owl.Rl()` |
+| `conflict` | `owl:Thing and owl:Nothing could not be made: Define again` | other programs made and removed them while `Define` made them, three times | Define again |
+| `conflict` | `cepheus.Same: the class of N changed while it was read: read it again` | over the network, a class taken apart between the two questions `Same` asks | call `Same` again |
 | `closed` | `this database was closed` | a call on a database after `cepheus.Close` | Connect again |
 | `unreachable` | `no Cepheus server answers at ADDRESS: REASON` | Connect: nothing listens at the socket or the host's port, or what listens does not answer the handshake within 5 s (REASON `no answer within 5 s`, or `the TLS handshake: Resource temporarily unavailable`) | start the server, check the address |
 | `unreachable` | `the server did not answer for 30 s (REASON): a write in flight was applied once or not at all` | a call after the connection broke and stayed broken for the retry budget | start the server; read before writing again |
