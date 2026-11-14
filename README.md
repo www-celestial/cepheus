@@ -6,7 +6,9 @@ or nothing, with who and why; the group is the event, and the journal keeps ever
 **view**, the exact state after one group, and reads it with no lock. A **fork** is a temporary state started from a
 view: written to like the database, with the same checks, and never written to disk; it is the base of unit tests and
 what-if questions. **Rules** (Datalog) derive facts from facts: the writer keeps the derived facts in every view, as
-facts, at each group, and `why` gives the proof of one ([rules](docs/book/rules.md)).
+facts, at each group, and `why` gives the proof of one ([rules](docs/book/rules.md)). OWL 2 RL, the W3C's ontology
+rules, is a library of such rules (`Cepheus.Owl`), equality (owl:sameAs) included, kept by classes of equal things
+whose facts live on one representative ([OWL 2 RL](docs/book/rules.md#owl-2-rl-a-library-of-rules)).
 
 ```ocaml
 open Cepheus

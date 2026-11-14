@@ -27,7 +27,7 @@ it was answered from; `server_sim` checks them over a simulated network with the
 | G14 | through the server, a write sent with its session and serial is applied at most once; sent again until answered, exactly once, every answer naming the same group | F1, F2, broken connections |
 | G15 | every read, in a local reader or at the server, holds every group answered and every state read before it started, and is the exact state after a durable group: reads are linearizable | F1, readers slow, paused or killed, broken streams |
 | G16 | through the server, a connection does exactly what its token's rights permit | always |
-| G17 | every view holds exactly the least model of its asserted facts under its rules, and marks exactly those asserted | always (with G1-G3 under F1, F2) |
+| G17 | every view holds exactly the least model of its asserted facts under its rules (with equality: read through its classes), and marks exactly those asserted | always (with G1-G3 under F1, F2) |
 | G18 | no confirmed group leaves an instance of a constraint (`Never`) | always |
 | G19 | a rule change takes effect at one group | always |
 | G20 | `why` returns a well-founded proof of a fact of the view, or nothing for a non-fact | always |
@@ -461,6 +461,22 @@ rule range-restricted and typed (checked when it is written; a pattern's propert
 pattern whose property is a constant, its values' types those of the property at each instance). A group refused (by
 its budget, a constraint, a schema rule, a derived fact that does not fit its property) leaves nothing.
 
+*With equality* (a rule whose head gives `cepheus/same`, as OWL 2 RL's): the classes of equal things are those of the
+least model of the rules with equality axiomatised (eq-ref, eq-sym, eq-trans, eq-rep-s, eq-rep-p, eq-rep-o: [W3C 2012],
+Table 4), each member but its representative holding `[x cepheus/same r]`; and the view's facts, each thing read as its
+class's representative, are that model's, read the same way: a fact only derived names representatives, a fact a
+program asserted stays as written (the rewriting of [Motik 2015b], Theorem 1: T and ρ together represent the
+materialisation of the axiomatised equality). *Proof sketch.* Insertion: each equality an instance gives merges two
+classes before the next fact runs, and every fact that names the smaller side's representative is rewritten onto the
+larger's at the next round, so the rules, which read representatives only, see exactly the rewritten facts (Motik et
+al.'s invariant 2: every unmarked fact is its own rewriting); a fact's rewriting is derived from the rewriting of its
+premises, so the rewritten least model is reached. Retraction: a class whose facts may have lost a proof is taken
+apart (each member its own representative, every fact only derived that names its representative deleted, its
+consequences checked by B/F) and its members' asserted facts are round 0 of the insertion: Delete-Rederive over the
+class ([Gupta 1993]), exact whatever the order of the deletions. *Tested by* `test/owl.ml` against `Check.least_eq`
+(a union-find, every fact rewritten after each pass), on five paths and random sequences with retractions; a mutant
+that never takes a class apart fails 75 checks.
+
 *Proof.* (1) *Insertion.* Semi-naive evaluation from the group's asserted additions reaches the least fixpoint of the
 rules over the state after the retractions: every rule instance with a fact of round r is enumerated in round r
 (the atoms before the matched one over rounds below r, those after over rounds up to r), so every instance that
@@ -575,6 +591,10 @@ an instance whose body facts are all proved has it as head; the instance that pr
 so each node's children were proved before it, and the tree has no cycle. By G17 every derived fact of v has a
 proof, which the check finds: it explores every instance of every rule that gives the fact, until one is proved.
 
+With equality, a fact of a representative that rewrites a member's asserted fact is proved by a node `cepheus/same`
+whose children are that asserted fact and the facts of the classes (`[x cepheus/same r]`, themselves nodes of
+`cepheus/same` with no children: the proof of an equality itself is not given yet).
+
 *Tested by* `test/reasoning.ml` (every fifth group of each random sequence: every derived fact's proof checked node by
 node — each node's rule exists, its body atoms bind consistently to the children's facts in order, its head is the
 node's fact, its ranges hold, every leaf is asserted in the view — and the named case of a two-step proof).
@@ -611,6 +631,22 @@ node's fact, its ranges hold, every leaf is asserted in the view — and the nam
 kind of its sources too, and a refusal by the rules names only the rule to it ([server](server.md)). *Tested by*
 `test/reasoning.ml` ("where a property's derived facts come from") and `test/server_unit.ml` ("rules and kinds":
 random rules, facts and tokens, every token's reads against the oracle's own reckoning).
+- **Equality storms stay linear.** A rule writer can make many things one (a functional property with n values on one
+  thing): n things cost n − 1 facts of `cepheus/same`, never the n² facts of the axiomatised equality, and each fact
+  is moved O(log n) times over any sequence of merges (union by size). Equalities are applied fact by fact, so such a
+  property costs O(n) rule instances, not the n² pairs a round would enumerate. Every fact a merge writes or moves
+  counts against the budget, so a storm past it is refused whole. *Tested by* `test/owl.ml` ("an equality storm":
+  3,000 things one class, 2,999 facts, 0.05 s; past a budget of 100 facts refused, nothing applied).
+- **An equality cannot reach what it must not.** Two values, a property thing, or a thing the rules name (owl:Thing, a
+  class an unfolded rule names) are never made the same: the group is refused, naming the rule. `cepheus/same` is
+  read as a derived fact: a token with rights per kind reads it, and any property of a rule set with equality (whose
+  facts a merge may rewrite), only when it reads every kind the equalities come from. *Tested by* `test/owl.ml`
+  (eq-rep-p, prp-fp over values) and `test/server_unit.ml` ("equality and kinds").
+- **Templates are bounded.** A list unfolds into one rule of at most 64 copies of its patterns (a group that makes a
+  longer list is refused, naming the rule); a write of a list is a change of the rules, under a change's budget; no
+  rule may give a list, so a list changes by writes only, which the writer sees. Nothing new is decoded: a template is
+  a rule's canonical text (`*p` for its list), read by the rules' parser, which refuses any text that does not print
+  back the same; `cepheus/same`'s facts are ordinary derived facts of the frame.
 
 ## G21 Live questions
 

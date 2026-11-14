@@ -186,6 +186,7 @@ type term = Var of int | Thing of int | Val of value          (* as in questions
 type pattern = { e : term; p : int; v : term }
 type head = Give of pattern | Never
 val prop_var : int -> int                                     (* a pattern's property as the variable ?k *)
+val every : int -> int                                        (* a template's list: [c, every l, m] *)
 type rule = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
 val define : db -> rule list -> (int list, error) result
 val undefine : db -> string list -> (unit, error) result
@@ -215,6 +216,12 @@ the body whose property is a constant has `?k` as its thing or its value. A valu
 that property's type; a head that gives a fact its property cannot take refuses the group (errors `Invalid "rule R
 gives …"`). Such rules run unfolded on the facts of their small relations ([rules](rules.md#specialisation-by-small-relations));
 questions keep constant properties.
+
+A pattern `[c, every l, m]` is a **template**'s list: "for every value m of c's l", the patterns that name m written once
+for each member, the variables only they hold fresh in each copy (OWL 2 RL's cls-int1 and prp-key); the writer
+unfolds it on l's facts, so a write of l is a change of the rules, and no rule may give l
+([templates](rules.md#templates-rules-over-lists)). A head `[x, cepheus/same, y]` (`Schema.p_same`, system property
+6) makes x and y one thing ([equality](rules.md#equality-classes-of-equal-things)).
 
 `undefine db names` removes the rules of these names in one group: their definitions retracted, and the facts only
 they derived with them (a name that is no rule is ignored).
@@ -264,6 +271,30 @@ ada is a member of #65536
 by member-inverse, from [#65536 16 #65537]
 after: 0 and 0
 ```
+
+## OWL 2 RL
+
+```ocaml signature
+module Owl : sig
+  type t = { type_ : int; same_as : int; sub_class_of : int; (* ... a field a property of the vocabulary *) thing : int; nothing : int }
+  val vocabulary : (string * typ * bool * bool) list           (* name, type, many, unique *)
+  val setup : db -> (t, error) result
+  val rl : t -> rule list
+  val description : t -> view -> int -> int option
+  val all_different : t -> int list -> op list
+  val disjoint_classes : t -> int list -> op list
+  val disjoint_properties : t -> (int * int) list -> op list
+end
+val same : view -> int -> int list
+```
+
+`Owl.setup db` declares the vocabulary (`owl/Type`, `owl/SubClassOf`, …, in one group) and makes owl:Thing and
+owl:Nothing (`[t, owl/Builtin, "Thing"]`), once: a database that has them keeps them, and the ids are in the record.
+`Owl.rl o` is the rules (`owl/cax-sco`, …): define them with `define`. `Owl.description o v p` is the thing that
+describes property p (`[d, owl/Property, Link p]`), if one. `all_different`, `disjoint_classes` and
+`disjoint_properties` give the operations that write those n-ary axioms as their pairs. `same v x` is x's class of
+equal things, by id, itself included ([x] when it has none); `get`, `values`, `things` and the questions read a thing
+they name as its class's representative. The whole: [OWL 2 RL](rules.md#owl-2-rl-a-library-of-rules).
 
 ## Reading
 

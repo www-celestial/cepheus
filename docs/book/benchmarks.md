@@ -496,6 +496,101 @@ The two slow rounds through the socket did not repeat in the process, where the 
 timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
 disk whose fsyncs vary that much from round to round.
 
+## Rules, step 6: OWL 2 RL, and equality by rewriting (2026-11-14)
+
+The sixth step of the reasoner ([rules](rules.md#owl-2-rl-a-library-of-rules)): OWL 2 RL as a library of rules
+(`Cepheus.Owl`: its vocabulary, every rule of the W3C's tables, templates over lists), and equality (owl:sameAs) by
+classes of equal things and the rewriting of their facts.
+
+**Method.** `bench/reason.exe` (release build) of the step 3 branch eb264f0 (`bulk`, where this step started) and of
+this branch, each built from its own source. 21 rounds alternated (the order turned each round), a round in one hold of
+the heavy lock, every process in a 3 GB scope; a cell is the median with $[x(1), x(21)]$; a ratio is the median of the
+paired ratios with their range. The machine was shared with other jobs' processes outside the lock. Commands:
+`reason.exe w3c|owl 1 groups -` (LUBM-shaped, one university, a group a department, in memory),
+`reason.exe w3c|owl 10 bulk DIR` (ten universities, one load, durable), `reason.exe uobm 1 rew|ax|plain`,
+`reason.exe storm N`, `reason.exe reads`, `bench.exe` (start-up).
+
+**OWL 2 RL whole against step 2's W3C rules** (the target: as fast). `owl`: the univ-bench ontology written in the
+library's vocabulary, the library's rules (63 rules as written, the equality ones among them); `w3c`: the same ontology
+as facts with the ten W3C rules step 2 measured (cax-sco, scm-sco, prp-dom, prp-rng, prp-spo1, prp-inv1, prp-inv2,
+prp-trp, cls-svf1, cls-int1 over two members). The same 532,205 derived facts of the data on both sides.
+
+| LUBM-shaped | step 3 eb264f0, w3c | this branch, w3c | this branch, owl | owl / w3c |
+|---|---:|---:|---:|---:|
+| one university, a group a department (in memory): reasoning | 0.246 s [0.224, 0.279] | 0.247 s [0.226, 0.272] | **0.277 s** [0.262, 0.359] | 1.15 [1.01, 1.34] |
+| the same, the whole run (data made, written, reasoned) | 0.617 s | 0.615 s | 0.638 s | 1.06 [0.92, 1.26] |
+| derivations / derived facts | 237,731 / 74,710 | 237,731 / 74,710 | 252,120 / 74,768 | |
+| ten universities, one load, durable: the load | 1.795 s [1.709, 2.790] | 1.816 s [1.686, 2.776] | **1.750 s** [1.691, 3.277] | 0.98 [0.61, 1.68] |
+| its reasoning | 0.533 s [0.481, 0.920] | 0.543 s [0.484, 0.607] | **0.512 s** [0.442, 0.532] | 0.92 [0.79, 1.09] |
+| derivations / derived facts | 2,147,932 / 658,865 | 2,147,932 / 658,865 | 2,274,854 / 658,923 | |
+
+The groups' row is the second series (21 rounds, after the last change to the unfolding: prp-npa2, whose value is a
+text, is no longer run on every fact while the ontology has no negative assertion: owl / w3c was 1.20 before); the
+loads' rows the first series (21 rounds). On a load OWL 2 RL whole reasons faster than the ten rules (its unfolded
+program holds fewer rules: the reductions below); group by group it costs 15 % more reasoning, 6 % more of the whole
+run: the 6 % more derivations, and the constraints (cls-nothing2, eq-diff1), whose plans the group's facts are run
+through after the fixpoint.
+
+The library derives a few more facts and makes 6 % more derivations: cls-int2 gives each member of a defined class the
+type of its restriction (`Student ⊓ ∃takesCourse.Course`), which cls-svf1 gave already; the W3C rules step 2 measured
+leave cls-int2 out. On the way, three kinds of unfolded rule are now left out, for both forms: a rule whose head is one
+of its patterns (cax-sco over the reflexive `[r subClassOf r]` that scm-svf1 gives each restriction), two rules that are
+the same edge (cax-sco over scm-int's facts and cls-int2), and a rule whose class follows from a sibling's by the
+subclass edges (prp-dom over the domains scm-dom1 adds up the hierarchy): 3.35 M derivations before, 2.27 M after (step
+2's rules: 2.15 M).
+
+**Equality, UOBM-like.** LUBM-shaped data (one university) where a quarter of the people are recorded 2 to 4 times
+(6,558 records more: the same e-mail, half the person's facts each), the e-mail inverse functional (prp-ifp); UOBM
+(Ma et al. [Ma 2006]) adds such equalities to LUBM, and Motik et al. [Motik 2015b] measured rewriting against the
+axiomatised equality on it. `rew`: OWL 2 RL whole, equality by the classes; `ax`: the same rules, their equalities
+written as `owl/SameAs` facts, with eq-sym, eq-trans, and eq-rep-s and eq-rep-o once for each property (eq-ref left
+out: it would only make `ax` larger). Read through their classes (each fact's things as their class's least member),
+the two give the same 217,232 facts (the digest of their values is equal): an independent check of the rewriting at
+scale. `plain`: the same data with no inverse functional property, nothing made the same.
+
+| one university, 6,558 records more | rew (rewriting) | ax (axiomatised) | rew / ax | plain (no equality) |
+|---|---:|---:|---:|---:|
+| reasoning | **1.066 s** [1.040, 1.126] | 1.957 s [1.902, 2.117] | **0.54** [0.51, 0.59] | 0.364 s [0.357, 0.452] |
+| the 24 groups written | **1.523 s** [1.484, 1.622] | 2.405 s [2.341, 2.622] | 0.63 [0.59, 0.68] | 0.822 s |
+| of which the merges (classes made, facts rewritten) | 0.261 s [0.256, 0.270] | | | |
+| derivations | 402,815 | 1,316,744 | 1 / 3.27 | 310,241 |
+| facts (derived; of equality) | 255,826 (78,394; 6,558) | 358,071 (180,639; 41,220) | 1 / 1.40 (2.30; 6.29) | 274,665 (97,235; 0) |
+
+Against the published gains: Motik et al. measured rewriting 2.3× faster than the axiomatised equality on UOBM (one
+thread, 2696.7 s → 1152.7 s; 3.8× fewer derivations, 3.2× fewer facts), and 31.1× on Claros, whose classes are large
+(85.5× fewer derivations). Here 1.84× on the UOBM-like data, with 3.27× fewer derivations: the same order as their
+UOBM, whose classes are small too (2 to 4 records here). The gain grows with the classes, as the storm below shows:
+axiomatised, a class of n things holds n² sameAs facts; with n = 100, rewriting takes 0.001 s and the axiomatised
+equality 0.139 s (1,030,001 derivations, 20,423 facts), with n = 200, 0.002 s against 0.343 s (8,120,001
+derivations, 80,523 facts): 139× and 172×; with n = 400 the axiomatised equality passes the budget and its group is
+refused, naming prp-fp. Rewriting costs more than the same data without equality (`plain`, 0.364 s): each record's
+facts are derived once before its merge and moved after it, and the merges themselves (0.26 s) look up every
+property that could name the merged thing.
+
+**An equality storm** (a functional property with n values on one thing: n things become one; one group, in memory):
+
+| n | reasoning | of which merges | facts of `cepheus/same` |
+|---:|---:|---:|---:|
+| 1,000 | 0.011 s | 0.004 s | 999 |
+| 10,000 | 0.164 s | 0.074 s | 9,999 |
+| 100,000 | 1.42 s | 0.84 s | 99,999 |
+
+(single runs; `reason.exe storm N`)
+
+Linear: n − 1 facts of `cepheus/same`, where the axiomatised equality holds n² sameAs facts derived 2n³ + n² + n times
+[Motik 2015b]. Before the equalities were applied fact by fact (at the end of a round), 3,000 things took 3.95 s (the
+n² pairs of the functional property's rule); now 0.05 s.
+
+**Reads and start-up.** A read by id names a thing as its class's representative: one pointer comparison when the
+view holds no equality (21 rounds, LUBM-1 in memory, 2,000,000 reads each): `get` 2,662 ns on step 3, 2,647 ns here
+(paired 1.02 [0.93, 1.11]); `values` 780 and 767 ns (1.00 [0.85, 1.23]). Start-up (`bench.exe`, 21 rounds of 50
+runs): 3.226 ms [3.131, 3.357] on step 3, **3.217 ms** [3.058, 3.371] here, paired 1.00 [0.94, 1.06]: the library and
+the equality add nothing to start-up (the rules are compiled at the first write that needs them, never at open).
+
+**Old databases.** A database written by main 9761e4a and one written by step 3 (LUBM-1 with the 94 rules, a group a
+department) are read whole by step 3's binary and by this one: the same 432,123 facts (131,437 derived), the same
+digest of every fact and its flag.
+
 ## Rules, step 3: the path of loads, sorted and parallel (2026-11-14)
 
 The third step of the reasoner ([rules](rules.md#large-groups)): a large group's facts reasoned as a sorted prefix of

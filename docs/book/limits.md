@@ -34,6 +34,9 @@ defaults, and the cache's size (`set_cache`).
 | rounds on several domains | from 20,000 facts a round, up to 4 domains (`Bulk.domains`), rules without `Not` and aggregates, in a group the writer reasons itself (not a change in the background) | `Reason.par_min` |
 | a rule | 1 pattern or more, at most 64 variables; a pattern's property a constant, or a variable bound by a pattern whose property is a constant | `Rules.check` |
 | a small relation (unfolded on) | at most 10,000 facts, by exact counts; at most 10,000 rules unfolded from one rule | `Reason.small_limit`, `Reason.unfold_limit` |
+| a template | one `every` pattern a rule, no `Not` or aggregate beside it; a list of at most 64 members (a group that makes a longer one is refused, naming the rule); no rule gives a list's property | `Reason.template_limit`, `Rules.check` |
+| equality (`cepheus/same`) | two values are never the same thing, nor two properties, nor a thing a rule names; no `Not` or aggregate in a rule set that makes things the same; with equality the closure modules, the path of loads and the rounds on several domains are off | `Reason.apply_merges`, `Resolve` |
+| OWL 2 RL (`Cepheus.Owl`) | property chains of two links (a longer one through properties of the program's); `owl/HasValue` a thing and `owl/TargetValue` a text (other values: a rule of the program's); AllDifferent, AllDisjointClasses, AllDisjointProperties as their pairs; `Why` gives the rewriting of an equality, not the equality's own proof | `src/owl.ml` |
 | a closure module | prp-trp, or the linear pair over another property, with distinct variables, no constant, no range; on a property of links that takes many values, none unique; one module a property | `Reason.find_modules` |
 | operations in a group | no other limit; every `Expect` is checked against the state before the group | |
 | a batch | up to 4,096 waiting writes resolved at once | `Engine.max_batch` |

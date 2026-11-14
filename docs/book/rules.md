@@ -579,6 +579,207 @@ sorted columns [Urbani 2016]) rather than hashed one by one:
 A group whose rules derive with a `Not` or an aggregate takes the ordinary path. A rule's text that the group itself
 adds is found among the group's new texts, which the dictionary's map does not hold yet.
 
+## OWL 2 RL, a library of rules
+
+**OWL 2** is the W3C's language of *ontologies*: classes ("a professor is a person"), properties and what they mean
+("an advisor is a professor", "an e-mail identifies one person"). **OWL 2 RL** is the part of it that rules can compute
+completely: the W3C gives it as 78 rules, in six tables (OWL 2 Profiles, section 4.3 [W3C 2012]). Cepheus has no switch
+for it: `Cepheus.Owl` is a library of rules over a vocabulary of properties of its own, and a database gets OWL 2 RL by
+defining those rules, as it defines any rules. The ontology is then data: facts written in groups, versioned in the
+journal, and the rules are unfolded on them ([specialisation](#specialisation-by-small-relations)).
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let o = Result.get_ok (Owl.setup db) in
+  ignore (Result.get_ok (define db (Owl.rl o)));
+  let[@warning "-8"] (Ok [ name; email; advisor ]) =
+    declare db [ prop "person/name" Ttext; prop ~many:true "person/email" Ttext; prop ~many:true "person/advisor" Tlink ]
+  in
+  (* the ontology: a professor is a person; an advisor is a professor; an e-mail is one person's *)
+  let r =
+    Result.get_ok
+      (write db
+         [ Add (-1, name, Text "Person"); Add (-2, name, Text "Professor"); Add (-2, o.sub_class_of, Link (-1));
+           Add (-3, o.property, Link advisor); Add (-3, o.range, Link (-2));
+           Add (-4, o.property, Link email); Add (-4, o.inverse_functional, Bool true) ])
+  in
+  let person = thing r (-1) and professor = thing r (-2) in
+  (* two records of one professor, the same e-mail in both, and a student whose advisor is the first *)
+  let r =
+    Result.get_ok
+      (write db
+         [ Add (-1, email, Text "ada@uni.org"); Add (-2, email, Text "ada@uni.org"); Add (-2, name, Text "Ada");
+           Add (-3, advisor, Link (-1)) ])
+  in
+  let a1 = thing r (-1) and a2 = thing r (-2) in
+  let v = view db in
+  let ids l = String.concat ", " (List.map string_of_int l) and show l = String.concat ", " (List.map Value.to_string l) in
+  Printf.printf "the records %d and %d are one thing: %s\n" a1 a2 (ids (same v a1));
+  Printf.printf "its types: %s (Professor is %d, Person %d); its name: %s\n" (show (values v a1 o.type_)) professor person
+    (show (values v a1 name));
+  (match why v a2 o.type_ (Link person) with
+   | Some (By b) -> Printf.printf "a person by %s, from %d facts\n" b.rule (List.length b.from)
+   | _ -> ());
+  (* one record's e-mail retracted: two things again *)
+  ignore (Result.get_ok (write db [ Retract (a2, email, Text "ada@uni.org") ]));
+  Printf.printf "after: %s; %s\n" (ids (same (view db) a1)) (ids (same (view db) a2))
+```
+
+```output
+the records 65542 and 65543 are one thing: 65542, 65543
+its types: #65538, #65539 (Professor is 65539, Person 65538); its name: "Ada"
+a person by owl/prp-rng, from 3 facts
+after: 65542; 65543
+```
+
+- The name written on the second record is read on the first, 65542, the class's representative: reads name a thing
+  as its representative, and `why` of the second record's type proves the representative's. It gives a proof, not
+  the shortest: Person by prp-rng, over the range that scm-rng1 derived (the advisor's range is Professor, and a
+  Professor is a Person).
+- The rules are the W3C's, written in its form: generic rules over the ontology's facts, with the property a variable
+  ([above](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)). The writer runs them unfolded on the ontology, one
+  rule an axiom ("an advisor is a professor" becomes `[x advisor y] -> [y type Professor]`); a write of the ontology
+  is a change of the rules, computed as one ([in the background](#changes-of-the-rules-in-the-background) on a database
+  on the disk).
+- The two records were made **one thing** by `owl/prp-ifp` (an inverse functional property: one value, one thing):
+  their facts are kept on one of them, the **representative**, and `same` lists the class; reads name a thing as its
+  class's representative ([equality](#equality-classes-of-equal-things) below).
+- Retracting the e-mail that made them one splits them again: the class is taken apart and derived again.
+
+### The vocabulary
+
+A property thing keeps only `cepheus/` facts ([a property as a variable](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)),
+and Cepheus has no RDF lists; so the vocabulary differs from OWL's RDF form in three ways, each the smallest that keeps
+the W3C's rules as they are:
+
+- An axiom about a property is a fact of its **description**, a thing of its own: `[d, owl/Property, advisor]` names
+  the property, and d's other facts are its axioms: `[d, owl/Range, Professor]`, `[d, owl/Transitive, true]`. One
+  description a property: the schema rules give derived axioms to it (scm-dom2: a subproperty's description gets the
+  domain of its superproperty's).
+- A **list** (an intersection's classes, a union's, a key's properties, an enumeration's things) is the values of a
+  property that takes many: `[Student, owl/IntersectionOf, Person]`, `[Student, owl/IntersectionOf, r]`. The rules that
+  need every member at once (cls-int1, prp-key) are **templates** ([below](#templates-rules-over-lists)).
+- A **property chain** (p1 then p2 gives p, prp-spo2) is a thing with two links: `[ch, owl/ChainOf, p]`,
+  `[ch, owl/First, p1]`, `[ch, owl/Second, p2]`; a chain of three or more is written as chains of two, through a
+  property of the program's own for each middle step (p1, p2, p3 gives p: p1, p2 gives q; q, p3 gives p).
+- AllDifferent, AllDisjointClasses and AllDisjointProperties are written as their pairs (`Owl.all_different`,
+  `Owl.disjoint_classes`, `Owl.disjoint_properties` make them): what the W3C's n-ary forms mean, pairwise.
+
+| property | on | value | OWL |
+|---|---|---|---|
+| `owl/Type` | a thing | a class | rdf:type |
+| `owl/SameAs`, `owl/DifferentFrom` | a thing | a thing | owl:sameAs, owl:differentFrom |
+| `owl/SubClassOf`, `owl/EquivalentClass`, `owl/DisjointWith`, `owl/ComplementOf` | a class | a class | rdfs:subClassOf, owl:equivalentClass, owl:disjointWith, owl:complementOf |
+| `owl/IntersectionOf`, `owl/UnionOf` | a class | each member class | owl:intersectionOf, owl:unionOf (a list) |
+| `owl/OneOf` | a class | each member thing | owl:oneOf |
+| `owl/HasKey` | a class | each key property | owl:hasKey |
+| `owl/OnProperty` | a restriction | a property | owl:onProperty |
+| `owl/SomeValuesFrom`, `owl/AllValuesFrom`, `owl/OnClass` | a restriction | a class | owl:someValuesFrom, owl:allValuesFrom, owl:onClass |
+| `owl/HasValue` | a restriction | a thing | owl:hasValue (a thing; a value of a text or a number is a rule of the program's) |
+| `owl/MaxCardinality`, `owl/MaxQualifiedCardinality` | a restriction | an int, 0 or 1 | owl:maxCardinality, owl:maxQualifiedCardinality |
+| `owl/Property` | a description | the property | the subject of the property's axioms |
+| `owl/Domain`, `owl/Range` | a description | a class | rdfs:domain, rdfs:range |
+| `owl/SubPropertyOf`, `owl/EquivalentProperty`, `owl/InverseOf`, `owl/PropertyDisjointWith` | a description | a property | rdfs:subPropertyOf, owl:equivalentProperty, owl:inverseOf, owl:propertyDisjointWith |
+| `owl/Functional`, `owl/InverseFunctional`, `owl/Transitive`, `owl/Symmetric`, `owl/Asymmetric`, `owl/Irreflexive` | a description | `true` | the property's characteristics |
+| `owl/ChainOf`, `owl/First`, `owl/Second` | a chain | a property | owl:propertyChainAxiom (two links) |
+| `owl/SourceIndividual`, `owl/AssertionProperty`, `owl/TargetIndividual`, `owl/TargetValue` | a negative assertion | a thing, a property, a thing, a text | owl:NegativePropertyAssertion |
+| `owl/Builtin` | owl:Thing, owl:Nothing | "Thing", "Nothing" | the two classes every ontology has |
+
+`Owl.setup db` declares these properties and makes the things owl:Thing and owl:Nothing, once (a database that has them
+keeps them); `Owl.rl` gives the rules, named `owl/` and the W3C's name (`owl/cax-sco`; a W3C rule with two heads is two
+rules, the second named with a `b`: `owl/scm-eqc1b`).
+
+### Each of the 78 rules
+
+| W3C table | rules | in Cepheus |
+|---|---|---|
+| 4, equality (9) | eq-ref, eq-sym, eq-trans, eq-rep-s, eq-rep-p, eq-rep-o | the classes of equal things and their rewriting ([below](#equality-classes-of-equal-things)); `owl/eq` makes `owl/SameAs` an equality; eq-rep-p: a property is the same as no other (a rule that would make it so refuses its group) |
+| | eq-diff1, eq-diff2, eq-diff3 | the constraint `owl/eq-diff1` (`[x, owl/DifferentFrom, x]`, which a rewritten difference between two equal things becomes); AllDifferent as its pairs |
+| 5, properties (20) | prp-dom, prp-rng, prp-symp, prp-trp, prp-spo1, prp-eqp1, prp-eqp2, prp-inv1, prp-inv2 | rules (a transitive property's closure by the closure module) |
+| | prp-spo2 | a rule over chains of two links |
+| | prp-fp, prp-ifp, prp-key | rules that make things the same; prp-key a template over the key's properties |
+| | prp-irp, prp-asyp, prp-pdw, prp-npa1, prp-npa2 | constraints; prp-adp: AllDisjointProperties as pairs of prp-pdw |
+| | prp-ap | nothing to do: an annotation property is a property like any other |
+| 6, classes (19) | cls-int2, cls-uni, cls-svf1, cls-svf2, cls-avf, cls-hv1, cls-hv2, cls-oo | rules |
+| | cls-int1 | a template over the intersection's members |
+| | cls-maxc2, cls-maxqc3, cls-maxqc4 | rules that make things the same |
+| | cls-nothing2, cls-com, cls-maxc1, cls-maxqc1, cls-maxqc2 | constraints |
+| | cls-thing, cls-nothing1 | the two things `Owl.setup` makes |
+| 7, class axioms (5) | cax-sco, cax-eqc1, cax-eqc2 | rules |
+| | cax-dw | a constraint; cax-adc: AllDisjointClasses as pairs of cax-dw |
+| 8, datatypes (5) | dt-type1, dt-type2, dt-eq, dt-diff, dt-not-type | held by the typed values: a value has one type and one word ([concepts](concepts.md)), an ill-typed value never enters, equal values are one fact |
+| 9, schema (20) | scm-sco, scm-eqc1, scm-eqc2, scm-spo, scm-eqp1, scm-eqp2, scm-dom1, scm-dom2, scm-rng1, scm-rng2, scm-hv, scm-svf1, scm-svf2, scm-avf1, scm-avf2, scm-int, scm-uni | rules over the ontology's facts (scm-sco by the closure module); scm-hv, scm-svf1 and scm-avf1 have a second rule for the case a reflexive fact would give |
+| | scm-cls, scm-op, scm-dp | held without facts: a class is its own subclass and owl:Thing's, a property its own subproperty; nothing reflexive is stored, and `x owl/Type owl:Thing` is not stored for every thing (Cepheus declares no classes) |
+
+Every rule has a test that it fires, or that its constraint refuses, on five paths (a fork group by group, the rules
+as written, the ontology after the data, a load on the disk, a change in the background), each view compared with
+the meaning of the rules computed from scratch ([testing](testing.md)).
+
+### Templates: rules over lists
+
+`cls-int1` says: when y has the type of every member of C's intersection, y is a C. Its body has as many patterns as
+the intersection has members: the W3C writes it over a list, `LIST[?x, ?c1, …, ?cn]`. In Cepheus a pattern
+`[c, every L, m]` (OCaml `Cepheus.every L`; in the canonical text `[?0 *40 ?1]`) reads "for every value m of c's L":
+the patterns that name m are written once for each member, and the variables only they hold are fresh in each copy.
+
+```text
+cls-int1:  [c, every owl/IntersectionOf, m] [y, owl/Type, m] -> [y, owl/Type, c]
+over [Student, owl/IntersectionOf, Person] [Student, owl/IntersectionOf, r]:
+           [y, owl/Type, Person] [y, owl/Type, r] -> [y, owl/Type, Student]
+prp-key:   [c, every owl/HasKey, p] [x, owl/Type, c] [y, owl/Type, c] [x, ?p, z] [y, ?p, z] -> [x, cepheus/same, y]
+over a key {email, birth}:
+           [x type C] [y type C] [x email z1] [y email z1] [x birth z2] [y birth z2] -> [x cepheus/same y]
+```
+
+The writer unfolds a template on the list's facts in the rules as written (a list of no member gives no rule), and the
+unfolded rules run as any rule. A template's rules change when its list does, so **a write of a list is a change of
+the rules**: the rules removed (the old unfolding) lose their consequences by B/F, the rules added derive theirs, in
+the group, under a change's budget, and in the background on a database on the disk. No rule may give a list's
+property (refused when the rules are defined, and a fact of it derived refuses the group): a list changes by writes
+only. One template pattern a rule, at most 64 members a list, no `Not` or aggregate beside it.
+
+### Equality: classes of equal things
+
+A rule whose head gives `cepheus/same` (system property 6) makes its two things **the same thing**: OWL's owl:sameAs,
+which the W3C's rules axiomatise (eq-ref, eq-sym, eq-trans: an equivalence; eq-rep-s, eq-rep-p, eq-rep-o: a fact of one
+is a fact of the other). Written as rules, n equal things hold n² sameAs facts derived 2n³ + n² + n times, and every
+fact of each is copied onto all n (Motik, Nenov, Piro, Horrocks [Motik 2015b], section 3). Cepheus keeps them by
+**rewriting** instead, as RDFox does [Motik 2015b]:
+
+- **Classes.** The things made equal form a class, held in a union-find (Tarjan [Tarjan 1975]) merged smaller into
+  larger: one member is the class's **representative**, and each other member x holds one derived fact
+  `[x, cepheus/same, r]`, journaled like any derived fact (replicas, replay and the past need nothing more). A thing
+  changes class O(log n) times over any sequence of merges.
+- **Rewriting.** The facts of a class are kept on its representative: a merge moves the facts only derived of the
+  smaller side's representative onto the larger's, and a fact a program asserted stays where it was written, its
+  rewriting beside it. The rules read the facts of representatives only; their heads name representatives. So a
+  class of n things costs n − 1 facts of `cepheus/same`, and each fact is derived once for the class, not once for
+  each member.
+- **One fact at a time.** The equalities a fact gives are applied before the round's next fact runs, as RDFox's
+  fact-at-a-time evaluation does: the facts they make outdated start nothing. A functional property with n values on
+  one thing costs O(n) rule instances, not the n² pairs a round would enumerate (measured: 3,000 things made one in
+  0.05 s; 3.95 s before).
+- **Reads.** A question, `get`, `values` and `things` read a thing they name as its class's representative (one
+  lookup); `same v x` lists the class. An answer binds the representative for derived facts; a fact a program asserted
+  about another member is also there, as written.
+- **Retraction.** A retraction that may undo an equality takes the class apart and derives it again (Delete-Rederive
+  for the class, [Gupta 1993]): when a rule instance that gave an equality loses a fact, when B/F meets a fact only
+  derived that names a class of several things, or when a write retracts a fact of a member, each member becomes its
+  own representative again, every fact only derived that names the representative is deleted (its consequences
+  checked by B/F), and the asserted facts of the members are derived again from scratch, equalities included. It is
+  exact; B/F on equalities (Motik, Nenov, Piro, Horrocks, IJCAI 2015) would re-derive less, and is left for later.
+- **Limits.** Two different values are never the same thing: a rule that would make them so refuses the group
+  (prp-fp over a property with two values). A property is the same as no other. A thing the rules name as a constant
+  (owl:Thing, a class an unfolded rule names) keeps its own identity: a merge of it refuses the group. A rule set that
+  makes things the same takes no `Not` and no aggregate yet. With equality, the closure modules, the path of loads and
+  the parallel rounds are off; equality rules over a relation with no fact are left out of the unfolded program, so a
+  database whose ontology makes nothing the same keeps them.
+- **Why.** A fact of a representative that rewrites a member's asserted fact is proved by a node `cepheus/same` whose
+  children are that fact and the facts of the classes; the proof of an equality itself is not given yet (G20).
+
 ## What it costs, and against the giants
 
 Measured on this laptop (Intel i7-4720HQ, 2.6 GHz, 4 cores; OCaml 5.5 without flambda), on LUBM-shaped data
@@ -598,7 +799,12 @@ every number: [benchmarks](benchmarks.md#rules-2026-11-08), and for loads
 | its reasoning whole (the group's facts made ready for the joins, 0.13 s, included) | **1.29 M derived facts/s** (0.41 s) | | |
 | the same load as ten groups, a university each: peak resident memory | **133 MB** | | |
 | a derived fact put into the view (a delta of 200,000 changes) | **0.83 µs** in sorted batches; 1.12 µs one by one | | |
+| OWL 2 RL whole (`Cepheus.Owl`) against step 2's ten W3C rules, LUBM-10 in one load: reasoning | **0.512 s** against 0.543 s | | 0.92 |
+| the same, LUBM-1 a group a department: reasoning | **0.277 s** against 0.247 s | | 1.15 |
+| equality by rewriting against axiomatised, UOBM-like (one university, 6,558 duplicate records) | **1.066 s** against 1.957 s | | 1.84× faster, 3.27× fewer derivations |
+| a class of 100,000 things (a functional property's storm) | **1.42 s**, 99,999 facts of `cepheus/same` | | axiomatised: past the budget from 400 things |
 
+The OWL 2 RL and equality numbers: [benchmarks](benchmarks.md#rules-step-6-owl-2-rl-and-equality-by-rewriting-2026-11-14).
 The write path without rules is unchanged: the same student groups on main's binary and this one, 9.06 µs and
 9.06 µs to write, 7.15 and 6.20 µs to retract; start-up, 2 % more for the reasoner's code
 ([benchmarks](benchmarks.md#rules-2026-11-08)).
@@ -657,13 +863,15 @@ Each was weighed against the others in the design; the measurements are the desi
 
 ## What is not here yet
 
-The design's plan has six steps; this version has steps 1 to 5.
+The design's plan has six steps; this version has the six.
 
 - **Step 3's rest**: a change of the rules computed in the background still puts its derived facts into the view's
   delta (not a run of its own), and the joins of its rounds probe the store fact by fact.
 - **Step 5's rest**: a change with new things is computed in the group; a change's derived facts wait for the next
   merge to reach a run.
-- **Step 6**: OWL 2 RL as a library of rules, and equality (`owl:sameAs`) by rewriting.
+- **Step 6's rest**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
+  proof of an equality in `why`; equality beside `Not` and aggregates, the closure modules, the path of loads and the
+  parallel rounds; `owl.Rl()` from Cesia (the OCaml library is `Cepheus.Owl`).
 - The budget as a database setting rather than a number of the process; the group that asserted each leaf of a proof.
 
 ## References
@@ -672,4 +880,5 @@ Every work cited here is in [references](references.md#rules-datalog-materialisa
 Cepheus took from it: [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [Feeley 1987], [Gupta 1993],
 [Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016],
 [Subotic 2018], [Zhao 2020], [Guo 2005], [Hu 2019],
-[Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012].
+[Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012], [Motik 2015b], [Motik 2015c], [Tarjan 1975],
+[Ma 2006].
