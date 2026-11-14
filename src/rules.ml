@@ -46,6 +46,18 @@ let absent k p = absent_base + (k lsl 16) + p
 let[@inline] is_absent p = p >= absent_base && p < agg_base
 let absent_of p = (p - absent_base) lsr 16, (p - absent_base) land 0xffff
 
+(* A template's list pattern (the reasoner design, section 5.16): [c, every L, m] reads "for every value m of c's L";
+   the patterns that name m are written once for each member, the variables only they hold fresh in each copy (the
+   W3C's LIST[...] of OWL 2 RL: cls-int1 over an intersection's members, prp-key over a key's properties). The engine
+   unfolds a template on L's facts (Reason), so a write of L is a change of the rules. *)
+let every_base = 0x2000_0000
+let every p = every_base + p
+let[@inline] is_every p = p >= every_base && p < every_base + 0x1_0000
+let every_of p = p - every_base
+
+(* the property a pattern reads: its own, decoded from a Not's or a template's *)
+let base_prop p = if is_every p then every_of p else if p >= absent_base && p < absent_base + (max_nots lsl 16) then (p - absent_base) land 0xffff else p
+
 type agg = [ `Sum | `Count | `Min | `Max ]
 
 let agg_code : agg -> int = function `Sum -> 0 | `Count -> 1 | `Min -> 2 | `Max -> 3
@@ -103,7 +115,7 @@ let value_text (x : Value.t) =
   | Link n -> Printf.sprintf "l%d" n
 
 let term_text = function Query.Var k -> Printf.sprintf "?%d" k | Thing n -> Printf.sprintf "#%d" n | Val x -> value_text x
-let prop_text p = if p < 0 then Printf.sprintf "?%d" (-1 - p) else string_of_int p
+let prop_text p = if p < 0 then Printf.sprintf "?%d" (-1 - p) else if is_every p then Printf.sprintf "*%d" (every_of p) else string_of_int p
 let pattern_text (q : Query.pattern) = Printf.sprintf "[%s %s %s]" (term_text q.e) (prop_text q.p) (term_text q.v)
 
 let[@inline never] to_text r =
@@ -193,7 +205,11 @@ let[@inline never] of_text name text =
     word "[";
     let e = term () in
     skip ();
-    let p = if peek () = '?' then (incr i; prop_var (int ())) else int () in
+    let p =
+      if peek () = '?' then (incr i; prop_var (int ()))
+      else if peek () = '*' then (incr i; let q = int () in if q < 0 || q >= Schema.first_thing then fail (); every q)
+      else int ()
+    in
     let v = term () in
     word "]";
     { Query.e; p; v }
@@ -286,7 +302,7 @@ let static_types (v : Store.view) r =
       (match q.e with Query.Var x -> set x Value.Tlink | _ -> ());
       if q.p < 0 then set (pvar q.p) Value.Tlink
       else
-        let p = if is_absent q.p then snd (absent_of q.p) else q.p in
+        let p = base_prop q.p in
         match q.v, Schema.find v.schema p with
         | Query.Var x, Some d -> set x d.typ
         | Query.Var _, None -> raise (Bad (Printf.sprintf "no property %d" p))
@@ -312,8 +328,24 @@ let[@inline never] check (v : Store.view) r =
       (fun (q : Query.pattern) ->
         List.iter (fun k -> if k < 0 || k >= r.vars then bad "variable ?%d out of range" k else seen.(k) <- true) (pattern_vars q);
         (match q.e with Query.Val _ -> bad "the thing of a pattern is a variable or a thing" | _ -> ());
-        if q.p >= 0 && Schema.find v.schema q.p = None then bad "no property %d" q.p)
+        if q.p >= 0 && Schema.find v.schema (base_prop q.p) = None then bad "no property %d" (base_prop q.p))
       all;
+    (* a template: one list pattern, its value the member variable, which other patterns name and the head does not *)
+    (match List.filter (fun (q : Query.pattern) -> is_every q.p) pos.where with
+     | [] -> ()
+     | [ t ] -> (
+       if sh.nots <> [||] || sh.agg <> None then bad "a template (every) takes no Not and no aggregate";
+       match t.v with
+       | Query.Var m ->
+         let names (q : Query.pattern) = q.e = Query.Var m || q.v = Query.Var m || q.p = prop_var m in
+         if not (List.exists (fun (q : Query.pattern) -> q != t && names q) pos.where) then
+           bad "the member ?%d of every [..] is in no other pattern" m;
+         (match pos.head with
+          | Give h -> if names h then bad "the member ?%d of every [..] is in its head: each member is a copy of the patterns" m
+          | Never -> ());
+         if t.e = Query.Var m then bad "every [..] lists the values of a thing, not of itself"
+       | _ -> bad "the value of every [..] is a variable: the member")
+     | _ -> bad "one every [..] a rule");
     Array.iteri (fun k s -> if not s then bad "variable ?%d appears in no pattern of the body" k) seen;
     (* a Not: 1 to 4 patterns; a variable in no positive pattern is the own of one Not *)
     Array.iter (fun ps -> if Array.length ps > 4 then bad "a Not takes 1 to 4 patterns, not %d" (Array.length ps)) sh.nots;

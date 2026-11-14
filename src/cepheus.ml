@@ -63,6 +63,8 @@ let write db ?(by = 0) ?(why = "") ops =
 
 let thing r k = List.assoc k r.things
 
+exception Found of int
+
 type prop = Schema.prop = { name : string; typ : typ; many : bool; unique : bool }
 
 let prop ?(many = false) ?(unique = false) name typ = { name; typ; many; unique }
@@ -86,6 +88,7 @@ type pattern = Query.pattern = { e : term; p : int; v : term }
 type head = Rules.head = Give of pattern | Never
 
 let prop_var = Rules.prop_var
+let every = Rules.every
 let absent = Rules.absent
 let aggregate = Rules.aggregate
 type rule = Rules.t = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
@@ -141,6 +144,31 @@ let undefine db names =
       names
   in
   if ops = [] then Ok () else Result.map (fun _ -> ()) (write db ~why:"cepheus: rules" ops)
+
+(* ---- OWL 2 RL, a library of rules (src/owl.ml) ---- *)
+
+module Owl = struct
+  include Owl
+
+  (* the vocabulary declared, and owl:Thing and owl:Nothing made, once: what is there already is kept *)
+  let rec setup db =
+    match declare db (List.map (fun (n, typ, many, unique) -> prop ~many ~unique n typ) vocabulary) with
+    | Error e -> Error e
+    | Ok ids -> (
+      let builtin = List.nth ids (List.length ids - 1) in
+      let v = view db in
+      let find s = match Store.word v (Value.Text s) with Some w -> (match Store.iter_things v builtin w (fun e -> raise_notrace (Found e)) with () -> None | exception Found e -> Some e) | None -> None in
+      match find "Thing", find "Nothing" with
+      | Some thing, Some nothing -> Ok (make ids ~thing ~nothing)
+      | t, n -> (
+        let ops = (match t with None -> [ Add (-1, builtin, Text "Thing") ] | Some _ -> []) @ (match n with None -> [ Add (-2, builtin, Text "Nothing") ] | Some _ -> []) in
+        match write db ~why:"cepheus: owl" ops with
+        | Ok _ | Error (Not_unique _) -> setup db
+        | Error e -> Error e))
+
+  (* the description thing of a property: the thing whose owl/Property is p, if one *)
+  let description (t : t) (v : view) p = match Store.iter_things v t.property p (fun e -> raise_notrace (Found e)) with () -> None | exception Found e -> Some e
+end
 
 type proof = Reason.proof =
   | Given of { e : int; p : int; v : value }

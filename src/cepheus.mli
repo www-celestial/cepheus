@@ -111,6 +111,13 @@ type pattern = Query.pattern = { e : term; p : int; v : term }
 
 type head = Rules.head = Give of pattern | Never
 
+val every : int -> int
+(** [every l]: in a rule's pattern [[c, every l, m]], "for every value m of c's l": the patterns that name m are
+    written once for each of c's values of [l] (the variables only they hold fresh in each copy). A template, as the
+    W3C writes OWL 2 RL's rules over lists: [[c, every intersection_of, m]; [y, type, m]] gives [[y, type, c]] when y
+    has every member's type. The engine unfolds it on [l]'s facts, so a write of [l] changes the rules (it is computed
+    as a rule change); no rule may give [l]. One such pattern a rule, with no Not and no aggregate. *)
+
 val prop_var : int -> int
 (** [prop_var k]: in a rule's pattern, the property as the variable [?k] (a negative number, where a property id
     goes): the W3C's form of OWL 2 RL's rules, [[c, domain, p]; [x, p, y]] gives [[x, type, c]]. Another pattern of
@@ -148,6 +155,81 @@ val define : db -> rule list -> (int list, error) result
 
 val undefine : db -> string list -> (unit, error) result
 (** Removes these rules (by name) in one group: the facts that only they derived go with them. *)
+
+(** {2 OWL 2 RL}
+
+    The rules of the W3C's OWL 2 RL (OWL 2 Profiles, section 4.3) as a library: a vocabulary of properties
+    ([owl/Type], [owl/SubClassOf], ...) and the rules over it, which a database defines as any rules. An ontology is
+    then data: [Add (invoice, o.sub_class_of, Link document)]; the engine runs the rules unfolded on it. [docs/book/rules.md]
+    tells the whole of it, rule by rule. *)
+
+module Owl : sig
+  type t = Owl.t = {
+    type_ : int;
+    same_as : int;
+    different_from : int;
+    sub_class_of : int;
+    equivalent_class : int;
+    disjoint_with : int;
+    complement_of : int;
+    intersection_of : int;  (** a member: [C, intersection_of, A]; C's members are its values *)
+    union_of : int;
+    one_of : int;
+    has_key : int;
+    on_property : int;  (** a restriction's property: a link to the property thing *)
+    some_values_from : int;
+    all_values_from : int;
+    has_value : int;  (** a thing (an individual) *)
+    max_cardinality : int;  (** an int: 0 or 1 in OWL 2 RL *)
+    max_qualified_cardinality : int;
+    on_class : int;
+    property : int;  (** a description thing's property: [d, property, Link p]; d's other facts describe p *)
+    domain : int;
+    range : int;
+    sub_property_of : int;
+    equivalent_property : int;
+    inverse_of : int;
+    property_disjoint_with : int;
+    functional : int;  (** bool, on a description *)
+    inverse_functional : int;
+    transitive : int;
+    symmetric : int;
+    asymmetric : int;
+    irreflexive : int;
+    chain_of : int;  (** a chain thing: [ch, chain_of, p], [ch, first, p1], [ch, second, p2]: p1 then p2 gives p *)
+    first : int;
+    second : int;
+    source_individual : int;  (** a negative assertion: no [source assertion_property target] *)
+    assertion_property : int;
+    target_individual : int;
+    target_value : int;  (** a text *)
+    builtin : int;
+    thing : int;  (** owl:Thing *)
+    nothing : int;  (** owl:Nothing *)
+  }
+
+  val vocabulary : (string * typ * bool * bool) list
+  (** The properties: name ([owl/Type] ...), type, many, unique. *)
+
+  val setup : db -> (t, error) result
+  (** Declares the vocabulary and makes the things owl:Thing and owl:Nothing, once (a database that has them keeps
+      them): their ids. *)
+
+  val rl : t -> rule list
+  (** The rules, named [owl/<W3C name>] ([owl/cax-sco]): define them with {!define}. *)
+
+  val description : t -> view -> int -> int option
+  (** The description thing of a property ([owl/Property] links to it), if one. *)
+
+  val all_different : t -> int list -> op list
+  (** AllDifferent, written as its pairs ([owl/DifferentFrom]). *)
+
+  val disjoint_classes : t -> int list -> op list
+  (** AllDisjointClasses, as its pairs ([owl/DisjointWith]). *)
+
+  val disjoint_properties : t -> (int * int) list -> op list
+  (** AllDisjointProperties of (description thing, property) pairs, as its pairs ([owl/PropertyDisjointWith]). *)
+end
 
 type proof = Reason.proof =
   | Given of { e : int; p : int; v : value }  (** an asserted fact *)

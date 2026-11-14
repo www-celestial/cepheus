@@ -561,6 +561,11 @@ type program = {
   ix_bw : index;  (* backward: the head matched *)
   ix_cons : index;  (* the constraints, forward *)
   spec : spec option;
+  lists : (int * int array) array;  (* the templates' lists (property, its facts as (thing, value) words, sorted) the
+                                       rules as written were unfolded on: a write of one is a change of the rules *)
+  islist : Bytes.t;  (* by property: 1 a template's list *)
+  mutable lruns : Store.run array;  (* the runs and stamps the lists were last seen with (Store.stamp) *)
+  mutable lstamps : Store.stamp array;
   pool : ctx list ref;
   pm : Mutex.t;
 }
@@ -1297,7 +1302,7 @@ let [@inline never] find_modules ?(plain = fun _ -> true) ?dep (v : Store.view) 
   in
   Array.of_list modules, in_module
 
-let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(src : Rules.t array) ~(ids : int array) ~(bad_head : string array) ~spec =
+let [@inline never] build ?(also_reads = [||]) ?(lists = [||]) (v : Store.view) ~key ~(src : Rules.t array) ~(ids : int array) ~(bad_head : string array) ~spec =
   let np = Schema.count v.schema in
   let shapes = Array.map Rules.split src in
   let rules = Array.map (fun (sh : Rules.shape) -> sh.pos) shapes in
@@ -1323,6 +1328,9 @@ let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(src : Rul
      generic rules *)
   if !all <> 0 then Bytes.iteri (fun p c -> Bytes.set reads p (Char.chr (Char.code c lor !all))) reads;
   Array.iter (fun p -> mark p 1) also_reads;
+  Array.iter (fun (p, _) -> mark p 1) lists;
+  let islist = Bytes.make np '\000' in
+  Array.iter (fun (p, _) -> if p < np then Bytes.set islist p '\001') lists;
   let plain ri = nots.(ri) = [||] && aggs.(ri) = None in
   let dep = Array.mapi (fun i (r : Rules.t) -> { r with where = Array.to_list natoms.(i) }) rules in
   let modules, in_module = find_modules ~plain ~dep v rules in
@@ -1360,7 +1368,8 @@ let [@inline never] build ?(also_reads = [||]) (v : Store.view) ~key ~(src : Rul
     consts = Array.of_list (List.rev !consts); orders = Hashtbl.create 64; size = S.facts v; modules; in_module;
     ix_ins; ix_lost; ix_lost_walk; ix_pf = ix_lost;
     ix_bw = build_index np rules ~backward:true give; ix_cons = build_index np rules ~backward:false (fun ri -> never.(ri));
-    spec; pool = ref []; pm = Mutex.create () }
+    spec; lists; islist; lruns = v.runs; lstamps = Array.map (fun (p, _) -> Store.stamp v p (-1)) lists; pool = ref [];
+    pm = Mutex.create () }
 
 (* the stratum of a fact: the stratum of the rules whose heads give it, -1 when none does *)
 let fact_stratum prog p w =
@@ -1370,13 +1379,151 @@ let fact_stratum prog p w =
     let rec f = function [] -> -1 | (w', s) :: rest -> if w' < 0 || w' = w then s else f rest in
     f (Array.unsafe_get prog.pstrat p)
 
-(* the generic program: the rules as written *)
-let [@inline never] make_gen (v : Store.view) =
-  let parsed =
-    List.filter_map (fun (id, (name, text)) -> match Rules.of_text name text with Ok r -> Some (id, r) | Error _ -> None) (Schema.rules v.schema)
+(* ---- templates (the reasoner design, section 5.16) ----
+   A rule with a list pattern [c, every L, m] is unfolded on L's facts: for each thing c with values of L (or the
+   constant c), one rule whose patterns that name m are written once for each member (in the order of their words),
+   m replaced by the member, the variables only those patterns hold fresh in each copy, and the list pattern gone.
+   cls-int1 over an intersection {A, B} gives [y type A] [y type B] -> [y type C]; prp-key over a key {p1, p2} gives
+   [x type C] [y type C] [x p1 z1] [y p1 z1] [x p2 z2] [y p2 z2] -> [x same y]. A list of no member gives no rule (the
+   W3C's LIST[...] has at least one). Unfolded rules keep their template's name and thing. *)
+
+let template_limit = 64  (* members of one list, at most: the patterns of one unfolded rule stay few *)
+
+let [@inline never] unfold_template (v : Store.view) (r : Rules.t) =
+  match List.find_opt (fun (a : Query.pattern) -> Rules.is_every a.p) r.where with
+  | None -> [ r ]
+  | Some ta ->
+    let l = Rules.every_of ta.p in
+    let m = match ta.v with Query.Var m -> m | _ -> invalid_arg "Reason.unfold_template" in
+    let others = List.filter (fun a -> a != ta) r.where in
+    let names (a : Query.pattern) = a.e = Query.Var m || a.v = Query.Var m || a.p = Rules.prop_var m in
+    let per, shared = List.partition names others in
+    let vars_of (a : Query.pattern) =
+      List.filter_map (function Query.Var x -> Some x | _ -> None) [ a.e; a.v ] @ (if a.p < 0 then [ Rules.pvar a.p ] else [])
+    in
+    let outside = Array.make (max 1 r.vars) false in
+    List.iter (fun a -> List.iter (fun x -> outside.(x) <- true) (vars_of a)) (shared @ (match r.head with Rules.Give h -> [ h ] | Never -> []));
+    List.iter (fun x -> outside.(x) <- true) (vars_of ta);
+    (* the variables of the copies: fresh in each, unless held outside *)
+    let fresh = List.sort_uniq compare (List.filter (fun x -> x <> m && not outside.(x)) (List.concat_map vars_of per)) in
+    let typ = match Schema.find v.schema l with Some d -> Some d.typ | None -> None in
+    (* the lists: (c, its members' words, sorted) *)
+    let lists =
+      match typ, ta.e with
+      | None, _ -> []
+      | Some _, Query.Thing c -> let ws = ref [] in S.iter_values v c l (fun w -> ws := w :: !ws); if !ws = [] then [] else [ c, List.sort compare !ws ]
+      | Some _, Query.Var _ ->
+        let h = Hashtbl.create 16 in
+        S.iter_prop v l (fun e w -> Hashtbl.replace h e (w :: Option.value (Hashtbl.find_opt h e) ~default:[]));
+        List.sort compare (Hashtbl.fold (fun c ws acc -> (c, List.sort_uniq compare ws) :: acc) h [])
+      | Some _, Query.Val _ -> []
+    in
+    List.filter_map
+      (fun (c, ws) ->
+        if List.length ws > template_limit then
+          refuse "rule %s: the list of #%d has %d members (a template takes at most %d)" r.name c (List.length ws) template_limit;
+        let next = ref r.vars in
+        let cterm : Query.term -> Query.term = function Query.Var x when ta.e = Query.Var x -> Thing c | t -> t in
+        let ok = ref true in
+        let copies =
+          List.concat_map
+            (fun w ->
+              let ren = Hashtbl.create 4 in
+              List.iter (fun x -> Hashtbl.replace ren x !next; incr next) fresh;
+              let member : Query.term =
+                match Store.value v (Option.get typ) w with Value.Link t -> Thing t | x -> Val x
+              in
+              let term (t : Query.term) : Query.term =
+                match t with
+                | Query.Var x when x = m -> member
+                | Var x -> (match Hashtbl.find_opt ren x with Some y -> Var y | None -> cterm t)
+                | t -> t
+              in
+              let prop p =
+                if p = Rules.prop_var m then (
+                  match member with
+                  | Thing t when t >= Schema.first_prop && t < Schema.first_thing && Schema.find v.schema t <> None -> t
+                  | _ -> ok := false; 0)
+                else if p < 0 then (match Hashtbl.find_opt ren (Rules.pvar p) with Some y -> Rules.prop_var y | None -> p)
+                else p
+              in
+              List.map (fun (a : Query.pattern) -> { Query.e = term a.e; p = prop a.p; v = term a.v }) per)
+            ws
+        in
+        if not !ok then None
+        else begin
+          let ranges =
+            List.concat_map (fun (x, lo, hi) -> if x = m || List.mem x fresh then [] else [ x, lo, hi ]) r.ranges
+          in
+          let shared = List.map (fun (a : Query.pattern) -> { a with e = cterm a.e; v = cterm a.v }) shared in
+          let head = match r.head with Rules.Give h -> Rules.Give { h with e = cterm h.e; v = cterm h.v } | Never -> Never in
+          (* the variables numbered densely again *)
+          let nv = !next in
+          let used = Array.make (max 1 nv) false in
+          let see (a : Query.pattern) = List.iter (fun x -> used.(x) <- true) (vars_of a) in
+          let where = shared @ copies in
+          List.iter see where;
+          (match head with Give h -> see h | Never -> ());
+          let map = Array.make (max 1 nv) (-1) and k = ref 0 in
+          Array.iteri (fun x u -> if u then (map.(x) <- !k; incr k)) used;
+          let t = function Query.Var x -> Query.Var map.(x) | t -> t in
+          let pat (a : Query.pattern) = { Query.e = t a.e; p = (if a.p < 0 then Rules.prop_var map.(Rules.pvar a.p) else a.p); v = t a.v } in
+          Some
+            { r with vars = !k; where = List.map pat where; ranges = List.filter_map (fun (x, lo, hi) -> if used.(x) then Some (map.(x), lo, hi) else None) ranges;
+                     head = (match head with Give h -> Give (pat h) | Never -> Never) }
+        end)
+      lists
+
+(* the rules of a view as written, parsed, their templates unfolded on the view's lists: (rule thing, rule) *)
+let [@inline never] written (v : Store.view) =
+  List.concat_map
+    (fun (id, (name, text)) ->
+      match Rules.of_text name text with
+      | Ok r -> List.map (fun r -> id, r) (unfold_template v r)
+      | Error _ -> [])
+    (Schema.rules v.schema)
+
+(* a list's facts: (thing, value) words, sorted *)
+let [@inline never] list_of (v : Store.view) p =
+  let l = ref [] in
+  if Schema.find v.schema p <> None then S.iter_prop v p (fun e w -> l := (e, w) :: !l);
+  let a = Array.of_list !l in
+  Array.sort compare a;
+  Array.concat (Array.to_list (Array.map (fun (e, w) -> [| e; w |]) a))
+
+(* the lists the templates of a view's rules read, and their facts *)
+let [@inline never] list_facts (v : Store.view) =
+  let ps =
+    List.sort_uniq compare
+      (List.concat_map
+         (fun (_, (name, text)) ->
+           match Rules.of_text name text with
+           | Ok r -> List.filter_map (fun (a : Query.pattern) -> if Rules.is_every a.p then Some (Rules.every_of a.p) else None) r.where
+           | Error _ -> [])
+         (Schema.rules v.schema))
   in
+  Array.of_list (List.map (fun p -> p, list_of v p) ps)
+
+(* the generic program: the rules as written, their templates unfolded *)
+let [@inline never] make_gen (v : Store.view) =
+  let parsed = written v in
   let rules = Array.of_list (List.map snd parsed) and ids = Array.of_list (List.map fst parsed) in
-  build v ~key:(Schema.rules_key v.schema) ~src:rules ~ids ~bad_head:(Array.make (Array.length rules) "") ~spec:None
+  build ~lists:(list_facts v) v ~key:(Schema.rules_key v.schema) ~src:rules ~ids ~bad_head:(Array.make (Array.length rules) "") ~spec:None
+
+(* do a view's lists hold the facts the program's templates were unfolded on: by identity first, else by the facts *)
+let [@inline never] lists_hold (prog : program) (v : Store.view) =
+  Array.length prog.lists = 0
+  || (v.runs == prog.lruns
+      && (let ok = ref true in
+          Array.iteri (fun i (p, _) -> if !ok && not (Store.same_stamp (Store.stamp v p (-1)) prog.lstamps.(i)) then ok := false) prog.lists;
+          !ok))
+  ||
+  if Array.for_all (fun (p, f) -> list_of v p = f) prog.lists then begin
+    prog.lruns <- v.runs;
+    prog.lstamps <- Array.map (fun (p, _) -> Store.stamp v p (-1)) prog.lists;
+    true
+  end
+  else false
 
 (* what a group is refused with when a rule gives a fact that does not fit: its thing not a thing, its property not one
    a rule can give, or its value not of the property's type *)
@@ -1595,6 +1742,9 @@ let [@inline never] substitute (v : Store.view) (r : Rules.t) (sty : Value.typ o
    the chain stays, and each such fact is derived once a step (the transitive reduction of their graph, one edge at a
    time, so that reachability never changes). At most 2,000 such rules are weighed. *)
 let [@inline never] reduce (parts : (int * Rules.t * string) list) =
+  (* a rule whose head is one of its patterns gives nothing new (cax-sco over a reflexive [c sub c], which scm-svf1b
+     gives each restriction): dropped *)
+  let parts = List.filter (fun (_, (r : Rules.t), bad) -> bad <> "" || match r.head with Rules.Give h -> not (List.mem h r.where) | Never -> true) parts in
   let edge (r : Rules.t) =
     match r.where, r.head, r.ranges with
     | [ { e = Var x; p; v = Thing a } ], Rules.Give { e = Var x'; p = p'; v = Thing c }, [] when x = x' && p = p' && p >= 0 && a <> c -> Some (p, a, c)
@@ -1623,7 +1773,45 @@ let [@inline never] reduce (parts : (int * Rules.t * string) list) =
       !found
     in
     List.iter (fun (p, a, c) -> if reach p a c then Hashtbl.remove live (p, a, c)) edges;
-    List.filter (fun (_, r, bad) -> bad <> "" || match edge r with Some e -> Hashtbl.mem live e | None -> true) parts
+    (* and of rules that are the same edge (cax-sco over scm-int's facts and cls-int2 give [x type C] -> [x type A]
+       both), one: the others would derive each fact again *)
+    let kept = Hashtbl.create (2 * n) in
+    let parts =
+      List.filter
+        (fun (_, r, bad) ->
+          bad <> ""
+          || match edge r with
+             | Some e -> Hashtbl.mem live e && not (Hashtbl.mem kept e) && (Hashtbl.replace kept e (); true)
+             | None -> true)
+        parts
+    in
+    (* Rules of one body whose heads [t P c] differ only by c (prp-dom over a domain and the domains scm-dom1 gives
+       up its superclasses): one whose c follows from another's c by the edges of P gives nothing the other and the
+       edges do not; it goes (of classes that reach each other, the least stays) *)
+    let reach_any p a c =
+      let seen = Hashtbl.create 16 and stack = ref [ a ] and found = ref false in
+      while (not !found) && !stack <> [] do
+        let u = List.hd !stack in
+        stack := List.tl !stack;
+        List.iter
+          (fun w -> if Hashtbl.mem live (p, u, w) then if w = c then found := true else if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); stack := w :: !stack))
+          (Hashtbl.find_all out (p, u))
+      done;
+      !found
+    in
+    let key (r : Rules.t) = match r.head with Rules.Give { e; p; v = Thing c } when p >= 0 && edge r = None -> Some ((r.where, r.ranges, e, p), c) | _ -> None in
+    let groups = Hashtbl.create 64 in
+    List.iter (fun (_, r, bad) -> if bad = "" then match key r with Some (k, c) -> Hashtbl.replace groups k (c :: Option.value (Hashtbl.find_opt groups k) ~default:[]) | None -> ()) parts;
+    List.filter
+      (fun (_, r, bad) ->
+        bad <> ""
+        ||
+        match key r with
+        | Some (((_, _, _, p) as k), c) ->
+          let cs = Hashtbl.find groups k in
+          not (List.exists (fun c1 -> c1 <> c && reach_any p c1 c && ((not (reach_any p c c1)) || c1 < c)) cs)
+        | None -> true)
+      parts
   end
 
 (* the program of the generic one's rules unfolded on the view's small relations; None when nothing unfolds *)
@@ -1703,7 +1891,7 @@ let [@inline never] make_spec ?unstable (v : Store.view) (gen : program) =
     in
     let parts = Array.of_list (reduce parts) in
     Some
-      (build ~also_reads:(Array.map fst rels) v ~key:gen.key ~src:(Array.map (fun (_, r, _) -> r) parts) ~ids:(Array.map (fun (g, _, _) -> gen.ids.(g)) parts)
+      (build ~also_reads:(Array.map fst rels) ~lists:gen.lists v ~key:gen.key ~src:(Array.map (fun (_, r, _) -> r) parts) ~ids:(Array.map (fun (g, _, _) -> gen.ids.(g)) parts)
          ~bad_head:(Array.map (fun (_, _, b) -> b) parts) ~spec:(Some spec))
 
 (* does the view hold the facts the program was unfolded on: by identity first (Store.stamp), else by its facts *)
@@ -1753,7 +1941,7 @@ let [@inline never] programs (v : Store.view) =
       let en =
         let old = Hashtbl.find_opt cache key in
         match old with
-        | Some en when size <= (2 * en.gen.size) + 1024 && (2 * size) + 1024 >= en.gen.size && Schema.count v.schema = en.gen.np -> en
+        | Some en when size <= (2 * en.gen.size) + 1024 && (2 * size) + 1024 >= en.gen.size && Schema.count v.schema = en.gen.np && lists_hold en.gen v -> en
         | _ ->
           let gen = make_gen v in
           (* rules with Not or aggregates run as written: their strata are the rules' *)
@@ -3240,11 +3428,25 @@ let rec run ?background ?limit ?stop ~(v0 : Store.view) (v : Store.view) (change
   | exception e -> seconds := !seconds +. (Unix.gettimeofday () -. t0); raise e
 
 and run_ ?(background = false) ?limit ?(stop = never) ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
-  let same = Schema.rules_key v0.schema = Schema.rules_key v.schema in
-  if same && not (Schema.has_rules v.schema) then v, changes
-  else if background && not same then raise Background
+  let same_key = Schema.rules_key v0.schema = Schema.rules_key v.schema in
+  if same_key && not (Schema.has_rules v.schema) then v, changes
+  else if background && not same_key then raise Background
   else begin
     let gen, spec = programs v in
+    (* a write of a template's list changes the rules as written (their unfolding) *)
+    let lists = same_key && Bytes.length gen.islist > 0 && Array.exists (fun (ch : Group.change) -> ch.p < Bytes.length gen.islist && Bytes.get gen.islist ch.p <> '\000') changes in
+    (* the rules removed and added by this group, as unfolded: the old ones on the state before *)
+    let removed, added_idx =
+      if same_key && not lists then [], []
+      else begin
+        let old = List.map snd (written v0) in
+        let removed = List.filter (fun r -> not (Array.exists (fun r' -> r' = r) gen.src)) old in
+        let added = List.filter (fun i -> not (List.mem gen.src.(i) old)) (List.init (Array.length gen.src) Fun.id) in
+        removed, added
+      end
+    in
+    let same = same_key && removed = [] && added_idx = [] in
+    if background && not same then raise Background;
     let prog =
       if not same then gen
       else
@@ -3255,9 +3457,9 @@ and run_ ?(background = false) ?limit ?(stop = never) ~(v0 : Store.view) (v : St
     in
     incr (if prog == gen then gen_groups else spec_groups);
     let go prog ~whole =
-      match reason ?limit ~whole ~stop ~v0 v changes words prog same with
+      match reason ?limit ~whole ~stop ~removed ~added_idx ~v0 v changes words prog same with
       | r -> r
-      | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; reason ?limit ~whole ~stop ~v0 v changes words gen same
+      | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; reason ?limit ~whole ~stop ~removed ~added_idx ~v0 v changes words gen same
     in
     match go prog ~whole:(not same) with
     | r -> r
@@ -3269,7 +3471,7 @@ and run_ ?(background = false) ?limit ?(stop = never) ~(v0 : Store.view) (v : St
       else go gen ~whole:true
   end
 
-and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
+and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list) ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
     let reads p = if p < prog.np then Char.code (Bytes.unsafe_get prog.reads p) else 0 in
     (* an aggregate's property holds only what its rule gives: no write asserts it, under the rules after the group (a
        retraction of its fact, derived only, is refused before, by Resolve, with the same message; a retraction of an
@@ -3294,11 +3496,6 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
         c.whole <- whole;
         c.stop <- stop;
         Array.iteri (fun mi (m : closure) -> c.mfresh.(mi) <- S.count_prop v0 m.m_t = 0) prog.modules;
-        (* the rules removed or changed, and added or changed, by this group *)
-        let old_rules = if same then [] else Schema.rules v0.schema and new_rules = if same then [] else Schema.rules v.schema in
-        let removed = List.filter (fun (id, r) -> not (List.mem (id, r) new_rules)) old_rules in
-        let added = List.filter (fun (id, r) -> not (List.mem (id, r) old_rules)) new_rules in
-        let added_idx = List.filter_map (fun (id, _) -> let rec f i = if i >= Array.length prog.ids then None else if prog.ids.(i) = id then Some i else f (i + 1) in f 0) added in
         (* the asserted changes the rules may read: round 0, or candidates of B/F *)
         let cands = ref [] and first = ref [] in
         (* first the state each fact is left in by the group's last change of it, which is its state in [v]: no lookup;
@@ -3342,10 +3539,8 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
           changes;
         (* the facts a removed rule gave: each loses a derivation; an aggregate's, every fact of its property *)
         List.iter
-          (fun (_, (name, text)) ->
-            match Rules.of_text name text with
-            | Error _ -> ()
-            | Ok r -> (
+          (fun (r : Rules.t) ->
+            (
               let sh = Rules.split r in
               match sh.pos.head with
               | Never -> ()
@@ -3478,6 +3673,10 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
             let e = fe ws x and p = fp ws x and w = fw ws x in
             if has ws x 16 then (if n = 2 then todo e p w n b)
             else begin
+              (* a template's list changes by writes only: its unfolding is the rules as written *)
+              if p < Bytes.length prog.islist && Bytes.get prog.islist p <> '\000' then
+                refuse "rule %s gives %s, the list of a template: only a write may change it"
+                  (if rule ws x >= 0 then rule_name c (rule ws x) else "?") (match Schema.find c.v.schema p with Some d -> d.name | None -> string_of_int p);
               let kind = if n = 2 then Group.Derived else Group.Underived in
               out := { Group.kind; e; p; v = value_of c.v p w } :: !out;
               todo e p w n b
@@ -3574,6 +3773,8 @@ let [@inline never] chain_needs c (ixs : index list) =
 let rec bulk ~(own : string -> int option) ~first_new (v : Store.view) (b : Bulk.t) =
   let n = b.n and gp = b.p and gw = b.w in
   let gen, spec = programs v in
+  (* a write of a template's list is a change of the rules: the ordinary path *)
+  if Array.exists (fun (p, _) -> p + 1 < Array.length b.poff && b.poff.(p + 1) > b.poff.(p)) gen.lists then None else
   let prog =
     choose v gen spec (fun s ->
         (* a fact of each relation touched: one a property frozen whole, one a value frozen *)
@@ -3798,6 +3999,8 @@ let [@inline never] sources (v : Store.view) p =
           | _ -> ())
         prog.rules
     done;
+    (* a template's rules come from its list too (they are its unfolding): every list counts *)
+    if Hashtbl.length out > 0 then Array.iter (fun (l, _) -> Hashtbl.replace out l ()) prog.lists;
     if !any then None else Some (List.sort compare (Hashtbl.fold (fun k () l -> k :: l) out []))
   end
 

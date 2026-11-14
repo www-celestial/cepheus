@@ -21,7 +21,8 @@
                                      payment added and retracted: aggregates and a Not, against the same bodies as plain
                                      rules, and without rules; per group, in microseconds
    reason.exe w3c N groups|bulk DIR|-   as mat N rules, with the univ-bench ontology as facts and the W3C's form of the
-                                     OWL 2 RL rules it needs (10 rules, variable properties), which the engine unfolds *)
+                                     OWL 2 RL rules it needs (10 rules, variable properties), which the engine unfolds
+   reason.exe owl N groups|bulk DIR|-   the same with OWL 2 RL whole (Cepheus.Owl: its vocabulary and every rule) *)
 
 open Cepheus
 
@@ -627,6 +628,73 @@ let w3c_ontology db ids =
     rule "cls-int1" 6 [ pa c3 (q "intersection1") c1; pa c3 (q "intersection2") c2; pa x ty c1; pa x ty c2 ] (pa x ty c3) ],
   ps
 
+(* the univ-bench axioms in the vocabulary of the OWL library (Cepheus.Owl), its rules being owl.Rl(): the same axioms
+   as [w3c_ontology], a description thing a property (its domain, range, superproperties, inverse, transitivity), the
+   defined classes as an intersection of two members (the class and a restriction) *)
+let owl_ontology db ids (o : Owl.t) =
+  let pr = ids.pr and cls = ids.cls in
+  let ops = ref [] and next = ref 0 in
+  let fresh () = decr next; !next in
+  let add s p x = ops := Add (s, p, Link x) :: !ops in
+  let descr = Hashtbl.create 32 in
+  let d p = match Hashtbl.find_opt descr p with Some t -> t | None -> let t = fresh () in Hashtbl.replace descr p t; add t o.property (pr p); t in
+  List.iter
+    (fun (a, b) -> add (cls a) o.sub_class_of (cls b))
+    [ "AdministrativeStaff", "Employee"; "Article", "Publication"; "AssistantProfessor", "Professor";
+      "AssociateProfessor", "Professor"; "Book", "Publication"; "Chair", "Professor"; "ClericalStaff", "AdministrativeStaff";
+      "College", "Organization"; "ConferencePaper", "Article"; "Course", "Work"; "Dean", "Professor";
+      "Department", "Organization"; "Faculty", "Employee"; "FullProfessor", "Professor"; "GraduateCourse", "Course";
+      "GraduateStudent", "Person"; "Institute", "Organization"; "JournalArticle", "Article"; "Lecturer", "Faculty";
+      "Manual", "Publication"; "PostDoc", "Faculty"; "Professor", "Faculty"; "Program", "Organization";
+      "Research", "Work"; "ResearchAssistant", "Person"; "ResearchGroup", "Organization"; "Software", "Publication";
+      "Specification", "Publication"; "SystemsStaff", "AdministrativeStaff"; "TechnicalReport", "Article";
+      "UndergraduateStudent", "Student"; "University", "Organization"; "UnofficialPublication", "Publication";
+      "VisitingProfessor", "Professor"; "Chair", "Person"; "Employee", "Person"; "Student", "Person";
+      "TeachingAssistant", "Person"; "Director", "Person" ];
+  let dom p c = add (d p) o.domain (cls c) and rng p c = add (d p) o.range (cls c) in
+  dom "advisor" "Person"; rng "advisor" "Professor";
+  dom "affiliatedOrganizationOf" "Organization"; rng "affiliatedOrganizationOf" "Organization";
+  dom "affiliateOf" "Organization"; rng "affiliateOf" "Person";
+  dom "age" "Person";
+  dom "degreeFrom" "Person"; rng "degreeFrom" "University";
+  dom "doctoralDegreeFrom" "Person"; rng "doctoralDegreeFrom" "University";
+  dom "emailAddress" "Person";
+  dom "hasAlumnus" "University"; rng "hasAlumnus" "Person";
+  dom "listedCourse" "Schedule"; rng "listedCourse" "Course";
+  dom "mastersDegreeFrom" "Person"; rng "mastersDegreeFrom" "University";
+  dom "member" "Organization"; rng "member" "Person";
+  dom "orgPublication" "Organization"; rng "orgPublication" "Publication";
+  dom "publicationAuthor" "Publication"; rng "publicationAuthor" "Person";
+  dom "publicationResearch" "Publication"; rng "publicationResearch" "Research";
+  dom "researchProject" "ResearchGroup"; rng "researchProject" "Research";
+  dom "softwareDocumentation" "Software"; rng "softwareDocumentation" "Publication";
+  dom "subOrganizationOf" "Organization"; rng "subOrganizationOf" "Organization";
+  dom "teacherOf" "Faculty"; rng "teacherOf" "Course";
+  dom "teachingAssistantOf" "TeachingAssistant"; rng "teachingAssistantOf" "Course";
+  dom "tenured" "Professor";
+  dom "undergraduateDegreeFrom" "Person"; rng "undergraduateDegreeFrom" "University";
+  List.iter (fun (a, b) -> add (d a) o.sub_property_of (pr b))
+    [ "doctoralDegreeFrom", "degreeFrom"; "mastersDegreeFrom", "degreeFrom"; "undergraduateDegreeFrom", "degreeFrom";
+      "headOf", "worksFor"; "worksFor", "memberOf" ];
+  add (d "member") o.inverse_of (pr "memberOf");
+  add (d "hasAlumnus") o.inverse_of (pr "degreeFrom");
+  ops := Add (d "subOrganizationOf", o.transitive, Bool true) :: !ops;
+  let define c a p dc =
+    let r = fresh () in
+    add r o.on_property (pr p);
+    add r o.some_values_from (cls dc);
+    match a with
+    | Some a -> add (cls c) o.intersection_of (cls a); add (cls c) o.intersection_of r
+    | None -> add r o.sub_class_of (cls c)
+  in
+  define "Chair" (Some "Person") "headOf" "Department";
+  define "Dean" None "headOf" "College";
+  define "Director" (Some "Person") "headOf" "Program";
+  define "Employee" (Some "Person") "worksFor" "Organization";
+  define "Student" (Some "Person") "takesCourse" "Course";
+  define "TeachingAssistant" (Some "Person") "teachingAssistantOf" "Course";
+  ignore (ok (write db (List.rev !ops)))
+
 (* the derived facts of the data, not of the ontology's things: what the two forms of the rules must agree on *)
 let data_derived (v : view) ~from_e ~skip =
   let d = ref 0 in
@@ -635,16 +703,30 @@ let data_derived (v : view) ~from_e ~skip =
   done;
   !d
 
-let w3c n path dir =
+let w3c ?(form = "w3c") n path dir =
   Reason.derivations := 0;
   let dir = if dir = "-" then None else Some dir in
   let db = match dir with None -> fork empty | Some d -> ok (open_ d) in
   let ids = setup db in
-  let rules, ps = w3c_ontology db ids in
-  ignore (ok (define db rules));
+  let ids, ps, on_property =
+    if form = "owl" then begin
+      (* OWL 2 RL whole (Cepheus.Owl): its vocabulary, its rules, the ontology in it; the data's types are owl/Type *)
+      let o = ok (Owl.setup db) in
+      ignore (ok (define db (Owl.rl o)));
+      let ids = { ids with ty = o.type_ } in
+      owl_ontology db ids o;
+      let ps = Array.of_list (List.map (fun (n, _, _, _) -> Option.get (property (view db) n)) Owl.vocabulary) in
+      ids, ps, o.on_property
+    end
+    else begin
+      let rules, ps = w3c_ontology db ids in
+      ignore (ok (define db rules));
+      ids, ps, ps.(8)
+    end
+  in
   (* the restrictions are things of the ontology: a fact [x type r] is the W3C form's own step *)
   let restriction = Hashtbl.create 8 in
-  Store.iter_prop (view db) ps.(8) (fun e _ -> Hashtbl.replace restriction e ());
+  Store.iter_prop (view db) on_property (fun e _ -> Hashtbl.replace restriction e ());
   let g = { st = (7 * 0x1E3779B97F4A7C15) lor 1; lit = 0 } in
   let groups = ref 0 in
   Reason.seconds := 0.;
@@ -683,9 +765,9 @@ let w3c n path dir =
   in
   let v = view db in
   let all, d = count_derived v in
-  let dd = data_derived v ~from_e:Schema.first_thing ~skip:(fun p w -> Array.mem p ps || (p = ids.ty && Hashtbl.mem restriction w)) in
+  let dd = data_derived v ~from_e:Schema.first_thing ~skip:(fun p w -> (p <> ids.ty && Array.mem p ps) || (p = ids.ty && Hashtbl.mem restriction w)) in
   let r = !Reason.seconds and ix = !Reason.bulk_index_seconds in
-  Printf.printf "w3c %d %s %s: %.3f s, %d groups (%d unfolded, %d as written), %d facts (%d derived, %d of the data without the restrictions' types), %d derivations; reasoning %.3f s, %.3f M derived/s; of which the working set's build %.3f s\n%!" n
+  Printf.printf "%s %d %s %s: %.3f s, %d groups (%d unfolded, %d as written), %d facts (%d derived, %d of the data without the restrictions' types), %d derivations; reasoning %.3f s, %.3f M derived/s; of which the working set's build %.3f s\n%!" form n
     path (if dir = None then "memory" else "disk") t !groups !Reason.spec_groups !Reason.gen_groups all d dd !Reason.derivations r
     (if r > 0. then float_of_int d /. r /. 1e6 else 0.) ix;
   close db
@@ -846,5 +928,6 @@ let () =
   | [ "closure"; kind; form; dir ] -> closure_bench kind form dir
   | [ "closure-del"; kind; form; dir; how ] -> closure_del kind form dir how
   | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
+  | [ "owl"; n; path; dir ] -> w3c ~form:"owl" (int_of_string n) path dir
   | [ "notagg"; n; k; r; mode ] -> notagg_bench (int_of_string n) (int_of_string k) (int_of_string r) mode
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2
