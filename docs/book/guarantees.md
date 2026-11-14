@@ -492,7 +492,7 @@ recovered view, a replica's or the past's is the writer's, byte for byte of fact
 fact's flag: for each fact, the newest entry gives its state in the new view and the oldest its state below the merged
 runs; a flag changed is a retraction and an addition in the new run.
 (6) *Closure modules.* For prp-trp on $T$ the least model's $T$ is the transitive closure $T^+$ of $T$'s other
-facts; for the linear pair it is $E^* \circ (E \cup B)$, $B$ the facts of $T$ asserted or given by other rules. From
+facts; for the linear pair it is $E^{\ast} \circ (E \cup B)$, $B$ the facts of $T$ asserted or given by other rules. From
 scratch, the module computes exactly these over the strong components (a component's targets are its successors' with
 them, and its own members when it holds a cycle), and makes every pair not present; incrementally, the state before
 the group holds the closure (G17 for the group before, by induction), so a new edge $(a, b)$ adds exactly

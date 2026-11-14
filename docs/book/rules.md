@@ -702,7 +702,7 @@ The same things, the same ids: the engine's library, defined from either languag
 ### The vocabulary
 
 A property thing keeps only `cepheus/` facts ([a property as a variable](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)),
-and Cepheus has no RDF lists; so the vocabulary differs from OWL's RDF form in three ways, each the smallest that keeps
+and Cepheus has no RDF lists; so the vocabulary differs from OWL's RDF form in four ways, each the smallest that keeps
 the W3C's rules as they are:
 
 - An axiom about a property is a fact of its **description**, a thing of its own: `[d, owl/Property, advisor]` names
@@ -921,7 +921,7 @@ The design's plan has six steps; this version has the six.
   merge to reach a run.
 - **Step 6's rest**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
   proof of an equality in `why`; equality beside `Not` and aggregates, the closure modules, the path of loads and the
-  parallel rounds; `owl.Rl()` from Cesia (the OCaml library is `Cepheus.Owl`).
+  parallel rounds.
 - The budget as a database setting rather than a number of the process; the group that asserted each leaf of a proof.
 
 ## References
@@ -931,4 +931,4 @@ Cepheus took from it: [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [
 [Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016],
 [Subotic 2018], [Zhao 2020], [Guo 2005], [Hu 2019],
 [Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012], [Motik 2015b], [Motik 2015c], [Tarjan 1975],
-[Ma 2006].
+[Ma 2006], [Leis 2014], [Budiu 2023].
