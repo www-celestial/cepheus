@@ -758,6 +758,19 @@ let () =
 
 (* ---- a base larger than the cache ---- *)
 
+(* A random question on the paged base's 6,000 things may be a cross product (two parts that share no variable) or a
+   join on a value of three (things that share a tag): tens of millions of rows, the memory of the machine, and the
+   naive evaluator reads every fact again for each binding (24,000 facts a binding). A draw whose work passes 20,000
+   candidates is left out there (None, as a draw that does not type); an error is left to [find], which gives it. *)
+let paged_query r v facts =
+  match C.random_query r v facts qnames with
+  | Some q as some -> (
+    match Query.fold ~seq:true ~budget:20_000 v q ~init:(fun () -> ()) ~step:(fun () _ -> ()) ~merge:(fun () () -> ()) with
+    | () -> some
+    | exception Query.Over_budget _ -> None
+    | exception _ -> some)
+  | None -> None
+
 let () =
   section "a base larger than the cache: pages read and checked as needed, by several domains; damage after open";
   let cap = !Pages.capacity in
@@ -801,7 +814,7 @@ let () =
        let pv = view pf in
        let facts = C.facts_of_view pv in
        for _ = 1 to 15 do
-         match C.random_query r pv facts qnames with
+         match paged_query r pv facts with
          | None -> ()
          | Some q -> (
            match find pv q with
@@ -812,7 +825,7 @@ let () =
          (Atomic.get Pages.misses - m0) fpages;
        (* the base dropped from the cache (as a merge does to the base it replaced): read again from the file *)
        Pages.drop pv.runs.(0).a.pg;
-       let q = C.random_query r pv facts qnames in
+       let q = paged_query r pv facts in
        Option.iter (fun q -> match find pv q with
            | Ok rows -> C.check (C.sorted_rows rows = C.naive facts q) "seed %d: a question after the drop" seed
            | Error e -> C.fail "seed %d: after the drop: %s" seed (message e)) q
@@ -835,7 +848,7 @@ let () =
     | Some (pv, _), _ ->
       let facts = facts0 in
       for _ = 1 to 15 do
-        match C.random_query r pv facts qnames with
+        match paged_query r pv facts with
         | None -> ()
         | Some q -> (
           match find pv q with
