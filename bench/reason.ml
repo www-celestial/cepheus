@@ -892,13 +892,29 @@ let uobm n mode =
 
 (* ---- an equality storm: one thing with n values of a functional property, so n things become one; rewriting must
    keep it linear (n - 1 facts of cepheus/same) where the axiomatised equality holds n^2 facts ---- *)
-let storm n =
+let storm ?(mode = "rew") n =
   let db = fork empty in
   let o = ok (Owl.setup db) in
-  ignore (ok (define db (Owl.rl o)));
   let[@warning "-8"] [ k; tx ] = ok (declare db [ prop ~many:true "t/k" Tlink; prop ~many:true "t/text" Ttext ]) in
+  (* ax: the equality axiomatised, as in [uobm] (the equalities as owl/SameAs facts, eq-sym, eq-trans, eq-rep-s and
+     eq-rep-o for the two properties) *)
+  let rules =
+    if mode = "rew" then Owl.rl o
+    else
+      let x = Var 0 and y = Var 1 and z = Var 2 in
+      List.filter_map (fun (r : rule) -> match r.head with Give h when h.p = Schema.p_same -> if r.name = "owl/eq" then None else Some { r with head = Give { h with p = o.same_as } } | _ -> Some r) (Owl.rl o)
+      @ [ { name = "ax/eq-sym"; vars = 2; where = [ { e = x; p = o.same_as; v = y } ]; ranges = []; head = Give { e = y; p = o.same_as; v = x } };
+          { name = "ax/eq-trans"; vars = 3; where = [ { e = x; p = o.same_as; v = y }; { e = y; p = o.same_as; v = z } ]; ranges = []; head = Give { e = x; p = o.same_as; v = z } } ]
+      @ List.map (fun p -> { name = Printf.sprintf "ax/eq-rep-s-%d" p; vars = 3; where = [ { e = x; p = o.same_as; v = y }; { e = x; p; v = z } ]; ranges = []; head = Give { e = y; p; v = z } }) [ k; tx ]
+      @ [ { name = "ax/eq-rep-o"; vars = 3; where = [ { e = x; p = o.same_as; v = y }; { e = z; p = k; v = x } ]; ranges = []; head = Give { e = z; p = k; v = y } } ]
+  in
+  ignore (ok (define db rules));
   ignore (ok (write db [ Add (-1, o.property, Link k); Add (-1, o.functional, Bool true) ]));
   let r = ok (write db (Add (-1, tx, Text "x") :: List.init n (fun i -> Add (-(i + 2), tx, Text (string_of_int i))))) in
+  (* the receipt's things read once into a table (a walk of the list each would be n^2) *)
+  let ids = Hashtbl.create (2 * n) in
+  List.iter (fun (t, id) -> Hashtbl.replace ids t id) r.things;
+  let thing _ t = Hashtbl.find ids t in
   let x = thing r (-1) in
   Reason.seconds := 0.;
   Reason.merge_seconds := 0.;
@@ -907,8 +923,8 @@ let storm n =
   ignore (ok (write db (List.init n (fun i -> Add (x, k, Link (thing r (-(i + 2))))))));
   let t = now () -. t0 in
   let v = view db in
-  Printf.printf "storm %d: %.3f s (reasoning %.3f s, merges %.3f s), %d derivations, %d facts of cepheus/same, class of %d\n%!" n t !Reason.seconds
-    !Reason.merge_seconds !Reason.derivations (Store.count_prop v Schema.p_same) (List.length (same v (thing r (-2))))
+  Printf.printf "storm %d %s: %.3f s (reasoning %.3f s, merges %.3f s), %d derivations, %d facts (%d of cepheus/same, %d of owl/SameAs)\n%!" n mode t !Reason.seconds
+    !Reason.merge_seconds !Reason.derivations (Store.facts v) (Store.count_prop v Schema.p_same) (Store.count_prop v o.same_as)
 
 (* ---- Not and aggregates (the reasoner's step 4) ----
    N invoices of K lines each (an amount, a day), a group an invoice, then R rounds on them in turn: a line added (of
@@ -1086,5 +1102,6 @@ let () =
   | [ "owl"; n; path; dir ] -> w3c ~form:"owl" (int_of_string n) path dir
   | [ "uobm"; n; mode ] -> uobm (int_of_string n) mode
   | [ "storm"; n ] -> storm (int_of_string n)
+  | [ "storm"; n; mode ] -> storm ~mode (int_of_string n)
   | [ "notagg"; n; k; r; mode ] -> notagg_bench (int_of_string n) (int_of_string k) (int_of_string r) mode
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2

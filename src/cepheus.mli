@@ -238,7 +238,8 @@ type proof = Reason.proof =
 
 val why : view -> int -> int -> value -> proof option
 (** [why v thing property value]: a well-founded proof of a fact of the view, its leaves asserted facts of the view
-    (G20); [None] when the triple is not a fact of the view. Computed when asked: nothing is stored at write time. *)
+    (G20); [None] when the triple is not a fact of the view. Computed when asked: nothing is stored at write time. A
+    thing (and a thing as the value) is read as its class's representative, as {!get} reads it. *)
 
 val sources : view -> int -> int list option
 (** [sources v p]: the properties whose facts the derived facts of property [p] can come from through the rules,

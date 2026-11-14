@@ -51,13 +51,12 @@ let types (v : Store.view) q =
    kept on the representative, [x cepheus/same r] holds when x is not one *)
 (* does the view hold any fact of cepheus/same: known for the newest view asked (its runs and the delta's entry of the
    property), so that a read of a database without equality pays a pointer comparison, not a count over the runs *)
-let same_slot : (Store.run array * Store.stamp * bool) option Atomic.t = Atomic.make None
+let same_slot = Atomic.make None
 
 let any_same (v : Store.view) =
-  let st = Store.stamp v Schema.p_same (-1) in
   match Atomic.get same_slot with
-  | Some (runs, st', b) when runs == v.runs && Store.same_stamp st st' -> b
-  | _ -> let b = Store.count_prop v Schema.p_same > 0 in Atomic.set same_slot (Some (v.runs, st, b)); b
+  | Some (runs, d, b) when runs == v.runs && d == v.delta -> b
+  | _ -> let b = Store.count_prop v Schema.p_same > 0 in Atomic.set same_slot (Some (v.runs, v.delta, b)); b
 
 let rep (v : Store.view) x =
   if x < Schema.first_thing || not (any_same v) then x

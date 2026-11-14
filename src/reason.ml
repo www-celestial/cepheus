@@ -1404,7 +1404,9 @@ let [@inline never] build ?(also_reads = [||]) ?(lists = [||]) (v : Store.view) 
       match r.head with Give h -> mark h.p 2; see_const h.v | Never -> ())
     rules;
   (* a variable property reads or gives every property; the relations a program is unfolded on are read by its
-     generic rules *)
+     generic rules; with equality, every fact may be rewritten (a fact of any property that names a member of a class
+     is read by the rewriting): every property is read *)
+  if Array.exists (fun (r : Rules.t) -> match r.head with Give h -> h.p = Schema.p_same | Never -> false) rules then all := !all lor 1;
   if !all <> 0 then Bytes.iteri (fun p c -> Bytes.set reads p (Char.chr (Char.code c lor !all))) reads;
   Array.iter (fun p -> mark p 1) also_reads;
   Array.iter (fun (p, _) -> mark p 1) lists;
@@ -1909,13 +1911,14 @@ let [@inline never] spec_parts ?unstable (v : Store.view) (gen : program) =
   let n = Array.length gen.rules in
   let unfold g =
     let r = gen.rules.(g) and sty = gen.sty.(g) in
-    (* a rule that makes things the same, over a relation with no fact, is left out while it has none (the relation
-       frozen): a database whose ontology and data make nothing the same keeps the closure modules, the path of
-       loads and the parallel rounds, which classes of equal things turn off *)
+    (* a rule that makes things the same, or that reads a variable property, over a relation with no fact, is left
+       out while it has none (the relation frozen): a database whose ontology and data make nothing the same keeps the
+       closure modules, the path of loads and the parallel rounds, which classes of equal things turn off; and a rule
+       over a variable property that cannot be unfolded (prp-npa2: its value is a text) does not run on every fact *)
     let unst = match unstable with Some f -> f | None -> fun _ -> false in
     let empty =
       match r.head with
-      | Rules.Give h when h.p = Schema.p_same ->
+      | (Rules.Give _ | Never) when (match r.head with Rules.Give h -> h.p = Schema.p_same | Never -> false) || Rules.has_var_prop r ->
         List.find_opt
           (fun (a : Query.pattern) ->
             a.p >= 0 && (not (unst (rel_of a)))

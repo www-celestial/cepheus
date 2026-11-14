@@ -383,7 +383,9 @@ let random_sequences seeds =
    retractions; a refusal must be the meaning's (two values made one, or a constraint broken), and an acceptance too ---- *)
 
 let random_equality seeds =
+  let only = Option.map int_of_string (Sys.getenv_opt "OWL_SEED") in
   for seed = 1 to seeds do
+    if only = None || only = Some seed then begin
     let g = Rng.make (1000 + seed) in
     let pick a = a.(Rng.int g (Array.length a)) in
     let e = setup (fork empty) in
@@ -431,8 +433,17 @@ let random_equality seeds =
          let bad = ref false in
          let m, _ = C.least_eq ~ptyp:(ptyp v0) ~bad (C.rules_of v0) !f in
          C.check (!bad || C.violated (C.rules_of v0) m) "seed %d step %d: refused (%s), but the meaning holds no contradiction" seed step (message err));
-      exact (Printf.sprintf "equality seed %d step %d" seed step) (view e.db)
+      if only <> None then
+        Printf.printf "step %d: %s -> %s\n%!" step
+          (String.concat " " (List.map (function Add (a, b, x) -> Printf.sprintf "+[%d %d %s]" a b (Value.to_string x) | Retract (a, b, x) -> Printf.sprintf "-[%d %d %s]" a b (Value.to_string x) | _ -> "") ops))
+          (match view e.db with v -> Printf.sprintf "group %d" (group v));
+      exact (Printf.sprintf "equality seed %d step %d" seed step) (view e.db);
+      (* and exactly the facts written are asserted (the rewriting leaves them where they were written) *)
+      let mine = List.fold_left (fun s -> function Add (a, b, x) -> F.add (a, b, x) s | _ -> s) F.empty !asserted in
+      let theirs = F.filter (fun (_, p, _) -> p >= Schema.first_prop && List.mem p (List.map (fun (n, _, _, _) -> Option.get (property (view e.db) n)) Owl.vocabulary @ [ e.k; e.l; e.j ]) && p <> o.builtin) (C.asserted_facts (view e.db)) in
+      C.check (F.equal mine (F.filter (fun (_, p, _) -> p <> o.builtin) theirs)) "equality seed %d step %d: the facts written are asserted (%d written, %d asserted)" seed step (F.cardinal mine) (F.cardinal theirs)
     done
+    end
   done
 
 (* ---- an equality storm: a functional property that makes n things one ---- *)
@@ -443,7 +454,7 @@ let storm () =
   ignore (ok (write e.db [ Add (d e 0, o.property, lk e.k); Add (d e 0, o.functional, tru) ]));
   let n = 3000 in
   let r = ok (write e.db (List.init n (fun k -> Add (-(k + 1), e.tx, Text (Printf.sprintf "y%d" k))))) in
-  let ys = List.init n (fun k -> thing r (-(k + 1))) in
+  let ys = List.map snd (List.sort compare (List.map (fun (t, id) -> -t, id) r.things)) in
   let t0 = Unix.gettimeofday () in
   ignore (ok (write e.db (List.map (fun y -> Add (i e 0, e.k, Link y)) ys)));
   let dt = Unix.gettimeofday () -. t0 in

@@ -174,7 +174,10 @@ type proof = Reason.proof =
   | Given of { e : int; p : int; v : value }
   | By of { rule : string; e : int; p : int; v : value; from : proof list }
 
-let why (v : view) e p x = match Store.word v x with None -> None | Some w -> Reason.why v e p w
+(* a thing named, and a thing as the value, read as their classes' representatives (as get and values read them) *)
+let why (v : view) e p x =
+  let e = Query.rep v e and x = match x with Link t -> Link (Query.rep v t) | x -> x in
+  match Store.word v x with None -> None | Some w -> Reason.why v e p w
 
 let sources = Reason.sources
 let rule_budget = Reason.budget_base, Reason.budget_per
