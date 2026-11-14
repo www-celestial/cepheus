@@ -542,13 +542,27 @@ after it has an instance of one, checked from scratch; the named case: the refus
 *Promise.* Defining, changing or removing rules takes effect at the group that writes it: every view before it holds
 the least model under the old rules, every view from it the least model under the new.
 
-*Conditions.* This version reasons inline, in the group that changes the rules, under the budget; the design's
-background path for very large changes comes later and keeps the same promise.
+*Conditions.* None: on a fork and in the deterministic core the change is reasoned in its group; in the threaded writer
+of a database on the disk it is computed beside the writer and installed as one group
+([rules](rules.md#changes-of-the-rules-in-the-background)); a crash at any point included.
 
 *Proof.* The rule's facts and the derived changes they cause are one group: G2 makes them all visible at once or not.
+On the background path, that group's frame is the exact difference between the writer's view and the background's,
+which is the least model of the state at the switch under the new rules: each batch of groups the background caught
+up with keeps it so (the least model is a function of the asserted facts, and incremental reasoning reaches it: G17),
+and the change's asserted part commutes with those groups (no fact in common, checked, else `Conflict`). The writer
+adopts that view only with the group, so no view before it holds a fact of the new rules; replay of the frame gives
+the adopted view, so a recovery, a replica or a local reader gets every view from it whole. Before its frame is
+durable the change is not confirmed, and a crash leaves nothing of it. The protocol is model-checked
+(`spec/RuleChange.tla`).
 
-*Tested by* `test/reasoning.ml` (rules defined, changed and removed at random among the writes; G17 checked on the view
-of every group).
+*Tested by* `test/reasoning.ml` (rules defined, changed and removed at random among the writes, on forks and on
+databases on the disk where every change takes the background path: G17 checked on the view of every group, the same
+decisions as the model's, and the database reopened the same); `test/rulechange.ml` (groups written while a change is
+held after its build, caught up exactly and ordered before it; a group that interferes ends it with `Conflict`; 6
+writers, 24 changes and 2 readers checking every view they take against the least model under its own rules; close
+during a change; kill -9 during changes, each recovered view exact); `tools/tlc.sh` (`spec/RuleChange.tla`, and its
+seven variants that must break).
 
 ## G20 `why` returns a proof
 
@@ -576,6 +590,16 @@ node's fact, its ranges hold, every leaf is asserted in the view — and the nam
   *Tested by* `test/reasoning.ml` ("a closure past the budget": chains of 200 in one group, both rule shapes, edges to
   older and to newer things; the edge joining two chains of 40; the W3C's prp-trp unfolded over a chain; each refused
   whole, the view unchanged, the least model after).
+- **A change of the rules is bounded and can be stopped.** Its derived facts count against a change's budget
+  ($100{,}000 + 100 \times$ its asserted changes $+ 4 \times$ the database's facts), at the build and over the groups
+  it catches up with, so its memory stays in proportion to the database: a rule of $n^2$ facts is refused, named, while
+  the other writers go on. A round on several domains keeps at most twice the budget left in heads before it falls
+  back to one domain, which refuses where it must. If the background falls 65,536 groups behind, the writer waits for
+  it: the log and the deltas stay bounded. A close cancels a change in flight (its reasoning checks a flag every 1,024
+  derived facts); a kill leaves nothing of a change not yet durable. Rules are written only by tokens that write
+  every kind (the server checks it before the write is queued, as for any rule). *Tested by* `test/rulechange.ml`
+  (a cross product refused while a writer goes on; close; kill -9) and `test/server_unit.ml` ("rules are for write
+  tokens").
 - **The unfolded rules give exactly the rules as written.** Beside the proof of G17 (7), the random sequences run a
   third time with unfolding off (`Reason.specialise`), and every group's view must equal the unfolded run's, and both
   the least model computed from scratch: a fault of the unfolding cannot change an answer unseen.

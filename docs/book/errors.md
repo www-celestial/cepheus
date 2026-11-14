@@ -44,6 +44,20 @@ loop of optimistic concurrency).
 | `#E has a value for N (property P)` | `Expect (E, P, None)`, and E has a value for P, whose name is N |
 | `#E does not have V for N (property P)` | `Expect (E, P, Some V)`, and the fact (E, P, V) does not hold; N is P's name |
 
+
+A change of the rules or the ontology computed in the background ([rules](rules.md#changes-of-the-rules-in-the-background))
+answers `Conflict` when a group written meanwhile interfered; `define` tries again by itself:
+
+| message | when |
+|---|---|
+| `group G, written meanwhile, changed [#E P V], which the change writes` | the group asserted or retracted a fact the change asserts or retracts |
+| `group G, written meanwhile, changed the rules` | a change made in its own group (one that makes new things) was ordered first |
+| `#E would have two values of NAME under the new rules` | the groups written meanwhile and the new rules give a one-valued property two values |
+| `NAME V would be taken twice under the new rules` | the same for a unique property |
+| `constraint R: FACTS`, a rule's refusal | the groups written meanwhile break the new rules |
+| `the change derived more than N facts with the groups written meanwhile` | the groups written meanwhile took the change past its budget |
+| `the facts of the change were written meanwhile` | the change's asserted part changed between its build and its install |
+
 ## `Not_unique`
 
 | message | when | do |
@@ -86,6 +100,9 @@ From `write` with rules (the writer's reasoning, the same on a database and on a
 | `[#E P V] is derived by rule R from F and G: retract one of those` | a `Retract` of a fact that is only derived: its premises would derive it again; retract the asserted facts it names (the facts of one proof) |
 | `[#E P V] is derived by a rule` | the same, when no proof of it could be printed |
 | `rule R derived more than N facts from a group of K facts` | the group's derived changes pass the budget, $N = \mathit{base} + \mathit{per} \times K$ ([api](api.md#rules), `rule_budget`); R derived the most. Split the write, or raise the budget |
+| `rule R derived more than N facts from a change of the rules or the ontology` | a change's derived facts pass its budget, $N = \mathit{base} + \mathit{per} \times K + 4 \times$ the database's facts (`change_budget`); R derived the most |
+| `a change of the rules or the ontology derived more than N facts` | the same, found at the change's install, after the groups it caught up with |
+| `the change failed: E` | a change in the background met an error of the engine (a bug), written on the standard error too |
 | `constraint R: FACTS` | the group would make the body of constraint R true: FACTS are the facts of one instance |
 | `rule R gives #E a second value of NAME, which takes one` | a derived value of a one-valued property beside another value |
 | `rule R gives NAME V, which another thing has` | a derived value of a unique property that another thing holds |

@@ -364,7 +364,11 @@ compiled into two programs a rule set: as written, and unfolded on the database'
 view holds those relations' facts, checked at each group by identity); a group runs the unfolded one unless it
 changes a frozen relation. A rule's plans are compiled when they first run, one copy a recursion depth of B/F, and
 transitive properties are kept by closure modules (strong components and unions of targets for a closure from
-scratch, a product of sources and targets for an edge added). The whole of it: [rules](rules.md).
+scratch, a product of sources and targets for an edge added). A change of the rules or the ontology is computed in the
+background in a database on the disk, as a merge is: built from the working view on a domain of its own, caught up
+with the groups logged meanwhile (under the new rules, by batches), and installed by the writer as one group whose
+frame is the difference; its view becomes the working view. Rounds of 20,000 facts and more are derived on several
+domains, by morsels. The whole of it: [rules](rules.md).
 
 ## How it is tested
 

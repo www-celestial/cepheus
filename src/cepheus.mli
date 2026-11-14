@@ -175,6 +175,10 @@ val rule_budget : int ref * int ref
 (** The budget of a write: its derived changes may not pass [fst + snd * its asserted changes] (100,000 + 100 x); a
     group past it is refused, naming the rule that derived the most. *)
 
+val change_budget : int ref
+(** A change of the rules or the ontology may derive this many times the facts of the database before it, beyond
+    [rule_budget] (4): a change past it is refused, naming the rule that derived the most. *)
+
 (** {1 Reading} *)
 
 val get : view -> int -> (int * value) list

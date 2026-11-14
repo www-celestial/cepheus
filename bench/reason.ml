@@ -269,6 +269,22 @@ let count_derived (v : view) =
   done;
   !all, !d
 
+(* the ids of a database [setup] made: the properties declared again (their ids), the class things and the universities
+   found by their names *)
+let ids_of db =
+  let ps =
+    prop ~many:true "type" Tlink
+    :: Array.to_list (Array.map (fun n -> if List.mem n literal then prop ~many:true n Ttext else prop ~many:true n Tlink) props)
+  in
+  let pids = Array.of_list (ok (declare db ps)) in
+  let pr n = let rec go i = if props.(i) = n then pids.(i + 1) else go (i + 1) in go 0 in
+  let v = view db in
+  let named s = match things v (pr "name") (Text s) with x :: _ -> x | [] -> failwith ("no thing named " ^ s) in
+  let cids = Array.map named classes in
+  let cls n = let rec go i = if classes.(i) = n then cids.(i) else go (i + 1) in go 0 in
+  let us = Array.init 1000 (fun u -> named (Printf.sprintf "University%d" u)) in
+  { ty = pids.(0); pr; cls; univ = (fun u -> us.(u)) }
+
 let pct a q = let a = Array.copy a in Array.sort compare a; a.(min (Array.length a - 1) (int_of_float (q *. float_of_int (Array.length a))))
 
 let mat n mode path dir =
@@ -690,8 +706,90 @@ let notagg_bench n k reps mode =
   Printf.printf "notagg %d %d %s: add a line median %.2f us p90 %.2f; retract it median %.2f us p90 %.2f; pay median %.2f us p90 %.2f; unpay median %.2f us p90 %.2f\n%!"
     n k mode (pct add 0.5) (pct add 0.9) (pct del 0.5) (pct del 0.9) (pct pay 0.5) (pct pay 0.9) (pct unpay 0.5) (pct unpay 0.9)
 
+(* the univ-bench rules defined over n universities loaded without them, in memory: one change, inline (a fork) *)
+let define_bench n =
+  let db, ids, _, t, _ = build n false in
+  Gc.compact ();
+  let all0, _ = count_derived (view db) in
+  Reason.seconds := 0.;
+  let t0 = now () in
+  ignore (ok (define db (ontology_rules ids)));
+  let dt = now () -. t0 in
+  let all, d = count_derived (view db) in
+  Printf.printf "define %d: loaded in %.2f s, %d facts; the 94 rules defined in %.3f s (reasoning %.3f s): %d derived, %.2f M derived/s, %d facts after\n%!"
+    n t all0 dt !Reason.seconds d (float d /. dt /. 1e6) all
+
+(* Durable writes of graduate students by [clients] threads for [secs] seconds into a copy of base (n universities
+   without rules); [at] seconds in, with [mode] = with, the univ-bench rules defined (the background path). Prints the
+   change's times and the groups confirmed by each 10 ms, for the windows' throughputs (bench/change.sh). *)
+let change_bench n clients secs at mode dir =
+  (* kind one: the base has the 94 rules, the change adds one (every Person is also a Schedule, a class the data and the
+     rules leave empty, as the design's Person ⊑ Agent); kind all: the base has none, the change defines the 94 *)
+  let kind = match Sys.getenv_opt "CHANGE" with Some k -> k | None -> "one" in
+  let dir = dir ^ "-" ^ kind in
+  let base = dir ^ "-base" in
+  if not (Sys.file_exists base) then begin
+    let db, _, _, t, _ = build ~dir:base n (kind = "one") in
+    ok (snapshot db);
+    close db;
+    Printf.printf "base: %d universities in %.1f s\n%!" n t
+  end;
+  let run = dir ^ "-run" in
+  ignore (Sys.command (Printf.sprintf "rm -rf %s && cp -a %s %s" (Filename.quote run) (Filename.quote base) (Filename.quote run)));
+  let db = ok (open_ run) in
+  let ids = ids_of db in
+  let v = view db in
+  let first p c = List.hd (things v p (Link c)) in
+  let dept = first ids.ty (ids.cls "Department") in
+  let course = first ids.ty (ids.cls "GraduateCourse") and prof = first ids.ty (ids.cls "FullProfessor") in
+  let bins = int_of_float (secs *. 100.) + 1 in
+  let counts = Array.init clients (fun _ -> Array.make bins 0) in
+  let t0 = now () and stop = Atomic.make false in
+  let worker k () =
+    let g = { st = ((k + 1) * 0x1E3779B97F4A7C15) lor 1; lit = 1_000_000 * (k + 1) } in
+    while not (Atomic.get stop) do
+      ignore (ok (write db (student ids g dept course prof)));
+      let b = int_of_float ((now () -. t0) *. 100.) in
+      if b < bins then counts.(k).(b) <- counts.(k).(b) + 1
+    done
+  in
+  let ts = List.init clients (fun k -> Thread.create (worker k) ()) in
+  Thread.delay at;
+  let c0 = now () in
+  if mode = "with" then
+    ignore
+      (ok
+         (define db
+            (if kind = "one" then
+               [ { name = "person-work"; vars = 1; where = [ { e = Var 0; p = ids.ty; v = Thing (ids.cls "Person") } ]; ranges = [];
+                   head = Give { e = Var 0; p = ids.ty; v = Thing (ids.cls "Schedule") } } ]
+             else ontology_rules ids)));
+  let c1 = now () in
+  (* the change's derived facts, by the count of the class it fills (kind one), or all (and those of the few students
+     written since its install) *)
+  let derived =
+    if mode <> "with" then 0
+    else if kind = "one" then List.length (things (view db) ids.ty (Link (ids.cls "Schedule")))
+    else snd (count_derived (view db))
+  in
+  Thread.delay (Float.max 0. (secs -. (c1 -. t0)));
+  Atomic.set stop true;
+  List.iter Thread.join ts;
+  let total = Array.init bins (fun b -> Array.fold_left (fun s a -> s + a.(b)) 0 counts) in
+  let p50 h = float (Histogram.max h) in
+  Printf.printf "change %s: start %.3f s, end %.3f s, build %.3f s, background %.3f s, install %.3f s\n" mode (c0 -. t0) (c1 -. t0)
+    (p50 Engine.build_us /. 1e6) (p50 Engine.change_us /. 1e6) (p50 Engine.install_us /. 1e6);
+  print_string "bins";
+  Array.iter (fun c -> Printf.printf " %d" c) total;
+  print_newline ();
+  if mode = "with" then Printf.printf "facts derived %d\n%!" derived;
+  close db;
+  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote run)))
+
 let () =
   match Array.to_list Sys.argv |> List.tl with
+  | [ "define"; n ] -> define_bench (int_of_string n)
+  | [ "change"; n; c; secs; at; mode; dir ] -> change_bench (int_of_string n) (int_of_string c) (float_of_string secs) (float_of_string at) mode dir
   | [ "mat"; n; mode; path; dir ] -> mat (int_of_string n) mode path dir
   | [ "student"; n; r; dir ] -> student_bench dir (int_of_string n) (int_of_string r)
   | [ "why"; n; r; dir ] -> why_bench dir (int_of_string n) (int_of_string r)

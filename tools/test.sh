@@ -1,5 +1,7 @@
 #!/bin/sh
-# Every test: unit and property tests, the rules' property tests (G17, G18, G20), the exhaustive enumeration, the simulation (SEEDS seeds, 300 by default),
+# Every test: unit and property tests, the rules' property tests (G17, G18, G20), the background path of rule changes
+# (forced interleavings, writers and readers beside changes, the change budget, close, CHANGE_KILLS kill -9 rounds: 10),
+# the exhaustive enumeration, the simulation (SEEDS seeds, 300 by default),
 # the commit buffer's simulation (BUFFER_SEEDS seeds, 300 by default: three databases sharing one buffer),
 # real kill -9 rounds, the bank test, the sale of seats with kill -9 (docs/book/case-seats.md), the file vault (its C,
 # its chunks, its store under simulated power losses, damage, erasure, copies, a fuzzed reader) and real kill -9 rounds
@@ -33,6 +35,7 @@ dune build --profile release 2>&1
 b=_build/default/test
 CEPHEUS_TMP=$tmp $b/unit.exe | tail -1
 $b/reasoning.exe | tail -1
+CEPHEUS_TMP=$tmp $b/rulechange.exe "${CHANGE_KILLS:-10}" | tail -1
 $b/exhaustive.exe | tail -5
 $b/sim.exe --seeds "${SEEDS:-300}" | tail -2
 # its stderr: the engine reporting the failures it is given (a cut whose fsync failed too)

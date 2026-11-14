@@ -56,6 +56,24 @@ let agg_message (v : Store.view) p =
 let budget_base = ref 100_000
 let budget_per = ref 100
 
+(* A change: a group that changes the rules, or the ontology (a group past a data write's budget that writes a fact of a
+   relation the rules are unfolded on in the state before it: [ontology] below). Its budget is a data
+   write's plus [change_per] x the facts of the database before it (the design's section 5.11): a change may derive in
+   proportion to the database it applies to, and a runaway rule is still stopped, named. The threaded writer runs a
+   change on the background path ([Background]); a fork and the deterministic core run it in the group, with the
+   same budget, so they accept and refuse exactly what the database does (G8). *)
+let change_per = ref 4
+
+(* raised by [run ~background:true] for a change, before any reasoning for a change of the rules, past the data
+   budget for a change of the ontology: the writer takes the group to the background path *)
+exception Background
+
+(* past a data write's budget: a refusal, unless the group changes the ontology (then a change's budget) *)
+exception Exceeded of string
+
+(* never set: the [stop] of a group that cannot be cancelled *)
+let never = Atomic.make false
+
 (* counters for the benchmarks and the tests: rule instances found, facts checked by B/F or Why, and the seconds spent
    reasoning (Reason.run and Reason.bulk) *)
 let derivations = ref 0
@@ -470,6 +488,8 @@ and ctx = {
   mutable nn : int;
   mutable derived : int;  (* derived changes so far *)
   mutable limit : int;
+  mutable whole : bool;  (* the group is a change: [limit] is a change's, [stop] is checked *)
+  mutable stop : bool Atomic.t;  (* set: a change cancelled (its database closes) *)
   mutable vp : Bytes.t;  (* by property: 1 when the view may hold facts of it (a load: the view lacks most); empty: all *)
   per_rule : int array;
   mutable side_e : Bulk.i32;  (* the modules' facts that go to the output directly: things, properties, values *)
@@ -1495,7 +1515,9 @@ let [@inline never] reduce (parts : (int * Rules.t * string) list) =
   end
 
 (* the program of the generic one's rules unfolded on the view's small relations; None when nothing unfolds *)
-let [@inline never] make_spec ?unstable (v : Store.view) (gen : program) =
+(* the rules unfolded on the view's small relations, and the relations they were unfolded on (frozen); None when
+   no rule unfolds *)
+let [@inline never] spec_parts ?unstable (v : Store.view) (gen : program) =
   let n = Array.length gen.rules in
   let unfold g =
     let r = gen.rules.(g) and sty = gen.sty.(g) in
@@ -1545,11 +1567,16 @@ let [@inline never] make_spec ?unstable (v : Store.view) (gen : program) =
   let keep = Array.make n false in
   let parts = attempt keep in
   if Array.for_all Fun.id (Array.mapi (fun g u -> u = None || keep.(g)) unfolded) then None
-  else begin
-    let rels =
-      List.sort_uniq compare (List.concat (Array.to_list (Array.mapi (fun g u -> match u with Some (_, rels) when not keep.(g) -> rels | _ -> []) unfolded)))
-      |> Array.of_list
-    in
+  else
+    Some
+      ( parts,
+        List.sort_uniq compare (List.concat (Array.to_list (Array.mapi (fun g u -> match u with Some (_, rels) when not keep.(g) -> rels | _ -> []) unfolded)))
+        |> Array.of_list )
+
+let [@inline never] make_spec ?unstable (v : Store.view) (gen : program) =
+  match spec_parts ?unstable v gen with
+  | None -> None
+  | Some (parts, rels) ->
     let np = Schema.count v.schema in
     let frozen = Bytes.make np '\000' and fws = Array.make np [] in
     Array.iter
@@ -1566,7 +1593,6 @@ let [@inline never] make_spec ?unstable (v : Store.view) (gen : program) =
     Some
       (build ~also_reads:(Array.map fst rels) v ~key:gen.key ~src:(Array.map (fun (_, r, _) -> r) parts) ~ids:(Array.map (fun (g, _, _) -> gen.ids.(g)) parts)
          ~bad_head:(Array.map (fun (_, _, b) -> b) parts) ~spec:(Some spec))
-  end
 
 (* does the view hold the facts the program was unfolded on: by identity first (Store.stamp), else by its facts *)
 let [@inline never] spec_holds (s : spec) (v : Store.view) =
@@ -1680,7 +1706,7 @@ let [@inline never] new_ctx ?facts prog v =
     bfqs = Array.init prog.nstrata (fun s -> if s = 0 then bfq else Queue.create ()); ins_s = Array.make prog.nstrata None;
     xplans = Hashtbl.create 8; round = max_int; cw = Array.make (Array.length prog.consts) (-1);
     ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; bfq; next = ints 64 0;
-    spare = ints 64 0; nn = 0; derived = 0; limit = max_int; vp = Bytes.empty;
+    spare = ints 64 0; nn = 0; derived = 0; limit = max_int; whole = false; stop = never; vp = Bytes.empty;
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
     seen2 = iset_create (); walked = Bytes.empty; xk = ignore }
@@ -1697,6 +1723,8 @@ let [@inline never] take ?facts prog v =
   c.nn <- 0;
   c.derived <- 0;
   c.limit <- max_int;
+  c.whole <- false;
+  c.stop <- never;
   c.vp <- Bytes.empty;
   c.ws.with_ip <- true;
   c.ns <- 0;
@@ -1738,9 +1766,14 @@ let[@inline never] count_derived c ri =
     let by = Hashtbl.create 8 in
     Array.iteri (fun i n -> if n > 0 then Hashtbl.replace by (rule_name c i) (n + Option.value (Hashtbl.find_opt by (rule_name c i)) ~default:0)) c.per_rule;
     let best = Hashtbl.fold (fun name n (bn, bk) -> if n > bk || (n = bk && name < bn) then name, n else bn, bk) by ("", -1) in
-    refuse "rule %s derived more than %d facts from a group of %d facts" (fst best) c.limit
-      ((c.limit - !budget_base) / max 1 !budget_per)
+    if c.whole then refuse "rule %s derived more than %d facts from a change of the rules or the ontology" (fst best) c.limit
+    else
+      raise
+        (Exceeded
+           (Printf.sprintf "rule %s derived more than %d facts from a group of %d facts" (fst best) c.limit
+              ((c.limit - !budget_base) / max 1 !budget_per)))
   end
+  else if c.derived land 1023 = 0 && Atomic.get c.stop then refuse "the change was cancelled: the database closes"
 
 (* a frozen relation's fact about to change: the group is reasoned again with the generic rules *)
 let[@inline] check_frozen c p w = match c.prog.spec with None -> () | Some s -> if is_frozen s p w then raise_notrace (Respec (p, w))
@@ -1750,10 +1783,8 @@ let [@inline never] head_refusal c (pl : plan) =
   if b <> "" then b else head_message c.v (rule_name c pl.ri) ~thing:(pl.he <> -1) pl.hp
 
 (* the head of a forward instance, at round r - 1: a fact that is not there yet joins round r *)
-let[@inline never] emit_at c pl r =
-  incr derivations;
-  if not pl.hok then refuse "%s" (head_refusal c pl);
-  let p = pl.hp and e = pl.he and w = pl.hw in
+(* the head (e p w) of an instance of rule ri: a fact at round r, unless it is one already *)
+let[@inline never] emit_fact c ri e p w r =
   let ws = c.ws in
   let x = find ws e p w in
   if x >= 0 then begin
@@ -1761,21 +1792,102 @@ let[@inline never] emit_at c pl r =
       check_frozen c p w;
       set_now ws x 2;
       set_round ws x r;
-      set_rule ws x pl.ri;
-      count_derived c pl.ri;
+      set_rule ws x ri;
+      count_derived c ri;
       push_next c x
     end
   end
   else if not ((Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000')) && S.mem c.v e p w) then begin
-    if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c pl.ri) e;
+    if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c ri) e;
     check_frozen c p w;
     let x = add ws e p w 0 in
     set_now ws x 2;
     set_round ws x r;
-    set_rule ws x pl.ri;
-    count_derived c pl.ri;
+    set_rule ws x ri;
+    count_derived c ri;
     push_next c x
   end
+
+let emit_at c pl r =
+  incr derivations;
+  if not pl.hok then refuse "%s" (head_refusal c pl);
+  emit_fact c pl.ri pl.he pl.hp pl.hw r
+
+(* ---- Large rounds on several domains (the design's section 5.14) ----
+   A round of many facts, or the first round of a change's added rules, is cut into morsels (Leis et al., SIGMOD
+   2014) taken in turn by the domains (Bulk.parallel): each derives with plans of its own in a context of its own,
+   reading the view and the working set, which nobody writes meanwhile, and keeps the heads it finds; then this domain
+   makes them facts, morsel after morsel, in order, exactly as it would have found them alone: the result, the budget
+   and the refusals do not depend on the domains. Only for rules without Not and aggregates, and when every constant
+   of the rules is interned (a plan interns a head's text at its first use). *)
+
+let par_min = ref 20_000  (* a round of at least this many facts runs on several domains *)
+
+let [@inline never] worker_ctx c =
+  { c with ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; ins_s = Array.make c.prog.nstrata None;
+           xplans = Hashtbl.create 8; next = ints 16 0; spare = ints 16 0; nn = 0; per_rule = Array.make (Array.length c.prog.rules) 0;
+           buf_a = buf_create 16; buf_b = buf_create 16; seen = iset_create (); seen2 = iset_create (); pt = ws_create () }
+
+(* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
+   the other cores while it runs *)
+let par_ok c = !Bulk.domains > 1 && c.stop == never && (not c.prog.stratified) && Array.for_all (fun w -> w >= 0) c.cw
+
+exception Too_many
+
+(* [k] morsels, [run w m f]: morsel m derived in context w, each instance to f; their heads made facts of round [r].
+   false: the morsels found more heads than the budget leaves room for (the caller derives alone, which refuses
+   exactly where it must) *)
+let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r =
+  let outs = Array.init k (fun _ -> buf_create 64) and fails = Array.make k None in
+  let left = c.limit - c.derived in
+  let room = if left > max_int / 4 then max_int else (2 * left) + 100_000 in
+  let heads = Atomic.make 0 and found_all = Atomic.make 0 in
+  match
+    Bulk.parallel k (fun m ->
+        let w = worker_ctx c and out = outs.(m) and n = ref 0 and nf = ref 0 in
+        let ws = c.ws and vp = c.vp in
+        let found pl =
+          incr nf;
+          if not pl.hok then raise (Refused (head_refusal w pl));
+          let e = pl.he and p = pl.hp and v = pl.hw in
+          (* a head that is a fact already changes nothing (as emit_fact): only the others are kept *)
+          let x = find ws e p v in
+          if (if x >= 0 then now ws x = 0 else not ((Bytes.length vp = 0 || (p < Bytes.length vp && Bytes.unsafe_get vp p <> '\000')) && S.mem w.v e p v))
+          then begin
+            buf_push out e; buf_push out p; buf_push out v; buf_push out pl.ri;
+            incr n;
+            if !n land 1023 = 0 && Atomic.fetch_and_add heads 1024 + 1024 > room then raise Too_many
+          end
+        in
+        (try run w m found with Refused msg -> fails.(m) <- Some msg);
+        ignore (Atomic.fetch_and_add found_all !nf))
+  with
+  | () ->
+    derivations := !derivations + Atomic.get found_all;
+    for m = 0 to k - 1 do
+      let out = outs.(m) in
+      let i = ref 0 in
+      let ws = c.ws in
+      while !i < out.bn do
+        let ri = buf_get out (!i + 3) and e = buf_get out !i and p = buf_get out (!i + 1) and w = buf_get out (!i + 2) in
+        let x = find ws e p w in
+        if x >= 0 then begin
+          if now ws x = 0 then (check_frozen c p w; set_now ws x 2; set_round ws x r; set_rule ws x ri; count_derived c ri; push_next c x)
+        end
+        else begin
+          (* not in the view: its morsel looked *)
+          if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c ri) e;
+          check_frozen c p w;
+          let x = add ws e p w 0 in
+          set_now ws x 2; set_round ws x r; set_rule ws x ri; count_derived c ri; push_next c x
+        end;
+        i := !i + 4
+      done;
+      outs.(m) <- buf_create 0;
+      Option.iter (fun msg -> raise (Refused msg)) fails.(m)
+    done;
+    true
+  | exception Too_many -> false
 
 let emit c pl = emit_at c pl (c.round + 1)
 
@@ -2361,11 +2473,26 @@ let saturate ?(s = 0) c (first : ints) nf =
   let cur = ref first and ncur = ref nf and r = ref 0 in
   while !ncur > 0 || c.nn > 0 do
     c.round <- !r;
-    let d = !cur in
-    for i = 0 to !ncur - 1 do
-      let x = A.unsafe_get d i in
-      if now ws x > 0 && round ws x = !r then run_all ins (fe ws x) (fp ws x) (fw ws x)
-    done;
+    let d = !cur and nc = !ncur and rr = !r in
+    let par =
+      nc >= !par_min && par_ok c
+      &&
+      let k = 4 * !Bulk.domains in
+      let ix = if c.prog.nstrata = 1 then c.prog.ix_ins else c.prog.ix_ins_s.(s) in
+      par_phase c k
+        (fun w m found ->
+          let ins = make_disp w ix State found in
+          for i = m * nc / k to ((m + 1) * nc / k) - 1 do
+            let x = A.unsafe_get d i in
+            if now ws x > 0 && round ws x = rr then run_all ins (fe ws x) (fp ws x) (fw ws x)
+          done)
+        (rr + 1)
+    in
+    if not par then
+      for i = 0 to nc - 1 do
+        let x = A.unsafe_get d i in
+        if now ws x > 0 && round ws x = rr then run_all ins (fe ws x) (fp ws x) (fw ws x)
+      done;
     for mi = 0 to nm - 1 do if c.prog.strat.(c.prog.modules.(mi).m_rule) = s then module_round c mi d !ncur !r done;
     (* this round's buffer takes the next round's facts *)
     let nx = c.next and nn = c.nn in
@@ -2819,15 +2946,32 @@ let[@inline never] fact_text (v : Store.view) e p w =
    changes: the asserted ones (a retraction a rule still derives becomes Now_derived), then the derived ones. Raises
    [Refused]. The rules run unfolded on their small relations when the group changes none of those relations' facts;
    a group that does, or that would derive or delete one, is reasoned with the rules as written. *)
-let rec run ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
+(* Does a group change the ontology: does it assert or retract a fact of a relation the rules are unfolded on in the
+   state before it (spec_parts, without the relations groups were seen changing: so the answer depends on the rules
+   and the state only, the same on a fork and in the database, whatever the unfolding did before). Rules with Not or
+   aggregates run as written: none. Asked only of a group past a data write's budget. *)
+let [@inline never] ontology (gen : program) (v0 : Store.view) (changes : Group.change array) (words : int array) =
+  (not gen.stratified)
+  &&
+  match spec_parts v0 gen with
+  | None -> false
+  | Some (_, rels) ->
+    let hit = ref false in
+    Array.iteri (fun i (ch : Group.change) -> if Array.exists (fun (p, w) -> p = ch.p && (w < 0 || w = words.(i))) rels then hit := true) changes;
+    !hit
+
+(* [background]: a change raises [Background] (above). [limit]: the budget (a change's catch-up of a group gives its
+   own); [stop]: a change's cancellation *)
+let rec run ?background ?limit ?stop ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
   let t0 = Unix.gettimeofday () in
-  match run_ ~v0 v changes words with
+  match run_ ?background ?limit ?stop ~v0 v changes words with
   | r -> seconds := !seconds +. (Unix.gettimeofday () -. t0); r
   | exception e -> seconds := !seconds +. (Unix.gettimeofday () -. t0); raise e
 
-and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
+and run_ ?(background = false) ?limit ?(stop = never) ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
   let same = Schema.rules_key v0.schema = Schema.rules_key v.schema in
   if same && not (Schema.has_rules v.schema) then v, changes
+  else if background && not same then raise Background
   else begin
     let gen, spec = programs v in
     let prog =
@@ -2839,12 +2983,22 @@ and run_ ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (wor
             !l)
     in
     incr (if prog == gen then gen_groups else spec_groups);
-    match reason ~v0 v changes words prog same with
+    let go prog ~whole =
+      match reason ?limit ~whole ~stop ~v0 v changes words prog same with
+      | r -> r
+      | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; reason ?limit ~whole ~stop ~v0 v changes words gen same
+    in
+    match go prog ~whole:(not same) with
     | r -> r
-    | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; reason ~v0 v changes words gen same
+    | exception Exceeded m ->
+      (* past a data write's budget: a change of the ontology takes a change's, on the background path in the
+         threaded writer, here again from the start otherwise *)
+      if not (ontology gen v0 changes words) then raise (Refused m)
+      else if background then raise Background
+      else go gen ~whole:true
   end
 
-and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
+and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
     let reads p = if p < prog.np then Char.code (Bytes.unsafe_get prog.reads p) else 0 in
     (* an aggregate's property holds only what its rule gives: no write asserts it, under the rules after the group (a
        retraction of its fact, derived only, is refused before, by Resolve, with the same message; a retraction of an
@@ -2862,7 +3016,12 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
     with_ctx ~prog v (fun c ->
         let ws = c.ws in
         c.v0 <- v0;
-        c.limit <- !budget_base + (!budget_per * Array.length changes);
+        c.limit <-
+          (match limit with
+           | Some l -> l
+           | None -> !budget_base + (!budget_per * Array.length changes) + if whole then !change_per * S.facts v0 else 0);
+        c.whole <- whole;
+        c.stop <- stop;
         Array.iteri (fun mi (m : closure) -> c.mfresh.(mi) <- S.count_prop v0 m.m_t = 0) prog.modules;
         (* the rules removed or changed, and added or changed, by this group *)
         let old_rules = if same then [] else Schema.rules v0.schema and new_rules = if same then [] else Schema.rules v.schema in
@@ -2958,11 +3117,11 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
           if cands_s <> [] || not (Queue.is_empty c.bfqs.(s)) then backward_forward c s cands_s;
           (* an added rule: the facts it gives over the state, at round 1; the module of an added closure, from
              scratch *)
-          List.iter
-            (fun ri ->
-              if not (prog.never.(ri) || prog.in_module.(ri) || prog.aggs.(ri) <> None) && prog.strat.(ri) = s then
-                instances c ri (fun pl -> emit_at c pl 1))
-            added_idx;
+          let adding = List.filter (fun ri -> not (prog.never.(ri) || prog.in_module.(ri) || prog.aggs.(ri) <> None) && prog.strat.(ri) = s) added_idx in
+          let adding = Array.of_list adding in
+          if not (Array.length adding > 1 && S.facts v0 >= !par_min && par_ok c
+                  && par_phase c (Array.length adding) (fun w m found -> instances w adding.(m) found) 1)
+          then Array.iter (fun ri -> instances c ri (fun pl -> emit_at c pl 1)) adding;
           Array.iteri
             (fun mi (m : closure) ->
               if prog.strat.(m.m_rule) = s && (List.mem m.m_rule added_idx || (m.m_base >= 0 && List.mem m.m_base added_idx)) then begin
@@ -2995,7 +3154,7 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
             let a = ints (max 1 n) 0 in
             List.iteri (fun i x -> A.unsafe_set a i x) first;
             saturate ~s c a n
-          end
+          end;
         done;
         c.cur <- -1;
         (* the constraints: an instance that involves a fact this group made present refuses it, or whose Not the
@@ -3057,12 +3216,13 @@ and reason ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (w
           todo := (e, p, w, 2) :: !todo
         done;
         let derived = Array.of_list (List.rev !out) in
-        let xs = Array.of_list !todo in
-        Array.sort (fun (e, p, w, _) (e', p', w', _) -> let c = compare (e : int) e' in if c <> 0 then c else let c = compare (p : int) p' in if c <> 0 then c else compare (w : int) w') xs;
-        let m = Array.length xs in
+        let m = List.length !todo in
+        let es = Array.make m 0 and ps = Array.make m 0 and wv = Array.make m 0 and ss = Array.make m 0 in
+        List.iteri (fun i (e, p, w, st) -> es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- st) !todo;
+        let o = Store.fact_order es ps wv m in
         let v' =
-          S.set_sorted c.v (Array.map (fun (e, _, _, _) -> e) xs) (Array.map (fun (_, p, _, _) -> p) xs)
-            (Array.map (fun (_, _, w, _) -> w) xs) (Array.map (fun (_, _, _, s) -> s) xs) m
+          S.set_sorted c.v (Array.map (fun i -> es.(i)) o) (Array.map (fun i -> ps.(i)) o) (Array.map (fun i -> wv.(i)) o)
+            (Array.map (fun i -> ss.(i)) o) m
         in
         (* the schema's own rules over derived facts: one value for a one-valued property; a unique value once (a
            module's facts are of a property that takes many, none unique) *)
@@ -3104,9 +3264,14 @@ let rec bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp 
         !l)
   in
   incr (if prog == gen then gen_groups else spec_groups);
+  (* past the budget: the ordinary path decides (a change of the ontology takes a change's budget there) *)
   match bulk_with ~own prog v ge gp gw n with
   | r -> r
-  | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; bulk_with ~own gen v ge gp gw n
+  | exception Exceeded m -> raise (Refused m)
+  | exception Respec (fp, fw) -> (
+    incr respecs;
+    unsettle v [ (fp, fw) ];
+    match bulk_with ~own gen v ge gp gw n with r -> r | exception Exceeded m -> raise (Refused m))
 
 and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : Bulk.ints) n =
   let many_only p = match Schema.find v.schema p with Some d -> d.many && not d.unique | None -> false in
@@ -3293,3 +3458,16 @@ let [@inline never] derived_message (v : Store.view) e p w =
     in
     Printf.sprintf "%s is derived by rule %s from %s: retract one of those" (fact_text v e p w) rule (String.concat " and " texts)
   | _ -> Printf.sprintf "%s is derived by a rule" (fact_text v e p w)
+
+(* the texts and floats a view's rules name: interned into the writer's dictionary before a change runs in the
+   background, so that the background never interns a text of its own (Engine) *)
+let [@inline never] constants (v : Store.view) =
+  List.concat_map
+    (fun (_, (name, text)) ->
+      match Rules.of_text name text with
+      | Error _ -> []
+      | Ok r ->
+        let term = function Query.Val x when is_text_const x -> [ x ] | _ -> [] in
+        let pat (a : Query.pattern) = term a.e @ term a.v in
+        List.concat_map pat r.where @ match r.head with Give h -> pat h | Never -> [])
+    (Schema.rules v.schema)
