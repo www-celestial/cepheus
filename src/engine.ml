@@ -730,6 +730,7 @@ type change = {
   mutable backlog : int;  (* the groups in [clog] *)
   out : outcome option Atomic.t;
   mutable cdom : unit Domain.t option;
+  born : int;  (* the writer's lineage when it started (Raft) *)
 }
 
 exception Interfered of error
@@ -872,6 +873,10 @@ type live = {
       (* Raft: the frame of groups [first, first + count), whole, proposed; Ok once committed, Error if this server
          stopped leading before *)
   mutable rollback : bool;  (* a proposed frame was not committed: the working view goes back to the published one *)
+  mutable lineage : int;
+      (* Raft: one more each time the working view leaves this writer's own line (a proposed frame not committed and
+         taken back, a frame of another leader applied): a change of the rules started on an older lineage is never
+         installed, it is answered not_leader *)
   mutable change : change option;  (* the change in the background *)
   mutable waiting : (req * Store.view) list;  (* the changes that wait for it, or for the merge in flight, oldest first *)
 }
@@ -930,10 +935,17 @@ let syncer l () =
       Mutex.unlock l.sm
   done
 
+(* Raft: the working view leaves this writer's own line; a change of the rules in the background, which started from
+   it or logged its groups, is stopped, and answered not_leader when the writer polls it *)
+let break_lineage l =
+  l.lineage <- l.lineage + 1;
+  Option.iter (fun ch -> Atomic.set ch.stop true) l.change
+
 (* Raft: the working view back to the published one, after a proposed frame that was not committed *)
 let roll_back l =
   if l.rollback then begin
     l.e.working <- Atomic.get l.e.published;
+    break_lineage l;
     Mutex.protect l.sm (fun () -> l.rollback <- false)
   end
 
@@ -1029,12 +1041,16 @@ let to_merge l (b : batch) =
 
 (* The change's install, by the writer: the groups logged since the background was ready, the asserted part again
    against the working view (its Expects; the same as the build's, or Conflict), the frame (the asserted changes in
-   their order, then the difference as derived changes), handed to the syncer; the change's view adopted. *)
+   their order, then the difference as derived changes), handed to the syncer; the change's view adopted. In a Raft
+   cluster, once nothing is in flight (its frame is proposed alone, as every write's), and only on the lineage it
+   started from: its view holds no group that was not committed, and every group another leader wrote. *)
 let install_change l ch (b : built) =
   let t = l.e in
   let t0 = Journal.clock () in
+  if l.raft then settle l;
   match t.stopped with
   | Some e -> deliver ch.creq (Error e)
+  | None when ch.born <> l.lineage -> deliver ch.creq (Error not_leader)
   | None -> (
     match
       let batches, _ = take_log ch in
@@ -1116,7 +1132,10 @@ let rec poll_change l =
     | Some o ->
       Option.iter Domain.join ch.cdom;
       l.change <- None;
-      (match o with Built b -> install_change l ch b | Ended e -> deliver ch.creq (Error e));
+      (match o with
+       | _ when ch.born <> l.lineage -> deliver ch.creq (Error not_leader)
+       | Built b -> install_change l ch b
+       | Ended e -> deliver ch.creq (Error e));
       poll_change l)
   | None -> (
     match l.waiting with
@@ -1135,7 +1154,10 @@ let rec poll_change l =
           List.fold_left (fun v (x : Value.t) -> match x with Text _ | Float _ -> fst (Store.word_intern v x) | _ -> v) l.e.working texts
         in
         l.e.working <- w;
-        let ch = { creq = r; cops = r.w; stop = Atomic.make false; cm = Mutex.create (); clog = Queue.create (); backlog = 0; out = Atomic.make None; cdom = None } in
+        let ch =
+          { creq = r; cops = r.w; stop = Atomic.make false; cm = Mutex.create (); clog = Queue.create (); backlog = 0; out = Atomic.make None;
+            cdom = None; born = l.lineage }
+        in
         (* a domain the runtime cannot give (its limit) answers the change, never stops the writer *)
         match Domain.spawn (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) ch w) with
         | d -> ch.cdom <- Some d; l.change <- Some ch
@@ -1172,7 +1194,8 @@ let writer l () =
         deliver r (Error (Busy "this database is not a replica: it takes no frame"));
         handle rest
       | Apply (r, f) :: rest ->
-        if l.raft then settle l;
+        (* Raft: another leader's frame; a change of the rules started here is not installed (its lineage is gone) *)
+        if l.raft then (settle l; break_lineage l);
         (match decode_frame f with
          | Error e -> deliver r (Error e)
          | Ok gs -> (
@@ -1251,7 +1274,7 @@ let start ?(follow = no_follow) ?(replica = false) ?(raft = false) e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
       to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow; replica; raft;
-      propose = (fun _ _ _ -> Error (Busy "no Raft yet")); rollback = false; change = None; waiting = [] }
+      propose = (fun _ _ _ -> Error (Busy "no Raft yet")); rollback = false; change = None; waiting = []; lineage = 0 }
   in
   (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
   l.domain <- Some (Domain.spawn (fun () ->

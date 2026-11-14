@@ -11,6 +11,7 @@
      ontology past a data write's budget is accepted, on the disk and on a fork alike, and a data write past it is not;
    - close during a change: the change answered Closed, nothing of it after the reopen;
    - a change with an Incr in its group: computed in its group, beside groups that count with the same counter;
+   - a Raft member: a change's frame proposed; a frame taken back or another leader's frame answers it not_leader;
    - kill -9 during changes (child processes): after each recovery the view is exact under its rules, a rule there
      with all its consequences or not at all.
    Usage: rulechange.exe [KILLS]; scratch databases in $CEPHEUS_TMP. *)
@@ -315,6 +316,98 @@ let counting () =
   close db;
   C.rmrf d
 
+(* A Raft cluster's member (Engine.start ~raft: each write's frame proposed, written once committed; Cluster's
+   propose replaced here by a function that records the frames, or refuses one as a server that stopped leading):
+   a change's frame is proposed as every write's; a frame refused and taken back, or a frame of another leader
+   applied, while a change runs in the background, answers the change not_leader and installs nothing of it: its view
+   held a group that was never committed, or missed one. The journal replayed gives the same view each time. *)
+let raft_member () =
+  section "a Raft member: a change's frame proposed; a frame taken back, or another leader's frame, answers the change not_leader";
+  let d = C.tmpdir "rc-raft" in
+  let e = match Engine.open_ Disk.real d with Ok e -> e | Error e -> failwith (message e) in
+  let l = Engine.start ~raft:true e in
+  let proposed = ref [] and refuse = Atomic.make false and pm = Mutex.create () in
+  l.propose <-
+    (fun first count _ ->
+      if Atomic.exchange refuse false then Error Engine.not_leader
+      else (Mutex.protect pm (fun () -> proposed := (first, count) :: !proposed); Ok ()));
+  let wr ops = Engine.write l ops 0 "w" in
+  let pub () = Atomic.get e.published in
+  let ids, ops = Result.get_ok (Resolve.declare (pub ()) [ prop ~many:true "a" Tlink; prop ~many:true "b" Tlink; prop ~many:true "type" Tlink; prop "n" Tint ]) in
+  ignore (ok (wr ops));
+  let[@warning "-8"] [ a; b; ty; n ] = ids in
+  let r = ok (wr (List.init 30 (fun i -> Add (-(i + 1), n, Int i)))) in
+  let t = Array.init 30 (fun i -> List.assoc (-(i + 1)) r.things) in
+  ignore (ok (wr (List.init 29 (fun i -> Add (t.(i), a, Link t.(i + 1))))));
+  let define name where head =
+    let id = free_id (Atomic.get e.published) in
+    let text = Rules.to_text (rule name where head) in
+    [ Add (id, Schema.p_name, Text name); Add (id, Schema.p_rule, Text text); Expect (id, Schema.p_name, None) ]
+  in
+  let has v x p y = List.mem (Link y) (values v x p) in
+  let all_proposed () =
+    (* every group from 2 on (group 1 is made at the open) proposed once, in order, none twice *)
+    let gs = List.concat_map (fun (f, c) -> List.init c (fun k -> f + k)) (Mutex.protect pm (fun () -> !proposed)) in
+    List.sort compare gs = List.init ((pub ()).group - 1) (fun k -> k + 2)
+  in
+  let in_thread_w ops = in_thread (fun () -> wr ops) in
+  (* a change beside writes: its frame proposed *)
+  Engine.change_pause := 0.2;
+  let before = Atomic.get Engine.changes_done in
+  let res = in_thread_w (define "copy" [ { e = x; p = a; v = y } ] (Give { e = x; p = b; v = y })) in
+  Unix.sleepf 0.05;
+  for i = 0 to 4 do ignore (ok (wr [ Add (t.(i), ty, Link t.(29)) ])) done;
+  (match res () with
+   | Ok rc ->
+     C.check (Atomic.get Engine.changes_done = before + 1) "the change went the background path";
+     C.check (List.exists (fun (f, c) -> f <= rc.group && rc.group < f + c) (Mutex.protect pm (fun () -> !proposed))) "the change's group %d was proposed" rc.group;
+     C.check (exact (pub ()) && Store.count_prop (pub ()) b = 29) "its consequences there, exact"
+   | Error er -> C.fail "a change on a Raft member: %s" (message er));
+  C.check (all_proposed ()) "every group was proposed, once, in order";
+  (* a frame refused while a change runs: taken back; the change answered not_leader, nothing of it there *)
+  let res = in_thread_w (define "back" [ { e = x; p = a; v = y } ] (Give { e = y; p = b; v = x })) in
+  Unix.sleepf 0.05;
+  Atomic.set refuse true;
+  (match wr [ Add (t.(5), ty, Link t.(6)) ] with
+   | Error er -> C.check (Engine.is_not_leader er) "a frame refused: not_leader (%s)" (message er)
+   | Ok _ -> C.fail "a refused frame was confirmed");
+  ignore (ok (wr [ Add (t.(7), ty, Link t.(8)) ]));
+  (match res () with
+   | Error er -> C.check (Engine.is_not_leader er) "the change beside a frame taken back: not_leader (%s)" (message er)
+   | Ok _ -> C.fail "a change whose view held a group taken back was installed");
+  let v = pub () in
+  C.check (Schema.rule_by_name v.schema "back" = None && not (has v t.(5) ty t.(6)) && has v t.(7) ty t.(8) && exact v)
+    "nothing of the change nor of the group taken back; the next group there; exact";
+  C.check (all_proposed ()) "every group was proposed, once, in order, after the frame taken back";
+  (* a frame of another leader applied while a change runs: the change answered not_leader *)
+  let res = in_thread_w (define "typed" [ { e = x; p = a; v = y } ] (Give { e = y; p = ty; v = Thing t.(0) })) in
+  Unix.sleepf 0.05;
+  let v = pub () in
+  let g = match Resolve.resolve v ~n:(v.group + 1) ~time:0 ~by:0 ~why:"another leader" [ Add (t.(9), ty, Link t.(10)) ] with
+    | Ok (_, g, _) -> g | Error _ -> failwith "another leader's group" in
+  let body = Buffer.create 256 in
+  Group.encode body g;
+  let body = Buffer.to_bytes body in
+  (match Engine.call l (fun r -> Engine.Apply (r, { Engine.first = g.n; count = 1; body; len = Bytes.length body })) with
+   | Ok _ -> C.check true "another leader's frame applied"
+   | Error er -> C.fail "another leader's frame: %s" (message er));
+  (match res () with
+   | Error er -> C.check (Engine.is_not_leader er) "the change beside another leader's frame: not_leader (%s)" (message er)
+   | Ok _ -> C.fail "a change was installed across another leader's frame");
+  let v = pub () in
+  C.check (Schema.rule_by_name v.schema "typed" = None && has v t.(9) ty t.(10) && exact v) "nothing of the change; the frame there; exact";
+  Engine.change_pause := 0.;
+  (* a change once the lineage is steady again: installed *)
+  (match wr (define "typed" [ { e = x; p = a; v = y } ] (Give { e = y; p = ty; v = Thing t.(0) })) with
+   | Ok _ -> C.check (Schema.rule_by_name (pub ()).schema "typed" <> None && exact (pub ())) "a change after them: installed, exact"
+   | Error er -> C.fail "a change after them: %s" (message er));
+  let last = C.user_facts (pub ()) in
+  Engine.stop l;
+  let db = open_db d in
+  C.check (F.equal (C.user_facts (view db)) last && exact (view db)) "reopened: the journal gives the same view";
+  close db;
+  C.rmrf d
+
 (* ---- kill -9: a child writes and changes the rules until killed ---- *)
 
 let child d =
@@ -376,5 +469,6 @@ let () =
     budget ();
     closing ();
     counting ();
+    raft_member ();
     kills rounds;
     C.finish "rulechange"
