@@ -802,7 +802,7 @@ let uobm n mode =
   let ids = setup db in
   let o = ok (Owl.setup db) in
   let rules =
-    if mode = "rew" then Owl.rl o
+    if mode = "rew" || mode = "plain" then Owl.rl o
     else begin
       let same_to_fact (r : rule) =
         match r.head with
@@ -812,7 +812,8 @@ let uobm n mode =
       let base = List.filter_map same_to_fact (Owl.rl o) in
       let x = Var 0 and y = Var 1 and z = Var 2 in
       let v = view db in
-      let props = List.filter (fun p -> p <> o.same_as && match describe v p with Some d -> not (String.length d.name > 8 && String.sub d.name 0 8 = "cepheus/") | None -> false) (List.init (Schema.count v.schema) Fun.id) in
+      (* the data's properties and owl/Type: the things made equal are people (the ontology's things never are) *)
+      let props = o.type_ :: Array.to_list (Array.map ids.pr props) in
       let link p = match describe v p with Some d -> d.typ = Tlink | None -> false in
       base
       @ [ { name = "ax/eq-sym"; vars = 2; where = [ { e = x; p = o.same_as; v = y } ]; ranges = []; head = Give { e = y; p = o.same_as; v = x } };
@@ -824,8 +825,8 @@ let uobm n mode =
   ignore (ok (define db rules));
   let ids = { ids with ty = o.type_ } in
   owl_ontology db ids o;
-  (* the e-mail, inverse functional *)
-  ignore (ok (write db [ Add (-1, o.property, Link (ids.pr "emailAddress")); Add (-1, o.inverse_functional, Bool true) ]));
+  (* the e-mail, inverse functional (not in mode plain: the same data, nothing made the same) *)
+  if mode <> "plain" then ignore (ok (write db [ Add (-1, o.property, Link (ids.pr "emailAddress")); Add (-1, o.inverse_functional, Bool true) ]));
   let g = { st = (7 * 0x1E3779B97F4A7C15) lor 1; lit = 0 } in
   let email = ids.pr "emailAddress" in
   let groups = ref 0 and records = ref 0 in
@@ -871,14 +872,43 @@ let uobm n mode =
         if Store.state v e p w = 2 then incr derived;
         if p = o.same_as || p = Schema.p_same then incr nsame
         else begin
-          let link = match describe v p with Some d -> d.typ = Tlink | None -> false in
-          let f = least e, p, if link then least w else w in
+          (* a value as its words would differ between the two (their dictionaries' order): as a value *)
+          let f = match describe v p with
+            | Some { typ = Tlink; _ } -> least e, p, string_of_int (least w)
+            | Some d -> least e, p, Value.to_string (Store.value v d.typ w)
+            | None -> least e, p, "?" in
           if not (Hashtbl.mem seen f) then (Hashtbl.replace seen f (); h := !h + Hashtbl.hash f)
         end)
   done;
+  (match Sys.getenv_opt "DUMP" with
+   | Some f ->
+     let oc = open_out f in
+     List.iter (fun (e, p, w) -> Printf.fprintf oc "%d %d %s\n" e p w) (List.sort compare (Hashtbl.fold (fun k () l -> k :: l) seen []));
+     close_out oc
+   | None -> ());
   let r = !Reason.seconds in
-  Printf.printf "uobm %d %s: %.3f s, %d groups, %d records more, %d facts (%d derived, %d of equality), %d derivations; reasoning %.3f s; read through the classes: %d facts, digest %x\n%!"
-    n mode t !groups !records !all !derived !nsame !Reason.derivations r (Hashtbl.length seen) !h
+  Printf.printf "uobm %d %s: %.3f s, %d groups, %d records more, %d facts (%d derived, %d of equality), %d derivations; reasoning %.3f s (merges %.3f s; groups unfolded %d, as written %d, again %d); read through the classes: %d facts, digest %x\n%!"
+    n mode t !groups !records !all !derived !nsame !Reason.derivations r !Reason.merge_seconds !Reason.spec_groups !Reason.gen_groups !Reason.respecs (Hashtbl.length seen) !h
+
+(* ---- an equality storm: one thing with n values of a functional property, so n things become one; rewriting must
+   keep it linear (n - 1 facts of cepheus/same) where the axiomatised equality holds n^2 facts ---- *)
+let storm n =
+  let db = fork empty in
+  let o = ok (Owl.setup db) in
+  ignore (ok (define db (Owl.rl o)));
+  let[@warning "-8"] [ k; tx ] = ok (declare db [ prop ~many:true "t/k" Tlink; prop ~many:true "t/text" Ttext ]) in
+  ignore (ok (write db [ Add (-1, o.property, Link k); Add (-1, o.functional, Bool true) ]));
+  let r = ok (write db (Add (-1, tx, Text "x") :: List.init n (fun i -> Add (-(i + 2), tx, Text (string_of_int i))))) in
+  let x = thing r (-1) in
+  Reason.seconds := 0.;
+  Reason.merge_seconds := 0.;
+  Reason.derivations := 0;
+  let t0 = now () in
+  ignore (ok (write db (List.init n (fun i -> Add (x, k, Link (thing r (-(i + 2))))))));
+  let t = now () -. t0 in
+  let v = view db in
+  Printf.printf "storm %d: %.3f s (reasoning %.3f s, merges %.3f s), %d derivations, %d facts of cepheus/same, class of %d\n%!" n t !Reason.seconds
+    !Reason.merge_seconds !Reason.derivations (Store.count_prop v Schema.p_same) (List.length (same v (thing r (-2))))
 
 (* ---- Not and aggregates (the reasoner's step 4) ----
    N invoices of K lines each (an amount, a day), a group an invoice, then R rounds on them in turn: a line added (of
@@ -1018,6 +1048,22 @@ let change_bench n clients secs at mode dir =
   close db;
   ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote run)))
 
+(* reads: the cost of [get] and [values] by id (the reads a question's constant and a program's Get make), on
+   LUBM-1 with its rules, in memory: 2,000,000 of each on things drawn at random, the time a read *)
+let reads_bench () =
+  let db, ids, _, _, _ = build 1 true in
+  let v = view db in
+  let lo = Schema.first_thing and hi = v.next_e in
+  let g = { st = (13 * 0x1E3779B97F4A7C15) lor 1; lit = 0 } in
+  let xs = Array.init 2_000_000 (fun _ -> rand g lo (hi - 1)) in
+  let s = ref 0 in
+  let t0 = now () in
+  Array.iter (fun x -> s := !s + List.length (get v x)) xs;
+  let t1 = now () in
+  Array.iter (fun x -> s := !s + List.length (values v x ids.ty)) xs;
+  let t2 = now () in
+  Printf.printf "reads: get %.1f ns, values %.1f ns (%d)\n%!" ((t1 -. t0) *. 1e9 /. 2e6) ((t2 -. t1) *. 1e9 /. 2e6) !s
+
 let () =
   (match Sys.getenv_opt "DOMAINS" with Some d -> Bulk.domains := int_of_string d | None -> ());
   match Array.to_list Sys.argv |> List.tl with
@@ -1028,6 +1074,7 @@ let () =
     Printf.printf "digest %s: %d facts (%d derived), digest %x\n" dir all d !digest;
     close db
   | [ "define"; n ] -> define_bench (int_of_string n)
+  | [ "reads" ] -> reads_bench ()
   | [ "change"; n; c; secs; at; mode; dir ] -> change_bench (int_of_string n) (int_of_string c) (float_of_string secs) (float_of_string at) mode dir
   | [ "mat"; n; mode; path; dir ] -> mat (int_of_string n) mode path dir
   | [ "student"; n; r; dir ] -> student_bench dir (int_of_string n) (int_of_string r)
@@ -1038,5 +1085,6 @@ let () =
   | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
   | [ "owl"; n; path; dir ] -> w3c ~form:"owl" (int_of_string n) path dir
   | [ "uobm"; n; mode ] -> uobm (int_of_string n) mode
+  | [ "storm"; n ] -> storm (int_of_string n)
   | [ "notagg"; n; k; r; mode ] -> notagg_bench (int_of_string n) (int_of_string k) (int_of_string r) mode
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2

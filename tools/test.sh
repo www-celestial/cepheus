@@ -33,6 +33,7 @@ b=_build/default/test
 CEPHEUS_TMP=$tmp $b/unit.exe | tail -1
 $b/reasoning.exe | tail -1
 CEPHEUS_TMP=$tmp $b/rulechange.exe "${CHANGE_KILLS:-10}" | tail -1
+CEPHEUS_TMP=$tmp $b/owl.exe "${OWL_SEEDS:-200}" | tail -1
 $b/exhaustive.exe | tail -5
 $b/sim.exe --seeds "${SEEDS:-300}" | tail -2
 # its stderr: the engine reporting the failures it is given (a cut whose fsync failed too)

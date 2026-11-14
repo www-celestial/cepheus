@@ -183,7 +183,7 @@ let reads_prop (v : Store.view) r p =
   match Schema.find v.schema p with
   | None -> false
   | Some d ->
-    let reads q = (Schema.is_system q && q <> Schema.p_same) || match Schema.find v.schema q with Some dq -> Tokens.reads_kind r (Tokens.kind_of dq.name) | None -> true in
+    let reads q = Schema.is_system q || match Schema.find v.schema q with Some dq -> Tokens.reads_kind r (Tokens.kind_of dq.name) | None -> true in
     (p = Schema.p_same || Tokens.reads_kind r (Tokens.kind_of d.name))
     &&
     match Reason.sources v p with

@@ -551,6 +551,23 @@ let rights_kinds () =
   Answer.question_budget := saved;
   check (match fq () with Some (Wire.Rows _) -> true | _ -> false) "bounds: within its budget"
 
+(* Rights per kind with equality: cepheus/same (the classes the rules make) is read as a derived fact, through what the
+   equalities read; and with equality, every property's facts may be rewritten, so its readers must read that too *)
+let rights_equality () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ ax; by_ ]) = declare db [ prop ~many:true "a/x" Tlink; prop ~many:true "b/y" Tlink ] in
+  let same_rule =
+    { name = "a-key"; vars = 3; where = [ { e = Var 0; p = ax; v = Var 2 }; { e = Var 1; p = ax; v = Var 2 } ]; ranges = [];
+      head = Give { e = Var 0; p = Schema.p_same; v = Var 1 } }
+  in
+  ignore (Result.get_ok (define db [ same_rule ]));
+  let v = view db in
+  let k read = Tokens.Kinds { read; add = [] } in
+  check (not (Core.reads_prop v (k [ "b" ]) Schema.p_same)) "equality and kinds: cepheus/same unread without the kind the equalities read";
+  check (Core.reads_prop v (k [ "a" ]) Schema.p_same) "equality and kinds: cepheus/same read with it";
+  check (not (Core.reads_prop v (k [ "b" ]) by_)) "equality and kinds: b's facts may be rewritten by a's equalities: unread without a";
+  check (Core.reads_prop v (k [ "a"; "b" ]) by_) "equality and kinds: read with both"
+
 (* Rights per kind with rules: a token sees a property's facts, derived ones included, only when it reads the kind
    of the property and every kind those facts can come from through the rules. Random rules (across kinds, over a
    variable property too) and random facts, written by a write token; tokens reading some kinds; after every group,
@@ -1376,6 +1393,7 @@ let () =
   tokens_golden ();
   rights_kinds ();
   rights_derived ();
+  rights_equality ();
   fdpass ();
   followed_rules ();
   request_ids ();

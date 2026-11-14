@@ -90,6 +90,7 @@ let specialise = ref true  (* false: the rules always run as written (the tests 
 let walk_retract = ref true  (* false: a closure's retractions by B/F through its rules' plans (the tests compare) *)
 let module_seconds = ref 0. (* of [seconds]: the closure modules' work, their facts found and put aside *)
 let bulk_groups = ref 0  (* large groups reasoned on their sorted prefix *)
+let merge_seconds = ref 0. (* of [seconds]: equalities applied, their facts rewritten *)
 
 (* ---- hashing ---- *)
 
@@ -621,7 +622,10 @@ and ctx = {
   (* equality (the reasoner design, section 5.10): the rules read the facts of representatives only *)
   mutable eqon : bool;  (* some thing is not its own representative: the plans skip its facts *)
   mutable nr : (int, int) Hashtbl.t;  (* the view's things that are not representatives: x -> its representative *)
+  mutable nrbits : Bytes.t;  (* and a bit a thing (from Schema.first_thing): one of them *)
   eqt : (int, int) Hashtbl.t;  (* the representatives this group changed: x -> its representative now *)
+  mutable eqbits : Bytes.t;  (* a bit a thing: in [eqt] *)
+  mutable eqset : int list;  (* the things in [eqt], their bits cleared at the next group *)
   mutable pend : (int * int * int) list;  (* the equalities found in the round: (a, b, rule) *)
   mutable boom : int list;  (* classes to take apart and derive again (B/F): their representatives *)
   exploded : (int, unit) Hashtbl.t;
@@ -633,22 +637,42 @@ and ctx = {
    [x cepheus/same r] (derived, one a thing that is not a representative) holds the classes. The view's non
    representatives are read once a view (a table rebuilt when the facts of cepheus/same change: never changed once
    made, so that several domains may read it); a group's changes are in the context's [eqt] above it. *)
-let reps_slot : (Store.run array * Store.stamp * (int, int) Hashtbl.t) option Atomic.t = Atomic.make None
+let reps_slot : (Store.run array * Store.stamp * (int, int) Hashtbl.t * Bytes.t) option Atomic.t = Atomic.make None
+
+let[@inline] bit (b : Bytes.t) x =
+  let i = x - Schema.first_thing in
+  i >= 0 && i lsr 3 < Bytes.length b && Char.code (Bytes.unsafe_get b (i lsr 3)) land (1 lsl (i land 7)) <> 0
+
+let[@inline never] set_bit (b : Bytes.t) x on =
+  let i = x - Schema.first_thing in
+  let k = i lsr 3 in
+  let b = if k < Bytes.length b then b else (let b' = Bytes.make (max (k + 1) (2 * Bytes.length b)) '\000' in Bytes.blit b 0 b' 0 (Bytes.length b); b') in
+  let m = 1 lsl (i land 7) in
+  Bytes.unsafe_set b k (Char.unsafe_chr (if on then Char.code (Bytes.unsafe_get b k) lor m else Char.code (Bytes.unsafe_get b k) land lnot m));
+  b
 
 let [@inline never] nonreps (v : Store.view) =
   let st = Store.stamp v Schema.p_same (-1) in
   match Atomic.get reps_slot with
-  | Some (runs, st', t) when runs == v.runs && Store.same_stamp st st' -> t
+  | Some (runs, st', t, b) when runs == v.runs && Store.same_stamp st st' -> t, b
   | _ ->
-    let t = Hashtbl.create 64 in
-    if Store.count_prop v Schema.p_same > 0 then Store.iter_prop v Schema.p_same (fun e w -> Hashtbl.replace t e w);
-    Atomic.set reps_slot (Some (v.runs, st, t));
-    t
+    let t = Hashtbl.create 64 and b = ref Bytes.empty in
+    if Store.count_prop v Schema.p_same > 0 then begin
+      b := Bytes.make (((v.next_e - Schema.first_thing) lsr 3) + 1) '\000';
+      Store.iter_prop v Schema.p_same (fun e w -> Hashtbl.replace t e w; b := set_bit !b e true)
+    end;
+    Atomic.set reps_slot (Some (v.runs, st, t, !b));
+    t, !b
 
+(* a thing's representative now: one bit read for a thing of no class (the usual case) *)
 let[@inline] rep_of c x =
-  if Hashtbl.length c.eqt > 0 && Hashtbl.mem c.eqt x then Hashtbl.find c.eqt x
-  else if Hashtbl.mem c.nr x then Hashtbl.find c.nr x
+  if bit c.eqbits x then Hashtbl.find c.eqt x
+  else if bit c.nrbits x then Hashtbl.find c.nr x
   else x
+
+let[@inline never] set_rep c x r =
+  if not (bit c.eqbits x) then (c.eqbits <- set_bit c.eqbits x true; c.eqset <- x :: c.eqset);
+  Hashtbl.replace c.eqt x r
 
 let[@inline] is_rep c x = rep_of c x = x
 
@@ -2094,7 +2118,8 @@ let [@inline never] new_ctx ?facts ?keys prog v =
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
     seen2 = iset_create (); walked = Bytes.empty; xk = ignore; plain_derive = false; heads_none = Hashtbl.create 8;
-    eqon = false; nr = Hashtbl.create 1; eqt = Hashtbl.create 8; pend = []; boom = []; exploded = Hashtbl.create 8; refill = [];
+    eqon = false; nr = Hashtbl.create 1; nrbits = Bytes.empty; eqt = Hashtbl.create 8; eqbits = Bytes.empty; eqset = [];
+    pend = []; boom = []; exploded = Hashtbl.create 8; refill = [];
     why_mode = false }
 
 let [@inline never] take ?facts ?keys prog v =
@@ -2124,12 +2149,14 @@ let [@inline never] take ?facts ?keys prog v =
   c.plain_derive <- false;
   Hashtbl.reset c.heads_none;
   Hashtbl.reset c.eqt;
+  List.iter (fun x -> c.eqbits <- set_bit c.eqbits x false) c.eqset;
+  c.eqset <- [];
   Hashtbl.reset c.exploded;
   c.pend <- [];
   c.boom <- [];
   c.refill <- [];
   c.why_mode <- false;
-  c.nr <- (if prog.eq then nonreps v else Hashtbl.create 1);
+  (let t, b = if prog.eq then nonreps v else Hashtbl.create 1, Bytes.empty in c.nr <- t; c.nrbits <- b);
   c.eqon <- prog.eq && Hashtbl.length c.nr > 0;
   c
 
@@ -3106,6 +3133,8 @@ let [@inline never] facts_naming c (ts : (int, unit) Hashtbl.t) f =
    property that makes n things one costs n - 1 facts of cepheus/same and the moves of the smaller sides, never the
    n^2 facts of the axiomatised equality. *)
 let [@inline never] apply_merges c round =
+  let t0 = Unix.gettimeofday () in
+  Fun.protect ~finally:(fun () -> merge_seconds := !merge_seconds +. (Unix.gettimeofday () -. t0)) @@ fun () ->
   let pend = List.rev c.pend in
   c.pend <- [];
   let ws = c.ws in
@@ -3134,7 +3163,7 @@ let [@inline never] apply_merges c round =
           [ ra; rb ];
         let ma, la = members ra and mb, lb = members rb in
         let r, x, mx, mr = if la > lb || (la = lb && ra < rb) then ra, rb, mb, ma else rb, ra, ma, mb in
-        List.iter (fun y -> Hashtbl.replace c.eqt y r; moved := (y, ri) :: !moved) mx;
+        List.iter (fun y -> set_rep c y r; moved := (y, ri) :: !moved) mx;
         (* the smaller list copied: O(its size) a merge, O(n log n) in all (union by size) *)
         Hashtbl.replace mem r (List.rev_append mx mr, la + lb);
         Hashtbl.remove mem x;
@@ -3418,7 +3447,7 @@ let [@inline never] explode c f0 r =
       (fun y ->
         let id = intern c y Schema.p_same r in
         if now ws id > 0 then (set_now ws id 0; set_mark ws id 4; count_derived c (-1));
-        Hashtbl.replace c.eqt y y)
+        set_rep c y y)
       !ms;
     let ts = Hashtbl.create 8 in
     Hashtbl.replace ts r ();

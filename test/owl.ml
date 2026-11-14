@@ -289,11 +289,19 @@ let cases : case list =
 let tmp = match Sys.getenv_opt "CEPHEUS_TMP" with Some d -> d | None -> Filename.get_temp_dir_name ()
 let counter = ref 0
 
+(* a database on the disk for a case; at its end closed and opened again: the frames replayed (derived facts,
+   cepheus/same's among them) give the same facts, the same ones asserted *)
 let on_disk f =
   incr counter;
   let dir = Filename.concat tmp (Printf.sprintf "owl-test-%d-%d" (Unix.getpid ()) !counter) in
-  let db = ok (open_ dir) in
-  Fun.protect ~finally:(fun () -> close db; C.rmrf dir) (fun () -> f db)
+  Fun.protect ~finally:(fun () -> C.rmrf dir) (fun () ->
+      let db = ok (open_ dir) in
+      (try f db with e -> close db; raise e);
+      let all = C.user_facts (view db) and asserted = C.asserted_facts (view db) in
+      close db;
+      let db = ok (open_ dir) in
+      C.check (F.equal (C.user_facts (view db)) all && F.equal (C.asserted_facts (view db)) asserted) "reopened: the same facts, the same asserted";
+      close db)
 
 let paths () =
   List.iter

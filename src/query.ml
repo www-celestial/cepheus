@@ -49,8 +49,18 @@ let types (v : Store.view) q =
 
 (* A thing named by a question is read as its class's representative (the reasoner design, section 5.10): facts are
    kept on the representative, [x cepheus/same r] holds when x is not one *)
+(* does the view hold any fact of cepheus/same: known for the newest view asked (its runs and the delta's entry of the
+   property), so that a read of a database without equality pays a pointer comparison, not a count over the runs *)
+let same_slot : (Store.run array * Store.stamp * bool) option Atomic.t = Atomic.make None
+
+let any_same (v : Store.view) =
+  let st = Store.stamp v Schema.p_same (-1) in
+  match Atomic.get same_slot with
+  | Some (runs, st', b) when runs == v.runs && Store.same_stamp st st' -> b
+  | _ -> let b = Store.count_prop v Schema.p_same > 0 in Atomic.set same_slot (Some (v.runs, st, b)); b
+
 let rep (v : Store.view) x =
-  if x < Schema.first_thing || Store.count_prop v Schema.p_same = 0 then x
+  if x < Schema.first_thing || not (any_same v) then x
   else (let r = ref x in Store.iter_values v x Schema.p_same (fun w -> r := w); !r)
 
 let compile (v : Store.view) q =

@@ -186,7 +186,7 @@ let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ
 
 let same (v : view) x =
   let r = Query.rep v x in
-  if Store.count_prop v Schema.p_same = 0 then [ x ]
+  if not (Query.any_same v) then [ x ]
   else (let l = ref [ r ] in Store.iter_things v Schema.p_same r (fun y -> l := y :: !l); List.sort compare !l)
 
 let get (v : view) e =
