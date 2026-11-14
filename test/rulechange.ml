@@ -320,7 +320,8 @@ let counting () =
    propose replaced here by a function that records the frames, or refuses one as a server that stopped leading):
    a change's frame is proposed as every write's; a frame refused and taken back, or a frame of another leader
    applied, while a change runs in the background, answers the change not_leader and installs nothing of it: its view
-   held a group that was never committed, or missed one. The journal replayed gives the same view each time. *)
+   held a group that was never committed, or missed one. An equality rule's classes (cepheus/same) go through the
+   same frames. The journal replayed gives the same view. *)
 let raft_member () =
   section "a Raft member: a change's frame proposed; a frame taken back, or another leader's frame, answers the change not_leader";
   let d = C.tmpdir "rc-raft" in
@@ -345,10 +346,11 @@ let raft_member () =
     [ Add (id, Schema.p_name, Text name); Add (id, Schema.p_rule, Text text); Expect (id, Schema.p_name, None) ]
   in
   let has v x p y = List.mem (Link y) (values v x p) in
+  let applied = ref [] in
   let all_proposed () =
-    (* every group from 2 on (group 1 is made at the open) proposed once, in order, none twice *)
+    (* every group from 2 on (group 1 is made at the open) proposed once, in order, none twice, but another leader's *)
     let gs = List.concat_map (fun (f, c) -> List.init c (fun k -> f + k)) (Mutex.protect pm (fun () -> !proposed)) in
-    List.sort compare gs = List.init ((pub ()).group - 1) (fun k -> k + 2)
+    List.sort compare (gs @ !applied) = List.init ((pub ()).group - 1) (fun k -> k + 2)
   in
   let in_thread_w ops = in_thread (fun () -> wr ops) in
   (* a change beside writes: its frame proposed *)
@@ -389,7 +391,7 @@ let raft_member () =
   Group.encode body g;
   let body = Buffer.to_bytes body in
   (match Engine.call l (fun r -> Engine.Apply (r, { Engine.first = g.n; count = 1; body; len = Bytes.length body })) with
-   | Ok _ -> C.check true "another leader's frame applied"
+   | Ok _ -> applied := g.n :: !applied; C.check true "another leader's frame applied"
    | Error er -> C.fail "another leader's frame: %s" (message er));
   (match res () with
    | Error er -> C.check (Engine.is_not_leader er) "the change beside another leader's frame: not_leader (%s)" (message er)
@@ -401,10 +403,19 @@ let raft_member () =
   (match wr (define "typed" [ { e = x; p = a; v = y } ] (Give { e = y; p = ty; v = Thing t.(0) })) with
    | Ok _ -> C.check (Schema.rule_by_name (pub ()).schema "typed" <> None && exact (pub ())) "a change after them: installed, exact"
    | Error er -> C.fail "a change after them: %s" (message er));
-  let last = C.user_facts (pub ()) in
+  (* equality (cepheus/same, OWL's owl:sameAs by rewriting): its rule a change of the rules, its classes derived
+     facts of ordinary frames, all proposed; the journal gives the same classes *)
+  (match wr (define "same-n" [ { e = x; p = n; v = z }; { e = y; p = n; v = z } ] (Give { e = x; p = Schema.p_same; v = y })) with
+   | Ok _ -> C.check true "an equality rule defined on a Raft member"
+   | Error er -> C.fail "an equality rule on a Raft member: %s" (message er));
+  let twin = List.assoc (-1) (ok (wr [ Add (-1, n, Int 3) ])).things in
+  let cls v = List.sort compare (same v twin) in
+  C.check (List.mem t.(3) (cls (pub ())) && List.length (cls (pub ())) = 2) "a new thing made equal to #%d by the rule: one class of two" t.(3);
+  C.check (all_proposed ()) "every group was proposed (but the other leader's), the equality's included";
+  let last = C.user_facts (pub ()) and last_cls = cls (pub ()) in
   Engine.stop l;
   let db = open_db d in
-  C.check (F.equal (C.user_facts (view db)) last && exact (view db)) "reopened: the journal gives the same view";
+  C.check (F.equal (C.user_facts (view db)) last && cls (view db) = last_cls) "reopened: the journal gives the same view and the same class";
   close db;
   C.rmrf d
 
