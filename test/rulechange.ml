@@ -10,6 +10,7 @@
    - the change budget: a rule that would derive past it is refused, named, while writers go on; a change of the
      ontology past a data write's budget is accepted, on the disk and on a fork alike, and a data write past it is not;
    - close during a change: the change answered Closed, nothing of it after the reopen;
+   - a change with an Incr in its group: computed in its group, beside groups that count with the same counter;
    - kill -9 during changes (child processes): after each recovery the view is exact under its rules, a rule there
      with all its consequences or not at all.
    Usage: rulechange.exe [KILLS]; scratch databases in $CEPHEUS_TMP. *)
@@ -280,6 +281,40 @@ let closing () =
   close db;
   C.rmrf d
 
+(* a change of the rules with an Incr in its group: computed in its group (inline), its counter read at its point, so
+   that the groups counting with the same counter meanwhile never conflict with it and none is lost *)
+let counting () =
+  section "a change with an Incr in its group: computed in its group, beside groups that count with the same counter";
+  let d = C.tmpdir "rc-incr" in
+  let db = open_db d in
+  let a, b, _, _ = schema db in
+  let n = Option.get (property (view db) "n") in
+  let t = things db 20 in
+  ignore (ok (write db (List.init 19 (fun i -> Add (t.(i), a, Link t.(i + 1))))));
+  let counter = t.(0) and before = Atomic.get Engine.changes_done in
+  let stop = Atomic.make false and counted = Atomic.make 0 and refused = Atomic.make 0 in
+  let w = Thread.create (fun () -> while not (Atomic.get stop) do (match write db [ Incr (counter, n, 1, None) ] with Ok _ -> Atomic.incr counted | Error _ -> Atomic.incr refused) done) () in
+  Unix.sleepf 0.05;
+  let id = free_id (view db) in
+  let text = Rules.to_text (rule "copy" [ { e = x; p = a; v = y } ] (Give { e = x; p = b; v = y })) in
+  let res = write db [ Add (id, Schema.p_name, Text "copy"); Add (id, Schema.p_rule, Text text); Expect (id, Schema.p_name, None); Incr (counter, n, 1, None) ] in
+  Unix.sleepf 0.05;
+  Atomic.set stop true;
+  Thread.join w;
+  (match res with
+   | Ok _ ->
+     let v = view db in
+     C.check (Schema.rule_by_name v.schema "copy" <> None && Store.count_prop v b = 19 && exact v) "the rule and its consequences are there, exact";
+     C.check (values v counter n = [ Int (Atomic.get counted + 1) ]) "the counter counted every group (%d and the change's)" (Atomic.get counted);
+     C.check (Atomic.get Engine.changes_done = before) "the change was computed in its group, not in the background"
+   | Error e -> C.fail "a change with an Incr: %s" (message e));
+  C.check (Atomic.get refused = 0 && Atomic.get counted > 0) "the groups counting beside it: %d, none refused" (Atomic.get counted);
+  close db;
+  let db = open_db d in
+  C.check (exact (view db) && values (view db) counter n = [ Int (Atomic.get counted + 1) ]) "reopened: the same";
+  close db;
+  C.rmrf d
+
 (* ---- kill -9: a child writes and changes the rules until killed ---- *)
 
 let child d =
@@ -340,5 +375,6 @@ let () =
     concurrency ();
     budget ();
     closing ();
+    counting ();
     kills rounds;
     C.finish "rulechange"
