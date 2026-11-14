@@ -1,6 +1,7 @@
 (** Latencies in microseconds, counted in log-linear buckets as HdrHistogram does (Tene): exact below 256, then 128
     buckets per power of two, so every percentile is known within 1/128 (0.8 %), with a fixed memory of 3,584 counters
-    whatever the number of values. One writer per histogram; merge the histograms of several writers at the end. *)
+    whatever the number of values, made at the first value. One writer per histogram; merge the histograms of several
+    writers at the end. *)
 
 type t
 
