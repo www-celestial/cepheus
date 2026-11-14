@@ -29,6 +29,16 @@ Vide. Laissé par une fermeture propre (chaque frame et chaque nom durables, auc
 l'ouverture suivante, qui saute alors les fsyncs dont a besoin une recovery après un crash (G5 ; la recovery : la
 remise en état à l'ouverture, en relisant le journal). Sa création et sa suppression ne sont pas forcées sur le disque.
 
+## `DIR/shared`
+
+Vide. Créé par la première ouverture de la base par un serveur, dont le commit buffer (l'endroit où le serveur copie
+les frames de plusieurs bases pour les confirmer par un seul fsync) force le journal à partir de là
+([le serveur](server.md#many-databases-one-fsync-the-commit-buffer)), et gardé tant qu'un serveur l'ouvre ; supprimé
+par une ouverture dans le processus même d'un programme (`Cepheus.open_`) après une fermeture propre. Sa création et sa
+suppression sont forcées (le fsync du répertoire). Une ouverture dans le processus même d'un programme refuse une base
+qui a `shared` et pas `closed` (`Busy`) : ses frames confirmées les plus récentes peuvent n'être que dans
+`DATA/server.wal.1` ou `.2`, les fichiers du serveur.
+
 ## Segment de journal `DIR/journal/<first group, 20 digits>.seg`
 
 ```
@@ -126,22 +136,23 @@ nomment dans les anciens segments ne servent donc jamais.
 
 Un run tient les changements des groupes lo+1 .. hi par-dessus l'état au groupe lo (lo = 0 : un bottom run, tout
 l'état à hi). L'état de la base sur disque est une chaîne de runs depuis 0, chacun reposant sur la fin de celui d'en
-dessous, plus le journal après le plus récent. Le format 8 tient chaque fait trois fois : par chose, par propriété et
+dessous, plus le journal après le plus récent. Le format 9 tient chaque fait trois fois : par chose, par propriété et
 valeur, et par propriété et chose (le **column order** : les lignes de chaque propriété à part, dans l'ordre des
-choses). Il code chaque section en **frame of reference** (Goldstein et al. 1998,
+choses), et, pour chaque propriété texte, ses textes distincts dans l'ordre de leurs octets (le **text order** :
+`Prefix`). Il code chaque section en **frame of reference** (Goldstein et al. 1998,
 Zukowski et al. 2006) : un bloc de valeurs est rangé comme une base et, pour chaque valeur, sa différence avec la base
 en autant de bits qu'en demande la plus grande différence du bloc (le bit packing des colonnes du journal, plus haut) ;
 toute valeur se lit en $O(1)$ sans décoder ses voisines.
 
 ```
-header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (8) | 8 database id, 16 bytes
+header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (9) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0
-  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 23 section
+  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 24 section
     offsets (below, the last one the part's end)
-  | part t: rows n | thing range ne | things k | properties np | its 23 section offsets
+  | part t: rows n | thing range ne | things k | properties np | its 24 section offsets
   | layout length | file pages P
-  | 560 CRC of the page table u32 | 564 CRC of bytes 0..564 u32 | zeros to 4096
+  | 576 CRC of the page table u32 | 580 CRC of bytes 0..580 u32 | zeros to 4096
 pages: P pages of 16 KiB at 4096 + 16384 f
 page table, at 4096 + 16384 P: for each page k of the layout (ceil(layout length / 16384) of them), 8 bytes: the file
   page f that holds it (u32; 0xFFFFFFFF: none, the page reads as zeros) | the page's CRC-32C (u32)
@@ -182,7 +193,19 @@ cdir    16 bytes a block          the columns' block directories
 cdata                             the columns' values
 cmh     16 bytes a block          the columns' row offsets (a monotone sequence): headers
 cmb                               their bits
+tord    (np + 1) u64, then u32s   the text order: each property's first entry (the last, the count of all), then the
+                                  distinct texts of each text property's rows in the part, as text ids, in the order
+                                  of their bytes (part t: only the np + 1 zeros)
 ```
+
+**Le text order** (format 9). Le merge rassemble les numéros de texte distincts de chaque propriété texte pendant
+qu'il écrit les lignes de cette propriété (dans l'ordre des valeurs, donc chaque numéro une fois), lit chaque texte une
+fois, les trie par leurs octets (UTF-8 : l'ordre de leurs code points, les numéros Unicode de leurs caractères), et
+écrit les numéros. Les textes qui commencent par un préfixe en forment un seul tronçon, trouvé par deux binary searches
+(des recherches par moitiés successives), chaque étape un texte lu à travers le cache ; les textes d'une vue qui ont un
+préfixe sont l'union du tronçon de chaque run et des textes de la propriété dans le delta (au plus un seuil de merge
+d'entre eux, regardés un par un) : un sur-ensemble des textes que tiennent ses faits, que le join (la jointure des
+patterns de la question) vérifie ensuite. Quatre octets par texte distinct et par run.
 
 La partie a tient les faits que le run ajoute, la partie t les faits des runs d'en dessous qu'il retire (vide dans un
 bottom run) ; un run n'ajoute que des faits absents en dessous de lui et ne retire que des faits présents en dessous de
@@ -321,9 +344,13 @@ chaque page du fichier au plus une fois), l'ordre de ses sections, ses rank tabl
 propriété, dans l'ordre), les value indexes (dans leur place), les offsets des textes, et chaque colonne (son entrée
 dans ses sections, les comptes de sa rank table, ses offsets de 0 à ses lignes chacun plus grand que le précédent, ses
 blocs dans l'ordre et dans leur place, ses lignes celles de la propriété par valeur) ; un run qui ne se vérifie pas est
-mis de côté et le choix refait sans lui. Un run qui tient dans le cache est lu et vérifié en entier à l'ouverture, par
-jusqu'à 4 domains (des fils d'exécution d'OCaml qui tournent en parallèle) quand il a 512 pages ou plus (chacun avec
-son propre descripteur ; le CRC fait l'essentiel du temps d'une ouverture). Le replay commence à la
+mis de côté et le choix refait sans lui. Un run qui tient dans le cache est lu et vérifié en entier à l'ouverture ;
+pour un run plus grand, les pages que lisent ses vérifications (ses tables) sont lues et vérifiées d'abord, quand le
+cache a de la place pour elles toutes. Dans les deux cas, les pages sont lues dans l'ordre du fichier, les pages du
+fichier qui se suivent en une seule lecture (jusqu'à 1 MiB), par jusqu'à 4 domains (des fils d'exécution d'OCaml qui
+tournent en parallèle) à partir de 64 pages (chacun avec son propre descripteur ; le CRC fait l'essentiel du temps
+d'une ouverture à chaud, quand le fichier est déjà dans la mémoire du noyau, et la latence du disque l'essentiel d'une
+ouverture à froid). Le replay commence à la
 position du journal inscrite dans l'en-tête du run le plus récent, dont le groupe peut précéder celui du run lui-même :
 un merge en arrière-plan part d'une vue en avance sur le disque, et sa position est la fin de la dernière frame
 durable. Les groupes jusqu'à celui du run sont lus et sautés. Un journal qui finit avant le groupe du run le plus
@@ -333,8 +360,10 @@ Une page est l'unité du cache : elle est lue du fichier en entier (16 384 octet
 table), vérifiée contre son CRC, et servie seulement ensuite. Un champ de 2, 4 ou 8 octets dans une table est aligné sur
 sa taille, donc aucun ne traverse une page ; un champ serré au bit près le peut, et il est alors lu dans les deux pages.
 
-Le **format 7** (le format 8 sans le column order) est mis de côté à l'ouverture de la même façon : ses groupes rejoués
-depuis le journal (une base de 10 M de faits : 5,2 s, une seule fois), le premier merge écrivant le format 8.
+Le **format 8** (le format 9 sans le text order) et le **format 7** (le format 8 sans le column order) sont mis de côté
+à l'ouverture de la même façon : leurs groupes rejoués depuis le journal (une base de 10 M de faits depuis le format 7 :
+5,2 s, une seule fois), le premier merge écrivant le format 9. Une version qui lit le format 8 met de côté de la même
+façon un run du format 9 (elle dit "an earlier format (9)") et rejoue le journal, dont le format n'a pas changé.
 
 Les **formats 5 et 6** (chaque fait deux fois en mots fixes : par chose une propriété u16 et une valeur i64, par
 propriété une valeur i64 et une chose u32, un offset dense u64 par slot de chose ; le format 6 avec le drapeau d'un fait
@@ -348,6 +377,12 @@ format 4 (un seul snapshot `<group>.snap` qui tient toute la base, avec une tabl
 d'avant sont mis de côté à l'ouverture (ce sont des caches) : le journal est rejoué, et le premier merge les supprime.
 Le format 1 gardait aussi les faits de lien par cible (`roff`, `rp`, `re`) ; le format 2 avait un CRC par MiB et était
 mappé en entier ; le format 3 n'avait pas de groupe du journal dans son en-tête.
+
+## Le vault `DIR/vault/`
+
+Le fichier des clés, les packs, leurs index, un record et un nœud, octet par octet : [le vault](vault.md#formats) (le
+vault : là où Cepheus garde les octets des fichiers ; un pack : un fichier où il ajoute ses records, ses entrées
+écrites ; un nœud : une entrée de l'arbre qui relie les morceaux d'un fichier).
 
 ## Les fichiers du serveur
 
@@ -376,3 +411,54 @@ Un checkpoint dont le CRC ne correspond pas est ignoré : le journal est alors l
 **`DATA/cepheus.lock`** : le pid du serveur en décimal et un saut de ligne, sous un lock `lockf` exclusif tant qu'il
 tourne.
 **`DATA/cepheus.server`** : l'identifiant du serveur (`cph-s-` et 16 chiffres hexadécimaux) et un saut de ligne.
+
+**`DATA/server.wal.1` et `DATA/server.wal.2`**, les deux fichiers du commit buffer, qui alternent (`src/wal.ml` ;
+[le serveur](server.md#many-databases-one-fsync-the-commit-buffer)) :
+
+```
+file   = header, 40 bytes: 0 magic "CPHW" (0x57485043) u32 | 4 format u32 (1) | 8 generation u64 | 16 zero, 20 bytes
+                           | 36 CRC of the 36 bytes before
+       | rounds, from offset 40
+round  = header, 28 bytes: 0 magic "CPHR" (0x52485043) u32 | 4 body length u32 | 8 round number u64 (0, 1, 2... in
+                           its file) | 16 entries u32 | 20 body CRC u32 | 24 CRC of the 24 bytes before
+       | body: entries, each: database id (16 bytes, as in DIR/cepheus) | length u32 | one frame of that database's
+                           journal, whole (header, groups, trailer: the bytes its segment holds)
+       | trailer, 16 bytes: body length u32 | body CRC u32 | header CRC u32 | magic "CPHT" (0x54485043)
+```
+
+Un fichier est commencé avec son en-tête et son premier tour (round : des entrées qu'un seul fsync confirme) ensemble :
+écrit à côté sous le nom `server.wal.N.tmp`, forcé, renommé à son nom, le répertoire forcé, si bien qu'un crash laisse
+soit l'ancien fichier, soit le nouveau, entier. Les tours suivants y sont ajoutés, chacun forcé. Le fichier le plus
+récent a la génération la plus haute. Les deux fichiers sont supprimés au démarrage d'un serveur (une fois que le
+journal de chaque base contient leurs frames, forcées) et à un arrêt propre (une fois chaque journal forcé) : un
+répertoire de données au repos n'en a aucun. À la recovery, chaque tour du fichier le plus ancien doit passer la
+vérification ; dans le fichier le plus récent, le premier tour qui ne la passe pas est une fin torn (le tour en cours
+au moment du crash, jamais confirmé) si aucun tour écrit en entier ne le suit, et un dommage sinon, comme dans un
+journal ; un fichier dont l'en-tête ne passe pas la vérification est un dommage.
+
+**`DATA/raft/`**, le log et l'état d'un cluster Raft (des serveurs qui gardent le même log, la liste ordonnée des
+écritures, par l'algorithme de consensus Raft ; `server/raftlog.ml` ;
+[le serveur](server.md#a-cluster-of-three-raft)), le dossier en mode 0700, chaque fichier en 0600 :
+
+```
+state    = magic "cepheus raft state\n" (19 bytes) | term u64 | vote (varint length, a peer's name; empty: none)
+         | repair u64 (0, or the newest index a damaged log may have acknowledged) | CRC-32C u32 of everything before
+log.<first index, 20 digits> = header, 52 bytes: 0 magic "CPHL" (0x4C485043) u32 | 4 format u32 (1)
+                           | 8 first index u64 | 16 term of the entry before it u64 | 24 cluster id (22 bytes)
+                           | 46 two zero bytes | 48 CRC of the 48 bytes before
+         | rounds
+round    = header, 36 bytes: 0 magic "CPHE" (0x45485043) u32 | 4 body length u32 | 8 first index u64 | 16 count u32
+                           | 20 commit index u64 (the one known when its entries were given to the disk, never
+                             past the round's last entry: entries no truncation can remove)
+                           | 28 body CRC u32 | 32 CRC of the 32 bytes before
+         | body: count entries, each: term u64 | length u32 | bytes (empty: a leader's no-op; else 0x01, the
+                           database's id (16 bytes), one frame of its journal, whole)
+         | trailer, 16 bytes: body length u32 | body CRC u32 | header CRC u32 | magic "CPHT" (0x54485043)
+```
+
+`state` est écrit à côté, forcé, renommé par-dessus l'ancien, et le répertoire forcé ; s'il ne passe pas la
+vérification, le démarrage est refusé. Un tour est l'ensemble des entrées d'un fsync. À la recovery, dans le segment le
+plus récent, le premier tour qui ne passe pas la vérification est une fin torn (coupée) si aucun en-tête de tour qui
+passe la vérification ne le suit et qu'aucun trailer ne met là un tour entier ; tout le reste est un dommage : le
+segment et ceux d'après sont renommés `*.damaged` (gardés), les tours d'avant le dommage sont écrits de nouveau sous le
+nom du segment, et `state` enregistre `repair` (la règle de 2018).

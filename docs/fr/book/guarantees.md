@@ -4,7 +4,10 @@ Chaque garantie énonce ce qui est promis, sous quelles pannes, ses conditions e
 de preuve) et le test qui la vérifie. Les tests sont dans `test/` ; `tools/test.sh` les lance tous. Les mots sont
 expliqués dans [concepts](concepts.md), [architecture](architecture.md) et le [glossaire](glossary.md) ; les
 mathématiques sont dans [théorie](theory.md). Tout ce qui suit vaut pour cette version : une seule machine, des runs sur
-le disque en niveaux (leveling, ratio 4), pas de réplication ; les règles comme [règles](rules.md) le dit.
+le disque en niveaux (leveling, ratio 4), une replica asynchrone (une copie de la base tenue à jour sur une autre
+machine, sans que les écritures l'attendent : [serveur](server.md#a-replica) ; son journal est un préfixe des groupes
+durables du primary, le serveur qui reçoit les écritures, et sa promotion, le passage de la replica au rôle de
+primary, se fait à la main) ; les règles comme [règles](rules.md) le dit.
 G14, G15 et G16 appartiennent au serveur : leurs énoncés, leurs preuves et leurs tests sont dans [la page du serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)
 ([G15](server.md#lectures-locales-g15) : des lectures dans la mémoire même d'un programme, sur la machine du serveur).
 À travers le serveur, G1 à G13 gardent leurs énoncés : un groupe est confirmé quand son reçu est envoyé, après son
@@ -29,11 +32,14 @@ durable à partir duquel elle a été répondue ; `server_sim` les vérifie sur 
 | G14 | à travers le serveur, une écriture envoyée avec sa session et son numéro de série est appliquée au plus une fois ; renvoyée jusqu'à avoir une réponse, exactement une fois, chaque réponse nommant le même groupe | F1, F2, connexions coupées |
 | G15 | chaque lecture, dans un lecteur local ou au serveur, contient chaque groupe répondu et chaque état lu avant son début, et est l'état exact après un groupe durable : les lectures sont linearizable | F1, lecteurs lents, en pause ou tués, flux coupés |
 | G16 | à travers le serveur, une connexion fait exactement ce que permettent les droits de son token | toujours |
-| G17 | chaque vue contient exactement le plus petit modèle de ses faits affirmés sous ses règles, et marque exactement ceux qui sont affirmés | toujours (avec G1-G3 sous F1, F2) |
+| G17 | chaque vue contient exactement le plus petit modèle de ses faits affirmés sous ses règles (avec l'égalité : lu à travers ses classes), et marque exactement ceux qui sont affirmés | toujours (avec G1-G3 sous F1, F2) |
 | G18 | aucun groupe confirmé ne laisse une instance d'une contrainte (`Never`) | toujours |
 | G19 | un changement de règle prend effet à un seul groupe | toujours |
 | G20 | `why` renvoie une preuve bien fondée d'un fait de la vue, ou rien pour un non-fait | toujours |
 | G21 | chaque message d'une question vivante (`Watch`) laisse au programme exactement les lignes de `Find` à son groupe, un groupe durable ; ses groupes ne font que croître, sans en sauter un qui a changé les lignes | F1, F2, connexions coupées, programmes lents |
+| G22 | aucun fait ne cite un chunk (un morceau d'un fichier) ou un nœud (une entrée de l'arbre qui relie les chunks d'un fichier) du vault de fichiers (là où Cepheus garde les octets des fichiers) qui n'est pas sur le disque | F1, F2 |
+| G23 | le vault ne sert aucun octet d'un fichier autre que les octets qui y ont été mis | F3 (tout changement du disque) |
+| G24 | après `Erase`, aucune lecture du vault, ni d'une copie qui a pris ses clés depuis, ne donne un octet des fichiers du propriétaire | toujours |
 
 ## Les pannes
 
@@ -80,8 +86,25 @@ pas aux octets durables. La recovery (`Journal.scan`) lit les frames dans l'ordr
 qui ne passe pas la vérification ; toutes les frames avant une frame durable sont durables, donc intactes, donc lues.
 Les runs utilisés à la recovery sont cohérents avec le journal (G7).
 
+*Avec le commit buffer d'un serveur* ([le serveur](server.md#many-databases-one-fsync-the-commit-buffer) ; le commit
+buffer est l'endroit où le serveur copie les frames de plusieurs bases pour les confirmer toutes par un seul fsync), la
+frame est écrite dans le journal sans fsync, et `write` revient après le fsync du tour du buffer qui en contient une
+copie entière (ou, quand le buffer était inactif, après le fsync de son propre journal, comme sans le buffer). Jusqu'à
+ce que le journal soit forcé (un checkpoint, le moment où le journal lui-même est rendu durable), le buffer garde cette
+copie : un fichier du buffer n'est vidé qu'une fois que chaque journal qui y a des frames a été forcé après elles, et un
+run n'est nommé qu'une fois son journal forcé (`Engine.install`), donc aucun état durable ne repose sur des frames que
+le buffer est seul à contenir. Une base n'écrit sa frame suivante qu'une fois la précédente confirmée ; donc, après une
+coupure de courant, son journal contient, après sa dernière frame forcée, des frames que le buffer contient, chacune
+entière, perdue ou torn (écrite à moitié, interrompue en cours de route), et au plus une frame qu'aucun fsync n'a
+confirmée. La recovery réécrit à sa place chaque frame que contient le buffer avant de lire le journal
+(`Journal.repair`), et chaque autre frame avant la dernière d'entre elles doit passer la vérification (elle a été
+forcée) ; la règle propre au journal prend le reste. Donc chaque frame confirmée est lue.
+
 *Testé par* `test/sim.ml` (à chaque recovery : "lost acknowledged groups"), `test/exhaustive.ml` (chaque état de crash
-de petits journaux), `test/crash.ml` (de vrais `kill -9`, le contenu de chaque confirmation vérifié).
+de petits journaux ; partie 6, le commit buffer), `test/crash.ml` (de vrais `kill -9`, le contenu de chaque
+confirmation vérifié), `test/wal_sim.ml` (trois bases qui partagent un buffer, avec chaque panne),
+`test/server_crash.ml` (un vrai serveur de deux bases, tué). Vérifié par model checking (l'exploration par une
+machine de tous les états d'un modèle) : `spec/CommitBuffer.tla`.
 
 ## G2 Tout ou rien
 
@@ -230,10 +253,12 @@ sections, les rank tables (les tables de rangs : le compte de chaque mot découl
 est égal au nombre de choses) et l'ordre et les bornes de chaque table de positions et de chaque répertoire, ceux des
 colonnes compris (chaque colonne dans ses sections, les comptes de sa rank table, ses positions de lignes chacune plus
 grande que la précédente jusqu'à ses lignes, ses blocs dans l'ordre : `Snapshot.check_and_build`). Un run qui tient
-dans le cache est lu et vérifié en entier, par jusqu'à 4 domains pour un run de 512 pages ou plus, chacun avec son
-propre descripteur, avant d'être pris. Chaque page passe par `Pages.fill`, qui lit la page du fichier que nomme la
-table des pages et vérifie le CRC-32C que donne la table avant que la page entre dans la frame table (la table des
-emplacements de pages du cache) : aucun autre chemin n'y met une page. Chaque accès à un run vérifie ses bornes (la
+dans le cache est lu et vérifié en entier avant d'être pris ; pour un run plus grand, les pages de ses tables sont lues
+et vérifiées d'abord, quand le cache a de la place pour elles (par jusqu'à 4 domains à partir de 64 pages, chacun avec
+son propre descripteur). Une page lue dans le fichier d'un run n'entre dans la frame table (la table des emplacements
+de pages du cache) qu'une fois vérifié le CRC-32C que donne sa table des pages : à l'ouverture
+(`Snapshot.check_and_build`) ou à la demande (`Pages.fill`) ; une page qu'un merge vient d'écrire entre depuis les
+octets dont il a calculé le CRC (`Pages.admit`). Aucun autre chemin n'y met une page. Chaque accès à un run vérifie ses bornes (la
 frame table, puis les octets de la page ou la copie d'un bloc), donc une lecture ne sort jamais des octets du run. Le
 codage des formats 7 et 8 (des blocs par frame of reference, une table des pages, le column order) change ce que
 contient une page, pas cet argument : une valeur n'est décodée que depuis une page qui a passé la vérification. Pour un
@@ -361,6 +386,22 @@ réponse (un statut partagé par 20 000 factures, un tag très fréquent dans le
 constantes, des liens, des intervalles) comparées à un évaluateur naïf sur tous les faits, sur une base avec un delta
 et sur une base compactée.
 
+*Avec Not, Or et In* ([Cepheus depuis Cesia](cesia.md#not-or-and-in)), la promesse porte sur les variables propres
+à la question : ses bindings qui font tenir ses patterns et ses conditions, qui font tenir une alternative de chaque
+`Or` pour une valeur des variables propres à cette alternative, et pour lesquels aucune valeur des variables propres à
+chaque `Not` ne fait tenir ses éléments, chacun une fois. `In` restreint les candidats, `Not` ne fait que retirer des
+bindings, et un `Or` est une union disjointe (l'alternative j avec les alternatives d'avant elle comme des `Not` : un
+binding tient pour un plus petit j, et il est une réponse de la question j et d'aucune autre), donc chacun vient une
+fois ; une alternative qui a ses propres variables garde les bindings qu'elle a donnés. Avec Sort, Limit et After, les
+lignes sont celles du select (ce que la question renvoie), dans l'ordre, coupées comme le dit le chapitre. *Testé
+par* `test/questions.ml` : des états aléatoires (chaque type, des flottants avec nan et -0, les faits dérivés d'une
+règle, des retraits, des runs fusionnés au hasard) et des questions aléatoires avec des patterns, des intervalles,
+`Not`, `Or`, `And` et `In`, et un select, Sort, Limit et After aléatoires, répondues par un oracle (un évaluateur de
+référence) en force brute sur chaque fait (les bindings, les groupes, l'ordre valeur par valeur, le curseur, les
+ex aequo), et par le moteur sur le chemin du heap (un tas qui garde les meilleures lignes), sur le chemin de l'index et
+selon son propre choix, avant et après un aller-retour sur le réseau : les mêmes lignes, dans le même ordre ; et des
+questions vivantes avec `Not`, `Or` et `In` vérifiées par l'oracle après chaque frame.
+
 ## G12 Les merges sont atomiques
 
 *Promesse.* Après un crash à n'importe quel point d'un merge (F1, F2, F4), la base s'ouvre sur les runs d'avant ou sur
@@ -481,13 +522,39 @@ groupe publié n'est pas durable en 5 pas.
 
 *Promesse.* Chaque vue — de n'importe quel groupe, dans n'importe quel processus, après n'importe quel crash et
 n'importe quelle recovery, d'un fork — contient exactement le **least model** (le plus petit modèle) de ses faits
-affirmés sous les règles définies à son groupe : un fait est dans la vue si et seulement s'il est affirmé ou s'il a une
+affirmés sous les règles définies à son groupe (avec `Not` et des agrégats : le **perfect model**, le modèle parfait,
+des règles stratifiées, c'est-à-dire rangées en strata, des étages dont chacun ne lit sous une négation et sous les agrégats
+que ce que donnent les étages plus bas, le perfect model étant le least model calculé étage par étage ; [Apt 1988],
+[Przymusinski 1988]) : un fait est dans la vue si et seulement s'il est affirmé ou s'il a une
 preuve (un arbre fini d'instances de règles dont les feuilles sont des faits affirmés). Et un fait est marqué affirmé
 dans la vue si et seulement s'il est affirmé.
 
-*Conditions.* Les règles telles que cette version les a : du Datalog sans négation, sans agrégats et sans nouvelles
-choses dans les têtes, chaque règle range-restricted (chaque variable de la tête apparaît dans le corps) et typée
-(vérifié quand elle est écrite). Un groupe refusé (par son budget, une contrainte, une règle du schéma) ne laisse rien.
+*Conditions.* Les règles telles que cette version les a : du Datalog avec `Not` et des agrégats (`Sum`, `Count`, `Min`,
+`Max`) stratifiés et sans nouvelles choses dans les têtes, chaque règle range-restricted (chaque variable de la tête
+apparaît dans le corps) et typée (vérifié quand elle est écrite ; la propriété d'un pattern est une constante ou une
+variable liée par un pattern dont la propriété est une constante, et les types de ses valeurs sont ceux de la propriété
+à chaque instance). Un groupe refusé (par son budget, une contrainte, une règle du schéma, un fait dérivé qui ne
+convient pas à sa propriété) ne laisse rien.
+
+*Avec l'égalité* (une règle dont la tête donne `cepheus/same`, comme celles d'OWL 2 RL, le profil de règles du langage
+d'ontologies OWL du W3C) : les classes de choses égales sont celles du least model des règles avec l'égalité
+axiomatisée (eq-ref, eq-sym, eq-trans, eq-rep-s, eq-rep-p, eq-rep-o : [W3C 2012], Table 4), chaque membre sauf son
+représentant (la chose qui tient lieu de toute sa classe) ayant `[x cepheus/same r]` ; et les faits de la vue, chaque
+chose lue comme le représentant de sa classe, sont ceux de ce modèle, lus de la même façon : un fait seulement dérivé
+nomme des représentants, un fait qu'un programme a affirmé reste tel qu'il a été écrit (la réécriture de
+[Motik 2015b], Théorème 1 : T et ρ ensemble représentent la matérialisation de l'égalité axiomatisée). *Esquisse de
+preuve.* Insertion : chaque égalité que donne une instance fusionne deux classes avant que le fait suivant soit traité,
+et chaque fait qui nomme le représentant du plus petit côté est réécrit sur celui du plus grand au tour suivant, donc
+les règles, qui ne lisent que des représentants, voient exactement les faits réécrits (l'invariant 2 de Motik et al. :
+chaque fait non marqué est sa propre réécriture) ; la réécriture d'un fait est dérivée de la réécriture de ses
+prémisses, donc le least model réécrit est atteint. Retrait : une classe dont les faits ont pu perdre une preuve est
+défaite (chaque membre redevient son propre représentant, chaque fait seulement dérivé qui nomme son représentant est
+supprimé, ses conséquences vérifiées par B/F, Backward/Forward, l'algorithme qui retire les faits restés sans preuve)
+et les faits affirmés de ses membres forment le tour 0 de l'insertion : Delete-Rederive (supprimer, puis dériver de
+nouveau) sur la classe ([Gupta 1993]), exact quel que soit l'ordre des suppressions. *Testé par* `test/owl.ml` contre
+`Check.least_eq` (un union-find, la structure qui tient des classes que l'on fusionne, chaque fait réécrit après chaque
+passe), sur cinq chemins et des suites aléatoires avec des retraits ; un mutant (une copie du code changée exprès) qui
+ne défait jamais une classe échoue à 75 vérifications.
 
 *Preuve.* (1) *Insertion.* La semi-naive evaluation à partir des ajouts affirmés du groupe atteint le plus petit point
 fixe des règles sur l'état après les retraits : chaque instance de règle avec un fait du tour r est énumérée au tour r
@@ -501,16 +568,62 @@ affirmés, et l'état seulement quand leur preuve est réfutée ; un fait retir�
 (3) *Changements de règles.* Une règle ajoutée est évaluée sur tout l'état (ses instances sur des faits plus anciens),
 puis avec les autres par la semi-naive evaluation ; une règle supprimée donne ses têtes à B/F comme candidats.
 (4) *Durabilité.* Les changements dérivés sont dans la frame même du groupe, écrits et forcés avec elle (G1, G2) ; le
-replay les applique selon leur sorte et n'évalue rien, donc une vue rétablie, celle d'une réplique ou celle du passé est
+replay les applique selon leur sorte et n'évalue rien, donc une vue rétablie, celle d'une replica ou celle du passé est
 celle du writer, octet pour octet de faits. (5) *Runs.* Un merge garde l'indicateur de chaque fait : pour chaque fait,
 l'entrée la plus récente donne son état dans la nouvelle vue et la plus ancienne son état en dessous des runs
 fusionnés ; un indicateur changé est un retrait et un ajout dans le nouveau run.
+(6) *Les modules de closure.* Pour prp-trp (la règle d'OWL 2 RL d'une propriété transitive) sur $T$, le $T$ du least
+model est la transitive closure $T^+$ (la fermeture transitive : chaque paire reliée par un chemin) des autres faits
+de $T$ ; pour la paire linéaire (deux règles : chaque arête donne un fait de la closure, et une arête suivie d'un fait
+de la closure en donne un), c'est $E^* \circ (E \cup B)$, $B$ étant les faits de $T$ affirmés ou donnés par d'autres
+règles. De zéro, le module calcule exactement ceux-ci sur les composantes fortement connexes (les cibles d'une
+composante sont celles de ses successeurs avec eux, et ses propres membres quand elle contient un cycle), et fait
+chaque paire qui n'est pas présente ; de façon incrémentale, l'état avant le groupe contient la closure (G17 pour le
+groupe d'avant, par récurrence), donc une nouvelle arête $(a, b)$ ajoute exactement
+$(\{a\} \cup \mathrm{pred}(a)) \times (\{b\} \cup \mathrm{succ}(b))$ (pour la paire linéaire : les choses qui atteignent $a$
+par $E$, et, pour un nouveau fait $(c, d)$ de $B$, celles qui atteignent $c$, fois $d$), chaque nouveau fait au tour
+suivant, où les autres règles le voient. Retrait par des parcours : si aucune autre règle ne donne $T$ ou $E$, les
+arêtes sont les faits que le groupe laisse affirmés, donc les nouvelles cibles d'une source sur les arêtes restantes
+sont ses cibles dans le least model ; une source qui n'atteint aucune arête retirée les garde (ses chemins sont
+intacts), donc seules les sources calculées peuvent perdre des faits, et elles perdent exactement ceux qui sont hors de
+leurs nouvelles cibles. Sinon, B/F avec les plans des deux règles, exact par (2).
+(7) *Les propriétés variables et le dépliage.* Une règle dépliée (unfolded : réécrite en une règle par fait d'une
+petite relation, les constantes à leur place) est la règle générique où les variables de ses petits atomes sont
+remplacées par les mots d'un de leurs bindings communs dans la vue (les intervalles gardés, les instances qui ne
+peuvent pas exister écartées) : sur tout état dont les petites relations contiennent exactement ces faits, les
+instances des règles dépliées sont celles de la règle générique, une pour une. Le writer n'utilise le programme déplié
+que pour un groupe dont l'état les garde : la vue contient les faits sur lesquels il a été déplié (vérifié à chaque
+groupe), le groupe n'en affirme ni n'en retire aucun, et la dérivation ou la suppression de l'un d'eux fait recommencer
+le groupe avec les règles telles qu'elles sont écrites. Une relation ne sert au dépliage que si aucune chaîne de règles
+ne mène des têtes des règles dépliées jusqu'à elle, donc les preuves de ses faits ne passent pas par les règles
+dépliées sur elle : les vérifications du programme déplié (B/F) le supposent, et cela tient alors.
+(8) *Les strata.* Un ensemble de règles avec un cycle à travers `Not` ou un agrégat est refusé à sa définition, donc
+chaque règle ne lit sous `Not` et sous les agrégats que ce que donnent les strata plus bas. Les strata sont tenus à jour
+dans l'ordre : quand le stratum $s$ tourne, ceux d'en dessous contiennent leur perfect model de l'état du groupe
+(récurrence sur $s$), donc ce sont des faits fixes pour $s$, et les règles de $s$ sont monotones dans les faits propres
+à $s$ ; (1) et (2) s'appliquent à elles, avec les instances que les changements des strata plus bas enlèvent et
+donnent : un fait rendu présent que filtre un `Not` enlève les instances que ce `Not` permettait (les candidats de
+B/F, leurs instances perdues énumérées avec les `Not` lus sur l'état d'avant le groupe) ; un fait parti donne les
+instances que son absence permet (le tour 1 de l'insertion) ([Motik 2019]). Les réponses qu'un agrégat réunit sous
+une clé ne changent que par des réponses qui contiennent l'un des faits que le groupe a changés : chacune de ces
+réponses est trouvée une fois, à partir de ce fait (sur l'état d'après le groupe s'il est venu, d'avant s'il est
+parti), et la somme et le compte changent de la somme des changements des réponses ([Budiu 2023]) ; un minimum ou un
+maximum est relu sur toutes les réponses de sa clé quand l'extrême les a quittées. Aucune écriture n'affirme la
+propriété d'un agrégat et aucune autre règle ne la donne, donc ses faits sont exactement les valeurs de l'agrégat.
 
 *Testé par* `test/reasoning.ml` (après chaque groupe de suites aléatoires de 60 groupes, 60 seeds simples et 60 avec les
 faits fusionnés en runs entre les groupes dans `tools/test.sh`, `RULES_SEEDS` pour plus : des règles aléatoires sûres et
 typées définies, changées et supprimées, des ajouts et des retraits aléatoires de faits affirmés, dérivés et les deux,
 la vue égale au plus petit modèle de ses faits affirmés recalculé de zéro par évaluation naïve avec l'évaluateur propre
-au vérificateur, `Check.least`, et ses faits affirmés égaux à ceux du modèle) ; la simulation (trois règles à partir
+au vérificateur, `Check.least`, et ses faits affirmés égaux à ceux du modèle ; parmi les règles, des transitive
+closures des deux formes et des règles sur une propriété variable liée par une petite relation, que le moteur déplie ;
+et les suites simples une seconde fois avec le dépliage coupé, la vue de chaque groupe égale à celle de l'exécution
+dépliée, et avec les closures retirées par B/F au lieu des parcours ; le cas nommé "a closure's retractions decided by
+walks" : 120 groupes d'ajouts et de retraits sur les deux formes et une règle qui lit les deux, le least model après
+chacun, les règles aléatoires avec des `Not` et des agrégats (`Sum`, `Count`, `Min`, `Max` sur des propriétés int à
+une valeur qu'aucune écriture n'affirme) comparées au perfect model recalculé de zéro, stratum par stratum
+(`Check.perfect`, les strata par les plus longs chemins), les cycles à travers eux refusés comme prévu, et les mêmes
+vues que celles de B/F) ; la simulation (trois règles à partir
 du troisième groupe de chaque seed : les vues publiées, rétablies et de fork égales au plus petit modèle, après des
 crashs à chaque appel au disque, des coupures de courant, des fichiers abîmés, des merges commencés en avance) ;
 `test/crash.ml` (une règle marque la chose de chaque client ; après chaque `kill -9`, chaque chose confirmée a sa
@@ -524,7 +637,9 @@ sur un état sans instance d'elle.
 
 *Preuve.* Les règles sans négation sont monotones : une nouvelle instance du corps d'une contrainte a besoin d'un fait
 que le groupe a rendu présent. Après le point fixe, les plans de la contrainte tournent sur chacun de ces faits (chaque
-atome du corps mis en correspondance avec lui, les autres sur l'état final) ; une contrainte ajoutée tourne sur tout
+atome du corps mis en correspondance avec lui, les autres sur l'état final) ; avec un `Not`, une instance vient aussi
+d'un fait que le groupe a enlevé et que le `Not` lisait, et les plans tournent aussi sur chacun de ces faits (le
+pattern de son `Not` mis en correspondance avec lui, le reste sur l'état final) ; une contrainte ajoutée tourne sur tout
 l'état. Un groupe qui trouve une instance lève une exception avant que sa frame soit faite.
 
 *Testé par* `test/reasoning.ml` (des contraintes aléatoires parmi les règles aléatoires : un groupe est refusé
@@ -536,14 +651,31 @@ groupe refusé ne change rien).
 *Promesse.* Définir, changer ou supprimer des règles prend effet au groupe qui l'écrit : chaque vue d'avant contient le
 plus petit modèle sous les anciennes règles, chaque vue à partir de ce groupe le plus petit modèle sous les nouvelles.
 
-*Conditions.* Cette version raisonne en ligne, dans le groupe qui change les règles, sous le budget ; le chemin en
-arrière-plan que prévoit la conception pour les très grands changements vient plus tard et garde la même promesse.
+*Conditions.* Aucune : sur un fork et dans le cœur déterministe, le changement est raisonné dans son groupe ; dans le
+writer à threads d'une base sur le disque, il est calculé à côté du writer et installé comme un seul groupe
+([règles](rules.md#changes-of-the-rules-in-the-background)) ; un crash à n'importe quel moment compris.
 
 *Preuve.* Les faits de la règle et les changements dérivés qu'ils causent forment un seul groupe : G2 les rend tous
 visibles d'un coup, ou aucun.
+Sur le chemin en arrière-plan, la frame de ce groupe est la différence exacte entre la vue du writer et celle de
+l'arrière-plan, qui est le least model de l'état au switch (l'instant où le writer adopte la nouvelle vue) sous les
+nouvelles règles : chaque batch de groupes que l'arrière-plan a rattrapé la garde telle (le least model est une
+fonction des faits affirmés, et le raisonnement incrémental l'atteint : G17), et la partie affirmée du changement
+commute avec ces groupes (aucun fait en commun, vérifié, sinon `Conflict`). Le writer n'adopte cette vue qu'avec le
+groupe, donc aucune vue d'avant lui ne contient un fait des nouvelles règles ; le replay de la frame donne la vue
+adoptée, donc une recovery, une replica ou un lecteur local reçoit entière chaque vue à partir de lui. Avant que sa
+frame soit durable, le changement n'est pas confirmé, et un crash n'en laisse rien. Le protocole est vérifié par
+model checking (`spec/RuleChange.tla`).
 
-*Testé par* `test/reasoning.ml` (des règles définies, changées et supprimées au hasard parmi les écritures ; G17 vérifié
-sur la vue de chaque groupe).
+*Testé par* `test/reasoning.ml` (des règles définies, changées et supprimées au hasard parmi les écritures, sur des
+forks et sur des bases sur le disque où chaque changement prend le chemin en arrière-plan : G17 vérifié sur la vue de
+chaque groupe, les mêmes décisions que celles du modèle, et la base rouverte à l'identique) ; `test/rulechange.ml` (des
+groupes écrits pendant qu'un changement est retenu après sa construction, rattrapés exactement et rangés avant lui ; un
+groupe qui interfère y met fin par `Conflict` ; 6 clients qui écrivent, 24 changements et 2 lecteurs qui vérifient
+chaque vue qu'ils prennent contre le least model sous ses propres règles ; une fermeture pendant un changement ; des
+kill -9 pendant des changements, chaque vue rétablie exacte) ; `tools/tlc.sh` (`spec/RuleChange.tla`, et ses huit
+variantes qui doivent échouer, parmi elles la reprise de frames par un membre de Raft, l'algorithme de consensus qui
+garde le même log sur plusieurs serveurs).
 
 ## G20 `why` renvoie une preuve
 
@@ -557,19 +689,93 @@ prouvé chaque fait est gardée à ce moment-là, donc les enfants de chaque nœ
 pas de cycle. Par G17, chaque fait dérivé de v a une preuve, que la vérification trouve : elle explore chaque instance
 de chaque règle qui donne le fait, jusqu'à ce que l'une soit prouvée.
 
+Avec l'égalité, un fait d'un représentant qui réécrit le fait affirmé d'un membre est prouvé par un nœud
+`cepheus/same` dont les enfants sont ce fait affirmé et les faits des classes (`[x cepheus/same r]`, eux-mêmes des
+nœuds de `cepheus/same` sans enfants : la preuve d'une égalité elle-même n'est pas encore donnée).
+
 *Testé par* `test/reasoning.ml` (un groupe sur cinq de chaque suite aléatoire : la preuve de chaque fait dérivé
 vérifiée nœud par nœud — la règle de chaque nœud existe, les atomes de son corps se lient de façon cohérente aux faits
 des enfants dans l'ordre, sa tête est le fait du nœud, ses intervalles tiennent, chaque feuille est affirmée dans la
 vue — et le cas nommé d'une preuve en deux étapes).
 
+## La sécurité des règles
+
+
+- **Un travail et une mémoire bornés.** Chaque fait dérivé compte dans le budget ($100\,000 + 100 \times$ les
+  changements affirmés du groupe) sur chaque chemin : l'instance d'un plan, chaque fait qu'un module de closure fait de
+  façon incrémentale, les cibles d'un batch vérifiées contre le budget à mesure qu'elles grandissent (donc sa mémoire
+  avant un refus est en proportion du budget), les faits d'une forêt comptés avant qu'aucun soit fait, et les
+  suppressions de B/F. Un ensemble de règles ou des données dont les conséquences le dépassent sont refusés en entier,
+  en nommant la règle : jamais un writer qui manque de mémoire ou qui cale sur une closure de $n^2$ faits.
+  *Testé par* `test/reasoning.ml` ("a closure past the budget" : des chaînes de 200 dans un groupe, les deux formes de
+  règles, des arêtes vers des choses plus anciennes et plus récentes ; l'arête qui joint deux chaînes de 40 ; le
+  prp-trp du W3C déplié sur une chaîne ; chacun refusé en entier, la vue inchangée, le least model après).
+- **Un changement des règles est borné et peut être arrêté.** Ses faits dérivés comptent dans le budget d'un
+  changement ($100\,000 + 100 \times$ ses changements affirmés $+ 4 \times$ les faits de la base), à la construction
+  et sur les groupes qu'il rattrape, donc sa mémoire reste en proportion de la base : une règle de $n^2$ faits est
+  refusée, nommée, pendant que les autres clients continuent d'écrire. Un tour sur plusieurs domains garde en têtes au
+  plus deux fois le budget restant avant de revenir à un seul domain, qui refuse là où il le doit. Si l'arrière-plan
+  prend 65 536 groupes de retard, le writer l'attend : la liste des groupes à rattraper et les deltas restent bornés.
+  Une fermeture annule un changement en cours (son raisonnement vérifie un indicateur tous les 1 024 faits dérivés) ;
+  un kill ne laisse rien d'un changement pas encore durable. Les règles ne sont écrites que par des tokens qui écrivent
+  chaque kind (un kind regroupe les propriétés d'une sorte de chose ; le serveur le vérifie avant que l'écriture soit
+  mise en file, comme pour toute règle). *Testé par* `test/rulechange.ml` (un produit cartésien refusé pendant qu'un
+  client continue d'écrire ; une fermeture ; kill -9) et `test/server_unit.ml` ("rules are for write
+  tokens").
+- **Les règles dépliées donnent exactement les règles telles qu'elles sont écrites.** À côté de la preuve de G17 (7),
+  les suites aléatoires tournent une troisième fois avec le dépliage coupé (`Reason.specialise`), et la vue de chaque
+  groupe doit être égale à celle de l'exécution dépliée, et les deux au least model recalculé de zéro : une faute du
+  dépliage ne peut pas changer une réponse sans qu'on le voie.
+- **Les droits par kind et les faits dérivés.** Un fait dérivé est un fait de sa propriété, lu sous les droits de son
+  kind comme n'importe quel autre. Il peut venir de faits d'autres kinds (le corps d'une règle) : `sources v p` donne
+  les propriétés dont peuvent venir les faits dérivés d'une propriété, de proche en proche, sur les règles telles
+  qu'elles sont écrites (si on ne les connaît pas : une propriété variable lit n'importe laquelle). Un lecteur autorisé
+  à certains kinds seulement n'apprend, par les faits dérivés d'une propriété, rien qu'il n'ait le droit de lire quand
+  il lit chaque kind de ses sources, et les droits par kind du serveur en tiennent compte : un tel lecteur ne lit une
+  propriété que s'il lit aussi chaque kind de ses sources, et un refus par les règles ne lui nomme que la règle
+  ([serveur](server.md)). *Testé par* `test/reasoning.ml` ("where a property's derived facts come from") et
+  `test/server_unit.ml` ("rules and kinds" : des règles, des faits et des tokens aléatoires, les lectures de chaque
+  token comparées au propre calcul de l'oracle).
+- **Les tempêtes d'égalités restent linéaires.** Celui qui écrit des règles peut rendre beaucoup de choses égales (une
+  propriété fonctionnelle, qui n'a qu'une valeur par chose, avec n valeurs sur une chose) : n choses coûtent n − 1
+  faits de `cepheus/same`, jamais les n² faits de l'égalité axiomatisée, et chaque fait est déplacé O(log n) fois sur
+  toute suite de fusions (l'union par taille : la plus petite classe rejoint la plus grande). Les égalités sont
+  appliquées fait par fait, donc une telle propriété coûte O(n) instances de règles, pas les n² paires qu'un tour
+  énumérerait. Chaque fait qu'une fusion écrit ou déplace compte dans le budget, donc une tempête qui le dépasse est
+  refusée en entier. *Testé par* `test/owl.ml` ("an equality storm" : 3 000 choses en une classe, 2 999 faits,
+  0,05 s ; au-delà d'un budget de 100 faits, refusée, rien d'appliqué).
+- **Une égalité ne peut pas atteindre ce qu'elle ne doit pas.** Deux valeurs, une chose qui est une propriété, ou une
+  chose que nomment les règles (owl:Thing, une classe que nomme une règle dépliée) ne sont jamais rendues égales : le
+  groupe est refusé, en nommant la règle. `cepheus/same` est lu comme un fait dérivé : un token qui a des droits par
+  kind le lit, ainsi que toute propriété d'un ensemble de règles avec égalité (dont une fusion peut réécrire les
+  faits), seulement s'il lit chaque kind d'où viennent les égalités ; le `Get` du serveur ne lit une chose comme sa
+  classe que pour un token qui lit `cepheus/same` (un autre reçoit les propres faits de la chose, et n'apprend aucune
+  égalité). *Testé par* `test/owl.ml` (eq-rep-p, prp-fp sur des valeurs), `test/server_unit.ml` ("equality and
+  kinds") et `test/cesia-live.ce` (OWL 2 RL par TLS, un token d'un seul kind : `Same` et les questions refusés, `Get`
+  rien).
+- **Les templates sont bornés.** Une liste se déplie en une règle d'au plus 64 copies de ses patterns (un template est
+  une règle dont un pattern se répète pour chaque membre d'une liste ; un groupe qui fait une liste plus longue est
+  refusé, en nommant la règle) ; écrire une liste est un changement des règles, sous le budget d'un changement ; aucune
+  règle ne peut donner une liste, donc une liste ne change que par des écritures, que le writer voit. Rien de nouveau
+  n'est décodé : un template est le texte canonique d'une règle (`*p` pour sa liste), lu par le parser des règles, qui
+  refuse tout texte qui ne se réimprime pas à l'identique ; les faits de `cepheus/same` sont des faits dérivés
+  ordinaires de la frame.
+
 ## G21 Les questions vivantes
 
-*Promesse.* Le premier message d'un watch (une question vivante, ouverte par `cepheus.Watch`) est la réponse de `Find`
+*Promesse.* Le premier message d'un watch (une question vivante : sa réponse, puis ses changements) est la réponse de `Find`
 à un groupe durable ; après chaque message suivant (un changement, ou à nouveau la réponse), les lignes que tient le
 programme, le changement appliqué, sont exactement la réponse de `Find` au groupe de ce message, un groupe durable
 (G1 : aucun crash ne peut le reprendre). Les groupes des messages d'un watch ne font que croître, et chaque groupe qui a
 changé les lignes entre deux messages est dans le changement du second : aucun changement n'est perdu, aucun ne vient
-deux fois, quoi qu'il casse entre-temps (la connexion, le serveur par `kill -9`, la lecture du programme).
+deux fois, quoi qu'il casse entre-temps (la connexion, le serveur par `kill -9`, la lecture du programme). Un watch
+d'une question avec `Not`, `Or`, `In` ou `Prefix` tient la promesse par ses clés : un binding dont une frame change
+l'appartenance à la réponse s'accorde avec l'un des faits de la frame à un pattern de la question (un binding qui ne
+s'accorde avec aucun ne lit aucun fait changé), donc les bindings qui ont les valeurs que donnent ces faits (ou, pour
+un pattern dont les variables sont toutes propres à un `Not` ou à une alternative, les valeurs qu'atteignent ses autres
+éléments, avant et après la frame) sont répondus de nouveau avant et après, et le changement est leur différence ;
+`test/questions.ml` vérifie ses lignes par l'oracle après chaque frame, et celles d'un token restreint par l'oracle sur
+les faits qu'il a le droit de lire.
 
 *Conditions.* La question est une conjunctive query (les patterns et les intervalles de `Find`), avec `Give` ou des
 agrégats. Un programme qui lit plus lentement que n'arrivent les changements reçoit à nouveau la réponse plutôt que
@@ -607,3 +813,60 @@ qui ne lit jamais à côté d'un qui lit : le lecteur reçoit chaque changement 
 `lagging`) ; les tests du package sur des forks (`cesia/tests/cepheus.test.ce`) ; `test/cesia.sh` (un watch par TLS,
 un local, et un qui continue à travers un `kill -9` du serveur pendant que 1 500 lignes s'écrivent : ses groupes ne
 font que croître et il finit avec les 1 500).
+
+## G22 Les fichiers sont durables avant leurs faits
+
+*Énoncé.* Un fait qui cite la racine d'un fichier nomme un arbre de nœuds et de chunks qui sont tous sur le disque :
+chacun de ses chunks et de ses nœuds se relit après tout crash et toute recovery.
+
+*Preuve.* `Vault.finish` force le pack (un fichier du vault où ses records, les entrées qu'il écrit, s'ajoutent les uns
+après les autres) qui contient les records du fichier, et le répertoire d'un nouveau pack, avant de renvoyer la racine
+(par son propre fsync, ou par un fsync partagé avec d'autres puts, les opérations qui mettent un fichier dans le vault,
+commencés après que ses records ont été ajoutés : le group commit, plusieurs écritures confirmées par un seul fsync) ;
+un pack fermé plus tôt a été forcé avant que son index soit écrit. Les faits sont écrits après le retour de `finish`,
+comme tout groupe (G1). La recovery ne coupe rien : un pack qui a son index est pris tel que le dit l'index (écrit
+après que le pack a été forcé) ; un pack sans index est lu en entier, chaque record vérifié par ses CRC, forcé (après
+un `kill -9`, ses records peuvent n'être que dans le page cache, et un nouveau fichier peut les trouver déjà stockés),
+et fermé tel qu'il est, jamais réécrit. Un record qu'un crash a laissé torn n'a jamais été forcé, donc aucun fait ne le
+cite. Un chunk trouvé déjà stocké est relu et vérifié avant qu'un nouveau fichier le cite, donc un chunk endommagé est
+écrit de nouveau plutôt que cité.
+
+*Testé par* `test/vault_unit.ml` (120 seeds de coupures de courant à des appels pris au hasard pendant des puts sur le
+disque simulé, trois par seed : chaque fichier terminé avant un crash se relit exact ; quatre threads qui mettent des
+fichiers en même temps, coupés par une coupure de courant à un moment au hasard, 40 seeds ; un kill au milieu d'un put,
+le fichier remis, puis une coupure de courant, 30 seeds) et `test/vault_crash.ml` (20 `kill -9` d'un processus qui met
+des fichiers et écrit leurs faits : chaque fichier cité se relit exact, chaque fichier confirmé est là).
+
+## G23 Aucun octet faux n'est servi
+
+*Énoncé.* Un octet que donne le vault est un octet du fichier qui a été mis, à sa place ; sinon la lecture est une
+erreur (`damaged`, `missing` ou `erased`).
+
+*Preuve.* Un record n'est utilisé que si le CRC de son en-tête passe la vérification, s'il porte le nom demandé (le nom
+de son en-tête, que le tag authentifie), et si son tag AEGIS-256 (le code d'authentification que le chiffrement
+calcule avec la clé) passe la vérification sur ses octets scellés (chiffrés et authentifiés) et les champs de son
+en-tête : un changement passe avec une probabilité de 2^-256, et un record déplacé sur un autre porte un autre nom. Le
+CRC-32C des octets bruts, scellé avec eux, est vérifié après le codec (la décompression). Les tailles d'un nœud sont
+vérifiées contre celles de son parent, la longueur d'un chunk contre celle de son nœud.
+
+*Testé par* `test/vault_unit.ml` : des octets changés dans des packs, un record déplacé sur un autre, 20 000 records
+changés au hasard (des octets, des coupures, des champs avec leurs CRC recalculés), chaque lecture donnant les bons
+octets ou une erreur.
+
+## G24 L'effacement
+
+*Énoncé.* Après le retour de `Erase(owner)`, aucune lecture du vault ne donne un octet d'un fichier scellé avec la clé
+du propriétaire, ni aucune lecture d'une copie des records du vault qui a pris ses clés depuis ; aucun nouveau fichier
+ne nomme ce propriétaire.
+
+*Preuve.* La clé du propriétaire n'existait que dans le fichier des clés, scellée par la clé maîtresse ; `Erase`
+réécrit ce fichier sans elle (à côté, forcé, renommé par-dessus l'ancien, le répertoire forcé), avec une marque qui dit
+que le domaine est effacé (le domaine : les fichiers scellés avec cette clé), avant de revenir. Un record du
+propriétaire a alors besoin d'une clé qu'aucun fichier ne contient. Une copie qui prend les clés prend la marque et
+laisse tomber la clé. Non couvert : une copie du fichier des clés faite avant l'effacement (une sauvegarde) contient
+toujours la clé ; les blocs de l'ancien fichier peuvent rester sur un disque flash jusqu'à leur réutilisation
+([le vault](vault.md#erasing-an-owner)).
+
+*Testé par* `test/vault_unit.ml` (les fichiers d'un domaine effacé `erased`, après une réouverture aussi ; sa clé
+scellée absente du fichier des clés ; effacé sur une copie qui a pris les clés) et `server_unit` (Erase à travers le
+serveur, les droits, et un put refusé après lui).

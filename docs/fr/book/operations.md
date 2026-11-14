@@ -9,6 +9,7 @@ du disque, les sauvegardes, la vérification, la mémoire et l'espace disque, et
 DIR/cepheus                       the database's id (16 random bytes) and format, written once, atomically, with a CRC
 DIR/lock                          held (lockf) while the database is open: one process at a time
 DIR/closed                        left by a clean close (everything durable), removed by the next open
+DIR/shared                        the database is opened by a server, whose commit buffer forces its journal
 DIR/journal/NNNNNNNNNNNNNNNNNNNN.seg   segments named by their first group, 64 MB each, only appended to
 DIR/snapshots/LO-HI.run           the runs (levels of the LSM tree): the changes of groups LO+1..HI on top of the
                                   state at LO (20 digits each); the chain from 0 to the newest group is the base, and
@@ -25,7 +26,9 @@ Le journal est la vérité : les runs sont des caches qu'on peut toujours recons
 
 1. prend le lock (`Busy` si un autre processus l'a) ;
 2. lit l'id ; si `closed` est là (le dernier processus a fermé proprement), le supprime ; sinon force le répertoire de
-   la base ;
+   la base. Si `shared` est là et que `closed` n'y est pas, une ouverture dans le processus même d'un programme est
+   refusée (`Busy` : [une base d'un serveur](#a-database-of-a-server)) ; après une fermeture propre, elle supprime
+   `shared` et continue ;
 3. convertit un journal de format 1 au format 2, une seule fois (chaque segment écrit à côté, forcé, renommé
    par-dessus l'ancien ; un crash au milieu laisse chaque segment entier, et l'ouverture suivante continue), et
    supprime les fichiers des merges qu'un crash a interrompus (`.tmp`) ;
@@ -33,33 +36,67 @@ Le journal est la vérité : les runs sont des caches qu'on peut toujours recons
    (le CRC de l'en-tête, la table des pages, les rank tables, l'ordre et les bornes de chaque table ; le CRC d'une page
    au moment où elle est lue) ; un run qui ne passe pas la vérification, ou d'un format antérieur (5 et 6 : "an earlier
    format (6), the journal is replayed"), est mis de côté et noté (`Cepheus.notes`), et le choix est refait sans lui ;
-5. après un crash (pas de `closed`), écrit de nouveau la frame la plus récente du journal et force le segment le plus
-   récent et le répertoire du journal (un processus tué avant son fsync les a laissés dans le page cache ; après un
+5. ouverte par un serveur, écrit d'abord de nouveau dans le journal les frames que son commit buffer (l'endroit où le
+   serveur copie les frames de plusieurs bases pour les confirmer par un seul fsync) contient pour cette base
+   ([plus bas](#a-database-of-a-server)), et les force ;
+6. après un crash (pas de `closed`), écrit de nouveau la frame la plus récente du journal et force le segment le plus
+   récent et le répertoire du journal (un processus tué avant son fsync les a laissés dans le page cache, la copie des
+   fichiers que le noyau garde en mémoire ; après un
    fsync qui a échoué, le page cache peut contenir des octets que le disque n'a pas, G13) ; puis lit le journal à partir
    de la position du run le plus récent : vérifie chaque frame, applique chaque groupe, et fait un merge en un nouveau
    run quand les changements dépassent le seuil ou que le groupe est un grand groupe, comme l'aurait fait le writer ;
    un journal qui finit avant le groupe du run le plus récent est un dommage. Le journal est lu à travers une fenêtre
    de 4 MiB : une frame dont les runs contiennent déjà les groupes est vérifiée par son CRC, morceau par morceau, et pas
    décodée ; une frame plus longue à rejouer est lue en entier (la mémoire de son groupe, comme quand il a été écrit) ;
-6. à la première frame qui ne passe pas la vérification : un torn tail (une fin de journal à moitié écrite) est coupé
+7. à la première frame qui ne passe pas la vérification : un torn tail (une fin de journal à moitié écrite) est coupé
    (truncate, fsync) ; un dommage arrête l'ouverture avec `Damaged "file: what, at which offset"` (le fichier, ce qui
    ne va pas, à quel offset ; les merges du replay avant lui peuvent avoir écrit un run des groupes d'avant le
    dommage) ;
-7. une frame dont le trailer a été déchiré alors que son en-tête et son corps sont intacts est gardée, et son trailer
+8. une frame dont le trailer a été déchiré alors que son en-tête et son corps sont intacts est gardée, et son trailer
    reconstruit ; un segment le plus récent déchiré à sa création (son en-tête ne passe pas la vérification et il ne
    contient aucune frame) est supprimé ;
-8. une nouvelle base (pas encore de groupe) reçoit le groupe 1, qui décrit les cinq propriétés système (une base faite
+9. une nouvelle base (pas encore de groupe) reçoit le groupe 1, qui décrit les cinq propriétés système (une base faite
    avant que `cepheus/rule` existe n'a pas la description de celle-ci : ses règles marchent tout de même).
 
 Le temps de recovery, c'est la vérification des runs plus le replay des groupes qui suivent le plus récent. Chaque
 merge écrit un run, donc le replay est d'au plus un seuil de merge de changements (et des groupes écrits pendant que
 le dernier merge tournait) ; `Cepheus.snapshot` fait le merge tout de suite, avant un arrêt prévu par exemple.
 
+## Une base d'un serveur
+
+Un serveur force les journaux de toutes ses bases par un seul fsync par tour, à travers son commit buffer
+(`DATA/server.wal.1` et `.2` : [le serveur](server.md#many-databases-one-fsync-the-commit-buffer)). Entre deux
+checkpoints d'un journal (les moments où le journal lui-même est forcé), ses frames confirmées les plus récentes
+peuvent n'être durables que dans le buffer : le journal les tient dans le page cache, et une coupure de courant peut
+les y perdre. Donc :
+
+- **Le serveur les réécrit à son démarrage.** Avant d'ouvrir ses bases, il lit le buffer ; l'ouverture de chaque base
+  réécrit à leur place dans son journal les frames que le buffer a pour elle, et les force ; chaque frame du journal
+  avant la dernière d'entre elles que le buffer ne contient pas doit passer la vérification (elle a été forcée : sinon
+  `Damaged`) ; la règle propre au journal prend ce qui suit. Puis le buffer est vidé. Un démarrage refuse (`Damaged`,
+  en nommant les ids) quand le buffer contient des frames d'une base que `cluster.toml` ne liste plus : la rajouter,
+  démarrer, arrêter, et la retirer.
+- **Le processus même d'un programme refuse la base après un crash.** `Cepheus.open_` d'une base qui a `shared` et pas
+  `closed` renvoie `Busy` (`DIR was written through a server's commit buffer and not closed cleanly: ...`) : il
+  couperait les frames confirmées comme un torn tail, ou prendrait leurs trous pour un dommage. Démarrez le serveur sur
+  son répertoire de données et arrêtez-le : la base est alors fermée proprement, et s'ouvre n'importe où. Après une
+  fermeture propre, l'ouverture supprime `shared` et la base redevient une base ordinaire.
+- **Revenir à une version antérieure.** Les versions d'avant le commit buffer ne lisent pas `server.wal`. Arrêtez
+  d'abord le serveur proprement (un arrêt propre force chaque journal et supprime les deux fichiers) : la version
+  antérieure ouvre alors chaque base comme avant. Après un crash, démarrez cette version une fois et arrêtez-la avant
+  de revenir en arrière. Si une version antérieure a quand même ouvert une base après un crash et y a écrit, le
+  démarrage suivant de cette version refuse cette base (`Damaged` : `the frame at N is not the one the commit buffer
+  holds for group G`) plutôt que d'écraser les frames de la version antérieure ; ne supprimez `DATA/server.wal.1` et
+  `.2` que si vous acceptez de perdre les écritures qu'ils contenaient.
+- **Les sauvegardes** se font comme plus bas : une copie lit le page cache, donc la copie du journal contient chaque
+  frame confirmée avant que la copie de son segment commence. Laissez `shared` hors de la copie (ou supprimez-le) : la
+  copie s'ouvre comme une base ordinaire.
+
 ## Quand la recovery dit `Damaged`
 
 Des données durables ont changé : une panne du disque, un fichier mal manipulé, un segment qui manque au milieu. Ne
 supprimez aucun fichier. Copiez le répertoire à part ; lancez `Cepheus.verify` sur la copie pour la liste complète ;
-restaurez la base depuis une sauvegarde ou (plus tard) une réplique. Le message nomme le segment et l'offset de la
+restaurez la base depuis une sauvegarde ou (plus tard) une replica. Le message nomme le segment et l'offset de la
 première frame mauvaise. Si et seulement si vous savez que la partie abîmée n'a jamais été confirmée (par exemple, la
 frame est la plus récente et la machine a perdu le courant pendant qu'elle l'écrivait), la fin peut être coupée à la
 main à cet offset (`truncate -s OFFSET SEGMENT`) : c'est une décision humaine, que Cepheus ne prend jamais.
