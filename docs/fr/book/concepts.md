@@ -16,13 +16,14 @@ Datomic (entité, attribut, valeur, transaction, ajouté) ; dans Cepheus, la tra
 retiré » d'un datom vivent dans les groupes du journal (plus bas), et une vue contient les faits qui sont vrais à son
 groupe.
 
-- Une **chose** (l'entité ; `thing` dans le code) est un numéro et rien d'autre : elle n'a ni table ni colonnes,
+- Une **chose** (l'entité ; *thing* dans le code) est un numéro et rien d'autre : elle n'a ni table ni colonnes,
   seulement les faits qui la concernent. La base donne les numéros de chose de façon dense, à partir de 65 536, dans
   l'ordre où les choses sont créées. Des numéros denses font de « chaque fait d'une chose » un accès à un tableau, pas
   une recherche ([architecture](architecture.md#les-index--les-runs-et-le-delta)).
 - Une **propriété** (l'attribut) est elle-même une chose, numérotée de 16 à 65 535, avec un nom comme `client/city`, un
   type et deux indicateurs (plus bas). Les numéros 1 à 5 sont les propriétés système, qui décrivent les propriétés et
-  les règles ([règles](rules.md)).
+  les règles, et le 6, `cepheus/same`, tient les classes de choses que les règles ont rendues identiques
+  ([règles](rules.md#equality-classes-of-equal-things)).
 - Une **valeur** est atomique et typée : `Int` (un entier signé de 63 bits), `Float`, `Bool`, `Text` (des octets ; de
   l'UTF-8 par convention, Cepheus ne regarde pas dedans), `Date` (des millisecondes depuis le 1970-01-01 UTC), `Money`
   (un décimal exact gardé comme un entier d'unités mineures, les centimes par exemple, le nombre de chiffres décimaux
@@ -92,6 +93,11 @@ qu'ajouter, garde ces changements ; rejouer le journal les applique de nouveau e
 - `Expect (thing, property, Some value)` : le groupe échoue avec `Conflict` sauf si le fait est vrai avant le groupe ;
   `Expect (thing, property, None)` : sauf si la chose n'a aucune valeur pour la propriété. Chaque `Expect` d'un groupe
   est vérifié sur l'état juste avant le groupe, où qu'il se trouve dans la liste.
+- `Incr (thing, property, by, into)` : un compteur que le groupe incrémente. La valeur de la chose pour une propriété
+  `Int` à une valeur (aucune valeur compte pour 0) grandit de `by`, lue par le writer à ce point du groupe, et `into = Some (thing',
+  property')` ajoute aussi la nouvelle valeur à cet endroit ; il se résout dans les changements que ferait un `Add` de
+  la nouvelle valeur. Des groupes qui incrémentent un même compteur au même moment ne sont jamais en conflit : chacun
+  lit ce qu'a laissé le groupe d'avant lui.
 
 Un nombre négatif à la place d'une chose ou dans un `Link` est une **nouvelle chose** de ce groupe : `-1`, `-2`, ...
 reçoivent les numéros de chose suivants dans l'ordre de leur première apparition, et le reçu dit lesquels
