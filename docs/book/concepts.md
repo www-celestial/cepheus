@@ -18,7 +18,8 @@ facts that are true at its group.
   The database gives thing numbers densely, from 65,536 up, in the order things are made. Dense numbers make "every
   fact of a thing" an array access, not a search ([architecture](architecture.md#indexes-the-runs-and-the-delta)).
 - A **property** (the attribute) is itself a thing, numbered from 16 to 65,535, with a name such as `client/city`, a
-  type, and two flags (below). Numbers 1 to 5 are the system properties that describe properties and rules ([rules](rules.md)).
+  type, and two flags (below). Numbers 1 to 5 are the system properties that describe properties and rules, and 6,
+  `cepheus/same`, holds the classes of things the rules made the same ([rules](rules.md#equality-classes-of-equal-things)).
 - A **value** is atomic and typed: `Int` (a 63-bit signed integer), `Float`, `Bool`, `Text` (bytes; UTF-8 by
   convention, Cepheus does not look inside), `Date` (milliseconds since 1970-01-01 UTC), `Money` (an exact decimal
   kept as an integer of minor units, the number of decimal digits being the property's, 0 to 18) and `Link` (another

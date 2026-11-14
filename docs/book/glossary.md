@@ -96,6 +96,8 @@ the usual one, both are given.
 - **closure module** — the writer's way of keeping a transitive property's facts (Hu, Motik, Horrocks 2019): each new
   fact of the closure found once by walks, instead of once a path by the rule; recognised in two shapes, prp-trp and
   the linear pair. [rules](rules.md#transitive-closures-the-closure-module)
+- **class of equal things** — the things the rules made the same (OWL's owl:sameAs): one of them, the representative,
+  holds the class's facts, and each other member x holds `[x cepheus/same r]`. [rules](rules.md#equality-classes-of-equal-things)
 - **cluster** — the servers that hold the same databases; one machine is a cluster of one peer. Its id (`cph-c-` and
   16 hex digits) is in `cluster.toml` and in every Welcome. [server](server.md#clustertoml)
 - **column order** (vertical partitioning) — the third order of a run (format 8): each property's rows (thing, value)
@@ -164,6 +166,8 @@ the usual one, both are given.
   asserted it (bit 63 of its value word in a run). [rules](rules.md)
 - **deterministic simulation testing** — running the engine on a simulated disk where one seed decides every event, so
   that any failure replays exactly. [testing](testing.md)
+- **description** — in OWL 2 RL's vocabulary, the thing that holds a property's axioms: `[d, owl/Property, p]`, then
+  `[d, owl/Domain, c]`, `[d, owl/Transitive, true]` (a property thing takes no fact of its own). [rules](rules.md#the-vocabulary)
 - **dictionary** — the table that numbers each distinct text (and float) once; the rows hold the number. A run keeps
   its texts' bytes, their offsets and a hash table of them.
 - **dirty page**, **writeback** — a page of the kernel's page cache that a program wrote and the disk does not hold yet
@@ -337,6 +341,8 @@ the usual one, both are given.
   [server](server.md#elections)
 - **optimistic concurrency control** — read without locks, and check at the end that what was read still holds
   (Kung and Robinson 1981): `Expect`.
+- **OWL 2 RL** — the part of the W3C's ontology language OWL 2 that rules compute completely: 78 rules in six tables
+  (OWL 2 Profiles, section 4.3); in Cepheus a library of rules, `Cepheus.Owl`. [rules](rules.md#owl-2-rl-a-library-of-rules)
 - **origin** — the token's name, session, serial and floor that a group written through the server carries in its
   `why`: which program wrote it, and how a resent write is recognized.
   [server](server.md#writes-applied-once-sessions-g14)
@@ -399,8 +405,13 @@ the usual one, both are given.
   its own journal; asynchronous: behind by its lag, the primary never waits for it. [server](server.md#a-replica)
 - **replica lag** — the time from a group durable on the primary to the replica's word that it holds it durably.
   [server](server.md#what-a-replica-costs)
+- **representative** — the member of a class of equal things that holds the class's facts; reads and questions name a
+  thing as its representative. [rules](rules.md#equality-classes-of-equal-things)
 - **retry** — running a transaction again after the database refused it (a `Conflict` in Cepheus, a serialization
   failure in PostgreSQL), from a new read.
+- **rewriting** (of equality) — keeping the facts of a class of equal things on its representative, instead of copying
+  every fact onto every member as the rules of OWL's equality would (Motik et al., AAAI 2015).
+  [rules](rules.md#equality-classes-of-equal-things)
 - **rewrite of the newest frame** — at a recovery after anything but a clean close, the journal's newest frame is
   written again before it is forced, so that pages a failed fsync marked clean are dirty again and really written
   (G13). [guarantees](guarantees.md#g13-a-failed-fsync-is-never-trusted)
@@ -483,8 +494,10 @@ the usual one, both are given.
   client checks the host it connected to against it. [server](server.md#tls)
 - **syncer** — the thread that writes and forces the frames, beside the writer.
 - **system property** — `cepheus/name`, `cepheus/type`, `cepheus/many`, `cepheus/unique` (1 to 4).
-- **template** — the questions that differ only by their constants (the unpaid invoices of each client), kept as one
+- **template** — (1) the questions that differ only by their constants (the unpaid invoices of each client), kept as one
   with the constants as parameters: a fact's change is computed once and its rows routed by the parameters' values.
+  (2) A rule with a list pattern `[c, every L, m]`, written once for each member of c's L when it is unfolded (OWL 2
+  RL's cls-int1 over an intersection). [rules](rules.md#templates-rules-over-lists)
 - **term** (Raft) — the number of an election; it grows at each one, and a term has at most one leader. A server
   forces its term and its vote before it answers. [server](server.md#elections)
 - **thing** — the entity of a fact: a number, from 65,536 up. [concepts](concepts.md#facts-the-entityattributevalue-model)

@@ -10,6 +10,7 @@ let p_type = 2
 let p_many = 3
 let p_unique = 4
 let p_rule = 5
+let p_same = 6
 let first_prop = 16
 let first_thing = 65536
 let last_thing = (1 lsl 31) - 1
@@ -20,7 +21,8 @@ let system =
      Some { name = "cepheus/type"; typ = Value.Tint; many = false; unique = false };
      Some { name = "cepheus/many"; typ = Value.Tbool; many = false; unique = false };
      Some { name = "cepheus/unique"; typ = Value.Tbool; many = false; unique = false };
-     Some { name = "cepheus/rule"; typ = Value.Ttext; many = false; unique = false } |]
+     Some { name = "cepheus/rule"; typ = Value.Ttext; many = false; unique = false };
+     Some { name = "cepheus/same"; typ = Value.Tlink; many = false; unique = false } |]
 
 module SM = Map.Make (String)
 

@@ -47,11 +47,27 @@ let types (v : Store.view) q =
     q.where;
   Array.mapi (fun i -> function Some t -> t | None -> bad "variable %d appears in no pattern" i) ty
 
+(* A thing named by a question is read as its class's representative (the reasoner design, section 5.10): facts are
+   kept on the representative, [x cepheus/same r] holds when x is not one *)
+(* does the view hold any fact of cepheus/same: known for the newest view asked (its runs and the delta's entry of the
+   property), so that a read of a database without equality pays a pointer comparison, not a count over the runs *)
+let same_slot = Atomic.make None
+
+let any_same (v : Store.view) =
+  match Atomic.get same_slot with
+  | Some (runs, d, b) when runs == v.runs && d == v.delta -> b
+  | _ -> let b = Store.count_prop v Schema.p_same > 0 in Atomic.set same_slot (Some (v.runs, v.delta, b)); b
+
+let rep (v : Store.view) x =
+  if x < Schema.first_thing || not (any_same v) then x
+  else (let r = ref x in Store.iter_values v x Schema.p_same (fun w -> r := w); !r)
+
 let compile (v : Store.view) q =
   let ty = types v q in
   let side = function
     | Var x -> V x
-    | Thing e -> W e
+    | Thing e -> W (rep v e)
+    | Val (Value.Link l) -> W (rep v l)
     | Val x -> (match Store.word v x with Some w -> W w | None -> raise No_answer)
   in
   let pats =

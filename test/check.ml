@@ -174,6 +174,71 @@ let heads ?ptyp ?bad (r : Rules.t) (facts : F.t) =
         | _ -> (match bad with Some b -> b := true | None -> ()); None)
       rows
 
+(* A template's meaning (Rules.every): [c, every L, m] holds for a list c of L when the patterns that name m hold for
+   each member of c's L, each copy with variables of its own for those that appear only in such patterns. Written
+   here from that sentence, over the facts as values: for each c, the rule with the copies, then evaluated as any
+   rule. A list of no member gives nothing. *)
+let template_rules (facts : F.t) (r : Rules.t) =
+  match List.find_opt (fun (a : Query.pattern) -> Rules.is_every a.p) r.where with
+  | None -> [ r ]
+  | Some ta ->
+    let l = Rules.every_of ta.p and m = (match ta.v with Query.Var m -> m | _ -> -1) in
+    let rest = List.filter (fun a -> a != ta) r.where in
+    let names (a : Query.pattern) = a.e = Query.Var m || a.v = Query.Var m || a.p = -1 - m in
+    let per = List.filter names rest and shared = List.filter (fun a -> not (names a)) rest in
+    let vs (a : Query.pattern) = List.filter_map (function Query.Var x -> Some x | _ -> None) [ a.e; a.v ] @ (if a.p < 0 then [ -1 - a.p ] else []) in
+    let hv = match r.head with Rules.Give h -> vs h | Never -> [] in
+    let held = List.concat_map vs shared @ hv @ vs ta in
+    let own x = x <> m && not (List.mem x held) in
+    let lists = Hashtbl.create 8 in
+    F.iter
+      (fun (e, p, x) ->
+        if p = l && (match ta.e with Query.Thing c -> c = e | _ -> true) then
+          Hashtbl.replace lists e (x :: Option.value (Hashtbl.find_opt lists e) ~default:[]))
+      facts;
+    Hashtbl.fold
+      (fun c xs acc ->
+        let xs = List.sort_uniq Value.compare xs in
+        let n = ref r.vars and ok = ref true in
+        let copies =
+          List.concat_map
+            (fun x ->
+              let mine = Hashtbl.create 4 in
+              let rn y = match Hashtbl.find_opt mine y with Some z -> z | None -> let z = !n in incr n; Hashtbl.replace mine y z; z in
+              let t (u : Query.term) : Query.term =
+                match u with
+                | Query.Var y when y = m -> (match x with Value.Link k -> Thing k | x -> Val x)
+                | Var y when own y -> Var (rn y)
+                | Var y when ta.e = Query.Var y -> Thing c
+                | u -> u
+              in
+              let prop q =
+                if q = -1 - m then (match x with Value.Link k when k >= Schema.first_prop && k < Schema.first_thing -> k | _ -> ok := false; 0)
+                else if q < 0 && own (-1 - q) then -1 - rn (-1 - q)
+                else q
+              in
+              List.map (fun (a : Query.pattern) -> { Query.e = t a.e; p = prop a.p; v = t a.v }) per)
+            xs
+        in
+        let ct (u : Query.term) : Query.term = match u with Query.Var y when ta.e = Query.Var y -> Thing c | u -> u in
+        let shared = List.map (fun (a : Query.pattern) -> { a with e = ct a.e; v = ct a.v }) shared in
+        let head = match r.head with Rules.Give h -> Rules.Give { h with e = ct h.e; v = ct h.v } | Never -> Never in
+        if xs = [] || not !ok then acc
+        else begin
+          (* the variables used, numbered again from 0 *)
+          let where = shared @ copies in
+          let used = Hashtbl.create 8 and k = ref 0 in
+          let see y = if not (Hashtbl.mem used y) then (Hashtbl.replace used y !k; incr k) in
+          List.iter (fun (a : Query.pattern) -> List.iter see (vs a)) where;
+          (match head with Rules.Give h -> List.iter see (vs h) | Never -> ());
+          let t (u : Query.term) : Query.term = match u with Query.Var y -> Var (Hashtbl.find used y) | u -> u in
+          let pt (a : Query.pattern) = { Query.e = t a.e; p = (if a.p < 0 then -1 - Hashtbl.find used (-1 - a.p) else a.p); v = t a.v } in
+          { r with vars = !k; where = List.map pt where; head = (match head with Rules.Give h -> Rules.Give (pt h) | Never -> Never);
+                   ranges = List.filter_map (fun (y, lo, hi) -> match Hashtbl.find_opt used y with Some z when not (own y) && y <> m -> Some (z, lo, hi) | _ -> None) r.ranges }
+          :: acc
+        end)
+      lists []
+
 (* the least fixpoint of the facts under the rules (naive evaluation: every rule over everything, until nothing new) *)
 let least ?ptyp ?bad (rules : Rules.t list) (facts : F.t) =
   let s = ref facts and go = ref true in
@@ -182,8 +247,11 @@ let least ?ptyp ?bad (rules : Rules.t list) (facts : F.t) =
     List.iter
       (fun r ->
         List.iter
-          (function Some f when not (F.mem f !s) -> s := F.add f !s; go := true | _ -> ())
-          (heads ?ptyp ?bad r !s))
+          (fun r ->
+            List.iter
+              (function Some f when not (F.mem f !s) -> s := F.add f !s; go := true | _ -> ())
+              (heads ?ptyp ?bad r !s))
+          (template_rules !s r))
       rules
   done;
   !s
@@ -392,7 +460,10 @@ let perfect ?ptyp ?bad (rules : Rules.t list) (facts : F.t) =
 let stratified (rules : Rules.t list) = strata_of (Array.of_list (List.map decode rules)) <> None
 
 let violated (rules : Rules.t list) (m : F.t) =
-  List.exists (fun (r : Rules.t) -> r.head = Never && (let d = decode r in if plain_rule d then heads r m <> [] else answers d m <> [])) rules
+  List.exists
+    (fun (r : Rules.t) ->
+      r.head = Never && List.exists (fun r -> let d = decode r in if plain_rule d then heads r m <> [] else answers d m <> []) (template_rules m r))
+    rules
 
 (* the facts of a view that are not about schema things, and those asserted *)
 let user_facts (v : Store.view) =
@@ -548,3 +619,87 @@ let tmpdir name =
   d
 
 let rmrf d = ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote d)))
+
+(* ---- Equality: the meaning of the rules that make things the same ----
+   A rule whose head gives cepheus/same makes its two things one thing (OWL 2 RL's owl:sameAs: eq-ref, eq-sym, eq-trans,
+   eq-rep-s, eq-rep-p, eq-rep-o). Computed here naively: a union-find over the things, every fact rewritten onto the
+   least member of its class after each pass, the rules evaluated again until nothing changes (the materialisation of
+   the axiomatised equality, up to the choice of a member: Motik, Nenov, Piro, Horrocks, AAAI 2015, Theorem 1). Two
+   different values made the same set [bad]. *)
+
+let same_head (r : Rules.t) = match r.head with Rules.Give h -> h.p = Schema.p_same | Never -> false
+
+let least_eq ?ptyp ?bad (rules : Rules.t list) (facts : F.t) =
+  let parent = Hashtbl.create 16 in
+  let rec find x = match Hashtbl.find_opt parent x with Some y when y <> x -> let r = find y in Hashtbl.replace parent x r; r | _ -> x in
+  let union a b = let a = find a and b = find b in if a <> b then (if a < b then Hashtbl.replace parent b a else Hashtbl.replace parent a b; true) else false in
+  let canon (e, p, (x : Value.t)) = find e, p, (match x with Link t -> Value.Link (find t) | x -> x) in
+  let s = ref (F.map canon facts) and go = ref true in
+  while !go do
+    go := false;
+    List.iter
+      (fun r ->
+        List.iter
+          (fun (r : Rules.t) ->
+            if same_head r then begin
+              let types = match ptyp with Some pt when has_var_prop r -> Some (rule_types pt r) | _ -> None in
+              let rows = naive ?types !s { vars = r.vars; where = r.where; ranges = r.ranges } in
+              match r.head with
+              | Give h ->
+                let term row = function Query.Var x -> row.(x) | Thing t -> Value.Link t | Val x -> x in
+                List.iter
+                  (fun row ->
+                    match term row h.e, term row h.v with
+                    | Link a, Link b -> if union a b then go := true
+                    | x, y -> if not (Value.equal x y) then (match bad with Some b -> b := true | None -> ()))
+                  rows
+              | Never -> ()
+            end
+            else
+              List.iter (function Some f when not (F.mem f !s) -> s := F.add f !s; go := true | _ -> ()) (heads ?ptyp ?bad r !s))
+          (template_rules !s r))
+      rules;
+    let s' = F.map canon !s in
+    if not (F.equal s' !s) then (s := s'; go := true)
+  done;
+  !s, find
+
+(* a view against the meaning of its rules with equality: the same classes, and the same facts once both are read
+   through the view's classes (asserted facts stay where they were written; facts only derived name representatives) *)
+let eq_diff ?ptyp (v : Store.view) =
+  let bad = ref false in
+  let rules = rules_of v in
+  let asserted = asserted_facts v in
+  let m, find = least_eq ?ptyp ~bad rules asserted in
+  let rep x = let r = ref x in Store.iter_values v x Schema.p_same (fun w -> r := w); !r in
+  let errors = ref [] in
+  let err fmt = Printf.ksprintf (fun s -> errors := s :: !errors) fmt in
+  (* the classes: two things are the same in the view exactly when they are in the meaning *)
+  let things = Hashtbl.create 64 in
+  let see_t = function Value.Link t when t >= Schema.first_thing -> Hashtbl.replace things t () | _ -> () in
+  F.iter (fun (e, _, x) -> Hashtbl.replace things e (); see_t x) asserted;
+  let ts = Hashtbl.fold (fun t () l -> t :: l) things [] |> List.sort compare in
+  let byv = Hashtbl.create 16 and bym = Hashtbl.create 16 in
+  List.iter (fun t -> Hashtbl.replace byv t (rep t); Hashtbl.replace bym t (find t)) ts;
+  List.iter
+    (fun a -> List.iter (fun b -> if a < b && (Hashtbl.find byv a = Hashtbl.find byv b) <> (Hashtbl.find bym a = Hashtbl.find bym b) then err "#%d and #%d: the same in the %s only" a b (if Hashtbl.find byv a = Hashtbl.find byv b then "view" else "meaning")) ts)
+    ts;
+  let vr x = match Hashtbl.find_opt byv x with Some r -> r | None -> rep x in
+  let through (e, p, (x : Value.t)) = vr e, p, (match x with Link t -> Value.Link (vr t) | x -> x) in
+  let got = ref F.empty in
+  F.iter
+    (fun ((e, p, x) as f) ->
+      if p <> Schema.p_same then begin
+        (* a fact only derived names representatives *)
+        (match Store.word v x with
+         | Some w when Store.state v e p w = 2 && through f <> f -> err "[%d %d %s] is only derived and names a thing that is no representative" e p (Value.to_string x)
+         | _ -> ());
+        got := F.add (through f) !got
+      end)
+    (user_facts v);
+  let want = F.map through m in
+  if not (F.equal !got want) then begin
+    let show s = String.concat " " (List.map (fun (e, p, x) -> Printf.sprintf "[%d %d %s]" e p (Value.to_string x)) (F.elements s)) in
+    err "missing %s; extra %s" (show (F.diff want !got)) (show (F.diff !got want))
+  end;
+  !bad, List.rev !errors

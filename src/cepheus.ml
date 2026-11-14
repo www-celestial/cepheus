@@ -67,6 +67,8 @@ let write db ?(by = 0) ?(why = "") ops =
 
 let thing r k = List.assoc k r.things
 
+exception Found of int
+
 type prop = Schema.prop = { name : string; typ : typ; many : bool; unique : bool }
 
 let prop ?(many = false) ?(unique = false) name typ = { name; typ; many; unique }
@@ -90,6 +92,7 @@ type pattern = Query.pattern = { e : term; p : int; v : term }
 type head = Rules.head = Give of pattern | Never
 
 let prop_var = Rules.prop_var
+let every = Rules.every
 let absent = Rules.absent
 let aggregate = Rules.aggregate
 type rule = Rules.t = { name : string; vars : int; where : pattern list; ranges : (int * value * value) list; head : head }
@@ -146,11 +149,39 @@ let undefine db names =
   in
   if ops = [] then Ok () else Result.map (fun _ -> ()) (write db ~why:"cepheus: rules" ops)
 
+(* ---- OWL 2 RL, a library of rules (src/owl.ml) ---- *)
+
+module Owl = struct
+  include Owl
+
+  (* the vocabulary declared, and owl:Thing and owl:Nothing made, once: what is there already is kept *)
+  let rec setup db =
+    match declare db (List.map (fun (n, typ, many, unique) -> prop ~many ~unique n typ) vocabulary) with
+    | Error e -> Error e
+    | Ok ids -> (
+      let builtin = List.nth ids (List.length ids - 1) in
+      let v = view db in
+      let find s = match Store.word v (Value.Text s) with Some w -> (match Store.iter_things v builtin w (fun e -> raise_notrace (Found e)) with () -> None | exception Found e -> Some e) | None -> None in
+      match find "Thing", find "Nothing" with
+      | Some thing, Some nothing -> Ok (make ids ~thing ~nothing)
+      | t, n -> (
+        let ops = (match t with None -> [ Add (-1, builtin, Text "Thing") ] | Some _ -> []) @ (match n with None -> [ Add (-2, builtin, Text "Nothing") ] | Some _ -> []) in
+        match write db ~why:"cepheus: owl" ops with
+        | Ok _ | Error (Not_unique _) -> setup db
+        | Error e -> Error e))
+
+  (* the description thing of a property: the thing whose owl/Property is p, if one *)
+  let description (t : t) (v : view) p = match Store.iter_things v t.property p (fun e -> raise_notrace (Found e)) with () -> None | exception Found e -> Some e
+end
+
 type proof = Reason.proof =
   | Given of { e : int; p : int; v : value }
   | By of { rule : string; e : int; p : int; v : value; from : proof list }
 
-let why (v : view) e p x = match Store.word v x with None -> None | Some w -> Reason.why v e p w
+(* a thing named, and a thing as the value, read as their classes' representatives (as get and values read them) *)
+let why (v : view) e p x =
+  let e = Query.rep v e and x = match x with Link t -> Link (Query.rep v t) | x -> x in
+  match Store.word v x with None -> None | Some w -> Reason.why v e p w
 
 let sources = Reason.sources
 let rule_budget = Reason.budget_base, Reason.budget_per
@@ -158,12 +189,21 @@ let change_budget = Reason.change_per
 
 let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ | None -> None
 
+(* ---- classes of equal things ---- *)
+
+let same (v : view) x =
+  let r = Query.rep v x in
+  if not (Query.any_same v) then [ x ]
+  else (let l = ref [ r ] in Store.iter_things v Schema.p_same r (fun y -> l := y :: !l); List.sort compare !l)
+
 let get (v : view) e =
+  let e = Query.rep v e in
   let out = ref [] in
   Store.iter_facts v e (fun p w -> match typ_of v p with Some t -> out := (p, Store.value v t w) :: !out | None -> ());
   List.sort compare !out
 
 let values (v : view) e p =
+  let e = Query.rep v e in
   match typ_of v p with
   | None -> []
   | Some t ->
@@ -172,6 +212,7 @@ let values (v : view) e p =
     List.rev !out
 
 let things (v : view) p x =
+  let x = match x with Link t -> Link (Query.rep v t) | x -> x in
   match Store.word v x with
   | None -> []
   | Some w ->

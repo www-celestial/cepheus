@@ -151,6 +151,20 @@ From `find` and `fold` (the question is malformed):
 | `V is not a T` | a constant value of the wrong type for its property |
 | `a range needs an int, date or money variable` | a range on a text or float variable, or on a variable outside 0 to `vars - 1` (ranges also accept bool and link variables) |
 
+### Templates and equality
+
+| message | when |
+|---|---|
+| `rule R: one every [..] a rule`; `rule R: the member ?k of every [..] is in no other pattern`; `… is in its head …`; `rule R: a template (every) takes no Not and no aggregate` | a template written wrong |
+| `rule R gives P, the list of the template T: only a write may change a list` | a rule's head is a template's list, or a rule derived a fact of one |
+| `rule R: the list of #c has N members (a template takes at most 64)` | a write makes a list too long for its template |
+| `rule R makes two different values the same: only things can be the same as another` | an equality between two values that differ (prp-fp over a property of texts with two values) |
+| `rule R would make the property #p the same as another thing: a property is the same as no other` | an equality on a property thing |
+| `rule R would make #a the same as #b, which a rule names: a thing the rules name keeps its own identity` | an equality on a constant of the rules (owl:Thing, a class an unfolded rule names) |
+| `rule R: a rule that makes things the same takes no Not and no aggregate`; `a rule set that makes things the same takes no Not and no aggregate yet` | equality beside negation or aggregates |
+| `rule R: cepheus/same is read through the classes of equal things, not by a rule's pattern` | a rule's body reads `cepheus/same` |
+| `constraint owl/eq-diff1: [#r owl/DifferentFrom #r]` | two things said different are made the same |
+
 ## `Damaged`: durable data lost or changed
 
 The files no longer hold what the database made durable: a disk that changed bytes, a file copied badly, a segment

@@ -5,8 +5,8 @@
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
 
 (executables
- (names unit sim wal_sim exhaustive crash bank seats reasoning rulechange)
- (modules unit sim wal_sim exhaustive crash bank seats reasoning rulechange)
+ (names unit sim wal_sim exhaustive crash bank seats reasoning rulechange owl)
+ (modules unit sim wal_sim exhaustive crash bank seats reasoning rulechange owl)
  (libraries cepheus check unix threads.posix)
  (ocamlopt_flags (:standard -O3))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

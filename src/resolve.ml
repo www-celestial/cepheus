@@ -201,6 +201,21 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
             | Ok r -> (match Rules.check !v r with Error m -> invalid "%s" m | Ok () -> r))
           (Schema.rules !v.schema)
       in
+      (* a template's list changes by writes only: no rule gives it *)
+      let lists = List.concat_map (fun (r : Rules.t) -> List.filter_map (fun (a : Query.pattern) -> if Rules.is_every a.p then Some (Rules.every_of a.p, r.name) else None) r.where) rules in
+      List.iter
+        (fun (r : Rules.t) ->
+          match r.head with
+          | Rules.Give h when h.p >= 0 && List.mem_assoc h.p lists ->
+            let name = match Schema.find !v.schema h.p with Some d -> d.name | None -> string_of_int h.p in
+            invalid "rule %s gives %s, the list of the template %s: only a write may change a list" r.name name (List.assoc h.p lists)
+          | _ -> ())
+        rules;
+      (* equality and negation or aggregates in one rule set: not yet (a Not or an aggregate would read the state of
+         things that rewriting moves) *)
+      if List.exists (fun (r : Rules.t) -> match r.head with Rules.Give h -> h.p = Schema.p_same | Never -> false) rules
+         && not (List.for_all Rules.is_plain rules)
+      then invalid "a rule set that makes things the same takes no Not and no aggregate yet";
       (* the rule set as a whole: an aggregate's property is its rule's alone, and no property depends on its own
          absence or aggregate (the strata) *)
       if not (List.for_all Rules.is_plain rules) then begin

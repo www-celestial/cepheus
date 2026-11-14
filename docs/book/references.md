@@ -387,7 +387,22 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[W3C 2012]** W3C. OWL 2 Web Ontology Language Profiles (Second Edition). Recommendation, 11 December 2012, §4.3.
   https://www.w3.org/TR/owl2-profiles/
   — OWL 2 RL's rules (prp-dom, prp-trp, cax-sco, …), written over the ontology's facts with the property a variable:
-  the form a rule with a variable property takes.
+  the form a rule with a variable property takes; its 78 rules in Tables 4 to 9, LIST[…] over RDF lists: the library
+  `Cepheus.Owl`, rule by rule, and its templates.
+- **[Motik 2015b]** B. Motik, Y. Nenov, R. Piro, I. Horrocks. Handling owl:sameAs via Rewriting. *AAAI* 2015, 231–237.
+  https://doi.org/10.1609/aaai.v29i1.9187 (arXiv:1411.3622)
+  — Equality by rewriting: a representative a class, the facts of the others outdated and skipped, the rules' constants
+  rewritten too; a clique of n equal resources gives n² sameAs triples in 2n³ + n² + n derivations when axiomatised;
+  rewriting 31.1× faster on Claros, 2.3× on UOBM (one thread, Table 3). The classes of equal things.
+- **[Motik 2015c]** B. Motik, Y. Nenov, R. Piro, I. Horrocks. Combining Rewriting and Incremental Materialisation
+  Maintenance for Datalog Programs with Equality. *IJCAI* 2015, 3127–3133.
+  — B/F≈, retraction with rewritten equality: the finer algorithm Cepheus' Delete-Rederive of a class leaves for later.
+- **[Tarjan 1975]** R. E. Tarjan. Efficiency of a Good But Not Linear Set Union Algorithm. *JACM* 22(2), 215–225, 1975.
+  https://doi.org/10.1145/321879.321884
+  — Union by size: a thing changes class O(log n) times over any sequence of merges.
+- **[Ma 2006]** L. Ma, Y. Yang, Z. Qiu, G. T. Xie, Y. Pan, S. Liu. Towards a Complete OWL Ontology Benchmark. *ESWC*
+  2006, 125–139 (as cited by [Motik 2015b]).
+  — UOBM, LUBM with the axioms that make individuals equal: the shape of the UOBM-like benchmark.
 - **[Fan 2019]** Z. Fan, J. Zhu, Z. Zhang, A. Albarghouthi, P. Koutris, J. M. Patel. Scaling-Up In-Memory Datalog
   Processing: Observations and Techniques. *PVLDB* 12(6), 695–708, 2019. https://doi.org/10.14778/3311880.3311886
   — Soufflé "runs out of memory when evaluating TC on G80K": transitive closure is where Datalog engines break.
