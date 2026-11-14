@@ -5,7 +5,7 @@ de preuve) et le test qui la vérifie. Les tests sont dans `test/` ; `tools/test
 expliqués dans [concepts](concepts.md), [architecture](architecture.md) et le [glossaire](glossary.md) ; les
 mathématiques sont dans [théorie](theory.md). Tout ce qui suit vaut pour cette version : une seule machine, des runs sur
 le disque en niveaux (leveling, ratio 4), une replica asynchrone (une copie de la base tenue à jour sur une autre
-machine, sans que les écritures l'attendent : [serveur](server.md#a-replica) ; son journal est un préfixe des groupes
+machine, sans que les écritures l'attendent : [serveur](server.md#une-replica) ; son journal est un préfixe des groupes
 durables du primary, le serveur qui reçoit les écritures, et sa promotion, le passage de la replica au rôle de
 primary, se fait à la main) ; les règles comme [règles](rules.md) le dit.
 G14, G15 et G16 appartiennent au serveur : leurs énoncés, leurs preuves et leurs tests sont dans [la page du serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)
@@ -86,7 +86,7 @@ pas aux octets durables. La recovery (`Journal.scan`) lit les frames dans l'ordr
 qui ne passe pas la vérification ; toutes les frames avant une frame durable sont durables, donc intactes, donc lues.
 Les runs utilisés à la recovery sont cohérents avec le journal (G7).
 
-*Avec le commit buffer d'un serveur* ([le serveur](server.md#many-databases-one-fsync-the-commit-buffer) ; le commit
+*Avec le commit buffer d'un serveur* ([le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer) ; le commit
 buffer est l'endroit où le serveur copie les frames de plusieurs bases pour les confirmer toutes par un seul fsync), la
 frame est écrite dans le journal sans fsync, et `write` revient après le fsync du tour du buffer qui en contient une
 copie entière (ou, quand le buffer était inactif, après le fsync de son propre journal, comme sans le buffer). Jusqu'à
@@ -386,7 +386,7 @@ réponse (un statut partagé par 20 000 factures, un tag très fréquent dans le
 constantes, des liens, des intervalles) comparées à un évaluateur naïf sur tous les faits, sur une base avec un delta
 et sur une base compactée.
 
-*Avec Not, Or et In* ([Cepheus depuis Cesia](cesia.md#not-or-and-in)), la promesse porte sur les variables propres
+*Avec Not, Or et In* ([Cepheus depuis Cesia](cesia.md#not-or-et-in)), la promesse porte sur les variables propres
 à la question : ses bindings qui font tenir ses patterns et ses conditions, qui font tenir une alternative de chaque
 `Or` pour une valeur des variables propres à cette alternative, et pour lesquels aucune valeur des variables propres à
 chaque `Not` ne fait tenir ses éléments, chacun une fois. `In` restreint les candidats, `Not` ne fait que retirer des
@@ -653,7 +653,7 @@ plus petit modèle sous les anciennes règles, chaque vue à partir de ce groupe
 
 *Conditions.* Aucune : sur un fork et dans le cœur déterministe, le changement est raisonné dans son groupe ; dans le
 writer à threads d'une base sur le disque, il est calculé à côté du writer et installé comme un seul groupe
-([règles](rules.md#changes-of-the-rules-in-the-background)) ; un crash à n'importe quel moment compris.
+([règles](rules.md#les-changements-des-règles-en-arrière-plan)) ; un crash à n'importe quel moment compris.
 
 *Preuve.* Les faits de la règle et les changements dérivés qu'ils causent forment un seul groupe : G2 les rend tous
 visibles d'un coup, ou aucun.
@@ -865,7 +865,7 @@ que le domaine est effacé (le domaine : les fichiers scellés avec cette clé),
 propriétaire a alors besoin d'une clé qu'aucun fichier ne contient. Une copie qui prend les clés prend la marque et
 laisse tomber la clé. Non couvert : une copie du fichier des clés faite avant l'effacement (une sauvegarde) contient
 toujours la clé ; les blocs de l'ancien fichier peuvent rester sur un disque flash jusqu'à leur réutilisation
-([le vault](vault.md#erasing-an-owner)).
+([le vault](vault.md#effacer-un-propriétaire)).
 
 *Testé par* `test/vault_unit.ml` (les fichiers d'un domaine effacé `erased`, après une réouverture aussi ; sa clé
 scellée absente du fichier des clés ; effacé sur une copie qui a pris les clés) et `server_unit` (Erase à travers le

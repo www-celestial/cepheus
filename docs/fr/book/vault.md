@@ -233,7 +233,7 @@ cite).
 Un crash avant la fin de l'étape 2 laisse des chunks qu'aucun fait ne cite : ils sont sans danger (et seront repris
 par un nettoyage du vault, pas encore construit). Un crash après elle laisse un fichier dont les octets sont tous là,
 et peut-être encore aucun fait. Aucun fait ne cite jamais un chunk qui n'est pas sur le disque
-([G22](guarantees.md#g22-files-are-durable-before-their-facts)).
+([G22](guarantees.md#g22-les-fichiers-sont-durables-avant-leurs-faits)).
 
 ### Effacer un propriétaire
 
@@ -300,7 +300,7 @@ racine en 64 chiffres hexadécimaux minuscules.
 - **G24 Les fichiers d'un propriétaire effacé sont illisibles.** Après `Erase`, aucune lecture de ce vault, ou d'une
   copie qui a pris ses clés depuis, ne donne un octet des fichiers du propriétaire : `erased`.
 
-Leurs tests ([tests](testing.md#the-file-vault)) : une coupure de courant simulée à des points aléatoires des puts
+Leurs tests ([tests](testing.md#le-vault-de-fichiers)) : une coupure de courant simulée à des points aléatoires des puts
 (120 seeds, c'est-à-dire 120 valeurs de départ du générateur aléatoire, trois crashes chacune, des secteurs torn,
 écrits à moitié, et des secteurs perdus, chaque fichier fini avant le crash relu), `kill -9` d'un processus qui dépose
 des fichiers jusqu'à 40 MB et écrit leurs faits (20 tours : chaque fichier cité relu exact, chaque fichier confirmé
@@ -336,7 +336,7 @@ clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -DCEP
 Mesuré sur la machine des [benchmarks](benchmarks.md) (les mesures de vitesse faites selon une méthode fixe ; Intel
 i7-4720HQ de 2015, 4 cœurs, 11 GB, btrfs sur un SSD SATA), partagée avec d'autres travaux, par `bench/vbench.exe`, le
 2026-11-13 : 21 exécutions pour chaque mesure, la médiane et son intervalle à 97,3 % par order statistics (deux
-valeurs prises à un rang fixe dans les mesures triées, comme dans les [benchmarks](benchmarks.md#method)). Les
+valeurs prises à un rang fixe dans les mesures triées, comme dans les [benchmarks](benchmarks.md#méthode)). Les
 octets : les premiers 1 MB, 100 MB et 1 GB de 1 GiB des propres fichiers du système mis bout à bout (`/usr/lib`,
 `/usr/bin`, la documentation, les pages de manuel) : des programmes, des bibliothèques et du texte. Chaque put va dans
 un vault en service (la clé de son domain déjà faite), et se termine quand `finish` l'a forcé sur le disque. Un **cache

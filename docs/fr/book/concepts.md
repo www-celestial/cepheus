@@ -23,7 +23,7 @@ groupe.
 - Une **propriété** (l'attribut) est elle-même une chose, numérotée de 16 à 65 535, avec un nom comme `client/city`, un
   type et deux indicateurs (plus bas). Les numéros 1 à 5 sont les propriétés système, qui décrivent les propriétés et
   les règles, et le 6, `cepheus/same`, tient les classes de choses que les règles ont rendues identiques
-  ([règles](rules.md#equality-classes-of-equal-things)).
+  ([règles](rules.md#légalité--des-classes-de-choses-égales)).
 - Une **valeur** est atomique et typée : `Int` (un entier signé de 63 bits), `Float`, `Bool`, `Text` (des octets ; de
   l'UTF-8 par convention, Cepheus ne regarde pas dedans), `Date` (des millisecondes depuis le 1970-01-01 UTC), `Money`
   (un décimal exact gardé comme un entier d'unités mineures, les centimes par exemple, le nombre de chiffres décimaux

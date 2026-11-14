@@ -27,7 +27,7 @@ Le journal est la vérité : les runs sont des caches qu'on peut toujours recons
 1. prend le lock (`Busy` si un autre processus l'a) ;
 2. lit l'id ; si `closed` est là (le dernier processus a fermé proprement), le supprime ; sinon force le répertoire de
    la base. Si `shared` est là et que `closed` n'y est pas, une ouverture dans le processus même d'un programme est
-   refusée (`Busy` : [une base d'un serveur](#a-database-of-a-server)) ; après une fermeture propre, elle supprime
+   refusée (`Busy` : [une base d'un serveur](#une-base-dun-serveur)) ; après une fermeture propre, elle supprime
    `shared` et continue ;
 3. convertit un journal de format 1 au format 2, une seule fois (chaque segment écrit à côté, forcé, renommé
    par-dessus l'ancien ; un crash au milieu laisse chaque segment entier, et l'ouverture suivante continue), et
@@ -38,7 +38,7 @@ Le journal est la vérité : les runs sont des caches qu'on peut toujours recons
    format (6), the journal is replayed"), est mis de côté et noté (`Cepheus.notes`), et le choix est refait sans lui ;
 5. ouverte par un serveur, écrit d'abord de nouveau dans le journal les frames que son commit buffer (l'endroit où le
    serveur copie les frames de plusieurs bases pour les confirmer par un seul fsync) contient pour cette base
-   ([plus bas](#a-database-of-a-server)), et les force ;
+   ([plus bas](#une-base-dun-serveur)), et les force ;
 6. après un crash (pas de `closed`), écrit de nouveau la frame la plus récente du journal et force le segment le plus
    récent et le répertoire du journal (un processus tué avant son fsync les a laissés dans le page cache, la copie des
    fichiers que le noyau garde en mémoire ; après un
@@ -65,7 +65,7 @@ le dernier merge tournait) ; `Cepheus.snapshot` fait le merge tout de suite, ava
 ## Une base d'un serveur
 
 Un serveur force les journaux de toutes ses bases par un seul fsync par tour, à travers son commit buffer
-(`DATA/server.wal.1` et `.2` : [le serveur](server.md#many-databases-one-fsync-the-commit-buffer)). Entre deux
+(`DATA/server.wal.1` et `.2` : [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)). Entre deux
 checkpoints d'un journal (les moments où le journal lui-même est forcé), ses frames confirmées les plus récentes
 peuvent n'être durables que dans le buffer : le journal les tient dans le page cache, et une coupure de courant peut
 les y perdre. Donc :

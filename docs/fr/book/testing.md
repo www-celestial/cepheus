@@ -50,7 +50,7 @@ générateur, et une seed donne toujours la même suite) : un échec affiche don
 | `rulechange.exe` | le chemin en arrière-plan des changements de règles sur des bases sur le disque : des groupes écrits pendant qu'un changement est retenu après sa construction (`Engine.change_pause`), rattrapés exactement ; un groupe qui écrit le fait du changement, casse sa nouvelle contrainte ou prend le numéro de sa règle y met fin par `Conflict` ; 6 threads qui écrivent, 24 changements et 2 lecteurs qui vérifient chaque vue contre le least model sous ses propres règles, puis la base rouverte ; le budget d'un changement (un produit cartésien refusé pendant qu'un writer continue) et un changement d'ontologie au-delà d'un budget de données, acceptés de la même façon sur le disque et sur un fork ; une fermeture pendant un changement ; un changement avec un `Incr` dans son groupe, calculé dans son groupe à côté de groupes qui comptent avec le même compteur ; un membre Raft (Raft : un algorithme de consensus où des serveurs s'accordent sur un même log, l'ordre des écritures, sous un leader élu ; ici ses frames sont proposées à une fonction qui les enregistre ou en refuse une) : la frame du changement proposée, une frame reprise par Raft ou la frame d'un autre leader qui répond au changement `not_leader`, le journal rouvert identique ; kill -9 pendant des changements, chaque vue rétablie exacte | `CHANGE_KILLS` (10, dans `tools/test.sh`) |
 | `exhaustive.exe` | chaque état de crash de petits journaux, à l'intérieur des merges, et de deux bases qui partagent un commit buffer (le fichier où le serveur force d'un seul fsync les frames de plusieurs bases) | aucune |
 | `sim.exe` | la simulation déterministe | `--seeds N` (les seeds 1 à N ; 100 par défaut), `--seed S` (une seule seed), `--steps N` (étapes par seed, 150) |
-| `wal_sim.exe` | la simulation déterministe du commit buffer du serveur : trois bases qui le partagent ([plus bas](#the-commit-buffer)) | `--seeds N` (100 par défaut), `--seed S`, `--steps N` (200) ; `WAL_SIM_TRACE` défini : chaque événement d'une seed sur la sortie d'erreur standard |
+| `wal_sim.exe` | la simulation déterministe du commit buffer du serveur : trois bases qui le partagent ([plus bas](#le-commit-buffer)) | `--seeds N` (100 par défaut), `--seed S`, `--steps N` (200) ; `WAL_SIM_TRACE` défini : chaque événement d'une seed sur la sortie d'erreur standard |
 | `crash.exe DIR ROUNDS [SEED]` | de vrais tours de `kill -9` sur une base dans DIR | SEED 42 par défaut |
 | `bank.exe DIR SECONDS` | le test de la banque pendant SECONDS | |
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | la vente de places avec kill -9 et un vérificateur de l'historique ([cas](case-seats.md#de-vrais-crashs-et-un-vérificateur-de-tout-lhistorique)) ; `ROUNDS` 0 : pas de kill, le temps pour tout vendre | `BUYERS` (16), SEED 42, SEATS 2 000 |
@@ -421,7 +421,7 @@ les fichiers, découpés en chunks, des morceaux, puis compressés et scellés, 
 puis vérifie que chaque fichier que citent les faits se relit exact et que chaque fichier confirmé est là.
 
 Le cœur en C est fuzzé seul par `test/fuzz_vault.c` (libFuzzer, AddressSanitizer, UndefinedBehaviorSanitizer ; la
-commande est dans [le vault](vault.md#security)) : des blocs LZ4 et des frames Zstandard d'octets arbitraires décodés
+commande est dans [le vault](vault.md#sécurité)) : des blocs LZ4 et des frames Zstandard d'octets arbitraires décodés
 dans des buffers sans marge, des allers-retours, et des textes scellés forgés ou changés. 1,1 million d'exécutions en
 181 s : aucun échec.
 
@@ -500,7 +500,7 @@ groupe plus tardif de même numéro. La constante `Rule` choisit comment un grou
 | `LocalReadsDesignFresh.cfg` | le lease de la conception | pareil | `NoStale` (Fresh et Durable) tient : 289 765 |
 | `LocalReadsDraft.cfg` | le premier brouillon de la conception | pareil | casse `NoStale` : Fresh (12 états) |
 
-`spec/CommitBuffer.tla` modélise le commit buffer du serveur ([le serveur](server.md#many-databases-one-fsync-the-commit-buffer)) :
+`spec/CommitBuffer.tla` modélise le commit buffer du serveur ([le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)) :
 des bases dont les syncers (le thread qui fait les fsync d'un journal) écrivent chaque frame dans leur journal sans
 fsync et la donnent au buffer, une frame en cours par base ; des tours de toutes les frames arrivées entre-temps,
 ajoutées et forcées une seule fois, un tour en cours ; des frames forcées dans leur propre journal (les longues, et
@@ -526,9 +526,9 @@ distincts, profondeur 25, 9 minutes sur 4 workers. Chaque variante qui retire un
 
 Le modèle prend les écritures de la recovery pour forcées, comme le code doit les rendre : la première version du code
 sautait une frame dont le page cache montrait déjà les octets, ce que le modèle ne peut pas voir et que la simulation
-a trouvé ([plus haut](#the-commit-buffer)).
+a trouvé ([plus haut](#le-commit-buffer)).
 
-`spec/RuleChange.tla` modélise un changement des règles par le chemin en arrière-plan ([règles](rules.md#changes-of-the-rules-in-the-background),
+`spec/RuleChange.tla` modélise un changement des règles par le chemin en arrière-plan ([règles](rules.md#les-changements-des-règles-en-arrière-plan),
 G19) : trois faits affirmés et deux dérivés, d'anciennes règles et de nouvelles (les nouvelles avec une contrainte), un
 writer qui valide des groupes sous ses règles, en frames de faits avec leurs états après, un changement C qui affirme
 aussi un fait et en attend un autre ; la construction à partir de la vue de travail, le rattrapage par batches (des

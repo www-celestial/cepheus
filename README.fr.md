@@ -12,7 +12,7 @@ dans chaque vue, comme des faits, à chaque groupe, et `why` donne la preuve de 
 ([règles](docs/fr/book/rules.md)). OWL 2 RL, les règles d'ontologie du W3C (une ontologie : les classes et les
 propriétés d'un domaine, et leurs axiomes), est une bibliothèque de telles règles (`Cepheus.Owl` ; depuis Cesia, le
 package `owl`), égalité (owl:sameAs) comprise, tenue par des classes de choses égales dont les faits vivent sur un seul
-représentant ([OWL 2 RL](docs/fr/book/rules.md#owl-2-rl-a-library-of-rules)).
+représentant ([OWL 2 RL](docs/fr/book/rules.md#owl-2-rl-une-bibliothèque-de-règles)).
 
 ```ocaml
 open Cepheus
@@ -64,11 +64,11 @@ lecture voit tout ce qui a été confirmé avant elle ; G15) : 0,22 µs par lect
 (l'aller-retour d'une requête et de sa réponse), et aucune écriture ne l'attend. Une replica (une copie tenue à jour)
 sur une autre machine garde une copie de chaque base par mutual TLS (où les deux côtés montrent un certificat), groupe
 pour groupe dans son propre journal : les sauvegardes se prennent sur elle, et `cepheus promote` en fait le primary (le
-serveur qui prend les écritures), à la main ([une replica](docs/fr/book/server.md#a-replica)). Trois serveurs ou plus
+serveur qui prend les écritures), à la main ([une replica](docs/fr/book/server.md#une-replica)). Trois serveurs ou plus
 forment un cluster Raft (Raft : un algorithme par lequel plusieurs serveurs s'accordent sur une même suite
 d'écritures) : une écriture est confirmée dès qu'une majorité la tient forcée sur son disque, et quand le leader (le
 serveur qui prend les écritures) est perdu, les autres en élisent un nouveau d'eux-mêmes, sans perdre aucune écriture
-confirmée ([un cluster de trois](docs/fr/book/server.md#a-cluster-of-three-raft)). Tout, de `cluster.toml` au wire
+confirmée ([un cluster de trois](docs/fr/book/server.md#un-cluster-de-trois-raft)). Tout, de `cluster.toml` au wire
 protocol octet par octet : [le serveur](docs/fr/book/server.md).
 
 ## Depuis Cesia

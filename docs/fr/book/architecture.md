@@ -242,7 +242,7 @@ niveau, bien en dessous des 31 qu'un merge peut prendre (`Snapshot.max_take` : l
 d'une chose dans les bits d'un entier, deux par run). À 10 millions de faits en groupes de 5 000 clients (environ
 415 000 faits chacun) écrits par deux threads, chaque groupe est confirmé en 9,8 s au lieu de 18,2, et avec le
 snapshot qui suit, le chargement prend 13,0 s au lieu de 21,9
-([benchmarks](benchmarks.md#chunked-loads-2026-11-12-at-10-million-facts)).
+([benchmarks](benchmarks.md#les-chargements-par-morceaux-2026-11-12-à-10-millions-de-faits)).
 
 **Mémoire.** Un merge a besoin du cache, de quelques buffers de page (des zones de mémoire de travail : au plus 2 pour
 chaque flux d'une passe ; 19 mesurés dans le test unitaire, dont la borne est 24) et de 25 octets pour chaque 16 KiB de
@@ -366,7 +366,7 @@ numéro 41 µs (PostgreSQL 176 µs avec 32 MB de buffers).
 Chaque base a exactement un writer (G9 : un fichier de lock, `DIR/lock`, tenu par un seul processus). Un seul writer
 veut dire aucun lock entre writers, aucun deadlock (deux attentes qui se bloquent l'une l'autre), et un ordre total des
 groupes sans trou, ce qui fait du journal une history (un historique) qu'on peut rejouer et répliquer
-([une replica](server.md#a-replica), une copie de la base tenue à jour sur une autre machine, prend les frames de son
+([une replica](server.md#une-replica), une copie de la base tenue à jour sur une autre machine, prend les frames de son
 primary, le serveur qui reçoit les écritures, telles qu'elles sont). Son
 coût : une base ne peut pas résoudre les groupes plus vite qu'un cœur (le writer résout un groupe de 5 faits en
 environ 7 µs, si bien que le fsync du disque est la limite bien avant), et un groupe lent retarde les suivants. Des

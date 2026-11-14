@@ -7,7 +7,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **AEGIS-256** — un chiffrement authentifié (Wu et Preneel, 2013 : il chiffre les octets et y joint un tag, une
   empreinte qui révèle tout changement) avec une clé, un nonce (un nombre à ne jamais réutiliser sous une même clé) et
   un tag de 256 bits, rapide grâce aux instructions AES du processeur : il scelle chaque chunk du vault (chaque morceau
-  d'un fichier gardé dans le vault de fichiers de la base). [vault](vault.md#sealed-aegis-256-under-the-owners-key)
+  d'un fichier gardé dans le vault de fichiers de la base). [vault](vault.md#scellé--aegis-256-sous-la-clé-du-propriétaire)
 - **AGM bound** — la plus grande réponse que peut avoir une conjunctive query, calculée à partir des tailles de ses
   entrées par une fractional edge cover (une couverture fractionnaire des arêtes ; Atserias, Grohe, Marx 2008) :
   $N^{1{,}5}$ pour les triangles de $N$ liens. Un worst-case optimal join ne travaille jamais beaucoup au-delà.
@@ -95,7 +95,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **checkpoint** (d'un journal, avec le commit buffer) — un fsync du journal d'une base, qui y rend durables les frames
   que le commit buffer a forcées ; un fichier du buffer n'est vidé qu'une fois que chaque journal qui y a des frames a
   eu le sien. Le checkpoint de PostgreSQL écrit ses pages de données pour que son WAL puisse être recyclé : le même
-  rôle. [le serveur](server.md#many-databases-one-fsync-the-commit-buffer)
+  rôle. [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)
 - **checksum**, **CRC**, **CRC-32C** — un nombre court calculé à partir d'octets, qui change s'ils changent ; CRC-32C
   (le polynôme de Castagnoli, le checksum d'iSCSI, RFC 3720) détecte toute rafale d'au plus 32 bits et laisse passer un
   dommage aléatoire avec une probabilité $2^{-32}$. Cepheus le calcule par l'instruction même du processeur (SSE4.2 sur
@@ -117,10 +117,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **closure module** (le module de closure) — la façon dont le writer tient les faits d'une propriété transitive (Hu,
   Motik, Horrocks 2019) : chaque nouveau fait de la closure (la transitive closure : tous les couples reliés par un
   chemin) est trouvé une seule fois par des parcours, au lieu d'une fois par chemin par la règle ; reconnu sous deux
-  formes, prp-trp et la paire linéaire. [règles](rules.md#transitive-closures-the-closure-module)
+  formes, prp-trp et la paire linéaire. [règles](rules.md#les-transitive-closures--le-closure-module)
 - **class of equal things** (une classe de choses égales) — les choses que les règles ont rendues identiques (le
   owl:sameAs d'OWL) : l'une d'elles, le représentant, tient les faits de la classe, et chaque autre membre x tient
-  `[x cepheus/same r]`. [règles](rules.md#equality-classes-of-equal-things)
+  `[x cepheus/same r]`. [règles](rules.md#légalité--des-classes-de-choses-égales)
 - **cluster** — les serveurs qui tiennent les mêmes bases ; une machine seule est un cluster d'un seul peer (un
   membre). Son id (`cph-c-` et 16 chiffres hexadécimaux) est dans `cluster.toml` et dans chaque Welcome.
   [serveur](server.md#clustertoml)
@@ -136,10 +136,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **commit buffer** — le log forcé propre au serveur (`DATA/server.wal.1` et `.2`) : les frames de toutes ses bases y
   entrent par rounds (des tournées), un fsync par round pour tout le serveur, comme les bases de PostgreSQL partagent
   son WAL ; le journal de chaque base est écrit tout de suite mais n'est forcé qu'à ses checkpoints.
-  [le serveur](server.md#many-databases-one-fsync-the-commit-buffer)
+  [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)
 - **committed** (Raft) — une entrée du log d'un cluster (le log répliqué de Raft) qu'une majorité des serveurs tient
   forcée, comptée par un leader pour une entrée de son propre term ; elle n'est plus jamais perdue ensuite.
-  [serveur](server.md#one-log-for-the-cluster)
+  [serveur](server.md#un-seul-log-pour-le-cluster)
 - **compaction** — un autre nom pour un merge dans un LSM-tree.
   [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **component** — une des structures d'un LSM-tree : le delta en mémoire (C0), les runs sur le disque.
@@ -208,7 +208,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   chaque événement, pour que tout échec se rejoue exactement. [tester](testing.md)
 - **description** — dans le vocabulaire d'OWL 2 RL, la chose qui porte les axiomes d'une propriété :
   `[d, owl/Property, p]`, puis `[d, owl/Domain, c]`, `[d, owl/Transitive, true]` (la chose d'une propriété ne prend
-  aucun fait qui lui soit propre). [règles](rules.md#the-vocabulary)
+  aucun fait qui lui soit propre). [règles](rules.md#le-vocabulaire)
 - **dictionary** (le dictionnaire) — la table qui numérote une seule fois chaque texte distinct (et chaque float) ; les
   lignes contiennent le numéro. Un run garde les octets de ses textes, leurs offsets (leurs positions en octets) et une
   table de hachage de ceux-ci.
@@ -236,7 +236,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [concepts](concepts.md#les-faits--le-modèle-entityattributevalue)
 - **epoch** (une epoch) — une partie numérotée de l'historique d'une base, entre deux promotions : `DIR/epochs` liste
   chaque epoch et son premier groupe (PostgreSQL l'appelle une timeline). Une copie ne peut suivre un primary que si
-  son historique est un préfixe de celui du primary. [serveur](server.md#promotion-by-hand)
+  son historique est un préfixe de celui du primary. [serveur](server.md#la-promotion-à-la-main)
 - **eviction policy** (la politique d'éviction) — la règle qui choisit quelle page quitte un cache plein ; celle de
   Cepheus est S3-FIFO.
 - **`Expect`** — une précondition d'un groupe : un fait qui doit être vrai (ou une valeur qui doit être absente) juste
@@ -281,7 +281,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   2006). [théorie](theory.md#11-runs-et-journal-compressés--le-codage-et-sa-borne)
 - **frozen relation** (une relation figée) — une petite relation sur laquelle les règles ont été dépliées : tant que
   ses faits restent les mêmes, ce sont les règles dépliées qui tournent ; un groupe qui change l'un de ses faits fait
-  tourner les règles telles qu'elles sont écrites. [règles](rules.md#specialisation-by-small-relations)
+  tourner les règles telles qu'elles sont écrites. [règles](rules.md#la-spécialisation-par-petites-relations)
 - **fsync** — l'appel système qui revient une fois que les octets d'un fichier sont sur le disque.
 - **fuzzing**, **libFuzzer**, **sanitizer** — le fuzzing fait tourner une fonction sur des millions d'entrées qu'un
   programme modifie pour atteindre de nouveaux chemins dans le code, et s'arrête à la première qui échoue ; libFuzzer
@@ -305,7 +305,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **group commit** — les écritures qui arrivent pendant qu'un fsync tourne partagent le suivant.
   [architecture](architecture.md#le-journal--un-write-ahead-log)
 - **handover** (la passation) — l'arrêt propre d'un primary, qui envoie ses derniers groupes à sa replica et attend
-  qu'elle les tienne : après lui, aucun groupe confirmé ne manque sur la replica. [serveur](server.md#promotion-by-hand)
+  qu'elle les tienne : après lui, aucun groupe confirmé ne manque sur la replica. [serveur](server.md#la-promotion-à-la-main)
 - **handshake** — les premiers round trips (allers-retours) d'une connexion TLS, où les deux côtés se mettent d'accord
   sur des clés et où le serveur montre son certificat : environ 4,8 ms de calcul ici, c'est pourquoi les connexions
   vivent longtemps. [serveur](server.md#tls)
@@ -344,7 +344,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   type (`client/City` pour le champ `City` du kind `client`) ; `Insert` et `Get` écrivent et lisent les champs d'une
   chose pour un kind sous la forme d'une map. [Cesia](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)
 - **leader**, **follower** — dans un cluster Raft, le seul serveur d'un term qui prend les écritures et sert les
-  lectures, et les autres, qui stockent ses entrées et votent. [serveur](server.md#a-cluster-of-three-raft)
+  lectures, et les autres, qui stockent ses entrées et votent. [serveur](server.md#un-cluster-de-trois-raft)
 - **lagging** (« en retard ») — la fin d'un watch dont le programme a pris trop de retard (8 MiB de pushes qu'il n'a
   pas pris, au serveur) : le package relance le watch depuis son dernier groupe.
   [serveur](server.md#les-questions-vivantes-watch)
@@ -413,12 +413,12 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   présents en dessous de lui, donc chaque compte d'une vue est une somme de comptes exacts.
   [architecture](architecture.md#les-index--les-runs-et-le-delta)
 - **no-op** (Raft) — la première entrée d'un nouveau leader, vide, de son propre term : quand elle est committed,
-  toutes les entrées d'avant le sont aussi. [serveur](server.md#elections)
+  toutes les entrées d'avant le sont aussi. [serveur](server.md#les-élections)
 - **optimistic concurrency control** — lire sans locks, et vérifier à la fin que ce qui a été lu est toujours vrai
   (Kung et Robinson 1981) : `Expect`.
 - **OWL 2 RL** — la partie d'OWL 2, le langage d'ontologies du W3C (une ontologie : les classes et les propriétés
   d'un domaine, et leurs axiomes), que des règles calculent entièrement : 78 règles en six tables (OWL 2 Profiles,
-  section 4.3) ; dans Cepheus, une bibliothèque de règles, `Cepheus.Owl`. [règles](rules.md#owl-2-rl-a-library-of-rules)
+  section 4.3) ; dans Cepheus, une bibliothèque de règles, `Cepheus.Owl`. [règles](rules.md#owl-2-rl-une-bibliothèque-de-règles)
 - **origin** — le nom du token, la session, le numéro de série et le floor qu'un groupe écrit à travers le serveur porte
   dans son `why` : quel programme l'a écrit, et comment une écriture renvoyée est reconnue.
   [serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)
@@ -449,11 +449,11 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **population count** (popcount) — le nombre de bits à 1 dans un mot ; une recherche dans une rank table en fait un.
 - **pre-vote** — la question qu'un serveur Raft pose aux autres avant de se présenter à une élection : voteriez-vous
   pour moi ? Il n'augmente son term qu'avec une majorité de oui, si bien qu'un serveur coupé puis revenu ne perturbe
-  pas le cluster (thèse d'Ongaro, 9.6). [serveur](server.md#elections)
+  pas le cluster (thèse d'Ongaro, 9.6). [serveur](server.md#les-élections)
 - **primary** (le primary) — le serveur qui prend les écritures d'une base ; ses replicas copient ses groupes.
-  [serveur](server.md#a-replica)
+  [serveur](server.md#une-replica)
 - **promotion** (la promotion) — une replica dont on fait un primary (`cepheus promote`) : une nouvelle epoch, et les
-  écritures acceptées. [serveur](server.md#promotion-by-hand)
+  écritures acceptées. [serveur](server.md#la-promotion-à-la-main)
 - **proof** (une preuve) — un arbre dont les feuilles sont des faits affirmés et dont les nœuds sont des instances de
   règles, les enfants de chaque nœud étant les faits de son corps ; *well-founded* (bien fondée) : chaque enfant prouvé
   avant son parent. `why` en renvoie une (G20). [règles](rules.md#why)
@@ -488,22 +488,22 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **replay** — appliquer les groupes du journal dans l'ordre pour reconstruire un état.
 - **Raft** — l'algorithme de consensus (la façon dont plusieurs serveurs s'accordent sur une même suite d'écritures)
   que fait tourner un cluster de trois serveurs ou plus (Ongaro et Ousterhout 2014) : un leader par term, élu par une
-  majorité ; une écriture est confirmée dès qu'une majorité la tient forcée. [serveur](server.md#a-cluster-of-three-raft)
+  majorité ; une écriture est confirmée dès qu'une majorité la tient forcée. [serveur](server.md#un-cluster-de-trois-raft)
 - **Raft log** (le log) — le log unique d'un cluster : chaque entrée est une frame du journal d'une base, entière, ou
-  le no-op d'un leader, avec son index et son term ; `DATA/raft/`. [formats](formats.md#the-servers-files)
+  le no-op d'un leader, avec son index et son term ; `DATA/raft/`. [formats](formats.md#les-fichiers-du-serveur)
 - **replica** (une replica) — un serveur sur une autre machine qui garde une copie de chaque base de son primary,
   groupe pour groupe, dans son propre journal ; asynchrone : elle est en retard de son lag, et le primary ne l'attend
-  jamais. [serveur](server.md#a-replica)
+  jamais. [serveur](server.md#une-replica)
 - **replica lag** (le lag d'une replica) — le temps qui va d'un groupe durable sur le primary au moment où la replica
-  dit qu'elle le tient de façon durable. [serveur](server.md#what-a-replica-costs)
+  dit qu'elle le tient de façon durable. [serveur](server.md#ce-que-coûte-une-replica)
 - **representative** (le représentant) — le membre d'une classe de choses égales qui tient les faits de la classe ;
   les lectures et les questions désignent une chose par son représentant.
-  [règles](rules.md#equality-classes-of-equal-things)
+  [règles](rules.md#légalité--des-classes-de-choses-égales)
 - **retry** — exécuter de nouveau une transaction après que la base l'a refusée (un `Conflict` dans Cepheus, une
   serialization failure dans PostgreSQL), à partir d'une nouvelle lecture.
 - **rewriting** (de l'égalité ; la réécriture) — garder les faits d'une classe de choses égales sur son représentant,
   au lieu de copier chaque fait sur chaque membre comme le feraient les règles de l'égalité d'OWL (Motik et al., AAAI
-  2015). [règles](rules.md#equality-classes-of-equal-things)
+  2015). [règles](rules.md#légalité--des-classes-de-choses-égales)
 - **rewrite of the newest frame** (la réécriture de la frame la plus récente) — à une recovery après autre chose qu'une
   fermeture propre, la frame la plus récente du journal est écrite de nouveau avant d'être forcée, pour que les pages
   qu'un fsync échoué a marquées clean redeviennent dirty et soient vraiment écrites (G13).
@@ -513,10 +513,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **right per kind** (un droit par kind) — un droit d'un token sur une base qui nomme des kinds : ne lire que les faits
   de certains kinds, et n'ajouter qu'à certains (`{ read = ["client", "invoice"], add = ["invoice"] }`) ; le kind
   d'une propriété est son nom jusqu'à son premier `/`. Un tel token lit au serveur, jamais dans sa propre mémoire.
-  [serveur](server.md#rights-g16)
+  [serveur](server.md#les-droits-g16)
 - **round** (du commit buffer ; une tournée) — les frames de toutes les bases arrivées pendant que le round précédent
   était forcé, écrites comme un seul enregistrement du buffer et forcées par un seul fsync ; chaque frame est
-  confirmée après lui. Un seul round est en vol à la fois. [le serveur](server.md#many-databases-one-fsync-the-commit-buffer)
+  confirmée après lui. Un seul round est en vol à la fois. [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)
 - **round trip** — une requête et sa réponse : le temps entre l'envoi de l'une et la réception de l'autre, dont la plus
   grande part est le travail du noyau (les appels système, le réveil de l'autre processus).
   [serveur](server.md#la-vitesse-à-côté-de-postgresql)
@@ -581,7 +581,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   (1, puisque les runs sont nets), et pendant un merge complet une nouvelle copie de la base à côté de l'ancienne (2).
   [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **split brain** — deux serveurs qui prennent en même temps les écritures d'une même base, chacun ignorant l'autre ;
-  ce qu'une promotion à la main peut empêcher et ce qu'elle ne peut pas empêcher : [serveur](server.md#promotion-by-hand)
+  ce qu'une promotion à la main peut empêcher et ce qu'elle ne peut pas empêcher : [serveur](server.md#la-promotion-à-la-main)
 - **SSE4.2**, **x86-64-v2** — SSE4.2 est un ensemble d'instructions des processeurs x86-64 (Intel depuis Nehalem,
   2008 ; AMD depuis Bulldozer, 2011), dont `crc32`, qui calcule CRC-32C 8 octets à la fois ; un programme voit si le
   processeur l'a au bit 20 d'un registre que remplit l'instruction `cpuid`. x86-64-v2 est le niveau de x86-64 qui
@@ -595,7 +595,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [garanties](guarantees.md#g4-strict-serializability)
 - **strong component** (une composante fortement connexe) — un plus grand ensemble de choses qui s'atteignent toutes
   les unes les autres par les arêtes d'un graphe ; chaque membre d'une composante atteint les mêmes choses. On les
-  trouve par l'algorithme de Tarjan (1972). [règles](rules.md#transitive-closures-the-closure-module)
+  trouve par l'algorithme de Tarjan (1972). [règles](rules.md#les-transitive-closures--le-closure-module)
 - **structural sharing** — une nouvelle version d'une structure persistante partage avec l'ancienne chaque partie non
   touchée.
 - **subjectAltName** — le champ d'un certificat qui liste les noms (DNS) et les adresses (IP) pour lesquels il est
@@ -607,9 +607,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   chaque client), gardées comme une seule dont les constantes sont des paramètres : le changement d'un fait se calcule
   une fois et ses lignes sont routées par les valeurs des paramètres. (2) Une règle avec un pattern de liste
   `[c, every L, m]`, écrite une fois pour chaque membre de la liste L de c quand on la déplie (cls-int1 d'OWL 2 RL sur
-  une intersection). [règles](rules.md#templates-rules-over-lists)
+  une intersection). [règles](rules.md#templates--des-règles-sur-des-listes)
 - **term** (Raft ; le term) — le numéro d'une élection ; il augmente à chacune, et un term a au plus un leader. Un
-  serveur force son term et son vote avant de répondre. [serveur](server.md#elections)
+  serveur force son term et son vote avant de répondre. [serveur](server.md#les-élections)
 - **thing** (une chose) — l'entité d'un fait : un numéro, à partir de 65 536.
   [concepts](concepts.md#les-faits--le-modèle-entityattributevalue)
 - **threat to validity** (une menace sur la validité) — une façon dont la preuve ou la mesure pourrait être fausse, à
@@ -626,11 +626,11 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   écrite entière.
 - **transaction** — une unité de travail appliquée entièrement ou pas du tout ; le groupe de Cepheus.
 - **transitive property** (une propriété transitive) — une propriété qui relie une chose à tout ce qu'elle atteint :
-  une partie d'une partie est une partie. Tenue par le closure module. [règles](rules.md#transitive-closures-the-closure-module)
+  une partie d'une partie est une partie. Tenue par le closure module. [règles](rules.md#les-transitive-closures--le-closure-module)
 - **unfolding** (le dépliage ; specialisation by small relations, partial evaluation) — une règle réécrite en une
   règle par fait d'une petite relation de son corps, les mots de ce fait (ses constantes) à la place de ses
   variables : ce que le moteur fait tourner pour les règles écrites sur l'ontologie.
-  [règles](rules.md#specialisation-by-small-relations)
+  [règles](rules.md#la-spécialisation-par-petites-relations)
 - **unique** — une propriété dont aucune valeur n'est partagée par deux choses, vérifiée après chaque groupe.
 - **Unix-domain socket** — un socket entre deux processus d'une même machine, nommé par un chemin dans le système de
   fichiers (`.s.cepheus.7400`) ; il ne peut pas aller d'une machine à une autre.
@@ -643,7 +643,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **variable** — une inconnue d'une question, numérotée à partir de 0.
 - **variable property** (une propriété variable) — un pattern de règle dont la propriété est une variable
   (`prop_var k`), liée par un autre pattern du corps : la forme des règles d'OWL 2 RL chez le W3C.
-  [règles](rules.md#a-property-as-a-variable-the-w3cs-form-of-owls-rules)
+  [règles](rules.md#une-propriété-comme-variable--la-forme-des-règles-dowl-du-w3c)
 - **varint** (LEB128), **zigzag** — un nombre entier en morceaux de 7 bits, les petits étant courts ; zigzag fait
   correspondre les nombres signés aux non signés (0, -1, 1, -2 → 0, 1, 2, 3). [formats](formats.md#un-groupe)
 - **visibility number**, **visibility page** (le numéro de visibilité, la page de visibilité) — le numéro, dans les

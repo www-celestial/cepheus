@@ -14,11 +14,11 @@ commande : [le serveur](server.md).
 |---|---|---|
 | `/usr/local/bin/cepheus` | le serveur et ses commandes | root |
 | `/etc/cepheus/` | `cluster.toml`, `tokens.toml`, les certificats et les clés | cepheus, mode 0700 |
-| `/var/lib/cepheus/` | les données : un dossier par base de données, et les fichiers propres au serveur ([fichiers du serveur](server.md#files-of-the-server)) | cepheus, mode 0700 |
+| `/var/lib/cepheus/` | les données : un dossier par base de données, et les fichiers propres au serveur ([fichiers du serveur](server.md#les-fichiers-du-serveur)) | cepheus, mode 0700 |
 | `/run/cepheus/` | le Unix socket (un canal entre deux programmes d'une même machine, nommé par un chemin), créé à chaque démarrage | cepheus, groupe cepheus, mode 0750 |
 | `/backup/cepheus/` | les copies de chaque nuit ; sur un autre disque, et copiées sur une autre machine | cepheus |
 
-Un utilisateur propre au serveur, le binaire construit comme dans le [démarrage rapide](quickstart.md#1-build-and-install),
+Un utilisateur propre au serveur, le binaire construit comme dans le [démarrage rapide](quickstart.md#1-compiler-et-installer),
 et un cluster (les serveurs qui tiennent les mêmes bases) dont le certificat nomme le nom d'hôte et l'adresse de la
 machine :
 
@@ -75,7 +75,7 @@ cepheus: token ops added to /etc/cepheus/tokens.toml; it is shown only now
 ```
 
 Un programme de cette machine n'atteint le socket que si son utilisateur est dans le groupe `cepheus` (`sudo usermod -aG cepheus
-USER`) ; son token reste nécessaire ([qui peut atteindre le socket](server.md#who-may-reach-the-socket)). Les programmes
+USER`) ; son token reste nécessaire ([qui peut atteindre le socket](server.md#qui-peut-atteindre-le-socket)). Les programmes
 d'autres machines se connectent par TCP avec TLS, avec le `ca.pem` du cluster.
 
 ## Un service
@@ -107,11 +107,11 @@ WantedBy=multi-user.target
 ```
 
 - `Type=notify` : le serveur dit à systemd qu'il est prêt une fois chaque base ouverte et le socket à l'écoute, donc les
-  services rangés après lui démarrent quand il répond ([démarrage](server.md#start-stop-crash)).
+  services rangés après lui démarrent quand il répond ([démarrage](server.md#démarrage-arrêt-crash)).
 - `RuntimeDirectory` crée `/run/cepheus` à chaque démarrage, au nom de l'utilisateur et du groupe du serveur, mode
   0750 ; `StateDirectory` crée `/var/lib/cepheus` s'il manque, au nom de l'utilisateur du serveur.
 - `Restart=on-failure` : après un kill (le processus tué par un signal), un crash, ou la sortie qui suit un disque en
-  échec ([G10](guarantees.md#g10-stop-on-a-disk-error)), systemd redémarre le serveur, et la recovery (la remise en
+  échec ([G10](guarantees.md#g10-arrêt-sur-une-erreur-du-disque)), systemd redémarre le serveur, et la recovery (la remise en
   état de chaque base à l'ouverture, en relisant son journal) décide de ce qui est durable. Un arrêt propre
   (`systemctl stop`, SIGTERM) n'est pas suivi d'un redémarrage.
 - `TimeoutStopSec` : un arrêt attend les écritures en cours et un merge (la fusion des fichiers triés d'une base) en
@@ -121,7 +121,7 @@ WantedBy=multi-user.target
   processus désigne un fichier ou un socket ouvert), et les fichiers des bases aussi ([cluster.toml](server.md#clustertoml)) ;
   montez les deux ensemble.
 - `MemoryMax` au-dessus du `cache` de `cluster.toml` et des changements depuis le dernier merge
-  ([mémoire](operations.md#memory)).
+  ([mémoire](operations.md#la-mémoire)).
 
 ```sh
 sudo systemctl daemon-reload
@@ -138,11 +138,11 @@ cepheus: ready in 23.9 ms: shop at group 1; socket /run/cepheus/.s.cepheus.7400,
 Le journal d'une base (le fichier où elle ne fait qu'ajouter ses écritures) n'est jamais que complété à sa fin, et ses
 runs (les copies triées de son état, dans des fichiers) sont écrits à côté puis renommés, donc une copie n'a pas besoin
 d'arrêt, dans cet ordre : l'id de la base, ses runs, puis ses segments (les fichiers successifs du journal)
-([sauvegarde et restauration](operations.md#backup-and-restore)). La copie tient chaque groupe (une écriture, appliquée
+([sauvegarde et restauration](operations.md#sauvegarde-et-restauration)). La copie tient chaque groupe (une écriture, appliquée
 tout entière ou pas du tout) confirmé avant le début de la copie de son segment, y compris ceux du commit buffer (le
 journal commun du serveur, où les écritures de plusieurs bases partagent un seul fsync, l'appel système qui attend que
 les octets soient vraiment sur le disque). Elle laisse de côté `lock`, `closed`, `shared` et `sessions` : la copie
-s'ouvre comme une base à part entière. Prise sur une [replica](server.md#backups-from-the-replica) (une copie de la
+s'ouvre comme une base à part entière. Prise sur une [replica](server.md#les-sauvegardes-depuis-la-replica) (une copie de la
 base tenue à jour sur une autre machine), elle ne coûte rien au primary (le serveur qui reçoit les écritures), et tient
 les groupes que tenait la replica. `/usr/local/bin/cepheus-backup` :
 
@@ -259,7 +259,7 @@ stopped (process 610898, 605 ms)
 L'exercice réussit quand le serveur démarre et que le groupe est au moins celui que montrait le serveur en service
 quand la copie a commencé. Une copie qui ne s'ouvre pas nomme son dommage, comme plus bas ; restaurez alors celle de la
 nuit d'avant. La vérification complète de chaque frame (un bloc du journal écrit d'un seul tenant, que ses CRC
-vérifient) des anciens segments, `Cepheus.verify` ([vérification](operations.md#verification-scrubbing)), n'a pas
+vérifient) des anciens segments, `Cepheus.verify` ([vérification](operations.md#la-vérification-scrubbing)), n'a pas
 encore de commande : c'est un appel de l'API OCaml.
 
 ## Ce qu'il faut surveiller
@@ -301,20 +301,20 @@ database.shop.watches: 0
 | `requests` | les requêtes répondues depuis le démarrage | un rythme qui baisse alors que des programmes tournent |
 | `gc_minor`, `gc_major` | les collections du runtime OCaml jusqu'ici (les passages du garbage collector, qui reprend la mémoire inutilisée) | à côté de la mémoire du processus : un rythme qui ne cesse de croître |
 | `stopping` | un arrêt est en cours | `true` en dehors d'un arrêt prévu |
-| `commit_buffer.rounds`, `.frames`, `.alone` | les fsyncs du buffer, les frames qu'ils ont rendues durables, les frames forcées dans leur propre journal (une base écrite seule) | `.frames` / `.rounds` : les frames partagées par un seul fsync ([commit buffer](server.md#many-databases-one-fsync-the-commit-buffer)) |
+| `commit_buffer.rounds`, `.frames`, `.alone` | les fsyncs du buffer, les frames qu'ils ont rendues durables, les frames forcées dans leur propre journal (une base écrite seule) | `.frames` / `.rounds` : les frames partagées par un seul fsync ([commit buffer](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)) |
 | `database.NAME.group` | son groupe durable le plus récent | immobile alors que des programmes écrivent : leurs écritures échouent ; lisez leurs erreurs et le log |
 | `database.NAME.facts` | les faits de son état le plus récent | la croissance, pour le disque et la mémoire |
-| `database.NAME.resent` | les écritures répondues de nouveau depuis la table des sessions : envoyées de nouveau après une connexion coupée, appliquées une seule fois ([G14](server.md#writes-applied-once-sessions-g14)) | une hausse régulière : des connexions se coupent (le réseau, `idle_timeout`, des redémarrages) |
-| `database.NAME.followers` | les programmes de cette machine qui lisent dans leur propre mémoire ([lectures locales](server.md#local-reads-g15)) | moins que les programmes qui devraient le faire |
+| `database.NAME.resent` | les écritures répondues de nouveau depuis la table des sessions : envoyées de nouveau après une connexion coupée, appliquées une seule fois ([G14](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)) | une hausse régulière : des connexions se coupent (le réseau, `idle_timeout`, des redémarrages) |
+| `database.NAME.followers` | les programmes de cette machine qui lisent dans leur propre mémoire ([lectures locales](server.md#lectures-locales-g15)) | moins que les programmes qui devraient le faire |
 | `database.NAME.frames`, `.follow_ns_a_frame` | les frames publiées, et le temps moyen du serveur par frame pour les publier aux lecteurs locaux, en nanosecondes | un temps qui grandit avec `followers` |
 | `database.NAME.visible` | le numéro de visibilité que partagent les lecteurs locaux (G15) | il avance avec les frames |
-| `database.NAME.watches` | les questions vivantes (tenues à jour) ouvertes ([Watch](cesia.md#watch-live-questions)) | plus que les écrans ouverts |
+| `database.NAME.watches` | les questions vivantes (tenues à jour) ouvertes ([Watch](cesia.md#watch--les-questions-vivantes)) | plus que les écrans ouverts |
 
 À côté, le disque : un merge complet tient en double les runs de la base pendant qu'il tourne, et le journal garde
 chaque groupe pour toujours, donc gardez libre au moins la taille des runs de la plus grande base, et surveillez la
-croissance du journal ([espace disque](operations.md#disk-space-and-merges)). Et le log, `journalctl -u cepheus` :
+croissance du journal ([espace disque](operations.md#lespace-disque-et-les-merges)). Et le log, `journalctl -u cepheus` :
 chaque ligne commence par `cepheus:`, et celles-ci demandent un coup d'œil
-([toutes les lignes](errors.md#lines-on-the-standard-error)) :
+([toutes les lignes](errors.md#les-lignes-sur-la-sortie-derreur)) :
 
 | ligne | que faire |
 |---|---|
@@ -323,12 +323,12 @@ chaque ligne commence par `cepheus:`, et celles-ci demandent un coup d'œil
 | `background merge failed`, `a merge could not be installed`, `a merge could not catch up` | le disque : la place, les erreurs dans le log du système ; la base continue avec ses anciens runs |
 | `database NAME: the sessions could not be saved` | le disque ; le démarrage suivant lit une plus grande part du journal |
 | `FILE not reloaded: MSG` | `tokens.toml` est mal formé : le serveur garde les tokens qu'il avait |
-| `database NAME stopped: MSG`, avant une sortie | un disque en échec : voir [après un crash](#after-a-crash-or-a-power-loss) |
+| `database NAME stopped: MSG`, avant une sortie | un disque en échec : voir [après un crash](#après-un-crash-ou-une-coupure-de-courant) |
 
 ## Les mises à jour
 
 1. Lisez ce que la nouvelle version change dans [les formats de fichiers](formats.md) et dans [le serveur](server.md),
-   et faites l'[exercice de restauration](#the-restore-drill) sur la sauvegarde la plus récente.
+   et faites l'[exercice de restauration](#lexercice-de-restauration) sur la sauvegarde la plus récente.
 2. Construisez-la, et installez-la par-dessus l'ancien binaire (le serveur qui tourne garde sa propre copie ouverte) :
    `sudo install -m 755 _build/default/bin/main.exe /usr/local/bin/cepheus`.
 3. `sudo systemctl restart cepheus` : un arrêt propre, qui force chaque journal sur le disque et vide le commit buffer,
@@ -336,8 +336,8 @@ chaque ligne commence par `cepheus:`, et celles-ci demandent un coup d'œil
 4. `journalctl -u cepheus -n 1 -o cat` : la ligne « ready » (prêt), chaque base à son groupe. Une ouverture qui
    convertit un format est plus lente une fois (plus bas).
 5. Reconstruisez le moteur des programmes Cesia depuis le même commit, et leur `cesia.lock`
-   ([démarrage rapide](quickstart.md#3-a-project-for-the-program)) : sur la machine du serveur, un moteur lit lui-même
-   les fichiers de la base ([lectures locales](cesia.md#local-reads)), donc il doit connaître les formats qu'écrit le
+   ([démarrage rapide](quickstart.md#3-un-projet-pour-le-programme)) : sur la machine du serveur, un moteur lit lui-même
+   les fichiers de la base ([lectures locales](cesia.md#lectures-locales)), donc il doit connaître les formats qu'écrit le
    serveur.
 
 Ce qu'une nouvelle version peut faire à son premier démarrage, une seule fois :
@@ -352,10 +352,10 @@ Ce qui ne va que dans un sens, de sorte que revenir à une version antérieure d
 à jour :
 
 - **Le format du journal.** Un journal de format 1 est converti au format 2 à la première ouverture, segment par
-  segment ([formats](formats.md#a-group)) ; une version qui ne lit que le format 1 ne peut plus le lire ensuite.
+  segment ([formats](formats.md#un-groupe)) ; une version qui ne lit que le format 1 ne peut plus le lire ensuite.
 - **Le commit buffer.** Les versions d'avant lui ne lisent pas `DATA/server.wal.1` et `.2`. Ne revenez en arrière
   qu'après un arrêt propre, qui les supprime ; après un crash, démarrez d'abord cette version une fois et arrêtez-la
-  ([une base d'un serveur](operations.md#a-database-of-a-server)). Fait ici : la version antérieure, démarrée après un
+  ([une base d'un serveur](operations.md#une-base-dun-serveur)). Fait ici : la version antérieure, démarrée après un
   arrêt propre, a ouvert la base à son groupe, et cette version de nouveau après elle.
 
 ## Après un crash ou une coupure de courant
@@ -363,7 +363,7 @@ Ce qui ne va que dans un sens, de sorte que revenir à une version antérieure d
 **Ce qui se passe tout seul.** systemd redémarre le serveur (`Restart=on-failure` ; après une coupure de courant, au
 démarrage de la machine). Chaque base fait sa recovery à son ouverture : les frames du commit buffer réécrites dans son
 journal, une fin torn du journal (écrite à moitié) coupée, les groupes d'après le run le plus récent rejoués
-([recovery](operations.md#opening-and-recovery)). Chaque écriture qui a reçu la réponse `Ok` est là (G1) ; une écriture
+([recovery](operations.md#louverture-et-la-recovery)). Chaque écriture qui a reçu la réponse `Ok` est là (G1) ; une écriture
 en cours peut y être ou non, et la bibliothèque du programme l'envoie de nouveau : elle est appliquée une seule fois
 (G14). Ici, un serveur tué par `kill -9` pendant qu'un programme écrivait 2 000 commandes :
 
@@ -391,20 +391,20 @@ cepheus: database shop: damaged: 00000000000000000001.seg: damaged frame at offs
 
 systemd réessaie jusqu'à sa limite de démarrages, et le log répète la ligne. Ne supprimez pas de fichiers : copiez de
 côté le dossier de la base, et restaurez-la depuis la sauvegarde la plus récente qui passe l'exercice
-([quand la recovery dit `Damaged`](operations.md#when-recovery-says-damaged)) ; le sens du message :
-[erreurs](errors.md#damaged-durable-data-lost-or-changed).
+([quand la recovery dit `Damaged`](operations.md#quand-la-recovery-dit-damaged)) ; le sens du message :
+[erreurs](errors.md#damaged--des-données-durables-perdues-ou-changées).
 
 **Un disque en échec.** Une écriture ou un fsync raté arrête la base, et le serveur sort (`database NAME stopped: ...`) ;
 systemd le redémarre, et la recovery décide de ce qui est durable
-([G13](guarantees.md#g13-a-failed-fsync-is-never-trusted)). Un système de fichiers passé en lecture seule refuse le
+([G13](guarantees.md#g13-on-ne-se-fie-jamais-à-un-fsync-qui-a-échoué)). Un système de fichiers passé en lecture seule refuse le
 démarrage jusqu'à ce qu'il soit réparé : lisez le log du système pour y trouver l'erreur du disque
-([quand une écriture renvoie `Io`](operations.md#when-a-write-returns-io)).
+([quand une écriture renvoie `Io`](operations.md#quand-une-écriture-renvoie-io)).
 
 **Un programme qui ouvre lui-même les fichiers.** Après un crash, une base que tenait le serveur est refusée au propre
 processus d'un programme (`Busy`) jusqu'à ce que le serveur ait démarré dessus une fois
-([une base d'un serveur](operations.md#a-database-of-a-server)).
+([une base d'un serveur](operations.md#une-base-dun-serveur)).
 
 **Le disque lui-même.** Une coupure de courant ne garde ce qui a reçu la réponse `Ok` que si le disque garde ce que
 `fsync` a rendu durable : les disques grand public peuvent tenir des écritures dans un cache volatil. Utilisez des
 disques avec power-loss protection (une réserve d'énergie qui écrit ce cache sur le disque à la coupure) pour les
-données qui comptent ([disques](operations.md#disks)).
+données qui comptent ([disques](operations.md#les-disques)).

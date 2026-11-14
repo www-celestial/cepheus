@@ -33,7 +33,7 @@ remise en état à l'ouverture, en relisant le journal). Sa création et sa supp
 
 Vide. Créé par la première ouverture de la base par un serveur, dont le commit buffer (l'endroit où le serveur copie
 les frames de plusieurs bases pour les confirmer par un seul fsync) force le journal à partir de là
-([le serveur](server.md#many-databases-one-fsync-the-commit-buffer)), et gardé tant qu'un serveur l'ouvre ; supprimé
+([le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)), et gardé tant qu'un serveur l'ouvre ; supprimé
 par une ouverture dans le processus même d'un programme (`Cepheus.open_`) après une fermeture propre. Sa création et sa
 suppression sont forcées (le fsync du répertoire). Une ouverture dans le processus même d'un programme refuse une base
 qui a `shared` et pas `closed` (`Busy`) : ses frames confirmées les plus récentes peuvent n'être que dans
@@ -413,7 +413,7 @@ tourne.
 **`DATA/cepheus.server`** : l'identifiant du serveur (`cph-s-` et 16 chiffres hexadécimaux) et un saut de ligne.
 
 **`DATA/server.wal.1` et `DATA/server.wal.2`**, les deux fichiers du commit buffer, qui alternent (`src/wal.ml` ;
-[le serveur](server.md#many-databases-one-fsync-the-commit-buffer)) :
+[le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)) :
 
 ```
 file   = header, 40 bytes: 0 magic "CPHW" (0x57485043) u32 | 4 format u32 (1) | 8 generation u64 | 16 zero, 20 bytes
@@ -438,7 +438,7 @@ journal ; un fichier dont l'en-tête ne passe pas la vérification est un dommag
 
 **`DATA/raft/`**, le log et l'état d'un cluster Raft (des serveurs qui gardent le même log, la liste ordonnée des
 écritures, par l'algorithme de consensus Raft ; `server/raftlog.ml` ;
-[le serveur](server.md#a-cluster-of-three-raft)), le dossier en mode 0700, chaque fichier en 0600 :
+[le serveur](server.md#un-cluster-de-trois-raft)), le dossier en mode 0700, chaque fichier en 0600 :
 
 ```
 state    = magic "cepheus raft state\n" (19 bytes) | term u64 | vote (varint length, a peer's name; empty: none)

@@ -89,8 +89,8 @@ Les règles d'une règle, vérifiées quand elle est écrite (une erreur est `In
   nouvelles choses dans les têtes, les *existential rules*, peut dériver sans fin ; le Datalog sans elles finit
   toujours : son *least model* ci-dessous est fini.)
 - La propriété d'un pattern est une constante, comme dans une question, ou une variable liée par un autre pattern
-  ([plus bas](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)) ; un corps peut tenir des `Not` et une tête un
-  agrégat (`Sum`, `Count`, `Min`, `Max`), avec leurs propres règles ([plus bas](#negation-and-aggregates-strata)).
+  ([plus bas](#une-propriété-comme-variable--la-forme-des-règles-dowl-du-w3c)) ; un corps peut tenir des `Not` et une tête un
+  agrégat (`Sum`, `Count`, `Min`, `Max`), avec leurs propres règles ([plus bas](#la-négation-et-les-agrégats--les-strata)).
 
 ## Ce que tient la base : le least model
 
@@ -397,7 +397,7 @@ est la propriété `p` dans le `k`-ième Not de la règle, `aggregate f p` la pr
 
 Leur texte canonique ajoute `; not [E P V] ...` avant la tête et `give sum [E P V]` (ou `count`, `min`, `max`) ; une
 règle sans eux a le texte qu'elle avait avant. En Cesia : `cepheus.Not(...)` dans `Where`, et `cepheus.Sum(x)`,
-`Min(x)`, `Max(x)` ou `Count()` comme valeur de `Then` ([les règles depuis Cesia](cesia.md#rules)).
+`Min(x)`, `Max(x)` ou `Count()` comme valeur de `Then` ([les règles depuis Cesia](cesia.md#règles)).
 
 **Ce qu'ils veulent dire.** Une règle qui lit une propriété sous `Not` a besoin que cette propriété soit d'abord
 complète, et un agrégat aussi. Les règles sont rangées en **strata** (un stratum : une couche de règles) : une règle ne
@@ -442,7 +442,7 @@ pour les règles stratifiées) :
 3. B/F sur ses candidats, puis l'insertion semi-naive à partir de chaque fait rendu présent jusque-là.
 
 Un `Not` dont les patterns ont leurs deux côtés connus est une seule recherche par candidat. Un ensemble de règles avec
-`Not` ou des agrégats tourne tel qu'écrit (sans [spécialisation](#specialisation-by-small-relations)), et un
+`Not` ou des agrégats tourne tel qu'écrit (sans [spécialisation](#la-spécialisation-par-petites-relations)), et un
 chargement dans une base qui a ces règles prend le chemin ordinaire, pas celui des grands groupes. `why` du fait d'un
 agrégat donne les faits de chaque réponse de sa chose.
 
@@ -457,7 +457,7 @@ lui : le nouveau fait de chaque instance de règle, chaque fait que crée un clo
 mesure qu'elles grandissent (pour que les $n^2$ faits d'un graphe dense soient refusés avant d'être faits, en mémoire
 en proportion du budget), et les faits que supprime B/F.
 
-Un **changement** — un groupe qui change les règles, ou l'ontologie ([plus bas](#changes-of-the-rules-in-the-background)) —
+Un **changement** — un groupe qui change les règles, ou l'ontologie ([plus bas](#les-changements-des-règles-en-arrière-plan)) —
 s'applique à toute la base, donc son budget grandit avec elle : **$100\,000 + 100 \times \text{ses changements affirmés} +
 4 \times \text{les faits de la base avant lui}$** (`change_budget`, le 4) : un changement peut rendre la base au plus
 cinq fois plus grande, et une règle dont les conséquences croissent plus vite (chaque paire de choses, une closure
@@ -515,7 +515,7 @@ fait que donnait la règle est vérifié pour une autre preuve), les deux dans l
 dans ce groupe : un changement de règle prend effet à un seul numéro de groupe, chaque vue d'avant lui étant la
 materialisation (l'ensemble des faits dérivés tenus par la base) sous les anciennes règles, chaque vue à partir de lui
 sous les nouvelles (G19). Dans une base sur le disque, le changement est calculé à côté du writer et installé comme ce
-groupe ([section suivante](#changes-of-the-rules-in-the-background)).
+groupe ([section suivante](#les-changements-des-règles-en-arrière-plan)).
 
 ## Les changements des règles en arrière-plan
 
@@ -526,7 +526,7 @@ groupe :
 
 1. **Quels groupes.** Un groupe qui change les règles (une règle définie, changée ou retirée), ou l'**ontologie** : un
    groupe au-delà du budget d'une écriture de données qui affirme ou retire un fait d'une relation sur laquelle les
-   règles sont dépliées dans l'état d'avant lui ([spécialisation](#specialisation-by-small-relations) ; trouvé à partir
+   règles sont dépliées dans l'état d'avant lui ([spécialisation](#la-spécialisation-par-petites-relations) ; trouvé à partir
    des règles et de cet état seuls, jamais de ce qu'ont fait les groupes d'avant, pour qu'un fork trouve la même
    chose). Le writer résout d'abord la partie affirmée du groupe comme toujours (les types, `Expect`, les propres
    vérifications des règles : safety, types, strata) : une erreur reçoit sa réponse tout de suite. Un changement avec
@@ -564,7 +564,7 @@ contrainte que les données cassent : `Invalid "constraint NAME: …"`). Un chan
 `Invalid` à la construction. Une fermeture de la base annule un changement en cours : il reçoit `Closed`, et rien de
 lui n'est dans le journal.
 
-Dans un cluster Raft ([serveur](server.md#one-log-for-the-cluster) ; Raft est un protocole où plusieurs serveurs
+Dans un cluster Raft ([serveur](server.md#un-seul-log-pour-le-cluster) ; Raft est un protocole où plusieurs serveurs
 tiennent un même log, la suite répliquée des frames, qu'écrit l'un d'eux, le leader), le changement tourne sur le
 leader, et son groupe est proposé comme la frame de n'importe quelle écriture, seul. Si le leader cesse de l'être
 pendant que le changement tourne (une frame qu'il a écrite est reprise, ou il applique la frame d'un autre leader), le
@@ -596,7 +596,7 @@ la vue, et le merge suivant les écrit dans un run). Sa part au switch, ce sont 
 l'arrière-plan prend plus de 65 536 groupes de retard, le writer l'attend, pour que les groupes consignés et les
 deltas restent bornés.
 
-**Ce que cela coûte** ([benchmarks](benchmarks.md#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13)). Sur
+**Ce que cela coûte** ([benchmarks](benchmarks.md#règles-étape-5--les-changements-des-règles-en-arrière-plan-2026-11-13)). Sur
 10 universités en forme de LUBM avec les 94 règles, pendant que 256 clients écrivent de façon durable, ajouter un
 axiome (chaque personne est aussi d'une classe que les données laissent vide : environ 150 000 faits dérivés)
 s'installe en 3,1 s (médiane de 21 ; sa construction 0,49 s), et la part du writer lui-même à l'installation est de
@@ -664,7 +664,7 @@ entièrement : le W3C la donne sous forme de 78 règles, en six tableaux (OWL 2 
 Cepheus n'a pas d'interrupteur pour elle : `Cepheus.Owl` est une bibliothèque de règles sur un vocabulaire de
 propriétés à elle, et une base obtient OWL 2 RL en définissant ces règles, comme elle définit n'importe quelles règles.
 L'ontologie est alors des données : des faits écrits dans des groupes, versionnés dans le journal, et les règles sont
-dépliées sur eux ([spécialisation](#specialisation-by-small-relations)).
+dépliées sur eux ([spécialisation](#la-spécialisation-par-petites-relations)).
 
 ```ocaml
 open Cepheus
@@ -762,19 +762,19 @@ pour l'instant qu'en OCaml.
   donne une preuve, pas la plus courte : Person par prp-rng, sur le range (la classe des valeurs d'une propriété) qu'a
   dérivé scm-rng1 (le range de advisor est Professor, et un Professor est une Person).
 - Les règles sont celles du W3C, écrites sous sa forme : des règles génériques sur les faits de l'ontologie, avec la
-  propriété en variable ([plus haut](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)). Le writer les exécute
+  propriété en variable ([plus haut](#une-propriété-comme-variable--la-forme-des-règles-dowl-du-w3c)). Le writer les exécute
   dépliées sur l'ontologie, une règle par axiome (« un directeur de thèse est un professeur » devient
   `[x advisor y] -> [y type Professor]`) ; une écriture de l'ontologie est un changement des règles, calculé comme tel
-  ([en arrière-plan](#changes-of-the-rules-in-the-background) sur une base sur le disque).
+  ([en arrière-plan](#les-changements-des-règles-en-arrière-plan) sur une base sur le disque).
 - Les deux enregistrements ont été rendus **une seule chose** par `owl/prp-ifp` (une propriété inverse fonctionnelle :
   une valeur, une chose) : leurs faits sont gardés sur l'un d'eux, le **représentant**, et `same` liste la classe ; les
-  lectures nomment une chose par le représentant de sa classe ([l'égalité](#equality-classes-of-equal-things) plus
+  lectures nomment une chose par le représentant de sa classe ([l'égalité](#légalité--des-classes-de-choses-égales) plus
   bas).
 - Retirer l'e-mail qui les rendait une seule chose les sépare à nouveau : la classe est défaite et dérivée à nouveau.
 
 ### Le vocabulaire
 
-Une chose de propriété ne garde que des faits `cepheus/` ([une propriété comme variable](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)),
+Une chose de propriété ne garde que des faits `cepheus/` ([une propriété comme variable](#une-propriété-comme-variable--la-forme-des-règles-dowl-du-w3c)),
 et Cepheus n'a pas de listes RDF (RDF : le modèle de données du web sémantique, en triplets) ; le vocabulaire diffère
 donc de la forme RDF d'OWL de trois façons, chacune la plus petite qui garde les règles du W3C telles qu'elles sont :
 
@@ -785,7 +785,7 @@ donc de la forme RDF d'OWL de trois façons, chacune la plus petite qui garde le
 - Une **liste** (les classes d'une intersection, celles d'une union, les propriétés d'une clé, les choses d'une
   énumération) est les valeurs d'une propriété qui en prend plusieurs : `[Student, owl/IntersectionOf, Person]`,
   `[Student, owl/IntersectionOf, r]`. Les règles qui ont besoin de chaque membre à la fois (cls-int1, prp-key) sont des
-  **templates** (des modèles de règles, dépliés sur la liste ; [plus bas](#templates-rules-over-lists)).
+  **templates** (des modèles de règles, dépliés sur la liste ; [plus bas](#templates--des-règles-sur-des-listes)).
 - Une **chaîne de propriétés** (p1 puis p2 donne p, prp-spo2) est une chose avec deux liens : `[ch, owl/ChainOf, p]`,
   `[ch, owl/First, p1]`, `[ch, owl/Second, p2]` ; une chaîne de trois ou plus s'écrit comme des chaînes de deux, par
   une propriété propre au programme pour chaque étape du milieu (p1, p2, p3 donne p : p1, p2 donne q ; q, p3 donne p).
@@ -821,7 +821,7 @@ est deux règles, la seconde nommée avec un `b` : `owl/scm-eqc1b`).
 
 | tableau du W3C | règles | dans Cepheus |
 |---|---|---|
-| 4, égalité (9) | eq-ref, eq-sym, eq-trans, eq-rep-s, eq-rep-p, eq-rep-o | les classes de choses égales et leur réécriture ([plus bas](#equality-classes-of-equal-things)) ; `owl/eq` fait de `owl/SameAs` une égalité ; eq-rep-p : une propriété n'est identique à aucune autre (une règle qui la rendrait telle refuse son groupe) |
+| 4, égalité (9) | eq-ref, eq-sym, eq-trans, eq-rep-s, eq-rep-p, eq-rep-o | les classes de choses égales et leur réécriture ([plus bas](#légalité--des-classes-de-choses-égales)) ; `owl/eq` fait de `owl/SameAs` une égalité ; eq-rep-p : une propriété n'est identique à aucune autre (une règle qui la rendrait telle refuse son groupe) |
 | | eq-diff1, eq-diff2, eq-diff3 | la contrainte `owl/eq-diff1` (`[x, owl/DifferentFrom, x]`, ce que devient une différence réécrite entre deux choses égales) ; AllDifferent comme ses paires |
 | 5, propriétés (20) | prp-dom, prp-rng, prp-symp, prp-trp, prp-spo1, prp-eqp1, prp-eqp2, prp-inv1, prp-inv2 | des règles (la closure d'une propriété transitive par le closure module) |
 | | prp-spo2 | une règle sur des chaînes de deux liens |
@@ -917,7 +917,7 @@ Mesuré sur ce portable (Intel i7-4720HQ, 2,6 GHz, 4 cœurs ; OCaml 5.5 sans fla
 LUBM [Guo 2005], pas sa sortie officielle) avec l'ontologie univ-bench sous forme de 94 règles, une par axiome. Sept
 tours, alternés, chaque processus limité à 3 GB ; la médiane et l'intervalle $[x(1), x(7)]$ des tours (couverture de
 98,4 %). La méthode et chaque chiffre : [benchmarks](benchmarks.md#règles-2026-11-08), et pour les chargements
-[le chemin des chargements](benchmarks.md#rules-step-3-the-path-of-loads-sorted-and-parallel-2026-11-14).
+[le chemin des chargements](benchmarks.md#règles-étape-3--le-chemin-des-chargements-trié-et-parallèle-2026-11-14).
 
 | quoi | avec les règles | sans | |
 |---|---|---|---|
@@ -934,7 +934,7 @@ tours, alternés, chaque processus limité à 3 GB ; la médiane et l'intervalle
 | l'égalité par réécriture contre axiomatisée, en forme d'UOBM (un benchmark d'universités plus riche en OWL que LUBM ; une université, 6 558 enregistrements en double) | **1,066 s** contre 1,957 s | | 1,84× plus rapide, 3,27× moins de dérivations |
 | une classe de 100 000 choses (la tempête d'une propriété fonctionnelle) | **1,42 s**, 99 999 faits de `cepheus/same` | | axiomatisée : au-delà du budget dès 400 choses |
 
-Les chiffres d'OWL 2 RL et de l'égalité : [benchmarks](benchmarks.md#rules-step-6-owl-2-rl-and-equality-by-rewriting-2026-11-14).
+Les chiffres d'OWL 2 RL et de l'égalité : [benchmarks](benchmarks.md#règles-étape-6--owl-2-rl-et-légalité-par-réécriture-2026-11-14).
 Le chemin des écritures sans règles est inchangé : les mêmes groupes d'étudiants sur le binaire de main et sur
 celui-ci, 9,06 µs et 9,06 µs pour écrire, 7,15 et 6,20 µs pour retirer ; le démarrage, 2 % de plus pour le code du
 moteur de raisonnement ([benchmarks](benchmarks.md#règles-2026-11-08)).
@@ -961,7 +961,7 @@ les chiffres marqués *calculé* sont les nôtres, tirés de leurs tableaux) :
   dans les persistent maps ou les runs du store (34 recherches pour un étudiant) ; le prototype de la conception, sur
   des hash tables à lui, prenait 19,1 µs.
 
-**Les closures et la forme du W3C** (l'étape 2 de la conception ; [benchmarks](benchmarks.md#rules-step-2-closures-and-the-w3cs-form-2026-11-12)) :
+**Les closures et la forme du W3C** (l'étape 2 de la conception ; [benchmarks](benchmarks.md#règles-étape-2--les-closures-et-la-forme-du-w3c-2026-11-12)) :
 le closure module calcule les 683 496 nouveaux faits de la hiérarchie de 100 000 nœuds en **22,5 ms** (prp-trp comme
 règle : 0,92 s de raisonnement) et les 1 344 791 du DAG aléatoire (un graphe orienté sans cycle) en **47,3 ms**
 (17,6 s), chaque nouveau fait créé une seule fois ; les données en forme de LUBM avec l'ontologie en faits et les 10

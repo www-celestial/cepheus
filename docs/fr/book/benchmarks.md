@@ -214,7 +214,7 @@ Pas atteint, de l'étape 4 du plan : un pic de 150 MB quelle que soit la taille 
 d'opérations en vol des deux groupes, environ 70 MB chacune, le cache de 64 MB, et les tableaux compacts d'un groupe),
 et 10 millions de faits en 3 s (chaque groupe de 415 000 faits paie sa propre résolution, son merge et son fsync :
 46 frames ; les mêmes 10 millions de faits en deux groupes se chargent en 4,1 à 5,6 s, avec un pic de 1,46 GB :
-[api](api.md#writing)).
+[api](api.md#écrire)).
 
 Les mêmes 10 millions de faits en 4 grands groupes (`GROUP=56818`, un thread), puis `snapshot`, $n = 5$ alternés :
 chaque groupe confirmé en 5,12 s [4,28 ; 6,95] contre 5,93 [5,58 ; 6,98], un pic de 862 MB [808 ; 967] contre 987
@@ -568,7 +568,7 @@ une fois chacune en 7 tours, sur un disque dont les fsync varient autant d'un to
 ## Règles, étape 6 : OWL 2 RL, et l'égalité par réécriture (2026-11-14)
 
 La sixième étape du reasoner (la partie du writer qui déduit des faits nouveaux à partir des règles)
-([règles](rules.md#owl-2-rl-a-library-of-rules)) : OWL 2 RL (la partie d'OWL 2, le langage d'ontologies du W3C, que
+([règles](rules.md#owl-2-rl-une-bibliothèque-de-règles)) : OWL 2 RL (la partie d'OWL 2, le langage d'ontologies du W3C, que
 des règles calculent entièrement) comme bibliothèque de règles (`Cepheus.Owl` : son vocabulaire, chaque règle des
 tables du W3C, des templates sur des listes, c'est-à-dire des règles écrites une fois pour chaque membre d'une liste),
 et l'égalité (owl:sameAs) par des classes de choses égales (les choses que les règles rendent identiques, dont un seul
@@ -676,7 +676,7 @@ groupe par département) sont lues en entier par le binaire de l'étape 3 et par
 
 ## Règles, étape 3 : le chemin des chargements, trié et parallèle (2026-11-14)
 
-La troisième étape du reasoner ([règles](rules.md#large-groups)) : les faits d'un grand groupe raisonnés comme un
+La troisième étape du reasoner ([règles](rules.md#grands-groupes)) : les faits d'un grand groupe raisonnés comme un
 préfixe trié du working set (l'ensemble des faits sur lequel travaille le raisonnement) au lieu de hash chains (des
 chaînes de faits par valeur de hachage), des chaînes gardées seulement là où un plan les lit, les grands tours changés
 en faits sur chaque thread matériel, les faits déduits fusionnés dans les deux ordres du groupe ; les contraintes, les
@@ -741,7 +741,7 @@ chargement des modules (8 ici, 230 KB), les créent maintenant à leur première
 université chargée par chacun).
 
 **Un changement des règles** (les deux cibles de l'étape 5, mesurées de nouveau avec cette étape ; la méthode de
-l'[étape 5](#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13) :
+l'[étape 5](#règles-étape-5--les-changements-des-règles-en-arrière-plan-2026-11-13) :
 `CHANGE=one reason.exe change 10 256 8 2 with|without DIR`, le changement d'une règle sur LUBM-10 pendant que 256
 clients écrivent ; 7 paires pour chaque binaire, en une seule prise du lock ; et `reason.exe define 10`, les 94 règles
 définies en mémoire sur le chargement, 5 tours) :
@@ -783,7 +783,7 @@ l'étalement des paires du 0,88 de l'étape 5).
 
 ## Règles, étape 5 : les changements des règles en arrière-plan (2026-11-13)
 
-La cinquième étape du reasoner ([règles](rules.md#changes-of-the-rules-in-the-background)) : un changement des règles ou
+La cinquième étape du reasoner ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) : un changement des règles ou
 de l'ontologie calculé à côté du writer, mis à jour des groupes écrits entre-temps, installé comme un seul groupe ; des
 tours de 20 000 faits et plus déduits sur plusieurs domains dans les groupes que le writer raisonne lui-même.
 
@@ -858,7 +858,7 @@ model checker de TLA+, qui parcourt tous les états du modèle) : atteint ([test
 
 ## Règles, étape 2 : les closures et la forme du W3C (2026-11-12)
 
-La deuxième étape du reasoner ([règles](rules.md#transitive-closures-the-closure-module)) : les propriétés transitives
+La deuxième étape du reasoner ([règles](rules.md#les-transitive-closures--le-closure-module)) : les propriétés transitives
 tenues par un closure module (un module qui calcule la transitive closure, tous les couples reliés par un chemin, sans
 passer par la règle), et les règles sur une propriété variable dépliées sur les faits de l'ontologie.
 
@@ -875,7 +875,7 @@ le disque (`closure KIND trp|linear DIR`) : les 99 999 arêtes de la hiérarchie
 les autres (moins de 20 000 opérations) le chemin ordinaire. « Le module » est le temps propre du closure module (ses
 faits trouvés et rangés pour le groupe), comme le prototype mesurait son module ; « raisonnement » est le tout dans le
 groupe (avec, pour un grand groupe, la construction du working set de ses faits). Des données de la forme de LUBM comme
-dans [Règles (2026-11-08)](#rules-2026-11-08) : `mat 10 rules …` les 94 règles écrites une par axiome, `w3c 10 …`
+dans [Règles (2026-11-08)](#règles-2026-11-08) : `mat 10 rules …` les 94 règles écrites une par axiome, `w3c 10 …`
 l'ontologie sous forme de faits et les 10 règles du W3C dont elle a besoin (cax-sco, scm-sco, prp-dom, prp-rng,
 prp-spo1, prp-inv1, prp-inv2, prp-trp, cls-svf1, cls-int1 sur deux membres), que le moteur déplie.
 Commandes : `reason.exe closure hierarchy|deep|dag|chain trp|linear DIR`, `reason.exe mat 10 rules bulk|groups DIR|-`,

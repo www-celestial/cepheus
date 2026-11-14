@@ -459,7 +459,7 @@ changement innocent de l'installation peut changer un résultat mesuré, [Mytkow
   paie (une réservation avec une expiration) est la réponse habituelle ; c'est un autre groupe, avec son propre
   `Expect`.
 - Une seule machine prend les écritures : si elle est perdue, la vente s'arrête jusqu'à son retour, ou jusqu'à ce
-  qu'une [replica](server.md#a-replica) (une copie de la base qui suit le journal du serveur) soit promue à la main
+  qu'une [replica](server.md#une-replica) (une copie de la base qui suit le journal du serveur) soit promue à la main
   (les ventes confirmées pendant son retard sont alors perdues ; Raft, l'étape 7, un protocole où un groupe n'est
   confirmé qu'une fois copié sur une majorité de serveurs, attendrait cette majorité).
 - Le paiement est hors de la base : une vente confirmée par Cepheus et un paiement refusé par la banque doivent être

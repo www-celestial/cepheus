@@ -176,10 +176,10 @@ par morceaux.
 Pour borner la mémoire, écrivez un chargement en groupes de quelques centaines de milliers de faits, depuis deux
 threads, pour que l'un construise son groupe suivant pendant que le writer prend celui de l'autre : chaque groupe est
 atomique (G2 tient pour un groupe, pas pour le chargement), les runs des groupes restent côte à côte jusqu'à ce que 16
-d'entre eux fusionnent en une seule passe ([architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)),
+d'entre eux fusionnent en une seule passe ([architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)),
 et `snapshot` à la fin laisse un seul run. À 10 millions de faits en groupes de 5 000 clients (environ 415 000 faits)
 par deux threads : 9,8 s pour confirmer tous les groupes, 3,2 s pour le snapshot (le merge de toute la base en un seul
-run), un pic de 292 MB avec un cache de 64 MB ([benchmarks](benchmarks.md#chunked-loads-2026-11-12-at-10-million-facts)) ;
+run), un pic de 292 MB avec un cache de 64 MB ([benchmarks](benchmarks.md#les-chargements-par-morceaux-2026-11-12-à-10-millions-de-faits)) ;
 jusqu'au snapshot, une lecture visite chaque run (à 1 million de faits, un client par e-mail sur 8 runs 1,40 µs, sur
 2 runs 0,73).
 
@@ -254,21 +254,21 @@ dans ce groupe ce qu'elle donne sur toute la base, dans les limites du budget d'
 vérifiée sur toute la base. Un nom qui est celui d'une propriété est `Invalid`. Si un autre writer a pris un numéro
 entre-temps, ou si un groupe écrit entre-temps a gêné le changement, `define` relit le schéma et réessaie
 (`Conflict`). Dans une base sur le disque, le changement est calculé à côté du writer et revient une fois installé
-([règles](rules.md#changes-of-the-rules-in-the-background)) : un `write` envoyé entre-temps peut être placé avant lui.
+([règles](rules.md#les-changements-des-règles-en-arrière-plan)) : un `write` envoyé entre-temps peut être placé avant lui.
 
 La propriété `p` d'un pattern est l'id d'une propriété, ou `prop_var k` (un nombre négatif) pour la variable `?k` : un
 autre pattern du corps, dont la propriété est une constante, a `?k` pour chose ou pour valeur. Une valeur lue sous une
 propriété variable a le type de cette propriété ; une tête qui donne un fait que sa propriété ne peut pas prendre
 refuse le groupe (erreurs `Invalid "rule R gives …"`). Ces règles tournent dépliées sur les faits de leurs petites
-relations ([règles](rules.md#specialisation-by-small-relations)) ; les questions gardent des propriétés constantes.
+relations ([règles](rules.md#la-spécialisation-par-petites-relations)) ; les questions gardent des propriétés constantes.
 
 Un pattern `[c, every l, m]` est la liste d'un **template** (une règle écrite une fois pour tous les membres d'une
 liste) : « pour chaque valeur m de la propriété l de c », les patterns qui nomment m écrits une fois pour chaque
 membre, les variables qu'eux seuls tiennent nouvelles dans chaque copie (cls-int1 et prp-key d'OWL 2 RL, les règles du
 W3C pour raisonner sur des ontologies, des descriptions de classes, de propriétés et de leurs liens) ; le writer le déplie sur les faits de l, donc une écriture de l est un
-changement des règles, et aucune règle ne peut donner l ([templates](rules.md#templates-rules-over-lists)). Une tête
+changement des règles, et aucune règle ne peut donner l ([templates](rules.md#templates--des-règles-sur-des-listes)). Une tête
 `[x, cepheus/same, y]` (`Schema.p_same`, la propriété système 6) fait de x et y une seule chose
-([égalité](rules.md#equality-classes-of-equal-things)).
+([égalité](rules.md#légalité--des-classes-de-choses-égales)).
 
 `undefine db names` retire en un seul groupe les règles de ces noms : leurs définitions retirées, et les faits qu'elles
 seules dérivaient avec elles (un nom qui n'est pas une règle est ignoré).
@@ -344,7 +344,7 @@ record (la valeur de type t qu'il rend). `Owl.rl o` est la liste des règles (`o
 une. `all_different`, `disjoint_classes` et `disjoint_properties` donnent les opérations qui écrivent ces axiomes
 n-aires (qui portent sur n choses à la fois) sous forme de leurs paires. `same v x` est la classe des choses égales à
 x, par id, x compris ([x] quand aucune autre chose ne lui est égale) ; `get`, `values`, `things` et les questions
-lisent une chose qu'ils nomment comme le représentant de sa classe. Le tout : [OWL 2 RL](rules.md#owl-2-rl-a-library-of-rules).
+lisent une chose qu'ils nomment comme le représentant de sa classe. Le tout : [OWL 2 RL](rules.md#owl-2-rl-une-bibliothèque-de-règles).
 
 ## Lire
 
@@ -514,8 +514,8 @@ Ses noms sont dans le module `Question`, pour que `open Cepheus` n'apporte que `
 qu'il apportait déjà (le `Not` ou le `Pattern` propre d'un programme reste le sien) ; `Question.[ ... ]` l'ouvre pour
 une liste d'items. `ask v q` répond à une question qui a `Not`, `Or`, `In` et `Prefix` à côté de ses patterns et de ses
 intervalles, et rend ses lignes triées, coupées et découpées en pages : le même sens et les mêmes bornes que depuis
-Cesia ([Not, Or et In](cesia.md#not-or-and-in), [Prefix](cesia.md#prefix-the-start-of-a-text),
-[pages](cesia.md#sort-limit-and-after-pages)). `give` nomme les variables de chaque ligne (vide : chaque variable de la
+Cesia ([Not, Or et In](cesia.md#not-or-et-in), [Prefix](cesia.md#prefix--le-début-dun-texte),
+[pages](cesia.md#sort-limit-et-after--des-pages)). `give` nomme les variables de chaque ligne (vide : chaque variable de la
 question) ; le `col` d'une clé est une colonne de `give` ; `limit` 0 rend toutes les lignes ; `after` est une ligne des
 colonnes de `give`. `find` et `query` ne changent pas : une question de patterns et d'intervalles, avec chaque
 variable donnée, a les lignes que rend `find`.

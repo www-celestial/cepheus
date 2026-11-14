@@ -47,7 +47,7 @@ nouveau, écrire à nouveau (la boucle habituelle de l'optimistic concurrency, l
 
 
 Un changement des règles ou de l'ontologie (les faits qui décrivent les classes et les propriétés, que lisent les
-règles) calculé en arrière-plan ([règles](rules.md#changes-of-the-rules-in-the-background)) répond `Conflict` quand un
+règles) calculé en arrière-plan ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) répond `Conflict` quand un
 groupe écrit entre-temps a interféré ; `define` réessaie de lui-même :
 
 | message | quand |
@@ -200,7 +200,7 @@ en octets depuis le début du segment :
 | `group N uses property P, which does not exist` | le replay a rencontré un changement d'une propriété qu'aucun groupe n'a déclarée |
 
 Au démarrage d'un serveur, depuis son commit buffer (l'endroit où le serveur copie les frames de plusieurs bases pour
-les confirmer par un seul fsync : [le serveur](server.md#many-databases-one-fsync-the-commit-buffer) ; `FILE` est
+les confirmer par un seul fsync : [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer) ; `FILE` est
 `DATA/server.wal.1` ou `.2`) :
 
 | message | ce qu'il veut dire |
@@ -209,11 +209,11 @@ les confirmer par un seul fsync : [le serveur](server.md#many-databases-one-fsyn
 | `FILE: unknown format F` | un en-tête qui passe la vérification, d'un autre format que 1 |
 | `server.wal.N: damaged round at offset O (written whole)` | un tour (une écriture du buffer confirmée par un fsync) qui ne passe pas la vérification, dans le fichier le plus ancien, ou suivi d'un tour écrit en entier : il a été durable, il est maintenant endommagé |
 | `FILE: round R at O does not hold its entries` / `has bytes after its entries` | un tour qui passe la vérification mais dont les entrées ne font pas exactement son corps |
-| `server.wal.1 holds confirmed writes of databases this server did not open (ids ...): open them with it once` | le buffer contient des frames d'une base que `cluster.toml` ne liste plus : la rajouter, démarrer le serveur, l'arrêter ([opérations](operations.md#a-database-of-a-server)) |
+| `server.wal.1 holds confirmed writes of databases this server did not open (ids ...): open them with it once` | le buffer contient des frames d'une base que `cluster.toml` ne liste plus : la rajouter, démarrer le serveur, l'arrêter ([opérations](operations.md#une-base-dun-serveur)) |
 | `journal: segment SEG, where the commit buffer's frames go, is missing` | le run le plus récent reprend dans un segment qui n'est pas là |
 | `SEG: the frame at O (group G) does not check, before the commit buffer's frames from group N` | une frame que le buffer ne contient pas, avant des frames qu'il contient : elle a été forcée, et elle est endommagée |
 | `journal: the commit buffer's frame of group G does not start where a frame does (group N)` | les frames du journal et celles du buffer ne s'alignent pas |
-| `SEG: the frame at O is not the one the commit buffer holds for group G (the database was written without its server's buffer after a crash)` | une autre frame qui passe la vérification est là où va celle du buffer : une version sans le buffer a ouvert la base après un crash et y a écrit ; elle n'est jamais écrasée ([opérations](operations.md#a-database-of-a-server)) |
+| `SEG: the frame at O is not the one the commit buffer holds for group G (the database was written without its server's buffer after a crash)` | une autre frame qui passe la vérification est là où va celle du buffer : une version sans le buffer a ouvert la base après un crash et y a écrit ; elle n'est jamais écrasée ([opérations](operations.md#une-base-dun-serveur)) |
 
 Depuis `verify` seulement (une lecture complète est stricte : la recovery répare ceux-ci, donc après elle ce sont des
 dommages) :
@@ -266,7 +266,7 @@ premier échec).
 | erreur | message | quand | que faire |
 |---|---|---|---|
 | `Busy` | `DIR is open in another process` | un autre processus tient `DIR/lock`, ou ce processus a déjà la base ouverte, sous ce chemin ou n'importe quel autre qui nomme le même répertoire (un lien symbolique, `DIR/.`, `x/../DIR`) | fermer l'autre ; un seul moteur par base |
-| `Busy` | `DIR was written through a server's commit buffer and not closed cleanly: its newest writes may be in the server's DATA/server.wal.1 or .2 alone; start the server on its data directory, which writes them into the journal, and stop it` | `open_` dans le processus même d'un programme, d'une base que tenait un serveur quand il a crashé (`DIR/shared` et pas de `DIR/closed`) | démarrer le serveur et l'arrêter ; la base s'ouvre ensuite n'importe où ([opérations](operations.md#a-database-of-a-server)) |
+| `Busy` | `DIR was written through a server's commit buffer and not closed cleanly: its newest writes may be in the server's DATA/server.wal.1 or .2 alone; start the server on its data directory, which writes them into the journal, and stop it` | `open_` dans le processus même d'un programme, d'une base que tenait un serveur quand il a crashé (`DIR/shared` et pas de `DIR/closed`) | démarrer le serveur et l'arrêter ; la base s'ouvre ensuite n'importe où ([opérations](operations.md#une-base-dun-serveur)) |
 | `Closed` | `the database is closed` | `write` ou `snapshot` après `close` | ouvrir la base à nouveau |
 
 ## Exceptions
@@ -326,11 +326,11 @@ valeur `result.Err({Kind: "cepheus", Code, Message})`, avec les codes en minuscu
 | `invalid` | `an Or of one pattern that differs only in its value is In's case: write In(x, [...]) on the pattern's variable` | un `Or` qui est un `In` | `cepheus.In` (une seule façon de l'écrire) |
 | `invalid` | `variable N is in no pattern of the question: it may be the own of one Not or one Or only`; `variable N is a Not's or an Or's own: Give and Sort take the question's variables`; `a question needs a pattern outside Not` | une variable partagée par deux Not, donnée, ou une question faite de Not seulement | la lier par un pattern de la question |
 | `invalid` | `In needs values of the variable's type (a T), not V`; `a variable of In appears in no pattern` | `In` avec des valeurs d'un autre type | des valeurs du type de la variable |
-| `invalid` | `this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2` | une question qui les utilise, sur une connexion à un serveur d'une version antérieure | mettre à jour le serveur ([mises à jour](production.md#upgrades)) |
-| `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | un groupe avec `cepheus.Incr`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur ([mises à jour](production.md#upgrades)) |
+| `invalid` | `this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2` | une question qui les utilise, sur une connexion à un serveur d'une version antérieure | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
+| `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | un groupe avec `cepheus.Incr`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
 | `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` sur un autre type, un préfixe vide ou trop long | une variable texte que donne un pattern |
-| `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | les bornes d'une question ([limites](limits.md#questions)) | demander page par page, découper la liste, ou poser plusieurs questions |
-| `too_large` | `the question passed the server's budget of N candidates: ask a narrower one, or several` | une question dont le join (la jointure des patterns) énumère plus que le budget du serveur ([limites](limits.md#questions)) ; un watch (une question vivante, tenue à jour) qui le dépasse à une frame se termine par elle | une question plus étroite : plus de constantes, un intervalle, un Limit sur le chemin de l'index |
+| `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | les bornes d'une question ([limites](limits.md#les-questions)) | demander page par page, découper la liste, ou poser plusieurs questions |
+| `too_large` | `the question passed the server's budget of N candidates: ask a narrower one, or several` | une question dont le join (la jointure des patterns) énumère plus que le budget du serveur ([limites](limits.md#les-questions)) ; un watch (une question vivante, tenue à jour) qui le dépasse à une frame se termine par elle | une question plus étroite : plus de constantes, un intervalle, un Limit sur le chemin de l'index |
 | `invalid` | `a watch keeps every row of its question: Sort, Limit and After are for Find` | `Watch` avec Sort, Limit ou After | suivre la question sans eux, et trier les lignes en Cesia (`list.SortBy`) |
 | `invalid` | `H is reached over the network: give the cluster's certificate authority, ca = "/etc/cepheus/ca.pem"` | Connect par TCP sans `ca` | le `ca.pem` du cluster (créé par `cepheus cluster init`) |
 | `invalid` | `a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server` | un Fork d'une base atteinte par le réseau | faire un fork de `cepheus.Empty`, ou tourner sur la machine du serveur |
@@ -376,7 +376,7 @@ grandi d'un seuil de plus. D'autres lignes viennent du writer et du commit buffe
 | `cepheus: FILE reloaded: N tokens` / `cepheus: FILE not reloaded: MSG` | tokens.toml a changé ; un fichier qui ne se lit pas n'est pas pris, le serveur garde les tokens qu'il avait |
 | `cepheus: database NAME: the sessions could not be saved: MSG` | le checkpoint des sessions a échoué (une erreur de disque) : l'ancien reste, et le démarrage suivant lit davantage du journal |
 | `cepheus: stopping` / `cepheus: stopped` | SIGTERM ou SIGINT : l'arrêt du [serveur](server.md#démarrage-arrêt-crash) |
-| `cepheus: connection N (token T), request I of kind K failed: EXN` | une requête a rencontré ce que le serveur n'attendait pas (un bug, la mémoire épuisée) : elle a reçu la réponse `internal` et sa connexion a été fermée ([le serveur](server.md#a-request-that-makes-the-server-fail)). EXN est le texte de l'exception, coupé à 300 octets, chaque octet hors de l'ASCII imprimable écrit `\ddd` |
+| `cepheus: connection N (token T), request I of kind K failed: EXN` | une requête a rencontré ce que le serveur n'attendait pas (un bug, la mémoire épuisée) : elle a reçu la réponse `internal` et sa connexion a été fermée ([le serveur](server.md#une-requête-qui-fait-échouer-le-serveur)). EXN est le texte de l'exception, coupé à 300 octets, chaque octet hors de l'ASCII imprimable écrit `\ddd` |
 | `cepheus: connection N (token T) failed: EXN` | la même chose dans un autre thread de la connexion (la réponse à une écriture, un push, un message que le serveur envoie sans demande) ou dans sa boucle de lecture : `internal` sur la requête d'id 0, puis la connexion se ferme |
 | `cepheus: a watched question at a frame failed: EXN` | une question suivie a échoué à une frame : ses watches se terminent par `internal`, les autres questions continuent |
 | `cepheus: the watches of a database failed: EXN` | le hub (le thread qui calcule les questions vivantes d'une base) a échoué hors d'une question : chaque watch de la base se termine par `internal`, et un nouveau watch part de l'état de la frame |

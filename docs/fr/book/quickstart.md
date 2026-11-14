@@ -8,14 +8,14 @@ tourner en production : [le guide de production](production.md).
 ## Ce qu'il faut
 
 - Linux sur x86-64 ou arm64, avec l'instruction CRC-32C du processeur (un CRC est une somme de contrôle : un nombre
-  calculé sur des octets, qui change dès qu'un octet change) ([limites](limits.md#files-and-the-platform)).
+  calculé sur des octets, qui change dès qu'un octet change) ([limites](limits.md#les-fichiers-et-la-plateforme)).
 - OCaml 5 avec dune (l'outil de compilation d'OCaml), un compilateur C, et les en-têtes d'OpenSSL 3 (le package
   `libssl-dev` sur Debian et Ubuntu, `openssl-devel` sur Fedora ; un package est du code ou un logiciel groupé sous un
   nom, qui s'installe d'un coup).
 - Pour le programme Cesia : Cesia compilé depuis ses sources avec ce même OCaml (le README de Cesia, section « From the
   sources »), ici dans `~/cesia`. Le **moteur** du package, la partie OCaml du client, est compilé contre l'interface
   native du Cesia qui le chargera (le fichier compilé qui décrit ce que Cesia offre au code OCaml qu'il charge)
-  ([le package](cesia.md#the-package)), et une release de Cesia (une version publiée) ne contient pas encore cette
+  ([le package](cesia.md#le-package)), et une release de Cesia (une version publiée) ne contient pas encore cette
   interface.
 
 ## 1. Compiler et installer
@@ -67,7 +67,7 @@ Le token lui-même est allé dans `~/shop/app.token` : le serveur n'en garde que
 partir de lui, qui ne permet pas de le retrouver), il n'est donc montré qu'une fois. Le serveur écoute sur un socket
 Unix dans `~/shop/run` (un canal du noyau entre deux programmes d'une même machine, nommé par un chemin : pour les
 programmes de cette machine) et sur le port TCP 7400 avec TLS (pour les autres machines). Chaque clé de `cluster.toml`
-et chaque commande : [le serveur](server.md#running-a-server).
+et chaque commande : [le serveur](server.md#faire-tourner-un-serveur).
 
 ## 3. Un projet pour le programme
 
@@ -144,15 +144,15 @@ Ce qu'il a fait :
 
 - `cepheus.Kind` nomme une sorte de chose et ses champs (c'est un kind) ; `Connect` déclare dans la base les propriétés
   qui lui manquent (`task/Title`, `task/Done` ; une propriété est un attribut nommé et typé d'une chose), en une seule
-  écriture ([kinds](cesia.md#kinds-and-the-values-they-hold)).
+  écriture ([kinds](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)).
 - Chaque `Insert` et chaque `Update` est un **groupe** : une écriture de plusieurs faits (un fait est un triplet chose,
   propriété, valeur), tout ou rien, qui reçoit sa réponse une fois qu'elle est sur le disque du serveur, et que
   l'historique garde avec `by` et `why` ([Insert, Get, Update](cesia.md#insert-get-update)).
 - `Find` est une question : les choses dont `Done` est faux, avec leur titre. Ses patterns (les triplets de la question)
   sont des faits qui doivent être vrais, ses variables sont les paramètres de la fonction
-  ([questions](cesia.md#find-questions)).
+  ([questions](cesia.md#find--les-questions)).
 - `--allow native=cepheus,env` permet au programme de charger le moteur du package et de lire les deux variables de son
-  environnement ([la permission](cesia.md#the-package)).
+  environnement ([la permission](cesia.md#le-package)).
 
 Relancez-le : il ajoute deux tâches de plus, et la question trouve les deux qui ne sont pas terminées :
 
@@ -193,7 +193,7 @@ database.main.watches: 0
 
 Huit groupes : la description que le système fait de ses propriétés, la déclaration des deux propriétés du kind, et
 trois écritures pour chaque exécution du programme. Ce que veut dire chaque ligne, et lesquelles surveiller :
-[le guide de production](production.md#what-to-watch).
+[le guide de production](production.md#ce-quil-faut-surveiller).
 
 Arrêtez le serveur, redémarrez-le, et lancez le programme une troisième fois :
 
@@ -209,7 +209,7 @@ cepheus: ready in 1.7 ms: main at group 8; socket /home/you/shop/run/.s.cepheus.
 Ok([{Task: 65537, Title: "Read the guide"}, {Task: 65539, Title: "Read the guide"}, {Task: 65541, Title: "Read the guide"}])
 ```
 
-Les groupes étaient sur le disque quand chaque écriture a reçu sa réponse (G1, [garanties](guarantees.md#g1-durability)) ;
+Les groupes étaient sur le disque quand chaque écriture a reçu sa réponse (G1, [garanties](guarantees.md#g1-durabilité)) ;
 un arrêt propre a fermé la base, donc le démarrage n'a rien eu à rejouer (le replay : relire les groupes du journal, le
 fichier où la base écrit chaque groupe d'abord, pour refaire l'état).
 

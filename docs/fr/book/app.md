@@ -78,7 +78,7 @@ take = ["src/browser"]
 Ni l'une ni l'autre n'a encore de release marquée d'un tag (une version publiée), donc `cesia pkg install` ne peut pas
 aller les chercher : `tools/deps.sh` fait ce qu'il ferait, à partir des deux checkouts. Il copie le package Cesia de
 Cepheus et son **moteur** (la partie OCaml du client, compilée avec le checkout de Cepheus,
-[le package](cesia.md#the-package)) dans `deps/www-celestial/cepheus`, le `src/browser` de Ceti dans
+[le package](cesia.md#le-package)) dans `deps/www-celestial/cepheus`, le `src/browser` de Ceti dans
 `deps/www-celestial/ceti`, et écrit `cesia.lock`, l'empreinte de chaque fichier, que Cesia vérifie avant de charger un
 fichier. Sans `CETI`, il n'installe que Cepheus : ce qu'il faut à l'application pour tourner.
 
@@ -116,7 +116,7 @@ sed -i 's/^name = "main"/name = "invoices"/' ~/invoices-db/cluster.toml
 ```
 
 L'application présente au serveur deux **tokens**, les secrets qui donnent des droits sur une base
-([droits](server.md#rights-g16)) : le sien, qui écrit ; et celui du comptable, qui ne lit et n'ajoute que les kinds
+([droits](server.md#les-droits-g16)) : le sien, qui écrit ; et celui du comptable, qui ne lit et n'ajoute que les kinds
 `invoice` et `line` (un kind regroupe sous des noms de champs les propriétés d'une sorte de chose ; la base stocke des
 faits, des triplets chose, propriété, valeur, où une chose est un numéro et une propriété un attribut nommé et typé), et
 `counter`, qui numérote les factures :
@@ -146,7 +146,7 @@ chaque requête d'un comptable lit et écrit par le second, donc une page qui mo
 refusée deux fois, par l'application (un 403, le code HTTP « interdit ») et, si l'application avait un bug, par la base
 elle-même (`denied`). La protection ne repose pas sur le seul code de l'application. Le prix : un token qui a des droits
 par kind ne lit jamais dans la mémoire même du programme (ses lectures vont au serveur par son socket, le canal du noyau
-qui le relie au serveur : [droits](server.md#rights-g16)), ce que montrent les mesures plus bas.
+qui le relie au serveur : [droits](server.md#les-droits-g16)), ce que montrent les mesures plus bas.
 
 L'application lit ses réglages dans son environnement :
 
@@ -158,7 +158,7 @@ export CEPHEUS_TOKEN=$(cat ~/invoices-db/web.token) CEPHEUS_BOOKS_TOKEN=$(cat ~/
 ## 3. Les kinds, la règle et la contrainte
 
 `src/invoices/kinds.ce` déclare ce que tient la base. Un **kind** est une sorte de chose et ses champs ; chaque champ
-est une propriété de la base, comme `invoice/Total` ([kinds](cesia.md#kinds-and-the-values-they-hold)) :
+est une propriété de la base, comme `invoice/Total` ([kinds](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)) :
 
 ```text
 Client = cepheus.Kind("client", {
@@ -185,7 +185,7 @@ Les choix qu'il contient :
 - **`BillTo`** est le nom du client tel qu'il était quand la facture a été faite, comme le garde une vraie facture : le
   comptable, qui n'a pas le droit de lire les clients, voit quand même à qui chaque facture est adressée.
 - **`Search`** contient un nom en minuscules. `cepheus.Prefix` compare des octets
-  ([Prefix](cesia.md#prefix-the-start-of-a-text)), donc une recherche qui ignore la casse garde un champ sous la forme
+  ([Prefix](cesia.md#prefix--le-début-dun-texte)), donc une recherche qui ignore la casse garde un champ sous la forme
   qu'elle cherche. `text.Lower` ne change que A à Z ; le `Lower` de l'application (`check.ce`) met aussi en minuscules
   les lettres accentuées de Latin-1 (le jeu de caractères des langues d'Europe de l'Ouest), pour que « él » trouve
   « Élodie ».
@@ -196,7 +196,7 @@ Les choix qu'il contient :
 - **`Overdue`** n'est jamais écrit par l'application : la base le dérive. Chaque client a un **`Name`** (`ClientForm` le
   vérifie) : un client supprimé n'en a pas.
 
-Les deux **règles** ([les règles depuis Cesia](cesia.md#rules)) :
+Les deux **règles** ([les règles depuis Cesia](cesia.md#règles)) :
 
 ```text
 Overdue = cepheus.Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Status, "late"]], Then: [c, Client.Overdue, true]})
@@ -246,7 +246,7 @@ environ 30 KB), et un curseur de page (la ligne d'où reprend la page suivante, 
 
 `src/invoices/invoices.ce`. Une facture et ses lignes forment **un seul groupe**, tout ou rien : `cepheus.New(k)` nomme
 la k-ième chose nouvelle du groupe, donc les lignes pointent vers la facture avant qu'elle ait un id
-([Write](cesia.md#write-groups-of-facts-all-or-nothing)) :
+([Write](cesia.md#write--des-groupes-de-faits-tout-ou-rien)) :
 
 ```text
 defn AddInvoice(f, billTo, by, db)
@@ -268,7 +268,7 @@ end
   numéro et écrire ce numéro plus un ne conviendrait pas : deux requêtes qui le lisent en même temps prennent le même,
   et l'une d'elles doit réessayer (50 à la fois : 2 905 essais sur 4 200 ont échoué). Le numéro est plutôt le suivant
   du compteur, que la base prend dans le groupe qui crée la facture (`cepheus.Incr`,
-  [Write](cesia.md#write-groups-of-facts-all-or-nothing)) : des groupes qui comptent en même temps n'entrent jamais en
+  [Write](cesia.md#write--des-groupes-de-faits-tout-ou-rien)) : des groupes qui comptent en même temps n'entrent jamais en
   conflit et ne sautent jamais un numéro, un groupe refusé n'en prend aucun, et des factures créées en même temps
   partagent les fsync du serveur (l'appel système qui attend que les octets écrits soient vraiment sur le disque) au
   lieu de s'attendre les unes les autres.
@@ -297,7 +297,7 @@ en même temps qu'il met fin aux sessions expirées.
 ## 6. Lire : pages, recherche et filtres
 
 `src/invoices/paging.ce` donne une page de n'importe quelle question triée. Une page, ce sont les lignes **après** une
-ligne, dans l'ordre de la question (`After`, [pages](cesia.md#sort-limit-and-after-pages)), jamais « sauter les 4 000
+ligne, dans l'ordre de la question (`After`, [pages](cesia.md#sort-limit-et-after--des-pages)), jamais « sauter les 4 000
 premières » : une page à 50 000 lignes de profondeur coûte ce que coûte la première, et une ligne écrite entre deux
 pages n'en déplace aucune. La page d'avant est la même question avec chaque clé de `Sort` inversée, après la première
 ligne de la page ; `Page` demande une ligne de plus qu'il n'en montre, pour savoir s'il y a une page suivante. Le
@@ -323,7 +323,7 @@ rows = cepheus.Find(7, (i, no, b, d, u, s, t) -> {
 ```
 
 Une page de factures prend environ 1 ms de cette façon, par HTTP, triée selon n'importe lequel de ses ordres, filtrée
-ou cherchée (une requête prenait de 9 à 69 ms avec une seule question) : voir [ce que cela coûte](#14-what-it-costs).
+ou cherchée (une requête prenait de 9 à 69 ms avec une seule question) : voir [ce que cela coûte](#14-ce-que-cela-coûte).
 La liste des clients fait de même pour leurs e-mails.
 
 **La recherche à mesure qu'on tape** est un `Prefix` sur le nom en minuscules ou sur l'e-mail, l'un ou l'autre, avec
@@ -349,7 +349,7 @@ liste sans recherche est une question de cinq variables, et avec une recherche, 
 ## 7. Des tests sur des forks
 
 Un **fork** est une base dans la mémoire du programme, avec toutes les vérifications d'une vraie, règles comprises, et
-sans serveur ([forks](cesia.md#forks)). Chaque test de `src/invoices/store.test.ce` fait un fork de `cepheus.Empty`
+sans serveur ([forks](cesia.md#les-forks)). Chaque test de `src/invoices/store.test.ce` fait un fork de `cepheus.Empty`
 avec les kinds et les règles de l'application :
 
 ```text
@@ -442,7 +442,7 @@ en https `Strict-Transport-Security` (le navigateur n'emploie plus que https pou
 ## 9. Le tableau de bord en direct
 
 Les nombres du tableau de bord sont trois **watches** (des questions vivantes : tenues à jour, leur réponse puis ses
-changements ; [questions vivantes](cesia.md#watch-live-questions)), donnés à la page par `std/live`
+changements ; [questions vivantes](cesia.md#watch--les-questions-vivantes)), donnés à la page par `std/live`
 ([écrans en direct](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#live-screens-stdlive)).
 `live.Route("/live", screen)` les sert ; `screen` tourne quand une page se connecte, trouve son utilisateur par le
 cookie de sa requête, et suit les questions par la base de son rôle, chaque watch prenant fin avec la page
@@ -469,7 +469,7 @@ live.show('payments', rows => { /* the 10 latest, by PaidAt */ })
 Comment un paiement atteint chaque page ouverte : le groupe est écrit et forcé sur le disque du serveur ; le processus
 de l'application, qui suit la base pour ses lectures locales (des lectures dans sa propre mémoire), calcule les
 changements des watches à partir du groupe (les totaux par différence,
-[comment un changement est calculé](cesia.md#watch-live-questions)) et les donne une fois le groupe durable (sur le
+[comment un changement est calculé](cesia.md#watch--les-questions-vivantes)) et les donne une fois le groupe durable (sur le
 disque, à l'abri d'une coupure) ; l'écran de chaque page envoie son changement par son WebSocket ; la page le dessine
 à son prochain rafraîchissement. Toutes les pages qui suivent la même question partagent un seul watch. Un watch ne
 garde ni ordre ni limite, donc « les derniers paiements » suit ceux des dernières 24 heures, et la page garde les 10
@@ -484,7 +484,7 @@ lignes (pas de page : pas de `Limit`), et une pour les dates de paiement de chaq
 Une cellule qui commence par `=`, `+`, `-`, `@`, une tabulation ou un retour chariot reçoit un `'` devant elle, pour
 qu'un tableur n'exécute jamais un nom de destinataire comme une formule (la CSV injection, comme l'appelle l'OWASP, une
 fondation qui recense les failles des applications web). Les 100 000 factures du seed s'exportent en 1,2 s environ (une
-requête), les 11 006 en retard en 114 ms ([ce que cela coûte](#14-what-it-costs)).
+requête), les 11 006 en retard en 114 ms ([ce que cela coûte](#14-ce-que-cela-coûte)).
 
 ## 11. Le faire tourner
 
@@ -587,16 +587,16 @@ rules defined in 0.95 s
 
 Les factures entrent par groupes de 20 000, environ 480 000 faits chacun, de façon à prendre le chemin des grands
 groupes dans la base (un grand groupe : 20 000 opérations ou plus, toutes des ajouts, qui prend un chemin plus rapide ;
-[grands groupes](architecture.md#large-groups)). Quand cette exécution a été mesurée, une contrainte, ou une règle dont
+[grands groupes](architecture.md#grands-groupes)). Quand cette exécution a été mesurée, une contrainte, ou une règle dont
 la tête (le fait qu'elle conclut) est une propriété à une seule valeur, envoyait un grand groupe sur le chemin ordinaire
 du writer (le seul thread, c'est-à-dire fil d'exécution, qui applique les groupes d'une base, un à la fois) ; et
 l'application, démarrée plus haut, avait défini ses règles. Dans une base où elles ne sont pas encore définies, le seed
 les définit après le chargement, en un seul groupe qui dérive sur tout le chargement, et le seed entier prend 4,84 s
-([ce que cela coûte](#14-what-it-costs)) ; ici il a pris 12,5 s. Son `Define` n'avait alors rien à écrire, mais a
+([ce que cela coûte](#14-ce-que-cela-coûte)) ; ici il a pris 12,5 s. Son `Define` n'avait alors rien à écrire, mais a
 attendu, comme première lecture après le chargement, que la copie de la base que garde le programme intègre les groupes
 du chargement. Depuis l'étape 3 du reasoner (la partie du writer qui applique les règles à chaque groupe), le chemin des
 grands groupes vérifie les contraintes (avec leur `Not`) et les têtes à une seule valeur après son point fixe (le moment
-où les règles ne donnent plus rien de nouveau ; [règles](rules.md#large-groups)) : un chargement dans une base qui a les
+où les règles ne donnent plus rien de nouveau ; [règles](rules.md#grands-groupes)) : un chargement dans une base qui a les
 règles de l'application reste sur ce chemin (pas mesuré de nouveau ici).
 
 ## 12. Tests end-to-end dans Firefox
@@ -728,10 +728,10 @@ Stopped [systemd-run] /home/you/cesia/_build/default/src/bin/main.exe run --allo
 `cesia run --workers 4` lance quatre processus derrière un seul port
 ([chaque cœur](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#every-core)). Chacun se connecte à
 Cepheus et garde sa propre copie des pages de la base pour ses lectures locales (chaque lecteur tient son cache :
-[ce que cela coûte](server.md#what-it-costs)), et chacun lance la vérification des retards de chaque minute, que leurs
+[ce que cela coûte](server.md#ce-que-cela-coûte)), et chacun lance la vérification des retards de chaque minute, que leurs
 `Expect` empêchent de s'appliquer deux fois.
 
-**Sauvegardes** : `cepheus-backup` du [guide de production](production.md#backups), pendant que le serveur tourne, puis
+**Sauvegardes** : `cepheus-backup` du [guide de production](production.md#les-sauvegardes), pendant que le serveur tourne, puis
 l'exercice de restauration sur un autre serveur (ici le serveur en service est arrêté d'abord, puisqu'une copie d'une
 base est refusée sur la machine qui fait tourner cette base) :
 
@@ -763,7 +763,7 @@ son chemin, son statut et ses millisecondes ; jamais une query, la partie de l'a
 ni un cookie ni un corps), `request failed` avec le code et le message d'une erreur causée par le serveur,
 `sign-in refused` sans l'identifiant tapé (sinon un mot de passe tapé dans le champ de l'identifiant serait dans le
 log), et `keeping failed` si la vérification des retards de la minute échoue ; côté serveur, ce que dit le [guide de
-production](production.md#what-to-watch).
+production](production.md#ce-quil-faut-surveiller).
 
 ## 14. Ce que cela coûte
 
@@ -783,7 +783,7 @@ qui fabrique les 2,4 millions d'opérations des groupes (une map chacune). Le d�
 remplie : 30,9 ms [30,2 ; 31,7]. Le processus de l'application, de sa commande à son port qui accepte une connexion :
 81,6 ms [80,0 ; 82,2], dont le `Ms` de sa ligne de log (ses deux connexions, les règles, libsodium) fait de 44 à 54 ms,
 et le reste est le démarrage de Cesia, la lecture du code de l'application et le premier chargement du moteur (13 ms,
-[ce que cela coûte](cesia.md#what-it-costs)).
+[ce que cela coûte](cesia.md#ce-que-cela-coûte)).
 
 **Les pages**, en ms, avec 1 client (un programme qui envoie les requêtes l'une après l'autre), puis 50 à la fois :
 
@@ -852,7 +852,7 @@ après l'autre :
 
 Le changement atteint d'habitude la page moins d'une milliseconde après la réponse du writer : le processus de
 l'application l'a calculé à partir du groupe pendant que le serveur forçait ce groupe sur le disque, et l'a donné une
-fois le groupe durable ([ce que coûte un changement](cesia.md#what-it-costs)).
+fois le groupe durable ([ce que coûte un changement](cesia.md#ce-que-cela-coûte)).
 
 **À côté des géants : la part de la base seule.** Le même seed dans PostgreSQL 18.6 (`bench/giants/load.sql` : les mêmes
 tirages, les index dont les pages ont besoin, des commits durables, comme par défaut ; un commit est la validation d'une

@@ -150,7 +150,7 @@ admin = true
   (`status`) ; aucun droit sur les données à lui seul.
 - **Les droits par kind**, `{ read = [...], add = [...] }` : le droit de lire, et d'ajouter, seulement les kinds
   nommés. Le **kind** d'une propriété (sa sorte) est son nom jusqu'à son premier `/` : `invoice/Total` est du kind
-  `invoice`, comme le nomme le `cepheus.Kind("invoice", ...)` du client Cesia. Voir [les droits](#rights-g16).
+  `invoice`, comme le nomme le `cepheus.Kind("invoice", ...)` du client Cesia. Voir [les droits](#les-droits-g16).
 - Le serveur relit le fichier dans la seconde qui suit un changement (de sa date de modification, de sa taille ou de
   son inode) ; un token retiré, ou dont les droits ont été réduits, prend effet à la requête suivante de chaque
   connexion qui le tient (G16). Un fichier qui ne se lit pas comme du TOML valide n'est pas chargé (le serveur dit
@@ -197,7 +197,7 @@ passes du garbage collector du runtime OCaml depuis le démarrage ; le garbage c
 mémoire que plus rien n'utilise), `stopping`, et pour chaque base `database.NAME.group` (son groupe durable le plus
 récent), `.facts` et `.resent` (les écritures qui ont reçu une seconde fois leur réponse, tirée de la table des
 sessions, G14) ; `role` et les lignes des replicas (une replica est un second serveur qui garde une copie des bases
-d'un autre : [une replica](#what-a-replica-serves)).
+d'un autre : [une replica](#ce-que-sert-une-replica)).
 
 ### Les fichiers du serveur
 
@@ -230,7 +230,7 @@ SOCKET/.s.cepheus.PORT     the Unix socket, made at start, removed at stop
 
 **Démarrage.** Lire et vérifier `cluster.toml` et `tokens.toml` ; prendre le lock du répertoire des données (un second
 serveur sur les mêmes données est refusé : G9 étendue au serveur) ; lire les fichiers du commit buffer
-([plus bas](#many-databases-one-fsync-the-commit-buffer)) ; ouvrir chaque base, en parallèle (un domain chacune, au
+([plus bas](#plusieurs-bases-un-seul-fsync--le-commit-buffer)) ; ouvrir chaque base, en parallèle (un domain chacune, au
 plus `domains` à la fois), chacune avec sa recovery (ce que fait une ouverture après un crash pour retrouver le
 dernier état durable, [exploitation](operations.md#louverture-et-la-recovery)), qui récrit d'abord dans son journal
 les frames (les blocs du journal, écrits chacun d'un seul tenant) que le buffer garde pour elle, et sa table des
@@ -278,14 +278,14 @@ MemoryMax=8G
 **Pourquoi.** Une écriture est confirmée une fois sa frame durable, et rendre des octets durables coûte un **fsync**
 (l'appel système qui ne revient qu'une fois que le disque tient ce qui a été écrit dans un fichier : 3 ms ou plus sur
 le SSD de cette machine). Dans une même base, les écritures qui arrivent pendant qu'un fsync tourne partagent le
-suivant (group commit, [architecture](architecture.md#the-journal-a-write-ahead-log)). D'une base à l'autre, elles ne
+suivant (group commit, [architecture](architecture.md#le-journal--un-write-ahead-log)). D'une base à l'autre, elles ne
 le partageaient pas tant que chaque base forçait son propre journal : 64 bases écrites à la fois faisaient 64 fsyncs
 de 64 fichiers, et une écriture attendait 24,1 ms à la médiane, contre 3,07 ms avec une seule base écrite
 (`sbench.exe mwrite`, $n = 5$, avant le buffer). Les bases de PostgreSQL partagent un seul **WAL** (write-ahead log :
 le fichier où chaque changement est rendu durable avant de compter), si bien que les commits de toutes se groupent.
 
 **Ce qu'il fait.** Le serveur tient un journal à lui, le **commit buffer** (`DATA/server.wal.1` et `.2`,
-`src/wal.ml` ; la disposition de ses octets dans [formats](formats.md#the-servers-files)) :
+`src/wal.ml` ; la disposition de ses octets dans [formats](formats.md#les-fichiers-du-serveur)) :
 
 ```
 database d1: frame -> d1's journal (written, no fsync) --+
@@ -324,17 +324,17 @@ peut finir par un round torn : celui qui était en vol au crash, jamais confirm�
 les frames que le buffer tient pour elle à leur place dans son journal, même là où le page cache (la copie des
 fichiers que le noyau garde en mémoire) les montre déjà (un fsync qui a échoué a pu marquer ces pages clean,
 c'est-à-dire identiques au disque : seule une écriture les rend à nouveau dirty, à écrire,
-[G13](guarantees.md#g13-a-failed-fsync-is-never-trusted)), et les force ; chaque frame placée avant la dernière d'entre
+[G13](guarantees.md#g13-on-ne-se-fie-jamais-à-un-fsync-qui-a-échoué)), et les force ; chaque frame placée avant la dernière d'entre
 elles et que le buffer ne tient pas doit se vérifier (elle a été forcée : sinon `Damaged`) ; la règle propre du journal
 prend ensuite ce qui suit, au plus la seule frame en vol. Puis les deux fichiers sont supprimés et les rounds
 commencent. Un arrêt propre force chaque journal et supprime les fichiers : un démarrage après lui ne lit rien.
 
 **Les pannes.** Une écriture ou un fsync du buffer qui échoue, ou ceux d'un journal à un checkpoint, arrête le
 buffer : chaque écriture suivante échoue avec `Io` et plus rien n'est confirmé
-([G10](guarantees.md#g10-stop-on-a-disk-error)) ; le round qui a échoué est aussitôt retranché de son fichier ; la
+([G10](guarantees.md#g10-arrêt-sur-une-erreur-du-disque)) ; le round qui a échoué est aussitôt retranché de son fichier ; la
 base dont l'écriture a échoué s'arrête, et le serveur sort en moins d'une seconde, comme plus haut. Une base ouverte
 par un serveur est refusée par le propre processus d'un programme après un crash, tant que le serveur n'a pas démarré
-une fois dessus : [exploitation](operations.md#a-database-of-a-server), où le retour à une version antérieure est
+une fois dessus : [exploitation](operations.md#une-base-dun-serveur), où le retour à une version antérieure est
 expliqué aussi.
 
 **Ce qu'il gagne et ce qu'il coûte** (2026-11-12, la machine des autres benchmarks, builds release ; `sbench.exe
@@ -473,13 +473,13 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   `In`, `Prefix`, Sort, Limit ou After est refusée dans le programme (`invalid` : « this server speaks protocol 1: ...
   need a server of protocol 2 ») plutôt qu'envoyée. Un programme de version 1 est servi par un serveur de 2 exactement
   comme avant.
-- **L'ordre** : Sort, Limit et After sur les colonnes du select ([pages](cesia.md#sort-limit-and-after-pages)). Il suit
+- **L'ordre** : Sort, Limit et After sur les colonnes du select ([pages](cesia.md#sort-limit-et-after--des-pages)). Il suit
   le select seulement quand la question en a un, si bien que toute autre question est codée comme avant ; un serveur
   qui ne le connaît pas refuse un tel Find (« bytes after the request ») plutôt que d'y répondre sans trier.
 - Une **opération** : 0 Add, 1 Retract, 2 Expect une valeur, 3 Expect aucune ; puis la chose (en zigzag : un id
   négatif est une nouvelle chose du groupe), la propriété, la valeur. 4 Incr (version 4) : la chose, la propriété,
   `by` (zigzag), puis un octet 0, ou 1 suivi de la chose (zigzag) et de la propriété d'`into`. Un token ajoute un
-  `Incr` quand il peut ajouter au kind du compteur et à celui d'`into` ([les droits](#rights-g16)).
+  `Incr` quand il peut ajouter au kind du compteur et à celui d'`into` ([les droits](#les-droits-g16)).
 - Chaque lecture nomme le groupe de la vue qui lui a répondu, chaque reçu (Receipt, la réponse à une écriture) son
   groupe : un programme peut vérifier ce qu'il a lu contre ce qu'il a écrit.
 
@@ -606,7 +606,7 @@ Chaque réponse est une valeur ou une erreur `{code, message}`. Les codes du mot
 | `invalid` | une requête mal formée (la connexion se ferme), une question qui ne passe pas la vérification, un numéro de série sous le floor de sa session, un why qui commence par le marqueur du serveur, `Follow` sur une connexion qui a des écritures en cours | corriger la requête |
 | `denied` (Follow) | `Follow` sur TCP : les lectures locales sont pour les programmes de la machine du serveur, par son Unix socket | lire à travers le serveur ; le client OCaml le fait de lui-même |
 | `busy` (Follow) | `Follow` quand les fichiers de runs n'ont pas pu être ouverts huit fois de suite (des merges les supprimant entre-temps) | suivre à nouveau : le client OCaml le fait, en moins de 100 ms |
-| `internal` | le serveur a échoué sur une requête, ou dans une autre tâche de la connexion (la réponse d'une écriture, un push), sur ce qu'il n'attendait pas : un bug, ou de la mémoire qui a manqué. Sur l'id de la requête, ou sur l'id 0 ; puis la connexion se ferme, ses écritures en cours recevant d'abord leur réponse ([plus bas](#a-request-that-makes-the-server-fail)) | se reconnecter (le client OCaml le fait) ; signaler la ligne du log du serveur |
+| `internal` | le serveur a échoué sur une requête, ou dans une autre tâche de la connexion (la réponse d'une écriture, un push), sur ce qu'il n'attendait pas : un bug, ou de la mémoire qui a manqué. Sur l'id de la requête, ou sur l'id 0 ; puis la connexion se ferme, ses écritures en cours recevant d'abord leur réponse ([plus bas](#une-requête-qui-fait-échouer-le-serveur)) | se reconnecter (le client OCaml le fait) ; signaler la ligne du log du serveur |
 | `read_only` | `Write`, `Put` ou `Erase` sur une replica ; le message nomme son primary (le serveur qui prend les écritures) et l'adresse du primary | écrire au primary |
 | `denied` (Follow, replica) | `Follow` sur une replica : son état est en retard sur celui de son primary | lire par le socket ; le client OCaml le fait de lui-même |
 | `invalid` (promote) | `promote` (qui fait d'une replica un primary : la promotion) sur un primary, pendant que le primary envoie encore, ou sans son handover (la passation que fait l'arrêt propre du primary) et sans `--force` | arrêter proprement le primary, puis promouvoir ; `--force` une fois qu'il ne peut plus écrire |
@@ -921,7 +921,7 @@ serveur qui prend les écritures), groupe par groupe, dans son propre journal, f
 une seconde copie qui survit à la perte de la machine du primary, un endroit d'où prendre les sauvegardes sans toucher
 au primary, et, à la main, un nouveau primary quand l'ancien a disparu (`cepheus promote`). Elle est **asynchrone** :
 le primary confirme une écriture dès que son propre fsync revient et n'attend jamais une replica, si bien qu'une
-replica a du retard, son lag (mesuré [plus bas](#what-a-replica-costs)), et qu'une écriture confirmée pendant ce lag
+replica a du retard, son lag (mesuré [plus bas](#ce-que-coûte-une-replica)), et qu'une écriture confirmée pendant ce lag
 n'est que sur le primary. Raft (étape 7) attend une majorité avant de confirmer.
 
 ### En mettre une en place
@@ -971,8 +971,8 @@ Le **sender** du primary (l'envoyeur), un thread par replica et par base, lit le
 fichiers le tiennent, frame après frame, octet pour octet avec le CRC de chaque frame, à partir du groupe qui suit le
 plus récent de la replica, et seulement jusqu'au groupe **durable** le plus récent du primary. Il n'envoie jamais une
 frame dont le fsync n'est pas revenu : si ce fsync échouait, le primary s'arrêterait, et son démarrage suivant
-pourrait ne pas garder la frame ([G10](guarantees.md#g10-stop-on-a-disk-error),
-[G13](guarantees.md#g13-a-failed-fsync-is-never-trusted)), laissant à la replica un groupe que le primary n'a pas.
+pourrait ne pas garder la frame ([G10](guarantees.md#g10-arrêt-sur-une-erreur-du-disque),
+[G13](guarantees.md#g13-on-ne-se-fie-jamais-à-un-fsync-qui-a-échoué)), laissant à la replica un groupe que le primary n'a pas.
 Donc **le journal d'une replica est toujours un préfixe des groupes durables de son primary**. Le sender est réveillé
 après chaque frame durable, par la condition que signale déjà le flux des lecteurs locaux : le writer et le syncer ne
 font rien de plus pour lui.
@@ -987,16 +987,16 @@ garde en mémoire une frame par replica, quel que soit le retard de la replica ;
 frames données à son writer et pas encore durables (toujours une frame au moins, jusqu'aux 256 MiB que permet le
 journal).
 
-Le protocole des peers ne passe que par le port peer, dans les frames du [protocole](#framing), kinds 20 à 26 :
+Le protocole des peers ne passe que par le port peer, dans les frames du [protocole](#le-framing), kinds 20 à 26 :
 
 | message | de | contient |
 |---|---|---|
 | `PeerHello` | les deux | la version (1), l'id du cluster, le nom du serveur ; un autre id de cluster est refusé |
-| `Replicate` | replica | la base, son groupe suivant, ses epochs (l'historique de ses promotions, [plus bas](#promotion-by-hand)) ; la réponse : l'id de la base, le groupe le plus récent du primary, ses epochs, ou une erreur (`diverged`, `newer`, `unknown_database`, `not_primary`) |
+| `Replicate` | replica | la base, son groupe suivant, ses epochs (l'historique de ses promotions, [plus bas](#la-promotion-à-la-main)) ; la réponse : l'id de la base, le groupe le plus récent du primary, ses epochs, ou une erreur (`diverged`, `newer`, `unknown_database`, `not_primary`) |
 | `Epochs` | un primary qui démarre | rien ; la réponse : le groupe le plus récent et les epochs de chaque base |
 | `Frame` | primary | le premier groupe, le nombre, le CRC, la longueur, puis les octets, en morceaux de 1 MiB |
 | `Beat` | primary | son groupe durable le plus récent, chaque seconde sans frame |
-| `Stopped` | primary | son arrêt propre : chaque groupe jusqu'à celui-ci a été envoyé ([plus bas](#promotion-by-hand)) |
+| `Stopped` | primary | son arrêt propre : chaque groupe jusqu'à celui-ci a été envoyé ([plus bas](#la-promotion-à-la-main)) |
 | `Applied` | replica | elle tient durablement chaque groupe jusqu'à celui-ci |
 
 Le certificat que montre un peer doit être signé par la CA du cluster et nommer un `[[peer]]` autre que le serveur
@@ -1069,7 +1069,7 @@ rien sans une majorité.
 ### Les sauvegardes depuis la replica
 
 Le répertoire de données d'une replica tient les fichiers des bases de son primary (leur id, leurs runs, leurs
-segments), si bien que [le script de sauvegarde](production.md#backups) le copie pendant que la replica tourne, et le
+segments), si bien que [le script de sauvegarde](production.md#les-sauvegardes) le copie pendant que la replica tourne, et le
 primary ne fait aucun travail pour cela. Le script copie aussi `epochs` : une copie sans lui recommence à l'epoch 1, et
 un historique promu la refuse comme replica.
 
@@ -1232,7 +1232,7 @@ Les trois démarrent sur des **répertoires de données vides** : chaque base re
 (calculé à partir de l'id du cluster et du nom de la base) et le même premier groupe, et chaque groupe suivant arrive
 par le log du cluster (plus bas). Un répertoire de données écrit par un serveur seul est refusé (`was not made by this
 Raft cluster`) : faire grandir un serveur seul en cluster est une étape suivante. Avec 1 `[[peer]]`, un serveur est
-seul, avec 2 c'est un primary et sa replica ([plus haut](#a-replica)), avec 3 ou plus un cluster Raft : une seule
+seul, avec 2 c'est un primary et sa replica ([plus haut](#une-replica)), avec 3 ou plus un cluster Raft : une seule
 façon de basculer (fail over : passer à un autre serveur quand l'un tombe) pour un cluster de chaque taille. Dans un
 cluster Raft, `cepheus replicate` et `cepheus promote` sont refusés, et `DATA/cepheus.role` ne doit pas exister. Un
 nombre pair de serveurs fonctionne, mais ajoute une machine qui peut tomber en panne sans ajouter une panne à laquelle
@@ -1254,7 +1254,7 @@ d'une base ne tient donc **que des frames committed** : rien n'est jamais repris
 
 Toute frame que fait une base passe par le log : celle d'une écriture (un `Incr` compris, son compteur lu à son point
 sur le leader), celle d'un chargement, et le groupe d'un changement des règles calculé en arrière-plan
-([règles](rules.md#changes-of-the-rules-in-the-background)), proposé seul une fois que plus rien d'autre n'est en vol.
+([règles](rules.md#les-changements-des-règles-en-arrière-plan)), proposé seul une fois que plus rien d'autre n'est en vol.
 Un changement qui tourne pendant que son leader cesse d'être leader reçoit `not_leader`, rien de lui n'étant écrit.
 Une entrée est une seule frame du protocole : un groupe fait au plus 8 MiB dans un cluster, et un chargement prend le
 chemin ordinaire du writer (pas celui des grands groupes, qui écrit une frame par morceaux avant qu'elle soit
@@ -1264,7 +1264,7 @@ pas, pour l'instant (les grandes entrées par morceaux sont une étape suivante)
 
 Le log est `DATA/raft/` (0700) : des segments `log.<first index>` (0600), chacun un en-tête et des **rounds**, un
 round étant les entrées d'un même fsync, vérifiés par CRC-32C comme les frames d'un journal
-([formats](formats.md#the-servers-files)) ; et `DATA/raft/state` (0600), le term du serveur, son vote, et sa marque de
+([formats](formats.md#les-fichiers-du-serveur)) ; et `DATA/raft/state` (0600), le term du serveur, son vote, et sa marque de
 réparation, écrits à côté, forcés et renommés. Chaque seconde, une fois le journal de chaque base forcé, les segments
 entiers du log que chaque journal tient et que chaque serveur tient sont supprimés. Un serveur qui fait sa recovery
 récrit dans les journaux les frames dont le log sait qu'elles sont committed, coupe chaque journal après elles, et
@@ -1289,7 +1289,7 @@ Pourquoi ces durées : les heartbeats (les messages par lesquels le leader montr
 50 ms ; un follower répond aussitôt à un heartbeat, quoi que fasse son disque (son acquittement d'entrées attend leur
 fsync, celui d'un heartbeat non), si bien que le timeout couvre le réseau et une pause du processus, pas un fsync
 lent. Une bascule prend le timeout (0,5 à 1 s), un tour de pre-votes et un tour de votes (un fsync pour le vote), et le
-no-op du nouveau leader (un fsync) : mesuré [plus bas](#what-a-cluster-costs). etcd attend plus longtemps par défaut
+no-op du nouveau leader (un fsync) : mesuré [plus bas](#ce-que-coûte-un-cluster). etcd attend plus longtemps par défaut
 (« By default, etcd uses a 100ms heartbeat interval » : un heartbeat toutes les 100 ms ; « By default, etcd uses a
 1000ms election timeout » : un election timeout de 1 000 ms ; son guide de réglage pour la v3.5), et demande que
 « Election timeouts must be at least 10 times the round-trip time » (l'election timeout doit valoir au moins 10 round
@@ -1344,7 +1344,7 @@ le serveur ne peut pas savoir quels votes il a donnés.
 
 ### Le protocole des peers, version 2
 
-Sur le port peer, dans les frames du [protocole](#framing) : `PeerHello` dit version 2 ; un peer de version 1 est
+Sur le port peer, dans les frames du [protocole](#le-framing) : `PeerHello` dit version 2 ; un peer de version 1 est
 refusé avec `version`. `Raft` (kind 27) fait d'une connexion un flux de messages de Raft, dans un seul sens, venant du
 peer du certificat, chacun une frame de kind 28 (id 0) : `Pre_vote` et `Vote` (un term, le dernier index et le
 dernier term du demandeur), leurs réponses (accordé, un term), `Append` (le term du leader, un numéro, l'index et le
@@ -1362,7 +1362,7 @@ alors, comme sur tout disque en panne).
 
 ### La sécurité d'un cluster
 
-- **Qui peut parler Raft.** Le TLS mutuel du port peer ([celui d'une replica](#security)) : un certificat de la CA du
+- **Qui peut parler Raft.** Le TLS mutuel du port peer ([celui d'une replica](#sécurité)) : un certificat de la CA du
   cluster qui nomme un autre `[[peer]]`, puis l'id du cluster ; un peer du protocole 1 reçoit `version`. Un flux Raft
   n'est accepté que d'un peer de la liste, et chaque message qu'il porte est celui de ce peer (son expéditeur est le
   nom du certificat, jamais un champ).
@@ -1374,7 +1374,7 @@ alors, comme sur tout disque en panne).
 - **Des promesses tenues à travers les crashs.** Le term et le vote sont forcés (écrits à côté, fsync, renommage, le
   répertoire forcé) avant que tout message de ce term ne parte, et une entrée n'est acquittée qu'une fois forcée : TLA+
   montre qu'un cluster sans l'un ou l'autre perd une écriture committed ou élit deux leaders dans un même term. Un log
-  abîmé suit la règle de 2018 ([plus haut](#a-damaged-log-the-2018-rule)).
+  abîmé suit la règle de 2018 ([plus haut](#un-log-abîmé--la-règle-de-2018)).
 - **Le déni de service.** Au plus 256 connexions de peers, deux flux Raft par peer (un plus ancien est fermé), 4 096
   messages en file pour un peer (puis abandonnés : Raft renvoie ce qui compte), les messages plus vieux qu'un election
   timeout abandonnés.
@@ -1531,7 +1531,7 @@ Un token qui a des **droits par kind** (`{ read = ["client", "invoice"], add = [
   serveur refuse son `Follow`, et ses lectures vont au serveur. Les clients le font d'eux-mêmes.
 - Avec des règles, il ne lit une propriété que s'il lit le kind de la propriété **et chaque kind dont peuvent venir
   les faits dérivés de la propriété** par les règles (`sources`,
-  [règles](rules.md#a-property-as-a-variable-the-w3cs-form-of-owls-rules) ; une règle sur une propriété variable peut
+  [règles](rules.md#une-propriété-comme-variable--la-forme-des-règles-dowl-du-w3c) ; une règle sur une propriété variable peut
   lire n'importe quel kind) : sinon un fait dérivé lui dirait quelque chose des faits qu'il ne peut pas lire. Une telle
   propriété est, pour lui, un kind qu'il ne lit pas (`Get` laisse ses faits de côté, une question sur elle reçoit
   `denied`). Un refus par les règles ne nomme que la règle (`constraint NAME`, `rule NAME refused the group`) :
@@ -1566,7 +1566,7 @@ la requête, la réponse d'une écriture, un push, les propres threads de la con
   token, l'id et le kind de la requête) et le texte de l'exception, coupé à 300 octets, chaque octet hors de l'ASCII
   imprimable écrit `\ddd`, pour que les octets d'un client dans le texte d'une exception ne puissent ni former une
   ligne à eux, ni parler au terminal qui affiche le log. Au plus une telle ligne par seconde : la suivante compte
-  celles qui ont été laissées de côté. Les lignes sont dans [erreurs](errors.md#lines-on-the-standard-error).
+  celles qui ont été laissées de côté. Les lignes sont dans [erreurs](errors.md#les-lignes-sur-la-sortie-derreur).
 - **Une frame est entière ou n'est pas** : une réponse dont le codage échoue ne laisse rien d'elle dans la sortie, un
   push de plusieurs frames est donné entier ou pas du tout, et une réponse de plusieurs frames qui échoue après
   quelques-unes finit par `internal` sur son id, que le client prend pour sa fin.
@@ -1718,8 +1718,8 @@ Les nombres bruts et les scripts : les fichiers de mesure de ce travail (pas dan
   partagée des pages pour beaucoup de lecteurs d'une même machine (chaque lecteur garde son propre cache : [ce que
   cela coûte](#ce-que-cela-coûte)).
 - Une replica ne copie pas encore les fichiers du vault, un client ne passe pas de lui-même au nouveau primary, et une
-  promotion se fait à la main ([une replica](#a-replica)).
-- Dans un cluster Raft ([plus haut](#a-cluster-of-three-raft)) : ajouter ou retirer un serveur (un à la fois, des
+  promotion se fait à la main ([une replica](#une-replica)).
+- Dans un cluster Raft ([plus haut](#un-cluster-de-trois-raft)) : ajouter ou retirer un serveur (un à la fois, des
   learners d'abord, des serveurs qui reçoivent le log sans voter), un serveur qui rejoint le cluster avec des données
   ou qui tombe en retard sur le début du log du leader (un rattrapage à partir des journaux), les lectures locales, les
   fichiers du vault, un groupe de plus de 8 MiB, un serveur abîmé réparé par n'importe quel peer (pas seulement par un
@@ -1728,9 +1728,9 @@ Les nombres bruts et les scripts : les fichiers de mesure de ce travail (pas dan
 Le client Cesia est l'étape 4 ([Cepheus depuis Cesia](cesia.md)) : un programme Cesia atteint une base par un serveur
 seulement, par `cepheus.Connect`, et lit localement sur la machine du serveur. Les questions vivantes passent par le
 protocole (étape 5, [plus haut](#les-questions-vivantes-watch)). Plusieurs bases partagent un seul fsync ([le commit
-buffer](#many-databases-one-fsync-the-commit-buffer), le reste de l'étape 5). Une replica suit son primary (étape 6,
-[plus haut](#a-replica)). Trois serveurs élisent un leader et confirment les écritures sur une majorité (étape 7,
-[plus haut](#a-cluster-of-three-raft)). Ensuite : le reste de l'étape 7 (la liste plus haut), des bases en mémoire
+buffer](#plusieurs-bases-un-seul-fsync--le-commit-buffer), le reste de l'étape 5). Une replica suit son primary (étape 6,
+[plus haut](#une-replica)). Trois serveurs élisent un leader et confirment les écritures sur une majorité (étape 7,
+[plus haut](#un-cluster-de-trois-raft)). Ensuite : le reste de l'étape 7 (la liste plus haut), des bases en mémoire
 avec `Expire` et `Incr` (étape 8). La bibliothèque OCaml ouvre encore un répertoire de base dans son propre processus
 (`Cepheus.open_`) : c'est le moteur que fait tourner le serveur, et ce que pilotent ses tests et ses benchmarks ; les
 programmes, en Cesia, passent par le serveur.

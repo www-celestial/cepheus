@@ -353,11 +353,11 @@ Ok([{Invoice: 65537}, {Invoice: 65540}])
 - `cepheus.In(x, values)` : x est l'une des valeurs, de son type (des ids pour un lien : les factures de ces clients).
   Une valeur que la base ne tient pas n'est pas un candidat ; une liste vide n'a pas de réponse. Il prend jusqu'à
   100 000 valeurs, autant qu'une page a de lignes : les ids d'une page reviennent en une seule question
-  ([limites](limits.md#questions)).
+  ([limites](limits.md#les-questions)).
 
 **Sens exact.** Chaque opérateur lit les faits de la vue à laquelle on répond à la question, y compris les faits que
 dérivent les règles : ils sont dans chaque vue, exactement (G17) ; un `Not` lit donc un ensemble complet de faits. (Un
-`Not` dans le corps d'une *règle* est la même fonction, [règles](#rules).) `Not` et `Or` ne peuvent pas contenir un
+`Not` dans le corps d'une *règle* est la même fonction, [règles](#règles).) `Not` et `Or` ne peuvent pas contenir un
 `Not` ou un `Or` : nommez une condition plus profonde avec une règle, comme un fait dérivé.
 
 **Comment on y répond.** `In` est une relation d'une seule colonne pour Generic Join : ses valeurs sont les candidats
@@ -579,14 +579,14 @@ Ok(missing)
 - `Where` prend des patterns, `Above`, `Below`, `Between` et `Not` ; `Or`, `In` et `Prefix` sont pour les questions.
   Une variable de `Then` doit être dans un pattern de `Where` hors d'un `Not`, et une règle ne peut pas prendre le nom
   d'une propriété : les deux sont refusés avec le Code `"invalid"`.
-- Les règles sont pour les tokens qui écrivent toute la base ([droits](server.md#rights-g16)) : une règle lit chaque
+- Les règles sont pour les tokens qui écrivent toute la base ([droits](server.md#les-droits-g16)) : une règle lit chaque
   kind.
 
 Le `Where` d'une règle peut tenir `cepheus.Not(...)` : une réponse tient quand aucun fait ne correspond à ses patterns,
 ses variables qui ne sont dans aucun autre pattern lui étant propres (« il n'y a pas de facture `j` de `c` qui soit
 impayée »). La valeur de `Then` peut être `cepheus.Sum(x)`, `Min(x)`, `Max(x)` ou `Count()` : la règle donne à sa
 chose un seul fait, la somme, la plus petite ou la plus grande valeur de `x`, ou le nombre de réponses, tenu à jour
-par différence à chaque écriture ([règles](rules.md#negation-and-aggregates-strata)) :
+par différence à chaque écriture ([règles](rules.md#la-négation-et-les-agrégats--les-strata)) :
 
 ```cesia norun
 Books = cepheus.Kind("books", {Due: cepheus.Money(2), Clear: cepheus.Bool()})
@@ -619,7 +619,7 @@ Ok({Due: missing, Clear: true})
 **OWL 2** est le langage des **ontologies** du W3C : une ontologie dit ce que veulent dire les mots d'un domaine de
 connaissance, ses **classes** (« un professeur est une personne ») et ses propriétés (« le directeur de thèse, advisor,
 est un professeur », « un e-mail est celui d'une seule personne »). **OWL 2 RL** en est la partie que des règles
-calculent entièrement : le W3C la donne sous forme de 78 règles ([règles](rules.md#owl-2-rl-a-library-of-rules) dit
+calculent entièrement : le W3C la donne sous forme de 78 règles ([règles](rules.md#owl-2-rl-une-bibliothèque-de-règles) dit
 comment Cepheus tient chacune). Depuis Cesia, c'est le package `owl`, à côté de `cepheus`, que le programme prend
 aussi :
 
@@ -665,7 +665,7 @@ Ok([65542]) Ok({Name: missing, Email: ["ada@uni.org"], Advisor: []})
 
 - **Le vocabulaire** est un kind comme un autre, nommé `owl` : `owl.Vocabulary`, donné à `Connect` (ou à `Fork`) avec
   les kinds propres du programme, déclare ses propriétés `owl/Type`, `owl/SubClassOf` et les autres (les mêmes que
-  déclare la bibliothèque du moteur : [le vocabulaire](rules.md#the-vocabulary)), et chacune est un nom du package :
+  déclare la bibliothèque du moteur : [le vocabulaire](rules.md#le-vocabulaire)), et chacune est un nom du package :
   `owl.SubClassOf`. Une classe est une chose de la base, comme une autre ; une ontologie est faite de faits, écrits
   avec `Write`, versionnés comme les autres.
 - **Un axiome sur une propriété** (une affirmation de l'ontologie) est un fait de sa **description**, une chose à part
@@ -686,17 +686,17 @@ Ok([65542]) Ok({Name: missing, Email: ["ada@uni.org"], Advisor: []})
   fois) est refusée par `Define` : seule une écriture change une telle liste.
   Aucune règle à côté de celles d'OWL 2 RL ne peut tenir un `Not` ou un agrégat : ses règles sur une propriété qui est
   une variable peuvent donner n'importe quelle propriété, et une telle règle pourrait donc lire sa propre absence. C'est
-  pourquoi cet exemple tourne sur un [fork](#forks) : la base du chapitre tient les règles avec `Not` et `Sum` plus
+  pourquoi cet exemple tourne sur un [fork](#les-forks) : la base du chapitre tient les règles avec `Not` et `Sum` plus
   haut. `owl.Rl()` sans le vocabulaire, ou un nom qui n'est pas l'une de ses règles, est un `Err` de Code `"invalid"`.
 - **Droits.** Les règles d'OWL 2 RL lisent des propriétés qui sont des variables, si bien que ce qu'elles donnent peut
   venir de n'importe quel kind : un token ne le lit, et ne lit `Same`, que s'il lit chaque kind
-  ([droits](server.md#rights-g16)) ; `Define` demande un token qui écrit toute la base. Un token de certains kinds
+  ([droits](server.md#les-droits-g16)) ; `Define` demande un token qui écrit toute la base. Un token de certains kinds
   reçoit `denied` pour `Same`, pour une question et pour `Define`, et ne reçoit de `Get` aucun des faits que les règles
   peuvent donner : il n'apprend aucune égalité.
 - **Sécurité.** Rien de nouveau n'est décodé : les maps de `owl.Rl()` ne font que nommer des règles, que `Define` prend
   dans la bibliothèque du moteur (un nom qui lui manque est un `Err`), et le writer (le seul thread qui applique les
   groupes de la base) les vérifie comme n'importe quelle règle, sous les budgets des règles (une tempête d'égalités
-  coûte n − 1 faits, jamais n², [règles](rules.md#equality-classes-of-equal-things)). `Same` par le réseau pose au
+  coûte n − 1 faits, jamais n², [règles](rules.md#légalité--des-classes-de-choses-égales)). `Same` par le réseau pose au
   serveur au plus deux questions, chacune sous son budget de question.
 
 ## Fichiers
@@ -785,7 +785,7 @@ Comment, en bref ([le serveur](server.md#lectures-locales-g15) le raconte en ent
 
 - Le serveur passe au programme les fichiers de run de la base, déjà ouverts (`SCM_RIGHTS` : un socket Unix peut porter
   des fichiers ouverts d'un programme à un autre), si bien que le programme n'a besoin d'aucun droit sur les fichiers du
-  serveur, et que son token décide de ce qu'il peut lire (G16). Un token qui a des [droits par kind](server.md#rights-g16)
+  serveur, et que son token décide de ce qu'il peut lire (G16). Un token qui a des [droits par kind](server.md#les-droits-g16)
   ne peut pas lire toute la base : ses lectures vont au serveur, qui ne lui donne que les kinds qu'il lit.
 - Ensuite, le serveur envoie les octets de chaque groupe sur le follow stream (le flux qui suit la base) avant de les
   forcer sur son disque, et le package les applique à un nouvel état pendant que le disque travaille.
