@@ -73,7 +73,9 @@ type t = {
   mutable fd : Disk.fd;  (* the newest segment's *)
   mutable seg : int;
   mutable size : int;
-  rounds : round Dynarray.t;  (* oldest first *)
+  mutable rounds : round array;  (* oldest first, the first [nr] (a plain array: Stdlib's Dynarray links CamlinternalOO,
+                                    whose frame descriptors every start-up pays) *)
+  mutable nr : int;
   mutable next : int;
   mutable last_term : int;
   cache : (int, int * Bytes.t) Hashtbl.t;  (* index -> term, bytes *)
@@ -125,6 +127,15 @@ let save_state t s =
   t.secure path
 
 (* ---- rounds ---- *)
+
+let push t r =
+  if t.nr = Array.length t.rounds then begin
+    let a = Array.make (max 64 (2 * t.nr)) r in
+    Array.blit t.rounds 0 a 0 t.nr;
+    t.rounds <- a
+  end;
+  t.rounds.(t.nr) <- r;
+  t.nr <- t.nr + 1
 
 let encode_round ~first ~commit (entries : (int * Bytes.t) list) =
   let blen = List.fold_left (fun a (_, d) -> a + 12 + Bytes.length d) 0 entries in
@@ -243,7 +254,7 @@ let open_ ?(secure = fun _ -> ()) disk dir ~cluster =
   secure dir;
   let st = if disk.exists (state_path dir) then decode_state (state_path dir) (Disk.read_all disk (state_path dir)) else { term = 0; vote = ""; repair = 0 } in
   let t =
-    { disk; dir; cluster; secure; m = Mutex.create (); segs = []; fd = 0; seg = 0; size = 0; rounds = Dynarray.create ();
+    { disk; dir; cluster; secure; m = Mutex.create (); segs = []; fd = 0; seg = 0; size = 0; rounds = [||]; nr = 0;
       next = 1; last_term = 0; cache = Hashtbl.create 1024; cq = Queue.create (); cbytes = 0; failed = false }
   in
   let terms = ref [] and sizes = ref [] and commit = ref 0 and damage = ref None and repair = ref st.repair in
@@ -312,7 +323,7 @@ let open_ ?(secure = fun _ -> ()) disk dir ~cluster =
             match round_at b !p size with
             | Some (f, count, c, es, e) when f = t.next && List.for_all (fun (tm, _, _) -> tm >= t.last_term) es
                                            && (let ok = ref true and prev = ref t.last_term in List.iter (fun (tm, _, _) -> if tm < !prev then ok := false; prev := tm) es; !ok) ->
-              Dynarray.add_last t.rounds { rfirst = f; rcount = count; seg = first; off = !p; size = e - !p; rcommit = c };
+              push t { rfirst = f; rcount = count; seg = first; off = !p; size = e - !p; rcommit = c };
               List.iter (fun (tm, _, len) -> terms := tm :: !terms; sizes := len :: !sizes; t.last_term <- tm) es;
               t.next <- f + count;
               commit := max !commit (min c (t.next - 1));
@@ -346,7 +357,7 @@ let open_ ?(secure = fun _ -> ()) disk dir ~cluster =
     t.fd <- disk.openf (seg_path t t.seg) false;
     (* what a killed process wrote and did not force may be in the page cache only: the newest round is written
        again and forced before anything rests on it (as the journal's recovery does) *)
-    match Dynarray.find_last t.rounds with
+    match if t.nr = 0 then None else Some t.rounds.(t.nr - 1) with
     | Some r when r.seg = t.seg ->
       let b = Bytes.create r.size in
       disk.pread t.fd r.off b 0 r.size;
@@ -395,17 +406,17 @@ let append t ~first ~commit entries =
           end;
           t.disk.pwrite t.fd t.size b 0 n;
           t.disk.fsync t.fd);
-      Dynarray.add_last t.rounds { rfirst = first; rcount = List.length entries; seg = t.seg; off = t.size; size = n; rcommit = commit };
+      push t { rfirst = first; rcount = List.length entries; seg = t.seg; off = t.size; size = n; rcommit = commit };
       t.size <- t.size + n;
       List.iteri (fun k (term, d) -> remember t (first + k) term d; t.last_term <- term) entries;
       t.next <- first + List.length entries)
 
 (* the round holding index i (rounds of no entry hold none) *)
 let find_round t i =
-  let lo = ref 0 and hi = ref (Dynarray.length t.rounds - 1) and res = ref None in
+  let lo = ref 0 and hi = ref (t.nr - 1) and res = ref None in
   while !lo <= !hi do
     let mid = (!lo + !hi) / 2 in
-    let r = Dynarray.get t.rounds mid in
+    let r = t.rounds.(mid) in
     if i < r.rfirst then hi := mid - 1
     else if i >= r.rfirst + r.rcount then lo := mid + 1
     else (res := Some (mid, r); lo := !hi + 1)
@@ -433,7 +444,7 @@ let read t i =
 
 (* every entry from index [from] on, in order (recovery: a database's frames to write again) *)
 let iter t ~from f =
-  let rs = Mutex.protect t.m (fun () -> Dynarray.to_list t.rounds) in
+  let rs = Mutex.protect t.m (fun () -> List.init t.nr (Array.get t.rounds)) in
   List.iter
     (fun r ->
       if r.rfirst + r.rcount > from then
@@ -447,10 +458,10 @@ let truncate t i ~prev_term =
       if i < t.next then
         fail t (fun () ->
             (* the first round that holds i or comes after it *)
-            let k = ref (Dynarray.length t.rounds) in
-            Dynarray.iteri (fun j r -> if !k = Dynarray.length t.rounds && r.rfirst + r.rcount > i then k := j) t.rounds;
-            if !k < Dynarray.length t.rounds then begin
-              let r = Dynarray.get t.rounds !k in
+            let k = ref 0 in
+            while !k < t.nr && t.rounds.(!k).rfirst + t.rounds.(!k).rcount <= i do incr k done;
+            if !k < t.nr then begin
+              let r = t.rounds.(!k) in
               let keep = if r.rfirst < i then List.filteri (fun j _ -> r.rfirst + j < i) (read_round t r) else [] in
               (* the segments after r's removed; r's cut at r *)
               List.iter (fun (s, _) -> if s > r.seg then t.disk.remove (seg_path t s)) t.segs;
@@ -458,13 +469,13 @@ let truncate t i ~prev_term =
               if r.seg <> t.seg then (t.disk.close t.fd; t.fd <- t.disk.openf (seg_path t r.seg) false; t.seg <- r.seg);
               t.disk.truncate t.fd r.off;
               t.size <- r.off;
-              Dynarray.truncate t.rounds !k;
+              t.nr <- !k;
               t.next <- r.rfirst;
               t.last_term <- prev_term;
               if keep <> [] then begin
                 let b = encode_round ~first:r.rfirst ~commit:(min r.rcommit (i - 1)) keep in
                 t.disk.pwrite t.fd t.size b 0 (Bytes.length b);
-                Dynarray.add_last t.rounds { rfirst = r.rfirst; rcount = List.length keep; seg = t.seg; off = t.size; size = Bytes.length b; rcommit = min r.rcommit (i - 1) };
+                push t { rfirst = r.rfirst; rcount = List.length keep; seg = t.seg; off = t.size; size = Bytes.length b; rcommit = min r.rcommit (i - 1) };
                 t.size <- t.size + Bytes.length b;
                 t.next <- i
               end;
@@ -489,10 +500,9 @@ let cut_before t i =
         t.segs <- l;
         let first = fst (List.hd l) in
         let k = ref 0 in
-        while !k < Dynarray.length t.rounds && (Dynarray.get t.rounds !k).seg < first do incr k done;
-        let keep = Dynarray.init (Dynarray.length t.rounds - !k) (fun j -> Dynarray.get t.rounds (!k + j)) in
-        Dynarray.clear t.rounds;
-        Dynarray.append t.rounds keep;
+        while !k < t.nr && t.rounds.(!k).seg < first do incr k done;
+        Array.blit t.rounds !k t.rounds 0 (t.nr - !k);
+        t.nr <- t.nr - !k;
         t.disk.sync_dir t.dir
       end)
 
