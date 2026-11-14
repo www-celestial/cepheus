@@ -164,7 +164,7 @@ let describe = function
   | Float x -> "the number " ^ string_of_float x | Text s -> Printf.sprintf "the text %S" s | Handle (k, _) -> "a handle " ^ k
   | List _ -> "a list" | Map _ -> "a map" | Struct _ -> "a struct" | Function _ -> "a function" | Other _ -> "a value"
 
-let of_cesia (pname : string) (typ : Value.typ) (x : C.value) : Value.t =
+let[@inline never] of_cesia (pname : string) (typ : Value.typ) (x : C.value) : Value.t =
   let wrong what = refuse "invalid" "%s needs %s, not %s" pname what (describe x) in
   match typ, x with
   | Ttext, Text s -> Text s
@@ -252,7 +252,7 @@ let resolve_kind d (k : kind) =
 
 (* a value of a property in database [d]: where a link goes, a property of a kind is its id there, so that OWL's axioms
    name properties ([d, owl/Property, Person.Advisor]) *)
-let value_in d pname (typ : Value.typ) (x : C.value) : Value.t =
+let[@inline never] value_in d pname (typ : Value.typ) (x : C.value) : Value.t =
   match typ, x with
   | Tlink, C.Handle ("cepheus.property", p) -> (
     match entry properties p with Some (k, i) -> Link (resolve_kind d k).ids.(i) | None -> of_cesia pname typ x)
@@ -1141,7 +1141,7 @@ let same_of ctx a =
         | members -> (
           match one { Query.vars = 2; where = [ pat (Var 1) (Var 0) ]; ranges = [ 1, Value.Link x, Value.Link x ] } with
           | [ r ] -> List.sort compare (r :: members)
-          | _ -> refuse "protocol" "%s: the class of %d changed while it was read: read it again" name x))
+          | _ -> refuse "conflict" "%s: the class of %d changed while it was read: read it again" name x))
     in
     C.ok ctx (C.list ctx (Array.of_list (List.map (fun e -> C.Int e) ids)))
   with Refused (code, m) -> failure ctx code m
