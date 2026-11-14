@@ -47,11 +47,18 @@ let types (v : Store.view) q =
     q.where;
   Array.mapi (fun i -> function Some t -> t | None -> bad "variable %d appears in no pattern" i) ty
 
+(* A thing named by a question is read as its class's representative (the reasoner design, section 5.10): facts are
+   kept on the representative, [x cepheus/same r] holds when x is not one *)
+let rep (v : Store.view) x =
+  if x < Schema.first_thing || Store.count_prop v Schema.p_same = 0 then x
+  else (let r = ref x in Store.iter_values v x Schema.p_same (fun w -> r := w); !r)
+
 let compile (v : Store.view) q =
   let ty = types v q in
   let side = function
     | Var x -> V x
-    | Thing e -> W e
+    | Thing e -> W (rep v e)
+    | Val (Value.Link l) -> W (rep v l)
     | Val x -> (match Store.word v x with Some w -> W w | None -> raise No_answer)
   in
   let pats =

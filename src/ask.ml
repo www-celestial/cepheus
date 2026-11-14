@@ -224,7 +224,7 @@ let typs_of (t : t) = Array.map (function Some ty -> ty | None -> Value.Tint) t.
    values, once a question (not once a conjunction, a Not's binding or a window): [words_of] *)
 let sorted_words (v : Store.view) (ty : Value.typ) l =
   List.iter (fun x -> if not (Value.has_type ty x) then bad "In needs values of the variable's type (a %s), not %s" (Value.typ_name ty) (Value.to_string x)) l;
-  let a = Array.of_list (List.filter_map (Store.word v) l) in
+  let a = Array.of_list (List.filter_map (function Value.Link t -> Some (Query.rep v t) | x -> Store.word v x) l) in
   Array.sort (fun (x : int) y -> compare x y) a;
   let n = ref 0 in
   Array.iteri (fun i w -> if i = 0 || w <> a.(!n - 1) then (a.(!n) <- w; incr n)) a;
@@ -255,7 +255,7 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
   let typs = typs_of t in
   match nt.items, nt.own with
   | [ Pattern { e; p; v = pv } ], [] ->
-    let side = function Query.Var x -> `B (at x) | Thing c -> `W (Some c) | Val x -> `W (Store.word v x) in
+    let side = function Query.Var x -> `B (at x) | Thing c -> `W (Some (Query.rep v c)) | Val (Value.Link l) -> `W (Some (Query.rep v l)) | Val x -> `W (Store.word v x) in
     (match side e, side pv with
      | `W None, _ | _, `W None -> fun _ -> false
      | se, sv ->

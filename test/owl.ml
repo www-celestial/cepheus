@@ -36,14 +36,20 @@ let d e n = e.th.(9 + n)
 let i e n = e.th.(13 + n)
 let lk x = Link x
 
-type expect = Has of (int * int * value) list | Lacks of (int * int * value) list | Refused of string | Nothing_more
+type expect = Has of (int * int * value) list | Lacks of (int * int * value) list | Refused of string | Nothing_more | Same of int list | Apart of int * int
 
 type case = { name : string; onto : env -> op list; data : env -> op list; expect : env -> expect list }
 
 let ptyp (v : view) p = Option.map (fun (d : prop) -> d.typ) (describe v p)
 
-(* the view against the least model of its asserted facts *)
+(* the view against the least model of its asserted facts; with rules that make things the same, against the meaning
+   of the equality (Check.eq_diff: the same classes, the same facts read through them) *)
 let exact what (v : view) =
+  if List.exists C.same_head (C.rules_of v) then begin
+    let _, errs = C.eq_diff ~ptyp:(ptyp v) v in
+    match errs with [] -> incr C.checks | l -> C.fail "%s: the view is not the meaning of its rules\n  %s" what (String.concat "\n  " l)
+  end
+  else
   let bad = ref false in
   let want = C.least ~ptyp:(ptyp v) ~bad (C.rules_of v) (C.asserted_facts v) in
   let got = C.user_facts v in
@@ -53,7 +59,10 @@ let exact what (v : view) =
   end
   else incr C.checks
 
-let has (v : view) (e, p, x) = match Store.word v x with Some w -> Store.mem v e p w | None -> false
+(* a fact, read as a program reads it: its things as their classes' representatives *)
+let has (v : view) (e, p, x) =
+  let x = match x with Link t -> Link (Query.rep v t) | x -> x in
+  List.exists (Value.equal x) (values v e p)
 
 let expect_after what env (res : (receipt, error) result) (ex : expect list) =
   let v = view env.db in
@@ -68,6 +77,8 @@ let expect_after what env (res : (receipt, error) result) (ex : expect list) =
           let has_sub s sub = let n = String.length sub in let rec f k = k + n <= String.length s && (String.sub s k n = sub || f (k + 1)) in f 0 in
           C.check (has_sub m rule) "%s: refused by %s (%s)" what rule m
         | Ok _ -> C.fail "%s: accepted, %s expected to refuse it" what rule)
+      | Same l -> (match res with Ok _ -> List.iter (fun x -> C.check (same v x = List.sort compare l) "%s: the class of #%d is %s, not %s" what x (String.concat "," (List.map string_of_int l)) (String.concat "," (List.map string_of_int (same v x)))) l | Error e -> C.fail "%s: refused: %s" what (message e))
+      | Apart (a, b) -> C.check (not (List.mem b (same v a))) "%s: #%d and #%d apart" what a b
       | Nothing_more -> ())
     ex;
   exact what v
@@ -235,7 +246,45 @@ let cases : case list =
       data = nodata; expect = (fun e -> [ Has [ r e 1, e.o.sub_class_of, lk (r e 0) ]; Lacks [ r e 0, e.o.sub_class_of, lk (r e 1) ] ]) };
     { name = "scm-int"; onto = (fun e -> [ Add (c e 0, e.o.intersection_of, lk (c e 1)); Add (c e 0, e.o.intersection_of, lk (c e 2)) ]); data = nodata;
       expect = (fun e -> [ Has [ c e 0, e.o.sub_class_of, lk (c e 1); c e 0, e.o.sub_class_of, lk (c e 2) ] ]) };
-    { name = "scm-uni"; onto = (fun e -> [ Add (c e 0, e.o.union_of, lk (c e 1)) ]); data = nodata; expect = (fun e -> [ Has [ c e 1, e.o.sub_class_of, lk (c e 0) ] ]) } ]
+    { name = "scm-uni"; onto = (fun e -> [ Add (c e 0, e.o.union_of, lk (c e 1)) ]); data = nodata; expect = (fun e -> [ Has [ c e 1, e.o.sub_class_of, lk (c e 0) ] ]) };
+    (* table 4: equality, by the classes and the rewriting *)
+    { name = "eq-ref, eq-sym, eq-trans"; onto = (fun _ -> []);
+      data = (fun e -> [ Add (i e 0, e.o.same_as, lk (i e 1)); Add (i e 2, e.o.same_as, lk (i e 1)) ]); expect = (fun e -> [ Same [ i e 0; i e 1; i e 2 ]; Apart (i e 0, i e 3) ]) };
+    { name = "eq-rep-s"; onto = (fun _ -> []); data = (fun e -> [ Add (i e 0, e.o.same_as, lk (i e 1)); Add (i e 0, e.k, lk (i e 5)) ]);
+      expect = (fun e -> [ Has [ i e 1, e.k, lk (i e 5) ] ]) };
+    { name = "eq-rep-o"; onto = (fun _ -> []); data = (fun e -> [ Add (i e 0, e.o.same_as, lk (i e 1)); Add (i e 5, e.k, lk (i e 0)) ]);
+      expect = (fun e -> [ Has [ i e 5, e.k, lk (i e 1) ] ]) };
+    { name = "eq-rep-p: a property is the same as no other";
+      onto = (fun e -> [ Add (d e 0, e.o.property, lk e.k); Add (d e 0, e.o.functional, tru) ]);
+      data = (fun e -> [ Add (i e 0, e.k, lk e.l); Add (i e 0, e.k, lk e.j) ]); expect = (fun _ -> [ Refused "a property is the same as no other" ]) };
+    { name = "eq-diff1"; onto = (fun _ -> []); data = (fun e -> [ Add (i e 0, e.o.same_as, lk (i e 1)); Add (i e 0, e.o.different_from, lk (i e 1)) ]);
+      expect = (fun _ -> [ Refused "owl/eq-diff1" ]) };
+    { name = "eq-diff2, eq-diff3: AllDifferent as its pairs"; onto = (fun e -> Owl.all_different e.o [ i e 0; i e 1; i e 2 ]);
+      data = (fun e -> [ Add (i e 3, e.o.same_as, lk (i e 0)); Add (i e 3, e.o.same_as, lk (i e 2)) ]); expect = (fun _ -> [ Refused "owl/eq-diff1" ]) };
+    { name = "prp-fp"; onto = (fun e -> [ Add (d e 0, e.o.property, lk e.k); Add (d e 0, e.o.functional, tru) ]);
+      data = (fun e -> [ Add (i e 0, e.k, lk (i e 1)); Add (i e 0, e.k, lk (i e 2)); Add (i e 2, e.l, lk (i e 6)) ]);
+      expect = (fun e -> [ Same [ i e 1; i e 2 ]; Has [ i e 1, e.l, lk (i e 6) ] ]) };
+    { name = "prp-fp over values: two different values are never the same";
+      onto = (fun e -> [ Add (d e 0, e.o.property, lk e.age); Add (d e 0, e.o.functional, tru) ]);
+      data = (fun e -> [ Add (i e 0, e.age, Int 5); Add (i e 0, e.age, Int 6) ]); expect = (fun _ -> [ Refused "owl/prp-fp" ]) };
+    { name = "prp-ifp"; onto = (fun e -> [ Add (d e 0, e.o.property, lk e.k); Add (d e 0, e.o.inverse_functional, tru) ]);
+      data = (fun e -> [ Add (i e 1, e.k, lk (i e 0)); Add (i e 2, e.k, lk (i e 0)); Add (i e 3, e.k, lk (i e 4)) ]);
+      expect = (fun e -> [ Same [ i e 1; i e 2 ]; Apart (i e 1, i e 3) ]) };
+    { name = "prp-key"; onto = (fun e -> [ Add (c e 0, e.o.has_key, lk e.k); Add (c e 0, e.o.has_key, lk e.l) ]);
+      data = (fun e -> [ Add (i e 0, ty e, lk (c e 0)); Add (i e 1, ty e, lk (c e 0)); Add (i e 2, ty e, lk (c e 0));
+                         Add (i e 0, e.k, lk (i e 5)); Add (i e 1, e.k, lk (i e 5)); Add (i e 2, e.k, lk (i e 5));
+                         Add (i e 0, e.l, lk (i e 6)); Add (i e 1, e.l, lk (i e 6)); Add (i e 2, e.l, lk (i e 7)) ]);
+      expect = (fun e -> [ Same [ i e 0; i e 1 ]; Apart (i e 0, i e 2) ]) };
+    { name = "cls-maxc2"; onto = (fun e -> [ Add (r e 0, e.o.max_cardinality, Int 1); Add (r e 0, e.o.on_property, lk e.k) ]);
+      data = (fun e -> [ Add (i e 0, ty e, lk (r e 0)); Add (i e 0, e.k, lk (i e 1)); Add (i e 0, e.k, lk (i e 2)) ]); expect = (fun e -> [ Same [ i e 1; i e 2 ] ]) };
+    { name = "cls-maxqc3";
+      onto = (fun e -> [ Add (r e 0, e.o.max_qualified_cardinality, Int 1); Add (r e 0, e.o.on_property, lk e.k); Add (r e 0, e.o.on_class, lk (c e 1)) ]);
+      data = (fun e -> [ Add (i e 0, ty e, lk (r e 0)); Add (i e 0, e.k, lk (i e 1)); Add (i e 1, ty e, lk (c e 1)); Add (i e 0, e.k, lk (i e 2));
+                         Add (i e 2, ty e, lk (c e 1)); Add (i e 0, e.k, lk (i e 3)) ]);
+      expect = (fun e -> [ Same [ i e 1; i e 2 ]; Apart (i e 1, i e 3) ]) };
+    { name = "cls-maxqc4";
+      onto = (fun e -> [ Add (r e 0, e.o.max_qualified_cardinality, Int 1); Add (r e 0, e.o.on_property, lk e.k); Add (r e 0, e.o.on_class, lk e.o.thing) ]);
+      data = (fun e -> [ Add (i e 0, ty e, lk (r e 0)); Add (i e 0, e.k, lk (i e 1)); Add (i e 0, e.k, lk (i e 2)) ]); expect = (fun e -> [ Same [ i e 1; i e 2 ] ]) } ]
 
 let tmp = match Sys.getenv_opt "CEPHEUS_TMP" with Some d -> d | None -> Filename.get_temp_dir_name ()
 let counter = ref 0
@@ -322,6 +371,99 @@ let random_sequences seeds =
     done
   done
 
+(* ---- random equalities: sameAs, functional and inverse functional properties, keys, max cardinality 1, with
+   retractions; a refusal must be the meaning's (two values made one, or a constraint broken), and an acceptance too ---- *)
+
+let random_equality seeds =
+  for seed = 1 to seeds do
+    let g = Rng.make (1000 + seed) in
+    let pick a = a.(Rng.int g (Array.length a)) in
+    let e = setup (fork empty) in
+    let o = e.o in
+    let cls = Array.init 4 (c e) and ind = Array.init 10 (i e) and rs = Array.init 2 (r e) and ds = Array.init 3 (d e) in
+    let lp = [| e.k; e.l; e.j |] in
+    let onto () =
+      match Rng.int g 12 with
+      | 0 -> Add (pick ds, o.property, lk (pick lp))
+      | 1 -> Add (pick ds, o.functional, tru)
+      | 2 -> Add (pick ds, o.inverse_functional, tru)
+      | 3 -> Add (pick rs, o.max_cardinality, Int 1)
+      | 4 -> Add (pick rs, o.on_property, lk (pick lp))
+      | 5 -> Add (pick cls, o.has_key, lk (pick lp))
+      | 6 -> Add (pick cls, o.sub_class_of, lk (pick cls))
+      | 7 -> Add (pick ds, o.symmetric, tru)
+      | 8 -> Add (pick ds, o.sub_property_of, lk (pick lp))
+      | 9 -> Add (pick rs, o.max_qualified_cardinality, Int 1)
+      | 10 -> Add (pick rs, o.on_class, lk (pick cls))
+      | _ -> Add (pick ds, o.domain, lk (pick cls))
+    in
+    let data () =
+      match Rng.int g 10 with
+      | 0 | 1 -> Add (pick ind, o.same_as, lk (pick ind))
+      | 2 -> Add (pick ind, o.different_from, lk (pick ind))
+      | 3 | 4 -> Add (pick ind, o.type_, lk (pick (Array.append cls rs)))
+      | _ -> Add (pick ind, pick lp, lk (pick ind))
+    in
+    let asserted = ref [] in
+    for step = 1 to 16 do
+      let ops =
+        if step <= 3 || Rng.int g 6 = 0 then List.init (1 + Rng.int g 3) (fun _ -> onto ())
+        else if Rng.int g 3 = 0 && !asserted <> [] then
+          List.filteri (fun _ _ -> Rng.int g 2 = 0) !asserted |> List.map (function Add (a, b, x) -> Retract (a, b, x) | x -> x)
+        else List.init (1 + Rng.int g 4) (fun _ -> data ())
+      in
+      let v0 = view e.db in
+      (match write e.db ops with
+       | Ok _ ->
+         List.iter (function Add _ as a -> asserted := a :: !asserted | Retract (a, b, x) -> asserted := List.filter (fun y -> y <> Add (a, b, x)) !asserted | _ -> ()) ops
+       | Error err ->
+         (* the meaning of the state the write would make: refused there too *)
+         let f = ref (C.asserted_facts v0) in
+         List.iter (function Add (a, b, x) -> f := F.add (a, b, x) !f | Retract (a, b, x) -> f := F.remove (a, b, x) !f | _ -> ()) ops;
+         let bad = ref false in
+         let m, _ = C.least_eq ~ptyp:(ptyp v0) ~bad (C.rules_of v0) !f in
+         C.check (!bad || C.violated (C.rules_of v0) m) "seed %d step %d: refused (%s), but the meaning holds no contradiction" seed step (message err));
+      exact (Printf.sprintf "equality seed %d step %d" seed step) (view e.db)
+    done
+  done
+
+(* ---- an equality storm: a functional property that makes n things one ---- *)
+
+let storm () =
+  let e = setup (fork empty) in
+  let o = e.o in
+  ignore (ok (write e.db [ Add (d e 0, o.property, lk e.k); Add (d e 0, o.functional, tru) ]));
+  let n = 3000 in
+  let r = ok (write e.db (List.init n (fun k -> Add (-(k + 1), e.tx, Text (Printf.sprintf "y%d" k))))) in
+  let ys = List.init n (fun k -> thing r (-(k + 1))) in
+  let t0 = Unix.gettimeofday () in
+  ignore (ok (write e.db (List.map (fun y -> Add (i e 0, e.k, Link y)) ys)));
+  let dt = Unix.gettimeofday () -. t0 in
+  let v = view e.db in
+  C.check (List.length (same v (List.hd ys)) = n) "storm: one class of %d things" n;
+  C.check (Store.count_prop v Schema.p_same = n - 1) "storm: %d facts of cepheus/same, not n^2 (%d)" (n - 1) (Store.count_prop v Schema.p_same);
+  C.check (Store.count_prop v e.tx = (2 * n) - 1) "storm: every thing's own text stays, rewritten once onto the representative (%d)" (Store.count_prop v e.tx);
+  Printf.printf "  %d things made one in %.3f s\n%!" n dt;
+  (* past the budget: refused whole, the view unchanged *)
+  let b0 = !Reason.budget_base and b1 = !Reason.budget_per in
+  Reason.budget_base := 100;
+  Reason.budget_per := 0;
+  let e2 = setup (fork empty) in
+  Reason.budget_base := b0;
+  Reason.budget_per := b1;
+  ignore (ok (write e2.db [ Add (d e2 0, e2.o.property, lk e2.k); Add (d e2 0, e2.o.functional, tru) ]));
+  let r = ok (write e2.db (List.init 500 (fun k -> Add (-(k + 1), e2.tx, Text (Printf.sprintf "y%d" k))))) in
+  let before = view e2.db in
+  Reason.budget_base := 100;
+  Reason.budget_per := 0;
+  let res = write e2.db (List.init 500 (fun k -> Add (i e2 0, e2.k, Link (thing r (-(k + 1)))))) in
+  Reason.budget_base := b0;
+  Reason.budget_per := b1;
+  (match res with
+   | Error (Invalid m) -> C.check true "storm past the budget refused: %s" m; Printf.printf "  past the budget: %s\n%!" m
+   | _ -> C.fail "storm past the budget: not refused");
+  C.check (group (view e2.db) = group before && Store.count_prop (view e2.db) Schema.p_same = 0) "storm past the budget: nothing applied"
+
 let () =
   section "owl: each rule, on the five paths";
   paths ();
@@ -337,4 +479,8 @@ let () =
   Reason.specialise := false;
   random_sequences (seeds / 4);
   Reason.specialise := true;
+  section (Printf.sprintf "owl: random equalities, %d seeds" seeds);
+  random_equality seeds;
+  section "owl: an equality storm";
+  storm ();
   C.finish "owl"

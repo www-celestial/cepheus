@@ -186,6 +186,11 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
             invalid "rule %s gives %s, the list of the template %s: only a write may change a list" r.name name (List.assoc h.p lists)
           | _ -> ())
         rules;
+      (* equality and negation or aggregates in one rule set: not yet (a Not or an aggregate would read the state of
+         things that rewriting moves) *)
+      if List.exists (fun (r : Rules.t) -> match r.head with Rules.Give h -> h.p = Schema.p_same | Never -> false) rules
+         && not (List.for_all Rules.is_plain rules)
+      then invalid "a rule set that makes things the same takes no Not and no aggregate yet";
       (* the rule set as a whole: an aggregate's property is its rule's alone, and no property depends on its own
          absence or aggregate (the strata) *)
       if not (List.for_all Rules.is_plain rules) then begin

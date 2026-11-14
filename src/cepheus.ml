@@ -182,12 +182,21 @@ let change_budget = Reason.change_per
 
 let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ | None -> None
 
+(* ---- classes of equal things ---- *)
+
+let same (v : view) x =
+  let r = Query.rep v x in
+  if Store.count_prop v Schema.p_same = 0 then [ x ]
+  else (let l = ref [ r ] in Store.iter_things v Schema.p_same r (fun y -> l := y :: !l); List.sort compare !l)
+
 let get (v : view) e =
+  let e = Query.rep v e in
   let out = ref [] in
   Store.iter_facts v e (fun p w -> match typ_of v p with Some t -> out := (p, Store.value v t w) :: !out | None -> ());
   List.sort compare !out
 
 let values (v : view) e p =
+  let e = Query.rep v e in
   match typ_of v p with
   | None -> []
   | Some t ->
@@ -196,6 +205,7 @@ let values (v : view) e p =
     List.rev !out
 
 let things (v : view) p x =
+  let x = match x with Link t -> Link (Query.rep v t) | x -> x in
   match Store.word v x with
   | None -> []
   | Some w ->

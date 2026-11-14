@@ -41,6 +41,7 @@ module S = struct
   let[@inline never] iter_values_st v e p f = Store.iter_values_st v e p f
   let[@inline never] iter_prop v p f = Store.iter_prop v p f
   let[@inline never] count_values v e p = Store.count_values v e p
+  let[@inline never] iter_facts v e f = Store.iter_facts v e f
 end
 
 exception Refused of string
@@ -564,6 +565,8 @@ type program = {
   lists : (int * int array) array;  (* the templates' lists (property, its facts as (thing, value) words, sorted) the
                                        rules as written were unfolded on: a write of one is a change of the rules *)
   islist : Bytes.t;  (* by property: 1 a template's list *)
+  eq : bool;  (* a rule makes things the same (its head gives cepheus/same): the classes of equal things are kept *)
+  cthings : (int, unit) Hashtbl.t;  (* the things the rules name: they never become the same as another *)
   mutable lruns : Store.run array;  (* the runs and stamps the lists were last seen with (Store.stamp) *)
   mutable lstamps : Store.stamp array;
   pool : ctx list ref;
@@ -615,7 +618,39 @@ and ctx = {
   mutable plain_derive : bool;  (* a large group whose rules derive without Not or aggregates (only constraints have
                                    them): its rounds may run on several domains *)
   heads_none : (int * int, bool) Hashtbl.t;  (* a change: does the view hold no fact (_ p w) of a head (p, w) *)
+  (* equality (the reasoner design, section 5.10): the rules read the facts of representatives only *)
+  mutable eqon : bool;  (* some thing is not its own representative: the plans skip its facts *)
+  mutable nr : (int, int) Hashtbl.t;  (* the view's things that are not representatives: x -> its representative *)
+  eqt : (int, int) Hashtbl.t;  (* the representatives this group changed: x -> its representative now *)
+  mutable pend : (int * int * int) list;  (* the equalities found in the round: (a, b, rule) *)
+  mutable boom : int list;  (* classes to take apart and derive again (B/F): their representatives *)
+  exploded : (int, unit) Hashtbl.t;
+  mutable refill : int list;  (* the asserted facts of a class taken apart: round 0 of the insertion *)
+  mutable why_mode : bool;  (* Why: a fact of a class is proved by the asserted fact of a member it rewrites *)
 }
+
+(* ---- equality: the classes of equal things ----
+   [x cepheus/same r] (derived, one a thing that is not a representative) holds the classes. The view's non
+   representatives are read once a view (a table rebuilt when the facts of cepheus/same change: never changed once
+   made, so that several domains may read it); a group's changes are in the context's [eqt] above it. *)
+let reps_slot : (Store.run array * Store.stamp * (int, int) Hashtbl.t) option Atomic.t = Atomic.make None
+
+let [@inline never] nonreps (v : Store.view) =
+  let st = Store.stamp v Schema.p_same (-1) in
+  match Atomic.get reps_slot with
+  | Some (runs, st', t) when runs == v.runs && Store.same_stamp st st' -> t
+  | _ ->
+    let t = Hashtbl.create 64 in
+    if Store.count_prop v Schema.p_same > 0 then Store.iter_prop v Schema.p_same (fun e w -> Hashtbl.replace t e w);
+    Atomic.set reps_slot (Some (v.runs, st, t));
+    t
+
+let[@inline] rep_of c x =
+  if Hashtbl.length c.eqt > 0 && Hashtbl.mem c.eqt x then Hashtbl.find c.eqt x
+  else if Hashtbl.mem c.nr x then Hashtbl.find c.nr x
+  else x
+
+let[@inline] is_rep c x = rep_of c x = x
 
 exception Respec of int * int
 (* a frozen relation's fact (property, value) changes: the group is reasoned again with the generic rules *)
@@ -926,6 +961,16 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
   in
   let final =
     match r.head, pos with
+    | Give h, p when p <> -1 && h.p = Schema.p_same ->
+      (* an equality: its two sides, and whether both are things (two values are never the same thing) *)
+      let ge = getter ~head:false h.e and gv = getter ~head:false h.v in
+      let thing_t : Query.term -> unit -> bool = function
+        | Query.Var x -> (match sty.(x) with Some Value.Tlink -> fun () -> true | Some _ -> fun () -> false | None -> fun () -> dty.(x) = link_code)
+        | Thing _ -> fun () -> true
+        | Val _ -> fun () -> false
+      in
+      let te = thing_t h.e and tv = thing_t h.v in
+      fun () -> pl.he <- ge (); pl.hp <- Schema.p_same; pl.hw <- gv (); pl.hok <- te () && tv (); k pl
     | Give h, p when p <> -1 ->
       let ge = getter ~head:false h.e and gv = getter ~head:true h.v in
       let dyn = function Query.Var y -> sty.(y) = None | _ -> false in
@@ -962,6 +1007,14 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
     if xp >= 0 && not bound.(xp) then invalid_arg "Reason.compile: a property variable joined before its binder";
     (* the step's property, read at each call when it is a variable *)
     let cp = ref a.p in
+    (* with classes of equal things, a fact that names a thing that is not its representative is not read (its
+       rewriting, the representative's, is) *)
+    let next =
+      if not prog.eq then next
+      else
+        let lk = if a.p >= 0 then (let l = ptype ctx.v a.p = link_code in fun () -> l) else fun () -> ptype ctx.v !cp = link_code in
+        fun () -> if (not ctx.eqon) || (is_rep ctx pl.be.(j) && ((not (lk ())) || is_rep ctx pl.bw.(j))) then next ()
+    in
     let source = if j >= nb then nsrc else source in
     let strict = pos >= 0 && pos < nb && j < pos in
     let lim () = if j >= nb then max_int else if strict then ctx.round - 1 else ctx.round in
@@ -1217,7 +1270,9 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
   pl.run <-
     (fun e p w ->
       if pos = -1 then (pl.he <- e; pl.hp <- p; pl.hw <- w; pl.hok <- true);
-      if unify_e e && unify_v w && unify_p p then begin
+      if unify_e e && unify_v w && unify_p p
+         && ((not prog.eq) || pos < 0 || (not ctx.eqon) || (is_rep ctx e && (ptype ctx.v p <> link_code || is_rep ctx w)))
+      then begin
         if pos >= 0 then (pl.be.(pos) <- e; pl.bp.(pos) <- p; pl.bw.(pos) <- w);
         body ()
       end);
@@ -1333,7 +1388,16 @@ let [@inline never] build ?(also_reads = [||]) ?(lists = [||]) (v : Store.view) 
   Array.iter (fun (p, _) -> if p < np then Bytes.set islist p '\001') lists;
   let plain ri = nots.(ri) = [||] && aggs.(ri) = None in
   let dep = Array.mapi (fun i (r : Rules.t) -> { r with where = Array.to_list natoms.(i) }) rules in
-  let modules, in_module = find_modules ~plain ~dep v rules in
+  let same_head ri = match rules.(ri).head with Give h -> h.p = Schema.p_same | Never -> false in
+  let eq = Array.exists Fun.id (Array.init nr same_head) in
+  let cthings = Hashtbl.create 8 in
+  Array.iter
+    (fun (r : Rules.t) ->
+      List.iter (fun (a : Query.pattern) -> List.iter (function Query.Thing t -> Hashtbl.replace cthings t () | _ -> ()) [ a.e; a.v ])
+        (r.where @ match r.head with Give h -> [ h ] | Never -> []))
+    rules;
+  (* with equality, closures run as rules: the modules' walks read every fact, the rules only the representatives' *)
+  let modules, in_module = if eq then [||], Array.make nr false else find_modules ~plain ~dep v rules in
   let free_free = ref false in
   Array.iter
     (fun (r : Rules.t) ->
@@ -1367,8 +1431,8 @@ let [@inline never] build ?(also_reads = [||]) ?(lists = [||]) (v : Store.view) 
     ids; sty; never; bad_head; atoms = Array.map atoms_of rules; free_free = !free_free; np; reads;
     consts = Array.of_list (List.rev !consts); orders = Hashtbl.create 64; size = S.facts v; modules; in_module;
     ix_ins; ix_lost; ix_lost_walk; ix_pf = ix_lost;
-    ix_bw = build_index np rules ~backward:true give; ix_cons = build_index np rules ~backward:false (fun ri -> never.(ri));
-    spec; lists; islist; lruns = v.runs; lstamps = Array.map (fun (p, _) -> Store.stamp v p (-1)) lists; pool = ref [];
+    ix_bw = build_index np rules ~backward:true (fun ri -> give ri && not (same_head ri)); ix_cons = build_index np rules ~backward:false (fun ri -> never.(ri));
+    spec; lists; islist; eq; cthings; lruns = v.runs; lstamps = Array.map (fun (p, _) -> Store.stamp v p (-1)) lists; pool = ref [];
     pm = Mutex.create () }
 
 (* the stratum of a fact: the stratum of the rules whose heads give it, -1 when none does *)
@@ -1821,6 +1885,26 @@ let [@inline never] spec_parts ?unstable (v : Store.view) (gen : program) =
   let n = Array.length gen.rules in
   let unfold g =
     let r = gen.rules.(g) and sty = gen.sty.(g) in
+    (* a rule that makes things the same, over a relation with no fact, is left out while it has none (the relation
+       frozen): a database whose ontology and data make nothing the same keeps the closure modules, the path of
+       loads and the parallel rounds, which classes of equal things turn off *)
+    let unst = match unstable with Some f -> f | None -> fun _ -> false in
+    let empty =
+      match r.head with
+      | Rules.Give h when h.p = Schema.p_same ->
+        List.find_opt
+          (fun (a : Query.pattern) ->
+            a.p >= 0 && (not (unst (rel_of a)))
+            && (match a.v with
+                | Val x when not (is_text_const x) -> S.count_things v a.p (inline_word x) = 0
+                | Thing c -> S.count_things v a.p c = 0
+                | _ -> S.count_prop v a.p = 0))
+          r.where
+      | _ -> None
+    in
+    match empty with
+    | Some a -> Some ([], [ rel_of a ])
+    | None ->
     match small_atoms ?unstable v ~counts:true r sty with
     | None -> None
     | Some cand -> (
@@ -2009,7 +2093,9 @@ let [@inline never] new_ctx ?facts ?keys prog v =
     spare = ints 64 0; nn = 0; derived = 0; limit = max_int; whole = false; stop = never; vp = Bytes.empty;
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
-    seen2 = iset_create (); walked = Bytes.empty; xk = ignore; plain_derive = false; heads_none = Hashtbl.create 8 }
+    seen2 = iset_create (); walked = Bytes.empty; xk = ignore; plain_derive = false; heads_none = Hashtbl.create 8;
+    eqon = false; nr = Hashtbl.create 1; eqt = Hashtbl.create 8; pend = []; boom = []; exploded = Hashtbl.create 8; refill = [];
+    why_mode = false }
 
 let [@inline never] take ?facts ?keys prog v =
   let c =
@@ -2037,6 +2123,14 @@ let [@inline never] take ?facts ?keys prog v =
   c.walked <- Bytes.empty;
   c.plain_derive <- false;
   Hashtbl.reset c.heads_none;
+  Hashtbl.reset c.eqt;
+  Hashtbl.reset c.exploded;
+  c.pend <- [];
+  c.boom <- [];
+  c.refill <- [];
+  c.why_mode <- false;
+  c.nr <- (if prog.eq then nonreps v else Hashtbl.create 1);
+  c.eqon <- prog.eq && Hashtbl.length c.nr > 0;
   c
 
 let [@inline never] give c =
@@ -2117,10 +2211,22 @@ let[@inline never] emit_fact c ri e p w r =
     push_next c x
   end
 
+(* an instance of a rule that makes two things the same: an equality for the round's end (two values that differ are
+   never the same thing: the group is refused) *)
+let[@inline never] same_head c pl =
+  let a = pl.he and b = pl.hw in
+  if a <> b then begin
+    if not pl.hok then refuse "rule %s makes two different values the same: only things can be the same as another" (rule_name c pl.ri);
+    if rep_of c a <> rep_of c b then c.pend <- (a, b, pl.ri) :: c.pend
+  end
+
 let emit_at c pl r =
   incr derivations;
-  if not pl.hok then refuse "%s" (head_refusal c pl);
-  emit_fact c pl.ri pl.he pl.hp pl.hw r
+  if pl.hp = Schema.p_same then same_head c pl
+  else begin
+    if not pl.hok then refuse "%s" (head_refusal c pl);
+    emit_fact c pl.ri pl.he pl.hp pl.hw r
+  end
 
 (* ---- Large rounds on several domains (the design's section 5.14) ----
    A round of many facts, or the first round of a change's added rules, is cut into morsels (Leis et al., SIGMOD
@@ -2140,7 +2246,7 @@ let [@inline never] worker_ctx c =
 
 (* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
    the other cores while it runs *)
-let par_ok c = !Bulk.threads > 1 && c.stop == never && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
+let par_ok c = !Bulk.threads > 1 && c.stop == never && (not c.prog.eq) && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
 
 exception Too_many
 
@@ -2424,6 +2530,20 @@ let[@inline never] decided c x =
 (* the queue of B/F's candidates of a rule's stratum *)
 let[@inline] queue_of c ri = if c.prog.nstrata = 1 then c.bfq else Array.unsafe_get c.bfqs (Array.unsafe_get c.prog.strat ri)
 
+(* does a thing belong to a class of more than one thing (now) *)
+let [@inline never] in_class c t =
+  rep_of c t <> t || (let n = ref false in iter_in c Schema.p_same t (fun y -> if rep_of c y = t then n := true); !n)
+
+(* the class a fact names (as its thing, or its value under a link property), if one has more than one thing: its
+   representative, or -1 *)
+let [@inline never] class_named c x =
+  let ws = c.ws in
+  let e = fe ws x and p = fp ws x and w = fw ws x in
+  if p = Schema.p_same then -1
+  else if in_class c e then rep_of c e
+  else if ptype c.v p = link_code && in_class c w then rep_of c w
+  else -1
+
 let rec plans c d =
   if d >= Array.length c.bwd then begin
     let n = Array.length c.bwd in
@@ -2489,11 +2609,37 @@ and check c d x =
     else if Bytes.length c.walked > 0 && (let p = fp ws x in p < Bytes.length c.walked && Bytes.unsafe_get c.walked p <> '\000') then
       (* a fact of a closure its module decided in this group: present, it holds *)
       (if now ws x > 0 then prove c d x)
+    else if c.eqon && fp ws x = Schema.p_same then
+      (* a class's own fact: Why names the class (the equality's own proof is not given yet); B/F never checks it *)
+      (if c.why_mode && now ws x > 0 then (set_rule ws x (-3); set_by ws x [||]; prove c d x))
+    else if c.eqon && (not c.why_mode) && class_named c x >= 0 then
+      (* a fact only derived of a class of several things: unknown until its class is derived again (B/F takes the
+         class apart) *)
+      c.boom <- class_named c x :: c.boom
     else begin
       let p = fp ws x in
       if p < c.prog.np && Char.code (Bytes.unsafe_get c.prog.reads p) land 2 <> 0 then begin
         plans c d;
         try run_all (Array.unsafe_get c.bwd d) (fe ws x) p (fw ws x) with Exit -> ()
+      end;
+      (* Why: a fact of a representative that rewrites an asserted fact of a member of its class (or of its value's) *)
+      if c.eqon && c.why_mode && (not (has ws x 2)) && now ws x > 0 then begin
+        let e = fe ws x and w = fw ws x in
+        let lk = ptype c.v p = link_code in
+        let members t = let l = ref [ t ] in iter_in c Schema.p_same t (fun y -> l := y :: !l); !l in
+        let asserted y w' = let id = find ws y p w' in if id >= 0 then now ws id = 1 else S.state c.v y p w' = 1 in
+        match
+          List.find_map (fun y -> List.find_map (fun w' -> if (y <> e || w' <> w) && asserted y w' then Some (y, w') else None) (if lk then members w else [ w ])) (members e)
+        with
+        | Some (y, w') ->
+          let g = intern c y p w' in
+          check c (d + 1) g;
+          let ids = List.filter (fun i -> i >= 0) [ g; (if y <> e then intern c y Schema.p_same e else -1); (if w' <> w then intern c w' Schema.p_same w else -1) ] in
+          List.iter (fun i -> check c (d + 1) i) ids;
+          set_rule ws x (-2);
+          set_by ws x (Array.of_list ids);
+          prove c d x
+        | None -> ()
       end
     end
   end
@@ -2925,12 +3071,111 @@ let [@inline never] module_round c mi (d : ints) nd r =
 
 (* semi-naive evaluation: [first] the [nf] facts of round 0, and facts of round 1 already waiting in the next
    round's list. The rounds' facts in two buffers taken in turn, out of the collector's sight *)
+(* ---- equality: merges and their rewriting (the reasoner design, section 5.10; Motik, Nenov, Piro, Horrocks, AAAI
+   2015) ---- *)
+
+(* every fact now that names one of [ts] as its thing, or as its value under a link property ([cepheus/same]'s aside),
+   once each: [f e p w state] (1 asserted, 2 only derived) *)
+let [@inline never] facts_naming c (ts : (int, unit) Hashtbl.t) f =
+  let ws = c.ws and v = c.v in
+  let st e p w = let x = find ws e p w in if x >= 0 then now ws x else S.state v e p w in
+  let links = List.filter (fun p -> p <> Schema.p_same && ptype v p = link_code) (List.init (Schema.count v.schema) Fun.id) in
+  let seen = Hashtbl.create 16 in
+  let once e p w s = if not (Hashtbl.mem seen (e, p, w)) then (Hashtbl.replace seen (e, p, w) (); f e p w s) in
+  let ts_l = Hashtbl.fold (fun x () l -> x :: l) ts [] |> List.sort compare in
+  List.iter
+    (fun x ->
+      if x < ws.fresh then begin
+        S.iter_facts v x (fun p w -> if p <> Schema.p_same then (let s = st x p w in if s > 0 then once x p w s));
+        List.iter (fun p -> S.iter_things v p x (fun e -> let s = st e p x in if s > 0 then once e p x s)) links
+      end)
+    ts_l;
+  let n = ws.n in
+  for y = 0 to n - 1 do
+    if base ws y = 0 && now ws y > 0 then begin
+      let e = fe ws y and p = fp ws y and w = fw ws y in
+      if p <> Schema.p_same && (Hashtbl.mem ts e || (Hashtbl.mem ts w && ptype v p = link_code)) then once e p w (now ws y)
+    end
+  done
+
+(* The equalities found in a round, applied at its end (so that no plan runs over a state that changes under it):
+   classes merged, the smaller into the larger (union by size, Tarjan 1975: a thing changes class O(log n) times), the
+   members of the smaller given [y cepheus/same r]; then every fact that names an old representative is rewritten onto
+   the new one, at round [r]: a fact only derived moves (it goes, its rewriting comes), an asserted one stays where the
+   program wrote it, and its rewriting comes beside it. Every fact counts against the budget, so a functional
+   property that makes n things one costs n - 1 facts of cepheus/same and the moves of the smaller sides, never the
+   n^2 facts of the axiomatised equality. *)
+let [@inline never] apply_merges c round =
+  let pend = List.rev c.pend in
+  c.pend <- [];
+  let ws = c.ws in
+  let mem = Hashtbl.create 8 in
+  (* a class's members, and their number *)
+  let members x =
+    match Hashtbl.find_opt mem x with
+    | Some l -> l
+    | None ->
+      let l = ref [ x ] and n = ref 1 in
+      iter_in c Schema.p_same x (fun y -> if rep_of c y = x then (l := y :: !l; incr n));
+      Hashtbl.replace mem x (!l, !n);
+      !l, !n
+  in
+  let losers = Hashtbl.create 8 and moved = ref [] in
+  List.iter
+    (fun (a, b, ri) ->
+      let ra = rep_of c a and rb = rep_of c b in
+      if ra <> rb then begin
+        List.iter
+          (fun t ->
+            if t < Schema.first_thing then refuse "rule %s would make the property #%d the same as another thing: a property is the same as no other" (rule_name c ri) t;
+            if Hashtbl.mem c.prog.cthings t then
+              if c.prog.spec <> None then raise_notrace (Respec (-1, -1))
+              else refuse "rule %s would make #%d the same as #%d, which a rule names: a thing the rules name keeps its own identity" (rule_name c ri) ra rb)
+          [ ra; rb ];
+        let ma, la = members ra and mb, lb = members rb in
+        let r, x, mx, mr = if la > lb || (la = lb && ra < rb) then ra, rb, mb, ma else rb, ra, ma, mb in
+        List.iter (fun y -> Hashtbl.replace c.eqt y r; moved := (y, ri) :: !moved) mx;
+        (* the smaller list copied: O(its size) a merge, O(n log n) in all (union by size) *)
+        Hashtbl.replace mem r (List.rev_append mx mr, la + lb);
+        Hashtbl.remove mem x;
+        Hashtbl.replace losers x ri
+      end)
+    pend;
+  if !moved <> [] then begin
+    c.eqon <- true;
+    (* the facts of cepheus/same: each member of a class merged into another names its new representative *)
+    List.iter
+      (fun (y, ri) ->
+        let r = rep_of c y in
+        let olds = ref [] in
+        iter_out c y Schema.p_same (fun z -> if z <> r then olds := z :: !olds);
+        List.iter (fun z -> let id = intern c y Schema.p_same z in if now ws id > 0 then (set_now ws id 0; count_derived c ri)) !olds;
+        if y <> r then emit_fact c ri y Schema.p_same r round)
+      (List.rev !moved);
+    (* the facts of the old representatives, rewritten *)
+    let ts = Hashtbl.create 8 in
+    Hashtbl.iter (fun x _ -> Hashtbl.replace ts x ()) losers;
+    let todo = ref [] in
+    facts_naming c ts (fun e p w st -> todo := (e, p, w, st) :: !todo);
+    List.iter
+      (fun (e, p, w, st) ->
+        let ri = match Hashtbl.find_opt losers e with Some ri -> ri | None -> Hashtbl.find losers w in
+        let e' = rep_of c e and w' = if ptype c.v p = link_code then rep_of c w else w in
+        if st = 2 then begin
+          check_frozen c p w;
+          let id = intern c e p w in
+          if now ws id > 0 then (set_now ws id 0; count_derived c ri)
+        end;
+        emit_fact c ri e' p w' round)
+      (List.rev !todo)
+  end
+
 let saturate ?(s = 0) c (first : ints) nf =
   let ws = c.ws in
   let ins = ins_s_d c s in
   let nm = Array.length c.prog.modules in
   let cur = ref first and ncur = ref nf and r = ref 0 in
-  while !ncur > 0 || c.nn > 0 do
+  while !ncur > 0 || c.nn > 0 || c.pend <> [] do
     c.round <- !r;
     let d = !cur and nc = !ncur and rr = !r in
     let par =
@@ -2948,11 +3193,22 @@ let saturate ?(s = 0) c (first : ints) nf =
         (rr + 1)
     in
     if not par then
-      for i = 0 to nc - 1 do
-        let x = A.unsafe_get d i in
-        if now ws x > 0 && round ws x = rr then run_all ins (fe ws x) (fp ws x) (fw ws x)
-      done;
+      if not c.prog.eq then
+        for i = 0 to nc - 1 do
+          let x = A.unsafe_get d i in
+          if now ws x > 0 && round ws x = rr then run_all ins (fe ws x) (fp ws x) (fw ws x)
+        done
+      else
+        (* with equality, the equalities a fact gives are applied before the next fact runs (as RDFox's
+           fact-at-a-time rewriting does): the facts they make outdated start nothing, so a functional property with
+           n values on one thing costs O(n) instances, not the n^2 pairs a round would enumerate *)
+        for i = 0 to nc - 1 do
+          let x = A.unsafe_get d i in
+          if now ws x > 0 && round ws x = rr then run_all ins (fe ws x) (fp ws x) (fw ws x);
+          if c.pend <> [] then apply_merges c (rr + 1)
+        done;
     for mi = 0 to nm - 1 do if c.prog.strat.(c.prog.modules.(mi).m_rule) = s then module_round c mi d !ncur !r done;
+    if c.pend <> [] then apply_merges c (rr + 1);
     (* this round's buffer takes the next round's facts *)
     let nx = c.next and nn = c.nn in
     c.next <- (if d != first then d else c.spare);
@@ -2967,6 +3223,9 @@ let saturate ?(s = 0) c (first : ints) nf =
 (* B/F over the candidates (ids in the working set): each one checked; one without a proof deleted, and the facts its
    instances give, still there, checked in turn *)
 let [@inline never] on_lost c pl =
+  (* an equality that lost an instance: its class is taken apart and derived again *)
+  if pl.hp = Schema.p_same then c.boom <- rep_of c pl.he :: c.boom
+  else
   (* a closure its module decides gives no candidate through its own rules *)
   if pl.hok && not (Bytes.length c.walked > 0 && pl.hp >= 0 && pl.hp < Bytes.length c.walked && Bytes.unsafe_get c.walked pl.hp <> '\000'
                     && c.prog.in_module.(pl.ri)) then begin
@@ -3142,6 +3401,44 @@ let module_retract c f0 (cands : int list) =
 
 (* B/F for stratum [s] (Motik, Nenov, Piro, Horrocks 2019 for stratified rules: the strata in order, the lower ones
    complete): its queue holds the candidates the lower strata's deletions and Nots gave it *)
+(* Retraction with equality, Delete-Rederive for a class (Gupta, Mumick, Subrahmanian 1993, applied to the classes;
+   the reasoner design, section 5.10): a class whose facts may have lost a proof (an equality lost an instance, a fact
+   naming it lost a derivation or was retracted) is taken apart: each member its own representative again, every fact
+   only derived that names the representative deleted (the instances it gave lose it, B/F's way), and the asserted
+   facts of every member are round 0 of the insertion that follows, which derives again the equalities that still
+   hold and rewrites their facts. Rewriting keeps one fact for the derivations of every member, so a finer test (B/F
+   on equalities, Motik et al., IJCAI 2015) is left for later; this one is exact. *)
+let [@inline never] explode c f0 r =
+  if (not (Hashtbl.mem c.exploded r)) && rep_of c r = r then begin
+    Hashtbl.replace c.exploded r ();
+    let ws = c.ws in
+    let ms = ref [] in
+    iter_in c Schema.p_same r (fun y -> if rep_of c y = r then ms := y :: !ms);
+    List.iter
+      (fun y ->
+        let id = intern c y Schema.p_same r in
+        if now ws id > 0 then (set_now ws id 0; set_mark ws id 4; count_derived c (-1));
+        Hashtbl.replace c.eqt y y)
+      !ms;
+    let ts = Hashtbl.create 8 in
+    Hashtbl.replace ts r ();
+    let gone = ref [] in
+    facts_naming c ts (fun e p w st -> if st = 2 then gone := intern c e p w :: !gone);
+    List.iter
+      (fun x ->
+        if not (has ws x 4) then begin
+          check_frozen c (fp ws x) (fw ws x);
+          set_mark ws x 4;
+          set_now ws x 2;
+          run_all f0 (fe ws x) (fp ws x) (fw ws x);
+          set_now ws x 0;
+          count_derived c (-1)
+        end)
+      !gone;
+    List.iter (fun y -> Hashtbl.replace ts y ()) !ms;
+    facts_naming c ts (fun e p w st -> if st = 1 then c.refill <- intern c e p w :: c.refill)
+  end
+
 let [@inline never] backward_forward c s (cands : int list) =
   let ws = c.ws and q = c.bfqs.(s) in
   plans c 0;
@@ -3150,9 +3447,16 @@ let [@inline never] backward_forward c s (cands : int list) =
   let cands = if s = 0 then module_retract c (lost_walk_d c) cands else cands in
   let f0 = if Bytes.length c.walked > 0 then lost_walk_d c else f0 in
   List.iter (fun x -> Queue.add x q) cands;
-  while not (Queue.is_empty q) do
+  let booms () = while c.boom <> [] do let r = List.hd c.boom in c.boom <- List.tl c.boom; explode c f0 r done in
+  booms ();
+  while not (Queue.is_empty q) || c.boom <> [] do
+    booms ();
+    if not (Queue.is_empty q) then
     let x = Queue.pop q in
     check_frozen c (fp ws x) (fw ws x);
+    (* a fact of a class of several things: its class is taken apart first (it is deleted there if only derived) *)
+    let cl = if c.eqon && base ws x <> 1 && now ws x = 2 then class_named c x else -1 in
+    if cl >= 0 then (c.boom <- cl :: c.boom; booms ());
     if not (has ws x 4) then begin
       check c 0 x;
       if not (has ws x 2) then begin
@@ -3532,8 +3836,13 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
                   cands := x :: !cands
                 end
               | Added when r land 1 <> 0 && base ws x = 1 && round ws x <> 0 ->
-                set_round ws x 0;
-                first := x :: !first
+                (* a fact naming a thing that is not its representative: its rewriting is what the rules read *)
+                if c.eqon && ((not (is_rep c ch.e)) || (ptype c.v ch.p = link_code && not (is_rep c words.(i)))) then
+                  emit_fact c (-1) (rep_of c ch.e) ch.p (if ptype c.v ch.p = link_code then rep_of c words.(i) else words.(i)) 1
+                else begin
+                  set_round ws x 0;
+                  first := x :: !first
+                end
               | _ -> ()
             end)
           changes;
@@ -3544,6 +3853,9 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
               let sh = Rules.split r in
               match sh.pos.head with
               | Never -> ()
+              | Give h when h.p = Schema.p_same ->
+                (* a removed equality: the classes its instances made are derived again *)
+                if c.eqon then instances c ~extra:r (-1) (fun pl -> c.boom <- rep_of c pl.he :: c.boom)
               | Give h when sh.agg <> None ->
                 if Schema.find c.v.schema h.p <> None then iter_all c h.p (fun e w -> cands := intern c e h.p w :: !cands)
               | Give h ->
@@ -3580,7 +3892,7 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
               prog.aggs;
             flips c s ins ~present:true (on_lost c);
           end;
-          if cands_s <> [] || not (Queue.is_empty c.bfqs.(s)) then backward_forward c s cands_s;
+          if cands_s <> [] || (not (Queue.is_empty c.bfqs.(s))) || c.boom <> [] then backward_forward c s cands_s;
           (* an added rule: the facts it gives over the state, at round 1; the module of an added closure, from
              scratch *)
           let adding = List.filter (fun ri -> not (prog.never.(ri) || prog.in_module.(ri) || prog.aggs.(ri) <> None) && prog.strat.(ri) = s) added_idx in
@@ -3601,6 +3913,9 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
             prog.modules;
           (* round 0: the group's asserted additions; with strata, every fact the group made present so far (the
              lower strata's, this stratum's aggregates'), their rounds set to 0 *)
+          (* the asserted facts of the classes taken apart: round 0 too *)
+          List.iter (fun x -> if now ws x = 1 && round ws x <> 0 then (set_round ws x 0; first := x :: !first)) c.refill;
+          c.refill <- [];
           let first =
             if not prog.stratified then List.rev !first
             else begin
@@ -3906,6 +4221,8 @@ and[@inline never] bulk_checks c ~nb =
 
 and bulk_with ~own ~first_new prog (v : Store.view) (b : Bulk.t) =
   let n = b.n in
+  (* with classes of equal things, the ordinary path (its merges rewrite facts of the view) *)
+  if prog.eq then None else
   (* rules that derive without Not or aggregates; constraints (with Nots or not), and heads on one-valued or unique
      properties, checked after the fixpoint below (a group that breaks one goes to the ordinary path, which refuses it
      with its message). A group only adds facts: a constraint's Not can only become false, so the instances to check
@@ -3981,6 +4298,8 @@ let [@inline never] sources (v : Store.view) p =
     let q = Queue.create () in
     Queue.add p q;
     Hashtbl.replace seen p ();
+    (* with equality, every fact may be a rewriting: what the equalities read counts too *)
+    if prog.eq && p <> Schema.p_same then (Queue.add Schema.p_same q; Hashtbl.replace seen Schema.p_same ());
     while (not !any) && not (Queue.is_empty q) do
       let x = Queue.pop q in
       (* a rule's Nots read their properties too: an absence tells of them *)
@@ -4048,6 +4367,7 @@ let [@inline never] why (v : Store.view) e p w =
   | _ ->
     with_ctx ~prog:(program v) v (fun c ->
         let ws = c.ws in
+        c.why_mode <- true;
         let x = add ws e p w 2 in
         check c 0 x;
         let rec tree x =
@@ -4071,6 +4391,9 @@ let [@inline never] why (v : Store.view) e p w =
               By { rule = rule_name c ri; e; p; v = value_of v p w; from = List.map tree ys }
             | ri, ids when ri >= 0 ->
               By { rule = rule_name c ri; e; p; v = value_of v p w; from = Array.to_list (Array.map tree ids) }
+            | (-2 | -3), ids ->
+              (* the rewriting of an equality: the asserted fact of a member, and the facts of the classes *)
+              By { rule = "cepheus/same"; e; p; v = value_of v p w; from = Array.to_list (Array.map tree ids) }
             | _ -> failwith (Printf.sprintf "Reason.why: %s has no proof: the materialisation is wrong" (fact_text v e p w))
         in
         if has ws x 2 then Some (tree x)

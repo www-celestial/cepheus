@@ -255,6 +255,12 @@ val change_budget : int ref
 
 (** {1 Reading} *)
 
+val same : view -> int -> int list
+(** The class of a thing: the things the rules made the same as it (a rule whose head gives [cepheus/same], as
+    OWL 2 RL's [owl/SameAs] and functional properties do), itself included, by id. Their facts are kept on one of
+    them, the representative; {!get}, {!values}, {!things} and the questions read a thing they name as its class's
+    representative. *)
+
 val get : view -> int -> (int * value) list
 (** Every fact of a thing: (property, value), by property. *)
 

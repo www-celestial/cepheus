@@ -9,6 +9,11 @@ val p_many : int  (** [cepheus/many], 3 *)
 val p_unique : int  (** [cepheus/unique], 4 *)
 val p_rule : int  (** [cepheus/rule], 5: a rule's definition, its canonical text (Rules) *)
 
+val p_same : int
+(** [cepheus/same], 6: [x cepheus/same r], derived only, says that the thing x is the same as r, the representative of
+    its class of equal things (the reasoner design, section 5.10); a rule whose head gives it makes two things one. No
+    write asserts it, and no group 1 declares it: a database made before it knows it all the same. *)
+
 val first_prop : int
 (** 16: the first id of a property of the application; property ids are below {!first_thing}. *)
 

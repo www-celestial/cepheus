@@ -177,13 +177,14 @@ let writable c ~id ~kind i =
    from through the rules (Reason.sources; any kind, for a rule over a variable property), so that a derived fact
    tells it nothing of the facts it may not read. *)
 let reads_prop (v : Store.view) r p =
-  Schema.is_system p
+  (Schema.is_system p && p <> Schema.p_same)
   ||
+  (* cepheus/same: the classes the rules make, read as any derived fact: by its sources (Reason.sources) *)
   match Schema.find v.schema p with
   | None -> false
   | Some d ->
-    let reads q = Schema.is_system q || match Schema.find v.schema q with Some dq -> Tokens.reads_kind r (Tokens.kind_of dq.name) | None -> true in
-    Tokens.reads_kind r (Tokens.kind_of d.name)
+    let reads q = (Schema.is_system q && q <> Schema.p_same) || match Schema.find v.schema q with Some dq -> Tokens.reads_kind r (Tokens.kind_of dq.name) | None -> true in
+    (p = Schema.p_same || Tokens.reads_kind r (Tokens.kind_of d.name))
     &&
     match Reason.sources v p with
     | Some qs -> List.for_all reads qs

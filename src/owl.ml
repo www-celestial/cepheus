@@ -177,7 +177,31 @@ let rules_without_equality (t : t) : Rules.t list =
     rule "scm-int" [ pat c t.intersection_of m ] (give c t.sub_class_of m);
     rule "scm-uni" [ pat c t.union_of m ] (give m t.sub_class_of c) ]
 
-let rl (t : t) = rules_without_equality t
+(* equality (step 6, part 2): table 4 and the rules that give owl:sameAs. A rule whose head is [x cepheus/same y] makes
+   x and y one thing: the engine keeps the classes of equal things and rewrites their facts onto one representative
+   (Motik, Nenov, Piro, Horrocks, AAAI 2015), so eq-ref, eq-sym, eq-trans and eq-rep-s, eq-rep-p, eq-rep-o are its
+   own: no rule of theirs is written. owl/eq makes owl/SameAs such a rule's premise. *)
+let equality (t : t) : Rules.t list =
+  let v k = Query.Var k and pv k = Rules.prop_var k in
+  let tru = Query.Val (Value.Bool true) in
+  let same a b = Rules.Give (pat a Schema.p_same b) in
+  let ty = t.type_ in
+  let a = v 0 and c = v 2 and x = v 4 and y = v 5 and z = v 6 and u = v 7 in
+  let p = 9 in
+  let y1 = v 16 and y2 = v 17 and x1 = v 18 and x2 = v 19 and m = v 20 in
+  let one = Query.Val (Value.Int 1) and thing = Query.Thing t.thing in
+  [ rule "eq" [ pat x t.same_as y ] (same x y);
+    rule "eq-diff1" [ pat x t.different_from x ] Never;
+    rule "prp-fp" [ pat a t.property (v p); pat a t.functional tru; pat x (pv p) y1; pat x (pv p) y2 ] (same y1 y2);
+    rule "prp-ifp" [ pat a t.property (v p); pat a t.inverse_functional tru; pat x1 (pv p) y; pat x2 (pv p) y ] (same x1 x2);
+    rule "prp-key" [ pat c (Rules.every t.has_key) m; pat x ty c; pat y ty c; pat x (pv 20) z; pat y (pv 20) z ] (same x y);
+    rule "cls-maxc2" [ pat a t.max_cardinality one; pat a t.on_property (v p); pat u ty a; pat u (pv p) y1; pat u (pv p) y2 ] (same y1 y2);
+    rule "cls-maxqc3"
+      [ pat a t.max_qualified_cardinality one; pat a t.on_property (v p); pat a t.on_class c; pat u ty a; pat u (pv p) y1; pat y1 ty c; pat u (pv p) y2; pat y2 ty c ]
+      (same y1 y2);
+    rule "cls-maxqc4" [ pat a t.max_qualified_cardinality one; pat a t.on_property (v p); pat a t.on_class thing; pat u ty a; pat u (pv p) y1; pat u (pv p) y2 ] (same y1 y2) ]
+
+let rl (t : t) = rules_without_equality t @ equality t
 
 (* ---- the n-ary axioms, as their pairs ---- *)
 

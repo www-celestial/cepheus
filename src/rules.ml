@@ -347,6 +347,8 @@ let[@inline never] check (v : Store.view) r =
        | _ -> bad "the value of every [..] is a variable: the member")
      | _ -> bad "one every [..] a rule");
     Array.iteri (fun k s -> if not s then bad "variable ?%d appears in no pattern of the body" k) seen;
+    if List.exists (fun (q : Query.pattern) -> base_prop q.p = Schema.p_same) all then
+      bad "cepheus/same is read through the classes of equal things, not by a rule's pattern";
     (* a Not: 1 to 4 patterns; a variable in no positive pattern is the own of one Not *)
     Array.iter (fun ps -> if Array.length ps > 4 then bad "a Not takes 1 to 4 patterns, not %d" (Array.length ps)) sh.nots;
     let owner = Array.make r.vars (-1) in
@@ -390,7 +392,9 @@ let[@inline never] check (v : Store.view) r =
          end
          else match Schema.find v.schema q.p with Some d -> Some d | None -> bad "no property %d in its head" q.p
        in
-       if q.p >= 0 && Schema.is_system q.p then bad "its head gives a cepheus/ property";
+       if q.p >= 0 && Schema.is_system q.p && q.p <> Schema.p_same then bad "its head gives a cepheus/ property";
+       (* an equality: [x cepheus/same y] makes x and y one thing (the engine's classes of equal things, Reason) *)
+       if q.p = Schema.p_same && (sh.nots <> [||] || sh.agg <> None) then bad "a rule that makes things the same takes no Not and no aggregate";
        (* the head's variables are bound by the body's positive patterns (range restriction) *)
        List.iter (fun k -> if k >= 0 && k < r.vars && not (outer k) then bad "?%d of its head is in no pattern outside Not" k) (pattern_vars q);
        (match q.e with

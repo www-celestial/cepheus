@@ -22,7 +22,9 @@
                                      rules, and without rules; per group, in microseconds
    reason.exe w3c N groups|bulk DIR|-   as mat N rules, with the univ-bench ontology as facts and the W3C's form of the
                                      OWL 2 RL rules it needs (10 rules, variable properties), which the engine unfolds
-   reason.exe owl N groups|bulk DIR|-   the same with OWL 2 RL whole (Cepheus.Owl: its vocabulary and every rule) *)
+   reason.exe owl N groups|bulk DIR|-   the same with OWL 2 RL whole (Cepheus.Owl: its vocabulary and every rule)
+   reason.exe uobm N rew|ax         UOBM-like: N universities, a quarter of the people recorded 2 to 4 times, the e-mail
+                                     inverse functional; equality by rewriting (rew) or axiomatised (ax), in memory *)
 
 open Cepheus
 
@@ -695,6 +697,18 @@ let owl_ontology db ids (o : Owl.t) =
   define "TeachingAssistant" (Some "Person") "teachingAssistantOf" "Course";
   ignore (ok (write db (List.rev !ops)))
 
+(* DROP=1: the database directory a run made is removed when it ends (a series of loads keeps the disk small); only a
+   directory named w-* or o-* under a folder named owl-t, the job's own *)
+let drop_db dir =
+  if Sys.getenv_opt "DROP" = Some "1" && Filename.basename (Filename.dirname dir) = "owl-t"
+     && (let b = Filename.basename dir in String.length b > 2 && (String.sub b 0 2 = "w-" || String.sub b 0 2 = "o-"))
+  then begin
+    let rec rm p =
+      if Sys.is_directory p then (Array.iter (fun f -> rm (Filename.concat p f)) (Sys.readdir p); Sys.rmdir p) else Sys.remove p
+    in
+    if Sys.file_exists dir then rm dir
+  end
+
 (* the derived facts of the data, not of the ontology's things: what the two forms of the rules must agree on *)
 let data_derived (v : view) ~from_e ~skip =
   let d = ref 0 in
@@ -770,7 +784,101 @@ let w3c ?(form = "w3c") n path dir =
   Printf.printf "%s %d %s %s: %.3f s, %d groups (%d unfolded, %d as written), %d facts (%d derived, %d of the data without the restrictions' types), %d derivations; reasoning %.3f s, %.3f M derived/s; of which the working set's build %.3f s\n%!" form n
     path (if dir = None then "memory" else "disk") t !groups !Reason.spec_groups !Reason.gen_groups all d dd !Reason.derivations r
     (if r > 0. then float_of_int d /. r /. 1e6 else 0.) ix;
-  close db
+  close db;
+  Option.iter drop_db dir
+
+(* ---- UOBM-like: equality, by rewriting (rew) or axiomatised (ax) ----
+   LUBM-shaped data with the univ-bench ontology in OWL 2 RL's vocabulary, where a quarter of the people are recorded
+   2 to 4 times (a record a department that knows them: the same e-mail, part of their facts each), and the e-mail is
+   inverse functional (prp-ifp): each person's records are one thing. UOBM (Ma et al., ESWC 2006) adds such equalities to
+   LUBM; Motik, Nenov, Piro, Horrocks (AAAI 2015) measure rewriting against the axiomatised equality on it. rew: OWL 2 RL
+   whole (the classes and the rewriting); ax: the same rules, their equalities given as owl/SameAs facts, with eq-sym,
+   eq-trans, and eq-rep-s and eq-rep-o written once for each property (eq-ref left out, which only makes ax larger).
+   Both are read through their classes at the end (each fact's things as their class's least member): the digests
+   must agree. *)
+let uobm n mode =
+  Reason.derivations := 0;
+  let db = fork empty in
+  let ids = setup db in
+  let o = ok (Owl.setup db) in
+  let rules =
+    if mode = "rew" then Owl.rl o
+    else begin
+      let same_to_fact (r : rule) =
+        match r.head with
+        | Give h when h.p = Schema.p_same -> if r.name = "owl/eq" then None else Some { r with head = Give { h with p = o.same_as } }
+        | _ -> Some r
+      in
+      let base = List.filter_map same_to_fact (Owl.rl o) in
+      let x = Var 0 and y = Var 1 and z = Var 2 in
+      let v = view db in
+      let props = List.filter (fun p -> p <> o.same_as && match describe v p with Some d -> not (String.length d.name > 8 && String.sub d.name 0 8 = "cepheus/") | None -> false) (List.init (Schema.count v.schema) Fun.id) in
+      let link p = match describe v p with Some d -> d.typ = Tlink | None -> false in
+      base
+      @ [ { name = "ax/eq-sym"; vars = 2; where = [ { e = x; p = o.same_as; v = y } ]; ranges = []; head = Give { e = y; p = o.same_as; v = x } };
+          { name = "ax/eq-trans"; vars = 3; where = [ { e = x; p = o.same_as; v = y }; { e = y; p = o.same_as; v = z } ]; ranges = []; head = Give { e = x; p = o.same_as; v = z } } ]
+      @ List.map (fun p -> { name = Printf.sprintf "ax/eq-rep-s-%d" p; vars = 3; where = [ { e = x; p = o.same_as; v = y }; { e = x; p; v = z } ]; ranges = []; head = Give { e = y; p; v = z } }) props
+      @ List.filter_map (fun p -> if link p then Some { name = Printf.sprintf "ax/eq-rep-o-%d" p; vars = 3; where = [ { e = x; p = o.same_as; v = y }; { e = z; p; v = x } ]; ranges = []; head = Give { e = z; p; v = y } } else None) props
+    end
+  in
+  ignore (ok (define db rules));
+  let ids = { ids with ty = o.type_ } in
+  owl_ontology db ids o;
+  (* the e-mail, inverse functional *)
+  ignore (ok (write db [ Add (-1, o.property, Link (ids.pr "emailAddress")); Add (-1, o.inverse_functional, Bool true) ]));
+  let g = { st = (7 * 0x1E3779B97F4A7C15) lor 1; lit = 0 } in
+  let email = ids.pr "emailAddress" in
+  let groups = ref 0 and records = ref 0 in
+  Reason.seconds := 0.;
+  let t0 = now () in
+  for u = 0 to n - 1 do
+    university ids g u (fun ops ->
+        (* the people of this group (things with an e-mail), their facts; a quarter recorded again 1 to 3 times *)
+        let facts = Hashtbl.create 1024 in
+        List.iter (function Add (e, p, x) -> Hashtbl.add facts e (p, x) | _ -> ()) ops;
+        let next = ref (List.fold_left (fun m -> function Add (e, _, x) -> min m (min e (match x with Link l -> l | _ -> 0)) | _ -> m) 0 ops) in
+        let extra = ref [] in
+        Hashtbl.iter
+          (fun e (p, x) ->
+            if p = email && rand g 1 4 = 1 then
+              for _ = 1 to rand g 1 3 do
+                decr next;
+                incr records;
+                let d = !next in
+                extra := Add (d, email, x) :: !extra;
+                List.iter (fun (q, y) -> if q <> email && rand g 0 1 = 1 then extra := Add (d, q, y) :: !extra) (Hashtbl.find_all facts e)
+              done)
+          facts;
+        incr groups;
+        ignore (ok (write db (ops @ List.rev !extra))))
+  done;
+  let t = now () -. t0 in
+  let v = view db in
+  (* the classes: rew's cepheus/same, ax's owl/SameAs closure; a fact read through them, its things as the least member *)
+  let cls = Hashtbl.create 1024 in
+  let least x = match Hashtbl.find_opt cls x with Some m -> m | None -> x in
+  if mode = "rew" then begin
+    let reps = Hashtbl.create 1024 in
+    Store.iter_prop v Schema.p_same (fun e r -> Hashtbl.replace reps r (min e (Option.value (Hashtbl.find_opt reps r) ~default:r)));
+    Store.iter_prop v Schema.p_same (fun e r -> Hashtbl.replace cls e (Hashtbl.find reps r));
+    Hashtbl.iter (fun r m -> Hashtbl.replace cls r m) reps
+  end
+  else Store.iter_prop v o.same_as (fun e w -> if w < least e then Hashtbl.replace cls e w);
+  let seen = Hashtbl.create 100_000 and h = ref 0 and all = ref 0 and derived = ref 0 and nsame = ref 0 in
+  for e = Schema.first_thing to v.next_e - 1 do
+    Store.iter_facts v e (fun p w ->
+        incr all;
+        if Store.state v e p w = 2 then incr derived;
+        if p = o.same_as || p = Schema.p_same then incr nsame
+        else begin
+          let link = match describe v p with Some d -> d.typ = Tlink | None -> false in
+          let f = least e, p, if link then least w else w in
+          if not (Hashtbl.mem seen f) then (Hashtbl.replace seen f (); h := !h + Hashtbl.hash f)
+        end)
+  done;
+  let r = !Reason.seconds in
+  Printf.printf "uobm %d %s: %.3f s, %d groups, %d records more, %d facts (%d derived, %d of equality), %d derivations; reasoning %.3f s; read through the classes: %d facts, digest %x\n%!"
+    n mode t !groups !records !all !derived !nsame !Reason.derivations r (Hashtbl.length seen) !h
 
 (* ---- Not and aggregates (the reasoner's step 4) ----
    N invoices of K lines each (an amount, a day), a group an invoice, then R rounds on them in turn: a line added (of
@@ -929,5 +1037,6 @@ let () =
   | [ "closure-del"; kind; form; dir; how ] -> closure_del kind form dir how
   | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
   | [ "owl"; n; path; dir ] -> w3c ~form:"owl" (int_of_string n) path dir
+  | [ "uobm"; n; mode ] -> uobm (int_of_string n) mode
   | [ "notagg"; n; k; r; mode ] -> notagg_bench (int_of_string n) (int_of_string k) (int_of_string r) mode
   | _ -> prerr_endline "usage: reason.exe mat N rules|none groups|bulk DIR|- | student N R DIR | why N R DIR | apply N"; exit 2
