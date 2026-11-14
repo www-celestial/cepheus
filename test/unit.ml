@@ -136,6 +136,28 @@ let () =
     | exception Codec.Short -> incr C.checks
   done
 
+let () =
+  section "latency histograms: counters made at the first value, by one of two domains at once";
+  let h = Histogram.create () and e = Histogram.create () in
+  C.check (Histogram.percentile h 0.5 = 0 && Histogram.total h = 0) "an empty histogram";
+  Histogram.merge_into h e;
+  C.check (Histogram.percentile h 1.0 = 0 && Histogram.total h = 0) "an empty one merged into an empty one";
+  List.iter (Histogram.record e) [ 5; 300; 70000 ];
+  Histogram.merge_into h e;
+  C.check (Histogram.total h = 3 && Histogram.percentile h 0.0 = 5 && Histogram.percentile h 0.5 = 301
+           && Histogram.percentile h 1.0 = 70000) "a full one merged into an empty one";
+  (* a lost array would leave a value counted in the total and in no counter: the walk would run past the end *)
+  for _ = 1 to 100 do
+    let h = Histogram.create () and go = Atomic.make false in
+    let d = Domain.spawn (fun () -> while not (Atomic.get go) do Domain.cpu_relax () done; Histogram.record h 7) in
+    Atomic.set go true;
+    Histogram.record h 9;
+    Domain.join d;
+    match Histogram.percentile h 1.0 with
+    | p -> C.check (p = 7 || p = 9) "two first values at once: the top one %d" p
+    | exception Invalid_argument _ -> C.fail "two first values at once: a value counted in no counter"
+  done
+
 (* ---- bit packing, and the journal's coding of groups in columns ---- *)
 
 let () =
