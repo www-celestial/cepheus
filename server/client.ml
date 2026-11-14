@@ -435,6 +435,9 @@ let retry_budget = ref 30.0
    connection), until it returns or the budget is spent; then [gave_up ()] *)
 let with_retry c attempt gave_up =
   let deadline = Unix.gettimeofday () +. !retry_budget in
+  (* the pause between two tries doubles up to 1 s; in a Raft cluster (its members known) up to 50 ms: another member
+     answers at once, and an election lasts about a second *)
+  let cap = if c.members <> [] then 0.05 else 1.0 in
   let rec go pause =
     match attempt () with
     | r -> r
@@ -446,10 +449,10 @@ let with_retry c attempt gave_up =
         let moved = match where with Some a -> (try let a' = address_of_string a in let m = a' <> c.address in c.address <- a'; m with Config.Bad _ -> false) | None -> false in
         if not moved then Unix.sleepf pause;
         match if moved then reconnect c else Ok () with
-        | Ok () -> go (if moved then pause else min 1.0 (pause *. 2.))
+        | Ok () -> go (if moved then pause else min cap (pause *. 2.))
         | Error (true, m) ->
           gave_up (match where with Some a -> Printf.sprintf "not_leader: the leader is at %s, which this connection cannot reach (%s)" a m | None -> m)
-        | Error (false, _) -> Unix.sleepf pause; go (min 1.0 (pause *. 2.))
+        | Error (false, _) -> Unix.sleepf pause; go (min cap (pause *. 2.))
       end
     | exception Broken m ->
       let rec again pause =
@@ -467,7 +470,7 @@ let with_retry c attempt gave_up =
                c.address <- after l
              | _ -> ());
             Unix.sleepf pause;
-            again (min 1.0 (pause *. 2.))
+            again (min cap (pause *. 2.))
       in
       again pause
   in
