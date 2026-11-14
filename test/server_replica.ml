@@ -5,6 +5,8 @@
    - srv2, made a replica of srv1 (its role file 0600), copies srv1's databases from nothing while a program writes
      to srv1, and holds every group, the same groups; it refuses writes (read_only) and serves reads;
    - killed (kill -9) while writes go on, it starts again and catches up;
+   - a change of the rules on the primary (in its background) and a load on the path of loads with the rule's
+     consequences: the replica holds both, read there;
    - the peer port refuses a certificate of another CA, one of the cluster's CA for a name that is no other peer
      (srv1's own, the intruder's), and a peer of another cluster id; a replica of an unknown database is refused;
    - a promotion while srv1 sends is refused, and so is one without the handover after srv1 was killed; srv1's clean
@@ -142,6 +144,27 @@ let () =
   wait_socket (sock "srv2");
   wait_for "the replica catches up after kill -9" caught_up;
   C.check true "the replica caught up after kill -9 (%d)" (group "srv1" "main");
+  (* a change of the rules on the primary (computed in its background), then a load past a large group's size (the
+     path of loads, its frame written by pieces, the rule's consequences in it): the replica holds both, read there *)
+  let sdb2, sps = match Client.declare w "side" [ prop "k" Tint; prop "k2" Tint ] with Ok (db, ps) -> db, ps | Error e -> failwith ("declare: " ^ e.message) in
+  let[@warning "-8"] [ sk; sk2 ] = sps in
+  let rid = Schema.first_thing - 100 in
+  let copy : Cepheus.rule = { name = "copy"; vars = 2; where = [ { e = Var 0; p = sk; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p = sk2; v = Var 1 } } in
+  (match Client.write w sdb2 [ Resolve.Add (rid, Schema.p_name, Text "copy"); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text copy)); Resolve.Expect (rid, Schema.p_name, None) ] with
+   | Ok _ -> C.check true "a change of the rules on the primary"
+   | Error e -> C.check false "a change of the rules on the primary: %s %s" e.code e.message);
+  let load = 25_000 in
+  (match Client.write w sdb2 (List.init load (fun i -> Resolve.Add (-(i + 1), sk, Int (1_000_000 + i)))) with
+   | Ok _ -> C.check true "a load of %d facts on the primary" load
+   | Error e -> C.check false "a load on the primary: %s %s" e.code e.message);
+  wait_for "the replica catches up after the change and the load" caught_up;
+  let rows c db p = match Client.find c db { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } with Ok (_, rows) -> List.length rows | Error _ -> -1 in
+  let nk = rows w sdb2 sk in
+  C.check (nk >= load && rows w sdb2 sk2 = nk) "the primary: the load and the rule's consequences (%d)" nk;
+  let r = Result.get_ok (Client.connect (Client.Unix_socket (sock "srv2")) wtext) in
+  let rdb = Result.get_ok (Client.open_db r "side") in
+  C.check (rows r rdb sk = nk && rows r rdb sk2 = nk) "the replica: the load and the rule's consequences, read there (%d)" (rows r rdb sk2);
+  Client.close r;
   (* the peer port refuses: another CA, a name that is no other peer, another cluster id, an unknown database *)
   let with_tls (c : Config.t) ca cert key = { c with tls = Some { Config.ca; cert; key } } in
   let f d x = Filename.concat d x in

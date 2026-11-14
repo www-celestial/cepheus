@@ -12,6 +12,9 @@
      log 0600;
    - the peer port refuses a peer of protocol 1, a certificate of the cluster's CA for a name no peer has, and a
      certificate of another CA.
+   - a load, a change of the rules (computed in the leader's background) beside groups that count with one counter
+     (Incr), and a load past one Raft entry (8 MiB), refused whole; the leader killed: the new one holds the load,
+     the change's consequences and the counter, nothing of the refused load.
 
      server_raft.exe DIR *)
 
@@ -275,6 +278,79 @@ let () =
    | Ok l -> Replica.close_link l; C.check false "a peer of protocol 1 was taken");
   Replica.version_override := None;
   ignore v;
+  (* the reasoner's paths in a cluster: a load, a change of the rules (computed in the background on the leader)
+     beside groups that count with one counter (Incr), a load past a Raft entry (8 MiB) refused whole; then the leader
+     killed: the new one holds every group, each of them through the Raft log *)
+  let sdb2, sps =
+    match Client.declare w "side" [ prop "k" Tint; prop "k2" Tint; prop "t" Ttext; prop "c" Tint ] with
+    | Ok (db, ps) -> db, ps
+    | Error e -> failwith ("declare: " ^ e.message)
+  in
+  let[@warning "-8"] [ sk; sk2; st; sc ] = sps in
+  let load = 30_000 in
+  (match Client.write w sdb2 (List.init load (fun i -> Resolve.Add (-(i + 1), sk, Int (1_000_000 + i)))) with
+   | Ok _ -> C.check true "a load of %d facts in the cluster" load
+   | Error e -> C.check false "a load in the cluster: %s %s" e.code e.message);
+  let counter = match Client.write w sdb2 [ Resolve.Add (-1, sc, Int 0) ] with Ok r -> List.assoc (-1) r.things | Error e -> failwith e.message in
+  let w2 = match Client.connect ~session:779 ~ca:(Filename.concat ca "ca.pem") (tcp follower) wtext with Ok c -> c | Error m -> failwith m in
+  let cdb = Result.get_ok (Client.open_db ~local:false w2 "side") in
+  let counted = Atomic.make 0 and stop = Atomic.make false in
+  let counting =
+    Thread.create
+      (fun () ->
+        while not (Atomic.get stop) do
+          match Client.write w2 cdb [ Resolve.Incr (counter, sc, 1, None) ] with
+          | Ok _ -> Atomic.incr counted
+          | Error e -> C.check false "an Incr in the cluster: %s %s" e.code e.message; Atomic.set stop true
+        done)
+      ()
+  in
+  let rid = Schema.first_thing - 100 in
+  let copy : Cepheus.rule = { name = "copy"; vars = 2; where = [ { e = Var 0; p = sk; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p = sk2; v = Var 1 } } in
+  (match Client.write w sdb2 [ Resolve.Add (rid, Schema.p_name, Text "copy"); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text copy)); Resolve.Expect (rid, Schema.p_name, None) ] with
+   | Ok _ -> C.check true "a change of the rules in the cluster, beside %d Incr" (Atomic.get counted)
+   | Error e -> C.check false "a change of the rules in the cluster: %s %s" e.code e.message);
+  Thread.delay 0.2;
+  Atomic.set stop true;
+  Thread.join counting;
+  Client.close w2;
+  let rows p = match Client.find w sdb2 { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } with Ok (_, rows) -> List.length rows | Error _ -> -1 in
+  let nk = rows sk in
+  C.check (nk >= load && rows sk2 = nk) "the rule's consequences on the leader: %d of %d" (rows sk2) nk;
+  (* a load past one Raft entry: refused whole, on every server *)
+  let side_before = group (Option.get (leader ())) "side" in
+  let text i = Printf.sprintf "%08d-%s" i (Digest.to_hex (Digest.string (string_of_int i))) in
+  (match Client.write w sdb2 (List.init 260_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text i)))) with
+   | Error { code = "invalid"; message } ->
+     let has m sub = let n = String.length sub in let rec go i = i + n <= String.length m && (String.sub m i n = sub || go (i + 1)) in go 0 in
+     C.check (has message "over the frame limit of 8388608")
+       "a load past 8 MiB in a cluster: refused (%s)" message
+   | Error e -> C.check false "a load past 8 MiB: %s %s" e.code e.message
+   | Ok _ -> C.check false "a load past 8 MiB was taken by a cluster");
+  let same () = List.for_all (fun db -> let g = group (Option.get (leader ())) db in List.for_all (fun k -> not alive.(k) || group k db = g) [ 0; 1; 2 ]) [ "main"; "side" ] in
+  wait_for "every server holds the leader's groups" same;
+  let lk = Option.get (leader ()) in
+  C.check (group lk "side" = side_before) "nothing of the refused load on any server (side at %d)" side_before;
+  (* the leader killed: the new one holds the load, the change and its consequences, the counter *)
+  let side_g = group lk "side" in
+  Unix.kill pids.(lk) Sys.sigkill;
+  ignore (Serve.wait pids.(lk));
+  alive.(lk) <- false;
+  wait_for "a new leader" (fun () -> match leader () with Some k -> k <> lk && stat k "raft.ready" = "true" | None -> false);
+  let ln = Option.get (leader ()) in
+  C.check (group ln "side" >= side_g) "the new leader %s holds side's groups (%d)" (List.nth names ln) side_g;
+  C.check (rows sk = nk && rows sk2 = nk) "on the new leader: the load and the rule's consequences (%d)" nk;
+  (match Client.get w sdb2 counter with
+   | Ok (_, facts) -> C.check (List.assoc_opt sc facts = Some (Int (Atomic.get counted))) "on the new leader: the counter at %d" (Atomic.get counted)
+   | Error e -> C.check false "the counter: %s" e.message);
+  (match Client.find w sdb2 { Query.vars = 1; where = [ { Query.e = Var 0; p = st; v = Val (Text (text 7)) } ]; ranges = [] } with
+   | Ok (_, rows) -> C.check (rows = []) "on the new leader: nothing of the refused load"
+   | Error e -> C.check false "a read on the new leader: %s" e.message);
+  pids.(lk) <- Serve.start bin cfgs.(lk);
+  alive.(lk) <- true;
+  wait_socket (sock lk);
+  wait_for "the killed leader catches up" same;
+  C.check true "the killed leader caught up (side at %d)" (group ln "side");
   Client.close w;
   Array.iteri (fun k c -> if alive.(k) then (C.check (run [ "stop"; "--config"; c ] = 0) "cepheus stop %s" (List.nth names k); ignore (Serve.wait pids.(k)))) cfgs;
   C.rmrf dir;

@@ -1039,7 +1039,8 @@ the server a replica, does a batch hold a large group's run).
   replica; promotions refused while the primary sends and without a handover; the clean stop's handover and `cepheus
   promote` (every confirmed group there, a write sent again answered with its first receipt, writes taken in epoch
   2); an old primary told at start of the newer epoch; the old primary following the new one; the same groups in
-  both journals; the files' modes (0600, the data directory 0700).
+  both journals; the files' modes (0600, the data directory 0700); a change of the rules on the primary and a load
+  on the path of large groups with the rule's consequences, both read on the replica.
 
 ### Security
 
@@ -1117,6 +1118,15 @@ parallel), the entry is **committed**: the leader writes the frame into the data
 log holds it forced), publishes it, and answers the program. Every server then applies each committed frame to its
 own database, in the log's order. A database's journal thus holds **committed frames only**: nothing is ever taken
 back from a journal, a run, or a view.
+
+Every frame a database makes goes through the log: a write's (an `Incr` included, its counter read at its point on
+the leader), a load's, and the group of a change of the rules computed in the background
+([rules](rules.md#changes-of-the-rules-in-the-background)), proposed alone once nothing else is in flight. A change
+that runs while its leader stops leading is answered `not_leader`, nothing of it written. An entry is one wire frame:
+a group is at most 8 MiB in a cluster, and a load takes the ordinary path of the writer (not the path of large groups,
+which writes a frame by pieces before it is durable); a group past 8 MiB is refused whole (`invalid`, "over the frame
+limit of 8388608"): a load is split into groups; a change of the rules whose consequences pass it cannot be, yet
+(large entries in pieces are a next step).
 
 The log is `DATA/raft/` (0700): segments `log.<first index>` (0600), each a header and **rounds**, a round being the
 entries of one fsync, checked by CRC-32C as a journal's frames are ([formats](formats.md#the-servers-files)); and
@@ -1302,7 +1312,9 @@ median for a leader ready at 772: in a cluster its pause now stops at 50 ms.
 - **Real servers** (`server_raft`): three servers over mutual TLS on loopback; a program connected to a follower writes
   through the leader; the leader killed (kill -9) while a program writes, a new one elected, every write the program
   was told committed there, a write sent again in its session answered with its first receipt; the old leader back
-  as a follower, caught up; refusals at the peer port; the files' modes.
+  as a follower, caught up; refusals at the peer port; the files' modes; a load, a change of the rules beside groups
+  that count with one counter, a load past 8 MiB refused whole, then the leader killed: the new one holds the load,
+  the change's consequences and the counter, nothing of the refused load.
 
 ## Security
 
