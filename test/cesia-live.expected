@@ -9,6 +9,11 @@ tls a kind declared after a rule: true
 tls 100 fibers: 100 answered, 100 in the database
 tls Incr by 50 fibers: 50 answered, numbered 1 to 50 once each: true the counter at 50
 tls closed: closed
+tls owl same: true true true
+tls owl get: Ada Ada
+tls owl refused: invalid true
+tls owl apart: true missing
+tls owl kinds: denied denied missing denied
 local: 200 writes by one connection, read at once by another: 200 seen
 local fork: 201 in the fork, 200 in the database
 local 200 fibers: 200 ids, 200 in the database

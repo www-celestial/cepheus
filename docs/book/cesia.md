@@ -575,6 +575,80 @@ Ok({Due: missing, Clear: true})
   without answers has no fact (Ada's `Due` went with her last unpaid invoice). A sum past the largest int refuses the
   group; it never wraps.
 
+## OWL 2 RL
+
+**OWL 2** is the W3C's language of **ontologies**: an ontology says what the words of a domain mean, its **classes**
+("a professor is a person") and its properties ("an advisor is a professor", "an e-mail is one person's"). **OWL 2
+RL** is the part of it that rules compute completely: the W3C gives it as 78 rules ([rules](rules.md#owl-2-rl-a-library-of-rules)
+tells how Cepheus holds each). From Cesia it is the package `owl`, beside `cepheus`, which the program takes too:
+
+```toml
+take = ["cesia/cepheus", "cesia/cepheus/owl"]
+```
+
+```cesia norun
+use deps/www-celestial/cepheus/cesia/cepheus/owl
+use std/list
+
+Person = cepheus.Kind("person", {Name: cepheus.Text(), Email: cepheus.Text(many = true), Advisor: cepheus.Link(many = true)})
+Label = cepheus.Kind("label", {Name: cepheus.Text(unique = true)})
+onto = result.Unwrap(cepheus.Fork(cepheus.Empty, [owl.Vocabulary, Person, Label]))
+io.Print(cepheus.Define(owl.Rl(), onto))
+(* the ontology: a professor is a person; an advisor is a professor; an e-mail is one person's *)
+c = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Label.Name, "Person"), cepheus.Add(cepheus.New(2), Label.Name, "Professor"),
+  cepheus.Add(cepheus.New(2), owl.SubClassOf, cepheus.New(1)),
+  cepheus.Add(cepheus.New(3), owl.Property, Person.Advisor), cepheus.Add(cepheus.New(3), owl.Range, cepheus.New(2)),
+  cepheus.Add(cepheus.New(4), owl.Property, Person.Email), cepheus.Add(cepheus.New(4), owl.InverseFunctional, true)], onto)).Things
+(* two records of one professor, the same e-mail in both, and a student whose advisor is the first *)
+r = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Person.Email, "ada@uni.org"), cepheus.Add(cepheus.New(2), Person.Email, "ada@uni.org"),
+  cepheus.Add(cepheus.New(2), Person.Name, "Ada"), cepheus.Add(cepheus.New(3), Person.Advisor, cepheus.New(1))], onto)).Things
+io.Print(cepheus.Same(r[1], onto))
+io.Print(cepheus.Get(Person, r[1], onto))
+io.Print(list.Sort(result.Unwrap(cepheus.Get(owl.Vocabulary, r[2], onto)).Type), "are", c[1], "and", c[2])
+(* a class disjoint from Person: Ada in it is refused *)
+io.Print(cepheus.Write([cepheus.Add(cepheus.New(1), owl.DisjointWith, c[1]), cepheus.Add(r[1], owl.Type, cepheus.New(1))], onto))
+result.Unwrap(cepheus.Write([cepheus.Retract(r[2], Person.Email, "ada@uni.org")], onto))
+io.Print(cepheus.Same(r[1], onto), cepheus.Get(Person, r[1], onto))
+```
+
+```text
+Ok(missing)
+Ok([65542, 65543])
+Ok({Name: "Ada", Email: ["ada@uni.org"], Advisor: []})
+[65538, 65539] are 65538 and 65539
+Err({Kind: "cepheus", Code: "invalid", Message: "constraint owl/cax-dw: [#65545 owl/DisjointWith #65538] [#65542 owl/Type #65545] [#65542 owl/Type #65538]"})
+Ok([65542]) Ok({Name: missing, Email: ["ada@uni.org"], Advisor: []})
+```
+
+- **The vocabulary** is a kind like any, named `owl`: `owl.Vocabulary`, given to `Connect` (or `Fork`) with the
+  program's own kinds, declares its properties `owl/Type`, `owl/SubClassOf` and the others (the same as the engine's
+  library declares: [the vocabulary](rules.md#the-vocabulary)), and each is a name of the package: `owl.SubClassOf`.
+  A class is a thing of the database, as any; an ontology is facts, written with `Write`, versioned like any.
+- **An axiom about a property** is a fact of its **description**, a thing of its own whose `owl.Property` is the
+  property: `[d, owl.Property, Person.Advisor]`, then `[d, owl.Range, professor]`. A property of a kind, written where
+  a link goes, is its id in the database (read back, it is that Int).
+- **`owl.Rl()` is data**: a list of 63 maps `{Rule, Library}`, one a rule, named `owl/` and the W3C's name
+  (`owl/cax-sco`). `Define` takes each rule's definition from the engine's library, for this database, makes the
+  things owl:Thing and owl:Nothing once (their `owl.Builtin` is `"Thing"` and `"Nothing"`), and defines the rules in
+  one group, as any rules: a program defines them at each start, and the second time writes nothing. A list like any:
+  `list.Filter` keeps a part of it.
+- **Things made one.** `owl/prp-ifp` made the two records one thing: `cepheus.Same(x, db)` gives the **class** of x,
+  the things the rules made the same as it. The facts of a class are kept on one of them, and `Get`, `Find` and
+  `Watch` read any thing of a class as that one: the name written on the second record is read on the first. The
+  e-mail retracted, they are two things again.
+- **Refusals.** A constraint of OWL 2 RL (`owl/cax-dw` here: no thing in two disjoint classes) refuses its group whole,
+  with Code `"invalid"` and the rule's name. A rule of the program that gives a list of the library's templates
+  (`owl.IntersectionOf`, `owl.UnionOf`, `owl.OneOf`, `owl.HasKey`) is refused by `Define`: only a write changes a list.
+  No rule beside OWL 2 RL's may hold a `Not` or an aggregate: its rules over a property that is a variable may give
+  any property, so such a rule could read its own absence. That is why this example runs on a [fork](#forks): the
+  chapter's database holds the rules with `Not` and `Sum` above. `owl.Rl()` without the vocabulary, or a name that is
+  no rule of it, is an `Err` of Code `"invalid"`.
+- **Rights.** The rules of OWL 2 RL read properties that are variables, so what they give may come from any kind: a
+  token reads it, and `Same`, only when it reads every kind ([rights](server.md#rights-g16)); `Define` needs a token
+  that writes the whole database. A token of some kinds gets a thing's own facts only, and learns no equality.
+
 ## Files
 
 A **file kind** keeps files in the database: `Scans = cepheus.Files("scan")` is a kind with the fields `Name`,

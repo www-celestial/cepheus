@@ -1,0 +1,172 @@
+(* OWL 2 RL from Cesia (cesia/cepheus/owl) on forks of Empty: the vocabulary as a kind, owl.Rl() defined with Define,
+   an ontology and data written as facts, the facts derived read back, things made one (cepheus.Same), and the
+   refusals: a constraint, a rule that gives a template's list, the rules without their vocabulary, an unknown rule,
+   equality beside a Not. *)
+use cesia/cepheus
+use cesia/cepheus/owl
+use std/bug
+use std/list
+use std/result
+use std/text
+use std/value
+
+Person = cepheus.Kind("person", {Name: cepheus.Text(), Email: cepheus.Text(many = true), Advisor: cepheus.Link(many = true),
+  Takes: cepheus.Link(many = true), Within: cepheus.Link(many = true), Member: cepheus.Link(many = true), MemberOf: cepheus.Link(many = true)})
+Label = cepheus.Kind("label", {Name: cepheus.Text(unique = true)})
+
+(* the rules that make things the same: Not and aggregates take a database without them *)
+equality = ["owl/eq", "owl/eq-diff1", "owl/prp-fp", "owl/prp-ifp", "owl/prp-key", "owl/cls-maxc2", "owl/cls-maxqc3", "owl/cls-maxqc4"]
+
+defn uni()
+  (** A fork with OWL 2 RL and a small ontology: Professor and Student are Persons; an advisor is a professor; an
+      e-mail is one person's; Within is transitive; MemberOf is Member's inverse; a Student is a Person who takes some
+      Course (an intersection, a template, and a restriction); Course and Person are disjoint. *)
+  t = cepheus.Fork(cepheus.Empty, [owl.Vocabulary, Person, Label])?
+  cepheus.Define(owl.Rl(), t)?
+  n(k) = cepheus.New(k)
+  o = cepheus.Write([
+    cepheus.Add(n(1), Label.Name, "Person"), cepheus.Add(n(2), Label.Name, "Professor"), cepheus.Add(n(3), Label.Name, "Student"),
+    cepheus.Add(n(4), Label.Name, "Course"),
+    cepheus.Add(n(2), owl.SubClassOf, n(1)), cepheus.Add(n(4), owl.DisjointWith, n(1)),
+    cepheus.Add(n(5), owl.Property, Person.Advisor), cepheus.Add(n(5), owl.Range, n(2)),
+    cepheus.Add(n(6), owl.Property, Person.Email), cepheus.Add(n(6), owl.InverseFunctional, true),
+    cepheus.Add(n(7), owl.Property, Person.Within), cepheus.Add(n(7), owl.Transitive, true),
+    cepheus.Add(n(8), owl.Property, Person.Member), cepheus.Add(n(8), owl.InverseOf, Person.MemberOf),
+    cepheus.Add(n(9), owl.OnProperty, Person.Takes), cepheus.Add(n(9), owl.SomeValuesFrom, n(4)),
+    cepheus.Add(n(3), owl.IntersectionOf, n(1)), cepheus.Add(n(3), owl.IntersectionOf, n(9)),
+  ], t)?
+  c = o.Things
+  result.Ok({Db: t, Person: c[1], Professor: c[2], Student: c[3], Course: c[4], Advisor: c[5], Takes: c[9]})
+end
+
+defn types(x, u)
+  (** The classes of x, the smallest id first. *)
+  list.Sort(cepheus.Get(owl.Vocabulary, x, u.Db)?.Type)
+end
+
+defn isRulesAreData()
+  rl = owl.Rl()
+  bug.Assert(value.Len(rl) == 63, "63 rules: the W3C's 78 but those held otherwise")
+  bug.Assert(value.Equal(rl[1], {Rule: "owl/prp-dom", Library: "owl"}), "a rule is a map of its name")
+  value.Len(list.Filter(r -> r.Rule in equality, rl)) == 8
+end
+
+defn isDerivedFactsAreRead()
+  u = uni()?
+  w = cepheus.Write([cepheus.Add(cepheus.New(1), Person.Name, "Ada"), cepheus.Add(cepheus.New(2), Person.Advisor, cepheus.New(1)),
+    cepheus.Add(cepheus.New(2), owl.Type, u.Person), cepheus.Add(cepheus.New(3), owl.Type, u.Course),
+    cepheus.Add(cepheus.New(2), Person.Takes, cepheus.New(3))], u.Db)?
+  ada = w.Things[1]
+  bo = w.Things[2]
+  bug.Assert(value.Equal(types(ada, u), [u.Person, u.Professor]), "an advisor is a professor, a professor a person")
+  bug.Assert(value.Equal(types(bo, u), list.Sort([u.Person, u.Student, u.Takes])), "a person who takes a course is a student")
+  students = cepheus.Find(1, (x) -> {Where: [[x, owl.Type, u.Student]], Give: {X: x}}, u.Db)?
+  value.Equal(students, [{X: bo}])
+end
+
+defn isTransitiveAndInverse()
+  u = uni()?
+  w = cepheus.Write([cepheus.Add(cepheus.New(1), Person.Within, cepheus.New(2)), cepheus.Add(cepheus.New(2), Person.Within, cepheus.New(3)),
+    cepheus.Add(cepheus.New(4), Person.Member, cepheus.New(5))], u.Db)?
+  t = w.Things
+  bug.Assert(value.Equal(list.Sort(cepheus.Get(Person, t[1], u.Db)?.Within), list.Sort([t[2], t[3]])), "Within is transitive")
+  value.Equal(cepheus.Get(Person, t[5], u.Db)?.MemberOf, [t[4]])
+end
+
+defn isEqualityAndItsUndoing()
+  u = uni()?
+  w = cepheus.Write([cepheus.Add(cepheus.New(1), Person.Email, "ada@uni.org"), cepheus.Add(cepheus.New(2), Person.Email, "ada@uni.org"),
+    cepheus.Add(cepheus.New(2), Person.Name, "Ada"), cepheus.Add(cepheus.New(3), Person.Advisor, cepheus.New(1))], u.Db)?
+  a1 = w.Things[1]
+  a2 = w.Things[2]
+  bug.Assert(value.Equal(cepheus.Same(a1, u.Db)?, list.Sort([a1, a2])), "one e-mail, one person: the two records are one thing")
+  bug.Assert(value.Equal(cepheus.Same(a2, u.Db)?, cepheus.Same(a1, u.Db)?), "the same class from either")
+  bug.Assert(cepheus.Get(Person, a1, u.Db)?.Name == "Ada", "a thing is read as its class: the name of the other record")
+  bug.Assert(value.Equal(types(a2, u), [u.Person, u.Professor]), "the advisor's types, read from either record")
+  cepheus.Write([cepheus.Retract(a2, Person.Email, "ada@uni.org")], u.Db)?
+  bug.Assert(value.Equal(cepheus.Same(a1, u.Db)?, [a1]), "the e-mail retracted: two things again")
+  value.Equal(cepheus.Same(a2, u.Db)?, [a2]) and cepheus.Get(Person, a1, u.Db)?.Name == missing
+end
+
+defn isSameOfAThingAlone()
+  u = uni()?
+  value.Equal(cepheus.Same(u.Person, u.Db)?, [u.Person])
+end
+
+defn isAConstraintRefusesItsGroup()
+  u = uni()?
+  before = cepheus.Find(1, (x) -> {Where: [[x, owl.Type, u.Person]], Give: {X: x}}, u.Db)?
+  bad = cepheus.Write([cepheus.Add(cepheus.New(1), owl.Type, u.Course), cepheus.Add(cepheus.New(1), owl.Type, u.Professor)], u.Db)
+  bug.Assert(result.IsErr(bad) and bad.Error.Code == "invalid", "a course that is a person: refused")
+  bug.Assert(text.Contains("owl/cax-dw", bad.Error.Message), bad.Error.Message)
+  value.Equal(cepheus.Find(1, (x) -> {Where: [[x, owl.Type, u.Person]], Give: {X: x}}, u.Db)?, before)
+end
+
+defn isDifferentThingsStayApart()
+  u = uni()?
+  w = cepheus.Write([cepheus.Add(cepheus.New(1), Person.Name, "Ada"), cepheus.Add(cepheus.New(2), Person.Name, "Bo"),
+    cepheus.Add(cepheus.New(1), owl.DifferentFrom, cepheus.New(2))], u.Db)?
+  bad = cepheus.Write([cepheus.Add(w.Things[1], Person.Email, "x@uni.org"), cepheus.Add(w.Things[2], Person.Email, "x@uni.org")], u.Db)
+  bug.Assert(result.IsErr(bad) and text.Contains("owl/eq-diff1", bad.Error.Message), "two different things made one: refused")
+  value.Equal(cepheus.Same(w.Things[1], u.Db)?, [w.Things[1]])
+end
+
+defn isNothingHasNoMember()
+  u = uni()?
+  nothing = cepheus.Find(1, (t) -> {Where: [[t, owl.Builtin, "Nothing"]], Give: {T: t}}, u.Db)?[1].T
+  w = cepheus.Write([cepheus.Add(cepheus.New(1), owl.SubClassOf, nothing)], u.Db)?
+  bad = cepheus.Write([cepheus.Add(cepheus.New(1), owl.Type, w.Things[1])], u.Db)
+  result.IsErr(bad) and text.Contains("owl/cls-nothing2", bad.Error.Message)
+end
+
+defn isAPropertyIsALink()
+  u = uni()?
+  advisor = cepheus.Get(owl.Vocabulary, u.Advisor, u.Db)?.Property[1]
+  found = cepheus.Find(1, (d) -> {Where: [[d, owl.Property, Person.Advisor]], Give: {D: d}}, u.Db)?
+  value.Equal(found, [{D: u.Advisor}]) and advisor < u.Person
+end
+
+defn isARuleMayNotGiveAList()
+  u = uni()?
+  r = cepheus.Rule("to-list", 2, (c, m) -> {Where: [[c, owl.UnionOf, m]], Then: [c, owl.IntersectionOf, m]})
+  bad = cepheus.Define([r], u.Db)
+  result.IsErr(bad) and bad.Error.Code == "invalid" and text.Contains("owl/IntersectionOf", bad.Error.Message)
+end
+
+defn isTheVocabularyIsNeeded()
+  t = cepheus.Fork(cepheus.Empty, [Person])?
+  bad = cepheus.Define(owl.Rl(), t)
+  result.IsErr(bad) and bad.Error.Code == "invalid" and text.Contains("owl.Vocabulary", bad.Error.Message)
+end
+
+defn isAnUnknownRuleIsRefused()
+  t = cepheus.Fork(cepheus.Empty, [owl.Vocabulary])?
+  bad = cepheus.Define([{Rule: "owl/cax-nope", Library: "owl"}], t)
+  result.IsErr(bad) and text.Contains("owl/cax-nope", bad.Error.Message)
+end
+
+defn isANotBesideOwlIsRefused()
+  (* OWL 2 RL's rules over a property that is a variable may give any property: a Not or an aggregate beside them
+     would depend on its own absence *)
+  t = cepheus.Fork(cepheus.Empty, [owl.Vocabulary, Person])?
+  lonely = cepheus.Rule("lonely", 2, (x, y) -> {Where: [[x, Person.Name, "Ada"], cepheus.Not([x, Person.Advisor, y])], Then: [x, owl.Type, x]})
+  bad = cepheus.Define(list.Concat(owl.Rl(), [lonely]), t)
+  result.IsErr(bad) and bad.Error.Code == "invalid" and text.Contains("Not", bad.Error.Message)
+end
+
+defn isAPartOfTheRules()
+  (* a list like any: a program may define some of the rules only, here those that make no things the same *)
+  t = cepheus.Fork(cepheus.Empty, [owl.Vocabulary, Person])?
+  cepheus.Define(list.Filter(r -> not (r.Rule in equality), owl.Rl()), t)?
+  w = cepheus.Write([cepheus.Add(cepheus.New(1), owl.Property, Person.Email), cepheus.Add(cepheus.New(1), owl.InverseFunctional, true),
+    cepheus.Add(cepheus.New(2), Person.Email, "a@x.org"), cepheus.Add(cepheus.New(3), Person.Email, "a@x.org")], t)?
+  value.Equal(cepheus.Same(w.Things[2], t)?, [w.Things[2]])
+end
+
+defn isDefiningAgainWritesNothing()
+  u = uni()?
+  g1 = cepheus.Write([cepheus.Add(cepheus.New(1), Person.Name, "x")], u.Db)?.Group
+  cepheus.Define(owl.Rl(), u.Db)?
+  g2 = cepheus.Write([cepheus.Add(cepheus.New(1), Person.Name, "y")], u.Db)?.Group
+  g2 == g1 + 1
+end

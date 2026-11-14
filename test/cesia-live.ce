@@ -5,12 +5,14 @@
 
     cesia run --allow native=cepheus,env,read,net=:0 src/live.ce [restart] *)
 use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/cepheus/cesia/cepheus/owl
 use std/fiber
 use std/io
 use std/list
 use std/net
 use std/result
 use std/sys
+use std/text
 use std/value
 
 Note = cepheus.Kind("note", {Title: cepheus.Text(), N: cepheus.Int(), Mark: cepheus.Text(unique = true)})
@@ -53,6 +55,38 @@ defn overTls()
   io.Print("tls Incr by 50 fibers:", ok, "answered, numbered 1 to 50 once each:", value.Equal(ns, [k for k in 1..50]), "the counter at", cepheus.Get(Note, counter, db)?.N)
   cepheus.Close(db)
   io.Print("tls closed:", cepheus.Get(Note, id, db).Error.Code)
+  result.Ok(missing)
+end
+
+Person = cepheus.Kind("person", {Name: cepheus.Text(), Email: cepheus.Text(many = true)})
+
+defn owlOverTls()
+  (** OWL 2 RL over TLS (CEPHEUS_OWL): its rules defined, two records made one thing by an e-mail, read at the server
+      (Same from either record, Get through the class), a constraint's refusal; then a token with rights per kind
+      (CEPHEUS_OWL_KINDS, person only): OWL's rules read every kind, so it reads none of what they may give, and learns
+      no equality. *)
+  db = cepheus.Connect(sys.Env("CEPHEUS_OWL"), [owl.Vocabulary, Person], token = token, ca = sys.Env("CEPHEUS_CA"))?
+  cepheus.Define(owl.Rl(), db)?
+  n(k) = cepheus.New(k)
+  o = cepheus.Write([cepheus.Add(n(1), owl.Property, Person.Email), cepheus.Add(n(1), owl.InverseFunctional, true),
+    cepheus.Add(n(2), owl.DisjointWith, n(3)), cepheus.Add(n(3), Person.Name, "Course")], db)?
+  w = cepheus.Write([cepheus.Add(n(1), Person.Email, "ada@uni.org"), cepheus.Add(n(2), Person.Email, "ada@uni.org"),
+    cepheus.Add(n(2), Person.Name, "Ada"), cepheus.Add(n(1), owl.Type, o.Things[2])], db)?
+  a1 = w.Things[1]
+  a2 = w.Things[2]
+  both = list.Sort([a1, a2])
+  io.Print("tls owl same:", value.Equal(cepheus.Same(a1, db)?, both), value.Equal(cepheus.Same(a2, db)?, both), value.Equal(cepheus.Same(o.Things[1], db)?, [o.Things[1]]))
+  io.Print("tls owl get:", cepheus.Get(Person, a1, db)?.Name, cepheus.Get(Person, a2, db)?.Name)
+  bad = cepheus.Write([cepheus.Add(a2, owl.Type, o.Things[3])], db)
+  io.Print("tls owl refused:", bad.Error.Code, text.Contains("owl/cax-dw", bad.Error.Message))
+  cepheus.Write([cepheus.Retract(a2, Person.Email, "ada@uni.org")], db)?
+  io.Print("tls owl apart:", value.Equal(cepheus.Same(a2, db)?, [a2]), cepheus.Get(Person, a1, db)?.Name)
+  cepheus.Write([cepheus.Add(a2, Person.Email, "ada@uni.org")], db)?
+  k = cepheus.Connect(sys.Env("CEPHEUS_OWL"), [Person], token = sys.Env("CEPHEUS_OWL_KINDS"), ca = sys.Env("CEPHEUS_CA"))?
+  io.Print("tls owl kinds:", cepheus.Same(a1, k).Error.Code, cepheus.Find(1, (x) -> {Where: [[x, Person.Name, "Ada"]], Give: {X: x}}, k).Error.Code,
+    cepheus.Get(Person, a1, k)?, cepheus.Define(owl.Rl(), k).Error.Code)
+  cepheus.Close(k)
+  cepheus.Close(db)
   result.Ok(missing)
 end
 
@@ -149,6 +183,7 @@ if value.Len(sys.Args) > 0 and sys.Args[1] == "restart"
   result.Unwrap(restart())
 else
   result.Unwrap(overTls())
+  result.Unwrap(owlOverTls())
   result.Unwrap(local())
   result.Unwrap(watching(sys.Env("CEPHEUS_TLS"), sys.Env("CEPHEUS_CA"), "tls-live"))
   result.Unwrap(watching(sys.Env("CEPHEUS_URL"), missing, "local-live"))

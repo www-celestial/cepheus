@@ -180,8 +180,15 @@ Never = "cepheus.Never"
 (** Defines rules in a database, in one group: the new ones, and those whose definition changed, found by name; the
     others are left as they are, so a program defines its rules at each start. The group derives what the rules give
     over the whole database. An Ok of missing, or an Err with Code "invalid" for a rule the database refuses, as a
-    variable of Then that no pattern binds. *)
+    variable of Then that no pattern binds. The rules of OWL 2 RL are defined the same way, as data that owl.Rl()
+    gives (cesia/cepheus/owl): Define(list.Concat(owl.Rl(), [mine]), db). *)
 Define(rules, db) = define(db, rules)
+
+(** The class of a thing: the things that the rules made the same as it, itself included, by id, the smallest first
+    (an Ok of a list); [thing] alone when none. OWL 2 RL's rules make things the same (owl.SameAs, a functional
+    property: cesia/cepheus/owl). The facts of a class are kept on one of its things, and Get, Find and Watch read any
+    thing of a class as that one: the facts of the whole class. *)
+Same(thing, db) = same(db, thing)
 
 (** A kind of files: each of its things is a file, with the fields Name (a Text), Size (an Int: its bytes), Type (a
     Text: a media type, as "application/pdf"), Owner (a Link: the thing whose key seals the bytes) and Content (the
