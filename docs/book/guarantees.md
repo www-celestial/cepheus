@@ -578,7 +578,7 @@ decisions as the model's, and the database reopened the same); `test/rulechange.
 held after its build, caught up exactly and ordered before it; a group that interferes ends it with `Conflict`; 6
 writers, 24 changes and 2 readers checking every view they take against the least model under its own rules; close
 during a change; kill -9 during changes, each recovered view exact); `tools/tlc.sh` (`spec/RuleChange.tla`, and its
-seven variants that must break).
+eight variants that must break, a Raft member's take-back among them).
 
 ## G20 `why` returns a proof
 

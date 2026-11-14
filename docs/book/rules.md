@@ -509,6 +509,13 @@ the retry decides on the newer state, where a lasting problem gives its `Invalid
 data breaks: `Invalid "constraint NAME: …"`). A change past its budget is `Invalid` at the build. A close cancels a
 change in flight: it is answered `Closed`, and nothing of it is in the journal.
 
+In a Raft cluster ([server](server.md#one-log-for-the-cluster)) the change runs on the leader, and its group is
+proposed as any write's frame, alone. If the leader stops leading while the change runs (a frame it wrote is taken
+back, or it applies another leader's frame), the change is answered `not_leader` and nothing of it is written: its view
+could hold a group that was never committed, or miss one the new leader wrote. The program sends it again (the OCaml
+client does, to the new leader). In a cluster a group is at most 8 MiB, one entry of the log: a change whose group,
+its derived facts included, passes it is refused (`invalid`, over the frame limit).
+
 **Why this keeps the guarantees.** The change is ordered when it is installed: every group it caught up with is
 before it, and its `Expect`s are checked against that state (G4). Its view is the least model of the state at the
 switch under the new rules, because each batch keeps it so (G17 holds for incremental groups) and the change's
@@ -517,8 +524,9 @@ difference between the writer's view and that one, so replay — recovery, a rep
 the view the writer adopted. No view before the group holds a fact of the new rules (the background's view is
 published only with the group), every view from it holds all of them (G19). A crash before the group is durable leaves
 nothing: the change was never confirmed. The protocol is checked by TLC (`spec/RuleChange.tla`: the build, batches of
-catch-up, the switch, crashes; every view exact under its rules, one switch, constraints, `Expect` at the switch, no
-write lost, and the change ends), and each of its seven parts is needed: without any one, TLC finds a counterexample
+catch-up, the switch, crashes, a Raft leader's frames taken back; every view exact under its rules, one switch,
+constraints, `Expect` at the switch, no write lost, and the change ends), and each of its eight parts is needed:
+without any one, TLC finds a counterexample
 ([testing](testing.md#model-checking)).
 
 **What the writer does meanwhile.** It never waits for the build or the catch-up; no background merge starts while a

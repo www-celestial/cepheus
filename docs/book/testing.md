@@ -44,7 +44,7 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | `_build/default/test/unit.exe` | the unit and property tests | `CEPHEUS_TMP`: where its databases on the real disk go (the system's temp directory by default) |
 | `reasoning.exe` | the rules: named cases (closures of both shapes and their budget, a variable property, `sources`), then G17, G18 and G20 on random sequences (random rules defined, changed and removed, transitive closures and rules over a variable property among them; random additions and retractions) against the least model from scratch, plain and over merged runs, and the plain ones again with rounds on several domains (from 4 facts a round) and with the rules always as written, every group's view equal to the first run's; and half the seeds on databases on the disk, where every change of the rules takes the background path, with the model's decisions and the database reopened the same; then groups of additions from 2 facts on databases on the disk, so that the path of loads reasons on its sorted prefix (rules without `Not` or aggregates, constraints and one-valued heads among them; facts derived already asserted again; new things), against the model, and again with rounds on several domains | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group), `RULES_PROGRESS` (a line a seed) |
 | `owl.exe` | OWL 2 RL (`Cepheus.Owl`): each of the W3C's 78 rules by a case where it fires or its constraint refuses, on five paths (a fork group by group; the rules always as written; the data before the ontology, so that the ontology's group is a change of the rules and of the templates' lists; a load on the disk, on the path of large groups; a database on the disk, the ontology after the data, by the background path), each view compared with the meaning of the rules computed from scratch (`Check.least`, templates by their meaning; with equality `Check.least_eq`: a union-find, the facts rewritten each pass, the view read through its classes), then the data retracted and written again, the ontology retracted; the datatypes; random ontologies and data (also with the rules as written); random equalities (sameAs, functional, inverse functional, keys, max cardinality 1, differentFrom; a refusal must be the meaning's contradiction, an acceptance its absence); an equality storm (3,000 things made one: 2,999 facts of `cepheus/same`, past a small budget refused whole); every database on the disk closed and opened again, the same facts; the facts written stay asserted, where they were written | `OWL_SEEDS` (200, in `tools/test.sh`), `OWL_SEED` (one random equality seed, printed step by step) |
-| `rulechange.exe` | the background path of rule changes on databases on the disk: groups written while a change is held after its build (`Engine.change_pause`), caught up exactly; a group that writes the change's fact, breaks its new constraint or takes its rule's number ends it with `Conflict`; 6 writers, 24 changes and 2 readers checking every view against the least model under its own rules, then the database reopened; the change budget (a cross product refused while a writer goes on) and an ontology change past a data budget accepted the same on the disk and on a fork; close during a change; kill -9 during changes, each recovered view exact | `CHANGE_KILLS` (10, in `tools/test.sh`) |
+| `rulechange.exe` | the background path of rule changes on databases on the disk: groups written while a change is held after its build (`Engine.change_pause`), caught up exactly; a group that writes the change's fact, breaks its new constraint or takes its rule's number ends it with `Conflict`; 6 writers, 24 changes and 2 readers checking every view against the least model under its own rules, then the database reopened; the change budget (a cross product refused while a writer goes on) and an ontology change past a data budget accepted the same on the disk and on a fork; close during a change; a change with an `Incr` in its group, computed in its group beside groups that count with the same counter; a Raft member (its frames proposed to a function that records them or refuses one): the change's frame proposed, a frame taken back or another leader's frame answering the change `not_leader`, the journal reopened the same; kill -9 during changes, each recovered view exact | `CHANGE_KILLS` (10, in `tools/test.sh`) |
 | `exhaustive.exe` | every crash state of small journals, inside merges, and of two databases sharing a commit buffer | none |
 | `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
 | `wal_sim.exe` | the deterministic simulation of the server's commit buffer: three databases sharing it ([below](#the-commit-buffer)) | `--seeds N` (100 by default), `--seed S`, `--steps N` (200); `WAL_SIM_TRACE` set: each event of a seed on the standard error |
@@ -460,15 +460,18 @@ whose bytes the page cache already showed, which the model cannot see and the si
 `spec/RuleChange.tla` models a change of the rules on the background path ([rules](rules.md#changes-of-the-rules-in-the-background),
 G19): three asserted facts and two derived ones, old rules and new rules (the new ones with a constraint), a writer
 committing groups under its rules as frames of facts with their states after, a change C that also asserts a fact and
-expects another; the build from the working view, the catch-up by batches of any size, the switch by the writer, and
-crashes that keep any prefix of the frames from the durable ones on. Invariants: `ViewsExact` (the working and the
+expects another; the build from the working view, the catch-up by batches of any size, the switch by the writer,
+crashes that keep any prefix of the frames from the durable ones on, and a Raft member's take-back (the frames not
+committed taken back, the working view back to the published one, a new lineage: a change started on an older one is
+answered, never installed). Invariants: `ViewsExact` (the working and the
 published views, and the state at every frame of the journal, are the least model of their asserted facts under their
 rules: no view mixes the old rules' facts with the new ones'), `JournalIsWork` (replay gives the working view: C's
 frame is exactly the difference the adopted view holds), `OneSwitch` (the rules change at C's frame), `ConstraintsHold`
 (G18), `Serial` (C's `Expect` held just before it, its asserted fact at it), `NoLostWrite` (C's frame changes no
 asserted fact but its own), `AckedDurable`; and the liveness property `Ends` (under fairness the change is installed,
-answered or lost to a crash). Bounds in `spec/RuleChange.cfg` (4 data groups, 2 crashes, ready 2 groups behind):
-137,889 distinct states, 15 s, everything holds. Each part of the rule is needed:
+answered or lost to a crash). Bounds in `spec/RuleChange.cfg` (4 data groups, 2 crashes, ready 2 groups behind, 1
+take-back): 276,553 distinct states, 28 s, everything holds. Each part of the rule is needed (the variants without a
+take-back but `RuleChangeTakeBack.cfg`):
 
 | configuration | the rule without | breaks |
 |---|---|---|
@@ -479,6 +482,7 @@ answered or lost to a crash). Bounds in `spec/RuleChange.cfg` (4 data groups, 2 
 | `RuleChangeOverlap.cfg` | the `Conflict` of a group that touches C's fact | `Serial` |
 | `RuleChangeStale.cfg` | the difference at the install: the build's own changes written | `ViewsExact` |
 | `RuleChangePublished.cfg` | the build from the working view: from the published one | `NoLostWrite` |
+| `RuleChangeTakeBack.cfg` | the install on the change's own lineage (Raft): installed after a take-back | `NoLostWrite` |
 
 `tools/tlc.sh` runs them all and fails unless each that must break does: 1 min 57 s on the test machine (2026-11-12),
 every model included.

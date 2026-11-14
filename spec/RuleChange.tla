@@ -23,9 +23,16 @@
    nothing written) or writes C's frame, the difference between its working view and V, and adopts V. Crash keeps a
    prefix of the frames from the durable ones on (a kill or a power loss); Recover replays it.
 
+   In a Raft cluster (server/cluster.ml, Engine's propose) a durable frame is a committed one, and a server that stops
+   leading takes back the frames it wrote and that were not committed (TakeBack: the working view goes back to the
+   published one); each take-back starts a new lineage of the writer. A change started on an older lineage is never
+   installed: Install answers it (not_leader), nothing written. Its view may hold a group taken back, which no
+   journal holds.
+
    Checked by tools/tlc.sh (bounds in RuleChange.cfg), the invariants and the liveness property Ends. Each of the
    rules of the design is needed: with any one of Rederive, CatchUpAll, ExpectAtInstall, CheckAtCatchUp, CheckOverlap,
-   TrackDiff, BuildFromWorking set to FALSE (RuleChangeCopy.cfg, ...), TLC finds a counterexample. *)
+   TrackDiff, BuildFromWorking, SameLineage set to FALSE (RuleChangeCopy.cfg, ..., RuleChangeTakeBack.cfg), TLC finds
+   a counterexample. *)
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS MaxGroups, MaxCrashes, Behind,
@@ -35,7 +42,9 @@ CONSTANTS MaxGroups, MaxCrashes, Behind,
           CheckAtCatchUp,    \* each caught-up state checked against the new rules' constraint
           CheckOverlap,      \* a logged group that touches a fact C asserts ends C (Conflict)
           TrackDiff,         \* C's frame is the difference at the install, not the build's own changes
-          BuildFromWorking   \* the build starts from the working view (every prepared group), not the published one
+          BuildFromWorking,  \* the build starts from the working view (every prepared group), not the published one
+          MaxTakeBacks,      \* Raft: frames not committed taken back, at most this many times (0: a single server)
+          SameLineage        \* Raft: a change is installed only on the lineage it started from
 
 VARIABLES
   work, wr,   \* the working view and its rules ("old", "new")
@@ -51,9 +60,11 @@ VARIABLES
   eb,         \* the Expect at the build (for the variant that checks it there)
   dk,         \* the build's own changes (for the variant that writes them as C's frame)
   cpos,       \* C's frame in the journal (0: none)
-  acked       \* C was confirmed to its client
+  acked,      \* C was confirmed to its client
+  tb, lin,    \* Raft: take-backs so far; the writer's lineage (one more at each take-back)
+  born        \* the lineage C started on
 
-vars == <<work, wr, jn, jd, pub, pr, ng, crashes, up, cs, bv, bpos, bad, eb, dk, cpos, acked>>
+vars == <<work, wr, jn, jd, pub, pr, ng, crashes, up, cs, bv, bpos, bad, eb, dk, cpos, acked, tb, lin, born>>
 
 Asserted == {1, 2, 3}
 U == Asserted \cup {11, 12}
@@ -90,7 +101,7 @@ Batch(v, fs) == LET S == Net(AssertedOf(v), fs)
 
 Init == /\ work = Empty /\ wr = "old" /\ jn = << >> /\ jd = 0 /\ pub = Empty /\ pr = "old" /\ ng = 0
         /\ crashes = 0 /\ up = TRUE /\ cs = "none" /\ bv = Empty /\ bpos = 0 /\ bad = FALSE /\ eb = FALSE /\ dk = {}
-        /\ cpos = 0 /\ acked = FALSE
+        /\ cpos = 0 /\ acked = FALSE /\ tb = 0 /\ lin = 0 /\ born = 0
 
 (* a data group under the writer's rules; a group that would break the rules' constraint is refused (no frame) *)
 Write(x) == /\ up /\ ng < MaxGroups
@@ -99,38 +110,39 @@ Write(x) == /\ up /\ ng < MaxGroups
                IN /\ ~Broken(wr, S2)
                   /\ work' = Mat(wr, S2) /\ jn' = Append(jn, [fr |-> Diff(work, Mat(wr, S2)), r |-> wr])
             /\ ng' = ng + 1
-            /\ UNCHANGED <<wr, jd, pub, pr, crashes, up, cs, bv, bpos, bad, eb, dk, cpos, acked>>
+            /\ UNCHANGED <<wr, jd, pub, pr, crashes, up, cs, bv, bpos, bad, eb, dk, cpos, acked, tb, lin, born>>
 
 (* every frame written made durable; the working view published; C confirmed if its frame is among them *)
 Sync == /\ up /\ jd < Len(jn) /\ jd' = Len(jn) /\ pub' = work /\ pr' = wr /\ acked' = (acked \/ cpos > 0)
-        /\ UNCHANGED <<work, wr, jn, ng, crashes, up, cs, bv, bpos, bad, eb, dk, cpos>>
+        /\ UNCHANGED <<work, wr, jn, ng, crashes, up, cs, bv, bpos, bad, eb, dk, cpos, tb, lin, born>>
 
 Start == /\ up /\ cs = "none" /\ wr = "old" /\ cpos = 0
          /\ LET from == IF BuildFromWorking THEN work ELSE pub
                 S == AssertedOf(from) \cup {Own}
             IN /\ bv' = Mat("new", S) /\ bad' = Broken("new", S) /\ eb' = ExpectOK(AssertedOf(from))
                /\ dk' = Diff(from, Mat("new", S))
-         /\ bpos' = Len(jn) /\ cs' = "run"
-         /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, cpos, acked>>
+         /\ bpos' = Len(jn) /\ cs' = "run" /\ born' = lin
+         /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, cpos, acked, tb, lin>>
 
 CatchUp == /\ up /\ cs = "run" /\ bpos < Len(jn)
            /\ \E k \in 1..(Len(jn) - bpos) :
                 LET r == Batch(bv, SubSeq(jn, bpos + 1, bpos + k))
                 IN bv' = r[1] /\ bad' = (bad \/ r[2]) /\ bpos' = bpos + k
-           /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, cs, eb, dk, cpos, acked>>
+           /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, cs, eb, dk, cpos, acked, tb, lin, born>>
 
 Ready == /\ up /\ cs = "run" /\ Len(jn) - bpos < Behind /\ cs' = "ready"
-         /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, bv, bpos, bad, eb, dk, cpos, acked>>
+         /\ UNCHANGED <<work, wr, jn, jd, pub, pr, ng, crashes, up, bv, bpos, bad, eb, dk, cpos, acked, tb, lin, born>>
 
 Install == /\ up /\ cs = "ready"
            /\ LET r == Batch(bv, IF CatchUpAll THEN SubSeq(jn, bpos + 1, Len(jn)) ELSE << >>)
                   ok == ~(bad \/ r[2]) /\ (IF ExpectAtInstall THEN ExpectOK(AssertedOf(work)) ELSE eb)
+                        /\ (SameLineage => born = lin)
                   fr == IF TrackDiff THEN Diff(work, r[1]) ELSE dk
               IN IF ok
                  THEN /\ work' = r[1] /\ wr' = "new" /\ jn' = Append(jn, [fr |-> fr, r |-> "new"])
                       /\ cpos' = Len(jn) + 1 /\ cs' = "done"
                  ELSE /\ cs' = "none" /\ UNCHANGED <<work, wr, jn, cpos>>
-           /\ UNCHANGED <<jd, pub, pr, ng, crashes, up, bv, bpos, bad, eb, dk, acked>>
+           /\ UNCHANGED <<jd, pub, pr, ng, crashes, up, bv, bpos, bad, eb, dk, acked, tb, lin, born>>
 
 (* a kill or a power loss: the frames kept are a prefix that holds the durable ones; the background is lost *)
 Crash == /\ up /\ crashes < MaxCrashes
@@ -139,21 +151,31 @@ Crash == /\ up /\ crashes < MaxCrashes
               /\ cpos' = IF cpos > kept THEN 0 ELSE cpos
               /\ cs' = IF cpos > 0 /\ cpos <= kept THEN "done" ELSE "none"
          /\ up' = FALSE /\ crashes' = crashes + 1
-         /\ UNCHANGED <<work, wr, jd, pub, pr, ng, bv, bpos, bad, eb, dk, acked>>
+         /\ UNCHANGED <<work, wr, jd, pub, pr, ng, bv, bpos, bad, eb, dk, acked, tb, lin, born>>
 
 Recover == /\ ~up /\ up' = TRUE
            /\ work' = Replay(Len(jn)) /\ wr' = RulesAt(Len(jn)) /\ pub' = Replay(Len(jn)) /\ pr' = RulesAt(Len(jn))
            /\ jd' = Len(jn)
-           /\ UNCHANGED <<jn, ng, crashes, cs, bv, bpos, bad, eb, dk, cpos, acked>>
+           /\ UNCHANGED <<jn, ng, crashes, cs, bv, bpos, bad, eb, dk, cpos, acked, tb, lin, born>>
+
+(* Raft: this server stops leading; the frames it wrote and that were not committed are taken back, its working view
+   goes back to the published one, a new lineage starts. C, if its frame was among them, is answered (not_leader);
+   C in the background goes on, and its install checks its lineage *)
+TakeBack == /\ up /\ tb < MaxTakeBacks /\ jd < Len(jn)
+            /\ jn' = SubSeq(jn, 1, jd) /\ work' = pub /\ wr' = pr
+            /\ cpos' = IF cpos > jd THEN 0 ELSE cpos
+            /\ cs' = IF cpos > jd THEN "none" ELSE cs
+            /\ tb' = tb + 1 /\ lin' = lin + 1
+            /\ UNCHANGED <<jd, pub, pr, ng, crashes, up, bv, bpos, bad, eb, dk, acked, born>>
 
 Next == \/ \E x \in Asserted : Write(x)
-        \/ Sync \/ Start \/ CatchUp \/ Ready \/ Install \/ Crash \/ Recover
+        \/ Sync \/ Start \/ CatchUp \/ Ready \/ Install \/ Crash \/ Recover \/ TakeBack
 
 Spec == Init /\ [][Next]_vars
 FairSpec == Spec /\ WF_vars(CatchUp) /\ WF_vars(Ready) /\ WF_vars(Install) /\ WF_vars(Recover)
 
 TypeOK == /\ wr \in {"old", "new"} /\ pr \in {"old", "new"} /\ cs \in {"none", "run", "ready", "done"}
-          /\ jd <= Len(jn) /\ cpos <= Len(jn) /\ (cs \in {"run", "ready"} => bpos <= Len(jn))
+          /\ jd <= Len(jn) /\ cpos <= Len(jn) /\ (cs \in {"run", "ready"} /\ born = lin => bpos <= Len(jn))
 
 (* G17 for every view: the working and the published views, and the state at every frame of the journal (what a
    recovery, a replica, a local reader or the past reads) are the materialisation of their asserted facts under their

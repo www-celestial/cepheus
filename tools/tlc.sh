@@ -41,7 +41,7 @@ done
 # the background path of a rule change, its invariants and its liveness (it ends)
 java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/RuleChange" -config RuleChange.cfg RuleChange.tla
 # each variant of the background path that drops a part of its rule must break an invariant
-for c in RuleChangeCopy RuleChangeLate RuleChangeEarlyExpect RuleChangeNoCheck RuleChangeOverlap RuleChangeStale RuleChangePublished; do
+for c in RuleChangeCopy RuleChangeLate RuleChangeEarlyExpect RuleChangeNoCheck RuleChangeOverlap RuleChangeStale RuleChangePublished RuleChangeTakeBack; do
   rc=0
   java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 1 -metadir "$meta/$c" -config $c.cfg RuleChange.tla || rc=$?
   if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/RuleChange.tla should break an invariant (TLC exit $rc)"; exit 1; fi
