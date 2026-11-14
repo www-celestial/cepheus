@@ -31,6 +31,8 @@ type t = {
   new_session : unit -> int;
   max_inflight : int;
   more : unit -> (string * string) list;  (* server-wide lines of the status (the commit buffer's) *)
+  read_only : unit -> string option;  (* Some why: the server takes no write (a replica) *)
+  ops : string -> ((string * string) list, string * string) result option;  (* admin operations beyond status *)
   started : int;
   served : int Atomic.t;  (* requests of closed connections *)
   conns : (int, conn) Hashtbl.t;  (* open connections, for status and stop *)
@@ -70,11 +72,12 @@ and conn = {
   puts : (int, db * Files.put) Hashtbl.t;  (* the files being put, by the id of their Put (the reading thread only) *)
 }
 
-let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> []) () =
+let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> [])
+    ?(read_only = fun () -> None) ?(ops = fun _ -> None) () =
   let by_name = Hashtbl.create 8 in
   Array.iter (fun d -> Hashtbl.replace by_name d.name d) dbs;
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
-    max_inflight; more; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
+    max_inflight; more; read_only; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
 
 let connect ?(wake = ignore) ?(close = ignore) srv ~flush ~submit =
   Mutex.protect srv.cm (fun () ->
@@ -166,6 +169,7 @@ let readable c ~id ~kind i =
 let writable c ~id ~kind i =
   match db_of c ~id ~kind i with
   | None -> None
+  | Some _ when c.srv.read_only () <> None -> err c ~id ~kind "read_only" "%s" (Option.get (c.srv.read_only ())); None
   | Some d -> (
     match c.rights.(i) with
     | Some (Tokens.Write | Tokens.Kinds { add = _ :: _; _ }) -> Some d
@@ -617,7 +621,11 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
         | Some tok, Wire.Admin what ->
           if not tok.admin then err c ~id ~kind "denied" "this token is not an admin token"
           else if what = "status" then reply c ~id ~kind (Wire.Status (status c))
-          else err c ~id ~kind "invalid" "unknown admin operation %S" what;
+          else (
+            match c.srv.ops what with
+            | Some (Ok l) -> reply c ~id ~kind (Wire.Status l)
+            | Some (Error (code, m)) -> err c ~id ~kind code "%s" m
+            | None -> err c ~id ~kind "invalid" "unknown admin operation %S" what);
           Continue
         | _, Wire.Open name ->
           (match Hashtbl.find_opt c.srv.by_name name with
@@ -673,6 +681,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
           (match db_of c ~id ~kind e.db with
            | None -> ()
            | Some d when c.rights.(e.db) <> Some Tokens.Write -> err c ~id ~kind "denied" "erasing an owner's files needs a right to write all of %s" d.name
+           | Some _ when c.srv.read_only () <> None -> err c ~id ~kind "read_only" "%s" (Option.get (c.srv.read_only ()))
            | Some _ when e.owner <= 0 -> err c ~id ~kind "invalid" "an erasure names an owner, a thing: the database's own key (0) is never erased"
            | Some d -> (
              match Files.vault d.files with

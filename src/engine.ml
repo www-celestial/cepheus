@@ -262,6 +262,65 @@ let prepare ?(release = fun (_ : int) -> ()) t (reqs : (Resolve.op list * int * 
   { results = Array.of_list (List.rev !results); groups = !groups; body; first; count = !count; after = t.working;
     runs = !runs; pending = !pending }
 
+(* ---- A replica's frames ----
+   A replica takes its primary's groups as its primary's journal codes them, never resolves a write: [prepare_apply]
+   decodes a frame (bounds checked: Group.decode), skips the groups the working view holds already (a frame sent again
+   after a connection broke), replays the others in order, without a gap, as recovery does (a large group merged at
+   once into a run, as the primary did), and makes the batch whose body the syncer appends to this journal: the
+   frame's own bytes when it is applied whole. Nothing changes on an error. *)
+
+type frame = { first : int; count : int; body : Bytes.t; len : int }
+
+(* the groups of a frame, decoded; Error if it does not decode to exactly its groups *)
+let decode_frame f =
+  let r = Codec.reader f.body 0 f.len in
+  match List.init f.count (fun k -> let g = Group.decode r in (if g.n <> f.first + k then raise Codec.Short); g) with
+  | gs when Codec.at_end r -> Ok gs
+  | _ -> Error (Damaged (Printf.sprintf "the frame of groups %d to %d has bytes after its groups" f.first (f.first + f.count - 1)))
+  | exception (Codec.Short | Invalid_argument _) ->
+    Error (Damaged (Printf.sprintf "the frame of groups %d to %d does not decode to its groups" f.first (f.first + f.count - 1)))
+
+(* may hold a large group: the writer lets no merge run beside it *)
+let maybe_large gs = List.exists (fun (g : Group.t) -> Array.length g.changes >= !Resolve.large_min) gs
+
+let prepare_apply t (f : frame) gs =
+  match t.stopped with
+  | Some e -> Error e
+  | None -> (
+    let start = t.working in
+    let fresh = List.filter (fun (g : Group.t) -> g.n > start.group) gs in
+    let runs = ref [] in
+    match
+      List.fold_left
+        (fun (v : Store.view) (g : Group.t) ->
+          if g.n <> v.group + 1 then raise (Journal.Damaged (Printf.sprintf "group %d after group %d: a gap" g.n v.group));
+          match Resolve.replay_large v g with
+          | Some (v', facts) ->
+            if !runs <> [] then raise (Journal.Damaged "two large groups in one frame");
+            let take, level = plan_large ~extra:facts.n v' in
+            let w = Snapshot.merge ~bulk:facts ~sync:false t.disk (Filename.concat t.dir "snapshots") t.id v' ~take ~level (Atomic.get t.at) in
+            runs := [ w ];
+            w.view
+          | None -> Resolve.replay v g)
+        start fresh
+    with
+    | after ->
+      let body = Buffer.create (if List.length fresh = f.count then f.len else 256) in
+      if List.length fresh = f.count then Buffer.add_subbytes body f.body 0 f.len
+      else List.iter (Group.encode body) fresh;
+      t.working <- after;
+      let count = List.length fresh in
+      Ok
+        { results = [| Ok { group = after.group; things = [] } |]; groups = List.rev fresh; body;
+          first = (match fresh with g :: _ -> g.n | [] -> start.group + 1); count; after; runs = !runs; pending = None }
+    | exception Journal.Damaged m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
+    | exception Pages.Unreadable m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
+    | exception Disk.Io m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Io m)
+    | exception e ->
+      (* groups that decode and do not replay (a peer's bug, or worse): refused, the writer goes on *)
+      List.iter (Snapshot.abandon t.disk) !runs;
+      Error (Damaged (Printf.sprintf "the frame of groups %d to %d does not replay: %s" f.first (f.first + f.count - 1) (Printexc.to_string e))))
+
 (* Writes and forces the frame; on failure the database stops, and the batch's writes fail. A large group's run is
    forced beside its frame (two fsyncs at once, on two files), and named once both are done (G12); if only the run's
    fsync fails, the group is durable and confirmed, and the database stops (the next open replays it). *)
@@ -382,8 +441,9 @@ let read_meta disk dir =
 
 (* Opens or creates the database in [dir]: recovery = newest snapshot that checks, then the journal after it.
    [buffer]: the database is opened by a server whose commit buffer (Wal) will force its journal; given the database's
-   id, the frames the buffer holds for it, which recovery writes again into the journal. *)
-let open_ ?(id_source = random_id) ?buffer disk dir =
+   id, the frames the buffer holds for it, which recovery writes again into the journal. [bootstrap] false: a new
+   database stays empty, at group 0 (a replica's copy, whose groups all come from its primary, the first included). *)
+let open_ ?(id_source = random_id) ?buffer ?(bootstrap = true) disk dir =
   try
     mkdirs disk dir;
     let lock = Filename.concat dir "lock" in
@@ -472,8 +532,8 @@ let open_ ?(id_source = random_id) ?buffer disk dir =
           { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes;
             at = Atomic.make (Journal.position journal); merged = !merged; closed = Atomic.make false }
         in
-        if !v.group = 0 then begin
-          (* a new database: the first group describes the system properties *)
+        if !v.group = 0 && bootstrap then begin
+          (* a new database: the first group describes the system properties (a replica's copy takes its primary's) *)
           let n = 1 in
           match Resolve.resolve ~bootstrap:true !v ~n ~time:(disk.now ()) ~by:0 ~why:"cepheus: create" Resolve.bootstrap_ops with
           | Ok (v', g, _) ->
@@ -522,7 +582,11 @@ type req = {
   rc : Condition.t;
 }
 
-type control = Write of req | Snapshot of req | Stop
+type control =
+  | Write of req
+  | Snapshot of req
+  | Apply of req * frame  (** a replica's frame from its primary: [req]'s result once it is durable here *)
+  | Stop
 
 (* ---- Merging in the background ----
    The writer never stops for a merge: another domain writes the new base's file from the working view of the
@@ -600,6 +664,7 @@ type live = {
   mutable merging : merger option;
   mutable retry : int;  (* after a failed merge, the next waits until the delta has this many changes *)
   follow : follow;
+  mutable replica : bool;  (* takes its primary's frames (Apply) and no write; a promotion ends it *)
 }
 
 let deliver r res =
@@ -691,9 +756,54 @@ let writer l () =
       | Write r :: rest when List.length acc < max_batch -> split (r :: acc) rest
       | rest -> List.rev acc, rest
     in
+    (* a batch to force: while the syncer forces the previous frame, the next one grows: everything that arrived
+       meanwhile goes into one frame and one fsync (group commit), within the frame limit; then the merges *)
+    let enqueue b reqs =
+      Mutex.lock l.sm;
+      while
+        match l.to_sync with
+        | Some (b0, _) ->
+          Option.is_some b0.pending || Option.is_some b.pending || b0.runs <> [] || b.runs <> [] || Buffer.length b0.body > max_frame
+          || Buffer.length b0.body + Buffer.length b.body > !frame_limit
+        | None -> false
+      do
+        Condition.wait l.c_sync l.sm
+      done;
+      (match l.to_sync with
+       | None -> l.to_sync <- Some (b, reqs)
+       | Some (b0, r0) -> l.to_sync <- Some (merge b0 b, Array.append r0 reqs));
+      Condition.broadcast l.c_sync;
+      Mutex.unlock l.sm;
+      match l.merging with
+      | Some m ->
+        Mutex.lock m.lm;
+        m.log <- b.groups @ m.log;
+        m.logn <- m.logn + b.count;
+        Mutex.unlock m.lm;
+        if Atomic.get m.ready <> None then finish_merge l
+      | None ->
+        if needs_compaction l.e.working && l.e.working.delta.dn > l.retry && l.e.stopped = None then
+          l.merging <- Some (start_merge l.e l.e.working)
+    in
     let rec handle items =
       match items with
       | [] -> ()
+      | Write r :: rest when l.replica ->
+        deliver r (Error (Busy "this database is a replica: it takes its primary's groups, and no write"));
+        handle rest
+      | Apply (r, _) :: rest when not l.replica ->
+        deliver r (Error (Busy "this database is not a replica: it takes no frame"));
+        handle rest
+      | Apply (r, f) :: rest ->
+        (match decode_frame f with
+         | Error e -> deliver r (Error e)
+         | Ok gs -> (
+           (* a large group merges at once with the newest runs: no merge beside it, nothing in flight *)
+           if maybe_large gs then (finish_merge l; wait_idle l);
+           match prepare_apply l.e f gs with
+           | Error e -> deliver r (Error e)
+           | Ok b -> enqueue b [| r |]));
+        handle rest
       | Write _ :: _ ->
         let ws, rest = split [] items in
         let reqs = Array.of_list ws in
@@ -710,33 +820,7 @@ let writer l () =
         let taken = Array.length b.results in
         let left = List.filteri (fun i _ -> i >= taken) ws in
         let reqs = Array.sub reqs 0 taken in
-        Mutex.lock l.sm;
-        (* while the syncer forces the previous frame, the next one grows: everything that arrived meanwhile goes
-           into one frame and one fsync (group commit), within the frame limit *)
-        while
-          match l.to_sync with
-          | Some (b0, _) ->
-            Option.is_some b0.pending || Option.is_some b.pending || Buffer.length b0.body > max_frame
-            || Buffer.length b0.body + Buffer.length b.body > !frame_limit
-          | None -> false
-        do
-          Condition.wait l.c_sync l.sm
-        done;
-        (match l.to_sync with
-         | None -> l.to_sync <- Some (b, reqs)
-         | Some (b0, r0) -> l.to_sync <- Some (merge b0 b, Array.append r0 reqs));
-        Condition.broadcast l.c_sync;
-        Mutex.unlock l.sm;
-        (match l.merging with
-         | Some m ->
-           Mutex.lock m.lm;
-           m.log <- b.groups @ m.log;
-           m.logn <- m.logn + b.count;
-           Mutex.unlock m.lm;
-           if Atomic.get m.ready <> None then finish_merge l
-         | None ->
-           if needs_compaction l.e.working && l.e.working.delta.dn > l.retry && l.e.stopped = None then
-             l.merging <- Some (start_merge l.e l.e.working));
+        enqueue b reqs;
         handle (List.map (fun r -> Write r) left @ rest)
       | Snapshot r :: rest ->
         finish_merge l;
@@ -746,7 +830,7 @@ let writer l () =
       | Stop :: rest ->
         finish_merge l;
         wait_idle l;
-        List.iter (function Write r | Snapshot r -> deliver r (Error Closed) | Stop -> ()) rest;
+        List.iter (function Write r | Snapshot r | Apply (r, _) -> deliver r (Error Closed) | Stop -> ()) rest;
         go := false
     in
     handle items
@@ -756,10 +840,10 @@ let writer l () =
   Condition.broadcast l.c_sync;
   Mutex.unlock l.sm
 
-let start ?(follow = no_follow) e =
+let start ?(follow = no_follow) ?(replica = false) e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
-      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow }
+      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow; replica }
   in
   (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
   l.domain <- Some (Domain.spawn (fun () ->
@@ -782,7 +866,7 @@ let call l make =
   let r = { w = ([], 0, ""); res = None; rm = Mutex.create (); rc = Condition.create () } in
   let r = make r in
   match r with
-  | Write q | Snapshot q ->
+  | Write q | Snapshot q | Apply (q, _) ->
     if not (submit l r) then Error Closed
     else begin
       Mutex.lock q.rm;
@@ -793,6 +877,14 @@ let call l make =
   | Stop -> Ok { group = 0; things = [] }
 
 let write l ops by why = call l (fun r -> Write { r with w = (ops, by, why) })
+
+(* A replica's promotion: from the next control on, its writer takes writes and refuses frames. Called once every frame
+   given is durable (the follower stopped and waited), so that no write resolves on a state the primary's frames
+   would still change. *)
+let promote l =
+  Mutex.lock l.m;
+  l.replica <- false;
+  Mutex.unlock l.m
 let snapshot_live l = call l (fun r -> Snapshot r)
 
 let stop l =

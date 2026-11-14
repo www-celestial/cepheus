@@ -51,7 +51,7 @@ type t = {
   sdir : string;  (* the database's snapshots directory *)
   fm : Mutex.t;
   fc : Condition.t;  (* a queue grew, or a follower died *)
-  word : word;
+  mutable word : word;  (* in memory while the server is a replica (no local reader), the shared page's after *)
   mutable vseq : int;  (* the number stored *)
   mutable visible : Store.view;  (* the state visible under it *)
   visible_a : Store.view Atomic.t;
@@ -211,6 +211,22 @@ let take ?(stop = fun () -> false) t f =
         f.bytes <- 0;
         l
       end)
+
+(* A replica's sender (Replica): waits once, until the number moves past [seen] (a frame durable) or a wake (the ticker
+   every second, a stop); the number then. *)
+let wait_past t seen = Mutex.protect t.fm (fun () -> if t.vseq = seen then Condition.wait t.fc t.fm; t.vseq)
+
+(* A word in memory: a replica's, which serves no local reader *)
+let memory_word () = let r = ref 0 in { get = (fun () -> !r); set = (fun v -> r := v) }
+
+(* The shared page, at a promotion: its number moves past both the one in memory and the page's own, so that no state
+   a reader of an earlier server held under a number is served (as a start adds 2) *)
+let use_page t (w : word) =
+  Mutex.protect t.fm (fun () ->
+      let v = max (w.get () + 2) (t.vseq + 1) in
+      w.set v;
+      t.word <- w;
+      t.vseq <- v)
 
 (* wake every sender (stop, a follower's connection closed) *)
 let wake t = Mutex.protect t.fm (fun () -> Condition.broadcast t.fc)

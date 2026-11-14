@@ -37,6 +37,8 @@
 
      sbench.exe mwrite ADDR D C SECS        D databases d1 .. dD of the server (empty ones), C writers each, one fact a
                                              durable group: groups/s in all and the latencies
+     sbench.exe rate ADDR RATE SECS W        RATE groups a second of one fact to main for SECS, over W connections: the
+                                             groups/s, the write latency, and (CEPHEUS_ADMIN) the replicas' lag
 
    The other commands open the database for remote reads (the server answers), even over the Unix socket.
 
@@ -618,6 +620,63 @@ let mwrite addr dbs per secs =
   Printf.printf "%d databases, %d writers each: %.1f groups/s p50 %.2f p99 %.2f ms\n%!" dbs per (float (Array.fold_left ( + ) 0 cnt) /. dt)
     (float (Histogram.percentile h 0.5) /. 1e3) (float (Histogram.percentile h 0.99) /. 1e3)
 
+(* Writes at a steady rate: RATE groups a second of one fact each for SECS seconds, spread over W connections (one in
+   flight each, each on its own schedule: an open loop, a write that is late goes at once); then, after a second, the
+   lines of the status that name the replicas (an admin token in CEPHEUS_ADMIN): the replica lag from a group durable
+   on the primary to the replica's word that it holds it durably *)
+let rate addr r secs w =
+  let stop = Atomic.make false in
+  let hist = Array.init w (fun _ -> Histogram.create ()) and cnt = Array.make w 0 in
+  let t0 = now () in
+  let worker k () =
+    let c = connect addr in
+    let db, p =
+      match Client.declare c "main" [ { Schema.name = "n/k"; typ = Value.Tint; many = false; unique = false } ] with
+      | Ok (db, [ p ]) -> db, p
+      | Ok _ -> failwith "declare"
+      | Error e -> failwith (e.code ^ ": " ^ e.message)
+    in
+    let gap = float w /. float r in
+    let i = ref 0 in
+    while not (Atomic.get stop) do
+      let at = t0 +. (gap *. (float !i +. (float k /. float w))) in
+      let d = at -. now () in
+      if d > 0. then Unix.sleepf d;
+      let t = now () in
+      ignore (ok (Client.write c db [ Resolve.Add (-1, p, Int !i) ]));
+      incr i;
+      Histogram.record hist.(k) (int_of_float ((now () -. t) *. 1e6));
+      cnt.(k) <- cnt.(k) + 1
+    done;
+    Client.close c
+  in
+  let ts = List.init w (fun k -> Thread.create (worker k) ()) in
+  Unix.sleepf secs;
+  Atomic.set stop true;
+  List.iter Thread.join ts;
+  let dt = now () -. t0 in
+  let h = Histogram.create () in
+  Array.iter (Histogram.merge_into h) hist;
+  Printf.printf "rate %d: %.1f groups/s, write p50 %.3f p99 %.3f ms" r (float (Array.fold_left ( + ) 0 cnt) /. dt)
+    (float (Histogram.percentile h 0.5) /. 1e3) (float (Histogram.percentile h 0.99) /. 1e3);
+  (match Sys.getenv_opt "CEPHEUS_ADMIN" with
+   | None -> ()
+   | Some a -> (
+     Unix.sleepf 1.0;
+     match Client.connect ~program:"sbench" ?ca:(Sys.getenv_opt "CEPHEUS_CA") (Client.address_of_string addr) a with
+     | Error m -> failwith m
+     | Ok c ->
+       (match Client.status c with
+        | Ok l ->
+          List.iter
+            (fun (k, v) ->
+              let has s = let n = String.length s in let rec f i = i + n <= String.length k && (String.sub k i n = s || f (i + 1)) in f 0 in
+              if has ".replica." && (has "lag" || has ".group") then Printf.printf " %s %s" k v)
+            l
+        | Error e -> failwith e.message);
+       Client.close c));
+  print_newline ()
+
 (* N new connections, each its handshake (TLS on TCP) and Hello, then closed: microseconds a connection *)
 let hs addr n =
   let t0 = now () in
@@ -753,9 +812,10 @@ let () =
   | [| _; "wlat"; a; f; m; n |] -> wlat a (int_of_string f) m (int_of_string n)
   | [| _; "stall"; a; f; n; secs; st |] -> stall a (int_of_string f) (int_of_string n) (float_of_string secs) (int_of_string st)
   | [| _; "mwrite"; a; d; c; secs |] -> mwrite a (int_of_string d) (int_of_string c) (float_of_string secs)
+  | [| _; "rate"; a; r; secs; w |] -> rate a (int_of_string r) (float_of_string secs) (int_of_string w)
   | [| _; "livecpu"; d; n; g |] -> livecpu d (int_of_string n) (int_of_string g)
   | [| _; "rights"; rounds; n |] -> rights (int_of_string rounds) (int_of_string n)
   | _ ->
     prerr_endline
-      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS [W] | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS | wlat ADDR FACTS local|remote N | stall ADDR FACTS N SECS S | livecpu DIR SCREENS GROUPS | mwrite ADDR D C SECS | rights ROUNDS N";
+      "sbench.exe ping ADDR N | get ADDR FACTS DEPTH N | clients ADDR FACTS C N | write ADDR FACTS C SECS [W] | q ADDR FACTS Q3|Q4 N | check ADDR FACTS | local ADDR FACTS N | localq ADDR FACTS Q3|Q4 N | follow ADDR FACTS SECS | ids ADDR FACTS | wlat ADDR FACTS local|remote N | stall ADDR FACTS N SECS S | livecpu DIR SCREENS GROUPS | mwrite ADDR D C SECS | rate ADDR RATE SECS W | rights ROUNDS N";
     exit 2

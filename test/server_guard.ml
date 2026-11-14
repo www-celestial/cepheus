@@ -121,7 +121,7 @@ let () =
       hub = (fun () -> Watch.hub watch); files = Files.cell ~master:(fun () -> Ok (String.make 32 'k')) (Filename.concat dir "shop/vault") }
   in
   let page = Unix.openfile "/dev/null" [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0 in
-  let dbs = [| { Net.core; live; follow; watch; page; checkpointed = 0 } |] in
+  let dbs = [| { Net.core; live; follow; watch; page = Some page; checkpointed = 0; replica = ref false } |] in
   let tok = { Tokens.name = "w"; hash = Tokens.hash_of_text "cph_w"; databases = [ "shop", Tokens.Write ]; admin = false } in
   let srv =
     Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| core |] ~tokens:(Tokens.with_tokens Tokens.empty [ tok ]) ~now:Disk.real.now
