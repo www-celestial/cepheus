@@ -806,17 +806,27 @@ let () =
 (* ---- a base larger than the cache ---- *)
 
 (* A random question on the paged base's 6,000 things may be a cross product (two parts that share no variable) or a
-   join on a value of three (things that share a tag): tens of millions of rows, the memory of the machine, and the
-   naive evaluator reads every fact again for each binding (24,000 facts a binding). A draw whose work passes 20,000
-   candidates is left out there (None, as a draw that does not type); an error is left to [find], which gives it. *)
+   join on a value of three (things that share a tag): tens of millions of rows, the memory of the machine; and the
+   naive evaluator reads every fact again (24,000) for each binding of its patterns taken in their written order, so
+   its partial bindings, not the answer's rows, make its time. The engine counts them: the question cut after its
+   first k patterns, k = 1 .. all, has as many answers as the naive evaluator has bindings at its k-th pattern. A draw
+   whose counts pass 20,000 candidates in all is left out (None, as a draw that does not type); a page that cannot be
+   read is left to [find], which answers it. *)
 let paged_query r v facts =
   match C.random_query r v facts qnames with
-  | Some q as some -> (
-    match Query.fold ~seq:true ~budget:20_000 v q ~init:(fun () -> ()) ~step:(fun () _ -> ()) ~merge:(fun () () -> ()) with
-    | () -> some
-    | exception Query.Over_budget _ -> None
-    | exception _ -> some)
   | None -> None
+  | Some (q : Query.t) as some -> (
+    let left = ref 20_000 in
+    let count where =
+      let w = ref 0 in
+      Query.fold ~seq:true ~budget:!left v { q with where; ranges = [] } ~init:(fun () -> ()) ~step:(fun () _ -> incr w) ~merge:(fun () () -> ());
+      left := !left - max 1 !w
+    in
+    let prefixes = List.init (List.length q.where) (fun k -> List.filteri (fun i _ -> i <= k) q.where) in
+    match List.iter count prefixes with
+    | () -> if !left > 0 then some else None
+    | exception Pages.Unreadable _ -> some
+    | exception _ -> None)
 
 let () =
   section "a base larger than the cache: pages read and checked as needed, by several domains; damage after open";
@@ -997,8 +1007,10 @@ let () =
   close db;
   let db = Result.get_ok (open_ dir) in
   C.check (C.F.equal (C.facts_of_view (view db)) (C.facts_of_view (view f3))) "reopened database equals the fork that mirrored it";
+  let last = (view db).group in
   close db;
-  (match verify dir with Ok n -> C.check (n > 20) "verify reads %d groups" n | Error e -> C.fail "verify: %s" (message e));
+  (* every group of the journal, as many as the writes accepted (the random writes refuse some) *)
+  (match verify dir with Ok n -> C.check (n = last && n > 10) "verify reads %d groups, the journal's %d" n last | Error e -> C.fail "verify: %s" (message e));
   C.rmrf dir
 
 (* ---- named cases ---- *)
