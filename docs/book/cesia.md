@@ -843,6 +843,24 @@ alone 3.09 [3.04, 3.13]; the same with the package used but not called 3.51 [3.4
   fingerprint (BLAKE2 of 2.3 MB, 3.9 ms), loading the system's OpenSSL (1.3 ms), and linking 1.4 MB of machine code
   into the process. Once a process: a program connects once, at its start.
 
+**OWL 2 RL** (`bench/reason.ml owlprep 1`: LUBM-1, 150,477 facts with the univ-bench ontology in OWL 2 RL's
+vocabulary and no rule, a copy for each run; `Define(owl.Rl())` timed in the program, `reason.exe owldefine` for
+OCaml's `define db (Owl.rl o)`; $n = 21$ rounds alternated, each the same 75,560 facts of `owl/Type` after): at the
+server through its Unix socket 1.26 s [1.20, 1.44] against 0.93 [0.90, 1.01] for OCaml on the database in its own
+process, 1.32× [1.22, 1.53] by the rounds' ratios; in a fork 0.82 s [0.81, 0.84] against 0.78 [0.76, 0.81], 1.06×
+[0.99, 1.10].
+
+- The server reasons as OCaml does: over TLS, where the program keeps no copy, `Define` takes 0.84 to 0.94 s (5
+  rounds). The 0.3 s more through the socket are the program's local copy applying the change's 75,560 derived
+  facts, so that its reads see them (a `Define` again, which writes nothing, waits that long for it there, 2 ms over
+  TLS): the price of local reads for a write that large, paid once.
+- In a fork the engine is the same code in the program's process: the 6 % are Cesia's process around it.
+- Start-up does not grow: the package `owl` is read only by a program that uses it. `io.Print(1)` with the package
+  `cepheus` used, not called, 3.64 ms against 3.62 before OWL (1.005 [0.98, 1.04], $n = 21$ rounds of 30 runs,
+  alternated); the first call, which loads the engine, 18.87 ms against 18.78 (1.007 [0.98, 1.02]); `io.Print(1)`
+  alone, the same program in both folders, 1.013 [1.00, 1.05]: the noise. The engine holds OWL 2 RL's rules, 58 KB
+  more to check at its load (4.58 MB); the binding's own code is 14 KB smaller than before.
+
 **The rest of the program.** The package's reader and, on the server's machine, its follower are domains of the
 program's process, and OCaml 5 stops every domain at each minor collection, while the follower's state lives in the
 program's heap. A loop that makes 2 million maps (`bench/cesia/gc.ce`, the best of three, $n = 7$): 125.8 ms [124.8,
