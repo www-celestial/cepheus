@@ -776,7 +776,7 @@ pour l'instant qu'en OCaml.
 
 Une chose de propriété ne garde que des faits `cepheus/` ([une propriété comme variable](#une-propriété-comme-variable--la-forme-des-règles-dowl-du-w3c)),
 et Cepheus n'a pas de listes RDF (RDF : le modèle de données du web sémantique, en triplets) ; le vocabulaire diffère
-donc de la forme RDF d'OWL de trois façons, chacune la plus petite qui garde les règles du W3C telles qu'elles sont :
+donc de la forme RDF d'OWL de quatre façons, chacune la plus petite qui garde les règles du W3C telles qu'elles sont :
 
 - Un axiome sur une propriété est un fait de sa **description**, une chose à elle : `[d, owl/Property, advisor]` nomme
   la propriété, et les autres faits de d sont ses axiomes : `[d, owl/Range, Professor]`, `[d, owl/Transitive, true]`.
@@ -1009,7 +1009,7 @@ Le plan de la conception a six étapes ; cette version a les six.
   d'un changement attendent le merge suivant pour atteindre un run.
 - **Le reste de l'étape 6** : B/F sur les égalités (Motik et al., IJCAI 2015 [Motik 2015c]) au lieu de défaire une
   classe ; la preuve d'une égalité dans `why` ; l'égalité à côté de `Not` et des agrégats, des closure modules, du
-  chemin des chargements et des tours parallèles ; `owl.Rl()` depuis Cesia (la bibliothèque OCaml est `Cepheus.Owl`).
+  chemin des chargements et des tours parallèles.
 - Le budget comme réglage de la base plutôt que comme nombre du processus ; le groupe qui a affirmé chaque feuille d'une
   preuve.
 
@@ -1020,4 +1020,4 @@ Chaque travail cité ici est dans les
 [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [Feeley 1987], [Gupta 1993], [Motik 2015], [Motik 2019],
 [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016], [Subotic 2018], [Zhao 2020],
 [Guo 2005], [Hu 2019], [Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012], [Motik 2015b], [Motik 2015c],
-[Tarjan 1975], [Ma 2006].
+[Tarjan 1975], [Ma 2006], [Leis 2014], [Budiu 2023].

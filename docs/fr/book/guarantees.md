@@ -575,7 +575,7 @@ fusionnés ; un indicateur changé est un retrait et un ajout dans le nouveau ru
 (6) *Les modules de closure.* Pour prp-trp (la règle d'OWL 2 RL d'une propriété transitive) sur $T$, le $T$ du least
 model est la transitive closure $T^+$ (la fermeture transitive : chaque paire reliée par un chemin) des autres faits
 de $T$ ; pour la paire linéaire (deux règles : chaque arête donne un fait de la closure, et une arête suivie d'un fait
-de la closure en donne un), c'est $E^* \circ (E \cup B)$, $B$ étant les faits de $T$ affirmés ou donnés par d'autres
+de la closure en donne un), c'est $E^{\ast} \circ (E \cup B)$, $B$ étant les faits de $T$ affirmés ou donnés par d'autres
 règles. De zéro, le module calcule exactement ceux-ci sur les composantes fortement connexes (les cibles d'une
 composante sont celles de ses successeurs avec eux, et ses propres membres quand elle contient un cycle), et fait
 chaque paire qui n'est pas présente ; de façon incrémentale, l'état avant le groupe contient la closure (G17 pour le
