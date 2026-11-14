@@ -344,10 +344,15 @@ venue, volume and year); a work that could not be checked is not listed. The des
   of the benchmarks.
 - **[Urbani 2016]** J. Urbani, C. Jacobs, M. Krötzsch. Column-Oriented Datalog Materialization for Large Knowledge
   Graphs. *AAAI* 2016, 258–264. https://doi.org/10.1609/aaai.v30i1.9993
-  — VLog: materialisation over sorted columns; its published one-thread rate, beside ours.
+  — VLog: materialisation over sorted columns, the model of a load's sorted prefix (large groups); its published
+  one-thread rate, beside ours.
 - **[Scholz 2016]** B. Scholz, H. Jordan, P. Subotić, T. Westmann. On Fast Large-Scale Program Analysis in Datalog.
   *CC* 2016, 196–206. https://doi.org/10.1145/2892208.2892226
   — Soufflé, Datalog compiled to C++: its published times, beside ours.
+- **[Subotic 2018]** P. Subotić, H. Jordan, L. Chang, A. Fekete, B. Scholz. Automatic Index Selection for Large-Scale
+  Datalog Computation. *PVLDB* 12(2), 141–153, 2018. https://doi.org/10.14778/3282495.3282500
+  — The indexes a rule set needs, chosen from the searches its plans make: in a large group, a derived fact joins only
+  the chains some plan reads.
 - **[Zhao 2020]** D. Zhao, P. Subotić, B. Scholz. Debugging Large-scale Datalog: A Scalable Provenance Evaluation
   Strategy. *ACM TOPLAS* 42(2), 2020. https://doi.org/10.1145/3379446
   — Provenance stored per fact (rule and proof height) at a published 1.31× run time: the alternative to Cepheus'

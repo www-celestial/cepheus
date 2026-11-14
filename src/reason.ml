@@ -31,7 +31,7 @@ module S = struct
   let[@inline never] mem v e p w = Store.mem v e p w
   let[@inline never] count_prop v p = Store.count_prop v p
   let[@inline never] count_things v p w = Store.count_things v p w
-  let[@inline never] set_sorted v es ps ws ss n = Store.set_sorted v es ps ws ss n
+  let[@inline never] set_sorted ~olds v es ps ws ss n = Store.set_sorted ~olds v es ps ws ss n
   let[@inline never] facts v = Store.facts v
   let[@inline never] distinct v p = Store.distinct v p
   let[@inline never] word_intern v x = Store.word_intern v x
@@ -88,6 +88,7 @@ let trace = ref false  (* the phases of a closure from scratch, printed (the ben
 let specialise = ref true  (* false: the rules always run as written (the tests compare both paths) *)
 let walk_retract = ref true  (* false: a closure's retractions by B/F through its rules' plans (the tests compare) *)
 let module_seconds = ref 0. (* of [seconds]: the closure modules' work, their facts found and put aside *)
+let bulk_groups = ref 0  (* large groups reasoned on their sorted prefix *)
 
 (* ---- hashing ---- *)
 
@@ -121,12 +122,13 @@ type idx = {
 
 let slots_for facts = let size = ref 64 in while !size < 2 * facts do size := 2 * !size done; !size
 
-let[@inline never] new_slots size = let a = ints (3 * size) 0 in for i = 0 to size - 1 do A.unsafe_set a (3 * i) (-1) done; a
+(* every cell -1: an empty slot's key, and its head, so that a key absent gives no fact *)
+let[@inline never] new_slots size = ints (3 * size) (-1)
 
 (* [keys]: the keys expected, for the size of the table (it grows past them); [facts]: the facts' chains *)
 let[@inline never] idx_create ?(facts = 64) ?(keys = facts) () =
   let size = slots_for keys in
-  { sl = new_slots size; mask = size - 1; used = 0; slots = ints (size / 2) 0; next = ints facts (-1) }
+  { sl = new_slots size; mask = size - 1; used = 0; slots = ints_raw (size / 2); next = ints_raw facts }
 
 let[@inline] idx_slot t a b =
   let sl = t.sl and mask = t.mask in
@@ -178,7 +180,8 @@ let[@inline never] idx_clear t =
 
 type ws = {
   mutable n : int;
-  mutable f3 : ints;  (* fact x: f3.(3x) its thing, f3.(3x+1) its property, f3.(3x+2) its value word *)
+  mutable f2 : ints;  (* fact x: f2.(2x) its thing and property (thing lsl 16 + property: a property id is below
+                         65,536, Schema.first_thing), f2.(2x+1) its value word: one cache line a fact *)
   mutable cap : int;
   mutable base : Bytes.t;  (* the state in the view the reasoning started from: 0 absent, 1 asserted, 2 only derived *)
   mutable old : Bytes.t;  (* the state before the group (its asserted changes too): what Not and aggregates compare *)
@@ -195,20 +198,34 @@ type ws = {
   ip : idx;  (* (property, 0) *)
   mutable with_ip : bool;  (* [ip] kept: some plan joins an atom with neither side bound (a load whose rules have none
                               skips it) *)
+  mutable nb : int;  (* the sorted prefix of a large group (below): facts 0 .. nb-1; 0 none *)
+  mutable b_old : int;  (* its facts of things below b_lo: 0 .. b_old-1, found by binary search *)
+  mutable b_lo : int;  (* thing b_lo + k (a new thing): its facts b_off.(k) .. b_off.(k+1) - 1 *)
+  mutable b_off : Bulk.i32;
+  mutable bk : Bulk.t;  (* the group's facts by (property, value, thing) *)
+  mutable b_has : Bytes.t;  (* by property: 1 its facts are in the prefix *)
+  mutable need : Bytes.t;  (* by property, the chains a fact of it joins: 1 ie, 2 iw, 4 ip; empty: all of them *)
+  mutable fresh : int;  (* things from this one on are the group's new things: the view holds no fact about them (a
+                           large group's; max_int otherwise) *)
 }
 
-let[@inline never] ws_create ?(facts = 64) () =
+(* [keys]: the keys expected in the chains (a large group's prefix is in none) *)
+let[@inline never] ws_create ?(facts = 64) ?keys () =
   let c = max 64 facts in
+  let keys = match keys with Some k -> max 64 k | None -> c in
   let size = ref 128 in
   while !size < 2 * c do size := 2 * !size done;
-  { n = 0; f3 = ints (3 * c) 0; cap = c; base = Bytes.make c '\000'; old = Bytes.make c '\000'; now = Bytes.make c '\000';
-    mark = Bytes.make c '\000'; round = ints c (-1); rule = ints c (-1); by = [||]; set = ints !size (-1);
-    smask = !size - 1; ie = idx_create ~facts:c (); iw = idx_create ~facts:c ();
-    ip = idx_create ~facts:c ~keys:32 (); with_ip = true }
+  (* every cell of a fact is written when it is added (or put in the prefix): only [set] and the slots need filling *)
+  { n = 0; f2 = ints_raw (2 * c); cap = c; base = Bytes.create c; old = Bytes.create c; now = Bytes.create c;
+    mark = Bytes.create c; round = ints_raw c; rule = ints_raw c; by = [||]; set = ints !size (-1);
+    smask = !size - 1; ie = idx_create ~facts:c ~keys (); iw = idx_create ~facts:c ~keys ();
+    ip = idx_create ~facts:c ~keys:32 (); with_ip = true; nb = 0; b_old = 0; b_lo = 0; b_off = Bulk.i32 0; bk = Bulk.empty;
+    b_has = Bytes.empty; need = Bytes.empty; fresh = max_int }
 
-let[@inline] fe ws x = A.unsafe_get ws.f3 (3 * x)
-let[@inline] fp ws x = A.unsafe_get ws.f3 ((3 * x) + 1)
-let[@inline] fw ws x = A.unsafe_get ws.f3 ((3 * x) + 2)
+let[@inline] fe ws x = A.unsafe_get ws.f2 (2 * x) lsr 16
+let[@inline] fp ws x = A.unsafe_get ws.f2 (2 * x) land 0xFFFF
+let[@inline] fw ws x = A.unsafe_get ws.f2 ((2 * x) + 1)
+let[@inline] set_f ws x e p w = A.unsafe_set ws.f2 (2 * x) ((e lsl 16) lor p); A.unsafe_set ws.f2 ((2 * x) + 1) w
 let[@inline] round ws x = A.unsafe_get ws.round x
 let[@inline] rule ws x = A.unsafe_get ws.rule x
 let[@inline] set_round ws x r = A.unsafe_set ws.round x r
@@ -224,14 +241,15 @@ let[@inline never] set_by ws x ids =
   ws.by.(x) <- ids
 
 let[@inline] find ws e p w =
-  if ws.n = 0 then -1
+  (* a property id is below 65,536 (the packing of f2): any other p is no fact *)
+  if ws.n = 0 || p lsr 16 <> 0 then -1
   else begin
-    let set = ws.set and mask = ws.smask in
+    let set = ws.set and mask = ws.smask and ep = (e lsl 16) lor p in
     let i = ref (h3 e p w land mask) and r = ref (-2) in
     while !r = -2 do
       let x = A.unsafe_get set !i in
       if x = -1 then r := -1
-      else if A.unsafe_get ws.f3 (3 * x) = e && A.unsafe_get ws.f3 ((3 * x) + 2) = w && A.unsafe_get ws.f3 ((3 * x) + 1) = p then r := x
+      else if A.unsafe_get ws.f2 (2 * x) = ep && A.unsafe_get ws.f2 ((2 * x) + 1) = w then r := x
       else i := (!i + 1) land mask
     done;
     !r
@@ -246,7 +264,7 @@ let[@inline never] grow ws =
   let n = ws.n in
   let c = 2 * ws.cap in
   let gb a = let b = Bytes.make c '\000' in Bytes.blit a 0 b 0 n; b in
-  ws.f3 <- regrow ws.f3 (3 * n) (3 * c) 0;
+  ws.f2 <- regrow ws.f2 (2 * n) (2 * c) 0;
   ws.cap <- c;
   ws.round <- regrow ws.round n c (-1); ws.rule <- regrow ws.rule n c (-1);
   ws.base <- gb ws.base; ws.old <- gb ws.old; ws.now <- gb ws.now; ws.mark <- gb ws.mark;
@@ -260,10 +278,11 @@ let[@inline never] grow_set ws =
 
 (* a fact the working set did not hold: its id *)
 let[@inline never] add ws e p w base =
+  if p lsr 16 <> 0 || e < 0 then invalid_arg "Reason.add: not a fact";
   if ws.n >= ws.cap then grow ws;
   if 2 * (ws.n + 1) > A.dim ws.set then grow_set ws;
   let x = ws.n in
-  A.unsafe_set ws.f3 (3 * x) e; A.unsafe_set ws.f3 ((3 * x) + 1) p; A.unsafe_set ws.f3 ((3 * x) + 2) w;
+  set_f ws x e p w;
   Bytes.unsafe_set ws.base x (Char.unsafe_chr base);
   Bytes.unsafe_set ws.old x (Char.unsafe_chr base);
   Bytes.unsafe_set ws.now x (Char.unsafe_chr base);
@@ -280,14 +299,16 @@ let[@inline] old ws x = Char.code (Bytes.unsafe_get ws.old x)
 let[@inline] has ws x m = Char.code (Bytes.unsafe_get ws.mark x) land m <> 0
 let[@inline] set_mark ws x m = Bytes.unsafe_set ws.mark x (Char.unsafe_chr (Char.code (Bytes.unsafe_get ws.mark x) lor m))
 
-(* in the chains: a fact the view lacks (base absent) once it is present *)
+(* in the chains: a fact the view lacks (base absent) once it is present; in a large group, only the chains some
+   plan reads for its property ([need]) *)
 let[@inline never] chain ws x =
   if not (has ws x 8) then begin
     set_mark ws x 8;
     let p = fp ws x in
-    idx_add ws.ie p (fe ws x) x;
-    idx_add ws.iw p (fw ws x) x;
-    if ws.with_ip then idx_add ws.ip p 0 x
+    let nd = if p < Bytes.length ws.need then Char.code (Bytes.unsafe_get ws.need p) else 7 in
+    if nd land 1 <> 0 then idx_add ws.ie p (fe ws x) x;
+    if nd land 2 <> 0 then idx_add ws.iw p (fw ws x) x;
+    if ws.with_ip && nd land 4 <> 0 then idx_add ws.ip p 0 x
   end
 
 let[@inline never] set_now ws x s =
@@ -306,6 +327,88 @@ let[@inline never] reset ws =
     (* every slot is emptied: open addressing needs no tombstones *)
     List.iter idx_clear [ ws.ie; ws.iw; ws.ip ];
     ws.n <- 0
+  end;
+  if ws.nb > 0 then begin
+    ws.nb <- 0;
+    ws.b_old <- 0;
+    ws.b_off <- Bulk.i32 0;
+    ws.bk <- Bulk.empty;
+    ws.b_has <- Bytes.empty
+  end;
+  ws.need <- Bytes.empty;
+  ws.fresh <- max_int
+
+(* ---- the sorted prefix of a large group ----
+   A load's facts are many and all new: hashing each into the chains cost more than the reasoning (0.4 us a fact, one
+   domain, for 1.35 M facts). So in a large group the facts of the properties the rules read or give are the working
+   set's facts 0 .. nb-1, in (thing, property, value) order, present at round 0: in [set], put there by several
+   domains, and in no chain. A thing's facts are a range of the prefix (offsets over the new things, a binary search
+   below them), a (property, value)'s things a range of the group's order by property, which its run needs anyway
+   (Bulk.make, done before the reasoning). Facts no rule reads or gives stay out: no plan reads them, no head is one. *)
+
+let[@inline] in_prefix ws p = p < Bytes.length ws.b_has && Bytes.unsafe_get ws.b_has p <> '\000'
+
+(* the values of (e p _) in the prefix *)
+let[@inline never] b_iter_e ws e p f =
+  if in_prefix ws p then begin
+    let lo = ref 0 and hi = ref 0 in
+    let k = e - ws.b_lo in
+    if k >= 0 then begin
+      if k + 1 < Bigarray.Array1.dim ws.b_off then begin
+        lo := Int32.to_int (Bigarray.Array1.unsafe_get ws.b_off k);
+        hi := Int32.to_int (Bigarray.Array1.unsafe_get ws.b_off (k + 1))
+      end
+    end
+    else begin
+      let l = ref 0 and h = ref ws.b_old in
+      while !l < !h do let m = (!l + !h) lsr 1 in if fe ws m < e then l := m + 1 else h := m done;
+      lo := !l;
+      hi := !l;
+      while !hi < ws.b_old && fe ws !hi = e do incr hi done
+    end;
+    for x = !lo to !hi - 1 do if fp ws x = p then f (fw ws x) done
+  end
+
+(* the things of (_ p w) in the prefix *)
+let[@inline never] b_iter_w ws p w f =
+  if in_prefix ws p then begin
+    let b = ws.bk in
+    let l = ref (Array.unsafe_get b.poff p) and h = ref (Array.unsafe_get b.poff (p + 1)) in
+    let top = !h in
+    while !l < !h do let m = (!l + !h) lsr 1 in if Bulk.pword b m < w then l := m + 1 else h := m done;
+    let r = ref !l in
+    while !r < top && Bulk.pword b !r = w do f (Bulk.pthing b !r); incr r done
+  end
+
+(* every fact of p in the prefix *)
+let[@inline never] b_iter_p ws p f =
+  if in_prefix ws p then begin
+    let b = ws.bk in
+    for r = Array.unsafe_get b.poff p to Array.unsafe_get b.poff (p + 1) - 1 do f (Bulk.pthing b r) (Bulk.pword b r) done
+  end
+
+(* the prefix's facts into [set] on several domains: the table cut into regions of consecutive slots, a domain a
+   region, each placing the facts whose slot falls in it; a fact whose probe would leave its region is put aside and
+   placed after, by the usual probe (which may cross regions): every fact is where [find] looks for it. *)
+let[@inline never] place_prefix ws nb =
+  let size = A.dim ws.set in
+  let regions = if nb < 50_000 || !Bulk.threads <= 1 then 1 else (let r = ref 1 in while 2 * !r <= !Bulk.threads && 2 * !r <= size / 1024 do r := 2 * !r done; !r) in
+  if regions = 1 then for x = 0 to nb - 1 do place ws x done
+  else begin
+    let per = size / regions in
+    let aside = Array.make regions [] in
+    Bulk.parallel ~d:!Bulk.threads regions (fun r ->
+        let lo = r * per and hi = (r + 1) * per and set = ws.set and mask = ws.smask and l = ref [] in
+        for x = 0 to nb - 1 do
+          let i = h3 (fe ws x) (fp ws x) (fw ws x) land mask in
+          if i >= lo && i < hi then begin
+            let i = ref i in
+            while !i < hi && A.unsafe_get set !i <> -1 do incr i done;
+            if !i < hi then A.unsafe_set set !i x else l := x :: !l
+          end
+        done;
+        aside.(r) <- !l);
+    Array.iter (fun l -> List.iter (place ws) (List.rev l)) aside
   end
 
 
@@ -504,6 +607,9 @@ and ctx = {
   seen2 : iset;
   mutable walked : Bytes.t;  (* by property: 1 its facts are a closure decided by its module's walks in this group *)
   mutable xk : plan -> unit;  (* where the plans of flips and aggregates send their instances *)
+  mutable plain_derive : bool;  (* a large group whose rules derive without Not or aggregates (only constraints have
+                                   them): its rounds may run on several domains *)
+  heads_none : (int * int, bool) Hashtbl.t;  (* a change: does the view hold no fact (_ p w) of a head (p, w) *)
 }
 
 exception Respec of int * int
@@ -870,7 +976,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
           let p = !cp in
           let e = ge () and w = gv () in
           let x = find ws e p w in
-          if (if x >= 0 then vis x (lim ()) else in_view p && S.mem ctx.v e p w) then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
+          if (if x >= 0 then vis x (lim ()) else in_view p && e < ws.fresh && S.mem ctx.v e p w) then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
       | Proved, true, true ->
         fun () -> let p = !cp in let e = ge () and w = gv () in if find pt e p w >= 0 then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
       | Old, true, true ->
@@ -898,7 +1004,8 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
             ce := e;
             cl := lim ();
             pl.be.(j) <- e;
-            if in_view p then S.iter_values ctx.v e p (if ws.n = 0 then on else filt);
+            if in_view p && e < ws.fresh then S.iter_values ctx.v e p (if ws.n = 0 then on else filt);
+            if !cl >= 0 then b_iter_e ws e p on;
             let x = ref (idx_head ws.ie p e) in
             while !x >= 0 do
               let y = !x in
@@ -930,6 +1037,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
             cl := lim ();
             pl.bw.(j) <- w;
             if in_view p then S.iter_things ctx.v p w (if ws.n = 0 then on else filt);
+            if !cl >= 0 then b_iter_w ws p w on;
             let x = ref (idx_head ws.iw p w) in
             while !x >= 0 do
               let y = !x in
@@ -965,6 +1073,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
             let p = !cp in
             cl := lim ();
             if in_view p then S.iter_prop ctx.v p (if ws.n = 0 then on else filt);
+            if !cl >= 0 then b_iter_p ws p on;
             let x = ref (idx_head ws.ip p 0) in
             while !x >= 0 do
               let y = !x in
@@ -1005,7 +1114,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
     let before = nmode = Before in
     let[@inline] now_has e p w =
       let x = find ws e p w in
-      if x >= 0 then Char.code (Bytes.unsafe_get ws.now x) > 0 else in_view p && S.mem ctx.v e p w
+      if x >= 0 then Char.code (Bytes.unsafe_get ws.now x) > 0 else in_view p && e < ws.fresh && S.mem ctx.v e p w
     in
     let var = function Query.Var x -> x | _ -> -1 in
     let rec chain = function
@@ -1024,7 +1133,8 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
           else
             fun () ->
               let e = ge () in
-              if in_view p then S.iter_values ctx.v e p (fun w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on w);
+              if in_view p && e < ws.fresh then S.iter_values ctx.v e p (fun w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on w);
+              b_iter_e ws e p on;
               let x = ref (idx_head ws.ie p e) in
               while !x >= 0 do
                 let y = !x in
@@ -1038,6 +1148,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
             fun () ->
               let w = gv () in
               if in_view p then S.iter_things ctx.v p w (fun e -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e);
+              b_iter_w ws p w on;
               let x = ref (idx_head ws.iw p w) in
               while !x >= 0 do
                 let y = !x in
@@ -1050,6 +1161,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
           else
             fun () ->
               if in_view p then S.iter_prop ctx.v p (fun e w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e w);
+              b_iter_p ws p on;
               (* the working set's own facts of p: its chain by property (kept but in a load, which refuses Nots) *)
               let x = ref (idx_head ws.ip p 0) in
               while !x >= 0 do
@@ -1699,24 +1811,24 @@ let [@inline never] choose (v : Store.view) (gen : program) (spec : program opti
 
 (* ---- contexts ---- *)
 
-let [@inline never] new_ctx ?facts prog v =
+let [@inline never] new_ctx ?facts ?keys prog v =
   let nm = Array.length prog.modules in
   let bfq = Queue.create () in
-  { prog; ws = ws_create ?facts (); pt = ws_create (); v; v0 = v; cur = -1;
+  { prog; ws = ws_create ?facts ?keys (); pt = ws_create (); v; v0 = v; cur = -1;
     bfqs = Array.init prog.nstrata (fun s -> if s = 0 then bfq else Queue.create ()); ins_s = Array.make prog.nstrata None;
     xplans = Hashtbl.create 8; round = max_int; cw = Array.make (Array.length prog.consts) (-1);
     ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; bfq; next = ints 64 0;
     spare = ints 64 0; nn = 0; derived = 0; limit = max_int; whole = false; stop = never; vp = Bytes.empty;
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
-    seen2 = iset_create (); walked = Bytes.empty; xk = ignore }
+    seen2 = iset_create (); walked = Bytes.empty; xk = ignore; plain_derive = false; heads_none = Hashtbl.create 8 }
 
-let [@inline never] take ?facts prog v =
+let [@inline never] take ?facts ?keys prog v =
   let c =
     if facts <> None then None
     else Mutex.protect prog.pm (fun () -> match !(prog.pool) with c :: r -> prog.pool := r; Some c | [] -> None)
   in
-  let c = match c with Some c -> c | None -> new_ctx ?facts prog v in
+  let c = match c with Some c -> c | None -> new_ctx ?facts ?keys prog v in
   c.v <- v;
   c.round <- max_int;
   Array.iteri (fun i x -> c.cw.(i) <- Option.value (S.word v x) ~default:(-1)) prog.consts;
@@ -1735,6 +1847,8 @@ let [@inline never] take ?facts prog v =
   c.v0 <- v;
   c.cur <- -1;
   c.walked <- Bytes.empty;
+  c.plain_derive <- false;
+  Hashtbl.reset c.heads_none;
   c
 
 let [@inline never] give c =
@@ -1745,8 +1859,8 @@ let [@inline never] give c =
     Mutex.protect c.prog.pm (fun () -> c.prog.pool := c :: !(c.prog.pool))
   end
 
-let with_ctx ~prog ?facts v f =
-  let c = take ?facts prog v in
+let with_ctx ~prog ?facts ?keys v f =
+  let c = take ?facts ?keys prog v in
   match f c with
   | r -> give c; r
   | exception e -> give c; raise e
@@ -1783,6 +1897,13 @@ let [@inline never] head_refusal c (pl : plan) =
   if b <> "" then b else head_message c.v (rule_name c pl.ri) ~thing:(pl.he <> -1) pl.hp
 
 (* the head of a forward instance, at round r - 1: a fact that is not there yet joins round r *)
+(* a change derives many facts of a few heads (p, w): one count tells when the view holds none of a head's, and its
+   facts are then not looked up one by one (the view's facts do not change while a group is reasoned) *)
+let[@inline never] none_of c p w =
+  match Hashtbl.find_opt c.heads_none (p, w) with
+  | Some b -> b
+  | None -> let b = S.count_things c.v p w = 0 in Hashtbl.replace c.heads_none (p, w) b; b
+
 (* the head (e p w) of an instance of rule ri: a fact at round r, unless it is one already *)
 let[@inline never] emit_fact c ri e p w r =
   let ws = c.ws in
@@ -1797,7 +1918,7 @@ let[@inline never] emit_fact c ri e p w r =
       push_next c x
     end
   end
-  else if not ((Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000')) && S.mem c.v e p w) then begin
+  else if not ((Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000')) && e < ws.fresh && (not (c.whole && none_of c p w)) && S.mem c.v e p w) then begin
     if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c ri) e;
     check_frozen c p w;
     let x = add ws e p w 0 in
@@ -1826,35 +1947,179 @@ let par_min = ref 20_000  (* a round of at least this many facts runs on several
 let [@inline never] worker_ctx c =
   { c with ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; ins_s = Array.make c.prog.nstrata None;
            xplans = Hashtbl.create 8; next = ints 16 0; spare = ints 16 0; nn = 0; per_rule = Array.make (Array.length c.prog.rules) 0;
-           buf_a = buf_create 16; buf_b = buf_create 16; seen = iset_create (); seen2 = iset_create (); pt = ws_create () }
+           buf_a = buf_create 16; buf_b = buf_create 16; seen = iset_create (); seen2 = iset_create (); pt = ws_create ();
+           heads_none = Hashtbl.create 1 }
 
 (* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
    the other cores while it runs *)
-let par_ok c = !Bulk.domains > 1 && c.stop == never && (not c.prog.stratified) && Array.for_all (fun w -> w >= 0) c.cw
+let par_ok c = !Bulk.threads > 1 && c.stop == never && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
 
 exception Too_many
 
 (* [k] morsels, [run w m f]: morsel m derived in context w, each instance to f; their heads made facts of round [r].
    false: the morsels found more heads than the budget leaves room for (the caller derives alone, which refuses
    exactly where it must) *)
+(* The heads of a large round made facts on several domains, with the ids, rounds, rules and next round's list the
+   one-domain loop below gives (so that nothing depends on the domains). The candidates, numbered g in morsel order,
+   are deduplicated by regions of the membership table, one domain a region, each claiming an empty slot for the
+   first candidate of a fact (its slot marked -(2 + g)) and finding the later ones there; a candidate whose probe
+   would leave its region is decided after, in order, by the usual probe. The facts claimed then take their ids in
+   the order of g, are written on several domains, and join the chains and the next round in that order. Only when
+   no candidate can refuse the group (the budget has room for them all, no frozen fact, no thing past the last). *)
+let [@inline never] merge_regions c (outs : buf array) r =
+  let ws = c.ws and k = Array.length outs in
+  let mbase = Array.make (k + 1) 0 in
+  for m = 0 to k - 1 do mbase.(m + 1) <- mbase.(m) + (outs.(m).bn / 4) done;
+  let total = mbase.(k) in
+  let n0 = ws.n in
+  while n0 + total > ws.cap do grow ws done;
+  if 2 * (n0 + total) > A.dim ws.set then begin
+    let size = ref (A.dim ws.set) in
+    while 2 * (n0 + total) > !size do size := 2 * !size done;
+    ws.set <- ints !size (-1);
+    ws.smask <- !size - 1;
+    for x = 0 to n0 - 1 do place ws x done
+  end;
+  (* candidate g: morsel m, position j *)
+  let morsel = Array.make (max 1 total) 0 in
+  for m = 0 to k - 1 do Array.fill morsel mbase.(m) (mbase.(m + 1) - mbase.(m)) m done;
+  let cget g f = let m = Array.unsafe_get morsel g in buf_get outs.(m) ((4 * (g - mbase.(m))) + f) in
+  let flag = Bytes.make (max 1 total) '\000' and slot = ints_raw (max 1 total) and xid = ints_raw (max 1 total) in
+  (* the decision for candidate g at slot i onwards, up to [hi]: true when decided *)
+  let decide g i0 hi =
+    let e = cget g 0 and p = cget g 1 and w = cget g 2 in
+    let set = ws.set and mask = ws.smask in
+    let i = ref i0 and fin = ref false and stop = ref false in
+    while not !stop do
+      if !i >= hi then stop := true
+      else begin
+        let v = A.unsafe_get set !i in
+        if v = -1 then begin
+          A.unsafe_set set !i (-(2 + g));
+          Bytes.unsafe_set flag g '\001';
+          A.unsafe_set slot g !i;
+          fin := true;
+          stop := true
+        end
+        else if v >= 0 then begin
+          if fe ws v = e && fw ws v = w && fp ws v = p then begin
+            if now ws v = 0 then (Bytes.unsafe_set ws.now v '\002'; Bytes.unsafe_set flag g '\002'; A.unsafe_set xid g v);
+            fin := true;
+            stop := true
+          end
+          else i := (!i + 1) land mask
+        end
+        else begin
+          let g' = -v - 2 in
+          if cget g' 0 = e && cget g' 2 = w && cget g' 1 = p then (fin := true; stop := true) else i := (!i + 1) land mask
+        end;
+        if (not !stop) && !i = 0 && hi > mask then stop := true
+      end
+    done;
+    !fin
+  in
+  let size = A.dim ws.set in
+  let regions = let rr = ref 1 in while 2 * !rr <= 2 * !Bulk.threads && 2 * !rr <= size / 1024 do rr := 2 * !rr done; !rr in
+  let per = size / regions in
+  (* each candidate's slot, then the candidates of each region in order (a counting sort by region, morsel by
+     morsel), so that a region's domain reads its own candidates only *)
+  let home = ints_raw (max 1 total) in
+  let cnt = Array.init k (fun _ -> Array.make regions 0) in
+  Bulk.parallel ~d:!Bulk.threads k (fun m ->
+      let c = cnt.(m) in
+      for g = mbase.(m) to mbase.(m + 1) - 1 do
+        let i = h3 (cget g 0) (cget g 1) (cget g 2) land ws.smask in
+        A.unsafe_set home g i;
+        let rg = i / per in
+        c.(rg) <- c.(rg) + 1
+      done);
+  let roff = Array.make (regions + 1) 0 in
+  for rg = 0 to regions - 1 do roff.(rg + 1) <- roff.(rg) + Array.fold_left (fun t c -> t + c.(rg)) 0 cnt done;
+  let at = Array.init k (fun _ -> Array.make regions 0) in
+  for rg = 0 to regions - 1 do
+    let s = ref roff.(rg) in
+    for m = 0 to k - 1 do at.(m).(rg) <- !s; s := !s + cnt.(m).(rg) done
+  done;
+  let byreg = ints_raw (max 1 total) in
+  Bulk.parallel ~d:!Bulk.threads k (fun m ->
+      let a = at.(m) in
+      for g = mbase.(m) to mbase.(m + 1) - 1 do
+        let rg = A.unsafe_get home g / per in
+        A.unsafe_set byreg a.(rg) g;
+        a.(rg) <- a.(rg) + 1
+      done);
+  let aside = Array.make regions [] in
+  Bulk.parallel ~d:!Bulk.threads regions (fun rg ->
+      let hi = (rg + 1) * per and l = ref [] in
+      for q = roff.(rg) to roff.(rg + 1) - 1 do
+        let g = A.unsafe_get byreg q in
+        if not (decide g (A.unsafe_get home g) hi) then l := g :: !l
+      done;
+      aside.(rg) <- !l);
+  (* the candidates set aside, in order, by the usual probe (it may cross regions, and wraps) *)
+  let rest = List.sort compare (List.concat (Array.to_list aside)) in
+  List.iter
+    (fun g ->
+      let i = h3 (cget g 0) (cget g 1) (cget g 2) land ws.smask in
+      (* from its slot to the table's end, then from its start: an empty slot is found (the table is at most half full) *)
+      if not (decide g i size) then ignore (decide g 0 size))
+    rest;
+  (* ids in the order of g *)
+  let cnt = ref n0 in
+  for g = 0 to total - 1 do if Bytes.unsafe_get flag g = '\001' then (A.unsafe_set xid g !cnt; incr cnt) done;
+  ws.n <- !cnt;
+  Bulk.parallel ~d:!Bulk.threads k (fun m ->
+      for g = mbase.(m) to mbase.(m + 1) - 1 do
+        match Bytes.unsafe_get flag g with
+        | '\001' ->
+          let x = A.unsafe_get xid g in
+          set_f ws x (cget g 0) (cget g 1) (cget g 2);
+          Bytes.unsafe_set ws.base x '\000';
+          Bytes.unsafe_set ws.old x '\000';
+          Bytes.unsafe_set ws.now x '\002';
+          Bytes.unsafe_set ws.mark x '\000';
+          A.unsafe_set ws.round x r;
+          A.unsafe_set ws.rule x (cget g 3);
+          A.unsafe_set ws.set (A.unsafe_get slot g) x
+        | '\002' ->
+          let x = A.unsafe_get xid g in
+          A.unsafe_set ws.round x r;
+          A.unsafe_set ws.rule x (cget g 3)
+        | _ -> ()
+      done);
+  (* the chains, the counts and the next round, in order *)
+  for g = 0 to total - 1 do
+    if Bytes.unsafe_get flag g <> '\000' then begin
+      let x = A.unsafe_get xid g in
+      if base ws x = 0 then chain ws x;
+      count_derived c (cget g 3);
+      push_next c x
+    end
+  done
+
+(* [k] morsels, [run w m f]: morsel m derived in context w, each instance to f; their heads made facts of round [r].
+   false: the morsels found more heads than the budget leaves room for (the caller derives alone, which refuses
+   exactly where it must) *)
 let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r =
-  let outs = Array.init k (fun _ -> buf_create 64) and fails = Array.make k None in
+  let outs = Array.init k (fun _ -> buf_create 64) and fails = Array.make k None and odd = Array.make k false in
   let left = c.limit - c.derived in
   let room = if left > max_int / 4 then max_int else (2 * left) + 100_000 in
   let heads = Atomic.make 0 and found_all = Atomic.make 0 in
   match
-    Bulk.parallel k (fun m ->
+    Bulk.parallel ~d:!Bulk.threads k (fun m ->
         let w = worker_ctx c and out = outs.(m) and n = ref 0 and nf = ref 0 in
-        let ws = c.ws and vp = c.vp in
+        let ws = c.ws and vp = c.vp and next_e = c.v.next_e and spec = c.prog.spec in
         let found pl =
           incr nf;
           if not pl.hok then raise (Refused (head_refusal w pl));
           let e = pl.he and p = pl.hp and v = pl.hw in
           (* a head that is a fact already changes nothing (as emit_fact): only the others are kept *)
           let x = find ws e p v in
-          if (if x >= 0 then now ws x = 0 else not ((Bytes.length vp = 0 || (p < Bytes.length vp && Bytes.unsafe_get vp p <> '\000')) && S.mem w.v e p v))
+          if (if x >= 0 then now ws x = 0 else not ((Bytes.length vp = 0 || (p < Bytes.length vp && Bytes.unsafe_get vp p <> '\000')) && e < ws.fresh && S.mem w.v e p v))
           then begin
             buf_push out e; buf_push out p; buf_push out v; buf_push out pl.ri;
+            (* a head the merge must refuse or reason again about: the one-domain merge decides it *)
+            if e >= next_e || (match spec with None -> false | Some s -> is_frozen s p v) then odd.(m) <- true;
             incr n;
             if !n land 1023 = 0 && Atomic.fetch_and_add heads 1024 + 1024 > room then raise Too_many
           end
@@ -1864,6 +2129,10 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
   with
   | () ->
     derivations := !derivations + Atomic.get found_all;
+    let total = Array.fold_left (fun t (o : buf) -> t + (o.bn / 4)) 0 outs in
+    if total >= !par_min && c.derived + total <= c.limit && Array.for_all Option.is_none fails && not (Array.exists Fun.id odd) then
+      merge_regions c outs r
+    else
     for m = 0 to k - 1 do
       let out = outs.(m) in
       let i = ref 0 in
@@ -1917,7 +2186,7 @@ let[@inline never] xplan c ri pos (source : source) (nsrc : source) (nmode : nmo
 let[@inline] in_view c p = Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000')
 
 (* is (e p w) a fact now: the working set's entry, else the view *)
-let[@inline never] present c e p w = let x = find c.ws e p w in if x >= 0 then now c.ws x > 0 else in_view c p && S.mem c.v e p w
+let[@inline never] present c e p w = let x = find c.ws e p w in if x >= 0 then now c.ws x > 0 else in_view c p && e < c.ws.fresh && S.mem c.v e p w
 
 (* the id of a fact of the state in the working set, added with its state in the view if needed *)
 let[@inline never] intern c e p w =
@@ -1927,7 +2196,8 @@ let[@inline never] intern c e p w =
 (* the values of (e p _) now, and the things of (_ p w) now *)
 let [@inline never] iter_out c e p f =
   let ws = c.ws in
-  if in_view c p then S.iter_values c.v e p (fun w -> if ws.n = 0 then f w else let x = find ws e p w in if x < 0 || now ws x > 0 then f w);
+  if in_view c p && e < ws.fresh then S.iter_values c.v e p (fun w -> if ws.n = 0 then f w else let x = find ws e p w in if x < 0 || now ws x > 0 then f w);
+  b_iter_e ws e p f;
   let x = ref (idx_head ws.ie p e) in
   while !x >= 0 do
     let y = !x in
@@ -1938,6 +2208,7 @@ let [@inline never] iter_out c e p f =
 let [@inline never] iter_in c p w f =
   let ws = c.ws in
   if in_view c p then S.iter_things c.v p w (fun e -> if ws.n = 0 then f e else let x = find ws e p w in if x < 0 || now ws x > 0 then f e);
+  b_iter_w ws p w f;
   let x = ref (idx_head ws.iw p w) in
   while !x >= 0 do
     let y = !x in
@@ -2477,7 +2748,7 @@ let saturate ?(s = 0) c (first : ints) nf =
     let par =
       nc >= !par_min && par_ok c
       &&
-      let k = 4 * !Bulk.domains in
+      let k = 4 * !Bulk.threads in
       let ix = if c.prog.nstrata = 1 then c.prog.ix_ins else c.prog.ix_ins_s.(s) in
       par_phase c k
         (fun w m found ->
@@ -2574,7 +2845,7 @@ let module_retract c f0 (cands : int list) =
                which reaches no retracted edge's start (so its way to b does not use one), changes nothing: every path
                through it goes the other way (only the edge itself stays, derived) *)
             let starts = List.map (fun x -> fe ws x) gone_e in
-            let present_t e w = let x = find ws e t w in if x >= 0 then now ws x > 0 else in_view c t && S.mem c.v e t w in
+            let present_t e w = let x = find ws e t w in if x >= 0 then now ws x > 0 else in_view c t && e < ws.fresh && S.mem c.v e t w in
             let other_way x =
               let a = fe ws x and b = fw ws x and found = ref false in
               edge_out a (fun w ->
@@ -3196,16 +3467,20 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
             changes
         in
         (* the facts whose state changed, put into the view at once, sorted by thing (S.set_sorted) *)
-        let todo = ref [] in
+        (* each fact's state in the view before ([base]) and after: the view's lookups are spared *)
+        let cap = ws.n + c.ns in
+        let es = Array.make cap 0 and ps = Array.make cap 0 and wv = Array.make cap 0 and ss = Array.make cap 0 and bs = Array.make cap 0 in
+        let m = ref 0 in
+        let todo e p w n b = let i = !m in es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- n; bs.(i) <- b; m := i + 1 in
         for x = 0 to ws.n - 1 do
           let b = base ws x and n = now ws x in
           if b <> n then begin
             let e = fe ws x and p = fp ws x and w = fw ws x in
-            if has ws x 16 then (if n = 2 then todo := (e, p, w, n) :: !todo)
+            if has ws x 16 then (if n = 2 then todo e p w n b)
             else begin
               let kind = if n = 2 then Group.Derived else Group.Underived in
               out := { Group.kind; e; p; v = value_of c.v p w } :: !out;
-              todo := (e, p, w, n) :: !todo
+              todo e p w n b
             end
           end
         done;
@@ -3213,15 +3488,13 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
         for k = 0 to c.ns - 1 do
           let e = Int32.to_int (Bigarray.Array1.unsafe_get c.side_e k) and p = Bigarray.Array1.unsafe_get c.side_p k and w = A.unsafe_get c.side_w k in
           out := { Group.kind = Derived; e; p; v = value_of c.v p w } :: !out;
-          todo := (e, p, w, 2) :: !todo
+          todo e p w 2 0
         done;
         let derived = Array.of_list (List.rev !out) in
-        let m = List.length !todo in
-        let es = Array.make m 0 and ps = Array.make m 0 and wv = Array.make m 0 and ss = Array.make m 0 in
-        List.iteri (fun i (e, p, w, st) -> es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- st) !todo;
+        let m = !m in
         let o = Store.fact_order es ps wv m in
         let v' =
-          S.set_sorted c.v (Array.map (fun i -> es.(i)) o) (Array.map (fun i -> ps.(i)) o) (Array.map (fun i -> wv.(i)) o)
+          S.set_sorted ~olds:(Array.map (fun i -> bs.(i)) o) c.v (Array.map (fun i -> es.(i)) o) (Array.map (fun i -> ps.(i)) o) (Array.map (fun i -> wv.(i)) o)
             (Array.map (fun i -> ss.(i)) o) m
         in
         (* the schema's own rules over derived facts: one value for a one-valued property; a unique value once (a
@@ -3244,12 +3517,62 @@ and reason ?limit ~whole ~stop ~(v0 : Store.view) (v : Store.view) (changes : Gr
           derived;
         v', Array.append changes derived)
 
+(* The chains the insertion's plans read, by property (an index selection: Subotic et al., PVLDB 2018, choose the
+   indexes from the searches the plans make): each plan's steps in the order it will be compiled with (order_of),
+   the variables bound as compile binds them; a step with the thing known and the value not reads the chain by
+   (property, thing), the other way round the one by (property, value), neither side the one by property; both known,
+   a lookup. A variable property's step may read any property; the closure modules read both chains of their
+   relations. In a large group a derived fact joins only the chains its property needs: most of a load's derived
+   facts (types, read only with both sides known) join none. *)
+let [@inline never] chain_needs c (ixs : index list) =
+  let prog = c.prog in
+  let need = Bytes.make prog.np '\000' in
+  let all = ref 0 in
+  let add p b = if p < 0 then all := !all lor b else if p < prog.np then Bytes.set need p (Char.chr (Char.code (Bytes.get need p) lor b)) in
+  Array.iter
+    (fun (ri, pos) ->
+      let r = prog.rules.(ri) in
+      let atoms = prog.natoms.(ri) in
+      let bound = Array.make (max 1 r.vars) false in
+      let bind_t = function Query.Var x -> bound.(x) <- true | _ -> () in
+      let bind (a : Query.pattern) = bind_t a.e; bind_t a.v; if a.p < 0 then bound.(Rules.pvar a.p) <- true in
+      let known = function Query.Var x -> bound.(x) | _ -> true in
+      if pos >= 0 then begin
+        bind atoms.(pos);
+        Array.iter
+          (fun j ->
+            let a = atoms.(j) in
+            (match known a.e, known a.v with
+             | true, true -> ()
+             | true, false -> add a.p 1
+             | false, true -> add a.p 2
+             | false, false -> add a.p 4);
+            bind a)
+          (order_of c ri pos)
+      end)
+    (Array.concat (List.map (fun (ix : index) -> ix.slots) ixs));
+  Array.iter (fun (m : closure) -> add m.m_e 7; add m.m_t 7) prog.modules;
+  (* the constraints' Nots read their patterns' chains *)
+  Array.iteri (fun ri never -> if never then Array.iter (Array.iter (fun (q : Query.pattern) -> add q.p 7)) prog.nots.(ri)) prog.never;
+  (* a large group's checks of one-valued and unique properties read the derived facts' chains (bulk_checks) *)
+  Array.iter
+    (fun (r : Rules.t) ->
+      match r.head with
+      | Give h when h.p < 0 -> add h.p 3
+      | Give h -> (match Schema.find c.v.schema h.p with Some d -> add h.p ((if d.many then 0 else 1) lor if d.unique then 2 else 0) | None -> ())
+      | Never -> ())
+    prog.rules;
+  if !all <> 0 then Bytes.iteri (fun p ch -> Bytes.set need p (Char.chr (Char.code ch lor !all))) need;
+  need
+
 (* ---- a large group: its facts all new, the derived ones appended ----
-   The group's facts (the view lacks them all) are the working set's round 0; the rules run on them by rounds as on any
-   group; the facts derived are returned in the order found, for the group's Bulk. Raises [Refused] past the budget.
-   [None] when the group must take the ordinary path: a constraint, or a rule whose head gives a one-valued or unique
-   property (the checks of those are the ordinary path's). *)
-let rec bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : Bulk.ints) n =
+   The group's facts (the view lacks them all) are the working set's round 0, as its sorted prefix (above); the rules
+   run on them by rounds as on any group; the facts derived are returned in the order found, for the group's Bulk.
+   [b]: the group's facts in both orders (Bulk.make); [first_new]: the group's first new thing. Raises [Refused] past
+   the budget. [None] when the group must take the ordinary path: a constraint, or a rule whose head gives a one-valued
+   or unique property (the checks of those are the ordinary path's). *)
+let rec bulk ~(own : string -> int option) ~first_new (v : Store.view) (b : Bulk.t) =
+  let n = b.n and gp = b.p and gw = b.w in
   let gen, spec = programs v in
   let prog =
     choose v gen spec (fun s ->
@@ -3265,28 +3588,140 @@ let rec bulk ~(own : string -> int option) (v : Store.view) (ge : Bulk.i32) (gp 
   in
   incr (if prog == gen then gen_groups else spec_groups);
   (* past the budget: the ordinary path decides (a change of the ontology takes a change's budget there) *)
-  match bulk_with ~own prog v ge gp gw n with
+  match bulk_with ~own ~first_new prog v b with
   | r -> r
   | exception Exceeded m -> raise (Refused m)
   | exception Respec (fp, fw) -> (
     incr respecs;
     unsettle v [ (fp, fw) ];
-    match bulk_with ~own gen v ge gp gw n with r -> r | exception Exceeded m -> raise (Refused m))
+    match bulk_with ~own ~first_new gen v b with r -> r | exception Exceeded m -> raise (Refused m))
 
-and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : Bulk.ints) n =
-  let many_only p = match Schema.find v.schema p with Some d -> d.many && not d.unique | None -> false in
-  let plain =
-    (not prog.stratified)
-    && Array.for_all2
-         (fun never (r : Rules.t) -> (not never) && match r.head with Give h -> h.p < 0 || many_only h.p | Never -> false)
-         prog.never prog.rules
+(* the prefix of [ws]: the facts of [b] whose property [keep] says, in the order by thing, at round 0; the offsets of
+   the things from [first_new] on; the membership table *)
+and[@inline never] fill_prefix ws (b : Bulk.t) ~first_new ~next_e (keep : Bytes.t) =
+  let n = b.n in
+  let kept p = p < Bytes.length keep && Bytes.unsafe_get keep p <> '\000' in
+  (* the rows kept by each chunk of the order by thing, then each chunk's facts at their place *)
+  let nch = Bulk.chunks n and ch = !Bulk.chunk in
+  let cnt = Array.make (nch + 1) 0 in
+  Bulk.parallel ~d:!Bulk.threads nch (fun k ->
+      let c = ref 0 in
+      for r = k * ch to min n ((k + 1) * ch) - 1 do if kept (Bulk.prop b (Bulk.row b r)) then incr c done;
+      cnt.(k + 1) <- !c);
+  for k = 1 to nch do cnt.(k) <- cnt.(k) + cnt.(k - 1) done;
+  let nb = cnt.(nch) in
+  Bulk.parallel ~d:!Bulk.threads nch (fun k ->
+      let x = ref cnt.(k) in
+      for r = k * ch to min n ((k + 1) * ch) - 1 do
+        let i = Bulk.row b r in
+        let p = Bulk.prop b i in
+        if kept p then begin
+          let y = !x in
+          set_f ws y (Bulk.thing b i) p (Bulk.word b i);
+          x := y + 1
+        end
+      done;
+      let lo = cnt.(k) and len = cnt.(k + 1) - cnt.(k) in
+      if len > 0 then begin
+        (* present, asserted, absent from the view and before the group, round 0, and already "chained" (mark 8):
+           never put in a chain *)
+        Bytes.fill ws.now lo len '\001';
+        Bytes.fill ws.base lo len '\000';
+        Bytes.fill ws.old lo len '\000';
+        Bytes.fill ws.mark lo len '\008';
+        A.fill (A.sub ws.round lo len) 0;
+        A.fill (A.sub ws.rule lo len) (-1)
+      end);
+  ws.n <- nb;
+  ws.nb <- nb;
+  ws.bk <- b;
+  ws.b_has <- keep;
+  (* the facts of things older than the group first (the order is by thing): found by binary search; the new things'
+     ranges by offsets *)
+  let old = ref 0 in
+  (let l = ref 0 and h = ref nb in
+   while !l < !h do let m = (!l + !h) lsr 1 in if fe ws m < first_new then l := m + 1 else h := m done;
+   old := !l);
+  ws.b_old <- !old;
+  ws.b_lo <- first_new;
+  ws.fresh <- first_new;
+  let things = max 0 (next_e - first_new) in
+  let off = Bulk.i32 (things + 1) in
+  let x = ref !old in
+  for k = 0 to things do
+    while !x < nb && fe ws !x < first_new + k do incr x done;
+    Bigarray.Array1.unsafe_set off k (Int32.of_int !x)
+  done;
+  ws.b_off <- off;
+  place_prefix ws nb;
+  nb
+
+(* After a large group's fixpoint: does the state break no constraint, give no thing a second value of a one-valued
+   property, nor a unique property's value to two things? The constraints' plans run from every fact the group made
+   present (all of the working set's, and the closure modules' facts set aside), as the ordinary path runs them; the
+   derived facts of one-valued and unique properties are counted with the group's and the view's. false: the ordinary
+   path decides (and refuses, naming what it finds). *)
+and[@inline never] bulk_checks c ~nb =
+  let ws = c.ws and prog = c.prog and v = c.v in
+  let ok = ref true in
+  if Array.exists Fun.id prog.never then begin
+    let cons = make_disp c prog.ix_cons State (fun _ -> raise_notrace Exit) in
+    c.round <- max_int;
+    (try
+       for x = 0 to ws.n - 1 do if now ws x > 0 then run_all cons (fe ws x) (fp ws x) (fw ws x) done;
+       for k = 0 to c.ns - 1 do
+         run_all cons (Int32.to_int (Bigarray.Array1.unsafe_get c.side_e k)) (Bigarray.Array1.unsafe_get c.side_p k) (A.unsafe_get c.side_w k)
+       done
+     with Exit -> ok := false)
+  end;
+  (* the derived facts of one-valued or unique properties *)
+  let kind p = match Schema.find v.schema p with Some d -> (if d.many then 0 else 1) lor (if d.unique then 2 else 0) | None -> 0 in
+  let checked = Hashtbl.create 64 in
+  let check e p w =
+    let k = kind p in
+    if k land 1 <> 0 && not (Hashtbl.mem checked (0, e, p)) then begin
+      Hashtbl.replace checked (0, e, p) ();
+      let cnt = ref 0 in
+      if e < ws.fresh && in_view c p then cnt := S.count_values v e p;
+      b_iter_e ws e p (fun _ -> incr cnt);
+      let y = ref (idx_head ws.ie p e) in
+      while !y >= 0 do (if fe ws !y = e && fp ws !y = p && now ws !y > 0 then incr cnt); y := idx_next ws.ie !y done;
+      if !cnt > 1 then ok := false
+    end;
+    if k land 2 <> 0 && not (Hashtbl.mem checked (1, w, p)) then begin
+      Hashtbl.replace checked (1, w, p) ();
+      let cnt = ref 0 in
+      if in_view c p then cnt := S.count_things v p w;
+      b_iter_w ws p w (fun _ -> incr cnt);
+      let y = ref (idx_head ws.iw p w) in
+      while !y >= 0 do (if fw ws !y = w && fp ws !y = p && now ws !y > 0 then incr cnt); y := idx_next ws.iw !y done;
+      if !cnt > 1 then ok := false
+    end
   in
-  if not plain then None
+  for x = nb to ws.n - 1 do if !ok then check (fe ws x) (fp ws x) (fw ws x) done;
+  (* a module's facts set aside, of a one-valued or unique property: the ordinary path counts them *)
+  for k = 0 to c.ns - 1 do if kind (Bigarray.Array1.unsafe_get c.side_p k) <> 0 then ok := false done;
+  !ok
+
+and bulk_with ~own ~first_new prog (v : Store.view) (b : Bulk.t) =
+  let n = b.n in
+  (* rules that derive without Not or aggregates; constraints (with Nots or not), and heads on one-valued or unique
+     properties, checked after the fixpoint below (a group that breaks one goes to the ordinary path, which refuses it
+     with its message). A group only adds facts: a constraint's Not can only become false, so the instances to check
+     are those with a new fact among their positive patterns, as on the ordinary path *)
+  if Array.exists Fun.id (Array.mapi (fun ri never -> (not never) && (prog.nots.(ri) <> [||] || prog.aggs.(ri) <> None)) prog.never) then None
   else
     let t0 = Unix.gettimeofday () in
     Fun.protect ~finally:(fun () -> seconds := !seconds +. (Unix.gettimeofday () -. t0)) @@ fun () ->
-    (* a working set made at the size of the group and its consequences (LUBM derives 0.4 a fact) *)
-    with_ctx ~prog ~facts:(n + (n / 2) + 64) v (fun c ->
+    (* the properties a rule reads or gives: their facts are the prefix *)
+    let keep = Bytes.init (max 0 (min (Bytes.length prog.reads) (Array.length b.poff - 1))) (fun p -> if Bytes.get prog.reads p <> '\000' then '\001' else '\000') in
+    let nb = ref 0 in
+    for i = 0 to Bytes.length keep - 1 do
+      if Bytes.unsafe_get keep i <> '\000' && i + 1 < Array.length b.poff then nb := !nb + b.poff.(i + 1) - b.poff.(i)
+    done;
+    (* a working set made at the size of the prefix and its consequences (LUBM derives 0.4 a fact); the chains hold the
+       derived facts only *)
+    with_ctx ~prog ~facts:((2 * !nb) + 64) ~keys:4096 v (fun c ->
         let ws = c.ws in
         Array.iteri
           (fun i (x : Value.t) ->
@@ -3299,28 +3734,21 @@ and bulk_with ~own prog (v : Store.view) (ge : Bulk.i32) (gp : Bulk.u16) (gw : B
         c.vp <- Bytes.init prog.np (fun p -> if S.count_prop v p > 0 then '\001' else '\000');
         Array.iteri (fun mi (m : closure) -> c.mfresh.(mi) <- S.count_prop v m.m_t = 0) prog.modules;
         ws.with_ip <- prog.free_free;
-        let first = ints (max 1 n) 0 in
-        for i = 0 to n - 1 do
-          let x =
-            add ws (Int32.to_int (Bigarray.Array1.unsafe_get ge i)) (Bigarray.Array1.unsafe_get gp i) (Bigarray.Array1.unsafe_get gw i) 0
-          in
-          set_now ws x 1;
-          set_round ws x 0;
-          A.unsafe_set first i x
-        done;
+        c.plain_derive <- true;
+        ws.need <- chain_needs c [ prog.ix_ins; prog.ix_cons ];
+        let nb = fill_prefix ws b ~first_new ~next_e:v.next_e keep in
+        incr bulk_groups;
+        let first = ints (max 1 nb) 0 in
+        for x = 0 to nb - 1 do A.unsafe_set first x x done;
         bulk_index_seconds := !bulk_index_seconds +. (Unix.gettimeofday () -. t0);
-        saturate c first n;
-        let nd = ws.n - n in
-        (* a head whose property was known only at each instance: its facts' properties checked as the ordinary
-           path's would be *)
-        let fine = ref true in
-        for x = n to ws.n - 1 do if !fine && not (many_only (fp ws x)) then fine := false done;
-        if not !fine then None
+        saturate c first nb;
+        let nd = ws.n - nb in
+        if not (bulk_checks c ~nb) then None
         else begin
           let total = nd + c.ns in
           let de = Bulk.i32 total and dp = Bulk.u16 total and dw = Bulk.ints total in
           for k = 0 to nd - 1 do
-            let x = n + k in
+            let x = nb + k in
             Bigarray.Array1.unsafe_set de k (Int32.of_int (fe ws x));
             Bigarray.Array1.unsafe_set dp k (fp ws x);
             Bigarray.Array1.unsafe_set dw k (fw ws x)

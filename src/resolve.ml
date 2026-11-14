@@ -391,6 +391,8 @@ type large = {
   why : string;
   first_new : int;
   count_new : int;
+  nows : (int * int * int) array;  (* facts derived already that the group asserts (kind Now_asserted), in its order:
+                                      in the view's delta, merged into the run with it; the frame's first changes *)
 }
 
 (* a property for the faster path: its type (bits 0-2: 1 int, 2 date, 3 money, 4 bool, 5 link, 6 text, 7 float),
@@ -493,16 +495,44 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
     if !next - 1 > Schema.last_thing then raise Slow;
     (* new texts: numbered in order of first use, as [intern] would: their places k in that order, then their ids
        first + k *)
-    let gtexts = Hashtbl.create (Array.fold_left (fun n a -> n + Array.length a) 16 fresh) and order = ref [] and m = ref 0 in
+    (* the strings hashed by the chunks' domains at once, then placed in order in a table of open addressing (a
+       load's 600,000 texts: 0.2 s through a Hashtbl, its hashing and its buckets, on one domain) *)
+    let total = Array.fold_left (fun n a -> n + Array.length a) 0 fresh in
+    let hs = Array.map (fun a -> Array.make (Array.length a) 0) fresh in
+    Bulk.parallel nch (fun c -> let a = fresh.(c) and h = hs.(c) in for j = 0 to Array.length a - 1 do h.(j) <- Hashtbl.hash a.(j) done);
+    let size = let z = ref 16 in while !z < 2 * total do z := 2 * !z done; !z in
+    let mask = size - 1 in
+    let slot_k = Array.make size (-1) and slot_h = Array.make size 0 and news = Array.make total "" and m = ref 0 in
+    (* the slot of string s (hash h): its own, or the empty one where it goes *)
+    let slot s h =
+      let i = ref (h land mask) in
+      while (let k = Array.unsafe_get slot_k !i in k >= 0 && not (Array.unsafe_get slot_h !i = h && String.equal (Array.unsafe_get news k) s)) do
+        i := (!i + 1) land mask
+      done;
+      !i
+    in
     let maps =
-      Array.map
-        (Array.map (fun s ->
-             match Hashtbl.find_opt gtexts s with
-             | Some k -> k
-             | None -> let k = !m in Hashtbl.add gtexts s k; order := s :: !order; incr m; k))
+      Array.mapi
+        (fun c a ->
+          Array.mapi
+            (fun j s ->
+              let h = hs.(c).(j) in
+              let i = slot s h in
+              let k = Array.unsafe_get slot_k i in
+              if k >= 0 then k
+              else begin
+                let k = !m in
+                Array.unsafe_set slot_k i k;
+                Array.unsafe_set slot_h i h;
+                Array.unsafe_set news k s;
+                incr m;
+                k
+              end)
+            a)
         fresh
     in
-    let news = Array.of_list (List.rev !order) in
+    let news = Array.sub news 0 !m in
+    let gtext s = let k = Array.unsafe_get slot_k (slot s (Hashtbl.hash s)) in if k >= 0 then Some k else None in
     let v, first_text = Store.add_texts v0 news in
     Array.iter (fun map -> Array.iteri (fun j k -> map.(j) <- first_text + k) map) maps;
     Bulk.parallel nch (fun c ->
@@ -524,24 +554,33 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
     let order = if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw nops in
     let row r = if sorted then r else Int32.to_int (Bigarray.Array1.unsafe_get order r) in
     let thing i = Int32.to_int (Bigarray.Array1.unsafe_get fe i) in
-    let drops = Array.make nch [] in
+    let drops = Array.make nch [] and nows = Array.make nch [] in
     Bulk.parallel nch (fun c ->
-        let d = ref [] in
+        let d = ref [] and nw = ref [] in
         for r = c * ch to min nops ((c + 1) * ch) - 1 do
           let i = row r in
           let e = thing i and p = Bigarray.Array1.unsafe_get fp i and w = Bigarray.Array1.unsafe_get fw i in
-          if r > 0 then begin
+          let twice =
+            r > 0
+            &&
             let j = row (r - 1) in
-            if thing j = e && Bigarray.Array1.unsafe_get fp j = p then
-              if Bigarray.Array1.unsafe_get fw j = w then d := i :: !d else if kinds.(p) land 8 = 0 then raise Slow
-          end;
-          if e < v0.next_e && Store.mem v0 e p w then begin
-            (* a fact a rule derives already, asserted now: a change of its flag, for [resolve] *)
-            if p < Bytes.length ruled && Bytes.unsafe_get ruled p <> '\000' && Store.state v0 e p w = 2 then raise Slow;
+            thing j = e && Bigarray.Array1.unsafe_get fp j = p
+            && (Bigarray.Array1.unsafe_get fw j = w || (if kinds.(p) land 8 = 0 then raise Slow else false))
+          in
+          if twice then d := i :: !d
+          else if e < v0.next_e && Store.mem v0 e p w then begin
+            (* a fact a rule derives already, asserted now: its flag changes (kind Now_asserted), in the delta *)
+            if Store.state v0 e p w = 2 then nw := i :: !nw;
             d := i :: !d
           end
         done;
-        drops.(c) <- !d);
+        drops.(c) <- !d;
+        nows.(c) <- !nw);
+    let nows =
+      let l = List.sort compare (List.concat (Array.to_list nows)) in
+      Array.of_list (List.map (fun i -> thing i, Bigarray.Array1.unsafe_get fp i, Bigarray.Array1.unsafe_get fw i) l)
+    in
+    let v = Array.fold_left (fun v (e, p, w) -> Store.set v e p w 1) v nows in
     let count, sorted, order =
       if Array.for_all (fun d -> d = []) drops then nops, sorted, order
       else begin
@@ -561,38 +600,9 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
         !k, sorted, if sorted then Bulk.i32 0 else Bulk.by_thing fe fp fw !k
       end
     in
-    (* the rules: the facts they derive from the group's, appended after them (Bulk.d0), in the order found *)
-    let touches_rules =
-      Bytes.length ruled > 0
-      &&
-      let t = ref false in
-      for i = 0 to count - 1 do
-        let p = Bigarray.Array1.unsafe_get fp i in
-        if p < Bytes.length ruled && Bytes.unsafe_get ruled p <> '\000' then t := true
-      done;
-      !t
-    in
-    let v, fe, fp, fw, count, d0, sorted, order =
-      if not touches_rules then v, fe, fp, fw, count, count, sorted, order
-      else
-        let rv = { v with next_e = !next } in
-        (* the group's own texts are not in the dictionary's map yet: a rule's text the group adds is found here, so
-           that a pattern on it matches, and a head that gives it does not intern it twice *)
-        let own s = match Hashtbl.find_opt gtexts s with Some k -> Some (first_text + k) | None -> None in
-        match (try Reason.bulk ~own rv fe fp fw count with Reason.Refused _ -> None) with
-        | None -> raise Slow
-        | Some (rv, de, dp, dw, nd) ->
-          let n = count + nd in
-          let fe' = Bulk.i32 n and fp' = Bulk.u16 n and fw' = Bulk.ints n in
-          let blit a b = Bigarray.Array1.blit (Bigarray.Array1.sub a 0 count) (Bigarray.Array1.sub b 0 count) in
-          let blit2 a b = Bigarray.Array1.blit a (Bigarray.Array1.sub b count nd) in
-          blit fe fe'; blit fp fp'; blit fw fw';
-          blit2 de fe'; blit2 dp fp'; blit2 dw fw';
-          let sorted = Bulk.in_order fe' fp' fw' n in
-          { rv with next_e = v.next_e }, fe', fp', fw', n, count, sorted, (if sorted then Bulk.i32 0 else Bulk.by_thing fe' fp' fw' n)
-    in
-    let b = Bulk.make ~d0 ~sorted ~order fe fp fw count ~np in
-    (* a value two things take for a unique property, or one taken already: to [resolve] *)
+    let b = Bulk.make ~sorted ~order fe fp fw count ~np in
+    (* a value two things take for a unique property, or one taken already: to [resolve] (the derived facts of a
+       unique property are counted by Reason.bulk) *)
     for q = 0 to np - 1 do
       match Schema.find v0.schema q with
       | Some d when d.unique ->
@@ -605,9 +615,33 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
             done)
       | _ -> ()
     done;
+    (* the rules: the facts they derive from the group's, appended after them (Bulk.d0) *)
+    let touches_rules =
+      Bytes.length ruled > 0
+      &&
+      let t = ref false in
+      for i = 0 to count - 1 do
+        let p = Bigarray.Array1.unsafe_get fp i in
+        if p < Bytes.length ruled && Bytes.unsafe_get ruled p <> '\000' then t := true
+      done;
+      !t
+    in
+    let v, b =
+      if not touches_rules then v, b
+      else
+        let rv = { v with next_e = !next } in
+        (* the group's own texts are not in the dictionary's map yet: a rule's text the group adds is found here, so
+           that a pattern on it matches, and a head that gives it does not intern it twice *)
+        let own s = match gtext s with Some k -> Some (first_text + k) | None -> None in
+        match (try Reason.bulk ~own ~first_new:v0.next_e rv b with Reason.Refused _ -> None) with
+        | None -> raise Slow
+        | Some (rv, de, dp, dw, nd) ->
+          let b = Bulk.add_derived b de dp dw nd ~np in
+          { rv with next_e = v.next_e }, b
+    in
     let first_new = v0.next_e and count_new = !next - v0.next_e in
     let view = { v with next_e = !next; group = n } in
-    Some { view; facts = b; count; dense; farmap; n; time; by; why; first_new; count_new }
+    Some { view; facts = b; count; dense; farmap; n; time; by; why; first_new; count_new; nows }
   with Slow -> None
 
 (* The receipt's new things, (temporary id, number) in the order of numbering, as [resolve] lists them: a pair a new
@@ -629,17 +663,23 @@ let receipt (l : large) =
 let encode_large (l : large) =
   let kinds = kinds l.view and b = l.facts in
   let np = Array.length kinds in
+  (* change j: the facts asserted again first (Now_asserted), then the group's facts and the derived ones *)
+  let m = Array.length l.nows in
+  let count = m + b.n in
+  let te j = if j < m then (let e, _, _ = l.nows.(j) in e) else Bulk.thing b (j - m)
+  and tp j = if j < m then (let _, p, _ = l.nows.(j) in p) else Bulk.prop b (j - m)
+  and tw j = if j < m then (let _, _, w = l.nows.(j) in w) else Bulk.word b (j - m) in
   let colmap = Array.make np (-1) and cols = ref [] and nc = ref 0 in
   let tags = [| -1; 0; 5; 6; 2; 7; 4; 1 |] in
-  let loc = Bulk.i32 (max 1 b.n) and tl = ref [] and nt = ref 0 in
+  let loc = Bulk.i32 (max 1 count) and tl = ref [] and nt = ref 0 in
   (* the texts' places in order of first use: a table indexed by text id over the ids the group uses when that range
      is small (a load's: its own new texts and a few old ones), a hash table otherwise *)
   let lo = ref max_int and hi = ref min_int and ntext = ref 0 in
-  for i = 0 to b.n - 1 do
-    let p = Bulk.prop b i in
+  for j = 0 to count - 1 do
+    let p = tp j in
     if colmap.(p) < 0 then (colmap.(p) <- !nc; cols := (p, tags.(kinds.(p) land 7)) :: !cols; incr nc);
     if kinds.(p) land 7 = 6 then begin
-      let w = Bulk.word b i in
+      let w = tw j in
       incr ntext;
       if w < !lo then lo := w;
       if w > !hi then hi := w
@@ -662,18 +702,18 @@ let encode_large (l : large) =
         | None -> let k = !nt in Hashtbl.add texts w k; tl := w :: !tl; incr nt; k
     end
   in
-  for i = 0 to b.n - 1 do
-    if kinds.(Bulk.prop b i) land 7 = 6 then Bigarray.Array1.unsafe_set loc i (Int32.of_int (place (Bulk.word b i)))
+  for j = 0 to count - 1 do
+    if kinds.(tp j) land 7 = 6 then Bigarray.Array1.unsafe_set loc j (Int32.of_int (place (tw j)))
   done;
-  let out = Buffer.create (16 + (4 * b.n)) in
+  let out = Buffer.create (16 + (4 * count)) in
   Group.encode_source out ~n:l.n ~time:l.time ~by:l.by ~why:l.why ~first_new:l.first_new ~count_new:l.count_new
-    { count = b.n;
-      kinds = (fun i -> if Bulk.derived b i then 2 else 1);
-      things = (fun i -> Bulk.thing b i);
-      col = (fun i -> Array.unsafe_get colmap (Bulk.prop b i));
+    { count;
+      kinds = (fun j -> if j < m then Group.code Now_asserted else if Bulk.derived b (j - m) then 2 else 1);
+      things = te;
+      col = (fun j -> Array.unsafe_get colmap (tp j));
       cols = Array.of_list (List.rev !cols);
-      num = (fun i -> if Array.unsafe_get kinds (Bulk.prop b i) land 7 = 6 then Int32.to_int (Bigarray.Array1.unsafe_get loc i) else Bulk.word b i);
-      float = (fun i -> String.get_int64_le (Store.text l.view (Bulk.word b i)) 0);
+      num = (fun j -> if Array.unsafe_get kinds (tp j) land 7 = 6 then Int32.to_int (Bigarray.Array1.unsafe_get loc j) else tw j);
+      float = (fun j -> String.get_int64_le (Store.text l.view (tw j)) 0);
       texts = Array.of_list (List.rev_map (fun w -> Store.text l.view w) !tl) };
   out
 
@@ -681,16 +721,28 @@ let encode_large (l : large) =
    the derived after (a large group's frame), no system property (its additions are facts absent before it,
    distinct: Resolve records only effective changes) *)
 let replay_large (v0 : Store.view) (g : Group.t) =
-  let d0 =
+  (* facts derived already that the group asserted first (Now_asserted), into the delta *)
+  let k0 =
     let k = ref 0 in
+    while !k < Array.length g.changes && g.changes.(!k).kind = Now_asserted do incr k done;
+    !k
+  in
+  let d0 =
+    let k = ref k0 in
     while !k < Array.length g.changes && g.changes.(!k).kind = Added do incr k done;
     !k
   in
-  if Array.length g.changes < !large_min
+  if Array.length g.changes - k0 < !large_min
      || Array.exists (fun (c : Group.change) -> Schema.is_system c.p || Schema.find v0.schema c.p = None) g.changes
      || Array.exists (fun (c : Group.change) -> c.kind <> Derived) (Array.sub g.changes d0 (Array.length g.changes - d0))
+     || Array.exists (fun (c : Group.change) -> Store.word v0 c.v = None) (Array.sub g.changes 0 k0)
   then None
   else begin
+    let v0 =
+      Array.fold_left (fun v (c : Group.change) -> Store.set v c.e c.p (Option.get (Store.word v c.v)) 1) v0 (Array.sub g.changes 0 k0)
+    in
+    let g = { g with changes = Array.sub g.changes k0 (Array.length g.changes - k0) } in
+    let d0 = d0 - k0 in
     let n = Array.length g.changes in
     let fe = Bulk.i32 n and fp = Bulk.u16 n and fw = Bulk.ints n in
     (* the texts the view has, by their ids; those it lacks by -(k + 1), k their place in order of first use, until

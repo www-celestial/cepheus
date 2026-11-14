@@ -42,7 +42,7 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | command | what it runs | options |
 |---|---|---|
 | `_build/default/test/unit.exe` | the unit and property tests | `CEPHEUS_TMP`: where its databases on the real disk go (the system's temp directory by default) |
-| `reasoning.exe` | the rules: named cases (closures of both shapes and their budget, a variable property, `sources`), then G17, G18 and G20 on random sequences (random rules defined, changed and removed, transitive closures and rules over a variable property among them; random additions and retractions) against the least model from scratch, plain and over merged runs, and the plain ones again with rounds on several domains (from 4 facts a round) and with the rules always as written, every group's view equal to the first run's; and half the seeds on databases on the disk, where every change of the rules takes the background path, with the model's decisions and the database reopened the same | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group), `RULES_PROGRESS` (a line a seed) |
+| `reasoning.exe` | the rules: named cases (closures of both shapes and their budget, a variable property, `sources`), then G17, G18 and G20 on random sequences (random rules defined, changed and removed, transitive closures and rules over a variable property among them; random additions and retractions) against the least model from scratch, plain and over merged runs, and the plain ones again with rounds on several domains (from 4 facts a round) and with the rules always as written, every group's view equal to the first run's; and half the seeds on databases on the disk, where every change of the rules takes the background path, with the model's decisions and the database reopened the same; then groups of additions from 2 facts on databases on the disk, so that the path of loads reasons on its sorted prefix (rules without `Not` or aggregates, constraints and one-valued heads among them; facts derived already asserted again; new things), against the model, and again with rounds on several domains | `RULES_SEEDS` (60), `RULES_SEED` (one seed, printed group by group), `RULES_PROGRESS` (a line a seed) |
 | `rulechange.exe` | the background path of rule changes on databases on the disk: groups written while a change is held after its build (`Engine.change_pause`), caught up exactly; a group that writes the change's fact, breaks its new constraint or takes its rule's number ends it with `Conflict`; 6 writers, 24 changes and 2 readers checking every view against the least model under its own rules, then the database reopened; the change budget (a cross product refused while a writer goes on) and an ontology change past a data budget accepted the same on the disk and on a fork; close during a change; kill -9 during changes, each recovered view exact | `CHANGE_KILLS` (10, in `tools/test.sh`) |
 | `exhaustive.exe` | every crash state of small journals, inside merges, and of two databases sharing a commit buffer | none |
 | `sim.exe` | the deterministic simulation | `--seeds N` (seeds 1 to N; 100 by default), `--seed S` (one seed), `--steps N` (steps a seed, 150) |
@@ -123,12 +123,14 @@ checks a property on many random inputs against a reference model written indepe
    aside but a damaged one, no merge's file left; random questions on the published views must give the naive
    evaluator's answers within the Generic Join bound. `sim.exe --seed S` replays one seed.
 4. **Real crashes** (`test/crash.exe DIR ROUNDS`): a child process writes with 8 threads and prints each confirmation,
-   merging every 50 changes, while a ninth thread loads large groups (150 new things, 300 additions, taking the path of
+   merging every 50 changes, while a ninth thread loads large groups (150 new things, 450 additions, taking the path of
    large groups from 200 operations here, in chunks of 64, their frames written by pieces beside their merges on two
-   domains and forced every 2 KB); the parent kills it with SIGKILL at a random moment (it counts the kills that land
-   inside a merge, and those before the child's declare is durable: then no group may be confirmed, and the
-   properties come back all together or not at all), reopens, and checks every confirmed group's content (a large
-   group's first and last things), that no run was set aside and no merge's file is left.
+   domains and forced every 2 KB; a rule derives a fact from each loaded thing's, so that the path of loads reasons
+   on its sorted prefix); the parent kills it with SIGKILL at a random moment (it counts the kills that land inside a
+   merge, and those before the child's declare is durable: then no group may be confirmed, and the properties come
+   back all together or not at all), reopens, and checks every confirmed group's content (a large group's first and
+   last things), every load there whole with each thing's derived fact or not there at all, that no run was set aside
+   and no merge's file is left.
 5. **Concurrency** (`test/bank.exe DIR SECONDS`): transfers with `Expect` from 16 threads, two reader domains checking
    that every view keeps the total and that views never go back.
 6. **A sale of seats under kill -9, with a checker of the history** (`test/seats.exe DIR ROUNDS`): 16 buyers sell 2,000

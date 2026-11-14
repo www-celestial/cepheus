@@ -553,29 +553,50 @@ derived facts already, so start-up does not grow.
 ## Large groups
 
 A group of 20,000 additions and more (a load) takes the path of large groups ([architecture](architecture.md#large-groups)):
-its facts are mapped into compact arrays and merged into a run at once. With rules, its facts are the round 0 of the
-same semi-naive evaluation, in the working set, and the derived facts are appended to the group's arrays: they reach
-the run with the asserted ones, in one merge. A group that the faster path cannot decide alone (a constraint, a head
-on a one-valued or unique property, a fact derived already and now asserted) takes the ordinary path, which decides
-as always. A rule's text that the group itself adds is found among the group's new texts, which the dictionary's map
-does not hold yet (the simulation found that case: without it, a pattern on such a text matched nothing).
+its facts are mapped into compact arrays, sorted in both orders of a run, and merged into a run at once. With rules,
+its facts are the round 0 of the same semi-naive evaluation, held as the design's sorted path has them (after VLog's
+sorted columns [Urbani 2016]) rather than hashed one by one:
+
+- **A sorted prefix, not hash chains.** The group's facts of the properties some rule reads or gives (no rule can
+  match the others) are the working set's first facts, in the order by thing: a thing's facts are a range of them (an
+  offset a new thing), a (property, value)'s things a range of the group's order by property, which its run needs
+  anyway. Only the membership table holds each of them, filled by several domains, each owning a region of the table.
+- **Only the chains a plan reads.** A derived fact joins the chain by (property, thing) only if some plan reads its
+  property with the thing known and the value not, and the chain by (property, value) only the other way round, as the
+  plans' compiled order says (an index selection, in the manner of [Subotic 2018]). A load's derived types, read only
+  with both sides known, join none.
+- **Rounds on several domains.** A round of 20,000 facts or more is derived by morsels; its heads are made facts by
+  regions of the membership table, one domain a region, with the ids, rules and order the one-domain loop gives: the
+  result does not depend on the number of domains.
+- **The derived facts merged into the group's orders**, sorted alone, not sorted again with the group's.
+- **A new thing's facts are not looked up in the view** (it has none); a fact derived already that the group asserts
+  changes its flag in the delta (kind 4 in the frame, before the group's facts) instead of sending the group to the
+  ordinary path, so that a load in chunks (a university a group) stays on this path.
+- **Constraints and one-valued heads are checked after the fixpoint**: the constraints' plans (with their Nots) run
+  from every fact the group made present, and each derived fact of a one-valued or unique property is counted with
+  the group's and the view's. A group that breaks one goes to the ordinary path, which refuses it with its message.
+
+A group whose rules derive with a `Not` or an aggregate takes the ordinary path. A rule's text that the group itself
+adds is found among the group's new texts, which the dictionary's map does not hold yet.
 
 ## What it costs, and against the giants
 
 Measured on this laptop (Intel i7-4720HQ, 2.6 GHz, 4 cores; OCaml 5.5 without flambda), on LUBM-shaped data
 (universities, departments, people, courses, generated from the published ranges of the LUBM generator [Guo 2005],
 not its official output) with the univ-bench ontology as 94 rules, one an axiom. Seven rounds, alternated, each
-process capped at 3 GB, nothing else running; the median and the interval $[x(1), x(7)]$ of the rounds (98.4 %
-coverage). The method and every number: [benchmarks](benchmarks.md#rules-2026-11-08).
+process capped at 3 GB; the median and the interval $[x(1), x(7)]$ of the rounds (98.4 % coverage). The method and
+every number: [benchmarks](benchmarks.md#rules-2026-11-08), and for loads
+[the path of loads](benchmarks.md#rules-step-3-the-path-of-loads-sorted-and-parallel-2026-11-14).
 
 | what | with the rules | without | |
 |---|---|---|---|
 | write a graduate student (10 facts; 6 derived) | **23.1 µs** [21.9, 24.1] | 9.1 µs | 2.5× |
 | retract it (B/F: the 6 derived facts go) | **34.1 µs** [33.1, 54.8] | 6.9 µs | 4.9× |
 | `why` of a derived type (a proof of 2 to 8 facts) | **1.2 to 3.1 µs** | | |
-| load 10 universities in one group (1.35 M facts, 532,205 derived, 2,024,788 derivations), durable | 2.48 s | 1.20 s | |
-| its reasoning: the saturation alone | **1.04 M derived facts/s** [0.98, 1.05] on one core | | |
-| its reasoning with the working set's build (1.35 M facts indexed, 0.58 s) | 0.52 M derived facts/s [0.49, 0.53] | | |
+| load 10 universities in one group (1.35 M facts, 532,205 derived, 2,021,310 derivations), durable | **1.78 s** [1.66, 2.27] | 1.06 s | |
+| its reasoning: the rounds alone (saturation), on 8 threads | **1.92 M derived facts/s** [1.58, 2.04] | | |
+| its reasoning whole (the group's facts made ready for the joins, 0.13 s, included) | **1.29 M derived facts/s** (0.41 s) | | |
+| the same load as ten groups, a university each: peak resident memory | **133 MB** | | |
 | a derived fact put into the view (a delta of 200,000 changes) | **0.83 µs** in sorted batches; 1.12 µs one by one | | |
 
 The write path without rules is unchanged: the same student groups on main's binary and this one, 9.06 µs and
@@ -592,12 +613,11 @@ marked *computed* are ours from their tables):
 | RDFox B/F, Motik et al., AAAI 2015 [Motik 2015] | LUBM-1k-L, delete 100 facts | "0.0 s" in its table (below its rounding) |
 | Soufflé, Scholz et al., CC 2016 [Scholz 2016] | a points-to analysis of OpenJDK 7, about 840 M tuples | 75 s sequential, 35 s parallel (4 cores): another workload, given for the order of magnitude |
 
-- **One core, saturation**: 1.04 M derived facts/s here, 0.67 M/s for RDFox 2014, about 1.28 M/s for VLog: the same
-  order; VLog's published rate stays ahead by 1.2×, on another machine and a hundred times more data.
-- **Counting the working set's build** (a load's facts indexed for the joins, which the published rates count in
-  their load), 0.52 M/s: RDFox 2014's level, behind VLog by 2.5×. The next step of the design sorts a load's facts
-  instead of hashing them (VLog's own method).
-- **In parallel**: not yet; RDFox reaches 7.0 M/s on 32 threads.
+- **One core, saturation**: 1.04 M derived facts/s here (step 1), 0.67 M/s for RDFox 2014, about 1.28 M/s for VLog:
+  the same order; VLog's published rate stays ahead by 1.2×, on another machine and a hundred times more data.
+- **In parallel, a load's facts sorted** (step 3): the rounds 1.92 M/s on this laptop's 4 cores (8 threads), the
+  reasoning whole 1.3 to 1.6 M/s, 0.33 to 0.40 M/s a core: close to RDFox 2014's 0.44 M/s a core at 32 threads; RDFox
+  reaches 7.0 M/s in all on its 16 cores.
 - **Small writes**: microseconds, in the process. No giant publishes a per-group latency to compare with.
 - **Where the reasoner costs the most**: a retraction, 4.9 times the same group without rules. B/F checks each fact
   that lost a derivation against every rule that can give it, each check a lookup in the store's persistent maps or
@@ -637,11 +657,10 @@ Each was weighed against the others in the design; the measurements are the desi
 
 ## What is not here yet
 
-The design's plan has six steps; this version has steps 1, 2, 4 and 5.
+The design's plan has six steps; this version has steps 1 to 5.
 
-- **Step 3**: large derivations sorted. Rounds of 20,000 facts and more are derived on several domains (above), but
-  derived facts still reach the view's delta in sorted batches, about a microsecond a fact, and the join of a round
-  probes the store fact by fact; a change's derived facts are not written to a run of their own.
+- **Step 3's rest**: a change of the rules computed in the background still puts its derived facts into the view's
+  delta (not a run of its own), and the joins of its rounds probe the store fact by fact.
 - **Step 5's rest**: a change with new things is computed in the group; a change's derived facts wait for the next
   merge to reach a run.
 - **Step 6**: OWL 2 RL as a library of rules, and equality (`owl:sameAs`) by rewriting.
@@ -651,5 +670,6 @@ The design's plan has six steps; this version has steps 1, 2, 4 and 5.
 
 Every work cited here is in [references](references.md#rules-datalog-materialisation-and-its-maintenance), with what
 Cepheus took from it: [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [Feeley 1987], [Gupta 1993],
-[Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016], [Zhao 2020], [Guo 2005], [Hu 2019],
+[Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016],
+[Subotic 2018], [Zhao 2020], [Guo 2005], [Hu 2019],
 [Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012].

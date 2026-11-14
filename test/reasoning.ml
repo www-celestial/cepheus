@@ -644,7 +644,10 @@ let compare_paths = ref false
 
 (* [durable]: the sequences on a database on the disk, written through its threaded writer: each change of the rules
    takes the background path (Engine), and must decide and leave exactly what the model says, as a fork does (G8) *)
-let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
+(* [adds]: the groups are additions only, of 2 to 7 facts, now and then about new things (the path of loads when
+   Resolve.large_min is small: Reason.bulk on its sorted prefix); [plain]: rules without Not, aggregates or Never (the
+   rules that path takes) *)
+let random_sequences ?(durable = false) ?(adds = false) ?(plain = false) ~seeds ~groups ~merges () =
   let progress = Sys.getenv_opt "RULES_PROGRESS" <> None in
   for seed = (if debug > 0 then debug else 1) to (if debug > 0 then debug else seeds) do
     if progress then begin
@@ -711,7 +714,7 @@ let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
              head = (match head with Never -> Never | Give h -> Give (pat h)) }
     in
     let gen_rule k =
-      let kind = Rng.int r 10 in
+      let kind = if plain then (match Rng.int r 6 with 0 -> 0 | 1 -> 1 | k -> 5 + k) else Rng.int r 10 in
       match kind with
       | 0 -> closure_rule k
       | 1 -> var_prop_rule k
@@ -754,6 +757,9 @@ let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
             | 0 when used.(4) -> Give { e = Var (pick link_vars); p = n; v = Var 4 }
             | 1 when used.(5) -> Give { e = Var (pick link_vars); p = tag; v = Var 5 }
             | 2 -> Give { e = Var (pick link_vars); p = tag; v = Val (Text "derived") }
+            | 3 when plain ->
+              (* a one-valued property (the aggregates' ints, which plain rules give here): a second value refuses *)
+              Give { e = Var (pick link_vars); p = aggp.(Rng.int r 4); v = (if used.(4) then Var 4 else Val (Int (Rng.int r 3))) }
             | _ -> Give { e = Var (pick link_vars); p = links.(Rng.int r 4); v = (if Rng.int r 4 = 0 then Thing (some_thing ()) else Var (pick link_vars)) }
         in
         let ranges = if used.(4) && Rng.int r 4 = 0 then [ (4, Int 0, Int 1) ] else [] in
@@ -807,6 +813,12 @@ let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
           | _ -> false)
         rules
     in
+    (* a thing with two values of a one-valued property (the aggregates' ints, given by plain rules in [plain]) *)
+    let two_values m =
+      plain
+      && (let seen = Hashtbl.create 16 in
+          F.exists (fun (e, p, _) -> Array.mem p aggp && (Hashtbl.mem seen (e, p) || (Hashtbl.replace seen (e, p) (); false))) m)
+    in
     let random_fact () =
       match Rng.int r 7 with
       | 0 -> (some_thing (), n, Int (Rng.int r 3))
@@ -833,14 +845,14 @@ let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
            match define !db [ rl ] with
            | Ok _ ->
              C.check (not (cyc || conflict)) "seed %d group %d: a rule accepted that is not stratified (%b) or gives an aggregate's property (%b)" seed g cyc conflict;
-             C.check (not (violated rules' m' || !bad)) "seed %d group %d: a rule accepted over a state that breaks a constraint or derives a fact of the wrong type" seed g
+             C.check (not (violated rules' m' || !bad || two_values m')) "seed %d group %d: a rule accepted over a state that breaks a constraint or derives a fact of the wrong type" seed g
            | Error (Invalid msg) ->
              (* refused: a cycle, a conflict, a constraint broken, or the budget; never silently; a rule with a Not or an
                 aggregate the generator made well is refused for one of those only *)
              if has_sub msg "depends on its own" then C.check cyc "seed %d group %d: refused for a cycle the strata do not find: %s" seed g msg
              else if has_sub msg "which the aggregate" then C.check conflict "seed %d group %d: refused for a conflict: %s" seed g msg
              else
-               C.check (cyc || conflict || violated rules' m' || !bad || (Rules.is_plain rl && String.length msg > 0)) "seed %d group %d: rule refused: %s" seed g msg
+               C.check (cyc || conflict || violated rules' m' || !bad || two_values m' || (Rules.is_plain rl && String.length msg > 0)) "seed %d group %d: rule refused: %s" seed g msg
            | Error e -> C.fail "seed %d: %s" seed (message e)))
        | 2 -> (
          match rules with
@@ -849,6 +861,33 @@ let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
            let rl = List.nth rules (Rng.int r (List.length rules)) in
            if seed = debug then Printf.printf "g%d undefine %s\n" g rl.name;
            ignore (ok (undefine !db [ rl.name ])))
+       | _ when adds -> (
+         (* additions only, some about new things (temporary ids, numbered from next_e in order of first use, the
+            thing of an operation before its link's target, as Resolve numbers them) *)
+         let k = 2 + Rng.int r 6 in
+         let ops =
+           List.init k (fun _ ->
+               (* now and then a fact there already, derived or asserted (a derived one asserted: Now_asserted) *)
+               let e, p, x = if Rng.int r 4 = 0 && not (F.is_empty m_old) then (let l = F.elements m_old in List.nth l (Rng.int r (List.length l))) else random_fact () in
+               match Rng.int r 4 with
+               | 0 -> Add (-(1 + Rng.int r 3), p, x)
+               | 1 -> (match x with Link _ -> Add (e, p, Link (-(1 + Rng.int r 3))) | _ -> Add (e, p, x))
+               | _ -> Add (e, p, x))
+         in
+         let next = ref v.next_e and ids = Hashtbl.create 4 in
+         let id t = if t >= 0 then t else match Hashtbl.find_opt ids t with Some x -> x | None -> let x = !next in incr next; Hashtbl.add ids t x; x in
+         let facts = List.map (function Add (e, p, x) -> let e = id e in (e, p, (match x with Link t -> Link (id t) | x -> x)) | _ -> assert false) ops in
+         let ea = List.fold_left (fun s f -> F.add f s) e_old facts in
+         let bad = ref false in
+         let m' = C.perfect ~ptyp ~bad rules ea in
+         let want_refused = violated rules m' || !bad || two_values m' in
+         if seed = debug then Printf.printf "g%d write %s\n" g (String.concat " " (List.map show_op ops));
+         match write !db ops with
+         | Ok rc ->
+           C.check (not want_refused) "seed %d group %d: accepted, expected refused" seed g;
+           List.iter (fun (t, x) -> C.check (Hashtbl.find_opt ids t = Some x) "seed %d group %d: new thing %d numbered %d" seed g t x) rc.things
+         | Error (Invalid msg) -> C.check want_refused "seed %d group %d: refused, expected accepted: %s" seed g msg
+         | Error e -> C.fail "seed %d: %s" seed (message e))
        | _ -> (
          (* a group of additions and retractions, simulated on (facts, asserted) as Resolve applies them *)
          let ops =
@@ -884,7 +923,7 @@ let random_sequences ?(durable = false) ~seeds ~groups ~merges () =
          match Hashtbl.find_opt outcomes key with
          | Some (_, f) -> C.check (F.equal f got) "seed %d group %d: the rules as written give the unfolded run's view: %s" seed g (C.show_diff f got)
          | None -> ()
-       else Hashtbl.replace outcomes key (true, snd here));
+       else if not adds then Hashtbl.replace outcomes key (true, snd here));
       let want = C.perfect ~ptyp rules asserted in
       C.check (F.equal got want) "seed %d group %d: G17, the view is the perfect model: %s" seed g (if F.equal got want then "" else C.show_diff got want);
       C.check (not (violated rules got)) "seed %d group %d: G18, no constraint broken" seed g;
@@ -916,6 +955,15 @@ let () =
   section "G8, G17, G19: the same on databases on the disk: every change of the rules on the background path";
   random_sequences ~durable:true ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
   C.check (Atomic.get Engine.changes_done > 0) "the background path installed changes";
+  section "G8, G17, G18: the path of loads (groups of additions from 2 facts; rules without Not or aggregates, constraints and one-valued heads among them) on the disk";
+  Resolve.large_min := 2;
+  let b0 = !Reason.bulk_groups in
+  random_sequences ~durable:true ~adds:true ~plain:true ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
+  C.check (!Reason.bulk_groups > b0) "the path of loads reasoned groups";
+  Reason.par_min := 4;
+  random_sequences ~durable:true ~adds:true ~plain:true ~seeds:(max 1 (seeds / 4)) ~groups:60 ~merges:false ();
+  Reason.par_min := 20_000;
+  Resolve.large_min := 20_000;
   section "rounds on several domains (from 4 facts a round): every group's view the same as above";
   Reason.par_min := 4;
   compare_paths := true;

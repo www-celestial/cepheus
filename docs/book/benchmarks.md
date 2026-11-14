@@ -496,6 +496,97 @@ The two slow rounds through the socket did not repeat in the process, where the 
 timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
 disk whose fsyncs vary that much from round to round.
 
+## Rules, step 3: the path of loads, sorted and parallel (2026-11-14)
+
+The third step of the reasoner ([rules](rules.md#large-groups)): a large group's facts reasoned as a sorted prefix of
+the working set instead of hash chains, chains kept only where a plan reads them, large rounds made facts on every
+hardware thread, the derived facts merged into the group's two orders; constraints, one-valued heads and facts
+derived already stay on that path; a large batch of derived facts enters the view's delta by maps built in linear
+time.
+
+**Method.** `bench/reason.exe` (release build) of main 9761e4a, of the step 5 branch 0b8c847 (where this step
+started) and of this branch, each built from its own source. Rounds alternated (the order of the binaries turned each
+round), a series in one hold of the heavy lock, every process in a 3 GB scope; a cell is the median with
+$[x(1), x(n)]$; a ratio is the median of the paired ratios (round by round) with their range. The peak resident
+memory is the process's (`getrusage`), the data generated in the process and its list of operations included. The
+machine was shared with other jobs' processes outside the lock (a load average of 5 on 8 threads): the medians are
+above the quietest runs. The same answers: 532,205 derived facts and 2,021,310 derivations on every side, and on this
+branch the digest of every fact and its flag equal for one group, a university a group, and a department a group.
+Commands: `reason.exe mat 10 rules|none bulk|chunks DIR`, `reason.exe student 1 2000 DIR`, `reason.exe define 10`.
+
+**LUBM-shaped data, ten universities with the 94 rules, one group, durable** (1,354,654 asserted facts; 7 rounds):
+
+| | main 9761e4a | step 5 0b8c847 | this branch | this / main |
+|---|---:|---:|---:|---:|
+| the load, every fact durable | 2.90 s [2.72, 3.90] | 2.76 s [2.68, 3.19] | **1.78 s** [1.66, 2.27] | 0.62 [0.42, 0.81] |
+| its reasoning | 1.217 s [1.047, 1.285] | 1.015 s [0.870, 1.054] | **0.411 s** [0.334, 0.465] | 0.33 [0.27, 0.44] |
+| of which the facts made ready for the joins | 0.627 s [0.489, 0.693] | 0.603 s [0.478, 0.672] | **0.128 s** [0.065, 0.142] | 0.21 [0.10, 0.26] |
+| the rounds alone (saturation), derived facts a second | 0.92 M [0.85, 0.98] | 1.36 M [1.27, 1.44] | **1.92 M** [1.58, 2.04] | 2.04 [1.66, 2.17] |
+| the reasoning whole, derived facts a second | 0.44 M | 0.52 M | **1.29 M** (best run 1.59 M) | |
+| peak resident memory | 680 MB [659, 753] | 832 MB [804, 836] | **557 MB** [494, 570] | 0.81 [0.69, 0.86] |
+
+**The same without rules** (5 rounds): 1.374 s [1.299, 1.717] on main, **1.059 s** [1.042, 1.783] here (0.82
+[0.74, 1.04]: the sort by thing on several domains, the new texts numbered through an open table), 340 MB and 308 MB.
+
+**A university a group** (ten large groups of about 135,000 facts, durable; this branch only, the others have no such
+mode; 5 rounds): the ten writes **2.45 s** [2.21, 3.04], their reasoning 0.61 s, **peak resident memory 133 MB**
+[131, 134]. Before this step, from the second university on, each group went to the ordinary path (a university's
+type, derived from the degrees of earlier universities, asserted again): 8.6 s in one run.
+
+**On the disk**: the run of the load with its consequences 23.1 MB (12.3 bytes a fact, the dictionary of its 600,000
+texts included), without rules 19.9 MB (14.7 a fact): the 532,205 derived facts take 3.3 MB, **6.2 bytes each**; in
+the journal 2.8 bytes each (7.2 MB against 5.7).
+
+**What did not change: a small group's path** (`student 1 2000`: a graduate student written then retracted, 2,000 of
+each, on a fork over one university; 7 rounds; medians of the rounds' medians, paired ratios against main):
+
+| | main 9761e4a | step 5 0b8c847 | this branch | this / main |
+|---|---:|---:|---:|---:|
+| without rules: write / retract | 10.0 / 6.9 µs | 10.0 / 7.2 µs | 10.0 / 7.2 µs | 1.00 [0.50, 1.44] / 1.04 [0.72, 1.15] |
+| with the 94 rules: write / retract | 27.9 / 41.0 µs | 28.1 / 42.9 µs | 29.1 / 42.2 µs | 1.03 [0.90, 1.17] / 1.00 [0.93, 1.76] |
+
+The microsecond clock of these medians and the shared machine make the rounds' spread wider than any difference.
+Start-up (`bench.exe` without arguments, 21 rounds of 50 runs, alternated): 3.186 ms on 0b8c847, 3.263 ms here
+(paired 1.03 [0.85, 1.11], faster in 1 round of 21): about 3 % more, the code of this step (61 KB of code and frame
+tables: the runtime reads a binary's frame descriptors and relocations at start-up). Databases written by main's and
+by 0b8c847's binaries open here and read the same facts and flags (the digest of one university loaded by each).
+
+**A change of the rules** (step 5's two targets, measured again with this step; [step 5](#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13)'s
+method: `CHANGE=one reason.exe change 10 256 8 2 with|without DIR`, the change one rule over LUBM-10 while 256
+clients write; 7 pairs for each binary, in one hold; and `reason.exe define 10`, the 94 rules defined in memory over
+the load, 5 rounds):
+
+| | step 5 0b8c847 | this branch |
+|---|---:|---:|
+| the change's build beside 256 writers (119,000 to 150,000 derived facts) | 0.531 s [0.388, 0.562]: 0.33 M/s | **0.332 s** [0.282, 0.391]: **0.45 M/s** |
+| the writers' throughput in the change's window, with / without | 0.88 [0.52, 1.51] | 0.86 [0.48, 5.47] |
+| the same over the run from the change's start | 1.08 [0.77, 1.39] | 0.87 [0.54, 1.46] |
+| the 94 rules defined in memory (532,205 derived) | 3.35 s [2.64, 23.9] | **2.10 s** [1.96, 2.62]: 0.25 M/s |
+
+The change's build is faster by its delta: a large batch of derived facts now enters the view's delta by maps built
+in linear time (0.6 µs a fact instead of 1.2). Its rounds still read the view fact by fact on the change's own domain
+(more domains there cost the writers' throughput: step 5's finding), and its facts still go into the delta, not a run
+of their own: the step's target, 2 M derived facts a second, is not reached (0.45 M/s), nor 0.90 for the writers
+(0.86 median, within the pairs' spread of step 5's 0.88).
+
+- **Against the step's targets**: the load with its consequences in at most 1.5 s: 1.78 s median, 1.66 s at best
+  (missed: the load without rules takes 1.06 s here, and the run's merge of the 532,205 derived facts adds about 0.1
+  s); its reasoning in at most 0.25 s (2.5 M derived facts a second on 8 threads): 0.41 s median, 0.33 s at best,
+  1.3-1.6 M a second (missed; the rounds alone reach 1.9-2.0 M a second); a load's memory in at most 150 MB in chunks:
+  133 MB (met); at most 5 bytes a fact: 6.2 bytes a derived fact in the run, 12.3 a fact with the dictionary (missed:
+  the run's format is unchanged in this step).
+- **Where the reasoning's time goes now** (this branch, one run with timers): the working set allocated 0.03-0.05 s,
+  the prefix filled 0.015 s, its membership table 0.03 s, the derive phases 0.09-0.14 s (2,021,310 derivations, each a
+  lookup in a table of tens of MB), the heads made facts 0.08-0.11 s (of which the regions' probes 0.055-0.08). Every
+  step left is memory latency; 8 threads against 4 gave 13 % (0.350/0.305 s against 0.407/0.353 s).
+- **Beside the giants** (their papers, their machines and data; *computed*: ours from their tables): RDFox 2014
+  [Motik 2014] 0.67 M derived facts a second on one thread, 6.1-7.0 M on 16-32 threads of two 8-core Xeons (0.44 M a
+  core at 32 threads); VLog [Urbani 2016] about 1.28 M on one thread. Here 1.9 M a second for the rounds and 1.3-1.6 M
+  for the whole reasoning on one 4-core laptop (8 threads): 0.33-0.40 M a core, close to RDFox 2014's 0.44 M a core in
+  parallel and above its one-thread rate; below RDFox's absolute parallel numbers, which need its 16 cores. GraphDB's documented OWL2-RL
+  load, 9.1 k asserted statements a second on 8 cores, persisted (other data, another machine): here 1.35 M asserted
+  facts with their consequences durable in 1.78 s, about 0.76 M a second.
+
 ## Rules, step 5: changes of the rules in the background (2026-11-13)
 
 The fifth step of the reasoner ([rules](rules.md#changes-of-the-rules-in-the-background)): a change of the rules or the

@@ -99,8 +99,8 @@ end
 io.Print("$nInvoices invoices, $facts facts with their lines, in $(text.Decimals(2, sys.Now() - t)) s")
 (* numbered here without the counter of the invoices: it goes on after the last *)
 result.Unwrap(invoices.CatchUpNumbers(db))
-(* The rules last: a rule whose head is a one-valued property, or a constraint, sends a large group to the ordinary
-   path of the writer, four times slower here; defined after the load, they derive over it in one group. *)
+(* The rules last: defined after the load, they derive over it in one group (a large group with them is checked
+   against them after its fixpoint, which a load without them spares). *)
 t = sys.Now()
 result.Unwrap(cepheus.Define(invoices.Rules, db))
 io.Print("rules defined in $(text.Decimals(2, sys.Now() - t)) s")
