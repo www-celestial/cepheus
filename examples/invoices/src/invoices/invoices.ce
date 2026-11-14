@@ -2,7 +2,6 @@
    found, listed by pages with filters, and marked late. Each function takes the database last. *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/dict
-use std/fiber
 use std/list
 use std/result
 use std/value
@@ -11,10 +10,43 @@ InvoiceSorts = ["-number", "number", "-date", "due", "-total"]   (** The orders 
 Statuses = ["unpaid", "late", "paid"]   (** The statuses of an invoice. *)
 Week = 604800   (** Seconds in a week. *)
 
-defn nextNumber(db)
-  (** The number after the largest one: read in the index's order, one row. *)
+defn largestNumber(db)
+  (** The largest invoice number, 0 when there is none: read in the index's order, one row. *)
   top = cepheus.Find(2, (i, n) -> {Where: [[i, Invoice.Number, n]], Give: {N: n}, Sort: [cepheus.Desc(n)], Limit: 1}, db)?
-  result.Ok(if value.Len(top) == 0 1 else top[1].N + 1 end)
+  result.Ok(if value.Len(top) == 0 0 else top[1].N end)
+end
+
+defn invoiceCounter(db)
+  (** The counter that numbers the invoices: an Ok of its id. Made at the first invoice, from the largest number the
+      database holds, so that a database filled before it goes on from there; two programs that make it at once get
+      the same one, its name being unique. *)
+  for attempt in 1..2
+    found = cepheus.Find(1, (c) -> {Where: [[c, Counter.Name, "invoice"]], Give: {C: c}}, db)?
+    if value.Len(found) > 0
+      return result.Ok(found[1].C)
+    end
+    made = cepheus.Insert(Counter, {Name: "invoice", Last: largestNumber(db)?}, db, why = "invoice counter made")
+    if result.IsOk(made) or made.Error.Code != "unique"
+      return made
+    end
+  end
+  result.Err({Code: "busy", Message: "The counter of the invoices is being made: try again."})
+end
+
+defn CatchUpNumbers(db)
+  (** Moves the counter of the invoices up to the largest number the database holds, after a program numbered
+      invoices without it (the seed does): the next invoice takes the number after. An Ok of the counter's id. *)
+  c = invoiceCounter(db)?
+  last = cepheus.Get(Counter, c, db)?.Last
+  top = largestNumber(db)?
+  if value.IsMissing(last) or top > last
+    (* as it was read: an invoice numbered meanwhile moved the counter, and the group is refused *)
+    moved = cepheus.Write([cepheus.Expect(c, Counter.Last, last), cepheus.Add(c, Counter.Last, top)], db, why = "invoice numbers caught up")
+    if result.IsErr(moved) and moved.Error.Code != "conflict"
+      return moved
+    end
+  end
+  result.Ok(c)
 end
 
 defn lineOps(inv, lines, from)
@@ -30,38 +62,23 @@ defn lineOps(inv, lines, from)
   ops
 end
 
-(* One invoice numbered at a time in this process: a channel of one place, which AddInvoice fills while it numbers and
-   writes. Invoice numbers follow each other without a gap, as the law of many countries asks, so each is the largest
-   one plus one; 50 requests at once that each read the largest would all take the same, and all but one retry. *)
-numbering = fiber.Channel(size = 1)
-
 defn AddInvoice(f, billTo, by, db)
-  (** A new unpaid invoice with its lines, in one group: f as InvoiceForm checked it, billTo the client's name now. It
-      takes the next number, one invoice at a time in this process; if another process took the number meanwhile (the
-      group is refused: the number is unique), the next one. An Ok of {Invoice, Number}. *)
-  fiber.Send(true, numbering)
-  done = numbered(f, billTo, by, db)
-  _ = fiber.Receive(numbering)
-  done
-end
-
-defn numbered(f, billTo, by, db)
-  (** AddInvoice, once it may number. *)
-  for attempt in 1..10
-    n = nextNumber(db)?
-    inv = cepheus.New(1)
-    ops = list.Concat([cepheus.Add(inv, Invoice.Number, n), cepheus.Add(inv, Invoice.Client, f.Client), cepheus.Add(inv, Invoice.BillTo, billTo),
-                       cepheus.Add(inv, Invoice.Search, Lower(billTo)), cepheus.Add(inv, Invoice.Date, f.Date), cepheus.Add(inv, Invoice.Due, f.Due),
-                       cepheus.Add(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Total, f.Total)], lineOps(inv, f.Lines, 2))
+  (** A new unpaid invoice with its lines, in one group: f as InvoiceForm checked it, billTo the client's name now. Its
+      number is the counter's next, which the database takes in the same group (cepheus.Incr): the numbers follow
+      each other without a gap, as the law of many countries asks, and invoices made at once neither wait for each
+      other nor retry. An Ok of {Invoice}. *)
+  c = invoiceCounter(db)?
+  inv = cepheus.New(1)
+  ops = list.Concat([cepheus.Incr(c, Counter.Last, into = [inv, Invoice.Number]), cepheus.Add(inv, Invoice.Client, f.Client), cepheus.Add(inv, Invoice.BillTo, billTo),
+                     cepheus.Add(inv, Invoice.Search, Lower(billTo)), cepheus.Add(inv, Invoice.Date, f.Date), cepheus.Add(inv, Invoice.Due, f.Due),
+                     cepheus.Add(inv, Invoice.Status, "unpaid"), cepheus.Add(inv, Invoice.Total, f.Total)], lineOps(inv, f.Lines, 2))
+  done = cepheus.Write(ops, db, by = by, why = "invoice added")
+  if result.IsErr(done) and done.Error.Code == "unique"
+    (* a number taken without the counter (by the seed, or by hand): the counter catches up, and one more try *)
+    CatchUpNumbers(db)?
     done = cepheus.Write(ops, db, by = by, why = "invoice added")
-    if result.IsOk(done)
-      return result.Ok({Invoice: done.Value.Things[1], Number: n})
-    end
-    if done.Error.Code != "unique"
-      return done
-    end
   end
-  result.Err({Code: "busy", Message: "Many invoices are being made at once: try again."})
+  result.Ok({Invoice: done?.Things[1]})
 end
 
 defn GetInvoice(id, db)

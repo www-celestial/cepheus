@@ -187,6 +187,34 @@ defn isNewThingsOfAGroup()
   cepheus.Get(Invoice, r.Things[2], s.Db)?.Client == r.Things[1]
 end
 
+Counter = cepheus.Kind("counter", {Name: cepheus.Text(), Last: cepheus.Int()})
+Ticket = cepheus.Kind("ticket", {Number: cepheus.Int(unique = true), Label: cepheus.Text()})
+
+defn isIncrNumbersWithoutAGap()
+  (** 30 fibers at once each make a ticket numbered by the counter, in its own group: 1 to 30, each once, no retry *)
+  t = cepheus.Fork(cepheus.Empty, [Counter, Ticket])?
+  c = cepheus.Insert(Counter, {Name: "tickets"}, t)?
+  make(k) = cepheus.Write([cepheus.Incr(c, Counter.Last, into = [cepheus.New(1), Ticket.Number]), cepheus.Add(cepheus.New(1), Ticket.Label, "ticket $(k)")], t)
+  tasks = [fiber.Spawn(() -> make(k)) for k in 1..30]
+  tickets = [result.Unwrap(fiber.Wait(x))?.Things[1] for x in tasks]
+  numbers = [cepheus.Get(Ticket, b, t)?.Number for b in tickets]
+  value.Equal(list.Sort(numbers), [k for k in 1..30]) and cepheus.Get(Counter, c, t)?.Last == 30
+end
+
+defn isIncrRefusedLeavesTheCounter()
+  (** a refused group takes no number; by counts down too; past the 63 bits, refused *)
+  t = cepheus.Fork(cepheus.Empty, [Counter, Ticket])?
+  c = cepheus.Insert(Counter, {Name: "tickets", Last: 5}, t)?
+  refused = cepheus.Write([cepheus.Incr(c, Counter.Last), cepheus.Expect(c, Counter.Name, "other")], t)
+  cepheus.Write([cepheus.Incr(c, Counter.Last, by = -2)], t)?
+  big = cepheus.Insert(Counter, {Last: 4611686018427387903}, t)?
+  over = cepheus.Write([cepheus.Incr(big, Counter.Last)], t)
+  wrong = cepheus.Write([cepheus.Incr(c, Counter.Name)], t)
+  intoText = cepheus.Write([cepheus.Incr(c, Counter.Last, into = [c, Counter.Name])], t)
+  list.All([refused.Error.Code == "conflict", cepheus.Get(Counter, c, t)?.Last == 3, over.Error.Code == "invalid",
+            wrong.Error.Code == "invalid", intoText.Error.Code == "invalid", cepheus.Get(Counter, c, t)?.Last == 3])
+end
+
 defn isUniqueAndRetract()
   s = shop()?
   taken = cepheus.Insert(Client, {Name: "Eve", Email: "ada@x.fr"}, s.Db)

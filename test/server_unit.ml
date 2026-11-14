@@ -126,11 +126,13 @@ let rand_request r =
              after = (if Rng.bool r then None else Some (Array.init (Rng.int r 3) (fun _ -> rand_value r))) } in
     Wire.Find { db = 0; query = q; select; extra = []; order }
   | 4 ->
-    let op () = match Rng.int r 4 with
+    let op () = match Rng.int r 6 with
       | 0 -> Resolve.Add (Rng.int r 100 - 50, Rng.int r 40, rand_value r)
       | 1 -> Resolve.Retract (Rng.int r 100, Rng.int r 40, rand_value r)
       | 2 -> Resolve.Expect (Rng.int r 100, Rng.int r 40, Some (rand_value r))
-      | _ -> Resolve.Expect (Rng.int r 100, Rng.int r 40, None) in
+      | 3 -> Resolve.Expect (Rng.int r 100, Rng.int r 40, None)
+      | 4 -> Resolve.Incr (Rng.int r 100 - 50, Rng.int r 40, (if Rng.bool r then max_int - Rng.int r 3 else min_int + Rng.int r 3), None)
+      | _ -> Resolve.Incr (Rng.int r 100 - 50, Rng.int r 40, Rng.int r 21 - 10, Some (Rng.int r 100 - 50, Rng.int r 40)) in
     Wire.Write { db = 0; serial = Rng.int r 100; floor = Rng.int r 100; by = Rng.int r 10 - 5; why = "why"; ops = List.init (Rng.int r 5) (fun _ -> op ()) }
   | 5 -> Wire.Ping (String.make (Rng.int r 30) 'p')
   | 6 -> Wire.Follow (Rng.int r 300)
@@ -209,6 +211,52 @@ let wire () =
     done
   done;
   check !fine "wire: %d fuzzed questions with operators and an order: read or refused, never more; the plain ones coded as before" !outcomes;
+  (* Incr (version 4), from a hostile program: every byte changed, cuts, bytes inserted, huge numbers; the request
+     is read (each count bounded by the bytes left) or refused (Short, Malformed), never more; a Write without Incr
+     is coded byte for byte as before it *)
+  let r = Rng.make 17 in
+  let good = ref true and tries = ref 0 in
+  for _ = 1 to 2000 do
+    let op () =
+      match Rng.int r 3 with
+      | 0 -> Resolve.Incr (Rng.int r 200 - 100, Rng.int r 70000, Rng.int r 1000 - 500, None)
+      | 1 -> Resolve.Incr (Rng.int r 200 - 100, Rng.int r 40, (if Rng.bool r then max_int else min_int), Some (Rng.int r 200 - 100, Rng.int r 40))
+      | _ -> Resolve.Add (Rng.int r 100, Rng.int r 40, rand_value r)
+    in
+    let req = Wire.Write { db = 0; serial = Rng.int r 9; floor = 0; by = 0; why = "w"; ops = List.init (1 + Rng.int r 3) (fun _ -> op ()) } in
+    let b = Buffer.create 64 in
+    Wire.put_request b req;
+    let bytes = Buffer.to_bytes b in
+    (match Wire.get_request Wire.k_write (Codec.reader bytes 0 (Bytes.length bytes)) with
+     | back -> if back <> req then good := false
+     | exception _ -> good := false);
+    for _ = 1 to 8 do
+      let m = Bytes.copy bytes in
+      let n = Bytes.length m in
+      let m =
+        match Rng.int r 4 with
+        | 0 -> let i = Rng.int r n in Bytes.set m i (Char.chr (Rng.int r 256)); m
+        | 1 -> Bytes.sub m 0 (Rng.int r n)
+        | 2 -> let i = Rng.int r (n + 1) in Bytes.cat (Bytes.sub m 0 i) (Bytes.cat (Bytes.make (1 + Rng.int r 9) (Char.chr (Rng.int r 256))) (Bytes.sub m i (n - i)))
+        | _ -> Bytes.cat m (Bytes.of_string "\004\255\255\255\255\255\255\255\255\255\001\002")
+      in
+      incr tries;
+      match Wire.get_request Wire.k_write (Codec.reader m 0 (Bytes.length m)) with
+      | _ -> ()
+      | exception (Codec.Short | Wire.Malformed _) -> ()
+      | exception e -> good := false; Printf.printf "fuzz incr: %s\n" (Printexc.to_string e)
+    done
+  done;
+  (* an op tag past 4, and Incr's into byte past 1: refused *)
+  let raw tail =
+    let b = Buffer.create 16 in
+    Codec.put_varint b 0; Codec.put_varint b 1; Codec.put_varint b 0; Codec.put_int b 0; Codec.put_string b ""; Codec.put_varint b 1;
+    Buffer.add_string b tail;
+    Buffer.to_bytes b
+  in
+  let refused tail = match Wire.get_request Wire.k_write (let m = raw tail in Codec.reader m 0 (Bytes.length m)) with _ -> false | exception (Codec.Short | Wire.Malformed _) -> true in
+  check (!good && refused "\005\002\016\000" && refused "\004\002\016\002\002" && refused "\004\002\016\002\001\002")
+    "wire: Incr round trips; %d fuzzed Writes with Incr read or refused, never more; a tag past 4 and a wrong into refused" !tries;
   let replies =
     [ Wire.Welcome { server = "s"; cluster = "c"; session = 9; frame = 16; inflight = 3 };
       Wire.Opened { db = 1; group = 7; props = [ 16, { Schema.name = "a"; typ = Tmoney 2; many = true; unique = false } ] };
@@ -497,6 +545,13 @@ let rights_kinds () =
   check (not (denied (w (Wire.Follow 0)))) "kinds: a write token still follows";
   check (match k (Wire.Open "compta") with Some (Wire.Opened _) -> true | _ -> false) "kinds: Open";
   check (ok (write a [ Add (-1, 17, Int 7) ]) && denied (find a [ 17 ])) "kinds: add only: writes, reads nothing";
+  (* Incr adds to its counter's kind and to its into's: both must be kinds the token adds *)
+  check (ok (write w (declare 22 "transaction/Number" Tint @ declare 23 "compte/Next" Tint))) "kinds: counters declared";
+  check (ok (write k [ Incr (-1, 17, 1, Some (-2, 22)) ])) "kinds: an Incr within the kinds added";
+  check (denied (write k [ Incr (thing, 23, 1, None) ])) "kinds: an Incr of a counter of a kind not added is denied";
+  check (denied (write k [ Incr (-1, 17, 1, Some (thing, 23)) ])) "kinds: an Incr into a kind not added is denied";
+  check (denied (write a [ Incr (-1, 22, 1, Some (-2, 16)) ])) "kinds: add only, into another kind: denied";
+  check (ok (write a [ Incr (-1, 22, 1, Some (-2, 17)) ])) "kinds: add only, within its kind: written";
   (* every operator under rights per kind, on random questions: denied when any pattern, those inside Not and Or too,
      names a kind the token may not read (16 and 17 read, 18 not); else the rows a write token gets, in the same
      order, whatever Sort, Limit and After a client sends (a cursor made by hand included) *)
@@ -846,8 +901,8 @@ let versions () =
     Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
-  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3)) "versions: a server speaks 1, 2 and 3";
-  check (match hello 4 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 4";
+  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4)) "versions: a server speaks 1, 2, 3 and 4";
+  check (match hello 5 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 5";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -865,7 +920,7 @@ let versions () =
     ignore (Unix.write fd s 0 (Bytes.length s))
   in
   let old = Thread.create (fun () ->
-      for _ = 1 to 3 do
+      for _ = 1 to Wire.version do
         let fd, _ = Unix.accept ~cloexec:true sock in
         (try
            let h = Bytes.create Wire.header in
@@ -888,7 +943,14 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     (* an Incr to a server of protocol 3 or older is refused in the program, never sent; a write without it is sent *)
+     let db = { Client.handle = 0; group = 0; props = []; local = None; wants_local = false; retry_at = 0. } in
+     check (Client.write c db [ Resolve.Incr (65536, 16, 1, None) ] = Error { code = "invalid"; message = Client.no_incr } && c.serial = 0)
+       "versions: an Incr to a server of 1 is refused before it is sent";
+     c.spoken <- 3;
+     check (Client.write c db [ Resolve.Add (65536, 16, Int 1); Resolve.Incr (65536, 17, 1, Some (-1, 18)) ] = Error { code = "invalid"; message = Client.no_incr })
+       "versions: and to a server of 3";
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
   Thread.join old;

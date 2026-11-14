@@ -54,7 +54,8 @@ let things ops first_new =
   List.iter
     (function
       | Resolve.Add (e, _, v) | Resolve.Retract (e, _, v) -> see e; (match v with Value.Link t -> see t | _ -> ())
-      | Resolve.Expect _ -> ())
+      | Resolve.Expect _ -> ()
+      | Resolve.Incr (e, _, _, into) -> see e; (match into with Some (t, _) -> see t | None -> ()))
     ops;
   List.rev !order
 

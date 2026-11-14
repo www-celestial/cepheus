@@ -39,6 +39,10 @@ Overdue = cepheus.Rule("overdue", 2, (c, i) -> {Where: [[i, Invoice.Client, c], 
     once. n is the Not's own: no name at all. *)
 NoInvoiceOfDeleted = cepheus.Rule("no-invoice-of-a-deleted-client", 3, (c, i, n) -> {Where: [[i, Invoice.Client, c], cepheus.Not([c, Client.Name, n])], Then: cepheus.Never})
 
-Kinds = [Client, Invoice, Line, User, Session]   (** Every kind of the app: those of its full token. *)
-Books = [Invoice, Line]   (** The kinds of the accountant's token, which reads and adds invoices only. *)
+(** A counter that the database increments in the group that takes its next number: Last is the last number given.
+    The one named "invoice" numbers the invoices (AddInvoice). *)
+Counter = cepheus.Kind("counter", {Name: cepheus.Text(unique = true), Last: cepheus.Int()})
+
+Kinds = [Client, Invoice, Line, User, Session, Counter]   (** Every kind of the app: those of its full token. *)
+Books = [Invoice, Line, Counter]   (** The kinds of the accountant's token, which reads and adds invoices only, numbered by their counter. *)
 Rules = [Overdue, NoInvoiceOfDeleted]   (** The rules the app defines at its start. *)

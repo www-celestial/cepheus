@@ -7,6 +7,7 @@ tls fork: invalid
 tls rule: true
 tls a kind declared after a rule: true
 tls 100 fibers: 100 answered, 100 in the database
+tls Incr by 50 fibers: 50 answered, numbered 1 to 50 once each: true the counter at 50
 tls closed: closed
 local: 200 writes by one connection, read at once by another: 200 seen
 local fork: 201 in the fork, 200 in the database

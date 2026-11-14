@@ -1,7 +1,8 @@
-(* The wire protocol, versions 1 to 3. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
-   After: below), version 3 the files of the vault (Put, Piece, Load: below), and nothing else: a server speaks all
-   three, a program says in Hello the version it speaks, and against an older server a program speaks that server's
-   version (Client.hello) and asks nothing that version lacks. A connection carries frames both ways:
+(* The wire protocol, versions 1 to 4. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+   After: below), version 3 the files of the vault (Put, Piece, Load: below), version 4 the operation Incr (tag 4 of
+   put_op), and nothing else: a server speaks all four, a program says in Hello the version it speaks, and against an
+   older server a program speaks that server's version (Client.hello) and asks nothing that version lacks. A
+   connection carries frames both ways:
 
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
      flags  = bit 0: more (a reply in several frames: the rows of a Find), bit 1: error (the body is an error)
@@ -14,7 +15,7 @@ open Cepheus
 module Ask = Question.Ask
 module Top = Question.Top
 
-let version = 3
+let version = 4
 
 (* the oldest version a server still speaks *)
 let oldest = 1
@@ -251,6 +252,12 @@ let put_op b = function
   | Resolve.Retract (e, p, v) -> Buffer.add_char b '\001'; Codec.put_int b e; Codec.put_varint b p; Value.encode b v
   | Resolve.Expect (e, p, Some v) -> Buffer.add_char b '\002'; Codec.put_int b e; Codec.put_varint b p; Value.encode b v
   | Resolve.Expect (e, p, None) -> Buffer.add_char b '\003'; Codec.put_int b e; Codec.put_varint b p
+  (* version 4: by (zigzag), then a byte 0, or 1 and into's thing (zigzag) and property *)
+  | Resolve.Incr (e, p, by, into) -> (
+    Buffer.add_char b '\004'; Codec.put_int b e; Codec.put_varint b p; Codec.put_int b by;
+    match into with
+    | None -> Buffer.add_char b '\000'
+    | Some (t, q) -> Buffer.add_char b '\001'; Codec.put_int b t; Codec.put_varint b q)
 
 let get_op r =
   let tag = Codec.get_byte r in
@@ -261,6 +268,12 @@ let get_op r =
   | 1 -> Resolve.Retract (e, p, Value.decode r)
   | 2 -> Resolve.Expect (e, p, Some (Value.decode r))
   | 3 -> Resolve.Expect (e, p, None)
+  | 4 -> (
+    let by = Codec.get_int r in
+    match Codec.get_byte r with
+    | 0 -> Resolve.Incr (e, p, by, None)
+    | 1 -> let t = Codec.get_int r in let q = Codec.get_varint r in Resolve.Incr (e, p, by, Some (t, q))
+    | _ -> raise Codec.Short)
   | _ -> raise Codec.Short
 
 let request_kind = function

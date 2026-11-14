@@ -188,6 +188,11 @@ the group's number and the ids of the things it made, or an `Err` and nothing wr
   it; `cepheus.Expect(thing, property)`, unless the thing has no value of the property. This is how a program writes
   "only if nobody changed it since I read it", an **optimistic** check: nothing is locked; the group that comes second
   is refused, and the program reads again.
+- `cepheus.Incr(thing, property, by = 1, into = missing)`: a **counter** that the group increments. The thing's value
+  of an `Int()` property of one value (none counts 0) grows by `by` (a negative `by` counts down), read by the
+  database at this point of the group. `into = [thing, property]` also adds the new value there, an `Int()` property:
+  an invoice gets its number in the group that makes it. A value past the 63 bits of an Int refuses the group, Code
+  `"invalid"`.
 - `cepheus.New(k)`: the k-th new thing of the group, in any place a thing goes: `New(1)`, `New(2)`... `Things[k]` is
   its id.
 
@@ -210,6 +215,33 @@ The second payment is refused: the first made the invoice paid. Each group is a 
 database as it was after the group before it, and the groups of a database are applied one after the other: they
 are **serializable**, and more, **strictly serializable**: a group that starts after another one was confirmed comes
 after it ([guarantees](guarantees.md#g4-strict-serializability)).
+
+Numbers that follow each other without a gap, as the law of many countries asks of invoices, are a counter that the
+group itself increments. Reading the largest number and writing it plus one would not do: two programs that read at
+the same time take the same number, and one of them must try again. With `Incr`, the database reads the counter
+when it applies the group, so groups that count at the same time never conflict and never skip a number, and a
+refused group takes none:
+
+```cesia norun
+Counter = cepheus.Kind("counter", {Last: cepheus.Int()})
+Bill = cepheus.Kind("bill", {Number: cepheus.Int(unique = true), Client: cepheus.Link()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Counter, Bill], token = sys.Env("CEPHEUS_TOKEN")))
+counter = result.Unwrap(cepheus.Insert(Counter, {Last: 0}, db))
+bill = [cepheus.Incr(counter, Counter.Last, into = [cepheus.New(1), Bill.Number]), cepheus.Add(cepheus.New(1), Bill.Client, bo)]
+first = result.Unwrap(cepheus.Write(bill, db)).Things[1]
+second = result.Unwrap(cepheus.Write(bill, db)).Things[1]
+io.Print(cepheus.Get(Bill, first, db), cepheus.Get(Bill, second, db))
+refused = cepheus.Write([cepheus.Expect(bo, Client.City, "Rome"), cepheus.Incr(counter, Counter.Last, into = [cepheus.New(1), Bill.Number])], db)
+io.Print(refused.Error.Code, cepheus.Get(Counter, counter, db))
+```
+
+```text
+Ok({Number: 1, Client: 65539}) Ok({Number: 2, Client: 65539})
+conflict Ok({Last: 2})
+```
+
+`Incr` is one operation of the group, as `Add` is: the bill's other facts, its lines, are in the same group, all or
+nothing.
 
 A write over the network is answered once its group is on the server's disk (an fsync, G1); the writes that arrive
 while the disk works share the next one (**group commit**). If the connection breaks before the answer, the package
@@ -434,9 +466,9 @@ cepheus.Close(w)
 ```
 
 ```text
-Ok({Group: 10, Rows: [{Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
-Ok({Group: 11, Rows: missing, Added: [{Invoice: 65543, Total: 45.0}], Removed: []})
-Ok({Group: 12, Rows: missing, Added: [], Removed: [{Invoice: 65543, Total: 45.0}]})
+Ok({Group: 14, Rows: [{Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
+Ok({Group: 15, Rows: missing, Added: [{Invoice: 65546, Total: 45.0}], Removed: []})
+Ok({Group: 16, Rows: missing, Added: [], Removed: [{Invoice: 65546, Total: 45.0}]})
 ```
 
 - A change comes only when the rows change, and only once its group is on the server's disk (G1): a screen never

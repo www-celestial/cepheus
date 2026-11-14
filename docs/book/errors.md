@@ -62,6 +62,9 @@ From `write` (the writer's checks, the same on a database and on a fork):
 | `Expect on a new thing` | an `Expect` names a negative (new) thing: it has no facts before the group |
 | `Expect: V is not a T` | the value of an `Expect` is not of the property's type |
 | `V is not a T (property NAME)` | an `Add` or `Retract` with a value of the wrong type |
+| `Incr counts on a one-valued int property of the program's: NAME is X` | an `Incr` of a counter that is not an `Int` (X: `a text`, ...), many-valued, or the database's own |
+| `Incr writes into an int property of the program's: NAME is X` | an `Incr` whose `into` is not an `Int`, or is the database's own |
+| `Incr: NAME of #E is N, and BY more passes the ints` | the counter's sum would pass the 63 bits of an int: the group is refused, the counter stays N |
 | `no thing #E` | E is 65,536 or more and the database never made it |
 | `no thing #E to link to` | a `Link` to a number below 16, or to a thing never made |
 | `#E is a system thing` | E is below 16: those numbers are reserved |
@@ -273,6 +276,7 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `variable N is in no pattern of the question: it may be the own of one Not or one Or only`; `variable N is a Not's or an Or's own: Give and Sort take the question's variables`; `a question needs a pattern outside Not` | a variable shared by two Nots, given, or a question of Nots alone | bind it by a pattern of the question |
 | `invalid` | `In needs values of the variable's type (a T), not V`; `a variable of In appears in no pattern` | `In` with values of another type | values of the variable's type |
 | `invalid` | `this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2` | a question with them, on a connection to a server of an earlier release | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | a group with `cepheus.Incr`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
 | `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` on another type, an empty or long prefix | a text variable a pattern gives |
 | `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | the bounds of a question ([limits](limits.md#questions)) | page, split the list, or ask several questions |
 | `too_large` | `the question passed the server's budget of N candidates: ask a narrower one, or several` | a question whose join enumerates more than the server's budget ([limits](limits.md#questions)); a watch past it at a frame ends with it | a narrower question: more constants, a range, a Limit on the index path |
@@ -287,7 +291,8 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 A mistake in the shape of a call is a bug of the program, not an error value: it stops the fiber, as `bug.Panic`,
 with Cesia's message, as `cepheus.Get needs a database, as cepheus.Connect or Fork gives it, not the number 3.`
 Those of the package: a database, a kind (`as cepheus.Kind made it`), a property (`as Client.City`), a map, a list,
-an operation (`as cepheus.Add, Retract or Expect makes it`), a question (`{Where: [patterns], Give: {Name:
+an operation (`as cepheus.Add, Retract, Expect or Incr makes it`), an `Incr`'s `into` (`[thing, property], as
+[cepheus.New(1), Invoice.Number]`), a question (`{Where: [patterns], Give: {Name:
 variable}}`), a pattern (`[thing, property, value], or Above, Below or Between`), a variable or a thing's id first in a
 pattern, a variable or an aggregate in Give; and at `cepheus.Kind`: a name that is not small letters, digits, `_` and
 `-`, no field, a field named `kind`, a type that is none of `Text()`, `Int()`, `Float()`, `Bool()`, `Date()`,

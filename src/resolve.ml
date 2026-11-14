@@ -7,6 +7,7 @@ type op =
   | Add of int * int * Value.t
   | Retract of int * int * Value.t
   | Expect of int * int * Value.t option
+  | Incr of int * int * int * (int * int) option
 
 type error = Conflict of string | Invalid of string | Not_unique of string
 
@@ -72,7 +73,8 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
     List.iter
       (function
         | Add (e, _, x) | Retract (e, _, x) -> see e; (match x with Value.Link t -> see t | _ -> ())
-        | Expect (e, _, _) -> if e < 0 then invalid "Expect on a new thing")
+        | Expect (e, _, _) -> if e < 0 then invalid "Expect on a new thing"
+        | Incr (e, _, _, into) -> see e; (match into with Some (t, _) -> see t | None -> ()))
       ops;
     if !next - 1 > Schema.last_thing then
       invalid "thing numbers end at %d: this group would make #%d" Schema.last_thing (!next - 1);
@@ -128,23 +130,46 @@ let resolve ?(bootstrap = false) (v0 : Store.view) ~n ~time ~by ~why ops =
       else if not bootstrap then invalid "#%d is a system thing" e;
       if Schema.is_system p && e >= Schema.first_thing then invalid "cepheus/ properties describe property things only"
     in
+    let add e p x =
+      let d = desc !v p in
+      check_thing e p;
+      if not (Value.has_type d.typ x) then invalid "%s is not a %s (property %s)" (Value.to_string x) (Value.typ_name d.typ) d.name;
+      (match x with
+       | Value.Link t -> if t < Schema.first_prop || t >= !next then invalid "no thing #%d to link to" t
+       | _ -> ());
+      if not d.many then begin
+        let olds = ref [] in
+        let w = Store.word !v x in
+        Store.iter_values !v e p (fun w' -> if Some w' <> w then olds := w' :: !olds);
+        List.iter (fun w' -> assert_retract e p (Store.value !v d.typ w')) !olds
+      end;
+      assert_add e p x
+    in
+    (* Incr's properties: ints of the program's, the counter's one-valued *)
+    let int_prop what ~one p =
+      let d = desc !v p in
+      if Schema.is_system p || (one && d.many) || d.typ <> Value.Tint then
+        invalid "Incr %s %s int property of the program's: %s is %s" what (if one then "a one-valued" else "an") d.name
+          (if Schema.is_system p then "the database's own" else if d.typ <> Value.Tint then "a " ^ Value.typ_name d.typ else "many-valued");
+      d
+    in
     List.iter
       (function
-        | Add (e, p, x) ->
-          let e = id e and x = (match x with Value.Link t -> Value.Link (id t) | x -> x) in
-          let d = desc !v p in
+        | Add (e, p, x) -> add (id e) p (match x with Value.Link t -> Value.Link (id t) | x -> x)
+        | Incr (e, p, by, into) ->
+          (* the counter's value at this point of the group (none counts 0), grown by [by] exactly: a sum past the
+             ints refuses the group; then written as an Add would, and into [into] *)
+          let e = id e in
+          let d = int_prop "counts on" ~one:true p in
           check_thing e p;
-          if not (Value.has_type d.typ x) then invalid "%s is not a %s (property %s)" (Value.to_string x) (Value.typ_name d.typ) d.name;
-          (match x with
-           | Value.Link t -> if t < Schema.first_prop || t >= !next then invalid "no thing #%d to link to" t
-           | _ -> ());
-          if not d.many then begin
-            let olds = ref [] in
-            let w = Store.word !v x in
-            Store.iter_values !v e p (fun w' -> if Some w' <> w then olds := w' :: !olds);
-            List.iter (fun w' -> assert_retract e p (Store.value !v d.typ w')) !olds
-          end;
-          assert_add e p x
+          let old = ref 0 in
+          Store.iter_values !v e p (fun w -> match Store.value !v d.typ w with Value.Int n -> old := n | _ -> ());
+          let old = !old in
+          if (by > 0 && old > max_int - by) || (by < 0 && old < min_int - by) then
+            invalid "Incr: %s of #%d is %d, and %d more passes the ints" d.name e old by;
+          let x = Value.Int (old + by) in
+          add e p x;
+          Option.iter (fun (t, q) -> ignore (int_prop "writes into" ~one:false q); add (id t) q x) into
         | Retract (e, p, x) ->
           let e = id e and x = (match x with Value.Link t -> Value.Link (id t) | x -> x) in
           let d = desc !v p in

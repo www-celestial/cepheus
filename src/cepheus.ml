@@ -46,7 +46,11 @@ let group (v : view) = v.group
 let fork v = Temporary { fv = Store.fork v; fm = Mutex.create () }
 let empty = Resolve.empty
 
-type op = Resolve.op = Add of int * int * value | Retract of int * int * value | Expect of int * int * value option
+type op = Resolve.op =
+  | Add of int * int * value
+  | Retract of int * int * value
+  | Expect of int * int * value option
+  | Incr of int * int * int * (int * int) option
 type receipt = Engine.receipt = { group : int; things : (int * int) list }
 
 let write db ?(by = 0) ?(why = "") ops =

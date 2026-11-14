@@ -445,6 +445,7 @@ let commit ctx d ~by ~why ops =
       v'.group, temps
     | Error e -> let code, m = resolve_code e in refuse code "%s" m)
   | Server s -> (
+    if s.conn.cl.spoken < 4 && Client.has_incr ops then refuse "invalid" "%s" Client.no_incr;
     match Conn.write (park ctx) s.conn ~db:s.cdb.handle ~by ~why ops with
     | Wire.Receipt r -> r.group, r.things
     | rep -> server_error rep "Write")
@@ -495,15 +496,16 @@ let update ctx a =
     C.ok ctx (Int group)
   with Refused (code, m) -> failure ctx code m
 
-let op_keys = C.keys [| "Op"; "Thing"; "Property"; "Value" |]
+let op_keys = C.keys [| "Op"; "Thing"; "Property"; "Value"; "Into" |]
 
 let write ctx a =
   let name = "cepheus.Write" in
   try
     let d = db_of ctx name a.(0) in
+    let what = "an operation, as cepheus.Add, Retract, Expect or Incr makes it" in
     let op v =
       match C.fields op_keys (map_of ctx name v) with
-      | [| Text o; thing; prop; x |] -> (
+      | [| Text o; thing; prop; x; into |] -> (
         let thing = int ctx name thing in
         let k, i = property_of ctx name prop in
         let f = k.fields.(i) in
@@ -512,8 +514,20 @@ let write ctx a =
         | "add" -> Resolve.Add (thing, p, of_cesia f.pname f.typ x)
         | "retract" -> Resolve.Retract (thing, p, of_cesia f.pname f.typ x)
         | "expect" -> Resolve.Expect (thing, p, if x = C.Missing then None else Some (of_cesia f.pname f.typ x))
-        | _ -> C.need ctx name "an operation, as cepheus.Add, Retract or Expect makes it" v)
-      | _ -> C.need ctx name "an operation, as cepheus.Add, Retract or Expect makes it" v
+        | "incr" ->
+          (* into: [thing, property], or missing *)
+          let into =
+            match into with
+            | C.Missing -> None
+            | C.List l when C.length l = 2 ->
+              let t = int ctx name (C.item ctx l 0) in
+              let k', i' = property_of ctx name (C.item ctx l 1) in
+              Some (t, (resolve_kind d k').ids.(i'))
+            | v -> C.need ctx name "Incr's into: [thing, property], as [cepheus.New(1), Invoice.Number]" v
+          in
+          Resolve.Incr (thing, p, int ctx name x, into)
+        | _ -> C.need ctx name what v)
+      | _ -> C.need ctx name what v
     in
     let ops = Array.to_list (Array.map op (list_of ctx name a.(1))) in
     if ops = [] then refuse "invalid" "a group needs at least one operation";

@@ -407,10 +407,12 @@ On a follow stream the server pushes (request id 0):
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
   (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
-- **Versions.** Version 3 adds the files (Put, Piece, Load, Erase) and nothing else: a program of version 3 connects
-  to a server of 2 in 2 (as below), and a file is refused in the program (`invalid`: "this server speaks protocol 2 or
-  older: files need a server of protocol 3"). Version 2 adds the question's operators and order (below) and nothing
-  else; a server speaks 1, 2 and 3, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+- **Versions.** Version 4 adds the operation `Incr` (below) and nothing else: a program of version 4 connects to a
+  server of 3 in 3, and a group with an `Incr` is refused in the program (`invalid`: "this server speaks protocol 3 or
+  older: Incr needs a server of protocol 4") before it is sent. Version 3 adds the files (Put, Piece, Load, Erase) and
+  nothing else: a program of version 3 connects to a server of 2 in 2 (as below), and a file is refused in the program
+  (`invalid`: "this server speaks protocol 2 or older: files need a server of protocol 3"). Version 2 adds the
+  question's operators and order (below) and nothing else; a server speaks 1 to 4, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
   and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
   one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
   protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2
@@ -419,7 +421,9 @@ On a follow stream the server pushes (request id 0):
   follows the select only when the question has it, so that every other question is coded as before; a server that
   does not know it refuses such a Find ("bytes after the request") rather than answer it unsorted.
 - An **operation**: 0 Add, 1 Retract, 2 Expect a value, 3 Expect none; then the thing (zigzag: a negative id is a new
-  thing of the group), the property, the value.
+  thing of the group), the property, the value. 4 Incr (version 4): the thing, the property, `by` (zigzag), then a
+  byte 0, or 1 followed by `into`'s thing (zigzag) and property. A token adds an `Incr` when it may add to the
+  counter's kind and to `into`'s ([rights](#rights-g16)).
 - Every read names the group of the view it was answered from, every receipt its group: a program can check what it
   read against what it wrote.
 
@@ -521,7 +525,7 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 |---|---|---|
 | `auth` | Hello with an unknown token; a request before Hello; a token removed since | check the token; the connection closes |
 | `denied` | the token lacks the right for this database or operation; a session of another token | a token with the right |
-| `version` | Hello with a protocol version the server does not speak (it speaks 1 to 3) | a library connects again in the version before; else a server and a library of the same release |
+| `version` | Hello with a protocol version the server does not speak (it speaks 1 to 4) | a library connects again in the version before; else a server and a library of the same release |
 | `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |
@@ -834,7 +838,8 @@ A token with **rights per kind** (`{ read = ["client", "invoice"], add = ["invoi
   on a kind it does not read is refused with `denied` when it arrives. `Open` still lists every property's name: the
   schema is not data.
 - `Write` adds, retracts or expects facts of the kinds it adds only, and declares properties of those kinds only; a
-  group with one fact of another kind is refused whole with `denied`. Rules are for `write` tokens only: a rule reads
+  group with one fact of another kind is refused whole with `denied`. An `Incr` adds to its counter's kind and to its
+  `into`'s: it needs both (as an `Expect` does, it tells the token the counter's value). Rules are for `write` tokens only: a rule reads
   every kind.
 - It never reads in its own memory: a local reader maps the whole database, so the server refuses its `Follow`, and
   its reads go to the server. The clients do it by themselves.
