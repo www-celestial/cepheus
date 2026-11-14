@@ -33,7 +33,7 @@ cepheus.Erase(ada, db)?             (* ada's key destroyed: every file she owned
 - `cepheus.Files(name)` est un kind comme les autres, avec les champs `Name`, `Size`, `Type`, `Owner` et `Content` :
   donnez-le à `Connect`, et posez des questions sur lui comme sur n'importe quel kind. `List(kind, db)` est la question
   `Find(4, (f, n, s, t) -> {Where: [[f, kind.Name, n], [f, kind.Size, s], [f, kind.Type, t]], Give: {Id: f, Name: n, Size: s, Type: t}}, db)`.
-- **Les droits sont ceux du kind** ([G16](guarantees.md#g16-rights)) : un token (la suite d'octets secrète qu'un
+- **Les droits sont ceux du kind** ([G16](server.md#les-droits-g16)) : un token (la suite d'octets secrète qu'un
   programme présente pour prouver ses droits) qui peut ajouter à `scan` peut déposer un scan ; un token qui peut lire
   `scan` peut lire ses octets ; `Erase` demande un token qui écrit toute la base (l'effacement ne peut pas être
   annulé), et un propriétaire : la clé propre de la base, celle des fichiers sans propriétaire, n'est jamais effacée
