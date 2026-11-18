@@ -369,7 +369,11 @@ u.Db = if u.Role == "admin" env.Full else env.Books end
 **Passwords and sessions** (`auth.ce`). A password is kept as its Argon2id hash only (`crypto.HashPassword`, through
 libsodium: [cryptography](https://github.com/www-celestial/cesia/blob/main/docs/book/crypto.md)). An unknown login is
 checked against the hash of a password nobody has, so that it takes as long as a wrong password and the time of a
-reply tells nobody which logins exist; both get the same message. A session is 32 random bytes from the system
+reply tells nobody which logins exist; both get the same message. The hash runs away from the app's one thread
+(`c.Fn`'s `slow`: [a call that takes long](https://github.com/www-celestial/cesia/blob/main/docs/book/c.md#a-call-that-takes-long)):
+while a visitor signs in, the other requests go on. At most half the machine's cores hash at once (64 MiB each), the
+others wait in a line of 64 a place, and one more gets a 500 at once: a flood of sign-ins takes a bounded memory
+([the measures](#14-what-it-costs)). A session is 32 random bytes from the system
 (`crypto.Random`), sent once in a cookie; the database keeps their BLAKE2b hash, so a copy of the database opens no
 session. The cookie is `HttpOnly` (no script reads it), `SameSite=Strict` (no other site's page sends it), lasts 8
 hours, and is `Secure` when the app serves https.
@@ -707,30 +711,30 @@ its requests did not pass. The scripts: `bench/run.sh` (the seed, the start-ups,
 request on a connection of its own), `bench/actions.sh` (the forms, through `bench/load`), `bench/live.sh` (the
 dashboard in Firefox), `bench/giants/giants.sh` (beside PostgreSQL), `bench/stats` (the medians).
 
-**Starting.** The seed in an empty database: 4.84 s [4.60, 4.94] for 2.4 million facts, most of it the Cesia
-side, which makes the groups' 2.4 million operations (a map each). The Cepheus server's start on the seeded database: 30.9 ms [30.2, 31.7]. The app's
-process, from its command to its port accepting a connection: 81.6 ms [80.0, 82.2], of which its log line's `Ms`
-(its two connections, the rules, libsodium) is 44 to 54 ms, and the rest Cesia's start, the reading of the app's
-code and the engine's first load (13 ms, [what it costs](cesia.md#what-it-costs)).
+**Starting.** The seed in an empty database: 4.82 s [4.63, 5.22] for 2.4 million facts, most of it the Cesia
+side, which makes the groups' 2.4 million operations (a map each). The Cepheus server's start on the seeded database:
+29.6 ms [29.1, 30.1]. The app's process, from its command to its port accepting a connection: 78.6 ms [76.9, 79.3], of
+which its log line's `Ms` (its two connections, the rules, libsodium) is about 41 ms, and the rest Cesia's start, the
+reading of the app's code and the engine's first load (13 ms, [what it costs](cesia.md#what-it-costs)).
 
 **The pages**, ms, with 1 client, then 50 at once:
 
 | page | 1 client: p50 | p99 | 50 clients: p50 | p99 | requests a second at 50 |
 |---|---:|---:|---:|---:|---:|
-| the floor: `/app.css`, a constant | 0.13 [0.12, 0.13] | 0.21 | 2.48 | 4.50 | 19,083 |
-| the sign-in page | 0.13 [0.12, 0.14] | 0.32 | 2.78 | 4.41 | 17,568 |
-| the dashboard (its HTML; its numbers come live) | 0.21 [0.20, 0.22] | 0.45 | 7.96 | 11.9 | 6,349 |
-| invoices, the first page | 0.97 [0.96, 0.99] | 1.70 | 52.4 | 76.0 | 1,059 |
-| invoices, a page 50,000 deep | 1.07 [1.06, 1.11] | 1.93 | 58.8 | 84.2 | 963 |
-| invoices, unpaid or late (`In`) | 1.33 [1.32, 1.35] | 2.26 | 74.6 | 112 | 753 |
-| invoices, late or due in a week (`Or`) | 1.71 [1.70, 1.89] | 2.88 | 94.7 | 132 | 594 |
-| invoices, as the accountant (read at the server) | 1.48 [1.44, 1.50] | 2.20 | 41.0 | 72.4 | 1,174 |
-| an invoice and its lines | 0.30 [0.30, 0.31] | 0.56 | 12.9 | 18.9 | 4,158 |
-| the form of a new invoice | 0.27 [0.26, 0.28] | 0.49 | 11.5 | 16.8 | 4,721 |
-| a client, what it owes, its invoices not paid | 0.59 [0.58, 0.61] | 1.00 | 29.0 | 43.2 | 1,902 |
-| clients, the first page by name | 13.2 [13.1, 13.5] | 24.7 | 737 | 1,059 | 75 |
-| clients, the search as one types ("ma") | 1.19 [1.18, 1.33] | 2.03 | 63.4 | 101 | 870 |
-| the CSV of the late invoices (11,006 rows) | 114 [112, 131] | | 5,740 | | 8.5 |
+| the floor: `/app.css`, a constant | 0.11 [0.11, 0.12] | 0.20 | 2.75 | 4.10 | 17,969 |
+| the sign-in page | 0.12 [0.11, 0.12] | 0.26 | 3.09 | 4.85 | 16,300 |
+| the dashboard (its HTML; its numbers come live) | 0.19 [0.19, 0.20] | 0.36 | 7.63 | 10.7 | 7,183 |
+| invoices, the first page | 0.77 [0.77, 0.78] | 1.13 | 39.5 | 62.2 | 1,402 |
+| invoices, a page 50,000 deep | 0.86 [0.85, 0.87] | 1.29 | 43.7 | 70.5 | 1,256 |
+| invoices, unpaid or late (`In`) | 1.15 [1.13, 1.16] | 1.48 | 58.6 | 93.8 | 928 |
+| invoices, late or due in a week (`Or`) | 1.43 [1.42, 1.44] | 1.79 | 74.7 | 121 | 731 |
+| invoices, as the accountant (read at the server) | 1.13 [1.10, 1.16] | 1.57 | 50.0 | 77.7 | 997 |
+| an invoice and its lines | 0.29 [0.29, 0.30] | 0.51 | 12.8 | 16.0 | 4,352 |
+| the form of a new invoice | 0.26 [0.26, 0.27] | 0.47 | 11.4 | 14.0 | 4,932 |
+| a client, what it owes, its invoices not paid | 0.41 [0.40, 0.41] | 0.66 | 19.1 | 26.8 | 2,932 |
+| clients, the first page by name | 0.51 [0.50, 0.51] | 0.78 | 25.1 | 34.5 | 2,238 |
+| clients, the search as one types ("ma") | 1.65 [1.63, 1.66] | 2.08 | 88.8 | 130 | 633 |
+| the CSV of the late invoices (11,011 rows) | 77.0 [76.6, 78.3] | | 3,791 | | 12.9 |
 
 - With 50 clients at once, the app's one process serves them one after another: the latency is about 50 times a
   request's work, and the requests a second say what one core gives. `cesia run --workers 4` serves the same port
@@ -738,9 +742,11 @@ code and the engine's first load (13 ms, [what it costs](cesia.md#what-it-costs)
 - The accountant's list costs 0.5 ms more alone, a round trip to the server through its socket (its token reads
   there, not in the app's memory), and serves more at 50, since the server's domains do the reading beside the app's
   core.
-- The list of clients by name is the slow page: a sort on a text reads every client (10,000) before it keeps the
-  first 20, where a sort on a number reads the index in its order. The search as one types reads only the clients it
-  finds.
+- The list of clients by name reads the index of the names in their order, as a list by a number does: 0.51 ms, where
+  it read every client (10,000) before it kept the first 20 (13.2 ms, 75 a second at 50, measured on 2026-11-13). The
+  search as one types costs 0.46 ms more than it did then: its clients whose name starts with "ma" come after every
+  "A" to "L" in that order, so the walk in the index's order finds none before its budget and the heap answers
+  ([Sort, Limit and After](cesia.md#sort-limit-and-after-pages)).
 - The CSV is mostly Cesia's: the question is a few ms; formatting 11,000 rows and their dates is the rest.
 
 **The actions**, ms, through the forms (`bench/load`: Cesia's HTTP client, a connection a request, which costs
@@ -748,21 +754,51 @@ about 0.35 ms a request more than ApacheBench), each answered once its group is 
 
 | action | 1 client: p50 | p99 | 50 clients: p50 | p99 | a second at 50 |
 |---|---:|---:|---:|---:|---:|
-| a client made | 3.82 [3.63, 4.40] | 16.2 | 20.0 [17.6, 23.2] | 33.6 | 1,996 |
-| an invoice paid | 3.76 [3.58, 4.25] | 11.2 | 21.3 [18.6, 23.6] | 29.7 | 2,117 |
-| an invoice made, with two lines | 5.72 [4.92, 11.4] | 58.3 | 24.4 [23.3, 29.1] | 41.0 | 1,722 |
-| a sign-in | 70.2 [65.8, 75.5] | 84.6 | 3,062 [2,989, 3,253] | 3,092 | 16 |
+| a client made | 5.51 [3.77, 8.25] | 20.8 | 25.6 [24.1, 29.9] | 49.5 | 1,470 |
+| an invoice paid | 6.41 [4.44, 9.28] | 21.3 | 25.9 [17.1, 36.3] | 40.1 | 1,691 |
+| an invoice made, with two lines | 8.21 [5.26, 11.9] | 30.4 | 44.4 [25.3, 63.8] | 95.4 | 707 |
+| a sign-in | 85.1 [82.8, 89.9] | 184 | 855 [827, 907] | 1,583 | 32 |
 
-- 50 writes at once share the server's fsyncs (group commit, [the server](server.md)): 2,000 a second, against 240
-  one after the other.
+- These rounds (2026-11-19) ran with the disk 99 % full and other jobs writing beside the lock: an fsync took longer
+  and varied more than on 2026-11-13 (a client made: 3.82 ms [3.63, 4.40] then, 1,996 a second at 50; an invoice made
+  1,722 a second), hence the wide intervals of the writes.
+- 50 writes at once share the server's fsyncs (group commit, [the server](server.md)): about 1,500 a second, against
+  150 one after the other.
 - An invoice takes its number in its own group (`Incr`, step 5), so 50 at once share the server's fsyncs as the
-  other writes do: 1,722 a second. The numbering it replaced, one invoice at a time in the process, measured in turn
+  other writes do. The numbering it replaced, one invoice at a time in the process, measured in turn
   with it on the same server and data (21 rounds each, 2026-11-13): 141 a second, p50 262 ms at 50 clients; the
   rounds' ratio of invoices a second, new over old, 11.0 [9.4, 15.4], and the same alone (p50 0.99 [0.42, 1.38]: the
   machine was busy, hence the wide intervals and the p99 alone). Before that queue, 2,905 of 4,200 tries failed: each
   of 50 read the same largest number.
-- A sign-in is Argon2id, about 65 ms of the app's one thread, on purpose (the cost of guessing a password); 50 at
-  once take 3 s, and the requests of that process wait meanwhile.
+- A sign-in is Argon2id, about 65 ms of one core and 64 MiB, on purpose (the cost of guessing a password); it runs
+  beside the requests, at most four at once on this machine (half its cores), so 50 at once are answered in 855 ms at
+  the median, 32 a second, where they took 3,062 ms on the app's thread, 16 a second, each request of the process
+  waiting meanwhile.
+
+**Pages while sign-ins arrive** (`bench/signins`: sign-ins at a fixed rate, each sent at its time whatever the others
+do, while 8 clients ask the first page of invoices one after the other; 5 s a round, 11 rounds, the cases in a
+rotated order in each round; the app's memory at its peak, from `/proc`), ms:
+
+| sign-ins | pages a second | page p50 | p99 | longest | sign-in p50 | p99 | memory at the peak |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| none | 1,063 [1,003, 1,153] | 7.17 | 11.0 | 14.0 | | | 150 MB |
+| 50 a second, the hash on the app's thread, as before 2026-11-13 | 3 [3, 4] | 749 | 7,087 | 7,087 | 7,546 | 12,478 | 152 MB |
+| 50 a second, the hash beside the requests (now) | 279 [260, 309] | 27.1 | 55.5 | 69.3 | 2,032 | 3,316 | 365 MB |
+| 20 a second, beside the requests | 612 [547, 667] | 11.9 | 23.8 | 30.9 | 97.0 | 152 | 293 MB |
+
+- When the hash held the app's one thread, 50 sign-ins a second left 3 pages a second, each waiting up to 7 s. Beside
+  the requests, the pages go on at 279 a second, and the sign-ins wait in their line.
+- 50 a second is twice what this machine can hash: Argon2id is made to need its 64 MiB at every step (memory-hard),
+  and a few at once take the memory's bandwidth. libsodium alone, called from C on this machine: 13 to 15 hashes a
+  second on one thread, 22 to 24 on two, 24 to 33 on four, 30 on eight. The pages slow for the same reasons: their
+  work waits for the memory and shares the cores.
+- At a rate it can hash (20 a second), a sign-in takes 97 ms and the pages go on at 612 a second, their p99 24 ms.
+- Two hashes at once instead of four (`CESIA_CORES=2`, which also halves the cores of Cesia's work on arrays): under
+  50 a second the pages go twice as fast (552 a second, p99 26 ms) and the sign-ins slower (2.9 s), 75 of 2,750
+  refused by the line; at 20 a second both are the same as with four.
+- The memory grows by the hashes that run at once, 64 MiB each: 365 MB at the peak against 150 MB. 400 sign-ins at
+  once: 260 answered (4 running, 256 in the line), 140 refused at once with a 500, the memory at 367 MB at the peak,
+  and the app answers the next page as before.
 
 **The live dashboard**: from a payment's answer (the group durable) to the page's unpaid total changed in Firefox
 (`performance.now()` on the page, the same clock as the program's), 10 payments a round, one after the other:
@@ -782,31 +818,37 @@ memory. µs, one client:
 
 | question | Cepheus p50 | p99 | PostgreSQL p50 | p99 |
 |---|---:|---:|---:|---:|
-| a page of invoices (20 rows of 7 fields) | 375 [369, 377] | 565 | **43** [42, 49] | 86 |
-| a page 50,000 deep | 389 [387, 392] | 583 | **47** [45, 54] | 87 |
-| invoices by a prefix of the bill-to name | 1,781 [1,773, 1,792] | 2,391 | **163** [161, 167] | 232 |
-| clients by name | 12,758 [12,622, 12,997] | 17,516 | **37** [36, 45] | 76 |
-| clients by a prefix of the name or of the e-mail (`Or`) | **850** [834, 855] | 1,184 | 1,328 [1,325, 1,329] | 2,063 |
-| the total not paid (`Not`, `Sum`, `Count`) | 55,987 [55,594, 56,526] | 251,290 | **10,792** [10,661, 10,874] | 15,555 |
-| an invoice and its lines | **25** [25, 26] | 50 | 48 [48, 48] | 99 |
-| a durable update of one invoice | **2,704** [2,594, 2,904] | 5,191 | 2,989 [2,965, 3,038] | 7,541 |
+| a page of invoices (20 rows of 7 fields) | 182 [180, 183] | 318 | **46** [42, 48] | 80 |
+| a page 50,000 deep | 180 [180, 182] | 308 | **49** [45, 53] | 86 |
+| invoices by a prefix of the bill-to name | 1,184 [1,179, 1,198] | 1,492 | **161** [158, 167] | 227 |
+| clients by name | 120 [118, 122] | 187 | **37** [37, 38] | 74 |
+| clients by a prefix of the name or of the e-mail (`Or`) | **1,282** [1,262, 1,307] | 1,538 | 1,315 [1,312, 1,323] | 1,907 |
+| the total not paid (`Not`, `Sum`, `Count`) | 14,040 [13,929, 14,103] | 27,772 | **10,772** [10,663, 10,812] | 14,235 |
+| an invoice and its lines | **25** [24, 26] | 42 | 49 [49, 52] | 96 |
+| a durable update of one invoice | **2,832** [2,669, 3,301] | 6,697 | 2,961 [2,850, 3,707] | 7,185 |
 
 Where PostgreSQL wins, and why:
 
-- **A sorted page**: 8 to 9 times faster. Its B-tree on the number gives the 20 rows in order, each row one read of
+- **A sorted page**: about 4 times faster. Its B-tree on the number gives the 20 rows in order, each row one read of
   its table; Cepheus keeps a fact a property (the entity–attribute–value model), so a row of 7 fields is 7 reads of
-  indexes, and its page in the index's order is asked as windows of the number's values. Both are under half a
+  indexes, and its page in the index's order is asked as windows of the number's values. Both are under a fifth of a
   millisecond, but this is the order of the gap.
-- **A sort on a text**: 345 times. PostgreSQL reads its index on the name in order; Cepheus has no order of an index
-  for a text key, and sorts every client.
-- **A sum over a filter**: 5 times. PostgreSQL scans its table; Cepheus answers the `Not` for each of the 100,000
+- **A sort on a text**: 3.2 times, where it was 345 times on 2026-11-13 (12,758 µs, every client read and sorted). Both
+  read the index of the names in its order now; the sorted question alone takes 33 µs in OCaml, and most of the 83 µs
+  between them are the page's other question (the e-mails of its 20 clients, `In`) and the rows made for Cesia.
+- **A prefix that the order does not follow** (the invoices billed to "ad...", the largest numbers first): 7.4 times.
+  About 4 in 100 invoices match; Cepheus walks the numbers in order, a window at a time, and asks the prefix in each,
+  each row of 7 fields read as 7 facts.
+- **A sum over a filter**: 1.3 times. PostgreSQL scans its table; Cepheus answers the `Not` for each of the 100,000
   invoices. On the dashboard this is paid once per question (the watch's first answer, shared by every page), then
   each change costs its difference.
 
-Where Cepheus wins: an invoice with its lines is read in the app's own memory with no round trip (25 µs against 48);
-the search on either of two prefixes (`Or` of two `Prefix`) is 1.6 times faster than PostgreSQL's two `LIKE`s; a
-durable write costs the same (both wait for one fsync of the disk). And every number of the PostgreSQL column still
-needs a program around it that would watch the changes (`LISTEN`/`NOTIFY`, written by hand) to give a live dashboard.
+Where Cepheus wins: an invoice with its lines is read in the app's own memory with no round trip (25 µs against 49);
+the search on either of two prefixes (`Or` of two `Prefix`) costs the same as PostgreSQL's two `LIKE`s (1.6 times
+faster on 2026-11-13, before the sort on a text by the index: its walk in the order of the names finds no "ma" before
+its budget, then the heap answers); a durable write costs the same (both wait for one fsync of the disk). And every
+number of the PostgreSQL column still needs a program around it that would watch the changes (`LISTEN`/`NOTIFY`,
+written by hand) to give a live dashboard.
 
 ## 15. Security
 
@@ -827,13 +869,13 @@ What the app defends against, how, and the test that shows it:
 | the app's own rights | the permissions of step 13, no file written | (the task's `allow`) |
 
 What is not defended here: sign-ins are not limited by client, since the request a Cesia handler gets carries no
-address of its client; and a sign-in costs about 65 ms of Argon2id on the app's one thread, which no other request
-of that process passes meanwhile: 50 sign-ins at once take 3 s, and so would any page asked during them (the
-actions above). A flood of sign-ins is a denial of service until the hash runs beside the requests.
+address of its client. A flood of sign-ins is bounded, not refused: its hashes run beside the requests, at most half
+the cores at once, and the line holds 64 a place; past it a sign-in gets a 500 at once. Under 50 sign-ins a second,
+twice what this machine can hash, the app's memory peaked at 365 MB (150 MB without) and its other pages went on at
+279 a second, a quarter of their pace (the measures above); the sign-ins themselves waited 2 s in the line.
 
 ## What is not built yet
 
 - A watch with an order and a limit (the latest ten payments): the dashboard watches a window of time and the page
   sorts it.
-- An index order for a sort on a text (the clients by name read every client).
-- Argon2id beside the requests: a sign-in holds the app's thread for its 65 ms.
+- Sign-ins limited by client: a Cesia handler's request carries no address of its client.
