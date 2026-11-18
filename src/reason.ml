@@ -2347,7 +2347,9 @@ let[@inline never] same_head c pl =
 (* ---- A change's sinks: their heads made facts by one sort ----
    A change derives most of its facts at once, and a sink's (above, [sink]) start nothing: no instance reads them, no
    proof uses them. Taken one by one, each head cost a probe of the working set, its slot, three chains and their share
-   of the tables' growth (0.8 us a head beside 256 writers, on 8 threads). So a change keeps them in [hd] as they come,
+   of the tables' growth (0.8 us a head beside 256 writers, on 8 threads). So a change reasoned on one domain (in the
+   background, or a round too small for several) keeps them in [hd] as they come (emit_at; a round on several domains
+   makes its heads facts by regions of the working set, par_phase, those of sinks too),
    and at the end of its reasoning sorts them once by (thing, property, value) (stable: a fact's first instance names
    its rule), keeps the first of each fact, sets aside those the working set or the view holds (the facts the change
    made present otherwise, the facts already there), and counts the others: they go to the output in that order,
@@ -2735,9 +2737,6 @@ let [@inline never] merge_regions c (outs : buf array) r =
    exactly where it must) *)
 let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r =
   let outs = Array.init k (fun _ -> buf_create 64) and fails = Array.make k None and odd = Array.make k false in
-  (* a sink's heads, by morsel: made [sink]s in morsel order after (a head past the last thing refuses in the morsel,
-     at its place among the others) *)
-  let souts = Array.init k (fun _ -> buf_create 16) and sinks = c.sinks in
   let left = c.limit - c.derived in
   let room = if left > max_int / 4 then max_int else (2 * left) + 100_000 in
   let heads = Atomic.make 0 and found_all = Atomic.make 0 in
@@ -2749,14 +2748,6 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
           incr nf;
           if not pl.hok then raise (Refused (head_refusal w pl));
           let e = pl.he and p = pl.hp and v = pl.hw in
-          if pl.ri < Array.length sinks && Array.unsafe_get sinks pl.ri && e >= 0 then begin
-            if e >= next_e then raise (Refused (Printf.sprintf "rule %s gives a fact about #%d, which does not exist" (rule_name c pl.ri) e));
-            let so = souts.(m) in
-            buf_push so e; buf_push so p; buf_push so v; buf_push so pl.ri;
-            incr n;
-            if !n land 1023 = 0 && Atomic.fetch_and_add heads 1024 + 1024 > room then raise Too_many
-          end
-          else
           (* a head that is a fact already changes nothing (as emit_fact): only the others are kept *)
           let x = find ws e p v in
           if (if x >= 0 then now ws x = 0 else not ((Bytes.length vp = 0 || (p < Bytes.length vp && Bytes.unsafe_get vp p <> '\000')) && e < ws.fresh && S.mem w.v e p v))
@@ -2799,7 +2790,6 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
       outs.(m) <- buf_create 0;
       Option.iter (fun msg -> raise (Refused msg)) fails.(m)
     done;
-    Array.iter (fun (so : buf) -> let i = ref 0 in while !i < so.bn do sink c (buf_get so (!i + 3)) (buf_get so !i) (buf_get so (!i + 1)) (buf_get so (!i + 2)); i := !i + 4 done) souts;
     true
   | exception Too_many -> false
 
