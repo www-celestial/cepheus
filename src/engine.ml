@@ -951,7 +951,7 @@ let run_of_its_own t (bv : Store.view) (a : Reason.apart) =
   let t0 = Journal.clock () in
   let n = a.an in
   let e = Bigarray.Array1.sub a.ae 0 n and p = Bigarray.Array1.sub a.ap 0 n and w = Bigarray.Array1.sub a.aw 0 n in
-  let sorted = Bulk.in_order e p w n in
+  let sorted = a.sorted in
   let order = if sorted then Bulk.i32 0 else Bulk.by_thing e p w n in
   let facts = Bulk.make ~d0:0 ~sorted ~order e p w n ~np:(Schema.count bv.schema) in
   let lo = if Array.length bv.runs = 0 then 0 else bv.runs.(0).hi in

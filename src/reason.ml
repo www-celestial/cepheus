@@ -79,15 +79,41 @@ let never = Atomic.make false
    adds (absent from the view, derived only after it) of properties that take many values and none unique (no check
    reads them after the fixpoint), whose thing the view's delta holds no entry for at that fact (an entry there would
    hide the run below it), when they are at least [min]; else none. They are neither in the view nor in the changes
-   [run] returns: [an] facts, things, properties, value words, in the order the reasoner found them. *)
-type apart = { amin : int; mutable an : int; mutable ae : Bulk.i32; mutable ap : Bulk.u16; mutable aw : Bulk.ints }
+   [run] returns: [an] facts, things, properties, value words, in the order the reasoner found them ([sorted]: that
+   order is by (thing, property, value)). *)
+type apart = { amin : int; mutable an : int; mutable ae : Bulk.i32; mutable ap : Bulk.u16; mutable aw : Bulk.ints; mutable sorted : bool }
 
-let apart ~min = { amin = max 1 min; an = 0; ae = Bulk.i32 0; ap = Bulk.u16 0; aw = Bulk.ints 0 }
+let apart ~min = { amin = max 1 min; an = 0; ae = Bulk.i32 0; ap = Bulk.u16 0; aw = Bulk.ints 0; sorted = true }
 
 (* the view's delta holds no entry for the fact (e p w) *)
 let no_entry (v : Store.view) e p w =
   (not (Store.is_touched v e))
   || match Store.IM.find_opt e v.delta.de with None -> true | Some (td : Store.tdelta) -> not (Store.PW.mem (p, w) td.tf)
+
+(* [no_entry] for n facts in (thing, property, value) order, [thing i], [prop i], [word i]: [f i] for each fact the delta
+   holds no entry for. When many of their things are touched, one walk of the delta's things beside them (both in
+   thing order) instead of a search each *)
+let[@inline never] no_entries (v : Store.view) n thing prop word f =
+  let touched = ref 0 in
+  for i = 0 to n - 1 do if Store.is_touched v (thing i) then incr touched done;
+  let de = v.delta.de in
+  if !touched * 16 < v.delta.dn then
+    for i = 0 to n - 1 do if no_entry v (thing i) (prop i) (word i) then f i done
+  else begin
+    let i = ref 0 in
+    (try
+       Store.IM.iter
+         (fun e (td : Store.tdelta) ->
+           while !i < n && thing !i < e do f !i; incr i done;
+           while !i < n && thing !i = e do
+             if not (Store.PW.mem (prop !i, word !i) td.tf) then f !i;
+             incr i
+           done;
+           if !i >= n then raise_notrace Exit)
+         de
+     with Exit -> ());
+    for j = !i to n - 1 do f j done
+  end
 
 (* counters for the benchmarks and the tests: rule instances found, facts checked by B/F or Why, and the seconds spent
    reasoning (Reason.run and Reason.bulk) *)
@@ -105,6 +131,8 @@ let walk_retract = ref true  (* false: a closure's retractions by B/F through it
 let module_seconds = ref 0. (* of [seconds]: the closure modules' work, their facts found and put aside *)
 let bulk_groups = ref 0  (* large groups reasoned on their sorted prefix *)
 let merge_seconds = ref 0. (* of [seconds]: equalities applied, their facts rewritten *)
+let sink_facts = ref 0  (* facts a change's sinks made by sink_heads *)
+let heads_every = ref max_int  (* a change's sink heads deduplicated every this many at most (tests make it small) *)
 
 (* ---- hashing ---- *)
 
@@ -540,6 +568,13 @@ type spec = {
   mutable stamps : Store.stamp array;
 }
 
+(* A change's heads of sinks (the program's [sink]), as its instances find them: (thing lsl 16 + property, value word,
+   rule), in Bigarrays out of the collector's sight; made facts by sink_heads. [lim]: the count at which they are
+   deduplicated before the end, so that a rule past the change's budget is refused before its heads fill the memory. *)
+type heads = { mutable hk : ints; mutable hv : ints; mutable hr : ints; mutable nh : int; mutable lim : int }
+
+let heads_create () = { hk = ints_raw 0; hv = ints_raw 0; hr = ints_raw 0; nh = 0; lim = 0 }
+
 type program = {
   key : int;
   rules : Rules.t array;  (* an unfolded rule keeps its generic rule's name; positive patterns only, a plain head *)
@@ -558,6 +593,7 @@ type program = {
   ids : int array;  (* their things *)
   sty : Value.typ option array array;  (* each rule's static types (Rules.static_types); None: the property's *)
   never : bool array;  (* a constraint *)
+  sink : bool array;  (* the rule's facts start nothing: no pattern of any rule can match its head (below, [sink]) *)
   bad_head : string array;  (* "": the head fits; else what every instance's group is refused with *)
   atoms : Query.pattern array array;  (* each rule's body, as an array *)
   free_free : bool;  (* a plan of a fact joins an atom with neither side bound: the working set keeps the index by
@@ -647,6 +683,8 @@ and ctx = {
   mutable why_mode : bool;  (* Why: a fact of a class is proved by the asserted fact of a member it rewrites *)
   mutable parts : int;  (* a rule's instances cut into [parts] morsels: this context runs the one numbered [part] (the *)
   mutable part : int;   (* items of its plan's first step, by blocks of 64, one block in [parts]) *)
+  mutable sinks : bool array;  (* a change: by rule, its heads go to [hd] (a sink whose property is plain); else empty *)
+  mutable hd : heads;
 }
 
 (* ---- equality: the classes of equal things ----
@@ -1460,6 +1498,31 @@ let [@inline never] build ?(also_reads = [||]) ?(lists = [||]) (v : Store.view) 
     rules;
   (* an ordinary rule: one fact an instance (not a constraint, not an aggregate) *)
   let give ri = not never.(ri) && aggs.(ri) = None in
+  (* A sink: an ordinary rule (not a closure's, not an aggregate) whose head's fact no pattern of any rule can match:
+     a constant property, no other rule's pattern of it with the head's value or with a variable value, no property
+     read as a variable, no equality, no template's list, no frozen relation of it. Its facts start no instance and
+     prove none: a change makes its heads facts by one sort at the end (sink_heads) instead of the working set's. *)
+  let sink =
+    Array.mapi
+      (fun ri (r : Rules.t) ->
+        (not eq) && give ri && (not in_module.(ri))
+        &&
+        match r.head with
+        | Never -> false
+        | Give h ->
+          h.p >= 0 && h.p < np && h.p <> Schema.p_same
+          && (Char.code (Bytes.get reads h.p) land 1 = 0
+              || (!all land 1 = 0
+                  && (not (Array.mem h.p also_reads))
+                  && (not (Array.exists (fun (p, _) -> p = h.p) lists))
+                  &&
+                  let hw = Rules.node_word h.v in
+                  hw <> -1
+                  && Array.for_all
+                       (Array.for_all (fun (a : Query.pattern) -> a.p <> h.p || (let aw = Rules.node_word a.v in aw <> -1 && aw <> hw)))
+                       natoms)))
+      rules
+  in
   let ix_lost = build_index np rules ~backward:false give in
   let walk_rule = Array.make (Array.length rules) false in
   Array.iter (fun (m : closure) -> if m.m_walk then (walk_rule.(m.m_rule) <- true; if m.m_base >= 0 then walk_rule.(m.m_base) <- true)) modules;
@@ -1480,7 +1543,7 @@ let [@inline never] build ?(also_reads = [||]) ?(lists = [||]) (v : Store.view) 
       | _ -> ())
     rules;
   { key; rules; src; natoms; nots; own; aggs; strat; nstrata; stratified; pstrat; anystrat = !anystrat; agg_rule; ix_ins_s;
-    ids; sty; never; bad_head; atoms = Array.map atoms_of rules; free_free = !free_free; np; reads;
+    ids; sty; never; sink; bad_head; atoms = Array.map atoms_of rules; free_free = !free_free; np; reads;
     consts = Array.of_list (List.rev !consts); orders = Hashtbl.create 64; size = S.facts v; modules; in_module;
     ix_ins; ix_lost; ix_lost_walk; ix_pf = ix_lost;
     ix_bw = build_index np rules ~backward:true (fun ri -> give ri && not (same_head ri)); ix_cons = build_index np rules ~backward:false (fun ri -> never.(ri));
@@ -2149,7 +2212,7 @@ let [@inline never] new_ctx ?facts ?keys prog v =
     seen2 = iset_create (); walked = Bytes.empty; xk = ignore; plain_derive = false; heads_none = Hashtbl.create 8;
     eqon = false; nr = Hashtbl.create 1; nrbits = Bytes.empty; eqt = Hashtbl.create 8; eqbits = Bytes.empty; eqset = [];
     pend = []; boom = []; exploded = Hashtbl.create 8; refill = [];
-    why_mode = false; parts = 1; part = 0 }
+    why_mode = false; parts = 1; part = 0; sinks = [||]; hd = heads_create () }
 
 let [@inline never] take ?facts ?keys prog v =
   let c =
@@ -2185,13 +2248,15 @@ let [@inline never] take ?facts ?keys prog v =
   c.boom <- [];
   c.refill <- [];
   c.why_mode <- false;
+  c.sinks <- [||];
+  c.hd.nh <- 0;
   (let t, b = if prog.eq then nonreps v else Hashtbl.create 1, Bytes.empty in c.nr <- t; c.nrbits <- b);
   c.eqon <- prog.eq && Hashtbl.length c.nr > 0;
   c
 
 let [@inline never] give c =
   (* a context that held a large group's facts is let go, its memory with it *)
-  if c.ws.cap <= 1 lsl 16 && A.dim c.side_w <= 1 lsl 16 then begin
+  if c.ws.cap <= 1 lsl 16 && A.dim c.side_w <= 1 lsl 16 && A.dim c.hd.hk <= 1 lsl 16 then begin
     reset c.ws;
     reset c.pt;
     Mutex.protect c.prog.pm (fun () -> c.prog.pool := c :: !(c.prog.pool))
@@ -2276,12 +2341,176 @@ let[@inline never] same_head c pl =
     if rep_of c a <> rep_of c b then c.pend <- (a, b, pl.ri) :: c.pend
   end
 
+(* ---- A change's sinks: their heads made facts by one sort ----
+   A change derives most of its facts at once, and a sink's (above, [sink]) start nothing: no instance reads them, no
+   proof uses them. Taken one by one, each head cost a probe of the working set, its slot, three chains and their share
+   of the tables' growth (0.8 us a head beside 256 writers, on 8 threads). So a change keeps them in [hd] as they come,
+   and at the end of its reasoning sorts them once by (thing, property, value) (stable: a fact's first instance names
+   its rule), keeps the first of each fact, sets aside those the working set or the view holds (the facts the change
+   made present otherwise, the facts already there), and counts the others: they go to the output in that order,
+   never into the working set. The sort is linear: an LSD radix sort by thing, 11-bit digits (Knuth, TAOCP vol. 3,
+   5.2.5), as Bulk's, then by (property, value) inside each thing. *)
+
+(* [hd]'s heads in (thing lsl 16 + property, value) order, stable *)
+let[@inline never] sort_heads h =
+  let n = h.nh in
+  let sorted = ref true and i = ref 1 in
+  while !sorted && !i < n do
+    let a = A.unsafe_get h.hk (!i - 1) and b = A.unsafe_get h.hk !i in
+    if a > b || (a = b && A.unsafe_get h.hv (!i - 1) > A.unsafe_get h.hv !i) then sorted := false;
+    incr i
+  done;
+  if not !sorted then begin
+    let mn = ref max_int and mx = ref min_int in
+    for i = 0 to n - 1 do
+      let e = A.unsafe_get h.hk i lsr 16 in
+      if e < !mn then mn := e;
+      if e > !mx then mx := e
+    done;
+    let mn = !mn and range = !mx - !mn and m = 2047 in
+    let cnt = Array.make 2049 0 in
+    let sk = ref h.hk and sv = ref h.hv and sr = ref h.hr in
+    let dk = ref (ints_raw n) and dv = ref (ints_raw n) and dr = ref (ints_raw n) and shift = ref 0 in
+    while range lsr !shift > 0 do
+      let ak = !sk and av = !sv and ar = !sr and bk = !dk and bv = !dv and br = !dr and sh = !shift in
+      Array.fill cnt 0 2049 0;
+      for i = 0 to n - 1 do
+        let x = (((A.unsafe_get ak i lsr 16) - mn) lsr sh) land m in
+        Array.unsafe_set cnt (x + 1) (Array.unsafe_get cnt (x + 1) + 1)
+      done;
+      for x = 1 to 2048 do Array.unsafe_set cnt x (Array.unsafe_get cnt x + Array.unsafe_get cnt (x - 1)) done;
+      for i = 0 to n - 1 do
+        let k = A.unsafe_get ak i in
+        let x = (((k lsr 16) - mn) lsr sh) land m in
+        let at = Array.unsafe_get cnt x in
+        A.unsafe_set bk at k;
+        A.unsafe_set bv at (A.unsafe_get av i);
+        A.unsafe_set br at (A.unsafe_get ar i);
+        Array.unsafe_set cnt x (at + 1)
+      done;
+      sk := bk; sv := bv; sr := br; dk := ak; dv := av; dr := ar;
+      shift := sh + 11
+    done;
+    let hk = !sk and hv = !sv and hr = !sr in
+    h.hk <- hk; h.hv <- hv; h.hr <- hr;
+    (* inside each thing, by (property, value): by insertion for a few heads, else a stable sort of their places *)
+    let lt i j = let a = A.unsafe_get hk i and b = A.unsafe_get hk j in a < b || (a = b && A.unsafe_get hv i < A.unsafe_get hv j) in
+    let s = ref 0 in
+    while !s < n do
+      let e = A.unsafe_get hk !s lsr 16 in
+      let t = ref (!s + 1) in
+      while !t < n && A.unsafe_get hk !t lsr 16 = e do incr t done;
+      let lo = !s and hi = !t in
+      if hi - lo <= 32 then
+        for r = lo + 1 to hi - 1 do
+          let k = A.unsafe_get hk r and v = A.unsafe_get hv r and ri = A.unsafe_get hr r in
+          let j = ref (r - 1) in
+          while !j >= lo && (A.unsafe_get hk !j > k || (A.unsafe_get hk !j = k && A.unsafe_get hv !j > v)) do
+            A.unsafe_set hk (!j + 1) (A.unsafe_get hk !j);
+            A.unsafe_set hv (!j + 1) (A.unsafe_get hv !j);
+            A.unsafe_set hr (!j + 1) (A.unsafe_get hr !j);
+            decr j
+          done;
+          A.unsafe_set hk (!j + 1) k;
+          A.unsafe_set hv (!j + 1) v;
+          A.unsafe_set hr (!j + 1) ri
+        done
+      else begin
+        let ix = Array.init (hi - lo) (fun r -> lo + r) in
+        Array.stable_sort (fun i j -> if lt i j then -1 else if lt j i then 1 else 0) ix;
+        let k = Array.map (fun i -> A.unsafe_get hk i) ix and v = Array.map (fun i -> A.unsafe_get hv i) ix
+        and ri = Array.map (fun i -> A.unsafe_get hr i) ix in
+        for r = 0 to hi - lo - 1 do
+          A.unsafe_set hk (lo + r) k.(r);
+          A.unsafe_set hv (lo + r) v.(r);
+          A.unsafe_set hr (lo + r) ri.(r)
+        done
+      end;
+      s := hi
+    done
+  end
+
+(* [hd]'s heads sorted, the first of each fact kept, those the view holds dropped; those the working set holds kept
+   ([final] false: they are decided at the end) or made facts there as emit_fact does ([final]); [final]: each fact
+   kept counted, as every derived fact is. The facts kept that neither holds: their count. *)
+let[@inline never] sink_heads c ~final =
+  let h = c.hd and ws = c.ws in
+  sort_heads h;
+  (* the properties of the working set's facts: a head of another one is not there, with no probe *)
+  let np = c.prog.np in
+  let inws = Bytes.make (max 1 np) '\000' in
+  for x = 0 to ws.n - 1 do
+    let p = fp ws x in
+    if p < np then Bytes.unsafe_set inws p '\001'
+  done;
+  let n = h.nh and k = ref 0 and fresh = ref 0 in
+  let lk = ref (-1) and lv = ref 0 and lp = ref (-1) and lw = ref 0 and none = ref false in
+  let keep key w ri = A.unsafe_set h.hk !k key; A.unsafe_set h.hv !k w; A.unsafe_set h.hr !k ri; incr k in
+  for i = 0 to n - 1 do
+    let key = A.unsafe_get h.hk i and w = A.unsafe_get h.hv i in
+    if key <> !lk || w <> !lv then begin
+      lk := key;
+      lv := w;
+      let e = key lsr 16 and p = key land 0xFFFF and ri = A.unsafe_get h.hr i in
+      let x = if p < np && Bytes.unsafe_get inws p <> '\000' then find ws e p w else -1 in
+      if x >= 0 then begin
+        if not final then keep key w ri
+        else if now ws x = 0 then begin
+          set_now ws x 2;
+          set_round ws x 1;
+          set_rule ws x ri;
+          count_derived c ri
+        end
+      end
+      else begin
+        (* one count a head (p, w): does the view hold any fact of it *)
+        if p <> !lp || w <> !lw then begin
+          lp := p;
+          lw := w;
+          none := none_of c p w
+        end;
+        let in_view = Bytes.length c.vp = 0 || (p < Bytes.length c.vp && Bytes.unsafe_get c.vp p <> '\000') in
+        if not (in_view && e < ws.fresh && (not !none) && S.mem c.v e p w) then begin
+          keep key w ri;
+          incr fresh;
+          if final then (count_derived c ri; incr sink_facts)
+        end
+      end
+    end
+  done;
+  h.nh <- !k;
+  !fresh
+
+(* the head (e p w) of an instance of sink ri, kept in [hd]; past [lim] heads, deduplicated, and the change refused
+   there when the facts kept already pass its budget *)
+let[@inline never] sink c ri e p w =
+  if e >= c.v.next_e then refuse "rule %s gives a fact about #%d, which does not exist" (rule_name c ri) e;
+  let h = c.hd in
+  if h.nh >= A.dim h.hk then begin
+    let size = max 4096 (2 * h.nh) in
+    h.hk <- regrow h.hk h.nh size 0;
+    h.hv <- regrow h.hv h.nh size 0;
+    h.hr <- regrow h.hr h.nh size 0
+  end;
+  let i = h.nh in
+  A.unsafe_set h.hk i ((e lsl 16) lor p);
+  A.unsafe_set h.hv i w;
+  A.unsafe_set h.hr i ri;
+  h.nh <- i + 1;
+  if i land 1023 = 1023 && Atomic.get c.stop then refuse "the change was cancelled: the database closes";
+  if h.nh >= h.lim then begin
+    let fresh = sink_heads c ~final:false in
+    if c.derived + fresh > c.limit then ignore (sink_heads c ~final:true);
+    h.lim <- h.nh + min !heads_every (max 65536 (min (1 lsl 40) ((c.limit - c.derived) / 2)))
+  end
+
 let emit_at c pl r =
   incr derivations;
   if pl.hp = Schema.p_same then same_head c pl
   else begin
     if not pl.hok then refuse "%s" (head_refusal c pl);
-    emit_fact c pl.ri pl.he pl.hp pl.hw r
+    if pl.ri < Array.length c.sinks && Array.unsafe_get c.sinks pl.ri && pl.he >= 0 then sink c pl.ri pl.he pl.hp pl.hw
+    else emit_fact c pl.ri pl.he pl.hp pl.hw r
   end
 
 (* ---- Large rounds on several domains (the design's section 5.14) ----
@@ -2299,7 +2528,7 @@ let [@inline never] worker_ctx c =
   { c with ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; ins_s = Array.make c.prog.nstrata None;
            xplans = Hashtbl.create 8; next = ints 16 0; spare = ints 16 0; nn = 0; per_rule = Array.make (Array.length c.prog.rules) 0;
            buf_a = buf_create 16; buf_b = buf_create 16; seen = iset_create (); seen2 = iset_create (); pt = ws_create ();
-           heads_none = Hashtbl.create 1 }
+           heads_none = Hashtbl.create 1; sinks = [||]; hd = heads_create () }
 
 (* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
    the other cores while it runs (measured again with a rule's instances in morsels: the same build, and the writers'
@@ -2454,6 +2683,9 @@ let [@inline never] merge_regions c (outs : buf array) r =
    exactly where it must) *)
 let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r =
   let outs = Array.init k (fun _ -> buf_create 64) and fails = Array.make k None and odd = Array.make k false in
+  (* a sink's heads, by morsel: made [sink]s in morsel order after (a head past the last thing refuses in the morsel,
+     at its place among the others) *)
+  let souts = Array.init k (fun _ -> buf_create 16) and sinks = c.sinks in
   let left = c.limit - c.derived in
   let room = if left > max_int / 4 then max_int else (2 * left) + 100_000 in
   let heads = Atomic.make 0 and found_all = Atomic.make 0 in
@@ -2465,6 +2697,14 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
           incr nf;
           if not pl.hok then raise (Refused (head_refusal w pl));
           let e = pl.he and p = pl.hp and v = pl.hw in
+          if pl.ri < Array.length sinks && Array.unsafe_get sinks pl.ri && e >= 0 then begin
+            if e >= next_e then raise (Refused (Printf.sprintf "rule %s gives a fact about #%d, which does not exist" (rule_name c pl.ri) e));
+            let so = souts.(m) in
+            buf_push so e; buf_push so p; buf_push so v; buf_push so pl.ri;
+            incr n;
+            if !n land 1023 = 0 && Atomic.fetch_and_add heads 1024 + 1024 > room then raise Too_many
+          end
+          else
           (* a head that is a fact already changes nothing (as emit_fact): only the others are kept *)
           let x = find ws e p v in
           if (if x >= 0 then now ws x = 0 else not ((Bytes.length vp = 0 || (p < Bytes.length vp && Bytes.unsafe_get vp p <> '\000')) && e < ws.fresh && S.mem w.v e p v))
@@ -2507,6 +2747,7 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
       outs.(m) <- buf_create 0;
       Option.iter (fun msg -> raise (Refused msg)) fails.(m)
     done;
+    Array.iter (fun (so : buf) -> let i = ref 0 in while !i < so.bn do sink c (buf_get so (!i + 3)) (buf_get so !i) (buf_get so (!i + 1)) (buf_get so (!i + 2)); i := !i + 4 done) souts;
     true
   | exception Too_many -> false
 
@@ -3860,6 +4101,17 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
            | None -> !budget_base + (!budget_per * Array.length changes) + if whole then !change_per * S.facts v0 else 0);
         c.whole <- whole;
         c.stop <- stop;
+        (* a change: the sinks whose property is plain (many values, none unique, not the system's, not a template's
+           list) keep their heads for sink_heads; their facts need none of the checks below *)
+        let plain p =
+          match Schema.find v.schema p with
+          | Some d -> d.many && (not d.unique) && (not (Schema.is_system p)) && not (p < Bytes.length prog.islist && Bytes.get prog.islist p <> '\000')
+          | None -> false
+        in
+        if whole && Array.exists Fun.id prog.sink then begin
+          c.sinks <- Array.mapi (fun ri s -> s && match prog.rules.(ri).head with Give h -> plain h.p | Never -> false) prog.sink;
+          c.hd.lim <- min !heads_every (max 65536 (min (1 lsl 40) (c.limit / 2)))
+        end;
         Array.iteri (fun mi (m : closure) -> c.mfresh.(mi) <- S.count_prop v0 m.m_t = 0) prog.modules;
         (* the asserted changes the rules may read: round 0, or candidates of B/F *)
         let cands = ref [] and first = ref [] in
@@ -4002,6 +4254,8 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
           end;
         done;
         c.cur <- -1;
+        (* the sinks' heads made facts, counted *)
+        if c.hd.nh > 0 then ignore (sink_heads c ~final:true);
         (* the constraints: an instance that involves a fact this group made present refuses it, or whose Not the
            group made true *)
         if Array.exists Fun.id prog.never then begin
@@ -4042,7 +4296,8 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
         in
         (* the facts whose state changed, put into the view at once, sorted by thing (S.set_sorted) *)
         (* each fact's state in the view before ([base]) and after: the view's lookups are spared *)
-        let cap = ws.n + c.ns in
+        let h = c.hd in
+        let cap = ws.n + c.ns + h.nh in
         let es = Array.make cap 0 and ps = Array.make cap 0 and wv = Array.make cap 0 and ss = Array.make cap 0 and bs = Array.make cap 0 in
         let m = ref 0 in
         let todo e p w n b = let i = !m in es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- n; bs.(i) <- b; m := i + 1 in
@@ -4053,11 +4308,7 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
           | None -> 0
           | Some a ->
             let np = Schema.count c.v.schema in
-            let plain = Bytes.init np (fun p ->
-                match Schema.find c.v.schema p with
-                | Some d when d.many && (not d.unique) && (not (Schema.is_system p)) && not (p < Bytes.length prog.islist && Bytes.get prog.islist p <> '\000') -> '\001'
-                | _ -> '\000')
-            in
+            let plain = Bytes.init np (fun p -> if plain p then '\001' else '\000') in
             let fits e p w = p < np && Bytes.unsafe_get plain p <> '\000' && no_entry c.v e p w in
             let k = ref 0 in
             for x = 0 to ws.n - 1 do
@@ -4067,13 +4318,23 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
               if fits (Int32.to_int (Bigarray.Array1.unsafe_get c.side_e j)) (Bigarray.Array1.unsafe_get c.side_p j) (A.unsafe_get c.side_w j) then
                 (Bytes.unsafe_set marks (ws.n + j) '\001'; incr k)
             done;
+            (* the sinks' facts: plain, in thing order *)
+            let base = ws.n + c.ns in
+            no_entries c.v h.nh (fun j -> A.unsafe_get h.hk j lsr 16) (fun j -> A.unsafe_get h.hk j land 0xFFFF) (A.unsafe_get h.hv)
+              (fun j -> Bytes.unsafe_set marks (base + j) '\001'; incr k);
             if !k >= a.amin then !k else 0
         in
         let put = match apart with
           | Some a when nmarked > 0 ->
             if Bigarray.Array1.dim a.ae < nmarked then (a.ae <- Bulk.i32 nmarked; a.ap <- Bulk.u16 nmarked; a.aw <- Bulk.ints nmarked);
+            a.sorted <- true;
             fun e p w ->
               let i = a.an in
+              (* still in (thing, property, value) order *)
+              if i > 0 && a.sorted then begin
+                let e' = Int32.to_int (Bigarray.Array1.unsafe_get a.ae (i - 1)) and p' = Bigarray.Array1.unsafe_get a.ap (i - 1) in
+                if e' > e || (e' = e && (p' > p || (p' = p && Bigarray.Array1.unsafe_get a.aw (i - 1) > w))) then a.sorted <- false
+              end;
               Bigarray.Array1.unsafe_set a.ae i (Int32.of_int e);
               Bigarray.Array1.unsafe_set a.ap i p;
               Bigarray.Array1.unsafe_set a.aw i w;
@@ -4104,6 +4365,15 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
         for k = 0 to c.ns - 1 do
           let e = Int32.to_int (Bigarray.Array1.unsafe_get c.side_e k) and p = Bigarray.Array1.unsafe_get c.side_p k and w = A.unsafe_get c.side_w k in
           if set_apart (ws.n + k) then put e p w
+          else begin
+            out := { Group.kind = Derived; e; p; v = value_of c.v p w } :: !out;
+            todo e p w 2 0
+          end
+        done;
+        for j = 0 to h.nh - 1 do
+          let key = A.unsafe_get h.hk j and w = A.unsafe_get h.hv j in
+          let e = key lsr 16 and p = key land 0xFFFF in
+          if set_apart (ws.n + c.ns + j) then put e p w
           else begin
             out := { Group.kind = Derived; e; p; v = value_of c.v p w } :: !out;
             todo e p w 2 0
