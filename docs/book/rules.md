@@ -524,16 +524,39 @@ difference between the writer's view and that one, so replay — recovery, a rep
 the view the writer adopted. No view before the group holds a fact of the new rules (the background's view is
 published only with the group), every view from it holds all of them (G19). A crash before the group is durable leaves
 nothing: the change was never confirmed. The protocol is checked by TLC (`spec/RuleChange.tla`: the build, batches of
-catch-up, the switch, crashes, a Raft leader's frames taken back; every view exact under its rules, one switch,
-constraints, `Expect` at the switch, no write lost, and the change ends), and each of its eight parts is needed:
+catch-up, the switch, crashes, a Raft leader's frames taken back, a change's run of its own, merges; every view exact
+under its rules, one switch, constraints, `Expect` at the switch, no write lost, the runs on the disk exact, and the
+change ends), and each of its thirteen parts is needed:
 without any one, TLC finds a counterexample
 ([testing](testing.md#model-checking)).
 
 **What the writer does meanwhile.** It never waits for the build or the catch-up; no background merge starts while a
-change runs, and a change waits for a merge in flight, so that both views share their runs (the change's derived facts
-reach the view's delta, and the next merge writes them to a run). Its part at the switch is the last groups and the
-frame. If the background falls more than 65,536 groups behind, the writer waits for it, so that the log and the deltas
-stay bounded.
+change runs, and a change waits for a merge in flight, so that both views share their runs. Its part at the switch is
+the last groups and the frame. If the background falls more than 65,536 groups behind, the writer waits for it, so
+that the log and the deltas stay bounded.
+
+**A large change's derived facts: a run of their own.** The **delta** is the part of a view kept in memory as maps
+(a fact at a time, over the runs on the disk); a **run** is a sorted file of facts. Putting 150,000 derived facts in
+the delta one by one took half of a change's build. So when the build adds 20,000 derived facts or more of the
+properties that take many values, none of them unique (no check reads those facts after the rounds), and whose fact
+the delta holds no entry for, it sets them apart, sorts them and writes them, by the one way a run is written (a merge,
+of them alone), as a run of their own: **R**, on top of the runs and under the change's delta. The catch-up reads R as
+any run. The table of differences holds a fact of R only once a group written meanwhile touches it (before that, its
+states are known: absent for the writer, derived for the change), and keeps it once there, even when its two states
+agree, since a fact of R missing from the table means "derived, as R says". The change's frame does not change: its
+asserted changes, the table's differences, then R's facts that the table does not hold, as derived. The journal holds
+every derived fact, as before, and its format is the same.
+
+R is **provisional**: its state is no group's (one change's derived facts, without the groups around them), so it is
+never named in the chain of runs, never forced to the disk, and its file (`<lo>-<hi>.run.change.tmp`, level 0 in its
+header, which an open refuses in a named run) goes when the merge that takes it is installed, when the change ends
+without its install, or at close. A crash loses it (a `.tmp` file, removed at open), and recovery replays the change's
+frame. The writer adopts R with the change's view, and every merge takes it (a merge takes the newest runs, and R is
+always among the newest). From 4 such runs a merge starts; at 8, a change puts its derived facts in the delta, as a
+small change does. Replicas, Raft followers and local readers never see R: they apply the change's frame, as before.
+TLC checks the protocol with R ([testing](testing.md#model-checking)), and each of R's five rules is needed: R takes
+only the facts the delta has no entry for, a fact of R starts in the table as (absent, derived), it stays there once
+touched, R is never named, every merge takes it; without any one, TLC finds a counterexample.
 
 **What it costs** ([benchmarks](benchmarks.md#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13)). On 10
 LUBM-shaped universities with the 94 rules, while 256 clients write durably, adding one axiom (every person is also of

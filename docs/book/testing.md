@@ -463,26 +463,36 @@ committing groups under its rules as frames of facts with their states after, a 
 expects another; the build from the working view, the catch-up by batches of any size, the switch by the writer,
 crashes that keep any prefix of the frames from the durable ones on, and a Raft member's take-back (the frames not
 committed taken back, the working view back to the published one, a new lineage: a change started on an older one is
-answered, never installed). Invariants: `ViewsExact` (the working and the
+answered, never installed); the views as the engine keeps them, layers of runs and a delta, with the change's derived
+facts in a run of their own R under its view's delta, the table of differences fact by fact, and a merge that names
+the working view's state on the disk. Invariants: `ViewsExact` (the working and the
 published views, and the state at every frame of the journal, are the least model of their asserted facts under their
 rules: no view mixes the old rules' facts with the new ones'), `JournalIsWork` (replay gives the working view: C's
 frame is exactly the difference the adopted view holds), `OneSwitch` (the rules change at C's frame), `ConstraintsHold`
 (G18), `Serial` (C's `Expect` held just before it, its asserted fact at it), `NoLostWrite` (C's frame changes no
-asserted fact but its own), `AckedDurable`; and the liveness property `Ends` (under fairness the change is installed,
+asserted fact but its own), `AckedDurable`, `ChangeViewExact` (the change's view, read through its layers, is the
+least model under the new rules), `TableExact` (the table and R are the difference between the writer's state where
+the background stands and the change's view), `RunsExact` (the runs named on the disk hold the journal's state at
+their group); and the liveness property `Ends` (under fairness the change is installed,
 answered or lost to a crash). Bounds in `spec/RuleChange.cfg` (4 data groups, 2 crashes, ready 2 groups behind, 1
-take-back): 276,553 distinct states, 28 s, everything holds. Each part of the rule is needed (the variants without a
+take-back, 1 merge): 1,200,400 distinct states, 4 min 12 s on 4 workers, everything holds. Each part of the rule is needed (the variants without a
 take-back but `RuleChangeTakeBack.cfg`):
 
 | configuration | the rule without | breaks |
 |---|---|---|
-| `RuleChangeCopy.cfg` | the derived facts found again: a logged group's frame copied | `ViewsExact` |
-| `RuleChangeLate.cfg` | the writer's last catch-up | `NoLostWrite` |
+| `RuleChangeCopy.cfg` | the derived facts found again: a logged group's frame copied | `ChangeViewExact` |
+| `RuleChangeLate.cfg` | the writer's last catch-up | `JournalIsWork` |
 | `RuleChangeEarlyExpect.cfg` | the `Expect` checked at the install: at the build | `Serial` |
 | `RuleChangeNoCheck.cfg` | the new rules' check of the caught-up state | `ConstraintsHold` |
 | `RuleChangeOverlap.cfg` | the `Conflict` of a group that touches C's fact | `Serial` |
 | `RuleChangeStale.cfg` | the difference at the install: the build's own changes written | `ViewsExact` |
-| `RuleChangePublished.cfg` | the build from the working view: from the published one | `NoLostWrite` |
-| `RuleChangeTakeBack.cfg` | the install on the change's own lineage (Raft): installed after a take-back | `NoLostWrite` |
+| `RuleChangePublished.cfg` | the build from the working view: from the published one | `TableExact` |
+| `RuleChangeTakeBack.cfg` | the install on the change's own lineage (Raft): installed after a take-back | `ViewsExact` |
+| `RuleChangeShadowed.cfg` | R takes only the facts the forked view's delta has no entry for: it takes them all | `ChangeViewExact` |
+| `RuleChangeUntracked.cfg` | a fact of R enters the table as (absent, derived): as its state before the step | `TableExact` |
+| `RuleChangeNoTombstone.cfg` | a fact of R whose two states agree stays in the table: removed | `TableExact` |
+| `RuleChangeNamed.cfg` | R never named: named with the runs below it once C's frame is durable | `RunsExact` |
+| `RuleChangeMergeSkipsRun.cfg` | every merge takes R: a merge leaves it below | `RunsExact` |
 
 `tools/tlc.sh` runs them all and fails unless each that must break does: 1 min 57 s on the test machine (2026-11-12),
 every model included.
