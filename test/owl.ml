@@ -483,6 +483,28 @@ let storm () =
    | _ -> C.fail "storm past the budget: not refused");
   C.check (group (view e2.db) = group before && Store.count_prop (view e2.db) Schema.p_same = 0) "storm past the budget: nothing applied"
 
+(* owl.Rl() of the Cesia package (cesia/cepheus/owl/owl.ce, read from the repository's root, where tools/test.sh runs)
+   names each rule of Owl.rl once, and no other: its Define takes them from this library by name *)
+let cesia_names () =
+  let file = "cesia/cepheus/owl/owl.ce" in
+  match In_channel.with_open_bin file In_channel.input_all with
+  | exception Sys_error m -> C.fail "the Cesia package of OWL 2 RL is not readable here: %s" m
+  | src ->
+    (* the texts between quotes after "names = [", up to its "]" *)
+    let rec find i = if i + 9 > String.length src then String.length src else if String.sub src i 9 = "names = [" then i + 9 else find (i + 1) in
+    let stop = match String.index_from_opt src (find 0) ']' with Some j -> j | None -> String.length src in
+    let rec scan i acc =
+      match String.index_from_opt src i '"' with
+      | Some a when a < stop -> (
+        match String.index_from_opt src (a + 1) '"' with Some b -> scan (b + 1) (String.sub src (a + 1) (b - a - 1) :: acc) | None -> List.rev acc)
+      | _ -> List.rev acc
+    in
+    let cesia = scan (find 0) [] in
+    let o = ok (Owl.setup (fork empty)) in
+    let lib = List.map (fun (r : rule) -> r.name) (Owl.rl o) in
+    C.check (List.sort compare cesia = List.sort compare lib) "owl.Rl() of Cesia names the %d rules of Owl.rl (it names %d)" (List.length lib) (List.length cesia);
+    C.check (List.length (List.sort_uniq compare cesia) = List.length cesia) "owl.Rl() of Cesia names each rule once"
+
 let () =
   section "owl: each rule, on the five paths";
   paths ();
@@ -502,4 +524,6 @@ let () =
   random_equality seeds;
   section "owl: an equality storm";
   storm ();
+  section "owl: the Cesia package names the library's rules";
+  cesia_names ();
   C.finish "owl"

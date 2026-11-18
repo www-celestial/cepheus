@@ -666,6 +666,48 @@ a person by owl/prp-rng, from 3 facts
 after: 65542; 65543
 ```
 
+From Cesia, the same through a server ([Cepheus from Cesia](cesia.md#owl-2-rl)): the vocabulary is the kind
+`owl.Vocabulary`, given to `Connect`, and `owl.Rl()` the rules as data, which `cepheus.Define` takes from this library
+(`Owl.setup`'s work included); a property of a kind, where a link goes, is its id (`[d, owl.Property, Person.Advisor]`):
+
+```cesia norun
+use deps/www-celestial/cepheus/cesia/cepheus
+use deps/www-celestial/cepheus/cesia/cepheus/owl
+use std/io
+use std/list
+use std/result
+use std/sys
+
+Person = cepheus.Kind("person", {Name: cepheus.Text(), Email: cepheus.Text(many = true), Advisor: cepheus.Link(many = true)})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [owl.Vocabulary, Person], token = sys.Env("CEPHEUS_TOKEN")))
+result.Unwrap(cepheus.Define(owl.Rl(), db))
+(* the ontology: a professor is a person; an advisor is a professor; an e-mail is one person's *)
+c = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Person.Name, "Person"), cepheus.Add(cepheus.New(2), Person.Name, "Professor"),
+  cepheus.Add(cepheus.New(2), owl.SubClassOf, cepheus.New(1)),
+  cepheus.Add(cepheus.New(3), owl.Property, Person.Advisor), cepheus.Add(cepheus.New(3), owl.Range, cepheus.New(2)),
+  cepheus.Add(cepheus.New(4), owl.Property, Person.Email), cepheus.Add(cepheus.New(4), owl.InverseFunctional, true)], db)).Things
+(* two records of one professor, the same e-mail in both, and a student whose advisor is the first *)
+r = result.Unwrap(cepheus.Write([
+  cepheus.Add(cepheus.New(1), Person.Email, "ada@uni.org"), cepheus.Add(cepheus.New(2), Person.Email, "ada@uni.org"),
+  cepheus.Add(cepheus.New(2), Person.Name, "Ada"), cepheus.Add(cepheus.New(3), Person.Advisor, cepheus.New(1))], db)).Things
+io.Print("the records", r[1], "and", r[2], "are one thing:", result.Unwrap(cepheus.Same(r[1], db)))
+types = list.Sort(result.Unwrap(cepheus.Get(owl.Vocabulary, r[1], db)).Type)
+name = result.Unwrap(cepheus.Get(Person, r[2], db)).Name
+io.Print("its types: $types (Professor is $(c[2]), Person $(c[1])); its name: $name")
+(* one record's e-mail retracted: two things again *)
+result.Unwrap(cepheus.Write([cepheus.Retract(r[2], Person.Email, "ada@uni.org")], db))
+io.Print("after:", result.Unwrap(cepheus.Same(r[1], db)), result.Unwrap(cepheus.Same(r[2], db)))
+```
+
+```text
+the records 65542 and 65543 are one thing: [65542, 65543]
+its types: [65538, 65539] (Professor is 65539, Person 65538); its name: Ada
+after: [65542] [65543]
+```
+
+The same things, the same ids: the engine's library, defined from either language. `why` is OCaml's alone for now.
+
 - The name written on the second record is read on the first, 65542, the class's representative: reads name a thing
   as its representative, and `why` of the second record's type proves the representative's. It gives a proof, not
   the shortest: Person by prp-rng, over the range that scm-rng1 derived (the advisor's range is Professor, and a
@@ -683,7 +725,7 @@ after: 65542; 65543
 ### The vocabulary
 
 A property thing keeps only `cepheus/` facts ([a property as a variable](#a-property-as-a-variable-the-w3cs-form-of-owls-rules)),
-and Cepheus has no RDF lists; so the vocabulary differs from OWL's RDF form in three ways, each the smallest that keeps
+and Cepheus has no RDF lists; so the vocabulary differs from OWL's RDF form in four ways, each the smallest that keeps
 the W3C's rules as they are:
 
 - An axiom about a property is a fact of its **description**, a thing of its own: `[d, owl/Property, advisor]` names
@@ -902,7 +944,7 @@ The design's plan has six steps; this version has the six.
   merge to reach a run.
 - **Step 6's rest**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
   proof of an equality in `why`; equality beside `Not` and aggregates, the closure modules, the path of loads and the
-  parallel rounds; `owl.Rl()` from Cesia (the OCaml library is `Cepheus.Owl`).
+  parallel rounds.
 - The budget as a database setting rather than a number of the process; the group that asserted each leaf of a proof.
 
 ## References
@@ -912,4 +954,4 @@ Cepheus took from it: [Abiteboul 1995], [Bancilhon 1986], [Ramakrishnan 1990], [
 [Motik 2015], [Motik 2019], [Apt 1988], [Przymusinski 1988], [Mumick 1990], [Motik 2014], [Urbani 2016], [Scholz 2016],
 [Subotic 2018], [Zhao 2020], [Guo 2005], [Hu 2019],
 [Hu 2022], [Tarjan 1972], [Nuutila 1995], [Jones 1993], [W3C 2012], [Motik 2015b], [Motik 2015c], [Tarjan 1975],
-[Ma 2006].
+[Ma 2006], [Leis 2014], [Budiu 2023].

@@ -95,7 +95,7 @@ if [ -n "$CESIA_NATIVE" ]; then
   fi
   rm -f "$tmp/has-live.ce" "$tmp/cesia-screens.out"
   sh test/cesia.sh "$tmp" > "$tmp/cesia.out" 2>&1 || { cat "$tmp/cesia.out"; exit 1; }
-  tail -2 "$tmp/cesia.out"
+  tail -3 "$tmp/cesia.out"
   rm -f "$tmp/cesia.out"
 else
   echo "cesia client: not tested (no cesia here with its cesia_v1.cmi: set CESIA_NATIVE to its folder)"

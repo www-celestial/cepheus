@@ -23,6 +23,8 @@
    reason.exe w3c N groups|bulk DIR|-   as mat N rules, with the univ-bench ontology as facts and the W3C's form of the
                                      OWL 2 RL rules it needs (10 rules, variable properties), which the engine unfolds
    reason.exe owl N groups|bulk DIR|-   the same with OWL 2 RL whole (Cepheus.Owl: its vocabulary and every rule)
+   reason.exe owlprep N DIR         N universities and the ontology in OWL 2 RL's vocabulary in DIR, with no rule
+   reason.exe owldefine DIR disk|fork   OWL 2 RL defined on DIR (or a fork of it): the time, the facts of owl/Type
    reason.exe uobm N rew|ax         UOBM-like: N universities, a quarter of the people recorded 2 to 4 times, the e-mail
                                      inverse functional; equality by rewriting (rew) or axiomatised (ax), in memory *)
 
@@ -787,6 +789,35 @@ let w3c ?(form = "w3c") n path dir =
   close db;
   Option.iter drop_db dir
 
+(* ---- OWL 2 RL defined on a database that holds its data already: the OCaml side of the Cesia package's measure ---- *)
+
+(* N universities and the univ-bench ontology in OWL 2 RL's vocabulary, in DIR, made empty first: no rule *)
+let owl_prep n dir =
+  if Sys.file_exists dir then failwith (dir ^ " exists");
+  let db = ok (open_ dir) in
+  let ids = setup db in
+  let o = ok (Owl.setup db) in
+  let ids = { ids with ty = o.type_ } in
+  owl_ontology db ids o;
+  let g = { st = (7 * 0x1E3779B97F4A7C15) lor 1; lit = 0 } in
+  for u = 0 to n - 1 do university ids g u (fun ops -> ignore (ok (write db ops))) done;
+  let all, d = count_derived (view db) in
+  Printf.printf "owlprep %d: %d facts (%d derived)\n%!" n all d;
+  close db
+
+(* OWL 2 RL defined on the database DIR (disk: in it, the change of the rules on the disk; fork: in a fork of it, in
+   memory): the time of define, and the facts of owl/Type after *)
+let owl_define dir mode =
+  let db = ok (open_ dir) in
+  let t = if mode = "fork" then fork (view db) else db in
+  let t0 = now () in
+  let o = ok (Owl.setup t) in
+  ignore (ok (define t (Owl.rl o)));
+  let s = now () -. t0 in
+  let types = Store.count_prop (view t) o.type_ in
+  Printf.printf "owldefine %s: %.3f s, %d facts of owl/Type\n%!" mode s types;
+  close db
+
 (* ---- UOBM-like: equality, by rewriting (rew) or axiomatised (ax) ----
    LUBM-shaped data with the univ-bench ontology in OWL 2 RL's vocabulary, where a quarter of the people are recorded
    2 to 4 times (a record a department that knows them: the same e-mail, part of their facts each), and the e-mail is
@@ -1101,6 +1132,8 @@ let () =
   | [ "closure-del"; kind; form; dir; how ] -> closure_del kind form dir how
   | [ "w3c"; n; path; dir ] -> w3c (int_of_string n) path dir
   | [ "owl"; n; path; dir ] -> w3c ~form:"owl" (int_of_string n) path dir
+  | [ "owlprep"; n; dir ] -> owl_prep (int_of_string n) dir
+  | [ "owldefine"; dir; mode ] -> owl_define dir mode
   | [ "uobm"; n; mode ] -> uobm (int_of_string n) mode
   | [ "storm"; n ] -> storm (int_of_string n)
   | [ "storm"; n; mode ] -> storm ~mode (int_of_string n)

@@ -187,7 +187,8 @@ toujours les reconstruire à partir du journal. Un run est le format en mémoire
 on en a besoin (il ne vaut que pour les machines 64 bits little-endian ; le journal est le format portable). À
 l'ouverture, Cepheus prend la chaîne de runs nommés depuis 0 qui atteint le groupe le plus récent avec le moins de runs,
 et vérifie chaque run : l'en-tête, la page table, les rank tables, l'ordre et les bornes de chaque table d'offsets ; un
-run qui tient dans le cache est lu et vérifié en entier avant la première question, un plus grand page par page. Un
+run qui tient dans le cache est lu et vérifié en entier avant la première question ; pour un plus grand, les pages de
+ses tables sont lues et vérifiées à l'ouverture, celles de ses lignes à mesure que les questions en ont besoin. Un
 run qui ne se vérifie pas est mis de côté (noté, sauté) et la chaîne est choisie à nouveau sans lui, jusqu'au journal
 seul. Aucun run n'est gardé hors de la chaîne : le journal tient chaque groupe, donc un run endommagé coûte un replay,
 jamais un fait. Les runs des formats plus anciens (format 4, `<group>.snap`, toute la base dans un fichier ; formats 5
@@ -215,7 +216,10 @@ donc autant que les écritures : leveling, avec $T = 4$
 **Quand.** Un merge démarre quand le delta tient plus de 200 000 changements (`Engine.compact_min`). Il prend le delta
 et les runs les plus récents, jusqu'au premier niveau qui peut tous les tenir, et y écrit un seul run (`Engine.plan`).
 Il tourne dans un domain à lui, à côté des écritures : ses entrées sont déjà triées dans l'ordre de chaque section, donc
-chaque section du nouveau run est une seule passe avec un curseur dans chacune ($O(n + d)$ étapes, aucun tri), et il déverse
+chaque section du nouveau run est une seule passe avec un curseur dans chacune, sans tri : la ligne suivante de l'ordre
+par propriété vient d'un binary heap (un tas binaire, qui donne toujours son plus petit élément) des curseurs rangés
+par leur tête (valeur, chose), $O((n + d) \log k)$ étapes pour $k$ runs fusionnés (Knuth 1998, 5.4.1 : un merge à
+$k$ voies), et il déverse
 le résultat dans `<lo>-<hi>.run.tmp`, page par page : une page de 16 KiB part (son CRC, un `pwrite` à sa place, le
 cache) dès que ses octets sont écrits. Puis la table des CRC, l'en-tête, un fsync. Pendant ce temps, le writer note les
 groupes qu'il résout ; le merge les rejoue sur les nouveaux runs jusqu'à n'avoir plus que moins de 256 groupes de
@@ -223,6 +227,22 @@ retard ; le writer attend alors que le syncer soit inactif (au plus un fsync), r
 son nom, force le répertoire, supprime les runs qu'il a remplacés, et bascule les deux vues sur les nouveaux runs en
 une seule écriture atomique. Un crash à n'importe quel moment laisse les runs d'avant ou les runs d'après, entiers
 (G12). `snapshot` est le seul merge complet : le delta et tous les runs en un seul run.
+
+**Les grands groupes : en tiering à leur niveau (lazy leveling).** Un chargement écrit en beaucoup de grands groupes
+(quelques centaines de milliers de faits chacun : plus bas) fusionnerait, sous le leveling, le run de chaque groupe avec
+ceux d'avant lui, niveau après niveau : un fait est réécrit chaque fois que son niveau déborde, environ une fois par
+niveau. Donc le run d'un grand groupe ne prend que le delta et les runs les plus récents des niveaux en dessous de
+celui qui le contient, et reste à côté des runs de ce niveau, ceux des grands groupes d'avant lui (du tiering à ce
+niveau : le lazy leveling de Dayan et Idreos, du tiering à un niveau et du leveling ailleurs, Dostoevsky 2018), tant
+qu'il n'y en aurait pas 16 (`Engine.tier`) côte à côte : alors le merge de ce groupe les prend tous, comme le ferait
+`Engine.plan`, en une seule passe à $k$ voies. Un chargement écrit alors chaque fait environ deux fois (le run de son
+groupe, le merge des runs côte à côte, puis `snapshot`), et les lectures pendant qu'il tourne visitent jusqu'à 16 runs
+de ce niveau ; un `snapshot` après un chargement les ramène à un. Les runs ne sont jamais plus de 16 plus un par
+niveau, bien en dessous des 31 qu'un merge peut prendre (`Snapshot.max_take` : le passage par chose garde les sources
+d'une chose dans les bits d'un entier, deux par run). À 10 millions de faits en groupes de 5 000 clients (environ
+415 000 faits chacun) écrits par deux threads, chaque groupe est confirmé en 9,8 s au lieu de 18,2, et avec le
+snapshot qui suit, le chargement prend 13,0 s au lieu de 21,9
+([benchmarks](benchmarks.md#les-chargements-par-morceaux-2026-11-12-à-10-millions-de-faits)).
 
 **Mémoire.** Un merge a besoin du cache, de quelques buffers de page (des zones de mémoire de travail : au plus 2 pour
 chaque flux d'une passe ; 19 mesurés dans le test unitaire, dont la borne est 24) et de 25 octets pour chaque 16 KiB de
@@ -345,7 +365,9 @@ numéro 41 µs (PostgreSQL 176 µs avec 32 MB de buffers).
 
 Chaque base a exactement un writer (G9 : un fichier de lock, `DIR/lock`, tenu par un seul processus). Un seul writer
 veut dire aucun lock entre writers, aucun deadlock (deux attentes qui se bloquent l'une l'autre), et un ordre total des
-groupes sans trou, ce qui fait du journal une history (un historique) qu'on peut rejouer et, plus tard, répliquer. Son
+groupes sans trou, ce qui fait du journal une history (un historique) qu'on peut rejouer et répliquer
+([une replica](server.md#une-replica), une copie de la base tenue à jour sur une autre machine, prend les frames de son
+primary, le serveur qui reçoit les écritures, telles qu'elles sont). Son
 coût : une base ne peut pas résoudre les groupes plus vite qu'un cœur (le writer résout un groupe de 5 faits en
 environ 7 µs, si bien que le fsync du disque est la limite bien avant), et un groupe lent retarde les suivants. Des
 bases distinctes écrivent en parallèle.
@@ -376,8 +398,9 @@ des variables ; pour lier la variable suivante, prendre le pattern qui offre le 
 donné les variables déjà liées (des comptes exacts, lus dans les index), les énumérer, et ne garder chaque candidat que
 si chaque autre pattern sur la variable l'accepte (une recherche dans un index chacun, $O(\log n)$). Sur une chaîne de
 patterns, il fait ce que feraient des recherches d'index imbriquées ; sur un cycle, il reste dans la borne. L'ordre des
-variables est choisi d'après les comptes : chaque ordre jusqu'à 7 variables (avec élagage), de façon gloutonne
-au-delà. Chaque réponse sort une seule fois (G11). Sur le graphe des follows (568 163
+variables est choisi d'après les comptes : l'ordre du moindre travail estimé, par une programmation dynamique sur les
+sous-ensembles de variables (Selinger et al. 1979), les champs d'une chose placés juste après elle et ceux d'une
+constante en premier, jusqu'à 12 variables dans le programme, de façon gloutonne au-delà. Chaque réponse sort une seule fois (G11). Sur le graphe des follows (568 163
 liens), les triangles prennent 1,03 s sur un domain et 371 ms sur trois (PostgreSQL 1,03 s et 603 ms).
 
 ## Règles
@@ -390,7 +413,22 @@ tableaux hors de la vue du collector ; les changements dérivés rejoignent la f
 (2 à 5) et la vue en un seul lot trié. Le replay les applique et n'évalue rien. Dans un run, la valeur d'un fait porte
 un drapeau « seulement dérivé » dans le bit le plus bas de son champ, dans les blocs qui tiennent un fait dérivé
 (formats 7 et 8 ; le format 6 utilisait le bit 63 d'un mot de valeur). Un grand groupe avec des règles raisonne sur ses
-propres faits dans le working set et ajoute les faits dérivés à ses tableaux, fusionnés avec eux dans le run. Le tout :
+propres faits, tenus comme un préfixe trié du working set (pas de chaînes de hachage : les faits d'une chose sont un
+intervalle, les choses d'une valeur un intervalle de l'ordre du groupe par propriété), dérive ses tours sur un domain
+par thread matériel (`Bulk.threads` : ses recherches attendent la mémoire, ce que cache le second thread d'un cœur), et
+fusionne les faits dérivés dans les deux ordres de ses tableaux, écrits avec eux dans le run. Les règles sont compilées
+en deux programmes par ensemble de règles : tel qu'il est écrit, et déplié sur les petites relations de la base
+(réécrit en une règle par fait de ces relations ; gardé en cache tant que la vue tient les faits de ces relations,
+vérifié à chaque groupe par identité) ; un groupe fait tourner le programme déplié sauf s'il change une relation
+figée. Les plans d'une règle sont compilés à leur premier passage, une copie par profondeur de récursion de B/F
+(Backward/Forward), et les propriétés transitives sont tenues par des modules de closure (une transitive closure :
+toutes les paires reliées par un chemin ; des composantes fortement connexes et des unions de cibles pour une closure
+calculée de zéro, un produit de sources et de cibles pour une arête ajoutée). Un changement des règles ou de
+l'ontologie (les faits qui décrivent les classes et les propriétés, que lisent les règles) est calculé en arrière-plan
+dans une base sur le disque, comme un merge : construit à partir de la vue de travail sur un domain à lui, mis à jour
+avec les groupes notés entre-temps (sous les nouvelles règles, par lots), et installé par le writer comme un seul
+groupe dont la frame est la différence ; sa vue devient la vue de travail. Les tours de 20 000 faits et plus sont
+dérivés sur plusieurs domains, par morsels (des petits lots de travail que les domains se partagent). Le tout :
 [règles](rules.md).
 
 ## Comment c'est testé

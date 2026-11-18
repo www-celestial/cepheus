@@ -492,7 +492,7 @@ recovered view, a replica's or the past's is the writer's, byte for byte of fact
 fact's flag: for each fact, the newest entry gives its state in the new view and the oldest its state below the merged
 runs; a flag changed is a retraction and an addition in the new run.
 (6) *Closure modules.* For prp-trp on $T$ the least model's $T$ is the transitive closure $T^+$ of $T$'s other
-facts; for the linear pair it is $E^* \circ (E \cup B)$, $B$ the facts of $T$ asserted or given by other rules. From
+facts; for the linear pair it is $E^{\ast} \circ (E \cup B)$, $B$ the facts of $T$ asserted or given by other rules. From
 scratch, the module computes exactly these over the strong components (a component's targets are its successors' with
 them, and its own members when it holds a cycle), and makes every pair not present; incrementally, the state before
 the group holds the closure (G17 for the group before, by induction), so a new edge $(a, b)$ adds exactly
@@ -641,8 +641,10 @@ random rules, facts and tokens, every token's reads against the oracle's own rec
 - **An equality cannot reach what it must not.** Two values, a property thing, or a thing the rules name (owl:Thing, a
   class an unfolded rule names) are never made the same: the group is refused, naming the rule. `cepheus/same` is
   read as a derived fact: a token with rights per kind reads it, and any property of a rule set with equality (whose
-  facts a merge may rewrite), only when it reads every kind the equalities come from. *Tested by* `test/owl.ml`
-  (eq-rep-p, prp-fp over values) and `test/server_unit.ml` ("equality and kinds").
+  facts a merge may rewrite), only when it reads every kind the equalities come from; the server's `Get` reads a
+  thing as its class only for a token that reads `cepheus/same` (another gets the thing's own facts, and learns no
+  equality). *Tested by* `test/owl.ml` (eq-rep-p, prp-fp over values), `test/server_unit.ml` ("equality and kinds")
+  and `test/cesia-live.ce` (OWL 2 RL over TLS, a token of one kind: `Same` and questions denied, `Get` nothing).
 - **Templates are bounded.** A list unfolds into one rule of at most 64 copies of its patterns (a group that makes a
   longer list is refused, naming the rule); a write of a list is a change of the rules, under a change's budget; no
   rule may give a list, so a list changes by writes only, which the writer sees. Nothing new is decoded: a template is

@@ -45,6 +45,21 @@ nouveau, écrire à nouveau (la boucle habituelle de l'optimistic concurrency, l
 | `#E has a value for N (property P)` | `Expect (E, P, None)`, et E a une valeur pour P, dont le nom est N |
 | `#E does not have V for N (property P)` | `Expect (E, P, Some V)`, et le fait (E, P, V) ne tient pas ; N est le nom de P |
 
+
+Un changement des règles ou de l'ontologie (les faits qui décrivent les classes et les propriétés, que lisent les
+règles) calculé en arrière-plan ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) répond `Conflict` quand un
+groupe écrit entre-temps a interféré ; `define` réessaie de lui-même :
+
+| message | quand |
+|---|---|
+| `group G, written meanwhile, changed [#E P V], which the change writes` | le groupe a affirmé ou retiré un fait que le changement affirme ou retire |
+| `group G, written meanwhile, changed the rules` | un changement fait dans son propre groupe (un changement qui crée de nouvelles choses) a été rangé avant |
+| `#E would have two values of NAME under the new rules` | les groupes écrits entre-temps et les nouvelles règles donnent deux valeurs à une propriété qui n'en prend qu'une |
+| `NAME V would be taken twice under the new rules` | la même chose pour une propriété unique |
+| `constraint R: FACTS`, le refus d'une règle | les groupes écrits entre-temps enfreignent les nouvelles règles |
+| `the change derived more than N facts with the groups written meanwhile` | les groupes écrits entre-temps ont fait dépasser son budget au changement |
+| `the facts of the change were written meanwhile` | la partie affirmée du changement a changé entre sa construction et son installation |
+
 ## `Not_unique`
 
 | message | quand | que faire |
@@ -63,6 +78,9 @@ Depuis `write` (les vérifications du writer, les mêmes sur une base et sur un 
 | `Expect on a new thing` | un `Expect` nomme une chose négative (nouvelle) : elle n'a aucun fait avant le groupe |
 | `Expect: V is not a T` | la valeur d'un `Expect` n'est pas du type de la propriété |
 | `V is not a T (property NAME)` | un `Add` ou un `Retract` avec une valeur du mauvais type |
+| `Incr counts on a one-valued int property of the program's: NAME is X` | un `Incr` d'un compteur qui n'est pas un `Int` (X : `a text`, ...), qui a plusieurs valeurs, ou qui est une propriété de la base elle-même (pas du programme) |
+| `Incr writes into an int property of the program's: NAME is X` | un `Incr` dont le `into` n'est pas un `Int`, ou est une propriété de la base elle-même |
+| `Incr: NAME of #E is N, and BY more passes the ints` | la somme du compteur dépasserait les 63 bits d'un int : le groupe est refusé, le compteur reste à N |
 | `no thing #E` | E vaut 65 536 ou plus et la base ne l'a jamais créée |
 | `no thing #E to link to` | un `Link` vers un numéro sous 16, ou vers une chose jamais créée |
 | `#E is a system thing` | E est sous 16 : ces numéros sont réservés |
@@ -84,10 +102,16 @@ Depuis `write` avec des règles (le raisonnement du writer, le même sur une bas
 | `[#E P V] is derived by rule R from F and G: retract one of those` | un `Retract` d'un fait qui n'est que dérivé : ses prémisses le dériveraient à nouveau ; retirez les faits affirmés qu'il nomme (les faits d'une preuve) |
 | `[#E P V] is derived by a rule` | la même chose, quand aucune preuve n'a pu en être affichée |
 | `rule R derived more than N facts from a group of K facts` | les changements dérivés du groupe dépassent le budget, $N = \mathit{base} + \mathit{per} \times K$ ([api](api.md#règles), `rule_budget`) ; R est celle qui a le plus dérivé. Découpez l'écriture, ou relevez le budget |
+| `rule R derived more than N facts from a change of the rules or the ontology` | les faits dérivés d'un changement dépassent son budget, $N = \mathit{base} + \mathit{per} \times K + 4 \times$ les faits de la base (`change_budget`) ; R est celle qui a le plus dérivé |
+| `a change of the rules or the ontology derived more than N facts` | la même chose, trouvée à l'installation du changement, après les groupes qu'il a rattrapés |
+| `the change failed: E` | un changement en arrière-plan a rencontré une erreur du moteur (un bug), écrite aussi sur la sortie d'erreur standard |
 | `constraint R: FACTS` | le groupe rendrait vrai le corps de la contrainte R : FACTS sont les faits d'une instance |
 | `rule R gives #E a second value of NAME, which takes one` | une valeur dérivée d'une propriété à une seule valeur à côté d'une autre valeur |
 | `rule R gives NAME V, which another thing has` | une valeur dérivée d'une propriété unique qu'une autre chose tient |
 | `rule R gives a fact about #E, which does not exist` | une tête nomme une chose que la base n'a jamais créée |
+| `rule R gives a fact of #P, which is not a property it can give` | une tête dont la propriété est une variable donne une chose qui n'est pas une propriété de l'application (aucune, ou une propriété `cepheus/`) |
+| `rule R gives NAME a value of another type` | une tête donne une valeur lue sous une propriété variable à une propriété d'un autre type |
+| `rule R gives a fact about a value that is not a thing` | la chose d'une tête est une variable lue sous une propriété variable dont les valeurs ne sont pas des liens |
 
 Depuis `define`, ou une écriture des faits d'une règle (une règle est vérifiée quand elle est écrite) :
 
@@ -99,6 +123,7 @@ Depuis `define`, ou une écriture des faits d'une règle (une règle est vérifi
 | `rule NAME: variable ?K out of range` | un pattern ou la tête utilise K hors de 0 à `vars - 1` |
 | `rule NAME: variable ?K appears in no pattern of the body` | une variable sous `vars` qu'aucun pattern du corps n'utilise |
 | `rule NAME: the thing of a pattern is a variable or a thing` | la chose d'un pattern est un `Val` |
+| `rule NAME: the property ?K is bound by no pattern whose property is a constant` / `… the property ?K of its head …` | une propriété variable (`prop_var K`) qu'aucun pattern à propriété constante n'a pour chose ou pour valeur |
 | `rule NAME: no property P` / `… no property P in its head` | un pattern ou la tête nomme une propriété qui n'existe pas |
 | `rule NAME: variable X is both a T and a U` | comme pour une question |
 | `rule NAME: a range needs an int, date or money variable` / `… the bounds of ?X are not of its type` | un intervalle sur un autre type, ou des bornes d'un autre type |
@@ -127,6 +152,20 @@ Depuis `find` et `fold` (la question est mal formée) :
 | `variable X appears in no pattern` | une variable sous `vars` qu'aucun pattern n'utilise |
 | `V is not a T` | une valeur constante du mauvais type pour sa propriété |
 | `a range needs an int, date or money variable` | un intervalle sur une variable texte ou flottante, ou sur une variable hors de 0 à `vars - 1` (les intervalles acceptent aussi les variables bool et link) |
+
+### Les templates et l'égalité
+
+| message | quand |
+|---|---|
+| `rule R: one every [..] a rule`; `rule R: the member ?k of every [..] is in no other pattern`; `… is in its head …`; `rule R: a template (every) takes no Not and no aggregate` | un template (une règle dont un pattern se répète pour chaque membre d'une liste) mal écrit |
+| `rule R gives P, the list of the template T: only a write may change a list` | la tête d'une règle est la liste d'un template, ou une règle a dérivé un fait d'une telle liste |
+| `rule R: the list of #c has N members (a template takes at most 64)` | une écriture rend une liste trop longue pour son template |
+| `rule R makes two different values the same: only things can be the same as another` | une égalité entre deux valeurs qui diffèrent (prp-fp, la règle d'OWL 2 RL pour une propriété qui n'a qu'une valeur par chose, sur une propriété de textes avec deux valeurs) |
+| `rule R would make the property #p the same as another thing: a property is the same as no other` | une égalité sur une chose qui est une propriété |
+| `rule R would make #a the same as #b, which a rule names: a thing the rules name keeps its own identity` | une égalité sur une constante des règles (owl:Thing, la classe de toutes les choses ; une classe que nomme une règle dépliée, c'est-à-dire réécrite pour chaque fait d'une petite relation) |
+| `rule R: a rule that makes things the same takes no Not and no aggregate`; `a rule set that makes things the same takes no Not and no aggregate yet` | l'égalité à côté de la négation ou des agrégats |
+| `rule R: cepheus/same is read through the classes of equal things, not by a rule's pattern` | le corps d'une règle lit `cepheus/same` |
+| `constraint owl/eq-diff1: [#r owl/DifferentFrom #r]` | deux choses déclarées différentes sont rendues égales |
 
 ## `Damaged` : des données durables perdues ou changées
 
@@ -159,6 +198,22 @@ en octets depuis le début du segment :
 | `SEG: segment ends with a broken frame at O` | une frame qui ne se vérifie pas à la fin d'un segment qui n'est pas le plus récent (les segments sont forcés en entier avant que le suivant commence) |
 | `the journal ends at group G, before the snapshot of group S` | le run le plus récent tient des groupes que le journal a perdus (un run n'est nommé qu'une fois ses groupes durables) |
 | `group N uses property P, which does not exist` | le replay a rencontré un changement d'une propriété qu'aucun groupe n'a déclarée |
+
+Au démarrage d'un serveur, depuis son commit buffer (l'endroit où le serveur copie les frames de plusieurs bases pour
+les confirmer par un seul fsync : [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer) ; `FILE` est
+`DATA/server.wal.1` ou `.2`) :
+
+| message | ce qu'il veut dire |
+|---|---|
+| `FILE: a broken header` | un fichier du buffer dont l'en-tête ne passe pas la vérification (un fichier ne prend son nom qu'une fois son en-tête durable) |
+| `FILE: unknown format F` | un en-tête qui passe la vérification, d'un autre format que 1 |
+| `server.wal.N: damaged round at offset O (written whole)` | un tour (une écriture du buffer confirmée par un fsync) qui ne passe pas la vérification, dans le fichier le plus ancien, ou suivi d'un tour écrit en entier : il a été durable, il est maintenant endommagé |
+| `FILE: round R at O does not hold its entries` / `has bytes after its entries` | un tour qui passe la vérification mais dont les entrées ne font pas exactement son corps |
+| `server.wal.1 holds confirmed writes of databases this server did not open (ids ...): open them with it once` | le buffer contient des frames d'une base que `cluster.toml` ne liste plus : la rajouter, démarrer le serveur, l'arrêter ([opérations](operations.md#une-base-dun-serveur)) |
+| `journal: segment SEG, where the commit buffer's frames go, is missing` | le run le plus récent reprend dans un segment qui n'est pas là |
+| `SEG: the frame at O (group G) does not check, before the commit buffer's frames from group N` | une frame que le buffer ne contient pas, avant des frames qu'il contient : elle a été forcée, et elle est endommagée |
+| `journal: the commit buffer's frame of group G does not start where a frame does (group N)` | les frames du journal et celles du buffer ne s'alignent pas |
+| `SEG: the frame at O is not the one the commit buffer holds for group G (the database was written without its server's buffer after a crash)` | une autre frame qui passe la vérification est là où va celle du buffer : une version sans le buffer a ouvert la base après un crash et y a écrit ; elle n'est jamais écrasée ([opérations](operations.md#une-base-dun-serveur)) |
 
 Depuis `verify` seulement (une lecture complète est stricte : la recovery répare ceux-ci, donc après elle ce sont des
 dommages) :
@@ -211,6 +266,7 @@ premier échec).
 | erreur | message | quand | que faire |
 |---|---|---|---|
 | `Busy` | `DIR is open in another process` | un autre processus tient `DIR/lock`, ou ce processus a déjà la base ouverte, sous ce chemin ou n'importe quel autre qui nomme le même répertoire (un lien symbolique, `DIR/.`, `x/../DIR`) | fermer l'autre ; un seul moteur par base |
+| `Busy` | `DIR was written through a server's commit buffer and not closed cleanly: its newest writes may be in the server's DATA/server.wal.1 or .2 alone; start the server on its data directory, which writes them into the journal, and stop it` | `open_` dans le processus même d'un programme, d'une base que tenait un serveur quand il a crashé (`DIR/shared` et pas de `DIR/closed`) | démarrer le serveur et l'arrêter ; la base s'ouvre ensuite n'importe où ([opérations](operations.md#une-base-dun-serveur)) |
 | `Closed` | `the database is closed` | `write` ou `snapshot` après `close` | ouvrir la base à nouveau |
 
 ## Exceptions
@@ -227,8 +283,26 @@ premier échec).
 
 Un programme connecté au serveur reçoit chaque erreur ci-dessus comme une valeur `{code, message}` (`conflict`,
 `invalid`, `unique`, `damaged`, `io`, `busy`, `closed`), et les codes propres au serveur : `auth`, `denied`, `version`,
-`too_large`, `unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`. Chacun, quand il arrive et que
-faire : [le serveur](server.md#erreurs).
+`too_large`, `unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`, `internal`, `read_only` (une
+replica, une copie de la base tenue à jour sur une autre machine, qui ne prend pas d'écritures), et, dans un cluster
+Raft (des serveurs qui gardent les mêmes bases et le même log, la liste ordonnée des écritures, par l'algorithme de
+consensus Raft), `not_leader` (ce serveur suit un leader, le serveur du cluster qui reçoit les écritures : son message
+le nomme, et son corps porte l'adresse du leader, que la bibliothèque OCaml suit d'elle-même) et `no_leader` (une
+élection, le vote qui choisit un leader, est en cours, ou le nouveau leader n'est pas prêt : réessayer ; la
+bibliothèque OCaml le fait, dans son budget de nouvelles tentatives). Chacun, quand il arrive et que faire :
+[le serveur](server.md#erreurs).
+
+Celles du vault de fichiers (là où Cepheus garde les octets des fichiers : [le vault](vault.md)), à travers le serveur
+ou depuis `Cepheus_vault.Vault` :
+
+| code | message | quand | que faire |
+|---|---|---|---|
+| `missing` | `thing T has no file of this kind`, `chunk H is not in the vault` | un Load d'une chose sans fichier ; un record (une entrée écrite par le vault) qu'un fait cite et que le vault ne contient pas (un vault copié sans ses packs, les fichiers où il ajoute ses records) | vérifier la chose ; restaurer les packs |
+| `damaged` | `record H: its tag does not check (the bytes changed on the disk)`, `... its header does not check`, `... the record found there is another one`, `... its bytes do not match their CRC` | un chunk (un morceau d'un fichier) ou un nœud (une entrée de l'arbre qui relie les chunks d'un fichier) changé sur le disque | remettre le même fichier (le chunk endommagé est écrit de nouveau), ou restaurer depuis une copie |
+| `erased` | `the files of domain D were erased (its key is destroyed)` | un Load d'un fichier d'un propriétaire effacé, ou un Put qui le nomme | rien : c'est définitif |
+| `invalid` | `the master key does not open the key of domain D (another vault's key?)` | le vault ouvert avec une autre clé maîtresse que la sienne | donner au serveur son propre `vault.key` |
+| `damaged` | `keys: the entry at N does not check, and later ones do` | le fichier des clés a changé sur le disque avant sa fin | restaurer `keys` depuis une copie (une clé perdue, ce sont les fichiers d'un domaine, ceux d'un propriétaire, perdus) |
+| `busy` | `DIR is open in another process` | un second processus ouvre le même vault | un processus par vault |
 
 ## Dans un programme Cesia
 
@@ -246,8 +320,25 @@ valeur `result.Err({Kind: "cepheus", Code, Message})`, avec les codes en minuscu
 | `invalid` | `Insert needs at least one field of K`, `Update needs at least one field of K`, `Update needs the id of a thing, not N`, `a group needs at least one operation` | une écriture vide | écrire quelque chose |
 | `invalid` | `P holds several values: change them with Write, Add and Retract` | un Update d'un champ à plusieurs valeurs | `cepheus.Write` avec `Add` et `Retract` |
 | `invalid` | `Above, Below and Between are for ints, dates and money, not a T`; `a variable of Above, Below or Between appears in no pattern` | un intervalle sur un autre type, ou sur une variable d'aucun pattern | filtrer les lignes en Cesia (`list.Filter`) |
+| `invalid` | `Sort's keys are fields of Give: a variable or an aggregate that Give gives` | une clé de Sort que Give ne donne pas | l'ajouter à Give (After est une ligne : elle contient chaque clé) |
+| `invalid` | `After needs Sort: the rows after a row, in an order`; `After needs every field of Give: F is missing`; `After's N needs a T, not V` | un curseur sans ordre, ou qui n'est pas une ligne entière de Give | donner Sort, et une ligne d'une réponse précédente |
+| `invalid` | `Not takes 1 to 4 patterns or conditions, not N`; `Or takes 2 to 4 alternatives, not N`; `And takes 1 to 4 patterns or conditions, not N`; `Not takes patterns and conditions: no Not or Or inside it`; `Or takes patterns, conditions and And: no Not or Or inside it`; `And is for an alternative of Or: Where is already all of its items` | la forme de Not, Or et And | nommer une condition plus profonde par une règle, comme un fait dérivé |
+| `invalid` | `an Or of one pattern that differs only in its value is In's case: write In(x, [...]) on the pattern's variable` | un `Or` qui est un `In` | `cepheus.In` (une seule façon de l'écrire) |
+| `invalid` | `variable N is in no pattern of the question: it may be the own of one Not or one Or only`; `variable N is a Not's or an Or's own: Give and Sort take the question's variables`; `a question needs a pattern outside Not` | une variable partagée par deux Not, donnée, ou une question faite de Not seulement | la lier par un pattern de la question |
+| `invalid` | `In needs values of the variable's type (a T), not V`; `a variable of In appears in no pattern` | `In` avec des valeurs d'un autre type | des valeurs du type de la variable |
+| `invalid` | `this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2` | une question qui les utilise, sur une connexion à un serveur d'une version antérieure | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
+| `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | un groupe avec `cepheus.Incr`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
+| `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` sur un autre type, un préfixe vide ou trop long | une variable texte que donne un pattern |
+| `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | les bornes d'une question ([limites](limits.md#les-questions)) | demander page par page, découper la liste, ou poser plusieurs questions |
+| `too_large` | `the question passed the server's budget of N candidates: ask a narrower one, or several` | une question dont le join (la jointure des patterns) énumère plus que le budget du serveur ([limites](limits.md#les-questions)) ; un watch (une question vivante, tenue à jour) qui le dépasse à une frame se termine par elle | une question plus étroite : plus de constantes, un intervalle, un Limit sur le chemin de l'index |
+| `invalid` | `a watch keeps every row of its question: Sort, Limit and After are for Find` | `Watch` avec Sort, Limit ou After | suivre la question sans eux, et trier les lignes en Cesia (`list.SortBy`) |
 | `invalid` | `H is reached over the network: give the cluster's certificate authority, ca = "/etc/cepheus/ca.pem"` | Connect par TCP sans `ca` | le `ca.pem` du cluster (créé par `cepheus cluster init`) |
 | `invalid` | `a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server` | un Fork d'une base atteinte par le réseau | faire un fork de `cepheus.Empty`, ou tourner sur la machine du serveur |
+| `invalid` | `OWL 2 RL's rules need its vocabulary: give owl.Vocabulary to Connect (or Fork)` | `Define` de `owl.Rl()` sur une base sans le kind `owl` | ajouter `owl.Vocabulary` à la liste de Connect, ou de Fork |
+| `invalid` | `P is declared in this database otherwise than in OWL 2 RL's vocabulary` | une propriété `owl/...` déclarée avec un autre type, `many` ou `unique` | une base dont les propriétés `owl/` sont celles d'OWL 2 RL |
+| `invalid` | `N is no rule of OWL 2 RL: owl.Rl() gives its rules` | une map `{Rule, Library: "owl"}` d'un nom que la bibliothèque n'a pas | les maps de `owl.Rl()` |
+| `conflict` | `owl:Thing and owl:Nothing could not be made: Define again` | d'autres programmes les ont créées et supprimées pendant que `Define` les créait, trois fois | refaire Define |
+| `conflict` | `cepheus.Same: the class of N changed while it was read: read it again` | par le réseau, une classe défaite entre les deux questions que pose `Same` | appeler `Same` à nouveau |
 | `closed` | `this database was closed` | un appel sur une base après `cepheus.Close` | se reconnecter avec Connect |
 | `unreachable` | `no Cepheus server answers at ADDRESS: REASON` | Connect : rien n'écoute au socket ou au port de l'hôte, ou ce qui écoute ne répond pas au handshake (la poignée de main qui ouvre la connexion) en 5 s (REASON `no answer within 5 s`, ou `the TLS handshake: Resource temporarily unavailable`) | démarrer le serveur, vérifier l'adresse |
 | `unreachable` | `the server did not answer for 30 s (REASON): a write in flight was applied once or not at all` | un appel après que la connexion a cassé et est restée cassée pendant tout le budget de nouvelles tentatives | démarrer le serveur ; relire avant d'écrire à nouveau |
@@ -256,7 +347,8 @@ valeur `result.Err({Kind: "cepheus", Code, Message})`, avec les codes en minuscu
 Une faute dans la forme d'un appel est un bug du programme, pas une valeur d'erreur : elle arrête la fiber, comme
 `bug.Panic`, avec le message de Cesia, comme `cepheus.Get needs a database, as cepheus.Connect or Fork gives it, not the
 number 3.` Celles du package : une base, un kind (`as cepheus.Kind made it`), une propriété (`as Client.City`), une map,
-une liste, une opération (`as cepheus.Add, Retract or Expect makes it`), une question (`{Where: [patterns], Give:
+une liste, une opération (`as cepheus.Add, Retract, Expect or Incr makes it`), le `into` d'un `Incr` (`[thing, property], as
+[cepheus.New(1), Invoice.Number]`), une question (`{Where: [patterns], Give:
 {Name: variable}}`), un pattern (`[thing, property, value], or Above, Below or Between`), une variable ou l'identifiant
 d'une chose en premier dans un pattern, une variable ou un agrégat dans Give ; et à `cepheus.Kind` : un nom qui n'est
 pas fait de lettres minuscules, de chiffres, de `_` et de `-`, aucun champ, un champ nommé `kind`, un type qui n'est
@@ -268,11 +360,14 @@ paramètre) ; à `cepheus.Find` : plus de 12 variables.
 
 Un merge tourne en arrière-plan ; quand il échoue, il le dit sur la sortie d'erreur standard, supprime son fichier, et
 la base continue avec ses anciens runs (aucune erreur n'atteint un client) ; le merge suivant attend que le delta ait
-grandi d'un seuil de plus. Deux autres lignes viennent du writer.
+grandi d'un seuil de plus. D'autres lignes viennent du writer et du commit buffer.
 
 | ligne | quand |
 |---|---|
 | `cepheus: the journal could not be cut back after a failed write: MSG` | après une écriture ou un fsync du journal qui a échoué, le retour à la dernière frame durable a échoué aussi : les écritures qui ont échoué peuvent revenir à la réouverture (G13) |
+| `cepheus: the journal could not be forced at close: MSG` | le fsync d'un journal partagé (celui d'une base qui écrit par le commit buffer) a échoué à la fermeture : pas de marqueur `closed`, et la prochaine ouverture est une recovery |
+| `cepheus: the commit buffer could not be cut back after a failed write: MSG` | après une écriture ou un fsync du buffer qui a échoué, son retour au dernier tour forcé a échoué aussi : le tour qui a échoué peut revenir au prochain démarrage |
+| `cepheus: the commit buffer could not be emptied: MSG` | un arrêt propre n'a pas pu supprimer `DATA/server.wal.1` ou `.2` : le prochain démarrage les lit, et trouve leurs frames déjà dans les journaux |
 | `cepheus: the run of a large group could not be named: MSG` | le renommage du fichier de run d'un grand groupe a échoué après que sa frame était durable : la base s'arrête (`Io`), et l'ouverture suivante rejoue le groupe depuis le journal |
 | `cepheus: background merge failed: EXN` | le domain du merge a rencontré une exception (une erreur de disque, une page illisible) |
 | `cepheus: a merge could not be installed: MSG` | le renommage ou le fsync du répertoire a échoué |
@@ -281,3 +376,10 @@ grandi d'un seuil de plus. Deux autres lignes viennent du writer.
 | `cepheus: FILE reloaded: N tokens` / `cepheus: FILE not reloaded: MSG` | tokens.toml a changé ; un fichier qui ne se lit pas n'est pas pris, le serveur garde les tokens qu'il avait |
 | `cepheus: database NAME: the sessions could not be saved: MSG` | le checkpoint des sessions a échoué (une erreur de disque) : l'ancien reste, et le démarrage suivant lit davantage du journal |
 | `cepheus: stopping` / `cepheus: stopped` | SIGTERM ou SIGINT : l'arrêt du [serveur](server.md#démarrage-arrêt-crash) |
+| `cepheus: connection N (token T), request I of kind K failed: EXN` | une requête a rencontré ce que le serveur n'attendait pas (un bug, la mémoire épuisée) : elle a reçu la réponse `internal` et sa connexion a été fermée ([le serveur](server.md#une-requête-qui-fait-échouer-le-serveur)). EXN est le texte de l'exception, coupé à 300 octets, chaque octet hors de l'ASCII imprimable écrit `\ddd` |
+| `cepheus: connection N (token T) failed: EXN` | la même chose dans un autre thread de la connexion (la réponse à une écriture, un push, un message que le serveur envoie sans demande) ou dans sa boucle de lecture : `internal` sur la requête d'id 0, puis la connexion se ferme |
+| `cepheus: a watched question at a frame failed: EXN` | une question suivie a échoué à une frame : ses watches se terminent par `internal`, les autres questions continuent |
+| `cepheus: the watches of a database failed: EXN` | le hub (le thread qui calcule les questions vivantes d'une base) a échoué hors d'une question : chaque watch de la base se termine par `internal`, et un nouveau watch part de l'état de la frame |
+| `cepheus: a connection's thread failed: EXN` / `cepheus: a connection's start failed: EXN` | ce qu'aucun rattrapage d'exception d'une connexion n'attendait, après la fermeture de son socket ; ou aucun thread n'a pu être créé pour une nouvelle connexion (la limite du système) : elle est fermée tout de suite |
+| `cepheus: a write's reply failed: EXN` / `cepheus: the receipt of a write in its session's table failed: EXN` | l'issue d'une écriture n'a pas pu être transmise, ou gardée dans la table de sa session (la mémoire) : ceux qui l'attendent reçoivent leur réponse quand même |
+| `... (and N failures since the line before, not written)` | les lignes ci-dessus viennent au plus une fois par seconde : la suivante compte celles qui ont été laissées de côté |

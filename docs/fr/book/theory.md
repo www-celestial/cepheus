@@ -205,9 +205,39 @@ fait une fois, une ligne d'un run plus ancien n'est montrée que si aucun run pl
 le même fait, et le delta n'ajoute que des faits absents en dessous de lui) ; des préfixes distincts donnent des
 bindings distincts.
 
-**Ordre.** Jusqu'à 7 variables, Cepheus essaie chaque ordre (avec élagage) et garde celui qui a la plus petite somme
-estimée de bindings partiels, chaque étape multipliant par son estimation de candidats par binding ; au-delà, de
-façon gloutonne. Freitag et al. [Freitag 2020], Mhedhbi et Salihoglu [Mhedhbi 2019] et Wang et al. [Wang 2023] montrent
+**Ordre.** Cepheus garde l'ordre des variables dont le travail estimé est le plus petit : les candidats qu'énumèrent
+ses niveaux, soit, à chaque niveau, ses bindings partiels multipliés par les candidats par binding de la variable
+suivante (le compte du meilleur pattern, étant donné les variables liées avant). Les bindings partiels d'un ensemble
+de variables sont les mêmes quel que soit l'ordre qui les a liées ; ils sont donc estimés une fois par ensemble : le
+plus petit produit des candidats par binding parmi les ordres de l'ensemble, puisque chacun de ces produits les borne
+par au-dessus. Le meilleur ordre d'un ensemble est alors le meilleur ordre de l'ensemble privé d'une variable, suivi
+de cette variable : une programmation dynamique sur les sous-ensembles, comme celle par laquelle Selinger et al.
+[Selinger 1979] choisissent un ordre des joins, en $n 2^{n-1}$ étapes pour $n$ variables, et exacte pour ce coût.
+
+Deux sortes de variables ont leur place choisie avant la programmation dynamique, et restent en dehors. Une variable
+dont le seul pattern n'a pas d'autre variable et lui offre au plus un candidat (un champ d'une chose donnée par son
+id) vient en premier : elle y coûte 1, le moins que puisse coûter une étape, et ne multiplie rien (exact). Une *leaf*
+(une feuille), c'est-à-dire une variable $y$ dont le seul pattern la donne comme valeur d'une propriété à une seule
+valeur d'une variable $x$, avec $d \ge 2$ valeurs en tout, vient juste après $x$ : là, elle a un candidat par binding,
+ne multiplie rien, et coûte les bindings partiels $S$ de l'étape de $x$, le moins qu'elle puisse coûter après $x$ (les
+bindings partiels ne diminuent jamais le long d'un ordre). La règle est exacte quand le compte de $x$ ne dépend pas de
+$y$ (aucun autre pattern de $x$ ne lui offre plus que la moyenne de la leaf, $\lfloor N / d \rfloor$ pour $N$ faits de
+la propriété) : avant $x$, $y$ coûterait au moins 1 et multiplierait par $d$ l'étape de $x$ et chaque étape entre les
+deux, ce qui change le coût d'au plus $S + S - d S \le 0$ en faveur de l'après (un argument d'échange). Sinon, c'est
+une heuristique, à un facteur 2 près de la lecture de la leaf en premier à cette étape : avant $x$, les deux étapes
+coûtent environ $d + N$ par binding des étapes d'avant, après $x$ au plus $2 N$. Les mesures lui donnent raison : pour
+la somme des totaux de 100 000 factures (`[i, Total, t]`), l'estimation préfère lire les totaux valeur par valeur
+($d + N$) plutôt que facture par facture ($2 N$), et cette seconde lecture, celle que donne la règle, prend 16,2 ms
+contre 53,6 ms (cinq runs sur le disque : les factures de chaque valeur coûtent une recherche dans chaque run). Ainsi
+les champs d'une ligne (le numéro d'une facture, son statut, son total, ses dates) sont des leaves de la chose de la
+ligne, et une page de 7 champs ne laisse à la programmation dynamique qu'une ou deux variables. La programmation
+dynamique tourne sur les variables qui restent, jusqu'à 12 (24 576 étapes, chacune sur au plus une entrée par autre
+variable : les comptes sont lus une fois par question, fusionnés par la variable de l'autre côté, quel que soit le
+nombre de patterns) ; au-delà de 12, vient ensuite la variable qui a le moins de candidats (de façon gloutonne). Le
+planner d'avant essayait chaque ordre jusqu'à 7 variables et devenait glouton à 8, ce qui, pour une page triée des 7
+champs d'une facture (8 variables), commençait par le statut, à 3 valeurs, et lisait chaque facture dans chaque
+fenêtre du chemin de l'index : 8,4 ms contre 0,17 ms maintenant (`probe`, 100 000 factures).
+Freitag et al. [Freitag 2020], Mhedhbi et Salihoglu [Mhedhbi 2019] et Wang et al. [Wang 2023] montrent
 que l'ordre et le mélange avec des joins ordinaires comptent le plus en pratique ; le coût mesuré de chaque question
 est dans les [benchmarks](benchmarks.md).
 
@@ -531,6 +561,31 @@ algorithmes) :
   la conjecture OMv ([Henzinger 2015]) ; le pire cas de B/F est un recalcul des faits qu'il atteint. Mesurées sur des
   données en forme de LUBM, les petits retraits restent dans les microsecondes
   ([benchmarks](benchmarks.md#règles-2026-11-08)).
+- **Les dérivations d'une closure, face à ses faits.** Pour prp-trp (la règle d'OWL 2 RL d'une propriété
+  transitive), $T(x, z) \leftarrow T(x, y), T(y, z)$, le fait $(x, z)$ de la closure (la transitive closure, la
+  fermeture transitive du point précédent : tous les couples reliés par un chemin) est dérivé une fois pour chaque $y$
+  tel que $(x, y)$ et $(y, z)$ soient dans la closure : $D = \sum_{(x,z) \in T^+}
+  |\{y : (x,y), (y,z) \in T^+\}|$, environ $n^3/6$ pour $n^2/2$ faits sur une chaîne de $n$ (166 par fait à $n = 500$).
+  La règle linéaire dérive $(x, z)$ une fois pour chaque arête qui part de $x$ sur un chemin vers $z$. Le module de
+  closure fait chaque nouveau fait une seule fois : depuis zéro, sur les strong components (les composantes fortement
+  connexes : des groupes de nœuds qui s'atteignent tous les uns les autres) dans l'ordre topologique inverse, les
+  cibles d'une composante sont l'union de celles de ses successeurs et de ces successeurs eux-mêmes, si bien que le
+  travail est $O(V + E + \sum_{u \to w} |\mathrm{targets}(w)| + |T^+|)$, soit $O(|T^+|)$ sur une forêt (les cibles de
+  chaque chose sont celles de son parent, plus ce parent : on remonte, sans aucune union) ; une arête ajoutée à une
+  closure déjà présente coûte ses nouveaux faits et les faits rencontrés : $(\{a\} \cup \mathrm{pred}(a)) \times
+  (\{b\} \cup \mathrm{succ}(b))$, testés une fois chacun (Hu, Motik, Horrocks [Hu 2019], [Hu 2022] ; Nuutila
+  [Nuutila 1995] ; les composantes de Tarjan [Tarjan 1972]).
+- **Le dépliage est exact tant que ses relations ne bougent pas.** Pour une règle $\rho$ dont les atomes $A$ portent
+  sur les relations $R$, et dont $B$ est le reste, les instances de $\rho$ sur un état $S$ sont l'union, sur les
+  bindings joints $\theta$ de $A$ dans $S$, des instances de $B\theta \to H\theta$ : c'est la partial evaluation
+  (l'évaluation partielle : un programme spécialisé sur une partie de ses entrées) de $\rho$ sur $R$ ([Jones 1993]).
+  Le programme déplié et $\rho$ ont donc le même least model sur tout état dont le $R$ est celui sur lequel on a
+  déplié. B/F avec le programme déplié tient les faits de $R$ pour prouvés ; c'est correct quand aucun fait de $R$ ne
+  peut perdre sa preuve sans qu'on le voie : $R$ ne doit pas dépendre de ce que donnent les règles dépliées (sinon un
+  cycle à travers $R$ pourrait garder en vie deux faits qui ne se soutiennent que l'un l'autre, comme le faisaient les
+  propriétés inverses avec le comptage), et un groupe qui supprime ou dérive un fait de $R$ est raisonné avec $\rho$
+  telle qu'elle est écrite. Côté coût : une règle sur une propriété variable, telle qu'écrite, part de chaque fait ;
+  dépliée, elle ne part que des faits de ses propriétés, chaque plan avec ses constantes en place.
 
 ## 11. Runs et journal compressés : le codage et sa borne
 
@@ -631,8 +686,7 @@ connaît la structure bat les compresseurs généraux, sans C.
   al. [Binnig 2009]), pour les intervalles sur des textes.
 - **Règles, les étapes suivantes** ([règles](rules.md#ce-qui-nest-pas-encore-là)) : le module de fermeture pour les propriétés
   transitives (la materialisation modulaire de Hu, Motik et Horrocks, [Hu 2019]), des règles spécialisées par
-  l'ontologie, des dérivations parallèles triées, la négation stratifiée et les agrégats (agrégats tenus par la règle de
-  DBSP pour les opérateurs linéaires, Budiu et al. [Budiu 2023]), l'égalité par réécriture ; des abonnements par les
+  l'ontologie, des dérivations parallèles triées, l'égalité par réécriture ; des abonnements par les
   règles de delta de DBSP.
 - **Réplication** : Raft [Ongaro 2014] avec une recovery consciente du protocole [Alagappan 2018] ; le journal est la seule chose répliquée (Aurora [Verbitski 2017]).
 - **Plusieurs machines** : des bases réparties sur des machines, puis le stockage sur des object stores (Socrates [Antonopoulos 2019]), puis une base

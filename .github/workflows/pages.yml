@@ -1,13 +1,16 @@
 name: pages
 
-# The site of Cepheus, its book and the reference of its Cesia package, as tools/site.sh makes it with cesia doc --site from
-# this commit: built for each pull request, and published on GitHub Pages from main. It runs on the nightly Cesia, as its
-# release gives it. A formula that can't be written, a link that leads nowhere, a French page that drifts from its English
-# one, or a Cesia example that doesn't check, stops the build, and the site in place stays as it was.
+# The site of Cepheus, its book and the reference of its Cesia package, as cesia doc --site makes them from this commit, on
+# the nightly Cesia, as its release gives it: a check, nothing published, since the repository is private and the site is
+# read where it is built, with cesia doc --site --open. A formula that can't be written, a link that leads nowhere, a French
+# page that drifts from its English one, or a Cesia example that doesn't check, fails it.
 on:
   push:
     branches: [main]
   pull_request:
+  # Each day too: a new nightly Cesia checks the site again without a push to Cepheus.
+  schedule:
+    - cron: "17 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -18,11 +21,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  site:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
-    outputs:
-      built: ${{ steps.site.outputs.built }}
     steps:
       - uses: actions/checkout@v7
       - name: Cesia nightly
@@ -40,31 +41,7 @@ jobs:
           tar -xzf "download/$archive" -C "$HOME/.cesia"
           echo "$HOME/.cesia/bin" >> "$GITHUB_PATH"
       - name: Site
-        id: site
         if: env.NO_CESIA != '1'
         run: |
           cesia version
-          tools/site.sh _site
-          echo "built=1" >> "$GITHUB_OUTPUT"
-      # What the build keeps for itself: what lets the next build skip a page that didn't change.
-      - name: Only the pages
-        if: env.NO_CESIA != '1'
-        run: rm -rf _site/.pages _site/.reference _site/.book
-      - uses: actions/upload-pages-artifact@v5
-        if: env.NO_CESIA != '1'
-        with:
-          path: _site
-
-  deploy:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main' && needs.build.outputs.built == '1'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v5
+          cesia doc --site _site

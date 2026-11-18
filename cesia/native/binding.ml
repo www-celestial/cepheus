@@ -13,6 +13,10 @@ module C = Cesia_v1
 open Cepheus
 open Cepheus_server
 
+(* the library's module of OWL 2 RL itself (its vocabulary, its rules), not Cepheus.Owl, whose setup is the
+   engine's and would link its threads into the client *)
+module Owl = Cepheus__Owl
+
 (* ---- reading the arguments: a match each, and Cesia's message for a wrong one ---- *)
 
 let int ctx name = function C.Int i -> i | v -> C.need ctx name "an Int" v
@@ -160,7 +164,7 @@ let describe = function
   | Float x -> "the number " ^ string_of_float x | Text s -> Printf.sprintf "the text %S" s | Handle (k, _) -> "a handle " ^ k
   | List _ -> "a list" | Map _ -> "a map" | Struct _ -> "a struct" | Function _ -> "a function" | Other _ -> "a value"
 
-let of_cesia (pname : string) (typ : Value.typ) (x : C.value) : Value.t =
+let[@inline never] of_cesia (pname : string) (typ : Value.typ) (x : C.value) : Value.t =
   let wrong what = refuse "invalid" "%s needs %s, not %s" pname what (describe x) in
   match typ, x with
   | Ttext, Text s -> Text s
@@ -211,13 +215,15 @@ let db_of ctx name = function
   | v -> C.need ctx name "a database, as cepheus.Connect or Fork gives it" v
 
 (* a property of the database by its name: its id and type *)
-let lookup d pname =
+let declared d pname =
   match d.src with
-  | Server s -> List.find_map (fun (p, (x : Schema.prop)) -> if x.name = pname then Some (p, x.typ) else None) s.cdb.props
+  | Server s -> List.find_map (fun (p, (x : Schema.prop)) -> if x.name = pname then Some (p, x) else None) s.cdb.props
   | Fork f -> (
     match Schema.by_name f.fv.schema pname with
-    | Some p -> Option.map (fun (x : Schema.prop) -> p, x.typ) (Schema.find f.fv.schema p)
+    | Some p -> Option.map (fun (x : Schema.prop) -> p, x) (Schema.find f.fv.schema p)
     | None -> None)
+
+let lookup d pname = match declared d pname with Some (p, (x : Schema.prop)) -> Some (p, x.typ) | None -> None
 
 (* the ids of a kind's properties in a database, found once *)
 let resolve_kind d (k : kind) =
@@ -243,6 +249,14 @@ let resolve_kind d (k : kind) =
     end;
     d.resolved.(k.index) <- Some r;
     r
+
+(* a value of a property in database [d]: where a link goes, a property of a kind is its id there, so that OWL's axioms
+   name properties ([d, owl/Property, Person.Advisor]) *)
+let[@inline never] value_in d pname (typ : Value.typ) (x : C.value) : Value.t =
+  match typ, x with
+  | Tlink, C.Handle ("cepheus.property", p) -> (
+    match entry properties p with Some (k, i) -> Link (resolve_kind d k).ids.(i) | None -> of_cesia pname typ x)
+  | _ -> of_cesia pname typ x
 
 (* the state to read in this program: a fork's, or a database followed here; None: read at the server *)
 let local_state d =
@@ -398,6 +412,8 @@ let record_of ctx (k : kind) iter =
   end;
   if !found then C.record ctx k.fkeys vals else C.Missing
 
+(* a thing read as its class's representative, as Cepheus.get reads it (the facts of things the rules made the same are
+   kept on one of them): the server's Get does the same *)
 let get_thing ctx d (k : kind) thing =
   let r = resolve_kind d k in
   let slot = r.slot and typs = r.typs in
@@ -406,7 +422,7 @@ let get_thing ctx d (k : kind) thing =
   | Some v -> (
     try
       record_of ctx k (fun f ->
-          Store.iter_facts v thing (fun p w ->
+          Store.iter_facts v (Query.rep v thing) (fun p w ->
               if p < ns then begin
                 let i = Array.unsafe_get slot p in
                 if i >= 0 then f i (of_word v (Array.unsafe_get typs i) w)
@@ -463,8 +479,8 @@ let field_ops ctx name d (k : kind) thing fields ~update =
       | x when f.many ->
         if update then refuse "invalid" "%s holds several values: change them with Write, Add and Retract" f.pname;
         let xs = match x with C.List l -> Array.init (C.length l) (C.item ctx l) | x -> [| x |] in
-        Array.iter (fun x -> ops := Resolve.Add (thing, r.ids.(i), of_cesia f.pname f.typ x) :: !ops) xs
-      | x -> ops := Resolve.Add (thing, r.ids.(i), of_cesia f.pname f.typ x) :: !ops)
+        Array.iter (fun x -> ops := Resolve.Add (thing, r.ids.(i), value_in d f.pname f.typ x) :: !ops) xs
+      | x -> ops := Resolve.Add (thing, r.ids.(i), value_in d f.pname f.typ x) :: !ops)
     k.fields;
   (* a field the kind does not have is a mistake of the program, said rather than dropped *)
   Array.iter
@@ -511,9 +527,9 @@ let write ctx a =
         let f = k.fields.(i) in
         let p = (resolve_kind d k).ids.(i) in
         match o with
-        | "add" -> Resolve.Add (thing, p, of_cesia f.pname f.typ x)
-        | "retract" -> Resolve.Retract (thing, p, of_cesia f.pname f.typ x)
-        | "expect" -> Resolve.Expect (thing, p, if x = C.Missing then None else Some (of_cesia f.pname f.typ x))
+        | "add" -> Resolve.Add (thing, p, value_in d f.pname f.typ x)
+        | "retract" -> Resolve.Retract (thing, p, value_in d f.pname f.typ x)
+        | "expect" -> Resolve.Expect (thing, p, if x = C.Missing then None else Some (value_in d f.pname f.typ x))
         | "incr" ->
           (* into: [thing, property], or missing *)
           let into =
@@ -661,7 +677,7 @@ let question ?(uses = []) ctx name d qv nvars =
       let f = k.fields.(i) in
       let pid = (resolve_kind d k).ids.(i) in
       let e = match var e, e with Some j, _ -> vtyp.(j) <- Some Value.Tlink; Query.Var j | None, C.Int t -> Query.Thing t | _ -> C.need ctx name "a variable or a thing's id first in a pattern" e in
-      let x = match var x with Some j -> vtyp.(j) <- Some f.typ; Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x) in
+      let x = match var x with Some j -> vtyp.(j) <- Some f.typ; Query.Var j | None -> Query.Val (value_in d f.pname f.typ x) in
       { Query.e; p = pid; v = x }
     in
     (* a list's items; Not, Or and And give their four arguments, those left out missing *)
@@ -720,7 +736,7 @@ let question ?(uses = []) ctx name d qv nvars =
           match var x with
           | Some j -> (
             match vtyp.(j) with
-            | Some t -> [ Question.Ask.In (j, List.map (of_cesia "In" t) (list_of vs)) ]
+            | Some t -> [ Question.Ask.In (j, List.map (value_in d "In" t) (list_of vs)) ]
             | None -> refuse "invalid" "a variable of In appears in no pattern")
           | None -> C.need ctx name "a variable first in In" x)
         | _ -> C.need ctx name what it)
@@ -1076,7 +1092,7 @@ let rule_of ctx name d v =
               | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> agg `Max, Query.Var (Option.get (var s))
               | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> agg `Count, Query.Val (Value.Int 0)
               | _ -> C.need ctx name "a value of Then: a variable, a value, or Sum, Min, Max of a variable, or Count()" x)
-            | _ -> None, (match var x with Some j -> Query.Var j | None -> Query.Val (of_cesia f.pname f.typ x))
+            | _ -> None, (match var x with Some j -> Query.Var j | None -> Query.Val (value_in d f.pname f.typ x))
           in
           Rules.Give { Query.e; p = (match a with Some g -> Rules.aggregate g pid | None -> pid); v }
         | v -> C.need ctx name "Then: a pattern [thing, property, value], or cepheus.Never" v
@@ -1085,13 +1101,117 @@ let rule_of ctx name d v =
     | _ -> C.need ctx name "a rule {Where: [patterns], Then: pattern}" body)
   | _ -> C.need ctx name "a rule, as cepheus.Rule makes it" v
 
+(* ---- a question of the package's own, whose answers are things: their ids, read where Find reads ---- *)
+
+let ask_ids ctx d (q : Query.t) extra =
+  let cols = Array.init q.vars Fun.id in
+  match local_state d with
+  | Some v -> (
+    match Answer.answer ~extra v q (Wire.Give cols) with
+    | a -> List.init a.n (fun r -> Array.map (fun c -> a.word r c) cols)
+    | exception Pages.Unreadable m -> refuse "damaged" "%s" m)
+  | None -> (
+    match d.src with
+    | Fork _ -> []
+    | Server s -> (
+      match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query = q; select = Wire.Give cols; extra; order = Question.Top.none }) with
+      | Wire.Rows rw -> List.map (Array.map (function Value.Link e | Value.Int e -> e | _ -> refuse "protocol" "an unexpected row")) rw.rows
+      | rep -> server_error rep "a question"))
+
+(* ---- Same: the class of a thing, the things the rules made the same as it (cepheus/same) ---- *)
+
+let same_of ctx a =
+  let name = "cepheus.Same" in
+  try
+    let d = db_of ctx name a.(0) in
+    let x = int ctx name a.(1) in
+    let ids =
+      match local_state d with
+      | Some v -> Query.same v x
+      | None -> (
+        (* at the server: the things whose cepheus/same is x's representative (a question reads a thing it names as
+           its representative); then, when x is one of them, the representative, x's own cepheus/same: the question
+           names x by a range of one link, which is read as written (a link of In or of a pattern would be read as
+           the representative, which has none) *)
+        let pat e v : Query.pattern = { e; p = Schema.p_same; v } in
+        let one q = List.map (fun r -> r.(0)) (ask_ids ctx d q []) in
+        match one { Query.vars = 1; where = [ pat (Var 0) (Thing x) ]; ranges = [] } with
+        | [] -> [ x ]
+        | members when not (List.mem x members) -> List.sort compare (x :: members)
+        | members -> (
+          match one { Query.vars = 2; where = [ pat (Var 1) (Var 0) ]; ranges = [ 1, Value.Link x, Value.Link x ] } with
+          | [ r ] -> List.sort compare (r :: members)
+          | _ -> refuse "conflict" "%s: the class of %d changed while it was read: read it again" name x))
+    in
+    C.ok ctx (C.list ctx (Array.of_list (List.map (fun e -> C.Int e) ids)))
+  with Refused (code, m) -> failure ctx code m
+
+(* ---- the library OWL 2 RL (the package cesia/cepheus/owl): owl.Rl() names its rules, {Rule: "owl/cax-sco",
+   Library: "owl"}, and Define takes them from the engine's library (Cepheus.Owl.rl), for this database ---- *)
+
+let library_keys = C.keys [| "Rule"; "Library" |]
+
+(* the name of a rule of the library, or None for a rule of the program's own *)
+let library_rule ctx name v =
+  match v with
+  | C.Map m | C.Struct m -> (
+    match C.fields library_keys m with
+    | [| _; C.Missing |] -> None
+    | [| C.Text r; C.Text "owl" |] -> Some r
+    | _ -> C.need ctx name "a rule of OWL 2 RL, as owl.Rl() gives it" v)
+  | _ -> None
+
+(* the ids of OWL 2 RL's vocabulary in this database (declared by owl.Vocabulary, a kind given to Connect or Fork, as
+   Cepheus.Owl.setup declares it), and owl:Thing and owl:Nothing, made once in a group of their own *)
+let owl_of ctx d =
+  let ids =
+    List.map
+      (fun (n, typ, many, unique) ->
+        match declared d n with
+        | Some (p, (x : Schema.prop)) when x.typ = typ && x.many = many && x.unique = unique -> p
+        | Some _ -> refuse "invalid" "%s is declared in this database otherwise than in OWL 2 RL's vocabulary" n
+        | None -> refuse "invalid" "OWL 2 RL's rules need its vocabulary: give owl.Vocabulary to Connect (or Fork)")
+      Owl.vocabulary
+  in
+  let builtin = List.nth ids (List.length ids - 1) in
+  let find s =
+    match ask_ids ctx d { Query.vars = 1; where = [ { e = Var 0; p = builtin; v = Val (Text s) } ]; ranges = [] } [] with
+    | r :: _ -> Some r.(0)
+    | [] -> None
+  in
+  let rec go tries =
+    match find "Thing", find "Nothing" with
+    | Some thing, Some nothing -> Owl.make ids ~thing ~nothing
+    | t, n ->
+      if tries = 0 then refuse "conflict" "owl:Thing and owl:Nothing could not be made: Define again";
+      let ops = (if t = None then [ Resolve.Add (-1, builtin, Text "Thing") ] else []) @ if n = None then [ Resolve.Add (-2, builtin, Text "Nothing") ] else [] in
+      (* another program that made them at once: read again *)
+      (match commit ctx d ~by:0 ~why:"cepheus: owl" ops with _ -> () | exception Refused (("unique" | "conflict"), _) -> ());
+      go (tries - 1)
+  in
+  go 3
+
 (* the new rules and the changed ones in one group, as Cepheus.define: a name taken by a property is refused, a race
    for a free id (another program defining at once) is read again *)
 let define ctx a =
   let name = "cepheus.Define" in
   try
     let d = db_of ctx name a.(0) in
-    let rules = Array.to_list (Array.map (rule_of ctx name d) (list_of ctx name a.(1))) in
+    let items = list_of ctx name a.(1) in
+    (* the program's rules first, then those of the library, which may write owl:Thing and owl:Nothing *)
+    let own = Array.map (fun v -> match library_rule ctx name v with Some r -> Error r | None -> Ok (rule_of ctx name d v)) items in
+    let library = lazy (Owl.rl (owl_of ctx d)) in
+    let rules =
+      Array.to_list
+        (Array.map
+           (function
+             | Ok r -> r
+             | Error n -> (
+               match List.find_opt (fun (r : Rules.t) -> r.name = n) (Lazy.force library) with
+               | Some r -> r
+               | None -> refuse "invalid" "%s is no rule of OWL 2 RL: owl.Rl() gives its rules" n))
+           own)
+    in
     let rec go tries =
       let names, texts = named ctx d in
       let next = ref Schema.first_prop in
@@ -1152,4 +1272,4 @@ let () =
     [ "kind", 2, 2, kind; "connect", 4, 4, connect; "get", 3, 3, get; "insert", 5, 5, insert; "update", 6, 6, update;
       "write", 4, 4, write; "variables", 1, 1, variables; "find", 3, 3, find; "fork", 2, 2, fork; "close", 1, 1, close;
       "watch", 3, 3, watch; "next", 1, 1, next; "define", 2, 2, define; "put", 9, 9, put; "read", 5, 5, read;
-      "delete", 5, 5, delete; "erase", 2, 2, erase ]
+      "delete", 5, 5, delete; "erase", 2, 2, erase; "same", 2, 2, same_of ]

@@ -191,10 +191,7 @@ let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ
 
 (* ---- classes of equal things ---- *)
 
-let same (v : view) x =
-  let r = Query.rep v x in
-  if not (Query.any_same v) then [ x ]
-  else (let l = ref [ r ] in Store.iter_things v Schema.p_same r (fun y -> l := y :: !l); List.sort compare !l)
+let same (v : view) x = Query.same v x
 
 let get (v : view) e =
   let e = Query.rep v e in

@@ -30,7 +30,7 @@ cepheus.Erase(ada, db)?             (* ada's key destroyed: every file she owned
 - `cepheus.Files(name)` is a kind like any other, with the fields `Name`, `Size`, `Type`, `Owner` and `Content`: give
   it to `Connect`, and ask questions on it as on any kind. `List(kind, db)` is the question
   `Find(4, (f, n, s, t) -> {Where: [[f, kind.Name, n], [f, kind.Size, s], [f, kind.Type, t]], Give: {Id: f, Name: n, Size: s, Type: t}}, db)`.
-- **Rights are the kind's** ([G16](guarantees.md#g16-rights)): a token that may add to `scan` may put a scan; one that
+- **Rights are the kind's** ([G16](server.md#rights-g16)): a token that may add to `scan` may put a scan; one that
   may read `scan` may read its bytes; `Erase` needs a token that writes the whole database (it cannot be undone), and
   an owner: the database's own key, under the files of no owner, is never erased (`invalid`).
 - `Put` returns once the bytes and the facts are on the server's disk; sent again after a broken connection, it is
