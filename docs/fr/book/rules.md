@@ -585,27 +585,57 @@ de l'arrière-plan n'est publiée qu'avec le groupe), chaque vue à partir de lu
 le groupe soit durable ne laisse rien : le changement n'a jamais été confirmé. Le protocole est vérifié par TLC (le
 model checker de TLA+, qui parcourt tous les états d'un modèle ; `spec/RuleChange.tla` : la construction, des lots de
 rattrapage, le switch, des crashs, les frames d'un leader Raft reprises ; chaque vue exacte sous ses règles, un seul
-switch, les contraintes, `Expect` au switch, aucune écriture perdue, et le changement se termine), et chacune de ses
-huit parties est nécessaire : sans n'importe laquelle d'entre elles, TLC trouve un contre-exemple
+switch, les contraintes, `Expect` au switch, aucune écriture perdue, les runs sur le disque exacts, et le changement
+se termine ; avec aussi le run à lui des faits dérivés d'un changement, et des merges), et chacune de ses treize parties
+est nécessaire : sans n'importe laquelle d'entre elles, TLC trouve un contre-exemple
 ([tests](testing.md#model-checking)).
 
 **Ce que fait le writer pendant ce temps.** Il n'attend jamais la construction ni le rattrapage ; aucun merge (la
 fusion de runs triés en un seul) ne démarre en arrière-plan pendant qu'un changement tourne, et un changement attend
-un merge en cours, pour que les deux vues partagent leurs runs (les faits dérivés du changement atteignent le delta de
-la vue, et le merge suivant les écrit dans un run). Sa part au switch, ce sont les derniers groupes et la frame. Si
-l'arrière-plan prend plus de 65 536 groupes de retard, le writer l'attend, pour que les groupes consignés et les
-deltas restent bornés.
+un merge en cours, pour que les deux vues partagent leurs runs. Sa part au switch, ce sont les derniers groupes et la
+frame. Si l'arrière-plan prend plus de 65 536 groupes de retard, le writer l'attend, pour que les groupes consignés et
+les deltas restent bornés.
 
-**Ce que cela coûte** ([benchmarks](benchmarks.md#règles-étape-5--les-changements-des-règles-en-arrière-plan-2026-11-13)). Sur
-10 universités en forme de LUBM avec les 94 règles, pendant que 256 clients écrivent de façon durable, ajouter un
-axiome (chaque personne est aussi d'une classe que les données laissent vide : environ 150 000 faits dérivés)
-s'installe en 3,1 s (médiane de 21 ; sa construction 0,49 s), et la part du writer lui-même à l'installation est de
-54 ms. Le débit des clients pendant qu'il tourne est 0,84 de ce qu'il est sans le changement, 0,89 sur toute la mesure
-depuis son début : l'arrière-plan partage avec le writer les quatre cœurs de la machine, ses caches et le garbage
-collector, et le delta grandit pendant ce temps, puisqu'aucun merge ne tourne à côté d'un changement. Définir les 94
-règles sur les mêmes données sans règles est le pire cas : chaque groupe écrit pendant ce temps coûte aux nouvelles
-règles plusieurs fois ce qu'il coûte aux anciennes, l'arrière-plan ne peut pas suivre à pleine charge (environ 110 µs
-par groupe contre 10 à 25 pour le writer), et le writer l'attend à 65 536 groupes de retard (des secondes).
+**Les faits dérivés d'un grand changement : un run à eux.** Le **delta** est la partie d'une vue gardée en mémoire
+sous forme de maps (des tables de correspondance, un fait à la fois, par-dessus les runs du disque) ; un **run** est
+un fichier trié de faits. Mettre 150 000 faits dérivés dans le delta un par un prenait la moitié de la construction
+d'un changement. Alors, quand la construction ajoute 20 000 faits dérivés ou plus des propriétés qui prennent
+plusieurs valeurs, aucune unique (aucune vérification ne relit ces faits après les tours), et dont le delta ne tient
+aucune entrée pour ce fait, elle les met de côté, les trie et les écrit, par la seule façon dont un run s'écrit (un
+merge, d'eux seuls), comme un run à eux : **R**, au-dessus des runs et sous le delta de la vue du changement. Le
+rattrapage lit R comme n'importe quel run. La table des différences (où le rattrapage garde, fait par fait, chaque
+fait dont l'état diffère entre la vue du writer et celle du changement, et d'où la frame du changement est écrite) ne
+tient un fait de R qu'une fois qu'un groupe écrit pendant ce temps le touche (avant cela, ses états sont connus :
+absent pour le writer, dérivé pour le changement), et l'y garde ensuite, même quand ses deux états sont d'accord,
+puisqu'un fait de R absent de la table veut dire « dérivé, comme R le dit ». La frame du changement ne change pas :
+ses changements affirmés, les différences de la table, puis les faits de R que la table ne tient pas, comme dérivés.
+Le journal tient chaque fait dérivé, comme avant, et son format est le même.
+
+R est **provisoire** : son état n'est celui d'aucun groupe (les faits dérivés d'un changement, sans les groupes
+autour), donc il n'est jamais nommé dans la chaîne des runs, jamais forcé sur le disque (fsync), et son fichier
+(`<lo>-<hi>.run.change.tmp`, niveau 0 dans son en-tête, ce qu'une ouverture refuse dans un run nommé) s'en va quand le
+merge qui le prend est installé, quand le changement se termine sans être installé, ou à la fermeture. Un crash le
+perd (un fichier `.tmp`, supprimé à l'ouverture), et la recovery rejoue la frame du changement. Le writer adopte R
+avec la vue du changement, et chaque merge le prend (un merge prend les runs les plus récents, et R est toujours parmi
+eux). À partir de 4 tels runs, un merge démarre ; à 8, un changement met ses faits dérivés dans le delta, comme le
+fait un petit changement. Les replicas, les followers Raft et les lecteurs locaux ne voient jamais R : ils appliquent
+la frame du changement, comme avant. TLC vérifie le protocole avec R ([tests](testing.md#model-checking)), et chacune
+des cinq règles de R est nécessaire : R ne prend que les faits pour lesquels le delta n'a pas d'entrée, un fait de R
+entre dans la table comme (absent, dérivé), il y reste une fois touché, R n'est jamais nommé, chaque merge le prend ;
+sans n'importe laquelle, TLC trouve un contre-exemple.
+
+**Ce que cela coûte** ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5--les-faits-dérivés-dun-changement-dans-un-run-à-eux-2026-11-18)).
+Sur 10 universités en forme de LUBM avec les 94 règles, pendant que 256 clients écrivent de façon durable, ajouter un
+axiome (chaque personne est aussi d'une classe que les données laissent vide : environ 140 000 faits dérivés) s'installe
+en 0,60 s (médiane de 21 ; sa construction 0,16 s, son run à lui 0,03 s : 0,72 M de faits dérivés par seconde), et la
+part du writer lui-même à l'installation est de 34 ms. Le débit des clients pendant qu'il tourne est 0,87 de ce qu'il
+est sans le changement, 0,78 sur toute la mesure depuis son début (0,83 et 0,86 dans une autre série : un seul arrêt
+dans une fenêtre de moins d'une seconde déplace beaucoup le rapport d'une paire) : l'arrière-plan partage avec le writer
+les quatre cœurs de la machine, ses caches et le garbage collector, et le delta grandit pendant ce temps, puisqu'aucun
+merge ne tourne à côté d'un changement. Définir les 94 règles sur les mêmes données sans règles est le pire cas : chaque
+groupe écrit pendant ce temps coûte aux nouvelles règles plusieurs fois ce qu'il coûte aux anciennes, l'arrière-plan ne
+peut pas suivre à pleine charge (environ 110 µs par groupe contre 10 à 25 pour le writer), et le writer l'attend à 65
+536 groupes de retard (des secondes).
 
 **Des tours sur plusieurs domains.** Dans un groupe que le writer raisonne lui-même (un chargement, un changement sur
 un fork ou dans le cœur déterministe), un tour de 20 000 faits ou plus, et le premier tour des règles qu'ajoute un
@@ -613,9 +643,12 @@ changement, est découpé en morsels (des petits morceaux de travail, Leis et al
 jusqu'à quatre domains, chacun dérivant avec ses propres plans et gardant les têtes qui ne sont pas encore des faits ;
 puis un seul domain en fait des faits, morsel après morsel, dans l'ordre, comme il les aurait trouvées seul : le
 résultat, le budget et les refus ne dépendent pas des domains. Les règles avec `Not` ou des agrégats, et les règles
-dont un groupe ajouterait les constantes texte au dictionnaire (intern), tournent sur un seul domain. Un changement en
-arrière-plan ne dérive que sur son propre domain : mesuré sur quatre domains à cet endroit, le débit des clients
-pendant le changement tombait de 0,84 à 0,78 de ce qu'il est sans lui. Mesuré sur un chargement de 10 universités avec
+dont un groupe ajouterait les constantes texte au dictionnaire (intern), tournent sur un seul domain. Quand les règles
+ajoutées sont moins nombreuses que les threads, les instances de chaque règle sont découpées par blocs des premiers
+éléments de son plan, un bloc par morsel. Un changement en arrière-plan ne dérive que sur son propre domain : mesuré sur
+plusieurs domains à cet endroit, le débit des clients pendant le changement baissait (de 0,84 à 0,78 à l'étape 5 ;
+avec les instances d'une règle en morsels, de 0,83 à 0,50), et la construction n'allait pas plus vite
+([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5--les-faits-dérivés-dun-changement-dans-un-run-à-eux-2026-11-18)). Mesuré sur un chargement de 10 universités avec
 les 94 règles : les tours à 1,44 M de faits dérivés/s sur quatre domains, 0,90 sur un seul.
 
 Les règles sont compilées à la première écriture qui en a besoin, jamais à l'ouverture : une ouverture rejoue des
@@ -1003,10 +1036,12 @@ mention contraire.
 
 Le plan de la conception a six étapes ; cette version a les six.
 
-- **Le reste de l'étape 3** : un changement des règles calculé en arrière-plan met encore ses faits dérivés dans le
-  delta de la vue (pas dans un run à lui), et les joins de ses tours interrogent le store fait par fait.
-- **Le reste de l'étape 5** : un changement avec de nouvelles choses est calculé dans le groupe ; les faits dérivés
-  d'un changement attendent le merge suivant pour atteindre un run.
+- **Le reste de l'étape 3** : les joins des tours d'un changement en arrière-plan interrogent le store fait par fait,
+  sur le seul domain du changement.
+- **Le reste de l'étape 5** : un changement avec de nouvelles choses est calculé dans le groupe ; seuls les faits
+  dérivés des propriétés à plusieurs valeurs, aucune unique, vont dans le run à eux d'un changement (les autres entrent
+  dans le delta) ; les deux cibles de l'étape 5 ne sont pas atteintes toutes les deux
+  ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5--les-faits-dérivés-dun-changement-dans-un-run-à-eux-2026-11-18)).
 - **Le reste de l'étape 6** : B/F sur les égalités (Motik et al., IJCAI 2015 [Motik 2015c]) au lieu de défaire une
   classe ; la preuve d'une égalité dans `why` ; l'égalité à côté de `Not` et des agrégats, des closure modules, du
   chemin des chargements et des tours parallèles.

@@ -577,8 +577,9 @@ databases on the disk where every change takes the background path: G17 checked 
 decisions as the model's, and the database reopened the same); `test/rulechange.ml` (groups written while a change is
 held after its build, caught up exactly and ordered before it; a group that interferes ends it with `Conflict`; 6
 writers, 24 changes and 2 readers checking every view they take against the least model under its own rules; close
-during a change; kill -9 during changes, each recovered view exact); `tools/tlc.sh` (`spec/RuleChange.tla`, and its
-eight variants that must break, a Raft member's take-back among them).
+during a change; kill -9 during changes, each recovered view exact; the same with every change's derived facts in a run
+of their own, killed between its write and its install too); `tools/tlc.sh` (`spec/RuleChange.tla`, and its
+thirteen variants that must break, a Raft member's take-back and a change's run of its own among them).
 
 ## G20 `why` returns a proof
 

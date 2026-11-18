@@ -335,7 +335,13 @@ journal n'attende derrière des centaines de MB de dirty pages d'un merge, des p
 répertoire ; c'est seulement alors que les runs qu'il a remplacés sont supprimés, ainsi que tout autre run hors de la
 chaîne (G12). Aucun run n'est gardé de côté comme solution de repli : le journal tient chaque groupe, donc un run
 trouvé endommagé à une ouverture est mis de côté et ses groupes rejoués depuis le journal. Un fichier `.tmp` trouvé à
-l'ouverture est un merge qu'un crash a interrompu : il est supprimé.
+l'ouverture est un merge qu'un crash a interrompu : il est supprimé. Les faits dérivés d'un grand changement des
+règles ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) s'écrivent de la même façon, seuls, dans
+`<lo>-<hi>.run.change.tmp`, au niveau 0 et sans fsync : ce run est provisoire, son état n'est celui d'aucun groupe,
+donc il n'est jamais renommé ; son fichier s'en va une fois installé un merge qui l'a pris (ou quand le changement se
+termine sans être installé, ou à la fermeture), et à l'ouverture comme tout fichier `.tmp`. Une ouverture refuse un run
+nommé dont le niveau est 0. Le journal tient la frame du changement avec chaque fait dérivé, donc rien sur le disque ne
+dépend de ce fichier.
 
 **Ouverture.** L'ouverture prend, parmi les chaînes que permettent les noms, celle qui atteint le groupe le plus récent
 avec le moins de runs, et vérifie chaque run : son en-tête, sa page table (par son CRC, et le fait qu'elle associe

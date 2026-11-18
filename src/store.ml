@@ -78,6 +78,23 @@ type run = {
   s0 : int;  (* the id of its first text *)
 }
 
+(* A provisional run (level 0): a change of the rules' derived facts, a run of their own on top of the others, under
+   the delta (Engine). Its state is no group's: it is never named, every merge takes it, and the chain on the disk, the
+   follow stream and recovery leave it out. *)
+let provisional r = r.level = 0
+
+(* the provisional runs of a view: its newest ones *)
+let provisionals (rs : run array) =
+  let k = ref 0 in
+  while !k < Array.length rs && provisional rs.(!k) do incr k done;
+  !k
+
+(* the runs of the chain: those that are or will be named, without the provisional ones (always the newest) *)
+let chain_runs (rs : run array) =
+  let k = ref 0 in
+  while !k < Array.length rs && provisional rs.(!k) do incr k done;
+  if !k = 0 then rs else Array.sub rs !k (Array.length rs - !k)
+
 (* min and max of ints: Stdlib's are polymorphic, a call to the C comparison each time *)
 let[@inline] min (a : int) b = if a <= b then a else b
 let[@inline] max (a : int) b = if a >= b then a else b

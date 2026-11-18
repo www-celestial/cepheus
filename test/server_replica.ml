@@ -146,8 +146,8 @@ let () =
   C.check true "the replica caught up after kill -9 (%d)" (group "srv1" "main");
   (* a change of the rules on the primary (computed in its background), then a load past a large group's size (the
      path of loads, its frame written by pieces, the rule's consequences in it): the replica holds both, read there *)
-  let sdb2, sps = match Client.declare w "side" [ prop "k" Tint; prop "k2" Tint ] with Ok (db, ps) -> db, ps | Error e -> failwith ("declare: " ^ e.message) in
-  let[@warning "-8"] [ sk; sk2 ] = sps in
+  let sdb2, sps = match Client.declare w "side" [ prop "k" Tint; prop "k2" Tint; prop ~many:true "k3" Tint ] with Ok (db, ps) -> db, ps | Error e -> failwith ("declare: " ^ e.message) in
+  let[@warning "-8"] [ sk; sk2; sk3 ] = sps in
   let rid = Schema.first_thing - 100 in
   let copy : Cepheus.rule = { name = "copy"; vars = 2; where = [ { e = Var 0; p = sk; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p = sk2; v = Var 1 } } in
   (match Client.write w sdb2 [ Resolve.Add (rid, Schema.p_name, Text "copy"); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text copy)); Resolve.Expect (rid, Schema.p_name, None) ] with
@@ -164,6 +164,15 @@ let () =
   let r = Result.get_ok (Client.connect (Client.Unix_socket (sock "srv2")) wtext) in
   let rdb = Result.get_ok (Client.open_db r "side") in
   C.check (rows r rdb sk = nk && rows r rdb sk2 = nk) "the replica: the load and the rule's consequences, read there (%d)" (rows r rdb sk2);
+  (* a change of the rules over the load: its 25,000 derived facts a run of their own on the primary, in its frame for
+     the replica, which applies it as any frame *)
+  let rid3 = Schema.first_thing - 99 in
+  let copy3 : Cepheus.rule = { name = "copy3"; vars = 2; where = [ { e = Var 0; p = sk; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p = sk3; v = Var 1 } } in
+  (match Client.write w sdb2 [ Resolve.Add (rid3, Schema.p_name, Text "copy3"); Resolve.Add (rid3, Schema.p_rule, Text (Rules.to_text copy3)); Resolve.Expect (rid3, Schema.p_name, None) ] with
+   | Ok _ -> C.check true "a change of the rules over the load on the primary"
+   | Error e -> C.check false "a change of the rules over the load: %s %s" e.code e.message);
+  wait_for "the replica catches up after the change over the load" caught_up;
+  C.check (rows w sdb2 sk3 = nk && rows r rdb sk3 = nk) "the change's consequences on the primary and on the replica (%d, %d of %d)" (rows w sdb2 sk3) (rows r rdb sk3) nk;
   Client.close r;
   (* the peer port refuses: another CA, a name that is no other peer, another cluster id, an unknown database *)
   let with_tls (c : Config.t) ca cert key = { c with tls = Some { Config.ca; cert; key } } in

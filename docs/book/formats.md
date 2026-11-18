@@ -306,7 +306,12 @@ clients write, the file is also forced every 8 MiB on the way, so that no journa
 of a merge's dirty pages), and, once the run's group is durable in the journal, the rename to its name and an fsync of
 the directory; only then are the runs it replaced removed, and every other run outside the chain (G12). No run is
 kept aside as a fallback: the journal holds every group, so a run found damaged at an open is set aside and its groups
-replayed from the journal. A `.tmp` file found at open is a merge a crash interrupted: it is removed.
+replayed from the journal. A `.tmp` file found at open is a merge a crash interrupted: it is removed. The derived
+facts of a large change of the rules ([rules](rules.md#changes-of-the-rules-in-the-background)) are written
+the same way, alone, into `<lo>-<hi>.run.change.tmp`, at level 0 and not forced: that run is provisional, its state no
+group's, so it is never renamed; its file goes once a merge that took it is installed (or when the change ends without
+its install, or at close), and at open as any `.tmp` file. An open refuses a named run whose level is 0. The journal
+holds the change's frame with every derived fact, so nothing on the disk depends on that file.
 
 **Opening.** Open takes, among the chains the names allow, the one that reaches the newest group with the fewest
 runs, and checks each run: its header, its page table (by its CRC, and that it maps each file page at most once),

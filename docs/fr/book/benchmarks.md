@@ -565,6 +565,58 @@ Les deux tours lents par le socket ne se sont pas répétés dans le processus, 
 sont chronométrés : la plus longue attente d'un switch de merge a été de 413 ms sur main et de 447 ms sur la branche,
 une fois chacune en 7 tours, sur un disque dont les fsync varient autant d'un tour à l'autre.
 
+## Règles, les cibles de l'étape 5 : les faits dérivés d'un changement dans un run à eux (2026-11-18)
+
+Le reste de l'étape 5 ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) : un grand changement des règles
+écrit les faits dérivés qu'il ajoute comme un run à eux, provisoire, sous le delta de sa vue, au lieu de les mettre dans
+le delta un par un ; le rattrapage ne les tient dans sa table des différences qu'une fois qu'un groupe écrit pendant ce
+temps les touche.
+
+**Méthode.** Celle de l'étape 5 ([plus bas](#règles-étape-5--les-changements-des-règles-en-arrière-plan-2026-11-13)) :
+`CHANGE=one reason.exe change 10 256 8 2 with|without DIR` (build release), la règle `[x type Person] -> [x type
+Schedule]` définie sur LUBM-10 avec les 94 règles sur le disque (1,89 M de faits) pendant que 256 clients écrivent des
+étudiants (GraduateStudent) de façon durable ; 21 paires (avec, sans) pour main 8445b4a et pour cette branche,
+alternées, en une seule prise du lock des travaux lourds, chaque exécution dans un scope de 3 GB. Une case est la
+médiane avec $[x(1), x(n)]$ ; un débit est le nombre de faits dérivés du changement sur sa construction (et sur sa
+construction et l'écriture de son run) ; un rapport de débit est celui d'une paire.
+
+| ce qui est mesuré (21 paires) | main 8445b4a | cette branche |
+|---|---:|---:|
+| le changement, de `define` à sa réponse | 1,54 s [0,66 ; 12,5] | **0,60 s** [0,34 ; 1,45] |
+| sa construction (environ 140 000 faits dérivés) | 0,308 s [0,233 ; 0,433] | **0,159 s** [0,088 ; 0,206] |
+| son run à lui : trié et écrit, sans fsync | | 0,033 s [0,020 ; 0,042] |
+| faits dérivés par seconde, la construction | 0,45 M [0,35 ; 0,52] | **0,86 M** [0,69 ; 1,38] |
+| faits dérivés par seconde, la construction et le run | 0,45 M [0,35 ; 0,52] | **0,72 M** [0,58 ; 1,12] |
+| la part du writer à l'installation | 53 ms [37 ; 74] | **34 ms** [20 ; 42] |
+| le débit des clients dans la fenêtre du changement, avec / sans | 0,61 [0,001 ; 1,09] | **0,87** [0,05 ; 5042] |
+| la même chose sur toute l'exécution depuis le début du changement | 0,76 [0,001 ; 3,18] | **0,78** [0,44 ; 2,17] |
+
+Où va la construction de main (une exécution avec des chronomètres) : 0,32 s = les programmes 0,015, les instances de la
+règle ajoutée 0,096, la liste des faits dérivés 0,029, leur entrée dans le delta 0,149, les vérifications 0,020. Le run
+à eux remplace la part du delta par son tri et son écriture (0,03 s), et les vérifications après les tours ne relisent
+plus que les faits des propriétés à une seule valeur ou uniques.
+
+**Une variante : l'arrière-plan sur plusieurs domains** (les instances de la règle ajoutée en morsels sur chaque thread,
+comme dans les propres groupes du writer ; 21 paires contre cette branche, la même méthode) : la même construction
+(0,168 s des deux côtés), et le débit des clients plus bas à côté (0,50 dans la fenêtre du changement et 0,84 sur
+l'exécution, contre 0,83 et 0,86). Une règle d'un seul atome a peu de travail de join à partager, et ses têtes
+deviennent des faits par un seul domain dans les deux cas : l'arrière-plan reste sur son propre domain, comme l'étape 5
+l'avait trouvé.
+
+- **Contre les cibles de l'étape** : 2 M de faits dérivés par seconde sur 8 threads : 0,72 M avec l'écriture du run,
+  0,86 M pour la construction seule (manqué : le changement raisonne sur son propre domain, et ses tours lisent la vue
+  fait par fait) ; les clients à 10 % près de leur débit sans le changement : 0,87 dans la fenêtre du changement (manqué
+  ; 0,61 sur main), 0,78 sur l'exécution depuis son début (manqué ; 0,76 sur main ; une autre série de 21 paires du même
+  code, le même jour, a donné 0,83 et 0,86). La fenêtre est courte maintenant (0,34 à 1,45 s), et un seul arrêt d'un
+  côté d'une paire déplace beaucoup son rapport.
+- **Le démarrage** (21 tours de 100 exécutions, alternés, chaque binaire en 7 copies prises à tour de rôle) :
+  `bench.exe` 2,996 ms sur main, 2,998 ms ici (apparié 1,000 [0,984 ; 1,008]) ; `cepheus` (`bin/main.exe`) 4,899 ms et
+  4,922 ms (apparié 1,007 [0,992 ; 1,021]) : aucun changement mesuré (les deux intervalles contiennent 1).
+- **À côté des géants** (leurs articles ; le tableau de l'étape 3) : RDFox 2014 [Motik 2014] dérive 0,67 M de faits par
+  seconde sur un thread et 6,1 à 7,0 M sur 16 à 32 threads de deux Xeon à 8 cœurs ; les 0,72 M par seconde de ce
+  changement, sur un seul domain à côté de 256 clients qui écrivent de façon durable, sont environ le débit de RDFox sur
+  un thread, loin en dessous de son débit en parallèle.
+
 ## Règles, étape 6 : OWL 2 RL, et l'égalité par réécriture (2026-11-14)
 
 La sixième étape du reasoner (la partie du writer qui déduit des faits nouveaux à partir des règles)

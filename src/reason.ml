@@ -75,6 +75,20 @@ exception Exceeded of string
 (* never set: the [stop] of a group that cannot be cancelled *)
 let never = Atomic.make false
 
+(* The derived facts a change of the rules sets apart for a run of its own (Engine, the background path): the facts it
+   adds (absent from the view, derived only after it) of properties that take many values and none unique (no check
+   reads them after the fixpoint), whose thing the view's delta holds no entry for at that fact (an entry there would
+   hide the run below it), when they are at least [min]; else none. They are neither in the view nor in the changes
+   [run] returns: [an] facts, things, properties, value words, in the order the reasoner found them. *)
+type apart = { amin : int; mutable an : int; mutable ae : Bulk.i32; mutable ap : Bulk.u16; mutable aw : Bulk.ints }
+
+let apart ~min = { amin = max 1 min; an = 0; ae = Bulk.i32 0; ap = Bulk.u16 0; aw = Bulk.ints 0 }
+
+(* the view's delta holds no entry for the fact (e p w) *)
+let no_entry (v : Store.view) e p w =
+  (not (Store.is_touched v e))
+  || match Store.IM.find_opt e v.delta.de with None -> true | Some (td : Store.tdelta) -> not (Store.PW.mem (p, w) td.tf)
+
 (* counters for the benchmarks and the tests: rule instances found, facts checked by B/F or Why, and the seconds spent
    reasoning (Reason.run and Reason.bulk) *)
 let derivations = ref 0
@@ -631,6 +645,8 @@ and ctx = {
   exploded : (int, unit) Hashtbl.t;
   mutable refill : int list;  (* the asserted facts of a class taken apart: round 0 of the insertion *)
   mutable why_mode : bool;  (* Why: a fact of a class is proved by the asserted fact of a member it rewrites *)
+  mutable parts : int;  (* a rule's instances cut into [parts] morsels: this context runs the one numbered [part] (the *)
+  mutable part : int;   (* items of its plan's first step, by blocks of 64, one block in [parts]) *)
 }
 
 (* ---- equality: the classes of equal things ----
@@ -1277,20 +1293,30 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
   in
   (* the steps built from the first, so that each sees the variables the earlier ones bind: [step] marks the
      variables it binds before the rest is built *)
-  let rec build = function
+  (* a morsel of a rule's instances ([ctx.parts] > 1): the first step's items by blocks of 64, those of its block only;
+     the morsels together take every item once, whatever runs them *)
+  let morsel = pos = -2 && ctx.parts > 1 in
+  let rec build first = function
     | [] -> if nn = 0 then final else guard (ready ~last:true) final
     | j :: rest ->
       let s = ref (fun () -> ()) in
-      let mk = step j (fun () -> !s ()) in
-      if nn = 0 then s := build rest
+      let k =
+        if first && morsel then begin
+          let cnt = ref 0 and parts = ctx.parts and part = ctx.part in
+          fun () -> let i = !cnt in cnt := i + 1; if (i lsr 6) mod parts = part then !s ()
+        end
+        else fun () -> !s ()
+      in
+      let mk = step j k in
+      if nn = 0 then s := build false rest
       else begin
         let gs = ready ~last:false in
-        let b = build rest in
+        let b = build false rest in
         s := guard gs b
       end;
       mk
   in
-  let body = if nn = 0 then build (Array.to_list order) else (let gs = ready ~last:false in guard gs (build (Array.to_list order))) in
+  let body = if nn = 0 then build true (Array.to_list order) else (let gs = ready ~last:false in guard gs (build true (Array.to_list order))) in
   pl.run <-
     (fun e p w ->
       if pos = -1 then (pl.he <- e; pl.hp <- p; pl.hw <- w; pl.hok <- true);
@@ -2123,7 +2149,7 @@ let [@inline never] new_ctx ?facts ?keys prog v =
     seen2 = iset_create (); walked = Bytes.empty; xk = ignore; plain_derive = false; heads_none = Hashtbl.create 8;
     eqon = false; nr = Hashtbl.create 1; nrbits = Bytes.empty; eqt = Hashtbl.create 8; eqbits = Bytes.empty; eqset = [];
     pend = []; boom = []; exploded = Hashtbl.create 8; refill = [];
-    why_mode = false }
+    why_mode = false; parts = 1; part = 0 }
 
 let [@inline never] take ?facts ?keys prog v =
   let c =
@@ -2259,8 +2285,9 @@ let emit_at c pl r =
   end
 
 (* ---- Large rounds on several domains (the design's section 5.14) ----
-   A round of many facts, or the first round of a change's added rules, is cut into morsels (Leis et al., SIGMOD
-   2014) taken in turn by the domains (Bulk.parallel): each derives with plans of its own in a context of its own,
+   A round of many facts, or the first round of a change's added rules (each rule's instances cut into morsels by
+   blocks of its first step's items when the rules are fewer than the threads), is cut into morsels (Leis et al.,
+   SIGMOD 2014) taken in turn by the domains (Bulk.parallel): each derives with plans of its own in a context of its own,
    reading the view and the working set, which nobody writes meanwhile, and keeps the heads it finds; then this domain
    makes them facts, morsel after morsel, in order, exactly as it would have found them alone: the result, the budget
    and the refusals do not depend on the domains. Only for rules without Not and aggregates, and when every constant
@@ -2275,7 +2302,8 @@ let [@inline never] worker_ctx c =
            heads_none = Hashtbl.create 1 }
 
 (* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
-   the other cores while it runs *)
+   the other cores while it runs (measured again with a rule's instances in morsels: the same build, and the writers'
+   throughput lower beside it) *)
 let par_ok c = !Bulk.threads > 1 && c.stop == never && (not c.prog.eq) && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
 
 exception Too_many
@@ -3757,13 +3785,13 @@ let [@inline never] ontology (gen : program) (v0 : Store.view) (changes : Group.
 
 (* [background]: a change raises [Background] (above). [limit]: the budget (a change's catch-up of a group gives its
    own); [stop]: a change's cancellation *)
-let rec run ?background ?limit ?stop ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
+let rec run ?background ?limit ?stop ?apart ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
   let t0 = Unix.gettimeofday () in
-  match run_ ?background ?limit ?stop ~v0 v changes words with
+  match run_ ?background ?limit ?stop ?apart ~v0 v changes words with
   | r -> seconds := !seconds +. (Unix.gettimeofday () -. t0); r
   | exception e -> seconds := !seconds +. (Unix.gettimeofday () -. t0); raise e
 
-and run_ ?(background = false) ?limit ?(stop = never) ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
+and run_ ?(background = false) ?limit ?(stop = never) ?apart ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) =
   let same_key = Schema.rules_key v0.schema = Schema.rules_key v.schema in
   if same_key && not (Schema.has_rules v.schema) then v, changes
   else if background && not same_key then raise Background
@@ -3793,9 +3821,9 @@ and run_ ?(background = false) ?limit ?(stop = never) ~(v0 : Store.view) (v : St
     in
     incr (if prog == gen then gen_groups else spec_groups);
     let go prog ~whole =
-      match reason ?limit ~whole ~stop ~removed ~added_idx ~v0 v changes words prog same with
+      match reason ?limit ?apart ~whole ~stop ~removed ~added_idx ~v0 v changes words prog same with
       | r -> r
-      | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; reason ?limit ~whole ~stop ~removed ~added_idx ~v0 v changes words gen same
+      | exception Respec (fp, fw) -> incr respecs; unsettle v [ (fp, fw) ]; reason ?limit ?apart ~whole ~stop ~removed ~added_idx ~v0 v changes words gen same
     in
     match go prog ~whole:(not same) with
     | r -> r
@@ -3807,7 +3835,8 @@ and run_ ?(background = false) ?limit ?(stop = never) ~(v0 : Store.view) (v : St
       else go gen ~whole:true
   end
 
-and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list) ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
+and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list) ~(v0 : Store.view) (v : Store.view) (changes : Group.change array) (words : int array) prog same =
+    Option.iter (fun a -> a.an <- 0) apart;
     let reads p = if p < prog.np then Char.code (Bytes.unsafe_get prog.reads p) else 0 in
     (* an aggregate's property holds only what its rule gives: no write asserts it, under the rules after the group (a
        retraction of its fact, derived only, is refused before, by Resolve, with the same message; a retraction of an
@@ -3929,8 +3958,11 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
              scratch *)
           let adding = List.filter (fun ri -> not (prog.never.(ri) || prog.in_module.(ri) || prog.aggs.(ri) <> None) && prog.strat.(ri) = s) added_idx in
           let adding = Array.of_list adding in
-          if not (Array.length adding > 1 && S.facts v0 >= !par_min && par_ok c
-                  && par_phase c (Array.length adding) (fun w m found -> instances w adding.(m) found) 1)
+          (* fewer rules than threads: each rule's instances in morsels, one a thread *)
+          let na = Array.length adding in
+          let parts = if na >= !Bulk.threads then 1 else !Bulk.threads in
+          if not (na * parts > 1 && S.facts v0 >= !par_min && par_ok c
+                  && par_phase c (na * parts) (fun w m found -> w.parts <- parts; w.part <- m mod parts; instances w adding.(m / parts) found) 1)
           then Array.iter (fun ri -> instances c ri (fun pl -> emit_at c pl 1)) adding;
           Array.iteri
             (fun mi (m : closure) ->
@@ -4014,6 +4046,41 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
         let es = Array.make cap 0 and ps = Array.make cap 0 and wv = Array.make cap 0 and ss = Array.make cap 0 and bs = Array.make cap 0 in
         let m = ref 0 in
         let todo e p w n b = let i = !m in es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- n; bs.(i) <- b; m := i + 1 in
+        (* a change's facts set apart for a run of its own ([apart]): marked first, taken only when they are enough *)
+        let marks = match apart with Some _ -> Bytes.make cap '\000' | None -> Bytes.empty in
+        let nmarked =
+          match apart with
+          | None -> 0
+          | Some a ->
+            let np = Schema.count c.v.schema in
+            let plain = Bytes.init np (fun p ->
+                match Schema.find c.v.schema p with
+                | Some d when d.many && (not d.unique) && (not (Schema.is_system p)) && not (p < Bytes.length prog.islist && Bytes.get prog.islist p <> '\000') -> '\001'
+                | _ -> '\000')
+            in
+            let fits e p w = p < np && Bytes.unsafe_get plain p <> '\000' && no_entry c.v e p w in
+            let k = ref 0 in
+            for x = 0 to ws.n - 1 do
+              if base ws x = 0 && now ws x = 2 && (not (has ws x 16)) && fits (fe ws x) (fp ws x) (fw ws x) then (Bytes.unsafe_set marks x '\001'; incr k)
+            done;
+            for j = 0 to c.ns - 1 do
+              if fits (Int32.to_int (Bigarray.Array1.unsafe_get c.side_e j)) (Bigarray.Array1.unsafe_get c.side_p j) (A.unsafe_get c.side_w j) then
+                (Bytes.unsafe_set marks (ws.n + j) '\001'; incr k)
+            done;
+            if !k >= a.amin then !k else 0
+        in
+        let put = match apart with
+          | Some a when nmarked > 0 ->
+            if Bigarray.Array1.dim a.ae < nmarked then (a.ae <- Bulk.i32 nmarked; a.ap <- Bulk.u16 nmarked; a.aw <- Bulk.ints nmarked);
+            fun e p w ->
+              let i = a.an in
+              Bigarray.Array1.unsafe_set a.ae i (Int32.of_int e);
+              Bigarray.Array1.unsafe_set a.ap i p;
+              Bigarray.Array1.unsafe_set a.aw i w;
+              a.an <- i + 1
+          | _ -> fun _ _ _ -> ()
+        in
+        let set_apart i = nmarked > 0 && Bytes.unsafe_get marks i <> '\000' in
         for x = 0 to ws.n - 1 do
           let b = base ws x and n = now ws x in
           if b <> n then begin
@@ -4024,17 +4091,23 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
               if p < Bytes.length prog.islist && Bytes.get prog.islist p <> '\000' then
                 refuse "rule %s gives %s, the list of a template: only a write may change it"
                   (if rule ws x >= 0 then rule_name c (rule ws x) else "?") (match Schema.find c.v.schema p with Some d -> d.name | None -> string_of_int p);
-              let kind = if n = 2 then Group.Derived else Group.Underived in
-              out := { Group.kind; e; p; v = value_of c.v p w } :: !out;
-              todo e p w n b
+              if set_apart x then put e p w
+              else begin
+                let kind = if n = 2 then Group.Derived else Group.Underived in
+                out := { Group.kind; e; p; v = value_of c.v p w } :: !out;
+                todo e p w n b
+              end
             end
           end
         done;
         let in_ws = List.length !out in
         for k = 0 to c.ns - 1 do
           let e = Int32.to_int (Bigarray.Array1.unsafe_get c.side_e k) and p = Bigarray.Array1.unsafe_get c.side_p k and w = A.unsafe_get c.side_w k in
-          out := { Group.kind = Derived; e; p; v = value_of c.v p w } :: !out;
-          todo e p w 2 0
+          if set_apart (ws.n + k) then put e p w
+          else begin
+            out := { Group.kind = Derived; e; p; v = value_of c.v p w } :: !out;
+            todo e p w 2 0
+          end
         done;
         let derived = Array.of_list (List.rev !out) in
         let m = !m in
@@ -4049,7 +4122,7 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
           (fun i (ch : Group.change) ->
             if i < in_ws && ch.kind = Group.Derived then
               match Schema.find v'.schema ch.p with
-              | Some d ->
+              | Some d when (not d.many) || d.unique ->
                 let x = match S.word v' ch.v with Some w -> find ws ch.e ch.p w | None -> -1 in
                 let rn = if x >= 0 && rule ws x >= 0 then rule_name c (rule ws x) else "?" in
                 if (not d.many) && S.count_values v' ch.e ch.p > 1 then
@@ -4059,7 +4132,7 @@ and reason ?limit ~whole ~stop ~(removed : Rules.t list) ~(added_idx : int list)
                   | Some w -> if S.count_things v' ch.p w > 1 then refuse "rule %s gives %s %s, which another thing has" rn d.name (Value.to_string ch.v)
                   | None -> ()
                 end
-              | None -> ())
+              | _ -> ())
           derived;
         v', Array.append changes derived)
 

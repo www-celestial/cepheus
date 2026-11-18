@@ -496,6 +496,53 @@ The two slow rounds through the socket did not repeat in the process, where the 
 timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
 disk whose fsyncs vary that much from round to round.
 
+## Rules, step 5's targets: a change's derived facts in a run of their own (2026-11-18)
+
+The rest of step 5 ([rules](rules.md#changes-of-the-rules-in-the-background)): a large change of the rules writes the
+derived facts it adds as a run of their own, provisional, under its view's delta, instead of putting them into the delta
+one by one; the catch-up holds them in its table of differences only once a group written meanwhile touches them.
+
+**Method.** Step 5's ([below](#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13)): `CHANGE=one reason.exe
+change 10 256 8 2 with|without DIR` (release build), the rule `[x type Person] -> [x type Schedule]` defined over
+LUBM-10 with the 94 rules on the disk (1.89 M facts) while 256 clients write graduate students durably; 21 pairs (with,
+without) for main 8445b4a and for this branch, alternated, in one hold of the heavy lock, each run in a 3 GB scope. A
+cell is the median with $[x(1), x(n)]$; a rate is the change's derived facts over its build (and over its build and its
+run's write); a throughput ratio is a pair's.
+
+| what (21 pairs) | main 8445b4a | this branch |
+|---|---:|---:|
+| the change, from `define` to its answer | 1.54 s [0.66, 12.5] | **0.60 s** [0.34, 1.45] |
+| its build (about 140,000 derived facts) | 0.308 s [0.233, 0.433] | **0.159 s** [0.088, 0.206] |
+| its run of its own: sorted and written, not forced | | 0.033 s [0.020, 0.042] |
+| derived facts a second, the build | 0.45 M [0.35, 0.52] | **0.86 M** [0.69, 1.38] |
+| derived facts a second, the build and the run | 0.45 M [0.35, 0.52] | **0.72 M** [0.58, 1.12] |
+| the writer's part at the install | 53 ms [37, 74] | **34 ms** [20, 42] |
+| the clients' throughput in the change's window, with / without | 0.61 [0.001, 1.09] | **0.87** [0.05, 5042] |
+| the same over the whole run from the change's start | 0.76 [0.001, 3.18] | **0.78** [0.44, 2.17] |
+
+Where main's build goes (one run with timers): 0.32 s = the programs 0.015, the added rule's instances 0.096, the list
+of derived facts 0.029, putting them into the delta 0.149, the checks 0.020. The run of its own replaces the delta's
+part by its sort and write (0.03 s), and the checks after the rounds now read only the facts of one-valued or unique
+properties.
+
+**A variant: the background on several domains** (the added rule's instances in morsels on every thread, as in the
+writer's own groups; 21 pairs against this branch, the same method): the same build (0.168 s on both sides), and the
+clients' throughput lower beside it (0.50 in the change's window and 0.84 over the run, against 0.83 and 0.86). A rule
+of one atom has little join work to share, and its heads are made facts by one domain either way: the background stays
+on its own domain, as step 5 found.
+
+- **Against the step's targets**: 2 M derived facts a second on 8 threads: 0.72 M with the run's write, 0.86 M for the
+  build alone (missed: the change reasons on its own domain, and its rounds read the view fact by fact); the writers
+  within 10 % of their throughput without the change: 0.87 in the change's window (missed; 0.61 on main), 0.78 over the
+  run from its start (missed; 0.76 on main; another series of 21 pairs of the same code, the same day, gave 0.83 and
+  0.86). The window is short now (0.34 to 1.45 s), and one stall on either side of a pair moves its ratio a lot.
+- **Start-up** (21 rounds of 100 runs, alternated, each binary in 7 copies taken in turn): `bench.exe` 2.996 ms on main,
+  2.998 ms here (paired 1.000 [0.984, 1.008]); `cepheus` (`bin/main.exe`) 4.899 ms and 4.922 ms (paired 1.007 [0.992,
+  1.021]): no change measured (both intervals hold 1).
+- **Beside the giants** (their papers; step 3's table): RDFox 2014 [Motik 2014] derives 0.67 M facts a second on one
+  thread and 6.1 to 7.0 M on 16 to 32 threads of two 8-core Xeons; this change's 0.72 M a second, on one domain beside
+  256 durable writers, is about RDFox's one-thread rate, far below its parallel one.
+
 ## Rules, step 6: OWL 2 RL, and equality by rewriting (2026-11-14)
 
 The sixth step of the reasoner ([rules](rules.md#owl-2-rl-a-library-of-rules)): OWL 2 RL as a library of rules

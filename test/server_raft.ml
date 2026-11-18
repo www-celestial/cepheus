@@ -278,11 +278,12 @@ let () =
    | Ok l -> Replica.close_link l; C.check false "a peer of protocol 1 was taken");
   Replica.version_override := None;
   ignore v;
-  (* the reasoner's paths in a cluster: a load, a change of the rules (computed in the background on the leader)
+  (* the reasoner's paths in a cluster: a load, a change of the rules (computed in the background on the leader, its
+     30,000 derived facts a run of their own there, every one of them in its frame through the Raft log)
      beside groups that count with one counter (Incr), a load past a Raft entry (8 MiB) refused whole; then the leader
      killed: the new one holds every group, each of them through the Raft log *)
   let sdb2, sps =
-    match Client.declare w "side" [ prop "k" Tint; prop "k2" Tint; prop "t" Ttext; prop "c" Tint ] with
+    match Client.declare w "side" [ prop "k" Tint; prop ~many:true "k2" Tint; prop "t" Ttext; prop "c" Tint ] with
     | Ok (db, ps) -> db, ps
     | Error e -> failwith ("declare: " ^ e.message)
   in

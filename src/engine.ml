@@ -53,6 +53,10 @@ type t = {
   at : Journal.position Atomic.t;  (* the journal's end after the last durable frame: where a merge's replay starts *)
   mutable merged : int;  (* the group of the newest run *)
   closed : bool Atomic.t;  (* close ran: a second one does nothing *)
+  pm : Mutex.t;
+  mutable provisional : (Store.run * string) list;
+      (* the provisional runs of the working view (changes of the rules' derived facts, level 0) and their files, under
+         [pm]: removed once a merge that took them is installed, at a Raft take-back that drops them, at close *)
 }
 
 type batch = {
@@ -89,7 +93,12 @@ let large_merge_us = Histogram.create ()
 let switch_us = Histogram.create ()
 let merge_us = Histogram.create ()
 
-let needs_compaction (v : Store.view) = v.delta.dn > !compact_min
+(* the provisional runs a view holds at most (changes of the rules' runs of their own, which no merge took yet): past
+   [max_provisional / 2] a merge starts, at [max_provisional] a change writes its derived facts into the delta as a
+   smaller one does, so that a merge never takes more runs than Snapshot.max_take *)
+let max_provisional = 8
+
+let needs_compaction (v : Store.view) = v.delta.dn > !compact_min || Store.provisionals v.runs >= max_provisional / 2
 
 (* saturated: a [compact_min] near max_int (the merge benchmark turns merges off so) must not wrap around *)
 let cap l = let c = ref !compact_min in for _ = 1 to l do c := if !c > max_int / !ratio then max_int else !c * !ratio done; !c
@@ -353,6 +362,19 @@ let prepare_apply t (f : frame) gs =
       List.iter (Snapshot.abandon t.disk) !runs;
       Error (Damaged (Printf.sprintf "the frame of groups %d to %d does not replay: %s" f.first (f.first + f.count - 1) (Printexc.to_string e))))
 
+let drop_runs rs = List.iter (fun (r : Store.run) -> Pages.drop r.a.pg) rs
+
+(* The files of the provisional runs that left the working view (a merge that took them is installed, a Raft take-back
+   dropped them): a view taken before still reads them, through the descriptor the file keeps open *)
+let sweep t =
+  let gone =
+    Mutex.protect t.pm (fun () ->
+        let live, gone = List.partition (fun (r, _) -> Array.exists (fun r' -> r' == r) t.working.runs) t.provisional in
+        t.provisional <- live;
+        gone)
+  in
+  List.iter (fun ((r : Store.run), f) -> Pages.drop r.a.pg; try t.disk.remove f with Disk.Io _ -> ()) gone
+
 (* Writes and forces the frame; on failure the database stops, and the batch's writes fail. A large group's run is
    forced beside its frame (two fsyncs at once, on two files), and named once both are done (G12); if only the run's
    fsync fails, the group is durable and confirmed, and the database stops (the next open replays it). *)
@@ -385,6 +407,7 @@ let commit t b =
               prerr_endline ("cepheus: the run of a large group could not be named: " ^ m);
               t.stopped <- Some (Io m))
         (List.rev b.runs);
+      if b.runs <> [] then sweep t;
       Atomic.set t.published b.after;
       b.results
     | exception Disk.Io m ->
@@ -415,7 +438,6 @@ let journal_busy () =
     last := f;
     b
 
-let drop_runs rs = List.iter (fun (r : Store.run) -> Pages.drop r.a.pg) rs
 
 (* The switch, with nothing in flight: [w]'s file takes its name, and [v] (w's view with the groups written since)
    becomes the working and the published view; the runs it replaces leave the cache. *)
@@ -428,7 +450,8 @@ let install t (w : Snapshot.written) (v : Store.view) =
   t.merged <- w.group;
   t.working <- v;
   Atomic.set t.published v;
-  drop_runs w.replaced
+  drop_runs w.replaced;
+  sweep t
 
 (* A merge now of every run and the delta, with nothing in flight (working = published). *)
 let compact t =
@@ -565,7 +588,8 @@ let open_ ?(id_source = random_id) ?buffer ?raft ?bootstrap_time ?(bootstrap = t
                                     (Journal.next_group journal - 1) start.group));
         let t =
           { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes;
-            at = Atomic.make (Journal.position journal); merged = !merged; closed = Atomic.make false }
+            at = Atomic.make (Journal.position journal); merged = !merged; closed = Atomic.make false; pm = Mutex.create ();
+            provisional = [] }
         in
         if !v.group = 0 && bootstrap then begin
           (* a new database: the first group describes the system properties (a replica's copy takes its primary's) *)
@@ -606,6 +630,7 @@ let close t =
     in
     if t.stopped = None && forced then t.disk.close (t.disk.openf (Filename.concat t.dir "closed") true);
     drop_runs (Array.to_list t.working.runs);
+    List.iter (fun (_, f) -> try t.disk.remove f with Disk.Io _ -> ()) (Mutex.protect t.pm (fun () -> let l = t.provisional in t.provisional <- []; l));
     t.disk.unlock (Filename.concat t.dir "lock")
   end
 
@@ -698,17 +723,32 @@ let start_merge ?(wake = ignore) t (from : Store.view) =
    interns a text and its view's text numbers are the writer's: the view can be adopted. *)
 
 let change_behind = 64
-let change_pass = 0.02  (* seconds: a catch-up pass this short makes the background ready *)
+let change_pass = 0.005  (* seconds: a catch-up pass this short makes the background ready (the writer's last one is
+                             shorter still) *)
 let change_backlog = 65_536  (* groups logged and not yet taken by the background: past it the writer waits for it *)
 let change_pause = ref 0.  (* seconds the background waits after its build, before its catch-up: the tests' interleavings *)
 let changes_done = Atomic.make 0  (* installed changes, for the tests and benchmarks *)
 let change_us = Histogram.create ()  (* a change in the background: from its start to the catch-up *)
 let install_us = Histogram.create ()  (* the writer's part at its install: the last groups, the frame *)
 let build_us = Histogram.create ()  (* a change's build alone: its consequences on the state it started from *)
+let run_us = Histogram.create ()  (* the run of its own of a change's derived facts: sorted, written *)
+
+(* a change whose derived facts set apart are at least this many writes them as a run of their own (as a group of
+   [Resolve.large_min] operations takes the path of loads); tests make it small *)
+let change_run_min = ref 20_000
+let runs_installed = Atomic.make 0  (* changes installed with a run of their own, for the tests and benchmarks *)
 
 (* a fact's states in the writer's lineage and in the change's view, where they differ: (thing, property, word) ->
    4 x writer's + change's (0 absent, 1 asserted, 2 only derived) *)
 type diff = (int * int * int, int) Hashtbl.t
+
+(* A large change's derived facts in a run of their own (the provisional run R, level 0), under the change's view's
+   delta: the facts it adds that the view's delta holds no entry for (Reason.apart), sorted, written by a merge of
+   them alone (no fsync: never named; recovery replays the change's frame). [rt]: a bit by row of R in its order by
+   thing, set once the fact is in the table ([nt] of them): R's facts enter the table only when a step touches them,
+   with the states (absent, derived) before, and stay there when their two states agree (the frame takes R's facts
+   the table lacks as derived) *)
+type run_of_its_own = { r : Store.run; file : string; facts : Bulk.t; things : Bytes.t; rt : Bytes.t; mutable nt : int }
 
 type built = {
   bv : Store.view;  (* under the new rules: the state after [applied] logged groups, with the change *)
@@ -716,7 +756,31 @@ type built = {
   own : Group.change array;  (* the change's asserted changes at the build *)
   own_keys : (int * int * int, unit) Hashtbl.t;  (* their facts *)
   limit : int;  (* its budget *)
+  run : run_of_its_own option;
 }
+
+(* the row of R that holds (e p w) in its order by thing, or -1: a binary search *)
+let run_row (f : Bulk.t) e p w =
+  let cmp r =
+    let i = Bulk.row f r in
+    let e' = Bulk.thing f i in
+    if e' <> e then compare (e' : int) e
+    else
+      let p' = Bulk.prop f i in
+      if p' <> p then compare (p' : int) p else compare (Bulk.word f i : int) w
+  in
+  let lo = ref 0 and hi = ref f.n in
+  while !lo < !hi do
+    let m = (!lo + !hi) lsr 1 in
+    if cmp m < 0 then lo := m + 1 else hi := m
+  done;
+  if !lo < f.n && cmp !lo = 0 then !lo else -1
+
+let bit (b : Bytes.t) i = Char.code (Bytes.unsafe_get b (i lsr 3)) land (1 lsl (i land 7)) <> 0
+let set_bit (b : Bytes.t) i = Bytes.unsafe_set b (i lsr 3) (Char.unsafe_chr (Char.code (Bytes.unsafe_get b (i lsr 3)) lor (1 lsl (i land 7))))
+
+(* the run's file, when the change ends without its install *)
+let drop_run t (b : built) = Option.iter (fun ro -> Pages.drop ro.r.a.pg; try t.disk.remove ro.file with Disk.Io _ -> ()) b.run
 
 type outcome = Built of built | Ended of error
 
@@ -737,33 +801,106 @@ exception Interfered of error
 
 let before_of : Group.kind -> int = function Added | Derived -> 0 | Retracted | Now_derived -> 1 | Now_asserted | Underived -> 2
 
-(* a group's changes, each fact once: its state before the first change of it and after the last *)
+(* Facts with a small int each, by open addressing on (thing, property, word), in arrays: a step's states take no
+   block a fact (a pass over thousands of groups found its facts in hash tables of tuples: a fifth of its time, and
+   blocks the collector stops every domain for) *)
+type facts = { mutable fn : int; mutable mask : int; mutable slot : int array; mutable xe : int array; mutable xp : int array;
+               mutable xw : int array; mutable xs : int array }
+
+let facts_create k =
+  let size = ref 16 in
+  while !size < 2 * k do size := 2 * !size done;
+  let k = max 8 k in
+  { fn = 0; mask = !size - 1; slot = Array.make !size 0; xe = Array.make k 0; xp = Array.make k 0; xw = Array.make k 0; xs = Array.make k 0 }
+
+let[@inline] fhash e p w = let h = (e * 0x1E3779B97F4A7C15) lxor (p * 0x05EBCA77C2B2AE63) lxor (w * 0x165667B19E3779F9) in (h lxor (h lsr 29)) land max_int
+
+(* the index of (e p w), or -1 *)
+let facts_find f e p w =
+  let i = ref (fhash e p w land f.mask) and r = ref (-2) in
+  while !r = -2 do
+    let x = Array.unsafe_get f.slot !i - 1 in
+    if x < 0 then r := -1
+    else if Array.unsafe_get f.xe x = e && Array.unsafe_get f.xp x = p && Array.unsafe_get f.xw x = w then r := x
+    else i := (!i + 1) land f.mask
+  done;
+  !r
+
+let facts_grow f =
+  let n = Array.length f.xe * 2 in
+  let ext a = let b = Array.make n 0 in Array.blit a 0 b 0 f.fn; b in
+  f.xe <- ext f.xe; f.xp <- ext f.xp; f.xw <- ext f.xw; f.xs <- ext f.xs;
+  let size = ref (Array.length f.slot) in
+  while !size < 2 * n do size := 2 * !size done;
+  f.slot <- Array.make !size 0;
+  f.mask <- !size - 1;
+  for x = 0 to f.fn - 1 do
+    let i = ref (fhash f.xe.(x) f.xp.(x) f.xw.(x) land f.mask) in
+    while f.slot.(!i) <> 0 do i := (!i + 1) land f.mask done;
+    f.slot.(!i) <- x + 1
+  done
+
+(* (e p w) with [s] when it is new, else [upd] of its int *)
+let facts_put f e p w s upd =
+  let x = facts_find f e p w in
+  if x >= 0 then f.xs.(x) <- upd f.xs.(x)
+  else begin
+    if f.fn = Array.length f.xe then facts_grow f;
+    let x = f.fn in
+    f.xe.(x) <- e; f.xp.(x) <- p; f.xw.(x) <- w; f.xs.(x) <- s;
+    f.fn <- x + 1;
+    let i = ref (fhash e p w land f.mask) in
+    while f.slot.(!i) <> 0 do i := (!i + 1) land f.mask done;
+    f.slot.(!i) <- x + 1
+  end
+
+(* a group's changes, each fact once: its state before the first change of it and after the last, as 4 b + a *)
 let fact_states (v : Store.view) (cs : Group.change array) =
-  let h = Hashtbl.create (Array.length cs + 1) in
+  let f = facts_create (Array.length cs) in
   Array.iter
     (fun (c : Group.change) ->
       match Store.word v c.v with
       | None -> ()
       | Some w ->
-        let k = (c.e, c.p, w) in
         let a = Group.after c.kind in
-        match Hashtbl.find_opt h k with Some (b, _) -> Hashtbl.replace h k (b, a) | None -> Hashtbl.replace h k (before_of c.kind, a))
+        facts_put f c.e c.p w ((before_of c.kind lsl 2) lor a) (fun st -> (st land lnot 3) lor a))
     cs;
-  h
+  f
 
-(* the difference after a step: [w] the writer's changes of facts, [c] the change's *)
-let track (d : diff) w c =
-  let one k ~ws ~cs =
-    let w0, c0 =
-      match Hashtbl.find_opt d k with
-      | Some x -> x lsr 2, x land 3
-      | None -> (match ws, cs with Some (b, _), _ | None, Some (b, _) -> b, b | None, None -> 0, 0)
-    in
-    let w1 = match ws with Some (_, a) -> a | None -> w0 and c1 = match cs with Some (_, a) -> a | None -> c0 in
-    if w1 = c1 then Hashtbl.remove d k else Hashtbl.replace d k ((w1 lsl 2) lor c1)
+(* the difference after a step: [w] the writer's changes of facts, [c] the change's; a fact of R not in the table was
+   absent in the writer's lineage and derived in the change's view, and stays in the table once there *)
+let track (d : diff) (run : run_of_its_own option) (w : facts) (c : facts) =
+  (* [ws], [cs]: the states 4 b + a of the fact on each side, -1 when that side did not touch it *)
+  let one e p x ~ws ~cs =
+    let ri = match run with Some ro when e lsr 3 < Bytes.length ro.things && bit ro.things e -> run_row ro.facts e p x | _ -> -1 in
+    if ri < 0 && ws >= 0 && cs >= 0 && ws = cs && not (Hashtbl.mem d (e, p, x)) then ()  (* both sides alike, as before *)
+    else begin
+      let k = (e, p, x) in
+      let w0, c0 =
+        match Hashtbl.find_opt d k with
+        | Some st -> st lsr 2, st land 3
+        | None when ri >= 0 -> 0, 2
+        | None -> let b = if ws >= 0 then ws lsr 2 else cs lsr 2 in b, b
+      in
+      let w1 = if ws >= 0 then ws land 3 else w0 and c1 = if cs >= 0 then cs land 3 else c0 in
+      if w1 = c1 && ri < 0 then Hashtbl.remove d k
+      else begin
+        Hashtbl.replace d k ((w1 lsl 2) lor c1);
+        match run with
+        | Some ro when ri >= 0 && not (bit ro.rt ri) -> set_bit ro.rt ri; ro.nt <- ro.nt + 1
+        | _ -> ()
+      end
+    end
   in
-  Hashtbl.iter (fun k st -> one k ~ws:(Some st) ~cs:(Hashtbl.find_opt c k)) w;
-  Hashtbl.iter (fun k st -> if not (Hashtbl.mem w k) then one k ~ws:None ~cs:(Some st)) c
+  for i = 0 to w.fn - 1 do
+    let e = w.xe.(i) and p = w.xp.(i) and x = w.xw.(i) in
+    let j = facts_find c e p x in
+    one e p x ~ws:w.xs.(i) ~cs:(if j >= 0 then c.xs.(j) else -1)
+  done;
+  for j = 0 to c.fn - 1 do
+    let e = c.xe.(j) and p = c.xp.(j) and x = c.xw.(j) in
+    if facts_find w e p x < 0 then one e p x ~ws:(-1) ~cs:c.xs.(j)
+  done
 
 (* the logged batches not yet applied, oldest first, and how many groups they hold *)
 let take_log ch =
@@ -787,6 +924,7 @@ let step ch b (bv : Store.view) (batches : (Group.t list * Store.view) list) =
           (fun (c : Group.change) ->
             match c.kind with
             | Derived | Underived -> ()
+            | _ when not (Array.exists (fun (o : Group.change) -> o.e = c.e && o.p = c.p) b.own) -> ()
             | _ -> (
               match Store.word dv c.v with
               | Some x when Hashtbl.mem b.own_keys (c.e, c.p, x) ->
@@ -798,32 +936,71 @@ let step ch b (bv : Store.view) (batches : (Group.t list * Store.view) list) =
     match Resolve.catch_up ~limit:b.limit ~stop:ch.stop bv dv gs with
     | Error e -> raise (Interfered (of_resolve e))
     | Ok (bv', cs) ->
-      track b.diff w (fact_states bv' cs);
-      if Hashtbl.length b.diff > b.limit + Array.length b.own then
+      track b.diff b.run w (fact_states bv' cs);
+      let in_run = match b.run with Some ro -> ro.facts.n - ro.nt | None -> 0 in
+      if Hashtbl.length b.diff + in_run > b.limit + Array.length b.own then
         raise (Interfered (Conflict (Printf.sprintf "the change derived more than %d facts with the groups written meanwhile" b.limit)));
       bv'
 
+(* the change's derived facts set apart by the reasoner ([a]), sorted, as the run R on top of [bv]'s runs, under its
+   delta (which holds no entry for them): written by a merge of them alone, at level 0, under a name of its own that
+   ends in .tmp (an open removes it: Snapshot.clean), not forced. It holds no text: the texts interned since the
+   newest run stay the dictionary's (its first text is the dictionary's first, so that a merge that takes R takes
+   them from the dictionary, once) *)
+let run_of_its_own t (bv : Store.view) (a : Reason.apart) =
+  let t0 = Journal.clock () in
+  let n = a.an in
+  let e = Bigarray.Array1.sub a.ae 0 n and p = Bigarray.Array1.sub a.ap 0 n and w = Bigarray.Array1.sub a.aw 0 n in
+  let sorted = Bulk.in_order e p w n in
+  let order = if sorted then Bulk.i32 0 else Bulk.by_thing e p w n in
+  let facts = Bulk.make ~d0:0 ~sorted ~order e p w n ~np:(Schema.count bv.schema) in
+  let lo = if Array.length bv.runs = 0 then 0 else bv.runs.(0).hi in
+  let file = Filename.concat (sdir t) (Snapshot.name lo bv.group ^ ".change" ^ Snapshot.tmp_suffix) in
+  let alone = { bv with delta = Store.empty_delta; dict = { bv.dict with dnext = bv.dict.chunks.c0 } } in
+  (* no journal position: R is never opened, nothing replays from it (the writer's, which moves on during the build,
+     may be past the change's view) *)
+  let none = { Journal.segment = 0; offset = 0; next = 0 } in
+  let w = Snapshot.merge ~bulk:facts ~sync:false ~file t.disk (sdir t) t.id alone ~take:0 ~level:0 none in
+  let r = w.view.runs.(0) in
+  (* its things, a bit each: most facts a step touches are of other things, found so with one bit *)
+  let top = ref 0 in
+  for i = 0 to n - 1 do top := max !top (Int32.to_int (Bigarray.Array1.unsafe_get e i)) done;
+  let things = Bytes.make ((!top / 8) + 1) '\000' in
+  for i = 0 to n - 1 do set_bit things (Int32.to_int (Bigarray.Array1.unsafe_get e i)) done;
+  Histogram.record run_us (Journal.clock () - t0);
+  { bv with runs = Array.append [| r |] bv.runs }, { r; file; facts; things; rt = Bytes.make ((n + 7) / 8) '\000'; nt = 0 }
+
 (* the background: the build, then the catch-up until fewer than [change_behind] groups are left *)
-let change_run ~wake ch (w0 : Store.view) =
+let change_run ~wake t ch (w0 : Store.view) =
   let t0 = Journal.clock () in
   let ops, by, why = ch.cops in
   let ended e = Atomic.set ch.out (Some (Ended e)) in
+  let made = ref None in
   (match
      let limit = ref 0 in
+     let apart = Reason.apart ~min:(if Store.provisionals w0.runs >= max_provisional then max_int else !change_run_min) in
      let reason ~v0 v changes words =
        limit := !Reason.budget_base + (!Reason.budget_per * Array.length changes) + (!Reason.change_per * Store.facts v0);
-       Reason.run ~limit:!limit ~stop:ch.stop ~v0 v changes words
+       Reason.run ~limit:!limit ~stop:ch.stop ~apart ~v0 v changes words
      in
      match Resolve.resolve (Store.fork w0) ~n:(w0.group + 1) ~time:0 ~by ~why ~reason ops with
      | Error e -> ended (of_resolve e)
      | Ok (bv, g, _) ->
        Histogram.record build_us (Journal.clock () - t0);
+       let bv, run =
+         if apart.an = 0 then bv, None
+         else begin
+           let bv, ro = run_of_its_own t bv apart in
+           made := Some ro;
+           bv, Some ro
+         end
+       in
        let diff : diff = Hashtbl.create (Array.length g.changes + 16) in
-       track diff (Hashtbl.create 1) (fact_states bv g.changes);
+       track diff None (facts_create 0) (fact_states bv g.changes);
        let own = Array.of_list (List.filter (fun (c : Group.change) -> c.kind <> Derived && c.kind <> Underived) (Array.to_list g.changes)) in
        let own_keys = Hashtbl.create 8 in
        Array.iter (fun (c : Group.change) -> match Store.word bv c.v with Some x -> Hashtbl.replace own_keys (c.e, c.p, x) () | None -> ()) own;
-       let b = ref { bv; diff; own; own_keys; limit = !limit } in
+       let b = ref { bv; diff; own; own_keys; limit = !limit; run } in
        if !change_pause > 0. then Unix.sleepf !change_pause;
        let go = ref true in
        while !go do
@@ -839,11 +1016,16 @@ let change_run ~wake ch (w0 : Store.view) =
        Atomic.set ch.out (Some (Built !b))
    with
    | () -> ()
-   | exception Interfered e -> ended e
-   | exception Pages.Unreadable m -> ended (Damaged m)
    | exception e ->
-     prerr_endline ("cepheus: a change of the rules failed: " ^ Printexc.to_string e);
-     ended (Invalid ("the change failed: " ^ Printexc.to_string e)));
+     (* the run of a change that ends here goes with it *)
+     Option.iter (fun ro -> Pages.drop ro.r.a.pg; try t.disk.remove ro.file with Disk.Io _ -> ()) !made;
+     match e with
+     | Interfered e -> ended e
+     | Pages.Unreadable m -> ended (Damaged m)
+     | Disk.Io m -> ended (Io m)
+     | e ->
+       prerr_endline ("cepheus: a change of the rules failed: " ^ Printexc.to_string e);
+       ended (Invalid ("the change failed: " ^ Printexc.to_string e)));
   wake ()
 
 (* The follow stream (the server's local readers, server/follow.ml): [before b] as the syncer takes the frame of [b],
@@ -945,6 +1127,7 @@ let break_lineage l =
 let roll_back l =
   if l.rollback then begin
     l.e.working <- Atomic.get l.e.published;
+    sweep l.e;
     break_lineage l;
     Mutex.protect l.sm (fun () -> l.rollback <- false)
   end
@@ -1049,8 +1232,8 @@ let install_change l ch (b : built) =
   let t0 = Journal.clock () in
   if l.raft then settle l;
   match t.stopped with
-  | Some e -> deliver ch.creq (Error e)
-  | None when ch.born <> l.lineage -> deliver ch.creq (Error not_leader)
+  | Some e -> drop_run t b; deliver ch.creq (Error e)
+  | None when ch.born <> l.lineage -> drop_run t b; deliver ch.creq (Error not_leader)
   | None -> (
     match
       let batches, _ = take_log ch in
@@ -1089,19 +1272,42 @@ let install_change l ch (b : built) =
               | None -> None)
             (Array.to_list b.own)
         in
-        let nd = Hashtbl.fold (fun _ st n -> if st lsr 2 <> 1 && st land 3 <> 1 then n + 1 else n) b.diff 0 in
+        (* the table's facts whose two states differ (R's that agree stay there, and are none of the frame's) *)
+        let differs st = st lsr 2 <> st land 3 in
+        let derived st = differs st && st lsr 2 <> 1 && st land 3 <> 1 in
+        let nt = Hashtbl.fold (fun _ st n -> if derived st then n + 1 else n) b.diff 0 in
+        let nr = match b.run with Some ro -> ro.facts.n - ro.nt | None -> 0 in
+        let nd = nt + nr in
         if nd > b.limit then raise (Interfered (Invalid (Printf.sprintf "a change of the rules or the ontology derived more than %d facts" b.limit)));
-        let de = Array.make nd 0 and dp = Array.make nd 0 and dw = Array.make nd 0 and ds = Array.make nd 0 in
+        let de = Array.make nt 0 and dp = Array.make nt 0 and dw = Array.make nt 0 and ds = Array.make nt 0 in
         let i = ref 0 in
         Hashtbl.iter
           (fun ((e, p, w) as k) st ->
-            if st lsr 2 <> 1 && st land 3 <> 1 then (de.(!i) <- e; dp.(!i) <- p; dw.(!i) <- w; ds.(!i) <- st; incr i)
-            else if not (Hashtbl.mem b.own_keys k) then
+            if derived st then (de.(!i) <- e; dp.(!i) <- p; dw.(!i) <- w; ds.(!i) <- st; incr i)
+            else if differs st && not (Hashtbl.mem b.own_keys k) then
               raise (Interfered (Conflict (Printf.sprintf "the change's view differs on an asserted fact [#%d %d]" e p))))
           b.diff;
-        (* in the table's order: replay applies states, and the order of facts of one group does not matter to it *)
-        let frame = Array.init nd (fun j -> { Group.kind = kind ds.(j); e = de.(j); p = dp.(j); v = value dp.(j) dw.(j) }) in
-        va, Array.append (Array.of_list first) frame
+        (* in the table's order, then R's facts the table lacks, in thing order: replay applies states, and the order of
+           facts of one group does not matter to it *)
+        let frame = Array.init nt (fun j -> { Group.kind = kind ds.(j); e = de.(j); p = dp.(j); v = value dp.(j) dw.(j) }) in
+        let from_run =
+          match b.run with
+          | None -> [||]
+          | Some ro ->
+            let f = ro.facts in
+            let out = Array.make nr { Group.kind = Derived; e = 0; p = 0; v = Value.Int 0 } in
+            let j = ref 0 in
+            for r = 0 to f.n - 1 do
+              if not (bit ro.rt r) then begin
+                let x = Bulk.row f r in
+                let p = Bulk.prop f x in
+                out.(!j) <- { Group.kind = Derived; e = Bulk.thing f x; p; v = value p (Bulk.word f x) };
+                incr j
+              end
+            done;
+            out
+        in
+        va, Array.concat [ Array.of_list first; frame; from_run ]
       in
       match Resolve.resolve t.working ~n ~time:(t.disk.now ()) ~by ~why ~reason ops with
       | Error e -> Error (of_resolve e)
@@ -1111,6 +1317,7 @@ let install_change l ch (b : built) =
         if Buffer.length body > !frame_limit then Error (too_large (Buffer.length body))
         else begin
           t.working <- v;
+          Option.iter (fun ro -> Mutex.protect t.pm (fun () -> t.provisional <- (ro.r, ro.file) :: t.provisional); Atomic.incr runs_installed) b.run;
           Atomic.incr changes_done;
           hand l { results = [| Ok { group = n; things = temps } |]; groups = [ g ]; body; first = n; count = 1; after = v; runs = [];
                    pending = None; own = true; change = None } [| ch.creq |];
@@ -1118,9 +1325,9 @@ let install_change l ch (b : built) =
         end
     with
     | Ok () -> Histogram.record install_us (Journal.clock () - t0)
-    | Error e -> deliver ch.creq (Error e)
-    | exception Interfered e -> deliver ch.creq (Error e)
-    | exception Pages.Unreadable m -> deliver ch.creq (Error (Damaged m)))
+    | Error e -> drop_run t b; deliver ch.creq (Error e)
+    | exception Interfered e -> drop_run t b; deliver ch.creq (Error e)
+    | exception Pages.Unreadable m -> drop_run t b; deliver ch.creq (Error (Damaged m)))
 
 (* the change in the background, if it is done: installed or answered; else the next waiting one started, when no
    merge is in flight. A start interns the change's texts into the working view, then forks it. *)
@@ -1133,6 +1340,7 @@ let rec poll_change l =
       Option.iter Domain.join ch.cdom;
       l.change <- None;
       (match o with
+       | Built b when ch.born <> l.lineage -> drop_run l.e b; deliver ch.creq (Error not_leader)
        | _ when ch.born <> l.lineage -> deliver ch.creq (Error not_leader)
        | Built b -> install_change l ch b
        | Ended e -> deliver ch.creq (Error e));
@@ -1159,7 +1367,7 @@ let rec poll_change l =
             cdom = None; born = l.lineage }
         in
         (* a domain the runtime cannot give (its limit) answers the change, never stops the writer *)
-        match Domain.spawn (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) ch w) with
+        match Domain.spawn (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) l.e ch w) with
         | d -> ch.cdom <- Some d; l.change <- Some ch
         | exception e -> deliver r (Error (Busy ("a change of the rules could not start: " ^ Printexc.to_string e))); poll_change l
       end
@@ -1254,6 +1462,7 @@ let writer l () =
            Atomic.set ch.stop true;
            Option.iter Domain.join ch.cdom;
            l.change <- None;
+           (match Atomic.get ch.out with Some (Built b) -> drop_run l.e b | _ -> ());
            deliver ch.creq (Error Closed)
          | None -> ());
         List.iter (fun (r, _) -> deliver r (Error Closed)) l.waiting;

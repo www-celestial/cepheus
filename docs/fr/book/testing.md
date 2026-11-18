@@ -535,27 +535,39 @@ aussi un fait et en attend un autre ; la construction à partir de la vue de tra
 lots) de n'importe quelle taille, le switch (le passage aux nouvelles règles) par le writer, des crashs qui gardent
 n'importe quel préfixe des frames à partir des frames durables, et la reprise d'un membre Raft (les frames que Raft n'a
 pas validées reprises, la vue de travail ramenée à la vue publiée, une nouvelle lignée : un changement commencé sur une
-plus ancienne reçoit une réponse, il n'est jamais installé). Invariants : `ViewsExact` (la vue de travail et la vue
-publiée, et l'état à chaque frame du journal, sont le least model de leurs faits affirmés sous leurs règles : aucune
-vue ne mêle les faits des anciennes règles à ceux des nouvelles), `JournalIsWork` (le replay donne la vue de travail :
+plus ancienne reçoit une réponse, il n'est jamais installé) ; les vues comme le moteur les garde, des couches de runs
+et un delta, avec les faits dérivés du changement dans un run à eux, R, sous le delta de sa vue, la table des
+différences fait par fait, et un merge qui nomme sur le disque l'état de la vue de travail. Invariants :
+`ViewsExact` (la vue de travail et la vue publiée, et l'état à chaque frame du journal, sont le least model de leurs
+faits affirmés sous leurs règles : aucune vue ne mêle les faits des anciennes règles à ceux des nouvelles),
+`JournalIsWork` (le replay donne la vue de travail :
 la frame de C est exactement la différence que tient la vue adoptée), `OneSwitch` (les règles changent à la frame de
 C), `ConstraintsHold` (G18), `Serial` (l'`Expect` de C tenait juste avant C, son fait affirmé à C), `NoLostWrite` (la
-frame de C ne change aucun fait affirmé sauf le sien), `AckedDurable` ; et la propriété de liveness `Ends` (une
+frame de C ne change aucun fait affirmé sauf le sien), `AckedDurable`, `ChangeViewExact` (la vue du changement, lue à
+travers ses couches, est le least model sous les nouvelles règles), `TableExact` (la table et R sont la différence
+entre l'état du writer là où en est l'arrière-plan et la vue du changement), `RunsExact` (les runs nommés sur le disque
+tiennent l'état du journal à leur groupe) ; et la propriété de liveness `Ends` (une
 liveness dit qu'une chose finit par arriver : sous fairness, c'est-à-dire si chaque étape toujours possible finit par
 être prise, le changement est installé, répondu ou perdu dans un crash). Bornes dans `spec/RuleChange.cfg` (4 groupes
-de données, 2 crashs, la construction prête à 2 groupes de retard, 1 reprise) : 276 553 états distincts, 28 s, tout
-tient. Chaque partie de la règle est nécessaire (les variantes sont sans reprise, sauf `RuleChangeTakeBack.cfg`) :
+de données, 2 crashs, la construction prête à 2 groupes de retard, 1 reprise, 1 merge) : 1 200 400 états distincts,
+4 min 12 s sur 4 workers, tout tient. Chaque partie de la règle est nécessaire (les variantes sont sans reprise, sauf
+`RuleChangeTakeBack.cfg`) :
 
 | configuration | la règle sans | casse |
 |---|---|---|
-| `RuleChangeCopy.cfg` | les faits dérivés retrouvés : la frame d'un groupe du journal copiée | `ViewsExact` |
-| `RuleChangeLate.cfg` | le dernier rattrapage du writer | `NoLostWrite` |
+| `RuleChangeCopy.cfg` | les faits dérivés retrouvés : la frame d'un groupe du journal copiée | `ChangeViewExact` |
+| `RuleChangeLate.cfg` | le dernier rattrapage du writer | `JournalIsWork` |
 | `RuleChangeEarlyExpect.cfg` | l'`Expect` vérifié à l'installation : à la construction | `Serial` |
 | `RuleChangeNoCheck.cfg` | la vérification de l'état rattrapé par les nouvelles règles | `ConstraintsHold` |
 | `RuleChangeOverlap.cfg` | le `Conflict` d'un groupe qui touche le fait de C | `Serial` |
 | `RuleChangeStale.cfg` | la différence à l'installation : les propres changements de la construction écrits | `ViewsExact` |
-| `RuleChangePublished.cfg` | la construction à partir de la vue de travail : à partir de la vue publiée | `NoLostWrite` |
-| `RuleChangeTakeBack.cfg` | l'installation sur la propre lignée du changement (Raft) : installé après une reprise | `NoLostWrite` |
+| `RuleChangePublished.cfg` | la construction à partir de la vue de travail : à partir de la vue publiée | `TableExact` |
+| `RuleChangeTakeBack.cfg` | l'installation sur la propre lignée du changement (Raft) : installé après une reprise | `ViewsExact` |
+| `RuleChangeShadowed.cfg` | R ne prend que les faits pour lesquels le delta de la vue forkée n'a pas d'entrée : il les prend tous | `ChangeViewExact` |
+| `RuleChangeUntracked.cfg` | un fait de R entre dans la table comme (absent, dérivé) : comme son état avant l'étape | `TableExact` |
+| `RuleChangeNoTombstone.cfg` | un fait de R dont les deux états sont d'accord reste dans la table : retiré | `TableExact` |
+| `RuleChangeNamed.cfg` | R jamais nommé : nommé avec les runs en dessous une fois la frame de C durable | `RunsExact` |
+| `RuleChangeMergeSkipsRun.cfg` | chaque merge prend R : un merge le laisse en dessous | `RunsExact` |
 
 `tools/tlc.sh` les lance tous et échoue sauf si chacun de ceux qui doivent casser casse : 1 min 57 s sur la machine de
 test (2026-11-12), tous les modèles compris.
