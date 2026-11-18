@@ -1055,14 +1055,15 @@ let change_bench n clients secs at mode dir =
   List.iter Thread.join ts;
   let total = Array.init bins (fun b -> Array.fold_left (fun s a -> s + a.(b)) 0 counts) in
   let p50 h = float (Histogram.max h) in
-  Printf.printf "change %s: start %.3f s, end %.3f s, build %.3f s, background %.3f s, install %.3f s\n" mode (c0 -. t0) (c1 -. t0)
-    (p50 Engine.build_us /. 1e6) (p50 Engine.change_us /. 1e6) (p50 Engine.install_us /. 1e6);
+  Printf.printf "change %s: start %.3f s, end %.3f s, build %.3f s, run %.3f s, background %.3f s, install %.3f s\n" mode (c0 -. t0) (c1 -. t0)
+    (p50 Engine.build_us /. 1e6) (p50 Engine.run_us /. 1e6) (p50 Engine.change_us /. 1e6) (p50 Engine.install_us /. 1e6);
   print_string "bins";
   Array.iter (fun c -> Printf.printf " %d" c) total;
   print_newline ();
   if mode = "with" then Printf.printf "facts derived %d\n%!" derived;
   close db;
-  ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote run)))
+  (* KEEP: the database stays (an older binary reads it back: bench digest) *)
+  if Sys.getenv_opt "KEEP" = None then ignore (Sys.command (Printf.sprintf "rm -rf %s" (Filename.quote run)))
 
 (* reads: the cost of [get] and [values] by id (the reads a question's constant and a program's Get make), on
    LUBM-1 with its rules, in memory: 2,000,000 of each on things drawn at random, the time a read *)

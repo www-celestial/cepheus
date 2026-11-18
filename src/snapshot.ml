@@ -912,13 +912,16 @@ let max_take = 31
    name, forced first. On a failure of the disk, the file is removed and the failure raised. *)
 let no_bulk = Bulk.empty
 
-let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id (v : Store.view) ~take ~level
+let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk dir id (v : Store.view) ~take ~level
     (pos : Journal.position) =
   if pos.next > v.group + 1 then invalid_arg "Snapshot.merge: the journal position is after the view";
   let rs = v.runs in
   let nr = Array.length rs in
   if take < 0 || take > nr then invalid_arg "Snapshot.merge: more runs than the view has";
   if take > max_take then invalid_arg "Snapshot.merge: more runs than a merge takes";
+  (* a run that will be named never rests on a provisional one (level 0: a change's run, Engine), whose state is no
+     group's: every merge takes those, the newest runs *)
+  if level > 0 && take < nr && Store.provisional rs.(take) then invalid_arg "Snapshot.merge: a provisional run left below";
   let bottom = take = nr in
   let lo = if bottom then 0 else rs.(take).hi in
   let src = Array.sub rs 0 take in
@@ -980,7 +983,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) disk dir id
   let len = lt.len in
   let npages = Pages.pages len in
   let path = Filename.concat dir (name lo v.group) in
-  let tmp = path ^ tmp_suffix in
+  let tmp = match file with Some f -> f | None -> path ^ tmp_suffix in
   if disk.Disk.exists tmp then disk.remove tmp;
   let fd = disk.openf tmp true in
   let crcs = Bytes.make (4 * npages) '\000' and map = Array.make npages (-1) in
@@ -1364,6 +1367,8 @@ let check_and_build disk dir (lo0, hi0, file) id =
     let toffs = List.init Store.noffsets (fun i -> g (tbase + 4 + i)) in
     let len = g (tbase + 4 + Store.noffsets) and phys = g (tbase + 5 + Store.noffsets) in
     if lo <> lo0 || hi <> hi0 then bad "its groups are not those of its name";
+    (* level 0 is a change's provisional run (Engine), whose state is no group's: never named *)
+    if level < 1 then bad "its level is 0, a provisional run's";
     if List.exists (fun x -> x < 0) ([ an; ane; ak; anp; ans; asb; tn; tne; tk; tnp; s0; level; len; phys; hbits ] @ aoffs @ toffs)
        || ak > ane || tk > tne || ak > an || tk > tn || hbits > 40
        || anp > Schema.first_thing || tnp > Schema.first_thing || (lo = 0 && tn > 0)

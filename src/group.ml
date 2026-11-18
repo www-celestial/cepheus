@@ -75,11 +75,14 @@ let encode_source b ~n ~time ~by ~why ~first_new ~count_new (s : source) =
 let encode b g =
   let ch = g.changes in
   let cols = Hashtbl.create 8 and cl = ref [] and texts = Hashtbl.create 8 and tl = ref [] in
+  (* a column's key: its property and its tag in one int (a tag is below 8), so that a large group's changes take no
+     tuple each *)
   let col = Array.map (fun c ->
-      let key = (c.p, tag_of c.v) in
+      let t = tag_of c.v in
+      let key = (c.p lsl 3) lor t in
       match Hashtbl.find_opt cols key with
       | Some k -> k
-      | None -> let k = Hashtbl.length cols in Hashtbl.replace cols key k; cl := key :: !cl; k) ch in
+      | None -> let k = Hashtbl.length cols in Hashtbl.replace cols key k; cl := (c.p, t) :: !cl; k) ch in
   let num = Array.map (fun c ->
       match c.v with
       | Value.Int x | Date x | Money x | Link x -> x

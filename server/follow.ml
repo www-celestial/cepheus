@@ -101,7 +101,7 @@ let create ?(max_bytes = max_behind) (e : Engine.t) word =
   let vseq = word.get () + 2 in
   word.set vseq;
   { e; sdir = Filename.concat e.dir "snapshots"; fm = Mutex.create (); fc = Condition.create (); word; vseq; visible = v;
-    visible_a = Atomic.make v; inflight = None; followers = []; named = v.runs; max_bytes; frames = 0; hook_s = 0. }
+    visible_a = Atomic.make v; inflight = None; followers = []; named = Store.chain_runs v.runs; max_bytes; frames = 0; hook_s = 0. }
 
 (* the state remote reads see: the view of the number, or the published one when it holds the same group *)
 let view t =
@@ -125,7 +125,12 @@ let push t ev =
       t.followers;
   Condition.broadcast t.fc
 
-let names sdir (rs : Store.run array) = Array.to_list (Array.map (fun (r : Store.run) -> { lo = r.lo; hi = r.hi; path = Filename.concat sdir (Snapshot.name r.lo r.hi); tmp = None }) rs)
+(* the runs of the chain: a change's provisional run (Store.provisional) is never passed; its facts come in the
+   change's frame, which the reader applies as every frame *)
+let names sdir (rs : Store.run array) =
+  Array.to_list (Array.map (fun (r : Store.run) -> { lo = r.lo; hi = r.hi; path = Filename.concat sdir (Snapshot.name r.lo r.hi); tmp = None }) (Store.chain_runs rs))
+
+let same_runs (a : Store.run array) (b : Store.run array) = Array.length a = Array.length b && Array.for_all2 ( == ) a b
 
 (* Engine.follow's [before]: the frame of [b], before its write *)
 let before t (b : Engine.batch) =
@@ -138,7 +143,7 @@ let before t (b : Engine.batch) =
           | [] -> [ Frame { vseq = v; first = b.first; count = b.count; body = b.body } ]
           | w :: _ ->
             (* a large group: its run, merged already and not yet named, is the state; its file is read where it is *)
-            let rs = w.view.runs in
+            let rs = Store.chain_runs w.view.runs in
             let runs =
               List.mapi (fun i (r : run) -> if i = 0 then { r with tmp = Some w.tmp; path = w.path } else r) (names t.sdir rs)
             in
@@ -152,8 +157,9 @@ let before t (b : Engine.batch) =
 
 (* the runs changed with no frame (a merge installed in the background): named, the state unchanged; under fm *)
 let name_runs t (p : Store.view) =
-  if p.runs != t.named && p.group = t.visible.group then begin
-    t.named <- p.runs;
+  let chain = Store.chain_runs p.runs in
+  if (not (same_runs chain t.named)) && p.group = t.visible.group then begin
+    t.named <- chain;
     t.visible <- p;
     Atomic.set t.visible_a p;
     push t (Runs { vseq = t.vseq; runs = names t.sdir p.runs })
@@ -236,7 +242,8 @@ let wake t = Mutex.protect t.fm (fun () -> Condition.broadcast t.fc)
    its frames up to [v.group] are durable and whole; a frame being written after them may read as torn or as
    damaged, and is not needed. *)
 let catch_up ?(chunk = 1 lsl 20) disk (e : Engine.t) (v : Store.view) emit =
-  let top = if Array.length v.runs = 0 then 0 else v.runs.(0).hi in
+  let chain = Store.chain_runs v.runs in
+  let top = if Array.length chain = 0 then 0 else chain.(0).hi in
   let b = ref (Buffer.create 4096) and first = ref 0 and count = ref 0 and last = ref top in
   let flush () =
     if !count > 0 then emit (Frame { vseq = 0; first = !first; count = !count; body = !b });
