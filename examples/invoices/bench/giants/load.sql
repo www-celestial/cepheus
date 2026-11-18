@@ -28,9 +28,10 @@ insert into invoice
   select d.i, d.i, d.c, cl.name, cl.search, d.date, d.date + interval '30 days',
          case when d.date + interval '30 days' < now() then (case when d.luck <= 88 then 'paid' else 'late' end)
               else (case when d.luck <= 50 then 'paid' else 'unpaid' end) end,
-         (select sum(quantity * price) from line l where l.invoice = d.i), null
-  from drawn d join client cl on cl.id = d.c;
-update invoice set paid_at = least(now(), date + (select paid_days from drawn where drawn.i = invoice.id) * interval '1 day') where status = 'paid';
+         t.total, null
+  from drawn d join client cl on cl.id = d.c
+  join (select invoice, sum(quantity * price) as total from line group by invoice) t on t.invoice = d.i;
+update invoice set paid_at = least(now(), invoice.date + d.paid_days * interval '1 day') from drawn d where d.i = invoice.id and status = 'paid';
 alter table line add foreign key (invoice) references invoice;
 commit;
 create index on client (name collate "C");
