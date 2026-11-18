@@ -80,39 +80,89 @@ let scratch = Domain.DLS.new_key (fun () -> Bytes.create ((block * 8) + 8))
 let zlen n = let z = (n lsl 1) lxor (n asr 62) in if z land lnot 0x7f = 0 then 1 else
     let k = ref 1 and x = ref (z lsr 7) in while !x > 0 do incr k; x := !x lsr 7 done; !k
 
+(* One pass fills a block and finds both its range and its differences' range; fields of up to 31 bits are packed
+   by a running word written 4 bytes at a time (the bit order of [put]), wider ones by [put]; a block whose fields
+   take no bits writes none: the same bytes as three passes and a read-modify-write of 8 bytes a field, which the
+   unit tests keep as the reference, and faster (bench numbers in docs/book/benchmarks.md) *)
 let put_ints (out : Buffer.t) n (f : int -> int) =
   let s = Domain.DLS.get scratch in
   let v = Array.make block 0 in
   let i = ref 0 in
   while !i < n do
     let len = min block (n - !i) in
-    for k = 0 to len - 1 do v.(k) <- f (!i + k) done;
-    let lo = ref v.(0) and hi = ref v.(0) in
-    for k = 1 to len - 1 do let x = v.(k) in if x < !lo then lo := x; if x > !hi then hi := x done;
-    let wr = width (!hi - !lo) in
+    let base = !i in
+    let x0 = f base in
+    Array.unsafe_set v 0 x0;
+    let lo = ref x0 and hi = ref x0 and prev = ref x0 in
     let dlo = ref 0 and dhi = ref 0 in
     if len > 1 then begin
-      dlo := v.(1) - v.(0); dhi := !dlo;
-      for k = 2 to len - 1 do let d = v.(k) - v.(k - 1) in if d < !dlo then dlo := d; if d > !dhi then dhi := d done
+      let x1 = f (base + 1) in
+      Array.unsafe_set v 1 x1;
+      let d = x1 - x0 in
+      dlo := d; dhi := d; prev := x1;
+      if x1 < !lo then lo := x1; if x1 > !hi then hi := x1;
+      for k = 2 to len - 1 do
+        let x = f (base + k) in
+        Array.unsafe_set v k x;
+        if x < !lo then lo := x; if x > !hi then hi := x;
+        let d = x - !prev in
+        if d < !dlo then dlo := d; if d > !dhi then dhi := d;
+        prev := x
+      done
     end;
+    let wr = width (!hi - !lo) in
     let wd = width (!dhi - !dlo) in
-    let raw = zlen !lo + bytes len wr and delta = zlen v.(0) + zlen !dlo + bytes (len - 1) wd in
+    let raw = zlen !lo + bytes len wr and delta = zlen x0 + zlen !dlo + bytes (len - 1) wd in
     if len > 1 && delta < raw then begin
       Buffer.add_char out (Char.unsafe_chr (0x80 lor wd));
-      Codec.put_int out v.(0);
+      Codec.put_int out x0;
       Codec.put_int out !dlo;
       let nb = bytes (len - 1) wd in
-      Bytes.fill s 0 (nb + 8) '\000';
-      for k = 1 to len - 1 do put s ((k - 1) * wd) (v.(k) - v.(k - 1) - !dlo) wd done;
-      Buffer.add_subbytes out s 0 nb
+      if wd > 0 then begin
+        let dl = !dlo in
+        if wd <= 31 then begin
+          let m = mask wd in
+          let acc = ref 0 and nbits = ref 0 and o = ref 0 in
+          for k = 1 to len - 1 do
+            acc := !acc lor (((Array.unsafe_get v k - Array.unsafe_get v (k - 1) - dl) land m) lsl !nbits);
+            nbits := !nbits + wd;
+            if !nbits >= 32 then begin
+              Bytes.set_int32_le s !o (Int32.of_int !acc); o := !o + 4; acc := !acc lsr 32; nbits := !nbits - 32
+            end
+          done;
+          while !nbits > 0 do Bytes.unsafe_set s !o (Char.unsafe_chr (!acc land 0xFF)); acc := !acc lsr 8; nbits := !nbits - 8; incr o done
+        end
+        else begin
+          Bytes.fill s 0 (nb + 8) '\000';
+          for k = 1 to len - 1 do put s ((k - 1) * wd) (Array.unsafe_get v k - Array.unsafe_get v (k - 1) - dl) wd done
+        end;
+        Buffer.add_subbytes out s 0 nb
+      end
     end
     else begin
       Buffer.add_char out (Char.unsafe_chr wr);
       Codec.put_int out !lo;
       let nb = bytes len wr in
-      Bytes.fill s 0 (nb + 8) '\000';
-      for k = 0 to len - 1 do put s (k * wr) (v.(k) - !lo) wr done;
-      Buffer.add_subbytes out s 0 nb
+      if wr > 0 then begin
+        let l = !lo in
+        if wr <= 31 then begin
+          let m = mask wr in
+          let acc = ref 0 and nbits = ref 0 and o = ref 0 in
+          for k = 0 to len - 1 do
+            acc := !acc lor (((Array.unsafe_get v k - l) land m) lsl !nbits);
+            nbits := !nbits + wr;
+            if !nbits >= 32 then begin
+              Bytes.set_int32_le s !o (Int32.of_int !acc); o := !o + 4; acc := !acc lsr 32; nbits := !nbits - 32
+            end
+          done;
+          while !nbits > 0 do Bytes.unsafe_set s !o (Char.unsafe_chr (!acc land 0xFF)); acc := !acc lsr 8; nbits := !nbits - 8; incr o done
+        end
+        else begin
+          Bytes.fill s 0 (nb + 8) '\000';
+          for k = 0 to len - 1 do put s (k * wr) (Array.unsafe_get v k - l) wr done
+        end;
+        Buffer.add_subbytes out s 0 nb
+      end
     end;
     i := !i + len
   done
