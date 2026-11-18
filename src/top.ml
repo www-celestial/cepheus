@@ -230,7 +230,8 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
         if got.n >= cap || last then found := Some got
         else begin
           let left = budget -. float_of_int !spent in
-          if left <= 0. then over := true else m := max 1 (min (2 * !m) (int_of_float left))
+          (* an estimate past the ints (a cross product's) cuts nothing: int_of_float would give 0 there *)
+          if left <= 0. then over := true else m := max 1 (min (2 * !m) (if left >= 1e18 then max_int else int_of_float left))
         end
       done;
       match !found with Some g -> g | None -> Atomic.incr gave_up; heap None
