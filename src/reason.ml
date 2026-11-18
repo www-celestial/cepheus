@@ -1894,7 +1894,12 @@ let [@inline never] substitute (v : Store.view) (r : Rules.t) (sty : Value.typ o
   in
   if not (inside && List.for_all real where) then None
   else
-    match Rules.static_types v r' with
+    (* a rule whose properties are constants: each variable of r' is in some of the patterns it was in, so its type is
+       the one it had (the rule's types were found: [sty] has one for each variable); the check again for each
+       binding was most of the unfolding's time. A property variable bound to a constant gives the values of its
+       patterns their property's type: found again *)
+    let typed = (not (Rules.has_var_prop r)) && r.vars > 0 && Array.for_all Option.is_some sty in
+    match if typed then sty else Rules.static_types v r' with
     | exception Rules.Bad _ -> None
     | sty' ->
       let bad =
@@ -2135,36 +2140,51 @@ let cache_m = Mutex.create ()
    view's small relations, when its rules have some *)
 let [@inline never] programs (v : Store.view) =
   let key = Schema.rules_key v.schema in
-  Mutex.protect cache_m (fun () ->
-      let size = S.facts v in
-      let en =
-        let old = Hashtbl.find_opt cache key in
-        match old with
-        | Some en when size <= (2 * en.gen.size) + 1024 && (2 * size) + 1024 >= en.gen.size && Schema.count v.schema = en.gen.np && lists_hold en.gen v -> en
-        | _ ->
-          let gen = make_gen v in
-          (* rules with Not or aggregates run as written: their strata are the rules' *)
-          let specialisable =
-            (not gen.stratified) && Array.exists Fun.id (Array.mapi (fun g r -> small_atoms v ~counts:false r gen.sty.(g) <> None) gen.rules)
-          in
-          (* the relations found to be the data's stay so while the rules do *)
-          let unstable = match old with Some en -> en.unstable | None -> [] in
-          let en = { gen; specs = []; nospec = false; specialisable; unstable } in
-          if Hashtbl.length cache > 16 then Hashtbl.reset cache;
-          Hashtbl.replace cache key en;
-          en
+  let size = S.facts v in
+  let holds (en : entry) =
+    size <= (2 * en.gen.size) + 1024 && (2 * size) + 1024 >= en.gen.size && Schema.count v.schema = en.gen.np && lists_hold en.gen v
+  in
+  (* found under the lock, made outside it: a change's new rules take 15 to 22 ms to compile and unfold (LUBM's 95),
+     which the writer, whose groups need the old rules' program meanwhile, waited for. Two domains that miss together
+     each make one, and the first one put stays; a program unfolded while a group made its relations the data's
+     ([unsettle]) is used once and not kept, as if made before *)
+  let en =
+    match Mutex.protect cache_m (fun () -> match Hashtbl.find_opt cache key with Some en when holds en -> Ok en | old -> Error old) with
+    | Ok en -> en
+    | Error old ->
+      let gen = make_gen v in
+      (* rules with Not or aggregates run as written: their strata are the rules' *)
+      let specialisable =
+        (not gen.stratified) && Array.exists Fun.id (Array.mapi (fun g r -> small_atoms v ~counts:false r gen.sty.(g) <> None) gen.rules)
       in
-      if (not !specialise) || (not en.specialisable) || en.nospec then en.gen, None
-      else
-        match List.find_opt (fun (p : program) -> spec_holds (Option.get p.spec) v) en.specs with
-        | Some p -> en.gen, Some p
-        | None -> (
-          let unstable (rp, rw) = List.exists (fun (p, w) -> p = rp && (rw < 0 || rw = w)) en.unstable in
-          match make_spec ~unstable v en.gen with
-          | None -> en.nospec <- true; en.gen, None
-          | Some p ->
-            en.specs <- p :: List.filteri (fun i _ -> i < 3) en.specs;
-            en.gen, Some p))
+      Mutex.protect cache_m (fun () ->
+          match Hashtbl.find_opt cache key with
+          | Some en when holds en -> en
+          | now ->
+            (* the relations found to be the data's stay so while the rules do *)
+            let unstable = match now, old with Some en, _ | None, Some en -> en.unstable | None, None -> [] in
+            let en = { gen; specs = []; nospec = false; specialisable; unstable } in
+            if Hashtbl.length cache > 16 then Hashtbl.reset cache;
+            Hashtbl.replace cache key en;
+            en)
+  in
+  if (not !specialise) || (not en.specialisable) then en.gen, None
+  else
+    match
+      Mutex.protect cache_m (fun () ->
+          if en.nospec then Ok None
+          else match List.find_opt (fun (p : program) -> spec_holds (Option.get p.spec) v) en.specs with Some p -> Ok (Some p) | None -> Error en.unstable)
+    with
+    | Ok spec -> en.gen, spec
+    | Error u ->
+      let unstable (rp, rw) = List.exists (fun (p, w) -> p = rp && (rw < 0 || rw = w)) u in
+      let spec = make_spec ~unstable v en.gen in
+      Mutex.protect cache_m (fun () ->
+          if en.unstable == u then
+            match spec with
+            | None -> en.nospec <- true
+            | Some p -> en.specs <- p :: List.filteri (fun i _ -> i < 3) en.specs);
+      en.gen, spec
 
 let program (v : Store.view) = fst (programs v)
 
