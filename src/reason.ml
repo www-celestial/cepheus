@@ -90,30 +90,21 @@ let no_entry (v : Store.view) e p w =
   (not (Store.is_touched v e))
   || match Store.IM.find_opt e v.delta.de with None -> true | Some (td : Store.tdelta) -> not (Store.PW.mem (p, w) td.tf)
 
-(* [no_entry] for n facts in (thing, property, value) order, [thing i], [prop i], [word i]: [f i] for each fact the delta
-   holds no entry for. When many of their things are touched, one walk of the delta's things beside them (both in
-   thing order) instead of a search each *)
+(* [no_entry] for n facts, [thing i], [prop i], [word i], most of a few (property, value)s (a change's sinks): [f i]
+   for each fact the delta holds no entry for. The delta's things of a (property, value), found once for a run of
+   facts of it (the delta keeps the same entries by thing and by (property, value)): none, and its facts need no
+   search *)
 let[@inline never] no_entries (v : Store.view) n thing prop word f =
-  let touched = ref 0 in
-  for i = 0 to n - 1 do if Store.is_touched v (thing i) then incr touched done;
-  let de = v.delta.de in
-  if !touched * 16 < v.delta.dn then
-    for i = 0 to n - 1 do if no_entry v (thing i) (prop i) (word i) then f i done
-  else begin
-    let i = ref 0 in
-    (try
-       Store.IM.iter
-         (fun e (td : Store.tdelta) ->
-           while !i < n && thing !i < e do f !i; incr i done;
-           while !i < n && thing !i = e do
-             if not (Store.PW.mem (prop !i, word !i) td.tf) then f !i;
-             incr i
-           done;
-           if !i >= n then raise_notrace Exit)
-         de
-     with Exit -> ());
-    for j = !i to n - 1 do f j done
-  end
+  let lp = ref (-1) and lw = ref 0 and things = ref None in
+  for i = 0 to n - 1 do
+    let e = thing i in
+    if not (Store.is_touched v e) then f i
+    else begin
+      let p = prop i and w = word i in
+      if p <> !lp || w <> !lw then (lp := p; lw := w; things := Store.delta_av v p w);
+      match !things with None -> f i | Some (vd : Store.vdelta) -> if not (Store.IM.mem e vd.vm) then f i
+    end
+  done
 
 (* counters for the benchmarks and the tests: rule instances found, facts checked by B/F or Why, and the seconds spent
    reasoning (Reason.run and Reason.bulk) *)
@@ -1741,22 +1732,29 @@ let [@inline never] rel_facts (v : Store.view) (p, w) =
 
 (* does a fact of one of [targets] follow, through the rules, from the facts [starts] describe: nodes (property,
    value), -1 for any *)
-let [@inline never] reaches (rules : Rules.t array) (starts : (int * int) list) (targets : (int * int) list) =
-  let node (a : Query.pattern) = (if a.p < 0 then -1 else a.p), snd (rel_of a) in
-  let matches (np, nw) (ap, aw) = (np = -1 || ap = -1 || np = ap) && (nw = -1 || aw = -1 || nw = aw) in
-  let n = Array.length rules in
-  let fired = Array.make n false in
-  (* the rules by an atom's (property, value), by an atom's property when its value varies, and those reading a
-     variable property *)
+(* the rules by an atom's (property, value), by an atom's property when its value varies, and those reading a
+   variable property: made once for a set of rules, read by each [reaches] over it *)
+type reach_ix = { rrules : Rules.t array; bypw : (int * int, int) Hashtbl.t; byp : (int, int) Hashtbl.t; anyp : int list }
+
+let reach_node (a : Query.pattern) = (if a.p < 0 then -1 else a.p), snd (rel_of a)
+
+let [@inline never] reach_index (rules : Rules.t array) =
   let bypw = Hashtbl.create 64 and byp = Hashtbl.create 64 and anyp = ref [] in
   Array.iteri
     (fun ri (r : Rules.t) ->
       List.iter
         (fun (a : Query.pattern) ->
-          let p, w = node a in
+          let p, w = reach_node a in
           if p < 0 then anyp := ri :: !anyp else if w < 0 then Hashtbl.add byp p ri else Hashtbl.add bypw (p, w) ri)
         r.where)
     rules;
+  { rrules = rules; bypw; byp; anyp = !anyp }
+
+let [@inline never] reaches ix (starts : (int * int) list) (targets : (int * int) list) =
+  let rules = ix.rrules and bypw = ix.bypw and byp = ix.byp and anyp = ref ix.anyp and node = reach_node in
+  let matches (np, nw) (ap, aw) = (np = -1 || ap = -1 || np = ap) && (nw = -1 || aw = -1 || nw = aw) in
+  let n = Array.length rules in
+  let fired = Array.make n false in
   let seen = Hashtbl.create 64 and q = Queue.create () and whole = Hashtbl.create 8 and all = ref false in
   let push nd = if not (Hashtbl.mem seen nd) then (Hashtbl.replace seen nd (); Queue.add nd q) in
   List.iter push starts;
@@ -2052,6 +2050,7 @@ let [@inline never] spec_parts ?unstable (v : Store.view) (gen : program) =
       |> List.concat
     in
     let rules = Array.of_list (List.map (fun (_, r, _) -> r) parts) in
+    let ix = reach_index rules in
     (* a relation that depends on what its unfolded rules give is not unfolded on *)
     let bad = ref false in
     Array.iteri
@@ -2059,7 +2058,7 @@ let [@inline never] spec_parts ?unstable (v : Store.view) (gen : program) =
         match u with
         | Some (rs, rels) when not keep.(g) ->
           let starts = List.filter_map (fun ((r : Rules.t), _) -> match r.head with Give h -> Some ((if h.p < 0 then -1 else h.p), snd (rel_of h)) | Never -> None) rs in
-          if reaches rules starts rels then (keep.(g) <- true; bad := true)
+          if reaches ix starts rels then (keep.(g) <- true; bad := true)
         | _ -> ())
       unfolded;
     if !bad then attempt keep else parts
@@ -2275,9 +2274,8 @@ let[@inline never] push_next c x =
 
 let rule_name c ri = c.prog.rules.(ri).name
 
-let[@inline never] count_derived c ri =
-  c.derived <- c.derived + 1;
-  if ri >= 0 then c.per_rule.(ri) <- c.per_rule.(ri) + 1;
+(* past the budget: refused, naming the rule that derived the most *)
+let[@inline never] over_budget c =
   if c.derived > c.limit then begin
     (* the rule named is the generic one: an unfolded rule keeps its name; their counts summed *)
     let by = Hashtbl.create 8 in
@@ -2291,6 +2289,11 @@ let[@inline never] count_derived c ri =
               ((c.limit - !budget_base) / max 1 !budget_per)))
   end
   else if c.derived land 1023 = 0 && Atomic.get c.stop then refuse "the change was cancelled: the database closes"
+
+let[@inline never] count_derived c ri =
+  c.derived <- c.derived + 1;
+  if ri >= 0 then c.per_rule.(ri) <- c.per_rule.(ri) + 1;
+  over_budget c
 
 (* a frozen relation's fact about to change: the group is reasoned again with the generic rules *)
 let[@inline] check_frozen c p w = match c.prog.spec with None -> () | Some s -> if is_frozen s p w then raise_notrace (Respec (p, w))
@@ -2431,8 +2434,9 @@ let[@inline never] sort_heads h =
   end
 
 (* [hd]'s heads sorted, the first of each fact kept, those the view holds dropped; those the working set holds kept
-   ([final] false: they are decided at the end) or made facts there as emit_fact does ([final]); [final]: each fact
-   kept counted, as every derived fact is. The facts kept that neither holds: their count. *)
+   ([final] false: they are decided at the end) or made facts there as emit_fact does ([final]); [final]: the facts
+   kept counted, by rule, as every derived fact is, the budget checked once for them. The facts kept that neither
+   holds: their count. *)
 let[@inline never] sink_heads c ~final =
   let h = c.hd and ws = c.ws in
   sort_heads h;
@@ -2443,7 +2447,7 @@ let[@inline never] sink_heads c ~final =
     let p = fp ws x in
     if p < np then Bytes.unsafe_set inws p '\001'
   done;
-  let n = h.nh and k = ref 0 and fresh = ref 0 in
+  let n = h.nh and k = ref 0 and fresh = ref 0 and per_rule = c.per_rule in
   let lk = ref (-1) and lv = ref 0 and lp = ref (-1) and lw = ref 0 and none = ref false in
   let keep key w ri = A.unsafe_set h.hk !k key; A.unsafe_set h.hv !k w; A.unsafe_set h.hr !k ri; incr k in
   for i = 0 to n - 1 do
@@ -2473,12 +2477,17 @@ let[@inline never] sink_heads c ~final =
         if not (in_view && e < ws.fresh && (not !none) && S.mem c.v e p w) then begin
           keep key w ri;
           incr fresh;
-          if final then (count_derived c ri; incr sink_facts)
+          if final then Array.unsafe_set per_rule ri (Array.unsafe_get per_rule ri + 1)
         end
       end
     end
   done;
   h.nh <- !k;
+  if final then begin
+    c.derived <- c.derived + !fresh;
+    sink_facts := !sink_facts + !fresh;
+    over_budget c
+  end;
   !fresh
 
 (* the head (e p w) of an instance of sink ri, kept in [hd]; past [lim] heads, deduplicated, and the change refused
