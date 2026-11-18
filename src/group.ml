@@ -43,7 +43,9 @@ type source = {
   texts : string array;  (* the group's texts, each once, in order of first use *)
 }
 
-let encode_source b ~n ~time ~by ~why ~first_new ~count_new (s : source) =
+(* [parallel k f]: f 0 .. f (k - 1), each once, on several domains (Bulk.parallel): a group of 65,536 changes or more
+   codes its four columns' parts each on one, into a buffer of its own, then appended in order: the same bytes *)
+let encode_source ?parallel b ~n ~time ~by ~why ~first_new ~count_new (s : source) =
   Codec.put_varint b n;
   Codec.put_int b time;
   Codec.put_int b by;
@@ -56,21 +58,43 @@ let encode_source b ~n ~time ~by ~why ~first_new ~count_new (s : source) =
     Array.iter (Codec.put_string b) s.texts;
     Codec.put_varint b (Array.length s.cols);
     Array.iter (fun (p, t) -> Codec.put_varint b p; Buffer.add_char b (Char.unsafe_chr t)) s.cols;
-    Pack.put_ints b s.count s.kinds;
-    Pack.put_ints b s.count s.things;
-    Pack.put_ints b s.count s.col;
-    (* each column's values, in the changes' order: the changes listed by column first (a counting sort) *)
-    let nc = Array.length s.cols in
-    let start = Array.make (nc + 1) 0 in
-    for i = 0 to s.count - 1 do let c = s.col i in start.(c + 1) <- start.(c + 1) + 1 done;
-    for c = 1 to nc do start.(c) <- start.(c) + start.(c - 1) done;
-    let at = Array.sub start 0 nc and by_col = Array.make s.count 0 in
-    for i = 0 to s.count - 1 do let c = s.col i in by_col.(at.(c)) <- i; at.(c) <- at.(c) + 1 done;
-    for c = 0 to nc - 1 do
-      let k = start.(c + 1) - start.(c) and o = start.(c) in
-      if snd s.cols.(c) = 1 then for j = 0 to k - 1 do Codec.put_u64 b (s.float by_col.(o + j)) done
-      else Pack.put_ints b k (fun j -> s.num by_col.(o + j))
-    done
+    (* each column's values, in the changes' order: the changes listed by column first (a counting sort); one column
+       (a change's derived facts of one class, say): its values are the changes' in their order *)
+    let values out =
+      let nc = Array.length s.cols in
+      if nc = 1 then begin
+        if snd s.cols.(0) = 1 then for i = 0 to s.count - 1 do Codec.put_u64 out (s.float i) done
+        else Pack.put_ints out s.count s.num
+      end
+      else begin
+        let start = Array.make (nc + 1) 0 in
+        for i = 0 to s.count - 1 do let c = s.col i in start.(c + 1) <- start.(c + 1) + 1 done;
+        for c = 1 to nc do start.(c) <- start.(c) + start.(c - 1) done;
+        let at = Array.sub start 0 nc and by_col = Array.make s.count 0 in
+        for i = 0 to s.count - 1 do let c = s.col i in by_col.(at.(c)) <- i; at.(c) <- at.(c) + 1 done;
+        for c = 0 to nc - 1 do
+          let k = start.(c + 1) - start.(c) and o = start.(c) in
+          if snd s.cols.(c) = 1 then for j = 0 to k - 1 do Codec.put_u64 out (s.float by_col.(o + j)) done
+          else Pack.put_ints out k (fun j -> s.num by_col.(o + j))
+        done
+      end
+    in
+    let part out = function
+      | 0 -> Pack.put_ints out s.count s.kinds
+      | 1 -> Pack.put_ints out s.count s.things
+      | 2 -> Pack.put_ints out s.count s.col
+      | _ -> values out
+    in
+    match parallel with
+    | Some par when s.count >= 65_536 -> (
+      let parts = Array.init 4 (fun _ -> Buffer.create (s.count / 2)) in
+      match par 4 (fun k -> part parts.(k) k) with
+      | () -> Array.iter (Buffer.add_buffer b) parts
+      | exception _ ->
+        (* a domain the runtime could not give: all of it here, into [b] (the parts, which a domain it gave may still
+           be writing, are dropped) *)
+        for k = 0 to 3 do part b k done)
+    | _ -> for k = 0 to 3 do part b k done
   end
 
 (* The coding of a group whose changes are its records, then [n] more read by index (a change's derived facts in its
@@ -79,7 +103,7 @@ let encode_source b ~n ~time ~by ~why ~first_new ~count_new (s : source) =
    Link, 0 or 1 for a Bool, a text's number for a Text or a Float), [tag p] the tag of property p's values, [text w] the
    text of word w (a Float's 8 bytes). Columns and texts are numbered in order of first use over every change, the
    records' then the extra ones': the bytes are those of [encode] of the group with all its changes as records. *)
-let encode_parts b g ~n:extra ~thing ~prop ~tag ~word ~text =
+let encode_parts ?parallel b g ~n:extra ~thing ~prop ~tag ~word ~text =
   let ch = g.changes in
   let nf = Array.length ch in
   let count = nf + extra in
@@ -109,18 +133,22 @@ let encode_parts b g ~n:extra ~thing ~prop ~tag ~word ~text =
        | Text s -> place s)
   done;
   if extra > 0 then begin
-    (* the extra changes' columns by property (a property's values take one tag), their texts' places by word *)
-    let pcol = ref (Array.make 64 (-1)) and wplace = Hashtbl.create 16 in
+    (* the extra changes' columns and tags by property (a property's values take one tag; [tag] once a property),
+       their texts' places by word *)
+    let pcol = ref (Array.make 64 (-1)) and ptag = ref (Array.make 64 0) and wplace = Hashtbl.create 16 in
     for j = 0 to extra - 1 do
       let p = prop j in
       if p >= Array.length !pcol then begin
-        let a = Array.make (max (p + 1) (2 * Array.length !pcol)) (-1) in
+        let k = max (p + 1) (2 * Array.length !pcol) in
+        let a = Array.make k (-1) and t = Array.make k 0 in
         Array.blit !pcol 0 a 0 (Array.length !pcol);
-        pcol := a
+        Array.blit !ptag 0 t 0 (Array.length !ptag);
+        pcol := a;
+        ptag := t
       end;
-      let t = tag p in
-      let c = Array.unsafe_get !pcol p in
-      let c = if c >= 0 then c else (let c = column p t in Array.unsafe_set !pcol p c; c) in
+      let c = !pcol.(p) in
+      let c = if c >= 0 then c else (let t = tag p in let c = column p t in !pcol.(p) <- c; !ptag.(p) <- t; c) in
+      let t = !ptag.(p) in
       col.(nf + j) <- c;
       num.(nf + j) <-
         (match t with
@@ -134,7 +162,7 @@ let encode_parts b g ~n:extra ~thing ~prop ~tag ~word ~text =
          | _ -> word j)
     done
   end;
-  encode_source b ~n:g.n ~time:g.time ~by:g.by ~why:g.why ~first_new:g.first_new ~count_new:g.count_new
+  encode_source ?parallel b ~n:g.n ~time:g.time ~by:g.by ~why:g.why ~first_new:g.first_new ~count_new:g.count_new
     { count;
       kinds = (fun i -> if i < nf then code ch.(i).kind else 2);
       things = (fun i -> if i < nf then ch.(i).e else thing (i - nf));

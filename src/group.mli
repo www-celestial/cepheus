@@ -49,7 +49,11 @@ type source = {
   texts : string array;  (** the group's texts, each once, in order of first use *)
 }
 
-val encode_source : Buffer.t -> n:int -> time:int -> by:int -> why:string -> first_new:int -> count_new:int -> source -> unit
+val encode_source :
+  ?parallel:(int -> (int -> unit) -> unit) -> Buffer.t -> n:int -> time:int -> by:int -> why:string -> first_new:int ->
+  count_new:int -> source -> unit
+(** [parallel k f] runs f 0 .. f (k - 1), each once, on several domains: a group of 65,536 changes or more codes
+    the parts of its four columns (kinds, things, columns, values) beside each other, the same bytes. *)
 
 val encode : Buffer.t -> t -> unit
 (** The journal's coding of a group (format 2, docs/book/formats.md): its header, its texts once each, then its changes
@@ -60,7 +64,7 @@ val tag_of_typ : Value.typ -> int
     5 Date, 6 Money, 7 Link. *)
 
 val encode_parts :
-  Buffer.t -> t -> n:int -> thing:(int -> int) -> prop:(int -> int) -> tag:(int -> int) -> word:(int -> int) ->
+  ?parallel:(int -> (int -> unit) -> unit) -> Buffer.t -> t -> n:int -> thing:(int -> int) -> prop:(int -> int) -> tag:(int -> int) -> word:(int -> int) ->
   text:(int -> string) -> unit
 (** {!encode} of the group with [n] more changes after its records, read by index and never made records: each
     Derived, change j of the thing [thing j], the property [prop j], whose values take the tag [tag p] ({!tag_of_typ}), and

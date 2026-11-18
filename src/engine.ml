@@ -192,13 +192,15 @@ let inline_only ops =
    file, not yet named, while another domain writes its frame's body to the journal (Journal.begin_frame): the batch
    carries both, and the commit finishes the frame, then names the run once the frame is durable, as a background
    merge's (G12). The writer runs no background merge then, and nothing else appends to the journal meanwhile. *)
-let prepare ?(release = fun (_ : int) -> ()) ?(background = false) t (reqs : (Resolve.op list * int * string) array) =
+let prepare ?(release = fun (_ : int) -> ()) ?(background = false) ?(ready = fun () -> false) t (reqs : (Resolve.op list * int * string) array) =
   let body = Buffer.create 1024 in
   let first = t.working.group + 1 in
   let count = ref 0 and groups = ref [] and runs = ref [] and pending = ref None and change = ref None in
   let one = Buffer.create 256 in
   let results = ref [] and full = ref false and i = ref 0 in
-  while (not !full) && !i < Array.length reqs do
+  (* [ready ()]: a change in the background waits for its install: the prefix stops there, so that the install's last
+     catch-up holds no more groups than it must *)
+  while (not !full) && !i < Array.length reqs && not (!count > 0 && ready ()) do
     let ops, by, why = reqs.(!i) in
     let large_ops = List.compare_length_with ops !Resolve.large_min >= 0 in
     (* the result of request i, or None: it waits for the next frame *)
@@ -1329,7 +1331,8 @@ let install_change l ch (b : built) =
               | Some t -> t
               | None -> let t = match find p with Some d -> Group.tag_of_typ d.typ | None -> 0 in Hashtbl.replace tags p t; t
             in
-            Group.encode_parts body g ~n:nr ~thing:(fun j -> Bulk.thing f (row j)) ~prop:(fun j -> Bulk.prop f (row j)) ~tag
+            (* its columns beside each other: the frame's coding is on the path of every write that waits *)
+            Group.encode_parts ~parallel:(fun k f -> Bulk.parallel k f) body g ~n:nr ~thing:(fun j -> Bulk.thing f (row j)) ~prop:(fun j -> Bulk.prop f (row j)) ~tag
               ~word:(fun j -> Bulk.word f (row j)) ~text:(Store.text v);
             let value p w = match find p with Some d -> Store.value v d.typ w | None -> Value.Int w in
             [ n, fun () -> Array.init nr (fun j -> let x = row j in let p = Bulk.prop f x in { Group.kind = Derived; e = Bulk.thing f x; p; v = value p (Bulk.word f x) }) ]
@@ -1358,13 +1361,15 @@ let rec poll_change l =
     match Atomic.get ch.out with
     | None -> ()
     | Some o ->
-      Option.iter Domain.join ch.cdom;
       l.change <- None;
+      (* installed, then its domain joined: what it made is the writer's from [out] on (an atomic), and the join waits
+         for the domain's end, which the writer need not wait for first *)
       (match o with
        | Built b when ch.born <> l.lineage -> drop_run l.e b; deliver ch.creq (Error not_leader)
        | _ when ch.born <> l.lineage -> deliver ch.creq (Error not_leader)
        | Built b -> install_change l ch b
        | Ended e -> deliver ch.creq (Error e));
+      Option.iter Domain.join ch.cdom;
       poll_change l)
   | None -> (
     match l.waiting with
@@ -1450,7 +1455,8 @@ let writer l () =
           wait_idle l
         end;
         let t0 = Journal.clock () in
-        let b = prepare ~release:(fun i -> reqs.(i).w <- ([], 0, "")) ~background:true l.e (Array.map (fun r -> r.w) reqs) in
+        let ready () = match l.change with Some ch -> Atomic.get ch.out <> None | None -> false in
+        let b = prepare ~release:(fun i -> reqs.(i).w <- ([], 0, "")) ~background:true ~ready l.e (Array.map (fun r -> r.w) reqs) in
         Histogram.record prepare_us (Journal.clock () - t0);
         (* the requests the frame did not take go first in the next one *)
         let taken = Array.length b.results in
