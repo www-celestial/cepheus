@@ -419,9 +419,67 @@ let raft_member () =
   close db;
   C.rmrf d
 
+(* the change's files in the snapshots directory: a run of its own written and not yet taken by a merge *)
+let change_files d = List.filter (fun n -> has_sub n ".change") (Array.to_list (Sys.readdir (Filename.concat d "snapshots")))
+
+(* A change's derived facts as a run of their own (Engine.change_run_min small): the provisional run in the views from
+   the change's on, its facts read through it, beside writes caught up meanwhile (a fact of the run whose state the
+   writes change, a fact the old rules also derive); every merge takes it and its file goes; the journal holds every
+   derived fact (reopened: the same). *)
+let own_run () =
+  section "a change's derived facts in a run of their own: read through it, caught up, merged, its file removed";
+  let d = C.tmpdir "rc-run" in
+  let db = open_db d in
+  let a, b, ty, _ = schema db in
+  let t = things db 200 in
+  ignore (ok (write db (List.init 199 (fun i -> Add (t.(i), a, Link t.(i + 1))))));
+  ignore (ok (define db [ rule "old" [ { e = x; p = ty; v = Thing t.(0) } ] (Give { e = x; p = b; v = Thing t.(1) }) ]));
+  let r0 = Atomic.get Engine.runs_installed in
+  Engine.change_run_min := 100;
+  Engine.change_pause := 0.2;
+  (* the new rule: b's of every a edge (199 facts, a run of their own) *)
+  let res = in_thread (fun () -> define db [ rule "copy" [ { e = x; p = a; v = y } ] (Give { e = x; p = b; v = y }) ]) in
+  Unix.sleepf 0.05;
+  (* meanwhile: an edge retracted (its b leaves the run's facts), two added, and a type that makes the old rule derive
+     a fact of the run ([#t0 b #t1]: the writer derives it, the change's view had it) *)
+  ignore (ok (write db [ Retract (t.(10), a, Link t.(11)) ]));
+  ignore (ok (write db [ Add (t.(20), a, Link t.(150)) ]));
+  ignore (ok (write db [ Add (t.(30), a, Link t.(1)) ]));
+  ignore (ok (write db [ Add (t.(0), ty, Link t.(0)) ]));
+  (match res () with
+   | Ok _ ->
+     let v = view db in
+     C.check (Atomic.get Engine.runs_installed = r0 + 1) "installed with a run of its own";
+     C.check (Array.length v.runs > 0 && Store.provisional v.runs.(0)) "the view's newest run is the change's, provisional";
+     C.check (List.length (change_files d) = 1) "its file in the snapshots directory: %s" (String.concat " " (change_files d));
+     C.check (exact v) "the view is exact under both rules";
+     C.check (Store.count_prop v b = 200 && not (List.mem (Link t.(11)) (values v t.(10) b))) "every edge copied, the one retracted meanwhile not (%d)" (Store.count_prop v b)
+   | Error e -> C.fail "the change: %s" (message e));
+  Engine.change_pause := 0.;
+  (* writes over the run's facts, then a snapshot: the run taken, its file gone *)
+  ignore (ok (write db [ Retract (t.(40), a, Link t.(41)); Add (t.(40), b, Link t.(41)) ]));
+  C.check (exact (view db)) "a fact of the run asserted and its proof gone: exact";
+  let last = C.user_facts (view db) in
+  ignore (ok (snapshot db));
+  let v = view db in
+  C.check (Array.for_all (fun r -> not (Store.provisional r)) v.runs && change_files d = []) "after a merge: no provisional run, no file";
+  C.check (F.equal (C.user_facts v) last) "the merge holds the same facts";
+  (* again, closed before any merge: the file goes at the close; the journal replays the change *)
+  ignore (ok (define db [ rule "back" [ { e = x; p = a; v = y } ] (Give { e = y; p = ty; v = x }) ]));
+  C.check (Array.length (view db).runs > 0 && Store.provisional (view db).runs.(0)) "a second change, a run of its own";
+  let last = C.user_facts (view db) in
+  close db;
+  C.check (change_files d = []) "closed: the file removed";
+  let db = open_db d in
+  C.check (F.equal (C.user_facts (view db)) last && exact (view db)) "reopened: the journal gives the same facts";
+  close db;
+  Engine.change_run_min := 20_000;
+  C.rmrf d
+
 (* ---- kill -9: a child writes and changes the rules until killed ---- *)
 
 let child d =
+  (match Sys.getenv_opt "RC_RUN_MIN" with Some m when m <> "" -> Engine.change_run_min := int_of_string m; Engine.change_pause := 0.02 | _ -> ());
   let db = open_db d in
   let a, b, ty, _ = schema db in
   let v = view db in
@@ -449,9 +507,10 @@ let child d =
     if Rng.bool r then ignore (define db [ pool.(Rng.int r 3) ]) else ignore (undefine db [ pool.(Rng.int r 3).name ])
   done
 
-let kills rounds =
-  section (Printf.sprintf "kill -9 during changes, %d rounds: after each recovery the view is exact under its rules" rounds);
-  let d = C.tmpdir "rc-kill" in
+let kills ?(runs = false) rounds =
+  section (Printf.sprintf "kill -9 during changes%s, %d rounds: after each recovery the view is exact under its rules" (if runs then " (each with a run of its own, killed between its write and its install too)" else "") rounds);
+  if runs then Unix.putenv "RC_RUN_MIN" "1";
+  let d = C.tmpdir (if runs then "rc-kill-run" else "rc-kill") in
   let r = Rng.make 11 and seen = ref [] in
   for round = 1 to rounds do
     let pid = Unix.create_process Sys.executable_name [| Sys.executable_name; "--child"; d |] Unix.stdin Unix.stdout Unix.stderr in
@@ -463,9 +522,11 @@ let kills rounds =
     | Ok db ->
       let v = view db in
       C.check (exact v) "round %d: the recovered view (group %d) is exact under its %d rules" round v.group (List.length (C.rules_of v));
+      C.check (Array.for_all (fun r -> not (Store.provisional r)) v.runs && change_files d = []) "round %d: no run of a change kept by the open" round;
       seen := List.sort_uniq compare (List.map (fun (rl : rule) -> rl.name) (C.rules_of v)) :: !seen;
       close db
   done;
+  if runs then Unix.putenv "RC_RUN_MIN" "";
   Printf.printf "  rule sets recovered: %s\n%!" (String.concat " " (List.map (fun l -> "{" ^ String.concat "," l ^ "}") (List.rev !seen)));
   C.rmrf d
 
@@ -482,4 +543,16 @@ let () =
     counting ();
     raft_member ();
     kills rounds;
+    own_run ();
+    (* every test again, each change's derived facts in a run of their own (from 1 fact) *)
+    section "the same with every change's derived facts in a run of their own:";
+    Engine.change_run_min := 1;
+    let r0 = Atomic.get Engine.runs_installed in
+    interleavings ();
+    concurrency ();
+    closing ();
+    raft_member ();
+    C.check (Atomic.get Engine.runs_installed > r0) "changes installed with a run of their own (%d)" (Atomic.get Engine.runs_installed - r0);
+    Engine.change_run_min := 20_000;
+    kills ~runs:true rounds;
     C.finish "rulechange"

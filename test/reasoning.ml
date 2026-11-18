@@ -955,6 +955,14 @@ let () =
   section "G8, G17, G19: the same on databases on the disk: every change of the rules on the background path";
   random_sequences ~durable:true ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
   C.check (Atomic.get Engine.changes_done > 0) "the background path installed changes";
+  section "G8, G17, G19: the same with every change's derived facts in a run of their own (from 1 fact), its rounds in morsels on several domains (from 4 facts)";
+  Engine.change_run_min := 1;
+  Reason.par_min := 4;
+  let r0 = Atomic.get Engine.runs_installed in
+  random_sequences ~durable:true ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
+  C.check (Atomic.get Engine.runs_installed > r0) "changes were installed with a run of their own (%d)" (Atomic.get Engine.runs_installed - r0);
+  Reason.par_min := 20_000;
+  Engine.change_run_min := 20_000;
   section "G8, G17, G18: the path of loads (groups of additions from 2 facts; rules without Not or aggregates, constraints and one-valued heads among them) on the disk";
   Resolve.large_min := 2;
   let b0 = !Reason.bulk_groups in
