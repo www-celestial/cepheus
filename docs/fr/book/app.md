@@ -409,6 +409,11 @@ passe ; `crypto.HashPassword`, par libsodium :
 [cryptographie](https://github.com/www-celestial/cesia/blob/main/docs/book/crypto.md)). Un identifiant inconnu est
 vérifié contre le hash d'un mot de passe que personne n'a, pour qu'il prenne autant de temps qu'un mauvais mot de passe
 et que le temps d'une réponse n'apprenne à personne quels identifiants existent ; les deux reçoivent le même message.
+Le hash tourne hors du seul thread de l'application (le `slow` de `c.Fn` :
+[un appel qui prend du temps](https://github.com/www-celestial/cesia/blob/main/docs/book/c.md#a-call-that-takes-long)) :
+pendant qu'un visiteur se connecte, les autres requêtes avancent. Au plus la moitié des cœurs de la machine calculent
+un hash à la fois (64 MiB chacun), les autres attendent dans une file de 64 par place, et une de plus reçoit un 500
+tout de suite : un flot de connexions prend une mémoire bornée ([les mesures](#14-ce-que-cela-coûte)).
 Une session, ce sont 32 octets aléatoires venus du système (`crypto.Random`), envoyés une seule fois dans un cookie ;
 la base garde leur hash BLAKE2b (une fonction de hash rapide), donc une copie de la base n'ouvre aucune session. Le
 cookie est `HttpOnly` (aucun script ne le lit), `SameSite=Strict` (aucune page d'un autre site ne l'envoie), dure 8
@@ -776,33 +781,34 @@ c'est-à-dire la 6e et la 16e valeur une fois les tours triés) ; le p50 et le p
 d'une requête, de son envoi à sa réponse) que la moitié et 99 sur 100 de ses requêtes n'ont pas dépassées. Les
 scripts : `bench/run.sh` (le seed, les démarrages, les pages par ApacheBench, chaque requête sur sa propre connexion),
 `bench/actions.sh` (les formulaires, par `bench/load`), `bench/live.sh` (le tableau de bord dans Firefox),
-`bench/giants/giants.sh` (à côté de PostgreSQL), `bench/stats` (les médianes).
+`bench/giants/giants.sh` (à côté de PostgreSQL), `bench/signins` (les pages pendant que des connexions arrivent),
+`bench/stats` (les médianes).
 
-**Le démarrage.** Le seed dans une base vide : 4,84 s [4,60 ; 4,94] pour 2,4 millions de faits, surtout le côté Cesia,
+**Le démarrage.** Le seed dans une base vide : 4,82 s [4,63 ; 5,22] pour 2,4 millions de faits, surtout le côté Cesia,
 qui fabrique les 2,4 millions d'opérations des groupes (une map chacune). Le démarrage du serveur Cepheus sur la base
-remplie : 30,9 ms [30,2 ; 31,7]. Le processus de l'application, de sa commande à son port qui accepte une connexion :
-81,6 ms [80,0 ; 82,2], dont le `Ms` de sa ligne de log (ses deux connexions, les règles, libsodium) fait de 44 à 54 ms,
-et le reste est le démarrage de Cesia, la lecture du code de l'application et le premier chargement du moteur (13 ms,
-[ce que cela coûte](cesia.md#ce-que-cela-coûte)).
+remplie : 29,6 ms [29,1 ; 30,1]. Le processus de l'application, de sa commande à son port qui accepte une connexion :
+78,6 ms [76,9 ; 79,3], dont le `Ms` de sa ligne de log (ses deux connexions, les règles, libsodium) fait environ
+41 ms, et le reste est le démarrage de Cesia, la lecture du code de l'application et le premier chargement du moteur
+(13 ms, [ce que cela coûte](cesia.md#ce-que-cela-coûte)).
 
 **Les pages**, en ms, avec 1 client (un programme qui envoie les requêtes l'une après l'autre), puis 50 à la fois :
 
 | page | 1 client : p50 | p99 | 50 clients : p50 | p99 | requêtes par seconde à 50 |
 |---|---:|---:|---:|---:|---:|
-| le plancher : `/app.css`, une constante | 0,13 [0,12 ; 0,13] | 0,21 | 2,48 | 4,50 | 19 083 |
-| la page de connexion | 0,13 [0,12 ; 0,14] | 0,32 | 2,78 | 4,41 | 17 568 |
-| le tableau de bord (son HTML ; ses nombres arrivent en direct) | 0,21 [0,20 ; 0,22] | 0,45 | 7,96 | 11,9 | 6 349 |
-| factures, la première page | 0,97 [0,96 ; 0,99] | 1,70 | 52,4 | 76,0 | 1 059 |
-| factures, une page à 50 000 de profondeur | 1,07 [1,06 ; 1,11] | 1,93 | 58,8 | 84,2 | 963 |
-| factures, impayées ou en retard (`In`) | 1,33 [1,32 ; 1,35] | 2,26 | 74,6 | 112 | 753 |
-| factures, en retard ou à échéance dans la semaine (`Or`) | 1,71 [1,70 ; 1,89] | 2,88 | 94,7 | 132 | 594 |
-| factures, vues par le comptable (lues au serveur) | 1,48 [1,44 ; 1,50] | 2,20 | 41,0 | 72,4 | 1 174 |
-| une facture et ses lignes | 0,30 [0,30 ; 0,31] | 0,56 | 12,9 | 18,9 | 4 158 |
-| le formulaire d'une nouvelle facture | 0,27 [0,26 ; 0,28] | 0,49 | 11,5 | 16,8 | 4 721 |
-| un client, ce qu'il doit, ses factures non payées | 0,59 [0,58 ; 0,61] | 1,00 | 29,0 | 43,2 | 1 902 |
-| clients, la première page par nom | 13,2 [13,1 ; 13,5] | 24,7 | 737 | 1 059 | 75 |
-| clients, la recherche à mesure qu'on tape (« ma ») | 1,19 [1,18 ; 1,33] | 2,03 | 63,4 | 101 | 870 |
-| le CSV des factures en retard (11 006 lignes) | 114 [112 ; 131] | | 5 740 | | 8,5 |
+| le plancher : `/app.css`, une constante | 0,11 [0,11 ; 0,12] | 0,20 | 2,75 | 4,10 | 17 969 |
+| la page de connexion | 0,12 [0,11 ; 0,12] | 0,26 | 3,09 | 4,85 | 16 300 |
+| le tableau de bord (son HTML ; ses nombres arrivent en direct) | 0,19 [0,19 ; 0,20] | 0,36 | 7,63 | 10,7 | 7 183 |
+| factures, la première page | 0,77 [0,77 ; 0,78] | 1,13 | 39,5 | 62,2 | 1 402 |
+| factures, une page à 50 000 de profondeur | 0,86 [0,85 ; 0,87] | 1,29 | 43,7 | 70,5 | 1 256 |
+| factures, impayées ou en retard (`In`) | 1,15 [1,13 ; 1,16] | 1,48 | 58,6 | 93,8 | 928 |
+| factures, en retard ou à échéance dans la semaine (`Or`) | 1,43 [1,42 ; 1,44] | 1,79 | 74,7 | 121 | 731 |
+| factures, vues par le comptable (lues au serveur) | 1,13 [1,10 ; 1,16] | 1,57 | 50,0 | 77,7 | 997 |
+| une facture et ses lignes | 0,29 [0,29 ; 0,30] | 0,51 | 12,8 | 16,0 | 4 352 |
+| le formulaire d'une nouvelle facture | 0,26 [0,26 ; 0,27] | 0,47 | 11,4 | 14,0 | 4 932 |
+| un client, ce qu'il doit, ses factures non payées | 0,41 [0,40 ; 0,41] | 0,66 | 19,1 | 26,8 | 2 932 |
+| clients, la première page par nom | 0,51 [0,50 ; 0,51] | 0,78 | 25,1 | 34,5 | 2 238 |
+| clients, la recherche à mesure qu'on tape (« ma ») | 1,65 [1,63 ; 1,66] | 2,08 | 88,8 | 130 | 633 |
+| le CSV des factures en retard (11 011 lignes) | 77,0 [76,6 ; 78,3] | | 3 791 | | 12,9 |
 
 - Avec 50 clients à la fois, le seul processus de l'application les sert l'un après l'autre : la latence est environ
   50 fois le travail d'une requête, et les requêtes par seconde disent ce que donne un cœur. `cesia run --workers 4`
@@ -812,9 +818,11 @@ et le reste est le démarrage de Cesia, la lecture du code de l'application et l
   réponse) vers le serveur par son socket (son token lit là-bas, pas dans la mémoire de l'application), et en sert
   davantage à 50, puisque les domains du serveur (des fils d'exécution d'OCaml qui tournent en parallèle, chacun sur
   son cœur) font la lecture à côté du cœur de l'application.
-- La liste des clients par nom est la page lente : un tri sur un texte lit chaque client (10 000) avant de garder les
-  20 premiers, là où un tri sur un nombre lit l'index dans son ordre. La recherche à mesure qu'on tape ne lit que les
-  clients qu'elle trouve.
+- La liste des clients par nom lit l'index des noms dans leur ordre, comme le fait une liste par un nombre : 0,51 ms,
+  là où elle lisait chaque client (10 000) avant de garder les 20 premiers (13,2 ms, 75 par seconde à 50, mesuré le
+  2026-11-13). La recherche à mesure qu'on tape coûte 0,46 ms de plus qu'alors : ses clients dont le nom commence par
+  « ma » viennent après tous les « A » à « L » dans cet ordre, donc le parcours dans l'ordre de l'index n'en trouve
+  aucun avant son budget, et le heap répond ([Sort, Limit et After](cesia.md#sort-limit-et-after--des-pages)).
 - Le CSV est surtout du travail de Cesia : la question prend quelques ms ; mettre en forme 11 000 lignes et leurs dates
   fait le reste.
 
@@ -824,22 +832,58 @@ serveur :
 
 | action | 1 client : p50 | p99 | 50 clients : p50 | p99 | par seconde à 50 |
 |---|---:|---:|---:|---:|---:|
-| un client créé | 3,82 [3,63 ; 4,40] | 16,2 | 20,0 [17,6 ; 23,2] | 33,6 | 1 996 |
-| une facture payée | 3,76 [3,58 ; 4,25] | 11,2 | 21,3 [18,6 ; 23,6] | 29,7 | 2 117 |
-| une facture créée, avec deux lignes | 5,72 [4,92 ; 11,4] | 58,3 | 24,4 [23,3 ; 29,1] | 41,0 | 1 722 |
-| une connexion d'utilisateur | 70,2 [65,8 ; 75,5] | 84,6 | 3 062 [2 989 ; 3 253] | 3 092 | 16 |
+| un client créé | 5,51 [3,77 ; 8,25] | 20,8 | 25,6 [24,1 ; 29,9] | 49,5 | 1 470 |
+| une facture payée | 6,41 [4,44 ; 9,28] | 21,3 | 25,9 [17,1 ; 36,3] | 40,1 | 1 691 |
+| une facture créée, avec deux lignes | 8,21 [5,26 ; 11,9] | 30,4 | 44,4 [25,3 ; 63,8] | 95,4 | 707 |
+| une connexion d'utilisateur | 85,1 [82,8 ; 89,9] | 184 | 855 [827 ; 907] | 1 583 | 32 |
 
+- Ces tours (2026-11-19) ont tourné avec le disque plein à 99 % et d'autres jobs qui écrivaient à côté du lock : un
+  fsync prenait plus longtemps et variait davantage que le 2026-11-13 (un client créé : 3,82 ms [3,63 ; 4,40] alors,
+  1 996 par seconde à 50 ; une facture créée, 1 722 par seconde), d'où les intervalles larges des écritures.
 - 50 écritures à la fois partagent les fsync du serveur (le group commit : confirmer plusieurs groupes par un seul
-  fsync, [le serveur](server.md)) : 2 000 par seconde, contre 240 l'une après l'autre.
+  fsync, [le serveur](server.md)) : environ 1 500 par seconde, contre 150 l'une après l'autre.
 - Une facture prend son numéro dans son propre groupe (`Incr`, étape 5), donc 50 à la fois partagent les fsync du
-  serveur comme les autres écritures : 1 722 par seconde. La numérotation qu'elle a remplacée, une facture à la fois
+  serveur comme les autres écritures. La numérotation qu'elle a remplacée, une facture à la fois
   dans le processus, mesurée en alternance avec elle sur le même serveur et les mêmes données (21 tours chacune,
   2026-11-13) : 141 par seconde, p50 262 ms à 50 clients ; le rapport des tours en factures par seconde, nouvelle sur
   ancienne, 11,0 [9,4 ; 15,4], et le même avec un seul client (p50 0,99 [0,42 ; 1,38] : la machine était occupée,
   d'où les intervalles larges et le p99 à un seul client). Avant cette file d'attente, 2 905 essais sur 4 200
   échouaient : chacune des 50 lisait le même plus grand numéro.
-- Une connexion d'utilisateur, c'est Argon2id, environ 65 ms du seul thread de l'application, exprès (le coût de
-  deviner un mot de passe) ; 50 à la fois prennent 3 s, et les requêtes de ce processus attendent pendant ce temps.
+- Une connexion d'utilisateur, c'est Argon2id, environ 65 ms d'un cœur et 64 MiB, exprès (le coût de deviner un mot
+  de passe) ; elle tourne à côté des requêtes, au plus quatre à la fois sur cette machine (la moitié de ses cœurs),
+  donc 50 à la fois sont répondues en 855 ms en
+  médiane, 32 par seconde, là où elles prenaient 3 062 ms sur le thread de l'application, 16 par seconde, chaque
+  requête du processus attendant pendant ce temps.
+
+**Les pages pendant que des connexions arrivent** (`bench/signins` : des connexions à un rythme fixe, chacune envoyée à
+son heure quoi que fassent les autres, pendant que 8 clients demandent la première page de factures l'un après
+l'autre ; 5 s par tour, 11 tours, les cas dans un ordre tournant à chaque tour ; la mémoire de l'application à son
+pic, lue dans `/proc`), en ms :
+
+| connexions | pages par seconde | p50 d'une page | p99 | la plus longue | p50 d'une connexion | p99 | mémoire au pic |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| aucune | 1 063 [1 003 ; 1 153] | 7,17 | 11,0 | 14,0 | | | 150 MB |
+| 50 par seconde, le hash sur le thread de l'application, comme avant le 2026-11-13 | 3 [3 ; 4] | 749 | 7 087 | 7 087 | 7 546 | 12 478 | 152 MB |
+| 50 par seconde, le hash à côté des requêtes (maintenant) | 279 [260 ; 309] | 27,1 | 55,5 | 69,3 | 2 032 | 3 316 | 365 MB |
+| 20 par seconde, à côté des requêtes | 612 [547 ; 667] | 11,9 | 23,8 | 30,9 | 97,0 | 152 | 293 MB |
+
+- Quand le hash tenait le seul thread de l'application, 50 connexions par seconde ne laissaient que 3 pages par
+  seconde, chacune attendant jusqu'à 7 s. À côté des requêtes, les pages continuent à 279 par seconde, et les
+  connexions attendent dans leur file.
+- 50 par seconde, c'est deux fois ce que cette machine sait hasher : Argon2id est fait pour avoir besoin de ses 64 MiB
+  à chaque étape (memory-hard : sa mémoire est le coût qu'on ne peut pas éviter), et quelques-uns à la fois prennent
+  la bande passante de la mémoire (ce qu'elle peut lire et écrire par seconde). libsodium seule, appelée depuis du C
+  sur cette machine : de 13 à 15 hashes par seconde sur un thread, de 22 à 24 sur deux, de 24 à 33 sur quatre, 30 sur
+  huit. Les pages ralentissent pour les mêmes raisons : leur travail attend la mémoire et partage les cœurs.
+- À un rythme qu'elle sait hasher (20 par seconde), une connexion prend 97 ms et les pages continuent à 612 par
+  seconde, leur p99 à 24 ms.
+- Deux hashes à la fois au lieu de quatre (`CESIA_CORES=2`, qui divise aussi par deux les cœurs du travail de Cesia
+  sur les tableaux) : sous 50 par seconde, les pages vont deux fois plus vite (552 par seconde, p99 26 ms) et les
+  connexions plus lentement (2,9 s), 75 sur 2 750 refusées par la file ; à 20 par seconde, les deux sont les mêmes
+  qu'avec quatre.
+- La mémoire grandit des hashes qui tournent à la fois, 64 MiB chacun : 365 MB au pic contre 150 MB. 400 connexions à
+  la fois : 260 répondues (4 en cours, 256 dans la file), 140 refusées tout de suite par un 500, la mémoire à 367 MB au
+  pic, et l'application répond à la page suivante comme avant.
 
 **Le tableau de bord en direct** : de la réponse à un paiement (le groupe durable) au total impayé de la page changé
 dans Firefox (`performance.now()` sur la page, la même horloge que celle du programme), 10 paiements par tour, l'un
@@ -862,33 +906,39 @@ Cepheus, les fonctions de l'application elle-même, ses lectures dans sa propre 
 
 | question | Cepheus p50 | p99 | PostgreSQL p50 | p99 |
 |---|---:|---:|---:|---:|
-| une page de factures (20 lignes de 7 champs) | 375 [369 ; 377] | 565 | **43** [42 ; 49] | 86 |
-| une page à 50 000 de profondeur | 389 [387 ; 392] | 583 | **47** [45 ; 54] | 87 |
-| les factures par un préfixe du nom du destinataire | 1 781 [1 773 ; 1 792] | 2 391 | **163** [161 ; 167] | 232 |
-| les clients par nom | 12 758 [12 622 ; 12 997] | 17 516 | **37** [36 ; 45] | 76 |
-| les clients par un préfixe du nom ou de l'e-mail (`Or`) | **850** [834 ; 855] | 1 184 | 1 328 [1 325 ; 1 329] | 2 063 |
-| le total impayé (`Not`, `Sum`, `Count`) | 55 987 [55 594 ; 56 526] | 251 290 | **10 792** [10 661 ; 10 874] | 15 555 |
-| une facture et ses lignes | **25** [25 ; 26] | 50 | 48 [48 ; 48] | 99 |
-| une mise à jour durable d'une facture | **2 704** [2 594 ; 2 904] | 5 191 | 2 989 [2 965 ; 3 038] | 7 541 |
+| une page de factures (20 lignes de 7 champs) | 182 [180 ; 183] | 318 | **46** [42 ; 48] | 80 |
+| une page à 50 000 de profondeur | 180 [180 ; 182] | 308 | **49** [45 ; 53] | 86 |
+| les factures par un préfixe du nom du destinataire | 1 184 [1 179 ; 1 198] | 1 492 | **161** [158 ; 167] | 227 |
+| les clients par nom | 120 [118 ; 122] | 187 | **37** [37 ; 38] | 74 |
+| les clients par un préfixe du nom ou de l'e-mail (`Or`) | **1 282** [1 262 ; 1 307] | 1 538 | 1 315 [1 312 ; 1 323] | 1 907 |
+| le total impayé (`Not`, `Sum`, `Count`) | 14 040 [13 929 ; 14 103] | 27 772 | **10 772** [10 663 ; 10 812] | 14 235 |
+| une facture et ses lignes | **25** [24 ; 26] | 42 | 49 [49 ; 52] | 96 |
+| une mise à jour durable d'une facture | **2 832** [2 669 ; 3 301] | 6 697 | 2 961 [2 850 ; 3 707] | 7 185 |
 
 Là où PostgreSQL gagne, et pourquoi :
 
-- **Une page triée** : de 8 à 9 fois plus vite. Son B-tree (l'arbre trié de pages où PostgreSQL range ses tables et
+- **Une page triée** : environ 4 fois plus vite. Son B-tree (l'arbre trié de pages où PostgreSQL range ses tables et
   ses index) sur le numéro donne les 20 lignes dans l'ordre, chaque ligne une lecture de sa table ; Cepheus garde chaque
   propriété dans un fait à part (le modèle entity–attribute–value), donc une ligne de 7 champs, ce sont 7 lectures
   d'index, et sa page dans l'ordre de l'index est demandée comme des fenêtres des valeurs du numéro. Les deux sont sous
-  la demi-milliseconde, mais c'est l'ordre de grandeur de l'écart.
-- **Un tri sur un texte** : 345 fois. PostgreSQL lit son index sur le nom dans l'ordre ; Cepheus n'a pas d'ordre
-  d'index pour une clé de texte, et trie tous les clients.
-- **Une somme sur un filtre** : 5 fois. PostgreSQL parcourt sa table ; Cepheus répond au `Not` pour chacune des
+  le cinquième de milliseconde, mais c'est l'ordre de grandeur de l'écart.
+- **Un tri sur un texte** : 3,2 fois, là où c'était 345 fois le 2026-11-13 (12 758 µs, chaque client lu et trié). Les
+  deux lisent maintenant l'index des noms dans son ordre ; la question triée seule prend 33 µs en OCaml, et l'essentiel
+  des 83 µs qui les séparent, c'est l'autre question de la page (les e-mails de ses 20 clients, `In`) et les lignes
+  fabriquées pour Cesia.
+- **Un préfixe que l'ordre ne suit pas** (les factures adressées à « ad... », les plus grands numéros d'abord) : 7,4
+  fois. Environ 4 factures sur 100 correspondent ; Cepheus parcourt les numéros dans l'ordre, une fenêtre à la fois,
+  et demande le préfixe dans chacune, chaque ligne de 7 champs lue comme 7 faits.
+- **Une somme sur un filtre** : 1,3 fois. PostgreSQL parcourt sa table ; Cepheus répond au `Not` pour chacune des
   100 000 factures. Sur le tableau de bord, cela se paie une fois par question (la première réponse du watch, partagée
   par toutes les pages), puis chaque changement coûte sa différence.
 
 Là où Cepheus gagne : une facture avec ses lignes est lue dans la mémoire même de l'application, sans round trip
-(25 µs contre 48) ; la recherche sur l'un de deux préfixes (`Or` de deux `Prefix`) est 1,6 fois plus rapide que les
-deux `LIKE` de PostgreSQL ; une écriture durable coûte la même chose (les deux attendent un seul fsync du disque). Et
-chaque nombre de la colonne PostgreSQL a encore besoin d'un programme autour, qui suivrait les changements
-(`LISTEN`/`NOTIFY`, écrit à la main), pour donner un tableau de bord en direct.
+(25 µs contre 49) ; la recherche sur l'un de deux préfixes (`Or` de deux `Prefix`) coûte autant que les deux `LIKE` de
+PostgreSQL (1,6 fois plus rapide le 2026-11-13, avant le tri sur un texte par l'index : son parcours dans l'ordre des
+noms ne trouve aucun « ma » avant son budget, puis le heap répond) ; une écriture durable coûte la même chose (les deux
+attendent un seul fsync du disque). Et chaque nombre de la colonne PostgreSQL a encore besoin d'un programme autour,
+qui suivrait les changements (`LISTEN`/`NOTIFY`, écrit à la main), pour donner un tableau de bord en direct.
 
 ## 15. Sécurité
 
@@ -909,15 +959,15 @@ Ce dont l'application se défend, comment, et le test qui le montre :
 | les droits de l'application elle-même | les permissions de l'étape 13, aucun fichier écrit | (le `allow` de la tâche) |
 
 Ce qui n'est pas défendu ici : les connexions d'utilisateurs ne sont pas limitées par client, puisque la requête que
-reçoit un handler Cesia ne porte pas l'adresse de son client ; et une connexion d'utilisateur coûte environ 65 ms
-d'Argon2id sur le seul thread de l'application, pendant lesquelles aucune autre requête de ce processus n'avance :
-50 connexions à la fois prennent 3 s, et il en irait de même de toute page demandée pendant ce temps (les actions plus
-haut). Un flot de connexions d'utilisateurs est un déni de service (le serveur ne répond plus) tant que le hash ne
-tourne pas à côté des requêtes.
+reçoit un handler Cesia ne porte pas l'adresse de son client. Un flot de connexions est borné, pas refusé : ses hashes
+tournent à côté des requêtes, au plus la moitié des cœurs à la fois, et la file en tient 64 par place ; au-delà, une
+connexion reçoit un 500 tout de suite. Sous 50 connexions par seconde, deux fois ce que cette machine sait hasher, la
+mémoire de l'application a culminé à 365 MB (150 MB sans) et ses autres pages ont continué à 279 par seconde, le quart
+de leur rythme (les mesures plus haut) ; les connexions elles-mêmes ont attendu 2 s dans la file.
 
 ## Ce qui n'est pas encore construit
 
 - Un watch avec un ordre et une limite (les dix derniers paiements) : le tableau de bord suit une fenêtre de temps et
   la page la trie.
-- Un ordre d'index pour un tri sur un texte (les clients par nom lisent chaque client).
-- Argon2id à côté des requêtes : une connexion d'utilisateur tient le thread de l'application pendant ses 65 ms.
+- Des connexions d'utilisateurs limitées par client : la requête d'un handler Cesia ne porte pas l'adresse de son
+  client.

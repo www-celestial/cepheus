@@ -432,9 +432,12 @@ place, if that place is after the cursor.
   value: the question is asked again on windows of that variable's values read from the property's index, from the
   cursor on, each window holding twice as many facts as the one before, until k rows are found: the work of the rows
   the page needs. A text's window is the next texts in the order of their bytes, which each run on disk keeps for its
-  property (the order `Prefix` reads too), merged over the runs and the changes not yet merged. Its budget is the planner's estimate of the heap's work; past it, the heap answers, so this way never
-  costs more than about twice the other (the rule of the ski-rental problem: rent until the rent reaches the price,
-  then buy).
+  property (the order `Prefix` reads too), merged over the runs and the changes not yet merged. Its budget is half
+  the planner's estimate of the heap's work, in facts read, since a fact read this way costs about twice a step of the
+  heap; past it, the heap answers, so this way never costs more than about twice the other (the rule of the
+  ski-rental problem: rent until the rent reaches the price, then buy). It loses when the rows the page wants lie far
+  in the order: the clients whose name starts with "ma", sorted by name, sit after every "A" to "L" (962 µs against
+  450 for the heap alone, on the app's data of [the guide](app.md#14-what-it-costs)).
 
 `Watch` refuses `Sort`, `Limit` and `After` (a watch keeps every row of its question): sort the rows it gives with
 `list.SortBy`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,

@@ -16,9 +16,10 @@
    - the index path, when the first key is a column of an int, a date, money, a link or a text that a pattern gives
      as its value (a bool has two values: nothing to gain): the question asked again on windows of that column's
      values, read off the property's index from the cursor on (a text's in the order of its bytes, which each run
-     keeps: Store.text_order), each window holding twice as many facts as the one before, until k rows are found. Its budget is the planner's estimate of
-     the heap path: past it, the heap path answers, so the index path never costs more than twice the heap path's
-     estimate (the break-even rule of Karlin, Manasse, Rudolph and Sleator 1988). *)
+     keeps: Store.text_order), each window holding twice as many facts as the one before, until k rows are found.
+     Its budget is half the planner's estimate of the heap path, in facts walked (a fact walked costs about twice a
+     candidate of the heap): past it, the heap path answers, so the index path never costs more than about twice the
+     heap path (the break-even rule of Karlin, Manasse, Rudolph and Sleator 1988). *)
 
 type key = { col : int; desc : bool }
 
@@ -209,9 +210,12 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
     in
     (* the windows of x's values in the order of the first key, from the cursor on: [next m] gives the next one, of
        about m facts, its facts and whether it is the last; each window's rows are those of the question asked on it,
-       and every row of a later window comes after every row of an earlier one, so k rows found end the walk *)
+       and every row of a later window comes after every row of an earlier one, so k rows found end the walk. The walk
+       reads at most half the heap's estimate in facts, its last window cut to what is left: a fact walked costs about
+       twice a candidate of the heap (0.41 to 0.55 us against 0.28 on the invoices app's clients), so the walk given
+       up costs about the heap's own time, and the whole about twice the heap's at worst *)
     let windowed next =
-      let budget = Lazy.force estimate in
+      let budget = Lazy.force estimate /. 2. in
       let got = fresh () and spent = ref 0 and m = ref (2 * cap) and over = ref false and found = ref None in
       while !found = None && not !over do
         let win, facts, last = next !m in
@@ -224,8 +228,11 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
            sort_cut cmp cap got
          | None -> ());
         if got.n >= cap || last then found := Some got
-        else if float_of_int !spent > budget then over := true
-        else m := 2 * !m
+        else begin
+          let left = budget -. float_of_int !spent in
+          (* an estimate past the ints (a cross product's) cuts nothing: int_of_float would give 0 there *)
+          if left <= 0. then over := true else m := max 1 (min (2 * !m) (if left >= 1e18 then max_int else int_of_float left))
+        end
       done;
       match !found with Some g -> g | None -> Atomic.incr gave_up; heap None
     in

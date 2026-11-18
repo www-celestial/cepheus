@@ -460,10 +460,14 @@ ligne après laquelle commence la page).
   l'index de la propriété, à partir du curseur, chaque fenêtre tenant deux fois plus de faits que la précédente,
   jusqu'à ce que k lignes soient trouvées : le travail des lignes dont la page a besoin. La fenêtre d'un texte, ce sont
   les textes suivants dans l'ordre de leurs octets, que chaque run sur le disque garde pour sa propriété (l'ordre que
-  lit aussi `Prefix`), fusionnés sur les runs et les changements pas encore fusionnés. Son budget est l'estimation,
-  par le planner (la partie qui choisit comment répondre à une question), du travail du heap ; au-delà, le heap
-  répond, si bien que cette façon ne coûte jamais plus d'environ deux fois l'autre (la règle du ski-rental problem, le
-  problème de la location de skis : louer jusqu'à ce que la location atteigne le prix, puis acheter).
+  lit aussi `Prefix`), fusionnés sur les runs et les changements pas encore fusionnés. Son budget est la moitié de
+  l'estimation, par le planner (la partie qui choisit comment répondre à une question), du travail du heap, en faits
+  lus, puisqu'un fait lu de cette façon coûte environ deux fois une étape du heap ; au-delà, le heap répond, si bien que
+  cette façon ne coûte jamais plus d'environ deux fois l'autre (la règle du ski-rental problem, le problème de la
+  location de skis : louer jusqu'à ce que la location atteigne le prix, puis acheter). Elle perd quand les lignes que
+  veut la page sont loin dans l'ordre : les clients dont le nom commence par « ma », triés par nom, viennent après tous
+  les « A » à « L » (962 µs contre 450 pour le heap seul, sur les données de l'application du
+  [guide](app.md#14-ce-que-cela-coûte)).
 
 `Watch` refuse `Sort`, `Limit` et `After` (un watch garde chaque ligne de sa question) : triez les lignes qu'il donne
 avec `list.SortBy`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que
