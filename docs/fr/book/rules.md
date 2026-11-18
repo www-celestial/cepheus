@@ -641,12 +641,12 @@ règle), met de côté ceux que la vue ou le working set tiennent, et compte les
 dérivé ; ils vont dans la sortie du changement dans cet ordre, donc son run à lui s'écrit sans autre tri. Prise une par
 une dans le working set, chaque tête coûtait une recherche, sa place, trois index et sa part de la croissance des tables
 : environ 0,8 µs par tête à côté de 256 writers, six fois le coût de la trouver. Au-delà de la moitié de la place que
-laisse le budget, les têtes sont dédoublonnées avant la fin, et un changement dont les faits gardés dépassent son budget
-y est refusé, en nommant la règle qui en a dérivé le plus, comme avant. Seulement dans un changement (un groupe qui
-change les règles), seulement pour des règles dont la propriété prend plusieurs valeurs, aucune unique, pas une
-propriété du système, et pas avec l'égalité (une règle qui rend des choses identiques lit chaque fait), et sur un seul
-domain : un tour sur plusieurs domains (plus bas) fait de ses têtes des faits par régions du working set, celles d'un
-sink aussi, en parallèle.
+laisse le budget (65 536 têtes au moins), les têtes sont dédoublonnées avant la fin, et un changement dont les faits
+gardés dépassent son budget y est refusé, en nommant la règle qui en a dérivé le plus, comme avant. Seulement dans un
+changement (un groupe qui change les règles ou l'ontologie), seulement pour des règles dont la propriété prend plusieurs
+valeurs, aucune unique, pas une propriété du système, et pas avec l'égalité (une règle qui rend des choses identiques
+lit chaque fait), et sur un seul domain : un tour sur plusieurs domains (plus bas) fait de ses têtes des faits par
+régions du working set, celles d'un sink aussi, en parallèle.
 
 **Ce que cela coûte** ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--les-faits-quaucune-règle-ne-lit-faits-par-un-seul-tri-2026-11-18)).
 Sur 10 universités en forme de LUBM avec les 94 règles, pendant que 256 clients écrivent de façon durable, ajouter un

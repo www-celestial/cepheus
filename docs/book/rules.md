@@ -573,12 +573,12 @@ inside each thing [Knuth 1998]; both stable. It keeps the first of each fact (st
 rule), sets aside those the view or the working set holds, and counts the others against the budget, as every derived
 fact; they go to the change's output in that order, so that its run of its own is written with no other sort. Taken one
 by one in the working set, each head cost a probe, its slot, three indexes and their share of the tables' growth: about
-0.8 µs a head beside 256 writers, six times the cost of finding it. Past half the budget's room, the heads are
-deduplicated before the end, and a change whose facts kept pass its budget is refused there, naming the rule that
-derived the most, as before. Only in a change (a group that changes the rules), only for rules whose property takes many
-values, none unique, not the system's, and not with equality (a rule that makes things the same reads every fact), and
-on one domain: a round on several domains (below) makes its heads facts by regions of the working set, a sink's too, in
-parallel.
+0.8 µs a head beside 256 writers, six times the cost of finding it. Past half the budget's room (65,536 heads at least),
+the heads are deduplicated before the end, and a change whose facts kept pass its budget is refused there, naming the
+rule that derived the most, as before. Only in a change (a group that changes the rules or the ontology), only for rules
+whose property takes many values, none unique, not the system's, and not with equality (a rule that makes things the
+same reads every fact), and on one domain: a round on several domains (below) makes its heads facts by regions of the
+working set, a sink's too, in parallel.
 
 **What it costs** ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-facts-no-rule-reads-made-facts-by-one-sort-2026-11-18)).
 On 10 LUBM-shaped universities with the 94 rules, while 256 clients write durably, adding one axiom (every person is
