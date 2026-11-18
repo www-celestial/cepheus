@@ -624,13 +624,39 @@ des cinq règles de R est nécessaire : R ne prend que les faits pour lesquels l
 entre dans la table comme (absent, dérivé), il y reste une fois touché, R n'est jamais nommé, chaque merge le prend ;
 sans n'importe laquelle, TLC trouve un contre-exemple.
 
-**Ce que cela coûte** ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5--les-faits-dérivés-dun-changement-dans-un-run-à-eux-2026-11-18)).
+**Les faits qu'aucune règle ne lit : faits par un seul tri.** La plupart des faits dérivés d'un changement ne
+déclenchent souvent rien : ce sont les faits d'un **sink** (un puits : une règle dont aucun pattern d'aucune règle ne
+peut correspondre à la tête ; dans l'exemple ci-dessous, `[x type Schedule]`, une classe qu'aucune règle ne lit). Le
+working set (la table propre au raisonnement, des faits qu'un groupe touche, avec les index que cherchent les plans des
+règles) n'en a besoin que pour savoir qu'un fait n'est pas trouvé deux fois ; une relation qu'aucun plan ne cherche n'a
+besoin d'aucun index (le choix des index d'après les recherches des plans, [Subotic 2018]), seulement que ses doublons
+soient retirés, ce que fait un seul tri. Alors un changement garde les têtes d'un sink dans un buffer à mesure que ses
+instances les trouvent (hors du tas du garbage collector : une chose, une propriété, une valeur et la règle chacune), et
+à la fin de son raisonnement les trie une fois par (chose, propriété, valeur) : elles arrivent en quelques suites
+croissantes (les faits d'un atome lus dans les runs de la vue l'un après l'autre), fusionnées deux à deux comme le fait
+un natural merge sort (un tri par fusion qui part des suites déjà triées), et au-delà de 64 suites un radix sort,
+chiffre le moins significatif d'abord, par chose, des chiffres de 11 bits, puis par propriété et valeur dans chaque
+chose [Knuth 1998] ; les deux sont stables. Il garde le premier de chaque fait (stable : sa première instance nomme sa
+règle), met de côté ceux que la vue ou le working set tiennent, et compte les autres dans le budget, comme chaque fait
+dérivé ; ils vont dans la sortie du changement dans cet ordre, donc son run à lui s'écrit sans autre tri. Prise une par
+une dans le working set, chaque tête coûtait une recherche, sa place, trois index et sa part de la croissance des tables
+: environ 0,8 µs par tête à côté de 256 writers, six fois le coût de la trouver. Au-delà de la moitié de la place que
+laisse le budget (65 536 têtes au moins), les têtes sont dédoublonnées avant la fin, et un changement dont les faits
+gardés dépassent son budget y est refusé, en nommant la règle qui en a dérivé le plus, comme avant. Seulement dans un
+changement (un groupe qui change les règles ou l'ontologie), seulement pour des règles dont la propriété prend plusieurs
+valeurs, aucune unique, pas une propriété du système, et pas avec l'égalité (une règle qui rend des choses identiques
+lit chaque fait), et sur un seul domain : un tour sur plusieurs domains (plus bas) fait de ses têtes des faits par
+régions du working set, celles d'un sink aussi, en parallèle.
+
+**Ce que cela coûte** ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--les-faits-quaucune-règle-ne-lit-faits-par-un-seul-tri-2026-11-18)).
 Sur 10 universités en forme de LUBM avec les 94 règles, pendant que 256 clients écrivent de façon durable, ajouter un
-axiome (chaque personne est aussi d'une classe que les données laissent vide : environ 140 000 faits dérivés) s'installe
-en 0,60 s (médiane de 21 ; sa construction 0,16 s, son run à lui 0,03 s : 0,72 M de faits dérivés par seconde), et la
-part du writer lui-même à l'installation est de 34 ms. Le débit des clients pendant qu'il tourne est 0,87 de ce qu'il
-est sans le changement, 0,78 sur toute la mesure depuis son début (0,83 et 0,86 dans une autre série : un seul arrêt
-dans une fenêtre de moins d'une seconde déplace beaucoup le rapport d'une paire) : l'arrière-plan partage avec le writer
+axiome (chaque personne est aussi d'une classe que les données laissent vide : environ 135 000 faits dérivés, tous
+d'un sink) s'installe en 0,31 s (médiane de 21 ; sa construction 0,053 s, son run à lui 0,025 s : 2,6 M de faits
+dérivés par seconde pour la construction, 1,7 M avec l'écriture du run), et la part du writer lui-même à l'installation
+est de 36 ms. Le débit des clients pendant qu'il tourne est 0,50 de ce qu'il est sans le changement, 0,93 sur toute la
+mesure depuis son début : la fenêtre est courte maintenant (0,2 à 0,3 s) et contient l'installation, la part du writer
+et la frame du changement écrite et forcée, 40 à 60 ms sans aucun groupe confirmé ; un seul arrêt dans une fenêtre de
+moins d'une seconde déplace beaucoup le rapport d'une paire. L'arrière-plan partage avec le writer
 les quatre cœurs de la machine, ses caches et le garbage collector, et le delta grandit pendant ce temps, puisqu'aucun
 merge ne tourne à côté d'un changement. Définir les 94 règles sur les mêmes données sans règles est le pire cas : chaque
 groupe écrit pendant ce temps coûte aux nouvelles règles plusieurs fois ce qu'il coûte aux anciennes, l'arrière-plan ne
@@ -1040,8 +1066,10 @@ Le plan de la conception a six étapes ; cette version a les six.
   sur le seul domain du changement.
 - **Le reste de l'étape 5** : un changement avec de nouvelles choses est calculé dans le groupe ; seuls les faits
   dérivés des propriétés à plusieurs valeurs, aucune unique, vont dans le run à eux d'un changement (les autres entrent
-  dans le delta) ; les deux cibles de l'étape 5 ne sont pas atteintes toutes les deux
-  ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5--les-faits-dérivés-dun-changement-dans-un-run-à-eux-2026-11-18)).
+  dans le delta) ; les deux cibles de l'étape 5 ne sont pas atteintes toutes les deux : 2 M de faits dérivés par seconde
+  pour la construction, pas avec l'écriture de son run ; le débit des writers pendant un changement, dont la fenêtre
+  contient surtout la frame de l'installation maintenant
+  ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--les-faits-quaucune-règle-ne-lit-faits-par-un-seul-tri-2026-11-18)).
 - **Le reste de l'étape 6** : B/F sur les égalités (Motik et al., IJCAI 2015 [Motik 2015c]) au lieu de défaire une
   classe ; la preuve d'une égalité dans `why` ; l'égalité à côté de `Not` et des agrégats, des closure modules, du
   chemin des chargements et des tours parallèles.

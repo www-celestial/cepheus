@@ -224,6 +224,128 @@ let () =
    | Error e -> C.fail "%s" (message e))
 
 let () =
+  section "rules: a change's sink heads sorted by (thing, property, value), stable: against List.stable_sort";
+  let r = Rng.make 7 in
+  for _ = 1 to 300 do
+    let n = Rng.int r 400 and wide = Rng.bool r and few = 1 + Rng.int r 3 in
+    let h = Reason.heads_create () in
+    h.hk <- Reason.ints n 0;
+    h.hv <- Reason.ints n 0;
+    h.hr <- Reason.ints n 0;
+    h.nh <- n;
+    let l =
+      List.init n (fun i ->
+          (* many heads on a few things (the sort inside a thing, past 32 heads too), or things far apart *)
+          let e = if wide then Schema.first_thing + Rng.int r (1 lsl 30) else Schema.first_thing + Rng.int r few in
+          let key = (e lsl 16) lor Rng.int r 4 and w = Rng.int r 7 - 3 in
+          Bigarray.Array1.set h.hk i key;
+          Bigarray.Array1.set h.hv i w;
+          Bigarray.Array1.set h.hr i i;
+          key, w, i)
+    in
+    (* or as a few ascending runs one after the other (as a view's runs are read), for the merge *)
+    let l =
+      if Rng.bool r then l
+      else begin
+        let k = 1 + Rng.int r 8 in
+        let cut = List.sort compare (List.init (k - 1) (fun _ -> Rng.int r (n + 1))) in
+        let rec runs i = function [] -> [ i, n ] | c :: rest -> (i, c) :: runs c rest in
+        let arr = Array.of_list l in
+        let out = List.concat_map (fun (a, b) -> List.stable_sort (fun (k, w, _) (k', w', _) -> compare (k, w) (k', w')) (Array.to_list (Array.sub arr a (b - a)))) (runs 0 cut) in
+        List.iteri (fun i (key, w, _) -> Bigarray.Array1.set h.hk i key; Bigarray.Array1.set h.hv i w; Bigarray.Array1.set h.hr i i) out;
+        List.mapi (fun i (key, w, _) -> key, w, i) out
+      end
+    in
+    let want = List.stable_sort (fun (k, w, _) (k', w', _) -> compare (k, w) (k', w')) l in
+    Reason.sort_heads h;
+    let got = List.init n (fun i -> Bigarray.Array1.get h.hk i, Bigarray.Array1.get h.hv i, Bigarray.Array1.get h.hr i) in
+    if got <> want then C.fail "%d heads (%s): not in stable order" n (if wide then "wide" else "few things")
+  done;
+  C.check true "300 random buffers sorted stably (radix, or a merge of a few runs)"
+
+(* A rule whose facts no rule reads (a sink) over siblings: x member y once for each sibling of x under y, so the
+   heads come many times; one fact asserted before. On a fork (the change inline; with morsels on several domains,
+   where the working set takes the sink's heads by regions), on
+   the disk (the background path, a run of its own from 1 fact), with the heads deduplicated after every head. *)
+let () =
+  section "rules: a change's sinks (facts no rule reads) made facts by one sort: the first of each, those there aside";
+  let case where db =
+    let ty, parent, member, _, _, _ = schema db in
+    let r = ok (write db (List.init 3 (fun k -> Add (-(k + 1), ty, Link (-(k + 1)))))) in
+    let ps = Array.init 3 (fun k -> thing r (-(k + 1))) in
+    let r = ok (write db (List.init 12 (fun i -> Add (-(i + 1), parent, Link ps.(i mod 3))))) in
+    let xs = Array.init 12 (fun i -> thing r (-(i + 1))) in
+    ignore (ok (write db [ Add (xs.(1), member, Link ps.(1)) ]));
+    let sib =
+      { name = "sib"; vars = 3; where = [ { e = Var 0; p = parent; v = Var 1 }; { e = Var 2; p = parent; v = Var 1 } ]; ranges = [];
+        head = Give { e = Var 0; p = member; v = Var 1 } }
+    in
+    let s0 = !Reason.sink_facts in
+    ignore (ok (define db [ sib ]));
+    let v = view db in
+    (* on several domains, the round's heads are made facts by regions of the working set, a sink's too *)
+    let want = if !Reason.par_min <= 4 then 0 else 11 in
+    C.check (!Reason.sink_facts - s0 = want) "%s: the sink made %d facts, the 12th asserted already (%d)" where want (!Reason.sink_facts - s0);
+    Array.iteri
+      (fun i x ->
+        C.check (Store.state v x member ps.(i mod 3) = (if i = 1 then 1 else 2)) "%s: x%d a member of its parent, %s" where i
+          (if i = 1 then "asserted" else "derived");
+        C.check (List.length (values v x member) = 1) "%s: x%d a member of one thing" where i)
+      xs;
+    check_proofs v;
+    ignore (ok (undefine db [ "sib" ]));
+    let v = view db in
+    C.check (Array.for_all (fun x -> values v x member = (if x = xs.(1) then [ Link ps.(1) ] else [])) xs) "%s: the rule removed, only the asserted fact" where;
+    ignore (ok (define db [ sib ]));
+    C.check (Array.for_all (fun x -> List.length (values (view db) x member) = 1) xs) "%s: defined again" where
+  in
+  case "fork" (fork empty);
+  Reason.par_min := 4;
+  case "fork, morsels" (fork empty);
+  Reason.par_min := 20_000;
+  Reason.heads_every := 1;
+  case "fork, deduplicated after every head" (fork empty);
+  Reason.heads_every := max_int;
+  let d = C.tmpdir "sinks" in
+  Engine.change_run_min := 1;
+  let r0 = Atomic.get Engine.runs_installed in
+  let db = ok (open_ d) in
+  case "disk" db;
+  C.check (Atomic.get Engine.runs_installed > r0) "disk: the change's facts in a run of their own";
+  let want = C.user_facts (view db) in
+  close db;
+  Engine.change_run_min := 20_000;
+  let db = ok (open_ d) in
+  C.check (F.equal (C.user_facts (view db)) want) "disk: reopened, the same facts";
+  close db;
+  C.rmrf d;
+  (* past the budget, refused naming the rule, when its heads are deduplicated before the end as at the end *)
+  List.iter
+    (fun every ->
+      Reason.heads_every := every;
+      let db = fork empty in
+      let _, parent, member, _, _, _ = schema db in
+      let r = ok (write db (List.init 40 (fun i -> Add (-(i + 1), parent, Link (-41))))) in
+      ignore r;
+      let c0 = !change_budget and b0 = !(fst rule_budget) in
+      change_budget := 0;
+      fst rule_budget := 100;
+      let cross =
+        { name = "cross"; vars = 3; where = [ { e = Var 0; p = parent; v = Var 1 }; { e = Var 2; p = parent; v = Var 1 } ]; ranges = [];
+          head = Give { e = Var 0; p = member; v = Var 2 } }
+      in
+      (match define db [ cross ] with
+       | Error (Invalid m) ->
+         let pre = "rule cross derived more than" in
+         C.check (String.length m >= String.length pre && String.sub m 0 (String.length pre) = pre) "every %d: refused, %s" every m
+       | Ok _ -> C.fail "every %d: 1,600 facts past a budget of about 100 must be refused" every
+       | Error e -> C.fail "every %d: %s" every (message e));
+      change_budget := c0;
+      fst rule_budget := b0)
+    [ max_int; 1; 7 ];
+  Reason.heads_every := max_int
+
+let () =
   section "rules: refused definitions";
   let db = fork empty in
   let ty, _, _, _, status, _ = schema db in
@@ -963,6 +1085,14 @@ let () =
   C.check (Atomic.get Engine.runs_installed > r0) "changes were installed with a run of their own (%d)" (Atomic.get Engine.runs_installed - r0);
   Reason.par_min := 20_000;
   Engine.change_run_min := 20_000;
+  section "G8, G17, G19: a change's sinks deduplicated every 3 heads, on forks, on the disk";
+  Reason.heads_every := 3;
+  let s0 = !Reason.sink_facts in
+  random_sequences ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
+  random_sequences ~durable:true ~seeds:(max 1 (seeds / 4)) ~groups:60 ~merges:false ();
+  Reason.heads_every := max_int;
+  (* a few seeds may hold no sink (RULES_SEEDS): the named cases above check them *)
+  if seeds >= 20 then C.check (!Reason.sink_facts > s0) "the sinks made facts (%d)" (!Reason.sink_facts - s0);
   section "G8, G17, G18: the path of loads (groups of additions from 2 facts; rules without Not or aggregates, constraints and one-valued heads among them) on the disk";
   Resolve.large_min := 2;
   let b0 = !Reason.bulk_groups in

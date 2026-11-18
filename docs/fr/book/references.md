@@ -237,7 +237,9 @@ est citée dans la page [comparaison](comparison.md).
   textes des runs, remplies au plus à moitié (environ 1,5 sonde pour un texte qui s'y trouve, 2,5 pour un texte qui n'y
   est pas). La section 5.2.5, le tri par distribution : le counting sort et le radix sort stable par le chiffre le moins
   significatif d'abord, qui trient les faits d'un grand groupe (par chose, par propriété, puis par valeur à l'intérieur
-  de chaque propriété, avec des chiffres de 11 bits).
+  de chaque propriété, avec des chiffres de 11 bits), et les têtes des sinks d'un changement au-delà de 64 suites. La
+  section 5.2.4, le tri par fusion : le natural merge qui trie les têtes des sinks d'un changement, qui arrivent en
+  quelques suites croissantes.
 - **[Leis 2014]** V. Leis, P. Boncz, A. Kemper, T. Neumann. Morsel-Driven Parallelism: A NUMA-Aware Query
   Evaluation Framework for the Many-Core Age. *SIGMOD* 2014, 743–754. https://doi.org/10.1145/2588555.2610507
   — Un travail découpé en petits morceaux ("morsels") que des threads de travail prennent à tour de rôle chez un
@@ -381,7 +383,8 @@ est citée dans la page [comparaison](comparison.md).
 - **[Subotic 2018]** P. Subotić, H. Jordan, L. Chang, A. Fekete, B. Scholz. Automatic Index Selection for Large-Scale
   Datalog Computation. *PVLDB* 12(2), 141–153, 2018. https://doi.org/10.14778/3282495.3282500
   — Les index dont un ensemble de règles a besoin, choisis d'après les recherches que font ses plans : dans un grand
-  groupe, un fait dérivé n'entre que dans les chaînes que lit au moins un plan.
+  groupe, un fait dérivé n'entre que dans les chaînes que lit au moins un plan ; les faits des sinks d'un changement,
+  qu'aucun plan ne cherche, n'entrent dans aucune table.
 - **[Zhao 2020]** D. Zhao, P. Subotić, B. Scholz. Debugging Large-scale Datalog: A Scalable Provenance Evaluation
   Strategy. *ACM TOPLAS* 42(2), 2020. https://doi.org/10.1145/3379446
   — La provenance stockée par fait (règle et hauteur de preuve) pour un temps d'exécution publié de 1,31× : l'autre voie

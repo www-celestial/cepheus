@@ -496,6 +496,67 @@ The two slow rounds through the socket did not repeat in the process, where the 
 timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
 disk whose fsyncs vary that much from round to round.
 
+## Rules, step 5's targets again: a change's facts no rule reads, made facts by one sort (2026-11-18)
+
+The lever the measures below pointed at ([rules](rules.md#changes-of-the-rules-in-the-background)): a change keeps
+the heads of its **sinks** (rules whose facts no rule reads) in a buffer, sorts them once at the end of its reasoning
+(a natural merge of the few ascending runs they come in, a radix sort past 64), keeps the first of each fact, sets
+aside those the view or the working set holds, and writes the others to its output in thing order, never into the
+working set.
+
+**Where main's build went** (main 5de6b66, one run each with timers, the same change as below, 3 runs): 0.13 to 0.20 s
+= the programs 0.015 to 0.020, the added rule's instances 0.096 to 0.149 (of which reading the view's facts alone
+0.016: the rest, about 0.8 µs a head, is putting each head into the working set: a probe, its slot, three chains, the
+tables' growth by doubling), the derived facts set apart 0.008 to 0.014 (a search of the delta a fact), the rest
+under 0.01; its run of its own 0.023 to 0.036 (a sort when the heads did not come in thing order, 0.001 to 0.012).
+**Where it goes now** (the same timers): the instances read 0.014 to 0.017, their heads kept 0.005 to 0.010, sorted
+0.0003 to 0.0024 (one run at 0.008), made facts 0.0015 to 0.0023, set apart 0.0012 to 0.0020 (one search of the
+delta a (property, value)); the programs 0.014 to 0.024, almost all of it the rules unfolded on small relations
+for the writer's next groups (the unfolding 0.008 to 0.013, its checks 0.004 to 0.009); the run of its own
+0.020 to 0.029 (no sort: the facts come sorted; the merge's write 0.017 to 0.025).
+
+**Method.** As below: `CHANGE=one reason.exe change 10 256 8 2 with|without DIR`, the rule `[x type Person] -> [x
+type Schedule]` defined over LUBM-10 with the 94 rules on the disk while 256 clients write graduate students
+durably; 21 pairs (with, without) for main 5de6b66 and for this branch, alternated, in one hold of the heavy lock,
+each run in a 3 GB scope. A cell is the median with $[x(1), x(n)]$.
+
+| what (21 pairs) | main 5de6b66 | this branch |
+|---|---:|---:|
+| the change, from `define` to its answer | 0.543 s [0.315, 0.905] | **0.311 s** [0.164, 2.83] |
+| its build (about 135,000 derived facts) | 0.168 s [0.093, 0.209] | **0.053 s** [0.032, 0.070] |
+| its run of its own: written, not forced | 0.033 s [0.021, 0.044] | **0.025 s** [0.020, 0.032] |
+| derived facts a second, the build | 0.80 M [0.67, 1.30] | **2.57 M** [1.97, 3.77] |
+| derived facts a second, the build and the run | 0.67 M [0.58, 1.06] | **1.73 M** [1.44, 2.32] |
+| the writer's part at the install | 32 ms [21, 61] | 36 ms [23, 51] |
+| the clients' throughput in the change's window, with / without | 0.93 [0.06, 18.7] | 0.50 [0.03, 1.00] |
+| the same over the whole run from the change's start | 0.96 [0.77, 2.34] | 0.93 [0.11, 5.43] |
+
+- **The same derived facts** (no writer, so that both runs are the same; each database then read whole by one
+  binary): the axiom over LUBM-10, 2,006,283 facts of which 651,629 derived, digest `3d3ea1921e042` on both sides;
+  the 94 rules defined over LUBM-1 without rules, 210,869 facts of which 60,526 derived, `67123592f6fa` on both.
+  With no writer, the axiom's build is 0.086 s on main and 0.024 s here (119,424 derived facts: 1.4 M and 5.0 M a
+  second; 1.1 M and 2.8 M with the run's write).
+- **Changes with few sinks** (11 pairs, alternated): the 94 rules defined inline on a fork of LUBM-1 (`reason.exe
+  define 1`, its rounds on several domains), 0.230 s on main and 0.210 s here (paired 0.97 [0.69, 1.22]); the same
+  rules on the background path with no writer (`CHANGE=all ... change 1 0 2 1`), build 0.105 and 0.104 s: no change.
+  A round on several domains makes a sink's heads facts by regions of the working set, as before: pushed and sorted on
+  one domain, the inline define was no faster (paired 1.03 [0.86, 1.94]).
+- **Against the step's targets**: 2 M derived facts a second: **2.57 M for the build** (1.97 at its least), 1.73 M
+  with its run's write (missed; 2.32 at best); the writers within 10 % of their throughput without the change: missed,
+  0.50 in the change's window and 0.93 over the run from its start (main 0.93 and 0.96 in this series). The window is
+  0.2 to 0.3 s now, and it holds the install: the writer's own part (36 ms) and the change's frame of 135,000 derived
+  facts written and forced, about 40 to 60 ms with no group confirmed (the bins of 10 ms show it). Main's window
+  ratio is the median of pairs as far apart as 0.06 and 18.7: in five of its 21 pairs the run without the change
+  stalled inside the window (ratios 4.7 to 18.7), as a merge's switch does (no merge runs beside a change), which a
+  window of 0.5 to 0.7 s holds more often. The next levers: the install's frame (each of R's facts becomes a change record and a value for the frame,
+  allocated by the writer, then encoded), and, in the build, the unfolding of the new rules on small relations.
+- **Start-up** (21 rounds of 100 runs, alternated, each binary in 7 copies taken in turn): `bench.exe` 2.664 ms on
+  main, 2.688 ms here (paired 0.999 [0.983, 1.020]); `cepheus` (`bin/main.exe`) 4.779 ms and 4.711 ms (paired 0.986
+  [0.981, 0.993]): it does not grow.
+- **Beside the giants** (their papers; step 3's table): RDFox 2014 [Motik 2014] derives 0.67 M facts a second on one
+  thread and 6.1 to 7.0 M on 16 to 32 threads of two 8-core Xeons; this change's build, 2.6 M a second on one domain beside 256
+  durable writers, is about four times RDFox's one-thread rate and below its parallel one; with the run's write, 1.7 M.
+
 ## Rules, step 5's targets: a change's derived facts in a run of their own (2026-11-18)
 
 The rest of step 5 ([rules](rules.md#changes-of-the-rules-in-the-background)): a large change of the rules writes the
