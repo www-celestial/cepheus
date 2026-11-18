@@ -781,7 +781,8 @@ c'est-à-dire la 6e et la 16e valeur une fois les tours triés) ; le p50 et le p
 d'une requête, de son envoi à sa réponse) que la moitié et 99 sur 100 de ses requêtes n'ont pas dépassées. Les
 scripts : `bench/run.sh` (le seed, les démarrages, les pages par ApacheBench, chaque requête sur sa propre connexion),
 `bench/actions.sh` (les formulaires, par `bench/load`), `bench/live.sh` (le tableau de bord dans Firefox),
-`bench/giants/giants.sh` (à côté de PostgreSQL), `bench/stats` (les médianes).
+`bench/giants/giants.sh` (à côté de PostgreSQL), `bench/signins` (les pages pendant que des connexions arrivent),
+`bench/stats` (les médianes).
 
 **Le démarrage.** Le seed dans une base vide : 4,82 s [4,63 ; 5,22] pour 2,4 millions de faits, surtout le côté Cesia,
 qui fabrique les 2,4 millions d'opérations des groupes (une map chacune). Le démarrage du serveur Cepheus sur la base

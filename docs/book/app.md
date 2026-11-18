@@ -709,7 +709,8 @@ benchmarks out). Each number is the median of 21 rounds, with its distribution-f
 statistics $[x_{(6)}, x_{(16)}]$ of the rounds); a round's p50 and p99 are the latencies that half and 99 in 100 of
 its requests did not pass. The scripts: `bench/run.sh` (the seed, the start-ups, the pages through ApacheBench, each
 request on a connection of its own), `bench/actions.sh` (the forms, through `bench/load`), `bench/live.sh` (the
-dashboard in Firefox), `bench/giants/giants.sh` (beside PostgreSQL), `bench/stats` (the medians).
+dashboard in Firefox), `bench/giants/giants.sh` (beside PostgreSQL), `bench/signins` (the pages while sign-ins
+arrive), `bench/stats` (the medians).
 
 **Starting.** The seed in an empty database: 4.82 s [4.63, 5.22] for 2.4 million facts, most of it the Cesia
 side, which makes the groups' 2.4 million operations (a map each). The Cepheus server's start on the seeded database:
