@@ -476,6 +476,87 @@ let own_run () =
   Engine.change_run_min := 20_000;
   C.rmrf d
 
+(* The install's frame with a run of its own: R's facts the table lacks are coded from R's columns, never made records
+   on the writer's path (Engine.batch's [rest]). For a copy rule of each type (text, float, bool, int, date, money,
+   link), with writes caught up meanwhile (a premise of a fact of R retracted: its row leaves the frame; one added),
+   the frame's bytes are those of Group.encode of its groups made whole (Engine.whole, as the watch makes them), they
+   decode to those groups, R's facts are there as Derived changes, and the journal gives the same facts again. *)
+let install_frame () =
+  section "a change's install codes R's facts from its columns: the bytes of its whole group, every type, rows left out";
+  let d = C.tmpdir "rc-frame" in
+  let e = match Engine.open_ Disk.real d with Ok e -> e | Error e -> failwith (message e) in
+  let seen = ref [] and sm = Mutex.create () in
+  (* the syncer's hook: each batch with groups beyond their records, checked there *)
+  let before (b : Engine.batch) =
+    if b.rest <> [] then begin
+      let gs = List.rev (Engine.whole b) in
+      let enc = Buffer.create 4096 in
+      List.iter (Group.encode enc) gs;
+      let r = Codec.reader (Buffer.to_bytes b.body) 0 (Buffer.length b.body) in
+      let dec = List.map (fun _ -> Group.decode r) gs in
+      let extra = List.fold_left (fun k (n, f) -> ignore n; k + Array.length (f ())) 0 b.rest in
+      let derived = List.fold_left (fun k (g : Group.t) -> k + Array.length (Array.of_list (List.filter (fun (c : Group.change) -> c.kind = Derived) (Array.to_list g.changes)))) 0 gs in
+      Mutex.protect sm (fun () ->
+          seen := (Buffer.contents enc = Buffer.contents b.body, List.for_all2 Group.equal dec gs && Codec.at_end r, extra, derived) :: !seen)
+    end
+  in
+  let l = Engine.start ~follow:{ Engine.before; after = ignore } e in
+  let wr ops = Engine.write l ops 0 "w" in
+  let pub () = Atomic.get e.published in
+  let props =
+    [ prop "name" Ttext; prop ~many:true "name2" Ttext; prop "w" Tfloat; prop ~many:true "w2" Tfloat; prop "ok" Tbool; prop ~many:true "ok2" Tbool;
+      prop "n" Tint; prop ~many:true "n2" Tint; prop "day" Tdate; prop ~many:true "day2" Tdate; prop "price" (Tmoney 2);
+      prop ~many:true "price2" (Tmoney 2); prop "to" Tlink; prop ~many:true "to2" Tlink ]
+  in
+  let ids, ops = Result.get_ok (Resolve.declare (pub ()) props) in
+  ignore (ok (wr ops));
+  let id k = List.nth ids k in
+  let value k i : Value.t =
+    match k with
+    | 0 -> Text (Printf.sprintf "t%d" (i mod 37)) | 1 -> Float (float i /. 8.) | 2 -> Bool (i mod 3 = 0) | 3 -> Int (i * 7)
+    | 4 -> Date (20_000 + i) | 5 -> Money (i * 100) | _ -> Link (i + 1)
+  in
+  let r = ok (wr (List.init 60 (fun i -> Add (-(i + 1), id 6, Int i)))) in
+  let t = Array.init 60 (fun i -> List.assoc (-(i + 1)) r.things) in
+  let value k i = match value k i with Link j -> Value.Link t.(j mod 60) | v -> v in
+  for k = 0 to 6 do ignore (ok (wr (List.init 59 (fun i -> Add (t.(i), id (2 * k), value k i))))) done;
+  let define name where head =
+    let id = free_id (pub ()) in
+    [ Add (id, Schema.p_name, Text name); Add (id, Schema.p_rule, Text (Rules.to_text (rule name where head))); Expect (id, Schema.p_name, None) ]
+  in
+  Engine.change_run_min := 1;
+  Engine.change_pause := 0.1;
+  let installs = ref 0 in
+  for k = 0 to 6 do
+    let src = id (2 * k) and dst = id ((2 * k) + 1) in
+    let res = in_thread (fun () -> wr (define (Printf.sprintf "copy%d" k) [ { e = x; p = src; v = y } ] (Give { e = x; p = dst; v = y }))) in
+    Unix.sleepf 0.03;
+    (* meanwhile: a premise of a fact of R retracted (its row leaves the frame), a new one *)
+    ignore (ok (wr [ Retract (t.(k), src, value k k) ]));
+    ignore (ok (wr [ Add (t.(59), src, value k 59) ]));
+    (match res () with
+     | Ok _ -> incr installs
+     | Error er -> C.fail "the copy of type %d: %s" k (message er));
+    C.check (exact (pub ())) "type %d: the view is exact under its rules" k;
+    C.check (Store.count_prop (pub ()) dst = 59) "type %d: 59 facts copied, the one retracted meanwhile not (%d)" k (Store.count_prop (pub ()) dst)
+  done;
+  Engine.change_pause := 0.;
+  Engine.change_run_min := 20_000;
+  let seen = Mutex.protect sm (fun () -> List.rev !seen) in
+  C.check (List.length seen = !installs && !installs = 7) "seven frames with facts of a run (%d, %d installs)" (List.length seen) !installs;
+  List.iteri
+    (fun k (same_bytes, decodes, extra, derived) ->
+      C.check same_bytes "frame %d: the bytes of Group.encode of its whole groups" k;
+      C.check decodes "frame %d: they decode to its whole groups" k;
+      C.check (extra >= 57 && derived >= extra) "frame %d: R's facts there as Derived changes (%d of them, %d derived)" k extra derived)
+    seen;
+  let last = C.user_facts (pub ()) in
+  Engine.stop l;
+  let db = open_db d in
+  C.check (F.equal (C.user_facts (view db)) last && exact (view db)) "reopened: the journal gives the same facts";
+  close db;
+  C.rmrf d
+
 (* ---- kill -9: a child writes and changes the rules until killed ---- *)
 
 let child d =
@@ -544,6 +625,7 @@ let () =
     raft_member ();
     kills rounds;
     own_run ();
+    install_frame ();
     (* every test again, each change's derived facts in a run of their own (from 1 fact) *)
     section "the same with every change's derived facts in a run of their own:";
     Engine.change_run_min := 1;
