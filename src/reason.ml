@@ -2351,19 +2351,62 @@ let[@inline never] same_head c pl =
    and at the end of its reasoning sorts them once by (thing, property, value) (stable: a fact's first instance names
    its rule), keeps the first of each fact, sets aside those the working set or the view holds (the facts the change
    made present otherwise, the facts already there), and counts the others: they go to the output in that order,
-   never into the working set. The sort is linear: an LSD radix sort by thing, 11-bit digits (Knuth, TAOCP vol. 3,
-   5.2.5), as Bulk's, then by (property, value) inside each thing. *)
+   never into the working set. The heads come as a few ascending runs (an atom's facts read from the view's runs one
+   after the other): those are merged by pairs, as a natural merge sort does (Knuth, TAOCP vol. 3, 5.2.4); more than
+   [max_runs] of them, an LSD radix sort by thing, 11-bit digits (5.2.5), as Bulk's, then by (property, value) inside
+   each thing. *)
+
+let max_runs = 64
 
 (* [hd]'s heads in (thing lsl 16 + property, value) order, stable *)
 let[@inline never] sort_heads h =
   let n = h.nh in
-  let sorted = ref true and i = ref 1 in
-  while !sorted && !i < n do
+  (* the ascending runs' starts, up to max_runs + 1 *)
+  let starts = Array.make (max_runs + 2) n and nr = ref 1 and i = ref 1 in
+  starts.(0) <- 0;
+  while !nr <= max_runs && !i < n do
     let a = A.unsafe_get h.hk (!i - 1) and b = A.unsafe_get h.hk !i in
-    if a > b || (a = b && A.unsafe_get h.hv (!i - 1) > A.unsafe_get h.hv !i) then sorted := false;
+    if a > b || (a = b && A.unsafe_get h.hv (!i - 1) > A.unsafe_get h.hv !i) then (starts.(!nr) <- !i; incr nr);
     incr i
   done;
-  if not !sorted then begin
+  if !nr > 1 && !nr <= max_runs then begin
+    (* runs 2j and 2j + 1 merged into one, pass after pass, between two sets of buffers; on equal heads the earlier
+       run's first: stable *)
+    let sk = ref h.hk and sv = ref h.hv and sr = ref h.hr in
+    let dk = ref (ints_raw n) and dv = ref (ints_raw n) and dr = ref (ints_raw n) in
+    let nr = ref !nr in
+    while !nr > 1 do
+      let ak = !sk and av = !sv and ar = !sr and bk = !dk and bv = !dv and br = !dr in
+      let o = ref 0 and j = ref 0 and m = ref 0 in
+      while !j < !nr do
+        let lo = starts.(!j) and mid = starts.(!j + 1) in
+        let hi = if !j + 1 < !nr then starts.(!j + 2) else mid in
+        starts.(!m) <- lo;
+        incr m;
+        let x = ref lo and y = ref mid in
+        while !x < mid || !y < hi do
+          let take_x =
+            !y >= hi
+            || (!x < mid
+                && (let a = A.unsafe_get ak !x and b = A.unsafe_get ak !y in
+                    a < b || (a = b && A.unsafe_get av !x <= A.unsafe_get av !y)))
+          in
+          let s = if take_x then !x else !y in
+          A.unsafe_set bk !o (A.unsafe_get ak s);
+          A.unsafe_set bv !o (A.unsafe_get av s);
+          A.unsafe_set br !o (A.unsafe_get ar s);
+          incr o;
+          if take_x then incr x else incr y
+        done;
+        j := !j + 2
+      done;
+      starts.(!m) <- n;
+      nr := !m;
+      sk := bk; sv := bv; sr := br; dk := ak; dv := av; dr := ar
+    done;
+    h.hk <- !sk; h.hv <- !sv; h.hr <- !sr
+  end
+  else if !nr > 1 then begin
     let mn = ref max_int and mx = ref min_int in
     for i = 0 to n - 1 do
       let e = A.unsafe_get h.hk i lsr 16 in
@@ -4307,9 +4350,6 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
         (* each fact's state in the view before ([base]) and after: the view's lookups are spared *)
         let h = c.hd in
         let cap = ws.n + c.ns + h.nh in
-        let es = Array.make cap 0 and ps = Array.make cap 0 and wv = Array.make cap 0 and ss = Array.make cap 0 and bs = Array.make cap 0 in
-        let m = ref 0 in
-        let todo e p w n b = let i = !m in es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- n; bs.(i) <- b; m := i + 1 in
         (* a change's facts set apart for a run of its own ([apart]): marked first, taken only when they are enough *)
         let marks = match apart with Some _ -> Bytes.make cap '\000' | None -> Bytes.empty in
         let nmarked =
@@ -4333,6 +4373,11 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
               (fun j -> Bytes.unsafe_set marks (base + j) '\001'; incr k);
             if !k >= a.amin then !k else 0
         in
+        (* the facts that go to the view, not apart: at most the others *)
+        let cap = cap - nmarked in
+        let es = Array.make cap 0 and ps = Array.make cap 0 and wv = Array.make cap 0 and ss = Array.make cap 0 and bs = Array.make cap 0 in
+        let m = ref 0 in
+        let todo e p w n b = let i = !m in es.(i) <- e; ps.(i) <- p; wv.(i) <- w; ss.(i) <- n; bs.(i) <- b; m := i + 1 in
         let put = match apart with
           | Some a when nmarked > 0 ->
             if Bigarray.Array1.dim a.ae < nmarked then (a.ae <- Bulk.i32 nmarked; a.ap <- Bulk.u16 nmarked; a.aw <- Bulk.ints nmarked);
