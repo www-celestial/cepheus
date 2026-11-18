@@ -194,7 +194,7 @@ let all_patterns = Ask.patterns
    question's own) *)
 let occurrences (q : Query.t) extra =
   let group l = List.filter_map (function Ask.Pattern p -> Some (p, Some l) | _ -> None) l in
-  let rec of_item = function Ask.Not l -> group l | Or alts -> List.concat_map group alts | _ -> [] in
+  let of_item = function Ask.Not l -> group l | Or alts -> List.concat_map group alts | _ -> [] in
   Array.of_list (List.map (fun p -> p, None) q.where @ List.concat_map of_item extra)
 
 let whole_template (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =

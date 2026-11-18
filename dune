@@ -1,0 +1,7 @@
+(env
+ ; Each start-up pays for the frame tables of the code linked in: ld.so relocates every descriptor's return address and
+ ; the runtime hashes them all into one table. So the release build has no -g: its debug information, which nothing
+ ; reads (no backtraces are printed), gave every bounds check a call site of its own (7,370 in the server, piled up in
+ ; the table's hash) and every descriptor 4 more bytes. Bounds checks stay, as before.
+ (release
+  (ocamlopt_flags ())))
