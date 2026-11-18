@@ -541,7 +541,9 @@ the delta one by one took half of a change's build. So when the build adds 20,00
 properties that take many values, none of them unique (no check reads those facts after the rounds), and whose fact
 the delta holds no entry for, it sets them apart, sorts them and writes them, by the one way a run is written (a merge,
 of them alone), as a run of their own: **R**, on top of the runs and under the change's delta. The catch-up reads R as
-any run. The table of differences holds a fact of R only once a group written meanwhile touches it (before that, its
+any run. The table of differences (where the catch-up keeps, fact by fact, each fact whose state differs between the
+writer's view and the change's, and from which the change's frame is written) holds a fact of R only once a group
+written meanwhile touches it (before that, its
 states are known: absent for the writer, derived for the change), and keeps it once there, even when its two states
 agree, since a fact of R missing from the table means "derived, as R says". The change's frame does not change: its
 asserted changes, the table's differences, then R's facts that the table does not hold, as derived. The journal holds
@@ -558,12 +560,14 @@ TLC checks the protocol with R ([testing](testing.md#model-checking)), and each 
 only the facts the delta has no entry for, a fact of R starts in the table as (absent, derived), it stays there once
 touched, R is never named, every merge takes it; without any one, TLC finds a counterexample.
 
-**What it costs** ([benchmarks](benchmarks.md#rules-step-5-changes-of-the-rules-in-the-background-2026-11-13)). On 10
-LUBM-shaped universities with the 94 rules, while 256 clients write durably, adding one axiom (every person is also of
-a class the data leaves empty: about 150,000 derived facts) is installed in 3.1 s (median of 21; its build 0.49 s),
-and the writer's own part at the install is 54 ms. The clients' throughput while it runs is 0.84 of what it is without
-the change, 0.89 over the whole run from its start: the background shares the machine's four cores, its caches and
-its collector with the writer, and the delta grows meanwhile, since no merge runs beside a change. Defining all 94
+**What it costs** ([benchmarks](benchmarks.md#rules-step-5s-targets-a-changes-derived-facts-in-a-run-of-their-own-2026-11-18)).
+On 10 LUBM-shaped universities with the 94 rules, while 256 clients write durably, adding one axiom (every person is
+also of a class the data leaves empty: about 140,000 derived facts) is installed in 0.60 s (median of 21; its build
+0.16 s, its run of its own 0.03 s: 0.72 M derived facts a second), and the writer's own part at the install is 34 ms.
+The clients' throughput while it runs is 0.87 of what it is without the change, 0.78 over the whole run from its start
+(0.83 and 0.86 in another series: one stall in a window of under a second moves a pair's ratio a lot): the background
+shares the machine's four cores, its caches and its collector with the writer, and the delta grows meanwhile, since no
+merge runs beside a change. Defining all 94
 rules over the same data without rules is the worst case: every group written meanwhile costs the new rules several
 times what it costs the old ones, the background cannot keep up at full load (about 110 µs a group against the
 writer's 10 to 25), and the writer waits for it at 65,536 groups behind (seconds).
@@ -573,9 +577,11 @@ deterministic core), a round of 20,000 facts or more, and the first round of a c
 morsels (Leis et al. [Leis 2014]) taken in turn by up to four domains, each deriving with plans of its own and keeping
 the heads that are not facts yet; then one domain makes them facts, morsel after morsel, in order, as it would have
 found them alone: the result, the budget and the refusals do not depend on the domains. Rules with `Not` or
-aggregates, and rules whose text constants a group would intern, run on one domain. A change in the background
-derives on its own domain only: measured on four domains there, the clients' throughput during the change fell from
-0.84 to 0.78 of what it is without it. Measured on a load of 10 universities with the 94 rules: the rounds at 1.44 M derived facts/s on four
+aggregates, and rules whose text constants a group would intern, run on one domain. When the added rules are fewer
+than the threads, each rule's instances are cut by blocks of its plan's first items, one block a morsel. A change in
+the background derives on its own domain only: measured on several domains there, the clients' throughput during the
+change fell (0.84 to 0.78 in step 5; with a rule's instances in morsels, 0.83 to 0.50), and the build was no faster
+([benchmarks](benchmarks.md#rules-step-5s-targets-a-changes-derived-facts-in-a-run-of-their-own-2026-11-18)). Measured on a load of 10 universities with the 94 rules: the rounds at 1.44 M derived facts/s on four
 domains, 0.90 on one.
 
 The rules are compiled at the first write that needs them, never at open: an open replays frames, which hold the
@@ -938,10 +944,11 @@ Each was weighed against the others in the design; the measurements are the desi
 
 The design's plan has six steps; this version has the six.
 
-- **Step 3's rest**: a change of the rules computed in the background still puts its derived facts into the view's
-  delta (not a run of its own), and the joins of its rounds probe the store fact by fact.
-- **Step 5's rest**: a change with new things is computed in the group; a change's derived facts wait for the next
-  merge to reach a run.
+- **Step 3's rest**: the joins of a change's rounds in the background probe the store fact by fact, on the change's
+  one domain.
+- **Step 5's rest**: a change with new things is computed in the group; only the derived facts of properties of many
+  values, none unique, go into a change's run of its own (the others enter the delta); step 5's two targets are not
+  both reached ([benchmarks](benchmarks.md#rules-step-5s-targets-a-changes-derived-facts-in-a-run-of-their-own-2026-11-18)).
 - **Step 6's rest**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
   proof of an equality in `why`; equality beside `Not` and aggregates, the closure modules, the path of loads and the
   parallel rounds.

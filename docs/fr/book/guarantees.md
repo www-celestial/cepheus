@@ -673,9 +673,10 @@ chaque groupe, les mêmes décisions que celles du modèle, et la base rouverte 
 groupes écrits pendant qu'un changement est retenu après sa construction, rattrapés exactement et rangés avant lui ; un
 groupe qui interfère y met fin par `Conflict` ; 6 clients qui écrivent, 24 changements et 2 lecteurs qui vérifient
 chaque vue qu'ils prennent contre le least model sous ses propres règles ; une fermeture pendant un changement ; des
-kill -9 pendant des changements, chaque vue rétablie exacte) ; `tools/tlc.sh` (`spec/RuleChange.tla`, et ses huit
-variantes qui doivent échouer, parmi elles la reprise de frames par un membre de Raft, l'algorithme de consensus qui
-garde le même log sur plusieurs serveurs).
+kill -9 pendant des changements, chaque vue rétablie exacte ; la même chose avec les faits dérivés de chaque
+changement dans un run à eux, tué aussi entre leur écriture et l'installation) ; `tools/tlc.sh` (`spec/RuleChange.tla`,
+et ses treize variantes qui doivent échouer, parmi elles la reprise de frames par un membre de Raft, l'algorithme de
+consensus qui garde le même log sur plusieurs serveurs, et le run à lui des faits d'un changement).
 
 ## G20 `why` renvoie une preuve
 
