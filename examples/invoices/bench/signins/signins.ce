@@ -1,0 +1,83 @@
+(** Pages served while sign-ins arrive: RATE sign-ins a second, each sent at its time whatever the others do (an open
+    loop, as visitors come), for SECONDS seconds, while C clients ask PATH one after the other (a closed loop: each sends
+    its next request once its last answer came). One line of JSON: the sign-ins made, their median and 99th percentile
+    in milliseconds; the pages served a second, their median, 99th percentile and longest wait; and the requests that
+    failed (an answer other than the one expected). The session's cookie of the pages comes in BENCH_SID.
+    signins BASE RATE SECONDS C PATH *)
+use std/fiber
+use std/http
+use std/io
+use std/json
+use std/list
+use std/math
+use std/result
+use std/sys
+use std/text
+use std/value
+
+args = sys.Args
+base = args[1]
+rate = text.Number(args[2])
+seconds = text.Number(args[3])
+c = text.Number(args[4])
+path = args[5]
+(* The Origin a browser of this page would send: BASE, whose port http.Fetch names in Host too, as a browser does. *)
+origin = {Name: "origin", Value: base}
+form = {Name: "content-type", Value: "application/x-www-form-urlencoded"}
+admin = {Name: "cookie", Value: "sid=$(sys.Env("BENCH_SID"))"}
+
+defn timed(url, method, body, headers, expect)
+  (** One request: its time in milliseconds, and whether its answer was the one expected. *)
+  t0 = sys.Now()
+  r = http.Fetch(url, method = method, body = body, headers = headers)
+  {Ms: (sys.Now() - t0) * 1000, Ok: result.IsOk(r) and r.Value.Status == expect}
+end
+
+defn pages(stop, out)
+  (** One client of PATH until stop closes: its times and failures to out. *)
+  times = []
+  failed = 0
+  while sys.Now() < stop
+    t = timed("$base$path", "GET", "", [admin], 200)
+    times = list.Append(t.Ms, times)
+    if not t.Ok
+      failed += 1
+    end
+  end
+  fiber.Send({Times: times, Failed: failed}, out)
+end
+
+at(p, xs) = if value.Len(xs) == 0 0 else xs[list.Max([1, math.Round(p * value.Len(xs))])] end
+round3(x) = math.Round(x * 1000) / 1000
+
+start = sys.Now()
+stop = start + seconds
+out = fiber.Channel()
+for i in 1..c
+  fiber.Spawn(() -> pages(stop, out))
+end
+(* the sign-ins: the k-th leaves at start + k / rate *)
+signins = []
+k = 0
+while rate > 0 and start + k / rate < stop
+  wait = start + k / rate - sys.Now()
+  if wait > 0
+    sys.Sleep(wait)
+  end
+  signins = list.Append(fiber.Spawn(() -> timed("$base/login", "POST", "login=bench&password=bench+password+1", [origin, form], 303)), signins)
+  k += 1
+end
+times = []
+failed = 0
+for i in 1..c
+  got = result.Unwrap(fiber.Receive(out))
+  times = list.Concat(times, got.Times)
+  failed += got.Failed
+end
+took = sys.Now() - start
+done = [fiber.Wait(t).Value for t in signins]
+sorted = list.Sort(times)
+signed = list.Sort([d.Ms for d in done])
+io.Print(json.Text({What: "pages during sign-ins", Path: path, C: c, Rate: rate, Seconds: seconds,
+  Signins: value.Len(done), SigninP50: round3(at(0.5, signed)), SigninP99: round3(at(0.99, signed)), SigninFailed: value.Len([d for d in done if not d.Ok]),
+  Pages: value.Len(sorted), Rps: math.Round(value.Len(sorted) / took), P50: round3(at(0.5, sorted)), P99: round3(at(0.99, sorted)), Max: round3(at(1.0, sorted)), Failed: failed}))
