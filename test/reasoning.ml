@@ -243,12 +243,25 @@ let () =
           Bigarray.Array1.set h.hr i i;
           key, w, i)
     in
+    (* or as a few ascending runs one after the other (as a view's runs are read), for the merge *)
+    let l =
+      if Rng.bool r then l
+      else begin
+        let k = 1 + Rng.int r 8 in
+        let cut = List.sort compare (List.init (k - 1) (fun _ -> Rng.int r (n + 1))) in
+        let rec runs i = function [] -> [ i, n ] | c :: rest -> (i, c) :: runs c rest in
+        let arr = Array.of_list l in
+        let out = List.concat_map (fun (a, b) -> List.stable_sort (fun (k, w, _) (k', w', _) -> compare (k, w) (k', w')) (Array.to_list (Array.sub arr a (b - a)))) (runs 0 cut) in
+        List.iteri (fun i (key, w, _) -> Bigarray.Array1.set h.hk i key; Bigarray.Array1.set h.hv i w; Bigarray.Array1.set h.hr i i) out;
+        List.mapi (fun i (key, w, _) -> key, w, i) out
+      end
+    in
     let want = List.stable_sort (fun (k, w, _) (k', w', _) -> compare (k, w) (k', w')) l in
     Reason.sort_heads h;
     let got = List.init n (fun i -> Bigarray.Array1.get h.hk i, Bigarray.Array1.get h.hv i, Bigarray.Array1.get h.hr i) in
     if got <> want then C.fail "%d heads (%s): not in stable order" n (if wide then "wide" else "few things")
   done;
-  C.check true "300 random buffers sorted stably"
+  C.check true "300 random buffers sorted stably (radix, or a merge of a few runs)"
 
 (* A rule whose facts no rule reads (a sink) over siblings: x member y once for each sibling of x under y, so the
    heads come many times; one fact asserted before. On a fork (the change inline, its morsels on several domains), on
@@ -1077,7 +1090,8 @@ let () =
   Reason.par_min := 20_000;
   random_sequences ~durable:true ~seeds:(max 1 (seeds / 4)) ~groups:60 ~merges:false ();
   Reason.heads_every := max_int;
-  C.check (!Reason.sink_facts > s0) "the sinks made facts (%d)" (!Reason.sink_facts - s0);
+  (* a few seeds may hold no sink (RULES_SEEDS): the named cases above check them *)
+  if seeds >= 20 then C.check (!Reason.sink_facts > s0) "the sinks made facts (%d)" (!Reason.sink_facts - s0);
   section "G8, G17, G18: the path of loads (groups of additions from 2 facts; rules without Not or aggregates, constraints and one-valued heads among them) on the disk";
   Resolve.large_min := 2;
   let b0 = !Reason.bulk_groups in
