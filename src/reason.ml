@@ -1895,9 +1895,9 @@ let [@inline never] substitute (v : Store.view) (r : Rules.t) (sty : Value.typ o
   if not (inside && List.for_all real where) then None
   else
     (* a rule whose properties are constants: each variable of r' is in some of the patterns it was in, so its type is
-       the one it had (the rule's types were found: [sty] has one for each variable); the check again for each
-       binding was most of the unfolding's time. A property variable bound to a constant gives the values of its
-       patterns their property's type: found again *)
+       the one it had (the rule's types were found: [sty] has one for each variable), and is not checked again for
+       each binding. A property variable bound to a constant gives the values of its patterns their property's
+       type: found again *)
     let typed = (not (Rules.has_var_prop r)) && r.vars > 0 && Array.for_all Option.is_some sty in
     match if typed then sty else Rules.static_types v r' with
     | exception Rules.Bad _ -> None
