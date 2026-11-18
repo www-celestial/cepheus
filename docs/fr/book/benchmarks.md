@@ -565,6 +565,73 @@ Les deux tours lents par le socket ne se sont pas répétés dans le processus, 
 sont chronométrés : la plus longue attente d'un switch de merge a été de 413 ms sur main et de 447 ms sur la branche,
 une fois chacune en 7 tours, sur un disque dont les fsync varient autant d'un tour à l'autre.
 
+## Règles, les cibles de l'étape 5 encore : les faits qu'aucune règle ne lit, faits par un seul tri (2026-11-18)
+
+Le levier que montraient les mesures plus bas ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) : un
+changement garde les têtes de ses **sinks** (les règles dont aucune règle ne lit les faits) dans un buffer, les trie une
+fois à la fin de son raisonnement (une fusion des quelques suites croissantes dans lesquelles elles arrivent, un radix
+sort au-delà de 64), garde le premier de chaque fait, met de côté ceux que la vue ou le working set tiennent, et écrit
+les autres dans sa sortie dans l'ordre des choses, jamais dans le working set.
+
+**Où allait la construction de main** (main 5de6b66, avec des chronomètres, le même changement que ci-dessous, 3
+exécutions) : 0,13 à 0,20 s = les programmes 0,015 à 0,020, les instances de la règle ajoutée 0,096 à 0,149 (dont la
+seule lecture des faits de la vue 0,016 : le reste, environ 0,8 µs par tête, c'est mettre chaque tête dans le working
+set : une recherche, sa place, trois chaînes, la croissance des tables par doublement), les faits dérivés mis de côté
+0,008 à 0,014 (une recherche dans le delta par fait), le reste sous 0,01 ; son run à lui 0,023 à 0,036 (un tri quand
+les têtes n'arrivaient pas dans l'ordre des choses, 0,001 à 0,012). **Où elle va maintenant** (les mêmes
+chronomètres) : les instances lisent 0,014 à 0,017, leurs têtes gardées 0,005 à 0,010, triées 0,0003 à 0,0024 (une
+exécution à 0,008), faites faits 0,0015 à 0,0023, mises de côté 0,0012 à 0,0020 (une recherche dans le delta par
+(propriété, valeur)) ; les programmes 0,014 à 0,024, presque tout pour les règles dépliées sur les petites relations, pour les
+groupes suivants du writer (le dépliage 0,008 à 0,013, ses vérifications 0,004 à 0,009) ; le run à lui 0,020 à 0,029
+(aucun tri : les faits arrivent triés ; l'écriture du merge 0,017 à 0,025).
+
+**Méthode.** Comme plus bas : `CHANGE=one reason.exe change 10 256 8 2 with|without DIR`, la règle `[x type Person]
+-> [x type Schedule]` définie sur LUBM-10 avec les 94 règles sur le disque pendant que 256 clients écrivent des
+étudiants de façon durable ; 21 paires (avec, sans) pour main 5de6b66 et pour cette branche, alternées, en une seule
+prise du lock des travaux lourds, chaque exécution dans un scope de 3 GB. Une case est la médiane avec
+$[x(1), x(n)]$.
+
+| ce qui est mesuré (21 paires) | main 5de6b66 | cette branche |
+|---|---:|---:|
+| le changement, de `define` à sa réponse | 0,543 s [0,315, 0,905] | **0,311 s** [0,164, 2,83] |
+| sa construction (environ 135 000 faits dérivés) | 0,168 s [0,093, 0,209] | **0,053 s** [0,032, 0,070] |
+| son run à lui : écrit, non forcé | 0,033 s [0,021, 0,044] | **0,025 s** [0,020, 0,032] |
+| faits dérivés par seconde, la construction | 0,80 M [0,67, 1,30] | **2,57 M** [1,97, 3,77] |
+| faits dérivés par seconde, la construction et le run | 0,67 M [0,58, 1,06] | **1,73 M** [1,44, 2,32] |
+| la part du writer à l'installation | 32 ms [21, 61] | 36 ms [23, 51] |
+| le débit des clients dans la fenêtre du changement, avec / sans | 0,93 [0,06, 18,7] | 0,50 [0,03, 1,00] |
+| la même chose sur toute la mesure depuis le début du changement | 0,96 [0,77, 2,34] | 0,93 [0,11, 5,43] |
+
+- **Les mêmes faits dérivés** (sans writer, pour que les deux exécutions soient les mêmes ; chaque base ensuite lue en
+  entier par un seul binaire) : l'axiome sur LUBM-10, 2 006 283 faits dont 651 629 dérivés, digest `3d3ea1921e042` des
+  deux côtés ; les 94 règles définies sur LUBM-1 sans règles, 210 869 faits dont 60 526 dérivés, `67123592f6fa` des deux
+  côtés. Sans writer, la construction de l'axiome prend 0,086 s sur main et 0,024 s ici (119 424 faits dérivés : 1,4 M
+  et 5,0 M par seconde ; 1,1 M et 2,8 M avec l'écriture du run).
+- **Des changements avec peu de sinks** (11 paires, alternées) : les 94 règles définies sur un fork de LUBM-1
+  (`reason.exe define 1`, ses tours sur plusieurs domains), 0,230 s sur main et 0,210 s ici (rapport par paire 0,97
+  [0,69, 1,22]) ; les mêmes règles par le chemin en arrière-plan sans writer (`CHANGE=all ... change 1 0 2 1`),
+  construction 0,105 et 0,104 s : aucun changement. Un tour sur plusieurs domains fait des têtes d'un sink des faits
+  par régions du working set, comme avant : poussées et triées sur un seul domain, la définition sur un fork n'allait
+  pas plus vite (1,03 [0,86, 1,94]).
+- **Face aux cibles de l'étape** : 2 M de faits dérivés par seconde : **2,57 M pour la construction** (1,97 au
+  moins), 1,73 M avec l'écriture de son run (manqué ; 2,32 au mieux) ; les writers à moins de 10 % de leur débit sans
+  le changement : manqué, 0,50 dans la fenêtre du changement et 0,93 sur toute la mesure depuis son début (main 0,93 et
+  0,96 dans cette série). La fenêtre fait maintenant 0,2 à 0,3 s, et elle contient l'installation : la part du writer
+  lui-même (36 ms) et la frame du changement, 135 000 faits dérivés écrits et forcés (fsync), environ 40 à 60 ms sans
+  aucun groupe confirmé (les tranches de 10 ms le montrent). Le rapport de main dans la fenêtre est la médiane de paires
+  aussi éloignées que 0,06 et 18,7 : dans cinq de ses 21 paires, l'exécution sans le changement s'est arrêtée dans la
+  fenêtre (des rapports de 4,7 à 18,7), comme le fait le switch d'un merge (aucun merge ne tourne à côté d'un
+  changement), ce qu'une fenêtre de 0,5 à 0,7 s contient plus souvent. Les leviers suivants : la frame de l'installation (chaque fait de R y devient un enregistrement de
+  changement et une valeur, alloués par le writer, puis encodés), et, dans la construction, le dépliage des nouvelles
+  règles sur les petites relations.
+- **Démarrage** (21 tours de 100 exécutions, alternés, chaque binaire en 7 copies prises à tour de rôle) :
+  `bench.exe` 2,664 ms sur main, 2,688 ms ici (rapport par paire 0,999 [0,983, 1,020]) ; `cepheus` (`bin/main.exe`)
+  4,779 ms et 4,711 ms (0,986 [0,981, 0,993]) : il ne grandit pas.
+- **Face aux géants** (leurs articles ; le tableau de l'étape 3) : RDFox 2014 [Motik 2014] dérive 0,67 M de faits par
+  seconde sur un thread et 6,1 à 7,0 M sur 16 à 32 threads de deux Xeon à 8 cœurs ; la construction de ce changement, 2,6 M par seconde sur
+  un seul domain à côté de 256 writers durables, fait environ quatre fois le débit de RDFox sur un thread, et moins que
+  son débit parallèle ; avec l'écriture du run, 1,7 M.
+
 ## Règles, les cibles de l'étape 5 : les faits dérivés d'un changement dans un run à eux (2026-11-18)
 
 Le reste de l'étape 5 ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) : un grand changement des règles

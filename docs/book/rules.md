@@ -560,13 +560,34 @@ TLC checks the protocol with R ([testing](testing.md#model-checking)), and each 
 only the facts the delta has no entry for, a fact of R starts in the table as (absent, derived), it stays there once
 touched, R is never named, every merge takes it; without any one, TLC finds a counterexample.
 
-**What it costs** ([benchmarks](benchmarks.md#rules-step-5s-targets-a-changes-derived-facts-in-a-run-of-their-own-2026-11-18)).
+**Facts no rule reads: made facts by one sort.** Most of a change's derived facts often start nothing: they are the
+facts of a **sink**, a rule whose head no pattern of any rule can match (in the example below, `[x type Schedule]`, a
+class no rule reads). The working set (the reasoning's own table of the facts a group touches, with the indexes the
+rules' plans search) needs them only to know a fact is not found twice; a relation no plan searches needs no index (the
+choice of indexes from the plans' searches, [Subotic 2018]), only its duplicates removed, which one sort does. So a
+change keeps a sink's heads in a buffer as its instances find them (outside the collector's heap, a thing, a property, a
+value and the rule each), and at the end of its reasoning sorts them once by (thing, property, value): they come as a
+few ascending runs (an atom's facts read from the view's runs one after the other), merged by pairs as a natural merge
+sort does, and past 64 runs a least-significant-digit radix sort by thing, 11-bit digits, then by property and value
+inside each thing [Knuth 1998]; both stable. It keeps the first of each fact (stable: its first instance names its
+rule), sets aside those the view or the working set holds, and counts the others against the budget, as every derived
+fact; they go to the change's output in that order, so that its run of its own is written with no other sort. Taken one
+by one in the working set, each head cost a probe, its slot, three indexes and their share of the tables' growth: about
+0.8 µs a head beside 256 writers, six times the cost of finding it. Past half the budget's room, the heads are
+deduplicated before the end, and a change whose facts kept pass its budget is refused there, naming the rule that
+derived the most, as before. Only in a change (a group that changes the rules), only for rules whose property takes many
+values, none unique, not the system's, and not with equality (a rule that makes things the same reads every fact), and
+on one domain: a round on several domains (below) makes its heads facts by regions of the working set, a sink's too, in
+parallel.
+
+**What it costs** ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-facts-no-rule-reads-made-facts-by-one-sort-2026-11-18)).
 On 10 LUBM-shaped universities with the 94 rules, while 256 clients write durably, adding one axiom (every person is
-also of a class the data leaves empty: about 140,000 derived facts) is installed in 0.60 s (median of 21; its build
-0.16 s, its run of its own 0.03 s: 0.72 M derived facts a second), and the writer's own part at the install is 34 ms.
-The clients' throughput while it runs is 0.87 of what it is without the change, 0.78 over the whole run from its start
-(0.83 and 0.86 in another series: one stall in a window of under a second moves a pair's ratio a lot): the background
-shares the machine's four cores, its caches and its collector with the writer, and the delta grows meanwhile, since no
+also of a class the data leaves empty: about 135,000 derived facts, all of them a sink's) is installed in 0.31 s
+(median of 21; its build 0.053 s, its run of its own 0.025 s: 2.6 M derived facts a second for the build, 1.7 M with
+the run's write), and the writer's own part at the install is 36 ms. The clients' throughput while it runs is 0.50 of
+what it is without the change, 0.93 over the whole run from its start: the window is short now (0.2 to 0.3 s) and holds
+the install, the writer's part and the change's frame written and forced, 40 to 60 ms with no group confirmed; one
+stall in a window of under a second moves a pair's ratio a lot. The background shares the machine's four cores, its caches and its collector with the writer, and the delta grows meanwhile, since no
 merge runs beside a change. Defining all 94
 rules over the same data without rules is the worst case: every group written meanwhile costs the new rules several
 times what it costs the old ones, the background cannot keep up at full load (about 110 µs a group against the
@@ -948,7 +969,9 @@ The design's plan has six steps; this version has the six.
   one domain.
 - **Step 5's rest**: a change with new things is computed in the group; only the derived facts of properties of many
   values, none unique, go into a change's run of its own (the others enter the delta); step 5's two targets are not
-  both reached ([benchmarks](benchmarks.md#rules-step-5s-targets-a-changes-derived-facts-in-a-run-of-their-own-2026-11-18)).
+  both reached: 2 M derived facts a second for the build, not with its run's write; the writers' throughput during a
+  change, whose window now mostly holds the install's frame
+  ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-facts-no-rule-reads-made-facts-by-one-sort-2026-11-18)).
 - **Step 6's rest**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
   proof of an equality in `why`; equality beside `Not` and aggregates, the closure modules, the path of loads and the
   parallel rounds.

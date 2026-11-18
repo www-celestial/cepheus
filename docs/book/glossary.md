@@ -461,6 +461,9 @@ the usual one, both are given.
   maps them sees one physical copy: a store by one is seen at once by the others. The visibility page is mapped so,
   read-write by the server and read-only by the readers. [server](server.md#local-reads-g15)
 - **single writer** — one writer thread applies every group of a database, in order. [architecture](architecture.md#one-writer-threads-and-domains)
+- **sink** — a rule whose facts no rule reads: no pattern of any rule can match its head. Its facts start nothing, so a
+  change makes them facts by one sort at the end of its reasoning rather than one by one in its working set.
+  [rules](rules.md#changes-of-the-rules-in-the-background)
 - **slice** — the candidates a pattern offers a variable when its other side is known: a thing's values of a
   property, or the things that hold one value. In a run it is a stretch of rows, sorted: two of them on one level are
   intersected by leapfrogging. [theory](theory.md)

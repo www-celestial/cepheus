@@ -564,6 +564,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [serveur](server.md#lectures-locales-g15)
 - **single writer** (un seul writer) — un seul thread writer applique chaque groupe d'une base, dans l'ordre.
   [architecture](architecture.md#un-seul-writer-threads-et-domains)
+- **sink** (un puits) — une règle dont aucune règle ne lit les faits : aucun pattern d'aucune règle ne peut correspondre à
+  sa tête. Ses faits ne déclenchent rien, donc un changement en fait des faits par un seul tri à la fin de son
+  raisonnement, plutôt qu'un par un dans son working set.
+  [règles](rules.md#les-changements-des-règles-en-arrière-plan)
 - **slice** — les candidats qu'un pattern offre à une variable quand son autre côté est connu : les valeurs d'une
   propriété pour une chose, ou les choses qui ont une valeur. Dans un run, c'est une suite de lignes, triée : deux
   d'entre elles à un même niveau sont intersectées par leapfrog. [théorie](theory.md)

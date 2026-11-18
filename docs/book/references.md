@@ -212,7 +212,9 @@ venue, volume and year); a work that could not be checked is not listed. The des
   Addison-Wesley, 1998. ISBN 0-201-89685-0.
   — Section 6.4, hashing with linear probing: the runs' text tables, at most half full (about 1.5 probes for a text
   that is there, 2.5 for one that is not). Section 5.2.5, sorting by distribution: the counting sort and the stable least-significant-digit radix sort that
-  sort a large group's facts (by thing, by property, then by value inside each property, 11-bit digits).
+  sort a large group's facts (by thing, by property, then by value inside each property, 11-bit digits), and a change's
+  sink heads past 64 runs. Section 5.2.4, sorting by merging: the natural merge that sorts a change's sink heads,
+  which come as a few ascending runs.
 - **[Leis 2014]** V. Leis, P. Boncz, A. Kemper, T. Neumann. Morsel-Driven Parallelism: A NUMA-Aware Query
   Evaluation Framework for the Many-Core Age. *SIGMOD* 2014, 743–754. https://doi.org/10.1145/2588555.2610507
   — Work cut into small pieces ("morsels") that worker threads take in turn from a shared dispatcher, so that the
@@ -352,7 +354,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Subotic 2018]** P. Subotić, H. Jordan, L. Chang, A. Fekete, B. Scholz. Automatic Index Selection for Large-Scale
   Datalog Computation. *PVLDB* 12(2), 141–153, 2018. https://doi.org/10.14778/3282495.3282500
   — The indexes a rule set needs, chosen from the searches its plans make: in a large group, a derived fact joins only
-  the chains some plan reads.
+  the chains some plan reads; a change's sink facts, which no plan searches, join no table at all.
 - **[Zhao 2020]** D. Zhao, P. Subotić, B. Scholz. Debugging Large-scale Datalog: A Scalable Provenance Evaluation
   Strategy. *ACM TOPLAS* 42(2), 2020. https://doi.org/10.1145/3379446
   — Provenance stored per fact (rule and proof height) at a published 1.31× run time: the alternative to Cepheus'
