@@ -26,6 +26,7 @@ type t = { n : int; time : int; by : int; why : string; first_new : int; count_n
 
 (* the tag of a value: Value's byte; both booleans are tag 2 (the value says which) *)
 let tag_of (v : Value.t) = match v with Int _ -> 0 | Float _ -> 1 | Bool _ -> 2 | Text _ -> 4 | Date _ -> 5 | Money _ -> 6 | Link _ -> 7
+let tag_of_typ : Value.typ -> int = function Tint -> 0 | Tfloat -> 1 | Tbool -> 2 | Ttext -> 4 | Tdate -> 5 | Tmoney _ -> 6 | Tlink -> 7
 
 (* What the encoder reads of a group's changes, from an array of changes or from a large group's arrays (Resolve):
    one coding, so that both write the same bytes. [col i] is change i's column, numbered in order of first use, whose
@@ -72,30 +73,80 @@ let encode_source b ~n ~time ~by ~why ~first_new ~count_new (s : source) =
     done
   end
 
-let encode b g =
+(* The coding of a group whose changes are its records, then [n] more read by index (a change's derived facts in its
+   run of their own, which never become records on the writer's path: Engine). Extra change j is Derived; [thing j],
+   [prop j] its fact's thing and property, [word j] its value's word (Store's: the int of an Int, a Date, a Money or a
+   Link, 0 or 1 for a Bool, a text's number for a Text or a Float), [tag p] the tag of property p's values, [text w] the
+   text of word w (a Float's 8 bytes). Columns and texts are numbered in order of first use over every change, the
+   records' then the extra ones': the bytes are those of [encode] of the group with all its changes as records. *)
+let encode_parts b g ~n:extra ~thing ~prop ~tag ~word ~text =
   let ch = g.changes in
+  let nf = Array.length ch in
+  let count = nf + extra in
   let cols = Hashtbl.create 8 and cl = ref [] and texts = Hashtbl.create 8 and tl = ref [] in
   (* a column's key: its property and its tag in one int (a tag is below 8), so that a large group's changes take no
      tuple each *)
-  let col = Array.map (fun c ->
-      let t = tag_of c.v in
-      let key = (c.p lsl 3) lor t in
-      match Hashtbl.find_opt cols key with
-      | Some k -> k
-      | None -> let k = Hashtbl.length cols in Hashtbl.replace cols key k; cl := (c.p, t) :: !cl; k) ch in
-  let num = Array.map (fun c ->
-      match c.v with
-      | Value.Int x | Date x | Money x | Link x -> x
-      | Bool x -> if x then 1 else 0
-      | Float _ -> 0
-      | Text s -> (match Hashtbl.find_opt texts s with
-          | Some k -> k
-          | None -> let k = Hashtbl.length texts in Hashtbl.replace texts s k; tl := s :: !tl; k)) ch in
+  let column p t =
+    let key = (p lsl 3) lor t in
+    match Hashtbl.find_opt cols key with
+    | Some k -> k
+    | None -> let k = Hashtbl.length cols in Hashtbl.replace cols key k; cl := (p, t) :: !cl; k
+  in
+  let place s =
+    match Hashtbl.find_opt texts s with
+    | Some k -> k
+    | None -> let k = Hashtbl.length texts in Hashtbl.replace texts s k; tl := s :: !tl; k
+  in
+  let col = Array.make count 0 and num = Array.make count 0 in
+  for i = 0 to nf - 1 do
+    let c = Array.unsafe_get ch i in
+    col.(i) <- column c.p (tag_of c.v);
+    num.(i) <-
+      (match c.v with
+       | Value.Int x | Date x | Money x | Link x -> x
+       | Bool x -> if x then 1 else 0
+       | Float _ -> 0
+       | Text s -> place s)
+  done;
+  if extra > 0 then begin
+    (* the extra changes' columns by property (a property's values take one tag), their texts' places by word *)
+    let pcol = ref (Array.make 64 (-1)) and wplace = Hashtbl.create 16 in
+    for j = 0 to extra - 1 do
+      let p = prop j in
+      if p >= Array.length !pcol then begin
+        let a = Array.make (max (p + 1) (2 * Array.length !pcol)) (-1) in
+        Array.blit !pcol 0 a 0 (Array.length !pcol);
+        pcol := a
+      end;
+      let t = tag p in
+      let c = Array.unsafe_get !pcol p in
+      let c = if c >= 0 then c else (let c = column p t in Array.unsafe_set !pcol p c; c) in
+      col.(nf + j) <- c;
+      num.(nf + j) <-
+        (match t with
+         | 1 -> 0
+         | 2 -> if word j <> 0 then 1 else 0
+         | 4 ->
+           let w = word j in
+           (match Hashtbl.find_opt wplace w with
+            | Some k -> k
+            | None -> let k = place (text w) in Hashtbl.add wplace w k; k)
+         | _ -> word j)
+    done
+  end;
   encode_source b ~n:g.n ~time:g.time ~by:g.by ~why:g.why ~first_new:g.first_new ~count_new:g.count_new
-    { count = Array.length ch; kinds = (fun i -> code ch.(i).kind); things = (fun i -> ch.(i).e); col = Array.get col;
+    { count;
+      kinds = (fun i -> if i < nf then code ch.(i).kind else 2);
+      things = (fun i -> if i < nf then ch.(i).e else thing (i - nf));
+      col = Array.get col;
       cols = Array.of_list (List.rev !cl); num = Array.get num;
-      float = (fun i -> match ch.(i).v with Float f -> Int64.bits_of_float f | _ -> 0L);
+      float = (fun i ->
+        if i < nf then (match ch.(i).v with Float f -> Int64.bits_of_float f | _ -> 0L)
+        else String.get_int64_le (text (word (i - nf))) 0);
       texts = Array.of_list (List.rev !tl) }
+
+let encode b g =
+  encode_parts b g ~n:0 ~thing:(fun _ -> 0) ~prop:(fun _ -> 0) ~tag:(fun _ -> 0) ~word:(fun _ -> 0) ~text:(fun _ -> "")
 
 let decode r =
   let n = Codec.get_varint r in

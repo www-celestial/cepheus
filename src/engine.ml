@@ -61,7 +61,11 @@ type t = {
 
 type batch = {
   results : (receipt, error) result array;  (* one for each request it took: a prefix of those given to [prepare] *)
-  groups : Group.t list;  (* newest first *)
+  groups : Group.t list;  (* newest first; a change's group without the derived facts of its run of their own: [rest] *)
+  rest : (int * (unit -> Group.change array)) list;
+      (* the changes groups hold beyond their records, by group: a change's derived facts in its run of their own (R),
+         read from R's columns by a reader that needs them as records ([whole]: the watch, on its own domain), never
+         made records on the writer's path *)
   body : Buffer.t;
   first : int;
   count : int;
@@ -72,6 +76,13 @@ type batch = {
   change : Store.view option;  (* the request after the prefix is a change for the background path (Reason.Background):
                                   the view after its asserted changes, to find the texts it names *)
 }
+
+(* a batch's groups, newest first, each with all its changes: those of [rest] made records after its own *)
+let whole b =
+  match b.rest with
+  | [] -> b.groups
+  | rest ->
+    List.map (fun (g : Group.t) -> match List.assoc_opt g.n rest with Some f -> { g with changes = Array.append g.changes (f ()) } | None -> g) b.groups
 
 (* The levels (Store, Snapshot): the delta is merged once it holds [compact_min] changes; level l holds at most
    compact_min * ratio^l rows. A merge takes the delta and the newest runs, down to the first level that can hold
@@ -300,7 +311,7 @@ let prepare ?(release = fun (_ : int) -> ()) ?(background = false) t (reqs : (Re
     | Some r -> results := r :: !results; incr i
     | None -> full := true
   done;
-  { results = Array.of_list (List.rev !results); groups = !groups; body; first; count = !count; after = t.working;
+  { results = Array.of_list (List.rev !results); groups = !groups; rest = []; body; first; count = !count; after = t.working;
     runs = !runs; pending = !pending; own = true; change = !change }
 
 (* ---- A replica's frames ----
@@ -352,7 +363,7 @@ let prepare_apply t (f : frame) gs =
       t.working <- after;
       let count = List.length fresh in
       Ok
-        { results = [| Ok { group = after.group; things = [] } |]; groups = List.rev fresh; body;
+        { results = [| Ok { group = after.group; things = [] } |]; groups = List.rev fresh; rest = []; body;
           first = (match fresh with g :: _ -> g.n | [] -> start.group + 1); count; after; runs = !runs; pending = None; own = false; change = None }
     | exception Journal.Damaged m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
     | exception Pages.Unreadable m -> List.iter (Snapshot.abandon t.disk) !runs; Error (Damaged m)
@@ -1183,7 +1194,7 @@ let merge a b =
   let body = Buffer.create (Buffer.length a.body + Buffer.length b.body) in
   Buffer.add_buffer body a.body;
   Buffer.add_buffer body b.body;
-  { results = Array.append a.results b.results; groups = b.groups @ a.groups; body; first = a.first;
+  { results = Array.append a.results b.results; groups = b.groups @ a.groups; rest = b.rest @ a.rest; body; first = a.first;
     count = a.count + b.count; after = b.after; runs = b.runs @ a.runs; pending = None; own = a.own && b.own; change = None }
 
 (* a batch to the syncer: while it forces the previous frame, the next one grows: everything that arrived meanwhile goes
@@ -1205,7 +1216,7 @@ let hand l b reqs =
   Condition.broadcast l.c_sync;
   Mutex.unlock l.sm;
   match l.change with
-  | Some ch when b.count > 0 -> Mutex.protect ch.cm (fun () -> Queue.push (List.rev b.groups, b.after) ch.clog; ch.backlog <- ch.backlog + b.count)
+  | Some ch when b.count > 0 -> Mutex.protect ch.cm (fun () -> Queue.push (List.rev (whole b), b.after) ch.clog; ch.backlog <- ch.backlog + b.count)
   | _ -> ()
 
 (* after a batch handed: its groups logged for the merge in flight, which is switched to when it is done; or a merge
@@ -1214,7 +1225,7 @@ let to_merge l (b : batch) =
   match l.merging with
   | Some m ->
     Mutex.lock m.lm;
-    m.log <- b.groups @ m.log;
+    m.log <- whole b @ m.log;
     m.logn <- m.logn + b.count;
     Mutex.unlock m.lm;
     if Atomic.get m.ready <> None then finish_merge l
@@ -1287,39 +1298,49 @@ let install_change l ch (b : built) =
             else if differs st && not (Hashtbl.mem b.own_keys k) then
               raise (Interfered (Conflict (Printf.sprintf "the change's view differs on an asserted fact [#%d %d]" e p))))
           b.diff;
-        (* in the table's order, then R's facts the table lacks, in thing order: replay applies states, and the order of
-           facts of one group does not matter to it *)
+        (* in the table's order, then R's facts the table lacks, in thing order (below): replay applies states, and the
+           order of facts of one group does not matter to it *)
         let frame = Array.init nt (fun j -> { Group.kind = kind ds.(j); e = de.(j); p = dp.(j); v = value dp.(j) dw.(j) }) in
-        let from_run =
-          match b.run with
-          | None -> [||]
-          | Some ro ->
-            let f = ro.facts in
-            let out = Array.make nr { Group.kind = Derived; e = 0; p = 0; v = Value.Int 0 } in
-            let j = ref 0 in
-            for r = 0 to f.n - 1 do
-              if not (bit ro.rt r) then begin
-                let x = Bulk.row f r in
-                let p = Bulk.prop f x in
-                out.(!j) <- { Group.kind = Derived; e = Bulk.thing f x; p; v = value p (Bulk.word f x) };
-                incr j
-              end
-            done;
-            out
-        in
-        va, Array.concat [ Array.of_list first; frame; from_run ]
+        va, Array.append (Array.of_list first) frame
       in
       match Resolve.resolve t.working ~n ~time:(t.disk.now ()) ~by ~why ~reason ops with
       | Error e -> Error (of_resolve e)
       | Ok (v, g, temps) ->
         let body = Buffer.create 4096 in
-        Group.encode body g;
+        (* the group's records, then R's facts the table lacks, coded from R's columns: a record and a value a fact
+           (135 k of them for an axiom over LUBM-10) took the writer 25 ms, made and coded; the watch makes them
+           ([rest]), on its own domain *)
+        let rest =
+          match b.run with
+          | Some ro when ro.facts.n > ro.nt ->
+            let f = ro.facts and nr = ro.facts.n - ro.nt in
+            let row =
+              if ro.nt = 0 then Bulk.row f
+              else begin
+                let kept = Array.make nr 0 and j = ref 0 in
+                for r = 0 to f.n - 1 do if not (bit ro.rt r) then (kept.(!j) <- Bulk.row f r; incr j) done;
+                Array.get kept
+              end
+            in
+            let find p = Schema.find v.schema p in
+            let tags = Hashtbl.create 8 in
+            let tag p =
+              match Hashtbl.find_opt tags p with
+              | Some t -> t
+              | None -> let t = match find p with Some d -> Group.tag_of_typ d.typ | None -> 0 in Hashtbl.replace tags p t; t
+            in
+            Group.encode_parts body g ~n:nr ~thing:(fun j -> Bulk.thing f (row j)) ~prop:(fun j -> Bulk.prop f (row j)) ~tag
+              ~word:(fun j -> Bulk.word f (row j)) ~text:(Store.text v);
+            let value p w = match find p with Some d -> Store.value v d.typ w | None -> Value.Int w in
+            [ n, fun () -> Array.init nr (fun j -> let x = row j in let p = Bulk.prop f x in { Group.kind = Derived; e = Bulk.thing f x; p; v = value p (Bulk.word f x) }) ]
+          | _ -> Group.encode body g; []
+        in
         if Buffer.length body > !frame_limit then Error (too_large (Buffer.length body))
         else begin
           t.working <- v;
           Option.iter (fun ro -> Mutex.protect t.pm (fun () -> t.provisional <- (ro.r, ro.file) :: t.provisional); Atomic.incr runs_installed) b.run;
           Atomic.incr changes_done;
-          hand l { results = [| Ok { group = n; things = temps } |]; groups = [ g ]; body; first = n; count = 1; after = v; runs = [];
+          hand l { results = [| Ok { group = n; things = temps } |]; groups = [ g ]; rest; body; first = n; count = 1; after = v; runs = [];
                    pending = None; own = true; change = None } [| ch.creq |];
           Ok ()
         end
@@ -1414,6 +1435,9 @@ let writer l () =
            | Ok b -> hand l b [| r |]; to_merge l b));
         handle rest
       | Write _ :: _ ->
+        (* a change in the background that is ready is installed before the batch, not after it: the batch's groups
+           would be its last catch-up's (up to 256 groups, 6 to 10 ms of the install, at 256 clients) *)
+        poll_change l;
         (* Raft: nothing in flight, so that a frame that is not committed takes back nothing but itself *)
         if l.raft then settle l;
         let ws, rest = split [] items in
