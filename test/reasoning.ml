@@ -955,7 +955,7 @@ let () =
   section "G8, G17, G19: the same on databases on the disk: every change of the rules on the background path";
   random_sequences ~durable:true ~seeds:(max 1 (seeds / 2)) ~groups:60 ~merges:false ();
   C.check (Atomic.get Engine.changes_done > 0) "the background path installed changes";
-  section "G8, G17, G19: the same with every change's derived facts in a run of their own (from 1 fact), its rounds in morsels on several domains (from 4 facts)";
+  section "G8, G17, G19: the same with every change's derived facts in a run of their own (from 1 fact), the writer's rounds in morsels on several domains (from 4 facts)";
   Engine.change_run_min := 1;
   Reason.par_min := 4;
   let r0 = Atomic.get Engine.runs_installed in
