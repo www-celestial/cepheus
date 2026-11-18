@@ -2301,9 +2301,10 @@ let [@inline never] worker_ctx c =
            buf_a = buf_create 16; buf_b = buf_create 16; seen = iset_create (); seen2 = iset_create (); pt = ws_create ();
            heads_none = Hashtbl.create 1 }
 
-(* a change in the background too: its morsels write Bigarrays only (no block for the collector, so that the
-   writer's domain is not stopped more often), and its domains end with the phase *)
-let par_ok c = !Bulk.threads > 1 && (not c.prog.eq) && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
+(* not for a change in the background ([stop] is its own): its domain alone, so that the writer and its clients keep
+   the other cores while it runs (measured again with a rule's instances in morsels: the same build, and the writers'
+   throughput lower beside it) *)
+let par_ok c = !Bulk.threads > 1 && c.stop == never && (not c.prog.eq) && ((not c.prog.stratified) || c.plain_derive) && Array.for_all (fun w -> w >= 0) c.cw
 
 exception Too_many
 
