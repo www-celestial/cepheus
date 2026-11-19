@@ -50,9 +50,9 @@ and the test that checks it: [guarantees](docs/book/guarantees.md).
 `cepheus serve --config cluster.toml` runs Cepheus as PostgreSQL runs: one process holds the databases, programs
 connect through a Unix socket or TCP with TLS 1.3, each with a token that grants it read or write, database by
 database (G16); a write sent again after a lost reply is applied once (G14). Server against server on the same
-machine and data (1 M facts), a point read costs 10.8 µs over the Unix socket (PostgreSQL 18.6: 26.4), 39.2 µs with
-TLS (49.6); 8 clients at once, 3.22 µs a read in all (6.54); 16 requests in flight on one connection, 1.46 µs a read
-(PostgreSQL's pipeline of 16: 9.11). A program on the server's machine reads in its own memory, linearizably
+machine and data (1 M facts), a point read costs 9.7 µs over the Unix socket (PostgreSQL 18.6: 24.9), 41.3 µs with
+TLS (52.3); 8 clients at once, 3.71 µs a read in all (6.27); 16 requests in flight on one connection, 1.30 µs a read
+(PostgreSQL's pipeline of 16: 9.05). A program on the server's machine reads in its own memory, linearizably
 (G15): 0.22 µs a point read, no round trip, and no write waits for it. A replica on another machine keeps a copy of
 every database over mutual TLS, group for group in its own journal: backups are taken from it, and `cepheus promote`
 makes it the primary, by hand ([a replica](docs/book/server.md#a-replica)). Three servers or more form a Raft
@@ -80,7 +80,7 @@ lyon = result.Unwrap(cepheus.Find(1, (c) -> {Where: [[c, Client.City, "Lyon"]], 
 ```
 
 On the server's machine a `cepheus.Get` of 4 fields costs 0.77 µs from Cesia (PostgreSQL 18.6 through its socket,
-from C: 26.4 µs); over TLS 51.6 µs (PostgreSQL's 49.6); 64 fibers on one connection write as fast as 64 connections.
+from C: 26.4 µs); over TLS 51.6 µs (PostgreSQL's 52.3); 64 fibers on one connection write as fast as 64 connections.
 Nothing loads before the package's first call, which costs 13 ms once a process.
 
 ## Files

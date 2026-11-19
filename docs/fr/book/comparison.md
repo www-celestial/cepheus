@@ -65,15 +65,16 @@ cent de celles ci-dessous (Q1 0,38 µs, Q2 1,57 µs, Q3 3,74 à 3,82 ms, Q4 231 
   planner pour n'importe quel SQL, des décennies d'outils. (La réplication est construite : une replica promue à la
   main, et un cluster Raft qui élit son leader de lui-même, [le serveur](server.md#une-replica).)
 
-**Serveur contre serveur** (1 M de faits, les mêmes lignes, les deux par leurs propres sockets, 2026-11-08 ; le
-tableau complet et sa méthode : [le serveur](server.md#la-vitesse-à-côté-de-postgresql)) :
+**Serveur contre serveur** (1 M de faits, les mêmes lignes, les deux par leurs propres sockets ; les quatre premières
+lignes le 2026-11-19 en 101 tours, les autres le 2026-11-08 en 11 ; le tableau complet et sa méthode : [le
+serveur](server.md#la-vitesse-à-côté-de-postgresql)) :
 
 | | serveur Cepheus | PostgreSQL 18.6 | qui gagne, et pourquoi |
 |---|---:|---:|---|
-| une lecture ponctuelle, 1 client, socket Unix | **10,81 µs** | 26,39 µs | Cepheus : 1,5 µs de travail au-dessus du round trip du noyau (9,32 µs) ; le seul `SELECT 1` de PostgreSQL prend 15,19 µs |
-| la même, TCP + TLS 1.3 | **39,18 µs** | 49,64 µs | Cepheus, de moins : OpenSSL travaille ici sur des buffers en mémoire (16 µs de TLS là où OpenSSL seul en demande 11) |
-| 16 lectures en vol sur une connexion, par lecture | **1,46 µs** | 9,11 µs (pipeline de 16) | Cepheus : des réponses par numéro, un lot répondu en un seul appel système |
-| 8 clients à la fois, par lecture | **3,22 µs** | 6,54 µs | Cepheus : 4 I/O domains de threads (un seul domain : 9,6 µs) ; PostgreSQL fait un fork d'un processus par connexion |
+| une lecture ponctuelle, 1 client, socket Unix | **9,68 µs** | 24,91 µs | Cepheus : 0,65 µs de travail au-dessus du round trip du noyau (8,86 µs) ; le seul `SELECT 1` de PostgreSQL prend 15,24 µs |
+| la même, TCP + TLS 1.3 | **41,33 µs** | 52,31 µs | Cepheus, de moins : OpenSSL travaille ici sur des buffers en mémoire (18 µs de TLS là où OpenSSL seul en demande 11) |
+| 16 lectures en vol sur une connexion, par lecture | **1,30 µs** | 9,05 µs (pipeline de 16) | Cepheus : des réponses par numéro, un lot répondu en un seul appel système |
+| 8 clients à la fois, par lecture | **3,71 µs** | 6,27 µs | Cepheus : 4 I/O domains de threads (un seul domain : 9,6 µs) ; PostgreSQL fait un fork d'un processus par connexion |
 | 256 clients à la fois, par lecture | **2,88 µs** | 12,83 µs | Cepheus : les threads restent bon marché ; les 256 processus de PostgreSQL coûtent plus |
 | Q3, Q4 par le socket | **0,487 ms, 12,37 ms** | 0,662 ms, 18,47 ms | Cepheus |
 | une nouvelle connexion TLS | **2,60 ms** | 4,28 ms | Cepheus : aucun processus à forker |

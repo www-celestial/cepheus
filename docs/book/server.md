@@ -1463,15 +1463,22 @@ machine's other heavy jobs away, every process under a 3 GB cap; medians and the
 (OCaml, every reply decoded); PostgreSQL's is `pgbench -M prepared` (prepared statements, the extended protocol). A
 point read is an invoice by its id: `Get` of its 4 facts against `SELECT * FROM invoice WHERE id = :k`.
 
+The five rows at $n = 101$ were measured again for the first version, 2026-11-19: Cepheus' server at 19cb5ac (release
+build, 4 I/O domains), PostgreSQL 18.6 on a new cluster of its own (port 5548) with the same rows, 101 rounds each under
+the lock alone, the two sides' order swapped every round (`sbench.exe` `ping`, `get` at depths 1 and 16 and `clients` 8,
+against `pgbench -M prepared -T 1`); their ratio is PostgreSQL's time over Cepheus' in each round, its median and
+interval the same way. The machine's load over the minute before a round (the job that held the lock just before) had a
+median of 4.8; in the 19 rounds begun below 2, a point read took 8.87 µs and 8 clients 3.51 µs a read.
+
 | | Cepheus | PostgreSQL 18.6 | ratio |
 |---|---:|---:|---:|
-| empty round trip, Unix socket (Ping; `SELECT 1`), $n = 21$ | 9.32 µs [8.75, 9.77] | 15.19 µs [14.57, 16.30] | 1.6× |
-| point read, 1 client, Unix socket, $n = 21$ | **10.81 µs** [10.36, 11.15] | 26.39 µs [25.22, 27.78] | 2.4× |
-| point read, 1 client, TCP + TLS 1.3, $n = 21$ | **39.18 µs** [36.24, 44.59] | 49.64 µs [48.31, 50.61] | 1.3× |
+| empty round trip, Unix socket (Ping; `SELECT 1`), $n = 101$ | 8.86 µs [8.79, 9.03] | 15.24 µs [15.00, 15.60] | 1.73× [1.69, 1.77] |
+| point read, 1 client, Unix socket, $n = 101$ | **9.68 µs** [9.17, 10.09] | 24.91 µs [24.41, 25.26] | 2.62× [2.51, 2.75] |
+| point read, 1 client, TCP + TLS 1.3, $n = 101$ | **41.33 µs** [40.49, 42.12] | 52.31 µs [51.53, 52.92] | 1.27× [1.22, 1.31] |
 | point read, TCP without TLS (PostgreSQL), $n = 21$ | (no plain TCP: TLS always) | 35.81 µs [34.54, 37.71] | |
-| point reads, 16 in flight on one connection (a pipeline of 16), per read, $n = 11$ | **1.46 µs** [1.34, 2.06] | 9.11 µs [8.78, 10.45] | 6.2× |
+| point reads, 16 in flight on one connection (a pipeline of 16), per read, $n = 101$ | **1.30 µs** [1.29, 1.32] | 9.05 µs [9.00, 9.13] | 6.95× [6.88, 7.01] |
 | point reads, 128 in flight, per read, $n = 11$ | 1.31 µs [1.29, 1.36] | | |
-| 8 clients, one read in flight each: wall time per read, $n = 11$ | **3.22 µs** [2.96, 3.47] | 6.54 µs [6.17, 7.39] | 2.0× |
+| 8 clients, one read in flight each: wall time per read, $n = 101$ | **3.71 µs** [3.64, 3.78] | 6.27 µs [6.25, 6.29] | 1.71× [1.68, 1.74] |
 | 64 clients, $n = 11$ | 3.14 µs [2.99, 3.71] | 7.00 µs [6.78, 7.68] | 2.2× |
 | 256 clients, $n = 11$ | 2.88 µs [2.73, 3.94] | 12.83 µs [11.96, 13.75] | 4.5× |
 | Q3, the unpaid invoices of a city (city-7: 396 rows of 2 values), $n = 11$ | 0.487 ms [0.474, 0.526] | 0.662 ms [0.656, 0.699] | 1.4× |
@@ -1481,25 +1488,28 @@ point read is an invoice by its id: `Get` of its 4 facts against `SELECT * FROM 
 
 What it says:
 
-- **One client**: a point read costs the kernel's round trip (two system calls a side and two wake-ups: the 9.32 µs
-  of Ping) and 1.5 µs of the server's work (decoding, the read of the view, coding). PostgreSQL's own floor, `SELECT 1`,
-  is 15.2 µs: its work a statement is larger than our whole read. The plan's target was 10 µs; the empty round trip
-  on this machine was 8.46 µs when the design measured it and 9.32 today, so 10.8 is the floor plus the same 1.4-1.5
-  µs of work. Only not making the round trip goes below it ([local reads](#local-reads-g15): 0.22 µs).
+- **One client**: a point read costs the kernel's round trip (two system calls a side and two wake-ups: the 8.86 µs of
+  Ping) and the server's work (decoding, the read of the view, coding), small beside it: the read took 0.65 µs more than
+  Ping, paired by round [0.04, 1.03], and less in 38 rounds of 101 (the server sends Ping's 16 bytes back; 1.5 µs more
+  on 2026-11-08). PostgreSQL's own floor, `SELECT 1`, is 15.2 µs: its work a statement is larger than our whole read.
+  The plan's target was 10 µs: 9.68 now (10.81 on 2026-11-08, when the empty round trip took 9.32; 8.46 when the design
+  measured it). Only not making the round trip goes below it ([local reads](#local-reads-g15): 0.22 µs).
 - **Many clients**: the plan's main target, 8 clients at most 4 µs a read (PostgreSQL 6.2 µs when the design measured
-  it, 6.5 today), holds: 3.22 µs. With one I/O domain the server answered every 9.6 µs (the prototype): the I/O
-  domains are what wins it (3 rounds at each $k = 1, 2, 4, 8$: 9.1-10.0, 5.3-5.5, 2.9-4.0 and 2.1-3.1 µs; 4, the default,
-  keeps 16 in flight at 1.3-1.5 µs where 8 domains gave 1.5-2.1). PostgreSQL's
-  process a connection pays more as connections grow (12.8 µs at 256); our threads in 4 domains do not.
-- **Pipelining** (several requests in flight on one connection, the replies matched by id): 1.46 µs a read with 16 in
-  flight, 6.2 times PostgreSQL's pipeline of 16, where the backend still answers in order and parses each statement.
-- **TLS** costs us 28.4 µs more than the Unix socket (39.2 against 10.8); OpenSSL's own TLS round trip in C on this
-  machine (64 bytes each way, the design's prototype) costs 27.06 µs against 16.04 in plain TCP: 11.0 µs of TLS. Ours
-  adds about 16 µs over plain TCP (23.2 µs, step 1's server, $n = 11$): the memory buffers through which OpenSSL works
-  here (a copy into them and one out, and more OpenSSL calls a read) cost the rest. Both sides use OpenSSL's default
-  TLS 1.3 cipher (AES-256-GCM); the C prototype, AES-128-GCM. The plan's target was 36 µs: missed by 3 µs; still
-  1.3 times PostgreSQL with TLS. A new TLS connection costs 2.6 ms (one ECDSA signature by the server, the client's
-  checks; no client certificate), 1.6 times less than PostgreSQL's.
+  it, 6.27 now), holds: 3.71 µs (3.51 in the rounds begun below a load of 2; 3.22 on 2026-11-08, $n = 11$). With one I/O
+  domain the server answered every 9.6 µs (the prototype): the I/O domains are what wins it (3 rounds at each
+  $k = 1, 2, 4, 8$: 9.1-10.0, 5.3-5.5, 2.9-4.0 and 2.1-3.1 µs; 4, the default, keeps 16 in flight at 1.3-1.5 µs where 8
+  domains gave 1.5-2.1). PostgreSQL's process a connection pays more as connections grow (12.8 µs at 256); our threads
+  in 4 domains do not.
+- **Pipelining** (several requests in flight on one connection, the replies matched by id): 1.30 µs a read with 16 in
+  flight, 6.95 times PostgreSQL's pipeline of 16 (9.05 µs), where the backend still answers in order and parses each
+  statement.
+- **TLS** costs us 31.9 µs more than the Unix socket (41.3 against 9.7; paired by round [30.9, 32.8]); OpenSSL's own TLS
+  round trip in C on this machine (64 bytes each way, the design's prototype) costs 27.06 µs against 16.04 in plain TCP:
+  11.0 µs of TLS. Ours adds about 18 µs over plain TCP (23.2 µs, step 1's server, $n = 11$): the memory buffers through
+  which OpenSSL works here (a copy into them and one out, and more OpenSSL calls a read) cost the rest. Both sides use
+  OpenSSL's default TLS 1.3 cipher (AES-256-GCM); the C prototype, AES-128-GCM. The plan's target was 36 µs: missed by
+  5 µs; still 1.27 times PostgreSQL with TLS (52.3 µs). A new TLS connection costs 2.6 ms (one ECDSA signature by the
+  server, the client's checks; no client certificate), 1.6 times less than PostgreSQL's.
 - **Q3 and Q4** go through the socket as rows (Q3) and as aggregates computed in the server (Q4: 100 rows sent,
   not 45,064): 1.4 and 1.5 times faster than PostgreSQL's plans. Both sides give the same answers: 396 rows for
   city-7, and 45,064 unpaid invoices summing to 2,248,567,111 cents (a fresh load of the same seeded data,

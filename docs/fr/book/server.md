@@ -1641,15 +1641,23 @@ des médianes et leur intervalle à 95 % sans hypothèse sur la distribution (pa
 réponse décodée) ; celui de PostgreSQL est `pgbench -M prepared` (des prepared statements, le protocole étendu). Une
 lecture ponctuelle est une facture lue par son id : `Get` de ses 4 faits contre `SELECT * FROM invoice WHERE id = :k`.
 
+Les cinq lignes à $n = 101$ ont été mesurées de nouveau pour la première version, le 2026-11-19 : le serveur de Cepheus
+à 19cb5ac (build release, 4 I/O domains), PostgreSQL 18.6 sur un nouveau cluster à lui (port 5548) avec les mêmes
+lignes, 101 tours chacun seul sous le lock, l'ordre des deux côtés inversé à chaque tour (`sbench.exe` `ping`, `get` à 1
+et à 16 en cours et `clients` 8, contre `pgbench -M prepared -T 1`) ; leur rapport est le temps de PostgreSQL sur celui
+de Cepheus dans chaque tour, sa médiane et son intervalle de la même façon. La charge de la machine pendant la minute
+avant un tour (le travail qui tenait le lock juste avant) avait une médiane de 4,8 ; dans les 19 tours commencés en
+dessous de 2, une lecture ponctuelle prenait 8,87 µs et 8 clients 3,51 µs par lecture.
+
 | | Cepheus | PostgreSQL 18.6 | rapport |
 |---|---:|---:|---:|
-| round trip vide, Unix socket (Ping ; `SELECT 1`), $n = 21$ | 9,32 µs [8,75 ; 9,77] | 15,19 µs [14,57 ; 16,30] | 1,6× |
-| lecture ponctuelle, 1 client, Unix socket, $n = 21$ | **10,81 µs** [10,36 ; 11,15] | 26,39 µs [25,22 ; 27,78] | 2,4× |
-| lecture ponctuelle, 1 client, TCP + TLS 1.3, $n = 21$ | **39,18 µs** [36,24 ; 44,59] | 49,64 µs [48,31 ; 50,61] | 1,3× |
+| round trip vide, Unix socket (Ping ; `SELECT 1`), $n = 101$ | 8,86 µs [8,79 ; 9,03] | 15,24 µs [15,00 ; 15,60] | 1,73× [1,69 ; 1,77] |
+| lecture ponctuelle, 1 client, Unix socket, $n = 101$ | **9,68 µs** [9,17 ; 10,09] | 24,91 µs [24,41 ; 25,26] | 2,62× [2,51 ; 2,75] |
+| lecture ponctuelle, 1 client, TCP + TLS 1.3, $n = 101$ | **41,33 µs** [40,49 ; 42,12] | 52,31 µs [51,53 ; 52,92] | 1,27× [1,22 ; 1,31] |
 | lecture ponctuelle, TCP sans TLS (PostgreSQL), $n = 21$ | (pas de TCP en clair : TLS toujours) | 35,81 µs [34,54 ; 37,71] | |
-| lectures ponctuelles, 16 en cours sur une connexion (un pipeline de 16), par lecture, $n = 11$ | **1,46 µs** [1,34 ; 2,06] | 9,11 µs [8,78 ; 10,45] | 6,2× |
+| lectures ponctuelles, 16 en cours sur une connexion (un pipeline de 16), par lecture, $n = 101$ | **1,30 µs** [1,29 ; 1,32] | 9,05 µs [9,00 ; 9,13] | 6,95× [6,88 ; 7,01] |
 | lectures ponctuelles, 128 en cours, par lecture, $n = 11$ | 1,31 µs [1,29 ; 1,36] | | |
-| 8 clients, une lecture en cours chacun : temps écoulé par lecture, $n = 11$ | **3,22 µs** [2,96 ; 3,47] | 6,54 µs [6,17 ; 7,39] | 2,0× |
+| 8 clients, une lecture en cours chacun : temps écoulé par lecture, $n = 101$ | **3,71 µs** [3,64 ; 3,78] | 6,27 µs [6,25 ; 6,29] | 1,71× [1,68 ; 1,74] |
 | 64 clients, $n = 11$ | 3,14 µs [2,99 ; 3,71] | 7,00 µs [6,78 ; 7,68] | 2,2× |
 | 256 clients, $n = 11$ | 2,88 µs [2,73 ; 3,94] | 12,83 µs [11,96 ; 13,75] | 4,5× |
 | Q3, les factures impayées d'une ville (city-7 : 396 lignes de 2 valeurs), $n = 11$ | 0,487 ms [0,474 ; 0,526] | 0,662 ms [0,656 ; 0,699] | 1,4× |
@@ -1660,28 +1668,31 @@ lecture ponctuelle est une facture lue par son id : `Get` de ses 4 faits contre 
 Ce que cela dit :
 
 - **Un client** : une lecture ponctuelle coûte le round trip du noyau (deux appels système de chaque côté et deux
-  réveils : les 9,32 µs de Ping) et 1,5 µs de travail du serveur (le décodage, la lecture de la vue, le codage). Le
-  plancher de PostgreSQL lui-même, `SELECT 1`, est de 15,2 µs : son travail par instruction est plus grand que toute
-  notre lecture. La cible du plan était 10 µs ; le round trip vide sur cette machine était de 8,46 µs quand la
-  conception l'a mesuré et de 9,32 aujourd'hui, donc 10,8 est le plancher plus les mêmes 1,4-1,5 µs de travail. Seul
-  le fait de ne pas faire le round trip descend en dessous ([lectures locales](#lectures-locales-g15) : 0,22 µs).
+  réveils : les 8,86 µs de Ping) et le travail du serveur (le décodage, la lecture de la vue, le codage), petit à côté :
+  la lecture a pris 0,65 µs de plus que Ping, apparié par tour [0,04 ; 1,03], et moins dans 38 tours sur 101 (le serveur
+  renvoie les 16 octets de Ping ; 1,5 µs de plus le 2026-11-08). Le plancher de PostgreSQL lui-même, `SELECT 1`, est de
+  15,2 µs : son travail par instruction est plus grand que toute notre lecture. La cible du plan était 10 µs : 9,68
+  maintenant (10,81 le 2026-11-08, quand le round trip vide prenait 9,32 ; 8,46 quand la conception l'a mesuré). Seul le
+  fait de ne pas faire le round trip descend en dessous ([lectures locales](#lectures-locales-g15) : 0,22 µs).
 - **Beaucoup de clients** : la cible principale du plan, 8 clients à 4 µs au plus par lecture (PostgreSQL 6,2 µs quand
-  la conception l'a mesuré, 6,5 aujourd'hui), tient : 3,22 µs. Avec un seul I/O domain, le serveur répondait toutes
-  les 9,6 µs (le prototype) : ce sont les I/O domains qui font gagner (3 tours à chaque $k = 1, 2, 4, 8$ : 9,1-10,0 ;
-  5,3-5,5 ; 2,9-4,0 et 2,1-3,1 µs ; 4, la valeur par défaut, tient 16 lectures en cours à 1,3-1,5 µs là où 8 domains
-  donnaient 1,5-2,1). Le processus par connexion de PostgreSQL paie davantage à mesure que les connexions augmentent
-  (12,8 µs à 256) ; nos threads dans 4 domains, non.
-- **Pipelining** (plusieurs requêtes en cours sur une connexion, les réponses reliées par l'id) : 1,46 µs par lecture
-  avec 16 en cours, 6,2 fois plus rapide que le pipeline de 16 de PostgreSQL, où le backend répond toujours dans
-  l'ordre et analyse chaque instruction.
-- **TLS** nous coûte 28,4 µs de plus que le Unix socket (39,2 contre 10,8) ; le round trip TLS d'OpenSSL lui-même, en
-  C sur cette machine (64 octets dans chaque sens, le prototype de la conception), coûte 27,06 µs contre 16,04 en TCP
-  en clair : 11,0 µs de TLS. Le nôtre ajoute environ 16 µs au TCP en clair (23,2 µs, le serveur de l'étape 1,
-  $n = 11$) : les buffers en mémoire par lesquels OpenSSL travaille ici (une copie vers eux et une hors d'eux, et
-  davantage d'appels à OpenSSL par lecture) coûtent le reste. Les deux côtés utilisent le cipher TLS 1.3 par défaut
-  d'OpenSSL (AES-256-GCM) ; le prototype C, AES-128-GCM. La cible du plan était 36 µs : manquée de 3 µs ; toujours 1,3
-  fois plus rapide que PostgreSQL avec TLS. Une nouvelle connexion TLS coûte 2,6 ms (une signature ECDSA par le
-  serveur, les vérifications du client ; aucun certificat client), 1,6 fois moins que celle de PostgreSQL.
+  la conception l'a mesuré, 6,27 maintenant), tient : 3,71 µs (3,51 dans les tours commencés sous une charge de 2 ; 3,22
+  le 2026-11-08, $n = 11$). Avec un seul I/O domain, le serveur répondait toutes les 9,6 µs (le prototype) : ce sont les
+  I/O domains qui font gagner (3 tours à chaque $k = 1, 2, 4, 8$ : 9,1-10,0 ; 5,3-5,5 ; 2,9-4,0 et 2,1-3,1 µs ; 4, la
+  valeur par défaut, tient 16 lectures en cours à 1,3-1,5 µs là où 8 domains donnaient 1,5-2,1). Le processus par
+  connexion de PostgreSQL paie davantage à mesure que les connexions augmentent (12,8 µs à 256) ; nos threads dans 4
+  domains, non.
+- **Pipelining** (plusieurs requêtes en cours sur une connexion, les réponses reliées par l'id) : 1,30 µs par lecture
+  avec 16 en cours, 6,95 fois plus rapide que le pipeline de 16 de PostgreSQL (9,05 µs), où le backend répond toujours
+  dans l'ordre et analyse chaque instruction.
+- **TLS** nous coûte 31,9 µs de plus que le Unix socket (41,3 contre 9,7 ; apparié par tour [30,9 ; 32,8]) ; le round
+  trip TLS d'OpenSSL lui-même, en C sur cette machine (64 octets dans chaque sens, le prototype de la conception), coûte
+  27,06 µs contre 16,04 en TCP en clair : 11,0 µs de TLS. Le nôtre ajoute environ 18 µs au TCP en clair (23,2 µs, le
+  serveur de l'étape 1, $n = 11$) : les buffers en mémoire par lesquels OpenSSL travaille ici (une copie vers eux et une
+  hors d'eux, et davantage d'appels à OpenSSL par lecture) coûtent le reste. Les deux côtés utilisent le cipher TLS 1.3
+  par défaut d'OpenSSL (AES-256-GCM) ; le prototype C, AES-128-GCM. La cible du plan était 36 µs : manquée de 5 µs ;
+  toujours 1,27 fois plus rapide que PostgreSQL avec TLS (52,3 µs). Une nouvelle connexion TLS coûte 2,6 ms (une
+  signature ECDSA par le serveur, les vérifications du client ; aucun certificat client), 1,6 fois moins que celle de
+  PostgreSQL.
 - **Q3 et Q4** passent par le socket sous forme de lignes (Q3) et d'agrégats calculés dans le serveur (Q4 : 100 lignes
   envoyées, pas 45 064) : 1,4 et 1,5 fois plus rapides que les plans d'exécution de PostgreSQL. Les deux côtés donnent
   les mêmes réponses : 396 lignes pour city-7, et 45 064 factures impayées dont la somme fait 2 248 567 111 centimes

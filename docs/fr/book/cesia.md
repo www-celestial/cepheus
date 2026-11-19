@@ -866,7 +866,7 @@ prepared` (C, libpq) qui lit `SELECT * FROM invoice WHERE id = $1`, les mêmes l
 | | client Cesia | client OCaml | PostgreSQL 18.6 |
 |---|---:|---:|---:|
 | sur la machine du serveur : une lecture locale | **0,77** [0,76 ; 0,82] | 0,24 [0,22 ; 0,36] | 26,4 [23,9 ; 32,3] par son socket Unix |
-| par TCP et TLS 1.3 (loopback) | 51,6 [44,1 ; 63,4] | 37,1 [31,3 ; 46,8] | 49,6, dans d'autres tours ([serveur](server.md#la-vitesse-à-côté-de-postgresql)) |
+| par TCP et TLS 1.3 (loopback) | 51,6 [44,1 ; 63,4] | 37,1 [31,3 ; 46,8] | 52,3, dans d'autres tours ([serveur](server.md#la-vitesse-à-côté-de-postgresql)) |
 | au serveur par son socket Unix | (pas un chemin du client Cesia : il y lit en local) | 8,9 [8,0 ; 9,6] | |
 
 - La lecture locale est 34 fois plus rapide que celle de PostgreSQL par son socket, et 3,2 fois plus lente que celle
@@ -970,7 +970,7 @@ la même base pour chacun) :
 **À côté des géants.** Aucun client Cesia de PostgreSQL n'existe (le `std/sql` de Cesia parle à SQLite) ; PostgreSQL est
 donc mesuré par sa bibliothèque C, le client le plus rapide qu'il ait : un programme Cesia sur la machine du serveur lit
 une ligne 34 fois plus vite que n'importe quel client de PostgreSQL ne le peut, puisqu'il ne fait aucun round trip, et
-par le réseau le client Cesia reste dans le coût propre du géant (51,6 contre 49,6 µs, le chiffre de PostgreSQL vient d'autres tours,
+par le réseau le client Cesia reste dans le coût propre du géant (51,6 contre 52,3 µs, le chiffre de PostgreSQL vient d'autres tours,
 [serveur](server.md#la-vitesse-à-côté-de-postgresql)). Là où PostgreSQL gagne : son client se connecte en 2 ms (socket Unix) ou 4,3 ms (TLS), là où le
 seul premier appel du client Cesia coûte 13 ms ; et un programme qui ne tient aucune copie des données utilise moins de
 mémoire qu'un lecteur local (31 MB pour une base de 1 M de faits, [serveur](server.md#ce-que-cela-coûte)). Les peers

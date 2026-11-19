@@ -57,15 +57,16 @@ Cepheus' reads on one run measured since then are within a few percent of those 
   of tools. (Replication is built: a replica promoted by hand, and a Raft cluster that elects its leader by itself,
   [the server](server.md#a-replica).)
 
-**Server against server** (1 M facts, the same rows, both through their own sockets, 2026-11-08; the full table and
-its method: [the server](server.md#speed-beside-postgresql)):
+**Server against server** (1 M facts, the same rows, both through their own sockets; the first four rows 2026-11-19 in
+101 rounds, the others 2026-11-08 in 11; the full table and its method: [the
+server](server.md#speed-beside-postgresql)):
 
 | | Cepheus server | PostgreSQL 18.6 | who wins, and why |
 |---|---:|---:|---|
-| a point read, 1 client, Unix socket | **10.81 µs** | 26.39 µs | Cepheus: 1.5 µs of work over the kernel's round trip (9.32 µs); PostgreSQL's `SELECT 1` alone takes 15.19 µs |
-| the same, TCP + TLS 1.3 | **39.18 µs** | 49.64 µs | Cepheus, by less: OpenSSL works on memory buffers here (16 µs of TLS where OpenSSL alone needs 11) |
-| 16 reads in flight on one connection, a read | **1.46 µs** | 9.11 µs (pipeline of 16) | Cepheus: replies by id, a batch answered in one system call |
-| 8 clients at once, a read | **3.22 µs** | 6.54 µs | Cepheus: 4 I/O domains of threads (one domain: 9.6 µs); PostgreSQL forks a process a connection |
+| a point read, 1 client, Unix socket | **9.68 µs** | 24.91 µs | Cepheus: 0.65 µs of work over the kernel's round trip (8.86 µs); PostgreSQL's `SELECT 1` alone takes 15.24 µs |
+| the same, TCP + TLS 1.3 | **41.33 µs** | 52.31 µs | Cepheus, by less: OpenSSL works on memory buffers here (18 µs of TLS where OpenSSL alone needs 11) |
+| 16 reads in flight on one connection, a read | **1.30 µs** | 9.05 µs (pipeline of 16) | Cepheus: replies by id, a batch answered in one system call |
+| 8 clients at once, a read | **3.71 µs** | 6.27 µs | Cepheus: 4 I/O domains of threads (one domain: 9.6 µs); PostgreSQL forks a process a connection |
 | 256 clients at once, a read | **2.88 µs** | 12.83 µs | Cepheus: threads stay cheap; PostgreSQL's 256 processes cost more |
 | Q3, Q4 through the socket | **0.487 ms, 12.37 ms** | 0.662 ms, 18.47 ms | Cepheus |
 | a new TLS connection | **2.60 ms** | 4.28 ms | Cepheus: no process to fork |

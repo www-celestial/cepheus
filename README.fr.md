@@ -57,9 +57,9 @@ et `why` renvoie une preuve vraie (G20). Chaque garantie, ses conditions exactes
 les programmes se connectent par un socket Unix ou par TCP avec TLS 1.3, chacun avec un token (un secret) qui lui donne
 la lecture ou l'écriture, base par base (G16) ; une écriture renvoyée après une réponse perdue est appliquée une seule
 fois (G14). Serveur contre serveur sur la même machine et les mêmes données (1 M de faits), une lecture ponctuelle
-coûte 10,8 µs par le socket Unix (PostgreSQL 18.6 : 26,4), 39,2 µs avec TLS (49,6) ; 8 clients à la fois, 3,22 µs par
-lecture en tout (6,54) ; 16 requêtes en cours sur une seule connexion, 1,46 µs par lecture (le pipeline de 16 de
-PostgreSQL : 9,11). Un programme sur la machine du serveur lit dans sa propre mémoire, de façon linearizable (chaque
+coûte 9,7 µs par le socket Unix (PostgreSQL 18.6 : 24,9), 41,3 µs avec TLS (52,3) ; 8 clients à la fois, 3,71 µs par
+lecture en tout (6,27) ; 16 requêtes en cours sur une seule connexion, 1,30 µs par lecture (le pipeline de 16 de
+PostgreSQL : 9,05). Un programme sur la machine du serveur lit dans sa propre mémoire, de façon linearizable (chaque
 lecture voit tout ce qui a été confirmé avant elle ; G15) : 0,22 µs par lecture ponctuelle, aucun round trip
 (l'aller-retour d'une requête et de sa réponse), et aucune écriture ne l'attend. Une replica (une copie tenue à jour)
 sur une autre machine garde une copie de chaque base par mutual TLS (où les deux côtés montrent un certificat), groupe
@@ -91,7 +91,7 @@ lyon = result.Unwrap(cepheus.Find(1, (c) -> {Where: [[c, Client.City, "Lyon"]], 
 ```
 
 Sur la machine du serveur, un `cepheus.Get` de 4 champs coûte 0,77 µs depuis Cesia (PostgreSQL 18.6 par son socket,
-depuis le C : 26,4 µs) ; par TLS, 51,6 µs (49,6 pour PostgreSQL) ; 64 fibers (les threads légers de Cesia) sur une
+depuis le C : 26,4 µs) ; par TLS, 51,6 µs (52,3 pour PostgreSQL) ; 64 fibers (les threads légers de Cesia) sur une
 seule connexion écrivent aussi vite que 64 connexions. Rien ne se charge avant le premier appel du package, qui coûte
 13 ms une fois par processus.
 

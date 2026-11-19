@@ -811,7 +811,7 @@ prepared` (C, libpq) reading `SELECT * FROM invoice WHERE id = $1`, the same row
 | | Cesia client | OCaml client | PostgreSQL 18.6 |
 |---|---:|---:|---:|
 | on the server's machine: a local read | **0.77** [0.76, 0.82] | 0.24 [0.22, 0.36] | 26.4 [23.9, 32.3] through its Unix socket |
-| over TCP and TLS 1.3 (loopback) | 51.6 [44.1, 63.4] | 37.1 [31.3, 46.8] | 49.6, in other rounds ([server](server.md#speed-beside-postgresql)) |
+| over TCP and TLS 1.3 (loopback) | 51.6 [44.1, 63.4] | 37.1 [31.3, 46.8] | 52.3, in other rounds ([server](server.md#speed-beside-postgresql)) |
 | at the server through its Unix socket | (not a path of the Cesia client: it reads locally there) | 8.9 [8.0, 9.6] | |
 
 - The local read is 34 times faster than PostgreSQL's through its socket, and 3.2 times slower than the OCaml
@@ -906,7 +906,7 @@ a server started from the same database for each):
 **Beside the giants.** No Cesia client of PostgreSQL exists (Cesia's `std/sql` speaks SQLite), so PostgreSQL is
 measured through its C library, the fastest client it has: a Cesia program on the server's machine reads a row 34
 times faster than any client of PostgreSQL can, since it makes no round trip, and over the network the Cesia client is
-within the giant's own cost (51.6 against 49.6 µs, PostgreSQL's figure from other rounds, [server](server.md#speed-beside-postgresql)). Where PostgreSQL wins:
+within the giant's own cost (51.6 against 52.3 µs, PostgreSQL's figure from other rounds, [server](server.md#speed-beside-postgresql)). Where PostgreSQL wins:
 its client connects in 2 ms (Unix socket) or 4.3 ms (TLS), where the Cesia client's first call alone costs 13 ms;
 and a program that holds no copy of the data uses less memory than a local reader (31 MB of a database of 1 M facts,
 [server](server.md#what-it-costs)). Datomic's peers read in their own process too ("application processes
