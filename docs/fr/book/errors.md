@@ -207,8 +207,8 @@ les confirmer par un seul fsync : [le serveur](server.md#plusieurs-bases-un-seul
 |---|---|
 | `FILE: a broken header` | un fichier du buffer dont l'en-tête ne passe pas la vérification (un fichier ne prend son nom qu'une fois son en-tête durable) |
 | `FILE: unknown format F` | un en-tête qui passe la vérification, d'un autre format que 1 |
-| `server.wal.N: damaged round at offset O (written whole)` | un tour (une écriture du buffer confirmée par un fsync) qui ne passe pas la vérification, dans le fichier le plus ancien, ou suivi d'un tour écrit en entier : il a été durable, il est maintenant endommagé |
-| `FILE: round R at O does not hold its entries` / `has bytes after its entries` | un tour qui passe la vérification mais dont les entrées ne font pas exactement son corps |
+| `server.wal.N: damaged round at offset O (written whole)` | un round (une tournée du buffer : une écriture confirmée par un fsync) qui ne passe pas la vérification, dans le fichier le plus ancien, ou suivi d'un round écrit en entier : il a été durable, il est maintenant endommagé |
+| `FILE: round R at O does not hold its entries` / `has bytes after its entries` | un round qui passe la vérification mais dont les entrées ne font pas exactement son corps |
 | `server.wal.1 holds confirmed writes of databases this server did not open (ids ...): open them with it once` | le buffer contient des frames d'une base que `cluster.toml` ne liste plus : la rajouter, démarrer le serveur, l'arrêter ([opérations](operations.md#une-base-dun-serveur)) |
 | `journal: segment SEG, where the commit buffer's frames go, is missing` | le run le plus récent reprend dans un segment qui n'est pas là |
 | `SEG: the frame at O (group G) does not check, before the commit buffer's frames from group N` | une frame que le buffer ne contient pas, avant des frames qu'il contient : elle a été forcée, et elle est endommagée |
@@ -366,7 +366,7 @@ grandi d'un seuil de plus. D'autres lignes viennent du writer et du commit buffe
 |---|---|
 | `cepheus: the journal could not be cut back after a failed write: MSG` | après une écriture ou un fsync du journal qui a échoué, le retour à la dernière frame durable a échoué aussi : les écritures qui ont échoué peuvent revenir à la réouverture (G13) |
 | `cepheus: the journal could not be forced at close: MSG` | le fsync d'un journal partagé (celui d'une base qui écrit par le commit buffer) a échoué à la fermeture : pas de marqueur `closed`, et la prochaine ouverture est une recovery |
-| `cepheus: the commit buffer could not be cut back after a failed write: MSG` | après une écriture ou un fsync du buffer qui a échoué, son retour au dernier tour forcé a échoué aussi : le tour qui a échoué peut revenir au prochain démarrage |
+| `cepheus: the commit buffer could not be cut back after a failed write: MSG` | après une écriture ou un fsync du buffer qui a échoué, son retour au dernier round forcé a échoué aussi : le round qui a échoué peut revenir au prochain démarrage |
 | `cepheus: the commit buffer could not be emptied: MSG` | un arrêt propre n'a pas pu supprimer `DATA/server.wal.1` ou `.2` : le prochain démarrage les lit, et trouve leurs frames déjà dans les journaux |
 | `cepheus: the run of a large group could not be named: MSG` | le renommage du fichier de run d'un grand groupe a échoué après que sa frame était durable : la base s'arrête (`Io`), et l'ouverture suivante rejoue le groupe depuis le journal |
 | `cepheus: background merge failed: EXN` | le domain du merge a rencontré une exception (une erreur de disque, une page illisible) |

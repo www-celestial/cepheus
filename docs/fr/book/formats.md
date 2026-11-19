@@ -434,14 +434,14 @@ round  = header, 28 bytes: 0 magic "CPHR" (0x52485043) u32 | 4 body length u32 |
        | trailer, 16 bytes: body length u32 | body CRC u32 | header CRC u32 | magic "CPHT" (0x54485043)
 ```
 
-Un fichier est commencé avec son en-tête et son premier tour (round : des entrées qu'un seul fsync confirme) ensemble :
+Un fichier est commencé avec son en-tête et son premier round (une tournée du buffer : les entrées qu'un seul fsync confirme) ensemble :
 écrit à côté sous le nom `server.wal.N.tmp`, forcé, renommé à son nom, le répertoire forcé, si bien qu'un crash laisse
-soit l'ancien fichier, soit le nouveau, entier. Les tours suivants y sont ajoutés, chacun forcé. Le fichier le plus
+soit l'ancien fichier, soit le nouveau, entier. Les rounds suivants y sont ajoutés, chacun forcé. Le fichier le plus
 récent a la génération la plus haute. Les deux fichiers sont supprimés au démarrage d'un serveur (une fois que le
 journal de chaque base contient leurs frames, forcées) et à un arrêt propre (une fois chaque journal forcé) : un
-répertoire de données au repos n'en a aucun. À la recovery, chaque tour du fichier le plus ancien doit passer la
-vérification ; dans le fichier le plus récent, le premier tour qui ne la passe pas est une fin torn (le tour en cours
-au moment du crash, jamais confirmé) si aucun tour écrit en entier ne le suit, et un dommage sinon, comme dans un
+répertoire de données au repos n'en a aucun. À la recovery, chaque round du fichier le plus ancien doit passer la
+vérification ; dans le fichier le plus récent, le premier round qui ne la passe pas est une fin torn (le round en cours
+au moment du crash, jamais confirmé) si aucun round écrit en entier ne le suit, et un dommage sinon, comme dans un
 journal ; un fichier dont l'en-tête ne passe pas la vérification est un dommage.
 
 **`DATA/raft/`**, le log et l'état d'un cluster Raft (des serveurs qui gardent le même log, la liste ordonnée des
@@ -465,8 +465,8 @@ round    = header, 36 bytes: 0 magic "CPHE" (0x45485043) u32 | 4 body length u32
 ```
 
 `state` est écrit à côté, forcé, renommé par-dessus l'ancien, et le répertoire forcé ; s'il ne passe pas la
-vérification, le démarrage est refusé. Un tour est l'ensemble des entrées d'un fsync. À la recovery, dans le segment le
-plus récent, le premier tour qui ne passe pas la vérification est une fin torn (coupée) si aucun en-tête de tour qui
-passe la vérification ne le suit et qu'aucun trailer ne met là un tour entier ; tout le reste est un dommage : le
-segment et ceux d'après sont renommés `*.damaged` (gardés), les tours d'avant le dommage sont écrits de nouveau sous le
+vérification, le démarrage est refusé. Un round est l'ensemble des entrées d'un fsync. À la recovery, dans le segment le
+plus récent, le premier round qui ne passe pas la vérification est une fin torn (coupée) si aucun en-tête de round qui
+passe la vérification ne le suit et qu'aucun trailer ne met là un round entier ; tout le reste est un dommage : le
+segment et ceux d'après sont renommés `*.damaged` (gardés), les rounds d'avant le dommage sont écrits de nouveau sous le
 nom du segment, et `state` enregistre `repair` (la règle de 2018).

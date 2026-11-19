@@ -239,8 +239,8 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   commence (Fresh), chaque groupe qu'une lecture a rendu avant qu'elle commence (Ordered), et elle est l'état du modèle à
   son groupe, durable (Durable) : G15, avec G5 et G13 pour les lecteurs. Les premières exécutions ont trouvé un bug du
   test (le corps d'un grand groupe, écrit par morceaux, décodé depuis le buffer de lot vide).
-- `server_crash` : un vrai `cepheus serve` de deux bases (leurs journaux forcés par son commit buffer, en tours qui
-  portent les deux ; un tour : les frames arrivées ensemble, forcées par un seul fsync), tué 20 fois (kill -9) sous quatre clients qui écrivent par le socket Unix, la moitié vers chaque
+- `server_crash` : un vrai `cepheus serve` de deux bases (leurs journaux forcés par son commit buffer, en rounds qui
+  portent les deux ; un round, une tournée du buffer : les frames arrivées ensemble, forcées par un seul fsync), tué 20 fois (kill -9) sous quatre clients qui écrivent par le socket Unix, la moitié vers chaque
   base ; à la fin, chaque écriture confirmée est dans sa base une fois et aucune écriture deux fois (G1, G14) ; pendant ce
   temps, deux lecteurs lisent dans leur propre mémoire, et chaque lecture, locale ou au serveur pendant qu'un follower
   est refait, tient chaque écriture répondue et chaque état rendu avant qu'elle commence (G15 avec l'horloge réelle :
@@ -275,24 +275,24 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   alternent après 300 à 3 300 octets, les segments de leurs journaux longs de 600 à 4 600 octets. Une seule seed décide
   de chaque événement : les écritures de chaque base (certaines de grands groupes, forcés dans leur propre journal ;
   certaines frames plus longues que ce que prend le buffer, forcées là aussi), le moment où chaque frame atteint son
-  journal et le buffer, les tours, les nettoyages du fichier qui n'est pas actif, les merges, les morts du processus
+  journal et le buffer, les rounds, les nettoyages du fichier qui n'est pas actif, les merges, les morts du processus
   (le page cache gardé, perdu à une coupure de courant plus tard), les coupures de courant, les crashs à l'intérieur de
   n'importe quel appel disque, ceux de la recovery aussi, et les fsyncs qui échouent, du fichier du buffer ou d'un
   journal, comme le disque de la simulation les fait (G13). Après chaque recovery : chaque groupe confirmé de chaque
   base est là (G1), chaque journal tient exactement les groupes écrits, dans l'ordre (G2, G3), ce qu'une recovery a
-  publié survit au crash suivant (G5), aucune ouverture ne refuse, sauf à une frame ou à un tour qu'aucun fsync n'a
+  publié survit au crash suivant (G5), aucune ouverture ne refuse, sauf à une frame ou à un round qu'aucun fsync n'a
   confirmé et dont seul le secteur de l'en-tête a été perdu (G6), aucune écriture n'est confirmée après un fsync qui a
   échoué (G10). Une base ouverte seule après un crash doit être refusée, et acceptée après un arrêt propre ; et de temps
   en temps une version sans le buffer ouvre une base après un crash et y écrit : le démarrage suivant du serveur doit
   refuser cette base, jamais écrire par-dessus ses frames. La moitié des seeds forcent dans son propre journal une frame
   qui arrive quand le buffer est au repos (`Wal.alone`). Dans `tools/test.sh` (300 seeds, 2026-11-12) : 29 771 groupes
-  confirmés, 12 968 tours (950 de plusieurs bases), 1 726 coupures de courant, 1 044 morts du processus, 1 476 crashs à
+  confirmés, 12 968 rounds (950 de plusieurs bases), 1 726 coupures de courant, 1 044 morts du processus, 1 476 crashs à
   l'intérieur d'un appel disque et 607 à l'intérieur d'une recovery, 6 838 erreurs `Io`, 4 598 ouvertures seules
   refusées et 601 acceptées après un arrêt propre, 155 bases écrites par une version sans le buffer (12 d'entre elles
-  refusées au démarrage suivant, les autres n'avaient rien perdu) ; une fausse alarme de G6 (un tour qu'aucun fsync n'a
+  refusées au démarrage suivant, les autres n'avaient rien perdu) ; une fausse alarme de G6 (un round qu'aucun fsync n'a
   confirmé, seul le secteur de son en-tête perdu) ; aucun échec.
 - `exhaustive.exe`, partie 6 : deux bases partagent un buffer dont les fichiers alternent après 500 octets, leurs
-  segments longs de 1 500 octets, dans une exécution fixe, chaque frame passant par le buffer (des tours d'une base et
+  segments longs de 1 500 octets, dans une exécution fixe, chaque frame passant par le buffer (des rounds d'une base et
   des deux, de longues frames forcées dans leur propre journal, un segment quitté, des changements de fichier, un
   nettoyage, un changement vers le fichier nettoyé). À chacun de ses 50 appels disque qui modifient quelque chose : une
   mort du processus (puis une coupure de courant après la recovery), et des coupures de courant qui gardent chaque
@@ -505,14 +505,14 @@ groupe plus tardif de même numéro. La constante `Rule` choisit comment un grou
 
 `spec/CommitBuffer.tla` modélise le commit buffer du serveur ([le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)) :
 des bases dont les syncers (le thread qui fait les fsync d'un journal) écrivent chaque frame dans leur journal sans
-fsync et la donnent au buffer, une frame en cours par base ; des tours de toutes les frames arrivées entre-temps,
-ajoutées et forcées une seule fois, un tour en cours ; des frames forcées dans leur propre journal (les longues, et
-une qui arrive quand le buffer est au repos) ; des checkpoints qui forcent un journal ; le tour le plus ancien
+fsync et la donnent au buffer, une frame en cours par base ; des rounds (des tournées) de toutes les frames arrivées entre-temps,
+ajoutées et forcées une seule fois, un round en cours ; des frames forcées dans leur propre journal (les longues, et
+une qui arrive quand le buffer est au repos) ; des checkpoints qui forcent un journal ; le round le plus ancien
 abandonné une fois que chacune de ses frames est couverte par un checkpoint ; F1 (une mort du processus, le page cache
 gardé), F2 (une coupure de courant : chaque frame non forcée d'un journal perdue, gardée ou torn, chacune pour elle ;
-les tours du buffer après ceux qui sont forcés gardés jusqu'à un certain tour), F4 (un fsync qui échoue, du buffer ou
+les rounds du buffer après ceux qui sont forcés gardés jusqu'à un certain round), F4 (un fsync qui échoue, du buffer ou
 d'un journal à un checkpoint, marque ses pages clean et arrête le buffer) ; et la recovery avec la règle telle qu'elle
-est construite (le tour le plus récent du buffer, s'il est torn, coupé ; chaque frame qu'il a gardée écrite de nouveau
+est construite (le round le plus récent du buffer, s'il est torn, coupé ; chaque frame qu'il a gardée écrite de nouveau
 à sa place ; chaque autre frame avant la dernière d'entre elles doit se vérifier ; la règle propre du journal après).
 Invariants : `Durable` (G1 : chaque fois que le serveur tourne, chaque frame confirmée est dans son journal), `Prefix`
 (G3), `NeverRefused` (aucun dommage n'est modélisé, donc aucune ouverture ne peut refuser : G6), `CheckpointOnDisk` (un
@@ -523,7 +523,7 @@ distincts, profondeur 25, 9 minutes sur 4 workers. Chaque variante qui retire un
 | configuration | la règle sans | casse |
 |---|---|---|
 | `CommitBufferTrust.cfg` | les frames du buffer à la recovery : chaque journal par sa propre règle | `Durable` |
-| `CommitBufferEarly.cfg` | le checkpoint : un tour abandonné dès que ses frames sont dans le page cache de leurs journaux | `Durable` |
+| `CommitBufferEarly.cfg` | le checkpoint : un round abandonné dès que ses frames sont dans le page cache de leurs journaux | `Durable` |
 | `CommitBufferCkpt.cfg` | l'arrêt après un fsync qui échoue : un checkpoint après lui | `CheckpointOnDisk` |
 | `CommitBufferMany.cfg` | une seule frame en cours : une base écrit sa frame suivante avant que la précédente soit confirmée (1 base, 3 frames) | `NeverRefused` |
 

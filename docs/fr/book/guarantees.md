@@ -88,7 +88,7 @@ Les runs utilisés à la recovery sont cohérents avec le journal (G7).
 
 *Avec le commit buffer d'un serveur* ([le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer) ; le commit
 buffer est l'endroit où le serveur copie les frames de plusieurs bases pour les confirmer toutes par un seul fsync), la
-frame est écrite dans le journal sans fsync, et `write` revient après le fsync du tour du buffer qui en contient une
+frame est écrite dans le journal sans fsync, et `write` revient après le fsync du round du buffer (sa tournée : les frames venues ensemble, forcées d'un seul fsync) qui en contient une
 copie entière (ou, quand le buffer était inactif, après le fsync de son propre journal, comme sans le buffer). Jusqu'à
 ce que le journal soit forcé (un checkpoint, le moment où le journal lui-même est rendu durable), le buffer garde cette
 copie : un fichier du buffer n'est vidé qu'une fois que chaque journal qui y a des frames a été forcé après elles, et un

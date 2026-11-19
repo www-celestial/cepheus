@@ -64,7 +64,7 @@ le dernier merge tournait) ; `Cepheus.snapshot` fait le merge tout de suite, ava
 
 ## Une base d'un serveur
 
-Un serveur force les journaux de toutes ses bases par un seul fsync par tour, à travers son commit buffer
+Un serveur force les journaux de toutes ses bases par un seul fsync par round (une tournée : les frames venues ensemble, forcées d'un coup), à travers son commit buffer
 (`DATA/server.wal.1` et `.2` : [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)). Entre deux
 checkpoints d'un journal (les moments où le journal lui-même est forcé), ses frames confirmées les plus récentes
 peuvent n'être durables que dans le buffer : le journal les tient dans le page cache, et une coupure de courant peut
