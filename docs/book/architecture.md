@@ -205,11 +205,24 @@ newest runs of the levels below the one that holds it, and stays beside the runs
 before it (tiering at that level: Dayan and Idreos's lazy leveling, Dostoevsky 2018), until 16 of them
 (`Engine.tier`) would lie side by side: then that group's merge takes them all, as `Engine.plan` would, in one
 $k$-way pass. A load then writes each fact about twice (its group's run, the tier's merge, then `snapshot`), and
-reads while it runs visit up to 16 runs of that level; `snapshot` after a load brings them back to one. The runs are
+reads while it runs visit up to 16 runs of that level; once the writes stop, the writer merges them (below), and
+`snapshot` after a load brings everything back to one. The runs are
 never more than 16 plus one a level, far below the 31 a merge may take (`Snapshot.max_take`: the pass by thing keeps a
 thing's sources in the bits of an integer, two a run). At 10 million facts in groups of 5,000 clients (about 415,000 facts each) written
 by two threads, every group is confirmed in 9.8 s instead of 18.2, and with the snapshot after it the load takes 13.0
 s instead of 21.9 ([benchmarks](benchmarks.md#chunked-loads-2026-11-12-at-10-million-facts)).
+
+**An idle writer merges a tier.** Lazy leveling keeps a load's writes at about two a fact, but its reads pay for every
+run of the tier until 16 would lie side by side, which a load of a few groups never reaches: the invoices app's seed
+left 5 runs of about 480,000 rows each, and every lookup visited all of them (its sorted page of invoices took 120 µs
+in OCaml, 64 on the same facts in one run). So every second the server's clock asks each writer (`Engine.tidy`): when
+no group came since the last second, no merge or change of the rules runs, and a level holds two runs or more, the
+writer merges the delta and the newest runs, down to the last run of that level, into the first level that holds them
+(`Engine.plan_tier`), in the background as a merge of the delta is (the seed's 2.4 million rows in about 0.65 s here).
+A busy writer never starts it (the tier then waits for the delta's next merge, which takes it); a database of one run
+a level never does: it runs once after a load. After a merge that failed (a full disk) it waits for the delta's next
+`compact_min` changes, as those merges do, so that a full disk sees no merge every second. Leveling is the
+read-optimal end of the trade-off (Dayan and Idreos, Dostoevsky, SIGMOD 2018), and a writer with nothing to write has nothing to trade.
 
 **Memory.** A merge needs the cache, a few page buffers (at most 2 for each stream of a pass; 19 measured in the unit
 test, whose bound is 24) and 25 bytes for each 16 KiB of the new run's layout (3.1 % of the 10 M run, whose coded

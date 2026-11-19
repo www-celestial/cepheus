@@ -237,12 +237,27 @@ niveau : le lazy leveling de Dayan et Idreos, du tiering à un niveau et du leve
 qu'il n'y en aurait pas 16 (`Engine.tier`) côte à côte : alors le merge de ce groupe les prend tous, comme le ferait
 `Engine.plan`, en une seule passe à $k$ voies. Un chargement écrit alors chaque fait environ deux fois (le run de son
 groupe, le merge des runs côte à côte, puis `snapshot`), et les lectures pendant qu'il tourne visitent jusqu'à 16 runs
-de ce niveau ; un `snapshot` après un chargement les ramène à un. Les runs ne sont jamais plus de 16 plus un par
+de ce niveau ; une fois les écritures arrêtées, le writer les fusionne (plus bas), et un `snapshot` après un
+chargement ramène tout à un. Les runs ne sont jamais plus de 16 plus un par
 niveau, bien en dessous des 31 qu'un merge peut prendre (`Snapshot.max_take` : le passage par chose garde les sources
 d'une chose dans les bits d'un entier, deux par run). À 10 millions de faits en groupes de 5 000 clients (environ
 415 000 faits chacun) écrits par deux threads, chaque groupe est confirmé en 9,8 s au lieu de 18,2, et avec le
 snapshot qui suit, le chargement prend 13,0 s au lieu de 21,9
 ([benchmarks](benchmarks.md#les-chargements-par-morceaux-2026-11-12-à-10-millions-de-faits)).
+
+**Un writer au repos fusionne les runs côte à côte.** Le lazy leveling garde les écritures d'un chargement à environ
+deux par fait, mais ses lectures paient chaque run côte à côte tant qu'il n'y en a pas 16, ce qu'un chargement de
+quelques groupes n'atteint jamais : le seed de l'application de factures laissait 5 runs d'environ 480 000 lignes
+chacun, et chaque recherche dans l'index les visitait tous (sa page triée de factures prenait 120 µs en OCaml, 64 sur
+les mêmes faits en un seul run). Donc chaque seconde, l'horloge du serveur demande à chaque writer (`Engine.tidy`) :
+quand aucun groupe n'est venu depuis la seconde d'avant, qu'aucun merge ni changement des règles ne tourne, et qu'un
+niveau tient deux runs ou plus, le writer fusionne le delta et les runs les plus récents, jusqu'au dernier run de ce
+niveau, dans le premier niveau qui les contient (`Engine.plan_tier`), en arrière-plan comme un merge du delta (les
+2,4 millions de lignes du seed en environ 0,65 s ici). Un writer occupé ne le lance jamais (les runs côte à côte
+attendent alors le prochain merge du delta, qui les prend) ; une base d'un run par niveau non plus : il tourne une fois
+après un chargement. Après un merge qui a échoué (un disque plein), il attend les `compact_min` changements suivants du
+delta, comme ces merges-là, pour qu'un disque plein ne voie pas un merge par seconde. Le leveling est le bout du
+compromis le plus rapide pour les lectures (Dayan et Idreos, Dostoevsky, SIGMOD 2018), et un writer qui n'a rien à écrire n'a rien à échanger.
 
 **Mémoire.** Un merge a besoin du cache, de quelques buffers de page (des zones de mémoire de travail : au plus 2 pour
 chaque flux d'une passe ; 19 mesurés dans le test unitaire, dont la borne est 24) et de 25 octets pour chaque 16 KiB de
