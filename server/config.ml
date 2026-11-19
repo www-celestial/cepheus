@@ -80,10 +80,30 @@ let client_address c p =
     let h = if String.contains h ':' then "[" ^ h ^ "]" else h in
     Printf.sprintf "%s:%d" h c.port)
 
-(* the first address of a host for a TCP port *)
+(* the first address of a host for a TCP port: where a listener binds *)
 let resolve host port =
   match Unix.getaddrinfo host (string_of_int port) [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ] with
   | ai :: _ -> ai.Unix.ai_addr
+  | [] -> failwith (Printf.sprintf "%s does not resolve" host)
+
+(* A TCP connection to a host's port: each address of the host in getaddrinfo's order (RFC 6724) until one takes it,
+   since a server may listen on one of them only ("localhost" gives ::1 before 127.0.0.1 on most Linux systems, and a
+   server listening on 127.0.0.1 or 0.0.0.0 refuses ::1); the last one's error when none does. [setup fd] runs on each
+   socket before its connect (timeouts, options); a socket that does not connect is closed. *)
+let connect host port setup =
+  let rec go (ai : Unix.addr_info) rest =
+    let next e = match rest with ai :: rest -> go ai rest | [] -> raise e in
+    match Unix.socket ~cloexec:true ai.ai_family Unix.SOCK_STREAM 0 with
+    | exception (Unix.Unix_error _ as e) -> next e
+    | fd -> (
+      match setup fd; Unix.connect fd ai.ai_addr with
+      | () -> fd
+      | exception e ->
+        (try Unix.close fd with Unix.Unix_error _ -> ());
+        (match e with Unix.Unix_error _ -> next e | _ -> raise e))
+  in
+  match Unix.getaddrinfo host (string_of_int port) [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ] with
+  | ai :: rest -> go ai rest
   | [] -> failwith (Printf.sprintf "%s does not resolve" host)
 
 let default_domains () = max 1 (min 4 (Domain.recommended_domain_count () / 2))

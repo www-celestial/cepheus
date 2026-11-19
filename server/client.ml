@@ -69,17 +69,12 @@ let handshake_timeout = ref 5.0
 let set_timeouts fd t = Unix.setsockopt_float fd Unix.SO_RCVTIMEO t; Unix.setsockopt_float fd Unix.SO_SNDTIMEO t
 
 let open_socket address =
-  let fd, addr =
-    match address with
-    | Unix_socket p -> Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0, Unix.ADDR_UNIX p
-    | Tcp (h, p) ->
-      let addr = Config.resolve h p in
-      let fd = Unix.socket ~cloexec:true (Unix.domain_of_sockaddr addr) Unix.SOCK_STREAM 0 in
-      (try Unix.setsockopt fd Unix.TCP_NODELAY true with e -> Unix.close fd; raise e);
-      fd, addr
-  in
-  (try set_timeouts fd !handshake_timeout; Unix.connect fd addr with e -> Unix.close fd; raise e);
-  fd
+  match address with
+  | Unix_socket p ->
+    let fd = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+    (try set_timeouts fd !handshake_timeout; Unix.connect fd (Unix.ADDR_UNIX p) with e -> Unix.close fd; raise e);
+    fd
+  | Tcp (h, p) -> Config.connect h p (fun fd -> Unix.setsockopt fd Unix.TCP_NODELAY true; set_timeouts fd !handshake_timeout)
 
 let write_all = Fdpass.write_all
 

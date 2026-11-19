@@ -890,6 +890,46 @@ let request_ids () =
     check (not (List.mem 0 ids) && List.length (List.sort_uniq compare ids) = 4) "ids: no request takes id 0 when they wrap (%s)"
       (String.concat ", " (List.map string_of_int ids))
 
+(* ---- a TCP connection to a host: each of its addresses in turn ----
+   A listener on 127.0.0.1 alone: "localhost", which gives ::1 first on most Linux systems, still reaches it, and so do
+   the client and a replica's peer connection, which connect through Config.connect; a port where nothing listens is
+   refused with the last address's error, and no socket is left open by the addresses tried. *)
+
+let tcp_connect () =
+  let before = open_fds () in
+  let l = Unix.socket ~cloexec:true Unix.PF_INET Unix.SOCK_STREAM 0 in
+  Unix.setsockopt l Unix.SO_REUSEADDR true;
+  Unix.bind l (Unix.ADDR_INET (Unix.inet_addr_loopback, 0));
+  Unix.listen l 4;
+  let port = match Unix.getsockname l with Unix.ADDR_INET (_, p) -> p | _ -> assert false in
+  let addrs = List.map (fun (ai : Unix.addr_info) -> ai.ai_addr) (Unix.getaddrinfo "localhost" (string_of_int port) [ Unix.AI_SOCKTYPE Unix.SOCK_STREAM ]) in
+  let set = ref 0 in
+  (match Config.connect "localhost" port (fun _ -> incr set) with
+   | fd ->
+     check (!set >= 1 && !set <= List.length addrs) "connect: setup runs once an address tried (%d of %d)" !set (List.length addrs);
+     check (match Unix.getpeername fd with Unix.ADDR_INET (a, p) -> a = Unix.inet_addr_loopback && p = port | _ -> false)
+       "connect: localhost reaches a listener on 127.0.0.1 alone (%d addresses, the first %s)" (List.length addrs)
+       (match addrs with Unix.ADDR_INET (a, _) :: _ -> Unix.string_of_inet_addr a | _ -> "none");
+     Unix.close fd
+   | exception e -> check false "connect: localhost to a listener on 127.0.0.1 alone: %s" (Printexc.to_string e));
+  Unix.close l;
+  check (open_fds () = before) "connect: no socket left open by the addresses tried (%d, then %d)" before (open_fds ());
+  (* the port now free: every address refuses, the last one's error comes back, nothing is left open *)
+  (match Config.connect "localhost" port (fun _ -> ()) with
+   | fd -> Unix.close fd; check false "connect: a port where nothing listens"
+   | exception Unix.Unix_error (Unix.ECONNREFUSED, _, _) -> check true "connect: refused where nothing listens"
+   | exception e -> check false "connect: refused where nothing listens, not %s" (Printexc.to_string e));
+  check (open_fds () = before) "connect: no socket left open by a refused connect";
+  (* setup's own failure is no address's: it comes back at once, its socket closed *)
+  (match Config.connect "localhost" port (fun _ -> failwith "setup") with
+   | _ -> check false "connect: a failed setup"
+   | exception Failure m -> check (m = "setup" && open_fds () = before) "connect: a failed setup comes back, its socket closed"
+   | exception e -> check false "connect: a failed setup, not %s" (Printexc.to_string e));
+  match Config.connect "no-such-host.invalid" port (fun _ -> ()) with
+  | _ -> check false "connect: a host that does not resolve"
+  | exception Failure m -> check (m = "no-such-host.invalid does not resolve") "connect: %s" m
+  | exception e -> check false "connect: a host that does not resolve, not %s" (Printexc.to_string e)
+
 (* ---- protocol 2 beside protocol 1 ----
    A server speaks 1 and 2 and refuses the others; a program speaks 2, and with a server of protocol 1 only (here a
    small one of its own on a Unix socket, which refuses Hello 2 as such a server does, then welcomes Hello 1) it
@@ -1459,6 +1499,7 @@ let () =
   fdpass ();
   followed_rules ();
   request_ids ();
+  tcp_connect ();
   files ();
   files_wire ();
   (* last: its questions spawn domains, after which no test may fork *)

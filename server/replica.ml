@@ -602,10 +602,7 @@ let connect ?(timeout = !handshake_s) (cfg : Config.t) (p : Config.peer) =
     | Ok ctx -> (
       let host, port = Config.host_port "[[peer]] address" p.address in
       match
-        let addr = Config.resolve host port in
-        let fd = Unix.socket ~cloexec:true (Unix.domain_of_sockaddr addr) Unix.SOCK_STREAM 0 in
-        (try timeouts fd timeout; Unix.setsockopt fd Unix.TCP_NODELAY true; Unix.connect fd addr with e -> Unix.close fd; raise e);
-        fd
+        Config.connect host port (fun fd -> timeouts fd timeout; Unix.setsockopt fd Unix.TCP_NODELAY true)
       with
       | exception Unix.Unix_error (e, _, _) -> Error (Printf.sprintf "%s (%s): %s" p.pname p.address (Unix.error_message e))
       | exception Failure m -> Error m
