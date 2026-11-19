@@ -300,7 +300,7 @@ let commit w =
     if b.count > 0 then begin
       let tag = b.first + b.count - 1 in
       s.last <- b.after, tag;
-      if s.hub <> None then Queue.push (if b.runs <> [] then `Large (tag, b.after) else `Frame (tag, List.rev b.groups, b.after)) s.hq
+      if s.hub <> None then Queue.push (if b.runs <> [] then `Large (tag, b.after) else `Frame (tag, List.rev (Engine.whole b), b.after)) s.hq
     end;
     let res = Engine.commit s.e b in
     Follow.after s.follow;

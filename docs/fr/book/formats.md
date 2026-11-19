@@ -117,8 +117,10 @@ entiers de 63 bits du moteur, donc n'importe quelles valeurs reviennent exacteme
 petit et le plus grand int prend 63 bits par valeur).
 
 La frame d'un grand groupe est codée par la même fonction à partir des tableaux du groupe ; ses octets sont donc ceux
-qu'écrit `Group.encode` pour le même groupe. À 10 M de faits, le premier groupe du chargement (9,4 M de changements)
-prend 21,6 MB au format 2, contre 94,1 MB au format 1 ([benchmarks](benchmarks.md)).
+qu'écrit `Group.encode` pour le même groupe ; de même pour la frame d'un changement des règles dont les faits dérivés
+sont dans un run à eux, ces faits lus dans les colonnes du run
+([règles](rules.md#les-changements-des-règles-en-arrière-plan)). À 10 M de faits, le premier groupe du chargement (9,4 M
+de changements) prend 21,6 MB au format 2, contre 94,1 MB au format 1 ([benchmarks](benchmarks.md)).
 
 Le **format 1** codait les changements l'un après l'autre (`kind byte | thing varint | property varint | value`, la
 valeur comme un octet de tag puis son varint ou sa chaîne). Un journal au format 1 est **converti une seule fois à

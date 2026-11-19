@@ -9,7 +9,8 @@
 
 open Cepheus
 
-type item = Frame of int * Group.t list * Store.view | Large of int * Store.view | Durable of int | Quit
+(* a frame: its tag, its groups oldest first (made here, on the hubs' domain: Engine.whole), the state after them *)
+type item = Frame of int * (unit -> Group.t list) * Store.view | Large of int * Store.view | Durable of int | Quit
 
 type t = {
   m : Mutex.t;
@@ -62,7 +63,7 @@ let run t h () =
       (fun item ->
         match
           match item with
-          | Frame (tag, gs, v) -> Live.frame h ~tag gs v
+          | Frame (tag, gs, v) -> Live.frame h ~tag (gs ()) v
           | Large (tag, v) -> Live.reset h v ~tag
           | Durable g -> Live.durable h g
           | Quit -> go := false
@@ -88,7 +89,7 @@ let before t (b : Engine.batch) =
         let tag = b.first + b.count - 1 in
         t.last <- b.after;
         t.last_tag <- tag;
-        if t.hub <> None then push t (if b.runs <> [] then Large (tag, b.after) else Frame (tag, List.rev b.groups, b.after)))
+        if t.hub <> None then push t (if b.runs <> [] then Large (tag, b.after) else Frame (tag, (fun () -> List.rev (Engine.whole b)), b.after)))
 
 let after t = Mutex.protect t.m (fun () -> if t.hub <> None then push t (Durable (t.published ())))
 

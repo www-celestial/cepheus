@@ -49,11 +49,28 @@ type source = {
   texts : string array;  (** the group's texts, each once, in order of first use *)
 }
 
-val encode_source : Buffer.t -> n:int -> time:int -> by:int -> why:string -> first_new:int -> count_new:int -> source -> unit
+val encode_source :
+  ?parallel:(int -> (int -> unit) -> unit) -> Buffer.t -> n:int -> time:int -> by:int -> why:string -> first_new:int ->
+  count_new:int -> source -> unit
+(** [parallel k f] runs f 0 .. f (k - 1), each once, on several domains: a group of 65,536 changes or more codes
+    the parts of its four columns (kinds, things, columns, values) beside each other, the same bytes. *)
 
 val encode : Buffer.t -> t -> unit
 (** The journal's coding of a group (format 2, docs/book/formats.md): its header, its texts once each, then its changes
     in columns, in their order. *)
+
+val tag_of_typ : Value.typ -> int
+(** The tag of a type's values in the coding: {!Value.encode}'s byte (both booleans 2): 0 Int, 1 Float, 2 Bool, 4 Text,
+    5 Date, 6 Money, 7 Link. *)
+
+val encode_parts :
+  ?parallel:(int -> (int -> unit) -> unit) -> Buffer.t -> t -> n:int -> thing:(int -> int) -> prop:(int -> int) -> tag:(int -> int) -> word:(int -> int) ->
+  text:(int -> string) -> unit
+(** {!encode} of the group with [n] more changes after its records, read by index and never made records: each
+    Derived, change j of the thing [thing j], the property [prop j], whose values take the tag [tag p] ({!tag_of_typ}), and
+    the value word [word j] (Store's: the int of an Int, a Date, a Money or a Link, 0 or 1 for a Bool, a text's number
+    for a Text or a Float, whose text [text w] gives: a Float's 8 bytes). The same bytes as {!encode} of the group whose
+    records are all its changes. *)
 
 val decode : Codec.reader -> t
 (** Raises {!Codec.Short} on bytes that are not a group. *)

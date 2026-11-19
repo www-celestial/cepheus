@@ -288,6 +288,11 @@ unfolded on, so those relations are **frozen**:
   the rules as written check (the writer keeps such a rule as written). With that, a fact of a frozen relation
   changes only through a group that asserts it or derives or deletes it, which the writer sees.
 - `why` uses the rules as written: a proof names the generic rule, and its leaves include the ontology's facts.
+- The programs (the rules compiled, and unfolded) are kept by rule set, under a lock that every group with rules
+  takes for a moment. A new rule set's are made outside it (a change's 95 rules take 15 to 22 ms to compile and
+  unfold), so that the writer's groups, which take the old rules' program meanwhile, never wait for a change's. An
+  unfolded rule's variables keep the types the rule gives them (checked once a rule, not once a binding), unless a
+  property variable became a constant.
 
 ## Retraction: Backward/Forward
 
@@ -547,7 +552,10 @@ written meanwhile touches it (before that, its
 states are known: absent for the writer, derived for the change), and keeps it once there, even when its two states
 agree, since a fact of R missing from the table means "derived, as R says". The change's frame does not change: its
 asserted changes, the table's differences, then R's facts that the table does not hold, as derived. The journal holds
-every derived fact, as before, and its format is the same.
+every derived fact, as before, and its format is the same. The writer codes R's part of the frame straight from R's
+columns (`Group.encode_parts`), its columns and texts numbered as the coding of the whole group numbers them: the same
+bytes, with no record and no value made for each of R's facts, which took the writer about 25 ms for 135,000 of them.
+The watches, which need the frame's changes one by one, make R's records on their own domain (`Engine.whole`).
 
 R is **provisional**: its state is no group's (one change's derived facts, without the groups around them), so it is
 never named in the chain of runs, never forced to the disk, and its file (`<lo>-<hi>.run.change.tmp`, level 0 in its
@@ -580,14 +588,16 @@ whose property takes many values, none unique, not the system's, and not with eq
 same reads every fact), and on one domain: a round on several domains (below) makes its heads facts by regions of the
 working set, a sink's too, in parallel.
 
-**What it costs** ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-facts-no-rule-reads-made-facts-by-one-sort-2026-11-18)).
+**What it costs** ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-install-without-a-record-a-fact-2026-11-19)).
 On 10 LUBM-shaped universities with the 94 rules, while 256 clients write durably, adding one axiom (every person is
-also of a class the data leaves empty: about 135,000 derived facts, all of them a sink's) is installed in 0.31 s
-(median of 21; its build 0.053 s, its run of its own 0.025 s: 2.6 M derived facts a second for the build, 1.7 M with
-the run's write), and the writer's own part at the install is 36 ms. The clients' throughput while it runs is 0.50 of
-what it is without the change, 0.93 over the whole run from its start: the window is short now (0.2 to 0.3 s) and holds
-the install, the writer's part and the change's frame written and forced, 40 to 60 ms with no group confirmed; one
-stall in a window of under a second moves a pair's ratio a lot. The background shares the machine's four cores, its caches and its collector with the writer, and the delta grows meanwhile, since no
+also of a class the data leaves empty: about 135,000 derived facts, all of them a sink's) is installed in 0.22 s
+(median of 21; its build 0.048 s, its run of its own 0.025 s: 2.9 M derived facts a second for the build, 1.8 M with
+the run's write), and the writer's own part at the install is 10 ms (33 before its frame was coded from R's
+columns). The writers lose about 40 ms of their work in the change's window on the disk, whose fsync stalls of up to
+half a second still decide a pair's ratio; in a tmpfs folder, with no stall, 49 ms in a window of 0.58 s: 0.83 of
+their throughput without the change, paired, and 0.92 against the median window of a run without it. Over the run
+from its start, the change's own loss is under 1 %; the axiom itself makes every later student write derive one more
+fact, about 8 % more of the writer's work, which the disk hides behind its fsyncs. The background shares the machine's four cores, its caches and its collector with the writer, and the delta grows meanwhile, since no
 merge runs beside a change. Defining all 94
 rules over the same data without rules is the worst case: every group written meanwhile costs the new rules several
 times what it costs the old ones, the background cannot keep up at full load (about 110 µs a group against the
@@ -969,9 +979,10 @@ The design's plan has six steps; this version has the six.
   one domain.
 - **Step 5's rest**: a change with new things is computed in the group; only the derived facts of properties of many
   values, none unique, go into a change's run of its own (the others enter the delta); step 5's two targets are not
-  both reached: 2 M derived facts a second for the build, not with its run's write; the writers' throughput during a
-  change, whose window now mostly holds the install's frame
-  ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-facts-no-rule-reads-made-facts-by-one-sort-2026-11-18)).
+  both reached: 2 M derived facts a second for the build (2.9 M), not with its run's write (1.8 M: the run's write is a
+  third of it); the writers in a change's window, 0.83 of their throughput without it, paired, with no disk stall
+  (0.92 against the median window), the install's coding and its last catch-up the writer's part of it
+  ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-install-without-a-record-a-fact-2026-11-19)).
 - **Step 6's rest**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
   proof of an equality in `why`; equality beside `Not` and aggregates, the closure modules, the path of loads and the
   parallel rounds.

@@ -103,8 +103,9 @@ block ends at its last whole byte. Differences are taken modulo $2^{63}$, as the
 values come back exactly (a block that holds both the least and the greatest int takes 63 bits a value).
 
 A large group's frame is coded by the same function from the group's arrays, so its bytes are those `Group.encode`
-writes for the same group. At 10 M facts the load's first group (9.4 M changes) takes 21.6 MB in format 2, against
-94.1 MB in format 1 ([benchmarks](benchmarks.md)).
+writes for the same group; so is the frame of a change of the rules whose derived facts are in a run of their own,
+those facts read from the run's columns ([rules](rules.md#changes-of-the-rules-in-the-background)). At 10 M facts
+the load's first group (9.4 M changes) takes 21.6 MB in format 2, against 94.1 MB in format 1 ([benchmarks](benchmarks.md)).
 
 **Format 1** coded the changes one after the other (`kind byte | thing varint | property varint | value`, the value
 as a tag byte then its varint or string). A journal of format 1 is **converted once at open**, before anything reads

@@ -496,6 +496,87 @@ The two slow rounds through the socket did not repeat in the process, where the 
 timed: the longest wait for a merge switch was 413 ms on main and 447 ms on the branch, once each in 7 rounds, on a
 disk whose fsyncs vary that much from round to round.
 
+## Rules, step 5's targets again: a change's install without a record a fact (2026-11-19)
+
+The lever the measures below pointed at ([rules](rules.md#changes-of-the-rules-in-the-background)): at the install,
+each of the run's derived facts became a change record and a value, made by the writer, then coded for the frame
+(`Group.encode`: a hash lookup a change for its column), while no group was confirmed. Now the writer codes the frame
+straight from the run's columns (`Group.encode_parts`: the group's records, then the run's facts read by index), the
+same bytes, its four columns (kinds, things, columns, values) on several domains past 65,536 changes; the watches,
+which need the changes one by one, make the run's records on their own domain (`Engine.whole`). And what the profile
+showed next: the writer installs a ready change before its next batch (the batch stops at it, so that the install's
+last catch-up holds the groups of the background's last pass, not up to 256 more), and joins the change's domain
+after the install; the reasoner's programs of a new rule set are made outside the lock that every writer group takes
+for a moment (a change's 95 rules took 15 to 22 ms to compile and unfold under it, which the writer waited through);
+and the journal's column coder fills a block and finds its two ranges in one pass and packs fields of up to 31 bits by
+a running word (135,000 values: 0.92 to 0.69 ms constant, 1.28 to 1.03 ascending, 1.45 to 1.25 random; the same bytes,
+which a test checks against the format's plain coder).
+
+**Where the install went** (main a61dd80, one run each with timers, 5 runs on the disk): the groups logged since the
+change was ready caught up, 6 to 10 ms (102 to 224 groups); the run's facts made records, 9 to 11 ms; gathered into one
+array, 1.5 to 3; coded, 15 to 27: 35 to 48 ms, 2.0 to 2.8 M words allocated, 9 to 13 minor collections. **Where it goes
+now** (8 runs): the catch-up 0 groups in four runs and 90 to 188 (5 to 11 ms) in the four others, the groups that came
+during the background's last pass (its thresholds, 64 groups or 5 ms, unchanged: a tighter one could keep a loaded
+background from ever being ready); the records of the asserted part and the table, 0.3 to 1 ms; the coding, 6 to 14 ms
+(once 26) beside 256 writers (alone on a quiet machine, the install's shape: 4.3 ms on four domains, 5.8 ms on one; most of what
+is left is numbering the columns and texts in order of first use and sorting the values by column, on one domain);
+from the change ready to its install, 0 to 2 ms (up to 17 before). The frame itself is small (35 to 41 KB for 131,000
+to 144,000 facts: thing deltas, one column, one value), so its write and fsync are an ordinary frame's.
+
+**Method.** The same change as below, `CHANGE=one reason.exe change 10 256 8 2 with|without DIR`, 21 pairs (with,
+without) for main a61dd80 and this branch, alternated, in one hold of the heavy lock, each run in a 3 GB scope, twice:
+on the disk, and in a tmpfs folder (`/dev/shm`), where an fsync waits for nothing, so that no stall of the disk enters
+the measure and the writers are bound by the processor (about 13,000 groups a second against 9,000 to 11,000 on the
+disk). On the disk, the journal's fsync stalls for 0.1 to 0.5 s once or twice a run (btrfs at 99 % full, shared with
+other jobs' writes; the profiled runs logged every fsync over 100 ms), in runs with and without the change alike, which
+swung a pair's window ratio from 0.03 to 18 in the series below. So beside the paired ratio (the change's window with /
+the same window without), each window is set against the **median** of every window of the same length in the run
+without the change (from 1 s to 7.5 s, sliding by 10 ms), which a stall cannot move; the writer time lost is that
+median's groups less the window's, at its rate; the whole run is the median 250 ms window from the change's start, with
+/ without, and $1 - \text{lost} / \text{time}$, the window's loss over the 6 s that follow its start. A cell is the
+median over the pairs with its distribution-free 95 % interval ($[x(6), x(16)]$ of 21).
+
+| what (21 pairs) | main, disk | this branch, disk | main, tmpfs | this branch, tmpfs |
+|---|---:|---:|---:|---:|
+| the writer's part at the install | 33 ms [28, 38] | **10 ms** [8, 15] | 41 ms [37, 43] | **21 ms** [17, 24] |
+| the change, from `define` to its answer | 0.213 s [0.174, 0.246] | 0.221 s [0.160, 0.288] | 0.545 s [0.499, 0.649] | 0.581 s [0.527, 0.646] |
+| its build (about 135,000 derived facts) | 0.050 s [0.045, 0.056] | 0.048 s [0.043, 0.054] | 0.055 s [0.051, 0.059] | 0.056 s [0.050, 0.060] |
+| its run of its own | 0.026 s [0.023, 0.029] | 0.025 s [0.024, 0.027] | 0.031 s [0.029, 0.035] | 0.030 s [0.029, 0.033] |
+| derived facts a second, the build and the run | 1.82 M [1.64, 1.89] | 1.84 M [1.72, 1.90] | 1.77 M [1.72, 1.86] | 1.78 M [1.71, 1.88] |
+| the writers in the window, paired | 0.72 [0.49, 0.93] | 0.65 [0.25, 1.46] | 0.77 [0.75, 0.80] | **0.83** [0.81, 0.87] |
+| the writers in the window, against the median window | 0.67 [0.49, 0.83] | 0.75 [0.31, 1.05] | 0.84 [0.81, 0.87] | **0.92** [0.88, 0.94] |
+| the writer time lost in the window | 83 ms [37, 102] | 40 ms [-14, 109] | 97 ms [68, 119] | **49 ms** [35, 78] |
+| the whole run, paired | 0.89 [0.71, 1.15] | 0.87 [0.74, 1.02] | 0.92 [0.91, 0.93] | 0.91 [0.90, 0.93] |
+| the whole run, against the median window | 0.93 [0.72, 1.09] | 0.95 [0.82, 1.02] | 0.92 [0.91, 0.97] | 0.92 [0.91, 0.95] |
+| the whole run, $1 - \text{lost} / \text{time}$ | 0.986 [0.983, 0.994] | 0.993 [0.982, 1.002] | 0.984 [0.980, 0.989] | **0.992** [0.987, 0.994] |
+
+- **Reading it.** In tmpfs, with no stall (none of 250 ms in any window, against 3 to 5 on the disk), the intervals
+  are narrow: the writers lose half as much in the change's window as on main (49 ms against 97), its window ratio goes
+  from 0.77 to 0.83 paired. The ratio against the median window reads higher (0.92) because a run's throughput falls over
+  its 8 s as its delta grows (14,000 groups a second at first, 12,000 by the end), so the median of [1, 7.5] s is below
+  the rate at 2 s; with no stall, the paired ratio is the fair one. On the disk the stalls still decide a pair, but the
+  medians agree: 40 ms lost against 83. Over the whole run the two binaries are alike in tmpfs, 0.91 to 0.92: after the
+  change every student written derives one fact more under 95 rules instead of 94, about 8 % more of the writer's work
+  for every later group, which the disk's fsyncs hide (0.95 there); the change's own cost, the window's lost time over
+  the run, is under 1 % (0.992).
+- **Against the step's targets**: the writers in the change's window at 0.90 of a run without it: **0.92 against the
+  median window in tmpfs**, 0.83 paired (missed; main 0.84 and 0.77); over the whole run at 0.96: 0.992 for the change's
+  own loss, 0.91 to 0.95 with the work the new rule adds to every later write (missed: that part is the rule's, not
+  the install's); 2 M derived facts a second with the run's write: 1.84 M (missed: the build is 2.87 M a second, the
+  run's write of 135,000 facts takes 25 ms of the 73).
+- **The second lead** (the unfolding of the new rules, which checked the static types again for each binding): the
+  build moves by 2 ms at most (0.050 and 0.048 s, within the intervals): the types were not most of the unfolding
+  here; what is left of the programs' 15 to 22 ms is the unfolding's other work and its reachability checks.
+- **The same derived facts** (no writer, so that both runs are the same; each database then read whole by one
+  binary): the axiom over LUBM-10, 2,006,283 facts of which 651,629 derived, digest `3d3ea1921e042` on both sides; the
+  94 rules defined over LUBM-1 without rules, 210,869 facts of which 60,526 derived, `67123592f6fa` on both. With no
+  writer, the axiom's build is 0.022 s and its run 0.018 to 0.019 s on both sides (119,424 derived facts: 2.9 M a
+  second with the run's write), its install 21 ms on main and 6 ms here; the 94 rules' install 14 and 6 ms; `define 1`
+  (the 94 rules inline on a fork) 0.199 and 0.197 s.
+- **Start-up** (21 rounds of 100 runs, alternated, each binary in 7 copies taken in turn): `bench.exe` 2.575 ms on
+  main, 2.564 ms here (paired 1.001 [0.970, 1.005]); `cepheus` (`bin/main.exe`) 4.577 ms and 4.604 ms (paired 1.005
+  [0.993, 1.012]): no change measured (both intervals hold 1).
+
 ## Rules, step 5's targets again: a change's facts no rule reads, made facts by one sort (2026-11-18)
 
 The lever the measures below pointed at ([rules](rules.md#changes-of-the-rules-in-the-background)): a change keeps
