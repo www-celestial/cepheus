@@ -902,23 +902,25 @@ fois le groupe durable ([ce que coûte un changement](cesia.md#ce-que-cela-coût
 tirages, les index dont les pages ont besoin, des commits durables, comme par défaut ; un commit est la validation d'une
 transaction), les mêmes questions par `pgbench -M prepared` (l'outil de mesure de PostgreSQL ; son client C, en requêtes
 préparées, analysées une seule fois puis exécutées avec de nouvelles valeurs, une connexion, par son socket Unix) ; côté
-Cepheus, les fonctions de l'application elle-même, ses lectures dans sa propre mémoire. En µs, un client, 21 tours
-alternés (la médiane des p50 des tours avec son intervalle à 95 %, la médiane de leurs p99), le 2026-11-19 :
+Cepheus, les fonctions de l'application elle-même, ses lectures dans sa propre mémoire. En µs, un client, 101 tours
+alternés, en 5 lots chacun seul sous le lock (la médiane des p50 des tours avec son intervalle à 95 % sans hypothèse sur
+la distribution, ici $[x_{(41)}, x_{(61)}]$ des tours, 95,4 % ; la médiane de leurs p99 ; et le rapport des deux p50
+de chaque tour, sa médiane et son intervalle de la même façon), le 2026-11-19 :
 
-| question | Cepheus p50 | p99 | PostgreSQL p50 | p99 |
-|---|---:|---:|---:|---:|
-| une page de factures (20 lignes de 7 champs) | 115 [113 ; 120] | 241 | **42** [41 ; 44] | 74 |
-| une page à 50 000 de profondeur | 116 [115 ; 118] | 189 | **44** [44 ; 45] | 77 |
-| les factures par un préfixe du nom du destinataire | 535 [531 ; 545] | 741 | **158** [157 ; 162] | 223 |
-| les clients par nom | 88,0 [87,0 ; 88,9] | 141 | **37** [37 ; 39] | 66 |
-| les clients par un préfixe du nom ou de l'e-mail (`Or`) | **480** [477 ; 489] | 678 | 1 298 [1 297 ; 1 299] | 1 651 |
-| le total impayé (`Not`, `Sum`, `Count`) | **8 362** [8 283 ; 8 469] | 15 904 | 10 519 [10 344 ; 10 574] | 12 841 |
-| une facture et ses lignes | **24,1** [23,1 ; 24,1] | 44,1 | 48 [48 ; 50] | 82 |
-| une mise à jour durable d'une facture | **2 972** [2 710 ; 3 157] | 5 509 | 3 085 [2 950 ; 3 263] | 6 981 |
+| question | Cepheus p50 | p99 | PostgreSQL p50 | p99 | Cepheus / PostgreSQL |
+|---|---:|---:|---:|---:|---:|
+| une page de factures (20 lignes de 7 champs) | 115 [114 ; 116] | 223 | **42** [42 ; 42] | 76 | 2,71 [2,69 ; 2,76] |
+| une page à 50 000 de profondeur | 115 [115 ; 116] | 195 | **45** [44 ; 45] | 81 | 2,58 [2,55 ; 2,59] |
+| les factures par un préfixe du nom du destinataire | 540 [537 ; 545] | 738 | **161** [160 ; 161] | 230 | 3,35 [3,34 ; 3,38] |
+| les clients par nom | 88 [87 ; 88] | 136 | **36** [36 ; 37] | 72 | 2,41 [2,39 ; 2,44] |
+| les clients par un préfixe du nom ou de l'e-mail (`Or`) | **485** [483 ; 488] | 676 | 1 320 [1 312 ; 1 323] | 1 699 | 0,37 [0,36 ; 0,37] |
+| le total impayé (`Not`, `Sum`, `Count`) | **8 363** [8 291 ; 8 517] | 16 952 | 10 435 [10 410 ; 10 466] | 13 276 | 0,81 [0,80 ; 0,82] |
+| une facture et ses lignes | **23,1** [22,9 ; 23,1] | 43,2 | 49 [49 ; 50] | 84 | 0,47 [0,46 ; 0,47] |
+| une mise à jour durable d'une facture | **3 040** [2 989 ; 3 074] | 7 398 | 3 088 [3 012 ; 3 219] | 8 052 | 0,95 [0,92 ; 0,99] |
 
-Face au moteur de la veille, dans les mêmes tours : la page 180 µs, à 50 000 de profondeur 179, le préfixe 1 152, les
-clients 120, le `Or` 1 253, le total 13 721. Le chargement du seed laissait 5 runs côte à côte, et chaque lecture
-payait une recherche dans chacun ; le serveur les fusionne maintenant dès que son writer est au repos une seconde
+Face au moteur de la veille (21 tours alternés avec celui-ci, le même matin) : la page 180 µs, à 50 000 de profondeur
+179, le préfixe 1 152, les clients 120, le `Or` 1 253, le total 13 721. Le chargement du seed laissait 5 runs côte à
+côte, et chaque lecture payait une recherche dans chacun ; le serveur les fusionne maintenant dès que son writer est au repos une seconde
 ([merges](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)). La première fenêtre d'une page triée
 tient les faits de ses lignes au lieu de deux fois plus, et les champs d'une ligne sont lus après les filtres, une
 fois chacun.
@@ -933,20 +935,20 @@ Là où PostgreSQL gagne, et pourquoi :
   près autant, et le reste, ce sont les lignes fabriquées pour Cesia et le travail de Cesia lui-même : une seule
   question pour toute la page en prendrait environ la moitié (53 µs pour 7 patterns triés, contre 110 pour les deux).
 - **Un tri sur un texte** : 2,4 fois (3,2 la veille). La question triée seule prend 27 µs en OCaml ; l'essentiel des
-  51 µs qui les séparent, c'est l'autre question de la page (les e-mails de ses 20 clients, `In`) et les lignes
+  52 µs qui les séparent, c'est l'autre question de la page (les e-mails de ses 20 clients, `In`) et les lignes
   fabriquées pour Cesia.
 - **Un préfixe que l'ordre ne suit pas** (les factures adressées à « ad... », les plus grands numéros d'abord) : 3,4
   fois (7,4 la veille). Environ 4 factures sur 100 correspondent ; Cepheus parcourt les numéros dans l'ordre, une
   fenêtre à la fois, et demande le préfixe dans chacune : environ 2 100 candidats pour 20 lignes, 0,2 µs chacun, là
   où PostgreSQL lit les champs d'une ligne dans un seul tuple (la ligne telle que sa table la range).
 
-Là où Cepheus gagne : le total impayé, 1,26 fois plus vite (les faits des 100 000 factures lus dans un seul run au lieu
+Là où Cepheus gagne : le total impayé, 1,23 fois plus vite (les faits des 100 000 factures lus dans un seul run au lieu
 de cinq ; PostgreSQL parcourt sa table) ; une facture avec ses lignes est lue dans la mémoire même de l'application,
-sans round trip (24 µs contre 48) ; la recherche sur l'un de deux préfixes (`Or` de deux `Prefix`), 2,7 fois plus
-rapide que les deux `LIKE` de PostgreSQL (son parcours dans l'ordre des noms abandonne après 2 fenêtres, puis le heap
-répond) ; une écriture durable coûte la même chose (les deux attendent un seul fsync du disque). Et chaque nombre de la
-colonne PostgreSQL a encore besoin d'un programme autour, qui suivrait les changements (`LISTEN`/`NOTIFY`, écrit à la
-main), pour donner un tableau de bord en direct.
+sans round trip (23 µs contre 49) ; la recherche sur l'un de deux préfixes (`Or` de deux `Prefix`), 2,7 fois plus rapide
+que les deux `LIKE` de PostgreSQL (son parcours dans l'ordre des noms abandonne après 2 fenêtres, puis le heap répond) ;
+une écriture durable coûte presque la même chose, 0,95 du temps de PostgreSQL [0,92 ; 0,99] (les deux attendent un seul
+fsync du disque). Et chaque nombre de la colonne PostgreSQL a encore besoin d'un programme autour, qui suivrait les
+changements (`LISTEN`/`NOTIFY`, écrit à la main), pour donner un tableau de bord en direct.
 
 ## 15. Sécurité
 

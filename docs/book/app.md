@@ -815,23 +815,24 @@ the group while the server forced it to the disk, and gave it once durable ([wha
 **Beside the giants: the database's part alone.** The same seed in PostgreSQL 18.6 (`bench/giants/load.sql`: the same
 draws, the indexes the pages need, durable commits as by default), the same questions through `pgbench -M prepared`
 (its C client, one connection, through its Unix socket); on Cepheus, the app's own functions, its reads in its own
-memory. µs, one client, 21 rounds alternated (the median of the rounds' p50 with its 95 % interval, the median of
-their p99), 2026-11-19:
+memory. µs, one client, 101 rounds alternated, in 5 batches each under the lock alone (the median of the rounds' p50
+with its distribution-free 95 % interval, here $[x_{(41)}, x_{(61)}]$ of the rounds, 95.4 %; the median of their p99;
+and the ratio of the two p50 of each round, its median and interval the same way), 2026-11-19:
 
-| question | Cepheus p50 | p99 | PostgreSQL p50 | p99 |
-|---|---:|---:|---:|---:|
-| a page of invoices (20 rows of 7 fields) | 115 [113, 120] | 241 | **42** [41, 44] | 74 |
-| a page 50,000 deep | 116 [115, 118] | 189 | **44** [44, 45] | 77 |
-| invoices by a prefix of the bill-to name | 535 [531, 545] | 741 | **158** [157, 162] | 223 |
-| clients by name | 88.0 [87.0, 88.9] | 141 | **37** [37, 39] | 66 |
-| clients by a prefix of the name or of the e-mail (`Or`) | **480** [477, 489] | 678 | 1,298 [1,297, 1,299] | 1,651 |
-| the total not paid (`Not`, `Sum`, `Count`) | **8,362** [8,283, 8,469] | 15,904 | 10,519 [10,344, 10,574] | 12,841 |
-| an invoice and its lines | **24.1** [23.1, 24.1] | 44.1 | 48 [48, 50] | 82 |
-| a durable update of one invoice | **2,972** [2,710, 3,157] | 5,509 | 3,085 [2,950, 3,263] | 6,981 |
+| question | Cepheus p50 | p99 | PostgreSQL p50 | p99 | Cepheus / PostgreSQL |
+|---|---:|---:|---:|---:|---:|
+| a page of invoices (20 rows of 7 fields) | 115 [114, 116] | 223 | **42** [42, 42] | 76 | 2.71 [2.69, 2.76] |
+| a page 50,000 deep | 115 [115, 116] | 195 | **45** [44, 45] | 81 | 2.58 [2.55, 2.59] |
+| invoices by a prefix of the bill-to name | 540 [537, 545] | 738 | **161** [160, 161] | 230 | 3.35 [3.34, 3.38] |
+| clients by name | 88 [87, 88] | 136 | **36** [36, 37] | 72 | 2.41 [2.39, 2.44] |
+| clients by a prefix of the name or of the e-mail (`Or`) | **485** [483, 488] | 676 | 1,320 [1,312, 1,323] | 1,699 | 0.37 [0.36, 0.37] |
+| the total not paid (`Not`, `Sum`, `Count`) | **8,363** [8,291, 8,517] | 16,952 | 10,435 [10,410, 10,466] | 13,276 | 0.81 [0.80, 0.82] |
+| an invoice and its lines | **23.1** [22.9, 23.1] | 43.2 | 49 [49, 50] | 84 | 0.47 [0.46, 0.47] |
+| a durable update of one invoice | **3,040** [2,989, 3,074] | 7,398 | 3,088 [3,012, 3,219] | 8,052 | 0.95 [0.92, 0.99] |
 
-Against the engine of the day before, in the same rounds: the page 180 µs, 50,000 deep 179, the prefix 1,152, the
-clients 120, the `Or` 1,253, the total 13,721. The seed's load left 5 runs side by side and every read paid a lookup
-in each; the server now merges them once its writer is idle a second
+Against the engine of the day before (21 rounds alternated with this one, the same morning): the page 180 µs, 50,000
+deep 179, the prefix 1,152, the clients 120, the `Or` 1,253, the total 13,721. The seed's load left 5 runs side by
+side and every read paid a lookup in each; the server now merges them once its writer is idle a second
 ([merges](architecture.md#merges-a-leveled-log-structured-merge-tree)). A sorted page's first window holds its rows'
 facts instead of twice as many, and a row's fields are read after the filters, once each.
 
@@ -843,19 +844,20 @@ Where PostgreSQL wins, and why:
   sorted question takes 24 in OCaml, the fields of its 20 rows (a second question, `In`) about as much, and the rest
   is the rows made for Cesia and Cesia's own work: one question for the whole page would take about half (53 µs for
   7 patterns sorted, against 110 for the two).
-- **A sort on a text**: 2.4 times (3.2 the day before). The sorted question alone takes 27 µs in OCaml; most of the 51
+- **A sort on a text**: 2.4 times (3.2 the day before). The sorted question alone takes 27 µs in OCaml; most of the 52
   µs between them are the page's other question (the e-mails of its 20 clients, `In`) and the rows made for Cesia.
 - **A prefix that the order does not follow** (the invoices billed to "ad...", the largest numbers first): 3.4 times
   (7.4 the day before). About 4 in 100 invoices match; Cepheus walks the numbers in order, a window at a time, and
   asks the prefix in each: about 2,100 candidates for 20 rows, 0.2 µs each, where PostgreSQL reads a row's fields
   in one tuple.
 
-Where Cepheus wins: the total not paid, 1.26 times faster (100,000 invoices' facts read in one run instead of five;
-PostgreSQL scans its table); an invoice with its lines is read in the app's own memory with no round trip (24 µs
-against 48); the search on either of two prefixes (`Or` of two `Prefix`), 2.7 times faster than PostgreSQL's two
-`LIKE`s (its walk in the order of the names gives up after 2 windows, then the heap answers); a durable write costs
-the same (both wait for one fsync of the disk). And every number of the PostgreSQL column still needs a program around
-it that would watch the changes (`LISTEN`/`NOTIFY`, written by hand) to give a live dashboard.
+Where Cepheus wins: the total not paid, 1.23 times faster (100,000 invoices' facts read in one run instead of five;
+PostgreSQL scans its table); an invoice with its lines is read in the app's own memory with no round trip (23 µs against
+49); the search on either of two prefixes (`Or` of two `Prefix`), 2.7 times faster than PostgreSQL's two `LIKE`s (its
+walk in the order of the names gives up after 2 windows, then the heap answers); a durable write costs nearly the same,
+0.95 of PostgreSQL's time [0.92, 0.99] (both wait for one fsync of the disk). And every number of the PostgreSQL column
+still needs a program around it that would watch the changes (`LISTEN`/`NOTIFY`, written by hand) to give a live
+dashboard.
 
 ## 15. Security
 
