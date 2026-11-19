@@ -1087,8 +1087,108 @@ type dict = { chunks : chunks; dcount : int; smap : int SM.t; extra : string IM.
 type tdelta = { tf : int PW.t;  (* (property, value) -> entry *) tn : int IM.t  (* property -> net count *) }
 type vdelta = { vn : int; vm : int IM.t  (* thing -> entry *) }
 
+(* A property's delta by value: value words to their things, an AVL tree as Map's (persistent by path copying:
+   Adams 1993, Driscoll, Sarnak, Sleator and Tarjan 1989), each node also holding the sums over its subtree of the
+   net counts [vn] and of their additions (vn when positive): an order-statistic tree (Cormen, Leiserson, Rivest and
+   Stein, Introduction to Algorithms, chapter 14). So the facts of a range of values, and the value where a count of
+   additions from a value is reached, are found in O(log n), where Map's walk of the range took a step a value: the
+   reads of a day of sessions in the delta (the end of each, a value) walked every one of them. *)
+module VM = struct
+  type t = E | N of { l : t; k : int; d : vdelta; r : t; h : int; s : int; a : int }
+
+  let empty = E
+  let is_empty = function E -> true | N _ -> false
+  let[@inline] height = function E -> 0 | N n -> n.h
+  let[@inline] sum = function E -> 0 | N n -> n.s
+  let[@inline] adds = function E -> 0 | N n -> n.a
+  let[@inline] pos (d : vdelta) = if d.vn > 0 then d.vn else 0
+
+  let create l k (d : vdelta) r =
+    let hl = height l and hr = height r in
+    N { l; k; d; r; h = (if hl >= hr then hl + 1 else hr + 1); s = sum l + d.vn + sum r; a = adds l + pos d + adds r }
+
+  (* as Map's: the heights of the two sides differ by at most 2 *)
+  let[@inline never] bal l k d r =
+    let hl = height l and hr = height r in
+    if hl > hr + 2 then
+      match l with
+      | N { l = ll; k = lk; d = ld; r = lr; _ } ->
+        if height ll >= height lr then create ll lk ld (create lr k d r)
+        else (
+          match lr with
+          | N { l = lrl; k = lrk; d = lrd; r = lrr; _ } -> create (create ll lk ld lrl) lrk lrd (create lrr k d r)
+          | E -> invalid_arg "VM.bal")
+      | E -> invalid_arg "VM.bal"
+    else if hr > hl + 2 then
+      match r with
+      | N { l = rl; k = rk; d = rd; r = rr; _ } ->
+        if height rr >= height rl then create (create l k d rl) rk rd rr
+        else (
+          match rl with
+          | N { l = rll; k = rlk; d = rld; r = rlr; _ } -> create (create l k d rll) rlk rld (create rlr rk rd rr)
+          | E -> invalid_arg "VM.bal")
+      | E -> invalid_arg "VM.bal"
+    else create l k d r
+
+  let rec add k d = function
+    | E -> create E k d E
+    | N n -> if k = n.k then create n.l k d n.r else if k < n.k then bal (add k d n.l) n.k n.d n.r else bal n.l n.k n.d (add k d n.r)
+
+  let rec find_opt k = function E -> None | N n -> if k = n.k then Some n.d else find_opt k (if k < n.k then n.l else n.r)
+
+  let rec min_binding = function E -> raise Not_found | N { l = E; k; d; _ } -> (k, d) | N n -> min_binding n.l
+  let rec max_binding = function E -> raise Not_found | N { r = E; k; d; _ } -> (k, d) | N n -> max_binding n.r
+  let rec remove_min = function E -> invalid_arg "VM.remove_min" | N { l = E; r; _ } -> r | N n -> bal (remove_min n.l) n.k n.d n.r
+
+  let rec remove k = function
+    | E -> E
+    | N n ->
+      if k = n.k then (match n.l, n.r with E, t | t, E -> t | l, r -> let k', d' = min_binding r in bal l k' d' (remove_min r))
+      else if k < n.k then bal (remove k n.l) n.k n.d n.r
+      else bal n.l n.k n.d (remove k n.r)
+
+  let rec iter f = function E -> () | N n -> iter f n.l; f n.k n.d; iter f n.r
+  let rec fold f m acc = match m with E -> acc | N n -> fold f n.r (f n.k n.d (fold f n.l acc))
+
+  (* the bindings with lo <= key <= hi, in order *)
+  let rec iter_range lo hi f = function
+    | E -> ()
+    | N n ->
+      if n.k > lo then iter_range lo hi f n.l;
+      if n.k >= lo && n.k <= hi then f n.k n.d;
+      if n.k < hi then iter_range lo hi f n.r
+
+  (* the net counts of the keys >= lo, <= hi, and lo .. hi *)
+  let rec sum_from lo = function E -> 0 | N n -> if n.k < lo then sum_from lo n.r else sum_from lo n.l + n.d.vn + sum n.r
+  let rec sum_to hi = function E -> 0 | N n -> if n.k > hi then sum_to hi n.l else sum n.l + n.d.vn + sum_to hi n.r
+
+  let rec sum_range lo hi = function
+    | E -> 0
+    | N n ->
+      if n.k < lo then sum_range lo hi n.r
+      else if n.k > hi then sum_range lo hi n.l
+      else sum_from lo n.l + n.d.vn + sum_to hi n.r
+
+  (* the additions of the keys below w, above w *)
+  let rec adds_below w = function E -> 0 | N n -> if n.k < w then adds n.l + pos n.d + adds_below w n.r else adds_below w n.l
+  let rec adds_above w = function E -> 0 | N n -> if n.k > w then adds n.r + pos n.d + adds_above w n.l else adds_above w n.r
+
+  (* the least key whose additions from the least key up to it reach t (t >= 1); the greatest from the top down *)
+  let rec reach_up t = function
+    | E -> None
+    | N n -> let la = adds n.l in if la >= t then reach_up t n.l else (let h = la + pos n.d in if h >= t then Some n.k else reach_up (t - h) n.r)
+
+  let rec reach_down t = function
+    | E -> None
+    | N n -> let ra = adds n.r in if ra >= t then reach_down t n.r else (let h = ra + pos n.d in if h >= t then Some n.k else reach_down (t - h) n.l)
+
+  (* the least x >= w whose keys w .. x add m facts or more (m >= 1); with [desc], the greatest x <= w whose keys
+     x .. w do; None when there are fewer *)
+  let nth w m ~desc t = if desc then reach_down (adds_above w t + m) t else reach_up (adds_below w t + m) t
+end
+
 let[@inline] present st = st land 1 <> 0
-type pdelta = { pn : int; pk : int  (* values in pm *); pm : vdelta IM.t  (* value -> its things *) }
+type pdelta = { pn : int; pk : int  (* values in pm *); pm : VM.t  (* value -> its things *) }
 
 type delta = {
   de : tdelta IM.t;  (* by thing *)
@@ -1249,7 +1349,7 @@ let prefix_words v p pre =
       end)
     v.runs;
   (match IM.find_opt p v.delta.dav with
-   | Some pd -> IM.iter (fun w _ -> if starts (text v w) then out := w :: !out) pd.pm
+   | Some pd -> VM.iter (fun w _ -> if starts (text v w) then out := w :: !out) pd.pm
    | None -> ());
   Array.of_list (List.sort_uniq compare !out)
 
@@ -1266,7 +1366,7 @@ let text_order v p ~desc ~from =
     match IM.find_opt p v.delta.dav with
     | None -> [||]
     | Some pd ->
-      let ws = Array.of_list (IM.fold (fun w _ acc -> w :: acc) pd.pm []) in
+      let ws = Array.of_list (VM.fold (fun w _ acc -> w :: acc) pd.pm []) in
       let ts = Array.map (fun w -> text v w, w) ws in
       Array.sort (fun (a, _) (b, _) -> cmp a b) ts;
       Array.map snd ts
@@ -1510,7 +1610,7 @@ let iter_facts v e f =
     end
   end
 
-let delta_av v p w = match IM.find_opt p v.delta.dav with None -> None | Some pd -> IM.find_opt w pd.pm
+let delta_av v p w = match IM.find_opt p v.delta.dav with None -> None | Some pd -> VM.find_opt w pd.pm
 
 (* a row (e p w) of run j, older runs and the delta aside: shown? *)
 let[@inline] shown v j e p w = j = 0 || not (newer v (holders v e) j e p w)
@@ -1534,12 +1634,12 @@ let iter_prop v p f =
     for j = 0 to Array.length rs - 1 do
       base_iter_p rs.(j).a p (fun e w ->
           let in_delta = match pd with
-            | Some pd -> (match IM.find_opt w pd.pm with Some vd -> IM.mem e vd.vm | None -> false)
+            | Some pd -> (match VM.find_opt w pd.pm with Some vd -> IM.mem e vd.vm | None -> false)
             | None -> false
           in
           if (not in_delta) && shown v j e p w then f e w)
     done;
-    Option.iter (fun pd -> IM.iter (fun w vd -> IM.iter (fun e st -> if present st then f e w) vd.vm) pd.pm) pd
+    Option.iter (fun pd -> VM.iter (fun w vd -> IM.iter (fun e st -> if present st then f e w) vd.vm) pd.pm) pd
 
 (* the facts of p with lo <= value word <= hi (an order on values for the inline types) *)
 let iter_range v p lo hi f =
@@ -1550,20 +1650,14 @@ let iter_range v p lo hi f =
     for j = 0 to Array.length rs - 1 do
       base_iter_range rs.(j).a p lo hi (fun e w ->
           let in_delta = match pd with
-            | Some pd -> (match IM.find_opt w pd.pm with Some vd -> IM.mem e vd.vm | None -> false)
+            | Some pd -> (match VM.find_opt w pd.pm with Some vd -> IM.mem e vd.vm | None -> false)
             | None -> false
           in
           if (not in_delta) && shown v j e p w then f e w)
     done;
     match pd with
     | None -> ()
-    | Some pd ->
-      let rec go s =
-        match s () with
-        | Seq.Cons ((w, vd), s') when w <= hi -> IM.iter (fun e st -> if present st then f e w) vd.vm; go s'
-        | _ -> ()
-      in
-      if lo <= hi then go (IM.to_seq_from lo pd.pm)
+    | Some pd -> VM.iter_range lo hi (fun w vd -> IM.iter (fun e st -> if present st then f e w) vd.vm) pd.pm
 
 let mem v e p w =
   match thing_delta v e with
@@ -1719,17 +1813,15 @@ let count_prop v p =
   done;
   !n + match IM.find_opt p v.delta.dav with Some pd -> pd.pn | None -> 0
 
-(* the facts of p in a range: exact on the runs, and the delta's part walked over the range only *)
-let count_range v p lo hi =
+(* the facts of p in a range: exact on the runs, and the delta's part from its sums (VM), O(log n) *)
+let[@inline never] count_range v p lo hi =
   let rs = v.runs and n = ref 0 in
   for j = 0 to Array.length rs - 1 do
     n := !n + base_count_range rs.(j).a p lo hi - base_count_range rs.(j).t p lo hi
   done;
   (match IM.find_opt p v.delta.dav with
-   | None -> ()
-   | Some pd ->
-     let rec go s = match s () with Seq.Cons ((w, vd), s') when w <= hi -> n := !n + vd.vn; go s' | _ -> () in
-     if lo <= hi then go (IM.to_seq_from lo pd.pm));
+   | Some pd when lo <= hi -> n := !n + VM.sum_range lo hi pd.pm
+   | _ -> ());
   !n
 
 (* the values of p that the delta holds changes of *)
@@ -1740,7 +1832,7 @@ let delta_values v p = match IM.find_opt p v.delta.dav with Some pd -> pd.pk | N
    that value holds m facts of the source that gave it, less those newer runs retract, and at most m of each other
    source: a bound of the window of m facts, found in two lookups a run, that the search for that window starts
    from instead of the whole range of ints *)
-let nth_bound v p w m ~desc =
+let[@inline never] nth_bound v p w m ~desc =
   let best = ref None in
   let keep x = match !best with Some b when (if desc then x <= b else x >= b) -> () | _ -> best := Some x in
   if m > 0 then begin
@@ -1762,22 +1854,8 @@ let nth_bound v p w m ~desc =
     match IM.find_opt p v.delta.dav with
     | None -> ()
     | Some pd ->
-      (* the delta's additions of p, value after value from w *)
-      let k = ref 0 in
-      if desc then begin
-        let at = ref (Some w) in
-        while !at <> None do
-          match IM.find_last_opt (fun x -> x <= Option.get !at) pd.pm with
-          | None -> at := None
-          | Some (x, vd) ->
-            k := !k + max 0 vd.vn;
-            if !k >= m then (keep x; at := None) else at := if x = min_int then None else Some (x - 1)
-        done
-      end
-      else begin
-        let rec go s = match s () with Seq.Cons ((x, vd), s') -> k := !k + max 0 vd.vn; if !k >= m then keep x else go s' | Seq.Nil -> () in
-        go (IM.to_seq_from w pd.pm)
-      end
+      (* the delta's additions of p from w: the value where they reach m, from the sums of its tree (VM) *)
+      Option.iter keep (VM.nth w m ~desc pd.pm)
   end;
   !best
 
@@ -1806,15 +1884,15 @@ let[@inline never] change v e p w ~td ~old st =
       if k = 0 then IM.remove p td.tn else IM.add p k td.tn
   in
   let de = if PW.is_empty tf then IM.remove e d.de else IM.add e { tf; tn } d.de in
-  let pd = match IM.find_opt p d.dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = IM.empty } in
-  let vold = IM.find_opt w pd.pm in
+  let pd = match IM.find_opt p d.dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = VM.empty } in
+  let vold = VM.find_opt w pd.pm in
   let vd = match vold with Some vd -> vd | None -> { vn = 0; vm = IM.empty } in
   let vm = if st < 0 then IM.remove e vd.vm else IM.add e st vd.vm in
   let pm, pk =
-    if IM.is_empty vm then IM.remove w pd.pm, (if vold = None then pd.pk else pd.pk - 1)
-    else IM.add w { vn = vd.vn + diff; vm } pd.pm, if vold = None then pd.pk + 1 else pd.pk
+    if IM.is_empty vm then VM.remove w pd.pm, (if vold = None then pd.pk else pd.pk - 1)
+    else VM.add w { vn = vd.vn + diff; vm } pd.pm, if vold = None then pd.pk + 1 else pd.pk
   in
-  let dav = if IM.is_empty pm then IM.remove p d.dav else IM.add p { pn = pd.pn + diff; pk; pm } d.dav in
+  let dav = if VM.is_empty pm then IM.remove p d.dav else IM.add p { pn = pd.pn + diff; pk; pm } d.dav in
   { v with delta = { de; dav; dn = d.dn + 1; dnet = d.dnet + diff } }
 
 (* the entry for a state (0 absent, 1 asserted, 2 only derived) over a state of the runs; -1 when they agree *)
@@ -1918,11 +1996,11 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
     let k = ref 0 in
     while !k < m do
       let p = cp.(o.(!k)) in
-      let pd = match IM.find_opt p !dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = IM.empty } in
+      let pd = match IM.find_opt p !dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = VM.empty } in
       let pm = ref pd.pm and pk = ref pd.pk and pn = ref pd.pn in
       while !k < m && cp.(o.(!k)) = p do
         let w = cw.(o.(!k)) in
-        let vold = IM.find_opt w !pm in
+        let vold = VM.find_opt w !pm in
         let vd = match vold with Some vd -> vd | None -> { vn = 0; vm = IM.empty } in
         let vm = ref vd.vm and vn = ref vd.vn in
         (* the group's entries of (p, w), by thing: added at once when none is a removal *)
@@ -1945,10 +2023,10 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
           let ks = Array.init c (fun q -> ce.(o.(k0 + q))) and vs = Array.init c (fun q -> cst.(o.(k0 + q))) in
           vm := im_add_sorted ks vs c !vm
         end;
-        if IM.is_empty !vm then (pm := IM.remove w !pm; if vold <> None then decr pk)
-        else (pm := IM.add w { vn = !vn; vm = !vm } !pm; if vold = None then incr pk)
+        if IM.is_empty !vm then (pm := VM.remove w !pm; if vold <> None then decr pk)
+        else (pm := VM.add w { vn = !vn; vm = !vm } !pm; if vold = None then incr pk)
       done;
-      dav := (if IM.is_empty !pm then IM.remove p !dav else IM.add p { pn = !pn; pk = !pk; pm = !pm } !dav)
+      dav := (if VM.is_empty !pm then IM.remove p !dav else IM.add p { pn = !pn; pk = !pk; pm = !pm } !dav)
     done;
     { !v with delta = { de = !de; dav = !dav; dn = !dn; dnet = !dnet } }
   end
@@ -1989,7 +2067,7 @@ type stamp = No_entry | Of_p of pdelta | Of_pw of vdelta
 let stamp v p w =
   match IM.find_opt p v.delta.dav with
   | None -> No_entry
-  | Some pd -> if w < 0 then Of_p pd else (match IM.find_opt w pd.pm with None -> No_entry | Some vd -> Of_pw vd)
+  | Some pd -> if w < 0 then Of_p pd else (match VM.find_opt w pd.pm with None -> No_entry | Some vd -> Of_pw vd)
 
 let same_stamp a b =
   match a, b with

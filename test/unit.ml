@@ -1542,4 +1542,42 @@ let () =
   Engine.compact_min := cmin;
   Engine.tier := tier
 
+let () =
+  section "the delta's map by value (Store.VM): its sums and the value where a count is reached, against a list";
+  (* random adds and removes of values with net counts of -2 to 3, from fixed seeds; after each, every query on a
+     few ranges and starts against the sorted list of bindings: the range's net count, the m-th addition from a value
+     up and down, the bindings of a range, the order of a fold, and the tree's balance *)
+  for seed = 1 to 40 do
+    let r = Rng.make seed in
+    let m = ref Store.VM.empty and model = ref [] in
+    let rec height = function Store.VM.E -> 0 | N n -> 1 + max (height n.l) (height n.r) in
+    let rec balanced = function Store.VM.E -> true | N n -> abs (height n.l - height n.r) <= 2 && balanced n.l && balanced n.r in
+    for step = 1 to 300 do
+      let k = Rng.int r 200 - 100 in
+      if Rng.chance r 0.3 then (m := Store.VM.remove k !m; model := List.remove_assoc k !model)
+      else begin
+        let vn = Rng.int r 6 - 2 in
+        let d = { Store.vn; vm = Store.IM.singleton step 1 } in
+        m := Store.VM.add k d !m;
+        model := (k, vn) :: List.remove_assoc k !model
+      end;
+      let sorted = List.sort compare !model in
+      let lo = Rng.int r 240 - 120 and len = Rng.int r 120 in
+      let hi = lo + len in
+      let want = List.fold_left (fun n (k, vn) -> if k >= lo && k <= hi then n + vn else n) 0 sorted in
+      C.check (Store.VM.sum_range lo hi !m = want) "seed %d step %d: sum of [%d, %d] %d, not %d" seed step lo hi (Store.VM.sum_range lo hi !m) want;
+      let want_r = List.filter (fun (k, _) -> k >= lo && k <= hi) sorted in
+      let got_r = ref [] in
+      Store.VM.iter_range lo hi (fun k (d : Store.vdelta) -> got_r := (k, d.vn) :: !got_r) !m;
+      C.check (List.rev !got_r = want_r) "seed %d step %d: the bindings of [%d, %d]" seed step lo hi;
+      let cnt = 1 + Rng.int r 8 in
+      let up = let rec go a = function [] -> None | (k, vn) :: t -> let a = a + max 0 vn in if k >= lo && a >= cnt then Some k else go (if k >= lo then a else 0) t in go 0 sorted in
+      let down = let rec go a = function [] -> None | (k, vn) :: t -> let a = a + max 0 vn in if k <= lo && a >= cnt then Some k else go (if k <= lo then a else 0) t in go 0 (List.rev sorted) in
+      C.check (Store.VM.nth lo cnt ~desc:false !m = up) "seed %d step %d: the %d-th addition from %d up" seed step cnt lo;
+      C.check (Store.VM.nth lo cnt ~desc:true !m = down) "seed %d step %d: the %d-th addition from %d down" seed step cnt lo;
+      C.check (List.rev (Store.VM.fold (fun k (d : Store.vdelta) acc -> (k, d.vn) :: acc) !m []) = sorted) "seed %d step %d: the fold's order" seed step;
+      C.check (balanced !m && (match sorted with [] -> Store.VM.is_empty !m | _ -> fst (Store.VM.min_binding !m) = fst (List.hd sorted))) "seed %d step %d: balance and least key" seed step
+    done
+  done
+
 let () = C.finish "unit"

@@ -948,9 +948,9 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
   Array.iter (fun (r : Store.run) -> of_part ba np r.a; of_part bt np r.t) src;
   Store.IM.iter
     (fun p (pd : Store.pdelta) ->
-      if p < np && not (Store.IM.is_empty pd.pm) then begin
-        let n = Store.IM.fold (fun _ (vd : Store.vdelta) n -> n + Store.IM.cardinal vd.vm) pd.pm 0 in
-        let lo = fst (Store.IM.min_binding pd.pm) and hi = fst (Store.IM.max_binding pd.pm) in
+      if p < np && not (Store.VM.is_empty pd.pm) then begin
+        let n = Store.VM.fold (fun _ (vd : Store.vdelta) n -> n + Store.IM.cardinal vd.vm) pd.pm 0 in
+        let lo = fst (Store.VM.min_binding pd.pm) and hi = fst (Store.VM.max_binding pd.pm) in
         widen ba p lo hi n;
         widen bt p lo hi n
       end)
@@ -1130,7 +1130,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
         | None -> [||]
         | Some pd ->
           let l = ref [] in
-          Store.IM.iter (fun w (vd : Store.vdelta) -> Store.IM.iter (fun e st -> l := (w, e, st) :: !l) vd.vm) pd.pm;
+          Store.VM.iter (fun w (vd : Store.vdelta) -> Store.IM.iter (fun e st -> l := (w, e, st) :: !l) vd.vm) pd.pm;
           Array.of_list (List.rev !l)
       in
       if Array.length dl = 0 && nlive = 0 && !bp < bq then
