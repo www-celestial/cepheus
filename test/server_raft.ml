@@ -100,8 +100,13 @@ let () =
     let ls = List.filter (fun k -> alive.(k) && stat k "raft.role" = "leader") [ 0; 1; 2 ] in
     match ls with [ k ] -> Some k | _ -> None
   in
-  wait_for "a leader" (fun () -> leader () <> None);
-  let l0 = Option.get (leader ()) in
+  (* the leader of the probe that saw it: a second probe could see none, between two terms *)
+  let await_leader ?(ok = fun _ -> true) what =
+    let got = ref None in
+    wait_for what (fun () -> got := (match leader () with Some k when ok k -> Some k | _ -> None); !got <> None);
+    Option.get !got
+  in
+  let l0 = await_leader "a leader" in
   C.check true "the three elected %s (term %s)" (List.nth names l0) (stat l0 "raft.term");
   (* a program connected to a follower is sent to the leader *)
   let follower = (l0 + 1) mod 3 in
@@ -197,7 +202,7 @@ let () =
     exit 0
   end;
   (* the leader killed while the program writes *)
-  let killed_at = ref 0. and first_after = ref 0. in
+  let killed_at = ref 0. and first_after = ref 0. and n_before = !n in
   let writer =
     Thread.create
       (fun () ->
@@ -212,13 +217,15 @@ let () =
         done)
       ()
   in
-  Thread.delay 0.3;
+  (* the kill comes after the writer's first 50 writes, not after a delay: on a disk in memory 400 writes can end
+     before any delay, and the failover would see no write *)
+  wait_for "the writer's first writes" (fun () -> !n - n_before >= 50);
   killed_at := Unix.gettimeofday ();
   Unix.kill pids.(l0) Sys.sigkill;
   ignore (Serve.wait pids.(l0));
   alive.(l0) <- false;
   Thread.join writer;
-  let l1 = Option.get (leader ()) in
+  let l1 = await_leader "a new leader" in
   C.check (l1 <> l0) "a new leader: %s (term %s)" (List.nth names l1) (stat l1 "raft.term");
   if !first_after > 0. then begin
     let ms = (!first_after -. !killed_at) *. 1000. in
@@ -319,7 +326,7 @@ let () =
   let nk = rows sk in
   C.check (nk >= load && rows sk2 = nk) "the rule's consequences on the leader: %d of %d" (rows sk2) nk;
   (* a load past one Raft entry: refused whole, on every server *)
-  let side_before = group (Option.get (leader ())) "side" in
+  let side_before = group (await_leader "a leader") "side" in
   let text i = Printf.sprintf "%08d-%s" i (Digest.to_hex (Digest.string (string_of_int i))) in
   (match Client.write w sdb2 (List.init 260_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text i)))) with
    | Error { code = "invalid"; message } ->
@@ -328,17 +335,20 @@ let () =
        "a load past 8 MiB in a cluster: refused (%s)" message
    | Error e -> C.check false "a load past 8 MiB: %s %s" e.code e.message
    | Ok _ -> C.check false "a load past 8 MiB was taken by a cluster");
-  let same () = List.for_all (fun db -> let g = group (Option.get (leader ())) db in List.for_all (fun k -> not alive.(k) || group k db = g) [ 0; 1; 2 ]) [ "main"; "side" ] in
+  let same () =
+    match leader () with
+    | None -> false
+    | Some l -> List.for_all (fun db -> let g = group l db in List.for_all (fun k -> not alive.(k) || group k db = g) [ 0; 1; 2 ]) [ "main"; "side" ]
+  in
   wait_for "every server holds the leader's groups" same;
-  let lk = Option.get (leader ()) in
+  let lk = await_leader "a leader" in
   C.check (group lk "side" = side_before) "nothing of the refused load on any server (side at %d)" side_before;
   (* the leader killed: the new one holds the load, the change and its consequences, the counter *)
   let side_g = group lk "side" in
   Unix.kill pids.(lk) Sys.sigkill;
   ignore (Serve.wait pids.(lk));
   alive.(lk) <- false;
-  wait_for "a new leader" (fun () -> match leader () with Some k -> k <> lk && stat k "raft.ready" = "true" | None -> false);
-  let ln = Option.get (leader ()) in
+  let ln = await_leader ~ok:(fun k -> k <> lk && stat k "raft.ready" = "true") "a new leader" in
   C.check (group ln "side" >= side_g) "the new leader %s holds side's groups (%d)" (List.nth names ln) side_g;
   C.check (rows sk = nk && rows sk2 = nk) "on the new leader: the load and the rule's consequences (%d)" nk;
   (match Client.get w sdb2 counter with
