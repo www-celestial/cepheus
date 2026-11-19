@@ -16,10 +16,11 @@
    - the index path, when the first key is a column of an int, a date, money, a link or a text that a pattern gives
      as its value (a bool has two values: nothing to gain): the question asked again on windows of that column's
      values, read off the property's index from the cursor on (a text's in the order of its bytes, which each run
-     keeps: Store.text_order), each window holding twice as many facts as the one before, until k rows are found.
-     Its budget is half the planner's estimate of the heap path, in facts walked (a fact walked costs about twice a
-     candidate of the heap): past it, the heap path answers, so the index path never costs more than about twice the
-     heap path (the break-even rule of Karlin, Manasse, Rudolph and Sleator 1988). *)
+     keeps: Store.text_order), the first window of k facts, each next one at least twice the one before, until k rows
+     are found. Its budget is half the planner's estimate of the heap path, in facts walked (a fact walked costs about
+     twice a candidate of the heap): past it, the heap path answers, so the index path never costs more than about
+     twice the heap path (the break-even rule of Karlin, Manasse, Rudolph and Sleator 1988); and it gives up sooner
+     when its yield so far says the page cannot be filled within the budget (rows that lie far in the order). *)
 
 type key = { col : int; desc : bool }
 
@@ -106,14 +107,38 @@ type acc = { mutable a : int array array; mutable n : int }
 
 let fresh () = { a = [||]; n = 0 }
 
-let sort_cut cmp cap t =
+(* The comparator of one sort, made by [mk ()]: the rows in [ord]; when a key is a text, each text is read once a sort,
+   into a table of the sort's own (a sort of n rows compares a row's texts about log n times, each a read of a run's
+   pages: the clients sorted by name, then by city for the clients of one name), so that the heap path's domains,
+   each sorting its own buffer, share none *)
+let sorter v (typs : Value.typ array) (ord : key array) =
+  if not (Array.exists (fun k -> typs.(k.col) = Value.Ttext) ord) then (let c = compare_rows v typs ord in fun () -> c)
+  else fun () ->
+    let memo = Hashtbl.create 64 in
+    let text w = match Hashtbl.find_opt memo w with Some s -> s | None -> let s = Store.text v w in Hashtbl.add memo w s; s in
+    fun (a : int array) (b : int array) ->
+      let c = ref 0 and i = ref 0 in
+      while !c = 0 && !i < Array.length ord do
+        let k = ord.(!i) in
+        let x = a.(k.col) and y = b.(k.col) in
+        let r =
+          if x = y then 0
+          else match typs.(k.col) with Ttext -> String.compare (text x) (text y) | Tfloat -> total_order (float_of_word v x) (float_of_word v y) | _ -> compare x y
+        in
+        c := if k.desc then -r else r;
+        incr i
+      done;
+      !c
+
+let sort_cut mk cap t =
+  let cmp = mk () in
   let s = Array.sub t.a 0 t.n in
   Array.stable_sort cmp s;
   let n = if cap > 0 && t.n > cap then (let m = ref cap in while !m < t.n && cmp s.(cap - 1) s.(!m) = 0 do incr m done; !m) else t.n in
   t.a <- s;
   t.n <- n
 
-let push cmp cap t row =
+let push mk cap t row =
   if t.n = Array.length t.a then begin
     let a = Array.make (max 64 (2 * t.n)) [||] in
     Array.blit t.a 0 a 0 t.n;
@@ -121,10 +146,10 @@ let push cmp cap t row =
   end;
   t.a.(t.n) <- row;
   t.n <- t.n + 1;
-  if cap > 0 && t.n >= max 64 (2 * cap) then sort_cut cmp cap t
+  if cap > 0 && t.n >= max 64 (2 * cap) then sort_cut mk cap t
 
-let append cmp cap a b =
-  for i = 0 to b.n - 1 do push cmp cap a b.a.(i) done;
+let append mk cap a b =
+  for i = 0 to b.n - 1 do push mk cap a b.a.(i) done;
   a
 
 (* ---- the answer ---- *)
@@ -145,6 +170,17 @@ type source = {
 }
 
 exception Enough
+
+(* The 99 % upper bound of the mean of a Poisson count of x (one-sided): the most hopeful yield of a walk that found
+   x rows. Exact, it is half the chi-square quantile of 2x + 2 degrees (Garwood 1936); here by the cube-root
+   approximation of Wilson and Hilferty 1931 (Byar's formula, in Breslow and Day 1987), within 0.2 % of the exact bound
+   for x from 0 to 199 (4.61 for x = 0, the exact -ln 0.01 = 4.605). A walk given up on it when it would have filled
+   the page within its budget needs a yield above that bound: under 1 in 100 at each window for rows spread evenly
+   in the order. *)
+let poisson_upper x =
+  let n = float_of_int (x + 1) in
+  let t = 1. -. (1. /. (9. *. n)) +. (2.326 /. (3. *. sqrt n)) in
+  n *. t *. t *. t
 
 let check cols (typs : Value.typ array) o =
   List.iter (fun k -> if k.col < 0 || k.col >= cols then bad "Sort: column %d out of range" k.col) o.keys;
@@ -182,7 +218,7 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
   end
   else begin
     let ord = full cols o.keys in
-    let cmp = compare_rows v typs ord in
+    let mk = sorter v typs ord in
     let keep =
       match o.after with
       | None -> fun _ -> true
@@ -193,10 +229,10 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
     let cap = o.limit in
     let heap range =
       let acc =
-        src.fold range ~seq:false ~init:fresh ~merge:(append cmp cap)
-          ~step:(fun t env -> let r = src.project env in if keep r then push cmp cap t r; t)
+        src.fold range ~seq:false ~init:fresh ~merge:(append mk cap)
+          ~step:(fun t env -> let r = src.project env in if keep r then push mk cap t r; t)
       in
-      sort_cut cmp cap acc;
+      sort_cut mk cap acc;
       acc
     in
     let first = List.hd o.keys in
@@ -213,10 +249,13 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
        and every row of a later window comes after every row of an earlier one, so k rows found end the walk. The walk
        reads at most half the heap's estimate in facts, its last window cut to what is left: a fact walked costs about
        twice a candidate of the heap (0.41 to 0.55 us against 0.28 on the invoices app's clients), so the walk given
-       up costs about the heap's own time, and the whole about twice the heap's at worst *)
+       up costs about the heap's own time, and the whole about twice the heap's at worst. The first window holds k
+       facts (the page's rows when each fact gives one: a list without a filter reads its page and no more); each next
+       one twice the one before, or more when the yield so far says the page needs more: the facts the missing rows
+       need at the most hopeful yield (the Poisson bound below), which it needs with a probability of 99 % or more *)
     let windowed next =
       let budget = Lazy.force estimate /. 2. in
-      let got = fresh () and spent = ref 0 and m = ref (2 * cap) and over = ref false and found = ref None in
+      let got = fresh () and spent = ref 0 and m = ref cap and over = ref false and found = ref None in
       while !found = None && not !over do
         let win, facts, last = next !m in
         Atomic.incr windows;
@@ -224,14 +263,19 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
         (match win with
          | Some win ->
            let w = heap (Some win) in
-           for i = 0 to w.n - 1 do push cmp cap got w.a.(i) done;
-           sort_cut cmp cap got
+           for i = 0 to w.n - 1 do push mk cap got w.a.(i) done;
+           sort_cut mk cap got
          | None -> ());
         if got.n >= cap || last then found := Some got
         else begin
           let left = budget -. float_of_int !spent in
+          (* the page's rows still missing, at the most hopeful yield the walk so far allows: the walk is given up
+             when even they need more facts than the budget has left (rows that come late in the order) *)
+          let need = float_of_int (cap - got.n) *. float_of_int !spent /. poisson_upper got.n in
           (* an estimate past the ints (a cross product's) cuts nothing: int_of_float would give 0 there *)
-          if left <= 0. then over := true else m := max 1 (min (2 * !m) (if left >= 1e18 then max_int else int_of_float left))
+          let int f = if f >= 1e18 then max_int else int_of_float (Float.ceil f) in
+          if left <= 0. || need > left then over := true
+          else m := max 1 (min (max (2 * !m) (int need)) (int left))
         end
       done;
       match !found with Some g -> g | None -> Atomic.incr gave_up; heap None
@@ -334,7 +378,6 @@ let sort_rows (v : Store.view) ~(typs : Value.typ array) (o : order) (rows : int
   if o.keys = [] then (if o.limit > 0 && Array.length rows > o.limit then Array.sub rows 0 o.limit else rows)
   else begin
     let ord = full cols o.keys in
-    let cmp = compare_rows v typs ord in
     let rows =
       match o.after with
       | None -> rows
@@ -343,6 +386,6 @@ let sort_rows (v : Store.view) ~(typs : Value.typ array) (o : order) (rows : int
         Array.of_list (List.filter (fun r -> compare_cursor v typs ord r cur > 0) (Array.to_list rows))
     in
     let t = { a = Array.copy rows; n = Array.length rows } in
-    sort_cut cmp o.limit t;
+    sort_cut (sorter v typs ord) o.limit t;
     Array.sub t.a 0 t.n
   end
