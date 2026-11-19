@@ -131,6 +131,9 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
   (* each pattern's offers: to x, (y, kn, un) the count when the variable y on its other side is bound, and when it
      is not; a word on the other side (or x itself) gives its count to [base] *)
   let offers = Array.make nvars [] and npat = Array.make nvars 0 and parent = Array.make nvars (-1) in
+  (* a variable given as the one value of a thing: its property's distinct values, and the share of its facts in its
+     range (1. without one), for the placement of the leaves below *)
+  let ldist = Array.make nvars 1 and lrange = Array.make nvars 1. in
   let offer x y k u = if y < 0 then (if k < base.(x) then base.(x) <- k) else offers.(x) <- (y, k, u) :: offers.(x) in
   List.iter
     (fun pt ->
@@ -144,15 +147,16 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
         (match pe, pv with
          | W e, V y -> npat.(y) <- npat.(y) + 1; offer y (-1) (Store.count_values v e pt.pp) 0
          | V x, V y ->
-           let un =
+           let d = Store.distinct v pt.pp in
+           let un, r =
              match iv.(y) with
-             | None -> Store.distinct v pt.pp
+             | None -> d, 1.
              | Some (lo, hi) ->
-               let all = max 1 (Store.count_prop v pt.pp) in
-               max 1 (Store.count_range v pt.pp lo hi * Store.distinct v pt.pp / all)
+               let all = max 1 (Store.count_prop v pt.pp) and n = Store.count_range v pt.pp lo hi in
+               max 1 (n * d / all), Float.min 1. (float_of_int (max 0 n) /. float_of_int all)
            in
            npat.(y) <- npat.(y) + 1;
-           if not pt.many then parent.(y) <- x;
+           if not pt.many then (parent.(y) <- x; ldist.(y) <- max 1 d; lrange.(y) <- r);
            offer y x (if pt.many then 4 else 1) un
          | _, W _ -> ()))
     pats;
@@ -246,8 +250,38 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
       csize.(i) <- !size
     done
   end;
-  (* the whole order: the first, then the core, each variable followed by its leaves; a variable placed first costs 1,
-     a leaf the partial bindings of its thing's step *)
+  (* Where a leaf goes: after its thing's step, or later, after a filter that keeps fewer bindings (the leaf's lookup
+     is then made for fewer of them): Hellerstein and Stonebraker 1993's placement of predicates, a cheap selective
+     test before a projection that filters nothing. A filter here is a core variable whose only pattern gives it as
+     the one value of a thing bound before it, with an In, a Prefix or a range: the share of the property's facts it
+     keeps is estimated as Selinger et al. 1979 do, the set's words over the property's distinct values, the range's
+     facts over all. After each step of the core, the bindings kept: its partial bindings times the shares of the
+     filters so far; a leaf goes after the step of its thing, or the first later step that keeps the fewest (the
+     same step when no filter follows: the order of a question without filters is unchanged). The estimate [cost]
+     stays that of the join without the filters' shares, as before. *)
+  let at = Array.make nvars (-1) in
+  Array.iteri (fun i x -> at.(x) <- i) cord;
+  let kept = Array.make c 1. in
+  let share = ref 1. in
+  Array.iteri
+    (fun i y ->
+      if npat.(y) = 1 && parent.(y) >= 0 && at.(parent.(y)) >= 0 && at.(parent.(y)) < i && (has_set.(y) || iv.(y) <> None) then begin
+        let s = if has_set.(y) && base.(y) < max_int then Float.min 1. (float_of_int base.(y) /. float_of_int ldist.(y)) else 1. in
+        share := !share *. s *. lrange.(y)
+      end;
+      kept.(i) <- csize.(i) *. !share)
+    cord;
+  let place = Array.make nvars (-1) in
+  for y = 0 to nvars - 1 do
+    if leaf.(y) then begin
+      let i0 = at.(parent.(y)) in
+      let b = ref i0 in
+      for i = i0 + 1 to c - 1 do if kept.(i) < kept.(!b) then b := i done;
+      place.(y) <- !b
+    end
+  done;
+  (* the whole order: the first, then the core, each step followed by the leaves placed there; a variable placed first
+     costs 1, a leaf the partial bindings of its thing's step *)
   let ord = Array.make nvars 0 and n = ref 0 and cost = ref !ccost in
   for x = 0 to nvars - 1 do
     if first.(x) then (ord.(!n) <- x; incr n; cost := !cost +. 1.)
@@ -257,7 +291,7 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
       ord.(!n) <- x;
       incr n;
       for y = 0 to nvars - 1 do
-        if leaf.(y) && parent.(y) = x then (ord.(!n) <- y; incr n; cost := !cost +. csize.(i))
+        if leaf.(y) && place.(y) = i then (ord.(!n) <- y; incr n; cost := !cost +. csize.(at.(parent.(y))))
       done)
     cord;
   assert (!n = nvars);
@@ -397,12 +431,27 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
       Array.init n (fun i ->
           Array.map (fun pt -> i + 1 < n && single ord.(i) pt && other ord.(i) pt = V ord.(i + 1)) by_var.(ord.(i)))
     in
+    (* [kept]: a pattern of level i that gives a later variable y as the one value of this level's thing, y in no other
+       pattern (a leaf: a field of a row), not skipped: its test here (has the thing a value) reads the value itself
+       (Store.value1) and keeps it for y's level, which then reads nothing (the same lookup made once, not twice); the
+       bindings it drops are dropped here as before, so the work and its bound are unchanged. y, or -1 *)
+    let kept =
+      Array.init n (fun i ->
+          Array.mapi
+            (fun j pt ->
+              match pt.pe, pt.pv with
+              | V x, V y when x = ord.(i) && y <> x && (not pt.many) && (not skip.(i).(j)) && Array.length by_var.(y) = 1 && level_of y > i -> y
+              | _ -> -1)
+            by_var.(ord.(i)))
+    in
     let slice = Array.init n (fun i -> Array.map (fun pt -> single ord.(i) pt && known_at i (other ord.(i) pt)) by_var.(ord.(i))) in
     let leap = Array.map (fun s -> Array.fold_left (fun k b -> if b then k + 1 else k) 0 s >= 2) slice in
     (* one runner per domain: its own bindings and its own count of candidates; no allocation per binding but the
        iterators' own *)
     let runner () =
       let env = Array.make n 0 and bound = Array.make n false and w = ref 0 and cell = [| 0 |] in
+      (* a leaf's value read at its thing's level ([kept]): the thing, and the value *)
+      let kthing = Array.make n (-1) and kword = Array.make n 0 and kcell = [| 0 |] in
       let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
       let accepts x c pt =
         if has x pt.pe && has x pt.pv then Store.mem v c pt.pp c
@@ -414,6 +463,18 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
           match pt.pe with
           | W e -> Store.mem v e pt.pp c
           | V y -> if bound.(y) then Store.mem v env.(y) pt.pp c else Store.count_things v pt.pp c > 0
+      in
+      (* the test of pattern j of level i on candidate c: [accepts], or, for a pattern of a leaf ([kept]), its value
+         read and kept for the leaf's level *)
+      let[@inline never] keep y c pt =
+        match Store.value1 v c pt.pp kcell with
+        | 0 -> false
+        | 1 -> Array.unsafe_set kthing y c; Array.unsafe_set kword y (Array.unsafe_get kcell 0); true
+        | _ -> Store.has_value v c pt.pp
+      in
+      let test i j x c pt =
+        let y = Array.unsafe_get (Array.unsafe_get kept i) j in
+        if y < 0 then accepts x c pt else keep y c pt
       in
       let count x pt = count_with get x pt in
       (* the candidates themselves *)
@@ -428,8 +489,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
           | Some e, _ -> Store.iter_values v e pt.pp f
           | None, Some (lo, hi) ->
             (* a variable with a range, read off the property's index in value order: only the range *)
-            let seen = Hashtbl.create 256 in
-            Store.iter_range v pt.pp lo hi (fun _ w -> if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); f w))
+            Store.iter_range_values v pt.pp lo hi f
           | None, None -> Store.iter_taken v pt.pp f
       in
       (* level i: the smallest source, and its size; each pattern's count kept for the leapfrog *)
@@ -478,7 +538,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
         let x = ord.(i) and ps = by_var.(ord.(i)) and sk = skip.(i) in
         let ok = ref true and j = ref 0 in
         while !ok && !j < Array.length ps do
-          if !j <> src && (not sk.(!j)) && (lf = 0 || !j > 61 || (lf lsr !j) land 1 = 0) && not (accepts x c ps.(!j)) then ok := false;
+          if !j <> src && (not sk.(!j)) && (lf = 0 || !j > 61 || (lf lsr !j) land 1 = 0) && not (test i !j x c ps.(!j)) then ok := false;
           incr j
         done;
         !ok
@@ -496,7 +556,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
               if in_range x c then begin
                 let ok = ref true and j = ref 0 in
                 while !ok && !j < Array.length ps do
-                  if (not sk.(!j)) && not (accepts x c ps.(!j)) then ok := false;
+                  if (not sk.(!j)) && not (test i !j x c ps.(!j)) then ok := false;
                   incr j
                 done;
                 if !ok then f c
@@ -509,7 +569,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
               if in_range x c then begin
                 let ok = ref true and j = ref 0 in
                 while !ok && !j < Array.length ps do
-                  if !j <> src && (not sk.(!j)) && not (accepts x c ps.(!j)) then ok := false;
+                  if !j <> src && (not sk.(!j)) && not (test i !j x c ps.(!j)) then ok := false;
                   incr j
                 done;
                 if !ok then f c
@@ -557,7 +617,8 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
             (* the one value of a bound thing's one-valued property *)
             let pt = by_var.(x).(f) in
             let e = match pt.pe with W e -> e | V y -> env.(y) in
-            match Store.value1 v e pt.pp cell with
+            (* read at its thing's level already ([kept]), or now *)
+            match if Array.unsafe_get kthing x = e then (cell.(0) <- Array.unsafe_get kword x; 1) else Store.value1 v e pt.pp cell with
             | 0 -> ()
             | 1 ->
               incr w;

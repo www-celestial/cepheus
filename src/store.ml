@@ -1780,6 +1780,19 @@ let iter_holders v p f =
     iter_prop v p (fun e _ -> if not (Hashtbl.mem seen e) then (Hashtbl.replace seen e (); f e))
   end
 
+(* the values of p with lo <= value word <= hi, each once, in the order [iter_range] meets them first: in value order
+   from the rows by value of a view of one run with no change of p, equal values side by side; otherwise seen once
+   through a table *)
+let iter_range_values v p lo hi f =
+  if Array.length v.runs = 1 && not (IM.mem p v.delta.dav) then begin
+    let last = ref 0 and first = ref true in
+    base_iter_range v.runs.(0).a p lo hi (fun _ w -> if !first || w <> !last then (first := false; last := w; f w))
+  end
+  else begin
+    let seen = Hashtbl.create 256 in
+    iter_range v p lo hi (fun _ w -> if not (Hashtbl.mem seen w) then (Hashtbl.replace seen w (); f w))
+  end
+
 (* the values p takes, each once: in value order from the rows by value of a view of one run with no change of p, equal
    values side by side; otherwise seen once through a table *)
 let iter_taken v p f =
@@ -1832,7 +1845,7 @@ let delta_values v p = match IM.find_opt p v.delta.dav with Some pd -> pd.pk | N
    that value holds m facts of the source that gave it, less those newer runs retract, and at most m of each other
    source: a bound of the window of m facts, found in two lookups a run, that the search for that window starts
    from instead of the whole range of ints *)
-let[@inline never] nth_bound v p w m ~desc =
+let nth_bound v p w m ~desc =
   let best = ref None in
   let keep x = match !best with Some b when (if desc then x <= b else x >= b) -> () | _ -> best := Some x in
   if m > 0 then begin
