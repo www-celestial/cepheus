@@ -134,6 +134,34 @@ let plan_large ~extra (v : Store.view) =
   while j + !k < Array.length rs && rs.(j + !k).level = l do incr k done;
   if !k + 1 >= !tier || Array.length rs - j + 1 > !tier then plan ~extra v else j, l
 
+(* The merge of a writer that has been idle a tick (Tidy): the delta and the newest runs, down to the oldest of the first
+   level, from the newest, that two runs share (the large groups' runs a load leaves side by side, [plan_large]),
+   into the first level that holds them all, with every newer run of a level up to it (as [plan]); None when every
+   level holds one run. Lazy leveling keeps a load's writes at about two a fact; once the writes stop, the reads pay
+   for every run of the tier at each lookup (5 runs after the invoices app's seed: each read visits them all), so the
+   tier is merged as leveling would have (Dayan and Idreos 2018: leveling is the read-optimal end of the trade-off) *)
+let plan_tier (v : Store.view) =
+  let rs = v.runs in
+  let n = Array.length rs in
+  let last = ref (-1) and i = ref 1 in
+  while !last < 0 && !i < n do
+    if rs.(!i).level > 0 && rs.(!i).level = rs.(!i - 1).level then begin
+      let k = ref !i in
+      while !k + 1 < n && rs.(!k + 1).level = rs.(!i).level do incr k done;
+      last := !k
+    end;
+    incr i
+  done;
+  if !last < 0 then None
+  else begin
+    let rec go l j size =
+      let j = ref j and size = ref size in
+      while !j < n && (!j <= !last || rs.(!j).level <= l) do size := !size + Store.run_rows rs.(!j); incr j done;
+      if !size <= cap l then Some (!j, l) else go (l + 1) !j !size
+    in
+    go rs.(!last).level 0 v.delta.dn
+  end
+
 (* every run and the delta into one, at a level that holds them *)
 let plan_all (v : Store.view) =
   let rs = v.runs in
@@ -425,8 +453,8 @@ let sdir t = Filename.concat t.dir "snapshots"
 
 (* the merge of [v] into a file, not yet installed: the runs [plan] says, or all of them; [Atomic.get t.at] taken with
    [v]: its first group is <= v.group + 1; [busy]: clients may be writing beside it (a background merge) *)
-let merge_begin ?busy ?(all = false) t (v : Store.view) pos =
-  let take, level = if all then plan_all v else plan v in
+let merge_begin ?busy ?(all = false) ?(tier = false) t (v : Store.view) pos =
+  let take, level = if all then plan_all v else match if tier then plan_tier v else None with Some p -> p | None -> plan v in
   Snapshot.merge ?busy t.disk (sdir t) t.id v ~take ~level pos
 
 (* a frame was written since the last call: the journal is busy, its fsyncs are waited for *)
@@ -645,7 +673,7 @@ type req = {
 
 (* Apply: a replica's frame from its primary, or a Raft cluster's frame of another leader: [req]'s result once it is
    durable here. Wake: a background domain is done (a merge, a change): the writer looks, even when no write comes *)
-type control = Write of req | Snapshot of req | Apply of req * frame | Wake | Stop
+type control = Write of req | Snapshot of req | Apply of req * frame | Wake | Tidy | Stop
 
 (* ---- Merging in the background ----
    The writer never stops for a merge: another domain writes the new base's file from the working view of the
@@ -676,7 +704,7 @@ let after_applied m applied =
   Mutex.unlock m.lm;
   gs, k
 
-let start_merge ?(wake = ignore) t (from : Store.view) =
+let start_merge ?(wake = ignore) ?tier t (from : Store.view) =
   let pos = Atomic.get t.at in
   let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None } in
   m.dom <-
@@ -684,7 +712,7 @@ let start_merge ?(wake = ignore) t (from : Store.view) =
       (Domain.spawn (fun () ->
            try
              let t0 = Journal.clock () in
-             let w = merge_begin ~busy:(journal_busy ()) t from pos in
+             let w = merge_begin ~busy:(journal_busy ()) ?tier t from pos in
              let v = ref w.view and applied = ref 0 in
              let go = ref true in
              while !go do
@@ -1061,6 +1089,7 @@ type live = {
          installed, it is answered not_leader *)
   mutable change : change option;  (* the change in the background *)
   mutable waiting : (req * Store.view) list;  (* the changes that wait for it, or for the merge in flight, oldest first *)
+  mutable quiet : int;  (* the working view's group at the last Tidy: the same at the next one, the writer was idle *)
 }
 
 let deliver r res =
@@ -1455,6 +1484,16 @@ let writer l () =
         (match l.merging with Some m when Atomic.get m.ready <> None -> finish_merge l | _ -> ());
         poll_change l;
         handle rest
+      | Tidy :: rest ->
+        (* no group since the last tick: a tier of runs a load left is merged now, in the background, as a merge of
+           the delta is (the reads stop paying for each of its runs); after a merge that failed (a full disk), not
+           before the delta's next [compact_min] changes, as the delta's merges wait ([retry]) *)
+        let g = l.e.working.group in
+        if g = l.quiet && l.merging = None && l.change = None && l.waiting = [] && l.e.stopped = None && (not l.rollback)
+           && (l.retry = 0 || l.e.working.delta.dn > l.retry) && plan_tier l.e.working <> None
+        then l.merging <- Some (start_merge ~wake:(fun () -> ignore (submit l Wake)) ~tier:true l.e l.e.working);
+        l.quiet <- g;
+        handle rest
       | Stop :: rest ->
         (* a change in the background is cancelled: nothing of it was written *)
         (match l.change with
@@ -1469,7 +1508,7 @@ let writer l () =
         l.waiting <- [];
         finish_merge l;
         wait_idle l;
-        List.iter (function Write r | Snapshot r | Apply (r, _) -> deliver r (Error Closed) | Wake | Stop -> ()) rest;
+        List.iter (function Write r | Snapshot r | Apply (r, _) -> deliver r (Error Closed) | Wake | Tidy | Stop -> ()) rest;
         go := false
     in
     handle items
@@ -1483,7 +1522,7 @@ let start ?(follow = no_follow) ?(replica = false) ?(raft = false) e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
       to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow; replica; raft;
-      propose = (fun _ _ _ -> Error (Busy "no Raft yet")); rollback = false; change = None; waiting = []; lineage = 0 }
+      propose = (fun _ _ _ -> Error (Busy "no Raft yet")); rollback = false; change = None; waiting = []; lineage = 0; quiet = -1 }
   in
   (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
   l.domain <- Some (Domain.spawn (fun () ->
@@ -1504,9 +1543,12 @@ let call l make =
       Mutex.unlock q.rm;
       Option.get q.res
     end
-  | Wake | Stop -> Ok { group = 0; things = [] }
+  | Wake | Tidy | Stop -> Ok { group = 0; things = [] }
 
 let write l ops by why = call l (fun r -> Write { r with w = (ops, by, why) })
+
+(* a tick of the server's clock (every second): the writer merges a tier of runs if no group came since the last one *)
+let tidy l = ignore (submit l Tidy)
 
 (* A replica's promotion: from the next control on, its writer takes writes and refuses frames. Called once every frame
    given is durable (the follower stopped and waited), so that no write resolves on a state the primary's frames

@@ -1580,4 +1580,46 @@ let () =
     done
   done
 
+let () =
+  section "an idle writer merges the tier of runs a load left (Engine.tidy), and a busy one does not";
+  let large = !Resolve.large_min and cmin = !Engine.compact_min and tier = !Engine.tier in
+  Resolve.large_min := 50;
+  Engine.compact_min := 1_000;
+  Engine.tier := 16;
+  let disk = Sim_disk.disk (Sim_disk.create (Rng.make 78)) in
+  let db = Result.get_ok (open_on disk "/tidy") in
+  let[@warning "-8"] (Ok [ k ]) = declare db [ prop "k" Tint ] in
+  for g = 0 to 2 do ignore (Result.get_ok (write db (List.init 100 (fun i -> Add (-(i + 1), k, Int ((g * 100) + i)))))) done;
+  let runs0 = Array.length (view db).runs and facts0 = Store.facts (view db) in
+  close db;
+  C.check (runs0 = 3) "three large groups: three runs side by side, not %d" runs0;
+  let l = Engine.start (Result.get_ok (Engine.open_ disk "/tidy")) in
+  let runs () = Array.length (Atomic.get l.e.published).runs in
+  let merged0 = Atomic.get Engine.merges in
+  (* a write after each tick (it answers once the writer took the tick): never idle, no merge *)
+  Engine.tidy l;
+  ignore (Result.get_ok (Engine.write l [ Add (-1, k, Int 1000) ] 0 ""));
+  Engine.tidy l;
+  ignore (Result.get_ok (Engine.write l [ Add (-1, k, Int 1001) ] 0 ""));
+  C.check (l.merging = None && Atomic.get Engine.merges = merged0 && runs () = runs0) "busy between ticks: no merge, %d runs" (runs ());
+  (* two ticks with no group between: the tier and the delta merged, in the background *)
+  Engine.tidy l;
+  Engine.tidy l;
+  let t0 = Unix.gettimeofday () in
+  while Atomic.get Engine.merges = merged0 && Unix.gettimeofday () -. t0 < 20. do Unix.sleepf 0.001 done;
+  C.check (runs () = 1 && Store.facts (Atomic.get l.e.published) = facts0 + 2) "idle: one run, %d; %d facts, %d before and 2 more" (runs ()) (Store.facts (Atomic.get l.e.published)) facts0;
+  (* one run a level: nothing to merge, however idle *)
+  let merged1 = Atomic.get Engine.merges in
+  Engine.tidy l;
+  Engine.tidy l;
+  ignore (Result.get_ok (Engine.write l [ Add (-1, k, Int 1002) ] 0 ""));
+  C.check (l.merging = None && Atomic.get Engine.merges = merged1) "one run: no merge";
+  Engine.stop l;
+  let db = Result.get_ok (open_on disk "/tidy") in
+  C.check (Store.facts (view db) = facts0 + 3) "reopened: the facts, %d" (Store.facts (view db));
+  close db;
+  Resolve.large_min := large;
+  Engine.compact_min := cmin;
+  Engine.tier := tier
+
 let () = C.finish "unit"

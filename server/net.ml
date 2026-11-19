@@ -773,8 +773,9 @@ let serve (cfg : Config.t) =
                 Option.map (fun s -> Thread.create (accept_loop s true tls_ctx) ()) tcp ]
           in
           let peer_acceptor = match peer, peer_ctx with Some s, Some ctx -> Some (Thread.create (Replica.peer_listener rep ctx s) ()) | _ -> None in
-          (* every second: tokens.toml reloaded when it changed, the session tables saved, a writer that stopped on a
-             failed disk stops the server (G10: systemd starts it again, and recovery decides) *)
+          (* every second: tokens.toml reloaded when it changed, the session tables saved, a tier of runs merged by a
+             writer idle since the last second (Engine.tidy), a writer that stopped on a failed disk stops the server
+             (G10: systemd starts it again, and recovery decides) *)
           let stamp = ref (file_stamp tokens_file) in
           let failed = Atomic.make None in
           let ticking = Atomic.make true in
@@ -797,6 +798,7 @@ let serve (cfg : Config.t) =
                   | _ -> ())
                 cluster;
               Array.iter (fun d -> Follow.tick d.follow) dbs;
+              Array.iter (fun d -> Engine.tidy d.live) dbs;
               Array.iter
                 (fun d -> match d.live.e.stopped with
                    | Some e when Atomic.get failed = None ->
