@@ -315,6 +315,12 @@ faits sur lesquels elles ont été dépliées ; ces relations sont donc **figée
   que le writer voit.
 - `why` utilise les règles telles qu'écrites : une preuve nomme la règle générique, et ses feuilles comprennent les
   faits de l'ontologie.
+- Les programmes (les règles compilées, et dépliées) sont gardés par jeu de règles, sous un verrou que chaque groupe
+  avec des règles prend un instant. Ceux d'un nouveau jeu de règles sont faits hors du verrou (les 95 règles d'un
+  changement prennent 15 à 22 ms à compiler et à déplier), pour que les groupes du writer, qui prennent pendant ce
+  temps le programme des anciennes règles, n'attendent jamais celui d'un changement. Les variables d'une règle
+  dépliée gardent les types que la règle leur donne (vérifiés une fois par règle, pas une fois par liaison), sauf si
+  une variable de propriété est devenue une constante.
 
 ## Le retrait : Backward/Forward
 
@@ -609,7 +615,12 @@ tient un fait de R qu'une fois qu'un groupe écrit pendant ce temps le touche (a
 absent pour le writer, dérivé pour le changement), et l'y garde ensuite, même quand ses deux états sont d'accord,
 puisqu'un fait de R absent de la table veut dire « dérivé, comme R le dit ». La frame du changement ne change pas :
 ses changements affirmés, les différences de la table, puis les faits de R que la table ne tient pas, comme dérivés.
-Le journal tient chaque fait dérivé, comme avant, et son format est le même.
+Le journal tient chaque fait dérivé, comme avant, et son format est le même. Le writer code la part de R dans la frame
+directement depuis les colonnes de R (`Group.encode_parts`), ses colonnes et ses textes numérotés comme les numérote le
+codage du groupe entier : les mêmes octets, sans record (l'enregistrement OCaml d'un changement) ni valeur faits pour
+chacun des faits de R, ce qui prenait au writer environ 25 ms pour 135 000 d'entre eux. Les watches (les questions
+suivies en direct), qui ont besoin des changements de la frame un par un, font les records de R sur leur propre
+domain (`Engine.whole`).
 
 R est **provisoire** : son état n'est celui d'aucun groupe (les faits dérivés d'un changement, sans les groupes
 autour), donc il n'est jamais nommé dans la chaîne des runs, jamais forcé sur le disque (fsync), et son fichier
@@ -648,15 +659,18 @@ valeurs, aucune unique, pas une propriété du système, et pas avec l'égalité
 lit chaque fait), et sur un seul domain : un tour sur plusieurs domains (plus bas) fait de ses têtes des faits par
 régions du working set, celles d'un sink aussi, en parallèle.
 
-**Ce que cela coûte** ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--les-faits-quaucune-règle-ne-lit-faits-par-un-seul-tri-2026-11-18)).
+**Ce que cela coûte** ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--linstallation-dun-changement-sans-un-record-par-fait-2026-11-19)).
 Sur 10 universités en forme de LUBM avec les 94 règles, pendant que 256 clients écrivent de façon durable, ajouter un
 axiome (chaque personne est aussi d'une classe que les données laissent vide : environ 135 000 faits dérivés, tous
-d'un sink) s'installe en 0,31 s (médiane de 21 ; sa construction 0,053 s, son run à lui 0,025 s : 2,6 M de faits
-dérivés par seconde pour la construction, 1,7 M avec l'écriture du run), et la part du writer lui-même à l'installation
-est de 36 ms. Le débit des clients pendant qu'il tourne est 0,50 de ce qu'il est sans le changement, 0,93 sur toute la
-mesure depuis son début : la fenêtre est courte maintenant (0,2 à 0,3 s) et contient l'installation, la part du writer
-et la frame du changement écrite et forcée, 40 à 60 ms sans aucun groupe confirmé ; un seul arrêt dans une fenêtre de
-moins d'une seconde déplace beaucoup le rapport d'une paire. L'arrière-plan partage avec le writer
+d'un sink) s'installe en 0,22 s (médiane de 21 ; sa construction 0,048 s, son run à lui 0,025 s : 2,9 M de faits
+dérivés par seconde pour la construction, 1,8 M avec l'écriture du run), et la part du writer lui-même à l'installation
+est de 10 ms (33 avant que sa frame soit codée depuis les colonnes de R). Les writers perdent environ 40 ms de leur
+travail dans la fenêtre du changement sur le disque, dont les arrêts de fsync jusqu'à une demi-seconde décident encore
+du rapport d'une paire ; dans un dossier tmpfs (un système de fichiers en mémoire), sans arrêt, 49 ms dans une fenêtre
+de 0,58 s : 0,83 de leur débit sans le changement, par paire, et 0,92 face à la fenêtre médiane d'une exécution sans
+lui. Sur la mesure depuis son début, la perte propre du changement est sous 1 % ; l'axiome lui-même fait dériver à
+chaque étudiant écrit ensuite un fait de plus, environ 8 % de travail de plus pour le writer, ce que le disque cache
+derrière ses fsyncs. L'arrière-plan partage avec le writer
 les quatre cœurs de la machine, ses caches et le garbage collector, et le delta grandit pendant ce temps, puisqu'aucun
 merge ne tourne à côté d'un changement. Définir les 94 règles sur les mêmes données sans règles est le pire cas : chaque
 groupe écrit pendant ce temps coûte aux nouvelles règles plusieurs fois ce qu'il coûte aux anciennes, l'arrière-plan ne
@@ -1067,9 +1081,10 @@ Le plan de la conception a six étapes ; cette version a les six.
 - **Le reste de l'étape 5** : un changement avec de nouvelles choses est calculé dans le groupe ; seuls les faits
   dérivés des propriétés à plusieurs valeurs, aucune unique, vont dans le run à eux d'un changement (les autres entrent
   dans le delta) ; les deux cibles de l'étape 5 ne sont pas atteintes toutes les deux : 2 M de faits dérivés par seconde
-  pour la construction, pas avec l'écriture de son run ; le débit des writers pendant un changement, dont la fenêtre
-  contient surtout la frame de l'installation maintenant
-  ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--les-faits-quaucune-règle-ne-lit-faits-par-un-seul-tri-2026-11-18)).
+  pour la construction (2,9 M), pas avec l'écriture de son run (1,8 M : l'écriture du run en fait un tiers) ; les writers
+  dans la fenêtre d'un changement, 0,83 de leur débit sans lui, par paire, sans arrêt du disque (0,92 face à la fenêtre
+  médiane), le codage de l'installation et son dernier rattrapage étant la part du writer
+  ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--linstallation-dun-changement-sans-un-record-par-fait-2026-11-19)).
 - **Le reste de l'étape 6** : B/F sur les égalités (Motik et al., IJCAI 2015 [Motik 2015c]) au lieu de défaire une
   classe ; la preuve d'une égalité dans `why` ; l'égalité à côté de `Not` et des agrégats, des closure modules, du
   chemin des chargements et des tours parallèles.

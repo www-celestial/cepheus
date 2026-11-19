@@ -565,6 +565,98 @@ Les deux tours lents par le socket ne se sont pas répétés dans le processus, 
 sont chronométrés : la plus longue attente d'un switch de merge a été de 413 ms sur main et de 447 ms sur la branche,
 une fois chacune en 7 tours, sur un disque dont les fsync varient autant d'un tour à l'autre.
 
+## Règles, les cibles de l'étape 5 encore : l'installation d'un changement sans un record par fait (2026-11-19)
+
+Le levier que montraient les mesures plus bas ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) : à
+l'installation, chaque fait dérivé du run devenait un record de changement (l'enregistrement OCaml d'un changement) et
+une valeur, faits par le writer, puis codés pour la frame (`Group.encode` : une recherche dans une table de hachage par
+changement pour sa colonne), pendant qu'aucun groupe n'était confirmé. Maintenant le writer code la frame directement
+depuis les colonnes du run (`Group.encode_parts` : les records du groupe, puis les faits du run lus par indice), les
+mêmes octets, ses quatre colonnes (les sortes, les choses, les colonnes, les valeurs) sur plusieurs domains au-delà de
+65 536 changements ; les watches (les questions suivies en direct), qui ont besoin des changements un par un, font les
+records du run sur leur propre domain (`Engine.whole`). Et ce que le profil montrait ensuite : le writer installe un
+changement prêt avant son batch suivant (le batch s'arrête à lui, pour que le dernier rattrapage de l'installation ne
+tienne que les groupes du dernier passage de l'arrière-plan, pas jusqu'à 256 de plus), et attend la fin du domain du
+changement (`Domain.join`) après l'installation ; les programmes du raisonneur pour un nouveau jeu de règles sont faits
+hors du verrou que chaque groupe du writer prend un instant (les 95 règles d'un changement prenaient 15 à 22 ms à
+compiler et à déplier sous ce verrou, que le writer attendait) ; et le codeur des colonnes du journal remplit un bloc et
+trouve ses deux étendues en une seule passe, et serre les champs d'au plus 31 bits par un mot courant (135 000 valeurs :
+0,92 à 0,69 ms constantes, 1,28 à 1,03 croissantes, 1,45 à 1,25 aléatoires ; les mêmes octets, ce qu'un test vérifie
+contre le codeur simple du format).
+
+**Où allait l'installation** (main a61dd80, avec des chronomètres, 5 exécutions sur le disque) : les groupes écrits
+depuis que le changement était prêt, rattrapés, 6 à 10 ms (102 à 224 groupes) ; les faits du run faits records, 9 à
+11 ms ; réunis en un seul tableau, 1,5 à 3 ; codés, 15 à 27 : 35 à 48 ms, 2,0 à 2,8 M de mots alloués, 9 à 13
+collections mineures du garbage collector. **Où elle va maintenant** (8 exécutions) : le rattrapage, 0 groupe dans
+quatre exécutions et 90 à 188 (5 à 11 ms) dans les quatre autres, les groupes venus pendant le dernier passage de
+l'arrière-plan (ses seuils, 64 groupes ou 5 ms, inchangés : un seuil plus serré pourrait empêcher un arrière-plan chargé
+d'être jamais prêt) ; les records de la part affirmée et de la table, 0,3 à 1 ms ; le codage, 6 à 14 ms (une fois 26) à
+côté de 256 writers (seul, sur une machine calme, de la forme de l'installation : 4,3 ms sur quatre domains, 5,8 ms sur
+un ; l'essentiel du reste est la numérotation des colonnes et des textes dans l'ordre de leur premier usage et le tri
+des valeurs par colonne, sur un seul domain) ; du changement prêt à son installation, 0 à 2 ms (jusqu'à 17 avant). La
+frame elle-même est petite (35 à 41 KB pour 131 000 à 144 000 faits : les écarts entre choses, une colonne, une valeur),
+donc son écriture et son fsync (l'appel qui force les octets sur le disque) sont ceux d'une frame ordinaire.
+
+**Méthode.** Le même changement que plus bas, `CHANGE=one reason.exe change 10 256 8 2 with|without DIR`, 21 paires
+(avec, sans) pour main a61dd80 et cette branche, alternées, en une seule prise du lock des travaux lourds, chaque
+exécution dans un scope de 3 GB, deux fois : sur le disque, et dans un dossier tmpfs (`/dev/shm`, un système de
+fichiers en mémoire), où un fsync n'attend rien, pour qu'aucun arrêt du disque n'entre dans la mesure et que les writers
+soient limités par le processeur (environ 13 000 groupes par seconde, contre 9 000 à 11 000 sur le disque). Sur le
+disque, le fsync du journal s'arrête 0,1 à 0,5 s une ou deux fois par exécution (btrfs plein à 99 %, partagé avec les
+écritures d'autres travaux ; les exécutions chronométrées ont noté chaque fsync de plus de 100 ms), dans les exécutions
+avec et sans le changement de la même façon, ce qui faisait aller le rapport d'une paire dans la fenêtre de 0,03 à 18
+dans la série plus bas. Alors, à côté du rapport par paire (la fenêtre du changement avec / la même fenêtre sans), chaque
+fenêtre est mise face à la **médiane** de toutes les fenêtres de même longueur de l'exécution sans le changement (de 1 s
+à 7,5 s, glissant de 10 ms), qu'un arrêt ne peut pas déplacer ; le temps de writer perdu est les groupes de cette
+médiane moins ceux de la fenêtre, à son débit ; la mesure entière est la fenêtre médiane de 250 ms depuis le début du
+changement, avec / sans, et $1 - \text{perdu} / \text{temps}$, la perte de la fenêtre sur les 6 s qui suivent son
+début. Une case est la médiane sur les paires avec son intervalle à 95 % sans hypothèse de loi ($[x(6), x(16)]$ sur
+21).
+
+| ce qui est mesuré (21 paires) | main, disque | cette branche, disque | main, tmpfs | cette branche, tmpfs |
+|---|---:|---:|---:|---:|
+| la part du writer à l'installation | 33 ms [28, 38] | **10 ms** [8, 15] | 41 ms [37, 43] | **21 ms** [17, 24] |
+| le changement, de `define` à sa réponse | 0,213 s [0,174, 0,246] | 0,221 s [0,160, 0,288] | 0,545 s [0,499, 0,649] | 0,581 s [0,527, 0,646] |
+| sa construction (environ 135 000 faits dérivés) | 0,050 s [0,045, 0,056] | 0,048 s [0,043, 0,054] | 0,055 s [0,051, 0,059] | 0,056 s [0,050, 0,060] |
+| son run à lui | 0,026 s [0,023, 0,029] | 0,025 s [0,024, 0,027] | 0,031 s [0,029, 0,035] | 0,030 s [0,029, 0,033] |
+| faits dérivés par seconde, la construction et le run | 1,82 M [1,64, 1,89] | 1,84 M [1,72, 1,90] | 1,77 M [1,72, 1,86] | 1,78 M [1,71, 1,88] |
+| les writers dans la fenêtre, par paire | 0,72 [0,49, 0,93] | 0,65 [0,25, 1,46] | 0,77 [0,75, 0,80] | **0,83** [0,81, 0,87] |
+| les writers dans la fenêtre, face à la fenêtre médiane | 0,67 [0,49, 0,83] | 0,75 [0,31, 1,05] | 0,84 [0,81, 0,87] | **0,92** [0,88, 0,94] |
+| le temps de writer perdu dans la fenêtre | 83 ms [37, 102] | 40 ms [-14, 109] | 97 ms [68, 119] | **49 ms** [35, 78] |
+| toute la mesure, par paire | 0,89 [0,71, 1,15] | 0,87 [0,74, 1,02] | 0,92 [0,91, 0,93] | 0,91 [0,90, 0,93] |
+| toute la mesure, face à la fenêtre médiane | 0,93 [0,72, 1,09] | 0,95 [0,82, 1,02] | 0,92 [0,91, 0,97] | 0,92 [0,91, 0,95] |
+| toute la mesure, $1 - \text{perdu} / \text{temps}$ | 0,986 [0,983, 0,994] | 0,993 [0,982, 1,002] | 0,984 [0,980, 0,989] | **0,992** [0,987, 0,994] |
+
+- **Comment le lire.** Dans tmpfs, sans arrêt (aucun de 250 ms dans aucune fenêtre, contre 3 à 5 sur le disque), les
+  intervalles sont étroits : les writers perdent moitié moins dans la fenêtre du changement que sur main (49 ms contre
+  97), son rapport par paire passe de 0,77 à 0,83. Le rapport face à la fenêtre médiane se lit plus haut (0,92) parce
+  que le débit d'une exécution baisse au fil de ses 8 s à mesure que son delta grandit (14 000 groupes par seconde au
+  début, 12 000 à la fin), donc la médiane de [1, 7,5] s est sous le débit à 2 s ; sans arrêt, le rapport par paire est
+  le juste. Sur le disque les arrêts décident encore d'une paire, mais les médianes s'accordent : 40 ms perdues contre
+  83. Sur toute la mesure, les deux binaires se ressemblent dans tmpfs, 0,91 à 0,92 : après le changement, chaque
+  étudiant écrit dérive un fait de plus sous 95 règles au lieu de 94, environ 8 % de travail de plus pour le writer à
+  chaque groupe suivant, ce que cachent les fsyncs du disque (0,95 là) ; le coût propre du changement, le temps perdu de
+  la fenêtre sur la mesure, est sous 1 % (0,992).
+- **Face aux cibles de l'étape** : les writers dans la fenêtre du changement à 0,90 d'une exécution sans lui : **0,92
+  face à la fenêtre médiane dans tmpfs**, 0,83 par paire (manqué ; main 0,84 et 0,77) ; sur toute la mesure à 0,96 :
+  0,992 pour la perte propre du changement, 0,91 à 0,95 avec le travail que la nouvelle règle ajoute à chaque écriture
+  suivante (manqué : cette part est celle de la règle, pas de l'installation) ; 2 M de faits dérivés par seconde avec
+  l'écriture du run : 1,84 M (manqué : la construction fait 2,87 M par seconde, l'écriture du run de 135 000 faits prend
+  25 ms sur 73).
+- **La deuxième piste** (le dépliage des nouvelles règles, qui revérifiait les types statiques pour chaque liaison) :
+  la construction bouge de 2 ms au plus (0,050 et 0,048 s, dans les intervalles) : les types n'étaient pas l'essentiel
+  du dépliage ici ; ce qui reste des 15 à 22 ms des programmes est le reste du travail du dépliage et ses vérifications
+  d'atteignabilité.
+- **Les mêmes faits dérivés** (sans writer, pour que les deux exécutions soient les mêmes ; chaque base ensuite lue en
+  entier par un seul binaire) : l'axiome sur LUBM-10, 2 006 283 faits dont 651 629 dérivés, digest `3d3ea1921e042` des
+  deux côtés ; les 94 règles définies sur LUBM-1 sans règles, 210 869 faits dont 60 526 dérivés, `67123592f6fa` des deux
+  côtés. Sans writer, la construction de l'axiome prend 0,022 s et son run 0,018 à 0,019 s des deux côtés (119 424 faits
+  dérivés : 2,9 M par seconde avec l'écriture du run), son installation 21 ms sur main et 6 ms ici ; l'installation des
+  94 règles 14 et 6 ms ; `define 1` (les 94 règles sur un fork) 0,199 et 0,197 s.
+- **Démarrage** (21 tours de 100 exécutions, alternés, chaque binaire en 7 copies prises à tour de rôle) :
+  `bench.exe` 2,575 ms sur main, 2,564 ms ici (rapport par paire 1,001 [0,970, 1,005]) ; `cepheus` (`bin/main.exe`)
+  4,577 ms et 4,604 ms (1,005 [0,993, 1,012]) : aucun changement mesuré (les deux intervalles contiennent 1).
+
 ## Règles, les cibles de l'étape 5 encore : les faits qu'aucune règle ne lit, faits par un seul tri (2026-11-18)
 
 Le levier que montraient les mesures plus bas ([règles](rules.md#les-changements-des-règles-en-arrière-plan)) : un

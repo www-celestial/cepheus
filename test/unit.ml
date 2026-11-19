@@ -184,19 +184,57 @@ let () =
     C.check !ok "round %d: a packed field reads back otherwise" round
   done;
   List.iter (fun (x, w) -> C.check (Pack.width x = w) "width %d" x) [ 0, 0; 1, 1; 2, 2; 255, 8; 256, 9; max_int, 62; -1, 63; min_int, 63 ];
-  (* columns: every block mode, extreme values, lengths around 128 *)
-  for round = 1 to 300 do
+  (* the coder as the format describes it, plainly (three passes, a field at a time): Pack.put_ints writes its bytes *)
+  let put_ints_ref out n f =
+    let s = Bytes.create ((Pack.block * 8) + 8) and v = Array.make Pack.block 0 and i = ref 0 in
+    while !i < n do
+      let len = min Pack.block (n - !i) in
+      for k = 0 to len - 1 do v.(k) <- f (!i + k) done;
+      let lo = ref v.(0) and hi = ref v.(0) in
+      for k = 1 to len - 1 do lo := min !lo v.(k); hi := max !hi v.(k) done;
+      let wr = Pack.width (!hi - !lo) in
+      let dlo = ref 0 and dhi = ref 0 in
+      if len > 1 then begin
+        dlo := v.(1) - v.(0); dhi := !dlo;
+        for k = 2 to len - 1 do let d = v.(k) - v.(k - 1) in dlo := min !dlo d; dhi := max !dhi d done
+      end;
+      let wd = Pack.width (!dhi - !dlo) in
+      let raw = Pack.zlen !lo + Pack.bytes len wr and delta = Pack.zlen v.(0) + Pack.zlen !dlo + Pack.bytes (len - 1) wd in
+      if len > 1 && delta < raw then begin
+        Buffer.add_char out (Char.chr (0x80 lor wd)); Codec.put_int out v.(0); Codec.put_int out !dlo;
+        let nb = Pack.bytes (len - 1) wd in
+        Bytes.fill s 0 (nb + 8) '\000';
+        for k = 1 to len - 1 do Pack.put s ((k - 1) * wd) (v.(k) - v.(k - 1) - !dlo) wd done;
+        Buffer.add_subbytes out s 0 nb
+      end
+      else begin
+        Buffer.add_char out (Char.chr wr); Codec.put_int out !lo;
+        let nb = Pack.bytes len wr in
+        Bytes.fill s 0 (nb + 8) '\000';
+        for k = 0 to len - 1 do Pack.put s (k * wr) (v.(k) - !lo) wr done;
+        Buffer.add_subbytes out s 0 nb
+      end;
+      i := !i + len
+    done
+  in
+  (* columns: every block mode, extreme values, lengths around 128, widths of 0 to 63 bits *)
+  for round = 1 to 600 do
     let n = Rng.int r 400 in
-    let gen = match round mod 5 with
+    let gen = match round mod 6 with
       | 0 -> (fun _ -> Rng.next r)
       | 1 -> (let b = Rng.next r in fun i -> b + (3 * i) + Rng.int r 3)
       | 2 -> (fun i -> if i mod 7 = 0 then max_int else if i mod 7 = 1 then min_int else Rng.int r 10)
       | 3 -> (let c = Rng.next r in fun _ -> c)
-      | _ -> (fun i -> -i * 1000)
+      | 4 -> (fun i -> -i * 1000)
+      | _ -> (let w = Rng.int r 64 in let b = Rng.next r in fun _ -> b + (Rng.next r land Pack.mask w))
     in
+    let gen = if round mod 2 = 0 then gen else (fun i -> if round mod 4 = 1 then gen i else (gen i) asr (Rng.int r 63)) in
     let a = Array.init n gen in
+    let refb = Buffer.create 64 in
+    put_ints_ref refb n (Array.get a);
     let buf = Buffer.create 64 in
     Pack.put_ints buf n (Array.get a);
+    C.check (Buffer.contents buf = Buffer.contents refb) "round %d: the coder writes the format's bytes (%d ints)" round n;
     Buffer.add_string buf "tail";
     let bytes = Buffer.to_bytes buf in
     let rd = Codec.reader bytes 0 (Bytes.length bytes) in
@@ -270,6 +308,45 @@ let () =
         | _ -> C.fail "seed %d: a group cut at %d decoded" seed cut
         | exception Codec.Short -> incr C.checks
       done
+  done
+
+(* encode_parts: a group's records then changes read by index (a change's derived facts in its run of their own),
+   each Derived, of every type, the texts and floats by word; on one domain and, past 65,536 changes, on several:
+   the bytes of Group.encode of the group with all of them as records *)
+let () =
+  section "groups in columns: records then changes read by index, on one domain or several, the bytes of the whole group";
+  let r = Rng.make 23 in
+  let typs = [| Value.Tint; Tfloat; Tbool; Ttext; Tdate; Tmoney 2; Tlink |] in
+  for seed = 1 to 40 do
+    let g = random_group r seed in
+    let n = match seed mod 4 with 0 -> 0 | 1 -> 1 + Rng.int r 300 | 2 -> 70_000 + Rng.int r 3_000 | _ -> Rng.int r 2_000 in
+    (* the extra changes' properties, a type each (some the records' properties too), their texts by word *)
+    let props = Array.init (1 + Rng.int r 5) (fun _ -> 16 + Rng.int r 50) in
+    let ptyp = Hashtbl.create 8 in
+    Array.iter (fun p -> if not (Hashtbl.mem ptyp p) then Hashtbl.replace ptyp p typs.(Rng.int r (Array.length typs))) props;
+    let words = Array.init 50 (fun i -> if i mod 2 = 0 then String.init (Rng.int r 12) (fun _ -> Char.chr (Rng.int r 256)) else (let b = Bytes.create 8 in Bytes.set_int64_le b 0 (Int64.of_int (Rng.next r)); Bytes.to_string b)) in
+    let ep = Array.init n (fun _ -> props.(Rng.int r (Array.length props))) in
+    let ee = let e = ref (65536 + Rng.int r 1000) in Array.init n (fun _ -> e := !e + Rng.int r 3; !e) in
+    let ew = Array.init n (fun i -> match Hashtbl.find ptyp ep.(i) with
+      | Value.Tbool -> Rng.int r 2 | Ttext -> 2 * Rng.int r 25 | Tfloat -> 1 + (2 * Rng.int r 25) | _ -> Rng.int r 1_000_000) in
+    let value p w : Value.t =
+      match Hashtbl.find ptyp p with
+      | Value.Tint -> Int w | Tdate -> Date w | Tmoney _ -> Money w | Tlink -> Link w | Tbool -> Bool (w <> 0)
+      | Ttext -> Text words.(w) | Tfloat -> Float (Int64.float_of_bits (String.get_int64_le words.(w) 0))
+    in
+    let whole = { g with changes = Array.append g.changes (Array.init n (fun i -> { Group.kind = Derived; e = ee.(i); p = ep.(i); v = value ep.(i) ew.(i) })) } in
+    let want = Buffer.create 64 in
+    Group.encode want whole;
+    let parts ?parallel () =
+      let b = Buffer.create 64 in
+      Group.encode_parts ?parallel b g ~n ~thing:(Array.get ee) ~prop:(Array.get ep) ~tag:(fun p -> Group.tag_of_typ (Hashtbl.find ptyp p))
+        ~word:(Array.get ew) ~text:(Array.get words);
+      Buffer.contents b
+    in
+    C.check (parts () = Buffer.contents want) "seed %d: %d records and %d changes by index, one domain: the whole group's bytes" seed (Array.length g.changes) n;
+    C.check (parts ~parallel:(fun k f -> Bulk.parallel k f) () = Buffer.contents want) "seed %d: on several domains: the same bytes" seed;
+    let rd = Codec.reader (Buffer.to_bytes want) 0 (Buffer.length want) in
+    C.check (Group.equal (Group.decode rd) whole) "seed %d: they decode to the whole group" seed
   done
 
 (* ---- the reference semantics of a write, written independently of Resolve ---- *)
