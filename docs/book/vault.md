@@ -11,20 +11,22 @@ Terms are explained at their first use and in the [glossary](glossary.md).
 
 ## From Cesia
 
-```text
+```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/result
+use std/sys
 
 Person = cepheus.Kind("person", {Name: cepheus.Text()})
 Scans = cepheus.Files("scan")
-db = cepheus.Connect("cepheus://srv1:7400/shop", [Person, Scans], token = sys.Env("CEPHEUS_TOKEN"), ca = "/etc/cepheus/ca.pem")?
-ada = cepheus.Insert(Person, {Name: "Ada Martin"}, db)?
-f = cepheus.Put(Scans, "2026-11.pdf", sys.Read("2026-11.pdf")?, db, type = "application/pdf", owner = ada)?
-cepheus.Get(Scans, f, db)?          (* {Name: "2026-11.pdf", Size: 2480311, Type: "application/pdf", Owner: ada, Content: "9c1e..."} *)
-all = cepheus.Read(Scans, f, db)?    (* the whole file, a Text of its bytes *)
-page = cepheus.Read(Scans, f, db, from = 1_000_000, len = 65_536)?   (* only the chunks under the range are read *)
-cepheus.List(Scans, db)?            (* [{Id, Name, Size, Type}] *)
-cepheus.Delete(Scans, f, db)?       (* its facts retracted; its bytes stay while the history cites them *)
-cepheus.Erase(ada, db)?             (* ada's key destroyed: every file she owned is unreadable, everywhere *)
+db = result.Unwrap(cepheus.Connect("cepheus://srv1:7400/shop", [Person, Scans], token = sys.Env("CEPHEUS_TOKEN"), ca = "/etc/cepheus/ca.pem"))
+ada = result.Unwrap(cepheus.Insert(Person, {Name: "Ada Martin"}, db))
+f = result.Unwrap(cepheus.Put(Scans, "2026-11.pdf", result.Unwrap(sys.Read("2026-11.pdf")), db, type = "application/pdf", owner = ada))
+result.Unwrap(cepheus.Get(Scans, f, db))   (* {Name: "2026-11.pdf", Size: 2480311, Type: "application/pdf", Owner: ada, Content: "9c1e..."} *)
+all = result.Unwrap(cepheus.Read(Scans, f, db))   (* the whole file, a Text of its bytes *)
+page = result.Unwrap(cepheus.Read(Scans, f, db, from = 1_000_000, len = 65_536))   (* only the chunks under the range are read *)
+result.Unwrap(cepheus.List(Scans, db))   (* [{Id, Name, Size, Type}] *)
+result.Unwrap(cepheus.Delete(Scans, f, db))   (* its facts retracted; its bytes stay while the history cites them *)
+result.Unwrap(cepheus.Erase(ada, db))   (* ada's key destroyed: every file she owned is unreadable, everywhere *)
 ```
 
 - `cepheus.Files(name)` is a kind like any other, with the fields `Name`, `Size`, `Type`, `Owner` and `Content`: give

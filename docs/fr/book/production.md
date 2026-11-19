@@ -283,6 +283,7 @@ stopping: false
 commit_buffer.rounds: 0
 commit_buffer.frames: 0
 commit_buffer.alone: 679
+role: primary
 database.shop.group: 6202
 database.shop.facts: 12428
 database.shop.resent: 1
@@ -291,6 +292,7 @@ database.shop.frames: 679
 database.shop.follow_ns_a_frame: 2483
 database.shop.visible: 6217
 database.shop.watches: 0
+database.shop.epoch: 1
 ```
 
 | ligne | ce que c'est | à surveiller |
@@ -302,6 +304,7 @@ database.shop.watches: 0
 | `gc_minor`, `gc_major` | les collections du runtime OCaml jusqu'ici (les passages du garbage collector, qui reprend la mémoire inutilisée) | à côté de la mémoire du processus : un rythme qui ne cesse de croître |
 | `stopping` | un arrêt est en cours | `true` en dehors d'un arrêt prévu |
 | `commit_buffer.rounds`, `.frames`, `.alone` | les fsyncs du buffer, les frames qu'ils ont rendues durables, les frames forcées dans leur propre journal (une base écrite seule) | `.frames` / `.rounds` : les frames partagées par un seul fsync ([commit buffer](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)) |
+| `role` | `primary` ; `replica of PEER` sur une replica, avec les lignes `replica.*` de chaque base ; `primary (promoted from PEER)` après un `cepheus promote` ([ce que sert une replica](server.md#ce-que-sert-une-replica)) | un changement que vous n'avez pas fait (un `cepheus promote`) |
 | `database.NAME.group` | son groupe durable le plus récent | immobile alors que des programmes écrivent : leurs écritures échouent ; lisez leurs erreurs et le log |
 | `database.NAME.facts` | les faits de son état le plus récent | la croissance, pour le disque et la mémoire |
 | `database.NAME.resent` | les écritures répondues de nouveau depuis la table des sessions : envoyées de nouveau après une connexion coupée, appliquées une seule fois ([G14](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)) | une hausse régulière : des connexions se coupent (le réseau, `idle_timeout`, des redémarrages) |
@@ -309,6 +312,7 @@ database.shop.watches: 0
 | `database.NAME.frames`, `.follow_ns_a_frame` | les frames publiées, et le temps moyen du serveur par frame pour les publier aux lecteurs locaux, en nanosecondes | un temps qui grandit avec `followers` |
 | `database.NAME.visible` | le numéro de visibilité que partagent les lecteurs locaux (G15) | il avance avec les frames |
 | `database.NAME.watches` | les questions vivantes (tenues à jour) ouvertes ([Watch](cesia.md#watch--les-questions-vivantes)) | plus que les écrans ouverts |
+| `database.NAME.epoch` | l'epoch de la base (son époque : un numéro qui compte ses primaries) : 1, et un de plus à chaque promotion d'une replica ([ce que sert une replica](server.md#ce-que-sert-une-replica)) | un changement que vous n'avez pas fait |
 
 À côté, le disque : un merge complet tient en double les runs de la base pendant qu'il tourne, et le journal garde
 chaque groupe pour toujours, donc gardez libre au moins la taille des runs de la plus grande base, et surveillez la

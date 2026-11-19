@@ -265,6 +265,7 @@ stopping: false
 commit_buffer.rounds: 0
 commit_buffer.frames: 0
 commit_buffer.alone: 679
+role: primary
 database.shop.group: 6202
 database.shop.facts: 12428
 database.shop.resent: 1
@@ -273,6 +274,7 @@ database.shop.frames: 679
 database.shop.follow_ns_a_frame: 2483
 database.shop.visible: 6217
 database.shop.watches: 0
+database.shop.epoch: 1
 ```
 
 | line | what it is | watch for |
@@ -284,6 +286,7 @@ database.shop.watches: 0
 | `gc_minor`, `gc_major` | the OCaml runtime's collections so far | beside the process's memory: a rate that keeps growing |
 | `stopping` | a stop is under way | `true` outside a planned stop |
 | `commit_buffer.rounds`, `.frames`, `.alone` | the buffer's fsyncs, the frames they made durable, the frames forced in their own journal (a database written alone) | `.frames` / `.rounds`: frames shared by one fsync ([commit buffer](server.md#many-databases-one-fsync-the-commit-buffer)) |
+| `role` | `primary`; `replica of PEER` on a replica, with each database's `replica.*` lines; `primary (promoted from PEER)` after a `cepheus promote` ([what a replica serves](server.md#what-a-replica-serves)) | a change you did not make (a `cepheus promote`) |
 | `database.NAME.group` | its newest durable group | flat while programs write: their writes fail; read their errors and the log |
 | `database.NAME.facts` | facts in its newest state | growth, for the disk and the memory |
 | `database.NAME.resent` | writes answered again from the session table: sent again after a broken connection, applied once ([G14](server.md#writes-applied-once-sessions-g14)) | a steady rise: connections break (the network, `idle_timeout`, restarts) |
@@ -291,6 +294,7 @@ database.shop.watches: 0
 | `database.NAME.frames`, `.follow_ns_a_frame` | frames published, and the server's mean time a frame to publish them to the local readers, in nanoseconds | a time that grows with `followers` |
 | `database.NAME.visible` | the visibility number the local readers share (G15) | it moves with the frames |
 | `database.NAME.watches` | live questions open ([Watch](cesia.md#watch-live-questions)) | more than the screens open |
+| `database.NAME.epoch` | the database's epoch: 1, and one more at each promotion of a replica ([what a replica serves](server.md#what-a-replica-serves)) | a change you did not make |
 
 Beside it, the disk: a full merge holds the database's base twice while it runs, and the journal keeps every group
 for ever, so keep free at least the size of the largest database's runs, and watch the journal's growth

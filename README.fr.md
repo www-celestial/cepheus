@@ -80,12 +80,14 @@ servies depuis sa propre mémoire, aussi linearizable que celles du serveur
 
 ```text
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/result
+use std/sys
 
 Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Email: cepheus.Text(unique = true)})
-db = cepheus.Connect("cepheus://srv1:7400/shop", [Client], token = sys.Env("CEPHEUS_TOKEN"), ca = "/etc/cepheus/ca.pem")?
-ada = cepheus.Insert(Client, {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"}, db, by = 7, why = "signup")?
-cepheus.Get(Client, ada, db)?               (* {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"} *)
-lyon = cepheus.Find(1, (c) -> {Where: [[c, Client.City, "Lyon"]], Give: {Client: c}}, db)?
+db = result.Unwrap(cepheus.Connect("cepheus://srv1:7400/shop", [Client], token = sys.Env("CEPHEUS_TOKEN"), ca = "/etc/cepheus/ca.pem"))
+ada = result.Unwrap(cepheus.Insert(Client, {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"}, db, by = 7, why = "signup"))
+result.Unwrap(cepheus.Get(Client, ada, db))   (* {Name: "Ada Martin", City: "Lyon", Email: "ada@example.com"} *)
+lyon = result.Unwrap(cepheus.Find(1, (c) -> {Where: [[c, Client.City, "Lyon"]], Give: {Client: c}}, db))
 ```
 
 Sur la machine du serveur, un `cepheus.Get` de 4 champs coûte 0,77 µs depuis Cesia (PostgreSQL 18.6 par son socket,

@@ -32,9 +32,11 @@ cepheus
 
 ```text
 usage: cepheus serve|stop|status --config FILE
-       cepheus token add NAME [--database DB=read|write]... [--admin] --config FILE
+       cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE
        cepheus token list|remove [NAME] --config FILE
        cepheus cluster init|cert NAME --dir DIR [--host H]...
+       cepheus replicate PEER --config FILE
+       cepheus promote [--force] --config FILE
 ```
 
 `CESIA_NATIVE` nomme le dossier de l'interface native de ce Cesia (`cesia_v1.cmi`) : avec elle, la compilation fait
@@ -162,7 +164,9 @@ Ok([{Task: 65537, Title: "Read the guide"}, {Task: 65539, Title: "Read the guide
 
 ## 5. Arrêter, démarrer, regarder
 
-`cepheus status` montre ce que tient le serveur ; il lui faut un token avec `--admin` :
+`cepheus status` montre ce que tient le serveur ; il lui faut un token avec `--admin`, que le serveur connaît moins
+d'une seconde après son `token add` (il relit `tokens.toml` chaque seconde quand le fichier a changé ; un `status`
+envoyé plus tôt est refusé avec `auth: unknown token`) :
 
 ```sh
 cepheus token add ops --admin --config ~/shop/cluster.toml > ~/shop/ops.token
@@ -181,6 +185,7 @@ stopping: false
 commit_buffer.rounds: 0
 commit_buffer.frames: 0
 commit_buffer.alone: 7
+role: primary
 database.main.group: 8
 database.main.facts: 36
 database.main.resent: 0
@@ -189,6 +194,7 @@ database.main.frames: 7
 database.main.follow_ns_a_frame: 6471
 database.main.visible: 9
 database.main.watches: 0
+database.main.epoch: 1
 ```
 
 Huit groupes : la description que le système fait de ses propriétés, la déclaration des deux propriétés du kind, et
