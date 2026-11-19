@@ -7,7 +7,8 @@ mathématiques sont dans [théorie](theory.md). Tout ce qui suit vaut pour cette
 le disque en niveaux (leveling, ratio 4), une replica asynchrone (une copie de la base tenue à jour sur une autre
 machine, sans que les écritures l'attendent : [serveur](server.md#une-replica) ; son journal est un préfixe des groupes
 durables du primary, le serveur qui reçoit les écritures, et sa promotion, le passage de la replica au rôle de
-primary, se fait à la main) ; les règles comme [règles](rules.md) le dit.
+primary, se fait à la main), et un cluster Raft de trois serveurs ou plus, dont les invariants propres et leur preuve
+sont dans [sa section](server.md#comment-cest-prouvé) ; les règles comme [règles](rules.md) le dit.
 G14, G15 et G16 appartiennent au serveur : leurs énoncés, leurs preuves et leurs tests sont dans [la page du serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)
 ([G15](server.md#lectures-locales-g15) : des lectures dans la mémoire même d'un programme, sur la machine du serveur).
 À travers le serveur, G1 à G13 gardent leurs énoncés : un groupe est confirmé quand son reçu est envoyé, après son

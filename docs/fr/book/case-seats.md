@@ -32,7 +32,7 @@ nouveau, et comment saurez-vous que vous avez réussi (\[Heilmeier]). Ici :
      suivent ;
   4. et la vente doit rester rapide avec beaucoup d'acheteurs à la fois (mesuré à la section 6).
 - **Hors du sujet** : le paiement lui-même (le côté de la banque), les acheteurs qui changent d'avis (un remboursement
-  est un autre groupe), plusieurs machines (Cepheus tourne sur une seule).
+  est un autre groupe), plusieurs machines (ici, un seul serveur prend les écritures).
 
 Le modèle de données, en faits de Cepheus (chose, propriété, valeur) : une place est une chose avec un `seat/number` ;
 son propriétaire est une propriété à une seule valeur, `seat/owner` (le numéro de l'acheteur) ; un débit est une chose
@@ -460,8 +460,9 @@ changement innocent de l'installation peut changer un résultat mesuré, [Mytkow
   `Expect`.
 - Une seule machine prend les écritures : si elle est perdue, la vente s'arrête jusqu'à son retour, ou jusqu'à ce
   qu'une [replica](server.md#une-replica) (une copie de la base qui suit le journal du serveur) soit promue à la main
-  (les ventes confirmées pendant son retard sont alors perdues ; Raft, l'étape 7, un protocole où un groupe n'est
-  confirmé qu'une fois copié sur une majorité de serveurs, attendrait cette majorité).
+  (les ventes confirmées pendant son retard sont alors perdues) ; un [cluster Raft](server.md#un-cluster-de-trois-raft)
+  de trois (un protocole où un groupe n'est confirmé qu'une fois copié sur une majorité de serveurs) ne confirme une
+  vente qu'une fois que deux serveurs la tiennent, et élit un autre leader de lui-même.
 - Le paiement est hors de la base : une vente confirmée par Cepheus et un paiement refusé par la banque doivent être
   défaits par un autre groupe (une compensation), ce que ce chapitre ne couvre pas.
 

@@ -53,8 +53,9 @@ Cepheus' reads on one run measured since then are within a few percent of those 
   levels and large groups, and the load in parallel and without copies, Cepheus loads the same facts in 5.13 s and
   `COPY` takes 30.87 s ([architecture](architecture.md#large-groups)); Cepheus pays in memory (1.46 GB at the peak of
   one 9.4 M group, 0.88 of it the client's list, where PostgreSQL works in its 1 GB of buffers).
-- *What it has that Cepheus has not built*: SQL, many concurrent writers (row locks), replication and failover, a
-  planner for any SQL, decades of tools.
+- *What it has that Cepheus has not built*: SQL, many concurrent writers (row locks), a planner for any SQL, decades
+  of tools. (Replication is built: a replica promoted by hand, and a Raft cluster that elects its leader by itself,
+  [the server](server.md#a-replica).)
 
 **Server against server** (1 M facts, the same rows, both through their own sockets, 2026-11-08; the full table and
 its method: [the server](server.md#speed-beside-postgresql)):
@@ -147,7 +148,7 @@ links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both o
   `Expect` refuses it ([concepts](concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)).
 - Group commit: "When activity is high, LGWR can use group commits", writing the redo of waiting transactions "in one
   operation" ([process architecture, 19c](https://docs.oracle.com/en/database/oracle/oracle-database/19/cncpt/process-architecture.html)).
-- *Where Oracle wins*: everything a mature server has: many writers, clustering, replication, partitioning, SQL.
+- *Where Oracle wins*: everything a mature server has: many writers, clustering, partitioning, SQL.
 
 ### Datomic
 
@@ -226,7 +227,8 @@ journal the added and retracted flags.
   transaction may not exceed "10,000,000 bytes of affected data", keys 10,000 bytes, values 100,000 bytes
   ([known limitations](https://apple.github.io/foundationdb/known-limitations.html)); a Cepheus view can be read for
   as long as it is held.
-- *Where FoundationDB wins*: many machines, replication, isolation of interactive transactions over ranges.
+- *Where FoundationDB wins*: many machines, each holding a part of the data, and isolation of interactive
+  transactions over ranges.
 
 ### CockroachDB
 
@@ -238,7 +240,10 @@ journal the added and retracted flags.
   the Pebble storage engine", which "uses a Log-structured Merge-tree (LSM)", and "multi-version concurrency control
   (MVCC)" with "hybrid logical clock (HLC) timestamps"
   ([storage layer](https://docs.cockroachlabs.com/docs/stable/architecture/storage-layer)).
-- *Where CockroachDB wins*: it runs on many machines and survives the loss of one; SQL. Cepheus runs on one.
+- *Where CockroachDB wins*: it spreads one database over many machines, each range a Raft group of its own, so its
+  data and its writes grow with the machines; SQL. A Cepheus cluster also survives the loss of a minority of its
+  servers ([Raft](server.md#a-cluster-of-three-raft)), but each server holds every database whole and one leader takes
+  every write.
 
 ## Further reading
 

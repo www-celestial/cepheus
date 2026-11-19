@@ -61,9 +61,9 @@ cent de celles ci-dessous (Q1 0,38 µs, Q2 1,57 µs, Q3 3,74 à 3,82 ms, Q4 231 
   groupes, et le chargement en parallèle et sans copies, Cepheus charge les mêmes faits en 5,13 s et `COPY` prend
   30,87 s ([architecture](architecture.md#grands-groupes)) ; Cepheus paie en mémoire (1,46 GB au pic d'un groupe de
   9,4 M, dont 0,88 pour la liste du client, là où PostgreSQL travaille dans son 1 GB de buffers).
-- *Ce qu'il a et que Cepheus n'a pas construit* : SQL, beaucoup de writers concurrents (des locks par ligne), la
-  réplication et le failover (la bascule sur une autre machine), un query planner pour n'importe quel SQL, des
-  décennies d'outils.
+- *Ce qu'il a et que Cepheus n'a pas construit* : SQL, beaucoup de writers concurrents (des locks par ligne), un query
+  planner pour n'importe quel SQL, des décennies d'outils. (La réplication est construite : une replica promue à la
+  main, et un cluster Raft qui élit son leader de lui-même, [le serveur](server.md#une-replica).)
 
 **Serveur contre serveur** (1 M de faits, les mêmes lignes, les deux par leurs propres sockets, 2026-11-08 ; le
 tableau complet et sa méthode : [le serveur](server.md#la-vitesse-à-côté-de-postgresql)) :
@@ -160,8 +160,7 @@ de 1 GiB), les deux sur un cœur, deux tours alternés
 - Le group commit : « When activity is high, LGWR can use group commits », qui écrit le redo des transactions en
   attente « in one operation »
   ([process architecture, 19c](https://docs.oracle.com/en/database/oracle/oracle-database/19/cncpt/process-architecture.html)).
-- *Là où Oracle gagne* : tout ce qu'a un serveur mûr : beaucoup de writers, le clustering, la réplication, le
-  partitionnement, SQL.
+- *Là où Oracle gagne* : tout ce qu'a un serveur mûr : beaucoup de writers, le clustering, le partitionnement, SQL.
 
 ### Datomic
 
@@ -247,8 +246,8 @@ transaction, son journal les drapeaux ajouté et retiré.
   over five seconds », une transaction ne peut pas dépasser « 10,000,000 bytes of affected data », les clés 10 000
   octets, les valeurs 100 000 octets ([known limitations](https://apple.github.io/foundationdb/known-limitations.html)) ;
   une vue de Cepheus peut être lue aussi longtemps qu'on la garde.
-- *Là où FoundationDB gagne* : plusieurs machines, la réplication, l'isolation des transactions interactives sur des
-  intervalles.
+- *Là où FoundationDB gagne* : plusieurs machines, chacune avec une partie des données, et l'isolation des
+  transactions interactives sur des intervalles.
 
 ### CockroachDB
 
@@ -260,8 +259,10 @@ transaction, son journal les drapeaux ajouté et retiré.
   the Pebble storage engine », qui « uses a Log-structured Merge-tree (LSM) », et « multi-version concurrency control
   (MVCC) » avec des « hybrid logical clock (HLC) timestamps »
   ([storage layer](https://docs.cockroachlabs.com/docs/stable/architecture/storage-layer)).
-- *Là où CockroachDB gagne* : il tourne sur plusieurs machines et survit à la perte de l'une d'elles ; SQL. Cepheus
-  tourne sur une seule.
+- *Là où CockroachDB gagne* : il répartit une base sur plusieurs machines, chaque range (un intervalle de clés) un
+  groupe Raft à lui, si bien que ses données et ses écritures grandissent avec les machines ; SQL. Un cluster Cepheus
+  survit lui aussi à la perte d'une minorité de ses serveurs ([Raft](server.md#un-cluster-de-trois-raft)), mais chaque
+  serveur tient chaque base entière et un seul leader prend toutes les écritures.
 
 ## Pour aller plus loin
 

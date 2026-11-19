@@ -27,7 +27,7 @@ trying to do, how is it done today, what is new, and how will you know you succe
   3. *durable*: a sale the buyer was told about (confirmed) is never lost, whatever crashes come after;
   4. and the sale must still go fast with many buyers at once (measured in section 6).
 - **Out of scope**: the payment itself (a bank's side), buyers who change their mind (a refund is another group),
-  several machines (Cepheus runs on one).
+  several machines (here, one server takes the writes).
 
 The data model, in Cepheus' facts (thing, property, value): a seat is a thing with a `seat/number`; its owner is a
 one-valued property `seat/owner` (the buyer's number); a charge is a thing with `charge/seat` (a link to the seat) and
@@ -421,7 +421,8 @@ can change a measured result, [Mytkowicz 2009]):
   wasted (2,211 conflicts for 2,000 sales above). A seat held for a minute while the buyer pays (a reservation
   with an expiry) is the usual answer; it is another group with its own `Expect`.
 - One machine takes the writes: if it is lost, the sale stops until it is back, or until a [replica](server.md#a-replica)
-  is promoted by hand (the sales confirmed during its lag are then lost; Raft, step 7, would wait for a majority).
+  is promoted by hand (the sales confirmed during its lag are then lost); a [Raft cluster](server.md#a-cluster-of-three-raft)
+  of three confirms a sale only once two servers hold it, and elects another leader by itself.
 - The payment is outside the database: a sale confirmed by Cepheus and a payment refused by the bank must be undone by
   another group (a compensation), which this chapter does not cover.
 
