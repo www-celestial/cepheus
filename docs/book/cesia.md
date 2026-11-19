@@ -430,14 +430,20 @@ place, if that place is after the cursor.
   and k rows sent instead of $N$;
 - **in the index's order**, when the first key is an int, a date, money, a link or a text that a pattern gives as its
   value: the question is asked again on windows of that variable's values read from the property's index, from the
-  cursor on, each window holding twice as many facts as the one before, until k rows are found: the work of the rows
-  the page needs. A text's window is the next texts in the order of their bytes, which each run on disk keeps for its
-  property (the order `Prefix` reads too), merged over the runs and the changes not yet merged. Its budget is half
-  the planner's estimate of the heap's work, in facts read, since a fact read this way costs about twice a step of the
-  heap; past it, the heap answers, so this way never costs more than about twice the other (the rule of the
-  ski-rental problem: rent until the rent reaches the price, then buy). It loses when the rows the page wants lie far
-  in the order: the clients whose name starts with "ma", sorted by name, sit after every "A" to "L" (962 µs against
-  450 for the heap alone, on the app's data of [the guide](app.md#14-what-it-costs)).
+  cursor on, the first window holding k facts (a list without a filter reads its page and no more), each next one at
+  least twice the one before, until k rows are found: the work of the rows the page needs. A text's window is the next
+  texts in the order of their bytes, which each run on disk keeps for its property (the order `Prefix` reads too),
+  merged over the runs and the changes not yet merged. Its budget is half the planner's estimate of the heap's work,
+  in facts read, since a fact read this way costs about twice a step of the heap; past it, the heap answers, so this
+  way never costs more than about twice the other (the rule of the ski-rental problem: rent until the rent reaches the
+  price, then buy). It gives up sooner when the rows found so far say the page cannot be filled within the budget:
+  even at the most hopeful yield they allow (the upper bound at 99 % of the mean of a Poisson count,
+  [Garwood 1936](references.md#joins), by the approximation of [Wilson 1931](references.md#joins)), the missing rows
+  would need more facts than the budget has left; a next window holds at least the facts the missing rows need at that
+  yield. It loses when the rows the page wants lie far in the order: the clients whose name starts with "ma", sorted
+  by name, sit after every "A" to "L"; the walk then gives up after 2 windows instead of 5 (in OCaml, 396 µs against
+  657 when it walked to its budget, and 322 for the heap alone, on the app's data of
+  [the guide](app.md#14-what-it-costs)).
 
 `Watch` refuses `Sort`, `Limit` and `After` (a watch keeps every row of its question): sort the rows it gives with
 `list.SortBy`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,

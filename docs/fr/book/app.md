@@ -902,43 +902,51 @@ fois le groupe durable ([ce que coûte un changement](cesia.md#ce-que-cela-coût
 tirages, les index dont les pages ont besoin, des commits durables, comme par défaut ; un commit est la validation d'une
 transaction), les mêmes questions par `pgbench -M prepared` (l'outil de mesure de PostgreSQL ; son client C, en requêtes
 préparées, analysées une seule fois puis exécutées avec de nouvelles valeurs, une connexion, par son socket Unix) ; côté
-Cepheus, les fonctions de l'application elle-même, ses lectures dans sa propre mémoire. En µs, un client :
+Cepheus, les fonctions de l'application elle-même, ses lectures dans sa propre mémoire. En µs, un client, 21 tours
+alternés (la médiane des p50 des tours avec son intervalle à 95 %, la médiane de leurs p99), le 2026-11-19 :
 
 | question | Cepheus p50 | p99 | PostgreSQL p50 | p99 |
 |---|---:|---:|---:|---:|
-| une page de factures (20 lignes de 7 champs) | 182 [180 ; 183] | 318 | **46** [42 ; 48] | 80 |
-| une page à 50 000 de profondeur | 180 [180 ; 182] | 308 | **49** [45 ; 53] | 86 |
-| les factures par un préfixe du nom du destinataire | 1 184 [1 179 ; 1 198] | 1 492 | **161** [158 ; 167] | 227 |
-| les clients par nom | 120 [118 ; 122] | 187 | **37** [37 ; 38] | 74 |
-| les clients par un préfixe du nom ou de l'e-mail (`Or`) | **1 282** [1 262 ; 1 307] | 1 538 | 1 315 [1 312 ; 1 323] | 1 907 |
-| le total impayé (`Not`, `Sum`, `Count`) | 14 040 [13 929 ; 14 103] | 27 772 | **10 772** [10 663 ; 10 812] | 14 235 |
-| une facture et ses lignes | **25** [24 ; 26] | 42 | 49 [49 ; 52] | 96 |
-| une mise à jour durable d'une facture | **2 832** [2 669 ; 3 301] | 6 697 | 2 961 [2 850 ; 3 707] | 7 185 |
+| une page de factures (20 lignes de 7 champs) | 115 [113 ; 120] | 241 | **42** [41 ; 44] | 74 |
+| une page à 50 000 de profondeur | 116 [115 ; 118] | 189 | **44** [44 ; 45] | 77 |
+| les factures par un préfixe du nom du destinataire | 535 [531 ; 545] | 741 | **158** [157 ; 162] | 223 |
+| les clients par nom | 88,0 [87,0 ; 88,9] | 141 | **37** [37 ; 39] | 66 |
+| les clients par un préfixe du nom ou de l'e-mail (`Or`) | **480** [477 ; 489] | 678 | 1 298 [1 297 ; 1 299] | 1 651 |
+| le total impayé (`Not`, `Sum`, `Count`) | **8 362** [8 283 ; 8 469] | 15 904 | 10 519 [10 344 ; 10 574] | 12 841 |
+| une facture et ses lignes | **24,1** [23,1 ; 24,1] | 44,1 | 48 [48 ; 50] | 82 |
+| une mise à jour durable d'une facture | **2 972** [2 710 ; 3 157] | 5 509 | 3 085 [2 950 ; 3 263] | 6 981 |
+
+Face au moteur de la veille, dans les mêmes tours : la page 180 µs, à 50 000 de profondeur 179, le préfixe 1 152, les
+clients 120, le `Or` 1 253, le total 13 721. Le chargement du seed laissait 5 runs côte à côte, et chaque lecture
+payait une recherche dans chacun ; le serveur les fusionne maintenant dès que son writer est au repos une seconde
+([merges](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)). La première fenêtre d'une page triée
+tient les faits de ses lignes au lieu de deux fois plus, et les champs d'une ligne sont lus après les filtres, une
+fois chacun.
 
 Là où PostgreSQL gagne, et pourquoi :
 
-- **Une page triée** : environ 4 fois plus vite. Son B-tree (l'arbre trié de pages où PostgreSQL range ses tables et
-  ses index) sur le numéro donne les 20 lignes dans l'ordre, chaque ligne une lecture de sa table ; Cepheus garde chaque
+- **Une page triée** : 2,7 fois plus vite. Son B-tree (l'arbre trié de pages où PostgreSQL range ses tables et ses
+  index) sur le numéro donne les 20 lignes dans l'ordre, chaque ligne une lecture de sa table ; Cepheus garde chaque
   propriété dans un fait à part (le modèle entity–attribute–value), donc une ligne de 7 champs, ce sont 7 lectures
-  d'index, et sa page dans l'ordre de l'index est demandée comme des fenêtres des valeurs du numéro. Les deux sont sous
-  le cinquième de milliseconde, mais c'est l'ordre de grandeur de l'écart.
-- **Un tri sur un texte** : 3,2 fois, là où c'était 345 fois le 2026-11-13 (12 758 µs, chaque client lu et trié). Les
-  deux lisent maintenant l'index des noms dans son ordre ; la question triée seule prend 33 µs en OCaml, et l'essentiel
-  des 83 µs qui les séparent, c'est l'autre question de la page (les e-mails de ses 20 clients, `In`) et les lignes
+  d'index, et sa page dans l'ordre de l'index est demandée comme des fenêtres des valeurs du numéro. Des 115 µs de
+  Cepheus, la question triée en prend 24 en OCaml, les champs de ses 20 lignes (une deuxième question, `In`) à peu
+  près autant, et le reste, ce sont les lignes fabriquées pour Cesia et le travail de Cesia lui-même : une seule
+  question pour toute la page en prendrait environ la moitié (53 µs pour 7 patterns triés, contre 110 pour les deux).
+- **Un tri sur un texte** : 2,4 fois (3,2 la veille). La question triée seule prend 27 µs en OCaml ; l'essentiel des
+  51 µs qui les séparent, c'est l'autre question de la page (les e-mails de ses 20 clients, `In`) et les lignes
   fabriquées pour Cesia.
-- **Un préfixe que l'ordre ne suit pas** (les factures adressées à « ad... », les plus grands numéros d'abord) : 7,4
-  fois. Environ 4 factures sur 100 correspondent ; Cepheus parcourt les numéros dans l'ordre, une fenêtre à la fois,
-  et demande le préfixe dans chacune, chaque ligne de 7 champs lue comme 7 faits.
-- **Une somme sur un filtre** : 1,3 fois. PostgreSQL parcourt sa table ; Cepheus répond au `Not` pour chacune des
-  100 000 factures. Sur le tableau de bord, cela se paie une fois par question (la première réponse du watch, partagée
-  par toutes les pages), puis chaque changement coûte sa différence.
+- **Un préfixe que l'ordre ne suit pas** (les factures adressées à « ad... », les plus grands numéros d'abord) : 3,4
+  fois (7,4 la veille). Environ 4 factures sur 100 correspondent ; Cepheus parcourt les numéros dans l'ordre, une
+  fenêtre à la fois, et demande le préfixe dans chacune : environ 2 100 candidats pour 20 lignes, 0,2 µs chacun, là
+  où PostgreSQL lit les champs d'une ligne dans un seul tuple (la ligne telle que sa table la range).
 
-Là où Cepheus gagne : une facture avec ses lignes est lue dans la mémoire même de l'application, sans round trip
-(25 µs contre 49) ; la recherche sur l'un de deux préfixes (`Or` de deux `Prefix`) coûte autant que les deux `LIKE` de
-PostgreSQL (1,6 fois plus rapide le 2026-11-13, avant le tri sur un texte par l'index : son parcours dans l'ordre des
-noms ne trouve aucun « ma » avant son budget, puis le heap répond) ; une écriture durable coûte la même chose (les deux
-attendent un seul fsync du disque). Et chaque nombre de la colonne PostgreSQL a encore besoin d'un programme autour,
-qui suivrait les changements (`LISTEN`/`NOTIFY`, écrit à la main), pour donner un tableau de bord en direct.
+Là où Cepheus gagne : le total impayé, 1,26 fois plus vite (les faits des 100 000 factures lus dans un seul run au lieu
+de cinq ; PostgreSQL parcourt sa table) ; une facture avec ses lignes est lue dans la mémoire même de l'application,
+sans round trip (24 µs contre 48) ; la recherche sur l'un de deux préfixes (`Or` de deux `Prefix`), 2,7 fois plus
+rapide que les deux `LIKE` de PostgreSQL (son parcours dans l'ordre des noms abandonne après 2 fenêtres, puis le heap
+répond) ; une écriture durable coûte la même chose (les deux attendent un seul fsync du disque). Et chaque nombre de la
+colonne PostgreSQL a encore besoin d'un programme autour, qui suivrait les changements (`LISTEN`/`NOTIFY`, écrit à la
+main), pour donner un tableau de bord en direct.
 
 ## 15. Sécurité
 

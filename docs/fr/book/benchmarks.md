@@ -110,6 +110,41 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
 
+## Les lectures de l'application de factures après un chargement, et le premier appel (2026-11-19)
+
+**Méthode.** Le seed de l'application de factures (100 000 factures, 10 000 clients, 2,4 millions de lignes ;
+[le guide](app.md#14-ce-que-cela-coûte)), ses questions posées comme l'application les pose, en OCaml seul sur la vue
+locale de l'application (le côté Cesia et PostgreSQL sont dans le tableau du guide, 21 tours) ; le moteur d'avant cette
+étape contre celui de cette étape, alternés, 21 tours de 1 000 appels chacun : la médiane des p50 des tours en µs, avec
+son intervalle à 95 %, sur le seed fusionné en un seul run.
+
+| question | avant | après | ce qui a changé |
+|---|---:|---:|---|
+| les clés d'une page triée (5 patterns, 21 lignes) | 38,9 [38,1 ; 38,9] | **23,8** [23,1 ; 24,1] | sa première fenêtre tient 21 faits, pas 42 |
+| la page avec les champs de ses lignes | 63,2 [63,2 ; 64,1] | **47,0** [47,0 ; 47,9] | la même chose |
+| les factures par un préfixe du nom du destinataire | 498 [497 ; 501] | **433** [431 ; 435] | les champs d'une ligne lus après le préfixe, une fois : 3 920 candidats → 2 288 |
+| les clients par nom, avec leurs e-mails | 55,1 [55,1 ; 56,0] | **36,0** [36,0 ; 36,0] | chaque nom lu une fois par tri, pas à chaque comparaison |
+| les clients par un préfixe du nom ou de l'e-mail | 657 [654 ; 659] | **396** [395 ; 397] | la marche abandonne après 2 fenêtres au lieu de 5, puis le heap (322 seul) |
+| une facture, ses lignes | 8,1 | 8,1 | |
+
+**Les runs qu'un chargement laisse.** Le seed tel que son chargement le laisse tient 5 runs côte à côte (le lazy
+leveling, [merges](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)), et chaque recherche les
+visite tous : sur le moteur d'avant, une série de 1 000 appels sur chacun, une page prenait 120 µs contre 64 sur les
+mêmes faits en un seul run, le préfixe 1 088 contre 515, le total impayé 13,6 ms contre 8,4. Le serveur les fusionne
+maintenant dès que son writer est au repos une seconde (les 2,4 millions de lignes en environ 0,65 s ici) ; le tableau
+du guide mesure le tout (une page 180 → 115 µs par Cesia).
+
+**Une journée de sessions dans le delta.** 10 000 connexions, chacune avec sa propre fin : un intervalle sur leurs fins
+(la question du visiteur) est compté à partir des sommes de l'arbre du delta en $O(\log n)$ au lieu d'un pas par
+session. Un processus qui se connecte les rejoue encore (sa première vue : 57,7 ms contre 55,6, 6 tours alternés, dans
+leur dispersion) : ce que retirerait un merge du delta d'un writer au repos est laissé à une étape suivante.
+
+**Le premier appel.** Le premier appel du package Cesia (le fichier du moteur dont l'empreinte est vérifiée, puis
+projeté en mémoire et relogé) : 22,30 ms contre 22,48, le rapport 0,990 [0,984 ; 0,994] (21 tours de 100 processus,
+alternés) ; son fichier tient 24 KB de code de plus pour les lectures ci-dessus et 48 KB de moins depuis que sa colle
+Cesia est compilée avec l'inlining par défaut du compilateur (l'inlining : le code d'une fonction recopié là où elle
+est appelée). La commande `cepheus` sans argument : 4,58 ms contre 4,55, le rapport 1,004 [1,000 ; 1,013].
+
 ## Les questions avec des opérateurs, un ordre et des pages (2026-11-12), à 10 millions de faits
 
 **Méthode.** Les données des autres benchmarks (10 M de faits : 113 636 clients et leurs 2 272 720 factures, dont

@@ -88,6 +88,39 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## The invoices app's reads after a load, and the first call (2026-11-19)
+
+**Method.** The invoices app's seed (100,000 invoices, 10,000 clients, 2.4 million rows;
+[the guide](app.md#14-what-it-costs)), its questions asked as the app asks them, in OCaml alone on the app's local view
+(the Cesia side and PostgreSQL are in the guide's table, 21 rounds); the engine before this step against this step's,
+alternated, 21 rounds of 1,000 calls each: the median of the rounds' p50 in µs, with its 95 % interval, on the seed
+merged into one run.
+
+| question | before | after | what changed |
+|---|---:|---:|---|
+| a sorted page's keys (5 patterns, 21 rows) | 38.9 [38.1, 38.9] | **23.8** [23.1, 24.1] | its first window holds 21 facts, not 42 |
+| the page with its rows' fields | 63.2 [63.2, 64.1] | **47.0** [47.0, 47.9] | the same |
+| invoices by a prefix of the bill-to name | 498 [497, 501] | **433** [431, 435] | a row's fields read after the prefix, once: 3,920 candidates → 2,288 |
+| clients by name, with their e-mails | 55.1 [55.1, 56.0] | **36.0** [36.0, 36.0] | each name read once a sort, not at each comparison |
+| clients by a prefix of the name or of the e-mail | 657 [654, 659] | **396** [395, 397] | the walk gives up after 2 windows instead of 5, then the heap (322 alone) |
+| an invoice, its lines | 8.1 | 8.1 | |
+
+**The runs a load leaves.** The seed as its load leaves it holds 5 runs side by side (lazy leveling,
+[merges](architecture.md#merges-a-leveled-log-structured-merge-tree)), and every lookup visits each: on the engine
+before, one series of 1,000 calls on each, a page took 120 µs against 64 on the same facts in one run, the prefix 1,088
+against 515, the total not paid 13.6 ms against 8.4. The server now merges them once its writer has been idle a second
+(the 2.4 million rows in about 0.65 s here); the guide's table measures the whole (a page 180 → 115 µs through Cesia).
+
+**A day of sessions in the delta.** 10,000 sign-ins, each its own end: a range on their ends (the visitor's question)
+is counted from the sums of the delta's tree in $O(\log n)$ instead of a step a session. A process that connects still
+replays them (its first view: 57.7 ms against 55.6, 6 rounds alternated, within their spread): what a merge of an idle
+writer's delta would remove is left for a later step.
+
+**The first call.** The Cesia package's first call (the engine's file fingerprinted, mapped and relocated): 22.30 ms
+against 22.48, the ratio 0.990 [0.984, 0.994] (21 rounds of 100 processes, alternated); its file holds 24 KB of code
+more for the reads above and 48 KB less since its Cesia glue is compiled with the compiler's default inlining. The
+`cepheus` command with no argument: 4.58 ms against 4.55, the ratio 1.004 [1.000, 1.013].
+
 ## Questions with operators, an order and pages (2026-11-12), at 10 million facts
 
 **Method.** The data of the other benchmarks (10 M facts: 113,636 clients and their 2,272,720 invoices, of which

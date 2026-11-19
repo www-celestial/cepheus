@@ -264,6 +264,20 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — The dynamic program over subsets that chooses the order of joins: the best plan of a set from the best plans of
   its subsets, the size of each subset's result estimated once, whatever the order. `Query.order` runs it over the
   sets of a question's variables.
+- **[Hellerstein 1993]** J. M. Hellerstein, M. Stonebraker. Predicate Migration: Optimizing Queries with Expensive
+  Predicates. *SIGMOD* 1993, 267–276. https://doi.org/10.1145/170035.170078
+  — Where a test goes in a plan: a cheap, selective one before the steps it saves. `Query.order` places a field of
+  a row (a leaf: one value, in no other pattern) after the filters that follow its row, so that its lookup is made
+  for the rows they keep only.
+- **[Garwood 1936]** F. Garwood. Fiducial Limits for the Poisson Distribution. *Biometrika* 28(3–4), 437–442, 1936.
+  https://doi.org/10.1093/biomet/28.3-4.437
+  — The upper bound of a Poisson mean from a count, half a chi-square quantile: the most hopeful yield of a sorted
+  page's walk in the index's order, from the rows it found; the walk gives up when even that yield cannot fill the
+  page within its budget (`Top`).
+- **[Wilson 1931]** E. B. Wilson, M. M. Hilferty. The Distribution of Chi-Square. *Proceedings of the National Academy
+  of Sciences* 17(12), 684–688, 1931. https://doi.org/10.1073/pnas.17.12.684
+  — The cube-root approximation of a chi-square quantile, which gives Garwood's bound without a table (within 0.2 %
+  for 0 to 199 rows).
 - **[Wang 2023]** Y. R. Wang, M. Willsey, D. Suciu. Free Join: Unifying Worst-Case Optimal and Traditional Joins.
   *Proceedings of the ACM on Management of Data* 1(2), 1–23 (SIGMOD 2023). https://doi.org/10.1145/3589295
   — The mix of binary and worst-case optimal joins; Cepheus keeps one way, Generic Join.

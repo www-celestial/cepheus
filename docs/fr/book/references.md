@@ -291,6 +291,20 @@ est citée dans la page [comparaison](comparison.md).
   — La programmation dynamique sur les sous-ensembles qui choisit l'ordre des joins : le meilleur plan d'un ensemble se
   tire des meilleurs plans de ses sous-ensembles, et la taille du résultat de chaque sous-ensemble n'est estimée
   qu'une fois, quel que soit l'ordre. `Query.order` l'applique aux ensembles de variables d'une question.
+- **[Hellerstein 1993]** J. M. Hellerstein, M. Stonebraker. Predicate Migration: Optimizing Queries with Expensive
+  Predicates. *SIGMOD* 1993, 267–276. https://doi.org/10.1145/170035.170078
+  — Où va un test dans un plan : un test bon marché et sélectif avant les étapes qu'il épargne. `Query.order` place
+  un champ d'une ligne (une feuille : une seule valeur, dans aucun autre pattern) après les filtres qui suivent sa
+  ligne, pour que sa recherche ne soit faite que pour les lignes qu'ils gardent.
+- **[Garwood 1936]** F. Garwood. Fiducial Limits for the Poisson Distribution. *Biometrika* 28(3–4), 437–442, 1936.
+  https://doi.org/10.1093/biomet/28.3-4.437
+  — La borne supérieure de la moyenne d'une loi de Poisson à partir d'un compte, la moitié d'un quantile du
+  chi-deux : le rendement le plus optimiste de la marche d'une page triée dans l'ordre de l'index, d'après les lignes
+  qu'elle a trouvées ; la marche abandonne quand même ce rendement ne peut pas remplir la page dans son budget (`Top`).
+- **[Wilson 1931]** E. B. Wilson, M. M. Hilferty. The Distribution of Chi-Square. *Proceedings of the National Academy
+  of Sciences* 17(12), 684–688, 1931. https://doi.org/10.1073/pnas.17.12.684
+  — L'approximation par la racine cubique d'un quantile du chi-deux, qui donne la borne de Garwood sans table (à
+  0,2 % près de 0 à 199 lignes).
 - **[Wang 2023]** Y. R. Wang, M. Willsey, D. Suciu. Free Join: Unifying Worst-Case Optimal and Traditional Joins.
   *Proceedings of the ACM on Management of Data* 1(2), 1–23 (SIGMOD 2023). https://doi.org/10.1145/3589295
   — Le mélange de binary joins et de joins worst-case optimal ; Cepheus garde une seule façon, Generic Join.

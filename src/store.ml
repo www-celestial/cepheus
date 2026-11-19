@@ -1087,12 +1087,13 @@ type dict = { chunks : chunks; dcount : int; smap : int SM.t; extra : string IM.
 type tdelta = { tf : int PW.t;  (* (property, value) -> entry *) tn : int IM.t  (* property -> net count *) }
 type vdelta = { vn : int; vm : int IM.t  (* thing -> entry *) }
 
-(* A property's delta by value: value words to their things, an AVL tree as Map's (persistent by path copying:
-   Adams 1993, Driscoll, Sarnak, Sleator and Tarjan 1989), each node also holding the sums over its subtree of the
-   net counts [vn] and of their additions (vn when positive): an order-statistic tree (Cormen, Leiserson, Rivest and
-   Stein, Introduction to Algorithms, chapter 14). So the facts of a range of values, and the value where a count of
-   additions from a value is reached, are found in O(log n), where Map's walk of the range took a step a value: the
-   reads of a day of sessions in the delta (the end of each, a value) walked every one of them. *)
+(* A property's delta by value: value words to their things, a balanced tree as Map's (the heights of a node's two
+   sides differ by at most 2; persistent by path copying: Driscoll, Sarnak, Sleator and Tarjan 1989), each node also
+   holding the sums over its subtree of the net counts [vn] and of their additions (vn when positive): an
+   order-statistic tree (Cormen, Leiserson, Rivest and Stein, Introduction to Algorithms, 3rd edition, chapter 14). So
+   the facts of a range of values, and the value where a count of additions from a value is reached, are found in
+   O(log n), where Map's walk of the range took a step a value: the reads of a day of sessions in the delta (the end
+   of each, a value) walked every one of them. *)
 module VM = struct
   type t = E | N of { l : t; k : int; d : vdelta; r : t; h : int; s : int; a : int }
 
