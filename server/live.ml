@@ -33,6 +33,19 @@
    are. The cost of a frame is that of its keys' questions; a fact of a pattern with no variable of the question in its
    group (a ground fact, a Not with no variable of the question) is the whole question again.
 
+   Sort and Limit (a window): a watch with Sort keeps the rows of Find with the same Sort and Limit, in that order (the
+   rows of each message come in it): with Limit k, the first k rows and the copies of the k-th, which the watch holds
+   with the last of them, L. A row of the answer is held exactly when it comes at or before L (every row before the
+   k-th is held, and every copy of it), unless the window holds the whole answer (fewer rows than k: then every row).
+   So, at a frame, the rows held after it at or before L are those held, less the rows removed that come at or before
+   L, plus the rows added that come at or before L: the delta queries' rows, each compared with L (O(d log k) for d
+   rows). If they are k or more, the window is their first k and the copies of the k-th. If they are fewer, every row
+   after L that the window now needs is one of the answer's after L: it is refilled by one Find of the rows After L,
+   with Limit the rows missing, on the view after the frame (the index path when the first key is indexed); a refill
+   that finds fewer than asked has found every row, and the window holds the whole answer. After each message the rows
+   held are Find's at its group, ties too (spec/WatchWindow.tla checks the rule; test/live_sim.ml checks it against
+   Find at every message). A watch without Sort is the plain one above.
+
    Messages are held until their frame is durable (G5, G13: never shown before a crash can no longer take it back):
    the hub evaluates a frame while it is forced, and gives its messages once it is durable. *)
 
@@ -51,6 +64,24 @@ type msg =
 (* the state of a key of an aggregate: its bindings, and each aggregate's word (a sum, a minimum, a maximum) *)
 type key = { mutable n : int; acc : int array }
 
+(* a row of a window, in its order: every row of one window carries the same [cmp] *)
+type wrow = { cmp : row -> row -> int; r : row }
+
+module W = Map.Make (struct
+  type t = wrow
+
+  let compare a b = a.cmp a.r b.r
+end)
+
+(* Sort and Limit: the rows a watch holds, in its order *)
+type window = {
+  order : Top.order;  (* Sort's keys and Limit (0: every row); no After *)
+  cmp : row -> row -> int;  (* the keys, then every other column ascending (Top.full) *)
+  mutable kept : int W.t;  (* the rows held, each with its copies *)
+  mutable n : int;  (* the rows held, copies counted *)
+  mutable complete : bool;  (* they are every row of the answer *)
+}
+
 type sub = {
   sid : int;
   t : template;
@@ -66,6 +97,7 @@ type sub = {
   net : (row, int) Hashtbl.t;  (* a projecting Give: rows added minus removed *)
   before : (row, row option) Hashtbl.t;  (* Group: a touched key's row before the frame *)
   dirty : (row, unit) Hashtbl.t;  (* Group: a key whose minimum or maximum was removed *)
+  win : window option;  (* Sort and Limit *)
 }
 
 and template = {
@@ -265,9 +297,81 @@ let recount (v : Store.view) (s : sub) kv =
   fold_fixed v s.q asg ~drop:(fun _ -> false) (fun b -> agg_add t k b);
   k
 
-(* the watch's answer now, and its state (the keys of an aggregate) *)
+(* ---- Sort and Limit: a window ---- *)
+
+let new_window (o : Top.order) cols =
+  let ord = Top.full cols o.keys in
+  { order = o; cmp = Top.compare_value_rows ord; kept = W.empty; n = 0; complete = true }
+
+let win_add w r d =
+  w.kept <- W.update { cmp = w.cmp; r } (function None -> Some d | Some c -> Some (c + d)) w.kept;
+  w.n <- w.n + d
+
+(* one copy of [r] taken away, if held *)
+let win_take w r =
+  let k = { cmp = w.cmp; r } in
+  match W.find_opt k w.kept with
+  | Some c ->
+    w.kept <- (if c = 1 then W.remove k w.kept else W.add k (c - 1) w.kept);
+    w.n <- w.n - 1;
+    true
+  | None -> false
+
+(* the rows of [s]'s question in its order on [v], from the row after [after] (None: the first), [limit] of them and
+   the copies of the last (0: all) *)
+let ordered (v : Store.view) (s : sub) (w : window) ~after ~limit =
+  let t = s.t in
+  let order = { w.order with Top.limit; after } in
+  let a = Answer.answer ~order ~extra:t.extra ~budget:!Answer.question_budget v s.q (Wire.Give t.give) in
+  let typs = Array.init a.cols a.typ in
+  List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
+
+(* the window filled with the answer on [v]: its rows *)
+let win_answer (v : Store.view) (s : sub) (w : window) =
+  let rows = ordered v s w ~after:None ~limit:w.order.limit in
+  w.kept <- W.empty;
+  w.n <- 0;
+  List.iter (fun r -> win_add w r 1) rows;
+  w.complete <- w.order.limit = 0 || w.n < w.order.limit;
+  rows
+
+(* A frame's rows added and removed (the delta queries') moved into the window, on the view after the frame [v1]: the
+   rows it gains and loses, each in the order (the rule at the top of this file) *)
+let slide (v1 : Store.view) (s : sub) (w : window) added removed =
+  (* each row's copies gained (> 0) or lost, in the order *)
+  let net = ref W.empty in
+  let note r d = net := W.update { cmp = w.cmp; r } (fun o -> Some (d + Option.value o ~default:0)) !net in
+  let last = match W.max_binding_opt w.kept with Some (k, _) -> Some k.r | None -> None in
+  let inside r = w.complete || match last with Some l -> w.cmp r l <= 0 | None -> false in
+  List.iter (fun r -> if inside r && win_take w r then note r (-1)) removed;
+  List.iter (fun r -> if inside r then (win_add w r 1; note r 1)) added;
+  let k = w.order.limit in
+  if k > 0 && w.n > k then begin
+    (* the first k rows and the copies of the k-th: the whole entries after it go *)
+    let go = ref true in
+    while !go do
+      match W.max_binding_opt w.kept with
+      | Some (m, c) when w.n - c >= k -> w.kept <- W.remove m w.kept; w.n <- w.n - c; w.complete <- false; note m.r (-c)
+      | _ -> go := false
+    done
+  end;
+  if k > 0 && w.n < k && not w.complete then begin
+    (* every row held is at or before L, and every row of the answer there is held: the missing ones come after L *)
+    let need = k - w.n in
+    let more = ordered v1 s w ~after:last ~limit:need in
+    List.iter (fun r -> win_add w r 1; note r 1) more;
+    if List.length more < need then w.complete <- true
+  end;
+  let copies r c acc = let rec go i acc = if i = 0 then acc else go (i - 1) (r :: acc) in go c acc in
+  let a, r = W.fold (fun x d (a, r) -> if d > 0 then copies x.r d a, r else if d < 0 then a, copies x.r (-d) r else a, r) !net ([], []) in
+  List.rev a, List.rev r
+
+(* the watch's answer now, and its state (the keys of an aggregate, the window) *)
 let answer (v : Store.view) (s : sub) =
   let t = s.t in
+  match s.win with
+  | Some w -> win_answer v s w
+  | None ->
   if Array.length t.aggs = 0 then begin
     let a = if t.extra = [] then Answer.answer v s.q (Wire.Give t.give) else Answer.answer ~extra:t.extra ~budget:!Answer.question_budget v s.q (Wire.Give t.give) in
     let typs = Array.init a.cols a.typ in
@@ -381,6 +485,7 @@ let finish (v1 : Store.view) (s : sub) =
       !a, !r
     end
   in
+  let added, removed = match s.win with Some w when added <> [] || removed <> [] -> slide v1 s w added removed | _ -> added, removed in
   if added = [] && removed = [] then None else Some (added, removed)
 
 (* The bindings of the template over [v] that use a fact of [delta] (a table of the frame's facts on this side, by
@@ -619,7 +724,7 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
         let ts = Hashtbl.create 8 in
         Hashtbl.iter (fun p () -> List.iter (fun (t, _) -> Hashtbl.replace ts t.tkey t) (Option.value (Hashtbl.find_opt h.by_prop p) ~default:[])) props;
         let dplus = lazy (words v1 plus) and dminus = lazy (words v0 minus) in
-        let wholes = ref [] and broken = ref [] in
+        let wholes = ref [] and broken = ref [] and over = ref [] in
         (* what a question did not expect, in its changes or its rows, ends its own watches (failed); a damaged page
            ends every watch (below) *)
         let guard t f =
@@ -655,12 +760,21 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
              (fun s ->
                if ok s then
                  guard s.t @@ fun () ->
-                 match finish v1 s with Some (added, removed) -> out := (s, Change { group = v1.group; added; removed }) :: !out | None -> ())
+                 match finish v1 s with
+                 | Some (added, removed) -> out := (s, Change { group = v1.group; added; removed }) :: !out
+                 | None -> ()
+                 (* a window's refill past the budget: that watch ends *)
+                 | exception Query.Over_budget n -> over := (s, n) :: !over)
              (List.rev !touched);
            List.rev !out
          with
         | out ->
           List.iter (fun (t, e) -> failed h t e) (List.rev !broken);
+          List.iter
+            (fun (s, n) ->
+              remove h s;
+              ignore (s.emit (Ended { code = "too_large"; message = Printf.sprintf "the question passed the server's budget of %d candidates" n })))
+            (List.rev !over);
           give h tag (List.filter (fun (s, _) -> not s.gone) (out @ List.rev !wholes))
         | exception (Pages.Unreadable m | Query.Bad m) -> end_all h "damaged" m)
       end;
@@ -715,11 +829,17 @@ let touched_since h (q : Query.t) n =
 (* A watch of [q] with [sel], resuming from group [from] (0: a new one): its first message is the answer at the hub's
    newest state, or Same when that answer is the one at [from] (the ring holds every change since and none touches
    the question), held until that state is durable; then a change after each frame that changes its rows. [emit] is
-   called under the hub's lock and must not wait. Raises Query.Bad for a question that is not valid, and
+   called under the hub's lock and must not wait. With [order] (Sort, and Limit or none), its rows are Find's with
+   that order, in it (a window, above). Raises Query.Bad for a question that is not valid, Query.Over_budget, and
    Pages.Unreadable. *)
-let subscribe ?(extra = []) h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
+let subscribe ?(extra = []) ?(order = Top.none) h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
   Mutex.protect h.hm (fun () ->
       (match h.stopped with Some (code, m) -> raise (Failure (code ^ ": " ^ m)) | None -> ());
+      if order <> Top.none then begin
+        (match sel with Wire.Group _ -> Query.bad "a watch of aggregates keeps every group: Sort and Limit are for a watch of Give" | Give _ -> ());
+        if order.after <> None then Query.bad "a watch has no After: its rows are the first of its order, as they change";
+        if order.keys = [] then Query.bad "a watch's Limit needs Sort: the engine's order is no order a watch can keep"
+      end;
       let v = h.view in
       let tq, key, params =
         if extra = [] then (check v q sel; templatize q sel)
@@ -738,15 +858,15 @@ let subscribe ?(extra = []) h (q : Query.t) (sel : Wire.select) ~from ~(emit : m
         | Some t -> t
         | None -> if extra = [] then new_template v key tq q.vars sel else whole_template v key q sel extra
       in
+      let win = if order = Top.none then None else Some (new_window order (Array.length t.give)) in
       let s =
         { sid = h.next; t; params; q; emit; gone = false; keys = Hashtbl.create 8; touched = false; plus = []; minus = [];
-          net = Hashtbl.create 8; before = Hashtbl.create 8; dirty = Hashtbl.create 8 }
+          net = Hashtbl.create 8; before = Hashtbl.create 8; dirty = Hashtbl.create 8; win }
       in
       let first =
         if from > 0 && from >= h.ring_from && from <= v.group && not (touched_since h { q with where = all_patterns q extra } from) then begin
-          if extra <> [] && Array.length t.aggs > 0 then ignore (answer v s);
-          (* the keys of an aggregate are needed for the changes to come *)
-          if Array.length t.aggs > 0 then ignore (answer v s);
+          (* the keys of an aggregate, and a window, are needed for the changes to come *)
+          if Array.length t.aggs > 0 || win <> None then ignore (answer v s);
           Same { group = v.group }
         end
         else Answer { group = v.group; rows = answer v s }

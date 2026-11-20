@@ -171,7 +171,7 @@ let () =
   (* the warm-up: a watch makes the hubs' domain and thread, which stay *)
   let p, ended = pair () in
   ignore (welcomed p);
-  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = [] });
+  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none });
   ignore (next_frame p);
   Unix.close p.fd;
   ignore (ends ended);
@@ -188,7 +188,7 @@ let () =
   (* 1. a watch, a write answered, then a write in flight and a request that raises, sent together *)
   let p, ended = pair () in
   let w1 = welcomed p in
-  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = [] });
+  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none });
   let answered = match next_frame p with Some f -> (match push f with Some (Wire.Answer _) -> true | _ -> false) | None -> false in
   send p ~id:3 (write 1);
   let receipt = ref false and change = ref false in
@@ -258,7 +258,7 @@ let () =
   let other name (p, ended) =
     let w = welcomed p in
     (* its pushes' thread made, as a push that fails would find it *)
-    send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = [] });
+    send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none });
     ignore (next_frame p);
     let c = Mutex.protect srv.cm (fun () -> Hashtbl.fold (fun _ c _ -> Some c) srv.conns None) in
     let (), _ = with_stderr dir (fun () -> match c with Some c -> Core.broke c (Failure "a push that failed") | None -> ()) in

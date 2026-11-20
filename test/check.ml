@@ -130,6 +130,40 @@ let naive ?types (facts : F.t) (q : Query.t) =
 
 let sorted_rows l = List.sort compare l
 
+(* ---- Sort and Limit's reference: rows of values sorted by the keys, then every other column ascending, cut to the
+   first k and the copies of the k-th; values compared within their type (no float in the tests' schemas) ---- *)
+
+module Top = Question.Top
+
+let cmp_value (a : Value.t) (b : Value.t) =
+  match a, b with
+  | Text x, Text y -> String.compare x y
+  | (Int x | Date x | Money x | Link x), (Int y | Date y | Money y | Link y) -> Int.compare x y
+  | Bool x, Bool y -> Bool.compare x y
+  | _ -> compare a b
+
+let cmp_rows (o : Top.order) (a : Value.t array) b =
+  let cols = Array.length a in
+  let keys = o.keys @ List.filter_map (fun c -> if List.exists (fun (k : Top.key) -> k.col = c) o.keys then None else Some { Top.col = c; desc = false }) (List.init cols Fun.id) in
+  List.fold_left (fun c (k : Top.key) -> if c <> 0 then c else let x = cmp_value a.(k.col) b.(k.col) in if k.desc then -x else x) 0 keys
+
+(* the rows in the order, cut at its limit *)
+let top_rows (o : Top.order) rows =
+  let sorted = List.stable_sort (cmp_rows o) rows in
+  if o.limit = 0 || List.length sorted <= o.limit then sorted
+  else
+    let kth = List.nth sorted (o.limit - 1) in
+    List.filteri (fun i x -> i < o.limit || x = kth) sorted
+
+let rec in_order o = function a :: (b :: _ as rest) -> cmp_rows o a b <= 0 && in_order o rest | _ -> true
+
+(* a random Sort (keys of the columns, ascending or descending) and a Limit of 1 to 5, or none, for [cols] columns *)
+let random_order r cols =
+  let keys = List.filter_map (fun c -> if Rng.int r 2 = 0 then Some { Top.col = c; desc = Rng.bool r } else None) (List.init cols Fun.id) in
+  let keys = if keys = [] then [ { Top.col = Rng.int r cols; desc = Rng.bool r } ] else keys in
+  let keys = if Rng.bool r then List.rev keys else keys in
+  { Top.keys; limit = (if Rng.int r 4 = 0 then 0 else 1 + Rng.int r 5); after = None }
+
 (* ---- The rules' reference: the least model, naively ---- *)
 
 (* the type of a property a rule may give ([ptyp]), for rules with a variable property: a fact whose property is none,

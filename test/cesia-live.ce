@@ -126,11 +126,36 @@ defn follow(w, title, want)
   result.Ok({Rows: rows, Group: group, Growing: growing})
 end
 
+defn descending(rows)
+  (** The rows' N are in descending order. *)
+  ns = [r.N for r in rows]
+  value.Equal(ns, list.Reverse(list.Sort(ns)))
+end
+
+defn upTo(w, group)
+  (** The rows of a watch with Sort and Limit, taken from its channel until its message of group [group]: whether
+      each message's rows came in the order. *)
+  first = fiber.Receive(w.Changes, timeout = 30)?
+  rows = first.Rows
+  inOrder = descending(rows)
+  g = first.Group
+  while g < group
+    c = fiber.Receive(w.Changes, timeout = 30)?
+    inOrder = inOrder and (if value.IsMissing(c.Rows) descending(c.Added) and descending(c.Removed) else descending(c.Rows) end)
+    g = c.Group
+    rows = if value.IsMissing(c.Rows) list.Concat(list.Filter(r -> list.Count(x -> value.Equal(x, r), c.Removed) == 0, rows), c.Added) else c.Rows end
+  end
+  result.Ok({Rows: rows, InOrder: inOrder})
+end
+
 defn watching(url, ca, what)
-  (** A watch of the notes of a run, while another connection writes them: its rows at the end are the 20 notes. *)
+  (** A watch of the notes of a run, while another connection writes them: its rows at the end are the 20 notes; and a
+      watch of the 5 largest, Sort and Limit: its rows at the end are Find's 5, each message's in the order. *)
   db = cepheus.Connect(url, [Note], token = token, ca = ca)?
   other = cepheus.Connect(url, [Note], token = token, ca = ca)?
   w = cepheus.Watch(2, (x, n) -> {Where: [[x, Note.Title, what], [x, Note.N, n]], Give: {N: n}}, db)?
+  top = (x, n) -> {Where: [[x, Note.Title, what], [x, Note.N, n]], Give: {N: n}, Sort: [cepheus.Desc(n)], Limit: 5}
+  five = cepheus.Watch(2, top, db)?
   writer = fiber.Spawn(() -> [cepheus.Insert(Note, {Title: what, N: k, Mark: "$what-$k"}, other) for k in 1..20])
   got = follow(w, what, 20)?
   fiber.Wait(writer)
@@ -138,6 +163,11 @@ defn watching(url, ca, what)
   ns = list.Sort([r.N for r in got.Rows])
   found = list.Sort([r.N for r in cepheus.Find(2, (x, n) -> {Where: [[x, Note.Title, what], [x, Note.N, n]], Give: {N: n}}, db)?])
   io.Print("$what watch:", value.Len(ns), "rows, groups growing:", got.Growing, "the same as Find:", value.Equal(ns, found))
+  (* each write is a larger N: every group changes the five, the last one too *)
+  kept = upTo(five, got.Group)?
+  cepheus.Close(five)
+  io.Print("$what watch of the 5 largest: Find's rows:", value.Equal(list.Reverse(list.Sort([r.N for r in kept.Rows])), [r.N for r in cepheus.Find(2, top, db)?]),
+           "each message in the order:", kept.InOrder)
   cepheus.Close(db)
   cepheus.Close(other)
   result.Ok(missing)

@@ -31,7 +31,7 @@ type t = {
   early : (int, (int * int * Bytes.t) list) Hashtbl.t;  (* replies that came before they were asked for *)
   mutable welcome : Wire.reply option;
   mutable follows : (Unix.file_descr * unit Domain.t) list;  (* the follow streams of its databases *)
-  mutable spoken : int;  (* the protocol's version this connection speaks: 4, or less with a server that speaks no more *)
+  mutable spoken : int;  (* the protocol's version this connection speaks: 5, or less with a server that speaks no more *)
   mutable members : address list;  (* a Raft cluster's servers, from Welcome: where to go when this one is gone *)
 }
 
@@ -46,6 +46,10 @@ let no_files = "this server speaks protocol 2 or older: files need a server of p
 let no_incr = "this server speaks protocol 3 or older: Incr needs a server of protocol 4"
 
 let has_incr ops = List.exists (function Resolve.Incr _ -> true | _ -> false) ops
+
+(* a watch with Sort and Limit, on a connection to a server of protocol 4 or older: refused here, never sent (such a
+   server refuses the watch's order) *)
+let no_sorted_watch spoken = Printf.sprintf "this server speaks protocol %d: a watch with Sort and Limit needs a server of protocol 5" spoken
 
 exception Broken of string
 
@@ -638,9 +642,10 @@ let rec declare ?(avoid = []) c name (props : Schema.prop list) =
 
 type pushed = Pushed of Wire.push | Ended of error
 
-let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) query =
+let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) ?(order = Top.none) query =
   if extra <> [] && c.spoken < 2 then invalid_arg older;
-  let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra }) in
+  if order <> Top.none && c.spoken < 5 then invalid_arg (no_sorted_watch c.spoken);
+  let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra; worder = order }) in
   flush c;
   id
 

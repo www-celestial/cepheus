@@ -6,7 +6,10 @@
    later; watches that fall behind (their queue full), resume from their group (Same or the answer), or end with a
    large group. At every message a watch gets, its rows must be the naive answer of its question on the facts of the
    view of the message's group, as a multiset (G11 of live questions); and no message is given before its frame is
-   durable. A failure prints its seed; [live_sim.exe --seed N] replays it. *)
+   durable. A watch of Give may have Sort (random keys, ascending or descending) and a Limit of 1 to 5 rows, or none:
+   its rows, in its order, must then be the naive answer sorted and cut (its first k rows and the copies of the k-th)
+   and Find's rows with the same Sort and Limit on the view of that group, and each message's rows must come in the
+   order. A failure prints its seed; [live_sim.exe --seed N] replays it. *)
 
 open Cepheus
 open Cepheus_server
@@ -20,9 +23,14 @@ let messages = ref 0
 let sames = ref 0
 let laggings = ref 0
 
+module Top = Question.Top
+
+let windows = ref 0
+
 type watch = {
   q : Query.t;
   sel : Wire.select;
+  order : Top.order;  (* Sort and Limit, or none *)
   mutable sub : Live.sub option;
   mutable rows : Value.t array list;  (* as its messages left them *)
   mutable group : int;
@@ -99,6 +107,19 @@ let run seed =
   let check_now w g what =
     let f = facts_at g in
     let want = expected f w.q w.sel and got = List.sort compare w.rows in
+    let want, got =
+      if w.order = Top.none then want, got
+      else begin
+        (* in the order: the oracle's rows, and Find's on the view of that group *)
+        incr windows;
+        let o = C.top_rows w.order want and mine = C.top_rows { w.order with limit = 0 } w.rows in
+        let v = Hashtbl.find views g in
+        let a = Answer.answer ~order:w.order v w.q w.sel in
+        let find = List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v (a.typ j) (a.word i j))) in
+        C.check (find = o) "seed %d: %s of group %d: Find gives %d rows, the oracle %d" seed what g (List.length find) (List.length o);
+        o, mine
+      end
+    in
     if want <> got && Sys.getenv_opt "LIVE_DEBUG" <> None then begin
       let pr l = String.concat " | " (List.map (fun r -> String.concat "," (Array.to_list (Array.map Value.to_string r))) l) in
       Printf.printf "question: %s\n  got: %s\n  want: %s\n  watch group %d\n" (String.concat "; " (List.map (fun (pt : Query.pattern) ->
@@ -124,10 +145,12 @@ let run seed =
       incr messages;
       match m with
       | Answer a ->
+        C.check (w.order = Top.none || C.in_order w.order a.rows) "seed %d: an answer's rows out of the order" seed;
         C.check (a.group <= !durable) "seed %d: an answer of group %d given before it is durable (%d)" seed a.group !durable;
         C.check (a.group >= w.group) "seed %d: an answer of group %d after %d" seed a.group w.group;
         w.rows <- a.rows; w.group <- a.group; w.started <- true; check_now w a.group "an answer"; true
       | Change c ->
+        C.check (w.order = Top.none || (C.in_order w.order c.added && C.in_order w.order c.removed)) "seed %d: a change's rows out of the order" seed;
         C.check (w.started && c.group > w.group) "seed %d: a change of group %d after %d" seed c.group w.group;
         C.check (c.group <= !durable) "seed %d: a change of group %d given before it is durable (%d)" seed c.group !durable;
         List.iter (fun x -> match remove_one x w.rows with Some rows -> w.rows <- rows | None -> C.check false "seed %d: a row removed that is not there" seed) c.removed;
@@ -145,7 +168,7 @@ let run seed =
   in
   let subscribe w ~from =
     w.ended <- None;
-    match Live.subscribe hub w.q w.sel ~from ~emit:(emit w) with
+    match Live.subscribe ~order:w.order hub w.q w.sel ~from ~emit:(emit w) with
     | s -> if w.ended = None then w.sub <- Some s (* its first message may end it at once (its queue full) *)
     | exception Query.Bad m -> C.check false "seed %d: a question refused: %s" seed m
   in
@@ -170,7 +193,13 @@ let run seed =
   in
   let add_watch () =
     let q, sel = questions () in
-    let w = { q; sel; sub = None; rows = []; group = 0; started = false; ended = None; full = false } in
+    (* Sort and Limit half of the time on a Give: random keys, a limit of 1 to 5, or none *)
+    let order =
+      match sel with
+      | Wire.Give g when Rng.int r 2 = 0 -> C.random_order r (if Array.length g = 0 then q.vars else Array.length g)
+      | _ -> Top.none
+    in
+    let w = { q; sel; order; sub = None; rows = []; group = 0; started = false; ended = None; full = false } in
     watches := w :: !watches;
     subscribe w ~from:0
   in
@@ -252,5 +281,5 @@ let () =
   let seeds = ref 400 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "N" ] ignore "live_sim.exe";
   (match !one with Some s -> run s | None -> for s = 1 to !seeds do run s done);
-  Printf.printf "live: %d messages checked (%d same, %d lagging)\n" !messages !sames !laggings;
+  Printf.printf "live: %d messages checked (%d same, %d lagging; %d checks of a window against Find)\n" !messages !sames !laggings !windows;
   C.finish "live"

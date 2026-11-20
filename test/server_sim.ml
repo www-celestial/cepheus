@@ -70,6 +70,7 @@ type known = { answered : int; returned : int }
 type cwatch = {
   wq : Query.t;
   wsel : Wire.select;
+  word : Question.Top.order;  (* Sort and Limit, or none *)
   mutable wid : int option;  (* the id of its Watch on the current connection *)
   mutable wrows : Value.t array list;
   mutable wgroup : int;
@@ -130,8 +131,8 @@ type server = {
 type ev = E of Follow.event | R of int * (int * int) list * Follower.file list
 
 (* a watch of a local reader, on its follower *)
-type lwatch = { lq : Query.t; lsel : Wire.select; mutable lrows : Value.t array list; mutable lgroup : int; mutable lstarted : bool;
-                mutable lsub : Live.sub option }
+type lwatch = { lq : Query.t; lsel : Wire.select; lord : Question.Top.order; mutable lrows : Value.t array list; mutable lgroup : int;
+                mutable lstarted : bool; mutable lsub : Live.sub option }
 
 type reader = {
   mutable lw : lwatch list;
@@ -488,9 +489,16 @@ let expected w g (q : Query.t) (sel : Wire.select) =
 
 let rec remove_one x = function [] -> None | y :: r when y = x -> Some r | y :: r -> Option.map (fun r -> y :: r) (remove_one x r)
 
-(* a message of a watch, applied to its rows: then they must be the model's answer at its group *)
-let watch_message w what rows group0 started (m : Wire.push) =
+(* a message of a watch, applied to its rows: then they must be the model's answer at its group; with Sort, each
+   message's rows in the order *)
+let watch_message w what ?(order = Top.none) rows group0 started (m : Wire.push) =
   let g = match m with Wire.Answer a -> a.group | Change c -> c.group | Same g -> g in
+  if order <> Top.none then begin
+    match m with
+    | Wire.Answer a -> if not (C.in_order order a.rows) then fail w "%s: an answer's rows out of the order" what
+    | Change c -> if not (C.in_order order c.added && C.in_order order c.removed) then fail w "%s: a change's rows out of the order" what
+    | Same _ -> ()
+  end;
   if g > w.committed then fail w "%s: a message of group %d, not durable (%d)" what g w.committed;
   (match m with
    | Wire.Change _ -> if not started || g <= group0 then fail w "%s: a change of group %d after %d" what g group0
@@ -506,8 +514,15 @@ let watch_message w what rows group0 started (m : Wire.push) =
   in
   rows, g
 
-let check_watch w what rows g q sel =
-  if C.sorted_rows rows <> C.sorted_rows (expected w g q sel) then
+let check_watch w what ?(order = Top.none) rows g q sel =
+  if order <> Top.none then begin
+    (* Sort and Limit: the naive answer in the order, cut *)
+    let want = C.top_rows order (expected w g q sel) in
+    if C.top_rows { order with limit = 0 } rows <> want then
+      fail w "%s with Sort and Limit at group %d: %d rows, the naive evaluator %d" what g (List.length rows) (List.length want)
+    else count (what ^ "es with Sort and Limit checked")
+  end
+  else if C.sorted_rows rows <> C.sorted_rows (expected w g q sel) then
     fail w "%s at group %d: %d rows, the naive evaluator %d" what g (List.length rows) (List.length (expected w g q sel))
   else count (what ^ "es checked")
 
@@ -517,7 +532,7 @@ let send_watch (cl : client) sc cw =
   let id = cl.next_id in
   cl.next_id <- cl.next_id + 1;
   let body = Buffer.create 64 in
-  Wire.put_request body (Wire.Watch { db = 0; query = cw.wq; select = cw.wsel; from; wextra = [] });
+  Wire.put_request body (Wire.Watch { db = 0; query = cw.wq; select = cw.wsel; from; wextra = []; worder = cw.word });
   Wire.add_frame sc.to_server ~id ~kind:Wire.k_watch ~flags:0 body;
   Hashtbl.replace sc.outstanding id (P_watch cw);
   cw.wid <- Some id
@@ -543,11 +558,11 @@ let on_watch w (cl : client) sc id flags body cw =
     else begin
       cw.wparts <- None;
       if not (allowed_read cl.kind) then fail w "client %s watched without the right" (token_of cl.kind);
-      let rows, g = watch_message w "a watch" cw.wrows cw.wgroup cw.wstarted m in
+      let rows, g = watch_message w "a watch" ~order:cw.word cw.wrows cw.wgroup cw.wstarted m in
       cw.wrows <- rows;
       cw.wgroup <- g;
       cw.wstarted <- true;
-      check_watch w "a watch" rows g cw.wq cw.wsel
+      check_watch w "a watch" ~order:cw.word rows g cw.wq cw.wsel
     end
   end
 
@@ -795,14 +810,14 @@ let local_subscribe w r (lw : lwatch) =
              | Same s -> Wire.Same s.group
              | Ended _ -> assert false
            in
-           let rows, g = watch_message w "a local watch" lw.lrows lw.lgroup lw.lstarted p in
+           let rows, g = watch_message w "a local watch" ~order:lw.lord lw.lrows lw.lgroup lw.lstarted p in
            lw.lrows <- rows;
            lw.lgroup <- g;
            lw.lstarted <- true;
-           check_watch w "a local watch" rows g lw.lq lw.lsel);
+           check_watch w "a local watch" ~order:lw.lord rows g lw.lq lw.lsel);
         true
       in
-      match Live.subscribe h lw.lq lw.lsel ~from:(if lw.lstarted then lw.lgroup else 0) ~emit with
+      match Live.subscribe ~order:lw.lord h lw.lq lw.lsel ~from:(if lw.lstarted then lw.lgroup else 0) ~emit with
       | sub -> lw.lsub <- Some sub; count "local watches"
       | exception Failure m -> count ("local watches refused: " ^ m)
       | exception Query.Bad m -> fail w "a local watch refused: %s" m))
@@ -822,7 +837,9 @@ let reader_watch w r =
         | None -> ()
         | Some q ->
           let lsel = if Rng.bool w.r then Wire.Give [||] else Wire.Give (Array.init (1 + Rng.int w.r q.vars) (fun _ -> Rng.int w.r q.vars)) in
-          let lw = { lq = q; lsel; lrows = []; lgroup = 0; lstarted = false; lsub = None } in
+          let cols = match lsel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group _ -> 0 in
+          let lord = if Rng.bool w.r then C.random_order w.r cols else Top.none in
+          let lw = { lq = q; lsel; lord; lrows = []; lgroup = 0; lstarted = false; lsub = None } in
           r.lw <- lw :: r.lw;
           local_subscribe w r lw)
       | None -> ())
@@ -923,7 +940,9 @@ let client_step w (cl : client) =
                 | x :: _ -> Wire.Group (key, [| Wire.Count; Wire.Sum x; Wire.Min x; Wire.Max x |])
                 | [] -> Wire.Group (key, [| Wire.Count |]))
             in
-            let cw = { wq = q; wsel = sel; wid = None; wrows = []; wgroup = 0; wstarted = false; wparts = None } in
+            (* Sort and Limit half of the time on a Give *)
+            let word = match sel with Wire.Give g when Rng.bool w.r -> C.random_order w.r (if Array.length g = 0 then q.vars else Array.length g) | _ -> Top.none in
+            let cw = { wq = q; wsel = sel; word; wid = None; wrows = []; wgroup = 0; wstarted = false; wparts = None } in
             cl.watches <- cl.watches @ [ cw ];
             count "watches";
             send_watch cl sc cw))

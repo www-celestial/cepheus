@@ -74,6 +74,26 @@ let compare_rows v (typs : Value.typ array) (ord : key array) (a : int array) (b
   done;
   !c
 
+(* rows of values (a watch's, Live) in the order [ord], as compare_rows orders their words: an int, a date, money or a
+   link is its own word (Store.word), a bool 0 or 1 *)
+let compare_values (a : Value.t) (b : Value.t) =
+  match a, b with
+  | Text x, Text y -> String.compare x y
+  | Float x, Float y -> total_order x y
+  | (Int x | Date x | Money x | Link x), (Int y | Date y | Money y | Link y) -> compare x y
+  | Bool x, Bool y -> compare x y
+  | _ -> compare a b
+
+let compare_value_rows (ord : key array) (a : Value.t array) (b : Value.t array) =
+  let c = ref 0 and i = ref 0 in
+  while !c = 0 && !i < Array.length ord do
+    let k = ord.(!i) in
+    let x = compare_values a.(k.col) b.(k.col) in
+    c := if k.desc then -x else x;
+    incr i
+  done;
+  !c
+
 (* a cursor's cell, ready to compare with a word *)
 type cell = W of int | S of string | F of float
 

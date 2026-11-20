@@ -921,9 +921,10 @@ let message_keys = C.keys [| "Group"; "Rows"; "Added"; "Removed" |]
 let find_source d (sh : Conn.shared) =
   let from = if sh.started then sh.group else 0 in
   let local hub =
-    match Live.subscribe ~extra:sh.extra hub sh.query sh.select ~from ~emit:(fun m -> Conn.deliver sh m; true) with
+    match Live.subscribe ~extra:sh.extra ~order:sh.order hub sh.query sh.select ~from ~emit:(fun m -> Conn.deliver sh m; true) with
     | sub -> Mutex.protect sh.sm (fun () -> sh.src <- Local (hub, sub)); true
     | exception Query.Bad m -> Conn.finish sh "invalid" m; true
+    | exception Query.Over_budget n -> Conn.finish sh "too_large" (Printf.sprintf "the question passed the budget of %d candidates" n); true
     | exception Pages.Unreadable m -> Conn.finish sh "damaged" m; true
     | exception Failure _ -> false
   in
@@ -933,9 +934,10 @@ let find_source d (sh : Conn.shared) =
     match Client.local_hub s.conn.cl s.cdb with
     | Some hub when local hub -> true
     | _ when sh.extra <> [] && s.conn.cl.spoken < 2 -> Conn.finish sh "invalid" Client.older; true
+    | _ when sh.order <> Question.Top.none && s.conn.cl.spoken < 5 -> Conn.finish sh "invalid" (Client.no_sorted_watch s.conn.cl.spoken); true
     | _ ->
       Mutex.protect sh.sm (fun () -> sh.src <- Remote);
-      Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from; wextra = sh.extra }))
+      Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from; wextra = sh.extra; worder = sh.order }))
 
 (* a watch's source stops: the server's watch, or the hub's *)
 let stop_source d (sh : Conn.shared) =
@@ -961,13 +963,16 @@ let watch ctx a =
     let d = db_of ctx name a.(0) in
     let nvars = int ctx name a.(2) in
     let qn = question ctx name d a.(1) nvars in
-    if qn.order <> Question.Top.none then refuse "invalid" "a watch keeps every row of its question: Sort, Limit and After are for Find";
     let b = Buffer.create 64 in
     Wire.put_query b qn.query;
     Wire.put_select b qn.select;
-    if qn.extra <> [] then Wire.put_order b ~extra:qn.extra Question.Top.none;
+    if qn.extra <> [] || qn.order <> Question.Top.none then Wire.put_order b ~extra:qn.extra qn.order;
     let key = string_of_int (match a.(0) with C.Handle (_, i) -> i | _ -> -1) ^ ":" ^ Buffer.contents b in
-    let sh = match Hashtbl.find_opt shared key with Some sh when sh.ended = None -> sh | _ -> let sh = Conn.new_shared ~extra:qn.extra key qn.query qn.select in Hashtbl.replace shared key sh; sh in
+    let sh =
+      match Hashtbl.find_opt shared key with
+      | Some sh when sh.ended = None -> sh
+      | _ -> let sh = Conn.new_shared ~extra:qn.extra ~order:qn.order key qn.query qn.select in Hashtbl.replace shared key sh; sh
+    in
     let c = Conn.join sh in
     (* the first message waited for here: the answer, or why there is none; it is given again by the first next *)
     match Conn.next (park ctx) (find_source d) c with

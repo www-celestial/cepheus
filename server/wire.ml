@@ -1,7 +1,8 @@
-(* The wire protocol, versions 1 to 4. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+(* The wire protocol, versions 1 to 5. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
    After: below), version 3 the files of the vault (Put, Piece, Load: below), version 4 the operation Incr (tag 4 of
-   put_op), and nothing else: a server speaks all four, a program says in Hello the version it speaks, and against an
-   older server a program speaks that server's version (Client.hello) and asks nothing that version lacks. A
+   put_op), version 5 a Watch's Sort and Limit (its extension's order, which an older server refuses), and nothing
+   else: a server speaks all five, a program says in Hello the version it speaks, and against an older server a
+   program speaks that server's version (Client.hello) and asks nothing that version lacks. A
    connection carries frames both ways:
 
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
@@ -15,7 +16,7 @@ open Cepheus
 module Ask = Question.Ask
 module Top = Question.Top
 
-let version = 4
+let version = 5
 
 (* the oldest version a server still speaks *)
 let oldest = 1
@@ -72,8 +73,9 @@ type request =
   | Ping of string
   | Admin of string
   | Follow of int  (** a database: this connection becomes its follow stream *)
-  | Watch of { db : int; query : Query.t; select : select; from : int; wextra : Ask.item list }
-      (** the question kept answered; [from]: the group whose answer the program holds (0: none) *)
+  | Watch of { db : int; query : Query.t; select : select; from : int; wextra : Ask.item list; worder : Top.order }
+      (** the question kept answered; [from]: the group whose answer the program holds (0: none); [worder]: Sort and
+          Limit (version 5), coded as Find's order; with neither it nor [wextra], the request is coded as before them *)
   | Unwatch of int  (** the id of the Watch *)
   | Put of {
       db : int;
@@ -313,7 +315,7 @@ let put_request b = function
   | Follow db -> Codec.put_varint b db
   | Watch w ->
     Codec.put_varint b w.db; put_query b w.query; put_select b w.select; Codec.put_varint b w.from;
-    if w.wextra <> [] then put_order b ~extra:w.wextra Top.none
+    if w.wextra <> [] || w.worder <> Top.none then put_order b ~extra:w.wextra w.worder
   | Unwatch id -> Codec.put_varint b id
   | Put p ->
     Codec.put_varint b p.db;
@@ -372,9 +374,8 @@ let get_request kind (r : Codec.reader) =
       let query = get_query r in
       let select = get_select r in
       let from = Codec.get_varint r in
-      let wextra, order = get_order r in
-      if order <> Top.none then raise (Malformed "a watch keeps every row of its question: Sort, Limit and After are for Find");
-      Watch { db; query; select; from; wextra }
+      let wextra, worder = get_order r in
+      Watch { db; query; select; from; wextra; worder }
     else if kind = k_unwatch then Unwatch (Codec.get_varint r)
     else if kind = k_put then
       let db = Codec.get_varint r in

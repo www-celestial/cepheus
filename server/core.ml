@@ -511,7 +511,7 @@ let move_pushes c =
     true
   end
 
-let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
+let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
   let tok = Option.get c.token in
   let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
   (* G16 at each message: the token may still read the database (the table is read again only when it changed) *)
@@ -563,7 +563,7 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra =
   in
   let emit m = match push m with ok -> ok | exception e -> broke c e; true in
   let h = d.hub () in
-  match Live.subscribe ~extra h q sel ~from ~emit with
+  match Live.subscribe ~extra ~order h q sel ~from ~emit with
   | s -> Mutex.protect c.pm (fun () -> c.watching <- (id, (h, s)) :: c.watching)
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
   | exception Query.Over_budget n ->
@@ -684,7 +684,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
         | _, Wire.Watch w ->
           (match readable c ~id ~kind w.db with
            | None -> ()
-           | Some d -> if kinds_read c ~id ~kind d w.query w.wextra then watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra);
+           | Some d -> if kinds_read c ~id ~kind d w.query w.wextra then watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra ~order:w.worder);
           Continue
         | _, Wire.Unwatch w -> unwatch c ~id ~kind w; Continue
         | _, (Wire.Put p as req) ->

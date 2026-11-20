@@ -136,6 +136,11 @@ let rand_request r =
     Wire.Write { db = 0; serial = Rng.int r 100; floor = Rng.int r 100; by = Rng.int r 10 - 5; why = "why"; ops = List.init (Rng.int r 5) (fun _ -> op ()) }
   | 5 -> Wire.Ping (String.make (Rng.int r 30) 'p')
   | 6 -> Wire.Follow (Rng.int r 300)
+  | 7 when Rng.bool r ->
+    (* a Watch, with Sort and Limit or without (version 5) *)
+    let q = { Query.vars = 1 + Rng.int r 3; where = List.init (Rng.int r 4) (fun _ -> { Query.e = rand_term r; p = Rng.int r 40; v = rand_term r }); ranges = [] } in
+    let worder = if Rng.bool r then Top.none else { Top.keys = List.init (1 + Rng.int r 3) (fun _ -> { Top.col = Rng.int r 3; desc = Rng.bool r }); limit = Rng.int r 5; after = None } in
+    Wire.Watch { db = Rng.int r 4; query = q; select = Wire.Give (Array.init (Rng.int r 3) (fun _ -> Rng.int r 3)); from = Rng.int r 1000; wextra = []; worder }
   | _ -> Wire.Admin "status"
 
 let wire () =
@@ -159,6 +164,8 @@ let wire () =
          so that a server that does not know it reads every other question as before (a frame's length tells where
          its body ends: no connection cuts one) *)
       | Wire.Find f' when (match q with Wire.Find f -> f.order <> Top.none && f'.order = Top.none && f'.query = f.query && f'.select = f.select | _ -> false) -> ()
+      (* a Watch likewise: without its Sort and Limit, it is the watch an older program sends *)
+      | Wire.Watch w' when (match q with Wire.Watch w -> w.worder <> Top.none && w'.worder = Top.none && w'.query = w.query && w'.from = w.from | _ -> false) -> ()
       | _ -> ok := false
       | exception (Codec.Short | Wire.Malformed _) -> ()
     end
@@ -524,7 +531,7 @@ let rights_kinds () =
   let thing = match made with Some (Wire.Receipt { things = (_, t) :: _; _ }) -> t | _ -> 0 in
   let q ps = { Query.vars = 2; where = List.map (fun p -> { Query.e = Var 0; p; v = Var 1 }) ps; ranges = [] } in
   let find ask ps = ask (Wire.Find { db = 0; query = q ps; select = Wire.Give [||]; extra = []; order = Top.none }) in
-  let watch ask ps = ask (Wire.Watch { db = 0; query = q ps; select = Wire.Give [||]; from = 0; wextra = [] }) in
+  let watch ask ps = ask (Wire.Watch { db = 0; query = q ps; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none }) in
   check (match find k [ 17 ] with Some (Wire.Rows _) -> true | _ -> false) "kinds: a question on a kind read";
   check (denied (find k [ 18 ]) && denied (find k [ 16; 18 ])) "kinds: a question that touches a kind not read is denied";
   check (denied (watch k [ 18 ])) "kinds: a watch too, when it arrives";
@@ -588,7 +595,7 @@ let rights_kinds () =
     | _ -> incr leaks
   done;
   check (!leaks = 0 && !denials > 100 && !answered > 100) "kinds: every operator, Sort and After under rights per kind (%d denied, %d answered, %d wrong)" !denials !answered !leaks;
-  check (denied (k (Wire.Watch { db = 0; query = q [ 16 ]; select = Wire.Give [||]; from = 0; wextra = [ Ask.Not [ Pattern { e = Var 0; p = 18; v = Var 2 } ] ] })))
+  check (denied (k (Wire.Watch { db = 0; query = q [ 16 ]; select = Wire.Give [||]; from = 0; wextra = [ Ask.Not [ Pattern { e = Var 0; p = 18; v = Var 2 } ] ]; worder = Question.Top.none })))
     "kinds: a watch with a Not over a kind not read is denied";
   (* the bounds, each with its error; the work budget; a cursor by hand that is not a row *)
   let invalid = function Some (Wire.Err { code = "invalid"; _ }) -> true | _ -> false in
@@ -958,8 +965,8 @@ let versions () =
     Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
-  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4)) "versions: a server speaks 1, 2, 3 and 4";
-  check (match hello 5 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 5";
+  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5)) "versions: a server speaks 1 to 5";
+  check (match hello 6 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 6";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -1000,7 +1007,7 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
      (* an Incr to a server of protocol 3 or older is refused in the program, never sent; a write without it is sent *)
      let db = { Client.handle = 0; group = 0; props = []; local = None; wants_local = false; retry_at = 0. } in
      check (Client.write c db [ Resolve.Incr (65536, 16, 1, None) ] = Error { code = "invalid"; message = Client.no_incr } && c.serial = 0)
@@ -1008,6 +1015,12 @@ let versions () =
      c.spoken <- 3;
      check (Client.write c db [ Resolve.Add (65536, 16, Int 1); Resolve.Incr (65536, 17, 1, Some (-1, 18)) ] = Error { code = "invalid"; message = Client.no_incr })
        "versions: and to a server of 3";
+     (* a watch with Sort and Limit to a server of protocol 4 or older is refused in the program, never sent *)
+     c.spoken <- 4;
+     let q = { Query.vars = 2; where = [ { e = Var 0; p = 16; v = Var 1 } ]; ranges = [] } in
+     let order = { Top.keys = [ { col = 1; desc = true } ]; limit = 10; after = None } in
+     check (match Client.watch c db ~order q with _ -> false | exception Invalid_argument m -> m = Client.no_sorted_watch 4)
+       "versions: a watch with Sort and Limit to a server of 4 is refused before it is sent (%s)" (Client.no_sorted_watch 4);
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
   Thread.join old;
@@ -1263,6 +1276,133 @@ let with_stderr f =
   Sys.remove path;
   r, s
 
+(* ---- a watch with Sort and Limit through the core: its first answer, its changes in its order, the refill of its
+   window, what it refuses, its budget, and a token of one kind ---- *)
+
+let watch_window () =
+  let sim = Sim_disk.create (Rng.make 19) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/w";
+  let e = Result.get_ok (Engine.open_ disk "/w/shop") in
+  let v0 = Atomic.get e.published in
+  let hub = Live.create v0 ~tag:v0.group ~durable:max_int in
+  let d = { Core.name = "shop"; index = 0; dir = "/w/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> hub); files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/w/shop/vault" } in
+  (* the writer, each group given to the hub at once (durable at once) *)
+  let submit (_ : Core.db) ops by why k =
+    let b = Engine.prepare e [| ops, by, why |] in
+    let r = (Engine.commit e b).(0) in
+    if b.count > 0 then Live.frame hub ~tag:b.after.group (List.rev b.groups) b.after;
+    k r
+  in
+  let props = [ { Schema.name = "person/score"; typ = Value.Tint; many = false; unique = false };
+                { Schema.name = "secret/note"; typ = Ttext; many = false; unique = false } ] in
+  let ids, ops = Result.get_ok (Resolve.declare (Atomic.get e.published) props) in
+  submit d ops 0 "declare" (fun r -> ignore (Result.get_ok r));
+  let pscore = List.nth ids 0 and pnote = List.nth ids 1 in
+  let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+  let toks = Tokens.with_tokens Tokens.empty
+      [ mk "w" [ "shop", Tokens.Write ]; mk "k" [ "shop", Tokens.Kinds { read = [ "person" ]; add = [] } ] ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+  let conn tok =
+    let out = Buffer.create 256 in
+    let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+    let c = Lazy.force c in
+    let next = ref 1 in
+    let send req =
+      let id = !next in
+      incr next;
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      id
+    in
+    (* the messages given since, each: a push, or the error that ends a watch *)
+    let take () =
+      ignore (Core.move_pushes c);
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      match frames_of s with
+      | None -> check false "window: frames not whole"; []
+      | Some fs ->
+        List.filter_map
+          (fun (_, kind, flags, body) ->
+            let r = Codec.reader body 0 (Bytes.length body) in
+            if kind <> Wire.k_watch then None
+            else if flags land Wire.f_error <> 0 then (match Wire.get_reply kind flags r with Wire.Err e -> Some (Error e.code) | _ -> None)
+            else Some (Ok (Wire.get_push r)))
+          fs
+    in
+    ignore (send (Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 }));
+    ignore (take ());
+    send, take
+  in
+  let wsend, wtake = conn "w" in
+  let write ops = ignore (wsend (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops })); ignore (wtake ()) in
+  (* six people, scores 10 to 60 *)
+  let b = Engine.prepare e [| List.init 6 (fun i -> Resolve.Add (-(i + 1), pscore, Int (10 * (i + 1)))), 0, "seed" |] in
+  let r = (Engine.commit e b).(0) in
+  Live.frame hub ~tag:b.after.group (List.rev b.groups) b.after;
+  let p = Array.init 6 (fun i -> Cepheus.thing (Result.get_ok r) (-(i + 1))) in
+  let scores = { Query.vars = 2; where = [ { Query.e = Var 0; p = pscore; v = Var 1 } ]; ranges = [] } in
+  let top3 = { Top.keys = [ { col = 1; desc = true }; { col = 0; desc = false } ]; limit = 3; after = None } in
+  let watch ?(send = wsend) ?(take = wtake) ?(sel = Wire.Give [||]) ?(q = scores) order =
+    ignore (send (Wire.Watch { db = 0; query = q; select = sel; from = 0; wextra = []; worder = order }));
+    take ()
+  in
+  let row x n = [| Value.Link x; Value.Int n |] in
+  check (match watch top3 with [ Ok (Wire.Answer a) ] -> a.rows = [ row p.(5) 60; row p.(4) 50; row p.(3) 40 ] | _ -> false)
+    "window: the first answer is Find's 3 rows, in the order";
+  let change () = match wtake () with [ Ok (Wire.Change c) ] -> Some (c.added, c.removed) | [] -> None | _ -> Some ([], []) in
+  ignore (wsend (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Add (-1, pscore, Int 55) ] }));
+  let p7 = match change () with Some ([ [| Value.Link x; Int 55 |] ], [ r ]) when r = row p.(3) 40 -> x | _ -> check false "window: a row comes in, the third goes"; 0 in
+  ignore (wsend (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Retract (p.(5), pscore, Int 60) ] }));
+  check (change () = Some ([ row p.(3) 40 ], [ row p.(5) 60 ])) "window: the first goes, the window refilled after its last";
+  ignore (wsend (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Add (-1, pscore, Int 5) ] }));
+  check (change () = None) "window: a row after the window: no message";
+  ignore (wsend (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Add (p7, pscore, Int 45) ] }));
+  check (change () = Some ([ row p7 45 ], [ row p7 55 ])) "window: a row that changes inside it: its old row out, its new one in";
+  ignore (wsend (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Retract (p.(4), pscore, Int 50); Retract (p.(3), pscore, Int 40); Add (-1, pscore, Int 47) ] }));
+  check (match change () with Some ([ a; b ], [ c; d ]) -> a.(1) = Int 47 && b = row p.(2) 30 && c = row p.(4) 50 && d = row p.(3) 40 | _ -> false)
+    "window: two go, one comes before the last, one refilled: each list in the order";
+  (* what a watch refuses, and its bounds *)
+  let invalid order = match watch order with [ Error "invalid" ] -> true | _ -> false in
+  check (invalid { top3 with limit = Top.max_limit + 1 }) "window: Limit at most %d" Top.max_limit;
+  check (invalid { top3 with keys = [] }) "window: Limit without Sort is refused";
+  check (invalid { top3 with after = Some [| Value.Link 1; Int 1 |] }) "window: After is refused";
+  check (match watch ~sel:(Wire.Group ([||], [| Wire.Count |])) { top3 with keys = [ { col = 0; desc = true } ] } with [ Error "invalid" ] -> true | _ -> false)
+    "window: aggregates are refused";
+  let saved = !Answer.question_budget in
+  Answer.question_budget := 2;
+  check (match watch top3 with [ Error "too_large" ] -> true | _ -> false) "window: its first answer within the server's budget";
+  Answer.question_budget := saved;
+  (* a refill past the budget ends that watch, too_large; the others go on *)
+  let s2, t2 = conn "w" and s3, t3 = conn "w" in
+  let top = match watch ~send:s2 ~take:t2 { top3 with limit = 1 } with [ Ok (Wire.Answer { rows = [ r ]; _ }) ] -> r | _ -> check false "window: a watch of 1 row"; [||] in
+  ignore (watch ~send:s3 ~take:t3 Top.none);
+  (* the refill reads the index's order: a candidate or two; a budget of none *)
+  Answer.question_budget := 0;
+  (match top with [| Value.Link x; v |] -> write [ Retract (x, pscore, v) ] | _ -> ());
+  Answer.question_budget := saved;
+  check (match t2 () with [ Error "too_large" ] -> true | _ -> false) "window: a refill past the budget ends its watch, too_large";
+  check (match t3 () with [ Ok (Wire.Change c) ] -> c.removed = [ top ] && c.added = [] | _ -> false) "window: a watch without Sort goes on";
+  ignore p7;
+  (* a token that reads one kind: a watch of it with Sort and Limit, refilled with the same question; one over a kind
+     it does not read is denied when it arrives *)
+  let ksend, ktake = conn "k" in
+  let first = watch ~send:ksend ~take:ktake { top3 with limit = 2 } in
+  check (match first with [ Ok (Wire.Answer a) ] -> List.length a.rows = 2 | _ -> false) "window: a token of one kind watches its kind";
+  let notes = { Query.vars = 2; where = [ { Query.e = Var 0; p = pnote; v = Var 1 } ]; ranges = [] } in
+  check (match watch ~send:ksend ~take:ktake ~q:notes { top3 with limit = 2 } with [ Error "denied" ] -> true | _ -> false) "window: not a kind it does not read";
+  let top = match first with [ Ok (Wire.Answer a) ] -> List.hd a.rows | _ -> [||] in
+  (match top with
+   | [| Value.Link x; v |] -> write [ Retract (x, pscore, v) ]
+   | _ -> ());
+  check (match ktake () with [ Ok (Wire.Change c) ] -> List.length c.added = 1 && c.removed = [ top ] | _ -> false) "window: its refill, read with its own rights"
+
 type gconn = { gc : Core.conn; send : Wire.request -> int * Core.input option; take : unit -> (int * int * int * Bytes.t) list option;
                bad_flush : bool ref; bad_wake : bool ref; closed : int ref }
 
@@ -1420,7 +1560,7 @@ let guard () =
   (* a push that fails (the thread of its pushes not made) ends its own connection, never the hub: another watch of the
      question gets every change *)
   let scores = { Query.vars = 2; where = [ { Query.e = Var 0; p = pscore; v = Var 1 } ]; ranges = [] } in
-  let watch g = ignore (g.send (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = [] })); ignore (g.take ()) in
+  let watch g = ignore (g.send (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none })); ignore (g.take ()) in
   let a = conn () and b = conn () and wr = conn () in
   watch a;
   watch b;
@@ -1502,6 +1642,7 @@ let () =
   tcp_connect ();
   files ();
   files_wire ();
+  watch_window ();
   (* last: its questions spawn domains, after which no test may fork *)
   guard ();
   C.finish "server unit"

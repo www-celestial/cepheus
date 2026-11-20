@@ -102,7 +102,7 @@ defn isFindSortRefusals()
   notGiven = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i}, Sort: [t]}, s.Db)
   noSort = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, After: {T: 10}}, s.Db)
   short = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, T: t}, Sort: [t], After: {T: 10}}, s.Db)
-  watch = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t]}, s.Db)
+  watch = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t], After: {T: 10}}, s.Db)
   misspelt = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Sort: [t], Afer: {T: 10}}, s.Db)
   old = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {T: t}, Note: "kept"}, s.Db)
   bug.Assert(misspelt.Error.Code == "invalid" and result.IsOk(old), "an unknown key beside Sort is refused, and only there")
@@ -287,6 +287,33 @@ defn isWatchSharedByFibers()
   cepheus.Close(a)
   cepheus.Close(b)
   value.Equal(x.Added, [{Invoice: id}]) and value.Equal(y.Added, [{Invoice: id}])
+end
+
+defn isWatchKeepsTheFirstRowsInOrder()
+  (** Sort and Limit in a watch: Find's rows, in the order, as they change; a row that leaves the window is replaced
+      by the next one. *)
+  s = shop()?
+  w = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {Invoice: i, Total: t}, Sort: [cepheus.Desc(t)], Limit: 2}, s.Db)?
+  first = fiber.Receive(w.Changes)?
+  big = cepheus.Insert(Invoice, {Client: s.Bo, Total: 500, Status: "unpaid"}, s.Db)?
+  came = fiber.Receive(w.Changes)?
+  small = cepheus.Insert(Invoice, {Client: s.Bo, Total: 1, Status: "unpaid"}, s.Db)?
+  cepheus.Update(Invoice, big, {Total: 5}, s.Db)?
+  went = fiber.Receive(w.Changes)?
+  cepheus.Close(w)
+  bug.Assert(value.Equal([r.Total for r in first.Rows], [1200.0, 80.5]), "the first two, the largest first")
+  bug.Assert(value.Equal(came.Added, [{Invoice: big, Total: 500.0}]) and value.Equal([r.Total for r in came.Removed], [80.5]), "a row in, the last out")
+  bug.Assert(went.Group == came.Group + 2, "a row after the window: no change")
+  value.Equal(went.Removed, [{Invoice: big, Total: 500.0}]) and value.Equal([r.Total for r in went.Added], [80.5]) and small > 0
+end
+
+defn isWatchSortRefusals()
+  s = shop()?
+  noSort = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, T: t}, Limit: 2}, s.Db)
+  after = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, T: t}, Sort: [t], After: {I: 1, T: 10}}, s.Db)
+  many = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, T: t}, Sort: [t], Limit: 100001}, s.Db)
+  sums = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {N: cepheus.Count()}, Sort: [cepheus.Count()]}, s.Db)
+  list.All([noSort.Error.Code == "invalid", after.Error.Code == "invalid", many.Error.Code == "invalid", sums.Error.Code == "invalid"])
 end
 
 defn isWatchSumsByDifference()

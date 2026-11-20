@@ -18,5 +18,7 @@ local: 200 writes by one connection, read at once by another: 200 seen
 local fork: 201 in the fork, 200 in the database
 local 200 fibers: 200 ids, 200 in the database
 tls-live watch: 20 rows, groups growing: true the same as Find: true
+tls-live watch of the 5 largest: Find's rows: true each message in the order: true
 local-live watch: 20 rows, groups growing: true the same as Find: true
+local-live watch of the 5 largest: Find's rows: true each message in the order: true
 silent peer: unreachable within 7 s: true the program ran meanwhile: true

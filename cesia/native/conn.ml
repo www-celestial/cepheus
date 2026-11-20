@@ -24,7 +24,8 @@ open Cepheus_server
    group of its last message: the server answers Same (nothing changed since) or the answer, which the package turns
    into the change from its rows; the fibers see no gap and no repeat. A fiber whose queue fills (it reads slower than
    the changes come) loses its queue and gets the answer again when it asks: a slow fiber never holds the others,
-   and its memory stays bounded. *)
+   and its memory stays bounded. A watch with Sort gives its rows in its order: the answer's, and the rows of each
+   change. *)
 
 type message = M_answer of int * Live.row list | M_change of int * Live.row list * Live.row list | M_end of string * string
 
@@ -53,15 +54,22 @@ and shared = {
   query : Query.t;
   select : Wire.select;
   extra : Question.Ask.item list;
+  order : Question.Top.order;  (* Sort and Limit *)
 }
 
 let queue_max = 256
 
-let new_shared ?(extra = []) key query select =
+let new_shared ?(extra = []) ?(order = Question.Top.none) key query select =
   { key; sm = Mutex.create (); rows = Hashtbl.create 16; group = 0; started = false; consumers = []; src = Nothing; lost = true;
-    finding = false; ended = None; parts = None; query; select; extra }
+    finding = false; ended = None; parts = None; query; select; extra; order }
 
-let row_list sh = Hashtbl.fold (fun r n acc -> let rec go k acc = if k = 0 then acc else go (k - 1) (r :: acc) in go n acc) sh.rows []
+(* rows in the watch's order, when it has one *)
+let in_order sh (rows : Live.row list) =
+  match sh.order.keys, rows with
+  | [], _ | _, [] -> rows
+  | keys, r :: _ -> List.stable_sort (Question.Top.compare_value_rows (Question.Top.full (Array.length r) keys)) rows
+
+let row_list sh = in_order sh (Hashtbl.fold (fun r n acc -> let rec go k acc = if k = 0 then acc else go (k - 1) (r :: acc) in go n acc) sh.rows [])
 
 (* under sh.sm: to every consumer; the wakes to call once sh.sm is released *)
 let give sh m =
@@ -107,7 +115,7 @@ let deliver sh (m : Live.msg) =
       Hashtbl.iter (fun r n -> Hashtbl.replace sh.rows r n) now;
       let g = max sh.group a.group in
       sh.group <- g;
-      if !added = [] && !removed = [] then [] else give sh (M_change (g, !added, !removed))
+      if !added = [] && !removed = [] then [] else give sh (M_change (g, in_order sh !added, in_order sh !removed))
     | Live.Change c ->
       List.iter (fun r -> bump sh.rows r (-1)) c.removed;
       List.iter (fun r -> bump sh.rows r 1) c.added;

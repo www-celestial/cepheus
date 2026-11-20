@@ -1,9 +1,10 @@
 #!/bin/sh
 # Model-checks spec/Journal.tla, spec/Merge.tla, spec/Seats.tla, spec/LocalReads.tla, spec/Watch.tla,
-# spec/CommitBuffer.tla, spec/RuleChange.tla and spec/Raft.tla with TLC (bounds in their .cfg files), and checks that
-# what must break does: the naive sale of spec/Seats.tla (SeatsNaive.cfg), every variant of the local reads' rule that
-# drops a part of it, the design's lease and its first draft (LocalReads*.cfg), every variant of a watch's resume that
-# drops a part of its rule (Watch*.cfg),
+# spec/WatchWindow.tla, spec/CommitBuffer.tla, spec/RuleChange.tla and spec/Raft.tla with TLC (bounds in their .cfg
+# files), and checks that what must break does: the naive sale of spec/Seats.tla (SeatsNaive.cfg), every variant of the
+# local reads' rule that drops a part of it, the design's lease and its first draft (LocalReads*.cfg), every variant of
+# a watch's resume that drops a part of its rule (Watch*.cfg), every variant of a watch's window (Sort and Limit) that
+# drops a part of its rule (WatchWindow*.cfg),
 # every variant of the commit buffer that drops a part of its rule (CommitBuffer*.cfg), every variant of a rule
 # change's background path that drops a part of its rule (RuleChange*.cfg); spec/Raft.tla by parts (RaftCore,
 # RaftDamage, RaftLease: exhaustive within their bounds), and each of its variants that drops one rule must break an
@@ -28,6 +29,14 @@ for c in WatchNoTouch WatchNoRing; do
   rc=0
   java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 1 -metadir "$meta/$c" -config $c.cfg Watch.tla || rc=$?
   if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/Watch.tla should break an invariant (TLC exit $rc)"; exit 1; fi
+  echo "tlc.sh: $c breaks an invariant, as it must"
+done
+# a watch's window (Sort and Limit), and each variant that drops a part of its rule must break an invariant
+java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/WatchWindow" -config WatchWindow.cfg WatchWindow.tla
+for c in WatchWindowNoRefill WatchWindowNoTies WatchWindowStrict; do
+  rc=0
+  java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 1 -metadir "$meta/$c" -config $c.cfg WatchWindow.tla || rc=$?
+  if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/WatchWindow.tla should break an invariant (TLC exit $rc)"; exit 1; fi
   echo "tlc.sh: $c breaks an invariant, as it must"
 done
 java -Xmx1g -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/CommitBuffer" -config CommitBuffer.cfg CommitBuffer.tla
