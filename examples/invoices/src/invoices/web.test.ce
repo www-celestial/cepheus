@@ -139,5 +139,8 @@ defn isBadCursorRefused()
      that does not exist), refused when it is not *)
   older = ask(a, "GET", "/invoices?after=eyJJbnZvaWNlIjo5OTk5OTksIk51bWJlciI6MiwiU3RhdHVzIjoidW5wYWlkIiwiRHVlIjoxNzk2MDgzMjAwLCJYIjoxNzkzNDkxMjAwfQ==", sid = sid)
   forged = ask(a, "GET", "/invoices?after=eyJJbnZvaWNlIjoieCIsIlgiOjF9", sid = sid)
+  negative = ask(a, "GET", "/invoices?after=eyJJbnZvaWNlIjotMSwiWCI6MX0=", sid = sid)
+  huge = ask(a, "GET", "/invoices?after=eyJJbnZvaWNlIjo0NjExNjg2MDE4NDI3Mzg3OTAzLCJOdW1iZXIiOjEsIlN0YXR1cyI6IngiLCJEdWUiOjEsIlgiOjF9", sid = sid)
+  bug.Assert(negative.Status == 400 and huge.Status == 200, "an older cursor of no invoice's id: $(negative.Status), $(huge.Status)")
   junk.Status == 200 and typed.Status == 400 and older.Status == 200 and forged.Status == 400
 end
