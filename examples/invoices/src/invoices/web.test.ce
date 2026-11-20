@@ -135,5 +135,9 @@ defn isBadCursorRefused()
   sid = signIn(a, "ada", "correct horse battery")
   junk = ask(a, "GET", "/clients?after=%21%21", sid = sid)
   typed = ask(a, "GET", "/clients?after=eyJDbGllbnQiOiJ4In0", sid = sid)
-  junk.Status == 200 and typed.Status == 400
+  (* a cursor of the invoices' older form, {Invoice, Number, Status, Due, X}: read when its invoice is an id (here one
+     that does not exist), refused when it is not *)
+  older = ask(a, "GET", "/invoices?after=eyJJbnZvaWNlIjo5OTk5OTksIk51bWJlciI6MiwiU3RhdHVzIjoidW5wYWlkIiwiRHVlIjoxNzk2MDgzMjAwLCJYIjoxNzkzNDkxMjAwfQ==", sid = sid)
+  forged = ask(a, "GET", "/invoices?after=eyJJbnZvaWNlIjoieCIsIlgiOjF9", sid = sid)
+  junk.Status == 200 and typed.Status == 400 and older.Status == 200 and forged.Status == 400
 end

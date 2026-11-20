@@ -177,14 +177,15 @@ defn filterOf(f, i, s, u, now)
   out
 end
 
-defn sortKeys(sort, no, d, u, t)
-  (** The keys of Sort for one of InvoiceSorts. *)
+defn sortKeys(sort, i, no, d, u, t)
+  (** The keys of Sort for one of InvoiceSorts: its key, then the due date and the invoice, so that the invoice decides
+      a tie (as the pages ordered their rows when they read their keys first: a link saved then names the same rows). *)
   match sort
-    "number" -> [no]
-    "-date" -> [cepheus.Desc(d)]
-    "due" -> [u]
-    "-total" -> [cepheus.Desc(t)]
-    else -> [cepheus.Desc(no)]
+    "number" -> [no, u, i]
+    "-date" -> [cepheus.Desc(d), u, i]
+    "due" -> [u, i]
+    "-total" -> [cepheus.Desc(t), u, i]
+    else -> [cepheus.Desc(no), u, i]
   end
 end
 
@@ -197,62 +198,45 @@ end
 defn invoicesQuery(f, now)
   (** The question of the list of invoices, for Page: f as InvoicesPage takes it. A search needs a variable more, the
       bill-to name in lower case: the question has 8 variables then, else 7, since every variable of a question must
-      be in a pattern, and a pattern more costs a sorted page more. An Ok of {N, Query}. *)
+      be in a pattern. An Ok of {N, Query}. *)
   give(i, no, b, d, u, s, t) = {Invoice: i, Number: no, BillTo: b, Date: d, Due: u, Status: s, Total: t}
   if f.Search == ""
     return {N: 7, Query: (p) -> ((i, no, b, d, u, s, t) -> {Where: invoicesWhere(f, now, i, no, b, d, u, s, t), Give: give(i, no, b, d, u, s, t),
-                                                              Sort: p.Sort(sortKeys(f.Sort, no, d, u, t)), Limit: p.Limit, After: p.After})}
+                                                              Sort: p.Sort(sortKeys(f.Sort, i, no, d, u, t)), Limit: p.Limit, After: p.After})}
   end
   {N: 8, Query: (p) -> ((i, no, b, d, u, s, t, k) -> {Where: list.Concat(invoicesWhere(f, now, i, no, b, d, u, s, t), [[i, Invoice.Search, k], cepheus.Prefix(k, f.Search)]),
-                                                        Give: give(i, no, b, d, u, s, t), Sort: p.Sort(sortKeys(f.Sort, no, d, u, t)), Limit: p.Limit, After: p.After})}
+                                                        Give: give(i, no, b, d, u, s, t), Sort: p.Sort(sortKeys(f.Sort, i, no, d, u, t)), Limit: p.Limit, After: p.After})}
 end
 
-defn keysQuery(f, now)
-  (** The question of a page of invoices' keys, for Page: each invoice of the filter with its number, status, due date,
-      and x, the total when the order is by total, else the date. Five patterns (six with a search): a sorted page of a
-      question of eight patterns leaves the order of the index and reads every answer (9 ms at 100,000 invoices,
-      against 0.2 ms for five), so the page's other fields are read after, for its rows only. *)
-  key(no, u, x) = match f.Sort
-    "number" -> [no]
-    "-date" -> [cepheus.Desc(x)]
-    "due" -> [u]
-    "-total" -> [cepheus.Desc(x)]
-    else -> [cepheus.Desc(no)]
+defn pageCursor(cursor, f, db)
+  (** The cursor of a page of invoices, a row of its seven fields. One saved in a link before a page was one question
+      is a row of its keys, {Invoice, Number, Status, Due, X}, X the total when the order is by total, else the date:
+      it is made the row it stands for, its other fields read from its invoice, so that the link gives the rows after
+      that invoice (or before it), as it did. A deleted invoice's other fields are left empty: the keys of the order,
+      its id among them, place it before they are read. A cursor that is neither is left to Find, which refuses it. *)
+  if not value.IsDict(cursor)
+    return result.Ok(cursor)
   end
-  xp = if f.Sort == "-total" Invoice.Total else Invoice.Date end
-  base(i, no, s, u, x) = list.Concat([[i, Invoice.Number, no], [i, Invoice.Status, s], [i, Invoice.Due, u], [i, xp, x]],
-                                     list.Concat(filterOf(f, i, s, u, now), if value.IsMissing(f.Client) [] else [[i, Invoice.Client, f.Client]] end))
-  give(i, no, s, u, x) = {Invoice: i, Number: no, Status: s, Due: u, X: x}
-  if f.Search == ""
-    return {N: 5, Query: (p) -> ((i, no, s, u, x) -> {Where: base(i, no, s, u, x), Give: give(i, no, s, u, x), Sort: p.Sort(key(no, u, x)), Limit: p.Limit, After: p.After})}
+  back = "Before" in cursor
+  row = if back cursor.Before else cursor.After end
+  if not (value.IsDict(row) and "X" in row and value.IsInt(dict.Get("Invoice", row)))
+    return result.Ok(cursor)
   end
-  {N: 6, Query: (p) -> ((i, no, s, u, x, k) -> {Where: list.Concat(base(i, no, s, u, x), [[i, Invoice.Search, k], cepheus.Prefix(k, f.Search)]),
-                                                  Give: give(i, no, s, u, x), Sort: p.Sort(key(no, u, x)), Limit: p.Limit, After: p.After})}
-end
-
-defn rowsOf(keys, db)
-  (** The fields of the invoices of a page, in the page's order: one question, its candidates the page's ids. *)
-  if value.Len(keys) == 0
-    return result.Ok([])
-  end
-  rows = cepheus.Find(7, (i, no, b, d, u, s, t) -> {
-    Where: [[i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, s], [i, Invoice.Total, t], cepheus.In(i, [k.Invoice for k in keys])],
-    Give: {Invoice: i, Number: no, BillTo: b, Date: d, Due: u, Status: s, Total: t},
-  }, db)?
-  by = dict.Dict()
-  for r in rows
-    by[r.Invoice] = r
-  end
-  result.Ok([by[k.Invoice] for k in keys])
+  inv = cepheus.Get(Invoice, row.Invoice, db)?
+  have(x, field) = if value.IsMissing(inv) x else dict.GetOr(field, x, inv) end
+  byTotal = f.Sort == "-total"
+  full = {Invoice: row.Invoice, Number: dict.Get("Number", row), BillTo: have("", "BillTo"), Date: if byTotal have(0, "Date") else row.X end,
+          Due: dict.Get("Due", row), Status: dict.Get("Status", row), Total: if byTotal row.X else have(0, "Total") end}
+  result.Ok(if back {Before: full} else {After: full} end)
 end
 
 defn InvoicesPage(f, now, cursor, size, db)
   (** A page of invoices, as Page gives it, with every field of each row: f is {Statuses, Action, Open, Search,
       Client, Sort}, as filterOf reads the first three; Search a start of the bill-to name in lower case ("" for all),
-      Client an id or missing, Sort one of InvoiceSorts. The page's cursors are rows of its keys. *)
-  q = keysQuery(f, now)
-  page = Page(q.N, q.Query, db, size, cursor = cursor)?
-  result.Ok({Rows: rowsOf(page.Rows, db)?, Next: page.Next, Prev: page.Prev})
+      Client an id or missing, Sort one of InvoiceSorts. One sorted question of seven patterns (eight with a search):
+      the page's cursors are its rows (pageCursor reads the older ones too). *)
+  q = invoicesQuery(f, now)
+  Page(q.N, q.Query, db, size, cursor = pageCursor(cursor, f, db)?)
 end
 
 defn AllInvoices(f, now, db)

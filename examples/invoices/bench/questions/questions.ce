@@ -17,7 +17,7 @@ n = text.Number(sys.Args[1])
 db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), invoices.Kinds, token = sys.Env("CEPHEUS_TOKEN")))
 all = {Statuses: [], Action: false, Open: false, Search: "", Client: missing, Sort: "-number"}
 ad = {Statuses: [], Action: false, Open: false, Search: "ad", Client: missing, Sort: "-number"}
-deep = {After: {Invoice: 1, Number: 50000, Status: "", Due: 0, X: 0}}
+deep = {After: {Invoice: 1, Number: 50000, BillTo: "", Date: 0, Due: 0, Status: "", Total: 0}}
 one = result.Unwrap(cepheus.Find(1, (i) -> {Where: [[i, invoices.Invoice.Number, 50000]], Give: {Id: i}}, db))[1].Id
 ids = result.Unwrap(cepheus.Find(2, (i, no) -> {Where: [[i, invoices.Invoice.Number, no]], Give: {Id: i, N: no}, Sort: [no], Limit: 1000}, db))
 now = sys.Now()

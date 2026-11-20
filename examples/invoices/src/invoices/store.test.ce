@@ -160,6 +160,58 @@ defn isCursorChecked()
   value.Equal(back, c) and Cursor({after: "!!"}) == missing and Cursor({before: "e30"}) != missing
 end
 
+defn oldOrder(f, db)
+  (** The invoices in the order the pages had when they read a page of their keys first (Invoice, Number, Status, Due,
+      and X, the total when sorted by total, else the date; ties by those fields' names): their ids. *)
+  x = if f.Sort == "-total" Invoice.Total else Invoice.Date end
+  key(no, u, v) = match f.Sort
+    "number" -> [no]
+    "-date" -> [cepheus.Desc(v)]
+    "due" -> [u]
+    "-total" -> [cepheus.Desc(v)]
+    else -> [cepheus.Desc(no)]
+  end
+  rows = cepheus.Find(5, (i, no, s, u, v) -> {Where: [[i, Invoice.Number, no], [i, Invoice.Status, s], [i, Invoice.Due, u], [i, x, v]],
+                                             Give: {Invoice: i, Number: no, Status: s, Due: u, X: v}, Sort: key(no, u, v)}, db)?
+  result.Ok([r.Invoice for r in rows])
+end
+
+defn isPageCursorNewOrOld()
+  (** A page of invoices is one question, its cursor a row of its seven fields, in the order the pages had; a link
+      saved with a cursor of the keys the pages read before gives the same pages, after and before it, through its
+      link too; and one of an invoice deleted since gives the rows after its place. *)
+  s = shop()?
+  form = {client: "$(s.Bo)", date: "2026-10-02", due: "2026-10-31", label1: "Box", quantity1: "1", price1: "7"}
+  AddInvoice(InvoiceForm(form)?, "Élodie Bo", 0, s.Db)?
+  form.price1 = "900"
+  AddInvoice(InvoiceForm(form)?, "Élodie Bo", 0, s.Db)?
+  form.date = "2026-10-01"
+  form.price1 = "7"
+  AddInvoice(InvoiceForm(form)?, "Élodie Bo", 0, s.Db)?
+  ok = true
+  for sort in InvoiceSorts
+    f = all
+    f.Sort = sort
+    whole = InvoicesPage(f, now, missing, 100, s.Db)?
+    one = InvoicesPage(f, now, missing, 2, s.Db)?
+    two = InvoicesPage(f, now, one.Next, 2, s.Db)?
+    old(r) = {Invoice: r.Invoice, Number: r.Number, Status: r.Status, Due: r.Due, X: if sort == "-total" r.Total else r.Date end}
+    after = InvoicesPage(f, now, {After: old(one.Rows[2])}, 2, s.Db)?
+    link = Cursor({after: text.Split("=", Link({After: old(one.Rows[2])}))[2] then encode.UrlDecode})
+    linked = InvoicesPage(f, now, link, 2, s.Db)?
+    before = InvoicesPage(f, now, {Before: old(two.Rows[1])}, 2, s.Db)?
+    bug.Assert(value.Equal([r.Invoice for r in whole.Rows], oldOrder(f, s.Db)?), "the order of the pages kept: $sort")
+    bug.Assert(value.Equal(list.Sort(dict.Keys(one.Next.After)), ["BillTo", "Date", "Due", "Invoice", "Number", "Status", "Total"]), "a cursor of seven fields")
+    ok = ok and value.Equal(after.Rows, two.Rows) and value.Equal(linked.Rows, two.Rows) and value.Equal(before.Rows, one.Rows)
+  end
+  f = all
+  one = InvoicesPage(f, now, missing, 2, s.Db)?
+  two = InvoicesPage(f, now, one.Next, 2, s.Db)?
+  gone = {After: {Invoice: one.Rows[2].Invoice, Number: one.Rows[2].Number, Status: one.Rows[2].Status, Due: one.Rows[2].Due, X: one.Rows[2].Date}}
+  DeleteInvoice(one.Rows[2].Invoice, 0, s.Db)?
+  ok and value.Equal(InvoicesPage(f, now, gone, 2, s.Db)?.Rows, two.Rows)
+end
+
 defn isNumberedInOrderAtOnce()
   (** 20 invoices made at once by 20 fibers: numbers 1 to 20, each once. *)
   t = cepheus.Fork(cepheus.Empty, Kinds)?
