@@ -858,7 +858,8 @@ let subscribe ?(extra = []) ?(order = Top.none) h (q : Query.t) (sel : Wire.sele
         | Some t -> t
         | None -> if extra = [] then new_template v key tq q.vars sel else whole_template v key q sel extra
       in
-      let win = if order = Top.none then None else Some (new_window order (Array.length t.give)) in
+      (* the order checked as Find checks it (its columns, its Limit: a client's bytes) before a window is made of it *)
+      let win = if order = Top.none then None else (Top.check (Array.length t.give) [||] order; Some (new_window order (Array.length t.give))) in
       let s =
         { sid = h.next; t; params; q; emit; gone = false; keys = Hashtbl.create 8; touched = false; plus = []; minus = [];
           net = Hashtbl.create 8; before = Hashtbl.create 8; dirty = Hashtbl.create 8; win }

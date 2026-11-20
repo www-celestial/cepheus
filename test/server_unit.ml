@@ -1373,6 +1373,10 @@ let watch_window () =
   check (invalid { top3 with limit = Top.max_limit + 1 }) "window: Limit at most %d" Top.max_limit;
   check (invalid { top3 with keys = [] }) "window: Limit without Sort is refused";
   check (invalid { top3 with after = Some [| Value.Link 1; Int 1 |] }) "window: After is refused";
+  check (invalid { top3 with keys = [ { col = 9; desc = false } ] }) "window: a Sort of a column it has not is refused, before a window is made";
+  (* what no encoder sends (a varint is never negative), refused by the hub itself *)
+  let bad o = match Live.subscribe ~order:o hub scores (Wire.Give [||]) ~from:0 ~emit:(fun _ -> true) with _ -> false | exception Query.Bad _ -> true in
+  check (bad { top3 with keys = [ { col = -1; desc = true } ] } && bad { top3 with limit = -1 }) "window: a negative column or Limit is refused";
   check (match watch ~sel:(Wire.Group ([||], [| Wire.Count |])) { top3 with keys = [ { col = 0; desc = true } ] } with [ Error "invalid" ] -> true | _ -> false)
     "window: aggregates are refused";
   let saved = !Answer.question_budget in
