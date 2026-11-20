@@ -665,6 +665,9 @@ items reach, before and after the frame) are answered again before and after, an
 `test/questions.ml` checks its rows against the oracle after every frame, and a restricted token's against the
 oracle over the facts it may read.
 
+A watch with `Sort` and `Limit` k keeps the promise with `Find`'s rows for the same `Sort` and `Limit` (the first k
+in the order and the copies of the k-th): see (4) below.
+
 *Conditions.* The question is a conjunctive query (`Find`'s patterns and ranges), with `Give` or aggregates. A program
 that reads slower than the changes come gets the answer again rather than every change (it then holds `Find`'s rows at
 the answer's group). A watch ends for good on `Close`, a closed database or a token that may no longer read it (G16).
@@ -683,14 +686,26 @@ connection or a `lagging` end the package watches again `from` the group of its 
 (a property and its constants), else the answer at its newest group, which the package turns into the change from its
 rows: `spec/Watch.tla` checks that the rows are always the answer at their group and never go back, with lagging,
 broken connections, and a watch stopped and started again (1,015,657 states); without the touch test, or without the
-ring's bound, TLC finds a counterexample (`tools/tlc.sh` checks both).
+ring's bound, TLC finds a counterexample (`tools/tlc.sh` checks both). (4) *A window.* Let W be `Find`'s rows with
+`Limit` k at a group and L the last of them: a row of the answer is in W exactly when it comes at or before L (all
+rows before the k-th are, and every copy of the k-th), unless W is the whole answer. After a frame, the rows of the
+new answer at or before L are therefore W, less the removed rows at or before L, plus the added ones at or before L
+(by (1), the added and removed rows are exactly the delta queries'). If they are k or more, the first k of them and
+the copies of the k-th are the new answer's first k (every other row of the new answer comes after L); if fewer,
+the missing rows are the new answer's first ones after L, which `Find` with `After` L and `Limit` the rows missing
+gives (fewer than asked: there are no more, and W is the whole answer). `spec/WatchWindow.tla` checks it (every
+answer of 4 rows with up to 2 copies each, every Limit up to 3, every frame: 374 states, 167,278 transitions), and
+TLC breaks it when the refill, the copies of the k-th or the "at or before" is left out.
 
 *Tested by* `test/live_sim.ml` (100 seeds in `tools/test.sh`, `LIVE_SEEDS` for more: random groups of adds, removals,
 derived facts and merges into runs, large groups; every message of every watch, plain, projecting and aggregating,
-equal to the naive evaluator's answer at its group; resume by `same` or the answer, lagging); `test/server_sim.ml`
+equal to the naive evaluator's answer at its group; resume by `same` or the answer, lagging; half the watches of
+`Give` with a random `Sort` and a `Limit` of 1 to 5 or none, their rows equal at every message to `Find`'s and an oracle's,
+in the order); `test/server_sim.ml`
 (watches over the simulated network: pushes cut at any byte, connections broken at any message and watches resumed,
 the hub late or at once, lagging, unwatch with pushes in flight, large groups, the server's crashes: every message's
-rows are the naive answer at a durable group, never older than the last); `test/server_limits.ml` (a watch that never
+rows are the naive answer at a durable group, never older than the last; half the watches of `Give` with `Sort` and
+`Limit`, their rows the naive answer sorted and cut); `test/server_limits.ml` (a watch that never
 reads beside one that reads: the reader gets every change in order, the silent one ends `lagging`); the package's
 tests on forks (`cesia/tests/cepheus.test.ce`); `test/cesia.sh` (a watch over TLS, a local one, and one that goes on
 through a `kill -9` of the server while 1,500 rows are written: its groups only grow and it ends with the 1,500).

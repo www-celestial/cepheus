@@ -153,9 +153,10 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 | `Wire` | the protocol: frames, requests and replies, their codings, the error codes |
 | `Sessions` | the session table of a database (`start`, `finish`, `replay`), its checkpoint (`save`, `load`) |
 | `Core` | the server without sockets: a connection's frames in (`input`), replies out, rights, writes to `submit`; a question's answer (`answer`), the same at the server and in a local reader |
+| `Live` | live questions, the same at the server and in a local reader: a hub of templates (`create`, `frame`, `durable`, `rebase`, `reset`, `stop`), a watch (`subscribe ?extra ?order`, `unsubscribe`); with `?order` (Sort and Limit) a window of its rows kept by the frames' rows and refilled by one page `Find` After its last row |
 | `Net` | the process: listeners, I/O domains, a thread a connection, the limits of connections, follow streams (`follow_stream`), start, stop (`serve`) |
 | `Follow` | a database's follow stream at the server: the visibility page (`page_path`, `open_page`), the writer's hooks (`hooks`: `before` a frame's write, `after` it is published), the readers' queues (`register`, `take`), the catch-up from the journal (`catch_up`), the view of remote reads (`view`) |
 | `Follower` | a local reader's copy of a database: its runs from the files passed (`create`, `runs`), the frames applied (`frame`), the state visible under the page's number (`view`, `try_view`) |
 | `Fdpass` | descriptors passed over a Unix socket (`send`, `recv`: SCM_RIGHTS) and a page mapped read-only and shared (`map_page`, `word`); its C is `server/fdpass_stubs.c` |
-| `Client` | a client in OCaml (tests, benchmarks, `cepheus status`): `connect`, `open_db` (local reads over the Unix socket: `?local`), `get`, `find`, `write` with its session, `declare`, `status` |
+| `Client` | a client in OCaml (tests, benchmarks, `cepheus status`): `connect`, `open_db` (local reads over the Unix socket: `?local`), `get`, `find`, `write` with its session, `declare`, `watch ?order` and `next_push`, `status` |
 | `Tls` | TLS 1.3 by OpenSSL on memory buffers (`server_ctx`, `client_ctx`, `handshake`, `read`, `write`, `make_cert`); its C, a core of plain C and its OCaml wrappers, is `server/tls_stubs.c` |

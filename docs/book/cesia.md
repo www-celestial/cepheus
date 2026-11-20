@@ -445,8 +445,8 @@ place, if that place is after the cursor.
   657 when it walked to its budget, and 322 for the heap alone, on the app's data of
   [the guide](app.md#14-what-it-costs)).
 
-`Watch` refuses `Sort`, `Limit` and `After` (a watch keeps every row of its question): sort the rows it gives with
-`list.SortBy`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
+`Watch` takes `Sort` and `Limit` too, and keeps the first rows of the order as they change
+([below](#sort-and-limit-in-a-watch)); it refuses `After`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
 `Give`, `Sort`, `Limit` and `After`: a misspelt `After` would otherwise give the first page again and again (a
 question without them is read as before, its other keys left aside).
 
@@ -515,6 +515,68 @@ database before the group. `Sum` and `Count` follow by difference; `Min` and `Ma
 extremum went. Questions that differ only by their constants (the unpaid invoices of each client) share one
 **template**: a fact's change is computed once and its rows sent to the watches whose constants they match, so a
 group costs the same with 10 watches or 10,000 ([what it costs](#what-it-costs)).
+
+### Sort and Limit in a watch
+
+`Watch` takes `Sort` and `Limit` as `Find` does: at each message its rows are `Find`'s with the same `Sort` and
+`Limit` at the message's group (the first k rows in the order, and the copies of the k-th), and each message gives its
+rows in the order: an answer's `Rows`, a change's `Added` and its `Removed`, each sorted. The messages keep their two
+forms, so a reader of a watch reads one with `Sort` as any other; the rows held stay a set to which `Added` is added
+and from which `Removed` is taken, so a page that shows them in order merges `Added` at its place or sorts the k rows
+again (`std/live` keeps a show's rows as a set).
+
+```cesia norun
+top2 = (i, total) -> {
+  Where: [[i, Invoice.Total, total]],
+  Give: {Invoice: i, Total: total},
+  Sort: [cepheus.Desc(total)],
+  Limit: 2,
+}
+w = result.Unwrap(cepheus.Watch(2, top2, db))
+io.Print(fiber.Receive(w.Changes))
+big = result.Unwrap(cepheus.Insert(Invoice, {Client: bo, Total: 500, Status: "paid"}, db))
+io.Print(fiber.Receive(w.Changes))
+result.Unwrap(cepheus.Update(Invoice, big, {Total: 5}, db))
+io.Print(fiber.Receive(w.Changes))
+cepheus.Close(w)
+```
+
+```text
+Ok({Group: 16, Rows: [{Invoice: 65537, Total: 1200.0}, {Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
+Ok({Group: 17, Rows: missing, Added: [{Invoice: 65547, Total: 500.0}], Removed: [{Invoice: 65538, Total: 80.5}]})
+Ok({Group: 18, Rows: missing, Added: [{Invoice: 65538, Total: 80.5}], Removed: [{Invoice: 65547, Total: 500.0}]})
+```
+
+- A row that comes before the window's last row comes in, and pushes out the rows past the k-th; a row of the window
+  that goes is replaced by the next one of the order, which the watch reads by one `Find` of the rows after its last
+  row (`After` it, `Limit` the rows missing) at the group of the change. The watch holds k rows, never the whole
+  answer, and its first answer costs a page.
+- A row of the window whose fields change goes and comes back with its new fields in the same change, at its new place
+  (or not at all, when its new place is past the k-th). A write that changes nothing in the window (a row past the
+  k-th, a fact no row of the question reads) gives no message.
+- `Sort` without `Limit` keeps every row of the answer, in the order.
+- Refused, `invalid`: `After` (a watch's rows are the first of its order, as they change), `Limit` without `Sort` (the
+  engine's order is no order a watch can keep), `Sort` or `Limit` with aggregates, a `Limit` over 100,000 rows (as for
+  `Find`). Against a server of an earlier release (protocol 4 or older) such a watch is refused in the program, never
+  sent: "this server speaks protocol 4: a watch with Sort and Limit needs a server of protocol 5". A watch without
+  them goes as before.
+- **What it costs.** A change costs the delta queries below, as for any watch, plus the comparison of each row they
+  add or remove with the window's last row, $O(d \log k)$ for $d$ rows, plus one page `Find` when a row leaves the
+  window. On the app of [the guide](app.md#9-the-live-dashboard), its dashboard's ten latest payments: the first answer
+  97 µs against 6,299 µs for the payments of the last day that the page sorted (3,410 rows held instead of 10), and a
+  group at the hub 11.9 µs at the median against 10.0, 18.7 on the mean against 13.5 (a payment taken back refills the
+  window: one page `Find`) ([what it costs](app.md#14-what-it-costs)).
+
+**How the window is kept.** The watch holds its window W (the rows of `Find` with `Limit` k) and L, its last row. A
+row of the answer is in W exactly when it comes at or before L in the order (every row before the k-th, and every copy
+of the k-th), unless W is the whole answer (fewer than k rows: then every row is). So after a group, the rows of the
+new answer at or before L are those of W, less the removed rows at or before L, plus the added rows at or before L:
+the delta queries' rows, each compared with L. If they are k or more, the new W is their first k and the copies of
+the k-th; if fewer, every row the new W still needs comes after L, and one `Find` with `After` L and `Limit` the rows
+missing gives them (a refill that finds fewer than it asked has found every row, and W is then the whole answer).
+`spec/WatchWindow.tla` checks the rule: after every group W is `Find`'s rows, and TLC breaks it when the refill is left
+out, when the cut splits the copies of the k-th row, or when "at or before L" becomes "before L"; `test/live_sim.ml`
+checks it against `Find` and an oracle of its own at every message.
 
 ## Rules
 

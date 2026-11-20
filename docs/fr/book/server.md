@@ -439,7 +439,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 6 Ping | des octets quelconques | Pong : les mêmes octets |
 | 7 Admin | "status" | Status : le nombre, (clé, valeur)... |
 | 8 Follow | handle (sur le Unix socket seulement) | Start : l'id de la base, le numéro de visibilité, le nombre, (lo, hi) de chaque run, du plus récent au plus ancien ; les descriptors de `visible` et de chaque run voyagent avec son premier octet. La connexion est alors le follow stream de la base ([lectures locales](#lectures-locales-g15)) |
-| 11 Watch | handle, question, select, from (le groupe de la réponse que tient le programme ; 0 : aucune), puis ses opérateurs tels que Find les code, quand il en a (ni Sort, ni Limit, ni After) | des pushes (des messages que le serveur envoie sans qu'on les lui demande) sur l'id du Watch, jusqu'à Unwatch ou une erreur ([questions vivantes](#les-questions-vivantes-watch)) |
+| 11 Watch | handle, question, select, from (le groupe de la réponse que tient le programme ; 0 : aucune), puis ses opérateurs, Sort et Limit tels que Find les code, quand il en a (pas d'After ; Sort et Limit depuis la version 5) | des pushes (des messages que le serveur envoie sans qu'on les lui demande) sur l'id du Watch, jusqu'à Unwatch ou une erreur ([questions vivantes](#les-questions-vivantes-watch)) |
 | 12 Unwatch | l'id du Watch | Unwatched |
 | 14 Put (version 3) | handle, serial, floor, by (zigzag), why, le kind du fichier, le nom, le media type, le propriétaire (0 : la clé propre de la base), cold (un octet), puis les premiers octets du fichier ; le flag `more` quand des Pieces suivent | Receipt du groupe de ses faits (kind/Name, Size, Type, Owner, Content), une fois ses octets et ce groupe durables ([le vault](vault.md) : le vault de fichiers, où le serveur garde les octets des fichiers) |
 | 15 Piece | d'autres octets du Put de cet id ; `more` sauf sur le dernier | (la réponse du Put) |
@@ -461,13 +461,16 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   `Group ([k...], [a...])` donne une ligne par clé distincte : les variables de la clé, puis les agrégats `Count`,
   `Sum x` (int, money), `Min x`, `Max x` (int, money, date), calculés dans le serveur sans construire les réponses (Q4
   plus bas : 100 lignes au lieu de 45 064).
-- **Les versions.** La version 4 ajoute l'opération `Incr` (plus bas : ajouter un nombre à un compteur) et rien d'autre : un programme de version 4 se
+- **Les versions.** La version 5 ajoute le Sort et le Limit d'un Watch ([questions vivantes](#les-questions-vivantes-watch)) et rien d'autre :
+  un programme de version 5 se connecte à un serveur de 4 en 4, et un watch avec Sort ou Limit est refusé dans le
+  programme (`invalid` : « this server speaks protocol 4: a watch with Sort and Limit needs a server of protocol 5 »)
+  avant d'être envoyé, puisqu'un serveur plus ancien refuse l'ordre d'un Watch. La version 4 ajoute l'opération `Incr` (plus bas : ajouter un nombre à un compteur) et rien d'autre : un programme de version 4 se
   connecte à un serveur de 3 en 3, et un groupe avec un `Incr` est refusé dans le programme (`invalid` : « this server
   speaks protocol 3 or older: Incr needs a server of protocol 4 ») avant d'être envoyé. La version 3 ajoute les
   fichiers (Put, Piece, Load, Erase) et rien d'autre : un programme de version 3 se connecte à un serveur de 2 en 2
   (comme plus bas), et un fichier est refusé dans le programme (`invalid` : « this server speaks protocol 2 or older:
   files need a server of protocol 3 »). La version 2 ajoute les opérateurs et l'ordre de la question (plus bas) et rien
-  d'autre ; un serveur parle les versions 1 à 4, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
+  d'autre ; un serveur parle les versions 1 à 5, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
   dans Hello ; un serveur de version 1 se contente de la refuser (`version`) et ferme, et la bibliothèque se reconnecte
   en 1 : ses questions de patterns et de ranges reçoivent leur réponse comme avant, et une question avec `Not`, `Or`,
   `In`, `Prefix`, Sort, Limit ou After est refusée dans le programme (`invalid` : « this server speaks protocol 1: ...
@@ -546,6 +549,15 @@ same   = 2 | group                                                 nothing the q
 - **Le follow stream** porte `durable` (kind 13) après que chaque frame est durable : un lecteur local calcule les
   questions vivantes de son propre programme à partir des frames qu'il applique, pendant le fsync du serveur, et les
   donne à `durable`. Un lecteur d'une version plus ancienne saute ce kind.
+- **Sort et Limit** (version 5) : les lignes du watch sont celles de Find avec les mêmes Sort et Limit au groupe de
+  chaque message, et les lignes de chaque message viennent dans l'ordre (celles de la réponse, les lignes ajoutées et
+  les lignes retirées d'un changement). Le hub tient la fenêtre (window) de chaque watch de ce genre, k lignes et sa
+  dernière : les lignes d'un frame sont comparées à la dernière, et une ligne qui quitte la fenêtre est remplacée par
+  un seul Find After la dernière ligne, Limit les lignes qui manquent, sur le fil du hub, avec la question même du watch
+  (les droits pour lesquels sa première réponse a été vérifiée) et le budget de questions du serveur (au-delà, ce watch
+  se termine `too_large`). Un Limit de plus de 100 000, un After, un Limit sans Sort, et des agrégats avec Sort ou Limit
+  sont refusés (`invalid`) : [Sort et Limit dans un watch](cesia.md#sort-et-limit-dans-un-watch), la règle vérifiée par
+  model checking dans `spec/WatchWindow.tla`.
 - Ce qu'est un changement, et comment il se calcule : [Cepheus depuis Cesia](cesia.md#watch--les-questions-vivantes) ;
   la règle de reprise est vérifiée par model checking dans `spec/Watch.tla` (pas de trou, pas de répétition, les lignes
   jamais plus anciennes que le dernier message : 1 015 657 états ; sans le test des patterns touchés ou sans la borne
@@ -594,7 +606,7 @@ Chaque réponse est une valeur ou une erreur `{code, message}`. Les codes du mot
 |---|---|---|
 | `auth` | Hello avec un token inconnu ; une requête avant Hello ; un token retiré depuis | vérifier le token ; la connexion se ferme |
 | `denied` | il manque au token le droit pour cette base ou cette opération ; une session d'un autre token | un token qui a ce droit |
-| `version` | Hello avec une version du protocole que le serveur ne parle pas (il parle les versions 1 à 4) | une bibliothèque se reconnecte dans la version d'avant ; sinon, un serveur et une bibliothèque d'une même release |
+| `version` | Hello avec une version du protocole que le serveur ne parle pas (il parle les versions 1 à 5) | une bibliothèque se reconnecte dans la version d'avant ; sinon, un serveur et une bibliothèque d'une même release |
 | `too_large` | une frame de plus de 16 MiB | écrire en groupes plus petits ; la connexion se ferme |
 | `unknown_database` | un nom ou un handle que le serveur ne tient pas | la déclarer dans cluster.toml |
 | `stopping` | le serveur s'arrête | se reconnecter : la bibliothèque le fait |

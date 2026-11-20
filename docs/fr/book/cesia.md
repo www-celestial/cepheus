@@ -475,8 +475,8 @@ ligne après laquelle commence la page).
   marche abandonne alors après 2 fenêtres au lieu de 5 (en OCaml, 396 µs contre 657 quand elle allait jusqu'à son
   budget, et 322 pour le heap seul, sur les données de l'application du [guide](app.md#14-ce-que-cela-coûte)).
 
-`Watch` refuse `Sort`, `Limit` et `After` (un watch garde chaque ligne de sa question) : triez les lignes qu'il donne
-avec `list.SortBy`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que
+`Watch` prend aussi `Sort` et `Limit`, et garde les premières lignes de l'ordre à mesure qu'elles changent
+([plus bas](#sort-et-limit-dans-un-watch)) ; il refuse `After`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que
 `Where`, `Give`, `Sort`, `Limit` et `After` : un `After` mal écrit donnerait sinon la première page encore et encore
 (une question sans elles est lue comme avant, ses autres clés laissées de côté).
 
@@ -552,6 +552,73 @@ redemandés pour la clé dont l'extremum est parti. Les questions qui ne diffèr
 impayées de chaque client) partagent un seul **template** (un modèle de question, dont les constantes deviennent des
 paramètres) : le changement d'un fait se calcule une fois et ses lignes vont aux watches dont les constantes leur
 correspondent, si bien qu'un groupe coûte autant avec 10 watches qu'avec 10 000 ([ce que cela coûte](#ce-que-cela-coûte)).
+
+
+### Sort et Limit dans un watch
+
+`Watch` prend `Sort` et `Limit` comme `Find` : à chaque message ses lignes sont celles de `Find` avec les mêmes `Sort`
+et `Limit` au groupe du message (les k premières lignes dans l'ordre, et les copies de la k-ième), et chaque message
+donne ses lignes dans l'ordre : les `Rows` d'une réponse, les `Added` et les `Removed` d'un changement, chacun trié.
+Les messages gardent leurs deux formes, si bien qu'un lecteur de watch en lit un avec `Sort` comme un autre ; les
+lignes tenues restent un ensemble auquel on ajoute `Added` et dont on retire `Removed` : une page qui les montre dans
+l'ordre place `Added` à sa place ou retrie les k lignes (`std/live` tient les lignes d'un affichage comme un
+ensemble).
+
+```cesia norun
+top2 = (i, total) -> {
+  Where: [[i, Invoice.Total, total]],
+  Give: {Invoice: i, Total: total},
+  Sort: [cepheus.Desc(total)],
+  Limit: 2,
+}
+w = result.Unwrap(cepheus.Watch(2, top2, db))
+io.Print(fiber.Receive(w.Changes))
+big = result.Unwrap(cepheus.Insert(Invoice, {Client: bo, Total: 500, Status: "paid"}, db))
+io.Print(fiber.Receive(w.Changes))
+result.Unwrap(cepheus.Update(Invoice, big, {Total: 5}, db))
+io.Print(fiber.Receive(w.Changes))
+cepheus.Close(w)
+```
+
+```text
+Ok({Group: 16, Rows: [{Invoice: 65537, Total: 1200.0}, {Invoice: 65538, Total: 80.5}], Added: missing, Removed: missing})
+Ok({Group: 17, Rows: missing, Added: [{Invoice: 65547, Total: 500.0}], Removed: [{Invoice: 65538, Total: 80.5}]})
+Ok({Group: 18, Rows: missing, Added: [{Invoice: 65538, Total: 80.5}], Removed: [{Invoice: 65547, Total: 500.0}]})
+```
+
+- Une ligne qui vient avant la dernière ligne de la fenêtre (window : les k lignes que le watch tient) y entre, et
+  pousse dehors les lignes au-delà de la k-ième ; une ligne de la fenêtre qui part est remplacée par la suivante de
+  l'ordre, que le watch lit par un seul `Find` des lignes d'après sa dernière (`After` elle, `Limit` les lignes qui
+  manquent) au groupe du changement. Le watch tient k lignes, jamais toute la réponse, et sa première réponse coûte une
+  page.
+- Une ligne de la fenêtre dont les champs changent part et revient avec ses nouveaux champs dans le même changement, à
+  sa nouvelle place (ou pas du tout, quand sa nouvelle place est au-delà de la k-ième). Une écriture qui ne change rien
+  à la fenêtre (une ligne au-delà de la k-ième, un fait qu'aucune ligne de la question ne lit) ne donne aucun message.
+- `Sort` sans `Limit` garde toutes les lignes de la réponse, dans l'ordre.
+- Refusés, `invalid` : `After` (les lignes d'un watch sont les premières de son ordre, à mesure qu'elles changent),
+  `Limit` sans `Sort` (l'ordre du moteur n'est pas un ordre qu'un watch peut garder), `Sort` ou `Limit` avec des
+  agrégats, un `Limit` de plus de 100 000 lignes (comme pour `Find`). Face à un serveur d'une version antérieure
+  (protocole 4 ou plus ancien), un tel watch est refusé dans le programme, jamais envoyé : « this server speaks
+  protocol 4: a watch with Sort and Limit needs a server of protocol 5 ». Un watch sans eux part comme avant.
+- **Ce qu'il coûte.** Un changement coûte les delta queries ci-dessus, comme pour tout watch, plus la comparaison de
+  chaque ligne qu'elles ajoutent ou retirent avec la dernière ligne de la fenêtre, $O(d \log k)$ pour $d$ lignes, plus un
+  `Find` d'une page quand une ligne quitte la fenêtre. Sur l'application du [guide](app.md#9-le-tableau-de-bord-en-direct),
+  les dix derniers paiements de son tableau de bord : la première réponse en 97 µs contre 6 299 µs pour les paiements des
+  dernières 24 heures que la page triait (3 410 lignes tenues au lieu de 10), et un groupe au hub (le fil qui calcule les
+  changements) 11,9 µs à la médiane contre 10,0, 18,7 en moyenne contre 13,5 (un paiement repris remplit à nouveau la
+  fenêtre : un `Find` d'une page) ([ce que cela coûte](app.md#14-ce-que-cela-coûte)).
+
+**Comment la fenêtre est tenue.** Le watch tient sa fenêtre W (les lignes de `Find` avec `Limit` k) et L, sa dernière
+ligne. Une ligne de la réponse est dans W exactement quand elle vient à L ou avant dans l'ordre (toutes les lignes
+d'avant la k-ième, et toutes les copies de la k-ième), sauf si W est toute la réponse (moins de k lignes : alors toutes
+y sont). Donc, après un groupe, les lignes de la nouvelle réponse à L ou avant sont celles de W, moins les lignes
+retirées à L ou avant, plus les lignes ajoutées à L ou avant : les lignes des delta queries, chacune comparée à L. Si
+elles sont k ou plus, la nouvelle W est leurs k premières et les copies de la k-ième ; si elles sont moins, chaque
+ligne qui manque encore à la nouvelle W vient après L, et un seul `Find` avec `After` L et `Limit` les lignes qui
+manquent les donne (un remplissage qui en trouve moins qu'il n'en demande les a toutes trouvées, et W est alors toute
+la réponse). `spec/WatchWindow.tla` vérifie la règle : après chaque groupe W est les lignes de `Find`, et TLC la casse
+quand on enlève le remplissage, quand la coupe sépare les copies de la k-ième ligne, ou quand « à L ou avant » devient
+« avant L » ; `test/live_sim.ml` la vérifie contre `Find` et un oracle à lui à chaque message.
 
 ## Règles
 

@@ -537,6 +537,9 @@ the usual one, both are given.
   (`/dev/shm/cepheus-ID.visible`), under which the newest durable state is visible: the server stores it after each
   fsync, before it answers the writers; a local read loads it and serves the state held under it. One store makes a
   group visible to every reader at one instant. [server](server.md#local-reads-g15)
+- **window** (of a watch) — the rows a watch with `Sort` and `Limit` holds: `Find`'s first k rows in its order and
+  the copies of the k-th, kept by each frame's rows compared with its last row, and refilled by one page `Find` after
+  that row when a row leaves it ([Sort and Limit in a watch](cesia.md#sort-and-limit-in-a-watch)).
 - **working set** — the reasoner's arrays for one group: the facts it touched, their states, rounds and marks, in
   open-addressing tables with chains by (property, thing) and (property, value), out of the collector's sight.
   [rules](rules.md#large-groups)

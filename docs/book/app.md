@@ -277,23 +277,18 @@ there is a next one. The cursor of a link is the last row (or the first, for the
 JSON: a visitor can write one by hand, so it is read as any input, a JSON object of at most 2 KB, whose fields the
 question checks against their types (a wrong one is a 400).
 
-**Keys first, then rows.** A sorted page costs about the patterns of each answer it reads; and at 100,000 invoices, a
-page of the eight patterns that one row of the list needs (number, bill-to, date, due date, status, total, and the
-search) left the index's order and read every answer: 9.1 ms, against 0.88 ms for seven patterns, 0.25 for six and
-0.18 for five (the best of 20 runs of each, outside the machine's lock). So the list asks the
-page of its **keys** first, five patterns (the number, the status, the due date, the date or the total of the order,
-and the filters), then the other fields of those 20 invoices only, with their ids as `cepheus.In`:
-
-```text
-rows = cepheus.Find(7, (i, no, b, d, u, s, t) -> {
-  Where: [[i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, s], [i, Invoice.Total, t], cepheus.In(i, [k.Invoice for k in keys])],
-  Give: {Invoice: i, Number: no, BillTo: b, Date: d, Due: u, Status: s, Total: t},
-}, db)?
-```
-
-A page of invoices takes about 1 ms that way, through HTTP, sorted by any of its orders, filtered or searched (one
-request each took 9 to 69 ms with a single question): see [what it costs](#14-what-it-costs). The list of clients
-does the same for their e-mails.
+**One question a page.** A page of invoices is one sorted question of the seven fields a row of the list shows
+(`invoicesQuery`: number, bill-to, date, due date, status, total, and the filters; eight with the search), its order
+each sort's key, then the due date and the invoice (`sortKeys`), so that two invoices of one date always come in one
+order. The engine walks the index of the first key and reads the other fields of each row once it passes the filters
+([how it is answered](cesia.md#sort-limit-and-after-pages)): 62 µs a page in the app's own memory, against 113 for
+the page of its keys then their rows that the app asked before ([what it costs](#14-what-it-costs)). The cursor of a
+link is a row of the seven fields. A link saved before, whose cursor is a row of five keys (`Invoice`, `Number`,
+`Status`, `Due`, and `X`, the total when sorted by total, else the date), still works: `pageCursor` makes it the row it
+stands for, its other fields read from its invoice (an invoice deleted since gets empty ones, which are never
+compared: the order's keys before them, its id among them, place it first), so the link gives the same page after it,
+or before it, as it did (`isPageCursorNewOrOld`, for each order). The list of clients asks the page of its keys
+first, then their e-mails.
 
 **The search as one types** is a `Prefix` on the name in lower case or on the e-mail, either one, with `Or`:
 
@@ -406,11 +401,22 @@ request, and watches through the database of its role, each watch ended with the
 ```text
 unpaid = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
 late = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Status, "late"], [i, Invoice.Total, t]], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
-paid = cepheus.Watch(5, (i, p, no, b, t) -> {
-  Where: [[i, Invoice.PaidAt, p], cepheus.Above(p, since), [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Total, t]],
-  Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
-}, db, until = s.Ended)?
+paid = cepheus.Watch(5, LatestPayments, db, until = s.Ended)?
 [live.Show("unpaid", unpaid.Changes), live.Show("late", late.Changes), live.Show("payments", paid.Changes)]
+```
+
+where `LatestPayments` is a question with `Sort` and `Limit` ([Sort and Limit in a
+watch](cesia.md#sort-and-limit-in-a-watch)): the ten latest payments, the newest first. Its watch holds those ten
+rows only; a payment comes in at the top and pushes the tenth out, and one that leaves the ten (its date moved back)
+is replaced by the eleventh, which the watch reads by one page of the question after its last row:
+
+```text
+LatestPayments(i, p, no, b, t) = {
+  Where: [[i, Invoice.PaidAt, p], [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Total, t]],
+  Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
+  Sort: [cepheus.Desc(p), cepheus.Desc(no)],
+  Limit: 10,
+}
 ```
 
 and the page's side, in `/app.js`, draws each show as it changes:
@@ -418,16 +424,17 @@ and the page's side, in `/app.js`, draws each show as it changes:
 ```js
 const live = await connect('/live')
 live.show('unpaid', rows => tile('unpaid', rows))
-live.show('payments', rows => { /* the 10 latest, by PaidAt */ })
+live.show('payments', rows => { /* the ten rows, sorted again by PaidAt: live.js holds a show's rows as a set */ })
 ```
 
 How a payment reaches every open page: the group is written and forced to the server's disk; the app's process,
 which follows the database for its local reads, computes the watches' changes from the group (the totals by
 difference, [how a change is computed](cesia.md#watch-live-questions)) and gives them once the group is durable; each
 page's screen sends its change over its WebSocket; the page draws it at its next frame. Every page that watches the
-same question shares one watch. A watch keeps no order and no limit, so "the latest payments" watches those of the
-last 24 hours, and the page keeps the 10 latest. The accountant's dashboard is the same, through its token; its
-watches are computed at the server, which pushes them.
+same question shares one watch. Before a watch took `Sort` and `Limit`, the dashboard watched every payment of the
+last 24 hours and the page kept the 10 latest: on the seed, 3,410 rows held by each page and a first answer of 6.3
+ms, against 10 rows and 97 µs now. The accountant's dashboard is the same, through its token; its watches are
+computed at the server, which pushes them.
 
 ## 10. The CSV export
 
@@ -749,6 +756,20 @@ reading of the app's code and the engine's first load (13 ms, [what it costs](ce
   "A" to "L" in that order, so the walk in the index's order finds none before its budget and the heap answers
   ([Sort, Limit and After](cesia.md#sort-limit-and-after-pages)).
 - The CSV is mostly Cesia's: the question is a few ms; formatting 11,000 rows and their dates is the rest.
+- **A page as one question** (2026-11-20, measured after the table above, in the app's own memory, `InvoicesPage` 200
+  times a round, 21 rounds alternated with the app as it was, the page of its keys then their rows; p50 µs, the ratio
+  paired by round): the first page 62.0 [61.0, 62.9] against 113 [111, 114], 0.550 [0.535, 0.564]; a page 50,000 deep
+  67.9 against 118, 0.575 [0.561, 0.601]; the search by bill-to prefix ("ad") 556 [551, 562] against 525 [523, 540],
+  1.053 [1.041, 1.063]: there one question is 5 % slower, since it reads the seven fields of the rows its windows find
+  past the page, where the page of keys read five.
+- **The dashboard's payments** (the same day, the watch alone in the app's own memory, its first answer 20 times a
+  round, 21 rounds alternated): the ten latest payments 97 µs [83, 99] against 6,299 [6,170, 6,576] for every payment
+  of the last 24 hours (3,410 rows held by each page instead of 10), once the latest payments have instants of their
+  own; on the seed as it is made, where about 3,000 payments share its last instant (one window of the index holds them
+  all), 1,297 [1,239, 1,377] against 6,188. A group at the hub (the dashboard's three watches, 5,000 groups of
+  payments, totals changed and payments taken back, in OCaml on a copy of the seed): 11.9 µs at the median against
+  10.0, 18.7 on the mean against 13.5, since a payment taken back refills the window by one page; the watch of the
+  last 24 hours costs the same as before (the ratio of the means 0.995 [0.968, 1.034]).
 
 **The actions**, ms, through the forms (`bench/load`: Cesia's HTTP client, a connection a request, which costs
 about 0.35 ms a request more than ApacheBench), each answered once its group is on the server's disk:
@@ -872,7 +893,7 @@ What the app defends against, how, and the test that shows it:
 | a page that shows what it should not | the role checked by every route; the accountant's token reads invoices, their lines and their counter only | `isAccountantSeesInvoicesOnly`, `isAccountantSeesNoClient` (denied by the database) |
 | cross-site scripting | every value escaped; a Content-Security-Policy that allows the app's own script only; values drawn with `textContent` in the page | `isClientMadeAndEscaped` |
 | CSV injection | a `'` before a cell that a spreadsheet would run | `isCsvOfTheFilter` |
-| input that breaks a check or the memory | every field bounded and checked before use; bodies of 64 KiB at most; cursors of 2 KB, their types checked | `isClientChecked`, `isInvoiceChecked`, `isBadCursorRefused` |
+| input that breaks a check or the memory | every field bounded and checked before use; bodies of 64 KiB at most; cursors of 2 KB, their types checked (an older cursor's invoice read only when it is an id, and used for the order only) | `isClientChecked`, `isInvoiceChecked`, `isBadCursorRefused`, `isPageCursorNewOrOld` |
 | two requests at once | `Expect` on the status (paid once), the number taken by the group (`Incr`) and `unique`, `unique` on the e-mail, the constraint on deleted clients | `isPaidOnce`, `isNumberedInOrderAtOnce`, `isAccountantNumbersInvoicesAtOnce`, `isDeleteChecked`, `isEmailUnique` |
 | a secret in the logs | the log holds no query, cookie, body, token, or login typed | (by reading `web.ce`) |
 | the app's own rights | the permissions of step 13, no file written | (the task's `allow`) |

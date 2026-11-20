@@ -53,7 +53,7 @@ test draws from a seeded generator (`Rng`, SplitMix64), so a failure prints its 
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | the sale of seats with kill -9 and a checker of the history ([case](case-seats.md#real-crashes-and-a-checker-of-the-whole-history)); `ROUNDS` 0: no kill, the time to sell out | `BUYERS` (16), SEED 42, SEATS 2,000 |
 | `examples.exe` | every ```` ```ocaml ```` block of `README.md` and `docs/book/*.md` (`test/extract.ml` makes the program), each in its own directory under `CEPHEUS_TMP`, its output compared with the ```` ```output ```` block under it | `CEPHEUS_TMP` |
 | `tools/test.sh` | `dune build --profile release`, then unit, reasoning, exhaustive, sim, wal_sim, crash, bank, seats and examples, the server's tests, and the Cesia client's when a Cesia with its native interface is here | `CEPHEUS_TMP` (a short path: a Unix socket's holds 107 bytes), `SEEDS` (300), `BUFFER_SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `CESIA_NATIVE` (the folder of Cesia's `cesia_v1.cmi`; found from the `cesia` command when unset) |
-| `tools/tlc.sh` | TLC on every model of `spec/` (the journal, merges, the sale of seats, local reads, watches, the commit buffer, a rule change's background path), and every variant that must break an invariant ([model checking](#model-checking)) | `TLA2TOOLS`: the path of `tla2tools.jar` |
+| `tools/tlc.sh` | TLC on every model of `spec/` (the journal, merges, the sale of seats, local reads, watches and their windows, the commit buffer, a rule change's background path), and every variant that must break an invariant ([model checking](#model-checking)) | `TLA2TOOLS`: the path of `tla2tools.jar` |
 
 **Deterministic simulation testing** runs the real engine on a simulated disk where one seed decides every event (the
 writes, the order of the writer's steps, crashes, damage), so that a failure is not a rare accident but a seed that
@@ -189,7 +189,13 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   second server of the same database refused); and a follower of a database with a rule, from its run and its
   journal, holds exactly the engine's facts and which of them are asserted, at its start and after it rests on a new
   base (the derived facts come with their kind, in the run's flag and the frames' kinds, and are applied as replay
-  applies them, never evaluated).
+  applies them, never evaluated); a watch with Sort and Limit through the core: its first answer in the order, a row
+  coming in and the last going, a row of the window leaving and the window refilled after its last row, a row after
+  the window giving no message, a row changing inside it, each change's lists in the order; After, Limit without Sort,
+  aggregates and a Limit over 100,000 refused; its first answer and its refill within the question budget (past it,
+  that watch ends `too_large` and a watch without Sort beside it goes on); a token of one kind refilled with its own
+  question, one over a kind it does not read denied; and a program of protocol 5 refusing such a watch to a server of
+  protocol 4 before it is sent.
 - `server_sim`: the deterministic simulation of the server over a simulated network, on the simulated disk: clients
   of every right, pipelined, their bytes cut at any byte and delivered late, connections broken (the unanswered
   writes sent again with their serials), the writer's batches, merges, checkpoints, server deaths and power losses
@@ -434,6 +440,15 @@ visible:
 | `LocalReadsDesign.cfg` | the design's lease | 1 reader, 2 writes, 4 ticks, leases of 2 | breaks Ordered (7 states) |
 | `LocalReadsDesignFresh.cfg` | the design's lease | the same | `NoStale` (Fresh and Durable) holds: 289,765 |
 | `LocalReadsDraft.cfg` | the design's first draft | the same | breaks `NoStale`: Fresh (12 states) |
+
+`spec/WatchWindow.tla` models the window of a watch with `Sort` and `Limit` ([Sort and Limit in a
+watch](cesia.md#sort-and-limit-in-a-watch)): the answer a bag of 4 rows in their order, each with up to 2 copies,
+the Limit 0 to 3, and every frame (any rows removed, any added) moved into the window by its rule. Invariants:
+`RowsRight` (the window is `Find`'s rows, the first k and the copies of the k-th), `CompleteRight` (when it says it
+holds the whole answer, it does), `NothingLost` (a removed row at or before the window's last was held). They hold in
+374 distinct states (167,278 transitions, 4 s); `WatchWindowNoRefill.cfg` (no refill), `WatchWindowNoTies.cfg` (a cut
+that splits the copies of the k-th row) and `WatchWindowStrict.cfg` ("before the last" instead of "at or before")
+each break `RowsRight`, and `tools/tlc.sh` fails unless they do.
 
 `spec/CommitBuffer.tla` models the server's commit buffer ([the server](server.md#many-databases-one-fsync-the-commit-buffer)):
 databases whose syncers write each frame to their journal without an fsync and give it to the buffer, one frame in

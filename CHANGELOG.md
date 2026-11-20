@@ -45,7 +45,7 @@ stay as they are, or a later version reads and speaks both the old and the new.
   their bytes went (G24).
 - Checked by unit and property tests, a deterministic simulation of the disk's faults (power losses, torn and lost
   writes, failed fsyncs, crashes inside any disk call), an exhaustive enumeration of the crash states of small
-  journals and merges, real `kill -9` rounds, and 12 TLA+ models whose 35 variants that each drop one part of a rule
+  journals and merges, real `kill -9` rounds, and 13 TLA+ models whose 38 variants that each drop one part of a rule
   must all break ([testing](docs/book/testing.md)).
 
 ### Rules
@@ -66,7 +66,10 @@ stay as they are, or a later version reads and speaks both the old and the new.
   kinds of things ([the server](docs/book/server.md)).
 - Many databases share one fsync a round through the commit buffer; a program on the server's machine reads in its
   own memory, linearizably, with no round trip (0.22 µs a point read); live questions (`Watch`) send each change of an
-  answer once its group is durable.
+  answer once its group is durable, and with `Sort` and `Limit` keep the first rows of an order as they change (the
+  ten latest payments: ten rows held, a row that leaves them replaced by one page read after the last), the rule
+  model-checked ([Sort and Limit in a watch](docs/book/cesia.md#sort-and-limit-in-a-watch)). The wire protocol is at
+  version 5 (a Watch's Sort and Limit); a program speaks 1 to 5 with a server of any of them.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects
   a new leader by itself.
@@ -80,7 +83,9 @@ stay as they are, or a later version reads and speaks both the old and the new.
   `Incr`, `Find`, `Watch`, rules with `Rule` and `Define`, `Fork` for tests, files with `Put`, `Read`, `List`,
   `Delete` and `Erase` ([Cepheus from Cesia](docs/book/cesia.md)). Nothing loads before the package's first call.
 - A real app built step by step on it, invoices and clients, from `cesia new` to production, with its tests in
-  Firefox and the time of every page ([a real app](docs/book/app.md)).
+  Firefox and the time of every page ([a real app](docs/book/app.md)): its list a page of one sorted question, whose
+  links keep working from one version of the app to the next, and a dashboard of live totals and of the ten latest
+  payments.
 
 ### Files
 
@@ -108,6 +113,9 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 | an invoice and its lines | **23.1 [22.9, 23.1]** | 49 [49, 50] | 0.47 [0.46, 0.47] |
 | a durable update of one invoice | **3,040 [2,989, 3,074]** | 3,088 [3,012, 3,219] | 0.95 [0.92, 0.99] |
 
+- Since this table, a page of invoices is one question (2026-11-20): in the app's own memory 62 µs against the 113 of
+  the page of keys then rows, 0.550 [0.535, 0.564] paired by round, and the prefix 1.053 [1.041, 1.063]; the table is
+  measured again for the release ([a real app](docs/book/app.md#14-what-it-costs)).
 - Where PostgreSQL still wins: a sorted page 2.7 times, a page deep in the list 2.6 times, a prefix the order does not
   follow 3.4 times, a sort on a text 2.4 times. Its B-tree gives a row's fields in one read, where Cepheus keeps a fact
   a property and reads each field from its index ([why](docs/book/app.md#14-what-it-costs)).

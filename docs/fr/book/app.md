@@ -306,25 +306,20 @@ chiffres qui passe dans une adresse) de son JSON (le format texte des objets de 
 un à la main, donc il est lu comme toute entrée, un objet JSON de 2 KB au plus, dont la question vérifie les champs
 selon leurs types (un faux donne un 400, le code HTTP « requête invalide »).
 
-**Les clés d'abord, puis les lignes.** Une page triée coûte à peu près, pour chaque réponse qu'elle lit, le prix de ses
-patterns ; et à 100 000 factures, une page des huit patterns dont une ligne de la liste a besoin (numéro, destinataire,
-date, échéance, statut, total, et la recherche) quittait l'ordre de l'index (la copie triée des faits où la base
-cherche) et lisait toutes les réponses : 9,1 ms, contre 0,88 ms pour sept patterns, 0,25 pour six et 0,18 pour cinq (le
-meilleur de 20 exécutions de chacune, hors du lock de la machine, le lock qui tient les autres benchmarks, des mesures
-de vitesse faites selon une méthode fixe, à l'écart pendant une mesure, étape 14). Donc la liste demande d'abord la page
-de ses **clés**, cinq patterns (le numéro, le statut, l'échéance, la date ou le total de l'ordre, et les filtres), puis
-les autres champs de ces 20 factures seulement, avec leurs ids en `cepheus.In` :
-
-```text
-rows = cepheus.Find(7, (i, no, b, d, u, s, t) -> {
-  Where: [[i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Date, d], [i, Invoice.Due, u], [i, Invoice.Status, s], [i, Invoice.Total, t], cepheus.In(i, [k.Invoice for k in keys])],
-  Give: {Invoice: i, Number: no, BillTo: b, Date: d, Due: u, Status: s, Total: t},
-}, db)?
-```
-
-Une page de factures prend environ 1 ms de cette façon, par HTTP, triée selon n'importe lequel de ses ordres, filtrée
-ou cherchée (une requête prenait de 9 à 69 ms avec une seule question) : voir [ce que cela coûte](#14-ce-que-cela-coûte).
-La liste des clients fait de même pour leurs e-mails.
+**Une question par page.** Une page de factures est une seule question triée des sept champs qu'une ligne de la liste
+montre (`invoicesQuery` : numéro, destinataire, date, échéance, statut, total, et les filtres ; huit avec la
+recherche), son ordre la clé de chaque tri, puis l'échéance et la facture (`sortKeys`), si bien que deux factures
+d'une même date viennent toujours dans un seul ordre. Le moteur parcourt l'index (la copie triée des faits où la base
+cherche) de la première clé et lit les autres champs de chaque ligne une fois qu'elle passe les filtres ([comment elle
+est répondue](cesia.md#sort-limit-et-after--des-pages)) : 62 µs par page dans la mémoire de l'application, contre 113
+pour la page de ses clés puis de leurs lignes que l'application demandait avant ([ce que cela
+coûte](#14-ce-que-cela-coûte)). Le curseur d'un lien est une ligne des sept champs. Un lien enregistré avant, dont le
+curseur est une ligne de cinq clés (`Invoice`, `Number`, `Status`, `Due`, et `X`, le total quand le tri est par total,
+sinon la date), marche toujours : `pageCursor` en fait la ligne qu'il représente, ses autres champs lus sur sa facture
+(une facture supprimée depuis reçoit des champs vides, qui ne sont jamais comparés : les clés de l'ordre d'avant eux,
+son id parmi elles, la placent d'abord), si bien que le lien donne la même page après lui, ou avant lui, qu'avant
+(`isPageCursorNewOrOld`, pour chaque ordre). La liste des clients demande d'abord la page de ses clés, puis leurs
+e-mails.
 
 **La recherche à mesure qu'on tape** est un `Prefix` sur le nom en minuscules ou sur l'e-mail, l'un ou l'autre, avec
 `Or` :
@@ -456,11 +451,22 @@ cookie de sa requête, et suit les questions par la base de son rôle, chaque wa
 ```text
 unpaid = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
 late = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Status, "late"], [i, Invoice.Total, t]], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
-paid = cepheus.Watch(5, (i, p, no, b, t) -> {
-  Where: [[i, Invoice.PaidAt, p], cepheus.Above(p, since), [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Total, t]],
-  Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
-}, db, until = s.Ended)?
+paid = cepheus.Watch(5, LatestPayments, db, until = s.Ended)?
 [live.Show("unpaid", unpaid.Changes), live.Show("late", late.Changes), live.Show("payments", paid.Changes)]
+```
+
+où `LatestPayments` est une question avec `Sort` et `Limit` ([Sort et Limit dans un
+watch](cesia.md#sort-et-limit-dans-un-watch)) : les dix derniers paiements, le plus récent d'abord. Son watch ne tient
+que ces dix lignes ; un paiement entre en haut et pousse le dixième dehors, et un paiement qui quitte les dix (sa date
+reculée) est remplacé par le onzième, que le watch lit par une page de la question après sa dernière ligne :
+
+```text
+LatestPayments(i, p, no, b, t) = {
+  Where: [[i, Invoice.PaidAt, p], [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Total, t]],
+  Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
+  Sort: [cepheus.Desc(p), cepheus.Desc(no)],
+  Limit: 10,
+}
 ```
 
 et le côté de la page, dans `/app.js`, dessine chaque affichage à mesure qu'il change :
@@ -468,7 +474,7 @@ et le côté de la page, dans `/app.js`, dessine chaque affichage à mesure qu'i
 ```js
 const live = await connect('/live')
 live.show('unpaid', rows => tile('unpaid', rows))
-live.show('payments', rows => { /* the 10 latest, by PaidAt */ })
+live.show('payments', rows => { /* the ten rows, sorted again by PaidAt: live.js holds a show's rows as a set */ })
 ```
 
 Comment un paiement atteint chaque page ouverte : le groupe est écrit et forcé sur le disque du serveur ; le processus
@@ -476,9 +482,10 @@ de l'application, qui suit la base pour ses lectures locales (des lectures dans 
 changements des watches à partir du groupe (les totaux par différence,
 [comment un changement est calculé](cesia.md#watch--les-questions-vivantes)) et les donne une fois le groupe durable (sur le
 disque, à l'abri d'une coupure) ; l'écran de chaque page envoie son changement par son WebSocket ; la page le dessine
-à son prochain rafraîchissement. Toutes les pages qui suivent la même question partagent un seul watch. Un watch ne
-garde ni ordre ni limite, donc « les derniers paiements » suit ceux des dernières 24 heures, et la page garde les 10
-plus récents. Le tableau de bord du comptable est le même, par son token ; ses watches sont calculés au serveur, qui les
+à son prochain rafraîchissement. Toutes les pages qui suivent la même question partagent un seul watch. Avant qu'un watch
+prenne `Sort` et `Limit`, le tableau de bord suivait chaque paiement des dernières 24 heures et la page gardait les 10
+plus récents : sur le seed (les données de départ), 3 410 lignes tenues par chaque page et une première réponse en
+6,3 ms, contre 10 lignes et 97 µs maintenant. Le tableau de bord du comptable est le même, par son token ; ses watches sont calculés au serveur, qui les
 pousse.
 
 ## 10. L'export CSV
@@ -825,6 +832,22 @@ remplie : 29,6 ms [29,1 ; 30,1]. Le processus de l'application, de sa commande �
   aucun avant son budget, et le heap répond ([Sort, Limit et After](cesia.md#sort-limit-et-after--des-pages)).
 - Le CSV est surtout du travail de Cesia : la question prend quelques ms ; mettre en forme 11 000 lignes et leurs dates
   fait le reste.
+- **Une page en une seule question** (2026-11-20, mesuré après le tableau ci-dessus, dans la mémoire de l'application,
+  `InvoicesPage` 200 fois par round, 21 rounds alternés avec l'application telle qu'elle était, la page de ses clés
+  puis de leurs lignes ; p50 en µs, le rapport apparié par round) : la première page 62,0 [61,0, 62,9] contre 113 [111,
+  114], 0,550 [0,535, 0,564] ; une page à 50 000 de profondeur 67,9 contre 118, 0,575 [0,561, 0,601] ; la recherche
+  par préfixe du destinataire (« ad ») 556 [551, 562] contre 525 [523, 540], 1,053 [1,041, 1,063] : là, une seule
+  question est 5 % plus lente, puisqu'elle lit les sept champs des lignes que ses fenêtres trouvent au-delà de la page,
+  là où la page des clés en lisait cinq.
+- **Les paiements du tableau de bord** (le même jour, le watch seul dans la mémoire de l'application, sa première
+  réponse 20 fois par round, 21 rounds alternés) : les dix derniers paiements 97 µs [83, 99] contre 6 299 [6 170, 6 576]
+  pour chaque paiement des dernières 24 heures (3 410 lignes tenues par chaque page au lieu de 10), une fois que les
+  derniers paiements ont chacun leur instant ; sur le seed tel qu'il est fait, où environ 3 000 paiements partagent son
+  dernier instant (une seule fenêtre de l'index les tient tous), 1 297 [1 239, 1 377] contre 6 188. Un groupe au hub (les
+  trois watches du tableau de bord, 5 000 groupes de paiements, de totaux changés et de paiements repris, en OCaml sur
+  une copie du seed) : 11,9 µs à la médiane contre 10,0, 18,7 en moyenne contre 13,5, puisqu'un paiement repris remplit
+  à nouveau la fenêtre par une page ; le watch des dernières 24 heures coûte autant qu'avant (le rapport des moyennes
+  0,995 [0,968, 1,034]).
 
 **Les actions**, en ms, par les formulaires (`bench/load` : le client HTTP de Cesia, une connexion par requête, ce qui
 coûte environ 0,35 ms de plus par requête qu'ApacheBench), chacune répondue une fois son groupe sur le disque du
@@ -963,7 +986,7 @@ Ce dont l'application se défend, comment, et le test qui le montre :
 | une page qui montre ce qu'elle ne devrait pas | le rôle vérifié par chaque route ; le token du comptable ne lit que les factures, leurs lignes et leur compteur | `isAccountantSeesInvoicesOnly`, `isAccountantSeesNoClient` (refusé par la base) |
 | cross-site scripting (du script d'un autre site injecté dans une page) | chaque valeur échappée ; une Content-Security-Policy qui n'autorise que le script de l'application elle-même ; des valeurs dessinées avec `textContent` dans la page | `isClientMadeAndEscaped` |
 | CSV injection | un `'` devant une cellule qu'un tableur exécuterait | `isCsvOfTheFilter` |
-| une entrée qui casse une vérification ou la mémoire | chaque champ borné et vérifié avant usage ; des corps de 64 KiB au plus ; des curseurs de 2 KB, leurs types vérifiés | `isClientChecked`, `isInvoiceChecked`, `isBadCursorRefused` |
+| une entrée qui casse une vérification ou la mémoire | chaque champ borné et vérifié avant usage ; des corps de 64 KiB au plus ; des curseurs de 2 KB, leurs types vérifiés (la facture d'un curseur plus ancien n'est lue que si c'est un id, et ne sert qu'à l'ordre) | `isClientChecked`, `isInvoiceChecked`, `isBadCursorRefused`, `isPageCursorNewOrOld` |
 | deux requêtes à la fois | `Expect` sur le statut (payée une seule fois), le numéro pris par le groupe (`Incr`) et `unique`, `unique` sur l'e-mail, la contrainte sur les clients supprimés | `isPaidOnce`, `isNumberedInOrderAtOnce`, `isAccountantNumbersInvoicesAtOnce`, `isDeleteChecked`, `isEmailUnique` |
 | un secret dans les logs | le log ne contient ni query, ni cookie, ni corps, ni token, ni identifiant tapé | (en lisant `web.ce`) |
 | les droits de l'application elle-même | les permissions de l'étape 13, aucun fichier écrit | (le `allow` de la tâche) |

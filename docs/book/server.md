@@ -394,7 +394,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
 | 8 Follow | handle (over the Unix socket only) | Start: the database's id, the visibility number, count, (lo, hi) of each run, newest first; the descriptors of `visible` and of each run ride on its first byte. The connection is then the database's follow stream ([local reads](#local-reads-g15)) |
-| 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none), then its operators as Find codes them, when it has some (no Sort, Limit or After) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
+| 11 Watch | handle, question, select, from (the group of the answer the program holds; 0: none), then its operators, Sort and Limit as Find codes them, when it has some (no After; Sort and Limit from version 5) | pushes on the Watch's id until Unwatch or an error ([live questions](#live-questions-watch)) |
 | 12 Unwatch | the Watch's id | Unwatched |
 | 14 Put (version 3) | handle, serial, floor, by (zigzag), why, the file kind, name, media type, owner (0: the database's own key), cold (a byte), then the file's first bytes; the flag `more` when Pieces follow | Receipt of the group of its facts (kind/Name, Size, Type, Owner, Content), once its bytes and that group are durable ([the vault](vault.md)) |
 | 15 Piece | more bytes of the Put of this id; `more` but on the last | (the Put's reply) |
@@ -415,12 +415,15 @@ On a follow stream the server pushes (request id 0):
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
   (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
-- **Versions.** Version 4 adds the operation `Incr` (below) and nothing else: a program of version 4 connects to a
+- **Versions.** Version 5 adds a Watch's Sort and Limit ([live questions](#live-questions-watch)) and nothing else: a
+  program of version 5 connects to a server of 4 in 4, and a watch with Sort or Limit is refused in the program
+  (`invalid`: "this server speaks protocol 4: a watch with Sort and Limit needs a server of protocol 5") before it is
+  sent, since an older server refuses a Watch's order. Version 4 adds the operation `Incr` (below) and nothing else: a program of version 4 connects to a
   server of 3 in 3, and a group with an `Incr` is refused in the program (`invalid`: "this server speaks protocol 3 or
   older: Incr needs a server of protocol 4") before it is sent. Version 3 adds the files (Put, Piece, Load, Erase) and
   nothing else: a program of version 3 connects to a server of 2 in 2 (as below), and a file is refused in the program
   (`invalid`: "this server speaks protocol 2 or older: files need a server of protocol 3"). Version 2 adds the
-  question's operators and order (below) and nothing else; a server speaks 1 to 4, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+  question's operators and order (below) and nothing else; a server speaks 1 to 5, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
   and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
   one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
   protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2
@@ -489,6 +492,14 @@ same   = 2 | group                                                 nothing the q
 - **The follow stream** carries `durable` (kind 13) after each frame is durable: a local reader computes its own
   program's live questions from the frames it applies, during the server's fsync, and gives them at `durable`. A
   reader of an earlier version skips the kind.
+- **Sort and Limit** (version 5): the watch's rows are Find's with the same Sort and Limit at each message's group,
+  and each message's rows come in the order (the answer's, a change's added and its removed rows). The hub keeps the
+  window of each such watch, k rows and its last one: a frame's rows are compared with the last, and a row that leaves
+  the window is replaced by one Find After the last row, Limit the rows missing, on the hub's thread with the watch's
+  own question (the rights its first answer was checked for) and the server's question budget (past it, that watch
+  ends `too_large`). A Limit over 100,000, an After, a Limit without Sort, and aggregates with Sort or Limit are
+  refused (`invalid`): [Sort and Limit in a watch](cesia.md#sort-and-limit-in-a-watch), the rule model-checked in
+  `spec/WatchWindow.tla`.
 - What a change is, and how it is computed: [Cepheus from Cesia](cesia.md#watch-live-questions); the resume rule is
   model-checked in `spec/Watch.tla` (no gap, no repeat, the rows never older than the last message: 1,015,657 states;
   without the touch test or the ring's bound, TLC finds a counterexample).
@@ -533,7 +544,7 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 |---|---|---|
 | `auth` | Hello with an unknown token; a request before Hello; a token removed since | check the token; the connection closes |
 | `denied` | the token lacks the right for this database or operation; a session of another token | a token with the right |
-| `version` | Hello with a protocol version the server does not speak (it speaks 1 to 4) | a library connects again in the version before; else a server and a library of the same release |
+| `version` | Hello with a protocol version the server does not speak (it speaks 1 to 5) | a library connects again in the version before; else a server and a library of the same release |
 | `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |

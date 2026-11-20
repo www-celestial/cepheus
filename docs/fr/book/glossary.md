@@ -655,6 +655,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   est visible : le serveur l'écrit après chaque fsync, avant de répondre aux programmes qui ont écrit ; une lecture
   locale le charge et sert l'état tenu sous lui. Une seule écriture en mémoire rend un groupe visible à tous les
   lecteurs au même instant. [serveur](server.md#lectures-locales-g15)
+- **window** (la fenêtre, d'un watch) — les lignes que tient un watch avec `Sort` et `Limit` : les k premières lignes
+  de `Find` dans son ordre et les copies de la k-ième, tenues par les lignes de chaque frame comparées à sa dernière
+  ligne, et remplies à nouveau par un `Find` d'une page après cette ligne quand une ligne en part ([Sort et Limit dans
+  un watch](cesia.md#sort-et-limit-dans-un-watch)).
 - **working set** — les tableaux du reasoner pour un groupe : les faits qu'il a touchés, leurs états, leurs tours et
   leurs marques, dans des tables en open addressing avec des chaînes par (propriété, chose) et (propriété, valeur), hors
   de la vue du collector. [règles](rules.md#grands-groupes)

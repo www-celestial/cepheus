@@ -779,6 +779,9 @@ un pattern dont les variables sont toutes propres à un `Not` ou à une alternat
 `test/questions.ml` vérifie ses lignes par l'oracle après chaque frame, et celles d'un token restreint par l'oracle sur
 les faits qu'il a le droit de lire.
 
+Un watch avec `Sort` et `Limit` k tient la promesse avec les lignes de `Find` pour les mêmes `Sort` et `Limit` (les k
+premières dans l'ordre et les copies de la k-ième) : voir (4) plus bas.
+
 *Conditions.* La question est une conjunctive query (les patterns et les intervalles de `Find`), avec `Give` ou des
 agrégats. Un programme qui lit plus lentement que n'arrivent les changements reçoit à nouveau la réponse plutôt que
 chaque changement (il tient alors les lignes de `Find` au groupe de la réponse). Un watch se termine pour de bon à
@@ -802,15 +805,27 @@ de la question (une propriété et ses constantes), sinon par la réponse à son
 transforme en changement à partir de ses lignes : `spec/Watch.tla` vérifie que les lignes sont toujours la réponse à
 leur groupe et ne reviennent jamais en arrière, avec le lagging, les connexions coupées, et un watch arrêté puis
 relancé (1 015 657 états) ; sans le test des patterns touchés, ou sans la borne du ring, TLC trouve un contre-exemple
-(`tools/tlc.sh` vérifie les deux).
+(`tools/tlc.sh` vérifie les deux). (4) *Une fenêtre.* Soit W les lignes de `Find` avec `Limit` k à un groupe et L la
+dernière d'entre elles : une ligne de la réponse est dans W exactement quand elle vient à L ou avant (toutes les lignes
+d'avant la k-ième y sont, et chaque copie de la k-ième), sauf si W est toute la réponse. Après une frame, les lignes de
+la nouvelle réponse à L ou avant sont donc W, moins les lignes retirées à L ou avant, plus les lignes ajoutées à L ou
+avant (par (1), les lignes ajoutées et retirées sont exactement celles des delta queries). Si elles sont k ou plus, les
+k premières et les copies de la k-ième sont les k premières de la nouvelle réponse (toute autre ligne de la nouvelle
+réponse vient après L) ; si elles sont moins, les lignes qui manquent sont les premières de la nouvelle réponse après
+L, que donne `Find` avec `After` L et `Limit` les lignes qui manquent (moins qu'il n'en demande : il n'y en a pas
+d'autres, et W est toute la réponse). `spec/WatchWindow.tla` le vérifie (chaque réponse de 4 lignes avec jusqu'à 2
+copies chacune, chaque Limit jusqu'à 3, chaque frame : 374 états, 167 278 transitions), et TLC le casse quand on enlève
+le remplissage, les copies de la k-ième ou le « à L ou avant ».
 
 *Testé par* `test/live_sim.ml` (100 seeds dans `tools/test.sh`, `LIVE_SEEDS` pour plus : des groupes au hasard
 d'ajouts, de retraits, de faits dérivés et de merges en runs, des grands groupes ; chaque message de chaque watch,
 simple, qui projette ou qui agrège, égal à la réponse de l'évaluateur naïf à son groupe ; la reprise par `same` ou par
-la réponse, le lagging) ; `test/server_sim.ml` (des watches sur le réseau simulé : des pushes coupés à n'importe quel
+la réponse, le lagging ; la moitié des watches de `Give` avec un `Sort` au hasard et un `Limit` de 1 à 5 ou aucun, leurs
+lignes égales à chaque message à celles de `Find` et d'un oracle, dans l'ordre) ; `test/server_sim.ml` (des watches sur le réseau simulé : des pushes coupés à n'importe quel
 octet, des connexions coupées à n'importe quel message et des watches repris, le hub en retard ou tout de suite, le
 lagging, unwatch avec des pushes en route, des grands groupes, les crashes du serveur : les lignes de chaque message
-sont la réponse naïve à un groupe durable, jamais plus ancienne que la dernière) ; `test/server_limits.ml` (un watch
+sont la réponse naïve à un groupe durable, jamais plus ancienne que la dernière ; la moitié des watches de `Give` avec
+`Sort` et `Limit`, leurs lignes la réponse naïve triée et coupée) ; `test/server_limits.ml` (un watch
 qui ne lit jamais à côté d'un qui lit : le lecteur reçoit chaque changement dans l'ordre, le silencieux se termine par
 `lagging`) ; les tests du package sur des forks (`cesia/tests/cepheus.test.ce`) ; `test/cesia.sh` (un watch par TLS,
 un local, et un qui continue à travers un `kill -9` du serveur pendant que 1 500 lignes s'écrivent : ses groupes ne

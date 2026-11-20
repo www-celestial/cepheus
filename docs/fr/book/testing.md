@@ -56,7 +56,7 @@ générateur, et une seed donne toujours la même suite) : un échec affiche don
 | `seats.exe DIR ROUNDS [SEED] [naive\|expect] [SEATS]` | la vente de places avec kill -9 et un vérificateur de l'historique ([cas](case-seats.md#de-vrais-crashs-et-un-vérificateur-de-tout-lhistorique)) ; `ROUNDS` 0 : pas de kill, le temps pour tout vendre | `BUYERS` (16), SEED 42, SEATS 2 000 |
 | `examples.exe` | chaque bloc ```` ```ocaml ```` de `README.md` et de `docs/book/*.md` (`test/extract.ml` en fait le programme), chacun dans son propre répertoire sous `CEPHEUS_TMP`, sa sortie comparée au bloc ```` ```output ```` qui le suit | `CEPHEUS_TMP` |
 | `tools/test.sh` | `dune build --profile release`, puis unit, reasoning, exhaustive, sim, wal_sim, crash, bank, seats et examples, les tests du serveur, et ceux du client Cesia quand un Cesia avec son interface native est là | `CEPHEUS_TMP` (un chemin court : celui d'un socket Unix tient en 107 octets), `SEEDS` (300), `BUFFER_SEEDS` (300), `KILLS` (20), `BANK_SECONDS` (2), `SEAT_KILLS` (20), `CESIA_NATIVE` (le dossier du `cesia_v1.cmi` de Cesia ; trouvé à partir de la commande `cesia` s'il n'est pas défini) |
-| `tools/tlc.sh` | TLC sur chaque modèle de `spec/` (le journal, les merges, la vente de places, les lectures locales, les watches — les questions vivantes, tenues à jour —, le commit buffer, le chemin en arrière-plan d'un changement de règles), et chaque variante qui doit casser un invariant ([model checking](#model-checking)) | `TLA2TOOLS` : le chemin de `tla2tools.jar` |
+| `tools/tlc.sh` | TLC sur chaque modèle de `spec/` (le journal, les merges, la vente de places, les lectures locales, les watches — les questions vivantes, tenues à jour — et leurs fenêtres, le commit buffer, le chemin en arrière-plan d'un changement de règles), et chaque variante qui doit casser un invariant ([model checking](#model-checking)) | `TLA2TOOLS` : le chemin de `tla2tools.jar` |
 
 Le **deterministic simulation testing** (les tests par simulation déterministe) fait tourner le vrai moteur sur un disque
 simulé où une seule seed décide de chaque événement (les écritures, l'ordre des étapes du writer, les crashs, les
@@ -220,7 +220,14 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   de la même base refusé) ; et un follower (un lecteur qui suit la base) d'une base avec une règle, à partir de son run
   et de son journal, tient exactement les faits du moteur et ceux d'entre eux qui sont affirmés, à son départ et après
   qu'il repose sur une nouvelle base (les faits dérivés viennent avec leur sorte, dans le drapeau du run et les sortes
-  des frames, et sont appliqués comme le replay les applique, jamais évalués).
+  des frames, et sont appliqués comme le replay les applique, jamais évalués) ; un watch avec Sort et Limit à travers le
+  cœur du serveur : sa première réponse dans l'ordre, une ligne qui entre et la dernière qui part, une ligne de la
+  fenêtre qui part et la fenêtre remplie à nouveau après sa dernière ligne, une ligne d'après la fenêtre qui ne donne
+  aucun message, une ligne qui change dans la fenêtre, les listes de chaque changement dans l'ordre ; After, Limit sans
+  Sort, des agrégats et un Limit de plus de 100 000 refusés ; sa première réponse et son remplissage dans le budget de
+  questions (au-delà, ce watch se termine `too_large` et un watch sans Sort à côté continue) ; un token d'une seule
+  sorte rempli avec sa propre question, un watch sur une sorte qu'il ne lit pas refusé ; et un programme du protocole 5
+  qui refuse un tel watch à un serveur du protocole 4 avant de l'envoyer.
 - `server_sim` : la simulation déterministe du serveur sur un réseau simulé, sur le disque simulé : des clients de
   chaque droit, en pipelining (plusieurs requêtes envoyées sans attendre les réponses), leurs octets coupés à n'importe
   quel octet et livrés en retard, des connexions cassées (les écritures sans réponse envoyées à nouveau avec leurs
@@ -502,6 +509,17 @@ groupe plus tardif de même numéro. La constante `Rule` choisit comment un grou
 | `LocalReadsDesign.cfg` | le lease de la conception (un droit limité dans le temps) | 1 lecteur, 2 écritures, 4 tics, des leases de 2 | casse Ordered (7 états) |
 | `LocalReadsDesignFresh.cfg` | le lease de la conception | pareil | `NoStale` (Fresh et Durable) tient : 289 765 |
 | `LocalReadsDraft.cfg` | le premier brouillon de la conception | pareil | casse `NoStale` : Fresh (12 états) |
+
+`spec/WatchWindow.tla` modélise la fenêtre (window) d'un watch avec `Sort` et `Limit` ([Sort et Limit dans un
+watch](cesia.md#sort-et-limit-dans-un-watch)) : la réponse un bag (un ensemble où une ligne peut revenir) de 4 lignes
+dans leur ordre, chacune avec jusqu'à 2 copies, le Limit de 0 à 3, et chaque frame (n'importe quelles lignes retirées,
+n'importe quelles lignes ajoutées) portée dans la fenêtre par sa règle. Invariants : `RowsRight` (la fenêtre est les
+lignes de `Find`, les k premières et les copies de la k-ième), `CompleteRight` (quand elle dit tenir toute la réponse,
+elle la tient), `NothingLost` (une ligne retirée à la dernière de la fenêtre ou avant était tenue). Ils tiennent dans
+374 états distincts (167 278 transitions, 4 s) ; `WatchWindowNoRefill.cfg` (pas de remplissage),
+`WatchWindowNoTies.cfg` (une coupe qui sépare les copies de la k-ième ligne) et `WatchWindowStrict.cfg` (« avant la
+dernière » au lieu de « à la dernière ou avant ») cassent chacune `RowsRight`, et `tools/tlc.sh` échoue si elles ne le
+font pas.
 
 `spec/CommitBuffer.tla` modélise le commit buffer du serveur ([le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)) :
 des bases dont les syncers (le thread qui fait les fsync d'un journal) écrivent chaque frame dans leur journal sans
