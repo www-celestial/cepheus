@@ -405,18 +405,14 @@ end
 
 defn screen(s, env)
   (** The live dashboard of a page, for the user of its cookie: three watches, each ended with the page. The totals
-      are aggregates, which a watch keeps by difference; the payments are those of the last 24 hours. *)
+      are aggregates, which a watch keeps by difference; the payments are the ten latest (LatestPayments). *)
   u = Visitor(dict.Get("sid", s.Request.Cookies), env.Now(), env.Keys, env.Full)?
   if value.IsMissing(u)
     return result.Err({Kind: "auth", Message: "Sign in again."})
   end
   db = if u.Role == "admin" env.Full else env.Books end
-  since = env.Now() - 86400
   unpaid = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t], cepheus.Not([i, Invoice.Status, "paid"])], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
   late = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Status, "late"], [i, Invoice.Total, t]], Give: {Total: cepheus.Sum(t), Count: cepheus.Count()}}, db, until = s.Ended)?
-  paid = cepheus.Watch(5, (i, p, no, b, t) -> {
-    Where: [[i, Invoice.PaidAt, p], cepheus.Above(p, since), [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Total, t]],
-    Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
-  }, db, until = s.Ended)?
+  paid = cepheus.Watch(5, LatestPayments, db, until = s.Ended)?
   [live.Show("unpaid", unpaid.Changes), live.Show("late", late.Changes), live.Show("payments", paid.Changes)]
 end

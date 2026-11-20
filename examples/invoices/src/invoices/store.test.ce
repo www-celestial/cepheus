@@ -212,6 +212,30 @@ defn isPageCursorNewOrOld()
   ok and value.Equal(InvoicesPage(f, now, gone, 2, s.Db)?.Rows, two.Rows)
 end
 
+defn isLatestPaymentsWatched()
+  (** The dashboard's payments: the ten latest, newest first; a payment comes in at the top and pushes the tenth out;
+      one that leaves the ten (here its date moved back) lets the next one in. *)
+  s = shop()?
+  ids = [s.One.Invoice, s.Two.Invoice, s.Three.Invoice]
+  form = {client: "$(s.Bo)", date: "2026-10-02", due: "2026-10-31", label1: "Box", quantity1: "1", price1: "7"}
+  for k in 1..9
+    ids = list.Append(AddInvoice(InvoiceForm(form)?, "Élodie Bo", 0, s.Db)?.Invoice, ids)
+  end
+  for k in 1..11
+    PayInvoice(ids[k], now + k, 0, s.Db)?
+  end
+  w = cepheus.Watch(5, LatestPayments, s.Db)?
+  first = fiber.Receive(w.Changes)?
+  PayInvoice(ids[12], now + 12, 0, s.Db)?
+  came = fiber.Receive(w.Changes)?
+  cepheus.Write([cepheus.Retract(ids[12], Invoice.PaidAt, now + 12), cepheus.Add(ids[12], Invoice.PaidAt, now - 1)], s.Db)?
+  went = fiber.Receive(w.Changes)?
+  cepheus.Close(w)
+  bug.Assert(value.Equal([r.PaidAt for r in first.Rows], list.Reverse([now + k for k in 2..11])), "the ten latest, newest first")
+  bug.Assert(value.Equal([r.Invoice for r in came.Added], [ids[12]]) and value.Equal([r.Invoice for r in came.Removed], [ids[2]]), "one in, the tenth out")
+  value.Equal([r.Invoice for r in went.Removed], [ids[12]]) and value.Equal([r.Invoice for r in went.Added], [ids[2]])
+end
+
 defn isNumberedInOrderAtOnce()
   (** 20 invoices made at once by 20 fibers: numbers 1 to 20, each once. *)
   t = cepheus.Fork(cepheus.Empty, Kinds)?

@@ -257,6 +257,15 @@ defn AllInvoices(f, now, db)
   result.Ok([{Invoice: r.Invoice, Number: r.Number, BillTo: r.BillTo, Date: r.Date, Due: r.Due, Status: r.Status, Total: r.Total, PaidAt: dict.Get(r.Invoice, at)} for r in rows])
 end
 
+(** The question of the dashboard's payments, for cepheus.Watch (5 variables): the ten latest, the newest first. A
+    watch of it holds those ten only, and refills itself when one leaves them. *)
+LatestPayments(i, p, no, b, t) = {
+  Where: [[i, Invoice.PaidAt, p], [i, Invoice.Number, no], [i, Invoice.BillTo, b], [i, Invoice.Total, t]],
+  Give: {Invoice: i, PaidAt: p, Number: no, BillTo: b, Total: t},
+  Sort: [cepheus.Desc(p), cepheus.Desc(no)],
+  Limit: 10,
+}
+
 defn MarkLate(now, db, most = 500)
   (** Marks late the unpaid invoices whose due date has passed, at most most of them, in one group, each as it was read
       (one paid meanwhile is left for the next round): an Ok of how many. *)

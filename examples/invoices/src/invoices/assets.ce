@@ -47,8 +47,9 @@ if (board) {
     live.onError(e => { state.textContent = 'error: ' + (e.Message || e) })
     live.show('unpaid', rows => tile('unpaid', rows))
     live.show('late', rows => tile('late', rows))
+    // the ten latest payments, the watch's rows: live.js holds them as a set, so they are put in its order again
     live.show('payments', rows => {
-      const latest = rows.slice().sort((a, b) => b.PaidAt - a.PaidAt || b.Number - a.Number).slice(0, 10)
+      const latest = rows.slice().sort((a, b) => b.PaidAt - a.PaidAt || b.Number - a.Number)
       document.querySelector('#payments').replaceChildren(...latest.map(r => {
         const tr = document.createElement('tr')
         const a = document.createElement('a')

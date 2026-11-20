@@ -190,7 +190,7 @@ defn Dashboard(u)
   Layout("Dashboard", u, "<div class=\"tiles\" id=\"dashboard\" data-live=\"/live\">
 <div class=\"tile\"><h2>Not paid</h2><p class=\"big\" id=\"unpaid\">…</p><p id=\"unpaid-count\"></p></div>
 <div class=\"tile\"><h2>Late</h2><p class=\"big\" id=\"late\">…</p><p id=\"late-count\"></p></div></div>
-<h2>Payments of the last 24 hours</h2>
+<h2>The ten latest payments</h2>
 <table><thead><tr><th>Number</th><th>Bill to</th><th>Paid</th><th class=\"num\">Total</th></tr></thead><tbody id=\"payments\"></tbody></table>
 <p id=\"live-state\" class=\"muted\">connecting…</p>")
 end
