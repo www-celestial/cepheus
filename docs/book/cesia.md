@@ -281,7 +281,12 @@ makes, can do much more on a graph ([theory](theory.md#4-generic-join)). Each an
 
 **Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) and `cepheus.Between(x, lo, hi)`
 ($\mathit{lo} \le x \le \mathit{hi}$), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
-filters after it. Any other condition is Cesia's, on the rows it gives (`list.Filter`).
+filters after it. Any other condition is Cesia's, on the rows it gives (`list.Filter`). A Date is kept to the
+millisecond and Money to its digits, so a bound between two of them (`Above(price, 10.005)` for cents, a time of
+`sys.Now()`) keeps exactly the values on its side: it is rounded toward the inside of the range, 10.005 to 10.01 for
+Above and to 10.00 for Below. A bound of floats within $2^{-50}$ (relative) of a unit is that unit, as a decimal
+written to the cent is (10.01 times 100 is 1000.9999999999999 in floats): `Above(price, 10.01)` leaves 10.01 out.
+`Above(n, v)` with the largest Int, or `Below(n, v)` with the least, keeps nothing.
 
 **Aggregates.** In `Give`, `cepheus.Sum(x)`, `cepheus.Min(x)`, `cepheus.Max(x)` and `cepheus.Count()` group the answers
 by the other fields of `Give`, as SQL's `GROUP BY` does; `Count()` counts the answers of a group. They are computed

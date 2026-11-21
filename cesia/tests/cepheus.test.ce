@@ -2,7 +2,10 @@
 use cesia/cepheus
 use std/bug
 use std/fiber
+use std/io
 use std/list
+use std/math
+use std/random
 use std/result
 use std/text
 use std/value
@@ -66,6 +69,75 @@ defn isFindRanges()
   bug.Assert(value.Len(above(80.5)) == 1, "cepheus.Above is strict")
   bug.Assert(value.Len(between) == 2, "cepheus.Between holds its bounds")
   value.Equal(below, [{T: 10.0}])
+end
+
+Item = cepheus.Kind("item", {Price: cepheus.Money(2), When: cepheus.Date(), N: cepheus.Int()})
+
+defn items()
+  (** A fork with three items: prices 10.00, 10.01 and 10.02, dates 1.000, 1.001 and 1.002 s, numbers 1, 2 and 3. *)
+  t = cepheus.Fork(cepheus.Empty, [Item])?
+  cepheus.Insert(Item, {Price: 10.00, When: 1.000, N: 1}, t)?
+  cepheus.Insert(Item, {Price: 10.01, When: 1.001, N: 2}, t)?
+  cepheus.Insert(Item, {Price: 10.02, When: 1.002, N: 3}, t)?
+  result.Ok(t)
+end
+
+defn isRangeBoundsRoundInside()
+  (** A bound between two cents or two milliseconds is rounded toward the inside of the range, one at a cent or a
+      millisecond stays exact, and Above the largest Int or Below the least is empty: the rows they gave before are
+      wrong. *)
+  t = items()?
+  prices(cond) = [r.P for r in cepheus.Find(2, (i, p) -> {Where: [[i, Item.Price, p], cond(p)], Give: {P: p}, Sort: [p]}, t)?]
+  dates(cond) = [r.D for r in cepheus.Find(2, (i, d) -> {Where: [[i, Item.When, d], cond(d)], Give: {D: d}, Sort: [d]}, t)?]
+  ints(cond) = [r.N for r in cepheus.Find(2, (i, n) -> {Where: [[i, Item.N, n], cond(n)], Give: {N: n}, Sort: [n]}, t)?]
+  bug.Assert(value.Equal(prices((p) -> cepheus.Above(p, 10.005)), [10.01, 10.02]), "Above(price, 10.005)")
+  bug.Assert(value.Equal(prices((p) -> cepheus.Below(p, 10.004)), [10.0]), "Below(price, 10.004)")
+  bug.Assert(value.Equal(prices((p) -> cepheus.Between(p, 10.004, 10.016)), [10.01]), "Between(price, 10.004, 10.016)")
+  bug.Assert(value.Equal(prices((p) -> cepheus.Between(p, 10.005, 10.005)), []), "Between(price, 10.005, 10.005)")
+  bug.Assert(value.Equal(prices((p) -> cepheus.Above(p, 10.01)), [10.02]), "Above(price, 10.01): 10.01 times 100 is 1000.9999999999999")
+  bug.Assert(value.Equal(prices((p) -> cepheus.Below(p, 10.01)), [10.0]), "Below(price, 10.01)")
+  bug.Assert(value.Equal(prices((p) -> cepheus.Between(p, 10.01, 10.02)), [10.01, 10.02]), "Between(price, 10.01, 10.02)")
+  bug.Assert(value.Equal(prices((p) -> cepheus.Above(p, 10)), [10.01, 10.02]), "Above(price, 10), an Int")
+  bug.Assert(value.Equal(dates((d) -> cepheus.Above(d, 1.0005)), [1.001, 1.002]), "Above(when, 1.0005)")
+  bug.Assert(value.Equal(dates((d) -> cepheus.Below(d, 1.0004)), [1.0]), "Below(when, 1.0004)")
+  bug.Assert(value.Equal(dates((d) -> cepheus.Between(d, 1.0004, 1.0016)), [1.001]), "Between(when, 1.0004, 1.0016)")
+  bug.Assert(value.Equal(dates((d) -> cepheus.Above(d, 1.001)), [1.002]), "Above(when, 1.001)")
+  bug.Assert(value.Equal(dates((d) -> cepheus.Below(d, 1)), []), "Below(when, 1), an Int")
+  bug.Assert(value.Equal(ints((n) -> cepheus.Above(n, 4611686018427387903)), []), "Above(n, the largest Int)")
+  bug.Assert(value.Equal(ints((n) -> cepheus.Below(n, -4611686018427387903 - 1)), []), "Below(n, the least Int)")
+  bug.Assert(value.Equal(ints((n) -> cepheus.Above(n, 4611686018427387902)), []), "Above(n, the largest Int less 1)")
+  bug.Assert(value.Equal(ints((n) -> cepheus.Below(n, 4611686018427387903)), [1, 2, 3]), "Below(n, the largest Int)")
+  bug.Assert(value.Equal(ints((n) -> cepheus.Above(n, -4611686018427387903 - 1)), [1, 2, 3]), "Above(n, the least Int)")
+  bug.Assert(value.Equal(ints((n) -> cepheus.Between(n, 3, 1)), []), "Between(n, 3, 1)")
+  value.Equal(ints((n) -> cepheus.Between(n, -4611686018427387903 - 1, 4611686018427387903)), [1, 2, 3])
+end
+
+defn isRangeBoundsAsANaiveFilter()
+  (** Random prices and dates, and random bounds of Above, Below and Between, at a cent or a millisecond and between
+      two: the rows are those a filter of every value keeps, comparing whole cents or milliseconds with the bound
+      scaled to them. *)
+  t = cepheus.Fork(cepheus.Empty, [Item])?
+  cents = [random.Int(-500, 500) for k in 1..40]
+  for c in cents
+    cepheus.Insert(Item, {Price: c / 100, When: c / 1000}, t)?
+  end
+  bound() = random.Int(-520, 520) if random.Int(0, 1) == 0 else random.Int(-520, 519) + 0.1 + random.Float() * 0.8
+  ok = true
+  for k in 1..150
+    a = bound()
+    b = bound()
+    pick = random.Int(1, 3)
+    keep(c) = (c > a) if pick == 1 else ((c < a) if pick == 2 else (c >= a and c <= b))
+    cond(x, u) = cepheus.Above(x, a / u) if pick == 1 else (cepheus.Below(x, a / u) if pick == 2 else cepheus.Between(x, a / u, b / u))
+    want = list.Sort([c * 1.0 for c in cents if keep(c)])
+    p = [math.Round(r.P * 100) for r in cepheus.Find(2, (i, x) -> {Where: [[i, Item.Price, x], cond(x, 100)], Give: {I: i, P: x}}, t)?]
+    d = [math.Round(r.D * 1000) for r in cepheus.Find(2, (i, x) -> {Where: [[i, Item.When, x], cond(x, 1000)], Give: {I: i, D: x}}, t)?]
+    if not value.Equal(list.Sort(p), want) or not value.Equal(list.Sort(d), want)
+      io.Print("seed", random.Seed(), "condition", pick, "bounds", a, b, "want", want, "prices", list.Sort(p), "dates", list.Sort(d))
+      ok = false
+    end
+  end
+  ok
 end
 
 defn isFindSorts()

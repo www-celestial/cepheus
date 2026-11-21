@@ -136,3 +136,7 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 - A run a merge replaced is closed, and its disk space freed, once no view reads it. The cache's queues kept an
   entry for each of its pages, which held the run and its open file until the cache was full: with the data inside
   the cache (1 GiB by default), every replaced run stayed open, its space held while `du` showed it gone.
+- From Cesia, `Above`, `Below` and `Between` keep exactly the values inside their bounds. A bound between two cents
+  or two milliseconds was rounded to the nearest before the strict step, so `Above(price, 10.005)` left out 10.01
+  and `Between(price, 10.004, 10.016)` gave 10.00 and 10.02; now it is rounded toward the inside of the range. And
+  `Above(n, v)` with the largest Int, or `Below` with the least, wrapped around and gave every row: now none.
