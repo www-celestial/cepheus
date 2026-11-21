@@ -395,7 +395,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique); past the frame limit, in frames of about 1 MiB of properties, all but the last with `more`, each with its handle, group and count |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)...; past the frame limit, in frames of about 1 MiB of facts, all but the last with `more`, each with its group and count |
-| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort sent as its rows are found, none held): the view's group, columns, count, values row by row |
+| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort past the server's cells sent as its rows are found, none held): the view's group, columns, count, values row by row |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
@@ -1478,8 +1478,8 @@ What one peer may make the server hold or do, each bound refused or waited for b
   one kind cannot make the database unopenable; a group whose receipt would pass a frame is refused before it is
   applied.
 - **Answers.** An answer the server holds (Sort, aggregates, a watch's first answer) is bounded by its cells, rows
-  times columns, a question's and every connection's together; a Find without Sort holds none of its rows, so a cross
-  product of patterns that share no variable (the size of the product, the AGM bound: Atserias, Grohe, Marx 2008)
+  times columns, a question's and every connection's together; a Find without Sort past them holds none of its rows
+  (asked again and sent as they are found), so a cross product of patterns that share no variable (the size of the product, the AGM bound: Atserias, Grohe, Marx 2008)
   costs the server its time, not its memory. A question takes 64 patterns at most, and its work is counted in lookups.
 - **Watches.** 1,024 a connection, 65,536 the server, and what their windows and groups keep counts against a
   connection's cells.

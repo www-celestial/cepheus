@@ -56,8 +56,8 @@ let work_budget (q : Query.t) extra =
    old copies wait for the collector; a watch's answer, whose rows become values, counts four cells a cell (Live).
    Measured at [max_cells], the peak above a server's base: 128 MiB sorted, 167 MiB grouped, 57 MiB a watch's, so the
    pool's four questions take about 0.7 GiB at most, under a tenth of the documented unit's MemoryMax of 8 GiB. A Find
-   of a Give without Sort holds none of its rows (they are coded as they come: [stream]); a program reading in its
-   own memory has no ticket. *)
+   of a Give without Sort past them is asked again, and its rows coded as they come, none held ([stream]); a program
+   reading in its own memory has no ticket. *)
 let max_cells = ref (1 lsl 23)
 let pool_cells = ref (1 lsl 25)
 

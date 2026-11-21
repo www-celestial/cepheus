@@ -355,11 +355,13 @@ let get c ~id ~kind d thing =
         | _ -> ())
   in
   each (fun p typ w -> incr n; Codec.put_varint f p; put_word f v typ w);
-  let one = Buffer.create 64 in
   send_items c ~id ~kind ~head:(fun b -> Codec.put_varint b v.group) ~count:!n ~size:(Buffer.length f)
     (fun k ->
       if Buffer.length f + 32 <= Wire.max_frame then k f
-      else each (fun p typ w -> Buffer.clear one; Codec.put_varint one p; put_word one v typ w; k one))
+      else begin
+        let one = Buffer.create 64 in
+        each (fun p typ w -> Buffer.clear one; Codec.put_varint one p; put_word one v typ w; k one)
+      end)
 
 exception Gone
 
@@ -367,7 +369,9 @@ exception Gone
    and its question is refused *)
 let max_rows = Wire.max_frame - 64
 
-let row_too_large n = raise (Answer.Too_large (Printf.sprintf "a row of %d bytes is over the frame limit of %d: give fewer of its texts at once" n max_rows))
+exception Row_too_large of int
+
+let row_too_large n = raise (Row_too_large n)
 
 (* rows coded in frames of about a MiB as the fold finds them, none held: each frame but the last has the flag more,
    and is sent before the next rows are found (the output holds a frame at most); a peer gone stops the fold *)
@@ -434,8 +438,10 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
-(* A Give without Sort is coded as its rows come (Answer.stream); another answer is held whole, its cells charged to a
-   ticket (Answer), then sent. The work budget and the memory one end the reply too_large, a damaged page met while
+(* An answer is held whole, its cells charged to a ticket (Answer), then sent: the fold on several domains when it is
+   large, as fast as before. A Give without Sort past its cells, or the pool's, is asked again and coded as its rows
+   come (Answer.stream, on one domain), none held: it is never refused for its size (nothing was sent of the first
+   try, which ends in the fold). The work budget and the memory one end the reply too_large, a damaged page met while
    the rows are coded (a text read from its run) damaged: after the frames sent, if any. *)
 let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
   let v = d.view () in
@@ -449,11 +455,16 @@ let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
   match
     match sel with
     | Wire.Give give when order = Question.Top.none -> (
-      match Answer.stream ~extra ~budget v q give with Some (typs, rows) -> stream_rows c ~id ~kind v typs rows | None -> held ())
+      match held () with
+      | () -> ()
+      | exception (Answer.Too_large _ as e) -> (
+        match Answer.stream ~extra ~budget v q give with Some (typs, rows) -> stream_rows c ~id ~kind v typs rows | None -> raise e))
     | _ -> held ()
   with
   | () -> ()
   | exception Gone -> ()
+  | exception Row_too_large n ->
+    err c ~id ~kind "too_large" "a row of %d bytes is over the frame limit of %d: give fewer of its texts at once" n max_rows
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
   | exception Query.Over_budget n ->
     err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n

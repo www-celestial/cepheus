@@ -184,7 +184,7 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   against every request on every database through the server's core (G16, `Follow` with them), a token removed or
   narrowed, a forged origin, a frame over the limit; the bounds of an answer (a cross product of two patterns that
   share no variable asked with Sort, with aggregates and as a watch, each `too_large` past its cells and the cells
-  given back; without Sort, every row streamed in frames, the output never holding more than one; the pool held by
+  given back; without Sort, past its cells, every row streamed in frames, the output never holding more than one; the pool held by
   others; 64 patterns taken and 65 refused; a pattern repeated ten times past a budget of lookups; three watches a
   connection and five a server under lowered limits, and what windows keep); replies within the frame limit (an Open
   of 17 MB of names and a Get of 17 MB of facts in frames of the flag more, joined; names and texts past their bounds;
