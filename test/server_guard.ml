@@ -319,6 +319,35 @@ let () =
   Net.max_reading := saved;
   clean "the reading buffers";
   served "after the reading buffers";
+  (* 5. replies held back: 3,000 Finds of 2,000 rows each (about 14 KB a reply, 42 MB in all) sent in one write by a
+     client that reads nothing yet: the server decodes no request while it holds more than Core.max_out of replies;
+     then every reply comes, in order *)
+  ignore (Result.get_ok (Engine.write live (List.init 2000 (fun i -> Resolve.Add (-(i + 1), pscore, Value.Int i))) 0 "rows"));
+  let p, ended = pair () in
+  ignore (welcomed p);
+  let find = Wire.Find { db = 0; query = scores; select = Wire.Give [||]; extra = []; order = Question.Top.none } in
+  let b = Buffer.create 65536 in
+  for i = 1 to 3000 do let x = Buffer.create 32 in Wire.put_request x find; Wire.add_frame b ~id:(100 + i) ~kind:Wire.k_find ~flags:0 x done;
+  let all = Buffer.to_bytes b in
+  let writer = Thread.create (fun () -> write_all p.fd all 0 (Bytes.length all)) () in
+  Thread.delay 0.5;
+  let decoded = Mutex.protect srv.cm (fun () -> Hashtbl.fold (fun _ (c : Core.conn) n -> n + c.requests) srv.conns 0) in
+  C.check (decoded < 400) "replies held back: %d of 3,000 requests decoded while the client reads nothing" decoded;
+  let rows = ref 0 and ordered = ref true and last = ref 100 in
+  for _ = 1 to 3000 do
+    match next_frame p with
+    | Some ((i, _, _, _) as f) ->
+      if i <> !last + 1 then ordered := false;
+      last := i;
+      (match reply f with Some (Wire.Rows r) -> rows := !rows + List.length r.rows | _ -> ())
+    | None -> ordered := false
+  done;
+  Thread.join writer;
+  C.check (!ordered && !rows >= 3000 * 2000) "replies held back: then every reply, in order (%d rows)" !rows;
+  Unix.close p.fd;
+  ignore (ends ended);
+  clean "replies held back";
+  served "after replies held back";
   Unix.close listener;
   Unix.close page;
   Engine.stop live;

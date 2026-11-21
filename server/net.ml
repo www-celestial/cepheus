@@ -243,10 +243,11 @@ let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
 
 and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
   let dead = ref false in
-  let scratch = ref (Bytes.create 65536) in
+  let scratch = Bytes.create 65536 in
   let c_ref = ref None in
   (* the replies sent in their order: the reading thread and the writes' thread both flush, under the output's lock
-     (held through the system call: the other waits, as it would for the socket) *)
+     (held through the system calls: the other waits, as it would for the socket); in pieces of 64 KiB, so that no
+     copy of the output is kept, and an output that grew past a chunk gives its memory back *)
   let flush () =
     match !c_ref with
     | None -> ()
@@ -254,10 +255,18 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
       Mutex.protect c.om (fun () ->
           let n = Buffer.length c.out in
           if n > 0 then begin
-            if n > Bytes.length !scratch then scratch := Bytes.create (max n (2 * Bytes.length !scratch));
-            Buffer.blit c.out 0 !scratch 0 n;
-            Buffer.clear c.out;
-            if not !dead then (try io.write !scratch 0 n with Unix.Unix_error _ | Failure _ -> dead := true)
+            if not !dead then begin
+              let o = ref 0 in
+              try
+                while !o < n do
+                  let k = min (n - !o) (Bytes.length scratch) in
+                  Buffer.blit c.out !o scratch 0 k;
+                  io.write scratch 0 k;
+                  o := !o + k
+                done
+              with Unix.Unix_error _ | Failure _ -> dead := true
+            end;
+            if n > Core.chunk then Buffer.reset c.out else Buffer.clear c.out
           end)
   in
   (* the connection ended from another thread (Core.broke): its reading side shut down, so that the reading thread
@@ -361,6 +370,7 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
          else follow_stream c dbs.(d.index) fd ~id ~stopping:srv.stopping;
          go := false
        | Core.Full -> Core.wait_room c
+       | Core.Flush -> ()  (* the output was sent above: the frames left are given again *)
        | Core.Need ->
          (* room for the frame begun: its length is known once its first 4 bytes are here *)
          if !have >= 4 then begin

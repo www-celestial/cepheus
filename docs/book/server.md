@@ -1445,6 +1445,8 @@ What one peer may make the server hold or do, each bound refused or waited for b
 - **Reading.** A longer frame grows its connection's buffer, back to 64 KiB once it is used; the grown buffers hold
   64 MiB more at most, server-wide, a connection past it waiting for room: 512 connections that each begin a frame of
   16 MiB do not make the server hold 8 GiB.
+- **Replies.** A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are
+  sent: 100 Gets of a 900 KB text sent in 1,400 bytes and never read hold a MiB and a reply, not 90 MB.
 - **Answers.** An answer the server holds (Sort, aggregates, a watch's first answer) is bounded by its cells, rows
   times columns, a question's and every connection's together; a Find without Sort holds none of its rows, so a cross
   product of patterns that share no variable (the size of the product, the AGM bound: Atserias, Grohe, Marx 2008)
@@ -1455,7 +1457,7 @@ What one peer may make the server hold or do, each bound refused or waited for b
 *Tested by* `test/server_unit.ml` ("the bounds of an answer at the server": a cross product asked every way, the
 pool held by others, 65 patterns, a pattern repeated, the watches of a connection and of the server) and
 `test/server_guard.ml` (real sockets: a frame of 16 MiB before Hello, three frames of 700 KB begun at once under a
-bound of 1 MiB).
+bound of 1 MiB, 3,000 Finds of 14 KB sent at once by a client that reads nothing yet).
 
 ### TLS
 

@@ -833,6 +833,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
 type input =
   | Need  (** a frame is not whole yet: read more *)
   | Full  (** the writes in flight reached the limit *)
+  | Flush  (** the replies not yet sent passed [max_out]: send them, then give the rest again *)
   | Shut
   | Follow of db * int  (** the connection becomes a follow stream (Follows) *)
 
@@ -841,8 +842,15 @@ type input =
    and a peer that has shown no token cannot make the server hold more for it than that (and its 64 KiB of buffer). *)
 let max_hello = 4096
 
-(* Every complete frame of [buf] from [off] to [stop], until the connection has its limit of writes in flight: the
-   offset of the first byte not used, and why it stopped. A frame over the limit (before Hello, over [max_hello])
+(* The replies not yet sent at which a connection stops decoding requests: they go out first (the transport sends
+   them, then gives the rest again), so that requests sent together that each ask for much (a Get of a large text, a
+   Find of many rows) and are never read hold a MiB of replies and one more reply, not the sum of all of them: the
+   back-pressure that the writes in flight have (design 3.5), on what the server sends. The length is read without
+   the output's lock: a reply appended by another thread meanwhile is seen at the next frame. *)
+let max_out = 1 lsl 20
+
+(* Every complete frame of [buf] from [off] to [stop], until the connection has its limit of writes in flight or
+   [max_out] of replies not sent: the offset of the first byte not used, and why it stopped. A frame over the limit (before Hello, over [max_hello])
    closes the connection before its body is read. A request that raises what it does not expect is answered internal and closes the connection
    ([fail]): the frames of its reply sent before (a Find's first rows) end with that error, which the client takes
    as the reply's end. A connection that another of its threads failed ([broke]) reads no more requests. *)
@@ -850,6 +858,7 @@ let input c buf off stop =
   let rec go o =
     if Atomic.get c.failed then o, Shut
     else if c.inflight >= c.srv.max_inflight then o, Full
+    else if Buffer.length c.out > max_out then o, Flush
     else if stop - o < 4 then o, Need
     else
       let len = Wire.u32 buf o in
@@ -865,10 +874,15 @@ let input c buf off stop =
       else
         let id = Wire.u32 buf (o + 4) and kind = Bytes.get_uint8 buf (o + 8) and flags = Bytes.get_uint8 buf (o + 9) in
         match handle c ~id ~kind ~flags (Codec.reader buf (o + Wire.header) (len - 6)) with
-        | Continue -> go (o + 4 + len)
-        | Close -> o + 4 + len, Shut
-        | Follows (d, id) -> o + 4 + len, Follow (d, id)
         | exception e -> fail c ~id ~kind e; o + 4 + len, Shut
+        | r -> (
+          (* a reply's scratch that grew past a chunk gives its memory back (a connection keeps 4 KiB of it) *)
+          if Buffer.length c.body > chunk then Buffer.reset c.body;
+          if Buffer.length c.scratch > chunk then Buffer.reset c.scratch;
+          match r with
+          | Continue -> go (o + 4 + len)
+          | Close -> o + 4 + len, Shut
+          | Follows (d, id) -> o + 4 + len, Follow (d, id))
   in
   go off
 
