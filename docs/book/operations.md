@@ -26,7 +26,8 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
 1. takes the lock (`Busy` if another process has it);
 2. reads the id; if `closed` is there (the last process closed cleanly), removes it; else forces the database's
    directory. If `shared` is there and `closed` is not, an open in a program's own process is refused (`Busy`: [a
-   database of a server](#a-database-of-a-server)); after a clean close it removes `shared` and goes on;
+   database of a server](#a-database-of-a-server)); after a clean close it removes `shared` and goes on. The
+   directory is forced after the removal of `closed` too when `shared` is there, so that no power loss brings it back;
 3. converts a journal of format 1 to format 2, once (each segment written beside, forced, renamed over the old one;
    a crash in the middle leaves each segment whole, and the next open goes on), and removes the files of merges a
    crash interrupted (`.tmp`);

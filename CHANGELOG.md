@@ -140,3 +140,6 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   or two milliseconds was rounded to the nearest before the strict step, so `Above(price, 10.005)` left out 10.01
   and `Between(price, 10.004, 10.016)` gave 10.00 and 10.02; now it is rounded toward the inside of the range. And
   `Above(n, v)` with the largest Int, or `Below` with the least, wrapped around and gave every row: now none.
+- A database written through the server's commit buffer has the removal of its clean-close marker forced at open,
+  before its journal is written. A power loss soon after could bring the marker back, and the database then opened
+  alone, without the frames the buffer alone held: confirmed groups missing, instead of the refusal (`Busy`).

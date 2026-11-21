@@ -12,7 +12,9 @@
    G5 what a recovery published survives the next crash, G6 no open refuses but at a frame or a round no fsync
    confirmed whose header's sector alone was lost (the residual of docs/book/guarantees.md, G6), G10 no write is
    confirmed after a failed fsync of its database's journal or of the buffer. After a crash a database opened alone
-   is refused; after a clean stop it opens alone. A failure prints its seed; [wal_sim.exe --seed N] replays it. *)
+   is refused; after a clean stop it opens alone. Whether it was closed cleanly is the simulation's own record, not the
+   marker found on the disk: a power loss that brings back a marker the open had removed must not let it open alone.
+   A failure prints its seed; [wal_sim.exe --seed N] replays it. *)
 
 open Cepheus
 module C = Check
@@ -32,6 +34,7 @@ type db = {
   mutable waiting : (unit, unit) Effect.Deep.continuation option;
   mutable stopped : bool;  (* an Io error came: nothing more may be confirmed until a restart (G10) *)
   mutable unsure : Journal.position option;  (* a frame written that no fsync confirmed *)
+  mutable clean : bool;  (* closed cleanly since its last open with the buffer *)
 }
 
 type w = {
@@ -175,6 +178,9 @@ let rec recover ?(kill = false) ?(close = false) w =
    | Error (Busy _) when shared && not clean -> count "opens alone refused"
    | Error (Busy m) -> fail w "%s: refused alone: %s" d.name m
    | Ok e when shared && not clean -> fail w "%s: opened alone, its newest frames maybe in the buffer" d.name; Engine.close e
+   | Ok e when shared && not d.clean ->
+     fail w "%s: opened alone after a crash that brought back its closed marker: its newest frames maybe in the buffer" d.name;
+     Engine.close e
    | Ok e ->
      (* closed cleanly: everything is in its journal; a clean close again leaves it as it was *)
      count "opens alone after a clean close";
@@ -220,7 +226,8 @@ let rec recover ?(kill = false) ?(close = false) w =
     if w.round_unsure && has m "(written whole)" then (count "false alarms: an unconfirmed round without its header's sector"; raise Over)
     else (fail w "the buffer is damaged: %s" m; raise Over)
   | x, opened -> (
-    let close_all () = Array.iter (function Ok e -> Engine.close e | Error _ -> ()) opened in
+    (* [clean] before the close: a close interrupted before its marker leaves none *)
+    let close_all () = Array.iteri (fun i -> function Ok e -> w.dbs.(i).clean <- true; Engine.close e | Error _ -> ()) opened in
     let bad = ref None in
     Array.iteri
       (fun i r ->
@@ -274,6 +281,7 @@ let rec recover ?(kill = false) ?(close = false) w =
             let got = C.facts_of_view e.working and want = model w d k in
             if not (C.F.equal got want) then fail w "%s: recovered state at %d differs from the model: %s" d.name k (C.show_diff got want);
             Wal.attach x e.id e.journal;
+            d.clean <- false;
             d.e <- Some e)
           w.dbs;
         w.wal <- Some x))
@@ -295,7 +303,7 @@ let step w =
   | n when n < 74 ->
     (* a clean stop: every commit answered, each database closed (its journal forced), the buffer emptied *)
     quiet w;
-    Array.iter (fun d -> Engine.close (engine d)) w.dbs;
+    Array.iter (fun d -> d.clean <- true; Engine.close (engine d)) w.dbs;
     Wal.stop (wal w);
     count "clean stops";
     recover ~close:true w
@@ -314,7 +322,7 @@ let run seed steps =
   let reverts = Rng.chance r 0.3 in
   let sim = Sim_disk.create ~reverts (Rng.split r) in
   let mk name = { name; dir = data ^ "/" ^ name; e = None; groups = Hashtbl.create 64; acked = 0; prepared = 0; waiting = None;
-                  stopped = false; unsure = None } in
+                  stopped = false; unsure = None; clean = true } in
   let w = { seed; sim; disk = Sim_disk.disk sim; r; dbs = Array.map mk names; wal = None; round_unsure = false;
             older = None } in
   Journal.segment_limit := 600 + Rng.int r 4000;

@@ -157,8 +157,11 @@ and the journal's directory before it replays any group of that segment (`Journa
 database's directory, unless the last process closed cleanly: `close` leaves a marker (`DIR/closed`) once every
 frame and name is durable, and only if no fsync failed; an open removes it before it writes anything. So a marker
 seen means that no process wrote since a clean close, or that a power loss came after the writes, and a power loss
-leaves nothing in the page cache; the marker's own creation and removal need no fsync (lost, they only make the next
-open force). PostgreSQL keeps the same state in `pg_control` (shut down, or in production). (Found by the simulation once it could kill a process without a power loss; mutation check:
+leaves nothing in the page cache; for a database never written through a server's commit buffer, the marker's own
+creation and removal need no fsync (lost, they only make the next open force). For one that was (`DIR/shared`), the
+open forces the directory after it removes the marker, before it writes anything: a power loss that brought the
+marker back would let an open without the buffer take the database for one closed cleanly, without the frames the
+buffer alone holds. PostgreSQL keeps the same state in `pg_control` (shut down, or in production). (Found by the simulation once it could kill a process without a power loss; mutation check:
 without the segment's fsync, 9 of 300 seeds fail, without the directory's, 5.)
 
 *Tested by* the bank test (reader domains check every view they take: constant total, numbers never go back) and the

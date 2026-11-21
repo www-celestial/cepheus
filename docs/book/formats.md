@@ -22,7 +22,9 @@ rather than wait) and keeps it until `close`, or until the process dies and the 
 ## `DIR/closed`
 
 Empty. Left by a clean close (every frame and name durable, no fsync failed) and removed by the next open, which then
-skips the fsyncs a recovery after a crash needs (G5). Its creation and removal are not forced.
+skips the fsyncs a recovery after a crash needs (G5). Its creation is not forced, nor its removal but in a database
+that has `shared`, where the open forces the directory before it writes anything (a marker a power loss brought back
+would let an open without the server's buffer go on).
 
 ## `DIR/shared`
 
