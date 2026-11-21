@@ -1407,6 +1407,142 @@ let watch_window () =
    | _ -> ());
   check (match ktake () with [ Ok (Wire.Change c) ] -> List.length c.added = 1 && c.removed = [ top ] | _ -> false) "window: its refill, read with its own rights"
 
+(* ---- the bounds of an answer at the server (the review's F4, F6, F7): a cross product of two patterns that share no
+   variable (600 people: 360,000 rows of 4 columns) asked every way; the patterns of a question; the watches a
+   connection and the server keep ---- *)
+
+let answer_bounds () =
+  let sim = Sim_disk.create (Rng.make 23) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/b";
+  let e = Result.get_ok (Engine.open_ disk "/b/shop") in
+  let v0 = Atomic.get e.published in
+  let hub = Live.create v0 ~tag:v0.group ~durable:max_int in
+  let d = { Core.name = "shop"; index = 0; dir = "/b/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> hub); files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/b/shop/vault" } in
+  let commit ops =
+    let b = Engine.prepare e [| ops, 0, "t" |] in
+    let r = (Engine.commit e b).(0) in
+    if b.count > 0 then Live.frame hub ~tag:b.after.group (List.rev b.groups) b.after;
+    r
+  in
+  let submit (_ : Core.db) ops _ _ k = k (commit ops) in
+  let ids, ops = Result.get_ok (Resolve.declare v0 [ { Schema.name = "person/score"; typ = Value.Tint; many = false; unique = false } ]) in
+  ignore (Result.get_ok (commit ops));
+  let score = List.hd ids in
+  let n = 600 in
+  ignore (Result.get_ok (commit (List.init n (fun i -> Resolve.Add (-(i + 1), score, Int i)))));
+  let toks = Tokens.with_tokens Tokens.empty [ { Tokens.name = "r"; hash = Tokens.hash_of_text "cph_r"; databases = [ "shop", Tokens.Read ]; admin = false } ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let k = ref 0 in fun () -> incr k; !k) () in
+  (* a connection: its output taken at each flush, the largest it held noted *)
+  let conn () =
+    let out = Buffer.create 256 and most = ref 0 in
+    let rec c =
+      lazy (Core.connect srv ~submit ~flush:(fun () ->
+          let cc = Lazy.force c in
+          most := max !most (Buffer.length cc.Core.out);
+          Buffer.add_buffer out cc.Core.out;
+          Buffer.clear cc.Core.out))
+    in
+    let c = Lazy.force c in
+    let next = ref 1 in
+    let send req =
+      let id = !next in
+      incr next;
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.move_pushes c);
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      match frames_of s with None -> check false "bounds: frames not whole"; [] | Some fs -> fs
+    in
+    ignore (send (Wire.Hello { version = Wire.version; token = "cph_r"; program = "t"; session = 0 }));
+    c, send, most
+  in
+  let c, send, most = conn () in
+  let code fs =
+    match List.rev fs with
+    | (_, _, flags, _) :: _ when flags land Wire.f_error = 0 -> "ok"
+    | f :: _ -> (match reply_of f with Some (Wire.Err e) -> e.code | _ -> "?")
+    | [] -> "none"
+  in
+  let cross = { Query.vars = 4; where = [ { Query.e = Var 0; p = score; v = Var 1 }; { e = Var 2; p = score; v = Var 3 } ]; ranges = [] } in
+  let find ?(q = cross) ?(sel = Wire.Give [||]) ?(order = Top.none) () = send (Wire.Find { db = 0; query = q; select = sel; extra = []; order }) in
+  let by1 = { Top.keys = [ { col = 1; desc = false } ]; limit = 0; after = None } in
+  let saved_cells = !Answer.max_cells and saved_pool = !Answer.pool_cells in
+  Answer.max_cells := 50_000;
+  (* held answers: refused past their cells, the pool given back *)
+  check (code (find ~order:by1 ()) = "too_large") "bounds: a sorted cross product past its cells is too_large";
+  check (code (find ~sel:(Wire.Group ([| 0; 1; 2; 3 |], [| Wire.Count |])) ()) = "too_large") "bounds: a grouped one too";
+  check (code (send (Wire.Watch { db = 0; query = cross; select = Wire.Give [||]; from = 0; wextra = []; worder = Top.none })) = "too_large")
+    "bounds: a watch's first answer too, under the hub's lock";
+  check (Atomic.get Answer.pool = 0) "bounds: every ticket given back (%d cells left)" (Atomic.get Answer.pool);
+  (* a Give without Sort is streamed: every row, in frames of the flag more, the output never holding more than a frame *)
+  most := 0;
+  let fs = find () in
+  let rows = List.fold_left (fun acc f -> match reply_of f with Some (Wire.Rows r) -> acc + List.length r.rows | _ -> acc) 0 fs in
+  let mores = List.length (List.filter (fun (_, _, fl, _) -> fl land Wire.f_more <> 0) fs) in
+  check (rows = n * n && mores >= 3 && code fs = "ok") "bounds: the cross product without Sort, every row streamed (%d rows, %d frames)" rows (List.length fs);
+  check (!most <= Core.chunk + 65536) "bounds: the output held a frame at most while it streamed (%d bytes)" !most;
+  check (match find ~order:{ by1 with limit = 10 } () with [ f ] -> (match reply_of f with Some (Wire.Rows r) -> List.length r.rows = 10 | _ -> false) | _ -> false)
+    "bounds: a sorted page of it, Limit 10, within the cells";
+  (* the pool of every ticket: held elsewhere, a held answer is refused; given back, answered *)
+  Answer.max_cells := saved_cells;
+  Answer.pool_cells := 100_000;
+  let held = { Answer.used = Atomic.make 0 } in
+  (try Answer.charge held 90_000 with Answer.Too_large _ -> ());
+  (match find ~order:by1 () with
+   | fs -> check (code fs = "too_large" && (match reply_of (List.hd fs) with Some (Wire.Err e) -> contains e.message "is building" | _ -> false)) "bounds: the server's pool, held by others: too_large");
+  Answer.release held;
+  Answer.pool_cells := saved_pool;
+  check (code (find ~order:by1 ()) = "ok") "bounds: the pool given back, the same question answered";
+  (* the patterns of a question (F6): 64 at most, refused before they are decoded; the work in lookups *)
+  let rep k = { Query.vars = 2; where = List.init k (fun _ -> { Query.e = Var 0; p = score; v = Var 1 }); ranges = [] } in
+  check (code (find ~q:(rep 64) ()) = "ok") "bounds: a question of 64 patterns";
+  let c2, send2, _ = conn () in
+  check (match send2 (Wire.Find { db = 0; query = rep 65; select = Wire.Give [||]; extra = []; order = Top.none }) with
+         | [ f ] -> (match reply_of f with Some (Wire.Err e) -> e.code = "invalid" && contains e.message "64 patterns" | _ -> false) | _ -> false)
+    "bounds: 65 patterns are refused, before they are decoded";
+  ignore c2;
+  let saved_budget = !Answer.question_budget in
+  Answer.question_budget := 5_000;
+  check (code (find ~q:(rep 1) ()) = "ok") "bounds: one pattern within a budget of 5,000 lookups";
+  check (code (find ~q:(rep 10) ()) = "too_large") "bounds: the same pattern ten times does ten lookups a candidate: past it";
+  Answer.question_budget := saved_budget;
+  (* the watches a connection keeps, and the server (F7) *)
+  let one = { Query.vars = 1; where = [ { Query.e = Thing 65536; p = score; v = Var 0 } ]; ranges = [] } in
+  let watch ?(send = send) ?(q = one) ?(order = Top.none) () = send (Wire.Watch { db = 0; query = q; select = Wire.Give [||]; from = 0; wextra = []; worder = order }) in
+  let saved_w = !Core.max_watches and saved_sw = !Core.max_server_watches in
+  Core.max_watches := 3;
+  Core.max_server_watches := 5;
+  let ids = List.init 3 (fun _ -> match watch () with [ (i, _, _, _) as f ] when code [ f ] = "ok" -> i | _ -> -1) in
+  check (List.for_all (fun i -> i > 0) ids) "watches: three on a connection";
+  check (code (watch ()) = "too_large") "watches: a fourth is too_large";
+  check (code (send (Wire.Unwatch (List.hd ids))) = "ok" && code (watch ()) = "ok") "watches: one unwatched, another taken";
+  let c3, send3, _ = conn () in
+  check (code (watch ~send:send3 ()) = "ok" && code (watch ~send:send3 ()) = "ok") "watches: five on the server";
+  check (code (watch ~send:send3 ()) = "too_large") "watches: a sixth on another connection is too_large";
+  Core.disconnect c3;
+  check (Atomic.get srv.watches = 3 && code (watch ~send:send2 ()) = "ok") "watches: a connection's end gives its watches back";
+  Core.max_watches := saved_w;
+  Core.max_server_watches := saved_sw;
+  (* what windows keep: a connection's at most one answer's cells (a window of 50 rows of 4 columns, values: 800) *)
+  Answer.max_cells := 2_000;
+  let page = { Top.keys = [ { col = 1; desc = false } ]; limit = 50; after = None } in
+  let _, send4, _ = conn () in
+  check (code (watch ~send:send4 ~q:cross ~order:page ()) = "ok" && code (watch ~send:send4 ~q:cross ~order:page ()) = "ok")
+    "watches: two windows of 50 rows of 4 columns (1,600 cells)";
+  check (code (watch ~send:send4 ~q:cross ~order:page ()) = "too_large") "watches: a third would keep more than a connection's cells";
+  Answer.max_cells := saved_cells;
+  Core.disconnect c;
+  Core.disconnect c2;
+  ignore c3;
+  Engine.close e
+
 type gconn = { gc : Core.conn; send : Wire.request -> int * Core.input option; take : unit -> (int * int * int * Bytes.t) list option;
                bad_flush : bool ref; bad_wake : bool ref; closed : int ref }
 
@@ -1647,6 +1783,7 @@ let () =
   files ();
   files_wire ();
   watch_window ();
+  answer_bounds ();
   (* last: its questions spawn domains, after which no test may fork *)
   guard ();
   C.finish "server unit"

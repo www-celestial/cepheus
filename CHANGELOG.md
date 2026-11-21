@@ -76,6 +76,16 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - Commands: `cepheus serve`, `stop`, `status`, `token add|list|remove`, `cluster init|cert`, `replicate`, `promote`
   ([commands](docs/book/server.md#commands)), and a systemd service with backups, a restore drill and what to watch
   ([production](docs/book/production.md)).
+- An answer the server holds while it builds it (a Find with Sort or aggregates, a watch's first answer) is bounded
+  by its cells, rows times columns (8,388,608 a question, 33,554,432 for every connection's at once), past which it is
+  `too_large`; a Find without Sort sends its rows as the join finds them and holds none (the same rows in the same
+  order), so that a cross product of patterns that share no variable can no longer exhaust the server's memory
+  ([limits](docs/book/limits.md#questions)).
+- A question's work at the server is counted in lookups (its candidates over the most patterns one variable has), and
+  a question has at most 64 patterns, refused before they are decoded: repeating a pattern no longer multiplies the
+  work a question may take.
+- A connection keeps 1,024 watches at most and the server 65,536, and what their windows and groups keep counts
+  against a connection's cells; past either, the Watch is `too_large`.
 
 ### From Cesia
 

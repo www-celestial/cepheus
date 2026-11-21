@@ -38,6 +38,10 @@ type t = {
 (* a question with Not, Or, In, Prefix, Sort, Limit or After, on a connection to a server of protocol 1 *)
 let older = "this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2"
 
+(* a question the server refuses before it decodes it (Wire.max_patterns): refused here, before it is sent *)
+let too_many_patterns (q : Query.t) =
+  Printf.sprintf "a question has at most %d patterns, not %d: ask several, or name a part with a rule" Wire.max_patterns (List.length q.where)
+
 (* a file, on a connection to a server of protocol 1 or 2 *)
 let no_files = "this server speaks protocol 2 or older: files need a server of protocol 3"
 
@@ -513,6 +517,7 @@ let find c db ?(select = Wire.Give [||]) ?(extra = []) ?(order = Top.none) query
     | exception Query.Bad m -> Error { code = "invalid"; message = m }
     | exception Pages.Unreadable m -> Error { code = "damaged"; message = m })
   | None when (extra <> [] || order <> Top.none) && c.spoken < 2 -> Error { code = "invalid"; message = older }
+  | None when List.length query.where > Wire.max_patterns -> Error { code = "invalid"; message = too_many_patterns query }
   | None -> (
     match read_call c (Wire.Find { db = db.handle; query; select; extra; order }) with
     | Wire.Rows r -> Ok (r.group, r.rows)
@@ -645,6 +650,7 @@ type pushed = Pushed of Wire.push | Ended of error
 let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) ?(order = Top.none) query =
   if extra <> [] && c.spoken < 2 then invalid_arg older;
   if order <> Top.none && c.spoken < 5 then invalid_arg (no_sorted_watch c.spoken);
+  if List.length query.where > Wire.max_patterns then invalid_arg (too_many_patterns query);
   let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra; worder = order }) in
   flush c;
   id

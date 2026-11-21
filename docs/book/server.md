@@ -389,7 +389,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
-| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
+| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort sent as its rows are found, none held): the view's group, columns, count, values row by row |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
@@ -500,6 +500,10 @@ same   = 2 | group                                                 nothing the q
   ends `too_large`). A Limit over 100,000, an After, a Limit without Sort, and aggregates with Sort or Limit are
   refused (`invalid`): [Sort and Limit in a watch](cesia.md#sort-and-limit-in-a-watch), the rule model-checked in
   `spec/WatchWindow.tla`.
+- **Bounds.** A connection keeps 1,024 watches at most, the server 65,536, and what their windows and groups keep
+  between messages counts as cells, a connection's at most one answer's; a watch's first answer is built within the
+  answer's bounds, under the hub's lock. Past any, the Watch is `too_large`; a watch the server ended no longer counts
+  ([limits](limits.md#the-server)).
 - What a change is, and how it is computed: [Cepheus from Cesia](cesia.md#watch-live-questions); the resume rule is
   model-checked in `spec/Watch.tla` (no gap, no repeat, the rows never older than the last message: 1,015,657 states;
   without the touch test or the ring's bound, TLC finds a counterexample).
@@ -545,7 +549,7 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 | `auth` | Hello with an unknown token; a request before Hello; a token removed since | check the token; the connection closes |
 | `denied` | the token lacks the right for this database or operation; a session of another token | a token with the right |
 | `version` | Hello with a protocol version the server does not speak (it speaks 1 to 5) | a library connects again in the version before; else a server and a library of the same release |
-| `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
+| `too_large` | a frame over 16 MiB (the connection closes); a question past the server's work budget, or an answer it would hold past its cells (a Find with Sort or aggregates, a watch's first answer); a Watch past the watches of a connection or of the server ([limits](limits.md#questions)) | write in smaller groups; ask a narrower question, or pages; unwatch first |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |
 | `too_many_connections` | a new connection over the Unix socket while the server holds `max_connections` (request id 0; over TCP the connection is closed without a word) | connect later, or raise the limit |

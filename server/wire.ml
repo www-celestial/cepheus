@@ -156,10 +156,17 @@ let count r =
   if n > r.Codec.stop - r.Codec.pos then raise Codec.Short;
   n
 
+(* the patterns of a question over the wire, at most: as many as its variables may be (64), so that the planner and
+   the join's lookups (each candidate is looked up in every other pattern of its variable) stay in proportion to a
+   question a program writes; refused before they are decoded *)
+let max_patterns = 64
+
 let get_query r : Query.t =
   let vars = Codec.get_varint r in
   if vars > 64 then raise (Malformed "a question has at most 64 variables");
-  let where = List.init (count r) (fun _ -> let e = get_term r in let p = Codec.get_varint r in let v = get_term r in { Query.e; p; v }) in
+  let n = count r in
+  if n > max_patterns then raise (Malformed (Printf.sprintf "a question has at most %d patterns, not %d" max_patterns n));
+  let where = List.init n (fun _ -> let e = get_term r in let p = Codec.get_varint r in let v = get_term r in { Query.e; p; v }) in
   let ranges = List.init (count r) (fun _ -> let x = Codec.get_varint r in let lo = Value.decode r in let hi = Value.decode r in x, lo, hi) in
   { vars; where; ranges }
 

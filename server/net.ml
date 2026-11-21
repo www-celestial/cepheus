@@ -272,7 +272,7 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
         if !pusher = None && not !ending then pusher := Some (Thread.create push_loop ());
         Condition.signal pc)
   in
-  let c = Core.connect ~wake ~close srv ~flush ~submit in
+  let c = Core.connect ~wake ~close ~gone:(fun () -> !dead) srv ~flush ~submit in
   c_ref := Some c;
   let buf = ref (Bytes.create 65536) and have = ref 0 in
   let go = ref true in

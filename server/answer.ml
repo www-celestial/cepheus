@@ -29,13 +29,98 @@ let of_rows cols (typs : Value.typ array) (rows : int array array) =
 
 let lead = Top.lead
 
-(* the work a question may take at the server, in candidates of its join (each domain's, and its Nots' together): past
+(* the work a question may take at the server, in lookups of its join (each domain's, and its Nots' together): past
    it, Query.Over_budget, and the program is told to ask a narrower question; a program reading in its own memory has
    no budget but its own *)
 let question_budget = ref 1_000_000_000
 
-let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view) (q : Query.t) (sel : Wire.select) =
-  (* Not, Or and In beside the patterns and ranges: the question goes through Ask *)
+(* Query.fold counts candidates, and each candidate of a variable is looked up in every other pattern of that
+   variable: a question that repeats one pattern a thousand times does a thousand lookups a candidate within the same
+   count. So the candidates a question may take are its budget of lookups over the most patterns one variable has, its
+   Nots' and alternatives' included: the lookups stay within [question_budget] whatever the question's shape. *)
+let work_budget (q : Query.t) extra =
+  let per = Hashtbl.create 8 in
+  let note = function Query.Var x -> Hashtbl.replace per x (1 + Option.value (Hashtbl.find_opt per x) ~default:0) | _ -> () in
+  List.iter (fun (pt : Query.pattern) -> note pt.e; if pt.v <> pt.e then note pt.v) (Ask.patterns q extra);
+  !question_budget / max 1 (Hashtbl.fold (fun _ n m -> max n m) per 0)
+
+(* ---- the memory of an answer at the server ----
+   An answer the server holds while it builds it (sorted, grouped, or a watch's) takes memory in proportion to its
+   cells, its rows times its columns; and a question's rows are not bounded by its size: patterns that share no
+   variable are a cross product, |R| x |S| rows for two of them (the AGM bound, Atserias, Grohe, Marx, FOCS 2008, is
+   the product of the relations' sizes when no variable is shared), so a 16-byte Find of two patterns over 12,000
+   facts is 144 million rows. Each such answer carries a ticket: its cells are charged to it as its accumulators grow,
+   against [max_cells], its own bound, and against [pool_cells], the bound of every ticket at once (the connections
+   run their questions at the same time); past either, Too_large, and the program is told too_large. A cell is a word
+   (8 bytes) in a flat accumulator, (cols + 2) / cols words in a sorted one's rows, more while an array doubles and its
+   old copies wait for the collector; a watch's answer, whose rows become values, counts four cells a cell (Live).
+   Measured at [max_cells], the peak above a server's base: 128 MiB sorted, 167 MiB grouped, 57 MiB a watch's, so the
+   pool's four questions take about 0.7 GiB at most, under a tenth of the documented unit's MemoryMax of 8 GiB. A Find
+   of a Give without Sort holds none of its rows (they are coded as they come: [stream]); a program reading in its
+   own memory has no ticket. *)
+let max_cells = ref (1 lsl 23)
+let pool_cells = ref (1 lsl 25)
+
+(* the cells charged now by every ticket *)
+let pool = Atomic.make 0
+
+exception Too_large of string
+
+type ticket = { used : int Atomic.t }
+
+let charge t n =
+  let p = Atomic.fetch_and_add pool n + n in
+  let u = Atomic.fetch_and_add t.used n + n in
+  if u > !max_cells then
+    raise (Too_large (Printf.sprintf "the answer passed the server's budget of %d cells (rows times columns): ask a narrower question, or pages with Sort, Limit and After" !max_cells));
+  if p > !pool_cells then
+    raise (Too_large (Printf.sprintf "the answers the server is building hold its budget of %d cells: ask again in a moment, or a narrower question" !pool_cells))
+
+let release t = let u = Atomic.exchange t.used 0 in ignore (Atomic.fetch_and_add pool (-u))
+
+(* [f] with a ticket, given back whatever [f] does *)
+let with_ticket f = let t = { used = Atomic.make 0 } in Fun.protect ~finally:(fun () -> release t) (fun () -> f t)
+
+(* cells are charged by grains of 4,096 (a flat accumulator's words): one atomic addition a grain *)
+let grain = 4096
+
+(* A source's fold whose accumulators charge their rows of [cols] cells, [bound] rows an accumulator at most (a heap
+   cuts itself back once it holds max(64, 2 Limit): Top.push). Top keeps at most [bound] rows of a fold that has
+   returned (the windows of the index path, one after another): the charge above [base] (the ticket's when the Give
+   began) and those rows is then given back. *)
+type 'a counted = { mutable acc : 'a; mutable rows : int; mutable left : int }
+
+let counted t ~base ~cols ~bound fold ~init ~step ~merge =
+  let cols = max 1 cols in
+  let every = max 1 (grain / cols) in
+  let r =
+    fold ~init:(fun () -> { acc = init (); rows = 0; left = every })
+      ~step:(fun c env ->
+        let a = step c.acc env in
+        if a != c.acc then c.acc <- a;
+        if c.rows < bound then begin
+          c.rows <- c.rows + 1;
+          c.left <- c.left - 1;
+          if c.left = 0 then (c.left <- every; charge t (every * cols))
+        end;
+        c)
+      ~merge:(fun a b -> a.acc <- merge a.acc b.acc; a.rows <- min bound (a.rows + b.rows); a)
+  in
+  if bound < max_int then begin
+    let keep = base + (bound * cols) and now = Atomic.get t.used in
+    if now > keep then (ignore (Atomic.fetch_and_add t.used (keep - now)); ignore (Atomic.fetch_and_add pool (keep - now)))
+  end;
+  r.acc
+
+(* the question's types and checks, and its fold (Not, Or and In beside the patterns and ranges: through Ask) *)
+type prepared = {
+  ask : Ask.t option;
+  ty : Value.typ array;
+  var : int -> unit;
+  fold : 'a. ?seq:bool -> ?window:Top.window -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> unit -> 'a;
+}
+
+let prepare ~extra ~budget (v : Store.view) (q : Query.t) =
   let ask = if extra = [] then None else Some (Ask.compile v q extra) in
   let ty = match ask with None -> Query.types v q | Some a -> Ask.typs_of a in
   let var x =
@@ -53,13 +138,43 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view
     | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ~budget ~range:(x, lo, hi) v a ~init ~step ~merge
     | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ~budget ~words:(x, ws) v a ~init ~step ~merge
   in
+  { ask; ty; var; fold }
+
+(* A Give without Sort that holds none of its rows: its columns' types, and [rows f], which gives [f] the words of
+   each row's columns as the fold finds it (on one domain, in the engine's order: Query.fold's seq; the same rows in
+   the same order as [answer]'s), [f] reading them before it returns. None when the question cannot be streamed: an
+   Or whose alternatives have variables of their own keeps every binding to give each once (Ask.fold), so it is held
+   and counted as an answer. Raises Query.Bad. *)
+let stream ?(extra = []) ?(budget = max_int) (v : Store.view) (q : Query.t) give =
+  let { ask; ty; var; fold } = prepare ~extra ~budget v q in
+  match ask with
+  | Some a when List.exists (fun (c : Ask.conj) -> c.free <> []) a.conjs -> None
+  | _ ->
+    let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
+    Array.iter var give;
+    let k = Array.length give in
+    let row = Array.make k 0 in
+    let rows f =
+      fold ~seq:true ~init:ignore ~merge:(fun () () -> ())
+        ~step:(fun () env -> for i = 0 to k - 1 do row.(i) <- env.(give.(i)) done; f row) ()
+    in
+    Some (Array.map (fun x -> ty.(x)) give, rows)
+
+let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
+  let { ask; ty; var; fold } = prepare ~extra ~budget v q in
   match sel with
   | Wire.Give give when order <> Top.none ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;
     let typs = Array.map (fun x -> ty.(x)) give in
+    let bound = if order.limit > 0 then max 64 (2 * order.limit) else max_int in
+    let base = match ticket with Some t -> Atomic.get t.used | None -> 0 in
     let src =
-      { Top.fold = (fun window ~seq ~init ~step ~merge -> fold ~seq ?window ~init ~step ~merge ());
+      { Top.fold =
+          (fun window ~seq ~init ~step ~merge ->
+            match ticket with
+            | None -> fold ~seq ?window ~init ~step ~merge ()
+            | Some t -> counted t ~base ~cols:(weight * max 1 (Array.length give)) ~bound (fun ~init ~step ~merge -> fold ~seq ?window ~init ~step ~merge ()) ~init ~step ~merge);
         project = (fun env -> Array.map (fun x -> env.(x)) give);
         var = (fun c -> Some give.(c));
         lead = lead v q;
@@ -70,10 +185,17 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;
     let k = Array.length give in
-    let acc =
-      fold ~init:(fun () -> { a = [||]; n = 0 }) ~merge:append
-        ~step:(fun acc env -> for i = 0 to k - 1 do push acc env.(give.(i)) done; acc) ()
+    let step =
+      match ticket with
+      | None -> fun acc env -> for i = 0 to k - 1 do push acc env.(give.(i)) done; acc
+      | Some t ->
+        fun acc env ->
+          let n0 = acc.n in
+          for i = 0 to k - 1 do push acc env.(give.(i)) done;
+          if n0 / grain <> acc.n / grain then charge t (weight * grain);
+          acc
     in
+    let acc = fold ~init:(fun () -> { a = [||]; n = 0 }) ~merge:append ~step () in
     { cols = k; n = acc.n / max 1 k; typ = (fun j -> ty.(give.(j))); word = (fun i j -> acc.a.((i * k) + j)) }
   | Wire.Group (keys, aggs) ->
     Array.iter var keys;
@@ -88,6 +210,10 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view
           (match ty.(x) with Tint | Tmoney _ | Tdate -> () | t -> Query.bad "a min or max of a %s variable" (Value.typ_name t)))
       aggs;
     let nk = Array.length keys and na = Array.length aggs in
+    (* a key's cells, charged by grains of keys *)
+    let width = weight * max 1 (nk + na) in
+    let every = max 1 (grain / width) in
+    let added = match ticket with None -> ignore | Some t -> fun n -> if n mod every = 0 then charge t (every * width) in
     (* key words -> aggregate words, a table a domain, joined at the end *)
     let fresh () = Array.init na (fun i -> match aggs.(i) with Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) in
     let add (st : int array) env =
@@ -116,7 +242,7 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view
           let k = Array.init nk (fun i -> env.(keys.(i))) in
           (match Hashtbl.find_opt t k with
            | Some s -> add s env
-           | None -> let s = fresh () in add s env; Hashtbl.replace t k s);
+           | None -> let s = fresh () in add s env; Hashtbl.replace t k s; added (Hashtbl.length t));
           t) ()
     in
     let groups = Array.of_seq (Hashtbl.to_seq tbl) in
@@ -131,6 +257,8 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) (v : Store.view
       { cols = nk + na; n = Array.length groups; typ; word }
     end
     else begin
+      (* the rows of the sort, a copy of the groups *)
+      Option.iter (fun t -> charge t (Array.length groups * width)) ticket;
       let typs = Array.init (nk + na) typ in
       let rows = Array.map (fun (k, s) -> Array.append k s) groups in
       of_rows (nk + na) typs (Top.sort_rows v ~typs order rows)
