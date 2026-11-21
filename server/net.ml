@@ -58,21 +58,48 @@ type sockets = { sm : Mutex.t; open_ : (Unix.file_descr, unit) Hashtbl.t }
 type io = { read : Bytes.t -> int -> int -> int; write : Bytes.t -> int -> int -> unit; bye : unit -> unit }
 
 (* The idle limit (cluster.toml, [clients] idle_timeout): a connection must send a whole request within [idle]
-   seconds of its accept and of its previous request, its TLS handshake included, and take what the server sends
-   within [idle] seconds; otherwise it is closed. The socket's timeouts wake a blocked read or write at least that
-   often (SO_RCVTIMEO, SO_SNDTIMEO: socket(7)); bytes that trickle in without making a request do not reset the clock.
-   0: no limit. *)
-let timeouts fd idle =
-  if idle > 0 then begin
-    Unix.setsockopt_float fd Unix.SO_RCVTIMEO (float idle);
-    Unix.setsockopt_float fd Unix.SO_SNDTIMEO (float idle)
-  end
+   seconds of its previous request, and take what the server sends within [idle] seconds; otherwise it is closed. 0:
+   no limit. Before its Hello it has [hello_s] from its accept (or its idle limit, when that is shorter) for its TLS
+   handshake and its Hello, whatever its idle limit: a program's client gives up after 5 s (Client.handshake_timeout),
+   so twice that turns away no program. The socket's timeouts wake a blocked read or write at least that often
+   (SO_RCVTIMEO, SO_SNDTIMEO: socket(7)), and the clock is checked after every read, inside the TLS handshake's loop
+   and inside a TLS record's too (Tls.handshake, Tls.read: [waiting]): bytes that trickle in, each within the socket's
+   timeout, without making a request do not keep a connection (Slowloris: R. Hansen, 2009). *)
+let hello_s = ref 10.0
 
-exception Idle
+(* 0.: no timeout *)
+let timeouts fd secs =
+  Unix.setsockopt_float fd Unix.SO_RCVTIMEO secs;
+  Unix.setsockopt_float fd Unix.SO_SNDTIMEO secs
+
+exception Idle of string
 
 let plain fd = { read = Unix.read fd; write = write_all fd; bye = ignore }
 
-let over_tls (t : Tls.t) = { read = Tls.read t; write = Tls.write t; bye = (fun () -> Tls.close t) }
+let over_tls (t : Tls.t) ~waiting = { read = Tls.read ~waiting t; write = Tls.write t; bye = (fun () -> Tls.close t) }
+
+(* ---- connections that have shown no token yet ----
+   A new connection when the server holds max_connections takes the slot of the oldest connection that has shown no
+   token (shut down), rather than being refused while such a one holds a slot; one that has shown its token is never
+   taken. So peers that open connections and send nothing cannot keep out the programs that show a token: a program
+   shows it within milliseconds of its accept, and a flood would have to open max_connections connections within
+   that time to take its slot. Keyed by the socket: an entry leaves the table, under its lock, before its socket is
+   closed, so a socket shut down here is never one the system gave since to another connection. *)
+type unshown = { um : Mutex.t; since : (Unix.file_descr, float) Hashtbl.t }
+
+let unshown = { um = Mutex.create (); since = Hashtbl.create 64 }
+let shown fd = Mutex.protect unshown.um (fun () -> Hashtbl.remove unshown.since fd)
+let note_unshown fd = Mutex.protect unshown.um (fun () -> Hashtbl.replace unshown.since fd (Unix.gettimeofday ()))
+
+(* the oldest connection that has shown no token, shut down: false when there is none *)
+let take_oldest () =
+  Mutex.protect unshown.um (fun () ->
+      match Hashtbl.fold (fun fd t acc -> match acc with Some (_, t') when t' <= t -> acc | _ -> Some (fd, t)) unshown.since None with
+      | None -> false
+      | Some (fd, _) ->
+        Hashtbl.remove unshown.since fd;
+        (try Unix.shutdown fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ());
+        true)
 
 (* ---- a follow stream (a local reader, over the Unix socket: Follow) ----
    The connection's thread sends the database's events; another thread waits for the connection's end (the program
@@ -228,20 +255,33 @@ let stop_reading () = Mutex.protect reading.rm (fun () -> reading.closing <- tru
 let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
   Mutex.protect socks.sm (fun () -> Hashtbl.replace socks.open_ fd ());
   Fun.protect ~finally:(fun () ->
+      shown fd;
       Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
       try Unix.close fd with Unix.Unix_error _ -> ())
   @@ fun () ->
-  (try timeouts fd idle with Unix.Unix_error _ -> ());
+  let t0 = Unix.gettimeofday () in
+  let before = if idle > 0 then Float.min !hello_s (float idle) else !hello_s in
+  (try timeouts fd before with Unix.Unix_error _ -> ());
   match tls with
-  | None -> serve_conn srv dbs ~idle fd (plain fd)
+  | None -> serve_conn srv dbs ~idle ~t0 ~before fd (fun ~waiting:_ -> plain fd)
   | Some ctx -> (
     (* the handshake in the connection's own thread: its computation (milliseconds) without the runtime lock; a
-       peer silent for the idle limit in the middle of it makes a read fail (EAGAIN), and the connection closes *)
-    match Tls.handshake ctx fd ~server:true ~host:"" with
-    | Ok t -> serve_conn ~tls:t srv dbs ~idle fd (over_tls t)
+       peer silent, or slow, past the time before Hello in the middle of it makes it fail, and the connection closes *)
+    let waiting () = if Unix.gettimeofday () -. t0 >= before then failwith (Printf.sprintf "the TLS handshake took more than %g s" before) in
+    match Tls.handshake ~waiting ctx fd ~server:true ~host:"" with
+    | Ok t -> serve_conn ~tls:t srv dbs ~idle ~t0 ~before fd (over_tls t)
     | Error _ -> ())
 
-and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
+and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle ~t0 ~before fd make_io =
+  (* the time of the accept, then of each whole request; whether a token was shown *)
+  let last = ref t0 and authed = ref false in
+  (* the clock: before Hello, [before] from the accept; then the idle limit from the last request *)
+  let over () =
+    let now = Unix.gettimeofday () in
+    if not !authed then (if now -. t0 >= before then raise (Idle (Printf.sprintf "no Hello within %g s of the connection: it is closed" before)))
+    else if idle > 0 && now -. !last >= float idle then raise (Idle (Printf.sprintf "no request for %d s (idle_timeout): the connection is closed" idle))
+  in
+  let io = make_io ~waiting:over in
   let dead = ref false in
   let scratch = Bytes.create 65536 in
   let c_ref = ref None in
@@ -310,14 +350,11 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
   c_ref := Some c;
   let buf = ref (Bytes.create base) and have = ref 0 in
   let go = ref true in
-  (* the time of the accept, then of each whole request *)
-  let last = ref (Unix.gettimeofday ()) in
   let read_or_idle b o n =
     let rec go () =
       match io.read b o n with
       | k -> k
-      | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
-        if Unix.gettimeofday () -. !last >= float idle then raise Idle else go ()
+      | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) -> over (); go ()
     in
     go ()
   in
@@ -340,9 +377,15 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
   try
      while !go do
        (* the frames already here first; a read only when a frame is not whole *)
-       let before = c.requests in
+       let requests = c.requests in
        let used, why = Core.input c !buf 0 !have in
-       if c.requests > before then last := Unix.gettimeofday ();
+       if c.requests > requests then last := Unix.gettimeofday ();
+       if (not !authed) && c.token <> None then begin
+         (* a token shown: the idle limit from now on, and the connection is never taken for a new one *)
+         authed := true;
+         shown fd;
+         (try timeouts fd (if idle > 0 then float idle else 0.) with Unix.Unix_error _ -> ())
+       end;
        Bytes.blit !buf used !buf 0 (!have - used);
        have := !have - used;
        (* a long frame used: the buffer back to its size, its room given back *)
@@ -387,12 +430,12 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
          else begin
            have := !have + k;
            (* bytes that trickle in without a whole request do not keep the connection *)
-           if idle > 0 && Unix.gettimeofday () -. !last >= float idle then raise Idle
+           over ()
          end
      done
    with
-   | Idle ->
-     Core.err c ~id:0 ~kind:0 "idle" "no request for %d s (idle_timeout): the connection is closed" idle;
+   | Idle m ->
+     Core.err c ~id:0 ~kind:0 "idle" "%s" m;
      flush ()
    | Unix.Unix_error _ | Failure _ | Exit -> ()
    | e -> Core.fail c ~id:0 ~kind:0 e
@@ -797,8 +840,10 @@ let serve (cfg : Config.t) =
             while Atomic.get accepting do
               match Unix.accept ~cloexec:true s with
               | fd, _ ->
-                if Atomic.fetch_and_add opened 1 >= cfg.max_connections then (Atomic.decr opened; refuse fd tls)
+                (* full: the slot of the oldest connection that has shown no token, if any (it ends a moment later) *)
+                if Atomic.fetch_and_add opened 1 >= cfg.max_connections && not (take_oldest ()) then (Atomic.decr opened; refuse fd tls)
                 else begin
+                  note_unshown fd;
                   (* a peer gone already makes it fail: the connection ends at its first read *)
                   if nodelay then (try Unix.setsockopt fd Unix.TCP_NODELAY true with Unix.Unix_error _ -> ());
                   let io = ios.(Atomic.fetch_and_add next 1 mod Array.length ios) in

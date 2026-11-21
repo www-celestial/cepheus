@@ -155,26 +155,35 @@ let () =
   (* the limits *)
   Out_channel.with_open_bin cfg (fun oc -> output_string oc (replace s "[clients]\n" "[clients]\nmax_connections = 3\nidle_timeout = 1\n"));
   let pid = serve () in
-  (* the limit: three connections held, a fourth refused, over the socket with a reason, over TCP before TLS *)
-  let held = List.init 3 (fun _ -> unix_conn sock) in
-  Thread.delay 0.1;
+  (* the limit: three programs connected, a fourth connection refused, over the socket with a reason, over TCP before
+     TLS *)
+  let programs = List.init 3 (fun _ -> match Client.connect (Client.Unix_socket sock) tok with Ok c -> c | Error m -> failwith m) in
   let closed, codes, _ = until_closed (unix_conn sock) 2.0 in
   C.check (closed && codes = [ "too_many_connections" ]) "a fourth connection over the socket: too_many_connections, closed (%s)" (String.concat "," codes);
   let closed, _, n = until_closed (tcp_conn port) 2.0 in
   C.check (closed && n = 0) "a fourth connection over TCP: closed before any byte";
-  (* idle: the three held are closed within twice the limit, each after the frame idle *)
+  List.iter Client.close programs;
+  Thread.delay 0.2;
+  (* three connections that show no token hold the slots: a program takes the oldest one's, which is closed at once
+     with no word; the two others are closed within twice the limit, each after the frame idle *)
+  let held = List.init 3 (fun _ -> let fd = unix_conn sock in Thread.delay 0.02; fd) in
+  Thread.delay 0.1;
   let t1 = Unix.gettimeofday () in
-  List.iter
-    (fun fd ->
-      let closed, codes, _ = until_closed fd 3.0 in
-      C.check (closed && codes = [ "idle" ]) "a silent connection: idle, closed (%s)" (String.concat "," codes);
-      Unix.close fd)
-    held;
-  C.check (Unix.gettimeofday () -. t1 < 2.5) "the silent connections closed within twice the limit";
-  (* room again: a client is served *)
   let c = match Client.connect (Client.Unix_socket sock) tok with Ok c -> c | Error m -> failwith m in
   let db = match Client.open_db ~local:false c "main" with Ok db -> db | Error e -> failwith e.message in
-  C.check (match Client.get c db 1 with Ok (_, f) -> f <> [] | Error _ -> false) "a client is served once there is room";
+  C.check (match Client.get c db 1 with Ok (_, f) -> f <> [] | Error _ -> false) "a program is served while connections that show no token hold every slot";
+  (match held with
+   | oldest :: rest ->
+     let closed, codes, _ = until_closed oldest 1.0 in
+     C.check (closed && codes = [] && Unix.gettimeofday () -. t1 < 0.9) "the oldest of them gave its slot: closed at once, no word (%s)" (String.concat "," codes);
+     List.iter
+       (fun fd ->
+         let closed, codes, _ = until_closed fd 3.0 in
+         C.check (closed && codes = [ "idle" ]) "a silent connection: idle, closed (%s)" (String.concat "," codes))
+       rest
+   | [] -> ());
+  List.iter Unix.close held;
+  C.check (Unix.gettimeofday () -. t1 < 2.5) "the silent connections closed within twice the limit";
   (* a byte at a time, never a whole request: closed *)
   let fd = unix_conn sock in
   let t2 = Unix.gettimeofday () in
@@ -197,6 +206,37 @@ let () =
   let closed, _, n = until_closed fd 3.0 in
   C.check (closed && n = 0) "a TLS handshake that never starts is closed";
   Unix.close fd;
+  (* a byte at a time, each within the socket's timeout: a TLS record of the handshake (a header announcing 512 bytes,
+     then its bytes one by one), and after Hello a record of the application's data; both closed within the limit *)
+  let drip fd head =
+    Thread.create
+      (fun () ->
+        try
+          ignore (Unix.write_substring fd head 0 (String.length head));
+          for _ = 1 to 40 do Thread.delay 0.25; ignore (Unix.write_substring fd "\001" 0 1) done
+        with Unix.Unix_error _ -> ())
+      ()
+  in
+  let fd = tcp_conn port in
+  let t3 = Unix.gettimeofday () in
+  let d = drip fd "\022\003\001\002\000" in
+  let closed, _, _ = until_closed fd 6.0 in
+  C.check (closed && Unix.gettimeofday () -. t3 < 2.6) "a TLS handshake that trickles a byte at a time is closed within twice the limit (%.1f s)" (Unix.gettimeofday () -. t3);
+  Thread.join d;
+  Unix.close fd;
+  let ca = Filename.concat a "ca.pem" in
+  (match Client.connect ~ca (Client.Tcp ("127.0.0.1", port)) tok with
+   | Error m -> C.check false "TLS: %s" m
+   | Ok tc -> (
+     match tc.Client.fd with
+     | None -> C.check false "TLS: no socket"
+     | Some fd ->
+       let t4 = Unix.gettimeofday () in
+       let d = drip fd "\023\003\003\001\000" in
+       let closed, _, _ = until_closed fd 6.0 in
+       C.check (closed && Unix.gettimeofday () -. t4 < 2.6) "after Hello, a TLS record that trickles a byte at a time is closed within twice the limit (%.1f s)" (Unix.gettimeofday () -. t4);
+       Thread.join d;
+       Client.close tc));
   (* pings more often than the limit keep a connection (a new one: the first has been idle meanwhile) *)
   Client.close c;
   let c = match Client.connect (Client.Unix_socket sock) tok with Ok c -> c | Error m -> failwith m in

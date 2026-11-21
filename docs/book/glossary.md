@@ -118,7 +118,8 @@ the usual one, both are given.
 - **conjunctive query** — a question made of patterns that must all hold at once (an AND of facts), over shared
   variables. [concepts](concepts.md#questions)
 - **connection limit** — the most connections the server keeps open at once (`max_connections`, 512 by default); a
-  new one over it is closed at its accept. [server](server.md#clustertoml)
+  new one over it takes the slot of the oldest connection that has shown no token, or is closed at its accept.
+  [server](server.md#clustertoml)
 - **constant-time comparison** — comparing two secrets byte by byte to the end, whatever the first difference, so that
   the time taken tells an attacker nothing about how much of a guess was right. [server](server.md#tokens)
 - **constraint** — a rule whose head is `Never`: an answer of its body refuses the group (G18).
@@ -260,7 +261,8 @@ the usual one, both are given.
 - **history** — the sequence of every transaction a database applied, with what each read and wrote; Cepheus'
   journal is one, in group order.
 - **idle timeout** — the time a connection may go without a whole request before the server closes it
-  (`idle_timeout`, 600 s by default), its TLS handshake included. [server](server.md#clustertoml)
+  (`idle_timeout`, 600 s by default); before its Hello, 10 s at most, its TLS handshake included.
+  [server](server.md#clustertoml)
 - **index word** — the 64-bit form of a value in the indexes: the value itself, or a dictionary number for texts and
   floats; what `fold` gives, and `decode` turns back into the value. [api](api.md#questions)
 - **information bound** (entropy) — the fewest bits any coding needs for some data, from how many different values it

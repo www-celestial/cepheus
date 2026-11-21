@@ -92,18 +92,23 @@ name = "stock"
   start, and says which line or key (a configuration is never guessed).
 - A database declared and not yet on disk is created at the first start (its directory under `data`).
 - `max_connections` bounds the connections open at once, from their accept to their close (a thread each, and a file
-  descriptor). At the limit a new connection is closed at once: over the Unix socket after an error frame
-  `too_many_connections`, over TCP without a word and before its TLS handshake, so that a refused connection costs the
+  descriptor). At the limit a new connection takes the slot of the oldest connection that has shown no token yet,
+  which is closed without a word (a connection that has shown its token is never taken: peers that connect and send
+  nothing cannot keep programs out); when every connection has shown one, the new one is closed at once: over the
+  Unix socket after an error frame `too_many_connections`, over TCP without a word and before its TLS handshake, so that a refused connection costs the
   server no handshake (its key exchange and signature: a whole new TLS connection costs 2.6 ms, both sides,
   [measured below](#speed-beside-postgresql)). The log says how many were refused, at most once a second. The
   default, 512, leaves room under systemd's default limit of 1,024 descriptors a service (`LimitNOFILE`), which the
   databases' files share (a journal segment, a run file a level); raise both together. A server out of descriptors
   says so in its log and keeps accepting once some close (`accept` fails with `EMFILE`; the connection waits in the
   kernel's queue).
-- `idle_timeout`: a connection must send a whole request within this many seconds of its accept (its TLS handshake
-  included) and of its previous request, and must take what the server sends within as long; otherwise the server
-  sends it an error frame `idle` (request id 0) and closes it. Bytes that trickle in without making a request do not
-  keep a connection open. A program's library keeps its connection alive with `Ping`, or connects again: the OCaml
+- `idle_timeout`: a connection must send a whole request within this many seconds of its previous request, and must
+  take what the server sends within as long; otherwise the server sends it an error frame `idle` (request id 0) and
+  closes it. Before its Hello it has 10 s from its accept (or `idle_timeout`, when shorter) for its TLS handshake and
+  its Hello, whatever `idle_timeout` is (0 included); a program's client gives up after 5 s. Bytes that trickle in
+  without making a request do not keep a connection open: the clock is checked after every read, inside the TLS
+  handshake and inside a TLS record too, so a peer that sends a byte at a time, each within the socket's timeout, is
+  closed (Slowloris, R. Hansen 2009). A program's library keeps its connection alive with `Ping`, or connects again: the OCaml
   client sends a read (Open, Get, Find, Ping, status) again on a new connection after a broken one, within its retry
   budget, as it does for writes (G14). PostgreSQL's `idle_session_timeout` is off by default and its
   `authentication_timeout` is one minute; Redis's `timeout` is off by default.
@@ -554,7 +559,7 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |
 | `too_many_connections` | a new connection over the Unix socket while the server holds `max_connections` (request id 0; over TCP the connection is closed without a word) | connect later, or raise the limit |
-| `idle` | no whole request for `idle_timeout` seconds (request id 0, then the server closes the connection) | send `Ping` meanwhile, or connect again: the OCaml client does |
+| `idle` | no whole request for `idle_timeout` seconds, or no Hello within 10 s of the connection (request id 0, then the server closes the connection) | send `Ping` meanwhile, or connect again: the OCaml client does |
 | `refused` | a write sent again after a later write of its session was applied, whose first error was lost when the server started again (its error, when the same server refused it, is given again instead) | it was not applied: decide again |
 | `missing` | Load of a thing that has no file of the kind; a chunk the vault does not hold | |
 | `erased` | Load, or Put, of an owner whose key was erased | |
@@ -1068,8 +1073,9 @@ the server a replica, does a batch hold a large group's run).
   its bytes, and its groups must follow the replica's newest without a gap. A frame that fails any of these is
   refused, the replica's state unchanged, and the stream starts again. A primary checks a replica's history before it
   sends anything.
-- **Denial of service.** At most 256 peer connections at once; 5 s for a handshake and its Hello, 30 s of silence on a
-  stream; the replica holds at most 64 MiB of frames in flight, the primary one frame a replica.
+- **Denial of service.** At most 256 peer connections at once; 5 s from the accept for a handshake and its Hello, a
+  byte at a time or not (the clock checked after every read, inside the handshake and inside a TLS record), 30 s of
+  silence on a stream; the replica holds at most 64 MiB of frames in flight, the primary one frame a replica.
 - **Files.** `cepheus.role`, `epochs` and `handover` are written beside (a new name opened with `O_EXCL`, so a link
   planted there is never followed), forced, renamed and the directory forced, mode 0600; the data directory 0700.
 - **What it does not stop.** A peer whose key is stolen can act as a replica (read every database) or, as a
@@ -1441,7 +1447,10 @@ What one peer may make the server hold or do, each bound refused or waited for b
 ([limits](limits.md#the-server)):
 
 - **Before a token.** A frame before Hello is 4 KiB at most, so a peer that shows no token holds its connection's
-  64 KiB buffer and nothing more.
+  64 KiB buffer and nothing more, for 10 s at most from its accept (its TLS handshake and its Hello, a byte at a time
+  or not); at `max_connections` a new connection takes the slot of the oldest such one, never a program's.
+- **Slow peers.** After Hello, a whole request within `idle_timeout` of the previous one: the clock is checked after
+  every read, inside a TLS record too.
 - **Reading.** A longer frame grows its connection's buffer, back to 64 KiB once it is used; the grown buffers hold
   64 MiB more at most, server-wide, a connection past it waiting for room: 512 connections that each begin a frame of
   16 MiB do not make the server hold 8 GiB.
@@ -1456,7 +1465,9 @@ What one peer may make the server hold or do, each bound refused or waited for b
 
 *Tested by* `test/server_unit.ml` ("the bounds of an answer at the server": a cross product asked every way, the
 pool held by others, 65 patterns, a pattern repeated, the watches of a connection and of the server) and
-`test/server_guard.ml` (real sockets: a frame of 16 MiB before Hello, three frames of 700 KB begun at once under a
+`test/server_limits.ml` (a real server: connections that show no token holding every slot while a program connects,
+a TLS handshake and a TLS record after Hello sent a byte at a time) and `test/server_guard.ml` (real sockets: a frame
+of 16 MiB before Hello, three frames of 700 KB begun at once under a
 bound of 1 MiB, 3,000 Finds of 14 KB sent at once by a client that reads nothing yet).
 
 ### TLS

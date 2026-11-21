@@ -221,10 +221,12 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
 - `server_tls`: a real server with TLS: a client of the cluster's CA reads; another cluster's CA, a certificate that
   does not name the host, another cluster id, a TCP client without a CA and a plain client on the TLS port are all
   refused, and the server goes on; TCP without `[tls]` is refused at start.
-- `server_limits`: a real server with `max_connections = 3` and `idle_timeout = 1`: with three connections open, a
-  fourth over the Unix socket gets `too_many_connections` and one over TCP is closed before any byte; a silent
-  connection, one that trickles a byte at a time without a request, and one that stops in its TLS handshake are
-  closed within twice the limit (the first two after `idle`); a client that pings more often stays; a client idle
+- `server_limits`: a real server with `max_connections = 3` and `idle_timeout = 1`: with three programs connected, a
+  fourth connection over the Unix socket gets `too_many_connections` and one over TCP is closed before any byte;
+  with three connections that show no token holding every slot, a program is served (the oldest of them gives its
+  slot); a silent connection, one that trickles a byte at a time without a request, one that stops in its TLS
+  handshake, one that sends its TLS handshake a byte at a time, and one that sends a TLS record a byte at a time
+  after Hello are closed within twice the limit (the silent ones after `idle`); a client that pings more often stays; a client idle
   past the limit reads again, its library connecting again by itself.
 - `server_guard`: connections served by the server's own code over real sockets, on a database whose reads raise
   when the test says (a bug of a request): a request that raises on a connection with a watch and a write in flight

@@ -89,6 +89,10 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - Before Hello a frame is 4 KiB at most, and the reading buffers grown for long frames hold 64 MiB more at most,
   server-wide, a connection past it waiting for room: a peer that shows no token can no longer make the server hold
   16 MiB, nor many connections 16 MiB each.
+- A connection has 10 s from its accept for its TLS handshake and its Hello, and the clock (that one, then
+  `idle_timeout`) is checked inside the TLS handshake and inside a TLS record, so that a peer that sends a byte at a
+  time is closed (Slowloris); on the peer port, 5 s the same way. At `max_connections` a new connection takes the slot
+  of the oldest one that has shown no token, so that peers that connect and send nothing no longer keep programs out.
 - A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are sent, so that
   many small requests for large replies, never read, no longer pile their replies up in the server's memory.
 

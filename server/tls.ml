@@ -43,42 +43,50 @@ let send_pending t =
   in
   go ()
 
-(* the handshake, as the server ([host] "") or as a client that checks the server's name *)
-let handshake ctx fd ~server ~host =
+(* The handshake, as the server ([host] "") or as a client that checks the server's name. [waiting ()] is called
+   before each read after the first, when the bytes so far made no whole step: a peer that sends a byte at a time,
+   each within the socket's timeout, is stopped there (Slowloris: R. Hansen, 2009), by its Failure. *)
+let handshake ?(waiting = ignore) ctx fd ~server ~host =
   match c_string "the host" host; conn_ ctx server host with
   | exception Failure m -> Error m
   | c -> (
     let t = { c; fd; m = Mutex.create (); wm = Mutex.create (); raw = Bytes.create 65536; out = Bytes.create 65536 } in
-    let rec go () =
+    let rec go first =
       let fin = handshake_step c in
       send_pending t;
       if not fin then begin
+        if not first then waiting ();
         let k = Unix.read fd t.raw 0 (Bytes.length t.raw) in
         if k = 0 then failwith "the TLS handshake: the peer closed the connection";
         feed c t.raw 0 k;
-        go ()
+        go false
       end
     in
-    match go () with
+    match go true with
     | () -> Ok t
     | exception Failure m -> Error m
     | exception Unix.Unix_error (e, _, _) -> Error ("the TLS handshake: " ^ Unix.error_message e))
 
-(* plain bytes, at most [len] (> 0); 0 at the end of the stream *)
-let rec read t buf ofs len =
+(* plain bytes, at most [len] (> 0); 0 at the end of the stream. [waiting ()] is called before each read of the
+   socket once bytes came that made no whole record: what it raises ends the read (a record sent a byte at a time) *)
+let read ?(waiting = ignore) t buf ofs len =
   range "read" buf ofs len;
-  let n, out = Mutex.protect t.m (fun () -> let n = read_plain t.c buf ofs len in n, pending t.c) in
-  if out > 0 then Mutex.protect t.wm (fun () -> send_pending t);
-  if n > 0 then n
-  else if n < 0 then 0
-  else begin
-    let k = Unix.read t.fd t.raw 0 (Bytes.length t.raw) in
-    if k = 0 then 0
+  let rec go first =
+    let n, out = Mutex.protect t.m (fun () -> let n = read_plain t.c buf ofs len in n, pending t.c) in
+    if out > 0 then Mutex.protect t.wm (fun () -> send_pending t);
+    if n > 0 then n
+    else if n < 0 then 0
     else begin
-      Mutex.protect t.m (fun () -> feed t.c t.raw 0 k);
-      read t buf ofs len
+      if not first then waiting ();
+      let k = Unix.read t.fd t.raw 0 (Bytes.length t.raw) in
+      if k = 0 then 0
+      else begin
+        Mutex.protect t.m (fun () -> feed t.c t.raw 0 k);
+        go false
+      end
     end
-  end
+  in
+  go true
 
 let write t buf ofs len =
   range "write" buf ofs len;

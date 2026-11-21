@@ -206,7 +206,14 @@ let handshake_s = ref 5.0
 let stream_s = ref 30.0
 let beat_s = 1.0
 
-type link = { tls : Tls.t; fd : Unix.file_descr; mutable inb : Bytes.t; mutable have : int; closed : bool Atomic.t }
+type link = {
+  tls : Tls.t;
+  fd : Unix.file_descr;
+  mutable inb : Bytes.t;
+  mutable have : int;
+  closed : bool Atomic.t;
+  mutable until : float;  (* a frame must be whole by then, a byte at a time or not (0.: no such time): the Hello *)
+}
 
 exception Broken of string
 
@@ -230,8 +237,9 @@ let next_frame l =
         Bytes.blit l.inb 0 b 0 l.have;
         l.inb <- b
       end;
+      let waiting () = if l.until > 0. && Unix.gettimeofday () >= l.until then raise (Broken "no whole frame in time") in
       let k =
-        try Tls.read l.tls l.inb l.have (Bytes.length l.inb - l.have) with
+        try Tls.read ~waiting l.tls l.inb l.have (Bytes.length l.inb - l.have) with
         | Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) -> raise (Broken "the peer went silent")
         | Unix.Unix_error (e, _, _) -> raise (Broken (Unix.error_message e))
         | Failure m -> raise (Broken m)
@@ -526,17 +534,21 @@ let serve_peer t ctx fd =
     (try Unix.close fd with Unix.Unix_error _ -> ())
   in
   timeouts fd !handshake_s;
-  match Tls.handshake ctx fd ~server:true ~host:"" with
+  (* the handshake and the Hello within [handshake_s] of the accept, a byte at a time or not *)
+  let until = Unix.gettimeofday () +. !handshake_s in
+  let waiting () = if Unix.gettimeofday () >= until then failwith (Printf.sprintf "no handshake within %g s" !handshake_s) in
+  match Tls.handshake ~waiting ctx fd ~server:true ~host:"" with
   | Error m -> refuse ("TLS: " ^ m)
   | Ok tls -> (
     let name = Tls.peer_name tls in
-    let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false } in
+    let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false; until } in
     if name = t.cfg.me || peer_of t.cfg name = None then (close_link l; refuse (Printf.sprintf "its certificate names %S, which is not another [[peer]]" name))
     else
       try
         match expect l k_hello with
         | Error _ -> close_link l
         | Ok r ->
+          l.until <- 0.;
           let v = Codec.get_varint r in
           let cluster = Codec.get_string r in
           let _ = Codec.get_string r in
@@ -610,7 +622,7 @@ let connect ?(timeout = !handshake_s) (cfg : Config.t) (p : Config.peer) =
         match Tls.handshake ctx fd ~server:false ~host with
         | Error m -> (try Unix.close fd with Unix.Unix_error _ -> ()); Error (Printf.sprintf "%s (%s): TLS: %s" p.pname p.address m)
         | Ok tls -> (
-          let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false } in
+          let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false; until = 0. } in
           if Tls.peer_name tls <> p.pname then (close_link l; Error (Printf.sprintf "%s's certificate names %S" p.address (Tls.peer_name tls)))
           else
             let b = Buffer.create 64 in
