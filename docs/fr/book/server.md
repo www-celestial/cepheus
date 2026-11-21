@@ -106,7 +106,10 @@ name = "stock"
 - Une base déclarée et pas encore sur le disque est créée au premier démarrage (son répertoire sous `data`).
 - `max_connections` borne les connexions ouvertes à la fois, de l'instant où le serveur les accepte jusqu'à leur
   fermeture (un thread chacune, et un file descriptor, le numéro par lequel un processus désigne un fichier ou un
-  socket ouvert). À la limite, une nouvelle connexion est fermée aussitôt : sur le Unix socket après une frame
+  socket ouvert). À la limite, une nouvelle connexion prend la place de la plus ancienne connexion qui n'a encore
+  montré aucun token, et celle-ci est fermée sans un mot (une connexion qui a montré son token n'est jamais prise :
+  ceux qui se connectent sans rien envoyer ne peuvent pas tenir les programmes dehors) ; quand chaque connexion en a
+  montré un, la nouvelle est fermée aussitôt : sur le Unix socket après une frame
   d'erreur (un message du protocole qui porte une erreur) `too_many_connections`, sur TCP sans un mot et avant son
   handshake TLS (les premiers échanges, où les deux côtés s'accordent sur des clés), pour qu'une connexion refusée ne
   coûte au serveur aucun handshake (son échange de clés et sa signature : une nouvelle connexion TLS entière coûte
@@ -115,10 +118,15 @@ name = "stock"
   service (`LimitNOFILE`), que se partagent les fichiers des bases (un segment de journal, un fichier de run par
   niveau) ; relevez les deux ensemble. Un serveur à court de descriptors le dit dans son log et recommence à accepter
   dès que des connexions se ferment (`accept` échoue avec `EMFILE` ; la connexion attend dans la file du noyau).
-- `idle_timeout` : une connexion doit envoyer une requête entière dans ce nombre de secondes après que le serveur l'a
-  acceptée (son handshake TLS compris) et après sa requête précédente, et doit prendre ce que le serveur lui envoie
-  dans le même délai ; sinon le serveur lui envoie une frame d'erreur `idle` (id de requête 0) et la ferme. Des octets
-  qui arrivent au compte-gouttes sans former une requête ne gardent pas une connexion ouverte. La bibliothèque d'un
+- `idle_timeout` : une connexion doit envoyer une requête entière dans ce nombre de secondes après sa requête
+  précédente, et doit prendre ce que le serveur lui envoie dans le même délai ; sinon le serveur lui envoie une frame
+  d'erreur `idle` (id de requête 0) et la ferme. Avant son Hello, elle a 10 s depuis que le serveur l'a acceptée (ou
+  `idle_timeout`, s'il est plus court) pour son handshake TLS et son Hello, quel que soit `idle_timeout` (0 compris) ;
+  le client d'un programme abandonne après 5 s. Des octets qui arrivent au compte-gouttes sans former une requête ne
+  gardent pas une connexion ouverte : l'horloge est regardée après chaque lecture, dans le handshake TLS et aussi dans
+  un record TLS (un bloc chiffré du flux TLS), si bien que l'autre bout qui envoie un octet à la fois, chacun dans le
+  timeout du socket, est fermé (l'attaque Slowloris, R. Hansen 2009 : tenir les connexions d'un serveur en envoyant
+  très lentement). La bibliothèque d'un
   programme garde sa connexion en vie avec `Ping`, ou se reconnecte : le client OCaml renvoie une lecture (Open, Get,
   Find, Ping, status) sur une nouvelle connexion après une connexion rompue, dans son budget de retries (le nombre de
   nouvelles tentatives permis), comme il le fait pour les écritures (G14). Le `idle_session_timeout` de PostgreSQL est
@@ -418,7 +426,8 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 - `id` : choisi par le client ; une réponse porte l'id et le kind (le type de message) de sa requête.
 - Une frame de plus de 16 MiB reçoit la réponse `too_large` et la connexion se ferme : l'autre bout de la connexion,
-  s'il annonce 4 GiB, ne peut pas faire allouer cette mémoire au serveur. Un nombre annoncé dans un corps (de faits,
+  s'il annonce 4 GiB, ne peut pas faire allouer cette mémoire au serveur. Avant Hello, la limite est de 4 KiB :
+  l'autre bout, tant qu'il n'a montré aucun token, tient au plus 64 KiB de la mémoire du serveur. Un nombre annoncé dans un corps (de faits,
   de lignes, d'opérations) plus grand que les octets qui restent est refusé avant que rien ne soit alloué.
 - Les **valeurs** sont codées comme dans le journal ([formats](formats.md)) : un octet de tag, qui donne le type (0
   int, 1 float, 2 false, 3 true, 4 text, 5 date, 6 money, 7 link), puis un varint en zigzag, les 8 octets d'un float,
@@ -431,10 +440,10 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | corps de la requête | corps de la réponse |
 |---|---|---|
-| 1 Hello | la version en varint (1, 2 ou 3), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours |
-| 2 Open | le nom de la base | Opened : le handle (le numéro de la base ouverte sur cette connexion), le groupe le plus récent, les propriétés (id, nom, code du type, many, unique) |
-| 3 Get | handle, chose | Facts : le groupe de la vue, le nombre, (propriété, valeur)... |
-| 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more`) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne |
+| 1 Hello | la version en varint (1, 2 ou 3), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
+| 2 Open | le nom de la base | Opened : le handle (le numéro de la base ouverte sur cette connexion), le groupe le plus récent, les propriétés (id, nom, code du type, many, unique) ; au-delà de la limite des frames, en frames d'environ 1 MiB de propriétés, toutes sauf la dernière avec `more`, chacune avec son handle, son groupe et son nombre |
+| 3 Get | handle, chose | Facts : le groupe de la vue, le nombre, (propriété, valeur)... ; au-delà de la limite des frames, en frames d'environ 1 MiB de faits, toutes sauf la dernière avec `more`, chacune avec son groupe et son nombre |
+| 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more` ; un Give sans Sort qui dépasse les cellules que le serveur tient, lignes fois colonnes, est envoyé à mesure que ses lignes sont trouvées, aucune n'est tenue) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne |
 | 5 Write | handle, serial, floor, by (zigzag), why, nombre, opérations | Receipt : le groupe, le nombre, (id temporaire de la nouvelle chose, son id)... |
 | 6 Ping | des octets quelconques | Pong : les mêmes octets |
 | 7 Admin | "status" | Status : le nombre, (clé, valeur)... |
@@ -558,6 +567,11 @@ same   = 2 | group                                                 nothing the q
   se termine `too_large`). Un Limit de plus de 100 000, un After, un Limit sans Sort, et des agrégats avec Sort ou Limit
   sont refusés (`invalid`) : [Sort et Limit dans un watch](cesia.md#sort-et-limit-dans-un-watch), la règle vérifiée par
   model checking dans `spec/WatchWindow.tla`.
+- **Les bornes.** Une connexion garde au plus 1 024 watches, le serveur 65 536, et ce que leurs fenêtres et leurs
+  groupes gardent entre deux messages compte comme des cellules, au plus celles d'une réponse pour une connexion ; la
+  première réponse d'un watch est construite dans les bornes d'une réponse, sous le lock du hub. Au-delà de l'une
+  d'elles, le Watch est `too_large` ; un watch que le serveur a terminé ne compte plus
+  ([limites](limits.md#le-serveur)).
 - Ce qu'est un changement, et comment il se calcule : [Cepheus depuis Cesia](cesia.md#watch--les-questions-vivantes) ;
   la règle de reprise est vérifiée par model checking dans `spec/Watch.tla` (pas de trou, pas de répétition, les lignes
   jamais plus anciennes que le dernier message : 1 015 657 états ; sans le test des patterns touchés ou sans la borne
@@ -607,11 +621,11 @@ Chaque réponse est une valeur ou une erreur `{code, message}`. Les codes du mot
 | `auth` | Hello avec un token inconnu ; une requête avant Hello ; un token retiré depuis | vérifier le token ; la connexion se ferme |
 | `denied` | il manque au token le droit pour cette base ou cette opération ; une session d'un autre token | un token qui a ce droit |
 | `version` | Hello avec une version du protocole que le serveur ne parle pas (il parle les versions 1 à 5) | une bibliothèque se reconnecte dans la version d'avant ; sinon, un serveur et une bibliothèque d'une même release |
-| `too_large` | une frame de plus de 16 MiB | écrire en groupes plus petits ; la connexion se ferme |
+| `too_large` | une frame de plus de 16 MiB (la connexion se ferme) ; une question qui dépasse le budget de travail du serveur, ou une réponse qu'il tiendrait au-delà de ses cellules (un Find avec Sort ou des agrégats, la première réponse d'un watch) ; un Watch au-delà des watches d'une connexion ou du serveur ([limites](limits.md#les-questions)) | écrire en groupes plus petits ; poser une question plus étroite, ou demander des pages ; faire d'abord un Unwatch |
 | `unknown_database` | un nom ou un handle que le serveur ne tient pas | la déclarer dans cluster.toml |
 | `stopping` | le serveur s'arrête | se reconnecter : la bibliothèque le fait |
 | `too_many_connections` | une nouvelle connexion sur le Unix socket alors que le serveur tient `max_connections` connexions (id de requête 0 ; sur TCP la connexion est fermée sans un mot) | se connecter plus tard, ou relever la limite |
-| `idle` | aucune requête entière pendant `idle_timeout` secondes (id de requête 0, puis le serveur ferme la connexion) | envoyer `Ping` entre-temps, ou se reconnecter : le client OCaml le fait |
+| `idle` | aucune requête entière pendant `idle_timeout` secondes, ou aucun Hello dans les 10 s qui suivent la connexion (id de requête 0, puis le serveur ferme la connexion) | envoyer `Ping` entre-temps, ou se reconnecter : le client OCaml le fait |
 | `refused` | une écriture renvoyée après qu'une écriture plus tardive de sa session a été appliquée, et dont la première erreur s'est perdue quand le serveur a redémarré (si c'est le même serveur qui l'a refusée, son erreur est redonnée à la place) | elle n'a pas été appliquée : décider à nouveau |
 | `missing` | Load d'une chose qui n'a pas de fichier de ce kind ; un chunk (un morceau d'un fichier) que le vault ne tient pas | |
 | `erased` | Load, ou Put, d'un propriétaire dont la clé a été effacée | |
@@ -1190,8 +1204,9 @@ serveur est-il une replica, un lot tient-il le run d'un grand groupe).
   son décodage est borné par ses octets, et ses groupes doivent suivre le plus récent de la replica sans trou. Une
   frame qui échoue à l'une de ces vérifications est refusée, l'état de la replica inchangé, et le flux recommence. Un
   primary vérifie l'historique d'une replica avant de lui envoyer quoi que ce soit.
-- **Le déni de service.** Au plus 256 connexions de peers à la fois ; 5 s pour un handshake et son Hello, 30 s de
-  silence sur un flux ; la replica tient au plus 64 MiB de frames en vol, le primary une frame par replica.
+- **Le déni de service.** Au plus 256 connexions de peers à la fois ; 5 s depuis l'accept pour un handshake et son
+  Hello, un octet à la fois ou non (l'horloge regardée après chaque lecture, dans le handshake et dans un record TLS),
+  30 s de silence sur un flux ; la replica tient au plus 64 MiB de frames en vol, le primary une frame par replica.
 - **Les fichiers.** `cepheus.role`, `epochs` et `handover` sont écrits à côté (un nouveau nom ouvert avec `O_EXCL`, si
   bien qu'un lien posé là n'est jamais suivi), forcés, renommés, puis le répertoire est forcé, mode 0600 ; le
   répertoire de données 0700.
@@ -1600,7 +1615,68 @@ comptés avant et après).
 
 Le répertoire du Unix socket est la porte d'entrée sur une machine : donnez-lui le mode `0750`, avec pour propriétaire
 l'utilisateur du serveur et pour groupe Unix celui des programmes autorisés à se connecter
-(`chgrp cepheus /run/cepheus`) ; le token reste nécessaire. Sur TCP, TLS.
+(`chgrp cepheus /run/cepheus`) ; le token reste nécessaire. Le serveur met le socket en mode 0660 dès qu'il l'a lié à
+son adresse, quel que soit son umask (le masque des droits qu'un processus retire aux fichiers qu'il crée) : Linux ne
+laisse un programme se connecter qu'avec le droit d'écrire sur le socket (unix(7)), si bien que le groupe de son
+propriétaire peut se connecter, et personne d'autre. Sur TCP, TLS.
+
+### Le répertoire de données
+
+Ses fichiers tiennent les faits en clair (le journal, les runs, les tables des sessions) : chaque fichier que fait une
+base est en mode 0600 et chaque dossier en 0700, quel que soit l'umask du processus. Un répertoire de données qui
+laisse entrer son groupe ou les autres (fait à la main sous l'umask habituel, 0755) est rendu au seul serveur à son
+démarrage, et le log le dit ; un répertoire qu'il ne peut pas changer (un autre propriétaire) est refusé. *Testé par*
+`test/server_limits.ml` (un répertoire de données de mode 755 : 0700 après le démarrage, chaque fichier de la base
+0600 et chaque dossier 0700, le socket 0660).
+
+### Aucun chemin dans une réponse
+
+Une erreur des propres fichiers du serveur (le disque, le vault et sa clé) parvient au programme comme son code
+(`io`, `busy`) et un message fixe, "the server could not use its files (its log says why)" ; ce qu'elle dit (les
+chemins, les mots du système) va dans le log du serveur seulement. *Testé par* `test/server_unit.ml` (une clé du vault
+lisible par d'autres : `io` pour le programme, son chemin dans le log seulement).
+
+### Le déni de service
+
+Ce que l'autre bout d'une connexion, quel qu'il soit, peut faire tenir ou faire au serveur ; chaque borne est
+refusée, ou attendue, avant d'être dépassée ([limites](limits.md#le-serveur)) :
+
+- **Avant un token.** Une frame avant Hello fait au plus 4 KiB, si bien que l'autre bout, tant qu'il ne montre aucun
+  token, tient le buffer de 64 KiB de sa connexion et rien de plus, pendant 10 s au plus depuis l'accept (son
+  handshake TLS et son Hello, un octet à la fois ou non) ; à `max_connections`, une nouvelle connexion prend la place
+  de la plus ancienne de ce genre, jamais celle d'un programme.
+- **Les bouts lents.** Après Hello, une requête entière dans les `idle_timeout` secondes qui suivent la précédente :
+  l'horloge est regardée après chaque lecture, dans un record TLS aussi.
+- **La lecture.** Une frame plus longue agrandit le buffer de sa connexion, qui revient à 64 KiB une fois qu'elle a
+  servi ; les buffers agrandis tiennent au plus 64 MiB de plus, pour tout le serveur, et une connexion qui les
+  dépasserait attend de la place : 512 connexions qui commencent chacune une frame de 16 MiB ne font pas tenir 8 GiB
+  au serveur.
+- **Ce qui reste à envoyer.** Une connexion dont les réponses pas encore envoyées dépassent 1 MiB n'a plus aucune de
+  ses requêtes décodée tant qu'elles ne sont pas parties : 100 Gets d'un texte de 900 KB envoyés en 1 400 octets et
+  jamais lus tiennent un MiB et une réponse, pas 90 MB.
+- **Les frames.** Aucune réponse ne dépasse la limite des frames, que chaque client refuse : un Get ou un Open qui la
+  dépasserait est envoyé en frames de l'indicateur `more` ; un nom fait au plus 255 octets et un texte la frame moins
+  4 KiB, si bien qu'un token qui peut ajouter à un kind ne peut pas rendre la base impossible à ouvrir ; un groupe
+  dont le reçu dépasserait une frame est refusé avant d'être appliqué.
+- **Les réponses.** Une réponse que le serveur tient (Sort, agrégats, la première réponse d'un watch) est bornée par
+  ses cellules, lignes fois colonnes, celles d'une question et celles de toutes les connexions ensemble ; un Find sans
+  Sort qui les dépasse ne tient aucune de ses lignes (il est posé de nouveau, et ses lignes envoyées à mesure qu'elles
+  sont trouvées), si bien qu'un produit cartésien de patterns qui ne partagent aucune variable (chaque réponse de l'un
+  avec chaque réponse de l'autre ; la taille du produit, la borne AGM : Atserias, Grohe, Marx 2008) coûte au serveur
+  son temps, pas sa mémoire. Une question prend au plus 64 patterns, et son travail est compté en lookups (des
+  recherches dans un index).
+- **Les watches.** 1 024 par connexion, 65 536 pour le serveur, et ce que gardent leurs fenêtres et leurs groupes
+  compte dans les cellules d'une connexion.
+
+*Testé par* `test/server_unit.ml` ("the bounds of an answer at the server" : un produit cartésien demandé de toutes
+les façons, le pool tenu par d'autres (la réserve de cellules commune aux connexions), 65 patterns, un pattern répété,
+les watches d'une connexion et du serveur ; "replies within the frame limit" : un Open de 17 MB de noms et un Get de
+17 MB de faits rejoints à partir de leurs frames, des noms et des textes au-delà de leurs bornes, un reçu au-delà
+d'une frame) et `test/server_limits.ml` (un vrai serveur : des connexions qui ne montrent aucun token et tiennent
+chaque place pendant qu'un programme se connecte, un handshake TLS et un record TLS après Hello envoyés un octet à la
+fois) et `test/server_guard.ml` (de vrais sockets : une frame de 16 MiB avant Hello, trois frames de 700 KB
+commencées à la fois sous une borne de 1 MiB, 3 000 Finds de 14 KB envoyés à la fois par un client qui ne lit encore
+rien).
 
 ### TLS
 

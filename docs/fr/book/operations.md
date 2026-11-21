@@ -18,7 +18,9 @@ DIR/snapshots/LO-HI.run.tmp       a merge being written (removed at open if a cr
 ```
 
 Le journal est la vérité : les runs sont des caches qu'on peut toujours reconstruire. La disposition des octets :
-[formats](formats.md).
+[formats](formats.md). Chaque fichier est créé en mode 0600 et chaque dossier en 0700, quel que soit l'umask du
+processus (le masque des droits qu'un processus retire aux fichiers qu'il crée) : ils tiennent les faits en clair
+(`Disk.real`).
 
 ## L'ouverture et la recovery
 
@@ -28,7 +30,8 @@ Le journal est la vérité : les runs sont des caches qu'on peut toujours recons
 2. lit l'id ; si `closed` est là (le dernier processus a fermé proprement), le supprime ; sinon force le répertoire de
    la base. Si `shared` est là et que `closed` n'y est pas, une ouverture dans le processus même d'un programme est
    refusée (`Busy` : [une base d'un serveur](#une-base-dun-serveur)) ; après une fermeture propre, elle supprime
-   `shared` et continue ;
+   `shared` et continue. Le répertoire est forcé aussi après la suppression de `closed` quand `shared` est là, pour
+   qu'aucune coupure de courant ne le fasse revenir ;
 3. convertit un journal de format 1 au format 2, une seule fois (chaque segment écrit à côté, forcé, renommé
    par-dessus l'ancien ; un crash au milieu laisse chaque segment entier, et l'ouverture suivante continue), et
    supprime les fichiers des merges qu'un crash a interrompus (`.tmp`) ;
@@ -53,8 +56,9 @@ Le journal est la vérité : les runs sont des caches qu'on peut toujours recons
    ne va pas, à quel offset ; les merges du replay avant lui peuvent avoir écrit un run des groupes d'avant le
    dommage) ;
 8. une frame dont le trailer a été déchiré alors que son en-tête et son corps sont intacts est gardée, et son trailer
-   reconstruit ; un segment le plus récent déchiré à sa création (son en-tête ne passe pas la vérification et il ne
-   contient aucune frame) est supprimé ;
+   reconstruit ; un segment le plus récent déchiré à sa création (pas plus long que son en-tête, qui ne passe pas la
+   vérification, et aucun run n'y reprend) est supprimé ; un en-tête qui ne passe pas la vérification dans un segment
+   qui tient davantage, ou là où reprend le run le plus récent, est un dommage ;
 9. une nouvelle base (pas encore de groupe) reçoit le groupe 1, qui décrit les cinq propriétés système (une base faite
    avant que `cepheus/rule` existe n'a pas la description de celle-ci : ses règles marchent tout de même).
 
@@ -182,7 +186,7 @@ prend le delta et les runs les plus récents jusqu'au premier niveau qui peut to
 la chaîne. Aucun run n'est gardé de côté : si le run le plus récent se révélait abîmé à une ouverture, il serait mis de
 côté et ses groupes rejoués depuis le journal (une ouverture plus lente, rien de perdu). L'espace d'un fichier
 supprimé ne revient que quand plus aucune vue ne le lit (le fichier reste ouvert jusqu'à ce que le garbage collector
-libère son run). Pendant un merge complet (`snapshot`), le répertoire contient la base deux fois, l'ancienne et la
+libère son run, et il est fermé alors). Pendant un merge complet (`snapshot`), le répertoire contient la base deux fois, l'ancienne et la
 nouvelle : prévoyez environ deux fois la base pour `snapshots/` pendant qu'il tourne, une fois la base après.
 
 Un fait est écrit environ $(T + 1) / 2 = 2{,}5$ fois par niveau qu'il traverse ($T = 4$), contre jusqu'à 17 fois avec

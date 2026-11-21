@@ -463,6 +463,17 @@ lui : le nouveau fait de chaque instance de règle, chaque fait que crée un clo
 mesure qu'elles grandissent (pour que les $n^2$ faits d'un graphe dense soient refusés avant d'être faits, en mémoire
 en proportion du budget), et les faits que supprime B/F.
 
+Les faits dérivés ne bornent pas à eux seuls le **travail** : un corps dont les patterns partagent une valeur lit leur
+produit, `[a tag t] [b tag t] [c tag t]` $n^3$ candidats pour $n$ têtes (une écriture de 400 faits de ce genre a tenu
+le writer 13 s). Les candidats que lisent les règles (chaque fait qu'énumère un pattern d'un corps, d'un Not ou d'une
+contrainte, comptés comme ceux d'une question, `Query.fold ~budget`) peuvent donc être au plus `work_budget` (10)
+fois le budget des faits dérivés : `Invalid "rule NAME read more than N candidates of its patterns for a group of K
+facts"`, NAME étant la règle dont le pattern a lu le dernier, ou `for a change of the rules or the ontology`. Un
+candidat est une lecture dans un index, un fait dérivé un fait interned (ses valeurs mises dans les dictionnaires de
+la base), indexé et gardé : les 1,2 M candidats du refus ci-dessus prennent 60 ms, les 100 000 faits dérivés du budget
+environ 0,1 s, si bien que le travail est borné dans le temps comme le sont les faits dérivés. Une règle qui parcourt
+beaucoup de candidats pour peu de têtes joint d'abord sur un pattern plus sélectif.
+
 Un **changement** — un groupe qui change les règles, ou l'ontologie ([plus bas](#les-changements-des-règles-en-arrière-plan)) —
 s'applique à toute la base, donc son budget grandit avec elle : **$100\,000 + 100 \times \text{ses changements affirmés} +
 4 \times \text{les faits de la base avant lui}$** (`change_budget`, le 4) : un changement peut rendre la base au plus

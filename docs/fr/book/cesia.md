@@ -135,8 +135,8 @@ une map de ses champs, chacun une propriété à nommer dans les questions et da
 | `cepheus.Int()` | un nombre entier de 63 bits | un Int | `42` |
 | `cepheus.Float()` | un flottant de 64 bits (IEEE 754) | un Float (un Int est accepté aussi) | `2.5` |
 | `cepheus.Bool()` | vrai ou faux | un Bool | `true` |
-| `cepheus.Date()` | un instant en UTC, gardé en millisecondes depuis 1970 | un nombre de secondes depuis 1970, comme le donne `sys.Now()` ; relu comme un Float | `1794268800.25` |
-| `cepheus.Money(scale)` | un décimal exact de `scale` chiffres après la virgule (0 à 18), gardé en unités mineures | un nombre (Int ou Float), arrondi à l'échelle ; relu comme un Float | `1200.5` |
+| `cepheus.Date()` | un instant en UTC, gardé en millisecondes depuis 1970 | un nombre de secondes depuis 1970, comme le donne `sys.Now()`, sous $4{,}6 \times 10^{15}$ dans les deux sens (146 millions d'années : ses millisecondes tiennent dans un Int) ; relu comme un Float | `1794268800.25` |
+| `cepheus.Money(scale)` | un décimal exact de `scale` chiffres après la virgule (0 à 18), gardé en unités mineures | un nombre (Int ou Float), arrondi à l'échelle, dont les unités mineures tiennent dans un Int ; relu comme un Float | `1200.5` |
 | `cepheus.Link()` | une autre chose de la base | son identifiant, un Int | `65536` |
 
 Chacun prend `unique = false` et `many = false`. Money est exact dans la base (un entier d'unités mineures, donc les
@@ -296,6 +296,12 @@ joins deux à deux, comme en fait une base SQL, peut faire bien plus sur un grap
 **Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) et `cepheus.Between(x, lo, hi)`
 ($\mathit{lo} \le x \le \mathit{hi}$), pour une variable d'un Int, d'une Date ou de Money, lisent l'index trié : ce sont des intervalles de la
 question, pas des filtres après elle. Toute autre condition est à Cesia, sur les lignes qu'elle donne (`list.Filter`).
+Une Date est gardée à la milliseconde et Money à ses chiffres, si bien qu'une borne qui tombe entre deux d'entre
+elles (`Above(price, 10.005)` pour des centimes, une heure de `sys.Now()`) garde exactement les valeurs de son côté :
+elle est arrondie vers l'intérieur de l'intervalle, 10,005 vers 10,01 pour Above et vers 10,00 pour Below. Une borne
+de floats à moins de $2^{-50}$ (en relatif) d'une unité est cette unité, comme l'est un décimal écrit au centime
+(10,01 fois 100 vaut `1000.9999999999999` en floats) : `Above(price, 10.01)` laisse 10,01 dehors. `Above(n, v)` avec
+le plus grand Int, ou `Below(n, v)` avec le plus petit, ne garde rien.
 
 **Agrégats.** Dans `Give`, `cepheus.Sum(x)`, `cepheus.Min(x)`, `cepheus.Max(x)` et `cepheus.Count()` groupent les
 réponses par les autres champs de `Give`, comme le fait le `GROUP BY` de SQL ; `Count()` compte les réponses d'un

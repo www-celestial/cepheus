@@ -185,8 +185,12 @@ rien) et force le segment le plus récent et le répertoire du journal avant de 
 `close` laisse un marqueur (`DIR/closed`) une fois que chaque frame et chaque nom sont durables, et seulement si aucun
 fsync n'a échoué ; une ouverture le supprime avant d'écrire quoi que ce soit. Un marqueur vu signifie donc qu'aucun
 processus n'a écrit depuis une fermeture propre, ou qu'une coupure de courant est venue après les écritures, et une
-coupure de courant ne laisse rien dans le page cache ; la création et la suppression du marqueur lui-même n'ont besoin
-d'aucun fsync (perdues, elles font seulement forcer la prochaine ouverture). PostgreSQL garde le même état dans
+coupure de courant ne laisse rien dans le page cache ; pour une base qui n'a jamais écrit par le commit buffer d'un
+serveur, la création et la suppression du marqueur lui-même n'ont besoin d'aucun fsync (perdues, elles font seulement
+forcer la prochaine ouverture). Pour une base qui l'a fait (`DIR/shared`), l'ouverture force le répertoire après avoir
+supprimé le marqueur, avant d'écrire quoi que ce soit : une coupure de courant qui ferait revenir le marqueur
+laisserait une ouverture sans le buffer prendre la base pour une base fermée proprement, sans les frames que le
+buffer est seul à tenir. PostgreSQL garde le même état dans
 `pg_control` (shut down, ou in production). (Trouvé par la simulation dès qu'elle a pu tuer un processus sans coupure
 de courant ; mutation check, où l'on retire le code pour voir si les tests échouent : sans le fsync du segment, 9 seeds
 sur 300 échouent, sans celui du répertoire, 5.)
@@ -211,7 +215,14 @@ récente du journal, sans rien d'écrit après elle, ressemble à un torn write 
 route) et est coupé à la recovery (une lecture complète avant la recovery le signale).
 
 *Preuve.* Chaque octet d'un segment est couvert : son en-tête par le CRC d'en-tête, l'en-tête de chaque frame par son
-CRC d'en-tête, son corps par le CRC du corps (répété dans le trailer), le trailer par comparaison avec l'en-tête. À la
+CRC d'en-tête, son corps par le CRC du corps (répété dans le trailer), le trailer par comparaison avec l'en-tête.
+L'en-tête d'un segment est écrit et forcé, et son répertoire aussi, avant qu'aucune frame n'entre dans le segment, et
+un run ne nomme une position que dans un segment que le writer avait commencé : un en-tête qui ne passe pas la
+vérification est donc un dommage dans un segment plus long que son en-tête, et dans celui où reprend le run le plus
+récent. Seul un segment le plus récent pas plus long que son en-tête, qu'aucun run ne nomme, peut être un segment
+qu'un crash a laissé en cours de création ; il ne tient aucune frame, et la recovery le supprime. (Un segment le plus
+récent coupé dans son en-tête, où aucun run ne reprend, se lit ainsi : c'est la perte de frames durables entières à la
+fin du journal sans rien d'écrit après elles, hors de portée d'une seule machine.) À la
 recovery, la première frame qui ne passe pas la vérification est un dommage quand un en-tête de frame correct la suit
 (les frames sont écrites l'une après l'autre, chacune forcée avant la suivante, donc un en-tête plus loin prouve que
 cette frame a été écrite entière), ou quand un trailer à la bonne distance porte le CRC du corps (la frame a été écrite
@@ -229,10 +240,12 @@ frame ou tout trailer qui ne passe pas la vérification est un dommage.
 ResidualBound tiennent dans les 3 856 315 états atteignables. TLC a d'abord trouvé une trace où deux frames abîmées à
 la fin étaient toutes les deux coupées ; la règle ci-dessus (un en-tête plus loin qui passe la vérification) l'a fermée.
 
-*Testé par* `test/exhaustive.ml` (chaque bit de deux journaux inversé : toujours vu par une lecture complète ; la
-recovery refuse, ou garde chaque groupe quand l'inversion a touché un trailer, qu'elle reconstruit, ou, pour une
-inversion dans la frame la plus récente, la coupe : compté comme le cas résiduel) et la simulation (des inversions
-aléatoires dans les segments durables).
+*Testé par* `test/exhaustive.ml` (chaque bit de deux journaux inversé, ceux des en-têtes de leurs segments aussi :
+toujours vu par une lecture complète ; la recovery refuse, ou garde chaque groupe quand l'inversion a touché un
+trailer, qu'elle reconstruit, ou, pour une inversion dans la frame la plus récente, la coupe : compté comme le cas
+résiduel ; l'en-tête du segment le plus récent mis à zéro à partir de chacun de ses octets en gardant ses frames,
+coupé à l'intérieur là où reprend un run, ou inversé dans un segment qui ne tient que son en-tête là où reprend un
+run : refusé) et la simulation (des inversions aléatoires dans les segments durables, leurs en-têtes aussi).
 
 ## G7 Les runs sur le disque
 
@@ -709,9 +722,16 @@ vue — et le cas nommé d'une preuve en deux étapes).
   avant un refus est en proportion du budget), les faits d'une forêt comptés avant qu'aucun soit fait, et les
   suppressions de B/F. Un ensemble de règles ou des données dont les conséquences le dépassent sont refusés en entier,
   en nommant la règle : jamais un writer qui manque de mémoire ou qui cale sur une closure de $n^2$ faits.
-  *Testé par* `test/reasoning.ml` ("a closure past the budget" : des chaînes de 200 dans un groupe, les deux formes de
-  règles, des arêtes vers des choses plus anciennes et plus récentes ; l'arête qui joint deux chaînes de 40 ; le
-  prp-trp du W3C déplié sur une chaîne ; chacun refusé en entier, la vue inchangée, le least model après).
+  Le travail est borné aussi, pas seulement ce qu'il dérive : chaque candidat que lit le plan d'une règle (chaque fait
+  qu'énumère un pattern d'un corps, d'un Not ou d'une contrainte ; sur plusieurs domains, celui de chaque morsel, un
+  petit morceau de travail) compte dans un budget de travail de 10 fois celui des faits dérivés (`work_budget`), refusé
+  de la même façon, en nommant la règle dont le pattern a lu le dernier : un corps dont les patterns partagent une
+  valeur ($n^3$ candidats pour $n$ têtes) s'arrête après environ 0,06 s d'une petite écriture au lieu de plusieurs
+  minutes. *Testé par* `test/reasoning.ml` ("a closure past the budget" : des chaînes de 200 dans un groupe, les deux
+  formes de règles, des arêtes vers des choses plus anciennes et plus récentes ; l'arête qui joint deux chaînes de 40 ;
+  le prp-trp du W3C déplié sur une chaîne ; chacun refusé en entier, la vue inchangée, le least model après ; "the work
+  budget" : trois choses d'un même tag dans une écriture et dans un changement des règles, un Not sur 3 000 choses d'un
+  même tag, chacun refusé, nommé, la vue inchangée).
 - **Un changement des règles est borné et peut être arrêté.** Ses faits dérivés comptent dans le budget d'un
   changement ($100\,000 + 100 \times$ ses changements affirmés $+ 4 \times$ les faits de la base), à la construction
   et sur les groupes qu'il rattrape, donc sa mémoire reste en proportion de la base : une règle de $n^2$ faits est
