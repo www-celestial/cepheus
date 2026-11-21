@@ -619,9 +619,15 @@ node's fact, its ranges hold, every leaf is asserted in the view — and the nam
   targets checked against the budget as they grow (so its memory before a refusal is in proportion to the budget), a
   forest's facts counted before any is made, and B/F's deletions. A rule set or data whose consequences pass it is
   refused whole, naming the rule: never a writer that runs out of memory or stalls on a closure of $n^2$ facts.
-  *Tested by* `test/reasoning.ml` ("a closure past the budget": chains of 200 in one group, both rule shapes, edges to
-  older and to newer things; the edge joining two chains of 40; the W3C's prp-trp unfolded over a chain; each refused
-  whole, the view unchanged, the least model after).
+  The work is bounded too, not only what it derives: every candidate a rule's plan reads (each fact a pattern of a
+  body, of a Not or of a constraint enumerates; on several domains, every morsel's) counts against a work budget of
+  10 times the derived one (`work_budget`), refused the same way, naming the rule whose pattern read the last one: a
+  body whose patterns share a value ($n^3$ candidates for $n$ heads) stops after about 0.06 s of a small write instead
+  of minutes. *Tested by* `test/reasoning.ml` ("a closure past the budget": chains of 200 in one group, both rule
+  shapes, edges to older and to newer things; the edge joining two chains of 40; the W3C's prp-trp unfolded over a
+  chain; each refused whole, the view unchanged, the least model after; "the work budget": three things of one tag
+  in a write and in a change of the rules, a Not over 3,000 things of one tag, each refused, named, the view
+  unchanged).
 - **A change of the rules is bounded and can be stopped.** Its derived facts count against a change's budget
   ($100{,}000 + 100 \times$ its asserted changes $+ 4 \times$ the database's facts), at the build and over the groups
   it catches up with, so its memory stays in proportion to the database: a rule of $n^2$ facts is refused, named, while

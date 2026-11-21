@@ -143,3 +143,7 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 - A database written through the server's commit buffer has the removal of its clean-close marker forced at open,
   before its journal is written. A power loss soon after could bring the marker back, and the database then opened
   alone, without the frames the buffer alone held: confirmed groups missing, instead of the refusal (`Busy`).
+- The work of the rules is bounded, not only their derived facts: the candidates their patterns read may be 10 times
+  the budget of derived facts (`work_budget`), else the group or the change is refused, naming the rule. A body of
+  three things that share a tag read $n^3$ candidates for $n$ heads, under the budget: one write of 400 facts held the
+  writer 13 s, 1,600 about 15 minutes; refused now in 0.06 s.

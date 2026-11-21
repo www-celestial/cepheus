@@ -65,6 +65,14 @@ let budget_per = ref 100
    same budget, so they accept and refuse exactly what the database does (G8). *)
 let change_per = ref 4
 
+(* The work of a group's rules: the candidates their plans read (each fact a pattern of a body, of a Not or of a
+   constraint enumerates), at most [work_per] x its budget of derived facts. The derived facts alone do not bound it: a
+   body of three patterns that share a value walks n^3 candidates to derive n facts ([a tag t] [b tag t] [c tag t]:
+   13 s for one write of 400 facts). A candidate is a read in an index (about 50 ns), a derived fact one interned,
+   indexed and kept (about 1 us: the budget's 100,000 in 0.1 s), so the work is bounded in time as the derived facts
+   are. *)
+let work_per = ref 10
+
 (* raised by [run ~background:true] for a change, before any reasoning for a change of the rules, past the data
    budget for a change of the ontology: the writer takes the group to the background path *)
 exception Background
@@ -641,6 +649,9 @@ and ctx = {
   mutable nn : int;
   mutable derived : int;  (* derived changes so far *)
   mutable limit : int;
+  mutable walk : int;  (* candidates the plans read so far ([work_per]) *)
+  mutable wlimit : int;
+  mutable wnext : int;  (* the next count [walk_slow] looks at: [wlimit], or the next cancel check, before *)
   mutable whole : bool;  (* the group is a change: [limit] is a change's, [stop] is checked *)
   mutable stop : bool Atomic.t;  (* set: a change cancelled (its database closes) *)
   mutable vp : Bytes.t;  (* by property: 1 when the view may hold facts of it (a load: the view lacks most); empty: all *)
@@ -723,6 +734,28 @@ let[@inline] is_rep c x = rep_of c x = x
 
 exception Respec of int * int
 (* a frozen relation's fact (property, value) changes: the group is reasoned again with the generic rules *)
+
+(* the work budget of a group with this budget of derived facts *)
+let work_limit limit = if limit >= max_int / !work_per then max_int else limit * !work_per
+
+(* past [c.wnext]: a change cancelled, or past the work budget, refused as the derived budget is ([over_budget]),
+   naming the rule whose plan read the candidate; else the next look *)
+let[@inline never] walk_slow c name =
+  if c.walk > c.wlimit then begin
+    if c.whole then refuse "rule %s read more than %d candidates of its patterns for a change of the rules or the ontology" name c.wlimit
+    else
+      raise
+        (Exceeded
+           (Printf.sprintf "rule %s read more than %d candidates of its patterns for a group of %d facts" name c.wlimit
+              ((c.limit - !budget_base) / max 1 !budget_per)))
+  end;
+  if Atomic.get c.stop then refuse "the change was cancelled: the database closes";
+  c.wnext <- (if c.wlimit - c.walk <= 65536 then c.wlimit else c.walk + 65536)
+
+(* one candidate read by a plan of rule [name] *)
+let[@inline] tick c name =
+  c.walk <- c.walk + 1;
+  if c.walk > c.wnext then walk_slow c name
 
 let[@inline] is_text_const (x : Value.t) = match x with Text _ | Float _ -> true | _ -> false
 
@@ -959,6 +992,8 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
     | Val x -> fun t -> fits_code t x
   in
   let ws = ctx.ws and pt = ctx.pt in
+  (* each candidate a step or a Not reads counts against the group's work budget ([tick]) *)
+  let name = r.name in
   (* the visible facts of the state for a step: the view's, unless the working set says otherwise, and the working
      set's own (chained); [lim]: the newest round a step sees *)
   let[@inline] vis x lim = Char.code (Bytes.unsafe_get ws.now x) > 0 && round ws x <= lim in
@@ -1110,7 +1145,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
         fun () -> let p = !cp in let e = ge () and w = gv () in if S.mem ctx.v0 e p w then (pl.be.(j) <- e; pl.bw.(j) <- w; next ())
       | _, true, false ->
         bound.(xv) <- true;
-        let on w = if in_range xv w then (env.(xv) <- w; pl.bw.(j) <- w; next ()) in
+        let on w = tick ctx name; if in_range xv w then (env.(xv) <- w; pl.bw.(j) <- w; next ()) in
         if source = Old then fun () -> let e = ge () in pl.be.(j) <- e; S.iter_values ctx.v0 e !cp on
         else if source = Proved then
           fun () ->
@@ -1124,7 +1159,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
               x := idx_next pt.ie y
             done
         else begin
-          let filt w = let x = find ws !ce !cp w in if x < 0 || vis x !cl then on w in
+          let filt w = let x = find ws !ce !cp w in if x < 0 || vis x !cl then on w else tick ctx name in
           fun () ->
             let p = !cp in
             let e = ge () in
@@ -1142,7 +1177,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
         end
       | _, false, true ->
         bound.(xe) <- true;
-        let on e = if in_range xe e then (env.(xe) <- e; pl.be.(j) <- e; next ()) in
+        let on e = tick ctx name; if in_range xe e then (env.(xe) <- e; pl.be.(j) <- e; next ()) in
         if source = Old then fun () -> let w = gv () in pl.bw.(j) <- w; S.iter_things ctx.v0 !cp w on
         else if source = Proved then
           fun () ->
@@ -1156,7 +1191,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
               x := idx_next pt.iw y
             done
         else begin
-          let filt e = let x = find ws e !cp !cw in if x < 0 || vis x !cl then on e in
+          let filt e = let x = find ws e !cp !cw in if x < 0 || vis x !cl then on e else tick ctx name in
           fun () ->
             let p = !cp in
             let w = gv () in
@@ -1176,6 +1211,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
         bound.(xe) <- true;
         bound.(xv) <- true;
         let on e w =
+          tick ctx name;
           if (not same || e = w) && in_range xe e && in_range xv w then begin
             env.(xe) <- e;
             env.(xv) <- w;
@@ -1195,7 +1231,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
               x := idx_next pt.ip y
             done
         else begin
-          let filt e w = let x = find ws e !cp w in if x < 0 || vis x !cl then on e w in
+          let filt e w = let x = find ws e !cp w in if x < 0 || vis x !cl then on e w else tick ctx name in
           fun () ->
             let p = !cp in
             cl := lim ();
@@ -1255,12 +1291,12 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
           if before then (fun () -> if S.mem ctx.v0 (ge ()) p (gv ()) then next ())
           else fun () -> if now_has (ge ()) p (gv ()) then next ()
         | true, false ->
-          let on w = if in_range xv w then (env.(xv) <- w; next ()) in
+          let on w = tick ctx name; if in_range xv w then (env.(xv) <- w; next ()) in
           if before then fun () -> S.iter_values ctx.v0 (ge ()) p on
           else
             fun () ->
               let e = ge () in
-              if in_view p && e < ws.fresh then S.iter_values ctx.v e p (fun w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on w);
+              if in_view p && e < ws.fresh then S.iter_values ctx.v e p (fun w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on w else tick ctx name);
               b_iter_e ws e p on;
               let x = ref (idx_head ws.ie p e) in
               while !x >= 0 do
@@ -1269,12 +1305,12 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
                 x := idx_next ws.ie y
               done
         | false, true ->
-          let on e = if in_range xe e then (env.(xe) <- e; next ()) in
+          let on e = tick ctx name; if in_range xe e then (env.(xe) <- e; next ()) in
           if before then fun () -> S.iter_things ctx.v0 p (gv ()) on
           else
             fun () ->
               let w = gv () in
-              if in_view p then S.iter_things ctx.v p w (fun e -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e);
+              if in_view p then S.iter_things ctx.v p w (fun e -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e else tick ctx name);
               b_iter_w ws p w on;
               let x = ref (idx_head ws.iw p w) in
               while !x >= 0 do
@@ -1283,11 +1319,11 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
                 x := idx_next ws.iw y
               done
         | false, false ->
-          let on e w = if (xe <> xv || e = w) && in_range xe e && in_range xv w then (env.(xe) <- e; env.(xv) <- w; next ()) in
+          let on e w = tick ctx name; if (xe <> xv || e = w) && in_range xe e && in_range xv w then (env.(xe) <- e; env.(xv) <- w; next ()) in
           if before then fun () -> S.iter_prop ctx.v0 p on
           else
             fun () ->
-              if in_view p then S.iter_prop ctx.v p (fun e w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e w);
+              if in_view p then S.iter_prop ctx.v p (fun e w -> let x = find ws e p w in if x < 0 || now ws x > 0 then on e w else tick ctx name);
               b_iter_p ws p on;
               (* the working set's own facts of p: its chain by property (kept but in a load, which refuses Nots) *)
               let x = ref (idx_head ws.ip p 0) in
@@ -2225,7 +2261,8 @@ let [@inline never] new_ctx ?facts ?keys prog v =
     bfqs = Array.init prog.nstrata (fun s -> if s = 0 then bfq else Queue.create ()); ins_s = Array.make prog.nstrata None;
     xplans = Hashtbl.create 8; round = max_int; cw = Array.make (Array.length prog.consts) (-1);
     ins = None; lost = None; lost_walk = None; cons = None; pf = [||]; bwd = [||]; bfq; next = ints 64 0;
-    spare = ints 64 0; nn = 0; derived = 0; limit = max_int; whole = false; stop = never; vp = Bytes.empty;
+    spare = ints 64 0; nn = 0; derived = 0; limit = max_int; walk = 0; wlimit = max_int; wnext = 65536; whole = false;
+    stop = never; vp = Bytes.empty;
     per_rule = Array.make (Array.length prog.rules) 0; side_e = Bulk.i32 0; side_p = Bulk.u16 0; side_w = ints_raw 0; ns = 0; mbatch = Array.make nm (-1);
     mfresh = Array.make nm false; buf_a = buf_create 64; buf_b = buf_create 64; seen = iset_create ();
     seen2 = iset_create (); walked = Bytes.empty; xk = ignore; plain_derive = false; heads_none = Hashtbl.create 8;
@@ -2245,6 +2282,9 @@ let [@inline never] take ?facts ?keys prog v =
   c.nn <- 0;
   c.derived <- 0;
   c.limit <- max_int;
+  c.walk <- 0;
+  c.wlimit <- max_int;
+  c.wnext <- 65536;
   c.whole <- false;
   c.stop <- never;
   c.vp <- Bytes.empty;
@@ -2759,7 +2799,7 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
   let outs = Array.init k (fun _ -> buf_create 64) and fails = Array.make k None and odd = Array.make k false in
   let left = c.limit - c.derived in
   let room = if left > max_int / 4 then max_int else (2 * left) + 100_000 in
-  let heads = Atomic.make 0 and found_all = Atomic.make 0 in
+  let heads = Atomic.make 0 and found_all = Atomic.make 0 and walks = Array.make k 0 in
   match
     Bulk.parallel ~d:!Bulk.threads k (fun m ->
         let w = worker_ctx c and out = outs.(m) and n = ref 0 and nf = ref 0 in
@@ -2780,10 +2820,13 @@ let [@inline never] par_phase c k (run : ctx -> int -> (plan -> unit) -> unit) r
           end
         in
         (try run w m found with Refused msg -> fails.(m) <- Some msg);
+        walks.(m) <- w.walk - c.walk;
         ignore (Atomic.fetch_and_add found_all !nf))
   with
   | () ->
     derivations := !derivations + Atomic.get found_all;
+    (* the candidates the morsels read count in the group's work, as if one domain had read them *)
+    c.walk <- c.walk + Array.fold_left ( + ) 0 walks;
     let total = Array.fold_left (fun t (o : buf) -> t + (o.bn / 4)) 0 outs in
     if total >= !par_min && c.derived + total <= c.limit && Array.for_all Option.is_none fails && not (Array.exists Fun.id odd) then
       merge_regions c outs r
@@ -4161,6 +4204,8 @@ and reason ?limit ?apart ~whole ~stop ~(removed : Rules.t list) ~(added_idx : in
           (match limit with
            | Some l -> l
            | None -> !budget_base + (!budget_per * Array.length changes) + if whole then !change_per * S.facts v0 else 0);
+        c.wlimit <- work_limit c.limit;
+        c.wnext <- min c.wlimit 65536;
         c.whole <- whole;
         c.stop <- stop;
         (* a change: the sinks whose property is plain (many values, none unique, not the system's, not a template's
@@ -4688,6 +4733,8 @@ and bulk_with ~own ~first_new prog (v : Store.view) (b : Bulk.t) =
               | None -> ())
           prog.consts;
         c.limit <- !budget_base + (!budget_per * n);
+        c.wlimit <- work_limit c.limit;
+        c.wnext <- min c.wlimit 65536;
         c.vp <- Bytes.init prog.np (fun p -> if S.count_prop v p > 0 then '\001' else '\000');
         Array.iteri (fun mi (m : closure) -> c.mfresh.(mi) <- S.count_prop v m.m_t = 0) prog.modules;
         ws.with_ip <- prog.free_free;

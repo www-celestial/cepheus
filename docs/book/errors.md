@@ -102,6 +102,8 @@ From `write` with rules (the writer's reasoning, the same on a database and on a
 | `rule R derived more than N facts from a group of K facts` | the group's derived changes pass the budget, $N = \mathit{base} + \mathit{per} \times K$ ([api](api.md#rules), `rule_budget`); R derived the most. Split the write, or raise the budget |
 | `rule R derived more than N facts from a change of the rules or the ontology` | a change's derived facts pass its budget, $N = \mathit{base} + \mathit{per} \times K + 4 \times$ the database's facts (`change_budget`); R derived the most |
 | `a change of the rules or the ontology derived more than N facts` | the same, found at the change's install, after the groups it caught up with |
+| `rule R read more than N candidates of its patterns for a group of K facts` | the candidates the group's rules read (each fact a pattern of a body, a Not or a constraint enumerates) pass the work budget, $N = 10 \times (\mathit{base} + \mathit{per} \times K)$ (`work_budget`); R read the last one. A body whose patterns share a value walks their product (three things of one tag: $n^3$). Join on a more selective pattern first, split the write, or raise the budget |
+| `rule R read more than N candidates of its patterns for a change of the rules or the ontology` | the same for a change, $N = 10 \times$ its budget of derived facts |
 | `the change failed: E` | a change in the background met an error of the engine (a bug), written on the standard error too |
 | `constraint R: FACTS` | the group would make the body of constraint R true: FACTS are the facts of one instance |
 | `rule R gives #E a second value of NAME, which takes one` | a derived value of a one-valued property beside another value |
