@@ -121,7 +121,9 @@ beaucoup d'entrées aléatoires contre un modèle de référence écrit indépen
    en-tête et son corps ont atteint le disque et que le fichier atteint sa fin : un trailer torn seul est reconstruit,
    G6 ; les frames plus courtes du format 2 mettent une limite de secteur entre un corps et son trailer, un cas que
    l'oracle manquait avant) ; chaque bit de deux journaux, inversé seul, doit être détecté par une lecture complète et
-   traité par la recovery comme le dit G6 ; un segment torn à sa création, à n'importe quel octet, est abandonné ; et
+   traité par la recovery comme le dit G6, les bits des en-têtes de leurs segments aussi ; un segment torn à sa
+   création, à n'importe quel octet, est abandonné, et l'en-tête d'un segment le plus récent mis à zéro à partir de
+   n'importe quel octet en gardant ses frames, ou coupé là où reprend un run, est refusé ; et
    à l'intérieur d'un merge (G12), à chaque appel disque qui modifie quelque chose, pour quatre sortes de merge
    (maintenant, de chaque run ; commencé en avance sur le disque et installé deux frames plus tard ; celui d'un grand
    groupe, fusionné pendant sa préparation et nommé une fois sa frame durable ; ceux d'une recovery qui rejoue une longue
@@ -212,7 +214,16 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   octets refusé avant toute allocation ; `Incr` aller-retour, et des Writes qui en portent fuzzés : chaque octet changé, des coupes, des octets insérés, des nombres énormes, lus ou refusés, jamais plus), les
   origines, la table des sessions et son checkpoint (un checkpoint endommagé
   refusé), et les droits de chaque token contre chaque requête sur chaque base à travers le cœur du serveur (G16,
-  `Follow` avec eux), un token retiré ou restreint, une origine forgée, une frame au-delà de la limite ; et ce dont les
+  `Follow` avec eux), un token retiré ou restreint, une origine forgée, une frame au-delà de la limite ; les bornes d'une réponse (un produit cartésien de deux patterns
+  qui ne partagent aucune variable, demandé avec Sort, avec des agrégats et comme un watch, chacun `too_large` au-delà
+  de ses cellules, lignes fois colonnes, et les cellules rendues ; sans Sort, au-delà de ses cellules, chaque ligne
+  envoyée en flux dans des frames, la sortie n'en tenant jamais plus d'une ; le pool, la réserve de cellules commune aux
+  connexions, tenu par d'autres ; 64 patterns pris et 65 refusés ; un pattern répété dix fois au-delà d'un budget de
+  lookups, des recherches dans un index ; trois watches par connexion et cinq par serveur sous des limites abaissées, et
+  ce que gardent les fenêtres) ; des réponses dans la limite des frames (un Open de 17 MB de noms et un Get de 17 MB de
+  faits en frames de l'indicateur more, rejointes ; des noms et des textes au-delà de leurs bornes ; un reçu au-delà
+  d'une frame refusé avant d'être appliqué) ; un seul Hello par connexion ; aucun chemin du serveur dans une erreur ;
+  et ce dont les
   lecteurs locaux ont besoin du système : des descripteurs passés sur un socket (400 messages aléatoires de 1 à 6 000
   octets avec jusqu'à 8 descripteurs, lus en morceaux aléatoires : les octets et les fichiers sortent dans l'ordre,
   chacun un nouveau descripteur du même fichier ouvert, aucun laissé ouvert ; plus de 64 refusés) et la page de
@@ -258,17 +269,22 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   la CA d'un autre cluster, un certificat qui ne nomme pas l'hôte, un autre identifiant de cluster, un client TCP sans
   CA et un client en clair sur le port TLS sont tous refusés, et le serveur continue ; TCP sans `[tls]` est refusé au
   démarrage.
-- `server_limits` : un vrai serveur avec `max_connections = 3` et `idle_timeout = 1` : avec trois connexions ouvertes,
-  une quatrième par le socket Unix reçoit `too_many_connections` et une par TCP est fermée avant tout octet ; une
-  connexion silencieuse, une qui envoie un octet à la fois sans requête, et une qui s'arrête dans son handshake TLS (la
-  poignée de main, l'échange qui ouvre la connexion chiffrée) sont fermées en moins de deux fois la limite (les deux
-  premières après `idle`) ; un client qui envoie des pings plus souvent reste ; un client inactif au-delà de la limite
+- `server_limits` : un vrai serveur avec `max_connections = 3` et `idle_timeout = 1` : avec trois programmes connectés,
+  une quatrième connexion par le socket Unix reçoit `too_many_connections` et une par TCP est fermée avant tout octet ;
+  avec trois connexions qui ne montrent aucun token et tiennent chaque place, un programme est servi (la plus ancienne
+  d'entre elles lui laisse sa place) ; une connexion silencieuse, une qui envoie un octet à la fois sans requête, une
+  qui s'arrête dans son handshake TLS (la poignée de main, l'échange qui ouvre la connexion chiffrée), une qui envoie
+  son handshake TLS un octet à la fois, et une qui envoie un record TLS (un bloc chiffré du flux TLS) un octet à la fois
+  après Hello sont fermées en moins de deux fois la limite (les silencieuses après `idle`) ; un client qui envoie des pings plus souvent reste ; un client inactif au-delà de la limite
   lit à nouveau, sa bibliothèque se reconnectant d'elle-même.
 - `server_guard` : des connexions servies par le propre code du serveur sur de vrais sockets, sur une base dont les
   lectures lèvent une exception quand le test le dit (le bug d'une requête) : une requête qui lève une exception sur
   une connexion qui a un watch et une écriture en cours (l'écriture répondue, la requête `internal`, la connexion
   fermée), 200 connexions de ce genre à la suite, et un échec dans un autre thread d'une connexion pendant qu'elle
-  attend dans une lecture, par un socket Unix et par TCP (`internal` sur l'id 0, aucune requête répondue après) ; après
+  attend dans une lecture, par un socket Unix et par TCP (`internal` sur l'id 0, aucune requête répondue après) ; une
+  frame de 16 MiB avant Hello refusée avant que son corps soit lu, trois frames de 700 KB commencées à la fois tenues
+  dans une borne de 1 MiB et répondues à tour de rôle, et 3 000 Finds envoyés à la fois par un client qui ne lit encore
+  rien, dont le serveur ne décode plus aucun tant qu'il tient un MiB de réponses ; après
   chacun, les descripteurs et les threads du processus sont ce qu'ils étaient, aucune connexion ni aucun watch ne reste,
   et une nouvelle connexion est servie.
 - Chaque serveur que lancent ces tests tourne dans une session à lui (`setsid`) avec sa sortie dans un `serve.log` à

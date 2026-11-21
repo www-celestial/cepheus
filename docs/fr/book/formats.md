@@ -27,7 +27,9 @@ le libère.
 
 Vide. Laissé par une fermeture propre (chaque frame et chaque nom durables, aucun fsync en échec) et supprimé par
 l'ouverture suivante, qui saute alors les fsyncs dont a besoin une recovery après un crash (G5 ; la recovery : la
-remise en état à l'ouverture, en relisant le journal). Sa création et sa suppression ne sont pas forcées sur le disque.
+remise en état à l'ouverture, en relisant le journal). Sa création n'est pas forcée sur le disque, ni sa suppression,
+sauf dans une base qui a `shared`, où l'ouverture force le répertoire avant d'écrire quoi que ce soit (un marqueur
+qu'une coupure de courant ferait revenir laisserait continuer une ouverture sans le buffer du serveur).
 
 ## `DIR/shared`
 

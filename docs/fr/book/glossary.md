@@ -148,7 +148,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **conjunctive query** — une question faite de patterns qui doivent tous être vrais à la fois (un ET de faits), sur
   des variables communes. [concepts](concepts.md#les-questions)
 - **connection limit** — le plus grand nombre de connexions que le serveur garde ouvertes à la fois
-  (`max_connections`, 512 par défaut) ; une nouvelle connexion au-delà est fermée dès son accept.
+  (`max_connections`, 512 par défaut) ; une nouvelle connexion au-delà prend la place de la plus ancienne connexion
+  qui n'a montré aucun token, ou elle est fermée dès son accept.
   [serveur](server.md#clustertoml)
 - **constant-time comparison** — comparer deux secrets octet par octet jusqu'au bout, quelle que soit la première
   différence, pour que le temps pris ne dise rien à un attaquant sur la part d'une tentative qui était juste.
@@ -319,7 +320,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **history** (l'historique) — la suite de toutes les transactions qu'une base a appliquées, avec ce que chacune a lu
   et écrit ; le journal de Cepheus en est une, dans l'ordre des groupes.
 - **idle timeout** — le temps pendant lequel une connexion peut rester sans une requête entière avant que le serveur la
-  ferme (`idle_timeout`, 600 s par défaut), son handshake TLS compris. [serveur](server.md#clustertoml)
+  ferme (`idle_timeout`, 600 s par défaut) ; avant son Hello, 10 s au plus, son handshake TLS compris.
+  [serveur](server.md#clustertoml)
 - **index word** — la forme sur 64 bits d'une valeur dans les index : la valeur elle-même, ou un numéro du dictionnaire
   pour les textes et les floats ; ce que donne `fold`, et que `decode` change de nouveau en valeur.
   [api](api.md#questions)

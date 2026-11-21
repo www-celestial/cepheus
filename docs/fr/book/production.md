@@ -109,7 +109,9 @@ WantedBy=multi-user.target
 - `Type=notify` : le serveur dit à systemd qu'il est prêt une fois chaque base ouverte et le socket à l'écoute, donc les
   services rangés après lui démarrent quand il répond ([démarrage](server.md#démarrage-arrêt-crash)).
 - `RuntimeDirectory` crée `/run/cepheus` à chaque démarrage, au nom de l'utilisateur et du groupe du serveur, mode
-  0750 ; `StateDirectory` crée `/var/lib/cepheus` s'il manque, au nom de l'utilisateur du serveur.
+  0750 (le serveur met son socket en 0660, pour que les programmes du groupe puissent se connecter) ;
+  `StateDirectory` crée `/var/lib/cepheus` s'il manque, au nom de l'utilisateur du serveur, 0700 (un répertoire de
+  données où d'autres peuvent entrer est mis en 0700 par le serveur à son démarrage, et son log le dit).
 - `Restart=on-failure` : après un kill (le processus tué par un signal), un crash, ou la sortie qui suit un disque en
   échec ([G10](guarantees.md#g10-arrêt-sur-une-erreur-du-disque)), systemd redémarre le serveur, et la recovery (la remise en
   état de chaque base à l'ouverture, en relisant son journal) décide de ce qui est durable. Un arrêt propre

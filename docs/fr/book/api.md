@@ -241,6 +241,7 @@ val why : view -> int -> int -> value -> proof option
 val sources : view -> int -> int list option
 val rule_budget : int ref * int ref
 val change_budget : int ref
+val work_budget : int ref
 ```
 
 Une règle est faite des patterns et des intervalles d'une question (`where`, `ranges`, les variables 0 à `vars - 1`) et
@@ -287,6 +288,10 @@ pas le droit de lire.
 `Invalid "rule NAME derived more than N facts from a group of K facts"` ; (100 000, 100) par défaut, pour chaque base du
 processus. Un changement des règles ou de l'ontologie peut aussi dériver jusqu'à `change_budget` (4) fois les faits de
 la base d'avant lui : au-delà, `Invalid "rule NAME derived more than N facts from a change of the rules or the ontology"`.
+Les candidats que lisent les règles (chaque fait qu'énumère un pattern d'un corps, d'un Not ou d'une contrainte)
+peuvent aller jusqu'à `work_budget` (10) fois ce budget : au-delà, `Invalid "rule NAME read more than N candidates of
+its patterns for a group of K facts"` (ou `for a change of the rules or the ontology`), NAME étant la règle dont le
+pattern a lu le dernier.
 
 ```ocaml
 open Cepheus
