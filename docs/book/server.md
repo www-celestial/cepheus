@@ -92,18 +92,23 @@ name = "stock"
   start, and says which line or key (a configuration is never guessed).
 - A database declared and not yet on disk is created at the first start (its directory under `data`).
 - `max_connections` bounds the connections open at once, from their accept to their close (a thread each, and a file
-  descriptor). At the limit a new connection is closed at once: over the Unix socket after an error frame
-  `too_many_connections`, over TCP without a word and before its TLS handshake, so that a refused connection costs the
+  descriptor). At the limit a new connection takes the slot of the oldest connection that has shown no token yet,
+  which is closed without a word (a connection that has shown its token is never taken: peers that connect and send
+  nothing cannot keep programs out); when every connection has shown one, the new one is closed at once: over the
+  Unix socket after an error frame `too_many_connections`, over TCP without a word and before its TLS handshake, so that a refused connection costs the
   server no handshake (its key exchange and signature: a whole new TLS connection costs 2.6 ms, both sides,
   [measured below](#speed-beside-postgresql)). The log says how many were refused, at most once a second. The
   default, 512, leaves room under systemd's default limit of 1,024 descriptors a service (`LimitNOFILE`), which the
   databases' files share (a journal segment, a run file a level); raise both together. A server out of descriptors
   says so in its log and keeps accepting once some close (`accept` fails with `EMFILE`; the connection waits in the
   kernel's queue).
-- `idle_timeout`: a connection must send a whole request within this many seconds of its accept (its TLS handshake
-  included) and of its previous request, and must take what the server sends within as long; otherwise the server
-  sends it an error frame `idle` (request id 0) and closes it. Bytes that trickle in without making a request do not
-  keep a connection open. A program's library keeps its connection alive with `Ping`, or connects again: the OCaml
+- `idle_timeout`: a connection must send a whole request within this many seconds of its previous request, and must
+  take what the server sends within as long; otherwise the server sends it an error frame `idle` (request id 0) and
+  closes it. Before its Hello it has 10 s from its accept (or `idle_timeout`, when shorter) for its TLS handshake and
+  its Hello, whatever `idle_timeout` is (0 included); a program's client gives up after 5 s. Bytes that trickle in
+  without making a request do not keep a connection open: the clock is checked after every read, inside the TLS
+  handshake and inside a TLS record too, so a peer that sends a byte at a time, each within the socket's timeout, is
+  closed (Slowloris, R. Hansen 2009). A program's library keeps its connection alive with `Ping`, or connects again: the OCaml
   client sends a read (Open, Get, Find, Ping, status) again on a new connection after a broken one, within its retry
   budget, as it does for writes (G14). PostgreSQL's `idle_session_timeout` is off by default and its
   `authentication_timeout` is one minute; Redis's `timeout` is off by default.
@@ -374,7 +379,8 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 - `id`: chosen by the client; a reply carries its request's id and kind.
 - A frame over 16 MiB is answered `too_large` and the connection closes: a peer that announces 4 GiB cannot make the
-  server allocate it. A count inside a body (of facts, of rows, of operations) larger than the bytes that remain is
+  server allocate it. Before Hello the limit is 4 KiB: a peer that has shown no token holds 64 KiB of the server's
+  memory at most. A count inside a body (of facts, of rows, of operations) larger than the bytes that remain is
   refused before anything is allocated.
 - **Values** are coded as in the journal ([formats](formats.md)): a tag byte (0 int, 1 float, 2 false, 3 true, 4 text,
   5 date, 6 money, 7 link), then a zigzag varint, 8 bytes of a float, or a length and the bytes of a text. A
@@ -386,10 +392,10 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | request body | reply body |
 |---|---|---|
-| 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
-| 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
-| 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
-| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`): the view's group, columns, count, values row by row |
+| 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
+| 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique); past the frame limit, in frames of about 1 MiB of properties, all but the last with `more`, each with its handle, group and count |
+| 3 Get | handle, thing | Facts: the view's group, count, (property, value)...; past the frame limit, in frames of about 1 MiB of facts, all but the last with `more`, each with its group and count |
+| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort past the server's cells sent as its rows are found, none held): the view's group, columns, count, values row by row |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
@@ -500,6 +506,10 @@ same   = 2 | group                                                 nothing the q
   ends `too_large`). A Limit over 100,000, an After, a Limit without Sort, and aggregates with Sort or Limit are
   refused (`invalid`): [Sort and Limit in a watch](cesia.md#sort-and-limit-in-a-watch), the rule model-checked in
   `spec/WatchWindow.tla`.
+- **Bounds.** A connection keeps 1,024 watches at most, the server 65,536, and what their windows and groups keep
+  between messages counts as cells, a connection's at most one answer's; a watch's first answer is built within the
+  answer's bounds, under the hub's lock. Past any, the Watch is `too_large`; a watch the server ended no longer counts
+  ([limits](limits.md#the-server)).
 - What a change is, and how it is computed: [Cepheus from Cesia](cesia.md#watch-live-questions); the resume rule is
   model-checked in `spec/Watch.tla` (no gap, no repeat, the rows never older than the last message: 1,015,657 states;
   without the touch test or the ring's bound, TLC finds a counterexample).
@@ -545,11 +555,11 @@ Every reply is a value or an error `{code, message}`. The engine's codes: `confl
 | `auth` | Hello with an unknown token; a request before Hello; a token removed since | check the token; the connection closes |
 | `denied` | the token lacks the right for this database or operation; a session of another token | a token with the right |
 | `version` | Hello with a protocol version the server does not speak (it speaks 1 to 5) | a library connects again in the version before; else a server and a library of the same release |
-| `too_large` | a frame over 16 MiB | write in smaller groups; the connection closes |
+| `too_large` | a frame over 16 MiB (the connection closes); a question past the server's work budget, or an answer it would hold past its cells (a Find with Sort or aggregates, a watch's first answer); a Watch past the watches of a connection or of the server ([limits](limits.md#questions)) | write in smaller groups; ask a narrower question, or pages; unwatch first |
 | `unknown_database` | a name or handle the server does not hold | declare it in cluster.toml |
 | `stopping` | the server is stopping | connect again: the library does |
 | `too_many_connections` | a new connection over the Unix socket while the server holds `max_connections` (request id 0; over TCP the connection is closed without a word) | connect later, or raise the limit |
-| `idle` | no whole request for `idle_timeout` seconds (request id 0, then the server closes the connection) | send `Ping` meanwhile, or connect again: the OCaml client does |
+| `idle` | no whole request for `idle_timeout` seconds, or no Hello within 10 s of the connection (request id 0, then the server closes the connection) | send `Ping` meanwhile, or connect again: the OCaml client does |
 | `refused` | a write sent again after a later write of its session was applied, whose first error was lost when the server started again (its error, when the same server refused it, is given again instead) | it was not applied: decide again |
 | `missing` | Load of a thing that has no file of the kind; a chunk the vault does not hold | |
 | `erased` | Load, or Put, of an owner whose key was erased | |
@@ -1063,8 +1073,9 @@ the server a replica, does a batch hold a large group's run).
   its bytes, and its groups must follow the replica's newest without a gap. A frame that fails any of these is
   refused, the replica's state unchanged, and the stream starts again. A primary checks a replica's history before it
   sends anything.
-- **Denial of service.** At most 256 peer connections at once; 5 s for a handshake and its Hello, 30 s of silence on a
-  stream; the replica holds at most 64 MiB of frames in flight, the primary one frame a replica.
+- **Denial of service.** At most 256 peer connections at once; 5 s from the accept for a handshake and its Hello, a
+  byte at a time or not (the clock checked after every read, inside the handshake and inside a TLS record), 30 s of
+  silence on a stream; the replica holds at most 64 MiB of frames in flight, the primary one frame a replica.
 - **Files.** `cepheus.role`, `epochs` and `handover` are written beside (a new name opened with `O_EXCL`, so a link
   planted there is never followed), forced, renamed and the directory forced, mode 0600; the data directory 0700.
 - **What it does not stop.** A peer whose key is stolen can act as a replica (read every database) or, as a
@@ -1428,7 +1439,59 @@ descriptors and threads counted before and after).
 ### Who may reach the socket
 
 The Unix socket's directory is the gate on one machine: make it `0750`, owned by the server's user and a group of
-the programs allowed to connect (`chgrp cepheus /run/cepheus`); the token is still needed. Over TCP, TLS.
+the programs allowed to connect (`chgrp cepheus /run/cepheus`); the token is still needed. The server makes the socket
+0660 once it is bound, whatever its umask: Linux lets a program connect only with the right to write the socket
+(unix(7)), so its owner's group may connect and nobody else. Over TCP, TLS.
+
+### The data directory
+
+Its files hold the facts in the clear (the journal, the runs, the session tables): every file a database makes is
+0600 and every folder 0700, whatever the process's umask. A data directory that lets its group or others in (made
+by hand under the usual umask, 0755) is made the server's alone at its start, and the log says so; one it cannot
+change (another owner) is refused. *Tested by* `test/server_limits.ml` (a data directory of mode 755: 0700 after the
+start, every file of the database 0600 and every folder 0700, the socket 0660).
+
+### No path in a reply
+
+An error of the server's own files (the disk, the vault and its key) reaches the program as its code (`io`, `busy`)
+and a fixed message, "the server could not use its files (its log says why)"; what it says (the paths, the
+system's words) goes to the server's log only. *Tested by* `test/server_unit.ml` (a vault key readable by others:
+`io` to the program, its path in the log only).
+
+### Denial of service
+
+What one peer may make the server hold or do, each bound refused or waited for before it is passed
+([limits](limits.md#the-server)):
+
+- **Before a token.** A frame before Hello is 4 KiB at most, so a peer that shows no token holds its connection's
+  64 KiB buffer and nothing more, for 10 s at most from its accept (its TLS handshake and its Hello, a byte at a time
+  or not); at `max_connections` a new connection takes the slot of the oldest such one, never a program's.
+- **Slow peers.** After Hello, a whole request within `idle_timeout` of the previous one: the clock is checked after
+  every read, inside a TLS record too.
+- **Reading.** A longer frame grows its connection's buffer, back to 64 KiB once it is used; the grown buffers hold
+  64 MiB more at most, server-wide, a connection past it waiting for room: 512 connections that each begin a frame of
+  16 MiB do not make the server hold 8 GiB.
+- **Replies.** A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are
+  sent: 100 Gets of a 900 KB text sent in 1,400 bytes and never read hold a MiB and a reply, not 90 MB.
+- **Frames.** No reply passes the frame limit, which every client refuses: a Get or an Open that would is sent in
+  frames of the flag `more`; a name is 255 bytes at most and a text the frame less 4 KiB, so a token that may add to
+  one kind cannot make the database unopenable; a group whose receipt would pass a frame is refused before it is
+  applied.
+- **Answers.** An answer the server holds (Sort, aggregates, a watch's first answer) is bounded by its cells, rows
+  times columns, a question's and every connection's together; a Find without Sort past them holds none of its rows
+  (asked again and sent as they are found), so a cross product of patterns that share no variable (the size of the product, the AGM bound: Atserias, Grohe, Marx 2008)
+  costs the server its time, not its memory. A question takes 64 patterns at most, and its work is counted in lookups.
+- **Watches.** 1,024 a connection, 65,536 the server, and what their windows and groups keep counts against a
+  connection's cells.
+
+*Tested by* `test/server_unit.ml` ("the bounds of an answer at the server": a cross product asked every way, the
+pool held by others, 65 patterns, a pattern repeated, the watches of a connection and of the server; "replies
+within the frame limit": an Open of 17 MB of names and a Get of 17 MB of facts joined from their frames, names and
+texts past their bounds, a receipt past a frame) and
+`test/server_limits.ml` (a real server: connections that show no token holding every slot while a program connects,
+a TLS handshake and a TLS record after Hello sent a byte at a time) and `test/server_guard.ml` (real sockets: a frame
+of 16 MiB before Hello, three frames of 700 KB begun at once under a
+bound of 1 MiB, 3,000 Finds of 14 KB sent at once by a client that reads nothing yet).
 
 ### TLS
 

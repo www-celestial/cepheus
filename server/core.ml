@@ -43,6 +43,8 @@ type t = {
   conns : (int, conn) Hashtbl.t;  (* open connections, for status and stop *)
   cm : Mutex.t;
   mutable next_conn : int;
+  watches : int Atomic.t;  (* the watches of every connection *)
+  kept : int Atomic.t;  (* the cells their windows and groups keep (Live.kept) *)
 }
 
 and conn = {
@@ -67,13 +69,15 @@ and conn = {
          group is durable *)
   pm : Mutex.t;  (* the pushes *)
   pushes : Buffer.t;  (* the watches' messages, coded, not yet given to the output *)
-  mutable watching : (int * (Live.hub * Live.sub)) list;  (* by the id of the Watch *)
+  mutable watching : (int * (Live.hub * Live.sub * int)) list;  (* by the id of the Watch, with the cells it keeps *)
+  mutable kept_cells : int;  (* the cells its watches keep *)
   mutable closed : bool;  (* pushes are dropped *)
   wake : unit -> unit;  (* the transport sends what [pushes] holds (it must not wait) *)
   close : unit -> unit;
       (* the transport ends the connection, from any of its threads or a hub's, without waiting: its reading wakes
          and its end runs ([ending]); called only before that end (by [broke]) *)
   failed : bool Atomic.t;  (* a thread other than the reading one failed: said at the end *)
+  gone : unit -> bool;  (* the transport can send nothing more (the peer went): a long reply stops *)
   puts : (int, db * Files.put) Hashtbl.t;  (* the files being put, by the id of their Put (the reading thread only) *)
 }
 
@@ -82,24 +86,36 @@ let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight 
   let by_name = Hashtbl.create 8 in
   Array.iter (fun d -> Hashtbl.replace by_name d.name d) dbs;
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
-    max_inflight; more; read_only; lead; raft; members; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1 }
+    max_inflight; more; read_only; lead; raft; members; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1;
+    watches = Atomic.make 0; kept = Atomic.make 0 }
 
-let connect ?(wake = ignore) ?(close = ignore) srv ~flush ~submit =
+let connect ?(wake = ignore) ?(close = ignore) ?(gone = fun () -> false) srv ~flush ~submit =
   Mutex.protect srv.cm (fun () ->
       let cid = srv.next_conn in
       srv.next_conn <- cid + 1;
       let c =
         { srv; cid; token = None; seen = Tokens.empty; rights = [||]; kinds = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
-          inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = [];
-          closed = false; wake; close; failed = Atomic.make false; puts = Hashtbl.create 2 }
+          inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = []; kept_cells = 0;
+          closed = false; wake; close; failed = Atomic.make false; gone; puts = Hashtbl.create 2 }
       in
       Hashtbl.replace srv.conns cid c;
       c)
 
+(* a watch no longer held by the connection: out of the server's counts *)
+let let_go c cells = ignore (Atomic.fetch_and_add c.srv.watches (-1)); ignore (Atomic.fetch_and_add c.srv.kept (-cells)); c.kept_cells <- c.kept_cells - cells
+
 let disconnect c =
-  let ws = Mutex.protect c.pm (fun () -> c.closed <- true; Buffer.reset c.pushes; let l = c.watching in c.watching <- []; l) in
-  List.iter (fun (_, (h, s)) -> Live.unsubscribe h s) ws;
+  let ws =
+    Mutex.protect c.pm (fun () ->
+        c.closed <- true;
+        Buffer.reset c.pushes;
+        let l = c.watching in
+        c.watching <- [];
+        List.iter (fun (_, (_, _, cells)) -> let_go c cells) l;
+        l)
+  in
+  List.iter (fun (_, (h, s, _)) -> Live.unsubscribe h s) ws;
   (* the files not finished are dropped: their chunks stored already are cited by no fact *)
   Hashtbl.reset c.puts;
   Mutex.protect c.srv.cm (fun () ->
@@ -118,7 +134,12 @@ let reply c ~id ~kind r =
 
 let err c ~id ~kind code fmt = Printf.ksprintf (fun message -> reply c ~id ~kind (Wire.Err { code; message })) fmt
 
-let engine_err c ~id ~kind e = let code, message = Wire.code_of_error e in reply c ~id ~kind (Wire.Err { code; message })
+(* An error of the server's own files (the disk, the vault and its key) for a program: its code and a fixed message;
+   what it says (paths, the system's words) goes to the server's log only (Fault: escaped, a line a second at most),
+   so that no path of the server crosses the wire *)
+let own_files = "the server could not use its files (its log says why)"
+
+let hidden c ~id ~kind m = Fault.log (Printf.sprintf "connection %d, request %d of kind %d" c.cid id kind) (Failure m); own_files
 
 (* What a connection did not expect (a bug, memory that ran out) ends at one place in each thread that serves it: a
    request in [input], a write's reply in [write], a push in [watch], the transport's own loops. Written in the
@@ -282,27 +303,112 @@ let put_word b (v : Store.view) (ty : Value.typ) w =
   | Ttext -> Buffer.add_char b '\004'; Codec.put_string b (Store.text v w)
   | Tfloat -> Value.encode b (Store.value v ty w)
 
+let chunk = 1 lsl 20
+
+(* A reply of items (a thing's facts, the schema's properties) whose body would pass the frame limit goes in frames of
+   about a MiB, each its head and a count of its items, all but the last with the flag more, which the clients join
+   (Client.join) as they join a Find's rows; one that fits goes in one frame, as every reply did before (a client of
+   an earlier version reads it). [items f] gives f each item, coded; an item fits a frame by itself (a text is at most
+   [max_text]). *)
+let send_items c ~id ~kind ~head ~count ~size items =
+  let b = c.body in
+  if size + 32 <= Wire.max_frame then begin
+    Buffer.clear b;
+    head b;
+    Codec.put_varint b count;
+    items (fun (x : Buffer.t) -> Buffer.add_buffer b x);
+    send_body c ~id ~kind ~flags:0 b
+  end
+  else begin
+    let part = Buffer.create chunk and n = ref 0 in
+    let frame ~more =
+      Buffer.clear b;
+      head b;
+      Codec.put_varint b !n;
+      Buffer.add_buffer b part;
+      send_body c ~id ~kind ~flags:(if more then Wire.f_more else 0) b;
+      Buffer.clear part;
+      n := 0;
+      if more then c.flush ()
+    in
+    items (fun x ->
+        if !n > 0 && Buffer.length part + Buffer.length x > chunk then frame ~more:true;
+        Buffer.add_buffer part x;
+        incr n);
+    frame ~more:false
+  end
+
 let get c ~id ~kind d thing =
   let v = d.view () in
-  let b = c.body and f = c.scratch in
-  Buffer.clear b;
-  Buffer.clear f;
-  let n = ref 0 in
   (* a token with rights per kind gets the facts of the kinds it reads, as if the thing had no other *)
   let t = match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> Some (kinds_table c d.index v r) | _ -> None in
   (* the thing read as its class's representative, as Cepheus.get reads it, for a token that may read the classes
      (cepheus/same): one that may not gets the thing's own facts, and learns no equality *)
   let thing = match t with Some t when not (bit t Schema.p_same 1) -> thing | _ -> Query.rep v thing in
-  Store.iter_facts v thing (fun p w ->
-      match Schema.find v.schema p with
-      | Some dsc when (match t with None -> true | Some t -> bit t p 1) -> incr n; Codec.put_varint f p; put_word f v dsc.typ w
-      | _ -> ());
-  Codec.put_varint b v.group;
-  Codec.put_varint b !n;
-  Buffer.add_buffer b f;
-  send_body c ~id ~kind ~flags:0 b
+  let f = c.scratch in
+  Buffer.clear f;
+  let n = ref 0 in
+  let each g =
+    Store.iter_facts v thing (fun p w ->
+        match Schema.find v.schema p with
+        | Some dsc when (match t with None -> true | Some t -> bit t p 1) -> g p dsc.typ w
+        | _ -> ())
+  in
+  each (fun p typ w -> incr n; Codec.put_varint f p; put_word f v typ w);
+  send_items c ~id ~kind ~head:(fun b -> Codec.put_varint b v.group) ~count:!n ~size:(Buffer.length f)
+    (fun k ->
+      if Buffer.length f + 32 <= Wire.max_frame then k f
+      else begin
+        let one = Buffer.create 64 in
+        each (fun p typ w -> Buffer.clear one; Codec.put_varint one p; put_word one v typ w; k one)
+      end)
 
-let chunk = 1 lsl 20
+exception Gone
+
+(* the rows of a frame's body at most: a row longer than that (texts of nearly 16 MiB side by side) fits no frame,
+   and its question is refused *)
+let max_rows = Wire.max_frame - 64
+
+exception Row_too_large of int
+
+let row_too_large n = raise (Row_too_large n)
+
+(* rows coded in frames of about a MiB as the fold finds them, none held: each frame but the last has the flag more,
+   and is sent before the next rows are found (the output holds a frame at most); a peer gone stops the fold *)
+let stream_rows c ~id ~kind (v : Store.view) (typs : Value.typ array) rows =
+  let cols = Array.length typs in
+  let b = c.body and r = Buffer.create 4096 and n = ref 0 in
+  let frame ~more =
+    Buffer.clear b;
+    Codec.put_varint b v.group;
+    Codec.put_varint b cols;
+    Codec.put_varint b !n;
+    Buffer.add_buffer b r;
+    send_body c ~id ~kind ~flags:(if more then Wire.f_more else 0) b;
+    Buffer.clear r;
+    n := 0
+  in
+  let sent () = c.flush (); if c.gone () then raise Gone in
+  rows (fun (row : int array) ->
+      let before = Buffer.length r in
+      for j = 0 to cols - 1 do put_word r v typs.(j) row.(j) done;
+      incr n;
+      if Buffer.length r >= chunk then begin
+        if Buffer.length r > max_rows then begin
+          (* the rows before this one go first; then it alone, if it fits *)
+          let last = Buffer.sub r before (Buffer.length r - before) in
+          if before = 0 then row_too_large (String.length last);
+          Buffer.truncate r before;
+          decr n;
+          frame ~more:true;
+          sent ();
+          Buffer.add_string r last;
+          n := 1
+        end;
+        frame ~more:true;
+        sent ()
+      end);
+  frame ~more:false
 
 (* rows coded in frames of about a MiB: each frame but the last has the flag more *)
 let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
@@ -310,8 +416,18 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   let rec go i =
     Buffer.clear b;
     let rows = Buffer.create 1024 in
-    let j = ref i in
-    while !j < nrows && Buffer.length rows < chunk do row !j rows; incr j done;
+    let j = ref i and full = ref false in
+    while !j < nrows && Buffer.length rows < chunk && not !full do
+      let before = Buffer.length rows in
+      row !j rows;
+      if Buffer.length rows > max_rows then begin
+        if !j = i then row_too_large (Buffer.length rows);
+        (* this row starts the next frame *)
+        Buffer.truncate rows before;
+        full := true
+      end
+      else incr j
+    done;
     Codec.put_varint b group;
     Codec.put_varint b cols;
     Codec.put_varint b (!j - i);
@@ -322,25 +438,88 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
-(* a damaged page met while the rows are coded (a text read from its run) ends the reply too, after the frames sent *)
+(* An answer is held whole, its cells charged to a ticket (Answer), then sent: the fold on several domains when it is
+   large, as fast as before. A Give without Sort past its cells, or the pool's, is asked again and coded as its rows
+   come (Answer.stream, on one domain), none held: it is never refused for its size (nothing was sent of the first
+   try, which ends in the fold). The work budget and the memory one end the reply too_large, a damaged page met while
+   the rows are coded (a text read from its run) damaged: after the frames sent, if any. *)
 let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
   let v = d.view () in
+  let budget = Answer.work_budget q extra in
+  let held () =
+    Answer.with_ticket (fun ticket ->
+        let a = Answer.answer ~ticket ~order ~extra ~budget v q sel in
+        let typs = Array.init a.cols a.typ in
+        send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n)
+  in
   match
-    let a = Answer.answer ~order ~extra ~budget:!Answer.question_budget v q sel in
-    let typs = Array.init a.cols a.typ in
-    send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n
+    match sel with
+    | Wire.Give give when order = Question.Top.none -> (
+      match held () with
+      | () -> ()
+      | exception (Answer.Too_large _ as e) -> (
+        match Answer.stream ~extra ~budget v q give with Some (typs, rows) -> stream_rows c ~id ~kind v typs rows | None -> raise e))
+    | _ -> held ()
   with
   | () -> ()
+  | exception Gone -> ()
+  | exception Row_too_large n ->
+    err c ~id ~kind "too_large" "a row of %d bytes is over the frame limit of %d: give fewer of its texts at once" n max_rows
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
   | exception Query.Over_budget n ->
     err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
+  | exception Answer.Too_large m -> err c ~id ~kind "too_large" "%s" m
   | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
 
 (* ---- writes ---- *)
 
+(* What a write may hold, so that every reply about it fits a frame: a property's (or a rule's) name 255 bytes at
+   most, a text [max_text] bytes at most (a Get of a thing of one such fact, its head included, is one frame), and
+   new things whose receipt (a temporary id and a number each) fits a frame: past one, refused before it is applied,
+   where before it was applied and its receipt could not be read. A group under 400,000 operations (40 bytes of
+   receipt at most each: two new things of 10 + 10) is not counted. *)
+let max_name = 255
+let max_text = Wire.max_frame - 4096
+
+let varint_size n = let rec go n k = if n < 0x80 then k else go (n lsr 7) (k + 1) in if n < 0 then 10 else go n 1
+
+let write_bounds (v : Store.view) ops =
+  let refuse code fmt = Printf.ksprintf (fun m -> Some (code, m)) fmt in
+  let rec texts = function
+    | [] -> None
+    | Resolve.Add (_, p, Value.Text n) :: _ when p = Schema.p_name && String.length n > max_name ->
+      refuse "invalid" "a name has at most %d bytes, not %d" max_name (String.length n)
+    | Resolve.Add (_, _, Value.Text x) :: _ when String.length x > max_text ->
+      refuse "too_large" "a text has at most %d bytes, not %d" max_text (String.length x)
+    | _ :: rest -> texts rest
+  in
+  match texts ops with
+  | Some _ as r -> r
+  | None ->
+    let nops = List.length ops in
+    if nops < 400_000 then None
+    else begin
+      let seen = Hashtbl.create 1024 and size = ref 32 in
+      let see x = if x < 0 && not (Hashtbl.mem seen x) then (Hashtbl.replace seen x (); size := !size + varint_size ((2 * -x) - 1) + varint_size (v.next_e + nops * 2)) in
+      List.iter
+        (function
+          | Resolve.Add (e, _, x) | Resolve.Retract (e, _, x) -> see e; (match x with Value.Link t -> see t | _ -> ())
+          | Resolve.Expect _ -> ()
+          | Resolve.Incr (e, _, _, into) -> see e; (match into with Some (t, _) -> see t | None -> ()))
+        ops;
+      if !size > Wire.max_frame then
+        refuse "too_large" "a group of %d new things: its receipt would pass the frame limit of %d bytes; write them in several groups" (Hashtbl.length seen) Wire.max_frame
+      else None
+    end
+
 let write c ~id ~kind d ~serial ~floor ~by ~why ops =
   if Origin.has_marker why then err c ~id ~kind "invalid" "a why may not start with the server's marker"
   else
+    (* the state the write is checked against, read once *)
+    let v = d.view () in
+    match write_bounds v ops with
+    | Some (code, m) -> err c ~id ~kind code "%s" m
+    | None ->
     let tok = Option.get c.token in
     let not_in_flight () = Mutex.protect c.om (fun () -> c.inflight <- c.inflight - 1; Condition.broadcast c.oc) in
     (* the reply of a write, in the thread that ends it (it may be another connection's: a write sent again while
@@ -360,6 +539,7 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
                 Wire.f_error
               | Error e ->
                 let code, message = Wire.code_of_error e in
+                let message = if code = "io" then hidden c ~id ~kind message else message in
                 (* a refusal by the rules names its rule only, to a token that may not read every kind *)
                 let message =
                   match c.rights.(d.index) with
@@ -375,7 +555,6 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
       | exception e -> broke c e);
       not_in_flight ()
     in
-    let v = d.view () in
     let published = v.group in
     match match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> unaddable c d.index v r ops | _ -> None with
     | Some k -> err c ~id ~kind "denied" "this token may not add to the kind %s of %s" k d.name
@@ -399,7 +578,9 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
 
 module Vault = Cepheus_vault.Vault
 
-let vault_err c ~id ~kind e = let code, m = Files.code_of e in err c ~id ~kind code "%s" m
+let vault_err c ~id ~kind e =
+  let code, m = Files.code_of e in
+  err c ~id ~kind code "%s" (if code = "io" || code = "busy" then hidden c ~id ~kind m else m)
 
 (* the last bytes of a file came: its bytes made durable, then the group of its facts written as any write, in the
    session (a Put sent again after a broken connection is applied once: its bytes are found stored, its group
@@ -449,7 +630,7 @@ let put_start c ~id ~more d (req : Wire.request) =
           if p.owner > 0 && Cepheus.get v p.owner = [] then refuse "invalid" "the owner %d is not a thing of %s" p.owner d.name
           else
             match Files.vault d.files with
-            | Error m -> refuse "io" "the vault of %s: %s" d.name m
+            | Error m -> refuse "io" "the vault of %s: %s" d.name (hidden c ~id ~kind m)
             | Ok vt -> (
               match Vault.writer vt ~domain:p.owner ~cold:p.cold with
               | Error e -> vault_err c ~id ~kind e
@@ -472,7 +653,7 @@ let load c ~id ~kind d ~thing ~prop ~from ~len =
     | Error (code, m) -> err c ~id ~kind code "%s" m
     | Ok root -> (
       match Files.vault d.files with
-      | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name m
+      | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name (hidden c ~id ~kind m)
       | Ok vt -> (
         match if len >= 0 then Ok len else Result.map (fun s -> s - from) (Vault.size vt root) with
         | Error e -> vault_err c ~id ~kind e
@@ -511,6 +692,15 @@ let move_pushes c =
     true
   end
 
+(* The watches a connection keeps at most, and the server (its connections together): a watch costs its question's
+   template, shared by the watches that differ only in their constants (about 1.3 KB a watch of one template,
+   measured: 200,000 of them took 253 MiB), so 65,536 of them hold about 85 MiB; 1,024 a connection, as its writes in
+   flight. What their windows and groups keep (Live.kept) counts too: a connection's at most one answer's cells
+   (Answer.max_cells), the server's at most Answer.pool_cells, so that a token that may read cannot make the server
+   keep, watch by watch, what it may not build for one question. Past any, the Watch is too_large. *)
+let max_watches = ref 1024
+let max_server_watches = ref 65_536
+
 let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
   let tok = Option.get c.token in
   let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
@@ -536,10 +726,12 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
   (* a push, under the hub's lock (so before the connection's end has dropped its watches), mostly in the hub's
      thread: its failure (the transport cannot make the thread of the pushes, memory) ends this connection, never the
      hub *)
+  (* a row that fits no frame ends the watch too_large; what the hub says of it after (lagging) is dropped *)
+  let over = ref false in
   let push (m : Live.msg) =
     let ok =
       Mutex.protect c.pm (fun () ->
-          if c.closed then true
+          if c.closed || !over then true
           else
             (* a push of several frames whole or not at all: a part of one, then the next, would be joined by the
                client into rows of neither *)
@@ -556,16 +748,50 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
               | Answer a -> Wire.add_push c.pushes ~id (Wire.Answer { group = a.group; cols; rows = a.rows }); true
               | Change ch -> Wire.add_push c.pushes ~id (Wire.Change { group = ch.group; cols; added = ch.added; removed = ch.removed }); true
               | Same s -> Wire.add_push c.pushes ~id (Wire.Same s.group); true
-            with e -> Buffer.truncate c.pushes n0; raise e)
+            with
+            | Wire.Row_too_large n ->
+              Buffer.truncate c.pushes n0;
+              let b = Buffer.create 128 in
+              Wire.put_reply b (Wire.Err { code = "too_large"; message = Printf.sprintf "a row of %d bytes is over the frame limit of %d: watch fewer of its texts at once" n max_rows });
+              Wire.add_frame c.pushes ~id ~kind:Wire.k_watch ~flags:Wire.f_error b;
+              over := true;
+              false
+            | e -> Buffer.truncate c.pushes n0; raise e)
     in
     c.wake ();
     ok
   in
   let emit m = match push m with ok -> ok | exception e -> broke c e; true in
   let h = d.hub () in
-  match Live.subscribe ~extra ~order h q sel ~from ~emit with
-  | s -> Mutex.protect c.pm (fun () -> c.watching <- (id, (h, s)) :: c.watching)
+  (* under the hub's lock, its first answer made: kept, or refused before any of it is (the hub, then the pushes'
+     lock, as a push takes them); the watches the hub ended are dropped from the counts first *)
+  let admit s =
+    let cells = Live.kept s in
+    Mutex.protect c.pm (fun () ->
+        let ended, live = List.partition (fun (_, (_, (s : Live.sub), _)) -> s.gone) c.watching in
+        List.iter (fun (_, (_, _, n)) -> let_go c n) ended;
+        c.watching <- live;
+        let srv = c.srv in
+        let refuse fmt = Printf.ksprintf (fun m -> raise (Answer.Too_large m)) fmt in
+        if List.length live >= !max_watches then refuse "a connection keeps %d watches at most: unwatch one first" !max_watches;
+        if c.kept_cells + cells > !Answer.max_cells then
+          refuse "the watches of a connection keep %d cells at most (their windows' rows and their groups): unwatch one first, or watch a smaller Limit" !Answer.max_cells;
+        if Atomic.fetch_and_add srv.watches 1 >= !max_server_watches then begin
+          ignore (Atomic.fetch_and_add srv.watches (-1));
+          refuse "the server keeps %d watches at most: unwatch one first, or watch again in a moment" !max_server_watches
+        end;
+        if Atomic.fetch_and_add srv.kept cells + cells > !Answer.pool_cells then begin
+          ignore (Atomic.fetch_and_add srv.watches (-1));
+          ignore (Atomic.fetch_and_add srv.kept (-cells));
+          refuse "the watches of the server keep %d cells at most: unwatch one first, or watch again in a moment" !Answer.pool_cells
+        end;
+        c.kept_cells <- c.kept_cells + cells;
+        c.watching <- (id, (h, s, cells)) :: c.watching)
+  in
+  match Answer.with_ticket (fun ticket -> Live.subscribe ~extra ~order ~ticket ~budget:(Answer.work_budget q extra) ~admit h q sel ~from ~emit) with
+  | _ -> ()
   | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
+  | exception Answer.Too_large m -> err c ~id ~kind "too_large" "%s" m
   | exception Query.Over_budget n ->
     err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
   | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
@@ -575,9 +801,10 @@ let unwatch c ~id ~kind w =
   let found = Mutex.protect c.pm (fun () ->
       let f = List.assoc_opt w c.watching in
       c.watching <- List.filter (fun (i, _) -> i <> w) c.watching;
+      Option.iter (fun (_, _, cells) -> let_go c cells) f;
       f)
   in
-  Option.iter (fun (h, s) -> Live.unsubscribe h s) found;
+  Option.iter (fun (h, s, _) -> Live.unsubscribe h s) found;
   reply c ~id ~kind Wire.Unwatched
 
 (* ---- dispatch ---- *)
@@ -610,13 +837,21 @@ type action =
 let handle c ~id ~kind ~flags (r : Codec.reader) =
   c.requests <- c.requests + 1;
   match Wire.get_request kind r with
-  | exception (Codec.Short | Wire.Malformed _) ->
+  | exception Codec.Short ->
     err c ~id ~kind "invalid" "a malformed request (kind %d)" kind;
+    Close
+  | exception Wire.Malformed m ->
+    err c ~id ~kind "invalid" "a malformed request (kind %d): %s" kind m;
     Close
   | req -> (
     if Atomic.get c.srv.stopping then (err c ~id ~kind "stopping" "the server is stopping"; Continue)
     else
       match req with
+      | Wire.Hello _ when c.session <> 0 ->
+        (* one Hello a connection: its token, rights and session stay those of the first (its watches were checked
+           against them) *)
+        err c ~id ~kind "invalid" "Hello once a connection: this one has shown its token";
+        Continue
       | Wire.Hello h ->
         if h.version < Wire.oldest || h.version > !speaks then
           (err c ~id ~kind "version" "protocol %d is not spoken here (%d to %d are)" h.version Wire.oldest !speaks; Close)
@@ -642,7 +877,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
         refresh_rights c;
         match c.token, req with
         | None, _ -> err c ~id ~kind "auth" "the token was removed"; Close
-        | _, Wire.Hello _ -> Continue
+        | _, Wire.Hello _ -> Continue (* answered above *)
         | _, Wire.Ping s -> reply c ~id ~kind (Wire.Pong s); Continue
         | Some tok, Wire.Admin what ->
           if not tok.admin then err c ~id ~kind "denied" "this token is not an admin token"
@@ -660,11 +895,13 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
            | Some _ when not (leads c ~id ~kind) -> ()
            | Some d ->
              let v = d.view () in
-             let props = ref [] in
+             let props = ref [] and size = ref 0 in
              for p = Schema.count v.schema - 1 downto 1 do
-               match Schema.find v.schema p with Some x -> props := (p, x) :: !props | None -> ()
+               match Schema.find v.schema p with Some x -> props := (p, x) :: !props; size := !size + String.length x.name + 20 | None -> ()
              done;
-             reply c ~id ~kind (Wire.Opened { db = d.index; group = v.group; props = !props }));
+             let one = Buffer.create 64 in
+             send_items c ~id ~kind ~head:(fun b -> Codec.put_varint b d.index; Codec.put_varint b v.group) ~count:(List.length !props) ~size:!size
+               (fun k -> List.iter (fun x -> Buffer.clear one; Wire.put_prop one x; k one) !props));
           Continue
         | _, Wire.Get g ->
           (match readable c ~id ~kind g.db with
@@ -714,7 +951,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
            | Some _ when e.owner <= 0 -> err c ~id ~kind "invalid" "an erasure names an owner, a thing: the database's own key (0) is never erased"
            | Some d -> (
              match Files.vault d.files with
-             | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name m
+             | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name (hidden c ~id ~kind m)
              | Ok vt -> ( match Vault.erase vt e.owner with Ok () -> reply c ~id ~kind Wire.Erased | Error x -> vault_err c ~id ~kind x)));
           Continue
         | _, Wire.Load l ->
@@ -739,18 +976,32 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
 type input =
   | Need  (** a frame is not whole yet: read more *)
   | Full  (** the writes in flight reached the limit *)
+  | Flush  (** the replies not yet sent passed [max_out]: send them, then give the rest again *)
   | Shut
   | Follow of db * int  (** the connection becomes a follow stream (Follows) *)
 
-(* Every complete frame of [buf] from [off] to [stop], until the connection has its limit of writes in flight: the
-   offset of the first byte not used, and why it stopped. A frame over the limit closes the connection before its
-   body is read. A request that raises what it does not expect is answered internal and closes the connection
+(* The frames a connection may send before its Hello, at most: a Hello is a version, a token (at most 256 characters
+   are looked at: Tokens.check), a program's name and a session, a few hundred bytes. 4 KiB leaves a long name room,
+   and a peer that has shown no token cannot make the server hold more for it than that (and its 64 KiB of buffer). *)
+let max_hello = 4096
+
+(* The replies not yet sent at which a connection stops decoding requests: they go out first (the transport sends
+   them, then gives the rest again), so that requests sent together that each ask for much (a Get of a large text, a
+   Find of many rows) and are never read hold a MiB of replies and one more reply, not the sum of all of them: the
+   back-pressure that the writes in flight have (design 3.5), on what the server sends. The length is read without
+   the output's lock: a reply appended by another thread meanwhile is seen at the next frame. *)
+let max_out = 1 lsl 20
+
+(* Every complete frame of [buf] from [off] to [stop], until the connection has its limit of writes in flight or
+   [max_out] of replies not sent: the offset of the first byte not used, and why it stopped. A frame over the limit (before Hello, over [max_hello])
+   closes the connection before its body is read. A request that raises what it does not expect is answered internal and closes the connection
    ([fail]): the frames of its reply sent before (a Find's first rows) end with that error, which the client takes
    as the reply's end. A connection that another of its threads failed ([broke]) reads no more requests. *)
 let input c buf off stop =
   let rec go o =
     if Atomic.get c.failed then o, Shut
     else if c.inflight >= c.srv.max_inflight then o, Full
+    else if Buffer.length c.out > max_out then o, Flush
     else if stop - o < 4 then o, Need
     else
       let len = Wire.u32 buf o in
@@ -758,14 +1009,23 @@ let input c buf off stop =
         err c ~id:0 ~kind:0 "too_large" "a frame of %d bytes (the limit is %d)" len Wire.max_frame;
         o, Shut
       end
+      else if c.token = None && len > max_hello then begin
+        err c ~id:0 ~kind:0 "too_large" "a frame of %d bytes before Hello (the limit is %d until a token is shown)" len max_hello;
+        o, Shut
+      end
       else if stop - o < 4 + len then o, Need
       else
         let id = Wire.u32 buf (o + 4) and kind = Bytes.get_uint8 buf (o + 8) and flags = Bytes.get_uint8 buf (o + 9) in
         match handle c ~id ~kind ~flags (Codec.reader buf (o + Wire.header) (len - 6)) with
-        | Continue -> go (o + 4 + len)
-        | Close -> o + 4 + len, Shut
-        | Follows (d, id) -> o + 4 + len, Follow (d, id)
         | exception e -> fail c ~id ~kind e; o + 4 + len, Shut
+        | r -> (
+          (* a reply's scratch that grew past a chunk gives its memory back (a connection keeps 4 KiB of it) *)
+          if Buffer.length c.body > chunk then Buffer.reset c.body;
+          if Buffer.length c.scratch > chunk then Buffer.reset c.scratch;
+          match r with
+          | Continue -> go (o + 4 + len)
+          | Close -> o + 4 + len, Shut
+          | Follows (d, id) -> o + 4 + len, Follow (d, id))
   in
   go off
 

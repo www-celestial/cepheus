@@ -317,18 +317,26 @@ let win_take w r =
     true
   | None -> false
 
-(* the rows of [s]'s question in its order on [v], from the row after [after] (None: the first), [limit] of them and
-   the copies of the last (0: all) *)
-let ordered (v : Store.view) (s : sub) (w : window) ~after ~limit =
-  let t = s.t in
-  let order = { w.order with Top.limit; after } in
-  let a = Answer.answer ~order ~extra:t.extra ~budget:!Answer.question_budget v s.q (Wire.Give t.give) in
+(* a watch's answer at the server counts four cells a cell: its rows become values (an int boxed, a text its string),
+   about three words more than the index word each *)
+let weight = 4
+
+(* an answer's rows as values *)
+let values_of (v : Store.view) (a : Answer.answer) =
   let typs = Array.init a.cols a.typ in
   List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
 
+(* the rows of [s]'s question in its order on [v], from the row after [after] (None: the first), [limit] of them and
+   the copies of the last (0: all) *)
+let ordered ?ticket ?(budget = !Answer.question_budget) (v : Store.view) (s : sub) (w : window) ~after ~limit =
+  let t = s.t in
+  let order = { w.order with Top.limit; after } in
+  let a = Answer.answer ?ticket ~weight ~order ~extra:t.extra ~budget v s.q (Wire.Give t.give) in
+  values_of v a
+
 (* the window filled with the answer on [v]: its rows *)
-let win_answer (v : Store.view) (s : sub) (w : window) =
-  let rows = ordered v s w ~after:None ~limit:w.order.limit in
+let win_answer ?ticket ?budget (v : Store.view) (s : sub) (w : window) =
+  let rows = ordered ?ticket ?budget v s w ~after:None ~limit:w.order.limit in
   w.kept <- W.empty;
   w.n <- 0;
   List.iter (fun r -> win_add w r 1) rows;
@@ -366,16 +374,19 @@ let slide (v1 : Store.view) (s : sub) (w : window) added removed =
   let a, r = W.fold (fun x d (a, r) -> if d > 0 then copies x.r d a, r else if d < 0 then a, copies x.r (-d) r else a, r) !net ([], []) in
   List.rev a, List.rev r
 
-(* the watch's answer now, and its state (the keys of an aggregate, the window) *)
-let answer (v : Store.view) (s : sub) =
+(* the watch's answer now, and its state (the keys of an aggregate, the window); at the server, its cells charged to
+   [ticket] as they are found, and its work within [budget] (Answer) *)
+let answer ?ticket ?budget (v : Store.view) (s : sub) =
   let t = s.t in
   match s.win with
-  | Some w -> win_answer v s w
+  | Some w -> win_answer ?ticket ?budget v s w
   | None ->
   if Array.length t.aggs = 0 then begin
-    let a = if t.extra = [] then Answer.answer v s.q (Wire.Give t.give) else Answer.answer ~extra:t.extra ~budget:!Answer.question_budget v s.q (Wire.Give t.give) in
-    let typs = Array.init a.cols a.typ in
-    List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
+    let a =
+      if t.extra = [] then Answer.answer ?ticket ~weight ?budget v s.q (Wire.Give t.give)
+      else Answer.answer ?ticket ~weight ~extra:t.extra ~budget:(Option.value budget ~default:!Answer.question_budget) v s.q (Wire.Give t.give)
+    in
+    values_of v a
   end
   else begin
     Hashtbl.reset s.keys;
@@ -391,15 +402,23 @@ let answer (v : Store.view) (s : sub) =
         t.aggs
     in
     let fold ~init ~merge ~step =
-      if t.extra = [] then Query.fold v s.q ~init ~merge ~step
-      else Ask.fold ~budget:!Answer.question_budget v (Ask.compile v s.q t.extra) ~init ~merge ~step
+      if t.extra = [] then Query.fold ?budget v s.q ~init ~merge ~step
+      else Ask.fold ~budget:(Option.value budget ~default:!Answer.question_budget) v (Ask.compile v s.q t.extra) ~init ~merge ~step
     in
+    (* a key's cells (its values and its aggregates, four words each), charged by grains of keys *)
+    let width = weight * max 1 (Array.length t.give + Array.length t.aggs) in
+    let every = max 1 (Answer.grain / width) in
+    let added = match ticket with None -> ignore | Some tk -> fun n -> if n mod every = 0 then Answer.charge tk (every * width) in
     let tbl =
       fold ~init:(fun () -> Hashtbl.create 16)
         ~merge:(fun a b -> Hashtbl.iter (fun kv k -> match Hashtbl.find_opt a kv with Some k' -> combine k' k | None -> Hashtbl.replace a kv k) b; a)
         ~step:(fun tbl b ->
           let kv = values v t b t.give in
-          let k = match Hashtbl.find_opt tbl kv with Some k -> k | None -> let k = { n = 0; acc = agg_start t } in Hashtbl.replace tbl kv k; k in
+          let k =
+            match Hashtbl.find_opt tbl kv with
+            | Some k -> k
+            | None -> let k = { n = 0; acc = agg_start t } in Hashtbl.replace tbl kv k; added (Hashtbl.length tbl); k
+          in
           agg_add t k b;
           tbl)
     in
@@ -830,9 +849,17 @@ let touched_since h (q : Query.t) n =
    newest state, or Same when that answer is the one at [from] (the ring holds every change since and none touches
    the question), held until that state is durable; then a change after each frame that changes its rows. [emit] is
    called under the hub's lock and must not wait. With [order] (Sort, and Limit or none), its rows are Find's with
-   that order, in it (a window, above). Raises Query.Bad for a question that is not valid, Query.Over_budget, and
-   Pages.Unreadable. *)
-let subscribe ?(extra = []) ?(order = Top.none) h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
+   that order, in it (a window, above). At the server, the first answer's cells are charged to [ticket] and its work
+   is within [budget] (Answer); [admit] takes the watch, or refuses it by an exception, before it is kept. Raises
+   Query.Bad for a question that is not valid, Query.Over_budget, Answer.Too_large, and Pages.Unreadable. *)
+(* the cells a watch keeps between its messages, four a value as its answer's: its window's rows, or its aggregate's
+   keys (a plain watch keeps none of its rows) *)
+let kept (s : sub) =
+  match s.win with
+  | Some w -> weight * w.n * max 1 (Array.length s.t.give)
+  | None -> if Array.length s.t.aggs = 0 then 0 else weight * Hashtbl.length s.keys * max 1 (Array.length s.t.give + Array.length s.t.aggs)
+
+let subscribe ?(extra = []) ?(order = Top.none) ?ticket ?budget ?(admit = ignore) h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
   Mutex.protect h.hm (fun () ->
       (match h.stopped with Some (code, m) -> raise (Failure (code ^ ": " ^ m)) | None -> ());
       if order <> Top.none then begin
@@ -867,11 +894,13 @@ let subscribe ?(extra = []) ?(order = Top.none) h (q : Query.t) (sel : Wire.sele
       let first =
         if from > 0 && from >= h.ring_from && from <= v.group && not (touched_since h { q with where = all_patterns q extra } from) then begin
           (* the keys of an aggregate, and a window, are needed for the changes to come *)
-          if Array.length t.aggs > 0 || win <> None then ignore (answer v s);
+          if Array.length t.aggs > 0 || win <> None then ignore (answer ?ticket ?budget v s);
           Same { group = v.group }
         end
-        else Answer { group = v.group; rows = answer v s }
+        else Answer { group = v.group; rows = answer ?ticket ?budget v s }
       in
+      (* the watch is taken or refused before any of it is kept *)
+      admit s;
       h.next <- h.next + 1;
       if not (Hashtbl.mem h.templates key) then begin
         Hashtbl.replace h.templates key t;

@@ -1407,6 +1407,280 @@ let watch_window () =
    | _ -> ());
   check (match ktake () with [ Ok (Wire.Change c) ] -> List.length c.added = 1 && c.removed = [ top ] | _ -> false) "window: its refill, read with its own rights"
 
+(* ---- the bounds of an answer at the server (the review's F4, F6, F7): a cross product of two patterns that share no
+   variable (600 people: 360,000 rows of 4 columns) asked every way; the patterns of a question; the watches a
+   connection and the server keep ---- *)
+
+let answer_bounds () =
+  let sim = Sim_disk.create (Rng.make 23) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/b";
+  let e = Result.get_ok (Engine.open_ disk "/b/shop") in
+  let v0 = Atomic.get e.published in
+  let hub = Live.create v0 ~tag:v0.group ~durable:max_int in
+  let d = { Core.name = "shop"; index = 0; dir = "/b/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> hub); files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/b/shop/vault" } in
+  let commit ops =
+    let b = Engine.prepare e [| ops, 0, "t" |] in
+    let r = (Engine.commit e b).(0) in
+    if b.count > 0 then Live.frame hub ~tag:b.after.group (List.rev b.groups) b.after;
+    r
+  in
+  let submit (_ : Core.db) ops _ _ k = k (commit ops) in
+  let ids, ops = Result.get_ok (Resolve.declare v0 [ { Schema.name = "person/score"; typ = Value.Tint; many = false; unique = false } ]) in
+  ignore (Result.get_ok (commit ops));
+  let score = List.hd ids in
+  let n = 600 in
+  ignore (Result.get_ok (commit (List.init n (fun i -> Resolve.Add (-(i + 1), score, Int i)))));
+  let toks = Tokens.with_tokens Tokens.empty [ { Tokens.name = "r"; hash = Tokens.hash_of_text "cph_r"; databases = [ "shop", Tokens.Read ]; admin = false } ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let k = ref 0 in fun () -> incr k; !k) () in
+  (* a connection: its output taken at each flush, the largest it held noted *)
+  let conn () =
+    let out = Buffer.create 256 and most = ref 0 in
+    let rec c =
+      lazy (Core.connect srv ~submit ~flush:(fun () ->
+          let cc = Lazy.force c in
+          most := max !most (Buffer.length cc.Core.out);
+          Buffer.add_buffer out cc.Core.out;
+          Buffer.clear cc.Core.out))
+    in
+    let c = Lazy.force c in
+    let next = ref 1 in
+    let send req =
+      let id = !next in
+      incr next;
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.move_pushes c);
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      match frames_of s with None -> check false "bounds: frames not whole"; [] | Some fs -> fs
+    in
+    ignore (send (Wire.Hello { version = Wire.version; token = "cph_r"; program = "t"; session = 0 }));
+    c, send, most
+  in
+  let c, send, most = conn () in
+  let code fs =
+    match List.rev fs with
+    | (_, _, flags, _) :: _ when flags land Wire.f_error = 0 -> "ok"
+    | f :: _ -> (match reply_of f with Some (Wire.Err e) -> e.code | _ -> "?")
+    | [] -> "none"
+  in
+  let cross = { Query.vars = 4; where = [ { Query.e = Var 0; p = score; v = Var 1 }; { e = Var 2; p = score; v = Var 3 } ]; ranges = [] } in
+  let find ?(q = cross) ?(sel = Wire.Give [||]) ?(order = Top.none) () = send (Wire.Find { db = 0; query = q; select = sel; extra = []; order }) in
+  let by1 = { Top.keys = [ { col = 1; desc = false } ]; limit = 0; after = None } in
+  let saved_cells = !Answer.max_cells and saved_pool = !Answer.pool_cells in
+  Answer.max_cells := 50_000;
+  (* held answers: refused past their cells, the pool given back *)
+  check (code (find ~order:by1 ()) = "too_large") "bounds: a sorted cross product past its cells is too_large";
+  check (code (find ~sel:(Wire.Group ([| 0; 1; 2; 3 |], [| Wire.Count |])) ()) = "too_large") "bounds: a grouped one too";
+  check (code (send (Wire.Watch { db = 0; query = cross; select = Wire.Give [||]; from = 0; wextra = []; worder = Top.none })) = "too_large")
+    "bounds: a watch's first answer too, under the hub's lock";
+  check (Atomic.get Answer.pool = 0) "bounds: every ticket given back (%d cells left)" (Atomic.get Answer.pool);
+  (* a Give without Sort is streamed: every row, in frames of the flag more, the output never holding more than a frame *)
+  most := 0;
+  let fs = find () in
+  let rows = List.fold_left (fun acc f -> match reply_of f with Some (Wire.Rows r) -> acc + List.length r.rows | _ -> acc) 0 fs in
+  let mores = List.length (List.filter (fun (_, _, fl, _) -> fl land Wire.f_more <> 0) fs) in
+  check (rows = n * n && mores >= 3 && code fs = "ok") "bounds: the cross product without Sort, every row streamed (%d rows, %d frames)" rows (List.length fs);
+  check (!most <= Core.chunk + 65536) "bounds: the output held a frame at most while it streamed (%d bytes)" !most;
+  check (match find ~order:{ by1 with limit = 10 } () with [ f ] -> (match reply_of f with Some (Wire.Rows r) -> List.length r.rows = 10 | _ -> false) | _ -> false)
+    "bounds: a sorted page of it, Limit 10, within the cells";
+  (* the pool of every ticket: held elsewhere, a held answer is refused; given back, answered *)
+  Answer.max_cells := saved_cells;
+  Answer.pool_cells := 100_000;
+  let held = { Answer.used = Atomic.make 0 } in
+  (try Answer.charge held 90_000 with Answer.Too_large _ -> ());
+  (match find ~order:by1 () with
+   | fs -> check (code fs = "too_large" && (match reply_of (List.hd fs) with Some (Wire.Err e) -> contains e.message "is building" | _ -> false)) "bounds: the server's pool, held by others: too_large");
+  Answer.release held;
+  Answer.pool_cells := saved_pool;
+  check (code (find ~order:by1 ()) = "ok") "bounds: the pool given back, the same question answered";
+  (* the patterns of a question (F6): 64 at most, refused before they are decoded; the work in lookups *)
+  let rep k = { Query.vars = 2; where = List.init k (fun _ -> { Query.e = Var 0; p = score; v = Var 1 }); ranges = [] } in
+  check (code (find ~q:(rep 64) ()) = "ok") "bounds: a question of 64 patterns";
+  let c2, send2, _ = conn () in
+  check (match send2 (Wire.Find { db = 0; query = rep 65; select = Wire.Give [||]; extra = []; order = Top.none }) with
+         | [ f ] -> (match reply_of f with Some (Wire.Err e) -> e.code = "invalid" && contains e.message "64 patterns" | _ -> false) | _ -> false)
+    "bounds: 65 patterns are refused, before they are decoded";
+  ignore c2;
+  let saved_budget = !Answer.question_budget in
+  Answer.question_budget := 5_000;
+  check (code (find ~q:(rep 1) ()) = "ok") "bounds: one pattern within a budget of 5,000 lookups";
+  check (code (find ~q:(rep 10) ()) = "too_large") "bounds: the same pattern ten times does ten lookups a candidate: past it";
+  Answer.question_budget := saved_budget;
+  (* the watches a connection keeps, and the server (F7) *)
+  let one = { Query.vars = 1; where = [ { Query.e = Thing 65536; p = score; v = Var 0 } ]; ranges = [] } in
+  let watch ?(send = send) ?(q = one) ?(order = Top.none) () = send (Wire.Watch { db = 0; query = q; select = Wire.Give [||]; from = 0; wextra = []; worder = order }) in
+  let saved_w = !Core.max_watches and saved_sw = !Core.max_server_watches in
+  Core.max_watches := 3;
+  Core.max_server_watches := 5;
+  let ids = List.init 3 (fun _ -> match watch () with [ (i, _, _, _) as f ] when code [ f ] = "ok" -> i | _ -> -1) in
+  check (List.for_all (fun i -> i > 0) ids) "watches: three on a connection";
+  check (code (watch ()) = "too_large") "watches: a fourth is too_large";
+  check (code (send (Wire.Unwatch (List.hd ids))) = "ok" && code (watch ()) = "ok") "watches: one unwatched, another taken";
+  let c3, send3, _ = conn () in
+  check (code (watch ~send:send3 ()) = "ok" && code (watch ~send:send3 ()) = "ok") "watches: five on the server";
+  check (code (watch ~send:send3 ()) = "too_large") "watches: a sixth on another connection is too_large";
+  Core.disconnect c3;
+  check (Atomic.get srv.watches = 3 && code (watch ~send:send2 ()) = "ok") "watches: a connection's end gives its watches back";
+  Core.max_watches := saved_w;
+  Core.max_server_watches := saved_sw;
+  (* what windows keep: a connection's at most one answer's cells (a window of 50 rows of 4 columns, values: 800) *)
+  Answer.max_cells := 2_000;
+  let page = { Top.keys = [ { col = 1; desc = false } ]; limit = 50; after = None } in
+  let _, send4, _ = conn () in
+  check (code (watch ~send:send4 ~q:cross ~order:page ()) = "ok" && code (watch ~send:send4 ~q:cross ~order:page ()) = "ok")
+    "watches: two windows of 50 rows of 4 columns (1,600 cells)";
+  check (code (watch ~send:send4 ~q:cross ~order:page ()) = "too_large") "watches: a third would keep more than a connection's cells";
+  Answer.max_cells := saved_cells;
+  Core.disconnect c;
+  Core.disconnect c2;
+  ignore c3;
+  Engine.close e
+
+(* ---- replies within the frame limit (the review's F5): a token that may add to one kind cannot declare long names;
+   names and values written before the bound (through the engine) come back in frames of the flag more, joined by the
+   client; a text past its bound, and a group whose receipt would pass a frame, are refused before they are applied ---- *)
+
+let reply_bounds () =
+  let sim = Sim_disk.create (Rng.make 29) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/r";
+  let e = Result.get_ok (Engine.open_ disk "/r/shop") in
+  let d = { Core.name = "shop"; index = 0; dir = "/r/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/r/shop/vault" } in
+  let commit ops = let b = Engine.prepare e [| ops, 0, "t" |] in (Engine.commit e b).(0) in
+  let submit (_ : Core.db) ops _ _ k = k (commit ops) in
+  let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+  let toks = Tokens.with_tokens Tokens.empty [ mk "w" [ "shop", Tokens.Write ]; mk "k" [ "shop", Tokens.Kinds { read = [ "pub" ]; add = [ "pub" ] } ] ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let k = ref 0 in fun () -> incr k; !k) () in
+  (* a request's frames, and its reply as the client joins them *)
+  let session tok =
+    let out = Buffer.create 256 in
+    let rec c = lazy (Core.connect srv ~submit ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out)) in
+    let c = Lazy.force c in
+    let ask req =
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      let fs = Option.value (frames_of s) ~default:[] in
+      let parts = List.filter_map reply_of fs in
+      fs, (match parts with [ r ] -> Some r | [] -> None | ps -> Some (Client.join ps))
+    in
+    ignore (ask (Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 }));
+    ask
+  in
+  let w = session "w" and k = session "k" in
+  let write ask ops = snd (ask (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops })) in
+  let code = function Some (Wire.Err e) -> e.code | Some _ -> "ok" | None -> "none" in
+  let within fs = List.for_all (fun (_, _, _, b) -> Bytes.length b + 6 <= Wire.max_frame) fs in
+  let mores fs = List.length (List.filter (fun (_, _, fl, _) -> fl land Wire.f_more <> 0) fs) in
+  let decl p name typ many = List.map (fun (e, q, x) -> Resolve.Add (e, q, x)) (Schema.facts p { Schema.name; typ; many; unique = false }) in
+  (* a token of one kind: a name of 1,000,004 bytes refused, one of 255 taken *)
+  check (code (write k (decl 40 ("pub/" ^ String.make 1_000_000 'x') Ttext false)) = "invalid") "replies: a name past %d bytes is refused" Core.max_name;
+  check (code (write k (decl 40 ("pub/" ^ String.make 251 'x') Ttext false)) = "ok") "replies: a name of %d bytes is taken" Core.max_name;
+  (* the PoC's 17 names of a million bytes, written before the bound: Open in frames of the flag more, joined *)
+  List.iteri (fun i p -> ignore (Result.get_ok (commit (decl p (Printf.sprintf "pub/%c%s" (Char.chr (97 + i)) (String.make 1_000_000 'x')) Ttext false)))) (List.init 17 (fun i -> 41 + i));
+  let fs, r = k (Wire.Open "shop") in
+  check (within fs && mores fs >= 1
+         && match r with Some (Wire.Opened o) -> List.length (List.filter (fun (_, (x : Schema.prop)) -> String.length x.name > 1_000_000) o.props) = 17 | _ -> false)
+    "replies: an Open of 17 MB of names, in %d frames within the limit, joined whole" (List.length fs);
+  (* a thing of 17 texts of a million bytes: Get in frames of the flag more, joined *)
+  ignore (Result.get_ok (commit (decl 60 "bag/item" Ttext true)));
+  let thing = match commit [ Resolve.Add (-1, 60, Text "a") ] with Ok rc -> Cepheus.thing rc (-1) | Error _ -> 0 in
+  List.iter (fun i -> ignore (Result.get_ok (commit [ Resolve.Add (thing, 60, Text (Printf.sprintf "%c%s" (Char.chr (97 + i)) (String.make 1_000_000 'x'))) ]))) (List.init 17 Fun.id);
+  let fs, r = w (Wire.Get { db = 0; thing }) in
+  check (within fs && mores fs >= 1 && match r with Some (Wire.Facts f) -> List.length f.facts = 18 | _ -> false)
+    "replies: a Get of 17 MB of facts, in %d frames within the limit, joined whole" (List.length fs);
+  let small = match commit [ Resolve.Add (-1, 60, Text "small") ] with Ok rc -> Cepheus.thing rc (-1) | Error _ -> 0 in
+  let fs, r = w (Wire.Get { db = 0; thing = small }) in
+  check (List.length fs = 1 && mores fs = 0 && match r with Some (Wire.Facts _) -> true | _ -> false) "replies: a small Get, one frame as before";
+  (* a text past its bound is refused; one at it is written, and its Get is one frame *)
+  check (code (write w [ Resolve.Add (-1, 60, Text (String.make (Core.max_text + 1) 't')) ]) = "too_large") "replies: a text past %d bytes is too_large" Core.max_text;
+  (match write w [ Resolve.Add (-1, 60, Text (String.make Core.max_text 't')) ] with
+   | Some (Wire.Receipt rc) ->
+     let fs, r = w (Wire.Get { db = 0; thing = snd (List.hd rc.things) }) in
+     check (within fs && match r with Some (Wire.Facts f) -> List.length f.facts = 1 | _ -> false) "replies: a text at the bound comes back in a frame"
+   | r -> check false "replies: a text at the bound is written (%s)" (code r));
+  (* a group whose receipt would pass a frame (the PoC's: two new things an operation, large temporary ids) *)
+  let v = Atomic.get e.published in
+  let big = List.init 700_000 (fun i -> Resolve.Add (-(1 lsl 60) - (2 * i), 60, Value.Link (-(1 lsl 60) - (2 * i) - 1))) in
+  check (match Core.write_bounds v big with Some ("too_large", _) -> true | _ -> false) "replies: a group whose receipt passes a frame is refused before it is applied";
+  check (Core.write_bounds v (List.init 399_999 (fun i -> Resolve.Add (-(i + 1), 60, Text "x"))) = None) "replies: a group under 400,000 operations is not counted";
+  Engine.close e
+
+(* ---- one Hello a connection, and no path of the server in an error (the review's F10, F11) ---- *)
+
+let hello_once () =
+  let sim = Sim_disk.create (Rng.make 31) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/h";
+  let e = Result.get_ok (Engine.open_ disk "/h/shop") in
+  let secret = "/srv/secret-place/cluster/vault.key" in
+  let d = { Core.name = "shop"; index = 0; dir = "/h/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Error (secret ^ " is readable by others (mode 644): chmod 600 it")) "/h/shop/vault" } in
+  let submit (_ : Core.db) ops by why k = let b = Engine.prepare e [| ops, by, why |] in k (Engine.commit e b).(0) in
+  let props = List.map (fun (f, t) -> { Schema.name = "scan/" ^ f; typ = t; many = false; unique = false })
+      [ "Name", Value.Ttext; "Size", Tint; "Type", Ttext; "Owner", Tlink; "Content", Ttext ] in
+  let _, ops = Result.get_ok (Resolve.declare (Atomic.get e.published) props) in
+  submit d ops 0 "declare" (fun r -> ignore (Result.get_ok r));
+  let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+  let toks = Tokens.with_tokens Tokens.empty [ mk "w" [ "shop", Tokens.Write ]; mk "r" [ "shop", Tokens.Read ] ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+  let out = Buffer.create 256 in
+  let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+  let c = Lazy.force c in
+  let ask req =
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_request b req;
+    Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+    let bytes = Buffer.to_bytes f in
+    let why = snd (Core.input c bytes 0 (Bytes.length bytes)) in
+    c.flush ();
+    let s = Buffer.to_bytes out in
+    Buffer.clear out;
+    why, if Bytes.length s = 0 then None else Some (Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6)))
+  in
+  let hello tok = Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 } in
+  check (match ask (hello "r") with _, Some (Wire.Welcome _) -> true | _ -> false) "hello: the first Hello, a read token";
+  check (match ask (hello "w") with Core.Need, Some (Wire.Err { code = "invalid"; _ }) -> true | _ -> false) "hello: a second Hello is invalid, the connection kept";
+  check (match ask (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Resolve.Add (-1, 16, Value.Text "x") ] }) with
+         | _, Some (Wire.Err { code = "denied"; _ }) -> true | _ -> false)
+    "hello: its token is still the first's: a write is denied";
+  (* the vault's key refused: the program gets io and no path, the log the path *)
+  let w = Lazy.force (let rec c2 = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c2 in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in c2) in
+  let wask req =
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_request b req;
+    Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+    let bytes = Buffer.to_bytes f in
+    ignore (Core.input w bytes 0 (Bytes.length bytes));
+    w.flush ();
+    let s = Buffer.to_bytes out in
+    Buffer.clear out;
+    if Bytes.length s = 0 then None else Some (Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6)))
+  in
+  ignore (wask (hello "w"));
+  let put = Wire.Put { db = 0; serial = 1; floor = 0; by = 0; why = "t"; kind = "scan"; name = "a.pdf"; typ = "application/pdf"; owner = 0; cold = false; data = "abc" } in
+  let r, log = with_stderr (fun () -> wask put) in
+  check (match r with Some (Wire.Err { code = "io"; message }) -> not (contains message "secret-place") | _ -> false) "paths: a vault's error names no path to the program";
+  check (contains log "secret-place") "paths: the log says it (%S)" log;
+  (* the log's line a second, for the tests after *)
+  Fault.last := neg_infinity;
+  Engine.close e
+
 type gconn = { gc : Core.conn; send : Wire.request -> int * Core.input option; take : unit -> (int * int * int * Bytes.t) list option;
                bad_flush : bool ref; bad_wake : bool ref; closed : int ref }
 
@@ -1647,6 +1921,9 @@ let () =
   files ();
   files_wire ();
   watch_window ();
+  answer_bounds ();
+  reply_bounds ();
+  hello_once ();
   (* last: its questions spawn domains, after which no test may fork *)
   guard ();
   C.finish "server unit"

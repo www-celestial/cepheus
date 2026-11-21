@@ -102,8 +102,10 @@ WantedBy=multi-user.target
 
 - `Type=notify`: the server tells systemd it is ready once every database is open and the socket listens, so the
   services ordered after it start when it answers ([start](server.md#start-stop-crash)).
-- `RuntimeDirectory` makes `/run/cepheus` at each start, owned by the server's user and group, mode 0750; `StateDirectory`
-  makes `/var/lib/cepheus` if it is missing, owned by the server's user.
+- `RuntimeDirectory` makes `/run/cepheus` at each start, owned by the server's user and group, mode 0750 (the server
+  makes its socket 0660, so that the group's programs may connect); `StateDirectory` makes `/var/lib/cepheus` if it is
+  missing, owned by the server's user, 0700 (a data directory others may enter is made 0700 by the server at its
+  start, and its log says so).
 - `Restart=on-failure`: after a kill, a crash, or the exit that follows a failed disk ([G10](guarantees.md#g10-stop-on-a-disk-error)),
   systemd starts the server again, and recovery decides what is durable. A clean stop (`systemctl stop`, SIGTERM)
   is not restarted.

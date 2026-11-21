@@ -274,6 +274,80 @@ let () =
   in
   other "over a Unix socket" (pair ());
   other "over TCP" (tcp ());
+  (* 4. the reading buffers: before Hello, a frame longer than Core.max_hello is refused before its body is read; after
+     it, long frames begun at once hold Net.max_reading more at most, and each is answered in turn *)
+  let raw_frame ~id ~kind body =
+    let f = Buffer.create (String.length body + Wire.header) in
+    Wire.add_frame f ~id ~kind ~flags:0 (let b = Buffer.create (String.length body) in Buffer.add_string b body; b);
+    Buffer.to_bytes f
+  in
+  let write_all fd b o n = let rec go o n = if n > 0 then (let k = Unix.write fd b o n in go (o + k) (n - k)) in try go o n with Unix.Unix_error _ -> () in
+  let p, ended = pair () in
+  let head = Bytes.sub (raw_frame ~id:1 ~kind:Wire.k_hello (String.make (16 lsl 20 - 16) 'h')) 0 65536 in
+  write_all p.fd head 0 (Bytes.length head);
+  let frames, closed = until_closed p in
+  C.check (closed && Net.reading.held = 0 && match frames with [ f ] -> (match reply f with Some (Wire.Err { code = "too_large"; _ }) -> true | _ -> false) | _ -> false)
+    "before Hello: a frame of 16 MiB is too_large and closes, its buffer never grown (%d frames, closed %b, %d bytes held)" (List.length frames) closed Net.reading.held;
+  C.check (ends ended) "before Hello: the connection's thread ended";
+  Unix.close p.fd;
+  let saved = !Net.max_reading in
+  Net.max_reading := 1 lsl 20;
+  let big = String.make 700_000 'p' in
+  let go = Atomic.make false and pongs = Atomic.make 0 in
+  let conns = List.init 3 (fun i -> let p, e = pair () in ignore (welcomed p); p, e, i) in
+  let senders =
+    List.map
+      (fun (p, _, i) ->
+        Thread.create
+          (fun () ->
+            let f = raw_frame ~id:(10 + i) ~kind:Wire.k_ping big in
+            let n = Bytes.length f in
+            write_all p.fd f 0 (n - 100);
+            while not (Atomic.get go) do Thread.delay 0.01 done;
+            write_all p.fd f (n - 100) 100;
+            match next_frame p with Some f when reply f = Some (Wire.Pong big) -> Atomic.incr pongs | _ -> ())
+          ())
+      conns
+  in
+  Thread.delay 0.5;
+  let held = Net.reading.held in
+  C.check (held > 0 && held <= !Net.max_reading) "after Hello: three frames of 700 KB begun at once hold %d bytes more (the bound %d)" held !Net.max_reading;
+  Atomic.set go true;
+  List.iter Thread.join senders;
+  C.check (Atomic.get pongs = 3 && settles (fun () -> Net.reading.held) 0 = 0) "after Hello: each long frame answered in turn, the room given back (%d answered)" (Atomic.get pongs);
+  List.iter (fun (p, e, _) -> Unix.close p.fd; ignore (ends e)) conns;
+  Net.max_reading := saved;
+  clean "the reading buffers";
+  served "after the reading buffers";
+  (* 5. replies held back: 3,000 Finds of 2,000 rows each (about 14 KB a reply, 42 MB in all) sent in one write by a
+     client that reads nothing yet: the server decodes no request while it holds more than Core.max_out of replies;
+     then every reply comes, in order *)
+  ignore (Result.get_ok (Engine.write live (List.init 2000 (fun i -> Resolve.Add (-(i + 1), pscore, Value.Int i))) 0 "rows"));
+  let p, ended = pair () in
+  ignore (welcomed p);
+  let find = Wire.Find { db = 0; query = scores; select = Wire.Give [||]; extra = []; order = Question.Top.none } in
+  let b = Buffer.create 65536 in
+  for i = 1 to 3000 do let x = Buffer.create 32 in Wire.put_request x find; Wire.add_frame b ~id:(100 + i) ~kind:Wire.k_find ~flags:0 x done;
+  let all = Buffer.to_bytes b in
+  let writer = Thread.create (fun () -> write_all p.fd all 0 (Bytes.length all)) () in
+  Thread.delay 0.5;
+  let decoded = Mutex.protect srv.cm (fun () -> Hashtbl.fold (fun _ (c : Core.conn) n -> n + c.requests) srv.conns 0) in
+  C.check (decoded < 400) "replies held back: %d of 3,000 requests decoded while the client reads nothing" decoded;
+  let rows = ref 0 and ordered = ref true and last = ref 100 in
+  for _ = 1 to 3000 do
+    match next_frame p with
+    | Some ((i, _, _, _) as f) ->
+      if i <> !last + 1 then ordered := false;
+      last := i;
+      (match reply f with Some (Wire.Rows r) -> rows := !rows + List.length r.rows | _ -> ())
+    | None -> ordered := false
+  done;
+  Thread.join writer;
+  C.check (!ordered && !rows >= 3000 * 2000) "replies held back: then every reply, in order (%d rows)" !rows;
+  Unix.close p.fd;
+  ignore (ends ended);
+  clean "replies held back";
+  served "after replies held back";
   Unix.close listener;
   Unix.close page;
   Engine.stop live;

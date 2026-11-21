@@ -928,6 +928,7 @@ let find ctx a =
         match d.src with
         | Fork _ -> assert false
         | Server s when (qn.extra <> [] || qn.order <> Question.Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
+        | Server _ when List.length query.where > Wire.max_patterns -> refuse "invalid" "%s" (Client.too_many_patterns query)
         | Server s -> (
           match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order }) with
           | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
@@ -967,6 +968,7 @@ let find_source d (sh : Conn.shared) =
     | Some hub when local hub -> true
     | _ when sh.extra <> [] && s.conn.cl.spoken < 2 -> Conn.finish sh "invalid" Client.older; true
     | _ when sh.order <> Question.Top.none && s.conn.cl.spoken < 5 -> Conn.finish sh "invalid" (Client.no_sorted_watch s.conn.cl.spoken); true
+    | _ when List.length sh.query.where > Wire.max_patterns -> Conn.finish sh "invalid" (Client.too_many_patterns sh.query); true
     | _ ->
       Mutex.protect sh.sm (fun () -> sh.src <- Remote);
       Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from; wextra = sh.extra; worder = sh.order }))

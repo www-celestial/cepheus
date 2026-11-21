@@ -76,6 +76,37 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - Commands: `cepheus serve`, `stop`, `status`, `token add|list|remove`, `cluster init|cert`, `replicate`, `promote`
   ([commands](docs/book/server.md#commands)), and a systemd service with backups, a restore drill and what to watch
   ([production](docs/book/production.md)).
+- An answer the server holds while it builds it (a Find with Sort or aggregates, a watch's first answer) is bounded
+  by its cells, rows times columns (8,388,608 a question, 33,554,432 for every connection's at once), past which it is
+  `too_large`; a Find without Sort past them is asked again and sends its rows as the join finds them, holding none
+  (the same rows in the same order), so that a cross product of patterns that share no variable can no longer exhaust the server's memory
+  ([limits](docs/book/limits.md#questions)).
+- A question's work at the server is counted in lookups (its candidates over the most patterns one variable has), and
+  a question has at most 64 patterns, refused before they are decoded: repeating a pattern no longer multiplies the
+  work a question may take.
+- A connection keeps 1,024 watches at most and the server 65,536, and what their windows and groups keep counts
+  against a connection's cells; past either, the Watch is `too_large`.
+- Before Hello a frame is 4 KiB at most, and the reading buffers grown for long frames hold 64 MiB more at most,
+  server-wide, a connection past it waiting for room: a peer that shows no token can no longer make the server hold
+  16 MiB, nor many connections 16 MiB each.
+- A connection has 10 s from its accept for its TLS handshake and its Hello, and the clock (that one, then
+  `idle_timeout`) is checked inside the TLS handshake and inside a TLS record, so that a peer that sends a byte at a
+  time is closed (Slowloris); on the peer port, 5 s the same way. At `max_connections` a new connection takes the slot
+  of the oldest one that has shown no token, so that peers that connect and send nothing no longer keep programs out.
+- No reply passes the frame limit, which every client refuses: a Get or an Open that would is sent in frames of the
+  flag `more`, which the OCaml and Cesia clients join (one that fits is one frame, as before, and a reply of an
+  earlier server is read as before); a name is 255 bytes at most and a text 16,773,120 through the server, and a group
+  whose receipt would pass a frame is refused before it is applied, where before it was applied and its receipt
+  could not be read. A token that may add to one kind can no longer make a database unopenable.
+- A database's files are 0600 and its folders 0700, and a data directory that lets its group or others in is made the
+  server's alone at its start (the log says so), so that its facts, in the clear on the disk, are no longer readable
+  by every user of the machine.
+- The Unix socket is 0660 once bound, so that the group of the socket's directory may connect, as the production page
+  says (it got EACCES under the usual umask).
+- A second Hello on a connection is `invalid`: a connection's token, rights and session stay those of its first.
+- An error of the server's own files reaches a program as its code and a fixed message, its paths in the log only.
+- A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are sent, so that
+  many small requests for large replies, never read, no longer pile their replies up in the server's memory.
 
 ### From Cesia
 
