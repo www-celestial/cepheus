@@ -198,6 +198,31 @@ let follow_stream (c : Core.conn) (d : database) fd ~id ~stopping =
         loop ()
       with Unix.Unix_error _ | Failure _ | Journal.Damaged _ -> ())
 
+(* ---- the reading buffers ----
+   A connection reads into a buffer of 64 KiB, grown to the frame begun when that is longer (16 MiB at most, and only
+   once a token was shown: Core.max_hello). What the grown buffers hold beyond their 64 KiB is bounded server-wide:
+   a connection waits for room before it grows its own, and its buffer shrinks back once the long frame is used, so
+   that many connections that each begin a long frame make the server hold [max_reading] more at most, not
+   max_connections times 16 MiB (8 GiB at the default 512). 64 MiB is four frames of the largest size read at once;
+   a connection that waits holds nothing but its 64 KiB. *)
+let base = 65536
+let max_reading = ref (64 lsl 20)
+
+type reading = { rm : Mutex.t; rc : Condition.t; mutable held : int; mutable closing : bool }
+
+let reading = { rm = Mutex.create (); rc = Condition.create (); held = 0; closing = false }
+
+(* room for [n] bytes more; false when the server stops meanwhile *)
+let take_room n =
+  Mutex.protect reading.rm (fun () ->
+      while reading.held > 0 && reading.held + n > !max_reading && not reading.closing do Condition.wait reading.rc reading.rm done;
+      if reading.closing then false else (reading.held <- reading.held + n; true))
+
+let give_room n = if n > 0 then Mutex.protect reading.rm (fun () -> reading.held <- reading.held - n; Condition.broadcast reading.rc)
+
+(* at stop: the connections that wait for room end *)
+let stop_reading () = Mutex.protect reading.rm (fun () -> reading.closing <- true; Condition.broadcast reading.rc)
+
 (* a connection: its socket is closed here, whatever ends it (its TLS handshake failing, its end, what nothing else
    expected: the thread's end logs that, io_domain) *)
 let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
@@ -274,7 +299,7 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
   in
   let c = Core.connect ~wake ~close ~gone:(fun () -> !dead) srv ~flush ~submit in
   c_ref := Some c;
-  let buf = ref (Bytes.create 65536) and have = ref 0 in
+  let buf = ref (Bytes.create base) and have = ref 0 in
   let go = ref true in
   (* the time of the accept, then of each whole request *)
   let last = ref (Unix.gettimeofday ()) in
@@ -300,6 +325,7 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
       Option.iter Thread.join w.thread;
       Core.ending c;
       flush ();
+      give_room (Bytes.length !buf - base);
       try io.bye () with Unix.Unix_error _ | Failure _ -> ())
   @@ fun () ->
   try
@@ -310,6 +336,13 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
        if c.requests > before then last := Unix.gettimeofday ();
        Bytes.blit !buf used !buf 0 (!have - used);
        have := !have - used;
+       (* a long frame used: the buffer back to its size, its room given back *)
+       if Bytes.length !buf > base && !have <= base then begin
+         let b = Bytes.create base in
+         Bytes.blit !buf 0 b 0 !have;
+         give_room (Bytes.length !buf - base);
+         buf := b
+       end;
        flush ();
        match why with
        | Core.Shut -> go := false
@@ -333,6 +366,7 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
          if !have >= 4 then begin
            let need = 4 + Wire.u32 !buf 0 in
            if need > Bytes.length !buf then begin
+             if not (take_room (need - Bytes.length !buf)) then raise Exit;
              let b = Bytes.create need in
              Bytes.blit !buf 0 b 0 !have;
              buf := b
@@ -350,7 +384,7 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle fd io =
    | Idle ->
      Core.err c ~id:0 ~kind:0 "idle" "no request for %d s (idle_timeout): the connection is closed" idle;
      flush ()
-   | Unix.Unix_error _ | Failure _ -> ()
+   | Unix.Unix_error _ | Failure _ | Exit -> ()
    | e -> Core.fail c ~id:0 ~kind:0 e
 
 (* ---- I/O domains ---- *)
@@ -562,6 +596,7 @@ let role_of (cfg : Config.t) =
       | exception (Unix.Unix_error (e, _, p)) -> Error (p ^ ": " ^ Unix.error_message e)))
 
 let serve (cfg : Config.t) =
+  Mutex.protect reading.rm (fun () -> reading.closing <- false);
   Files.log_made := (fun path -> log "made the vault's master key %s: keep a copy apart from the data (without it, no file opens)" path);
   (* SIGTERM and SIGINT are waited for by the main thread: blocked first, so that every thread and domain made from
      here on (the databases' writers too) blocks them and none of them is killed by one *)
@@ -840,6 +875,7 @@ let serve (cfg : Config.t) =
           Option.iter Unix.close tcp;
           Option.iter (fun p -> try Unix.unlink p with Unix.Unix_error _ -> ()) (Config.socket_path cfg);
           Array.iter (fun d -> Follow.wake d.follow; Watch.stop d.watch "stopping" "the server is stopping") dbs;
+          stop_reading ();
           let conns = Mutex.protect srv.cm (fun () -> Hashtbl.fold (fun _ c acc -> c :: acc) srv.conns []) in
           List.iter Core.drain conns;
           Atomic.set ticking false;

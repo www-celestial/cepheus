@@ -374,7 +374,8 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 - `id`: chosen by the client; a reply carries its request's id and kind.
 - A frame over 16 MiB is answered `too_large` and the connection closes: a peer that announces 4 GiB cannot make the
-  server allocate it. A count inside a body (of facts, of rows, of operations) larger than the bytes that remain is
+  server allocate it. Before Hello the limit is 4 KiB: a peer that has shown no token holds 64 KiB of the server's
+  memory at most. A count inside a body (of facts, of rows, of operations) larger than the bytes that remain is
   refused before anything is allocated.
 - **Values** are coded as in the journal ([formats](formats.md)): a tag byte (0 int, 1 float, 2 false, 3 true, 4 text,
   5 date, 6 money, 7 link), then a zigzag varint, 8 bytes of a float, or a length and the bytes of a text. A
@@ -1433,6 +1434,28 @@ descriptors and threads counted before and after).
 
 The Unix socket's directory is the gate on one machine: make it `0750`, owned by the server's user and a group of
 the programs allowed to connect (`chgrp cepheus /run/cepheus`); the token is still needed. Over TCP, TLS.
+
+### Denial of service
+
+What one peer may make the server hold or do, each bound refused or waited for before it is passed
+([limits](limits.md#the-server)):
+
+- **Before a token.** A frame before Hello is 4 KiB at most, so a peer that shows no token holds its connection's
+  64 KiB buffer and nothing more.
+- **Reading.** A longer frame grows its connection's buffer, back to 64 KiB once it is used; the grown buffers hold
+  64 MiB more at most, server-wide, a connection past it waiting for room: 512 connections that each begin a frame of
+  16 MiB do not make the server hold 8 GiB.
+- **Answers.** An answer the server holds (Sort, aggregates, a watch's first answer) is bounded by its cells, rows
+  times columns, a question's and every connection's together; a Find without Sort holds none of its rows, so a cross
+  product of patterns that share no variable (the size of the product, the AGM bound: Atserias, Grohe, Marx 2008)
+  costs the server its time, not its memory. A question takes 64 patterns at most, and its work is counted in lookups.
+- **Watches.** 1,024 a connection, 65,536 the server, and what their windows and groups keep counts against a
+  connection's cells.
+
+*Tested by* `test/server_unit.ml` ("the bounds of an answer at the server": a cross product asked every way, the
+pool held by others, 65 patterns, a pattern repeated, the watches of a connection and of the server) and
+`test/server_guard.ml` (real sockets: a frame of 16 MiB before Hello, three frames of 700 KB begun at once under a
+bound of 1 MiB).
 
 ### TLS
 

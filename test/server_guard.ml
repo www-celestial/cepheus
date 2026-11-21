@@ -274,6 +274,51 @@ let () =
   in
   other "over a Unix socket" (pair ());
   other "over TCP" (tcp ());
+  (* 4. the reading buffers: before Hello, a frame longer than Core.max_hello is refused before its body is read; after
+     it, long frames begun at once hold Net.max_reading more at most, and each is answered in turn *)
+  let raw_frame ~id ~kind body =
+    let f = Buffer.create (String.length body + Wire.header) in
+    Wire.add_frame f ~id ~kind ~flags:0 (let b = Buffer.create (String.length body) in Buffer.add_string b body; b);
+    Buffer.to_bytes f
+  in
+  let write_all fd b o n = let rec go o n = if n > 0 then (let k = Unix.write fd b o n in go (o + k) (n - k)) in try go o n with Unix.Unix_error _ -> () in
+  let p, ended = pair () in
+  let head = Bytes.sub (raw_frame ~id:1 ~kind:Wire.k_hello (String.make (16 lsl 20 - 16) 'h')) 0 65536 in
+  write_all p.fd head 0 (Bytes.length head);
+  let frames, closed = until_closed p in
+  C.check (closed && Net.reading.held = 0 && match frames with [ f ] -> (match reply f with Some (Wire.Err { code = "too_large"; _ }) -> true | _ -> false) | _ -> false)
+    "before Hello: a frame of 16 MiB is too_large and closes, its buffer never grown (%d frames, closed %b, %d bytes held)" (List.length frames) closed Net.reading.held;
+  C.check (ends ended) "before Hello: the connection's thread ended";
+  Unix.close p.fd;
+  let saved = !Net.max_reading in
+  Net.max_reading := 1 lsl 20;
+  let big = String.make 700_000 'p' in
+  let go = Atomic.make false and pongs = Atomic.make 0 in
+  let conns = List.init 3 (fun i -> let p, e = pair () in ignore (welcomed p); p, e, i) in
+  let senders =
+    List.map
+      (fun (p, _, i) ->
+        Thread.create
+          (fun () ->
+            let f = raw_frame ~id:(10 + i) ~kind:Wire.k_ping big in
+            let n = Bytes.length f in
+            write_all p.fd f 0 (n - 100);
+            while not (Atomic.get go) do Thread.delay 0.01 done;
+            write_all p.fd f (n - 100) 100;
+            match next_frame p with Some f when reply f = Some (Wire.Pong big) -> Atomic.incr pongs | _ -> ())
+          ())
+      conns
+  in
+  Thread.delay 0.5;
+  let held = Net.reading.held in
+  C.check (held > 0 && held <= !Net.max_reading) "after Hello: three frames of 700 KB begun at once hold %d bytes more (the bound %d)" held !Net.max_reading;
+  Atomic.set go true;
+  List.iter Thread.join senders;
+  C.check (Atomic.get pongs = 3 && settles (fun () -> Net.reading.held) 0 = 0) "after Hello: each long frame answered in turn, the room given back (%d answered)" (Atomic.get pongs);
+  List.iter (fun (p, e, _) -> Unix.close p.fd; ignore (ends e)) conns;
+  Net.max_reading := saved;
+  clean "the reading buffers";
+  served "after the reading buffers";
   Unix.close listener;
   Unix.close page;
   Engine.stop live;

@@ -86,6 +86,9 @@ stay as they are, or a later version reads and speaks both the old and the new.
   work a question may take.
 - A connection keeps 1,024 watches at most and the server 65,536, and what their windows and groups keep counts
   against a connection's cells; past either, the Watch is `too_large`.
+- Before Hello a frame is 4 KiB at most, and the reading buffers grown for long frames hold 64 MiB more at most,
+  server-wide, a connection past it waiting for room: a peer that shows no token can no longer make the server hold
+  16 MiB, nor many connections 16 MiB each.
 
 ### From Cesia
 

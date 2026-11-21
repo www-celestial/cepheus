@@ -836,9 +836,14 @@ type input =
   | Shut
   | Follow of db * int  (** the connection becomes a follow stream (Follows) *)
 
+(* The frames a connection may send before its Hello, at most: a Hello is a version, a token (at most 256 characters
+   are looked at: Tokens.check), a program's name and a session, a few hundred bytes. 4 KiB leaves a long name room,
+   and a peer that has shown no token cannot make the server hold more for it than that (and its 64 KiB of buffer). *)
+let max_hello = 4096
+
 (* Every complete frame of [buf] from [off] to [stop], until the connection has its limit of writes in flight: the
-   offset of the first byte not used, and why it stopped. A frame over the limit closes the connection before its
-   body is read. A request that raises what it does not expect is answered internal and closes the connection
+   offset of the first byte not used, and why it stopped. A frame over the limit (before Hello, over [max_hello])
+   closes the connection before its body is read. A request that raises what it does not expect is answered internal and closes the connection
    ([fail]): the frames of its reply sent before (a Find's first rows) end with that error, which the client takes
    as the reply's end. A connection that another of its threads failed ([broke]) reads no more requests. *)
 let input c buf off stop =
@@ -850,6 +855,10 @@ let input c buf off stop =
       let len = Wire.u32 buf o in
       if len > Wire.max_frame || len < 6 then begin
         err c ~id:0 ~kind:0 "too_large" "a frame of %d bytes (the limit is %d)" len Wire.max_frame;
+        o, Shut
+      end
+      else if c.token = None && len > max_hello then begin
+        err c ~id:0 ~kind:0 "too_large" "a frame of %d bytes before Hello (the limit is %d until a token is shown)" len max_hello;
         o, Shut
       end
       else if stop - o < 4 + len then o, Need
