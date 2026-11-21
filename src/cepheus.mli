@@ -262,6 +262,11 @@ val change_budget : int ref
 (** A change of the rules or the ontology may derive this many times the facts of the database before it, beyond
     [rule_budget] (4): a change past it is refused, naming the rule that derived the most. *)
 
+val work_budget : int ref
+(** The candidates a group's rules may read (each fact a pattern of a body, of a Not or of a constraint enumerates),
+    as this many times its budget of derived facts (10): a group or a change past it is refused, naming the rule whose
+    pattern read the last one. *)
+
 (** {1 Reading} *)
 
 val same : view -> int -> int list

@@ -232,6 +232,7 @@ val why : view -> int -> int -> value -> proof option
 val sources : view -> int -> int list option
 val rule_budget : int ref * int ref
 val change_budget : int ref
+val work_budget : int ref
 ```
 
 A rule is a question's patterns and ranges (`where`, `ranges`, variables 0 to `vars - 1`) and a head: `Give pattern`,
@@ -272,7 +273,10 @@ what a reader allowed some kinds only must read to read `p`'s derived facts with
 `rule_budget` is (base, per): a group whose derived changes pass $\mathit{base} + \mathit{per} \times \text{its asserted changes}$ is refused,
 `Invalid "rule NAME derived more than N facts from a group of K facts"`; (100,000, 100) by default, for every database
 of the process. A change of the rules or the ontology may also derive `change_budget` (4) times the facts of the
-database before it: `Invalid "rule NAME derived more than N facts from a change of the rules or the ontology"`.
+database before it: `Invalid "rule NAME derived more than N facts from a change of the rules or the ontology"`. The
+candidates the rules read (each fact a pattern of a body, of a Not or of a constraint enumerates) may be
+`work_budget` (10) times that budget: `Invalid "rule NAME read more than N candidates of its patterns for a group of
+K facts"` (or `for a change of the rules or the ontology`), NAME the rule whose pattern read the last one.
 
 ```ocaml
 open Cepheus

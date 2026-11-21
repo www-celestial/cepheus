@@ -568,8 +568,8 @@ let open_ ?(id_source = random_id) ?buffer ?raft ?bootstrap_time ?(bootstrap = t
            unless the last process closed cleanly: [close] leaves a marker once everything is durable, and an open
            removes it before it writes anything, so a marker seen means that no process wrote since a clean close,
            or that a power loss came after, which leaves nothing in the page cache (PostgreSQL keeps the same state in
-           pg_control: shut down, or in production). The marker's own changes need no fsync: lost, they only make
-           the next open force. *)
+           pg_control: shut down, or in production). For a database never written through a commit buffer, the
+           marker's own changes need no fsync: lost, they only make the next open force. *)
         let marker = Filename.concat dir "closed" in
         let clean = disk.exists marker in
         (* [shared]: a server's commit buffer forces the journal (made durable before its first frame; removed by the
@@ -585,7 +585,10 @@ let open_ ?(id_source = random_id) ?buffer ?raft ?bootstrap_time ?(bootstrap = t
         let mark = buffer <> None && not was_shared and unmark = buffer = None && was_shared in
         if mark then disk.close (disk.openf shared true);
         if unmark then disk.remove shared;
-        if (not clean) || mark || unmark then disk.sync_dir dir;
+        (* the marker's removal made durable, before the journal is written, for a database written through a commit
+           buffer ([was_shared]; [unmark] is one): brought back by a power loss, the marker would let an open without
+           the buffer take it for one closed cleanly, and lose the frames the buffer alone holds *)
+        if (not clean) || mark || was_shared then disk.sync_dir dir;
         if not (disk.exists jdir) then (disk.mkdir jdir; disk.sync_dir dir);
         if not (disk.exists sdir) then (disk.mkdir sdir; disk.sync_dir dir);
         (* a journal of format 1 coded in columns once, before anything reads it *)

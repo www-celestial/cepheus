@@ -12,7 +12,11 @@
    a page enters a small FIFO (a tenth of the room) and goes to the main FIFO only if it was read again meanwhile, so
    a scan does not push out the pages read again and again; in the main FIFO a page read since the policy last looked
    at it is kept (its 2-bit counter lowered), as a CLOCK keeps a page whose bit is set. A ghost FIFO remembers the
-   pages lately pushed out of the small one: a page that comes back soon goes straight to the main FIFO. *)
+   pages lately pushed out of the small one: a page that comes back soon goes straight to the main FIFO.
+
+   The FIFOs hold a base's tables, never the base: a run's file is closed by a finaliser on its base (Snapshot), once
+   no view holds it, and the GC frees its tables once no FIFO does. A base replaced by a merge leaves the FIFOs at once
+   ([drop]); a page an older view reads of it afterwards enters them again and leaves as any other. *)
 
 let bits = 14
 let size = 1 lsl bits
@@ -21,6 +25,9 @@ let mask = size - 1
 exception Unreadable of string
 (* a page that does not check, or that the disk could not read *)
 
+(* what the cache's FIFOs hold of a base: the arrays of its [frames], [hot] and [freq], and its [id] *)
+type tables = { tid : int; tframes : Bytes.t array; thot : Bytes.t array; tfreq : Bytes.t }
+
 type t = {
   id : int;  (* the cache's name for this base, in the ghost FIFO *)
   frames : Bytes.t array;  (* the resident pages *)
@@ -28,6 +35,7 @@ type t = {
   freq : Bytes.t;  (* a page's reads counted for the policy, 0 to 3 *)
   len : int;  (* bytes *)
   load : (int -> Bytes.t) option;  (* reads and checks page k; None: every page is resident for good *)
+  tables : tables;  (* the same arrays *)
 }
 
 (* a constant, so that the test of a frame needs no load: no page is empty *)
@@ -35,9 +43,13 @@ let absent = Bytes.unsafe_of_string ""
 let ids = Atomic.make 0
 let pages len = (len + size - 1) / size
 
+let make id n len load =
+  let frames = Array.make n absent and hot = Array.make n absent and freq = Bytes.make n '\000' in
+  { id; frames; hot; freq; len; load; tables = { tid = id; tframes = frames; thot = hot; tfreq = freq } }
+
 (* ---- the cache ---- *)
 
-type entry = { b : t; k : int }
+type entry = { b : tables; k : int }
 
 (* a FIFO of entries or keys, in a growing ring *)
 module Ring = struct
@@ -55,6 +67,19 @@ module Ring = struct
     r.a.((r.head + r.n) mod Array.length r.a) <- x;
     r.n <- r.n + 1
 
+  (* the entries for which [keep] holds, in their order: moved down in place, the slots freed left empty *)
+  let filter r keep =
+    let len = Array.length r.a and j = ref 0 in
+    for i = 0 to r.n - 1 do
+      let x = r.a.((r.head + i) mod len) in
+      if keep x then begin
+        r.a.((r.head + !j) mod len) <- x;
+        incr j
+      end
+    done;
+    for i = !j to r.n - 1 do r.a.((r.head + i) mod len) <- r.dummy done;
+    r.n <- !j
+
   let pop r =
     let x = r.a.(r.head) in
     r.a.(r.head) <- r.dummy;
@@ -63,7 +88,7 @@ module Ring = struct
     x
 end
 
-let none = { b = { id = -1; frames = [||]; hot = [||]; freq = Bytes.empty; len = 0; load = None }; k = 0 }
+let none = { b = { tid = -1; tframes = [||]; thot = [||]; tfreq = Bytes.empty }; k = 0 }
 let lock = Mutex.create ()
 let capacity = ref (65536 (* pages: 1 GiB *))
 let small = Ring.make none
@@ -74,8 +99,8 @@ let resident = ref 0
 let misses = Atomic.make 0 (* pages read from disk: for the tests and benchmarks *)
 let evicted = ref 0 (* pages out since the last full collection *)
 
-let key e = (e.b.id lsl 32) lor e.k
-let freq e = Char.code (Bytes.unsafe_get e.b.freq e.k)
+let key e = (e.b.tid lsl 32) lor e.k
+let freq e = Char.code (Bytes.unsafe_get e.b.tfreq e.k)
 
 let set_capacity bytes = capacity := max 16 (bytes / size)
 
@@ -87,8 +112,8 @@ let forget_ghost g =
 
 (* frames first, then hot: see touch *)
 let evict e =
-  e.b.frames.(e.k) <- absent;
-  e.b.hot.(e.k) <- absent;
+  e.b.tframes.(e.k) <- absent;
+  e.b.thot.(e.k) <- absent;
   decr resident;
   incr evicted
 
@@ -98,8 +123,8 @@ let evict e =
    with S3-FIFO's 2 bits. A page just read from the disk is hot for the read that needed it, and leaves the table at
    the next miss, so that only a later read counts. *)
 let set_freq e f =
-  e.b.hot.(e.k) <- absent;
-  Bytes.unsafe_set e.b.freq e.k (Char.unsafe_chr f)
+  e.b.thot.(e.k) <- absent;
+  Bytes.unsafe_set e.b.tfreq e.k (Char.unsafe_chr f)
 
 let fresh = ref none
 
@@ -107,7 +132,7 @@ let fresh = ref none
 let rec make_room () =
   if small.n > 0 && (small.n >= !capacity / 10 || main.n = 0) then begin
     let e = Ring.pop small in
-    if e.b.frames.(e.k) == absent then make_room ()
+    if e.b.tframes.(e.k) == absent then make_room ()
     else if freq e > 0 then begin
       (* read again while in the small FIFO: to the main one *)
       set_freq e 0;
@@ -124,7 +149,7 @@ let rec make_room () =
   end
   else if main.n > 0 then begin
     let e = Ring.pop main in
-    if e.b.frames.(e.k) == absent then make_room ()
+    if e.b.tframes.(e.k) == absent then make_room ()
     else
       let f = freq e in
       if f > 0 then begin
@@ -136,12 +161,19 @@ let rec make_room () =
   end
 
 (* A base the database no longer uses (replaced by a merge): its pages leave the cache now rather than when the policy
-   gets to them, so that two bases are never held for one. A view that still reads it reads its pages again from the
-   file. Nothing for a base built in memory (the GC frees it with its last view). *)
+   gets to them, so that two bases are never held for one, and its entries leave the FIFOs, which would hold its
+   tables until the cache is full (one pass over them, as long as the cache's room in pages, at each merge). A view
+   that still reads it reads its pages again from the file. Nothing for a base built in memory (the GC frees it with
+   its last view). *)
 let drop b =
   if b.load <> None then begin
     Mutex.lock lock;
-    Array.iteri (fun k f -> if f != absent then evict { b; k }) b.frames;
+    let tb = b.tables in
+    Array.iteri (fun k f -> if f != absent then evict { b = tb; k }) b.frames;
+    let other e = e.b != tb in
+    Ring.filter small other;
+    Ring.filter main other;
+    if !fresh.b == tb then fresh := none;
     Mutex.unlock lock
   end
 
@@ -178,7 +210,7 @@ let enter b k f =
   b.frames.(k) <- f;
   Bytes.unsafe_set b.freq k '\000';
   incr resident;
-  let e = { b; k } in
+  let e = { b = b.tables; k } in
   if Hashtbl.mem ghosts (key e) then Ring.push main e else Ring.push small e;
   e
 
@@ -193,7 +225,7 @@ let fill b k load =
       let e = enter b k f in
       (* the page read before this one leaves the hot table: its next read will count *)
       let p = !fresh in
-      if p.b.id >= 0 && freq p = 0 then p.b.hot.(p.k) <- absent;
+      if p.b.tid >= 0 && freq p = 0 then p.b.thot.(p.k) <- absent;
       fresh := e;
       if not !tracing then b.hot.(k) <- f;
       f
@@ -264,14 +296,11 @@ let[@inline] get8 b o = Char.code (Bytes.unsafe_get (frame b o) (o land mask))
 
 (* ---- a part with no page (Store.nothing) ---- *)
 
-let empty = { id = -1; frames = [||]; hot = [||]; freq = Bytes.empty; len = 0; load = None }
+let empty = make (-1) 0 0 None
 
 (* ---- runs read from a file through the cache (every run) ---- *)
 
-let on_file len load =
-  let n = pages len in
-  { id = Atomic.fetch_and_add ids 1; frames = Array.make n absent; hot = Array.make n absent; freq = Bytes.make n '\000';
-    len; load = Some load }
+let on_file len load = make (Atomic.fetch_and_add ids 1) (pages len) len (Some load)
 
 (* page k as it is (from the cache or the disk), for writing a base out *)
 let page b k = frame b (k lsl bits)

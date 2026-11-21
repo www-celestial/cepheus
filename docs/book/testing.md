@@ -105,7 +105,9 @@ checks a property on many random inputs against a reference model written indepe
    exactly the right groups (the frame counts when its header and body reached the disk and the file reaches its end:
    a torn trailer alone is rebuilt, G6; format 2's shorter frames put a sector boundary between a body and its
    trailer, a case the oracle missed before); every single bit of two journals flipped must be detected by a full read and handled by
-   recovery as G6 says; a segment torn at its creation at any byte is dropped; and inside a merge (G12), at every
+   recovery as G6 says, the bits of their segment headers too; a segment torn at its creation at any byte is dropped, and
+   a newest segment's header zeroed from any byte with its frames kept, or cut where a run resumes, is refused; and
+   inside a merge (G12), at every
    mutating disk call of four kinds of merge (now, of every run; begun ahead of the disk and installed two frames
    later; a large group's, merged as it is prepared and named once its frame is durable; those of a recovery
    replaying a long tail), every crash state: a process death then a power loss, and power losses keeping each prefix

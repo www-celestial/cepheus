@@ -26,7 +26,8 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
 1. takes the lock (`Busy` if another process has it);
 2. reads the id; if `closed` is there (the last process closed cleanly), removes it; else forces the database's
    directory. If `shared` is there and `closed` is not, an open in a program's own process is refused (`Busy`: [a
-   database of a server](#a-database-of-a-server)); after a clean close it removes `shared` and goes on;
+   database of a server](#a-database-of-a-server)); after a clean close it removes `shared` and goes on. The
+   directory is forced after the removal of `closed` too when `shared` is there, so that no power loss brings it back;
 3. converts a journal of format 1 to format 2, once (each segment written beside, forced, renamed over the old one;
    a crash in the middle leaves each segment whole, and the next open goes on), and removes the files of merges a
    crash interrupted (`.tmp`);
@@ -47,7 +48,8 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
    `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a run of the
    groups before the damage);
 8. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt; a newest
-   segment torn at its creation (its header does not check and it holds no frame) is removed;
+   segment torn at its creation (no longer than its header, which does not check, and no run resumes in it) is
+   removed; a header that does not check in a segment that holds more, or where the newest run resumes, is damage;
 9. a new database (no group yet) gets group 1, which describes the five system properties (a database made before
    `cepheus/rule` existed lacks the description of that one: its rules work all the same).
 
@@ -164,7 +166,7 @@ down to the first level that can hold them all, writes one run there (about 5 by
 and then removes the runs it replaced, and any other run outside the chain. No run is kept aside: should the newest run
 be found damaged at an open, it is set aside and its groups are replayed from the journal (a slower open, nothing
 lost). A removed file's space returns only when no view reads it any longer (the file stays open until the garbage
-collector frees its run). During a full merge (`snapshot`) the directory holds the base twice, the old and the new:
+collector frees its run, and closes it then). During a full merge (`snapshot`) the directory holds the base twice, the old and the new:
 budget about twice the base for `snapshots/` while it runs, once the base after it.
 
 A fact is written about $(T + 1) / 2 = 2.5$ times per level it crosses ($T = 4$), against up to 17 times with the one level

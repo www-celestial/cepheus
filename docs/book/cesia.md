@@ -126,8 +126,8 @@ name in questions and in `Write` (`Client.City`), and the field `kind`, which th
 | `cepheus.Int()` | a whole number of 63 bits | an Int | `42` |
 | `cepheus.Float()` | a 64-bit float (IEEE 754) | a Float (an Int is taken too) | `2.5` |
 | `cepheus.Bool()` | true or false | a Bool | `true` |
-| `cepheus.Date()` | an instant in UTC, kept in milliseconds since 1970 | a number of seconds since 1970, as `sys.Now()` gives; read back as a Float | `1794268800.25` |
-| `cepheus.Money(scale)` | an exact decimal of `scale` digits after the point (0 to 18), kept in minor units | a number (Int or Float), rounded to the scale; read back as a Float | `1200.5` |
+| `cepheus.Date()` | an instant in UTC, kept in milliseconds since 1970 | a number of seconds since 1970, as `sys.Now()` gives, below $4.6 \times 10^{15}$ either way (146 million years: its milliseconds an Int); read back as a Float | `1794268800.25` |
+| `cepheus.Money(scale)` | an exact decimal of `scale` digits after the point (0 to 18), kept in minor units | a number (Int or Float), rounded to the scale, whose minor units are an Int; read back as a Float | `1200.5` |
 | `cepheus.Link()` | another thing of the database | its id, an Int | `65536` |
 
 Each takes `unique = false` and `many = false`. Money is exact in the database (an integer of minor units, so sums are
@@ -281,7 +281,12 @@ makes, can do much more on a graph ([theory](theory.md#4-generic-join)). Each an
 
 **Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) and `cepheus.Between(x, lo, hi)`
 ($\mathit{lo} \le x \le \mathit{hi}$), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
-filters after it. Any other condition is Cesia's, on the rows it gives (`list.Filter`).
+filters after it. Any other condition is Cesia's, on the rows it gives (`list.Filter`). A Date is kept to the
+millisecond and Money to its digits, so a bound between two of them (`Above(price, 10.005)` for cents, a time of
+`sys.Now()`) keeps exactly the values on its side: it is rounded toward the inside of the range, 10.005 to 10.01 for
+Above and to 10.00 for Below. A bound of floats within $2^{-50}$ (relative) of a unit is that unit, as a decimal
+written to the cent is (10.01 times 100 is 1000.9999999999999 in floats): `Above(price, 10.01)` leaves 10.01 out.
+`Above(n, v)` with the largest Int, or `Below(n, v)` with the least, keeps nothing.
 
 **Aggregates.** In `Give`, `cepheus.Sum(x)`, `cepheus.Min(x)`, `cepheus.Max(x)` and `cepheus.Count()` group the answers
 by the other fields of `Give`, as SQL's `GROUP BY` does; `Count()` counts the answers of a group. They are computed

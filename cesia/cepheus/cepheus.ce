@@ -21,7 +21,8 @@ Float(unique = false, many = false) = {Type: "float", Unique: unique, Many: many
 (** true or false. *)
 Bool(unique = false, many = false) = {Type: "bool", Unique: unique, Many: many}
 
-(** An instant, as the seconds since 1970 in UTC that sys.Now gives, kept to the millisecond. *)
+(** An instant, as the seconds since 1970 in UTC that sys.Now gives, kept to the millisecond: below 4.6e15 s either
+    way, so that its milliseconds are an Int. *)
 Date(unique = false, many = false) = {Type: "date", Unique: unique, Many: many}
 
 (** Another thing of the database: its id. *)
@@ -99,13 +100,16 @@ Count() = {Count: true}
 (** A key of Sort, in descending order: the largest first. A key without it is ascending. *)
 Desc(key) = {Desc: key}
 
-(** A condition of Where: x above v, for an int, a date or money. *)
+(** A condition of Where: x above v, for an int, a date or money. A bound between two milliseconds or two units of
+    the money is rounded up, to the first value above it; Above the largest Int keeps nothing. *)
 Above(x, v) = {Range: x, Low: v, Open: "low"}
 
-(** A condition of Where: x below v. *)
+(** A condition of Where: x below v. A bound between two milliseconds or two units of the money is rounded down;
+    Below the least Int keeps nothing. *)
 Below(x, v) = {Range: x, High: v, Open: "high"}
 
-(** A condition of Where: lo <= x <= hi. *)
+(** A condition of Where: lo <= x <= hi, each bound rounded toward the inside when it falls between two
+    milliseconds or two units of the money. *)
 Between(x, lo, hi) = {Range: x, Low: lo, High: hi}
 
 (** A condition of Where: none of the facts these patterns name holds, with these conditions. Its variables in no

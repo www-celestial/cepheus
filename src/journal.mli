@@ -12,7 +12,9 @@
 
     Recovery reads the frames in order. At the first frame that does not check, it decides between a torn tail
     (written during a crash, never acknowledged: cut off) and damage (refuse to open, never drop): a valid frame after
-    it, or a trailer in its place (the frame was written whole), means damage. See [docs/book/guarantees.md], G1-G3, G6. *)
+    it, or a trailer in its place (the frame was written whole), means damage. A segment's header is forced before any
+    frame: one that does not check is a segment torn at its creation (removed) only in the newest segment, no longer
+    than its header, where no run resumes; elsewhere it is damage. See [docs/book/guarantees.md], G1-G3, G6. *)
 
 exception Damaged of string
 (** The journal has lost or changed data it had made durable. The message says where. *)

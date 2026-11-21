@@ -127,3 +127,26 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   in its server, 26 through its socket), the triangles of a follow graph on 3 cores 100 ms against 602, the load of
   the 10 M facts 5.13 s against `COPY`'s 30.87; durable writes on par with PostgreSQL, both bound by the disk's fsync
   ([comparison](docs/book/comparison.md)).
+
+### Fixes
+
+- A newest journal segment whose header does not check while it holds bytes past it, or where the newest run
+  resumes, is refused at open as damage (G6). Recovery took it for a segment torn at its creation and removed it, so
+  one flipped bit in its 40 bytes opened the database without that segment's groups, with no error.
+- A run a merge replaced is closed, and its disk space freed, once no view reads it. The cache's queues kept an
+  entry for each of its pages, which held the run and its open file until the cache was full: with the data inside
+  the cache (1 GiB by default), every replaced run stayed open, its space held while `du` showed it gone.
+- From Cesia, `Above`, `Below` and `Between` keep exactly the values inside their bounds. A bound between two cents
+  or two milliseconds was rounded to the nearest before the strict step, so `Above(price, 10.005)` left out 10.01
+  and `Between(price, 10.004, 10.016)` gave 10.00 and 10.02; now it is rounded toward the inside of the range. And
+  `Above(n, v)` with the largest Int, or `Below` with the least, wrapped around and gave every row: now none.
+- A database written through the server's commit buffer has the removal of its clean-close marker forced at open,
+  before its journal is written. A power loss soon after could bring the marker back, and the database then opened
+  alone, without the frames the buffer alone held: confirmed groups missing, instead of the refusal (`Busy`).
+- The work of the rules is bounded, not only their derived facts: the candidates their patterns read may be 10 times
+  the budget of derived facts (`work_budget`), else the group or the change is refused, naming the rule. A body of
+  three things that share a tag read $n^3$ candidates for $n$ heads, under the budget: one write of 400 facts held the
+  writer 13 s, 1,600 about 15 minutes; refused now in 0.06 s.
+- From Cesia, a date of $4.6 \times 10^{15}$ s or more either way, whose milliseconds pass the Ints, and money of the
+  least Int are refused (`invalid`): they were stored wrapped around (5e15 s read back as -4.2e15 s, the least Int's
+  cents as 0).

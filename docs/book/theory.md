@@ -232,7 +232,10 @@ readers that raise an exception on a page not hot, and run again from their star
 nothing before they return); the loops that call a function per row, which save their values around that call
 anyway, use readers that call. Evicted pages are never reused in place: a reader that raced with the eviction still
 holds the old bytes, which are right, and the GC frees them; a full collection after each quarter of the cache
-evicted keeps the pages in memory under 1.25 times the cache.
+evicted keeps the pages in memory under 1.25 times the cache. The policy's FIFOs hold a run's tables (its pages,
+`hot` and counters), never the run, whose file is closed by a finaliser once no view holds the run: a run a merge
+replaced leaves them at once, its pages taken out and its entries removed (one pass over the FIFOs a merge), and a
+page an older view reads of it afterwards enters them as any other, without keeping its file open.
 
 **Cost when everything is in memory**, 10 M facts, release build, 11 runs x 2 rounds alternated, against milestone
 2's mapped base (c67e52d): Q1 0.37 to 0.39 µs (+5 %), Q2 1.73 to 1.66 µs (-4 %), Q3 3.67 to 3.98 ms (+8 %), Q4 199 to

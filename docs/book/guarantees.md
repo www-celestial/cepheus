@@ -157,8 +157,11 @@ and the journal's directory before it replays any group of that segment (`Journa
 database's directory, unless the last process closed cleanly: `close` leaves a marker (`DIR/closed`) once every
 frame and name is durable, and only if no fsync failed; an open removes it before it writes anything. So a marker
 seen means that no process wrote since a clean close, or that a power loss came after the writes, and a power loss
-leaves nothing in the page cache; the marker's own creation and removal need no fsync (lost, they only make the next
-open force). PostgreSQL keeps the same state in `pg_control` (shut down, or in production). (Found by the simulation once it could kill a process without a power loss; mutation check:
+leaves nothing in the page cache; for a database never written through a server's commit buffer, the marker's own
+creation and removal need no fsync (lost, they only make the next open force). For one that was (`DIR/shared`), the
+open forces the directory after it removes the marker, before it writes anything: a power loss that brought the
+marker back would let an open without the buffer take the database for one closed cleanly, without the frames the
+buffer alone holds. PostgreSQL keeps the same state in `pg_control` (shut down, or in production). (Found by the simulation once it could kill a process without a power loss; mutation check:
 without the segment's fsync, 9 of 300 seeds fail, without the directory's, 5.)
 
 *Tested by* the bank test (reader domains check every view they take: constant total, numbers never go back) and the
@@ -179,7 +182,13 @@ than drop a durable frame. One residual case: damage to the newest frame of the 
 it, looks like a torn write and is cut at recovery (a full read before recovery reports it).
 
 *Proof.* Every byte of a segment is covered: its header by the header CRC, each frame's header by its header CRC, its
-body by the body CRC (repeated in the trailer), the trailer by comparison with the header. At recovery, the first frame
+body by the body CRC (repeated in the trailer), the trailer by comparison with the header. A segment's header is
+written and forced, and its directory, before any frame goes into the segment, and a run names a position only in a
+segment the writer had begun: so a header that does not check is damage in a segment longer than its header, and in
+the one the newest run resumes in. Only a newest segment no longer than its header, that no run names, may be one a
+crash left being made; it holds no frame, and recovery removes it. (A newest segment cut inside its header, where no
+run resumes, reads so: that is the loss of whole durable frames at the end of the journal with nothing written after
+them, out of reach of one machine.) At recovery, the first frame
 that does not check is damage when a frame header that checks follows it (frames are written one after the other, each
 forced before the next, so a later header proves this frame was written whole), or when
 a trailer at the right distance carries the body's CRC (the frame was written whole, only its header changed);
@@ -194,9 +203,11 @@ failed fsyncs (G13), the invariants Durable, RefuseOnlyOnDamage, PublishedOnDisk
 ResidualBound hold in all 3,856,315 reachable states. TLC first found a trace where
 two damaged frames at the end were both cut; the rule above (a later header that checks) closed it.
 
-*Tested by* `test/exhaustive.ml` (every bit of two journals flipped: always seen by a full read; recovery refuses, or
-keeps every group when the flip hit a trailer, which it rebuilds, or, for a flip in the newest frame, cuts it: counted
-as the residual) and the simulation (random flips in durable segments).
+*Tested by* `test/exhaustive.ml` (every bit of two journals flipped, their segment headers' too: always seen by a full
+read; recovery refuses, or keeps every group when the flip hit a trailer, which it rebuilds, or, for a flip in the
+newest frame, cuts it: counted as the residual; the newest segment's header zeroed from each of its bytes with its
+frames kept, cut inside where a run resumes, or flipped in a segment that holds only its header where a run resumes:
+refused) and the simulation (random flips in durable segments, their headers too).
 
 ## G7 Runs on disk
 
@@ -608,9 +619,15 @@ node's fact, its ranges hold, every leaf is asserted in the view — and the nam
   targets checked against the budget as they grow (so its memory before a refusal is in proportion to the budget), a
   forest's facts counted before any is made, and B/F's deletions. A rule set or data whose consequences pass it is
   refused whole, naming the rule: never a writer that runs out of memory or stalls on a closure of $n^2$ facts.
-  *Tested by* `test/reasoning.ml` ("a closure past the budget": chains of 200 in one group, both rule shapes, edges to
-  older and to newer things; the edge joining two chains of 40; the W3C's prp-trp unfolded over a chain; each refused
-  whole, the view unchanged, the least model after).
+  The work is bounded too, not only what it derives: every candidate a rule's plan reads (each fact a pattern of a
+  body, of a Not or of a constraint enumerates; on several domains, every morsel's) counts against a work budget of
+  10 times the derived one (`work_budget`), refused the same way, naming the rule whose pattern read the last one: a
+  body whose patterns share a value ($n^3$ candidates for $n$ heads) stops after about 0.06 s of a small write instead
+  of minutes. *Tested by* `test/reasoning.ml` ("a closure past the budget": chains of 200 in one group, both rule
+  shapes, edges to older and to newer things; the edge joining two chains of 40; the W3C's prp-trp unfolded over a
+  chain; each refused whole, the view unchanged, the least model after; "the work budget": three things of one tag
+  in a write and in a change of the rules, a Not over 3,000 things of one tag, each refused, named, the view
+  unchanged).
 - **A change of the rules is bounded and can be stopped.** Its derived facts count against a change's budget
   ($100{,}000 + 100 \times$ its asserted changes $+ 4 \times$ the database's facts), at the build and over the groups
   it catches up with, so its memory stays in proportion to the database: a rule of $n^2$ facts is refused, named, while

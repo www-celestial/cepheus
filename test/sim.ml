@@ -333,7 +333,7 @@ let step w =
     else Sim_disk.fail_next_fsync w.sim
   | n when n < 81 ->
     commit_pending w;
-    (* a silent change of durable journal bytes, then a restart: must be detected (G6) *)
+    (* a silent change of durable journal bytes, a segment header's too, then a restart: must be detected (G6) *)
     if w.pending = None && not w.stopped then begin
       let segs = List.filter (fun f -> Filename.dirname f = jdir) (Sim_disk.files w.sim) in
       let f = List.nth segs (Rng.int w.r (List.length segs)) in
@@ -342,7 +342,7 @@ let step w =
       (* the start of the newest frame of the newest segment *)
       let rec walk p last = if p + 28 > Bytes.length b then last else walk (p + 28 + (Int32.to_int (Bytes.get_int32_le b (p + 4)) land 0xFFFFFFFF) + 16) p in
       let newest = walk 40 40 in
-      match Sim_disk.flip_durable w.sim f 40 (Sim_disk.durable_size w.sim f) with
+      match Sim_disk.flip_durable w.sim f 0 (Sim_disk.durable_size w.sim f) with
       | None -> ()
       | Some off ->
         w.in_newest_frame <- f = last_seg && off >= newest;

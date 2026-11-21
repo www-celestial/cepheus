@@ -1,10 +1,11 @@
 (* Exhaustive enumeration, in the spirit of ALICE (Pillai et al., OSDI 2014) pushed to every case on small journals:
    1. after m durable frames, every state a crash can leave of frame m+1 (each subset of its sectors reached the disk,
       each cut length, each sector torn inside) must recover to exactly m or m+1 groups, never lose one;
-   2. every single bit flipped anywhere in the durable journal is detected by a full read, and recovery either
-      refuses, or keeps every group (a flipped trailer, rebuilt), or is the documented residual (a flip in the newest
-      frame, cut as torn: docs/book/guarantees.md, G6);
-   3. a segment whose creation was torn at any byte is dropped, and the journal continues;
+   2. every single bit flipped anywhere in the durable journal, its segment header too, is detected by a full read,
+      and recovery either refuses, or keeps every group (a flipped trailer, rebuilt), or is the documented residual (a
+      flip in the newest frame, cut as torn: docs/book/guarantees.md, G6);
+   3. a segment whose creation was torn at any byte is dropped, and the journal continues; a newest segment's header
+      damaged (flipped, zeroed from any byte with the frames kept, or cut where a run resumes) is refused (G6);
    4. inside a merge (G12): at every mutating disk call of a merge (a merge now, one begun from a view ahead of the
       disk and installed after two more frames, the merges of a recovery replaying a long tail), every crash state:
       a process death (the page cache kept, then lost at a later power loss), and power losses keeping each prefix
@@ -122,7 +123,8 @@ let flips sizes =
   let full, ends = build sizes in
   let frames = Array.length ends - 1 in
   let newest = ends.(frames - 1) in
-  for off = 40 to Bytes.length full - 1 do
+  (* from byte 0: a flip in the segment's header, durable before any frame, is damage too *)
+  for off = 0 to Bytes.length full - 1 do
     for bit = 0 to 7 do
       let b = Bytes.copy full in
       Bytes.set b off (Char.chr (Char.code (Bytes.get b off) lxor (1 lsl bit)));
@@ -135,6 +137,7 @@ let flips sizes =
       C.check (strict_read disk) "flip at %d bit %d not seen by a full read" off bit;
       match recover_bytes b with
       | Error _, _ -> incr C.checks
+      | Ok n, _ when off < 40 -> C.fail "flip at %d bit %d, in the segment's header: recovery opened with %d groups of %d" off bit n (2 * frames)
       | Ok n, _ when n = 2 * frames -> incr C.checks (* a trailer, rebuilt *)
       | Ok n, _ when n = 2 * (frames - 1) && off >= newest -> incr residual
       | Ok n, _ -> C.fail "flip at %d bit %d: recovery kept %d groups of %d" off bit n (2 * frames)
@@ -167,6 +170,46 @@ let torn_segment () =
       C.check (!n = 4 && Journal.next_group j = 5) "torn segment header at %d: %d groups" k !n;
       Journal.close j
     | exception Journal.Damaged m -> C.fail "torn segment header at %d: %s" k m
+  done
+
+(* The newest segment's header changed once durable (F3, G6): its bytes from k on lost (zeros, a replaced sector) with
+   its frames kept; the segment cut inside its header, or its header flipped, where a run resumes in it (at its first
+   frame, after its last, or in a segment that holds only its header). Recovery refuses each: the header is forced
+   before any frame, and a run names only a segment the writer had begun, so neither is a segment torn at its
+   creation. *)
+let header_damage () =
+  let full, ends = build [ 100; 300 ] in
+  let frames = Array.length ends - 1 in
+  let sim_with b =
+    let sim = Sim_disk.create (Rng.make 5) in
+    let disk = Sim_disk.disk sim in
+    disk.mkdir "/j";
+    let fd = disk.openf "/j/00000000000000000001.seg" true in
+    disk.pwrite fd 0 b 0 (Bytes.length b);
+    disk.fsync fd;
+    disk.sync_dir "/j";
+    disk
+  in
+  let refused what from b =
+    match Journal.recover ~force:true (sim_with b) "/j" id from (fun _ -> ()) with
+    | j -> Journal.close j; C.fail "%s: recovery opened" what
+    | exception Journal.Damaged _ -> incr C.checks
+  in
+  for k = 0 to 39 do
+    let b = Bytes.copy full in
+    Bytes.fill b k (40 - k) '\000';
+    if not (Bytes.equal b full) then refused (Printf.sprintf "header zeroed from byte %d, frames kept" k) None b;
+    List.iter
+      (fun (offset, next) -> refused (Printf.sprintf "cut at %d where a run resumes at %d" k offset) (Some { Journal.segment = 1; offset; next }) (Bytes.sub full 0 k))
+      [ 40, 1; ends.(frames), (2 * frames) + 1 ]
+  done;
+  let hdr, _ = build [] in
+  for off = 0 to 39 do
+    for bit = 0 to 7 do
+      let b = Bytes.copy hdr in
+      Bytes.set b off (Char.chr (Char.code (Bytes.get b off) lxor (1 lsl bit)));
+      refused (Printf.sprintf "header alone, flip at %d bit %d, where a run resumes" off bit) (Some { Journal.segment = 1; offset = 40; next = 1 }) b
+    done
   done
 
 (* ---- 4. inside a merge ---- *)
@@ -781,6 +824,7 @@ let () =
   List.iter crash_states [ [ 10; 20; 30 ]; [ 400; 900; 1500 ]; [ 2000; 100 ] ];
   List.iter flips [ [ 10; 20; 30 ]; [ 400; 900 ] ];
   torn_segment ();
+  header_damage ();
   Printf.printf "exhaustive: %d crash states, %d false alarms (header sector lost alone), %d flips in the newest frame cut as torn\n"
     !states !false_alarms !residual;
   C.finish "exhaustive"

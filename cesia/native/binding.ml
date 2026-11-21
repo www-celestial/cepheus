@@ -175,9 +175,13 @@ let[@inline never] of_cesia (pname : string) (typ : Value.typ) (x : C.value) : V
   | Tlink, Int i -> Link i
   | Tdate, (Int _ | Float _) ->
     let s = match x with Int i -> float_of_int i | Float f -> f | _ -> 0. in
-    if Float.is_finite s && Float.abs s < 9e15 then Date (Float.to_int (Float.round (s *. 1000.))) else wrong "a date in seconds since 1970"
+    (* its milliseconds an Int: |s| below max_int / 1000 s (146 million years) *)
+    if Float.is_finite s && Float.abs s < float_of_int (max_int / 1000) then Date (Float.to_int (Float.round (s *. 1000.)))
+    else wrong "a date in seconds since 1970"
   | Tmoney sc, Int i ->
-    if abs i < max_int / pow10.(sc) then Money (i * pow10.(sc)) else wrong "an amount that fits"
+    (* its minor units an Int, checked without [abs], which leaves the least Int negative *)
+    let m = max_int / pow10.(sc) in
+    if i > -m && i < m then Money (i * pow10.(sc)) else wrong "an amount that fits"
   | Tmoney sc, Float f ->
     let u = Float.round (f *. float_of_int pow10.(sc)) in
     if Float.is_finite u && Float.abs u < 4.6e18 then Money (Float.to_int u) else wrong "an amount that fits"
@@ -187,6 +191,33 @@ let[@inline never] of_cesia (pname : string) (typ : Value.typ) (x : C.value) : V
   | Tbool, _ -> wrong "a Bool"
   | Tdate, _ -> wrong "a date in seconds since 1970"
   | Tmoney _, _ -> wrong "an amount"
+
+(* A bound of Above, Below or Between, as a word of its property's type, rounded toward the inside of the range: the
+   least word at or above a low bound (above it, for Above), the greatest at or below a high bound (below it, for
+   Below). So a bound between two minor units (10.005 for cents, a fraction of a millisecond) keeps exactly the values
+   inside it. A bound in floats, scaled to the unit, is the unit it is within 2^-50 of, relative: a decimal written to
+   the unit, as 1.1 for cents, whose double times 100 is 110.00000000000001 (a double is within 2^-53 of its decimal,
+   relative, and the product adds as much again), or a sum of a few. None: no word is inside (Above the largest Int,
+   Below the least). *)
+let range_bound (typ : Value.typ) (x : C.value) ~low ~strict =
+  let whole w =
+    if not strict then Some w
+    else if low then (if w = max_int then None else Some (w + 1))
+    else if w = min_int then None
+    else Some (w - 1)
+  in
+  let scaled f u what =
+    let p = f *. u in
+    if not (Float.is_finite p && Float.abs p < 4.6e18) then refuse "invalid" "a range needs %s, not %s" what (describe x)
+    else
+      let r = Float.round p in
+      if Float.abs (p -. r) <= Float.abs p *. 0x1p-50 then whole (Float.to_int r)
+      else Some (Float.to_int (if low then Float.ceil p else Float.floor p))
+  in
+  match typ, x with
+  | Tdate, Float f -> scaled f 1000. "a date in seconds since 1970"
+  | Tmoney sc, Float f -> scaled f (float_of_int pow10.(sc)) "an amount that fits"
+  | _ -> (match of_cesia "a range" typ x with Int w | Date w | Money w -> whole w | _ -> Some 0)
 
 (* ---- databases: a connection's, or a fork ---- *)
 
@@ -700,10 +731,11 @@ let question ?(uses = []) ctx name d qv nvars =
         | Some j -> (
           match vtyp.(j) with
           | Some ((Tint | Tdate | Tmoney _) as t) ->
-            let word v = match of_cesia "a range" t v with Int i | Date i | Money i -> i | _ -> 0 in
-            (* Above and Below are strict: one minor unit (a millisecond, a cent) past the bound, on whole words *)
-            let lo = if lo = C.Missing then min_int else word lo + (if strict = C.Text "low" then 1 else 0) in
-            let hi = if hi = C.Missing then max_int else word hi - (if strict = C.Text "high" then 1 else 0) in
+            (* Above and Below are strict; each bound rounded toward the inside of the range; no word inside, an empty
+               range *)
+            let lo = if lo = C.Missing then Some min_int else range_bound t lo ~low:true ~strict:(strict = C.Text "low") in
+            let hi = if hi = C.Missing then Some max_int else range_bound t hi ~low:false ~strict:(strict = C.Text "high") in
+            let lo, hi = match lo, hi with Some lo, Some hi -> lo, hi | _ -> 1, 0 in
             let mk w = match t with Tdate -> Value.Date w | Tmoney _ -> Money w | _ -> Int w in
             j, mk lo, mk hi
           | Some t -> refuse "invalid" "Above, Below and Between are for ints, dates and money, not a %s" (Value.typ_name t)

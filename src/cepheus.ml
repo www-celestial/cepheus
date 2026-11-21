@@ -186,6 +186,7 @@ let why (v : view) e p x =
 let sources = Reason.sources
 let rule_budget = Reason.budget_base, Reason.budget_per
 let change_budget = Reason.change_per
+let work_budget = Reason.work_per
 
 let typ_of (v : view) p = match Schema.find v.schema p with Some d -> Some d.typ | None -> None
 

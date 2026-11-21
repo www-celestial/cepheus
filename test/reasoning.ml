@@ -208,6 +208,46 @@ let () =
   snd rule_budget := b1;
   C.check (match write db ops with Ok _ -> true | Error _ -> false) "within the default budget"
 
+(* The work of the rules is bounded, not only their derived facts: a body of three things that share a tag reads n^3
+   candidates for n heads, far under the derived budget (one write of 400 such facts held the writer 13 s); a Not
+   over the things that share a tag reads n^2 for n heads. Each is refused, named, the view unchanged; a change of
+   the rules over such facts too; a larger [work_budget] takes them. *)
+let () =
+  section "rules: the work budget refuses a group whose rules read too many candidates, naming the rule";
+  let marked db p = match find (view db) { vars = 1; ranges = []; where = [ { e = Var 0; p; v = Val (Bool true) } ] } with Ok l -> List.length l | Error _ -> -1 in
+  let refused what prefix = function
+    | Error (Invalid m) -> C.check (String.starts_with ~prefix m) "%s: refused: %s" what m
+    | Ok _ -> C.fail "%s: past the work budget, accepted" what
+    | Error e -> C.fail "%s: %s" what (message e)
+  in
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ tag; mark; lonely; score ]) = declare db [ prop "tag" Ttext; prop "mark" Tbool; prop "lonely" Tbool; prop "score" Tint ] in
+  let tri = { name = "three-share-a-tag"; vars = 4; ranges = []; head = Give { e = Var 0; p = mark; v = Val (Bool true) };
+              where = [ { e = Var 0; p = tag; v = Var 3 }; { e = Var 1; p = tag; v = Var 3 }; { e = Var 2; p = tag; v = Var 3 } ] } in
+  let alone = { name = "no-other-scored"; vars = 4; ranges = []; head = Give { e = Var 0; p = lonely; v = Val (Bool true) };
+                where = [ { e = Var 0; p = tag; v = Var 1 }; { e = Var 2; p = absent 0 tag; v = Var 1 }; { e = Var 2; p = absent 0 score; v = Var 3 } ] } in
+  ignore (ok (define db [ tri; alone ]));
+  let ops n t = List.init n (fun i -> Add (-1 - i, tag, Text t)) in
+  ignore (ok (write db (ops 40 "a")));
+  C.check (marked db mark = 40 && marked db lonely = 40) "40 things, 64,000 candidates: within the budget";
+  let before = C.facts_of_view (view db) in
+  refused "400 things share a tag" "rule three-share-a-tag read more than 1400000 candidates" (write db (ops 400 "b"));
+  C.check (C.F.equal before (C.facts_of_view (view db))) "the view unchanged";
+  ignore (ok (undefine db [ tri.name ]));
+  let before = C.facts_of_view (view db) in
+  refused "3,000 things share a tag, under a Not" "rule no-other-scored read more than 4000000 candidates" (write db (ops 3000 "c"));
+  C.check (C.F.equal before (C.facts_of_view (view db))) "the view unchanged";
+  (* a change of the rules over 200 things that share a tag: 8 M candidates *)
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ tag; mark ]) = declare db [ prop "tag" Ttext; prop "mark" Tbool ] in
+  let tri = { tri with head = Give { e = Var 0; p = mark; v = Val (Bool true) }; where = List.map (fun (a : Query.pattern) -> { a with p = tag }) tri.where } in
+  ignore (ok (write db (List.init 200 (fun i -> Add (-1 - i, tag, Text "d")))));
+  refused "the rule defined over 200 things" "rule three-share-a-tag read more than " (define db [ tri ]);
+  let w0 = !work_budget in
+  work_budget := 1000;
+  C.check (match define db [ tri ] with Ok _ -> marked db mark = 200 | Error _ -> false) "a larger work budget takes it";
+  work_budget := w0
+
 let () =
   section "rules: a derived second value of a one-valued property is refused";
   let db = fork empty in

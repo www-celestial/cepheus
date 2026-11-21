@@ -420,6 +420,16 @@ the budget). `rule_budget` holds the two numbers. Every path counts against it: 
 fact a closure module makes, a closure's targets as they grow (so that a dense graph's $n^2$ facts are refused before
 they are made, in memory in proportion to the budget), and the facts B/F deletes.
 
+The facts derived do not bound the **work** alone: a body whose patterns share a value reads their product,
+`[a tag t] [b tag t] [c tag t]` $n^3$ candidates for $n$ heads (one write of 400 such facts held the writer 13 s).
+So the candidates the rules read (each fact a pattern of a body, of a Not or of a constraint enumerates, as a
+question's are counted, `Query.fold ~budget`) may be at most `work_budget` (10) times the budget of derived facts:
+`Invalid "rule NAME read more than N candidates of its patterns for a group of K facts"`, NAME the rule whose pattern
+read the last one, or `for a change of the rules or the ontology`. A candidate is a read in an index, a derived fact
+one interned, indexed and kept: the 1.2 M candidates of the refusal above take 60 ms, the budget's 100,000 derived
+facts about 0.1 s, so the work is bounded in time as the derived facts are. A rule that walks many candidates for
+few heads joins on a more selective pattern first.
+
 A **change** — a group that changes the rules, or the ontology ([below](#changes-of-the-rules-in-the-background)) —
 applies to the whole database, so its budget grows with it: **$100{,}000 + 100 \times \text{its asserted changes} +
 4 \times \text{the facts of the database before it}$** (`change_budget`, the 4): a change may make the database at
