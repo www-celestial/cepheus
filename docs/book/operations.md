@@ -47,7 +47,8 @@ The journal is the truth: runs are caches that can always be rebuilt. Byte layou
    `Damaged "file: what, at which offset"` (the merges of the replay before it may have written a run of the
    groups before the damage);
 8. a frame whose trailer was torn while its header and body are intact is kept, and its trailer rebuilt; a newest
-   segment torn at its creation (its header does not check and it holds no frame) is removed;
+   segment torn at its creation (no longer than its header, which does not check, and no run resumes in it) is
+   removed; a header that does not check in a segment that holds more, or where the newest run resumes, is damage;
 9. a new database (no group yet) gets group 1, which describes the five system properties (a database made before
    `cepheus/rule` existed lacks the description of that one: its rules work all the same).
 

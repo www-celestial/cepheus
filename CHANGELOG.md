@@ -127,3 +127,9 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   in its server, 26 through its socket), the triangles of a follow graph on 3 cores 100 ms against 602, the load of
   the 10 M facts 5.13 s against `COPY`'s 30.87; durable writes on par with PostgreSQL, both bound by the disk's fsync
   ([comparison](docs/book/comparison.md)).
+
+### Fixes
+
+- A newest journal segment whose header does not check while it holds bytes past it, or where the newest run
+  resumes, is refused at open as damage (G6). Recovery took it for a segment torn at its creation and removed it, so
+  one flipped bit in its 40 bytes opened the database without that segment's groups, with no error.

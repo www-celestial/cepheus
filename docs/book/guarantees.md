@@ -179,7 +179,13 @@ than drop a durable frame. One residual case: damage to the newest frame of the 
 it, looks like a torn write and is cut at recovery (a full read before recovery reports it).
 
 *Proof.* Every byte of a segment is covered: its header by the header CRC, each frame's header by its header CRC, its
-body by the body CRC (repeated in the trailer), the trailer by comparison with the header. At recovery, the first frame
+body by the body CRC (repeated in the trailer), the trailer by comparison with the header. A segment's header is
+written and forced, and its directory, before any frame goes into the segment, and a run names a position only in a
+segment the writer had begun: so a header that does not check is damage in a segment longer than its header, and in
+the one the newest run resumes in. Only a newest segment no longer than its header, that no run names, may be one a
+crash left being made; it holds no frame, and recovery removes it. (A newest segment cut inside its header, where no
+run resumes, reads so: that is the loss of whole durable frames at the end of the journal with nothing written after
+them, out of reach of one machine.) At recovery, the first frame
 that does not check is damage when a frame header that checks follows it (frames are written one after the other, each
 forced before the next, so a later header proves this frame was written whole), or when
 a trailer at the right distance carries the body's CRC (the frame was written whole, only its header changed);
@@ -194,9 +200,11 @@ failed fsyncs (G13), the invariants Durable, RefuseOnlyOnDamage, PublishedOnDisk
 ResidualBound hold in all 3,856,315 reachable states. TLC first found a trace where
 two damaged frames at the end were both cut; the rule above (a later header that checks) closed it.
 
-*Tested by* `test/exhaustive.ml` (every bit of two journals flipped: always seen by a full read; recovery refuses, or
-keeps every group when the flip hit a trailer, which it rebuilds, or, for a flip in the newest frame, cuts it: counted
-as the residual) and the simulation (random flips in durable segments).
+*Tested by* `test/exhaustive.ml` (every bit of two journals flipped, their segment headers' too: always seen by a full
+read; recovery refuses, or keeps every group when the flip hit a trailer, which it rebuilds, or, for a flip in the
+newest frame, cuts it: counted as the residual; the newest segment's header zeroed from each of its bytes with its
+frames kept, cut inside where a run resumes, or flipped in a segment that holds only its header where a run resumes:
+refused) and the simulation (random flips in durable segments, their headers too).
 
 ## G7 Runs on disk
 

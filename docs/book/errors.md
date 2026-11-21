@@ -183,6 +183,8 @@ From `open_` (recovery) and `verify`; `SEG` is the segment's name, an offset is 
 | `journal: the first segment starts at group G` | no run, and the oldest segment does not start at group 1 |
 | `journal: SEG does not follow group G (a segment is missing)` | a gap between two segments |
 | `journal: SEG has a broken header` | a segment other than the newest has a header that does not check |
+| `journal: SEG has a broken header, with N bytes after it` | the newest segment holds bytes past its header, which does not check: the header was forced before any frame, so it changed since (G6) |
+| `journal: SEG, where the newest run starts, has a broken header` | the newest run resumes in a segment whose header does not check, or that is shorter than its header: the writer had forced that header |
 | `journal: SEG says it starts at group G` | a segment's header and its file name disagree |
 | `journal: SEG is shorter than the snapshot says` | the newest run resumes past the end of the segment |
 | `SEG: frame at O starts at group G, expected N` | a frame that checks, out of sequence |
@@ -213,7 +215,7 @@ From `verify` only (a full read is strict: recovery repairs these, so after it t
 
 | message | what it means |
 |---|---|
-| `journal: the newest segment has a broken header` | a newest segment torn at its creation, never repaired by a recovery |
+| `journal: the newest segment has a broken header` | a newest segment no longer than its header, torn at its creation, never repaired by a recovery |
 | `SEG: the trailer of the frame at O is damaged` | a frame whose header and body check, but not its trailer |
 | `SEG: the frame at O does not check` | the newest frame does not check (a torn tail, or damage to the newest frame: the residual case of G6) |
 

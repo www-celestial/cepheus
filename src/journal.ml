@@ -173,7 +173,8 @@ type seg = {
 }
 
 (* Read-only, but for [before]: checks the segments from [from] and calls [on_group] on each group. A torn tail is
-   allowed only in the newest segment; a torn header only in a newest segment that holds nothing. [before r] runs
+   allowed only in the newest segment; a torn header only in a newest segment no longer than its header, that no run
+   names (one a crash left being made). [before r] runs
    on the newest segment's reader before any of its groups is replayed. *)
 let scan ?(frame = fun _ -> ()) ?(before = fun (_ : reader) -> ()) ?(after = 0) disk dir id from on_group =
   let all = segments disk dir in
@@ -201,6 +202,13 @@ let scan ?(frame = fun _ -> ()) ?(before = fun (_ : reader) -> ()) ?(after = 0) 
         match read_header hb id name with
         | None ->
           if rest <> [] then damaged "journal: %s has a broken header" name;
+          (* The header is forced, and its directory, before anything else is written in the segment
+             (write_segment_header), and a run names a position only in a segment the writer had begun: a segment
+             that holds bytes past its header, or the one the newest run starts in, had a durable header, which
+             changed since (G6). Only a segment of its header's length or less, that no run names, may be one a
+             crash left being made: it holds no frame. *)
+          if size > seg_header then damaged "journal: %s has a broken header, with %d bytes after it" name (size - seg_header);
+          if resume then damaged "journal: %s, where the newest run starts, has a broken header" name;
           None
         | Some first ->
           if first <> s then damaged "journal: %s says it starts at group %d" name first;
