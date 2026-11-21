@@ -23,23 +23,19 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Cesia nightly
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           archive=cesia-linux-x86_64.tar.gz
-          if ! gh release download nightly --repo www-celestial/cesia-lang --pattern "$archive*" --dir download; then
-            echo "Cesia has no nightly release yet: nothing to build the site with."
-            echo "NO_CESIA=1" >> "$GITHUB_ENV"
-            exit 0
-          fi
+          # A failed download fails the check: a green check means the site was built.
+          gh release download nightly --repo www-celestial/cesia-lang --pattern "$archive*" --dir download
           (cd download && [ "$(sha256sum "$archive" | cut -d' ' -f1)" = "$(cut -d' ' -f1 < "$archive.sha256")" ])
           mkdir -p "$HOME/.cesia"
           tar -xzf "download/$archive" -C "$HOME/.cesia"
           echo "$HOME/.cesia/bin" >> "$GITHUB_PATH"
       - name: Site
-        if: env.NO_CESIA != '1'
         run: |
           cesia version
           cesia doc --site _site
