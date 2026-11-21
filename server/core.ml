@@ -298,29 +298,71 @@ let put_word b (v : Store.view) (ty : Value.typ) w =
   | Ttext -> Buffer.add_char b '\004'; Codec.put_string b (Store.text v w)
   | Tfloat -> Value.encode b (Store.value v ty w)
 
+let chunk = 1 lsl 20
+
+(* A reply of items (a thing's facts, the schema's properties) whose body would pass the frame limit goes in frames of
+   about a MiB, each its head and a count of its items, all but the last with the flag more, which the clients join
+   (Client.join) as they join a Find's rows; one that fits goes in one frame, as every reply did before (a client of
+   an earlier version reads it). [items f] gives f each item, coded; an item fits a frame by itself (a text is at most
+   [max_text]). *)
+let send_items c ~id ~kind ~head ~count ~size items =
+  let b = c.body in
+  if size + 32 <= Wire.max_frame then begin
+    Buffer.clear b;
+    head b;
+    Codec.put_varint b count;
+    items (fun (x : Buffer.t) -> Buffer.add_buffer b x);
+    send_body c ~id ~kind ~flags:0 b
+  end
+  else begin
+    let part = Buffer.create chunk and n = ref 0 in
+    let frame ~more =
+      Buffer.clear b;
+      head b;
+      Codec.put_varint b !n;
+      Buffer.add_buffer b part;
+      send_body c ~id ~kind ~flags:(if more then Wire.f_more else 0) b;
+      Buffer.clear part;
+      n := 0;
+      if more then c.flush ()
+    in
+    items (fun x ->
+        if !n > 0 && Buffer.length part + Buffer.length x > chunk then frame ~more:true;
+        Buffer.add_buffer part x;
+        incr n);
+    frame ~more:false
+  end
+
 let get c ~id ~kind d thing =
   let v = d.view () in
-  let b = c.body and f = c.scratch in
-  Buffer.clear b;
-  Buffer.clear f;
-  let n = ref 0 in
   (* a token with rights per kind gets the facts of the kinds it reads, as if the thing had no other *)
   let t = match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> Some (kinds_table c d.index v r) | _ -> None in
   (* the thing read as its class's representative, as Cepheus.get reads it, for a token that may read the classes
      (cepheus/same): one that may not gets the thing's own facts, and learns no equality *)
   let thing = match t with Some t when not (bit t Schema.p_same 1) -> thing | _ -> Query.rep v thing in
-  Store.iter_facts v thing (fun p w ->
-      match Schema.find v.schema p with
-      | Some dsc when (match t with None -> true | Some t -> bit t p 1) -> incr n; Codec.put_varint f p; put_word f v dsc.typ w
-      | _ -> ());
-  Codec.put_varint b v.group;
-  Codec.put_varint b !n;
-  Buffer.add_buffer b f;
-  send_body c ~id ~kind ~flags:0 b
-
-let chunk = 1 lsl 20
+  let f = c.scratch in
+  Buffer.clear f;
+  let n = ref 0 in
+  let each g =
+    Store.iter_facts v thing (fun p w ->
+        match Schema.find v.schema p with
+        | Some dsc when (match t with None -> true | Some t -> bit t p 1) -> g p dsc.typ w
+        | _ -> ())
+  in
+  each (fun p typ w -> incr n; Codec.put_varint f p; put_word f v typ w);
+  let one = Buffer.create 64 in
+  send_items c ~id ~kind ~head:(fun b -> Codec.put_varint b v.group) ~count:!n ~size:(Buffer.length f)
+    (fun k ->
+      if Buffer.length f + 32 <= Wire.max_frame then k f
+      else each (fun p typ w -> Buffer.clear one; Codec.put_varint one p; put_word one v typ w; k one))
 
 exception Gone
+
+(* the rows of a frame's body at most: a row longer than that (texts of nearly 16 MiB side by side) fits no frame,
+   and its question is refused *)
+let max_rows = Wire.max_frame - 64
+
+let row_too_large n = raise (Answer.Too_large (Printf.sprintf "a row of %d bytes is over the frame limit of %d: give fewer of its texts at once" n max_rows))
 
 (* rows coded in frames of about a MiB as the fold finds them, none held: each frame but the last has the flag more,
    and is sent before the next rows are found (the output holds a frame at most); a peer gone stops the fold *)
@@ -337,13 +379,25 @@ let stream_rows c ~id ~kind (v : Store.view) (typs : Value.typ array) rows =
     Buffer.clear r;
     n := 0
   in
+  let sent () = c.flush (); if c.gone () then raise Gone in
   rows (fun (row : int array) ->
+      let before = Buffer.length r in
       for j = 0 to cols - 1 do put_word r v typs.(j) row.(j) done;
       incr n;
       if Buffer.length r >= chunk then begin
+        if Buffer.length r > max_rows then begin
+          (* the rows before this one go first; then it alone, if it fits *)
+          let last = Buffer.sub r before (Buffer.length r - before) in
+          if before = 0 then row_too_large (String.length last);
+          Buffer.truncate r before;
+          decr n;
+          frame ~more:true;
+          sent ();
+          Buffer.add_string r last;
+          n := 1
+        end;
         frame ~more:true;
-        c.flush ();
-        if c.gone () then raise Gone
+        sent ()
       end);
   frame ~more:false
 
@@ -353,8 +407,18 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   let rec go i =
     Buffer.clear b;
     let rows = Buffer.create 1024 in
-    let j = ref i in
-    while !j < nrows && Buffer.length rows < chunk do row !j rows; incr j done;
+    let j = ref i and full = ref false in
+    while !j < nrows && Buffer.length rows < chunk && not !full do
+      let before = Buffer.length rows in
+      row !j rows;
+      if Buffer.length rows > max_rows then begin
+        if !j = i then row_too_large (Buffer.length rows);
+        (* this row starts the next frame *)
+        Buffer.truncate rows before;
+        full := true
+      end
+      else incr j
+    done;
     Codec.put_varint b group;
     Codec.put_varint b cols;
     Codec.put_varint b (!j - i);
@@ -393,9 +457,53 @@ let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
 
 (* ---- writes ---- *)
 
+(* What a write may hold, so that every reply about it fits a frame: a property's (or a rule's) name 255 bytes at
+   most, a text [max_text] bytes at most (a Get of a thing of one such fact, its head included, is one frame), and
+   new things whose receipt (a temporary id and a number each) fits a frame: past one, refused before it is applied,
+   where before it was applied and its receipt could not be read. A group under 400,000 operations (40 bytes of
+   receipt at most each: two new things of 10 + 10) is not counted. *)
+let max_name = 255
+let max_text = Wire.max_frame - 4096
+
+let varint_size n = let rec go n k = if n < 0x80 then k else go (n lsr 7) (k + 1) in if n < 0 then 10 else go n 1
+
+let write_bounds (v : Store.view) ops =
+  let refuse code fmt = Printf.ksprintf (fun m -> Some (code, m)) fmt in
+  let rec texts = function
+    | [] -> None
+    | Resolve.Add (_, p, Value.Text n) :: _ when p = Schema.p_name && String.length n > max_name ->
+      refuse "invalid" "a name has at most %d bytes, not %d" max_name (String.length n)
+    | Resolve.Add (_, _, Value.Text x) :: _ when String.length x > max_text ->
+      refuse "too_large" "a text has at most %d bytes, not %d" max_text (String.length x)
+    | _ :: rest -> texts rest
+  in
+  match texts ops with
+  | Some _ as r -> r
+  | None ->
+    let nops = List.length ops in
+    if nops < 400_000 then None
+    else begin
+      let seen = Hashtbl.create 1024 and size = ref 32 in
+      let see x = if x < 0 && not (Hashtbl.mem seen x) then (Hashtbl.replace seen x (); size := !size + varint_size ((2 * -x) - 1) + varint_size (v.next_e + nops * 2)) in
+      List.iter
+        (function
+          | Resolve.Add (e, _, x) | Resolve.Retract (e, _, x) -> see e; (match x with Value.Link t -> see t | _ -> ())
+          | Resolve.Expect _ -> ()
+          | Resolve.Incr (e, _, _, into) -> see e; (match into with Some (t, _) -> see t | None -> ()))
+        ops;
+      if !size > Wire.max_frame then
+        refuse "too_large" "a group of %d new things: its receipt would pass the frame limit of %d bytes; write them in several groups" (Hashtbl.length seen) Wire.max_frame
+      else None
+    end
+
 let write c ~id ~kind d ~serial ~floor ~by ~why ops =
   if Origin.has_marker why then err c ~id ~kind "invalid" "a why may not start with the server's marker"
   else
+    (* the state the write is checked against, read once *)
+    let v = d.view () in
+    match write_bounds v ops with
+    | Some (code, m) -> err c ~id ~kind code "%s" m
+    | None ->
     let tok = Option.get c.token in
     let not_in_flight () = Mutex.protect c.om (fun () -> c.inflight <- c.inflight - 1; Condition.broadcast c.oc) in
     (* the reply of a write, in the thread that ends it (it may be another connection's: a write sent again while
@@ -430,7 +538,6 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
       | exception e -> broke c e);
       not_in_flight ()
     in
-    let v = d.view () in
     let published = v.group in
     match match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> unaddable c d.index v r ops | _ -> None with
     | Some k -> err c ~id ~kind "denied" "this token may not add to the kind %s of %s" k d.name
@@ -600,10 +707,12 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
   (* a push, under the hub's lock (so before the connection's end has dropped its watches), mostly in the hub's
      thread: its failure (the transport cannot make the thread of the pushes, memory) ends this connection, never the
      hub *)
+  (* a row that fits no frame ends the watch too_large; what the hub says of it after (lagging) is dropped *)
+  let over = ref false in
   let push (m : Live.msg) =
     let ok =
       Mutex.protect c.pm (fun () ->
-          if c.closed then true
+          if c.closed || !over then true
           else
             (* a push of several frames whole or not at all: a part of one, then the next, would be joined by the
                client into rows of neither *)
@@ -620,7 +729,15 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
               | Answer a -> Wire.add_push c.pushes ~id (Wire.Answer { group = a.group; cols; rows = a.rows }); true
               | Change ch -> Wire.add_push c.pushes ~id (Wire.Change { group = ch.group; cols; added = ch.added; removed = ch.removed }); true
               | Same s -> Wire.add_push c.pushes ~id (Wire.Same s.group); true
-            with e -> Buffer.truncate c.pushes n0; raise e)
+            with
+            | Wire.Row_too_large n ->
+              Buffer.truncate c.pushes n0;
+              let b = Buffer.create 128 in
+              Wire.put_reply b (Wire.Err { code = "too_large"; message = Printf.sprintf "a row of %d bytes is over the frame limit of %d: watch fewer of its texts at once" n max_rows });
+              Wire.add_frame c.pushes ~id ~kind:Wire.k_watch ~flags:Wire.f_error b;
+              over := true;
+              false
+            | e -> Buffer.truncate c.pushes n0; raise e)
     in
     c.wake ();
     ok
@@ -754,11 +871,13 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
            | Some _ when not (leads c ~id ~kind) -> ()
            | Some d ->
              let v = d.view () in
-             let props = ref [] in
+             let props = ref [] and size = ref 0 in
              for p = Schema.count v.schema - 1 downto 1 do
-               match Schema.find v.schema p with Some x -> props := (p, x) :: !props | None -> ()
+               match Schema.find v.schema p with Some x -> props := (p, x) :: !props; size := !size + String.length x.name + 20 | None -> ()
              done;
-             reply c ~id ~kind (Wire.Opened { db = d.index; group = v.group; props = !props }));
+             let one = Buffer.create 64 in
+             send_items c ~id ~kind ~head:(fun b -> Codec.put_varint b d.index; Codec.put_varint b v.group) ~count:(List.length !props) ~size:!size
+               (fun k -> List.iter (fun x -> Buffer.clear one; Wire.put_prop one x; k one) !props));
           Continue
         | _, Wire.Get g ->
           (match readable c ~id ~kind g.db with

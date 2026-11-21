@@ -1543,6 +1543,83 @@ let answer_bounds () =
   ignore c3;
   Engine.close e
 
+(* ---- replies within the frame limit (the review's F5): a token that may add to one kind cannot declare long names;
+   names and values written before the bound (through the engine) come back in frames of the flag more, joined by the
+   client; a text past its bound, and a group whose receipt would pass a frame, are refused before they are applied ---- *)
+
+let reply_bounds () =
+  let sim = Sim_disk.create (Rng.make 29) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/r";
+  let e = Result.get_ok (Engine.open_ disk "/r/shop") in
+  let d = { Core.name = "shop"; index = 0; dir = "/r/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/r/shop/vault" } in
+  let commit ops = let b = Engine.prepare e [| ops, 0, "t" |] in (Engine.commit e b).(0) in
+  let submit (_ : Core.db) ops _ _ k = k (commit ops) in
+  let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+  let toks = Tokens.with_tokens Tokens.empty [ mk "w" [ "shop", Tokens.Write ]; mk "k" [ "shop", Tokens.Kinds { read = [ "pub" ]; add = [ "pub" ] } ] ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let k = ref 0 in fun () -> incr k; !k) () in
+  (* a request's frames, and its reply as the client joins them *)
+  let session tok =
+    let out = Buffer.create 256 in
+    let rec c = lazy (Core.connect srv ~submit ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out)) in
+    let c = Lazy.force c in
+    let ask req =
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      let fs = Option.value (frames_of s) ~default:[] in
+      let parts = List.filter_map reply_of fs in
+      fs, (match parts with [ r ] -> Some r | [] -> None | ps -> Some (Client.join ps))
+    in
+    ignore (ask (Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 }));
+    ask
+  in
+  let w = session "w" and k = session "k" in
+  let write ask ops = snd (ask (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops })) in
+  let code = function Some (Wire.Err e) -> e.code | Some _ -> "ok" | None -> "none" in
+  let within fs = List.for_all (fun (_, _, _, b) -> Bytes.length b + 6 <= Wire.max_frame) fs in
+  let mores fs = List.length (List.filter (fun (_, _, fl, _) -> fl land Wire.f_more <> 0) fs) in
+  let decl p name typ many = List.map (fun (e, q, x) -> Resolve.Add (e, q, x)) (Schema.facts p { Schema.name; typ; many; unique = false }) in
+  (* a token of one kind: a name of 1,000,004 bytes refused, one of 255 taken *)
+  check (code (write k (decl 40 ("pub/" ^ String.make 1_000_000 'x') Ttext false)) = "invalid") "replies: a name past %d bytes is refused" Core.max_name;
+  check (code (write k (decl 40 ("pub/" ^ String.make 251 'x') Ttext false)) = "ok") "replies: a name of %d bytes is taken" Core.max_name;
+  (* the PoC's 17 names of a million bytes, written before the bound: Open in frames of the flag more, joined *)
+  List.iteri (fun i p -> ignore (Result.get_ok (commit (decl p (Printf.sprintf "pub/%c%s" (Char.chr (97 + i)) (String.make 1_000_000 'x')) Ttext false)))) (List.init 17 (fun i -> 41 + i));
+  let fs, r = k (Wire.Open "shop") in
+  check (within fs && mores fs >= 1
+         && match r with Some (Wire.Opened o) -> List.length (List.filter (fun (_, (x : Schema.prop)) -> String.length x.name > 1_000_000) o.props) = 17 | _ -> false)
+    "replies: an Open of 17 MB of names, in %d frames within the limit, joined whole" (List.length fs);
+  (* a thing of 17 texts of a million bytes: Get in frames of the flag more, joined *)
+  ignore (Result.get_ok (commit (decl 60 "bag/item" Ttext true)));
+  let thing = match commit [ Resolve.Add (-1, 60, Text "a") ] with Ok rc -> Cepheus.thing rc (-1) | Error _ -> 0 in
+  List.iter (fun i -> ignore (Result.get_ok (commit [ Resolve.Add (thing, 60, Text (Printf.sprintf "%c%s" (Char.chr (97 + i)) (String.make 1_000_000 'x'))) ]))) (List.init 17 Fun.id);
+  let fs, r = w (Wire.Get { db = 0; thing }) in
+  check (within fs && mores fs >= 1 && match r with Some (Wire.Facts f) -> List.length f.facts = 18 | _ -> false)
+    "replies: a Get of 17 MB of facts, in %d frames within the limit, joined whole" (List.length fs);
+  let small = match commit [ Resolve.Add (-1, 60, Text "small") ] with Ok rc -> Cepheus.thing rc (-1) | Error _ -> 0 in
+  let fs, r = w (Wire.Get { db = 0; thing = small }) in
+  check (List.length fs = 1 && mores fs = 0 && match r with Some (Wire.Facts _) -> true | _ -> false) "replies: a small Get, one frame as before";
+  (* a text past its bound is refused; one at it is written, and its Get is one frame *)
+  check (code (write w [ Resolve.Add (-1, 60, Text (String.make (Core.max_text + 1) 't')) ]) = "too_large") "replies: a text past %d bytes is too_large" Core.max_text;
+  (match write w [ Resolve.Add (-1, 60, Text (String.make Core.max_text 't')) ] with
+   | Some (Wire.Receipt rc) ->
+     let fs, r = w (Wire.Get { db = 0; thing = snd (List.hd rc.things) }) in
+     check (within fs && match r with Some (Wire.Facts f) -> List.length f.facts = 1 | _ -> false) "replies: a text at the bound comes back in a frame"
+   | r -> check false "replies: a text at the bound is written (%s)" (code r));
+  (* a group whose receipt would pass a frame (the PoC's: two new things an operation, large temporary ids) *)
+  let v = Atomic.get e.published in
+  let big = List.init 700_000 (fun i -> Resolve.Add (-(1 lsl 60) - (2 * i), 60, Value.Link (-(1 lsl 60) - (2 * i) - 1))) in
+  check (match Core.write_bounds v big with Some ("too_large", _) -> true | _ -> false) "replies: a group whose receipt passes a frame is refused before it is applied";
+  check (Core.write_bounds v (List.init 399_999 (fun i -> Resolve.Add (-(i + 1), 60, Text "x"))) = None) "replies: a group under 400,000 operations is not counted";
+  Engine.close e
+
 type gconn = { gc : Core.conn; send : Wire.request -> int * Core.input option; take : unit -> (int * int * int * Bytes.t) list option;
                bad_flush : bool ref; bad_wake : bool ref; closed : int ref }
 
@@ -1784,6 +1861,7 @@ let () =
   files_wire ();
   watch_window ();
   answer_bounds ();
+  reply_bounds ();
   (* last: its questions spawn domains, after which no test may fork *)
   guard ();
   C.finish "server unit"

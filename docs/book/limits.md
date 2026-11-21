@@ -15,7 +15,8 @@ defaults, and the cache's size (`set_cache`).
 | `Int`, `Date`, `Money` | 63-bit signed integers: $-2^{62}$ to $2^{62} - 1$ | OCaml's `int` |
 | `Money` digits | 0 to 18 (`Tmoney 19` is refused: unknown type code) | `Value.of_code` |
 | `Float` | any IEEE double; each distinct value takes a dictionary entry of 8 bytes | `Store.float_key` |
-| `Text` | any bytes, any length a group can hold (below) | |
+| `Text` | any bytes, any length a group can hold (below); through the server, 16,773,120 bytes at most (the frame limit less 4 KiB: a thing of one such fact comes back in a frame), else `too_large` | `Core.max_text` |
+| a name (of a property, of a rule) | through the server, 255 bytes at most, else `invalid`: names are sent whole to every program that opens the database | `Core.max_name` |
 | distinct texts and floats | below $2^{32}$ a run (a run's hash table holds a text's place in 4 bytes) | `Snapshot.merge` |
 | values of one thing for one property | below $2^{32}$ in a run (a thing block's entry counts in 4 bytes); a merge that would pass it fails with `Invalid_argument` | `Snapshot.tblock_flush` |
 | `by` | any `int` (0 by default) | `Cepheus.write` |
@@ -128,7 +129,9 @@ defaults, and the cache's size (`set_cache`).
 | a connection's reading buffer | 64 KiB, grown to a longer frame once a token was shown, back to 64 KiB once it is used; the buffers' bytes beyond their 64 KiB, server-wide: 64 MiB (four frames of 16 MiB), a connection that would pass it waiting for room before it reads on | `Net.base`, `Net.max_reading` |
 | writes in flight a connection | 1,024 (stated in Welcome); at the limit the server stops reading the socket | `Core.create ~max_inflight` |
 | replies not yet sent a connection | past 1 MiB, the server decodes no more of its requests until they are sent (a program that sends many requests and reads nothing holds a MiB and one reply of the server's memory); sent in pieces of 64 KiB, the output's memory given back past a chunk | `Core.max_out`, `Net.serve_conn` |
-| a Find's reply | frames of about 1 MiB of rows (all but the last with the flag more); a Give without Sort sends each frame before it finds the next rows | `Core.chunk`, `Core.stream_rows` |
+| a Find's reply | frames of about 1 MiB of rows (all but the last with the flag more); a Give without Sort sends each frame before it finds the next rows; a row longer than a frame by itself (texts of nearly 16 MiB side by side) ends it `too_large`, and a watch the same way | `Core.chunk`, `Core.stream_rows`, `Wire.add_push` |
+| a Get's and an Open's reply | one frame, as before; when it would pass the frame limit, frames of about 1 MiB of facts or properties, all but the last with the flag more, which the clients join | `Core.send_items`, `Client.join` |
+| a Write's receipt | within a frame: a group whose new things' receipt would pass it is refused (`too_large`) before it is applied; a group under 400,000 operations is not counted (40 bytes of receipt an operation at most) | `Core.write_bounds` |
 | watches | 1,024 a connection (as its writes in flight), 65,536 the server (about 1.3 KB a watch of a shared question, measured: 85 MiB); what their windows and groups keep counts as cells: a connection's at most one answer's (8,388,608), the server's at most 33,554,432; past any, the Watch is `too_large`, and a watch the server ended (`lagging`, ...) no longer counts | `Core.max_watches`, `Core.max_server_watches`, `Live.kept` |
 | variables of a question over the wire | 64 | `Wire.get_query` |
 | a session's receipts | at most 4,096; forgotten an hour after the session's last write | `Sessions.max_receipts`, `Sessions.expiry_ms` |

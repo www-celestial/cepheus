@@ -93,6 +93,11 @@ stay as they are, or a later version reads and speaks both the old and the new.
   `idle_timeout`) is checked inside the TLS handshake and inside a TLS record, so that a peer that sends a byte at a
   time is closed (Slowloris); on the peer port, 5 s the same way. At `max_connections` a new connection takes the slot
   of the oldest one that has shown no token, so that peers that connect and send nothing no longer keep programs out.
+- No reply passes the frame limit, which every client refuses: a Get or an Open that would is sent in frames of the
+  flag `more`, which the OCaml and Cesia clients join (one that fits is one frame, as before, and a reply of an
+  earlier server is read as before); a name is 255 bytes at most and a text 16,773,120 through the server, and a group
+  whose receipt would pass a frame is refused before it is applied, where before it was applied and its receipt
+  could not be read. A token that may add to one kind can no longer make a database unopenable.
 - A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are sent, so that
   many small requests for large replies, never read, no longer pile their replies up in the server's memory.
 

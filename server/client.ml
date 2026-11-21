@@ -176,13 +176,17 @@ let rec frames c id =
     Hashtbl.replace c.early id' ((kind, flags, body) :: prev);
     frames c id
 
-(* a reply in several frames joined: the rows of a Find, the bytes of a Load *)
+(* a reply in several frames joined: the rows of a Find, the bytes of a Load, the facts of a Get and the properties of
+   an Open too long for one frame (a server of an earlier version sends those in one) *)
 let join parts =
+  let two () = raise (Broken "a reply in parts of two kinds") in
   match List.find_opt (function Wire.Err _ -> true | _ -> false) parts with
   | Some e -> e
   | None -> (
     match parts with
-    | Wire.Data _ :: _ -> Wire.Data (String.concat "" (List.map (function Wire.Data s -> s | _ -> raise (Broken "a reply in parts of two kinds")) parts))
+    | Wire.Data _ :: _ -> Wire.Data (String.concat "" (List.map (function Wire.Data s -> s | _ -> two ()) parts))
+    | Wire.Facts f :: _ -> Wire.Facts { f with facts = List.concat_map (function Wire.Facts x -> x.facts | _ -> two ()) parts }
+    | Wire.Opened o :: _ -> Wire.Opened { o with props = List.concat_map (function Wire.Opened x -> x.props | _ -> two ()) parts }
     | _ ->
       let group = ref 0 and cols = ref 0 in
       let rows =

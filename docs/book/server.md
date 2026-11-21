@@ -393,8 +393,8 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | kind | request body | reply body |
 |---|---|---|
 | 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
-| 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique) |
-| 3 Get | handle, thing | Facts: the view's group, count, (property, value)... |
+| 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique); past the frame limit, in frames of about 1 MiB of properties, all but the last with `more`, each with its handle, group and count |
+| 3 Get | handle, thing | Facts: the view's group, count, (property, value)...; past the frame limit, in frames of about 1 MiB of facts, all but the last with `more`, each with its group and count |
 | 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort sent as its rows are found, none held): the view's group, columns, count, values row by row |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
@@ -1456,6 +1456,10 @@ What one peer may make the server hold or do, each bound refused or waited for b
   16 MiB do not make the server hold 8 GiB.
 - **Replies.** A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are
   sent: 100 Gets of a 900 KB text sent in 1,400 bytes and never read hold a MiB and a reply, not 90 MB.
+- **Frames.** No reply passes the frame limit, which every client refuses: a Get or an Open that would is sent in
+  frames of the flag `more`; a name is 255 bytes at most and a text the frame less 4 KiB, so a token that may add to
+  one kind cannot make the database unopenable; a group whose receipt would pass a frame is refused before it is
+  applied.
 - **Answers.** An answer the server holds (Sort, aggregates, a watch's first answer) is bounded by its cells, rows
   times columns, a question's and every connection's together; a Find without Sort holds none of its rows, so a cross
   product of patterns that share no variable (the size of the product, the AGM bound: Atserias, Grohe, Marx 2008)
@@ -1464,7 +1468,9 @@ What one peer may make the server hold or do, each bound refused or waited for b
   connection's cells.
 
 *Tested by* `test/server_unit.ml` ("the bounds of an answer at the server": a cross product asked every way, the
-pool held by others, 65 patterns, a pattern repeated, the watches of a connection and of the server) and
+pool held by others, 65 patterns, a pattern repeated, the watches of a connection and of the server; "replies
+within the frame limit": an Open of 17 MB of names and a Get of 17 MB of facts joined from their frames, names and
+texts past their bounds, a receipt past a frame) and
 `test/server_limits.ml` (a real server: connections that show no token holding every slot while a program connects,
 a TLS handshake and a TLS record after Hello sent a byte at a time) and `test/server_guard.ml` (real sockets: a frame
 of 16 MiB before Hello, three frames of 700 KB begun at once under a
