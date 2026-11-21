@@ -1620,6 +1620,67 @@ let reply_bounds () =
   check (Core.write_bounds v (List.init 399_999 (fun i -> Resolve.Add (-(i + 1), 60, Text "x"))) = None) "replies: a group under 400,000 operations is not counted";
   Engine.close e
 
+(* ---- one Hello a connection, and no path of the server in an error (the review's F10, F11) ---- *)
+
+let hello_once () =
+  let sim = Sim_disk.create (Rng.make 31) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/h";
+  let e = Result.get_ok (Engine.open_ disk "/h/shop") in
+  let secret = "/srv/secret-place/cluster/vault.key" in
+  let d = { Core.name = "shop"; index = 0; dir = "/h/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> Live.create (Atomic.get e.published) ~tag:0 ~durable:max_int);
+            files = Files.cell ~disk ~master:(fun () -> Error (secret ^ " is readable by others (mode 644): chmod 600 it")) "/h/shop/vault" } in
+  let submit (_ : Core.db) ops by why k = let b = Engine.prepare e [| ops, by, why |] in k (Engine.commit e b).(0) in
+  let props = List.map (fun (f, t) -> { Schema.name = "scan/" ^ f; typ = t; many = false; unique = false })
+      [ "Name", Value.Ttext; "Size", Tint; "Type", Ttext; "Owner", Tlink; "Content", Ttext ] in
+  let _, ops = Result.get_ok (Resolve.declare (Atomic.get e.published) props) in
+  submit d ops 0 "declare" (fun r -> ignore (Result.get_ok r));
+  let mk name databases = { Tokens.name; hash = Tokens.hash_of_text ("cph_" ^ name); databases; admin = false } in
+  let toks = Tokens.with_tokens Tokens.empty [ mk "w" [ "shop", Tokens.Write ]; mk "r" [ "shop", Tokens.Read ] ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+  let out = Buffer.create 256 in
+  let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+  let c = Lazy.force c in
+  let ask req =
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_request b req;
+    Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+    let bytes = Buffer.to_bytes f in
+    let why = snd (Core.input c bytes 0 (Bytes.length bytes)) in
+    c.flush ();
+    let s = Buffer.to_bytes out in
+    Buffer.clear out;
+    why, if Bytes.length s = 0 then None else Some (Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6)))
+  in
+  let hello tok = Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 } in
+  check (match ask (hello "r") with _, Some (Wire.Welcome _) -> true | _ -> false) "hello: the first Hello, a read token";
+  check (match ask (hello "w") with Core.Need, Some (Wire.Err { code = "invalid"; _ }) -> true | _ -> false) "hello: a second Hello is invalid, the connection kept";
+  check (match ask (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Resolve.Add (-1, 16, Value.Text "x") ] }) with
+         | _, Some (Wire.Err { code = "denied"; _ }) -> true | _ -> false)
+    "hello: its token is still the first's: a write is denied";
+  (* the vault's key refused: the program gets io and no path, the log the path *)
+  let w = Lazy.force (let rec c2 = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c2 in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in c2) in
+  let wask req =
+    let b = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_request b req;
+    Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
+    let bytes = Buffer.to_bytes f in
+    ignore (Core.input w bytes 0 (Bytes.length bytes));
+    w.flush ();
+    let s = Buffer.to_bytes out in
+    Buffer.clear out;
+    if Bytes.length s = 0 then None else Some (Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6)))
+  in
+  ignore (wask (hello "w"));
+  let put = Wire.Put { db = 0; serial = 1; floor = 0; by = 0; why = "t"; kind = "scan"; name = "a.pdf"; typ = "application/pdf"; owner = 0; cold = false; data = "abc" } in
+  let r, log = with_stderr (fun () -> wask put) in
+  check (match r with Some (Wire.Err { code = "io"; message }) -> not (contains message "secret-place") | _ -> false) "paths: a vault's error names no path to the program";
+  check (contains log "secret-place") "paths: the log says it (%S)" log;
+  (* the log's line a second, for the tests after *)
+  Fault.last := neg_infinity;
+  Engine.close e
+
 type gconn = { gc : Core.conn; send : Wire.request -> int * Core.input option; take : unit -> (int * int * int * Bytes.t) list option;
                bad_flush : bool ref; bad_wake : bool ref; closed : int ref }
 
@@ -1862,6 +1923,7 @@ let () =
   watch_window ();
   answer_bounds ();
   reply_bounds ();
+  hello_once ();
   (* last: its questions spawn domains, after which no test may fork *)
   guard ();
   C.finish "server unit"

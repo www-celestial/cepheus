@@ -392,7 +392,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | request body | reply body |
 |---|---|---|
-| 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit |
+| 1 Hello | version varint (1, 2 or 3), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique); past the frame limit, in frames of about 1 MiB of properties, all but the last with `more`, each with its handle, group and count |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)...; past the frame limit, in frames of about 1 MiB of facts, all but the last with `more`, each with its group and count |
 | 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort sent as its rows are found, none held): the view's group, columns, count, values row by row |
@@ -1439,7 +1439,24 @@ descriptors and threads counted before and after).
 ### Who may reach the socket
 
 The Unix socket's directory is the gate on one machine: make it `0750`, owned by the server's user and a group of
-the programs allowed to connect (`chgrp cepheus /run/cepheus`); the token is still needed. Over TCP, TLS.
+the programs allowed to connect (`chgrp cepheus /run/cepheus`); the token is still needed. The server makes the socket
+0660 once it is bound, whatever its umask: Linux lets a program connect only with the right to write the socket
+(unix(7)), so its owner's group may connect and nobody else. Over TCP, TLS.
+
+### The data directory
+
+Its files hold the facts in the clear (the journal, the runs, the session tables): every file a database makes is
+0600 and every folder 0700, whatever the process's umask. A data directory that lets its group or others in (made
+by hand under the usual umask, 0755) is made the server's alone at its start, and the log says so; one it cannot
+change (another owner) is refused. *Tested by* `test/server_limits.ml` (a data directory of mode 755: 0700 after the
+start, every file of the database 0600 and every folder 0700, the socket 0660).
+
+### No path in a reply
+
+An error of the server's own files (the disk, the vault and its key) reaches the program as its code (`io`, `busy`)
+and a fixed message, "the server could not use its files (its log says why)"; what it says (the paths, the
+system's words) goes to the server's log only. *Tested by* `test/server_unit.ml` (a vault key readable by others:
+`io` to the program, its path in the log only).
 
 ### Denial of service
 

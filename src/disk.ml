@@ -66,7 +66,7 @@ let take_lock p =
       in
       if held then false
       else begin
-        let ufd = Unix.openfile p [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o644 in
+        let ufd = Unix.openfile p [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o600 in
         let k = key (Unix.fstat ufd) in
         (* the file a held lock was taken on, put at this path between the stat and the open: refused, and the
            descriptor kept open, so that the lock stays *)
@@ -82,15 +82,17 @@ let take_lock p =
             false
       end)
 
+(* A database's files hold its facts in the clear (the journal, the runs, the sessions): made readable and writable by
+   their owner only, its folders the same (0600, 0700), whatever the process's umask. *)
 let real =
   {
     exists = Sys.file_exists;
-    mkdir = (fun p -> unix "mkdir" p (fun () -> Unix.mkdir p 0o755));
+    mkdir = (fun p -> unix "mkdir" p (fun () -> Unix.mkdir p 0o700));
     readdir = (fun p -> unix "readdir" p (fun () -> List.sort compare (Array.to_list (Sys.readdir p))));
     openf =
       (fun p create ->
         let flags = Unix.O_RDWR :: Unix.O_CLOEXEC :: (if create then [ Unix.O_CREAT ] else []) in
-        let ufd = unix "open" p (fun () -> Unix.openfile p flags 0o644) in
+        let ufd = unix "open" p (fun () -> Unix.openfile p flags 0o600) in
         locked (fun () ->
             let fd = !next in
             incr next;

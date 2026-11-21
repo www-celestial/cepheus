@@ -147,8 +147,24 @@ let () =
     while not (Sys.file_exists sock) && Unix.gettimeofday () -. t0 < 30. do Thread.delay 0.01 done;
     pid
   in
+  (* a data directory made by hand under the usual umask (0755): the server makes it its own, its databases' files
+     0600 and folders 0700, and its socket 0660 (the directory's group is the gate) *)
+  let data = Filename.concat a "data" in
+  (try Unix.mkdir data 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  Unix.chmod data 0o755;
   (* the defaults: a watcher that never reads *)
   let pid = serve () in
+  let rec modes p =
+    let st = Unix.lstat p in
+    match st.st_kind with
+    | Unix.S_DIR -> (p, st.st_perm, true) :: List.concat_map (fun x -> modes (Filename.concat p x)) (Array.to_list (Sys.readdir p))
+    | Unix.S_REG -> [ p, st.st_perm, false ]
+    | _ -> []
+  in
+  let wrong = List.filter (fun (_, m, dir) -> m <> if dir then 0o700 else 0o600) (modes (Filename.concat data "main")) in
+  C.check ((Unix.stat data).st_perm = 0o700) "a data directory of mode 755 made the server's alone (%o)" (Unix.stat data).st_perm;
+  C.check (wrong = []) "a database's files 0600 and folders 0700 (%s)" (String.concat ", " (List.map (fun (p, m, _) -> Printf.sprintf "%s %o" (Filename.basename p) m) wrong));
+  C.check ((Unix.stat sock).st_perm land 0o777 = 0o660) "the socket 0660, whatever the umask (%o)" ((Unix.stat sock).st_perm land 0o777);
   stall sock tok;
   Unix.kill pid Sys.sigterm;
   (match Serve.wait pid with _, Unix.WEXITED 0 -> () | _ -> C.check false "not a clean stop");

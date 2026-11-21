@@ -17,7 +17,8 @@ DIR/snapshots/LO-HI.run           the runs (levels of the LSM tree): the changes
 DIR/snapshots/LO-HI.run.tmp       a merge being written (removed at open if a crash interrupted it)
 ```
 
-The journal is the truth: runs are caches that can always be rebuilt. Byte layouts: [formats](formats.md).
+The journal is the truth: runs are caches that can always be rebuilt. Byte layouts: [formats](formats.md). Every file
+is made 0600 and every folder 0700, whatever the process's umask: they hold the facts in the clear (`Disk.real`).
 
 ## Opening and recovery
 

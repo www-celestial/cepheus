@@ -134,7 +134,12 @@ let reply c ~id ~kind r =
 
 let err c ~id ~kind code fmt = Printf.ksprintf (fun message -> reply c ~id ~kind (Wire.Err { code; message })) fmt
 
-let engine_err c ~id ~kind e = let code, message = Wire.code_of_error e in reply c ~id ~kind (Wire.Err { code; message })
+(* An error of the server's own files (the disk, the vault and its key) for a program: its code and a fixed message;
+   what it says (paths, the system's words) goes to the server's log only (Fault: escaped, a line a second at most),
+   so that no path of the server crosses the wire *)
+let own_files = "the server could not use its files (its log says why)"
+
+let hidden c ~id ~kind m = Fault.log (Printf.sprintf "connection %d, request %d of kind %d" c.cid id kind) (Failure m); own_files
 
 (* What a connection did not expect (a bug, memory that ran out) ends at one place in each thread that serves it: a
    request in [input], a write's reply in [write], a push in [watch], the transport's own loops. Written in the
@@ -523,6 +528,7 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
                 Wire.f_error
               | Error e ->
                 let code, message = Wire.code_of_error e in
+                let message = if code = "io" then hidden c ~id ~kind message else message in
                 (* a refusal by the rules names its rule only, to a token that may not read every kind *)
                 let message =
                   match c.rights.(d.index) with
@@ -561,7 +567,9 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
 
 module Vault = Cepheus_vault.Vault
 
-let vault_err c ~id ~kind e = let code, m = Files.code_of e in err c ~id ~kind code "%s" m
+let vault_err c ~id ~kind e =
+  let code, m = Files.code_of e in
+  err c ~id ~kind code "%s" (if code = "io" || code = "busy" then hidden c ~id ~kind m else m)
 
 (* the last bytes of a file came: its bytes made durable, then the group of its facts written as any write, in the
    session (a Put sent again after a broken connection is applied once: its bytes are found stored, its group
@@ -611,7 +619,7 @@ let put_start c ~id ~more d (req : Wire.request) =
           if p.owner > 0 && Cepheus.get v p.owner = [] then refuse "invalid" "the owner %d is not a thing of %s" p.owner d.name
           else
             match Files.vault d.files with
-            | Error m -> refuse "io" "the vault of %s: %s" d.name m
+            | Error m -> refuse "io" "the vault of %s: %s" d.name (hidden c ~id ~kind m)
             | Ok vt -> (
               match Vault.writer vt ~domain:p.owner ~cold:p.cold with
               | Error e -> vault_err c ~id ~kind e
@@ -634,7 +642,7 @@ let load c ~id ~kind d ~thing ~prop ~from ~len =
     | Error (code, m) -> err c ~id ~kind code "%s" m
     | Ok root -> (
       match Files.vault d.files with
-      | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name m
+      | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name (hidden c ~id ~kind m)
       | Ok vt -> (
         match if len >= 0 then Ok len else Result.map (fun s -> s - from) (Vault.size vt root) with
         | Error e -> vault_err c ~id ~kind e
@@ -828,6 +836,11 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
     if Atomic.get c.srv.stopping then (err c ~id ~kind "stopping" "the server is stopping"; Continue)
     else
       match req with
+      | Wire.Hello _ when c.session <> 0 ->
+        (* one Hello a connection: its token, rights and session stay those of the first (its watches were checked
+           against them) *)
+        err c ~id ~kind "invalid" "Hello once a connection: this one has shown its token";
+        Continue
       | Wire.Hello h ->
         if h.version < Wire.oldest || h.version > !speaks then
           (err c ~id ~kind "version" "protocol %d is not spoken here (%d to %d are)" h.version Wire.oldest !speaks; Close)
@@ -853,7 +866,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
         refresh_rights c;
         match c.token, req with
         | None, _ -> err c ~id ~kind "auth" "the token was removed"; Close
-        | _, Wire.Hello _ -> Continue
+        | _, Wire.Hello _ -> Continue (* answered above *)
         | _, Wire.Ping s -> reply c ~id ~kind (Wire.Pong s); Continue
         | Some tok, Wire.Admin what ->
           if not tok.admin then err c ~id ~kind "denied" "this token is not an admin token"
@@ -927,7 +940,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
            | Some _ when e.owner <= 0 -> err c ~id ~kind "invalid" "an erasure names an owner, a thing: the database's own key (0) is never erased"
            | Some d -> (
              match Files.vault d.files with
-             | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name m
+             | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name (hidden c ~id ~kind m)
              | Ok vt -> ( match Vault.erase vt e.owner with Ok () -> reply c ~id ~kind Wire.Erased | Error x -> vault_err c ~id ~kind x)));
           Continue
         | _, Wire.Load l ->

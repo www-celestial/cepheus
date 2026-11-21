@@ -182,7 +182,14 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   allocated; `Incr` round trips, and Writes with it fuzzed: every byte changed, cuts, bytes inserted, huge numbers,
   read or refused, never more), origins, the session table and its checkpoint (a damaged one refused), and the rights of every token
   against every request on every database through the server's core (G16, `Follow` with them), a token removed or
-  narrowed, a forged origin, a frame over the limit; and what local readers need from the system: descriptors passed
+  narrowed, a forged origin, a frame over the limit; the bounds of an answer (a cross product of two patterns that
+  share no variable asked with Sort, with aggregates and as a watch, each `too_large` past its cells and the cells
+  given back; without Sort, every row streamed in frames, the output never holding more than one; the pool held by
+  others; 64 patterns taken and 65 refused; a pattern repeated ten times past a budget of lookups; three watches a
+  connection and five a server under lowered limits, and what windows keep); replies within the frame limit (an Open
+  of 17 MB of names and a Get of 17 MB of facts in frames of the flag more, joined; names and texts past their bounds;
+  a receipt past a frame refused before it is applied); one Hello a connection; no path of the server in an error;
+  and what local readers need from the system: descriptors passed
   over a socket (400 random messages of 1 to 6,000 bytes with up to 8 descriptors, read in random pieces: the bytes
   and the files come out in order, each a new descriptor of the same open file, none left open; more than 64
   refused) and the visibility page (a store seen at once through the read-only mapping, one mapping a file, a
@@ -232,8 +239,11 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   when the test says (a bug of a request): a request that raises on a connection with a watch and a write in flight
   (the write answered, the request `internal`, the connection closed), 200 such connections in a row, and a failure
   in another thread of a connection while it waits in a read, over a Unix socket and over TCP (`internal` on id 0, no
-  request answered after it); after each, the process's descriptors and threads are what they were, no connection or
-  watch is left, and a new connection is served.
+  request answered after it); a frame of 16 MiB before Hello refused before its body is read, three frames of
+  700 KB begun at once held within a bound of 1 MiB and answered in turn, and 3,000 Finds sent at once by a client
+  that reads nothing yet, of which the server decodes no more while it holds a MiB of replies; after each, the
+  process's descriptors and threads are what they were, no connection or watch is left, and a new connection is
+  served.
 - Every server these tests start runs in a session of its own (`setsid`) with its output in a `serve.log` beside its
   `cluster.toml`, and is stopped when its test ends, even when the test fails (`test/serve.ml`); the tests ignore
   SIGPIPE, so that a write to a connection the server closed is an error, not the death of the test.

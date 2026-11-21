@@ -98,6 +98,13 @@ stay as they are, or a later version reads and speaks both the old and the new.
   earlier server is read as before); a name is 255 bytes at most and a text 16,773,120 through the server, and a group
   whose receipt would pass a frame is refused before it is applied, where before it was applied and its receipt
   could not be read. A token that may add to one kind can no longer make a database unopenable.
+- A database's files are 0600 and its folders 0700, and a data directory that lets its group or others in is made the
+  server's alone at its start (the log says so), so that its facts, in the clear on the disk, are no longer readable
+  by every user of the machine.
+- The Unix socket is 0660 once bound, so that the group of the socket's directory may connect, as the production page
+  says (it got EACCES under the usual umask).
+- A second Hello on a connection is `invalid`: a connection's token, rights and session stay those of its first.
+- An error of the server's own files reaches a program as its code and a fixed message, its paths in the log only.
 - A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are sent, so that
   many small requests for large replies, never read, no longer pile their replies up in the server's memory.
 

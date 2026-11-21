@@ -205,7 +205,8 @@ let follow_stream (c : Core.conn) (d : database) fd ~id ~stopping =
   match start 8 with
   | Error m ->
     let b = Buffer.create 64 in
-    Wire.put_reply b (Wire.Err { code = "busy"; message = "the database's files could not be passed: " ^ m });
+    log "database %s: its files could not be passed to a local reader: %s" d.core.name m;
+    Wire.put_reply b (Wire.Err { code = "busy"; message = "the database's files could not be passed (the server's log says why)" });
     (try send_frame fd ~id ~kind:Wire.k_follow ~flags:Wire.f_error b [] with Unix.Unix_error _ -> ())
   | Ok (f, vseq, vis, runs, fds) ->
     Fun.protect ~finally:(fun () -> Follow.unregister fol f) @@ fun () ->
@@ -483,6 +484,19 @@ let lock_data dir =
   (match Unix.mkdir dir 0o700 with
    | () -> Disk.real.sync_dir (Filename.dirname dir)
    | exception Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  (* one made by hand, or by a mkdir under the usual umask, lets others in: its files hold the facts in the clear (an
+     earlier version made them 0644), so it is made the server's alone, and the log says so; one it cannot change
+     (another owner) is refused *)
+  match
+    let st = Unix.stat dir in
+    if st.st_perm land 0o077 <> 0 then begin
+      Unix.chmod dir (st.st_perm land 0o700);
+      log "%s let its group or others in (mode %o): made %o, the server's alone" dir st.st_perm (st.st_perm land 0o700)
+    end
+  with
+  | exception Unix.Unix_error (e, _, _) ->
+    Error (Printf.sprintf "%s lets its group or others in and could not be made the server's alone (%s): chmod 700 it" dir (Unix.error_message e))
+  | () ->
   let path = Filename.concat dir "cepheus.lock" in
   let fd = Unix.openfile path [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o600 in
   match Unix.lockf fd Unix.F_TLOCK 0 with
@@ -518,6 +532,9 @@ let unix_listener path =
   end;
   let s = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
   Unix.bind s (Unix.ADDR_UNIX path);
+  (* connecting needs the right to write the socket (unix(7)): its owner and its group, whatever the umask made it, so
+     that the directory's group is the gate (production.md); the token is still needed *)
+  Unix.chmod path 0o660;
   Unix.listen s 256;
   s
 
