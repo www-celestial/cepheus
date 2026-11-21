@@ -165,7 +165,7 @@ down to the first level that can hold them all, writes one run there (about 5 by
 and then removes the runs it replaced, and any other run outside the chain. No run is kept aside: should the newest run
 be found damaged at an open, it is set aside and its groups are replayed from the journal (a slower open, nothing
 lost). A removed file's space returns only when no view reads it any longer (the file stays open until the garbage
-collector frees its run). During a full merge (`snapshot`) the directory holds the base twice, the old and the new:
+collector frees its run, and closes it then). During a full merge (`snapshot`) the directory holds the base twice, the old and the new:
 budget about twice the base for `snapshots/` while it runs, once the base after it.
 
 A fact is written about $(T + 1) / 2 = 2.5$ times per level it crosses ($T = 4$), against up to 17 times with the one level

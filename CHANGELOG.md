@@ -133,3 +133,6 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 - A newest journal segment whose header does not check while it holds bytes past it, or where the newest run
   resumes, is refused at open as damage (G6). Recovery took it for a segment torn at its creation and removed it, so
   one flipped bit in its 40 bytes opened the database without that segment's groups, with no error.
+- A run a merge replaced is closed, and its disk space freed, once no view reads it. The cache's queues kept an
+  entry for each of its pages, which held the run and its open file until the cache was full: with the data inside
+  the cache (1 GiB by default), every replaced run stayed open, its space held while `du` showed it gone.

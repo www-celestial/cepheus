@@ -1090,6 +1090,48 @@ let () =
   (match verify dir with Ok n -> C.check (n = last && n > 10) "verify reads %d groups, the journal's %d" n last | Error e -> C.fail "verify: %s" (message e));
   C.rmrf dir
 
+(* A run a merge replaced is closed, and its disk space freed, once no view reads it. The cache's FIFOs held a base's
+   entries after Pages.drop took its pages out, until the cache was full: each entry held the base, the base the
+   function that reads its file, and the finaliser that closes the file never ran (39 removed runs open after 40
+   merges, 60 MB of disk held). Here a view taken before each merge reads the replaced run after it, so its pages
+   enter the FIFOs again, as a question that runs across a merge does. *)
+let () =
+  section "a run replaced by a merge is closed once no view reads it";
+  let dir = C.tmpdir "replaced" in
+  let removed_open () =
+    let n = ref 0 in
+    Array.iter
+      (fun fd ->
+        match Unix.readlink ("/proc/self/fd/" ^ fd) with
+        | l when String.starts_with ~prefix:dir l && Filename.check_suffix l ".run (deleted)" -> incr n
+        | _ -> ()
+        | exception Unix.Unix_error _ -> ())
+      (Sys.readdir "/proc/self/fd");
+    !n
+  in
+  let db = Result.get_ok (open_ dir) in
+  let[@warning "-8"] (Ok [ name; score ]) = declare db [ prop "name" Ttext; prop "score" Tint ] in
+  let first = ref (-1) in
+  let merges = 40 in
+  for r = 1 to merges do
+    let w = Result.get_ok (write db (List.concat (List.init 200 (fun i -> [ Add (-1 - i, name, Text (Printf.sprintf "c%d-%d" r i)); Add (-1 - i, score, Int i) ])))) in
+    if r = 1 then first := thing w (-1);
+    let old = view db in
+    ignore (Result.get_ok (snapshot db));
+    C.check (get old !first <> []) "merge %d: the view before it reads the replaced run" r
+  done;
+  (* the newest view asked holds its runs (Query.same_slot): the newest one now. A run's finaliser runs on the domain
+     that made it, the writer's, at its next work after the collection that finds the run unreachable: a write *)
+  ignore (get (view db) !first);
+  Gc.full_major ();
+  ignore (Result.get_ok (write db [ Add (-1, name, Text "x") ]));
+  Gc.full_major ();
+  ignore (Result.get_ok (write db [ Add (-1, name, Text "y") ]));
+  let n = removed_open () in
+  C.check (n = 0) "after %d merges, %d removed runs are still open" merges n;
+  close db;
+  C.rmrf dir
+
 (* ---- named cases ---- *)
 
 let () =
