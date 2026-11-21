@@ -21,7 +21,8 @@ Float(unique = false, many = false) = {Type: "float", Unique: unique, Many: many
 (** true or false. *)
 Bool(unique = false, many = false) = {Type: "bool", Unique: unique, Many: many}
 
-(** An instant, as the seconds since 1970 in UTC that sys.Now gives, kept to the millisecond. *)
+(** An instant, as the seconds since 1970 in UTC that sys.Now gives, kept to the millisecond: below 4.6e15 s either
+    way, so that its milliseconds are an Int. *)
 Date(unique = false, many = false) = {Type: "date", Unique: unique, Many: many}
 
 (** Another thing of the database: its id. *)

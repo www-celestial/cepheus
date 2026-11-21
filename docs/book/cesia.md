@@ -126,8 +126,8 @@ name in questions and in `Write` (`Client.City`), and the field `kind`, which th
 | `cepheus.Int()` | a whole number of 63 bits | an Int | `42` |
 | `cepheus.Float()` | a 64-bit float (IEEE 754) | a Float (an Int is taken too) | `2.5` |
 | `cepheus.Bool()` | true or false | a Bool | `true` |
-| `cepheus.Date()` | an instant in UTC, kept in milliseconds since 1970 | a number of seconds since 1970, as `sys.Now()` gives; read back as a Float | `1794268800.25` |
-| `cepheus.Money(scale)` | an exact decimal of `scale` digits after the point (0 to 18), kept in minor units | a number (Int or Float), rounded to the scale; read back as a Float | `1200.5` |
+| `cepheus.Date()` | an instant in UTC, kept in milliseconds since 1970 | a number of seconds since 1970, as `sys.Now()` gives, below $4.6 \times 10^{15}$ either way (146 million years: its milliseconds an Int); read back as a Float | `1794268800.25` |
+| `cepheus.Money(scale)` | an exact decimal of `scale` digits after the point (0 to 18), kept in minor units | a number (Int or Float), rounded to the scale, whose minor units are an Int; read back as a Float | `1200.5` |
 | `cepheus.Link()` | another thing of the database | its id, an Int | `65536` |
 
 Each takes `unique = false` and `many = false`. Money is exact in the database (an integer of minor units, so sums are

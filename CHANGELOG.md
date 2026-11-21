@@ -147,3 +147,6 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   the budget of derived facts (`work_budget`), else the group or the change is refused, naming the rule. A body of
   three things that share a tag read $n^3$ candidates for $n$ heads, under the budget: one write of 400 facts held the
   writer 13 s, 1,600 about 15 minutes; refused now in 0.06 s.
+- From Cesia, a date of $4.6 \times 10^{15}$ s or more either way, whose milliseconds pass the Ints, and money of the
+  least Int are refused (`invalid`): they were stored wrapped around (5e15 s read back as -4.2e15 s, the least Int's
+  cents as 0).

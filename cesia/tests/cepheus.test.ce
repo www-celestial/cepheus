@@ -140,6 +140,20 @@ defn isRangeBoundsAsANaiveFilter()
   ok
 end
 
+defn isDatesAndMoneyThatDoNotFitRefused()
+  (** A date whose milliseconds pass the Ints, and money of the least Int, are refused: they were stored wrapped
+      around (5e15 s read back as -4.2e15, the least Int's cents as 0). The largest that fit are kept. *)
+  t = items()?
+  far = cepheus.Insert(Item, {When: 5000000000000000.0}, t)
+  past = cepheus.Insert(Item, {When: -5000000000000000.0}, t)
+  edge = cepheus.Insert(Item, {When: 4611686018427387.0}, t)
+  least = cepheus.Insert(Item, {Price: -4611686018427387903 - 1}, t)
+  most = cepheus.Insert(Item, {Price: 46116860184273879}, t)
+  fits = cepheus.Insert(Item, {When: -4611686018427386.0, Price: -46116860184273878}, t)
+  list.All([far.Error.Code == "invalid", past.Error.Code == "invalid", edge.Error.Code == "invalid",
+            least.Error.Code == "invalid", most.Error.Code == "invalid", result.IsOk(fits)])
+end
+
 defn isFindSorts()
   s = shop()?
   q(after) = (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {I: i, Total: t}, Sort: [cepheus.Desc(t)], Limit: 2, After: after}

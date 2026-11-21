@@ -175,9 +175,13 @@ let[@inline never] of_cesia (pname : string) (typ : Value.typ) (x : C.value) : V
   | Tlink, Int i -> Link i
   | Tdate, (Int _ | Float _) ->
     let s = match x with Int i -> float_of_int i | Float f -> f | _ -> 0. in
-    if Float.is_finite s && Float.abs s < 9e15 then Date (Float.to_int (Float.round (s *. 1000.))) else wrong "a date in seconds since 1970"
+    (* its milliseconds an Int: |s| below max_int / 1000 s (146 million years) *)
+    if Float.is_finite s && Float.abs s < float_of_int (max_int / 1000) then Date (Float.to_int (Float.round (s *. 1000.)))
+    else wrong "a date in seconds since 1970"
   | Tmoney sc, Int i ->
-    if abs i < max_int / pow10.(sc) then Money (i * pow10.(sc)) else wrong "an amount that fits"
+    (* its minor units an Int, checked without [abs], which leaves the least Int negative *)
+    let m = max_int / pow10.(sc) in
+    if i > -m && i < m then Money (i * pow10.(sc)) else wrong "an amount that fits"
   | Tmoney sc, Float f ->
     let u = Float.round (f *. float_of_int pow10.(sc)) in
     if Float.is_finite u && Float.abs u < 4.6e18 then Money (Float.to_int u) else wrong "an amount that fits"

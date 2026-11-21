@@ -301,6 +301,7 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 |---|---|---|---|
 | `invalid` | `P needs a Text` (an Int, a number, a Bool, a date in seconds since 1970, an amount), `not V` | a value given for the property P is not of its type | give a value of the property's type |
 | `invalid` | `P needs an amount that fits` | a Money value past 63 bits once in minor units | a smaller amount |
+| `invalid` | `P needs a date in seconds since 1970, not V` | also a date of $4.6 \times 10^{15}$ s or more either way (its milliseconds would pass 63 bits) | a date in range |
 | `invalid` | `the kind K has no field F` | a field given to Insert or Update that the kind does not declare | correct the field's name (it is never dropped in silence) |
 | `invalid` | `P is not declared in this database: give its kind to Connect (or Fork)` | a kind used on a database that was not given it | add the kind to Connect's list, or Fork's |
 | `invalid` | `P is a T in this database, not a U` | the database declares the property with another type | the kind must match the database's schema |
