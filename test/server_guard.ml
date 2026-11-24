@@ -171,7 +171,7 @@ let () =
   (* the warm-up: a watch makes the hubs' domain and thread, which stay *)
   let p, ended = pair () in
   ignore (welcomed p);
-  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none });
+  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none; wtimeout = 0 });
   ignore (next_frame p);
   Unix.close p.fd;
   ignore (ends ended);
@@ -188,7 +188,7 @@ let () =
   (* 1. a watch, a write answered, then a write in flight and a request that raises, sent together *)
   let p, ended = pair () in
   let w1 = welcomed p in
-  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none });
+  send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none; wtimeout = 0 });
   let answered = match next_frame p with Some f -> (match push f with Some (Wire.Answer _) -> true | _ -> false) | None -> false in
   send p ~id:3 (write 1);
   let receipt = ref false and change = ref false in
@@ -258,7 +258,7 @@ let () =
   let other name (p, ended) =
     let w = welcomed p in
     (* its pushes' thread made, as a push that fails would find it *)
-    send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none });
+    send p ~id:2 (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none; wtimeout = 0 });
     ignore (next_frame p);
     let c = Mutex.protect srv.cm (fun () -> Hashtbl.fold (fun _ c _ -> Some c) srv.conns None) in
     let (), _ = with_stderr dir (fun () -> match c with Some c -> Core.broke c (Failure "a push that failed") | None -> ()) in
@@ -325,7 +325,7 @@ let () =
   ignore (Result.get_ok (Engine.write live (List.init 2000 (fun i -> Resolve.Add (-(i + 1), pscore, Value.Int i))) 0 "rows"));
   let p, ended = pair () in
   ignore (welcomed p);
-  let find = Wire.Find { db = 0; query = scores; select = Wire.Give [||]; extra = []; order = Question.Top.none } in
+  let find = Wire.Find { db = 0; query = scores; select = Wire.Give [||]; extra = []; order = Question.Top.none; timeout = 0 } in
   let b = Buffer.create 65536 in
   for i = 1 to 3000 do let x = Buffer.create 32 in Wire.put_request x find; Wire.add_frame b ~id:(100 + i) ~kind:Wire.k_find ~flags:0 x done;
   let all = Buffer.to_bytes b in

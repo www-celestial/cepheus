@@ -237,6 +237,17 @@ defn isFindOperatorRefusals()
   list.All([andTop.Error.Code == "invalid", inCase.Error.Code == "invalid", own.Error.Code == "invalid"])
 end
 
+defn isFindTimeout()
+  (** A cross product of three patterns over 400 clients (64 million answers) given 0.05 s ends timeout, its message
+      naming the time; the same question of one pattern answers within 5 s; a time of 0 is a mistake. *)
+  t = cepheus.Fork(cepheus.Empty, [Client])?
+  cepheus.Write([cepheus.Add(cepheus.New(k), Client.Name, "c$k") for k in 1..400], t)?
+  cross = cepheus.Find(6, (a, x, b, y, c, z) -> {Where: [[a, Client.Name, x], [b, Client.Name, y], [c, Client.Name, z]], Give: {N: cepheus.Count()}}, t, timeout = 0.05)
+  one = cepheus.Find(2, (a, x) -> {Where: [[a, Client.Name, x]], Give: {N: cepheus.Count()}}, t, timeout = 5)?
+  bug.Assert(cross.Error.Code == "timeout" and text.Contains("0.05 s", cross.Error.Message), "$cross")
+  one[1].N == 400
+end
+
 defn isFindLeavesOutAnUnusedVariable()
   (** A variable in no item of the question, as an optional filter left out, is left out; one Give names but no
       pattern binds is refused by its field. *)

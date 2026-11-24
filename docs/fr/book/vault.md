@@ -252,18 +252,19 @@ scellées de nouveau sous elle, l'ancienne détruite) : pas encore construit.
 
 ### Les copies : ce qui manque à une replica, par des Merkle trees
 
-Une replica a besoin des records qui lui manquent, et de ceux-là seulement. Les noms du vault sont des valeurs
-uniformes de 256 bits : leurs 16 premiers bits mettent chacun dans une des 65 536 feuilles d'un **Merkle tree** (un
-arbre de hashes, où chaque nœud porte le hash de ses enfants ; Merkle, "A Digital Signature Based on a Conventional
-Encryption Function", CRYPTO 1987), le digest (le hash qui résume) d'une feuille étant le BLAKE2b-256 de ses noms
-triés, celui d'un nœud le BLAKE2b-256 de ceux de ses 16 enfants (quatre niveaux sous la racine). Deux copies comparent
-leurs arbres depuis la racine vers le bas, seulement là où les digests diffèrent, comme l'anti-entropy de Dynamo (la
-comparaison de fond qui remet les copies d'accord ; DeCandia et al., SOSP 2007) : pour d records qui manquent à une
-copie parmi n, au plus 64 digests par différence et les noms d'au plus d feuilles passent d'une copie à l'autre, au lieu
-de n noms. Les records sont copiés tels quels (scellés : la copie les vérifie par leurs CRC, et n'a besoin d'aucune clé
-pour les stocker) ; les clés des domains partent scellées par la master key, que partagent les copies d'un même cluster
-(les serveurs qui tiennent les mêmes bases), et un effacement part avec elles. Construit et testé entre deux vaults d'un
-même processus ; le protocole entre serveurs viendra avec la réplication (la conception du serveur, section 8).
+Une replica a besoin des records qui lui manquent, et de ceux-là seulement. Les noms du vault sont des valeurs uniformes
+de 256 bits : leurs 16 premiers bits mettent chacun dans une des 65 536 feuilles d'un **Merkle tree** (un arbre de
+hashes, où chaque nœud porte le hash de ses enfants ; Merkle, "A Digital Signature Based on a Conventional Encryption
+Function", CRYPTO 1987), le digest (le hash qui résume) d'une feuille étant le BLAKE2b-256 de ses noms triés, celui d'un
+nœud le BLAKE2b-256 de ceux de ses 16 enfants (quatre niveaux sous la racine). Deux copies comparent leurs arbres depuis
+la racine vers le bas, seulement là où les digests diffèrent, comme l'anti-entropy de Dynamo (la comparaison de fond qui
+remet les copies d'accord ; DeCandia et al., SOSP 2007) : pour d records qui manquent à une copie parmi n, au plus 64
+digests par différence et les noms d'au plus d feuilles passent d'une copie à l'autre, au lieu de n noms. Les records
+sont copiés tels quels (scellés : la copie les vérifie par leurs CRC, et n'a besoin d'aucune clé pour les stocker) ; les
+clés des domains partent scellées par la master key, que partagent les copies d'un même cluster (les serveurs qui
+tiennent les mêmes bases), et un effacement part avec elles. Construit et testé entre deux vaults d'un même processus ;
+le protocole entre serveurs n'est pas construit : une replica ne copie pas encore les fichiers du vault ([le
+serveur](server.md#une-replica)).
 
 ## Formats
 
@@ -442,8 +443,9 @@ sont égaux (rapports 0,96 à 1,05, chaque intervalle contenant 1). Les programm
   restent dans les packs jusqu'à ce qu'un nettoyage marque ce que les faits et l'historique citent et réécrive les
   packs (comme `restic prune`).
 - **La réplication entre serveurs** : la comparaison et la copie sont construites ; le protocole, son modèle TLA+ (un
-  langage pour décrire un système et en vérifier tous les états ; ici : chaque chunk cité présent sur la replica), et
-  la réparation d'un chunk endommagé depuis une replica viendront avec la replica de l'étape 6 du serveur.
+  langage pour décrire un système et en vérifier tous les états ; ici : chaque chunk cité présent sur la replica), et la
+  réparation d'un chunk endommagé depuis une replica ne le sont pas : une replica ([le serveur](server.md#une-replica))
+  ne copie pas encore les fichiers du vault.
 - **Une nouvelle master key** (la clé de chaque domain scellée de nouveau), et l'effacement des faits personnels par le
   journal.
 - **Un index des noms sur le disque** plutôt qu'en mémoire, pour des vaults de nombreux téraoctets.

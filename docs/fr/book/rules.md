@@ -688,19 +688,20 @@ groupe écrit pendant ce temps coûte aux nouvelles règles plusieurs fois ce qu
 peut pas suivre à pleine charge (environ 110 µs par groupe contre 10 à 25 pour le writer), et le writer l'attend à 65
 536 groupes de retard (des secondes).
 
-**Des tours sur plusieurs domains.** Dans un groupe que le writer raisonne lui-même (un chargement, un changement sur
-un fork ou dans le cœur déterministe), un tour de 20 000 faits ou plus, et le premier tour des règles qu'ajoute un
+**Des tours sur plusieurs domains.** Dans un groupe que le writer raisonne lui-même (un chargement, un changement sur un
+fork ou dans le cœur déterministe), un tour de 20 000 faits ou plus, et le premier tour des règles qu'ajoute un
 changement, est découpé en morsels (des petits morceaux de travail, Leis et al. [Leis 2014]) pris à tour de rôle par
 jusqu'à quatre domains, chacun dérivant avec ses propres plans et gardant les têtes qui ne sont pas encore des faits ;
 puis un seul domain en fait des faits, morsel après morsel, dans l'ordre, comme il les aurait trouvées seul : le
-résultat, le budget et les refus ne dépendent pas des domains. Les règles avec `Not` ou des agrégats, et les règles
-dont un groupe ajouterait les constantes texte au dictionnaire (intern), tournent sur un seul domain. Quand les règles
+résultat, le budget et les refus ne dépendent pas des domains. Les règles avec `Not` ou des agrégats, et les règles dont
+un groupe ajouterait les constantes texte au dictionnaire (intern), tournent sur un seul domain. Quand les règles
 ajoutées sont moins nombreuses que les threads, les instances de chaque règle sont découpées par blocs des premiers
 éléments de son plan, un bloc par morsel. Un changement en arrière-plan ne dérive que sur son propre domain : mesuré sur
-plusieurs domains à cet endroit, le débit des clients pendant le changement baissait (de 0,84 à 0,78 à l'étape 5 ;
-avec les instances d'une règle en morsels, de 0,83 à 0,50), et la construction n'allait pas plus vite
-([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5--les-faits-dérivés-dun-changement-dans-un-run-à-eux-2026-11-18)). Mesuré sur un chargement de 10 universités avec
-les 94 règles : les tours à 1,44 M de faits dérivés/s sur quatre domains, 0,90 sur un seul.
+plusieurs domains à cet endroit, le débit des clients pendant le changement baissait (de 0,84 à 0,78 le 2026-11-13 ;
+avec les instances d'une règle en morsels, de 0,83 à 0,50 le 2026-11-18), et la construction n'allait pas plus vite
+([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5--les-faits-dérivés-dun-changement-dans-un-run-à-eux-2026-11-18)).
+Mesuré sur un chargement de 10 universités avec les 94 règles : les tours à 1,44 M de faits dérivés/s sur quatre
+domains, 0,90 sur un seul.
 
 Les règles sont compilées à la première écriture qui en a besoin, jamais à l'ouverture : une ouverture rejoue des
 frames, qui tiennent déjà les faits dérivés, donc le démarrage ne grandit pas.
@@ -1013,7 +1014,7 @@ tours, alternés, chaque processus limité à 3 GB ; la médiane et l'intervalle
 | son raisonnement entier (les faits du groupe préparés pour les joins, 0,13 s, compris) | **1,29 M de faits dérivés/s** (0,41 s) | | |
 | le même chargement en dix groupes, une université par groupe : mémoire résidente au pic | **133 MB** | | |
 | un fait dérivé mis dans la vue (un delta de 200 000 changements) | **0,83 µs** en lots triés ; 1,12 µs un par un | | |
-| OWL 2 RL entier (`Cepheus.Owl`) contre les dix règles du W3C de l'étape 2, LUBM-10 en un seul chargement : raisonnement | **0,512 s** contre 0,543 s | | 0,92 |
+| OWL 2 RL entier (`Cepheus.Owl`) contre les dix règles du W3C seules, l'ontologie en faits, LUBM-10 en un seul chargement : raisonnement | **0,512 s** contre 0,543 s | | 0,92 |
 | le même, LUBM-1 un groupe par département : raisonnement | **0,277 s** contre 0,247 s | | 1,15 |
 | l'égalité par réécriture contre axiomatisée, en forme d'UOBM (un benchmark d'universités plus riche en OWL que LUBM ; une université, 6 558 enregistrements en double) | **1,066 s** contre 1,957 s | | 1,84× plus rapide, 3,27× moins de dérivations |
 | une classe de 100 000 choses (la tempête d'une propriété fonctionnelle) | **1,42 s**, 99 999 faits de `cepheus/same` | | axiomatisée : au-delà du budget dès 400 choses |
@@ -1033,10 +1034,10 @@ les chiffres marqués *calculé* sont les nôtres, tirés de leurs tableaux) :
 | RDFox B/F, Motik et al., AAAI 2015 [Motik 2015] | LUBM-1k-L, suppression de 100 faits | « 0.0 s » dans son tableau (sous son arrondi) |
 | Soufflé, Scholz et al., CC 2016 [Scholz 2016] | une analyse points-to d'OpenJDK 7, environ 840 M de tuples | 75 s en séquentiel, 35 s en parallèle (4 cœurs) : une autre charge, donnée pour l'ordre de grandeur |
 
-- **Un cœur, la saturation** : 1,04 M de faits dérivés/s ici (étape 1), 0,67 M/s pour RDFox 2014, environ 1,28 M/s pour
-  VLog : le même ordre de grandeur ; le débit publié de VLog reste devant de 1,2×, sur une autre machine et avec cent
-  fois plus de données.
-- **En parallèle, les faits d'un chargement triés** (étape 3) : les tours à 1,92 M/s sur les 4 cœurs de ce portable
+- **Un cœur, la saturation** : 1,04 M de faits dérivés/s ici (2026-11-08), 0,67 M/s pour RDFox 2014, environ 1,28 M/s
+  pour VLog : le même ordre de grandeur ; le débit publié de VLog reste devant de 1,2×, sur une autre machine et avec
+  cent fois plus de données.
+- **En parallèle, les faits d'un chargement triés** (2026-11-14) : les tours à 1,92 M/s sur les 4 cœurs de ce portable
   (8 threads), le raisonnement entier de 1,3 à 1,6 M/s, 0,33 à 0,40 M/s par cœur : proche des 0,44 M/s par cœur de
   RDFox 2014 à 32 threads ; RDFox atteint 7,0 M/s en tout sur ses 16 cœurs.
 - **Petites écritures** : des microsecondes, dans le processus. Aucun géant ne publie de latence par groupe à comparer.
@@ -1045,7 +1046,7 @@ les chiffres marqués *calculé* sont les nôtres, tirés de leurs tableaux) :
   dans les persistent maps ou les runs du store (34 recherches pour un étudiant) ; le prototype de la conception, sur
   des hash tables à lui, prenait 19,1 µs.
 
-**Les closures et la forme du W3C** (l'étape 2 de la conception ; [benchmarks](benchmarks.md#règles-étape-2--les-closures-et-la-forme-du-w3c-2026-11-12)) :
+**Les closures et la forme du W3C** (2026-11-12 ; [benchmarks](benchmarks.md#règles-étape-2--les-closures-et-la-forme-du-w3c-2026-11-12)) :
 le closure module calcule les 683 496 nouveaux faits de la hiérarchie de 100 000 nœuds en **22,5 ms** (prp-trp comme
 règle : 0,92 s de raisonnement) et les 1 344 791 du DAG aléatoire (un graphe orienté sans cycle) en **47,3 ms**
 (17,6 s), chaque nouveau fait créé une seule fois ; les données en forme de LUBM avec l'ontologie en faits et les 10
@@ -1085,20 +1086,19 @@ mention contraire.
 
 ## Ce qui n'est pas encore là
 
-Le plan de la conception a six étapes ; cette version a les six.
-
-- **Le reste de l'étape 3** : les joins des tours d'un changement en arrière-plan interrogent le store fait par fait,
-  sur le seul domain du changement.
-- **Le reste de l'étape 5** : un changement avec de nouvelles choses est calculé dans le groupe ; seuls les faits
-  dérivés des propriétés à plusieurs valeurs, aucune unique, vont dans le run à eux d'un changement (les autres entrent
-  dans le delta) ; les deux cibles de l'étape 5 ne sont pas atteintes toutes les deux : 2 M de faits dérivés par seconde
-  pour la construction (2,9 M), pas avec l'écriture de son run (1,8 M : l'écriture du run en fait un tiers) ; les writers
-  dans la fenêtre d'un changement, 0,83 de leur débit sans lui, par paire, sans arrêt du disque (0,92 face à la fenêtre
-  médiane), le codage de l'installation et son dernier rattrapage étant la part du writer
+- **Les joins d'un changement en arrière-plan** : ses tours interrogent le store fait par fait, sur le seul domain du
+  changement.
+- **Le run d'un changement et ses cibles** : un changement avec de nouvelles choses est calculé dans le groupe ; seuls
+  les faits dérivés des propriétés à plusieurs valeurs, aucune unique, vont dans le run à eux d'un changement (les
+  autres entrent dans le delta) ; les deux cibles d'un changement (2 M de faits dérivés par seconde ; les writers dans
+  sa fenêtre à 0,90 de leur débit sans lui) ne sont pas atteintes toutes les deux : 2 M pour la construction (2,9 M),
+  pas avec l'écriture de son run (1,8 M : l'écriture du run en fait un tiers) ; les writers à 0,83, par paire, sans
+  arrêt du disque (0,92 face à la fenêtre médiane), le codage de l'installation et son dernier rattrapage étant la part
+  du writer
   ([benchmarks](benchmarks.md#règles-les-cibles-de-létape-5-encore--linstallation-dun-changement-sans-un-record-par-fait-2026-11-19)).
-- **Le reste de l'étape 6** : B/F sur les égalités (Motik et al., IJCAI 2015 [Motik 2015c]) au lieu de défaire une
-  classe ; la preuve d'une égalité dans `why` ; l'égalité à côté de `Not` et des agrégats, des closure modules, du
-  chemin des chargements et des tours parallèles.
+- **L'égalité** : B/F sur les égalités (Motik et al., IJCAI 2015 [Motik 2015c]) au lieu de défaire une classe ; la
+  preuve d'une égalité dans `why` ; l'égalité à côté de `Not` et des agrégats, des closure modules, du chemin des
+  chargements et des tours parallèles.
 - Le budget comme réglage de la base plutôt que comme nombre du processus ; le groupe qui a affirmé chaque feuille d'une
   preuve.
 

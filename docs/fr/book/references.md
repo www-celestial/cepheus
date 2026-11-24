@@ -1,12 +1,12 @@
 # Références
 
-Les travaux que Cepheus suit, auxquels il se mesure, ou qu'il prévoit de suivre, par sujet. Chaque entrée donne les
-auteurs, le titre, le lieu de publication et l'année, un lien (un DOI quand il y en a un, sinon la page de l'éditeur
-ou celle des auteurs), et ce que Cepheus en a pris. Chaque entrée a été vérifiée dans la notice de l'éditeur ou dans
-DBLP (les auteurs dans l'ordre, le titre exact, le lieu, le volume et l'année) ; un travail qui n'a pas pu être vérifié
-n'est pas listé. Les citations restent dans leur langue ; ce que Cepheus en a pris est en français. La documentation de
-conception des autres bases de données (PostgreSQL, SQLite, Oracle, Datomic, RocksDB, Neo4j, FoundationDB, CockroachDB)
-est citée dans la page [comparaison](comparison.md).
+Les travaux que Cepheus suit ou auxquels il se mesure, et ceux qui sont derrière ce qu'il ne construit pas encore, par
+sujet. Chaque entrée donne les auteurs, le titre, le lieu de publication et l'année, un lien (un DOI quand il y en a un,
+sinon la page de l'éditeur ou celle des auteurs), et ce que Cepheus en a pris. Chaque entrée a été vérifiée dans la
+notice de l'éditeur ou dans DBLP (les auteurs dans l'ordre, le titre exact, le lieu, le volume et l'année) ; un travail
+qui n'a pas pu être vérifié n'est pas listé. Les citations restent dans leur langue ; ce que Cepheus en a pris est en
+français. La documentation de conception des autres bases de données (PostgreSQL, SQLite, Oracle, Datomic, RocksDB,
+Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparison.md).
 
 ## Le stockage : les log-structured merge-trees
 
@@ -118,8 +118,9 @@ est citée dans la page [comparaison](comparison.md).
 - **[Alagappan 2018]** R. Alagappan, A. Ganesan, E. Lee, A. Albarghouthi, V. Chidambaram, A. C. Arpaci-Dusseau,
   R. H. Arpaci-Dusseau. Protocol-Aware Recovery for Consensus-Based Storage. *FAST* 2018, 15–32.
   https://www.usenix.org/conference/fast18/presentation/alagappan
-  — Un seul secteur abîmé peut faire perdre des données confirmées dans des systèmes répliqués ; la règle prévue pour
-  la réplication (une replica abîmée ne vote pas, elle se répare), et pourquoi une seule machine refuse d'ouvrir
+  — Un seul secteur abîmé peut faire perdre des données confirmées dans des systèmes répliqués ; la règle du log
+  abîmé d'un cluster Cepheus (un serveur abîmé ne vote ni ne se présente à une élection tant qu'il n'est pas réparé :
+  [le serveur](server.md#un-log-abîmé--la-règle-de-2018)), et pourquoi une seule machine refuse d'ouvrir
   plutôt que de couper.
 
 ## La gestion des buffers et le cache
@@ -338,7 +339,8 @@ est citée dans la page [comparaison](comparison.md).
   — L'implémentation de PostgreSQL, à laquelle la page de comparaison se compare.
 - **[Thomson 2012]** A. Thomson, T. Diamond, S.-C. Weng, K. Ren, P. Shao, D. J. Abadi. Calvin: Fast Distributed
   Transactions for Partitioned Database Systems. *SIGMOD* 2012, 1–12. https://doi.org/10.1145/2213836.2213838
-  — Des transactions dans un ordre fixé d'avance, sans locks : le writer unique, et le plan pour plusieurs machines.
+  — Des transactions dans un ordre fixé d'avance, sans locks : le writer unique ; une base partitionnée sur
+  plusieurs machines de cette façon n'est pas construite.
 
 ## Les structures persistantes et les forks
 
@@ -482,11 +484,12 @@ est citée dans la page [comparaison](comparison.md).
   — Des lectures qui ne diffèrent que par un paramètre et partagent un seul état : les templates des questions
   vivantes, dont les constantes sont des paramètres.
 
-## La réplication et plusieurs machines (prévu)
+## La réplication et plusieurs machines
 
 - **[Ongaro 2014]** D. Ongaro, J. Ousterhout. In Search of an Understandable Consensus Algorithm. *USENIX ATC* 2014,
   305–319. https://www.usenix.org/conference/atc14/technical-sessions/presentation/ongaro
-  — Raft, choisi pour la réplication, avec sa spécification TLA+ publique.
+  — Raft, l'algorithme d'un cluster Cepheus ([le serveur](server.md#un-cluster-de-trois-raft)), avec sa spécification
+  TLA+ publique.
 - **[Verbitski 2017]** A. Verbitski, A. Gupta, D. Saha, M. Brahmadesam, K. Gupta, R. Mittal, S. Krishnamurthy,
   S. Maurice, T. Kharatishvili, X. Bao. Amazon Aurora: Design Considerations for High Throughput Cloud-Native
   Relational Databases. *SIGMOD* 2017, 1041–1052. https://doi.org/10.1145/3035918.3056101
@@ -495,12 +498,12 @@ est citée dans la page [comparaison](comparison.md).
   D. Kossmann, S. Lingam, U. F. Minhas, N. Prakash, V. Purohit, H. Qu, C. S. Ravella, K. Reisteter, S. Shrotri,
   D. Tang, V. Wakade. Socrates: The New SQL Server in the Cloud. *SIGMOD* 2019, 1743–1756.
   https://doi.org/10.1145/3299869.3314047
-  — Le log, les pages et le calcul séparés : le plan pour le stockage sur des object stores.
+  — Le log, les pages et le calcul séparés : le stockage sur des object stores, pas construit.
 - **[Ammar 2018]** K. Ammar, F. McSherry, S. Salihoglu, M. Joglekar. Distributed Evaluation of Subgraph Queries Using
   Worst-case Optimal Low-Memory Dataflows. *PVLDB* 11(6), 691–704, 2018. https://doi.org/10.14778/3184470.3184473
-  — BiGJoin : Generic Join sur beaucoup de machines, prévu ; et ses delta queries, le changement d'un join pour des
-  faits ajoutés ou retirés, chaque nouveau binding au premier pattern qui correspond à un fait ajouté : la façon dont
-  se calcule le changement d'une question vivante (G21).
+  — BiGJoin : Generic Join sur beaucoup de machines, pas construit ; et ses delta queries, le changement d'un join
+  pour des faits ajoutés ou retirés, chaque nouveau binding au premier pattern qui correspond à un fait ajouté : la
+  façon dont se calcule le changement d'une question vivante (G21).
 
 ## Le vault de fichiers
 
@@ -589,13 +592,14 @@ est citée dans la page [comparaison](comparison.md).
 - **[Gray 1989]** C. G. Gray, D. R. Cheriton. Leases: An Efficient Fault-Tolerant Mechanism for Distributed File Cache
   Consistency. *SOSP* 1989, 202–210. https://doi.org/10.1145/74850.74870
   — Le lease, un droit qui prend fin de lui-même après un temps : ce que la conception proposait d'abord pour les
-  lectures locales, laissé au profit du numéro de visibilité sur une seule machine ; il revient entre machines.
+  lectures locales, laissé au profit du numéro de visibilité sur une seule machine ; entre machines, le leader d'un
+  cluster Raft sert ses lectures sous un lease ([le serveur](server.md#les-lectures-et-ce-que-voit-un-programme)).
 - **[Moraru 2014]** I. Moraru, D. G. Andersen, M. Kaminsky. Paxos Quorum Leases: Fast Reads Without Sacrificing
   Writes. *SoCC* 2014. https://doi.org/10.1145/2670979.2671001
   — Le détenteur d'un lease ne lit en local qu'après avoir évalué "whether an update to any of the leased objects is
   ongoing (i.e., in the process of being committed), and if not" : les lectures par des leases fondés sur des messages
-  ont besoin de cette attente pour être linearizable ; la mémoire partagée d'une seule machine la supprime. La voie
-  prévue pour les lecteurs sur d'autres machines (étape 7).
+  ont besoin de cette attente pour être linearizable ; la mémoire partagée d'une seule machine la supprime. Des lectures
+  locales sur d'autres machines par de tels leases ne sont pas construites.
 - **[unix(7)]** The Linux man-pages project. unix(7): `SCM_RIGHTS`, "Send or receive a set of open file descriptors
   from another process". https://man7.org/linux/man-pages/man7/unix.7.html
   — Comment le serveur passe à un lecteur local ses fichiers de runs et sa page de visibilité
@@ -638,7 +642,7 @@ est citée dans la page [comparaison](comparison.md).
   recovery du journal.
 - **[Kingsbury 2020]** K. Kingsbury, P. Alvaro. Elle: Inferring Isolation Anomalies from Experimental Observations.
   *PVLDB* 14(3), 268–280, 2020. https://doi.org/10.14778/3430915.3430918
-  — Le vérificateur d'isolation de Jepsen ; le test bank suit celui de Jepsen, Elle viendra avec la réplication.
+  — Le vérificateur d'isolation de Jepsen ; le test bank suit celui de Jepsen ; Elle elle-même ne tourne pas.
 
 - **[Serebryany 2012]** K. Serebryany, D. Bruening, A. Potapenko, D. Vyukov. AddressSanitizer: A Fast Address Sanity
   Checker. *USENIX ATC* 2012, 309–318. https://www.usenix.org/conference/atc12/technical-sessions/presentation/serebryany

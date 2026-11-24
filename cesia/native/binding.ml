@@ -350,7 +350,7 @@ let off_domain ctx f ~drop =
   match
     C.suspend ctx (fun resume ->
         ignore
-          (Domain.spawn (fun () ->
+          (Pool.spawn (fun () ->
                let r = try Ok (f ()) with e -> Error e in
                if Atomic.compare_and_set state Waiting (Done r) then resume ()
                else match r with Ok x -> drop x | Error _ -> ())))
@@ -909,28 +909,38 @@ let question ?(uses = []) ctx name d qv nvars =
 (* a row of the answer (values) as the program's map *)
 let record_of_row ctx qn (row : Value.t array) = C.record ctx qn.qkeys (Array.init (Array.length qn.at) (fun i -> to_cesia qn.typs.(i) row.(qn.at.(i))))
 
+(* a call's timeout = seconds: missing, or a number above 0 *)
+let timeout_of ctx name = function
+  | C.Missing -> None
+  | C.Int i when i > 0 -> Some (float_of_int i)
+  | C.Float f when f > 0. && not (Float.is_nan f) -> Some f
+  | v -> C.need ctx name "a timeout, a number of seconds above 0" v
+
 let find ctx a =
   let name = "cepheus.Find" in
   try
     let d = db_of ctx name a.(0) in
     let nvars = int ctx name a.(2) in
+    let timeout = timeout_of ctx name (if Array.length a > 3 then a.(3) else C.Missing) in
     let qn = question ctx name d a.(1) nvars in
     let query = qn.query and select = qn.select and at = qn.at and typs = qn.typs and keys = qn.qkeys in
     let ncols = Array.length at in
     let rows =
       match local_state d with
       | Some v -> (
-        match Answer.answer ~order:qn.order ~extra:qn.extra v query select with
+        match Answer.answer ~order:qn.order ~extra:qn.extra ?stop:(Client.local_stop timeout) v query select with
         | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init ncols (fun i -> of_word v typs.(i) (ans.word r at.(i)))))
         | exception Query.Bad m -> refuse "invalid" "%s" m
+        | exception Query.Timeout t -> refuse "timeout" "%s" (Query.timeout_message t)
         | exception Pages.Unreadable m -> refuse "damaged" "%s" m)
       | None -> (
         match d.src with
         | Fork _ -> assert false
         | Server s when (qn.extra <> [] || qn.order <> Question.Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
+        | Server s when timeout <> None && s.conn.cl.spoken < 6 -> refuse "invalid" "%s" (Client.no_timeout s.conn.cl.spoken)
         | Server _ when List.length query.where > Wire.max_patterns -> refuse "invalid" "%s" (Client.too_many_patterns query)
         | Server s -> (
-          match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order }) with
+          match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order; timeout = Client.timeout_ms timeout }) with
           | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
           | rep -> server_error rep "Find"))
     in
@@ -954,9 +964,10 @@ let message_keys = C.keys [| "Group"; "Rows"; "Added"; "Removed" |]
 let find_source d (sh : Conn.shared) =
   let from = if sh.started then sh.group else 0 in
   let local hub =
-    match Live.subscribe ~extra:sh.extra ~order:sh.order hub sh.query sh.select ~from ~emit:(fun m -> Conn.deliver sh m; true) with
+    match Live.subscribe ~extra:sh.extra ~order:sh.order ?stop:(Client.local_stop sh.timeout) hub sh.query sh.select ~from ~emit:(fun m -> Conn.deliver sh m; true) with
     | sub -> Mutex.protect sh.sm (fun () -> sh.src <- Local (hub, sub)); true
     | exception Query.Bad m -> Conn.finish sh "invalid" m; true
+    | exception Query.Timeout t -> Conn.finish sh "timeout" (Query.timeout_message t); true
     | exception Query.Over_budget n -> Conn.finish sh "too_large" (Printf.sprintf "the question passed the budget of %d candidates" n); true
     | exception Pages.Unreadable m -> Conn.finish sh "damaged" m; true
     | exception Failure _ -> false
@@ -968,10 +979,11 @@ let find_source d (sh : Conn.shared) =
     | Some hub when local hub -> true
     | _ when sh.extra <> [] && s.conn.cl.spoken < 2 -> Conn.finish sh "invalid" Client.older; true
     | _ when sh.order <> Question.Top.none && s.conn.cl.spoken < 5 -> Conn.finish sh "invalid" (Client.no_sorted_watch s.conn.cl.spoken); true
+    | _ when sh.timeout <> None && s.conn.cl.spoken < 6 -> Conn.finish sh "invalid" (Client.no_timeout s.conn.cl.spoken); true
     | _ when List.length sh.query.where > Wire.max_patterns -> Conn.finish sh "invalid" (Client.too_many_patterns sh.query); true
     | _ ->
       Mutex.protect sh.sm (fun () -> sh.src <- Remote);
-      Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from; wextra = sh.extra; worder = sh.order }))
+      Conn.watch s.conn sh (Wire.Watch { db = s.cdb.handle; query = sh.query; select = sh.select; from; wextra = sh.extra; worder = sh.order; wtimeout = Client.timeout_ms sh.timeout }))
 
 (* a watch's source stops: the server's watch, or the hub's *)
 let stop_source d (sh : Conn.shared) =
@@ -996,6 +1008,7 @@ let watch ctx a =
   try
     let d = db_of ctx name a.(0) in
     let nvars = int ctx name a.(2) in
+    let timeout = timeout_of ctx name (if Array.length a > 3 then a.(3) else C.Missing) in
     let qn = question ctx name d a.(1) nvars in
     let b = Buffer.create 64 in
     Wire.put_query b qn.query;
@@ -1005,7 +1018,7 @@ let watch ctx a =
     let sh =
       match Hashtbl.find_opt shared key with
       | Some sh when sh.ended = None -> sh
-      | _ -> let sh = Conn.new_shared ~extra:qn.extra ~order:qn.order key qn.query qn.select in Hashtbl.replace shared key sh; sh
+      | _ -> let sh = Conn.new_shared ~extra:qn.extra ~order:qn.order ?timeout key qn.query qn.select in Hashtbl.replace shared key sh; sh
     in
     let c = Conn.join sh in
     (* the first message waited for here: the answer, or why there is none; it is given again by the first next *)
@@ -1077,7 +1090,7 @@ let named ctx d =
       match d.src with
       | Fork _ -> []
       | Server s -> (
-        match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query = q; select = Wire.Give [| 0; 1 |]; extra = []; order = Question.Top.none }) with
+        match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query = q; select = Wire.Give [| 0; 1 |]; extra = []; order = Question.Top.none; timeout = 0 }) with
         | Wire.Rows rw -> List.filter_map (function [| Value.Link e; Value.Text t |] | [| Value.Int e; Value.Text t |] -> Some (e, t) | _ -> None) rw.rows
         | rep -> server_error rep "Define"))
   in
@@ -1153,7 +1166,7 @@ let ask_ids ctx d (q : Query.t) extra =
     match d.src with
     | Fork _ -> []
     | Server s -> (
-      match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query = q; select = Wire.Give cols; extra; order = Question.Top.none }) with
+      match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query = q; select = Wire.Give cols; extra; order = Question.Top.none; timeout = 0 }) with
       | Wire.Rows rw -> List.map (Array.map (function Value.Link e | Value.Int e -> e | _ -> refuse "protocol" "an unexpected row")) rw.rows
       | rep -> server_error rep "a question"))
 
@@ -1309,6 +1322,6 @@ let close ctx a =
 let () =
   C.register
     [ "kind", 2, 2, kind; "connect", 4, 4, connect; "get", 3, 3, get; "insert", 5, 5, insert; "update", 6, 6, update;
-      "write", 4, 4, write; "variables", 1, 1, variables; "find", 3, 3, find; "fork", 2, 2, fork; "close", 1, 1, close;
-      "watch", 3, 3, watch; "next", 1, 1, next; "define", 2, 2, define; "put", 9, 9, put; "read", 5, 5, read;
+      "write", 4, 4, write; "variables", 1, 1, variables; "find", 3, 4, find; "fork", 2, 2, fork; "close", 1, 1, close;
+      "watch", 3, 4, watch; "next", 1, 1, next; "define", 2, 2, define; "put", 9, 9, put; "read", 5, 5, read;
       "delete", 5, 5, delete; "erase", 2, 2, erase; "same", 2, 2, same_of ]

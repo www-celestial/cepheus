@@ -49,7 +49,8 @@ let parallel ?(d = !domains) k f =
           | exception e -> ignore (Atomic.compare_and_set failed None (Some e)); go := false
       done
     in
-    let ds = List.init (d - 1) (fun _ -> Domain.spawn work) in
+    (* the domains the process may have (Pool's budget): fewer take the same items *)
+    let ds = List.filter_map (fun _ -> Pool.try_spawn work) (List.init (d - 1) Fun.id) in
     work ();
     List.iter Domain.join ds;
     match Atomic.get failed with Some e -> raise e | None -> ()
@@ -311,7 +312,7 @@ let make ?d0 ~sorted ~order e p w n ~np =
   (* two domains: the four largest properties of a load sort in about 40 ms, and each domain's room is the largest
      property's rows (27 MB at 2.27 M rows): more domains would save a few ms for that memory each *)
   let d = if n < 200_000 then 1 else min (min 2 !domains) np in
-  let ds = List.init (d - 1) (fun _ -> Domain.spawn work) in
+  let ds = List.filter_map (fun _ -> Pool.try_spawn work) (List.init (d - 1) Fun.id) in
   work ();
   List.iter Domain.join ds;
   { b0 with poff; pw; pe }

@@ -261,6 +261,14 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 | `Busy` | `DIR was written through a server's commit buffer and not closed cleanly: its newest writes may be in the server's DATA/server.wal.1 or .2 alone; start the server on its data directory, which writes them into the journal, and stop it` | `open_` in a program's own process of a database a server held when it crashed (`DIR/shared` and no `DIR/closed`) | start the server and stop it; the database then opens anywhere ([operations](operations.md#a-database-of-a-server)) |
 | `Closed` | `the database is closed` | `write` or `snapshot` after `close` | open the database again |
 
+## `Timeout`: a question passed its time
+
+| error | message | when | do |
+|---|---|---|---|
+| `Timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | `find`, `ask` or `fold` given `~timeout:N` ran past N seconds (looked at every 1,024 candidates of each domain: it ends within a few milliseconds of its time); nothing is returned of it ([limits](limits.md#questions)) | a narrower question (a selective pattern first, a range, pages with Sort and Limit), or a longer time |
+
+`find`, `ask` and `fold` raise `Invalid_argument` for a timeout of 0 or less, or NaN: a program's mistake.
+
 ## Exceptions
 
 | exception | raised by | when |
@@ -274,7 +282,7 @@ closed`, and `journal: an earlier write failed; reopen the database` (the writes
 ## Through the server
 
 A program connected to the server receives every error above as a value `{code, message}` (`conflict`, `invalid`,
-`unique`, `damaged`, `io`, `busy`, `closed`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
+`unique`, `damaged`, `io`, `busy`, `closed`, `timeout`), and the server's own codes: `auth`, `denied`, `version`, `too_large`,
 `unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`, `internal`, `read_only` (a replica), and in
 a Raft cluster `not_leader` (this server follows a leader: its message names it, and its body carries the leader's
 address, which the OCaml library follows by itself) and `no_leader` (an election runs, or the new leader is not ready:
@@ -316,6 +324,8 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `In needs values of the variable's type (a T), not V`; `a variable of In appears in no pattern` | `In` with values of another type | values of the variable's type |
 | `invalid` | `this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2` | a question with them, on a connection to a server of an earlier release | upgrade the server ([upgrades](production.md#upgrades)) |
 | `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | a group with `cepheus.Incr`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `this server speaks protocol N: a question's timeout needs a server of protocol 6` | `Find` or `Watch` with `timeout`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server, or leave the time to the server's `question_timeout` |
+| `timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | the question ran past its `timeout`, or past the server's `question_timeout` (a time longer than the server's counts only from an admin token): in the program's memory or at the server alike | a narrower question, or pages; a longer `timeout` where the server allows it |
 | `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` on another type, an empty or long prefix | a text variable a pattern gives |
 | `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | the bounds of a question ([limits](limits.md#questions)) | page, split the list, or ask several questions |
 | `too_large` | `the question passed the server's budget of N candidates: ask a narrower one, or several` | a question whose join enumerates more than the server's budget, its lookups over the most patterns one variable has ([limits](limits.md#questions)); a watch past it at a frame (its Not, Or or In, or the refill of its window) ends with it | a narrower question: more constants, a range, a Limit on the index path |
