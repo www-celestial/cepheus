@@ -115,7 +115,8 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
         | exception (Snapshot.Bad m | Pages.Unreadable m | Invalid_argument m) -> damage "snapshots/%s: %s" n m
         | exception Disk.Io m ->
           if live && not (Sys.file_exists (sdir // n)) then note "snapshots/%s: removed by a merge meanwhile" n
-          else damage "snapshots/%s: %s" n m)
+          else damage "snapshots/%s: %s" n m
+        | exception e -> damage "snapshots/%s: %s" n (Printexc.to_string e))
       runs;
     (* the journal, its segments on up to 4 domains; the runs' positions looked for among its frames *)
     let jdir = dir // "journal" in
@@ -529,8 +530,12 @@ let restore ?(target = End) ~replace src dst =
     Unix.rmdir tmp;
     sync_dir parent;
     say "copied: journal %s, runs %s%s" (mb c.journal) (mb c.runs_) (if c.vault > 0 then ", vault " ^ mb c.vault else "");
+    (* the group's origin: the token of the program that wrote it through a server (Origin), who and why *)
     Option.iter
-      (fun (g : Group.t) -> say "group %d: written %s, by %d%s" g.n (time_text g.time) g.by (if g.why = "" then "" else Printf.sprintf ", why %S" g.why))
+      (fun (g : Group.t) ->
+        let token, why = match Origin.parse g.why with Some (o, w) -> Printf.sprintf ", through the token %s" o.token, w | None -> "", g.why in
+        say "group %d: written %s%s%s%s" g.n (time_text g.time) token (if g.by = 0 then "" else Printf.sprintf ", by %d" g.by)
+          (if why = "" then "" else Printf.sprintf ", why %S" why))
       last;
     say "%s: restored from %s at group %d; its next writes open epoch %d from group %d (%s)" dst src reached e (reached + 1) (since t0);
     Option.iter (fun a -> say "the database that was there is kept in %s: remove it once the restore is checked" a) aside;

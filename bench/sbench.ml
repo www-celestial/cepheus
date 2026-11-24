@@ -37,7 +37,7 @@
 
      sbench.exe mwrite ADDR D C SECS        D databases d1 .. dD of the server (empty ones), C writers each, one fact a
                                              durable group: groups/s in all and the latencies
-     sbench.exe rate ADDR RATE SECS W        RATE groups a second of one fact to main for SECS, over W connections: the
+     sbench.exe rate ADDR RATE SECS W        RATE groups a second of one fact to main (DB=name another) for SECS, over W connections: the
                                              groups/s, the write latency, and (CEPHEUS_ADMIN) the replicas' lag
 
    The other commands open the database for remote reads (the server answers), even over the Unix socket.
@@ -631,7 +631,7 @@ let rate addr r secs w =
   let worker k () =
     let c = connect addr in
     let db, p =
-      match Client.declare c "main" [ { Schema.name = "n/k"; typ = Value.Tint; many = false; unique = false } ] with
+      match Client.declare c (Option.value (Sys.getenv_opt "DB") ~default:"main") [ { Schema.name = "n/k"; typ = Value.Tint; many = false; unique = false } ] with
       | Ok (db, [ p ]) -> db, p
       | Ok _ -> failwith "declare"
       | Error e -> failwith (e.code ^ ": " ^ e.message)

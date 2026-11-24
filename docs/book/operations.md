@@ -88,8 +88,9 @@ the page cache, and a power loss may lose them there. So:
 ## When recovery says `Damaged`
 
 Durable data changed: a disk fault, a mishandled file, a segment missing in the
-middle. Do not delete files. Copy the directory aside; run `Cepheus.verify` on the copy for the full list; restore the
-database from a backup or (later) a replica. The message names the segment and the offset of the first bad frame. If
+middle. Do not delete files. Run `cepheus verify DIR` for the full list (it changes nothing); restore the database from
+a backup (`cepheus restore BACKUP DIR --replace`, which moves the damaged folder aside) or promote its replica. The
+message names the segment and the offset of the first bad frame. If
 and only if you know the damaged part was never confirmed (for example, the frame is the newest one and the machine
 lost power while writing it), the tail can be cut by hand at that offset (`truncate -s OFFSET SEGMENT`): this is a
 human decision, never taken by Cepheus.
@@ -113,28 +114,66 @@ the merge is tried again once the delta has grown by another threshold; a large 
 
 ## Backup and restore
 
-Segments are only appended to and never rewritten, and run files are written beside and renamed, so a consistent copy
-needs no stop:
+`cepheus backup --config FILE DEST` copies every database of a running server ([production](production.md#backups)),
+`cepheus restore SRC DIR` restores one ([the restore drill](production.md#the-restore-drill)). What they rest on:
+segments are only appended to and never rewritten, and run files are written beside and renamed, so a consistent copy
+needs no stop, in this order:
 
-1. copy `DIR/cepheus`;
-2. optionally, copy the run files of `DIR/snapshots/` (they make the restore faster; without them, the copy replays the
-   whole journal). A merge may remove runs while you copy: copy what is there, and the copy's open takes the chain its
-   names allow (a missing run only means a longer replay). Copy them **before** the segments: a run is named only once
-   its groups are durable in the journal, so the segments copied after it hold them; a run copied after the segments
-   may be newer than their end, and the copy would refuse to open (`the journal ends at group G, before the snapshot
-   of group S`);
-3. copy the segments of `DIR/journal/` in the order of their names. A segment being written may be copied with a torn
-   end, which the copy's recovery cuts; every group confirmed before the copy of its segment started is in the copy.
+1. `DIR/cepheus`, and `DIR/epochs` if there is one (a replica's history of promotions);
+2. the run files of `DIR/snapshots/`, each opened before the segments are listed. They make the restore faster
+   (without them, the copy replays the whole journal). A merge may remove a run meanwhile: an opened file still reads,
+   and a run removed before its open is only a longer replay (the copy's open takes the chain its names allow). They
+   come **before** the segments: a run is named only once its groups are durable in the journal, so the segments
+   copied after it hold them; a run copied after the segments may be newer than their end, and the copy would refuse
+   to open (`the journal ends at group G, before the snapshot of group S`);
+3. the segments of `DIR/journal/`, in the order of their names. The newest one may be copied while a frame is being
+   written: from the first frame of its copy that does not check whole (header, body and trailer), everything is that
+   frame (a large group's header is written after its body, so a copy may see its trailer and not its header), and
+   the copy is cut there. Every group confirmed before the copy of its segment started is before that point: it was
+   written whole before it was confirmed, and frames are appended one at a time;
+4. `DIR/vault/`, after the journal: its `keys`, then each pack and its index (a fact names a file only once the file's
+   records are forced, G22, so every file the copied journal cites is in the copied packs; the pack being written may
+   end in a torn record, which the copy's open indexes up to its last whole one, as after a crash).
 
-To restore: put the files in a new directory and open it (its recovery cuts a torn end), compare
-`Cepheus.group (Cepheus.view db)` with what you expect, close it, and run `Cepheus.verify` on it. A backup that was
-never opened and verified is not a backup.
+The copy leaves out `lock`, `closed`, `shared` and `sessions`. `cepheus backup` then checks it as `cepheus verify`
+does, cuts it after its last whole frame, forces it and writes its `closed` marker: a backup is a database closed
+cleanly, and a later `cepheus verify` of it takes any torn byte for damage.
+
+`cepheus restore SRC DIR [--to-group N | --to-time T]` copies into `DIR.restoring`, in the same order, the runs whose
+groups end at N or before and the segments up to the one that begins at N + 1 (kept as its header alone: a run of
+group N may name it), ends the journal after group N (the frame that holds N, when later groups share it, is coded
+again without them, at the same place, with the same first group), writes a new epoch from group N + 1 into
+`DIR/epochs`, opens the copy (its runs checked, the groups after the newest one replayed), closes it, checks it as
+`cepheus verify` does, and renames it `DIR`; with `--replace`, a database already in `DIR` is first renamed
+`DIR.before-restore-DATE`, never removed. It refuses a source or a target that a process holds open, a database
+written through a server's commit buffer and not closed cleanly, and a target whose server did not stop cleanly
+(`DATA/server.wal.1` or `.2` there): that server's next start would write the buffer's frames into the restored
+journal. The exit status of both: 0 done, 1 damage found, 2 refused or failed; neither leaves a half copy under its
+final name.
 
 ## Verification (scrubbing)
 
-`Cepheus.verify DIR` on a closed database reads every segment from the start and checks every frame, every trailer and
-every group number: it returns the number of groups or `Damaged`. Run it regularly on databases and on backups: it is
-the only check that decodes the old segments, which an open does not read when runs cover them.
+`cepheus verify DIR` checks a database's files as they are and changes nothing (it opens them read-only):
+
+- every segment of the journal on its own (on up to 4 domains), so that a damaged one does not hide the others: its
+  header, then every frame (its header's and body's CRCs, its trailer, its first group and count, the groups following
+  one another), the groups of every frame up to 16 MiB decoded and numbered (a larger frame, a large load's, is checked
+  by its CRCs: decoding it would take the memory of its group); the first damage of each segment named, with its
+  offset, and the segments missing between them;
+- every run, as an open checks it (its header, page table, rank and offset tables), and every page against its CRC
+  (read through a cache of 256 MiB: the memory stays under it whatever the database's size);
+- each run against the journal: its groups in the journal, its journal position the start of a frame;
+- the vault's records, by their CRCs, without the master key: the keys' file, every record each pack's index names,
+  the packs without an index up to their torn end.
+
+The end of the newest segment is read by the database's state: closed cleanly, every byte must check; left by a
+process that died, a torn frame with nothing written after it is a note (the next open cuts it); open in a server, the
+frame being written is not checked. A database written through a server's commit buffer and not closed cleanly is
+refused: start its server and stop it first. Exit status 0: whole (the last line names the group); 1: damage, one
+`damaged:` line each; 2: not a database, unreadable, or refused. Run it on the backups (`cepheus backup` runs it on
+each copy) and now and then on the live databases: it is the only check that reads the old segments and every page,
+which an open does not read when runs cover them. `Cepheus.verify DIR`, the OCaml call, stays: it reads every frame of
+a closed database's journal and returns the number of groups or `Damaged`.
 
 ## Memory
 

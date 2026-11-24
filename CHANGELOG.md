@@ -73,9 +73,19 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects
   a new leader by itself.
-- Commands: `cepheus serve`, `stop`, `status`, `token add|list|remove`, `cluster init|cert`, `replicate`, `promote`
-  ([commands](docs/book/server.md#commands)), and a systemd service with backups, a restore drill and what to watch
-  ([production](docs/book/production.md)).
+- Commands: `cepheus serve`, `stop`, `status`, `token add|list|remove`, `cluster init|cert`, `replicate`, `promote`,
+  `verify`, `backup`, `restore` ([commands](docs/book/server.md#commands)), and a systemd service with backups, a
+  restore drill and what to watch ([production](docs/book/production.md)).
+- **Operations as commands.** `cepheus verify DIR` checks a database's files and changes nothing: every frame of the
+  journal, every page of the runs, the runs against the journal, the vault's records, each damage named (exit status
+  1), a live database up to the frame being written. `cepheus backup --config FILE DEST` copies every database of a
+  running server, a replica's too, with no stop and no token, into `DEST/DATE`, named only once every copy is checked,
+  cut after its last whole frame and forced. `cepheus restore SRC DIR` restores one, opened and checked before it
+  takes its name; `--to-group N` or `--to-time T` stops before a bad write, as PostgreSQL's point-in-time recovery,
+  and the restored database writes in a new epoch, so that a replica holding the old history's later groups is
+  refused rather than followed; `--replace` moves the database there aside, never removes it
+  ([backups](docs/book/production.md#backups), [verification](docs/book/operations.md#verification-scrubbing)). The
+  backup script the production guide gave before still works, and its copies restore with `cepheus restore`.
 - An answer the server holds while it builds it (a Find with Sort or aggregates, a watch's first answer) is bounded
   by its cells, rows times columns (8,388,608 a question, 33,554,432 for every connection's at once), past which it is
   `too_large`; a Find without Sort past them is asked again and sends its rows as the join finds them, holding none

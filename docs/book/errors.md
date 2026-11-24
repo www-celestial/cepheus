@@ -171,8 +171,8 @@ From `find` and `fold` (the question is malformed):
 
 The files no longer hold what the database made durable: a disk that changed bytes, a file copied badly, a segment
 removed by hand. The database **refuses to open** rather than drop a confirmed group in silence (G6). **Do**: do not
-delete or edit files; copy the directory aside; run `Cepheus.verify` on the copy for the first fault; restore from a
-backup. Cut a journal by hand only if you know the damaged frame was never confirmed ([operations](operations.md#when-recovery-says-damaged)).
+delete or edit files; run `cepheus verify DIR` for every fault (it changes nothing); restore from a backup
+(`cepheus restore BACKUP DIR --replace`, which keeps the damaged folder aside). Cut a journal by hand only if you know the damaged frame was never confirmed ([operations](operations.md#when-recovery-says-damaged)).
 
 From `open_` (recovery) and `verify`; `SEG` is the segment's name, an offset is in bytes from the segment's start:
 

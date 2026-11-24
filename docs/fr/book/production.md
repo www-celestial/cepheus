@@ -137,16 +137,184 @@ cepheus: ready in 23.9 ms: shop at group 1; socket /run/cepheus/.s.cepheus.7400,
 
 ## Les sauvegardes
 
-Le journal d'une base (le fichier où elle ne fait qu'ajouter ses écritures) n'est jamais que complété à sa fin, et ses
-runs (les copies triées de son état, dans des fichiers) sont écrits à côté puis renommés, donc une copie n'a pas besoin
-d'arrêt, dans cet ordre : l'id de la base, ses runs, puis ses segments (les fichiers successifs du journal)
-([sauvegarde et restauration](operations.md#sauvegarde-et-restauration)). La copie tient chaque groupe (une écriture, appliquée
-tout entière ou pas du tout) confirmé avant le début de la copie de son segment, y compris ceux du commit buffer (le
-journal commun du serveur, où les écritures de plusieurs bases partagent un seul fsync, l'appel système qui attend que
-les octets soient vraiment sur le disque). Elle laisse de côté `lock`, `closed`, `shared` et `sessions` : la copie
-s'ouvre comme une base à part entière. Prise sur une [replica](server.md#les-sauvegardes-depuis-la-replica) (une copie de la
-base tenue à jour sur une autre machine), elle ne coûte rien au primary (le serveur qui reçoit les écritures), et tient
-les groupes que tenait la replica. `/usr/local/bin/cepheus-backup` :
+`cepheus backup` copie chaque base du serveur pendant qu'il sert, dans un dossier nommé par la date
+([commandes](server.md#les-commandes)). Elle ne demande ni arrêt ni token (le jeton secret d'un programme) : lancez-la
+sous l'utilisateur du serveur, qui lit le dossier des données. Pour chaque base, dans l'ordre qui garde une copie
+cohérente pendant que le serveur écrit ([sauvegarde et restauration](operations.md#sauvegarde-et-restauration)) : son
+id et son historique de promotions ; ses runs (les copies triées de son état, dans des fichiers), chacun ouvert avant
+qu'on liste le journal (le fichier où la base ne fait qu'ajouter ses écritures ; un merge, la fusion de runs, qui en
+retire un pendant ce temps le laisse lisible par son descripteur) ; ses segments (les fichiers successifs du journal),
+dans l'ordre de leurs noms ; son [vault](vault.md) (le coffre de ses fichiers), après le journal, pour que chaque
+fichier que ses faits citent soit dans la copie. Puis chaque copie est vérifiée comme
+[`cepheus verify`](operations.md#la-vérification-scrubbing) vérifie une base (chaque frame du journal, c'est-à-dire
+chaque bloc écrit d'un seul tenant et vérifié par ses CRC ; chaque page des runs ; les enregistrements du vault),
+arrêtée après sa dernière frame entière (la frame en cours d'écriture au moment de la copie est laissée de côté),
+forcée sur le disque, et marquée fermée. Les copies sont faites dans `DEST/DATE.partial`, renommé `DEST/DATE`
+seulement quand toutes sont entières et forcées : un dossier daté est toujours entier ; une sauvegarde tuée en route
+laisse son dossier `.partial`, que la sauvegarde suivante retire.
+
+Une copie tient chaque groupe (une écriture, appliquée tout entière ou pas du tout) confirmé avant le début de la
+copie de son journal, y compris ceux du commit buffer (le journal commun du serveur, où les écritures de plusieurs
+bases partagent un seul fsync, l'appel système qui attend que les octets soient vraiment sur le disque : ils sont dans
+le cache de pages du journal), et jamais un groupe déchiré. Elle laisse de côté `lock`, `shared` et `sessions`, et
+s'ouvre comme une base à part entière. Prise sur une [replica](server.md#les-sauvegardes-depuis-la-replica) (une
+copie de la base tenue à jour sur une autre machine), elle ne coûte rien au primary (le serveur qui reçoit les
+écritures) et tient les groupes que tenait la replica : avec un primary et une replica, sauvegardez la replica.
+
+```sh
+sudo -u cepheus cepheus backup --config /etc/cepheus/cluster.toml /backup/cepheus
+```
+
+```text
+shop: group 4954, 2.5 MB (journal 0.7 MB, runs 1.9 MB), 0.50 s
+/backup/cepheus/2026-11-24T224915 (1.15 s)
+```
+
+Une ligne par base (le groupe que tient sa copie, sa taille et son temps), puis le dossier. Prise ici pendant qu'un
+programme écrivait 200 groupes par seconde : le serveur était au groupe 4947 quand la sauvegarde a commencé, et la
+copie tient le groupe 4954. Le code de sortie : 0, fait ; 1, une copie a un dommage, nommé sur ses lignes (le dossier
+est gardé sous `DEST/DATE.damaged` pour qu'on le regarde : vérifiez la base en service une fois son serveur arrêté, et
+gardez les sauvegardes d'avant) ; 2, refusée ou échouée (une autre sauvegarde écrit dans DEST, une base dont le serveur
+s'est arrêté brutalement et doit d'abord la reprendre, un disque plein), et rien n'est nommé `DEST/DATE`.
+`cepheus backup --help` dit la même chose.
+
+Chaque nuit à 3 h, sous l'utilisateur du serveur, avec `/etc/systemd/system/cepheus-backup.service` :
+
+```ini
+[Unit]
+Description=Copy the Cepheus databases
+
+[Service]
+Type=oneshot
+User=cepheus
+Group=cepheus
+ExecStart=/usr/local/bin/cepheus backup --config /etc/cepheus/cluster.toml /backup/cepheus
+```
+
+et `/etc/systemd/system/cepheus-backup.timer` (`Persistent` : une nuit où la machine était éteinte est rattrapée à son
+démarrage) :
+
+```ini
+[Unit]
+Description=Copy the Cepheus databases every night
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+```sh
+sudo install -d -o cepheus -g cepheus -m 700 /backup/cepheus
+sudo systemctl daemon-reload
+sudo systemctl enable --now cepheus-backup.timer
+sudo systemctl start cepheus-backup
+journalctl -u cepheus-backup -n 2 -o cat
+```
+
+Une sauvegarde échouée est une unité en échec (`systemctl --failed`, le code de sortie dans le journal système) :
+surveillez-la comme le serveur. Copiez le dossier de chaque nuit sur une autre machine
+(`rsync -a /backup/cepheus/ backup-host:cepheus/`) : une copie sur le même disque ne survit pas au disque. Et gardez
+à part, une fois, une copie de `/etc/cepheus/vault.key` : les fichiers du vault sont scellés par elle, elle n'est
+jamais dans les données, et une sauvegarde d'un vault n'ouvre aucun fichier sans elle ([le vault](vault.md)). Rien ne
+retire les anciennes sauvegardes : retirez-les vous-même
+(`find /backup/cepheus -maxdepth 1 -name '20*' -mtime +30 -exec rm -r {} +` garde un mois). Le temps d'une
+sauvegarde et d'une restauration à 10 M de faits, à côté de `pg_basebackup` de PostgreSQL et de `.backup` de SQLite :
+[mesures](benchmarks.md#la-sauvegarde-et-la-restauration-2026-11-24-à-10-millions-de-faits).
+
+### L'exercice de restauration
+
+Une sauvegarde qu'on n'a jamais restaurée n'est pas une sauvegarde. Restaurez la plus récente une fois par mois et
+avant chaque mise à jour :
+
+```sh
+mkdir -p ~/drill
+cepheus restore /backup/cepheus/2026-11-24T224915/shop ~/drill/shop
+```
+
+```text
+copied: journal 0.7 MB, runs 1.9 MB
+group 4954: written 2026-11-24 22:49:15, through the token app
+/home/you/drill/shop: restored from /backup/cepheus/2026-11-24T224915/shop at group 4954; its next writes open epoch 2 from group 4955 (0.69 s)
+```
+
+`cepheus restore` copie la sauvegarde dans `DIR.restoring`, l'ouvre comme un serveur ouvre une base (chaque run
+vérifié, les groupes d'après le run le plus récent rejoués), vérifie chaque frame et chaque page, et seulement alors la
+renomme `DIR` : une restauration qui échoue, ou qu'on tue, ne laisse pas de demi-base derrière elle (la restauration
+suivante retire ce qu'elle a laissé). Elle refuse un dossier qui tient une base (`--replace` met d'abord celle-ci de
+côté, sans jamais la retirer) ou qu'un serveur en marche tient. La dernière ligne nomme le groupe atteint ; celle
+d'avant, quand et par quel token il a été écrit. L'exercice réussit quand la restauration finit avec le code 0 à un
+groupe au moins égal à celui que montrait le serveur en service quand la sauvegarde a commencé ; une sauvegarde qui ne
+se restaure pas nomme son dommage (code 1) : restaurez alors celle de la nuit d'avant. La restauration ouvre la copie
+dans son propre processus, donc l'exercice peut se faire sur la machine du serveur en service ; seul le fait de
+*servir* la copie y est refusé tant que ce serveur tourne, puisque la copie est l'une de ses bases
+(`/dev/shm/cepheus-ID.visible is held by another server`).
+
+Pour y essayer les programmes, servez-la sur un serveur à part (port 7500, pour qu'il ne réponde jamais aux programmes
+en service) :
+
+```sh
+cepheus cluster init drill --dir ~/drill/etc
+mkdir ~/drill/etc/data && mv ~/drill/shop ~/drill/etc/data/shop
+sed -i 's/127.0.0.1:7400/127.0.0.1:7500/; s/^name = "main"/name = "shop"/' ~/drill/etc/cluster.toml
+cepheus serve --config ~/drill/etc/cluster.toml
+```
+
+### Restaurer jusqu'à un groupe : défaire une mauvaise écriture
+
+Le journal garde chaque groupe, donc une restauration peut s'arrêter juste avant celui qui a fait le mal, comme la
+restauration à un instant donné de PostgreSQL (point-in-time recovery) arrête le rejeu de son WAL (son journal) à une
+cible. `--to-group N` restaure jusqu'au groupe N ; `--to-time T`, jusqu'au dernier groupe écrit à T ou avant
+(`2026-11-24T14:05`, ou `14:05:30`, à l'heure locale de la machine, ou en UTC avec un `Z` final). Le reçu d'une
+écriture nomme son groupe (`Group` en Cesia, `receipt.group` en OCaml), et la restauration affiche l'heure et le token
+du groupe atteint : restaurez d'abord dans un dossier d'essai, et regardez.
+
+```sh
+cepheus restore /backup/cepheus/2026-11-24T224915/shop ~/drill/shop --to-group 4800 --replace
+```
+
+```text
+copied: journal 0.7 MB, runs 1.9 MB
+group 4800: written 2026-11-24 22:49:15, through the token app
+/home/you/drill/shop: restored from /backup/cepheus/2026-11-24T224915/shop at group 4800; its next writes open epoch 2 from group 4801 (0.81 s)
+the database that was there is kept in /home/you/drill/shop.before-restore-2026-11-24T224935: remove it once the restore is checked
+```
+
+En production, le serveur arrêté d'abord :
+
+```sh
+sudo systemctl stop cepheus
+sudo -u cepheus cepheus restore /backup/cepheus/2026-11-24T224915/shop /var/lib/cepheus/shop --to-group 4800 --replace
+sudo systemctl start cepheus
+```
+
+Comment : les runs des groupes jusqu'à N sont copiés (un run plus récent tiendrait le futur), les segments jusqu'à N,
+et la frame qui tient N, quand des groupes plus récents la partagent, est réécrite sans eux ; l'ouverture rejoue les
+groupes depuis le run gardé le plus récent jusqu'à N. Une restauration à un groupe ancien rejoue donc le journal depuis
+le dernier run d'avant lui, comme PostgreSQL rejoue son WAL depuis sa sauvegarde de base. Les écritures d'après N ne
+sont pas perdues : la base mise de côté les tient (c'est une base arrêtée : `cepheus restore` restaure aussi depuis
+elle).
+
+**Les epochs.** Une base restaurée écrit ses groupes suivants dans une nouvelle epoch (une époque de son historique),
+celle d'après la dernière de son historique ([les epochs](server.md#la-promotion-à-la-main)) : les groupes d'après N
+qu'une replica (ou la copie locale d'un programme) tient encore sont de l'ancien historique, et une replica qui les
+tient est refusée comme divergente plutôt que suivie comme s'ils étaient de cette base. Refaites-la depuis le primary
+restauré (`cepheus replicate`). Quand le disque d'un primary est perdu et qu'une replica tourne, promouvez la replica
+(`cepheus promote`) plutôt que de restaurer : elle tient chaque groupe qu'elle a reçu, plus que la sauvegarde de la
+nuit. Un cluster Raft (trois serveurs qui élisent un chef) ne se restaure pas encore jusqu'à un groupe : restaurez
+dans un serveur seul.
+
+### Du script à la commande
+
+Avant le 2026-11-24, cette page donnait un script shell, `cepheus-backup DATA DEST`, qui copie les mêmes fichiers dans
+le même ordre. Il marche toujours, et ses copies se restaurent avec `cepheus restore` (une fin déchirée, si la copie en
+a une, est coupée par l'ouverture, comme après un crash). `cepheus backup` fait plus : il vérifie chaque copie, la
+coupe à sa dernière frame entière, la force sur le disque, ne nomme le dossier qu'une fois entier, copie le vault,
+refuse une deuxième sauvegarde dans le même dossier, et échoue par son code de sortie au lieu de laisser un dossier
+peut-être à moitié fait. Pour passer à la commande, changez la ligne `ExecStart` du service comme plus haut et retirez
+`/usr/local/bin/cepheus-backup`. Le script, tel qu'il était :
 
 ```sh
 #!/bin/sh
@@ -174,95 +342,6 @@ for db in "$data"/*/; do
 done
 echo "$dest"
 ```
-
-Chaque nuit à 3 h, sous l'utilisateur du serveur, avec `/etc/systemd/system/cepheus-backup.service` :
-
-```ini
-[Unit]
-Description=Copy the Cepheus databases
-
-[Service]
-Type=oneshot
-User=cepheus
-Group=cepheus
-ExecStart=/usr/local/bin/cepheus-backup /var/lib/cepheus /backup/cepheus
-```
-
-et `/etc/systemd/system/cepheus-backup.timer` (`Persistent` : une nuit où la machine était éteinte est rattrapée à son
-démarrage) :
-
-```ini
-[Unit]
-Description=Copy the Cepheus databases every night
-
-[Timer]
-OnCalendar=*-*-* 03:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-```
-
-Enregistrez le script sous le nom `cepheus-backup`, puis :
-
-```sh
-sudo install -m 755 cepheus-backup /usr/local/bin/
-sudo install -d -o cepheus -g cepheus -m 700 /backup/cepheus
-sudo systemctl daemon-reload
-sudo systemctl enable --now cepheus-backup.timer
-sudo systemctl start cepheus-backup
-journalctl -u cepheus-backup -n 1 -o cat
-```
-
-```text
-/backup/cepheus/2026-11-12T194940
-```
-
-Prise ici pendant qu'un programme écrivait 3 000 commandes : le serveur était au groupe 832 quand la copie a commencé,
-et la copie s'ouvre au groupe 837. Copiez le dossier de chaque nuit sur une autre machine
-(`rsync -a /backup/cepheus/ backup-host:cepheus/`) : une copie sur le même disque ne survit pas au disque.
-
-### L'exercice de restauration
-
-Une sauvegarde qu'on n'a jamais ouverte n'est pas une sauvegarde. Ouvrez la plus récente sur la machine de sauvegarde,
-sur un serveur à part, une fois par mois et avant chaque mise à jour. Sur la machine du serveur en service, elle est
-refusée, puisque c'est la copie d'une base que ce serveur tient :
-
-```text
-cepheus: database shop: /dev/shm/cepheus-69b9b1ca0ae6b04bbc10fec328e3ddcd.visible is held by another server: a copy of this database's data directory runs on this machine
-```
-
-Sur la machine de sauvegarde, sous n'importe quel utilisateur (port 7500, pour que ce serveur ne réponde jamais aux
-programmes en service) :
-
-```sh
-mkdir -p ~/drill-base
-cepheus cluster init drill --dir ~/drill-base/drill
-mkdir ~/drill-base/drill/data
-cp -R /backup/cepheus/2026-11-12T194940/shop ~/drill-base/drill/data/shop
-```
-
-Dans `~/drill-base/drill/cluster.toml`, mettez `listen = "127.0.0.1:7500"` et le nom de la base, `name = "shop"` ;
-puis :
-
-```sh
-(umask 077; cepheus token add ops --admin --config ~/drill-base/drill/cluster.toml > ~/drill-base/drill/ops.token)
-cepheus serve --config ~/drill-base/drill/cluster.toml &
-CEPHEUS_TOKEN=$(cat ~/drill-base/drill/ops.token) cepheus status --config ~/drill-base/drill/cluster.toml | grep 'database.shop.g'
-cepheus stop --config ~/drill-base/drill/cluster.toml
-```
-
-```text
-cepheus: ready in 4.4 ms: shop at group 837; socket /home/you/drill-base/drill/run/.s.cepheus.7500, tcp 127.0.0.1:7500; 4 I/O domains, at most 512 connections; server cph-s-79503ed3ea8cf613, cluster cph-c-937d9016144d9776
-database.shop.group: 837
-stopped (process 610898, 605 ms)
-```
-
-L'exercice réussit quand le serveur démarre et que le groupe est au moins celui que montrait le serveur en service
-quand la copie a commencé. Une copie qui ne s'ouvre pas nomme son dommage, comme plus bas ; restaurez alors celle de la
-nuit d'avant. La vérification complète de chaque frame (un bloc du journal écrit d'un seul tenant, que ses CRC
-vérifient) des anciens segments, `Cepheus.verify` ([vérification](operations.md#la-vérification-scrubbing)), n'a pas
-encore de commande : c'est un appel de l'API OCaml.
 
 ## Ce qu'il faut surveiller
 
@@ -314,7 +393,7 @@ database.shop.epoch: 1
 | `database.NAME.frames`, `.follow_ns_a_frame` | les frames publiées, et le temps moyen du serveur par frame pour les publier aux lecteurs locaux, en nanosecondes | un temps qui grandit avec `followers` |
 | `database.NAME.visible` | le numéro de visibilité que partagent les lecteurs locaux (G15) | il avance avec les frames |
 | `database.NAME.watches` | les questions vivantes (tenues à jour) ouvertes ([Watch](cesia.md#watch--les-questions-vivantes)) | plus que les écrans ouverts |
-| `database.NAME.epoch` | l'epoch de la base (son époque : un numéro qui compte ses primaries) : 1, et un de plus à chaque promotion d'une replica ([ce que sert une replica](server.md#ce-que-sert-une-replica)) | un changement que vous n'avez pas fait |
+| `database.NAME.epoch` | l'epoch de la base (son époque : un numéro qui compte ses primaries) : 1, et un de plus à chaque promotion d'une replica ([ce que sert une replica](server.md#ce-que-sert-une-replica)) et à chaque restauration ([restaurer jusqu'à un groupe](#restaurer-jusquà-un-groupe--défaire-une-mauvaise-écriture)) | un changement que vous n'avez pas fait |
 
 À côté, le disque : un merge complet tient en double les runs de la base pendant qu'il tourne, et le journal garde
 chaque groupe pour toujours, donc gardez libre au moins la taille des runs de la plus grande base, et surveillez la
@@ -395,8 +474,10 @@ de test :
 cepheus: database shop: damaged: 00000000000000000001.seg: damaged frame at offset 46961 (written whole)
 ```
 
-systemd réessaie jusqu'à sa limite de démarrages, et le log répète la ligne. Ne supprimez pas de fichiers : copiez de
-côté le dossier de la base, et restaurez-la depuis la sauvegarde la plus récente qui passe l'exercice
+systemd réessaie jusqu'à sa limite de démarrages, et le log répète la ligne. Ne supprimez pas de fichiers :
+`cepheus verify /var/lib/cepheus/shop` nomme chaque dommage de la base, sans rien changer ; puis restaurez par-dessus
+la sauvegarde la plus récente qui passe l'exercice, le serveur arrêté
+(`cepheus restore BACKUP/shop /var/lib/cepheus/shop --replace`, qui garde de côté le dossier endommagé)
 ([quand la recovery dit `Damaged`](operations.md#quand-la-recovery-dit-damaged)) ; le sens du message :
 [erreurs](errors.md#damaged--des-données-durables-perdues-ou-changées).
 

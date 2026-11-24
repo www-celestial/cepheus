@@ -802,7 +802,7 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
                   with
                   | () -> if Codec.at_end rd then None else Some (Printf.sprintf "%s: the frame at offset %d has bytes after its groups" name p)
                   | exception Exit -> Some (Printf.sprintf "%s: the frame at offset %d does not number its groups from %d" name p f0)
-                  | exception Codec.Short -> Some (Printf.sprintf "%s: the frame at offset %d does not decode" name p))
+                  | exception (Codec.Short | Invalid_argument _ | Failure _) -> Some (Printf.sprintf "%s: the frame at offset %d does not decode" name p))
               in
               match bad with
               | Some m -> result ~damage:m p

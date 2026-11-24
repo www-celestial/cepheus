@@ -99,9 +99,9 @@ les y perdre. Donc :
 ## Quand la recovery dit `Damaged`
 
 Des données durables ont changé : une panne du disque, un fichier mal manipulé, un segment qui manque au milieu. Ne
-supprimez aucun fichier. Copiez le répertoire à part ; lancez `Cepheus.verify` sur la copie pour la liste complète ;
-restaurez la base depuis une sauvegarde ou (plus tard) une replica. Le message nomme le segment et l'offset de la
-première frame mauvaise. Si et seulement si vous savez que la partie abîmée n'a jamais été confirmée (par exemple, la
+supprimez aucun fichier. Lancez `cepheus verify DIR` pour la liste complète (il ne change rien) ; restaurez la base
+depuis une sauvegarde (`cepheus restore BACKUP DIR --replace`, qui met de côté le dossier endommagé) ou promouvez sa
+replica. Le message nomme le segment et l'offset de la première frame mauvaise. Si et seulement si vous savez que la partie abîmée n'a jamais été confirmée (par exemple, la
 frame est la plus récente et la machine a perdu le courant pendant qu'elle l'écrivait), la fin peut être coupée à la
 main à cet offset (`truncate -s OFFSET SEGMENT`) : c'est une décision humaine, que Cepheus ne prend jamais.
 
@@ -125,30 +125,73 @@ fichier de run échoue renvoie `Io` pour ce groupe seulement. Chaque message : [
 
 ## Sauvegarde et restauration
 
-Les segments ne reçoivent que des ajouts et ne sont jamais réécrits, et les fichiers de runs sont écrits à côté puis
-renommés, donc une copie cohérente n'a besoin d'aucun arrêt :
+`cepheus backup --config FILE DEST` copie chaque base d'un serveur en marche ([production](production.md#les-sauvegardes)),
+`cepheus restore SRC DIR` en restaure une ([l'exercice de restauration](production.md#lexercice-de-restauration)). Ce
+sur quoi elles reposent : les segments ne reçoivent que des ajouts et ne sont jamais réécrits, et les fichiers de runs
+sont écrits à côté puis renommés, donc une copie cohérente n'a besoin d'aucun arrêt, dans cet ordre :
 
-1. copiez `DIR/cepheus` ;
-2. si vous voulez, copiez les fichiers de runs de `DIR/snapshots/` (ils rendent la restauration plus rapide ; sans eux,
-   la copie rejoue tout le journal). Un merge peut supprimer des runs pendant que vous copiez : copiez ce qui est là, et
-   l'ouverture de la copie prend la chaîne que ses noms permettent (un run qui manque veut seulement dire un replay plus
-   long). Copiez-les **avant** les segments : un run ne reçoit son nom qu'une fois ses groupes durables dans le
-   journal, donc les segments copiés après lui les contiennent ; un run copié après les segments peut être plus récent
-   que leur fin, et la copie refuserait de s'ouvrir (`the journal ends at group G, before the snapshot of group S`) ;
-3. copiez les segments de `DIR/journal/` dans l'ordre de leurs noms. Un segment en cours d'écriture peut être copié
-   avec une fin déchirée, que la recovery de la copie coupe ; chaque groupe confirmé avant que la copie de son segment
-   commence est dans la copie.
+1. `DIR/cepheus`, et `DIR/epochs` s'il existe (l'historique de promotions d'une replica) ;
+2. les fichiers de runs de `DIR/snapshots/`, chacun ouvert avant qu'on liste les segments. Ils rendent la restauration
+   plus rapide (sans eux, la copie rejoue tout le journal). Un merge peut supprimer un run pendant ce temps : un
+   fichier ouvert se lit encore, et un run supprimé avant son ouverture veut seulement dire un replay plus long
+   (l'ouverture de la copie prend la chaîne que ses noms permettent). Ils viennent **avant** les segments : un run ne
+   reçoit son nom qu'une fois ses groupes durables dans le journal, donc les segments copiés après lui les
+   contiennent ; un run copié après les segments peut être plus récent que leur fin, et la copie refuserait de
+   s'ouvrir (`the journal ends at group G, before the snapshot of group S`) ;
+3. les segments de `DIR/journal/`, dans l'ordre de leurs noms. Le plus récent peut être copié pendant qu'une frame
+   s'écrit : à partir de la première frame de sa copie qui ne se vérifie pas entière (en-tête, corps et trailer, la
+   fin de la frame qui répète ses longueurs et ses CRC), tout est cette frame (l'en-tête d'un grand groupe est écrit
+   après son corps, donc une copie peut voir son trailer et pas son en-tête), et la copie est coupée là. Chaque groupe
+   confirmé avant que la copie de son segment commence est avant ce point : il a été écrit entier avant d'être
+   confirmé, et les frames sont ajoutées une à la fois ;
+4. `DIR/vault/`, après le journal : ses `keys`, puis chaque pack (un fichier d'enregistrements du vault) et son index
+   (un fait ne nomme un fichier qu'une fois les enregistrements du fichier forcés, G22, donc chaque fichier que cite le
+   journal copié est dans les packs copiés ; le pack en cours d'écriture peut finir par un enregistrement déchiré, que
+   l'ouverture de la copie indexe jusqu'au dernier entier, comme après un crash).
 
-Pour restaurer : mettez les fichiers dans un nouveau répertoire et ouvrez-le (sa recovery coupe une fin déchirée),
-comparez `Cepheus.group (Cepheus.view db)` avec ce que vous attendez, fermez-le, et lancez `Cepheus.verify` dessus. Une
-sauvegarde qui n'a jamais été ouverte et vérifiée n'est pas une sauvegarde.
+La copie laisse de côté `lock`, `closed`, `shared` et `sessions`. `cepheus backup` la vérifie ensuite comme le fait
+`cepheus verify`, la coupe après sa dernière frame entière, la force sur le disque et écrit son marqueur `closed` : une
+sauvegarde est une base fermée proprement, et un `cepheus verify` plus tard prend tout octet déchiré pour un dommage.
+
+`cepheus restore SRC DIR [--to-group N | --to-time T]` copie dans `DIR.restoring`, dans le même ordre, les runs dont
+les groupes finissent à N ou avant et les segments jusqu'à celui qui commence à N + 1 (gardé réduit à son en-tête : un
+run du groupe N peut le nommer), finit le journal après le groupe N (la frame qui tient N, quand des groupes plus
+récents la partagent, est codée de nouveau sans eux, à la même place, avec le même premier groupe), écrit dans
+`DIR/epochs` une nouvelle epoch à partir du groupe N + 1, ouvre la copie (ses runs vérifiés, les groupes d'après le
+plus récent rejoués), la ferme, la vérifie comme le fait `cepheus verify`, et la renomme `DIR` ; avec `--replace`, une
+base déjà dans `DIR` est d'abord renommée `DIR.before-restore-DATE`, jamais supprimée. Elle refuse une source ou une
+cible qu'un processus tient ouverte, une base écrite à travers le commit buffer d'un serveur et pas fermée proprement,
+et une cible dont le serveur ne s'est pas arrêté proprement (`DATA/server.wal.1` ou `.2` présents) : le démarrage
+suivant de ce serveur écrirait les frames du buffer dans le journal restauré. Le code de sortie des deux : 0 fait,
+1 un dommage trouvé, 2 refusé ou échoué ; aucune des deux ne laisse une demi-copie sous son nom final.
 
 ## La vérification (scrubbing)
 
-`Cepheus.verify DIR` sur une base fermée lit chaque segment depuis le début et vérifie chaque frame, chaque trailer et
-chaque numéro de groupe : il renvoie le nombre de groupes ou `Damaged`. Lancez-le régulièrement sur les bases et sur les
-sauvegardes : c'est la seule vérification qui décode les anciens segments, qu'une ouverture ne lit pas quand des runs
-les couvrent.
+`cepheus verify DIR` vérifie les fichiers d'une base tels qu'ils sont et ne change rien (il les ouvre en lecture
+seule) :
+
+- chaque segment du journal à part (sur jusqu'à 4 domains, les fils d'exécution d'OCaml sur leurs propres cœurs),
+  pour qu'un segment abîmé ne cache pas les autres : son en-tête, puis chaque frame (les CRC de son en-tête et de son
+  corps, son trailer, son premier groupe et son nombre, les groupes qui se suivent), les groupes de chaque frame
+  jusqu'à 16 MiB décodés et numérotés (une frame plus grande, celle d'un gros chargement, est vérifiée par ses CRC :
+  la décoder prendrait la mémoire de son groupe) ; le premier dommage de chaque segment nommé, avec son offset, et les
+  segments qui manquent entre eux ;
+- chaque run, comme une ouverture le vérifie (son en-tête, sa table des pages, ses tables de rangs et d'offsets), et
+  chaque page contre son CRC (lue à travers un cache de 256 MiB : la mémoire reste en dessous quelle que soit la
+  taille de la base) ;
+- chaque run contre le journal : ses groupes dans le journal, sa position dans le journal au début d'une frame ;
+- les enregistrements du vault, par leurs CRC, sans la clé maîtresse : le fichier des clés, chaque enregistrement que
+  nomme l'index de chaque pack, les packs sans index jusqu'à leur fin déchirée.
+
+La fin du segment le plus récent est lue selon l'état de la base : fermée proprement, chaque octet doit se vérifier ;
+laissée par un processus mort, une frame déchirée sans rien d'écrit après elle est une note (l'ouverture suivante la
+coupe) ; ouverte dans un serveur, la frame en cours d'écriture n'est pas vérifiée. Une base écrite à travers le commit
+buffer d'un serveur et pas fermée proprement est refusée : démarrez son serveur et arrêtez-le d'abord. Code de sortie
+0 : entière (la dernière ligne nomme le groupe) ; 1 : un dommage, une ligne `damaged:` chacun ; 2 : pas une base,
+illisible, ou refusée. Lancez-le sur les sauvegardes (`cepheus backup` le lance sur chaque copie) et de temps en temps
+sur les bases en service : c'est la seule vérification qui lit les anciens segments et chaque page, qu'une ouverture
+ne lit pas quand des runs les couvrent. `Cepheus.verify DIR`, l'appel OCaml, reste : il lit chaque frame du journal
+d'une base fermée et renvoie le nombre de groupes ou `Damaged`.
 
 ## La mémoire
 

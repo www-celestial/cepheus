@@ -166,6 +166,16 @@ cepheus replicate PEER --config FILE     this server, stopped, becomes a replica
                                          (DATA/cepheus.role; [a replica](#a-replica))
 cepheus promote [--force] --config FILE  the running replica becomes a primary; an admin token in CEPHEUS_TOKEN;
                                          --force without its primary's handover
+cepheus verify DIR                       a database's files checked as they are, nothing changed: every frame,
+                                         every page, the runs against the journal, the vault's records; each damage
+                                         named (operations.md, "Verification")
+cepheus backup --config FILE DEST        every database of FILE's server copied while it serves, into DEST/DATE,
+                                         each copy checked, cut after its last whole frame, forced; no token
+                                         (production.md, "Backups")
+cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]
+                                         a backup restored into DIR, to its end, a group or a time, opened and
+                                         checked, in a new epoch; --replace moves a database in DIR aside
+cepheus verify|backup|restore --help     the usage, and the exit status: 0 done, 1 damage found, 2 refused or failed
 ```
 
 A first server on a laptop:
@@ -971,9 +981,11 @@ nothing without a majority.
 ### Backups from the replica
 
 A replica's data directory holds the files of its primary's databases (their id, their runs, their segments), so
-[the backup script](production.md#backups) copies it while the replica runs, and the primary does no work for it. The
-script copies `epochs` too: a copy without it starts again at epoch 1, and a promoted history refuses it as a
-replica.
+[`cepheus backup`](production.md#backups) with the replica's `cluster.toml` copies them while the replica runs, and
+the primary does no work for it: on a primary and a replica, back up the replica. The copy holds the groups the
+replica held (a few behind the primary at most, its lag in `cepheus status`), and `epochs` too: a copy without it
+would start again at epoch 1, and a promoted history would refuse it as a replica. The backup script of earlier
+versions copies them the same way.
 
 ### What a replica costs
 

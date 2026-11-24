@@ -671,15 +671,18 @@ let check ?(live = false) disk dir =
   List.iter
     (fun num ->
       let pname = Printf.sprintf "packs/%08d.pack" num and ipath = Filename.concat pdir (Printf.sprintf "%08d.idx" num) in
+      (* the index before the pack: a pack is complete and forced before its index is written, so that a pack read
+         while it is written is never taken for one shorter than its index *)
+      let index_bytes = if disk.Disk.exists ipath then Some (Disk.read_all disk ipath) else None in
       match Disk.read_all disk (Filename.concat pdir (Printf.sprintf "%08d.pack" num)) with
       | exception Disk.Io m -> if live && not (disk.exists (Filename.concat pdir (Printf.sprintf "%08d.pack" num))) then () else damage "%s: %s" pname m
       | b ->
         let n = Bytes.length b in
         bytes := !bytes + n;
         let index =
-          if not (disk.exists ipath) then None
-          else
-            let x = Disk.read_all disk ipath in
+          match index_bytes with
+          | None -> None
+          | Some x ->
             let m = Bytes.length x in
             bytes := !bytes + m;
             if m >= 24 && Bytes.sub_string x 0 8 = idx_magic && u32 x (m - 4) = Crc32c.bytes x 0 (m - 4) && u32 x 8 = format

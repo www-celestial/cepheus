@@ -173,8 +173,9 @@ Depuis `find` et `fold` (la question est mal formée) :
 
 Les fichiers ne tiennent plus ce que la base a rendu durable : un disque qui a changé des octets, un fichier mal copié,
 un segment supprimé à la main. La base **refuse de s'ouvrir** plutôt que de laisser tomber un groupe confirmé en
-silence (G6). **Que faire** : ne supprimez ni ne modifiez aucun fichier ; copiez le répertoire à part ; lancez
-`Cepheus.verify` sur la copie pour trouver le premier défaut ; restaurez depuis une sauvegarde. Ne coupez un journal à
+silence (G6). **Que faire** : ne supprimez ni ne modifiez aucun fichier ; lancez `cepheus verify DIR` pour chaque
+défaut (il ne change rien) ; restaurez depuis une sauvegarde (`cepheus restore BACKUP DIR --replace`, qui garde de côté
+le dossier endommagé). Ne coupez un journal à
 la main que si vous savez que la frame endommagée n'a jamais été confirmée
 ([opérations](operations.md#quand-la-recovery-dit-damaged)).
 

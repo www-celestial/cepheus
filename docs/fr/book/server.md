@@ -188,6 +188,16 @@ cepheus replicate PEER --config FILE     this server, stopped, becomes a replica
                                          (DATA/cepheus.role; [a replica](#a-replica))
 cepheus promote [--force] --config FILE  the running replica becomes a primary; an admin token in CEPHEUS_TOKEN;
                                          --force without its primary's handover
+cepheus verify DIR                       a database's files checked as they are, nothing changed: every frame,
+                                         every page, the runs against the journal, the vault's records; each damage
+                                         named (operations.md, "Verification")
+cepheus backup --config FILE DEST        every database of FILE's server copied while it serves, into DEST/DATE,
+                                         each copy checked, cut after its last whole frame, forced; no token
+                                         (production.md, "Backups")
+cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]
+                                         a backup restored into DIR, to its end, a group or a time, opened and
+                                         checked, in a new epoch; --replace moves a database in DIR aside
+cepheus verify|backup|restore --help     the usage, and the exit status: 0 done, 1 damage found, 2 refused or failed
 ```
 
 Un premier serveur sur un portable :
@@ -1095,9 +1105,11 @@ rien sans une majorité.
 ### Les sauvegardes depuis la replica
 
 Le répertoire de données d'une replica tient les fichiers des bases de son primary (leur id, leurs runs, leurs
-segments), si bien que [le script de sauvegarde](production.md#les-sauvegardes) le copie pendant que la replica tourne, et le
-primary ne fait aucun travail pour cela. Le script copie aussi `epochs` : une copie sans lui recommence à l'epoch 1, et
-un historique promu la refuse comme replica.
+segments), si bien que [`cepheus backup`](production.md#les-sauvegardes) avec le `cluster.toml` de la replica les copie
+pendant que la replica tourne, et le primary ne fait aucun travail pour cela : avec un primary et une replica,
+sauvegardez la replica. La copie tient les groupes que tenait la replica (quelques-uns derrière le primary au plus, son
+retard dans `cepheus status`), et `epochs` aussi : une copie sans lui recommencerait à l'epoch 1, et un historique
+promu la refuserait comme replica. Le script de sauvegarde des versions d'avant les copie de la même façon.
 
 ### Ce que coûte une replica
 
