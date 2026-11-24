@@ -28,7 +28,8 @@ let usage () =
     \       cepheus token list|remove [NAME] --config FILE\n\
     \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n\
     \       cepheus replicate PEER --config FILE\n\
-    \       cepheus promote [--force] --config FILE\n";
+    \       cepheus promote [--force] --config FILE\n\
+    \       cepheus import|export DB ... --config FILE (cepheus import --help)\n";
   exit 2
 
 let hosts = ref []
@@ -203,6 +204,7 @@ let cluster_init name dir =
 
 let () =
   match Array.to_list Sys.argv with
+  | _ :: ("import" | "export" as cmd) :: rest -> Transfer_cmd.main cmd rest
   | _ :: cmd :: rest -> (
     let config, dbs, admin, dir, pos = parse rest in
     match cmd, pos with
