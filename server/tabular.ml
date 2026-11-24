@@ -306,8 +306,10 @@ let reader ?(off = 0) ?(line = 1) ?(index = 0) fmt fd =
   end;
   r
 
-let rec read_more r =
-  if r.pos > 0 then begin
+(* more bytes read after those held; [compact]: the bytes before [pos] dropped first (only while no record of a batch
+   being made is held: its offsets are the buffer's) *)
+let rec read_more ~compact r =
+  if compact && r.pos > 0 then begin
     r.boff <- r.boff + r.pos;
     Bytes.blit r.buf r.pos r.buf 0 (r.len - r.pos);
     r.len <- r.len - r.pos;
@@ -322,7 +324,7 @@ let rec read_more r =
   match Unix.read r.fd r.buf r.len (Bytes.length r.buf - r.len) with
   | 0 -> r.eof <- true
   | k -> r.len <- r.len + k; r.bytes <- r.bytes + k
-  | exception Unix.Unix_error (Unix.EINTR, _, _) -> read_more r
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> read_more ~compact r
 
 let next r target =
   let starts = ref [] and stops = ref [] and lines = ref [] and first = ref (-1) and last = ref 0 and n = ref 0 in
@@ -365,8 +367,7 @@ let next r target =
     end
     else begin
       if r.len - r.pos > max_record then bad "line %d: a record of more than %d MiB (%s)" r.rline (max_record lsr 20) (if r.fmt = Csv && r.quoted then "a quote left open?" else "no line break");
-      if !first >= 0 then fin := true
-      else read_more r
+      read_more ~compact:(!first < 0) r
     end
   done;
   let base = if !first < 0 then 0 else !first in
@@ -405,10 +406,13 @@ let csv_fields (b : Bytes.t) o e =
       else bad "a character after the closing quote of field %d (a quote inside a field is written \"\")" (List.length !fields)
     end
     else begin
-      let j = match Bytes.index_from_opt b !i ',' with Some j when j < e -> j | _ -> e in
-      (match Bytes.index_from_opt b !i '"' with
-       | Some k when k < j -> bad "a quote inside field %d, which does not start with one (quote the field, a quote in it as \"\")" (List.length !fields + 1)
-       | _ -> ());
+      (* to the next comma or the record's end, no further *)
+      let j = ref !i in
+      while !j < e && Bytes.unsafe_get b !j <> ',' do
+        if Bytes.unsafe_get b !j = '"' then bad "a quote inside field %d, which does not start with one (quote the field, a quote in it as \"\")" (List.length !fields + 1);
+        incr j
+      done;
+      let j = !j in
       fields := { text = Bytes.sub_string b !i (j - !i); quoted = false } :: !fields;
       if j >= e then fin := true else i := j + 1
     end

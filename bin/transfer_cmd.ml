@@ -82,8 +82,8 @@ let main cmd args =
         | (g, _, _) :: _ -> let gn, _, _ = List.nth s.groups (List.length s.groups - 1) in Printf.sprintf "in %d groups, %d to %d" (List.length s.groups) g gn
       in
       say
-        (Printf.sprintf "%s: %s rows, %s facts (%s new things, %s changed) %s; checked in %.2f s, written in %.2f s%s%s"
-           (Filename.basename file) (count s.rows) (count s.facts) (count s.inserted) (count s.updated) groups s.check_s s.write_s
+        (Printf.sprintf "%s: %s rows, %s facts (%s new things, %s changed) %s; checked in %.2f s, written in %.2f s (%.2f s of it in the server's answers)%s%s"
+           (Filename.basename file) (count s.rows) (count s.facts) (count s.inserted) (count s.updated) groups s.check_s s.write_s s.server_s
            (if s.left_out > 0 then Printf.sprintf "; %s bad rows left out" (count s.left_out) else "")
            (if s.empty > 0 then Printf.sprintf "; %s rows without a value" (count s.empty) else ""));
       Client.close rc;

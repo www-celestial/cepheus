@@ -9,7 +9,8 @@
 # examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), live questions
 # against the naive evaluator (LIVE_SEEDS seeds, 100 by default), questions with Sort, Limit and After against a
 # brute-force oracle (QUESTION_SEEDS seeds, 300 by default), TLS and the
-# limits of connections on a real server, requests that make the server fail over real sockets, a replica (REPLICA_SEEDS
+# limits of connections on a real server, requests that make the server fail over real sockets, cepheus import and
+# export on a real server (a round trip of the invoices app, hostile files), a replica (REPLICA_SEEDS
 # simulated seeds, 300 by default, then two real servers), a Raft cluster (RAFT_SEEDS simulated seeds of 3 servers, 100
 # by default, and RAFT_SEEDS5 of 5, 50, then three real servers), a real server killed SERVER_KILLS times (20) under
 # writing clients.
@@ -60,6 +61,7 @@ $b/questions.exe --seeds "${QUESTION_SEEDS:-300}" | tail -2
 $b/server_tls.exe "$tmp/cepheus-tls" | tail -1
 $b/server_limits.exe "$tmp/cepheus-limits" | tail -1
 $b/server_guard.exe "$tmp/cepheus-guard" | tail -1
+$b/server_transfer.exe "$tmp/cepheus-transfer" | tail -1
 # a replica: its simulation (REPLICA_SEEDS seeds, 300 by default; its stderr: the failures it gives the engines),
 # then two real servers over mutual TLS (copy, kill -9, refusals, handover, promote, the old primary following)
 $b/replica_sim.exe --seeds "${REPLICA_SEEDS:-300}" 2> /dev/null | tail -2

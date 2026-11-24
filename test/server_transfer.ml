@@ -248,6 +248,7 @@ let hostile c cfg =
   refuse "fields" "Name,Email\nA,a11@x,extra\n" "line 2: 3 fields, the header has 2";
   refuse "twice in the file" "Name,Email\nA,d@x\nB,d@x\n" "line 3: Email \"d@x\" is on line 2 too";
   refuse "taken" "Name,Email\nZ,ada@x.org\n" "Email \"ada@x.org\" is taken by #";
+  refuse ~nothing:false ~args:[ "--link"; "Name=id" ] "--link on a text" "Name,Email\nA,l@x\n" "--link Name: client/Name is not a link (a text)";
   refuse ~nothing:false "an unknown column" "Name,Mail\nA,m@x\n" "\"Mail\" is no field of the kind";
   refuse ~kind:"invoice" "a link to nothing" "Number,Client\n9,nobody@x\n" "Client: no thing has client/Email \"nobody@x\"";
   refuse "JSON: a key twice" "{\"Name\":\"A\",\"Name\":\"B\"}\n" "line 1: Name twice";

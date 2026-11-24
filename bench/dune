@@ -18,3 +18,11 @@
  (libraries cepheus cepheus_server unix threads.posix)
  (ocamlopt_flags (:standard -O3 -inline 200))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
+
+; the data and the kinds of bench/transfer.sh (cepheus import beside COPY and .import)
+(executable
+ (name tbench)
+ (modules tbench)
+ (libraries cepheus cepheus_server unix threads.posix)
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

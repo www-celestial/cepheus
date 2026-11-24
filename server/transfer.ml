@@ -76,7 +76,11 @@ let fields_of props kind links =
   let ks = kind_props kind props in
   if ks = [] then stop "the database has no kind %s (no property %s/...)" kind kind;
   List.iter
-    (fun (f, _) -> if not (List.exists (fun (_, (d : Schema.prop)) -> d.name = kind ^ "/" ^ f) ks) then stop "--link %s: %s has no field %s" f kind f)
+    (fun (f, _) ->
+      match List.find_opt (fun (_, (d : Schema.prop)) -> d.name = kind ^ "/" ^ f) ks with
+      | None -> stop "--link %s: %s has no field %s" f kind f
+      | Some (_, d) when d.typ <> Value.Tlink -> stop "--link %s: %s/%s is not a link (a %s)" f kind f (Value.typ_name d.typ)
+      | Some _ -> ())
     links;
   Array.of_list
     (List.map
@@ -176,9 +180,23 @@ type row = {
   mutable target : int;  (* --upsert: the thing found by its unique values; 0: a new thing *)
 }
 
-(* a group, at most this many operations and about this many bytes of request (a frame holds 16 MiB) *)
-let group_ops = ref 500_000
-let group_bytes = ref (12 lsl 20)
+(* a group: at most this many operations, and this many bytes of their coding in the request (Wire.put_op; a frame
+   holds 16 MiB, the request's other fields and the receipt's room aside) *)
+let group_ops = ref 1_000_000
+let group_bytes = ref (15 lsl 20)
+
+(* the bytes of a varint, of an int in zigzag (Codec.put_int), of a value (Value.encode), of an Add (Wire.put_op) *)
+let varint_size n = if n < 0 then 9 else (let rec go n k = if n < 0x80 then k else go (n lsr 7) (k + 1) in go n 1)
+let int_size n = varint_size ((n lsl 1) lxor (n asr 62))
+
+let value_size (x : Value.t) =
+  match x with
+  | Int n | Date n | Money n | Link n -> 1 + int_size n
+  | Float _ -> 9
+  | Bool _ -> 1
+  | Text s -> 1 + varint_size (String.length s) + String.length s
+
+let add_size e p x = 1 + int_size e + varint_size p + value_size x
 
 (* the bytes of a batch of records parsed at once by a domain, and the batches of a round *)
 let batch_bytes = ref (1 lsl 20)
@@ -410,16 +428,20 @@ type writer = {
   mutable failed : (job * string) option;
   mutable groups : (int * job) list;  (* written: the group's number, newest first *)
   mutable thread : Thread.t option;
+  mutable waited : float;  (* seconds in the writes, their answers waited for *)
 }
 
 let writer write =
-  let w = { m = Mutex.create (); c = Condition.create (); q = Queue.create (); failed = None; groups = []; thread = None } in
+  let w = { m = Mutex.create (); c = Condition.create (); q = Queue.create (); failed = None; groups = []; thread = None; waited = 0. } in
   let rec loop () =
     let j = Mutex.protect w.m (fun () -> while Queue.is_empty w.q do Condition.wait w.c w.m done; let j = Queue.pop w.q in Condition.broadcast w.c; j) in
     match j with
     | None -> ()
     | Some j -> (
-      match write j.ops with
+      let t = Unix.gettimeofday () in
+      let r = write j.ops in
+      w.waited <- w.waited +. (Unix.gettimeofday () -. t);
+      match r with
       | Ok g -> Mutex.protect w.m (fun () -> w.groups <- (g, j) :: w.groups); loop ()
       | Error m -> Mutex.protect w.m (fun () -> w.failed <- Some (j, m); Condition.broadcast w.c))
   in
@@ -449,6 +471,7 @@ type summary = {
   groups : (int * int * int) list;  (* each group's number and its first and last line, in order *)
   check_s : float;
   write_s : float;
+  server_s : float;  (* of write_s, the writes sent and answered *)
   seen_bytes : int;  (* the table of unique values at its largest *)
 }
 
@@ -582,7 +605,6 @@ let import ~props ~find ~write ~say (o : options) =
       ops := []; nops := 0; bytes := 0; temp := 0; grows := 0
     end
   in
-  let size (x : Value.t) = match x with Text s -> 6 + String.length s | _ -> 10 in
   let outcome =
     try
       let fin = ref false in
@@ -606,12 +628,14 @@ let import ~props ~find ~write ~say (o : options) =
                 if Array.for_all (fun l -> l = []) row.cells then incr empty
                 else begin
                   let n = Array.fold_left (fun n l -> n + List.length l) 0 row.cells in
-                  let b = Array.fold_left (fun b l -> List.fold_left (fun b x -> b + 9 + size x) b l) 0 row.cells in
-                  if !nops > 0 && (!nops + n > !group_ops || !bytes + b > !group_bytes) then flush ();
+                  (* its thing: a new one numbered in the group it goes to *)
+                  let size e = Array.fold_left (fun b l -> List.fold_left (fun b x -> b + add_size e 65535 x) b l) 0 row.cells in
+                  if !nops > 0 && (!nops + n > !group_ops || !bytes + size (if row.target <> 0 then row.target else !temp - 1) > !group_bytes) then flush ();
+                  let e = if row.target <> 0 then (incr updated; row.target) else (decr temp; incr inserted; !temp) in
+                  let b = size e in
                   if !grows = 0 then gfirst := row.line;
                   glast := row.line;
                   incr grows;
-                  let e = if row.target <> 0 then (incr updated; row.target) else (decr temp; incr inserted; !temp) in
                   Array.iteri (fun i l -> List.iter (fun x -> ops := Resolve.Add (e, fields.(i).prop, x) :: !ops) l) row.cells;
                   nops := !nops + n;
                   facts := !facts + n;
@@ -642,7 +666,7 @@ let import ~props ~find ~write ~say (o : options) =
    | None, Error m -> stop "%s; %s" m (written ())
    | None, Ok () -> ());
   if not (unchanged ()) then say (Printf.sprintf "%s changed during the import: what was written is what it held during the check" base);
-  { rows = !nrows; left_out = !nbad; empty = !empty; inserted = !inserted; updated = !updated; facts = !facts; groups; check_s = t1 -. t0; write_s = t2 -. t1; seen_bytes = !seen_max }
+  { rows = !nrows; left_out = !nbad; empty = !empty; inserted = !inserted; updated = !updated; facts = !facts; groups; check_s = t1 -. t0; write_s = t2 -. t1; server_s = w.waited; seen_bytes = !seen_max }
 
 (* ---- the export ---- *)
 
