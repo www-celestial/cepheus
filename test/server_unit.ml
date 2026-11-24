@@ -82,6 +82,12 @@ let config () =
    | exception Config.Bad m -> check false "config: question_timeout 0: %s" m);
   refused (repl "socket = \"run\"" "socket = \"run\"\nquestion_timeout = -1") "a negative question_timeout";
   refused (repl "socket = \"run\"" "socket = \"run\"\nquestion_timeout = \"30s\"") "question_timeout as a string";
+  (* a Unix socket's path: 107 bytes at most (Linux's sun_path), else a message that names it, at start and at connect *)
+  let long = "/" ^ String.make 107 'x' in
+  let contains s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
+  check (Config.long_socket (String.sub long 0 107) = None && (match Config.long_socket long with Some m -> contains m "108 bytes" && contains m "107" | None -> false))
+    "config: a socket path of 108 bytes is named, with its length";
+  check (match Client.connect (Client.Unix_socket long) "cph_x" with Error m -> contains m "107" | Ok _ -> false) "client: a socket path of 108 bytes refused, named";
   refused (repl "socket = \"run\"" "socket = \"run\"\nidle_timeout = 604801") "an idle_timeout over a week";
   refused (repl "name = \"shop\"\n" "name = \"Shop!\"\n" |> fun f s -> let s = f s in repl "[[database]]\nname = \"shop\"" "[[database]]\nname = \"Shop!\"" s) "a bad database name"
 
