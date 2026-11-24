@@ -1,7 +1,8 @@
 # Exploitation
 
 Faire tourner une base : ses fichiers, ce que fait une ouverture, que faire quand elle signale un dommage ou une erreur
-du disque, les sauvegardes, la vérification, la mémoire et l'espace disque, et les outils du dépôt.
+du disque, les sauvegardes, la vérification, la mémoire et l'espace disque, l'import et l'export, et les outils du
+dépôt.
 
 ## Les fichiers
 
@@ -224,6 +225,191 @@ et 14 % de fsyncs de plus par seconde (médiane de 5 tours, plus haut dans les 5
 le couper). Les longs blocages (des fsyncs de 80 à 450 ms, quelques-uns par minute) viennent dans tous les modes : ce
 sont ceux du disque.
 
+## Import et export
+
+`cepheus import` charge les choses d'une sorte depuis un fichier, `cepheus export` les écrit : pour partir d'une base
+qui existe (PostgreSQL, SQLite, un tableur), pour les rapports et les audits, et pour quitter Cepheus. Les deux passent
+par le serveur avec un token, comme tout programme, jamais en ouvrant les fichiers d'une base vivante ; le token est
+dans `CEPHEUS_TOKEN`, jamais sur la ligne de commande (que chaque utilisateur de la machine peut lire) : le droit
+d'écrire la base pour importer, de la lire pour exporter.
+
+```sh
+cepheus import shop clients.csv --kind client --config /etc/cepheus/cluster.toml        # CSV with a header row
+cepheus import shop invoices.jsonl --kind invoice --config /etc/cepheus/cluster.toml    # JSON lines
+cepheus export shop --kind invoice --config /etc/cepheus/cluster.toml > invoices.jsonl
+cepheus export shop --kind invoice --format csv --config /etc/cepheus/cluster.toml > invoices.csv
+```
+
+La sorte (kind) est celle du programme : ses champs sont les propriétés `kind/Field` déclarées dans la base (le
+`cepheus.Connect` d'un programme Cesia déclare ses sortes, [Cepheus depuis Cesia](cesia.md)), si bien qu'un programme
+se connecte une fois avant le premier import. Une colonne de l'en-tête du CSV, ou une clé des JSON lines, nomme un
+champ : le même nom, ou le seul champ dont le nom ne diffère que par ses majuscules (les colonnes de PostgreSQL sont en
+minuscules : `email` est `Email`) ; `--map Col=Field` quand ils diffèrent, `--map Col=` pour laisser une colonne de
+côté. Une colonne qui ne nomme aucun champ arrête l'import avant qu'il lise une ligne.
+
+Depuis PostgreSQL ou SQLite, leurs propres commandes écrivent le fichier :
+
+```sh
+psql -c "\copy (SELECT name AS \"Name\", city AS \"City\", email AS \"Email\" FROM client) TO 'clients.csv' WITH (FORMAT csv, HEADER true)"
+sqlite3 -csv -header shop.db "SELECT name AS Name, city AS City, email AS Email FROM client" > clients.csv
+cepheus import shop clients.csv --kind client --config /etc/cepheus/cluster.toml
+```
+
+### Les fichiers
+
+**CSV** comme l'écrit la RFC 4180 (la description, par l'IETF, des valeurs séparées par des virgules) : une ligne
+d'en-tête, puis un enregistrement (record) par ligne ; un champ qui commence par un guillemet est entre guillemets et
+peut contenir des virgules et des sauts de ligne, `""` y étant un guillemet. Un guillemet ailleurs, ou un caractère
+après un guillemet fermant, est refusé : c'est un fichier cassé, pas une donnée. Un enregistrement finit à un saut de
+ligne hors des guillemets, LF ou CR LF ; les lignes vides sont sautées ; une marque d'ordre des octets UTF-8 au début
+(le BOM, les trois octets EF BB BF que certains éditeurs écrivent en premier) est sautée. Comme dans le `COPY` de
+PostgreSQL (sql-copy.html : « a NULL is written as an unquoted empty string, while an empty string data value is
+written with double quotes »), un champ vide sans guillemets n'est aucune valeur et `""` est le texte vide. Un export
+écrit CR LF, comme la RFC 4180.
+
+**JSON lines** comme les décrit jsonlines.org : un objet JSON par ligne (RFC 8259), `{"Name": "Ada", "City": "Lyon"}` ;
+`null` ou une clé absente n'est aucune valeur. Une clé deux fois, un objet imbriqué, une imbrication de plus de 64
+niveaux, un échappement faux, un surrogate seul (la moitié d'un caractère dans des échappements `\u`) sont refusés.
+
+Une valeur est lue selon le type de son champ, exactement :
+
+| type | CSV | JSON lines | export |
+|---|---|---|---|
+| `Int` | `-12` (63 bits) | un nombre entier | le même |
+| `Float` | `2.5`, `1e-7`, `NaN`, `Infinity` | un nombre, `"NaN"`, `"Infinity"` | le plus court décimal qui se relit en le même double |
+| `Bool` | `true`, `false`, `t`, `f`, `1`, `0` | `true`, `false` | `true`, `false` |
+| `Text` | UTF-8 sans NUL | une chaîne | la même |
+| `Date` | `2026-11-24`, `2026-11-24T10:30:00Z`, `2026-11-24 10:30:00.123+01:00` (RFC 3339 ; sans fuseau : UTC) | une chaîne de la même forme | `2026-11-24T10:30:00.123Z` |
+| `Money(s)` | `12.50` : au plus `s` décimales, jamais par un float | un nombre de la même forme | `12.50`, exactement `s` décimales |
+| `Link` | la clé de la chose liée (plus bas) | la clé, du type de la clé | la clé |
+| plusieurs valeurs | une liste JSON dans le champ : `"[""red"",""blue""]"` | une liste | une liste |
+
+Une date est gardée à la milliseconde : les chiffres plus fins (les microsecondes de PostgreSQL) sont coupés. L'argent
+(money) est lu depuis ses chiffres décimaux en unités mineures, si bien que `12.505` pour des centimes est refusé et
+que `0.1` vaut dix centimes, jamais 0.1000000000000000055. Un texte est vérifié en UTF-8 et un octet NUL refusé
+(PostgreSQL refuse `0x00` dans un texte aussi) ; un export refuse un texte qui en contient un (ni le CSV ni les JSON
+lines n'en portent).
+
+**Les liens.** Un lien s'écrit comme la clé de la chose liée : un champ unique d'une valeur. Par défaut la sorte
+nommée comme le champ en minuscules, par son seul champ unique : `Client` est un client trouvé par son `Email`.
+`--link Client=client/Email` nomme la clé, `--link Client=id` écrit plutôt les ids des choses (un export pour un audit,
+un import dans la même base). Les choses liées doivent être dans la base d'abord : importez les clients, puis les
+factures, puis leurs lignes.
+
+### Ce qu'un import vérifie, et quand il écrit
+
+Le fichier est lu deux fois. La première passe vérifie chaque ligne : le nombre de ses champs, chaque valeur contre son
+type, chaque lien trouvé dans la base, chaque valeur unique contre la base et contre les autres lignes du fichier. Une
+mauvaise ligne arrête l'import avec sa ligne (celle où elle commence, en comptant les sauts de ligne entre guillemets)
+et la raison, et **rien n'est écrit** :
+
+```text
+cepheus: clients.csv line 1204: Email "ada@example.com" is on line 7 too; nothing was written
+```
+
+`--skip-bad` écrit les bonnes lignes et liste les mauvaises sur stderr, chacune avec sa ligne. `--upsert` change la
+chose que trouve une valeur unique de la ligne au lieu de la refuser : les valeurs de la ligne remplacent ses champs,
+un champ vide en laisse un tel quel, et un champ de plusieurs valeurs est refusé (`Write` change ceux-là) ; deux lignes
+du fichier avec une même valeur unique sont refusées même alors, comme le `ON CONFLICT DO UPDATE` de PostgreSQL refuse
+de changer une ligne deux fois.
+
+La seconde passe relit le fichier et l'écrit en groupes d'au plus un million d'opérations (15 MiB de requête, sous les
+16 MiB d'une frame), chacun pris par le chemin des grands groupes de la base (20 000 opérations et plus : triés dans des
+tableaux par plusieurs domains, fusionnés dans un run à mesure qu'ils s'écrivent), depuis un thread à lui sur une
+connexion à lui, pendant que des domains (les fils d'exécution parallèles d'OCaml) analysent les lignes qui suivent.
+Donc :
+
+- **Un import qui tient dans un groupe est tout ou rien**, une contrainte des règles comprise : la base refuse le
+  groupe en entier.
+- **Un import plus grand est vérifié en entier d'abord**, puis écrit groupe après groupe. La base ne refuse un groupe
+  que pour ce que la première passe ne peut pas voir : une contrainte d'une règle, ou une valeur unique qu'un autre
+  programme a écrite entre-temps. L'import s'arrête alors et nomme ce qui est écrit :
+
+```text
+cepheus: invoices.csv lines 2252 to 2501: the database refused their group: invalid: constraint never-void: ...;
+written before it: lines 2 to 2251, in groups 5 to 13
+```
+
+  Les lignes d'avant sont dans la base, celles d'après non : corrigez le fichier, et importez ses lignes à partir de
+  celle-là.
+
+Un import est le travail d'une commande : deux imports d'une même sorte en même temps peuvent chacun trouver une valeur
+unique libre à leur première passe ; la base refuse alors le groupe du second, comme ci-dessus. Le fichier doit être un
+fichier (pas un pipe : il est lu deux fois), et ne pas changer pendant sa lecture (sa taille et sa date sont vérifiées
+entre les passes).
+
+### Ce que donne un export
+
+Chaque chose de la sorte à un état de la base, le groupe de cet état sur stderr
+(`cepheus: shop at group 6202: 100,000 things of invoice, 900,000 facts, as CSV, in 0.31 s`), les choses par id, chacune
+avec les faits **asserted** (écrits par un programme) de ses champs : ce que les règles dérivent (le `Overdue` d'un
+client) est laissé de côté, puisque les règles de la base où l'export est importé le dérivent à nouveau. Les liens
+s'écrivent par leur clé (`--link`, comme plus haut) ; une chose liée sans sa clé arrête l'export (`--link Field=id`
+écrit les ids). Un export importé dans une nouvelle base donne les mêmes faits : le test le fait pour l'app des
+factures, et ses exports des deux sont les mêmes octets.
+
+L'export lit une view (un état figé de la base) dans son propre processus, par le follow stream du serveur sur son
+socket Unix ([lectures locales](server.md#lectures-locales-g15)) : une view ne change jamais pendant sa lecture,
+si bien que le fichier est un seul état cohérent quel que soit le temps qu'il prend, et aucune écriture ne l'attend.
+Il tourne donc sur la machine du serveur, avec un token qui lit toute la base (un token de quelques sortes n'est jamais
+suivi) ; ailleurs il le dit et s'arrête. Lire à un groupe passé (`--as-of`) attend les lectures à un groupe passé.
+
+### Sécurité
+
+- Le serveur vérifie le token à chaque requête : les écritures d'un import demandent `write`, le follow stream d'un
+  export demande `read` sur toute la base. La commande ouvre le fichier avec les droits de son utilisateur ; le serveur
+  ne voit jamais un chemin.
+- Ce que contient un fichier est une donnée : un enregistrement fait au plus 8 MiB, si bien qu'un guillemet laissé
+  ouvert dans un fichier de 10 GB arrête l'import à sa ligne au lieu de lire le reste comme un seul champ ;
+  l'imbrication JSON est d'au plus 64 niveaux ; les textes sont vérifiés UTF-8 sans NUL.
+- Un export écrit les valeurs exactement telles qu'elles sont, puisqu'un aller-retour en a besoin : un texte qui
+  commence par `=`, `+`, `-` ou `@` est une formule pour un tableur qui ouvre le CSV (la CSV injection). Ouvrez un
+  export dans un tableur comme du texte, ou écrivez le rapport par l'app (le CSV de l'app des factures protège ses
+  cellules, [l'app](app.md#10-lexport-csv)).
+
+### Mémoire et vitesse
+
+La première passe garde 8 octets pour chaque valeur unique (un hash de 30 bits et le numéro de la ligne, dans une table
+d'adressage ouvert au plus pleine aux 3/4) ; deux valeurs d'un même hash sont départagées en relisant la ligne d'avant
+(l'offset de chaque 1 024e ligne est gardé), si bien que la vérification est exacte. Tout le reste est borné quelle que
+soit la taille du fichier : des tours de huit lots d'un MiB, deux groupes en vol, la borne d'un enregistrement.
+
+Mesuré sur la machine de test (Intel i7-4720HQ, 4 cœurs, SSD SATA ; son btrfs plein à 97 %, d'autres jobs qui
+compilaient à côté) le 2026-11-25 avec `bench/transfer.sh DIR 120482 7` : 120 482 clients et 2 409 640 factures,
+10,0 M de faits, 149 MB de CSV ; sept tours, les côtés à tour de rôle, chacun durable ; médiane [min, max]. Chaque côté
+charge les clients (un e-mail unique), puis les factures, leur lien trouvé par l'e-mail du client : Cepheus par
+`cepheus import` de chaque fichier ; PostgreSQL 18.6 par `\copy` des clients, puis `\copy` des factures dans une
+table de leur texte et `INSERT ... SELECT` joint sur l'e-mail, en une transaction ; SQLite 3.54 par `.import --csv` de
+chaque fichier dans une table à lui et le même `INSERT ... SELECT`.
+
+| | Cepheus | PostgreSQL 18.6 | SQLite 3.54 |
+|---|---:|---:|---:|
+| les clients (361 446 faits) | 1,18 s [1,05, 6,63] | 1,43 s [0,64, 7,21] | 0,47 s [0,43, 2,08] |
+| les factures (9 638 560 faits) | 25,0 s [15,7, 42,1] | 39,7 s [27,4, 83,7] | 8,94 s [7,74, 9,28] |
+| les deux | 28,5 s [16,8, 43,2] | 43,7 s [28,3, 85,2] | 9,71 s [8,17, 10,3] |
+| la mémoire au pic du chargement | la commande 556 MB [511, 577], le serveur 450 MB [332, 571] | le backend 316 MB (shared_buffers 1 GB) | 11 MB |
+| l'export des factures avec l'e-mail de leur client | 2,61 s [1,76, 3,99], 245 MB | 3,94 s [3,56, 11,5] | 1,61 s [1,57, 1,93] |
+| sur le disque après le chargement | 111 à 198 MB (journal et runs) | 237 MB | 276 MB |
+
+SQLite charge le plus vite : un processus écrit un fichier, et il ne vérifie rien des valeurs (ses colonnes prennent
+n'importe quel texte : les montants et les dates restent des textes). Cepheus lit le fichier deux fois, et la première
+passe, chaque ligne vérifiée et chaque lien trouvé, prend 3,57 s [3,15, 6,37] du temps des factures ; le reste est le
+serveur qui écrit dix grands groupes, ce qui a varié de 11,7 à 38,1 s sur ce disque (7,8 s dans un tour calme du même
+build l'heure d'avant), là où la bibliothèque écrit les mêmes faits dans son propre processus, en deux grands groupes, en
+5,13 s ([benchmarks](benchmarks.md)) : chaque groupe traverse le socket, codé et décodé (un de 960 000 faits, 0,72 s par le
+serveur, 0,41 s dans le processus). PostgreSQL perd les factures : sa jointure et sa vérification de clé étrangère
+(foreign key) reprennent chaque ligne après la copie. Une facture dont aucun client n'a l'e-mail est laissée de côté
+en silence par la jointure de PostgreSQL et de SQLite ; Cepheus refuse le fichier, en nommant la ligne, avant d'écrire
+quoi que ce soit.
+
+Un fichier de 10 GiB (10 737 434 790 octets, 192 506 762 lignes : les factures de 13 clients encore et encore, dans un
+dossier compressé par btrfs, `chattr +c`, pour qu'il tienne en 1,2 GB sur un disque qui avait 7 GB de libre) dont la
+dernière ligne a 3 décimales pour des centimes est vérifié en entier et refusé à cette ligne, rien d'écrit : 253 s
+(42 MB/s), le pic de la commande 244 MB, contre 130 MB pour les 149 MB des factures du benchmark : la mémoire ne suit
+pas le fichier.
+
+`bench/transfer.sh DIR CLIENTS [ROUNDS]` fait tourner les trois côtés.
+
 ## Les outils
 
 | outil | ce qu'il fait | page |
@@ -237,3 +423,4 @@ sont ceux du disque.
 | `bench/pg/pg.sh` | le côté de PostgreSQL : `init`, `start`, `load`, `read`, `write`, `stop` | [benchmarks](benchmarks.md#commandes) |
 | `bench/sqlite/sqlite.sh` | le côté de SQLite : `load`, `read` | [benchmarks](benchmarks.md#commandes) |
 | `bench/sqlite/seats.py`, `bench/pg/pg.sh seats` | les côtés de SQLite et de PostgreSQL de la vente de places | [cas](case-seats.md#la-vitesse-à-côté-des-géants) |
+| `bench/transfer.sh` | `cepheus import` et `export` à côté du `COPY` de PostgreSQL et du `.import` de SQLite | [import et export](#mémoire-et-vitesse) |
