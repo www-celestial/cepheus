@@ -13,7 +13,8 @@
 # The sides alternate, ROUNDS rounds (7), each on new files.
 #   bench/transfer.sh DIR CLIENTS [ROUNDS]       DIR: a short path (the server's Unix socket is under it)
 set -e
-dir=$1; n=$2; rounds=${3:-7}
+mkdir -p "$1"
+dir=$(cd "$1" && pwd); n=$2; rounds=${3:-7}
 here=$(cd "$(dirname "$0")/.." && pwd)
 B=$here/_build/default/bin/main.exe
 T=$here/_build/default/bench/tbench.exe
@@ -46,6 +47,7 @@ cepheus_side() {
   i=$(timed $B import shop "$csv/invoice.csv" --kind invoice --config "$dir/c/cluster.toml" 2>> "$dir/c/import.err")
   e=$(timed sh -c "exec $B export shop --kind invoice --format csv --config $dir/c/cluster.toml > $dir/c/out.csv 2>> $dir/c/import.err")
   echo "cepheus clients $c invoices $i export $e server_peak_mb $(peak $spid) server_base_mb $base disk_mb $(du -sm "$dir/c/data" | cut -f1) rows_out $(($(wc -l < "$dir/c/out.csv") - 1))"
+  grep -v "rows checked" "$dir/c/import.err" | sed 's/^/  /'
   kill $spid; wait $spid 2> /dev/null || true
   for d in "$dir"/c/data/*/; do [ -f "$d/cepheus" ] && rm -f "/dev/shm/cepheus-$(od -An -tx1 -j17 -N16 "$d/cepheus" | tr -d ' \n').visible"; done
   rm -rf "$dir/c"

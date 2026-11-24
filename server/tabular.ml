@@ -242,8 +242,13 @@ let date_text ms =
   let y, m, d = civil_of_days days in
   if y < 0 || y > 9999 then bad "a date of the year %d: RFC 3339 writes the years 0 to 9999" y;
   let s = r / 1000 and f = r mod 1000 in
-  let base = Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d" y m d (s / 3600) (s / 60 mod 60) (s mod 60) in
-  if f = 0 then base ^ "Z" else Printf.sprintf "%s.%03dZ" base f
+  (* written digit by digit: an export writes millions *)
+  let b = Bytes.make (if f = 0 then 20 else 24) 'Z' in
+  let put i k v = let v = ref v in for j = i + k - 1 downto i do Bytes.unsafe_set b j (Char.unsafe_chr (48 + (!v mod 10))); v := !v / 10 done in
+  put 0 4 y; Bytes.set b 4 '-'; put 5 2 m; Bytes.set b 7 '-'; put 8 2 d; Bytes.set b 10 'T';
+  put 11 2 (s / 3600); Bytes.set b 13 ':'; put 14 2 (s / 60 mod 60); Bytes.set b 16 ':'; put 17 2 (s mod 60);
+  if f <> 0 then (Bytes.set b 19 '.'; put 20 3 f);
+  Bytes.unsafe_to_string b
 
 (* ---- booleans ---- *)
 

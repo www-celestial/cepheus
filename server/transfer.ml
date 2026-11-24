@@ -700,14 +700,18 @@ let export (v : Store.view) (o : export) (out : string -> unit) =
   let asserted e p typ =
     let l = ref [] in
     Store.iter_values_st v e p (fun w st -> if st = 1 then l := Store.value v typ w :: !l);
-    List.sort Value.compare !l
+    match !l with [] | [ _ ] -> !l | l -> List.sort Value.compare l
   in
-  let text e f x =
+  (* a link's key, from a table of the part (the things that link one thing often come together: its invoices) *)
+  let text keys e f x =
     match f.typ, f.link, x with
     | Value.Tlink, Key k, Value.Link t -> (
-      match asserted t k.prop k.ktyp with
-      | y :: _ -> k.ktyp, y
-      | [] -> stop "#%d's %s links #%d, which has no %s: --link %s=id writes the ids" e f.name t k.kname f.name)
+      match Hashtbl.find_opt keys (t, k.prop) with
+      | Some y -> k.ktyp, y
+      | None -> (
+        match asserted t k.prop k.ktyp with
+        | y :: _ -> if Hashtbl.length keys > 65536 then Hashtbl.reset keys; Hashtbl.replace keys (t, k.prop) y; k.ktyp, y
+        | [] -> stop "#%d's %s links #%d, which has no %s: --link %s=id writes the ids" e f.name t k.kname f.name))
     | _ -> f.typ, x
   in
   let check e f s = match T.bad_utf8 s 0 (String.length s) with -1 -> () | _ -> stop "#%d's %s holds a NUL byte or bytes that are not UTF-8, which CSV and JSON lines do not carry" e f.name in
@@ -718,13 +722,13 @@ let export (v : Store.view) (o : export) (out : string -> unit) =
     | Bool b -> Buffer.add_string buf (if b then "true" else "false")
     | Float _ | Text _ | Date _ -> T.json_add buf (text_of typ x)
   in
-  let one buf e =
+  let one keys buf e =
     let vals = Array.map (fun f -> asserted e f.prop f.typ) fields in
     if Array.for_all (fun l -> l = []) vals then 0
     else begin
       let count = ref 0 in
       let render f x =
-        let typ, y = text e f x in
+        let typ, y = text keys e f x in
         (match y with Value.Text s -> check e f s | _ -> ());
         typ, y
       in
@@ -792,8 +796,8 @@ let export (v : Store.view) (o : export) (out : string -> unit) =
        done;
        let bufs = Array.init !np (fun _ -> Buffer.create (1 lsl 16)) and counts = Array.make !np (0, 0) in
        Bulk.parallel !np (fun i ->
-           let t = ref 0 and f = ref 0 in
-           Array.iter (fun e -> let c = one bufs.(i) e in if c > 0 then (incr t; f := !f + c)) parts.(i);
+           let t = ref 0 and f = ref 0 and keys = Hashtbl.create 1024 in
+           Array.iter (fun e -> let c = one keys bufs.(i) e in if c > 0 then (incr t; f := !f + c)) parts.(i);
            counts.(i) <- !t, !f);
        Array.iteri (fun i b -> out (Buffer.contents b); let t, f = counts.(i) in things := !things + t; facts := !facts + f) bufs
      done;
