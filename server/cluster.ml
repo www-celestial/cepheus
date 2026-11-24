@@ -422,6 +422,7 @@ and start_fetch t k =
       (Thread.create
          (fun () ->
            let outcome =
+             try
              match Replica.connect t.cfg peer with
              | Error m -> Catchup.Refused (Printf.sprintf "the copy from %s: %s" peer.pname m)
              | Ok l when l.pv < 3 -> Replica.close_link l; Catchup.Refused (peer.pname ^ " speaks peer protocol 2, which has no copy: upgrade it")
@@ -435,6 +436,7 @@ and start_fetch t k =
                    let decide x term = Mutex.protect t.m (fun () -> let r = Raft.install t.core ~index:x ~term in run t; r) in
                    Catchup.fetch t.cfg ~source:peer.pname ~id_of ~published ~decide ~send:(fun b -> Replica.send l ~kind:Replica.k_copy b)
                      ~next:(fun () -> Replica.next_frame l))
+             with e -> Catchup.Refused (Printf.sprintf "the copy from %s failed: %s" peer.pname (Printexc.to_string e))
            in
            let note m = Mutex.protect t.sm (fun () -> t.fetch_note <- m) in
            (match outcome with
@@ -446,6 +448,12 @@ and start_fetch t k =
             | Catchup.Dropped x ->
               note (Printf.sprintf "a copy at index %d from %s, not needed (this log holds its entry)" x peer.pname);
               log "Raft: the copy of %s's databases at index %d is not needed: this log holds its entry" peer.pname x
+            | Catchup.Refused m when Mutex.protect t.m (fun () -> t.core.inert) ->
+              (* decided, then not committed (the disk failed meanwhile): the server starts again as it was *)
+              note m;
+              log "Raft: %s; this server starts again" m;
+              Atomic.set restart true;
+              Unix.kill (Unix.getpid ()) Sys.sigterm
             | Catchup.Refused m ->
               note m;
               log "Raft: %s" m;
