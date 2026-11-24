@@ -1377,10 +1377,11 @@ qu'il a acquitté) : son term devient le plus récent
 des leurs, son vote dans ce term le sien (il a pu y voter), et sa marque de réparation leur dernier index le plus
 récent, si bien que par [la règle de 2018](#un-log-abîmé--la-règle-de-2018) il ne vote à nouveau qu'une fois qu'il
 tient chaque entrée jusque-là, reçue d'un serveur qui la sait committed. En pratique il prend ensuite une copie des
-bases et suit. Un nouveau cluster, c'est une majorité, lui compris, de réponses sans histoire (des serveurs frais, ou
-des serveurs de term 0 au log vide, sortis de cet état ainsi et qui n'ont entendu parler d'aucune élection depuis) :
-ils sortent de cet état et élisent un leader. Ce que cela ne couvre pas : une majorité qui perd ses données d'un coup a perdu ce
-qu'elle seule tenait, comme dans tout cluster Raft.
+bases et suit. Un nouveau cluster, c'est une majorité, lui compris, de serveurs frais, ou un serveur dont chacun des
+autres a répondu sans histoire (frais, ou de term 0 au log vide : sorti de cet état ainsi et qui n'a entendu parler
+d'aucune élection depuis) : ils sortent de cet état et élisent un leader. Ce que cela ne couvre pas : une majorité
+qui perd ses données d'un coup (ou ne les a jamais eues : un serveur qui n'a pris part à rien, à côté d'un serveur dont
+le disque a été perdu) : ce que seule cette majorité tenait est perdu, comme dans tout cluster Raft.
 
 ### Les élections
 

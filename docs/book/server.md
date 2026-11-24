@@ -1229,9 +1229,11 @@ them, which still holds what it acknowledged): its term becomes
 their newest, its vote in it its own (it may have voted in it), and its repair mark their newest last index, so that
 by [the 2018 rule](#a-damaged-log-the-2018-rule) it votes again only once it holds every entry up to there from a
 server that knows them committed. In practice it then takes a copy of the databases and follows. A new cluster is a
-majority, itself included, of answers with no history (fresh servers, or servers of term 0 and an empty log, which
-ended their freshness that way and heard of no election since): they end their freshness and elect a leader. What it does
-not cover: a majority that lost its data at once has lost what only it held, as in any Raft cluster.
+majority, itself included, of fresh servers, or one whose every other server answered with no history (fresh, or of
+term 0 and an empty log: ended its freshness that way and heard of no election since): they end their freshness and
+elect a leader. What it does
+not cover: a majority that lost its data at once (or never had it: a server that took part in nothing, beside one
+whose disk was lost): what only that majority held is lost, as in any Raft cluster.
 
 ### Elections
 

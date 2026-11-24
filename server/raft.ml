@@ -33,9 +33,9 @@
      damaged (every majority that elected a
      leader or committed an entry with its vote or acknowledgement holds one of them): its term becomes their newest,
      its vote in it its own (it may have voted in it), its repair mark their newest last index (the 2018 rule: it
-     votes again once it holds every entry up to it from a leader that committed it); or with a majority, itself
-     included, of answers with no history (fresh servers, or servers of term 0 and an empty log: a new cluster,
-     nothing was ever committed that a majority remembers);
+     votes again once it holds every entry up to it from a leader that committed it); or, a new cluster, with a
+     majority, itself included, of fresh servers, or with every other server's answer showing no history (fresh, or
+     of term 0 and an empty log);
    - leadership handed over (thesis 3.10): the leader stops taking proposals and serving reads (its lease given up
      first: the votes that follow do not wait for the promises it rests on), waits until the most up-to-date peer it
      heard lately holds its whole log forced, and sends it Timeout_now; that peer stands for election at once, with no
@@ -457,11 +457,14 @@ let held t k ~seq ~index ~commit =
 let end_fresh t =
   let others = List.filter_map (fun x -> x) (Array.to_list t.told) in
   let sound = List.filter (fun (_, _, f) -> not f) others in
-  (* an answer with no history: a fresh server, or one of term 0 with an empty log (it ended its freshness as a new
-     cluster's and has heard of no election since: a server writes its state only once no longer fresh, and a term
-     only grows) *)
+  (* a new cluster: a majority of fresh servers, itself included; or every other server answered with no history
+     (fresh, or of term 0 with an empty log: one that ended its freshness as a new cluster's and heard of no election
+     since). A server of term 0 with an empty log may also be one that never took part while the others ran: with
+     it alone a lost disk would start a new history, so every other server must have answered *)
+  let all_fresh = List.for_all (fun (_, _, f) -> f) others in
   let none = List.for_all (fun (tm, li, f) -> f || (tm = 0 && li = 0)) others in
-  if List.length sound >= t.n / 2 + 1 || (none && List.length others + 1 >= majority t) then begin
+  if List.length sound >= t.n / 2 + 1 || (all_fresh && List.length others + 1 >= majority t) || (none && List.length others = t.n - 1)
+  then begin
     t.term <- List.fold_left (fun m (tm, _, _) -> max m tm) t.term others;
     t.vote <- t.me;
     t.repair <- List.fold_left (fun m (_, li, _) -> max m li) t.repair sound;

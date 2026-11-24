@@ -29,8 +29,8 @@
    - a server whose whole state is lost (Wipe: its disk replaced) starts fresh: it answers no vote request and no
      Append, takes no term, stands for nothing, and asks the others their state (Ask); it ends its freshness with the
      answers of floor(n/2) + 1 other servers neither fresh nor damaged (its term their newest, its vote in it its own, its
-     repair mark their newest last index), or with a majority, itself included, of answers with no history (fresh,
-     or of term 0 and an empty log: a new cluster). A wipe comes only while the damaged and the wiped stay a minority (a majority that lost what it
+     repair mark their newest last index), or, a new cluster, with a majority, itself included, of fresh servers,
+     or with every other server's answer showing no history (fresh, or of term 0 and an empty log). A wipe comes only while the damaged and the wiped stay a minority (a majority that lost what it
      acknowledged may have lost a committed entry);
    - leadership handed over (thesis 3.10; cepheus stop on the leader): a leader whose peer holds its whole log gives
      up its lease and takes no more requests, and sends it TimeoutNow; that peer stands at once, its vote requests
@@ -397,7 +397,7 @@ HandleState(i, m) ==
   /\ UNCHANGED <<currentTerm, votedFor, log, plog, repair, base, fresh, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes, transfers, handing, gives>>
 
 (* a fresh server's freshness ends: with the answers of floor(n/2) + 1 others that are not fresh, or with a majority
-   of answers with no history (a new cluster) *)
+   of fresh servers or every other one answering with no history (a new cluster) *)
 EndFresh(i) ==
   /\ fresh[i]
   /\ LET answered == {t \in Server : told[i][t] /= NoAnswer}
@@ -406,7 +406,8 @@ EndFresh(i) ==
          need == IF FreshHearOne THEN 1 ELSE Cardinality(Server) \div 2 + 1
          Top(S, k) == IF S = {} THEN 0 ELSE CHOOSE x \in {told[i][t][k] : t \in S} : \A t \in S : told[i][t][k] <= x
      IN /\ \/ Cardinality(sound) >= need
-           \/ none /\ Majority(answered \cup {i})
+           \/ sound = {} /\ Majority(answered \cup {i})
+           \/ none /\ answered = Server \ {i}
         /\ currentTerm' = [currentTerm EXCEPT ![i] = Max(currentTerm[i], Top(answered, 1))]
         /\ votedFor' = [votedFor EXCEPT ![i] = i]
         /\ repair' = [repair EXCEPT ![i] = IF FreshNoRepair THEN repair[i] ELSE Max(repair[i], Top(sound, 2))]
