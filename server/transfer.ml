@@ -439,7 +439,8 @@ let writer write =
     | None -> ()
     | Some j -> (
       let t = Unix.gettimeofday () in
-      let r = write j.ops in
+      (* whatever it raises ends the import as a refusal: the thread never dies with a group waiting on it *)
+      let r = try write j.ops with e -> Error (Printexc.to_string e) in
       w.waited <- w.waited +. (Unix.gettimeofday () -. t);
       match r with
       | Ok g -> Mutex.protect w.m (fun () -> w.groups <- (g, j) :: w.groups); loop ()

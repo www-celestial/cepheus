@@ -44,7 +44,7 @@ cepheus_side() {
   base=$(peak $spid)
   c=$(timed $B import shop "$csv/client.csv" --kind client --config "$dir/c/cluster.toml" 2> "$dir/c/import.err")
   i=$(timed $B import shop "$csv/invoice.csv" --kind invoice --config "$dir/c/cluster.toml" 2>> "$dir/c/import.err")
-  e=$(timed $B export shop --kind invoice --format csv --config "$dir/c/cluster.toml" 2>> "$dir/c/import.err" > "$dir/c/out.csv")
+  e=$(timed sh -c "exec $B export shop --kind invoice --format csv --config $dir/c/cluster.toml > $dir/c/out.csv 2>> $dir/c/import.err")
   echo "cepheus clients $c invoices $i export $e server_peak_mb $(peak $spid) server_base_mb $base disk_mb $(du -sm "$dir/c/data" | cut -f1) rows_out $(($(wc -l < "$dir/c/out.csv") - 1))"
   kill $spid; wait $spid 2> /dev/null || true
   for d in "$dir"/c/data/*/; do [ -f "$d/cepheus" ] && rm -f "/dev/shm/cepheus-$(od -An -tx1 -j17 -N16 "$d/cepheus" | tr -d ' \n').visible"; done
@@ -99,9 +99,33 @@ COMMIT;
 EOF
   c=$(timed sqlite3 "$dir/s.db" < "$dir/s.sql")
   i=$(timed sqlite3 "$dir/s.db" < "$dir/s2.sql")
-  e=$(timed sqlite3 -csv -header "$dir/s.db" "SELECT c.email, i.total, i.status, i.date FROM invoice i JOIN client c ON c.id = i.client ORDER BY i.id" > "$dir/s-out.csv")
+  e=$(timed sh -c "exec sqlite3 -csv -header $dir/s.db 'SELECT c.email, i.total, i.status, i.date FROM invoice i JOIN client c ON c.id = i.client ORDER BY i.id' > $dir/s-out.csv")
   echo "sqlite clients $c invoices $i export $e disk_mb $(du -m "$dir/s.db" | cut -f1)"
   rm -f "$dir/s.db" "$dir/s-out.csv"
+}
+
+# BIG=BYTES: then a file of BYTES of invoices (13 clients' rows over and over, so that a folder compressed by btrfs,
+# chattr +c, holds it in a fraction of its size), its last row bad: the import checks it whole, streaming, refuses
+# the last row and writes nothing; its time and peak memory
+big_side() {
+  rm -rf "$dir/c" "$dir/big"
+  mkdir -p "$dir/big"
+  chattr +c "$dir/big" 2> /dev/null || true
+  $T big "$dir/big/invoices.csv" "$BIG" 13
+  $B cluster init bench --dir "$dir/c" > /dev/null
+  sed -i "s/127.0.0.1:7400/127.0.0.1:$port/; s/name = \"main\"/name = \"shop\"/" "$dir/c/cluster.toml"
+  CEPHEUS_TOKEN=$($B token add bench --database shop=write --config "$dir/c/cluster.toml" 2> /dev/null)
+  export CEPHEUS_TOKEN
+  setsid $B serve --config "$dir/c/cluster.toml" < /dev/null > "$dir/c/serve.log" 2>&1 &
+  spid=$!
+  for _ in $(seq 200); do [ -S "$dir/c/run/.s.cepheus.$port" ] && break; sleep 0.05; done
+  $T declare "$dir/c/run/.s.cepheus.$port" shop
+  $B import shop "$csv/client.csv" --kind client --config "$dir/c/cluster.toml" 2> /dev/null
+  r=$(timed $B import shop "$dir/big/invoices.csv" --kind invoice --config "$dir/c/cluster.toml" 2> "$dir/big.err" || true)
+  echo "big $(du -b "$dir/big/invoices.csv" | cut -f1) bytes ($(du -sm "$dir/big" | cut -f1) MB on the disk): $r; $(tail -1 "$dir/big.err")"
+  kill $spid; wait $spid 2> /dev/null || true
+  for d in "$dir"/c/data/*/; do [ -f "$d/cepheus" ] && rm -f "/dev/shm/cepheus-$(od -An -tx1 -j17 -N16 "$d/cepheus" | tr -d ' \n').visible"; done
+  rm -rf "$dir/c" "$dir/big"
 }
 
 for r in $(seq "$rounds"); do
@@ -110,3 +134,4 @@ for r in $(seq "$rounds"); do
   [ -z "$NOPG" ] && pg_side
   [ -z "$NOSQLITE" ] && sqlite_side
 done
+[ -n "$BIG" ] && big_side
