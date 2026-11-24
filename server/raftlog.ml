@@ -447,13 +447,14 @@ let read t i =
         | None -> None
         | Some (_, r) -> Some (List.nth (read_round t r) (i - r.rfirst))))
 
-(* every entry from index [from] on, in order (recovery: a database's frames to write again) *)
-let iter t ~from f =
+(* every entry from index [from] on (to [upto]), in order, each round read once (recovery: a database's frames to
+   write again; a frame's pieces) *)
+let iter ?(upto = max_int) t ~from f =
   let rs = Mutex.protect t.m (fun () -> List.init t.nr (Array.get t.rounds)) in
   List.iter
     (fun r ->
-      if r.rfirst + r.rcount > from then
-        List.iteri (fun k (term, d) -> if r.rfirst + k >= from then f (r.rfirst + k) term d) (Mutex.protect t.m (fun () -> read_round t r)))
+      if r.rfirst + r.rcount > from && r.rfirst <= upto then
+        List.iteri (fun k (term, d) -> let i = r.rfirst + k in if i >= from && i <= upto then f i term d) (Mutex.protect t.m (fun () -> read_round t r)))
     rs
 
 (* entries from i on dropped, forced (a follower's entries that a new leader's log does not hold); [prev_term]: the

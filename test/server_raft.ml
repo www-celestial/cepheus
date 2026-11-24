@@ -13,12 +13,16 @@
    - the peer port refuses a peer of protocol 1, a certificate of the cluster's CA for a name no peer has, and a
      certificate of another CA.
    - a load, a change of the rules (computed in the leader's background) beside groups that count with one counter
-     (Incr), and a load past one Raft entry (8 MiB), refused whole; the leader killed: the new one holds the load,
-     the change's consequences and the counter, nothing of the refused load;
+     (Incr), and a load past 8 MiB, carried through the log in pieces; the leader killed: the new one holds the
+     loads, the change's consequences and the counter;
    - the catch-up (server/catchup.ml): loads that pass a segment of the Raft log (64 MiB), so that the leader's log
      starts after 1; a follower killed and its data directory removed: started again empty, it asks the others their
      state, takes a copy of the databases from the leader, starts again on it and follows, holding every group; the
-     same with the follower killed (kill -9) during its copy, then with the leader killed during it.
+     same with the follower killed (kill -9) during its copy, then with the leader killed during it;
+   - a group of about 100 MiB (a rule's consequences: 25,600 texts of 4 KiB copied) through the log in pieces, its
+     time from the write to the receipt; the same with a follower killed (kill -9) during it (it comes back and holds
+     it whole), then with the leader killed during it, the client not trying again: on the new leader and on every
+     server, all of its consequences or none.
 
      server_raft.exe DIR *)
 
@@ -329,16 +333,12 @@ let () =
   let rows p = match Client.find w sdb2 { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } with Ok (_, rows) -> List.length rows | Error _ -> -1 in
   let nk = rows sk in
   C.check (nk >= load && rows sk2 = nk) "the rule's consequences on the leader: %d of %d" (rows sk2) nk;
-  (* a load past one Raft entry: refused whole, on every server *)
+  (* a load past 8 MiB: in pieces through the log, on every server *)
   let side_before = group (await_leader "a leader") "side" in
   let text i = Printf.sprintf "%08d-%s" i (Digest.to_hex (Digest.string (string_of_int i))) in
   (match Client.write w sdb2 (List.init 260_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text i)))) with
-   | Error { code = "invalid"; message } ->
-     let has m sub = let n = String.length sub in let rec go i = i + n <= String.length m && (String.sub m i n = sub || go (i + 1)) in go 0 in
-     C.check (has message "over the frame limit of 8388608")
-       "a load past 8 MiB in a cluster: refused (%s)" message
-   | Error e -> C.check false "a load past 8 MiB: %s %s" e.code e.message
-   | Ok _ -> C.check false "a load past 8 MiB was taken by a cluster");
+   | Ok r -> C.check (r.group = side_before + 1) "a load past 8 MiB in a cluster: taken (group %d)" r.group
+   | Error e -> C.check false "a load past 8 MiB: %s %s" e.code e.message);
   let same () =
     match leader () with
     | None -> false
@@ -346,7 +346,7 @@ let () =
   in
   wait_for "every server holds the leader's groups" same;
   let lk = await_leader "a leader" in
-  C.check (group lk "side" = side_before) "nothing of the refused load on any server (side at %d)" side_before;
+  C.check (group lk "side" = side_before + 1) "every server holds the load past 8 MiB (side at %d)" (side_before + 1);
   (* the leader killed: the new one holds the load, the change and its consequences, the counter *)
   let side_g = group lk "side" in
   Unix.kill pids.(lk) Sys.sigkill;
@@ -358,8 +358,8 @@ let () =
   (match Client.get w sdb2 counter with
    | Ok (_, facts) -> C.check (List.assoc_opt sc facts = Some (Int (Atomic.get counted))) "on the new leader: the counter at %d" (Atomic.get counted)
    | Error e -> C.check false "the counter: %s" e.message);
-  (match Client.find w sdb2 { Query.vars = 1; where = [ { Query.e = Var 0; p = st; v = Val (Text (text 7)) } ]; ranges = [] } with
-   | Ok (_, rows) -> C.check (rows = []) "on the new leader: nothing of the refused load"
+  (match Client.find w sdb2 { Query.vars = 1; where = [ { Query.e = Var 0; p = st; v = Val (Text (text 259_999)) } ]; ranges = [] } with
+   | Ok (_, rows) -> C.check (List.length rows = 1) "on the new leader: the load past 8 MiB, its last fact too"
    | Error e -> C.check false "a read on the new leader: %s" e.message);
   pids.(lk) <- Serve.start bin cfgs.(lk);
   alive.(lk) <- true;
@@ -426,6 +426,76 @@ let () =
   alive.(ll) <- true;
   wait_socket (sock ll);
   caught_up "a follower whose source was killed (kill -9) during its copy" fk;
+  (* a group of about 100 MiB: the consequences of a rule that copies 25,600 texts of 4 KiB *)
+  let sdb3, bps =
+    match Client.declare w "side" [ prop "b" Ttext; prop ~many:true "b2" Ttext; prop ~many:true "b3" Ttext; prop ~many:true "b4" Ttext ] with
+    | Ok (db, ps) -> db, ps
+    | Error e -> failwith ("declare: " ^ e.message)
+  in
+  let[@warning "-8"] [ pb; pb2; pb3; pb4 ] = bps in
+  let big i = Printf.sprintf "%06d%s" i (String.make 4090 (Char.chr (97 + (i mod 26)))) in
+  let nbig = 25_600 in
+  for part = 0 to 9 do
+    match Client.write w sdb3 (List.init (nbig / 10) (fun i -> Resolve.Add (-(i + 1), pb, Text (big ((part * (nbig / 10)) + i))))) with
+    | Ok _ -> ()
+    | Error e -> C.check false "a load of 4 KiB texts: %s %s" e.code e.message
+  done;
+  let count p = match Client.find w sdb3 ~select:(Wire.Give [| 0 |]) { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } with Ok (_, rows) -> List.length rows | Error _ -> -1 in
+  let rule name p : Cepheus.rule = { name; vars = 2; where = [ { e = Var 0; p = pb; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p; v = Var 1 } } in
+  let rules = ref 0 in
+  let add_rule ?(c = w) name p =
+    incr rules;
+    let rid = Schema.first_thing - 200 - !rules in
+    Client.write c sdb3 [ Resolve.Add (rid, Schema.p_name, Text name); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text (rule name p))); Resolve.Expect (rid, Schema.p_name, None) ]
+  in
+  let t0 = Unix.gettimeofday () in
+  (match add_rule "big2" pb2 with
+   | Ok r ->
+     let ms = (Unix.gettimeofday () -. t0) *. 1000. in
+     C.check true "a group of 100 MiB (a rule's %d consequences of 4 KiB) committed in %.0f ms (group %d)" nbig ms r.group;
+     Printf.printf "group_100mib_ms %.1f\n%!" ms
+   | Error e -> C.check false "a group of 100 MiB: %s %s" e.code e.message);
+  wait_for ~limit:120. "every server holds the group of 100 MiB" same;
+  C.check (count pb2 = nbig) "its %d consequences on the leader" nbig;
+  (* a follower killed during it *)
+  let ll = await_leader "a leader" in
+  let fk = (ll + 1) mod 3 in
+  let res = ref None in
+  let th = Thread.create (fun () -> res := Some (add_rule "big3" pb3)) () in
+  Thread.delay 0.4;
+  Unix.kill pids.(fk) Sys.sigkill;
+  ignore (Serve.wait pids.(fk));
+  Thread.join th;
+  (match !res with Some (Ok _) -> C.check true "a group of 100 MiB committed with a follower killed during it" | Some (Error e) -> C.check false "with a follower killed: %s %s" e.code e.message | None -> ());
+  pids.(fk) <- Serve.start bin cfgs.(fk);
+  wait_socket (sock fk);
+  wait_for ~limit:120. "the killed follower holds the group of 100 MiB" same;
+  C.check (count pb3 = nbig) "its %d consequences on the leader; the follower came back and holds its group" nbig;
+  (* the leader killed during it, the client trying nothing again: all of it or none, everywhere *)
+  let ll = await_leader "a leader" in
+  let w4 = match Client.connect ~session:781 ~ca:(Filename.concat ca "ca.pem") (tcp ll) wtext with Ok c -> c | Error m -> failwith m in
+  let sdb4 = Result.get_ok (Client.open_db ~local:false w4 "side") in
+  ignore sdb4;
+  Client.retry_budget := 0.;
+  let res = ref None in
+  let th = Thread.create (fun () -> res := Some (add_rule ~c:w4 "big4" pb4)) () in
+  Thread.delay 0.5;
+  Unix.kill pids.(ll) Sys.sigkill;
+  ignore (Serve.wait pids.(ll));
+  alive.(ll) <- false;
+  Thread.join th;
+  Client.retry_budget := 30.0;
+  Client.close w4;
+  let ln = await_leader ~ok:(fun k -> k <> ll && stat k "raft.ready" = "true") "a new leader" in
+  let n4 = count pb4 in
+  C.check (n4 = 0 || n4 = nbig) "the leader killed during a group of 100 MiB (%s): its consequences on the new leader %s: %d of %d (all or none)"
+    (match !res with Some (Ok _) -> "answered committed" | Some (Error e) -> e.code | None -> "?") (List.nth names ln) n4 nbig;
+  (match !res with Some (Ok _) -> C.check (n4 = nbig) "answered committed: all of it on the new leader" | _ -> ());
+  pids.(ll) <- Serve.start bin cfgs.(ll);
+  alive.(ll) <- true;
+  wait_socket (sock ll);
+  wait_for ~limit:120. "the old leader catches up" same;
+  C.check true "the old leader caught up (side at %d)" (group (await_leader "a leader") "side");
   Client.close w;
   Array.iteri (fun k c -> if alive.(k) then (C.check (run [ "stop"; "--config"; c ] = 0) "cepheus stop %s" (List.nth names k); ignore (Serve.wait pids.(k)))) cfgs;
   C.rmrf dir;

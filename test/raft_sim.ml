@@ -18,8 +18,13 @@
    the server starts again on it, the install repeated by a start a crash cut. The leader's floor waits for a silent
    peer 200 to 2,200 ms (the server: 5 minutes), so that servers down longer take copies.
 
+   Entries are the server's (Cluster): a write is a frame, one in eight a large one, carried in pieces of 64 to 320
+   bytes proposed at once (Cluster's rules: a sequence is applied whole at its last piece, read back from the log, and
+   never once broken by a newer term; the log is not cut, nor a copy made, inside an open one).
+
    Checked: at most one leader a term; every server's applied entries are the committed log's (no two different
-   entries applied at one index anywhere); every write a client was told is committed is in the final log at its
+   entries applied at one index anywhere); a large write is applied whole or not at all (its value's bytes are
+   checked); every write a client was told is committed is in the final log at its
    index; reads linearizable: a read served at index r returns the committed log's state at r, sees every write
    answered before it began, nothing written after it ended, and no read that ended before it began saw a later
    index; after the faults stop and the network heals, every server reaches the same commit and the same log. A
@@ -51,7 +56,7 @@ type hist = {
 }
 
 (* a copy being taken from [src], at its applied index [x] (of term [xt]), whole at [until] *)
-type copy = { src : int; x : int; xt : int; kv : (string * string) list; until : int; damaged : bool; life : int }
+type copy = { src : int; x : int; xt : int; kv : (string * string) list; kv_at : int; until : int; damaged : bool; life : int }
 
 type server = {
   id : int;
@@ -72,6 +77,10 @@ type server = {
   mutable fetch_after : int;
   mutable lives : int;  (* starts: a copy from a server that died meanwhile breaks *)
   mutable sound : bool;  (* neither damaged (the 2018 rule) nor lost (fresh) when last seen up *)
+  seqs : (string, Cluster.seq) Hashtbl.t;  (* the sequences of pieces not whole, as the apply thread keeps them *)
+  mutable held_upto : int;
+      (* the state machine holds the entries up to this one already (its checkpoint, or a copy, is ahead of the log a
+         start found): applied again, tracked, and their writes skipped (the server: their groups skipped) *)
 }
 
 type msg = { src : int; dst : int; at : int; m : Raft.msg; data : Bytes.t array }
@@ -111,6 +120,29 @@ let clock w s = int_of_float (float w.now *. s.rate)
 let encode_kv k v = Bytes.of_string (k ^ "\000" ^ v)
 let decode_kv d = match String.index_opt (Bytes.to_string d) '\000' with Some i -> let s = Bytes.to_string d in Some (String.sub s 0 i, String.sub s (i + 1) (String.length s - i - 1)) | None -> None
 
+(* the one database's id, and a write's entries: one frame, or a large value's pieces *)
+let db = "sim-database-001"
+let big_value serial n = Printf.sprintf "v%d:%s" serial (String.make n (Char.chr (97 + (serial mod 26))))
+
+(* a large value is whole: its bytes after ':' all the letter of its serial *)
+let whole v =
+  match String.index_opt v ':' with
+  | None -> true
+  | Some i ->
+    match int_of_string_opt (String.sub v 1 (i - 1)) with
+    | None -> false
+    | Some serial ->
+      let c = Char.chr (97 + (serial mod 26)) in
+      String.length v > i + 1 && String.for_all (( = ) c) (String.sub v (i + 1) (String.length v - i - 1))
+
+let entries_of w k v =
+  let f = encode_kv k v in
+  let n = Bytes.length f in
+  if n <= 64 then [ Cluster.encode_frame db f ]
+  else
+    let size = 64 + Rng.int w.r 256 in
+    List.init ((n + size - 1) / size) (fun j -> Cluster.encode_piece db ~total:n ~off:(j * size) f (min size (n - (j * size))))
+
 let entry s i =
   match List.assoc_opt i s.pend with
   | Some x -> Some x
@@ -127,7 +159,25 @@ let apply_one w s i (term, d) =
      fail w "server %d applies entry %d of term %d, another server applied one of term %d there" s.id i term t'
    | Some _ -> ()
    | None -> Hashtbl.replace w.applied_at i (term, d));
-  (match decode_kv d with Some (k, v) -> s.kv <- (k, v) :: List.remove_assoc k s.kv | None -> ());
+  let put f =
+    if i > s.held_upto then
+    match decode_kv f with
+    | Some (k, v) ->
+      if not (whole v) then fail w "server %d applies a value that is not whole at %d (%d bytes)" s.id i (String.length v);
+      if String.contains v ':' then tr w "server %d applies %s=%s at %d" s.id k (String.sub v 0 (String.index v ':')) i;
+      s.kv <- (k, v) :: List.remove_assoc k s.kv
+    | None -> fail w "server %d applies a frame that does not decode at %d" s.id i
+  in
+  (match Cluster.decode_entry d with
+   | Some e -> (
+     match e, Cluster.track s.seqs i term e with
+     | Frame (_, f), _ -> put f
+     | Piece _, Some q -> (
+       match s.rlog with
+       | Some l -> put (Cluster.assemble l ~pend:(fun j -> List.assoc_opt j s.pend) ~get:(entry s) ~from:q.sfirst ~upto:i ~total:q.stotal)
+       | None -> raise Down)
+     | _ -> ())
+   | None -> ());
   s.applied <- i
 
 let apply w s upto =
@@ -205,13 +255,13 @@ and fetch w s k =
   let src = w.servers.(k) in
   match s.copying, src.core with
   | None, Some sc when w.now >= s.fetch_after ->
-    let x = src.applied in
+    let x = min src.applied (Cluster.open_first src.seqs - 1) in
     let xt = Raft.term_at sc x in
     if x >= 1 && xt >= 0 then begin
       Raft.pin sc ~index:x ~until:(clock w src + 2000);
       count "copies begun";
       tr w "server %d takes a copy from %d at %d (term %d)" s.id k x xt;
-      s.copying <- Some { src = k; x; xt; kv = src.kv; until = w.now + 20 + Rng.int w.r 400; damaged = w.faults && Rng.chance w.r 0.1; life = src.lives }
+      s.copying <- Some { src = k; x; xt; kv = src.kv; kv_at = max src.applied src.held_upto; until = w.now + 20 + Rng.int w.r 400; damaged = w.faults && Rng.chance w.r 0.1; life = src.lives }
     end
   | _ -> ()
 
@@ -274,7 +324,9 @@ let install_copy s =
   if d.exists "/raft/copy" then begin
     match Raftlog.decode_copy (Disk.read_all d "/raft/copy") with
     | Some (x, term, _) ->
-      s.ckpt <- x, decode_kv_list (Disk.read_all d "/raft/copy.kv");
+      (match decode_kv_list (Disk.read_all d "/raft/copy.kv") with
+       | ("@", at) :: kv -> s.ckpt <- int_of_string at, kv
+       | kv -> s.ckpt <- x, kv);
       Raftlog.install d "/raft" ~cluster ~first:(x + 1) ~prev_term:term;
       d.remove "/raft/copy.kv";
       d.remove "/raft/copy";
@@ -299,11 +351,17 @@ let start w s =
     s.core <- Some c;
     s.rlog <- Some l;
     s.lives <- s.lives + 1;
-    (* the state machine: its checkpoint, then what the log holds committed *)
+    (* the state machine: its checkpoint, the sequences of pieces open at it (Cluster.create), then what the log holds
+       committed *)
     let ci, kv = s.ckpt in
     s.kv <- kv;
-    s.applied <- ci;
-    (try apply w s (max ci c.commit) with Over -> raise Over);
+    (* as the server: applied from the log (Cluster.create), the state machine's own entries above it skipped *)
+    let from = min ci (max (r.start - 1) (min c.commit (r.start + Array.length r.terms - 1))) in
+    s.applied <- from;
+    s.held_upto <- ci;
+    Hashtbl.reset s.seqs;
+    Raftlog.iter l ~from:r.start ~upto:from (fun i tm d -> match Cluster.decode_entry d with Some e -> ignore (Cluster.track s.seqs i tm e) | None -> ());
+    (try apply w s c.commit with Over -> raise Over);
     if s.applied < c.commit then fail w "server %d cannot replay to its commit hint %d" s.id c.commit;
     count "starts"
 
@@ -335,8 +393,8 @@ let disk_step w s =
 let checkpoint w s =
   guard w s (fun () ->
       let c = core s and l = Option.get s.rlog in
-      s.ckpt <- s.applied, s.kv;
-      let u = min (s.applied + 1) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c (clock w s) + 1))) in
+      s.ckpt <- max s.applied s.held_upto, s.kv;
+      let u = min (min (s.applied + 1) (Cluster.open_first s.seqs)) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c (clock w s) + 1))) in
       Raftlog.cut_before l u;
       Raft.compact c (min (Raftlog.first l) u))
 
@@ -354,7 +412,7 @@ let copy_step w s =
       guard w s (fun () ->
           if Raft.install c ~index:cp.x ~term:cp.xt then begin
             run w s;
-            Disk.write_file s.disk "/raft/copy.kv" (encode_kv_list cp.kv);
+            Disk.write_file s.disk "/raft/copy.kv" (encode_kv_list (("@", string_of_int cp.kv_at) :: cp.kv));
             Disk.write_file s.disk "/raft/copy" (Raftlog.encode_copy ~index:cp.x ~term:cp.xt ~source:(string_of_int cp.src));
             count "copies committed";
             tr w "server %d commits a copy at %d: it starts again" s.id cp.x;
@@ -394,19 +452,31 @@ let client_step w cl =
       end
       else begin
         w.serial <- w.serial + 1;
-        let v = Printf.sprintf "v%d" w.serial in
-        let d = encode_kv key v in
+        let v = if Rng.int w.r 8 = 0 then big_value w.serial (100 + Rng.int w.r 2000) else Printf.sprintf "v%d" w.serial in
         let c = core s in
-        match Raft.propose c (clock w s) (Bytes.length d) with
-        | None -> redirect ()
+        (* the entries of one write, at once (Cluster.propose under its lock) *)
+        let last =
+          List.fold_left
+            (fun last d ->
+              match last with
+              | None -> None
+              | Some _ -> (
+                match Raft.propose c (clock w s) (Bytes.length d) with
+                | None -> None
+                | Some i ->
+                  s.pend <- (i, (c.term, d)) :: s.pend;
+                  s.dq <- s.dq @ [ w.now + disk_delay w, Put { gen = c.gen; first = i; entries = [ c.term, d ]; commit = c.commit } ];
+                  Some i))
+            (Some 0) (entries_of w key v)
+        in
+        match last with
+        | None | Some 0 -> redirect ()
         | Some i ->
           let h = { hkind = W (key, v); hs = w.now; he = -1; index = -1; value = v; known = false } in
           w.hist <- h :: w.hist;
           cl.cur <- Some h;
           cl.sent_at <- w.now;
           s.waiting <- (i, c.term, cl.cid, h) :: s.waiting;
-          s.pend <- (i, (c.term, d)) :: s.pend;
-          s.dq <- s.dq @ [ w.now + disk_delay w, Put { gen = c.gen; first = i; entries = [ c.term, d ]; commit = c.commit } ];
           guard w s (fun () -> run w s)
       end)
   | None -> ()
@@ -494,7 +564,31 @@ let final_log w =
   Array.init top (fun i -> match Hashtbl.find_opt w.applied_at (i + 1) with Some x -> Some x | None -> None)
 
 let check_history w =
-  let log = final_log w in
+  (* the committed log's writes, at the entry that makes each whole *)
+  let log =
+    let raw = final_log w in
+    let seqs = Hashtbl.create 2 in
+    Array.mapi
+      (fun i e ->
+        match e with
+        | Some (tm, d) -> (
+          match Cluster.decode_entry d with
+          | Some e -> (
+            match e, Cluster.track seqs (i + 1) tm e with
+            | Frame (_, f), _ -> Some (tm, f)
+            | Piece _, Some q ->
+              let b = Bytes.create q.stotal in
+              for j = q.sfirst to i + 1 do
+                match raw.(j - 1) with
+                | Some (_, dj) -> (match Cluster.decode_entry dj with Some (Piece p) -> Bytes.blit p.data 0 b p.off (Bytes.length p.data) | _ -> ())
+                | None -> ()
+              done;
+              Some (tm, b)
+            | _ -> None)
+          | None -> None)
+        | None -> None)
+      raw
+  in
   let state_at key r =
     let v = ref "" in
     for i = 1 to min r (Array.length log) do
@@ -595,7 +689,7 @@ let run_seed ~n seed =
     Array.init n (fun id ->
         let sim = Sim_disk.create (Rng.split r) in
         { id; sim; disk = Sim_disk.disk sim; core = None; rlog = None; dq = []; pend = []; rate = 0.97 +. (0.06 *. float (Rng.int r 1000) /. 1000.);
-          kv = []; applied = 0; ckpt = 0, []; paused_until = 0; up_at = 0; waiting = []; copying = None; fetch_after = 0; lives = 0; sound = true })
+          kv = []; applied = 0; ckpt = 0, []; paused_until = 0; up_at = 0; waiting = []; copying = None; fetch_after = 0; lives = 0; sound = true; seqs = Hashtbl.create 2; held_upto = 0 })
   in
   let w =
     { seed; r; n; servers; net = []; cut = Array.make_matrix n n false; now = 0; leaders = Hashtbl.create 16; applied_at = Hashtbl.create 256;

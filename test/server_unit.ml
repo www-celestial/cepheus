@@ -1902,6 +1902,63 @@ let guard () =
     "guard: failures in a loop, at most a line a second, the next one counting those left out (%S, %S)" log log2;
   Engine.close e
 
+(* ---- a Raft cluster's frames in pieces (server/cluster.ml) ----
+   A frame's pieces make it whole only in order, of one term, for one database; a newer term, a frame or a first
+   piece of the same database breaks a sequence not whole; the frame assembled is the one cut; a piece that says more
+   than its frame holds does not decode. *)
+let pieces () =
+  let frame = Bytes.init 5000 (fun i -> Char.chr (i * 31 land 255)) in
+  let cut id size = List.init ((5000 + size - 1) / size) (fun k -> Cluster.encode_piece id ~total:5000 ~off:(k * size) frame (min size (5000 - (k * size)))) in
+  let feed seqs entries =
+    List.filter_map
+      (fun (i, tm, d) -> match Cluster.decode_entry d with Some e -> Option.map (fun q -> i, q) (Cluster.track seqs i tm e) | None -> None)
+      entries
+  in
+  let a = cut "aaaaaaaaaaaaaaaa" 1000 and b = cut "bbbbbbbbbbbbbbbb" 700 in
+  let seqs = Hashtbl.create 2 in
+  (* two databases' pieces between each other, of one term *)
+  let mixed = List.concat (List.mapi (fun k x -> [ x ] @ (match List.nth_opt b k with Some y -> [ y ] | None -> [])) a) @ List.filteri (fun k _ -> k >= List.length a) b in
+  let whole = feed seqs (List.mapi (fun i d -> i + 1, 3, d) mixed) in
+  check (List.length whole = 2 && Hashtbl.length seqs = 0) "pieces of two databases between each other: two frames whole";
+  (* a newer term breaks it *)
+  let seqs = Hashtbl.create 2 in
+  let es = List.mapi (fun i d -> i + 1, (if i < 2 then 3 else 4), d) a in
+  check (feed seqs es = [] && Hashtbl.length seqs = 0) "a newer term in the middle: never whole";
+  (* a frame of the same database, a first piece of the same database *)
+  let seqs = Hashtbl.create 2 in
+  let es = [ 1, 3, List.nth a 0; 2, 3, Cluster.encode_frame "aaaaaaaaaaaaaaaa" (Bytes.make 40 'x') ] @ List.mapi (fun i d -> i + 3, 3, d) (List.tl a) in
+  check (feed seqs es = []) "a frame of the same database in the middle: never whole";
+  let seqs = Hashtbl.create 2 in
+  let es = (1, 3, List.nth a 0) :: List.mapi (fun i d -> i + 2, 3, d) a in
+  check (List.map fst (feed seqs es) = [ 1 + List.length a ]) "a first piece again: the sequence starts there";
+  (* out of order *)
+  let seqs = Hashtbl.create 2 in
+  let es = List.mapi (fun i d -> i + 1, 3, d) (List.nth a 1 :: List.nth a 0 :: List.tl (List.tl a)) in
+  check (feed seqs es = []) "pieces out of order: never whole";
+  (* the frame assembled from a log *)
+  let dir = Filename.concat (Option.value (Sys.getenv_opt "CEPHEUS_TMP") ~default:(Filename.get_temp_dir_name ())) (Printf.sprintf "cepheus-pieces-%d" (Unix.getpid ())) in
+  C.rmrf dir;
+  let l, _ = Raftlog.open_ Disk.real dir ~cluster:"cph-c-0123456789abcdef" in
+  Raftlog.append l ~first:1 ~commit:0 (List.map (fun d -> 3, d) a);
+  let got = Cluster.assemble l ~pend:(fun _ -> None) ~get:(Raftlog.read l) ~from:1 ~upto:(List.length a) ~total:5000 in
+  check (Bytes.equal got frame) "the frame assembled from the log is the one cut";
+  let half = List.length a / 2 in
+  (* the entries given to the disk come first: there, the disk's older ones are to be cut *)
+  let other = cut "aaaaaaaaaaaaaaaa" 1000 in
+  let got = Cluster.assemble l ~pend:(fun i -> if i > half then Some (3, List.nth other (i - 1)) else None) ~get:(Raftlog.read l)
+      ~from:1 ~upto:(List.length a) ~total:5000 in
+  check (Bytes.equal got frame) "assembled with the entries given to the disk first";
+  let damaged = Bytes.of_string "\001aaaaaaaaaaaaaaaa----------------------" in
+  check (match Cluster.assemble l ~pend:(fun i -> if i = 2 then Some (3, damaged) else None) ~get:(Raftlog.read l) ~from:1 ~upto:(List.length a) ~total:5000 with
+         | _ -> false | exception Raftlog.Damaged _ -> true) "an entry that is not a piece where its sequence says: damage, never a frame";
+  Raftlog.close l;
+  C.rmrf dir;
+  let bad = Cluster.encode_piece "aaaaaaaaaaaaaaaa" ~total:5000 ~off:4500 frame 500 in
+  Bytes.set_int64_le bad 25 4600L;
+  check (Cluster.decode_entry bad = None) "a piece past its frame's end does not decode";
+  Bytes.set_int64_le bad 17 (Int64.of_int (Cluster.max_total + 1));
+  check (Cluster.decode_entry bad = None) "a frame longer than a group may be does not decode"
+
 let () =
   toml ();
   config ();
@@ -1924,6 +1981,7 @@ let () =
   answer_bounds ();
   reply_bounds ();
   hello_once ();
+  pieces ();
   (* last: its questions spawn domains, after which no test may fork *)
   guard ();
   C.finish "server unit"

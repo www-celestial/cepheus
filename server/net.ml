@@ -675,7 +675,8 @@ let serve (cfg : Config.t) =
   Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
   let raft = Cluster.is_raft cfg in
   if raft then begin
-    (* a Raft cluster's frames: one wire frame each, never a large group's written by pieces before its commit *)
+    (* a Raft cluster's frames: never a large group's written by pieces into the journal before its commit (a frame
+       past a MiB goes through the Raft log in pieces: Cluster) *)
     Resolve.large_min := max_int;
     Engine.frame_limit := Cluster.frame_limit
   end;
