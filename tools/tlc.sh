@@ -7,7 +7,7 @@
 # drops a part of its rule (WatchWindow*.cfg),
 # every variant of the commit buffer that drops a part of its rule (CommitBuffer*.cfg), every variant of a rule
 # change's background path that drops a part of its rule (RuleChange*.cfg); spec/Raft.tla by parts (RaftCore,
-# RaftDamage, RaftLease, RaftCopy, RaftWipe, RaftTransfer: exhaustive within their bounds), and each of its variants that drops one
+# RaftDamage, RaftLease, RaftCopy, RaftWipe, RaftTransfer, RaftRepairPeer: exhaustive within their bounds), and each of its variants that drops one
 # rule must break an invariant. TLA2TOOLS names
 # tla2tools.jar, the official release from https://github.com/tlaplus/tlaplus/releases (v1.7.4 used here); Java 11 or
 # later.
@@ -64,11 +64,11 @@ for c in LocalReadsLive LocalReadsNoSkip LocalReadsEarly LocalReadsRemoteFirst L
   echo "tlc.sh: $c breaks an invariant, as it must"
 done
 # Raft by parts, then each rule removed alone
-for c in RaftCore RaftDamage RaftLease RaftCopy RaftWipe RaftTransfer; do
+for c in RaftCore RaftDamage RaftLease RaftCopy RaftWipe RaftTransfer RaftRepairPeer; do
   java -Xmx1600m -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/$c" -config $c.cfg Raft.tla
 done
 for c in RaftCommitOldTerm RaftVolatileVote RaftAckUnforced RaftNoUpToDate RaftNoAbstain RaftNoStickiness RaftPromiseFirst RaftRestartForgets RaftReadEarly \
-         RaftCopyDiscards RaftCopyUncommitted RaftFreshHearOne RaftFreshNoRepair RaftTransferKeepsLease; do
+         RaftCopyDiscards RaftCopyUncommitted RaftFreshHearOne RaftFreshNoRepair RaftTransferKeepsLease RaftRepairUncommitted; do
   rc=0
   java -Xmx1600m -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -deadlock -workers 4 -metadir "$meta/$c" -config $c.cfg Raft.tla || rc=$?
   if [ "$rc" -ne 12 ]; then echo "tlc.sh: $c of spec/Raft.tla should break an invariant (TLC exit $rc)"; exit 1; fi

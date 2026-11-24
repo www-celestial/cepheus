@@ -211,6 +211,11 @@ let put_msg b (m : Raft.msg) data =
   | State x -> Buffer.add_uint8 b 9; v x.term; v x.last_index; bool x.fresh
   | Timeout_now x -> Buffer.add_uint8 b 10; v x.term
   | Vote_now x -> Buffer.add_uint8 b 11; v x.term; v x.last_index; v x.last_term
+  | Fetch_entries x -> Buffer.add_uint8 b 12; v x.from
+  | Entries x ->
+    Buffer.add_uint8 b 13; v x.prev_index; v x.prev_term; v x.commit;
+    v (Array.length x.terms);
+    Array.iteri (fun k tm -> v tm; v (Bytes.length data.(k)); Buffer.add_bytes b data.(k)) x.terms
 
 let max_entries = 1 lsl 20
 
@@ -256,6 +261,22 @@ let get_msg (r : Codec.reader) : Raft.msg * Bytes.t array =
   | 8 -> Ask, [||]
   | 9 -> let term = v () in let last_index = v () in let fresh = bool () in State { term; last_index; fresh }, [||]
   | 10 -> let term = v () in Timeout_now { term }, [||]
+  | 12 -> let from = v () in Fetch_entries { from }, [||]
+  | 13 ->
+    let prev_index = v () in
+    let prev_term = v () in
+    let commit = v () in
+    let n = v () in
+    if n > max_entries || n > r.stop - r.pos then raise Codec.Short;
+    let terms = Array.make n 0 and data = Array.make n Bytes.empty in
+    for k = 0 to n - 1 do
+      terms.(k) <- v ();
+      let len = v () in
+      if len > r.stop - r.pos then raise Codec.Short;
+      data.(k) <- Bytes.sub r.buf r.pos len;
+      r.pos <- r.pos + len
+    done;
+    Entries { prev_index; prev_term; terms; sizes = Array.map Bytes.length data; commit }, data
   | 11 -> let term = v () in let last_index = v () in let last_term = v () in Vote_now { term; last_index; last_term }, [||]
   | _ -> raise Codec.Short
 
@@ -501,14 +522,14 @@ let open_out t k o =
 (* an Append's entries' bytes, if the log still holds them as the message says (a follower's log may have been cut) *)
 let append_data t (m : Raft.msg) =
   match m with
-  | Append x -> (
+  | Append { prev_index; terms; _ } | Entries { prev_index; terms; _ } -> (
     match
       Array.mapi
         (fun j tm ->
-          match entry t (x.prev_index + 1 + j) with
+          match entry t (prev_index + 1 + j) with
           | Some (tm', d) when tm' = tm -> d
           | _ -> raise Exit)
-        x.terms
+        terms
     with
     | d -> Some d
     | exception Exit -> None
@@ -540,7 +561,8 @@ let send_loop t k o () =
              Thread.delay !pause;
              pause := min 1.0 (!pause *. 2.)));
         match o.link, append_data t m with
-        | Some l, _ when l.pv < 3 && (match m with Raft.Ask | State _ | Timeout_now _ -> true | _ -> false) -> ()  (* protocol 2 has none *)
+        | Some l, _ when l.pv < 3 && (match m with Raft.Ask | State _ | Timeout_now _ | Fetch_entries _ | Entries _ -> true | _ -> false) -> ()
+          (* protocol 2 has none of them *)
         | Some l, Some data -> (
           let b = Buffer.create 256 in
           (* a peer of protocol 2 has no Snap: the probe at the leader's start is an Append there *)
@@ -584,7 +606,7 @@ let serve_stream t name (l : Replica.link) =
          | kind, _, r when kind = Replica.k_msg ->
            let m, data = get_msg r in
            if r.pos <> r.stop then raise Codec.Short;
-           let terms = match m with Append x -> x.terms | _ -> [||] in
+           let terms = match m with Append x -> x.terms | Entries x -> x.terms | _ -> [||] in
            Mutex.protect t.m (fun () -> Raft.receive t.core (now ()) k m; run ~msg:(terms, data) t)
          | _ -> raise (Replica.Broken "a frame that is not a Raft message")
        done

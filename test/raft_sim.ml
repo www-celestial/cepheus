@@ -34,7 +34,8 @@
    index; after the faults stop and the network heals, every server reaches the same commit and the same log. A
    failure prints its seed; [raft_sim.exe --seed N] replays it (TRACE=1 prints its elections, starts, crashes and
    truncations), [--servers 5] runs five. Counted, not a failure: a cluster that settles on no leader because a
-   majority's logs are damaged (the 2018 rule's cost: repair by any peer is a next step). *)
+   majority's logs are damaged and no sound server knows their marks committed (the 2018 rule's cost: a damaged
+   server takes the entries it lacks from any peer that knows them committed, and only from such a peer). *)
 
 open Cepheus
 open Cepheus_server
@@ -207,8 +208,8 @@ let disk_delay w = if w.faults && Rng.chance w.r 0.02 then 50 + Rng.int w.r 250 
 let send w s k (m : Raft.msg) =
   let data =
     match m with
-    | Append x -> (
-      try Some (Array.mapi (fun j tm -> match entry s (x.prev_index + 1 + j) with Some (tm', d) when tm' = tm -> d | _ -> raise Exit) x.terms)
+    | Append { prev_index; terms; _ } | Entries { prev_index; terms; _ } -> (
+      try Some (Array.mapi (fun j tm -> match entry s (prev_index + 1 + j) with Some (tm', d) when tm' = tm -> d | _ -> raise Exit) terms)
       with Exit -> None)
     | _ -> Some [||]
   in
@@ -547,7 +548,7 @@ let deliver w =
         match s.core with
         | None -> ()
         | Some c ->
-          let terms = match m.m with Append x -> x.terms | _ -> [||] in
+          let terms = match m.m with Append x -> x.terms | Entries x -> x.terms | _ -> [||] in
           guard w s (fun () -> Raft.receive c (clock w s) m.src m.m; run ~msg:(terms, m.data) w s))
     due
 

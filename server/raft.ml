@@ -39,7 +39,14 @@
      heard lately holds its whole log forced, and sends it Timeout_now; that peer stands for election at once, with no
      pre-vote, asking Vote_now, which a voter grants despite stickiness (the thesis' flag, 4.2.3), on the same rules
      otherwise (one vote a term, a log at least as up to date, not damaged, not fresh). The leader gives up after two
-     election timeouts, and leads again.
+     election timeouts, and leads again;
+   - the 2018 rule's repair by any peer (Alagappan et al.'s CTRL takes the damaged entries from the others): a damaged
+     server whose election timeout passes asks every peer for the entries after its commit index (Fetch_entries);
+     a peer that is neither damaged nor fresh gives the entries its own commit index covers, and only those
+     (Entries): committed entries are the same on every server, so the damaged one takes them as from a leader
+     (a conflicting entry of its own was not committed: cut), and its repair ends once it holds every entry up to
+     the mark, forced, from a peer whose commit index reaches it. A peer whose log starts after the asker's end
+     says so (its start), and the asker takes a copy of the databases from it.
 
    Indexes start at 1. The log in memory is the terms (and sizes) of the entries from [start]; the entries' bytes are
    the transport's and the disk's (Raftlog). *)
@@ -64,6 +71,10 @@ type msg =
           takes a copy of the databases; answered as an Append whose entries end at [index] *)
   | Timeout_now of { term : int }  (** the leader hands over to the receiver: stand for election now *)
   | Vote_now of { term : int; last_index : int; last_term : int }  (** a vote request of a handover: not sticky *)
+  | Fetch_entries of { from : int }  (** a damaged server asks for the committed entries a peer holds from [from] *)
+  | Entries of { prev_index : int; prev_term : int; terms : int array; sizes : int array; commit : int }
+      (** committed entries after [prev_index] (of term [prev_term]), their bytes beside: the sender's commit index
+          reaches the last; none, at the sender's log start, when it holds no entry the asker can follow *)
   | Ask  (** a fresh server asks for the sender's state *)
   | State of { term : int; last_index : int; fresh : bool }  (** the answer *)
 
@@ -407,7 +418,11 @@ let tick t now =
     else (pump t now; hand t now)
   | Follower | Pre_candidate | Candidate ->
     if now >= t.deadline then
-      if t.repair > 0 then t.deadline <- random_timeout t now  (* damaged: stands for no election *)
+      if t.repair > 0 then begin
+        (* damaged: stands for no election; asks every peer for the committed entries it lacks *)
+        t.deadline <- random_timeout t now;
+        for k = 0 to t.n - 1 do if k <> t.me then emit t (Send (k, Fetch_entries { from = t.commit + 1 })) done
+      end
       else start_pre_vote t now
 
 let reply_append t k ~seq ~ok ~index = emit t (Send (k, Append_reply { term = t.term; seq; ok; index }))
@@ -459,7 +474,7 @@ and receive_fresh t _now k msg =
   | State { term; last_index; fresh } -> t.told.(k) <- Some (term, last_index, fresh); end_fresh t
   | Pre_vote _ -> emit t (Send (k, Pre_vote_reply { term = t.term; granted = false }))
   | Vote _ | Vote_now _ -> emit t (Send (k, Vote_reply { term = t.term; granted = false }))
-  | Pre_vote_reply _ | Vote_reply _ | Append _ | Append_reply _ | Snap _ | Timeout_now _ -> ()
+  | Pre_vote_reply _ | Vote_reply _ | Append _ | Append_reply _ | Snap _ | Timeout_now _ | Fetch_entries _ | Entries _ -> ()
 
 and receive_ t now k msg =
   match msg with
@@ -488,7 +503,7 @@ and receive_ t now k msg =
       if count t >= majority t then become_leader t now
     end
   | Append { term; seq; prev_index; prev_term; terms; sizes; commit; floor } -> append t now k ~term ~seq ~prev_index ~prev_term ~terms ~sizes ~commit ~floor
-  | Snap _ | Ask | State _ | Append_reply _ -> receive_more t now k msg
+  | Snap _ | Ask | State _ | Append_reply _ | Fetch_entries _ | Entries _ -> receive_more t now k msg
 
 (* a vote request of [term] (sticky or not, decided before) *)
 and vote t now k ~term ~last_index ~last_term =
@@ -537,36 +552,73 @@ and append t now k ~term ~seq ~prev_index ~prev_term ~terms ~sizes ~commit ~floo
       end
       else if prev > last_index t then reply_append t k ~seq ~ok:false ~index:(last_index t)
       else if skip = 0 && term_at t prev <> prev_t then reply_append t k ~seq ~ok:false ~index:(hint t prev)
-      else begin
-        (* the entries it lacks, after those it holds of the same term; a conflict cuts the log there *)
-        let j = ref skip and stop = ref false and bad = ref false in
-        while (not !stop) && !j < count do
-          let i = prev_index + 1 + !j in
-          if i > last_index t then stop := true
-          else if term_at t i = terms.(!j) then incr j
-          else if i <= t.commit then (bad := true; stop := true)
-          else begin
-            cut t i;
-            emit t (Truncate i);
-            stop := true
-          end
-        done;
-        if !bad then
-          (* a leader's entry against a committed one: never taken (a bug, or a peer that is not what it says) *)
-          reply_append t k ~seq ~ok:false ~index:t.commit
-        else begin
-          let first = prev_index + 1 + !j in
-          if !j < count then begin
-            for x = !j to count - 1 do push t terms.(x) sizes.(x) done;
-            emit t (Store { first; skip = !j; count = count - !j })
-          end;
-          t.verified <- max t.verified (prev_index + count);
-          commit_to t (min commit t.verified);
-          check_repair t ~leader_commit:commit;
-          reply_append t k ~seq ~ok:true ~index:(acked t)
-        end
-      end
+      else if take t ~prev_index ~skip ~terms ~sizes ~commit then reply_append t k ~seq ~ok:true ~index:(acked t)
+      else
+        (* a leader's entry against a committed one: never taken (a bug, or a peer that is not what it says) *)
+        reply_append t k ~seq ~ok:false ~index:t.commit
     end
+
+(* entries after [prev_index], which this log holds (from [skip] on: those before are before its start) of the term
+   the sender gave: those it lacks taken after those it holds of the same term, a conflict cutting the log there;
+   false (nothing taken) for an entry against a committed one *)
+and take t ~prev_index ~skip ~terms ~sizes ~commit =
+  let count = Array.length terms in
+  let j = ref skip and stop = ref false and bad = ref false in
+  while (not !stop) && !j < count do
+    let i = prev_index + 1 + !j in
+    if i > last_index t then stop := true
+    else if term_at t i = terms.(!j) then incr j
+    else if i <= t.commit then (bad := true; stop := true)
+    else begin
+      cut t i;
+      emit t (Truncate i);
+      stop := true
+    end
+  done;
+  if !bad then false
+  else begin
+    let first = prev_index + 1 + !j in
+    if !j < count then begin
+      for x = !j to count - 1 do push t terms.(x) sizes.(x) done;
+      emit t (Store { first; skip = !j; count = count - !j })
+    end;
+    t.verified <- max t.verified (prev_index + count);
+    commit_to t (min commit t.verified);
+    check_repair t ~leader_commit:commit;
+    true
+  end
+
+(* the committed entries a damaged peer asks for, from [from], within an Append's bytes *)
+and give t k ~from =
+  let prev = from - 1 in
+  if t.repair > 0 || t.fresh then ()
+  else if prev < t.start - 1 then
+    emit t (Send (k, Entries { prev_index = t.start - 1; prev_term = t.prev_term; terms = [||]; sizes = [||]; commit = t.commit }))
+  else if prev <= min t.commit (last_index t) then begin
+    let upto = min t.commit (last_index t) in
+    let stop = ref from and bytes = ref 0 in
+    while !stop <= upto && (!stop = from || !bytes + size_at t !stop <= max_append_bytes) do
+      bytes := !bytes + size_at t !stop;
+      incr stop
+    done;
+    let n = !stop - from in
+    emit t (Send (k, Entries { prev_index = prev; prev_term = term_at t prev; terms = Array.init n (fun j -> term_at t (from + j));
+                              sizes = Array.init n (fun j -> size_at t (from + j)); commit = t.commit }))
+  end
+
+(* a damaged server takes committed entries from any peer; their sender's log starting after this log's end: a copy *)
+and entries t k ~prev_index ~prev_term ~terms ~sizes ~commit =
+  if t.repair > 0 && t.role <> Leader then begin
+    let count = Array.length terms in
+    let base = t.start - 1 in
+    let skip = max 0 (base - prev_index) in
+    let prev = prev_index + skip and prev_t = if skip > 0 then t.prev_term else prev_term in
+    if prev_index + count > commit then ()  (* past what the sender knows committed: never taken *)
+    else if skip >= count && skip > 0 then ()
+    else if prev > last_index t then (if count = 0 then emit t (Fetch k))
+    else if skip = 0 && term_at t prev <> prev_t then ()
+    else ignore (take t ~prev_index ~skip ~terms ~sizes ~commit)
+  end
 
 and receive_more t now k msg =
   match msg with
@@ -586,6 +638,8 @@ and receive_more t now k msg =
     end
   | Ask -> emit t (Send (k, State { term = t.term; last_index = last_index t; fresh = false }))
   | State _ -> ()
+  | Fetch_entries { from } -> give t k ~from
+  | Entries { prev_index; prev_term; terms; sizes; commit } -> entries t k ~prev_index ~prev_term ~terms ~sizes ~commit
   | Append_reply { term; seq; ok; index } ->
     if term > t.term then become_follower t now ~term ~leader:(-1)
     else if t.role = Leader && term = t.term then begin

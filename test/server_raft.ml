@@ -15,6 +15,9 @@
      is copied; the leader killed: the new one gives both files' bytes; an owner's files erased there are erased;
    - cepheus stop on the leader while a program writes: leadership handed over (Timeout_now), the writes paused far
      less than an election timeout, none it was told committed lost;
+   - two servers killed and a byte of a round of each one's Raft log changed: both find their logs damaged (the
+     2018 rule: no vote), so the one left cannot be elected alone; they take the committed entries they lack from
+     it (Entries), their repair ends, a leader is elected, the program writes again, nothing it was told is lost;
    - the peer port refuses a peer of protocol 1, a certificate of the cluster's CA for a name no peer has, and a
      certificate of another CA.
    - a load, a change of the rules (computed in the leader's background) beside groups that count with one counter
@@ -374,6 +377,39 @@ let () =
   let gap, lost, handed = handover () in
   C.check (handed && gap < float !Cluster.election_ms) "cepheus stop on the leader: handed over, the writes paused %.1f ms" gap;
   C.check (lost = 0) "no write it was told committed lost (%d)" lost;
+  (* a damaged majority, repaired by the one left *)
+  write_some w 30;
+  let ls = await_leader "a leader" in
+  wait_for "every server holds the leader's groups" (fun () -> let g = group ls "main" in List.for_all (fun k -> group k "main" = g) [ 0; 1; 2 ]);
+  let before = !told in
+  let damaged = List.filter (fun k -> k <> ls) [ 0; 1; 2 ] in
+  List.iter (fun k -> Unix.kill pids.(k) Sys.sigkill; ignore (Serve.wait pids.(k)); alive.(k) <- false) damaged;
+  let flip k =
+    let rd = Filename.concat (Result.get_ok (Config.load cfgs.(k))).data "raft" in
+    let seg = List.hd (List.rev (List.sort compare (List.filter (fun f -> String.length f = 24 && String.sub f 0 4 = "log.") (Array.to_list (Sys.readdir rd))))) in
+    let path = Filename.concat rd seg in
+    let size = (Unix.stat path).st_size in
+    let fd = Unix.openfile path [ Unix.O_RDWR ] 0 in
+    let b = Bytes.create 1 and off = 52 + ((size - 52) * 3 / 5) in
+    ignore (Unix.lseek fd off Unix.SEEK_SET);
+    ignore (Unix.read fd b 0 1);
+    Bytes.set b 0 (Char.chr (Char.code (Bytes.get b 0) lxor 0x5a));
+    ignore (Unix.lseek fd off Unix.SEEK_SET);
+    ignore (Unix.write fd b 0 1);
+    Unix.close fd
+  in
+  List.iter flip damaged;
+  List.iter (fun k -> pids.(k) <- Serve.start bin cfgs.(k); alive.(k) <- true) damaged;
+  List.iter (fun k -> wait_socket (sock k)) damaged;
+  let logs = List.map (fun k -> In_channel.with_open_bin (Filename.concat (Filename.dirname cfgs.(k)) "serve.log") In_channel.input_all) damaged in
+  let has s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
+  C.check (List.for_all (fun l -> has l "set aside, kept as *.damaged") logs) "both found their logs damaged and set the damage aside";
+  let lr = await_leader ~ok:(fun k -> stat k "raft.ready" = "true") "a leader after the damaged majority's repair" in
+  C.check (List.for_all (fun k -> List.assoc_opt "raft.repair" (status k) = None) [ 0; 1; 2 ]) "their repair ended: a leader %s" (List.nth names lr);
+  write_some w 20;
+  let rd = Result.get_ok (Client.open_db ~local:false w "main") in
+  let missing = List.length (List.filter (fun (v, _) -> match Client.find w rd { Query.vars = 1; where = [ { Query.e = Var 0; p = mp; v = Val (Int v) } ]; ranges = [] } with Ok (_, []) -> true | Ok _ -> false | Error _ -> true) before) in
+  C.check (missing = 0) "after the repair, every write it was told committed is there (%d writes, %d missing)" (List.length before) missing;
   (* the peer port refuses *)
   let c1 = Result.get_ok (Config.load cfgs.(1)) in
   let target = List.nth c1.peers l1 in
