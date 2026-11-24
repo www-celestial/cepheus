@@ -19,6 +19,7 @@ type error =
   | Io of string           (* the disk failed: the database stopped; close it and open it again *)
   | Busy of string         (* the database is open in another process *)
   | Closed                 (* the database was closed *)
+  | Timeout of string      (* a question passed the time it was given (~timeout) *)
 val message : error -> string
 ```
 
@@ -33,8 +34,8 @@ val message : error -> string
 | `Link e` | une autre chose de la même base (un e négatif est une nouvelle chose du même groupe) | e |
 
 Le type d'une propriété est un `typ` ; `Tmoney d` prend 0 à 18 chiffres. `message e` est le texte d'une erreur, sa sorte
-d'abord : `"conflict: "`, `"invalid: "`, `"not unique: "`, `"damaged: "`, `"input/output error: "`, `"busy: "`, et
-`"the database is closed"`.
+d'abord : `"conflict: "`, `"invalid: "`, `"not unique: "`, `"damaged: "`, `"input/output error: "`, `"busy: "`,
+`"timeout: "`, et `"the database is closed"`.
 
 ## Bases et vues
 
@@ -402,8 +403,8 @@ facts of Bob: 3
 type term = Var of int | Thing of int | Val of value
 type pattern = { e : term; p : int; v : term }      (* thing, property, value *)
 type query = { vars : int; where : pattern list; ranges : (int * value * value) list }
-val find : view -> query -> (value array list, error) result
-val fold : view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
+val find : ?timeout:float -> view -> query -> (value array list, error) result
+val fold : ?timeout:float -> view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 val decode : view -> query -> int -> int -> value
 ```
 
@@ -426,7 +427,14 @@ tourne sur jusqu'à `Query.domains` domains (des fils d'exécution d'OCaml en pa
 machine, au plus 8) : les candidats sont coupés en slices (des tranches), chaque slice repliée à partir de son propre
 `init ()`, et les résultats des slices joints par `merge` dans l'ordre des slices, si bien que le résultat ne dépend pas
 du nombre de domains ; `step` peut tourner sur plusieurs domains à la fois et ne doit toucher que son accumulateur. Sous
-le seuil, `init` est appelé une fois et `merge` jamais.
+le seuil, `init` est appelé une fois et `merge` jamais. Les domains à côté de celui de l'appelant viennent des helpers
+du processus (`Pool` : les cœurs moins un, garés entre deux questions) : une question qui n'en trouve aucun de libre
+tourne sur moins de domains, le sien au moins.
+
+`~timeout:s` donne `s` secondes à la question (aucune limite par défaut) : au-delà, `find`, `fold` et `ask` rendent
+`Error (Timeout m)`, `m` nommant le temps, en quelques millisecondes (l'horloge est lue tous les 1 024 candidats de
+chaque domain) ; un timeout de 0 ou moins lève `Invalid_argument`. À travers le serveur, le `question_timeout` du
+serveur borne en plus chaque question ([le serveur](server.md#clustertoml)).
 
 `decode v q x w` est la valeur de la variable `x` de `q` dont le mot d'index est `w` : la valeur que donnerait `find`,
 un `Text` pour le numéro du dictionnaire d'une variable texte, un `Float` pour celui d'un flottant, un `Link` pour une
@@ -512,7 +520,7 @@ module Question : sig
   type key = { col : int; desc : bool }
   type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
 end
-val ask : view -> Question.t -> (value array list, error) result
+val ask : ?timeout:float -> view -> Question.t -> (value array list, error) result
 ```
 
 Ses noms sont dans le module `Question`, pour que `open Cepheus` n'apporte que `Question` et `ask` à côté des noms
@@ -571,6 +579,7 @@ questions).
 
 Une vue peut être lue depuis n'importe quel thread et n'importe quel domain en même temps, sans lock. `write` peut être
 appelé depuis n'importe quel thread de n'importe quel domain : le writer et le syncer (le thread qui fait les fsyncs du
-journal) tournent dans un domain à eux, l'appelant attend sur sa propre condition variable. Le `write` d'un fork prend le
+journal) sont deux threads d'un domain des writers, où ne tourne le travail d'aucun appelant (les bases du processus en
+partagent autant que de cœurs, `Pool.writers`), l'appelant attend sur sa propre condition variable. Le `write` d'un fork prend le
 mutex du fork, donc on peut écrire dans un même fork depuis plusieurs threads. Le `step` et l'`init` de `fold` peuvent
 tourner sur d'autres domains.

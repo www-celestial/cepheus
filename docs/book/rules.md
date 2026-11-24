@@ -613,17 +613,17 @@ rules over the same data without rules is the worst case: every group written me
 times what it costs the old ones, the background cannot keep up at full load (about 110 µs a group against the
 writer's 10 to 25), and the writer waits for it at 65,536 groups behind (seconds).
 
-**Rounds on several domains.** In a group the writer reasons itself (a load, a change on a fork or in the
-deterministic core), a round of 20,000 facts or more, and the first round of a change's added rules, is cut into
-morsels (Leis et al. [Leis 2014]) taken in turn by up to four domains, each deriving with plans of its own and keeping
-the heads that are not facts yet; then one domain makes them facts, morsel after morsel, in order, as it would have
-found them alone: the result, the budget and the refusals do not depend on the domains. Rules with `Not` or
-aggregates, and rules whose text constants a group would intern, run on one domain. When the added rules are fewer
-than the threads, each rule's instances are cut by blocks of its plan's first items, one block a morsel. A change in
-the background derives on its own domain only: measured on several domains there, the clients' throughput during the
-change fell (0.84 to 0.78 in step 5; with a rule's instances in morsels, 0.83 to 0.50), and the build was no faster
-([benchmarks](benchmarks.md#rules-step-5s-targets-a-changes-derived-facts-in-a-run-of-their-own-2026-11-18)). Measured on a load of 10 universities with the 94 rules: the rounds at 1.44 M derived facts/s on four
-domains, 0.90 on one.
+**Rounds on several domains.** In a group the writer reasons itself (a load, a change on a fork or in the deterministic
+core), a round of 20,000 facts or more, and the first round of a change's added rules, is cut into morsels (Leis et al.
+[Leis 2014]) taken in turn by up to four domains, each deriving with plans of its own and keeping the heads that are not
+facts yet; then one domain makes them facts, morsel after morsel, in order, as it would have found them alone: the
+result, the budget and the refusals do not depend on the domains. Rules with `Not` or aggregates, and rules whose text
+constants a group would intern, run on one domain. When the added rules are fewer than the threads, each rule's
+instances are cut by blocks of its plan's first items, one block a morsel. A change in the background derives on its own
+domain only: measured on several domains there, the clients' throughput during the change fell (0.84 to 0.78 on
+2026-11-13; with a rule's instances in morsels, 0.83 to 0.50 on 2026-11-18), and the build was no faster
+([benchmarks](benchmarks.md#rules-step-5s-targets-a-changes-derived-facts-in-a-run-of-their-own-2026-11-18)). Measured
+on a load of 10 universities with the 94 rules: the rounds at 1.44 M derived facts/s on four domains, 0.90 on one.
 
 The rules are compiled at the first write that needs them, never at open: an open replays frames, which hold the
 derived facts already, so start-up does not grow.
@@ -919,7 +919,7 @@ every number: [benchmarks](benchmarks.md#rules-2026-11-08), and for loads
 | its reasoning whole (the group's facts made ready for the joins, 0.13 s, included) | **1.29 M derived facts/s** (0.41 s) | | |
 | the same load as ten groups, a university each: peak resident memory | **133 MB** | | |
 | a derived fact put into the view (a delta of 200,000 changes) | **0.83 µs** in sorted batches; 1.12 µs one by one | | |
-| OWL 2 RL whole (`Cepheus.Owl`) against step 2's ten W3C rules, LUBM-10 in one load: reasoning | **0.512 s** against 0.543 s | | 0.92 |
+| OWL 2 RL whole (`Cepheus.Owl`) against the ten W3C rules alone, the ontology as facts, LUBM-10 in one load: reasoning | **0.512 s** against 0.543 s | | 0.92 |
 | the same, LUBM-1 a group a department: reasoning | **0.277 s** against 0.247 s | | 1.15 |
 | equality by rewriting against axiomatised, UOBM-like (one university, 6,558 duplicate records) | **1.066 s** against 1.957 s | | 1.84× faster, 3.27× fewer derivations |
 | a class of 100,000 things (a functional property's storm) | **1.42 s**, 99,999 facts of `cepheus/same` | | axiomatised: past the budget from 400 things |
@@ -939,9 +939,9 @@ marked *computed* are ours from their tables):
 | RDFox B/F, Motik et al., AAAI 2015 [Motik 2015] | LUBM-1k-L, delete 100 facts | "0.0 s" in its table (below its rounding) |
 | Soufflé, Scholz et al., CC 2016 [Scholz 2016] | a points-to analysis of OpenJDK 7, about 840 M tuples | 75 s sequential, 35 s parallel (4 cores): another workload, given for the order of magnitude |
 
-- **One core, saturation**: 1.04 M derived facts/s here (step 1), 0.67 M/s for RDFox 2014, about 1.28 M/s for VLog:
+- **One core, saturation**: 1.04 M derived facts/s here (2026-11-08), 0.67 M/s for RDFox 2014, about 1.28 M/s for VLog:
   the same order; VLog's published rate stays ahead by 1.2×, on another machine and a hundred times more data.
-- **In parallel, a load's facts sorted** (step 3): the rounds 1.92 M/s on this laptop's 4 cores (8 threads), the
+- **In parallel, a load's facts sorted** (2026-11-14): the rounds 1.92 M/s on this laptop's 4 cores (8 threads), the
   reasoning whole 1.3 to 1.6 M/s, 0.33 to 0.40 M/s a core: close to RDFox 2014's 0.44 M/s a core at 32 threads; RDFox
   reaches 7.0 M/s in all on its 16 cores.
 - **Small writes**: microseconds, in the process. No giant publishes a per-group latency to compare with.
@@ -949,7 +949,7 @@ marked *computed* are ours from their tables):
   that lost a derivation against every rule that can give it, each check a lookup in the store's persistent maps or
   runs (34 lookups for one student); the prototype of the design, over hash tables of its own, took 19.1 µs.
 
-**Closures and the W3C's form** (the design's step 2; [benchmarks](benchmarks.md#rules-step-2-closures-and-the-w3cs-form-2026-11-12)):
+**Closures and the W3C's form** (2026-11-12; [benchmarks](benchmarks.md#rules-step-2-closures-and-the-w3cs-form-2026-11-12)):
 the closure module computes the 100,000-node hierarchy's 683,496 new facts in **22.5 ms** (prp-trp as a rule: 0.92 s
 of reasoning) and the random DAG's 1,344,791 in **47.3 ms** (17.6 s), each new fact made once; LUBM-shaped data with
 the ontology as facts and the 10 W3C rules, unfolded, reasons in **1.10×** the time of the 94 rules written one an
@@ -983,17 +983,15 @@ Each was weighed against the others in the design; the measurements are the desi
 
 ## What is not here yet
 
-The design's plan has six steps; this version has the six.
-
-- **Step 3's rest**: the joins of a change's rounds in the background probe the store fact by fact, on the change's
-  one domain.
-- **Step 5's rest**: a change with new things is computed in the group; only the derived facts of properties of many
-  values, none unique, go into a change's run of its own (the others enter the delta); step 5's two targets are not
-  both reached: 2 M derived facts a second for the build (2.9 M), not with its run's write (1.8 M: the run's write is a
-  third of it); the writers in a change's window, 0.83 of their throughput without it, paired, with no disk stall
-  (0.92 against the median window), the install's coding and its last catch-up the writer's part of it
+- **The joins of a change in the background**: its rounds probe the store fact by fact, on the change's one domain.
+- **A change's run and its targets**: a change with new things is computed in the group; only the derived facts of
+  properties of many values, none unique, go into a change's run of its own (the others enter the delta); a change's two
+  targets (2 M derived facts a second; the writers in its window at 0.90 of their throughput without it) are not both
+  reached: 2 M for the build (2.9 M), not with its run's write (1.8 M: the run's write is a third of it); the writers
+  0.83, paired, with no disk stall (0.92 against the median window), the install's coding and its last catch-up the
+  writer's part of it
   ([benchmarks](benchmarks.md#rules-step-5s-targets-again-a-changes-install-without-a-record-a-fact-2026-11-19)).
-- **Step 6's rest**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
+- **Equality**: B/F on equalities (Motik et al., IJCAI 2015 [Motik 2015c]) instead of taking a class apart; the
   proof of an equality in `why`; equality beside `Not` and aggregates, the closure modules, the path of loads and the
   parallel rounds.
 - The budget as a database setting rather than a number of the process; the group that asserted each leaf of a proof.

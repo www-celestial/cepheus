@@ -19,6 +19,7 @@ type error =
   | Io of string           (* the disk failed: the database stopped; close it and open it again *)
   | Busy of string         (* the database is open in another process *)
   | Closed                 (* the database was closed *)
+  | Timeout of string      (* a question passed the time it was given (~timeout) *)
 val message : error -> string
 ```
 
@@ -33,8 +34,8 @@ val message : error -> string
 | `Link e` | another thing of the same database (a negative e is a new thing of the same group) | e |
 
 A property's type is a `typ`; `Tmoney d` takes 0 to 18 digits. `message e` is the text of an error, its kind first:
-`"conflict: "`, `"invalid: "`, `"not unique: "`, `"damaged: "`, `"input/output error: "`, `"busy: "`, and `"the
-database is closed"`.
+`"conflict: "`, `"invalid: "`, `"not unique: "`, `"damaged: "`, `"input/output error: "`, `"busy: "`, `"timeout: "`,
+and `"the database is closed"`.
 
 ## Databases and views
 
@@ -385,8 +386,8 @@ facts of Bob: 3
 type term = Var of int | Thing of int | Val of value
 type pattern = { e : term; p : int; v : term }      (* thing, property, value *)
 type query = { vars : int; where : pattern list; ranges : (int * value * value) list }
-val find : view -> query -> (value array list, error) result
-val fold : view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
+val find : ?timeout:float -> view -> query -> (value array list, error) result
+val fold : ?timeout:float -> view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 val decode : view -> query -> int -> int -> value
 ```
 
@@ -408,7 +409,13 @@ candidates or more (`Query.parallel_min`), the question runs on up to `Query.dom
 recommended count, at most 8): the candidates are cut into slices, each slice folded from its own `init ()`, and the
 slices' results joined by `merge` in slice order, so the result does not depend on the number of domains; `step` may
 run on several domains at once and must touch only its accumulator. Below the threshold, `init` is called once and
-`merge` never.
+`merge` never. The domains beside the caller's come from the process's helpers (`Pool`: the cores less one, parked
+between questions): a question that finds none free runs on fewer, its own at least.
+
+`~timeout:s` gives the question `s` seconds (none by default): past them, `find`, `fold` and `ask` return
+`Error (Timeout m)`, `m` naming the time, within milliseconds (the clock is read every 1,024 candidates of each
+domain); a timeout of 0 or less raises `Invalid_argument`. Through the server, the server's `question_timeout`
+bounds every question besides ([the server](server.md#clustertoml)).
 
 `decode v q x w` is the value of variable `x` of `q` whose index word is `w`: the value `find` would give, a `Text`
 for the dictionary number of a text variable, a `Float` for a float's, a `Link` for a thing, `Int`, `Date`, `Money`
@@ -490,7 +497,7 @@ module Question : sig
   type key = { col : int; desc : bool }
   type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
 end
-val ask : view -> Question.t -> (value array list, error) result
+val ask : ?timeout:float -> view -> Question.t -> (value array list, error) result
 ```
 
 Its names are in the module `Question`, so that `open Cepheus` brings only `Question` and `ask` beside the names it
@@ -545,6 +552,7 @@ tables at open and its other pages as questions need them). [operations](operati
 ## Threads and domains
 
 A view can be read from any thread and any domain at the same time, with no lock. `write` can be called from any
-thread of any domain: the writer and the syncer run in a domain of their own, the caller waits on its own condition
-variable. A fork's `write` takes the fork's mutex, so one fork can be written to from several threads. `fold`'s `step`
+thread of any domain: the writer and the syncer are two threads of a writers' domain, where no caller's work runs
+(the databases of the process share as many of them as the cores, `Pool.writers`), the caller waits on its own
+condition variable. A fork's `write` takes the fork's mutex, so one fork can be written to from several threads. `fold`'s `step`
 and `init` may run on other domains.

@@ -322,6 +322,29 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 La facture de 10 est sous 50 : la ville de Bo est maintenant Lyon, et sa seule facture n'est pas comptée.
 
+**Son temps.** `timeout = secondes` borne une question : au-delà, `Find` est un `Err` de Code `"timeout"`, dont le
+message nomme le temps, et le travail s'arrête (en quelques millisecondes : il est regardé tous les 1 024 candidats).
+Au serveur, le `question_timeout` du serveur (30 s par défaut, [le serveur](server.md#clustertoml)) est le plus
+qu'une question prend : un `timeout` plus court est celui de la question, un plus long ne compte que pour un token
+admin. Dans la mémoire du programme (sur la machine du serveur), seul le `timeout` du programme la borne. Une question
+que le programme n'attend plus (sa connexion fermée) s'arrête aussi au serveur.
+
+```cesia norun
+rows = cepheus.Find(6, (a, x, b, y, c, z) -> {
+  Where: [[a, Client.Name, x], [b, Client.Name, y], [c, Client.Name, z]],
+  Give: {Count: cepheus.Count()},
+}, db, timeout = 0.1)
+io.Print(rows.Code)
+```
+
+```text
+timeout
+```
+
+Trois patterns qui ne partagent aucune variable sont tous les triplets de clients (un produit cartésien) : un million
+de clients feraient $10^{18}$ réponses ; la question finit à son temps au lieu de tenir les cœurs du serveur.
+`cepheus.Watch` prend le même `timeout`, pour sa première réponse.
+
 ## Not, Or et In
 
 Trois conditions de `Where` disent ce qui ne doit pas tenir, ce qui peut tenir de plusieurs façons, et quelles valeurs

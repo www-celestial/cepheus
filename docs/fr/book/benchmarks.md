@@ -137,7 +137,7 @@ du guide mesure le tout (une page 180 → 115 µs par Cesia).
 **Une journée de sessions dans le delta.** 10 000 connexions, chacune avec sa propre fin : un intervalle sur leurs fins
 (la question du visiteur) est compté à partir des sommes de l'arbre du delta en $O(\log n)$ au lieu d'un pas par
 session. Un processus qui se connecte les rejoue encore (sa première vue : 57,7 ms contre 55,6, 6 tours alternés, dans
-leur dispersion) : ce que retirerait un merge du delta d'un writer au repos est laissé à une étape suivante.
+leur dispersion) : un merge du delta d'un writer au repos retirerait ce rejeu, et n'est pas construit.
 
 **Le premier appel.** Le premier appel du package Cesia (le fichier du moteur dont l'empreinte est vérifiée, puis
 projeté en mémoire et relogé) : 22,30 ms contre 22,48, le rapport 0,990 [0,984 ; 0,994] (21 tours de 100 processus,
@@ -418,9 +418,10 @@ du column order que fait l'ouverture (rank tables, répertoires : 2,5 MB) lisent
 lisait pas (les premières questions les liraient de toute façon).
 
 **Où les géants gagnent encore.** SQLite charge avec 11 MB de mémoire, contre 1,6 GB pour Cepheus (les chargements par
-morceaux sont l'étape 4). Son ouverture à froid est l'ouverture d'un fichier. PostgreSQL ne gagne plus aucune question
-ici ; c'est un serveur avec ses propres processus, ce que les chiffres de Cepheus ci-dessus ne comprennent pas (le
-serveur de Cepheus est mesuré dans [le serveur](server.md)).
+morceaux sont venus le lendemain : [plus haut](#les-chargements-par-morceaux-2026-11-12-à-10-millions-de-faits)). Son
+ouverture à froid est l'ouverture d'un fichier. PostgreSQL ne gagne plus aucune question ici ; c'est un serveur avec ses
+propres processus, ce que les chiffres de Cepheus ci-dessus ne comprennent pas (le serveur de Cepheus est mesuré dans
+[le serveur](server.md)).
 
 ## Runs et journal compressés (2026-11-09), à 10 millions de faits
 
@@ -568,9 +569,9 @@ qu'une plus grande part de ce dont une question a besoin reste dans le cache. SQ
 garde les liens follow dans une table et un covering index à eux (7,4 et 6,5 MB, `dbstat`), qui tiennent dans ses 16 MB
 de cache, alors que Cepheus trouve les liens d'un client dans son bloc de chose, parmi les enregistrements des factures
 numérotées après lui (un bloc de 128 choses contient environ 6 clients et 122 factures), si bien que les triangles
-touchent au hasard les 23,5 MB de blocs de choses. Lire Q5 dans les lignes par propriété, où les 568 163 liens follow
-sont rangés ensemble, est l'étape 3 du plan (le column order et un join qui les parcourt,
-[théorie](theory.md#12-ce-qui-vient-ensuite-et-pourquoi)).
+touchent au hasard les 23,5 MB de blocs de choses. La lecture de Q5 dans les lignes par propriété, où les 568 163 liens
+follow sont rangés ensemble, est venue deux jours plus tard avec le column order et un join qui les parcourt ([plus
+haut](#le-column-order-et-les-intersections-en-leapfrog-2026-11-11-à-10-millions-de-faits)).
 
 Les séries d'avant celle-ci (le jalon 2 et les niveaux, plus bas) ne retiraient pas les pages des fichiers, et leurs
 chiffres ne sont pas comparables avec ceux-ci. Le noyau compte une page de son page cache au control group (le cgroup,

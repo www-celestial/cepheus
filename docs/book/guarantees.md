@@ -51,10 +51,11 @@ it was answered from; `server_sim` checks them over a simulated network with the
   Alagappan, Arpaci-Dusseau, Arpaci-Dusseau, "Can Applications Recover from fsync Failures?", USENIX ATC 2020,
   section 3.3). In short: after a failed `fsync`, what a process reads back may be bytes the disk does not hold.
 
-Out of reach of one machine (replication will cover them): a disk that acknowledges an `fsync` without writing (and
-ext4 mounted with `data=journal`, which reports a failed write at the next `fsync` rather than the one that covered it:
-the paper's section 3.3.1); the loss of a whole durable frame at the end of the journal with nothing written after it;
-someone who rewrites the journal and its checksums; corrupted RAM (use ECC).
+Out of reach of one machine (only copies on other machines can cover them: [a replica, a Raft
+cluster](server.md#a-replica)): a disk that acknowledges an `fsync` without writing (and ext4 mounted with
+`data=journal`, which reports a failed write at the next `fsync` rather than the one that covered it: the paper's
+section 3.3.1); the loss of a whole durable frame at the end of the journal with nothing written after it; someone who
+rewrites the journal and its checksums; corrupted RAM (use ECC).
 
 A group is **confirmed** when `write` returned `Ok`.
 

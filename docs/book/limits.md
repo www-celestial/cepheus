@@ -46,7 +46,7 @@ defaults, and the cache's size (`set_cache`).
 | a segment | a new segment begins when the next frame would take the current one past 64 MiB | `Journal.segment_limit` |
 | frame overhead | 44 bytes (a 28-byte header and a 16-byte trailer) | `Journal.fh`, `Journal.ft` |
 | segment header | 40 bytes | `Journal.seg_header` |
-| writers | one per database (the writer thread of its domain) | `Engine.start` |
+| writers | one per database, a thread beside its syncer's; the writers of every database of the process share the writers' domains, as many as the cores by default (a new database takes the one with the fewest databases; a domain whose databases all closed ends): a server of 200 databases holds 8 of them on 8 cores | `Engine.start`, `Pool.run`, `Pool.writers` |
 
 ## Merges and runs
 
@@ -96,7 +96,10 @@ defaults, and the cache's size (`set_cache`).
 | variables | at most 64, the wire's bound (below); the planner's estimates keep the bound variables in the bits of an `int`, 0 to 62: the 64th is placed by a flag of its own and estimated as unbound | `Query.order` |
 | the order of the variables | the best order for its estimated work, by a dynamic program over the subsets of the variables that are neither a thing's field nor a constant's (those have a known place), for up to 12 of them ($n 2^{n-1}$ steps); greedy beyond | `Query.order`, `Query.dp_max` |
 | parallel questions | when the first variable has 20,000 candidates or more | `Query.parallel_min` |
-| domains of a question | the machine's recommended count, at most 8 | `Query.domains` |
+| domains of a question | the machine's recommended count, at most 8: its own and up to 7 of the process's helpers (below) | `Query.domains` |
+| the questions' helpers | the domains that help large questions, shared by every question of the process: the cores less one (7 on 8), within what the runtime's cap leaves (below); parked between questions, each leaves after 1 s without one; a question that finds none free runs on fewer domains, its own at least, never fails for want of one | `Pool.limit`, `Pool.keep`, `Pool.help` |
+| a question's time | the server's `[clients] question_timeout`, 0 to 604,800 seconds (0: none), 30 by default; a program's `timeout` (`Find`, `Watch`'s first answer; `Cepheus.find`, `ask`, `fold` in a program's own memory) is taken when shorter, and when longer only from an admin token; from the request's start; looked at every 1,024 candidates of each domain (a read of the monotonic clock); past it, the question ends `timeout` ("the question took more than N s"), its rows sent before it (a streamed Find) ended by the error | `Config.default_question_timeout`, `Core.question_seconds`, `Query.every`, `Query.check` |
+| a question whose program left | the program's connection looked at (poll(2), `POLLRDHUP`: its side closed) at most every 10 ms of the question's checks: the question stops, its domains back in the pool, nothing sent; the server's status counts it (`questions.cancelled`) | `Query.look_ms`, `Fdpass.peer_closed` |
 | slices | $\min(\text{candidates}, 16 \times \text{domains})$, taken in turn from a shared counter | `Query.fold` |
 | the leapfrog of a level | the slices among a variable's first 62 patterns whose count is at most 8 times the source's; its other patterns are checked one by one | `Query.fold` |
 | the property of a pattern | a constant: no variable in the property position | `Query.pattern` |
@@ -119,7 +122,8 @@ defaults, and the cache's size (`set_cache`).
 | file descriptors | one for the journal's current segment, one for each run file a live view holds (closed when no view holds the run any longer and the garbage collector frees it) | `Snapshot.check_and_build` |
 | run files | 64-bit little-endian machines (the in-memory layout); the journal is portable | [formats](formats.md) |
 | durability | relies on `fsync` meaning durable, for files and for directories (Linux and its usual file systems) | [operations](operations.md#disks) |
-| OCaml | 5 (domains), with `unix` and `threads`, and its C compiler for `src/crc32c_stubs.c` | `src/dune` |
+| OCaml | 5 (domains), with `unix` and `threads`, and its C compiler for `src/crc32c_stubs.c` and `src/clock_stubs.c` | `src/dune` |
+| domains a process | the runtime's cap, 128 in OCaml 5.5 (`OCAMLRUNPARAM=d=N` raises it, read when the program starts; Cepheus reads the same variable): Cepheus spawns at most the cap less 16 (left to the program's own domains); a domain it may do without (a merge, a change of the rules, the parts of a snapshot's reads, a helper of a question) is not spawned past it, and its work runs on a thread of the domain that asked, or on fewer domains. Each domain costs every minor collection a little (it stops them all): Cepheus keeps few | `Pool.cap`, `Pool.margin`, `Pool.try_spawn`, `Pool.background` |
 | processor | x86-64 with SSE4.2 (part of the x86-64-v2 level; Intel since Nehalem, 2008, AMD since Bulldozer, 2011), or arm64 with the CRC32 instructions (optional in ARMv8.0, required from ARMv8.1), on Linux or macOS; another one is refused when the program starts, another architecture does not build | `src/crc32c_stubs.c` |
 
 ## The server
@@ -141,7 +145,8 @@ defaults, and the cache's size (`set_cache`).
 | a token | 32 random bytes, `cph_` and 43 characters of base64url; at most 256 characters are looked at | `Tokens.generate`, `Tokens.check` |
 | I/O domains | `[clients] domains`, 1 to 64; default $\min(4, \text{cores} / 2)$ | `Config.default_domains` |
 | the page cache | `[storage] cache`, default 1 GiB | `Config.of_toml` |
-| the Unix socket | `.s.cepheus.PORT`, PORT the port of `listen` or 7400 | `Config.socket_name` |
+| the Unix socket | `.s.cepheus.PORT`, PORT the port of `listen` or 7400; its whole path at most 107 bytes (Linux's `sun_path` holds 108 with its final zero: unix(7)), else the server does not start, and a program's connection is refused, each naming the path and its length | `Config.socket_name`, `Net.unix_listener`, `Client.open_socket` |
+| databases a server | no bound of their own: 200 tested (each a writer and a syncer thread in the writers' domains, its journal and runs open); the process's descriptors (`ulimit -n`) and threads bound them | `Pool.run`, `test/server_limits.ml` |
 | peers | exactly one in this version | `Config.of_toml` |
 | TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |

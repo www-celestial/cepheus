@@ -26,7 +26,7 @@ machine elle-même). Un programme est un **client** : il se connecte, prouve qui
 cepheus serve --config /etc/cepheus/cluster.toml
 ├── listeners     the Unix socket DIR/.s.cepheus.PORT (same machine) and TCP host:port with TLS 1.3
 ├── I/O domains   k OCaml domains; a thread a connection, spread over them
-├── databases     each declared in cluster.toml: its writer and syncer (a domain of their own), its merges,
+├── databases     each declared in cluster.toml: its writer and syncer (threads of the writers' domains), its merges,
 │                 its session table (G14), its follow stream to the local readers and its visibility page (G15)
 ├── commit buffer DATA/server.wal.1 and .2: one fsync a round for the writes of every database (a domain of its own)
 ├── tokens        tokens.toml, beside cluster.toml, read again when it changes
@@ -43,8 +43,8 @@ Pourquoi un serveur plutôt qu'une bibliothèque que chaque programme ouvre :
   suivant ([architecture](architecture.md#le-journal--un-write-ahead-log)).
 - **Les droits.** Un programme reçoit exactement les droits de son token, base par base (G16) ; il n'a besoin d'aucune
   permission sur les fichiers des données.
-- **Le chemin vers plusieurs machines.** La réplication et Raft (étapes 6 et 7 du plan) vont de serveur à serveur ; un
-  programme garde le même code.
+- **Le chemin vers plusieurs machines.** La réplication et Raft ([une replica](#une-replica), [un cluster de
+  trois](#un-cluster-de-trois-raft)) vont de serveur à serveur ; un programme garde le même code.
 
 Pourquoi des **domains et des threads OCaml** : OCaml 5 exécute les threads (les fils d'exécution d'un processus) d'un
 même domain un à la fois (ils partagent le runtime lock du domain, le lock qui ne laisse qu'un thread à la fois
@@ -81,6 +81,7 @@ listen = "0.0.0.0:7400"            # TCP for programs, always TLS: needs [tls]
 domains = 4                        # the I/O domains, 1 to 64; default min(4, cores / 2)
 max_connections = 512              # connections open at once (local readers' included), 1 to 65536; default 512
 idle_timeout = 600                 # seconds without a whole request before a connection is closed; 0: never; default 600
+question_timeout = 30              # seconds a question may take (a Find, a watch's first answer); 0: no limit; default 30
 
 [tls]                              # made by `cepheus cluster init` (the CA and srv1) and `cepheus cluster cert`
 ca = "/etc/cepheus/ca.pem"         # the cluster's CA: the certificates it signed are trusted
@@ -132,6 +133,18 @@ name = "stock"
   nouvelles tentatives permis), comme il le fait pour les écritures (G14). Le `idle_session_timeout` de PostgreSQL est
   désactivé par défaut et son `authentication_timeout` est d'une minute ; le `timeout` de Redis est désactivé par
   défaut.
+- `question_timeout` : une question (un Find, la première réponse d'un Watch) finit avec l'erreur `timeout` une fois
+  qu'elle a tourné ce nombre de secondes, son message nommant le temps ; le travail s'arrête là (il est regardé tous
+  les 1 024 candidats de chacun de ses domains, une lecture de l'horloge monotone, celle qu'un changement de l'heure ne
+  fait pas bouger, ce qui coûte moins de 1 % à une question, mesuré). Un programme peut donner à une question un temps
+  plus court (`timeout` en Cesia, `?timeout` en OCaml : protocole 6) ; un plus long ne compte que d'un token admin,
+  pour qu'un token qui peut lire ne prenne pas plus des cœurs du serveur que le serveur n'en donne à chaque programme.
+  Une question dont le programme a fermé sa connexion s'arrête aussi, ses domains rendus (la connexion est regardée
+  avec le `POLLRDHUP` de `poll` au plus toutes les 10 ms de la question : le `client_connection_check_interval` de
+  PostgreSQL, désactivé par défaut chez lui). Le `statement_timeout` de PostgreSQL est désactivé par défaut ; SQLite
+  n'a pas de réglage à lui (le `sqlite3_progress_handler` ou le `sqlite3_interrupt` d'un programme) ; Datomic prend le
+  `:timeout` d'une requête. Les écritures n'ont pas de temps : un groupe est tout ou rien, et les budgets du writer le
+  bornent ([limites](limits.md#les-écritures)).
 
 ### tokens.toml
 
@@ -440,15 +453,15 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | corps de la requête | corps de la réponse |
 |---|---|---|
-| 1 Hello | la version en varint (1, 2 ou 3), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
+| 1 Hello | la version en varint (1 à 6), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
 | 2 Open | le nom de la base | Opened : le handle (le numéro de la base ouverte sur cette connexion), le groupe le plus récent, les propriétés (id, nom, code du type, many, unique) ; au-delà de la limite des frames, en frames d'environ 1 MiB de propriétés, toutes sauf la dernière avec `more`, chacune avec son handle, son groupe et son nombre |
 | 3 Get | handle, chose | Facts : le groupe de la vue, le nombre, (propriété, valeur)... ; au-delà de la limite des frames, en frames d'environ 1 MiB de faits, toutes sauf la dernière avec `more`, chacune avec son groupe et son nombre |
-| 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more` ; un Give sans Sort qui dépasse les cellules que le serveur tient, lignes fois colonnes, est envoyé à mesure que ses lignes sont trouvées, aucune n'est tenue) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne |
+| 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) ; puis, depuis la version 6 et seulement quand le programme en donne un, le temps de la question en millisecondes (de 1 à une semaine ; l'ordre est alors envoyé, vide s'il le faut) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more` ; un Give sans Sort qui dépasse les cellules que le serveur tient, lignes fois colonnes, est envoyé à mesure que ses lignes sont trouvées, aucune n'est tenue) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne |
 | 5 Write | handle, serial, floor, by (zigzag), why, nombre, opérations | Receipt : le groupe, le nombre, (id temporaire de la nouvelle chose, son id)... |
 | 6 Ping | des octets quelconques | Pong : les mêmes octets |
 | 7 Admin | "status" | Status : le nombre, (clé, valeur)... |
 | 8 Follow | handle (sur le Unix socket seulement) | Start : l'id de la base, le numéro de visibilité, le nombre, (lo, hi) de chaque run, du plus récent au plus ancien ; les descriptors de `visible` et de chaque run voyagent avec son premier octet. La connexion est alors le follow stream de la base ([lectures locales](#lectures-locales-g15)) |
-| 11 Watch | handle, question, select, from (le groupe de la réponse que tient le programme ; 0 : aucune), puis ses opérateurs, Sort et Limit tels que Find les code, quand il en a (pas d'After ; Sort et Limit depuis la version 5) | des pushes (des messages que le serveur envoie sans qu'on les lui demande) sur l'id du Watch, jusqu'à Unwatch ou une erreur ([questions vivantes](#les-questions-vivantes-watch)) |
+| 11 Watch | handle, question, select, from (le groupe de la réponse que tient le programme ; 0 : aucune), puis ses opérateurs, Sort et Limit tels que Find les code, quand il en a (pas d'After ; Sort et Limit depuis la version 5), et le temps de sa première réponse comme celui de Find (version 6) | des pushes (des messages que le serveur envoie sans qu'on les lui demande) sur l'id du Watch, jusqu'à Unwatch ou une erreur ([questions vivantes](#les-questions-vivantes-watch)) |
 | 12 Unwatch | l'id du Watch | Unwatched |
 | 14 Put (version 3) | handle, serial, floor, by (zigzag), why, le kind du fichier, le nom, le media type, le propriétaire (0 : la clé propre de la base), cold (un octet), puis les premiers octets du fichier ; le flag `more` quand des Pieces suivent | Receipt du groupe de ses faits (kind/Name, Size, Type, Owner, Content), une fois ses octets et ce groupe durables ([le vault](vault.md) : le vault de fichiers, où le serveur garde les octets des fichiers) |
 | 15 Piece | d'autres octets du Put de cet id ; `more` sauf sur le dernier | (la réponse du Put) |
@@ -470,7 +483,12 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   `Group ([k...], [a...])` donne une ligne par clé distincte : les variables de la clé, puis les agrégats `Count`,
   `Sum x` (int, money), `Min x`, `Max x` (int, money, date), calculés dans le serveur sans construire les réponses (Q4
   plus bas : 100 lignes au lieu de 45 064).
-- **Les versions.** La version 5 ajoute le Sort et le Limit d'un Watch ([questions vivantes](#les-questions-vivantes-watch)) et rien d'autre :
+- **Les versions.** La version 6 ajoute le temps d'une question (celui d'un Find, de la première réponse d'un Watch)
+  et rien d'autre : un programme de version 6 se connecte à un serveur de 5 en 5, et une question avec un `timeout`
+  est refusée dans le programme (`invalid` : « this server speaks protocol 5: a question's timeout needs a server of
+  protocol 6 ») avant d'être envoyée, puisqu'un serveur plus ancien refuse les octets après la question ; le
+  `question_timeout` propre au serveur borne chaque question quelle que soit la version du programme. La version 5
+  ajoute le Sort et le Limit d'un Watch ([questions vivantes](#les-questions-vivantes-watch)) et rien d'autre :
   un programme de version 5 se connecte à un serveur de 4 en 4, et un watch avec Sort ou Limit est refusé dans le
   programme (`invalid` : « this server speaks protocol 4: a watch with Sort and Limit needs a server of protocol 5 »)
   avant d'être envoyé, puisqu'un serveur plus ancien refuse l'ordre d'un Watch. La version 4 ajoute l'opération `Incr` (plus bas : ajouter un nombre à un compteur) et rien d'autre : un programme de version 4 se
@@ -479,7 +497,7 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   fichiers (Put, Piece, Load, Erase) et rien d'autre : un programme de version 3 se connecte à un serveur de 2 en 2
   (comme plus bas), et un fichier est refusé dans le programme (`invalid` : « this server speaks protocol 2 or older:
   files need a server of protocol 3 »). La version 2 ajoute les opérateurs et l'ordre de la question (plus bas) et rien
-  d'autre ; un serveur parle les versions 1 à 5, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
+  d'autre ; un serveur parle les versions 1 à 6, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
   dans Hello ; un serveur de version 1 se contente de la refuser (`version`) et ferme, et la bibliothèque se reconnecte
   en 1 : ses questions de patterns et de ranges reçoivent leur réponse comme avant, et une question avec `Not`, `Or`,
   `In`, `Prefix`, Sort, Limit ou After est refusée dans le programme (`invalid` : « this server speaks protocol 1: ...
@@ -588,8 +606,8 @@ sans hypothèse sur la distribution. Les commandes `wlat`, `stall`, `write ... W
 |---|---|---|
 | un changement après le reçu de son écriture, au serveur, par son socket Unix ($n = 7$, 200 écritures chacun) | p50 16,0 µs [11,0 ; 26,9], p99 68 | `NOTIFY` de PostgreSQL avec un serveur Go, du commit à l'écran, sa WebSocket comprise : 137 µs [128 ; 148] (mesuré sur la même machine le 2026-11-11 avec PostgreSQL 18.6 et Go 1.26.3, par un banc d'essai hors de ce dépôt) |
 | le même, dans le follower du programme sur la machine du serveur | p50 −6,9 µs [−14,8 ; −1,0] : avant le reçu ; p99 19,8 | |
-| l'écriture elle-même (son fsync) | p50 3 409 µs [2 970 ; 5 879] | l'insert de PostgreSQL avec son fsync : 3 317 µs [3 122 ; 3 438] (l'étude) |
-| 100 watches, chacun sur une connexion lue par un thread, un writer de groupes de 20 factures pendant 10 s, sans / avec une connexion qui suit une question et ne lit jamais ($n = 7$) | livrés 100 % / 100 % ; après le reçu p50 1 314 µs [1 259 ; 1 348] / 1 341 [1 186 ; 1 582], p99 4 880 [3 862 ; 7 126] / 5 747 [4 852 ; 96 319] ; le pic de mémoire du serveur 111 / 107 MB | l'écran bloqué de l'étude parmi 100 : Node `ws` et Go `gorilla` 100 % (p99 113 ms et 4,3 ms) ; un hub d'une seule fiber qui attend sur chaque socket, 50,6 % |
+| l'écriture elle-même (son fsync) | p50 3 409 µs [2 970 ; 5 879] | l'insert de PostgreSQL avec son fsync : 3 317 µs [3 122 ; 3 438] (le même banc d'essai) |
+| 100 watches, chacun sur une connexion lue par un thread, un writer de groupes de 20 factures pendant 10 s, sans / avec une connexion qui suit une question et ne lit jamais ($n = 7$) | livrés 100 % / 100 % ; après le reçu p50 1 314 µs [1 259 ; 1 348] / 1 341 [1 186 ; 1 582], p99 4 880 [3 862 ; 7 126] / 5 747 [4 852 ; 96 319] ; le pic de mémoire du serveur 111 / 107 MB | le même banc d'essai, un écran bloqué parmi 100 : Node `ws` et Go `gorilla` 100 % (p99 113 ms et 4,3 ms) ; un hub d'une seule fiber qui attend sur chaque socket, 50,6 % |
 | le hub seul (`livecpu`, dans un seul processus, $n = 5$) : S écrans, chacun suivant les factures impayées de son client, et un tableau de bord (la somme et le nombre des impayées), puis 20 000 groupes au hasard (nouvelles factures, paiements, totaux changés) | un groupe, tableau de bord compris, à 100 / 1 000 / 10 000 écrans : p50 16,0 µs [16,0 ; 21,0] / 13,1 [12,2 ; 19,1] / 12,2 [12,2 ; 12,9], moyenne 17,2 / 14,6 / 14,5 ; chaque écran et le tableau de bord égaux à ceux de `Find` à la fin | redemander à la place : la somme du tableau de bord 10,0 ms [9,7 ; 11,6] par groupe à 10 000 écrans ; l'écran que touche un groupe 8,1 µs |
 | 16 writers pendant 5 s sans / avec 100 watches de ce qu'ils écrivent, les watches lus par un autre processus ($n = 7$) | 1 844 groupes par seconde [568 ; 2 058] / 1 598 [977 ; 1 981] ; le rapport dans chaque tour 1,20 [0,29 ; 2,09] | PostgreSQL, 16 writers avec le `NOTIFY` d'un trigger : 8,6 fois moins d'inserts [6,1 ; 22,2] (ses commits font la queue sur le lock de `NOTIFY`, `async.c`) |
 
@@ -626,6 +644,7 @@ Chaque réponse est une valeur ou une erreur `{code, message}`. Les codes du mot
 | `stopping` | le serveur s'arrête | se reconnecter : la bibliothèque le fait |
 | `too_many_connections` | une nouvelle connexion sur le Unix socket alors que le serveur tient `max_connections` connexions (id de requête 0 ; sur TCP la connexion est fermée sans un mot) | se connecter plus tard, ou relever la limite |
 | `idle` | aucune requête entière pendant `idle_timeout` secondes, ou aucun Hello dans les 10 s qui suivent la connexion (id de requête 0, puis le serveur ferme la connexion) | envoyer `Ping` entre-temps, ou se reconnecter : le client OCaml le fait |
+| `timeout` | une question (un Find, la première réponse d'un Watch) a dépassé son temps : le `question_timeout` du serveur, ou le temps plus court que son programme lui a donné ; les frames déjà envoyées d'un Find en flux finissent par elle ([limites](limits.md#les-questions)) | poser une question plus étroite, ou demander des pages ; donner un `timeout` plus long (un token admin au-delà de celui du serveur) |
 | `refused` | une écriture renvoyée après qu'une écriture plus tardive de sa session a été appliquée, et dont la première erreur s'est perdue quand le serveur a redémarré (si c'est le même serveur qui l'a refusée, son erreur est redonnée à la place) | elle n'a pas été appliquée : décider à nouveau |
 | `missing` | Load d'une chose qui n'a pas de fichier de ce kind ; un chunk (un morceau d'un fichier) que le vault ne tient pas | |
 | `erased` | Load, ou Put, d'un propriétaire dont la clé a été effacée | |
@@ -851,9 +870,10 @@ modèle, chacune avec sa configuration, pour montrer qu'elles cassent.
 Ce que la règle du numéro change par rapport au lease : aucune écriture n'attend aucun lecteur (le lease faisait
 attendre à chaque écriture un round trip vers le lecteur le plus lent, et jusqu'à la durée du lease pour un lecteur
 arrêté) ; aucune horloge n'est lue lors d'une lecture ; aucun message ne revient du lecteur ; un serveur qui démarre
-n'attend rien (le lease le faisait attendre la durée d'un lease). Avec plusieurs machines (étape 7), un lecteur
-ailleurs n'a pas de page partagée : les leases y reviennent, entre serveurs (quorum leases), et la page contient alors
-la fin du propre lease du serveur local.
+n'attend rien (le lease le faisait attendre la durée d'un lease). Un lecteur sur une autre machine n'a pas de
+page partagée : ses lectures locales demanderaient des leases entre serveurs (quorum leases), que Cepheus n'a pas
+encore ; dans un cluster Raft, le leader sert les lectures, sous un lease à lui ([les
+lectures](#les-lectures-et-ce-que-voit-un-programme)).
 
 ### Ce que cela coûte
 
@@ -876,9 +896,9 @@ base (`bench/sbench.ml`, `local` et `localq`) ; par le socket, c'est la même re
 - **Une lecture ponctuelle** (une facture lue par son id) dans la mémoire du programme est 115 fois plus rapide que
   celle de PostgreSQL et 46 fois plus rapide qu'une lecture par le socket : ce qui reste est la lecture du moteur
   lui-même (la conception mesurait 0,42 µs dans le processus sur le build d'un autre jour ; le chargement du numéro et
-  le choix de l'état ajoutent quelques nanosecondes). La cible du plan était 0,5 µs. Mesuré à nouveau après l'arrivée
-  des règles (format de run 6, un flag dans le mot de 64 bits de chaque valeur), sur la même base agrandie par les
-  mesures d'écriture plus bas jusqu'à 1,56 M de groupes, $n = 11$ : 0,245 µs [0,231 ; 0,251] dans le programme,
+  le choix de l'état ajoutent quelques nanosecondes). La cible de la conception était 0,5 µs. Mesuré à nouveau après
+  l'arrivée des règles (format de run 6, un flag dans le mot de 64 bits de chaque valeur), sur la même base agrandie par
+  les mesures d'écriture plus bas jusqu'à 1,56 M de groupes, $n = 11$ : 0,245 µs [0,231 ; 0,251] dans le programme,
   9,93 µs [9,49 ; 11,27] par le socket, PostgreSQL 24,49 µs [24,11 ; 28,89].
 - **Les questions** y gagnent moins : Q3 et Q4 font leur travail dans le lecteur comme dans le serveur ; le round trip
   qu'elles évitent est petit à côté (Q3 s'épargne 39 µs, Q4 environ 1 ms de codage et de décodage de 100 lignes).
@@ -893,19 +913,19 @@ pour chaque lecteur avant son écriture, le numéro écrit et la vue avancée ap
 | aucun lecteur local | 1,42 µs [1,10 ; 1,78] | 3,06 ms [2,88 ; 3,18] |
 | 8 lecteurs locaux | 14,97 µs [13,09 ; 16,90] | 3,13 ms [2,94 ; 3,50] |
 
-La cible du plan était 20 µs pour 8 lecteurs ; les hooks coûtent 0,5 % d'un fsync de ce disque, et les deux latences
-sont égales dans le bruit du disque. Le coût croît avec les lecteurs (1,4 µs sans aucun) : chaque frame est mise en
-file pour chaque lecteur et réveille le thread qui l'envoie.
+La cible de la conception était 20 µs pour 8 lecteurs ; les hooks coûtent 0,5 % d'un fsync de ce disque, et les deux
+latences sont égales dans le bruit du disque. Le coût croît avec les lecteurs (1,4 µs sans aucun) : chaque frame est
+mise en file pour chaque lecteur et réveille le thread qui l'envoie.
 
 **Ce que suivre coûte à un lecteur.** Un lecteur local pendant que 256 clients écrivent des factures de 4 faits par le
 socket ($n = 7$ tours, son temps CPU sur 4 s) : **32,3 % d'un cœur** [23,3 ; 38,8] à 17 942 groupes par seconde
-[12 269 ; 22 027], environ 4,5 µs par changement appliqué. La cible du plan, 20 % d'un cœur à 18 000 groupes par
-seconde, est **manquée** : la conception mesurait 1,72 µs par changement pour rejouer un journal seul sur une machine
-calme ; ici le lecteur partage les 4 cœurs et les 8 threads matériels de la machine avec le serveur et les 256 clients
-qui écrivent, et chaque merge du serveur lui fait appliquer à nouveau, sur les nouveaux runs, les groupes écrits
+[12 269 ; 22 027], environ 4,5 µs par changement appliqué. La cible de la conception, 20 % d'un cœur à 18 000 groupes
+par seconde, est **manquée** : la conception mesurait 1,72 µs par changement pour rejouer un journal seul sur une
+machine calme ; ici le lecteur partage les 4 cœurs et les 8 threads matériels de la machine avec le serveur et les 256
+clients qui écrivent, et chaque merge du serveur lui fait appliquer à nouveau, sur les nouveaux runs, les groupes écrits
 pendant le merge. Sous cette charge, sa mémoire (Pss : la mémoire du processus, où chaque page partagée compte pour sa
-part) était de 273 MB [202 ; 325] : son delta des groupes depuis le run le plus récent, plus gros tant que les
-écritures vont plus vite que les merges.
+part) était de 273 MB [202 ; 325] : son delta des groupes depuis le run le plus récent, plus gros tant que les écritures
+vont plus vite que les merges.
 
 **Ce que huit lecteurs coûtent à la machine.** Huit lecteurs locaux du 1 M de faits, chacun ayant lu une fois chaque
 facture de l'échantillon ($n = 7$) : **250 MB de Pss** en tout [249 ; 250], 31 MB chacun, pour l'essentiel sa propre
@@ -913,12 +933,12 @@ copie des pages des runs (les runs de la base font 24 MB). Les backends de Postg
 servent 8 clients de lectures ponctuelles : 43 MB [43 ; 44] de Pss en tout (12 processus), parce qu'ils partagent un
 même buffer pool (la mémoire où une base garde les pages de ses fichiers). Que chaque lecteur garde son propre cache
 était le premier choix de la conception (le code du moteur tel qu'il est, chaque page vérifiée) ; une seule copie
-partagée par tous les lecteurs est l'étape suivante, quand la mémoire d'un déploiement le demandera. Avec le format de
-run 7 (2026-11-09), les mêmes huit lecteurs prennent **106,5 MB de Pss** [105,6 ; 107,1] contre 252,4 [251,5 ; 253,0]
-sur main 0ecc09e, en alternance sur 7 tours : la copie des pages des runs de chaque lecteur a rétréci avec les runs
+partagée par tous les lecteurs n'est pas construite. Avec le format de run 7 (2026-11-09), les mêmes huit lecteurs
+prennent **106,5 MB de Pss** [105,6 ; 107,1] contre 252,4 [251,5 ; 253,0] sur main 0ecc09e, en alternance sur 7 tours :
+la copie des pages des runs de chaque lecteur a rétréci avec les runs
 ([benchmarks](benchmarks.md#runs-et-journal-compressés-2026-11-09-à-10-millions-de-faits)).
 
-**Par rapport au serveur d'avant l'étape 3** (le même serveur sans lectures locales, ses binaires et les nôtres à tour
+**Par rapport au serveur d'avant les lectures locales** (le même serveur sans elles, ses binaires et les nôtres à tour
 de rôle à chaque tour, $n = 11$ ; le rapport nouveau / ancien par tour) : round trip vide 1,05 [0,90 ; 1,18], lecture
 ponctuelle par le socket 0,99 [0,79 ; 1,34], écritures durables d'un client 1,21 [0,90 ; 2,26] fois l'ancien débit, de
 64 clients 0,97 [0,66 ; 1,52] : aucune différence que les mesures puissent voir (chaque intervalle contient 1).
@@ -936,9 +956,10 @@ ponctuelle par le socket 0,99 [0,79 ; 1,34], écritures durables d'un client 1,2
 
 Avec `remote_apply`, le commit du primary de PostgreSQL attend le standby ; les lecteurs de Cepheus ne font attendre
 aucune écriture. Les peers de Datomic lisent dans leur propre mémoire mais ne voient les écritures les plus récentes
-qu'après `sync` ; les lecteurs de Cepheus les voient toujours. Ce que Cepheus n'a pas ici : des lecteurs sur d'autres
-machines (une replica, c'est-à-dire une copie tenue à jour sur une autre machine, étape 6, et Raft avec des quorum
-leases, étape 7), et le SQL de PostgreSQL.
+qu'après `sync` ; les lecteurs de Cepheus les voient toujours. Ce que Cepheus n'a pas ici : des lecteurs locaux sur
+d'autres machines (une replica, c'est-à-dire une copie tenue à jour sur une autre machine, sert ses lectures par son
+socket, le leader d'un cluster Raft sert chaque lecture ; les quorum leases ne sont pas construits), et le SQL de
+PostgreSQL.
 
 ## Une replica
 
@@ -948,7 +969,8 @@ une seconde copie qui survit à la perte de la machine du primary, un endroit d'
 au primary, et, à la main, un nouveau primary quand l'ancien a disparu (`cepheus promote`). Elle est **asynchrone** :
 le primary confirme une écriture dès que son propre fsync revient et n'attend jamais une replica, si bien qu'une
 replica a du retard, son lag (mesuré [plus bas](#ce-que-coûte-une-replica)), et qu'une écriture confirmée pendant ce lag
-n'est que sur le primary. Raft (étape 7) attend une majorité avant de confirmer.
+n'est que sur le primary. Un cluster Raft ([plus bas](#un-cluster-de-trois-raft)) attend une majorité avant de
+confirmer.
 
 ### En mettre une en place
 
@@ -1083,14 +1105,14 @@ primary devient une replica du nouveau avec `cepheus replicate srv2` et rattrape
 une fois qu'il a divergé, il faut le recopier depuis rien (un répertoire de données vide).
 
 **Deux primaries à la fois** (un split brain : deux serveurs qui prennent les écritures d'une même base). Ce que cette
-version empêche : une promotion pendant que le primary parle à sa replica ; un ancien primary qui redémarre (systemd,
-un reboot) alors qu'il joint un serveur d'une epoch plus récente : à son démarrage, à côté de ses ouvertures, un
-primary de plusieurs peers demande aux autres leurs epochs (au plus 1 s) et refuse de démarrer si l'un en tient une
-plus récente ; et la fusion d'un historique qui a divergé. Ce qu'elle ne peut pas empêcher : après une promotion
-forcée, un ancien primary coupé du nouveau mais encore joint par des programmes confirme des écritures qui n'existent
-que chez lui (elles sont refusées comme divergentes quand on en fait une replica). Isolez-le avant `--force` :
-arrêtez-le, coupez-le du réseau, ou éteignez-le. Avec Raft (étape 7), cela ne peut pas arriver : un leader ne confirme
-rien sans une majorité.
+version empêche : une promotion pendant que le primary parle à sa replica ; un ancien primary qui redémarre (systemd, un
+reboot) alors qu'il joint un serveur d'une epoch plus récente : à son démarrage, à côté de ses ouvertures, un primary de
+plusieurs peers demande aux autres leurs epochs (au plus 1 s) et refuse de démarrer si l'un en tient une plus récente ;
+et la fusion d'un historique qui a divergé. Ce qu'elle ne peut pas empêcher : après une promotion forcée, un ancien
+primary coupé du nouveau mais encore joint par des programmes confirme des écritures qui n'existent que chez lui (elles
+sont refusées comme divergentes quand on en fait une replica). Isolez-le avant `--force` : arrêtez-le, coupez-le du
+réseau, ou éteignez-le. Dans un cluster Raft ([plus bas](#un-cluster-de-trois-raft)), cela ne peut pas arriver : un
+leader ne confirme rien sans une majorité.
 
 ### Les sauvegardes depuis la replica
 
@@ -1258,7 +1280,7 @@ key = "/etc/cepheus/srv1.key"
 Les trois démarrent sur des **répertoires de données vides** : chaque base reçoit le même id sur chaque serveur
 (calculé à partir de l'id du cluster et du nom de la base) et le même premier groupe, et chaque groupe suivant arrive
 par le log du cluster (plus bas). Un répertoire de données écrit par un serveur seul est refusé (`was not made by this
-Raft cluster`) : faire grandir un serveur seul en cluster est une étape suivante. Avec 1 `[[peer]]`, un serveur est
+Raft cluster`) : faire grandir un serveur seul en cluster n'est pas construit. Avec 1 `[[peer]]`, un serveur est
 seul, avec 2 c'est un primary et sa replica ([plus haut](#une-replica)), avec 3 ou plus un cluster Raft : une seule
 façon de basculer (fail over : passer à un autre serveur quand l'un tombe) pour un cluster de chaque taille. Dans un
 cluster Raft, `cepheus replicate` et `cepheus promote` sont refusés, et `DATA/cepheus.role` ne doit pas exister. Un
@@ -1287,7 +1309,7 @@ Une entrée est une seule frame du protocole : un groupe fait au plus 8 MiB dans
 chemin ordinaire du writer (pas celui des grands groupes, qui écrit une frame par morceaux avant qu'elle soit
 durable) ; un groupe de plus de 8 MiB est refusé en entier (`invalid`, « over the frame limit of 8388608 ») : un
 chargement se découpe en groupes ; un changement des règles dont les conséquences dépassent cette limite ne le peut
-pas, pour l'instant (les grandes entrées par morceaux sont une étape suivante).
+pas (les grandes entrées par morceaux ne sont pas construites).
 
 Le log est `DATA/raft/` (0700) : des segments `log.<first index>` (0600), chacun un en-tête et des **rounds**, un
 round étant les entrées d'un même fsync, vérifiés par CRC-32C comme les frames d'un journal
@@ -1336,14 +1358,14 @@ le corps porte, après le message, l'adresse du leader pour les programmes (le d
 protocole 1, saute les octets qui suivent le message d'une erreur : pas de nouvelle version du protocole ; de même, le
 `Welcome` d'un serveur Raft porte, après ses champs, l'adresse de chaque membre pour les programmes). La bibliothèque
 OCaml le suit (`Client`, qu'utilisent la commande `cepheus`, les tests et les benchmarks) : elle se connecte au leader
-et renvoie la requête, une écriture avec sa session et son serial, pour qu'elle soit appliquée une fois (G14). Le
-client Cesia donne pour l'instant `not_leader` au programme (son message nomme l'adresse du leader) : l'y suivre est
-une étape suivante. Tant qu'il n'y a pas de leader (une élection est en cours) ou que le nouveau n'est pas prêt, un
-serveur répond `Err no_leader`, et la bibliothèque réessaie après une pause (10 ms, qui double jusqu'à 50 ms dans un
-cluster, 1 s ailleurs), dans son budget de retries (30 s) ; un programme dont le serveur a disparu essaie le membre
-suivant que ce serveur a nommé dans son Welcome. Une écriture qui était en vol quand son leader a cessé d'être leader
-reçoit le même traitement : appliquée une fois ou pas du tout, le nouveau leader répondant à son renvoi à partir de sa
-table des sessions si elle était committed.
+et renvoie la requête, une écriture avec sa session et son serial, pour qu'elle soit appliquée une fois (G14). Le client
+Cesia ne le suit pas encore : il donne au programme `not_leader`, dont le message nomme l'adresse du leader. Tant qu'il
+n'y a pas de leader (une élection est en cours) ou que le nouveau n'est pas prêt, un serveur répond `Err no_leader`, et
+la bibliothèque réessaie après une pause (10 ms, qui double jusqu'à 50 ms dans un cluster, 1 s ailleurs), dans son
+budget de retries (30 s) ; un programme dont le serveur a disparu essaie le membre suivant que ce serveur a nommé dans
+son Welcome. Une écriture qui était en vol quand son leader a cessé d'être leader reçoit le même traitement : appliquée
+une fois ou pas du tout, le nouveau leader répondant à son renvoi à partir de sa table des sessions si elle était
+committed.
 
 Ce qui n'est pas encore là : les lectures locales (`Follow`) sur les serveurs d'un cluster (`denied` : la bibliothèque
 lit par le socket) ; des lectures sur les followers sous des leases à eux (conception 8.4) ; les fichiers du vault
@@ -1440,7 +1462,7 @@ Ce qu'ils disent :
   plus tard), en parallèle : à peu près le chiffre du primary ici, plus le round trip.
 - **Le débit.** La base d'un leader a une frame en vol (ses écritures suivantes attendent, réunies dans une seule
   frame, qu'elle soit committed) : la latence d'un commit borne donc les frames par seconde d'une base. Plusieurs
-  frames en vol sont une étape suivante.
+  frames en vol ne sont pas construites.
 
 Un serveur sans peers est inchangé (cette release contre la précédente, alternées, $n = 21$) : prêt en 1,03 [0,96 ;
 1,07] fois le temps d'avant (médiane 129 ms ici, la machine chargée), un round trip vide 0,97 [0,87 ; 1,16], les
@@ -1477,25 +1499,25 @@ désormais à 50 ms.
   l'échec décrit par l'article de 2018), une promesse qui finit avant le lease qu'elle soutient, un serveur qui vote
   juste après son démarrage, des votes accordés malgré une promesse, et des lectures avant que le no-op soit committed
   (chacune : ReadFresh, une lecture périmée).
-- **La simulation** (`raft_sim`, 3 et 5 serveurs, une seed qui décide de tout, `--seed N` la rejoue) : le cœur Raft
-  du serveur lui-même et son log, chaque serveur sur un disque simulé avec sa propre horloge (jusqu'à 3 % d'écart) ;
-  des messages perdus, dupliqués et réordonnés ; des partitions (un serveur seul, une minorité, un lien coupé dans un
-  seul sens) ; des morts du processus, des coupures de courant (des octets non forcés perdus ou torn), des morts à
+- **La simulation** (`raft_sim`, 3 et 5 serveurs, une seed qui décide de tout, `--seed N` la rejoue) : le cœur Raft du
+  serveur lui-même et son log, chaque serveur sur un disque simulé avec sa propre horloge (jusqu'à 3 % d'écart) ; des
+  messages perdus, dupliqués et réordonnés ; des partitions (un serveur seul, une minorité, un lien coupé dans un seul
+  sens) ; des morts du processus, des coupures de courant (des octets non forcés perdus ou torn), des morts à
   l'intérieur d'un appel au disque, un octet forcé du log inversé avant un redémarrage, des fsyncs lents (jusqu'à
   300 ms), des pauses (jusqu'à 400 ms). Vérifié : au plus un leader par term ; chaque entrée appliquée où que ce soit
   est celle du log committed ; chaque écriture dont un client a appris qu'elle était committed est dans le log final à
-  son index ; des lectures linearizable (une lecture à l'index r rend l'état du log committed à r, voit chaque
-  écriture répondue avant son début et aucune écriture commencée après sa fin, et aucune lecture finie avant son début
-  n'a vu un index plus récent) ; une fois les pannes arrêtées, un seul commit et un seul log partout. Les seeds 1 à 300
-  à 3 serveurs et 1 à 100 à 5 : aucun échec (50 103 et 16 616 vérifications ; `tools/test.sh` en lance 100 et 50).
-  Comptés à part : 16 exécutions finissent avec un follower en retard sur le début du log de son leader, et 5 avec une
-  majorité abîmée qui n'élit aucun leader (deux étapes suivantes, plus haut). En chemin, elle a trouvé six bugs, chacun
-  corrigé avant cette release : un leader déchu qui disait « committed » à un programme pour un index qu'un nouveau
-  leader avait rempli ; une indication de commit écrite à côté d'entrées qu'une troncature ultérieure a remplacées,
-  puis prise pour committed après un crash ; un dommage au dernier round du log pris pour une fin torn et coupé
-  (l'échec de 2018 lui-même) ; un refus amplifié en une tempête de sondes par des messages dupliqués ; un follower qui
-  coupait son log au-delà de ce dont d'autres avaient encore besoin ; et un pre-vote qu'un serveur en retard de terms
-  ne pouvait jamais gagner.
+  son index ; des lectures linearizable (une lecture à l'index r rend l'état du log committed à r, voit chaque écriture
+  répondue avant son début et aucune écriture commencée après sa fin, et aucune lecture finie avant son début n'a vu un
+  index plus récent) ; une fois les pannes arrêtées, un seul commit et un seul log partout. Les seeds 1 à 300 à 3
+  serveurs et 1 à 100 à 5 : aucun échec (50 103 et 16 616 vérifications ; `tools/test.sh` en lance 100 et 50). Comptés à
+  part : 16 exécutions finissent avec un follower en retard sur le début du log de son leader, et 5 avec une majorité
+  abîmée qui n'élit aucun leader (le rattrapage et la réparation par n'importe quel peer ne sont pas encore construits,
+  plus haut). En chemin, elle a trouvé six bugs, chacun corrigé avant cette release : un leader déchu qui disait
+  « committed » à un programme pour un index qu'un nouveau leader avait rempli ; une indication de commit écrite à côté
+  d'entrées qu'une troncature ultérieure a remplacées, puis prise pour committed après un crash ; un dommage au dernier
+  round du log pris pour une fin torn et coupé (l'échec de 2018 lui-même) ; un refus amplifié en une tempête de sondes
+  par des messages dupliqués ; un follower qui coupait son log au-delà de ce dont d'autres avaient encore besoin ; et un
+  pre-vote qu'un serveur en retard de terms ne pouvait jamais gagner.
 - **De vrais serveurs** (`server_raft`) : trois serveurs en TLS mutuel sur loopback ; un programme connecté à un
   follower écrit à travers le leader ; le leader tué (kill -9) pendant qu'un programme écrit, un nouveau élu, chaque
   écriture dont le programme a appris qu'elle était committed présente, une écriture renvoyée dans sa session répondue
@@ -1696,9 +1718,10 @@ de certification** (CA, certificate authority) en qui le client a confiance.
   envoyé au début du handshake) ; puis, dans Welcome, que l'id du cluster est celui qu'il attend, quand on lui en a
   donné un. Le TLS du serveur refuse tout ce qui est plus ancien que TLS 1.3, et ne reprend aucune session TLS (pas de
   tickets : un programme garde sa connexion).
-- **Ce que vérifie le serveur.** Le token du programme, dans TLS (les programmes ne montrent aucun certificat :
-  choix 2 de la conception). Entre serveurs (la réplication, plus tard), les deux côtés montreront un certificat de la
-  CA qui nomme un peer de la liste : du mutual TLS, comme le font FoundationDB et etcd.
+- **Ce que vérifie le serveur.** Le token du programme, dans TLS (les programmes ne montrent aucun certificat : choix 2
+  de la conception). Entre serveurs (une replica et son primary, un cluster Raft), les deux côtés montrent un certificat
+  de la CA qui nomme un peer de la liste : du mutual TLS, comme le font FoundationDB et etcd ([celui d'une
+  replica](#sécurité)).
 - **Refusé, et testé** (`server_tls`) : un serveur dont le certificat a été signé par une autre CA ; un certificat de
   la bonne CA qui ne nomme pas l'hôte qu'a utilisé le programme ; un serveur d'un autre id de cluster ; une connexion
   TCP sans CA ; un client en clair (sans TLS) sur le port TLS, qui ne reçoit aucun Welcome ; et le serveur continue de
@@ -1759,28 +1782,28 @@ Ce que cela dit :
   réveils : les 8,86 µs de Ping) et le travail du serveur (le décodage, la lecture de la vue, le codage), petit à côté :
   la lecture a pris 0,65 µs de plus que Ping, apparié par tour [0,04 ; 1,03], et moins dans 38 tours sur 101 (le serveur
   renvoie les 16 octets de Ping ; 1,5 µs de plus le 2026-11-08). Le plancher de PostgreSQL lui-même, `SELECT 1`, est de
-  15,2 µs : son travail par instruction est plus grand que toute notre lecture. La cible du plan était 10 µs : 9,68
-  maintenant (10,81 le 2026-11-08, quand le round trip vide prenait 9,32 ; 8,46 quand la conception l'a mesuré). Seul le
-  fait de ne pas faire le round trip descend en dessous ([lectures locales](#lectures-locales-g15) : 0,22 µs).
-- **Beaucoup de clients** : la cible principale du plan, 8 clients à 4 µs au plus par lecture (PostgreSQL 6,2 µs quand
-  la conception l'a mesuré, 6,27 maintenant), tient : 3,71 µs (3,51 dans les tours commencés sous une charge de 2 ; 3,22
-  le 2026-11-08, $n = 11$). Avec un seul I/O domain, le serveur répondait toutes les 9,6 µs (le prototype) : ce sont les
-  I/O domains qui font gagner (3 tours à chaque $k = 1, 2, 4, 8$ : 9,1-10,0 ; 5,3-5,5 ; 2,9-4,0 et 2,1-3,1 µs ; 4, la
-  valeur par défaut, tient 16 lectures en cours à 1,3-1,5 µs là où 8 domains donnaient 1,5-2,1). Le processus par
-  connexion de PostgreSQL paie davantage à mesure que les connexions augmentent (12,8 µs à 256) ; nos threads dans 4
-  domains, non.
+  15,2 µs : son travail par instruction est plus grand que toute notre lecture. La cible de la conception était 10 µs :
+  9,68 maintenant (10,81 le 2026-11-08, quand le round trip vide prenait 9,32 ; 8,46 quand la conception l'a mesuré).
+  Seul le fait de ne pas faire le round trip descend en dessous ([lectures locales](#lectures-locales-g15) : 0,22 µs).
+- **Beaucoup de clients** : la cible principale de la conception, 8 clients à 4 µs au plus par lecture (PostgreSQL
+  6,2 µs quand la conception l'a mesuré, 6,27 maintenant), tient : 3,71 µs (3,51 dans les tours commencés sous une
+  charge de 2 ; 3,22 le 2026-11-08, $n = 11$). Avec un seul I/O domain, le serveur répondait toutes les 9,6 µs (le
+  prototype) : ce sont les I/O domains qui font gagner (3 tours à chaque $k = 1, 2, 4, 8$ : 9,1-10,0 ; 5,3-5,5 ; 2,9-4,0
+  et 2,1-3,1 µs ; 4, la valeur par défaut, tient 16 lectures en cours à 1,3-1,5 µs là où 8 domains donnaient 1,5-2,1).
+  Le processus par connexion de PostgreSQL paie davantage à mesure que les connexions augmentent (12,8 µs à 256) ; nos
+  threads dans 4 domains, non.
 - **Pipelining** (plusieurs requêtes en cours sur une connexion, les réponses reliées par l'id) : 1,30 µs par lecture
   avec 16 en cours, 6,95 fois plus rapide que le pipeline de 16 de PostgreSQL (9,05 µs), où le backend répond toujours
   dans l'ordre et analyse chaque instruction.
 - **TLS** nous coûte 31,9 µs de plus que le Unix socket (41,3 contre 9,7 ; apparié par tour [30,9 ; 32,8]) ; le round
   trip TLS d'OpenSSL lui-même, en C sur cette machine (64 octets dans chaque sens, le prototype de la conception), coûte
-  27,06 µs contre 16,04 en TCP en clair : 11,0 µs de TLS. Le nôtre ajoute environ 18 µs au TCP en clair (23,2 µs, le
-  serveur de l'étape 1, $n = 11$) : les buffers en mémoire par lesquels OpenSSL travaille ici (une copie vers eux et une
-  hors d'eux, et davantage d'appels à OpenSSL par lecture) coûtent le reste. Les deux côtés utilisent le cipher TLS 1.3
-  par défaut d'OpenSSL (AES-256-GCM) ; le prototype C, AES-128-GCM. La cible du plan était 36 µs : manquée de 5 µs ;
-  toujours 1,27 fois plus rapide que PostgreSQL avec TLS (52,3 µs). Une nouvelle connexion TLS coûte 2,6 ms (une
-  signature ECDSA par le serveur, les vérifications du client ; aucun certificat client), 1,6 fois moins que celle de
-  PostgreSQL.
+  27,06 µs contre 16,04 en TCP en clair : 11,0 µs de TLS. Le nôtre ajoute environ 18 µs au TCP en clair (23,2 µs, la
+  première version du serveur, $n = 11$) : les buffers en mémoire par lesquels OpenSSL travaille ici (une copie vers eux
+  et une hors d'eux, et davantage d'appels à OpenSSL par lecture) coûtent le reste. Les deux côtés utilisent le cipher
+  TLS 1.3 par défaut d'OpenSSL (AES-256-GCM) ; le prototype C, AES-128-GCM. La cible de la conception était 36 µs :
+  manquée de 5 µs ; toujours 1,27 fois plus rapide que PostgreSQL avec TLS (52,3 µs). Une nouvelle connexion TLS coûte
+  2,6 ms (une signature ECDSA par le serveur, les vérifications du client ; aucun certificat client), 1,6 fois moins que
+  celle de PostgreSQL.
 - **Q3 et Q4** passent par le socket sous forme de lignes (Q3) et d'agrégats calculés dans le serveur (Q4 : 100 lignes
   envoyées, pas 45 064) : 1,4 et 1,5 fois plus rapides que les plans d'exécution de PostgreSQL. Les deux côtés donnent
   les mêmes réponses : 396 lignes pour city-7, et 45 064 factures impayées dont la somme fait 2 248 567 111 centimes
@@ -1813,9 +1836,9 @@ Les nombres bruts et les scripts : les fichiers de mesure de ce travail (pas dan
 - Find rassemble les index words de sa réponse avant de les envoyer (plus haut) ; les forks ne passent pas encore par
   le protocole.
 - Des lecteurs locaux sur d'autres machines (une replica sert ses lectures par son socket ; dans un cluster Raft, le
-  leader sert chaque lecture, les followers aucune : les leases entre serveurs viennent ensuite), et une seule copie
-  partagée des pages pour beaucoup de lecteurs d'une même machine (chaque lecteur garde son propre cache : [ce que
-  cela coûte](#ce-que-cela-coûte)).
+  leader sert chaque lecture, les followers aucune : les lectures sur les followers sous des leases ne sont pas
+  construites), et une seule copie partagée des pages pour beaucoup de lecteurs d'une même machine (chaque lecteur garde
+  son propre cache : [ce que cela coûte](#ce-que-cela-coûte)).
 - Une replica ne copie pas encore les fichiers du vault, un client ne passe pas de lui-même au nouveau primary, et une
   promotion se fait à la main ([une replica](#une-replica)).
 - Dans un cluster Raft ([plus haut](#un-cluster-de-trois-raft)) : ajouter ou retirer un serveur (un à la fois, des
@@ -1824,12 +1847,13 @@ Les nombres bruts et les scripts : les fichiers de mesure de ce travail (pas dan
   fichiers du vault, un groupe de plus de 8 MiB, un serveur abîmé réparé par n'importe quel peer (pas seulement par un
   leader), le leadership passé à un autre serveur lors d'un arrêt propre, et le client Cesia qui suit `not_leader`.
 
-Le client Cesia est l'étape 4 ([Cepheus depuis Cesia](cesia.md)) : un programme Cesia atteint une base par un serveur
-seulement, par `cepheus.Connect`, et lit localement sur la machine du serveur. Les questions vivantes passent par le
-protocole (étape 5, [plus haut](#les-questions-vivantes-watch)). Plusieurs bases partagent un seul fsync ([le commit
-buffer](#plusieurs-bases-un-seul-fsync--le-commit-buffer), le reste de l'étape 5). Une replica suit son primary (étape 6,
-[plus haut](#une-replica)). Trois serveurs élisent un leader et confirment les écritures sur une majorité (étape 7,
-[plus haut](#un-cluster-de-trois-raft)). Ensuite : le reste de l'étape 7 (la liste plus haut), des bases en mémoire
-avec `Expire` et `Incr` (étape 8). La bibliothèque OCaml ouvre encore un répertoire de base dans son propre processus
-(`Cepheus.open_`) : c'est le moteur que fait tourner le serveur, et ce que pilotent ses tests et ses benchmarks ; les
-programmes, en Cesia, passent par le serveur.
+Ce qui est construit : le client Cesia ([Cepheus depuis Cesia](cesia.md)), par lequel un programme Cesia atteint une
+base par un serveur seulement, par `cepheus.Connect`, et lit localement sur la machine du serveur ; les questions
+vivantes sur le protocole ([plus haut](#les-questions-vivantes-watch)) ; plusieurs bases qui partagent un seul fsync
+([le commit buffer](#plusieurs-bases-un-seul-fsync--le-commit-buffer)) ; une replica qui suit son primary ([plus
+haut](#une-replica)) ; trois serveurs qui élisent un leader et confirment les écritures sur une majorité ([plus
+haut](#un-cluster-de-trois-raft)) ; `Incr`, un compteur augmenté dans son groupe
+([groupes](concepts.md#les-groupes--une-écriture-est-une-transaction)). Pas construit : ce que nomme la liste plus haut,
+et des bases tenues en mémoire seulement, avec `Expire`. La bibliothèque OCaml ouvre encore un répertoire de base dans
+son propre processus (`Cepheus.open_`) : c'est le moteur que fait tourner le serveur, et ce que pilotent ses tests et
+ses benchmarks ; les programmes, en Cesia, passent par le serveur.

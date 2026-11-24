@@ -287,6 +287,9 @@ database.shop.epoch: 1
 | `requests` | requests answered since the start | a rate that falls while programs run |
 | `gc_minor`, `gc_major` | the OCaml runtime's collections so far | beside the process's memory: a rate that keeps growing |
 | `stopping` | a stop is under way | `true` outside a planned stop |
+| `questions.timed_out`, `questions.cancelled` | questions ended by their time (`question_timeout`, or a program's shorter one), and because their program closed its connection, since the start | a rate that grows: questions too wide for their time (read which programs ask them), or programs that give up |
+| `questions.helpers` | the domains helping large questions now (parked a second after their last one) | always at its bound (the cores less one) while questions wait: the machine's cores are the limit |
+| `domains`, `domains.cap` | the domains the server holds now (its own, its databases' writers', its connections', the questions' helpers), and the runtime's cap (`OCAMLRUNPARAM=d=N`, 128 by default) | `domains` near the cap: merges and questions then run on fewer domains ([limits](limits.md#files-and-the-platform)) |
 | `commit_buffer.rounds`, `.frames`, `.alone` | the buffer's fsyncs, the frames they made durable, the frames forced in their own journal (a database written alone) | `.frames` / `.rounds`: frames shared by one fsync ([commit buffer](server.md#many-databases-one-fsync-the-commit-buffer)) |
 | `role` | `primary`; `replica of PEER` on a replica, with each database's `replica.*` lines; `primary (promoted from PEER)` after a `cepheus promote` ([what a replica serves](server.md#what-a-replica-serves)) | a change you did not make (a `cepheus promote`) |
 | `database.NAME.group` | its newest durable group | flat while programs write: their writes fail; read their errors and the log |

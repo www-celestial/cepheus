@@ -236,7 +236,15 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   slot); a silent connection, one that trickles a byte at a time without a request, one that stops in its TLS
   handshake, one that sends its TLS handshake a byte at a time, and one that sends a TLS record a byte at a time
   after Hello are closed within twice the limit (the silent ones after `idle`); a client that pings more often stays; a client idle
-  past the limit reads again, its library connecting again by itself.
+  past the limit reads again, its library connecting again by itself. Then a server of 200 databases (each takes a
+  write; the process holds 21 domains, under the cap of 128), 30 large questions sent at once (60,000 things, each
+  split among domains: every answer exact, none `internal`, the helpers within the pool), a cross product given
+  0.1 s (`timeout` within 0.3 s), and a question that takes seconds whose program closes its socket (the server
+  counts it cancelled within a second).
+- `server_unit`'s question times: a cross product of three patterns (216 million bindings) at the server's 0.1 s ends
+  `timeout` within 0.2 s, held and streamed; a token's longer time is the server's, an admin token's its own (0.3 s);
+  a program's 0.1 s with none at the server; a watch's first answer; a connection gone ends its question with no
+  reply; `Cepheus.fold ~timeout`.
 - `server_guard`: connections served by the server's own code over real sockets, on a database whose reads raise
   when the test says (a bug of a request): a request that raises on a connection with a watch and a write in flight
   (the write answered, the request `internal`, the connection closed), 200 such connections in a row, and a failure
@@ -392,7 +400,8 @@ erasure; 3,000 random file requests read back as written and 24,000 changed ones
 
 ## Not yet
 
-Jepsen-style tests under network faults come with replication.
+Jepsen-style tests of real servers under network faults are not built. The simulation of a Raft cluster loses,
+duplicates and reorders messages and cuts the network ([how it is proved](server.md#how-it-is-proved)).
 
 ## Model checking
 

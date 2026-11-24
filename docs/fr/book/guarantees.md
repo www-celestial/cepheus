@@ -62,10 +62,11 @@ durable à partir duquel elle a été répondue ; `server_sim` les vérifie sur 
   section 3.3). En bref : après un `fsync` qui a échoué, ce qu'un processus relit peut être des octets que le disque ne
   contient pas.
 
-Hors de portée d'une seule machine (la réplication les couvrira) : un disque qui confirme un `fsync` sans écrire (et
-ext4 monté avec `data=journal`, qui signale une écriture échouée au `fsync` suivant plutôt qu'à celui qui la couvrait :
-la section 3.3.1 de l'article) ; la perte d'une frame durable entière à la fin du journal sans rien d'écrit après elle ;
-quelqu'un qui réécrit le journal et ses checksums ; une RAM corrompue (utilisez de l'ECC).
+Hors de portée d'une seule machine (seules des copies sur d'autres machines peuvent les couvrir : [une replica, un
+cluster Raft](server.md#une-replica)) : un disque qui confirme un `fsync` sans écrire (et ext4 monté avec
+`data=journal`, qui signale une écriture échouée au `fsync` suivant plutôt qu'à celui qui la couvrait : la section 3.3.1
+de l'article) ; la perte d'une frame durable entière à la fin du journal sans rien d'écrit après elle ; quelqu'un qui
+réécrit le journal et ses checksums ; une RAM corrompue (utilisez de l'ECC).
 
 Un groupe est **confirmé** quand `write` a renvoyé `Ok`.
 

@@ -87,12 +87,12 @@ the page cache, and a power loss may lose them there. So:
 
 ## When recovery says `Damaged`
 
-Durable data changed: a disk fault, a mishandled file, a segment missing in the
-middle. Do not delete files. Copy the directory aside; run `Cepheus.verify` on the copy for the full list; restore the
-database from a backup or (later) a replica. The message names the segment and the offset of the first bad frame. If
-and only if you know the damaged part was never confirmed (for example, the frame is the newest one and the machine
-lost power while writing it), the tail can be cut by hand at that offset (`truncate -s OFFSET SEGMENT`): this is a
-human decision, never taken by Cepheus.
+Durable data changed: a disk fault, a mishandled file, a segment missing in the middle. Do not delete files. Copy the
+directory aside; run `Cepheus.verify` on the copy for the full list; restore the database from a backup, which can be
+taken on a replica ([backups from the replica](server.md#backups-from-the-replica)). The message names the segment and
+the offset of the first bad frame. If and only if you know the damaged part was never confirmed (for example, the frame
+is the newest one and the machine lost power while writing it), the tail can be cut by hand at that offset
+(`truncate -s OFFSET SEGMENT`): this is a human decision, never taken by Cepheus.
 
 ## When a write returns `Io`
 

@@ -307,6 +307,29 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 
 The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted.
 
+**Its time.** `timeout = seconds` bounds a question: past it, `Find` is an `Err` of Code `"timeout"`, whose message
+names the time, and the work stops (within milliseconds: it is looked at every 1,024 candidates). At the server, the
+server's `question_timeout` (30 s by default, [the server](server.md#clustertoml)) is the most a question takes: a
+shorter `timeout` is the question's, a longer one counts only for an admin token. In the program's memory (on the
+server's machine) only the program's own `timeout` bounds it. A question the program stops waiting for (its
+connection closed) stops at the server too.
+
+```cesia norun
+rows = cepheus.Find(6, (a, x, b, y, c, z) -> {
+  Where: [[a, Client.Name, x], [b, Client.Name, y], [c, Client.Name, z]],
+  Give: {Count: cepheus.Count()},
+}, db, timeout = 0.1)
+io.Print(rows.Code)
+```
+
+```text
+timeout
+```
+
+Three patterns that share no variable are every triple of clients (a cross product): a million clients would be
+$10^{18}$ answers; the question ends at its time instead of holding the server's cores. `cepheus.Watch` takes the same
+`timeout`, for its first answer.
+
 ## Not, Or and In
 
 Three conditions of `Where` say what must not hold, what may hold in several ways, and which values a variable may

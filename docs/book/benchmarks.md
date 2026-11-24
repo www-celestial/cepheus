@@ -111,10 +111,10 @@ before, one series of 1,000 calls on each, a page took 120 µs against 64 on the
 against 515, the total not paid 13.6 ms against 8.4. The server now merges them once its writer has been idle a second
 (the 2.4 million rows in about 0.65 s here); the guide's table measures the whole (a page 180 → 115 µs through Cesia).
 
-**A day of sessions in the delta.** 10,000 sign-ins, each its own end: a range on their ends (the visitor's question)
-is counted from the sums of the delta's tree in $O(\log n)$ instead of a step a session. A process that connects still
-replays them (its first view: 57.7 ms against 55.6, 6 rounds alternated, within their spread): what a merge of an idle
-writer's delta would remove is left for a later step.
+**A day of sessions in the delta.** 10,000 sign-ins, each its own end: a range on their ends (the visitor's question) is
+counted from the sums of the delta's tree in $O(\log n)$ instead of a step a session. A process that connects still
+replays them (its first view: 57.7 ms against 55.6, 6 rounds alternated, within their spread): a merge of an idle
+writer's delta would remove that replay, and is not built.
 
 **The first call.** The Cesia package's first call (the engine's file fingerprinted, mapped and relocated): 22.30 ms
 against 22.48, the ratio 0.990 [0.984, 0.994] (21 rounds of 100 processes, alternated); its file holds 24 KB of code
@@ -365,9 +365,10 @@ as resident there. The cold open is slower than main's (138 ms against 88): a ru
 whole, and the open's checks of the column order (rank tables, directories: 2.5 MB) read pages that main's open did
 not (the first questions would read them anyway).
 
-**Where the giants still win.** SQLite loads in 11 MB of memory against 1.6 GB (chunked loads are step 4). Its cold
-open is a file open. PostgreSQL does not win a question here any more; it is a server with its own processes, which
-Cepheus' numbers above do not include (Cepheus' server is measured in [server](server.md)).
+**Where the giants still win.** SQLite loads in 11 MB of memory against 1.6 GB (chunked loads came the next day:
+[above](#chunked-loads-2026-11-12-at-10-million-facts)). Its cold open is a file open. PostgreSQL does not win a
+question here any more; it is a server with its own processes, which Cepheus' numbers above do not include (Cepheus'
+server is measured in [server](server.md)).
 
 ## Compressed runs and journal (2026-11-09), at 10 million facts
 
@@ -500,9 +501,9 @@ Cepheus is faster on Q1 to Q4 (1.7 to 5.4 times): its run is 2.5 times smaller t
 question needs stays in the cache. SQLite wins Q5 by more than 100 times: it keeps the follow links in a table and a
 covering index of their own (7.4 and 6.5 MB, `dbstat`), which fit in its 16 MB of cache, while Cepheus finds a client's
 links in its thing block, among the records of the invoices numbered after it (a block of 128 things holds about 6
-clients and 122 invoices), so the triangles touch the 23.5 MB of thing blocks at random. Reading Q5 from the rows
-by property, where the 568,163 follow links lie together, is step 3 of the plan (the column order and a join that
-walks them, [theory](theory.md#12-what-comes-next-and-why)).
+clients and 122 invoices), so the triangles touch the 23.5 MB of thing blocks at random. Reading Q5 from the rows by
+property, where the 568,163 follow links lie together, came two days later with the column order and a join that walks
+them ([above](#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)).
 
 The series before this one (milestone 2 and the levels, below) did not drop the files' pages, and their numbers are
 not comparable with these. The kernel charges a page of its page cache to the control group that read it first, and

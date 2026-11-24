@@ -100,10 +100,11 @@ les y perdre. Donc :
 
 Des données durables ont changé : une panne du disque, un fichier mal manipulé, un segment qui manque au milieu. Ne
 supprimez aucun fichier. Copiez le répertoire à part ; lancez `Cepheus.verify` sur la copie pour la liste complète ;
-restaurez la base depuis une sauvegarde ou (plus tard) une replica. Le message nomme le segment et l'offset de la
-première frame mauvaise. Si et seulement si vous savez que la partie abîmée n'a jamais été confirmée (par exemple, la
-frame est la plus récente et la machine a perdu le courant pendant qu'elle l'écrivait), la fin peut être coupée à la
-main à cet offset (`truncate -s OFFSET SEGMENT`) : c'est une décision humaine, que Cepheus ne prend jamais.
+restaurez la base depuis une sauvegarde, qui peut se prendre sur une replica ([les sauvegardes depuis la
+replica](server.md#les-sauvegardes-depuis-la-replica)). Le message nomme le segment et l'offset de la première frame
+mauvaise. Si et seulement si vous savez que la partie abîmée n'a jamais été confirmée (par exemple, la frame est la plus
+récente et la machine a perdu le courant pendant qu'elle l'écrivait), la fin peut être coupée à la main à cet offset
+(`truncate -s OFFSET SEGMENT`) : c'est une décision humaine, que Cepheus ne prend jamais.
 
 ## Quand une écriture renvoie `Io`
 

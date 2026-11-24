@@ -389,11 +389,16 @@ bases distinctes écrivent en parallèle.
 
 OCaml 5 exécute du code en parallèle par des **domains** : chaque domain est un fil d'exécution avec son propre cœur,
 son tas pour les valeurs jeunes et son runtime lock (le lock du runtime d'OCaml) ; les **threads** (systhreads) d'un
-même domain partagent ce lock et passent chacun leur tour. Cepheus met le writer et le syncer dans un domain à eux, pour
-qu'ils n'attendent jamais le runtime lock des threads clients ; chaque merge tourne dans son propre domain ; et une
-grande question (20 000 candidats ou plus pour sa première variable) les découpe en slices (des tranches) que jusqu'à
-`Query.domains` domains prennent à tour de rôle (le nombre recommandé pour la machine, au plus 8), chacun avec son propre
-accumulateur, fusionnés dans l'ordre des slices pour que la réponse ne dépende pas du nombre de domains. Une vue n'a
+même domain partagent ce lock et passent chacun leur tour. Cepheus met le writer et le syncer dans un domain des
+writers, où ne tourne aucun thread client, pour qu'ils n'attendent jamais le runtime lock des threads clients (les bases
+d'un processus partagent autant de domains des writers que la machine a de cœurs : un domain coûte cher en OCaml 5,
+0,2 ms à lancer, et chacun en vie ralentit chaque collection mineure, qui les arrête tous) ; chaque merge tourne dans
+son propre domain ; et une grande question (20 000 candidats ou plus pour sa première variable) les découpe en slices
+(des tranches) que jusqu'à `Query.domains` domains prennent à tour de rôle (le nombre recommandé pour la machine, au plus
+8 : celui de la question et les helpers du processus, garés entre deux questions, `Pool`), chacun avec son propre
+accumulateur, fusionnés dans l'ordre des slices pour que la réponse ne dépende pas du nombre de domains. Un processus ne
+tient jamais plus de domains que le plafond d'OCaml moins une marge : un merge ou un helper qu'il ne peut avoir tourne
+sur un thread, ou la question sur moins de domains ([limites](limits.md#les-fichiers-et-la-plateforme)). Une vue n'a
 besoin d'aucun lock pour être lue, ce qui rend ce découpage gratuit. La somme des impayés par ville sur 453 866 factures
 prend 231 ms sur un domain et 107 ms sur trois (PostgreSQL 236 ms sur un processus, 109 ms sur trois).
 
