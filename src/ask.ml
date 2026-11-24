@@ -251,7 +251,7 @@ let prefix_set (v : Store.view) items x pre =
 
 (* a Not compiled: [holds env] on the conjunction's words (renumbered by [at]) is true when the Not's items have an
    answer, the binding then dropped *)
-let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : not_) : int array -> bool =
+let not_check ~budget ?stop ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : not_) : int array -> bool =
   let typs = typs_of t in
   match nt.items, nt.own with
   | [ Pattern { e; p; v = pv } ], [] ->
@@ -322,7 +322,7 @@ let not_check ~budget ~(spent : int Atomic.t) (v : Store.view) (t : t) at (nt : 
       if left <= 0 then raise (Query.Over_budget budget);
       let wk = ref 1 in
       let found =
-        match Query.fold ~seq:true ~sets:!sets ~budget:left ~account:wk v q ~init:(fun () -> ()) ~merge:(fun () () -> ()) ~step:(fun () _ -> raise Found) with
+        match Query.fold ~seq:true ~sets:!sets ~budget:left ~account:wk ?stop v q ~init:(fun () -> ()) ~merge:(fun () () -> ()) ~step:(fun () _ -> raise Found) with
         | () -> false
         | exception Found -> true
       in
@@ -359,20 +359,20 @@ let dense ?range ?words (v : Store.view) (t : t) (c : conj) =
   let window = match words with Some (x, ws) -> [ (dense.(x), ws) ] | None -> [] in
   q, dense, back, window @ List.map (fun (x, l) -> dense.(x), words_of t v x l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes
 
-let fold ?(seq = false) ?(budget = max_int) ?range ?words (v : Store.view) (t : t) ~init ~step ~merge =
+let fold ?(seq = false) ?(budget = max_int) ?stop ?range ?words (v : Store.view) (t : t) ~init ~step ~merge =
   let spent = Atomic.make 0 in
   let run (c : conj) =
     let q, dense, back, sets = dense ?range ?words v t c in
-    let checks = List.map (not_check ~budget ~spent v t (fun x -> dense.(x))) c.nots in
+    let checks = List.map (not_check ~budget ?stop ~spent v t (fun x -> dense.(x))) c.nots in
     let outer = Array.to_list (Array.mapi (fun d x -> d, x) back) |> List.filter (fun (_, x) -> t.outer.(x)) in
     let full env = let b = Array.make t.vars 0 in List.iter (fun (d, x) -> b.(x) <- env.(d)) outer; b in
     let keep env = List.for_all (fun h -> not (h env)) checks in
     if c.free = [] then
-      Query.fold ~seq ~sets ~budget v q ~init ~merge ~step:(fun acc env -> if keep env then step acc (full env) else acc)
+      Query.fold ~seq ~sets ~budget ?stop v q ~init ~merge ~step:(fun acc env -> if keep env then step acc (full env) else acc)
     else begin
       (* bindings once each, though the alternative's own variables give one for each of their values *)
       let seen = Hashtbl.create 64 in
-      Query.fold ~seq:true ~sets ~budget v q ~init ~merge
+      Query.fold ~seq:true ~sets ~budget ?stop v q ~init ~merge
         ~step:(fun acc env ->
           if keep env then begin
             let b = full env in

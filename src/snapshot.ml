@@ -1439,9 +1439,11 @@ let check_and_build disk dir (lo0, hi0, file) id =
           q := !q + c
         done
       in
-      let others = List.init (d - 1) (fun i -> Domain.spawn (part (i + 1))) in
+      (* a part the process has no domain for (Pool's budget) is read here, after this one's *)
+      let others = List.init (d - 1) (fun i -> i + 1, Pool.try_spawn (part (i + 1))) in
       let mine = match part 0 () with () -> None | exception e -> Some e in
-      let theirs = List.filter_map (fun dm -> match Domain.join dm with () -> None | exception e -> Some e) others in
+      let mine = List.fold_left (fun m (i, dm) -> match m, dm with None, None -> (match part i () with () -> None | exception e -> Some e) | _ -> m) mine others in
+      let theirs = List.filter_map (fun (_, dm) -> match dm with Some dm -> (match Domain.join dm with () -> None | exception e -> Some e) | None -> None) others in
       (match mine, theirs with Some e, _ | None, e :: _ -> raise e | None, [] -> ());
       Array.iteri (fun q k -> Pages.admit pg k got.(q); Atomic.incr Pages.misses) ks
     in

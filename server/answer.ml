@@ -120,7 +120,7 @@ type prepared = {
   fold : 'a. ?seq:bool -> ?window:Top.window -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> unit -> 'a;
 }
 
-let prepare ~extra ~budget (v : Store.view) (q : Query.t) =
+let prepare ~extra ~budget ?stop (v : Store.view) (q : Query.t) =
   let ask = if extra = [] then None else Some (Ask.compile v q extra) in
   let ty = match ask with None -> Query.types v q | Some a -> Ask.typs_of a in
   let var x =
@@ -131,12 +131,12 @@ let prepare ~extra ~budget (v : Store.view) (q : Query.t) =
   in
   let fold ?seq ?window ~init ~step ~merge () =
     match ask, window with
-    | None, None -> Query.fold ?seq ~budget v q ~init ~step ~merge
-    | None, Some (Top.Range (x, lo, hi)) -> Query.fold ?seq ~budget v { q with ranges = (x, lo, hi) :: q.ranges } ~init ~step ~merge
-    | None, Some (Top.Words (x, ws)) -> Query.fold ?seq ~sets:[ (x, ws) ] ~budget v q ~init ~step ~merge
-    | Some a, None -> Ask.fold ?seq ~budget v a ~init ~step ~merge
-    | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ~budget ~range:(x, lo, hi) v a ~init ~step ~merge
-    | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ~budget ~words:(x, ws) v a ~init ~step ~merge
+    | None, None -> Query.fold ?seq ~budget ?stop v q ~init ~step ~merge
+    | None, Some (Top.Range (x, lo, hi)) -> Query.fold ?seq ~budget ?stop v { q with ranges = (x, lo, hi) :: q.ranges } ~init ~step ~merge
+    | None, Some (Top.Words (x, ws)) -> Query.fold ?seq ~sets:[ (x, ws) ] ~budget ?stop v q ~init ~step ~merge
+    | Some a, None -> Ask.fold ?seq ~budget ?stop v a ~init ~step ~merge
+    | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ~budget ?stop ~range:(x, lo, hi) v a ~init ~step ~merge
+    | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ~budget ?stop ~words:(x, ws) v a ~init ~step ~merge
   in
   { ask; ty; var; fold }
 
@@ -145,8 +145,8 @@ let prepare ~extra ~budget (v : Store.view) (q : Query.t) =
    the same order as [answer]'s), [f] reading them before it returns. None when the question cannot be streamed: an
    Or whose alternatives have variables of their own keeps every binding to give each once (Ask.fold), so it is held
    and counted as an answer. Raises Query.Bad. *)
-let stream ?(extra = []) ?(budget = max_int) (v : Store.view) (q : Query.t) give =
-  let { ask; ty; var; fold } = prepare ~extra ~budget v q in
+let stream ?(extra = []) ?(budget = max_int) ?stop (v : Store.view) (q : Query.t) give =
+  let { ask; ty; var; fold } = prepare ~extra ~budget ?stop v q in
   match ask with
   | Some a when List.exists (fun (c : Ask.conj) -> c.free <> []) a.conjs -> None
   | _ ->
@@ -160,8 +160,8 @@ let stream ?(extra = []) ?(budget = max_int) (v : Store.view) (q : Query.t) give
     in
     Some (Array.map (fun x -> ty.(x)) give, rows)
 
-let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
-  let { ask; ty; var; fold } = prepare ~extra ~budget v q in
+let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
+  let { ask; ty; var; fold } = prepare ~extra ~budget ?stop v q in
   match sel with
   | Wire.Give give when order <> Top.none ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in

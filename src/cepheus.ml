@@ -6,6 +6,7 @@ module Engine = Engine
 module Group = Group
 module Pack = Pack
 module Pages = Pages
+module Pool = Pool
 module Histogram = Histogram
 module Journal = Journal
 module Query = Query
@@ -31,6 +32,7 @@ type error = Engine.error =
   | Io of string
   | Busy of string
   | Closed
+  | Timeout of string
 
 let message = Engine.message
 
@@ -220,11 +222,22 @@ let things (v : view) p x =
 
 type query = Query.t = { vars : int; where : pattern list; ranges : (int * value * value) list }
 
-let find v q = try Ok (Query.rows v q) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
+(* a question's time, in seconds: its stop (none when not given) *)
+let stop_of = function
+  | None -> None
+  | Some t ->
+    if Float.is_nan t || t <= 0. then invalid_arg (Printf.sprintf "Cepheus: a question's timeout is a number of seconds above 0, not %g" t);
+    Some (Query.stop t)
+
+let find ?timeout v q =
+  let stop = stop_of timeout in
+  try Ok (Query.rows ?stop v q)
+  with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m) | Query.Timeout t -> Error (Timeout (Query.timeout_message t))
 
 module Question = Question
 
-let ask v (q : Question.t) =
+let ask ?timeout v (q : Question.t) =
+  let stop = stop_of timeout in
   try
     let where = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) q.items in
     let ranges = List.filter_map (function Ask.Range (x, lo, hi) -> Some (x, lo, hi) | _ -> None) q.items in
@@ -239,9 +252,9 @@ let ask v (q : Question.t) =
       { Top.fold =
           (fun window ~seq ~init ~step ~merge ->
             match window with
-            | None -> Ask.fold ~seq v t ~init ~step ~merge
-            | Some (Top.Range (x, lo, hi)) -> Ask.fold ~seq ~range:(x, lo, hi) v t ~init ~step ~merge
-            | Some (Top.Words (x, ws)) -> Ask.fold ~seq ~words:(x, ws) v t ~init ~step ~merge);
+            | None -> Ask.fold ~seq ?stop v t ~init ~step ~merge
+            | Some (Top.Range (x, lo, hi)) -> Ask.fold ~seq ?stop ~range:(x, lo, hi) v t ~init ~step ~merge
+            | Some (Top.Words (x, ws)) -> Ask.fold ~seq ?stop ~words:(x, ws) v t ~init ~step ~merge);
         project = (fun env -> Array.map (fun x -> env.(x)) give);
         var = (fun c -> Some give.(c));
         lead = Top.lead v base;
@@ -250,14 +263,16 @@ let ask v (q : Question.t) =
     let order = { Top.keys = q.sort; limit = q.limit; after = q.after } in
     let rows =
       if order = Top.none then
-        List.rev (Ask.fold v t ~init:(fun () -> []) ~merge:(fun a b -> b @ a) ~step:(fun acc env -> src.project env :: acc))
+        List.rev (Ask.fold ?stop v t ~init:(fun () -> []) ~merge:(fun a b -> b @ a) ~step:(fun acc env -> src.project env :: acc))
       else Array.to_list (Top.give v ~typs src order)
     in
     Ok (List.map (fun r -> Array.mapi (fun i w -> Store.value v typs.(i) w) r) rows)
-  with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
+  with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m) | Query.Timeout t -> Error (Timeout (Query.timeout_message t))
 
-let fold v q ~init ~step ~merge =
-  try Ok (Query.fold v q ~init ~step ~merge) with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m)
+let fold ?timeout v q ~init ~step ~merge =
+  let stop = stop_of timeout in
+  try Ok (Query.fold ?stop v q ~init ~step ~merge)
+  with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m) | Query.Timeout t -> Error (Timeout (Query.timeout_message t))
 
 (* the type of variable x comes from the question, as find decodes its words *)
 let decode (v : view) (q : query) x w =

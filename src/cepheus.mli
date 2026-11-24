@@ -34,6 +34,7 @@ type error = Engine.error =
   | Io of string  (** the disk failed: the database stops, reopen it to recover *)
   | Busy of string  (** the database is open in another process *)
   | Closed
+  | Timeout of string  (** a question passed the time it was given ([?timeout]), or the server's [question_timeout] *)
 
 val message : error -> string
 
@@ -295,23 +296,27 @@ val set_cache : int -> unit
 (** The bytes of run pages kept in memory, for every database of the process (1 GiB by default). A run larger
     than the cache is read page by page as the questions need it. *)
 
-val find : view -> query -> (value array list, error) result
-(** Every binding of the variables that makes all patterns facts of the view, each once (G11). *)
+val find : ?timeout:float -> view -> query -> (value array list, error) result
+(** Every binding of the variables that makes all patterns facts of the view, each once (G11). [timeout]: the
+    seconds it may take (none by default), past which it ends with [Error (Timeout _)]; looked at every 1,024
+    candidates of each domain. Raises [Invalid_argument] for a timeout of 0 or less. *)
 
 (** {2 Questions with operators, an order and pages} *)
 
 (** The question of {!ask}: its own names, apart, so that [open Cepheus] adds only [Question] and [ask]. *)
 module Question = Question
 
-val ask : view -> Question.t -> (value array list, error) result
-(** The rows of the question, each a binding of its variables once (G11), in the order asked. *)
+val ask : ?timeout:float -> view -> Question.t -> (value array list, error) result
+(** The rows of the question, each a binding of its variables once (G11), in the order asked. [timeout]: as
+    {!find}'s. *)
 
 val fold :
-  view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
+  ?timeout:float -> view -> query -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> ('a, error) result
 (** The bindings folded into an accumulator, without building values: [step] gets index words (thing ids for links,
     the value for ints, dates, money, 0/1 for booleans, dictionary numbers for texts and floats) in a buffer it may not
     keep; {!decode} turns a word back into its value. A large question runs on several domains, each with its own
-    accumulator from [init ()], joined by [merge]; [step] must therefore only touch its accumulator. *)
+    accumulator from [init ()], joined by [merge]; [step] must therefore only touch its accumulator. [timeout]: as
+    {!find}'s. *)
 
 val decode : view -> query -> int -> int -> value
 (** [decode v q x w]: the value of variable [x] of [q] whose index word, as {!fold} gives it, is [w], the value {!find}
@@ -349,6 +354,7 @@ module Pack = Pack
 module Pages = Pages
 module Histogram = Histogram
 module Journal = Journal
+module Pool = Pool
 module Query = Query
 module Reason = Reason
 module Resolve = Resolve

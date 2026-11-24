@@ -29,6 +29,11 @@ let replace s a b =
   done;
   Buffer.contents buf
 
+let contains s sub =
+  let n = String.length sub in
+  let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in
+  go 0
+
 let unix_conn sock =
   let fd = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
   Unix.connect fd (Unix.ADDR_UNIX sock);
@@ -125,6 +130,93 @@ let stall sock tok =
   Client.close r;
   Client.close s;
   Client.close w
+
+(* Questions under load, on a server of 200 databases (each a writer and a syncer, in the writers' domains: before,
+   a domain each, which the runtime's cap of 128 stopped at about 120): every database opens and is served, and the
+   process holds fewer domains than the cap; 30 programs ask a large question each at once (60,000 things, its first
+   variable split among domains): each gets its exact answer, none internal, and the helpers stay within the pool;
+   a question given 0.1 s of a cross product ends timeout within 0.3 s; a program that sends a question that takes
+   seconds and closes its connection stops it: the server counts it cancelled within a second (its log has no
+   failure). *)
+let load sock tok admin =
+  let conn t = match Client.connect (Client.Unix_socket sock) t with Ok c -> c | Error m -> failwith m in
+  let stat c k = match Client.status c with Ok l -> (try List.assoc k l with Not_found -> "") | Error e -> "error " ^ e.message in
+  let ops = conn admin in
+  let dbs = int_of_string_opt (stat ops "domains") and cap = int_of_string_opt (stat ops "domains.cap") in
+  C.check (match dbs, cap with Some d, Some c -> d < c | _ -> false) "200 databases open on %s domains, under the cap of %s" (stat ops "domains") (stat ops "domains.cap");
+  let w = conn tok in
+  let prop name = { Schema.name; typ = Value.Tint; many = false; unique = false } in
+  (* every database served *)
+  let ok = ref 0 in
+  for i = 0 to 199 do
+    match Client.declare w (Printf.sprintf "d%d" i) [ prop "x/n" ] with
+    | Ok (db, [ p ]) -> (match Client.write w db [ Resolve.Add (-1, p, Int i) ] with Ok _ -> incr ok | Error _ -> ())
+    | _ -> ()
+  done;
+  C.check (!ok = 200) "each of the 200 databases takes a write (%d)" !ok;
+  let db, a, b = match Client.declare w "main" [ prop "load/a"; prop "load/b" ] with Ok (db, [ a; b ]) -> db, a, b | _ -> failwith "declare" in
+  let n = 60_000 in
+  let rec fill i = if i < n then begin
+      let k = min 5000 (n - i) in
+      (match Client.write w db (List.concat (List.init k (fun j -> [ Resolve.Add (-(j + 1), a, Int (i + j)); Resolve.Add (-(j + 1), b, Int ((i + j) mod 7)) ]))) with
+       | Ok _ -> () | Error e -> failwith e.message);
+      fill (i + k) end in
+  fill 0;
+  let q = { Query.vars = 3; where = [ { Query.e = Var 0; p = a; v = Var 1 }; { e = Var 0; p = b; v = Var 2 } ]; ranges = [] } in
+  let sel = Wire.Group ([| 2 |], [| Wire.Count |]) in
+  let results = Array.make 30 "none" in
+  let threads =
+    Array.init 30 (fun i ->
+        Thread.create
+          (fun () ->
+            let c = conn tok in
+            let d = match Client.open_db ~local:false c "main" with Ok d -> d | Error e -> failwith e.message in
+            results.(i) <-
+              (match Client.find c d ~select:sel q with
+               | Ok (_, rows) when List.length rows = 7 && List.for_all (function [| _; Value.Int k |] -> k >= n / 7 | _ -> false) rows -> "ok"
+               | Ok (_, rows) -> Printf.sprintf "%d rows" (List.length rows)
+               | Error e -> e.code);
+            Client.close c)
+          ())
+  in
+  let t30 = Unix.gettimeofday () in
+  Array.iter Thread.join threads;
+  let t30 = Unix.gettimeofday () -. t30 in
+  let bad = List.filter (( <> ) "ok") (Array.to_list results) in
+  C.check (bad = []) "30 large questions at once: each its exact answer, none internal (%s)" (String.concat "," bad);
+  C.check (match int_of_string_opt (stat ops "questions.helpers") with Some h -> h < Domain.recommended_domain_count () | None -> false)
+    "the questions' helpers within the pool (%s)" (stat ops "questions.helpers");
+  (* a program's time *)
+  let cross = { Query.vars = 6; where = [ { Query.e = Var 0; p = a; v = Var 1 }; { e = Var 2; p = a; v = Var 3 }; { e = Var 4; p = a; v = Var 5 } ]; ranges = [] } in
+  let c = conn tok in
+  let d = match Client.open_db ~local:false c "main" with Ok d -> d | Error e -> failwith e.message in
+  let t0 = Unix.gettimeofday () in
+  let r = Client.find c d ~select:(Wire.Group ([||], [| Wire.Count |])) ~timeout:0.1 cross in
+  let took0 = Unix.gettimeofday () -. t0 in
+  C.check ((match r with Error e -> e.code = "timeout" | Ok _ -> false) && took0 < 0.3) "a cross product given 0.1 s: timeout (%.3f s)" took0;
+  Client.close c;
+  (* a question whose program leaves *)
+  let before = stat ops "questions.cancelled" in
+  let fd = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
+  Unix.connect fd (Unix.ADDR_UNIX sock);
+  let send id req =
+    let body = Buffer.create 64 and f = Buffer.create 64 in
+    Wire.put_request body req;
+    Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 body;
+    ignore (Unix.write_substring fd (Buffer.contents f) 0 (Buffer.length f))
+  in
+  send 1 (Wire.Hello { version = Wire.version; token = tok; program = "leaves"; session = 0 });
+  send 2 (Wire.Find { db = db.Client.handle; query = cross; select = Wire.Group ([||], [| Wire.Count |]); extra = []; order = Question.Top.none; timeout = 0 });
+  Thread.delay 0.3;
+  Unix.close fd;
+  let t1 = Unix.gettimeofday () in
+  while stat ops "questions.cancelled" = before && Unix.gettimeofday () -. t1 < 3. do Thread.delay 0.01 done;
+  let took = Unix.gettimeofday () -. t1 in
+  C.check (stat ops "questions.cancelled" <> before && took < 1.) "a question whose program closed its connection: cancelled within %.3f s" took;
+  Printf.printf "load: 200 databases on %s domains (cap %s); 30 large questions at once in %.3f s; a 0.1 s timeout in %.3f s; cancelled %.3f s after the close\n%!"
+    (stat ops "domains") (stat ops "domains.cap") t30 took0 took;
+  Client.close w;
+  Client.close ops
 
 let () =
   let dir = match Sys.argv with [| _; d |] -> d | _ -> prerr_endline "server_limits.exe DIR"; exit 2 in
@@ -269,7 +361,22 @@ let () =
   Client.close c;
   Unix.kill pid Sys.sigterm;
   (match Serve.wait pid with _, Unix.WEXITED 0 -> C.check true "a clean stop" | _ -> C.check false "not a clean stop");
+  (* 200 databases, questions under load (the limits back to their defaults; a question's time of 5 s) *)
+  let dbs = String.concat "" (List.init 200 (fun i -> Printf.sprintf "[[database]]\nname = \"d%d\"\n" i)) in
+  Out_channel.with_open_bin cfg (fun oc -> output_string oc (replace s "[clients]\n" "[clients]\nquestion_timeout = 5\n" ^ dbs));
+  let rights = String.concat " " (List.init 200 (fun i -> Printf.sprintf "--database d%d=write" i)) in
+  let token2 = Filename.concat a "load.token" and admin_token = Filename.concat a "ops.token" in
+  C.check (Sys.command (Printf.sprintf "%s token add load --database main=write %s --config %s > %s" bin rights (Filename.quote cfg) (Filename.quote token2)) = 0) "token add load";
+  C.check (Sys.command (Printf.sprintf "%s token add ops --admin --config %s > %s" bin (Filename.quote cfg) (Filename.quote admin_token)) = 0) "token add ops";
+  let read t = String.trim (In_channel.with_open_bin t In_channel.input_all) in
+  let pid = serve () in
+  load sock (read token2) (read admin_token);
+  Unix.kill pid Sys.sigterm;
+  (match Serve.wait pid with _, Unix.WEXITED 0 -> C.check true "a clean stop of 200 databases" | _ -> C.check false "not a clean stop of 200 databases");
+  let log = In_channel.with_open_bin (Filename.concat a "serve.log") In_channel.input_all in
+  C.check (not (contains log "failed")) "the server's log says no failure";
   (try Sys.remove (Follow.page_of_dir (Filename.concat a "data/main")) with Sys_error _ -> ());
+  List.iter (fun i -> try Sys.remove (Follow.page_of_dir (Filename.concat a (Printf.sprintf "data/d%d" i))) with Sys_error _ -> ()) (List.init 200 Fun.id);
   C.rmrf dir;
   ignore Value.equal;
   C.finish "server limits"

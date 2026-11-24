@@ -158,8 +158,11 @@ end
     fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name; Limit, at
     most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in Sort's
     order: the next page. A variable in no item of Where and Give is left out, so a filter can be left out of Where
-    without changing n. *)
-Find(n, question, db) = find(db, ask(n, question), n)
+    without changing n. timeout: the seconds the question may take, past which it is an Err of Code "timeout"; at
+    the server, the server's question_timeout is the most it takes (an admin token's may be longer).
+
+      cepheus.Find(2, q, db, timeout = 2)? *)
+Find(n, question, db, timeout = missing) = find(db, ask(n, question), n, timeout)
 
 (** A rule of the database: a function of n variables that gives {Where, Then}, Where patterns [thing, property,
     value], Above, Below or Between, and Not (at most 16), and Then one pattern, the fact the rule gives for each answer
@@ -252,7 +255,7 @@ defn feed(w, changes)
   fiber.Close(changes)
 end
 
-defn Watch(n, question, db, size = 64, until = missing)
+defn Watch(n, question, db, size = 64, until = missing, timeout = missing)
   (** A live question: an Ok of {Changes, Watch}, Changes a channel of its messages, which holds size of them at most.
       The first is the answer, {Group, Rows}: the rows Find gives at group Group. Each next one is a change,
       {Group, Added, Removed}: the rows that came and the rows that went with group Group, so that the rows are then
@@ -262,8 +265,9 @@ defn Watch(n, question, db, size = 64, until = missing)
       rather than every change it missed. Every fiber that watches the same question shares one watch at the server,
       and on the server's machine the changes are computed here, from the writes this program follows. The channel
       closes when the watch ends: Close(w), a token that may no longer read the database, or until, a channel, once it
-      closes, as the s.Ended of a screen of std/live: live.Show("unpaid", cepheus.Watch(1, q, db, until = s.Ended)?.Changes). *)
-  w = watch(db, ask(n, question), n)
+      closes, as the s.Ended of a screen of std/live: live.Show("unpaid", cepheus.Watch(1, q, db, until = s.Ended)?.Changes).
+      timeout: the seconds its first answer may take, as Find's. *)
+  w = watch(db, ask(n, question), n, timeout)
   if result.IsErr(w)
     return w
   end

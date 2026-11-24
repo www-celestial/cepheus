@@ -206,6 +206,9 @@ let measure name n f =
 (* the five questions on a view: Q1 and Q2 take a client's index, Q3 a city's; each returns a number to check *)
 type questions = { q1 : int -> int; q2 : int -> int; q3 : int -> int; q4 : unit -> int * int; q5 : unit -> int }
 
+(* TIMEOUT=S: every question of Q3 to Q5 given S seconds (the deadline's checks on: their cost against none) *)
+let timeout = Option.map float_of_string (Sys.getenv_opt "TIMEOUT")
+
 let questions v s nclients =
   let r = Rng.make 9 in
   let sample = Array.init 4096 (fun _ -> Rng.int r nclients) in
@@ -224,7 +227,7 @@ let questions v s nclients =
     { vars = 3; ranges = [];
       where = [ { e = Var 0; p = s.follows; v = Var 1 }; { e = Var 1; p = s.follows; v = Var 2 }; { e = Var 2; p = s.follows; v = Var 0 } ] }
   in
-  let count q = ok (fold v q ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )) in
+  let count q = ok (fold ?timeout v q ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )) in
   (* Q1: all the facts of an invoice (a client's id + 1 + j) *)
   { q1 = (fun i -> List.length (get v (cids.(i land 4095) + 1 + (i mod 20))));
     q2 = (fun i -> List.length (things v s.mail (Text (email sample.(i land 4095)))));
@@ -232,7 +235,7 @@ let questions v s nclients =
     (* per domain: a table city -> (sum, count); merged at the end *)
     q4 = (fun () ->
         let sums =
-          ok (fold v q4 ~init:(fun () -> Hashtbl.create 128)
+          ok (fold ?timeout v q4 ~init:(fun () -> Hashtbl.create 128)
                 ~step:(fun t env ->
                     let a, n = Option.value (Hashtbl.find_opt t env.(2)) ~default:(0, 0) in
                     Hashtbl.replace t env.(2) (a + env.(3), n + 1);

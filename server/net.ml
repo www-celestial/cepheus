@@ -347,7 +347,8 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle ~t0 ~before fd m
         if !pusher = None && not !ending then pusher := Some (Thread.create push_loop ());
         Condition.signal pc)
   in
-  let c = Core.connect ~wake ~close ~gone:(fun () -> !dead) srv ~flush ~submit in
+  (* the program can take nothing more: its output failed, or it closed its side (a question it asked then stops) *)
+  let c = Core.connect ~wake ~close ~gone:(fun () -> !dead || Fdpass.peer_closed fd) srv ~flush ~submit in
   c_ref := Some c;
   let buf = ref (Bytes.create base) and have = ref 0 in
   let go = ref true in
@@ -522,6 +523,7 @@ let server_id dir =
 (* ---- listeners ---- *)
 
 let unix_listener path =
+  Option.iter failwith (Config.long_socket path);
   if Sys.file_exists path then begin
     (* a socket left by a server that died: removed; one a live server answers on: refused *)
     let s = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
@@ -630,7 +632,7 @@ let open_databases ?(replica = None) ?raft (cfg : Config.t) wal =
   let i = ref 0 in
   while !i < Array.length names do
     let batch = List.init (min cfg.domains (Array.length names - !i)) (fun j -> !i + j) in
-    let ds = List.map (fun j -> j, Domain.spawn (fun () -> one j names.(j))) batch in
+    let ds = List.map (fun j -> j, Pool.spawn (fun () -> one j names.(j))) batch in
     List.iter (fun (j, d) -> res.(j) <- Domain.join d) ds;
     i := !i + List.length batch
   done;
@@ -786,7 +788,8 @@ let serve (cfg : Config.t) =
             ~new_session:(fun () -> 1 + (Int64.to_int (String.get_int64_le (Tokens.random 8) 0) land 0x3FFF_FFFF_FFFF_FFFF))
             ~more:(fun () -> if raft then raft_status () else Wal.status wal @ Replica.server_lines rep)
             ~read_only:(fun () -> Replica.read_only rep) ?lead:(Option.map Cluster.lead cluster) ~raft
-            ~members:(if raft then List.map (Config.client_address cfg) cfg.peers else []) ~ops ()
+            ~members:(if raft then List.map (Config.client_address cfg) cfg.peers else []) ~ops
+            ~question_timeout:(float_of_int cfg.question_timeout) ()
         in
         (* TLS for TCP: the server's certificate and key; programs show no certificate (a token) *)
         match
@@ -829,7 +832,10 @@ let serve (cfg : Config.t) =
           let ios = Array.init cfg.domains (fun _ -> { m = Mutex.create (); cv = Condition.create (); fds = Queue.create (); stop = false; nconn = 0 }) in
           let socks = { sm = Mutex.create (); open_ = Hashtbl.create 64 } in
           let opened = Atomic.make 0 in
-          let doms = Array.map (fun io -> Domain.spawn (io_domain srv dbs socks ~idle:cfg.idle_timeout ~opened io)) ios in
+          let doms = Array.map (fun io -> Pool.spawn (io_domain srv dbs socks ~idle:cfg.idle_timeout ~opened io)) ios in
+          (* the domains that help large questions: the cores less one, within what the runtime's cap leaves once the
+             databases' writers, the connections' domains and room for the merges are counted (Pool) *)
+          Pool.limit := max 0 (min !Pool.limit (Pool.budget () - Atomic.get Pool.live - 4));
           let next = Atomic.make 0 in
           let accepting = Atomic.make true in
           let refused = Atomic.make 0 and noted = ref 0. in
