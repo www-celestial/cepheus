@@ -1406,7 +1406,7 @@ let check_and_build disk dir (lo0, hi0, file) id =
       end
     in
     let pg = Pages.on_file len (load_from fd) in
-    if disk == Disk.real then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
+    if disk == Disk.real || disk == Disk.read_only then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
     let a = Store.of_offsets ~pg ~n:an ~ne:ane ~k:ak ~np:anp ~ns:ans ~sblob:asb ~hbits aoffs in
     let t = Store.of_offsets ~pg ~n:tn ~ne:tne ~k:tk ~np:tnp ~ns:0 ~sblob:0 ~hbits:0 toffs in
     (* Pages read and checked now, then into the cache: the pages [ks] (logical numbers) that the file holds, in the
@@ -1629,3 +1629,44 @@ let file_pages disk path =
   let h = Bytes.create header in
   disk.pread fd 0 h 0 header;
   Int64.to_int (Bytes.get_int64_le h (24 + (8 * (15 + Store.noffsets + 4 + Store.noffsets + 1))))
+
+(* Every page of a run file read and checked against its CRC, in the file's order, by reads of up to 64 pages: for
+   cepheus verify, on a run larger than the cache (check_and_build reads and checks a smaller one whole). After
+   check_and_build, which checked the header and the page table. Raises Bad. *)
+let check_pages disk dir file =
+  let fd = disk.Disk.openf (Filename.concat dir file) false in
+  Fun.protect ~finally:(fun () -> try disk.close fd with Disk.Io _ -> ()) @@ fun () ->
+  let h = Bytes.create header in
+  disk.pread fd 0 h 0 header;
+  let g k = Int64.to_int (Bytes.get_int64_le h (24 + (8 * k))) in
+  let base = 15 + Store.noffsets + 4 + Store.noffsets in
+  let len = g base and phys = g (base + 1) in
+  let npages = Pages.pages len in
+  let table = Bytes.create (8 * npages) in
+  disk.pread fd (header + (phys * Pages.size)) table 0 (8 * npages);
+  (* the page of the layout each file page holds (-1: none) *)
+  let holds = Array.make (max 1 phys) (-1) in
+  for k = 0 to npages - 1 do
+    let f = Int32.to_int (Bytes.get_int32_le table (8 * k)) in
+    if f >= 0 && f < phys then holds.(f) <- k
+  done;
+  let chunk = 64 in
+  let buf = Bytes.create (chunk * Pages.size) in
+  let f = ref 0 in
+  while !f < phys do
+    let c = min chunk (phys - !f) in
+    disk.pread fd (header + (!f * Pages.size)) buf 0 (c * Pages.size);
+    for j = 0 to c - 1 do
+      let k = holds.(!f + j) in
+      if k >= 0 && Crc32c.bytes buf (j * Pages.size) Pages.size <> u32 table ((8 * k) + 4) then bad "page %d does not check" k
+    done;
+    f := !f + c
+  done
+
+(* A run file checked as an open checks it (its header, page table, rank and offset tables, every page it reads),
+   and every page against its CRC: its journal position and its pages. Raises Bad, Pages.Unreadable, Disk.Io. *)
+let verify disk dir ((_, _, file) as r) id =
+  let _, _, pos = check_and_build disk dir r id in
+  let phys = file_pages disk (Filename.concat dir file) in
+  if phys > !Pages.capacity then check_pages disk dir file;
+  pos, phys

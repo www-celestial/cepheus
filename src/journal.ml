@@ -709,6 +709,275 @@ let verify disk dir id =
   read disk dir id (fun _ -> incr n);
   !n
 
+(* ---- The journal checked as files: cepheus verify, backup and restore ----
+   Each segment is checked on its own, so that a damaged one does not hide the others: its header, then every frame
+   (its header, its body's CRC, its trailer, its first group and count, the groups that follow one another), and the
+   groups of every frame up to [decode_max] decoded and numbered (a larger frame, a large load's, is checked by its
+   CRCs: decoding it would take the memory of its group). The first frame that does not check ends the segment's
+   check; how it is read depends on what may lie at the end of the newest segment:
+     Strict  a database closed cleanly, or a copy that cepheus backup cut and forced: every byte checks;
+     Crash   a database whose process died: the frame being written may be torn (no valid frame or trailer after it),
+             its newest frame's trailer alone broken, the newest segment torn at its creation; what recovery cuts or
+             rebuilds, and nothing else;
+     Copy    a database being written (open in another process), or the files copied from one: from the first frame of
+             the newest segment that does not check whole, everything is the frame being written, whatever follows it
+             (a large group's header is written after its body, so a copy may see its trailer and not its header).
+   Every group confirmed before a copy of its segment started is before that point: it was written whole before it
+   was confirmed, and frames are appended one at a time. *)
+
+type tail = Strict | Crash | Copy
+
+type segment_check = {
+  sfirst : int;  (** the segment's first group, from its name *)
+  sbytes : int;  (** its size *)
+  sframes : int;  (** its whole frames *)
+  slast : int;  (** the last group of its whole frames ([sfirst - 1]: none) *)
+  send : int;  (** where its last whole frame ends (0: its header did not check) *)
+  stail : bool;  (** bytes after [send] that the rule takes for the frame being written *)
+  sdamage : string option;  (** the first damage, which ended the segment's check *)
+}
+
+let decode_max = ref (16 lsl 20)
+
+let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
+  let name = segment_name s in
+  let fd = disk.Disk.openf (path dir s) false in
+  Fun.protect ~finally:(fun () -> try disk.close fd with Disk.Io _ -> ()) @@ fun () ->
+  let r = reader disk fd in
+  let size = r.size in
+  let frames = ref 0 and expect = ref s in
+  let result ?damage ?(torn = false) stop =
+    { sfirst = s; sbytes = size; sframes = !frames; slast = !expect - 1; send = stop; stail = torn; sdamage = damage }
+  in
+  let hb = if size < seg_header then Bytes.empty else (let b = Bytes.create seg_header in disk.pread fd 0 b 0 seg_header; b) in
+  match read_header hb id name with
+  | exception Damaged m -> result ~damage:m 0
+  | None ->
+    if newest && tail <> Strict && size <= seg_header then result ~torn:true 0
+    else result ~damage:(Printf.sprintf "%s has a broken header" name) 0
+  | Some first when first <> s -> result ~damage:(Printf.sprintf "%s says it starts at group %d" name first) 0
+  | Some _ ->
+    (* the frame at p does not check: the tail, or damage, as the rule reads the bytes after it *)
+    let broken p =
+      if newest && tail = Copy then result ~torn:true p
+      else begin
+        let rest = Bytes.create (size - p) in
+        disk.pread fd p rest 0 (size - p);
+        if written_after rest 0 (size - p) then result ~damage:(Printf.sprintf "%s: damaged frame at offset %d (written whole)" name p) p
+        else if not newest then result ~damage:(Printf.sprintf "%s: the segment ends with a broken frame at offset %d" name p) p
+        else if tail = Strict then result ~damage:(Printf.sprintf "%s: a torn frame at offset %d, in a database closed cleanly" name p) p
+        else result ~torn:true p
+      end
+    in
+    let rec loop p =
+      if p = size then result p
+      else
+        match header_at r p with
+        | None -> broken p
+        | Some (len, f0, count, bc, hc) -> (
+          let decoded = if len <= !decode_max then frame_body r p len bc else None in
+          if not (if len <= !decode_max then Option.is_some decoded else body_checks r p len bc) then broken p
+          else if f0 <> !expect then result ~damage:(Printf.sprintf "%s: the frame at offset %d starts at group %d, where %d was expected" name p f0 !expect) p
+          else if count < 1 then result ~damage:(Printf.sprintf "%s: the frame at offset %d holds no group" name p) p
+          else
+            let stop = p + fh + len + ft in
+            let whole = trailer_at r p len bc hc in
+            (* a broken trailer: damage, but in a frame being written (Copy), or on the newest frame after a crash,
+               which recovery rebuilds *)
+            if (not whole) && newest && tail = Copy then result ~torn:true p
+            else if (not whole) && not (newest && tail = Crash && stop = size) then
+              result ~damage:(Printf.sprintf "%s: the trailer of the frame at offset %d is damaged" name p) p
+            else
+              let bad =
+                match decoded with
+                | None -> None
+                | Some (b, o) -> (
+                  let rd = Codec.reader b o len in
+                  match
+                    for k = 0 to count - 1 do
+                      let g = Group.decode rd in
+                      if g.Group.n <> f0 + k then raise Exit;
+                      on_group g
+                    done
+                  with
+                  | () -> if Codec.at_end rd then None else Some (Printf.sprintf "%s: the frame at offset %d has bytes after its groups" name p)
+                  | exception Exit -> Some (Printf.sprintf "%s: the frame at offset %d does not number its groups from %d" name p f0)
+                  | exception Codec.Short -> Some (Printf.sprintf "%s: the frame at offset %d does not decode" name p))
+              in
+              match bad with
+              | Some m -> result ~damage:m p
+              | None ->
+                frame { segment = s; offset = p; next = f0 } count stop;
+                incr frames;
+                expect := f0 + count;
+                loop stop)
+    in
+    loop seg_header
+
+type check = {
+  segments : segment_check list;  (** in the order of their names *)
+  damages : string list;  (** each segment's first damage, and the segments missing between them *)
+  last : int;  (** the newest group of the frames that check from group 1 on, with no damage before it *)
+}
+
+(* [domains] > 1: the segments checked at once, each by one domain (the callbacks then run on several domains) *)
+let check ?(domains = 1) ?(frame = fun _ _ _ -> ()) ?(on_group = fun _ -> ()) ~tail disk dir id =
+  let segs = Array.of_list (List.sort compare (segments disk dir)) in
+  let n = Array.length segs in
+  let out = Array.make n None in
+  let next = Atomic.make 0 in
+  let work () =
+    let rec go () =
+      let i = Atomic.fetch_and_add next 1 in
+      if i < n then begin
+        out.(i) <- Some (match check_segment ~tail ~newest:(i = n - 1) ~frame ~on_group disk dir id segs.(i) with
+                         | c -> Ok c
+                         | exception Disk.Io m -> Error m);
+        go ()
+      end
+    in
+    go ()
+  in
+  let d = if disk.Disk.parallel then max 1 (min domains n) else 1 in
+  let others = List.init (d - 1) (fun _ -> Domain.spawn work) in
+  work ();
+  List.iter Domain.join others;
+  let results = Array.to_list (Array.map Option.get out) in
+  (* an unreadable segment (Disk.Io) is named as damage: a read the disk refused *)
+  let results =
+    List.mapi
+      (fun i -> function
+        | Ok c -> c
+        | Error m -> { sfirst = segs.(i); sbytes = 0; sframes = 0; slast = segs.(i) - 1; send = 0; stail = false; sdamage = Some m })
+      results
+  in
+  let damages = ref [] and last = ref 0 and chained = ref true in
+  if n = 0 then damages := [ "journal: no segment" ]
+  else if segs.(0) <> 1 then (damages := [ Printf.sprintf "journal: the first segment starts at group %d" segs.(0) ]; chained := false);
+  List.iteri
+    (fun i c ->
+      (match c.sdamage with Some m -> damages := m :: !damages | None -> ());
+      (* the segment after a whole one starts where it ended *)
+      (if i > 0 then
+         let p = List.nth results (i - 1) in
+         if p.sdamage = None && not p.stail && c.sfirst <> p.slast + 1 then begin
+           damages := Printf.sprintf "journal: %s does not follow group %d (a segment is missing)" (segment_name c.sfirst) p.slast :: !damages;
+           chained := false
+         end);
+      if !chained then begin
+        if c.slast >= c.sfirst then last := c.slast;
+        if c.sdamage <> None then chained := false
+      end)
+    results;
+  { segments = results; damages = List.rev !damages; last = !last }
+
+(* The number and time of every group, in order, from the start, each frame checked by its CRCs, until [f n time]
+   returns false or a frame does not check: for cepheus restore --to-time. A frame longer than [decode_max] that holds
+   one group (a large one) has only its group's head read. *)
+let times disk dir id f =
+  let go = ref true in
+  List.iter
+    (fun s ->
+      if !go then begin
+        let fd = disk.Disk.openf (path dir s) false in
+        Fun.protect ~finally:(fun () -> try disk.close fd with Disk.Io _ -> ()) @@ fun () ->
+        let r = reader disk fd in
+        let hb = Bytes.create seg_header in
+        if r.size < seg_header then go := false
+        else begin
+          disk.pread fd 0 hb 0 seg_header;
+          if read_header hb id (segment_name s) <> Some s then go := false
+        end;
+        let rec loop p =
+          if !go then
+            match header_at r p with
+            | None -> ()
+            | Some (len, _, count, bc, _) ->
+              (if len <= !decode_max || count > 1 then
+                 match frame_body r p len bc with
+                 | Some (b, o) ->
+                   let rd = Codec.reader b o len in
+                   let k = ref 0 in
+                   while !go && !k < count do
+                     let g = Group.decode rd in
+                     go := f g.Group.n g.time;
+                     incr k
+                   done
+                 | None -> go := false
+               else if body_checks r p len bc then begin
+                 let h = Bytes.create (min len 64) in
+                 disk.pread fd (p + fh) h 0 (min len 64);
+                 let rd = Codec.reader h 0 (min len 64) in
+                 let n = Codec.get_varint rd in
+                 go := f n (Codec.get_int rd)
+               end
+               else go := false);
+              loop (p + fh + len + ft)
+        in
+        loop seg_header
+      end)
+    (List.sort compare (segments disk dir))
+
+(* ---- A copy of the journal ended after group [n] (cepheus restore --to-group) ----
+   On a copy that holds group [n]: the segments after the one that begins at group [n + 1] removed, that one kept as
+   its header alone (a run of group [n] may name it: its position is the start of the frame that follows), the frame
+   that holds [n] ended after it (the groups after [n] taken out of it: its groups decoded and coded again into a frame
+   at the same place, whose first group is the same), the segment truncated after it, everything forced. Returns
+   false, and changes nothing, when no frame that checks holds group [n]. *)
+let cut_after disk dir id n =
+  let segs = List.sort compare (segments disk dir) in
+  match List.fold_left (fun acc s -> if s <= n then Some s else acc) None segs with
+  | None -> false
+  | Some s ->
+    let fd = disk.Disk.openf (path dir s) false in
+    let found =
+      Fun.protect ~finally:(fun () -> try disk.close fd with Disk.Io _ -> ()) @@ fun () ->
+      let r = reader disk fd in
+      let rec walk p =
+        match header_at r p with
+        | Some (len, f0, count, bc, _) when f0 <= n && body_checks r p len bc ->
+          if n <= f0 + count - 1 then Some (p, len, f0, count) else walk (p + fh + len + ft)
+        | _ -> None
+      in
+      let header_ok =
+        r.size >= seg_header
+        && (let hb = Bytes.create seg_header in
+            disk.pread fd 0 hb 0 seg_header;
+            match read_header hb id (segment_name s) with Some f -> f = s | None -> false | exception Damaged _ -> false)
+      in
+      match if header_ok then walk seg_header else None with
+      | None -> false
+      | Some (p, len, f0, count) ->
+        let stop =
+          if n = f0 + count - 1 then p + fh + len + ft
+          else begin
+            let b = Bytes.create len in
+            disk.pread fd (p + fh) b 0 len;
+            let rd = Codec.reader b 0 len in
+            let out = Buffer.create len in
+            for _ = f0 to n do Group.encode out (Group.decode rd) done;
+            let f = frame_bytes out f0 (n - f0 + 1) in
+            disk.pwrite fd p f 0 (Bytes.length f);
+            p + Bytes.length f
+          end
+        in
+        disk.truncate fd stop;
+        disk.fsync fd;
+        true
+    in
+    if found then begin
+      List.iter
+        (fun s' ->
+          if s' > n + 1 then disk.remove (path dir s')
+          else if s' = n + 1 then begin
+            let fd = disk.openf (path dir s') false in
+            Fun.protect ~finally:(fun () -> disk.close fd) (fun () -> disk.truncate fd seg_header; disk.fsync fd)
+          end)
+        segs;
+      disk.sync_dir dir
+    end;
+    found
+
 
 (* The groups after [after], in order, without changing a file: the scan starts at the segment that holds group
    [after + 1], and the frames before it are checked by their CRCs but not decoded. For a database open in this
