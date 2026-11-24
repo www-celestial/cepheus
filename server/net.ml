@@ -620,7 +620,9 @@ let open_databases ?(replica = None) ?raft (cfg : Config.t) wal =
           let core =
             { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions;
               more = (fun () -> Follow.status follow @ Watch.status watch @ !lines ()); hub = (fun () -> Watch.hub watch);
-              files = Files.cell ~master:(fun () -> Files.master_file (Config.vault_key_path cfg)) (Filename.concat dir "vault") }
+              files =
+                Files.cell ~master:(fun () -> Files.master_file (Config.vault_key_path cfg))
+                  ~existing:(fun () -> Files.master_file ~make:false (Config.vault_key_path cfg)) (Filename.concat dir "vault") }
           in
           Ok ({ core; live; follow; watch; page; checkpointed = (Atomic.get e.published).group; replica = is_replica }, lines))
   in
@@ -753,7 +755,7 @@ let serve (cfg : Config.t) =
         let cluster =
           match raft_log with
           | Some (Ok o) ->
-            let c = Cluster.create cfg o (Array.to_list (Array.map (fun d -> { Cluster.name = d.core.name; id = d.live.e.id; live = d.live }) dbs)) in
+            let c = Cluster.create cfg o (Array.to_list (Array.map (fun d -> { Cluster.name = d.core.name; id = d.live.e.id; live = d.live; files = d.core.files }) dbs)) in
             rep.on_raft <- Some (Cluster.serve_stream c);
             rep.on_copy <- Some (Cluster.serve_copy c);
             Some c
@@ -788,6 +790,7 @@ let serve (cfg : Config.t) =
             ~new_session:(fun () -> 1 + (Int64.to_int (String.get_int64_le (Tokens.random 8) 0) land 0x3FFF_FFFF_FFFF_FFFF))
             ~more:(fun () -> if raft then raft_status () else Wal.status wal @ Replica.server_lines rep)
             ~read_only:(fun () -> Replica.read_only rep) ?lead:(Option.map Cluster.lead cluster) ~raft
+            ?files_commit:(Option.map Cluster.files_commit cluster) ?files_erase:(Option.map Cluster.files_erase cluster)
             ~members:(if raft then List.map (Config.client_address cfg) cfg.peers else []) ~ops ()
         in
         (* TLS for TCP: the server's certificate and key; programs show no certificate (a token) *)
@@ -938,6 +941,9 @@ let serve (cfg : Config.t) =
           (* a restart on a copy of the databases (Cluster.restart) is no stop for systemd *)
           if not (Atomic.get Cluster.restart) then notify "STOPPING=1";
           log "stopping";
+          (* a Raft cluster's leader hands its leadership over first (writes and reads paused, at most two election
+             timeouts) *)
+          Option.iter Cluster.hand_over cluster;
           Atomic.set srv.stopping true;
           Atomic.set accepting false;
           (* a replica's followers end, every frame they gave durable *)

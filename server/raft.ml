@@ -33,7 +33,13 @@
      leader or committed an entry with its vote or acknowledgement holds one of them): its term becomes their newest,
      its vote in it its own (it may have voted in it), its repair mark their newest last index (the 2018 rule: it
      votes again once it holds every entry up to it from a leader that committed it); or with a majority, itself
-     included, of fresh servers only (a new cluster: nothing was ever committed that a majority remembers).
+     included, of fresh servers only (a new cluster: nothing was ever committed that a majority remembers);
+   - leadership handed over (thesis 3.10): the leader stops taking proposals and serving reads (its lease given up
+     first: the votes that follow do not wait for the promises it rests on), waits until the most up-to-date peer it
+     heard lately holds its whole log forced, and sends it Timeout_now; that peer stands for election at once, with no
+     pre-vote, asking Vote_now, which a voter grants despite stickiness (the thesis' flag, 4.2.3), on the same rules
+     otherwise (one vote a term, a log at least as up to date, not damaged, not fresh). The leader gives up after two
+     election timeouts, and leads again.
 
    Indexes start at 1. The log in memory is the terms (and sizes) of the entries from [start]; the entries' bytes are
    the transport's and the disk's (Raftlog). *)
@@ -56,6 +62,8 @@ type msg =
   | Snap of { term : int; seq : int; index : int; index_term : int; commit : int; floor : int }
       (** the leader's log starts after [index], whose term is [index_term]: a follower that does not hold that entry
           takes a copy of the databases; answered as an Append whose entries end at [index] *)
+  | Timeout_now of { term : int }  (** the leader hands over to the receiver: stand for election now *)
+  | Vote_now of { term : int; last_index : int; last_term : int }  (** a vote request of a handover: not sticky *)
   | Ask  (** a fresh server asks for the sender's state *)
   | State of { term : int; last_index : int; fresh : bool }  (** the answer *)
 
@@ -119,6 +127,7 @@ type t = {
   mutable seq : int;
   mutable pins : (int * int) list;  (* (index, until ms): a copy being made at that index needs the entries after it *)
   mutable inert : bool;  (* a copy will be installed at the next start: nothing more is answered or stood for *)
+  mutable handing : (int * int) option;  (* the leader hands over: to this peer, until this time (ms) *)
   mutable fx : action list;  (* newest first *)
 }
 
@@ -155,7 +164,7 @@ let make ~me ~n ~election_ms ~heartbeat_ms ~floor_ms ~rng ~now ~term ~vote ~repa
       persisted = start + len - 1; gen = 0; commit = 0; floor = 0; role = Follower; leader = -1; votes = Array.make n false;
       deadline = 0; heard = min_int / 2; started = now; verified = 0;
       peers = Array.init n (fun _ -> { next = 1; matched = 0; probing = true; last_send = 0; last_seq = 0; sent = Queue.create (); acked_at = min_int / 2; contact = 0 });
-      noop = 0; seq = 0; pins = []; inert = false; fx = [] }
+      noop = 0; seq = 0; pins = []; inert = false; handing = None; fx = [] }
   in
   t.commit <- min (last_index t) (max commit (start - 1));
   t.deadline <- random_timeout t now;
@@ -210,6 +219,7 @@ let set_term t term =
 
 let become_follower t now ~term ~leader =
   let was = t.role = Leader in
+  t.handing <- None;
   set_term t term;
   t.role <- Follower;
   (* its committed entries are any leader's: known to match the new one *)
@@ -350,7 +360,15 @@ let quorum_time t now f =
 let lease_ms t = t.election_ms * 9 / 10
 
 (* reads on this server are linearizable until this time (ms), if it leads *)
-let lease_until t now = if t.role = Leader then quorum_time t now (fun p -> p.acked_at) + lease_ms t else min_int
+let lease_until t now = if t.role = Leader && t.handing = None then quorum_time t now (fun p -> p.acked_at) + lease_ms t else min_int
+
+(* the handover: Timeout_now once its peer holds the whole log forced; given up at its time (the leader leads on) *)
+let hand t now =
+  match t.handing with
+  | Some (k, until) when t.role = Leader ->
+    if now >= until then t.handing <- None
+    else if t.peers.(k).matched >= last_index t then emit t (Send (k, Timeout_now { term = t.term }))
+  | _ -> t.handing <- None
 
 (* ---- inputs ---- *)
 
@@ -386,7 +404,7 @@ let tick t now =
       t.deadline <- random_timeout t now;
       emit t Unlead
     end
-    else pump t now
+    else (pump t now; hand t now)
   | Follower | Pre_candidate | Candidate ->
     if now >= t.deadline then
       if t.repair > 0 then t.deadline <- random_timeout t now  (* damaged: stands for no election *)
@@ -440,8 +458,8 @@ and receive_fresh t _now k msg =
   | Ask -> emit t (Send (k, State { term = t.term; last_index = last_index t; fresh = true }))
   | State { term; last_index; fresh } -> t.told.(k) <- Some (term, last_index, fresh); end_fresh t
   | Pre_vote _ -> emit t (Send (k, Pre_vote_reply { term = t.term; granted = false }))
-  | Vote _ -> emit t (Send (k, Vote_reply { term = t.term; granted = false }))
-  | Pre_vote_reply _ | Vote_reply _ | Append _ | Append_reply _ | Snap _ -> ()
+  | Vote _ | Vote_now _ -> emit t (Send (k, Vote_reply { term = t.term; granted = false }))
+  | Pre_vote_reply _ | Vote_reply _ | Append _ | Append_reply _ | Snap _ | Timeout_now _ -> ()
 
 and receive_ t now k msg =
   match msg with
@@ -454,23 +472,27 @@ and receive_ t now k msg =
     if (not granted) && term > t.term then become_follower t now ~term ~leader:(-1)
     else if t.role = Pre_candidate && term = t.term + 1 && granted then begin
       t.votes.(k) <- true;
-      if count t >= majority t then begin
-        t.term <- t.term + 1;
-        t.vote <- t.me;
-        emit t Save;
-        t.role <- Candidate;
-        t.leader <- -1;
-        Array.fill t.votes 0 t.n false;
-        t.votes.(t.me) <- true;
-        t.deadline <- random_timeout t now;
-        for j = 0 to t.n - 1 do
-          if j <> t.me then emit t (Send (j, Vote { term = t.term; last_index = last_index t; last_term = last_term t }))
-        done
-      end
+      if count t >= majority t then stand t now ~handed:false
     end
+  | Timeout_now { term } ->
+    (* the leader hands over: an election at once, no pre-vote, its votes asked for despite stickiness *)
+    if term = t.term && t.role = Follower && t.leader = k && t.repair = 0 then stand t now ~handed:true
+  | Vote_now { term; last_index; last_term } -> vote t now k ~term ~last_index ~last_term
   | Vote { term; last_index; last_term } ->
     if sticky t now then emit t (Send (k, Vote_reply { term = t.term; granted = false }))
-    else begin
+    else vote t now k ~term ~last_index ~last_term
+  | Vote_reply { term; granted } ->
+    if term > t.term then become_follower t now ~term ~leader:(-1)
+    else if t.role = Candidate && term = t.term && granted then begin
+      t.votes.(k) <- true;
+      if count t >= majority t then become_leader t now
+    end
+  | Append { term; seq; prev_index; prev_term; terms; sizes; commit; floor } -> append t now k ~term ~seq ~prev_index ~prev_term ~terms ~sizes ~commit ~floor
+  | Snap _ | Ask | State _ | Append_reply _ -> receive_more t now k msg
+
+(* a vote request of [term] (sticky or not, decided before) *)
+and vote t now k ~term ~last_index ~last_term =
+    begin
       if term > t.term then become_follower t now ~term ~leader:(-1);
       let granted = term = t.term && (t.vote = -1 || t.vote = k) && t.repair = 0 && up_to_date t ~last_index ~last_term in
       if granted then begin
@@ -479,13 +501,25 @@ and receive_ t now k msg =
       end;
       emit t (Send (k, Vote_reply { term = t.term; granted }))
     end
-  | Vote_reply { term; granted } ->
-    if term > t.term then become_follower t now ~term ~leader:(-1)
-    else if t.role = Candidate && term = t.term && granted then begin
-      t.votes.(k) <- true;
-      if count t >= majority t then become_leader t now
-    end
-  | Append { term; seq; prev_index; prev_term; terms; sizes; commit; floor } ->
+
+(* this server stands for election: its term raised, its vote for itself forced, votes asked for; [handed]: the
+   leader handed over to it (Vote_now) *)
+and stand t now ~handed =
+  t.term <- t.term + 1;
+  t.vote <- t.me;
+  emit t Save;
+  t.role <- Candidate;
+  t.leader <- -1;
+  Array.fill t.votes 0 t.n false;
+  t.votes.(t.me) <- true;
+  t.deadline <- random_timeout t now;
+  for j = 0 to t.n - 1 do
+    if j <> t.me then
+      let last_index = last_index t and last_term = last_term t in
+      emit t (Send (j, if handed then Vote_now { term = t.term; last_index; last_term } else Vote { term = t.term; last_index; last_term }))
+  done
+
+and append t now k ~term ~seq ~prev_index ~prev_term ~terms ~sizes ~commit ~floor =
     if term < t.term then reply_append t k ~seq ~ok:false ~index:(last_index t)
     else begin
       if term > t.term || t.role <> Follower || t.leader <> k then become_follower t now ~term ~leader:k;
@@ -533,6 +567,9 @@ and receive_ t now k msg =
         end
       end
     end
+
+and receive_more t now k msg =
+  match msg with
   | Snap { term; seq; index; index_term; commit; floor } ->
     if term < t.term then reply_append t k ~seq ~ok:false ~index:(last_index t)
     else begin
@@ -575,6 +612,7 @@ and receive_ t now k msg =
       end;
       pump t now
     end
+  | Pre_vote _ | Pre_vote_reply _ | Vote _ | Vote_reply _ | Append _ | Timeout_now _ | Vote_now _ -> ()
 
 (* the disk forced the log up to [i] (in generation [gen]) *)
 let persisted t ~gen i =
@@ -591,14 +629,31 @@ let persisted t ~gen i =
 
 (* a leader's new entry: its index, or None if this server does not lead *)
 let propose t now size =
-  if t.role <> Leader then None
+  if t.role <> Leader || t.handing <> None then None
   else begin
     push t t.term size;
     pump t now;
     Some (last_index t)
   end
 
-let ready t = t.role = Leader && t.commit >= t.noop && not t.inert
+let ready t = t.role = Leader && t.commit >= t.noop && (not t.inert) && t.handing = None
+
+(* the leader hands over to the most up-to-date peer heard within an election timeout: true if one was chosen. From
+   now on it takes no proposal and serves no read (its lease is given up: [lease_until]) *)
+let hand_over t now =
+  if t.role <> Leader then false
+  else begin
+    let best = ref (-1) in
+    Array.iteri
+      (fun k p -> if k <> t.me && now - p.contact < t.election_ms && (!best < 0 || p.matched > t.peers.(!best).matched) then best := k)
+      t.peers;
+    if !best < 0 then false
+    else begin
+      t.handing <- Some (!best, now + (2 * t.election_ms));
+      hand t now;
+      true
+    end
+  end
 
 (* a copy at [index] whose entry there is of term [term] is installed at the next start, unless this log holds that
    entry (Raft's rule: its entries after it are kept, the copy is not needed) or its own start is past it: then

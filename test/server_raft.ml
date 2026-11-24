@@ -10,6 +10,11 @@
      time from the kill to the first write committed by the new leader is the failover time;
    - the old leader started again follows the new one and catches up; its data directory 0700, its Raft state and
      log 0600;
+   - the vault's files through the log: two files put through the leader (one sealed by an owner's key), read back
+     there; a follower without the cluster's vault.key waits (cepheus status says why), then takes them once the key
+     is copied; the leader killed: the new one gives both files' bytes; an owner's files erased there are erased;
+   - cepheus stop on the leader while a program writes: leadership handed over (Timeout_now), the writes paused far
+     less than an election timeout, none it was told committed lost;
    - the peer port refuses a peer of protocol 1, a certificate of the cluster's CA for a name no peer has, and a
      certificate of another CA.
    - a load, a change of the rules (computed in the leader's background) beside groups that count with one counter
@@ -55,7 +60,8 @@ let () =
     match Sys.argv with
     | [| _; d |] -> d, 0
     | [| _; d; "failover"; n |] -> d, int_of_string n
-    | _ -> prerr_endline "server_raft.exe DIR [failover N]"; exit 2
+    | [| _; d; "handover"; _ |] -> d, 0
+    | _ -> prerr_endline "server_raft.exe DIR [failover N | handover N]"; exit 2
   in
   C.rmrf dir;
   Unix.mkdir dir 0o700;
@@ -271,6 +277,103 @@ let () =
   C.check (mode c0.data = 0o700 && mode rdir = 0o700) "the data directory and its raft folder are 0700";
   C.check (mode (Filename.concat rdir "state") = 0o600) "the Raft state is 0600";
   C.check (List.for_all (fun f -> mode (Filename.concat rdir f) = 0o600) (List.filter (fun f -> String.length f > 4 && String.sub f 0 4 = "log.") (Array.to_list (Sys.readdir rdir)))) "the Raft log's segments are 0600";
+  (* the leader stopped (cepheus stop) while a program writes: the longest pause between two writes committed, the
+     writes it was told committed and missing, whether the stopped leader's log says it handed over; then it is
+     started again and catches up *)
+  let handover () =
+    let ll = await_leader "a leader" in
+    let stop = Atomic.make false and times = ref [] and mine = ref [] and k = ref 0 in
+    let wr =
+      Thread.create
+        (fun () ->
+          while not (Atomic.get stop) do
+            incr k;
+            let v = 50_000_000 + !k in
+            match Client.write w mdb [ Resolve.Add (-1, mp, Int v) ] with
+            | Ok _ -> times := Unix.gettimeofday () :: !times; mine := v :: !mine
+            | Error e -> Printf.printf "write error %s %s\n%!" e.code e.message
+          done)
+        ()
+    in
+    Thread.delay 0.4;
+    let t_stop = Unix.gettimeofday () in
+    ignore (run [ "stop"; "--config"; cfgs.(ll) ]);
+    ignore (Serve.wait pids.(ll));
+    alive.(ll) <- false;
+    ignore (await_leader ~ok:(fun k -> k <> ll && stat k "raft.ready" = "true") "a new leader");
+    Thread.delay 0.4;
+    Atomic.set stop true;
+    Thread.join wr;
+    let ts = List.rev !times in
+    let rec gaps acc = function a :: (b :: _ as r) -> gaps (if b >= t_stop -. 0.05 then max acc (b -. a) else acc) r | _ -> acc in
+    let gap = gaps 0. ts *. 1000. in
+    let lost = List.length (List.filter (fun v -> match Client.find w mdb { Query.vars = 1; where = [ { Query.e = Var 0; p = mp; v = Val (Int v) } ]; ranges = [] } with Ok (_, []) -> true | Ok _ -> false | Error _ -> true) !mine) in
+    let log_text = In_channel.with_open_bin (Filename.concat (Filename.dirname cfgs.(ll)) "serve.log") In_channel.input_all in
+    let has s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
+    pids.(ll) <- Serve.start bin cfgs.(ll);
+    alive.(ll) <- true;
+    wait_socket (sock ll);
+    let same () = match leader () with Some l -> List.for_all (fun db -> let g = group l db in List.for_all (fun k -> group k db = g) [ 0; 1; 2 ]) [ "main"; "side" ] | None -> false in
+    wait_for "the stopped leader catches up" same;
+    gap, lost, has log_text "leadership handed over"
+  in
+  (* [handover N] (a measure, not a test): N clean stops of the leader under writes, each the writes' longest pause *)
+  if Array.length Sys.argv = 4 && Sys.argv.(2) = "handover" then begin
+    let n = int_of_string Sys.argv.(3) in
+    for r = 1 to n do
+      let gap, lost, handed = handover () in
+      Printf.printf "round %d: the writes paused %.1f ms at the leader's stop (%s), %d lost\n%!" r gap (if handed then "handed over" else "not handed over") lost
+    done;
+    Client.close w;
+    Array.iteri (fun k c -> if alive.(k) then (ignore (run [ "stop"; "--config"; c ]); ignore (Serve.wait pids.(k)))) cfgs;
+    C.rmrf dir;
+    exit 0
+  end;
+  (* the vault's files: the cluster's key on every server but one follower *)
+  let lv = await_leader "a leader" in
+  let fv = (lv + 1) mod 3 in
+  let key = String.init 32 (fun i -> Char.chr ((i * 41 + 7) land 255)) in
+  let key_path k = Filename.concat (Filename.dirname cfgs.(k)) "vault.key" in
+  let put_key k = let fd = Unix.openfile (key_path k) [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL ] 0o600 in ignore (Unix.write_substring fd key 0 32); Unix.close fd in
+  List.iter (fun k -> if k <> fv then put_key k) [ 0; 1; 2 ];
+  let mdb2, fps =
+    match Client.declare w "main" [ prop "doc/Name" Ttext; prop "doc/Size" Tint; prop "doc/Type" Ttext; prop "doc/Owner" Tlink; prop "doc/Content" Ttext; prop "who" Ttext ] with
+    | Ok (db, ps) -> db, ps
+    | Error e -> failwith ("declare: " ^ e.message)
+  in
+  let[@warning "-8"] [ _; _; _; _; pcontent; pwho ] = fps in
+  let bytes n seed = String.init n (fun i -> Char.chr ((((i * 2654435761) lxor seed) lsr 7) land 255)) in
+  let f1 = bytes (3 lsl 20) 1 and f2 = bytes 700_000 2 in
+  let owner = match Client.write w mdb2 [ Resolve.Add (-1, pwho, Text "an owner") ] with Ok r -> List.assoc (-1) r.things | Error e -> failwith e.message in
+  let put name ?owner data =
+    match Client.put w mdb2 ~kind:"doc" ~name ?owner data with Ok r -> List.assoc (-1) r.things | Error e -> C.check false "a put in the cluster: %s %s" e.code e.message; -1
+  in
+  let t1 = put "one" f1 and t2 = put "two" ~owner f2 in
+  let loaded th = match Client.load w mdb2 ~thing:th ~prop:pcontent () with Ok s -> s | Error e -> "error " ^ e.code in
+  C.check (loaded t1 = f1 && loaded t2 = f2) "two files put in the cluster, read back on the leader";
+  wait_for ~limit:30. "the follower without the key says so" (fun () -> List.mem_assoc "raft.files" (status fv));
+  C.check true "a follower without the cluster's vault.key waits: %s" (stat fv "raft.files");
+  put_key fv;
+  let same_main () = match leader () with Some l -> let g = group l "main" in List.for_all (fun k -> group k "main" = g) [ 0; 1; 2 ] | None -> false in
+  wait_for ~limit:30. "the follower takes the files once the key is there" (fun () -> same_main () && not (List.mem_assoc "raft.files" (status fv)));
+  C.check true "with the key copied, it takes them (main at %d)" (group lv "main");
+  Unix.kill pids.(lv) Sys.sigkill;
+  ignore (Serve.wait pids.(lv));
+  alive.(lv) <- false;
+  let lw = await_leader ~ok:(fun k -> k <> lv && stat k "raft.ready" = "true") "a new leader" in
+  C.check (loaded t1 = f1 && loaded t2 = f2) "the new leader %s gives both files' bytes" (List.nth names lw);
+  (match Client.erase w mdb2 ~owner with
+   | Ok () -> C.check (String.length (loaded t2) >= 6 && String.sub (loaded t2) 0 6 = "error ") "an owner's files erased through the log: %s" (loaded t2)
+   | Error e -> C.check false "an erasure in the cluster: %s %s" e.code e.message);
+  C.check (loaded t1 = f1) "the database's own file still there";
+  pids.(lv) <- Serve.start bin cfgs.(lv);
+  alive.(lv) <- true;
+  wait_socket (sock lv);
+  wait_for ~limit:30. "the old leader catches up" same_main;
+  (* cepheus stop on the leader under writes: its leadership handed over *)
+  let gap, lost, handed = handover () in
+  C.check (handed && gap < float !Cluster.election_ms) "cepheus stop on the leader: handed over, the writes paused %.1f ms" gap;
+  C.check (lost = 0) "no write it was told committed lost (%d)" lost;
   (* the peer port refuses *)
   let c1 = Result.get_ok (Config.load cfgs.(1)) in
   let target = List.nth c1.peers l1 in

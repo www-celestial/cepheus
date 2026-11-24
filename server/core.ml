@@ -35,7 +35,11 @@ type t = {
   lead : unit -> (string * string * string) option;
       (* a Raft cluster: None while this server leads (ready, under its lease); else the code (not_leader, no_leader),
          why, and the leader's address for programs ("" if none): neither reads nor writes are served *)
-  raft : bool;  (* a member of a Raft cluster: no local reads, no files yet (next steps) *)
+  raft : bool;  (* a member of a Raft cluster: no local reads *)
+  files_commit : string -> domain:int -> root:string -> (unit, string * string) result;
+      (* a Raft cluster: the records of a file (and its domain's key) through the log, before its facts are written:
+         Ok once a majority holds them *)
+  files_erase : string -> int -> (unit, string * string) result;  (* a Raft cluster: an owner's files erased by every server *)
   members : string list;  (* a Raft cluster: every member's address for programs, sent after Welcome's fields *)
   ops : string -> ((string * string) list, string * string) result option;  (* admin operations beyond status *)
   started : int;
@@ -82,11 +86,12 @@ and conn = {
 }
 
 let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> [])
-    ?(read_only = fun () -> None) ?(lead = fun () -> None) ?(raft = false) ?(members = []) ?(ops = fun _ -> None) () =
+    ?(read_only = fun () -> None) ?(lead = fun () -> None) ?(raft = false) ?(members = []) ?(ops = fun _ -> None)
+    ?(files_commit = fun _ ~domain:_ ~root:_ -> Ok ()) ?(files_erase = fun _ _ -> Error ("invalid", "no Raft cluster")) () =
   let by_name = Hashtbl.create 8 in
   Array.iter (fun d -> Hashtbl.replace by_name d.name d) dbs;
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
-    max_inflight; more; read_only; lead; raft; members; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1;
+    max_inflight; more; read_only; lead; raft; files_commit; files_erase; members; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1;
     watches = Atomic.make 0; kept = Atomic.make 0 }
 
 let connect ?(wake = ignore) ?(close = ignore) ?(gone = fun () -> false) srv ~flush ~submit =
@@ -590,9 +595,14 @@ let put_end c ~id d (st : Files.put) =
   | Wire.Put p -> (
     match Vault.finish st.w with
     | Error e -> vault_err c ~id ~kind:Wire.k_put e
-    | Ok (root, size) ->
-      write c ~id ~kind:Wire.k_put d ~serial:p.serial ~floor:p.floor ~by:p.by ~why:p.why
-        (Files.facts st.p ~name:p.name ~typ:p.typ ~owner:p.owner ~size ~root))
+    | Ok (root, size) -> (
+      (* a Raft cluster: the file's records on a majority before its facts (G22 on every server); this connection
+         waits for it *)
+      match if c.srv.raft then c.srv.files_commit d.name ~domain:p.owner ~root else Ok () with
+      | Error (code, m) -> err c ~id ~kind:Wire.k_put code "%s" (if code = "io" then hidden c ~id ~kind:Wire.k_put m else m)
+      | Ok () ->
+        write c ~id ~kind:Wire.k_put d ~serial:p.serial ~floor:p.floor ~by:p.by ~why:p.why
+          (Files.facts st.p ~name:p.name ~typ:p.typ ~owner:p.owner ~size ~root)))
   | _ -> ()
 
 let put_feed c ~id ~more d (st : Files.put) data =
@@ -928,7 +938,6 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
           let more = flags land Wire.f_more <> 0 in
           (match writable c ~id ~kind p.db with
            | None -> ()
-           | Some d when c.srv.raft -> err c ~id ~kind "invalid" "the files of %s: a Raft cluster holds no files yet" d.name
            | Some d -> put_start c ~id ~more d req);
           Continue
         | _, Wire.Piece data ->
@@ -947,8 +956,12 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
            | None -> ()
            | Some d when c.rights.(e.db) <> Some Tokens.Write -> err c ~id ~kind "denied" "erasing an owner's files needs a right to write all of %s" d.name
            | Some _ when c.srv.read_only () <> None -> err c ~id ~kind "read_only" "%s" (Option.get (c.srv.read_only ()))
-           | Some d when c.srv.raft -> err c ~id ~kind "invalid" "the files of %s: a Raft cluster holds no files yet" d.name
            | Some _ when e.owner <= 0 -> err c ~id ~kind "invalid" "an erasure names an owner, a thing: the database's own key (0) is never erased"
+           | Some d when c.srv.raft -> (
+             (* through the log: every server erases it once committed *)
+             match c.srv.files_erase d.name e.owner with
+             | Ok () -> reply c ~id ~kind Wire.Erased
+             | Error (code, m) -> err c ~id ~kind code "%s" (if code = "io" then hidden c ~id ~kind m else m))
            | Some d -> (
              match Files.vault d.files with
              | Error m -> err c ~id ~kind "io" "the vault of %s: %s" d.name (hidden c ~id ~kind m)

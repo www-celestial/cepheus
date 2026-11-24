@@ -132,6 +132,7 @@ let catchup src =
      let rl, r = Raftlog.open_ Disk.real (cfg.data // "raft") ~cluster:cfg.id in
      C.check (r.start = 8 && r.prev_term = 2 && Array.length r.terms = 0) "the log starts after the copy's index (%d, term %d)" r.start r.prev_term;
      Raftlog.close rl
+   | Catchup.Installed x -> C.fail "a whole copy installed at %d, not 7" x
    | Catchup.Refused m -> C.fail "a whole copy refused: %s" m
    | Catchup.Dropped _ -> C.fail "a whole copy dropped");
   (* the install repeated after a crash in it: the index still there, the database already moved *)

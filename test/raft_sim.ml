@@ -18,6 +18,10 @@
    the server starts again on it, the install repeated by a start a crash cut. The leader's floor waits for a silent
    peer 200 to 2,200 ms (the server: 5 minutes), so that servers down longer take copies.
 
+   Clean stops of the leader (cepheus stop): it hands its leadership over (Timeout_now to the most up-to-date peer,
+   which stands at once and is voted for despite stickiness), then stops once it no longer leads or after two
+   election timeouts; reads and writes are not served meanwhile.
+
    Entries are the server's (Cluster): a write is a frame, one in eight a large one, carried in pieces of 64 to 320
    bytes proposed at once (Cluster's rules: a sequence is applied whole at its last piece, read back from the log, and
    never once broken by a newer term; the log is not cut, nor a copy made, inside an open one).
@@ -78,6 +82,7 @@ type server = {
   mutable lives : int;  (* starts: a copy from a server that died meanwhile breaks *)
   mutable sound : bool;  (* neither damaged (the 2018 rule) nor lost (fresh) when last seen up *)
   seqs : (string, Cluster.seq) Hashtbl.t;  (* the sequences of pieces not whole, as the apply thread keeps them *)
+  mutable stop_at : int;  (* a clean stop under way: the server stops then, or once it no longer leads *)
   mutable held_upto : int;
       (* the state machine holds the entries up to this one already (its checkpoint, or a copy, is ahead of the log a
          start found): applied again, tracked, and their writes skipped (the server: their groups skipped) *)
@@ -295,6 +300,7 @@ let crash w s ~power =
   count (if power then "power losses" else "deaths");
   s.core <- None;
   s.copying <- None;
+  s.stop_at <- max_int;
   (match s.rlog with Some l -> (try Raftlog.close l with _ -> ()) | None -> ());
   s.rlog <- None;
   s.dq <- [];
@@ -515,6 +521,13 @@ let faults w =
   Array.iter
     (fun s ->
       if s.core <> None && Rng.chance w.r 0.0008 then crash w s ~power:(Rng.bool w.r);
+      (* a clean stop of the leader: its leadership handed over first *)
+      (match s.core with
+       | Some c when c.role = Raft.Leader && s.stop_at = max_int && Rng.chance w.r 0.0006 ->
+         if Raft.hand_over c (clock w s) then (count "handovers begun"; tr w "server %d hands over" s.id);
+         s.stop_at <- w.now + (2 * election);
+         guard w s (fun () -> run w s)
+       | _ -> ());
       if s.core <> None && Rng.chance w.r 0.001 then (count "pauses"; s.paused_until <- w.now + 50 + Rng.int w.r 350))
     w.servers
 
@@ -550,7 +563,14 @@ let step w =
         disk_step w s;
         if s.core <> None && (w.now + s.id) mod tick = 0 then guard w s (fun () -> Raft.tick (core s) (clock w s); run w s);
         if s.core <> None && (w.now + 7 * s.id) mod 300 = 0 then checkpoint w s;
-        if s.core <> None then copy_step w s
+        if s.core <> None then copy_step w s;
+        (* the clean stop's end: once this server no longer leads, or at its time *)
+        match s.core with
+        | Some c when s.stop_at <> max_int && (c.role <> Raft.Leader || w.now >= s.stop_at) ->
+          count (if c.role <> Raft.Leader then "handovers done" else "handovers given up");
+          tr w "server %d stops cleanly (%s)" s.id (if c.role <> Raft.Leader then "handed over" else "as the leader");
+          crash w s ~power:false
+        | _ -> ()
       end)
     w.servers;
   if w.faults then faults w;
@@ -689,7 +709,7 @@ let run_seed ~n seed =
     Array.init n (fun id ->
         let sim = Sim_disk.create (Rng.split r) in
         { id; sim; disk = Sim_disk.disk sim; core = None; rlog = None; dq = []; pend = []; rate = 0.97 +. (0.06 *. float (Rng.int r 1000) /. 1000.);
-          kv = []; applied = 0; ckpt = 0, []; paused_until = 0; up_at = 0; waiting = []; copying = None; fetch_after = 0; lives = 0; sound = true; seqs = Hashtbl.create 2; held_upto = 0 })
+          kv = []; applied = 0; ckpt = 0, []; paused_until = 0; up_at = 0; waiting = []; copying = None; fetch_after = 0; lives = 0; sound = true; seqs = Hashtbl.create 2; held_upto = 0; stop_at = max_int })
   in
   let w =
     { seed; r; n; servers; net = []; cut = Array.make_matrix n n false; now = 0; leaders = Hashtbl.create 16; applied_at = Hashtbl.create 256;

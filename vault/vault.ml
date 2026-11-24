@@ -1087,6 +1087,25 @@ let add_raw t (r : Bytes.t) =
 
 let sync t = guard (fun () -> force t)
 
+(* the names of every record of the file of [root]: its nodes (the root first, each before its children) and its
+   chunks, to give a copy the sealed bytes of a file *)
+let tree t root =
+  guard (fun () ->
+      let acc = ref [] in
+      let rec walk name =
+        acc := name :: !acc;
+        let n = node_of t name in
+        for i = 0 to Array.length n.ends - 1 do
+          let child = String.sub n.names (32 * i) 32 in
+          if n.level = 0 then acc := child :: !acc else walk child
+        done
+      in
+      walk root;
+      List.rev !acc)
+
+(* the key entry of domain [d] (its key sealed by the master key), if the vault holds it *)
+let domain_entry t d = lock_ t.im (fun () -> Hashtbl.find_opt t.sealed_keys d)
+
 (* the keys' entries (each domain's key sealed by the master key, and the domains erased), to give a copy that has
    the same master key *)
 let key_entries t =
