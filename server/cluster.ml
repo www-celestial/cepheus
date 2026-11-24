@@ -329,6 +329,7 @@ type t = {
   sm : Mutex.t;
   mutable damage : string option;
   seqs : (string, seq) Hashtbl.t;  (* the apply thread's sequences of pieces not whole *)
+  mutable redo : int list;  (* the vault entries up to the applied index at the start: applied again first *)
   open_first : int Atomic.t;  (* the first entry they need *)
   fetching : bool Atomic.t;  (* a copy of the databases is being taken from a peer *)
   mutable fetch_after : float;  (* the next try after a refused or broken one (under sm) *)
@@ -719,16 +720,16 @@ let apply_erase t ~eid ~domain = apply_vault t eid (Printf.sprintf "the erasure 
 let apply_loop t () =
   (* the vault entries up to the point the apply starts from: applied again (they may not have been before a crash:
      the commit hint passes what was applied) *)
-  (match
-     Raftlog.iter t.rlog ~from:t.core.start ~upto:(Atomic.get t.applied) (fun _ _ d ->
-         if t.failed = None && not (Atomic.get t.stopping) then
-           match decode_entry d with
-           | Some (Records { rid; keys; records }) -> (match apply_records t ~rid ~keys ~records with Error m -> fail t m | Ok _ -> ())
-           | Some (Erase { eid; domain }) -> (match apply_erase t ~eid ~domain with Error m -> fail t m | Ok _ -> ())
-           | _ -> ())
-   with
-   | () -> ()
-   | exception Raftlog.Damaged m -> fail t m);
+  List.iter
+    (fun i ->
+      if t.failed = None && not (Atomic.get t.stopping) then
+        match Option.map (fun (_, d) -> decode_entry d) (entry t i) with
+        | Some (Some (Records { rid; keys; records })) -> (match apply_records t ~rid ~keys ~records with Error m -> fail t m | Ok _ -> ())
+        | Some (Some (Erase { eid; domain })) -> (match apply_erase t ~eid ~domain with Error m -> fail t m | Ok _ -> ())
+        | _ -> ()
+        | exception Raftlog.Damaged m -> fail t m)
+    t.redo;
+  t.redo <- [];
   while not (Atomic.get t.stopping) && t.failed = None do
     let upto =
       Mutex.protect t.m (fun () ->
@@ -946,7 +947,7 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
       serve_until = Atomic.make 0;
       outs = Array.mapi (fun _ p -> { peer = p; oq = Queue.create (); om = Mutex.create (); oc = Condition.create (); link = None; thread = None }) (Array.of_list cfg.peers);
       stopping = Atomic.make false; threads = []; failed = None; streams = Hashtbl.create 4; sm = Mutex.create (); damage = r.damage;
-      seqs = Hashtbl.create 4; open_first = Atomic.make max_int;
+      seqs = Hashtbl.create 4; redo = []; open_first = Atomic.make max_int;
       fetching = Atomic.make false; fetch_after = 0.; fetch_wait = 0.; fetch_note = ""; files_note = "" }
   in
   List.iter (fun d -> Hashtbl.replace t.dbs d.id d; d.live.propose <- propose t d.id) dbs;
@@ -954,7 +955,11 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
   Atomic.set t.applied (max (core.start - 1) (min core.commit (Raftlog.next o.rlog - 1)));
   (* the sequences of pieces open at that point, which the apply thread goes on with *)
   Raftlog.iter o.rlog ~from:core.start ~upto:(Atomic.get t.applied) (fun i tm d ->
-      match decode_entry d with Some e -> ignore (track t.seqs i tm e) | None -> ());
+      match decode_entry d with
+      | Some ((Records _ | Erase _) as e) -> ignore (track t.seqs i tm e); t.redo <- i :: t.redo
+      | Some e -> ignore (track t.seqs i tm e)
+      | None -> ());
+  t.redo <- List.rev t.redo;
   Atomic.set t.open_first (open_first t.seqs);
   t
 
