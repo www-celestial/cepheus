@@ -15,7 +15,13 @@
                                                   a certificate of the cluster's CA for NAME and its hosts
      cepheus replicate PEER --config FILE         this server (stopped) becomes a replica of PEER at its next start
      cepheus promote [--force] --config FILE      the running replica becomes a primary (an admin token in
-                                                  CEPHEUS_TOKEN); --force without its primary's handover *)
+                                                  CEPHEUS_TOKEN); --force without its primary's handover
+     cepheus verify DIR                           a database's files checked, nothing changed; each damage named
+     cepheus backup --config FILE DEST            every database of FILE's server copied while it serves, into
+                                                  DEST/DATE, checked
+     cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]
+                                                  a backup restored into DIR, up to a group or a time
+   verify, backup and restore: server/ops.ml; their exit status: 0 done, 1 damage found, 2 refused or failed *)
 
 open Cepheus_server
 
@@ -29,7 +35,11 @@ let usage () =
     \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n\
     \       cepheus replicate PEER --config FILE\n\
     \       cepheus promote [--force] --config FILE\n\
-    \       cepheus import|export DB ... --config FILE (cepheus import --help)\n";
+    \       cepheus import|export DB ... --config FILE (cepheus import --help)\n\
+    \       cepheus verify DIR\n\
+    \       cepheus backup --config FILE DEST\n\
+    \       cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]\n\
+    \       cepheus verify|backup|restore --help\n";
   exit 2
 
 let hosts = ref []
@@ -202,9 +212,92 @@ let cluster_init name dir =
   (try Unix.mkdir (Filename.concat dir "run") 0o750 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
   Printf.printf "%s\n" file
 
+(* ---- verify, backup, restore (server/ops.ml) ---- *)
+
+let verify_help =
+  "usage: cepheus verify DIR\n\n\
+   Checks a database's files as they are, changing nothing: every frame of its journal (its CRCs, its groups\n\
+   numbered), every run (as an open checks it, and every page against its CRC), each run's place in the journal,\n\
+   and the records of its vault by their CRCs. DIR is a database's folder (DATA/NAME), a backup's\n\
+   (DEST/DATE/NAME) or any copy. A database open in a server is checked up to the frame being written.\n\n\
+   Exit status: 0 whole; 1 damage found, each named on a line \"damaged: ...\"; 2 DIR holds no database, cannot\n\
+   be read, or must first be recovered by its server (start it and stop it).\n"
+
+let backup_help =
+  "usage: cepheus backup --config FILE DEST\n\n\
+   Copies every database of the server of FILE (cluster.toml) into DEST/DATE (local time, YYYY-MM-DDTHHMMSS)\n\
+   while it serves: no stop and no token, as the server's user (who reads its data directory). Each copy holds\n\
+   every group confirmed before its journal was copied, and its vault; it is checked as cepheus verify checks,\n\
+   and ended after its last whole frame. The folder takes its dated name only once every copy is whole and\n\
+   forced (DEST/DATE.partial until then; the next backup removes one a killed backup left). One backup into\n\
+   DEST at a time. Taken on a replica, it costs the primary nothing. Prints a line a database, then the folder.\n\n\
+   Exit status: 0 done; 1 a copy has damage (kept in DEST/DATE.damaged for a look); 2 refused or failed.\n"
+
+let restore_help =
+  "usage: cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]\n\n\
+   Restores the database of SRC (a backup's DEST/DATE/NAME, or a stopped database) into DIR: up to group N\n\
+   (--to-group), or up to the last group written at or before T (--to-time 2026-11-24T14:05[:SS] in local\n\
+   time, or UTC with a final Z), else to SRC's last group. DIR must be new or empty; --replace moves a database\n\
+   there aside first (DIR.before-restore-DATE, never removed). The copy is made in DIR.restoring, opened (its\n\
+   runs checked, the groups after its newest run replayed), verified, then renamed DIR. The restored database\n\
+   writes its next groups in a new epoch, so that a replica holding later groups of the old history is refused,\n\
+   never followed. Stop the server of DIR first, and start it after.\n\n\
+   Exit status: 0 restored; 1 SRC has damage before the group asked (DIR unchanged); 2 refused or failed (DIR\n\
+   unchanged).\n"
+
+let ops cmd args =
+  let help = List.mem "--help" args || List.mem "-h" args in
+  let config = ref None and to_group = ref None and to_time = ref None and replace = ref false and pos = ref [] in
+  let bad m = prerr_endline ("cepheus " ^ cmd ^ ": " ^ m ^ " (cepheus " ^ cmd ^ " --help)"); exit Ops.exit_failed in
+  let rec go = function
+    | ("--help" | "-h") :: r -> go r
+    | "--config" :: f :: r when cmd = "backup" -> config := Some f; go r
+    | "--to-group" :: n :: r when cmd = "restore" ->
+      (match int_of_string_opt n with Some n -> to_group := Some n | None -> bad ("--to-group " ^ n ^ ": a group number"));
+      go r
+    | "--to-time" :: t :: r when cmd = "restore" ->
+      (match Ops.parse_time t with Some ms -> to_time := Some ms | None -> bad ("--to-time " ^ t ^ ": YYYY-MM-DDTHH:MM[:SS], or with a final Z for UTC"));
+      go r
+    | "--replace" :: r when cmd = "restore" -> replace := true; go r
+    | x :: _ when String.length x > 1 && x.[0] = '-' -> bad ("unknown option " ^ x)
+    | x :: r -> pos := x :: !pos; go r
+    | [] -> ()
+  in
+  go args;
+  if help then begin
+    print_string (match cmd with "verify" -> verify_help | "backup" -> backup_help | _ -> restore_help);
+    exit 0
+  end;
+  let code =
+    try
+      match cmd, List.rev !pos with
+      | "verify", [ dir ] -> Ops.verify dir
+      | "backup", [ dest ] -> (
+        match !config with
+        | None -> bad "--config FILE is needed"
+        | Some f -> (match Config.load f with Ok c -> Ops.backup c dest | Error m -> bad m))
+      | "restore", [ src; dir ] ->
+        let target =
+          match !to_group, !to_time with
+          | Some _, Some _ -> bad "--to-group or --to-time, not both"
+          | Some n, None -> Ops.Group n
+          | None, Some t -> Ops.Time t
+          | None, None -> Ops.End
+        in
+        Ops.restore ~target ~replace:!replace src dir
+      | _ -> bad "wrong arguments"
+    with
+    | Ops.Refused m -> prerr_endline ("cepheus: " ^ m); Ops.exit_failed
+    | Cepheus.Disk.Io m -> prerr_endline ("cepheus: " ^ m); Ops.exit_failed
+    | Cepheus.Journal.Damaged m -> prerr_endline ("cepheus: damaged: " ^ m); Ops.exit_damage
+    | Unix.Unix_error (e, call, p) -> prerr_endline (Printf.sprintf "cepheus: %s %s: %s" call p (Unix.error_message e)); Ops.exit_failed
+  in
+  exit code
+
 let () =
   match Array.to_list Sys.argv with
   | _ :: ("import" | "export" as cmd) :: rest -> Transfer_cmd.main cmd rest
+  | _ :: (("verify" | "backup" | "restore") as cmd) :: rest -> ops cmd rest
   | _ :: cmd :: rest -> (
     let config, dbs, admin, dir, pos = parse rest in
     match cmd, pos with

@@ -599,17 +599,17 @@ rules defined in 0.95 s
 
 Les factures entrent par groupes de 20 000, environ 480 000 faits chacun, de façon à prendre le chemin des grands
 groupes dans la base (un grand groupe : 20 000 opérations ou plus, toutes des ajouts, qui prend un chemin plus rapide ;
-[grands groupes](architecture.md#grands-groupes)). Quand cette exécution a été mesurée, une contrainte, ou une règle dont
-la tête (le fait qu'elle conclut) est une propriété à une seule valeur, envoyait un grand groupe sur le chemin ordinaire
-du writer (le seul thread, c'est-à-dire fil d'exécution, qui applique les groupes d'une base, un à la fois) ; et
-l'application, démarrée plus haut, avait défini ses règles. Dans une base où elles ne sont pas encore définies, le seed
-les définit après le chargement, en un seul groupe qui dérive sur tout le chargement, et le seed entier prend 4,84 s
-([ce que cela coûte](#14-ce-que-cela-coûte)) ; ici il a pris 12,5 s. Son `Define` n'avait alors rien à écrire, mais a
-attendu, comme première lecture après le chargement, que la copie de la base que garde le programme intègre les groupes
-du chargement. Depuis l'étape 3 du reasoner (la partie du writer qui applique les règles à chaque groupe), le chemin des
-grands groupes vérifie les contraintes (avec leur `Not`) et les têtes à une seule valeur après son point fixe (le moment
-où les règles ne donnent plus rien de nouveau ; [règles](rules.md#grands-groupes)) : un chargement dans une base qui a les
-règles de l'application reste sur ce chemin (pas mesuré de nouveau ici).
+[grands groupes](architecture.md#grands-groupes)). Quand cette exécution a été mesurée, une contrainte, ou une règle
+dont la tête (le fait qu'elle conclut) est une propriété à une seule valeur, envoyait un grand groupe sur le chemin
+ordinaire du writer (le seul thread, c'est-à-dire fil d'exécution, qui applique les groupes d'une base, un à la fois) ;
+et l'application, démarrée plus haut, avait défini ses règles. Dans une base où elles ne sont pas encore définies, le
+seed les définit après le chargement, en un seul groupe qui dérive sur tout le chargement, et le seed entier prend
+4,84 s ([ce que cela coûte](#14-ce-que-cela-coûte)) ; ici il a pris 12,5 s. Son `Define` n'avait alors rien à écrire,
+mais a attendu, comme première lecture après le chargement, que la copie de la base que garde le programme intègre les
+groupes du chargement. Désormais, le chemin des grands groupes vérifie les contraintes (avec leur `Not`) et les têtes à
+une seule valeur après son point fixe (le moment où les règles ne donnent plus rien de nouveau ;
+[règles](rules.md#grands-groupes)) : un chargement dans une base qui a les règles de l'application reste sur ce chemin
+(pas mesuré de nouveau ici).
 
 ## 12. Tests end-to-end dans Firefox
 
@@ -1000,7 +1000,5 @@ de leur rythme (les mesures plus haut) ; les connexions elles-mêmes ont attendu
 
 ## Ce qui n'est pas encore construit
 
-- Un watch avec un ordre et une limite (les dix derniers paiements) : le tableau de bord suit une fenêtre de temps et
-  la page la trie.
 - Des connexions d'utilisateurs limitées par client : la requête d'un handler Cesia ne porte pas l'adresse de son
   client.

@@ -46,7 +46,7 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | un segment | un nouveau segment commence quand la frame suivante ferait dépasser 64 MiB au segment courant | `Journal.segment_limit` |
 | surcoût d'une frame | 44 octets (un en-tête de 28 octets et un trailer de 16 octets) | `Journal.fh`, `Journal.ft` |
 | en-tête de segment | 40 octets | `Journal.seg_header` |
-| writers | un par base (le thread writer de son domain) | `Engine.start` |
+| writers | un par base, un thread à côté de celui de son syncer ; les writers de toutes les bases du processus partagent les domains des writers, autant que de cœurs par défaut (une nouvelle base prend celui qui a le moins de bases ; un domain dont toutes les bases sont fermées s'arrête) : un serveur de 200 bases en tient 8 sur 8 cœurs | `Engine.start`, `Writers.run`, `Writers.writers` |
 
 ## Les merges et les runs
 
@@ -96,7 +96,10 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | variables | au plus 64, la borne du wire protocol, le format des messages sur une connexion (plus bas) ; les estimations du planner (la partie qui choisit l'ordre d'évaluation d'une question) gardent les variables liées dans les bits d'un `int`, de 0 à 62 : la 64e est placée par un indicateur à elle et estimée comme non liée | `Query.order` |
 | l'ordre des variables | le meilleur ordre pour son travail estimé, par une programmation dynamique sur les sous-ensembles des variables qui ne sont ni un champ d'une chose ni celui d'une constante (celles-là ont une place connue), jusqu'à 12 d'entre elles ($n 2^{n-1}$ étapes) ; un choix glouton au-delà | `Query.order`, `Query.dp_max` |
 | questions en parallèle | quand la première variable a 20 000 candidats ou plus | `Query.parallel_min` |
-| domains d'une question | le nombre recommandé pour la machine, au plus 8 | `Query.domains` |
+| domains d'une question | le nombre recommandé pour la machine, au plus 8 : le sien et jusqu'à 7 des helpers du processus (plus bas) | `Query.domains` |
+| les helpers des questions | les domains qui aident les grandes questions, partagés par toutes les questions du processus : les cœurs moins un (7 sur 8), dans ce que laisse le plafond du runtime (plus bas) ; garés entre deux questions, chacun s'en va après 1 s sans question ; une question qui n'en trouve aucun de libre tourne sur moins de domains, le sien au moins, et n'échoue jamais faute d'en avoir | `Pool.limit`, `Pool.keep`, `Pool.help` |
+| le temps d'une question | le `[clients] question_timeout` du serveur, de 0 à 604 800 secondes (0 : aucun), 30 par défaut ; le `timeout` d'un programme (`Find`, la première réponse d'un `Watch` ; `Cepheus.find`, `ask`, `fold` dans la mémoire même d'un programme) est pris quand il est plus court, et plus long seulement d'un token admin ; compté depuis le début de la requête ; regardé tous les 1 024 candidats de chaque domain (une lecture de l'horloge monotone, celle qu'un changement de l'heure ne fait pas bouger) ; au-delà, la question finit en `timeout` (« the question took more than N s »), ses lignes envoyées avant (un Find envoyé en flux) terminées par l'erreur | `Config.default_question_timeout`, `Core.question_seconds`, `Query.every`, `Query.check` |
+| une question dont le programme est parti | la connexion du programme regardée (poll(2), `POLLRDHUP` : son côté fermé) au plus toutes les 10 ms des vérifications de la question : la question s'arrête, ses domains rendus au pool, rien n'est envoyé ; le statut du serveur la compte (`questions.cancelled`) | `Query.look_ms`, `Fdpass.peer_closed` |
 | slices | $\min(\text{candidats}, 16 \times \text{domains})$, prises à tour de rôle sur un compteur partagé | `Query.fold` |
 | le leapfrog d'un niveau (l'intersection où chaque liste triée saute à son tour jusqu'à la plus grande clé) | les slices (les tranches de listes triées) parmi les 62 premiers patterns d'une variable dont le compte est au plus 8 fois celui de la source ; ses autres patterns sont vérifiés un par un | `Query.fold` |
 | la propriété d'un pattern | une constante : pas de variable à la place de la propriété | `Query.pattern` |
@@ -119,7 +122,8 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | descripteurs de fichier | un pour le segment courant du journal, un pour chaque fichier de run que tient une vue vivante (fermé quand plus aucune vue ne tient le run et que le garbage collector le libère) | `Snapshot.check_and_build` |
 | fichiers de runs | machines 64 bits little-endian (la disposition en mémoire) ; le journal est portable | [formats](formats.md) |
 | durabilité | repose sur le fait que `fsync` veut dire durable, pour les fichiers et pour les répertoires (Linux et ses systèmes de fichiers habituels) | [exploitation](operations.md#les-disques) |
-| OCaml | 5 (les domains), avec `unix` et `threads`, et son compilateur C pour `src/crc32c_stubs.c` | `src/dune` |
+| OCaml | 5 (les domains), avec `unix` et `threads`, et son compilateur C pour `src/crc32c_stubs.c` et `src/clock_stubs.c` | `src/dune` |
+| domains d'un processus | le plafond du runtime, 128 en OCaml 5.5 (`OCAMLRUNPARAM=d=N` le relève, lu au démarrage du programme ; Cepheus lit la même variable) : Cepheus lance au plus le plafond moins 16 (laissés aux domains du programme lui-même) ; un domain dont il peut se passer (un merge, un changement des règles, les parties des lectures d'un snapshot, un helper d'une question) n'est pas lancé au-delà, et son travail tourne sur un thread du domain qui l'a demandé, ou sur moins de domains. Chaque domain coûte un peu à chaque collection mineure (elle les arrête tous) : Cepheus en garde peu | `Pool.cap`, `Pool.margin`, `Pool.try_spawn`, `Writers.background` |
 | processeur | x86-64 avec SSE4.2 (qui fait partie du niveau x86-64-v2 ; Intel depuis Nehalem, 2008, AMD depuis Bulldozer, 2011), ou arm64 avec les instructions CRC32 (facultatives dans ARMv8.0, obligatoires à partir d'ARMv8.1), sous Linux ou macOS ; un autre processeur est refusé au démarrage du programme, une autre architecture ne compile pas | `src/crc32c_stubs.c` |
 
 ## Le serveur
@@ -141,7 +145,8 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | un token | 32 octets aléatoires, `cph_` et 43 caractères de base64url ; au plus 256 caractères sont regardés | `Tokens.generate`, `Tokens.check` |
 | I/O domains | `[clients] domains`, de 1 à 64 ; par défaut $\min(4, \text{cœurs} / 2)$ | `Config.default_domains` |
 | le page cache | `[storage] cache`, 1 GiB par défaut | `Config.of_toml` |
-| le socket Unix | `.s.cepheus.PORT`, PORT étant le port de `listen` ou 7400 | `Config.socket_name` |
+| le socket Unix | `.s.cepheus.PORT`, PORT étant le port de `listen` ou 7400 ; son chemin entier au plus 107 octets (le `sun_path` de Linux en tient 108 avec son zéro final : unix(7)), sinon le serveur ne démarre pas, et la connexion d'un programme est refusée, chacun nommant le chemin et sa longueur | `Config.socket_name`, `Net.unix_listener`, `Client.open_socket` |
+| bases d'un serveur | pas de borne à elles : 200 testées (chacune un thread writer et un thread syncer dans les domains des writers, son journal et ses runs ouverts) ; les descripteurs du processus (`ulimit -n`) et ses threads les bornent | `Writers.run`, `test/server_limits.ml` |
 | peers | exactement un dans cette version | `Config.of_toml` |
 | TLS | 1.3 seulement ; certificats : ECDSA P-256, la CA valable 3 650 jours, les autres 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | les threads des connexions | un par connexion (et un de plus tant qu'elle a des écritures en cours) | `Net.connection` |

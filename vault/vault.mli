@@ -73,6 +73,15 @@ val key_entries : t -> string list
 val take_keys : t -> string list -> (unit, error) result
 (** Another copy's entries: the keys this vault lacks (sealed by the same master key), the erasures. *)
 
+(** {1 Checks} *)
+
+type check = { vpacks : int; vbytes : int; vrecords : int; vdamages : string list; vnotes : string list }
+
+val check : ?live:bool -> Cepheus.Disk.t -> string -> check
+(** [check disk dir]: the vault's files checked by their CRCs, without its keys (cepheus verify): the keys' file, every
+    record of every pack (headers walked up to the length its index covers, every record the index names checked
+    whole), the packs without an index up to their torn end. [live]: a process writes it meanwhile. Changes nothing. *)
+
 (** {1 Roots in facts} *)
 
 val hex : string -> string

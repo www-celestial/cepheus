@@ -121,6 +121,52 @@ val close : t -> unit
 val verify : Disk.t -> string -> string -> int
 (** Reads every segment from the start and checks every frame: the number of groups, or {!Damaged}. *)
 
+(** {2 The journal checked as files: cepheus verify, backup and restore} *)
+
+(** What the end of the newest segment may hold: [Strict] for a database closed cleanly or a copy cut and forced
+    (every byte checks); [Crash] after a process died (a torn frame with nothing written after it, the newest frame's
+    trailer alone broken, the newest segment torn at its creation: what recovery cuts or rebuilds); [Copy] for a
+    database being written or the files copied from one (from the newest segment's first frame that does not check
+    whole, everything is the frame being written). *)
+type tail = Strict | Crash | Copy
+
+type segment_check = {
+  sfirst : int;  (** the segment's first group, from its name *)
+  sbytes : int;  (** its size *)
+  sframes : int;  (** its whole frames *)
+  slast : int;  (** the last group of its whole frames ([sfirst - 1]: none) *)
+  send : int;  (** where its last whole frame ends (0: its header did not check) *)
+  stail : bool;  (** bytes after [send] that the rule takes for the frame being written *)
+  sdamage : string option;  (** the first damage, which ended the segment's check *)
+}
+
+type check = {
+  segments : segment_check list;  (** in the order of their names *)
+  damages : string list;  (** each segment's first damage, and the segments missing between them *)
+  last : int;  (** the newest group of the frames that check from group 1 on, with no damage before it *)
+}
+
+val decode_max : int ref
+(** Frames whose body is at most this long (16 MiB) have their groups decoded and numbered by {!check}; a longer one
+    (a large load's) is checked by its CRCs. *)
+
+val check :
+  ?domains:int -> ?frame:(position -> int -> int -> unit) -> ?on_group:(Group.t -> unit) -> tail:tail -> Disk.t -> string ->
+  string -> check
+(** [check ~tail disk dir id]: every segment checked on its own (on up to [domains] domains at once: the callbacks then
+    run on several), each up to its first damage: its header, every frame's header, body CRC, trailer, first group and
+    count, its groups decoded and numbered (up to {!decode_max}); then the segments' order. [frame pos count stop] on
+    each whole frame, [on_group] on each decoded group. Never changes a file. *)
+
+val times : Disk.t -> string -> string -> (int -> int -> bool) -> unit
+(** [times disk dir id f]: [f n time] on every group in order, from the start, each frame checked by its CRCs, until
+    [f] returns false or a frame does not check (a large group's frame: only its head read). *)
+
+val cut_after : Disk.t -> string -> string -> int -> bool
+(** [cut_after disk dir id n] on a copy of a journal: ends it after group [n] (the frame that holds [n] coded again
+    without the groups after it, at the same place; the segment that begins at [n + 1] kept as its header alone; later
+    ones removed), forced. False, nothing changed, when no frame that checks holds [n]. *)
+
 val read : Disk.t -> string -> string -> (Group.t -> unit) -> unit
 (** Every group of the journal, in order, without changing a file; raises {!Damaged}. *)
 

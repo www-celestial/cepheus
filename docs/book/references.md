@@ -1,11 +1,11 @@
 # References
 
-The works Cepheus follows, measures itself against, or plans to follow, by subject. Each entry gives the authors, the
-title, the venue and the year, a link (a DOI where there is one, else the publisher's or the authors' page), and what
-Cepheus took from it. Every entry was checked against the publisher's record or DBLP (authors in order, exact title,
-venue, volume and year); a work that could not be checked is not listed. The design documentation of other databases
-(PostgreSQL, SQLite, Oracle, Datomic, RocksDB, Neo4j, FoundationDB, CockroachDB) is cited on the
-[comparison](comparison.md) page.
+The works Cepheus follows or measures itself against, and those behind what it does not build yet, by subject. Each
+entry gives the authors, the title, the venue and the year, a link (a DOI where there is one, else the publisher's or
+the authors' page), and what Cepheus took from it. Every entry was checked against the publisher's record or DBLP
+(authors in order, exact title, venue, volume and year); a work that could not be checked is not listed. The design
+documentation of other databases (PostgreSQL, SQLite, Oracle, Datomic, RocksDB, Neo4j, FoundationDB, CockroachDB) is
+cited on the [comparison](comparison.md) page.
 
 ## Storage: log-structured merge-trees
 
@@ -104,8 +104,9 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Alagappan 2018]** R. Alagappan, A. Ganesan, E. Lee, A. Albarghouthi, V. Chidambaram, A. C. Arpaci-Dusseau,
   R. H. Arpaci-Dusseau. Protocol-Aware Recovery for Consensus-Based Storage. *FAST* 2018, 15–32.
   https://www.usenix.org/conference/fast18/presentation/alagappan
-  — One damaged sector can lose confirmed data in replicated systems; the rule planned for replication (a damaged
-  replica does not vote, it repairs), and why a single machine refuses to open rather than cut.
+  — One damaged sector can lose confirmed data in replicated systems; the rule of a Cepheus cluster's damaged log (a
+  damaged server neither votes nor stands for election until it is repaired: [the
+  server](server.md#a-damaged-log-the-2018-rule)), and why a single machine refuses to open rather than cut.
 
 ## Buffer management and caching
 
@@ -311,7 +312,8 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — PostgreSQL's implementation, compared with on the comparison page.
 - **[Thomson 2012]** A. Thomson, T. Diamond, S.-C. Weng, K. Ren, P. Shao, D. J. Abadi. Calvin: Fast Distributed
   Transactions for Partitioned Database Systems. *SIGMOD* 2012, 1–12. https://doi.org/10.1145/2213836.2213838
-  — Transactions in an order fixed in advance, with no locks: the single writer, and the plan for several machines.
+  — Transactions in an order fixed in advance, with no locks: the single writer; a database partitioned over several
+  machines that way is not built.
 
 ## Persistent structures and forks
 
@@ -439,11 +441,12 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — Reads that differ by a parameter sharing one state: the templates of live questions, whose constants are
   parameters.
 
-## Replication and many machines (planned)
+## Replication and many machines
 
 - **[Ongaro 2014]** D. Ongaro, J. Ousterhout. In Search of an Understandable Consensus Algorithm. *USENIX ATC* 2014,
   305–319. https://www.usenix.org/conference/atc14/technical-sessions/presentation/ongaro
-  — Raft, chosen for replication, with its public TLA+ specification.
+  — Raft, the algorithm of a Cepheus cluster ([the server](server.md#a-cluster-of-three-raft)), with its public TLA+
+  specification.
 - **[Verbitski 2017]** A. Verbitski, A. Gupta, D. Saha, M. Brahmadesam, K. Gupta, R. Mittal, S. Krishnamurthy,
   S. Maurice, T. Kharatishvili, X. Bao. Amazon Aurora: Design Considerations for High Throughput Cloud-Native
   Relational Databases. *SIGMOD* 2017, 1041–1052. https://doi.org/10.1145/3035918.3056101
@@ -452,10 +455,10 @@ venue, volume and year); a work that could not be checked is not listed. The des
   D. Kossmann, S. Lingam, U. F. Minhas, N. Prakash, V. Purohit, H. Qu, C. S. Ravella, K. Reisteter, S. Shrotri,
   D. Tang, V. Wakade. Socrates: The New SQL Server in the Cloud. *SIGMOD* 2019, 1743–1756.
   https://doi.org/10.1145/3299869.3314047
-  — Log, pages and compute separated: the plan for storage on object stores.
+  — Log, pages and compute separated: storage on object stores, not built.
 - **[Ammar 2018]** K. Ammar, F. McSherry, S. Salihoglu, M. Joglekar. Distributed Evaluation of Subgraph Queries Using
   Worst-case Optimal Low-Memory Dataflows. *PVLDB* 11(6), 691–704, 2018. https://doi.org/10.14778/3184470.3184473
-  — BiGJoin: Generic Join over many machines, planned; and its delta queries, the change of a join for added or
+  — BiGJoin: Generic Join over many machines, not built; and its delta queries, the change of a join for added or
   removed facts, each new binding at the first pattern that matches an added fact: how a live question's change is
   computed (G21).
 
@@ -532,12 +535,13 @@ venue, volume and year); a work that could not be checked is not listed. The des
 - **[Gray 1989]** C. G. Gray, D. R. Cheriton. Leases: An Efficient Fault-Tolerant Mechanism for Distributed File Cache
   Consistency. *SOSP* 1989, 202–210. https://doi.org/10.1145/74850.74870
   — The lease, a right that ends by itself after a time: what the design first proposed for local reads, left for
-  the visibility number on one machine; it comes back between machines.
+  the visibility number on one machine; between machines, a Raft leader serves its reads under a lease ([the
+  server](server.md#reads-and-what-a-program-sees)).
 - **[Moraru 2014]** I. Moraru, D. G. Andersen, M. Kaminsky. Paxos Quorum Leases: Fast Reads Without Sacrificing
   Writes. *SoCC* 2014. https://doi.org/10.1145/2670979.2671001
   — A lease holder reads locally only after it has assessed "whether an update to any of the leased objects is
   ongoing (i.e., in the process of being committed), and if not": reads by message-based leases need that wait to
-  be linearizable; one machine's shared memory removes it. The way planned for readers on other machines (step 7).
+  be linearizable; one machine's shared memory removes it. Local reads on other machines by such leases are not built.
 - **[unix(7)]** The Linux man-pages project. unix(7): `SCM_RIGHTS`, "Send or receive a set of open file descriptors
   from another process". https://man7.org/linux/man-pages/man7/unix.7.html
   — How the server passes a local reader its run files and its visibility page (`server/fdpass_stubs.c`).
@@ -576,7 +580,7 @@ venue, volume and year); a work that could not be checked is not listed. The des
   — Model checking finds protocol bugs that tests miss; TLC found one in the journal's recovery rule here.
 - **[Kingsbury 2020]** K. Kingsbury, P. Alvaro. Elle: Inferring Isolation Anomalies from Experimental Observations.
   *PVLDB* 14(3), 268–280, 2020. https://doi.org/10.14778/3430915.3430918
-  — Jepsen's checker of isolation; the bank test follows Jepsen's, Elle comes with replication.
+  — Jepsen's checker of isolation; the bank test follows Jepsen's; Elle itself is not run.
 
 - **[Serebryany 2012]** K. Serebryany, D. Bruening, A. Potapenko, D. Vyukov. AddressSanitizer: A Fast Address Sanity
   Checker. *USENIX ATC* 2012, 309–318. https://www.usenix.org/conference/atc12/technical-sessions/presentation/serebryany

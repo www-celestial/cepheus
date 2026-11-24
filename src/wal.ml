@@ -382,7 +382,7 @@ let start t =
   t.dirty <- false;
   t.running <- true;
   if not t.manual then
-    t.dom <- Some (Domain.spawn (fun () ->
+    t.dom <- Some (Pool.spawn (fun () ->
         let a = Thread.create (rounder t) () and b = Thread.create (cleaner t) () in
         Thread.join a;
         Thread.join b))

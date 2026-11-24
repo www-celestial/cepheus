@@ -22,6 +22,59 @@ exception Bad of string
 (* a question that passed its budget of candidates (a server's bound: Core.question_budget) *)
 exception Over_budget of int
 
+(* ---- what stops a question before its answer ----
+   Its deadline (the server's question_timeout, or the time a program gives a call), or its asker gone (the program's
+   connection closed). Both are looked at where the budget is counted, every [every] candidates of each domain: a
+   read of the monotonic clock, about 20 ns a check, so that a question pays nothing it can measure for them; the
+   asker at most once every [look_ms]. As SQLite's progress handler (sqlite3_progress_handler: a callback every N
+   instructions of its machine, which may interrupt the statement), PostgreSQL's statement_timeout ("Abort any
+   statement that takes more than the specified amount of time") and client_connection_check_interval. *)
+
+(* the monotonic clock, in milliseconds (src/clock_stubs.c) *)
+external now_ms : unit -> int = "cepheus_monotonic_ms" [@@noalloc]
+
+(* the question passed its deadline: the seconds it was given *)
+exception Timeout of float
+
+(* the question's asker is gone *)
+exception Cancelled
+
+type stop = {
+  ms : int;  (* the milliseconds it is given; max_int: no deadline *)
+  seconds : float;  (* the same, for the message *)
+  mutable until : int;  (* the monotonic clock's ms past which it ends; 0: not looked at yet *)
+  gone : unit -> bool;  (* its asker is gone (the server: its connection closed) *)
+  mutable look : int;  (* the clock's ms from which [gone] is called again *)
+}
+
+let every = 1024
+let look_ms = 10
+
+(* a stop of [seconds] (0 or less: no deadline). The clock is first read at the question's first check (within its
+   first [every] candidates, microseconds after its start): a question that ends before never reads it, so that a
+   point question pays for its time a record and nothing more *)
+let stop ?(gone = fun () -> false) seconds =
+  let ms =
+    if seconds <= 0. || seconds >= 1e9 then max_int
+    else (let x = seconds *. 1000. in let i = int_of_float x in if float_of_int i < x then i + 1 else max 1 i)
+  in
+  { ms; seconds; until = 0; gone; look = 0 }
+
+(* the message of a deadline passed *)
+let timeout_message seconds = Printf.sprintf "the question took more than %g s, its time: ask a narrower one, or give it more time" seconds
+
+let check (s : stop) =
+  let now = now_ms () in
+  if s.until = 0 then s.until <- (if s.ms = max_int then max_int else now + s.ms)
+  else if now > s.until then raise (Timeout s.seconds);
+  if now >= s.look then begin
+    s.look <- now + look_ms;
+    if s.gone () then raise Cancelled
+  end
+
+(* a domain of the question failed: its other domains stop (the first failure is the question's) *)
+exception Stopped
+
 let bad fmt = Printf.ksprintf (fun s -> raise (Bad s)) fmt
 
 (* internal form: each side a variable or a word *)
@@ -358,7 +411,7 @@ let in_sorted (a : int array) c =
    [seq]: on this domain alone, the bindings in the engine's order, so that [step] may stop the fold by an exception.
    [sets]: the words some variables may take (In, Prefix): a set is a source of its variable's candidates when it is
    the smallest (a relation of one column, which the AGM bound counts as one), else a check of each candidate. *)
-let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.view) q ~init ~step ~merge =
+let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Store.view) q ~init ~step ~merge =
   match plan ~sets v q with
   | None -> init ()
   | Some { pats; limits; ord; cost = _ } ->
@@ -448,8 +501,19 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
     let leap = Array.map (fun s -> Array.fold_left (fun k b -> if b then k + 1 else k) 0 s >= 2) slice in
     (* one runner per domain: its own bindings and its own count of candidates; no allocation per binding but the
        iterators' own *)
-    let runner () =
+    (* a domain of this question failed: set before its exception goes up, so that the others stop at their next check *)
+    let abort = Atomic.make false in
+    let runner ticks =
       let env = Array.make n 0 and bound = Array.make n false and w = ref 0 and cell = [| 0 |] in
+      (* the next count of candidates at which the budget, the stop and the other domains are looked at: the budget
+         itself when there is nothing else to look at ([ticks] false: one comparison a candidate, as before them) *)
+      let lim = ref (if ticks then min budget every else budget) in
+      let[@inline never] over () =
+        if !w > budget then raise (Over_budget budget);
+        if Atomic.get abort then raise Stopped;
+        (match stop with Some s -> check s | None -> ());
+        lim := if budget - !w <= every then budget else !w + every
+      in
       (* a leaf's value read at its thing's level ([kept]): the thing, and the value *)
       let kthing = Array.make n (-1) and kword = Array.make n 0 and kcell = [| 0 |] in
       let get = function W w -> Some w | V y -> if bound.(y) then Some env.(y) else None in
@@ -552,7 +616,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
           Array.iter
             (fun c ->
               incr w;
-              if !w > budget then raise (Over_budget budget);
+              if !w > !lim then over ();
               if in_range x c then begin
                 let ok = ref true and j = ref 0 in
                 while !ok && !j < Array.length ps do
@@ -565,7 +629,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
         else if src >= 0 then
           iterate x ps.(src) (fun c ->
               incr w;
-              if !w > budget then raise (Over_budget budget);
+              if !w > !lim then over ();
               if in_range x c then begin
                 let ok = ref true and j = ref 0 in
                 while !ok && !j < Array.length ps do
@@ -602,7 +666,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
               Array.unsafe_set !b !m c;
               incr m);
           w := !w + !m;
-          if !w > budget then raise (Over_budget budget);
+          if !w > !lim then over ();
           if not !sorted then (let s = Array.sub !b 0 !m in Array.sort compare s; Array.blit s 0 !b 0 !m);
           lens.(xi).(j) <- !m;
           keys.(xi).(j) <- key
@@ -709,11 +773,11 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
           end
         end
       in
-      env, bound, choose, iterate, admits, level, w
+      env, bound, choose, iterate, admits, level, w, lim
     in
     if n = 0 then step (init ()) [||]
     else begin
-      let env, bound, choose, iterate, admits, level, w0 = runner () in
+      let env, bound, choose, iterate, admits, level, w0, lim0 = runner (match stop with Some _ -> true | None -> false) in
       let flush w = ignore (Atomic.fetch_and_add work !w); w := 0 in
       let x0 = ord.(0) in
       let src, size = choose 0 in
@@ -758,24 +822,37 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account (v : Store.vie
           done;
           flush w
         in
-        let others =
-          List.init (d - 1) (fun _ -> Domain.spawn (fun () -> let e, b, _, _, a, l, w = runner () in run (e, b, a, l, w)))
+        (* the first failure of a domain is the question's; it stops the others at their next check (Stopped) *)
+        let failed = Atomic.make None in
+        let guarded f =
+          match f () with
+          | () -> ()
+          | exception e ->
+            (match e with Stopped -> () | e -> ignore (Atomic.compare_and_set failed None (Some e)));
+            Atomic.set abort true
         in
-        (match run (env, bound, admits, level, w0) with
-         | () -> List.iter Domain.join others
-         | exception e -> List.iter (fun dm -> try Domain.join dm with _ -> ()) others; raise e);
+        (* the other domains from the pool (Pool: as many as it has free, maybe none), each with its own runner; this
+           one looks at the others from now on *)
+        (match stop with None -> lim0 := min budget (!w0 + every) | Some _ -> ());
+        let wait, _ =
+          Pool.help (d - 1) (fun () ->
+              guarded (fun () -> let e, b, _, _, a, l, w, _ = runner true in run (e, b, a, l, w)))
+        in
+        guarded (fun () -> run (env, bound, admits, level, w0));
+        wait ();
+        (match Atomic.get failed with Some e -> raise e | None -> ());
         let acc = ref (Option.get accs.(0)) in
         for s = 1 to slices - 1 do acc := merge !acc (Option.get accs.(s)) done;
         !acc
       end
     end
 
-let rows (v : Store.view) q =
+let rows ?stop (v : Store.view) q =
   match compile v q with
   | exception No_answer -> []
   | ty, _, _ ->
     let rows =
-      fold v q ~init:(fun () -> []) ~merge:(fun a b -> b @ a)
+      fold ?stop v q ~init:(fun () -> []) ~merge:(fun a b -> b @ a)
         ~step:(fun acc env -> Array.mapi (fun i w -> Store.value v ty.(i) w) env :: acc)
     in
     List.rev rows

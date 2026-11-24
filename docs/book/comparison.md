@@ -28,7 +28,6 @@ Cepheus' reads on one run measured since then are within a few percent of those 
 | durable writes, 256 clients, as fast as they go | 14,182 groups/s (rounds 14,141 to 17,192) | 19,559 inserts/s (12,742 to 20,863) | even: both bound by the disk's fsync rate; a side's rounds differ more than the two sides |
 | durable writes at a fixed rate of 2,000 a second, p99 | **0.1 to 1.7 s** | 0.6 to 6.1 s | Cepheus, on this noisy disk |
 | larger than memory: Q4, base 245 MB, 32 MB of cache, process capped at 128 MB | **385 ms** | 697 ms | Cepheus |
-| larger than memory: Q5 | 102 s | **1.05 s** | **PostgreSQL**, by 100 times (below) |
 | with run format 8 (2026-11-11): Q4 at 1, 2, 3, 4 cores | **128, 81.6, 57.8, 47.8 ms** | 233, 141, 107, 87.7 ms (1 to 4 processes) | Cepheus, 1.8 times at every count: three single values an invoice read from the columns of client, city and total |
 | with run format 8: Q5 at 1, 2, 3, 4 cores | **250, 149, 100, 77.3 ms** | 1,010, 604, 602, 616 ms (it launches 1 worker at most) | Cepheus, 4 to 8 times: the column of `follows` and leapfrog intersections |
 | with run format 8: Q5 larger than memory, 128 MB cap, 32 MB cache, cold | **263 ms** (114 ms on 3 cores; 260 ms at a 48 MB cap) | 1.05 s (2026-11-08) | Cepheus, 4 times: `follows` is now a column of its own, 1.6 MB |
@@ -37,11 +36,12 @@ Cepheus' reads on one run measured since then are within a few percent of those 
 
 **Where PostgreSQL wins, and why.**
 - *Q5 larger than memory, until run format 8 (2026-11-11), which keeps each property's rows apart in a third order
-  and takes the triangles at a 48 MB cap to 0.26 s (rows above).* Cepheus orders a base's rows by thing, so a client's follow links lie among the rows of its
-  20 invoices; the triangle question reads random pages of 120 MB of rows for a few bytes each (18.8 million pages read
-  in 6 runs with a 48 MB cache). PostgreSQL keeps `follows` in a table of its own, 23 MB with its index, which fits in
-  its 32 MB of buffers. A third order of Cepheus' rows (property, then thing) would make one property of many things
-  local, at 10 bytes a fact more; it waits for real workloads to decide ([theory](theory.md#7-pages-and-the-cache)).
+  and takes the triangles to 263 ms at a 128 MB cap and 260 ms at a 48 MB cap (rows above).* Before it, Cepheus
+  ordered a base's rows by thing only, so a client's follow links lay among the rows of its 20 invoices; the triangle
+  question read random pages of 120 MB of rows for a few bytes each (18.8 million pages read in 6 runs with a 48 MB
+  cache). PostgreSQL keeps `follows` in a table of its own, 23 MB with its index, which fits in its 32 MB of buffers;
+  format 8's column of `follows` takes 1.6 MB
+  ([benchmarks](benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)).
   Measured again on run format 7 (2026-11-09), cold (the files' pages dropped before each side, which the series
   above did not do), beside SQLite 3.54, PostgreSQL not run again: under a 128 MB cap the run of 54.4 MB fits beside
   the process and the triangles take 1.10 s (SQLite 1.04 s; format 6 did not end in 10 minutes); under 48 MB, where
@@ -107,7 +107,7 @@ links, an index on every searched column, `ANALYZE`, a 1 GiB page cache), both o
 | larger than memory, cold, 128 MB cap, 32 MB caches, Q1 to Q5 (2026-11-09) | **0.38 µs**, **0.65 µs**, **4.02 ms**, **240 ms**, 1.10 s | 0.87 µs, 1.40 µs, 97.5 ms, 496 ms, **1.04 s** | Cepheus on Q1 to Q4: its run of 54.4 MB fits under the cap, SQLite's file of 136.4 MB does not; **SQLite** on Q5 by 6 % |
 | Q1, Q2, Q3, Q4, Q5 with run format 8, one core (2026-11-11) | **0.39 µs**, **0.64 µs**, **2.87 ms**, **130 ms**, **256 ms** | 0.69 µs, 1.42 µs, 4.18 ms, 369 ms, 1.05 s | Cepheus on all five, Q5 by 4.1 times: the column order and leapfrog intersections ([benchmarks](benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)) |
 | larger than memory with run format 8, cold, 128 MB cap, 32 MB caches, Q1 to Q5 | **0.44 µs**, **0.69 µs**, **3.13 ms**, **129 ms**, **263 ms** | 2.89 µs, 1.48 µs, 112 ms, 552 ms, 1.14 s | Cepheus on all five; at a 48 MB cap its triangles take 260 ms against SQLite's 1.02 s |
-| the same at a 48 MB cap, 16 MB caches, where neither file fits | **23.3 µs**, **0.66 µs**, **82.5 ms**, **300 ms**, more than 2.5 min | 40.7 µs, 1.37 µs, 444 ms, 1.22 s, **1.02 s** | Cepheus on Q1 to Q4 (1.7 to 5.4 times); **SQLite** on Q5 by more than 100 times: its follow links fit in its cache in a table and an index of their own, where Cepheus reads them from its thing blocks, among the invoices |
+| at a 48 MB cap, 16 MB caches, where neither file fits, cold: Q1 to Q4 with run format 7 (2026-11-09), Q5 with run format 8 (2026-11-11) | **23.3 µs**, **0.66 µs**, **82.5 ms**, **300 ms**, **260 ms** [249, 274] | 40.7 µs, 1.37 µs, 444 ms, 1.22 s, 1.02 s | Cepheus on all five: Q1 to Q4 by 1.7 to 5.4 times; Q5 by 3.9 times, read from the column of `follows` (1.6 MB), where format 7 read the follow links in its thing blocks, among the invoices, and took more than 2.5 min a run ([benchmarks](benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)) |
 
 ## By design
 
@@ -211,7 +211,9 @@ journal the added and retracted flags.
   ([concurrent data access](https://neo4j.com/docs/operations-manual/5/database-internals/concurrent-data-access/)).
   Cepheus' groups are strictly serializable with no lock.
 - Clusters: "The servers in a cluster use the Raft protocol to ensure consistency and safety"
-  ([routing](https://neo4j.com/docs/operations-manual/5/clustering/setup/routing/)); Cepheus plans Raft for replication.
+  ([routing](https://neo4j.com/docs/operations-manual/5/clustering/setup/routing/)); a Cepheus cluster of three
+  servers uses Raft too: it elects its leader and confirms a write once a majority holds it
+  ([Raft](server.md#a-cluster-of-three-raft)).
 - *Where Neo4j wins*: Cypher, graph algorithms, clustering, tooling.
 
 ### FoundationDB

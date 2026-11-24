@@ -42,7 +42,7 @@ let spawn f =
       if !domain = None then
         domain :=
           Some
-            (Domain.spawn (fun () ->
+            (Pool.spawn (fun () ->
                  while true do
                    let f = Mutex.protect sm (fun () -> while Queue.is_empty starts do Condition.wait sc sm done; Queue.pop starts) in
                    ignore (Thread.create f ())

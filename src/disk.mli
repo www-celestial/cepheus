@@ -36,6 +36,10 @@ type t = {
 val real : t
 (** The machine's file system. Reads and writes go through [lseek] and [read] or [write]. *)
 
+val read_only : t
+(** The machine's file system for a reader that changes nothing (cepheus verify): files opened read-only and never
+    made; every call that would write raises {!Io}. *)
+
 val read_all : t -> string -> Bytes.t
 (** A whole file. *)
 

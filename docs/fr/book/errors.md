@@ -173,8 +173,9 @@ Depuis `find` et `fold` (la question est mal formée) :
 
 Les fichiers ne tiennent plus ce que la base a rendu durable : un disque qui a changé des octets, un fichier mal copié,
 un segment supprimé à la main. La base **refuse de s'ouvrir** plutôt que de laisser tomber un groupe confirmé en
-silence (G6). **Que faire** : ne supprimez ni ne modifiez aucun fichier ; copiez le répertoire à part ; lancez
-`Cepheus.verify` sur la copie pour trouver le premier défaut ; restaurez depuis une sauvegarde. Ne coupez un journal à
+silence (G6). **Que faire** : ne supprimez ni ne modifiez aucun fichier ; lancez `cepheus verify DIR` pour chaque
+défaut (il ne change rien) ; restaurez depuis une sauvegarde (`cepheus restore BACKUP DIR --replace`, qui garde de côté
+le dossier endommagé). Ne coupez un journal à
 la main que si vous savez que la frame endommagée n'a jamais été confirmée
 ([opérations](operations.md#quand-la-recovery-dit-damaged)).
 
@@ -273,6 +274,14 @@ premier échec).
 | `Busy` | `DIR was written through a server's commit buffer and not closed cleanly: its newest writes may be in the server's DATA/server.wal.1 or .2 alone; start the server on its data directory, which writes them into the journal, and stop it` | `open_` dans le processus même d'un programme, d'une base que tenait un serveur quand il a crashé (`DIR/shared` et pas de `DIR/closed`) | démarrer le serveur et l'arrêter ; la base s'ouvre ensuite n'importe où ([opérations](operations.md#une-base-dun-serveur)) |
 | `Closed` | `the database is closed` | `write` ou `snapshot` après `close` | ouvrir la base à nouveau |
 
+## `Timeout` : une question a dépassé son temps
+
+| erreur | message | quand | que faire |
+|---|---|---|---|
+| `Timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | `find`, `ask` ou `fold` avec `~timeout:N` a dépassé N secondes (regardé tous les 1 024 candidats de chaque domain : elle finit à quelques millisecondes de son temps) ; rien n'en est rendu ([limites](limits.md#les-questions)) | une question plus étroite (un pattern sélectif d'abord, un intervalle, des pages avec Sort et Limit), ou plus de temps |
+
+`find`, `ask` et `fold` lèvent `Invalid_argument` pour un timeout de 0 ou moins, ou NaN : une erreur du programme.
+
 ## Exceptions
 
 | exception | levée par | quand |
@@ -286,7 +295,7 @@ premier échec).
 ## À travers le serveur
 
 Un programme connecté au serveur reçoit chaque erreur ci-dessus comme une valeur `{code, message}` (`conflict`,
-`invalid`, `unique`, `damaged`, `io`, `busy`, `closed`), et les codes propres au serveur : `auth`, `denied`, `version`,
+`invalid`, `unique`, `damaged`, `io`, `busy`, `closed`, `timeout`), et les codes propres au serveur : `auth`, `denied`, `version`,
 `too_large`, `unknown_database`, `stopping`, `refused`, `too_many_connections`, `idle`, `internal`, `read_only` (une
 replica, une copie de la base tenue à jour sur une autre machine, qui ne prend pas d'écritures), et, dans un cluster
 Raft (des serveurs qui gardent les mêmes bases et le même log, la liste ordonnée des écritures, par l'algorithme de
@@ -333,6 +342,8 @@ valeur `result.Err({Kind: "cepheus", Code, Message})`, avec les codes en minuscu
 | `invalid` | `In needs values of the variable's type (a T), not V`; `a variable of In appears in no pattern` | `In` avec des valeurs d'un autre type | des valeurs du type de la variable |
 | `invalid` | `this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2` | une question qui les utilise, sur une connexion à un serveur d'une version antérieure | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
 | `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | un groupe avec `cepheus.Incr`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
+| `invalid` | `this server speaks protocol N: a question's timeout needs a server of protocol 6` | `Find` ou `Watch` avec `timeout`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur, ou laisser le temps au `question_timeout` du serveur |
+| `timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | la question a dépassé son `timeout`, ou le `question_timeout` du serveur (un temps plus long que celui du serveur ne compte que d'un token admin) : dans la mémoire du programme ou au serveur, pareil | une question plus étroite, ou des pages ; un `timeout` plus long là où le serveur le permet |
 | `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` sur un autre type, un préfixe vide ou trop long | une variable texte que donne un pattern |
 | `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | les bornes d'une question ([limites](limits.md#les-questions)) | demander page par page, découper la liste, ou poser plusieurs questions |
 | `too_large` | `the question passed the server's budget of N candidates: ask a narrower one, or several` | une question dont le join (la jointure des patterns) énumère plus que le budget du serveur, ses lookups (ses recherches dans un index) divisés par le plus grand nombre de patterns d'une même variable ([limites](limits.md#les-questions)) ; un watch (une question vivante, tenue à jour) qui le dépasse à une frame (par ses Not, Or ou In, ou par le remplissage de sa fenêtre) se termine par elle | une question plus étroite : plus de constantes, un intervalle, un Limit sur le chemin de l'index |

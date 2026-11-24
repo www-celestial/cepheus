@@ -545,11 +545,11 @@ The invoices go in groups of 20,000, about 480,000 facts each, so as to take the
 ([large groups](architecture.md#large-groups)). When this run was measured, a constraint, or a rule whose head is a
 property of one value, sent a large group to the ordinary path of the writer; and the app, started above, had defined
 its rules. Into a database where they are not defined yet, the seed defines them after the load, in one group that
-derives over all of it, and the whole seed takes 4.84 s ([what it costs](#14-what-it-costs)); here it took 12.5 s.
-Its `Define` then had nothing to write, but waited, as the first read after the load, for the program's copy of the
-database to take in the load's groups. Since the reasoner's step 3, the path of large groups checks constraints (with
-their `Not`) and one-valued heads after its fixpoint ([rules](rules.md#large-groups)): a load into a database that
-has the app's rules stays on that path (not measured again here).
+derives over all of it, and the whole seed takes 4.84 s ([what it costs](#14-what-it-costs)); here it took 12.5 s. Its
+`Define` then had nothing to write, but waited, as the first read after the load, for the program's copy of the database
+to take in the load's groups. Now the path of large groups checks constraints (with their `Not`) and one-valued heads
+after its fixpoint ([rules](rules.md#large-groups)): a load into a database that has the app's rules stays on that path
+(not measured again here).
 
 ## 12. End-to-end tests in Firefox
 
@@ -906,6 +906,4 @@ twice what this machine can hash, the app's memory peaked at 365 MB (150 MB with
 
 ## What is not built yet
 
-- A watch with an order and a limit (the latest ten payments): the dashboard watches a window of time and the page
-  sorts it.
 - Sign-ins limited by client: a Cesia handler's request carries no address of its client.

@@ -629,6 +629,111 @@ let guard f =
 
 (* [open_ disk dir ~master]: the vault in [dir] (made if missing), its keys opened by [master] (32 bytes, kept apart
    from the data: a copy of the data without it opens nothing) *)
+(* ---- The vault's files checked by their CRCs, without its keys (cepheus verify, backup, restore) ----
+   The keys' file: its header, its entries up to the first that does not check, which may only be a torn last one. A
+   pack with an index (closed: full, or indexed by the open after a crash): every record up to the length its index
+   covers walked by its header, which must check; every record the index names there, with that name and length, its
+   payload's CRC checked; a record the index does not name whose payload does not check is one a crash tore before it
+   was forced (the open's scan left it out: no file cites it). A pack without an index (the one being written, or the
+   one a crash left): its records up to the first header that does not check, which is its torn end; one whose payload
+   does not check before it, a record not forced at a crash. *)
+
+type check = { vpacks : int; vbytes : int; vrecords : int; vdamages : string list; vnotes : string list }
+
+let check ?(live = false) disk dir =
+  let damages = ref [] and notes = ref [] and records = ref 0 and bytes = ref 0 in
+  let damage fmt = Printf.ksprintf (fun m -> damages := m :: !damages) fmt in
+  let note fmt = Printf.ksprintf (fun m -> notes := m :: !notes) fmt in
+  let kp = Filename.concat dir "keys" in
+  if disk.Disk.exists kp then begin
+    let b = Disk.read_all disk kp in
+    let n = Bytes.length b in
+    bytes := !bytes + n;
+    if not (check_file_header b keys_magic) then damage "keys: its header does not check"
+    else begin
+      let good o = o + key_entry <= n && u32 b o = Crc32c.bytes b (o + 4) (key_entry - 4) in
+      let rec go o = if o + key_entry <= n && good o then go (o + key_entry) else o in
+      let stop = go file_header in
+      let rec later p = p + key_entry <= n && (good p || later (p + key_entry)) in
+      if stop < n then
+        if later (stop + key_entry) then damage "keys: the entry at %d does not check, and later ones do" stop
+        else note "keys: a torn entry at %d, never forced (the next open cuts it)" stop
+    end
+  end;
+  let pdir = Filename.concat dir "packs" in
+  let nums =
+    if disk.exists pdir then
+      List.sort compare
+        (List.filter_map (fun f -> if Filename.check_suffix f ".pack" then int_of_string_opt (Filename.chop_suffix f ".pack") else None) (disk.readdir pdir))
+    else []
+  in
+  let newest = List.fold_left max 0 nums in
+  List.iter
+    (fun num ->
+      let pname = Printf.sprintf "packs/%08d.pack" num and ipath = Filename.concat pdir (Printf.sprintf "%08d.idx" num) in
+      (* the index before the pack: a pack is complete and forced before its index is written, so that a pack read
+         while it is written is never taken for one shorter than its index *)
+      let index_bytes = if disk.Disk.exists ipath then Some (Disk.read_all disk ipath) else None in
+      match Disk.read_all disk (Filename.concat pdir (Printf.sprintf "%08d.pack" num)) with
+      | exception Disk.Io m -> if live && not (disk.exists (Filename.concat pdir (Printf.sprintf "%08d.pack" num))) then () else damage "%s: %s" pname m
+      | b ->
+        let n = Bytes.length b in
+        bytes := !bytes + n;
+        let index =
+          match index_bytes with
+          | None -> None
+          | Some x ->
+            let m = Bytes.length x in
+            bytes := !bytes + m;
+            if m >= 24 && Bytes.sub_string x 0 8 = idx_magic && u32 x (m - 4) = Crc32c.bytes x 0 (m - 4) && u32 x 8 = format
+               && 20 + (u32 x 16 * idx_entry) + 4 = m
+            then Some (u32 x 12, List.init (u32 x 16) (fun i -> let o = 20 + (i * idx_entry) in Bytes.sub_string x o 32, u32 x (o + 32), u32 x (o + 36)))
+            else (damage "%s: its index does not check (the next open reads the pack again)" pname; None)
+        in
+        if not (check_file_header b pack_magic) then begin
+          if index = None && num = newest && n <= file_header then note "%s: a pack torn at its creation, holding no record" pname
+          else damage "%s: its header does not check" pname
+        end
+        else
+          match index with
+          | Some (len, entries) ->
+            if len > n then damage "%s: shorter than its index says (%d bytes of %d)" pname n len
+            else begin
+              let starts = Hashtbl.create 1024 in
+              let rec walk o =
+                if o < len then
+                  if header_ok b o (len - o) then (Hashtbl.replace starts o (record_len b o); walk (o + record_len b o))
+                  else damage "%s: the record at %d does not check" pname o
+              in
+              walk file_header;
+              let named = Hashtbl.create 1024 in
+              List.iter
+                (fun (name, off, l) ->
+                  Hashtbl.replace named off ();
+                  if Hashtbl.find_opt starts off <> Some l || Bytes.sub_string b (off + 32) 32 <> name || not (payload_ok b off) then
+                    damage "%s: the record %s at %d, which its index names, does not check" pname (short name) off
+                  else incr records)
+                entries;
+              let torn = Hashtbl.fold (fun off _ k -> if Hashtbl.mem named off || payload_ok b off then k else k + 1) starts 0 in
+              if torn > 0 then note "%s: %d record%s torn before a crash and never indexed (no file cites them)" pname torn (if torn = 1 then "" else "s")
+            end
+          | None ->
+            let unforced = ref 0 in
+            let rec walk o =
+              if o >= n then o
+              else if header_ok b o (n - o) then begin
+                if payload_ok b o then incr records else incr unforced;
+                walk (o + record_len b o)
+              end
+              else o
+            in
+            let stop = walk file_header in
+            if num <> newest then note "%s: its index is missing (the next open reads the pack again and writes it)" pname;
+            if !unforced > 0 then note "%s: %d record%s that do not check, never forced (no file cites them)" pname !unforced (if !unforced = 1 then "" else "s");
+            if stop < n then note "%s: %s from offset %d" pname (if live then "the record being written" else "a torn end, never forced") stop)
+    nums;
+  { vpacks = List.length nums; vbytes = !bytes; vrecords = !records; vdamages = List.rev !damages; vnotes = List.rev !notes }
+
 let open_ ?(cache = 96 lsl 20) disk dir ~master =
   if String.length master <> 32 then Error (Invalid "a vault's master key is 32 bytes")
   else

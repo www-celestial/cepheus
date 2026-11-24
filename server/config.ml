@@ -20,18 +20,31 @@ type t = {
   domains : int;  (* I/O domains *)
   max_connections : int;  (* connections open at once, the local readers' included *)
   idle_timeout : int;  (* seconds a connection may go without a whole request (from its accept); 0: no limit *)
+  question_timeout : int;  (* seconds a question may take (a Find, a Watch's first answer); 0: no limit *)
   databases : string list;
 }
 
 let default_port = 7400
 let default_max_connections = 512
 let default_idle_timeout = 600
+let default_question_timeout = 30
 
 exception Bad of string
 
 let bad fmt = Printf.ksprintf (fun m -> raise (Bad m)) fmt
 
 let socket_name port = Printf.sprintf ".s.cepheus.%d" port
+
+(* the longest path of a Unix socket: Linux's sun_path holds 108 bytes, its final zero included (unix(7)); a longer
+   one fails in bind and connect with ENAMETOOLONG, which names no call *)
+let max_socket_path = 107
+
+let long_socket path =
+  if String.length path <= max_socket_path then None
+  else
+    Some
+      (Printf.sprintf "the Unix socket's path %s has %d bytes, and Linux allows %d: choose a shorter folder for it" path
+         (String.length path) max_socket_path)
 let socket_path c = Option.map (fun d -> Filename.concat d (socket_name c.port)) c.socket
 let tokens_path c = Filename.concat (Filename.dirname c.file) "tokens.toml"
 (* the master key of the databases' vaults: beside cluster.toml, never in the data *)
@@ -157,7 +170,7 @@ let of_toml file (doc : (string * Toml.value) list) =
   let names = List.map (fun p -> p.pname) peers in
   if List.length (List.sort_uniq compare names) <> List.length names then bad "two [[peer]] have the same name";
   let clients = Option.value (table "clients") ~default:[] in
-  known "clients" clients [ "listen"; "socket"; "domains"; "max_connections"; "idle_timeout" ];
+  known "clients" clients [ "listen"; "socket"; "domains"; "max_connections"; "idle_timeout"; "question_timeout" ];
   let listen = Option.map (host_port "[clients] listen") (str "clients" clients "listen") in
   let socket = Option.map path (str "clients" clients "socket") in
   if listen = None && socket = None then bad "[clients] needs listen (TCP), socket (a directory for the Unix socket), or both";
@@ -178,6 +191,12 @@ let of_toml file (doc : (string * Toml.value) list) =
     | Some (Toml.Int n) when n >= 0 && n <= 604_800 -> n
     | Some _ -> bad "[clients] idle_timeout must be a number of seconds from 0 (no limit) to 604800 (a week)"
     | None -> default_idle_timeout
+  in
+  let question_timeout =
+    match List.assoc_opt "question_timeout" clients with
+    | Some (Toml.Int n) when n >= 0 && n <= 604_800 -> n
+    | Some _ -> bad "[clients] question_timeout must be a number of seconds from 0 (no limit) to 604800 (a week)"
+    | None -> default_question_timeout
   in
   let tls =
     match table "tls" with
@@ -211,7 +230,7 @@ let of_toml file (doc : (string * Toml.value) list) =
   if databases = [] then bad "[[database]] is missing: the server holds the databases this file declares";
   if List.length (List.sort_uniq compare databases) <> List.length databases then bad "two [[database]] have the same name";
   let port = match listen with Some (_, p) -> p | None -> default_port in
-  { file; name; id; me; peers; listen; socket; port; tls; data; cache; domains; max_connections; idle_timeout; databases }
+  { file; name; id; me; peers; listen; socket; port; tls; data; cache; domains; max_connections; idle_timeout; question_timeout; databases }
 
 let load file =
   match Toml.parse_file file with

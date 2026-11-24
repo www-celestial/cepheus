@@ -149,6 +149,30 @@ let real =
     parallel = true;
   }
 
+(* The machine's file system for a reader that changes nothing (cepheus verify, the files a backup copies): files opened
+   read-only, never made; every call that would write raises Io. *)
+let read_only =
+  let refused what p = raise (Io (Printf.sprintf "%s %s: refused, read-only" what p)) in
+  {
+    real with
+    mkdir = (fun p -> refused "mkdir" p);
+    openf =
+      (fun p _ ->
+        let ufd = unix "open" p (fun () -> Unix.openfile p [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0) in
+        locked (fun () ->
+            let fd = !next in
+            incr next;
+            Hashtbl.replace table fd (ufd, p);
+            fd));
+    pwrite = (fun fd _ _ _ _ -> refused "pwrite" (snd (get fd)));
+    truncate = (fun fd _ -> refused "ftruncate" (snd (get fd)));
+    fsync = (fun fd -> refused "fsync" (snd (get fd)));
+    rename = (fun a _ -> refused "rename" a);
+    remove = (fun p -> refused "unlink" p);
+    sync_dir = (fun p -> refused "fsync" p);
+    lock = (fun p -> refused "lock" p);
+  }
+
 let read_all d path =
   let fd = d.openf path false in
   Fun.protect ~finally:(fun () -> d.close fd) (fun () ->
