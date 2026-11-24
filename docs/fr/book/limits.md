@@ -142,7 +142,7 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | I/O domains | `[clients] domains`, de 1 à 64 ; par défaut $\min(4, \text{cœurs} / 2)$ | `Config.default_domains` |
 | le page cache | `[storage] cache`, 1 GiB par défaut | `Config.of_toml` |
 | le socket Unix | `.s.cepheus.PORT`, PORT étant le port de `listen` ou 7400 | `Config.socket_name` |
-| peers | exactement un dans cette version | `Config.of_toml` |
+| peers | 1 : un serveur seul ; 2 : un primary et sa replica ; 3 ou plus : un cluster Raft ([plus bas](#un-cluster-raft)) | `Config.of_toml`, `Cluster.is_raft` |
 | TLS | 1.3 seulement ; certificats : ECDSA P-256, la CA valable 3 650 jours, les autres 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | les threads des connexions | un par connexion (et un de plus tant qu'elle a des écritures en cours) | `Net.connection` |
 | la file d'un lecteur local | 64 MiB de frames pas encore envoyées ; au-delà, le lecteur est coupé et suit de nouveau | `Follow.max_behind` |
@@ -154,6 +154,20 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | une connexion inactive | `[clients] idle_timeout` secondes, de 0 à 604 800 (0 : aucune limite) ; 600 par défaut : une requête entière dans ce délai depuis la requête précédente, et ce que le serveur envoie, pris dans ce délai ; avant Hello, 10 s depuis l'accept (ou `idle_timeout` quand il est plus court, quel qu'il soit) pour le handshake TLS et le Hello ; l'horloge regardée après chaque lecture, dans le handshake TLS et dans un record TLS (un bloc chiffré du flux TLS) aussi | `Config.default_idle_timeout`, `Net.hello_s`, `Net.timeouts` |
 | le handshake d'un client | 5 s pour la connexion, TLS et Hello (et le Follow et le Start d'un follow stream), ensuite le socket attend aussi longtemps qu'il le faut ; au-delà, la tentative est abandonnée comme coupée et retentée dans le budget de nouvelles tentatives | `Client.handshake_timeout` |
 | le budget de nouvelles tentatives d'un client | 30 s d'essais pour se reconnecter après une connexion coupée ; ensuite `unreachable` (une écriture en cours a été appliquée une fois ou pas du tout) | `Client.retry_budget` |
+
+## Un cluster Raft
+
+| quoi | limite | où |
+|---|---|---|
+| un groupe | 256 MiB, comme sur un serveur seul ; une frame de plus d'1 MiB passe par le log en morceaux (pieces) d'1 MiB, appliquée en entier à son dernier morceau ; une requête fait 16 MiB sur le fil (un groupe plus gros : les conséquences d'un changement des règles) | `Cluster.frame_limit`, `Cluster.piece` |
+| un Append | 1 MiB d'entrées (au moins une) ; 1 024 entrées ou 8 MiB en vol vers un follower | `Raft.max_append_bytes`, `Raft.max_inflight`, `Raft.max_inflight_bytes` |
+| le début du log | coupé chaque seconde derrière ce que chaque journal tient forcé et ce que tient chaque serveur (le plancher, floor) ; un serveur muet depuis 5 minutes, ou qui a besoin d'une copie, n'est pas attendu | `Cluster.floor_ms`, `Raft.floor` |
+| une copie des bases | des frames d'1 MiB ; refusée quand elle laisserait moins de 64 MiB libres ; la source garde son log d'après l'index de la copie 60 s après son dernier octet ; une copie refusée ou cassée réessayée après 1 s, doublé jusqu'à 30 s | `Catchup.margin`, `Catchup.pin_ms`, `Cluster.start_fetch` |
+| les enregistrements d'un fichier | des entrées d'environ 1 MiB, au plus 16 MiB d'entre elles attendant leur commit à la fois ; un follower sans le `vault.key` du cluster réessaie toutes les 2 s | `Cluster.files_commit`, `Cluster.vault_retry` |
+| la direction passée à un arrêt propre (handover) | au plus deux election timeouts (1 s), puis l'arrêt continue | `Raft.hand_over` |
+| la réparation d'un serveur abîmé | il interroge chaque peer une fois par election timeout (0,5 à 1 s) ; des `Entries` d'1 MiB au plus | `Raft.tick`, `Raft.give` |
+| un serveur frais (sans état Raft) | il interroge à chaque heartbeat (50 ms) jusqu'à ce que ⌊n/2⌋ + 1 autres serveurs non frais aient répondu, ou une majorité de serveurs frais | `Raft.end_fresh` |
+| le protocole des peers | version 3 ; un peer de version 2 est accepté, on ne lui envoie jamais ce qu'ajoute la 3 | `Replica.version`, `Replica.oldest` |
 
 ## Le vault de fichiers
 

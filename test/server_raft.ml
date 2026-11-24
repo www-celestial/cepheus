@@ -64,7 +64,8 @@ let () =
     | [| _; d |] -> d, 0
     | [| _; d; "failover"; n |] -> d, int_of_string n
     | [| _; d; "handover"; _ |] -> d, 0
-    | _ -> prerr_endline "server_raft.exe DIR [failover N | handover N]"; exit 2
+    | [| _; d; "catchup"; _; _ |] -> d, 0
+    | _ -> prerr_endline "server_raft.exe DIR [failover N | handover N | catchup FACTS N]"; exit 2
   in
   C.rmrf dir;
   Unix.mkdir dir 0o700;
@@ -149,6 +150,47 @@ let () =
   let same () = List.for_all (fun db -> let g = group l0 db in List.for_all (fun k -> group k db = g) [ 0; 1; 2 ]) [ "main"; "side" ] in
   wait_for "every server holds the leader's groups" same;
   C.check true "the three hold the same groups (main at %d)" (group l0 "main");
+  (* [catchup FACTS N] (a measure, not a test): FACTS facts loaded through the leader (writes of 100,000), then N
+     times a follower killed, its data directory removed and started again: the time from its start to holding every
+     group (its copy of the databases taken, checked, installed, the server started again on it, the log's tail
+     applied) *)
+  if Array.length Sys.argv = 5 && Sys.argv.(2) = "catchup" then begin
+    let facts = int_of_string Sys.argv.(3) and n = int_of_string Sys.argv.(4) in
+    let t0 = Unix.gettimeofday () in
+    let batch = 100_000 in
+    for b = 0 to (facts / batch) - 1 do
+      match Client.write w mdb (List.init batch (fun i -> Resolve.Add (-(i + 1), mp, Int ((b * batch) + i)))) with
+      | Ok _ -> ()
+      | Error e -> failwith ("load: " ^ e.message)
+    done;
+    let same () = match leader () with Some l -> List.for_all (fun db -> let g = group l db in List.for_all (fun k -> alive.(k) && group k db = g) [ 0; 1; 2 ]) [ "main"; "side" ] | None -> false in
+    wait_for ~limit:600. "every server holds the load" same;
+    Printf.printf "loaded %d facts through the leader in %.1f s\n%!" facts (Unix.gettimeofday () -. t0);
+    let log_start k = match String.split_on_char ' ' (stat k "raft.log") with a :: _ -> (match int_of_string_opt a with Some x -> x | None -> 0) | [] -> 0 in
+    wait_for ~limit:120. "the leader's log cut" (fun () -> match leader () with Some l -> log_start l > 1 | None -> false);
+    let data k = (Result.get_ok (Config.load cfgs.(k))).data in
+    let du d = let r = ref 0 in let rec go p = match Unix.lstat p with { Unix.st_kind = Unix.S_DIR; _ } -> Array.iter (fun x -> go (Filename.concat p x)) (Sys.readdir p) | st -> r := !r + st.st_size | exception Unix.Unix_error _ -> () in go d; !r in
+    for r = 1 to n do
+      let l = await_leader "a leader" in
+      let f = (l + 1 + (r mod 2)) mod 3 in
+      let db_bytes = du (Filename.concat (data l) "main") + du (Filename.concat (data l) "side") in
+      Unix.kill pids.(f) Sys.sigkill;
+      ignore (Serve.wait pids.(f));
+      alive.(f) <- false;
+      C.rmrf (data f);
+      let t1 = Unix.gettimeofday () in
+      pids.(f) <- Serve.start bin cfgs.(f);
+      alive.(f) <- true;
+      wait_socket (sock f);
+      wait_for ~limit:600. "the follower caught up" (fun () -> same () && stat f "raft.role" = "follower" && List.assoc_opt "raft.repair" (status f) = None);
+      Printf.printf "round %d: %s caught up from an empty data directory in %.0f ms (the databases %.1f MB)\n%!" r (List.nth names f)
+        ((Unix.gettimeofday () -. t1) *. 1000.) (float_of_int db_bytes /. 1e6)
+    done;
+    Client.close w;
+    Array.iteri (fun k c -> if alive.(k) then (ignore (run [ "stop"; "--config"; c ]); ignore (Serve.wait pids.(k)))) cfgs;
+    C.rmrf dir;
+    exit 0
+  end;
   (* a program that cannot follow: not_leader and the leader's address *)
   let r = Result.get_ok (Client.connect (Client.Unix_socket (sock follower)) wtext) in
   Client.retry_budget := 1.0;

@@ -73,6 +73,17 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects
   a new leader by itself.
+- In a Raft cluster ([the server](docs/book/server.md#a-cluster-of-three-raft)): a follower behind the leader's log
+  start, or started on an empty data directory, takes a **copy of the databases** from the leader (runs, journal,
+  session tables, vault), checked as `cepheus verify` checks one, then starts again on it (the role of
+  InstallSnapshot); a server with no Raft state takes no part until a majority of the others said their terms and
+  logs, so that a lost disk neither votes twice in a term nor elects a leader that lacks what it acknowledged; the log
+  no longer grows without end for a dead server (five minutes, then a copy); groups past 8 MiB go through the log in
+  pieces, applied whole or not at all, up to 256 MiB; the **vault's files** are replicated (`Put`, `Load`, `Erase`
+  through the leader, one `vault.key` shared by the servers); `cepheus stop` on the leader **hands its leadership
+  over** first (Timeout_now), the writes paused for one vote round; a damaged server takes the committed entries it
+  lacks from any sound peer, so that a damaged majority elects a leader again. The peer protocol is at version 3; a
+  peer of version 2 is still taken (a rolling upgrade).
 - Commands: `cepheus serve`, `stop`, `status`, `token add|list|remove`, `cluster init|cert`, `replicate`, `promote`,
   `verify`, `backup`, `restore` ([commands](docs/book/server.md#commands)), and a systemd service with backups, a
   restore drill and what to watch ([production](docs/book/production.md)).
@@ -171,6 +182,8 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 
 ### Fixes
 
+- `cepheus restore --replace` twice over one folder within a second failed (`ENOTEMPTY`): the folder moved aside took
+  the name of the one moved aside before. It now takes a free one (`-2`, `-3`, ...).
 - A newest journal segment whose header does not check while it holds bytes past it, or where the newest run
   resumes, is refused at open as damage (G6). Recovery took it for a segment torn at its creation and removed it, so
   one flipped bit in its 40 bytes opened the database without that segment's groups, with no error.

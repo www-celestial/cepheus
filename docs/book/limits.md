@@ -142,7 +142,7 @@ defaults, and the cache's size (`set_cache`).
 | I/O domains | `[clients] domains`, 1 to 64; default $\min(4, \text{cores} / 2)$ | `Config.default_domains` |
 | the page cache | `[storage] cache`, default 1 GiB | `Config.of_toml` |
 | the Unix socket | `.s.cepheus.PORT`, PORT the port of `listen` or 7400 | `Config.socket_name` |
-| peers | exactly one in this version | `Config.of_toml` |
+| peers | 1: a single server; 2: a primary and its replica; 3 or more: a Raft cluster ([below](#a-raft-cluster)) | `Config.of_toml`, `Cluster.is_raft` |
 | TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |
 | a local reader's queue | 64 MiB of frames not yet sent; past it the reader is cut off and follows again | `Follow.max_behind` |
@@ -154,6 +154,20 @@ defaults, and the cache's size (`set_cache`).
 | an idle connection | `[clients] idle_timeout` seconds, 0 to 604,800 (0: no limit); default 600: a whole request within it from the previous request, and what the server sends taken within it; before Hello, 10 s from the accept (or `idle_timeout` when shorter, whatever it is) for the TLS handshake and the Hello; the clock checked after every read, inside the TLS handshake and a TLS record too | `Config.default_idle_timeout`, `Net.hello_s`, `Net.timeouts` |
 | a client's handshake | 5 s for connect, TLS and Hello (and a follow stream's Follow and Start), then the socket waits as long as it must; past it the attempt is given up as broken and tried again within the retry budget | `Client.handshake_timeout` |
 | a client's retry budget | 30 s of tries to connect again after a broken connection; then `unreachable` (a write in flight was applied once or not at all) | `Client.retry_budget` |
+
+## A Raft cluster
+
+| what | limit | where |
+|---|---|---|
+| a group | 256 MiB, as on a single server; a frame past 1 MiB goes through the log in pieces of 1 MiB, applied whole at its last piece; a request is 16 MiB on the wire (a larger group: a change of the rules' consequences) | `Cluster.frame_limit`, `Cluster.piece` |
+| an Append | 1 MiB of entries (at least one); 1,024 entries or 8 MiB in flight to a follower | `Raft.max_append_bytes`, `Raft.max_inflight`, `Raft.max_inflight_bytes` |
+| the log's start | cut each second behind what every journal holds forced and every server holds (the floor); a server silent for 5 minutes, or one that needs a copy, is not waited for | `Cluster.floor_ms`, `Raft.floor` |
+| a copy of the databases | frames of 1 MiB; refused when it would leave less than 64 MiB free; the source keeps its log after the copy's index for 60 s after its last byte; a refused or broken one tried again after 1 s, doubling up to 30 s | `Catchup.margin`, `Catchup.pin_ms`, `Cluster.start_fetch` |
+| a file's records | entries of about 1 MiB, at most 16 MiB of them waiting for their commit at a time; a follower without the cluster's `vault.key` tries again every 2 s | `Cluster.files_commit`, `Cluster.vault_retry` |
+| a handover at a clean stop | at most two election timeouts (1 s), then the stop goes on | `Raft.hand_over` |
+| a damaged server's repair | it asks every peer once an election timeout (0.5 to 1 s); `Entries` of 1 MiB at most | `Raft.tick`, `Raft.give` |
+| a fresh server (no Raft state) | asks every heartbeat (50 ms) until ⌊n/2⌋ + 1 other servers that are not fresh answered, or a majority of fresh ones | `Raft.end_fresh` |
+| the peer protocol | version 3; a peer of version 2 is taken, never sent what 3 adds | `Replica.version`, `Replica.oldest` |
 
 ## The file vault
 
