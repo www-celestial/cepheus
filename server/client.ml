@@ -31,7 +31,7 @@ type t = {
   early : (int, (int * int * Bytes.t) list) Hashtbl.t;  (* replies that came before they were asked for *)
   mutable welcome : Wire.reply option;
   mutable follows : (Unix.file_descr * (unit -> unit)) list;
-      (* the follow streams of its databases, each a thread of a shared domain (Pool.run), and its join *)
+      (* the follow streams of its databases, each a domain of its own, and its join *)
   mutable spoken : int;  (* the protocol's version this connection speaks: 6, or less with a server that speaks no more *)
   mutable members : address list;  (* a Raft cluster's servers, from Welcome: where to go when this one is gone *)
 }
@@ -295,7 +295,7 @@ let close c =
   (match c.fd with
    | Some fd -> c.fd <- None; (try Unix.close fd with Unix.Unix_error _ -> ())
    | None -> ());
-  (* the follow streams end; their threads stop *)
+  (* the follow streams end; their domains stop *)
   List.iter (fun (fd, _) -> try Unix.shutdown fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ()) c.follows;
   List.iter (fun (_, join) -> join ()) c.follows;
   c.follows <- []
@@ -397,8 +397,8 @@ let follow_loop fc fol () =
 (* the server refuses to follow for this token: one that may not read every kind *)
 exception Not_followed
 
-(* a second connection, Follow on it: the page and the runs passed, the follower made, the rest applied by a thread
-   of a shared domain (Pool.run); None over TCP, or when the server refuses (the reads then go to the server) *)
+(* a second connection, Follow on it: the page and the runs passed, the follower made, the rest applied by a domain
+   of its own; None over TCP, or when the server refuses (the reads then go to the server) *)
 let follow c handle =
   match c.address with
   | Tcp _ -> None
@@ -434,10 +434,10 @@ let follow c handle =
         | _ -> None
       with
       | Some fol -> (
-        (* a thread of a domain that no program's computation shares (Pool.run: the cores' domains for every
-           followed database of the process, not a domain each) *)
-        match Pool.run [ follow_loop fc fol ] with
-        | join -> c.follows <- (fd, join) :: c.follows; Some fol
+        (* a domain of its own, counted (Pool), so that its frames never wait for the program's computation; the
+           Cesia client's engine has no systhreads to share one *)
+        match Pool.spawn (follow_loop fc fol) with
+        | d -> c.follows <- (fd, fun () -> Domain.join d) :: c.follows; Some fol
         | exception _ -> fclose fc; None)
       | None -> fclose fc; None
       | exception Not_followed -> fclose fc; raise Not_followed

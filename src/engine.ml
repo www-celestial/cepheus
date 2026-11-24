@@ -706,7 +706,7 @@ type merger = {
   mutable log : Group.t list;  (* groups prepared since the merge started, newest first *)
   mutable logn : int;
   ready : ready option Atomic.t;  (* the file and the new lineage, and how many logged groups it holds *)
-  mutable dom : (unit -> unit) option;  (* its join (Pool.background: a domain, or a thread of the writer's) *)
+  mutable dom : (unit -> unit) option;  (* its join (Writers.background: a domain, or a thread of the writer's) *)
 }
 
 let merges = Atomic.make 0 (* finished background merges, for the tests and benchmarks *)
@@ -727,7 +727,7 @@ let start_merge ?(wake = ignore) ?tier t (from : Store.view) =
   let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None } in
   m.dom <-
     Some
-      (Pool.background (fun () ->
+      (Writers.background (fun () ->
            try
              let t0 = Journal.clock () in
              let w = merge_begin ~busy:(journal_busy ()) ?tier t from pos in
@@ -839,7 +839,7 @@ type change = {
                                                    oldest first, and the writer's view after them *)
   mutable backlog : int;  (* the groups in [clog] *)
   out : outcome option Atomic.t;
-  mutable cdom : (unit -> unit) option;  (* its join (Pool.background) *)
+  mutable cdom : (unit -> unit) option;  (* its join (Writers.background) *)
   born : int;  (* the writer's lineage when it started (Raft) *)
 }
 
@@ -1090,7 +1090,7 @@ type live = {
   c_sync : Condition.t;
   mutable to_sync : (batch * req array) option;
   mutable syncing : bool;
-  mutable joins : (unit -> unit) option;  (* its writer's and syncer's, threads of a writers' domain (Pool.run) *)
+  mutable joins : (unit -> unit) option;  (* its writer's and syncer's, threads of a writers' domain (Writers.run) *)
   mutable closed : bool;
   mutable merging : merger option;
   mutable retry : int;  (* after a failed merge, the next waits until the delta has this many changes *)
@@ -1426,9 +1426,9 @@ let rec poll_change l =
           { creq = r; cops = r.w; stop = Atomic.make false; cm = Mutex.create (); clog = Queue.create (); backlog = 0; out = Atomic.make None;
             cdom = None; born = l.lineage }
         in
-        (* in a domain of its own, or past the process's budget a thread of the writer's (Pool.background); a thread
+        (* in a domain of its own, or past the process's budget a thread of the writer's (Writers.background); a thread
            the system cannot give answers the change, never stops the writer *)
-        match Pool.background (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) l.e ch w) with
+        match Writers.background (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) l.e ch w) with
         | join -> ch.cdom <- Some join; l.change <- Some ch
         | exception e -> deliver r (Error (Busy ("a change of the rules could not start: " ^ Printexc.to_string e))); poll_change l
       end
@@ -1560,8 +1560,8 @@ let start ?(follow = no_follow) ?(replica = false) ?(raft = false) e =
       to_sync = None; syncing = false; joins = None; closed = false; merging = None; retry = 0; follow; replica; raft;
       propose = (fun _ _ _ -> Error (Busy "no Raft yet")); rollback = false; change = None; waiting = []; lineage = 0; quiet = -1 }
   in
-  (* the writer and the syncer in a writers' domain (Pool.run): they never wait for the runtime lock of the clients *)
-  l.joins <- Some (Pool.run [ writer l; syncer l ]);
+  (* the writer and the syncer in a writers' domain (Writers.run): they never wait for the runtime lock of the clients *)
+  l.joins <- Some (Writers.run [ writer l; syncer l ]);
   l
 
 let call l make =

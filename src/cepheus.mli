@@ -355,6 +355,7 @@ module Pages = Pages
 module Histogram = Histogram
 module Journal = Journal
 module Pool = Pool
+module Writers = Writers
 module Query = Query
 module Reason = Reason
 module Resolve = Resolve

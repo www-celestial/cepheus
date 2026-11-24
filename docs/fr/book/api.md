@@ -580,6 +580,6 @@ questions).
 Une vue peut être lue depuis n'importe quel thread et n'importe quel domain en même temps, sans lock. `write` peut être
 appelé depuis n'importe quel thread de n'importe quel domain : le writer et le syncer (le thread qui fait les fsyncs du
 journal) sont deux threads d'un domain des writers, où ne tourne le travail d'aucun appelant (les bases du processus en
-partagent autant que de cœurs, `Pool.writers`), l'appelant attend sur sa propre condition variable. Le `write` d'un fork prend le
+partagent autant que de cœurs, `Writers.writers`), l'appelant attend sur sa propre condition variable. Le `write` d'un fork prend le
 mutex du fork, donc on peut écrire dans un même fork depuis plusieurs threads. Le `step` et l'`init` de `fold` peuvent
 tourner sur d'autres domains.

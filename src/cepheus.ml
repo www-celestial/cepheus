@@ -7,6 +7,7 @@ module Group = Group
 module Pack = Pack
 module Pages = Pages
 module Pool = Pool
+module Writers = Writers
 module Histogram = Histogram
 module Journal = Journal
 module Query = Query

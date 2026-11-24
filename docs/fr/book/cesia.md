@@ -330,20 +330,23 @@ admin. Dans la mémoire du programme (sur la machine du serveur), seul le `timeo
 que le programme n'attend plus (sa connexion fermée) s'arrête aussi au serveur.
 
 ```cesia norun
+names = result.Unwrap(cepheus.Fork(cepheus.Empty, [Client]))
+result.Unwrap(cepheus.Write([cepheus.Add(cepheus.New(k), Client.Name, "c$k") for k in 1..300], names))
 rows = cepheus.Find(6, (a, x, b, y, c, z) -> {
   Where: [[a, Client.Name, x], [b, Client.Name, y], [c, Client.Name, z]],
   Give: {Count: cepheus.Count()},
-}, db, timeout = 0.1)
-io.Print(rows.Code)
+}, names, timeout = 0.1)
+io.Print(rows.Error.Code)
 ```
 
 ```text
 timeout
 ```
 
-Trois patterns qui ne partagent aucune variable sont tous les triplets de clients (un produit cartésien) : un million
-de clients feraient $10^{18}$ réponses ; la question finit à son temps au lieu de tenir les cœurs du serveur.
-`cepheus.Watch` prend le même `timeout`, pour sa première réponse.
+Trois patterns qui ne partagent aucune variable sont tous les triplets de noms (un produit cartésien) : 300 noms font
+27 millions de réponses, un million $10^{18}$ ; la question finit à son temps au lieu de tenir les cœurs (ici ceux du
+programme, sur un fork à lui : [forks](#les-forks)). `cepheus.Watch` prend le même `timeout`, pour sa première
+réponse.
 
 ## Not, Or et In
 

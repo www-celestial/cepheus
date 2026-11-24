@@ -315,20 +315,22 @@ server's machine) only the program's own `timeout` bounds it. A question the pro
 connection closed) stops at the server too.
 
 ```cesia norun
+names = result.Unwrap(cepheus.Fork(cepheus.Empty, [Client]))
+result.Unwrap(cepheus.Write([cepheus.Add(cepheus.New(k), Client.Name, "c$k") for k in 1..300], names))
 rows = cepheus.Find(6, (a, x, b, y, c, z) -> {
   Where: [[a, Client.Name, x], [b, Client.Name, y], [c, Client.Name, z]],
   Give: {Count: cepheus.Count()},
-}, db, timeout = 0.1)
-io.Print(rows.Code)
+}, names, timeout = 0.1)
+io.Print(rows.Error.Code)
 ```
 
 ```text
 timeout
 ```
 
-Three patterns that share no variable are every triple of clients (a cross product): a million clients would be
-$10^{18}$ answers; the question ends at its time instead of holding the server's cores. `cepheus.Watch` takes the same
-`timeout`, for its first answer.
+Three patterns that share no variable are every triple of names (a cross product): 300 names make 27 million
+answers, a million $10^{18}$; the question ends at its time instead of holding the cores (here the program's, on a
+fork of its own: [forks](#forks)). `cepheus.Watch` takes the same `timeout`, for its first answer.
 
 ## Not, Or and In
 

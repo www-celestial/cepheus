@@ -46,7 +46,7 @@ defaults, and the cache's size (`set_cache`).
 | a segment | a new segment begins when the next frame would take the current one past 64 MiB | `Journal.segment_limit` |
 | frame overhead | 44 bytes (a 28-byte header and a 16-byte trailer) | `Journal.fh`, `Journal.ft` |
 | segment header | 40 bytes | `Journal.seg_header` |
-| writers | one per database, a thread beside its syncer's; the writers of every database of the process share the writers' domains, as many as the cores by default (a new database takes the one with the fewest databases; a domain whose databases all closed ends): a server of 200 databases holds 8 of them on 8 cores | `Engine.start`, `Pool.run`, `Pool.writers` |
+| writers | one per database, a thread beside its syncer's; the writers of every database of the process share the writers' domains, as many as the cores by default (a new database takes the one with the fewest databases; a domain whose databases all closed ends): a server of 200 databases holds 8 of them on 8 cores | `Engine.start`, `Writers.run`, `Writers.writers` |
 
 ## Merges and runs
 
@@ -123,7 +123,7 @@ defaults, and the cache's size (`set_cache`).
 | run files | 64-bit little-endian machines (the in-memory layout); the journal is portable | [formats](formats.md) |
 | durability | relies on `fsync` meaning durable, for files and for directories (Linux and its usual file systems) | [operations](operations.md#disks) |
 | OCaml | 5 (domains), with `unix` and `threads`, and its C compiler for `src/crc32c_stubs.c` and `src/clock_stubs.c` | `src/dune` |
-| domains a process | the runtime's cap, 128 in OCaml 5.5 (`OCAMLRUNPARAM=d=N` raises it, read when the program starts; Cepheus reads the same variable): Cepheus spawns at most the cap less 16 (left to the program's own domains); a domain it may do without (a merge, a change of the rules, the parts of a snapshot's reads, a helper of a question) is not spawned past it, and its work runs on a thread of the domain that asked, or on fewer domains. Each domain costs every minor collection a little (it stops them all): Cepheus keeps few | `Pool.cap`, `Pool.margin`, `Pool.try_spawn`, `Pool.background` |
+| domains a process | the runtime's cap, 128 in OCaml 5.5 (`OCAMLRUNPARAM=d=N` raises it, read when the program starts; Cepheus reads the same variable): Cepheus spawns at most the cap less 16 (left to the program's own domains); a domain it may do without (a merge, a change of the rules, the parts of a snapshot's reads, a helper of a question) is not spawned past it, and its work runs on a thread of the domain that asked, or on fewer domains. Each domain costs every minor collection a little (it stops them all): Cepheus keeps few | `Pool.cap`, `Pool.margin`, `Pool.try_spawn`, `Writers.background` |
 | processor | x86-64 with SSE4.2 (part of the x86-64-v2 level; Intel since Nehalem, 2008, AMD since Bulldozer, 2011), or arm64 with the CRC32 instructions (optional in ARMv8.0, required from ARMv8.1), on Linux or macOS; another one is refused when the program starts, another architecture does not build | `src/crc32c_stubs.c` |
 
 ## The server
@@ -146,7 +146,7 @@ defaults, and the cache's size (`set_cache`).
 | I/O domains | `[clients] domains`, 1 to 64; default $\min(4, \text{cores} / 2)$ | `Config.default_domains` |
 | the page cache | `[storage] cache`, default 1 GiB | `Config.of_toml` |
 | the Unix socket | `.s.cepheus.PORT`, PORT the port of `listen` or 7400; its whole path at most 107 bytes (Linux's `sun_path` holds 108 with its final zero: unix(7)), else the server does not start, and a program's connection is refused, each naming the path and its length | `Config.socket_name`, `Net.unix_listener`, `Client.open_socket` |
-| databases a server | no bound of their own: 200 tested (each a writer and a syncer thread in the writers' domains, its journal and runs open); the process's descriptors (`ulimit -n`) and threads bound them | `Pool.run`, `test/server_limits.ml` |
+| databases a server | no bound of their own: 200 tested (each a writer and a syncer thread in the writers' domains, its journal and runs open); the process's descriptors (`ulimit -n`) and threads bound them | `Writers.run`, `test/server_limits.ml` |
 | peers | exactly one in this version | `Config.of_toml` |
 | TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |

@@ -553,6 +553,6 @@ tables at open and its other pages as questions need them). [operations](operati
 
 A view can be read from any thread and any domain at the same time, with no lock. `write` can be called from any
 thread of any domain: the writer and the syncer are two threads of a writers' domain, where no caller's work runs
-(the databases of the process share as many of them as the cores, `Pool.writers`), the caller waits on its own
+(the databases of the process share as many of them as the cores, `Writers.writers`), the caller waits on its own
 condition variable. A fork's `write` takes the fork's mutex, so one fork can be written to from several threads. `fold`'s `step`
 and `init` may run on other domains.
