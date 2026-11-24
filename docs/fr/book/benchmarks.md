@@ -94,6 +94,7 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
 | `sbench.exe watches DIR` | un changement sous un watch (une question vivante, que le serveur tient à jour) de `Not`, `Or`, `In` et `Prefix` (un hub chacun, le hub étant le thread qui calcule les questions vivantes d'une base ; les changements faits en mémoire), contre la question à laquelle on répond de nouveau en entier : 21 changements chacun |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | le côté SQLite, un seul fichier `ROOT/bench.db` : `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
+| `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | la sauvegarde et la restauration des trois côtés : `cepheus backup`, `verify`, `restore` jusqu'à la fin et jusqu'à un groupe ; `pg_basebackup`, `pg_verifybackup`, une restauration et une restauration à un instant donné ; `.backup`, `integrity_check` et `.restore` de SQLite ; tout l'historique rejoué (`-replay`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | la vente de places du [cas](case-seats.md) : `BUYERS` threads vendent toutes les places d'une salle de SEATS places ; le temps, et ce qui a mal tourné |
 | `bench/sqlite/seats.py FILE immediate\|naive SEATS BUYERS` | la même vente sur SQLite (le module `sqlite3` de Python, WAL, c'est-à-dire write-ahead log, le journal où SQLite écrit avant de toucher sa base, `synchronous = FULL`) |
 | `bench/pg/pg.sh seats ROOT serializable\|naive SEATS BUYERS` | la même vente sur PostgreSQL (pgbench, `--max-tries=1000`, les scripts `bench/pg/seat-*.sql`) |
@@ -109,6 +110,78 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
+
+## La sauvegarde et la restauration (2026-11-24), à 10 millions de faits
+
+**Méthode.** `bench/ops.sh`, sur la machine des autres sections (i7-4720HQ, 4 cœurs et 8 threads, 11 Go, un SSD SATA
+sous btrfs, plein à 97 % ce jour-là), sous le verrou qui tient à l'écart les autres gros travaux de la machine
+(d'autres sessions faisaient à côté un travail léger : une charge moyenne de 3) ; chaque fichier dans le cache de pages
+(à chaud : les copies lisent la mémoire, pas le disque) ; 21 tours, chaque temps donné par sa médiane et son
+intervalle à 95 % qui ne suppose aucune loi. Les mêmes données des trois côtés : les 10 M de faits des autres sections
+(113 636 clients, 2 272 720 factures, les liens de suivi), chargés dans Cepheus comme une application les écrit
+(`bench.exe load`, un groupe par client et ses factures, 64 threads : 227 274 groupes en 107 s ; les runs laissés tels
+que le chargement les a faits : un run des groupes 1 à 223 108, et 4 166 groupes dans le journal après lui), et dans
+PostgreSQL 18.6 et SQLite 3.54 depuis les mêmes fichiers CSV.
+
+- **Cepheus** : `cepheus backup` du serveur en marche (aucun programme n'écrit), `cepheus verify` de la copie,
+  `cepheus restore` de la copie jusqu'à sa fin, et jusqu'au groupe du milieu de son historique
+  (`--to-group 113637` : aucun run ne finit avant lui, donc l'ouverture rejoue depuis le journal les groupes 1 à
+  113 637, les clients et leurs factures, 9,43 M de faits, en les fusionnant dans des runs comme le ferait
+  l'écrivain).
+- **PostgreSQL** : son WAL (son journal) archivé (`archive_command = 'cp %p ...'`), une sauvegarde de base prise avant
+  le chargement (48 Mo) ; puis `pg_basebackup -X stream -c fast` (format plain, le WAL envoyé en flux, un checkpoint
+  rapide), `pg_verifybackup` de la copie (le CRC-32C de chaque fichier contre le manifeste de la sauvegarde, et le WAL
+  dont elle a besoin), sa restauration (une copie, un démarrage, prêt à recevoir des connexions), et une restauration à
+  un instant donné (point-in-time recovery) jusqu'au milieu du WAL du chargement depuis la sauvegarde de base prise
+  avant lui (`recovery_target_lsn`, puis promue)
+  ([archivage continu et restauration à un instant donné](https://www.postgresql.org/docs/current/continuous-archiving.html),
+  [pg_basebackup](https://www.postgresql.org/docs/current/app-pgbasebackup.html),
+  [pg_verifybackup](https://www.postgresql.org/docs/current/app-pgverifybackup.html)).
+- **SQLite** : `.backup` dans un nouveau fichier (l'API de sauvegarde en ligne : « The online backup API allows the
+  contents of one database to be copied into another », [sqlite.org/backup.html](https://www.sqlite.org/backup.html)),
+  `PRAGMA integrity_check` de la copie ([pragma.html](https://www.sqlite.org/pragma.html#pragma_integrity_check)),
+  `.restore` dans un nouveau fichier. SQLite ne garde pas d'historique : il ne peut pas restaurer jusqu'à un point.
+
+| 10 M de faits | Cepheus | PostgreSQL 18.6 | SQLite 3.54 | qui gagne |
+|---|---|---|---|---|
+| la base | 104,7 Mo (journal 33,9, runs 70,8) | 284 Mo | 136,4 Mo | Cepheus |
+| une sauvegarde, pendant qu'elle sert | **1,16 s** [0,995, 1,45], 104,7 Mo | 22,53 s [15,83, 32,68], 337,9 Mo | 1,46 s [1,14, 2,10], 136,4 Mo | Cepheus |
+| la sauvegarde vérifiée | 565 ms [562, 579] | **95 ms** [92, 734] | 2,83 s [2,81, 2,83] | PostgreSQL |
+| une restauration jusqu'à la fin | **1,61 s** [1,48, 1,93] | 6,45 s [5,93, 7,70] | 2,65 s [2,08, 3,50] | Cepheus |
+| tout l'historique rejoué (11 tours) | 34,87 s [33,67, 36,19], depuis le journal seul (33,9 Mo) | **21,42 s** [12,89, 46,57], depuis une sauvegarde de base prise vide (48 Mo) et 403 Mo de WAL | aucune | PostgreSQL |
+| jusqu'au milieu de l'historique (pas le même travail) | 32,62 s [31,48, 35,56], 9,43 M de faits rejoués | 21,71 s [16,92, 35,40], la moitié du WAL du chargement rejouée | aucune | |
+
+Tout l'historique rejoué est le même travail des deux côtés : Cepheus restaure une copie dont on a retiré les runs (le
+journal seul, chaque groupe rejoué : `bench/ops.sh cepheus-replay`), PostgreSQL se restaure depuis la sauvegarde de
+base prise avant le chargement jusqu'à la fin du WAL archivé (`bench/ops.sh pg-replay` ; les 2 272 720 factures y sont).
+« Le milieu » ne l'est pas : le groupe du milieu de Cepheus vient après chaque client et chaque facture (9,43 M de
+faits, les liens de suivi après lui), alors que le LSN (la position dans le WAL) du milieu de PostgreSQL est à la
+moitié des octets de son WAL.
+
+- **Là où Cepheus gagne.** Sa sauvegarde est une copie des fichiers tels qu'ils sont (le journal et les runs sont écrits
+  une fois et jamais changés), vérifiée : 19 fois plus rapide que `pg_basebackup`, dont le temps est son checkpoint (le
+  moment où il force toutes ses pages sur le disque) et la copie de 338 Mo de pages, et une copie 3,2 fois plus petite
+  (les colonnes des runs codées par blocs, le journal compressé). Sa restauration jusqu'à la fin ouvre le run le plus
+  récent et rejoue les 4 166 groupes d'après lui : 4 fois plus rapide que le démarrage de PostgreSQL sur une sauvegarde
+  de base, qui refait son WAL depuis le checkpoint et force chaque page. Et une sauvegarde n'a besoin d'aucune archive
+  de journaux : le journal de la copie tient chaque groupe, donc une restauration jusqu'à n'importe quel groupe n'a
+  besoin que de la copie, alors que la restauration à un instant donné de PostgreSQL a besoin d'une sauvegarde de base
+  plus ancienne que la cible et de chaque fichier de WAL depuis (1,1 Go archivés pendant les 21 tours).
+- **Là où PostgreSQL gagne.** `pg_verifybackup` vérifie le CRC de chaque fichier contre le manifeste, 6 fois plus vite
+  que `cepheus verify`, qui en plus décode et numérote chacun des 227 274 groupes et vérifie les tables de chaque run
+  comme le fait une ouverture ; le journal tient ici en un seul segment, vérifié par un seul domain (les segments sont
+  vérifiés en parallèle). Et sa restauration rejoue le WAL, un redo physique des pages, 1,6 fois plus vite que le rejeu
+  de tout l'historique par Cepheus (médiane contre médiane ; l'intervalle de PostgreSQL est large, [12,89, 46,57] s,
+  son checkpoint de fin de restauration forçant chaque page sur ce disque) : Cepheus rejoue 227 274 groupes l'un après
+  l'autre, environ 287 000 faits par seconde, les fusionne dans des runs et les force comme le ferait l'écrivain. Les
+  historiques diffèrent aussi : celui de PostgreSQL est un `COPY` en masse (quelques transactions), celui de Cepheus
+  227 274 groupes des écritures d'une application. Le pas suivant pour Cepheus : rejouer des petits groupes consécutifs
+  en un seul lot, par le chemin des grands groupes (des tableaux triés, sans mise à jour d'index par fait).
+- **SQLite** copie son fichier à peu près aussi vite que Cepheus (1,46 s contre 1,16 s), mais le vérifie 5 fois plus
+  lentement (`integrity_check` parcourt chaque page de ses b-trees) et ne garde pas d'historique pour en restaurer un
+  point.
+- Pas mesuré : les sauvegardes à froid (les copies lues depuis le disque, pas depuis le cache de pages), une sauvegarde
+  sous des écritures, et une base plus grande que la mémoire.
 
 ## Les lectures de l'application de factures après un chargement, et le premier appel (2026-11-19)
 

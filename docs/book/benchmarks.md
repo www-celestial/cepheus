@@ -72,6 +72,7 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `sbench.exe watches DIR` | a change under a watch of `Not`, `Or`, `In` and `Prefix` (one hub each, the changes made in memory), against the question answered again in full: 21 changes each |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
+| `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | backup and restore on the three sides: `cepheus backup`, `verify`, `restore` to the end and to a group; `pg_basebackup`, `pg_verifybackup`, a restore and a point-in-time recovery; SQLite's `.backup`, `integrity_check`, `.restore`; the whole history replayed (`-replay`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | the sale of seats of the [case](case-seats.md): `BUYERS` threads sell out a hall of SEATS seats, the time and what went wrong |
 | `bench/sqlite/seats.py FILE immediate\|naive SEATS BUYERS` | the same sale on SQLite (Python's `sqlite3`, WAL, `synchronous = FULL`) |
 | `bench/pg/pg.sh seats ROOT serializable\|naive SEATS BUYERS` | the same sale on PostgreSQL (pgbench, `--max-tries=1000`, the scripts `bench/pg/seat-*.sql`) |
@@ -87,6 +88,71 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## Backup and restore (2026-11-24), at 10 million facts
+
+**Method.** `bench/ops.sh`, on the machine of the other sections (i7-4720HQ, 4 cores and 8 threads, 11 GB, a SATA
+SSD under btrfs, 97 % full that day), under the lock that keeps the machine's other heavy jobs away (other sessions ran
+light work beside: a load average of 3); every file in the page cache (warm: the copies read memory, not the disk);
+21 rounds, each time the median and its distribution-free 95 % interval. The same data on the three sides: the 10 M
+facts of the other sections (113,636 clients, 2,272,720 invoices, the follow links), loaded on Cepheus as an
+application writes them (`bench.exe load`, a group a client and its invoices, 64 threads: 227,274 groups in 107 s; the
+runs left as the load made them: one run of groups 1 to 223,108 and 4,166 groups in the journal after it), and on
+PostgreSQL 18.6 and SQLite 3.54 from the same CSV files.
+
+- **Cepheus**: `cepheus backup` of the running server (no program writing), `cepheus verify` of the copy,
+  `cepheus restore` of the copy to its end, and to the group in the middle of its history (`--to-group 113637`: no run
+  ends before it, so the open replays groups 1 to 113,637 from the journal, the clients and their invoices, 9.43 M
+  facts, merging them into runs as the writer would).
+- **PostgreSQL**: its WAL archived (`archive_command = 'cp %p ...'`), a base backup taken before the load (48 MB);
+  then `pg_basebackup -X stream -c fast` (plain format, the WAL streamed, a fast checkpoint), `pg_verifybackup` of it
+  (each file's CRC-32C against the backup's manifest, and the WAL it needs), its restore (a copy, a start, ready for
+  connections), and a point-in-time recovery to the middle of the load's WAL from the base backup taken before the load
+  (`recovery_target_lsn`, then promoted): the same work as Cepheus' restore to the middle group, half of the history
+  replayed ([continuous archiving and point-in-time recovery](https://www.postgresql.org/docs/current/continuous-archiving.html),
+  [pg_basebackup](https://www.postgresql.org/docs/current/app-pgbasebackup.html),
+  [pg_verifybackup](https://www.postgresql.org/docs/current/app-pgverifybackup.html)).
+- **SQLite**: `.backup` into a new file (the online backup API: "The online backup API allows the contents of one
+  database to be copied into another", [sqlite.org/backup.html](https://www.sqlite.org/backup.html)),
+  `PRAGMA integrity_check` of the copy ([pragma.html](https://www.sqlite.org/pragma.html#pragma_integrity_check)),
+  `.restore` into a new file. SQLite keeps no history: it cannot restore to a point.
+
+| 10 M facts | Cepheus | PostgreSQL 18.6 | SQLite 3.54 | who wins |
+|---|---|---|---|---|
+| the database | 104.7 MB (journal 33.9, runs 70.8) | 284 MB | 136.4 MB | Cepheus |
+| a backup, while it serves | **1.16 s** [0.995, 1.45], 104.7 MB | 22.53 s [15.83, 32.68], 337.9 MB | 1.46 s [1.14, 2.10], 136.4 MB | Cepheus |
+| the backup checked | 565 ms [562, 579] | **95 ms** [92, 734] | 2.83 s [2.81, 2.83] | PostgreSQL |
+| a restore to the end | **1.61 s** [1.48, 1.93] | 6.45 s [5.93, 7.70] | 2.65 s [2.08, 3.50] | Cepheus |
+| the whole history replayed (11 rounds) | 34.87 s [33.67, 36.19], from the journal alone (33.9 MB) | **21.42 s** [12.89, 46.57], from a base backup taken empty (48 MB) and 403 MB of WAL | none | PostgreSQL |
+| to the middle of the history (not the same work) | 32.62 s [31.48, 35.56], 9.43 M facts replayed | 21.71 s [16.92, 35.40], half of the load's WAL replayed | none | |
+
+The whole history replayed is the same work on both sides: Cepheus restores a copy whose runs were taken out (the
+journal alone, every group replayed: `bench/ops.sh cepheus-replay`), PostgreSQL recovers from the base backup taken
+before the load to the end of the WAL archived (`bench/ops.sh pg-replay`; the 2,272,720 invoices there). "The middle"
+is not: Cepheus' middle group comes after every client and invoice (9.43 M facts, the follow links after it), where
+PostgreSQL's middle LSN is halfway through the bytes of its WAL.
+
+- **Where Cepheus wins.** Its backup is a copy of the files as they are (the journal and the runs are written once and
+  never changed), checked: 19 times faster than `pg_basebackup`, whose time is its checkpoint and the copy of 338 MB of
+  pages, and a copy 3.2 times smaller (the runs' columns coded in blocks, the journal compressed). Its restore to the
+  end opens the newest run and replays the 4,166 groups after it: 4 times faster than PostgreSQL's start on a base
+  backup, which redoes its WAL from the checkpoint and forces every page. And a backup needs no archive of logs: the
+  journal in the copy holds every group, so a restore to any group needs the copy alone, where PostgreSQL's
+  point-in-time recovery needs a base backup older than the target and every WAL file since (1.1 GB archived during
+  the 21 rounds).
+- **Where PostgreSQL wins.** `pg_verifybackup` checks each file's CRC against the manifest, 6 times faster than
+  `cepheus verify`, which also decodes and numbers each of the 227,274 groups and checks every run's tables as an open
+  does; the journal is one segment here, checked by one domain (segments are checked in parallel). And its recovery
+  replays WAL, physical redo of pages, 1.6 times faster than Cepheus' replay of the whole history (median against
+  median; PostgreSQL's interval is wide, [12.89, 46.57] s, its end-of-recovery checkpoint forcing every page on this
+  disk): Cepheus replays 227,274 groups one after the other, about 287,000 facts a second, merging them into runs and
+  forcing those as the writer would. The histories differ too: PostgreSQL's is a bulk `COPY` (a few transactions),
+  Cepheus' 227,274 groups of an application's writes. The next step for Cepheus: replay consecutive small groups as
+  one batch, by the path of large groups (sorted arrays, no index update a fact).
+- **SQLite** copies its file about as fast as Cepheus (1.46 s against 1.16 s), but checks it 5 times slower
+  (`integrity_check` walks every b-tree page) and keeps no history to restore a point of.
+- Not measured: the backups taken cold (the copies read from the disk, not the page cache), a backup under writes,
+  and a database larger than memory.
 
 ## The invoices app's reads after a load, and the first call (2026-11-19)
 

@@ -15,6 +15,12 @@
 #   ops.sh sqlite ROOT CSVDIR ROUNDS
 #       the same rows in one file (bench/sqlite/sqlite.sh load); then each round: .backup into a new file, PRAGMA
 #       integrity_check of it, and its restore (.restore into a new file)
+#   ops.sh cepheus-replay ROOT CSVDIR FACTS ROUNDS
+#       the same load, a backup, its runs taken out; then each round: cepheus restore of it, the whole history replayed
+#       from the journal alone
+#   ops.sh pg-replay ROOT CSVDIR ROUNDS
+#       the same load with its WAL archived, the base backup taken before it; then each round: a recovery from that
+#       base backup to the end of the archived WAL, the whole history replayed
 # The sizes of each copy are printed once. ROOT must be short (a Unix socket path is at most 107 bytes).
 set -e
 cmd=$1; root=$2
@@ -61,6 +67,54 @@ cepheus)
   stats "cepheus verify (the copy)" < "$root/t.verify"
   stats "cepheus restore (to the end)" < "$root/t.restore"
   stats "cepheus restore (the middle group)" < "$root/t.mid"
+  ;;
+cepheus-replay)
+  csv=$3; facts=$4; rounds=$5
+  cep="$b/bin/main.exe"
+  rm -rf "$root"; mkdir -p "$root"
+  "$cep" cluster init ops --dir "$root/etc" > /dev/null
+  sed -i 's/^name = "main"/name = "shop"/' "$root/etc/cluster.toml"
+  mkdir "$root/etc/data"
+  SNAPSHOT=0 NOCSV=1 "$b/bench/bench.exe" load "$root/etc/data/shop" "$csv" "$facts" > "$root/load.out" 2>&1
+  "$cep" backup --config "$root/etc/cluster.toml" "$root/backup" > /dev/null
+  bk=$(ls -d "$root"/backup/20*)
+  rm -f "$bk"/shop/snapshots/*.run
+  echo "the copy without its runs: $(size "$bk/shop")"
+  for r in $(seq "$rounds"); do
+    rm -rf "$root/r"
+    log="$root/all.out"; timed "$cep" restore "$bk/shop" "$root/r" >> "$root/t.all"
+  done
+  tail -1 "$root/all.out"
+  stats "cepheus restore (the whole history)" < "$root/t.all"
+  ;;
+pg-replay)
+  csv=$3; rounds=$4
+  export PGHOST="$root/sock" PGPORT=${PGPORT:-5544} PGDATABASE=bench
+  rm -rf "$root"; mkdir -p "$root/arch"
+  sh "$here/pg/pg.sh" init "$root"
+  printf "archive_mode = on\narchive_command = 'cp %%p %s/arch/%%f'\n" "$root" >> "$root/data/postgresql.conf"
+  sh "$here/pg/pg.sh" start "$root" 2G
+  pg_basebackup -D "$root/base0" -X stream -c fast
+  sh "$here/pg/pg.sh" load "$root" "$csv"
+  psql -X -At -c "SELECT pg_switch_wal()" > /dev/null
+  sleep 2
+  sh "$here/pg/pg.sh" stop "$root"
+  echo "the empty base backup $(size "$root/base0"); the load's WAL archived $(size "$root/arch")"
+  for r in $(seq "$rounds"); do
+    rm -rf "$root/r"; cp -a "$root/base0" "$root/r"; chmod 700 "$root/r"
+    sed -i "/^unix_socket_directories/d; /^port/d; /^archive_/d" "$root/r/postgresql.conf"
+    mkdir -p "$root/rsock"
+    printf "unix_socket_directories = '%s'\nport = 5545\nrestore_command = 'cp %s/arch/%%f %%p'\nrecovery_target_timeline = 'latest'\n" "$root/rsock" "$root" >> "$root/r/postgresql.conf"
+    touch "$root/r/recovery.signal"
+    t0=$(ms)
+    pg_ctl -D "$root/r" -l "$root/r.log" -w -t 600 start > /dev/null
+    while [ "$(psql -X -At -h "$root/rsock" -p 5545 -d bench -c 'SELECT pg_is_in_recovery()')" != f ]; do sleep 0.05; done
+    t1=$(ms); echo $((t1 - t0)) >> "$root/t.all"
+    echo "rows: $(psql -X -At -h "$root/rsock" -p 5545 -d bench -c 'SELECT count(*) FROM invoice')" > "$root/rows.out"
+    pg_ctl -D "$root/r" -w stop > /dev/null
+  done
+  cat "$root/rows.out"
+  stats "PITR from the empty base backup to the end (the whole history)" < "$root/t.all"
   ;;
 pg)
   csv=$3; rounds=$4
@@ -125,5 +179,5 @@ sqlite)
   stats "sqlite integrity_check" < "$root/t.check"
   stats "sqlite .restore" < "$root/t.restore"
   ;;
-*) echo "ops.sh cepheus ROOT CSVDIR FACTS ROUNDS | pg ROOT CSVDIR ROUNDS | sqlite ROOT CSVDIR ROUNDS"; exit 2 ;;
+*) echo "ops.sh cepheus|cepheus-replay ROOT CSVDIR FACTS ROUNDS | pg|pg-replay|sqlite ROOT CSVDIR ROUNDS"; exit 2 ;;
 esac
