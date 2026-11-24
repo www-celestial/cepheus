@@ -197,9 +197,10 @@ let buf = lazy (Bigarray.Array1.create Bigarray.char Bigarray.c_layout (4 lsl 20
 
 let rec write_all fd b off n = if n > 0 then let k = Unix.write_bigarray fd b off n in write_all fd b (off + k) (n - k)
 
-(* [src] (open) copied into the new file [dst] (never through a name planted there: O_EXCL), mode 0600, up to
-   [limit] bytes or its end, forced: the bytes copied *)
-let copy_fd ?(limit = max_int) src dst =
+(* [src] (open) copied into the new file [dst] (never through a name planted there: O_EXCL), mode 0600, up to the
+   size it has now (a segment being appended is not chased) or its end, forced: the bytes copied *)
+let copy_fd src dst =
+  let limit = (Unix.fstat src).Unix.st_size in
   let b = Lazy.force buf in
   let out = Unix.openfile dst [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC ] 0o600 in
   Fun.protect ~finally:(fun () -> Unix.close out) (fun () ->
@@ -331,7 +332,7 @@ let backup (cfg : Config.t) dest =
     (Sys.readdir dest);
   let name =
     let s = stamp () in
-    let rec free k = let n = if k = 1 then s else Printf.sprintf "%s-%d" s k in if Sys.file_exists (dest // n) || Sys.file_exists (dest // (n ^ ".partial")) then free (k + 1) else n in
+    let rec free k = let n = if k = 1 then s else Printf.sprintf "%s-%d" s k in if List.exists (fun x -> Sys.file_exists (dest // (n ^ x))) [ ""; ".partial"; ".damaged" ] then free (k + 1) else n in
     free 1
   in
   (* every database's state before anything is copied: one a server's buffer must recover first refuses the backup *)

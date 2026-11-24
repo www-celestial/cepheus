@@ -7,6 +7,8 @@
    - killed (kill -9) while writes go on, it starts again and catches up;
    - a change of the rules on the primary (in its background) and a load on the path of loads with the rule's
      consequences: the replica holds both, read there;
+   - cepheus backup of the replica while the primary writes: the copy restores, at a group the replica held, with
+     the load and the rules' consequences;
    - the peer port refuses a certificate of another CA, one of the cluster's CA for a name that is no other peer
      (srv1's own, the intruder's), and a peer of another cluster id; a replica of an unknown database is refused;
    - a promotion while srv1 sends is refused, and so is one without the handover after srv1 was killed; srv1's clean
@@ -173,6 +175,24 @@ let () =
    | Error e -> C.check false "a change of the rules over the load: %s %s" e.code e.message);
   wait_for "the replica catches up after the change over the load" caught_up;
   C.check (rows w sdb2 sk3 = nk && rows r rdb sk3 = nk) "the change's consequences on the primary and on the replica (%d, %d of %d)" (rows w sdb2 sk3) (rows r rdb sk3) nk;
+  (* cepheus backup on the replica while the primary writes: it copies the replica's files, and the copy restores with
+     the load and the rules' consequences, at a group the replica held *)
+  let before = group "srv2" "side" in
+  let wt = Thread.create (fun () -> write_some w 200) () in
+  let dest = Filename.concat dir "rbackup" in
+  C.check (run [ "backup"; "--config"; cfg2; dest ] = 0) "cepheus backup on the replica while the primary writes";
+  Thread.join wt;
+  let folder = List.find (fun n -> n <> "cepheus-backup.lock") (Array.to_list (Sys.readdir dest)) in
+  let restored = Filename.concat dir "rside" in
+  C.check (run [ "restore"; Filename.concat (Filename.concat dest folder) "side"; restored ] = 0) "the replica's backup restores";
+  (match Cepheus.open_ restored with
+   | Error e -> C.check false "the restored copy of the replica: %s" (Cepheus.message e)
+   | Ok d ->
+     let v = Cepheus.view d in
+     let count p = match Cepheus.find v { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } with Ok l -> List.length l | Error _ -> -1 in
+     C.check (Cepheus.group v >= before && Cepheus.group v <= group "srv1" "side") "the copy is at a group the replica held (%d)" (Cepheus.group v);
+     C.check (count sk >= load && count sk2 = count sk && count sk3 = count sk) "the copy holds the load and the rules' consequences (%d)" (count sk3);
+     Cepheus.close d);
   Client.close r;
   (* the peer port refuses: another CA, a name that is no other peer, another cluster id, an unknown database *)
   let with_tls (c : Config.t) ca cert key = { c with tls = Some { Config.ca; cert; key } } in
