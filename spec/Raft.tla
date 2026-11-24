@@ -28,9 +28,9 @@
      log becomes the copy's, forced, its start X, and the 2018 rule's repair ends once X reaches it;
    - a server whose whole state is lost (Wipe: its disk replaced) starts fresh: it answers no vote request and no
      Append, takes no term, stands for nothing, and asks the others their state (Ask); it ends its freshness with the
-     answers of floor(n/2) + 1 other servers that are not fresh (its term their newest, its vote in it its own, its
-     repair mark their newest last index), or with a majority, itself included, of fresh servers only (a new
-     cluster). A wipe comes only while the damaged and the wiped stay a minority (a majority that lost what it
+     answers of floor(n/2) + 1 other servers neither fresh nor damaged (its term their newest, its vote in it its own, its
+     repair mark their newest last index), or with a majority, itself included, of answers with no history (fresh,
+     or of term 0 and an empty log: a new cluster). A wipe comes only while the damaged and the wiped stay a minority (a majority that lost what it
      acknowledged may have lost a committed entry);
    - leadership handed over (thesis 3.10; cepheus stop on the leader): a leader whose peer holds its whole log gives
      up its lease and takes no more requests, and sends it TimeoutNow; that peer stands at once, its vote requests
@@ -383,8 +383,9 @@ Ask(i, j) ==
   /\ msgs' = msgs \cup {[mtype |-> "Ask", msource |-> i, mdest |-> j]}
   /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes, transfers, handing, gives>>
 
+(* a damaged server answers nothing (its log may lack what it acknowledged, and it has a history) *)
 HandleAsk(j, m) ==
-  /\ m.mtype = "Ask" /\ m.mdest = j
+  /\ m.mtype = "Ask" /\ m.mdest = j /\ repair[j] = 0
   /\ msgs' = (msgs \ {m}) \cup {[mtype |-> "State", mterm |-> currentTerm[j], mlast |-> Len(log[j]), mfresh |-> fresh[j],
                                   msource |-> j, mdest |-> m.msource]}
   /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes, transfers, handing, gives>>
@@ -396,15 +397,16 @@ HandleState(i, m) ==
   /\ UNCHANGED <<currentTerm, votedFor, log, plog, repair, base, fresh, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes, transfers, handing, gives>>
 
 (* a fresh server's freshness ends: with the answers of floor(n/2) + 1 others that are not fresh, or with a majority
-   of fresh servers only (a new cluster) *)
+   of answers with no history (a new cluster) *)
 EndFresh(i) ==
   /\ fresh[i]
   /\ LET answered == {t \in Server : told[i][t] /= NoAnswer}
          sound == {t \in answered : ~told[i][t][3]}
+         none == \A t \in answered : told[i][t][3] \/ (told[i][t][1] = 0 /\ told[i][t][2] = 0)
          need == IF FreshHearOne THEN 1 ELSE Cardinality(Server) \div 2 + 1
          Top(S, k) == IF S = {} THEN 0 ELSE CHOOSE x \in {told[i][t][k] : t \in S} : \A t \in S : told[i][t][k] <= x
      IN /\ \/ Cardinality(sound) >= need
-           \/ sound = {} /\ Majority(answered \cup {i})
+           \/ none /\ Majority(answered \cup {i})
         /\ currentTerm' = [currentTerm EXCEPT ![i] = Max(currentTerm[i], Top(answered, 1))]
         /\ votedFor' = [votedFor EXCEPT ![i] = i]
         /\ repair' = [repair EXCEPT ![i] = IF FreshNoRepair THEN repair[i] ELSE Max(repair[i], Top(sound, 2))]
@@ -416,6 +418,7 @@ DropFresh(j, m) ==
   /\ m.mdest = j
   /\ \/ fresh[j] /\ m.mtype \in {"VoteReq", "VoteResp", "AppendReq", "AppendResp", "Copy", "TimeoutNow"}
      \/ ~fresh[j] /\ m.mtype = "State"
+     \/ repair[j] > 0 /\ m.mtype = "Ask"
   /\ msgs' = msgs \ {m}
   /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes, transfers, handing, gives>>
 

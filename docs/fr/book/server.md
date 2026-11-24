@@ -1371,13 +1371,15 @@ contre lequel il voterait maintenant, et acquitter des entrées qu'une majorité
 et participant aussitôt, il pourrait élire un second leader dans ce term, ou élire un leader à qui manque une entrée
 committed. Un serveur qui démarre sans état Raft est donc **frais** (fresh) : il ne répond à aucun vote ni à aucun
 Append, ne prend aucun term, ne se présente à rien, et demande à chaque peer son état (`Ask` : son term, son dernier
-index, s'il est frais). Il sort de cet état avec les réponses de ⌊n/2⌋ + 1 autres serveurs qui ne sont pas frais
-(toute majorité qui a élu un leader ou commité une entrée avec son vote en tient un) : son term devient le plus récent
+index, s'il est frais ; un serveur abîmé ne répond pas). Il sort de cet état avec les réponses de ⌊n/2⌋ + 1 autres serveurs ni frais ni
+abîmés (toute majorité qui a élu un leader ou commité une entrée avec son vote en tient un, qui tient toujours ce
+qu'il a acquitté) : son term devient le plus récent
 des leurs, son vote dans ce term le sien (il a pu y voter), et sa marque de réparation leur dernier index le plus
 récent, si bien que par [la règle de 2018](#un-log-abîmé--la-règle-de-2018) il ne vote à nouveau qu'une fois qu'il
 tient chaque entrée jusque-là, reçue d'un serveur qui la sait committed. En pratique il prend ensuite une copie des
-bases et suit. Un nouveau cluster, c'est une majorité, lui compris, de serveurs frais seulement : ils sortent ensemble
-de cet état et élisent un leader. Ce que cela ne couvre pas : une majorité qui perd ses données d'un coup a perdu ce
+bases et suit. Un nouveau cluster, c'est une majorité, lui compris, de réponses sans histoire (des serveurs frais, ou
+des serveurs de term 0 au log vide, sortis de cet état ainsi et qui n'ont entendu parler d'aucune élection depuis) :
+ils sortent de cet état et élisent un leader. Ce que cela ne couvre pas : une majorité qui perd ses données d'un coup a perdu ce
 qu'elle seule tenait, comme dans tout cluster Raft.
 
 ### Les élections

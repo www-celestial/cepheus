@@ -65,7 +65,8 @@ let () =
     | [| _; d; "failover"; n |] -> d, int_of_string n
     | [| _; d; "handover"; _ |] -> d, 0
     | [| _; d; "catchup"; _; _ |] -> d, 0
-    | _ -> prerr_endline "server_raft.exe DIR [failover N | handover N | catchup FACTS N]"; exit 2
+    | [| _; d; "group"; _ |] -> d, 0
+    | _ -> prerr_endline "server_raft.exe DIR [failover N | handover N | catchup FACTS N | group N]"; exit 2
   in
   C.rmrf dir;
   Unix.mkdir dir 0o700;
@@ -629,6 +630,23 @@ let () =
     let rid = Schema.first_thing - 200 - !rules in
     Client.write c sdb3 [ Resolve.Add (rid, Schema.p_name, Text name); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text (rule name p))); Resolve.Expect (rid, Schema.p_name, None) ]
   in
+  (* [group N] (a measure, not a test): N groups of about 100 MiB, each a rule's consequences, from the write to its
+     receipt *)
+  if Array.length Sys.argv = 4 && Sys.argv.(2) = "group" then begin
+    let n = int_of_string Sys.argv.(3) in
+    for r = 1 to n do
+      let ps = match Client.declare w "side" [ prop ~many:true (Printf.sprintf "g%d" r) Ttext ] with Ok (_, [ p ]) -> p | _ -> failwith "declare" in
+      let t0 = Unix.gettimeofday () in
+      (match add_rule (Printf.sprintf "g%d" r) ps with
+       | Ok _ -> Printf.printf "round %d: a group of 100 MiB committed in %.1f ms\n%!" r ((Unix.gettimeofday () -. t0) *. 1000.)
+       | Error e -> Printf.printf "round %d: %s %s\n%!" r e.code e.message);
+      wait_for ~limit:120. "every server holds it" same
+    done;
+    Client.close w;
+    Array.iteri (fun k c -> if alive.(k) then (ignore (run [ "stop"; "--config"; c ]); ignore (Serve.wait pids.(k)))) cfgs;
+    C.rmrf dir;
+    exit 0
+  end;
   let t0 = Unix.gettimeofday () in
   (match add_rule "big2" pb2 with
    | Ok r ->

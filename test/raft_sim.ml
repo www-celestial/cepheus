@@ -228,7 +228,11 @@ let rec run ?(msg = ([||], [||])) w s =
   List.iter
     (fun (e : Raft.action) ->
       match e with
-      | Save -> save s c
+      | Save ->
+        if Array.exists Option.is_some c.told && not c.fresh then
+          tr w "server %d saves term %d repair %d after States %s" s.id c.term c.repair
+            (String.concat " " (Array.to_list (Array.mapi (fun k x -> match x with Some (tm, li, f) -> Printf.sprintf "%d:(t%d,l%d%s)" k tm li (if f then ",fresh" else "") | None -> Printf.sprintf "%d:-" k) c.told)));
+        save s c
       | Truncate i ->
         tr w "server %d truncates from %d (commit %d, term %d)" s.id i c.commit c.term;
         s.pend <- List.filter (fun (j, _) -> j < i) s.pend;
@@ -710,7 +714,7 @@ let run_seed ~n seed =
     Array.init n (fun id ->
         let sim = Sim_disk.create (Rng.split r) in
         { id; sim; disk = Sim_disk.disk sim; core = None; rlog = None; dq = []; pend = []; rate = 0.97 +. (0.06 *. float (Rng.int r 1000) /. 1000.);
-          kv = []; applied = 0; ckpt = 0, []; paused_until = 0; up_at = 0; waiting = []; copying = None; fetch_after = 0; lives = 0; sound = true; seqs = Hashtbl.create 2; held_upto = 0; stop_at = max_int })
+          kv = []; applied = 0; ckpt = 0, []; paused_until = 0; up_at = Rng.int r 400; waiting = []; copying = None; fetch_after = 0; lives = 0; sound = true; seqs = Hashtbl.create 2; held_upto = 0; stop_at = max_int })
   in
   let w =
     { seed; r; n; servers; net = []; cut = Array.make_matrix n n false; now = 0; leaders = Hashtbl.create 16; applied_at = Hashtbl.create 256;

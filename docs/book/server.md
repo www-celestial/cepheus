@@ -1223,12 +1223,14 @@ disk replaced) may have voted, in a term still running, for a candidate it would
 entries that a majority committed with it: started empty and taking part at once, it could elect a second leader in
 that term, or elect a leader that lacks a committed entry. So a server that starts with no Raft state is **fresh**:
 it answers no vote and no Append, takes no term, stands for nothing, and asks every peer its state (`Ask`: its term,
-its last index, whether it is fresh). It ends its freshness with the answers of ⌊n/2⌋ + 1 other servers that are not
-fresh (every majority that elected a leader or committed an entry with its vote holds one of them): its term becomes
+its last index, whether it is fresh; a damaged server answers nothing). It ends its freshness with the answers of ⌊n/2⌋ + 1 other servers
+neither fresh nor damaged (every majority that elected a leader or committed an entry with its vote holds one of
+them, which still holds what it acknowledged): its term becomes
 their newest, its vote in it its own (it may have voted in it), and its repair mark their newest last index, so that
 by [the 2018 rule](#a-damaged-log-the-2018-rule) it votes again only once it holds every entry up to there from a
 server that knows them committed. In practice it then takes a copy of the databases and follows. A new cluster is a
-majority, itself included, of fresh servers only: they end their freshness together and elect a leader. What it does
+majority, itself included, of answers with no history (fresh servers, or servers of term 0 and an empty log, which
+ended their freshness that way and heard of no election since): they end their freshness and elect a leader. What it does
 not cover: a majority that lost its data at once has lost what only it held, as in any Raft cluster.
 
 ### Elections
