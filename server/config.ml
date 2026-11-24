@@ -21,6 +21,7 @@ type t = {
   max_connections : int;  (* connections open at once, the local readers' included *)
   idle_timeout : int;  (* seconds a connection may go without a whole request (from its accept); 0: no limit *)
   question_timeout : int;  (* seconds a question may take (a Find, a Watch's first answer); 0: no limit *)
+  slow_ms : int;  (* a question or a write that takes this many milliseconds or more is logged (Timings); 0: none *)
   databases : string list;
 }
 
@@ -28,6 +29,8 @@ let default_port = 7400
 let default_max_connections = 512
 let default_idle_timeout = 600
 let default_question_timeout = 30
+let default_slow_ms = 200
+let max_slow_ms = 3_600_000
 
 exception Bad of string
 
@@ -148,7 +151,7 @@ let of_toml file (doc : (string * Toml.value) list) =
   let need where t k = match str where t k with Some s -> s | None -> bad "[%s] needs %s" where k in
   List.iter
     (fun (k, _) ->
-      if not (List.mem k [ "cluster"; "peer"; "clients"; "tls"; "storage"; "database" ]) then bad "unknown section %s" k)
+      if not (List.mem k [ "cluster"; "peer"; "clients"; "tls"; "storage"; "log"; "database" ]) then bad "unknown section %s" k)
     doc;
   let cl = match table "cluster" with Some t -> t | None -> bad "[cluster] is missing" in
   known "cluster" cl [ "name"; "id"; "me" ];
@@ -218,6 +221,14 @@ let of_toml file (doc : (string * Toml.value) list) =
     | None -> 1 lsl 30
     | Some s -> ( match size s with Some n -> n | None -> bad "[storage] cache %S: a size such as 4G, 256M was expected" s)
   in
+  let lg = Option.value (table "log") ~default:[] in
+  known "log" lg [ "slow_ms" ];
+  let slow_ms =
+    match List.assoc_opt "slow_ms" lg with
+    | Some (Toml.Int n) when n >= 0 && n <= max_slow_ms -> n
+    | Some _ -> bad "[log] slow_ms must be a number of milliseconds from 0 (no log of slow questions and writes) to %d (an hour)" max_slow_ms
+    | None -> default_slow_ms
+  in
   let databases =
     List.map
       (fun t ->
@@ -230,7 +241,8 @@ let of_toml file (doc : (string * Toml.value) list) =
   if databases = [] then bad "[[database]] is missing: the server holds the databases this file declares";
   if List.length (List.sort_uniq compare databases) <> List.length databases then bad "two [[database]] have the same name";
   let port = match listen with Some (_, p) -> p | None -> default_port in
-  { file; name; id; me; peers; listen; socket; port; tls; data; cache; domains; max_connections; idle_timeout; question_timeout; databases }
+  { file; name; id; me; peers; listen; socket; port; tls; data; cache; domains; max_connections; idle_timeout; question_timeout; slow_ms;
+    databases }
 
 let load file =
   match Toml.parse_file file with

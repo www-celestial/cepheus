@@ -254,6 +254,15 @@ the fuzzing ran on x86-64; the arm64 code (`crc32cx`, `crc32cb`, the check by `g
   that reads nothing yet, of which the server decodes no more while it holds a MiB of replies; after each, the
   process's descriptors and threads are what they were, no connection or watch is left, and a new connection is
   served.
+- `server_observe`: the histograms' percentiles against the sorted values (4, 5 and 7 bits, up to 2^34 µs: within
+  1/2^bits above, never past the maximum; halves merged give the same), the window of `Timings` (slices in and out,
+  a slice begun again a turn later), 1,200,000 times recorded by 12 threads on 4 domains while another domain reads
+  the status (every one counted), `cepheus status --format prometheus` parsed back by a parser of the exposition
+  format's grammar (HELP and TYPE first, a family's lines together, names, escapes of `\`, `"` and a line feed,
+  values, NaN), the shapes of questions and writes (none of their constants in them), `[log] slow_ms`. Then a real
+  server at `slow_ms = 1`: a line for a slow Find, a Find ended by its 50 ms timeout, a watch and a large group, each
+  with its database, token name, candidates, rows and outcome; the test's 3,021 values and both tokens searched in its
+  log and in its Prometheus text: none found; `cepheus status`'s earlier lines in their order, its new ones there.
 - Every server these tests start runs in a session of its own (`setsid`) with its output in a `serve.log` beside its
   `cluster.toml`, and is stopped when its test ends, even when the test fails (`test/serve.ml`); the tests ignore
   SIGPIPE, so that a write to a connection the server closed is an error, not the death of the test.

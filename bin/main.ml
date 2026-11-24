@@ -2,7 +2,9 @@
 
      cepheus serve --config FILE                  run the server of FILE (cluster.toml) until SIGTERM or SIGINT
      cepheus stop --config FILE                   stop it (SIGTERM to the pid its data directory's lock names) and wait
-     cepheus status --config FILE                 what it holds and does (an admin token in CEPHEUS_TOKEN)
+     cepheus status [--format text|prometheus] --config FILE
+                                                  what it holds and does (an admin token in CEPHEUS_TOKEN): key: value
+                                                  lines, or Prometheus's text format (server/prometheus.ml)
      cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE
                                                   a new token, printed once; its hash goes to tokens.toml
      cepheus token list --config FILE             the tokens' names and rights (never the tokens)
@@ -29,7 +31,8 @@ let die fmt = Printf.ksprintf (fun m -> prerr_endline ("cepheus: " ^ m); exit 1)
 
 let usage () =
   prerr_string
-    "usage: cepheus serve|stop|status --config FILE\n\
+    "usage: cepheus serve|stop --config FILE\n\
+    \       cepheus status [--format text|prometheus] --config FILE\n\
     \       cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE\n\
     \       cepheus token list|remove [NAME] --config FILE\n\
     \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n\
@@ -43,6 +46,7 @@ let usage () =
 
 let hosts = ref []
 let force = ref false
+let format = ref "text"
 
 (* --config FILE, --database X (repeated), --admin, --dir DIR, --host H (repeated); the rest positional *)
 let parse args =
@@ -53,6 +57,7 @@ let parse args =
     | "--database" :: d :: r -> dbs := d :: !dbs; go r
     | "--admin" :: r -> admin := true; go r
     | "--force" :: r -> force := true; go r
+    | "--format" :: f :: r -> format := f; go r
     | "--dir" :: d :: r -> dir := Some d; go r
     | x :: _ when String.length x > 1 && x.[0] = '-' -> die "unknown option %s" x
     | x :: r -> pos := x :: !pos; go r
@@ -105,11 +110,13 @@ let client_address cfg =
   | None, None -> die "the configuration names no socket and no listen address"
 
 let status cfg =
+  if not (List.mem !format [ "text"; "prometheus" ]) then die "--format %s: text or prometheus" !format;
   let token = match Sys.getenv_opt "CEPHEUS_TOKEN" with Some t -> t | None -> die "CEPHEUS_TOKEN must hold an admin token" in
   match Client.connect ~program:"cepheus status" (client_address cfg) token with
   | Error m -> die "%s" m
   | Ok c -> (
     match Client.status c with
+    | Ok l when !format = "prometheus" -> print_string (Prometheus.of_status l)
     | Ok l -> List.iter (fun (k, v) -> Printf.printf "%s: %s\n" k v) l
     | Error e -> die "%s: %s" e.code e.message)
 

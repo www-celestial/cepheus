@@ -817,6 +817,7 @@ type written = {
   replaced : Store.run list;  (* the runs the new one replaces *)
   sync : unit -> unit;  (* the file's fsync *)
   mutable forced : bool;  (* its bytes are durable: [install] forces it first otherwise *)
+  bytes : int;  (* the file's size *)
 }
 
 (* The file of [w] forced, once. *)
@@ -1311,7 +1312,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
     let run = { Store.a; t; lo; hi = v.group; level; s0 } in
     let runs = Array.append [| run |] (Array.sub rs take (nr - take)) in
     { tmp; path; group = v.group; view = Store.of_runs ~schema:v.schema ~group:v.group ~next_e:v.next_e runs;
-      replaced = Array.to_list src; sync = (fun () -> disk.fsync fd); forced = sync }
+      replaced = Array.to_list src; sync = (fun () -> disk.fsync fd); forced = sync; bytes = header + (o.next * Pages.size) + (8 * npages) }
   | exception (Disk.Io _ as e) -> failed (); raise e
   | exception (Pages.Unreadable _ as e) -> failed (); raise e
 

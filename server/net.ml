@@ -621,7 +621,8 @@ let open_databases ?(replica = None) ?raft (cfg : Config.t) wal =
           let lines = ref (fun () -> []) in
           let core =
             { Core.name; index = i; dir; view = (fun () -> Follow.view follow); sessions;
-              more = (fun () -> Follow.status follow @ Watch.status watch @ !lines ()); hub = (fun () -> Watch.hub watch);
+              more = (fun () -> Follow.status follow @ Watch.status watch @ !lines () @ Space.database_lines dir e);
+              hub = (fun () -> Watch.hub watch);
               files = Files.cell ~master:(fun () -> Files.master_file (Config.vault_key_path cfg)) (Filename.concat dir "vault") }
           in
           Ok ({ core; live; follow; watch; page; checkpointed = (Atomic.get e.published).group; replica = is_replica }, lines))
@@ -786,10 +787,10 @@ let serve (cfg : Config.t) =
         let srv =
           Core.create ~server_id:sid ~cluster_id:cfg.id ~dbs:(Array.map (fun d -> d.core) dbs) ~tokens ~now:Disk.real.now
             ~new_session:(fun () -> 1 + (Int64.to_int (String.get_int64_le (Tokens.random 8) 0) land 0x3FFF_FFFF_FFFF_FFFF))
-            ~more:(fun () -> if raft then raft_status () else Wal.status wal @ Replica.server_lines rep)
+            ~more:(fun () -> (if raft then raft_status () else Wal.status wal @ Replica.server_lines rep) @ Space.server_lines cfg.data)
             ~read_only:(fun () -> Replica.read_only rep) ?lead:(Option.map Cluster.lead cluster) ~raft
             ~members:(if raft then List.map (Config.client_address cfg) cfg.peers else []) ~ops
-            ~question_timeout:(float_of_int cfg.question_timeout) ()
+            ~question_timeout:(float_of_int cfg.question_timeout) ~slow_ms:cfg.slow_ms ()
         in
         (* TLS for TCP: the server's certificate and key; programs show no certificate (a token) *)
         match

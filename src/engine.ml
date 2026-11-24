@@ -59,6 +59,9 @@ type t = {
   mutable provisional : (Store.run * string) list;
       (* the provisional runs of the working view (changes of the rules' derived facts, level 0) and their files, under
          [pm]: removed once a merge that took them is installed, at a Raft take-back that drops them, at close *)
+  merged_runs : int Atomic.t;  (* merges installed since the open (cepheus status) *)
+  merged_us : int Atomic.t;  (* their time together, in microseconds: a background one's from its start to its catch-up *)
+  merged_bytes : int Atomic.t;  (* the bytes of the runs they wrote *)
 }
 
 type batch = {
@@ -497,9 +500,18 @@ let install t (w : Snapshot.written) (v : Store.view) =
   sweep t
 
 (* A merge now of every run and the delta, with nothing in flight (working = published). *)
+(* a merge installed, for cepheus status: its time, its run's bytes *)
+let count_merge t (w : Snapshot.written) us =
+  Atomic.incr t.merged_runs;
+  ignore (Atomic.fetch_and_add t.merged_us us);
+  ignore (Atomic.fetch_and_add t.merged_bytes w.bytes)
+
 let compact t =
+  let t0 = Histogram.now_us () in
   let w = merge_begin ~all:true t t.working (Atomic.get t.at) in
-  match install t w w.view with () -> () | exception (Disk.Io _ as e) -> Snapshot.abandon t.disk w; raise e
+  match install t w w.view with
+  | () -> count_merge t w (Histogram.now_us () - t0)
+  | exception (Disk.Io _ as e) -> Snapshot.abandon t.disk w; raise e
 
 let snapshot t =
   match t.stopped with
@@ -635,6 +647,7 @@ let open_ ?(id_source = random_id) ?buffer ?raft ?bootstrap_time ?(bootstrap = t
         let t =
           { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes;
             at = Atomic.make (Journal.position journal); merged = !merged; closed = Atomic.make false; pm = Mutex.create ();
+            merged_runs = Atomic.make 0; merged_us = Atomic.make 0; merged_bytes = Atomic.make 0;
             provisional = [] }
         in
         if !v.group = 0 && bootstrap then begin
@@ -707,6 +720,7 @@ type merger = {
   mutable logn : int;
   ready : ready option Atomic.t;  (* the file and the new lineage, and how many logged groups it holds *)
   mutable dom : (unit -> unit) option;  (* its join (Writers.background: a domain, or a thread of the writer's) *)
+  mutable took : int;  (* microseconds from its start to its catch-up, once ready *)
 }
 
 let merges = Atomic.make 0 (* finished background merges, for the tests and benchmarks *)
@@ -724,7 +738,7 @@ let after_applied m applied =
 
 let start_merge ?(wake = ignore) ?tier t (from : Store.view) =
   let pos = Atomic.get t.at in
-  let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None } in
+  let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None; took = 0 } in
   m.dom <-
     Some
       (Writers.background (fun () ->
@@ -739,6 +753,7 @@ let start_merge ?(wake = ignore) ?tier t (from : Store.view) =
                applied := !applied + k;
                if k < catch_up then begin
                  Histogram.record merge_us (Journal.clock () - t0);
+                 m.took <- Journal.clock () - t0;
                  Atomic.set m.ready (Some (Done (w, !v, !applied)));
                  go := false
                end
@@ -1200,7 +1215,7 @@ let finish_merge l =
          !on_merge l.e.working v;
          install l.e w v
        with
-       | () -> l.retry <- 0; Atomic.incr merges
+       | () -> l.retry <- 0; Atomic.incr merges; count_merge l.e w m.took
        | exception Disk.Io msg ->
          prerr_endline ("cepheus: a merge could not be installed: " ^ msg);
          Snapshot.abandon l.e.disk w;
