@@ -12,6 +12,9 @@ external map_ro_ : Unix.file_descr -> int -> page = "cepheus_fd_map_ro"
 (* the monotonic clock, in milliseconds (Raft's timeouts and leases: a change of the wall clock does not move it) *)
 external monotonic_ms : unit -> int = "cepheus_monotonic_ms" [@@noalloc]
 
+(* the bytes this process may still write on the file system that holds [path] (statvfs: Unix.Unix_error) *)
+external free_bytes : string -> int = "cepheus_free_bytes"
+
 let max_fds = 64
 
 let range what b ofs len = if ofs < 0 || len < 0 || ofs > Bytes.length b - len then invalid_arg ("Fdpass." ^ what)

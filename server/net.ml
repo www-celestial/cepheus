@@ -754,6 +754,7 @@ let serve (cfg : Config.t) =
           | Some (Ok o) ->
             let c = Cluster.create cfg o (Array.to_list (Array.map (fun d -> { Cluster.name = d.core.name; id = d.live.e.id; live = d.live }) dbs)) in
             rep.on_raft <- Some (Cluster.serve_stream c);
+            rep.on_copy <- Some (Cluster.serve_copy c);
             Some c
           | _ -> None
         in
@@ -933,7 +934,8 @@ let serve (cfg : Config.t) =
           ignore (Thread.wait_signal sigs);
           (* stop: no new connection, no new request; the writes in flight end and are answered; each database closed
              cleanly (its marker), its sessions saved *)
-          notify "STOPPING=1";
+          (* a restart on a copy of the databases (Cluster.restart) is no stop for systemd *)
+          if not (Atomic.get Cluster.restart) then notify "STOPPING=1";
           log "stopping";
           Atomic.set srv.stopping true;
           Atomic.set accepting false;

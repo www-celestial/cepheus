@@ -67,6 +67,11 @@ let config_of = function
 
 let serve cfg =
   match Net.serve cfg with
+  | Ok () when Atomic.get Cluster.restart ->
+    (* a copy of the databases is committed (a Raft cluster's catch-up): the same command again, in this process, which
+       installs it before its databases open *)
+    flush_all ();
+    Unix.execv Sys.executable_name Sys.argv
   | Ok () -> exit 0
   | Error m -> die "%s" m
 

@@ -61,6 +61,88 @@ let refused f = match f () with _ -> false | exception Ops.Refused _ -> true
 
 let segs dir = List.sort compare (List.filter (fun n -> Filename.check_suffix n ".seg") (Array.to_list (Sys.readdir (dir // "journal"))))
 
+(* ---- a Raft server's copy of the databases from a peer (server/catchup.ml) ----
+   The copy of [src] as a source sends it, taken by a follower whose data is in [root]/cdata: whole, installed at
+   the start (the database replaced, the log started after the copy's index); refused, nothing applied, for a byte
+   changed on its way, a path outside a database, another cluster's id, a copy behind the follower, more bytes than it
+   said, a copy cut short, a copy larger than the free space; dropped when the Raft core says its log holds the entry;
+   a partial copy left by a crash removed at the start. *)
+let catchup src =
+  let cfgf = root // "c.toml" in
+  Out_channel.with_open_bin cfgf (fun oc ->
+      output_string oc
+        "[cluster]\nname = \"c\"\nid = \"cph-c-00000000000000c1\"\nme = \"srv2\"\n[[peer]]\nname = \"srv2\"\naddress = \"127.0.0.1:7401\"\n[clients]\nsocket = \"run\"\n[storage]\ndata = \"cdata\"\n[[database]]\nname = \"main\"\n");
+  let cfg = match Config.load cfgf with Ok c -> c | Error m -> failwith m in
+  C.rmrf cfg.data;
+  Unix.mkdir cfg.data 0o700;
+  Unix.mkdir (cfg.data // "raft") 0o700;
+  let id = Engine.read_meta Disk.real src in
+  let frames = ref [] in
+  Catchup.serve ~dbs:[ "main", src ] ~start:(fun () -> 7, 2) ~renew:ignore ~send:(fun b -> frames := Buffer.contents b :: !frames)
+    ~error:(fun c m -> C.fail "the source refused: %s %s" c m);
+  let sent = List.rev !frames in
+  let run ?(id_of = fun _ -> id) ?(published = fun _ -> 0) ?(decide = fun _ _ -> true) frames =
+    let q = ref frames in
+    let next () =
+      match !q with
+      | f :: rest -> q := rest; Replica.k_copy, 0, Codec.reader (Bytes.of_string f) 0 (String.length f)
+      | [] -> raise (Replica.Broken "the peer closed the connection")
+    in
+    Catchup.fetch cfg ~source:"srv1" ~id_of ~published ~decide ~send:ignore ~next
+  in
+  let tag f = Char.code f.[0] in
+  let field f = let r = Codec.reader (Bytes.of_string f) 1 (String.length f - 1) in r in
+  let rel_of f = let r = field f in ignore (Codec.get_string r); Codec.get_string r in
+  (* the frames after the File frame of the first segment of the journal, its first Bytes frame changed *)
+  let rec change pick g = function
+    | f :: b :: rest when tag f = 2 && pick (rel_of f) && tag b = 3 -> f :: g b :: rest
+    | f :: rest -> f :: change pick g rest
+    | [] -> []
+  in
+  let flip b = let x = Bytes.of_string b in let o = min (Bytes.length x - 1) 200 in Bytes.set x o (Char.chr (Char.code (Bytes.get x o) lxor 0x41)); Bytes.to_string x in
+  let journal r = String.length r > 8 && String.sub r 0 8 = "journal/" in
+  let nothing () = not (Sys.file_exists (cfg.data // "raft" // "copy")) && not (Sys.file_exists (cfg.data // "raft" // "copy.partial")) in
+  let refused what o = match o with
+    | Catchup.Refused m -> C.check (nothing ()) "a copy refused (%s): %s; nothing left" what m
+    | Catchup.Installed _ -> C.fail "a copy taken (%s)" what
+    | Catchup.Dropped _ -> C.fail "a copy dropped (%s)" what
+  in
+  refused "a byte of a segment changed on its way" (run (change journal flip sent));
+  refused "a path outside a database" (run (change journal (fun b -> b) (List.map (fun f -> if tag f = 2 && journal (rel_of f) then begin
+      let b = Buffer.create 64 in Buffer.add_uint8 b 2; Codec.put_string b "main"; Codec.put_string b "../../evil"; Codec.put_varint b 10; Buffer.contents b end else f) sent)));
+  refused "another cluster's database" (run ~id_of:(fun _ -> "0123456789abcdef") sent);
+  refused "a copy behind this server" (run ~published:(fun _ -> max_int) sent);
+  refused "cut short" (run (List.filteri (fun i _ -> i < List.length sent / 2) sent));
+  refused "more bytes than it said" (run (List.concat_map (fun f -> if tag f = 3 then [ f; f ] else [ f ]) sent));
+  let huge = let b = Buffer.create 32 in Buffer.add_uint8 b 1; Codec.put_varint b 7; Codec.put_varint b 2; Codec.put_varint b (1 lsl 61); Codec.put_varint b 1; Buffer.contents b in
+  refused "larger than the free space" (run (huge :: List.tl sent));
+  (match run ~decide:(fun _ _ -> false) sent with
+   | Catchup.Dropped 7 -> C.check (nothing ()) "a copy the Raft core does not need: dropped, nothing left"
+   | _ -> C.fail "a copy the core does not need was not dropped");
+  (* whole: committed, installed at the start *)
+  (match run sent with
+   | Catchup.Installed 7 ->
+     C.check (Sys.file_exists (cfg.data // "raft" // "copy" // "index")) "a whole copy: committed (its index)";
+     (* a crash after the commit point, then a partial copy of a later try left too *)
+     Unix.mkdir (cfg.data // "raft" // "copy.partial") 0o700;
+     C.check (Catchup.at_start cfg = Ok ()) "installed at the start";
+     C.check (nothing ()) "the copy's folders removed";
+     let g, f = facts (cfg.data // "main") in
+     C.check (g = fst (facts src) && C.F.equal f (snd (facts src))) "the database replaced by the copy (group %d)" g;
+     let rl, r = Raftlog.open_ Disk.real (cfg.data // "raft") ~cluster:cfg.id in
+     C.check (r.start = 8 && r.prev_term = 2 && Array.length r.terms = 0) "the log starts after the copy's index (%d, term %d)" r.start r.prev_term;
+     Raftlog.close rl
+   | Catchup.Refused m -> C.fail "a whole copy refused: %s" m
+   | Catchup.Dropped _ -> C.fail "a whole copy dropped");
+  (* the install repeated after a crash in it: the index still there, the database already moved *)
+  Unix.mkdir (cfg.data // "raft" // "copy") 0o700;
+  Replica.write_private (cfg.data // "raft" // "copy" // "index") (Bytes.to_string (Raftlog.encode_copy ~index:9 ~term:3 ~source:"srv1"));
+  C.check (Catchup.at_start cfg = Ok ()) "an install a crash cut: repeated";
+  let rl, r = Raftlog.open_ Disk.real (cfg.data // "raft") ~cluster:cfg.id in
+  C.check (r.start = 10 && r.prev_term = 3 && fst (facts (cfg.data // "main")) = fst (facts src)) "repeated: the log at 10, the database kept";
+  Raftlog.close rl;
+  C.rmrf cfg.data
+
 let () =
   Ops.quiet := true;
   C.rmrf root;
@@ -270,5 +352,6 @@ let () =
   if Sys.file_exists (d // "closed") then Sys.remove (d // "closed");
   Out_channel.with_open_bin (d // "shared") ignore;
   C.check (refused (fun () -> Ops.verify d)) "shared and not closed: refused";
+  catchup src;
   C.rmrf root;
   C.finish "ops"

@@ -13,7 +13,8 @@
    out in the order Raft gives them: the term and vote forced before any message after them leaves.
 
    A database's checkpoint each second forces its journal; the log's whole segments before what every journal holds
-   forced and every peer holds are removed. *)
+   forced and every peer holds (the floor: Raft) are removed. A peer the leader can no longer send entries to (they
+   are before its log's start) takes a copy of the databases (server/catchup.ml), then starts again on it. *)
 
 open Cepheus
 
@@ -26,6 +27,13 @@ let is_raft (cfg : Config.t) = List.length cfg.peers >= 3
 let election_ms = ref 500
 let heartbeat_ms = ref 50
 let tick_ms = 10
+
+(* a peer silent this long no longer holds the log's start back: it takes a copy of the databases when it comes back
+   (5 minutes: a restart, a reboot, an upgrade fit; a dead machine does not make the log grow without end) *)
+let floor_ms = ref 300_000
+
+(* set once a copy of the databases is committed here: the server stops, and bin/main.ml starts it again (exec) *)
+let restart = Atomic.make false
 
 (* a frame of a Raft cluster is at most this long: one wire frame carries it *)
 let frame_limit = 8 lsl 20
@@ -64,6 +72,9 @@ let put_msg b (m : Raft.msg) data =
     v (Array.length x.terms);
     Array.iteri (fun k tm -> v tm; v (Bytes.length data.(k)); Buffer.add_bytes b data.(k)) x.terms
   | Append_reply x -> Buffer.add_uint8 b 6; v x.term; v x.seq; bool x.ok; v x.index
+  | Snap x -> Buffer.add_uint8 b 7; v x.term; v x.seq; v x.index; v x.index_term; v x.commit; v x.floor
+  | Ask -> Buffer.add_uint8 b 8
+  | State x -> Buffer.add_uint8 b 9; v x.term; v x.last_index; bool x.fresh
 
 let max_entries = 1 lsl 20
 
@@ -98,6 +109,16 @@ let get_msg (r : Codec.reader) : Raft.msg * Bytes.t array =
     done;
     Append { term; seq; prev_index; prev_term; terms; sizes = Array.map Bytes.length data; commit; floor }, data
   | 6 -> let term = v () in let seq = v () in let ok = bool () in let index = v () in Append_reply { term; seq; ok; index }, [||]
+  | 7 ->
+    let term = v () in
+    let seq = v () in
+    let index = v () in
+    let index_term = v () in
+    let commit = v () in
+    let floor = v () in
+    Snap { term; seq; index; index_term; commit; floor }, [||]
+  | 8 -> Ask, [||]
+  | 9 -> let term = v () in let last_index = v () in let fresh = bool () in State { term; last_index; fresh }, [||]
   | _ -> raise Codec.Short
 
 (* ---- the node ---- *)
@@ -148,6 +169,10 @@ type t = {
   streams : (string, Replica.link list) Hashtbl.t;  (* the peers' connections to this server, by name *)
   sm : Mutex.t;
   mutable damage : string option;
+  fetching : bool Atomic.t;  (* a copy of the databases is being taken from a peer *)
+  mutable fetch_after : float;  (* the next try after a refused or broken one (under sm) *)
+  mutable fetch_wait : float;
+  mutable fetch_note : string;  (* what the last try did, for cepheus status *)
 }
 
 let fail t m =
@@ -219,8 +244,55 @@ and run_effects ~msg t =
       | Unlead ->
         (* every proposal resolved: those committed with their own entry, the others not *)
         resolve_waiters t max_int;
-        log "no longer the leader (term %d)" t.core.term)
+        log "no longer the leader (term %d)" t.core.term
+      | Fetch k -> start_fetch t k)
     (Raft.drain t.core)
+
+(* a copy of the databases from peer k (it leads), unless one is under way or the last one failed lately; on its
+   commit the server stops and starts again on it *)
+and start_fetch t k =
+  let go = Mutex.protect t.sm (fun () -> Unix.gettimeofday () >= t.fetch_after) && Atomic.compare_and_set t.fetching false true in
+  if go then begin
+    let peer = List.nth t.cfg.peers k in
+    log "Raft: this server's log ends before %s's log start: it takes a copy of the databases from it" peer.pname;
+    ignore
+      (Thread.create
+         (fun () ->
+           let outcome =
+             match Replica.connect t.cfg peer with
+             | Error m -> Catchup.Refused (Printf.sprintf "the copy from %s: %s" peer.pname m)
+             | Ok l when l.pv < 3 -> Replica.close_link l; Catchup.Refused (peer.pname ^ " speaks peer protocol 2, which has no copy: upgrade it")
+             | Ok l ->
+               Fun.protect ~finally:(fun () -> Replica.close_link l) (fun () ->
+                   Replica.timeouts l.fd 30.0;
+                   let id_of name = database_id t.cfg.id name in
+                   let published name =
+                     match List.find_opt (fun d -> d.name = name) t.db_list with Some d -> (Atomic.get d.live.e.published).group | None -> 0
+                   in
+                   let decide x term = Mutex.protect t.m (fun () -> let r = Raft.install t.core ~index:x ~term in run t; r) in
+                   Catchup.fetch t.cfg ~source:peer.pname ~id_of ~published ~decide ~send:(Replica.send l ~kind:Replica.k_copy)
+                     ~next:(fun () -> Replica.next_frame l))
+           in
+           let note m = Mutex.protect t.sm (fun () -> t.fetch_note <- m) in
+           (match outcome with
+            | Catchup.Installed x ->
+              note (Printf.sprintf "a copy at index %d from %s, installed at the restart" x peer.pname);
+              log "Raft: the copy of %s's databases at index %d is whole and checked: this server starts again on it" peer.pname x;
+              Atomic.set restart true;
+              Unix.kill (Unix.getpid ()) Sys.sigterm
+            | Catchup.Dropped x ->
+              note (Printf.sprintf "a copy at index %d from %s, not needed (this log holds its entry)" x peer.pname);
+              log "Raft: the copy of %s's databases at index %d is not needed: this log holds its entry" peer.pname x
+            | Catchup.Refused m ->
+              note m;
+              log "Raft: %s" m;
+              Mutex.protect t.sm (fun () ->
+                  t.fetch_wait <- min 30. (max 1. (2. *. t.fetch_wait));
+                  t.fetch_after <- Unix.gettimeofday () +. t.fetch_wait));
+           (match outcome with Catchup.Refused _ -> () | _ -> Mutex.protect t.sm (fun () -> t.fetch_wait <- 0.));
+           Atomic.set t.fetching false)
+         ())
+  end
 
 let entry t i =
   match Mutex.protect t.pm (fun () -> Hashtbl.find_opt t.pend i) with
@@ -327,8 +399,16 @@ let send_loop t k o () =
              Thread.delay !pause;
              pause := min 1.0 (!pause *. 2.)));
         match o.link, append_data t m with
+        | Some l, _ when l.pv < 3 && (match m with Raft.Ask | State _ -> true | _ -> false) -> ()  (* protocol 2 has neither *)
         | Some l, Some data -> (
           let b = Buffer.create 256 in
+          (* a peer of protocol 2 has no Snap: the probe at the leader's start is an Append there *)
+          let m =
+            match m with
+            | Raft.Snap x when l.pv < 3 ->
+              Raft.Append { term = x.term; seq = x.seq; prev_index = x.index; prev_term = x.index_term; terms = [||]; sizes = [||]; commit = x.commit; floor = x.floor }
+            | m -> m
+          in
           put_msg b m data;
           match Replica.send l ~kind:Replica.k_msg b with
           | () -> ()
@@ -371,6 +451,29 @@ let serve_stream t name (l : Replica.link) =
      | Codec.Short -> log "Raft: %s sent a message that does not decode: its stream is closed" name);
     Mutex.protect t.sm (fun () ->
         Hashtbl.replace t.streams name (List.filter (fun x -> x != l) (Option.value (Hashtbl.find_opt t.streams name) ~default:[])))
+
+(* ---- a peer's copy of the databases (server/catchup.ml) ---- *)
+
+(* the databases at this server's applied index, for the peer [name]; that index pinned in the core meanwhile, so
+   that the entries after it stay for the peer *)
+let serve_copy t name (l : Replica.link) =
+  match Array.find_index (( = ) name) t.names with
+  | None -> Replica.send_err l "denied" "not a peer of this cluster"
+  | Some _ ->
+    let x = ref 0 in
+    let pin () = Raft.pin t.core ~index:!x ~until:(now () + !Catchup.pin_ms) in
+    let start () =
+      Mutex.protect t.m (fun () ->
+          x := Atomic.get t.applied;
+          pin ();
+          !x, Raft.term_at t.core !x)
+    in
+    Replica.timeouts l.fd 30.0;
+    log "Raft: %s takes a copy of the databases" name;
+    (try
+       Catchup.serve ~dbs:(List.map (fun d -> d.name, d.live.e.dir) t.db_list) ~start ~renew:(fun () -> Mutex.protect t.m pin)
+         ~send:(Replica.send l ~kind:Replica.k_copy) ~error:(Replica.send_err l)
+     with Replica.Broken m -> log "Raft: the copy for %s stopped: %s" name m)
 
 (* ---- the ticker ---- *)
 
@@ -492,6 +595,12 @@ type opened = { rlog : Raftlog.t; rec_ : Raftlog.recovered }
 let recover (cfg : Config.t) =
   let dir = Filename.concat cfg.data "raft" in
   let secure p = try Unix.chmod p (if Sys.is_directory p then 0o700 else 0o600) with Unix.Unix_error _ | Sys_error _ -> () in
+  match
+    (* a copy of the databases taken from a peer: installed before anything reads the log or the databases *)
+    if Sys.file_exists dir then Catchup.at_start cfg else Ok ()
+  with
+  | Error m -> Error m
+  | Ok () ->
   match Raftlog.open_ ~secure Disk.real dir ~cluster:cfg.id with
   | rlog, rec_ ->
     Option.iter (fun m -> log "%s" m) rec_.damage;
@@ -506,8 +615,8 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
   let vote = match Array.find_index (( = ) r.st.vote) names with Some k -> k | None -> -1 in
   let rng = Rng.make (Int64.to_int (String.get_int64_le (Tokens.random 8) 0)) in
   let core =
-    Raft.make ~me ~n:(Array.length names) ~election_ms:!election_ms ~heartbeat_ms:!heartbeat_ms ~rng ~now:(now ())
-      ~term:r.st.term ~vote ~repair:r.st.repair ~start:r.start ~prev_term:r.prev_term ~terms:r.terms ~sizes:r.sizes ~commit:r.commit
+    Raft.make ~me ~n:(Array.length names) ~election_ms:!election_ms ~heartbeat_ms:!heartbeat_ms ~floor_ms:!floor_ms ~rng ~now:(now ())
+      ~term:r.st.term ~vote ~repair:r.st.repair ~fresh:r.fresh ~start:r.start ~prev_term:r.prev_term ~terms:r.terms ~sizes:r.sizes ~commit:r.commit
   in
   let t =
     { cfg; names; me; m = Mutex.create (); core; rlog = o.rlog; dbs = Hashtbl.create 8; db_list = dbs; waiters = Hashtbl.create 64;
@@ -515,7 +624,8 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
       pm = Mutex.create (); applied = Atomic.make (core.start - 1); ac = Condition.create ();
       serve_until = Atomic.make 0;
       outs = Array.mapi (fun _ p -> { peer = p; oq = Queue.create (); om = Mutex.create (); oc = Condition.create (); link = None; thread = None }) (Array.of_list cfg.peers);
-      stopping = Atomic.make false; threads = []; failed = None; streams = Hashtbl.create 4; sm = Mutex.create (); damage = r.damage }
+      stopping = Atomic.make false; threads = []; failed = None; streams = Hashtbl.create 4; sm = Mutex.create (); damage = r.damage;
+      fetching = Atomic.make false; fetch_after = 0.; fetch_wait = 0.; fetch_note = "" }
   in
   List.iter (fun d -> Hashtbl.replace t.dbs d.id d; d.live.propose <- propose t d.id) dbs;
   (* entries the recovery copied into the journals (up to the hint) are applied; the rest waits for the commit *)
@@ -538,7 +648,7 @@ let checkpoint t =
       let upto =
         Mutex.protect t.m (fun () ->
             let c = t.core in
-            min (a + 1) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c + 1))))
+            min (a + 1) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c (now ()) + 1))))
       in
       match Raftlog.cut_before t.rlog upto with
       | () -> Mutex.protect t.m (fun () -> Raft.compact t.core (min upto (Raftlog.first t.rlog)))
@@ -571,6 +681,8 @@ let status t =
         "raft.commit", string_of_int c.commit; "raft.applied", string_of_int (Atomic.get t.applied);
         "raft.log", Printf.sprintf "%d to %d" c.start (Raft.last_index c); "raft.forced", string_of_int c.persisted ]
       @ (if c.repair > 0 then [ "raft.repair", Printf.sprintf "damaged log: no vote until entries up to %d come from a leader" c.repair ] else [])
+      @ (if Atomic.get t.fetching then [ "raft.copy", Printf.sprintf "taking a copy of the databases (%d bytes so far)" (Atomic.get Catchup.received) ]
+         else match Mutex.protect t.sm (fun () -> t.fetch_note) with "" -> [] | m -> [ "raft.copy", m ])
       @ (match t.failed with Some m -> [ "raft.failed", m ] | None -> [])
       @
       if c.role = Raft.Leader then

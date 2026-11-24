@@ -199,8 +199,8 @@ let rec write_all fd b off n = if n > 0 then let k = Unix.write_bigarray fd b of
 
 (* [src] (open) copied into the new file [dst] (never through a name planted there: O_EXCL), mode 0600, up to the
    size it has now (a segment being appended is not chased) or its end, forced: the bytes copied *)
-let copy_fd src dst =
-  let limit = (Unix.fstat src).Unix.st_size in
+let copy_fd ?limit src dst =
+  let limit = match limit with Some n -> n | None -> (Unix.fstat src).Unix.st_size in
   let b = Lazy.force buf in
   let out = Unix.openfile dst [ Unix.O_WRONLY; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC ] 0o600 in
   Fun.protect ~finally:(fun () -> Unix.close out) (fun () ->
@@ -237,62 +237,68 @@ let segment_names jdir =
 
 type copied = { journal : int; runs_ : int; vault : int }
 
-(* The vault's files: each pack and its index if it has one, then the keys. Copied after the journal, so that the records
-   of every file its facts cite are in the copy: a fact names a file only once its records are forced (G22). A pack
-   copied while it is written may end in a torn record: the copy's open indexes it up to its last whole record, as
-   after a crash. *)
-let copy_vault src dst =
-  mkdir_private dst;
-  let n = ref 0 in
-  let sp = src // "packs" and dp = dst // "packs" in
-  mkdir_private dp;
-  if is_dir sp then
-    List.iter
-      (fun f ->
-        if Filename.check_suffix f ".pack" || Filename.check_suffix f ".idx" then
-          match open_ro (sp // f) with
-          | fd -> n := !n + Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> copy_fd fd (dp // f))
-          | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ())
-      (List.sort compare (Array.to_list (Sys.readdir sp)));
-  (* the keys after the packs: a domain's key is forced before its first record, so the keys copied now hold every
-     key a copied record needs *)
-  if Sys.file_exists (src // "keys") then n := !n + copy_file (src // "keys") (dst // "keys");
-  sync_dir dp;
-  sync_dir dst;
-  !n
+(* What a copy of a database holds, each file opened in the order that makes the copy consistent while the database
+   is written (operations.md, "Backup and restore"), and the size it has when it is opened (a file being appended is
+   copied up to there: a segment's frame being written is left out by the check after): the id and the history of
+   promotions ([sessions]: the session table, a checkpoint written beside and renamed); the runs [keep] allows, each
+   opened before any segment is listed (a merge may remove one meanwhile: its descriptor still reads it); the segments
+   [keep_seg] allows, in the order of their names; then the vault: each pack and its index if it has one, listed
+   after the journal, so that the records of every file its facts cite are in the copy (a fact names a file only once
+   its records are forced, G22), then the keys (a domain's key is forced before its first record, so the keys copied
+   then hold every key a copied record needs). A pack copied while it is written may end in a torn record: the copy's
+   open indexes it up to its last whole record, as after a crash. Each item: its path in the database's folder, its
+   descriptor (the caller closes it: [close_plan]), its size. *)
+type item = { rel : string; fd : Unix.file_descr; size : int }
 
-(* A database's files copied in the order that makes the copy consistent while it is written (operations.md, "Backup
-   and restore"): the id and the history of promotions; the runs [keep] allows, each opened before any segment is
-   listed (a merge may remove one meanwhile: its descriptor still reads it), then copied; the segments [keep_seg]
-   allows, in the order of their names, the newest up to where it ends when it is read; the vault. *)
-let copy_database ?(keep = fun _ -> true) ?(keep_seg = fun _ -> true) src dst =
-  mkdir_private dst;
-  mkdir_private (dst // "journal");
-  mkdir_private (dst // "snapshots");
-  ignore (copy_file (src // "cepheus") (dst // "cepheus"));
-  if Sys.file_exists (src // "epochs") then ignore (copy_file (src // "epochs") (dst // "epochs"));
-  let sdir = src // "snapshots" in
-  let runs =
+let close_plan = List.iter (fun i -> try Unix.close i.fd with Unix.Unix_error _ -> ())
+
+let plan_database ?(keep = fun _ -> true) ?(keep_seg = fun _ -> true) ?(sessions = false) src =
+  let items = ref [] in
+  let add rel fd = items := { rel; fd; size = (Unix.fstat fd).Unix.st_size } :: !items in
+  let add_path rel = match open_ro (src // rel) with fd -> add rel fd | exception Unix.Unix_error (Unix.ENOENT, _, _) -> () in
+  match
+    (match open_ro (src // "cepheus") with fd -> add "cepheus" fd | exception Unix.Unix_error (e, _, p) -> raise (Unix.Unix_error (e, "open", p)));
+    add_path "epochs";
+    if sessions then add_path "sessions";
+    let sdir = src // "snapshots" in
     if is_dir sdir then
-      List.filter_map
-        (fun ((_, _, n) as r) -> if not (keep r) then None else match open_ro (sdir // n) with fd -> Some (n, fd) | exception Unix.Unix_error (Unix.ENOENT, _, _) -> None)
-        (List.sort compare (Snapshot.list Disk.read_only sdir))
-    else []
-  in
-  let run_bytes =
-    List.fold_left (fun a (n, fd) -> a + Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> copy_fd fd (dst // "snapshots" // n))) 0 runs
-  in
-  let jdir = src // "journal" in
-  let journal =
-    List.fold_left
-      (fun a n -> if keep_seg (int_of_string (String.sub n 0 20)) then a + copy_file (jdir // n) (dst // "journal" // n) else a)
-      0 (segment_names jdir)
-  in
-  let vault = if is_dir (src // "vault") then copy_vault (src // "vault") (dst // "vault") else 0 in
-  sync_dir (dst // "journal");
-  sync_dir (dst // "snapshots");
-  sync_dir dst;
-  { journal; runs_ = run_bytes; vault }
+      List.iter
+        (fun ((_, _, n) as r) -> if keep r then add_path ("snapshots" // n))
+        (List.sort compare (Snapshot.list Disk.read_only sdir));
+    let jdir = src // "journal" in
+    List.iter (fun n -> if keep_seg (int_of_string (String.sub n 0 20)) then add_path ("journal" // n)) (segment_names jdir);
+    let sp = src // "vault" // "packs" in
+    if is_dir sp then
+      List.iter
+        (fun f -> if Filename.check_suffix f ".pack" || Filename.check_suffix f ".idx" then add_path ("vault" // "packs" // f))
+        (List.sort compare (Array.to_list (Sys.readdir sp)));
+    if is_dir (src // "vault") then add_path ("vault" // "keys")
+  with
+  | () -> List.rev !items
+  | exception e -> close_plan !items; raise e
+
+(* the folders a copy of a database holds *)
+let copy_dirs = [ "journal"; "snapshots"; "vault"; "vault" // "packs" ]
+
+(* A database's files copied as [plan_database] lists them, each forced, then the folders *)
+let copy_database ?keep ?keep_seg src dst =
+  let plan = plan_database ?keep ?keep_seg src in
+  Fun.protect ~finally:(fun () -> close_plan plan) (fun () ->
+      mkdir_private dst;
+      mkdir_private (dst // "journal");
+      mkdir_private (dst // "snapshots");
+      if List.exists (fun i -> starts i.rel "vault") plan || is_dir (src // "vault") then (mkdir_private (dst // "vault"); mkdir_private (dst // "vault" // "packs"));
+      let journal = ref 0 and runs = ref 0 and vault = ref 0 in
+      List.iter
+        (fun i ->
+          let n = copy_fd ~limit:i.size i.fd (dst // i.rel) in
+          if starts i.rel "journal" then journal := !journal + n
+          else if starts i.rel "snapshots" then runs := !runs + n
+          else if starts i.rel "vault" then vault := !vault + n)
+        plan;
+      List.iter (fun d -> if is_dir (dst // d) then sync_dir (dst // d)) (List.rev copy_dirs);
+      sync_dir dst;
+      { journal = !journal; runs_ = !runs; vault = !vault })
 
 (* ---- backup ---- *)
 
@@ -529,7 +535,10 @@ let restore ?(target = End) ~replace src dst =
     (* into place: the old database moved aside first, never removed *)
     let aside =
       if has_db then begin
-        let a = dst ^ ".before-restore-" ^ stamp () in
+        (* a name no folder has: two restores over one folder in a second must not meet *)
+        let s = dst ^ ".before-restore-" ^ stamp () in
+        let rec free k = let a = if k = 1 then s else Printf.sprintf "%s-%d" s k in if Sys.file_exists a then free (k + 1) else a in
+        let a = free 1 in
         Unix.rename dst a;
         Some a
       end

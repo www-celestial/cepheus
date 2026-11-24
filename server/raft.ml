@@ -16,7 +16,24 @@
      was sent, for 9/10 of the minimum election timeout;
    - the 2018 rule (Alagappan et al., FAST 2018; design 8.5): a server with [repair] > 0 found its log damaged; it
      stores and acknowledges what a leader sends, but neither votes nor stands for election until it holds every
-     entry up to [repair] from a leader whose commit index reaches it.
+     entry up to [repair] from a leader whose commit index reaches it;
+   - a catch-up from the databases (the role of InstallSnapshot, thesis ch. 5): a leader never sends from before its
+     log's start; a peer that needs it is sent Snap, the index before the start and its term. A follower that holds
+     that entry (or whose own start is past it) answers as to an Append; one that does not asks for a copy of the
+     databases (Fetch: the server's part, Cluster), whose index X the source knows committed. Once copied and checked,
+     the copy is installed unless this log holds entry X of the same term (Raft's rule: the copy dropped, the entries
+     after X kept); from that decision on the server is inert (it answers nothing, stands for nothing) until it starts
+     again on the copy, its log from X + 1;
+   - the floor (what every server holds, as far as the leader knows: no server cuts its log past it) counts only the
+     peers heard within [floor_ms] that need no copy, and never passes an index pinned for a copy being made;
+   - a server that starts with no Raft state ([fresh]: a new cluster's, or one whose data directory was lost) may have
+     voted and acknowledged entries before, and forgot it: it answers no vote and no Append, takes no term, stands for
+     nothing, and asks every peer its state (Ask; State: its term, its last index, whether it is fresh). It ends its
+     freshness with the States of floor(n/2) + 1 other servers that are not fresh (every majority that elected a
+     leader or committed an entry with its vote or acknowledgement holds one of them): its term becomes their newest,
+     its vote in it its own (it may have voted in it), its repair mark their newest last index (the 2018 rule: it
+     votes again once it holds every entry up to it from a leader that committed it); or with a majority, itself
+     included, of fresh servers only (a new cluster: nothing was ever committed that a majority remembers).
 
    Indexes start at 1. The log in memory is the terms (and sizes) of the entries from [start]; the entries' bytes are
    the transport's and the disk's (Raftlog). *)
@@ -36,6 +53,11 @@ type msg =
           server holds the leader's entries up to it, as far as the leader knows (no server cuts its log past it) *)
   | Append_reply of { term : int; seq : int; ok : bool; index : int }
       (** ok: the sender holds the leader's entries up to [index], forced; refused: retry after [index] *)
+  | Snap of { term : int; seq : int; index : int; index_term : int; commit : int; floor : int }
+      (** the leader's log starts after [index], whose term is [index_term]: a follower that does not hold that entry
+          takes a copy of the databases; answered as an Append whose entries end at [index] *)
+  | Ask  (** a fresh server asks for the sender's state *)
+  | State of { term : int; last_index : int; fresh : bool }  (** the answer *)
 
 type action =
   | Save  (** the term, the vote or the repair mark changed: durable before any later effect *)
@@ -46,6 +68,7 @@ type action =
   | Commit of int  (** the commit index grew to this *)
   | Lead  (** this server became the leader: its no-op, at [noop], empty, is to store before any later effect *)
   | Unlead  (** it stopped being the leader *)
+  | Fetch of int  (** this server needs a copy of the databases: from this peer, which leads *)
 
 type peer = {
   mutable next : int;
@@ -64,11 +87,15 @@ type t = {
   n : int;
   election_ms : int;
   heartbeat_ms : int;
+  floor_ms : int;
   rng : Rng.t;
   (* durable *)
   mutable term : int;
   mutable vote : int;  (* -1: none in this term *)
   mutable repair : int;
+  mutable fresh : bool;  (* no Raft state at its start, and not enough States since *)
+  told : (int * int * bool) option array;  (* a fresh server: the State each peer gave (term, last index, fresh) *)
+  mutable asked : int;  (* when it last asked (ms) *)
   (* the log *)
   mutable start : int;  (* the first index held (entries before it are committed and applied) *)
   mutable prev_term : int;  (* the term of entry start - 1 *)
@@ -90,6 +117,8 @@ type t = {
   peers : peer array;
   mutable noop : int;
   mutable seq : int;
+  mutable pins : (int * int) list;  (* (index, until ms): a copy being made at that index needs the entries after it *)
+  mutable inert : bool;  (* a copy will be installed at the next start: nothing more is answered or stood for *)
   mutable fx : action list;  (* newest first *)
 }
 
@@ -114,18 +143,19 @@ let size_at t i = if i >= t.start && i <= last_index t then t.sizes.(i - t.start
 let majority t = t.n / 2 + 1
 let random_timeout t now = now + t.election_ms + Rng.int t.rng t.election_ms
 
-let make ~me ~n ~election_ms ~heartbeat_ms ~rng ~now ~term ~vote ~repair ~start ~prev_term ~terms ~sizes ~commit =
+let make ~me ~n ~election_ms ~heartbeat_ms ~floor_ms ~rng ~now ~term ~vote ~repair ~fresh ~start ~prev_term ~terms ~sizes ~commit =
   let len = Array.length terms in
   let cap = max 64 (2 * len) in
   let a = Array.make cap 0 and s = Array.make cap 0 in
   Array.blit terms 0 a 0 len;
   Array.blit sizes 0 s 0 len;
   let t =
-    { me; n; election_ms; heartbeat_ms; rng; term; vote; repair; start; prev_term; terms = a; sizes = s; len;
+    { me; n; election_ms; heartbeat_ms; floor_ms; rng; term; vote; repair; fresh; told = Array.make n None; asked = min_int / 2;
+      start; prev_term; terms = a; sizes = s; len;
       persisted = start + len - 1; gen = 0; commit = 0; floor = 0; role = Follower; leader = -1; votes = Array.make n false;
       deadline = 0; heard = min_int / 2; started = now; verified = 0;
       peers = Array.init n (fun _ -> { next = 1; matched = 0; probing = true; last_send = 0; last_seq = 0; sent = Queue.create (); acked_at = min_int / 2; contact = 0 });
-      noop = 0; seq = 0; fx = [] }
+      noop = 0; seq = 0; pins = []; inert = false; fx = [] }
   in
   t.commit <- min (last_index t) (max commit (start - 1));
   t.deadline <- random_timeout t now;
@@ -210,11 +240,28 @@ let advance t =
     if i > t.commit && term_at t i = t.term then commit_to t i
   end
 
-(* every server holds the leader's log up to this index (as far as the leader knows; a follower: what its leader said)
-   *)
-let floor t =
-  if t.role = Leader then Array.fold_left min max_int (Array.mapi (fun k p -> if k = t.me then t.persisted else p.matched) t.peers)
-  else t.floor
+(* a peer the leader would have to send entries before its log's start: it needs a copy *)
+let needs_copy t p = p.probing && p.next - 1 < t.start - 1
+
+(* every server holds the leader's log up to this index (as far as the leader knows; a follower: what its leader said):
+   a peer silent for [floor_ms], or that needs a copy, is not waited for (it takes a copy), and an index pinned for a
+   copy being made is kept *)
+let floor t now =
+  t.pins <- List.filter (fun (_, until) -> until > now) t.pins;
+  let f =
+    if t.role = Leader then begin
+      let f = ref t.persisted in
+      Array.iteri
+        (fun k p -> if k <> t.me && now - p.contact < t.floor_ms && not (needs_copy t p) then f := min !f p.matched)
+        t.peers;
+      !f
+    end
+    else t.floor
+  in
+  List.fold_left (fun f (i, _) -> min f i) f t.pins
+
+(* a copy of the databases at [index] is being made here (for a peer): the entries after it stay until [until] *)
+let pin t ~index ~until = t.pins <- (index, until) :: List.filter (fun (i, _) -> i <> index) t.pins
 
 let send_append t now k =
   let p = t.peers.(k) in
@@ -237,17 +284,18 @@ let send_append t now k =
     p.last_send <- now;
     p.last_seq <- t.seq;
     if not p.probing then p.next <- p.next + count;
-    emit t (Send (k, Append { term = t.term; seq = t.seq; prev_index = prev; prev_term; terms; sizes; commit = t.commit; floor = floor t }))
+    emit t (Send (k, Append { term = t.term; seq = t.seq; prev_index = prev; prev_term; terms; sizes; commit = t.commit; floor = floor t now }))
   end
   else begin
-    (* the peer needs entries before this log's start: they are in the journals only (next step: a catch-up from
-       them); a heartbeat keeps it following *)
+    (* the peer needs entries before this log's start: they are in the databases only. Snap names the entry before
+       the start; a follower that lacks it takes a copy (it keeps following meanwhile) *)
     p.probing <- true;
     t.seq <- t.seq + 1;
+    if Queue.length p.sent >= 4096 then ignore (Queue.take p.sent);
     Queue.push (t.seq, now) p.sent;
     p.last_send <- now;
     p.last_seq <- t.seq;
-    emit t (Send (k, Append { term = t.term; seq = t.seq; prev_index = last_index t; prev_term = last_term t; terms = [||]; sizes = [||]; commit = t.commit; floor = floor t }))
+    emit t (Send (k, Snap { term = t.term; seq = t.seq; index = t.start - 1; index_term = t.prev_term; commit = t.commit; floor = floor t now }))
   end
 
 let in_flight t p =
@@ -318,6 +366,17 @@ let start_pre_vote t now =
 let count t = Array.fold_left (fun c v -> if v then c + 1 else c) 0 t.votes
 
 let tick t now =
+  if t.inert then ()
+  else if t.fresh then begin
+    if now - t.asked >= t.heartbeat_ms then begin
+      t.asked <- now;
+      (* every peer that has not said it is sound: a fresh one may end its freshness meanwhile *)
+      for k = 0 to t.n - 1 do
+        if k <> t.me && (match t.told.(k) with Some (_, _, false) -> false | _ -> true) then emit t (Send (k, Ask))
+      done
+    end
+  end
+  else
   match t.role with
   | Leader ->
     if now - quorum_time t now (fun p -> p.contact) >= t.election_ms then begin
@@ -351,7 +410,40 @@ let hint t i =
   while !j - 1 >= t.start && !j - 1 > t.commit && term_at t (!j - 1) = tm do decr j done;
   max t.commit (!j - 1)
 
-let receive t now k msg =
+(* entries the follower holds up to [index] are the leader's (Append's prev_index or Snap's index, with no conflict
+   found): its commit index and the 2018 rule follow *)
+let held t k ~seq ~index ~commit =
+  t.verified <- max t.verified index;
+  commit_to t (min commit t.verified);
+  check_repair t ~leader_commit:commit;
+  reply_append t k ~seq ~ok:true ~index:(acked t)
+
+(* a fresh server: enough States to end it (see the head of this file) *)
+let end_fresh t =
+  let others = List.filter_map (fun x -> x) (Array.to_list t.told) in
+  let sound = List.filter (fun (_, _, f) -> not f) others in
+  let fresh_ones = List.length others - List.length sound in
+  if List.length sound >= t.n / 2 + 1 || (sound = [] && fresh_ones + 1 >= majority t) then begin
+    t.term <- List.fold_left (fun m (tm, _, _) -> max m tm) t.term others;
+    t.vote <- t.me;
+    t.repair <- List.fold_left (fun m (_, li, _) -> max m li) t.repair sound;
+    t.fresh <- false;
+    emit t Save
+  end
+
+let rec receive t now k msg =
+  if t.inert then () else if t.fresh then receive_fresh t now k msg else receive_ t now k msg
+
+(* a fresh server takes only States, and answers only Ask; a vote request is refused with its term unchanged *)
+and receive_fresh t _now k msg =
+  match msg with
+  | Ask -> emit t (Send (k, State { term = t.term; last_index = last_index t; fresh = true }))
+  | State { term; last_index; fresh } -> t.told.(k) <- Some (term, last_index, fresh); end_fresh t
+  | Pre_vote _ -> emit t (Send (k, Pre_vote_reply { term = t.term; granted = false }))
+  | Vote _ -> emit t (Send (k, Vote_reply { term = t.term; granted = false }))
+  | Pre_vote_reply _ | Vote_reply _ | Append _ | Append_reply _ | Snap _ -> ()
+
+and receive_ t now k msg =
   match msg with
   | Pre_vote { term; last_index; last_term } ->
     let granted = term > t.term && (not (sticky t now)) && t.repair = 0 && up_to_date t ~last_index ~last_term in
@@ -441,6 +533,22 @@ let receive t now k msg =
         end
       end
     end
+  | Snap { term; seq; index; index_term; commit; floor } ->
+    if term < t.term then reply_append t k ~seq ~ok:false ~index:(last_index t)
+    else begin
+      if term > t.term || t.role <> Follower || t.leader <> k then become_follower t now ~term ~leader:k;
+      t.heard <- now;
+      t.floor <- floor;
+      t.deadline <- random_timeout t now;
+      (* entries up to this log's start are committed here, so the leader's *)
+      if index <= t.start - 1 || term_at t index = index_term then held t k ~seq ~index ~commit
+      else begin
+        emit t (Fetch k);
+        reply_append t k ~seq ~ok:false ~index:(last_index t)
+      end
+    end
+  | Ask -> emit t (Send (k, State { term = t.term; last_index = last_index t; fresh = false }))
+  | State _ -> ()
   | Append_reply { term; seq; ok; index } ->
     if term > t.term then become_follower t now ~term ~leader:(-1)
     else if t.role = Leader && term = t.term then begin
@@ -470,7 +578,7 @@ let receive t now k msg =
 
 (* the disk forced the log up to [i] (in generation [gen]) *)
 let persisted t ~gen i =
-  if gen = t.gen && i > t.persisted then begin
+  if gen = t.gen && i > t.persisted && not t.inert then begin
     t.persisted <- min i (last_index t);
     match t.role with
     | Leader -> advance t
@@ -490,7 +598,20 @@ let propose t now size =
     Some (last_index t)
   end
 
-let ready t = t.role = Leader && t.commit >= t.noop
+let ready t = t.role = Leader && t.commit >= t.noop && not t.inert
+
+(* a copy at [index] whose entry there is of term [term] is installed at the next start, unless this log holds that
+   entry (Raft's rule: its entries after it are kept, the copy is not needed) or its own start is past it: then
+   false. True: from now on this server answers nothing and stands for nothing (inert) until it starts again *)
+let install t ~index ~term =
+  if index <= t.start - 1 || (index <= last_index t && term_at t index = term) then false
+  else begin
+    if t.role = Leader then emit t Unlead;
+    t.role <- Follower;
+    t.leader <- -1;
+    t.inert <- true;
+    true
+  end
 
 (* the connection to peer k broke: what was in flight may be lost, so its log is probed again *)
 let unreachable t k =

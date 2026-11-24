@@ -18,7 +18,20 @@
    - the 2018 rule (Alagappan et al., FAST 2018; design 8.5): a server whose forced log is found damaged at a restart
      keeps the part before the damage, records repair = the newest index it may have acknowledged, and neither votes
      nor stands for election until it holds, from a leader whose commit index reaches repair, every entry up to it;
-     it acknowledges what it stores meanwhile.
+     it acknowledges what it stores meanwhile;
+   - the log's start (base: the entries before it are in the databases, their terms no longer read, but that of the
+     last) moves behind what a server knows committed and holds forced, with no floor (any server, any time: a
+     superset of what the floor allows); a leader never sends from before its start: a peer it would need to is
+     probed at its start, and one whose log does not hold that entry takes a copy of the databases (the role of
+     InstallSnapshot, Ongaro's thesis ch. 5): any server gives its state at an index X it knows committed and holds,
+     and the receiver keeps its log when it holds entry X of the same term (Raft's rule: the copy dropped), else its
+     log becomes the copy's, forced, its start X, and the 2018 rule's repair ends once X reaches it;
+   - a server whose whole state is lost (Wipe: its disk replaced) starts fresh: it answers no vote request and no
+     Append, takes no term, stands for nothing, and asks the others their state (Ask); it ends its freshness with the
+     answers of floor(n/2) + 1 other servers that are not fresh (its term their newest, its vote in it its own, its
+     repair mark their newest last index), or with a majority, itself included, of fresh servers only (a new
+     cluster). A wipe comes only while the damaged and the wiped stay a minority (a majority that lost what it
+     acknowledged may have lost a committed entry).
    Messages are a set: a message is taken off when it is handled; it may be handled late, in any order, or never (a
    loss); a duplicate does what a resend does (a leader sends an Append as often as it likes, a candidate is answered
    once a term). Time is abstracted: a timeout may pass whenever its server holds no promise.
@@ -36,28 +49,35 @@
    damaged server vote as if its log were shorter (the bug Alagappan et al. found); RepairEarly lets a damaged server
    vote again once it holds entries up to repair without the leader's commit index reaching it; NoStickiness grants
    votes despite a promise; PromiseFirst lets a promise end before the lease it supports; RestartForgets lets a
-   server that starts vote at once; ReadEarly reads before the no-op is committed. *)
+   server that starts vote at once; ReadEarly reads before the no-op is committed; CopyDiscards installs a copy
+   over a log that holds its last entry (the entries after it, acknowledged, dropped); CopyUncommitted gives a copy
+   past what the giver knows committed; FreshHearOne ends a fresh server's freshness on one answer; FreshNoRepair
+   ends it without the repair mark. *)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
-CONSTANTS Server, MaxTerm, MaxLog, MaxRestart, MaxDamage, MaxMsgs, Leases, Eager,
+CONSTANTS Server, MaxTerm, MaxLog, MaxRestart, MaxDamage, MaxMsgs, Leases, Eager, MaxCopy, MaxWipe,
           CommitOldTerm, VolatileVote, AckUnforced, NoUpToDate, NoAbstain, RepairEarly,
-          NoStickiness, PromiseFirst, RestartForgets, ReadEarly
+          NoStickiness, PromiseFirst, RestartForgets, ReadEarly, CopyDiscards, CopyUncommitted,
+          FreshHearOne, FreshNoRepair
 
 Nil == "nil"
 NoPromise == << >>
+NoAnswer == << >>
 
 VARIABLES
   currentTerm, votedFor, log, plog, repair,           \* durable (log: the terms of the entries; plog: forced prefix)
+  base,                                               \* durable: the entries up to base are in the databases
+  fresh, told,                                        \* a wiped server, and the answers it was given
   state, commitIndex, votes, nextIndex, matchIndex,   \* lost at a restart
   promise,                                            \* promise[s]: <<leader, term>> it heard from, or << >>
   lease,                                              \* lease[s]: the leader may read
   msgs,
   elected, committed,                                 \* ghosts
-  restarts, damages                                   \* bounds
+  restarts, damages, copies, wipes                    \* bounds
 
-durable == <<currentTerm, votedFor, log, plog, repair>>
+durable == <<currentTerm, votedFor, log, plog, repair, base, fresh, told>>
 volatile == <<state, commitIndex, votes, nextIndex, matchIndex>>
-vars == <<durable, volatile, promise, lease, msgs, elected, committed, restarts, damages>>
+vars == <<durable, volatile, promise, lease, msgs, elected, committed, restarts, damages, copies, wipes>>
 
 Majority(Q) == Cardinality(Q) * 2 > Cardinality(Server)
 Min(a, b) == IF a < b THEN a ELSE b
@@ -76,29 +96,30 @@ Ready(i) == \E n \in 1..commitIndex[i] : log[i][n] = currentTerm[i]
 
 Init ==
   /\ currentTerm = [s \in Server |-> 0] /\ votedFor = [s \in Server |-> Nil] /\ log = [s \in Server |-> << >>]
-  /\ plog = [s \in Server |-> 0] /\ repair = [s \in Server |-> 0]
+  /\ plog = [s \in Server |-> 0] /\ repair = [s \in Server |-> 0] /\ base = [s \in Server |-> 0]
+  /\ fresh = [s \in Server |-> FALSE] /\ told = [s \in Server |-> [t \in Server |-> NoAnswer]]
   /\ state = [s \in Server |-> "Follower"] /\ commitIndex = [s \in Server |-> 0] /\ votes = [s \in Server |-> {}]
   /\ nextIndex = [s \in Server |-> [t \in Server |-> 1]] /\ matchIndex = [s \in Server |-> [t \in Server |-> 0]]
   /\ promise = [s \in Server |-> NoPromise] /\ lease = [s \in Server |-> FALSE]
-  /\ msgs = {} /\ elected = {} /\ committed = {} /\ restarts = 0 /\ damages = 0
+  /\ msgs = {} /\ elected = {} /\ committed = {} /\ restarts = 0 /\ damages = 0 /\ copies = 0 /\ wipes = 0
 
 (* ---- elections ---- *)
 
 (* the election timeout passed: the term goes up, the vote for itself is durable, votes are asked for *)
 Timeout(i) ==
-  /\ state[i] /= "Leader" /\ promise[i] = NoPromise /\ ~Abstains(i) /\ currentTerm[i] < MaxTerm
+  /\ state[i] /= "Leader" /\ promise[i] = NoPromise /\ ~Abstains(i) /\ ~fresh[i] /\ currentTerm[i] < MaxTerm
   /\ currentTerm' = [currentTerm EXCEPT ![i] = currentTerm[i] + 1]
   /\ votedFor' = [votedFor EXCEPT ![i] = i]
   /\ state' = [state EXCEPT ![i] = "Candidate"]
   /\ votes' = [votes EXCEPT ![i] = {i}]
   /\ msgs' = msgs \cup {[mtype |-> "VoteReq", mterm |-> currentTerm[i] + 1, mlastTerm |-> LastTerm(log[i]),
                          mlastIndex |-> Len(log[i]), msource |-> i, mdest |-> j] : j \in Server \ {i}}
-  /\ UNCHANGED <<log, plog, repair, commitIndex, nextIndex, matchIndex, promise, lease, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<log, plog, repair, base, fresh, told, commitIndex, nextIndex, matchIndex, promise, lease, elected, committed, restarts, damages, copies, wipes>>
 
 (* a vote: a promised server ignores the request, its term included (stickiness); else the newer term is taken
    (a leader steps down) and the vote granted at most once a term, to a log at least as up to date *)
 HandleVoteReq(j, m) ==
-  /\ m.mtype = "VoteReq" /\ m.mdest = j /\ Unpromised(j)
+  /\ m.mtype = "VoteReq" /\ m.mdest = j /\ Unpromised(j) /\ ~fresh[j]
   /\ LET newer == m.mterm > currentTerm[j]
          term == IF newer THEN m.mterm ELSE currentTerm[j]
          had == IF newer THEN Nil ELSE votedFor[j]
@@ -109,13 +130,13 @@ HandleVoteReq(j, m) ==
         /\ state' = [state EXCEPT ![j] = IF newer THEN "Follower" ELSE state[j]]
         /\ lease' = [lease EXCEPT ![j] = IF newer THEN FALSE ELSE lease[j]]
         /\ msgs' = (msgs \ {m}) \cup {[mtype |-> "VoteResp", mterm |-> term, mgranted |-> grant, msource |-> j, mdest |-> m.msource]}
-  /\ UNCHANGED <<log, plog, repair, commitIndex, votes, nextIndex, matchIndex, promise, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<log, plog, repair, base, fresh, told, commitIndex, votes, nextIndex, matchIndex, promise, elected, committed, restarts, damages, copies, wipes>>
 
 HandleVoteResp(i, m) ==
   /\ m.mtype = "VoteResp" /\ m.mdest = i /\ m.mterm = currentTerm[i]
   /\ votes' = [votes EXCEPT ![i] = IF state[i] = "Candidate" /\ m.mgranted THEN votes[i] \cup {m.msource} ELSE votes[i]]
   /\ msgs' = msgs \ {m}
-  /\ UNCHANGED <<durable, state, commitIndex, nextIndex, matchIndex, promise, lease, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, state, commitIndex, nextIndex, matchIndex, promise, lease, elected, committed, restarts, damages, copies, wipes>>
 
 (* a majority of votes: leader, and its first entry is the no-op of its term *)
 BecomeLeader(i) ==
@@ -125,62 +146,64 @@ BecomeLeader(i) ==
   /\ nextIndex' = [nextIndex EXCEPT ![i] = [t \in Server |-> Len(log[i]) + 1]]
   /\ matchIndex' = [matchIndex EXCEPT ![i] = [t \in Server |-> 0]]
   /\ elected' = elected \cup {<<currentTerm[i], i>>}
-  /\ UNCHANGED <<currentTerm, votedFor, plog, repair, commitIndex, votes, promise, lease, msgs, committed, restarts, damages>>
+  /\ UNCHANGED <<currentTerm, votedFor, plog, repair, base, fresh, told, commitIndex, votes, promise, lease, msgs, committed, restarts, damages, copies, wipes>>
 
 (* a reply of an older term is dropped *)
 DropStale(j, m) ==
   /\ m.mtype \in {"VoteResp", "AppendResp"} /\ m.mdest = j /\ m.mterm < currentTerm[j]
   /\ msgs' = msgs \ {m}
-  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes>>
 
 (* any message of a newer term but a vote request: the term is taken, the server follows *)
 UpdateTerm(j, m) ==
-  /\ m.mtype \in {"VoteResp", "AppendReq", "AppendResp"} /\ m.mdest = j /\ m.mterm > currentTerm[j]
+  /\ m.mtype \in {"VoteResp", "AppendReq", "AppendResp"} /\ m.mdest = j /\ m.mterm > currentTerm[j] /\ ~fresh[j]
   /\ currentTerm' = [currentTerm EXCEPT ![j] = m.mterm]
   /\ votedFor' = [votedFor EXCEPT ![j] = Nil]
   /\ state' = [state EXCEPT ![j] = "Follower"]
   /\ lease' = [lease EXCEPT ![j] = FALSE]
-  /\ UNCHANGED <<log, plog, repair, commitIndex, votes, nextIndex, matchIndex, promise, msgs, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<log, plog, repair, base, fresh, told, commitIndex, votes, nextIndex, matchIndex, promise, msgs, elected, committed, restarts, damages, copies, wipes>>
 
 (* CheckQuorum, or any other reason *)
 StepDown(i) ==
   /\ state[i] = "Leader"
   /\ state' = [state EXCEPT ![i] = "Follower"]
   /\ lease' = [lease EXCEPT ![i] = FALSE]
-  /\ UNCHANGED <<durable, commitIndex, votes, nextIndex, matchIndex, promise, msgs, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, commitIndex, votes, nextIndex, matchIndex, promise, msgs, elected, committed, restarts, damages, copies, wipes>>
 
 (* ---- the log ---- *)
 
 ClientRequest(i) ==
   /\ state[i] = "Leader"
   /\ log' = [log EXCEPT ![i] = Append(log[i], currentTerm[i])]
-  /\ UNCHANGED <<currentTerm, votedFor, plog, repair, volatile, promise, lease, msgs, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<currentTerm, votedFor, plog, repair, base, fresh, told, volatile, promise, lease, msgs, elected, committed, restarts, damages, copies, wipes>>
 
 (* the disk forces what was appended *)
 Persist(i) ==
   /\ ~Sync /\ plog[i] < Len(log[i])
   /\ plog' = [plog EXCEPT ![i] = Len(log[i])]
-  /\ UNCHANGED <<currentTerm, votedFor, log, repair, volatile, promise, lease, msgs, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<currentTerm, votedFor, log, repair, base, fresh, told, volatile, promise, lease, msgs, elected, committed, restarts, damages, copies, wipes>>
 
-(* at most one entry a request; a heartbeat carries none *)
+(* at most one entry a request; a heartbeat carries none. Never from before the log's start: a peer whose next entry
+   is there is probed at the start (Snap: the entry before the start, whose term the leader keeps) *)
 AppendEntries(i, j) ==
   /\ i /= j /\ state[i] = "Leader"
-  /\ LET prev == nextIndex[i][j] - 1
-         entries == IF nextIndex[i][j] <= Len(log[i]) THEN << log[i][nextIndex[i][j]] >> ELSE << >>
+  /\ LET next == Max(nextIndex[i][j], base[i] + 1)
+         prev == next - 1
+         entries == IF next <= Len(log[i]) THEN << log[i][next] >> ELSE << >>
      IN msgs' = msgs \cup {[mtype |-> "AppendReq", mterm |-> currentTerm[i], mprevIndex |-> prev,
                             mprevTerm |-> IF prev = 0 THEN 0 ELSE log[i][prev], mentries |-> entries,
                             mcommit |-> Min(commitIndex[i], prev + Len(entries)), msource |-> i, mdest |-> j]}
-  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes>>
 
 Reply(j, m, ok, match) ==
   [mtype |-> "AppendResp", mterm |-> currentTerm[j], msuccess |-> ok, mmatch |-> match, msource |-> j, mdest |-> m.msource]
 
 (* an append of the server's term: it follows that leader and promises it; an older one is refused *)
 HandleAppendReq(j, m) ==
-  /\ m.mtype = "AppendReq" /\ m.mdest = j /\ m.mterm <= currentTerm[j]
+  /\ m.mtype = "AppendReq" /\ m.mdest = j /\ m.mterm <= currentTerm[j] /\ ~fresh[j]
   /\ IF m.mterm < currentTerm[j]
      THEN /\ msgs' = (msgs \ {m}) \cup {Reply(j, m, FALSE, 0)}
-          /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages>>
+          /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes>>
      ELSE
        LET ok == m.mprevIndex = 0 \/ (m.mprevIndex <= Len(log[j]) /\ log[j][m.mprevIndex] = m.mprevTerm)
            at == m.mprevIndex + 1
@@ -202,8 +225,8 @@ HandleAppendReq(j, m) ==
                   /\ repair' = [repair EXCEPT ![j] = IF repaired THEN 0 ELSE repair[j]]
                   /\ commitIndex' = [commitIndex EXCEPT ![j] = Max(commitIndex[j], m.mcommit)]
                   /\ msgs' = (msgs \ {m}) \cup {Reply(j, m, TRUE, match)}
-                  /\ UNCHANGED <<currentTerm, votedFor>>
-          /\ UNCHANGED <<votes, nextIndex, matchIndex, lease, elected, committed, restarts, damages>>
+                  /\ UNCHANGED <<currentTerm, votedFor, base, fresh, told>>
+          /\ UNCHANGED <<votes, nextIndex, matchIndex, lease, elected, committed, restarts, damages, copies, wipes>>
 
 HandleAppendResp(i, m) ==
   /\ m.mtype = "AppendResp" /\ m.mdest = i /\ m.mterm = currentTerm[i]
@@ -215,7 +238,7 @@ HandleAppendResp(i, m) ==
           /\ nextIndex' = [nextIndex EXCEPT ![i][j] = Max(matchIndex[i][j], m.mmatch) + 1]
      ELSE /\ nextIndex' = [nextIndex EXCEPT ![i][j] = Max(nextIndex[i][j] - 1, 1)]
           /\ UNCHANGED matchIndex
-  /\ UNCHANGED <<durable, state, commitIndex, votes, promise, lease, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, state, commitIndex, votes, promise, lease, elected, committed, restarts, damages, copies, wipes>>
 
 (* the newest index a majority holds forced, if its entry is of the leader's term (or any, in CommitOldTerm) *)
 AdvanceCommitIndex(i) ==
@@ -227,7 +250,7 @@ AdvanceCommitIndex(i) ==
         /\ CommitOldTerm \/ log[i][top] = currentTerm[i]
         /\ commitIndex' = [commitIndex EXCEPT ![i] = top]
         /\ committed' = committed \cup {<<n, log[i][n], currentTerm[i]>> : n \in 1..top}
-  /\ UNCHANGED <<durable, state, votes, nextIndex, matchIndex, promise, lease, msgs, elected, restarts, damages>>
+  /\ UNCHANGED <<durable, state, votes, nextIndex, matchIndex, promise, lease, msgs, elected, restarts, damages, copies, wipes>>
 
 (* ---- leases ---- *)
 
@@ -235,12 +258,12 @@ GetLease(i) ==
   /\ Leases /\ state[i] = "Leader" /\ ~lease[i]
   /\ Majority({i} \cup {j \in Server : promise[j] = <<i, currentTerm[i]>>})
   /\ lease' = [lease EXCEPT ![i] = TRUE]
-  /\ UNCHANGED <<durable, volatile, promise, msgs, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, volatile, promise, msgs, elected, committed, restarts, damages, copies, wipes>>
 
 ExpireLease(i) ==
   /\ lease[i]
   /\ lease' = [lease EXCEPT ![i] = FALSE]
-  /\ UNCHANGED <<durable, volatile, promise, msgs, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, volatile, promise, msgs, elected, committed, restarts, damages, copies, wipes>>
 
 (* a promise ends only after the lease it may support (clocks within their bound) *)
 ExpirePromise(j) ==
@@ -248,13 +271,13 @@ ExpirePromise(j) ==
   /\ LET l == promise[j][1] IN
        PromiseFirst \/ ~(state[l] = "Leader" /\ lease[l] /\ currentTerm[l] = promise[j][2])
   /\ promise' = [promise EXCEPT ![j] = NoPromise]
-  /\ UNCHANGED <<durable, volatile, lease, msgs, elected, committed, restarts, damages>>
+  /\ UNCHANGED <<durable, volatile, lease, msgs, elected, committed, restarts, damages, copies, wipes>>
 
 (* ---- faults ---- *)
 
 Reset(i) ==
   /\ state' = [state EXCEPT ![i] = "Follower"]
-  /\ commitIndex' = [commitIndex EXCEPT ![i] = 0]
+  /\ commitIndex' = [commitIndex EXCEPT ![i] = base[i]]
   /\ votes' = [votes EXCEPT ![i] = {}]
   /\ nextIndex' = [nextIndex EXCEPT ![i] = [t \in Server |-> 1]]
   /\ matchIndex' = [matchIndex EXCEPT ![i] = [t \in Server |-> 0]]
@@ -268,28 +291,132 @@ Restart(i) ==
   /\ Reset(i)
   /\ log' = [log EXCEPT ![i] = SubSeq(log[i], 1, Forced(i))]
   /\ restarts' = restarts + 1
-  /\ UNCHANGED <<currentTerm, plog, repair, msgs, elected, committed, damages>>
+  /\ UNCHANGED <<currentTerm, plog, repair, base, fresh, told, msgs, elected, committed, damages, copies, wipes>>
 
 (* a restart whose recovery finds forced entry d damaged: the log before it is kept; the server records the newest
    index it may have acknowledged (NoAbstain: it goes on as if its log were shorter) *)
 Damage(i) ==
-  /\ damages < MaxDamage /\ Forced(i) > 0
-  /\ \E d \in 1..Forced(i) :
+  /\ damages < MaxDamage /\ Forced(i) > base[i]
+  /\ \E d \in (base[i] + 1)..Forced(i) :
        /\ log' = [log EXCEPT ![i] = SubSeq(log[i], 1, d - 1)]
        /\ plog' = [plog EXCEPT ![i] = d - 1]
   /\ repair' = [repair EXCEPT ![i] = Max(repair[i], Len(log[i]))]
   /\ Reset(i)
   /\ damages' = damages + 1
-  /\ UNCHANGED <<currentTerm, msgs, elected, committed, restarts>>
+  /\ UNCHANGED <<currentTerm, base, fresh, told, msgs, elected, committed, restarts, copies, wipes>>
+
+(* ---- the log's start and copies ---- *)
+
+(* the databases hold every entry up to x: the log's start moves there, behind what this server knows committed and
+   holds forced (no floor: any server, any time) *)
+Compact(i) ==
+  /\ MaxCopy > 0
+  /\ \E x \in (base[i] + 1)..Min(commitIndex[i], Forced(i)) : base' = [base EXCEPT ![i] = x]
+  /\ UNCHANGED <<currentTerm, votedFor, log, plog, repair, fresh, told, volatile, promise, lease, msgs, elected, committed, restarts, damages, copies, wipes>>
+
+(* a server gives another its databases at x (copied as cepheus backup copies them): its state at or after its log's
+   start, within what it knows committed (CopyUncommitted: anything its log holds) *)
+SendCopy(i, j) ==
+  /\ i /= j /\ copies < MaxCopy
+  /\ \E x \in Max(base[i], 1)..(IF CopyUncommitted THEN Len(log[i]) ELSE commitIndex[i]) :
+       msgs' = msgs \cup {[mtype |-> "Copy", mindex |-> x, mentries |-> SubSeq(log[i], 1, x), msource |-> i, mdest |-> j]}
+  /\ copies' = copies + 1
+  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, wipes>>
+
+(* a copy installed, forced: unless the databases are at x already, or the log holds entry x of the same term (its
+   entries after x kept, the copy dropped: Raft's rule; CopyDiscards installs it anyway), the log becomes the copy's,
+   its start x, the commit index at least x, and the 2018 rule's repair ends once x reaches it *)
+HandleCopy(j, m) ==
+  /\ m.mtype = "Copy" /\ m.mdest = j /\ ~fresh[j]
+  /\ msgs' = msgs \ {m}
+  /\ LET x == m.mindex
+         holds == x <= Len(log[j]) /\ log[j][x] = m.mentries[x]
+     IN IF x <= base[j] \/ (holds /\ ~CopyDiscards)
+        THEN UNCHANGED <<durable, volatile>>
+        ELSE /\ log' = [log EXCEPT ![j] = m.mentries]
+             /\ plog' = [plog EXCEPT ![j] = x]
+             /\ base' = [base EXCEPT ![j] = x]
+             /\ commitIndex' = [commitIndex EXCEPT ![j] = Max(commitIndex[j], x)]
+             /\ repair' = [repair EXCEPT ![j] = IF repair[j] <= x THEN 0 ELSE repair[j]]
+             /\ UNCHANGED <<currentTerm, votedFor, fresh, told, state, votes, nextIndex, matchIndex>>
+  /\ UNCHANGED <<promise, lease, elected, committed, restarts, damages, copies, wipes>>
+
+(* ---- a lost disk ---- *)
+
+Sound(s) == ~fresh[s] /\ repair[s] = 0
+
+(* the whole state lost, while the damaged and the wiped stay a minority *)
+Wipe(i) ==
+  /\ wipes < MaxWipe
+  /\ Cardinality({s \in Server : s = i \/ ~Sound(s)}) * 2 < Cardinality(Server)
+  /\ currentTerm' = [currentTerm EXCEPT ![i] = 0]
+  /\ votedFor' = [votedFor EXCEPT ![i] = Nil]
+  /\ log' = [log EXCEPT ![i] = << >>]
+  /\ plog' = [plog EXCEPT ![i] = 0]
+  /\ repair' = [repair EXCEPT ![i] = 0]
+  /\ base' = [base EXCEPT ![i] = 0]
+  /\ fresh' = [fresh EXCEPT ![i] = TRUE]
+  /\ told' = [told EXCEPT ![i] = [t \in Server |-> NoAnswer]]
+  /\ state' = [state EXCEPT ![i] = "Follower"]
+  /\ commitIndex' = [commitIndex EXCEPT ![i] = 0]
+  /\ votes' = [votes EXCEPT ![i] = {}]
+  /\ nextIndex' = [nextIndex EXCEPT ![i] = [t \in Server |-> 1]]
+  /\ matchIndex' = [matchIndex EXCEPT ![i] = [t \in Server |-> 0]]
+  /\ lease' = [lease EXCEPT ![i] = FALSE]
+  /\ wipes' = wipes + 1
+  /\ UNCHANGED <<promise, msgs, elected, committed, restarts, damages, copies>>
+
+(* a fresh server asks another *)
+Ask(i, j) ==
+  /\ fresh[i] /\ i /= j
+  /\ msgs' = msgs \cup {[mtype |-> "Ask", msource |-> i, mdest |-> j]}
+  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes>>
+
+HandleAsk(j, m) ==
+  /\ m.mtype = "Ask" /\ m.mdest = j
+  /\ msgs' = (msgs \ {m}) \cup {[mtype |-> "State", mterm |-> currentTerm[j], mlast |-> Len(log[j]), mfresh |-> fresh[j],
+                                  msource |-> j, mdest |-> m.msource]}
+  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes>>
+
+HandleState(i, m) ==
+  /\ m.mtype = "State" /\ m.mdest = i
+  /\ msgs' = msgs \ {m}
+  /\ told' = IF fresh[i] THEN [told EXCEPT ![i][m.msource] = <<m.mterm, m.mlast, m.mfresh>>] ELSE told
+  /\ UNCHANGED <<currentTerm, votedFor, log, plog, repair, base, fresh, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes>>
+
+(* a fresh server's freshness ends: with the answers of floor(n/2) + 1 others that are not fresh, or with a majority
+   of fresh servers only (a new cluster) *)
+EndFresh(i) ==
+  /\ fresh[i]
+  /\ LET answered == {t \in Server : told[i][t] /= NoAnswer}
+         sound == {t \in answered : ~told[i][t][3]}
+         need == IF FreshHearOne THEN 1 ELSE Cardinality(Server) \div 2 + 1
+         Top(S, k) == IF S = {} THEN 0 ELSE CHOOSE x \in {told[i][t][k] : t \in S} : \A t \in S : told[i][t][k] <= x
+     IN /\ \/ Cardinality(sound) >= need
+           \/ sound = {} /\ Majority(answered \cup {i})
+        /\ currentTerm' = [currentTerm EXCEPT ![i] = Max(currentTerm[i], Top(answered, 1))]
+        /\ votedFor' = [votedFor EXCEPT ![i] = i]
+        /\ repair' = [repair EXCEPT ![i] = IF FreshNoRepair THEN repair[i] ELSE Max(repair[i], Top(sound, 2))]
+        /\ fresh' = [fresh EXCEPT ![i] = FALSE]
+  /\ UNCHANGED <<log, plog, base, told, volatile, promise, lease, msgs, elected, committed, restarts, damages, copies, wipes>>
+
+(* what a fresh server takes no part in, and the answers it is too late for *)
+DropFresh(j, m) ==
+  /\ m.mdest = j
+  /\ \/ fresh[j] /\ m.mtype \in {"VoteReq", "VoteResp", "AppendReq", "AppendResp", "Copy"}
+     \/ ~fresh[j] /\ m.mtype = "State"
+  /\ msgs' = msgs \ {m}
+  /\ UNCHANGED <<durable, volatile, promise, lease, elected, committed, restarts, damages, copies, wipes>>
 
 Next ==
   \/ \E i \in Server : \/ Timeout(i) \/ BecomeLeader(i) \/ StepDown(i) \/ ClientRequest(i)
                        \/ Persist(i) \/ AdvanceCommitIndex(i) \/ GetLease(i) \/ ExpireLease(i) \/ ExpirePromise(i)
-                       \/ Restart(i) \/ Damage(i)
-  \/ \E i, j \in Server : AppendEntries(i, j)
+                       \/ Restart(i) \/ Damage(i) \/ Compact(i) \/ Wipe(i) \/ EndFresh(i)
+  \/ \E i, j \in Server : AppendEntries(i, j) \/ SendCopy(i, j) \/ Ask(i, j)
   \/ \E m \in msgs : \E j \in Server :
        \/ HandleVoteReq(j, m) \/ HandleVoteResp(j, m)
-       \/ UpdateTerm(j, m) \/ DropStale(j, m) \/ HandleAppendReq(j, m) \/ HandleAppendResp(j, m)
+       \/ UpdateTerm(j, m) \/ DropStale(j, m) \/ HandleAppendReq(j, m) \/ HandleAppendResp(j, m) \/ HandleCopy(j, m)
+       \/ HandleAsk(j, m) \/ HandleState(j, m) \/ DropFresh(j, m)
 
 Spec == Init /\ [][Next]_vars
 
@@ -323,4 +450,8 @@ ReadFresh ==
 
 (* a server's commit index never passes its log *)
 CommitInLog == \A i \in Server : commitIndex[i] <= Len(log[i])
+
+(* what a server takes for committed is (its databases, its commit index): never an entry that was not *)
+CommittedPrefix ==
+  \A i \in Server : base[i] <= commitIndex[i] /\ \A n \in 1..commitIndex[i] : \E e \in committed : e[1] = n /\ e[2] = log[i][n]
 =============================================================================

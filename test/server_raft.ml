@@ -14,7 +14,11 @@
      certificate of another CA.
    - a load, a change of the rules (computed in the leader's background) beside groups that count with one counter
      (Incr), and a load past one Raft entry (8 MiB), refused whole; the leader killed: the new one holds the load,
-     the change's consequences and the counter, nothing of the refused load.
+     the change's consequences and the counter, nothing of the refused load;
+   - the catch-up (server/catchup.ml): loads that pass a segment of the Raft log (64 MiB), so that the leader's log
+     starts after 1; a follower killed and its data directory removed: started again empty, it asks the others their
+     state, takes a copy of the databases from the leader, starts again on it and follows, holding every group; the
+     same with the follower killed (kill -9) during its copy, then with the leader killed during it.
 
      server_raft.exe DIR *)
 
@@ -362,6 +366,66 @@ let () =
   wait_socket (sock lk);
   wait_for "the killed leader catches up" same;
   C.check true "the killed leader caught up (side at %d)" (group ln "side");
+  (* the catch-up: loads past a segment of the Raft log, so that its start passes 1 *)
+  let text i = Printf.sprintf "%08d-%s" i (Digest.to_hex (Digest.string (string_of_int i))) in
+  let loaded = ref 0 in
+  let log_start k = match String.split_on_char ' ' (stat k "raft.log") with a :: _ -> (match int_of_string_opt a with Some x -> x | None -> 0) | [] -> 0 in
+  let t_load = Unix.gettimeofday () in
+  while log_start (await_leader "a leader") <= 1 && !loaded < 30 do
+    let base = 10_000_000 + (!loaded * 200_000) in
+    (match Client.write w sdb2 (List.init 180_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text (base + i))))) with
+     | Ok _ -> incr loaded
+     | Error e -> C.check false "a load for the catch-up: %s %s" e.code e.message; loaded := 99);
+    if !loaded >= 9 then Thread.delay 1.2
+  done;
+  let ll = await_leader "a leader" in
+  C.check (log_start ll > 1) "the leader's log starts at %d after %d loads (%.1f s)" (log_start ll) !loaded (Unix.gettimeofday () -. t_load);
+  let data k = (Result.get_ok (Config.load cfgs.(k))).data in
+  let serve_log k = In_channel.with_open_bin (Filename.concat (Filename.dirname cfgs.(k)) "serve.log") In_channel.input_all in
+  let count_in s sub = let n = String.length sub in let c = ref 0 in for i = 0 to String.length s - n do if String.sub s i n = sub then incr c done; !c in
+  let caught_up what k =
+    wait_for ~limit:120. what (fun () -> alive.(k) && stat k "raft.role" = "follower" && List.assoc_opt "raft.repair" (status k) = None && same ());
+    C.check true "%s: %s follows, holds every group (side at %d), its repair done" what (List.nth names k) (group (await_leader "a leader") "side");
+    C.check (not (Sys.file_exists (Filename.concat (data k) "raft/copy")) && not (Sys.file_exists (Filename.concat (data k) "raft/copy.partial")))
+      "%s: no copy left in %s/raft" what (data k)
+  in
+  (* a follower killed, its data directory removed, started again empty *)
+  let wipe k =
+    Unix.kill pids.(k) Sys.sigkill;
+    ignore (Serve.wait pids.(k));
+    alive.(k) <- false;
+    C.rmrf (data k);
+    pids.(k) <- Serve.start bin cfgs.(k);
+    alive.(k) <- true
+  in
+  let fk = (ll + 1) mod 3 in
+  let installs0 = count_in (serve_log fk) "installed the copy" in
+  let t_copy = Unix.gettimeofday () in
+  wipe fk;
+  caught_up "a follower started on an empty data directory" fk;
+  C.check (count_in (serve_log fk) "installed the copy" = installs0 + 1) "it installed one copy of the leader's databases (%.1f s from its start)" (Unix.gettimeofday () -. t_copy);
+  (* killed during its copy, then started again *)
+  let copying k = match List.assoc_opt "raft.copy" (status k) with Some m -> String.length m > 6 && String.sub m 0 6 = "taking" | None -> false in
+  wipe fk;
+  wait_for ~limit:60. "the follower's copy" (fun () -> copying fk);
+  Unix.kill pids.(fk) Sys.sigkill;
+  ignore (Serve.wait pids.(fk));
+  pids.(fk) <- Serve.start bin cfgs.(fk);
+  caught_up "a follower killed (kill -9) during its copy" fk;
+  C.check (count_in (serve_log fk) "removed a copy of the databases that did not finish" >= 1) "the copy it was taking removed at its start";
+  (* the leader killed during the copy: the follower's copy breaks; it takes one from the next leader *)
+  let ll = await_leader "a leader" in
+  let fk = (ll + 1) mod 3 in
+  wipe fk;
+  wait_for ~limit:60. "the follower's copy" (fun () -> copying fk);
+  Unix.kill pids.(ll) Sys.sigkill;
+  ignore (Serve.wait pids.(ll));
+  alive.(ll) <- false;
+  (* the follower without its data cannot vote yet (it has not all it acknowledged): the old leader comes back *)
+  pids.(ll) <- Serve.start bin cfgs.(ll);
+  alive.(ll) <- true;
+  wait_socket (sock ll);
+  caught_up "a follower whose source was killed (kill -9) during its copy" fk;
   Client.close w;
   Array.iteri (fun k c -> if alive.(k) then (C.check (run [ "stop"; "--config"; c ] = 0) "cepheus stop %s" (List.nth names k); ignore (Serve.wait pids.(k)))) cfgs;
   C.rmrf dir;
