@@ -237,14 +237,13 @@ let segment_names jdir =
 
 type copied = { journal : int; runs_ : int; vault : int }
 
-(* The vault's files: keys, then each pack and its index if it has one. Copied after the journal, so that the records
+(* The vault's files: each pack and its index if it has one, then the keys. Copied after the journal, so that the records
    of every file its facts cite are in the copy: a fact names a file only once its records are forced (G22). A pack
    copied while it is written may end in a torn record: the copy's open indexes it up to its last whole record, as
    after a crash. *)
 let copy_vault src dst =
   mkdir_private dst;
   let n = ref 0 in
-  if Sys.file_exists (src // "keys") then n := !n + copy_file (src // "keys") (dst // "keys");
   let sp = src // "packs" and dp = dst // "packs" in
   mkdir_private dp;
   if is_dir sp then
@@ -255,6 +254,9 @@ let copy_vault src dst =
           | fd -> n := !n + Fun.protect ~finally:(fun () -> Unix.close fd) (fun () -> copy_fd fd (dp // f))
           | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ())
       (List.sort compare (Array.to_list (Sys.readdir sp)));
+  (* the keys after the packs: a domain's key is forced before its first record, so the keys copied now hold every
+     key a copied record needs *)
+  if Sys.file_exists (src // "keys") then n := !n + copy_file (src // "keys") (dst // "keys");
   sync_dir dp;
   sync_dir dst;
   !n
@@ -355,11 +357,19 @@ let backup (cfg : Config.t) dest =
         let live = st = Open in
         let out = partial // db in
         let c = copy_database src out in
-        let r = check ~tail:Journal.Copy ~live:false out in
+        (* the copy's end read as the source's: one being written may end in the frame being written *)
+        let tail = match st with Open -> Journal.Copy | Closed -> Journal.Strict | Crashed -> Journal.Crash in
+        let r = check ~tail ~live:false out in
         List.iter (fun m -> say "%s: note: %s" db m) r.notes;
         match r.damages with
         | [] ->
-          Option.iter (cut_copy out) r.tail;
+          Option.iter
+            (fun ((s, stop) as t) ->
+              let f = out // "journal" // Journal.segment_name s in
+              say "%s: note: journal/%s: %d bytes from offset %d left out, %s" db (Journal.segment_name s) (file_size f - stop) stop
+                (if st = Open then "the frame being written when it was copied" else "a frame torn at a crash, never confirmed");
+              cut_copy out t)
+            r.tail;
           mark_closed out;
           say "%s: group %d, %s (journal %s, runs %s%s), %s%s" db r.group (mb (c.journal + c.runs_ + c.vault)) (mb c.journal) (mb c.runs_)
             (if c.vault > 0 then ", vault " ^ mb c.vault else "") (since t1) (if live then "" else ", the database was closed")
@@ -451,7 +461,7 @@ let restore ?(target = End) ~replace src dst =
     | End -> None
     | Group n -> if n < 1 then refuse "--to-group %d: the groups start at 1" n else Some n
     | Time ms ->
-      let n = group_at_time src id ms in
+      let n = match group_at_time src id ms with n -> n | exception Journal.Damaged m -> refuse "%s: %s (cepheus verify names every damage)" src m in
       if n < 1 then refuse "--to-time: %s holds no group written at or before %s" src (time_text ms);
       Some n
   in
@@ -494,9 +504,12 @@ let restore ?(target = End) ~replace src dst =
     (match n with Some n when reached <> n -> refuse "the restored database opened at group %d, not %d" reached n | _ -> ());
     (* a new epoch after the group reached: a replica that holds later groups of the old history is refused, never
        followed as if they were this database's (server.md, "Epochs") *)
-    let h = Replica.load_epochs db in
-    let h = List.filter (fun (_, f) -> f <= reached) h in
-    let e = Replica.last_epoch h + 1 in
+    let full = Replica.load_epochs db in
+    let h = List.filter (fun (_, f) -> f <= reached) full in
+    (* the new epoch above every one the source's history and the database replaced knew: never a history another
+       copy of this database already has (as PostgreSQL's new timeline after a recovery to a point) *)
+    let known = List.map fst full @ (if has_db then (try List.map fst (Replica.load_epochs dst) with Journal.Damaged _ -> []) else []) in
+    let e = 1 + List.fold_left max 0 known in
     Replica.save_epochs db (h @ [ e, reached + 1 ]);
     let r = check ~tail:Journal.Strict ~live:false db in
     let last = ref None in

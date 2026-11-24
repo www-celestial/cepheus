@@ -272,8 +272,9 @@ run kept up to N. A restore to an old group therefore replays the journal from t
 PostgreSQL replays its WAL from its base backup. The writes after N are not lost: the database moved aside holds them
 (it is a stopped database: `cepheus restore` restores from it too).
 
-**Epochs.** A restored database writes its next groups in a new epoch, the one after its history's last
-([epochs](server.md#promotion-by-hand)): the groups after N that a replica (or a program's local copy) still holds are
+**Epochs.** A restored database writes its next groups in a new epoch, above every epoch its history and the
+database it replaces knew ([epochs](server.md#promotion-by-hand)), as PostgreSQL's recovery to a point starts a new
+timeline: the groups after N that a replica (or a program's local copy) still holds are
 of the old history, and a replica that holds them is refused as diverged rather than followed as if they were this
 database's. Make it again from the restored primary (`cepheus replicate`). When a primary's disk is lost and a replica
 runs, promote the replica (`cepheus promote`) rather than restore: it holds every group the replica received, more

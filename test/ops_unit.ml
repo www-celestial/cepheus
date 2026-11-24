@@ -201,6 +201,21 @@ let () =
   C.check (r.damages = [] && r.tail = Some (s.sfirst, !at)) "a copy: the frame whose header is not written yet is its tail";
   let r = Ops.check ~tail:Journal.Crash ~live:false d in
   C.check (r.damages <> []) "after a crash, the same bytes are damage (written whole)";
+  (* a frame damaged in the middle of the newest segment of a copy: damage, never a tail that would cut the frames
+     after it *)
+  copy src d;
+  let newest = jseg d (List.length (segs d) - 1) in
+  flip newest (40 + 28 + 2);
+  let r = Ops.check ~tail:Journal.Copy ~live:false d in
+  C.check (r.damages <> [] && r.tail = None) "a copy: a damaged frame followed by frames that check is damage (%s)" (String.concat "; " r.damages);
+  (* a restore above every epoch the source knew: a source promoted at N + 1, restored to N, opens epoch 3 *)
+  copy src d;
+  Replica.save_epochs d [ 1, 1; 2, 41 ];
+  C.rmrf dst;
+  C.check (Ops.restore ~target:(Ops.Group 40) ~replace:false d dst = Ops.exit_ok) "restore of a promoted history to the group before its promotion";
+  C.check (Replica.load_epochs dst = [ 1, 1; 3, 41 ]) "a new epoch above the dropped one (3, not 2 again)";
+  C.check (Ops.restore ~target:(Ops.Group 40) ~replace:true d dst = Ops.exit_ok) "the same restore again over it";
+  C.check (Replica.load_epochs dst = [ 1, 1; 4, 41 ]) "above the replaced database's epoch too (4)";
   (* the vault: files in packs of 64 KiB, so that closed packs have their index *)
   Vault.pack_limit := 65536;
   let master = String.init 32 (fun i -> Char.chr (i * 7 land 255)) in

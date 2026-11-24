@@ -126,14 +126,17 @@ needs no stop, in this order:
    come **before** the segments: a run is named only once its groups are durable in the journal, so the segments
    copied after it hold them; a run copied after the segments may be newer than their end, and the copy would refuse
    to open (`the journal ends at group G, before the snapshot of group S`);
-3. the segments of `DIR/journal/`, in the order of their names. The newest one may be copied while a frame is being
-   written: from the first frame of its copy that does not check whole (header, body and trailer), everything is that
-   frame (a large group's header is written after its body, so a copy may see its trailer and not its header), and
-   the copy is cut there. Every group confirmed before the copy of its segment started is before that point: it was
-   written whole before it was confirmed, and frames are appended one at a time;
-4. `DIR/vault/`, after the journal: its `keys`, then each pack and its index (a fact names a file only once the file's
-   records are forced, G22, so every file the copied journal cites is in the copied packs; the pack being written may
-   end in a torn record, which the copy's open indexes up to its last whole one, as after a crash).
+3. the segments of `DIR/journal/`, in the order of their names, each up to the size it had when it was opened. The
+   newest one may be copied while a frame is being written: the first frame of its copy that does not check whole
+   (header, body and trailer), when no frame that checks starts after it, is that frame, and the copy is cut there (a
+   large group's header is written after its body, but its trailer after its header: a copy that ends where the file
+   did never holds a trailer without its header); followed by a frame that checks, it is damage. Every group
+   confirmed before the copy of its segment started is before that point: it was written whole before it was
+   confirmed, and frames are appended one at a time;
+4. `DIR/vault/`, after the journal: each pack and its index, then its `keys` (a fact names a file only once the
+   file's records are forced, G22, so every file the copied journal cites is in the copied packs; a domain's key is
+   forced before its first record, so the keys copied after the packs hold every key they need; the pack being
+   written may end in a torn record, which the copy's open indexes up to its last whole one, as after a crash).
 
 The copy leaves out `lock`, `closed`, `shared` and `sessions`. `cepheus backup` then checks it as `cepheus verify`
 does, cuts it after its last whole frame, forces it and writes its `closed` marker: a backup is a database closed
@@ -142,8 +145,8 @@ cleanly, and a later `cepheus verify` of it takes any torn byte for damage.
 `cepheus restore SRC DIR [--to-group N | --to-time T]` copies into `DIR.restoring`, in the same order, the runs whose
 groups end at N or before and the segments up to the one that begins at N + 1 (kept as its header alone: a run of
 group N may name it), ends the journal after group N (the frame that holds N, when later groups share it, is coded
-again without them, at the same place, with the same first group), writes a new epoch from group N + 1 into
-`DIR/epochs`, opens the copy (its runs checked, the groups after the newest one replayed), closes it, checks it as
+again without them, at the same place, with the same first group), writes into `DIR/epochs` a new epoch from group
+N + 1, above every epoch the source's history and a replaced database knew, opens the copy (its runs checked, the groups after the newest one replayed), closes it, checks it as
 `cepheus verify` does, and renames it `DIR`; with `--replace`, a database already in `DIR` is first renamed
 `DIR.before-restore-DATE`, never removed. It refuses a source or a target that a process holds open, a database
 written through a server's commit buffer and not closed cleanly, and a target whose server did not stop cleanly
@@ -168,7 +171,8 @@ final name.
 
 The end of the newest segment is read by the database's state: closed cleanly, every byte must check; left by a
 process that died, a torn frame with nothing written after it is a note (the next open cuts it); open in a server, the
-frame being written is not checked. A database written through a server's commit buffer and not closed cleanly is
+frame being written is not checked (a frame that does not check with a frame that checks after it is damage, in
+every state). A database written through a server's commit buffer and not closed cleanly is
 refused: start its server and stop it first. Exit status 0: whole (the last line names the group); 1: damage, one
 `damaged:` line each; 2: not a database, unreadable, or refused. Run it on the backups (`cepheus backup` runs it on
 each copy) and now and then on the live databases: it is the only check that reads the old segments and every page,

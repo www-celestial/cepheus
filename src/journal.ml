@@ -758,8 +758,24 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
   | Some first when first <> s -> result ~damage:(Printf.sprintf "%s says it starts at group %d" name first) 0
   | Some _ ->
     (* the frame at p does not check: the tail, or damage, as the rule reads the bytes after it *)
+    (* a frame header that checks somewhere in [p + 1, size): a frame written after the one at p *)
+    let header_after p =
+      let rest = Bytes.create (size - p) in
+      disk.pread fd p rest 0 (size - p);
+      let found = ref false and q = ref 1 in
+      while (not !found) && !q + fh <= size - p do
+        if u32 rest !q = frame_magic && u32 rest (!q + 24) = Crc32c.bytes rest !q 24 then found := true;
+        incr q
+      done;
+      !found
+    in
+    (* Copy: the frame being written has nothing written after it but its own bytes (a copy ends where its file did
+       when it was opened, so a large group's trailer is there only if its header was written before), and a frame
+       that checks after it is damage *)
     let broken p =
-      if newest && tail = Copy then result ~torn:true p
+      if newest && tail = Copy then
+        if header_after p then result ~damage:(Printf.sprintf "%s: damaged frame at offset %d (frames that check follow it)" name p) p
+        else result ~torn:true p
       else begin
         let rest = Bytes.create (size - p) in
         disk.pread fd p rest 0 (size - p);
@@ -784,7 +800,7 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
             let whole = trailer_at r p len bc hc in
             (* a broken trailer: damage, but in a frame being written (Copy), or on the newest frame after a crash,
                which recovery rebuilds *)
-            if (not whole) && newest && tail = Copy then result ~torn:true p
+            if (not whole) && newest && tail = Copy then broken p
             else if (not whole) && not (newest && tail = Crash && stop = size) then
               result ~damage:(Printf.sprintf "%s: the trailer of the frame at offset %d is damaged" name p) p
             else

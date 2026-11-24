@@ -288,6 +288,7 @@ let ops cmd args =
     with
     | Ops.Refused m -> prerr_endline ("cepheus: " ^ m); Ops.exit_failed
     | Cepheus.Disk.Io m -> prerr_endline ("cepheus: " ^ m); Ops.exit_failed
+    | Cepheus.Journal.Damaged m -> prerr_endline ("cepheus: damaged: " ^ m); Ops.exit_damage
     | Unix.Unix_error (e, call, p) -> prerr_endline (Printf.sprintf "cepheus: %s %s: %s" call p (Unix.error_message e)); Ops.exit_failed
   in
   exit code

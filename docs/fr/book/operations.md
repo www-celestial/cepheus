@@ -138,16 +138,19 @@ sont écrits à côté puis renommés, donc une copie cohérente n'a besoin d'au
    reçoit son nom qu'une fois ses groupes durables dans le journal, donc les segments copiés après lui les
    contiennent ; un run copié après les segments peut être plus récent que leur fin, et la copie refuserait de
    s'ouvrir (`the journal ends at group G, before the snapshot of group S`) ;
-3. les segments de `DIR/journal/`, dans l'ordre de leurs noms. Le plus récent peut être copié pendant qu'une frame
-   s'écrit : à partir de la première frame de sa copie qui ne se vérifie pas entière (en-tête, corps et trailer, la
-   fin de la frame qui répète ses longueurs et ses CRC), tout est cette frame (l'en-tête d'un grand groupe est écrit
-   après son corps, donc une copie peut voir son trailer et pas son en-tête), et la copie est coupée là. Chaque groupe
-   confirmé avant que la copie de son segment commence est avant ce point : il a été écrit entier avant d'être
-   confirmé, et les frames sont ajoutées une à la fois ;
-4. `DIR/vault/`, après le journal : ses `keys`, puis chaque pack (un fichier d'enregistrements du vault) et son index
+3. les segments de `DIR/journal/`, dans l'ordre de leurs noms, chacun jusqu'à la taille qu'il avait à son ouverture.
+   Le plus récent peut être copié pendant qu'une frame s'écrit : la première frame de sa copie qui ne se vérifie pas
+   entière (en-tête, corps et trailer, la fin de la frame qui répète ses longueurs et ses CRC), quand aucune frame qui
+   se vérifie ne commence après elle, est cette frame, et la copie est coupée là (l'en-tête d'un grand groupe est écrit
+   après son corps, mais son trailer après son en-tête : une copie qui finit là où finissait le fichier ne tient
+   jamais un trailer sans son en-tête) ; suivie d'une frame qui se vérifie, c'est un dommage. Chaque groupe confirmé
+   avant que la copie de son segment commence est avant ce point : il a été écrit entier avant d'être confirmé, et les
+   frames sont ajoutées une à la fois ;
+4. `DIR/vault/`, après le journal : chaque pack (un fichier d'enregistrements du vault) et son index, puis ses `keys`
    (un fait ne nomme un fichier qu'une fois les enregistrements du fichier forcés, G22, donc chaque fichier que cite le
-   journal copié est dans les packs copiés ; le pack en cours d'écriture peut finir par un enregistrement déchiré, que
-   l'ouverture de la copie indexe jusqu'au dernier entier, comme après un crash).
+   journal copié est dans les packs copiés ; la clé d'un domaine est forcée avant son premier enregistrement, donc les
+   clés copiées après les packs tiennent chaque clé dont ils ont besoin ; le pack en cours d'écriture peut finir par
+   un enregistrement déchiré, que l'ouverture de la copie indexe jusqu'au dernier entier, comme après un crash).
 
 La copie laisse de côté `lock`, `closed`, `shared` et `sessions`. `cepheus backup` la vérifie ensuite comme le fait
 `cepheus verify`, la coupe après sa dernière frame entière, la force sur le disque et écrit son marqueur `closed` : une
@@ -157,7 +160,8 @@ sauvegarde est une base fermée proprement, et un `cepheus verify` plus tard pre
 les groupes finissent à N ou avant et les segments jusqu'à celui qui commence à N + 1 (gardé réduit à son en-tête : un
 run du groupe N peut le nommer), finit le journal après le groupe N (la frame qui tient N, quand des groupes plus
 récents la partagent, est codée de nouveau sans eux, à la même place, avec le même premier groupe), écrit dans
-`DIR/epochs` une nouvelle epoch à partir du groupe N + 1, ouvre la copie (ses runs vérifiés, les groupes d'après le
+`DIR/epochs` une nouvelle epoch à partir du groupe N + 1, au-dessus de chaque epoch que connaissaient l'historique de
+la source et une base remplacée, ouvre la copie (ses runs vérifiés, les groupes d'après le
 plus récent rejoués), la ferme, la vérifie comme le fait `cepheus verify`, et la renomme `DIR` ; avec `--replace`, une
 base déjà dans `DIR` est d'abord renommée `DIR.before-restore-DATE`, jamais supprimée. Elle refuse une source ou une
 cible qu'un processus tient ouverte, une base écrite à travers le commit buffer d'un serveur et pas fermée proprement,
@@ -185,7 +189,8 @@ seule) :
 
 La fin du segment le plus récent est lue selon l'état de la base : fermée proprement, chaque octet doit se vérifier ;
 laissée par un processus mort, une frame déchirée sans rien d'écrit après elle est une note (l'ouverture suivante la
-coupe) ; ouverte dans un serveur, la frame en cours d'écriture n'est pas vérifiée. Une base écrite à travers le commit
+coupe) ; ouverte dans un serveur, la frame en cours d'écriture n'est pas vérifiée (une frame qui ne se vérifie pas
+suivie d'une frame qui se vérifie est un dommage, dans tous les états). Une base écrite à travers le commit
 buffer d'un serveur et pas fermée proprement est refusée : démarrez son serveur et arrêtez-le d'abord. Code de sortie
 0 : entière (la dernière ligne nomme le groupe) ; 1 : un dommage, une ligne `damaged:` chacun ; 2 : pas une base,
 illisible, ou refusée. Lancez-le sur les sauvegardes (`cepheus backup` le lance sur chaque copie) et de temps en temps

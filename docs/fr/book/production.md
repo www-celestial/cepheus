@@ -298,7 +298,9 @@ sont pas perdues : la base mise de côté les tient (c'est une base arrêtée : 
 elle).
 
 **Les epochs.** Une base restaurée écrit ses groupes suivants dans une nouvelle epoch (une époque de son historique),
-celle d'après la dernière de son historique ([les epochs](server.md#la-promotion-à-la-main)) : les groupes d'après N
+au-dessus de chaque epoch que connaissaient son historique et la base qu'elle remplace
+([les epochs](server.md#la-promotion-à-la-main)), comme la restauration à un instant donné de PostgreSQL commence une
+nouvelle timeline (sa lignée d'historique) : les groupes d'après N
 qu'une replica (ou la copie locale d'un programme) tient encore sont de l'ancien historique, et une replica qui les
 tient est refusée comme divergente plutôt que suivie comme s'ils étaient de cette base. Refaites-la depuis le primary
 restauré (`cepheus replicate`). Quand le disque d'un primary est perdu et qu'une replica tourne, promouvez la replica
