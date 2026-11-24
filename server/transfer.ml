@@ -425,16 +425,26 @@ type writer = {
   m : Mutex.t;
   c : Condition.t;
   q : job option Queue.t;  (* None: the end *)
-  mutable failed : (job * string) option;
-  mutable groups : (int * job) list;  (* written: the group's number, newest first *)
+  mutable failed : ((int * int) * string) option;  (* the refused group's first and last line, and why *)
+  mutable groups : (int * int * int) list;  (* written: the group's number and its first and last line, newest first
+                                              (never the job: its operations are freed once written) *)
   mutable thread : Thread.t option;
   mutable waited : float;  (* seconds in the writes, their answers waited for *)
+  mutable busy : bool;  (* a group being written *)
 }
 
 let writer write =
-  let w = { m = Mutex.create (); c = Condition.create (); q = Queue.create (); failed = None; groups = []; thread = None; waited = 0. } in
+  let w = { m = Mutex.create (); c = Condition.create (); q = Queue.create (); failed = None; groups = []; thread = None; waited = 0.; busy = false } in
   let rec loop () =
-    let j = Mutex.protect w.m (fun () -> while Queue.is_empty w.q do Condition.wait w.c w.m done; let j = Queue.pop w.q in Condition.broadcast w.c; j) in
+    let j =
+      Mutex.protect w.m (fun () ->
+          w.busy <- false;
+          Condition.broadcast w.c;
+          while Queue.is_empty w.q do Condition.wait w.c w.m done;
+          let j = Queue.pop w.q in
+          w.busy <- j <> None;
+          j)
+    in
     match j with
     | None -> ()
     | Some j -> (
@@ -443,16 +453,17 @@ let writer write =
       let r = try write j.ops with e -> Error (Printexc.to_string e) in
       w.waited <- w.waited +. (Unix.gettimeofday () -. t);
       match r with
-      | Ok g -> Mutex.protect w.m (fun () -> w.groups <- (g, j) :: w.groups); loop ()
-      | Error m -> Mutex.protect w.m (fun () -> w.failed <- Some (j, m); Condition.broadcast w.c))
+      | Ok g -> Mutex.protect w.m (fun () -> w.groups <- (g, j.first, j.last) :: w.groups); loop ()
+      | Error m -> Mutex.protect w.m (fun () -> w.failed <- Some ((j.first, j.last), m); Condition.broadcast w.c))
   in
   w.thread <- Some (Thread.create loop ());
   w
 
-(* a group to write: it waits while one waits already (two in flight at most), and says whether the writer failed *)
+(* a group to write, once the one before is written (the next is made meanwhile: two groups in memory at most); false
+   when the writer failed *)
 let submit w j =
   Mutex.protect w.m (fun () ->
-      while Queue.length w.q >= 1 && w.failed = None do Condition.wait w.c w.m done;
+      while (w.busy || not (Queue.is_empty w.q)) && w.failed = None do Condition.wait w.c w.m done;
       if w.failed = None then (Queue.push j w.q; Condition.broadcast w.c));
   w.failed = None
 
@@ -654,7 +665,7 @@ let import ~props ~find ~write ~say (o : options) =
   in
   finish w;
   let t2 = Unix.gettimeofday () in
-  let groups = List.rev_map (fun (g, j) -> g, j.first, j.last) w.groups in
+  let groups = List.rev w.groups in
   let written () =
     match groups with
     | [] -> "nothing was written"
@@ -663,7 +674,7 @@ let import ~props ~find ~write ~say (o : options) =
       Printf.sprintf "written before it: lines %d to %d, in group%s %d%s" l0 ln (if gn = g0 then "" else "s") g0 (if gn = g0 then "" else Printf.sprintf " to %d" gn)
   in
   (match w.failed, outcome with
-   | Some (j, m), _ -> stop "%s lines %d to %d: the database refused their group: %s; %s" base j.first j.last m (written ())
+   | Some ((first, last), m), _ -> stop "%s lines %d to %d: the database refused their group: %s; %s" base first last m (written ())
    | None, Error m -> stop "%s; %s" m (written ())
    | None, Ok () -> ());
   if not (unchanged ()) then say (Printf.sprintf "%s changed during the import: what was written is what it held during the check" base);

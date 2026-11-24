@@ -71,7 +71,7 @@ let main cmd args =
         | None, None -> die "%s: --format csv or jsonl (its name ends in neither .csv nor .jsonl)" file
       in
       let rc = connect () and wc = connect () in
-      let rdb = open_ ~local:true rc database and wdb = open_ ~local:false wc database in
+      let rdb = open_ ~local:false rc database and wdb = open_ ~local:false wc database in
       let why = "cepheus import " ^ Filename.basename file in
       let o = { Transfer.file; kind; format; maps = List.rev !maps; links = List.rev !links; skip_bad = !skip_bad; upsert = !upsert; why } in
       let s = Transfer.import_client ~say (rc, rdb) (wc, wdb) o in

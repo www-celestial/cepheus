@@ -306,16 +306,9 @@ let reader ?(off = 0) ?(line = 1) ?(index = 0) fmt fd =
   end;
   r
 
-(* more bytes read after those held; [compact]: the bytes before [pos] dropped first (only while no record of a batch
-   being made is held: its offsets are the buffer's) *)
-let rec read_more ~compact r =
-  if compact && r.pos > 0 then begin
-    r.boff <- r.boff + r.pos;
-    Bytes.blit r.buf r.pos r.buf 0 (r.len - r.pos);
-    r.len <- r.len - r.pos;
-    r.scanned <- r.scanned - r.pos;
-    r.pos <- 0
-  end;
+(* more bytes read after those held (the records of the batch being made keep their offsets: [next] drops the bytes
+   before them at its start) *)
+let rec read_more r =
   if Bytes.length r.buf - r.len < read_size then begin
     let b = Bytes.create (2 * Bytes.length r.buf) in
     Bytes.blit r.buf 0 b 0 r.len;
@@ -324,9 +317,17 @@ let rec read_more ~compact r =
   match Unix.read r.fd r.buf r.len (Bytes.length r.buf - r.len) with
   | 0 -> r.eof <- true
   | k -> r.len <- r.len + k; r.bytes <- r.bytes + k
-  | exception Unix.Unix_error (Unix.EINTR, _, _) -> read_more ~compact r
+  | exception Unix.Unix_error (Unix.EINTR, _, _) -> read_more r
 
 let next r target =
+  (* the bytes before the first record not given are dropped first: the buffer holds a batch and a record at most *)
+  if r.pos > 0 then begin
+    r.boff <- r.boff + r.pos;
+    Bytes.blit r.buf r.pos r.buf 0 (r.len - r.pos);
+    r.len <- r.len - r.pos;
+    r.scanned <- r.scanned - r.pos;
+    r.pos <- 0
+  end;
   let starts = ref [] and stops = ref [] and lines = ref [] and first = ref (-1) and last = ref 0 and n = ref 0 in
   let record s e line =
     let e = if e > s && Bytes.get r.buf (e - 1) = '\r' then e - 1 else e in
@@ -367,7 +368,7 @@ let next r target =
     end
     else begin
       if r.len - r.pos > max_record then bad "line %d: a record of more than %d MiB (%s)" r.rline (max_record lsr 20) (if r.fmt = Csv && r.quoted then "a quote left open?" else "no line break");
-      read_more ~compact:(!first < 0) r
+      read_more r
     end
   done;
   let base = if !first < 0 then 0 else !first in
