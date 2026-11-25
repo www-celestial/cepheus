@@ -53,14 +53,18 @@
    Variants that must break (each a rule removed alone): CommitOldTerm counts entries of older terms (Figure 8);
    VolatileVote forgets the vote at a restart (two leaders in a term); AckUnforced acknowledges entries before they
    are forced (a restart loses a committed entry); NoUpToDate grants votes without comparing logs; NoAbstain lets a
-   damaged server vote as if its log were shorter (the bug Alagappan et al. found); RepairEarly lets a damaged server
-   vote again once it holds entries up to repair without the leader's commit index reaching it; NoStickiness grants
+   damaged server vote as if its log were shorter (the bug Alagappan et al. found); NoStickiness grants
    votes despite a promise; PromiseFirst lets a promise end before the lease it supports; RestartForgets lets a
    server that starts vote at once; ReadEarly reads before the no-op is committed; CopyDiscards installs a copy
    over a log that holds its last entry (the entries after it, acknowledged, dropped); CopyUncommitted gives a copy
    past what the giver knows committed; FreshHearOne ends a fresh server's freshness on one answer; FreshNoRepair
    ends it without the repair mark; TransferKeepsLease lets a leader that hands over keep its lease;
-   RepairUncommitted lets a peer give a damaged server entries past its commit index. *)
+   RepairUncommitted lets a peer give a damaged server entries past its commit index.
+   RepairEarly (a damaged server votes again once it holds entries up to repair from a leader whose commit index
+   does not reach it) is not one of them: kept as a margin, not shown needed. TLC finds no trace within its bounds
+   (RaftRepairEarly.cfg: terms up to 3, logs of 3, one damage; stopped past 19 M distinct states), and a leader
+   elected while the damaged server abstains holds every entry that can be committed, so its entries up to repair are
+   safe to take before they are committed. *)
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS Server, MaxTerm, MaxLog, MaxRestart, MaxDamage, MaxMsgs, Leases, Eager, MaxCopy, MaxWipe, MaxTransfer, MaxGive,
