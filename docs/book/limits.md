@@ -147,7 +147,7 @@ defaults, and the cache's size (`set_cache`).
 | the page cache | `[storage] cache`, default 1 GiB | `Config.of_toml` |
 | the Unix socket | `.s.cepheus.PORT`, PORT the port of `listen` or 7400; its whole path at most 107 bytes (Linux's `sun_path` holds 108 with its final zero: unix(7)), else the server does not start, and a program's connection is refused, each naming the path and its length | `Config.socket_name`, `Net.unix_listener`, `Client.open_socket` |
 | databases a server | no bound of their own: 200 tested (each a writer and a syncer thread in the writers' domains, its journal and runs open); the process's descriptors (`ulimit -n`) and threads bound them | `Writers.run`, `test/server_limits.ml` |
-| peers | exactly one in this version | `Config.of_toml` |
+| peers | 1: a single server; 2: a primary and its replica; 3 or more: a Raft cluster ([below](#a-raft-cluster)) | `Config.of_toml`, `Cluster.is_raft` |
 | TLS | 1.3 only; certificates: ECDSA P-256, the CA valid 3,650 days, the others 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | the connections' threads | one a connection (and one more while it has writes in flight) | `Net.connection` |
 | a local reader's queue | 64 MiB of frames not yet sent; past it the reader is cut off and follows again | `Follow.max_behind` |
@@ -162,6 +162,21 @@ defaults, and the cache's size (`set_cache`).
 | the log of slow questions and writes | `[log] slow_ms`, 0 to 3,600,000 ms (0: none); default 200: a question or a write at the server of that time or more gets a line, its constants written `?`; at most 10 lines a second (the next one counts those left out), each cut at 2,000 bytes, a write's properties the first 8 | `Config.default_slow_ms`, `Timings.lines_a_second`, `Timings.max_line` |
 | the times of `cepheus status` | a question's and a write's at the server, from the request read to the reply coded (a write's once its group is durable); p50, p99 and the maximum over the last 60 s (six slices of 10 s: 50 to 60 s of values), within 1/32 above (3.1 %), up to 2^34 µs (4.8 hours: a longer time counts there, the maximum exact); counts and sums since the start; a domain's slices its own, 960 counters (7.5 KiB) each, made at their first value: a database timed by d I/O domains holds 2 × 6 × d of them at most (360 KiB for d = 4) | `Timings.bits`, `Timings.slice_us`, `Timings.slices` |
 | a status's cost | a readdir and a stat a file of each database's journal and runs (a segment is 64 MiB: 16 a GiB of journal), a statvfs, the copy of each domain's slices; no lock of the server held while it is read | `Space`, `Timings.lines` |
+
+## A Raft cluster
+
+| what | limit | where |
+|---|---|---|
+| a group | 256 MiB, as on a single server; a frame past 1 MiB goes through the log in pieces of 1 MiB, applied whole at its last piece; a request is 16 MiB on the wire (a larger group: a change of the rules' consequences) | `Cluster.frame_limit`, `Cluster.piece` |
+| an Append | 1 MiB of entries (at least one); 1,024 entries or 8 MiB in flight to a follower | `Raft.max_append_bytes`, `Raft.max_inflight`, `Raft.max_inflight_bytes` |
+| the log's segments | 16 MiB: a new segment begins when the next round would pass it (a round larger than that is a segment of its own) | `Raftlog.segment_limit` |
+| the log's start | cut each second, by whole segments, behind what every journal holds forced and every server holds (the floor); a server silent for 5 minutes, or one that needs a copy, is not waited for | `Cluster.floor_ms`, `Raft.floor` |
+| a copy of the databases | frames of 1 MiB; refused when it would leave less than 64 MiB free; the source keeps its log after the copy's index for 60 s after its last byte; a refused or broken one tried again after 1 s, doubling up to 30 s | `Catchup.margin`, `Catchup.pin_ms`, `Cluster.start_fetch` |
+| a file's records | entries of about 1 MiB, at most 16 MiB of them waiting for their commit at a time; a follower without the cluster's `vault.key` tries again every 2 s | `Cluster.files_commit`, `Cluster.vault_retry` |
+| a handover at a clean stop | at most two election timeouts (1 s), then the stop goes on | `Raft.hand_over` |
+| a damaged server's repair | it asks every peer once an election timeout (0.5 to 1 s); `Entries` of 1 MiB at most | `Raft.tick`, `Raft.give` |
+| a fresh server (no Raft state) | asks every heartbeat (50 ms) until ⌊n/2⌋ + 1 other servers that are not fresh answered, or a majority of fresh ones | `Raft.end_fresh` |
+| the peer protocol | version 3; a peer of version 2 is taken, never sent what 3 adds | `Replica.version`, `Replica.oldest` |
 
 ## The file vault
 

@@ -184,9 +184,13 @@ let apply_promoted role ~dir_of =
    Version 2 (a Raft cluster, server/cluster.ml) adds:
      Raft                                          -> Raft (empty), then the connection carries Raft's messages one
                                                       way, from the certificate's peer, each a frame of kind Msg (id 0)
-   A peer of version 1 is refused with the error version. *)
+   Version 3 adds Raft's messages Snap (server/raft.ml) and a copy of the databases (server/catchup.ml):
+     Copy                                          -> Copy frames: Begin, File and Bytes, End (or an error)
+   A peer of version 1 is refused with the error version; one of version 2 is taken, and never sent what version 3
+   adds (a connector refused with version tries again announcing 2: an older peer, during a rolling upgrade). *)
 
-let version = 2
+let version = 3
+let oldest = 2
 
 (* the version a connection announces (the tests: an older peer) *)
 let version_override = ref None
@@ -199,6 +203,7 @@ let k_stopped = 25
 let k_applied = 26
 let k_raft = 27
 let k_msg = 28
+let k_copy = 29
 let piece = 1 lsl 20
 
 (* the time a peer has for its handshake and Hello, and the stream for a frame or a beat *)
@@ -213,6 +218,7 @@ type link = {
   mutable have : int;
   closed : bool Atomic.t;
   mutable until : float;  (* a frame must be whole by then, a byte at a time or not (0.: no such time): the Hello *)
+  mutable pv : int;  (* the peer protocol both ends speak on it *)
 }
 
 exception Broken of string
@@ -320,6 +326,7 @@ type t = {
   mutable peers_open : int;
   promoting : bool Atomic.t;  (* one promotion at a time *)
   mutable on_raft : (string -> link -> unit) option;  (* a Raft cluster: a peer's stream of Raft messages *)
+  mutable on_copy : (string -> link -> unit) option;  (* a Raft cluster: a peer's copy of the databases (Catchup) *)
   mutable on_promote : db -> unit -> unit;
       (* the transport's part of a promotion (the visibility page): prepared before the commit point (Failure if it
          cannot be), done after *)
@@ -339,7 +346,7 @@ let make_db ~name ~dir ~live ~follow ~sessions =
 
 let create cfg role dbs =
   { cfg; role; dbs; stopping = Atomic.make false; final = Atomic.make false; rm = Mutex.create (); peers_open = 0;
-    promoting = Atomic.make false; on_raft = None; on_promote = (fun _ () -> ()) }
+    promoting = Atomic.make false; on_raft = None; on_copy = None; on_promote = (fun _ () -> ()) }
 
 let is_replica t = match t.role with Replica_of _ -> true | _ -> false
 
@@ -541,7 +548,7 @@ let serve_peer t ctx fd =
   | Error m -> refuse ("TLS: " ^ m)
   | Ok tls -> (
     let name = Tls.peer_name tls in
-    let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false; until } in
+    let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false; until; pv = version } in
     if name = t.cfg.me || peer_of t.cfg name = None then (close_link l; refuse (Printf.sprintf "its certificate names %S, which is not another [[peer]]" name))
     else
       try
@@ -552,9 +559,10 @@ let serve_peer t ctx fd =
           let v = Codec.get_varint r in
           let cluster = Codec.get_string r in
           let _ = Codec.get_string r in
-          if v <> version then (send_err l "version" (Printf.sprintf "peer protocol %d is not spoken here (%d is)" v version); close_link l)
+          if v < oldest || v > version then (send_err l "version" (Printf.sprintf "peer protocol %d is not spoken here (%d to %d are)" v oldest version); close_link l)
           else if cluster <> t.cfg.id then (send_err l "cluster" (Printf.sprintf "this server is of the cluster %s" t.cfg.id); close_link l)
           else begin
+            l.pv <- v;
             let b = Buffer.create 64 in
             Codec.put_string b t.cfg.me; Codec.put_string b t.cfg.id; Codec.put_string b t.cfg.me;
             send l ~kind:k_hello b;
@@ -565,7 +573,11 @@ let serve_peer t ctx fd =
                match t.on_raft with
                | Some f -> f name l
                | None -> send_err l "invalid" "this server is not a member of a Raft cluster")
-             | _ -> send_err l "invalid" "Replicate, Epochs or Raft was expected");
+             | k, _, _ when k = k_copy && v >= 3 -> (
+               match t.on_copy with
+               | Some f -> f name l
+               | None -> send_err l "invalid" "this server is not a member of a Raft cluster")
+             | _ -> send_err l "invalid" "Replicate, Epochs, Raft or Copy was expected");
             close_link l
           end
       with Broken _ | Codec.Short -> close_link l)
@@ -605,7 +617,7 @@ let handover t =
 (* ---- the replica: a follower a database ---- *)
 
 (* a connection to a peer, mutual TLS, its certificate checked for the peer's address and name, the Hello *)
-let connect ?(timeout = !handshake_s) (cfg : Config.t) (p : Config.peer) =
+let rec connect ?(timeout = !handshake_s) ?(v = Option.value !version_override ~default:version) (cfg : Config.t) (p : Config.peer) =
   match cfg.tls with
   | None -> Error "a replica needs [tls]"
   | Some tl -> (
@@ -622,13 +634,17 @@ let connect ?(timeout = !handshake_s) (cfg : Config.t) (p : Config.peer) =
         match Tls.handshake ctx fd ~server:false ~host with
         | Error m -> (try Unix.close fd with Unix.Unix_error _ -> ()); Error (Printf.sprintf "%s (%s): TLS: %s" p.pname p.address m)
         | Ok tls -> (
-          let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false; until = 0. } in
+          let l = { tls; fd; inb = Bytes.create 65536; have = 0; closed = Atomic.make false; until = 0.; pv = v } in
           if Tls.peer_name tls <> p.pname then (close_link l; Error (Printf.sprintf "%s's certificate names %S" p.address (Tls.peer_name tls)))
           else
             let b = Buffer.create 64 in
-            Codec.put_varint b (Option.value !version_override ~default:version); Codec.put_string b cfg.id; Codec.put_string b cfg.me;
+            Codec.put_varint b v; Codec.put_string b cfg.id; Codec.put_string b cfg.me;
             match send l ~kind:k_hello b; Result.map (fun r -> let _ = Codec.get_string r in Codec.get_string r) (expect l k_hello) with
             | Ok cluster -> if cluster <> cfg.id then (close_link l; Error (p.pname ^ " is of another cluster")) else Ok l
+            | Error ("version", _) when v > oldest && !version_override = None ->
+              (* an older peer (a rolling upgrade): its version *)
+              close_link l;
+              connect ~timeout ~v:(v - 1) cfg p
             | Error (c, m) -> close_link l; Error (Printf.sprintf "%s: %s: %s" p.pname c m)
             | exception (Broken m | Failure m) -> close_link l; Error (p.pname ^ ": " ^ m)
             | exception Codec.Short -> close_link l; Error (p.pname ^ ": a bad Hello")))))

@@ -147,7 +147,7 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | le page cache | `[storage] cache`, 1 GiB par défaut | `Config.of_toml` |
 | le socket Unix | `.s.cepheus.PORT`, PORT étant le port de `listen` ou 7400 ; son chemin entier au plus 107 octets (le `sun_path` de Linux en tient 108 avec son zéro final : unix(7)), sinon le serveur ne démarre pas, et la connexion d'un programme est refusée, chacun nommant le chemin et sa longueur | `Config.socket_name`, `Net.unix_listener`, `Client.open_socket` |
 | bases d'un serveur | pas de borne à elles : 200 testées (chacune un thread writer et un thread syncer dans les domains des writers, son journal et ses runs ouverts) ; les descripteurs du processus (`ulimit -n`) et ses threads les bornent | `Writers.run`, `test/server_limits.ml` |
-| peers | exactement un dans cette version | `Config.of_toml` |
+| peers | 1 : un serveur seul ; 2 : un primary et sa replica ; 3 ou plus : un cluster Raft ([plus bas](#un-cluster-raft)) | `Config.of_toml`, `Cluster.is_raft` |
 | TLS | 1.3 seulement ; certificats : ECDSA P-256, la CA valable 3 650 jours, les autres 825 | `server/tls_stubs.c`, `bin/main.ml` |
 | les threads des connexions | un par connexion (et un de plus tant qu'elle a des écritures en cours) | `Net.connection` |
 | la file d'un lecteur local | 64 MiB de frames pas encore envoyées ; au-delà, le lecteur est coupé et suit de nouveau | `Follow.max_behind` |
@@ -162,6 +162,21 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | le log des questions et des écritures lentes | `[log] slow_ms`, de 0 à 3 600 000 ms (0 : aucun) ; 200 par défaut : une question ou une écriture au serveur de ce temps ou plus reçoit une ligne, ses constantes écrites `?` ; au plus 10 lignes par seconde (la suivante compte celles laissées de côté), chacune coupée à 2 000 octets, les propriétés d'une écriture les 8 premières | `Config.default_slow_ms`, `Timings.lines_a_second`, `Timings.max_line` |
 | les temps de `cepheus status` | ceux d'une question et d'une écriture au serveur, de la requête lue à la réponse codée (celle d'une écriture une fois son groupe durable) ; p50, p99 et le maximum sur les 60 dernières secondes (six tranches de 10 s : de 50 à 60 s de valeurs), à 1/32 près au-dessus (3,1 %), jusqu'à 2^34 µs (4,8 heures : un temps plus long compte là, le maximum exact) ; les comptes et les sommes depuis le démarrage ; les tranches d'un domain sont à lui, 960 compteurs (7,5 Kio) chacune, créées à leur première valeur : une base chronométrée par d domains d'I/O en tient au plus 2 × 6 × d (360 Kio pour d = 4) | `Timings.bits`, `Timings.slice_us`, `Timings.slices` |
 | ce que coûte un status | un readdir et un stat par fichier du journal et des runs de chaque base (un segment fait 64 Mio : 16 par Gio de journal), un statvfs, la copie des tranches de chaque domain ; aucun verrou du serveur tenu pendant la lecture | `Space`, `Timings.lines` |
+
+## Un cluster Raft
+
+| quoi | limite | où |
+|---|---|---|
+| un groupe | 256 MiB, comme sur un serveur seul ; une frame de plus d'1 MiB passe par le log en morceaux (pieces) d'1 MiB, appliquée en entier à son dernier morceau ; une requête fait 16 MiB sur le fil (un groupe plus gros : les conséquences d'un changement des règles) | `Cluster.frame_limit`, `Cluster.piece` |
+| un Append | 1 MiB d'entrées (au moins une) ; 1 024 entrées ou 8 MiB en vol vers un follower | `Raft.max_append_bytes`, `Raft.max_inflight`, `Raft.max_inflight_bytes` |
+| les segments du log | 16 MiB : un nouveau segment commence quand le round suivant le dépasserait (un round plus grand fait un segment à lui seul) | `Raftlog.segment_limit` |
+| le début du log | coupé chaque seconde, par segments entiers, derrière ce que chaque journal tient forcé et ce que tient chaque serveur (le plancher, floor) ; un serveur muet depuis 5 minutes, ou qui a besoin d'une copie, n'est pas attendu | `Cluster.floor_ms`, `Raft.floor` |
+| une copie des bases | des frames d'1 MiB ; refusée quand elle laisserait moins de 64 MiB libres ; la source garde son log d'après l'index de la copie 60 s après son dernier octet ; une copie refusée ou cassée réessayée après 1 s, doublé jusqu'à 30 s | `Catchup.margin`, `Catchup.pin_ms`, `Cluster.start_fetch` |
+| les enregistrements d'un fichier | des entrées d'environ 1 MiB, au plus 16 MiB d'entre elles attendant leur commit à la fois ; un follower sans le `vault.key` du cluster réessaie toutes les 2 s | `Cluster.files_commit`, `Cluster.vault_retry` |
+| la direction passée à un arrêt propre (handover) | au plus deux election timeouts (1 s), puis l'arrêt continue | `Raft.hand_over` |
+| la réparation d'un serveur abîmé | il interroge chaque peer une fois par election timeout (0,5 à 1 s) ; des `Entries` d'1 MiB au plus | `Raft.tick`, `Raft.give` |
+| un serveur frais (sans état Raft) | il interroge à chaque heartbeat (50 ms) jusqu'à ce que ⌊n/2⌋ + 1 autres serveurs non frais aient répondu, ou une majorité de serveurs frais | `Raft.end_fresh` |
+| le protocole des peers | version 3 ; un peer de version 2 est accepté, on ne lui envoie jamais ce qu'ajoute la 3 | `Replica.version`, `Replica.oldest` |
 
 ## Le vault de fichiers
 

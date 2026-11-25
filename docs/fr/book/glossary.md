@@ -159,6 +159,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **coordinated omission** — l'erreur d'une mesure en closed loop : un client bloqué par une écriture lente n'envoie
   rien pendant ce temps, donc les écritures qui auraient attendu ne sont jamais comptées (Tene 2015).
   [benchmarks](benchmarks.md#méthode)
+- **copie des bases** (catch-up : le rattrapage) — dans un cluster Raft, ce que prend un follower quand le leader ne
+  peut plus lui envoyer d'entrées (elles sont avant le début du log du leader) : les fichiers de chaque base, copiés
+  comme le fait `cepheus backup`, vérifiés comme le fait `cepheus verify`, installés au démarrage suivant du follower ;
+  le rôle d'InstallSnapshot dans Raft. [serveur](server.md#un-serveur-en-retard-sur-le-début-du-log--une-copie-des-bases)
 - **counterexample** (un contre-exemple) — une suite de pas qui mène d'un état initial à un état où un invariant est
   faux ; ce qu'affiche un model checker. [cas](case-seats.md#un-modèle-formel-vérifié-par-une-machine)
 - **counting** (view maintenance) — garder pour chaque fait dérivé le nombre de ses dérivations, et le supprimer à zéro
@@ -356,6 +360,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [architecture](architecture.md#grands-groupes)
 - **lazy leveling** — du tiering à chaque niveau sauf le dernier, qui est en leveling (Dayan et Idreos 2018).
   [théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes)
+- **leadership transfer** (passage de la direction) — l'arrêt propre du leader d'un cluster Raft : il abandonne son
+  lease, attend que le follower le plus à jour tienne tout son log, et lui dit de se présenter aussitôt à l'élection
+  (`Timeout_now`). [serveur](server.md#larrêt-propre-du-leader--la-direction-passée)
 - **leapfrog** (leapfrog intersection) — l'intersection de listes triées par des sauts : les listes dans l'ordre de
   leurs clés courantes, chacune saute à son tour jusqu'à la première clé au moins égale à la plus grande (par
   galloping), et une clé que toutes atteignent est dans chaque liste (Veldhuizen 2014). Un niveau d'une question
@@ -442,6 +449,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   version et l'ancienne reste valide. [architecture](architecture.md#les-index--les-runs-et-le-delta)
 - **phantom** — un nouveau membre d'un ensemble lu plus tôt (les faits qui correspondent à un pattern), que ne voit pas
   une vérification de faits isolés.
+- **piece** (morceau d'une frame) — dans un cluster Raft, une entrée qui porte un MiB d'une frame plus longue ; la
+  frame est appliquée en entier à son dernier morceau, sur chaque serveur, ou jamais.
+  [serveur](server.md#un-seul-log-pour-le-cluster)
 - **pipelining** — envoyer des requêtes sans attendre les réponses des précédentes : les round trips se recouvrent, et
   beaucoup de réponses reviennent en un seul appel système.
   [serveur](server.md#lordre-le-pipelining-et-la-back-pressure)
@@ -557,6 +567,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   ainsi (Cahill, Röhm et Fekete 2008 ; Ports et Grittner 2012).
 - **server** (le serveur) — le processus qui possède les fichiers des bases et répond aux requêtes des programmes sur
   des sockets : `cepheus serve`. [serveur](server.md)
+- **serveur frais** (fresh server) — dans un cluster Raft, un serveur qui a démarré sans état Raft (celui d'un nouveau
+  cluster, ou un serveur dont le répertoire de données a été perdu) : il ne participe à rien tant que ⌊n/2⌋ + 1 autres
+  serveurs ne lui ont pas dit leurs terms et leurs logs. [serveur](server.md#un-serveur-démarré-sur-un-répertoire-de-données-vide)
 - **session** — un numéro que le serveur donne à une connexion (Welcome) et que la bibliothèque du programme garde
   d'une reconnexion à l'autre ; ses écritures y sont numérotées.
   [serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)

@@ -419,12 +419,27 @@ round    = header, 36 bytes: 0 magic "CPHE" (0x45485043) u32 | 4 body length u32
                            | 20 commit index u64 (the one known when its entries were given to the disk, never
                              past the round's last entry: entries no truncation can remove)
                            | 28 body CRC u32 | 32 CRC of the 32 bytes before
-         | body: count entries, each: term u64 | length u32 | bytes (empty: a leader's no-op; else 0x01, the
-                           database's id (16 bytes), one frame of its journal, whole)
+         | body: count entries, each: term u64 | length u32 | bytes
          | trailer, 16 bytes: body length u32 | body CRC u32 | header CRC u32 | magic "CPHT" (0x54485043)
+entry    = empty: a leader's no-op
+         | 0x01 | the database's id (16 bytes) | one frame of its journal, whole
+         | 0x02 | the database's id | the frame's length u64 | this piece's offset in it u64 | the piece's bytes
+                           (a frame past 1 MiB, in pieces of 1 MiB that follow each other among the database's
+                           entries, of one term: applied whole at its last piece)
+         | 0x03 | the database's id | varint count | key entries of its vault, 112 bytes each (a domain's key sealed
+                           by the master key) | varint count | (varint length | a sealed record of the vault)...
+         | 0x04 | the database's id | varint owner (a domain of its vault erased)
+copy/index = magic "cepheus raft copy\n" (18 bytes) | index u64 | its term u64 | the peer it came from (varint
+             length, a name) | CRC-32C u32 of everything before
 ```
 
 `state` is written beside, forced, renamed over and the directory forced; one that does not check refuses the start.
+A server that starts with no `state` is fresh (a new cluster's, or one whose data was lost): it writes none until a
+majority's answers end its freshness ([the server](server.md#a-server-started-on-an-empty-data-directory)).
+`copy.partial/` holds a copy of the databases being taken from a peer (removed at the next start, or by the next
+try); `copy/` one whole and checked, its `index` written before the folder took its name (the commit point): at the
+next start each `copy/NAME/` replaces `DATA/NAME/`, the log is made to start after the index (every `log.*` removed,
+one empty segment written), then `copy/` is removed, so that a crash anywhere repeats what was not done.
 A round is the entries of one fsync. At recovery, in the newest segment, the first round that does not check is a
 torn tail (cut) if no round header that checks follows it and no trailer puts a whole round there; anything else is
 damage: the segment and those after it are renamed `*.damaged` (kept), the rounds before the damage are written
