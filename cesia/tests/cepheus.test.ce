@@ -12,6 +12,7 @@ use std/value
 
 Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Email: cepheus.Text(unique = true), Tags: cepheus.Text(many = true)})
 Invoice = cepheus.Kind("invoice", {Client: cepheus.Link(), Total: cepheus.Money(2), Status: cepheus.Text(), Due: cepheus.Date(), Paid: cepheus.Bool(), Lines: cepheus.Int()})
+Loan = cepheus.Kind("loan", {Client: cepheus.Link(), Rate: cepheus.Float(), Due: cepheus.Date(), PaidAt: cepheus.Date()})
 
 defn shop()
   (** A fork with two clients and three invoices. *)
@@ -227,6 +228,80 @@ defn isFindPrefix()
   inNot = cepheus.Find(2, (c, e) -> {Where: [[c, Client.City, "Lyon"], cepheus.Not([c, Client.Email, e], cepheus.Prefix(e, "ada@"))], Give: {C: c}}, s.Db)?
   empty = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cepheus.Prefix(n, "")], Give: {C: c}}, s.Db)
   list.All([value.Equal(a, [{C: s.Ada}]), value.Len(none) == 0, value.Len(inNot) == 0, empty.Error.Code == "invalid"])
+end
+
+defn loans()
+  (** A fork of loans: a rate, a due date and a payment date, and a phone for some clients. *)
+  t = cepheus.Fork(cepheus.Empty, [Client, Invoice, Loan])?
+  ada = cepheus.Insert(Client, {Name: "Ada", City: "Lyon", Email: "ada@x.fr", Tags: ["vip", "early"]}, t)?
+  bo = cepheus.Insert(Client, {Name: "Bo", City: "Paris", Email: "bo@x.fr"}, t)?
+  cy = cepheus.Insert(Client, {Name: "Cy", City: "Nice", Email: "cy@x.fr", Tags: ["new"]}, t)?
+  cepheus.Insert(Loan, {Client: ada, Rate: 2.5, Due: 1794268800, PaidAt: 1794268800}, t)?
+  cepheus.Insert(Loan, {Client: bo, Rate: 3.1, Due: 1794268800, PaidAt: 1794355200}, t)?
+  cepheus.Insert(Loan, {Client: cy, Rate: 2.99, Due: 1794355200, PaidAt: 1794268800}, t)?
+  cepheus.Insert(Loan, {Client: cy, Rate: -0.0, Due: 1794355200}, t)?
+  result.Ok({Db: t, Ada: ada, Bo: bo, Cy: cy})
+end
+
+defn isFindLess()
+  s = loans()?
+  late = cepheus.Find(3, (l, d, p) -> {Where: [[l, Loan.Due, d], [l, Loan.PaidAt, p], cepheus.Less(d, p)], Give: {L: l}}, s.Db)?
+  onTime = cepheus.Find(3, (l, d, p) -> {Where: [[l, Loan.Due, d], [l, Loan.PaidAt, p], cepheus.LessOrEqual(p, d)], Give: {L: l}}, s.Db)?
+  (* two clients, each pair once: texts by their bytes *)
+  pairs = cepheus.Find(4, (a, x, b, y) -> {Where: [[a, Client.Name, x], [b, Client.Name, y], cepheus.Less(x, y)], Give: {A: x, B: y}, Sort: [x, y]}, s.Db)?
+  (* the clients that Ada was not made before: Ada herself (links compare by id, the order things are made in) *)
+  first = cepheus.Find(3, (a, x, b) -> {Where: [[a, Client.Name, x], cepheus.Not([b, Client.Name, "Ada"], cepheus.Less(b, a))], Give: {A: x}}, s.Db)?
+  bug.Assert(value.Len(late) == 1 and value.Len(onTime) == 2, "$late $onTime")
+  bug.Assert(value.Equal(pairs, [{A: "Ada", B: "Bo"}, {A: "Ada", B: "Cy"}, {A: "Bo", B: "Cy"}]), "$pairs")
+  value.Equal(first, [{A: "Ada"}])
+end
+
+defn isFindFloatRanges()
+  s = loans()?
+  rates(c) = [r.R for r in cepheus.Find(2, (l, r) -> {Where: [[l, Loan.Rate, r], c(r)], Give: {R: r}, Sort: [r]}, s.Db)?]
+  bug.Assert(value.Equal(rates((r) -> cepheus.Between(r, 2.5, 3.0)), [2.5, 2.99]), "Between on a float")
+  bug.Assert(value.Equal(rates((r) -> cepheus.Above(r, 2.5)), [2.99, 3.1]), "Above is strict")
+  bug.Assert(value.Len(rates((r) -> cepheus.Below(r, 0))) == 1 and value.Len(rates((r) -> cepheus.Between(r, 0, 0))) == 0, "-0 below 0, as Sort orders them")
+  value.Equal(rates((r) -> cepheus.Between(r, 3, 2)), [])
+end
+
+defn isFindOptional()
+  s = loans()?
+  q(after) = (c, n, t) -> {Where: [[c, Client.Name, n], cepheus.Optional([c, Client.Tags, t])], Give: {Name: n, Tag: t}, Sort: [cepheus.Desc(t)], Limit: 2, After: after}
+  first = cepheus.Find(3, q(missing), s.Db)?
+  next = cepheus.Find(3, q(first[2]), s.Db)?
+  last = cepheus.Find(3, q(next[value.Len(next)]), s.Db)?
+  all = cepheus.Find(3, (c, n, t) -> {Where: [[c, Client.Name, n], cepheus.Optional([c, Client.Tags, t])], Give: {Name: n, Tag: t}}, s.Db)?
+  bug.Assert(value.Equal(first, [{Name: "Ada", Tag: "vip"}, {Name: "Cy", Tag: "new"}]), "$first")
+  bug.Assert(value.Equal(next, [{Name: "Ada", Tag: "early"}, {Name: "Bo", Tag: missing}]), "missing last, descending too: $next")
+  bug.Assert(value.Len(last) == 0 and value.Len(all) == 4, "$last $all")
+  counted = cepheus.Find(3, (c, n, t) -> {Where: [[c, Client.Name, n], cepheus.Optional([c, Client.Tags, t])], Give: {Tag: t, N: cepheus.Count()}, Sort: [t]}, s.Db)?
+  value.Equal(counted, [{Tag: "early", N: 1}, {Tag: "new", N: 1}, {Tag: "vip", N: 1}, {Tag: missing, N: 1}])
+end
+
+defn isFindLessAndOptionalRefusals()
+  s = loans()?
+  types = cepheus.Find(3, (l, r, d) -> {Where: [[l, Loan.Rate, r], [l, Loan.Due, d], cepheus.Less(r, d)], Give: {L: l}}, s.Db)
+  used = cepheus.Find(2, (c, t) -> {Where: [[c, Client.Name, t], cepheus.Optional([c, Client.Tags, t])], Give: {C: c}}, s.Db)
+  inside = cepheus.Find(2, (c, t) -> {Where: [[c, Client.Name, "Ada"], cepheus.Not(cepheus.Optional([c, Client.Tags, t]))], Give: {C: c}}, s.Db)
+  unbound = cepheus.Find(3, (c, l, r) -> {Where: [[c, Client.Name, "Cy"], cepheus.Optional([l, Loan.Rate, r])], Give: {C: c}}, s.Db)
+  summed = cepheus.Find(3, (c, l, r) -> {Where: [[l, Loan.Client, c], cepheus.Optional([l, Loan.PaidAt, r])], Give: {C: c, Last: cepheus.Max(r)}}, s.Db)
+  list.All([types.Error.Code == "invalid", used.Error.Code == "invalid", inside.Error.Code == "invalid", unbound.Error.Code == "invalid", summed.Error.Code == "invalid"])
+end
+
+defn isWatchWithOptional()
+  (** A tag added takes away the row where it was missing and gives one; retracted, the other way. *)
+  s = loans()?
+  w = cepheus.Watch(3, (c, n, t) -> {Where: [[c, Client.City, "Paris"], [c, Client.Name, n], cepheus.Optional([c, Client.Tags, t])], Give: {Name: n, Tag: t}}, s.Db)?
+  first = fiber.Receive(w.Changes)?
+  cepheus.Write([cepheus.Add(s.Bo, Client.Tags, "late")], s.Db)?
+  added = fiber.Receive(w.Changes)?
+  cepheus.Write([cepheus.Retract(s.Bo, Client.Tags, "late")], s.Db)?
+  back = fiber.Receive(w.Changes)?
+  cepheus.Close(w)
+  bug.Assert(value.Equal(first.Rows, [{Name: "Bo", Tag: missing}]), "$first")
+  bug.Assert(value.Equal(added.Added, [{Name: "Bo", Tag: "late"}]) and value.Equal(added.Removed, [{Name: "Bo", Tag: missing}]), "$added")
+  value.Equal(back.Added, [{Name: "Bo", Tag: missing}]) and value.Equal(back.Removed, [{Name: "Bo", Tag: "late"}])
 end
 
 defn isFindOperatorRefusals()

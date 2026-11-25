@@ -142,6 +142,7 @@ let pow10 = Array.init 19 (fun i -> let r = ref 1 in for _ = 1 to i do r := !r *
    [scale] digits: a Float in Cesia, minor units in Cepheus *)
 let to_cesia (typ : Value.typ) (x : Value.t) : C.value =
   match x with
+  | Link i when i = min_int -> C.Missing (* Value.missing: an Optional's cell with no value *)
   | Int i | Link i -> Int i
   | Float f -> Float f
   | Bool b -> Bool b
@@ -218,6 +219,22 @@ let range_bound (typ : Value.typ) (x : C.value) ~low ~strict =
   | Tdate, Float f -> scaled f 1000. "a date in seconds since 1970"
   | Tmoney sc, Float f -> scaled f (float_of_int pow10.(sc)) "an amount that fits"
   | _ -> (match of_cesia "a range" typ x with Int w | Date w | Money w -> whole w | _ -> Some 0)
+
+(* A bound of Above, Below or Between on a float, in IEEE 754's totalOrder (the order of Sort: -NaN, -infinity, ...,
+   -0, +0, ..., +infinity, NaN): the float itself, or the next one in that order for Above, the one before for Below;
+   None: none is past it. A float's place in that order is its bits, the negative ones' 63 low bits flipped. *)
+let total_key f = let i = Int64.bits_of_float f in if Int64.compare i 0L < 0 then Int64.logxor i Int64.max_int else i
+let of_total_key k = Int64.float_of_bits (if Int64.compare k 0L < 0 then Int64.logxor k Int64.max_int else k)
+let least_float = of_total_key Int64.min_int and greatest_float = of_total_key Int64.max_int
+
+let float_bound (x : C.value) ~low ~strict =
+  let f = match of_cesia "a range" Tfloat x with Float f -> f | _ -> 0. in
+  if not strict then Some f
+  else
+    let k = total_key f in
+    if low then (if k = Int64.max_int then None else Some (of_total_key (Int64.succ k)))
+    else if k = Int64.min_int then None
+    else Some (of_total_key (Int64.pred k))
 
 (* ---- databases: a connection's, or a fork ---- *)
 
@@ -674,6 +691,8 @@ let variables ctx a =
 let question_keys = C.keys [| "Where"; "Give"; "Sort"; "Limit"; "After" |]
 let desc_keys = C.keys [| "Desc" |]
 let op_keys = C.keys [| "Not"; "Or"; "And"; "In"; "Values"; "Prefix"; "Text" |]
+let less_keys = C.keys [| "Less"; "Than"; "Equal" |]
+let optional_keys = C.keys [| "Optional" |]
 let range_keys = C.keys [| "Range"; "Low"; "High"; "Open" |]
 let aggregate_keys = C.keys [| "Sum"; "Min"; "Max"; "Count" |]
 
@@ -701,7 +720,7 @@ let question ?(uses = []) ctx name d qv nvars =
     in
     let var = function C.Handle ("cepheus.variable", k) when k < nvars -> Some k | _ -> None in
     let vtyp = Array.make nvars None in
-    let what = "a pattern [thing, property, value], or Above, Below, Between, In, Not or Or" in
+    let what = "a pattern [thing, property, value], or Above, Below, Between, In, Prefix, Less, LessOrEqual, Not, Or or Optional" in
     let pattern_of l =
       let e = C.item ctx l 0 and p = C.item ctx l 1 and x = C.item ctx l 2 in
       let k, i = property_of ctx name p in
@@ -717,6 +736,8 @@ let question ?(uses = []) ctx name d qv nvars =
     let rec walk item =
       match item with
       | C.List l when C.length l = 3 -> ignore (pattern_of l)
+      | (C.Map m | C.Struct m) when (match C.fields optional_keys m with [| C.List l |] -> C.length l = 3 | _ -> false) ->
+        (match C.fields optional_keys m with [| C.List l |] -> ignore (pattern_of l) | _ -> ())
       | C.Map m | C.Struct m -> (
         match C.fields op_keys m with
         | [| n; o; a; _; _; _; _ |] -> List.iter walk (list_of n @ list_of a); List.iter walk (list_of o)
@@ -738,7 +759,13 @@ let question ?(uses = []) ctx name d qv nvars =
             let lo, hi = match lo, hi with Some lo, Some hi -> lo, hi | _ -> 1, 0 in
             let mk w = match t with Tdate -> Value.Date w | Tmoney _ -> Money w | _ -> Int w in
             j, mk lo, mk hi
-          | Some t -> refuse "invalid" "Above, Below and Between are for ints, dates and money, not a %s" (Value.typ_name t)
+          | Some Tfloat ->
+            (* in totalOrder; Above and Below strict, the next float past the bound; none past it, an empty range *)
+            let lo = if lo = C.Missing then Some least_float else float_bound lo ~low:true ~strict:(strict = C.Text "low") in
+            let hi = if hi = C.Missing then Some greatest_float else float_bound hi ~low:false ~strict:(strict = C.Text "high") in
+            let lo, hi = match lo, hi with Some lo, Some hi -> lo, hi | _ -> greatest_float, least_float in
+            j, Value.Float lo, Value.Float hi
+          | Some t -> refuse "invalid" "Above, Below and Between are for ints, floats, dates and money, not a %s" (Value.typ_name t)
           | None -> refuse "invalid" "a variable of Above, Below or Between appears in no pattern")
         | None -> C.need ctx name "a variable first in Above, Below or Between" x)
       | _ -> C.need ctx name what (C.Map m)
@@ -747,6 +774,19 @@ let question ?(uses = []) ctx name d qv nvars =
     let rec item_of ~top ~alt it : Question.Ask.item list =
       match it with
       | C.List l when C.length l = 3 -> [ Question.Ask.Pattern (pattern_of l) ]
+      | (C.Map m | C.Struct m) when (match C.fields optional_keys m with [| C.Missing |] -> false | _ -> true) -> (
+        if not top then refuse "invalid" "Optional is at the top of Where: no Optional inside Not or Or";
+        match C.fields optional_keys m with
+        | [| C.List l |] when C.length l = 3 -> [ Question.Ask.Optional (pattern_of l) ]
+        | v -> C.need ctx name "a pattern [thing, property, value] for Optional" v.(0))
+      | (C.Map m | C.Struct m) when (match C.fields less_keys m with [| C.Missing; _; _ |] -> false | _ -> true) -> (
+        match C.fields less_keys m with
+        | [| x; y; eq |] -> (
+          match var x, var y with
+          | Some i, Some j -> [ (if eq = C.Bool true then Question.Ask.Less_or_equal (i, j) else Question.Ask.Less (i, j)) ]
+          | None, _ -> C.need ctx name "a variable first in Less" x
+          | _, None -> C.need ctx name "a variable second in Less" y)
+        | _ -> C.need ctx name what it)
       | C.Map m | C.Struct m -> (
         match C.fields op_keys m with
         | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] -> let j, lo, hi = range_of m in [ Question.Ask.Range (j, lo, hi) ]
@@ -815,6 +855,8 @@ let question ?(uses = []) ctx name d qv nvars =
     let rec use_item = function
       | Question.Ask.Pattern (q : Query.pattern) -> use_t q.e; use_t q.v
       | Range (j, _, _) | In (j, _) | Prefix (j, _) -> use j
+      | Less (i, j) | Less_or_equal (i, j) -> use i; use j
+      | Optional (q : Query.pattern) -> use_t q.e; use_t q.v
       | Not l -> List.iter use_item l
       | Or alts -> List.iter (List.iter use_item) alts
     in
@@ -838,6 +880,9 @@ let question ?(uses = []) ctx name d qv nvars =
           | Range (j, lo, hi) -> Range (r j, lo, hi)
           | In (j, l) -> In (r j, l)
           | Prefix (j, p) -> Prefix (r j, p)
+          | Less (i, j) -> Less (r i, r j)
+          | Less_or_equal (i, j) -> Less_or_equal (r i, r j)
+          | Optional q -> Optional (rp q)
           | Not l -> Not (List.map ri l)
           | Or alts -> Or (List.map (List.map ri) alts)
         in
@@ -897,7 +942,16 @@ let question ?(uses = []) ctx name d qv nvars =
             if user = [] then refuse "invalid" "After needs Sort: the rows after a row, in an order";
             let vals = C.fields (C.keys names) m in
             let a = Array.make (Array.length cols) (Value.Int 0) in
-            Array.iteri (fun i x -> if x = C.Missing then refuse "invalid" "After needs every field of Give: %s is missing" names.(i); a.(at.(i)) <- of_cesia names.(i) typs.(i) x) vals;
+            (* an Optional's field may be missing: the row's cell is then missing too *)
+            let optional i = match wcols.(i) with Var j -> List.exists (function Question.Ask.Optional { v = Query.Var y; _ } -> y = j | _ -> false) extra | Agg _ -> false in
+            Array.iteri
+              (fun i x ->
+                if x = C.Missing && optional i then a.(at.(i)) <- Value.missing
+                else begin
+                  if x = C.Missing then refuse "invalid" "After needs every field of Give: %s is missing" names.(i);
+                  a.(at.(i)) <- of_cesia names.(i) typs.(i) x
+                end)
+              vals;
             Some a
           | v -> C.need ctx name "a row of Give for After" v
         in
@@ -929,7 +983,7 @@ let find ctx a =
       match local_state d with
       | Some v -> (
         match Answer.answer ~order:qn.order ~extra:qn.extra ?stop:(Client.local_stop timeout) v query select with
-        | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init ncols (fun i -> of_word v typs.(i) (ans.word r at.(i)))))
+        | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init ncols (fun i -> if ans.missing r at.(i) then C.Missing else of_word v typs.(i) (ans.word r at.(i)))))
         | exception Query.Bad m -> refuse "invalid" "%s" m
         | exception Query.Timeout t -> refuse "timeout" "%s" (Query.timeout_message t)
         | exception Pages.Unreadable m -> refuse "damaged" "%s" m)
@@ -938,6 +992,7 @@ let find ctx a =
         | Fork _ -> assert false
         | Server s when (qn.extra <> [] || qn.order <> Question.Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
         | Server s when timeout <> None && s.conn.cl.spoken < 6 -> refuse "invalid" "%s" (Client.no_timeout s.conn.cl.spoken)
+        | Server s when s.conn.cl.spoken < 7 && Wire.needs_7 qn.extra -> refuse "invalid" "%s" (Client.no_less s.conn.cl.spoken)
         | Server _ when List.length query.where > Wire.max_patterns -> refuse "invalid" "%s" (Client.too_many_patterns query)
         | Server s -> (
           match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order; timeout = Client.timeout_ms timeout }) with
@@ -980,6 +1035,7 @@ let find_source d (sh : Conn.shared) =
     | _ when sh.extra <> [] && s.conn.cl.spoken < 2 -> Conn.finish sh "invalid" Client.older; true
     | _ when sh.order <> Question.Top.none && s.conn.cl.spoken < 5 -> Conn.finish sh "invalid" (Client.no_sorted_watch s.conn.cl.spoken); true
     | _ when sh.timeout <> None && s.conn.cl.spoken < 6 -> Conn.finish sh "invalid" (Client.no_timeout s.conn.cl.spoken); true
+    | _ when s.conn.cl.spoken < 7 && Wire.needs_7 sh.extra -> Conn.finish sh "invalid" (Client.no_less s.conn.cl.spoken); true
     | _ when List.length sh.query.where > Wire.max_patterns -> Conn.finish sh "invalid" (Client.too_many_patterns sh.query); true
     | _ ->
       Mutex.protect sh.sm (fun () -> sh.src <- Remote);
@@ -1120,7 +1176,7 @@ let rule_of ctx name d v =
                   nranges := (j, lo, hi) :: !nranges
                 | _ -> refuse "invalid" "rule %s: a Not of a rule holds patterns, Above, Below and Between" rname)
               items
-          | _ -> refuse "invalid" "rule %s: a rule's Where holds patterns, Not, Above, Below and Between; Or, In and Prefix are for questions" rname)
+          | _ -> refuse "invalid" "rule %s: a rule's Where holds patterns, Not, Above, Below and Between; Or, In, Prefix, Less and Optional are for questions" rname)
         qn.extra;
       if !nots > Rules.max_nots then refuse "invalid" "rule %s: at most %d Nots" rname Rules.max_nots;
       let head =

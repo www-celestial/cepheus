@@ -100,8 +100,9 @@ Count() = {Count: true}
 (** A key of Sort, in descending order: the largest first. A key without it is ascending. *)
 Desc(key) = {Desc: key}
 
-(** A condition of Where: x above v, for an int, a date or money. A bound between two milliseconds or two units of
-    the money is rounded up, to the first value above it; Above the largest Int keeps nothing. *)
+(** A condition of Where: x above v, for an int, a float, a date or money. A bound between two milliseconds or two
+    units of the money is rounded up, to the first value above it; Above the largest Int keeps nothing. Floats compare
+    as Sort orders them (IEEE 754's totalOrder): -0 before 0, NaN after infinity. *)
 Above(x, v) = {Range: x, Low: v, Open: "low"}
 
 (** A condition of Where: x below v. A bound between two milliseconds or two units of the money is rounded down;
@@ -111,6 +112,19 @@ Below(x, v) = {Range: x, High: v, Open: "high"}
 (** A condition of Where: lo <= x <= hi, each bound rounded toward the inside when it falls between two
     milliseconds or two units of the money. *)
 Between(x, lo, hi) = {Range: x, Low: lo, High: hi}
+
+(** A condition of Where: x < y, two variables of one type (ints, floats, dates, money, texts by their bytes, links),
+    each bound by a pattern; at the top of Where, in Not, or in an alternative of Or. *)
+Less(x, y) = {Less: x, Than: y}
+
+(** A condition of Where: x <= y, as Less. *)
+LessOrEqual(x, y) = {Less: x, Than: y, Equal: true}
+
+(** A part of Where that may have no fact: the pattern [thing, property, value] whose thing a pattern of Where binds
+    and whose value is a variable in no other item. Each answer of the rest of Where comes once a value of the
+    thing's property, or once with that variable missing (SQL's LEFT JOIN); a missing value sorts after every value,
+    ascending and descending. At the top of Where only. *)
+Optional(pattern) = {Optional: pattern}
 
 (** A condition of Where: none of the facts these patterns name holds, with these conditions. Its variables in no
     other place of the question are its own: there is no value of them that makes every item hold. 1 to 4 patterns
@@ -153,7 +167,7 @@ end
 (** The answers of a question: an Ok of a list of maps, one an answer, with the fields of Give. The question is a
     function of n variables that gives {Where, Give}: Where a list of patterns [thing, property, value], each a fact
     that must hold, where any part but the property may be a variable, and of conditions (Above, Below, Between, In,
-    Prefix, Not, Or); Give
+    Prefix, Less, LessOrEqual, Not, Or) and Optional patterns; Give
     a map of the variables, or of aggregates of them, to give. Each answer comes once. Optional: Sort, a list of
     fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name; Limit, at
     most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in Sort's
