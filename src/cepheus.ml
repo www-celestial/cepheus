@@ -288,13 +288,12 @@ let ask ?timeout v (q : Question.t) =
         estimate = (fun () -> Ask.estimate v t) }
     in
     let order = { Top.keys = q.sort; limit = q.limit; after = q.after } in
-    let rows =
-      if order = Top.none then
-        List.rev (Ask.fold ?stop v t ~init:(fun () -> []) ~merge:(fun a b -> b @ a) ~step:(fun acc env -> src.project env :: acc))
-      else Array.to_list (Top.give ~masked v ~typs src order)
-    in
     let k = Array.length give in
-    Ok (List.map (fun r -> Array.init k (fun i -> if masked && Top.missing k r i then Value.missing else Store.value v typs.(i) r.(i))) rows)
+    let values r = Array.init k (fun i -> if masked && Top.missing k r i then Value.missing else Store.value v typs.(i) r.(i)) in
+    if order = Top.none then
+      (* each row's values made in the step, by the domain that found it *)
+      Ok (List.rev (Ask.fold ?stop v t ~init:(fun () -> []) ~merge:(fun a b -> b @ a) ~step:(fun acc env -> values (src.project env) :: acc)))
+    else Ok (List.map values (Array.to_list (Top.give ~masked v ~typs src order)))
   with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m) | Query.Timeout t -> Error (Timeout (Query.timeout_message t))
 
 let fold ?timeout v q ~init ~step ~merge =
