@@ -1612,52 +1612,110 @@ pre-votes, un vote (un fsync), le no-op (un fsync). Avec l'ancienne pause de la 
 1 s), le programme attendait à la médiane 1 290 ms un leader prêt à 772 : dans un cluster, sa pause s'arrête
 désormais à 50 ms.
 
+**L'arrêt propre du leader** ($n = 21$ : trois serveurs sur le SSD, un programme qui écrit sans pause, `cepheus stop`
+sur le leader) : ses écritures se sont arrêtées 350 ms au plus long (médiane ; 96 à 469 ms ; la plus longue des 21 :
+1 080 ms), aucune perdue, la direction passée à chaque fois (en 56 ms à la médiane, 19 à 733), la machine chargée (3,3 à
+4,6 sur 8 cœurs : d'autres travaux tournaient) ; contre 910 ms pour un leader tué (plus haut). La pause,
+ce sont les dernières écritures du leader committed, le tour de vote du nouveau leader (un fsync) et son no-op (un
+fsync), puis les 50 ms de la bibliothèque. Sa queue est une passation lente ou l'arrêt de l'ancien leader, les trois serveurs partageant ici
+un disque (une série d'avant, sur la même machine, a eu trois pauses de 2,3 à 4,3 s) : à mesurer de nouveau sur trois
+machines. etcd fait de même à l'arrêt d'un leader (« When stopping leader, Stop
+transfers its leadership to one of its peers before stopping the server » : le `Stop` de son serveur,
+[server.go](https://github.com/etcd-io/etcd/blob/main/server/etcdserver/server.go)) ; PostgreSQL n'a pas de bascule
+à lui (« PostgreSQL does not provide the system software required to identify a failure on the primary and notify
+the standby database server », [failover](https://www.postgresql.org/docs/current/warm-standby-failover.html)) : une
+bascule y est une promotion faite par un outil à côté. Non mesuré ici.
+
+**Un follower qui a perdu ses données** (une seule mesure, pas une série : trois serveurs sur le SSD d'une machine ;
+10 M de faits chargés par le leader en 81,3 s, puis 40 000 textes de 400 octets pour que le début du log passe un
+segment ; 79,0 MB de bases sur le leader ; un follower tué, son répertoire de données supprimé, redémarré) : il
+tenait chaque groupe 4,7 s après son démarrage (4 706 ms ; la charge de la machine à 1,6 au début de la mesure, 5,9 à
+sa fin, ses propres serveurs compris) : sa copie des bases prise par TLS, vérifiée comme `cepheus verify` en vérifie
+une, installée, le serveur redémarré dessus, la fin du log appliquée. À côté des géants : un nouveau standby
+PostgreSQL part d'un `pg_basebackup`, 22,53 s à la médiane pour les mêmes 10 M de faits sur cette machine
+([sauvegardes](benchmarks.md), mesuré le 2026-11-24, pas à côté de cette mesure), avant de rejouer le WAL écrit
+depuis ; etcd envoie à un follower en retard sur son log un snapshot qui « contains: raft status (term, conf), a
+snapshot of v2 store inside raft.Snapshot as []byte, a snapshot of v3 KV in the top level message as ReadCloser »
+(toute sa base, [snapshot_merge.go](https://github.com/etcd-io/etcd/blob/main/server/etcdserver/snapshot_merge.go)) ;
+non mesuré ici. Une seule mesure ne donne pas d'intervalle : une série de 21 reste à faire.
+
+**Un groupe de 100 MiB** (une seule mesure, sur un nouveau cluster, la charge de la machine à 1,6 : une règle dont
+les conséquences copient 25 600 textes de 4 KiB) : de l'écriture à son reçu 3,2 s (3 208 ms) : une centaine de
+morceaux d'un MiB par le log, chacun forcé sur une majorité, puis la frame rassemblée, vérifiée et appliquée ; une
+série de 21 reste à faire. etcd le refuse : « By default, the maximum size of
+any request is 1.5 MiB » (« etcd is designed to handle small key value pairs typical for metadata »,
+[limits](https://etcd.io/docs/v3.5/dev-guide/limit/)) ; PostgreSQL envoie le WAL d'une telle transaction à son
+standby synchrone à mesure qu'il est écrit : non mesuré ici.
+
 ### Comment c'est prouvé
 
-- **TLA+** (`spec/Raft.tla`, vérifié par `tools/tlc.sh`) : l'algorithme du cluster avec Pre-Vote laissé libre (tout
-  serveur peut se présenter à une élection : un sur-ensemble de ce que permettent les pre-votes), la stickiness, le
-  no-op, les votes durables, des acquittements d'entrées forcées seulement, des redémarrages qui perdent ce qui
-  n'était pas forcé, la règle de 2018, et le lease. Les messages sont perdus, retardés, réordonnés et dupliqués.
-  Invariants (des propriétés qui doivent tenir dans chaque état) : au plus un leader par term ; des logs d'accord sur
-  une entrée le sont sur tout ce qui la précède ; chaque leader ultérieur tient chaque entrée committed ; jamais deux
-  entrées committed au même index ; une lecture sous le lease voit chaque entrée committed. Vérifié par parties,
-  chacune de façon exhaustive dans ses bornes (3 serveurs, des terms jusqu'à 2, des logs de 2 entrées, 2 messages en
-  vol ; TLC 1.7.4) : les élections et le log avec un redémarrage qui perd ce qui n'était pas forcé (14 136 156 états
-  distincts, tout le graphe jusqu'à la profondeur 71), la règle de 2018 avec un serveur abîmé (5 786 757 états,
-  profondeur 58), et le lease avec un redémarrage (5 853 164 états, profondeur 49) : aucun invariant violé. Chaque
-  règle retirée seule en viole un, TLC affichant les étapes : commiter des entrées de terms plus anciens en les
-  comptant (LeaderCompleteness, la Figure 8 de l'article, avec des terms jusqu'à 4 : 1 083 149 états), un vote oublié
-  à un redémarrage (ElectionSafety), un acquittement avant le fsync (LeaderCompleteness), des votes qui ignorent les
-  logs (LeaderCompleteness), un serveur abîmé qui vote comme si son log était plus court (LeaderCompleteness :
-  l'échec décrit par l'article de 2018), une promesse qui finit avant le lease qu'elle soutient, un serveur qui vote
-  juste après son démarrage, des votes accordés malgré une promesse, et des lectures avant que le no-op soit committed
-  (chacune : ReadFresh, une lecture périmée).
-- **La simulation** (`raft_sim`, 3 et 5 serveurs, une seed qui décide de tout, `--seed N` la rejoue) : le cœur Raft
-  du serveur lui-même et son log, chaque serveur sur un disque simulé avec sa propre horloge (jusqu'à 3 % d'écart) ;
-  des messages perdus, dupliqués et réordonnés ; des partitions (un serveur seul, une minorité, un lien coupé dans un
-  seul sens) ; des morts du processus, des coupures de courant (des octets non forcés perdus ou torn), des morts à
-  l'intérieur d'un appel au disque, un octet forcé du log inversé avant un redémarrage, des fsyncs lents (jusqu'à
-  300 ms), des pauses (jusqu'à 400 ms). Vérifié : au plus un leader par term ; chaque entrée appliquée où que ce soit
-  est celle du log committed ; chaque écriture dont un client a appris qu'elle était committed est dans le log final à
-  son index ; des lectures linearizable (une lecture à l'index r rend l'état du log committed à r, voit chaque
-  écriture répondue avant son début et aucune écriture commencée après sa fin, et aucune lecture finie avant son début
-  n'a vu un index plus récent) ; une fois les pannes arrêtées, un seul commit et un seul log partout. Les seeds 1 à 300
-  à 3 serveurs et 1 à 100 à 5 : aucun échec (50 103 et 16 616 vérifications ; `tools/test.sh` en lance 100 et 50).
-  Comptés à part : 16 exécutions finissent avec un follower en retard sur le début du log de son leader, et 5 avec une
-  majorité abîmée qui n'élit aucun leader (deux étapes suivantes, plus haut). En chemin, elle a trouvé six bugs, chacun
-  corrigé avant cette release : un leader déchu qui disait « committed » à un programme pour un index qu'un nouveau
-  leader avait rempli ; une indication de commit écrite à côté d'entrées qu'une troncature ultérieure a remplacées,
-  puis prise pour committed après un crash ; un dommage au dernier round du log pris pour une fin torn et coupé
-  (l'échec de 2018 lui-même) ; un refus amplifié en une tempête de sondes par des messages dupliqués ; un follower qui
-  coupait son log au-delà de ce dont d'autres avaient encore besoin ; et un pre-vote qu'un serveur en retard de terms
-  ne pouvait jamais gagner.
+- **TLA+** (`spec/Raft.tla`, vérifié par `tools/tlc.sh`) : l'algorithme du cluster avec le Pre-Vote laissé libre
+  (n'importe quel serveur peut se présenter : un sur-ensemble de ce que permettent les pre-votes), la stickiness, le
+  no-op, des votes durables, des acquittements d'entrées forcées seulement, des redémarrages qui perdent ce qui n'était
+  pas forcé, la règle de 2018, le lease, et ce qu'ajoute cette version : le début du log déplacé derrière ce qu'un
+  serveur sait committed, sans aucun plancher (n'importe quel serveur, à n'importe quel moment), des copies des bases à
+  n'importe quel index qu'un serveur sait committed, données par n'importe quel serveur et installées selon la règle de
+  Raft ; des disques perdus (tout l'état d'un serveur disparu, tant que les abîmés et les perdus restent une minorité)
+  et la règle des serveurs frais ; la direction passée (TimeoutNow, des votes malgré une promesse) ; et la réparation
+  par n'importe quel peer (des entrées committed données à un serveur abîmé). Les messages sont perdus, retardés, remis
+  dans le désordre et dupliqués. Invariants : au plus un leader par term, des logs qui s'accordent sur une entrée
+  s'accordent sur tout ce qui la précède, chaque leader d'un term suivant tient chaque entrée committed, jamais deux
+  entrées committed au même index, une lecture sous le lease voit chaque entrée committed, et ce qu'un serveur tient
+  pour committed (ses bases, son commit index) l'était. Vérifié par parties, chacune de façon exhaustive dans ses bornes
+  (3 serveurs, des terms jusqu'à 2, des logs de 2 entrées, 2 messages en vol ; TLC 1.7.4) : les élections et le log avec
+  un redémarrage qui perd ce qui n'était pas forcé (14 136 156 états distincts, tout le graphe jusqu'à la profondeur
+  71), la règle de 2018 avec un serveur abîmé (5 786 757 états, profondeur 58), le lease avec un redémarrage (5 853 164
+  états, profondeur 49), les copies et le début du log (33 671 601 états, profondeur 51), un disque perdu avec des logs
+  d'une entrée (1 079 221 états, profondeur 43), la direction passée sous le lease (6 220 449 états, profondeur 50), et
+  la réparation par n'importe quel peer avec un serveur abîmé (20 193 842 états distincts, profondeur 59) : aucun
+  invariant cassé. Chaque règle retirée seule en casse un, TLC imprimant les étapes : commiter des entrées de terms plus
+  anciens en les comptant (LeaderCompleteness, la figure 8 de l'article, avec des terms jusqu'à 4 : 1 148 600 états), un
+  vote oublié à un redémarrage (ElectionSafety), un acquittement avant le fsync (LeaderCompleteness), des votes qui
+  ignorent les logs (LeaderCompleteness), un serveur abîmé qui vote comme si son log était plus court
+  (LeaderCompleteness : la panne de l'article), une promesse qui finit avant le lease qu'elle soutient, un serveur qui
+  vote juste après son démarrage, des votes accordés malgré une promesse, et des lectures avant que le no-op soit
+  committed (chacun : ReadFresh, une lecture périmée) ; et ceux de cette version : une copie installée sur un log qui
+  tient sa dernière entrée (ses entrées acquittées d'après elle perdues : CommitInLog), une copie au-delà de ce que sait
+  committed celui qui la donne (CommittedPrefix), un serveur frais qui sort de cet état sur une seule réponse
+  (LeaderCompleteness, 183 077 états), ou sans la marque de réparation (LeaderCompleteness), un leader qui garde son
+  lease pendant qu'il passe la direction (ReadFresh : le nouveau leader commite pendant que l'ancien lit), et une
+  réparation qui reçoit des entrées au-delà du commit index de celui qui les donne (CommittedPrefix).
+- **Simulation** (`raft_sim`, 3 et 5 serveurs, une seule seed qui décide de tout, `--seed N` la rejoue) : le cœur Raft,
+  le log et les entrées (frames, morceaux) du serveur lui-même, chaque serveur sur un disque simulé avec sa propre
+  horloge (jusqu'à 3 % d'écart) ; des messages perdus, dupliqués et remis dans le désordre ; des partitions (un serveur
+  seul, une minorité, un lien coupé dans un sens) ; des morts du processus, des coupures de courant (les octets non
+  forcés perdus ou déchirés), des morts au milieu d'un appel au disque, un octet forcé du log inversé avant un
+  redémarrage, un disque entier perdu, des fsync lents (jusqu'à 300 ms), des pauses (jusqu'à 400 ms), des serveurs
+  démarrés à des moments différents, des arrêts propres du leader avec sa direction passée ; une écriture sur huit
+  grande, en morceaux ; des copies de la machine à états qui prennent 20 à 420 ms, cassées quand l'un des côtés meurt,
+  une sur dix abîmée en route. Vérifié : au plus un leader par term ; chaque entrée appliquée où que ce soit est celle
+  du log committed ; une grande écriture appliquée en entier ou pas du tout ; chaque écriture dont un client a appris
+  qu'elle était committed est dans le log final à son index ; des lectures linéarisables (une lecture à l'index r rend
+  l'état du log committed en r, voit chaque écriture répondue avant qu'elle commence, aucune écriture commencée après
+  qu'elle a fini, et aucune lecture finie avant qu'elle commence n'a vu un index plus récent) ; une fois les pannes
+  arrêtées, un seul commit et un seul log partout. Seeds 1 à 2 000 de 3 serveurs et 1 à 1 000 de 5 : aucun échec
+  (226 632 et 117 016 vérifications ; 1 045 et 612 copies installées, 232 cassées par la mort de leur source, 108
+  refusées car abîmées ; 1 346 et 749 disques perdus ; 2 710 et 1 604 directions passées ; `tools/test.sh` en lance 100
+  et 50). Comptés à part : 53 parties de 3 serveurs et 3 de 5 finissent avec une majorité abîmée qu'aucun serveur sain
+  ne peut réparer (des entrées qu'elle seule tenait : le coût de la règle de 2018, plus haut). En chemin elle a trouvé,
+  à côté des six bugs de la version d'avant : un serveur qui a perdu son disque et revote dans un term où il avait
+  voté, et prend un leader à qui manque ce qu'il avait acquitté (la règle des serveurs frais) ; un serveur abîmé compté
+  comme une réponse saine par un serveur frais ; deux serveurs frais qui attendaient chacun la fin de l'état de
+  l'autre ; et une copie faite, ou le log coupé, au milieu des morceaux d'une frame (il manquait alors au follower ses
+  premiers morceaux).
 - **De vrais serveurs** (`server_raft`) : trois serveurs en TLS mutuel sur loopback ; un programme connecté à un
-  follower écrit à travers le leader ; le leader tué (kill -9) pendant qu'un programme écrit, un nouveau élu, chaque
-  écriture dont le programme a appris qu'elle était committed présente, une écriture renvoyée dans sa session répondue
-  avec son premier reçu ; l'ancien leader revenu comme follower, rattrapé ; des refus au port peer ; les modes des
-  fichiers ; un chargement, un changement des règles à côté de groupes qui comptent avec un même compteur, un
-  chargement de plus de 8 MiB refusé en entier, puis le leader tué : le nouveau tient le chargement, les conséquences
-  du changement et le compteur, rien du chargement refusé.
+  follower écrit par le leader ; le leader tué (kill -9) pendant qu'un programme écrit, un nouveau élu, chaque écriture
+  dont le programme a appris qu'elle était committed présente, une écriture renvoyée dans sa session recevant son
+  premier reçu ; l'ancien leader revenu comme follower, à jour ; des refus sur le port peer ; les modes des fichiers ;
+  deux fichiers mis par le leader, relus là et sur le leader suivant, un follower sans `vault.key` qui attend puis les
+  prend une fois la clé copiée, les fichiers d'un propriétaire effacés partout ; `cepheus stop` sur le leader pendant
+  des écritures, la direction passée, rien de perdu ; les logs de deux serveurs abîmés d'un coup, réparés par le
+  troisième, de nouveau un leader, rien de perdu ; un chargement, un changement des règles à côté de groupes qui
+  comptent avec un compteur, un chargement de plus de 8 MiB en morceaux, le leader tué : le nouveau tient tout ; un
+  redémarrage serveur par serveur ; des chargements au-delà d'un segment du log, puis le répertoire de données d'un
+  follower supprimé : il prend une copie et suit, de même tué pendant sa copie et avec sa source tuée pendant elle ;
+  un groupe de 32 MiB en morceaux, avec un follower tué pendant lui, puis le leader tué pendant lui : tout ou rien sur
+  chaque serveur.
 
 ## Sécurité
 
