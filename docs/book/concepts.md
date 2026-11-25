@@ -195,7 +195,10 @@ A **question** is a **conjunctive query**: a list of **patterns** `(thing, prope
 the value are either constants or **variables**, numbered from 0. The answer is every **binding** (a value for each
 variable) that makes every pattern a fact of the view, each binding once (G11). A variable in a thing position is a
 link; a variable's type comes from the properties it appears with. `ranges` keep `lo <= x <= hi` for a variable whose
-values are numbers (an int, a date, money, a bool as 0 and 1, a link as its thing number).
+values are numbers (an int, a date, money, a bool as 0 and 1, a link as its thing number, a float in IEEE 754's
+totalOrder). Beside its patterns, a question may hold conditions (`Not`, `Or`, `In`, `Prefix`, `Less` between two
+variables) and `Optional` patterns, whose variable is **missing** in a row where the thing has no value of the
+property, as SQL's `LEFT JOIN` gives a NULL ([Cepheus from Cesia](cesia.md#less-lessorequal-and-optional)).
 
 Answering such a question means **joining** the patterns: matching their shared variables. Cepheus uses one join
 algorithm, **Generic Join**, which binds one variable at a time and, for each, enumerates only the smallest set of

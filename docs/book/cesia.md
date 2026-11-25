@@ -281,7 +281,10 @@ makes, can do much more on a graph ([theory](theory.md#4-generic-join)). Each an
 
 **Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) and `cepheus.Between(x, lo, hi)`
 ($\mathit{lo} \le x \le \mathit{hi}$), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
-filters after it. Any other condition is Cesia's, on the rows it gives (`list.Filter`). A Date is kept to the
+filters after it. On a Float they keep the values on their side in the order `Sort` gives (IEEE 754's totalOrder:
+$-0$ before $0$, NaN after infinity), each candidate checked ([below](#less-lessorequal-and-optional)). Two variables
+compare with `cepheus.Less` and `cepheus.LessOrEqual` (same section). Any other condition is Cesia's, on the rows it
+gives (`list.Filter`). A Date is kept to the
 millisecond and Money to its digits, so a bound between two of them (`Above(price, 10.005)` for cents, a time of
 `sys.Now()`) keeps exactly the values on its side: it is rounded toward the inside of the range, 10.005 to 10.01 for
 Above and to 10.00 for Below. A bound of floats within $2^{-50}$ (relative) of a unit is that unit, as a decimal
@@ -381,15 +384,16 @@ value have a thing), or, for several items, when the Not's own question, its oth
 answers of the alternatives are disjoint and none needs to be kept to remove copies (but those of an alternative with
 variables of its own, which may give a binding once for each of their values).
 
-A `Watch` keeps `Not`, `Or`, `In` and `Prefix`, and a change sends only the rows it adds or removes. A frame's fact
-can change only the answers that agree with it at one of the question's patterns, wherever the pattern is: for a
-pattern that holds variables of the question, the answers with those values; for one inside a `Not` or an
-alternative whose variables are all its own, the answers its other items reach from the fact (an invoice paid: its
-client). For each such set of values, the question is answered again with them fixed, before and after the frame, and
-the difference is the change. So a fact added under a `Not` removes the rows it now excludes, a fact removed may give
-rows back, an alternative is read with the ones before it, and `In` and `Prefix` filter the values the fact gives. The
-cost of a frame is that of the answers it touches, not of the whole question (a fact that no variable of the question
-reaches, as a `Not` over a whole property, is the whole question again).
+A `Watch` keeps `Not`, `Or`, `In`, `Prefix`, `Less` and `Optional`, and a change sends only the rows it adds or
+removes. A frame's fact can change only the answers that agree with it at one of the question's patterns, wherever the
+pattern is: for a pattern that holds variables of the question, the answers with those values; for one inside a `Not`
+or an alternative whose variables are all its own, the answers its other items reach from the fact (an invoice paid:
+its client). For each such set of values, the question is answered again with them fixed, before and after the frame,
+and the difference is the change. So a fact added under a `Not` removes the rows it now excludes, a fact removed may
+give rows back, an alternative is read with the ones before it, `In`, `Prefix` and `Less` filter the values the fact
+gives, and a value added under an `Optional` takes away the row where it was missing and gives its own (a value
+removed, the other way). The cost of a frame is that of the answers it touches, not of the whole question (a fact that
+no variable of the question reaches, as a `Not` over a whole property, is the whole question again).
 
 ## Prefix: the start of a text
 
@@ -441,11 +445,12 @@ Ok([{Invoice: 65540, Total: 10.0}])
   are ordered by the other fields of `Give`, by name, so two rows are equal in the order only when they are the same
   row. Values compare within their type: numbers, dates and money as numbers; `false` before `true`; links by their
   id, the order the things were made in; texts by their bytes (UTF-8: the order of their code points, so "Z" comes
-  before "a" and "é" after "z", not a language's order); floats by IEEE 754's totalOrder.
+  before "a" and "é" after "z", not a language's order); floats by IEEE 754's totalOrder. A field an `Optional`
+  left `missing` comes after every value, in both directions ([below](#less-lessorequal-and-optional)).
 - `Limit: k`: the first k rows, and the copies of the k-th when `Give` leaves out a variable (a page never splits
   identical rows). Without `Sort`, k rows of the answer, in the engine's order.
 - `After: row`: the rows that come after this row in the order: the next page. It needs `Sort`, and a value for
-  every field of `Give`; the row need not be in the database any more.
+  every field of `Give` (or `missing` for an `Optional`'s); the row need not be in the database any more.
 
 **The previous page** is the same question with each key reversed (`Desc` added or taken away) and `After` the first
 row of the current page; reverse its rows (`list.Reverse`). There is no offset ("skip the first 4,000"): a page after
@@ -479,6 +484,79 @@ place, if that place is after the cursor.
 ([below](#sort-and-limit-in-a-watch)); it refuses `After`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
 `Give`, `Sort`, `Limit` and `After`: a misspelt `After` would otherwise give the first page again and again (a
 question without them is read as before, its other keys left aside).
+
+## Less, LessOrEqual and Optional
+
+Two variables compared with each other, ranges of floats, and a value that a thing may not have:
+
+```cesia norun
+Loan = cepheus.Kind("loan", {Client: cepheus.Link(), Rate: cepheus.Float(), Due: cepheus.Date(), PaidAt: cepheus.Date()})
+(* a fork, so that what this example writes stays out of db *)
+loans = result.Unwrap(cepheus.Fork(db, [Loan]))
+for l in [{Client: ada, Rate: 2.5, Due: 1794268800, PaidAt: 1794268800}, {Client: bo, Rate: 3.1, Due: 1794268800, PaidAt: 1794441600}, {Client: ada, Rate: 2.99, Due: 1794355200}]
+  result.Unwrap(cepheus.Insert(Loan, l, loans))
+end
+late = cepheus.Find(5, (l, c, n, d, p) -> {
+  Where: [[l, Loan.Client, c], [c, Client.Name, n], [l, Loan.Due, d], [l, Loan.PaidAt, p], cepheus.Less(d, p)],
+  Give: {Name: n, Due: d, Paid: p},
+}, loans)
+io.Print(late)
+io.Print(cepheus.Find(2, (l, r) -> {Where: [[l, Loan.Rate, r], cepheus.Between(r, 2.5, 3.0)], Give: {Rate: r}, Sort: [r]}, loans))
+emails = cepheus.Find(3, (c, n, e) -> {
+  Where: [[c, Client.Name, n], cepheus.Optional([c, Client.Email, e])],
+  Give: {Name: n, Email: e},
+  Sort: [e],
+}, db)
+io.Print(emails)
+```
+
+```text
+Ok([{Name: "Bo Lind", Due: 1794268800.0, Paid: 1794441600.0}])
+Ok([{Rate: 2.5}, {Rate: 2.99}])
+Ok([{Name: "Ada Martin", Email: "ada@example.com"}, {Name: "Bo Lind", Email: "bo@example.com"}, {Name: "Cy", Email: missing}])
+```
+
+The first question is "the loans paid after their due date": Ada's first loan was paid on its day, her second is not
+paid yet (it has no `PaidAt`, so no row). The last is SQL's `LEFT JOIN`: every client, with an email or without.
+
+- `cepheus.Less(x, y)` keeps $x < y$, `cepheus.LessOrEqual(x, y)` $x \le y$: two variables of one type, each given by
+  a pattern of the question (or the `Not`'s own, inside a `Not`). Ints, floats, dates, money, texts and links compare
+  as `Sort` orders them: texts by their bytes, floats in IEEE 754's totalOrder, links by their id (the order the
+  things were made in); a bool, or two types, is refused (`invalid`). It goes at the top of `Where`, in a `Not` and in
+  an alternative of `Or`. A variable against a constant is `Above` or `Below`; `Less(x, x)` keeps nothing and
+  `LessOrEqual(x, x)` everything.
+- `Above`, `Below` and `Between` take a Float variable too: its values in totalOrder, the order of `Sort` ($-0$ before
+  $0$, so `Below(r, 0)` keeps $-0$; NaN after $+\infty$). `Above` and `Below` are strict: the bound itself is out.
+- `cepheus.Optional([thing, property, v])`: for each answer of the rest of `Where`, a row for each value the thing has
+  of the property, or one row where v is `missing` when it has none. The thing is a variable that a pattern of
+  `Where` binds (or a thing's id); v is a variable in no other item of the question; `Optional` goes at the top of
+  `Where`, not in a `Not` or an `Or`. A property of `many` values gives a row a value, as a `LEFT JOIN` does; two
+  `Optional`s give each other's rows. The map of a row holds `missing` for v, as `Get` does for a field with no value.
+- **missing in an order.** `Sort` puts a missing value after every value, ascending and descending (PostgreSQL's
+  default puts its NULLs last ascending and first descending: here a page of the largest first never starts with the
+  rows that lack the value). `After` takes a row whose field is missing: the next page goes on among those rows.
+- **missing in a group.** `Count()` counts the rows, those with v missing too, and v as a key of `Give` makes a group
+  of the missing rows. `Sum`, `Min` and `Max` of v are refused (`invalid`): give its values, or count the rows.
+- The opposite question, "the clients with no email", is `cepheus.Not([c, Client.Email, e])` ([Not, Or and
+  In](#not-or-and-in)); the clients of an invoice that may have none is a question from the invoices (the link goes
+  from the invoice to its client): `Optional` reads a property of a thing, not the things that point to it.
+
+**How it is answered.** `Less` binds the variable that the join reaches second from the value of the first: for ints,
+dates, money and links, whose index keeps their values in order, the second variable's candidates are then a range of
+the sorted index, a seek to the first value past the other and a read from there, not a scan of every value (the
+inequality join of [Khayyat 2015](references.md#joins)); a text's or a float's index word is a number of the
+dictionary, in no order of values, so each candidate is checked (its bytes, its totalOrder). The planner counts a
+third of the property's distinct values for the bounded side, the share Selinger's planner gives an open range
+([Selinger 1979](references.md#joins)), so a bound pattern comes first and the other side is sought. Two large sets
+that nothing else joins are a cross product: $n^2/2$ pairs kept from $n$ values on each side; such a question ends at
+its time and, at the server, at its work budget ([limits](limits.md#questions)), as any cross product does.
+`Optional` is bound last, after the join and its `Not`s: each row of the rest looks up the thing's values of the
+property, one search of the index, as `Get` reads a field. This is SPARQL's `OPTIONAL` for one pattern, whose
+meaning [Pérez, Arenas and Gutierrez (2009)](references.md#joins) set. Its variable is in no other item because, with
+a variable that another part C also has, "A, then B if it can, then C" and "A and C, then B if it can" give different
+rows (a row where B gave the variable a value that C then refuses is lost in one and kept with B missing in the
+other); their *well-designed* patterns are those where the two agree. The items of `Where` have no order, so such a
+question would have no one meaning: it is refused.
 
 ## Watch: live questions
 

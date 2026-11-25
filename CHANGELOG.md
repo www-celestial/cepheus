@@ -21,8 +21,11 @@ stay as they are, or a later version reads and speaks both the old and the new.
   ([isolation](docs/book/concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)).
 - **Questions** of patterns joined by Generic Join, a worst-case optimal join (its time is bounded by the largest
   answer the data could give, the AGM bound, not by the sizes of the steps between); `Not`, `Or`, `In`, `Prefix` and
-  ranges; `Sum`, `Count`, `Min` and `Max`; pages with `Sort`, `Limit` and `After`
-  ([questions](docs/book/concepts.md#questions)). `find`, `ask` and `fold` take a `?timeout`, past which they give
+  ranges (of ints, dates, money, and floats in IEEE 754's totalOrder); `Less` and `LessOrEqual` between two variables
+  (the later one sought in the sorted index from the other's value, the inequality join of Khayyat et al. 2015);
+  `Optional`, SQL's `LEFT JOIN` of one property (SPARQL's `OPTIONAL`, Pérez et al. 2009: a missing cell sorts last
+  both ways); `Sum`, `Count`, `Min` and `Max`; pages with `Sort`, `Limit` and `After`
+  ([questions](docs/book/concepts.md#questions), [Less and Optional](docs/book/cesia.md#less-lessorequal-and-optional)). `find`, `ask` and `fold` take a `?timeout`, past which they give
   `Error (Timeout _)`, a constructor added to `Cepheus.error` before the first release.
 - A **fork** is a database in the program's memory that starts as a view: written to with every check, never to the
   disk, made without a copy; the base of an application's tests and of what-if questions
@@ -70,7 +73,7 @@ stay as they are, or a later version reads and speaks both the old and the new.
   answer once its group is durable, and with `Sort` and `Limit` keep the first rows of an order as they change (the
   ten latest payments: ten rows held, a row that leaves them replaced by one page read after the last), the rule
   model-checked ([Sort and Limit in a watch](docs/book/cesia.md#sort-and-limit-in-a-watch)). The wire protocol is at
-  version 6 (a question's time); a program speaks 1 to 6 with a server of any of them.
+  version 7 (Less, LessOrEqual and Optional); a program speaks 1 to 7 with a server of any of them.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects
   a new leader by itself.

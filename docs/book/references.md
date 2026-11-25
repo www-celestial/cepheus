@@ -282,6 +282,21 @@ cited on the [comparison](comparison.md) page.
 - **[Wang 2023]** Y. R. Wang, M. Willsey, D. Suciu. Free Join: Unifying Worst-Case Optimal and Traditional Joins.
   *Proceedings of the ACM on Management of Data* 1(2), 1–23 (SIGMOD 2023). https://doi.org/10.1145/3589295
   — The mix of binary and worst-case optimal joins; Cepheus keeps one way, Generic Join.
+- **[Khayyat 2015]** Z. Khayyat, W. Lucia, M. Singh, M. Ouzzani, P. Papotti, J.-A. Quiané-Ruiz, N. Tang, P. Kalnis.
+  Lightning Fast and Space Efficient Inequality Joins. *PVLDB* 8(13), 2074–2085, 2015.
+  https://doi.org/10.14778/2831360.2831362
+  — Joins on $<$ and $\le$ read from sorted columns instead of a cross product followed by a filter, which is what
+  the systems they describe ran. `Less` takes the seek of one side's sorted values from the other's value: once one
+  variable is bound, the other's candidates are a range of the property's sorted index (`Query.fold`).
+- **[Pérez 2009]** J. Pérez, M. Arenas, C. Gutierrez. Semantics and Complexity of SPARQL. *ACM Transactions on
+  Database Systems* 34(3), 1–45, 2009. https://doi.org/10.1145/1567274.1567278
+  — The meaning of SPARQL's `OPTIONAL` (a left outer join of sets of bindings), and the *well-designed* patterns,
+  those whose answer does not depend on where the optional part is joined. `Optional` is one pattern whose variable
+  is in no other item: a well-designed pattern, bound last (`Ask.expand`).
+- **[IEEE 754-2019]** IEEE Standard for Floating-Point Arithmetic. IEEE Std 754-2019.
+  https://doi.org/10.1109/IEEESTD.2019.8766229
+  — totalOrder (section 5.10): one order of every float, $-\mathrm{NaN} < -\infty < \dots < -0 < +0 < \dots <
+  +\infty < +\mathrm{NaN}$. `Sort`, the ranges and `Less` on floats compare in it (`Value.total_order`).
 
 ## Transactions and isolation
 

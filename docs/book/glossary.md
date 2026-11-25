@@ -263,6 +263,9 @@ the usual one, both are given.
 - **idle timeout** — the time a connection may go without a whole request before the server closes it
   (`idle_timeout`, 600 s by default); before its Hello, 10 s at most, its TLS handshake included.
   [server](server.md#clustertoml)
+- **inequality join** — a join on $<$ or $\le$ between two variables rather than on equality: the invoices paid
+  after their due date. Read from sorted values rather than as a cross product and a filter (Khayyat et al. 2015):
+  `Less`. [Cesia](cesia.md#less-lessorequal-and-optional)
 - **index word** — the 64-bit form of a value in the indexes: the value itself, or a dictionary number for texts and
   floats; what `fold` gives, and `decode` turns back into the value. [api](api.md#questions)
 - **information bound** (entropy) — the fewest bits any coding needs for some data, from how many different values it
@@ -281,6 +284,9 @@ the usual one, both are given.
 - **kind** (Cesia client) — a sort of thing in a Cesia program: a name and fields, each a property of a type
   (`client/City` for the field `City` of the kind `client`); `Insert` and `Get` read and write a thing's fields of a
   kind as a map. [Cesia](cesia.md#kinds-and-the-values-they-hold)
+- **LEFT JOIN** (left outer join) — SQL's join that keeps each row of its left side even when the right side has
+  nothing for it, the right side's columns then NULL; Cepheus's `Optional`, whose cell is then `missing`.
+  [Cesia](cesia.md#less-lessorequal-and-optional)
 - **leader**, **follower** — in a Raft cluster, the one server of a term that takes writes and serves reads, and the
   others, which store its entries and vote. [server](server.md#a-cluster-of-three-raft)
 - **lagging** — the end of a watch whose program fell too far behind (8 MiB of pushes it has not taken, at the server):
@@ -327,6 +333,8 @@ the usual one, both are given.
   atomic (G12); `snapshot` is the full merge, of every run. [architecture](architecture.md#merges-a-leveled-log-structured-merge-tree)
 - **model checking** — visiting every reachable state of a bounded model and checking invariants in each; TLC does it
   for TLA+. [testing](testing.md#model-checking)
+- **missing** (cell) — the cell of a row where an `Optional` found no value: `missing` in Cesia, `Value.missing` in
+  OCaml, sorted after every value in both directions. [Cesia](cesia.md#less-lessorequal-and-optional)
 - **monotone sequence** — numbers that never decrease (offsets), stored in blocks of 128 as a frame of reference with
   each block's header apart, so that entry q is one header and one field.
   [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
@@ -343,6 +351,8 @@ the usual one, both are given.
   [server](server.md#elections)
 - **optimistic concurrency control** — read without locks, and check at the end that what was read still holds
   (Kung and Robinson 1981): `Expect`.
+- **Optional** — a pattern of a question that may have no fact: SPARQL's `OPTIONAL` and SQL's `LEFT JOIN` of one
+  property. [Cesia](cesia.md#less-lessorequal-and-optional)
 - **OWL 2 RL** — the part of the W3C's ontology language OWL 2 that rules compute completely: 78 rules in six tables
   (OWL 2 Profiles, section 4.3); in Cepheus a library of rules, `Cepheus.Owl`. [rules](rules.md#owl-2-rl-a-library-of-rules)
 - **origin** — the token's name, session, serial and floor that a group written through the server carries in its
@@ -517,6 +527,8 @@ the usual one, both are given.
 - **token** — the secret a program shows the server to prove who it is: `cph_` and 43 characters, made by `cepheus
   token add`, shown once. [server](server.md#tokens)
 - **torn write** — a write the disk was doing when the power went, of which only part arrived; recovery cuts it.
+- **totalOrder** — the order IEEE 754 (2019, section 5.10) gives every float, $-0$ before $+0$ and NaN after
+  $+\infty$: the order of `Sort`, of the ranges and of `Less` on floats. [Cesia](cesia.md#sort-limit-and-after-pages)
 - **trailer** — the last 16 bytes of a frame, repeating its length and CRCs: a sign that the frame was written whole.
 - **transaction** — a unit of work applied entirely or not at all; Cepheus' group.
 - **transitive property** — a property that relates a thing to everything it reaches: a part of a part is a part.

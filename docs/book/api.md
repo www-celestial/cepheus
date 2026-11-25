@@ -394,8 +394,9 @@ val decode : view -> query -> int -> int -> value
 A question has `vars` variables, numbered 0 to `vars - 1`, and patterns whose thing (`e`) and value (`v`) are a
 variable, a thing (`Thing n`) or a value (`Val x`); the property is always a constant. A variable in a thing position
 is a link; a variable's type is the type of the properties it appears with, and must be one type. `ranges` keep
-`lo <= x <= hi` for a variable of a type whose index word is the value (int, date, money, bool, link); several ranges
-on one variable intersect.
+`lo <= x <= hi` for a variable of a type whose index word is the value (int, date, money, bool, link), read from the
+sorted index, or of a float, its bounds floats and each candidate checked in IEEE 754's totalOrder (the order of
+`sort`: `-0.` before `0.`, NaN after infinity); several ranges on one variable intersect.
 
 `find v q` returns every binding that makes every pattern a fact of the view, each once (G11), as arrays indexed by
 variable; their order is not specified. A constant the view has never seen (a text never written), or a pattern with
@@ -425,7 +426,7 @@ the fold read; it raises `Invalid_argument` for a variable out of the question o
 `Unreadable` when the text's page cannot be read.
 
 Errors of both: `Invalid` (an unknown property, a variable out of range or in no pattern or of two types, a constant
-of the wrong type, a range on a text or float variable) and `Damaged` (a page that cannot be read or does not check).
+of the wrong type, a range on a text variable, a float's range with bounds of another type) and `Damaged` (a page that cannot be read or does not check).
 
 ```ocaml
 open Cepheus
@@ -494,6 +495,7 @@ How a question is answered, and what it costs: [architecture](architecture.md#qu
 module Question : sig
   type item = Pattern of pattern | Range of int * value * value | In of int * value list | Prefix of int * string
             | Not of item list | Or of item list list
+            | Less of int * int | Less_or_equal of int * int | Optional of pattern
   type key = { col : int; desc : bool }
   type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
 end
@@ -502,9 +504,15 @@ val ask : ?timeout:float -> view -> Question.t -> (value array list, error) resu
 
 Its names are in the module `Question`, so that `open Cepheus` brings only `Question` and `ask` beside the names it
 always brought (a program's own `Not` or `Pattern` stays its own); `Question.[ ... ]` opens it for a list of items.
-`ask v q` answers a question with `Not`, `Or`, `In` and `Prefix` beside its patterns and ranges, and gives its rows
-sorted, cut and paged: the same meaning and the same bounds as from Cesia ([Not, Or and In](cesia.md#not-or-and-in),
-[Prefix](cesia.md#prefix-the-start-of-a-text), [pages](cesia.md#sort-limit-and-after-pages)). `give` names the
+`ask v q` answers a question with `Not`, `Or`, `In`, `Prefix`, `Less`, `Less_or_equal` and `Optional` beside its
+patterns and ranges, and gives its rows sorted, cut and paged: the same meaning and the same bounds as from Cesia
+([Not, Or and In](cesia.md#not-or-and-in), [Prefix](cesia.md#prefix-the-start-of-a-text),
+[pages](cesia.md#sort-limit-and-after-pages), [Less and Optional](cesia.md#less-lessorequal-and-optional)).
+`Less (x, y)` keeps $x < y$ and `Less_or_equal (x, y)` $x \le y$, two variables of one type (not bools), in the
+order of `sort`. `Optional p` gives, for each row of the other items, a row for each value of `p` (its thing a
+variable that a pattern binds, or a `Thing`; its value a variable in no other item), or one row whose cell is
+`Value.missing` (`Link min_int`, an id no thing has: a value of rows only, never of a fact; `Value.is_missing` tells
+it); a missing cell sorts after every value, in both directions, and an `after` row may hold it. `give` names the
 variables of each row (empty: every variable of the question); a key's `col` is a column of `give`; `limit` 0 gives
 every row; `after` is a row of `give`'s columns. `find` and `query` are unchanged: a question of patterns and ranges,
 given every variable, has the rows `find` gives.
@@ -532,6 +540,41 @@ let () =
 ```output
 "Ada"
 "Abel"
+```
+
+`Less` and `Optional`: the invoices paid after their due date, and every client with its phone or without:
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; phone; due; paid ]) =
+    declare db [ prop "client/name" Ttext; prop "client/phone" Ttext; prop "invoice/due" Tdate; prop "invoice/paid" Tdate ]
+  in
+  ignore (write db [ Add (-1, name, Text "Ada"); Add (-1, phone, Text "0601"); Add (-2, name, Text "Bo") ]);
+  ignore (write db [ Add (-1, due, Date 1000); Add (-1, paid, Date 2000); Add (-2, due, Date 3000); Add (-2, paid, Date 3000) ]);
+  let v = view db in
+  let show = function
+    | Ok rows -> List.iter (fun r -> print_endline (String.concat " " (Array.to_list (Array.map Value.to_string r)))) rows
+    | Error e -> print_endline (message e)
+  in
+  show
+    (ask v
+       { Question.vars = 3;
+         items = Question.[ Pattern { e = Var 0; p = due; v = Var 1 }; Pattern { e = Var 0; p = paid; v = Var 2 }; Less (1, 2) ];
+         give = [| 0 |]; sort = []; limit = 0; after = None });
+  show
+    (ask v
+       { Question.vars = 3;
+         items = Question.[ Pattern { e = Var 0; p = name; v = Var 1 }; Optional { e = Var 0; p = phone; v = Var 2 } ];
+         give = [| 1; 2 |]; sort = [ { Question.col = 1; desc = false } ]; limit = 0; after = None })
+```
+
+```output
+#65538
+"Ada" "0601"
+"Bo" missing
 ```
 
 ## The cache
