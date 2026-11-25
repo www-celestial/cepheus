@@ -11,16 +11,26 @@
 open Cepheus
 open Cepheus_vault
 
-type cell = { m : Mutex.t; mutable vault : Vault.t option; dir : string; disk : Disk.t; master : unit -> (string, string) result }
+type cell = {
+  m : Mutex.t;
+  mutable vault : Vault.t option;
+  dir : string;
+  disk : Disk.t;
+  master : unit -> (string, string) result;
+  existing : unit -> (string, string) result;  (* the master key, never made (a Raft follower's) *)
+}
 
-let cell ?(disk = Disk.real) ~master dir = { m = Mutex.create (); vault = None; dir; disk; master }
+let cell ?(disk = Disk.real) ?existing ~master dir =
+  { m = Mutex.create (); vault = None; dir; disk; master; existing = Option.value existing ~default:master }
 
-let vault c =
+(* the vault, opened at its first use; [make] false: with a master key that exists, never one made (a Raft cluster's
+   servers share one: a follower that lacks it must not make another) *)
+let vault ?(make = true) c =
   Mutex.protect c.m (fun () ->
       match c.vault with
       | Some v -> Ok v
       | None -> (
-        match c.master () with
+        match (if make then c.master else c.existing) () with
         | Error m -> Error m
         | Ok key -> (
           match Vault.open_ c.disk c.dir ~master:key with
@@ -33,9 +43,9 @@ let close c = Mutex.protect c.m (fun () -> Option.iter Vault.close c.vault; c.va
 
 let log_made = ref (fun (_ : string) -> ())
 
-(* the 32 bytes of [path], made when missing (written beside and renamed: whole or not at all); refused when it is a
-   link, has another size, or is readable by anyone but its owner *)
-let master_file path =
+(* the 32 bytes of [path], made when missing (written beside and renamed: whole or not at all) unless [make] is false;
+   refused when it is a link, has another size, or is readable by anyone but its owner *)
+let master_file ?(make = true) path =
   let read () =
     match Unix.lstat path with
     | st when st.st_kind <> Unix.S_REG -> Error (path ^ " is not a plain file")
@@ -45,6 +55,8 @@ let master_file path =
   in
   match Unix.lstat path with
   | _ -> read ()
+  | exception Unix.Unix_error (Unix.ENOENT, _, _) when not make ->
+    Error (path ^ " is missing: the servers of a Raft cluster share one vault key; copy the leader's here (mode 0600)")
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> (
     let tmp = path ^ ".tmp" in
     match

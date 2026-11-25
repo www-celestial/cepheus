@@ -262,7 +262,8 @@ rounds; open the listeners (a socket file left by a server that died is removed;
 server answers on is refused); start the I/O domains; tell systemd it is ready (`READY=1` on `$NOTIFY_SOCKET`, one
 datagram: `sd_notify(3)`). The server prints one line: the time of the opens, each database's group, the listeners.
 
-**Stop** (`SIGTERM`, `SIGINT`, `cepheus stop`). No new connection; new requests get `Err stopping`; the writes in
+**Stop** (`SIGTERM`, `SIGINT`, `cepheus stop`). A Raft cluster's leader first hands its leadership over
+([below](#a-clean-stop-of-the-leader-leadership-handed-over)). No new connection; new requests get `Err stopping`; the writes in
 flight become durable and are answered; each database is closed cleanly (its journal forced, its `closed` marker: the
 next open forces nothing) and its session table saved; the commit buffer's files are removed; the socket file is
 removed; exit 0.
@@ -1176,7 +1177,11 @@ key = "/etc/cepheus/srv1.key"
 The three start from **empty data directories**: each database gets the same id on every server (from the cluster's
 id and the database's name) and the same first group, and every later group comes through the cluster's log. A data
 directory written by a single server is refused (`was not made by this Raft cluster`): growing a server into a
-cluster is not built. With 1 `[[peer]]` a server is alone, with 2 it is a primary and its replica
+cluster is not built. Files ([below](#the-vaults-files-in-a-cluster)) need one `vault.key` shared by every server:
+the first file put on the leader makes it beside the leader's `cluster.toml` if it is missing, as on a single
+server; copy it (mode 0600) beside the other servers' `cluster.toml`, as the certificates are copied. A server whose
+data directory was lost starts again empty and takes a copy of the databases from the leader
+([below](#a-server-behind-the-logs-start-a-copy-of-the-databases)). With 1 `[[peer]]` a server is alone, with 2 it is a primary and its replica
 ([above](#a-replica)), with 3 or more a Raft cluster: one way to fail over a cluster of each size. In a Raft cluster,
 `cepheus replicate` and `cepheus promote` are refused, and `DATA/cepheus.role` must not exist. An even number of
 servers works, but adds a machine that can fail without adding a failure the cluster survives (a majority of 4 is 3).
@@ -1197,18 +1202,79 @@ back from a journal, a run, or a view.
 Every frame a database makes goes through the log: a write's (an `Incr` included, its counter read at its point on
 the leader), a load's, and the group of a change of the rules computed in the background
 ([rules](rules.md#changes-of-the-rules-in-the-background)), proposed alone once nothing else is in flight. A change
-that runs while its leader stops leading is answered `not_leader`, nothing of it written. An entry is one wire frame:
-a group is at most 8 MiB in a cluster, and a load takes the ordinary path of the writer (not the path of large groups,
-which writes a frame by pieces before it is durable); a group past 8 MiB is refused whole (`invalid`, "over the frame
-limit of 8388608"): a load is split into groups; a change of the rules whose consequences pass it cannot be
-(large entries in pieces are not built).
+that runs while its leader stops leading is answered `not_leader`, nothing of it written.
+
+**Large groups in pieces.** A frame of more than a MiB goes through the log in **pieces** of a MiB, entries proposed
+at once, one after the other among that database's, in the leader's term; each is replicated, forced and committed
+as any entry, and the frame is applied whole, on every server, when the entry of its last piece is (read back from
+the log then: a follower holds a group in transit on its disk, not in its memory). A sequence that is not whole when
+an entry of a newer term comes (its leader changed), or a frame or a first piece of the same database, is never
+applied, on any server: each decides it from the committed log alone, so all decide alike, and a group is applied
+whole or not at all. The log is not cut, and no copy of the databases is made, inside a sequence still open. A group
+is at most 256 MiB in a cluster (the journal's bound; past it `invalid`, "over the frame limit"); a request is at most
+16 MiB on the wire, so that a group past that is a change of the rules' consequences. A load takes the ordinary path
+of the writer, not the path of large groups (which writes a frame into the journal by pieces before it is
+committed).
 
 The log is `DATA/raft/` (0700): segments `log.<first index>` (0600), each a header and **rounds**, a round being the
 entries of one fsync, checked by CRC-32C as a journal's frames are ([formats](formats.md#the-servers-files)); and
 `DATA/raft/state` (0600), the server's term, its vote, and its repair mark, written beside, forced and renamed. Each
 second, once every database's journal is forced, the log's whole segments that every journal holds and every server
-holds are removed. A server that recovers writes the frames the log knows committed again into the journals, cuts each
-journal after them, and applies the rest once it learns how far the cluster committed.
+holds (the **floor**, as far as the leader knows) are removed. The floor waits for no server silent for five minutes,
+nor for one that needs a copy of the databases anyway (below): a dead machine no longer makes the log grow without
+end. A server that recovers writes the frames the log knows committed again into the journals, cuts each journal after
+them, and applies the rest once it learns how far the cluster committed.
+
+### A server behind the log's start: a copy of the databases
+
+A follower the leader can no longer send entries to, because they come before the leader's log start (it was down
+longer than the floor waits, its log was damaged, or its data directory is new), takes a **copy of the databases**:
+the role of InstallSnapshot in Raft (Ongaro's thesis, chapter 5). The leader sends it `Snap`, the index before its
+log's start and that entry's term; a follower that holds that entry (or whose own start is past it) answers as to an
+Append, and one that does not asks the leader for a copy on the peer port (`Copy`, peer protocol 3):
+
+1. The leader reads its **applied index** X (every entry up to it is in its databases) and X's term, pins X (its log
+   keeps the entries after X while it sends, and a minute after), then copies each database as `cepheus backup`
+   does: its id and history, its session table, its runs (each opened before the journal is listed: a merge that
+   removes one meanwhile does not take it away), its journal's segments, then its vault (packs, then keys), each file
+   up to the size it had when opened, sent in frames of a MiB with its path and size first.
+2. The follower writes them into `DATA/raft/copy.partial/` (folders 0700, files 0600, each forced), refusing a path
+   outside those a database holds, a file of more bytes than it said, a database its `cluster.toml` does not name,
+   and a copy larger than its free space (statvfs) less 64 MiB. Then each database is checked as
+   [`cepheus verify`](#commands) checks one (every frame's CRCs and groups numbered from 1, every run's pages, the
+   runs against the journal, the vault's records): its id must be the cluster's, its newest group at least the one the
+   follower holds; the frame being written when it was copied is cut. A copy that fails any of it is removed, never
+   applied, and the follower tries again later (1 s, doubling up to 30 s).
+3. Raft decides: a follower whose log holds entry X of the same term keeps its log, the copy is dropped (Raft's rule:
+   its entries after X may have been acknowledged); otherwise it answers nothing from then on, writes the copy's index,
+   renames the folder `DATA/raft/copy/` (the commit point), stops cleanly and starts again in the same process. Before
+   its databases open, each is replaced by its copy, the log is made to start at X + 1, and the folder is removed
+   last. A copy cut by a crash or a `kill -9` of either side is removed at the next start or by the next try; one
+   committed is installed, a crash inside the install repeating it.
+4. The follower then applies the leader's entries after X: those whose groups the copy holds already (the leader
+   applied more while it copied) are skipped, group by group.
+
+A copy needs no new command and no stop of the cluster: `cepheus status` says `raft.copy` while one is taken (its
+bytes so far) and what the last one did.
+
+### A server started on an empty data directory
+
+A server's term, vote and log must outlive it: Raft's safety rests on them. One whose data directory was lost (a
+disk replaced) may have voted, in a term still running, for a candidate it would vote against now, and acknowledged
+entries that a majority committed with it: started empty and taking part at once, it could elect a second leader in
+that term, or elect a leader that lacks a committed entry. So a server that starts with no Raft state is **fresh**:
+it answers no vote and no Append, takes no term, stands for nothing, and asks every peer its state (`Ask`: its term,
+its last index, whether it is fresh; a damaged server answers nothing). It ends its freshness with the answers of ⌊n/2⌋ + 1 other servers
+neither fresh nor damaged (every majority that elected a leader or committed an entry with its vote holds one of
+them, which still holds what it acknowledged): its term becomes
+their newest, its vote in it its own (it may have voted in it), and its repair mark their newest last index, so that
+by [the 2018 rule](#a-damaged-log-the-2018-rule) it votes again only once it holds every entry up to there from a
+server that knows them committed. In practice it then takes a copy of the databases and follows. A new cluster is a
+majority, itself included, of fresh servers, or one whose every other server answered with no history (fresh, or of
+term 0 and an empty log: ended its freshness that way and heard of no election since): they end their freshness and
+elect a leader. What it does
+not cover: a majority that lost its data at once (or never had it: a server that took part in nothing, beside one
+whose disk was lost): what only that majority held is lost, as in any Raft cluster.
 
 ### Elections
 
@@ -1231,6 +1297,18 @@ longer by default ("By default, etcd uses a 100ms heartbeat interval", "By defau
 timeout", its tuning guide for v3.5), and asks that "Election timeouts must be at least 10 times the round-trip time":
 on a LAN (0.1 to 0.5 ms) 500 ms is a thousand round trips.
 
+### A clean stop of the leader: leadership handed over
+
+`cepheus stop` on the leader (SIGTERM) first hands its leadership over (Ongaro's thesis, section 3.10): the leader
+gives up its lease and takes no more writes (a program's library sends them again to the new leader, in its session:
+G14), waits until the most up-to-date follower it heard from lately holds its whole log forced, and sends it
+`Timeout_now`. That follower stands for election at once, with no pre-vote, asking `Vote_now`: a voter grants it
+despite having heard from the leader (the thesis' flag, section 4.2.3), on the same rules otherwise (one vote a term,
+a log at least as up to date, not damaged, not fresh). The new leader is elected in one vote round instead of an
+election timeout, and the stop goes on. The lease is given up before anything leaves: the votes that follow do not
+wait for the promises it rests on, so the old leader serves no read once a new one may be elected. After two election
+timeouts without a new leader the stop goes on anyway. A follower's stop is as before.
+
 ### Reads, and what a program sees
 
 Only the leader serves reads and writes. A read on the leader is **linearizable** (it sees every write confirmed
@@ -1252,8 +1330,24 @@ that was in flight when its leader stopped leading gets the same treatment: appl
 answers its resend from its session table if it was committed.
 
 What is not there yet: local reads (`Follow`) on a cluster's servers (`denied`: the library reads through the
-socket); reads on followers under leases of their own (design 8.4); the vault's files (`Put` and `Erase` are refused);
-watches move to the leader only when the program opens them again.
+socket); reads on followers under leases of their own (design 8.4); watches move to the leader only when the program
+opens them again.
+
+### The vault's files in a cluster
+
+`Put`, `Load` and `Erase` go to the leader, as reads and writes do. A Put's bytes are stored in the leader's vault
+(sealed, deduplicated: [the vault](vault.md)); then, before the file's facts are written, every record of the file's
+tree (its nodes and chunks, sealed, the same bytes everywhere since a record's nonce is its name) and its domain's
+key (sealed by the master key) go through the log in entries of about a MiB, at most 16 MiB of them waiting for their
+commit at a time; the Put's connection waits until a majority holds them forced, then writes the facts as any write.
+Every server applies these entries to its own vault, in the log's order, forced, before the next entry: a fact never
+names a file whose records a server lacks (G22), and a new leader gives the file's bytes. An `Erase` is an entry
+too, applied by every server once committed: the domain's key destroyed everywhere. A file is retracted as any facts
+are; its bytes stay, as on a single server.
+
+The servers share one `vault.key` ([setting one up](#setting-one-up-1)). A follower never makes one: one that lacks it,
+or holds another, cannot apply a file's entries; it tries again every 2 s, says so in the log once a minute and in
+`cepheus status` (`raft.files`), and applies nothing after them meanwhile, until the leader's key is copied there.
 
 ### A damaged log: the 2018 rule
 
@@ -1269,24 +1363,42 @@ that index from a leader whose commit index reaches it; meanwhile it stores and 
 any follower. The rule is ours, informed by the paper (whose own recovery, CTRL, fetches the damaged entries from
 the other servers); its proof is the TLA+ model below, where the same server voting as if its log were shorter loses a
 committed entry. The cost is availability, never safety: if a majority is damaged at once, no leader is elected until
-an operator repairs one. A damaged `DATA/raft/state` (its CRC does not match) refuses the start: the server cannot know
-the votes it gave.
+a damaged server repairs itself from a peer (below). A damaged `DATA/raft/state` (its CRC does not match) refuses the
+start: the server cannot know the votes it gave.
 
-### The peer protocol, version 2
+**Repaired by any peer.** A damaged server waits for no leader: when its election timeout passes (it stands for
+nothing), it asks every peer for the entries after its commit index (`Fetch_entries`). A peer that is neither damaged
+nor fresh gives those its own commit index covers, and only those (`Entries`): a committed entry is the same on every
+server, so the damaged one takes them as from a leader, a conflicting entry of its own cut (it was not committed),
+and its repair ends once it holds every entry up to its mark, forced, from a peer whose commit index reaches it. A
+peer whose log starts after the damaged one's end says so, and the damaged one takes a copy of the databases from it.
+So a cluster whose majority is damaged at once (two of three servers' disks with a bad sector after a power loss)
+elects a leader again as soon as one sound server knows their marks committed, which the paper's CTRL does by asking
+the others too. It stays without a leader only when no sound server does (entries a damaged majority alone held): the
+operator then restores the damaged servers ([backups](production.md#backups)).
 
-On the peer port, in the frames of [the protocol](#framing): `PeerHello` says version 2; a peer of version 1 is
-refused with `version`. `Raft` (kind 27) turns a connection into a stream of Raft's messages, one way, from the
+### The peer protocol, version 3
+
+On the peer port, in the frames of [the protocol](#framing): `PeerHello` says version 3; a peer of version 2 is
+taken (a rolling upgrade: a server refused with `version` tries again saying 2, and is never sent what version 3
+adds; a follower of version 2 behind the leader's start stays behind, as before), one of version 1 is refused with
+`version`. `Raft` (kind 27) turns a connection into a stream of Raft's messages, one way, from the
 certificate's peer, each a frame of kind 28 (id 0): `Pre_vote` and `Vote` (a term, the asker's last index and term),
 their replies (granted, a term), `Append` (the leader's term, a number, the index and term before the entries, the
 entries' terms and bytes, the commit index, and the floor: the newest index every server holds), and its reply (ok and
-the newest index held forced, or refused and where to try again). Each server keeps one connection to each other
+the newest index held forced, or refused and where to try again). Version 3 adds `Snap` (the index before the leader's
+log start, its term, the commit index, the floor), `Ask` and `State` (a fresh server's question and a peer's term,
+last index and freshness), `Timeout_now` (a term) and `Vote_now` (as `Vote`), `Fetch_entries` (an index) and `Entries`
+(as an Append's entries, all committed), and `Copy` (kind 29: a copy of the databases, its frames `Begin` with the
+index, its term, the bytes and the databases, `File` with a database, a path and a size, `Bytes`, `End`). Each server keeps one connection to each other
 server for what it sends; replies come back on the other's. A message older than an election timeout in a sender's
 queue is dropped (Raft sends again what matters).
 
 `cepheus status` says `raft.role` (leader, follower, pre-candidate, candidate), `raft.term`, `raft.leader`,
 `raft.ready` (a leader whose no-op is committed and applied), `raft.commit`, `raft.applied`, `raft.log` (the indexes it holds), `raft.forced`, and on the leader, for each other
-server, `raft.peer.srv2: match M, next N`; `raft.repair` while the 2018 rule holds a server back, `raft.failed` if its
-disk failed (the server then stops, as on any failed disk).
+server, `raft.peer.srv2: match M, next N`; `raft.repair` while the 2018 rule holds a server back, `raft.copy` while a
+copy of the databases is taken and what the last one did, `raft.files` while a file's entries wait for the
+cluster's `vault.key`, `raft.failed` if its disk failed (the server then stops, as on any failed disk).
 
 ### Security of a cluster
 
@@ -1303,7 +1415,21 @@ disk failed (the server then stops, as on any failed disk).
   ([above](#a-damaged-log-the-2018-rule)).
 - **Denial of service.** At most 256 peer connections, two Raft streams a peer (an older one is closed), 4,096 messages
   queued for a peer (then dropped: Raft sends again what matters), messages older than an election timeout dropped.
-- **Files.** `DATA/raft/` 0700, its state and segments 0600.
+- **A copy of the databases is checked before it is used.** Only from a listed peer, over the same mutual TLS; every
+  path is one a database holds (`../` or any other name refused), every file exactly its announced size, the whole
+  no larger than the free space less 64 MiB (a peer cannot fill the disk); each database checked as `cepheus verify`
+  checks one, its id the cluster's, its newest group at least the follower's (a copy behind it is refused); only then
+  committed, and installed at the next start. A damaged or lying copy is removed, never applied.
+- **A group in pieces is applied whole or not at all.** A piece's offset and length are checked against its frame's
+  length (at most 256 MiB) before anything is allocated; the frame is put together only when its sequence is whole,
+  and its header, body and trailer CRCs are checked before it is applied, as any committed frame's; a broken sequence
+  is never applied, on any server.
+- **Repair takes committed entries only.** A peer gives a damaged server only the entries its own commit index covers,
+  and the damaged server refuses any past the commit index the message carries; a damaged or fresh peer gives none.
+- **A server that lost its data takes no part** until a majority of the others told it their terms and logs (the
+  fresh rule above): it neither votes twice in a term nor elects a leader that lacks what it had acknowledged.
+- **Files.** `DATA/raft/` 0700, its state, segments and copies 0600; the cluster's `vault.key` 0600, never made by a
+  follower.
 - **What it does not stop.** A peer whose key is stolen can disturb elections (a high term) or, elected, write
   entries: keep the peers' keys as the CA's, readable by the server's user only.
 
@@ -1351,45 +1477,98 @@ timeout's draw (500 to 1,000 ms after the last heartbeat) is most of it; then a 
 the no-op (one fsync). With the library's former pause (doubling up to 1 s), the program waited 1,290 ms at the
 median for a leader ready at 772: in a cluster its pause now stops at 50 ms.
 
+**A clean stop of the leader** ($n = 21$: three servers on the SSD, a program writing without pause, `cepheus stop` on
+the leader): its writes paused 350 ms at the longest (median; 96 to 469 ms; the longest of the 21: 1,080 ms), none lost, the
+leadership handed over each time (in 56 ms at the median, 19 to 733), the machine loaded (3.3 to 4.6 on 8 cores: other
+work ran); against 910 ms for a leader killed (above). The pause is the leader's last writes committed, the new
+leader's vote round (one fsync) and its no-op (one fsync), then the library's 50 ms. Its tail is a slow handover or the
+old leader's own stop, the three servers sharing one disk here (a series before it, on the same machine, had three
+pauses of 2.3 to 4.3 s): to be measured again on three machines. etcd does
+the same at a leader's stop ("When stopping leader, Stop transfers its leadership to one of its peers before
+stopping the server": its server's `Stop`, [server.go](https://github.com/etcd-io/etcd/blob/main/server/etcdserver/server.go));
+PostgreSQL has no failover of its own ("PostgreSQL does not provide the system software required to identify a
+failure on the primary and notify the standby database server",
+[failover](https://www.postgresql.org/docs/current/warm-standby-failover.html)): a switchover there is a promotion
+by a tool beside it. Not measured here.
+
+**A follower that lost its data** (one run, not a series: three servers on the SSD of one machine; 10 M facts loaded
+through the leader in 81.3 s, then 40,000 texts of 400 bytes so that the log's start passes a segment; 79.0 MB of
+databases on the leader; a follower killed, its data directory removed, started again): it held every group 4.7 s
+after its start (4,706 ms; the machine's load 1.6 when the run began, 5.9 at its end, its own servers included): its
+copy of the databases taken over TLS, checked as `cepheus verify` checks one, installed, the server started again on
+it, the log's tail applied. Beside the giants: a new PostgreSQL standby starts from `pg_basebackup`, 22.53 s at the
+median for the same 10 M facts on this machine ([backups](benchmarks.md), measured on 2026-11-24, not beside this
+run), before it replays the WAL written since; etcd sends a follower behind its log a snapshot that "contains: raft
+status (term, conf), a snapshot of v2 store inside raft.Snapshot as []byte, a snapshot of v3 KV in the top level
+message as ReadCloser" (its whole backend database,
+[snapshot_merge.go](https://github.com/etcd-io/etcd/blob/main/server/etcdserver/snapshot_merge.go)); not measured
+here. One run gives no interval: a series of 21 is still to be made.
+
+**A group of 100 MiB** (one run, on a new cluster, the machine's load 1.6: a rule whose consequences copy 25,600
+texts of 4 KiB): from the write to its receipt 3.2 s (3,208 ms): about 100 pieces of 1 MiB through the log, each
+forced on a majority, then the frame put together, checked and applied; a series of 21 is still to be made. etcd refuses it: "By default, the maximum size of any request is 1.5
+MiB" ("etcd is designed to handle small key value pairs typical for metadata",
+[limits](https://etcd.io/docs/v3.5/dev-guide/limit/)); PostgreSQL streams such a transaction's WAL to its
+synchronous standby as it is written: not measured here.
+
 ### How it is proved
 
 - **TLA+** (`spec/Raft.tla`, checked by `tools/tlc.sh`): the cluster's algorithm with Pre-Vote left free (any server may
   stand for election: a superset of what pre-votes allow), stickiness, the no-op, durable votes, acknowledgements of
-  forced entries only, restarts that lose what was not forced, the 2018 rule, and the lease. Messages are lost,
-  delayed, reordered and duplicated. Invariants: at most one leader a term, logs that agree on an entry agree before
-  it, every later leader holds every committed entry, no two entries committed at one index, a read under the lease
-  sees every committed entry. Checked by parts, each exhaustively within its bounds (3 servers, terms up to 2, logs
-  of 2 entries, 2 messages in flight; TLC 1.7.4): the elections and the log with a restart that loses what was not
-  forced (14,136,156 distinct states, the whole graph to depth 71), the 2018 rule with a damaged server (5,786,757
-  states, depth 58), and the lease with a restart (5,853,164 states, depth 49): no invariant broken. Each rule removed
-  alone breaks one, TLC printing the steps: committing entries of older terms by counting (LeaderCompleteness, the
-  paper's Figure 8, with terms up to 4: 1,083,149 states), a vote forgotten at a restart (ElectionSafety), an
+  forced entries only, restarts that lose what was not forced, the 2018 rule, the lease, and this release's additions:
+  the log's start moved behind what a server knows committed with no floor at all (any server, any time), copies of the
+  databases at any index a server knows committed, given by any server and installed under Raft's rule; lost disks (a
+  server's whole state gone, while the damaged and the lost stay a minority) and the fresh servers' rule; the handover
+  (TimeoutNow, votes despite a promise); and repair by any peer (committed entries given to a damaged server). Messages
+  are lost, delayed, reordered and duplicated. Invariants: at most one leader a term, logs that agree on an entry agree
+  before it, every later leader holds every committed entry, no two entries committed at one index, a read under the
+  lease sees every committed entry, and what a server takes for committed (its databases, its commit index) was
+  committed. Checked by parts, each exhaustively within its bounds (3 servers, terms up to 2, logs of 2 entries, 2
+  messages in flight; TLC 1.7.4): the elections and the log with a restart that loses what was not forced (14,136,156
+  distinct states, the whole graph to depth 71), the 2018 rule with a damaged server (5,786,757 states, depth 58), the
+  lease with a restart (5,853,164 states, depth 49), copies and the log's start (33,671,601 states, depth 51), a lost
+  disk with logs of one entry (1,079,221 states, depth 43), the handover under the lease (6,220,449 states, depth 50),
+  and repair by any peer with a damaged server (20,193,842 distinct states, depth 59): no invariant broken. Each rule
+  removed alone breaks one, TLC printing the steps: committing entries of older terms by counting (LeaderCompleteness,
+  the paper's Figure 8, with terms up to 4: 1,148,600 states), a vote forgotten at a restart (ElectionSafety), an
   acknowledgement before the fsync (LeaderCompleteness), votes that ignore the logs (LeaderCompleteness), a damaged
-  server that votes as if its log were shorter (LeaderCompleteness: the paper's failure), a promise that ends before
-  the lease it supports, a server that votes right after it starts, votes granted despite a promise, and reads before
-  the no-op is committed (each: ReadFresh, a stale read).
+  server that votes as if its log were shorter (LeaderCompleteness: the paper's failure), a promise that ends before the
+  lease it supports, a server that votes right after it starts, votes granted despite a promise, and reads before the
+  no-op is committed (each: ReadFresh, a stale read); and this release's: a copy installed over a log that holds its
+  last entry (its acknowledged entries after it dropped: CommitInLog), a copy past what its giver knows committed
+  (CommittedPrefix), a fresh server that ends its freshness on one answer (LeaderCompleteness, 183,077 states), or
+  without the repair mark (LeaderCompleteness), a leader that keeps its lease while it hands over (ReadFresh: the new
+  leader commits while the old one reads), and a repair given entries past the giver's commit index (CommittedPrefix).
 - **Simulation** (`raft_sim`, 3 and 5 servers, one seed deciding everything, `--seed N` replays it): the server's own
-  Raft core and log, each server on a simulated disk with its own clock (up to 3 % apart); messages lost, duplicated and
-  reordered; partitions (a server alone, a minority, a link cut one way); process deaths, power losses (unforced bytes
-  lost or torn), deaths inside a disk call, a forced byte of the log flipped before a restart, slow fsyncs (up to
-  300 ms), pauses (up to 400 ms). Checked: at most one leader a term; every entry applied anywhere is the committed
-  log's; every write a client was told committed is in the final log at its index; reads linearizable (a read at index r
-  returns the committed log's state at r, sees every write answered before it began, no write that began after it ended,
-  and no read that ended before it began saw a later index); once the faults stop, one commit and one log everywhere.
-  Seeds 1 to 300 of 3 servers and 1 to 100 of 5: no failure (50,103 and 16,616 checks; `tools/test.sh` runs 100 and 50).
-  Counted apart: 16 runs end with a follower behind its leader's log start, and 5 with a damaged majority electing no
-  leader (the catch-up and the repair by any peer are not built yet, above). On its way it found six bugs, each fixed
-  before this release: a deposed leader telling a program "committed" for an index a new leader had filled; a commit
-  hint written beside entries that a later truncation replaced, then taken for committed after a crash; damage at the
-  log's last round taken for a torn tail and cut (the 2018 failure itself); a refusal amplified into a storm of probes
-  by duplicated messages; a follower that cut its log past what others still needed; and a pre-vote that a server behind
-  in terms could never win.
+  Raft core, log and entries (frames, pieces), each server on a simulated disk with its own clock (up to 3 % apart);
+  messages lost, duplicated and reordered; partitions (a server alone, a minority, a link cut one way); process
+  deaths, power losses (unforced bytes lost or torn), deaths inside a disk call, a forced byte of the log flipped
+  before a restart, a whole disk lost, slow fsyncs (up to 300 ms), pauses (up to 400 ms), servers started at
+  different times, clean stops of the leader with its handover; one write in eight a large one in pieces; copies of
+  the state machine that take 20 to 420 ms, break when either side dies, one in ten damaged on its way. Checked: at
+  most one leader a term; every entry applied anywhere is the committed log's; a large write applied whole or not at
+  all; every write a client was told committed is in the final log at its index; reads linearizable (a read at index
+  r returns the committed log's state at r, sees every write answered before it began, no write that began after it
+  ended, and no read that ended before it began saw a later index); once the faults stop, one commit and one log
+  everywhere. Seeds 1 to 2,000 of 3 servers and 1 to 1,000 of 5: no failure (226,632 and 117,016 checks; 1,045 and
+  612 copies installed, 232 broken by the death of their source, 108 refused as damaged; 1,346 and 749 disks lost;
+  2,710 and 1,604 handovers; `tools/test.sh` runs 100 and 50). Counted apart: 53 runs of 3 servers and 3 of 5 end
+  with a damaged majority that no sound server can repair (entries only it held: the 2018 rule's cost, above). On
+  its way it found, beside the six bugs of the release before: a server that lost its disk voting again in a term it
+  had voted in, and taking a leader that lacked what it had acknowledged (the fresh rule); a damaged server counted
+  as a sound answer by a fresh one; two fresh servers each waiting for the other's freshness to end; and a copy made,
+  or the log cut, inside a frame's pieces (the follower then lacked its first pieces).
 - **Real servers** (`server_raft`): three servers over mutual TLS on loopback; a program connected to a follower writes
   through the leader; the leader killed (kill -9) while a program writes, a new one elected, every write the program
   was told committed there, a write sent again in its session answered with its first receipt; the old leader back
-  as a follower, caught up; refusals at the peer port; the files' modes; a load, a change of the rules beside groups
-  that count with one counter, a load past 8 MiB refused whole, then the leader killed: the new one holds the load,
-  the change's consequences and the counter, nothing of the refused load.
+  as a follower, caught up; refusals at the peer port; the files' modes; two files put through the leader, read back
+  there and on the next leader, a follower without `vault.key` waiting then taking them once it is copied, an
+  owner's files erased everywhere; `cepheus stop` on the leader under writes, handed over, none lost; two servers'
+  logs damaged at once, repaired from the third, a leader again, nothing lost; a load, a change of the rules beside
+  groups that count with one counter, a load past 8 MiB in pieces, the leader killed: the new one holds them all; a
+  rolling restart; loads past a segment of the log, then a follower's data directory removed: it takes a copy and
+  follows, the same with it killed during its copy and with its source killed during it; a group of 32 MiB in pieces,
+  with a follower killed during it, then with the leader killed during it: all of it or none on every server.
 
 ## Security
 
@@ -1670,16 +1849,17 @@ Raw numbers and scripts: the job's measurement files (not in the repository) wer
   readers of one machine (each reader keeps its own cache: [what it costs](#what-it-costs)).
 - A replica does not copy the files of the vault yet, a client does not move to the new primary by itself, and a
   promotion is made by hand ([a replica](#a-replica)).
-- In a Raft cluster ([above](#a-cluster-of-three-raft)): adding or removing a server (one at a time, learners first),
-  a server that joins with data or falls behind the leader's log start (a catch-up from the journals), local reads,
-  the vault's files, a group over 8 MiB, a damaged server repaired by any peer (not only by a leader), leadership
-  handed over at a clean stop, and the Cesia client following `not_leader`.
+- In a Raft cluster ([above](#a-cluster-of-three-raft)): adding or removing a server (a command, `cepheus cluster
+  add` and `remove`, one at a time, learners first, the copy of the databases above beneath it), a single server's
+  data directory grown into a cluster, local reads, and the Cesia client following `not_leader`.
 
 What is built: the Cesia client ([Cepheus from Cesia](cesia.md)), by which a Cesia program reaches a database through
 a server only, by `cepheus.Connect`, and reads locally on the server's machine; live questions on the wire
 ([above](#live-questions-watch)); many databases sharing one fsync ([the commit
 buffer](#many-databases-one-fsync-the-commit-buffer)); a replica that follows its primary ([above](#a-replica)); three
-servers that elect a leader and confirm writes on a majority ([above](#a-cluster-of-three-raft)); `Incr`, a counter
+servers that elect a leader and confirm writes on a majority, with a copy of the databases for a server behind the
+log's start, groups in pieces, the vault's files, the handover at a clean stop and repair by any peer
+([above](#a-cluster-of-three-raft)); `Incr`, a counter
 raised in its group ([groups](concepts.md#groups-a-write-is-a-transaction)). Not built: what the list above names,
 and databases held in memory only, with `Expire`. The OCaml library still opens a database directory in its own
 process (`Cepheus.open_`): it is the engine the server runs, and what its tests and benchmarks drive; programs, in

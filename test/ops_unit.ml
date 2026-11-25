@@ -57,11 +57,106 @@ let copy src dst = C.rmrf dst; ignore (Ops.copy_database src dst)
 let contains m s =
   let rec has i = i + String.length s <= String.length m && (String.sub m i (String.length s) = s || has (i + 1)) in
   has 0
-let refused f = match f () with _ -> false | exception Ops.Refused _ -> true
+let refused f = match f () with _ -> false | exception Ops.Refused _ -> true | exception e -> C.fail "escaped: %s" (Printexc.to_string e); false
+
+(* a command's exit status; an exception it lets escape is a failure, -1, and the checks go on *)
+let code f = match f () with c -> c | exception e -> C.fail "escaped: %s" (Printexc.to_string e); -1
 
 let segs dir = List.sort compare (List.filter (fun n -> Filename.check_suffix n ".seg") (Array.to_list (Sys.readdir (dir // "journal"))))
 
+(* ---- a Raft server's copy of the databases from a peer (server/catchup.ml) ----
+   The copy of [src] as a source sends it, taken by a follower whose data is in [root]/cdata: whole, installed at
+   the start (the database replaced, the log started after the copy's index); refused, nothing applied, for a byte
+   changed on its way, a path outside a database, another cluster's id, a copy behind the follower, more bytes than it
+   said, a copy cut short, a copy larger than the free space; dropped when the Raft core says its log holds the entry;
+   a partial copy left by a crash removed at the start. *)
+let catchup src =
+  let cfgf = root // "c.toml" in
+  Out_channel.with_open_bin cfgf (fun oc ->
+      output_string oc
+        "[cluster]\nname = \"c\"\nid = \"cph-c-00000000000000c1\"\nme = \"srv2\"\n[[peer]]\nname = \"srv2\"\naddress = \"127.0.0.1:7401\"\n[clients]\nsocket = \"run\"\n[storage]\ndata = \"cdata\"\n[[database]]\nname = \"main\"\n");
+  let cfg = match Config.load cfgf with Ok c -> c | Error m -> failwith m in
+  C.rmrf cfg.data;
+  Unix.mkdir cfg.data 0o700;
+  Unix.mkdir (cfg.data // "raft") 0o700;
+  let id = Engine.read_meta Disk.real src in
+  let frames = ref [] in
+  Catchup.serve ~dbs:[ "main", src ] ~start:(fun () -> 7, 2) ~renew:ignore ~send:(fun b -> frames := Buffer.contents b :: !frames)
+    ~error:(fun c m -> C.fail "the source refused: %s %s" c m);
+  let sent = List.rev !frames in
+  let run ?(id_of = fun _ -> id) ?(published = fun _ -> 0) ?(decide = fun _ _ -> true) frames =
+    let q = ref frames in
+    let next () =
+      match !q with
+      | f :: rest -> q := rest; Replica.k_copy, 0, Codec.reader (Bytes.of_string f) 0 (String.length f)
+      | [] -> raise (Replica.Broken "the peer closed the connection")
+    in
+    Catchup.fetch cfg ~source:"srv1" ~id_of ~published ~decide ~send:ignore ~next
+  in
+  let tag f = Char.code f.[0] in
+  let field f = let r = Codec.reader (Bytes.of_string f) 1 (String.length f - 1) in r in
+  let rel_of f = let r = field f in ignore (Codec.get_string r); Codec.get_string r in
+  (* the frames after the File frame of the first segment of the journal, its first Bytes frame changed *)
+  let rec change pick g = function
+    | f :: b :: rest when tag f = 2 && pick (rel_of f) && tag b = 3 -> f :: g b :: rest
+    | f :: rest -> f :: change pick g rest
+    | [] -> []
+  in
+  let flip b = let x = Bytes.of_string b in let o = min (Bytes.length x - 1) 200 in Bytes.set x o (Char.chr (Char.code (Bytes.get x o) lxor 0x41)); Bytes.to_string x in
+  let journal r = String.length r > 8 && String.sub r 0 8 = "journal/" in
+  let nothing () = not (Sys.file_exists (cfg.data // "raft" // "copy")) && not (Sys.file_exists (cfg.data // "raft" // "copy.partial")) in
+  let refused what o = match o with
+    | Catchup.Refused m -> C.check (nothing ()) "a copy refused (%s): %s; nothing left" what m
+    | Catchup.Installed _ -> C.fail "a copy taken (%s)" what
+    | Catchup.Dropped _ -> C.fail "a copy dropped (%s)" what
+  in
+  refused "a byte of a segment changed on its way" (run (change journal flip sent));
+  refused "a path outside a database" (run (change journal (fun b -> b) (List.map (fun f -> if tag f = 2 && journal (rel_of f) then begin
+      let b = Buffer.create 64 in Buffer.add_uint8 b 2; Codec.put_string b "main"; Codec.put_string b "../../evil"; Codec.put_varint b 10; Buffer.contents b end else f) sent)));
+  refused "another cluster's database" (run ~id_of:(fun _ -> "0123456789abcdef") sent);
+  refused "a copy behind this server" (run ~published:(fun _ -> max_int) sent);
+  refused "cut short" (run (List.filteri (fun i _ -> i < List.length sent / 2) sent));
+  refused "more bytes than it said" (run (List.concat_map (fun f -> if tag f = 3 then [ f; f ] else [ f ]) sent));
+  let huge = let b = Buffer.create 32 in Buffer.add_uint8 b 1; Codec.put_varint b 7; Codec.put_varint b 2; Codec.put_varint b (1 lsl 61); Codec.put_varint b 1; Buffer.contents b in
+  refused "larger than the free space" (run (huge :: List.tl sent));
+  (match run ~decide:(fun _ _ -> false) sent with
+   | Catchup.Dropped 7 -> C.check (nothing ()) "a copy the Raft core does not need: dropped, nothing left"
+   | _ -> C.fail "a copy the core does not need was not dropped");
+  (* whole: committed, installed at the start *)
+  (match run sent with
+   | Catchup.Installed 7 ->
+     C.check (Sys.file_exists (cfg.data // "raft" // "copy" // "index")) "a whole copy: committed (its index)";
+     (* a crash after the commit point, then a partial copy of a later try left too *)
+     Unix.mkdir (cfg.data // "raft" // "copy.partial") 0o700;
+     C.check (Catchup.at_start cfg = Ok ()) "installed at the start";
+     C.check (nothing ()) "the copy's folders removed";
+     let g, f = facts (cfg.data // "main") in
+     C.check (g = fst (facts src) && C.F.equal f (snd (facts src))) "the database replaced by the copy (group %d)" g;
+     let rl, r = Raftlog.open_ Disk.real (cfg.data // "raft") ~cluster:cfg.id in
+     C.check (r.start = 8 && r.prev_term = 2 && Array.length r.terms = 0) "the log starts after the copy's index (%d, term %d)" r.start r.prev_term;
+     Raftlog.close rl
+   | Catchup.Installed x -> C.fail "a whole copy installed at %d, not 7" x
+   | Catchup.Refused m -> C.fail "a whole copy refused: %s" m
+   | Catchup.Dropped _ -> C.fail "a whole copy dropped");
+  (* the install repeated after a crash in it: the index still there, the database already moved *)
+  Unix.mkdir (cfg.data // "raft" // "copy") 0o700;
+  Replica.write_private (cfg.data // "raft" // "copy" // "index") (Bytes.to_string (Raftlog.encode_copy ~index:9 ~term:3 ~source:"srv1"));
+  C.check (Catchup.at_start cfg = Ok ()) "an install a crash cut: repeated";
+  let rl, r = Raftlog.open_ Disk.real (cfg.data // "raft") ~cluster:cfg.id in
+  C.check (r.start = 10 && r.prev_term = 3 && fst (facts (cfg.data // "main")) = fst (facts src)) "repeated: the log at 10, the database kept";
+  Raftlog.close rl;
+  C.rmrf cfg.data
+(* ops_unit.exe --hold DIR: the database in DIR held open (as a server holds it) until stdin closes *)
+let hold dir =
+  match Cepheus.open_ dir with
+  | Error e -> prerr_endline (Cepheus.message e); exit 2
+  | Ok _ ->
+    print_endline "ready";
+    (try ignore (In_channel.input_all stdin) with _ -> ());
+    exit 0
+
 let () =
+  if Array.length Sys.argv = 3 && Sys.argv.(1) = "--hold" then hold Sys.argv.(2);
   Ops.quiet := true;
   C.rmrf root;
   Unix.mkdir root 0o700;
@@ -152,6 +247,12 @@ let () =
   C.check (Ops.parse_time "2026-11-24T03:00:00Z" = Some 1795489200000) "a time in UTC";
   C.check (Ops.parse_time "2026-11-24 03:00Z" = Some 1795489200000) "a time without seconds, a space for the T";
   C.check (Ops.parse_time "2026-13-24T03:00" = None) "a time that is none";
+  (* exactly its digits, a day of the calendar, 00 to 59: anything else refused, never moved to another day *)
+  List.iter (fun t -> C.check (Ops.parse_time t = None) "--to-time %S refused" t)
+    [ "2026-02-31T12:00"; "2023-02-29T12:00Z"; "1900-02-29T00:00Z"; "2026-07-01T12:00:60"; "2026-11-24T24:00Z"; "2026-11-24T10:60Z"; "2026-7-1T1:2";
+      "+026-07-01T12:00"; "2026-07-01T12:00 "; "99999-01-01T00:00"; "2026-07-01T-1:00"; "2026-07-01T12:00:00.5Z"; "2026-07-01"; "Z"; "" ];
+  C.check (Ops.parse_time "2024-02-29T12:00Z" = Some 1709208000000 && Ops.parse_time "2000-02-29T00:00Z" = Some 951782400000) "leap days";
+  C.check (Ops.parse_time "9999-12-31T23:59:59Z" = Some 253402300799000 && Ops.parse_time "0000-01-01T00:00Z" = Some (-62167219200000)) "years 0 to 9999";
   (* damage, named *)
   let d = root // "d" in
   let jseg d i = d // "journal" // List.nth (segs d) i in
@@ -214,7 +315,18 @@ let () =
   C.rmrf dst;
   C.check (Ops.restore ~target:(Ops.Group 40) ~replace:false d dst = Ops.exit_ok) "restore of a promoted history to the group before its promotion";
   C.check (Replica.load_epochs dst = [ 1, 1; 3, 41 ]) "a new epoch above the dropped one (3, not 2 again)";
-  C.check (Ops.restore ~target:(Ops.Group 40) ~replace:true d dst = Ops.exit_ok) "the same restore again over it";
+  (* --replace when DIR.before-restore-DATE is taken (an earlier --replace of the same second, or a folder of that
+     name): the database is moved aside under a free name (-2), never over the other folder *)
+  let stamp t = let t = Unix.localtime t in
+    Printf.sprintf "%04d-%02d-%02dT%02d%02d%02d" (t.tm_year + 1900) (t.tm_mon + 1) t.tm_mday t.tm_hour t.tm_min t.tm_sec in
+  let now = Unix.time () in
+  let planted = List.init 10 (fun i -> dst ^ ".before-restore-" ^ stamp (now +. float i)) in
+  List.iter (fun p -> Unix.mkdir p 0o700; Out_channel.with_open_bin (p // "mine") (fun oc -> output_string oc "mine")) planted;
+  C.check (code (fun () -> Ops.restore ~target:(Ops.Group 40) ~replace:true d dst) = Ops.exit_ok) "the same restore again over it, its aside name taken";
+  let asides = List.filter (fun n -> contains n "r.before-restore-" && Filename.check_suffix n "-2") (Array.to_list (Sys.readdir root)) in
+  C.check (List.length asides = 1 && Sys.file_exists (root // List.hd asides // "journal")) "the database moved aside as ...-2 (%s)" (String.concat " " asides);
+  C.check (List.for_all (fun p -> Sys.readdir p = [| "mine" |]) planted) "the folders of the names taken unchanged";
+  List.iter C.rmrf planted;
   C.check (Replica.load_epochs dst = [ 1, 1; 4, 41 ]) "above the replaced database's epoch too (4)";
   (* the vault: files in packs of 64 KiB, so that closed packs have their index *)
   Vault.pack_limit := 65536;
@@ -242,9 +354,23 @@ let () =
   let dest = root // "backup" in
   Unix.mkdir dest 0o700;
   Unix.mkdir (dest // "2020-01-01T000000.partial") 0o700;
+  Unix.mkdir (dest // "2020-01-01T000000.partial" // "main") 0o700;
+  (* a .partial of another program's (a download): never a backup's, kept *)
+  Unix.mkdir (dest // "movie.partial") 0o700;
+  Out_channel.with_open_bin (dest // "movie.partial" // "film") (fun oc -> output_string oc "x");
   C.check (Ops.backup cfg dest = Ops.exit_ok) "backup";
-  let dated = List.filter (fun n -> n <> "cepheus-backup.lock") (Array.to_list (Sys.readdir dest)) in
+  let dated = List.filter (fun n -> n <> "cepheus-backup.lock" && n <> "movie.partial") (Array.to_list (Sys.readdir dest)) in
   C.check (List.length dated = 1 && not (Filename.check_suffix (List.hd dated) ".partial")) "one dated folder, the partial one removed (%s)" (String.concat " " dated);
+  C.check (Sys.file_exists (dest // "movie.partial" // "film")) "a .partial a backup does not make is kept";
+  (* a DEST that others may write, a lock planted there as a link: refused, nothing made through the link *)
+  let dest2 = root // "backup2" in
+  Unix.mkdir dest2 0o700;
+  Unix.chmod dest2 0o777;
+  C.check (refused (fun () -> Ops.backup cfg dest2)) "a DEST writable by others: refused";
+  Unix.chmod dest2 0o700;
+  List.iter (fun n -> C.rmrf (dest2 // n)) (Array.to_list (Sys.readdir dest2));
+  Unix.symlink (root // "planted") (dest2 // "cepheus-backup.lock");
+  C.check (refused (fun () -> Ops.backup cfg dest2) && not (Sys.file_exists (root // "planted"))) "a lock planted as a link: refused, nothing made through it";
   let b = dest // List.hd dated // "main" in
   C.check (Sys.file_exists (b // "closed")) "the copy is marked closed";
   C.check ((Ops.check ~tail:Journal.Strict ~live:false b).damages = []) "the copy is whole";
@@ -270,5 +396,153 @@ let () =
   if Sys.file_exists (d // "closed") then Sys.remove (d // "closed");
   Out_channel.with_open_bin (d // "shared") ignore;
   C.check (refused (fun () -> Ops.verify d)) "shared and not closed: refused";
+  catchup src;
+  (* a run whose journal position is the end of a segment that is no longer the newest: the frame after its groups
+     began a new segment (an open resumes from it); whole for verify, restore and restore to its group and after *)
+  let limit = !Journal.segment_limit in
+  Journal.segment_limit := 2000;
+  let se = root // "segend" in
+  let db = Result.get_ok (Cepheus.open_ se) in
+  let[@warning "-8"] (Ok [ p ]) = Cepheus.declare db [ Cepheus.prop "p" Ttext ] in
+  let w s = match Cepheus.write db [ Resolve.Add (-1, p, Text s) ] with Ok _ -> () | Error e -> C.fail "write: %s" (Cepheus.message e) in
+  w (String.make 1200 'a');
+  (match Cepheus.snapshot db with Ok () -> () | Error e -> C.fail "snapshot: %s" (Cepheus.message e));
+  w (String.make 1200 'b');
+  w "c";
+  Cepheus.close db;
+  Journal.segment_limit := limit;
+  let sid = Engine.read_meta Disk.real se in
+  let at_seg_end =
+    List.filter_map
+      (fun ((_, hi, _) as r) ->
+        let pos, _ = Snapshot.verify Disk.real (se // "snapshots") r sid in
+        if List.mem (Journal.segment_name pos.Journal.next) (segs se) then Some hi else None)
+      (Snapshot.list Disk.real (se // "snapshots"))
+  in
+  C.check (at_seg_end <> [] && List.length (segs se) >= 2) "a run at the end of a segment the next one follows (%d runs)" (List.length at_seg_end);
+  C.check (code (fun () -> Ops.verify se) = Ops.exit_ok) "a run at a segment's end: verify whole";
+  let sg = fst (facts se) in
+  List.iter
+    (fun (what, target, at) ->
+      let r = root // "segend-r" in
+      C.rmrf r;
+      C.check (code (fun () -> Ops.restore ~target ~replace:false se r) = Ops.exit_ok && fst (facts r) = at && code (fun () -> Ops.verify r) = Ops.exit_ok)
+        "a run at a segment's end: restore %s, at group %d and whole" what at)
+    ([ "to the end", Ops.End, sg ] @ List.concat_map (fun h -> [ Printf.sprintf "--to-group %d" h, Ops.Group h, h; Printf.sprintf "--to-group %d" (h + 1), Ops.Group (h + 1), h + 1 ]) at_seg_end);
+  (* restore --replace over a database of a server that crashed while written through its commit buffer: replaced as
+     it is (moved aside); a buffer that an unclean stop left refuses only when it holds frames of the database *)
+  let rd = root // "rdata" in
+  Unix.mkdir rd 0o700;
+  let done_ f = match f () with c -> c = Ops.exit_ok | exception Ops.Refused m -> C.fail "refused: %s" m; false | exception e -> C.fail "escaped: %s" (Printexc.to_string e); false in
+  let crashed n =
+    let shop = rd // n in
+    if done_ (fun () -> Ops.restore ~replace:false src shop) then begin
+      Sys.remove (shop // "closed");
+      Out_channel.with_open_bin (shop // "shared") ignore
+    end;
+    shop
+  in
+  C.check (done_ (fun () -> Ops.restore ~target:(Ops.Group 5) ~replace:true src (crashed "shop1")) && fst (facts (rd // "shop1")) = 5)
+    "--replace over a database that crashed through the commit buffer: replaced";
+  (* a buffer as the server's leaves it at a crash: a round of a frame of the database [bid] *)
+  let buffer_with bid =
+    List.iter (fun n -> if Sys.file_exists (rd // n) then Sys.remove (rd // n)) [ "server.wal.1"; "server.wal.2" ];
+    let w = Wal.recover Disk.real rd in
+    Wal.start w;
+    let jd = root // "bj" in
+    C.rmrf jd;
+    Unix.mkdir jd 0o700;
+    let j = Journal.create Disk.real jd bid in
+    let alone = !Wal.alone in
+    Wal.alone := false;
+    Wal.attach w bid j;
+    let body = Buffer.create 8 in
+    Buffer.add_string body "a group";
+    Journal.append j body 1 1;
+    Wal.alone := alone;
+    let kept = List.filter_map (fun n -> if Sys.file_exists (rd // n) then Some (n, In_channel.with_open_bin (rd // n) In_channel.input_all) else None) [ "server.wal.1"; "server.wal.2" ] in
+    Wal.stop w;
+    Journal.close j;
+    List.iter (fun (n, b) -> Out_channel.with_open_bin (rd // n) (fun oc -> output_string oc b)) kept;
+    C.check (kept <> []) "a commit buffer left with a round"
+  in
+  buffer_with (String.make 16 'z');
+  C.check (done_ (fun () -> Ops.restore ~target:(Ops.Group 5) ~replace:true src (crashed "shop2"))) "--replace beside a buffer that holds frames of another database: done";
+  let shop3 = crashed "shop3" in
+  buffer_with id;
+  C.check (refused (fun () -> Ops.restore ~target:(Ops.Group 5) ~replace:true src shop3)) "--replace beside a buffer that holds frames of the database: refused";
+  C.check (refused (fun () -> Ops.restore ~replace:false src (rd // "shop4"))) "a restore into a new folder beside it: refused";
+  (* a crashed database whose newest frame's trailer alone is broken (kept, as recovery keeps and rebuilds it): its
+     backup, marked closed, verifies whole *)
+  let t10 = root // "t10" in
+  Unix.mkdir t10 0o700;
+  Unix.mkdir (t10 // "data") 0o700;
+  let one_db dir = Out_channel.with_open_bin (dir // "cluster.toml") (fun oc ->
+      output_string oc "[cluster]\nname = \"ops\"\nid = \"cph-c-00000000000000d1\"\nme = \"srv1\"\n[[peer]]\nname = \"srv1\"\naddress = \"127.0.0.1:7401\"\n[clients]\nsocket = \"run\"\n[storage]\ndata = \"data\"\n[[database]]\nname = \"main\"\n");
+    match Config.load (dir // "cluster.toml") with Ok c -> c | Error m -> failwith m
+  in
+  let cfg10 = one_db t10 in
+  let m10 = t10 // "data" // "main" in
+  copy src m10;
+  let newest = jseg m10 (List.length (segs m10) - 1) in
+  flip newest ((Unix.stat newest).st_size - 2);
+  C.check (code (fun () -> Ops.verify m10) = Ops.exit_ok) "a crashed database, its newest trailer broken: whole (the next open rebuilds it)";
+  C.check (code (fun () -> Ops.backup cfg10 (t10 // "b")) = Ops.exit_ok) "its backup";
+  (match List.filter (fun n -> n <> "cepheus-backup.lock") (try Array.to_list (Sys.readdir (t10 // "b")) with Sys_error _ -> []) with
+   | [ n ] -> C.check (code (fun () -> Ops.verify (t10 // "b" // n // "main")) = Ops.exit_ok) "the backup of a broken newest trailer verifies whole (the trailer written again)"
+   | l -> C.fail "the backup of a broken newest trailer: %s" (String.concat " " l));
+  (* a live database (another process holds it): what a frame being written shows is left out with a note (a large
+     group's header still zeros, a frame not all there); a frame written whole that does not check is damage *)
+  let lv = root // "live" in
+  Unix.mkdir lv 0o700;
+  Unix.mkdir (lv // "data") 0o700;
+  let cfgl = one_db lv in
+  let ld = lv // "data" // "main" in
+  copy src ld;
+  let to_child, from_us = Unix.pipe ~cloexec:true () and from_child, to_us = Unix.pipe ~cloexec:true () in
+  let child = Unix.create_process Sys.executable_name [| Sys.executable_name; "--hold"; ld |] to_child to_us Unix.stderr in
+  Unix.close to_child;
+  Unix.close to_us;
+  let ready = In_channel.input_line (Unix.in_channel_of_descr from_child) in
+  C.check (ready = Some "ready") "the database held by another process";
+  let lid = Engine.read_meta Disk.real ld in
+  let newest = jseg ld (List.length (segs ld) - 1) in
+  let last = ref (0, 0) in
+  ignore (Journal.check ~frame:(fun p _ stop -> if p.segment = int_of_string (String.sub (Filename.basename newest) 0 20) then last := (p.offset, stop)) ~tail:Journal.Copy Disk.real (ld // "journal") lid);
+  let off, stop = !last in
+  let size = (Unix.stat newest).st_size in
+  let frame_bytes = let b = Bytes.create (stop - off) in let fd = Unix.openfile newest [ Unix.O_RDONLY ] 0 in ignore (Unix.lseek fd off Unix.SEEK_SET); ignore (Unix.read fd b 0 (stop - off)); Unix.close fd; b in
+  let append b = let fd = Unix.openfile newest [ Unix.O_WRONLY; Unix.O_APPEND ] 0 in ignore (Unix.write fd b 0 (Bytes.length b)); Unix.close fd in
+  let backups = ref 0 in
+  let backup_code () =
+    incr backups;
+    let d = lv // Printf.sprintf "b%d" !backups in
+    let c = code (fun () -> Ops.backup cfgl d) in
+    c, List.filter (fun n -> n <> "cepheus-backup.lock") (try Array.to_list (Sys.readdir d) with Sys_error _ -> [])
+  in
+  (* a large group's frame being written: its header, written last, still zeros *)
+  append (Bytes.cat (Bytes.make 28 '\000') (Bytes.make 100 'x'));
+  C.check (code (fun () -> Ops.verify ld) = Ops.exit_ok) "live: a header still zeros is the frame being written";
+  let c, l = backup_code () in
+  C.check (c = Ops.exit_ok && List.length l = 1 && code (fun () -> Ops.verify (lv // Printf.sprintf "b%d" !backups // List.hd l // "main")) = Ops.exit_ok) "live: its backup leaves it out";
+  Unix.truncate newest size;
+  (* a frame being appended: its header there, not all its bytes yet *)
+  append (Bytes.sub frame_bytes 0 ((Bytes.length frame_bytes / 2) + 1));
+  C.check (code (fun () -> Ops.verify ld) = Ops.exit_ok) "live: a frame not all there is the frame being written";
+  Unix.truncate newest size;
+  (* the newest frame, every byte of it there, damaged *)
+  flip newest (off + 28 + 2);
+  C.check (code (fun () -> Ops.verify ld) = Ops.exit_damage) "live: a frame written whole that does not check is damage";
+  let c, l = backup_code () in
+  C.check (c = Ops.exit_damage && List.exists (fun n -> Filename.check_suffix n ".damaged") l) "live: its backup is damaged, never cut in silence";
+  Unix.close from_us;
+  ignore (Unix.waitpid [] child);
+  Unix.close from_child;
+  (* last, since it changes the process's zone: a local time the clocks skip is none (Paris, 2026-03-29, 02:00 to 03:00) *)
+  if Sys.file_exists "/usr/share/zoneinfo/Europe/Paris" then begin
+    Unix.putenv "TZ" "Europe/Paris";
+    C.check (Ops.parse_time "2026-03-29T02:30" = None && Ops.parse_time "2026-03-29T03:30" <> None && Ops.parse_time "2026-03-29T02:30Z" <> None)
+      "a local time the clocks skip is refused"
+  end;
   C.rmrf root;
   C.finish "ops"

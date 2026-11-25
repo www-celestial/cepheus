@@ -1,6 +1,8 @@
 (* The Raft log of a server and its durable state, on a Disk.t (the real disk, or the simulation's), in DATA/raft:
 
      state            "cepheus raft state\n" | term u64 | vote (a peer's name, "" for none) | repair u64 | crc32c
+                      (none: the server is fresh, a new cluster's or one whose data was lost, until Raft's fresh rule
+                      ends and writes it)
      log.<first>      segments, <first> the index of their first entry in 20 digits
      segment = header 52 B: magic "CPHL" | format u32 (1) | first index u64 | term of the entry before it u64
                             | cluster id (22 B) | 2 zero bytes | crc32c of the 48 before
@@ -38,8 +40,9 @@ let rh = 36
 let rt = 16
 let state_magic = "cepheus raft state\n"
 
-(* a segment starts once the newest passes this size (64 MB; tests make it small) *)
-let segment_limit = ref (64 lsl 20)
+(* a segment starts once the newest passes this size (16 MiB: the log's start moves by whole segments, so a smaller one
+   frees the disk sooner behind the floor; tests make it smaller) *)
+let segment_limit = ref (16 lsl 20)
 
 (* the entries' bytes kept in memory (the newest), so that a leader sends without reading its disk *)
 let cache_limit = ref (64 lsl 20)
@@ -61,6 +64,7 @@ type recovered = {
   sizes : int array;
   commit : int;  (* the newest commit index a round recorded *)
   damage : string option;  (* what was found damaged and set aside *)
+  fresh : bool;  (* no state: a new server, or one whose data was lost *)
 }
 
 type t = {
@@ -252,7 +256,9 @@ let set_aside disk dir name =
 let open_ ?(secure = fun _ -> ()) disk dir ~cluster =
   if not (disk.Disk.exists dir) then (disk.mkdir dir; disk.sync_dir (Filename.dirname dir));
   secure dir;
-  let st = if disk.exists (state_path dir) then decode_state (state_path dir) (Disk.read_all disk (state_path dir)) else { term = 0; vote = ""; repair = 0 } in
+  (* no state: a fresh server (it writes none before Raft's fresh rule ends) *)
+  let fresh = not (disk.exists (state_path dir)) in
+  let st = if not fresh then decode_state (state_path dir) (Disk.read_all disk (state_path dir)) else { term = 0; vote = ""; repair = 0 } in
   let t =
     { disk; dir; cluster; secure; m = Mutex.create (); segs = []; fd = 0; seg = 0; size = 0; rounds = [||]; nr = 0;
       next = 1; last_term = 0; cache = Hashtbl.create 1024; cq = Queue.create (); cbytes = 0; failed = false }
@@ -369,7 +375,7 @@ let open_ ?(secure = fun _ -> ()) disk dir ~cluster =
   let st = { st with repair = !repair } in
   t,
   { st; start = !start; prev_term = !prev_term; terms = Array.of_list (List.rev !terms); sizes = Array.of_list (List.rev !sizes);
-    commit = !commit; damage = !damage }
+    commit = !commit; damage = !damage; fresh }
 
 (* ---- appends, truncation, the start ---- *)
 
@@ -442,13 +448,14 @@ let read t i =
         | None -> None
         | Some (_, r) -> Some (List.nth (read_round t r) (i - r.rfirst))))
 
-(* every entry from index [from] on, in order (recovery: a database's frames to write again) *)
-let iter t ~from f =
+(* every entry from index [from] on (to [upto]), in order, each round read once (recovery: a database's frames to
+   write again; a frame's pieces) *)
+let iter ?(upto = max_int) t ~from f =
   let rs = Mutex.protect t.m (fun () -> List.init t.nr (Array.get t.rounds)) in
   List.iter
     (fun r ->
-      if r.rfirst + r.rcount > from then
-        List.iteri (fun k (term, d) -> if r.rfirst + k >= from then f (r.rfirst + k) term d) (Mutex.protect t.m (fun () -> read_round t r)))
+      if r.rfirst + r.rcount > from && r.rfirst <= upto then
+        List.iteri (fun k (term, d) -> let i = r.rfirst + k in if i >= from && i <= upto then f i term d) (Mutex.protect t.m (fun () -> read_round t r)))
     rs
 
 (* entries from i on dropped, forced (a follower's entries that a new leader's log does not hold); [prev_term]: the
@@ -505,6 +512,53 @@ let cut_before t i =
         t.nr <- t.nr - !k;
         t.disk.sync_dir t.dir
       end)
+
+(* ---- a copy of the databases installed (Catchup) ----
+   DATA/raft/copy/index, written once the copy is whole and checked, then the folder renamed into place (the commit
+   point): "cepheus raft copy\n" | index u64 | term u64 | the peer it came from | crc32c. At the next start the
+   databases are swapped and the log made to start after the copy's index ([install]); the index is removed last, so
+   that a crash anywhere repeats what was not done. *)
+
+let copy_magic = "cepheus raft copy\n"
+
+let encode_copy ~index ~term ~source =
+  let b = Buffer.create 64 in
+  Buffer.add_string b copy_magic;
+  Buffer.add_int64_le b (Int64.of_int index);
+  Buffer.add_int64_le b (Int64.of_int term);
+  Codec.put_string b source;
+  Buffer.add_int32_le b (Int32.of_int (Crc32c.string (Buffer.contents b)));
+  Buffer.to_bytes b
+
+(* (index, term, source), or None if it does not check *)
+let decode_copy b =
+  let n = Bytes.length b and m = String.length copy_magic in
+  if n < m + 16 + 1 + 4 || Bytes.sub_string b 0 m <> copy_magic || u32 b (n - 4) <> Crc32c.bytes b 0 (n - 4) then None
+  else
+    match
+      let index = u64 b m and term = u64 b (m + 8) in
+      let r = Codec.reader b (m + 16) (n - 4 - m - 16) in
+      let source = Codec.get_string r in
+      if r.Codec.pos <> r.stop || index < 1 || term < 0 then None else Some (index, term, source)
+    with
+    | x -> x
+    | exception Codec.Short -> None
+
+(* the log of [dir] made to start at [first] (its entry before, of term [prev_term], is in the databases): every
+   segment removed (those set aside as *.damaged kept), one empty segment written, forced; the 2018 rule's repair
+   ends if the copy reaches it. Idempotent: a crash in it is repeated at the next start *)
+let install ?(secure = fun _ -> ()) disk dir ~cluster ~first ~prev_term =
+  let sp = state_path dir in
+  if disk.Disk.exists sp then begin
+    let st = decode_state sp (Disk.read_all disk sp) in
+    if st.repair > 0 && st.repair <= first - 1 then begin
+      Disk.write_file disk sp (encode_state { st with repair = 0 });
+      secure sp
+    end
+  end;
+  List.iter (fun s -> disk.remove (Filename.concat dir (seg_name s))) (segments disk dir);
+  disk.sync_dir dir;
+  disk.close (new_segment disk dir secure ~first ~prev_term ~cluster)
 
 (* the first index held on disk *)
 let first t = Mutex.protect t.m (fun () -> match t.segs with (s, _) :: _ -> s | [] -> t.next)

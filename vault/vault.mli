@@ -67,6 +67,13 @@ val add_raw : t -> Bytes.t -> (unit, error) result
 val sync : t -> (unit, error) result
 (** What [add_raw] appended, forced. *)
 
+val tree : t -> string -> (string list, error) result
+(** [tree t root]: the names of every record of the file of [root], its nodes (the root first, each before its
+    children) and its chunks: what [raw] gives a copy (a Raft cluster's follower). *)
+
+val domain_entry : t -> int -> string option
+(** The entry of the key of domain [d], sealed by the master key, if the vault holds it: what [take_keys] takes. *)
+
 val key_entries : t -> string list
 (** The domains' keys sealed by the master key, and the domains erased. *)
 

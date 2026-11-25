@@ -77,17 +77,32 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects
   a new leader by itself.
+- In a Raft cluster ([the server](docs/book/server.md#a-cluster-of-three-raft)): a follower behind the leader's log
+  start, or started on an empty data directory, takes a **copy of the databases** from the leader (runs, journal,
+  session tables, vault), checked as `cepheus verify` checks one, then starts again on it (the role of
+  InstallSnapshot); a server with no Raft state takes no part until a majority of the others said their terms and
+  logs, so that a lost disk neither votes twice in a term nor elects a leader that lacks what it acknowledged; the log
+  no longer grows without end for a dead server (five minutes, then a copy); groups past 8 MiB go through the log in
+  pieces, applied whole or not at all, up to 256 MiB; the **vault's files** are replicated (`Put`, `Load`, `Erase`
+  through the leader, one `vault.key` shared by the servers); `cepheus stop` on the leader **hands its leadership
+  over** first (Timeout_now), the writes paused for one vote round; a damaged server takes the committed entries it
+  lacks from any sound peer, so that a damaged majority elects a leader again. The peer protocol is at version 3; a
+  peer of version 2 is still taken (a rolling upgrade).
 - Commands: `cepheus serve`, `stop`, `status`, `token add|list|remove`, `cluster init|cert`, `replicate`, `promote`,
   `verify`, `backup`, `restore` ([commands](docs/book/server.md#commands)), and a systemd service with backups, a
   restore drill and what to watch ([production](docs/book/production.md)).
 - **Operations as commands.** `cepheus verify DIR` checks a database's files and changes nothing: every frame of the
   journal, every page of the runs, the runs against the journal, the vault's records, each damage named (exit status
-  1), a live database up to the frame being written. `cepheus backup --config FILE DEST` copies every database of a
-  running server, a replica's too, with no stop and no token, into `DEST/DATE`, named only once every copy is checked,
-  cut after its last whole frame and forced. `cepheus restore SRC DIR` restores one, opened and checked before it
-  takes its name; `--to-group N` or `--to-time T` stops before a bad write, as PostgreSQL's point-in-time recovery,
+  1), a live database up to the frame being written (a frame that does not check while every byte of it is there is
+  read again for a second, then damage: never cut in silence). `cepheus backup --config FILE DEST` copies every
+  database of a running server, a replica's too, with no stop and no token, into `DEST/DATE`, named only once every
+  copy is checked, cut after its last whole frame and forced; DEST is the user's own (one that others may write is
+  refused), and a backup removes there only the `DATE.partial` folders a backup left, never through a link.
+  `cepheus restore SRC DIR` restores one, opened and checked before it takes its name; `--to-group N` or `--to-time T`
+  (exactly its digits and a day of the calendar) stops before a bad write, as PostgreSQL's point-in-time recovery,
   and the restored database writes in a new epoch, so that a replica holding the old history's later groups is
-  refused rather than followed; `--replace` moves the database there aside, never removes it
+  refused rather than followed; `--replace` moves the database there aside under a name no folder has, never removes it, even one that crashed
+  through a server's commit buffer (refused only while that buffer holds frames of it)
   ([backups](docs/book/production.md#backups), [verification](docs/book/operations.md#verification-scrubbing)). The
   backup script the production guide gave before still works, and its copies restore with `cepheus restore`.
 - An answer the server holds while it builds it (a Find with Sort or aggregates, a watch's first answer) is bounded
@@ -128,7 +143,11 @@ stay as they are, or a later version reads and speaks both the old and the new.
   unique values checked against the database and the file. The file is checked whole first: a bad row stops the
   import with its line and nothing is written (`--skip-bad` writes the good rows and lists the bad ones;
   `--upsert` changes the thing a unique value finds); then it is written in large groups of up to a million
-  operations, parsed by several domains while the server writes. `cepheus export DB --kind KIND [--format csv]` writes
+  operations, parsed by several domains while the server writes; a failure there, the connection lost included,
+  names the groups written. A quote opens a quoted field only at a field's start, so that a stray one makes its line
+  alone bad (PostgreSQL's COPY reads it as opening a quoted part, and loads the lines up to the next one as one row);
+  blank lines are read through, never held; a record's fields are made up to the header's count, its JSON holds at
+  most 100,000 values. `cepheus export DB --kind KIND [--format csv]` writes
   every thing of the kind at one group, named on stderr, its asserted facts and its links as their keys, read from one
   view on the server's machine. At 10 M facts (120,482 clients, 2.4 M invoices linked by e-mail), medians of seven rounds: 28.5 s, beside PostgreSQL's COPY and join 43.7 s and SQLite's .import 9.71 s; a file of 10 GiB checked whole in 244 MB ([import and export](docs/book/operations.md#import-and-export)).
 - A question has a **time**: `[clients] question_timeout` in `cluster.toml` (seconds, 30 by default, 0 for none), and a
@@ -220,6 +239,12 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 
 ### Fixes
 
+- `cepheus verify` (and the check of a backup) named as damage a run whose journal position is the end of a segment
+  that the next one follows (the frame after the run's groups began a new segment): a whole database was taken for a
+  damaged one. Such a position is now the start of the next segment's first frame, as the engine reads it.
+- `cepheus restore --replace` twice over one folder within a second failed (`ENOTEMPTY`): the folder moved aside took
+  the name of the one moved aside before. It now takes a name no entry has (`-2`, `-3`, ...), never renamed over
+  another folder.
 - A newest journal segment whose header does not check while it holds bytes past it, or where the newest run
   resumes, is refused at open as damage (G6). Recovery took it for a segment torn at its creation and removed it, so
   one flipped bit in its 40 bytes opened the database without that segment's groups, with no error.

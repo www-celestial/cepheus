@@ -126,6 +126,10 @@ the usual one, both are given.
   [rules](rules.md#constraints-never)
 - **coordinated omission** — the error of a closed-loop measure: a client stalled by a slow write sends nothing
   meanwhile, so the writes that would have waited are never counted (Tene 2015). [benchmarks](benchmarks.md#method)
+- **copy of the databases** (catch-up) — in a Raft cluster, what a follower takes when the leader can no longer send it
+  entries (they are before the leader's log start): each database's files, as `cepheus backup` copies them, checked as
+  `cepheus verify` checks them, installed at the follower's next start; the role of Raft's InstallSnapshot.
+  [server](server.md#a-server-behind-the-logs-start-a-copy-of-the-databases)
 - **counterexample** — a sequence of steps that leads from an initial state to one where an invariant is false; what
   a model checker prints. [case](case-seats.md#a-formal-model-checked-by-a-machine)
 - **counting** (view maintenance) — keeping for each derived fact the number of its derivations, deleting it at zero
@@ -226,6 +230,9 @@ the usual one, both are given.
   difference from the base in as many bits as the largest difference needs: values between 20,000 and 23,650 take
   12 bits each, not 64 (Goldstein et al. 1998; PFOR, its patched form, Zukowski et al. 2006).
   [theory](theory.md#11-compressed-runs-and-journal-the-coding-and-its-bound)
+- **fresh server** — in a Raft cluster, a server that started with no Raft state (a new cluster's, or one whose data
+  directory was lost): it takes no part until ⌊n/2⌋ + 1 other servers told it their terms and logs.
+  [server](server.md#a-server-started-on-an-empty-data-directory)
 - **frozen relation** — a small relation the rules were unfolded on: while its facts stay those, the unfolded rules
   run; a group that changes one of them runs the rules as written. [rules](rules.md#specialisation-by-small-relations)
 - **fsync** — the system call that returns once a file's bytes are on the disk.
@@ -296,6 +303,9 @@ the usual one, both are given.
   beside, by pieces). [architecture](architecture.md#large-groups)
 - **lazy leveling** — tiering at every level but the last, which is leveled (Dayan and Idreos 2018).
   [theory](theory.md#9-levels-on-disk-and-large-groups)
+- **leadership transfer** — the clean stop of a Raft cluster's leader: it gives up its lease, waits until the most
+  up-to-date follower holds its whole log, and tells it to stand for election at once (`Timeout_now`).
+  [server](server.md#a-clean-stop-of-the-leader-leadership-handed-over)
 - **leapfrog** (leapfrog intersection) — the intersection of sorted lists by seeks: the lists in the order of their
   current keys, each in turn jumps to the first key at least the largest (by galloping), and a key all reach is in
   every list (Veldhuizen 2014). A question's level intersects its slices so instead of looking each candidate up.
@@ -373,6 +383,8 @@ the usual one, both are given.
 - **persistent data structure** — one that is never changed in place: a change makes a new version and the old one
   stays valid. [architecture](architecture.md#indexes-the-runs-and-the-delta)
 - **phantom** — a new member of a set read earlier (the facts that match a pattern), unseen by a check of single facts.
+- **piece** (of a frame) — in a Raft cluster, an entry that carries a MiB of a frame longer than that; the frame is
+  applied whole at its last piece, on every server, or never. [server](server.md#one-log-for-the-cluster)
 - **pipelining** — sending requests without waiting for the replies of the earlier ones: the round trips overlap, and
   many replies come back in one system call. [server](server.md#order-pipelining-and-back-pressure)
 - **plan** (of a rule) — the rule compiled to closures with one atom matched to a given fact, the others joined in an

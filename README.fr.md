@@ -16,8 +16,8 @@ représentant ([OWL 2 RL](docs/fr/book/rules.md#owl-2-rl-une-bibliothèque-de-r�
 
 **Documentation : https://www-celestial.github.io/cepheus/fr/** (en anglais : https://www-celestial.github.io/cepheus/)
 
-La famille : [Cesia](https://www-celestial.github.io/cesia-lang/fr/) (le langage) · [Cemacs](https://www-celestial.github.io/cemacs/fr/) (l'éditeur) ·
-[Cepheus](https://www-celestial.github.io/cepheus/fr/) (la base de données) · [Ceti](https://www-celestial.github.io/ceti/fr/) (le pilote de navigateur).
+La famille : [Cesia](https://www-celestial.github.io/cesia-lang/) (le langage) · [Cemacs](https://www-celestial.github.io/cemacs/) (l'éditeur) ·
+[Cepheus](https://www-celestial.github.io/cepheus/) (la base de données) · [Ceti](https://www-celestial.github.io/ceti/) (le pilote de navigateur).
 
 ```ocaml
 open Cepheus

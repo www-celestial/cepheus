@@ -13,7 +13,8 @@
    out in the order Raft gives them: the term and vote forced before any message after them leaves.
 
    A database's checkpoint each second forces its journal; the log's whole segments before what every journal holds
-   forced and every peer holds are removed. *)
+   forced and every peer holds (the floor: Raft) are removed. A peer the leader can no longer send entries to (they
+   are before its log's start) takes a copy of the databases (server/catchup.ml), then starts again on it. *)
 
 open Cepheus
 
@@ -27,17 +28,44 @@ let election_ms = ref 500
 let heartbeat_ms = ref 50
 let tick_ms = 10
 
-(* a frame of a Raft cluster is at most this long: one wire frame carries it *)
-let frame_limit = 8 lsl 20
+(* a peer silent this long no longer holds the log's start back: it takes a copy of the databases when it comes back
+   (5 minutes: a restart, a reboot, an upgrade fit; a dead machine does not make the log grow without end) *)
+let floor_ms = ref 300_000
+
+(* set once a copy of the databases is committed here: the server stops, and bin/main.ml starts it again (exec) *)
+let restart = Atomic.make false
+
+(* a group of a Raft cluster is at most this long (the journal's own bound: 256 MiB); a frame longer than [piece]
+   goes through the log in pieces (below) *)
+let frame_limit = Journal.max_body
+let piece = 1 lsl 20
 
 let now () = Fdpass.monotonic_ms ()
 
 (* a database's id in a Raft cluster: the same on every server, from the cluster's id and the database's name *)
 let database_id cluster name = String.sub (Digest.BLAKE128.to_hex (Digest.BLAKE128.string (cluster ^ "\000" ^ name))) 0 16
 
-(* ---- entries ---- *)
+(* ---- entries ----
+   An entry is the no-op of a new term (empty), a frame (1, a database's id, its journal's frame whole), or a piece of
+   a frame longer than [piece] (2, the database's id, the frame's length, the piece's offset in it, its bytes). A
+   frame's pieces are proposed at once, in order, as entries that follow each other among that database's: the frame
+   is applied whole, on every server, when the entry of its last piece is (read back from the log then), and never
+   if its sequence is broken: an entry of a newer term (the leader changed: its frame was not proposed whole), or a
+   frame or a first piece of the same database, ends a sequence that is not whole. Every server decides it from the
+   committed log alone, so all decide alike.
 
-type entry = Noop | Frame of string * Bytes.t  (* a database's id, its journal's frame whole *)
+   The vault's files (Files, Vault): records (3, a database's id, the keys of domains sealed by the master key, the
+   sealed records of a file), proposed before the facts that cite the file, and an erasure (4, the id, the domain).
+   Every server applies them to its vault in the log's order, forced, before the next entry: a fact never names a
+   file whose records the server lacks (G22). The records are the same bytes everywhere (a record's nonce is its
+   name), and the keys open only under the master key the cluster's servers share (vault.key). *)
+
+type entry =
+  | Noop
+  | Frame of string * Bytes.t  (* a database's id, its journal's frame whole *)
+  | Piece of { pid : string; total : int; off : int; data : Bytes.t }
+  | Records of { rid : string; keys : string list; records : Bytes.t list }
+  | Erase of { eid : string; domain : int }
 
 let encode_frame id frame =
   let b = Bytes.create (17 + Bytes.length frame) in
@@ -46,9 +74,123 @@ let encode_frame id frame =
   Bytes.blit frame 0 b 17 (Bytes.length frame);
   b
 
+let piece_head = 33
+
+let encode_piece id ~total ~off frame len =
+  let b = Bytes.create (piece_head + len) in
+  Bytes.set b 0 '\002';
+  Bytes.blit_string id 0 b 1 16;
+  Bytes.set_int64_le b 17 (Int64.of_int total);
+  Bytes.set_int64_le b 25 (Int64.of_int off);
+  Bytes.blit frame off b piece_head len;
+  b
+
+let encode_records id ~keys records =
+  let b = Buffer.create (64 + List.fold_left (fun a r -> a + Bytes.length r + 4) 0 records) in
+  Buffer.add_char b '\003';
+  Buffer.add_string b id;
+  Codec.put_varint b (List.length keys);
+  List.iter (Buffer.add_string b) keys;
+  Codec.put_varint b (List.length records);
+  List.iter (fun r -> Codec.put_varint b (Bytes.length r); Buffer.add_bytes b r) records;
+  Buffer.to_bytes b
+
+let encode_erase id domain =
+  let b = Buffer.create 32 in
+  Buffer.add_char b '\004';
+  Buffer.add_string b id;
+  Codec.put_varint b domain;
+  Buffer.to_bytes b
+
+(* a key entry of the vault's keys file: 112 bytes (Vault) *)
+let key_bytes = 112
+
+(* a journal frame's header and trailer (Journal: 28 and 16 bytes); the longest frame a piece may say it belongs to *)
+let frame_head = 28
+let max_total = frame_limit + frame_head + 16
+
 let decode_entry d =
   let n = Bytes.length d in
-  if n = 0 then Some Noop else if n > 17 && Bytes.get d 0 = '\001' then Some (Frame (Bytes.sub_string d 1 16, Bytes.sub d 17 (n - 17))) else None
+  if n = 0 then Some Noop
+  else if n > 17 && Bytes.get d 0 = '\001' then Some (Frame (Bytes.sub_string d 1 16, Bytes.sub d 17 (n - 17)))
+  else if n > piece_head && Bytes.get d 0 = '\002' then begin
+    let total = Int64.to_int (Bytes.get_int64_le d 17) and off = Int64.to_int (Bytes.get_int64_le d 25) in
+    if total < 1 || total > max_total || off < 0 || off > total - (n - piece_head) then None
+    else Some (Piece { pid = Bytes.sub_string d 1 16; total; off; data = Bytes.sub d piece_head (n - piece_head) })
+  end
+  else if n > 17 && (Bytes.get d 0 = '\003' || Bytes.get d 0 = '\004') then begin
+    let id = Bytes.sub_string d 1 16 in
+    let r = Codec.reader d 17 (n - 17) in
+    match
+      if Bytes.get d 0 = '\004' then Erase { eid = id; domain = Codec.get_varint r }
+      else begin
+        let nk = Codec.get_varint r in
+        if nk > (r.stop - r.pos) / key_bytes then raise Codec.Short;
+        let keys = List.init nk (fun _ -> let k = Bytes.sub_string r.buf r.pos key_bytes in r.pos <- r.pos + key_bytes; k) in
+        let nr = Codec.get_varint r in
+        if nr > r.stop - r.pos then raise Codec.Short;
+        let records =
+          List.init nr (fun _ ->
+              let len = Codec.get_varint r in
+              if len > r.stop - r.pos then raise Codec.Short;
+              let x = Bytes.sub r.buf r.pos len in
+              r.pos <- r.pos + len;
+              x)
+        in
+        Records { rid = id; keys; records }
+      end
+    with
+    | e when r.pos = r.stop -> Some e
+    | _ -> None
+    | exception Codec.Short -> None
+  end
+  else None
+
+(* the sequences of pieces not whole yet, by database: from the entry of the first piece, of its term *)
+type seq = { sfirst : int; sterm : int; stotal : int; mutable snext : int }
+
+(* entry [i] of term [tm] seen, in the log's order: Some the sequence it makes whole *)
+let track (open_ : (string, seq) Hashtbl.t) i tm (e : entry) =
+  Hashtbl.filter_map_inplace (fun _ q -> if q.sterm < tm then None else Some q) open_;
+  match e with
+  | Noop | Records _ | Erase _ -> None
+  | Frame (id, _) -> Hashtbl.remove open_ id; None
+  | Piece p ->
+    let len = Bytes.length p.data in
+    if p.off = 0 then begin
+      let q = { sfirst = i; sterm = tm; stotal = p.total; snext = len } in
+      if len = p.total then (Hashtbl.remove open_ p.pid; Some q) else (Hashtbl.replace open_ p.pid q; None)
+    end
+    else (
+      match Hashtbl.find_opt open_ p.pid with
+      | Some q when q.sterm = tm && q.snext = p.off && q.stotal = p.total ->
+        q.snext <- q.snext + len;
+        if q.snext = q.stotal then (Hashtbl.remove open_ p.pid; Some q) else None
+      | _ -> Hashtbl.remove open_ p.pid; None)
+
+(* the first entry a sequence not whole needs (max_int: none): the log is not cut, and no copy is made, past it *)
+let open_first open_ = Hashtbl.fold (fun _ q m -> min m q.sfirst) open_ max_int
+
+(* the frame of the pieces in entries [from, upto], of [total] bytes. [pend]: the entries given to the disk and not
+   written yet, which come first (the disk may still hold older ones there, that a truncation queued will remove);
+   [get]: an entry, wherever it is *)
+let assemble rlog ~pend ~get ~from ~upto ~total =
+  let b = Bytes.create total in
+  let have = ref from in
+  let put i d =
+    if i = !have then
+      match decode_entry (match pend i with Some (_, d') -> d' | None -> d) with
+      | Some (Piece p) -> Bytes.blit p.data 0 b p.off (Bytes.length p.data); incr have
+      | _ -> raise (Raftlog.Damaged (Printf.sprintf "entry %d is not the piece of a frame its sequence says" i))
+  in
+  (* the older ones by rounds, each round read once; those the log does not hold yet by [get] *)
+  Raftlog.iter rlog ~from ~upto (fun i _ d -> put i d);
+  while !have <= upto do
+    match get !have with
+    | Some (_, d) -> put !have d
+    | None -> raise (Raftlog.Damaged (Printf.sprintf "the log lacks entry %d, a piece of a frame" !have))
+  done;
+  b
 
 (* ---- messages ---- *)
 
@@ -64,6 +206,16 @@ let put_msg b (m : Raft.msg) data =
     v (Array.length x.terms);
     Array.iteri (fun k tm -> v tm; v (Bytes.length data.(k)); Buffer.add_bytes b data.(k)) x.terms
   | Append_reply x -> Buffer.add_uint8 b 6; v x.term; v x.seq; bool x.ok; v x.index
+  | Snap x -> Buffer.add_uint8 b 7; v x.term; v x.seq; v x.index; v x.index_term; v x.commit; v x.floor
+  | Ask -> Buffer.add_uint8 b 8
+  | State x -> Buffer.add_uint8 b 9; v x.term; v x.last_index; bool x.fresh
+  | Timeout_now x -> Buffer.add_uint8 b 10; v x.term
+  | Vote_now x -> Buffer.add_uint8 b 11; v x.term; v x.last_index; v x.last_term
+  | Fetch_entries x -> Buffer.add_uint8 b 12; v x.from
+  | Entries x ->
+    Buffer.add_uint8 b 13; v x.prev_index; v x.prev_term; v x.commit;
+    v (Array.length x.terms);
+    Array.iteri (fun k tm -> v tm; v (Bytes.length data.(k)); Buffer.add_bytes b data.(k)) x.terms
 
 let max_entries = 1 lsl 20
 
@@ -98,11 +250,39 @@ let get_msg (r : Codec.reader) : Raft.msg * Bytes.t array =
     done;
     Append { term; seq; prev_index; prev_term; terms; sizes = Array.map Bytes.length data; commit; floor }, data
   | 6 -> let term = v () in let seq = v () in let ok = bool () in let index = v () in Append_reply { term; seq; ok; index }, [||]
+  | 7 ->
+    let term = v () in
+    let seq = v () in
+    let index = v () in
+    let index_term = v () in
+    let commit = v () in
+    let floor = v () in
+    Snap { term; seq; index; index_term; commit; floor }, [||]
+  | 8 -> Ask, [||]
+  | 9 -> let term = v () in let last_index = v () in let fresh = bool () in State { term; last_index; fresh }, [||]
+  | 10 -> let term = v () in Timeout_now { term }, [||]
+  | 12 -> let from = v () in Fetch_entries { from }, [||]
+  | 13 ->
+    let prev_index = v () in
+    let prev_term = v () in
+    let commit = v () in
+    let n = v () in
+    if n > max_entries || n > r.stop - r.pos then raise Codec.Short;
+    let terms = Array.make n 0 and data = Array.make n Bytes.empty in
+    for k = 0 to n - 1 do
+      terms.(k) <- v ();
+      let len = v () in
+      if len > r.stop - r.pos then raise Codec.Short;
+      data.(k) <- Bytes.sub r.buf r.pos len;
+      r.pos <- r.pos + len
+    done;
+    Entries { prev_index; prev_term; terms; sizes = Array.map Bytes.length data; commit }, data
+  | 11 -> let term = v () in let last_index = v () in let last_term = v () in Vote_now { term; last_index; last_term }, [||]
   | _ -> raise Codec.Short
 
 (* ---- the node ---- *)
 
-type db = { name : string; id : string; live : Engine.live }
+type db = { name : string; id : string; live : Engine.live; files : Files.cell }
 
 type op =
   | Put of { gen : int; first : int; entries : (int * Bytes.t) list; commit : int }
@@ -148,6 +328,17 @@ type t = {
   streams : (string, Replica.link list) Hashtbl.t;  (* the peers' connections to this server, by name *)
   sm : Mutex.t;
   mutable damage : string option;
+  seqs : (string, seq) Hashtbl.t;  (* the apply thread's sequences of pieces not whole *)
+  mutable redo : int list;  (* the vault entries up to the applied index at the start: applied again first *)
+  stable : int Atomic.t;
+      (* the newest applied index with no sequence of pieces open after it: a copy is made there, and the log is cut
+         behind it, never inside a frame's pieces (an applied index and the sequences read apart could be of two
+         moments: the apply thread advances one after the other) *)
+  fetching : bool Atomic.t;  (* a copy of the databases is being taken from a peer *)
+  mutable fetch_after : float;  (* the next try after a refused or broken one (under sm) *)
+  mutable fetch_wait : float;
+  mutable fetch_note : string;  (* what the last try did, for cepheus status *)
+  mutable files_note : string;  (* a vault entry this server cannot apply yet, for cepheus status *)
 }
 
 let fail t m =
@@ -219,8 +410,63 @@ and run_effects ~msg t =
       | Unlead ->
         (* every proposal resolved: those committed with their own entry, the others not *)
         resolve_waiters t max_int;
-        log "no longer the leader (term %d)" t.core.term)
+        log "no longer the leader (term %d)" t.core.term
+      | Fetch k -> start_fetch t k)
     (Raft.drain t.core)
+
+(* a copy of the databases from peer k (it leads), unless one is under way or the last one failed lately; on its
+   commit the server stops and starts again on it *)
+and start_fetch t k =
+  let go = Mutex.protect t.sm (fun () -> Unix.gettimeofday () >= t.fetch_after) && Atomic.compare_and_set t.fetching false true in
+  if go then begin
+    let peer = List.nth t.cfg.peers k in
+    log "Raft: this server's log ends before %s's log start: it takes a copy of the databases from it" peer.pname;
+    ignore
+      (Thread.create
+         (fun () ->
+           let outcome =
+             try
+             match Replica.connect t.cfg peer with
+             | Error m -> Catchup.Refused (Printf.sprintf "the copy from %s: %s" peer.pname m)
+             | Ok l when l.pv < 3 -> Replica.close_link l; Catchup.Refused (peer.pname ^ " speaks peer protocol 2, which has no copy: upgrade it")
+             | Ok l ->
+               Fun.protect ~finally:(fun () -> Replica.close_link l) (fun () ->
+                   Replica.timeouts l.fd 30.0;
+                   let id_of name = database_id t.cfg.id name in
+                   let published name =
+                     match List.find_opt (fun d -> d.name = name) t.db_list with Some d -> (Atomic.get d.live.e.published).group | None -> 0
+                   in
+                   let decide x term = Mutex.protect t.m (fun () -> let r = Raft.install t.core ~index:x ~term in run t; r) in
+                   Catchup.fetch t.cfg ~source:peer.pname ~id_of ~published ~decide ~send:(fun b -> Replica.send l ~kind:Replica.k_copy b)
+                     ~next:(fun () -> Replica.next_frame l))
+             with e -> Catchup.Refused (Printf.sprintf "the copy from %s failed: %s" peer.pname (Printexc.to_string e))
+           in
+           let note m = Mutex.protect t.sm (fun () -> t.fetch_note <- m) in
+           (match outcome with
+            | Catchup.Installed x ->
+              note (Printf.sprintf "a copy at index %d from %s, installed at the restart" x peer.pname);
+              log "Raft: the copy of %s's databases at index %d is whole and checked: this server starts again on it" peer.pname x;
+              Atomic.set restart true;
+              Unix.kill (Unix.getpid ()) Sys.sigterm
+            | Catchup.Dropped x ->
+              note (Printf.sprintf "a copy at index %d from %s, not needed (this log holds its entry)" x peer.pname);
+              log "Raft: the copy of %s's databases at index %d is not needed: this log holds its entry" peer.pname x
+            | Catchup.Refused m when Mutex.protect t.m (fun () -> t.core.inert) ->
+              (* decided, then not committed (the disk failed meanwhile): the server starts again as it was *)
+              note m;
+              log "Raft: %s; this server starts again" m;
+              Atomic.set restart true;
+              Unix.kill (Unix.getpid ()) Sys.sigterm
+            | Catchup.Refused m ->
+              note m;
+              log "Raft: %s" m;
+              Mutex.protect t.sm (fun () ->
+                  t.fetch_wait <- min 30. (max 1. (2. *. t.fetch_wait));
+                  t.fetch_after <- Unix.gettimeofday () +. t.fetch_wait));
+           (match outcome with Catchup.Refused _ -> () | _ -> Mutex.protect t.sm (fun () -> t.fetch_wait <- 0.));
+           Atomic.set t.fetching false)
+         ())
+  end
 
 let entry t i =
   match Mutex.protect t.pm (fun () -> Hashtbl.find_opt t.pend i) with
@@ -241,9 +487,11 @@ let disk_loop t () =
     in
     if ops = [] then go := false
     else
-      (* consecutive puts of one generation: one round *)
+      (* consecutive puts of one generation: one round, of 8 MiB at most (a frame's pieces are not one round of
+         its whole size: the round is encoded in memory) *)
+      let bytes = List.fold_left (fun n (_, d) -> n + Bytes.length d) 0 in
       let rec merge acc = function
-        | Put a :: Put b :: rest when a.gen = b.gen && b.first = a.first + List.length a.entries ->
+        | Put a :: Put b :: rest when a.gen = b.gen && b.first = a.first + List.length a.entries && bytes a.entries + bytes b.entries <= 8 lsl 20 ->
           merge acc (Put { a with entries = a.entries @ b.entries; commit = max a.commit b.commit } :: rest)
         | x :: rest -> merge (x :: acc) rest
         | [] -> List.rev acc
@@ -288,14 +536,14 @@ let open_out t k o =
 (* an Append's entries' bytes, if the log still holds them as the message says (a follower's log may have been cut) *)
 let append_data t (m : Raft.msg) =
   match m with
-  | Append x -> (
+  | Append { prev_index; terms; _ } | Entries { prev_index; terms; _ } -> (
     match
       Array.mapi
         (fun j tm ->
-          match entry t (x.prev_index + 1 + j) with
+          match entry t (prev_index + 1 + j) with
           | Some (tm', d) when tm' = tm -> d
           | _ -> raise Exit)
-        x.terms
+        terms
     with
     | d -> Some d
     | exception Exit -> None
@@ -327,8 +575,18 @@ let send_loop t k o () =
              Thread.delay !pause;
              pause := min 1.0 (!pause *. 2.)));
         match o.link, append_data t m with
+        | Some l, _ when l.pv < 3 && (match m with Raft.Ask | State _ | Timeout_now _ | Fetch_entries _ | Entries _ -> true | _ -> false) -> ()
+          (* protocol 2 has none of them *)
         | Some l, Some data -> (
           let b = Buffer.create 256 in
+          (* a peer of protocol 2 has no Snap: the probe at the leader's start is an Append there *)
+          let m =
+            match m with
+            | Raft.Snap x when l.pv < 3 ->
+              Raft.Append { term = x.term; seq = x.seq; prev_index = x.index; prev_term = x.index_term; terms = [||]; sizes = [||]; commit = x.commit; floor = x.floor }
+            | Raft.Vote_now x when l.pv < 3 -> Raft.Vote { term = x.term; last_index = x.last_index; last_term = x.last_term }
+            | m -> m
+          in
           put_msg b m data;
           match Replica.send l ~kind:Replica.k_msg b with
           | () -> ()
@@ -362,7 +620,7 @@ let serve_stream t name (l : Replica.link) =
          | kind, _, r when kind = Replica.k_msg ->
            let m, data = get_msg r in
            if r.pos <> r.stop then raise Codec.Short;
-           let terms = match m with Append x -> x.terms | _ -> [||] in
+           let terms = match m with Append x -> x.terms | Entries x -> x.terms | _ -> [||] in
            Mutex.protect t.m (fun () -> Raft.receive t.core (now ()) k m; run ~msg:(terms, data) t)
          | _ -> raise (Replica.Broken "a frame that is not a Raft message")
        done
@@ -371,6 +629,30 @@ let serve_stream t name (l : Replica.link) =
      | Codec.Short -> log "Raft: %s sent a message that does not decode: its stream is closed" name);
     Mutex.protect t.sm (fun () ->
         Hashtbl.replace t.streams name (List.filter (fun x -> x != l) (Option.value (Hashtbl.find_opt t.streams name) ~default:[])))
+
+(* ---- a peer's copy of the databases (server/catchup.ml) ---- *)
+
+(* the databases at this server's applied index, for the peer [name]; that index pinned in the core meanwhile, so
+   that the entries after it stay for the peer *)
+let serve_copy t name (l : Replica.link) =
+  match Array.find_index (( = ) name) t.names with
+  | None -> Replica.send_err l "denied" "not a peer of this cluster"
+  | Some _ ->
+    let x = ref 0 in
+    let pin () = Raft.pin t.core ~index:!x ~until:(now () + !Catchup.pin_ms) in
+    let start () =
+      Mutex.protect t.m (fun () ->
+          (* never inside a frame's pieces: the copy's follower would lack its first ones *)
+          x := Atomic.get t.stable;
+          pin ();
+          !x, Raft.term_at t.core !x)
+    in
+    Replica.timeouts l.fd 30.0;
+    log "Raft: %s takes a copy of the databases" name;
+    (try
+       Catchup.serve ~dbs:(List.map (fun d -> d.name, d.live.e.dir) t.db_list) ~start ~renew:(fun () -> Mutex.protect t.m pin)
+         ~send:(fun b -> Replica.send l ~kind:Replica.k_copy b) ~error:(Replica.send_err l)
+     with Replica.Broken m -> log "Raft: the copy for %s stopped: %s" name m)
 
 (* ---- the ticker ---- *)
 
@@ -382,16 +664,31 @@ let tick_loop t () =
 
 (* ---- the state machine ---- *)
 
-(* the frame of a committed entry into its database (another leader's, or this one's of an earlier term) *)
-let apply_frame t id frame =
+(* a whole frame's first group, count and body length, if its header, body and trailer check (Journal.frame_parts's
+   rule), its body moved to the start of the same bytes: a frame of 100 MiB is not copied once more *)
+let frame_in_place b =
+  let n = Bytes.length b in
+  let u32 o = Int32.to_int (Bytes.get_int32_le b o) land 0xFFFFFFFF in
+  if n < frame_head + 16 || u32 0 <> 0x46485043 || u32 24 <> Crc32c.bytes b 0 24 then None
+  else
+    let len = u32 4 in
+    if len <> n - frame_head - 16 || u32 20 <> Crc32c.bytes b frame_head len then None
+    else if u32 (frame_head + len) <> len || u32 (frame_head + len + 4) <> u32 20 || u32 (frame_head + len + 8) <> u32 24 || u32 (frame_head + len + 12) <> 0x54485043 then None
+    else
+      let first = Int64.to_int (Bytes.get_int64_le b 8) and count = u32 16 in
+      if first < 1 || count < 1 then None else (Bytes.blit b frame_head b 0 len; Some (first, count, b, len))
+
+(* the frame of a committed entry into its database (another leader's, or this one's of an earlier term); a frame
+   whose bytes are this call's own ([own_bytes]) is checked in place *)
+let apply_frame ?(own_bytes = false) t id frame =
   match Hashtbl.find_opt t.dbs id with
   | None -> Error (Printf.sprintf "a committed frame of database id %s, which this server's cluster.toml does not hold" id)
   | Some d -> (
-    match Journal.frame_parts frame with
+    match if own_bytes then frame_in_place frame else Option.map (fun (f, c, b) -> f, c, b, Bytes.length b) (Journal.frame_parts frame) with
     | None -> Error (Printf.sprintf "database %s: a committed frame that does not check" d.name)
-    | Some (first, count, body) -> (
+    | Some (first, count, body, len) -> (
       let r = { Engine.w = ([], 0, ""); res = None; rm = Mutex.create (); rc = Condition.create () } in
-      if not (Engine.submit d.live (Engine.Apply (r, { first; count; body; len = Bytes.length body }))) then Error "the database is closed"
+      if not (Engine.submit d.live (Engine.Apply (r, { first; count; body; len }))) then Error "the database is closed"
       else begin
         Mutex.lock r.rm;
         while r.res = None do Condition.wait r.rc r.rm done;
@@ -400,16 +697,67 @@ let apply_frame t id frame =
       end))
 
 (* a frame this leader proposed in its term: its syncer writes it; the log may be cut past it only once it is in the
-   journal *)
-let await_own t id frame =
-  match Hashtbl.find_opt t.dbs id, Journal.frame_parts frame with
-  | Some d, Some (first, count, _) ->
-    while (Atomic.get d.live.e.published).group < first + count - 1 && d.live.e.stopped = None && not (Atomic.get t.stopping) do
+   journal. [head]: the frame's first bytes (its header: the first group at 8, the count at 16) *)
+let await_own t id head =
+  match Hashtbl.find_opt t.dbs id with
+  | Some d when Bytes.length head >= frame_head ->
+    let last = Int64.to_int (Bytes.get_int64_le head 8) + (Int32.to_int (Bytes.get_int32_le head 16) land 0xFFFFFFFF) - 1 in
+    while (Atomic.get d.live.e.published).group < last && d.live.e.stopped = None && not (Atomic.get t.stopping) do
       Thread.delay 0.0005
     done
   | _ -> ()
 
+(* a vault entry into its database's vault, forced. A vault this server cannot open with the cluster's key (vault.key
+   missing, or another one) or whose key does not open the entry's: tried again every 2 s, said in the log once a
+   minute and in cepheus status, the entries after it waiting (the operator copies the leader's vault.key). [Ok
+   false]: the server stops meanwhile (the entry is applied again at the next start) *)
+let vault_retry = ref 2.0
+
+let apply_vault t id what (f : Cepheus_vault.Vault.t -> (unit, Cepheus_vault.Vault.error) result) =
+  match Hashtbl.find_opt t.dbs id with
+  | None -> Error (Printf.sprintf "a committed vault entry of database id %s, which this server's cluster.toml does not hold" id)
+  | Some d ->
+    let said = ref neg_infinity in
+    let rec go () =
+      match Files.vault ~make:false d.files with
+      | Ok v -> (
+        match f v with
+        | Ok () -> Mutex.protect t.sm (fun () -> t.files_note <- ""); Ok true
+        | Error (Cepheus_vault.Vault.Invalid m) -> wait m
+        | Error e -> Error (Printf.sprintf "database %s: the vault could not take %s: %s" d.name what (Cepheus_vault.Vault.message e)))
+      | Error m -> wait m
+    and wait m =
+      let note = Printf.sprintf "database %s: the vault cannot take %s yet: %s" d.name what m in
+      Mutex.protect t.sm (fun () -> t.files_note <- note);
+      let now = Unix.gettimeofday () in
+      if now -. !said >= 60. then (said := now; log "Raft: %s; trying again every %.0f s" note !vault_retry);
+      if Atomic.get t.stopping then Ok false
+      else (Thread.delay !vault_retry; if Atomic.get t.stopping then Ok false else go ())
+    in
+    go ()
+
+let apply_records t ~rid ~keys ~records =
+  apply_vault t rid "a file's records" (fun v ->
+      let ( let* ) = Result.bind in
+      let* () = if keys = [] then Ok () else Cepheus_vault.Vault.take_keys v keys in
+      let* () = List.fold_left (fun acc r -> let* () = acc in Cepheus_vault.Vault.add_raw v r) (Ok ()) records in
+      Cepheus_vault.Vault.sync v)
+
+let apply_erase t ~eid ~domain = apply_vault t eid (Printf.sprintf "the erasure of owner %d" domain) (fun v -> Cepheus_vault.Vault.erase v domain)
+
 let apply_loop t () =
+  (* the vault entries up to the point the apply starts from: applied again (they may not have been before a crash:
+     the commit hint passes what was applied) *)
+  List.iter
+    (fun i ->
+      if t.failed = None && not (Atomic.get t.stopping) then
+        match Option.map (fun (_, d) -> decode_entry d) (entry t i) with
+        | Some (Some (Records { rid; keys; records })) -> (match apply_records t ~rid ~keys ~records with Error m -> fail t m | Ok _ -> ())
+        | Some (Some (Erase { eid; domain })) -> (match apply_erase t ~eid ~domain with Error m -> fail t m | Ok _ -> ())
+        | _ -> ()
+        | exception Raftlog.Damaged m -> fail t m)
+    t.redo;
+  t.redo <- [];
   while not (Atomic.get t.stopping) && t.failed = None do
     let upto =
       Mutex.protect t.m (fun () ->
@@ -417,19 +765,35 @@ let apply_loop t () =
           t.core.commit)
     in
     let i = ref (Atomic.get t.applied + 1) in
+    let stopped = ref false in
     while !i <= upto && t.failed = None && not (Atomic.get t.stopping) do
       (match entry t !i with
        | None -> fail t (Printf.sprintf "the Raft log lacks committed entry %d" !i)
        | Some (term, d) -> (
+         let own () = Mutex.protect t.m (fun () -> t.core.role = Raft.Leader && term = t.core.term) in
          match decode_entry d with
          | None -> fail t (Printf.sprintf "committed entry %d is of an unknown kind" !i)
-         | Some Noop -> ()
-         | Some (Frame (id, frame)) ->
-           let own = Mutex.protect t.m (fun () -> t.core.role = Raft.Leader && term = t.core.term) in
-           if own then await_own t id frame
-           else match apply_frame t id frame with Ok () -> () | Error m -> fail t m)
-         | exception Raftlog.Damaged m -> fail t m);
-      if t.failed = None then Atomic.set t.applied !i;
+         | Some e -> (
+           let whole = track t.seqs !i term e in
+           match e, whole with
+           | Noop, _ -> ()
+           | Records { rid; keys; records }, _ -> (
+             match apply_records t ~rid ~keys ~records with Ok true -> () | Ok false -> stopped := true | Error m -> fail t m)
+           | Erase { eid; domain }, _ -> (
+             match apply_erase t ~eid ~domain with Ok true -> () | Ok false -> stopped := true | Error m -> fail t m)
+           | Frame (id, frame), _ -> if own () then await_own t id frame else (match apply_frame t id frame with Ok () -> () | Error m -> fail t m)
+           | Piece _, None -> ()
+           | Piece p, Some q ->
+             if own () then (match entry t q.sfirst with Some (_, d0) -> await_own t p.pid (Bytes.sub d0 piece_head (min frame_head (Bytes.length d0 - piece_head))) | None -> ())
+             else
+               match assemble t.rlog ~pend:(fun j -> Mutex.protect t.pm (fun () -> Hashtbl.find_opt t.pend j)) ~get:(entry t) ~from:q.sfirst ~upto:!i ~total:q.stotal with
+               | frame -> (match apply_frame ~own_bytes:true t p.pid frame with Ok () -> () | Error m -> fail t m)
+               | exception Raftlog.Damaged m -> fail t m))
+       | exception Raftlog.Damaged m -> fail t m);
+      if t.failed = None && not !stopped then begin
+        Atomic.set t.applied !i;
+        if Hashtbl.length t.seqs = 0 then Atomic.set t.stable !i
+      end;
       incr i
     done;
     Mutex.protect t.m (fun () -> refresh t; Condition.broadcast t.wc)
@@ -454,22 +818,108 @@ let lead t () =
       end
       else Some ("no_leader", "no leader now (an election is under way): try again", ""))
 
-(* a database's frame, proposed: Ok once committed (the syncer then writes and publishes it) *)
-let propose t id _first _count frame =
-  let data = encode_frame id frame in
+(* a database's frame, proposed (in pieces past [piece]): Ok once committed, its last piece with it (the syncer then
+   writes and publishes it) *)
+let rec propose t id _first _count frame =
+  let n = Bytes.length frame in
+  let entries =
+    if 17 + n <= piece then [ encode_frame id frame ]
+    else List.init ((n + piece - 1) / piece) (fun k -> encode_piece id ~total:n ~off:(k * piece) frame (min piece (n - (k * piece))))
+  in
+  propose_all t entries
+
+(* entries proposed at once, under the core's lock (they follow each other in the log, in this term): Ok once the
+   last one is committed *)
+and propose_all t entries = Result.map ignore (propose_at t entries)
+
+(* the same, Ok with the last entry's index *)
+and propose_at t entries =
   Mutex.protect t.m (fun () ->
       if t.failed <> None || not (ready_locked t) then Error Engine.not_leader
       else
-        match Raft.propose t.core (now ()) (Bytes.length data) with
-        | None -> Error Engine.not_leader
+        let last =
+          List.fold_left
+            (fun last data ->
+              match last with
+              | None -> None
+              | Some _ -> (
+                match Raft.propose t.core (now ()) (Bytes.length data) with
+                | None -> None
+                | Some i ->
+                  Mutex.protect t.pm (fun () -> Hashtbl.replace t.pend i (t.core.term, data));
+                  disk_push t (Put { gen = t.core.gen; first = i; entries = [ t.core.term, data ]; commit = t.core.commit });
+                  Some i))
+            (Some 0) entries
+        in
+        match last with
+        | None | Some 0 -> run t; Error Engine.not_leader
         | Some i ->
           let r = ref None in
           Hashtbl.replace t.waiters i (t.core.term, r);
-          Mutex.protect t.pm (fun () -> Hashtbl.replace t.pend i (t.core.term, data));
-          disk_push t (Put { gen = t.core.gen; first = i; entries = [ t.core.term, data ]; commit = t.core.commit });
           run t;
           while !r = None do Condition.wait t.wc t.m done;
-          Option.get !r)
+          Result.map (fun () -> i) (Option.get !r))
+
+(* ---- the vault's files ---- *)
+
+(* the records of the file of [root] and its domain's key, through the log, before the facts that cite it: Ok once a
+   majority holds them (entries of about a MiB, at most 16 MiB of them proposed before their commit) *)
+let files_commit t name ~domain ~root =
+  match List.find_opt (fun d -> d.name = name) t.db_list with
+  | None -> Error ("invalid", "no such database")
+  | Some d -> (
+    match Files.vault d.files with
+    | Error m -> Error ("io", m)
+    | Ok v -> (
+      match Cepheus_vault.Vault.tree v root with
+      | Error e -> Error (Files.code_of e)
+      | Ok names -> (
+        let keys = match Cepheus_vault.Vault.domain_entry v domain with Some e -> [ e ] | None -> [] in
+        let entries = ref [] and cur = ref [] and size = ref 0 and keys_left = ref keys and failed = ref None in
+        let close () =
+          if !cur <> [] || !keys_left <> [] then begin
+            entries := encode_records d.id ~keys:!keys_left (List.rev !cur) :: !entries;
+            keys_left := [];
+            cur := [];
+            size := 0
+          end
+        in
+        let flush () =
+          close ();
+          if !entries <> [] && !failed = None then
+            (match propose_all t (List.rev !entries) with Ok () -> () | Error e -> failed := Some e);
+          entries := []
+        in
+        let in_flight = ref 0 in
+        List.iter
+          (fun name ->
+            if !failed = None then
+              match Cepheus_vault.Vault.raw v name with
+              | Error e -> failed := Some (Engine.Damaged (Cepheus_vault.Vault.message e))
+              | Ok r ->
+                cur := r :: !cur;
+                size := !size + Bytes.length r;
+                in_flight := !in_flight + Bytes.length r;
+                if !size >= piece then close ();
+                if !in_flight >= 16 * piece then (flush (); in_flight := 0))
+          names;
+        flush ();
+        match !failed with
+        | None -> Ok ()
+        | Some e -> Error (Wire.code_of_error e))))
+
+(* an owner's files erased: through the log, applied by every server (this one too) once committed *)
+let files_erase t name domain =
+  match List.find_opt (fun d -> d.name = name) t.db_list with
+  | None -> Error ("invalid", "no such database")
+  | Some d -> (
+    match propose_at t [ encode_erase d.id domain ] with
+    | Error e -> Error (Wire.code_of_error e)
+    | Ok i ->
+      (* answered once this server's vault erased it too (the apply thread): a Load after the answer finds it erased *)
+      Mutex.protect t.m (fun () ->
+          while Atomic.get t.applied < i && t.failed = None && not (Atomic.get t.stopping) do Condition.wait t.wc t.m done);
+      if Atomic.get t.applied >= i then Ok () else Error ("no_leader", "the server stops: the erasure is committed, applied at its next start"))
 
 (* ---- start, recovery, stop ---- *)
 
@@ -477,13 +927,28 @@ let propose t id _first _count frame =
    hint, or within the newest run's groups) written again, and the journal cut where the others begin *)
 let frames_for rlog ~hint id ~snapshot =
   let copy = ref [] and cut = ref None in
-  Raftlog.iter rlog ~from:1 (fun i _ d ->
+  let seqs = Hashtbl.create 4 and parts = ref [] in
+  let frame i frame =
+    if !cut = None then
+      match Journal.frame_parts frame with
+      | Some (first, count, _) -> if i <= hint || first + count - 1 <= snapshot then copy := frame :: !copy else cut := Some first
+      | None -> raise (Raftlog.Damaged (Printf.sprintf "entry %d holds a frame that does not check" i))
+  in
+  Raftlog.iter rlog ~from:1 (fun i tm d ->
       match decode_entry d with
-      | Some (Frame (x, frame)) when x = id && !cut = None -> (
-        match Journal.frame_parts frame with
-        | Some (first, count, _) -> if i <= hint || first + count - 1 <= snapshot then copy := frame :: !copy else cut := Some first
-        | None -> raise (Raftlog.Damaged (Printf.sprintf "entry %d holds a frame that does not check" i)))
-      | _ -> ());
+      | Some e -> (
+        let whole = track seqs i tm e in
+        (* this database's pieces kept while their sequence is open *)
+        match e, whole with
+        | Frame (x, f), _ when x = id -> parts := []; frame i f
+        | Piece p, Some q when p.pid = id ->
+          let b = Bytes.create q.stotal in
+          List.iter (fun d -> match decode_entry d with Some (Piece p) -> Bytes.blit p.data 0 b p.off (Bytes.length p.data) | _ -> ()) (d :: !parts);
+          parts := [];
+          frame i b
+        | Piece p, None when p.pid = id && Hashtbl.mem seqs id -> parts := if p.off = 0 then [ d ] else d :: !parts
+        | _ -> if not (Hashtbl.mem seqs id) then parts := [])
+      | None -> ());
   List.rev !copy, !cut
 
 type opened = { rlog : Raftlog.t; rec_ : Raftlog.recovered }
@@ -492,6 +957,12 @@ type opened = { rlog : Raftlog.t; rec_ : Raftlog.recovered }
 let recover (cfg : Config.t) =
   let dir = Filename.concat cfg.data "raft" in
   let secure p = try Unix.chmod p (if Sys.is_directory p then 0o700 else 0o600) with Unix.Unix_error _ | Sys_error _ -> () in
+  match
+    (* a copy of the databases taken from a peer: installed before anything reads the log or the databases *)
+    if Sys.file_exists dir then Catchup.at_start cfg else Ok ()
+  with
+  | Error m -> Error m
+  | Ok () ->
   match Raftlog.open_ ~secure Disk.real dir ~cluster:cfg.id with
   | rlog, rec_ ->
     Option.iter (fun m -> log "%s" m) rec_.damage;
@@ -506,8 +977,8 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
   let vote = match Array.find_index (( = ) r.st.vote) names with Some k -> k | None -> -1 in
   let rng = Rng.make (Int64.to_int (String.get_int64_le (Tokens.random 8) 0)) in
   let core =
-    Raft.make ~me ~n:(Array.length names) ~election_ms:!election_ms ~heartbeat_ms:!heartbeat_ms ~rng ~now:(now ())
-      ~term:r.st.term ~vote ~repair:r.st.repair ~start:r.start ~prev_term:r.prev_term ~terms:r.terms ~sizes:r.sizes ~commit:r.commit
+    Raft.make ~me ~n:(Array.length names) ~election_ms:!election_ms ~heartbeat_ms:!heartbeat_ms ~floor_ms:!floor_ms ~rng ~now:(now ())
+      ~term:r.st.term ~vote ~repair:r.st.repair ~fresh:r.fresh ~start:r.start ~prev_term:r.prev_term ~terms:r.terms ~sizes:r.sizes ~commit:r.commit
   in
   let t =
     { cfg; names; me; m = Mutex.create (); core; rlog = o.rlog; dbs = Hashtbl.create 8; db_list = dbs; waiters = Hashtbl.create 64;
@@ -515,11 +986,21 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
       pm = Mutex.create (); applied = Atomic.make (core.start - 1); ac = Condition.create ();
       serve_until = Atomic.make 0;
       outs = Array.mapi (fun _ p -> { peer = p; oq = Queue.create (); om = Mutex.create (); oc = Condition.create (); link = None; thread = None }) (Array.of_list cfg.peers);
-      stopping = Atomic.make false; threads = []; failed = None; streams = Hashtbl.create 4; sm = Mutex.create (); damage = r.damage }
+      stopping = Atomic.make false; threads = []; failed = None; streams = Hashtbl.create 4; sm = Mutex.create (); damage = r.damage;
+      seqs = Hashtbl.create 4; redo = []; stable = Atomic.make 0;
+      fetching = Atomic.make false; fetch_after = 0.; fetch_wait = 0.; fetch_note = ""; files_note = "" }
   in
   List.iter (fun d -> Hashtbl.replace t.dbs d.id d; d.live.propose <- propose t d.id) dbs;
   (* entries the recovery copied into the journals (up to the hint) are applied; the rest waits for the commit *)
   Atomic.set t.applied (max (core.start - 1) (min core.commit (Raftlog.next o.rlog - 1)));
+  (* the sequences of pieces open at that point, which the apply thread goes on with *)
+  Raftlog.iter o.rlog ~from:core.start ~upto:(Atomic.get t.applied) (fun i tm d ->
+      match decode_entry d with
+      | Some ((Records _ | Erase _) as e) -> ignore (track t.seqs i tm e); t.redo <- i :: t.redo
+      | Some e -> ignore (track t.seqs i tm e)
+      | None -> ());
+  t.redo <- List.rev t.redo;
+  Atomic.set t.stable (min (Atomic.get t.applied) (open_first t.seqs - 1));
   t
 
 let start t =
@@ -538,7 +1019,7 @@ let checkpoint t =
       let upto =
         Mutex.protect t.m (fun () ->
             let c = t.core in
-            min (a + 1) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c + 1))))
+            min (min (a + 1) (Atomic.get t.stable + 1)) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c (now ()) + 1))))
       in
       match Raftlog.cut_before t.rlog upto with
       | () -> Mutex.protect t.m (fun () -> Raft.compact t.core (min upto (Raftlog.first t.rlog)))
@@ -546,6 +1027,38 @@ let checkpoint t =
   end
 
 let failed t = Mutex.protect t.sm (fun () -> t.failed)
+
+(* a clean stop of the leader: leadership handed over (thesis 3.10) to the most up-to-date follower, writes paused
+   meanwhile (a program's library sends them again to the new leader: G14), reads too (the lease given up before
+   anything leaves); at most two election timeouts, then the stop goes on whatever happened. Nothing on a follower *)
+let hand_over t =
+  let handing =
+    Mutex.protect t.m (fun () ->
+        (* the lease's fast path closed first: no read is served from here on (Raft.lease_until) *)
+        Atomic.set t.serve_until 0;
+        let h = Raft.hand_over t.core (now ()) in
+        run t;
+        h)
+  in
+  if handing then begin
+    let t0 = now () in
+    let target = match t.core.handing with Some (k, _) -> t.names.(k) | None -> "?" in
+    log "Raft: handing leadership over to %s before stopping" target;
+    (* when the peer held the whole log (Timeout_now sent from then on): what a slow handover waited for *)
+    let full = ref (-1) in
+    while
+      Mutex.protect t.m (fun () ->
+          (match t.core.handing with
+           | Some (k, _) when !full < 0 && t.core.peers.(k).matched >= Raft.last_index t.core -> full := now () - t0
+           | _ -> ());
+          t.core.role = Raft.Leader && t.core.handing <> None)
+      && now () - t0 < 2 * !election_ms
+    do Thread.delay 0.002 done;
+    let ms = now () - t0 in
+    Mutex.protect t.m (fun () ->
+        if t.core.role = Raft.Leader then log "Raft: the handover did not end within %d ms: stopping as the leader" ms
+        else log "Raft: leadership handed over (term %d) in %d ms (%s held the whole log at %d ms)" t.core.term ms target !full)
+  end
 
 let stop t =
   Atomic.set t.stopping true;
@@ -571,6 +1084,9 @@ let status t =
         "raft.commit", string_of_int c.commit; "raft.applied", string_of_int (Atomic.get t.applied);
         "raft.log", Printf.sprintf "%d to %d" c.start (Raft.last_index c); "raft.forced", string_of_int c.persisted ]
       @ (if c.repair > 0 then [ "raft.repair", Printf.sprintf "damaged log: no vote until entries up to %d come from a leader" c.repair ] else [])
+      @ (match Mutex.protect t.sm (fun () -> t.files_note) with "" -> [] | m -> [ "raft.files", m ])
+      @ (if Atomic.get t.fetching then [ "raft.copy", Printf.sprintf "taking a copy of the databases (%d bytes so far)" (Atomic.get Catchup.received) ]
+         else match Mutex.protect t.sm (fun () -> t.fetch_note) with "" -> [] | m -> [ "raft.copy", m ])
       @ (match t.failed with Some m -> [ "raft.failed", m ] | None -> [])
       @
       if c.role = Raft.Leader then
