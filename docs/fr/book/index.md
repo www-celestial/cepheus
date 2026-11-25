@@ -7,7 +7,7 @@ exacte.
 - [Démarrage rapide](quickstart.md) : construire Cepheus, lancer un serveur, et faire tourner un premier programme
   Cesia qui écrit et pose une question, en une dizaine de minutes.
 - [En production](production.md) : un service systemd, une sauvegarde chaque nuit et un exercice de restauration, ce
-  qu'il faut surveiller dans le status et le log, les mises à jour, et que faire après une panne ou une coupure de
+  qu'il faut surveiller dans le status et le log (les temps des questions et des écritures, les lentes, Prometheus), les mises à jour, et que faire après une panne ou une coupure de
   courant.
 - [Une vraie application](app.md) : des factures et des clients en Cesia, pas à pas, de `cesia new` jusqu'à la
   production : des listes par pages, une recherche pendant la frappe, un tableau de bord en direct, des utilisateurs

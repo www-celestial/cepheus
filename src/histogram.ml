@@ -83,7 +83,8 @@ let percentile h q =
     let want = max 1 (int_of_float (Float.ceil (q *. float h.total))) in
     let acc = ref 0 and i = ref 0 in
     while !acc + c.(!i) < want do acc := !acc + c.(!i); incr i done;
-    min h.max (upper h.bits !i)
+    (* the last bucket holds every value from its start on: the maximum is its bound *)
+    if !i = size h.bits - 1 then h.max else min h.max (upper h.bits !i)
   end
 
 let total h = h.total

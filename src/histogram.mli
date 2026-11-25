@@ -16,7 +16,8 @@ val merge_into : t -> t -> unit
 
 val percentile : t -> float -> int
 (** [percentile h q] is the value at or below which a fraction [q] (0..1) of the values lie, rounded up to its
-    bucket's highest value (never above the largest value recorded); 0 when [h] is empty. *)
+    bucket's highest value (never above the largest value recorded; the largest one in the last bucket, past 2^34 us);
+    0 when [h] is empty. *)
 
 val total : t -> int
 val max : t -> int

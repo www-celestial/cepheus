@@ -83,6 +83,10 @@ and conn = {
   failed : bool Atomic.t;  (* a thread other than the reading one failed: said at the end *)
   gone : unit -> bool;  (* the transport can send nothing more (the peer went): a long reply stops *)
   puts : (int, db * Files.put) Hashtbl.t;  (* the files being put, by the id of their Put (the reading thread only) *)
+  mutable mark : int;
+      (* the monotonic clock's microseconds at the end of the question just answered, among the frames of one input;
+         0 otherwise: the next frame's [t0], so that questions sent together read the clock once each (Timings) *)
+  mutable t0 : int;  (* the frame being handled: its start, when [mark] gave it; 0: read the clock *)
 }
 
 let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> [])
@@ -102,7 +106,7 @@ let connect ?(wake = ignore) ?(close = ignore) ?(gone = fun () -> false) srv ~fl
         { srv; cid; token = None; seen = Tokens.empty; rights = [||]; kinds = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
           inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = []; kept_cells = 0;
-          closed = false; wake; close; failed = Atomic.make false; gone; puts = Hashtbl.create 2 }
+          closed = false; wake; close; failed = Atomic.make false; gone; puts = Hashtbl.create 2; mark = 0; t0 = 0 }
       in
       Hashtbl.replace srv.conns cid c;
       c)
@@ -466,14 +470,19 @@ let cancelled c = Atomic.incr c.srv.cancelled
 
 let token_name c = match c.token with Some t -> t.name | None -> "none"
 
+(* a request's start: the end of the question just before it among the frames read together, else the clock *)
+let start c = if c.t0 > 0 then c.t0 else Histogram.now_us ()
+
 (* a question answered (or ended), timed from [t0] (Timings): written in the log when it is slow, its shape made only
    then *)
-let timed_question c d ~t0 ~stop ~rows ~outcome shape =
+let timed_question c d ~t0 ~stop ~rows ~outcome ~what (v : Store.view) q sel extra order =
   let now = Histogram.now_us () in
   let us = now - t0 in
+  c.mark <- now;
   if Timings.question c.srv.timings d.index ~now us then
     Timings.say c.srv.timings
-      (Timings.question_line ~db:d.name ~token:(token_name c) ~us ~candidates:(Query.work_of stop) ~rows ~outcome (shape ()))
+      (Timings.question_line ~db:d.name ~token:(token_name c) ~us ~candidates:(Query.work_of stop) ~rows ~outcome
+         (what ^ " " ^ Timings.shape v q sel extra order))
 
 (* An answer is held whole, its cells charged to a ticket (Answer), then sent: the fold on several domains when it is
    large, as fast as before. A Give without Sort past its cells, or the pool's, is asked again and coded as its rows
@@ -481,7 +490,7 @@ let timed_question c d ~t0 ~stop ~rows ~outcome shape =
    try, which ends in the fold). The work budget and the memory one end the reply too_large, a damaged page met while
    the rows are coded (a text read from its run) damaged: after the frames sent, if any. *)
 let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order ~timeout =
-  let t0 = Histogram.now_us () in
+  let t0 = start c in
   let v = d.view () in
   let budget = Answer.work_budget q extra in
   let stop = question_stop c timeout in
@@ -519,7 +528,7 @@ let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order ~timeout =
     | exception Answer.Too_large m -> err c ~id ~kind "too_large" "%s" m; "too_large"
     | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m; "damaged"
   in
-  timed_question c d ~t0 ~stop ~rows:(Some !rows) ~outcome (fun () -> "find " ^ Timings.shape v q sel extra order)
+  timed_question c d ~t0 ~stop ~rows:(Some !rows) ~outcome ~what:"find" v q sel extra order
 
 (* ---- writes ---- *)
 
@@ -563,7 +572,7 @@ let write_bounds (v : Store.view) ops =
     end
 
 let write c ~id ~kind d ~serial ~floor ~by ~why ops =
-  let t0 = Histogram.now_us () in
+  let t0 = start c in
   if Origin.has_marker why then err c ~id ~kind "invalid" "a why may not start with the server's marker"
   else
     (* the state the write is checked against, read once *)
@@ -767,7 +776,7 @@ let max_watches = ref 1024
 let max_server_watches = ref 65_536
 
 let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order ~timeout =
-  let t0 = Histogram.now_us () in
+  let t0 = start c in
   let tok = Option.get c.token in
   let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
   (* G16 at each message: the token may still read the database (the table is read again only when it changed) *)
@@ -868,7 +877,7 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order ~t
     | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m; "damaged"
     | exception Failure m -> err c ~id ~kind "stopping" "%s" m; "stopping"
   in
-  timed_question c d ~t0 ~stop ~rows:None ~outcome (fun () -> "watch " ^ Timings.shape (d.view ()) q sel extra order)
+  timed_question c d ~t0 ~stop ~rows:None ~outcome ~what:"watch" (d.view ()) q sel extra order
 
 let unwatch c ~id ~kind w =
   let found = Mutex.protect c.pm (fun () ->
@@ -1079,6 +1088,8 @@ let max_out = 1 lsl 20
    ([fail]): the frames of its reply sent before (a Find's first rows) end with that error, which the client takes
    as the reply's end. A connection that another of its threads failed ([broke]) reads no more requests. *)
 let input c buf off stop =
+  (* the bytes were read just now: the first frame reads the clock *)
+  c.mark <- 0;
   let rec go o =
     if Atomic.get c.failed then o, Shut
     else if c.inflight >= c.srv.max_inflight then o, Full
@@ -1097,9 +1108,12 @@ let input c buf off stop =
       else if stop - o < 4 + len then o, Need
       else
         let id = Wire.u32 buf (o + 4) and kind = Bytes.get_uint8 buf (o + 8) and flags = Bytes.get_uint8 buf (o + 9) in
+        c.t0 <- c.mark;
+        c.mark <- 0;
         match handle c ~id ~kind ~flags (Codec.reader buf (o + Wire.header) (len - 6)) with
-        | exception e -> fail c ~id ~kind e; o + 4 + len, Shut
+        | exception e -> c.t0 <- 0; fail c ~id ~kind e; o + 4 + len, Shut
         | r -> (
+          c.t0 <- 0;
           (* a reply's scratch that grew past a chunk gives its memory back (a connection keeps 4 KiB of it) *)
           if Buffer.length c.body > chunk then Buffer.reset c.body;
           if Buffer.length c.scratch > chunk then Buffer.reset c.scratch;

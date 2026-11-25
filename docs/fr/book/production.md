@@ -3,7 +3,7 @@
 Comment faire tourner un serveur Cepheus sur une machine qui lui est réservée : comme service systemd (le gestionnaire
 de services de Linux, qui lance les programmes au démarrage et les relance), avec des sauvegardes prises chaque nuit et
 un exercice de restauration, ce qu'il faut surveiller dans `cepheus status` et dans le log (les messages que le serveur
-écrit), comment faire une mise à jour, et que faire après un crash (l'arrêt brutal du processus) ou une coupure de
+écrit : les temps des questions et des écritures, les lentes, Prometheus), comment faire une mise à jour, et que faire après un crash (l'arrêt brutal du processus) ou une coupure de
 courant. Les commandes ont été lancées sur une machine de test ; leur sortie est montrée avec les chemins de cette
 page. Un premier serveur sur un portable : [le démarrage rapide](quickstart.md). Chaque clé de `cluster.toml` et chaque
 commande : [le serveur](server.md).

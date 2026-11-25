@@ -127,6 +127,18 @@ stay as they are, or a later version reads and speaks both the old and the new.
   `question_timeout = 0`, or the program's own time from an admin token, to keep it. Writes have no time.
 - A question whose program closed its connection **stops**, its domains given back at once (the socket looked at with
   `POLLRDHUP` at most every 10 ms, as PostgreSQL's `client_connection_check_interval`); before, it ran to its end.
+- **What is slow shows.** `[log] slow_ms` in `cluster.toml` (200 ms by default, 0 for none): a question or a write
+  that takes that long or more at the server gets a line in its log, with its database, its token's name, its time,
+  its outcome, a question's candidates, rows and shape, a write's operations, properties and group, each constant
+  written `?`: no value of the data and no token (a test searches the log for each of its values), 10 lines a second
+  at most ([slow questions and writes](docs/book/production.md#slow-questions-and-writes)). The log of a server that
+  had none of these lines gets them from 200 ms on: give `slow_ms = 0` to keep it as it was. `cepheus status` adds,
+  after its earlier lines, each database's questions and writes (counts since the start, p50, p99 and maximum over the
+  last minute, a write's to its group durable, within 3.1 %), merges (count, time, bytes), journal and runs bytes,
+  the page cache's room, hits and misses, and the disk's free bytes; `cepheus status --format prometheus` prints them
+  in Prometheus's text format, for node_exporter's textfile collector, rather than a port of the server. Timing every
+  question and write costs a point question COST_FIND at the server, a write COST_WRITE (measured: 21 rounds A/B).
+  `Cepheus.Histogram.create` takes `?bits`.
 - **Domains**: the databases' writers and syncers share the writers' domains (as many as the cores), not a domain each,
   so a server of 200 databases holds 21 domains, where before about 120 databases took every domain OCaml allows (128
   a process) and the next failed; large questions take their helping domains from one pool of the process (the cores

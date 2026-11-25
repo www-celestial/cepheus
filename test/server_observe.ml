@@ -78,6 +78,9 @@ let () =
   let s = Timings.slice_us in
   (* slice 10: 1..100 us; slice 13: 1000; slice 16: 5000 (slow) *)
   for i = 1 to 100 do ignore (Timings.question t 0 ~now:(10 * s) i) done;
+  let l = Timings.lines t 0 ~now:(10 * s) in
+  C.check (status_of l "database.a.question_samples" = 100 && status_of l "database.a.question_us_p99" = 99 && status_of l "database.a.question_us_p50" = 50)
+    "slice 10 alone: p50 and p99 of 1..100 are 50 and 99";
   ignore (Timings.question t 0 ~now:((13 * s) + 5) 1000);
   C.check (Timings.question t 0 ~now:(16 * s) 5000) "5 ms is slow at slow_ms = 5";
   C.check (not (Timings.question t 0 ~now:(16 * s) 4999)) "4.999 ms is not";
@@ -91,8 +94,9 @@ let () =
   let l = Timings.lines t 0 ~now:(15 * s) in
   C.check (status_of l "database.a.question_samples" = 101 || status_of l "database.a.question_samples" = 1)
     "an earlier window";
+  (* slice 16 took the place of slice 10 (16 mod 6 = 10 mod 6): a window that ends at 10 holds nothing of it now *)
   let l = Timings.lines t 0 ~now:(10 * s) in
-  C.check (status_of l "database.a.question_samples" = 100 && status_of l "database.a.question_us_p99" = 99) "slice 10 alone: p99 of 1..100 is 99";
+  C.check (status_of l "database.a.question_samples" = 0) "a slice taken by a later one is no longer read";
   let l = Timings.lines t 0 ~now:(30 * s) in
   C.check (status_of l "database.a.question_samples" = 0 && status_of l "database.a.question_us_p50" = 0) "an old window: empty";
   let l = Timings.lines t 1 ~now:(16 * s) in
@@ -369,11 +373,13 @@ let () =
   wait_ready sock;
   let addr = Client.Unix_socket sock in
   let c = match Client.connect addr wtext with Ok c -> c | Error m -> failwith m in
-  let db, name, code, tag =
+  let name, code, tag =
     match Client.declare c "main" [ prop "c/name" Ttext; prop "c/code" Tint; prop "c/tag" Ttext ] with
-    | Ok (db, [ n; k; t ]) -> db, n, k, t
+    | Ok (_, [ n; k; t ]) -> n, k, t
     | _ -> failwith "declare"
   in
+  (* asked at the server, even over the Unix socket (no local reads): what the server times *)
+  let db = match Client.open_db ~local:false c "main" with Ok db -> db | Error e -> failwith e.message in
   (* values of the data no line may show: texts and numbers of its own *)
   let secret i = Printf.sprintf "zq-secret-%06d" (731 * i) and number i = 913_000_000 + (7 * i) and tag_value = "zq-tag-4711" in
   let n = 1500 in
@@ -381,6 +387,9 @@ let () =
   let ops = List.concat (List.init n (fun i -> [ Resolve.Add (-(i + 1), name, Text (secret i)); Resolve.Add (-(i + 1), code, Int (number i)); Resolve.Add (-(i + 1), tag, Text tag_value) ])) in
   (match Client.write c db ~why:"load" ops with Ok _ -> () | Error e -> C.fail "the load: %s %s" e.code e.message);
   for i = 0 to 9 do ignore (Client.write c db [ Resolve.Add (-1, name, Text (secret (n + i))); Resolve.Add (-1, code, Int (number (n + i))) ]) done;
+  (* 12 slow writes in a second at most (each waits for its fsync, past 1 ms): 10 lines, the next written says how many
+     were left out; the questions come in the next second *)
+  Thread.delay 1.1;
   (* slow questions: a product counted (1500 x 1500), a watch of it, the same with three patterns past a 50 ms timeout *)
   let product = { Query.vars = 2; where = [ { e = Var 0; p = tag; v = Val (Text tag_value) }; { e = Var 1; p = tag; v = Val (Text tag_value) } ]; ranges = [] } in
   (match Client.find c db ~select:(Wire.Group ([||], [| Wire.Count |])) product with
@@ -398,7 +407,10 @@ let () =
   let w = Client.watch c db ~select:(Wire.Group ([||], [| Wire.Count |])) product in
   (match Client.next_push c w with Client.Pushed (Wire.Answer _) -> () | _ -> C.fail "the watch's first answer");
   Client.close c;
-  (* the log *)
+  (* the log: a question's line is written once its reply is coded (a watch's after its first answer was pushed) *)
+  let want = [ "ok: find group count"; "timeout: find"; "ok: watch group count"; "4500 operations" ] in
+  let t0 = Unix.gettimeofday () in
+  while (let l = read_file (dir // "serve.log") in not (List.for_all (contains l) want)) && Unix.gettimeofday () -. t0 < 10. do Thread.delay 0.05 done;
   let log = read_file (dir // "serve.log") in
   let slow = List.filter (fun l -> contains l "slow question" || contains l "slow write") (lines log) in
   let has_line what = List.exists (fun l -> List.for_all (contains l) what) slow in
@@ -407,6 +419,8 @@ let () =
   C.check (has_line [ "slow question: database main, token obs-writer"; "timeout: find group count where [x0 c/tag ?] [x1 c/tag ?] [x2 c/tag ?]" ]) "a line for the timeout";
   C.check (has_line [ "slow question: database main, token obs-writer"; "ok: watch group count" ]) "a line for the watch";
   C.check (has_line [ "slow write: database main, token obs-writer"; "group"; "ok: 4500 operations (4500 adds) of c/name, c/code, c/tag" ]) "a line for the large group";
+  C.check (List.length (List.filter (fun l -> contains l "slow write") slow) <= 10 && has_line [ "slow questions or writes not written since the line before" ])
+    "10 lines a second at most, the next one counting those left out";
   List.iter
     (fun l ->
       match String.index_opt l ',' with

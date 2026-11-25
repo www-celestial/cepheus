@@ -1,7 +1,8 @@
 # Running in production
 
 How to run a Cepheus server on a machine of its own: as a systemd service, with backups taken every night and a
-restore drill, what to watch in `cepheus status` and in the log, how to upgrade, and what to do after a crash or a
+restore drill, what to watch in `cepheus status` and in the log (the times of questions and writes, the slow ones,
+Prometheus), how to upgrade, and what to do after a crash or a
 power loss. The commands were run on a test machine; their output is shown with this page's paths. A first server on
 a laptop: [the quick start](quickstart.md). Every key of `cluster.toml` and every command: [the server](server.md).
 
