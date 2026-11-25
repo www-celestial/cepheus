@@ -298,6 +298,56 @@ cited on the [comparison](comparison.md) page.
   — totalOrder (section 5.10): one order of every float, $-\mathrm{NaN} < -\infty < \dots < -0 < +0 < \dots <
   +\infty < +\mathrm{NaN}$. `Sort`, the ranges and `Less` on floats compare in it (`Value.total_order`).
 
+## Reports
+
+- **[Hyndman 1996]** R. J. Hyndman, Y. Fan. Sample Quantiles in Statistical Packages. *The American Statistician*
+  50(4), 361–365, 1996. https://doi.org/10.1080/00031305.1996.10473566
+  — The nine definitions of a sample quantile that statistical packages use; `Quantile` is their definition 7 (R's and
+  NumPy's default, PostgreSQL's `percentile_cont`), `discrete = true` their definition 1 (`percentile_disc`).
+- **[Hoare 1961]** C. A. R. Hoare. Algorithm 65: Find. *Communications of the ACM* 4(7), 321–322, 1961.
+  https://doi.org/10.1145/366622.366647
+  — Selection: the k-th of n values by partitions about a pivot on one side only, linear on average; a quantile's
+  rank in Cepheus, on a group's different values weighted by their counts.
+- **[Floyd 1975]** R. W. Floyd, R. L. Rivest. Expected Time Bounds for Selection. *Communications of the ACM* 18(3),
+  165–172, 1975. https://doi.org/10.1145/360680.360691
+  — The expected number of comparisons of selection, and a faster sampling variant; Cepheus keeps Hoare's with a
+  median-of-three pivot.
+- **[Musser 1997]** D. R. Musser. Introspective Sorting and Selection Algorithms. *Software: Practice and Experience*
+  27(8), 983–993, 1997. https://doi.org/10.1002/(SICI)1097-024X(199708)27:8%3C983::AID-SPE117%3E3.0.CO;2-%23
+  — Introselect: past a bound on the partitions, the rest sorted, so that no input makes selection quadratic.
+- **[Welford 1962]** B. P. Welford. Note on a Method for Calculating Corrected Sums of Squares and Products.
+  *Technometrics* 4(3), 419–420, 1962. https://doi.org/10.1080/00401706.1962.10490022
+  — The one-pass update of a mean and a sum of squared deviations; accurate in floats, but its last digits depend on
+  the order of the values, so Cepheus does not use it.
+- **[Youngs 1971]** E. A. Youngs, E. M. Cramer. Some Results Relevant to Choice of Sum and Sum-of-Product Algorithms.
+  *Technometrics* 13(3), 657–665, 1971. https://doi.org/10.1080/00401706.1971.10488826
+  — The update PostgreSQL's `float8` variance and standard deviation run (its `float8_accum`).
+- **[Chan 1983]** T. F. Chan, G. H. Golub, R. J. LeVeque. Algorithms for Computing the Sample Variance: Analysis and
+  Recommendations. *The American Statistician* 37(3), 242–247, 1983. https://doi.org/10.1080/00031305.1983.10483115
+  — Why the textbook formula $\sum x^2 - (\sum x)^2 / n$ loses its digits in floats when the values are far from 0, and
+  how to merge two parts' sums; with exact sums, Cepheus computes that formula's numerator with no loss.
+- **[Neal 2015]** R. M. Neal. Fast exact summation using small and large superaccumulators. arXiv:1505.05571, 2015.
+  https://arxiv.org/abs/1505.05571
+  — Sums of floats kept exactly, as integers at each binary place, rounded once; Cepheus's exact sums are of that
+  family, with parts of 30 bits carried lazily.
+- **[RFC 8536]** A. Olson, P. Eggert, K. Murchison. The Time Zone Information Format (TZif). IETF RFC 8536, 2019.
+  https://www.rfc-editor.org/rfc/rfc8536
+  — The format of the zone database's files that Cepheus reads: transitions, time types, and the footer's POSIX TZ
+  string for the times after the last transition (with its extensions: hours from -167 to 167, a year of summer time).
+- **[tz]** The IANA Time Zone Database. https://www.iana.org/time-zones
+  — The rules of the world's local times, which every system ships (`tzdata`) and updates several times a year.
+- **[Hinnant 2013]** H. Hinnant. chrono-Compatible Low-Level Date Algorithms. 2013.
+  https://howardhinnant.github.io/date_algorithms.html
+  — The days of the proleptic Gregorian calendar from a year, month and day, and back, with no table: `Zone`'s calendar.
+- **[ISO 8601]** ISO 8601-1:2019. Date and time — Representations for information interchange, part 1.
+  https://www.iso.org/standard/70907.html
+  — Weeks from Monday: `Trunc(d, "week")`.
+- **[PostgreSQL aggregates]** PostgreSQL 18 documentation, 9.21 Aggregate Functions, and 9.9.2 date_trunc.
+  https://www.postgresql.org/docs/18/functions-aggregate.html ,
+  https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-TRUNC
+  — `avg`, `count(DISTINCT)`, `array_agg`, `string_agg`, `percentile_cont`, `percentile_disc`, `stddev`, `variance`
+  and `date_trunc` with a zone, the forms the tutorials set beside Cepheus's.
+
 ## Transactions and isolation
 
 - **[Codd 1970]** E. F. Codd. A Relational Model of Data for Large Shared Data Banks. *Communications of the ACM*

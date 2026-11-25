@@ -559,6 +559,7 @@ module Question : sig
   type item = Pattern of pattern | Range of int * value * value | In of int * value list | Prefix of int * string
             | Not of item list | Or of item list list
             | Less of int * int | Less_or_equal of int * int | Optional of pattern
+            | Trunc of int * int * string * string
   type key = { col : int; desc : bool }
   type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
 end
@@ -579,6 +580,13 @@ it); a missing cell sorts after every value, in both directions, and an `after` 
 variables of each row (empty: every variable of the question); a key's `col` is a column of `give`; `limit` 0 gives
 every row; `after` is a row of `give`'s columns. `find` and `query` are unchanged: a question of patterns and ranges,
 given every variable, has the rows `find` gives.
+
+`Trunc (y, x, unit, zone)` makes variable `y` the instant the unit of the date `x` starts in the zone's local time
+(`"second"` to `"millennium"`; an IANA zone, as `"Europe/Paris"`, or `"UTC"`): a variable computed from `x` as each
+row is given, as SPARQL's `BIND`, numbered after the question's (the i-th `Trunc` gives `vars + i`), at the top of
+`items` only, for `give` and `sort` ([reports](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)).
+Through the server, the same item, and the aggregates of reports in a `Group` select (`Avg`, `Distinct` for
+`Count(x)`, `Values`, `Quantile`, `Variance`, `Stddev`: [the protocol](server.md#the-protocol)).
 
 ```ocaml
 open Cepheus
@@ -638,6 +646,32 @@ let () =
 #65538
 "Ada" "0601"
 "Bo" missing
+```
+
+`Trunc`: each sale's month in Paris (a date is printed in milliseconds since 1970: February in Paris starts at
+1801436400000, 23:00 UTC on 31 January), the sales sorted by their dates:
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ day ]) = declare db [ prop "sale/day" Tdate ] in
+  (* 23:30 UTC on 31 January 2027 and 09:00 UTC on 10 February: both February in Paris *)
+  ignore (write db [ Add (-1, day, Date 1801438200000); Add (-2, day, Date 1802250000000) ]);
+  let q =
+    { Question.vars = 2;
+      items = Question.[ Pattern { e = Var 0; p = day; v = Var 1 }; Trunc (2, 1, "month", "Europe/Paris") ];
+      give = [| 1; 2 |]; sort = [ { Question.col = 0; desc = false } ]; limit = 0; after = None }
+  in
+  match ask (view db) q with
+  | Ok rows -> List.iter (fun r -> print_endline (String.concat " " (Array.to_list (Array.map Value.to_string r)))) rows
+  | Error e -> print_endline (message e)
+```
+
+```output
+date 1801438200000 date 1801436400000
+date 1802250000000 date 1801436400000
 ```
 
 ## The cache

@@ -437,7 +437,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 | 1 Hello | version varint (1 to 8), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique); past the frame limit, in frames of about 1 MiB of properties, all but the last with `more`, each with its handle, group and count |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)...; past the frame limit, in frames of about 1 MiB of facts, all but the last with `more`, each with its group and count |
-| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text, 6 Less: two variables, 7 LessOrEqual: two variables, 8 Optional: a pattern, from version 7), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values); then, from version 6 and only when the program gives one, the question's time in milliseconds (1 to a week; the order is then sent, empty if need be) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort past the server's cells sent as its rows are found, none held): the view's group, columns, count, values row by row; a cell an Optional left without a value is the link $-2^{62}$, which no thing has (a value of rows only) |
+| 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text, 6 Less: two variables, 7 LessOrEqual: two variables, 8 Optional: a pattern, from version 7; 9 Trunc: its variable, the date's variable, the unit and the zone (two texts), from version 9), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values); then, from version 6 and only when the program gives one, the question's time in milliseconds (1 to a week; the order is then sent, empty if need be) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort past the server's cells sent as its rows are found, none held): the view's group, columns, count, values row by row; a cell an Optional left without a value is the link $-2^{62}$, which no thing has (a value of rows only) |
 | 5 Write | handle, serial, floor, by (zigzag), why, count, operations | Receipt: the group, count, (new thing's temporary id, its id)... |
 | 6 Ping | any bytes | Pong: the same bytes |
 | 7 Admin | "status" | Status: count, (key, value)... |
@@ -462,8 +462,18 @@ On a follow stream the server pushes (request id 0):
   schema.
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
-  (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
-- **Versions.** Version 8 adds the operation Delete (tag 5, below) and the links that name a kind (the facts of
+  (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064);
+  from version 9, `Avg x` (tag 4), `Distinct x` (5, Cesia's `Count(x)`), `Values x` (6), `Quantile x p discrete` (7:
+  the variable, p as a float's 8 bytes, a byte), `Variance x population` (8) and `Stddev x population` (9: the
+  variable, a byte) ([reports](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)). A row of a group
+  with `Values` is one row a value of its list, the group's other cells repeated (several `Values`: their lists side by
+  side, a cell past a list's end missing), its rows one after the other: a list is several rows, as a list of a thing
+  is several facts. A cell a report's aggregate leaves empty (a sample's variance of one value) is missing.
+- **Versions.** Version 9 adds the aggregates of reports (tags 4 to 9 of the select's aggregates) and the operator
+  Trunc (tag 9) and nothing else: a program of version 9 connects to a server of 8 in 8, and a question with one of
+  them is refused in the program (`invalid`: "this server speaks protocol 8: Trunc, Avg, Count(x), Values, Quantile,
+  Variance and Stddev need a server of protocol 9") before it is sent, since an older server refuses the request whole;
+  a question without them is coded as before. Version 8 adds the operation Delete (tag 5, below) and the links that name a kind (the facts of
   `cepheus/to` and `cepheus/delete`, properties 7 and 8, in a Write) and nothing else: a program of version 8 connects
   to a server of 7 in 7, and a group with a Delete or one of those facts is refused in the program (`invalid`: "this
   server speaks protocol 7: Delete and links that name a kind need a server of protocol 8") before it is sent, since
@@ -484,7 +494,7 @@ On a follow stream the server pushes (request id 0):
   older: Incr needs a server of protocol 4") before it is sent. Version 3 adds the files (Put, Piece, Load, Erase) and
   nothing else: a program of version 3 connects to a server of 2 in 2 (as below), and a file is refused in the program
   (`invalid`: "this server speaks protocol 2 or older: files need a server of protocol 3"). Version 2 adds the
-  question's operators and order (below) and nothing else; a server speaks 1 to 8, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+  question's operators and order (below) and nothing else; a server speaks 1 to 9, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
   and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
   one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
   protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2

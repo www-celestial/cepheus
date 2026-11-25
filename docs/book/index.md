@@ -13,7 +13,8 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
 - [Tutorials](tutorials.md): business problems solved step by step, PostgreSQL beside: invoice numbers with no
   gap, a job queue where each job is taken once, test data that leaves nothing, pages that never skip a row, clients
   with no invoice this year, `In` and `Or`, a stock that never goes below zero, invoices paid late and ranges of
-  floats, clients with their phone if they have one.
+  floats, clients with their phone if they have one, a client with invoices kept, a monthly report in the company's
+  time zone, the median of payment delays and the products of each invoice.
 
 **Learn**
 1. [Concepts](concepts.md): facts and the entity–attribute–value model, the schema, groups (transactions), views,

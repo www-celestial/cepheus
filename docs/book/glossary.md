@@ -22,6 +22,8 @@ the usual one, both are given.
   being written meanwhile, so two reads one after the other may see a new value and then the old one (a **new-old
   inversion**); an *atomic* register forbids it, every read and write appearing at one instant. Linearizable reads
   are atomic: G15 forbids the inversion; the lease the design first proposed allowed it. [server](server.md#local-reads-g15)
+- **Avg** — the mean of a variable in each group of a report, from its exact sum: of ints and floats a Float, of money
+  money rounded to its scale, of dates a date; SQL's `avg`. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **back-pressure** — a slow side slowing the fast one down instead of being flooded: at its limit of writes in flight
   a connection is no longer read, the kernel's buffers fill, and the program's writes wait. Nothing is dropped.
   [server](server.md#order-pipelining-and-back-pressure)
@@ -143,6 +145,8 @@ the usual one, both are given.
   in one pass: $O(n + \text{keys})$, no comparison. A large group's facts are sorted by property this way, in chunks counted
   and spread at once by several domains.
   [theory](theory.md#9-levels-on-disk-and-large-groups)
+- **Count(x)**, **COUNT(DISTINCT x)** — the number of different values of a variable in a group, an Optional's
+  missing value not counted; `Count()` counts the answers. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **cut** (of the journal) — after a failed write or fsync, the writer truncates the journal back to the end of its
   last durable frame and forces it, so that the failed write is gone from memory and disk (G13).
   [guarantees](guarantees.md#g13-a-failed-fsync-is-never-trusted)
@@ -153,6 +157,9 @@ the usual one, both are given.
   [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **datom** — Datomic's fact: entity, attribute, value, transaction, added. Cepheus' fact is the first three; the group
   and the add-or-retract flag live in the journal. [concepts](concepts.md#facts-the-entityattributevalue-model)
+- **daylight saving time**, **summer time** — the hours a zone moves its clocks forward for part of the year (Paris:
+  UTC+2 from the last Sunday of March to the last of October, UTC+1 the rest): a day of 23 hours in spring, of 25 in
+  autumn, which `Trunc` follows. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **Delete** (of a thing) — the operation that deletes a thing of a kind, SQL's `DELETE`: the thing's facts of the
   kind retracted at the writer, and the links to it followed, in one group; the thing stays in the history.
   [Cesia](cesia.md#deleting-a-thing)
@@ -204,6 +211,9 @@ the usual one, both are given.
   first group (PostgreSQL calls it a timeline). A copy may follow a primary only if its history is a prefix of the
   primary's. [server](server.md#promotion-by-hand)
 - **eviction policy** — the rule that picks which page leaves a full cache; Cepheus' is S3-FIFO.
+- **exact sum** — a sum kept as an integer of as many 30-bit parts as it needs (a float at its binary place), so that it
+  rounds nothing until the end: the same result whatever the order of the terms, which is what makes a report's mean
+  and spread the same on any number of cores and in a watch. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **`Expect`** — a precondition of a group: a fact that must hold (or a value that must be absent) just before it; the
   writer checks it, and the group fails with `Conflict` otherwise. [concepts](concepts.md#groups-a-write-is-a-transaction)
 - **F1, F2, F3, F4** — the faults covered: a process crash, a power loss, silent damage of durable bytes, a failed
@@ -277,6 +287,9 @@ the usual one, both are given.
   [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **history** — the sequence of every transaction a database applied, with what each read and wrote; Cepheus'
   journal is one, in group order.
+- **IANA time zone database** (tz, zoneinfo) — the rules of every zone's local time since 1970 and before (offsets,
+  summer times), kept by the IANA and shipped by every system (`tzdata`); zones are named `Area/City`, as
+  `Europe/Paris`. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **idle timeout** — the time a connection may go without a whole request before the server closes it
   (`idle_timeout`, 600 s by default); before its Hello, 10 s at most, its TLS handshake included.
   [server](server.md#clustertoml)
@@ -350,6 +363,8 @@ the usual one, both are given.
   other way is to reason at question time (query rewriting, magic sets). [rules](rules.md)
 - **materialize the conflict** — protect a set against phantoms by keeping one fact that every writer of the set
   expects and changes (Fekete et al. 2005).
+- **median** — the middle value of a group in order (between the two middle ones for an even count): `Median(x)`, the
+  quantile 0.5. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **memory BIO** — an OpenSSL buffer in memory standing for the network: OpenSSL reads the bytes it is given and
   writes the bytes to send there, never touching the socket, so it never waits. [server](server.md#tls)
 - **merge** — the folding of the delta and the newest runs into one new run file; it runs in the background and is
@@ -413,6 +428,9 @@ the usual one, both are given.
   [rules](rules.md#why)
 - **property** — the attribute of a fact; itself a thing (16 to 65,535) with a name, a type and two flags.
 - **provenance** — where a fact comes from: here, a proof of it. [rules](rules.md#why)
+- **quantile**, **percentile** — the value below which a fraction p of a group's values lie: `Quantile(x, p)`, between
+  its two nearest values (Hyndman and Fan's definition 7, PostgreSQL's `percentile_cont`), or one of them with
+  `discrete = true` (definition 1, `percentile_disc`). [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **question** — Cepheus' query: patterns over variables. [concepts](concepts.md#questions)
 - **question timeout** — the time a question may take before it ends with the code `timeout`: the server's
   `question_timeout` (30 s by default), or a program's shorter `timeout`. [server](server.md#clustertoml)
@@ -444,6 +462,8 @@ the usual one, both are given.
   its own journal; asynchronous: behind by its lag, the primary never waits for it. [server](server.md#a-replica)
 - **replica lag** — the time from a group durable on the primary to the replica's word that it holds it durably.
   [server](server.md#what-a-replica-costs)
+- **report** — a question whose `Give` groups its answers and aggregates them: totals, means, medians, spreads, lists,
+  by month. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **representative** — the member of a class of equal things that holds the class's facts; reads and questions name a
   thing as its representative. [rules](rules.md#equality-classes-of-equal-things)
 - **retry** — running a transaction again after the database refused it (a `Conflict` in Cepheus, a serialization
@@ -481,6 +501,8 @@ the usual one, both are given.
   [case](case-seats.md#correctness-on-generated-inputs)
 - **schema** — the properties and their types; in Cepheus, facts like the rest. [concepts](concepts.md#properties-and-the-schema)
 - **segment** — one file of the journal, up to 64 MiB, named by its first group.
+- **selection** (algorithm) — finding the k-th value of n in order without sorting them all: Hoare's FIND, a partition
+  about a pivot repeated on one side, linear on average. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **semi-naive evaluation** — evaluating rules on what changed only: each round matches the facts new in the round
   before, so every rule instance is found once (Bancilhon, Ramakrishnan 1986). [rules](rules.md#how-the-writer-keeps-it-semi-naive-evaluation)
 - **serial** — the number a program's library gives each write of its session: 1, 2, 3... A serial sent twice is
@@ -528,6 +550,9 @@ the usual one, both are given.
 - **stable sort** — a sort that keeps equal keys in the order they came: sorting a large group's facts by value, from
   an order by thing, leaves the facts of one value in thing order, which is the order (property, value, thing) a run
   needs. [architecture](architecture.md#large-groups)
+- **standard deviation**, **variance** — how far a group's values spread around their mean: the variance is the mean
+  of the squared distances (divided by n - 1 for a sample, by n for a whole population), the standard deviation its
+  square root, in the values' unit: `Variance(x)`, `Stddev(x)`. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **strict serializability** — serializable in an order that respects real time. [guarantees](guarantees.md#g4-strict-serializability)
 - **strong component** — a largest set of things that all reach one another through a graph's edges; every member
   of one reaches the same things. Found by Tarjan's algorithm (1972). [rules](rules.md#transitive-closures-the-closure-module)
@@ -558,6 +583,10 @@ the usual one, both are given.
 - **transaction** — a unit of work applied entirely or not at all; Cepheus' group.
 - **transitive property** — a property that relates a thing to everything it reaches: a part of a part is a part.
   Kept by the closure module. [rules](rules.md#transitive-closures-the-closure-module)
+- **Trunc** — the instant a date's unit (its day, week, month, year...) starts in a zone's local time, a key of a
+  report's rows: SQL's `date_trunc`. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
+- **TZif** — the binary format of the zone database's compiled files (RFC 8536): a zone's transitions, and after the
+  last one its rule as a POSIX TZ string. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **unfolding** (specialisation by small relations, partial evaluation) — a rule rewritten as one rule a fact of a
   small relation of its body, that fact's words in place of its variables: what the engine runs for rules written over
   the ontology. [rules](rules.md#specialisation-by-small-relations)
@@ -569,6 +598,8 @@ the usual one, both are given.
   of each: the rows of "city = Lyon" or "client = #c" in one rank and two offsets, however many rows. Kept for a
   property when it takes at most 2 bytes a row (links, texts, dates, small ints).
   [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
+- **Values** — the different values of a variable in a group, a list in `Sort`'s order: SQL's `array_agg(DISTINCT x)`;
+  joined in Cesia, its `string_agg`. [Cesia](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)
 - **variable** — an unknown of a question, numbered from 0.
 - **variable property** — a rule pattern whose property is a variable (`prop_var k`), bound by another pattern of the
   body: the W3C's form of OWL 2 RL's rules. [rules](rules.md#a-property-as-a-variable-the-w3cs-form-of-owls-rules)

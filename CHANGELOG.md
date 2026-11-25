@@ -24,7 +24,15 @@ stay as they are, or a later version reads and speaks both the old and the new.
   ranges (of ints, dates, money, and floats in IEEE 754's totalOrder); `Less` and `LessOrEqual` between two variables
   (the later one sought in the sorted index from the other's value, the inequality join of Khayyat et al. 2015);
   `Optional`, SQL's `LEFT JOIN` of one property (SPARQL's `OPTIONAL`, Pérez et al. 2009: a missing cell sorts last
-  both ways); `Sum`, `Count`, `Min` and `Max`; pages with `Sort`, `Limit` and `After`
+  both ways); `Sum`, `Count`, `Min` and `Max`; pages with `Sort`, `Limit` and `After`; **reports**: `Avg`, `Count(x)`
+  (SQL's `COUNT(DISTINCT x)`), `Values` (the different values of a group, a list: `array_agg`), `Quantile` (Hyndman
+  and Fan's definition 7, `percentile_cont`; definition 1 with `discrete = true`, `percentile_disc`) and its sugar
+  `Median`, `Variance` and `Stddev` (of the sample, or of the population), the means and spreads from exact sums (the
+  same bits whatever the order of the rows and the number of cores, a watch's too), and `Trunc` (a date's second to
+  millennium in an IANA time zone, read from the system's TZif files with their POSIX rules: PostgreSQL's
+  `date_trunc(unit, d, zone)`) as a key of the rows ([reports](docs/book/cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc),
+  tutorials [11](docs/book/tutorials.md#11-a-monthly-report-of-sales-by-client-in-the-companys-time-zone) and
+  [12](docs/book/tutorials.md#12-the-median-and-spread-of-payment-delays-the-list-of-products-of-each-invoice))
   ([questions](docs/book/concepts.md#questions), [Less and Optional](docs/book/cesia.md#less-lessorequal-and-optional)). `find`, `ask` and `fold` take a `?timeout`, past which they give
   `Error (Timeout _)`, a constructor added to `Cepheus.error` before the first release.
 - **Links that name a kind**, SQL's foreign keys: a link property names a kind (`Link(to = "client")` in Cesia,
@@ -81,8 +89,8 @@ stay as they are, or a later version reads and speaks both the old and the new.
   answer once its group is durable, and with `Sort` and `Limit` keep the first rows of an order as they change (the
   ten latest payments: ten rows held, a row that leaves them replaced by one page read after the last), the rule
   model-checked ([Sort and Limit in a watch](docs/book/cesia.md#sort-and-limit-in-a-watch)). The wire protocol is at
-  version 8 (the operation Delete and the links that name a kind); a program speaks 1 to 8 with a server of any of
-  them. A token with rights per kind deletes a thing only if it may add to every kind the deletion can reach and read
+  version 9 (the aggregates of reports and Trunc; 8: the operation Delete and the links that name a kind); a program
+  speaks 1 to 9 with a server of any of them. A token with rights per kind deletes a thing only if it may add to every kind the deletion can reach and read
   every kind whose links refuse it.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects

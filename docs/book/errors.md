@@ -184,6 +184,20 @@ From `ask`, beside those (`Less`, `Less_or_equal`, `Optional`):
 | `Not takes patterns and conditions: no Not, Or or Optional inside it`; `an alternative of Or takes patterns and conditions: no Not, Or or Optional inside it` | an `Optional` (or a `Not`, an `Or`) inside a `Not` or an alternative |
 | `Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows` | an aggregate of an `Optional`'s variable (`Count` counts its rows) |
 
+From `ask` and from a report (`Trunc`, and the aggregates of protocol 9 through the server and Cesia):
+
+| message | when |
+|---|---|
+| `"N" is not a time zone name: an IANA name, as "Europe/Paris", or "UTC"`; `no time zone N in the zone database (DIR): ...` | a zone name with a character other than letters, digits, `_`, `-`, `+` and `/`, an empty part, `.` or `..` (no other file is read), or a name the system's zone database does not hold |
+| `the time zone N counts leap seconds: ...`; `the time zone N: its file ...` | a zone of `right/` (its seconds are not UTC's), or a file that is no TZif file or does not read |
+| `Trunc takes a unit of second, minute, hour, day, week, month, quarter, year, decade, century, millennium, not "U"` | another unit |
+| `Trunc takes a date, not a T`; `Trunc takes a date variable of a pattern of the question, not variable N`; `Trunc gives variable N, not M: its variables come after the question's ...` | a `Trunc` of another type, of no variable of the question, or numbered out of its place (the i-th `Trunc` gives variable `vars + i`) |
+| `Trunc is for Give: its variable is computed as a row is given`; `Not takes patterns and conditions: no Not, Or or Optional inside it` | a `Trunc` where a condition is (it is a column) |
+| `Avg is for ints, floats, money and dates, not a T`; `Variance is for ints, floats and money, not a T` (and `Stddev`); `Quantile between two values is for ints, floats, money and dates, not a T: Quantile(x, p, discrete = true) takes one of the values` | an aggregate of a type it does not take |
+| `Quantile's fraction is from 0 to 1, not P` | a quantile below 0, above 1, or NaN |
+| `Avg takes a variable of a pattern, not an Optional's, which may be missing: ...` (and `Quantile`, `Variance`, `Stddev`) | an aggregate of an `Optional`'s variable (`Count(x)` and `Values` leave its missing values out) |
+| `Sort's keys are not a Values column: it is a list` | a `Values` field as a key of `Sort` |
+
 ### Templates and equality
 
 | message | when |
@@ -361,6 +375,8 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `this server speaks protocol N: a question's timeout needs a server of protocol 6` | `Find` or `Watch` with `timeout`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server, or leave the time to the server's `question_timeout` |
 | `invalid` | `this server speaks protocol N: Less, LessOrEqual and Optional need a server of protocol 7` | `Find` or `Watch` with them, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
 | `invalid` | `this server speaks protocol N: Delete and links that name a kind need a server of protocol 8` | `Delete` of a thing that is no file, or `Connect` with a kind whose `Link` has `to`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `this server speaks protocol N: Trunc, Avg, Count(x), Values, Quantile, Variance and Stddev need a server of protocol 9` | `Find` or `Watch` with a report's aggregate or a `Trunc`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `"N" is not a time zone name: ...`; `no time zone N in the zone database (DIR): ...`; `Trunc takes a unit of ...`; `Avg is for ints, floats, money and dates, not a T`; `Quantile's fraction is from 0 to 1, not P`; `Sort's keys are not a Values column: it is a list` | a report's zone, unit, type or fraction that is not one ([reports](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc); every message above, in `Find` and `Watch`) | an IANA zone name (`"Europe/Paris"`), a unit of the list, an aggregate of a type it takes |
 | `invalid` | `NAME links to K things only, and #T is not one`; `the K #X cannot be deleted while the L #Y links to it (NAME: refuse)`; the work budget of a `Delete` | a link to a thing of another kind; a deletion a link refuses; a cascade too large for one group ([deleting a thing](cesia.md#deleting-a-thing)) | link to a thing of the kind; delete what links to it first |
 | `denied` | `this token may not add to the kind K, which a deletion of a J reaches`; `this token may not read the kind K, whose links refuse the deletion of a J`; `this token may not read the kind K, which NAME links to` | a token with rights per kind: a `Delete` (or a retraction of a fact of a kind links name) that may reach a kind it may not write, or tell of one it may not read; a link to a kind it may not read | a token with those rights ([rights](server.md#rights-g16)) |
 | `timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | the question ran past its `timeout`, or past the server's `question_timeout` (a time longer than the server's counts only from an admin token): in the program's memory or at the server alike | a narrower question, or pages; a longer `timeout` where the server allows it |
