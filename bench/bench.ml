@@ -311,15 +311,21 @@ let pages dir facts =
                                             Question.Less (2, 0) ]; give = [| 1 |]; sort = []; limit = 0; after = None } in
   Printf.printf "the invoices whose total is below that of client 7's first (Less): %d\n%!" (List.length (rows below));
   measure "  Less, a range" 1 (fun _ -> ignore (rows below));
+  measure "  before: the total read, then the range below it (Range)" 1 (fun _ ->
+      match rows { Question.vars = 1; items = [ Question.Pattern { e = Thing x; p = s.total; v = Var 0 } ]; give = [| 0 |]; sort = []; limit = 0; after = None } with
+      | [ [| Value.Money t |] ] ->
+        ignore (rows { Question.vars = 2; items = [ Question.Pattern { e = Var 0; p = s.total; v = Var 1 }; Question.Range (1, Value.Money min_int, Value.Money (t - 1)) ];
+                       give = [| 0 |]; sort = []; limit = 0; after = None })
+      | _ -> failwith "total");
   (* Optional: the clients of city-7, and every client, each with the clients it follows or missing, against the join *)
-  let opt where = { Question.vars = 3; items = [ Question.Pattern where; Question.Optional fol ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } in
-  let join where = { (opt where) with items = [ Question.Pattern where; Question.Pattern fol ] } in
+  let opt (vars, where) = { Question.vars; items = [ Question.Pattern where; Question.Optional fol ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } in
+  let join w = { (opt w) with items = [ Question.Pattern (snd w); Question.Pattern fol ] } in
   List.iter
     (fun (name, where) ->
       Printf.printf "%s, with the clients each follows (Optional): %d rows, %d by the join\n%!" name (List.length (rows (opt where))) (List.length (rows (join where)));
       measure "  Optional" 1 (fun _ -> ignore (rows (opt where)));
       measure "  the join" 1 (fun _ -> ignore (rows (join where))))
-    [ "the clients of city-7", { e = Var 0; p = s.cty; v = Val (Text "city-7") }; "every client", { e = Var 0; p = s.name; v = Var 2 } ];
+    [ "the clients of city-7", (2, { e = Var 0; p = s.cty; v = Val (Text "city-7") }); "every client", (3, { e = Var 0; p = s.name; v = Var 2 }) ];
   close db
 
 let read dir facts only =
