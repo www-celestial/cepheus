@@ -56,6 +56,7 @@ engine and of OpenSSL's libraries, once a process.
 
 ```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/date
 use std/fiber
 use std/io
 use std/result
@@ -317,7 +318,9 @@ io.Print(byCity)
 Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 ```
 
-The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted.
+The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted. Means, medians and
+quantiles, spreads, lists of values, the different values counted, and a date's day, month or year in a time zone are
+in [Reports](#reports-avg-countx-values-quantile-variance-stddev-trunc).
 
 **Its time.** `timeout = seconds` bounds a question: past it, `Find` is an `Err` of Code `"timeout"`, whose message
 names the time, and the work stops (within milliseconds: it is looked at every 1,024 candidates). At the server, the
@@ -571,6 +574,114 @@ question would have no one meaning: it is refused.
 What they cost beside PostgreSQL, on the benchmarks' data: [benchmarks](benchmarks.md#less-optional-and-one-shared-counter-2026-11-25-at-1-million-facts)
 (`Optional` costs what the join costs; `Less` what filtering the rows in the program costs).
 
+## Reports: Avg, Count(x), Values, Quantile, Variance, Stddev, Trunc
+
+The aggregates of a report, beside `Sum`, `Min`, `Max` and `Count()`, and a date's month (or day, week, year...) in a
+time zone as a key of the rows:
+
+```cesia norun
+Sale = cepheus.Kind("sale", {Client: cepheus.Link(), Amount: cepheus.Money(2), Day: cepheus.Date(), Tag: cepheus.Text(many = true)})
+(* a fork, so that what this example writes stays out of db *)
+sales = result.Unwrap(cepheus.Fork(db, [Sale]))
+for x in [[ada, 10, 1801438200, ["new"]], [ada, 30, 1802250000, ["new", "web"]], [bo, 20, 1802250000, ["web"]], [bo, 60, 1806532200, []]]
+  result.Unwrap(cepheus.Insert(Sale, {Client: x[1], Amount: x[2], Day: x[3], Tag: x[4]}, sales))
+end
+io.Print(cepheus.Find(4, (i, c, n, a) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a]],
+  Give: {Name: n, Mean: cepheus.Avg(a), Median: cepheus.Median(a), Low: cepheus.Quantile(a, 0.25), Spread: cepheus.Stddev(a)},
+  Sort: [n],
+}, sales))
+paris(d) = cepheus.Trunc(d, "month", zone = "Europe/Paris")
+for r in result.Unwrap(cepheus.Find(3, (i, a, d) -> {Where: [[i, Sale.Amount, a], [i, Sale.Day, d]], Give: {Month: paris(d), Total: cepheus.Sum(a)}, Sort: [paris(d)]}, sales))
+  io.Print(date.Format(date.FromUnix(r.Month)), r.Total)
+end
+io.Print(cepheus.Find(4, (i, c, n, t) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], cepheus.Optional([i, Sale.Tag, t])],
+  Give: {Name: n, Tags: cepheus.Values(t), Different: cepheus.Count(t), Sales: cepheus.Count(i)},
+  Sort: [n],
+}, sales))
+```
+
+```text
+Ok([{Name: "Ada Martin", Mean: 20.0, Median: 20.0, Low: 15.0, Spread: 14.142135623730951}, {Name: "Bo Lind", Mean: 40.0, Median: 40.0, Low: 30.0, Spread: 28.284271247461902}])
+2027-01-31T23:00:00Z 60.0
+2027-03-31T22:00:00Z 60.0
+Ok([{Name: "Ada Martin", Tags: ["new", "web"], Different: 2, Sales: 2}, {Name: "Bo Lind", Tags: ["web"], Different: 1, Sales: 2}])
+```
+
+Ada's mean of 10 and 30 is 20, so is her median, between the two; her first quartile is 15 (10 plus a quarter of the
+way to 30); the spread of two values is their difference over $\sqrt 2$. The months: Bo's last sale, of 22:30 UTC on 31
+March, is April's in Paris (00:30 on 1 April, summer time), and Ada's first, of 23:30 UTC on 31 January, February's
+(00:30 on 1 February); February starts at 23:00 UTC on 31 January, April at 22:00 UTC on 31 March. Ada's second sale has two tags, Bo's last none: `Values` lists the different tags, `Count(t)` counts them,
+`Count(i)` counts the sales (`Count()` would count the rows, one a tag).
+
+- `cepheus.Avg(x)`: the mean. Of ints and floats a Float; of money, money of its scale, rounded half away from zero
+  (as a Float written to a money field is: 10.005 euros is 10.01); of dates, a date, rounded to the millisecond. It is
+  the exact sum divided once: the same whatever the order of the rows.
+- `cepheus.Count(x)`: the number of *different* values of x in the group, SQL's `COUNT(DISTINCT x)` (floats are
+  different when their bits are, as `Sort` tells $-0$ from $0$). `cepheus.Count()` keeps counting the answers.
+- `cepheus.Values(x)`: the different values of x, a list in `Sort`'s order, each once. Joined in Cesia it is SQL's
+  `string_agg`: `text.Join(", ", row.Tags)`. A `Values` field is no key of `Sort`.
+- `cepheus.Quantile(x, p)`, p from 0 to 1: the value at the fraction p of the group's values in order, between its two
+  nearest values (Hyndman and Fan's definition 7, PostgreSQL's `percentile_cont`, R's and NumPy's default): with n
+  values in order and $h = p (n - 1)$, $x_{\lfloor h \rfloor} + (h - \lfloor h \rfloor)(x_{\lceil h \rceil} - x_{\lfloor h \rfloor})$,
+  counted from 0. Of ints and floats a Float, of money money (rounded to its scale), of dates a date.
+  `cepheus.Quantile(x, p, discrete = true)`: the first value whose rank reaches $p\,n$ (definition 1, `percentile_disc`),
+  one of the values, of any type (a text's median name). `cepheus.Median(x)` is `cepheus.Quantile(x, 0.5)`:
+
+  | sugar | its plain form | SQL |
+  |---|---|---|
+  | `cepheus.Median(x)` | `cepheus.Quantile(x, 0.5)` | `percentile_cont(0.5) WITHIN GROUP (ORDER BY x)` |
+  | `cepheus.Count(x)` | (none: its own aggregate) | `count(DISTINCT x)` |
+
+- `cepheus.Variance(x)` and `cepheus.Stddev(x)`: of the sample, divided by $n - 1$ (PostgreSQL's `variance`,
+  `var_samp`, `stddev`, `stddev_samp`): `missing` for a group of one value, as PostgreSQL's `NULL`; with
+  `population = true`, divided by n (`var_pop`, `stddev_pop`). Of ints, floats and money (in its units, euros
+  squared), a Float.
+- `cepheus.Trunc(d, unit, zone = "UTC")`: the instant the unit of the date d starts in the zone's local time, a key of
+  the rows as a variable is (and a key of `Sort`). Units: `"second"`, `"minute"`, `"hour"`, `"day"`, `"week"` (ISO
+  8601: from Monday), `"month"`, `"quarter"`, `"year"`, `"decade"`, `"century"` (2001 to 2100 is the 21st, as
+  PostgreSQL counts), `"millennium"`. A zone is an IANA name, as `"Europe/Paris"` or `"America/New_York"`, summer time
+  included, or `"UTC"`. A day, a week, a month starts at the earliest instant whose local time is at or after its
+  midnight: a day whose midnight a summer time change skips starts at the change, and the days are one after the other
+  on the time line; an hour, a minute or a second starts where the instant's clock says, so the hour a fall-back
+  repeats is two rows, each its own instant. PostgreSQL 18.6's `date_trunc(unit, d, zone)` gives the same instants
+  (55,784 tried, summer time days included), but for the hours of a zone that moves by 30 minutes (Lord Howe Island):
+  there PostgreSQL keeps the instant's offset and starts such an hour 30 minutes before the change.
+- **missing.** An Optional's missing value is left out of `Count(x)` and `Values(x)` (as SQL leaves out its `NULL`s:
+  Bo's sale without a tag); `Avg`, `Quantile`, `Median`, `Variance` and `Stddev` of an Optional's variable are refused
+  (`invalid`), as `Sum` is. A `Trunc` of a missing date is missing.
+- **Errors.** A zone that is not one (`"Europe/Pariss"`, or a name that is no zone of the database, as
+  `"../etc/passwd"`), a unit that is not one, `Avg` of a text, a fraction outside 0 to 1: `Err` of Code `"invalid"`,
+  naming it ([errors](errors.md)).
+
+**How it is answered.** Each group keeps, beside its key, what each aggregate needs, as the rows come, on every core
+that reads them, merged at the end. The mean, the variance and the standard deviation come from **exact sums**: the
+sum of the values and the sum of their squares, kept as integers of as many 30-bit parts as they need (a float, which
+is $m \cdot 2^e$ exactly, at its binary place), so that no rounding happens until the end; the variance is then
+$\frac{n \sum x^2 - (\sum x)^2}{n (n - 1)}$, its numerator exact, divided once and rounded to the nearest float (the
+standard deviation is its square root). The textbook formula in floats loses every digit when the values are far from 0
+(dates, in milliseconds since 1970) and Welford's update ([Welford 1962](references.md#reports)) depends on the order
+of the rows; exact sums give the same bits whatever the order and the number of cores, which PostgreSQL does for its
+`numeric` aggregates (in floats, its `float8` ones depend on the order). `Count(x)`, `Values` and `Quantile` keep each
+group's different values with their counts (a table of open addressing): a group of a million rows with a hundred
+different values holds a hundred entries; a quantile is the value of a rank, found by **selection** (Hoare's FIND,
+[Hoare 1961](references.md#reports): a partition about the median of three, linear on average, sorting the rest past a
+few rounds, so that no input makes it quadratic: [Musser 1997](references.md#reports)). A `Trunc` is computed from the
+date as each row is given, from the zone's rules: the system's time zone database (its TZif files, [RFC
+8536](references.md#reports), in `$TZDIR` or `/usr/share/zoneinfo`, which the system's `tzdata` package updates), each
+zone read once by a process; a server reads a new release of the rules at its next start, as PostgreSQL built with
+the system's zone data does.
+
+**Watched.** A `Watch` of a report keeps each group by difference: the sums, the exact sums and the counts of the bags
+add a row that comes and subtract one that goes; a group whose rows change is replaced whole (its old row removed, its
+new one added), and nothing else is asked again. A group's `Values` are one row a value at the server and in the
+protocol; the package folds them into one map, so a message gives the group's map whole.
+
+**Bounds.** The values a group keeps (`Count(x)`, `Values`, `Quantile`) count in the answer's cells, the server's
+memory bound of a question ([limits](limits.md#questions)): past it, `Err` of Code `"too_large"`, never a server out
+of memory.
+
 ## Watch: live questions
 
 A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64, until = missing)` takes the same question as
@@ -604,8 +715,8 @@ Ok({Group: 16, Rows: missing, Added: [], Removed: [{Invoice: 65546, Total: 45.0}
 - A change comes only when the rows change, and only once its group is on the server's disk (G1): a screen never
   shows a write that a crash could undo.
 - The rows are `Find`'s, with their repeats: a `Give` that leaves out a variable gives a row for each binding, as
-  `Find` does. Aggregates (`Sum`, `Count`, `Min`, `Max`) are watched too: a change then removes a group's old row and
-  adds its new one.
+  `Find` does. Aggregates (`Sum`, `Count`, `Min`, `Max`, and a report's: `Avg`, `Values`, `Quantile`...) are watched
+  too: a change then removes a group's old row and adds its new one.
 - **No gap, no repeat.** When the connection breaks or the server restarts, the watch goes on by itself from the group
   of its last message: the server answers that nothing the question reads changed since (and nothing comes), or with
   the answer at its newest group, which the package turns into the change from the rows it holds. The program sees no

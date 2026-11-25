@@ -109,7 +109,7 @@ Count(x = true) = {Count: x}
 Avg(x) = {Avg: x}
 
 (** An aggregate of Give: the different values of x in a group, a list in Sort's order (each once; an Optional's
-    missing value left out). Joined in Cesia, it is SQL's string_agg: text.Join(row.Tags, ", "). *)
+    missing value left out). Joined in Cesia, it is SQL's string_agg: text.Join(", ", row.Tags). *)
 Values(x) = {Values: x}
 
 (** An aggregate of Give: the quantile p (0 to 1) of x in a group, between its two nearest values as PostgreSQL's
