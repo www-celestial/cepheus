@@ -166,13 +166,14 @@ let () =
     done;
     List.iteri
       (fun r p ->
-        let name = Printf.sprintf "g%d" r in
+        (* the rule's name: not a property's (each one's cepheus/name is unique) *)
+        let name = Printf.sprintf "copy%d" r in
         let rule : Cepheus.rule = { name; vars = 2; where = [ { e = Var 0; p = pb; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p; v = Var 1 } } in
         let rid = Schema.first_thing - 300 - r in
         let t0 = Unix.gettimeofday () in
         (match Client.write w gdb [ Resolve.Add (rid, Schema.p_name, Text name); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text rule)); Resolve.Expect (rid, Schema.p_name, None) ] with
          | Ok _ -> Printf.printf "round %d: a group of 100 MiB committed in %.1f ms\n%!" (r + 1) ((Unix.gettimeofday () -. t0) *. 1000.)
-         | Error e -> Printf.printf "round %d: %s %s\n%!" (r + 1) e.code e.message);
+         | Error e -> failwith (Printf.sprintf "round %d: %s %s" (r + 1) e.code e.message));
         wait_for ~limit:300. "every server holds it" (fun () -> match leader () with Some l -> let g = group l "side" in List.for_all (fun k -> group k "side" = g) [ 0; 1; 2 ] | None -> false))
       (List.tl gps);
     Client.close w;
@@ -197,7 +198,20 @@ let () =
     wait_for ~limit:600. "every server holds the load" same;
     Printf.printf "loaded %d facts through the leader in %.1f s\n%!" facts (Unix.gettimeofday () -. t0);
     let log_start k = match String.split_on_char ' ' (stat k "raft.log") with a :: _ -> (match int_of_string_opt a with Some x -> x | None -> 0) | [] -> 0 in
+    (* the load's frames take little room in the Raft log: texts written to side until its start passes a segment
+       (16 MiB), so that the follower must take a copy of the databases (8 MB a write, as the test's catch-up does) *)
+    let text i = Printf.sprintf "%08d-%s" i (String.make 391 (Char.chr (97 + (i mod 26)))) in
+    let tdb, tp = match Client.declare w "side" [ prop "t" Ttext ] with Ok (db, [ p ]) -> db, p | _ -> failwith "declare t" in
+    let filled = ref 0 in
+    while log_start (await_leader "a leader") <= 1 && !filled < 30 do
+      (match Client.write w tdb (List.init 20_000 (fun i -> Resolve.Add (-(i + 1), tp, Text (text ((!filled * 20_000) + i))))) with
+       | Ok _ -> incr filled
+       | Error e -> failwith ("filler: " ^ e.message));
+      if !filled >= 2 then Thread.delay 1.2
+    done;
     wait_for ~limit:120. "the leader's log cut" (fun () -> match leader () with Some l -> log_start l > 1 | None -> false);
+    wait_for ~limit:600. "every server holds the texts" same;
+    Printf.printf "the leader's log starts at %d after %d writes of 20,000 texts\n%!" (log_start (await_leader "a leader")) !filled;
     let data k = (Result.get_ok (Config.load cfgs.(k))).data in
     let du d = let r = ref 0 in let rec go p = match Unix.lstat p with { Unix.st_kind = Unix.S_DIR; _ } -> Array.iter (fun x -> go (Filename.concat p x)) (Sys.readdir p) | st -> r := !r + st.st_size | exception Unix.Unix_error _ -> () in go d; !r in
     for r = 1 to n do
