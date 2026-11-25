@@ -4,7 +4,8 @@
      rbench.exe load DIR CSV    10,000 clients (a city of 100 each) and 245,000 invoices (a client, a total of 0.01 to
                                 1,000.00, a status, a date over 2017 to 2026): 1,000,000 facts; the same rows as CSV
                                 for PostgreSQL (bench/pg/pg.sh reports)
-     rbench.exe run DIR         each question RUNS times (21), its median and interval (Stats); a line a question
+     rbench.exe run DIR         each question RUNS times (21), its median and interval (Stats); a line a question;
+                                CEPHEUS_DOMAINS=n: on n domains at most
 
    The questions: every invoice (1 group), by its client's city (100), by its client (10,000); each with Sum (the
    aggregate of before), Avg, Count of the different statuses, Values of the statuses, the median total, Stddev; and
@@ -69,6 +70,8 @@ let measure name f =
   Stats.print (Printf.sprintf "%s (%d rows)" name !rows) per
 
 let run dir =
+  (* CEPHEUS_DOMAINS=n: a question on n domains at most (the engine's default: the machine's, at most 8) *)
+  Option.iter (fun d -> Query.domains := int_of_string d) (Sys.getenv_opt "CEPHEUS_DOMAINS");
   let db = ok (open_ dir) in
   let v = view db in
   let p n = Option.get (property v n) in
@@ -112,13 +115,4 @@ let () =
   match Sys.argv with
   | [| _; "load"; dir; csv |] -> load dir csv
   | [| _; "run"; dir |] -> run dir
-  | [| _; "micro" |] ->
-    let v = Store.empty () in
-    List.iter
-      (fun (name, a) ->
-        let st = Agg.fresh a in
-        let t = Unix.gettimeofday () in
-        for i = 1 to 10_000_000 do ignore (Agg.add v Value.Tint st 1 (i land 65535)) done;
-        Printf.printf "%s: %.1f ns an add\n%!" name ((Unix.gettimeofday () -. t) *. 1e9 /. 1e7))
-      [ "Avg", Wire.Avg 0; "Stddev", Wire.Stddev (0, false); "Count(x)", Wire.Distinct 0 ]
   | _ -> prerr_endline "rbench.exe load DIR CSV | run DIR"; exit 2

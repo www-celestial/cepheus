@@ -1070,6 +1070,10 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
 | an invoice and its 10,000 lines | 27.3 ms | **5.16 ms** | PostgreSQL, 5.3 times |
 | an invoice and the link of its 10,000 notes (`clear`; `ON DELETE SET NULL`) | **11.1 ms** | 46.5 ms | Cepheus, 4.2 times |
 | the check of a link that names a kind, at each write (a foreign key's) | **0.2 µs** | 9.6 µs | Cepheus, 48 times |
+| the median total of 245,000 invoices (`Median`; `percentile_cont`), 1 group | **30.8 ms** | 64.5 ms | Cepheus, 2.1 times |
+| the different statuses by city (`Count(s)`; `count(DISTINCT)`), 100 groups | **73.9 ms** | 208 ms | Cepheus, 2.8 times |
+| the mean invoice by client (`Avg`; `avg`), 10,000 groups | 155 ms | **73.8 ms** | PostgreSQL, 2.1 times |
+| the totals by month in Paris (`Trunc`; `date_trunc` with a zone), 121 groups | **43.3 ms** | 181 ms | Cepheus, 4.2 times |
 
 - A counter many writers share is where a lock costs most: PostgreSQL holds the row until each commit is on the disk,
   Cepheus's writer reads the counter as it applies each group, and the groups share their fsync.
@@ -1083,6 +1087,10 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
   ([the benchmarks](benchmarks.md#deletes-and-links-that-name-a-kind-2026-11-25)). Finding what links to a thing is one
   lookup in Cepheus, whatever their number, where PostgreSQL runs its foreign key's query through a trigger; a large
   cascade costs Cepheus what retracting its facts costs (1 µs a fact), PostgreSQL only marks its rows.
+- The reports are the engine's work, on 990,000 facts at a load of 3.6 to 6.6 ([the
+  benchmarks](benchmarks.md#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)): with few
+  groups Cepheus wins, keeping each group's different values with their counts where PostgreSQL sorts its rows; with
+  10,000 groups PostgreSQL's hash aggregate does, the question running on one of Cepheus's cores.
 
 ## Each tutorial in one line
 

@@ -89,6 +89,64 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Reports: Avg, Count(x), Values, Quantile, Stddev, Trunc (2026-11-26), at 1 million facts
+
+**Method.** `bench/rbench.ml load`: 10,000 clients (a city among 100) and 245,000 invoices (a client, a total of 0.01
+to 1,000.00 in cents, a status: 70 % paid, 20 % unpaid, 10 % late, a date over 2017 to 2026): 990,000 facts merged into
+one run, on the SATA SSD; PostgreSQL 18.6 the same rows (`pg.sh reports load`: `rclient`, `rinvoice`, the total a
+`bigint` of cents, the date a `timestamptz`, `rinvoice(client)` indexed, `VACUUM ANALYZE`). Each aggregate over every
+invoice (1 group), by its client's city (100 groups: a join of the invoices and the clients), by its client (10,000
+groups), each side reading only what the aggregate needs: Cepheus the engine's answer (`rbench.exe run`:
+`Answer.answer`, what the server computes, no socket), PostgreSQL the execution time of `EXPLAIN (ANALYZE, TIMING OFF)`
+(`pg.sh reports run`: inside the server, no socket, its default of 2 parallel workers). 5 alternated rounds, each side a
+median of 11 runs; given: the median of the 5 rounds, and in brackets their least and largest. The same answers both
+sides (rows counted; a `Values` group is one row a status at Cepheus, one array at PostgreSQL). The machine was shared:
+a load average (1 minute) of 3.6 to 6.6 on its 8 threads.
+
+| aggregate | groups | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---:|---|
+| `Sum` (the aggregate of before; `sum`) | 1 | **14.1 ms** [13.2, 14.9] | 16.3 ms [15.5, 29.8] | about the same |
+| | 100 | **47.1 ms** [46.5, 89.5] | 60.7 ms [58.2, 85.0] | Cepheus, 1.3 times |
+| | 10,000 | 91.7 ms [82.3, 106] | **72.4 ms** [69.4, 73.2] | PostgreSQL, 1.3 times |
+| `Avg` (`avg`) | 1 | 15.7 ms [13.4, 24.0] | 16.3 ms [15.6, 16.8] | about the same |
+| | 100 | **51.5 ms** [50.0, 58.9] | 59.3 ms [58.1, 104] | Cepheus, 1.2 times |
+| | 10,000 | 155 ms [146, 170] | **73.8 ms** [70.4, 76.1] | PostgreSQL, 2.1 times |
+| `Count(status)` (`count(DISTINCT status)`) | 1 | **21.8 ms** [18.9, 22.6] | 61.2 ms [59.8, 64.0] | Cepheus, 2.8 times |
+| | 100 | **73.9 ms** [72.8, 84.6] | 208 ms [200, 331] | Cepheus, 2.8 times |
+| | 10,000 | 217 ms [204, 252] | **180 ms** [174, 187] | PostgreSQL, 1.2 times |
+| `Values(status)` (`array_agg(DISTINCT status)`) | 1 | **21.9 ms** [18.5, 23.4] | 61.5 ms [59.8, 64.2] | Cepheus, 2.8 times |
+| | 100 | **74.7 ms** [73.9, 86.1] | 206 ms [206, 227] | Cepheus, 2.8 times |
+| | 10,000 | 231 ms [215, 273] | **186 ms** [178, 190] | PostgreSQL, 1.2 times |
+| `Median(total)` (`percentile_cont(0.5) WITHIN GROUP (ORDER BY total)`) | 1 | **30.8 ms** [29.0, 34.2] | 64.5 ms [62.9, 65.4] | Cepheus, 2.1 times |
+| | 100 | **88.3 ms** [87.9, 96.4] | 209 ms [206, 214] | Cepheus, 2.4 times |
+| | 10,000 | 305 ms [284, 634] | **143 ms** [139, 150] | PostgreSQL, 2.1 times |
+| `Stddev(total)` (`stddev`) | 1 | **15.8 ms** [13.7, 16.6] | 28.6 ms [27.7, 34.6] | Cepheus, 1.8 times |
+| | 100 | **51.6 ms** [49.8, 59.0] | 83.5 ms [77.1, 91.6] | Cepheus, 1.6 times |
+| | 10,000 | 178 ms [149, 226] | **128 ms** [127, 388] | PostgreSQL, 1.4 times |
+| `Sum` by `Trunc(date, "month", zone = "Europe/Paris")` (`date_trunc('month', date, 'Europe/Paris')`) | 121 | **43.3 ms** [32.2, 124] | 181 ms [171, 499] | Cepheus, 4.2 times |
+| `Sum` by `Trunc(date, "month")` (UTC) | 120 | **34.5 ms** [32.2, 57.7] | 165 ms [163, 213] | Cepheus, 4.8 times |
+
+- **Few groups, Cepheus; many, PostgreSQL.** PostgreSQL's `count(DISTINCT)`, `array_agg(DISTINCT)` and
+  `percentile_cont` sort each group's rows (a sort of 245,000 rows for one group), where Cepheus keeps each group's
+  different values with their counts (3 statuses, about 92,000 totals) and selects the median's rank. The question of
+  one group runs on Cepheus's 8 domains (68 ms on 1 for its `Sum`, 24 on 8, measured with `CEPHEUS_DOMAINS`); those of
+  100 and 10,000 groups start from the cities or the clients, the variable with the fewest candidates, too few for the
+  engine to split the question across its cores (it splits at the first level when there are 20,000 candidates or
+  more), so they run on one core, against PostgreSQL's 2 workers and its leader, and still win at 100 groups. At
+  10,000 groups each group's state is an object of its own, and PostgreSQL's hash aggregate is 1.2 to 2.1 times
+  faster. A flatter state for the groups (a mean's sums in the group's row of ints), and a split of such questions at
+  their second level, are not built yet.
+- **Exact costs little.** A mean or a spread from exact sums costs what a sum costs, within a tenth, at 1 and 100
+  groups: an int's sums stay in plain ints while they cannot overflow (a value of at most 26 bits, a thousand squares),
+  and the limbs are made only past that.
+- **Trunc** reads the zone's offset by a binary search of its transitions and remembers the start of the last 1,024
+  months it found: 0.04 µs a row more than UTC's. PostgreSQL's whole question costs 0.7 µs a row, its `date_trunc`
+  converting each row's instant to a local time and back.
+- **No slowdown of the questions of before.** `abench.exe`, the same file built on main (d9431f6) and on this branch,
+  alternated in each round on the same database: a Give of a join, `Sum` and `Count` by city, `Min` and `Max` by
+  client, a sorted group, a page, `Not`, a range and `Optional`: new/old 0.93 to 1.01 (median of the rounds' ratios;
+  their least and largest 0.65 and 1.31, the noise of a shared machine on sub-millisecond questions).
+
 ## Deletes and links that name a kind (2026-11-25)
 
 **Method.** `bench/dbench.ml load`: 10,000 clients, 100,000 invoices (`invoice/client` names the kind client,

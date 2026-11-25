@@ -111,6 +111,67 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
 
+## Les rapports : Avg, Count(x), Values, Quantile, Stddev, Trunc (2026-11-26), à 1 million de faits
+
+**Méthode.** `bench/rbench.ml load` : 10 000 clients (une ville parmi 100) et 245 000 factures (un client, un total de
+0,01 à 1 000,00 en centimes, un statut : 70 % payées, 20 % impayées, 10 % en retard, une date de 2017 à 2026) : 990 000
+faits fusionnés en un seul run, sur le SSD SATA ; PostgreSQL 18.6 les mêmes lignes (`pg.sh reports load` : `rclient`,
+`rinvoice`, le total un `bigint` de centimes, la date un `timestamptz`, `rinvoice(client)` indexé, `VACUUM ANALYZE`).
+Chaque agrégat sur toutes les factures (1 groupe), par la ville de leur client (100 groupes : un join des factures et
+des clients), par leur client (10 000 groupes), chaque côté ne lisant que ce dont l'agrégat a besoin : Cepheus la
+réponse du moteur (`rbench.exe run` : `Answer.answer`, ce que calcule le serveur, sans socket), PostgreSQL le temps
+d'exécution de `EXPLAIN (ANALYZE, TIMING OFF)` (`pg.sh reports run` : dans le serveur, sans socket, avec ses 2 workers
+parallèles par défaut). 5 tours alternés, chaque côté une médiane de 11 passages ; donné : la médiane des 5 tours, et
+entre crochets leur plus petit et leur plus grand. Les mêmes réponses des deux côtés (lignes comptées ; un groupe
+`Values` est une ligne par statut chez Cepheus, un tableau chez PostgreSQL). La machine était partagée : une charge
+moyenne (sur 1 minute) de 3,6 à 6,6 sur ses 8 threads.
+
+| agrégat | groupes | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---:|---|
+| `Sum` (l'agrégat d'avant ; `sum`) | 1 | **14,1 ms** [13,2, 14,9] | 16,3 ms [15,5, 29,8] | à peu près pareil |
+| | 100 | **47,1 ms** [46,5, 89,5] | 60,7 ms [58,2, 85,0] | Cepheus, 1,3 fois |
+| | 10 000 | 91,7 ms [82,3, 106] | **72,4 ms** [69,4, 73,2] | PostgreSQL, 1,3 fois |
+| `Avg` (`avg`) | 1 | 15,7 ms [13,4, 24,0] | 16,3 ms [15,6, 16,8] | à peu près pareil |
+| | 100 | **51,5 ms** [50,0, 58,9] | 59,3 ms [58,1, 104] | Cepheus, 1,2 fois |
+| | 10 000 | 155 ms [146, 170] | **73,8 ms** [70,4, 76,1] | PostgreSQL, 2,1 fois |
+| `Count(status)` (`count(DISTINCT status)`) | 1 | **21,8 ms** [18,9, 22,6] | 61,2 ms [59,8, 64,0] | Cepheus, 2,8 fois |
+| | 100 | **73,9 ms** [72,8, 84,6] | 208 ms [200, 331] | Cepheus, 2,8 fois |
+| | 10 000 | 217 ms [204, 252] | **180 ms** [174, 187] | PostgreSQL, 1,2 fois |
+| `Values(status)` (`array_agg(DISTINCT status)`) | 1 | **21,9 ms** [18,5, 23,4] | 61,5 ms [59,8, 64,2] | Cepheus, 2,8 fois |
+| | 100 | **74,7 ms** [73,9, 86,1] | 206 ms [206, 227] | Cepheus, 2,8 fois |
+| | 10 000 | 231 ms [215, 273] | **186 ms** [178, 190] | PostgreSQL, 1,2 fois |
+| `Median(total)` (`percentile_cont(0.5) WITHIN GROUP (ORDER BY total)`) | 1 | **30,8 ms** [29,0, 34,2] | 64,5 ms [62,9, 65,4] | Cepheus, 2,1 fois |
+| | 100 | **88,3 ms** [87,9, 96,4] | 209 ms [206, 214] | Cepheus, 2,4 fois |
+| | 10 000 | 305 ms [284, 634] | **143 ms** [139, 150] | PostgreSQL, 2,1 fois |
+| `Stddev(total)` (`stddev`) | 1 | **15,8 ms** [13,7, 16,6] | 28,6 ms [27,7, 34,6] | Cepheus, 1,8 fois |
+| | 100 | **51,6 ms** [49,8, 59,0] | 83,5 ms [77,1, 91,6] | Cepheus, 1,6 fois |
+| | 10 000 | 178 ms [149, 226] | **128 ms** [127, 388] | PostgreSQL, 1,4 fois |
+| `Sum` par `Trunc(date, "month", zone = "Europe/Paris")` (`date_trunc('month', date, 'Europe/Paris')`) | 121 | **43,3 ms** [32,2, 124] | 181 ms [171, 499] | Cepheus, 4,2 fois |
+| `Sum` par `Trunc(date, "month")` (UTC) | 120 | **34,5 ms** [32,2, 57,7] | 165 ms [163, 213] | Cepheus, 4,8 fois |
+
+- **Peu de groupes, Cepheus ; beaucoup, PostgreSQL.** Le `count(DISTINCT)`, le `array_agg(DISTINCT)` et le
+  `percentile_cont` de PostgreSQL trient les lignes de chaque groupe (un tri de 245 000 lignes pour un seul groupe), là
+  où Cepheus garde les valeurs différentes de chaque groupe avec leurs comptes (3 statuts, environ 92 000 totaux) et
+  sélectionne le rang de la médiane. La question d'un seul groupe tourne sur les 8 domains de Cepheus (68 ms sur 1 pour
+  son `Sum`, 24 sur 8, mesuré avec `CEPHEUS_DOMAINS`) ; celles de 100 et de 10 000 groupes partent des villes ou des
+  clients, la variable qui a le moins de candidats, trop peu pour que le moteur partage la question entre ses cœurs (il
+  la partage au premier niveau quand il y a 20 000 candidats ou plus), si bien qu'elles tournent sur un seul cœur,
+  contre les 2 workers de PostgreSQL et son leader, et gagnent encore à 100 groupes. À 10 000 groupes l'état de chaque
+  groupe est un objet à lui, et le hash aggregate de PostgreSQL est 1,2 à 2,1 fois plus rapide. Un état plus plat pour
+  les groupes (les sommes d'une moyenne dans la ligne d'ints du groupe), et un partage de telles questions à leur
+  deuxième niveau, ne sont pas encore construits.
+- **L'exact coûte peu.** Une moyenne ou une dispersion à partir de sommes exactes coûte ce que coûte une somme, à un
+  dixième près, à 1 et 100 groupes : les sommes d'un int restent dans des ints simples tant qu'elles ne peuvent pas
+  déborder (une valeur d'au plus 26 bits, un millier de carrés), et les morceaux ne sont faits qu'au-delà.
+- **Trunc** lit le décalage du fuseau par une recherche dichotomique dans ses transitions et se souvient du début des
+  1 024 derniers mois qu'il a trouvés : 0,04 µs par ligne de plus qu'en UTC. Toute la question de PostgreSQL coûte
+  0,7 µs par ligne, son `date_trunc` convertissant l'instant de chaque ligne en heure locale et retour.
+- **Pas de ralentissement des questions d'avant.** `abench.exe`, le même fichier compilé sur main (d9431f6) et sur
+  cette branche, alternés à chaque tour sur la même base : un Give d'un join, `Sum` et `Count` par ville, `Min` et `Max`
+  par client, un groupe trié, une page, `Not`, un range et `Optional` : nouveau/ancien de 0,93 à 1,01 (la médiane des
+  rapports des tours ; leurs plus petit et plus grand 0,65 et 1,31, le bruit d'une machine partagée sur des questions
+  de moins d'une milliseconde).
+
 ## Les suppressions et les liens qui nomment un kind (2026-11-25)
 
 **Méthode.** `bench/dbench.ml load` : 10 000 clients, 100 000 factures (`invoice/client` nomme le kind client,

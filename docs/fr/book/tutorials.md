@@ -1104,6 +1104,10 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
 | une facture et ses 10 000 lignes | 27,3 ms | **5,16 ms** | PostgreSQL, 5,3 fois |
 | une facture et le lien de ses 10 000 notes (`clear` ; `ON DELETE SET NULL`) | **11,1 ms** | 46,5 ms | Cepheus, 4,2 fois |
 | la vérification d'un lien qui nomme un kind, à chaque écriture (celle d'une foreign key) | **0,2 µs** | 9,6 µs | Cepheus, 48 fois |
+| le total médian de 245 000 factures (`Median` ; `percentile_cont`), 1 groupe | **30,8 ms** | 64,5 ms | Cepheus, 2,1 fois |
+| les statuts différents par ville (`Count(s)` ; `count(DISTINCT)`), 100 groupes | **73,9 ms** | 208 ms | Cepheus, 2,8 fois |
+| la facture moyenne par client (`Avg` ; `avg`), 10 000 groupes | 155 ms | **73,8 ms** | PostgreSQL, 2,1 fois |
+| les totaux par mois à Paris (`Trunc` ; `date_trunc` avec un fuseau), 121 groupes | **43,3 ms** | 181 ms | Cepheus, 4,2 fois |
 
 - Un compteur que beaucoup d'écrivains partagent est là où un lock coûte le plus : PostgreSQL tient la ligne jusqu'à
   ce que chaque commit soit sur le disque, le writer de Cepheus lit le compteur à mesure qu'il applique chaque groupe,
@@ -1119,6 +1123,11 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
   ce qui pointe vers une chose est une seule recherche dans Cepheus, quel que soit leur nombre, là où PostgreSQL fait
   passer la requête de sa foreign key par un trigger ; une grande cascade coûte à Cepheus ce que coûte le retrait de
   ses faits (1 µs par fait), PostgreSQL ne fait que marquer ses lignes.
+- Les rapports sont le travail du moteur, sur 990 000 faits à une charge de 3,6 à 6,6 ([les
+  benchmarks](benchmarks.md#les-rapports--avg-countx-values-quantile-stddev-trunc-2026-11-26-à-1-million-de-faits)) :
+  avec peu de groupes Cepheus gagne, en gardant les valeurs différentes de chaque groupe avec leurs comptes là où
+  PostgreSQL trie ses lignes ; avec 10 000 groupes c'est le hash aggregate de PostgreSQL, la question tournant sur un
+  seul des cœurs de Cepheus.
 
 ## Chaque tutoriel en une ligne
 
