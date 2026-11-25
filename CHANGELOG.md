@@ -118,6 +118,16 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - An error of the server's own files reaches a program as its code and a fixed message, its paths in the log only.
 - A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are sent, so that
   many small requests for large replies, never read, no longer pile their replies up in the server's memory.
+- **Import and export.** `cepheus import DB FILE --kind KIND` loads the things of a kind from CSV (RFC 4180, a header
+  row; PostgreSQL's rule for an empty field and "") or JSON lines, through the server with a token that writes:
+  each column a field (`--map` when the names differ), each value checked against its type (money read exactly from
+  its digits, dates as RFC 3339, texts UTF-8 without NUL), links found by the key of the thing linked (`--link`),
+  unique values checked against the database and the file. The file is checked whole first: a bad row stops the
+  import with its line and nothing is written (`--skip-bad` writes the good rows and lists the bad ones;
+  `--upsert` changes the thing a unique value finds); then it is written in large groups of up to a million
+  operations, parsed by several domains while the server writes. `cepheus export DB --kind KIND [--format csv]` writes
+  every thing of the kind at one group, named on stderr, its asserted facts and its links as their keys, read from one
+  view on the server's machine. At 10 M facts (120,482 clients, 2.4 M invoices linked by e-mail), medians of seven rounds: 28.5 s, beside PostgreSQL's COPY and join 43.7 s and SQLite's .import 9.71 s; a file of 10 GiB checked whole in 244 MB ([import and export](docs/book/operations.md#import-and-export)).
 - A question has a **time**: `[clients] question_timeout` in `cluster.toml` (seconds, 30 by default, 0 for none), and a
   program's shorter `timeout` (from Cesia `Find(..., timeout = 2)` and `Watch`; from OCaml `?timeout` on `Client.find`
   and `watch`, protocol 6), a longer one only from an admin token; past it the question ends with the code `timeout`,

@@ -89,3 +89,11 @@
 (rule
  (alias runtest)
  (action (run %{exe:vault_unit.exe})))
+
+; cepheus import and cepheus export against a real server
+(executable
+ (name server_transfer)
+ (modules server_transfer)
+ (libraries cepheus cepheus_server check unix threads.posix)
+ (ocamlopt_flags (:standard -O3))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

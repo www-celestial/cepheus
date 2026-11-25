@@ -38,6 +38,7 @@ let usage () =
     \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n\
     \       cepheus replicate PEER --config FILE\n\
     \       cepheus promote [--force] --config FILE\n\
+    \       cepheus import|export DB ... --config FILE (cepheus import --help)\n\
     \       cepheus verify DIR\n\
     \       cepheus backup --config FILE DEST\n\
     \       cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]\n\
@@ -302,6 +303,7 @@ let ops cmd args =
 
 let () =
   match Array.to_list Sys.argv with
+  | _ :: ("import" | "export" as cmd) :: rest -> Transfer_cmd.main cmd rest
   | _ :: (("verify" | "backup" | "restore") as cmd) :: rest -> ops cmd rest
   | _ :: cmd :: rest -> (
     let config, dbs, admin, dir, pos = parse rest in

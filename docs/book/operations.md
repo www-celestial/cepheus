@@ -1,7 +1,7 @@
 # Operations
 
 Running a database: its files, what an open does, what to do when it reports damage or a disk error, backups,
-verification, memory and disk space, and the tools of the repository.
+verification, memory and disk space, import and export, and the tools of the repository.
 
 ## Files
 
@@ -242,6 +242,178 @@ higher in all 5). The journal does not preallocate yet (it needs a segment made 
 that zeroes a torn tail instead of cutting it). The long stalls (fsyncs of 80 to 450 ms, a few a minute) come in every
 mode: they are the disk's.
 
+## Import and export
+
+`cepheus import` loads the things of a kind from a file, `cepheus export` writes them out: to start from an existing
+base (PostgreSQL, SQLite, a spreadsheet), for reports and audits, and to leave Cepheus. Both go through the server
+with a token, as any program does, never by opening the files of a live database; the token is in `CEPHEUS_TOKEN`,
+never on the command line (which every user of the machine can read): a right to write the database to import, to
+read it to export.
+
+```sh
+cepheus import shop clients.csv --kind client --config /etc/cepheus/cluster.toml        # CSV with a header row
+cepheus import shop invoices.jsonl --kind invoice --config /etc/cepheus/cluster.toml    # JSON lines
+cepheus export shop --kind invoice --config /etc/cepheus/cluster.toml > invoices.jsonl
+cepheus export shop --kind invoice --format csv --config /etc/cepheus/cluster.toml > invoices.csv
+```
+
+The kind is the program's: its fields are the properties `kind/Field` declared in the database (a Cesia program's
+`cepheus.Connect` declares its kinds, [Cepheus from Cesia](cesia.md)), so a program connects once before its first
+import. A column of the CSV header, or a key of JSON lines, names a field: the same name, or the one field whose name
+differs only by its capitals (PostgreSQL's columns are in small letters: `email` is `Email`); `--map Col=Field` when
+they differ, `--map Col=` to leave a column out. A column that names no field stops the import before it reads a row.
+
+From PostgreSQL or SQLite, their own commands write the file:
+
+```sh
+psql -c "\copy (SELECT name AS \"Name\", city AS \"City\", email AS \"Email\" FROM client) TO 'clients.csv' WITH (FORMAT csv, HEADER true)"
+sqlite3 -csv -header shop.db "SELECT name AS Name, city AS City, email AS Email FROM client" > clients.csv
+cepheus import shop clients.csv --kind client --config /etc/cepheus/cluster.toml
+```
+
+### The files
+
+**CSV** as RFC 4180 writes it (the IETF's description of comma-separated values): a header row, then one record a
+row; a field that starts with a quote is quoted and may hold commas and line breaks, `""` inside it being a quote. A
+quote anywhere else, or a character after a closing quote, is refused: it is a broken file, not data. A record ends at
+a line break outside quotes, LF or CR LF; blank lines are skipped; a UTF-8 byte order mark at the start (the three bytes
+EF BB BF that some editors write first) is skipped. As in PostgreSQL's `COPY` (sql-copy.html: "a NULL is written as an
+unquoted empty string, while an empty string data value is written with double quotes"), an unquoted empty field is no
+value and `""` is the empty text. An export writes CR LF, as RFC 4180 does.
+
+**JSON lines** as jsonlines.org describes them: one JSON object a line (RFC 8259), `{"Name": "Ada", "City": "Lyon"}`;
+`null` or a key left out is no value. A key twice, a nested object, nesting deeper than 64, a bad escape, a lone
+surrogate (half of a character in `\u` escapes) are refused.
+
+A value is read by its field's type, exactly:
+
+| type | CSV | JSON lines | export |
+|---|---|---|---|
+| `Int` | `-12` (63 bits) | a whole number | the same |
+| `Float` | `2.5`, `1e-7`, `NaN`, `Infinity` | a number, `"NaN"`, `"Infinity"` | the shortest decimal that reads back as the same double |
+| `Bool` | `true`, `false`, `t`, `f`, `1`, `0` | `true`, `false` | `true`, `false` |
+| `Text` | UTF-8 without NUL | a string | the same |
+| `Date` | `2026-11-24`, `2026-11-24T10:30:00Z`, `2026-11-24 10:30:00.123+01:00` (RFC 3339; no zone: UTC) | a string of the same | `2026-11-24T10:30:00.123Z` |
+| `Money(s)` | `12.50`: at most `s` decimals, never through a float | a number of the same form | `12.50`, exactly `s` decimals |
+| `Link` | the key of the thing linked (below) | the key, of the key's type | the key |
+| many values | a JSON list in the field: `"[""red"",""blue""]"` | a list | a list |
+
+A date is kept to the millisecond: finer digits (PostgreSQL's microseconds) are cut. Money is read from its decimal
+digits into minor units, so `12.505` for cents is refused and `0.1` is ten cents, never 0.1000000000000000055. A text
+is checked as UTF-8 and a NUL byte refused (PostgreSQL refuses `0x00` in a text too); an export refuses a text that
+holds one (CSV and JSON lines carry neither).
+
+**Links.** A link is written as the key of the thing linked: a unique field of one value. By default the kind named
+as the field in small letters, by its one unique field: `Client` is a client found by its `Email`. `--link
+Client=client/Email` names the key, `--link Client=id` writes the things' ids instead (an export for an audit, an
+import into the same database). The things linked must be in the database first: import the clients, then the
+invoices, then their lines.
+
+### What an import checks, and when it writes
+
+The file is read twice. The first pass checks every row: the number of its fields, each value against its type, each
+link found in the database, each unique value against the database and against the other rows of the file. A bad row
+stops the import with its line (the line it starts at, counting the line breaks inside quotes) and the reason, and
+**nothing is written**:
+
+```text
+cepheus: clients.csv line 1204: Email "ada@example.com" is on line 7 too; nothing was written
+```
+
+`--skip-bad` writes the good rows and lists the bad ones on stderr, each with its line. `--upsert` changes the thing
+that a row's unique value finds rather than refusing it: the row's values replace its fields, an empty field leaves
+one as it is, and a field of many values is refused (`Write` changes those); two rows of the file with one unique
+value are refused even then, as PostgreSQL's `ON CONFLICT DO UPDATE` refuses to change a row twice.
+
+The second pass reads the file again and writes it in groups of at most a million operations (15 MiB of request,
+under the frame's 16 MiB), each taken by the large-group path of the database (20,000 operations and more: sorted in
+arrays by several domains, merged into a run as it is written), from a thread of its own on a connection of its own,
+while domains parse the rows that come next. So:
+
+- **An import that fits one group is all or nothing**, a constraint of the rules included: the database refuses the
+  group whole.
+- **A larger import is checked whole first**, then written group after group. The database refuses a group only for
+  what the first pass cannot see: a constraint of a rule, or a unique value that another program wrote meanwhile.
+  The import then stops and names what is written:
+
+```text
+cepheus: invoices.csv lines 2252 to 2501: the database refused their group: invalid: constraint never-void: ...;
+written before it: lines 2 to 2251, in groups 5 to 13
+```
+
+  The rows before are in the database, the rows after are not: fix the file, and import its rows from that line on.
+
+An import is one command's work: two imports of one kind at once may each find a unique value free in their first
+pass; the database then refuses the second one's group, as above. The file must be a file (not a pipe: it is read
+twice), and not change while it is read (its size and time are checked between the passes).
+
+### What an export gives
+
+Every thing of the kind at one state of the database, the group of that state on stderr
+(`cepheus: shop at group 6202: 100,000 things of invoice, 900,000 facts, as CSV, in 0.31 s`), the things by id, each
+with the **asserted** facts of its fields: what the rules derive (a client's `Overdue`) is left out, since the rules of
+the database the export is imported into derive it again. Links are written as their key (`--link`, as above); a
+linked thing without its key stops the export (`--link Field=id` writes the ids). An export imported into a new
+database gives the same facts: the test does it for the invoices app, and its exports of both are the same bytes.
+
+The export reads one view in its own process, through the server's follow stream over its Unix socket
+([local reads](server.md#local-reads-g15)): a view never changes while it is read, so the file is one consistent state
+however long it takes, and no write waits for it. So it runs on the server's machine, with a token that reads the
+whole database (a token of some kinds is never followed); elsewhere it says so and stops. Reading at an earlier group
+(`--as-of`) waits for reads at a past group.
+
+### Security
+
+- The server checks the token at every request: an import's writes need `write`, an export's follow stream needs
+  `read` on the whole database. The command opens the file under its user's rights; the server never sees a path.
+- What a file holds is data: a record is at most 8 MiB, so a quote left open in a file of 10 GB stops the import at
+  its line rather than reading the rest as one field; JSON nesting is at most 64 deep; texts are checked UTF-8 without
+  NUL.
+- An export writes the values exactly as they are, since a round trip needs them: a text that starts with `=`, `+`,
+  `-` or `@` is a formula to a spreadsheet that opens the CSV (CSV injection). Open an export in a spreadsheet as text,
+  or write the report through the app (the invoices app's CSV guards its cells, [the app](app.md#10-the-csv-export)).
+
+### Memory and speed
+
+The first pass keeps 8 bytes for each unique value (a hash of 30 bits and the row's number, in a table of open
+addressing at most 3/4 full); two values of one hash are told apart by reading the earlier row again (the offset of
+every 1,024th row is kept), so the check is exact. Everything else is bounded whatever the file's size: rounds of
+eight batches of a MiB, two groups in flight, the record bound.
+
+Measured on the test machine (Intel i7-4720HQ, 4 cores, SATA SSD; its btrfs 97 % full, other jobs building beside)
+on 2026-11-25 with `bench/transfer.sh DIR 120482 7`: 120,482 clients and 2,409,640 invoices, 10.0 M facts, 149 MB of
+CSV; seven rounds, the sides in turn, each durable; median [min, max]. Each side loads the clients (a unique e-mail),
+then the invoices, their link found by the client's e-mail: Cepheus by `cepheus import` of each file; PostgreSQL 18.6
+by `\copy` of the clients, then `\copy` of the invoices into a table of their text and `INSERT ... SELECT` joined on
+the e-mail, in one transaction; SQLite 3.54 by `.import --csv` of each file into a table of its own and the same
+`INSERT ... SELECT`.
+
+| | Cepheus | PostgreSQL 18.6 | SQLite 3.54 |
+|---|---:|---:|---:|
+| the clients (361,446 facts) | 1.18 s [1.05, 6.63] | 1.43 s [0.64, 7.21] | 0.47 s [0.43, 2.08] |
+| the invoices (9,638,560 facts) | 25.0 s [15.7, 42.1] | 39.7 s [27.4, 83.7] | 8.94 s [7.74, 9.28] |
+| both | 28.5 s [16.8, 43.2] | 43.7 s [28.3, 85.2] | 9.71 s [8.17, 10.3] |
+| memory at the peak of the load | the command 556 MB [511, 577], the server 450 MB [332, 571] | the backend 316 MB (shared_buffers 1 GB) | 11 MB |
+| the export of the invoices with their client's e-mail | 2.61 s [1.76, 3.99], 245 MB | 3.94 s [3.56, 11.5] | 1.61 s [1.57, 1.93] |
+| on the disk after the load | 111 to 198 MB (journal and runs) | 237 MB | 276 MB |
+
+SQLite loads fastest: one process writes one file, and it checks nothing of the values (its columns take any text:
+the amounts and the dates stay texts). Cepheus reads the file twice, and the first pass, every row checked and every
+link found, takes 3.57 s [3.15, 6.37] of the invoices' time; the rest is the server writing ten large groups, which
+varied from 11.7 to 38.1 s on this disk (7.8 s in a quiet run of the same build the hour before), where the library
+writes the same facts in its own process, in two large groups, in 5.13 s ([benchmarks](benchmarks.md)): each group crosses the
+socket, coded and decoded (one of 960,000 facts, 0.72 s through the server, 0.41 s in the process). PostgreSQL loses
+the invoices: its join and its foreign key check each row after the copy. An invoice whose e-mail no client has is
+dropped in silence by the join of PostgreSQL and SQLite; Cepheus refuses the file, naming the line, before it
+writes anything.
+
+A file of 10 GiB (10,737,434,790 bytes, 192,506,762 rows: 13 clients' invoices over and over, in a folder compressed
+by btrfs, `chattr +c`, so that it held 1.2 GB of a disk with 7 GB free) whose last row has 3 decimals for cents is
+checked whole and refused at that line, nothing written: 253 s (42 MB/s), the command's peak 244 MB, against 130 MB
+for the 149 MB of the bench's invoices: the memory does not follow the file.
+
+`bench/transfer.sh DIR CLIENTS [ROUNDS]` runs the three sides.
+
 ## Tools
 
 | tool | what it does | page |
@@ -255,3 +427,4 @@ mode: they are the disk's.
 | `bench/pg/pg.sh` | PostgreSQL's side: `init`, `start`, `load`, `read`, `write`, `stop` | [benchmarks](benchmarks.md#commands) |
 | `bench/sqlite/sqlite.sh` | SQLite's side: `load`, `read` | [benchmarks](benchmarks.md#commands) |
 | `bench/sqlite/seats.py`, `bench/pg/pg.sh seats` | SQLite's and PostgreSQL's sides of the sale of seats | [case](case-seats.md#speed-beside-the-giants) |
+| `bench/transfer.sh` | `cepheus import` and `export` beside PostgreSQL's `COPY` and SQLite's `.import` | [import and export](#memory-and-speed) |

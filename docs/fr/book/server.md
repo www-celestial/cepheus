@@ -213,6 +213,11 @@ cepheus replicate PEER --config FILE     this server, stopped, becomes a replica
                                          (DATA/cepheus.role; [a replica](#a-replica))
 cepheus promote [--force] --config FILE  the running replica becomes a primary; an admin token in CEPHEUS_TOKEN;
                                          --force without its primary's handover
+cepheus import DB FILE --kind KIND [--map COL=FIELD]... [--link FIELD=KIND/KEY|id]... [--skip-bad] [--upsert] --config FILE
+                                         the things of FILE (CSV or JSON lines), checked whole, then written; a token
+                                         that writes DB in CEPHEUS_TOKEN ([import and export](operations.md#import-and-export))
+cepheus export DB --kind KIND [--format jsonl|csv] [--link FIELD=KIND/KEY|id]... --config FILE
+                                         every thing of KIND at one group, on stdout; a token that reads DB
 cepheus verify DIR                       a database's files checked as they are, nothing changed: every frame,
                                          every page, the runs against the journal, the vault's records; each damage
                                          named (operations.md, "Verification")
