@@ -34,3 +34,12 @@
  (libraries cepheus unix threads.posix)
  (ocamlopt_flags (:standard -O3 -inline 200))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
+
+; reports beside PostgreSQL's aggregates (bench/rbench.ml, bench/pg/pg.sh reports), and the questions of before for an
+; A/B of two builds (bench/abench.ml: it compiles without protocol 9)
+(executables
+ (names rbench abench)
+ (modules rbench abench stats)
+ (libraries cepheus cepheus_server unix threads.posix)
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

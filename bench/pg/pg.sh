@@ -18,6 +18,7 @@
 #   pg.sh fk ROOT run RUNS          each DELETE of its measured things, inside the server and rolled back, RUNS runs
 #                                   each, as dbench.exe delete prints them ("cascade 100 123.4", microseconds); then
 #                                   inserts of a bill without and with a foreign key, microseconds an insert (5 passes)
+#   pg.sh reports ROOT load CSVDIR | run   the aggregates of reports beside bench/rbench.ml's (rbench.exe load's rows)
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -146,6 +147,53 @@ ops)
       psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
     done | stats "$q engine only"
   done
+  ;;
+reports)
+  # pg.sh reports ROOT load CSVDIR: the rows of rbench.exe load (rclient, rinvoice: a date as timestamptz);
+  # pg.sh reports ROOT run: each aggregate over every invoice (1 group), by city (100), by client (10,000), and the totals
+  # by month in Paris, inside the server (engine only: EXPLAIN ANALYZE's execution time), RUNS runs each (21)
+  case "$3" in
+  load)
+    psql_ <<EOS
+DROP TABLE IF EXISTS rinvoice, rclient, rinvoice_in;
+CREATE TABLE rclient (id int PRIMARY KEY, city text NOT NULL);
+CREATE TABLE rinvoice_in (id int, client int, total bigint, status text, date bigint);
+CREATE TABLE rinvoice (id int PRIMARY KEY, client int NOT NULL REFERENCES rclient, total bigint NOT NULL, status text NOT NULL, date timestamptz NOT NULL);
+\copy rclient FROM '$4/rclient.csv' WITH (FORMAT csv)
+\copy rinvoice_in FROM '$4/rinvoice.csv' WITH (FORMAT csv)
+INSERT INTO rinvoice SELECT id, client, total, status, to_timestamp(date) FROM rinvoice_in;
+DROP TABLE rinvoice_in;
+CREATE INDEX ON rinvoice (client);
+VACUUM ANALYZE rclient, rinvoice;
+EOS
+    ;;
+  run)
+    runs=${RUNS:-21}
+    stats() { "$here/../../_build/default/bench/bench.exe" stats "$1"; }
+    from_city="FROM rinvoice i JOIN rclient c ON c.id = i.client GROUP BY c.city"
+    for g in one city client; do
+      case $g in
+      one) from="FROM rinvoice i"; key=""; name="1 group" ;;
+      city) from=$from_city; key="c.city, "; name="100 groups (city)" ;;
+      client) from="FROM rinvoice i GROUP BY i.client"; key="i.client, "; name="10,000 groups (client)" ;;
+      esac
+      for a in "Sum:sum(i.total)" "Avg:avg(i.total)" "Count(status):count(DISTINCT i.status)" "Values(status):array_agg(DISTINCT i.status)" \
+               "Median:percentile_cont(0.5) WITHIN GROUP (ORDER BY i.total)" "Stddev:stddev(i.total)"; do
+        label=${a%%:*}; agg=${a#*:}
+        sql="SELECT $key$agg $from"
+        for r in $(seq "$runs"); do
+          psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+        done | stats "$label $name ($(psql -X -At -c "SELECT count(*) FROM ($sql) x") rows)"
+      done
+    done
+    for z in Europe/Paris UTC; do
+      sql="SELECT date_trunc('month', date, '$z'), sum(total) FROM rinvoice GROUP BY 1"
+      for r in $(seq "$runs"); do
+        psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+      done | stats "Sum by month in $z ($(psql -X -At -c "SELECT count(*) FROM ($sql) x") rows)"
+    done
+    ;;
+  esac
   ;;
 write)
   # RATE=r: r inserts a second in all (pgbench -R: a latency counts from the scheduled start, so a stall is never

@@ -208,7 +208,7 @@ let fold_fixed (v : Store.view) (q : Query.t) asg ~drop (k : int array -> unit) 
 
 (* ---- templates ---- *)
 
-let projecting (q : Query.t) give = let seen = Array.make q.vars false in Array.iter (fun x -> seen.(x) <- true) give; Array.exists not seen
+let projecting (q : Query.t) give = let seen = Array.make q.vars false in Array.iter (fun x -> if x < q.vars then seen.(x) <- true) give; Array.exists not seen
 
 (* the template of a question: its constants as parameters, in the order they appear; its key, and the parameters *)
 let templatize ?(truncs = []) (q : Query.t) (sel : Wire.select) =

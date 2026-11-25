@@ -382,7 +382,23 @@ let select cmp (ks : int array) (cs : int array) k =
 
 (* ---- an aggregate of protocol 9 in a group ---- *)
 
-type sums = { s1 : Exact.t; s2 : Exact.t option; mutable n : int; mutable nan : int; mutable pinf : int; mutable ninf : int }
+(* An int's exact sums go first into plain ints, f1 and f2, while they cannot overflow (a value of at most 26 bits:
+   its square of 52, a thousand of them before f2 moves into the limbs; f1 moves when an addition would overflow), so
+   that most groups never touch the limbs and their result is a division of ints: [spilled] says whether the limbs
+   hold anything *)
+type sums = {
+  mutable e1 : Exact.t option;  (* the limbs, made at the first spill: most groups never need them *)
+  mutable e2 : Exact.t option;
+  square : bool;  (* a variance's: the sum of the squares too *)
+  mutable n : int;
+  mutable nan : int;
+  mutable pinf : int;
+  mutable ninf : int;
+  mutable f1 : int;
+  mutable f2 : int;
+  mutable k : int;  (* the squares in f2 *)
+  mutable spilled : bool;
+}
 
 type state = Sums of sums | Bag of Bag.t
 
@@ -397,7 +413,30 @@ let name = function
   | Wire.Count -> "Count" | Sum _ -> "Sum" | Min _ -> "Min" | Max _ -> "Max" | Avg _ -> "Avg" | Distinct _ -> "Count"
   | Values _ -> "Values" | Quantile _ -> "Quantile" | Variance _ -> "Variance" | Stddev _ -> "Stddev"
 
-let sums square = Sums { s1 = Exact.create (); s2 = (if square then Some (Exact.create ()) else None); n = 0; nan = 0; pinf = 0; ninf = 0 }
+let sums square =
+  Sums { e1 = None; e2 = None; square; n = 0; nan = 0; pinf = 0; ninf = 0; f1 = 0; f2 = 0; k = 0; spilled = false }
+
+let x1 s = match s.e1 with Some e -> e | None -> let e = Exact.create () in s.e1 <- Some e; e
+let x2 s = match s.e2 with Some e -> e | None -> let e = Exact.create () in s.e2 <- Some e; e
+
+let small = 1 lsl 26
+let squares_max = 1000
+
+(* f1 + b, or f1 into the limbs when that would overflow *)
+let add_f1 s b =
+  let r = s.f1 + b in
+  if (s.f1 lxor r) land (b lxor r) < 0 then (Exact.add_int (x1 s) 1 s.f1; s.f1 <- b; s.spilled <- true) else s.f1 <- r
+
+let add_int_sums s sign w =
+  if w = min_int then (Exact.add_int (x1 s) sign w; s.spilled <- true) else add_f1 s (if sign > 0 then w else -w);
+  if s.square then begin
+    if w > -small && w < small then begin
+      s.f2 <- s.f2 + (sign * (w * w));
+      s.k <- s.k + 1;
+      if s.k >= squares_max then (Exact.add_int (x2 s) 1 s.f2; s.f2 <- 0; s.k <- 0; s.spilled <- true)
+    end
+    else (Exact.add_square_int (x2 s) sign w; s.spilled <- true)
+  end
 
 let fresh = function
   | Wire.Avg _ -> sums false
@@ -452,20 +491,22 @@ let add (v : Store.view) (tx : Value.typ) st sign w =
        else if f = Float.infinity then s.pinf <- s.pinf + sign
        else if f = Float.neg_infinity then s.ninf <- s.ninf + sign
        else begin
-         Exact.add_float s.s1 sign f;
-         match s.s2 with Some s2 -> Exact.add_square_float s2 sign f | None -> ()
+         s.spilled <- true;
+         Exact.add_float (x1 s) sign f;
+         if s.square then Exact.add_square_float (x2 s) sign f
        end
-     | _ -> (
-       Exact.add_int s.s1 sign w;
-       match s.s2 with Some s2 -> Exact.add_square_int s2 sign w | None -> ()));
+     | _ -> add_int_sums s sign w);
     false
 
 let merge a b =
   match a, b with
   | Bag x, Bag y -> Bag.merge x y
   | Sums x, Sums y ->
-    Exact.merge x.s1 y.s1;
-    (match x.s2, y.s2 with Some p, Some q -> Exact.merge p q | _ -> ());
+    (match y.e1 with Some e -> Exact.merge (x1 x) e | None -> ());
+    (match y.e2 with Some e -> Exact.merge (x2 x) e | None -> ());
+    add_f1 x y.f1;
+    if x.k + y.k >= squares_max then (Exact.add_int (x2 x) 1 y.f2; x.spilled <- true) else (x.f2 <- x.f2 + y.f2; x.k <- x.k + y.k);
+    if y.spilled then x.spilled <- true;
     x.n <- x.n + y.n;
     x.nan <- x.nan + y.nan;
     x.pinf <- x.pinf + y.pinf;
@@ -500,7 +541,45 @@ let sorted_values (v : Store.view) (tx : Value.typ) st =
   | Sums _ -> invalid_arg "Agg.sorted_values"
 
 (* the result of a group; Value.missing when it has none (a sample variance of one value) *)
+(* the plain ints into the limbs: the exact path then reads only them *)
+let settle s =
+  if s.f1 <> 0 then (Exact.add_int (x1 s) 1 s.f1; s.f1 <- 0);
+  if s.f2 <> 0 then Exact.add_int (x2 s) 1 s.f2;
+  s.f2 <- 0;
+  s.k <- 0;
+  s.spilled <- true
+
+let exact_float x = Float.abs x < 9007199254740992.
+
 let result (v : Store.view) (a : Wire.agg) (tx : Value.typ) st : Value.t =
+  (* an int's group whose sums are plain ints: a division of exact operands, correctly rounded by IEEE 754 *)
+  let fast =
+    match a, st with
+    | Wire.Avg _, Sums s when (not s.spilled) && s.n > 0 && tx <> Tfloat -> (
+      let n = s.n in
+      match tx with
+      | Tint when exact_float (float_of_int s.f1) && Float.abs (float_of_int s.f1) < 9007199254740992. && abs s.f1 < 1 lsl 53 -> Some (Value.Float (float_of_int s.f1 /. float_of_int n))
+      | Tmoney _ | Tdate ->
+        let q = s.f1 / n and r = s.f1 mod n in
+        let q = if 2 * abs r >= n then (if s.f1 < 0 then q - 1 else q + 1) else q in
+        Some (if tx = Tdate then Value.Date q else Money q)
+      | _ -> None)
+    | (Wire.Variance (_, pop) | Stddev (_, pop)), Sums s when (not s.spilled) && tx <> Tfloat && s.n > 0 && (pop || s.n >= 2) ->
+      let n = s.n in
+      if abs s.f1 < 1 lsl 30 && n < 1 lsl 20 && s.f2 >= 0 && s.f2 < 1 lsl 41 then begin
+        let num = (n * s.f2) - (s.f1 * s.f1) in
+        let scale = match tx with Tmoney sc -> pow10.(sc) | _ -> 1 in
+        let den = float_of_int (if pop then n * n else n * (n - 1)) *. float_of_int scale *. float_of_int scale in
+        if num >= 0 && num < 1 lsl 53 && exact_float den then (let var = float_of_int num /. den in Some (Value.Float (match a with Stddev _ -> Float.sqrt var | _ -> var)))
+        else None
+      end
+      else None
+    | _ -> None
+  in
+  match fast with
+  | Some x -> x
+  | None ->
+  (match st with Sums s -> settle s | Bag _ -> ());
   match a, st with
   | Wire.Avg _, Sums s ->
     if s.n <= 0 then Value.missing
@@ -509,9 +588,9 @@ let result (v : Store.view) (a : Wire.agg) (tx : Value.typ) st : Value.t =
       | Tfloat when s.nan > 0 || (s.pinf > 0 && s.ninf > 0) -> Float Float.nan
       | Tfloat when s.pinf > 0 -> Float Float.infinity
       | Tfloat when s.ninf > 0 -> Float Float.neg_infinity
-      | Tfloat | Tint -> let neg, m, e = Exact.value s.s1 in Float (Exact.to_float ~neg m e [ s.n ])
+      | Tfloat | Tint -> let neg, m, e = Exact.value (x1 s) in Float (Exact.to_float ~neg m e [ s.n ])
       | Tmoney _ | Tdate ->
-        let neg, m, e = Exact.value s.s1 in
+        let neg, m, e = Exact.value (x1 s) in
         let q = Exact.div_round ~neg (Exact.shift_limbs m e) s.n in
         if tx = Tdate then Date q else Money q
       | _ -> Value.missing
@@ -521,8 +600,8 @@ let result (v : Store.view) (a : Wire.agg) (tx : Value.typ) st : Value.t =
     if n <= 0 || ((not pop) && n < 2) then Value.missing
     else if s.nan > 0 || s.pinf > 0 || s.ninf > 0 then Float Float.nan
     else begin
-      let _, m1, b1 = Exact.value s.s1 in
-      let _, m2, b2 = Exact.value (match s.s2 with Some x -> x | None -> s.s1) in
+      let _, m1, b1 = Exact.value (x1 s) in
+      let _, m2, b2 = Exact.value (x2 s) in
       (* n sum(x^2) - sum(x)^2, at the limb base min(b2, 2 b1) *)
       let b = min b2 (2 * b1) in
       let sq = Exact.shift_limbs (Exact.mul m1 m1) ((2 * b1) - b) and ns2 = Exact.shift_limbs (Exact.mul (Exact.of_int n) m2) (b2 - b) in
