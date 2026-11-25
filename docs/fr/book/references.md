@@ -312,6 +312,24 @@ Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparis
 
 ## Les transactions et l'isolation
 
+- **[Khayyat 2015]** Z. Khayyat, W. Lucia, M. Singh, M. Ouzzani, P. Papotti, J.-A. Quiané-Ruiz, N. Tang, P. Kalnis.
+  Lightning Fast and Space Efficient Inequality Joins. *PVLDB* 8(13), 2074–2085, 2015.
+  https://doi.org/10.14778/2831360.2831362
+  — Des joins sur $<$ et $\le$ lus dans des colonnes triées plutôt qu'un produit cartésien suivi d'un filtre, ce que
+  faisaient les systèmes qu'ils décrivent. `Less` reprend la recherche (seek) dans les valeurs triées d'un côté à partir
+  de la valeur de l'autre : une fois une variable liée, les candidats de l'autre sont un range de l'index trié de la
+  propriété (`Query.fold`).
+- **[Pérez 2009]** J. Pérez, M. Arenas, C. Gutierrez. Semantics and Complexity of SPARQL. *ACM Transactions on
+  Database Systems* 34(3), 1–45, 2009. https://doi.org/10.1145/1567274.1567278
+  — Le sens de l'`OPTIONAL` de SPARQL (un left outer join d'ensembles de liaisons), et les patterns *well-designed*
+  (bien construits), ceux dont la réponse ne dépend pas de l'endroit où la partie optionnelle est jointe. `Optional`
+  est un pattern dont la variable n'est dans aucun autre élément : un pattern well-designed, lié en dernier
+  (`Ask.expand`).
+- **[IEEE 754-2019]** IEEE Standard for Floating-Point Arithmetic. IEEE Std 754-2019.
+  https://doi.org/10.1109/IEEESTD.2019.8766229
+  — totalOrder (section 5.10) : un seul ordre de tous les floats, $-\mathrm{NaN} < -\infty < \dots < -0 < +0 < \dots <
+  +\infty < +\mathrm{NaN}$. `Sort`, les intervalles et `Less` sur des floats comparent dans cet ordre
+  (`Value.total_order`).
 - **[Papadimitriou 1979]** C. H. Papadimitriou. The Serializability of Concurrent Database Updates. *Journal of the
   ACM* 26(4), 631–653, 1979. https://doi.org/10.1145/322154.322158
   — La définition de la serializability que prouve G4.

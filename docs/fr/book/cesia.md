@@ -295,7 +295,10 @@ joins deux à deux, comme en fait une base SQL, peut faire bien plus sur un grap
 
 **Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) et `cepheus.Between(x, lo, hi)`
 ($\mathit{lo} \le x \le \mathit{hi}$), pour une variable d'un Int, d'une Date ou de Money, lisent l'index trié : ce sont des intervalles de la
-question, pas des filtres après elle. Toute autre condition est à Cesia, sur les lignes qu'elle donne (`list.Filter`).
+question, pas des filtres après elle. Sur un Float, ils gardent les valeurs de leur côté dans l'ordre que donne `Sort`
+(le totalOrder d'IEEE 754 : $-0$ avant $0$, NaN après l'infini), chaque candidat vérifié ([plus bas](#less-lessorequal-et-optional)).
+Deux variables se comparent avec `cepheus.Less` et `cepheus.LessOrEqual` (même section). Toute autre condition est à
+Cesia, sur les lignes qu'elle donne (`list.Filter`).
 Une Date est gardée à la milliseconde et Money à ses chiffres, si bien qu'une borne qui tombe entre deux d'entre
 elles (`Above(price, 10.005)` pour des centimes, une heure de `sys.Now()`) garde exactement les valeurs de son côté :
 elle est arrondie vers l'intérieur de l'intervalle, 10,005 vers 10,01 pour Above et vers 10,00 pour Below. Une borne
@@ -402,7 +405,7 @@ jusqu'à sa première). `Or` est demandé une fois pour chaque alternative, avec
 les copies (sauf celles d'une alternative qui a ses propres variables, qui peut donner un binding une fois pour
 chacune de leurs valeurs).
 
-Un `Watch` (une question vivante, tenue à jour, plus bas) garde `Not`, `Or`, `In` et `Prefix`, et un changement
+Un `Watch` (une question vivante, tenue à jour, plus bas) garde `Not`, `Or`, `In`, `Prefix`, `Less` et `Optional`, et un changement
 n'envoie que les lignes qu'il ajoute ou retire. Le fait d'une frame (un bloc du journal qui porte un ou plusieurs
 groupes) ne peut changer que les réponses qui s'accordent avec lui à l'un des patterns de la question, où que soit ce
 pattern : pour un pattern qui tient des variables de la question, les réponses avec ces valeurs ; pour un pattern à
@@ -410,7 +413,9 @@ l'intérieur d'un `Not` ou d'une alternative dont toutes les variables lui sont 
 items atteignent à partir du fait (une facture payée : son client). Pour chacun de ces ensembles de valeurs, on répond
 de nouveau à la question avec ces valeurs fixées, avant et après la frame, et la différence est le changement. Ainsi
 un fait ajouté sous un `Not` retire les lignes qu'il exclut maintenant, un fait retiré peut rendre des lignes, une
-alternative est lue avec celles d'avant elle, et `In` et `Prefix` filtrent les valeurs que donne le fait. Le coût
+alternative est lue avec celles d'avant elle, `In`, `Prefix` et `Less` filtrent les valeurs que donne le fait, et une
+valeur ajoutée sous un `Optional` retire la ligne où elle manquait et donne la sienne (une valeur retirée, l'inverse).
+Le coût
 d'une frame est celui des réponses qu'elle touche, pas celui de toute la question (un fait qu'aucune variable de la
 question n'atteint, comme sous un `Not` sur toute une propriété, redemande toute la question).
 
@@ -468,11 +473,12 @@ Ok([{Invoice: 65540, Total: 10.0}])
   nombres, les dates et Money comme des nombres ; `false` avant `true` ; les liens par leur id, l'ordre dans lequel
   les choses ont été créées ; les textes par leurs octets (UTF-8 : l'ordre de leurs code points, les numéros des
   caractères dans Unicode, si bien que « Z » vient avant « a » et « é » après « z », pas l'ordre d'une langue) ; les
-  floats par le totalOrder d'IEEE 754.
+  floats par le totalOrder d'IEEE 754. Un champ qu'un `Optional` a laissé `missing` vient après toute valeur, dans les
+  deux sens, là où PostgreSQL met ses NULL en premier dans un ordre décroissant ([plus bas](#less-lessorequal-et-optional)).
 - `Limit: k` : les k premières lignes, et les copies de la k-ième quand `Give` laisse de côté une variable (une page ne
   sépare jamais des lignes identiques). Sans `Sort`, k lignes de la réponse, dans l'ordre du moteur.
 - `After: row` : les lignes qui viennent après cette ligne dans l'ordre : la page suivante. Il demande `Sort`, et une
-  valeur pour chaque champ de `Give` ; la ligne n'a pas besoin d'être encore dans la base.
+  valeur pour chaque champ de `Give` (ou `missing` pour celui d'un `Optional`) ; la ligne n'a pas besoin d'être encore dans la base.
 
 **La page précédente** est la même question avec chaque clé inversée (`Desc` ajouté ou retiré) et `After` la première
 ligne de la page courante ; inversez ses lignes (`list.Reverse`). Il n'y a pas d'offset (« sauter les 4 000
@@ -511,6 +517,91 @@ ligne après laquelle commence la page).
 ([plus bas](#sort-et-limit-dans-un-watch)) ; il refuse `After`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que
 `Where`, `Give`, `Sort`, `Limit` et `After` : un `After` mal écrit donnerait sinon la première page encore et encore
 (une question sans elles est lue comme avant, ses autres clés laissées de côté).
+
+## Less, LessOrEqual et Optional
+
+Deux variables comparées entre elles, des intervalles de floats, et une valeur qu'une chose peut ne pas avoir :
+
+```cesia norun
+Loan = cepheus.Kind("loan", {Client: cepheus.Link(), Rate: cepheus.Float(), Due: cepheus.Date(), PaidAt: cepheus.Date()})
+(* a fork, so that what this example writes stays out of db *)
+loans = result.Unwrap(cepheus.Fork(db, [Loan]))
+for l in [{Client: ada, Rate: 2.5, Due: 1794268800, PaidAt: 1794268800}, {Client: bo, Rate: 3.1, Due: 1794268800, PaidAt: 1794441600}, {Client: ada, Rate: 2.99, Due: 1794355200}]
+  result.Unwrap(cepheus.Insert(Loan, l, loans))
+end
+late = cepheus.Find(5, (l, c, n, d, p) -> {
+  Where: [[l, Loan.Client, c], [c, Client.Name, n], [l, Loan.Due, d], [l, Loan.PaidAt, p], cepheus.Less(d, p)],
+  Give: {Name: n, Due: d, Paid: p},
+}, loans)
+io.Print(late)
+io.Print(cepheus.Find(2, (l, r) -> {Where: [[l, Loan.Rate, r], cepheus.Between(r, 2.5, 3.0)], Give: {Rate: r}, Sort: [r]}, loans))
+emails = cepheus.Find(3, (c, n, e) -> {
+  Where: [[c, Client.Name, n], cepheus.Optional([c, Client.Email, e])],
+  Give: {Name: n, Email: e},
+  Sort: [e],
+}, db)
+io.Print(emails)
+```
+
+```text
+Ok([{Name: "Bo Lind", Due: 1794268800.0, Paid: 1794441600.0}])
+Ok([{Rate: 2.5}, {Rate: 2.99}])
+Ok([{Name: "Ada Martin", Email: "ada@example.com"}, {Name: "Bo Lind", Email: "bo@example.com"}, {Name: "Cy", Email: missing}])
+```
+
+La première question est « les prêts remboursés après leur échéance » : le premier prêt d'Ada a été payé le jour même,
+son second n'est pas encore payé (il n'a pas de `PaidAt`, donc pas de ligne). La dernière est le `LEFT JOIN` de SQL (un
+join qui garde chaque ligne du côté gauche, même sans rien en face) : chaque client, avec un e-mail ou sans.
+
+- `cepheus.Less(x, y)` garde $x < y$, `cepheus.LessOrEqual(x, y)` $x \le y$ : deux variables d'un même type, chacune
+  donnée par un pattern de la question (ou propres au `Not`, dans un `Not`). Les ints, floats, dates, money, textes et
+  links se comparent comme `Sort` les range : les textes par leurs octets, les floats dans le totalOrder d'IEEE 754,
+  les links par leur id (l'ordre dans lequel les choses ont été créées) ; un bool, ou deux types, est refusé
+  (`invalid`). Il va en haut de `Where`, dans un `Not` et dans une alternative d'`Or`. Une variable contre une
+  constante, c'est `Above` ou `Below` ; `Less(x, x)` ne garde rien et `LessOrEqual(x, x)` garde tout.
+- `Above`, `Below` et `Between` prennent aussi une variable Float : ses valeurs dans le totalOrder, l'ordre de `Sort`
+  ($-0$ avant $0$, donc `Below(r, 0)` garde $-0$ ; NaN après $+\infty$). `Above` et `Below` sont stricts : la borne
+  elle-même est dehors.
+- `cepheus.Optional([thing, property, v])` : pour chaque réponse du reste de `Where`, une ligne pour chaque valeur
+  que la chose a de la propriété, ou une ligne où v est `missing` (absent) quand elle n'en a pas. La chose est une
+  variable qu'un pattern de `Where` lie (ou l'id d'une chose) ; v est une variable dans aucun autre élément de la
+  question ; `Optional` va en haut de `Where`, pas dans un `Not` ni dans un `Or`. Une propriété à plusieurs valeurs
+  (`many`) donne une ligne par valeur, comme un `LEFT JOIN` ; deux `Optional` se multiplient leurs lignes. La map d'une
+  ligne tient `missing` pour v, comme `Get` pour un champ sans valeur.
+- **missing dans un ordre.** `Sort` met une valeur absente après toute valeur, en ordre croissant comme décroissant
+  (PostgreSQL met par défaut ses NULL en dernier en croissant et en premier en décroissant : ici une page des plus
+  grands d'abord ne commence jamais par les lignes qui n'ont pas la valeur). `After` prend une ligne dont le champ est
+  absent : la page suivante continue parmi ces lignes.
+- **missing dans un groupe.** `Count()` compte les lignes, celles où v est absent aussi, et v comme clé de `Give` fait
+  un groupe des lignes absentes. `Sum`, `Min` et `Max` de v sont refusés (`invalid`) : donnez ses valeurs, ou comptez
+  les lignes.
+- La question inverse, « les clients sans e-mail », c'est `cepheus.Not([c, Client.Email, e])` ([Not, Or et
+  In](#not-or-et-in)) ; le client d'une facture qui peut ne pas en avoir est une question à partir des factures (le
+  lien va de la facture vers son client) : `Optional` lit une propriété d'une chose, pas les choses qui pointent vers
+  elle.
+
+**Comment on y répond.** `Less` lie la variable que le join atteint en second à partir de la valeur de la première :
+pour les ints, les dates, money et les links, dont l'index garde les valeurs dans l'ordre, les candidats de la seconde
+variable sont alors un range de l'index trié, une recherche (seek) jusqu'à la première valeur après l'autre et une
+lecture à partir de là, pas un parcours de toutes les valeurs (l'inequality join, la jointure d'inégalité, de
+[Khayyat 2015](references.md#les-joins)) ; le mot d'index d'un texte ou d'un float est un numéro du dictionnaire, dans
+aucun ordre de valeurs, donc chaque candidat est vérifié (ses octets, son totalOrder). Le planner compte un tiers des
+valeurs distinctes de la propriété pour le côté borné, la part que le planner de Selinger donne à un range ouvert
+([Selinger 1979](references.md#les-joins)), si bien qu'un pattern lié vient en premier et que l'autre côté est
+recherché. Deux grands ensembles que rien d'autre ne joint sont un produit cartésien : $n^2/2$ paires gardées de $n$
+valeurs de chaque côté ; une telle question s'arrête à son temps et, au serveur, à son budget de travail
+([limites](limits.md#les-questions)), comme tout produit cartésien.
+`Optional` est lié en dernier, après le join et ses `Not` : chaque ligne du reste cherche les valeurs de la propriété
+de la chose, une recherche dans l'index, comme `Get` lit un champ. C'est l'`OPTIONAL` de SPARQL pour un pattern, dont
+[Pérez, Arenas et Gutierrez (2009)](references.md#les-joins) ont fixé le sens. Sa variable n'est dans aucun autre
+élément parce que, avec une variable qu'une autre partie C a aussi, « A, puis B s'il peut, puis C » et « A et C, puis
+B s'il peut » donnent des lignes différentes (une ligne où B a donné à la variable une valeur que C refuse ensuite est
+perdue dans l'une et gardée avec B absent dans l'autre) ; leurs patterns *well-designed* (bien construits) sont ceux
+où les deux s'accordent. Les éléments de `Where` n'ont pas d'ordre, donc une telle question n'aurait pas un seul sens :
+elle est refusée.
+
+Ce qu'ils coûtent à côté de PostgreSQL, sur les données des benchmarks : [benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-million-de-faits)
+(`Optional` coûte ce que coûte le join ; `Less` ce que coûte le filtre des lignes dans le programme).
 
 ## Watch : les questions vivantes
 

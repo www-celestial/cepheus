@@ -13,6 +13,11 @@ exacte.
   production : des listes par pages, une recherche pendant la frappe, un tableau de bord en direct, des utilisateurs
   dont un comptable avec un token qui ne lit que les factures, une règle et une contrainte, l'export CSV, des tests
   dans Firefox, et la vitesse de chaque page.
+- [Tutoriels](tutorials.md) : des problèmes d'entreprise résolus pas à pas, PostgreSQL à côté : des numéros de
+  facture sans trou, une file de jobs où chaque job est pris une seule fois, des données de test qui ne laissent rien,
+  des pages qui ne sautent jamais une ligne, les clients sans facture cette année, `In` et `Or`, un stock qui ne
+  descend jamais sous zéro, les factures payées en retard et des ranges de floats, les clients avec leur téléphone
+  s'ils en ont un.
 
 **Apprendre**
 1. [Concepts](concepts.md) : les faits et le modèle entity–attribute–value, le schéma, les groupes (les transactions),

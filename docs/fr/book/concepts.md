@@ -216,7 +216,10 @@ des **variables**, numérotées à partir de 0. La réponse est chaque **binding
 fait de chaque pattern un fait de la vue, chaque binding une seule fois (G11). Une variable à la place d'une chose est
 un lien ; le type d'une variable vient des propriétés avec lesquelles elle apparaît. `ranges` restreint à
 `lo <= x <= hi` une variable dont les valeurs sont des nombres (un entier, une date, un montant, un booléen vu comme 0
-et 1, un lien vu comme son numéro de chose).
+et 1, un lien vu comme son numéro de chose, un float dans le totalOrder de IEEE 754). À côté de ses patterns, une
+question peut tenir des conditions (`Not`, `Or`, `In`, `Prefix`, `Less` entre deux variables) et des patterns
+`Optional`, dont la variable est **missing** (absente) dans une ligne où la chose n'a pas de valeur de la propriété,
+comme le `LEFT JOIN` de SQL donne un NULL ([Cepheus depuis Cesia](cesia.md#less-lessorequal-et-optional)).
 
 Répondre à une telle question, c'est faire le **join** des patterns (la jointure) : faire correspondre leurs variables
 communes. Cepheus utilise un seul algorithme de join, **Generic Join**, qui lie une variable à la fois et, pour

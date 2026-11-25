@@ -446,7 +446,8 @@ Ok([{Invoice: 65540, Total: 10.0}])
   row. Values compare within their type: numbers, dates and money as numbers; `false` before `true`; links by their
   id, the order the things were made in; texts by their bytes (UTF-8: the order of their code points, so "Z" comes
   before "a" and "é" after "z", not a language's order); floats by IEEE 754's totalOrder. A field an `Optional`
-  left `missing` comes after every value, in both directions ([below](#less-lessorequal-and-optional)).
+  left `missing` comes after every value, in both directions, where PostgreSQL puts its NULLs first in a descending
+  order ([below](#less-lessorequal-and-optional)).
 - `Limit: k`: the first k rows, and the copies of the k-th when `Give` leaves out a variable (a page never splits
   identical rows). Without `Sort`, k rows of the answer, in the engine's order.
 - `After: row`: the rows that come after this row in the order: the next page. It needs `Sort`, and a value for

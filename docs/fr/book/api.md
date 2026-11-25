@@ -412,7 +412,9 @@ Une question a `vars` variables, numérotées de 0 à `vars - 1`, et des pattern
 sont une variable, une chose (`Thing n`) ou une valeur (`Val x`) ; la propriété est toujours une constante. Une
 variable à la place d'une chose est un lien ; le type d'une variable est le type des propriétés avec lesquelles elle
 apparaît, et doit être un seul type. Les `ranges` gardent `lo <= x <= hi` pour une variable d'un type dont le mot
-d'index est la valeur (int, date, money, bool, link) ; plusieurs intervalles sur une même variable s'intersectent.
+d'index est la valeur (int, date, money, bool, link), lus dans l'index trié, ou d'un float, ses bornes des floats et
+chaque candidat vérifié dans le totalOrder de IEEE 754 (l'ordre de `sort` : `-0.` avant `0.`, NaN après l'infini) ;
+plusieurs intervalles sur une même variable s'intersectent.
 
 `find v q` rend chaque binding (une valeur pour chaque variable) qui fait de chaque pattern un fait de la vue, chacun une
 fois (G11), comme des tableaux indexés par variable ; leur ordre n'est pas spécifié. Une constante que la vue n'a jamais
@@ -445,7 +447,8 @@ une variable hors de la question ou une question que `fold` refuse, et `Unreadab
 être lue.
 
 Erreurs des deux : `Invalid` (une propriété inconnue, une variable hors des bornes, dans aucun pattern ou de deux types,
-une constante du mauvais type, un intervalle sur une variable texte ou flottante) et `Damaged` (une page qui ne peut pas
+une constante du mauvais type, un intervalle sur une variable texte, l'intervalle d'un float avec des bornes d'un autre
+type) et `Damaged` (une page qui ne peut pas
 être lue ou ne se vérifie pas).
 
 ```ocaml
@@ -517,6 +520,7 @@ Comment on répond à une question, et ce que cela coûte : [architecture](archi
 module Question : sig
   type item = Pattern of pattern | Range of int * value * value | In of int * value list | Prefix of int * string
             | Not of item list | Or of item list list
+            | Less of int * int | Less_or_equal of int * int | Optional of pattern
   type key = { col : int; desc : bool }
   type t = { vars : int; items : item list; give : int array; sort : key list; limit : int; after : value array option }
 end
@@ -525,10 +529,17 @@ val ask : ?timeout:float -> view -> Question.t -> (value array list, error) resu
 
 Ses noms sont dans le module `Question`, pour que `open Cepheus` n'apporte que `Question` et `ask` à côté des noms
 qu'il apportait déjà (le `Not` ou le `Pattern` propre d'un programme reste le sien) ; `Question.[ ... ]` l'ouvre pour
-une liste d'items. `ask v q` répond à une question qui a `Not`, `Or`, `In` et `Prefix` à côté de ses patterns et de ses
-intervalles, et rend ses lignes triées, coupées et découpées en pages : le même sens et les mêmes bornes que depuis
-Cesia ([Not, Or et In](cesia.md#not-or-et-in), [Prefix](cesia.md#prefix--le-début-dun-texte),
-[pages](cesia.md#sort-limit-et-after--des-pages)). `give` nomme les variables de chaque ligne (vide : chaque variable de la
+une liste d'items. `ask v q` répond à une question qui a `Not`, `Or`, `In`, `Prefix`, `Less`, `Less_or_equal` et
+`Optional` à côté de ses patterns et de ses intervalles, et rend ses lignes triées, coupées et découpées en pages : le
+même sens et les mêmes bornes que depuis Cesia ([Not, Or et In](cesia.md#not-or-et-in),
+[Prefix](cesia.md#prefix--le-début-dun-texte), [pages](cesia.md#sort-limit-et-after--des-pages),
+[Less et Optional](cesia.md#less-lessorequal-et-optional)). `Less (x, y)` garde $x < y$ et `Less_or_equal (x, y)`
+$x \le y$, deux variables d'un même type (pas des bools), dans l'ordre de `sort`. `Optional p` donne, pour chaque
+ligne des autres éléments, une ligne pour chaque valeur de `p` (sa chose une variable qu'un pattern lie, ou un
+`Thing` ; sa valeur une variable dans aucun autre élément), ou une ligne dont la cellule est `Value.missing`
+(`Link min_int`, un id qu'aucune chose n'a : une valeur des lignes seulement, jamais d'un fait ; `Value.is_missing` la
+reconnaît) ; une cellule absente se range après toute valeur, dans les deux sens, et une ligne `after` peut la tenir.
+`give` nomme les variables de chaque ligne (vide : chaque variable de la
 question) ; le `col` d'une clé est une colonne de `give` ; `limit` 0 rend toutes les lignes ; `after` est une ligne des
 colonnes de `give`. `find` et `query` ne changent pas : une question de patterns et d'intervalles, avec chaque
 variable donnée, a les lignes que rend `find`.
@@ -556,6 +567,41 @@ let () =
 ```output
 "Ada"
 "Abel"
+```
+
+`Less` et `Optional` : les factures payées après leur échéance, et chaque client avec son téléphone ou sans :
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; phone; due; paid ]) =
+    declare db [ prop "client/name" Ttext; prop "client/phone" Ttext; prop "invoice/due" Tdate; prop "invoice/paid" Tdate ]
+  in
+  ignore (write db [ Add (-1, name, Text "Ada"); Add (-1, phone, Text "0601"); Add (-2, name, Text "Bo") ]);
+  ignore (write db [ Add (-1, due, Date 1000); Add (-1, paid, Date 2000); Add (-2, due, Date 3000); Add (-2, paid, Date 3000) ]);
+  let v = view db in
+  let show = function
+    | Ok rows -> List.iter (fun r -> print_endline (String.concat " " (Array.to_list (Array.map Value.to_string r)))) rows
+    | Error e -> print_endline (message e)
+  in
+  show
+    (ask v
+       { Question.vars = 3;
+         items = Question.[ Pattern { e = Var 0; p = due; v = Var 1 }; Pattern { e = Var 0; p = paid; v = Var 2 }; Less (1, 2) ];
+         give = [| 0 |]; sort = []; limit = 0; after = None });
+  show
+    (ask v
+       { Question.vars = 3;
+         items = Question.[ Pattern { e = Var 0; p = name; v = Var 1 }; Optional { e = Var 0; p = phone; v = Var 2 } ];
+         give = [| 1; 2 |]; sort = [ { Question.col = 1; desc = false } ]; limit = 0; after = None })
+```
+
+```output
+#65538
+"Ada" "0601"
+"Bo" missing
 ```
 
 ## Le cache

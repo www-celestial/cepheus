@@ -326,6 +326,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **idle timeout** — le temps pendant lequel une connexion peut rester sans une requête entière avant que le serveur la
   ferme (`idle_timeout`, 600 s par défaut) ; avant son Hello, 10 s au plus, son handshake TLS compris.
   [serveur](server.md#clustertoml)
+- **inequality join** (une jointure d'inégalité) — un join sur $<$ ou $\le$ entre deux variables plutôt que sur
+  l'égalité : les factures payées après leur échéance. Lu dans des valeurs triées plutôt que comme un produit
+  cartésien suivi d'un filtre (Khayyat et al. 2015) : `Less`. [Cesia](cesia.md#less-lessorequal-et-optional)
 - **index word** — la forme sur 64 bits d'une valeur dans les index : la valeur elle-même, ou un numéro du dictionnaire
   pour les textes et les floats ; ce que donne `fold`, et que `decode` change de nouveau en valeur.
   [api](api.md#questions)
@@ -349,6 +352,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **kind** (client Cesia) — une sorte de chose dans un programme Cesia : un nom et des champs, chacun une propriété d'un
   type (`client/City` pour le champ `City` du kind `client`) ; `Insert` et `Get` écrivent et lisent les champs d'une
   chose pour un kind sous la forme d'une map. [Cesia](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)
+- **LEFT JOIN** (left outer join) — le join de SQL qui garde chaque ligne de son côté gauche même quand le côté
+  droit n'a rien pour elle, les colonnes du côté droit étant alors NULL ; l'`Optional` de Cepheus, dont la cellule est
+  alors `missing`. [Cesia](cesia.md#less-lessorequal-et-optional)
 - **leader**, **follower** — dans un cluster Raft, le seul serveur d'un term qui prend les écritures et sert les
   lectures, et les autres, qui stockent ses entrées et votent. [serveur](server.md#un-cluster-de-trois-raft)
 - **lagging** (« en retard ») — la fin d'un watch dont le programme a pris trop de retard (8 MiB de pushes qu'il n'a
@@ -407,6 +413,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [architecture](architecture.md#les-merges--un-log-structured-merge-tree-à-leveling)
 - **model checking** — visiter chaque état atteignable d'un modèle borné et vérifier des invariants dans chacun ; TLC
   le fait pour TLA+. [tester](testing.md#model-checking)
+- **missing** (une cellule absente) — la cellule d'une ligne où un `Optional` n'a pas trouvé de valeur : `missing` en
+  Cesia, `Value.missing` en OCaml, rangée après toute valeur dans les deux sens. [Cesia](cesia.md#less-lessorequal-et-optional)
 - **monotone sequence** (une suite monotone) — des nombres qui ne décroissent jamais (des offsets), rangés par blocs de
   128 sous forme de frame of reference avec l'en-tête de chaque bloc à part, pour que l'entrée q soit un en-tête et un
   champ. [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
@@ -425,6 +433,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   toutes les entrées d'avant le sont aussi. [serveur](server.md#les-élections)
 - **optimistic concurrency control** — lire sans locks, et vérifier à la fin que ce qui a été lu est toujours vrai
   (Kung et Robinson 1981) : `Expect`.
+- **Optional** — un pattern d'une question qui peut n'avoir aucun fait : l'`OPTIONAL` de SPARQL et le `LEFT JOIN` de
+  SQL sur une propriété. [Cesia](cesia.md#less-lessorequal-et-optional)
 - **OWL 2 RL** — la partie d'OWL 2, le langage d'ontologies du W3C (une ontologie : les classes et les propriétés
   d'un domaine, et leurs axiomes), que des règles calculent entièrement : 78 règles en six tables (OWL 2 Profiles,
   section 4.3) ; dans Cepheus, une bibliothèque de règles, `Cepheus.Owl`. [règles](rules.md#owl-2-rl-une-bibliothèque-de-règles)
@@ -644,6 +654,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   `cepheus token add`, montré une seule fois. [serveur](server.md#les-tokens)
 - **torn write** — une écriture que le disque faisait quand le courant a été coupé, dont une partie seulement est
   arrivée ; la recovery la coupe.
+- **totalOrder** — l'ordre que IEEE 754 (2019, section 5.10) donne à chaque float, $-0$ avant $+0$ et NaN après
+  $+\infty$ : l'ordre de `Sort`, des intervalles et de `Less` sur des floats. [Cesia](cesia.md#sort-limit-et-after--des-pages)
 - **trailer** — les 16 derniers octets d'une frame, qui répètent sa longueur et ses CRC : un signe que la frame a été
   écrite entière.
 - **transaction** — une unité de travail appliquée entièrement ou pas du tout ; le groupe de Cepheus.

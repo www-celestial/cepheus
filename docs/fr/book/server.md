@@ -484,10 +484,10 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | corps de la requête | corps de la réponse |
 |---|---|---|
-| 1 Hello | la version en varint (1 à 6), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
+| 1 Hello | la version en varint (1 à 7), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
 | 2 Open | le nom de la base | Opened : le handle (le numéro de la base ouverte sur cette connexion), le groupe le plus récent, les propriétés (id, nom, code du type, many, unique) ; au-delà de la limite des frames, en frames d'environ 1 MiB de propriétés, toutes sauf la dernière avec `more`, chacune avec son handle, son groupe et son nombre |
 | 3 Get | handle, chose | Facts : le groupe de la vue, le nombre, (propriété, valeur)... ; au-delà de la limite des frames, en frames d'environ 1 MiB de faits, toutes sauf la dernière avec `more`, chacune avec son groupe et son nombre |
-| 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) ; puis, depuis la version 6 et seulement quand le programme en donne un, le temps de la question en millisecondes (de 1 à une semaine ; l'ordre est alors envoyé, vide s'il le faut) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more` ; un Give sans Sort qui dépasse les cellules que le serveur tient, lignes fois colonnes, est envoyé à mesure que ses lignes sont trouvées, aucune n'est tenue) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne |
+| 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte, 6 Less : deux variables, 7 LessOrEqual : deux variables, 8 Optional : un pattern, depuis la version 7), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) ; puis, depuis la version 6 et seulement quand le programme en donne un, le temps de la question en millisecondes (de 1 à une semaine ; l'ordre est alors envoyé, vide s'il le faut) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more` ; un Give sans Sort qui dépasse les cellules que le serveur tient, lignes fois colonnes, est envoyé à mesure que ses lignes sont trouvées, aucune n'est tenue) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne ; une cellule qu'un Optional a laissée sans valeur est le link $-2^{62}$, qu'aucune chose n'a (une valeur des lignes seulement) |
 | 5 Write | handle, serial, floor, by (zigzag), why, nombre, opérations | Receipt : le groupe, le nombre, (id temporaire de la nouvelle chose, son id)... |
 | 6 Ping | des octets quelconques | Pong : les mêmes octets |
 | 7 Admin | "status" | Status : le nombre, (clé, valeur)... |
@@ -514,7 +514,11 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   `Group ([k...], [a...])` donne une ligne par clé distincte : les variables de la clé, puis les agrégats `Count`,
   `Sum x` (int, money), `Min x`, `Max x` (int, money, date), calculés dans le serveur sans construire les réponses (Q4
   plus bas : 100 lignes au lieu de 45 064).
-- **Les versions.** La version 6 ajoute le temps d'une question (celui d'un Find, de la première réponse d'un Watch)
+- **Les versions.** La version 7 ajoute les opérateurs Less, LessOrEqual et Optional (les tags 6 à 8) et rien
+  d'autre : un programme de version 7 se connecte à un serveur de 6 en 6, et une question avec l'un d'eux est refusée
+  dans le programme (`invalid` : « this server speaks protocol 6: Less, LessOrEqual and Optional need a server of
+  protocol 7 ») avant d'être envoyée, puisqu'un serveur plus ancien refuse un opérateur qu'il ne connaît pas ; une
+  question sans eux est codée comme avant. La version 6 ajoute le temps d'une question (celui d'un Find, de la première réponse d'un Watch)
   et rien d'autre : un programme de version 6 se connecte à un serveur de 5 en 5, et une question avec un `timeout`
   est refusée dans le programme (`invalid` : « this server speaks protocol 5: a question's timeout needs a server of
   protocol 6 ») avant d'être envoyée, puisqu'un serveur plus ancien refuse les octets après la question ; le
@@ -528,7 +532,7 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   fichiers (Put, Piece, Load, Erase) et rien d'autre : un programme de version 3 se connecte à un serveur de 2 en 2
   (comme plus bas), et un fichier est refusé dans le programme (`invalid` : « this server speaks protocol 2 or older:
   files need a server of protocol 3 »). La version 2 ajoute les opérateurs et l'ordre de la question (plus bas) et rien
-  d'autre ; un serveur parle les versions 1 à 6, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
+  d'autre ; un serveur parle les versions 1 à 7, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
   dans Hello ; un serveur de version 1 se contente de la refuser (`version`) et ferme, et la bibliothèque se reconnecte
   en 1 : ses questions de patterns et de ranges reçoivent leur réponse comme avant, et une question avec `Not`, `Or`,
   `In`, `Prefix`, Sort, Limit ou After est refusée dans le programme (`invalid` : « this server speaks protocol 1: ...

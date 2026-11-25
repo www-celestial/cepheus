@@ -153,7 +153,20 @@ Depuis `find` et `fold` (la question est mal formée) :
 | `variable X is both a T and a U` | X apparaît avec deux propriétés de types différents (une place de chose est un `link`) |
 | `variable X appears in no pattern` | une variable sous `vars` qu'aucun pattern n'utilise |
 | `V is not a T` | une valeur constante du mauvais type pour sa propriété |
-| `a range needs an int, date or money variable` | un intervalle sur une variable texte ou flottante, ou sur une variable hors de 0 à `vars - 1` (les intervalles acceptent aussi les variables bool et link) |
+| `a range needs an int, float, date or money variable` | un intervalle sur une variable texte, ou sur une variable hors de 0 à `vars - 1` (les intervalles acceptent aussi les variables bool et link) |
+| `a range of a float variable has float bounds, not V and W` | un intervalle sur une variable float dont les bornes ne sont pas des floats |
+
+De `ask`, à côté de ceux-là (`Less`, `Less_or_equal`, `Optional`) :
+
+| message | quand |
+|---|---|
+| `Less compares two variables of one type, not a T and a U`; `Less compares ints, floats, dates, money, texts and links, not bools` | `Less` ou `Less_or_equal` entre deux types, ou sur des bools |
+| `variable N of a condition appears in no pattern` | une variable de `Less` (ou d'un intervalle, de `In`, de `Prefix`) qu'aucun pattern ne lie |
+| `the thing of Optional is a variable that a pattern of the question binds, or a thing's id` | un `Optional` dont la chose est une valeur, ou une variable qu'aucun pattern ne lie (la valeur d'un autre `Optional` comprise) |
+| `the value of Optional is a variable`; `the value of Optional is a variable in no other item of the question: variable N is in M` | un `Optional` dont la valeur est une constante, ou une variable qu'un autre élément utilise |
+| `the value of Optional is one of the question's first 62 variables, not N`; `a question with Optional gives at most 62 columns, not N` | les bits d'un `int` tiennent les cellules absentes |
+| `Not takes patterns and conditions: no Not, Or or Optional inside it`; `an alternative of Or takes patterns and conditions: no Not, Or or Optional inside it` | un `Optional` (ou un `Not`, un `Or`) dans un `Not` ou une alternative |
+| `Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows` | un agrégat de la variable d'un `Optional` (`Count` compte ses lignes) |
 
 ### Les templates et l'égalité
 
@@ -333,7 +346,10 @@ valeur `result.Err({Kind: "cepheus", Code, Message})`, avec les codes en minuscu
 | `invalid` | `P is a T in this database, not a U` | la base déclare la propriété avec un autre type | le kind doit correspondre au schéma de la base |
 | `invalid` | `Insert needs at least one field of K`, `Update needs at least one field of K`, `Update needs the id of a thing, not N`, `a group needs at least one operation` | une écriture vide | écrire quelque chose |
 | `invalid` | `P holds several values: change them with Write, Add and Retract` | un Update d'un champ à plusieurs valeurs | `cepheus.Write` avec `Add` et `Retract` |
-| `invalid` | `Above, Below and Between are for ints, dates and money, not a T`; `a variable of Above, Below or Between appears in no pattern` | un intervalle sur un autre type, ou sur une variable d'aucun pattern | filtrer les lignes en Cesia (`list.Filter`) |
+| `invalid` | `Above, Below and Between are for ints, floats, dates and money, not a T`; `a variable of Above, Below or Between appears in no pattern` | un intervalle sur un autre type, ou sur une variable d'aucun pattern | filtrer les lignes en Cesia (`list.Filter`) |
+| `invalid` | `Less compares two variables of one type, not a T and a U`; `Less compares ints, floats, dates, money, texts and links, not bools` | `Less` ou `LessOrEqual` entre deux types, ou sur des bools (une constante dedans est une erreur du programme, comme tout argument de la mauvaise sorte : l'erreur de Cesia elle-même) | comparer deux variables d'un même type ; une variable et une constante avec `Above` ou `Below` |
+| `invalid` | `Optional is at the top of Where: no Optional inside Not or Or`; `the thing of Optional is a variable that a pattern of the question binds, or a thing's id`; `the value of Optional is a variable in no other item of the question: variable N is in M` | un `Optional` dans un `Not` ou un `Or`, sans pattern, d'une chose qu'aucun pattern ne lie, ou dont la variable sert à un autre élément ([Less et Optional](cesia.md#less-lessorequal-et-optional)) | lier sa chose par un pattern ; donner à sa valeur une variable à elle |
+| `invalid` | `Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows` | un agrégat de la variable d'un `Optional` | `Count()`, ou donner ses valeurs |
 | `invalid` | `Sort's keys are fields of Give: a variable or an aggregate that Give gives` | une clé de Sort que Give ne donne pas | l'ajouter à Give (After est une ligne : elle contient chaque clé) |
 | `invalid` | `After needs Sort: the rows after a row, in an order`; `After needs every field of Give: F is missing`; `After's N needs a T, not V` | un curseur sans ordre, ou qui n'est pas une ligne entière de Give | donner Sort, et une ligne d'une réponse précédente |
 | `invalid` | `Not takes 1 to 4 patterns or conditions, not N`; `Or takes 2 to 4 alternatives, not N`; `And takes 1 to 4 patterns or conditions, not N`; `Not takes patterns and conditions: no Not or Or inside it`; `Or takes patterns, conditions and And: no Not or Or inside it`; `And is for an alternative of Or: Where is already all of its items` | la forme de Not, Or et And | nommer une condition plus profonde par une règle, comme un fait dérivé |
@@ -343,6 +359,7 @@ valeur `result.Err({Kind: "cepheus", Code, Message})`, avec les codes en minuscu
 | `invalid` | `this server speaks protocol 1: Not, Or, In, Prefix, Sort, Limit and After need a server of protocol 2` | une question qui les utilise, sur une connexion à un serveur d'une version antérieure | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
 | `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | un groupe avec `cepheus.Incr`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
 | `invalid` | `this server speaks protocol N: a question's timeout needs a server of protocol 6` | `Find` ou `Watch` avec `timeout`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur, ou laisser le temps au `question_timeout` du serveur |
+| `invalid` | `this server speaks protocol N: Less, LessOrEqual and Optional need a server of protocol 7` | `Find` ou `Watch` avec eux, sur une connexion à un serveur d'une version plus ancienne : refusé avant d'être envoyé | mettre le serveur à jour ([les mises à jour](production.md#les-mises-à-jour)) |
 | `timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | la question a dépassé son `timeout`, ou le `question_timeout` du serveur (un temps plus long que celui du serveur ne compte que d'un token admin) : dans la mémoire du programme ou au serveur, pareil | une question plus étroite, ou des pages ; un `timeout` plus long là où le serveur le permet |
 | `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` sur un autre type, un préfixe vide ou trop long | une variable texte que donne un pattern |
 | `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | les bornes d'une question ([limites](limits.md#les-questions)) | demander page par page, découper la liste, ou poser plusieurs questions |

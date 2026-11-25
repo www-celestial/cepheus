@@ -81,7 +81,7 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
 |---|---|
 | `bench.exe load DIR CSVDIR FACTS` | charge FACTS faits par le writer : `GROUP` clients par groupe (un groupe est une écriture appliquée tout entière ou pas du tout ; 1 client par défaut : un client et ses 20 factures forment un groupe, puis les liens follow d'un client un autre groupe, envoyés par `THREADS` threads, 64 par défaut ; `GROUP=113636` à 10 M de faits : deux grands groupes, par 1 thread), chronomètre jusqu'à la confirmation du dernier groupe, puis fait un seul merge (`snapshot` ; `SNAPSHOT=0` : aucun, les runs restent tels que le chargement les a faits), et écrit les mêmes données en fichiers CSV pour les autres côtés (`NOCSV=1` : pas de CSV). Elle affiche les histogrammes du writer (un batch résolu ; un grand groupe résolu, encodé, fusionné ; un switch de merge ; un merge en arrière-plan ; le pwrite et le fsync du journal) |
 | `bench.exe read DIR FACTS [Q1,Q4,..]` | l'ouverture (le redémarrage depuis le snapshot), puis Q1 à Q5 ou celles qu'on nomme : médiane et intervalle à 95 % sur `RUNS` exécutions |
-| `bench.exe pages DIR FACTS` | les questions avec des opérateurs et un ordre : une page de 20 des factures impayées, les plus gros totaux d'abord, par le chemin de l'index (qui lit l'index des totaux du plus grand vers le bas) et par le chemin du heap (qui répond à toute la question et garde les 20 meilleures lignes dans un heap, un tas), la première page et la 101e, contre la réponse entière triée par le programme ; `Not` et `Prefix`, chacun contre ce que faisait un programme avant eux |
+| `bench.exe pages DIR FACTS` | les questions avec des opérateurs et un ordre : une page de 20 des factures impayées, les plus gros totaux d'abord, par le chemin de l'index (qui lit l'index des totaux du plus grand vers le bas) et par le chemin du heap (qui répond à toute la question et garde les 20 meilleures lignes dans un heap, un tas), la première page et la 101e, contre la réponse entière triée par le programme ; `Not` et `Prefix`, chacun contre ce que faisait un programme avant eux ; `Less` (une vérification de chaque lien de suivi, et un range de l'index des totaux sous le total d'une facture) et `Optional` (les clients d'une ville, et chaque client, avec les clients que chacun suit), chacun à côté de la question simple |
 | `bench.exe snapshot DIR` | un merge complet d'une base (`snapshot`), chronométré : tous ses runs en un seul |
 | `bench.exe write DIR CLIENTS SECS [RATE]` | des écritures durables (sur le disque même, couvertes par un fsync terminé) d'une nouvelle facture (4 faits) par CLIENTS threads : aussi vite qu'elles vont, ou RATE groupes par seconde en tout (open loop) |
 | `bench.exe merge DIR GROUPS` | GROUPS factures sans merge en arrière-plan, puis un seul merge (`snapshot`) : son temps et le pic de mémoire du merge seul |
@@ -92,7 +92,7 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
 | `bench.exe cpu DIR N` | le travail du writer seul : N groupes de 5 faits dans un fork de la base (une copie temporaire de la base, où l'on écrit sans rien écrire sur le disque) |
 | `bench.exe crc` | CRC-32C seul (un checksum : un court nombre calculé à partir d'octets, qui change s'ils changent) sur 24 octets, 4 KiB, 16 KiB, 1 MiB et 96 MiB, depuis un décalage impair : le temps d'un appel et les MB/s, médiane et intervalle à 95 % sur `RUNS` exécutions |
 | `sbench.exe watches DIR` | un changement sous un watch (une question vivante, que le serveur tient à jour) de `Not`, `Or`, `In` et `Prefix` (un hub chacun, le hub étant le thread qui calcule les questions vivantes d'une base ; les changements faits en mémoire), contre la question à laquelle on répond de nouveau en entier : 21 changements chacun |
-| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop) |
+| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop ; `COUNTER=1` : chaque transaction incrémente une même ligne de compteur partagée), `ops ROOT` (les questions de `bench.exe pages` auxquelles répondent `Less` et `Optional`, avec un index sur `invoice (total)`) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | le côté SQLite, un seul fichier `ROOT/bench.db` : `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | la sauvegarde et la restauration des trois côtés : `cepheus backup`, `verify`, `restore` jusqu'à la fin et jusqu'à un groupe ; `pg_basebackup`, `pg_verifybackup`, une restauration et une restauration à un instant donné ; `.backup`, `integrity_check` et `.restore` de SQLite ; tout l'historique rejoué (`-replay`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | la vente de places du [cas](case-seats.md) : `BUYERS` threads vendent toutes les places d'une salle de SEATS places ; le temps, et ce qui a mal tourné |
@@ -110,6 +110,78 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
+
+## Less, Optional et un compteur partagé (2026-11-25), à 1 million de faits
+
+**Méthode.** Les données des autres sections à 1 M de faits (11 363 clients, 227 260 factures, 56 797 liens de suivi),
+chargées par `bench.exe load` et fusionnées en un seul run ; PostgreSQL 18.6 les mêmes lignes (`pg.sh load`), avec un
+index sur `invoice (total)` que `pg.sh ops` ajoute pour le range plus bas. Les questions : Cepheus `bench.exe pages`
+dans son processus (le moteur, jusqu'à 8 domains, les lignes faites en valeurs OCaml) ; PostgreSQL le temps
+d'exécution de `EXPLAIN (ANALYZE, TIMING OFF)` (son moteur, aucune ligne envoyée ; il a choisi un seul processus pour
+chacune). 5 tours, les deux côtés l'un après l'autre dans chacun, chaque côté une médiane de 5 appels ; donnés : la
+médiane des 5 tours, et entre crochets le plus petit et le plus grand. La machine était partagée avec le travail
+d'autres jobs cette fois : une charge moyenne (load average, sur 1 minute) de 6,2 à 6,5 sur ses 8 threads pendant ces
+tours, donc ce sont les chiffres d'une machine occupée, pour les deux côtés pareil. Les données sur le SSD SATA (btrfs)
+des autres sections.
+
+| question | lignes | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---:|---|
+| les liens de suivi d'un client vers un plus récent, `Less(a, b)` : une vérification de chaque lien | 28 271 | 14,7 ms [14,2, 25,7] | 3,97 ms [3,95, 4,50], un `Seq Scan` avec son `Filter` | PostgreSQL, 3,7 fois |
+| &nbsp;&nbsp;la même, chaque lien donné et filtré par le programme | | 18,1 ms [16,3, 26,9] | | |
+| les factures dont le total est sous celui d'une facture, `Less(t, tx)` : un range de l'index des totaux | 122 962 | 76,2 ms [72,3, 97,6] | 22,0 ms [20,4, 41,0], un `Bitmap Index Scan` sur `total` | PostgreSQL, 3,5 fois |
+| &nbsp;&nbsp;le même range, sa borne lue d'abord (`Below` de ce total) | | 53,5 ms [52,8, 62,8] | | |
+| les 490 clients de city-7 avec les clients que chacun suit, `Optional` | 490 | **0,099 ms** [0,080, 0,163] | 0,554 ms [0,532, 0,784], un `Nested Loop Left Join` | Cepheus, 5,6 fois |
+| &nbsp;&nbsp;la même comme un join | | 0,110 ms [0,096, 0,212] | | |
+| chaque client avec les clients qu'il suit, `Optional` | 56 797 | 29,4 ms [28,7, 33,0] | 16,4 ms [13,4, 30,6], un `Hash Right Join` | PostgreSQL, 1,8 fois |
+| &nbsp;&nbsp;la même comme un join | | 30,2 ms [27,9, 40,9] | | |
+
+- **Les réponses** sont les mêmes des deux côtés (122 962, 490 et 56 797 lignes) sauf pour la première : « a < b »
+  compare des ids, et Cepheus numérote ses choses dans l'ordre où les 64 threads du chargement les ont écrites,
+  PostgreSQL par le numéro du client, donc les paires gardées diffèrent un peu (28 271 contre 28 265 des 56 797
+  liens).
+- **`Optional` coûte ce que coûte le join** (0,099 contre 0,110 ms, 29,4 contre 30,2) : chercher les valeurs de la
+  chose après le join est le travail que le join fait à ce pattern. Ici chaque client suit au moins 4 autres, donc
+  aucune ligne n'est absente : la mesure est celle de la façon du left join, pas des lignes absentes. Sur les clients
+  d'une ville Cepheus est 5,6 fois plus rapide (ses index donnent directement les 490 clients et leurs liens) ; sur
+  chaque client, le hash join de PostgreSQL sur les deux tables, lues entières dans leur ordre, est plus rapide.
+- **`Less` ne coûte pas plus que le filtre du programme lui-même** (14,7 contre 18,1 ms), mais le parcours par
+  PostgreSQL d'une table de deux colonnes, dans un seul processus, lit une ligne en 70 ns là où Cepheus lit l'index des
+  liens fait par fait.
+- **Le range de `Less`** lit les 122 962 totaux sous la borne dans l'index trié, comme le fait le même range avec sa
+  borne lue d'abord, mais sur un seul domain : une question n'est partagée entre domains qu'à son premier niveau, et
+  ce niveau est ici le seul total de la borne : sur un seul domain (`CEPHEUS_DOMAINS=1`, 3 tours à une charge de 2,7 à
+  3,9) les deux prennent le même temps, 61,3 ms contre 60,5. La partager au premier niveau qui a beaucoup de candidats
+  rendrait au range ses 8 domains : ce n'est pas encore construit.
+
+**Un compteur que 64 écrivains incrémentent** (tutoriels [1](tutorials.md#1-des-numéros-de-facture-sans-trou) et
+[7](tutorials.md#7-un-stock-qui-ne-descend-jamais-sous-zéro)) : chaque écriture son propre groupe, forcé sur le disque,
+pendant 5 s ; 5 tours ; la charge moyenne de 5,2 à 6,2. Cepheus : `bench/cesia/write.ce 64 5 counter`, 64 fibers
+d'un programme Cesia sur une seule connexion, chaque groupe un `Incr` d'un même compteur, contre un serveur à lui sur
+le SSD ; à côté, le même programme qui insère une facture de 4 faits par groupe. PostgreSQL : `COUNTER=1 pg.sh write`,
+pgbench avec 64 connexions, chaque transaction `UPDATE counter SET last = last + 1 WHERE id = 1` ; à côté, le même
+pgbench qui insère une ligne de facture.
+
+| 64 écrivains | Cepheus | PostgreSQL 18.6 |
+|---|---:|---:|
+| un compteur que chaque écriture incrémente | **5 890 par seconde** [4 578, 7 939], latence médiane 9,3 ms | 154 par seconde [8, 214], 231 ms |
+| une nouvelle ligne ou chose à chaque écriture, rien de partagé | 6 636 par seconde [5 114, 8 670], 6,9 ms (\*) | 5 387 par seconde [4 392, 6 557], 9,5 ms |
+
+- Le lock de ligne de PostgreSQL tient le compteur jusqu'à ce que le commit de la transaction soit sur le disque,
+  donc ses 64 écrivains passent un fsync à la fois : 35 fois moins d'écritures que quand ils ne partagent rien (un
+  tour est tombé à 8 par seconde, sa latence à 8,2 s : un arrêt du disque sous la charge des autres, gardé dans
+  l'intervalle). Le writer de Cepheus lit le compteur à mesure qu'il applique chaque groupe, et les groupes qui
+  arrivent pendant que le disque travaille partagent son fsync suivant : le compteur va aussi vite que des écritures
+  qui ne partagent rien.
+- (\*) Dans d'autres tours (5, à une charge de 3,1 à 3,4), alternés avec le compteur, qui y a fait 8 632 par seconde
+  [6 298, 8 801] : un groupe du compteur est un fait, une insertion quatre.
+
+**Q1 à Q5 ne sont pas plus lents.** Contre main avant ce travail (6707b9e), construit de la même façon, sur les mêmes
+données, les deux binaires alternés dans chaque tour (`bench.exe read`, 21 passages par question dans chacun), nouveau
+/ ancien par la médiane des rapports des tours : en 5 tours à une charge de 7 à 11, Q1 0,92 [0,62, 1,07], Q2 0,95
+[0,76, 1,16], Q3 1,17 [0,93, 1,68], Q4 1,04 [0,84, 1,28], Q5 0,98 [0,87, 1,17] ; Q3, le plus large, de nouveau seul en
+11 tours à une charge de 2,1 à 2,7 : 1,02 [0,98, 1,06] sur 8 domains (le plus petit de ses passages 274 µs contre
+277), 1,05 [0,90, 1,33] sur un seul. Une question sans les nouvelles conditions fait le test d'un candidat qu'elle
+faisait avant elles : leurs vérifications sont derrière un drapeau qui est faux pour elle.
 
 ## La sauvegarde et la restauration (2026-11-24), à 10 millions de faits
 
