@@ -1044,11 +1044,20 @@ let hand_over t =
     let t0 = now () in
     let target = match t.core.handing with Some (k, _) -> t.names.(k) | None -> "?" in
     log "Raft: handing leadership over to %s before stopping" target;
-    while Mutex.protect t.m (fun () -> t.core.role = Raft.Leader && t.core.handing <> None) && now () - t0 < 2 * !election_ms do Thread.delay 0.002 done;
+    (* when the peer held the whole log (Timeout_now sent from then on): what a slow handover waited for *)
+    let full = ref (-1) in
+    while
+      Mutex.protect t.m (fun () ->
+          (match t.core.handing with
+           | Some (k, _) when !full < 0 && t.core.peers.(k).matched >= Raft.last_index t.core -> full := now () - t0
+           | _ -> ());
+          t.core.role = Raft.Leader && t.core.handing <> None)
+      && now () - t0 < 2 * !election_ms
+    do Thread.delay 0.002 done;
     let ms = now () - t0 in
     Mutex.protect t.m (fun () ->
         if t.core.role = Raft.Leader then log "Raft: the handover did not end within %d ms: stopping as the leader" ms
-        else log "Raft: leadership handed over (term %d) in %d ms" t.core.term ms)
+        else log "Raft: leadership handed over (term %d) in %d ms (%s held the whole log at %d ms)" t.core.term ms target !full)
   end
 
 let stop t =
