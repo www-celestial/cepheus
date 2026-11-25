@@ -1,8 +1,8 @@
 #!/bin/sh
 # The Cesia client against a real server, as a program uses it: a project of its own that holds the package in
 # deps/www-celestial/cepheus (its cesia.toml, its Cesia files and its engine), under the label cepheus, with the
-# cesia.lock that cesia pkg would write. Then: the examples of docs/book/cesia.md and the Cesia ones of
-# docs/book/rules.md (test/cesia-docs.ce: each block with the blocks before it, on a database of its own); the client
+# cesia.lock that cesia pkg would write. Then: the examples of docs/book/cesia.md and docs/book/tutorials.md and
+# the Cesia ones of docs/book/rules.md (test/cesia-docs.ce: each block with the blocks before it, on a database of its own); the client
 # over TLS (OWL 2 RL there too, and a token of one kind) and through the Unix socket with local reads
 # (test/cesia-live.ce); and the server killed with kill -9 and started again while the program writes: every write
 # answered Ok is in the database once.
@@ -17,6 +17,7 @@ B=$root/_build/default/bin/main.exe
 tag=$(cesia run tools/tag.ce)
 n=$(grep -c '^```cesia norun$' docs/book/cesia.md)
 m=$(grep -c '^```cesia norun$' docs/book/rules.md)
+t=$(grep -c '^```cesia norun$' docs/book/tutorials.md)
 port=$((20000 + $$ % 20000))
 
 # the server: one database an example, one for TLS, one for the local reads, one for the restart
@@ -25,7 +26,7 @@ cfg=$tmp/s/cluster.toml
 mkdir -p "$tmp/s/r"
 sed -i "s/127.0.0.1:7400/127.0.0.1:$port/; s/^socket = \"run\"/socket = \"r\"/; /^\[\[database\]\]/,\$d" "$cfg"
 rights=""
-for d in $(seq "$n" | sed 's/^/doc/') $(seq "$m" | sed 's/^/rules/') tls local restart files owl; do
+for d in $(seq "$n" | sed 's/^/doc/') $(seq "$m" | sed 's/^/rules/') $(seq "$t" | sed 's/^/tut/') tls local restart files owl; do
   printf '[[database]]\nname = "%s"\n' "$d" >> "$cfg"
   rights="$rights --database $d=write"
 done
@@ -69,6 +70,7 @@ cesia run --allow read,write "$root/tools/lock.ce"
 
 cesia run --allow read,write,exec,env "$root/test/cesia-docs.ce" "$root/docs/book/cesia.md" "cepheus://localhost:$port/doc" "?socket=$tmp/s/r"
 cesia run --allow read,write,exec,env "$root/test/cesia-docs.ce" "$root/docs/book/rules.md" "cepheus://localhost:$port/rules" "?socket=$tmp/s/r"
+cesia run --allow read,write,exec,env "$root/test/cesia-docs.ce" "$root/docs/book/tutorials.md" "cepheus://localhost:$port/tut" "?socket=$tmp/s/r"
 
 cp "$root/test/cesia-live.ce" src/live.ce
 export CEPHEUS_URL="cepheus://localhost:$port/local?socket=$tmp/s/r" CEPHEUS_TLS="cepheus://127.0.0.1:$port/tls" CEPHEUS_CA="$tmp/s/ca.pem"

@@ -10,6 +10,10 @@ Read in this order to learn Cepheus; jump to the reference pages when you need a
 - [A real app](app.md): invoices and clients in Cesia, step by step from `cesia new` to production: lists in pages,
   search as one types, a live dashboard, users with an accountant's token that reads invoices only, a rule and a
   constraint, CSV export, tests in Firefox, and the speed of every page.
+- [Tutorials](tutorials.md): business problems solved step by step, PostgreSQL beside: invoice numbers with no
+  gap, a job queue where each job is taken once, test data that leaves nothing, pages that never skip a row, clients
+  with no invoice this year, `In` and `Or`, a stock that never goes below zero, invoices paid late and ranges of
+  floats, clients with their phone if they have one.
 
 **Learn**
 1. [Concepts](concepts.md): facts and the entity–attribute–value model, the schema, groups (transactions), views,
