@@ -59,6 +59,9 @@ let contains m s =
   has 0
 let refused f = match f () with _ -> false | exception Ops.Refused _ -> true | exception e -> C.fail "escaped: %s" (Printexc.to_string e); false
 
+(* a command's exit status; an exception it lets escape is a failure, -1, and the checks go on *)
+let code f = match f () with c -> c | exception e -> C.fail "escaped: %s" (Printexc.to_string e); -1
+
 let segs dir = List.sort compare (List.filter (fun n -> Filename.check_suffix n ".seg") (Array.to_list (Sys.readdir (dir // "journal"))))
 
 (* ops_unit.exe --hold DIR: the database in DIR held open (as a server holds it) until stdin closes *)
@@ -237,8 +240,7 @@ let () =
   let now = Unix.time () in
   let planted = List.init 10 (fun i -> dst ^ ".before-restore-" ^ stamp (now +. float i)) in
   List.iter (fun p -> Unix.mkdir p 0o700; Out_channel.with_open_bin (p // "mine") (fun oc -> output_string oc "mine")) planted;
-  let code = try Ops.restore ~target:(Ops.Group 40) ~replace:true d dst with e -> C.fail "escaped: %s" (Printexc.to_string e); -1 in
-  C.check (code = Ops.exit_ok) "the same restore again over it, its aside name taken";
+  C.check (code (fun () -> Ops.restore ~target:(Ops.Group 40) ~replace:true d dst) = Ops.exit_ok) "the same restore again over it, its aside name taken";
   let asides = List.filter (fun n -> contains n "r.before-restore-" && Filename.check_suffix n "-2") (Array.to_list (Sys.readdir root)) in
   C.check (List.length asides = 1 && Sys.file_exists (root // List.hd asides // "journal")) "the database moved aside as ...-2 (%s)" (String.concat " " asides);
   C.check (List.for_all (fun p -> Sys.readdir p = [| "mine" |]) planted) "the folders of the names taken unchanged";
@@ -284,6 +286,7 @@ let () =
   Unix.chmod dest2 0o777;
   C.check (refused (fun () -> Ops.backup cfg dest2)) "a DEST writable by others: refused";
   Unix.chmod dest2 0o700;
+  List.iter (fun n -> C.rmrf (dest2 // n)) (Array.to_list (Sys.readdir dest2));
   Unix.symlink (root // "planted") (dest2 // "cepheus-backup.lock");
   C.check (refused (fun () -> Ops.backup cfg dest2) && not (Sys.file_exists (root // "planted"))) "a lock planted as a link: refused, nothing made through it";
   let b = dest // List.hd dated // "main" in
@@ -334,13 +337,13 @@ let () =
       (Snapshot.list Disk.real (se // "snapshots"))
   in
   C.check (at_seg_end <> [] && List.length (segs se) >= 2) "a run at the end of a segment the next one follows (%d runs)" (List.length at_seg_end);
-  C.check (Ops.verify se = Ops.exit_ok) "a run at a segment's end: verify whole";
+  C.check (code (fun () -> Ops.verify se) = Ops.exit_ok) "a run at a segment's end: verify whole";
   let sg = fst (facts se) in
   List.iter
     (fun (what, target, at) ->
       let r = root // "segend-r" in
       C.rmrf r;
-      C.check (Ops.restore ~target ~replace:false se r = Ops.exit_ok && fst (facts r) = at && Ops.verify r = Ops.exit_ok)
+      C.check (code (fun () -> Ops.restore ~target ~replace:false se r) = Ops.exit_ok && fst (facts r) = at && code (fun () -> Ops.verify r) = Ops.exit_ok)
         "a run at a segment's end: restore %s, at group %d and whole" what at)
     ([ "to the end", Ops.End, sg ] @ List.concat_map (fun h -> [ Printf.sprintf "--to-group %d" h, Ops.Group h, h; Printf.sprintf "--to-group %d" (h + 1), Ops.Group (h + 1), h + 1 ]) at_seg_end);
   (* restore --replace over a database of a server that crashed while written through its commit buffer: replaced as
@@ -400,10 +403,10 @@ let () =
   copy src m10;
   let newest = jseg m10 (List.length (segs m10) - 1) in
   flip newest ((Unix.stat newest).st_size - 2);
-  C.check (Ops.verify m10 = Ops.exit_ok) "a crashed database, its newest trailer broken: whole (the next open rebuilds it)";
-  C.check (Ops.backup cfg10 (t10 // "b") = Ops.exit_ok) "its backup";
-  (match List.filter (fun n -> n <> "cepheus-backup.lock") (Array.to_list (Sys.readdir (t10 // "b"))) with
-   | [ n ] -> C.check (Ops.verify (t10 // "b" // n // "main") = Ops.exit_ok) "the backup of a broken newest trailer verifies whole (the trailer written again)"
+  C.check (code (fun () -> Ops.verify m10) = Ops.exit_ok) "a crashed database, its newest trailer broken: whole (the next open rebuilds it)";
+  C.check (code (fun () -> Ops.backup cfg10 (t10 // "b")) = Ops.exit_ok) "its backup";
+  (match List.filter (fun n -> n <> "cepheus-backup.lock") (try Array.to_list (Sys.readdir (t10 // "b")) with Sys_error _ -> []) with
+   | [ n ] -> C.check (code (fun () -> Ops.verify (t10 // "b" // n // "main")) = Ops.exit_ok) "the backup of a broken newest trailer verifies whole (the trailer written again)"
    | l -> C.fail "the backup of a broken newest trailer: %s" (String.concat " " l));
   (* a live database (another process holds it): what a frame being written shows is left out with a note (a large
      group's header still zeros, a frame not all there); a frame written whole that does not check is damage *)
@@ -431,24 +434,24 @@ let () =
   let backup_code () =
     incr backups;
     let d = lv // Printf.sprintf "b%d" !backups in
-    let code = Ops.backup cfgl d in
-    code, List.filter (fun n -> n <> "cepheus-backup.lock") (Array.to_list (Sys.readdir d))
+    let c = code (fun () -> Ops.backup cfgl d) in
+    c, List.filter (fun n -> n <> "cepheus-backup.lock") (try Array.to_list (Sys.readdir d) with Sys_error _ -> [])
   in
   (* a large group's frame being written: its header, written last, still zeros *)
   append (Bytes.cat (Bytes.make 28 '\000') (Bytes.make 100 'x'));
-  C.check (Ops.verify ld = Ops.exit_ok) "live: a header still zeros is the frame being written";
-  let code, l = backup_code () in
-  C.check (code = Ops.exit_ok && List.length l = 1 && Ops.verify (lv // Printf.sprintf "b%d" !backups // List.hd l // "main") = Ops.exit_ok) "live: its backup leaves it out";
+  C.check (code (fun () -> Ops.verify ld) = Ops.exit_ok) "live: a header still zeros is the frame being written";
+  let c, l = backup_code () in
+  C.check (c = Ops.exit_ok && List.length l = 1 && code (fun () -> Ops.verify (lv // Printf.sprintf "b%d" !backups // List.hd l // "main")) = Ops.exit_ok) "live: its backup leaves it out";
   Unix.truncate newest size;
   (* a frame being appended: its header there, not all its bytes yet *)
   append (Bytes.sub frame_bytes 0 ((Bytes.length frame_bytes / 2) + 1));
-  C.check (Ops.verify ld = Ops.exit_ok) "live: a frame not all there is the frame being written";
+  C.check (code (fun () -> Ops.verify ld) = Ops.exit_ok) "live: a frame not all there is the frame being written";
   Unix.truncate newest size;
   (* the newest frame, every byte of it there, damaged *)
   flip newest (off + 28 + 2);
-  C.check (Ops.verify ld = Ops.exit_damage) "live: a frame written whole that does not check is damage";
-  let code, l = backup_code () in
-  C.check (code = Ops.exit_damage && List.exists (fun n -> Filename.check_suffix n ".damaged") l) "live: its backup is damaged, never cut in silence";
+  C.check (code (fun () -> Ops.verify ld) = Ops.exit_damage) "live: a frame written whole that does not check is damage";
+  let c, l = backup_code () in
+  C.check (c = Ops.exit_damage && List.exists (fun n -> Filename.check_suffix n ".damaged") l) "live: its backup is damaged, never cut in silence";
   Unix.close from_us;
   ignore (Unix.waitpid [] child);
   Unix.close from_child;
