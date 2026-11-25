@@ -63,7 +63,7 @@ wire protocol byte by byte: [the server](docs/book/server.md).
 
 ## From Cesia
 
-A [Cesia](https://github.com/www-celestial/cesia) program reaches a database through the server, with the package
+A [Cesia](https://github.com/www-celestial/cesia-lang) program reaches a database through the server, with the package
 `cesia/cepheus` of this repository: one function to connect, and on the server's machine its reads are served from its
 own memory, as linearizable as the server's ([Cepheus from Cesia](docs/book/cesia.md)):
 

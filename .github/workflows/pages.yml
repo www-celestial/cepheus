@@ -1,9 +1,9 @@
 name: pages
 
 # The site of Cepheus, its book and the reference of its Cesia package, as cesia doc --site makes them from this commit, on
-# the nightly Cesia, as its release gives it: a check, nothing published, since the repository is private and the site is
-# read where it is built, with cesia doc --site --open. A formula that can't be written, a link that leads nowhere, a French
-# page that drifts from its English one, or a Cesia example that doesn't check, fails it.
+# the nightly Cesia, as its release gives it: built for every push and pull request, published on GitHub Pages from main
+# alone (https://www-celestial.github.io/cepheus/). A formula that can't be written, a link that leads nowhere, a French
+# page that drifts from its English one, or a Cesia example that doesn't check, fails it, and nothing is published.
 on:
   push:
     branches: [main]
@@ -39,3 +39,24 @@ jobs:
         run: |
           cesia version
           cesia doc --site _site
+      # The fingerprints that cesia doc keeps to write again only what changed: no page of the site.
+      - name: Only the pages
+        run: rm -rf _site/.pages _site/.reference _site/.book
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
+        with:
+          path: _site
+
+  # Only a push to main publishes: a pull request's site is checked, never shown.
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: site
+    runs-on: ubuntu-22.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5

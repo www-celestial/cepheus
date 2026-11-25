@@ -1,6 +1,6 @@
 # Cepheus from Cesia
 
-This chapter is for programmers who write in [Cesia](https://github.com/www-celestial/cesia): how a Cesia program
+This chapter is for programmers who write in [Cesia](https://github.com/www-celestial/cesia-lang): how a Cesia program
 reaches a Cepheus database, writes to it, reads it and asks it questions, what each call gives, what it costs, and
 what it guarantees. The examples below run as written, against a real server, each time the tests run
 (`test/cesia.sh`): what follows each one is what it printed.
