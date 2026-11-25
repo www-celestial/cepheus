@@ -30,6 +30,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   avoir lieu à un seul instant. Les lectures linearizable sont atomiques : G15 interdit l'inversion ; le lease (un
   droit accordé pour une durée limitée) que la conception proposait d'abord la permettait.
   [serveur](server.md#lectures-locales-g15)
+- **Avg** — la moyenne d'une variable dans chaque groupe d'un rapport, à partir de sa somme exacte : d'ints et de floats
+  un Float, de money de la money arrondie à son échelle, de dates une date ; le `avg` de SQL. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **back-pressure** — un côté lent qui ralentit le côté rapide au lieu d'être submergé : à sa limite d'écritures en
   cours, une connexion n'est plus lue, les buffers du noyau se remplissent, et les écritures du programme attendent.
   Rien n'est perdu. [serveur](server.md#lordre-le-pipelining-et-la-back-pressure)
@@ -176,6 +178,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   de sa clé en une passe : $O(n + \text{clés})$, sans comparaison. Les faits d'un grand groupe sont triés par propriété
   de cette façon, en chunks comptés et répartis en même temps par plusieurs domains.
   [théorie](theory.md#9-niveaux-sur-disque-et-grands-groupes)
+- **Count(x)**, **COUNT(DISTINCT x)** — le nombre de valeurs différentes d'une variable dans un groupe, la valeur
+  absente d'un Optional non comptée ; `Count()` compte les réponses. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **cut** (du journal ; la coupe) — après une écriture ou un fsync qui a échoué, le writer tronque le journal jusqu'à
   la fin de sa dernière frame durable et le force, pour que l'écriture échouée ait disparu de la mémoire et du disque
   (G13). [garanties](guarantees.md#g13-on-ne-se-fie-jamais-à-un-fsync-qui-a-échoué)
@@ -187,6 +191,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **datom** — le fait de Datomic : entité, attribut, valeur, transaction, ajouté. Le fait de Cepheus, ce sont les trois
   premiers ; le groupe et l'indicateur d'ajout ou de retrait vivent dans le journal.
   [concepts](concepts.md#les-faits--le-modèle-entityattributevalue)
+- **daylight saving time**, **summer time** (l'heure d'été) — les heures où un fuseau avance ses horloges pendant une
+  partie de l'année (Paris : UTC+2 du dernier dimanche de mars au dernier d'octobre, UTC+1 le reste) : un jour de 23
+  heures au printemps, de 25 à l'automne, que `Trunc` suit. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **Delete** (d'une chose ; supprimer) — l'opération qui supprime une chose d'un kind, le `DELETE` de SQL : les faits
   de la chose du kind retirés au writer, et les liens vers elle suivis, en un seul groupe ; la chose reste dans
   l'historique. [Cesia](cesia.md#supprimer-une-chose)
@@ -251,6 +258,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   son historique est un préfixe de celui du primary. [serveur](server.md#la-promotion-à-la-main)
 - **eviction policy** (la politique d'éviction) — la règle qui choisit quelle page quitte un cache plein ; celle de
   Cepheus est S3-FIFO.
+- **exact sum** (la somme exacte) — une somme gardée comme un entier d'autant de morceaux de 30 bits qu'il lui faut (un
+  float à sa place binaire), si bien qu'elle n'arrondit rien avant la fin : le même résultat quel que soit l'ordre des
+  termes, ce qui rend la moyenne et la dispersion d'un rapport les mêmes sur n'importe quel nombre de cœurs et dans un
+  watch. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **`Expect`** — une précondition d'un groupe : un fait qui doit être vrai (ou une valeur qui doit être absente) juste
   avant lui ; le writer la vérifie, et sinon le groupe échoue avec `Conflict`.
   [concepts](concepts.md#les-groupes--une-écriture-est-une-transaction)
@@ -333,6 +344,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [règles](rules.md#une-règle-est-une-question-avec-une-conclusion)
 - **history** (l'historique) — la suite de toutes les transactions qu'une base a appliquées, avec ce que chacune a lu
   et écrit ; le journal de Cepheus en est une, dans l'ordre des groupes.
+- **IANA time zone database** (tz, zoneinfo ; la base des fuseaux horaires) — les règles de l'heure locale de chaque
+  fuseau depuis 1970 et avant (décalages, heures d'été), tenues par l'IANA et livrées par chaque système (`tzdata`) ;
+  les fuseaux s'appellent `Zone/Ville`, comme `Europe/Paris`. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **idle timeout** — le temps pendant lequel une connexion peut rester sans une requête entière avant que le serveur la
   ferme (`idle_timeout`, 600 s par défaut) ; avant son Hello, 10 s au plus, son handshake TLS compris.
   [serveur](server.md#clustertoml)
@@ -419,6 +433,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   [règles](rules.md)
 - **materialize the conflict** — protéger un ensemble contre les phantoms en gardant un fait que chaque programme qui
   écrit dans l'ensemble attend et change (Fekete et al. 2005).
+- **median** (la médiane) — la valeur du milieu d'un groupe dans l'ordre (entre les deux du milieu pour un nombre pair) :
+  `Median(x)`, le quantile 0,5. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **memory BIO** — un buffer d'OpenSSL en mémoire qui tient lieu de réseau : OpenSSL lit les octets qu'on lui donne et
   y écrit les octets à envoyer, sans jamais toucher au socket, donc il n'attend jamais. [serveur](server.md#tls)
 - **merge** — la fusion du delta et des runs les plus récents en un seul nouveau fichier de run ; il tourne en
@@ -495,6 +511,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **property** (une propriété) — l'attribut d'un fait ; elle-même une chose (de 16 à 65 535) avec un nom, un type et
   deux indicateurs.
 - **provenance** — l'origine d'un fait : ici, une preuve de ce fait. [règles](rules.md#why)
+- **quantile**, **percentile** (le quantile) — la valeur sous laquelle se trouve une fraction p des valeurs d'un
+  groupe : `Quantile(x, p)`, entre ses deux valeurs les plus proches (la définition 7 de Hyndman et Fan, le
+  `percentile_cont` de PostgreSQL), ou une d'elles avec `discrete = true` (la définition 1, `percentile_disc`).
+  [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **question** — la query (la requête) de Cepheus : des patterns sur des variables.
   [concepts](concepts.md#les-questions)
 - **question timeout** — le temps qu'une question peut prendre avant de finir avec le code `timeout` : le
@@ -534,6 +554,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   jamais. [serveur](server.md#une-replica)
 - **replica lag** (le lag d'une replica) — le temps qui va d'un groupe durable sur le primary au moment où la replica
   dit qu'elle le tient de façon durable. [serveur](server.md#ce-que-coûte-une-replica)
+- **report** (le rapport) — une question dont le `Give` groupe ses réponses et les agrège : des totaux, des moyennes,
+  des médianes, des dispersions, des listes, par mois. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **representative** (le représentant) — le membre d'une classe de choses égales qui tient les faits de la classe ;
   les lectures et les questions désignent une chose par son représentant.
   [règles](rules.md#légalité--des-classes-de-choses-égales)
@@ -578,6 +600,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **schema** (le schéma) — les propriétés et leurs types ; dans Cepheus, des faits comme le reste.
   [concepts](concepts.md#les-propriétés-et-le-schéma)
 - **segment** — un fichier du journal, jusqu'à 64 MiB, nommé par son premier groupe.
+- **selection** (algorithme ; la sélection) — trouver la k-ième valeur de n dans l'ordre sans toutes les trier : le FIND
+  de Hoare, une partition autour d'un pivot répétée d'un seul côté, linéaire en moyenne. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **semi-naive evaluation** — évaluer les règles seulement sur ce qui a changé : chaque tour met en correspondance les
   faits nouveaux du tour d'avant, donc chaque instance de règle est trouvée une fois (Bancilhon, Ramakrishnan 1986).
   [règles](rules.md#comment-le-writer-la-tient-à-jour--la-semi-naive-evaluation)
@@ -636,6 +660,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   valeur les faits d'un grand groupe, à partir d'un ordre par chose, laisse les faits d'une même valeur dans l'ordre
   des choses, qui est l'ordre (propriété, valeur, chose) dont un run a besoin.
   [architecture](architecture.md#grands-groupes)
+- **standard deviation**, **variance** (l'écart type, la variance) — à quel point les valeurs d'un groupe s'écartent de
+  leur moyenne : la variance est la moyenne des carrés des écarts (divisée par n - 1 pour un échantillon, par n pour
+  toute une population), l'écart type sa racine carrée, dans l'unité des valeurs : `Variance(x)`, `Stddev(x)`.
+  [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **strict serializability** — serializable dans un ordre qui respecte le temps réel.
   [garanties](guarantees.md#g4-strict-serializability)
 - **strong component** (une composante fortement connexe) — un plus grand ensemble de choses qui s'atteignent toutes
@@ -674,6 +702,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **transaction** — une unité de travail appliquée entièrement ou pas du tout ; le groupe de Cepheus.
 - **transitive property** (une propriété transitive) — une propriété qui relie une chose à tout ce qu'elle atteint :
   une partie d'une partie est une partie. Tenue par le closure module. [règles](rules.md#les-transitive-closures--le-closure-module)
+- **Trunc** — l'instant où commence l'unité d'une date (son jour, sa semaine, son mois, son année...) dans l'heure
+  locale d'un fuseau, une clé des lignes d'un rapport : le `date_trunc` de SQL. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
+- **TZif** — le format binaire des fichiers compilés de la base des fuseaux (RFC 8536) : les transitions d'un fuseau,
+  et après la dernière sa règle en chaîne TZ POSIX. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **unfolding** (le dépliage ; specialisation by small relations, partial evaluation) — une règle réécrite en une
   règle par fait d'une petite relation de son corps, les mots de ce fait (ses constantes) à la place de ses
   variables : ce que le moteur fait tourner pour les règles écrites sur l'ontologie.
@@ -687,6 +719,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   première ligne de chacune : les lignes de « city = Lyon » ou de « client = #c » en un rank et deux offsets, quel que
   soit le nombre de lignes. Gardé pour une propriété quand elle prend au plus 2 octets par ligne (des liens, des
   textes, des dates, de petits entiers). [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
+- **Values** — les valeurs différentes d'une variable dans un groupe, une liste dans l'ordre de `Sort` : le
+  `array_agg(DISTINCT x)` de SQL ; jointes en Cesia, son `string_agg`. [Cesia](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)
 - **variable** — une inconnue d'une question, numérotée à partir de 0.
 - **variable property** (une propriété variable) — un pattern de règle dont la propriété est une variable
   (`prop_var k`), liée par un autre pattern du corps : la forme des règles d'OWL 2 RL chez le W3C.

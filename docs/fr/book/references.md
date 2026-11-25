@@ -310,6 +310,62 @@ Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparis
   *Proceedings of the ACM on Management of Data* 1(2), 1–23 (SIGMOD 2023). https://doi.org/10.1145/3589295
   — Le mélange de binary joins et de joins worst-case optimal ; Cepheus garde une seule façon, Generic Join.
 
+## Les rapports
+
+- **[Hyndman 1996]** R. J. Hyndman, Y. Fan. Sample Quantiles in Statistical Packages. *The American Statistician*
+  50(4), 361–365, 1996. https://doi.org/10.1080/00031305.1996.10473566
+  — Les neuf définitions d'un quantile d'échantillon qu'emploient les logiciels de statistique ; `Quantile` est leur
+  définition 7 (celle par défaut de R et de NumPy, le `percentile_cont` de PostgreSQL), `discrete = true` leur
+  définition 1 (`percentile_disc`).
+- **[Hoare 1961]** C. A. R. Hoare. Algorithm 65: Find. *Communications of the ACM* 4(7), 321–322, 1961.
+  https://doi.org/10.1145/366622.366647
+  — La sélection : la k-ième de n valeurs par des partitions autour d'un pivot d'un seul côté, linéaire en moyenne ; le
+  rang d'un quantile dans Cepheus, sur les valeurs différentes d'un groupe pondérées par leurs comptes.
+- **[Floyd 1975]** R. W. Floyd, R. L. Rivest. Expected Time Bounds for Selection. *Communications of the ACM* 18(3),
+  165–172, 1975. https://doi.org/10.1145/360680.360691
+  — Le nombre attendu de comparaisons de la sélection, et une variante plus rapide par échantillonnage ; Cepheus garde
+  celle de Hoare avec un pivot médiane de trois.
+- **[Musser 1997]** D. R. Musser. Introspective Sorting and Selection Algorithms. *Software: Practice and Experience*
+  27(8), 983–993, 1997. https://doi.org/10.1002/(SICI)1097-024X(199708)27:8%3C983::AID-SPE117%3E3.0.CO;2-%23
+  — L'introselect : au-delà d'une borne sur les partitions, le reste trié, si bien qu'aucune entrée ne rend la
+  sélection quadratique.
+- **[Welford 1962]** B. P. Welford. Note on a Method for Calculating Corrected Sums of Squares and Products.
+  *Technometrics* 4(3), 419–420, 1962. https://doi.org/10.1080/00401706.1962.10490022
+  — La mise à jour en une passe d'une moyenne et d'une somme des carrés des écarts ; précise en floats, mais ses
+  derniers chiffres dépendent de l'ordre des valeurs, aussi Cepheus ne l'emploie pas.
+- **[Youngs 1971]** E. A. Youngs, E. M. Cramer. Some Results Relevant to Choice of Sum and Sum-of-Product Algorithms.
+  *Technometrics* 13(3), 657–665, 1971. https://doi.org/10.1080/00401706.1971.10488826
+  — La mise à jour que font tourner la variance et l'écart type `float8` de PostgreSQL (son `float8_accum`).
+- **[Chan 1983]** T. F. Chan, G. H. Golub, R. J. LeVeque. Algorithms for Computing the Sample Variance: Analysis and
+  Recommendations. *The American Statistician* 37(3), 242–247, 1983. https://doi.org/10.1080/00031305.1983.10483115
+  — Pourquoi la formule des manuels $\sum x^2 - (\sum x)^2 / n$ perd ses chiffres en floats quand les valeurs sont loin
+  de 0, et comment fusionner les sommes de deux parties ; avec des sommes exactes, Cepheus calcule le numérateur de
+  cette formule sans perte.
+- **[Neal 2015]** R. M. Neal. Fast exact summation using small and large superaccumulators. arXiv:1505.05571, 2015.
+  https://arxiv.org/abs/1505.05571
+  — Des sommes de floats gardées exactement, comme des entiers à chaque place binaire, arrondies une seule fois ; les
+  sommes exactes de Cepheus sont de cette famille, avec des morceaux de 30 bits reportés paresseusement.
+- **[RFC 8536]** A. Olson, P. Eggert, K. Murchison. The Time Zone Information Format (TZif). IETF RFC 8536, 2019.
+  https://www.rfc-editor.org/rfc/rfc8536
+  — Le format des fichiers de la base des fuseaux que lit Cepheus : les transitions, les types d'heure, et la chaîne TZ
+  POSIX du pied de fichier pour les instants après la dernière transition (avec ses extensions : des heures de -167 à
+  167, une année entière d'heure d'été).
+- **[tz]** The IANA Time Zone Database. https://www.iana.org/time-zones
+  — Les règles des heures locales du monde, que livre chaque système (`tzdata`) et qu'il met à jour plusieurs fois par
+  an.
+- **[Hinnant 2013]** H. Hinnant. chrono-Compatible Low-Level Date Algorithms. 2013.
+  https://howardhinnant.github.io/date_algorithms.html
+  — Les jours du calendrier grégorien proleptique à partir d'une année, d'un mois et d'un jour, et retour, sans table :
+  le calendrier de `Zone`.
+- **[ISO 8601]** ISO 8601-1:2019. Date and time — Representations for information interchange, part 1.
+  https://www.iso.org/standard/70907.html
+  — Les semaines depuis le lundi : `Trunc(d, "week")`.
+- **[PostgreSQL aggregates]** PostgreSQL 18 documentation, 9.21 Aggregate Functions, et 9.9.2 date_trunc.
+  https://www.postgresql.org/docs/18/functions-aggregate.html ,
+  https://www.postgresql.org/docs/18/functions-datetime.html#FUNCTIONS-DATETIME-TRUNC
+  — `avg`, `count(DISTINCT)`, `array_agg`, `string_agg`, `percentile_cont`, `percentile_disc`, `stddev`, `variance`
+  et `date_trunc` avec un fuseau, les formes que les tutoriels mettent à côté de celles de Cepheus.
+
 ## Les transactions et l'isolation
 
 - **[Codd 1970]** E. F. Codd. A Relational Model of Data for Large Shared Data Banks. *Communications of the ACM*

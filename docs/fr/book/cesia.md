@@ -60,6 +60,7 @@ l'édition de liens dynamique du moteur et des bibliothèques d'OpenSSL, une foi
 
 ```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/date
 use std/fiber
 use std/io
 use std/result
@@ -333,7 +334,10 @@ io.Print(byCity)
 Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 ```
 
-La facture de 10 est sous 50 : la ville de Bo est maintenant Lyon, et sa seule facture n'est pas comptée.
+La facture de 10 est sous 50 : la ville de Bo est maintenant Lyon, et sa seule facture n'est pas comptée. Les
+moyennes, les médianes et les quantiles, les dispersions, les listes de valeurs, le compte des valeurs différentes, et
+le jour, le mois ou l'année d'une date dans un fuseau horaire sont dans
+[les rapports](#les-rapports--avg-countx-values-quantile-variance-stddev-trunc).
 
 **Son temps.** `timeout = secondes` borne une question : au-delà, `Find` est un `Err` de Code `"timeout"`, dont le
 message nomme le temps, et le travail s'arrête (en quelques millisecondes : il est regardé tous les 1 024 candidats).
@@ -613,6 +617,125 @@ elle est refusée.
 Ce qu'ils coûtent à côté de PostgreSQL, sur les données des benchmarks : [benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-million-de-faits)
 (`Optional` coûte ce que coûte le join ; `Less` ce que coûte le filtre des lignes dans le programme).
 
+## Les rapports : Avg, Count(x), Values, Quantile, Variance, Stddev, Trunc
+
+Les agrégats d'un **rapport** (un report : une question qui groupe ses réponses et les résume), à côté de `Sum`,
+`Min`, `Max` et `Count()`, et le mois d'une date (ou son jour, sa semaine, son année...) dans un fuseau horaire comme
+clé des lignes :
+
+```cesia norun
+Sale = cepheus.Kind("sale", {Client: cepheus.Link(), Amount: cepheus.Money(2), Day: cepheus.Date(), Tag: cepheus.Text(many = true)})
+(* a fork, so that what this example writes stays out of db *)
+sales = result.Unwrap(cepheus.Fork(db, [Sale]))
+for x in [[ada, 10, 1801438200, ["new"]], [ada, 30, 1802250000, ["new", "web"]], [bo, 20, 1802250000, ["web"]], [bo, 60, 1806532200, []]]
+  result.Unwrap(cepheus.Insert(Sale, {Client: x[1], Amount: x[2], Day: x[3], Tag: x[4]}, sales))
+end
+io.Print(cepheus.Find(4, (i, c, n, a) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a]],
+  Give: {Name: n, Mean: cepheus.Avg(a), Median: cepheus.Median(a), Low: cepheus.Quantile(a, 0.25), Spread: cepheus.Stddev(a)},
+  Sort: [n],
+}, sales))
+paris(d) = cepheus.Trunc(d, "month", zone = "Europe/Paris")
+for r in result.Unwrap(cepheus.Find(3, (i, a, d) -> {Where: [[i, Sale.Amount, a], [i, Sale.Day, d]], Give: {Month: paris(d), Total: cepheus.Sum(a)}, Sort: [paris(d)]}, sales))
+  io.Print(date.Format(date.FromUnix(r.Month)), r.Total)
+end
+io.Print(cepheus.Find(4, (i, c, n, t) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], cepheus.Optional([i, Sale.Tag, t])],
+  Give: {Name: n, Tags: cepheus.Values(t), Different: cepheus.Count(t), Sales: cepheus.Count(i)},
+  Sort: [n],
+}, sales))
+```
+
+```text
+Ok([{Name: "Ada Martin", Mean: 20.0, Median: 20.0, Low: 15.0, Spread: 14.142135623730951}, {Name: "Bo Lind", Mean: 40.0, Median: 40.0, Low: 30.0, Spread: 28.284271247461902}])
+2027-01-31T23:00:00Z 60.0
+2027-03-31T22:00:00Z 60.0
+Ok([{Name: "Ada Martin", Tags: ["new", "web"], Different: 2, Sales: 2}, {Name: "Bo Lind", Tags: ["web"], Different: 1, Sales: 2}])
+```
+
+La moyenne d'Ada, de 10 et 30, est 20, sa médiane aussi, entre les deux ; son premier quartile est 15 (10 plus un quart
+du chemin jusqu'à 30) ; la dispersion de deux valeurs est leur écart divisé par $\sqrt 2$. Les mois : la dernière
+vente de Bo, de 22 h 30 UTC le 31 mars, est d'avril à Paris (0 h 30 le 1er avril, heure d'été), et la première d'Ada,
+de 23 h 30 UTC le 31 janvier, de février (0 h 30 le 1er février) ; février commence à 23 h UTC le 31 janvier, avril à
+22 h UTC le 31 mars. La deuxième vente d'Ada a deux tags, la dernière de Bo aucun : `Values` donne la liste des tags
+différents, `Count(t)` les compte, `Count(i)` compte les ventes (`Count()` compterait les lignes, une par tag).
+
+- `cepheus.Avg(x)` : la moyenne. D'ints et de floats un Float ; de money, de la money de son échelle, arrondie au plus
+  proche en s'éloignant de zéro à mi-chemin (comme l'est un Float écrit dans un champ de money : 10,005 euros fait
+  10,01) ; de dates, une date, arrondie à la milliseconde. C'est la somme exacte divisée une seule fois : la même quel
+  que soit l'ordre des lignes.
+- `cepheus.Count(x)` : le nombre de valeurs *différentes* de x dans le groupe, le `COUNT(DISTINCT x)` de SQL (des
+  floats sont différents quand leurs bits le sont, comme `Sort` distingue $-0$ de $0$). `cepheus.Count()` compte
+  toujours les réponses.
+- `cepheus.Values(x)` : les valeurs différentes de x, une liste dans l'ordre de `Sort`, chacune une fois. Jointes en
+  Cesia, c'est le `string_agg` de SQL : `text.Join(", ", row.Tags)`. Un champ `Values` n'est pas une clé de `Sort`.
+- `cepheus.Quantile(x, p)`, p de 0 à 1 : la valeur à la fraction p des valeurs du groupe dans l'ordre, entre ses deux
+  valeurs les plus proches (la définition 7 de Hyndman et Fan, le `percentile_cont` de PostgreSQL, celle par défaut de
+  R et de NumPy) : avec n valeurs dans l'ordre et $h = p (n - 1)$,
+  $x_{\lfloor h \rfloor} + (h - \lfloor h \rfloor)(x_{\lceil h \rceil} - x_{\lfloor h \rfloor})$, comptées depuis 0.
+  D'ints et de floats un Float, de money de la money (arrondie à son échelle), de dates une date.
+  `cepheus.Quantile(x, p, discrete = true)` : la première valeur dont le rang atteint $p\,n$ (la définition 1,
+  `percentile_disc`), une des valeurs, de tout type (le nom médian d'une liste de textes). `cepheus.Median(x)` est
+  `cepheus.Quantile(x, 0.5)` :
+
+  | le sucre | sa forme simple | SQL |
+  |---|---|---|
+  | `cepheus.Median(x)` | `cepheus.Quantile(x, 0.5)` | `percentile_cont(0.5) WITHIN GROUP (ORDER BY x)` |
+  | `cepheus.Count(x)` | (aucune : son propre agrégat) | `count(DISTINCT x)` |
+
+- `cepheus.Variance(x)` et `cepheus.Stddev(x)` (la variance et l'écart type, standard deviation) : de l'échantillon,
+  divisées par $n - 1$ (le `variance`, le `var_samp`, le `stddev`, le `stddev_samp` de PostgreSQL) : `missing` pour
+  un groupe d'une seule valeur, comme le `NULL` de PostgreSQL ; avec `population = true`, divisées par n (`var_pop`,
+  `stddev_pop`). D'ints, de floats et de money (dans ses unités, des euros au carré pour la variance), un Float.
+- `cepheus.Trunc(d, unit, zone = "UTC")` : l'instant où commence l'unité de la date d dans l'heure locale du fuseau,
+  une clé des lignes comme l'est une variable (et une clé de `Sort`). Les unités : `"second"`, `"minute"`, `"hour"`,
+  `"day"`, `"week"` (ISO 8601 : depuis le lundi), `"month"`, `"quarter"`, `"year"`, `"decade"`, `"century"` (de 2001
+  à 2100 est le XXIe, comme compte PostgreSQL), `"millennium"`. Un fuseau (une time zone) est un nom IANA, comme
+  `"Europe/Paris"` ou `"America/New_York"`, heure d'été comprise, ou `"UTC"`. Un jour, une semaine, un mois commence
+  au premier instant dont l'heure locale est à son minuit ou après : un jour dont un changement d'heure saute le
+  minuit commence au changement, et les jours se suivent sur la ligne du temps ; une heure, une minute ou une seconde
+  commence là où le dit l'horloge de l'instant, si bien que l'heure qu'un retour à l'heure d'hiver répète fait deux
+  lignes, chacune son instant. Le `date_trunc(unit, d, zone)` de PostgreSQL 18.6 donne les mêmes instants (55 784
+  essayés, jours de changement d'heure compris), sauf pour les heures d'un fuseau qui bouge de 30 minutes (l'île Lord
+  Howe) : là PostgreSQL garde le décalage de l'instant et fait commencer une telle heure 30 minutes avant le
+  changement.
+- **missing.** La valeur absente d'un Optional est laissée de côté par `Count(x)` et `Values(x)` (comme SQL laisse de
+  côté ses `NULL` : la vente de Bo sans tag) ; `Avg`, `Quantile`, `Median`, `Variance` et `Stddev` de la variable
+  d'un Optional sont refusés (`invalid`), comme l'est `Sum`. Un `Trunc` d'une date absente est absent.
+- **Erreurs.** Un fuseau qui n'en est pas un (`"Europe/Pariss"`, ou un nom qui n'est aucun fuseau de la base, comme
+  `"../etc/passwd"`), une unité qui n'en est pas une, `Avg` d'un texte, une fraction hors de 0 à 1 : `Err` de Code
+  `"invalid"`, qui les nomme ([erreurs](errors.md)).
+
+**Comment on y répond.** Chaque groupe garde, à côté de sa clé, ce dont a besoin chaque agrégat, à mesure que les
+lignes viennent, sur chaque cœur qui les lit, fusionné à la fin. La moyenne, la variance et l'écart type viennent de
+**sommes exactes** (exact sums) : la somme des valeurs et la somme de leurs carrés, gardées comme des entiers d'autant
+de morceaux de 30 bits qu'il leur faut (un float, qui vaut exactement $m \cdot 2^e$, à sa place binaire), si bien
+qu'aucun arrondi n'a lieu avant la fin ; la variance est alors $\frac{n \sum x^2 - (\sum x)^2}{n (n - 1)}$, son
+numérateur exact, divisé une seule fois et arrondi au float le plus proche (l'écart type est sa racine carrée). La
+formule des manuels en floats perd tous ses chiffres quand les valeurs sont loin de 0 (des dates, en millisecondes
+depuis 1970) et la mise à jour de Welford ([Welford 1962](references.md#les-rapports)) dépend de l'ordre des lignes ;
+des sommes exactes donnent les mêmes bits quels que soient l'ordre et le nombre de cœurs, ce que fait PostgreSQL pour
+ses agrégats `numeric` (en floats, ceux de `float8` dépendent de l'ordre). `Count(x)`, `Values` et `Quantile` gardent
+les valeurs différentes de chaque groupe avec leurs comptes (une table à adressage ouvert) : un groupe d'un million de
+lignes à cent valeurs différentes tient cent entrées ; un quantile est la valeur d'un rang, trouvée par **sélection**
+(selection : le FIND de Hoare, [Hoare 1961](references.md#les-rapports) : une partition autour de la médiane de trois,
+linéaire en moyenne, qui trie le reste après quelques tours, si bien qu'aucune entrée ne la rend quadratique :
+[Musser 1997](references.md#les-rapports)). Un `Trunc` est calculé à partir de la date à mesure que chaque ligne est
+donnée, à partir des règles du fuseau : la base des fuseaux horaires du système (ses fichiers TZif, [RFC
+8536](references.md#les-rapports), dans `$TZDIR` ou `/usr/share/zoneinfo`, que met à jour le package `tzdata` du
+système), chaque fuseau lu une seule fois par un processus ; un serveur lit une nouvelle version des règles à son
+prochain démarrage, comme le fait PostgreSQL compilé avec les données de fuseaux du système.
+
+**Suivi.** Un `Watch` d'un rapport garde chaque groupe par différence : les sommes, les sommes exactes et les comptes
+des sacs ajoutent une ligne qui vient et retirent une ligne qui part ; un groupe dont les lignes changent est remplacé
+en entier (son ancienne ligne retirée, sa nouvelle ajoutée), et rien d'autre n'est redemandé. Les `Values` d'un
+groupe sont une ligne par valeur au serveur et dans le protocole ; le package les replie en une seule map, si bien
+qu'un message donne la map du groupe en entier.
+
+**Bornes.** Les valeurs qu'un groupe garde (`Count(x)`, `Values`, `Quantile`) comptent dans les cellules de la
+réponse, la borne de mémoire d'une question au serveur ([limites](limits.md#les-questions)) : au-delà, `Err` de Code
+`"too_large"`, jamais un serveur à court de mémoire.
+
 ## Watch : les questions vivantes
 
 Une **question vivante** (live question) est un `Find` qui reste ouvert. `cepheus.Watch(n, question, db, size = 64, until = missing)`
@@ -648,8 +771,9 @@ Ok({Group: 16, Rows: missing, Added: [], Removed: [{Invoice: 65546, Total: 45.0}
 - Un changement ne vient que quand les lignes changent, et seulement une fois son groupe sur le disque du serveur (G1) :
   un écran ne montre jamais une écriture qu'un crash pourrait défaire.
 - Les lignes sont celles de `Find`, avec leurs répétitions : un `Give` qui laisse de côté une variable donne une ligne
-  pour chaque binding, comme le fait `Find`. Les agrégats (`Sum`, `Count`, `Min`, `Max`) se suivent aussi : un
-  changement retire alors l'ancienne ligne d'un groupe et ajoute la nouvelle.
+  pour chaque binding, comme le fait `Find`. Les agrégats (`Sum`, `Count`, `Min`, `Max`, et ceux d'un rapport :
+  `Avg`, `Values`, `Quantile`...) se suivent aussi : un changement retire alors l'ancienne ligne d'un groupe et ajoute
+  la nouvelle.
 - **Pas de trou, pas de répétition.** Quand la connexion casse ou que le serveur redémarre, le watch reprend de
   lui-même au groupe de son dernier message : le serveur répond que rien de ce que lit la question n'a changé depuis
   (et rien ne vient), ou par la réponse à son groupe le plus récent, que le package transforme en changement à partir

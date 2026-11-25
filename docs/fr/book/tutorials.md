@@ -21,12 +21,14 @@ propriétés d'une sorte de chose ; une **chose** (thing) est un numéro, son id
 
 ```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
+use std/date
 use std/fiber
 use std/io
 use std/list
 use std/math
 use std/result
 use std/sys
+use std/text
 use std/value
 
 Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Phone: cepheus.Text(many = true), Closed: cepheus.Bool()})
@@ -82,7 +84,7 @@ Counter = cepheus.Kind("counter", {Last: cepheus.Int()})
 db = connect([Client, Invoice, Counter])
 numbers = result.Unwrap(cepheus.Insert(Counter, {Last: 0}, db))
 
-defn bill(client, total, date, db)
+defn bill(client, total, at, db)
   (** An invoice of this client, numbered in the group that makes it: refused whole, taking no number, when the
       client's account is closed. *)
   cepheus.Write([
@@ -90,7 +92,7 @@ defn bill(client, total, date, db)
     cepheus.Incr(numbers, Counter.Last, into = [cepheus.New(1), Invoice.Number]),
     cepheus.Add(cepheus.New(1), Invoice.Client, client),
     cepheus.Add(cepheus.New(1), Invoice.Total, total),
-    cepheus.Add(cepheus.New(1), Invoice.Date, date),
+    cepheus.Add(cepheus.New(1), Invoice.Date, at),
     cepheus.Add(cepheus.New(1), Invoice.Status, "unpaid")
   ], db)
 end
@@ -839,6 +841,250 @@ effacer une chose de l'historique est une autre opération, pas encore construit
 client quand son dernier fait de client est retiré, par `Retract` comme par `Delete`, et les liens vers elle suivent
 leur `onDelete` de la même façon. Mesuré : [plus bas](#ce-que-cela-coûte).
 
+## 11. Un rapport mensuel des ventes, par client, dans le fuseau horaire de l'entreprise
+
+**Le problème.** Le comptable veut les ventes de chaque mois : le total, la facture moyenne, combien de clients ont
+acheté et combien de factures, puis la même chose par client. L'entreprise est à Paris, donc un mois est un mois de
+Paris : une facture écrite à 0 h 30 le 1er février à Paris est de février, bien qu'il soit encore 23 h 30 le 31
+janvier en UTC, l'heure dans laquelle une date est gardée. Et le rapport reste sur un écran, vivant.
+
+**La solution de Cepheus.** Quatre agrégats de `Give` ([les rapports](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)) :
+`cepheus.Sum(t)`, `cepheus.Avg(t)` (la moyenne, exacte : la money reste de la money, arrondie au centime),
+`cepheus.Count(c)` (le nombre de clients *différents*, le `COUNT(DISTINCT client)` de SQL) et `cepheus.Count()` (le
+nombre de réponses) ; et `cepheus.Trunc(d, "month", zone = "Europe/Paris")`, l'instant où commence le mois d'une date
+à Paris (avec son heure d'été), un champ de `Give` qui est une clé des lignes, comme le `GROUP BY date_trunc(...)` de
+SQL. Sept factures de janvier à avril 2027, gardées dans `sales` :
+
+```cesia norun
+written = [[ada, 100, 1800007200], [bo, 250, 1801438200], [ada, 80, 1802250000], [cy, 40, 1803135600],
+           [bo, 120, 1806273000], [ada, 60, 1806532200], [cy, 200, 1807516800]]
+sales = [result.Unwrap(cepheus.Insert(Invoice, {Client: x[1], Total: x[2], Status: "unpaid", Date: x[3]}, db)) for x in written]
+paris(d) = cepheus.Trunc(d, "month", zone = "Europe/Paris")
+months = (i, c, d, t) -> {
+  Where: [[i, Invoice.Date, d], cepheus.Between(d, 1798758000, 1809122399), [i, Invoice.Client, c], [i, Invoice.Total, t]],
+  Give: {Month: paris(d), Total: cepheus.Sum(t), Mean: cepheus.Avg(t), Clients: cepheus.Count(c), Invoices: cepheus.Count()},
+}
+report = (i, c, d, t) -> {Where: months(i, c, d, t).Where, Give: months(i, c, d, t).Give, Sort: [paris(d)]}
+for r in result.Unwrap(cepheus.Find(4, report, db))
+  io.Print(date.Format(date.FromUnix(r.Month)), r.Total, r.Mean, r.Clients, r.Invoices)
+end
+```
+
+```text
+2026-12-31T23:00:00Z 100.0 100.0 1 1
+2027-01-31T23:00:00Z 370.0 123.33 3 3
+2027-02-28T23:00:00Z 120.0 120.0 1 1
+2027-03-31T22:00:00Z 260.0 130.0 2 2
+```
+
+Pas à pas : `Between` garde les dates du 1er janvier 2027 à minuit à Paris (le 31 décembre 2026, 23 h UTC) jusqu'à
+la fin d'avril à Paris ; `Trunc` donne à chaque facture le début de son mois à Paris, si bien que février commence à
+23 h UTC le 31 janvier, et avril à 22 h UTC le 31 mars, Paris étant alors à l'heure d'été (UTC+2). La facture de Bo
+de 23 h 30 UTC le 31 janvier est de février, et celle d'Ada de 22 h 30 UTC le 31 mars d'avril. Le même rapport en
+UTC, `Trunc(d, "month")`, les met toutes deux un mois plus tôt :
+
+```cesia norun
+utc = (i, d, t) -> {
+  Where: [[i, Invoice.Date, d], cepheus.Between(d, 1798758000, 1809122399), [i, Invoice.Total, t]],
+  Give: {Month: cepheus.Trunc(d, "month"), Total: cepheus.Sum(t)},
+  Sort: [cepheus.Trunc(d, "month")],
+}
+io.Print([{Month: date.FormatDate(date.FromUnix(r.Month)), Total: r.Total} for r in result.Unwrap(cepheus.Find(3, utc, db))])
+```
+
+```text
+[{Month: "2027-01-01", Total: 350.0}, {Month: "2027-02-01", Total: 120.0}, {Month: "2027-03-01", Total: 180.0}, {Month: "2027-04-01", Total: 200.0}]
+```
+
+Par client : le mois est une clé avec le nom du client.
+
+```cesia norun
+byClient = (i, c, n, d, t) -> {
+  Where: [[i, Invoice.Date, d], cepheus.Between(d, 1798758000, 1809122399), [i, Invoice.Client, c], [c, Client.Name, n], [i, Invoice.Total, t]],
+  Give: {Month: paris(d), Client: n, Total: cepheus.Sum(t), Invoices: cepheus.Count()},
+  Sort: [paris(d), n],
+}
+for r in result.Unwrap(cepheus.Find(5, byClient, db))
+  io.Print(date.Format(date.FromUnix(r.Month)), r.Client, r.Total, r.Invoices)
+end
+```
+
+```text
+2026-12-31T23:00:00Z Ada Martin 100.0 1
+2027-01-31T23:00:00Z Ada Martin 80.0 1
+2027-01-31T23:00:00Z Bo Lind 250.0 1
+2027-01-31T23:00:00Z Cy Moreau 40.0 1
+2027-02-28T23:00:00Z Bo Lind 120.0 1
+2027-03-31T22:00:00Z Ada Martin 60.0 1
+2027-03-31T22:00:00Z Cy Moreau 200.0 1
+```
+
+Sur l'écran du comptable le rapport est vivant : un `Watch` de la même question (un watch d'agrégats garde chaque
+groupe : pas de `Sort`) reçoit, quand Bo est facturé de 90 le 25 avril, le changement de la seule ligne d'avril.
+
+```cesia norun
+w = result.Unwrap(cepheus.Watch(4, months, db))
+fiber.Receive(w.Changes)
+result.Unwrap(cepheus.Insert(Invoice, {Client: bo, Total: 90, Status: "unpaid", Date: 1808643600}, db))
+change = result.Unwrap(fiber.Receive(w.Changes))
+row(r) = {Month: date.Format(date.FromUnix(r.Month)), Total: r.Total, Mean: r.Mean, Clients: r.Clients}
+io.Print([row(r) for r in change.Added], [row(r) for r in change.Removed])
+cepheus.Close(w)
+```
+
+```text
+[{Month: "2027-03-31T22:00:00Z", Total: 350.0, Mean: 116.67, Clients: 3}] [{Month: "2027-03-31T22:00:00Z", Total: 260.0, Mean: 130.0, Clients: 2}]
+```
+
+**PostgreSQL** groupe par `date_trunc` avec le fuseau, et compte les clients différents avec `COUNT(DISTINCT ...)` :
+
+```sql
+SELECT date_trunc('month', date, 'Europe/Paris') AS month, sum(total) AS total, avg(total) AS mean,
+       count(DISTINCT client) AS clients, count(*) AS invoices
+  FROM invoice WHERE date BETWEEN '2027-01-01 00:00 Europe/Paris' AND '2027-04-30 23:59:59 Europe/Paris'
+ GROUP BY 1 ORDER BY 1;
+```
+
+```text
+         month          | total  |         mean         | clients | invoices
+------------------------+--------+----------------------+---------+----------
+ 2027-01-01 00:00:00+01 | 100.00 | 100.0000000000000000 |       1 |        1
+ 2027-02-01 00:00:00+01 | 370.00 | 123.3333333333333333 |       3 |        3
+ 2027-03-01 00:00:00+01 | 120.00 | 120.0000000000000000 |       1 |        1
+ 2027-04-01 00:00:00+02 | 260.00 | 130.0000000000000000 |       2 |        2
+```
+
+(Le fuseau de la session est ici Europe/Paris : PostgreSQL affiche le début de chaque mois avec son décalage, +01 en
+hiver et +02 en été.)
+
+**La différence.** Les mêmes mois, les mêmes totaux et les mêmes comptes : PostgreSQL 18.6 et Cepheus lisent la même
+base des fuseaux (celle du système, `/usr/share/zoneinfo`), et leurs débuts d'un jour, d'une semaine, d'un mois ou
+d'une année s'accordent sur chacun des 55 784 instants essayés (`bench/pg/trunc.sql`), jours de changement d'heure
+compris. Trois différences. La moyenne : le `avg` d'un `numeric` de PostgreSQL donne 16 décimales
+(123.3333333333333333), le `Avg` de money de Cepheus est de la money, arrondie au centime en s'éloignant de zéro à
+mi-chemin (123,33), à partir de la somme exacte ; d'ints et de floats c'est un float. Le fuseau : le `timestamptz` de
+PostgreSQL s'affiche dans le fuseau de la session, Cepheus donne l'instant (des secondes depuis 1970, en UTC) et le
+programme l'affiche comme il veut. Et un fuseau qui bouge d'une demi-heure (l'île Lord Howe, en Australie) : pour une
+heure, PostgreSQL garde le décalage propre à l'instant, si bien que l'heure qu'un retour d'une demi-heure répète
+commence 30 minutes avant le changement, quand les horloges montraient une autre heure ; Cepheus la fait commencer au
+changement, pour que les heures, comme les jours, se suivent sur la ligne du temps
+([Trunc](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)). Le changement du watch est
+calculé par différence : les sommes, la somme exacte de la moyenne et le sac des clients d'avril se retranchent et
+s'ajoutent ; rien d'autre n'est redemandé.
+
+## 12. La médiane et la dispersion des délais de paiement, la liste des produits de chaque facture
+
+**Le problème.** Le responsable du crédit veut savoir avec quel retard paie chaque client : le délai médian (la moitié
+des paiements arrivent plus tôt, la moitié plus tard), le délai que tiennent 90 % des paiements, la moyenne et la
+dispersion (l'écart type) ; et le service des commandes veut chaque facture avec la liste de ses produits.
+
+**La solution de Cepheus.** `cepheus.Median(x)`, qui est `cepheus.Quantile(x, 0.5)`, la valeur entre les deux du
+milieu comme le `percentile_cont` de PostgreSQL (la définition 7 de Hyndman et Fan) ; `cepheus.Quantile(x, 0.9)` ;
+`cepheus.Stddev(x)`, l'écart type de l'échantillon ; et `cepheus.Values(n)`, les valeurs différentes d'un groupe en
+liste, dans l'ordre, le `array_agg(DISTINCT ...)` de SQL, jointes en Cesia avec `text.Join` (le `string_agg` de SQL).
+Un paiement garde son délai en jours, que le programme calcule quand le paiement arrive : une question n'a pas encore
+d'arithmétique (le lot B13 du plan), donc le délai est un fait, comme le serait une colonne.
+
+```cesia norun
+Payment = cepheus.Kind("payment", {Invoice: cepheus.Link(to = "invoice"), Days: cepheus.Int()})
+db = connect([Client, Invoice, Line, Payment])
+days = [0, 30, 12, 5, 45, 3, 60]
+for k in 1..7
+  result.Unwrap(cepheus.Insert(Payment, {Invoice: sales[k], Days: days[k]}, db))
+end
+delays = (p, i, c, n, x) -> {
+  Where: [[p, Payment.Invoice, i], [p, Payment.Days, x], [i, Invoice.Client, c], [c, Client.Name, n]],
+  Give: {Client: n, Median: cepheus.Median(x), Late90: cepheus.Quantile(x, 0.9), Mean: cepheus.Avg(x), Spread: cepheus.Stddev(x), Payments: cepheus.Count()},
+  Sort: [n],
+}
+for r in result.Unwrap(cepheus.Find(5, delays, db))
+  io.Print(r)
+end
+all = (p, x) -> {Where: [[p, Payment.Days, x]], Give: {Median: cepheus.Median(x), Late90: cepheus.Quantile(x, 0.9), Spread: cepheus.Stddev(x), Middle: cepheus.Quantile(x, 0.5, discrete = true)}}
+io.Print(cepheus.Find(2, all, db))
+```
+
+```text
+{Client: "Ada Martin", Median: 3.0, Late90: 10.2, Mean: 5.0, Spread: 6.244997998398398, Payments: 3}
+{Client: "Bo Lind", Median: 37.5, Late90: 43.5, Mean: 37.5, Spread: 10.606601717798213, Payments: 2}
+{Client: "Cy Moreau", Median: 32.5, Late90: 54.5, Mean: 32.5, Spread: 38.890872965260115, Payments: 2}
+Ok([{Median: 12.0, Late90: 51.00000000000001, Spread: 23.348294523216403, Middle: 12}])
+```
+
+Pas à pas : Ada a payé après 0, 12 et 3 jours, donc sa médiane est 3 ; Bo après 30 et 45, donc sa médiane est entre
+les deux, 37,5, comme celle à 90 % est 43,5 (30 + 0,9 × 15) ; la dispersion de Cy est la plus grande. Sur les sept
+paiements, la médiane est le quatrième délai dans l'ordre, 12, et celui à 90 % vaut 51.00000000000001 dans les deux
+systèmes : 0,9 × 6 vaut un peu plus que 5,4 en floats, et tous deux interpolent comme le disent Hyndman et Fan, entre
+les sixième et septième délais. Avec `discrete = true` le quantile est un des délais, le `percentile_disc` de
+PostgreSQL. Une moyenne et une dispersion d'ints sont des floats ; `Stddev` d'un seul paiement est `missing`, comme
+le `stddev` de PostgreSQL est `NULL`. Les produits de chaque facture :
+
+```cesia norun
+for x in [[1, "paper", 30], [1, "ink", 70], [2, "toner", 150], [2, "paper", 60], [2, "ink", 40], [4, "paper", 40]]
+  result.Unwrap(cepheus.Insert(Line, {Invoice: sales[x[1]], Label: x[2], Amount: x[3]}, db))
+end
+products = (l, i, n, a) -> {
+  Where: [[l, Line.Invoice, i], [l, Line.Label, n], [l, Line.Amount, a]],
+  Give: {Invoice: i, Products: cepheus.Values(n), Lines: cepheus.Count(), Amount: cepheus.Sum(a)},
+  Sort: [i],
+}
+for r in result.Unwrap(cepheus.Find(4, products, db))
+  io.Print(r.Invoice, r.Products, text.Join(", ", r.Products), r.Lines, r.Amount)
+end
+```
+
+```text
+65616 ["ink", "paper"] ink, paper 2 100.0
+65617 ["ink", "paper", "toner"] ink, paper, toner 3 250.0
+65619 ["paper"] paper 1 40.0
+```
+
+Chaque facture est une ligne : `Values` donne ses produits en liste, triés, chacun une fois (l'ordre de `Sort` : les
+textes par leurs octets), et `text.Join` fait le texte d'une facture imprimée.
+
+**PostgreSQL** écrit les quantiles comme des ordered-set aggregates (des agrégats sur un ensemble ordonné),
+`WITHIN GROUP (ORDER BY ...)`, et les listes avec `array_agg` et `string_agg` :
+
+```sql
+SELECT c.name, percentile_cont(0.5) WITHIN GROUP (ORDER BY p.days) AS median,
+       percentile_cont(0.9) WITHIN GROUP (ORDER BY p.days) AS late90, avg(p.days) AS mean,
+       stddev(p.days) AS spread, count(*) AS payments
+  FROM payment p JOIN invoice i ON i.id = p.invoice JOIN client c ON c.id = i.client
+ GROUP BY c.name ORDER BY c.name;
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY days) AS median, percentile_cont(0.9) WITHIN GROUP (ORDER BY days) AS late90,
+       stddev(days) AS spread, percentile_disc(0.5) WITHIN GROUP (ORDER BY days) AS middle FROM payment;
+SELECT invoice, array_agg(DISTINCT label ORDER BY label) AS products, string_agg(DISTINCT label, ', ' ORDER BY label) AS text,
+       count(*) AS lines, sum(amount) AS amount
+  FROM line GROUP BY invoice ORDER BY invoice;
+```
+
+```text
+    name    | median | late90 |        mean         |       spread        | payments
+------------+--------+--------+---------------------+---------------------+----------
+ Ada Martin |      3 |   10.2 |  5.0000000000000000 |  6.2449979983983982 |        3
+ Bo Lind    |   37.5 |   43.5 | 37.5000000000000000 | 10.6066017177982129 |        2
+ Cy Moreau  |   32.5 |   54.5 | 32.5000000000000000 | 38.8908729652601138 |        2
+
+ median |      late90       |       spread        | middle
+--------+-------------------+---------------------+--------
+     12 | 51.00000000000001 | 23.3482945232164044 |     12
+
+ invoice |     products      |       text        | lines | amount
+---------+-------------------+-------------------+-------+--------
+       1 | {ink,paper}       | ink, paper        |     2 | 100.00
+       2 | {ink,paper,toner} | ink, paper, toner |     3 | 250.00
+       4 | {paper}           | paper             |     1 |  40.00
+```
+
+**La différence.** Les mêmes médianes, quantiles et listes. Le `avg` et le `stddev` d'un entier de PostgreSQL sont
+des `numeric`, de 16 à 20 chiffres ; ceux de Cepheus sont des floats, calculés à partir de sommes exactes (la somme
+des délais et celle de leurs carrés, gardées comme des entiers), si bien qu'ils sont les mêmes quel que soit l'ordre
+des lignes et le nombre de cœurs qui les lisent, et que la moyenne d'un watch est exactement celle de Find.
+PostgreSQL trie chaque groupe pour trouver son quantile ; Cepheus garde les valeurs différentes de chaque groupe avec
+leurs comptes et sélectionne la k-ième (la sélection de Hoare, à peu près linéaire), si bien qu'un groupe d'un million
+de paiements à cent délais différents tient cent entrées. PostgreSQL calcule le délai à partir des dates dans la
+question (`paid_at - due`) ; Cepheus en a besoin comme fait tant qu'une question n'a pas d'arithmétique.
+
 ## Ce que cela coûte
 
 Mesuré sur les données des benchmarks à 1 million de faits (11 363 clients, 227 260 factures, 56 797 liens de suivi),
@@ -888,3 +1134,5 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
 | [payées en retard, des prêts dans un intervalle](#8-les-factures-payées-en-retard-les-prêts-entre-25-et-3-) | `Less`, `Between` sur un float | `a < b`, `BETWEEN` | le totalOrder sur les floats |
 | [les clients avec leur téléphone](#9-les-clients-avec-leur-téléphone-sils-en-ont-un) | `Optional` | `LEFT JOIN` | l'absent en dernier dans les deux sens, vivant avec `Watch` |
 | [un client qui a des factures gardé](#10-un-client-qui-a-des-factures-ne-se-supprime-pas-les-lignes-dune-facture-partent-avec-elle) | `Link(to, onDelete)`, `Delete` | `REFERENCES … ON DELETE` | des liens toujours indexés dans les deux sens ; une cascade demande les droits du token, et est bornée |
+| [un rapport mensuel à l'heure de Paris](#11-un-rapport-mensuel-des-ventes-par-client-dans-le-fuseau-horaire-de-lentreprise) | `Trunc(d, "month", zone =)`, `Sum`, `Avg`, `Count(c)` | `date_trunc(..., zone)`, `avg`, `COUNT(DISTINCT)` | les mêmes mois ; une moyenne de money est de la money ; vivant par différence |
+| [la médiane des délais, la liste des produits](#12-la-médiane-et-la-dispersion-des-délais-de-paiement-la-liste-des-produits-de-chaque-facture) | `Median`, `Quantile`, `Stddev`, `Values` | `percentile_cont`, `stddev`, `array_agg`, `string_agg` | des sommes exactes : les mêmes bits dans n'importe quel ordre ; un sac de valeurs par groupe |
