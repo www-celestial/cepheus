@@ -129,9 +129,9 @@ name = "stock"
   ([limits](limits.md#writes)).
 - `slow_ms`: a question (a Find, a watch's first answer) or a write that takes this many milliseconds or more at the
   server, from its request to its reply (a write's once its group is durable), gets a line in the server's log, its
-  values left out: `cepheus: slow question: database shop, token shop-web, 412.3 ms, 18204331 candidates, 20 rows, ok:
-  find give x0 x1 where [x0 invoice/status ?] [x0 invoice/total x1] sort column 1 desc limit 20`. 0 to 3,600,000 (an
-  hour); 0: no line. What the line holds, and how to read it: [slow questions and writes](production.md#slow-questions-and-writes).
+  values left out: `cepheus: slow question: database shop, token shop-web, 1722.7 ms, 37074621 candidates, 20 rows,
+  ok: find give x0 x1 where [x0 invoice/status ?] [x0 invoice/client x2] [x1 invoice/client x2] sort column 1 desc
+  limit 20`. 0 to 3,600,000 (an hour); 0: no line. What the line holds, and how to read it: [slow questions and writes](production.md#slow-questions-and-writes).
 
 ### tokens.toml
 

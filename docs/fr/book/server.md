@@ -151,8 +151,8 @@ name = "stock"
 - `slow_ms` : une question (un Find, la première réponse d'un watch) ou une écriture qui prend ce nombre de
   millisecondes ou plus au serveur, de sa requête à sa réponse (celle d'une écriture une fois son groupe durable),
   reçoit une ligne dans le log du serveur, ses valeurs laissées de côté : `cepheus: slow question: database shop, token
-  shop-web, 412.3 ms, 18204331 candidates, 20 rows, ok: find give x0 x1 where [x0 invoice/status ?] [x0 invoice/total
-  x1] sort column 1 desc limit 20`. De 0 à 3 600 000 (une heure) ; 0 : aucune ligne. Ce que tient la ligne, et comment
+  shop-web, 1722.7 ms, 37074621 candidates, 20 rows, ok: find give x0 x1 where [x0 invoice/status ?] [x0
+  invoice/client x2] [x1 invoice/client x2] sort column 1 desc limit 20`. De 0 à 3 600 000 (une heure) ; 0 : aucune ligne. Ce que tient la ligne, et comment
   la lire : [les questions et les écritures lentes](production.md#les-questions-et-les-écritures-lentes).
 
 ### tokens.toml

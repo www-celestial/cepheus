@@ -354,55 +354,64 @@ admin, chaque minute par exemple, et gardez les lignes avec leur heure :
 sudo -u cepheus sh -c 'CEPHEUS_TOKEN=$(cat /etc/cepheus/ops.token) cepheus status --config /etc/cepheus/cluster.toml'
 ```
 
+Le serveur d'une boutique, 14 s après son démarrage sur 100 000 factures : 18 000 questions sur les factures d'un
+client, 70 écritures de 1 000 factures, un import de 300 000 en un groupe, 500 écritures simples, puis quatre
+questions qui lisent beaucoup (une vraie exécution de la version que décrit ce livre) :
+
 ```text
 server: cph-s-9fa7ee8710147141
 cluster: cph-c-59f1eb5ca605aacd
-uptime_ms: 6050
-connections: 2
-requests: 683
-gc_minor: 23
-gc_major: 3
+uptime_ms: 14195
+connections: 1
+requests: 18580
+gc_minor: 4040
+gc_major: 41
 stopping: false
+questions.timed_out: 1
+questions.cancelled: 0
+questions.helpers: 0
+domains: 8
+domains.cap: 128
 commit_buffer.rounds: 0
 commit_buffer.frames: 0
-commit_buffer.alone: 679
+commit_buffer.alone: 570
 role: primary
-database.shop.group: 6202
-database.shop.facts: 12428
-database.shop.resent: 1
-database.shop.followers: 0
-database.shop.frames: 679
-database.shop.follow_ns_a_frame: 2483
-database.shop.visible: 6217
-database.shop.watches: 0
-database.shop.epoch: 1
+disk.free_bytes: 3799736320
+disk.size_bytes: 240065183744
 slow_ms: 200
 latency_window_s: 60
 cache.capacity_bytes: 4294967296
-cache.resident_bytes: 31817728
-cache.hits: 2210
-cache.misses: 1942
-disk.free_bytes: 96207753216
-disk.size_bytes: 250375106560
-database.shop.journal_bytes: 4194304
-database.shop.runs_bytes: 31768576
-database.shop.merges: 2
-database.shop.merge_us_sum: 412530
-database.shop.merge_bytes: 63520768
-database.shop.questions: 18340
-database.shop.questions_slow: 1
-database.shop.question_us_sum: 2993012
-database.shop.question_us_p50: 47
-database.shop.question_us_p99: 1855
-database.shop.question_us_max: 241663
-database.shop.question_samples: 3108
-database.shop.writes: 679
-database.shop.writes_slow: 0
-database.shop.write_us_sum: 2177443
-database.shop.write_us_p50: 2943
-database.shop.write_us_p99: 7423
-database.shop.write_us_max: 9151
-database.shop.write_samples: 127
+cache.resident_bytes: 1835008
+cache.hits: 291
+cache.misses: 217
+database.shop.group: 673
+database.shop.facts: 1410532
+database.shop.resent: 0
+database.shop.followers: 0
+database.shop.frames: 571
+database.shop.follow_ns_a_frame: 1977
+database.shop.visible: 573
+database.shop.watches: 0
+database.shop.epoch: 1
+database.shop.journal_bytes: 1808294
+database.shop.runs_bytes: 6735456
+database.shop.merges: 1
+database.shop.merge_us_sum: 207384
+database.shop.merge_bytes: 2678640
+database.shop.questions: 18004
+database.shop.questions_slow: 4
+database.shop.question_us_sum: 6640904
+database.shop.question_us_p50: 8
+database.shop.question_us_p99: 17
+database.shop.question_us_max: 2357964
+database.shop.question_samples: 18004
+database.shop.writes: 571
+database.shop.writes_slow: 1
+database.shop.write_us_sum: 3708511
+database.shop.write_us_p50: 3135
+database.shop.write_us_p99: 26623
+database.shop.write_us_max: 624869
+database.shop.write_samples: 571
 ```
 
 | ligne | ce que c'est | à surveiller |
@@ -454,13 +463,15 @@ chaque ligne commence par `cepheus:`, et celles-ci demandent un coup d'œil
 
 ### Les questions et les écritures lentes
 
-Une question ou une écriture qui prend `[log] slow_ms` ou plus (200 ms par défaut ; 0 : aucune) reçoit une ligne :
+Une question ou une écriture qui prend `[log] slow_ms` ou plus (200 ms par défaut ; 0 : aucune) reçoit une ligne ;
+celles du serveur ci-dessus :
 
 ```text
-cepheus: slow question: database shop, token shop-web, 412.3 ms, 18204331 candidates, 20 rows, ok: find give x0 x1 where [x0 invoice/status ?] [x0 invoice/total x1] sort column 1 desc limit 20
-cepheus: slow question: database shop, token reports, 2000.4 ms, 210532864 candidates, 0 rows, timeout: find group x0 sum x2 where [x1 invoice/client x0] [x1 invoice/total x2]
-cepheus: slow question: database shop, token shop-web, 251.7 ms, 4194304 candidates, ok: watch give all where [x0 invoice/status ?]
-cepheus: slow write: database shop, token import, 1840.2 ms, group 4801, ok: 3000000 operations (3000000 adds) of client/name, client/city, client/code
+cepheus: slow question: database shop, token shop-web, 2092.8 ms, 36761990 candidates, 1 row, ok: find group count where [x0 invoice/client ?] [x1 invoice/status ?]
+cepheus: slow question: database shop, token shop-web, 1722.7 ms, 37074621 candidates, 20 rows, ok: find give x0 x1 where [x0 invoice/status ?] [x0 invoice/client x2] [x1 invoice/client x2] sort column 1 desc limit 20
+cepheus: slow question: database shop, token shop-web, 2358.0 ms, 36761990 candidates, ok: watch group count where [x0 invoice/client ?] [x1 invoice/status ?]
+cepheus: slow question: database shop, token shop-web, 303.0 ms, 20111134 candidates, 0 rows, timeout: find group count where [x0 invoice/status ?] [x1 invoice/status ?] [x2 invoice/status ?]
+cepheus: slow write: database shop, token shop-web, 624.9 ms, group 173, ok: 900000 operations (900000 adds) of invoice/status, invoice/total, invoice/client
 ```
 
 - **Ce qu'elle tient** : la base, le nom du token (jamais le token), le temps au serveur (de la requête lue à la
@@ -513,14 +524,14 @@ mv "$out.tmp" "$out"
 ```text
 # HELP cepheus_database_question_seconds Time of a question at the server, from its request to its reply
 # TYPE cepheus_database_question_seconds summary
-cepheus_database_question_seconds{database="shop",quantile="0.5"} 0.000047
-cepheus_database_question_seconds{database="shop",quantile="0.99"} 0.001855
-cepheus_database_question_seconds{database="shop",quantile="1"} 0.241663
-cepheus_database_question_seconds_sum{database="shop"} 2.993012
-cepheus_database_question_seconds_count{database="shop"} 18340
+cepheus_database_question_seconds_count{database="shop"} 18004
+cepheus_database_question_seconds_sum{database="shop"} 6.640904
+cepheus_database_question_seconds{database="shop",quantile="0.5"} 0.000008
+cepheus_database_question_seconds{database="shop",quantile="0.99"} 0.000017
+cepheus_database_question_seconds{database="shop",quantile="1"} 2.357964
 # HELP cepheus_database_writes_slow_total Writes that took the slow time or more
 # TYPE cepheus_database_writes_slow_total counter
-cepheus_database_writes_slow_total{database="shop"} 0
+cepheus_database_writes_slow_total{database="shop"} 1
 ```
 
 Des alertes utiles : `rate(cepheus_database_questions_slow_total[5m]) > 0`, un
