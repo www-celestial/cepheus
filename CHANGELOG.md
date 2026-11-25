@@ -239,6 +239,13 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 
 ### Fixes
 
+- A local reader's runs that a merge replaced leave the program's page cache once its states on the new base are
+  published, as the server's do, and the pages that reads begun before take back leave at the next merge. Their pages
+  stayed until the cache, 256 MiB, was full, a base's worth at each merge, and the reads made while the states moved
+  to the new base read the old one back for good: under TechEmpower's updates (20 local reads and a write of 20 facts
+  a request, merges every few seconds), a Cesia program that only followed the database grew from 76 to 322 MB in 20
+  minutes, one that read and wrote to 119 MB with the first half of the fix; now 51 and 64 MB, level from the 13th
+  minute (measured side by side, 2026-11-25; [Cesia](docs/book/cesia.md#what-it-costs)).
 - `cepheus verify` (and the check of a backup) named as damage a run whose journal position is the end of a segment
   that the next one follows (the frame after the run's groups began a new segment): a whole database was taken for a
   damaged one. Such a position is now the start of the next segment's first frame, as the engine reads it.

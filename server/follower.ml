@@ -28,6 +28,7 @@ type t = {
   hl : Mutex.t;  (* the newest state and the live questions' hub, between the stream and a new watch *)
   mutable hub : Live.hub option;  (* the live questions of this program on this database, evaluated here *)
   mutable last_vseq : int;  (* the number of the newest frame applied *)
+  mutable replaced : Store.run list;  (* the runs the last new base replaced: their pages leave the cache again at the next *)
 }
 
 exception Stream of string
@@ -118,17 +119,18 @@ let chain t names files =
     | [] -> true
   in
   if not (rests built) then stream "the runs do not rest on one another";
+  let gone = List.filter_map (fun (k, ((r : Store.run), _)) -> if List.mem_assoc k built then None else Some r) t.built in
   t.built <- built;
-  base_of (List.map snd built)
+  base_of (List.map snd built), gone
 
 (* ---- the stream ---- *)
 
 let create ~id ~word ~names ~files =
   let t =
     { id; word; built = []; building = Store.empty (); log = []; states = Atomic.make []; sm = Mutex.create (); sc = Condition.create ();
-      dead = false; applied = 0; hl = Mutex.create (); hub = None; last_vseq = 0 }
+      dead = false; applied = 0; hl = Mutex.create (); hub = None; last_vseq = 0; replaced = [] }
   in
-  t.building <- chain t names files;
+  t.building <- fst (chain t names files);
   t
 
 (* publish under the lock, so that a read that found nothing and waits is woken; the states the number has passed
@@ -181,7 +183,7 @@ let durable t vseq = Option.iter (fun h -> Live.durable h vseq) (Mutex.protect t
    gives the same states on fewer runs); a state before them stays on the runs it has (a large group's run comes
    before the state it makes). The frames the new runs hold are dropped from the log. *)
 let runs t ~vseq ~names ~files =
-  let base = chain t names files in
+  let base, gone = chain t names files in
   let h = base.group in
   (* the log's frames, oldest first, onto the base: up to each target group in turn *)
   let frames = List.rev t.log in
@@ -217,7 +219,13 @@ let runs t ~vseq ~names ~files =
       | None -> ());
   let states = List.map (fun s -> match at s.view.group with Some v -> { s with view = v } | None -> s) keep in
   t.log <- List.filter (fun (f0, n, _) -> f0 + n - 1 > h) t.log;
-  publish t states
+  publish t states;
+  (* The runs the new base replaced leave the page cache now that no read starts on them, as the server's do (Engine):
+     else their pages stayed until the cache was full, a base's worth at each merge. Not before: until the states on
+     the new base are published, every read is on the old ones, and would read their pages back for good. The pages
+     that a read begun before takes back leave at the next new base; a state still on them reads them from the file. *)
+  List.iter (fun (r : Store.run) -> Pages.drop r.a.pg) (t.replaced @ gone);
+  t.replaced <- gone
 
 (* the stream ended (the server closed it, died, or cut it off): nothing more is served *)
 let stop t =

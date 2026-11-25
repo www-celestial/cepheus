@@ -932,7 +932,8 @@ The follow stream is open when `Connect` returns; the first local read may wait 
 written since the database's newest run (its catch-up), and later ones only, now and then, the microseconds of a
 frame on its way. What it costs: a domain of the program applies every group the server writes, by any program (1.7 µs
 a change alone, about 4.5 µs under 18,000 groups a second, measured at the server), and the program holds a
-cache of the database's pages (256 MB at most) and the changes since the last merge ([server](server.md#what-it-costs)).
+cache of the pages of the database's newest runs (256 MB at most: the runs a merge replaced leave it at once) and the
+changes since the last merge ([server](server.md#what-it-costs)).
 
 If the follow stream ends (the server restarted), the package reads at the server meanwhile and follows again, at most
 every 100 ms, without the program noticing.
@@ -1075,6 +1076,32 @@ a server started from the same database for each):
 - 10,000 screens of one program: 90 ms to the last fiber, before their WebSockets. A server program with
   `cesia run --workers 4` holds 2,500 screens a process, each process its own connection and watch: 17.6 ms to the
   last fiber.
+
+**Under sustained writes.** TechEmpower's updates (a request: 20 local reads, then one write of 20 facts; 32
+connections; the database merges its delta every few seconds), on 2026-11-25, the machine shared with other work
+(load 3.6 to 11.8), each side a process of its own on the same database, served in turn, beside a Go server on
+PostgreSQL 18.6 as the control (`net/http` and `pgx`, the same tests):
+
+| | plaintext, the first third of the rounds, then the last | RSS after about 20 minutes of writes: a program that only follows; one that reads and writes |
+|---|---:|---:|
+| Cesia before 1.3 and the client before these fixes | 29,950 then **14,852** a second | **322 MB**; **196 MB** |
+| Cesia 1.3 and this version | 29,075 then 35,690 | 51 MB; 64 MB |
+| Go and PostgreSQL | 42,247 then 65,086 | its process 25 to 28 MB; PostgreSQL 109 to 199 |
+
+- The throughput (12 rounds of 15 s of updates and 5 s of plaintext, 19 minutes): before, a program halved after a few
+  minutes and never came back, plaintext included, while Go rose as the machine grew freer. The cause was Cesia's: once
+  a quarter of its memory limit had been reserved, it checked the limit at every large allocation, each time asking
+  OCaml for the size of its heap; a `std/http` program with no database fell the same (29,294 then 14,918). Cesia 1.3
+  looks once a quarter. (These rounds ran with the first of the two fixes below, which change only the pages kept.)
+- The memory (20 minutes, two writers in turn, 10 of writes each, a program that only follows beside them): the local
+  copy kept the pages of every run that a merge had replaced until its cache, 256 MB, was full, a base's worth at
+  each merge; and the reads made while the copy moved its states onto the new base read the old one back, for good
+  (with the first fix alone, the writer still grew to 119 MB). Now the replaced runs leave once the new states are
+  published, and the pages read back leave at the next merge. The writer's rate stayed level: 1,430 then 1,384 a
+  second.
+- Where Go wins: plaintext, 1.8 times; and its process holds less than half the memory (28 against 64 MB), its pool
+  holding no copy of the data, though with its database the two sides weigh about the same (PostgreSQL 109 to 199 MB,
+  the Cepheus server 115 to 130). Cesia's updates are ahead here: 1,870 against 1,662 a second in the last third.
 
 **Beside the giants.** No Cesia client of PostgreSQL exists (Cesia's `std/sql` speaks SQLite), so PostgreSQL is
 measured through its C library, the fastest client it has: a Cesia program on the server's machine reads a row 34

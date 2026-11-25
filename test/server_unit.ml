@@ -897,6 +897,54 @@ let followed_rules () =
   Cepheus.close db;
   C.rmrf base
 
+(* A follower's run that a merge replaced leaves the page cache once the states on the new base are published, as the
+   server's do (Engine): its pages stayed resident until the cache was full, a base's worth at each merge (a Cesia app
+   that followed its database under writes grew from 41 to 225 MB in 15 minutes). A state still on the old run reads it
+   again from its file, and the pages it takes back leave at the next new base (the reads begun before the publication:
+   they took the whole base back at each merge, a writer that read 63 -> 138 MB in 15 minutes). *)
+let follower_drops_replaced () =
+  let ok = function Ok x -> x | Error e -> failwith (Cepheus.message e) in
+  let base = Filename.concat (Option.value (Sys.getenv_opt "CEPHEUS_TMP") ~default:(Filename.get_temp_dir_name ())) (Printf.sprintf "cepheus-drop-%d" (Unix.getpid ())) in
+  C.rmrf base;
+  Unix.mkdir base 0o700;
+  let dir = Filename.concat base "db" in
+  let db = ok (Cepheus.open_ dir) in
+  let name = match ok (Cepheus.declare db [ prop "name" Ttext ]) with [ p ] -> p | _ -> assert false in
+  let write k = ignore (ok (Cepheus.write db (List.init 200 (fun i -> Add (-(i + 1), name, Text (Printf.sprintf "thing %d of batch %d, a text that fills its pages" i k)))))) in
+  for k = 1 to 20 do write k done;
+  ok (Cepheus.snapshot db);
+  let id = Engine.read_meta Disk.real dir and sdir = Filename.concat dir "snapshots" in
+  let chain () = List.sort (fun (_, h, _) (_, h', _) -> compare h' h) (Snapshot.list Disk.real sdir) in
+  let names runs = List.map (fun (lo, hi, _) -> lo, hi) runs in
+  let files runs = List.map (fun (_, _, n) -> Follower.Mem (Disk.read_all Disk.real (Filename.concat sdir n))) runs in
+  let first = chain () in
+  let fol = Follower.create ~id ~word:(fun () -> 1) ~names:(names first) ~files:(files first) in
+  Follower.frame fol ~vseq:1 ~first:0 ~count:0 Bytes.empty;
+  let v = match Follower.try_view fol with Some v -> v | None -> failwith "drop: the follower holds no state" in
+  let facts = C.facts_of_view v in
+  let pg = v.runs.(0).a.pg in
+  let held () = Array.fold_left (fun n f -> if f != Pages.absent then n + 1 else n) 0 pg.frames in
+  check (held () > 1) "drop: the run's pages read are in the cache (%d of %d)" (held ()) (Pages.count pg);
+  (* more groups, then the merge into one run that replaces the first *)
+  for k = 21 to 25 do write k done;
+  ok (Cepheus.snapshot db);
+  let merged = chain () in
+  check (List.length merged = 1 && names merged <> names first) "drop: the merge replaced the run";
+  Follower.runs fol ~vseq:1 ~names:(names merged) ~files:(files merged);
+  check (held () = 0) "drop: the replaced run left the cache (%d of its pages held)" (held ());
+  check (C.F.equal (C.facts_of_view v) facts) "drop: a state on the replaced run reads it again";
+  check (fol.building.group = (Cepheus.view db).group && Array.length fol.building.runs = 1) "drop: the newest state rests on the merge";
+  check (held () > 1) "drop: the pages read again are in the cache (%d)" (held ());
+  (* the next merge: the pages read back leave too *)
+  for k = 26 to 30 do write k done;
+  ok (Cepheus.snapshot db);
+  let next = chain () in
+  check (names next <> names merged) "drop: a second merge";
+  Follower.runs fol ~vseq:1 ~names:(names next) ~files:(files next);
+  check (held () = 0) "drop: the pages read back left at the next new base (%d held)" (held ());
+  Cepheus.close db;
+  C.rmrf base
+
 (* ---- the client's request ids: 0 is the server's own id (a frame that says why it closes a connection), never a
    request's, even after 2^31 requests on one connection ---- *)
 
@@ -2104,6 +2152,7 @@ let () =
   rights_equality ();
   fdpass ();
   followed_rules ();
+  follower_drops_replaced ();
   request_ids ();
   tcp_connect ();
   files ();
