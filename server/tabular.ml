@@ -5,9 +5,11 @@
 
    The rules, those of PostgreSQL's COPY where a choice had to be made (sql-copy.html):
    - CSV: a field that starts with a quote is quoted, "" inside it is a quote, and it may hold commas and line breaks;
-     a quote anywhere else is refused, as a character after a closing quote. An unquoted empty field is no value, a
-     quoted one ("") the empty text: PostgreSQL's NULL and empty string. A record ends at a line break outside quotes,
-     LF or CR LF. A UTF-8 byte order mark at the start of the file is skipped.
+     a quote anywhere else is refused, as a character after a closing quote, and it opens nothing: the record still
+     ends at its line break, so that one line is bad (RFC 4180's grammar: an unquoted field holds no quote; PostgreSQL's
+     COPY reads a quote inside a field as opening a quoted part, and a stray one runs to the next stray one). An
+     unquoted empty field is no value, a quoted one ("") the empty text: PostgreSQL's NULL and empty string. A record
+     ends at a line break outside quotes, LF or CR LF. A UTF-8 byte order mark at the start of the file is skipped.
    - Texts are UTF-8 without NUL bytes (PostgreSQL refuses 0x00 in a text too): checked, never repaired.
    - Numbers are read exactly: an Int, money with at most its scale of decimals (12.50 is 1250 cents, never through
      a float), a float as IEEE's nearest double. Dates are RFC 3339 (2026-11-24, 2026-11-24T10:30:00Z,
@@ -271,8 +273,11 @@ type format = Csv | Jsonl
    about [target] bytes of them (one at least, until the end), copied into a block of their own so that other domains
    can parse them while the next batch is read. A record's bytes leave out its line break (LF, or CR LF) and a blank
    record (no byte) is skipped; [lines] gives the line each record starts at (the header is line 1), counting the
-   line breaks inside quotes. CSV finds a record's end by its quotes alone: a quote opens or closes, so "" inside a
-   quoted field closes and opens again; a record that is not well quoted is then refused by [csv_fields]. *)
+   line breaks inside quotes. CSV finds a record's end by its quotes as RFC 4180 places them: a quote at a field's
+   start opens a quoted field, the next quote closes it, and a quote right after that one is "" (inside again); a quote
+   anywhere else opens nothing (the line is bad, and [csv_fields] refuses it). A batch ends once [target] bytes are
+   behind its first record, blank lines included, and the bytes before a batch's first record are dropped as they are
+   passed: the buffer holds a batch and a record at most, whatever the file holds. *)
 type batch = {
   data : Bytes.t;
   starts : int array;
@@ -289,7 +294,7 @@ type reader = {
   mutable len : int;  (* bytes held *)
   mutable pos : int;  (* the start of the first record not given *)
   mutable scanned : int;  (* bytes of buf walked for record ends *)
-  mutable quoted : bool;  (* CSV: inside quotes at [scanned] *)
+  mutable state : int;  (* CSV, at [scanned]: [field_start], [unquoted], [in_quotes] or [after_quote] *)
   mutable line : int;  (* the line at [scanned] *)
   mutable rline : int;  (* the line the record at [pos] starts at *)
   mutable eof : bool;
@@ -300,10 +305,17 @@ type reader = {
 
 let read_size = 1 lsl 20
 
+(* where the CSV scan is: at a field's start (a quote opens it), in an unquoted field (a quote there opens nothing),
+   inside quotes, or right after a quote that closed them (another quote is "", inside again) *)
+let field_start = 0
+let unquoted = 1
+let in_quotes = 2
+let after_quote = 3
+
 (* a reader of fd from its offset [off], a record's start, which is record [index] and starts at line [line]; at the
    file's start a UTF-8 byte order mark is skipped *)
 let reader ?(off = 0) ?(line = 1) ?(index = 0) fmt fd =
-  let r = { fd; fmt; buf = Bytes.create (2 * read_size); len = 0; pos = 0; scanned = 0; quoted = false; line; rline = line; eof = false; count = index; bytes = 0; boff = off } in
+  let r = { fd; fmt; buf = Bytes.create (2 * read_size); len = 0; pos = 0; scanned = 0; state = field_start; line; rline = line; eof = false; count = index; bytes = 0; boff = off } in
   if off = 0 then begin
     let rec fill () = if r.len < 3 && not r.eof then (match Unix.read fd r.buf r.len (Bytes.length r.buf - r.len) with 0 -> r.eof <- true | k -> r.len <- r.len + k; r.bytes <- r.bytes + k; fill ()) in
     fill ();
@@ -324,15 +336,19 @@ let rec read_more r =
   | k -> r.len <- r.len + k; r.bytes <- r.bytes + k
   | exception Unix.Unix_error (Unix.EINTR, _, _) -> read_more r
 
-let next r target =
-  (* the bytes before the first record not given are dropped first: the buffer holds a batch and a record at most *)
+(* the bytes before [r.pos] dropped (none of them belongs to a record not given) *)
+let drop r =
   if r.pos > 0 then begin
     r.boff <- r.boff + r.pos;
     Bytes.blit r.buf r.pos r.buf 0 (r.len - r.pos);
     r.len <- r.len - r.pos;
     r.scanned <- r.scanned - r.pos;
     r.pos <- 0
-  end;
+  end
+
+let next r target =
+  (* the bytes before the first record not given are dropped first: the buffer holds a batch and a record at most *)
+  drop r;
   let starts = ref [] and stops = ref [] and lines = ref [] and first = ref (-1) and last = ref 0 and n = ref 0 in
   let record s e line =
     let e = if e > s && Bytes.get r.buf (e - 1) = '\r' then e - 1 else e in
@@ -345,34 +361,41 @@ let next r target =
   while not !fin do
     (* the record ends in what is held *)
     let i = ref r.scanned in
-    while !i < r.len && (!first < 0 || !last - !first < target) do
+    while !i < r.len && (!first < 0 || r.pos - !first < target) do
       (match r.fmt with
        | Jsonl -> (
          match Bytes.index_from_opt r.buf !i '\n' with
          | Some j when j < r.len -> record r.pos j r.rline; r.line <- r.line + 1; r.rline <- r.line; r.pos <- j + 1; i := j + 1
          | _ -> i := r.len)
        | Csv ->
-         let j = ref !i and stop = ref (-1) in
+         let j = ref !i and stop = ref (-1) and st = ref r.state in
          while !stop < 0 && !j < r.len do
-           (match Bytes.unsafe_get r.buf !j with
-            | '"' -> r.quoted <- not r.quoted
-            | '\n' -> r.line <- r.line + 1; if not r.quoted then stop := !j
-            | _ -> ());
+           let c = Bytes.unsafe_get r.buf !j in
+           (if !st = in_quotes then (if c = '"' then st := after_quote else if c = '\n' then r.line <- r.line + 1)
+            else
+              match c with
+              | ',' -> st := field_start
+              | '\n' -> r.line <- r.line + 1; stop := !j; st := field_start
+              | '"' -> if !st <> unquoted then st := in_quotes
+              | _ -> st := unquoted);
            incr j
          done;
+         r.state <- !st;
          if !stop >= 0 then (record r.pos !stop r.rline; r.rline <- r.line; r.pos <- !stop + 1);
          i := !j);
       r.scanned <- !i
     done;
-    if !first >= 0 && (!last - !first >= target || r.eof || r.scanned < r.len) then fin := true
+    if !first >= 0 && (r.pos - !first >= target || r.eof || r.scanned < r.len) then fin := true
     else if r.eof then begin
       (* the last record, without a line break *)
-      if r.len - r.pos > max_record then bad "line %d: a record of more than %d MiB (%s)" r.rline (max_record lsr 20) (if r.fmt = Csv && r.quoted then "a quote left open?" else "no line break");
+      if r.len - r.pos > max_record then bad "line %d: a record of more than %d MiB (%s)" r.rline (max_record lsr 20) (if r.fmt = Csv && r.state = in_quotes then "a quote left open?" else "no line break");
       if r.pos < r.len then (record r.pos r.len r.rline; r.pos <- r.len; r.scanned <- r.len);
       fin := true
     end
     else begin
-      if r.len - r.pos > max_record then bad "line %d: a record of more than %d MiB (%s)" r.rline (max_record lsr 20) (if r.fmt = Csv && r.quoted then "a quote left open?" else "no line break");
+      if r.len - r.pos > max_record then bad "line %d: a record of more than %d MiB (%s)" r.rline (max_record lsr 20) (if r.fmt = Csv && r.state = in_quotes then "a quote left open?" else "no line break");
+      (* blank lines only so far: passed, so dropped *)
+      if !first < 0 then drop r;
       read_more r
     end
   done;
@@ -388,12 +411,25 @@ let next r target =
 (* a field: its text, and whether it was quoted *)
 type field = { text : string; quoted : bool }
 
-(* The fields of the record b.[o, e) (no line break at its end). *)
-let csv_fields (b : Bytes.t) o e =
-  let fields = ref [] and i = ref o in
+(* The number of fields of the record b.[o, e), its commas outside quotes counted as [next] places quotes; nothing
+   made *)
+let csv_count (b : Bytes.t) o e =
+  let n = ref 1 and st = ref field_start in
+  for j = o to e - 1 do
+    let c = Bytes.unsafe_get b j in
+    if !st = in_quotes then (if c = '"' then st := after_quote)
+    else match c with ',' -> incr n; st := field_start | '"' -> if !st <> unquoted then st := in_quotes | _ -> st := unquoted
+  done;
+  !n
+
+(* The fields of the record b.[o, e) (no line break at its end), [limit] at most: a record of more is given
+   [limit] + 1 fields, the rest of it neither read nor made (a record of 8 MiB of commas is 8.4 M fields: 740 MB). *)
+let csv_fields ?(limit = max_int) (b : Bytes.t) o e =
+  let fields = ref [] and i = ref o and nf = ref 0 in
   let buf = Buffer.create 64 in
   let fin = ref false in
-  while not !fin do
+  while (not !fin) && !nf <= limit do
+    incr nf;
     if !i < e && Bytes.get b !i = '"' then begin
       (* a quoted field: to its closing quote, "" a quote *)
       Buffer.clear buf;
@@ -409,13 +445,13 @@ let csv_fields (b : Bytes.t) o e =
       fields := { text = Buffer.contents buf; quoted = true } :: !fields;
       if !i >= e then fin := true
       else if Bytes.get b !i = ',' then incr i
-      else bad "a character after the closing quote of field %d (a quote inside a field is written \"\")" (List.length !fields)
+      else bad "a character after the closing quote of field %d (a quote inside a field is written \"\")" !nf
     end
     else begin
       (* to the next comma or the record's end, no further *)
       let j = ref !i in
       while !j < e && Bytes.unsafe_get b !j <> ',' do
-        if Bytes.unsafe_get b !j = '"' then bad "a quote inside field %d, which does not start with one (quote the field, a quote in it as \"\")" (List.length !fields + 1);
+        if Bytes.unsafe_get b !j = '"' then bad "a quote inside field %d, which does not start with one (quote the field, a quote in it as \"\")" !nf;
         incr j
       done;
       let j = !j in
@@ -447,9 +483,14 @@ type json = Null | Bool of bool | Num of string  (* its text, read by the field'
 (* nesting deeper than this is refused: a line of 8 MiB of '[' would otherwise take the stack *)
 let max_depth = 64
 
-(* The JSON value of b.[o, e) *)
-let json_value (b : Bytes.t) o e =
+(* the items of lists and the members of objects that a record's JSON holds, all its fields together (In's bound, a
+   page's rows): a record of 8 MiB of [1,1,...] would otherwise be 4 M values, 400 MB to read, on each domain at once *)
+let max_values = 100_000
+
+(* The JSON value of b.[o, e); [budget]: the items and members it may still hold (a record's fields share one) *)
+let json_value ?(budget = ref max_values) (b : Bytes.t) o e =
   let i = ref o in
+  let item () = decr budget; if !budget < 0 then bad "more than %d values in one record (lists' items and objects' members)" max_values in
   let peek () = if !i < e then Bytes.get b !i else '\000' in
   let ws () = while !i < e && (match Bytes.get b !i with ' ' | '\t' | '\r' | '\n' -> true | _ -> false) do incr i done in
   let expect c = if peek () = c && !i < e then incr i else bad "%s at byte %d" (if !i < e then Printf.sprintf "%C" (Bytes.get b !i) else "the end of the line") (!i - o + 1) in
@@ -551,9 +592,10 @@ let json_value (b : Bytes.t) o e =
       ws ();
       if peek () = ']' && !i < e then (incr i; Arr [])
       else begin
+        item ();
         let l = ref [ value (depth + 1) ] in
         ws ();
-        while peek () = ',' && !i < e do incr i; l := value (depth + 1) :: !l; ws () done;
+        while peek () = ',' && !i < e do incr i; item (); l := value (depth + 1) :: !l; ws () done;
         expect ']';
         Arr (List.rev !l)
       end
@@ -565,7 +607,7 @@ let json_value (b : Bytes.t) o e =
     ws ();
     if peek () = '}' && !i < e then (incr i; [])
     else begin
-      let one () = ws (); let k = str () in ws (); expect ':'; let v = value (depth + 1) in ws (); k, v in
+      let one () = item (); ws (); let k = str () in ws (); expect ':'; let v = value (depth + 1) in ws (); k, v in
       let l = ref [ one () ] in
       while peek () = ',' && !i < e do incr i; l := one () :: !l done;
       expect '}';

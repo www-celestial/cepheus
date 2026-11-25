@@ -135,10 +135,10 @@ let scalar_json f j = match f.typ, f.link with Value.Tlink, Key k -> of_json k.k
 
 let distinct l = List.sort_uniq Value.compare l
 
-let cell_text f s =
+let cell_text ~budget f s =
   try
     if f.many then
-      match T.json_value (Bytes.unsafe_of_string s) 0 (String.length s) with
+      match T.json_value ~budget (Bytes.unsafe_of_string s) 0 (String.length s) with
       | T.Arr l -> distinct (List.map (scalar_json f) l)
       | _ -> T.bad "a field of several values holds a JSON list ([\"a\", \"b\"])"
       | exception T.Bad m -> T.bad "a field of several values holds a JSON list ([\"a\", \"b\"]): %s" m
@@ -238,12 +238,16 @@ let parse_record ctx (b : T.batch) k =
   (try
      match ctx.fmt with
      | T.Csv ->
-       let fs = T.csv_fields b.data b.starts.(k) b.stops.(k) in
-       if Array.length fs <> Array.length ctx.cols then T.bad "%d fields, the header has %d" (Array.length fs) (Array.length ctx.cols);
+       (* the header's count of fields made at most, and one more: the count of a longer record is read, never made *)
+       let ncols = Array.length ctx.cols in
+       let fs = T.csv_fields ~limit:ncols b.data b.starts.(k) b.stops.(k) in
+       if Array.length fs > ncols then T.bad "%d fields, the header has %d" (T.csv_count b.data b.starts.(k) b.stops.(k)) ncols;
+       if Array.length fs < ncols then T.bad "%d fields, the header has %d" (Array.length fs) ncols;
+       let budget = ref T.max_values in
        Array.iteri
          (fun c (x : T.field) ->
            let i = ctx.cols.(c) in
-           if i >= 0 && (x.quoted || x.text <> "") then row.cells.(i) <- cell_text ctx.fields.(i) x.text)
+           if i >= 0 && (x.quoted || x.text <> "") then row.cells.(i) <- cell_text ~budget ctx.fields.(i) x.text)
          fs
      | T.Jsonl ->
        let seen = Array.make (Array.length ctx.fields) false in
@@ -257,7 +261,12 @@ let parse_record ctx (b : T.batch) k =
              seen.(i) <- true;
              row.cells.(i) <- cell_json ctx.fields.(i) j)
          (T.json_object b.data b.starts.(k) b.stops.(k))
-   with T.Bad m -> row.bad <- Some m);
+   with T.Bad m ->
+     (* a record over several lines (a quote at a field's start opens a field that holds line breaks): its last line
+        named, so that no line is left out without a word *)
+     let breaks = ref 0 in
+     for j = b.starts.(k) to b.stops.(k) - 1 do if Bytes.unsafe_get b.data j = '\n' then incr breaks done;
+     row.bad <- Some (if !breaks = 0 then m else Printf.sprintf "%s (the record runs to line %d: a quote at a field's start opens a field to the next quote, line breaks included)" m (line + !breaks)));
   row
 
 let parse_batch ctx b = Array.init (Array.length b.T.starts) (parse_record ctx b)
@@ -318,6 +327,12 @@ let holders find prop (values : Value.t list) =
   tbl
 
 let good r = r.bad = None
+
+(* what a failure that is no refusal says: the connection lost, the disk, anything raised *)
+let failure = function
+  | Client.Broken m -> "the connection to the server: " ^ m
+  | Unix.Unix_error (e, call, arg) -> Printf.sprintf "%s%s: %s" call (if arg = "" then "" else " " ^ arg) (Unix.error_message e)
+  | e -> Printexc.to_string e
 
 (* a link's keys of good rows found in the database: each key becomes its thing's link; a key no thing holds makes
    the row bad *)
@@ -426,6 +441,7 @@ type writer = {
   c : Condition.t;
   q : job option Queue.t;  (* None: the end *)
   mutable failed : ((int * int) * string) option;  (* the refused group's first and last line, and why *)
+  mutable lost : bool;  (* the failed group's answer was lost (the write raised): it may be in the database *)
   mutable groups : (int * int * int) list;  (* written: the group's number and its first and last line, newest first
                                               (never the job: its operations are freed once written) *)
   mutable thread : Thread.t option;
@@ -434,7 +450,7 @@ type writer = {
 }
 
 let writer write =
-  let w = { m = Mutex.create (); c = Condition.create (); q = Queue.create (); failed = None; groups = []; thread = None; waited = 0.; busy = false } in
+  let w = { m = Mutex.create (); c = Condition.create (); q = Queue.create (); failed = None; lost = false; groups = []; thread = None; waited = 0.; busy = false } in
   let rec loop () =
     let j =
       Mutex.protect w.m (fun () ->
@@ -449,12 +465,14 @@ let writer write =
     | None -> ()
     | Some j -> (
       let t = Unix.gettimeofday () in
-      (* whatever it raises ends the import as a refusal: the thread never dies with a group waiting on it *)
-      let r = try write j.ops with e -> Error (Printexc.to_string e) in
+      (* whatever it raises ends the import, its group's outcome unknown (the connection lost after the request was
+         sent): the thread never dies with a group waiting on it *)
+      let r = try Ok (write j.ops) with e -> Error (failure e) in
       w.waited <- w.waited +. (Unix.gettimeofday () -. t);
       match r with
-      | Ok g -> Mutex.protect w.m (fun () -> w.groups <- (g, j.first, j.last) :: w.groups); loop ()
-      | Error m -> Mutex.protect w.m (fun () -> w.failed <- Some ((j.first, j.last), m); Condition.broadcast w.c))
+      | Ok (Ok g) -> Mutex.protect w.m (fun () -> w.groups <- (g, j.first, j.last) :: w.groups); loop ()
+      | Ok (Error m) -> Mutex.protect w.m (fun () -> w.failed <- Some ((j.first, j.last), m); Condition.broadcast w.c)
+      | Error m -> Mutex.protect w.m (fun () -> w.failed <- Some ((j.first, j.last), m); w.lost <- true; Condition.broadcast w.c))
   in
   w.thread <- Some (Thread.create loop ());
   w
@@ -507,7 +525,8 @@ let import ~props ~find ~write ~say (o : options) =
     | T.Csv ->
       let h = T.next r 1 in
       if Array.length h.starts = 0 then stop "%s is empty: a CSV file starts with its header (the names of its columns)" o.file;
-      let names = try T.csv_fields h.data h.starts.(0) h.stops.(0) with T.Bad m -> stop "%s line 1, the header: %s" o.file m in
+      let names = try T.csv_fields ~limit:T.max_values h.data h.starts.(0) h.stops.(0) with T.Bad m -> stop "%s line 1, the header: %s" o.file m in
+      if Array.length names > T.max_values then stop "%s line 1, the header: more than %d columns" o.file T.max_values;
       let cols =
         Array.map
           (fun (x : T.field) ->
@@ -600,7 +619,10 @@ let import ~props ~find ~write ~say (o : options) =
          Array.iter (fun row -> match row.bad with Some m -> report row m | None -> incr nrows) rows
        end
      done
-   with T.Bad m -> stop "%s: %s; nothing was written" base m);
+   with
+   | T.Bad m -> stop "%s: %s; nothing was written" base m
+   | Stop _ as e -> raise e
+   | e -> stop "%s: %s; nothing was written" base (failure e));
   if Lazy.is_val fd2 then Unix.close (Lazy.force fd2);
   let t1 = Unix.gettimeofday () in
   say (Printf.sprintf "%s: %d rows checked in %.2f s%s" base !nrows (t1 -. t0) (if !nbad > 0 then Printf.sprintf ", %d left out" !nbad else ""));
@@ -662,6 +684,8 @@ let import ~props ~find ~write ~say (o : options) =
     | Exit -> Ok ()
     | Stop m -> Error m
     | T.Bad m -> Error (Printf.sprintf "%s: %s" base m)
+    (* anything else (the connection lost, the disk): the writer finished all the same, what it wrote named *)
+    | e -> Error (Printf.sprintf "%s: %s" base (failure e))
   in
   finish w;
   let t2 = Unix.gettimeofday () in
@@ -674,6 +698,8 @@ let import ~props ~find ~write ~say (o : options) =
       Printf.sprintf "written before it: lines %d to %d, in group%s %d%s" l0 ln (if gn = g0 then "" else "s") g0 (if gn = g0 then "" else Printf.sprintf " to %d" gn)
   in
   (match w.failed, outcome with
+   | Some ((first, last), m), _ when w.lost ->
+     stop "%s lines %d to %d: the answer to their group was lost (%s): it may be in the database, the next group after those written; %s" base first last m (written ())
    | Some ((first, last), m), _ -> stop "%s lines %d to %d: the database refused their group: %s; %s" base first last m (written ())
    | None, Error m -> stop "%s; %s" m (written ())
    | None, Ok () -> ());

@@ -119,6 +119,117 @@ let forms () =
     (try ignore (T.json_value b 0 (Bytes.length b)) with T.Bad _ -> ())
   done
 
+(* ---- the reader's bounds and the import's failures, in this process (find and write given) ---- *)
+
+let mprop ?(many = false) ?(unique = false) name typ = { Schema.name; typ; many; unique }
+let mock_props = [ 16, mprop "client/Name" Value.Ttext; 17, mprop "client/Age" Value.Tint; 18, mprop ~many:true "client/Tags" Value.Tint ]
+
+(* an import of [content] with [find] and [write]: its summary, or the reason it stopped *)
+let mock ?(props = mock_props) ?(find = fun _ _ -> []) ?(wr = fun _ -> Ok 1) ?(skip_bad = true) content =
+  let file = Filename.concat !dir "mock.csv" in
+  write file content;
+  let o = { Transfer.file; kind = "client"; format = T.Csv; maps = []; links = []; skip_bad; upsert = false; why = "test" } in
+  let said = Buffer.create 256 in
+  match Transfer.import ~props ~find ~write:wr ~say:(fun m -> Buffer.add_string said (m ^ "\n")) o with
+  | s -> Ok s, Buffer.contents said
+  | exception Transfer.Stop m -> Error m, Buffer.contents said
+  | exception e -> Error ("escaped: " ^ Printexc.to_string e), Buffer.contents said
+
+(* the heap's growth in MB while [f] runs: its peak above what the process held before *)
+let peak_mb f =
+  Gc.compact ();
+  let before = (Gc.quick_stat ()).Gc.top_heap_words in
+  let r = f () in
+  r, ((Gc.quick_stat ()).Gc.top_heap_words - before) * 8 / 1_000_000
+
+let short s = if String.length s > 300 then String.sub s 0 300 else s
+
+let bounds () =
+  (* blank lines: passed and dropped, never held: the buffer stays at its 2 MiB, before a record and after one *)
+  List.iter
+    (fun (what, blank) ->
+      let f = Filename.concat !dir "blank.csv" in
+      let b = Buffer.create (25 lsl 20) and k = ref 0 in
+      Buffer.add_string b "first\n";
+      while Buffer.length b < 24 lsl 20 do Buffer.add_string b blank; incr k done;
+      Buffer.add_string b "last\n";
+      write f (Buffer.contents b);
+      let fd = Unix.openfile f [ Unix.O_RDONLY ] 0 in
+      let r = T.reader T.Csv fd in
+      let got = ref [] and fin = ref false in
+      while not !fin do
+        let bt = T.next r (1 lsl 20) in
+        if Array.length bt.T.starts = 0 then fin := true
+        else Array.iteri (fun j s -> got := (Bytes.sub_string bt.data s (bt.stops.(j) - s), bt.lines.(j)) :: !got) bt.starts
+      done;
+      Unix.close fd;
+      C.check (List.rev !got = [ "first", 1; "last", 2 + !k ]) "24 MiB of %s: the two records and their lines" what;
+      C.check (Bytes.length r.T.buf <= 4 lsl 20) "24 MiB of %s: the reader's buffer at %d bytes (2 MiB, doubled once at most)" what (Bytes.length r.T.buf))
+    [ "LF", "\n"; "CR LF", "\r\n" ];
+  (* a quote opens a quoted field at a field's start only (RFC 4180): elsewhere it opens nothing and the record ends
+     at its line break; "" inside quotes, and a quote right after a closing one *)
+  let f = Filename.concat !dir "quotes.csv" in
+  write f "a,b\nbob\"x,2\ncarl,3\n\"q\"\"r\",4\n\"multi\nline\",5\n\"c\"x\"d,6\ndora,7\n\"\",\"\"\"\"\n";
+  let fd = Unix.openfile f [ Unix.O_RDONLY ] 0 in
+  let bt = T.next (T.reader T.Csv fd) (1 lsl 20) in
+  Unix.close fd;
+  let recs = Array.to_list (Array.mapi (fun j s -> Bytes.sub_string bt.T.data s (bt.T.stops.(j) - s), bt.T.lines.(j)) bt.T.starts) in
+  C.check
+    (recs = [ "a,b", 1; "bob\"x,2", 2; "carl,3", 3; "\"q\"\"r\",4", 4; "\"multi\nline\",5", 5; "\"c\"x\"d,6", 7; "dora,7", 8; "\"\",\"\"\"\"", 9 ])
+    "records end at their line break when a quote is inside a field (%d records)" (List.length recs);
+  let fields s = Array.to_list (Array.map (fun (x : T.field) -> x.text) (T.csv_fields (Bytes.of_string s) 0 (String.length s))) in
+  let bad f = match f () with _ -> false | exception T.Bad _ -> true in
+  C.check (fields "\"q\"\"r\",4" = [ "q\"r"; "4" ] && fields "\"\",\"\"\"\"" = [ ""; "\"" ]) "quoted fields";
+  C.check (bad (fun () -> fields "bob\"x,2") && bad (fun () -> fields "\"c\"x\"d,6")) "a quote inside a field, a character after a closing quote: bad";
+  (* --skip-bad: each line with a quote inside a field left out and named; the lines between them written *)
+  let written = ref [] in
+  let wr ops = written := ops @ !written; Ok 1 in
+  (match mock ~wr "Name,Age\nann,1\nbob\"x,2\ncarl,3\ndora,4\neve\"y,5\nfred,6\n" with
+   | Ok s, said ->
+     let names = List.sort compare (List.filter_map (function Resolve.Add (_, 16, Value.Text t) -> Some t | _ -> None) !written) in
+     C.check (s.rows = 4 && s.left_out = 2 && names = [ "ann"; "carl"; "dora"; "fred" ] && has said "line 3: a quote inside field 1" && has said "line 6: a quote inside field 1")
+       "--skip-bad and stray quotes: 4 rows written (%s), 2 named: %s" (String.concat " " names) said
+   | Error m, _ -> C.check false "--skip-bad and stray quotes: %s" m);
+  (* a record that a quote at a field's start runs over several lines: its last line named *)
+  (match mock "Name,Age\n\"open,1\nnext,2\n\"x,3\nlast,4\n" with
+   | Ok s, said -> C.check (s.rows = 1 && s.left_out = 1 && has said "line 2: a character after the closing quote of field 1" && has said "runs to line 4") "a bad record over three lines: %s" said
+   | Error m, _ -> C.check false "a bad record over three lines: %s" m);
+  (* a record of 8 MiB of commas, a list of 8 MiB of values: refused, their fields and values never all made *)
+  let n = (8 lsl 20) - 16 in
+  let commas = "Name,Age\n" ^ String.make n ',' ^ "\n" in
+  let (r, said), mb = peak_mb (fun () -> mock commas) in
+  C.check ((match r with Ok s -> s.left_out = 1 | Error _ -> false) && has said (Printf.sprintf "line 2: %d fields, the header has 2" (n + 1)) && mb < 64)
+    "a record of 8 MiB of commas: refused, its count named, %d MB at the peak: %s" mb (short said);
+  let b = Buffer.create (8 lsl 20) in
+  Buffer.add_string b "Name,Age,Tags\nx,1,\"[";
+  while Buffer.length b < n do Buffer.add_string b "1," done;
+  Buffer.add_string b "1]\"\n";
+  let ones = Buffer.contents b in
+  let (r, said), mb = peak_mb (fun () -> mock ones) in
+  C.check ((match r with Ok s -> s.left_out = 1 | Error _ -> false) && has said "more than 100000 values in one record" && mb < 100)
+    "a list of 4 M values: refused, %d MB at the peak: %s" mb (short said);
+  (* a failure in the second pass that is no refusal (the connection lost): the groups written named *)
+  let rows = String.concat "" ("Name,Age,Boss\n" :: List.init 5000 (fun i -> Printf.sprintf "n%d,%d,7\n" i i)) in
+  let ops0 = !Transfer.group_ops and bb0 = !Transfer.batch_bytes in
+  Transfer.group_ops := 1000;
+  Transfer.batch_bytes := 4096;
+  let props = [ 16, mprop "client/Name" Value.Ttext; 17, mprop "client/Age" Value.Tint; 18, mprop "client/Boss" Value.Tlink; 19, mprop ~unique:true "boss/Code" Value.Tint ] in
+  let groups = ref 0 in
+  let find _ vals = if !groups >= 2 then raise (Client.Broken "the server closed the connection") else List.map (fun v -> 70000, v) vals in
+  let wr _ = incr groups; Ok !groups in
+  (match mock ~props ~find ~wr ~skip_bad:false rows with
+   | Error m, _ -> C.check (has m "the connection to the server: the server closed the connection" && has m "written before it: lines 2 to") "a connection lost in the second pass: %s" m
+   | Ok _, _ -> C.check false "a connection lost in the second pass: written");
+  (* a write whose answer is lost: its group may be in the database, never called refused *)
+  let groups = ref 0 in
+  let find _ vals = List.map (fun v -> 70000, v) vals in
+  let wr _ = incr groups; if !groups = 3 then raise (Client.Broken "the server closed the connection") else Ok !groups in
+  (match mock ~props ~find ~wr ~skip_bad:false rows with
+   | Error m, _ -> C.check (has m "the answer to their group was lost" && has m "it may be in the database" && has m "in groups 1 to 2") "a lost answer: %s" m
+   | Ok _, _ -> C.check false "a lost answer: written");
+  Transfer.group_ops := ops0;
+  Transfer.batch_bytes := bb0
+
 (* ---- the database of the invoices app ---- *)
 
 let prop ?(unique = false) ?(many = false) name typ = { Schema.name; typ; many; unique }
@@ -270,6 +381,28 @@ let hostile c cfg =
   Buffer.add_string lots "Name,Email\nA,a10@x\n\"B,b10@x\n";
   for i = 1 to 900_000 do Buffer.add_string lots (Printf.sprintf "C,c%d@x\n" i) done;
   refuse "a quote left open in 10 MiB" (Buffer.contents lots) "line 3: a record of more than 8 MiB (a quote left open?)";
+  (* a quote inside a field makes its line bad, and no other: --skip-bad writes the lines around it *)
+  let err = accept ~args:[ "--skip-bad" ] "stray quotes, --skip-bad" "Name,Email\nann,q1@x\nbob\"x,q2@x\ncarl,q3@x\ndora,q4@x\neve\"y,q5@x\nfred,q6@x\n" in
+  C.check (has err "line 3: a quote inside field 1" && has err "line 6: a quote inside field 1" && has err "4 rows" && has err "2 bad rows left out") "stray quotes: %s" err;
+  ignore (run ~out [ "export"; "h"; "--kind"; "client"; "--config"; cfg ]);
+  let o = read out in
+  C.check (has o "\"q3@x\"" && has o "\"q4@x\"" && not (has o "q2@x") && not (has o "q5@x")) "stray quotes: the lines between them written";
+  refuse "a quote inside a field, without --skip-bad" "Name,Email\nbob\"x,z1@x\nok,z2@x\n" "line 2: a quote inside field 1";
+  (* a record that a quote at a field's start runs over lines: named to its last line *)
+  refuse "a record over three lines" "Name,Email\n\"open,r1@x\nnext,r2@x\n\"x,r3@x\n" "(the record runs to line 4: a quote at a field's start opens a field to the next quote";
+  (* 20 MiB of blank lines between two rows: read through, never held *)
+  let blank = Buffer.create (21 lsl 20) in
+  Buffer.add_string blank "Name,Email\nb1,b1@x\n";
+  Buffer.add_string blank (String.make (20 lsl 20) '\n');
+  Buffer.add_string blank "b2,b2@x\n";
+  let err = accept "20 MiB of blank lines" (Buffer.contents blank) in
+  C.check (has err "2 rows") "20 MiB of blank lines: 2 rows: %s" err;
+  (* a record of 8 MiB of commas: its count named, its fields never made; a list of more than 100,000 values; a
+     header of more than 100,000 columns *)
+  refuse "a record of 8 MiB of commas" ("Name,Email\n" ^ String.make ((8 lsl 20) - 16) ',' ^ "\n") (Printf.sprintf "line 2: %d fields, the header has 2" ((8 lsl 20) - 15));
+  refuse ~kind:"note" ~args:[ "--link"; "Refs=id" ] "a list of 100,001 values"
+    ("{\"Title\":\"t\",\"Tags\":[" ^ String.concat "," (List.init 100_001 (fun _ -> "\"a\"")) ^ "]}\n") "line 1: more than 100000 values in one record";
+  refuse ~nothing:false ~args:[ "--map"; "X=" ] "a header of 100,001 columns" (String.concat "," (List.init 100_001 (fun _ -> "X")) ^ "\n") "the header: more than 100000 columns";
   (* a duplicate far from the first: read again from the file *)
   let lots = Buffer.create (11 lsl 20) in
   Buffer.add_string lots "Name,Email\n";
@@ -364,6 +497,7 @@ let () =
   C.rmrf !dir;
   Unix.mkdir !dir 0o700;
   forms ();
+  bounds ();
   let s = Filename.concat !dir "s" in
   C.check (fst (run [ "cluster"; "init"; "transfer"; "--dir"; s ]) = 0) "cluster init";
   let cfg = Filename.concat s "cluster.toml" in
