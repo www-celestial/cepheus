@@ -1,11 +1,12 @@
-(* The wire protocol, versions 1 to 7. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+(* The wire protocol, versions 1 to 8. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
    After: below), version 3 the files of the vault (Put, Piece, Load: below), version 4 the operation Incr (tag 4 of
    put_op), version 5 a Watch's Sort and Limit (its extension's order, which an older server refuses), version 6 a
    question's time (a Find's or a Watch's, after its extension), version 7 the operators Less, Less_or_equal and
    Optional (tags 6, 7 and 8 of put_item; a missing cell of a row is Value.missing, the link -2^62, which no thing
-   has), and nothing else: a server speaks all seven, a program says in Hello the version it speaks, and against an
-   older server a program speaks that server's version (Client.hello) and asks nothing that version lacks. A
-   connection carries frames both ways:
+   has), version 8 the operation Delete (tag 5 of put_op) and the links that name a kind (the facts of cepheus/to and
+   cepheus/delete, properties 7 and 8, in a Write), and nothing else: a server speaks all eight, a program says in
+   Hello the version it speaks, and against an older server a program speaks that server's version (Client.hello)
+   and asks nothing that version lacks. A connection carries frames both ways:
 
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
      flags  = bit 0: more (a reply in several frames: the rows of a Find), bit 1: error (the body is an error)
@@ -18,7 +19,7 @@ open Cepheus
 module Ask = Question.Ask
 module Top = Question.Top
 
-let version = 7
+let version = 8
 
 (* the oldest version a server still speaks *)
 let oldest = 1
@@ -294,10 +295,14 @@ let put_op b = function
     match into with
     | None -> Buffer.add_char b '\000'
     | Some (t, q) -> Buffer.add_char b '\001'; Codec.put_int b t; Codec.put_varint b q)
+  (* version 8: the thing (zigzag), then the kind's name *)
+  | Resolve.Delete (e, k) -> Buffer.add_char b '\005'; Codec.put_int b e; Codec.put_string b k
 
 let get_op r =
   let tag = Codec.get_byte r in
   let e = Codec.get_int r in
+  if tag = 5 then Resolve.Delete (e, Codec.get_string r)
+  else
   let p = Codec.get_varint r in
   match tag with
   | 0 -> Resolve.Add (e, p, Value.decode r)

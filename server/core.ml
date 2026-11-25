@@ -278,9 +278,13 @@ let kind_name (v : Store.view) p = match Schema.find v.schema p with Some d -> T
 let unreadable t (v : Store.view) (q : Query.t) extra =
   match List.find_opt (fun (pt : Query.pattern) -> not (bit t pt.p 1)) (Ask.patterns q extra) with Some pt -> Some (kind_name v pt.p) | None -> None
 
-(* the kind of the first fact of a group that the token may not add, if any: a fact of a property, or the declaration
-   of a property (its name, type, many or unique), of the property's kind, by its name in the schema or in this group;
-   rules are for tokens that write every kind *)
+(* What a group asks of a token's rights per kind that it lacks, if anything: the message of its first fact the
+   token may not add (a fact of a property, or the declaration of a property: its name, type, many, unique, or the kind
+   it links to, of the property's kind, by its name in the schema or in this group; rules are for tokens that write
+   every kind). A link that names a kind also reads it (its refusal tells whether a thing is of it). A Delete of a
+   thing of a kind, and a retraction of a fact of a kind some link names (it may leave a thing with none), may reach
+   every kind whose links name it, and on: the token adds to each kind a cascade or a clear reaches, and reads each
+   whose links refuse, or the group is denied whole. *)
 let unaddable c i (v : Store.view) r ops =
   let t = kinds_table c i v r in
   let declared e =
@@ -289,17 +293,55 @@ let unaddable c i (v : Store.view) r ops =
     | None ->
       List.find_map (function Resolve.Add (x, p, Value.Text n) when x = e && p = Schema.p_name -> Some (Tokens.kind_of n) | _ -> None) ops
   in
+  let no_add k = Some (Printf.sprintf "this token may not add to the kind %s" k) in
   let one e p =
-    if not (Schema.is_system p) then if bit t p 2 then None else Some (kind_name v p)
-    else if p = Schema.p_rule || Schema.rule v.schema e <> None then Some "rules"
-    else match declared e with Some k when Tokens.adds_kind r k -> None | Some k -> Some k | None -> Some (string_of_int e)
+    if not (Schema.is_system p) then
+      if not (bit t p 2) then no_add (kind_name v p)
+      else
+        match Schema.link v.schema p with
+        | Some l when not (Tokens.reads_kind r l.kind) ->
+          Some (Printf.sprintf "this token may not read the kind %s, which %s links to" l.kind (Resolve.prop_name v p))
+        | _ -> None
+    else if p = Schema.p_rule || Schema.rule v.schema e <> None then no_add "rules"
+    else match declared e with Some k when Tokens.adds_kind r k -> None | Some k -> no_add k | None -> no_add (string_of_int e)
   in
+  (* the kinds a thing of kind k (by name) leaving may reach, from the schema: the first one the token lacks *)
+  let reach k =
+    let ix = Schema.index v.schema in
+    match Schema.kind_id ix k with
+    | -1 -> None
+    | k0 ->
+      let seen = Hashtbl.create 4 and todo = Queue.create () and miss = ref None in
+      Hashtbl.add seen k0 ();
+      Queue.push k0 todo;
+      while !miss = None && not (Queue.is_empty todo) do
+        let k = Queue.pop todo in
+        Array.iter
+          (fun (l, od) ->
+            let lk = ix.pkind.(l) in
+            let name = ix.kinds.(lk) in
+            if !miss = None then
+              match od with
+              | Schema.Refuse ->
+                if not (Tokens.reads_kind r name) then
+                  miss := Some (Printf.sprintf "this token may not read the kind %s, whose links refuse the deletion of a %s" name ix.kinds.(k0))
+              | Schema.Cascade | Schema.Clear ->
+                if not (Tokens.adds_kind r name) then
+                  miss := Some (Printf.sprintf "this token may not add to the kind %s, which a deletion of a %s reaches" name ix.kinds.(k0))
+                else if not (Hashtbl.mem seen lk) then (Hashtbl.add seen lk (); Queue.push lk todo))
+          ix.linkers.(k)
+      done;
+      !miss
+  in
+  let leaving p = if Schema.has_links v.schema && Schema.named (Schema.index v.schema) p then reach (kind_name v p) else None in
   List.find_map
     (fun (op : Resolve.op) ->
       match op with
-      | Add (e, p, _) | Retract (e, p, _) | Expect (e, p, _) | Incr (e, p, _, None) -> one e p
+      | Retract (e, p, _) -> ( match one e p with None -> leaving p | m -> m)
+      | Add (e, p, _) | Expect (e, p, _) | Incr (e, p, _, None) -> one e p
       (* an Incr adds to its counter's kind and to its into's *)
-      | Incr (e, p, _, Some (t, q)) -> ( match one e p with None -> one t q | k -> k))
+      | Incr (e, p, _, Some (t, q)) -> ( match one e p with None -> one t q | k -> k)
+      | Delete (_, k) -> if not (Tokens.adds_kind r k) then no_add k else if Schema.has_links v.schema then reach k else None)
     ops
 
 (* a question that a token with rights per kind may not read: denied, when it arrives *)
@@ -574,6 +616,8 @@ let write_bounds (v : Store.view) ops =
       refuse "invalid" "a name has at most %d bytes, not %d" max_name (String.length n)
     | Resolve.Add (_, _, Value.Text x) :: _ when String.length x > max_text ->
       refuse "too_large" "a text has at most %d bytes, not %d" max_text (String.length x)
+    | Resolve.Delete (_, k) :: _ when String.length k > max_name ->
+      refuse "invalid" "a kind's name has at most %d bytes, not %d" max_name (String.length k)
     | _ :: rest -> texts rest
   in
   match texts ops with
@@ -587,7 +631,7 @@ let write_bounds (v : Store.view) ops =
       List.iter
         (function
           | Resolve.Add (e, _, x) | Resolve.Retract (e, _, x) -> see e; (match x with Value.Link t -> see t | _ -> ())
-          | Resolve.Expect _ -> ()
+          | Resolve.Expect _ | Resolve.Delete _ -> ()
           | Resolve.Incr (e, _, _, into) -> see e; (match into with Some (t, _) -> see t | None -> ()))
         ops;
       if !size > Wire.max_frame then
@@ -655,7 +699,7 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
     in
     let published = v.group in
     match match c.rights.(d.index) with Some (Tokens.Kinds _ as r) -> unaddable c d.index v r ops | _ -> None with
-    | Some k -> err c ~id ~kind "denied" "this token may not add to the kind %s of %s" k d.name
+    | Some m -> err c ~id ~kind "denied" "%s of %s" m d.name
     | None ->
     (* counted in flight before the table may hand [answer] to a write that ends at once *)
     Mutex.protect c.om (fun () -> c.inflight <- c.inflight + 1);

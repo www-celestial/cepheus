@@ -54,6 +54,7 @@ type op = Resolve.op =
   | Retract of int * int * value
   | Expect of int * int * value option
   | Incr of int * int * int * (int * int) option
+  | Delete of int * string
 type receipt = Engine.receipt = { group : int; things : (int * int) list }
 
 let write db ?(by = 0) ?(why = "") ops =
@@ -77,6 +78,25 @@ type prop = Schema.prop = { name : string; typ : typ; many : bool; unique : bool
 let prop ?(many = false) ?(unique = false) name typ = { name; typ; many; unique }
 let property (v : view) n = Schema.by_name v.schema n
 let describe (v : view) p = Schema.find v.schema p
+
+type on_delete = Schema.on_delete = Refuse | Cascade | Clear
+
+let link (v : view) p = match Schema.link v.schema p with Some l -> Some (l.kind, l.on_delete) | None -> None
+
+let rec link_to db links =
+  let v = view db in
+  match List.find_opt (fun (p, _, _) -> Schema.find v.schema p = None) links with
+  | Some (p, _, _) -> Error (Invalid (Printf.sprintf "no property %d" p))
+  | None -> (
+    let named = List.map (fun (p, kind, on_delete) -> p, (Option.get (Schema.find v.schema p)).name, { Schema.kind; on_delete }) links in
+    match Resolve.link_ops (Schema.link v.schema) named with
+    | Error m -> Error (Invalid m)
+    | Ok [] -> Ok ()
+    | Ok ops -> (
+      match write db ~why:"cepheus: links" ops with
+      | Ok _ -> Ok ()
+      | Error (Conflict _) -> link_to db links (* another writer named a kind for one of them meanwhile: read again *)
+      | Error e -> Error e))
 
 let rec declare db props =
   match Resolve.declare (view db) props with

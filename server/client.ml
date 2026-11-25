@@ -52,6 +52,19 @@ let no_incr = "this server speaks protocol 3 or older: Incr needs a server of pr
 
 let has_incr ops = List.exists (function Resolve.Incr _ -> true | _ -> false) ops
 
+(* a Delete, or a link that names a kind (the facts of cepheus/to and cepheus/delete), on a connection to a server of
+   protocol 7 or older: refused here, never sent (such a server closes the connection on the operation, and knows no
+   property 7 or 8) *)
+let no_delete spoken = Printf.sprintf "this server speaks protocol %d: Delete and links that name a kind need a server of protocol 8" spoken
+
+let needs_8 ops =
+  List.exists
+    (function
+      | Resolve.Delete _ -> true
+      | Resolve.Add (_, p, _) | Resolve.Retract (_, p, _) | Resolve.Expect (_, p, _) -> p = Schema.p_to || p = Schema.p_delete
+      | Resolve.Incr _ -> false)
+    ops
+
 (* a watch with Sort and Limit, on a connection to a server of protocol 4 or older: refused here, never sent (such a
    server refuses the watch's order) *)
 let no_sorted_watch spoken = Printf.sprintf "this server speaks protocol %d: a watch with Sort and Limit needs a server of protocol 5" spoken
@@ -564,6 +577,7 @@ let write c db ?(by = 0) ?(why = "") ops =
   (* before the first try only: once sent, the write may be applied, and only the server's answer or the budget
      tells (a connection made again to an older server, which closes it on the operation, ends as unreachable) *)
   if c.spoken < 4 && has_incr ops then Error { code = "invalid"; message = no_incr }
+  else if c.spoken < 8 && needs_8 ops then Error { code = "invalid"; message = no_delete c.spoken }
   else begin
     c.serial <- c.serial + 1;
     let serial = c.serial in
@@ -632,10 +646,23 @@ let admin c what =
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Admin" })
   | exception Broken m -> Error { code = "unreachable"; message = m ^ ": the operation was done once or not at all (see cepheus status)" }
 
+(* the kind a property of the database links to, from the facts of the property thing (a Get) *)
+let link_of c db p =
+  match read_call c (Wire.Get { db = db.handle; thing = p }) with
+  | Wire.Facts f ->
+    let one q = List.find_map (fun (q', (x : Value.t)) -> match x with Text s when q' = q -> Some s | _ -> None) f.facts in
+    Ok
+      (match one Schema.p_to with
+       | None -> None
+       | Some kind -> Some { Schema.kind; on_delete = Option.value ~default:Schema.Refuse (Option.bind (one Schema.p_delete) Schema.on_delete_of) })
+  | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" })
+
 (* the properties' ids for these names, declaring the missing ones in one write (as Cepheus.declare): the schema is
    read with Open again, and a declaration that lost a race for an id is made again without the ids it tried. Open
-   lists the properties only: an id held by a rule (a schema thing too) is found by that conflict, and skipped. *)
-let rec declare ?(avoid = []) c name (props : Schema.prop list) =
+   lists the properties only: an id held by a rule (a schema thing too) is found by that conflict, and skipped.
+   [links]: (name, link) of link properties that name a kind, declared in the same write (Resolve.link_ops); the kind
+   an existing one names is read from its facts. *)
+let rec declare ?(avoid = []) ?(links = []) c name (props : Schema.prop list) =
   match open_db ~local:false c name with
   | Error e -> Error e
   | Ok db ->
@@ -661,16 +688,39 @@ let rec declare ?(avoid = []) c name (props : Schema.prop list) =
           ops := Resolve.Expect (p, Schema.p_name, None) :: !ops;
           List.iter (fun (e, q, x) -> ops := Resolve.Add (e, q, x) :: !ops) (Schema.facts p d))
       props;
-    match !bad with
-    | Some e -> Error e
-    | None -> (
-      if !ops = [] then Ok (db, List.rev !ids)
+    (* the links: by the id each name has now (in the database, or in this write) *)
+    let id_of n = List.assoc n (List.combine (List.map (fun (d : Schema.prop) -> d.name) props) (List.rev !ids)) in
+    let fresh p = List.exists (function Resolve.Expect (q, r, None) -> q = p && r = Schema.p_name | _ -> false) !ops in
+    let named = List.map (fun (n, l) -> id_of n, n, l) links in
+    let current = Hashtbl.create 4 in
+    let read_links =
+      List.fold_left
+        (fun acc (p, _, _) ->
+          match acc with
+          | Error _ -> acc
+          | Ok () when fresh p -> Hashtbl.replace current p None; acc
+          | Ok () -> (match link_of c db p with Ok l -> Hashtbl.replace current p l; Ok () | Error e -> Error e))
+        (Ok ()) named
+    in
+    let lops =
+      match !bad, read_links with
+      | Some e, _ | None, Error e -> Error e
+      | None, Ok () -> (
+        match Resolve.link_ops (fun p -> Option.join (Hashtbl.find_opt current p)) named with
+        | Ok l -> Ok l
+        | Error m -> Error { code = "invalid"; message = m })
+    in
+    match lops with
+    | Error e -> Error e
+    | Ok lops -> (
+      let all = List.rev_append !ops lops in
+      if all = [] then Ok (db, List.rev !ids)
       else
-        match write c db ~why:"cepheus: declare" (List.rev !ops) with
+        match write c db ~why:"cepheus: declare" all with
         | Ok _ -> ( match open_db c name with Ok db -> Ok (db, List.rev !ids) | Error e -> Error e)
         | Error { code = "conflict"; _ } ->
           let tried = List.filter_map (function Resolve.Expect (p, q, None) when q = Schema.p_name -> Some p | _ -> None) !ops in
-          declare ~avoid:(tried @ avoid) c name props
+          declare ~avoid:(tried @ avoid) ~links c name props
         | Error e -> Error e)
 
 (* ---- live questions ----

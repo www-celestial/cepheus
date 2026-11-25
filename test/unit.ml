@@ -360,7 +360,7 @@ let model_write (m : model) (v : view) ops =
   List.iter
     (function
       | Add (e, _, x) | Retract (e, _, x) -> see e; (match x with Link t -> see t | _ -> ())
-      | Expect _ -> ()
+      | Expect _ | Delete _ -> ()
       | Incr (e, _, _, into) -> see e; Option.iter (fun (t, _) -> see t) into)
     ops;
   let id x = if x < 0 then Hashtbl.find temps x else x in
@@ -400,7 +400,8 @@ let model_write (m : model) (v : view) ops =
           let d = schema p in
           if e < Schema.first_thing || e >= !next || not (Value.has_type d.typ x) then raise Exit;
           f := C.F.remove (e, p, x) !f
-        | Expect _ -> ())
+        | Expect _ -> ()
+        | Delete _ -> invalid_arg "the model writes no Delete")
       ops;
     List.iter
       (fun (e, p, x) ->
@@ -725,6 +726,11 @@ let () =
     (* chunks of a few operations, so that a group spans many, mapped by several domains *)
     Bulk.chunk := 1 + Rng.int r 9;
     let f = fresh () in
+    (* half the seeds: links that name a kind, which the faster path checks or leaves to Resolve *)
+    if seed mod 2 = 0 then begin
+      let q n = Option.get (property (view f) n) in
+      ignore (Result.get_ok (link_to f [ q "boss", "name", Refuse; q "friend", "name", Cascade ]))
+    end;
     let v = C.layered r (view f) (1 + Rng.int r 3) (fun g -> for _ = 1 to 10 do ignore (write g (random_ops r (view g) ())) done; view g) in
     let p n = Option.get (property v n) in
     let things = v.next_e - Schema.first_thing in
@@ -753,6 +759,7 @@ let () =
     let key = function
       | Add (e, q, _) | Retract (e, q, _) | Expect (e, q, _) | Incr (e, q, _, _) ->
         (if e >= 0 then e else if e < -1_000_000_000 then v.next_e - e - 1_000_000_001 else v.next_e - e - 1), q
+      | Delete (e, _) -> e, 0
     in
     let ops = match Rng.int r 4 with
       | 0 -> List.map snd (List.sort compare (List.map (fun o -> Rng.int r 1_000_000, o) ops))
@@ -1740,5 +1747,170 @@ let () =
   Resolve.large_min := large;
   Engine.compact_min := cmin;
   Engine.tier := tier
+
+
+(* ---- links that name a kind: Delete, to, on delete (refuse, cascade, clear) ---- *)
+
+let contains s sub =
+  let n = String.length sub in
+  let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in
+  go 0
+
+let () =
+  section "links: to, Delete, refuse, cascade, clear";
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ cname; ccity; inum; iclient; lprice; linvoice; nbody; nabout; cat; parent; boss ]) =
+    declare db
+      [ prop "client/name" Ttext; prop "client/city" Ttext; prop "invoice/number" Tint; prop "invoice/client" Tlink;
+        prop "line/price" (Tmoney 2); prop "line/invoice" Tlink; prop "note/body" Ttext;
+        prop ~many:true "note/about" Tlink; prop "category/name" Ttext; prop "category/parent" Tlink; prop "employee/boss" Tlink ]
+  in
+  let refused ops = match write db ops with Error (Invalid m) -> Some m | _ -> None in
+  let ok ops = match write db ops with Ok r -> r | Error e -> failwith ("links: a write failed: " ^ message e) in
+  (* declarations: a link to a kind, read back; what is refused *)
+  C.check (Result.is_ok (link_to db [ iclient, "client", Refuse; linvoice, "invoice", Cascade; nabout, "invoice", Clear ])) "links: declared";
+  C.check (link (view db) iclient = Some ("client", Refuse) && link (view db) linvoice = Some ("invoice", Cascade) && link (view db) inum = None)
+    "links: read back";
+  C.check (Result.is_ok (link_to db [ iclient, "client", Refuse ])) "links: declared again, the same: nothing to do";
+  C.check (match link_to db [ iclient, "client", Cascade ] with Error (Invalid m) -> contains m "links to client things" | _ -> false)
+    "links: another on delete is refused";
+  C.check (match link_to db [ inum, "client", Refuse ] with Error (Invalid m) -> contains m "cepheus/to is for a link" | _ -> false)
+    "links: to on an int is refused";
+  C.check (match link_to db [ boss, "nobody", Refuse ] with Error (Invalid m) -> contains m "no property" | _ -> false)
+    "links: to a kind with no property is refused";
+  C.check (refused [ Add (boss, Schema.p_delete, Text "cascade") ] <> None) "links: cepheus/delete without cepheus/to is refused";
+  C.check (refused [ Add (boss, Schema.p_to, Text "category"); Add (boss, Schema.p_delete, Text "explode") ] <> None)
+    "links: an unknown on delete is refused";
+  C.check (Result.is_ok (link_to db [ parent, "category", Cascade ])) "links: a kind that links to itself";
+  (* to: checked on the state after the group *)
+  let r = ok [ Add (-1, cname, Text "Ada"); Add (-2, cname, Text "Bo"); Add (-3, nbody, Text "no client") ] in
+  let ada = thing r (-1) and bo = thing r (-2) and stranger = thing r (-3) in
+  C.check (match refused [ Add (-1, inum, Int 1); Add (-1, iclient, Link stranger) ] with Some m -> contains m "invoice/client links to client things only" | None -> false)
+    "links: to a thing of another kind is refused";
+  C.check (refused [ Add (-1, inum, Int 1); Add (-1, iclient, Link (-2)); Add (-2, nbody, Text "x") ] <> None)
+    "links: to a new thing of another kind is refused";
+  let r = ok [ Add (-1, inum, Int 1); Add (-1, iclient, Link (-2)); Add (-2, cname, Text "Cy") ] in
+  let cy = thing r (-2) and i0 = thing r (-1) in
+  C.check (link (view db) iclient <> None && values (view db) i0 iclient = [ Link cy ]) "links: to a client made in the same group";
+  let r = ok [ Add (-1, inum, Int 2); Add (-1, iclient, Link ada); Add (-2, lprice, Money 1000); Add (-2, linvoice, Link (-1));
+               Add (-3, lprice, Money 250); Add (-3, linvoice, Link (-1)); Add (-4, nbody, Text "call"); Add (-4, nabout, Link (-1)) ] in
+  let i1 = thing r (-1) and l1 = thing r (-2) and l2 = thing r (-3) and n1 = thing r (-4) in
+  (* refuse: a client with an invoice is not deleted, and the group leaves everything *)
+  let before = C.facts_of_view (view db) in
+  (match refused [ Delete (ada, "client") ] with
+   | Some m ->
+     C.check (contains m (Printf.sprintf "client #%d cannot be deleted while the invoice #%d links to it (invoice/client: refuse)" ada i1))
+       "links: refuse names the kind, the thing and a linking thing: %s" m
+   | None -> C.fail "links: a client with an invoice was deleted");
+  C.check (C.F.equal (C.facts_of_view (view db)) before) "links: a refused Delete leaves every fact";
+  C.check (refused [ Retract (ada, cname, Text "Ada") ] <> None) "links: retracting the last fact of a client with an invoice is refused too";
+  C.check (Result.is_ok (write db [ Retract (ada, cname, Text "Ada"); Add (ada, ccity, Text "Lyon") ])) "links: a client that keeps another fact is still one";
+  (* cascade and clear: an invoice's lines go with it, a note's link to it is retracted *)
+  let g = ok [ Delete (i1, "invoice") ] in
+  let v = view db in
+  C.check (get v i1 = [] && get v l1 = [] && get v l2 = []) "links: Delete of an invoice, its two lines with it (cascade)";
+  C.check (values v n1 nabout = [] && values v n1 nbody = [ Text "call" ]) "links: the note stays, its link retracted (clear)";
+  C.check (g.group = v.group) "links: in one group";
+  (* a Delete of a thing with no fact of the kind changes nothing; of a kind with no property, refused *)
+  let n0 = Store.facts (view db) in
+  C.check (Result.is_ok (write db [ Delete (stranger, "client") ]) && Store.facts (view db) = n0) "links: Delete of a thing of no such fact: nothing";
+  C.check (match refused [ Delete (ada, "nothing") ] with Some m -> contains m "no property" | None -> false) "links: Delete of an unknown kind is refused";
+  C.check (refused [ Delete (-1, "client") ] <> None) "links: Delete of a new thing is refused";
+  C.check (refused [ Delete (1_000_000, "client") ] <> None) "links: Delete of no thing is refused";
+  (* deleted and made again in one group: still a client, its invoice stays *)
+  C.check (Result.is_ok (write db [ Delete (cy, "client"); Add (cy, cname, Text "Cy again") ]) && values (view db) i0 iclient = [ Link cy ])
+    "links: deleted and given a fact again in one group: still a client";
+  (* a link to a thing deleted in the same group: refused *)
+  C.check (refused [ Delete (bo, "client"); Add (-1, inum, Int 9); Add (-1, iclient, Link bo) ] <> None) "links: a new link to a thing deleted in the group is refused";
+  (* a tree that links to itself (cascade): the whole subtree goes, the rest stays *)
+  let r = ok [ Add (-1, cat, Text "root"); Add (-2, cat, Text "a"); Add (-2, parent, Link (-1)); Add (-3, cat, Text "b"); Add (-3, parent, Link (-2));
+               Add (-4, cat, Text "c"); Add (-4, parent, Link (-3)); Add (-5, cat, Text "other"); Add (-5, parent, Link (-1)) ] in
+  ignore (ok [ Delete (thing r (-2), "category") ]);
+  let v = view db in
+  C.check (get v (thing r (-2)) = [] && get v (thing r (-3)) = [] && get v (thing r (-4)) = [] && values v (thing r (-1)) cat = [ Text "root" ]
+           && values v (thing r (-5)) parent = [ Link (thing r (-1)) ]) "links: a subtree deleted by cascade, its siblings kept";
+  (* a cycle: two things that link to each other, both cascade; and a thing that links to itself *)
+  let r = ok [ Add (-1, cat, Text "x"); Add (-2, cat, Text "y"); Add (-1, parent, Link (-2)); Add (-2, parent, Link (-1)); Add (-3, cat, Text "self"); Add (-3, parent, Link (-3)) ] in
+  ignore (ok [ Delete (thing r (-1), "category") ]);
+  ignore (ok [ Delete (thing r (-3), "category") ]);
+  let v = view db in
+  C.check (get v (thing r (-1)) = [] && get v (thing r (-2)) = [] && get v (thing r (-3)) = []) "links: a cycle and a thing linking to itself end";
+  (* the retraction of an invoice's last fact deletes its lines all the same: the same rule, whatever retracts *)
+  let r = ok [ Add (-1, inum, Int 5); Add (-2, lprice, Money 1); Add (-2, linvoice, Link (-1)) ] in
+  ignore (ok [ Retract (thing r (-1), inum, Int 5) ]);
+  C.check (get (view db) (thing r (-2)) = []) "links: the invoice's last fact retracted: its line goes";
+  (* the group's budget: a cascade past it is refused, nothing done *)
+  let r = ok (Add (-1, inum, Int 6) :: List.concat (List.init 300 (fun k -> [ Add (-(k + 2), lprice, Money k); Add (-(k + 2), linvoice, Link (-1)) ]))) in
+  let before = C.facts_of_view (view db) in
+  let base = !(fst rule_budget) and per = !(snd rule_budget) in
+  (fst rule_budget) := 50;
+  (snd rule_budget) := 1;
+  (match refused [ Delete (thing r (-1), "invoice") ] with
+   | Some m -> C.check (contains m "work budget") "links: past the budget, refused: %s" m
+   | None -> C.fail "links: a cascade past the budget was done");
+  C.check (C.F.equal (C.facts_of_view (view db)) before) "links: past the budget, nothing done";
+  (fst rule_budget) := base;
+  (snd rule_budget) := per;
+  C.check (Result.is_ok (write db [ Delete (thing r (-1), "invoice") ]) && get (view db) (thing r (-300)) = []) "links: within the budget, done";
+  (* rules see the retractions: a count of lines, kept by the writer; no rule gives a link that names a kind *)
+  let nlines = Result.get_ok (declare db [ prop "invoice/lines" Tint ]) |> List.hd in
+  let rule = { name = "lines-of"; vars = 2; where = [ { e = Var 1; p = linvoice; v = Var 0 } ]; ranges = []; head = Give { e = Var 0; p = aggregate `Count nlines; v = Val (Int 0) } } in
+  C.check (Result.is_ok (define db [ rule ])) "links: a rule over the lines";
+  let r = ok [ Add (-1, inum, Int 7); Add (-2, lprice, Money 1); Add (-2, linvoice, Link (-1)); Add (-3, lprice, Money 2); Add (-3, linvoice, Link (-1)) ] in
+  C.check (values (view db) (thing r (-1)) nlines = [ Int 2 ]) "links: two lines counted";
+  ignore (ok [ Delete (thing r (-2), "line") ]);
+  C.check (values (view db) (thing r (-1)) nlines = [ Int 1 ]) "links: a line deleted, the count follows";
+  let bad = { name = "give-link"; vars = 2; where = [ { e = Var 0; p = linvoice; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p = iclient; v = Var 1 } } in
+  C.check (match define db [ bad ] with Error (Invalid m) -> contains m "no rule gives one" | _ -> false) "links: a rule giving a link that names a kind is refused";
+  let gives = { name = "gives-boss"; vars = 2; where = [ { e = Var 0; p = iclient; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p = boss; v = Var 1 } } in
+  C.check (Result.is_ok (define db [ gives ])) "links: a rule giving a link of any thing";
+  C.check (match link_to db [ boss, "client", Refuse ] with Error (Invalid m) -> contains m "no rule gives one" | _ -> false)
+    "links: a link a rule gives cannot name a kind";
+  (* Never sees what a clear retracts: a line may not lose its invoice *)
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ inum; lprice; linvoice ]) = declare db [ prop "invoice/number" Tint; prop "line/price" Tint; prop "line/invoice" Tlink ] in
+  ignore (link_to db [ linvoice, "invoice", Clear ]);
+  let never = { name = "line-has-invoice"; vars = 2; where = [ { e = Var 0; p = lprice; v = Var 1 }; { e = Var 0; p = absent 0 linvoice; v = Var 1 } ]; ranges = []; head = Never } in
+  ignore never;
+  let never = { name = "line-has-invoice"; vars = 3; where = [ { e = Var 0; p = lprice; v = Var 1 }; { e = Var 0; p = absent 0 linvoice; v = Var 2 } ]; ranges = []; head = Never } in
+  C.check (Result.is_ok (define db [ never ])) "links: a constraint over the lines";
+  let r = Result.get_ok (write db [ Add (-1, inum, Int 1); Add (-2, lprice, Int 5); Add (-2, linvoice, Link (-1)) ]) in
+  C.check (match write db [ Delete (thing r (-1), "invoice") ] with Error (Invalid m) -> contains m "line-has-invoice" | _ -> false)
+    "links: Never sees the link a clear retracts"
+
+let () =
+  section "links: durable, after a power loss, and the large path";
+  let sim = Sim_disk.create (Rng.make 91) in
+  let disk = Sim_disk.disk sim in
+  let large = !Resolve.large_min in
+  Resolve.large_min := 50;
+  let opened () = Result.get_ok (open_on disk "/links") in
+  let db = ref (opened ()) in
+  let[@warning "-8"] (Ok [ cname; iclient; inum; lprice; linvoice ]) =
+    declare !db [ prop "client/name" Ttext; prop "invoice/client" Tlink; prop "invoice/number" Tint; prop "line/price" Tint; prop "line/invoice" Tlink ]
+  in
+  C.check (Result.is_ok (link_to !db [ iclient, "client", Refuse; linvoice, "invoice", Cascade ])) "links: declared on a database";
+  (* a load: 40 clients, 40 invoices of them, by the large path *)
+  let ops = List.concat (List.init 40 (fun k -> [ Add (-(k + 1), cname, Text (Printf.sprintf "c%d" k)); Add (-(k + 41), inum, Int k); Add (-(k + 41), iclient, Link (-(k + 1))) ])) in
+  C.check (Resolve.resolve_large (view !db) ~n:((view !db).group + 1) ~time:0 ~by:0 ~why:"" ops <> None) "links: a load whose links hold takes the large path";
+  let r = Result.get_ok (write !db ops) in
+  let bad = List.concat (List.init 30 (fun k -> [ Add (-(k + 1), inum, Int (100 + k)); Add (-(k + 1), iclient, Link (thing r (-(41 + k)))) ])) in
+  C.check (Resolve.resolve_large (view !db) ~n:((view !db).group + 1) ~time:0 ~by:0 ~why:"" bad = None) "links: a load with a link to an invoice leaves the large path";
+  C.check (match write !db bad with Error (Invalid _) -> true | _ -> false) "links: and is refused";
+  let inv = thing r (-41) in
+  ignore (Result.get_ok (write !db [ Add (-1, lprice, Int 3); Add (-1, linvoice, Link inv); Add (-2, lprice, Int 4); Add (-2, linvoice, Link inv) ]));
+  ignore (Result.get_ok (write !db [ Delete (inv, "invoice") ]));
+  let before = C.facts_of_view (view !db) in
+  Sim_disk.crash sim;
+  db := opened ();
+  C.check (C.F.equal (C.facts_of_view (view !db)) before) "links: after a power loss, the cascade's group replayed the same";
+  C.check (link (view !db) linvoice = Some ("invoice", Cascade)) "links: and the links read back from the journal";
+  ignore (Result.get_ok (snapshot !db));
+  close !db;
+  db := opened ();
+  C.check (link (view !db) iclient = Some ("client", Refuse) && C.F.equal (C.facts_of_view (view !db)) before) "links: and from a merged run";
+  C.check (match write !db [ Delete (thing r (-2), "client") ] with Error (Invalid _) -> true | _ -> false) "links: refuse, after the reopen";
+  close !db;
+  Resolve.large_min := large
 
 let () = C.finish "unit"

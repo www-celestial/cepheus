@@ -1,13 +1,15 @@
 (* From what a client asks to what the journal keeps. One function, used by the writer of a database and by every
    fork, so a fork accepts and refuses exactly what the database would (G8). Checks: types, things that exist,
    one value for a one-valued property (the old value is retracted in the same group), unique values, Expect
-   (checked against the state before the group), and the schema rules for property things. *)
+   (checked against the state before the group), links that name a kind (their things, and what they do when such a
+   thing stops being of the kind), and the schema rules for property things. *)
 
 type op =
   | Add of int * int * Value.t
   | Retract of int * int * Value.t
   | Expect of int * int * Value.t option
   | Incr of int * int * int * (int * int) option
+  | Delete of int * string
 
 type error = Conflict of string | Invalid of string | Not_unique of string
 
@@ -18,37 +20,72 @@ let invalid fmt = Printf.ksprintf (fun s -> fail (Invalid s)) fmt
 
 (* What a schema thing is, from its facts in v: a property (a name and a type), a rule (a name and a definition), or
    nothing yet. *)
-type thing = Prop of Schema.prop | Rule of string * string | Nothing
+type thing = Prop of Schema.prop * Schema.link option | Rule of string * string | Nothing
 
 let read_thing (v : Store.view) p =
   let one q = let r = ref None in Store.iter_values v p q (fun w -> r := Some w); !r in
+  let has_link () = Store.has_value v p Schema.p_to || Store.has_value v p Schema.p_delete in
   match one Schema.p_name, one Schema.p_type, one Schema.p_rule with
   | Some nw, Some tw, None -> (
     match Value.of_code tw with
     | None -> Error (Printf.sprintf "property %d has an unknown type code %d" p tw)
-    | Some typ ->
+    | Some typ -> (
       let flag q = match one q with Some w -> w <> 0 | None -> false in
-      Ok (Prop { Schema.name = Store.text v nw; typ; many = flag Schema.p_many; unique = flag Schema.p_unique }))
+      let d = { Schema.name = Store.text v nw; typ; many = flag Schema.p_many; unique = flag Schema.p_unique } in
+      match one Schema.p_to, one Schema.p_delete with
+      | None, None -> Ok (Prop (d, None))
+      | None, Some _ -> Error (Printf.sprintf "%s has cepheus/delete without cepheus/to, the kind it links to" d.name)
+      | Some kw, dw -> (
+        let kind = Store.text v kw in
+        if typ <> Value.Tlink then Error (Printf.sprintf "%s is a %s: cepheus/to is for a link" d.name (Value.typ_name typ))
+        else if kind = "" || String.contains kind '/' then
+          Error (Printf.sprintf "%s: cepheus/to is the name of a kind, without '/', not %S" d.name kind)
+        else
+          match dw with
+          | None -> Ok (Prop (d, Some { Schema.kind; on_delete = Refuse }))
+          | Some dw -> (
+            match Schema.on_delete_of (Store.text v dw) with
+            | Some on_delete -> Ok (Prop (d, Some { Schema.kind; on_delete }))
+            | None -> Error (Printf.sprintf "%s: cepheus/delete is refuse, cascade or clear, not %S" d.name (Store.text v dw))))))
   | Some nw, None, Some rw ->
-    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then
+    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique || has_link () then
       Error (Printf.sprintf "rule %d takes a name and a definition only" p)
     else Ok (Rule (Store.text v nw, Store.text v rw))
   | None, None, None ->
     if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then
       Error (Printf.sprintf "property %d keeps cepheus/many or cepheus/unique without a name and a type" p)
+    else if has_link () then Error (Printf.sprintf "property %d keeps cepheus/to or cepheus/delete without a name and a type" p)
     else Ok Nothing
   | _, _, Some _ -> Error (Printf.sprintf "rule %d needs a name and a definition, and no type" p)
   | _ -> Error (Printf.sprintf "property %d needs both a name and a type" p)
 
 let install_thing schema p = function
-  | Ok (Prop d) -> Schema.set_rule (Schema.set schema p (Some d)) p None
-  | Ok (Rule (n, t)) -> Schema.set_rule (Schema.set schema p None) p (Some (n, t))
-  | Ok Nothing | Error _ -> Schema.set_rule (Schema.set schema p None) p None
+  | Ok (Prop (d, l)) -> Schema.set_rule (Schema.set_link (Schema.set schema p (Some d)) p l) p None
+  | Ok (Rule (n, t)) -> Schema.set_rule (Schema.set_link (Schema.set schema p None) p None) p (Some (n, t))
+  | Ok Nothing | Error _ -> Schema.set_rule (Schema.set_link (Schema.set schema p None) p None) p None
 
 let refresh (v : Store.view) p = { v with schema = install_thing v.schema p (read_thing v p) }
 
 let desc (v : Store.view) p =
   match Schema.find v.schema p with Some d -> d | None -> invalid "no property %d" p
+
+(* Is x a thing of kind k (its number in the index): has it a fact of one of the kind's properties that a write
+   asserted? A fact only derived makes no thing of a kind. *)
+exception Has
+exception Found_thing of int
+
+let is_kind (v : Store.view) (ix : Schema.index) x k =
+  x >= Schema.first_thing
+  && k >= 0
+  && (try
+        Array.iter
+          (fun p -> if Store.has_value v x p then Store.iter_values_st v x p (fun _ st -> if st = 1 then raise_notrace Has))
+          ix.members.(k);
+        false
+      with Has -> true)
+
+(* the name of a link property, the kind of its things: invoice/Client, invoice *)
+let prop_name (v : Store.view) p = match Schema.find v.schema p with Some d -> d.name | None -> string_of_int p
 
 (* Applies one change (the state its kind leaves) and keeps the schema in step. No word is kept for "absent": every
    int is a value's word (min_int is the smallest Int, Date or Money), so a value not in the view is the None of
@@ -76,7 +113,8 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
       (function
         | Add (e, _, x) | Retract (e, _, x) -> see e; (match x with Value.Link t -> see t | _ -> ())
         | Expect (e, _, _) -> if e < 0 then invalid "Expect on a new thing"
-        | Incr (e, _, _, into) -> see e; (match into with Some (t, _) -> see t | None -> ()))
+        | Incr (e, _, _, into) -> see e; (match into with Some (t, _) -> see t | None -> ())
+        | Delete (e, _) -> if e < 0 then invalid "Delete of a new thing")
       ops;
     if !next - 1 > Schema.last_thing then
       invalid "thing numbers end at %d: this group would make #%d" Schema.last_thing (!next - 1);
@@ -147,6 +185,25 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
       end;
       assert_add e p x
     in
+    (* Delete, and the links followed when a thing stops being of a kind: the facts they read and retract, at most the
+       work budget of a group of this many operations (as the rules' work: Reason.work_per x its budget) *)
+    let work = ref 0 and wlimit = Reason.work_limit (!Reason.budget_base + (!Reason.budget_per * List.length ops)) in
+    let tick what =
+      incr work;
+      if !work > wlimit then
+        invalid "%s: the links followed passed %d facts, the work budget of a group of %d operations: delete the things that link to it first, in groups of their own" (what ()) wlimit (List.length ops)
+    in
+    (* the asserted facts of thing e of kind k (its number in [ix]), retracted at this point of the group *)
+    let retract_kind ix e k what =
+      Array.iter
+        (fun p ->
+          if Store.has_value !v e p then begin
+            let d = desc !v p and ws = ref [] in
+            Store.iter_values_st !v e p (fun w st -> if st = 1 then ws := w :: !ws);
+            List.iter (fun w -> tick what; assert_word false e p (Store.value !v d.typ w) !v w) (List.rev !ws)
+          end)
+        ix.Schema.members.(k)
+    in
     (* Incr's properties: ints of the program's, the counter's one-valued *)
     let int_prop what ~one p =
       let d = desc !v p in
@@ -178,8 +235,78 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
           check_thing e p;
           if not (Value.has_type d.typ x) then invalid "%s is not a %s (property %s)" (Value.to_string x) (Value.typ_name d.typ) d.name;
           assert_retract e p x
+        | Delete (e, k) ->
+          let ix = Schema.index !v.schema in
+          let ki = Schema.kind_id ix k in
+          if e < Schema.first_thing || e >= !next then invalid "Delete: no thing #%d" e;
+          if ki < 0 || Array.length ix.members.(ki) = 0 then invalid "Delete: the kind %s has no property in this database" k;
+          retract_kind ix e ki (fun () -> Printf.sprintf "deleting the %s #%d" k e)
         | Expect _ -> ())
       ops;
+    (* links that name a kind: what their facts do when the thing they link to stops being of it, and the things
+       they link to after the group *)
+    if Schema.has_links !v.schema then begin
+      let ix = Schema.index !v.schema in
+      (* the things that lost an asserted fact of a kind some link names, followed in order: a thing no longer of
+         the kind is lost, and each link to it does what its property says: cascade deletes the linking thing in its
+         own kind (a thing reached twice is followed once: cycles end), clear retracts the link, refuse leaves it to
+         the check below *)
+      let queue = Queue.create () in
+      List.iter (fun (c : Group.change) -> if c.kind = Retracted && Schema.named ix c.p then Queue.push (c.e, ix.pkind.(c.p)) queue) !out;
+      if not (Queue.is_empty queue) then begin
+        let seen = Hashtbl.create 16 and lost = ref [] in
+        while not (Queue.is_empty queue) do
+          let ((x, k) as xk) = Queue.pop queue in
+          if not (Hashtbl.mem seen xk) then begin
+            Hashtbl.add seen xk ();
+            if not (is_kind !v ix x k) then begin
+              lost := xk :: !lost;
+              Array.iter
+                (fun (l, od) ->
+                  if od <> Schema.Refuse then begin
+                    let lk = ix.pkind.(l) in
+                    let what () = Printf.sprintf "deleting the %s #%d (%s: %s)" ix.kinds.(k) x (prop_name !v l) (Schema.on_delete_name od) in
+                    let ys = ref [] in
+                    Store.iter_things !v l x (fun y -> ys := y :: !ys);
+                    List.iter
+                      (fun y ->
+                        tick what;
+                        if Store.state !v y l x = 1 then begin
+                          (match od with
+                           | Schema.Clear -> assert_word false y l (Value.Link x) !v x
+                           | _ -> retract_kind ix y lk what);
+                          if Schema.named ix l then Queue.push (y, lk) queue
+                        end)
+                      (List.rev !ys)
+                  end)
+                ix.linkers.(k)
+            end
+          end
+        done;
+        (* a link left to a thing no longer of its kind: refused, naming one *)
+        List.iter
+          (fun (x, k) ->
+            Array.iter
+              (fun (l, _) ->
+                match Store.iter_things !v l x (fun y -> raise_notrace (Found_thing y)) with
+                | () -> ()
+                | exception Found_thing y ->
+                  invalid "the %s #%d cannot be deleted while the %s #%d links to it (%s: refuse)" ix.kinds.(k) x
+                    ix.kinds.(ix.pkind.(l)) y (prop_name !v l))
+              ix.linkers.(k))
+          (List.rev !lost)
+      end;
+      (* a link added: to a thing of its kind after the group *)
+      List.iter
+        (fun (c : Group.change) ->
+          if c.kind = Added && c.p < Array.length ix.pto && ix.pto.(c.p) >= 0 then
+            match c.v with
+            | Value.Link t ->
+              let k = ix.pto.(c.p) in
+              if not (is_kind !v ix t k) then invalid "%s links to %s things only, and #%d is not one" (prop_name !v c.p) ix.kinds.(k) t
+            | _ -> ())
+        !out
+    end;
     let changes = Array.of_list (List.rev !out) in
     (* the schema things this group touched: properties checked below, rules here, before they run *)
     let touched = Hashtbl.create 2 in
@@ -189,7 +316,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
         match read_thing !v p, Schema.find v0.schema p, Schema.rule v0.schema p with
         | Error m, _, _ -> invalid "%s" m
         | Ok (Rule _), Some a, _ -> invalid "%s is a property: it never becomes a rule" a.name
-        | Ok (Prop d), _, Some _ -> invalid "a rule never becomes a property (%s)" d.name
+        | Ok (Prop (d, _)), _, Some _ -> invalid "a rule never becomes a property (%s)" d.name
         | _ -> ())
       touched;
     if Schema.rules_key !v.schema <> Schema.rules_key v0.schema || Hashtbl.length touched > 0 then begin
@@ -201,6 +328,14 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
             | Ok r -> (match Rules.check !v r with Error m -> invalid "%s" m | Ok () -> r))
           (Schema.rules !v.schema)
       in
+      (* a link that names a kind is written only: its things are checked at the write that gives it *)
+      List.iter
+        (fun (r : Rules.t) ->
+          match r.head with
+          | Rules.Give h when h.p >= 0 && Schema.link !v.schema h.p <> None ->
+            invalid "rule %s gives %s, a link that names a kind: no rule gives one" r.name (prop_name !v h.p)
+          | _ -> ())
+        rules;
       (* a template's list changes by writes only: no rule gives it *)
       let lists = List.concat_map (fun (r : Rules.t) -> List.filter_map (fun (a : Query.pattern) -> if Rules.is_every a.p then Some (Rules.every_of a.p, r.name) else None) r.where) rules in
       List.iter
@@ -275,6 +410,18 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
           end
         | Some a, None -> if Store.count_prop v p > 0 then invalid "%s still has values" a.name
         | None, _ -> ())
+      touched;
+    (* a link that names a kind for the first time, or another: every value it has is a thing of that kind *)
+    Hashtbl.iter
+      (fun p () ->
+        match Schema.link v.schema p with
+        | Some l when (match Schema.link v0.schema p with Some l0 -> l0.kind <> l.kind | None -> true) ->
+          let ix = Schema.index v.schema in
+          let k = Schema.kind_id ix l.kind and name = prop_name v p in
+          if k < 0 || Array.length ix.members.(k) = 0 then invalid "%s links to the kind %s, which has no property" name l.kind;
+          Store.iter_prop v p (fun e w ->
+              if not (is_kind v ix w k) then invalid "%s cannot link to %s things only: #%d links to #%d, which is not one" name l.kind e w)
+        | _ -> ())
       touched;
     let temps = List.rev_map (fun t -> t, Hashtbl.find temps t) !order in
     Ok ({ v with group = n }, { Group.n; time; by; why; first_new; count_new; changes }, temps)
@@ -351,6 +498,29 @@ let catch_up ?limit ?stop (v : Store.view) (d : Store.view) (gs : Group.t list) 
       | r -> r
       | exception Reason.Refused m -> fail (Conflict m)
     in
+    (* links that name a kind, under the change's schema (the writer checked the groups against its own): every link
+       they added goes to a thing of its kind, and none is left to a thing that stopped being of it *)
+    if Schema.has_links v.schema then begin
+      let ix = Schema.index v.schema in
+      Array.iter
+        (fun (c : Group.change) ->
+          match c.kind with
+          | (Added | Now_asserted) when c.p < Array.length ix.pto && ix.pto.(c.p) >= 0 -> (
+            match c.v with
+            | Value.Link t when not (is_kind v ix t ix.pto.(c.p)) ->
+              fail (Conflict (Printf.sprintf "a group written meanwhile links %s of #%d to #%d, which is no %s thing under the change" (prop_name v c.p) c.e t ix.kinds.(ix.pto.(c.p))))
+            | _ -> ())
+          | Retracted when Schema.named ix c.p && not (is_kind v ix c.e ix.pkind.(c.p)) ->
+            Array.iter
+              (fun (l, _) ->
+                match Store.iter_things v l c.e (fun y -> raise_notrace (Found_thing y)) with
+                | () -> ()
+                | exception Found_thing y ->
+                  fail (Conflict (Printf.sprintf "a group written meanwhile leaves #%d linked by %s to #%d, which is no %s thing any more" y (prop_name v l) c.e ix.kinds.(ix.pkind.(c.p)))))
+              ix.linkers.(ix.pkind.(c.p))
+          | _ -> ())
+        changes
+    end;
     (* the checks of one value and of unique values, for the asserted additions too: the writer checked them under
        the old rules *)
     Array.iter
@@ -630,6 +800,44 @@ let resolve_large (v0 : Store.view) ~n ~time ~by ~why ops =
             done)
       | _ -> ()
     done;
+    (* a link that names a kind: to a thing of it before the group, or to a new thing the group gives a fact of it;
+       anything else (an old thing that becomes one in the group, or a refusal) to [resolve] *)
+    if Schema.has_links v0.schema then begin
+      let ix = Schema.index v0.schema in
+      let nnew = !next - v0.next_e in
+      (* by kind: the new things the group gives a fact of it, a bit each, made at its first link *)
+      let news = Hashtbl.create 4 in
+      let fresh k =
+        match Hashtbl.find_opt news k with
+        | Some s -> s
+        | None ->
+          let s = Bytes.make ((nnew lsr 3) + 1) '\000' in
+          Array.iter
+            (fun q ->
+              if q < np then
+                for r = b.poff.(q) to b.poff.(q + 1) - 1 do
+                  let e = Bulk.pthing b r - v0.next_e in
+                  if e >= 0 then Bytes.unsafe_set s (e lsr 3) (Char.unsafe_chr (Char.code (Bytes.unsafe_get s (e lsr 3)) lor (1 lsl (e land 7))))
+                done)
+            ix.members.(k);
+          Hashtbl.add news k s;
+          s
+      in
+      for q = 0 to min np (Array.length ix.pto) - 1 do
+        let k = ix.pto.(q) in
+        if k >= 0 && b.poff.(q + 1) > b.poff.(q) then begin
+          let s = fresh k in
+          for r = b.poff.(q) to b.poff.(q + 1) - 1 do
+            let t = Bulk.pword b r in
+            let ok =
+              if t >= v0.next_e then (let e = t - v0.next_e in Char.code (Bytes.unsafe_get s (e lsr 3)) land (1 lsl (e land 7)) <> 0)
+              else is_kind v0 ix t k
+            in
+            if not ok then raise Slow
+          done
+        end
+      done
+    end;
     (* the rules: the facts they derive from the group's, appended after them (Bulk.d0) *)
     let touches_rules =
       Bytes.length ruled > 0
@@ -838,3 +1046,23 @@ let declare (v : Store.view) (props : Schema.prop list) =
         List.iter (fun (e, q, x) -> ops := Add (e, q, x) :: !ops) (Schema.facts p d))
     props;
   match !bad with Some m -> Error m | None -> Ok (List.rev !ids, List.rev !ops)
+
+(* The operations that make link properties name kinds: (id, name, link), [current] the link each names now (None for
+   one declared in the same group). One that names none gets its two facts, with an Expect that it still names none
+   (a declaration that lost a race is refused, and read again); one that names another kind, or the same with
+   another on_delete, is an Error: a change of them is a migration. *)
+let link_ops current (links : (int * string * Schema.link) list) =
+  let ops = ref [] and bad = ref None in
+  List.iter
+    (fun (p, name, (l : Schema.link)) ->
+      match current p with
+      | Some l0 when l0 = l -> ()
+      | Some (l0 : Schema.link) ->
+        if !bad = None then
+          bad := Some (Printf.sprintf "%s links to %s things in this database, with on delete %s, not to %s things with %s" name l0.kind
+                         (Schema.on_delete_name l0.on_delete) l.kind (Schema.on_delete_name l.on_delete))
+      | None ->
+        ops := Add (p, Schema.p_delete, Value.Text (Schema.on_delete_name l.on_delete)) :: Add (p, Schema.p_to, Value.Text l.kind)
+               :: Expect (p, Schema.p_to, None) :: !ops)
+    links;
+  match !bad with Some m -> Error m | None -> Ok (List.rev !ops)

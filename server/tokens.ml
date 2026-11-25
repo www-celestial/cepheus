@@ -82,7 +82,7 @@ let check t text =
 let right t db = List.assoc_opt db t.databases
 
 (* The kind of a property: its name up to the first '/', or the whole name *)
-let kind_of name = match String.index_opt name '/' with Some i -> String.sub name 0 i | None -> name
+let kind_of = Cepheus.Schema.kind_of
 
 let reads_kind r k = match r with Read | Write -> true | Kinds x -> List.mem k x.read
 let adds_kind r k = match r with Write -> true | Read -> false | Kinds x -> List.mem k x.add

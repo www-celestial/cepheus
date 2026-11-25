@@ -25,8 +25,14 @@ Bool(unique = false, many = false) = {Type: "bool", Unique: unique, Many: many}
     way, so that its milliseconds are an Int. *)
 Date(unique = false, many = false) = {Type: "date", Unique: unique, Many: many}
 
-(** Another thing of the database: its id. *)
-Link(unique = false, many = false) = {Type: "link", Unique: unique, Many: many}
+(** Another thing of the database: its id. to, the name of a kind: the thing must be of that kind, as SQL's foreign
+    key: it has a fact of the kind (a field the database holds for it), checked at each write, a thing made in the same
+    group counting. onDelete says what the link does when that thing stops being of the kind (Delete, or its last
+    field retracted): "refuse" (the default) refuses the group, naming one thing that links to it; "cascade" deletes
+    the linking thing too, in its own kind, and so on; "clear" retracts the link. Without to, any thing's id.
+
+      Line = Kind("line", {Invoice: Link(to = "invoice", onDelete = "cascade"), Price: Money(2)}) *)
+Link(unique = false, many = false, to = missing, onDelete = missing) = {Type: "link", Unique: unique, Many: many, To: to, OnDelete: onDelete}
 
 (** An exact decimal of scale digits after the point, as Money(2) for cents: read as a Float, kept in minor units. *)
 Money(scale, unique = false, many = false) = {Type: "money", Scale: scale, Unique: unique, Many: many}
@@ -239,9 +245,16 @@ Read(kind, id, db, from = 0, len = missing) = read(db, kind, id, from, len)
       Find(4, (f, n, s, t) -> {Where: [[f, kind.Name, n], [f, kind.Size, s], [f, kind.Type, t]], Give: {Id: f, Name: n, Size: s, Type: t}}, db) *)
 List(kind, db) = Find(4, (f, n, s, t) -> {Where: [[f, kind.Name, n], [f, kind.Size, s], [f, kind.Type, t]], Give: {Id: f, Name: n, Size: s, Type: t}}, db)
 
-(** A file deleted: its facts retracted in one group (an Ok of its number); the group is refused, Code "conflict", if
-    the file changed meanwhile. Its bytes stay in the vault as long as the history cites them; to make them unreadable
-    everywhere, erase its owner's key. *)
+(** A thing of a kind deleted, SQL's DELETE: its fields of the kind retracted at the writer, in one group (an Ok of its
+    number), and the links whose to names the kind and that link to it follow their onDelete in the same group:
+    refuse refuses the whole group (Code "invalid", naming one thing that links to it), cascade deletes the linking
+    things, clear retracts their links. A thing with none of the kind's fields: nothing to retract. The thing stays in
+    the history, as every group does. A file of a kind of Files: its facts retracted, and the group is refused, Code
+    "conflict", if the file changed meanwhile; a thing that is no file of the kind is an Err of Code "missing". Its
+    bytes stay in the vault as long as the history cites them; to make them unreadable everywhere, erase its owner's
+    key.
+
+      cepheus.Delete(Client, ada, db, why = "closed")? *)
 Delete(kind, id, db, by = 0, why = "") = delete(db, kind, id, by, why)
 
 (** The key of an owner destroyed: every file sealed with it can no longer be read, on this server's disk and in

@@ -60,7 +60,7 @@ let entry t i = if i >= 0 && i < t.count then Array.unsafe_get t.items i else No
 
 (* ---- kinds: declared by the program, the same for every database it reaches ---- *)
 
-type field = { fname : string; pname : string; typ : Value.typ; many : bool; unique : bool }
+type field = { fname : string; pname : string; typ : Value.typ; many : bool; unique : bool; link : Schema.link option }
 
 type kind = {
   kname : string;
@@ -75,7 +75,7 @@ type kind = {
 let kinds : kind table = table ()
 let properties : (kind * int) table = table ()
 let kind_key = C.keys [| "kind" |]
-let type_keys = C.keys [| "Type"; "Scale"; "Unique"; "Many" |]
+let type_keys = C.keys [| "Type"; "Scale"; "Unique"; "Many"; "To"; "OnDelete" |]
 
 let valid_kind_name s =
   s <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '_' || c = '-') s
@@ -108,8 +108,29 @@ let kind ctx a =
         if fname = "kind" then C.panic ctx (name ^ ": kind is the name the package keeps for itself: name the field otherwise");
         let d = map_of ctx name descs.(i) in
         match C.fields type_keys d with
-        | [| Text t; scale; unique; many |] ->
-          { fname; pname = kname ^ "/" ^ fname; typ = typ_of_text ctx name t scale; unique = bool ctx name unique; many = bool ctx name many }
+        | [| Text t; scale; unique; many; to_; od |] ->
+          let pname = kname ^ "/" ^ fname in
+          (* Link(to = "client", onDelete = "cascade"): the kind its things are of, by its name *)
+          let link =
+            match to_, od with
+            | C.Missing, C.Missing -> None
+            | C.Missing, _ -> C.panic ctx (Printf.sprintf "%s: %s has onDelete without to, the kind it links to: Link(to = \"client\", onDelete = \"cascade\")" name pname)
+            | C.Text k, od ->
+              if not (valid_kind_name k) then
+                C.panic ctx (Printf.sprintf "%s: %s links to %S, which is not a kind's name: small letters, digits, _ and -" name pname k);
+              let on_delete =
+                match od with
+                | C.Missing -> Schema.Refuse
+                | C.Text s -> (
+                  match Schema.on_delete_of s with
+                  | Some o -> o
+                  | None -> C.panic ctx (Printf.sprintf "%s: %s: onDelete is \"refuse\", \"cascade\" or \"clear\", not %S" name pname s))
+                | v -> C.need ctx name "an onDelete, \"refuse\", \"cascade\" or \"clear\"" v
+              in
+              Some { Schema.kind = k; on_delete }
+            | v, _ -> C.need ctx name "the name of a kind for to, as Link(to = \"client\")" v
+          in
+          { fname; pname; typ = typ_of_text ctx name t scale; unique = bool ctx name unique; many = bool ctx name many; link }
         | _ -> C.need ctx name "a type of property, as cepheus.Text()" descs.(i))
       names
   in
@@ -133,6 +154,9 @@ let property_of ctx name = function
   | v -> C.need ctx name "a property of a kind, as Client.City" v
 
 let props_of (k : kind) = Array.to_list (Array.map (fun f -> { Schema.name = f.pname; typ = f.typ; many = f.many; unique = f.unique }) k.fields)
+
+(* the links of a kind that name a kind: (property's name, link) *)
+let links_of (k : kind) = Array.to_list (Array.of_seq (Seq.filter_map (fun f -> Option.map (fun l -> f.pname, l) f.link) (Array.to_seq k.fields)))
 
 (* ---- values, between Cesia and the database ---- *)
 
@@ -401,7 +425,7 @@ let connect ctx a =
     | None -> Client.Tcp (host, port)
   in
   Option.iter (C.need_read ctx) ca;
-  let props = List.concat_map props_of (Array.to_list ks) in
+  let props = List.concat_map props_of (Array.to_list ks) and links = List.concat_map links_of (Array.to_list ks) in
   (* the handshake, the declarations (a write: an fsync) and the Opens wait at the server: in a domain of their own,
      the calling fiber parked meanwhile, so that the program's other fibers run (a silent peer holds only this call,
      for the handshake's time) *)
@@ -422,7 +446,7 @@ let connect ctx a =
     let fail code m = Client.close cl; refuse code "%s" m in
     (* declare reads the schema at the server, and opens the database to read it here once it wrote *)
     let cdb =
-      match Client.declare cl dbname props with
+      match Client.declare ~links cl dbname props with
       | Ok (db, _) when db.wants_local -> db
       | Ok _ -> (match Client.open_db cl dbname with Ok d -> d | Error e -> fail e.code e.message)
       | Error e -> fail e.code e.message
@@ -510,6 +534,7 @@ let commit ctx d ~by ~why ops =
     | Error e -> let code, m = resolve_code e in refuse code "%s" m)
   | Server s -> (
     if s.conn.cl.spoken < 4 && Client.has_incr ops then refuse "invalid" "%s" Client.no_incr;
+    if s.conn.cl.spoken < 8 && Client.needs_8 ops then refuse "invalid" "%s" (Client.no_delete s.conn.cl.spoken);
     match Conn.write (park ctx) s.conn ~db:s.cdb.handle ~by ~why ops with
     | Wire.Receipt r -> r.group, r.things
     | rep -> server_error rep "Write")
@@ -647,15 +672,25 @@ let read ctx a =
     | rep -> server_error rep "Read"
   with Refused (code, m) -> failure ctx code m
 
-(* a file's facts retracted, its Content expected unchanged: its bytes stay where the history cites them *)
+(* a thing of a kind deleted: the operation Delete, at the writer (its facts of the kind, and the links that name the
+   kind followed); a file's facts retracted, its Content expected unchanged, as before: its bytes stay where the history
+   cites them *)
+let is_files (k : kind) = List.for_all (fun (n, t) -> Array.exists (fun (x : field) -> x.fname = n && x.typ = t && not x.many) k.fields) file_fields
+
 let delete ctx a =
   let name = "cepheus.Delete" in
   try
     let d = db_of ctx name a.(0) in
     let k = kind_of ctx name a.(1) in
-    let content = file_field ctx name k "Content" in
     let thing = int ctx name a.(2) in
     if thing <= 0 then refuse "invalid" "Delete needs the id of a thing, not %d" thing;
+    if not (is_files k) then begin
+      ignore (resolve_kind d k);
+      let group, _ = commit ctx d ~by:(int ctx name a.(3)) ~why:(text ctx name a.(4)) [ Resolve.Delete (thing, k.kname) ] in
+      C.ok ctx (Int group)
+    end
+    else
+    let content = file_field ctx name k "Content" in
     let conn, cdb = server_of name d in
     let r = resolve_kind d k in
     match Conn.read (park ctx) conn (Wire.Get { db = cdb.handle; thing }) with
@@ -1115,12 +1150,21 @@ let fork ctx a =
         | None -> refuse "invalid" "a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server")
     in
     let ks = Array.map (kind_of ctx name) (list_of ctx name a.(1)) in
-    let props = List.concat_map props_of (Array.to_list ks) in
-    let v =
+    let props = List.concat_map props_of (Array.to_list ks) and links = List.concat_map links_of (Array.to_list ks) in
+    let declared =
       match Resolve.declare from props with
       | Error m -> refuse "invalid" "%s" m
-      | Ok (_, []) -> from
-      | Ok (_, ops) -> (
+      | Ok (ids, ops) -> (
+        (* the links, in the same group: by the id each property has now, in the fork or in this group *)
+        let id_of n = List.assoc n (List.combine (List.map (fun (d : Schema.prop) -> d.name) props) ids) in
+        match Resolve.link_ops (Schema.link from.schema) (List.map (fun (n, l) -> id_of n, n, l) links) with
+        | Error m -> refuse "invalid" "%s" m
+        | Ok lops -> ops @ lops)
+    in
+    let v =
+      match declared with
+      | [] -> from
+      | ops -> (
         match Resolve.resolve from ~n:(from.group + 1) ~time:(Disk.real.now ()) ~by:0 ~why:"cepheus: declare" ops with
         | Ok (v, _, _) -> v
         | Error e -> let code, m = resolve_code e in refuse code "%s" m)

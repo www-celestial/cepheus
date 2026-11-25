@@ -1096,7 +1096,7 @@ let [@inline never] compile ctx ?(extra : Rules.t option) ?(nmode = Now) ?(nsrc 
           pl.hp <- p;
           let th = thing_ok () in
           pl.he <- (if th then ge () else -1);
-          let ok = th && p >= Schema.first_prop && (let t = ptype ctx.v p in t >= 0 && fits t) in
+          let ok = th && p >= Schema.first_prop && (let t = ptype ctx.v p in t >= 0 && fits t) && Schema.link ctx.v.schema p = None in
           pl.hok <- ok;
           (* a text constant interned only for a head that fits *)
           pl.hw <- (if ok then gv () else 0);
@@ -1738,6 +1738,7 @@ let [@inline never] head_message (v : Store.view) name ~thing hp =
   else
     match if hp >= Schema.first_prop then Schema.find v.schema hp else None with
     | None -> Printf.sprintf "rule %s gives a fact of #%d, which is not a property it can give" name hp
+    | Some d when Schema.link v.schema hp <> None -> Printf.sprintf "rule %s gives %s, a link that names a kind: no rule gives one" name d.name
     | Some d -> Printf.sprintf "rule %s gives %s a value of another type" name d.name
 
 (* ---- specialisation by small relations (the design's section 5.4) ----
@@ -1950,7 +1951,7 @@ let [@inline never] substitute (v : Store.view) (r : Rules.t) (sty : Value.typ o
             | None -> head_message v r.name ~thing h.p
             | Some d ->
               let fits = match h.v with Var y -> (match sty'.(y) with Some t -> t = d.typ | None -> true) | Thing _ -> d.typ = Value.Tlink | Val x -> Value.has_type d.typ x in
-              if fits then "" else head_message v r.name ~thing h.p)
+              if fits && Schema.link v.schema h.p = None then "" else head_message v r.name ~thing h.p)
       in
       Some (r', bad)
 

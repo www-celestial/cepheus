@@ -798,6 +798,7 @@ let show_op = function
   | Retract (e, p, x) -> Printf.sprintf "-[%d %d %s]" e p (Value.to_string x)
   | Expect _ -> "expect"
   | Incr (e, p, by, _) -> Printf.sprintf "+=[%d %d %d]" e p by
+  | Delete (e, k) -> Printf.sprintf "-[%d %s]" e k
 
 (* each group's outcome and view, by (seed, group, merges): a run with the rules always as written must give the
    unfolded run's, exactly (Reason.specialise) *)
@@ -1066,7 +1067,7 @@ let random_sequences ?(durable = false) ?(adds = false) ?(plain = false) ~seeds 
              | Retract (e, p, x) ->
                if F.mem (e, p, x) !ea then (m := F.remove (e, p, x) !m; ea := F.remove (e, p, x) !ea)
                else if F.mem (e, p, x) !m then refused := true
-             | Expect _ | Incr _ -> ())
+             | Expect _ | Incr _ | Delete _ -> ())
            ops;
          let bad = ref false in
          let m' = C.perfect ~ptyp ~bad rules !ea in

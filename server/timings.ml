@@ -209,11 +209,11 @@ let shape (v : Store.view) (q : Query.t) (sel : Wire.select) extra (order : Top.
 (* A write's operations by kind, and the properties it names (the first 8; [more]: others too): taken when it arrives,
    in one pass, so that the slow line needs none of its operations (a large group's are let go of as soon as the
    writer has mapped them) *)
-type write_shape = { ops : int; adds : int; retracts : int; expects : int; incrs : int; props : int list; more : bool }
+type write_shape = { ops : int; adds : int; retracts : int; expects : int; incrs : int; deletes : int; props : int list; more : bool }
 
 let write_shape (ops : Resolve.op list) =
-  let adds = ref 0 and retracts = ref 0 and expects = ref 0 and incrs = ref 0 and n = ref 0 and props = ref [] and k = ref 0
-  and more = ref false in
+  let adds = ref 0 and retracts = ref 0 and expects = ref 0 and incrs = ref 0 and deletes = ref 0 and n = ref 0 and props = ref []
+  and k = ref 0 and more = ref false in
   let see p = if (not !more) && not (List.mem p !props) then if !k < 8 then (props := p :: !props; incr k) else more := true in
   List.iter
     (fun (op : Resolve.op) ->
@@ -221,17 +221,18 @@ let write_shape (ops : Resolve.op list) =
        | Add (_, p, _) -> incr adds; see p
        | Retract (_, p, _) -> incr retracts; see p
        | Expect (_, p, _) -> incr expects; see p
-       | Incr (_, p, _, _) -> incr incrs; see p);
+       | Incr (_, p, _, _) -> incr incrs; see p
+       | Delete _ -> incr deletes);
       incr n)
     ops;
-  { ops = !n; adds = !adds; retracts = !retracts; expects = !expects; incrs = !incrs; props = List.rev !props; more = !more }
+  { ops = !n; adds = !adds; retracts = !retracts; expects = !expects; incrs = !incrs; deletes = !deletes; props = List.rev !props; more = !more }
 
 let plural n one = Printf.sprintf "%d %s%s" n one (if n = 1 then "" else "s")
 
 let write_text (v : Store.view) w =
   let kinds =
     List.filter_map (fun (n, s) -> if n > 0 then Some (plural n s) else None)
-      [ w.adds, "add"; w.retracts, "retract"; w.expects, "expect"; w.incrs, "incr" ]
+      [ w.adds, "add"; w.retracts, "retract"; w.expects, "expect"; w.incrs, "incr"; w.deletes, "delete" ]
   in
   cut
     (Printf.sprintf "%s (%s)%s%s" (plural w.ops "operation") (String.concat ", " kinds)

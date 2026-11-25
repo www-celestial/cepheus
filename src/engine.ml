@@ -208,14 +208,15 @@ let beside (disk : Disk.t) a b =
 exception Deferred
 
 (* what only the writer may do in its order, so that a change with it is computed inline, in its group: new things
-   (a temporary id in an operation: their numbers are the writer's to give) and an Incr (its counter is read at its
-   point of the writer's order: groups that count with one counter never conflict) *)
+   (a temporary id in an operation: their numbers are the writer's to give), an Incr (its counter is read at its
+   point of the writer's order: groups that count with one counter never conflict) and a Delete (the facts it
+   retracts, and the things that link to it, are read at that point too) *)
 let inline_only ops =
   List.exists
     (function
       | Resolve.Add (e, _, x) | Retract (e, _, x) -> e < 0 || (match x with Value.Link t -> t < 0 | _ -> false)
       | Expect (e, _, _) -> e < 0
-      | Incr _ -> true)
+      | Incr _ | Delete _ -> true)
     ops
 
 (* The groups of a prefix of the requests, resolved on the working view, in order, as one frame: the prefix stops at
@@ -1429,7 +1430,7 @@ let rec poll_change l =
         let ops, _, _ = r.w in
         let texts =
           List.filter_map
-            (function Resolve.Add (_, _, x) | Retract (_, _, x) | Expect (_, _, Some x) -> Some x | Expect (_, _, None) | Incr _ -> None)
+            (function Resolve.Add (_, _, x) | Retract (_, _, x) | Expect (_, _, Some x) -> Some x | Expect (_, _, None) | Incr _ | Delete _ -> None)
             ops
           @ Reason.constants va
         in

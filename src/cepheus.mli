@@ -82,6 +82,12 @@ type op = Resolve.op =
           the group ({!Invalid}). [into = Some (thing', property')] also adds the new value as [(thing', property')],
           an int property ([thing'] may be a new thing): an invoice gets its number in the group that makes it. The
           journal keeps what it did, as an [Add]'s retraction and addition. *)
+  | Delete of int * string
+      (** [Delete (thing, kind)]: every fact of the thing of a property of that kind (its name before ['/']: the
+          kind of [client/name] is client) that a write asserted, retracted at this point of the group, at the
+          writer; then, as for any group that leaves a thing with no such fact, the links that name the kind and link
+          to it follow their {!on_delete} ({!link_to}). A thing with no fact of the kind: nothing to retract. A kind
+          with no property is {!Invalid}. *)
 (** A negative thing id, in a thing position, in a [Link] or in [Incr]'s [into], is a new thing of this group: [-1],
     [-2]... *)
 
@@ -107,6 +113,28 @@ val declare : db -> prop list -> (int list, error) result
 
 val property : view -> string -> int option
 val describe : view -> int -> prop option
+
+(** {2 Links that name a kind: foreign keys}
+
+    A thing is of a kind while it has a fact of one of the kind's properties that a write asserted (a fact only
+    derived makes no thing of a kind). A link property that names a kind takes only things of that kind as values,
+    checked on the state after each group (a thing made in the same group counts); and when a group leaves a thing
+    with no fact of the kind (a {!Delete}, or retractions), each fact that links to it does what its property says:
+    [Refuse] refuses the group, naming the kind, the thing, one thing that links to it and the property ({!Invalid});
+    [Cascade] deletes the linking thing too, in the kind of its property (as a {!Delete}, and so on: a thing reached
+    twice is followed once, so cycles end); [Clear] retracts the link. The facts these read and retract are at most
+    {!work_budget} x {!rule_budget}'s budget of the group ({!Invalid} past it: nothing is done), and a group stays
+    within the frame limit. No rule gives a link that names a kind. *)
+
+type on_delete = Schema.on_delete = Refuse | Cascade | Clear
+
+val link : view -> int -> (string * on_delete) option
+(** The kind a link property names, and what its facts do when such a thing stops being of it; [None]: any thing. *)
+
+val link_to : db -> (int * string * on_delete) list -> (unit, error) result
+(** [link_to db [ (invoice_client, "client", Refuse) ]]: these link properties name these kinds, in one group (those
+    that name them already are left). The writer checks every value they hold already; a property that names another
+    kind, or the same with another [on_delete], is {!Invalid}. *)
 
 (** {1 Rules}
 
