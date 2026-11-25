@@ -461,7 +461,7 @@ let expand (v : Store.view) (t : t) step =
   in
   go 0
 
-let fold ?(seq = false) ?(budget = max_int) ?stop ?range ?words (v : Store.view) (t : t) ~init ~step ~merge =
+let fold ?(seq = false) ?(any_order = false) ?(budget = max_int) ?stop ?range ?words (v : Store.view) (t : t) ~init ~step ~merge =
   let spent = Atomic.make 0 in
   let width = if Array.length t.opts = 0 then t.vars else t.vars + 1 in
   let emit = if Array.length t.opts = 0 then step else expand v t step in
@@ -472,7 +472,7 @@ let fold ?(seq = false) ?(budget = max_int) ?stop ?range ?words (v : Store.view)
     let full env = let b = Array.make width 0 in List.iter (fun (d, x) -> b.(x) <- env.(d)) outer; b in
     let keep env = List.for_all (fun h -> not (h env)) checks in
     if c.free = [] then
-      Query.fold ~seq ~sets ~less ~budget ?stop v q ~init ~merge ~step:(fun acc env -> if keep env then emit acc (full env) else acc)
+      Query.fold ~seq ~any_order ~sets ~less ~budget ?stop v q ~init ~merge ~step:(fun acc env -> if keep env then emit acc (full env) else acc)
     else begin
       (* bindings once each, though the alternative's own variables give one for each of their values *)
       let seen = Hashtbl.create 64 in

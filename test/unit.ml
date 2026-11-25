@@ -589,6 +589,52 @@ let () =
     done
   done
 
+(* ---- a question split across domains past a narrow first level ---- *)
+
+let () =
+  section "a question split across domains: past a narrow first level, probed, its work and its budget as on one";
+  let f = fresh () in
+  let p n = Option.get (property (view f) n) in
+  (* 100 heads, each the boss of 30 things with a score: the heads first (a level of 100), then their things *)
+  let heads = Array.init 100 (fun k -> thing (Result.get_ok (write f [ Add (-1, p "name", Text (Printf.sprintf "h%d" k)) ])) (-1)) in
+  for k = 0 to 2_999 do ignore (write f [ Add (-1, p "boss", Link heads.(k mod 100)); Add (-1, p "score", Int (k mod 997)) ]) done;
+  let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min in
+  let on d pm pr g = Query.domains := d; Query.parallel_min := pm; Query.probe_min := pr; Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0) g in
+  let rows ?(less = []) ?budget q = Query.fold ~less ?budget (view f) q ~init:(fun () -> []) ~step:(fun acc env -> Array.copy env :: acc) ~merge:(fun a b -> b @ a) in
+  let worked g = let w0 = Atomic.get Query.work in let r = g () in r, Atomic.get Query.work - w0 in
+  let check name ?less q variants =
+    let one, w1 = worked (fun () -> on 1 pm0 pr0 (fun () -> rows ?less q)) in
+    C.check (one <> []) "%s: no rows" name;
+    List.iter
+      (fun (pm, pr, what, first_split) ->
+        let s0 = Atomic.get Query.splits and p0 = Atomic.get Query.probed_splits in
+        let got, w3 = worked (fun () -> on 3 pm pr (fun () -> rows ?less q)) in
+        let split = Atomic.get Query.splits - s0 and probed = Atomic.get Query.probed_splits - p0 in
+        C.check (got = one) "%s, %s: the rows of one domain, in their order" name what;
+        C.check (w3 = w1) "%s, %s: %d candidates on 3 domains, %d on one" name what w3 w1;
+        C.check (split > 0) "%s, %s: no level split" name what;
+        if what = "probed" then C.check (probed > 0) "%s: no probe split" name;
+        (* the budget: every domain's candidates together, [budget] a domain the first level is split into (3 when it
+           is split, as before the splits of deeper levels; one otherwise), whatever the number of domains that take
+           part: refused one candidate past it, taken at it *)
+        let per = if first_split then 3 else 1 in
+        let under = (w1 - 1) / per and at = (w1 + per - 1) / per in
+        C.check (match on 3 pm pr (fun () -> rows ?less ~budget:under q) with _ -> false | exception Query.Over_budget _ -> true) "%s, %s: past its budget (%d a domain, %d candidates), not refused" name what under w1;
+        C.check (match on 3 pm pr (fun () -> rows ?less ~budget:at q) with r -> r = one | exception _ -> false) "%s, %s: within its budget, refused" name what;
+        (* on one domain, the same budget as before *)
+        C.check (match on 1 pm pr (fun () -> rows ?less ~budget:(w1 - 1) q) with _ -> false | exception Query.Over_budget _ -> true) "%s, %s: past its budget on one domain, not refused" name what)
+      variants
+  in
+  (* the heads (100: a level too narrow to split at 1,000), each with its 30 things and their scores: split at 100,
+     probed at 1,000 *)
+  let heads_q = { Query.vars = 4; ranges = [];
+                  where = [ { e = Var 0; p = p "name"; v = Var 2 }; { e = Var 1; p = p "boss"; v = Var 0 }; { e = Var 1; p = p "score"; v = Var 3 } ] } in
+  check "heads and their things" heads_q [ (100, 1, "split", true); (1_000, 1, "probed", false) ];
+  (* one thing's score (a level of one), then the scores below it, a range of the index (Less), then their things *)
+  let t = thing (Result.get_ok (write f [ Add (-1, p "score", Int 900) ])) (-1) in
+  let below = { Query.vars = 3; ranges = []; where = [ { e = Thing t; p = p "score"; v = Var 0 }; { e = Var 1; p = p "score"; v = Var 2 } ] } in
+  check "past a level of one (Less)" ~less:[ { Query.lx = V 2; ly = V 0; strict = true } ] below [ (100, 1, "split", false) ]
+
 let () =
   section "compaction keeps every fact";
   for seed = 1 to 100 do

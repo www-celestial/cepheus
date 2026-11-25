@@ -524,7 +524,7 @@ let order (v : Store.view) (tx : Value.typ) : int -> int -> int =
     let memo = Hashtbl.create 64 in
     let text w = match Hashtbl.find_opt memo w with Some s -> s | None -> let s = Store.text v w in Hashtbl.add memo w s; s in
     fun a b -> if a = b then 0 else String.compare (text a) (text b)
-  | _ -> compare
+  | _ -> fun (a : int) b -> if a < b then -1 else if a > b then 1 else 0
 
 (* a + (b - a) f rounded half away from zero, a <= b, as an int *)
 let lerp_int a b f =
@@ -550,6 +550,32 @@ let settle s =
   s.spilled <- true
 
 let exact_float x = Float.abs x < 9007199254740992.
+
+(* the quantile p of a group's values: its different words [ks] and their counts [cs], [n] values in all *)
+let quantile ?cmp (v : Store.view) (tx : Value.typ) p discrete ks cs n : Value.t =
+  if n <= 0 then Value.missing
+  else begin
+    let cmp = match cmp with Some c -> c | None -> order v tx in
+    let at k = select cmp ks cs k in
+    if discrete then (let k = max 1 (Float.to_int (Float.ceil (p *. float_of_int n))) in Store.value v tx (at (min n k - 1)))
+    else begin
+      (* Hyndman and Fan's definition 7, PostgreSQL's percentile_cont: h = p (n - 1), between the values of ranks
+         floor h and ceil h *)
+      let h = p *. float_of_int (n - 1) in
+      let lo = Float.to_int (Float.floor h) and hi = Float.to_int (Float.ceil h) in
+      let f = h -. Float.floor h in
+      let x = at lo in
+      let y = if hi = lo then x else at hi in
+      match tx with
+      | Tint -> if hi = lo then Float (float_of_int x) else (let a = float_of_int x and b = float_of_int y in Float (a +. ((b -. a) *. f)))
+      | Tfloat ->
+        let a = Query.float_of_word v x and b = Query.float_of_word v y in
+        Float (if hi = lo then a else a +. ((b -. a) *. f))
+      | Tmoney _ -> Money (if hi = lo then x else lerp_int x y f)
+      | Tdate -> Date (if hi = lo then x else lerp_int x y f)
+      | _ -> Value.missing
+    end
+  end
 
 let result (v : Store.view) (a : Wire.agg) (tx : Value.typ) st : Value.t =
   (* an int's group whose sums are plain ints: a division of exact operands, correctly rounded by IEEE 754 *)
@@ -611,32 +637,7 @@ let result (v : Store.view) (a : Wire.agg) (tx : Value.typ) st : Value.t =
       Float (match a with Stddev _ -> Float.sqrt var | _ -> var)
     end
   | Distinct _, Bag b -> Int b.live
-  | Quantile (_, p, discrete), Bag b ->
-    let n = b.total in
-    if n <= 0 then Value.missing
-    else begin
-      let ks, cs = Bag.entries b in
-      let cmp = order v tx in
-      let at k = select cmp ks cs k in
-      if discrete then (let k = max 1 (Float.to_int (Float.ceil (p *. float_of_int n))) in Store.value v tx (at (min n k - 1)))
-      else begin
-        (* Hyndman and Fan's definition 7, PostgreSQL's percentile_cont: h = p (n - 1), between the values of ranks
-           floor h and ceil h *)
-        let h = p *. float_of_int (n - 1) in
-        let lo = Float.to_int (Float.floor h) and hi = Float.to_int (Float.ceil h) in
-        let f = h -. Float.floor h in
-        let x = at lo in
-        let y = if hi = lo then x else at hi in
-        match tx with
-        | Tint -> if hi = lo then Float (float_of_int x) else (let a = float_of_int x and b = float_of_int y in Float (a +. ((b -. a) *. f)))
-        | Tfloat ->
-          let a = Query.float_of_word v x and b = Query.float_of_word v y in
-          Float (if hi = lo then a else a +. ((b -. a) *. f))
-        | Tmoney _ -> Money (if hi = lo then x else lerp_int x y f)
-        | Tdate -> Date (if hi = lo then x else lerp_int x y f)
-        | _ -> Value.missing
-      end
-    end
+  | Quantile (_, p, discrete), Bag b -> let ks, cs = Bag.entries b in quantile v tx p discrete ks cs b.total
   | _ -> invalid_arg "Agg.result"
 
 (* the cells a bag's new value takes (its two words, the table at most half full) *)
@@ -650,3 +651,199 @@ type cell = One of Value.t | Many of Value.t array
 let flatten (cells : cell array) : Value.t array list =
   let n = Array.fold_left (fun m -> function Many a -> max m (Array.length a) | One _ -> m) 1 cells in
   List.init n (fun i -> Array.map (function One x -> x | Many a -> if i < Array.length a then a.(i) else Value.missing) cells)
+
+(* ---- columns: one aggregate's state for every group of a table, in flat arrays (Answer's groups) ----
+   A report's table of groups (Answer) holds an aggregate of protocol 9 as a column, a group's state at its number,
+   so that a group costs no object of its own: the exact sums of an int, a date or money in four ints a group (n,
+   f1, f2, k, as [sums] holds them while they are plain ints), a group's [state] made only when its sums would move
+   into the limbs (an overflow, a thousand squares, a value of more than 26 bits) or for a float's (its exact sums from
+   its first value); the bags of every group in one table of open addressing (linear probing), (group, word) ->
+   count, with each group's different values and its values counted beside. Tables merge by groups, one table's
+   numbers mapped onto the other's; a group's result is [result] of the same exact sums or of the same bag, so the
+   same bit for bit. *)
+
+type col = Csums of csums | Cbag of cbag
+
+and csums = {
+  csquare : bool;
+  cfloat : bool;  (* a float's: a group's state from its first value *)
+  mutable q : int array;  (* group g's n, f1, f2, k at 4 g *)
+  mutable full : state option array;  (* group g's state once made *)
+}
+
+and cbag = {
+  mutable bg : int array;  (* an entry's group; -1: an empty slot *)
+  mutable bw : int array;  (* its word *)
+  mutable bc : int array;  (* its count *)
+  mutable bused : int;
+  mutable blive : int array;  (* group g's different values, in this table *)
+  mutable btotal : int array;  (* group g's values, copies counted, its parts' too *)
+  mutable parts : (cbag * int array) list;
+      (* the tables merged into this one, each with its groups' numbers here: their entries are read with this one's
+         at the end ([by_group]), not put again into this table one by one *)
+}
+
+let col (a : Wire.agg) (tx : Value.typ) =
+  match a with
+  | Avg _ -> Csums { csquare = false; cfloat = tx = Tfloat; q = [||]; full = [||] }
+  | Variance _ | Stddev _ -> Csums { csquare = true; cfloat = tx = Tfloat; q = [||]; full = [||] }
+  | Distinct _ | Values _ | Quantile _ -> Cbag { bg = Array.make 16 (-1); bw = Array.make 16 0; bc = Array.make 16 0; bused = 0; blive = [||]; btotal = [||]; parts = [] }
+  | Count | Sum _ | Min _ | Max _ -> invalid_arg "Agg.col"
+
+let grow_ints (a : int array) n = if Array.length a >= n then a else (let b = Array.make (max n (2 * Array.length a)) 0 in Array.blit a 0 b 0 (Array.length a); b)
+
+(* room for groups 0 to n - 1, a new one's state empty *)
+let col_room c n =
+  match c with
+  | Csums s ->
+    s.q <- grow_ints s.q (4 * n);
+    if Array.length s.full < n then (let f = Array.make (max n (2 * Array.length s.full)) None in Array.blit s.full 0 f 0 (Array.length s.full); s.full <- f)
+  | Cbag b -> b.blive <- grow_ints b.blive n; b.btotal <- grow_ints b.btotal n
+
+(* group g's state, made from its plain ints the first time *)
+let full_of s g =
+  match s.full.(g) with
+  | Some st -> st
+  | None ->
+    let o = 4 * g in
+    let st = Sums { e1 = None; e2 = None; square = s.csquare; n = s.q.(o); nan = 0; pinf = 0; ninf = 0; f1 = s.q.(o + 1); f2 = s.q.(o + 2); k = s.q.(o + 3); spilled = false } in
+    s.full.(g) <- Some st;
+    st
+
+let bag_hash g w = let h = ((g * 0x2545F4914F6CDD1D) lxor w) * 0x2545F4914F6CDD1D in h lsr 17
+
+let bag_grow b =
+  let size = 2 * Array.length b.bg in
+  let bg = Array.make size (-1) and bw = Array.make size 0 and bc = Array.make size 0 in
+  let m = size - 1 in
+  for i = 0 to Array.length b.bg - 1 do
+    let g = b.bg.(i) in
+    if g >= 0 then begin
+      let j = ref (bag_hash g b.bw.(i) land m) in
+      while bg.(!j) >= 0 do j := (!j + 1) land m done;
+      bg.(!j) <- g;
+      bw.(!j) <- b.bw.(i);
+      bc.(!j) <- b.bc.(i)
+    end
+  done;
+  b.bg <- bg;
+  b.bw <- bw;
+  b.bc <- bc
+
+(* [d] more copies (d > 0) of w in group g; true when it is a new entry: its cells *)
+let bag_add b g w d =
+  let m = Array.length b.bg - 1 in
+  let i = ref (bag_hash g w land m) in
+  while b.bg.(!i) >= 0 && (b.bg.(!i) <> g || b.bw.(!i) <> w) do i := (!i + 1) land m done;
+  b.btotal.(g) <- b.btotal.(g) + d;
+  if b.bg.(!i) >= 0 then (b.bc.(!i) <- b.bc.(!i) + d; false)
+  else begin
+    b.bg.(!i) <- g;
+    b.bw.(!i) <- w;
+    b.bc.(!i) <- d;
+    b.bused <- b.bused + 1;
+    b.blive.(g) <- b.blive.(g) + 1;
+    if 2 * b.bused > Array.length b.bg then bag_grow b;
+    true
+  end
+
+(* a binding's word w of group g (a row that comes: Answer's); true when a bag gained an entry (its cells). An int's
+   sums stay in the group's four ints while [add] would keep them plain; otherwise the group's state takes them *)
+let has_state s g = match Array.unsafe_get s.full g with Some _ -> true | None -> false
+
+let col_add (v : Store.view) (tx : Value.typ) c g w =
+  match c with
+  | Cbag b -> bag_add b g w 1
+  | Csums s ->
+    if s.cfloat || has_state s g then ignore (add v tx (full_of s g) 1 w)
+    else begin
+      let o = 4 * g and q = s.q in
+      let f1 = q.(o + 1) in
+      let r = f1 + w in
+      if w = min_int || (f1 lxor r) land (w lxor r) < 0 || (s.csquare && (w <= - small || w >= small || q.(o + 3) + 1 >= squares_max)) then
+        ignore (add v tx (full_of s g) 1 w)
+      else begin
+        q.(o) <- q.(o) + 1;
+        q.(o + 1) <- r;
+        if s.csquare then (q.(o + 2) <- q.(o + 2) + (w * w); q.(o + 3) <- q.(o + 3) + 1)
+      end
+    end;
+    false
+
+(* the groups of column [cb] into [ca]'s: group gb of b is group map.(gb) of a (room made for them) *)
+let col_merge ca cb (map : int array) nb =
+  match ca, cb with
+  | Cbag a, Cbag b ->
+    let map = Array.sub map 0 nb in
+    for gb = 0 to nb - 1 do a.btotal.(map.(gb)) <- a.btotal.(map.(gb)) + b.btotal.(gb) done;
+    a.parts <- ((b, map) :: List.map (fun (t, m) -> (t, Array.map (fun g -> map.(g)) m)) b.parts) @ a.parts
+  | Csums a, Csums b ->
+    for gb = 0 to nb - 1 do
+      let ga = map.(gb) in
+      if a.cfloat || has_state a ga || has_state b gb then merge (full_of a ga) (full_of b gb)
+      else begin
+        let oa = 4 * ga and ob = 4 * gb in
+        let f1 = a.q.(oa + 1) and f1' = b.q.(ob + 1) in
+        let r = f1 + f1' in
+        if (f1 lxor r) land (f1' lxor r) < 0 || a.q.(oa + 3) + b.q.(ob + 3) >= squares_max then merge (full_of a ga) (full_of b gb)
+        else begin
+          a.q.(oa) <- a.q.(oa) + b.q.(ob);
+          a.q.(oa + 1) <- r;
+          a.q.(oa + 2) <- a.q.(oa + 2) + b.q.(ob + 2);
+          a.q.(oa + 3) <- a.q.(oa + 3) + b.q.(ob + 3)
+        end
+      end
+    done
+  | _ -> invalid_arg "Agg.col_merge"
+
+(* the entries of a bag column by group, for groups 0 to n - 1, this table's and its parts' (a word may then come
+   once a part): group g's words and counts at off.(g) to off.(g + 1) - 1; by a count of each group's entries, then
+   one pass a table, in the order of the tables' slots *)
+let by_group c n =
+  match c with
+  | Cbag b ->
+    let tables = (b, None) :: List.map (fun (t, m) -> (t, Some m)) b.parts in
+    let off = Array.make (n + 1) 0 in
+    List.iter (fun (t, m) -> Array.iter (fun g -> if g >= 0 then (let g = match m with Some m -> m.(g) | None -> g in off.(g + 1) <- off.(g + 1) + 1)) t.bg) tables;
+    for g = 1 to n do off.(g) <- off.(g) + off.(g - 1) done;
+    let at = Array.sub off 0 (max 1 n) and ks = Array.make off.(n) 0 and cs = Array.make off.(n) 0 in
+    List.iter
+      (fun (t, m) ->
+        Array.iteri
+          (fun i g ->
+            if g >= 0 then begin
+              let g = match m with Some m -> m.(g) | None -> g in
+              ks.(at.(g)) <- t.bw.(i);
+              cs.(at.(g)) <- t.bc.(i);
+              at.(g) <- at.(g) + 1
+            end)
+          t.bg)
+      tables;
+    off, ks, cs
+  | Csums _ -> [||], [||], [||]
+
+(* the different words of a group's entries (several parts may hold one), in [cmp]'s order *)
+let distinct_sorted cmp (a : int array) =
+  Array.stable_sort cmp a;
+  let k = ref 0 in
+  Array.iteri (fun i w -> if i = 0 || w <> a.(!k - 1) then (a.(!k) <- w; incr k)) a;
+  if !k = Array.length a then a else Array.sub a 0 !k
+
+let int_order (a : int) b = if a < b then -1 else if a > b then 1 else 0
+
+(* group g's result ([by]: the column's [by_group]; [cmp]: the order of its type's words) *)
+let col_result ?cmp (v : Store.view) (a : Wire.agg) (tx : Value.typ) c g (off, ks, cs) : Value.t =
+  match c, a with
+  | Csums s, _ -> result v a tx (full_of s g)
+  | Cbag b, Wire.Distinct _ ->
+    (match b.parts with
+     | [] -> Int b.blive.(g)
+     | _ -> let lo = off.(g) in Int (Array.length (distinct_sorted int_order (Array.sub ks lo (off.(g + 1) - lo)))))
+  | Cbag b, Quantile (_, p, discrete) ->
+    let lo = off.(g) in
+    let n = off.(g + 1) - lo in
+    quantile ?cmp v tx p discrete (Array.sub ks lo n) (Array.sub cs lo n) b.btotal.(g)
+  | Cbag _, _ -> invalid_arg "Agg.col_result"
+
+(* group g's different values, in Sort's order *)
+let col_values cmp g (off, ks, _) = let lo = off.(g) in distinct_sorted cmp (Array.sub ks lo (off.(g + 1) - lo))
