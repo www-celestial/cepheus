@@ -8,7 +8,11 @@
 #   pg.sh read ROOT NCLIENTS   Q1-Q5: through the socket (pgbench, prepared) and inside the server (engine only);
 #                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2);
 #                              QS=Q4,Q5 only those; RUNS runs each (21), summarised by bench.exe stats
-#   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row; RATE=r inserts a second in all (open loop)
+#   pg.sh ops ROOT             the questions of bench.exe pages that Less and Optional answer (a < b, a range below a
+#                              value, LEFT JOIN), inside the server (engine only); RUNS runs each (21); adds an index
+#                              on invoice (total), as a user who asks that question makes
+#   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row; RATE=r inserts a second in all (open loop);
+#                              COUNTER=1: each transaction increments one counter row that every client shares instead
 #   pg.sh seats ROOT serializable|naive SEATS BUYERS   the sale of docs/book/case-seats.md (pgbench, --max-tries)
 #   pg.sh stop ROOT
 set -e
@@ -121,12 +125,34 @@ read)
     done | stats "$q engine only"
   done
   ;;
+ops)
+  runs=${RUNS:-21}
+  stats() { "$here/../../_build/default/bench/bench.exe" stats "$1"; }
+  psql_ -c "CREATE INDEX IF NOT EXISTS invoice_total ON invoice (total)" -c "ANALYZE invoice"
+  psql_ -c "SELECT count(*) FROM invoice" -c "SELECT count(*) FROM client" -c "SELECT count(*) FROM follows" >/dev/null
+  # client k's invoices are k * 20 to k * 20 + 19: 140 is client 7's first, as on the Cepheus side
+  less_check="SELECT a, b FROM follows WHERE a < b"
+  less_range="SELECT id FROM invoice WHERE total < (SELECT total FROM invoice WHERE id = 140)"
+  opt_city="SELECT c.id, f.b FROM client c LEFT JOIN follows f ON f.a = c.id WHERE c.city = 'city-7'"
+  opt_all="SELECT c.id, f.b FROM client c LEFT JOIN follows f ON f.a = c.id"
+  for q in less_check less_range opt_city opt_all; do
+    eval "sql=\$$q"
+    echo "$q rows: $(psql -X -At -c "SELECT count(*) FROM ($sql) x")"
+    for r in $(seq "$runs"); do
+      psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+    done | stats "$q engine only"
+  done
+  ;;
 write)
   # RATE=r: r inserts a second in all (pgbench -R: a latency counts from the scheduled start, so a stall is never
   # hidden); without it, as fast as the clients go. Latencies of every insert, from pgbench's log, into the histogram.
   n=$3; c=$4; secs=$5
   tmp=$(mktemp -d -p "$root")
   printf '\\set c random(0, %d)\n\\set t random(1, 100000)\n\\set d random(0, 3649)\nINSERT INTO invoice (id, client, total, status, date) VALUES (nextval('"'"'invoice_seq'"'"'), :c, :t, '"'"'unpaid'"'"', :d);\n' $((n - 1)) > "$tmp/w.sql"
+  if [ -n "$COUNTER" ]; then
+    psql_ -c "CREATE TABLE IF NOT EXISTS counter (id int PRIMARY KEY, last bigint NOT NULL)" -c "INSERT INTO counter VALUES (1, 0) ON CONFLICT DO NOTHING"
+    printf 'UPDATE counter SET last = last + 1 WHERE id = 1;\n' > "$tmp/w.sql"
+  fi
   j=$c; [ "$j" -gt 8 ] && j=8
   rate=""; [ -n "$RATE" ] && rate="-R $RATE"
   (cd "$tmp" && pgbench -n -M prepared -c "$c" -j "$j" -T "$secs" $rate -l --log-prefix=lat -f w.sql bench 2>/dev/null) \

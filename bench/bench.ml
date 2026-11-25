@@ -298,6 +298,28 @@ let pages dir facts =
   measure "  before: every e-mail, filtered" 1 (fun _ ->
       let all = ok (find v { vars = 2; ranges = []; where = [ { e = Var 0; p = s.mail; v = Var 1 } ] }) in
       ignore (List.filter (function [| _; Value.Text m |] -> String.starts_with ~prefix:"c1234" m | _ -> false) all));
+  (* Less, a check: the follow links from a client to a newer one (a < b), against every link filtered *)
+  let fol = { e = Var 0; p = s.follows; v = Var 1 } in
+  let newer = { Question.vars = 2; items = [ Question.Pattern fol; Question.Less (0, 1) ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } in
+  Printf.printf "the follow links to a newer client (Less): %d\n%!" (List.length (rows newer));
+  measure "  Less, a check" 1 (fun _ -> ignore (rows newer));
+  measure "  before: every link, filtered" 1 (fun _ ->
+      ignore (List.filter (fun r -> compare r.(0) r.(1) < 0) (ok (find v { vars = 2; ranges = []; where = [ fol ] }))));
+  (* Less, a range of the index: the invoices whose total is below that of client 7's first invoice *)
+  let x = match things v s.mail (Text (email 7)) with [ c ] -> c + 1 | _ -> failwith "email" in
+  let below = { Question.vars = 3; items = [ Question.Pattern { e = Thing x; p = s.total; v = Var 0 }; Question.Pattern { e = Var 1; p = s.total; v = Var 2 };
+                                            Question.Less (2, 0) ]; give = [| 1 |]; sort = []; limit = 0; after = None } in
+  Printf.printf "the invoices whose total is below that of client 7's first (Less): %d\n%!" (List.length (rows below));
+  measure "  Less, a range" 1 (fun _ -> ignore (rows below));
+  (* Optional: the clients of city-7, and every client, each with the clients it follows or missing, against the join *)
+  let opt where = { Question.vars = 3; items = [ Question.Pattern where; Question.Optional fol ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } in
+  let join where = { (opt where) with items = [ Question.Pattern where; Question.Pattern fol ] } in
+  List.iter
+    (fun (name, where) ->
+      Printf.printf "%s, with the clients each follows (Optional): %d rows, %d by the join\n%!" name (List.length (rows (opt where))) (List.length (rows (join where)));
+      measure "  Optional" 1 (fun _ -> ignore (rows (opt where)));
+      measure "  the join" 1 (fun _ -> ignore (rows (join where))))
+    [ "the clients of city-7", { e = Var 0; p = s.cty; v = Val (Text "city-7") }; "every client", { e = Var 0; p = s.name; v = Var 2 } ];
   close db
 
 let read dir facts only =

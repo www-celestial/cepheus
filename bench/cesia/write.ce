@@ -1,8 +1,9 @@
 (** Durable writes through the Cesia client: f fibers share the one connection, each inserting an invoice of 4 fields
     (as sbench's write) after the other, for s seconds. Prints the inserts a second and the median latency of one in
-    milliseconds.
+    milliseconds. With counter, each write is instead a group that increments one counter that every fiber shares
+    (Incr), as the invoice numbers and the stock of docs/book/tutorials.md.
 
-    cesia run --allow native=cepheus,env,read bench/cesia/write.ce F S *)
+    cesia run --allow native=cepheus,env,read bench/cesia/write.ce F S [counter] *)
 use deps/www-celestial/cepheus/cesia/cepheus
 use std/fiber
 use std/io
@@ -14,16 +15,22 @@ use std/text
 use std/value
 
 Invoice = cepheus.Kind("invoice", {client: cepheus.Link(), total: cepheus.Money(2), status: cepheus.Text(), date: cepheus.Date()})
-db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Invoice], token = sys.Env("CEPHEUS_TOKEN"), ca = sys.Env("CEPHEUS_CA")))
+Counter = cepheus.Kind("counter", {last: cepheus.Int()})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Invoice, Counter], token = sys.Env("CEPHEUS_TOKEN"), ca = sys.Env("CEPHEUS_CA")))
 f = text.Number(sys.Args[1])
 s = text.Number(sys.Args[2])
+counter = if value.Len(sys.Args) >= 3 and sys.Args[3] == "counter" result.Unwrap(cepheus.Insert(Counter, {last: 0}, db)) else missing end
 stop = sys.Now() + s
 defn worker(w)
   times = []
   k = 0
   while sys.Now() < stop
     t0 = sys.Now()
-    result.Unwrap(cepheus.Insert(Invoice, {client: 65536 + w, total: k, status: "unpaid", date: 1794268800}, db))
+    if value.IsMissing(counter)
+      result.Unwrap(cepheus.Insert(Invoice, {client: 65536 + w, total: k, status: "unpaid", date: 1794268800}, db))
+    else
+      result.Unwrap(cepheus.Write([cepheus.Incr(counter, Counter.last)], db))
+    end
     times = list.Append(sys.Now() - t0, times)
     k += 1
   end

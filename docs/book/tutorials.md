@@ -8,7 +8,7 @@ in [Cepheus from Cesia](cesia.md).
 **How to read the code.** The Cesia blocks run as written, against a real server, each time the tests run
 (`test/cesia.sh`): each block runs with every block before it, as one program, and what follows it is what it printed.
 So the tutorials share one database, as the parts of one application do. The SQL is PostgreSQL 18.6, run with `psql`
-on the same tables; what follows it is what PostgreSQL answered.
+on the same tables holding the same rows; what follows it is what PostgreSQL answered.
 
 ## The tutorials' database
 
@@ -118,7 +118,7 @@ Ok({Last: 20})
 20 invoices written hold the numbers 1 to 20, whatever order the fibers ran in, and the 10 refused took none.
 
 **PostgreSQL** gives numbers with a **sequence**, `nextval`, which never goes back: a transaction that takes a number
-and is then rolled back leaves a gap.
+and is then rolled back leaves a gap. The same 20 invoices took the numbers 1 to 20 from it; then:
 
 ```sql
 CREATE SEQUENCE invoice_number;
@@ -132,19 +132,20 @@ INSERT INTO invoice (client, number, total, status, date)
 ```text
  number
 --------
-      2
+     22
 ```
 
-Its documentation says so: "the value obtained by nextval is not reclaimed for re-use if the calling transaction
-later aborts", so "transaction aborts or database crashes can result in gaps" ([PostgreSQL, Sequence Manipulation
+Number 21 went with the transaction rolled back. This is by design: PostgreSQL's documentation says that a value
+`nextval` gave is not taken back when its transaction aborts, so that transactions numbering at the same time never
+wait for each other, and that aborts and crashes therefore leave gaps ([Sequence Manipulation
 Functions](https://www.postgresql.org/docs/18/functions-sequence.html)). The way without a gap in PostgreSQL is a
 counter row that each invoice's transaction updates:
 
 ```sql
-BEGIN;
-UPDATE counter SET last = last + 1 WHERE id = 1 RETURNING last;   -- the row is locked until COMMIT
-INSERT INTO invoice (client, number, total, status, date) VALUES (1, 3, 30, 'unpaid', now());
-COMMIT;
+CREATE TABLE counter (id int PRIMARY KEY, last bigint NOT NULL);
+-- the counter row stays locked until the transaction ends
+WITH n AS (UPDATE counter SET last = last + 1 WHERE id = 1 RETURNING last)
+INSERT INTO invoice (client, number, total, status, date) SELECT 1, last, 30, 'unpaid', now() FROM n;
 ```
 
 **The difference.** Both give no gap that way; the cost differs. PostgreSQL's `UPDATE` locks the counter row until
@@ -252,8 +253,8 @@ UPDATE job SET state = 'queued' WHERE state = 'taken' AND since < now() - interv
 
 **The difference.** Both take each job once: PostgreSQL by the row lock (the second worker skips the row, or, without
 `SKIP LOCKED`, waits and finds it taken), Cepheus by `Expect` in a strictly serializable order
-([G4](guarantees.md#g4-strict-serializability)). PostgreSQL's documentation warns that "skipping locked rows provides
-an inconsistent view of the data", fit for a queue and nothing else ([SELECT, the locking
+([G4](guarantees.md#g4-strict-serializability)). PostgreSQL's documentation warns that skipping locked rows gives an
+inconsistent view of the data, fit for a table used as a queue and not for general work ([SELECT, the locking
 clause](https://www.postgresql.org/docs/18/sql-select.html#SQL-FOR-UPDATE-SHARE)); a job kept locked for the whole of
 its work holds a connection and an open transaction for that time, which holds back `VACUUM`'s cleaning of the table.
 Cepheus holds nothing during the work: a job's state is a fact, its history kept (who took it, when, why it went
@@ -322,11 +323,11 @@ SELECT last_value FROM invoice_number;
 ```text
  last_value
 ------------
-          3
+         23
 ```
 
-**The difference.** The rolled-back transaction left its sequence moved on (`last_value` 3: tutorial 1's gap again),
-and while it was open it held its rows' locks against every other writer of them; code under test that commits by
+**The difference.** The rolled-back transaction left its sequence moved on (`last_value` 23: tutorial 1's gap again),
+and while such a transaction is open, the rows it changed stay locked against every other writer; code under test that commits by
 itself ends the test's transaction, and its data stays. A fork leaves nothing anywhere, guaranteed: the database it
 starts from and its history do not change ([G8](guarantees.md#g8-forks)), no lock is taken, and any number of forks of one
 database live at once, each its own. What PostgreSQL does that a fork does not: a transaction's writes go to its disk,
@@ -368,7 +369,7 @@ reads it next.
 
 ```sql
 SELECT total FROM invoice ORDER BY total DESC LIMIT 3;            -- 300.00, 280.00, 270.00
-INSERT INTO invoice (client, number, total, status, date) VALUES (1, 21, 1000, 'unpaid', now());
+INSERT INTO invoice (client, number, total, status, date) VALUES (1, nextval('invoice_number'), 1000, 'unpaid', now());
 SELECT total FROM invoice ORDER BY total DESC LIMIT 3 OFFSET 3;
 ```
 
@@ -383,7 +384,7 @@ SELECT total FROM invoice ORDER BY total DESC LIMIT 3 OFFSET 3;
 **The difference.** With `OFFSET` the invoice written between the pages pushed every row down by one: 270 shows twice,
 and a row deleted between pages would hide one. `OFFSET 12000` also reads and drops 12,000 rows before the page, so a
 deep page costs what all the pages before it cost. PostgreSQL's answer to both is **keyset pagination**, `WHERE
-(total, id) < (270.00, 27) ORDER BY total DESC, id DESC`, with an index on `(total, id)` and the tie-breaking column
+(total, id) < (270.00, 18) ORDER BY total DESC, id DESC`, with an index on `(total, id)` and the tie-breaking column
 written by hand. `After` is that, built in: it breaks ties by the other fields of the row itself, so two rows are equal
 in the order only when they are the same row, and needs no index chosen for it; the page after a row costs the same at
 any depth ([how it is answered](cesia.md#sort-limit-and-after-pages)).
@@ -500,7 +501,8 @@ SELECT c.name, i.total, i.status FROM invoice i JOIN client c ON c.id = i.client
 of its own, from the index that gives it the fewest candidates (here the disputed invoices, read from the index of
 `Status`), with the alternatives before it as `Not`s, so their answers never overlap and none is kept to remove
 copies; each answer comes once, guaranteed ([G11](guarantees.md#g11-exact-answers)). PostgreSQL reads an `OR` over two tables of a
-join as a filter on the joined rows, unless it rewrites it (a `BitmapOr` works within one table); the rewrite by hand
+join as a filter on the joined rows (its plan here: a `Hash Join` whose `Join Filter` is the `OR`, over every
+invoice), unless it rewrites it (a `BitmapOr` works within one table); the rewrite by hand
 is a `UNION`, which sorts or hashes every row to remove copies. `In` is a list of values in both.
 
 ## 7. A stock that never goes below zero
@@ -548,7 +550,9 @@ DETAIL:  Failing row contains (1, desk lamp, -1).
 
 **The difference.** Both keep the stock at zero or more, guaranteed. A `CHECK` sees one row; a constraint of Cepheus is
 a question over any facts ("the lamps reserved never exceed the lamps in stock", over the order lines), where
-PostgreSQL needs a trigger, and a trigger sees other rows only under `SERIALIZABLE` or with locks it takes. And the
+PostgreSQL needs a trigger, and a trigger that reads other rows is fooled by two transactions at once (each reads
+the other's rows as they were before it) unless it runs under `SERIALIZABLE` or takes locks; Cepheus's one writer
+checks each group against the database the groups before it made. And the
 cost, as for tutorial 1's counter: each `UPDATE` of the lamp's row waits for the one before it to commit.
 
 ## 8. Invoices paid late, loans between 2.5 and 3 %
@@ -651,8 +655,8 @@ SELECT c.name, p.number FROM client c LEFT JOIN phone p ON p.client = c.id ORDER
 ```text
     name    |     number
 ------------+----------------
- Cy Moreau  |
  Di Weber   |
+ Cy Moreau  |
  Ada Martin | 06 00 00 00 01
  Ada Martin | 04 00 00 00 01
  Bo Lind    | 01 00 00 00 02
