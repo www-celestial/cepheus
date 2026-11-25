@@ -137,6 +137,11 @@ type segment_check = {
   slast : int;  (** the last group of its whole frames ([sfirst - 1]: none) *)
   send : int;  (** where its last whole frame ends (0: its header did not check) *)
   stail : bool;  (** bytes after [send] that the rule takes for the frame being written *)
+  swritten : bool;
+      (** [Copy]: those bytes are a frame written whole that does not check (a header there, not zeros, that does not
+          check; or one that checks with every byte of its frame there): never a frame being written, but for the
+          instant a large group's header is written into its place *)
+  strailer : int option;  (** [Crash]: the offset of the newest frame, kept, whose trailer alone is broken *)
   sdamage : string option;  (** the first damage, which ended the segment's check *)
 }
 
@@ -157,6 +162,13 @@ val check :
     run on several), each up to its first damage: its header, every frame's header, body CRC, trailer, first group and
     count, its groups decoded and numbered (up to {!decode_max}); then the segments' order. [frame pos count stop] on
     each whole frame, [on_group] on each decoded group. Never changes a file. *)
+
+val check_newest : tail:tail -> Disk.t -> string -> string -> int -> segment_check
+(** [check_newest ~tail disk dir id s]: segment [s] alone checked as the newest, as {!check} checks it. *)
+
+val rebuild_trailer : Disk.t -> string -> int -> int -> unit
+(** [rebuild_trailer disk dir s p]: the trailer of the frame at offset [p] of segment [s], whose header and body check,
+    written again from its header and forced, as recovery does for the newest frame after a crash. *)
 
 val times : Disk.t -> string -> string -> (int -> int -> bool) -> unit
 (** [times disk dir id f]: [f n time] on every group in order, from the start, each frame checked by its CRCs, until

@@ -77,9 +77,13 @@ type report = {
   damages : string list;
   notes : string list;
   tail : (int * int) option;  (* the newest segment and the end of its last whole frame, when bytes follow it *)
+  tail_written : bool;  (* Copy: those bytes are a frame written whole that does not check (Journal.segment_check) *)
+  kept_trailer : (int * int) option;  (* Crash: the newest frame kept whose trailer alone is broken: its segment, offset *)
 }
 
 let file_size p = match Unix.stat p with st -> st.Unix.st_size | exception Unix.Unix_error _ -> 0
+
+let writing_note s stop = Printf.sprintf "journal/%s: the frame being written from offset %d is not checked (the database is open)" (Journal.segment_name s) stop
 
 (* Every file of the database in [dir] checked through [disk] (read-only), the newest segment's end read by [tail];
    [live]: a process writes it meanwhile (a run a merge removes is no damage). *)
@@ -90,7 +94,7 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
   match Engine.read_meta disk dir with
   | exception Journal.Damaged m ->
     { group = 0; segments = 0; journal_bytes = 0; frames = 0; runs = 0; run_bytes = 0; pages = 0; packs = 0; vault_bytes = 0;
-      records = 0; damages = [ m ]; notes = []; tail = None }
+      records = 0; damages = [ m ]; notes = []; tail = None; tail_written = false; kept_trailer = None }
   | exception Disk.Io m -> refuse "%s" m
   | id ->
     (* the runs: each as an open checks it, and every page *)
@@ -135,7 +139,7 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
       match newest with
       | Some s when s.stail ->
         (match tail with
-         | Journal.Copy when live -> note "journal/%s: the frame being written from offset %d is not checked (the database is open)" (Journal.segment_name s.sfirst) s.send
+         | Journal.Copy when live && not s.swritten -> note "%s" (writing_note s.sfirst s.send)
          | Journal.Crash when s.send = 0 -> note "journal/%s: a segment torn at its creation, holding no frame (the next open removes it)" (Journal.segment_name s.sfirst)
          | Journal.Crash -> note "journal/%s: a frame torn from offset %d, never confirmed (the next open cuts it)" (Journal.segment_name s.sfirst) s.send
          | _ -> ());
@@ -149,7 +153,12 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
           if hi > c.last then damage "snapshots/%s holds groups up to %d, past the journal's end (group %d)" n hi c.last
           else
             let at_end = match newest with Some s -> p.segment = s.sfirst && p.offset = s.send && p.next = c.last + 1 | None -> false in
-            if not (at_end || Hashtbl.find_opt found (p.segment, p.offset) = Some p.next) then
+            (* or the end of a segment the next one follows: the frame after the run's groups began a new segment *)
+            let at_seg_end =
+              List.exists (fun (s : Journal.segment_check) -> s.sfirst = p.segment && s.send = p.offset && s.slast = p.next - 1) c.segments
+              && List.exists (fun (s : Journal.segment_check) -> s.sfirst = p.next) c.segments
+            in
+            if not (at_end || at_seg_end || Hashtbl.find_opt found (p.segment, p.offset) = Some p.next) then
               damage "snapshots/%s: its journal position (%s at offset %d, group %d) is not the start of a frame" n
                 (Journal.segment_name p.segment) p.offset p.next)
         (List.rev !good);
@@ -164,10 +173,29 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
       end
       else 0, 0, 0
     in
+    let kept_trailer = match newest with Some { strailer = Some p; sfirst; _ } when c.damages = [] -> Some (sfirst, p) | _ -> None in
+    Option.iter (fun (s, p) -> note "journal/%s: the newest frame's trailer, at offset %d, is broken (a crash): the next open writes it again from its header" (Journal.segment_name s) p) kept_trailer;
     { group = c.last; segments = List.length c.segments; journal_bytes = List.fold_left (fun a (s : Journal.segment_check) -> a + s.sbytes) 0 c.segments;
       frames = List.fold_left (fun a (s : Journal.segment_check) -> a + s.sframes) 0 c.segments; runs = List.length !good;
       run_bytes = !run_bytes; pages = !pages; packs; vault_bytes; records; damages = List.rev !damages; notes = List.rev !notes;
-      tail = tail_at }
+      tail = tail_at; tail_written = (match newest with Some s -> s.stail && s.swritten | None -> false); kept_trailer }
+
+(* A tail the Copy rule leaves out as the frame being written while every byte of it is there ([tail_written]): a
+   frame written whole that does not check, or the instant a large group's header is written into its place. The live
+   database's segment read again for a second: being written if the frame checks now, or the server cut it back (a
+   failed write); damage if it stays as it was (a frame's bytes appear in the time of a write, and are forced at once) *)
+let still_torn src id (s, stop) =
+  let rec go k =
+    match Journal.check_newest ~tail:Journal.Copy Disk.read_only (src // "journal") id s with
+    | exception (Disk.Io _ | Journal.Damaged _) -> false
+    | c when c.send = stop && c.stail && c.swritten -> k = 0 || (Thread.delay 0.1; go (k - 1))
+    | _ -> false
+  in
+  go 10
+
+let written_damage (s, stop) =
+  Printf.sprintf "journal/%s: the frame at offset %d does not check, and every byte of it is written, for a second and more: damage, not a frame being written (its groups were confirmed, or would have been)"
+    (Journal.segment_name s) stop
 
 let print_report r =
   say "journal: %d segment%s, %s, %d frames, groups 1 to %d" r.segments (if r.segments = 1 then "" else "s") (mb r.journal_bytes) r.frames r.group;
@@ -186,6 +214,13 @@ let verify dir =
   let st = state dir in
   let tail = match st with Open -> Journal.Copy | Closed -> Journal.Strict | Crashed -> Journal.Crash in
   let r = check ~tail ~live:(st = Open) dir in
+  let r =
+    match r.tail with
+    | Some ((s, stop) as t) when st = Open && r.tail_written ->
+      if still_torn dir (Engine.read_meta Disk.read_only dir) t then { r with damages = r.damages @ [ written_damage t ] }
+      else { r with notes = r.notes @ [ writing_note s stop ] }
+    | _ -> r
+  in
   print_report r;
   match r.damages with
   | [] -> say "%s: whole, at group %d (%s)" dir r.group (since t0); exit_ok
@@ -224,9 +259,13 @@ let copy_file src dst =
 let mkdir_private p = Unix.mkdir p 0o700; Unix.chmod p 0o700
 let sync_dir p = Disk.real.Disk.sync_dir p
 
+(* a tree removed, never through a link (a link is removed, not followed), and only into folders of this user's *)
 let rec rmrf p =
   match Unix.lstat p with
-  | { Unix.st_kind = Unix.S_DIR; _ } -> Array.iter (fun n -> rmrf (p // n)) (Sys.readdir p); Unix.rmdir p
+  | { Unix.st_kind = Unix.S_DIR; st_uid; _ } ->
+    if st_uid <> Unix.geteuid () then refuse "%s belongs to another user (uid %d): not removed" p st_uid;
+    Array.iter (fun n -> rmrf (p // n)) (Sys.readdir p);
+    Unix.rmdir p
   | _ -> Unix.unlink p
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
@@ -316,21 +355,54 @@ let mark_closed dir =
   Unix.close fd;
   sync_dir dir
 
+(* [p] opened read-write, made if missing (mode 0600), never through a link: an existing name must be a file of this
+   user's, the one opened (its device and inode, read before and after the open) *)
+let open_own p =
+  match Unix.openfile p [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC ] 0o600 with
+  | fd -> fd
+  | exception Unix.Unix_error (Unix.EEXIST, _, _) ->
+    let st = Unix.lstat p in
+    if st.st_kind <> Unix.S_REG || st.st_uid <> Unix.geteuid () then refuse "%s is not a file of this user's (a link, or another's): remove it" p;
+    let fd = Unix.openfile p [ Unix.O_RDWR; Unix.O_CLOEXEC ] 0 in
+    let st' = Unix.fstat fd in
+    if st'.st_dev <> st.st_dev || st'.st_ino <> st.st_ino then (Unix.close fd; refuse "%s changed while it was opened" p);
+    fd
+
+(* a name [stamp] gives, with its -K, and .partial: the folders a backup makes, the only ones it removes *)
+let partial_name n =
+  let digit i = n.[i] >= '0' && n.[i] <= '9' in
+  let l = String.length n in
+  l >= 25 && Filename.check_suffix n ".partial"
+  && List.for_all digit [ 0; 1; 2; 3; 5; 6; 8; 9; 11; 12; 13; 14; 15; 16 ] && n.[4] = '-' && n.[7] = '-' && n.[10] = 'T'
+  && (l = 25 || (n.[17] = '-' && l > 26 && List.for_all digit (List.init (l - 26) (fun i -> 18 + i))))
+
 let backup (cfg : Config.t) dest =
   let t0 = Unix.gettimeofday () in
   Pages.set_capacity verify_cache;
   if not (is_dir cfg.data) then refuse "%s: the data directory %s is missing" cfg.file cfg.data;
   if not (Sys.file_exists dest) then (mkdir_private dest; sync_dir (Filename.dirname dest));
   if not (is_dir dest) then refuse "%s is not a folder" dest;
+  (* DEST is this user's alone: a backup removes there what a backup left, and nobody else may plant names in it *)
+  let st = Unix.stat dest in
+  if st.st_perm land 0o022 <> 0 then
+    refuse "%s is writable by other users (mode %o): a backup removes the folders a backup left in it, and another user could plant names there; choose a folder of your own, or chmod go-w it" dest st.st_perm;
+  if st.st_uid <> Unix.geteuid () && st.st_uid <> 0 then refuse "%s belongs to another user (uid %d): choose a folder of your own" dest st.st_uid;
   (* one backup into DEST at a time *)
-  let lock = Unix.openfile (dest // "cepheus-backup.lock") [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o600 in
+  let lock = open_own (dest // "cepheus-backup.lock") in
   Fun.protect ~finally:(fun () -> Unix.close lock) @@ fun () ->
   (match Unix.lockf lock Unix.F_TLOCK 0 with
    | () -> ()
    | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EACCES), _, _) -> refuse "another cepheus backup writes into %s" dest);
-  (* what a backup that did not finish left *)
+  (* what a backup that did not finish left: a folder of a name a backup makes, this user's; nothing else *)
   Array.iter
-    (fun n -> if Filename.check_suffix n ".partial" then (rmrf (dest // n); say "note: removed %s, left by a backup that did not finish" (dest // n)))
+    (fun n ->
+      if partial_name n then
+        match Unix.lstat (dest // n) with
+        | { Unix.st_kind = Unix.S_DIR; st_uid; _ } when st_uid = Unix.geteuid () ->
+          rmrf (dest // n);
+          say "note: removed %s, left by a backup that did not finish" (dest // n)
+        | _ -> say "note: %s is not a folder a backup left (a link, a file, or another user's): left as it is" (dest // n)
+        | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ())
     (Sys.readdir dest);
   let name =
     let s = stamp () in
@@ -360,6 +432,12 @@ let backup (cfg : Config.t) dest =
         (* the copy's end read as the source's: one being written may end in the frame being written *)
         let tail = match st with Open -> Journal.Copy | Closed -> Journal.Strict | Crashed -> Journal.Crash in
         let r = check ~tail ~live:false out in
+        (* a tail of a frame written whole: read again in the live database, damage if it stays so *)
+        let r =
+          match r.tail with
+          | Some t when live && r.tail_written && still_torn src (Engine.read_meta Disk.read_only out) t -> { r with damages = r.damages @ [ written_damage t ] }
+          | _ -> r
+        in
         List.iter (fun m -> say "%s: note: %s" db m) r.notes;
         match r.damages with
         | [] ->
@@ -370,9 +448,13 @@ let backup (cfg : Config.t) dest =
                 (if st = Open then "the frame being written when it was copied" else "a frame torn at a crash, never confirmed");
               cut_copy out t)
             r.tail;
+          (* the copy is marked closed, so read as every byte checks: a trailer the Crash rule kept is written again
+             first, as the next open would *)
+          Option.iter (fun (s, p) -> Journal.rebuild_trailer Disk.real (out // "journal") s p; say "%s: note: journal/%s: the trailer at offset %d written again from its header in the copy" db (Journal.segment_name s) p) r.kept_trailer;
           mark_closed out;
           say "%s: group %d, %s (journal %s, runs %s%s), %s%s" db r.group (mb (c.journal + c.runs_ + c.vault)) (mb c.journal) (mb c.runs_)
-            (if c.vault > 0 then ", vault " ^ mb c.vault else "") (since t1) (if live then "" else ", the database was closed")
+            (if c.vault > 0 then ", vault " ^ mb c.vault else "") (since t1)
+            (match st with Open -> "" | Closed -> ", the database was closed" | Crashed -> ", the database was left by a process that died")
         | l ->
           incr damaged;
           List.iter (fun m -> say "%s: damaged: %s" db m) l)
@@ -405,22 +487,29 @@ let days y m d =
   (era * 146097) + (yoe * 365) + (yoe / 4) - (yoe / 100) + doy - 719468
 
 (* YYYY-MM-DDTHH:MM[:SS] (or a space for the T) in the machine's local time, or with a final Z in UTC: milliseconds
-   since 1970 *)
+   since 1970. Exactly these digits, a day of the calendar (leap years), hours 00 to 23, minutes and seconds 00 to 59;
+   a local time the clocks skip (the change to summer time) is none; anything else is refused. *)
 let parse_time s =
   let utc = String.length s > 0 && s.[String.length s - 1] = 'Z' in
-  let s = String.map (fun c -> if c = ' ' then 'T' else c) (if utc then String.sub s 0 (String.length s - 1) else s) in
-  let parts =
-    match Scanf.sscanf_opt s "%4d-%2d-%2dT%2d:%2d:%2d%!" (fun y mo d h mi sec -> y, mo, d, h, mi, sec) with
-    | Some x -> Some x
-    | None -> Scanf.sscanf_opt s "%4d-%2d-%2dT%2d:%2d%!" (fun y mo d h mi -> y, mo, d, h, mi, 0)
-  in
-  match parts with
-  | Some (y, mo, d, h, mi, sec) when mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && h <= 23 && mi <= 59 && sec <= 60 ->
+  let n = String.length s - if utc then 1 else 0 in
+  let digits i k = let v = ref 0 in for j = i to i + k - 1 do (match s.[j] with '0' .. '9' as c -> v := (!v * 10) + Char.code c - 48 | _ -> raise Exit) done; !v in
+  match
+    if not (n = 16 || n = 19) || s.[4] <> '-' || s.[7] <> '-' || (s.[10] <> 'T' && s.[10] <> ' ') || s.[13] <> ':' || (n = 19 && s.[16] <> ':') then raise Exit;
+    let y = digits 0 4 and mo = digits 5 2 and d = digits 8 2 and h = digits 11 2 and mi = digits 14 2 and sec = if n = 19 then digits 17 2 else 0 in
+    if mo < 1 || mo > 12 || d < 1 || d > Tabular.month_days y mo || h > 23 || mi > 59 || sec > 59 then raise Exit;
+    y, mo, d, h, mi, sec
+  with
+  | exception Exit -> None
+  | y, mo, d, h, mi, sec ->
     if utc then Some (((days y mo d * 86400) + (h * 3600) + (mi * 60) + sec) * 1000)
     else
       let tm = { Unix.tm_year = y - 1900; tm_mon = mo - 1; tm_mday = d; tm_hour = h; tm_min = mi; tm_sec = sec; tm_wday = 0; tm_yday = 0; tm_isdst = false } in
-      Some (int_of_float (fst (Unix.mktime tm)) * 1000)
-  | _ -> None
+      match Unix.mktime tm with
+      | exception Unix.Unix_error _ -> None
+      | t, _ ->
+        (* the time read back: mktime moves a local time the clocks skip *)
+        let b = Unix.localtime t in
+        if (b.tm_year, b.tm_mon, b.tm_mday, b.tm_hour, b.tm_min, b.tm_sec) = (y - 1900, mo - 1, d, h, mi, sec) then Some (int_of_float t * 1000) else None
 
 let time_text ms =
   let t = Unix.localtime (float_of_int ms /. 1000.) in
@@ -451,10 +540,22 @@ let restore ?(target = End) ~replace src dst =
   if Sys.file_exists dst && (not has_db) && Sys.readdir dst <> [||] then refuse "%s is not empty and holds no database: restore into a new folder" dst;
   if has_db && not replace then
     refuse "%s holds a database: restore into a new folder, or add --replace (the database there is moved aside, never removed)" dst;
-  if has_db then ignore (match state dst with Open -> refuse "%s is open in another process: stop its server first (cepheus stop)" dst | s -> s);
+  (* the database replaced is moved aside, never read: only a process that holds it refuses the restore (one that
+     crashed, even through a server's commit buffer, is replaced as it is) *)
+  if has_db && held (dst // "lock") then refuse "%s is open in another process: stop its server first (cepheus stop)" dst;
   let parent = Filename.dirname dst in
-  if (Sys.file_exists (parent // "server.wal.1") || Sys.file_exists (parent // "server.wal.2")) && not (held (parent // "cepheus.lock")) then
-    refuse "the server of %s did not stop cleanly: its commit buffer (server.wal.1, .2) may hold frames of this database, which its next start would write into the restored journal; start the server and stop it (cepheus stop), then restore" parent;
+  (* a commit buffer that an unclean stop left: the server's next start writes the frames it holds for a database into
+     that database's journal, which would be the restored one's (the same id), or the start refuses frames of a
+     database it no longer finds; so it may hold none of the restored database's, nor of the one replaced *)
+  if (Sys.file_exists (parent // "server.wal.1") || Sys.file_exists (parent // "server.wal.2")) && not (held (parent // "cepheus.lock")) then begin
+    let ids = id :: (if has_db then (try [ Engine.read_meta Disk.read_only dst ] with Journal.Damaged _ | Disk.Io _ -> []) else []) in
+    match Wal.recover Disk.read_only parent with
+    | exception (Journal.Damaged m | Disk.Io m) ->
+      refuse "the server of %s did not stop cleanly, and its commit buffer (server.wal.1, .2) does not read (%s): start the server and stop it (cepheus stop), then restore" parent m
+    | w ->
+      if List.exists (fun i -> Wal.frames w i <> []) ids then
+        refuse "the server of %s did not stop cleanly: its commit buffer (server.wal.1, .2) holds frames of this database, which its next start would write into the restored journal; start the server and stop it (cepheus stop), then restore" parent
+  end;
   if not (is_dir parent) then refuse "%s: the folder %s is missing" dst parent;
   let n =
     match target with
@@ -529,9 +630,18 @@ let restore ?(target = End) ~replace src dst =
     (* into place: the old database moved aside first, never removed *)
     let aside =
       if has_db then begin
-        let a = dst ^ ".before-restore-" ^ stamp () in
-        Unix.rename dst a;
-        Some a
+        (* a name no entry has (-2, -3 after one of the same second), never renamed over another folder *)
+        let base = dst ^ ".before-restore-" ^ stamp () in
+        let rec go k =
+          let a = if k = 1 then base else Printf.sprintf "%s-%d" base k in
+          match Unix.lstat a with
+          | _ -> go (k + 1)
+          | exception Unix.Unix_error (Unix.ENOENT, _, _) -> (
+            match Unix.rename dst a with
+            | () -> a
+            | exception Unix.Unix_error ((Unix.ENOTEMPTY | Unix.EEXIST | Unix.ENOTDIR), _, _) -> go (k + 1))
+        in
+        Some (go 1)
       end
       else begin
         if Sys.file_exists dst then Unix.rmdir dst;

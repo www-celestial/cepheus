@@ -108,4 +108,7 @@ let main cmd args =
              (if format = Tabular.Csv then "CSV" else "JSON lines") e.seconds);
         Client.close c)
     | _ -> usage ()
-  with Transfer.Stop m -> die "%s" m
+  with
+  | Transfer.Stop m -> die "%s" m
+  (* anything else, outside an import's passes (they name what they wrote): the connection lost, the disk *)
+  | e -> die "%s" (Transfer.failure e)
