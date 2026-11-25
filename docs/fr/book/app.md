@@ -214,7 +214,11 @@ NoInvoiceOfDeleted = cepheus.Rule("no-invoice-of-a-deleted-client", 3, (c, i, n)
   un message clair ; mais entre cette vérification et la suppression, une autre requête pourrait lui en donner une, et
   `Expect` ne vérifie que les faits propres d'une chose, pas qu'aucune facture ne pointe vers elle. La suppression
   retire les champs du client, son nom avec eux : celui des deux groupes qui vient en second est refusé par la base,
-  dans un ordre comme dans l'autre, et une facture d'un client qui n'a jamais existé l'est aussi.
+  dans un ordre comme dans l'autre, et une facture d'un client qui n'a jamais existé l'est aussi. Un lien qui nomme un
+  kind dit désormais la même chose dans le schéma lui-même, `Client: cepheus.Link(to = "client")`, et
+  `cepheus.Delete(Client, id, db)` supprime un client avec la vérification au writer, en nommant une facture quand une
+  pointe vers lui ([tutoriel 10](tutorials.md#10-un-client-qui-a-des-factures-ne-se-supprime-pas-les-lignes-dune-facture-partent-avec-elle)) ;
+  l'application garde sa contrainte, qui marche comme elle a toujours marché.
 
 `src/main.ce` se connecte avec chaque token et définit les règles à chaque démarrage : `cepheus.Define` n'écrit que
 celles qui sont nouvelles ou changées.

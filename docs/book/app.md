@@ -193,7 +193,11 @@ NoInvoiceOfDeleted = cepheus.Rule("no-invoice-of-a-deleted-client", 3, (c, i, n)
   `n` such that..."). Deleting a client checks first that it has no invoice, for a clear message; but between that
   check and the delete, another request could give it one, and `Expect` checks only a thing's own facts, not that no
   invoice points to it. The delete retracts the client's fields, its name with them: whichever of the two groups
-  comes second is refused by the database, in either order, and so is an invoice of a client that never was.
+  comes second is refused by the database, in either order, and so is an invoice of a client that never was. A link
+  that names a kind now says the same in the schema itself, `Client: cepheus.Link(to = "client")`, and
+  `cepheus.Delete(Client, id, db)` deletes a client with the check at the writer, naming an invoice when one links to
+  it ([tutorial 10](tutorials.md#10-a-client-with-invoices-cannot-be-deleted-an-invoices-lines-go-with-it)); the app
+  keeps its constraint, which works as it always did.
 
 `src/main.ce` connects with each token and defines the rules at every start: `cepheus.Define` writes only those that
 are new or changed.
