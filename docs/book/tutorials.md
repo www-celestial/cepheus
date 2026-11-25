@@ -14,7 +14,8 @@ on the same tables holding the same rows; what follows it is what PostgreSQL ans
 
 Clients and their invoices, the data every tutorial uses. A **kind** groups the properties of a sort of thing; a
 **thing** is a number, its id; a property of `many` values holds a list (a client's phones); `Closed` is a flag that a
-closed account has.
+closed account has; `Link(to = "client")` links an invoice to a thing that must be a client, SQL's foreign key
+([tutorial 10](#10-a-client-with-invoices-cannot-be-deleted-an-invoices-lines-go-with-it)).
 
 ```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
@@ -28,7 +29,7 @@ use std/value
 
 Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Phone: cepheus.Text(many = true), Closed: cepheus.Bool()})
 Invoice = cepheus.Kind("invoice", {
-  Client: cepheus.Link(), Number: cepheus.Int(unique = true), Total: cepheus.Money(2), Status: cepheus.Text(),
+  Client: cepheus.Link(to = "client"), Number: cepheus.Int(unique = true), Total: cepheus.Money(2), Status: cepheus.Text(),
   Date: cepheus.Date(), Due: cepheus.Date(), PaidAt: cepheus.Date(),
 })
 
@@ -671,6 +672,143 @@ missing value last in both directions. The meaning is SQL's `LEFT JOIN`, and SPA
 variable is in no other part of the question, so the question has one meaning whatever the order of its parts. Measured:
 [below](#what-it-costs).
 
+## 10. A client with invoices cannot be deleted; an invoice's lines go with it
+
+**The problem.** A client leaves, or was entered twice, and someone deletes it. Its invoices must stay, and keep their
+client: an invoice is an accounting record, kept for ten years in France (Code de commerce, article L123-22), and an
+invoice whose client is gone points to nothing. A draft invoice that is thrown away, on the other hand, takes its lines
+with it: a line means nothing without its invoice. And a clerk's note about that draft stays: it only loses its link.
+
+**The Cepheus solution.** A link that names a kind, `cepheus.Link(to = "client")`, which the tutorials' database
+declares for `Invoice.Client` from the start: at each write, the thing linked must be a client, that is, have a fact
+of the kind client (a field of a client); this is SQL's **foreign key**, `REFERENCES client`. `onDelete` says what a
+link does when its thing stops being of the kind: `"refuse"`, the default, refuses the deletion; `"cascade"` deletes
+the linking thing with it; `"clear"` retracts the link. `cepheus.Delete(kind, id, db)` deletes a thing of a kind, SQL's
+`DELETE`: its facts of that kind are retracted, and the links to it follow their `onDelete`, in one group.
+
+```cesia norun
+Line = cepheus.Kind("line", {Invoice: cepheus.Link(to = "invoice", onDelete = "cascade"), Label: cepheus.Text(), Amount: cepheus.Money(2)})
+Note = cepheus.Kind("note", {About: cepheus.Link(to = "invoice", onDelete = "clear"), Text: cepheus.Text()})
+db = connect([Client, Invoice, Counter, Line, Note])
+io.Print(cepheus.Insert(Invoice, {Client: numbers, Total: 5, Status: "draft"}, db))
+```
+
+```text
+Err({Kind: "cepheus", Code: "invalid", Message: "invoice/Client links to client things only, and #65540 is not one"})
+```
+
+Step by step: `Connect` declares the two new kinds and their links; an invoice whose client is tutorial 1's counter
+is refused, since that thing is no client. Now Ada, who has invoices:
+
+```cesia norun
+io.Print(cepheus.Delete(Client, ada, db))
+io.Print(cepheus.Get(Client, ada, db))
+```
+
+```text
+Err({Kind: "cepheus", Code: "invalid", Message: "the client #65536 cannot be deleted while the invoice #65542 links to it (invoice/Client: refuse)"})
+Ok({Name: "Ada Martin", City: "Lyon", Phone: ["04 00 00 00 01", "06 00 00 00 01"], Closed: missing})
+```
+
+Her deletion is refused, naming one of her invoices, and nothing was written. A new client, Eve, and a draft for her
+with two lines and a note, then thrown away, while a screen watches the draft's lines:
+
+```cesia norun
+eve = result.Unwrap(cepheus.Insert(Client, {Name: "Eve Roux", City: "Lille"}, db))
+draft = result.Unwrap(cepheus.Insert(Invoice, {Client: eve, Total: 120, Status: "draft"}, db))
+paper = result.Unwrap(cepheus.Insert(Line, {Invoice: draft, Label: "paper", Amount: 20}, db))
+ink = result.Unwrap(cepheus.Insert(Line, {Invoice: draft, Label: "ink", Amount: 100}, db))
+memo = result.Unwrap(cepheus.Insert(Note, {About: draft, Text: "Eve asked for a discount"}, db))
+w = result.Unwrap(cepheus.Watch(2, (l, a) -> {Where: [[l, Line.Invoice, draft], [l, Line.Amount, a]], Give: {Line: l, Amount: a}}, db))
+fiber.Receive(w.Changes)
+io.Print(cepheus.Delete(Invoice, draft, db, why = "draft thrown away"))
+io.Print(result.Unwrap(fiber.Receive(w.Changes)).Removed)
+cepheus.Close(w)
+io.Print(cepheus.Get(Invoice, draft, db), cepheus.Get(Line, paper, db), cepheus.Get(Line, ink, db), cepheus.Get(Note, memo, db))
+io.Print(cepheus.Delete(Client, eve, db), cepheus.Get(Client, eve, db))
+```
+
+```text
+Ok(190)
+[{Line: 65614, Amount: 100.0}, {Line: 65613, Amount: 20.0}]
+Ok(missing) Ok(missing) Ok(missing) Ok({About: missing, Text: "Eve asked for a discount"})
+Ok(191) Ok(missing)
+```
+
+One group deleted the draft and its two lines (`cascade`) and retracted the note's link (`clear`), and the screen got
+it as one change that takes both lines away. Eve then had no invoice left, and is deleted. A deleted thing stays in the
+history: the journal keeps every group, this one too, with who and why ([Cepheus from Cesia](cesia.md#deleting-a-thing)).
+
+**PostgreSQL** declares the same with `REFERENCES … ON DELETE`:
+
+```sql
+CREATE TABLE line (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                   invoice bigint NOT NULL REFERENCES invoice ON DELETE CASCADE,
+                   label text NOT NULL, amount numeric(12,2) NOT NULL);
+CREATE TABLE note (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                   invoice bigint REFERENCES invoice ON DELETE SET NULL, text text NOT NULL);
+INSERT INTO invoice (client, total, status, date) VALUES (99, 5, 'draft', now());
+DELETE FROM client WHERE name = 'Ada Martin';
+```
+
+```text
+ERROR:  insert or update on table "invoice" violates foreign key constraint "invoice_client_fkey"
+DETAIL:  Key (client)=(99) is not present in table "client".
+ERROR:  update or delete on table "client" violates foreign key constraint "invoice_client_fkey" on table "invoice"
+DETAIL:  Key (id)=(1) is still referenced from table "invoice".
+```
+
+```sql
+INSERT INTO client (name, city) VALUES ('Eve Roux', 'Lille') RETURNING id;
+INSERT INTO invoice (client, total, status, date) VALUES (5, 120, 'draft', now()) RETURNING id;
+INSERT INTO line (invoice, label, amount) VALUES (22, 'paper', 20), (22, 'ink', 100);
+INSERT INTO note (invoice, text) VALUES (22, 'Eve asked for a discount');
+DELETE FROM invoice WHERE id = 22;
+SELECT count(*) AS lines FROM line WHERE invoice = 22;
+SELECT invoice, text FROM note;
+DELETE FROM client WHERE name = 'Eve Roux';
+```
+
+```text
+ id
+----
+  5
+
+ id
+----
+ 22
+
+DELETE 1
+ lines
+-------
+     0
+
+ invoice |           text
+---------+--------------------------
+         | Eve asked for a discount
+
+DELETE 1
+```
+
+`REFERENCES client` with no `ON DELETE` is `NO ACTION`, which refuses as `RESTRICT` does (it checks at the end of the
+statement, or of the transaction when the constraint is deferred); `SET NULL` is Cepheus's `clear`, and PostgreSQL also
+has `SET DEFAULT`, which Cepheus has not: a link has no default value.
+
+**The difference.** The same three answers, and four differences. Finding the lines of an invoice to delete is a
+search by value in the lines: PostgreSQL does not index the referencing column by itself ("the declaration of a
+foreign key constraint does not automatically create an index on the referencing columns", [Foreign
+Keys](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)), so without a `CREATE INDEX ON line
+(invoice)` each deleted invoice reads every line; Cepheus indexes every fact both ways, by its value too, so the things
+that link to a thing are always one lookup away. PostgreSQL runs a cascade with the rights of the tables' owner: a role
+that may delete invoices, and may not delete lines, deletes their lines all the same (run on PostgreSQL 18.6: its
+`DELETE FROM line` refused, its `DELETE FROM invoice` then took the line with it); a Cepheus token deletes only if it
+may write every kind its deletion can reach, and is refused whole otherwise. A cascade in Cepheus is bounded: past the
+group's work budget (a million facts for one `Delete`) it is refused whole, nothing done, where PostgreSQL deletes any
+number of rows, in one transaction that holds their locks. And a deleted client stays in Cepheus's history, where
+PostgreSQL's row is gone once `VACUUM` passes; erasing a thing from the history is another operation, not built yet. A
+thing also stops being a client when its last client fact is retracted, by `Retract` as by `Delete`, and the links to
+it follow their `onDelete` all the same. Measured: [below](#what-it-costs).
+
 ## What it costs
 
 Measured on the benchmarks' data at 1 million facts (11,363 clients, 227,260 invoices, 56,797 follow links), the same
@@ -707,3 +845,4 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
 | [a stock never below zero](#7-a-stock-that-never-goes-below-zero) | `Incr` and a `Never` rule | `CHECK` and `UPDATE` | a constraint over any facts, not one row |
 | [paid late, loans in a range](#8-invoices-paid-late-loans-between-25-and-3-) | `Less`, `Between` on a float | `a < b`, `BETWEEN` | totalOrder on floats |
 | [clients with their phone](#9-clients-with-their-phone-if-they-have-one) | `Optional` | `LEFT JOIN` | missing last in both directions, live with `Watch` |
+| [a client with invoices kept](#10-a-client-with-invoices-cannot-be-deleted-an-invoices-lines-go-with-it) | `Link(to, onDelete)`, `Delete` | `REFERENCES … ON DELETE` | links always indexed both ways; a cascade needs the token's rights, and is bounded |
