@@ -14,6 +14,10 @@
 #   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row; RATE=r inserts a second in all (open loop);
 #                              COUNTER=1: each transaction increments one counter row that every client shares instead
 #   pg.sh seats ROOT serializable|naive SEATS BUYERS   the sale of docs/book/case-seats.md (pgbench, --max-tries)
+#   pg.sh fk ROOT load              the data of bench/dbench.ml with the same foreign keys (bench/pg/fk.sql)
+#   pg.sh fk ROOT run RUNS          each DELETE of its measured things, inside the server and rolled back, RUNS runs
+#                                   each, as dbench.exe delete prints them ("cascade 100 123.4", microseconds); then
+#                                   inserts of a bill without and with a foreign key, microseconds an insert (5 passes)
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -185,6 +189,27 @@ EOS
   retried=$(sed -n 's/^number of transactions retried: \([0-9]*\).*/\1/p' "$root/pgbench-seats.out")
   failed=$(sed -n 's/^number of failed transactions: \([0-9]*\).*/\1/p' "$root/pgbench-seats.out")
   echo "postgres seats ($mode, $c buyers): $n seats, $1 sales, $4 unsold, $2 sold twice or more, $3 charged without the seat; sold out in $5 s; ${retried:-0} transactions retried, ${failed:-0} failed"
+  ;;
+fk)
+  case $3 in
+  load) psql_ -f "$here/fk.sql" > /dev/null ;;
+  run)
+    runs=${4:-21}
+    {
+      k=0
+      for c in "refuse 0" "refuse 100" "refuse 10000" "cascade 0" "cascade 100" "cascade 10000" "clear 0" "clear 100" "clear 10000"; do
+        k=$((k + 1))
+        for _ in $(seq "$runs"); do
+          echo "SELECT '$c ' || round(t_delete($k)::numeric, 1);"
+        done
+      done
+      for _ in 1 2 3 4 5; do
+        echo "SELECT 'write plain ' || round(t_bill(10000)::numeric, 3);"
+        echo "SELECT 'write to ' || round(t_bill_fk(10000)::numeric, 3);"
+      done
+    } | psql -X -q -At -v ON_ERROR_STOP=1
+    ;;
+  esac
   ;;
 stop)
   pg_ctl -D "$root/data" -w stop -m fast >/dev/null

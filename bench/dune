@@ -26,3 +26,11 @@
  (libraries cepheus cepheus_server unix threads.posix)
  (ocamlopt_flags (:standard -O3 -inline 200))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
+
+; deletes and links that name a kind (bench/dbench.ml), beside bench/pg/fk.sql
+(executable
+ (name dbench)
+ (modules dbench)
+ (libraries cepheus unix threads.posix)
+ (ocamlopt_flags (:standard -O3 -inline 200))
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))
