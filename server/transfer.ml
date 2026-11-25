@@ -557,20 +557,23 @@ let import ~props ~find ~write ~say (o : options) =
         end)
       b.starts
   in
-  (* an earlier row, read again from the file (its links found again) *)
-  let fd2 = lazy (Unix.openfile o.file [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0) in
+  (* an earlier row, read again from the file it checks (the descriptor checked, never the path again: a file renamed
+     over it meanwhile is another one), its offset put back for the reader of the pass; its links found again *)
   let fetch k =
     let m = k lsr 10 in
     let off, line = !marks.(m) in
-    let fd2 = Lazy.force fd2 in
-    ignore (Unix.lseek fd2 off Unix.SEEK_SET);
-    let r = T.reader ~off ~line ~index:(m lsl 10) o.format fd2 in
-    let rec go () =
-      let b = T.next r 65536 in
-      if Array.length b.starts = 0 then stop "%s changed during the import" o.file;
-      if k < b.index + Array.length b.starts then parse_record ctx b (k - b.index) else go ()
+    let at = Unix.lseek fd 0 Unix.SEEK_CUR in
+    let row =
+      Fun.protect ~finally:(fun () -> ignore (Unix.lseek fd at Unix.SEEK_SET)) (fun () ->
+          ignore (Unix.lseek fd off Unix.SEEK_SET);
+          let r = T.reader ~off ~line ~index:(m lsl 10) o.format fd in
+          let rec go () =
+            let b = T.next r 65536 in
+            if Array.length b.starts = 0 then stop "%s changed during the import" o.file;
+            if k < b.index + Array.length b.starts then parse_record ctx b (k - b.index) else go ()
+          in
+          go ())
     in
-    let row = go () in
     resolve_links find fields [| row |];
     row
   in
@@ -623,7 +626,6 @@ let import ~props ~find ~write ~say (o : options) =
    | T.Bad m -> stop "%s: %s; nothing was written" base m
    | Stop _ as e -> raise e
    | e -> stop "%s: %s; nothing was written" base (failure e));
-  if Lazy.is_val fd2 then Unix.close (Lazy.force fd2);
   let t1 = Unix.gettimeofday () in
   say (Printf.sprintf "%s: %d rows checked in %.2f s%s" base !nrows (t1 -. t0) (if !nbad > 0 then Printf.sprintf ", %d left out" !nbad else ""));
   if not (unchanged ()) then stop "%s changed during the import; nothing was written" o.file;

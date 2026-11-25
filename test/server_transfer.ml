@@ -227,6 +227,17 @@ let bounds () =
   (match mock ~props ~find ~wr ~skip_bad:false rows with
    | Error m, _ -> C.check (has m "the answer to their group was lost" && has m "it may be in the database" && has m "in groups 1 to 2") "a lost answer: %s" m
    | Ok _, _ -> C.check false "a lost answer: written");
+  (* a file renamed over the one imported during the first pass: an earlier row is read again from the file opened,
+     never from the path (which names another file now), so a duplicate far apart is still seen *)
+  let other = Filename.concat !dir "other.csv" in
+  let rows first = String.concat "" ("Name,Age\n" :: Printf.sprintf "a,%d\n" first :: List.init 20000 (fun i -> Printf.sprintf "n%d,%d\n" i (i + 10)) @ [ "dup,1\n" ]) in
+  write other (rows 999);
+  let calls = ref 0 in
+  let find _ _ = incr calls; if !calls = 2 then Unix.rename other (Filename.concat !dir "mock.csv"); [] in
+  let uprops = [ 16, mprop "client/Name" Value.Ttext; 17, mprop ~unique:true "client/Age" Value.Tint ] in
+  (match mock ~props:uprops ~find ~skip_bad:false (rows 1) with
+   | Error m, _ -> C.check (!calls > 2 && has m "line 20003: Age 1 is on line 2 too; nothing was written") "a file renamed over it during the check: %s" m
+   | Ok _, _ -> C.check false "a file renamed over it during the check: the duplicate not seen");
   Transfer.group_ops := ops0;
   Transfer.batch_bytes := bb0
 
