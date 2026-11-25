@@ -152,6 +152,12 @@ let () =
   C.check (Ops.parse_time "2026-11-24T03:00:00Z" = Some 1795489200000) "a time in UTC";
   C.check (Ops.parse_time "2026-11-24 03:00Z" = Some 1795489200000) "a time without seconds, a space for the T";
   C.check (Ops.parse_time "2026-13-24T03:00" = None) "a time that is none";
+  (* exactly its digits, a day of the calendar, 00 to 59: anything else refused, never moved to another day *)
+  List.iter (fun t -> C.check (Ops.parse_time t = None) "--to-time %S refused" t)
+    [ "2026-02-31T12:00"; "2023-02-29T12:00Z"; "1900-02-29T00:00Z"; "2026-07-01T12:00:60"; "2026-11-24T24:00Z"; "2026-11-24T10:60Z"; "2026-7-1T1:2";
+      "+026-07-01T12:00"; "2026-07-01T12:00 "; "99999-01-01T00:00"; "2026-07-01T-1:00"; "2026-07-01T12:00:00.5Z"; "2026-07-01"; "Z"; "" ];
+  C.check (Ops.parse_time "2024-02-29T12:00Z" = Some 1709208000000 && Ops.parse_time "2000-02-29T00:00Z" = Some 951782400000) "leap days";
+  C.check (Ops.parse_time "9999-12-31T23:59:59Z" = Some 253402300799000 && Ops.parse_time "0000-01-01T00:00Z" = Some (-62167219200000)) "years 0 to 9999";
   (* damage, named *)
   let d = root // "d" in
   let jseg d i = d // "journal" // List.nth (segs d) i in
@@ -302,5 +308,11 @@ let () =
       C.check (Ops.restore ~target ~replace:false se r = Ops.exit_ok && fst (facts r) = at && Ops.verify r = Ops.exit_ok)
         "a run at a segment's end: restore %s, at group %d and whole" what at)
     ([ "to the end", Ops.End, sg ] @ List.concat_map (fun h -> [ Printf.sprintf "--to-group %d" h, Ops.Group h, h; Printf.sprintf "--to-group %d" (h + 1), Ops.Group (h + 1), h + 1 ]) at_seg_end);
+  (* last, since it changes the process's zone: a local time the clocks skip is none (Paris, 2026-03-29, 02:00 to 03:00) *)
+  if Sys.file_exists "/usr/share/zoneinfo/Europe/Paris" then begin
+    Unix.putenv "TZ" "Europe/Paris";
+    C.check (Ops.parse_time "2026-03-29T02:30" = None && Ops.parse_time "2026-03-29T03:30" <> None && Ops.parse_time "2026-03-29T02:30Z" <> None)
+      "a local time the clocks skip is refused"
+  end;
   C.rmrf root;
   C.finish "ops"

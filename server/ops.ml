@@ -410,22 +410,29 @@ let days y m d =
   (era * 146097) + (yoe * 365) + (yoe / 4) - (yoe / 100) + doy - 719468
 
 (* YYYY-MM-DDTHH:MM[:SS] (or a space for the T) in the machine's local time, or with a final Z in UTC: milliseconds
-   since 1970 *)
+   since 1970. Exactly these digits, a day of the calendar (leap years), hours 00 to 23, minutes and seconds 00 to 59;
+   a local time the clocks skip (the change to summer time) is none; anything else is refused. *)
 let parse_time s =
   let utc = String.length s > 0 && s.[String.length s - 1] = 'Z' in
-  let s = String.map (fun c -> if c = ' ' then 'T' else c) (if utc then String.sub s 0 (String.length s - 1) else s) in
-  let parts =
-    match Scanf.sscanf_opt s "%4d-%2d-%2dT%2d:%2d:%2d%!" (fun y mo d h mi sec -> y, mo, d, h, mi, sec) with
-    | Some x -> Some x
-    | None -> Scanf.sscanf_opt s "%4d-%2d-%2dT%2d:%2d%!" (fun y mo d h mi -> y, mo, d, h, mi, 0)
-  in
-  match parts with
-  | Some (y, mo, d, h, mi, sec) when mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && h <= 23 && mi <= 59 && sec <= 60 ->
+  let n = String.length s - if utc then 1 else 0 in
+  let digits i k = let v = ref 0 in for j = i to i + k - 1 do (match s.[j] with '0' .. '9' as c -> v := (!v * 10) + Char.code c - 48 | _ -> raise Exit) done; !v in
+  match
+    if not (n = 16 || n = 19) || s.[4] <> '-' || s.[7] <> '-' || (s.[10] <> 'T' && s.[10] <> ' ') || s.[13] <> ':' || (n = 19 && s.[16] <> ':') then raise Exit;
+    let y = digits 0 4 and mo = digits 5 2 and d = digits 8 2 and h = digits 11 2 and mi = digits 14 2 and sec = if n = 19 then digits 17 2 else 0 in
+    if mo < 1 || mo > 12 || d < 1 || d > Tabular.month_days y mo || h > 23 || mi > 59 || sec > 59 then raise Exit;
+    y, mo, d, h, mi, sec
+  with
+  | exception Exit -> None
+  | y, mo, d, h, mi, sec ->
     if utc then Some (((days y mo d * 86400) + (h * 3600) + (mi * 60) + sec) * 1000)
     else
       let tm = { Unix.tm_year = y - 1900; tm_mon = mo - 1; tm_mday = d; tm_hour = h; tm_min = mi; tm_sec = sec; tm_wday = 0; tm_yday = 0; tm_isdst = false } in
-      Some (int_of_float (fst (Unix.mktime tm)) * 1000)
-  | _ -> None
+      match Unix.mktime tm with
+      | exception Unix.Unix_error _ -> None
+      | t, _ ->
+        (* the time read back: mktime moves a local time the clocks skip *)
+        let b = Unix.localtime t in
+        if (b.tm_year, b.tm_mon, b.tm_mday, b.tm_hour, b.tm_min, b.tm_sec) = (y - 1900, mo - 1, d, h, mi, sec) then Some (int_of_float t * 1000) else None
 
 let time_text ms =
   let t = Unix.localtime (float_of_int ms /. 1000.) in
