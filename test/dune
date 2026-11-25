@@ -48,8 +48,8 @@
  (action (run %{exe:examples.exe})))
 
 (executables
- (names server_sim server_unit server_crash server_tls server_limits server_guard live_sim questions replica_sim server_replica raft_sim server_raft ops_unit server_backup)
- (modules server_sim server_unit server_crash server_tls server_limits server_guard serve live_sim questions replica_sim server_replica raft_sim server_raft ops_unit server_backup)
+ (names server_sim server_unit server_crash server_tls server_limits server_guard live_sim questions reports replica_sim server_replica raft_sim server_raft ops_unit server_backup)
+ (modules server_sim server_unit server_crash server_tls server_limits server_guard serve live_sim questions reports replica_sim server_replica raft_sim server_raft ops_unit server_backup)
  (libraries cepheus cepheus_server cepheus_vault check unix threads.posix)
  (ocamlopt_flags (:standard -O3))
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

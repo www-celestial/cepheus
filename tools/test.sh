@@ -60,6 +60,8 @@ CEPHEUS_TMP=$tmp $b/server_unit.exe | tail -1
 $b/server_sim.exe --seeds "${SERVER_SEEDS:-200}" | tail -2
 $b/live_sim.exe --seeds "${LIVE_SEEDS:-100}" | tail -2
 $b/questions.exe --seeds "${QUESTION_SEEDS:-300}" | tail -2
+# the parts of reports: time zones against the C library's and PostgreSQL's, exact sums, bags, selection
+$b/reports.exe | tail -1
 $b/server_tls.exe "$tmp/cepheus-tls" | tail -1
 $b/server_limits.exe "$tmp/cepheus-limits" | tail -1
 $b/server_guard.exe "$tmp/cepheus-guard" | tail -1

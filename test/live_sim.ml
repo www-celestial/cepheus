@@ -9,7 +9,9 @@
    durable. A watch of Give may have Sort (random keys, ascending or descending) and a Limit of 1 to 5 rows, or none:
    its rows, in its order, must then be the naive answer sorted and cut (its first k rows and the copies of the k-th)
    and Find's rows with the same Sort and Limit on the view of that group, and each message's rows must come in the
-   order. A failure prints its seed; [live_sim.exe --seed N] replays it. *)
+   order. Reports (protocol 9: Avg, Count(x), Values, Quantile, Variance, Stddev, and Trunc of a date in a zone, in a
+   Give with Sort too), kept by difference, must be Find's rows on the view of the message's group, bit for bit.
+   A failure prints its seed; [live_sim.exe --seed N] replays it. *)
 
 open Cepheus
 open Cepheus_server
@@ -17,7 +19,11 @@ module C = Check
 
 let props =
   [ prop "name" Ttext; prop ~many:true "tag" Ttext; prop "score" Tint; prop "status" Ttext; prop ~many:true "friend" Tlink;
-    prop "price" (Tmoney 2); prop "owner" Tlink ]
+    prop "price" (Tmoney 2); prop "owner" Tlink; prop "due" Tdate; prop "rate" Tfloat ]
+
+(* dates about Paris's and New York's changes of 2026, and the year's last half hour; finite rates *)
+let dues = [| 1774744200000; 1774746000000; 1774747800000; 1792888200000; 1792890000000; 1792891800000; 1798759800000; 1793511000000; 1793514600000; 1700000000000 |]
+let rates = [| 0.5; 1.25; -2.; 1e10; 3.3; 0. |]
 
 let messages = ref 0
 let sames = ref 0
@@ -26,10 +32,12 @@ let laggings = ref 0
 module Top = Question.Top
 
 let windows = ref 0
+let reports = ref 0
 
 type watch = {
   q : Query.t;
   sel : Wire.select;
+  extra : Question.Ask.item list;  (* its Truncs *)
   order : Top.order;  (* Sort and Limit, or none *)
   mutable sub : Live.sub option;
   mutable rows : Value.t array list;  (* as its messages left them *)
@@ -63,7 +71,8 @@ let expected facts (q : Query.t) (sel : Wire.select) =
               | Wire.Count -> Value.Int (List.length l)
               | Sum x -> typed (List.hd l).(x) (List.fold_left (fun s b -> s + num b.(x)) 0 l)
               | Min x -> typed (List.hd l).(x) (List.fold_left (fun s b -> min s (num b.(x))) max_int l)
-              | Max x -> typed (List.hd l).(x) (List.fold_left (fun s b -> max s (num b.(x))) min_int l))
+              | Max x -> typed (List.hd l).(x) (List.fold_left (fun s b -> max s (num b.(x))) min_int l)
+              | _ -> assert false (* a report's: Find's rows (check_now) *))
             aggs
         in
         Array.append k a :: acc)
@@ -77,7 +86,7 @@ let hubr = ref (Live.create (Store.empty ()) ~tag:0 ~durable:0)
 let run seed =
   let r = Rng.make seed in
   let db = fork empty in
-  let[@warning "-8"] (Ok [ name; tag; score; status; friend; price; owner ]) = declare db props in
+  let[@warning "-8"] (Ok [ name; tag; score; status; friend; price; owner; due; rate ]) = declare db props in
   (* a rule half of the time: friends are friends both ways; else, half of the time, an owner is a thing with a name,
      and what it owns is deleted with it (a cascade, seen by the watches as the rows it takes away) *)
   if Rng.int r 2 = 0 then
@@ -106,18 +115,24 @@ let run seed =
     Snapshot.install mdisk "/merge" w;
     w.view
   in
+  (* a report's rows: Find's on that group's view *)
+  let report w = w.extra <> [] || match w.sel with Wire.Group (_, a) -> Array.exists Agg.is_new a | Give _ -> false in
+  let find_rows ?(order = Top.none) w g =
+    let v = Hashtbl.find views g in
+    let a = Answer.answer ~order ~extra:w.extra v w.q w.sel in
+    List.init a.n (fun i -> Array.init a.cols (fun j -> Answer.value v a i j))
+  in
   let check_now w g what =
     let f = facts_at g in
-    let want = expected f w.q w.sel and got = List.sort compare w.rows in
+    if report w then incr reports;
+    let want = if report w then List.sort compare (find_rows w g) else expected f w.q w.sel and got = List.sort compare w.rows in
     let want, got =
       if w.order = Top.none then want, got
       else begin
         (* in the order: the oracle's rows, and Find's on the view of that group *)
         incr windows;
         let o = C.top_rows w.order want and mine = C.top_rows { w.order with limit = 0 } w.rows in
-        let v = Hashtbl.find views g in
-        let a = Answer.answer ~order:w.order v w.q w.sel in
-        let find = List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v (a.typ j) (a.word i j))) in
+        let find = find_rows ~order:w.order w g in
         C.check (find = o) "seed %d: %s of group %d: Find gives %d rows, the oracle %d" seed what g (List.length find) (List.length o);
         o, mine
       end
@@ -170,13 +185,28 @@ let run seed =
   in
   let subscribe w ~from =
     w.ended <- None;
-    match Live.subscribe ~order:w.order hub w.q w.sel ~from ~emit:(emit w) with
+    match Live.subscribe ~extra:w.extra ~order:w.order hub w.q w.sel ~from ~emit:(emit w) with
     | s -> if w.ended = None then w.sub <- Some s (* its first message may end it at once (its queue full) *)
     | exception Query.Bad m -> C.check false "seed %d: a question refused: %s" seed m
   in
   let questions () =
     let st () = Value.Text statuses.(Rng.int r 3) and who () = pick () in
-    match Rng.int r 9 with
+    let plain (q, sel) = q, sel, [] in
+    match Rng.int r 12 with
+    | 9 ->
+      (* a report by owner: its prices' mean, median and spread, its different statuses and their list *)
+      { Query.vars = 4; where = [ { e = Var 0; p = owner; v = Var 1 }; { e = Var 0; p = price; v = Var 2 }; { e = Var 0; p = status; v = Var 3 } ]; ranges = [] },
+      Wire.Group ([| 1 |], [| Count; Avg 2; Quantile (2, 0.5, false); Stddev (2, false); Variance (2, true); Distinct 3; Values 3; Quantile (3, 0.5, true) |]), []
+    | 10 ->
+      (* a report of days in Paris: the dues truncated, the rates' mean and spread, the prices' sum and list *)
+      { vars = 4; where = [ { e = Var 0; p = due; v = Var 1 }; { e = Var 0; p = rate; v = Var 2 }; { e = Var 0; p = price; v = Var 3 } ]; ranges = [] },
+      Wire.Group ([| 4 |], [| Count; Sum 3; Avg 2; Stddev (2, false); Values 3; Min 3; Quantile (1, 0.25, false) |]),
+      [ Question.Ask.Trunc (4, 1, (if Rng.bool r then "day" else "hour"), "Europe/Paris") ]
+    | 11 ->
+      (* each thing's hour in New York, in a Give *)
+      { vars = 2; where = [ { e = Var 0; p = due; v = Var 1 } ]; ranges = [] }, Wire.Give [| 0; 2 |], [ Question.Ask.Trunc (2, 1, "hour", "America/New_York") ]
+    | k -> plain @@
+    match k with
     | 0 -> { Query.vars = 1; where = [ { e = Var 0; p = status; v = Val (st ()) } ]; ranges = [] }, Wire.Give [||]
     | 1 ->
       { vars = 2; where = [ { e = Var 0; p = owner; v = Val (Link (who ())) }; { e = Var 0; p = status; v = Val (Text "unpaid") }; { e = Var 0; p = price; v = Var 1 } ]; ranges = [] },
@@ -194,14 +224,14 @@ let run seed =
     | _ -> { vars = 2; where = [ { e = Var 0; p = tag; v = Val (Text tags.(Rng.int r 2)) }; { e = Var 0; p = name; v = Var 1 } ]; ranges = [] }, Wire.Give [| 1 |]
   in
   let add_watch () =
-    let q, sel = questions () in
+    let q, sel, extra = questions () in
     (* Sort and Limit half of the time on a Give: random keys, a limit of 1 to 5, or none *)
     let order =
       match sel with
       | Wire.Give g when Rng.int r 2 = 0 -> C.random_order r (if Array.length g = 0 then q.vars else Array.length g)
       | _ -> Top.none
     in
-    let w = { q; sel; order; sub = None; rows = []; group = 0; started = false; ended = None; full = false } in
+    let w = { q; sel; extra; order; sub = None; rows = []; group = 0; started = false; ended = None; full = false } in
     watches := w :: !watches;
     subscribe w ~from:0
   in
@@ -211,9 +241,10 @@ let run seed =
     | 8 -> [ Resolve.Delete (x, "name") ]
     | 0 | 1 ->
       [ Resolve.Add (-1, name, Text names.(Rng.int r 4)); Add (-1, status, Text statuses.(Rng.int r 3)); Add (-1, price, Money (Rng.int r 900));
-        Add (-1, owner, Link (pick ())); Add (-1, score, Int (Rng.int r 100)) ]
+        Add (-1, owner, Link (pick ())); Add (-1, score, Int (Rng.int r 100)); Add (-1, due, Date dues.(Rng.int r (Array.length dues)));
+        Add (-1, rate, Float rates.(Rng.int r (Array.length rates))) ]
     | 2 -> [ Add (x, status, Text statuses.(Rng.int r 3)) ]
-    | 3 -> [ Add (x, price, Money (Rng.int r 900)); Add (x, score, Int (Rng.int r 100)) ]
+    | 3 -> [ Add (x, price, Money (Rng.int r 900)); Add (x, score, Int (Rng.int r 100)); Add (x, due, Date dues.(Rng.int r (Array.length dues))); Add (x, rate, Float rates.(Rng.int r (Array.length rates))) ]
     | 4 -> (match Cepheus.values !v x tag with t :: _ when Rng.int r 2 = 0 -> [ Retract (x, tag, t) ] | _ -> [ Add (x, tag, Text tags.(Rng.int r 2)) ])
     | 5 -> (match Cepheus.values !v x friend with f :: _ when Rng.int r 2 = 0 -> [ Retract (x, friend, f) ] | _ -> [ Add (x, friend, Link (pick ())) ])
     | 6 -> List.map (fun (p, y) -> Resolve.Retract (x, p, y)) (Cepheus.get !v x |> List.filter (fun (p, _) -> p >= Schema.first_prop))
@@ -284,5 +315,5 @@ let () =
   let seeds = ref 400 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "N" ] ignore "live_sim.exe";
   (match !one with Some s -> run s | None -> for s = 1 to !seeds do run s done);
-  Printf.printf "live: %d messages checked (%d same, %d lagging; %d checks of a window against Find)\n" !messages !sames !laggings !windows;
+  Printf.printf "live: %d messages checked (%d same, %d lagging; %d checks of a window against Find; %d of a report)\n" !messages !sames !laggings !windows !reports;
   C.finish "live"
