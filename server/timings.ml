@@ -2,9 +2,11 @@
    (cluster.toml, [log] slow_ms).
 
    What is timed. Each question answered (a Find, a Watch's first answer) and each write answered, at the server,
-   from its request decoded to its reply coded: a write's reply is coded once its group is durable, so its wait for
-   the fsync (and for the writer's queue) is in it. On the monotonic clock (Histogram.now_us: two reads of about 20 ns
-   a request), into histograms of HdrHistogram's buckets (Tene) of 5 bits: a percentile within 1/32 (3.1 %) of the
+   from its bytes read to its reply coded: a write's reply is coded once its group is durable, so its wait for the
+   fsync (and for the writer's queue) is in it. On the monotonic clock (Histogram.now_us, about 20 ns a read): its
+   start is the read the connection makes after its bytes come for its idle limit (Net), or the end of the request
+   before it among frames read together; its end is a read, which also gives the idle limit its last request, so
+   that the clock is read no more often than before requests were timed. Into histograms of HdrHistogram's buckets (Tene) of 5 bits: a percentile within 1/32 (3.1 %) of the
    value, rounded up.
 
    The window. The percentiles are over the last minute: [slices] slices of [slice_us], the current one and the five

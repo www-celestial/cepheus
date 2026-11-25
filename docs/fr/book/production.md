@@ -433,8 +433,8 @@ database.shop.write_samples: 127
 | `database.NAME.journal_bytes`, `.runs_bytes` | les octets des segments de son journal et de ses runs, lus sur le disque à chaque status (un stat par fichier) | le journal grandit pour toujours ; les runs à peu près une fois les données |
 | `database.NAME.merges`, `.merge_us_sum`, `.merge_bytes` | depuis le démarrage : les merges installés, leur temps ensemble en microsecondes (celui d'un merge en arrière-plan, de son début à son rattrapage), et les octets des runs qu'ils ont écrits | un temps moyen par merge qui ne cesse de grandir à `merge_bytes` égal par merge : le disque |
 | `database.NAME.questions`, `.questions_slow`, `.question_us_sum` | depuis le démarrage : les questions répondues au serveur (un Find, la première réponse d'un watch ; pas les lectures locales d'un programme), celles qui ont pris `slow_ms` ou plus, et leur temps ensemble, en microsecondes | un rythme de `questions_slow` : leurs lignes du log disent lesquelles ([les questions lentes](#les-questions-et-les-écritures-lentes)) |
-| `database.NAME.question_us_p50`, `_p99`, `_max`, `.question_samples` | sur la fenêtre : le temps au serveur en microsecondes, de la requête décodée à la réponse codée, de la question médiane (p50 : la moitié des questions ont pris moins), du 99e percentile (p99 : 99 sur 100 ont pris moins) et de la plus lente, à 1/32 près au-dessus (3,1 %) ; et combien de questions tient la fenêtre (0 : les temps valent 0) | un p99 qui grandit alors que `question_samples` reste le même : des questions qui lisent plus, ou une machine qui a moins |
-| `database.NAME.writes`, `.writes_slow`, `.write_us_sum`, `.write_us_p50`, `_p99`, `_max`, `.write_samples` | la même chose pour les écritures, de la requête décodée à la réponse codée une fois son groupe durable : l'attente du writer, le fsync et le commit buffer y sont (une écriture répondue de nouveau depuis la table de sa session, ou refusée avant le writer, n'est pas comptée) | un p99 qui grandit : les fsyncs du disque (comparez `commit_buffer.frames` / `.rounds`), la bascule d'un merge, ou de grands groupes |
+| `database.NAME.question_us_p50`, `_p99`, `_max`, `.question_samples` | sur la fenêtre : le temps au serveur en microsecondes, de la requête lue à la réponse codée, de la question médiane (p50 : la moitié des questions ont pris moins), du 99e percentile (p99 : 99 sur 100 ont pris moins) et de la plus lente, à 1/32 près au-dessus (3,1 %) ; et combien de questions tient la fenêtre (0 : les temps valent 0) | un p99 qui grandit alors que `question_samples` reste le même : des questions qui lisent plus, ou une machine qui a moins |
+| `database.NAME.writes`, `.writes_slow`, `.write_us_sum`, `.write_us_p50`, `_p99`, `_max`, `.write_samples` | la même chose pour les écritures, de la requête lue à la réponse codée une fois son groupe durable : l'attente du writer, le fsync et le commit buffer y sont (une écriture répondue de nouveau depuis la table de sa session, ou refusée avant le writer, n'est pas comptée) | un p99 qui grandit : les fsyncs du disque (comparez `commit_buffer.frames` / `.rounds`), la bascule d'un merge, ou de grands groupes |
 
 À côté, le disque : un merge complet tient en double les runs de la base pendant qu'il tourne, et le journal garde
 chaque groupe pour toujours, donc gardez libre au moins la taille des runs de la plus grande base, et surveillez la
@@ -463,7 +463,7 @@ cepheus: slow question: database shop, token shop-web, 251.7 ms, 4194304 candida
 cepheus: slow write: database shop, token import, 1840.2 ms, group 4801, ok: 3000000 operations (3000000 adds) of client/name, client/city, client/code
 ```
 
-- **Ce qu'elle tient** : la base, le nom du token (jamais le token), le temps au serveur (de la requête décodée à la
+- **Ce qu'elle tient** : la base, le nom du token (jamais le token), le temps au serveur (de la requête lue à la
   réponse codée ; pour une écriture, une fois son groupe durable), et l'issue : `ok`, ou le code de son erreur
   (`timeout`, `cancelled` quand son programme a fermé sa connexion, `too_large`, `invalid`, `conflict`...), jamais le
   message de l'erreur, qui peut citer une valeur. Une question dit ensuite ses candidats (le compte que compte son
@@ -528,6 +528,32 @@ Des alertes utiles : `rate(cepheus_database_questions_slow_total[5m]) > 0`, un
 sous le plus grand `cepheus_database_runs_bytes`, et `time() - node_textfile_mtime_seconds{file="cepheus.prom"}`
 au-dessus de quelques minutes (le cron s'est arrêté, ou le serveur ne répond pas).
 
+### Ce que coûte le chronométrage
+
+Chaque question et chaque écriture est chronométrée au serveur par deux lectures de l'horloge monotone
+(`clock_gettime` par le vDSO, la petite bibliothèque que le noyau place dans chaque processus pour lire l'heure sans
+appel système : 17 ns seule sur [la machine des benchmarks](benchmarks.md)) et une inscription dans trois cache lines
+(les blocs de 64 octets que le processeur lit d'un coup) des tranches de son domain (4 ns). Le début est la lecture que
+la connexion fait de toute façon après l'arrivée de ses octets, pour sa limite d'inactivité, et la fin donne à cette
+limite sa dernière requête : un programme qui attend chaque réponse ne fait pas lire l'horloge au serveur plus souvent
+qu'avant. Mesuré avec les compteurs du processeur (`perf_event_open`, espace utilisateur : les instructions du thread
+qui sert, les cycles de tout le serveur), deux serveurs lancés à la fois, chacun sur une base de 100 000 choses
+(échangées à chaque tour), leurs salves demandées dans l'ordre ABBA, 21 tours, les serveurs sur un cœur et le client
+sur un autre :
+
+| une question ponctuelle (une valeur unique) | instructions | cycles |
+|---|---|---|
+| une à la fois (chaque réponse attendue) | +215 par question, +0,85 % (25 220 avant, à chaque tour) | pas mesurable : ±15 % d'un tour à l'autre (le réveil du thread) |
+| 32 en vol | +86 par question (médiane), moyenne géométrique +0,9 % (95 % : de 0,1 à 1,75 %) | +4,1 % (95 % : de 2,5 à 5,7 %) |
+
+Avec 32 en vol, les questions lues ensemble ont besoin chacune d'une lecture de l'horloge à leur fin, au milieu de
+leurs lectures de la mémoire, que cette lecture attend (le vDSO ordonne sa lecture du TSC, le compteur de cycles du
+processeur) : environ 2,5 % des 4,1 % (le même serveur sans ses lectures d'horloge ni son inscription : +1,6 %,
+intervalle de -0,04 à 3,3 %). Un témoin au même code (une fonction ajoutée, jamais appelée) donne 1,0014 (de 0,987 à
+1,016) : le plancher de la méthode. Une écriture attend son fsync, environ 4 ms sur ce disque : son chronométrage s'y
+perd (B/A 0,96, intervalle de 0,94 à 1,17). `cepheus status` coûte un readdir et un stat par fichier de chaque base,
+un statvfs et une copie des tranches, sans tenir aucun verrou du serveur.
+
 ### À côté des géants
 
 - **PostgreSQL** écrit dans son log une instruction qui a pris au moins `log_min_duration_statement` (« Causes the
@@ -541,6 +567,10 @@ au-dessus de quelques minutes (le cron s'est arrêté, ou le serveur ne répond 
   `cache.hits` de Cepheus compte celles de la politique. Son `auto_explain` écrit aussi le plan d'une instruction lente ;
   Cepheus n'écrit aucun plan. Aucun des deux n'a de percentiles : pg_stat_statements a la moyenne, le minimum, le
   maximum et l'écart type.
+- **Le coût du chronométrage lui-même** : PostgreSQL laisse `track_io_timing` désactivé par défaut (« as it will
+  repeatedly query the operating system for the current time, which may cause significant overhead on some
+  platforms ») et fournit `pg_test_timing` pour mesurer cette horloge ; `pg_stat_statements` lit l'horloge autour de
+  chaque instruction, comme Cepheus autour de chaque question.
 - **SQLite** n'a rien de cela : un programme chronomètre ses propres instructions (`sqlite3_trace_v2`,
   `sqlite3_profile`).
 - **Datomic** Pro appelle une fonction de l'exploitant chaque minute avec ses métriques (`datomic.metricsCallback` :

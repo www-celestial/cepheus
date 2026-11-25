@@ -84,8 +84,9 @@ and conn = {
   gone : unit -> bool;  (* the transport can send nothing more (the peer went): a long reply stops *)
   puts : (int, db * Files.put) Hashtbl.t;  (* the files being put, by the id of their Put (the reading thread only) *)
   mutable mark : int;
-      (* the monotonic clock's microseconds at the end of the question just answered, among the frames of one input;
-         0 otherwise: the next frame's [t0], so that questions sent together read the clock once each (Timings) *)
+      (* the monotonic clock's microseconds at the end of the question just answered, among the frames of one input,
+         or when the input's bytes were read (Core.input ~arrived); 0 otherwise: the next frame's [t0], so that a
+         request reads the clock once, at its end (Timings) *)
   mutable t0 : int;  (* the frame being handled: its start, when [mark] gave it; 0: read the clock *)
   mutable qring : Timings.ring;
       (* the ring its questions are recorded into: database [qdb]'s of domain [qdom] (its reading thread's), looked up
@@ -1102,9 +1103,10 @@ let max_out = 1 lsl 20
    closes the connection before its body is read. A request that raises what it does not expect is answered internal and closes the connection
    ([fail]): the frames of its reply sent before (a Find's first rows) end with that error, which the client takes
    as the reply's end. A connection that another of its threads failed ([broke]) reads no more requests. *)
-let input c buf off stop =
-  (* the bytes were read just now: the first frame reads the clock *)
-  c.mark <- 0;
+let input c ~arrived buf off stop =
+  (* the first frame's start: when its bytes were read (the monotonic clock's microseconds, Net's read for its idle
+     limit); 0: it reads the clock *)
+  c.mark <- arrived;
   let rec go o =
     if Atomic.get c.failed then o, Shut
     else if c.inflight >= c.srv.max_inflight then o, Full
@@ -1138,6 +1140,9 @@ let input c buf off stop =
           | Follows (d, id) -> o + 4 + len, Follow (d, id))
   in
   go off
+
+(* when the last frame of an input was answered: its question's end, read when it was timed (no clock read), else now *)
+let answered_at c = if c.mark > 0 then c.mark else Histogram.now_us ()
 
 (* the reading side waits here while the connection has its limit of writes in flight: it stops reading, the kernel's
    buffers fill, and the program's writes wait (back-pressure, design 3.5) *)

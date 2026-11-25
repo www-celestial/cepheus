@@ -374,7 +374,7 @@ let rights () =
       Wire.put_request b req;
       Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -460,7 +460,7 @@ let rights () =
   let c = Core.connect srv ~flush:(fun () -> ()) ~submit in
   let big = Bytes.create 10 in
   Bytes.set_int32_le big 0 (Int32.of_int (Wire.max_frame + 1));
-  check (snd (Core.input c big 0 10) = Core.Shut) "rights: a frame over 16 MiB closes"
+  check (snd (Core.input ~arrived:0 c big 0 10) = Core.Shut) "rights: a frame over 16 MiB closes"
 
 
 (* Every token file of the old forms reads the same and is written back byte for byte (the writer of main wrote
@@ -521,7 +521,7 @@ let rights_kinds () =
       Wire.put_request b req;
       Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -674,7 +674,7 @@ let rights_derived () =
         Wire.put_request b req;
         Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
         let bytes = Buffer.to_bytes f in
-        ignore (Core.input c bytes 0 (Bytes.length bytes));
+        ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
         c.flush ();
         let s = Buffer.to_bytes out in
         Buffer.clear out;
@@ -970,7 +970,7 @@ let versions () =
     Wire.put_request b (Wire.Hello { version; token = "cph_r"; program = "t"; session = 0 });
     Wire.add_frame f ~id:1 ~kind:Wire.k_hello ~flags:0 b;
     let bytes = Buffer.to_bytes f in
-    ignore (Core.input c bytes 0 (Bytes.length bytes));
+    ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
     c.flush ();
     let s = Buffer.to_bytes out in
     Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
@@ -1103,7 +1103,7 @@ let files () =
     in
     let ask req =
       let bytes = frames req in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -1174,8 +1174,8 @@ let files () =
   Wire.put_request hb (Wire.Hello { version = Wire.version; token = "cph_w"; program = "t"; session = 0 });
   Wire.add_frame hf ~id:1 ~kind:Wire.k_hello ~flags:0 hb;
   let hbytes = Buffer.to_bytes hf in
-  ignore (Core.input sess hbytes 0 (Bytes.length hbytes));
-  List.iter (fun b -> ignore (Core.input sess b 0 (Bytes.length b))) starts;
+  ignore (Core.input ~arrived:0 sess hbytes 0 (Bytes.length hbytes));
+  List.iter (fun b -> ignore (Core.input ~arrived:0 sess b 0 (Bytes.length b))) starts;
   check (Hashtbl.length sess.Core.puts = Files.max_puts) "files: %d puts open at once at most" Files.max_puts;
   Core.disconnect sess;
   (* a token whose right to write goes in the middle of a put: its next piece ends the put, refused *)
@@ -1187,7 +1187,7 @@ let files () =
     (match req with Some r -> Wire.put_request b r | None -> Buffer.add_string b "more bytes");
     Wire.add_frame fr ~id ~kind ~flags b;
     let x = Buffer.to_bytes fr in
-    ignore (Core.input cl x 0 (Bytes.length x));
+    ignore (Core.input ~arrived:0 cl x 0 (Bytes.length x));
     cl.flush ()
   in
   frame ~id:1 ~kind:Wire.k_hello ~flags:0 (Some (Wire.Hello { version = Wire.version; token = "cph_w"; program = "t"; session = 0 }));
@@ -1333,7 +1333,7 @@ let watch_window () =
       Wire.put_request b req;
       Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       id
     in
     (* the messages given since, each: a push, or the error that ends a watch *)
@@ -1470,7 +1470,7 @@ let answer_bounds () =
       Wire.put_request b req;
       Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       ignore (Core.move_pushes c);
       c.flush ();
       let s = Buffer.to_bytes out in
@@ -1611,7 +1611,7 @@ let timeouts () =
       Wire.put_request b req;
       Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       ignore (Core.move_pushes c);
       c.flush ();
       let s = Buffer.to_bytes out in
@@ -1688,7 +1688,7 @@ let reply_bounds () =
       Wire.put_request b req;
       Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -1765,7 +1765,7 @@ let hello_once () =
     Wire.put_request b req;
     Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
     let bytes = Buffer.to_bytes f in
-    let why = snd (Core.input c bytes 0 (Bytes.length bytes)) in
+    let why = snd (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes)) in
     c.flush ();
     let s = Buffer.to_bytes out in
     Buffer.clear out;
@@ -1784,7 +1784,7 @@ let hello_once () =
     Wire.put_request b req;
     Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
     let bytes = Buffer.to_bytes f in
-    ignore (Core.input w bytes 0 (Bytes.length bytes));
+    ignore (Core.input ~arrived:0 w bytes 0 (Bytes.length bytes));
     w.flush ();
     let s = Buffer.to_bytes out in
     Buffer.clear out;
@@ -1855,7 +1855,7 @@ let guard () =
       Wire.put_request b req;
       Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      match Core.input c bytes 0 (Bytes.length bytes) with
+      match Core.input ~arrived:0 c bytes 0 (Bytes.length bytes) with
       | _, why -> id, Some why
       | exception x -> check false "guard: request %d raised %s out of Core.input" id (Printexc.to_string x); id, None
     in

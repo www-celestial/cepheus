@@ -64,8 +64,14 @@ type io = { read : Bytes.t -> int -> int -> int; write : Bytes.t -> int -> int -
    so twice that turns away no program. The socket's timeouts wake a blocked read or write at least that often
    (SO_RCVTIMEO, SO_SNDTIMEO: socket(7)), and the clock is checked after every read, inside the TLS handshake's loop
    and inside a TLS record's too (Tls.handshake, Tls.read: [waiting]): bytes that trickle in, each within the socket's
-   timeout, without making a request do not keep a connection (Slowloris: R. Hansen, 2009). *)
+   timeout, without making a request do not keep a connection (Slowloris: R. Hansen, 2009). On the monotonic clock
+   (Histogram.now_us), which a change of the wall clock does not move: its read after each read is also the start of
+   the first request of those bytes (Core.input ~arrived, Timings), and a question's end gives the time of the last
+   request, so that timing a request reads the clock no more often than the idle limit did. *)
 let hello_s = ref 10.0
+
+(* seconds in microseconds *)
+let us s = int_of_float (s *. 1e6)
 
 (* 0.: no timeout *)
 let timeouts fd secs =
@@ -260,7 +266,7 @@ let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
       Mutex.protect socks.sm (fun () -> Hashtbl.remove socks.open_ fd);
       try Unix.close fd with Unix.Unix_error _ -> ())
   @@ fun () ->
-  let t0 = Unix.gettimeofday () in
+  let t0 = Histogram.now_us () in
   let before = if idle > 0 then Float.min !hello_s (float idle) else !hello_s in
   (try timeouts fd before with Unix.Unix_error _ -> ());
   match tls with
@@ -268,19 +274,20 @@ let rec connection (srv : Core.t) (dbs : database array) socks ~idle tls fd =
   | Some ctx -> (
     (* the handshake in the connection's own thread: its computation (milliseconds) without the runtime lock; a
        peer silent, or slow, past the time before Hello in the middle of it makes it fail, and the connection closes *)
-    let waiting () = if Unix.gettimeofday () -. t0 >= before then failwith (Printf.sprintf "the TLS handshake took more than %g s" before) in
+    let waiting () = if Histogram.now_us () - t0 >= us before then failwith (Printf.sprintf "the TLS handshake took more than %g s" before) in
     match Tls.handshake ~waiting ctx fd ~server:true ~host:"" with
     | Ok t -> serve_conn ~tls:t srv dbs ~idle ~t0 ~before fd (over_tls t)
     | Error _ -> ())
 
 and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle ~t0 ~before fd make_io =
-  (* the time of the accept, then of each whole request; whether a token was shown *)
-  let last = ref t0 and authed = ref false in
+  (* the time of the accept, then of each whole request answered, and of the last read; whether a token was shown *)
+  let last = ref t0 and arrived = ref t0 and authed = ref false in
   (* the clock: before Hello, [before] from the accept; then the idle limit from the last request *)
   let over () =
-    let now = Unix.gettimeofday () in
-    if not !authed then (if now -. t0 >= before then raise (Idle (Printf.sprintf "no Hello within %g s of the connection: it is closed" before)))
-    else if idle > 0 && now -. !last >= float idle then raise (Idle (Printf.sprintf "no request for %d s (idle_timeout): the connection is closed" idle))
+    let now = Histogram.now_us () in
+    arrived := now;
+    if not !authed then (if now - t0 >= us before then raise (Idle (Printf.sprintf "no Hello within %g s of the connection: it is closed" before)))
+    else if idle > 0 && now - !last >= idle * 1_000_000 then raise (Idle (Printf.sprintf "no request for %d s (idle_timeout): the connection is closed" idle))
   in
   let io = make_io ~waiting:over in
   let dead = ref false in
@@ -380,8 +387,8 @@ and serve_conn ?tls (srv : Core.t) (dbs : database array) ~idle ~t0 ~before fd m
      while !go do
        (* the frames already here first; a read only when a frame is not whole *)
        let requests = c.requests in
-       let used, why = Core.input c !buf 0 !have in
-       if c.requests > requests then last := Unix.gettimeofday ();
+       let used, why = Core.input c ~arrived:!arrived !buf 0 !have in
+       if c.requests > requests then last := Core.answered_at c;
        if (not !authed) && c.token <> None then begin
          (* a token shown: the idle limit from now on, and the connection is never taken for a new one *)
          authed := true;
