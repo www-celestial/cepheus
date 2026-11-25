@@ -248,9 +248,22 @@ let () =
   let dest = root // "backup" in
   Unix.mkdir dest 0o700;
   Unix.mkdir (dest // "2020-01-01T000000.partial") 0o700;
+  Unix.mkdir (dest // "2020-01-01T000000.partial" // "main") 0o700;
+  (* a .partial of another program's (a download): never a backup's, kept *)
+  Unix.mkdir (dest // "movie.partial") 0o700;
+  Out_channel.with_open_bin (dest // "movie.partial" // "film") (fun oc -> output_string oc "x");
   C.check (Ops.backup cfg dest = Ops.exit_ok) "backup";
-  let dated = List.filter (fun n -> n <> "cepheus-backup.lock") (Array.to_list (Sys.readdir dest)) in
+  let dated = List.filter (fun n -> n <> "cepheus-backup.lock" && n <> "movie.partial") (Array.to_list (Sys.readdir dest)) in
   C.check (List.length dated = 1 && not (Filename.check_suffix (List.hd dated) ".partial")) "one dated folder, the partial one removed (%s)" (String.concat " " dated);
+  C.check (Sys.file_exists (dest // "movie.partial" // "film")) "a .partial a backup does not make is kept";
+  (* a DEST that others may write, a lock planted there as a link: refused, nothing made through the link *)
+  let dest2 = root // "backup2" in
+  Unix.mkdir dest2 0o700;
+  Unix.chmod dest2 0o777;
+  C.check (refused (fun () -> Ops.backup cfg dest2)) "a DEST writable by others: refused";
+  Unix.chmod dest2 0o700;
+  Unix.symlink (root // "planted") (dest2 // "cepheus-backup.lock");
+  C.check (refused (fun () -> Ops.backup cfg dest2) && not (Sys.file_exists (root // "planted"))) "a lock planted as a link: refused, nothing made through it";
   let b = dest // List.hd dated // "main" in
   C.check (Sys.file_exists (b // "closed")) "the copy is marked closed";
   C.check ((Ops.check ~tail:Journal.Strict ~live:false b).damages = []) "the copy is whole";

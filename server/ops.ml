@@ -229,9 +229,13 @@ let copy_file src dst =
 let mkdir_private p = Unix.mkdir p 0o700; Unix.chmod p 0o700
 let sync_dir p = Disk.real.Disk.sync_dir p
 
+(* a tree removed, never through a link (a link is removed, not followed), and only into folders of this user's *)
 let rec rmrf p =
   match Unix.lstat p with
-  | { Unix.st_kind = Unix.S_DIR; _ } -> Array.iter (fun n -> rmrf (p // n)) (Sys.readdir p); Unix.rmdir p
+  | { Unix.st_kind = Unix.S_DIR; st_uid; _ } ->
+    if st_uid <> Unix.geteuid () then refuse "%s belongs to another user (uid %d): not removed" p st_uid;
+    Array.iter (fun n -> rmrf (p // n)) (Sys.readdir p);
+    Unix.rmdir p
   | _ -> Unix.unlink p
   | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
 
@@ -321,21 +325,54 @@ let mark_closed dir =
   Unix.close fd;
   sync_dir dir
 
+(* [p] opened read-write, made if missing (mode 0600), never through a link: an existing name must be a file of this
+   user's, the one opened (its device and inode, read before and after the open) *)
+let open_own p =
+  match Unix.openfile p [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_EXCL; Unix.O_CLOEXEC ] 0o600 with
+  | fd -> fd
+  | exception Unix.Unix_error (Unix.EEXIST, _, _) ->
+    let st = Unix.lstat p in
+    if st.st_kind <> Unix.S_REG || st.st_uid <> Unix.geteuid () then refuse "%s is not a file of this user's (a link, or another's): remove it" p;
+    let fd = Unix.openfile p [ Unix.O_RDWR; Unix.O_CLOEXEC ] 0 in
+    let st' = Unix.fstat fd in
+    if st'.st_dev <> st.st_dev || st'.st_ino <> st.st_ino then (Unix.close fd; refuse "%s changed while it was opened" p);
+    fd
+
+(* a name [stamp] gives, with its -K, and .partial: the folders a backup makes, the only ones it removes *)
+let partial_name n =
+  let digit i = n.[i] >= '0' && n.[i] <= '9' in
+  let l = String.length n in
+  l >= 25 && Filename.check_suffix n ".partial"
+  && List.for_all digit [ 0; 1; 2; 3; 5; 6; 8; 9; 11; 12; 13; 14; 15; 16 ] && n.[4] = '-' && n.[7] = '-' && n.[10] = 'T'
+  && (l = 25 || (n.[17] = '-' && l > 26 && List.for_all digit (List.init (l - 26) (fun i -> 18 + i))))
+
 let backup (cfg : Config.t) dest =
   let t0 = Unix.gettimeofday () in
   Pages.set_capacity verify_cache;
   if not (is_dir cfg.data) then refuse "%s: the data directory %s is missing" cfg.file cfg.data;
   if not (Sys.file_exists dest) then (mkdir_private dest; sync_dir (Filename.dirname dest));
   if not (is_dir dest) then refuse "%s is not a folder" dest;
+  (* DEST is this user's alone: a backup removes there what a backup left, and nobody else may plant names in it *)
+  let st = Unix.stat dest in
+  if st.st_perm land 0o022 <> 0 then
+    refuse "%s is writable by other users (mode %o): a backup removes the folders a backup left in it, and another user could plant names there; choose a folder of your own, or chmod go-w it" dest st.st_perm;
+  if st.st_uid <> Unix.geteuid () && st.st_uid <> 0 then refuse "%s belongs to another user (uid %d): choose a folder of your own" dest st.st_uid;
   (* one backup into DEST at a time *)
-  let lock = Unix.openfile (dest // "cepheus-backup.lock") [ Unix.O_RDWR; Unix.O_CREAT; Unix.O_CLOEXEC ] 0o600 in
+  let lock = open_own (dest // "cepheus-backup.lock") in
   Fun.protect ~finally:(fun () -> Unix.close lock) @@ fun () ->
   (match Unix.lockf lock Unix.F_TLOCK 0 with
    | () -> ()
    | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EACCES), _, _) -> refuse "another cepheus backup writes into %s" dest);
-  (* what a backup that did not finish left *)
+  (* what a backup that did not finish left: a folder of a name a backup makes, this user's; nothing else *)
   Array.iter
-    (fun n -> if Filename.check_suffix n ".partial" then (rmrf (dest // n); say "note: removed %s, left by a backup that did not finish" (dest // n)))
+    (fun n ->
+      if partial_name n then
+        match Unix.lstat (dest // n) with
+        | { Unix.st_kind = Unix.S_DIR; st_uid; _ } when st_uid = Unix.geteuid () ->
+          rmrf (dest // n);
+          say "note: removed %s, left by a backup that did not finish" (dest // n)
+        | _ -> say "note: %s is not a folder a backup left (a link, a file, or another user's): left as it is" (dest // n)
+        | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ())
     (Sys.readdir dest);
   let name =
     let s = stamp () in
