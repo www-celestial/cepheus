@@ -183,7 +183,8 @@ récents la partagent, est codée de nouveau sans eux, à la même place, avec l
 `DIR/epochs` une nouvelle epoch à partir du groupe N + 1, au-dessus de chaque epoch que connaissaient l'historique de
 la source et une base remplacée, ouvre la copie (ses runs vérifiés, les groupes d'après le
 plus récent rejoués), la ferme, la vérifie comme le fait `cepheus verify`, et la renomme `DIR` ; avec `--replace`, une
-base déjà dans `DIR` est d'abord renommée `DIR.before-restore-DATE`, jamais supprimée. Elle refuse une source ou une
+base déjà dans `DIR` est d'abord renommée `DIR.before-restore-DATE` (`-2`, `-3` à la suite quand un dossier porte ce nom : deux
+restaurations dans la même seconde), jamais supprimée ni renommée par-dessus un autre dossier. Elle refuse une source ou une
 cible qu'un processus tient ouverte, une source écrite à travers le commit buffer d'un serveur et pas fermée
 proprement, et une cible à côté d'un commit buffer qu'a laissé l'arrêt pas propre d'un serveur (`DATA/server.wal.1` ou
 `.2`, aucun serveur ne tenant le dossier des données) quand ce buffer tient des frames de la base restaurée ou de celle

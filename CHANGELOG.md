@@ -87,7 +87,7 @@ stay as they are, or a later version reads and speaks both the old and the new.
   `cepheus restore SRC DIR` restores one, opened and checked before it takes its name; `--to-group N` or `--to-time T`
   (exactly its digits and a day of the calendar) stops before a bad write, as PostgreSQL's point-in-time recovery,
   and the restored database writes in a new epoch, so that a replica holding the old history's later groups is
-  refused rather than followed; `--replace` moves the database there aside, never removes it, even one that crashed
+  refused rather than followed; `--replace` moves the database there aside under a name no folder has, never removes it, even one that crashed
   through a server's commit buffer (refused only while that buffer holds frames of it)
   ([backups](docs/book/production.md#backups), [verification](docs/book/operations.md#verification-scrubbing)). The
   backup script the production guide gave before still works, and its copies restore with `cepheus restore`.

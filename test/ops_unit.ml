@@ -57,7 +57,7 @@ let copy src dst = C.rmrf dst; ignore (Ops.copy_database src dst)
 let contains m s =
   let rec has i = i + String.length s <= String.length m && (String.sub m i (String.length s) = s || has (i + 1)) in
   has 0
-let refused f = match f () with _ -> false | exception Ops.Refused _ -> true
+let refused f = match f () with _ -> false | exception Ops.Refused _ -> true | exception e -> C.fail "escaped: %s" (Printexc.to_string e); false
 
 let segs dir = List.sort compare (List.filter (fun n -> Filename.check_suffix n ".seg") (Array.to_list (Sys.readdir (dir // "journal"))))
 
@@ -230,7 +230,19 @@ let () =
   C.rmrf dst;
   C.check (Ops.restore ~target:(Ops.Group 40) ~replace:false d dst = Ops.exit_ok) "restore of a promoted history to the group before its promotion";
   C.check (Replica.load_epochs dst = [ 1, 1; 3, 41 ]) "a new epoch above the dropped one (3, not 2 again)";
-  C.check (Ops.restore ~target:(Ops.Group 40) ~replace:true d dst = Ops.exit_ok) "the same restore again over it";
+  (* --replace when DIR.before-restore-DATE is taken (an earlier --replace of the same second, or a folder of that
+     name): the database is moved aside under a free name (-2), never over the other folder *)
+  let stamp t = let t = Unix.localtime t in
+    Printf.sprintf "%04d-%02d-%02dT%02d%02d%02d" (t.tm_year + 1900) (t.tm_mon + 1) t.tm_mday t.tm_hour t.tm_min t.tm_sec in
+  let now = Unix.time () in
+  let planted = List.init 10 (fun i -> dst ^ ".before-restore-" ^ stamp (now +. float i)) in
+  List.iter (fun p -> Unix.mkdir p 0o700; Out_channel.with_open_bin (p // "mine") (fun oc -> output_string oc "mine")) planted;
+  let code = try Ops.restore ~target:(Ops.Group 40) ~replace:true d dst with e -> C.fail "escaped: %s" (Printexc.to_string e); -1 in
+  C.check (code = Ops.exit_ok) "the same restore again over it, its aside name taken";
+  let asides = List.filter (fun n -> contains n "r.before-restore-" && Filename.check_suffix n "-2") (Array.to_list (Sys.readdir root)) in
+  C.check (List.length asides = 1 && Sys.file_exists (root // List.hd asides // "journal")) "the database moved aside as ...-2 (%s)" (String.concat " " asides);
+  C.check (List.for_all (fun p -> Sys.readdir p = [| "mine" |]) planted) "the folders of the names taken unchanged";
+  List.iter C.rmrf planted;
   C.check (Replica.load_epochs dst = [ 1, 1; 4, 41 ]) "above the replaced database's epoch too (4)";
   (* the vault: files in packs of 64 KiB, so that closed packs have their index *)
   Vault.pack_limit := 65536;
@@ -335,7 +347,7 @@ let () =
      it is (moved aside); a buffer that an unclean stop left refuses only when it holds frames of the database *)
   let rd = root // "rdata" in
   Unix.mkdir rd 0o700;
-  let done_ f = match f () with c -> c = Ops.exit_ok | exception Ops.Refused m -> C.fail "refused: %s" m; false in
+  let done_ f = match f () with c -> c = Ops.exit_ok | exception Ops.Refused m -> C.fail "refused: %s" m; false | exception e -> C.fail "escaped: %s" (Printexc.to_string e); false in
   let crashed n =
     let shop = rd // n in
     if done_ (fun () -> Ops.restore ~replace:false src shop) then begin

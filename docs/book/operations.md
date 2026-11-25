@@ -161,7 +161,8 @@ group N may name it), ends the journal after group N (the frame that holds N, wh
 again without them, at the same place, with the same first group), writes into `DIR/epochs` a new epoch from group
 N + 1, above every epoch the source's history and a replaced database knew, opens the copy (its runs checked, the groups after the newest one replayed), closes it, checks it as
 `cepheus verify` does, and renames it `DIR`; with `--replace`, a database already in `DIR` is first renamed
-`DIR.before-restore-DATE`, never removed. It refuses a source or a target that a process holds open, a source written
+`DIR.before-restore-DATE` (`-2`, `-3` after it when a folder has that name: two restores in one second), never
+removed nor renamed over another folder. It refuses a source or a target that a process holds open, a source written
 through a server's commit buffer and not closed cleanly, and a target beside a commit buffer that a server's unclean
 stop left (`DATA/server.wal.1` or `.2`, no server holding the data folder) when that buffer holds frames of the
 database restored or of the one replaced, or does not read: the server's next start would write them into the

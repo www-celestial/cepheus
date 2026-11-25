@@ -630,9 +630,18 @@ let restore ?(target = End) ~replace src dst =
     (* into place: the old database moved aside first, never removed *)
     let aside =
       if has_db then begin
-        let a = dst ^ ".before-restore-" ^ stamp () in
-        Unix.rename dst a;
-        Some a
+        (* a name no entry has (-2, -3 after one of the same second), never renamed over another folder *)
+        let base = dst ^ ".before-restore-" ^ stamp () in
+        let rec go k =
+          let a = if k = 1 then base else Printf.sprintf "%s-%d" base k in
+          match Unix.lstat a with
+          | _ -> go (k + 1)
+          | exception Unix.Unix_error (Unix.ENOENT, _, _) -> (
+            match Unix.rename dst a with
+            | () -> a
+            | exception Unix.Unix_error ((Unix.ENOTEMPTY | Unix.EEXIST | Unix.ENOTDIR), _, _) -> go (k + 1))
+        in
+        Some (go 1)
       end
       else begin
         if Sys.file_exists dst then Unix.rmdir dst;

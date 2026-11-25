@@ -240,7 +240,7 @@ let restore_help =
    Restores the database of SRC (a backup's DEST/DATE/NAME, or a stopped database) into DIR: up to group N\n\
    (--to-group), or up to the last group written at or before T (--to-time 2026-11-24T14:05[:SS] in local\n\
    time, or UTC with a final Z: exactly these digits, a day of the calendar), else to SRC's last group. DIR must be new or empty; --replace moves a database\n\
-   there aside first (DIR.before-restore-DATE, never removed). The copy is made in DIR.restoring, opened (its\n\
+   there aside first (DIR.before-restore-DATE, -2 when taken, never removed). The copy is made in DIR.restoring, opened (its\n\
    runs checked, the groups after its newest run replayed), verified, then renamed DIR. The restored database\n\
    writes its next groups in a new epoch, so that a replica holding later groups of the old history is refused,\n\
    never followed. Stop the server of DIR first, and start it after.\n\n\
