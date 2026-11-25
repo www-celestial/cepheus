@@ -61,7 +61,17 @@ let refused f = match f () with _ -> false | exception Ops.Refused _ -> true
 
 let segs dir = List.sort compare (List.filter (fun n -> Filename.check_suffix n ".seg") (Array.to_list (Sys.readdir (dir // "journal"))))
 
+(* ops_unit.exe --hold DIR: the database in DIR held open (as a server holds it) until stdin closes *)
+let hold dir =
+  match Cepheus.open_ dir with
+  | Error e -> prerr_endline (Cepheus.message e); exit 2
+  | Ok _ ->
+    print_endline "ready";
+    (try ignore (In_channel.input_all stdin) with _ -> ());
+    exit 0
+
 let () =
+  if Array.length Sys.argv = 3 && Sys.argv.(1) = "--hold" then hold Sys.argv.(2);
   Ops.quiet := true;
   C.rmrf root;
   Unix.mkdir root 0o700;
@@ -364,6 +374,72 @@ let () =
   buffer_with id;
   C.check (refused (fun () -> Ops.restore ~target:(Ops.Group 5) ~replace:true src shop3)) "--replace beside a buffer that holds frames of the database: refused";
   C.check (refused (fun () -> Ops.restore ~replace:false src (rd // "shop4"))) "a restore into a new folder beside it: refused";
+  (* a crashed database whose newest frame's trailer alone is broken (kept, as recovery keeps and rebuilds it): its
+     backup, marked closed, verifies whole *)
+  let t10 = root // "t10" in
+  Unix.mkdir t10 0o700;
+  Unix.mkdir (t10 // "data") 0o700;
+  let one_db dir = Out_channel.with_open_bin (dir // "cluster.toml") (fun oc ->
+      output_string oc "[cluster]\nname = \"ops\"\nid = \"cph-c-00000000000000d1\"\nme = \"srv1\"\n[[peer]]\nname = \"srv1\"\naddress = \"127.0.0.1:7401\"\n[clients]\nsocket = \"run\"\n[storage]\ndata = \"data\"\n[[database]]\nname = \"main\"\n");
+    match Config.load (dir // "cluster.toml") with Ok c -> c | Error m -> failwith m
+  in
+  let cfg10 = one_db t10 in
+  let m10 = t10 // "data" // "main" in
+  copy src m10;
+  let newest = jseg m10 (List.length (segs m10) - 1) in
+  flip newest ((Unix.stat newest).st_size - 2);
+  C.check (Ops.verify m10 = Ops.exit_ok) "a crashed database, its newest trailer broken: whole (the next open rebuilds it)";
+  C.check (Ops.backup cfg10 (t10 // "b") = Ops.exit_ok) "its backup";
+  (match List.filter (fun n -> n <> "cepheus-backup.lock") (Array.to_list (Sys.readdir (t10 // "b"))) with
+   | [ n ] -> C.check (Ops.verify (t10 // "b" // n // "main") = Ops.exit_ok) "the backup of a broken newest trailer verifies whole (the trailer written again)"
+   | l -> C.fail "the backup of a broken newest trailer: %s" (String.concat " " l));
+  (* a live database (another process holds it): what a frame being written shows is left out with a note (a large
+     group's header still zeros, a frame not all there); a frame written whole that does not check is damage *)
+  let lv = root // "live" in
+  Unix.mkdir lv 0o700;
+  Unix.mkdir (lv // "data") 0o700;
+  let cfgl = one_db lv in
+  let ld = lv // "data" // "main" in
+  copy src ld;
+  let to_child, from_us = Unix.pipe ~cloexec:true () and from_child, to_us = Unix.pipe ~cloexec:true () in
+  let child = Unix.create_process Sys.executable_name [| Sys.executable_name; "--hold"; ld |] to_child to_us Unix.stderr in
+  Unix.close to_child;
+  Unix.close to_us;
+  let ready = In_channel.input_line (Unix.in_channel_of_descr from_child) in
+  C.check (ready = Some "ready") "the database held by another process";
+  let lid = Engine.read_meta Disk.real ld in
+  let newest = jseg ld (List.length (segs ld) - 1) in
+  let last = ref (0, 0) in
+  ignore (Journal.check ~frame:(fun p _ stop -> if p.segment = int_of_string (String.sub (Filename.basename newest) 0 20) then last := (p.offset, stop)) ~tail:Journal.Copy Disk.real (ld // "journal") lid);
+  let off, stop = !last in
+  let size = (Unix.stat newest).st_size in
+  let frame_bytes = let b = Bytes.create (stop - off) in let fd = Unix.openfile newest [ Unix.O_RDONLY ] 0 in ignore (Unix.lseek fd off Unix.SEEK_SET); ignore (Unix.read fd b 0 (stop - off)); Unix.close fd; b in
+  let append b = let fd = Unix.openfile newest [ Unix.O_WRONLY; Unix.O_APPEND ] 0 in ignore (Unix.write fd b 0 (Bytes.length b)); Unix.close fd in
+  let backups = ref 0 in
+  let backup_code () =
+    incr backups;
+    let d = lv // Printf.sprintf "b%d" !backups in
+    let code = Ops.backup cfgl d in
+    code, List.filter (fun n -> n <> "cepheus-backup.lock") (Array.to_list (Sys.readdir d))
+  in
+  (* a large group's frame being written: its header, written last, still zeros *)
+  append (Bytes.cat (Bytes.make 28 '\000') (Bytes.make 100 'x'));
+  C.check (Ops.verify ld = Ops.exit_ok) "live: a header still zeros is the frame being written";
+  let code, l = backup_code () in
+  C.check (code = Ops.exit_ok && List.length l = 1 && Ops.verify (lv // Printf.sprintf "b%d" !backups // List.hd l // "main") = Ops.exit_ok) "live: its backup leaves it out";
+  Unix.truncate newest size;
+  (* a frame being appended: its header there, not all its bytes yet *)
+  append (Bytes.sub frame_bytes 0 ((Bytes.length frame_bytes / 2) + 1));
+  C.check (Ops.verify ld = Ops.exit_ok) "live: a frame not all there is the frame being written";
+  Unix.truncate newest size;
+  (* the newest frame, every byte of it there, damaged *)
+  flip newest (off + 28 + 2);
+  C.check (Ops.verify ld = Ops.exit_damage) "live: a frame written whole that does not check is damage";
+  let code, l = backup_code () in
+  C.check (code = Ops.exit_damage && List.exists (fun n -> Filename.check_suffix n ".damaged") l) "live: its backup is damaged, never cut in silence";
+  Unix.close from_us;
+  ignore (Unix.waitpid [] child);
+  Unix.close from_child;
   (* last, since it changes the process's zone: a local time the clocks skip is none (Paris, 2026-03-29, 02:00 to 03:00) *)
   if Sys.file_exists "/usr/share/zoneinfo/Europe/Paris" then begin
     Unix.putenv "TZ" "Europe/Paris";

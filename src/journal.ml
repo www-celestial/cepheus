@@ -399,6 +399,18 @@ let cut_from disk dir (from : position option) g =
     if !changed then disk.sync_dir dir
   end
 
+(* the trailer of the frame at [p], whose header checks, written from its header *)
+let write_trailer disk fd p =
+  let h = Bytes.create fh in
+  disk.Disk.pread fd p h 0 fh;
+  let len = u32 h 4 in
+  let t = Bytes.create ft in
+  set32 t 0 len;
+  set32 t 4 (u32 h 20);
+  set32 t 8 (u32 h 24);
+  set32 t 12 tail_magic;
+  disk.pwrite fd (p + fh + len) t 0 ft
+
 let recover ?frame ?after ?(copy = []) ?cut ~force disk dir id from on_group =
   repair disk dir from copy;
   Option.iter (cut_from disk dir from) cut;
@@ -416,18 +428,7 @@ let recover ?frame ?after ?(copy = []) ?cut ~force disk dir id from on_group =
     let fd = disk.openf last.file false in
     if last.torn then disk.truncate fd last.stop;
     (* rebuild the trailers of intact frames from their headers: recovery relies on them *)
-    List.iter
-      (fun p ->
-        let h = Bytes.create fh in
-        disk.pread fd p h 0 fh;
-        let len = u32 h 4 in
-        let t = Bytes.create ft in
-        set32 t 0 len;
-        set32 t 4 (u32 h 20);
-        set32 t 8 (u32 h 24);
-        set32 t 12 tail_magic;
-        disk.pwrite fd (p + fh + len) t 0 ft)
-      last.bad_trailers;
+    List.iter (write_trailer disk fd) last.bad_trailers;
     if last.torn || last.bad_trailers <> [] then disk.fsync fd;
     { disk; dir; id; fd; seg = last.first; size = last.stop; next; closed = false; failed = false; shared = None; unforced = false;
       lock = Mutex.create () }
@@ -734,6 +735,8 @@ type segment_check = {
   slast : int;  (** the last group of its whole frames ([sfirst - 1]: none) *)
   send : int;  (** where its last whole frame ends (0: its header did not check) *)
   stail : bool;  (** bytes after [send] that the rule takes for the frame being written *)
+  swritten : bool;  (** Copy: those bytes are a frame written whole that does not check (below) *)
+  strailer : int option;  (** Crash: the newest frame, kept, whose trailer alone is broken (recovery rebuilds it) *)
   sdamage : string option;  (** the first damage, which ended the segment's check *)
 }
 
@@ -745,9 +748,10 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
   Fun.protect ~finally:(fun () -> try disk.close fd with Disk.Io _ -> ()) @@ fun () ->
   let r = reader disk fd in
   let size = r.size in
-  let frames = ref 0 and expect = ref s in
-  let result ?damage ?(torn = false) stop =
-    { sfirst = s; sbytes = size; sframes = !frames; slast = !expect - 1; send = stop; stail = torn; sdamage = damage }
+  let frames = ref 0 and expect = ref s and kept_trailer = ref None in
+  let result ?damage ?(torn = false) ?(written = false) stop =
+    { sfirst = s; sbytes = size; sframes = !frames; slast = !expect - 1; send = stop; stail = torn; swritten = written;
+      strailer = !kept_trailer; sdamage = damage }
   in
   let hb = if size < seg_header then Bytes.empty else (let b = Bytes.create seg_header in disk.pread fd 0 b 0 seg_header; b) in
   match read_header hb id name with
@@ -771,11 +775,22 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
     in
     (* Copy: the frame being written has nothing written after it but its own bytes (a copy ends where its file did
        when it was opened, so a large group's trailer is there only if its header was written before), and a frame
-       that checks after it is damage *)
+       that checks after it is damage. Its bytes show as it is written: a frame is appended in one write, which a
+       reader sees in order up to the size it reads, and a large group's header, written last into its place, reads
+       as zeros until then. So a header there that is not zeros and does not check, or one that checks with every byte
+       of its frame there, is a frame written whole that does not check ([swritten]): damage, but for the instant a
+       header is written into its place, which the caller tells by reading the live file again *)
+    let written_whole p =
+      size - p >= fh
+      && (let h = Bytes.create fh in
+          disk.pread fd p h 0 fh;
+          (not (Bytes.for_all (( = ) '\000') h))
+          && match header_at r p with None -> true | Some (len, _, _, _, _) -> p + fh + len + ft <= size)
+    in
     let broken p =
       if newest && tail = Copy then
         if header_after p then result ~damage:(Printf.sprintf "%s: damaged frame at offset %d (frames that check follow it)" name p) p
-        else result ~torn:true p
+        else result ~torn:true ~written:(written_whole p) p
       else begin
         let rest = Bytes.create (size - p) in
         disk.pread fd p rest 0 (size - p);
@@ -803,7 +818,7 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
             if (not whole) && newest && tail = Copy then broken p
             else if (not whole) && not (newest && tail = Crash && stop = size) then
               result ~damage:(Printf.sprintf "%s: the trailer of the frame at offset %d is damaged" name p) p
-            else
+            else begin
               let bad =
                 match decoded with
                 | None -> None
@@ -823,12 +838,23 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
               match bad with
               | Some m -> result ~damage:m p
               | None ->
+                if not whole then kept_trailer := Some p;
                 frame { segment = s; offset = p; next = f0 } count stop;
                 incr frames;
                 expect := f0 + count;
-                loop stop)
+                loop stop
+            end)
     in
     loop seg_header
+
+(* one segment, the newest, checked again: for cepheus verify and backup, which read a live database's tail twice *)
+let check_newest ~tail disk dir id s = check_segment ~tail ~newest:true ~frame:(fun _ _ _ -> ()) ~on_group:ignore disk dir id s
+
+(* the trailer of the frame at offset [p] of segment [s] rebuilt from its header and forced, as recovery does for the
+   newest frame after a crash: for a copy that cepheus backup marks closed *)
+let rebuild_trailer disk dir s p =
+  let fd = disk.Disk.openf (path dir s) false in
+  Fun.protect ~finally:(fun () -> disk.close fd) (fun () -> write_trailer disk fd p; disk.fsync fd)
 
 type check = {
   segments : segment_check list;  (** in the order of their names *)
@@ -864,7 +890,7 @@ let check ?(domains = 1) ?(frame = fun _ _ _ -> ()) ?(on_group = fun _ -> ()) ~t
     List.mapi
       (fun i -> function
         | Ok c -> c
-        | Error m -> { sfirst = segs.(i); sbytes = 0; sframes = 0; slast = segs.(i) - 1; send = 0; stail = false; sdamage = Some m })
+        | Error m -> { sfirst = segs.(i); sbytes = 0; sframes = 0; slast = segs.(i) - 1; send = 0; stail = false; swritten = false; strailer = None; sdamage = Some m })
       results
   in
   let damages = ref [] and last = ref 0 and chained = ref true in

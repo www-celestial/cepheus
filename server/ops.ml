@@ -77,9 +77,13 @@ type report = {
   damages : string list;
   notes : string list;
   tail : (int * int) option;  (* the newest segment and the end of its last whole frame, when bytes follow it *)
+  tail_written : bool;  (* Copy: those bytes are a frame written whole that does not check (Journal.segment_check) *)
+  kept_trailer : (int * int) option;  (* Crash: the newest frame kept whose trailer alone is broken: its segment, offset *)
 }
 
 let file_size p = match Unix.stat p with st -> st.Unix.st_size | exception Unix.Unix_error _ -> 0
+
+let writing_note s stop = Printf.sprintf "journal/%s: the frame being written from offset %d is not checked (the database is open)" (Journal.segment_name s) stop
 
 (* Every file of the database in [dir] checked through [disk] (read-only), the newest segment's end read by [tail];
    [live]: a process writes it meanwhile (a run a merge removes is no damage). *)
@@ -90,7 +94,7 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
   match Engine.read_meta disk dir with
   | exception Journal.Damaged m ->
     { group = 0; segments = 0; journal_bytes = 0; frames = 0; runs = 0; run_bytes = 0; pages = 0; packs = 0; vault_bytes = 0;
-      records = 0; damages = [ m ]; notes = []; tail = None }
+      records = 0; damages = [ m ]; notes = []; tail = None; tail_written = false; kept_trailer = None }
   | exception Disk.Io m -> refuse "%s" m
   | id ->
     (* the runs: each as an open checks it, and every page *)
@@ -135,7 +139,7 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
       match newest with
       | Some s when s.stail ->
         (match tail with
-         | Journal.Copy when live -> note "journal/%s: the frame being written from offset %d is not checked (the database is open)" (Journal.segment_name s.sfirst) s.send
+         | Journal.Copy when live && not s.swritten -> note "%s" (writing_note s.sfirst s.send)
          | Journal.Crash when s.send = 0 -> note "journal/%s: a segment torn at its creation, holding no frame (the next open removes it)" (Journal.segment_name s.sfirst)
          | Journal.Crash -> note "journal/%s: a frame torn from offset %d, never confirmed (the next open cuts it)" (Journal.segment_name s.sfirst) s.send
          | _ -> ());
@@ -169,10 +173,29 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
       end
       else 0, 0, 0
     in
+    let kept_trailer = match newest with Some { strailer = Some p; sfirst; _ } when c.damages = [] -> Some (sfirst, p) | _ -> None in
+    Option.iter (fun (s, p) -> note "journal/%s: the newest frame's trailer, at offset %d, is broken (a crash): the next open writes it again from its header" (Journal.segment_name s) p) kept_trailer;
     { group = c.last; segments = List.length c.segments; journal_bytes = List.fold_left (fun a (s : Journal.segment_check) -> a + s.sbytes) 0 c.segments;
       frames = List.fold_left (fun a (s : Journal.segment_check) -> a + s.sframes) 0 c.segments; runs = List.length !good;
       run_bytes = !run_bytes; pages = !pages; packs; vault_bytes; records; damages = List.rev !damages; notes = List.rev !notes;
-      tail = tail_at }
+      tail = tail_at; tail_written = (match newest with Some s -> s.stail && s.swritten | None -> false); kept_trailer }
+
+(* A tail the Copy rule leaves out as the frame being written while every byte of it is there ([tail_written]): a
+   frame written whole that does not check, or the instant a large group's header is written into its place. The live
+   database's segment read again for a second: being written if the frame checks now, or the server cut it back (a
+   failed write); damage if it stays as it was (a frame's bytes appear in the time of a write, and are forced at once) *)
+let still_torn src id (s, stop) =
+  let rec go k =
+    match Journal.check_newest ~tail:Journal.Copy Disk.read_only (src // "journal") id s with
+    | exception (Disk.Io _ | Journal.Damaged _) -> false
+    | c when c.send = stop && c.stail && c.swritten -> k = 0 || (Thread.delay 0.1; go (k - 1))
+    | _ -> false
+  in
+  go 10
+
+let written_damage (s, stop) =
+  Printf.sprintf "journal/%s: the frame at offset %d does not check, and every byte of it is written, for a second and more: damage, not a frame being written (its groups were confirmed, or would have been)"
+    (Journal.segment_name s) stop
 
 let print_report r =
   say "journal: %d segment%s, %s, %d frames, groups 1 to %d" r.segments (if r.segments = 1 then "" else "s") (mb r.journal_bytes) r.frames r.group;
@@ -191,6 +214,13 @@ let verify dir =
   let st = state dir in
   let tail = match st with Open -> Journal.Copy | Closed -> Journal.Strict | Crashed -> Journal.Crash in
   let r = check ~tail ~live:(st = Open) dir in
+  let r =
+    match r.tail with
+    | Some ((s, stop) as t) when st = Open && r.tail_written ->
+      if still_torn dir (Engine.read_meta Disk.read_only dir) t then { r with damages = r.damages @ [ written_damage t ] }
+      else { r with notes = r.notes @ [ writing_note s stop ] }
+    | _ -> r
+  in
   print_report r;
   match r.damages with
   | [] -> say "%s: whole, at group %d (%s)" dir r.group (since t0); exit_ok
@@ -402,6 +432,12 @@ let backup (cfg : Config.t) dest =
         (* the copy's end read as the source's: one being written may end in the frame being written *)
         let tail = match st with Open -> Journal.Copy | Closed -> Journal.Strict | Crashed -> Journal.Crash in
         let r = check ~tail ~live:false out in
+        (* a tail of a frame written whole: read again in the live database, damage if it stays so *)
+        let r =
+          match r.tail with
+          | Some t when live && r.tail_written && still_torn src (Engine.read_meta Disk.read_only out) t -> { r with damages = r.damages @ [ written_damage t ] }
+          | _ -> r
+        in
         List.iter (fun m -> say "%s: note: %s" db m) r.notes;
         match r.damages with
         | [] ->
@@ -412,9 +448,13 @@ let backup (cfg : Config.t) dest =
                 (if st = Open then "the frame being written when it was copied" else "a frame torn at a crash, never confirmed");
               cut_copy out t)
             r.tail;
+          (* the copy is marked closed, so read as every byte checks: a trailer the Crash rule kept is written again
+             first, as the next open would *)
+          Option.iter (fun (s, p) -> Journal.rebuild_trailer Disk.real (out // "journal") s p; say "%s: note: journal/%s: the trailer at offset %d written again from its header in the copy" db (Journal.segment_name s) p) r.kept_trailer;
           mark_closed out;
           say "%s: group %d, %s (journal %s, runs %s%s), %s%s" db r.group (mb (c.journal + c.runs_ + c.vault)) (mb c.journal) (mb c.runs_)
-            (if c.vault > 0 then ", vault " ^ mb c.vault else "") (since t1) (if live then "" else ", the database was closed")
+            (if c.vault > 0 then ", vault " ^ mb c.vault else "") (since t1)
+            (match st with Open -> "" | Closed -> ", the database was closed" | Crashed -> ", the database was left by a process that died")
         | l ->
           incr damaged;
           List.iter (fun m -> say "%s: damaged: %s" db m) l)
