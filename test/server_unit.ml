@@ -892,9 +892,11 @@ let followed_rules () =
   Cepheus.close db;
   C.rmrf base
 
-(* A follower's run that a merge replaced leaves the page cache at once, as the server's do (Engine): its pages stayed
-   resident until the cache was full, a base's worth at each merge (a Cesia app that followed its database under
-   writes grew from 53 to 105 MB in 3 minutes). A state still on the old run reads it again from its file. *)
+(* A follower's run that a merge replaced leaves the page cache once the states on the new base are published, as the
+   server's do (Engine): its pages stayed resident until the cache was full, a base's worth at each merge (a Cesia app
+   that followed its database under writes grew from 41 to 225 MB in 15 minutes). A state still on the old run reads it
+   again from its file, and the pages it takes back leave at the next new base (the reads begun before the publication:
+   they took the whole base back at each merge, a writer that read 63 -> 138 MB in 15 minutes). *)
 let follower_drops_replaced () =
   let ok = function Ok x -> x | Error e -> failwith (Cepheus.message e) in
   let base = Filename.concat (Option.value (Sys.getenv_opt "CEPHEUS_TMP") ~default:(Filename.get_temp_dir_name ())) (Printf.sprintf "cepheus-drop-%d" (Unix.getpid ())) in
@@ -927,6 +929,14 @@ let follower_drops_replaced () =
   check (held () = 0) "drop: the replaced run left the cache (%d of its pages held)" (held ());
   check (C.F.equal (C.facts_of_view v) facts) "drop: a state on the replaced run reads it again";
   check (fol.building.group = (Cepheus.view db).group && Array.length fol.building.runs = 1) "drop: the newest state rests on the merge";
+  check (held () > 1) "drop: the pages read again are in the cache (%d)" (held ());
+  (* the next merge: the pages read back leave too *)
+  for k = 26 to 30 do write k done;
+  ok (Cepheus.snapshot db);
+  let next = chain () in
+  check (names next <> names merged) "drop: a second merge";
+  Follower.runs fol ~vseq:1 ~names:(names next) ~files:(files next);
+  check (held () = 0) "drop: the pages read back left at the next new base (%d held)" (held ());
   Cepheus.close db;
   C.rmrf base
 
