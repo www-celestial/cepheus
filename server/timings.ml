@@ -28,8 +28,8 @@
    status. Histogram.add_buckets takes the total as the sum of the counters copied, so the percentiles it gives are
    those of a moment within its read.
 
-   Memory: a ring is six slices of 963 counters and four more (46 KiB), made at its first value; a database timed by
-   every one of d I/O domains, questions and writes, holds at most 2 x d rings (370 KiB for d = 4), an idle one
+   Memory: a ring is six slices of 963 counters and four more (45 KiB), made at its first value; a database timed by
+   every one of d I/O domains, questions and writes, holds at most 2 x d rings (361 KiB for d = 4), an idle one
    nothing.
 
    The log. A question or a write that takes [slow_ms] or more (0: none) is written on a line of the standard error:
