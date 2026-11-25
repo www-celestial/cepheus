@@ -87,7 +87,11 @@ and conn = {
       (* the monotonic clock's microseconds at the end of the question just answered, among the frames of one input;
          0 otherwise: the next frame's [t0], so that questions sent together read the clock once each (Timings) *)
   mutable t0 : int;  (* the frame being handled: its start, when [mark] gave it; 0: read the clock *)
-  qkept : Timings.kept;  (* the rings its questions are recorded into (its reading thread's domain's) *)
+  mutable qring : Timings.ring;
+      (* the ring its questions are recorded into: database [qdb]'s of domain [qdom] (its reading thread's), looked up
+         again when either changed; [||]: none yet *)
+  mutable qdb : int;
+  mutable qdom : int;
 }
 
 let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> [])
@@ -108,7 +112,7 @@ let connect ?(wake = ignore) ?(close = ignore) ?(gone = fun () -> false) srv ~fl
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
           inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = []; kept_cells = 0;
           closed = false; wake; close; failed = Atomic.make false; gone; puts = Hashtbl.create 2; mark = 0; t0 = 0;
-          qkept = Timings.kept () }
+          qring = [||]; qdb = -1; qdom = -1 }
       in
       Hashtbl.replace srv.conns cid c;
       c)
@@ -481,7 +485,16 @@ let timed_question c d ~t0 ~stop ~rows ~outcome ~what (v : Store.view) q sel ext
   let now = Histogram.now_us () in
   let us = now - t0 in
   c.mark <- now;
-  if Timings.question_kept c.srv.timings c.qkept d.index ~now us then
+  let dom = Domain.self_index () in
+  let r =
+    if c.qdb = d.index && c.qdom = dom then c.qring
+    else begin
+      let r = Timings.question_ring c.srv.timings d.index in
+      c.qring <- r; c.qdb <- d.index; c.qdom <- dom;
+      r
+    end
+  in
+  if Timings.record r ~now us then
     Timings.say c.srv.timings
       (Timings.question_line ~db:d.name ~token:(token_name c) ~us ~candidates:(Query.work_of stop) ~rows ~outcome
          (what ^ " " ^ Timings.shape v q sel extra order))

@@ -426,7 +426,7 @@ let () =
   let log = read_file (dir // "serve.log") in
   let slow = List.filter (fun l -> contains l "slow question" || contains l "slow write") (lines log) in
   let has_line what = List.exists (fun l -> List.for_all (contains l) what) slow in
-  C.check (has_line [ "slow question: database main, token obs-writer"; "candidates"; "1 rows, ok: find group count where [x0 c/tag ?] [x1 c/tag ?]" ])
+  C.check (has_line [ "slow question: database main, token obs-writer"; "candidates"; "1 row, ok: find group count where [x0 c/tag ?] [x1 c/tag ?]" ])
     "a line for the product, its shape and rows:\n%s" (String.concat "\n" slow);
   C.check (has_line [ "slow question: database main, token obs-writer"; "timeout: find group count where [x0 c/tag ?] [x1 c/tag ?] [x2 c/tag ?]" ]) "a line for the timeout";
   C.check (has_line [ "slow question: database main, token obs-writer"; "ok: watch group count" ]) "a line for the watch";
