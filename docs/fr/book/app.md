@@ -1,7 +1,7 @@
 # Une vraie application : factures et clients
 
 Cette page construit une application entière sur cette pile, pas à pas, de `cesia new` à un service en production :
-une application de factures et de clients écrite en [Cesia](https://github.com/www-celestial/cesia), ses données dans un
+une application de factures et de clients écrite en [Cesia](https://github.com/www-celestial/cesia-lang), ses données dans un
 serveur Cepheus, ses écrans tenus à jour en direct par `std/live` de Cesia, et ses tests end-to-end (des tests de
 l'application entière, faits comme un utilisateur, dans un vrai navigateur) qui pilotent Firefox par Ceti (un projet qui
 commande Firefox depuis un programme ou un test Cesia). Son code est dans
@@ -401,11 +401,11 @@ u.Db = if u.Role == "admin" env.Full else env.Books end
 est une empreinte courte calculée à partir d'un texte, qui ne permet pas de retrouver ce texte ; Argon2id est une
 fonction de hash faite exprès lente et gourmande en mémoire, pour qu'on ne puisse pas essayer des milliards de mots de
 passe ; `crypto.HashPassword`, par libsodium :
-[cryptographie](https://github.com/www-celestial/cesia/blob/main/docs/book/crypto.md)). Un identifiant inconnu est
+[cryptographie](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/crypto.md)). Un identifiant inconnu est
 vérifié contre le hash d'un mot de passe que personne n'a, pour qu'il prenne autant de temps qu'un mauvais mot de passe
 et que le temps d'une réponse n'apprenne à personne quels identifiants existent ; les deux reçoivent le même message.
 Le hash tourne hors du seul thread de l'application (le `slow` de `c.Fn` :
-[un appel qui prend du temps](https://github.com/www-celestial/cesia/blob/main/docs/book/c.md#a-call-that-takes-long)) :
+[un appel qui prend du temps](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/c.md#a-call-that-takes-long)) :
 pendant qu'un visiteur se connecte, les autres requêtes avancent. Au plus la moitié des cœurs de la machine calculent
 un hash à la fois (64 MiB chacun), les autres attendent dans une file de 64 par place, et une de plus reçoit un 500
 tout de suite : un flot de connexions prend une mémoire bornée ([les mesures](#14-ce-que-cela-coûte)).
@@ -443,7 +443,7 @@ en https `Strict-Transport-Security` (le navigateur n'emploie plus que https pou
 
 Les nombres du tableau de bord sont trois **watches** (des questions vivantes : tenues à jour, leur réponse puis ses
 changements ; [questions vivantes](cesia.md#watch--les-questions-vivantes)), donnés à la page par `std/live`
-([écrans en direct](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#live-screens-stdlive)).
+([écrans en direct](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/http.md#live-screens-stdlive)).
 `live.Route("/live", screen)` les sert ; `screen` tourne quand une page se connecte, trouve son utilisateur par le
 cookie de sa requête, et suit les questions par la base de son rôle, chaque watch prenant fin avec la page
 (`until = s.Ended`) :
@@ -738,7 +738,7 @@ Stopped [systemd-run] /home/you/cesia/_build/default/src/bin/main.exe run --allo
 
 **Sur chaque cœur.** L'application ne garde aucun état à elle : les sessions sont dans la base, donc
 `cesia run --workers 4` lance quatre processus derrière un seul port
-([chaque cœur](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#every-core)). Chacun se connecte à
+([chaque cœur](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/http.md#every-core)). Chacun se connecte à
 Cepheus et garde sa propre copie des pages de la base pour ses lectures locales (chaque lecteur tient son cache :
 [ce que cela coûte](server.md#ce-que-cela-coûte)), et chacun lance la vérification des retards de chaque minute, que leurs
 `Expect` empêchent de s'appliquer deux fois.
@@ -820,7 +820,7 @@ remplie : 29,6 ms [29,1 ; 30,1]. Le processus de l'application, de sa commande �
 - Avec 50 clients à la fois, le seul processus de l'application les sert l'un après l'autre : la latence est environ
   50 fois le travail d'une requête, et les requêtes par seconde disent ce que donne un cœur. `cesia run --workers 4`
   sert le même port depuis 4 processus
-  ([chaque cœur](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#every-core)).
+  ([chaque cœur](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/http.md#every-core)).
 - La liste du comptable coûte 0,5 ms de plus avec un seul client, un round trip (l'aller-retour d'une requête et de sa
   réponse) vers le serveur par son socket (son token lit là-bas, pas dans la mémoire de l'application), et en sert
   davantage à 50, puisque les domains du serveur (des fils d'exécution d'OCaml qui tournent en parallèle, chacun sur
