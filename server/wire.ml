@@ -1,8 +1,10 @@
-(* The wire protocol, versions 1 to 6. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+(* The wire protocol, versions 1 to 7. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
    After: below), version 3 the files of the vault (Put, Piece, Load: below), version 4 the operation Incr (tag 4 of
    put_op), version 5 a Watch's Sort and Limit (its extension's order, which an older server refuses), version 6 a
-   question's time (a Find's or a Watch's, after its extension), and nothing else: a server speaks all six, a program says in Hello the version it speaks, and against an older server a
-   program speaks that server's version (Client.hello) and asks nothing that version lacks. A
+   question's time (a Find's or a Watch's, after its extension), version 7 the operators Less, Less_or_equal and
+   Optional (tags 6, 7 and 8 of put_item; a missing cell of a row is Value.missing, the link -2^62, which no thing
+   has), and nothing else: a server speaks all seven, a program says in Hello the version it speaks, and against an
+   older server a program speaks that server's version (Client.hello) and asks nothing that version lacks. A
    connection carries frames both ways:
 
      frame  = length u32 LE (the bytes after this field, at most 16 MiB) | id u32 LE | kind u8 | flags u8 | body
@@ -16,7 +18,7 @@ open Cepheus
 module Ask = Question.Ask
 module Top = Question.Top
 
-let version = 6
+let version = 7
 
 (* the oldest version a server still speaks *)
 let oldest = 1
@@ -192,7 +194,8 @@ let get_vars r = Array.init (count r) (fun _ -> Codec.get_varint r)
 
 (* What a question asks beyond its patterns, ranges and select, after them in a Find (and a Watch): a byte 1, then its
    operators (a count, then each: 0 a pattern, 1 a range, 2 In (variable, count, values), 3 Not (count, items), 4 Or
-   (count of alternatives, each a count and its items), 5 Prefix (variable, text)), its Sort (a count, then each key's column and a byte 1 when
+   (count of alternatives, each a count and its items), 5 Prefix (variable, text), 6 Less (two variables), 7
+   Less_or_equal (two variables), 8 Optional (a pattern)), its Sort (a count, then each key's column and a byte 1 when
    descending), its Limit (0: none) and its After (a byte 0, or 1 then a count and the values). A question without
    them is coded as before them, so that a server that does not know them reads every other question as it did, and
    refuses this one (bytes after the request). *)
@@ -203,6 +206,9 @@ let rec put_item b = function
   | Prefix (x, p) -> Buffer.add_char b '\005'; Codec.put_varint b x; Codec.put_string b p
   | Not l -> Buffer.add_char b '\003'; Codec.put_varint b (List.length l); List.iter (put_item b) l
   | Or alts -> Buffer.add_char b '\004'; Codec.put_varint b (List.length alts); List.iter (fun a -> Codec.put_varint b (List.length a); List.iter (put_item b) a) alts
+  | Less (x, y) -> Buffer.add_char b '\006'; Codec.put_varint b x; Codec.put_varint b y
+  | Less_or_equal (x, y) -> Buffer.add_char b '\007'; Codec.put_varint b x; Codec.put_varint b y
+  | Optional p -> Buffer.add_char b '\008'; put_term b p.e; Codec.put_varint b p.p; put_term b p.v
 
 let rec get_item depth r =
   if depth > 2 then raise (Malformed "operators nested too deep");
@@ -213,7 +219,16 @@ let rec get_item depth r =
   | 3 -> Not (List.init (count r) (fun _ -> get_item (depth + 1) r))
   | 4 -> Or (List.init (count r) (fun _ -> List.init (count r) (fun _ -> get_item (depth + 1) r)))
   | 5 -> let x = Codec.get_varint r in Prefix (x, Codec.get_string r)
+  | 6 -> let x = Codec.get_varint r in Less (x, Codec.get_varint r)
+  | 7 -> let x = Codec.get_varint r in Less_or_equal (x, Codec.get_varint r)
+  | 8 -> let e = get_term r in let p = Codec.get_varint r in let v = get_term r in Optional { Query.e; p; v }
   | _ -> raise (Malformed "an operator this server does not know")
+
+(* does a question's extension hold an operator of version 7 (Less, Less_or_equal, Optional), which a server of an
+   earlier version does not know *)
+let rec newer = function Ask.Less _ | Less_or_equal _ | Optional _ -> true | Not l -> List.exists newer l | Or alts -> List.exists (List.exists newer) alts | _ -> false
+
+let needs_7 extra = List.exists newer extra
 
 let put_order b ?(extra = []) (o : Top.order) =
   Buffer.add_char b '\001';

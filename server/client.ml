@@ -60,6 +60,10 @@ let no_sorted_watch spoken = Printf.sprintf "this server speaks protocol %d: a w
    closes the connection on the bytes after the question) *)
 let no_timeout spoken = Printf.sprintf "this server speaks protocol %d: a question's timeout needs a server of protocol 6" spoken
 
+(* Less and Optional, on a connection to a server of protocol 6 or older: refused here, never sent (such a server
+   refuses an operator it does not know) *)
+let no_less spoken = Printf.sprintf "this server speaks protocol %d: Less, LessOrEqual and Optional need a server of protocol 7" spoken
+
 (* a question's time in seconds as the wire's milliseconds (0: none given), 1 ms to a week; an infinite, NaN or
    negative time is the program's mistake *)
 let timeout_ms = function
@@ -538,12 +542,14 @@ let find c db ?(select = Wire.Give [||]) ?(extra = []) ?(order = Top.none) ?time
     match Answer.answer ~order ~extra ?stop:(local_stop timeout) v query select with
     | a ->
       let typs = Array.init a.cols a.typ in
-      Ok (v.group, List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))))
+      ignore typs;
+      Ok (v.group, List.init a.n (fun i -> Array.init a.cols (fun j -> Answer.value v a i j)))
     | exception Query.Bad m -> Error { code = "invalid"; message = m }
     | exception Query.Timeout t -> Error { code = "timeout"; message = Query.timeout_message t }
     | exception Pages.Unreadable m -> Error { code = "damaged"; message = m })
   | None when (extra <> [] || order <> Top.none) && c.spoken < 2 -> Error { code = "invalid"; message = older }
   | None when ms > 0 && c.spoken < 6 -> Error { code = "invalid"; message = no_timeout c.spoken }
+  | None when c.spoken < 7 && Wire.needs_7 extra -> Error { code = "invalid"; message = no_less c.spoken }
   | None when List.length query.where > Wire.max_patterns -> Error { code = "invalid"; message = too_many_patterns query }
   | None -> (
     match read_call c (Wire.Find { db = db.handle; query; select; extra; order; timeout = ms }) with
@@ -679,6 +685,7 @@ let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) ?(order = To
   if extra <> [] && c.spoken < 2 then invalid_arg older;
   if order <> Top.none && c.spoken < 5 then invalid_arg (no_sorted_watch c.spoken);
   if ms > 0 && c.spoken < 6 then invalid_arg (no_timeout c.spoken);
+  if c.spoken < 7 && Wire.needs_7 extra then invalid_arg (no_less c.spoken);
   if List.length query.where > Wire.max_patterns then invalid_arg (too_many_patterns query);
   let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra; worder = order; wtimeout = ms }) in
   flush c;

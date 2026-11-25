@@ -31,3 +31,13 @@ val decode : Codec.reader -> t
 val inline : typ -> bool
 (** Whether the index word is the value itself (ints, dates, money, booleans, links); texts and floats are
     dictionary numbers. *)
+
+val missing : t
+(** The cell of an answer where an Optional found no value ([Link min_int]: no thing has that id). It is a value of
+    the rows of a question only, never of a fact. *)
+
+val is_missing : t -> bool
+
+val total_order : float -> float -> int
+(** IEEE 754's totalOrder: -NaN < -infinity < ... < -0 < +0 < ... < +infinity < +NaN. Floats sort in it, and the
+    ranges and [Less] on floats compare in it. *)

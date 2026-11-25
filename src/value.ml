@@ -43,7 +43,7 @@ let to_string = function
   | Text s -> Printf.sprintf "%S" s
   | Date d -> Printf.sprintf "date %d" d
   | Money m -> Printf.sprintf "money %d" m
-  | Link e -> Printf.sprintf "#%d" e
+  | Link e -> if e = min_int then "missing" else Printf.sprintf "#%d" e
 
 (* floats compare by their bits, so that equality is exact (nan equals itself, 0.0 differs from -0.0) *)
 let equal a b =
@@ -78,3 +78,15 @@ let decode r =
   | _ -> raise Codec.Short
 
 let inline = function Ttext | Tfloat -> false | _ -> true
+
+(* the cell of an answer where an Optional found no value: a link no thing has (a thing's id is positive, a new
+   thing's of a write negative and small), so that rows of values carry it whatever their columns' types *)
+let missing = Link min_int
+
+let is_missing = function Link e -> e = min_int | _ -> false
+
+(* IEEE 754's totalOrder (section 5.10) on two floats: -NaN < -inf < ... < -0 < +0 < ... < +inf < +NaN: the order of
+   Sort, and of the ranges and Less on floats *)
+let total_order (a : float) (b : float) =
+  let key f = let i = Int64.bits_of_float f in if Int64.compare i 0L < 0 then Int64.logxor i Int64.max_int else i in
+  Int64.compare (key a) (key b)

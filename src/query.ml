@@ -14,7 +14,8 @@ type term = Var of int | Thing of int | Val of Value.t
 type pattern = { e : term; p : int; v : term }
 
 type t = { vars : int; where : pattern list; ranges : (int * Value.t * Value.t) list }
-(** [ranges]: [(x, lo, hi)] keeps the bindings with lo <= x <= hi (an int, a date or money). *)
+(** [ranges]: [(x, lo, hi)] keeps the bindings with lo <= x <= hi (an int, a date, money, or a float in IEEE 754's
+    totalOrder). *)
 
 exception No_answer
 exception Bad of string
@@ -89,6 +90,19 @@ let bad fmt = Printf.ksprintf (fun s -> raise (Bad s)) fmt
 type side = V of int | W of int
 type pat = { pe : side; pp : int; pv : side; many : bool }
 
+(* Less: [lx < ly], or [lx <= ly] when not [strict], two variables of one type, or a variable and a word (a Not's
+   own question, its other variables fixed) *)
+type less = { lx : side; ly : side; strict : bool }
+
+(* a float of the dictionary: its 8 bytes, little-endian (Store.float_key) *)
+let float_of_word (v : Store.view) w = Int64.float_of_bits (String.get_int64_le (Store.text v w) 0)
+
+(* two words of a type in its order: an int, a date, money, a link or a bool by its word, a text by its bytes, a float
+   in totalOrder *)
+let compare_words (v : Store.view) (ty : Value.typ) (a : int) b =
+  if a = b then 0
+  else match ty with Ttext -> String.compare (Store.text v a) (Store.text v b) | Tfloat -> Value.total_order (float_of_word v a) (float_of_word v b) | _ -> compare a b
+
 let typ_of (v : Store.view) p = match Schema.find v.schema p with Some d -> d | None -> bad "no property %d" p
 
 (* the type of each variable, from where it appears *)
@@ -144,16 +158,30 @@ let compile (v : Store.view) q =
         { pe = side pt.e; pp = pt.p; pv = side pt.v; many = d.many })
       q.where
   in
-  let ranges =
-    List.map
+  (* a range of an int, a date or money is one of words, read from the sorted index; one of a float, whose words are
+     the dictionary's, is a check of each candidate, in totalOrder *)
+  let floats =
+    List.filter_map
       (fun (x, lo, hi) ->
-        if x < 0 || x >= q.vars || not (Value.inline ty.(x)) then bad "a range needs an int, date or money variable";
-        match Store.word v lo, Store.word v hi with
-        | Some a, Some b -> x, a, b
-        | _ -> raise No_answer)
+        if x < 0 || x >= q.vars then bad "a range needs an int, float, date or money variable";
+        match ty.(x), lo, hi with
+        | Tfloat, Value.Float a, Value.Float b -> Some (x, a, b)
+        | Tfloat, _, _ -> bad "a range of a float variable has float bounds, not %s and %s" (Value.to_string lo) (Value.to_string hi)
+        | t, _, _ when Value.inline t -> None
+        | _ -> bad "a range needs an int, float, date or money variable")
       q.ranges
   in
-  ty, pats, ranges
+  let ranges =
+    List.filter_map
+      (fun (x, lo, hi) ->
+        if ty.(x) = Tfloat then None
+        else
+          match Store.word v lo, Store.word v hi with
+          | Some a, Some b -> Some (x, a, b)
+          | _ -> raise No_answer)
+      q.ranges
+  in
+  ty, pats, ranges, floats
 
 let has x = function V y -> x = y | W _ -> false
 
@@ -185,7 +213,10 @@ let intervals nvars ranges =
    patterns the question has. *)
 let dp_max = 12
 
-let order ?(sets = []) (v : Store.view) nvars pats ranges =
+(* [less]: the pairs of variables of ints, dates, money or links that Less compares, each both ways: a variable whose
+   other side is bound before it takes, from a property's values, those past the other's (a range of the sorted index),
+   estimated as a third of them (Selinger et al. 1979's share of an open range) *)
+let order ?(sets = []) ?(less = []) (v : Store.view) nvars pats ranges =
   let iv = intervals nvars ranges in
   let base = Array.make nvars max_int and has_set = Array.make nvars false in
   List.iter (fun (x, a) -> base.(x) <- min base.(x) (Array.length a); has_set.(x) <- true) sets;
@@ -221,6 +252,16 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
            offer y x (if pt.many then 4 else 1) un
          | _, W _ -> ()))
     pats;
+  (* Less: y is a value of a property whose thing is a variable: once x is bound, a third of its distinct values *)
+  List.iter
+    (fun (x, y) ->
+      let d =
+        List.fold_left
+          (fun m pt -> match pt.pe, pt.pv with V e, V w when w = y && e <> y -> min m (Store.distinct v pt.pp) | _ -> m)
+          max_int pats
+      in
+      if d < max_int then offers.(y) <- (x, max 1 (d / 3), max_int) :: offers.(y))
+    less;
   (* one entry a variable on the other side, its least counts *)
   let oth = Array.make nvars [||] and kn = Array.make nvars [||] and un = Array.make nvars [||] in
   for x = 0 to nvars - 1 do
@@ -251,6 +292,11 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
         && un.(x).(0) >= 2)
   in
   let core = Array.of_list (List.filter (fun x -> not (first.(x) || leaf.(x))) (List.init nvars Fun.id)) in
+  (* the variables placed first are bound before the core: their bits are bound in its estimates (only a Less offers
+     a variable a count from one of them: no pattern of a first variable has another) *)
+  let fmask = ref 0 in
+  Array.iteri (fun x f -> if f then fmask := !fmask lor (1 lsl x)) first;
+  let fmask = !fmask in
   let c = Array.length core in
   (* the core's order, and the partial bindings after each of its steps *)
   let cord = Array.make c 0 and csize = Array.make c 1. and ccost = ref 0. in
@@ -270,7 +316,7 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
       for k = 0 to c - 1 do
         if s land (1 lsl k) <> 0 then begin
           let r = s lxor (1 lsl k) in
-          let step = Array.unsafe_get size r *. float_of_int (est core.(k) (Array.unsafe_get vm r)) in
+          let step = Array.unsafe_get size r *. float_of_int (est core.(k) (Array.unsafe_get vm r lor fmask)) in
           if step < !sz then sz := step;
           (* ties: the largest last, so that the order of equal costs is the variables' own *)
           let cx = Array.unsafe_get cost r +. step in
@@ -293,7 +339,7 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
   else begin
     (* placed: a flag a variable, not a bit (the wire's 64th variable has none in an int: its bit, 1 lsl 63, is 0,
        and [est] only takes it for unbound) *)
-    let bound = ref 0 and size = ref 1. and placed = Array.make nvars false in
+    let bound = ref fmask and size = ref 1. and placed = Array.make nvars false in
     for i = 0 to c - 1 do
       let b = ref (-1) and bc = ref max_int in
       Array.iter
@@ -359,7 +405,7 @@ let order ?(sets = []) (v : Store.view) nvars pats ranges =
   ord, !cost
 
 (* the planner of every question: the tests put main's former one in its place, to compare the answers of both *)
-let planner = ref (fun ~sets v nvars pats ranges -> order ~sets v nvars pats ranges)
+let planner = ref (fun ~sets ~less v nvars pats ranges -> order ~sets ~less v nvars pats ranges)
 
 (* Questions run as a fold: [init ()] makes an accumulator, [step acc env] adds a binding (the buffer [env] is reused),
    [merge] joins two accumulators. Above [parallel_min] candidates for the first variable, the candidates are split
@@ -373,19 +419,27 @@ let work = Atomic.make 0
 
 (* What a question will do: its patterns with a variable, its ranges, and the order of its variables; None when it
    has no answer (a constant the view has never seen, or a pattern without variables that is not a fact). *)
-type plan = { pats : pat list; limits : (int * int * int) list; ord : int array; cost : float }
+type plan = {
+  pats : pat list;
+  limits : (int * int * int) list;
+  floats : (int * float * float) list;  (* the ranges of float variables, checked on each candidate *)
+  ty : Value.typ array;
+  ord : int array;
+  cost : float;
+}
 
-(* [sets]: for some variables, the index words they may take, sorted and distinct (In and Prefix) *)
-let plan ?(sets = []) (v : Store.view) q =
+(* [sets]: for some variables, the index words they may take, sorted and distinct (In and Prefix); [less]: the
+   variables of ints, dates, money or links that Less compares, as pairs, each both ways *)
+let plan ?(sets = []) ?(less = []) (v : Store.view) q =
   match compile v q with
   | exception No_answer -> None
-  | _ty, pats, limits ->
+  | ty, pats, limits, floats ->
     let ground, pats =
       List.partition (fun pt -> (match pt.pe with W _ -> true | _ -> false) && match pt.pv with W _ -> true | _ -> false) pats
     in
     if not (List.for_all (fun pt -> match pt.pe, pt.pv with W e, W w -> Store.mem v e pt.pp w | _ -> true) ground) then None
     else if List.exists (fun (_, a) -> Array.length a = 0) sets then None
-    else (let ord, cost = !planner ~sets v q.vars pats limits in Some { pats; limits; ord; cost })
+    else (let ord, cost = !planner ~sets ~less v q.vars pats limits in Some { pats; limits; floats; ty; ord; cost })
 
 (* the first place from [from] in a.(0 .. n-1), sorted, whose value is >= t: steps of 1, 2, 4, ... then a binary search
    (galloping: Bentley, Yao 1976), O(log d) for a place d further *)
@@ -419,26 +473,78 @@ let in_sorted (a : int array) c =
    [seq]: on this domain alone, the bindings in the engine's order, so that [step] may stop the fold by an exception.
    [sets]: the words some variables may take (In, Prefix): a set is a source of its variable's candidates when it is
    the smallest (a relation of one column, which the AGM bound counts as one), else a check of each candidate. *)
-let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Store.view) q ~init ~step ~merge =
-  match plan ~sets v q with
+(* the pairs of variables of a Less that the planner takes, each both ways: two variables of a type whose words keep
+   their order *)
+let less_pairs (v : Store.view) q (less : less list) =
+  if less = [] then []
+  else
+    match types v q with
+    | exception Bad _ -> []
+    | ty ->
+      List.concat_map
+        (fun l -> match l.lx, l.ly with V x, V y when x <> y && x < q.vars && y < q.vars && Value.inline ty.(x) && ty.(x) = ty.(y) -> [ (x, y); (y, x) ] | _ -> [])
+        less
+
+let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?stop (v : Store.view) q ~init ~step ~merge =
+  match plan ~sets ~less:(less_pairs v q less) v q with
   | None -> init ()
-  | Some { pats; limits; ord; cost = _ } ->
+  | Some { pats; limits; floats; ty; ord; cost = _ } ->
     let n = q.vars in
     let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
-    let iv = intervals n limits in
+    let lvl = Array.make n 0 in
+    Array.iteri (fun i x -> lvl.(x) <- i) ord;
+    (* Less: the side bound later (in the order) is bounded at its level by the other's word. For an int, a date,
+       money or a link, whose words keep their order, a range of words ([dyn]: the other variable, the later side the
+       greater, strict): the later variable's candidates read from the property's sorted index when they come from
+       its values, so that the join seeks instead of scanning once one side is bound (the inequality join of Khayyat
+       et al., VLDB 2015); for a text (its bytes) or a float (totalOrder), a check of each candidate ([dchk]). Against
+       a word (a Not's own question), the same with the word. Floats' ranges are checks too ([fchk]). *)
+    let empty = ref false and more = ref [] in
+    let dyn = Array.make n [] and dchk = Array.make n [] and fchk = Array.make n [] in
+    let decoded x = match ty.(x) with Value.Ttext | Tfloat -> true | _ -> false in
+    let var x = if x < 0 || x >= n then bad "variable %d out of range" x in
+    List.iter
+      (fun { lx; ly; strict } ->
+        match lx, ly with
+        | V x, V y when x = y -> var x; if strict then empty := true
+        | V x, V y ->
+          var x;
+          var y;
+          if ty.(x) <> ty.(y) then bad "Less compares two variables of one type, not a %s and a %s" (Value.typ_name ty.(x)) (Value.typ_name ty.(y));
+          let later, other, greater = if lvl.(y) > lvl.(x) then y, x, true else x, y, false in
+          if decoded later then dchk.(later) <- (V other, greater, strict) :: dchk.(later)
+          else dyn.(later) <- (other, greater, strict) :: dyn.(later)
+        | V x, W w ->
+          var x;
+          if decoded x then dchk.(x) <- (W w, false, strict) :: dchk.(x)
+          else if strict && w = min_int then empty := true
+          else more := (x, min_int, if strict then w - 1 else w) :: !more
+        | W w, V y ->
+          var y;
+          if decoded y then dchk.(y) <- (W w, true, strict) :: dchk.(y)
+          else if strict && w = max_int then empty := true
+          else more := (y, (if strict then w + 1 else w), max_int) :: !more
+        | W _, W _ -> bad "Less compares a variable")
+      less;
+    List.iter (fun (x, lo, hi) -> fchk.(x) <- (lo, hi) :: fchk.(x)) floats;
+    let has_chk = Array.init n (fun x -> dchk.(x) <> [] || fchk.(x) <> []) in
+    let any_chk = Array.exists Fun.id has_chk and any_dyn = Array.exists (fun l -> l <> []) dyn in
+    let iv = intervals n (limits @ !more) in
     let sv = Array.make n [||] and has_set = Array.make n false in
     List.iter (fun (x, a) -> if has_set.(x) then sv.(x) <- Array.of_list (List.filter (in_sorted a) (Array.to_list sv.(x))) else (sv.(x) <- a; has_set.(x) <- true)) sets;
     let any_set = sets <> [] in
-    (* a variable with a set has an interval, whole if it had none: its set is checked in the interval's branch, so a
-       question without sets runs the test it always ran (small enough to be inlined at every candidate) *)
-    let ivs = if any_set then Array.mapi (fun x r -> if has_set.(x) && r = None then Some (min_int, max_int) else r) iv else iv in
-    let in_range x c = match ivs.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi && ((not any_set) || (not has_set.(x)) || in_sorted sv.(x) c) in
+    (* a variable with a set or a check has an interval, whole if it had none: its set and its checks are looked at in
+       the interval's branch, so a question without them runs the test it always ran (small enough to be inlined at
+       every candidate) *)
+    let ivs = if any_set || any_chk then Array.mapi (fun x r -> if (has_set.(x) || has_chk.(x)) && r = None then Some (min_int, max_int) else r) iv else iv in
+    if !empty then init ()
+    else
     let by_var = Array.map Array.of_list by_var in
     (* how many candidates a pattern offers x, given [get] for the sides that are bound, doubled: 2 c for an exact
        count c, and 1, without a lookup, for a one-valued property of a bound thing, which offers at most one. So such
        a pattern is taken before any other offering one or more, and after one offering none: it is a smallest
        source either way (if it has none itself, the level has none), and the work stays within the bound *)
-    let count_with get x pt =
+    let count_in (iv : (int * int) option array) get x pt =
       2
       *
       if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp
@@ -449,7 +555,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
         | None, Some (lo, hi) -> Store.count_range v pt.pp lo hi
         | None, None -> Store.count_prop v pt.pp
     in
-    let count_with get x pt = let c = count_with get x pt in if c < 0 then 1 else c in
+    let count_in iv get x pt = let c = count_in iv get x pt in if c < 0 then 1 else c in
     (* the counts that no binding changes, once a question: at level i, a pattern whose other side is a constant or a
        variable bound only later (Q3's "status = unpaid", the same for each of a city's clients); -1 for the others *)
     let fixed =
@@ -461,7 +567,9 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
             (fun pt ->
               match other pt with
               | V y when y <> x && before y -> -1
-              | _ -> count_with (function W w -> Some w | V _ -> None) x pt)
+              (* a variable bounded by Less: its counts change with the bindings before it *)
+              | _ when dyn.(x) <> [] -> -1
+              | _ -> count_in iv (function W w -> Some w | V _ -> None) x pt)
             by_var.(x))
     in
     (* the plan of each level, beside its counts. [func]: the pattern that gives a one-valued property's value of a thing
@@ -513,6 +621,40 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
     let abort = Atomic.make false in
     let runner ~helper ticks =
       let env = Array.make n 0 and bound = Array.make n false and w = ref 0 and cell = [| 0 |] in
+      (* the intervals, a runner's own when Less bounds a variable by the bindings before it *)
+      let iv0 = iv in
+      let iv = if any_dyn then Array.copy iv else iv and ivs = if any_dyn then Array.copy ivs else ivs in
+      (* the checks of a text or float variable: its ranges (floats), and Less against the other side's word *)
+      let checks x c =
+        (match fchk.(x) with
+         | [] -> true
+         | l -> let f = float_of_word v c in List.for_all (fun (lo, hi) -> Value.total_order lo f <= 0 && Value.total_order f hi <= 0) l)
+        && List.for_all
+             (fun (s, greater, strict) ->
+               let o = match s with W w -> w | V y -> env.(y) in
+               let c' =
+                 if c = o then 0
+                 else match ty.(x) with Ttext -> String.compare (Store.text v c) (Store.text v o) | _ -> Value.total_order (float_of_word v c) (float_of_word v o)
+               in
+               if greater then (if strict then c' > 0 else c' >= 0) else if strict then c' < 0 else c' <= 0)
+             dchk.(x)
+      in
+      let in_range x c = match ivs.(x) with None -> true | Some (lo, hi) -> c >= lo && c <= hi && ((not any_set) || (not has_set.(x)) || in_sorted sv.(x) c) && ((not any_chk) || (not has_chk.(x)) || checks x c) in
+      (* a variable bounded by Less, at its level: its interval from its own and the other sides' words; false when
+         it is empty *)
+      let bounds x =
+        let lo, hi = match iv0.(x) with None -> min_int, max_int | Some (a, b) -> a, b in
+        let lo = ref lo and hi = ref hi and ok = ref true in
+        List.iter
+          (fun (y, greater, strict) ->
+            let o = env.(y) in
+            if greater then (if not strict then lo := max !lo o else if o = max_int then ok := false else lo := max !lo (o + 1))
+            else if not strict then hi := min !hi o
+            else if o = min_int then ok := false
+            else hi := min !hi (o - 1))
+          dyn.(x);
+        !ok && !lo <= !hi && (let r = Some (!lo, !hi) in iv.(x) <- r; ivs.(x) <- r; true)
+      in
       (* the next count of candidates at which the budget, the stop and the other domains are looked at: the budget
          itself when there is nothing else to look at ([ticks] false: one comparison a candidate, as before them) *)
       let lim = ref (if ticks then min budget every else budget) in
@@ -556,7 +698,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
         let y = Array.unsafe_get (Array.unsafe_get kept i) j in
         if y < 0 then accepts x c pt else keep y c pt
       in
-      let count x pt = count_with get x pt in
+      let count x pt = count_in iv get x pt in
       (* the candidates themselves *)
       let iterate x pt f =
         if has x pt.pe && has x pt.pv then Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
@@ -693,7 +835,8 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
         else begin
           let x = ord.(i) in
           let f = func.(i) in
-          if f >= 0 then begin
+          if any_dyn && dyn.(x) <> [] && not (bounds x) then ()
+          else if f >= 0 then begin
             (* the one value of a bound thing's one-valued property *)
             let pt = by_var.(x).(f) in
             let e = match pt.pe with W e -> e | V y -> env.(y) in
@@ -866,7 +1009,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
 let rows ?stop (v : Store.view) q =
   match compile v q with
   | exception No_answer -> []
-  | ty, _, _ ->
+  | ty, _, _, _ ->
     let rows =
       fold ?stop v q ~init:(fun () -> []) ~merge:(fun a b -> b @ a)
         ~step:(fun acc env -> Array.mapi (fun i w -> Store.value v ty.(i) w) env :: acc)

@@ -1,7 +1,8 @@
 (* Questions against an oracle: random states (every type of value, one and many values, texts that share their
    first bytes, floats with nan, -0 and the infinities, extreme ints, facts a rule derives, retractions), read from
    the delta and from runs merged at random; random questions (patterns, ranges, a select that gives every
-   variable, leaves some out, or aggregates) with a random Sort, Limit and After. The oracle answers each one by brute
+   variable, leaves some out, or aggregates; Not, Or, In, Prefix, Less between two variables, ranges of floats, and
+   Optional, whose missing cells sort last) with a random Sort, Limit and After. The oracle answers each one by brute
    force over every fact of the view: every binding, its row, the groups, the order compared value by value, the
    rows after the cursor, the first k and their copies. The engine must give the same rows in the same order, by the
    heap path, by the index path and by its own choice, and the same again after the request's trip through the wire.
@@ -45,6 +46,8 @@ let cmp_value (x : Value.t) (y : Value.t) =
 
 let int_of = function Value.Int a | Date a | Money a | Link a -> a | Bool b -> if b then 1 else 0 | _ -> invalid_arg "int_of"
 
+let in_range lo w hi = cmp_value lo w <= 0 && cmp_value w hi <= 0
+
 (* every binding of the question over the facts, as values *)
 let bindings (fl : (int * int * Value.t) list) (q : Query.t) =
   let out = ref [] in
@@ -58,7 +61,7 @@ let bindings (fl : (int * int * Value.t) list) (q : Query.t) =
   let rec go = function
     | [] ->
       let row = Array.map Option.get env in
-      if List.for_all (fun (x, lo, hi) -> let w = int_of row.(x) in w >= int_of lo && w <= int_of hi) q.ranges then out := row :: !out
+      if List.for_all (fun (x, lo, hi) -> in_range lo row.(x) hi) q.ranges then out := row :: !out
     | (pt : Query.pattern) :: rest -> List.iter (fun (e, p, x) -> if p = pt.p then bind pt.e (Link e) (fun () -> bind pt.v x (fun () -> go rest))) fl
   in
   go q.where;
@@ -71,7 +74,7 @@ let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.it
   (* every extension of env that makes the items hold: patterns first, then the conditions *)
   let rec holds env (items : Ask.item list) k =
     let pats = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) items
-    and conds = List.filter (function Ask.Range _ | In _ | Prefix _ -> true | _ -> false) items in
+    and conds = List.filter (function Ask.Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ -> true | _ -> false) items in
     let env = Array.copy env in
     let bind t (x : Value.t) k =
       match t with
@@ -83,7 +86,9 @@ let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.it
       | [] ->
         if List.for_all
             (function
-              | Ask.Range (x, lo, hi) -> (match env.(x) with Some w -> int_of w >= int_of lo && int_of w <= int_of hi | None -> false)
+              | Ask.Range (x, lo, hi) -> (match env.(x) with Some w -> in_range lo w hi | None -> false)
+              | Less (x, y) -> (match env.(x), env.(y) with Some a, Some b -> cmp_value a b < 0 | _ -> false)
+              | Less_or_equal (x, y) -> (match env.(x), env.(y) with Some a, Some b -> cmp_value a b <= 0 | _ -> false)
               | In (x, l) -> (match env.(x) with Some w -> List.exists (Value.equal w) l | None -> false)
               | Prefix (x, pre) -> (match env.(x) with Some (Text t) -> String.starts_with ~prefix:pre t | _ -> false)
               | _ -> true)
@@ -109,9 +114,22 @@ let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.it
       (dedup !start) extra
   in
   (* the conditions of the question, then its Nots *)
-  let conds = List.filter (function Ask.Range _ | In _ | Prefix _ -> true | _ -> false) (List.map (fun (x, lo, hi) -> Ask.Range (x, lo, hi)) q.ranges @ extra) in
+  let conds = List.filter (function Ask.Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ -> true | _ -> false) (List.map (fun (x, lo, hi) -> Ask.Range (x, lo, hi)) q.ranges @ extra) in
   let envs = List.filter (fun env -> let ok = ref false in holds env conds (fun _ -> ok := true); !ok) envs in
   let envs = List.filter (fun env -> List.for_all (function Ask.Not l -> let found = ref false in holds env l (fun _ -> found := true); not !found | _ -> true) extra) envs in
+  (* the Optionals last: a binding a value of the thing's property, or one with the variable missing *)
+  let expand envs (pt : Query.pattern) =
+    List.concat_map
+      (fun env ->
+        let e = match pt.e with Query.Var x -> (match env.(x) with Some (Value.Link e) -> e | _ -> assert false) | Thing e -> e | Val _ -> assert false in
+        let y = match pt.v with Query.Var y -> y | _ -> assert false in
+        let set x = let env = Array.copy env in env.(y) <- Some x; env in
+        match List.sort_uniq Value.compare (List.filter_map (fun (e', p, x) -> if e' = e && p = pt.p then Some x else None) fl) with
+        | [] -> [ set Value.missing ]
+        | l -> List.map set l)
+      envs
+  in
+  let envs = List.fold_left expand envs (List.filter_map (function Ask.Optional p -> Some p | _ -> None) extra) in
   List.map (Array.map (function Some x -> x | None -> Value.Int 0)) envs
 
 (* the rows of a select, with their columns' types *)
@@ -144,8 +162,18 @@ let ordered cols (o : Top.order) =
   let listed = List.map (fun (k : Top.key) -> k.col) o.keys in
   o.keys @ List.filter_map (fun c -> if List.mem c listed then None else Some { Top.col = c; desc = false }) (List.init cols Fun.id)
 
+(* a missing cell after every value, in both directions *)
 let cmp_row ord a b =
-  List.fold_left (fun c (k : Top.key) -> if c <> 0 then c else let x = cmp_value a.(k.col) b.(k.col) in if k.desc then -x else x) 0 ord
+  List.fold_left
+    (fun c (k : Top.key) ->
+      if c <> 0 then c
+      else
+        match Value.is_missing a.(k.col), Value.is_missing b.(k.col) with
+        | true, true -> 0
+        | true, false -> 1
+        | false, true -> -1
+        | false, false -> let x = cmp_value a.(k.col) b.(k.col) in if k.desc then -x else x)
+    0 ord
 
 let oracle cols rows (o : Top.order) =
   let ord = ordered cols o in
@@ -165,8 +193,7 @@ let oracle cols rows (o : Top.order) =
 
 let engine ?(extra = []) v q sel o =
   let a = Answer.answer ~order:o ~extra v q sel in
-  let typs = Array.init a.cols a.typ in
-  List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
+  List.init a.n (fun i -> Array.init a.cols (fun j -> Answer.value v a i j))
 
 (* the request through the wire: coded, read back *)
 let wired q extra sel (o : Top.order) =
@@ -182,6 +209,7 @@ let same a b = List.length a = List.length b && List.for_all2 (fun x y -> Array.
 let show rows = String.concat " | " (List.map (fun r -> String.concat "," (Array.to_list (Array.map Value.to_string r))) rows)
 
 let questions = ref 0 and with_order = ref 0 and empties = ref 0 and with_ops = ref 0
+let with_less = ref 0 and with_optional = ref 0 and with_floats = ref 0 and with_missing = ref 0
 
 (* Store.text_order: the texts of p in the order of their bytes, from a text on, merged over the runs and the delta:
    strictly in order, every text of p's facts at or after the start, none before it *)
@@ -306,13 +334,19 @@ let run seed =
             [ (x, mk a, mk (a + Rng.int r 15)) ]
           else []
         in
+        (* a range of a float now and then, its bounds among the floats of the data (nan, -0, the infinities) *)
+        let fl_vars = List.filter (fun x -> typs.(x) = Value.Tfloat) (List.init nv Fun.id) in
+        let float_range x = let a = floats.(Rng.int r (Array.length floats)) and b = floats.(Rng.int r (Array.length floats)) in
+          let a, b = if total_order a b <= 0 || Rng.int r 5 = 0 then a, b else b, a in (x, Value.Float a, Value.Float b) in
+        let ranges = if fl_vars <> [] && Rng.int r 3 = 0 then float_range (List.nth fl_vars (Rng.int r (List.length fl_vars))) :: ranges else ranges in
         let q = { Query.vars = nv; where; ranges } in
         (* Not, Or and In half of the time: their own variables numbered after the question's *)
         let ty_of k = match k with 7 -> Value.Ttext | 8 -> Tlink | 9 -> Tbool | k -> tv k in
+        let opt_vars = ref [] in
         let q, extra, typs, outer =
           if Rng.int r 2 = 0 then q, [], typs, Array.make nv true
           else begin
-            let nvars = ref nv and more = ref [] and bound_by_or = ref [] in
+            let nvars = ref nv and more = ref [] and bound_by_or = ref [] and optionals = ref [] in
             let fresh ty = let x = !nvars in incr nvars; more := !more @ [ ty ]; x in
             let value_of p = match List.filter (fun (_, p', _) -> p' = p) fl with [] -> None | l -> let _, _, x = List.nth l (Rng.int r (List.length l)) in Some x in
             let pat k =
@@ -323,15 +357,51 @@ let run seed =
               | _ -> Ask.Pattern { Query.e = Var 0; p; v = Var (fresh (ty_of k)) }
             in
             let last_var () = !nvars - 1 in
+            (* two variables of the question of one type that Less compares (x0 with itself when none) *)
+            let comparable = List.filter (fun x -> typs.(x) <> Value.Tbool) (List.init nv Fun.id) in
+            let less_pair () =
+              let pairs = List.concat_map (fun x -> List.filter_map (fun y -> if typs.(y) = typs.(x) && (x <> y || Rng.int r 4 = 0) then Some (x, y) else None) comparable) comparable in
+              match pairs with [] -> 0, 0 | l -> List.nth l (Rng.int r (List.length l))
+            in
+            let less x y = if Rng.bool r then Ask.Less (x, y) else Ask.Less_or_equal (x, y) in
             let cond_on x ty =
               match ty with
+              | Value.Tint when Rng.int r 3 = 0 -> (
+                (* Less between the own variable and an int of the question *)
+                match List.filter (fun y -> typs.(y) = Value.Tint) (List.init nv Fun.id) with
+                | [] -> [ Ask.Range (x, Int (Rng.int r 30 - 10), Int (Rng.int r 30)) ]
+                | l -> let y = List.nth l (Rng.int r (List.length l)) in [ (if Rng.bool r then less x y else less y x) ])
               | Value.Tint -> [ Ask.Range (x, Int (Rng.int r 30 - 10), Int (Rng.int r 30)) ]
+              | Tfloat -> let _, lo, hi = float_range x in [ Ask.Range (x, lo, hi) ]
               | Ttext -> if Rng.bool r then [ Ask.In (x, List.init (1 + Rng.int r 3) (fun _ -> Value.Text names.(Rng.int r 6))) ] else [ Ask.Prefix (x, prefixes.(Rng.int r (Array.length prefixes))) ]
               | _ -> []
             in
             let items = ref [] in
             for _ = 1 to 1 + Rng.int r 2 do
-              match Rng.int r 4 with
+              match Rng.int r 7 with
+              | 4 ->
+                (* Less between two variables of the question *)
+                let x, y = less_pair () in
+                items := less x y :: !items
+              | 5 ->
+                (* Optional: a property of x0, its value a variable of its own, given *)
+                let k = Rng.int r 10 in
+                let y = fresh (ty_of k) in
+                optionals := y :: !optionals;
+                items := Ask.Optional { Query.e = Var 0; p = prop_of.(k); v = Var y } :: !items
+              | 6 when Rng.bool r ->
+                (* Optional of a link's thing: the owner of x0 when x0 has one, now and then a thing's id *)
+                let y = fresh Value.Ttext in
+                optionals := y :: !optionals;
+                let e = match List.filter (fun x -> x > 0 && typs.(x) = Value.Tlink) (List.init nv Fun.id) with
+                  | [] -> Query.Thing (65536 + Rng.int r (n + 2)) | l -> Query.Var (List.nth l (Rng.int r (List.length l))) in
+                items := Ask.Optional { Query.e; p = name; v = Var y } :: !items
+              | 6 ->
+                (* Less inside Not: an own variable against one of the question *)
+                let x, _ = less_pair () in
+                let k = match typs.(x) with Value.Tint -> 1 | Tmoney _ -> 2 | Tdate -> 3 | Tfloat -> 4 | Ttext -> 0 | _ -> 6 in
+                let own = fresh (ty_of k) in
+                items := Ask.Not [ Ask.Pattern { Query.e = Var 0; p = prop_of.(k); v = Var own }; (if Rng.bool r then less own x else less x own) ] :: !items
               | 0 when Rng.bool r ->
                 (* Prefix on a text variable of the question *)
                 (match List.filter (fun x -> typs.(x) = Value.Ttext) (List.init nv Fun.id) with
@@ -366,7 +436,8 @@ let run seed =
                 items := Ask.Or [ alt (); alt () ] :: !items
             done;
             let typs = Array.append typs (Array.of_list !more) in
-            let outer = Array.init !nvars (fun x -> x < nv || List.mem x !bound_by_or) in
+            let outer = Array.init !nvars (fun x -> x < nv || List.mem x !bound_by_or || List.mem x !optionals) in
+            opt_vars := !optionals;
             { q with vars = !nvars }, List.rev !items, typs, outer
           end
         in
@@ -377,13 +448,20 @@ let run seed =
           | 1 -> let g = List.filter (fun _ -> Rng.int r 2 = 0) outs in Wire.Give (Array.of_list (if g = [] then [ 0 ] else g))
           | _ ->
             let keys = Array.of_list (List.filter (fun _ -> Rng.int r 2 = 0) outs) in
-            let aggs = List.filter_map (fun x -> if Rng.int r 3 = 0 && (match typs.(x) with Tint | Tmoney _ -> true | _ -> false) then Some (Wire.Sum x) else if Rng.int r 4 = 0 && (match typs.(x) with Tint | Tmoney _ | Tdate -> true | _ -> false) then Some (if Rng.bool r then Wire.Min x else Max x) else None) outs in
+            let outs' = List.filter (fun x -> not (List.mem x !opt_vars)) outs in
+            let aggs = List.filter_map (fun x -> if Rng.int r 3 = 0 && (match typs.(x) with Tint | Tmoney _ -> true | _ -> false) then Some (Wire.Sum x) else if Rng.int r 4 = 0 && (match typs.(x) with Tint | Tmoney _ | Tdate -> true | _ -> false) then Some (if Rng.bool r then Wire.Min x else Max x) else None) outs' in
             Wire.Group (keys, Array.of_list (Wire.Count :: aggs))
         in
         if extra <> [] then incr with_ops;
+        let rec has f = function Ask.Not l -> List.exists (has f) l | Or alts -> List.exists (List.exists (has f)) alts | i -> f i in
+        if List.exists (has (function Ask.Less _ | Less_or_equal _ -> true | _ -> false)) extra then incr with_less;
+        if List.exists (has (function Ask.Optional _ -> true | _ -> false)) extra then incr with_optional;
+        if List.exists (fun (_, lo, _) -> match lo with Value.Float _ -> true | _ -> false) q.ranges
+           || List.exists (has (function Ask.Range (_, Float _, _) -> true | _ -> false)) extra then incr with_floats;
         let ctyp, rows = rows_of typs (if extra = [] then bindings fl q else bindings_ask fl q extra outer) sel in
         let cols = Array.length ctyp in
         if rows = [] then incr empties;
+        if List.exists (Array.exists Value.is_missing) rows then incr with_missing;
         let o =
           let keys = List.filter_map (fun c -> if Rng.int r 2 = 0 then Some { Top.col = c; desc = Rng.bool r } else None) (List.init cols Fun.id) in
           let keys = List.sort_uniq (fun (a : Top.key) b -> compare a.col b.col) keys in
@@ -587,7 +665,7 @@ let planners seeds =
     let got = engine v q sel o in
     let w1 = Atomic.get Query.work in
     let keep = !Query.planner in
-    Query.planner := (fun ~sets v nvars pats ranges -> old_order ~sets v nvars pats ranges);
+    Query.planner := (fun ~sets ~less:_ v nvars pats ranges -> old_order ~sets v nvars pats ranges);
     let want = Fun.protect ~finally:(fun () -> Query.planner := keep) (fun () -> engine v q sel o) in
     let w2 = Atomic.get Query.work in
     let a, b = !planners_work in
@@ -767,7 +845,17 @@ let live seed =
        (fun () -> { Query.vars = 3; where = []; ranges = [] },
                   [ Ask.Or [ [ Pattern { e = Var 0; p = score; v = Var 1 }; Range (1, Int 0, Int 30) ];
                              [ Pattern { e = Var 0; p = score; v = Var 1 }; Pattern { e = Var 0; p = owner; v = Var 2 } ] ] ],
-       Wire.Group ([||], [| Wire.Count; Wire.Sum 1 |])) |]
+       Wire.Group ([||], [| Wire.Count; Wire.Sum 1 |]));
+       (* Optional: a tag added takes away the row where it was missing and gives one; a tag retracted the other way *)
+       (fun () -> { Query.vars = 3; where = [ { e = Var 0; p = score; v = Var 1 } ]; ranges = [] }, [ Ask.Optional { e = Var 0; p = tag; v = Var 2 } ], Wire.Give [| 0; 1; 2 |]);
+       (* an Optional of the owner (a token that may not read it is denied), counted by owner *)
+       (fun () -> { Query.vars = 3; where = [ { e = Var 0; p = name; v = Var 1 } ]; ranges = [] }, [ Ask.Optional { e = Var 0; p = owner; v = Var 2 } ], Wire.Group ([| 2 |], [| Wire.Count |]));
+       (* Less: the things whose score is below their owner's, or at most *)
+       (fun () -> { Query.vars = 4; where = [ { e = Var 0; p = score; v = Var 1 }; { e = Var 0; p = owner; v = Var 2 }; { e = Var 2; p = score; v = Var 3 } ]; ranges = [] },
+                  [ (if Rng.bool r then Ask.Less (1, 3) else Ask.Less_or_equal (1, 3)) ], Wire.Give [| 0; 2 |]);
+       (* Less inside a Not: no tag of x0 ... a name below another's *)
+       (fun () -> { Query.vars = 3; where = [ { e = Var 0; p = name; v = Var 1 } ]; ranges = [] },
+                  [ Ask.Not [ Pattern { e = Var 0; p = tag; v = Var 2 }; Less (2, 1) ] ], Wire.Give [| 0; 1 |]) |]
   in
   let watches = ref [] in
   let add () =
@@ -830,12 +918,84 @@ let live seed =
       !watches
   done
 
+(* ---- Less seeks, Optional, and what they refuse ----
+   Less between a bound int and the values of a property reads the range of the sorted index past it, not the whole
+   property (Khayyat et al. 2015): the work of the answer. Optional gives every row, the missing ones last in both
+   orders, and the pages after a missing cell. The mistakes are refused with their reason. *)
+let less_optional () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ num; phone; rate; nick ]) =
+    declare db [ prop "num" Tint; prop ~many:true "phone" Ttext; prop "rate" Tfloat; prop "nick" Ttext ]
+  in
+  let n = 4000 in
+  let ops =
+    List.concat
+      (List.init n (fun k ->
+           [ Resolve.Add (-1 - k, num, Int k); Add (-1 - k, rate, Float (float_of_int k /. 100.)) ]
+           @ (if k mod 3 = 0 then [ Resolve.Add (-1 - k, phone, Text (Printf.sprintf "p%d" k)) ] else [])
+           @ (if k mod 300 = 0 then [ Resolve.Add (-1 - k, phone, Text (Printf.sprintf "q%d" k)) ] else [])))
+  in
+  (match write db ops with Ok _ -> () | Error e -> C.fail "less: a write failed: %s" (message e));
+  let v = view db in
+  let t0 = Store.max_thing v - n + 1 in
+  (* the things whose num is above the num of the 3,990th thing: 9 of them, read from the index's range *)
+  let q = { Query.vars = 3; where = [ { Query.e = Thing (t0 + 3990); p = num; v = Var 0 }; { e = Var 1; p = num; v = Var 2 } ]; ranges = [] } in
+  let before = Atomic.get Query.work in
+  let got = engine ~extra:[ Ask.Less (0, 2) ] v q (Wire.Give [| 2 |]) { Top.keys = [ { col = 0; desc = false } ]; limit = 0; after = None } in
+  let work = Atomic.get Query.work - before in
+  C.check (got = List.init 9 (fun k -> [| Value.Int (3991 + k) |]) && work < 100) "less: a seek past a bound int: %s, %d candidates" (show got) work;
+  let got = engine ~extra:[ Ask.Less_or_equal (2, 0) ] v q (Wire.Group ([||], [| Wire.Count |])) Top.none in
+  C.check (got = [ [| Value.Int 3991 |] ]) "less: at most a bound int: %s" (show got);
+  (* floats: a range, and Less, in totalOrder *)
+  let qf = { Query.vars = 2; where = [ { Query.e = Var 0; p = rate; v = Var 1 } ]; ranges = [ (1, Float 2.5, Float 3.0) ] } in
+  let got = engine v qf (Wire.Group ([||], [| Wire.Count |])) Top.none in
+  C.check (got = [ [| Value.Int 51 |] ]) "less: a range of a float, 2.5 to 3.0: %s" (show got);
+  (match find v qf with Ok rows -> C.check (List.length rows = 51) "less: find with a range of a float: %d" (List.length rows) | Error e -> C.fail "less: find: %s" (message e));
+  let qf2 = { Query.vars = 4; where = [ { Query.e = Thing (t0 + 10); p = rate; v = Var 0 }; { e = Var 1; p = rate; v = Var 2 }; { e = Var 1; p = num; v = Var 3 } ]; ranges = [ (3, Int 0, Int 20) ] } in
+  let got = engine ~extra:[ Ask.Less (2, 0) ] v qf2 (Wire.Give [| 3 |]) { Top.keys = [ { col = 0; desc = false } ]; limit = 0; after = None } in
+  C.check (got = List.init 10 (fun k -> [| Value.Int k |])) "less: floats below a bound float: %s" (show got);
+  (* Optional: every thing, its phones or missing; missing last ascending and descending; the page after one *)
+  let qo = { Query.vars = 2; where = [ { Query.e = Var 0; p = num; v = Var 1 } ]; ranges = [ (1, Int 297, Int 303) ] } in
+  let opt = [ Ask.Optional { Query.e = Var 0; p = phone; v = Var 2 } ] in
+  let qo = { qo with vars = 3 } in
+  let page desc after = engine ~extra:opt v qo (Wire.Give [| 1; 2 |]) { Top.keys = [ { col = 1; desc } ]; limit = 3; after } in
+  let m = Value.missing in
+  let asc = page false None in
+  C.check (asc = [ [| Int 297; Text "p297" |]; [| Int 300; Text "p300" |]; [| Int 303; Text "p303" |] ]) "optional: ascending: %s" (show asc);
+  let after = page false (Some [| Int 300; Text "q300" |]) in
+  C.check (after = [ [| Int 298; m |]; [| Int 299; m |]; [| Int 301; m |] ]) "optional: missing last, after the values: %s" (show after);
+  let desc = page true None in
+  C.check (desc = [ [| Int 300; Text "q300" |]; [| Int 303; Text "p303" |]; [| Int 300; Text "p300" |] ]) "optional: descending: %s" (show desc);
+  let last = page true (Some [| Int 299; m |]) in
+  C.check (last = [ [| Int 301; m |]; [| Int 302; m |] ]) "optional: the page after a missing cell, descending: %s" (show last);
+  (match ask v { Question.vars = 3; items = Question.[ Pattern { e = Var 0; p = num; v = Val (Int 1) }; Optional { e = Var 0; p = phone; v = Var 2 }; Pattern { e = Var 0; p = num; v = Var 1 } ]; give = [| 1; 2 |]; sort = []; limit = 0; after = None } with
+   | Ok rows -> C.check (rows = [ [| Value.Int 1; Value.missing |] ]) "optional: ask's missing cell: %s" (show rows)
+   | Error e -> C.fail "optional: ask: %s" (message e));
+  (* what is refused, and why *)
+  let refused what q extra sel want =
+    match engine ~extra v q sel Top.none with
+    | _ -> C.fail "refused: %s: answered" what
+    | exception Query.Bad m -> C.check (m = want) "refused: %s: %s" what m
+  in
+  let q2 = { Query.vars = 3; where = [ { Query.e = Var 0; p = num; v = Var 1 }; { e = Var 0; p = nick; v = Var 2 } ]; ranges = [] } in
+  refused "Less of two types" q2 [ Ask.Less (1, 2) ] (Wire.Give [| 0 |]) "Less compares two variables of one type, not a int and a text";
+  refused "Optional's value used" q2 [ Ask.Optional { e = Var 0; p = phone; v = Var 2 } ] (Wire.Give [| 0 |])
+    "the value of Optional is a variable in no other item of the question: variable 2 is in 1";
+  refused "Optional inside Not" q2 [ Ask.Not [ Ask.Optional { e = Var 0; p = phone; v = Var 2 } ] ] (Wire.Give [| 0 |])
+    "Not takes patterns and conditions: no Not, Or or Optional inside it";
+  refused "Optional's thing unbound" { q2 with vars = 4 } [ Ask.Optional { e = Var 3; p = phone; v = Var 2 } ] (Wire.Give [| 0 |])
+    "the thing of Optional is a variable that a pattern of the question binds, or a thing's id";
+  refused "a sum of an Optional's" { Query.vars = 3; where = [ { Query.e = Var 0; p = rate; v = Var 1 } ]; ranges = [] } [ Ask.Optional { e = Var 0; p = num; v = Var 2 } ] (Wire.Group ([||], [| Wire.Sum 2 |]))
+    "Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows";
+  refused "a range of a text" q2 [ Ask.Range (2, Text "a", Text "b") ] (Wire.Give [| 0 |]) "a range needs an int, float, date or money variable"
+
 let () =
   let seeds = ref 300 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "S" ] (fun _ -> ()) "questions.exe";
-  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; ins (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
+  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; ins (); less_optional (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
   Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path, %d given up for the heap path\n"
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
+  Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"
     !planners_checks (fst !planners_work) (snd !planners_work);
   Printf.printf "questions: %d checks of live questions with Not, Or, In and Prefix after a frame (%d frames answered by their keys, %d by the whole question)\n"

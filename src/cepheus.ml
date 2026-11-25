@@ -249,6 +249,7 @@ let ask ?timeout v (q : Question.t) =
     Array.iter (fun x -> if x < 0 || x >= q.vars || not t.outer.(x) then Query.bad "give: variable %d is not one of the question's" x) give;
     let ty = Ask.typs_of t in
     let typs = Array.map (fun x -> ty.(x)) give in
+    let masked = Array.length t.opts > 0 in
     let src =
       { Top.fold =
           (fun window ~seq ~init ~step ~merge ->
@@ -256,7 +257,7 @@ let ask ?timeout v (q : Question.t) =
             | None -> Ask.fold ~seq ?stop v t ~init ~step ~merge
             | Some (Top.Range (x, lo, hi)) -> Ask.fold ~seq ?stop ~range:(x, lo, hi) v t ~init ~step ~merge
             | Some (Top.Words (x, ws)) -> Ask.fold ~seq ?stop ~words:(x, ws) v t ~init ~step ~merge);
-        project = (fun env -> Array.map (fun x -> env.(x)) give);
+        project = Ask.projector t give;
         var = (fun c -> Some give.(c));
         lead = Top.lead v base;
         estimate = (fun () -> Ask.estimate v t) }
@@ -265,9 +266,10 @@ let ask ?timeout v (q : Question.t) =
     let rows =
       if order = Top.none then
         List.rev (Ask.fold ?stop v t ~init:(fun () -> []) ~merge:(fun a b -> b @ a) ~step:(fun acc env -> src.project env :: acc))
-      else Array.to_list (Top.give v ~typs src order)
+      else Array.to_list (Top.give ~masked v ~typs src order)
     in
-    Ok (List.map (fun r -> Array.mapi (fun i w -> Store.value v typs.(i) w) r) rows)
+    let k = Array.length give in
+    Ok (List.map (fun r -> Array.init k (fun i -> if masked && Top.missing k r i then Value.missing else Store.value v typs.(i) r.(i))) rows)
   with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m) | Query.Timeout t -> Error (Timeout (Query.timeout_message t))
 
 let fold ?timeout v q ~init ~step ~merge =

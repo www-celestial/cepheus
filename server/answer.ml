@@ -20,12 +20,20 @@ let push acc w =
 let append a b = for i = 0 to b.n - 1 do push a b.a.(i) done; a
 
 (* The answer of a question with its select on [v], the same at the server and in a local reader: its columns, its
-   rows, the type of each column and the index word of each cell (no value built). Raises Query.Bad. *)
-type answer = { cols : int; n : int; typ : int -> Value.typ; word : int -> int -> int }
+   rows, the type of each column, the index word of each cell (no value built), and whether a cell is missing (an
+   Optional's variable with no value: its word is then 0). Raises Query.Bad. *)
+type answer = { cols : int; n : int; typ : int -> Value.typ; word : int -> int -> int; missing : int -> int -> bool }
 
-(* the answer from rows held whole (sorted, cut) *)
-let of_rows cols (typs : Value.typ array) (rows : int array array) =
-  { cols; n = Array.length rows; typ = (fun j -> typs.(j)); word = (fun i j -> rows.(i).(j)) }
+let none_missing _ _ = false
+
+(* the answer from rows held whole (sorted, cut); [masked]: each row has the mask of its missing cells after its
+   columns (Top) *)
+let of_rows ?(masked = false) cols (typs : Value.typ array) (rows : int array array) =
+  { cols; n = Array.length rows; typ = (fun j -> typs.(j)); word = (fun i j -> rows.(i).(j));
+    missing = (if masked then fun i j -> Top.missing cols rows.(i) j else none_missing) }
+
+(* the value of a cell *)
+let value (v : Store.view) (a : answer) i j = if a.missing i j then Value.missing else Store.value v (a.typ j) (a.word i j)
 
 let lead = Top.lead
 
@@ -112,10 +120,12 @@ let counted t ~base ~cols ~bound fold ~init ~step ~merge =
   end;
   r.acc
 
-(* the question's types and checks, and its fold (Not, Or and In beside the patterns and ranges: through Ask) *)
+(* the question's types and checks, and its fold (Not, Or and In beside the patterns and ranges: through Ask);
+   [masked]: it has Optionals, its bindings a mask after their variables *)
 type prepared = {
   ask : Ask.t option;
   ty : Value.typ array;
+  masked : bool;
   var : int -> unit;
   fold : 'a. ?seq:bool -> ?window:Top.window -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> unit -> 'a;
 }
@@ -138,7 +148,11 @@ let prepare ~extra ~budget ?stop (v : Store.view) (q : Query.t) =
     | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ~budget ?stop ~range:(x, lo, hi) v a ~init ~step ~merge
     | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ~budget ?stop ~words:(x, ws) v a ~init ~step ~merge
   in
-  { ask; ty; var; fold }
+  let masked = match ask with Some a -> Array.length a.opts > 0 | None -> false in
+  { ask; ty; masked; var; fold }
+
+(* the row of [give] of a binding: with the mask of its missing columns after them when the question has Optionals *)
+let projector ask give = match ask with Some a -> Ask.projector a give | None -> fun env -> Array.map (fun x -> env.(x)) give
 
 (* A Give without Sort that holds none of its rows: its columns' types, and [rows f], which gives [f] the words of
    each row's columns as the fold finds it (on one domain, in the engine's order: Query.fold's seq; the same rows in
@@ -146,22 +160,27 @@ let prepare ~extra ~budget ?stop (v : Store.view) (q : Query.t) =
    Or whose alternatives have variables of their own keeps every binding to give each once (Ask.fold), so it is held
    and counted as an answer. Raises Query.Bad. *)
 let stream ?(extra = []) ?(budget = max_int) ?stop (v : Store.view) (q : Query.t) give =
-  let { ask; ty; var; fold } = prepare ~extra ~budget ?stop v q in
+  let { ask; ty; masked; var; fold } = prepare ~extra ~budget ?stop v q in
   match ask with
   | Some a when List.exists (fun (c : Ask.conj) -> c.free <> []) a.conjs -> None
   | _ ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;
     let k = Array.length give in
-    let row = Array.make k 0 in
     let rows f =
-      fold ~seq:true ~init:ignore ~merge:(fun () () -> ())
-        ~step:(fun () env -> for i = 0 to k - 1 do row.(i) <- env.(give.(i)) done; f row) ()
+      if masked then (let project = projector ask give in fold ~seq:true ~init:ignore ~merge:(fun () () -> ()) ~step:(fun () env -> f (project env)) ())
+      else begin
+        let row = Array.make k 0 in
+        fold ~seq:true ~init:ignore ~merge:(fun () () -> ())
+          ~step:(fun () env -> for i = 0 to k - 1 do row.(i) <- env.(give.(i)) done; f row) ()
+      end
     in
     Some (Array.map (fun x -> ty.(x)) give, rows)
 
 let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
-  let { ask; ty; var; fold } = prepare ~extra ~budget ?stop v q in
+  let { ask; ty; masked; var; fold } = prepare ~extra ~budget ?stop v q in
+  (* an Optional's variable may be missing: no Sum, Min or Max of it *)
+  let optional x = match ask with Some a -> Array.exists (fun (o : Ask.opt) -> o.ov = x) a.opts | None -> false in
   match sel with
   | Wire.Give give when order <> Top.none ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
@@ -175,28 +194,38 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?
             match ticket with
             | None -> fold ~seq ?window ~init ~step ~merge ()
             | Some t -> counted t ~base ~cols:(weight * max 1 (Array.length give)) ~bound (fun ~init ~step ~merge -> fold ~seq ?window ~init ~step ~merge ()) ~init ~step ~merge);
-        project = (fun env -> Array.map (fun x -> env.(x)) give);
+        project = projector ask give;
         var = (fun c -> Some give.(c));
         lead = lead v q;
         estimate = (fun () -> match ask with None -> Query.estimate v q | Some a -> Ask.estimate v a) }
     in
-    of_rows (Array.length give) typs (Top.give v ~typs src order)
+    of_rows ~masked (Array.length give) typs (Top.give ~masked v ~typs src order)
   | Wire.Give give ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;
     let k = Array.length give in
+    (* a row's words, and with Optionals the mask of its missing cells after them (Ask.projector's) *)
+    let row =
+      if not masked then fun acc env -> for i = 0 to k - 1 do push acc env.(give.(i)) done
+      else begin
+        let project = projector ask give in
+        fun acc env -> let r = project env in for i = 0 to k do push acc r.(i) done
+      end
+    in
+    let stride = if masked then k + 1 else k in
     let step =
       match ticket with
-      | None -> fun acc env -> for i = 0 to k - 1 do push acc env.(give.(i)) done; acc
+      | None -> fun acc env -> row acc env; acc
       | Some t ->
         fun acc env ->
           let n0 = acc.n in
-          for i = 0 to k - 1 do push acc env.(give.(i)) done;
+          row acc env;
           if n0 / grain <> acc.n / grain then charge t (weight * grain);
           acc
     in
     let acc = fold ~init:(fun () -> { a = [||]; n = 0 }) ~merge:append ~step () in
-    { cols = k; n = acc.n / max 1 k; typ = (fun j -> ty.(give.(j))); word = (fun i j -> acc.a.((i * k) + j)) }
+    { cols = k; n = acc.n / max 1 stride; typ = (fun j -> ty.(give.(j))); word = (fun i j -> acc.a.((i * stride) + j));
+      missing = (if masked then fun i j -> (acc.a.((i * stride) + k) lsr j) land 1 = 1 else none_missing) }
   | Wire.Group (keys, aggs) ->
     Array.iter var keys;
     Array.iter
@@ -204,12 +233,16 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?
         | Wire.Count -> ()
         | Wire.Sum x ->
           var x;
+          if optional x then Query.bad "Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows";
           (match ty.(x) with Tint | Tmoney _ -> () | t -> Query.bad "a sum of a %s variable" (Value.typ_name t))
         | Wire.Min x | Wire.Max x ->
           var x;
+          if optional x then Query.bad "Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows";
           (match ty.(x) with Tint | Tmoney _ | Tdate -> () | t -> Query.bad "a min or max of a %s variable" (Value.typ_name t)))
       aggs;
     let nk = Array.length keys and na = Array.length aggs in
+    (* a group's key: its words, and with Optionals the mask of its missing ones after them *)
+    let key = if masked then projector ask keys else fun env -> Array.init nk (fun i -> env.(keys.(i))) in
     (* a key's cells, charged by grains of keys *)
     let width = weight * max 1 (nk + na) in
     let every = max 1 (grain / width) in
@@ -239,7 +272,7 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?
           Hashtbl.iter (fun k s -> match Hashtbl.find_opt a k with Some s' -> join s' s | None -> Hashtbl.replace a k s) b;
           a)
         ~step:(fun t env ->
-          let k = Array.init nk (fun i -> env.(keys.(i))) in
+          let k = key env in
           (match Hashtbl.find_opt t k with
            | Some s -> add s env
            | None -> let s = fresh () in add s env; Hashtbl.replace t k s; added (Hashtbl.length t));
@@ -254,12 +287,13 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?
     in
     if order = Top.none then begin
       let word i j = let k, s = groups.(i) in if j < nk then k.(j) else s.(j - nk) in
-      { cols = nk + na; n = Array.length groups; typ; word }
+      let missing = if masked then fun i j -> j < nk && (fst groups.(i)).(nk) lsr j land 1 = 1 else none_missing in
+      { cols = nk + na; n = Array.length groups; typ; word; missing }
     end
     else begin
-      (* the rows of the sort, a copy of the groups *)
+      (* the rows of the sort, a copy of the groups (and the mask of their keys after them) *)
       Option.iter (fun t -> charge t (Array.length groups * width)) ticket;
       let typs = Array.init (nk + na) typ in
-      let rows = Array.map (fun (k, s) -> Array.append k s) groups in
-      of_rows (nk + na) typs (Top.sort_rows v ~typs order rows)
+      let rows = Array.map (fun (k, s) -> if masked then Array.concat [ Array.sub k 0 nk; s; [| k.(nk) |] ] else Array.append k s) groups in
+      of_rows ~masked (nk + na) typs (Top.sort_rows ~masked v ~typs order rows)
     end

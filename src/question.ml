@@ -9,6 +9,11 @@ type item = Ask.item =
   | Prefix of int * string  (** the text x starts with these bytes (1 to 1,024) *)
   | Not of item list  (** none of these patterns and conditions holds, for any value of its own variables (1 to 4) *)
   | Or of item list list  (** at least one alternative holds, each a list of patterns and conditions (2 to 4) *)
+  | Less of int * int  (** x < y: two variables of one type (int, float, date, money, text, link) *)
+  | Less_or_equal of int * int  (** x <= y *)
+  | Optional of Query.pattern
+      (** the pattern's value, or {!Value.missing}: its thing a variable that a pattern binds (or a thing's id), its
+          value a variable in no other item; at the top of [items] only *)
 
 (** A key of [sort]: a column of [give], descending when [desc]. *)
 type key = Top.key = { col : int; desc : bool }

@@ -17,7 +17,16 @@
    - In x [values]: x is one of the values, a set of index words that the join takes as a source of x's candidates
      when it is the smallest, else as a check of each (Query.fold ~sets).
    - Prefix x p: the text x starts with the bytes of p: the words of the texts of x's property that do, found by two
-     binary searches in each run's text order (run format 9, Store.prefix_words), and then a set as In's. *)
+     binary searches in each run's text order (run format 9, Store.prefix_words), and then a set as In's.
+   - Less x y: x < y (Less_or_equal: x <= y), two variables of one type (an int, a float, a date, money, a text, a
+     link), each bound by a pattern; at the top, in a Not or in an alternative. The variable the join binds later is
+     bounded by the other's value at its level: a range of the sorted index for the types whose words keep their
+     order, a check of each candidate for a text (its bytes) and a float (totalOrder): Query.fold ~less.
+   - Optional [e p y]: the values of the thing e's property p, or none: SPARQL's OPTIONAL (Perez, Arenas, Gutierrez,
+     TODS 2009) for one pattern, the LEFT JOIN. e is a variable that a pattern of the question binds (or a thing's
+     id); y is a variable in no other item; at the top only. Bound last, after the join and its Nots: each binding
+     of the other variables gives a row for each value of e's p, or one row where y is missing (bit y of the mask
+     after the variables, below). So the rows are those of the question without it, each once a value, or once. *)
 
 type item =
   | Pattern of Query.pattern
@@ -26,19 +35,25 @@ type item =
   | Prefix of int * string  (** the text starts with these bytes *)
   | Not of item list  (** patterns and conditions *)
   | Or of item list list  (** alternatives, each its patterns and conditions (And) *)
+  | Less of int * int  (** x < y *)
+  | Less_or_equal of int * int  (** x <= y *)
+  | Optional of Query.pattern  (** the pattern's value, or missing *)
 
 let bad = Query.bad
 
+let pattern_terms (pt : Query.pattern) = (match pt.e with Var x -> [ x ] | _ -> []) @ (match pt.v with Var x -> [ x ] | _ -> [])
+
 let vars_of_item = function
-  | Pattern pt -> (match pt.e with Var x -> [ x ] | _ -> []) @ (match pt.v with Var x -> [ x ] | _ -> [])
+  | Pattern pt | Optional pt -> pattern_terms pt
   | Range (x, _, _) | In (x, _) | Prefix (x, _) -> [ x ]
+  | Less (x, y) | Less_or_equal (x, y) -> [ x; y ]
   | Not _ | Or _ -> []
 
 (* every pattern of a question, those inside Not and Or too *)
 let patterns (q : Query.t) extra =
   let rec of_item = function
-    | Pattern p -> [ p ]
-    | Range _ | In _ | Prefix _ -> []
+    | Pattern p | Optional p -> [ p ]
+    | Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ -> []
     | Not l -> List.concat_map of_item l
     | Or alts -> List.concat_map (List.concat_map of_item) alts
   in
@@ -48,7 +63,7 @@ let flat_vars items = List.sort_uniq compare (List.concat_map vars_of_item items
 
 let pattern_vars items = List.sort_uniq compare (List.concat_map (function Pattern _ as i -> vars_of_item i | _ -> []) items)
 
-let simple = function Pattern _ | Range _ | In _ | Prefix _ -> true | Not _ | Or _ -> false
+let simple = function Pattern _ | Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ -> true | Not _ | Or _ | Optional _ -> false
 
 (* ---- what the question is: its variables, its types, and its conjunctions ---- *)
 
@@ -60,20 +75,32 @@ type conj = {
   ranges : (int * Value.t * Value.t) list;
   ins : (int * Value.t list) list;
   prefixes : (int * string) list;
+  less : (int * int * bool) list;  (* x < y (strict) or x <= y *)
   nots : not_ list;
   free : int list;  (* the variables of its alternatives' own: its bindings are kept, to give each binding once *)
 }
+
+(* an Optional: its thing (a variable of the question or a thing), its property, its value's variable *)
+type opt = { oe : Query.term; op : int; ov : int }
 
 type t = {
   vars : int;
   outer : bool array;  (* the question's variables *)
   typs : Value.typ option array;
   conjs : conj list;
+  opts : opt array;
+      (* its Optionals, bound last: a binding is then [vars + 1] words, the last the mask of its missing variables
+         (bit x: x is missing, its word 0) *)
   words : (Store.view * (int * Value.t list * int array) list) option Atomic.t;
       (* the words of its Ins' values in the view last asked, found once for all its conjunctions, Nots and windows *)
 }
 
 let max_prefix = 1024
+
+(* the bit of a missing variable in the mask: OCaml's ints have 63 *)
+let max_optional_var = Sys.int_size - 1
+
+let less_of = function Less (x, y) -> Some (x, y, true) | Less_or_equal (x, y) -> Some (x, y, false) | _ -> None
 
 let typ_of (v : Store.view) p = match Schema.find v.schema p with Some d -> d | None -> bad "no property %d" p
 
@@ -87,24 +114,31 @@ let types (v : Store.view) nvars items =
     | Some t' -> if t' <> t then bad "variable %d is both a %s and a %s" x (Value.typ_name t') (Value.typ_name t)
   in
   let rec go = function
-    | Pattern (pt : Query.pattern) ->
+    | Pattern (pt : Query.pattern) | Optional pt ->
       let d = typ_of v pt.p in
       (match pt.e with Var x -> set x Value.Tlink | _ -> ());
       (match pt.v with Var x -> set x d.typ | Val x when not (Value.has_type d.typ x) -> bad "%s is not a %s" (Value.to_string x) (Value.typ_name d.typ) | _ -> ())
     | Range (x, _, _) | In (x, _) | Prefix (x, _) -> if x < 0 || x >= nvars then bad "variable %d out of range" x
+    | Less (x, y) | Less_or_equal (x, y) -> List.iter (fun x -> if x < 0 || x >= nvars then bad "variable %d out of range" x) [ x; y ]
     | Not l -> List.iter go l
     | Or alts -> List.iter (List.iter go) alts
   in
   List.iter go items;
-  (* a range is for an int, a date or money (and links and bools, inside the engine) *)
+  (* a range is for an int, a float, a date or money (and links and bools, inside the engine); Less for two
+     variables of one type, not bools *)
   let rec ranges = function
-    | Range (x, _, _) -> (match ty.(x) with Some t when Value.inline t -> () | _ -> bad "a range needs an int, date or money variable")
+    | Range (x, _, _) -> (match ty.(x) with Some t when Value.inline t || t = Tfloat -> () | _ -> bad "a range needs an int, float, date or money variable")
     | Prefix (x, p) ->
       (match ty.(x) with Some Ttext | None -> () | Some t -> bad "Prefix is for a text, not a %s" (Value.typ_name t));
       if String.length p < 1 || String.length p > max_prefix then bad "Prefix takes 1 to %d bytes, not %d" max_prefix (String.length p)
+    | Less (x, y) | Less_or_equal (x, y) -> (
+      match ty.(x), ty.(y) with
+      | Some Tbool, _ | _, Some Tbool -> bad "Less compares ints, floats, dates, money, texts and links, not bools"
+      | Some a, Some b when a <> b -> bad "Less compares two variables of one type, not a %s and a %s" (Value.typ_name a) (Value.typ_name b)
+      | _ -> ())
     | Not l -> List.iter ranges l
     | Or alts -> List.iter (List.iter ranges) alts
-    | Pattern _ | In _ -> ()
+    | Pattern _ | In _ | Optional _ -> ()
   in
   List.iter ranges items;
   ty
@@ -130,13 +164,13 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
     (function
       | Not l ->
         if l = [] || List.length l > 4 then bad "Not takes 1 to 4 patterns or conditions, not %d" (List.length l);
-        if not (List.for_all simple l) then bad "Not takes patterns and conditions: no Not or Or inside it"
+        if not (List.for_all simple l) then bad "Not takes patterns and conditions: no Not, Or or Optional inside it"
       | Or alts ->
         if List.length alts < 2 || List.length alts > 4 then bad "Or takes 2 to 4 alternatives, not %d" (List.length alts);
         List.iter
           (fun a ->
             if a = [] || List.length a > 4 then bad "And takes 1 to 4 patterns or conditions, not %d" (List.length a);
-            if not (List.for_all simple a) then bad "an alternative of Or takes patterns and conditions: no Not or Or inside it")
+            if not (List.for_all simple a) then bad "an alternative of Or takes patterns and conditions: no Not, Or or Optional inside it")
           alts;
         (* an Or of single patterns that differ only in their constant value is In's case *)
         (match alts with
@@ -156,6 +190,27 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
         List.iter (fun x -> if List.for_all (List.mem x) each then outer.(x) <- true) (List.concat each)
       | _ -> ())
     extra;
+  (* an Optional: its thing a variable of the question (or a thing), its value a variable in no other item; then a
+     variable of the question *)
+  let opts =
+    List.filter_map
+      (function
+        | Optional (pt : Query.pattern) ->
+          (match pt.e with
+           | Var x when outer.(x) -> ()
+           | Thing _ -> ()
+           | _ -> bad "the thing of Optional is a variable that a pattern of the question binds, or a thing's id");
+          let y = match pt.v with Var y -> y | _ -> bad "the value of Optional is a variable" in
+          if y >= max_optional_var then bad "the value of Optional is one of the question's first %d variables, not %d" max_optional_var y;
+          let uses = List.length (List.filter (( = ) y) (List.concat_map (fun it ->
+            let rec all = function Not l -> List.concat_map all l | Or alts -> List.concat_map (List.concat_map all) alts | i -> vars_of_item i in
+            all it) top)) in
+          if uses <> 1 then bad "the value of Optional is a variable in no other item of the question: variable %d is in %d" y (uses - 1);
+          Some { oe = pt.e; op = pt.p; ov = y }
+        | _ -> None)
+      extra
+  in
+  List.iter (fun o -> outer.(o.ov) <- true) opts;
   (* every other variable is the own of one Not, or of one Or's alternatives *)
   let owner = Array.make n `None in
   let claim x who =
@@ -171,7 +226,8 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
       | Not l -> List.iter (fun x -> claim x (`Not k)) (flat_vars l)
       | Or alts -> List.iter (fun a -> List.iter (fun x -> claim x (`Or k)) (flat_vars a)) alts
       | Range (x, _, _) | In (x, _) | Prefix (x, _) -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x
-      | Pattern _ -> ())
+      | Less (x, y) | Less_or_equal (x, y) -> List.iter (fun x -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x) [ x; y ]
+      | Pattern _ | Optional _ -> ())
     extra;
   List.iter (fun (x, _, _) -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x) q.ranges;
   Array.iteri (fun x t -> if t = None then bad "variable %d appears in no pattern" x) typs;
@@ -186,6 +242,7 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
   let base =
     { pats = q.where; ranges = q.ranges; ins = List.filter_map (function In (x, l) -> Some (x, l) | _ -> None) extra;
       prefixes = List.filter_map (function Prefix (x, p) -> Some (x, p) | _ -> None) extra;
+      less = List.filter_map less_of extra;
       nots = List.filter_map (function Not l -> Some (not_of l) | _ -> None) extra; free = [] }
   in
   if q.where = [] && not (List.exists (function Or _ -> true | _ -> false) extra) then bad "a question needs a pattern outside Not";
@@ -196,7 +253,8 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
         | Range (x, lo, hi) -> { c with ranges = c.ranges @ [ (x, lo, hi) ] }
         | In (x, l) -> { c with ins = c.ins @ [ (x, l) ] }
         | Prefix (x, p) -> { c with prefixes = c.prefixes @ [ (x, p) ] }
-        | Not _ | Or _ -> c)
+        | (Less _ | Less_or_equal _) as it -> { c with less = c.less @ Option.to_list (less_of it) }
+        | Not _ | Or _ | Optional _ -> c)
       c a
   in
   let conjs =
@@ -216,7 +274,7 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
         | _ -> cs)
       [ base ] extra
   in
-  { vars = n; outer; typs; conjs; words = Atomic.make None }
+  { vars = n; outer; typs; conjs; opts = Array.of_list opts; words = Atomic.make None }
 
 let typs_of (t : t) = Array.map (function Some ty -> ty | None -> Value.Tint) t.typs
 
@@ -295,7 +353,7 @@ let not_check ~budget ?stop ~(spent : int Atomic.t) (v : Store.view) (t : t) at 
       in
       let term_e = function Query.Var x when local x < 0 -> Query.Thing env.(at x) | t -> term t in
       let ok = ref true in
-      let pats = ref [] and ranges = ref [] and sets = ref [] in
+      let pats = ref [] and ranges = ref [] and sets = ref [] and less = ref [] in
       List.iter2
         (fun it ws ->
           match it with
@@ -304,15 +362,29 @@ let not_check ~budget ?stop ~(spent : int Atomic.t) (v : Store.view) (t : t) at 
             if local x >= 0 then ranges := (local x, lo, hi) :: !ranges
             else begin
               let w = env.(at x) in
-              match Store.word v lo, Store.word v hi with
-              | Some a, Some b -> if w < a || w > b then ok := false
-              | _ -> ok := false
+              match typs.(x), lo, hi with
+              | Tfloat, Float a, Float b ->
+                let f = Query.float_of_word v w in
+                if Value.total_order a f > 0 || Value.total_order f b > 0 then ok := false
+              | Tfloat, _, _ -> ok := false
+              | _ -> (
+                match Store.word v lo, Store.word v hi with
+                | Some a, Some b -> if w < a || w > b then ok := false
+                | _ -> ok := false)
             end
+          | Less (x, y) | Less_or_equal (x, y) -> (
+            let strict = (match it with Less _ -> true | _ -> false) in
+            let side x = if local x >= 0 then Query.V (local x) else Query.W env.(at x) in
+            match side x, side y with
+            | W a, W b ->
+              let c = Query.compare_words v typs.(x) a b in
+              if (strict && c >= 0) || c > 0 then ok := false
+            | lx, ly -> less := { Query.lx; ly; strict } :: !less)
           | In (x, _) -> if local x >= 0 then sets := (local x, ws) :: !sets else if not (Query.in_sorted ws env.(at x)) then ok := false
           | Prefix (x, pre) ->
             if local x >= 0 then sets := (local x, ws) :: !sets
             else (let t = Store.text v env.(at x) in if not (String.length t >= String.length pre && String.sub t 0 (String.length pre) = pre) then ok := false)
-          | Not _ | Or _ -> ())
+          | Not _ | Or _ | Optional _ -> ())
         items (sets_of ());
       !ok
       &&
@@ -322,7 +394,7 @@ let not_check ~budget ?stop ~(spent : int Atomic.t) (v : Store.view) (t : t) at 
       if left <= 0 then raise (Query.Over_budget budget);
       let wk = ref 1 in
       let found =
-        match Query.fold ~seq:true ~sets:!sets ~budget:left ~account:wk ?stop v q ~init:(fun () -> ()) ~merge:(fun () () -> ()) ~step:(fun () _ -> raise Found) with
+        match Query.fold ~seq:true ~sets:!sets ~less:!less ~budget:left ~account:wk ?stop v q ~init:(fun () -> ()) ~merge:(fun () () -> ()) ~step:(fun () _ -> raise Found) with
         | () -> false
         | exception Found -> true
       in
@@ -357,26 +429,49 @@ let dense ?range ?words (v : Store.view) (t : t) (c : conj) =
     | None -> prefix_set v pats x p
   in
   let window = match words with Some (x, ws) -> [ (dense.(x), ws) ] | None -> [] in
-  q, dense, back, window @ List.map (fun (x, l) -> dense.(x), words_of t v x l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes
+  let less = List.map (fun (x, y, strict) -> { Query.lx = V dense.(x); ly = V dense.(y); strict }) c.less in
+  q, dense, back, window @ List.map (fun (x, l) -> dense.(x), words_of t v x l) c.ins @ List.map (fun (x, p) -> dense.(x), prefix x p) c.prefixes, less
+
+(* the rows of a binding [b] (of [vars + 1] words, its mask 0) with its Optionals bound, each given to [step]: a row
+   a value of each Optional's property, or one with the variable missing (its word 0, its bit in the mask). A row
+   given is [b] itself or a copy: [step] may keep it *)
+let expand (v : Store.view) (t : t) step =
+  let n = Array.length t.opts and m = t.vars in
+  let rec go k acc (b : int array) =
+    if k = n then step acc b
+    else begin
+      let o = t.opts.(k) in
+      let e = match o.oe with Query.Var x -> b.(x) | Thing c -> Query.rep v c | Val _ -> -1 in
+      let ws = ref [] in
+      if e >= 0 then Store.iter_values v e o.op (fun w -> ws := w :: !ws);
+      match !ws with
+      | [] -> b.(m) <- b.(m) lor (1 lsl o.ov); go (k + 1) acc b
+      | [ w ] -> b.(o.ov) <- w; go (k + 1) acc b
+      | ws -> List.fold_left (fun acc w -> let b' = Array.copy b in b'.(o.ov) <- w; go (k + 1) acc b') acc (List.rev ws)
+    end
+  in
+  go 0
 
 let fold ?(seq = false) ?(budget = max_int) ?stop ?range ?words (v : Store.view) (t : t) ~init ~step ~merge =
   let spent = Atomic.make 0 in
+  let width = if Array.length t.opts = 0 then t.vars else t.vars + 1 in
+  let emit = if Array.length t.opts = 0 then step else expand v t step in
   let run (c : conj) =
-    let q, dense, back, sets = dense ?range ?words v t c in
+    let q, dense, back, sets, less = dense ?range ?words v t c in
     let checks = List.map (not_check ~budget ?stop ~spent v t (fun x -> dense.(x))) c.nots in
     let outer = Array.to_list (Array.mapi (fun d x -> d, x) back) |> List.filter (fun (_, x) -> t.outer.(x)) in
-    let full env = let b = Array.make t.vars 0 in List.iter (fun (d, x) -> b.(x) <- env.(d)) outer; b in
+    let full env = let b = Array.make width 0 in List.iter (fun (d, x) -> b.(x) <- env.(d)) outer; b in
     let keep env = List.for_all (fun h -> not (h env)) checks in
     if c.free = [] then
-      Query.fold ~seq ~sets ~budget ?stop v q ~init ~merge ~step:(fun acc env -> if keep env then step acc (full env) else acc)
+      Query.fold ~seq ~sets ~less ~budget ?stop v q ~init ~merge ~step:(fun acc env -> if keep env then emit acc (full env) else acc)
     else begin
       (* bindings once each, though the alternative's own variables give one for each of their values *)
       let seen = Hashtbl.create 64 in
-      Query.fold ~seq:true ~sets ~budget ?stop v q ~init ~merge
+      Query.fold ~seq:true ~sets ~less ~budget ?stop v q ~init ~merge
         ~step:(fun acc env ->
           if keep env then begin
             let b = full env in
-            if Hashtbl.mem seen b then acc else (Hashtbl.replace seen b (); step acc b)
+            if Hashtbl.mem seen b then acc else (Hashtbl.replace seen b (); emit acc (if width > t.vars then Array.copy b else b))
           end
           else acc)
     end
@@ -385,6 +480,26 @@ let fold ?(seq = false) ?(budget = max_int) ?stop ?range ?words (v : Store.view)
   | [] -> init ()
   | c :: rest -> List.fold_left (fun acc c -> merge acc (run c)) (run c) rest
 
+(* the row of [give]'s variables of a binding; with Optionals, the mask of its missing columns after them (bit c:
+   column c is missing, its word 0), as Top's rows hold it *)
+let projector (t : t) (give : int array) =
+  let k = Array.length give in
+  if Array.length t.opts = 0 then fun env -> Array.map (fun x -> env.(x)) give
+  else begin
+    if k > max_optional_var then bad "a question with Optional gives at most %d columns, not %d" max_optional_var k;
+    let m = t.vars in
+    fun env ->
+      let r = Array.make (k + 1) 0 and mask = env.(m) in
+      for c = 0 to k - 1 do
+        let x = give.(c) in
+        if (mask lsr x) land 1 = 1 then r.(k) <- r.(k) lor (1 lsl c) else r.(c) <- env.(x)
+      done;
+      r
+  end
+
+(* is variable x missing in a binding *)
+let missing (t : t) (env : int array) x = Array.length t.opts > 0 && (env.(t.vars) lsr x) land 1 = 1
+
 (* the planner's estimate of the work, all its questions *)
 let estimate (v : Store.view) (t : t) =
-  List.fold_left (fun s (c : conj) -> let q, _, _, sets = dense v t c in s +. Query.estimate ~sets v q) 0. t.conjs
+  List.fold_left (fun s (c : conj) -> let q, _, _, sets, _ = dense v t c in s +. Query.estimate ~sets v q) 0. t.conjs

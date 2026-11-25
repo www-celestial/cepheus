@@ -10,6 +10,11 @@
    Limit k: the first k rows, and the copies of the k-th (a page never splits identical rows: SQL's WITH TIES, on the
    whole row). After r: the rows strictly after r. Without Sort, Limit takes the first k rows in the engine's order.
 
+   Missing cells (Optional): the rows of a question with an Optional carry, after their columns, the mask of their
+   missing ones (bit c: column c is missing, its word 0); a missing cell comes after every value, in both directions
+   (SQL's NULLS LAST, for descending keys too), and equals another missing cell. A row of values (a watch's, After)
+   holds Value.missing there.
+
    Two ways to the same rows (docs/book/cesia.md, "Sort, Limit and After"):
    - the heap path: every binding of the question, kept in a buffer of at most about 2 k rows that is sorted and cut
      back to its first k (and their ties) each time it fills: O(N log k) comparisons, O(k) rows held a domain;
@@ -44,9 +49,7 @@ let gave_up = Atomic.make 0
 let bad = Query.bad
 
 (* IEEE 754's totalOrder on two floats: -NaN < -inf < ... < -0 < +0 < ... < +inf < +NaN *)
-let total_order (a : float) (b : float) =
-  let key f = let i = Int64.bits_of_float f in if Int64.compare i 0L < 0 then Int64.logxor i Int64.max_int else i in
-  Int64.compare (key a) (key b)
+let total_order = Value.total_order
 
 let float_of_word v w = Int64.float_of_bits (String.get_int64_le (Store.text v w) 0)
 
@@ -74,8 +77,27 @@ let compare_rows v (typs : Value.typ array) (ord : key array) (a : int array) (b
   done;
   !c
 
+(* is column c of a row of [cols] columns missing (its mask after them) *)
+let[@inline] missing cols (r : int array) c = (Array.unsafe_get r cols lsr c) land 1 = 1
+
+(* two cells' order when one is missing, or 0: a missing cell after a value, in both directions *)
+let[@inline] by_mask ma mb = if ma = mb then 0 else if ma then 1 else -1
+
+(* [compare_rows] of rows with a mask after their [cols] columns *)
+let compare_masked v (typs : Value.typ array) (ord : key array) (a : int array) (b : int array) =
+  let cols = Array.length typs in
+  let c = ref 0 and i = ref 0 in
+  while !c = 0 && !i < Array.length ord do
+    let k = ord.(!i) in
+    let ma = missing cols a k.col and mb = missing cols b k.col in
+    if ma || mb then c := by_mask ma mb
+    else (let x = compare_words v typs.(k.col) a.(k.col) b.(k.col) in c := if k.desc then -x else x);
+    incr i
+  done;
+  !c
+
 (* rows of values (a watch's, Live) in the order [ord], as compare_rows orders their words: an int, a date, money or a
-   link is its own word (Store.word), a bool 0 or 1 *)
+   link is its own word (Store.word), a bool 0 or 1; Value.missing after every value, in both directions *)
 let compare_values (a : Value.t) (b : Value.t) =
   match a, b with
   | Text x, Text y -> String.compare x y
@@ -88,35 +110,46 @@ let compare_value_rows (ord : key array) (a : Value.t array) (b : Value.t array)
   let c = ref 0 and i = ref 0 in
   while !c = 0 && !i < Array.length ord do
     let k = ord.(!i) in
-    let x = compare_values a.(k.col) b.(k.col) in
-    c := if k.desc then -x else x;
+    let x = a.(k.col) and y = b.(k.col) in
+    let ma = Value.is_missing x and mb = Value.is_missing y in
+    if ma || mb then c := by_mask ma mb
+    else (let x = compare_values x y in c := if k.desc then -x else x);
     incr i
   done;
   !c
 
-(* a cursor's cell, ready to compare with a word *)
-type cell = W of int | S of string | F of float
+(* a cursor's cell, ready to compare with a word; M: missing *)
+type cell = W of int | S of string | F of float | M
 
 let cell v (ty : Value.typ) name (x : Value.t) =
-  if not (Value.has_type ty x) then bad "After's %s needs a %s, not %s" name (Value.typ_name ty) (Value.to_string x);
-  match x with
-  | Text s -> S s
-  | Float f -> F f
-  | x -> (match Store.word v x with Some w -> W w | None -> bad "After's %s: %s" name (Value.to_string x))
+  if Value.is_missing x then M
+  else begin
+    if not (Value.has_type ty x) then bad "After's %s needs a %s, not %s" name (Value.typ_name ty) (Value.to_string x);
+    match x with
+    | Text s -> S s
+    | Float f -> F f
+    | x -> (match Store.word v x with Some w -> W w | None -> bad "After's %s: %s" name (Value.to_string x))
+  end
 
-(* a row against the cursor: > 0 when the row comes after it *)
-let compare_cursor v (typs : Value.typ array) (ord : key array) (row : int array) (cur : cell array) =
+(* a row against the cursor: > 0 when the row comes after it; [masked]: the row has its mask after its columns *)
+let compare_cursor ?(masked = false) v (typs : Value.typ array) (ord : key array) (row : int array) (cur : cell array) =
+  let cols = Array.length typs in
   let c = ref 0 and i = ref 0 in
   while !c = 0 && !i < Array.length ord do
     let k = ord.(!i) in
     let w = row.(k.col) in
-    let x =
-      match cur.(k.col), typs.(k.col) with
-      | W u, _ -> compare w u
-      | S s, _ -> String.compare (Store.text v w) s
-      | F f, _ -> total_order (float_of_word v w) f
-    in
-    c := if k.desc then -x else x;
+    let mr = masked && missing cols row k.col and mc = cur.(k.col) = M in
+    if mr || mc then c := by_mask mr mc
+    else begin
+      let x =
+        match cur.(k.col) with
+        | W u -> compare w u
+        | S s -> String.compare (Store.text v w) s
+        | F f -> total_order (float_of_word v w) f
+        | M -> 0
+      in
+      c := if k.desc then -x else x
+    end;
     incr i
   done;
   !c
@@ -131,8 +164,9 @@ let fresh () = { a = [||]; n = 0 }
    into a table of the sort's own (a sort of n rows compares a row's texts about log n times, each a read of a run's
    pages: the clients sorted by name, then by city for the clients of one name), so that the heap path's domains,
    each sorting its own buffer, share none *)
-let sorter v (typs : Value.typ array) (ord : key array) =
-  if not (Array.exists (fun k -> typs.(k.col) = Value.Ttext) ord) then (let c = compare_rows v typs ord in fun () -> c)
+let sorter ?(masked = false) v (typs : Value.typ array) (ord : key array) =
+  if masked then (let c = compare_masked v typs ord in fun () -> c)
+  else if not (Array.exists (fun k -> typs.(k.col) = Value.Ttext) ord) then (let c = compare_rows v typs ord in fun () -> c)
   else fun () ->
     let memo = Hashtbl.create 64 in
     let text w = match Hashtbl.find_opt memo w with Some s -> s | None -> let s = Store.text v w in Hashtbl.add memo w s; s in
@@ -222,8 +256,9 @@ let word_value (ty : Value.typ) w : Value.t =
   | Tlink -> Link w
   | Tbool | Ttext | Tfloat -> invalid_arg "Top.word_value"
 
-(* the rows of a question's Give, in the order [o] *)
-let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) : int array array =
+(* the rows of a question's Give, in the order [o]; [masked]: each row has the mask of its missing cells after its
+   columns (Optional) *)
+let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) : int array array =
   let cols = Array.length typs in
   check cols typs o;
   if o.keys = [] then begin
@@ -238,13 +273,13 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
   end
   else begin
     let ord = full cols o.keys in
-    let mk = sorter v typs ord in
+    let mk = sorter ~masked v typs ord in
     let keep =
       match o.after with
       | None -> fun _ -> true
       | Some a ->
         let cur = Array.mapi (fun i x -> cell v typs.(i) (string_of_int i) x) a in
-        fun row -> compare_cursor v typs ord row cur > 0
+        fun row -> compare_cursor ~masked v typs ord row cur > 0
     in
     let cap = o.limit in
     let heap range =
@@ -258,8 +293,11 @@ let give (v : Store.view) ~(typs : Value.typ array) (src : source) (o : order) :
     let first = List.hd o.keys in
     (* the planner's estimate of the heap path's work, once: the index path's budget, and its choice *)
     let estimate = lazy (src.estimate ()) in
+    (* a cursor missing in the first key: the heap (the index holds no missing cell) *)
+    let after_missing = match o.after with Some a -> Value.is_missing a.(first.col) | None -> false in
     let lead =
       match src.var first.col with
+      | _ when after_missing -> None
       | Some x when (Value.inline typs.(first.col) && typs.(first.col) <> Tbool) || typs.(first.col) = Ttext ->
         (match src.lead x with Some p -> Some (x, p) | None -> None)
       | _ -> None
@@ -391,8 +429,8 @@ let lead (v : Store.view) (q : Query.t) x =
       | _ -> best)
     None q.where
 
-(* rows held already (a group's key and aggregates), in the order [o] *)
-let sort_rows (v : Store.view) ~(typs : Value.typ array) (o : order) (rows : int array array) =
+(* rows held already (a group's key and aggregates), in the order [o]; [masked]: as [give]'s *)
+let sort_rows ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (o : order) (rows : int array array) =
   let cols = Array.length typs in
   check cols typs o;
   if o.keys = [] then (if o.limit > 0 && Array.length rows > o.limit then Array.sub rows 0 o.limit else rows)
@@ -403,9 +441,9 @@ let sort_rows (v : Store.view) ~(typs : Value.typ array) (o : order) (rows : int
       | None -> rows
       | Some a ->
         let cur = Array.mapi (fun i x -> cell v typs.(i) (string_of_int i) x) a in
-        Array.of_list (List.filter (fun r -> compare_cursor v typs ord r cur > 0) (Array.to_list rows))
+        Array.of_list (List.filter (fun r -> compare_cursor ~masked v typs ord r cur > 0) (Array.to_list rows))
     in
     let t = { a = Array.copy rows; n = Array.length rows } in
-    sort_cut (sorter v typs ord) o.limit t;
+    sort_cut (sorter ~masked v typs ord) o.limit t;
     Array.sub t.a 0 t.n
   end

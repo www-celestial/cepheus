@@ -180,6 +180,9 @@ let shape (v : Store.view) (q : Query.t) (sel : Wire.select) extra (order : Top.
     | Prefix (x, _) -> add (Printf.sprintf " Prefix(%s, ?)" (var x))
     | Not l -> add " Not("; List.iter item l; add " )"
     | Or alts -> add " Or("; List.iteri (fun i l -> if i > 0 then add " |"; List.iter item l) alts; add " )"
+    | Less (x, y) -> add (Printf.sprintf " Less(%s, %s)" (var x) (var y))
+    | Less_or_equal (x, y) -> add (Printf.sprintf " LessOrEqual(%s, %s)" (var x) (var y))
+    | Optional pt -> add " Optional("; pattern pt; add " )"
   in
   (match sel with
    | Wire.Give [||] -> add "give all"

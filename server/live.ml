@@ -173,7 +173,9 @@ let fix (q : Query.t) (asg : Value.t option array) ~drop =
       (fun (x, lo, hi) ->
         match asg.(x) with
         | Some y ->
-          (match num y, num lo, num hi with Some c, Some a, Some b when c >= a && c <= b -> () | _ -> ok := false);
+          (match y, lo, hi with
+           | Value.Float c, Float a, Float b -> if Value.total_order a c > 0 || Value.total_order c b > 0 then ok := false
+           | _ -> (match num y, num lo, num hi with Some c, Some a, Some b when c >= a && c <= b -> () | _ -> ok := false));
           None
         | None -> Some ((match var x with Query.Var y -> y | _ -> 0), lo, hi))
       q.ranges
@@ -223,10 +225,10 @@ let new_template (v : Store.view) key tq nq (sel : Wire.select) =
 let all_patterns = Ask.patterns
 
 (* every pattern of a question with operators, with the items of the Not or the alternative it is in (None: the
-   question's own) *)
+   question's own; an Optional's: [Optional p] alone) *)
 let occurrences (q : Query.t) extra =
   let group l = List.filter_map (function Ask.Pattern p -> Some (p, Some l) | _ -> None) l in
-  let of_item = function Ask.Not l -> group l | Or alts -> List.concat_map group alts | _ -> [] in
+  let of_item = function Ask.Not l -> group l | Or alts -> List.concat_map group alts | Optional p -> [ (p, Some [ Ask.Optional p ]) ] | _ -> [] in
   Array.of_list (List.map (fun p -> p, None) q.where @ List.concat_map of_item extra)
 
 let whole_template (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =
@@ -236,6 +238,15 @@ let whole_template (v : Store.view) key (q : Query.t) (sel : Wire.select) extra 
     | Wire.Give g -> (if Array.length g = 0 then Array.of_list (List.filter (fun x -> a.outer.(x)) (List.init q.vars Fun.id)) else g), [||]
     | Group (k, a) -> k, a
   in
+  (* an Optional's variable may be missing: no Sum, Min or Max of it, as Find refuses (Answer) *)
+  Array.iter
+    (function
+      | Wire.Sum x | Min x | Max x when Array.exists (fun (o : Ask.opt) -> o.ov = x) a.opts ->
+        Query.bad "Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows"
+      | _ -> ())
+    aggs;
+  (* its rows' columns, Ask.projector's: refused here as Find refuses them *)
+  let (_ : int array -> int array) = Ask.projector a give in
   let projecting = Array.length aggs = 0 && Array.exists Fun.id (Array.mapi (fun x o -> o && not (Array.mem x give)) a.outer) in
   { tkey = key; tq = q; nq = q.vars; np = 0; pats = Array.of_list (all_patterns q extra); typs = Ask.typs_of a; give; aggs;
     projecting; subs = Hashtbl.create 4; slots = [||]; count = 0; extra; outer = a.outer; occ = occurrences q extra }
@@ -247,7 +258,11 @@ let fixed_bindings (v : Store.view) (q : Query.t) extra (fixes : (int * Value.t)
 
 (* ---- the state of a watch ---- *)
 
-let values (v : Store.view) (t : template) (b : int array) cols = Array.map (fun x -> Store.value v t.typs.(x) b.(x)) cols
+(* a binding's values; a binding of a question with Optionals has the mask of its missing variables after them *)
+let values (v : Store.view) (t : template) (b : int array) cols =
+  let m = Array.length t.typs in
+  if Array.length b > m then Array.map (fun x -> if (b.(m) lsr x) land 1 = 1 then Value.missing else Store.value v t.typs.(x) b.(x)) cols
+  else Array.map (fun x -> Store.value v t.typs.(x) b.(x)) cols
 
 let agg_value (t : template) i w : Value.t =
   match t.aggs.(i) with
@@ -324,7 +339,8 @@ let weight = 4
 (* an answer's rows as values *)
 let values_of (v : Store.view) (a : Answer.answer) =
   let typs = Array.init a.cols a.typ in
-  List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j)))
+  ignore typs;
+  List.init a.n (fun i -> Array.init a.cols (fun j -> Answer.value v a i j))
 
 (* the rows of [s]'s question in its order on [v], from the row after [after] (None: the first), [limit] of them and
    the copies of the last (0: all) *)
@@ -605,6 +621,10 @@ let whole_delta (v0 : Store.view) (v1 : Store.view) (t : template) (facts : (int
               let outer_asg = List.filter (fun (x, _) -> t.outer.(x)) asg in
               match grp with
               | None -> if outer_asg = [] then all := true else add outer_asg
+              | Some [ Ask.Optional { v = Var y; _ } ] ->
+                (* an Optional's fact: the rows of its thing, whose value it adds, changes or takes away (missing) *)
+                let k = List.filter (fun (x, _) -> x <> y) outer_asg in
+                if k = [] then all := true else add k
               | Some items -> (
                 let gout = List.filter (fun x -> t.outer.(x)) (List.sort_uniq compare (List.concat_map Ask.vars_of_item items)) in
                 if gout = [] then all := true
@@ -612,7 +632,8 @@ let whole_delta (v0 : Store.view) (v1 : Store.view) (t : template) (facts : (int
                 else match group_keys [ v0; v1 ] t items asg outer_asg gout with Some ks -> List.iter add ks | None -> all := true)))
         t.occ)
     facts;
-  let bkey b = let buf = Buffer.create 32 in Array.iteri (fun x w -> if t.outer.(x) then Codec.put_int buf w) b; Buffer.contents buf in
+  (* a binding's key: its variables' words, and the mask of its missing ones (Optional) after them *)
+  let bkey b = let buf = Buffer.create 32 in Array.iteri (fun x w -> if x >= Array.length t.outer || t.outer.(x) then Codec.put_int buf w) b; Buffer.contents buf in
   let set (v : Store.view) =
     let h = Hashtbl.create 64 in
     let put b = Hashtbl.replace h (bkey b) b in

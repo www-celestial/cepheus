@@ -407,7 +407,9 @@ let stream_rows c ~id ~kind (v : Store.view) (typs : Value.typ array) rows =
   let sent () = c.flush (); if c.gone () then raise Gone in
   rows (fun (row : int array) ->
       let before = Buffer.length r in
-      for j = 0 to cols - 1 do put_word r v typs.(j) row.(j) done;
+      (* a row of a question with Optionals: the mask of its missing cells after its columns *)
+      if Array.length row > cols then for j = 0 to cols - 1 do if (row.(cols) lsr j) land 1 = 1 then Value.encode r Value.missing else put_word r v typs.(j) row.(j) done
+      else for j = 0 to cols - 1 do put_word r v typs.(j) row.(j) done;
       incr n;
       incr all;
       if Buffer.length r >= chunk then begin
@@ -516,7 +518,7 @@ let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order ~timeout =
         let a = Answer.answer ~ticket ~order ~extra ~budget ~stop v q sel in
         let typs = Array.init a.cols a.typ in
         rows := a.n;
-        send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n)
+        send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do if a.missing i j then Value.encode b Value.missing else put_word b v typs.(j) (a.word i j) done) a.n)
   in
   let outcome =
     match

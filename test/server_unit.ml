@@ -591,6 +591,9 @@ let rights_kinds () =
       extra := Ask.Or [ [ Pattern { e = Var 0; p = oa; v = Var a } ]; [ Pattern { e = Var 0; p = ob; v = Var b } ] ] :: !extra
     end;
     if Rng.bool r then extra := Ask.In (1, List.init (1 + Rng.int r 3) (fun _ -> sample top)) :: !extra;
+    (* an Optional, read like a pattern; a Less between the question's variables *)
+    if Rng.int r 3 = 0 then (let p = pk () in uses := p :: !uses; extra := Ask.Optional { e = Var 0; p; v = Var (fresh ()) } :: !extra);
+    if Rng.int r 4 = 0 then extra := Ask.Less_or_equal (1, 1) :: !extra;
     let q = { Query.vars = !vars; where = [ { e = Var 0; p = top; v = Var 1 } ]; ranges = [] } in
     let order =
       if Rng.bool r then Top.none
@@ -608,6 +611,8 @@ let rights_kinds () =
   check (!leaks = 0 && !denials > 100 && !answered > 100) "kinds: every operator, Sort and After under rights per kind (%d denied, %d answered, %d wrong)" !denials !answered !leaks;
   check (denied (k (Wire.Watch { db = 0; query = q [ 16 ]; select = Wire.Give [||]; from = 0; wextra = [ Ask.Not [ Pattern { e = Var 0; p = 18; v = Var 2 } ] ]; worder = Question.Top.none; wtimeout = 0 })))
     "kinds: a watch with a Not over a kind not read is denied";
+  check (denied (k (Wire.Find { db = 0; query = { (q [ 16 ]) with vars = 3 }; select = Wire.Give [||]; extra = [ Ask.Optional { e = Var 0; p = 18; v = Var 2 } ]; order = Question.Top.none; timeout = 0 })))
+    "kinds: an Optional of a kind not read is denied, as a pattern";
   (* the bounds, each with its error; the work budget; a cursor by hand that is not a row *)
   let invalid = function Some (Wire.Err { code = "invalid"; _ }) -> true | _ -> false in
   let fq ?(extra = []) ?(order = Top.none) () = w (Wire.Find { db = 0; query = q [ 16 ]; select = Wire.Give [||]; extra; order; timeout = 0 }) in
@@ -976,8 +981,8 @@ let versions () =
     Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
-  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5) && welcome (hello 6)) "versions: a server speaks 1 to 6";
-  check (match hello 7 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 7";
+  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5) && welcome (hello 6) && welcome (hello 7)) "versions: a server speaks 1 to 7";
+  check (match hello 8 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 8";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -1018,7 +1023,7 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 7; 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
      (* an Incr to a server of protocol 3 or older is refused in the program, never sent; a write without it is sent *)
      let db = { Client.handle = 0; group = 0; props = []; local = None; wants_local = false; retry_at = 0. } in
      check (Client.write c db [ Resolve.Incr (65536, 16, 1, None) ] = Error { code = "invalid"; message = Client.no_incr } && c.serial = 0)
@@ -1038,6 +1043,14 @@ let versions () =
        "versions: a question's time to a server of 5 is refused before it is sent";
      check (match Client.watch c db ~timeout:1.0 q with _ -> false | exception Invalid_argument m -> m = Client.no_timeout 5)
        "versions: and a watch's";
+     (* Less and Optional to a server of protocol 6 or older, inside a Not too: refused in the program, never sent *)
+     c.spoken <- 6;
+     let less = [ Ask.Not [ Ask.Less (0, 1) ] ] and opt = [ Ask.Optional { e = Var 0; p = 17; v = Var 2 } ] in
+     check (Client.find c db ~extra:less q = Error { code = "invalid"; message = Client.no_less 6 }
+            && Client.find c db ~extra:opt { q with vars = 3 } = Error { code = "invalid"; message = Client.no_less 6 })
+       "versions: Less and Optional to a server of 6 are refused before they are sent";
+     check (match Client.watch c db ~extra:opt { q with vars = 3 } with _ -> false | exception Invalid_argument m -> m = Client.no_less 6)
+       "versions: and in a watch";
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
   Thread.join old;
