@@ -909,8 +909,8 @@ lecteur qui suit la base) applique les groupes écrits depuis le run le plus ré
 suivantes seulement, de temps en temps, les microsecondes d'une frame en route. Ce que cela coûte : un domain du
 programme applique chaque groupe qu'écrit le serveur, quel que soit le programme qui l'écrit (1,7 µs par changement
 seul, environ 4,5 µs sous 18 000 groupes par seconde, mesuré au serveur), et le programme tient un cache des
-pages de la base (256 MB au plus) et les changements depuis le dernier merge
-([serveur](server.md#ce-que-cela-coûte)).
+pages des runs les plus récents de la base (256 MB au plus : les runs qu'un merge a remplacés en sortent aussitôt) et
+les changements depuis le dernier merge ([serveur](server.md#ce-que-cela-coûte)).
 
 Si le follow stream se termine (le serveur a redémarré), le package lit au serveur en attendant et suit à nouveau, au
 plus toutes les 100 ms, sans que le programme s'en aperçoive.
@@ -1065,6 +1065,34 @@ la même base pour chacun) :
 - 10 000 écrans d'un seul programme : 90 ms jusqu'à la dernière fiber, avant leurs WebSockets. Un programme serveur
   lancé par `cesia run --workers 4` tient 2 500 écrans par processus, chaque processus avec sa propre connexion et son
   watch : 17,6 ms jusqu'à la dernière fiber.
+
+**Sous des écritures soutenues.** Les updates de TechEmpower (une requête : 20 lectures locales, puis une écriture
+de 20 faits ; 32 connexions ; la base fusionne son delta toutes les quelques secondes), le 2026-11-25, la machine
+partagée avec d'autres travaux (charge de 3,6 à 11,8), chaque côté dans son propre processus sur la même base, servis
+tour à tour, à côté d'un serveur Go sur PostgreSQL 18.6 comme témoin (`net/http` et `pgx`, les mêmes tests) :
+
+| | plaintext, le premier tiers des tours, puis le dernier | RSS après environ 20 minutes d'écritures : un programme qui ne fait que suivre ; un programme qui lit et écrit |
+|---|---:|---:|
+| Cesia d'avant 1.3 et le client d'avant ces corrections | 29 950 puis **14 852** par seconde | **322 MB** ; **196 MB** |
+| Cesia 1.3 et cette version | 29 075 puis 35 690 | 51 MB ; 64 MB |
+| Go et PostgreSQL | 42 247 puis 65 086 | son processus 25 à 28 MB ; PostgreSQL 109 à 199 |
+
+- Le débit (12 tours de 15 s d'updates et 5 s de plaintext, 19 minutes) : avant, un programme tombait de moitié après
+  quelques minutes et ne revenait jamais, plaintext compris, pendant que Go montait à mesure que la machine se
+  libérait. La cause était dans Cesia : une fois un quart de sa limite de mémoire réservé, il vérifiait la limite à
+  chaque grande allocation, en demandant chaque fois à OCaml la taille de son heap ; un programme `std/http` sans base
+  tombait pareil (29 294 puis 14 918). Cesia 1.3 regarde une fois par quart. (Ces tours tournaient avec la première
+  des deux corrections ci-dessous, qui ne changent que les pages gardées.)
+- La mémoire (20 minutes, deux writers tour à tour, 10 minutes d'écritures chacun, un programme qui ne fait que suivre
+  à côté) : la copie locale gardait les pages de chaque run qu'un merge avait remplacé jusqu'à ce que son cache, 256
+  MB, soit plein, une base entière à chaque merge ; et les lectures faites pendant que la copie posait ses états sur la
+  nouvelle base relisaient l'ancienne, pour de bon (avec la première correction seule, le writer montait encore à
+  119 MB). Maintenant les runs remplacés sortent une fois les nouveaux états publiés, et les pages relues sortent au
+  merge suivant. Le débit du writer est resté stable : 1 430 puis 1 384 par seconde.
+- Là où Go gagne : le plaintext, 1,8 fois ; et son processus tient moins de la moitié de la mémoire (28 contre 64 MB),
+  son pool ne tenant aucune copie des données, même si avec leur base les deux côtés pèsent à peu près autant
+  (PostgreSQL de 109 à 199 MB, le serveur Cepheus de 115 à 130). Les updates de Cesia passent devant ici : 1 870
+  contre 1 662 par seconde au dernier tiers.
 
 **À côté des géants.** Aucun client Cesia de PostgreSQL n'existe (le `std/sql` de Cesia parle à SQLite) ; PostgreSQL est
 donc mesuré par sa bibliothèque C, le client le plus rapide qu'il ait : un programme Cesia sur la machine du serveur lit
