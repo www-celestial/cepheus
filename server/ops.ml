@@ -500,10 +500,22 @@ let restore ?(target = End) ~replace src dst =
   if Sys.file_exists dst && (not has_db) && Sys.readdir dst <> [||] then refuse "%s is not empty and holds no database: restore into a new folder" dst;
   if has_db && not replace then
     refuse "%s holds a database: restore into a new folder, or add --replace (the database there is moved aside, never removed)" dst;
-  if has_db then ignore (match state dst with Open -> refuse "%s is open in another process: stop its server first (cepheus stop)" dst | s -> s);
+  (* the database replaced is moved aside, never read: only a process that holds it refuses the restore (one that
+     crashed, even through a server's commit buffer, is replaced as it is) *)
+  if has_db && held (dst // "lock") then refuse "%s is open in another process: stop its server first (cepheus stop)" dst;
   let parent = Filename.dirname dst in
-  if (Sys.file_exists (parent // "server.wal.1") || Sys.file_exists (parent // "server.wal.2")) && not (held (parent // "cepheus.lock")) then
-    refuse "the server of %s did not stop cleanly: its commit buffer (server.wal.1, .2) may hold frames of this database, which its next start would write into the restored journal; start the server and stop it (cepheus stop), then restore" parent;
+  (* a commit buffer that an unclean stop left: the server's next start writes the frames it holds for a database into
+     that database's journal, which would be the restored one's (the same id), or the start refuses frames of a
+     database it no longer finds; so it may hold none of the restored database's, nor of the one replaced *)
+  if (Sys.file_exists (parent // "server.wal.1") || Sys.file_exists (parent // "server.wal.2")) && not (held (parent // "cepheus.lock")) then begin
+    let ids = id :: (if has_db then (try [ Engine.read_meta Disk.read_only dst ] with Journal.Damaged _ | Disk.Io _ -> []) else []) in
+    match Wal.recover Disk.read_only parent with
+    | exception (Journal.Damaged m | Disk.Io m) ->
+      refuse "the server of %s did not stop cleanly, and its commit buffer (server.wal.1, .2) does not read (%s): start the server and stop it (cepheus stop), then restore" parent m
+    | w ->
+      if List.exists (fun i -> Wal.frames w i <> []) ids then
+        refuse "the server of %s did not stop cleanly: its commit buffer (server.wal.1, .2) holds frames of this database, which its next start would write into the restored journal; start the server and stop it (cepheus stop), then restore" parent
+  end;
   if not (is_dir parent) then refuse "%s: the folder %s is missing" dst parent;
   let n =
     match target with

@@ -321,6 +321,49 @@ let () =
       C.check (Ops.restore ~target ~replace:false se r = Ops.exit_ok && fst (facts r) = at && Ops.verify r = Ops.exit_ok)
         "a run at a segment's end: restore %s, at group %d and whole" what at)
     ([ "to the end", Ops.End, sg ] @ List.concat_map (fun h -> [ Printf.sprintf "--to-group %d" h, Ops.Group h, h; Printf.sprintf "--to-group %d" (h + 1), Ops.Group (h + 1), h + 1 ]) at_seg_end);
+  (* restore --replace over a database of a server that crashed while written through its commit buffer: replaced as
+     it is (moved aside); a buffer that an unclean stop left refuses only when it holds frames of the database *)
+  let rd = root // "rdata" in
+  Unix.mkdir rd 0o700;
+  let done_ f = match f () with c -> c = Ops.exit_ok | exception Ops.Refused m -> C.fail "refused: %s" m; false in
+  let crashed n =
+    let shop = rd // n in
+    if done_ (fun () -> Ops.restore ~replace:false src shop) then begin
+      Sys.remove (shop // "closed");
+      Out_channel.with_open_bin (shop // "shared") ignore
+    end;
+    shop
+  in
+  C.check (done_ (fun () -> Ops.restore ~target:(Ops.Group 5) ~replace:true src (crashed "shop1")) && fst (facts (rd // "shop1")) = 5)
+    "--replace over a database that crashed through the commit buffer: replaced";
+  (* a buffer as the server's leaves it at a crash: a round of a frame of the database [bid] *)
+  let buffer_with bid =
+    List.iter (fun n -> if Sys.file_exists (rd // n) then Sys.remove (rd // n)) [ "server.wal.1"; "server.wal.2" ];
+    let w = Wal.recover Disk.real rd in
+    Wal.start w;
+    let jd = root // "bj" in
+    C.rmrf jd;
+    Unix.mkdir jd 0o700;
+    let j = Journal.create Disk.real jd bid in
+    let alone = !Wal.alone in
+    Wal.alone := false;
+    Wal.attach w bid j;
+    let body = Buffer.create 8 in
+    Buffer.add_string body "a group";
+    Journal.append j body 1 1;
+    Wal.alone := alone;
+    let kept = List.filter_map (fun n -> if Sys.file_exists (rd // n) then Some (n, In_channel.with_open_bin (rd // n) In_channel.input_all) else None) [ "server.wal.1"; "server.wal.2" ] in
+    Wal.stop w;
+    Journal.close j;
+    List.iter (fun (n, b) -> Out_channel.with_open_bin (rd // n) (fun oc -> output_string oc b)) kept;
+    C.check (kept <> []) "a commit buffer left with a round"
+  in
+  buffer_with (String.make 16 'z');
+  C.check (done_ (fun () -> Ops.restore ~target:(Ops.Group 5) ~replace:true src (crashed "shop2"))) "--replace beside a buffer that holds frames of another database: done";
+  let shop3 = crashed "shop3" in
+  buffer_with id;
+  C.check (refused (fun () -> Ops.restore ~target:(Ops.Group 5) ~replace:true src shop3)) "--replace beside a buffer that holds frames of the database: refused";
+  C.check (refused (fun () -> Ops.restore ~replace:false src (rd // "shop4"))) "a restore into a new folder beside it: refused";
   (* last, since it changes the process's zone: a local time the clocks skip is none (Paris, 2026-03-29, 02:00 to 03:00) *)
   if Sys.file_exists "/usr/share/zoneinfo/Europe/Paris" then begin
     Unix.putenv "TZ" "Europe/Paris";
