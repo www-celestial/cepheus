@@ -27,6 +27,14 @@ stay as they are, or a later version reads and speaks both the old and the new.
   both ways); `Sum`, `Count`, `Min` and `Max`; pages with `Sort`, `Limit` and `After`
   ([questions](docs/book/concepts.md#questions), [Less and Optional](docs/book/cesia.md#less-lessorequal-and-optional)). `find`, `ask` and `fold` take a `?timeout`, past which they give
   `Error (Timeout _)`, a constructor added to `Cepheus.error` before the first release.
+- **Links that name a kind**, SQL's foreign keys: a link property names a kind (`Link(to = "client")` in Cesia,
+  `link_to` in OCaml, the facts `cepheus/to` and `cepheus/delete` of its property thing), and each value it takes is a
+  thing of that kind, checked by the writer on the state after each group. When a group leaves a thing with no fact of
+  the kind, the links to it follow their `on_delete`: `refuse` (the default) refuses the group, naming the kind, the
+  thing, one linking thing and the property; `cascade` deletes the linking thing too (cycles end); `clear` retracts the
+  link. The operation **`Delete (thing, kind)`** deletes a thing of a kind, its facts of the kind retracted at the
+  writer, SQL's `DELETE`; a deletion and its links stay within the group's work budget, or nothing is done
+  ([deleting a thing](docs/book/cesia.md#deleting-a-thing), [tutorial 10](docs/book/tutorials.md#10-a-client-with-invoices-cannot-be-deleted-an-invoices-lines-go-with-it)).
 - A **fork** is a database in the program's memory that starts as a view: written to with every check, never to the
   disk, made without a copy; the base of an application's tests and of what-if questions
   ([forks](docs/book/concepts.md#forks)).
@@ -73,7 +81,9 @@ stay as they are, or a later version reads and speaks both the old and the new.
   answer once its group is durable, and with `Sort` and `Limit` keep the first rows of an order as they change (the
   ten latest payments: ten rows held, a row that leaves them replaced by one page read after the last), the rule
   model-checked ([Sort and Limit in a watch](docs/book/cesia.md#sort-and-limit-in-a-watch)). The wire protocol is at
-  version 7 (Less, LessOrEqual and Optional); a program speaks 1 to 7 with a server of any of them.
+  version 8 (the operation Delete and the links that name a kind); a program speaks 1 to 8 with a server of any of
+  them. A token with rights per kind deletes a thing only if it may add to every kind the deletion can reach and read
+  every kind whose links refuse it.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects
   a new leader by itself.
@@ -188,9 +198,11 @@ stay as they are, or a later version reads and speaks both the old and the new.
 
 ### From Cesia
 
-- The package `cesia/cepheus`: `Connect`, kinds with `Kind`, `Insert`, `Get`, `Update`, `Write` with `Expect` and
-  `Incr`, `Find`, `Watch`, rules with `Rule` and `Define`, `Fork` for tests, files with `Put`, `Read`, `List`,
-  `Delete` and `Erase` ([Cepheus from Cesia](docs/book/cesia.md)). Nothing loads before the package's first call.
+- The package `cesia/cepheus`: `Connect`, kinds with `Kind`, `Insert`, `Get`, `Update`, `Delete` (of a thing of any
+  kind, its links followed), `Write` with `Expect` and `Incr`, `Find`, `Watch`, rules with `Rule` and `Define`, `Fork`
+  for tests, files with `Put`, `Read`, `List`, `Delete` and `Erase` ([Cepheus from Cesia](docs/book/cesia.md)); a
+  `Link(to = "client", onDelete = "cascade")` names the kind it links to. Nothing loads before the package's first
+  call.
 - A real app built step by step on it, invoices and clients, from `cesia new` to production, with its tests in
   Firefox and the time of every page ([a real app](docs/book/app.md)): its list a page of one sorted question, whose
   links keep working from one version of the app to the next, and a dashboard of live totals and of the ten latest

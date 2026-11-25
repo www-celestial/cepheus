@@ -63,6 +63,10 @@ the usual one, both are given.
   [architecture](architecture.md#runs-on-disk)
 - **buffer pool** (the cache) — memory where a database keeps pages of its files, deciding itself what stays; Cepheus'
   holds the runs' 16 KiB pages, 1 GiB by default. [architecture](architecture.md#pages-and-the-cache)
+- **cascade**, **clear**, **refuse** (on delete) — what a link that names a kind does when the thing it links to
+  stops being of the kind (`onDelete`): `cascade` deletes the linking thing too, `clear` retracts the link, `refuse`
+  (the default) refuses the group; SQL's `ON DELETE CASCADE`, `SET NULL` and `RESTRICT` (or `NO ACTION`).
+  [Cesia](cesia.md#deleting-a-thing)
 - **cardinality** — how many values a thing may have for a property: one (the default) or many (`~many:true`).
   [concepts](concepts.md#properties-and-the-schema)
 - **certificate** — a public key and a name, signed by a certificate authority: what a server shows in a TLS handshake
@@ -149,6 +153,9 @@ the usual one, both are given.
   [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **datom** — Datomic's fact: entity, attribute, value, transaction, added. Cepheus' fact is the first three; the group
   and the add-or-retract flag live in the journal. [concepts](concepts.md#facts-the-entityattributevalue-model)
+- **Delete** (of a thing) — the operation that deletes a thing of a kind, SQL's `DELETE`: the thing's facts of the
+  kind retracted at the writer, and the links to it followed, in one group; the thing stays in the history.
+  [Cesia](cesia.md#deleting-a-thing)
 - **delta** — the changes since the last merge, in persistent maps; level 0 of the LSM-tree (C0), about 170 bytes a
   change. [architecture](architecture.md#indexes-the-runs-and-the-delta) In the reasoner, $\Delta$ is another thing: the
   facts a group changes, from which semi-naive evaluation derives (round 0 is the group's asserted additions).
@@ -222,6 +229,9 @@ the usual one, both are given.
 - **follow stream**, **follower** — a follow stream is the second connection of a local reader, on which the server
   sends every frame the writer makes, before its fsync, and the database's runs; the follower is the copy of the
   database the reader keeps from it, applying each frame as the server did. [server](server.md#local-reads-g15)
+- **foreign key** — in SQL, a column whose values must be the keys of another table's rows (`REFERENCES client`);
+  in Cepheus, a link that names a kind (`Link(to = "client")`): each thing it links to is of that kind, checked at each
+  write. [Cesia](cesia.md#kinds-and-the-values-they-hold)
 - **fork** — a temporary database started from a view: the same writes and checks, nothing on disk, free to make.
   [concepts](concepts.md#forks)
 - **frame** — the unit of one write and one fsync in the journal: a header, the groups, a trailer.
@@ -291,6 +301,9 @@ the usual one, both are given.
 - **kind** (Cesia client) — a sort of thing in a Cesia program: a name and fields, each a property of a type
   (`client/City` for the field `City` of the kind `client`); `Insert` and `Get` read and write a thing's fields of a
   kind as a map. [Cesia](cesia.md#kinds-and-the-values-they-hold)
+- **link that names a kind**, **of a kind** — a link property with a kind (`cepheus/to`): its values are things of
+  that kind. A thing is of a kind while it has a fact of one of the kind's properties that a write asserted.
+  [API](api.md#links-that-name-a-kind-foreign-keys)
 - **LEFT JOIN** (left outer join) — SQL's join that keeps each row of its left side even when the right side has
   nothing for it, the right side's columns then NULL; Cepheus's `Optional`, whose cell is then `missing`.
   [Cesia](cesia.md#less-lessorequal-and-optional)

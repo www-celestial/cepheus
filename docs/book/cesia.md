@@ -135,6 +135,15 @@ exact there, `Sum` included) and a Float in Cesia: an amount of up to 15 signifi
 written and read back gives the same minor units (a 64-bit float is within half a unit of it); beyond, its last digits
 round.
 
+`cepheus.Link(to = "client")` is a link that **names a kind**, SQL's **foreign key** (`REFERENCES client`): the thing
+it links to must be a client, that is, have a fact of the kind client that a write gave it (a value of one of its
+fields; a fact only a rule gives makes no thing a client), checked by the server at each write on the state after the
+group, so a client made in the same group counts. `to` takes the kind's name, a Text, so that a kind may link to
+itself (a category's parent, an employee's boss) and two kinds to each other. `onDelete` says what the link does when
+its thing stops being a client: `"refuse"` (the default) refuses the group that would leave it, `"cascade"` deletes
+the linking thing too, `"clear"` retracts the link ([deleting a thing](#deleting-a-thing)). A `Link()` without `to`
+takes any thing's id, as before.
+
 ## Insert, Get, Update
 
 ```cesia norun
@@ -844,7 +853,8 @@ A **file kind** keeps files in the database: `Scans = cepheus.Files("scan")` is 
 `Size`, `Type`, `Owner` and `Content`, given to `Connect` as any other. `cepheus.Put(Scans, name, bytes, db, type,
 owner, cold)` stores a file and gives its id once its bytes and its facts are on the server's disk; `cepheus.Read(Scans,
 id, db, from, len)` gives its bytes, all of them or a range (only the chunks under it are read); `cepheus.List(Scans,
-db)` its files (a `Find`); `cepheus.Delete(Scans, id, db)` retracts its facts; `cepheus.Erase(owner, db)` destroys an
+db)` its files (a `Find`); `cepheus.Delete(Scans, id, db)` retracts its facts ([deleting a thing](#deleting-a-thing));
+`cepheus.Erase(owner, db)` destroys an
 owner's key, after which every file it owned is unreadable, everywhere its bytes went. The rights of a token on the kind
 are its rights on the files. How the bytes are kept (chunks stored once, compressed, sealed, checked at every read):
 [the vault](vault.md).
@@ -855,6 +865,65 @@ db = cepheus.Connect("cepheus://srv1:7400/shop", [Client, Scans], token = sys.En
 f = cepheus.Put(Scans, "2026-11.pdf", sys.Read("2026-11.pdf")?, db, type = "application/pdf", owner = ada)?
 head = cepheus.Read(Scans, f, db, from = 0, len = 1024)?
 ```
+
+## Deleting a thing
+
+`cepheus.Delete(kind, id, db, by = 0, why = "")` deletes a thing of a kind, SQL's `DELETE`: at the server, its facts of
+that kind (every value of every field of the kind) are retracted, and each link that names the kind and links to it
+does what its `onDelete` says, all in one group: an `Ok` of the group's number, or an `Err` and nothing written.
+
+```cesia norun
+Order = cepheus.Kind("order", {Client: cepheus.Link(to = "client"), Total: cepheus.Money(2)})
+Line = cepheus.Kind("line", {Order: cepheus.Link(to = "order", onDelete = "cascade"), Price: cepheus.Money(2)})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Order, Line], token = sys.Env("CEPHEUS_TOKEN")))
+order = result.Unwrap(cepheus.Insert(Order, {Client: ada, Total: 30}, db))
+for price in [10, 20]
+  result.Unwrap(cepheus.Insert(Line, {Order: order, Price: price}, db))
+end
+io.Print(cepheus.Insert(Order, {Client: order, Total: 1}, db).Error.Message)
+io.Print(cepheus.Delete(Client, ada, db).Error.Message)
+io.Print(cepheus.Delete(Order, order, db))
+io.Print(cepheus.Find(1, (l) -> {Where: [[l, Line.Order, order]], Give: {Line: l}}, db))
+```
+
+```text
+order/Client links to client things only, and #65549 is not one
+the client #65536 cannot be deleted while the order #65549 links to it (order/Client: refuse)
+Ok(30)
+Ok([])
+```
+
+- **refuse** (the default): a group that leaves a thing no longer of the kind while a link of `"refuse"` still links
+  to it is refused whole, with Code `"invalid"`, naming the kind, the thing, one thing that links to it and the
+  property.
+- **cascade**: the linking thing is deleted too, in the kind of its link (`Line.Order` is of the kind line), as
+  `Delete` would, and the links to it follow in turn; a thing reached twice is followed once, so a cycle (two things
+  that link to each other, a thing that links to itself, a tree of categories) ends.
+- **clear**: the link is retracted; the linking thing keeps its other fields.
+
+Exactly: a thing **stops being** of a kind when a group leaves it with no fact of the kind that a write asserted,
+whatever did it, a `Delete` or the `Retract` of its last field; the links follow their `onDelete` all the same. A
+`Delete` of a thing with no fact of the kind changes nothing (an `Ok`, its group writes no fact). The facts a `Delete`
+and its links read and retract are at most the work budget of the group, a million for one `Delete` (10 x (100,000 +
+100 per operation), the rules' budget): past it, the group is refused whole, Code `"invalid"`, and nothing is done;
+delete the linking things first, in groups of their own. The things that link to a thing are found by the index by
+value, which holds every fact: one lookup a link property, whatever their number. Rules see a `Delete` as the
+retractions it makes: what they derive follows, and a `Never` is checked on the state after it. `Watch` sees them as
+any change: the rows they take away. A deleted thing stays in the history, as every group does. To delete things of a
+kind needs a token that may add to that kind and to every kind a cascade or a clear can reach from it, and read every
+kind whose links refuse it (G16): refused whole otherwise, before anything is done. No rule gives a link that names a
+kind (a rule set that would is refused at `Define`).
+
+A kind's links are declared by `Connect` (and `Fork`) with the kind: a property that has no `to` in the database
+gets it, and the server checks every value it holds already (an `Err` naming one that is no thing of the kind); one
+that names another kind, or another `onDelete`, is an `Err` at `Connect` (a change of them is a migration, not built
+yet). A `Link()` without `to` accepts a database where another program declared one: its writes are checked all the
+same.
+
+There is one `Delete`, for every kind. On a kind of [files](#files) it does what it always did, a file's facts
+retracted, with two checks of its own: the group is refused, Code `"conflict"`, if the file changed meanwhile, and a
+thing that is no file of the kind is an `Err` of Code `"missing"`; its bytes stay in the vault while the history cites
+them.
 
 ## Forks
 
@@ -962,7 +1031,7 @@ not `{Where, Give}`) is a bug: it stops the fiber, as `bug.Panic`, and names wha
 |---|---|---|
 | `conflict` | an `Expect` of the group did not hold | read again and decide again |
 | `unique` | a value of a `unique` property is taken | another value, or the thing that has it |
-| `invalid` | a value of the wrong type, a field the kind does not have, a kind not declared in this database, a question the engine refuses, an address without `ca` over the network | correct the call |
+| `invalid` | a value of the wrong type, a field the kind does not have, a kind not declared in this database, a question the engine refuses, an address without `ca` over the network, a link to a thing that is not of its kind, a deletion a link refuses, a cascade past the group's budget | correct the call; delete what links to it first |
 | `damaged` | a page of a run file did not check against its CRC | the server's operations: [operations](operations.md) |
 | `io`, `busy` | the server's disk failed, or another process holds the database | the server's operations |
 | `closed` | the database was closed by `Close` | connect again |
@@ -1119,6 +1188,9 @@ linearizable without it.
 
 - Forks of a database read at the server, which the server will make.
 - A program reaches one database a connection: `Connect` again for another.
+- A change of the kind a link names, or of its `onDelete`, on a database that has it (a migration); `Delete` as an
+  operation of `Write`, beside others in one group; a default value for a link (SQL's `SET DEFAULT`); erasing a
+  deleted thing from the history.
 
 ## References
 

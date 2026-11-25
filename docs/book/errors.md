@@ -93,6 +93,22 @@ From `write` (the writer's checks, the same on a database and on a fork):
 | `a group of N bytes is over the frame limit of 268435456` | the group's encoding passes 256 MiB, the largest frame body: split it ([limits](limits.md#writes)) |
 | `thing numbers end at 2147483647: this group would make #N` | the group's new things would take thing numbers past $2^{31} - 1$, the largest a run holds ([limits](limits.md#things-properties-values)); the database can make no more things |
 
+From `write`, links that name a kind and `Delete` ([api](api.md#links-that-name-a-kind-foreign-keys)):
+
+| message | when |
+|---|---|
+| `NAME links to K things only, and #T is not one` | the group adds a link of NAME (a property that names the kind K) to a thing that has no fact of K after the group; give the thing a fact of K in the same group, or link to one |
+| `the K #X cannot be deleted while the L #Y links to it (NAME: refuse)` | the group leaves X with no fact of K (a `Delete`, or the retraction of its last fact of K) while Y, of the kind L, still links to it by NAME, whose links refuse it; delete or relink Y first, in this group or before |
+| `deleting the K #X (NAME: cascade): the links followed passed N facts, the work budget of a group of M operations: delete the things that link to it first, in groups of their own` | a `Delete` and the links it follows read or retract more than $N = 10 \times (\mathit{base} + \mathit{per} \times M)$ facts (`work_budget`, `rule_budget`); nothing is done |
+| `Delete of a new thing`; `Delete: no thing #E`; `Delete: the kind K has no property in this database` | a `Delete` of a negative (new) thing, of a thing never made, or of a kind no property of the view has |
+| `NAME is a T: cepheus/to is for a link` | `cepheus/to` on a property that is not a link |
+| `NAME: cepheus/to is the name of a kind, without '/', not "S"`; `NAME: cepheus/delete is refuse, cascade or clear, not "S"`; `NAME has cepheus/delete without cepheus/to, the kind it links to` | the two facts of a link written wrong (by hand: `link_to` writes them right) |
+| `property P keeps cepheus/to or cepheus/delete without a name and a type` | a group left property thing P with one of them but neither a name nor a type |
+| `NAME links to the kind K, which has no property` | a link names a kind that no property of the database has (a name mistyped) |
+| `NAME cannot link to K things only: #E links to #T, which is not one` | a link that names a kind for the first time (or another one) while a value it holds is no thing of the kind |
+| `rule R gives NAME, a link that names a kind: no rule gives one` | `define` of a rule whose head is such a link, a link given that name while a rule gives it, or a rule over a variable property that would give one |
+| `a group written meanwhile links NAME of #E to #T, which is no K thing under the change`; `a group written meanwhile leaves #Y linked by NAME to #X, which is no K thing any more` | (as `Conflict`) a change of the rules in the background whose group declared a link, while groups written meanwhile broke it: make the change again |
+
 From `write` with rules (the writer's reasoning, the same on a database and on a fork; [rules](rules.md)):
 
 | message | when |
@@ -135,11 +151,13 @@ From `define`, or a write of a rule's facts (a rule is checked when it is writte
 | `rule R takes a name and a definition only` / `rule R needs a name and a definition, and no type` | a rule thing with `cepheus/many`, `cepheus/unique` or `cepheus/type`, or without its name |
 | `NAME is a property: it never becomes a rule` / `a rule never becomes a property (NAME)` | a schema thing changed from one kind to the other |
 
-From `declare` and `snapshot`:
+From `declare`, `link_to` and `snapshot`:
 
 | message | when |
 |---|---|
 | `NAME is declared already as another kind of property` | `declare` with a name that exists with another type, cardinality or unique flag |
+| `NAME links to K things in this database, with on delete D, not to L things with E` | `link_to` (or a kind given to Connect) of a property that names another kind, or another `on_delete`, already: a change of them is a migration |
+| `no property P` | `link_to` of a property that does not exist |
 | `a fork has no files` | `snapshot` on a fork |
 
 From `find` and `fold` (the question is malformed):
@@ -342,6 +360,9 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | a group with `cepheus.Incr`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
 | `invalid` | `this server speaks protocol N: a question's timeout needs a server of protocol 6` | `Find` or `Watch` with `timeout`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server, or leave the time to the server's `question_timeout` |
 | `invalid` | `this server speaks protocol N: Less, LessOrEqual and Optional need a server of protocol 7` | `Find` or `Watch` with them, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `this server speaks protocol N: Delete and links that name a kind need a server of protocol 8` | `Delete` of a thing that is no file, or `Connect` with a kind whose `Link` has `to`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `NAME links to K things only, and #T is not one`; `the K #X cannot be deleted while the L #Y links to it (NAME: refuse)`; the work budget of a `Delete` | a link to a thing of another kind; a deletion a link refuses; a cascade too large for one group ([deleting a thing](cesia.md#deleting-a-thing)) | link to a thing of the kind; delete what links to it first |
+| `denied` | `this token may not add to the kind K, which a deletion of a J reaches`; `this token may not read the kind K, whose links refuse the deletion of a J`; `this token may not read the kind K, which NAME links to` | a token with rights per kind: a `Delete` (or a retraction of a fact of a kind links name) that may reach a kind it may not write, or tell of one it may not read; a link to a kind it may not read | a token with those rights ([rights per kind](server.md#rights-per-kind)) |
 | `timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | the question ran past its `timeout`, or past the server's `question_timeout` (a time longer than the server's counts only from an admin token): in the program's memory or at the server alike | a narrower question, or pages; a longer `timeout` where the server allows it |
 | `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` on another type, an empty or long prefix | a text variable a pattern gives |
 | `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | the bounds of a question ([limits](limits.md#questions)) | page, split the list, or ask several questions |
@@ -376,7 +397,8 @@ an operation (`as cepheus.Add, Retract, Expect or Incr makes it`), an `Incr`'s `
 variable}}`), a pattern (`[thing, property, value], or Above, Below or Between`), a variable or a thing's id first in a
 pattern, a variable or an aggregate in Give; and at `cepheus.Kind`: a name that is not small letters, digits, `_` and
 `-`, no field, a field named `kind`, a type that is none of `Text()`, `Int()`, `Float()`, `Bool()`, `Date()`,
-`Link()`, `Money(scale)`, a scale outside 0 to 18; at `cepheus.Connect`: an address that is not
+`Link()`, `Money(scale)`, a scale outside 0 to 18, a `to` that is not a kind's name, an `onDelete` without `to` or
+other than `"refuse"`, `"cascade"` and `"clear"`; at `cepheus.Connect`: an address that is not
 `cepheus://host:port/database` (with `?socket=DIR` its only parameter); at `cepheus.Find`: more than 12 variables.
 
 ## Lines on the standard error

@@ -300,6 +300,11 @@ cited on the [comparison](comparison.md) page.
 
 ## Transactions and isolation
 
+- **[Codd 1970]** E. F. Codd. A Relational Model of Data for Large Shared Data Banks. *Communications of the ACM*
+  13(6), 377–387, 1970. https://doi.org/10.1145/362384.362685
+  — The foreign key: a value of one relation that is the key of another, as a link that names a kind
+  (`Link(to = "client")`) is; what it does on delete is SQL's referential actions (ISO/IEC 9075-2: `ON DELETE
+  CASCADE`, `SET NULL`, `SET DEFAULT`, `RESTRICT`, `NO ACTION`), of which Cepheus has `cascade`, `clear` and `refuse`.
 - **[Papadimitriou 1979]** C. H. Papadimitriou. The Serializability of Concurrent Database Updates. *Journal of the
   ACM* 26(4), 631–653, 1979. https://doi.org/10.1145/322154.322158
   — The definition of serializability that G4 proves.

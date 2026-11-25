@@ -434,7 +434,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | request body | reply body |
 |---|---|---|
-| 1 Hello | version varint (1 to 7), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
+| 1 Hello | version varint (1 to 8), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique); past the frame limit, in frames of about 1 MiB of properties, all but the last with `more`, each with its handle, group and count |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)...; past the frame limit, in frames of about 1 MiB of facts, all but the last with `more`, each with its group and count |
 | 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text, 6 Less: two variables, 7 LessOrEqual: two variables, 8 Optional: a pattern, from version 7), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values); then, from version 6 and only when the program gives one, the question's time in milliseconds (1 to a week; the order is then sent, empty if need be) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort past the server's cells sent as its rows are found, none held): the view's group, columns, count, values row by row; a cell an Optional left without a value is the link $-2^{62}$, which no thing has (a value of rows only) |
@@ -463,7 +463,12 @@ On a follow stream the server pushes (request id 0):
 - **select**: `Give [x...]` gives those variables of each answer, in this order (none: all); `Group ([k...], [a...])`
   gives one row a distinct key: the key's variables, then the aggregates `Count`, `Sum x` (int, money), `Min x`, `Max x`
   (int, money, date), computed in the server without building the answers (Q4 below: 100 rows instead of 45,064).
-- **Versions.** Version 7 adds the operators Less, LessOrEqual and Optional (tags 6 to 8) and nothing else: a
+- **Versions.** Version 8 adds the operation Delete (tag 5, below) and the links that name a kind (the facts of
+  `cepheus/to` and `cepheus/delete`, properties 7 and 8, in a Write) and nothing else: a program of version 8 connects
+  to a server of 7 in 7, and a group with a Delete or one of those facts is refused in the program (`invalid`: "this
+  server speaks protocol 7: Delete and links that name a kind need a server of protocol 8") before it is sent, since
+  an older server closes the connection on an operation it does not know and knows no property 7 or 8; a Delete of a
+  file (the Cesia package's `Delete` on a kind of files) is coded as before. Version 7 adds the operators Less, LessOrEqual and Optional (tags 6 to 8) and nothing else: a
   program of version 7 connects to a server of 6 in 6, and a question with one of them is refused in the program
   (`invalid`: "this server speaks protocol 6: Less, LessOrEqual and Optional need a server of protocol 7") before it
   is sent, since an older server refuses an operator it does not know; a question without them is coded as before.
@@ -479,7 +484,7 @@ On a follow stream the server pushes (request id 0):
   older: Incr needs a server of protocol 4") before it is sent. Version 3 adds the files (Put, Piece, Load, Erase) and
   nothing else: a program of version 3 connects to a server of 2 in 2 (as below), and a file is refused in the program
   (`invalid`: "this server speaks protocol 2 or older: files need a server of protocol 3"). Version 2 adds the
-  question's operators and order (below) and nothing else; a server speaks 1 to 7, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+  question's operators and order (below) and nothing else; a server speaks 1 to 8, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
   and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
   one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
   protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2
@@ -490,7 +495,9 @@ On a follow stream the server pushes (request id 0):
 - An **operation**: 0 Add, 1 Retract, 2 Expect a value, 3 Expect none; then the thing (zigzag: a negative id is a new
   thing of the group), the property, the value. 4 Incr (version 4): the thing, the property, `by` (zigzag), then a
   byte 0, or 1 followed by `into`'s thing (zigzag) and property. A token adds an `Incr` when it may add to the
-  counter's kind and to `into`'s ([rights](#rights-g16)).
+  counter's kind and to `into`'s ([rights](#rights-g16)). 5 Delete (version 8): the thing (zigzag), then the kind's
+  name (a string of at most 255 bytes): the thing's facts of that kind retracted at the writer, and the links that
+  name the kind followed ([deleting a thing](cesia.md#deleting-a-thing)).
 - Every read names the group of the view it was answered from, every receipt its group: a program can check what it
   read against what it wrote.
 
@@ -1616,6 +1623,13 @@ A token with **rights per kind** (`{ read = ["client", "invoice"], add = ["invoi
   group with one fact of another kind is refused whole with `denied`. An `Incr` adds to its counter's kind and to its
   `into`'s: it needs both (as an `Expect` does, it tells the token the counter's value). Rules are for `write` tokens only: a rule reads
   every kind.
+- A link that names a kind (`Link(to = "client")`) is a read of that kind too: its write is refused when the thing is
+  no client, which tells whether it is one. So a fact of such a link needs the right to read the kind it names. A
+  `Delete` of a thing of a kind, and a retraction of a fact of a kind that links name (it may leave a thing with no
+  fact of the kind), may reach every kind whose links name it, and on, through the schema: the token needs to add to
+  the kind, and to each kind a `cascade` or a `clear` reaches, and to read each kind whose links `refuse` (the
+  refusal names one of its things); otherwise the group is refused whole with `denied`, naming the kind, before
+  anything is done. The reach is the schema's, not the data's: a token is told the same whatever the things.
 - It never reads in its own memory: a local reader maps the whole database, so the server refuses its `Follow`, and
   its reads go to the server. The clients do it by themselves.
 - With rules, it reads a property only when it reads the property's kind **and every kind the property's derived
