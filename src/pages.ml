@@ -96,13 +96,21 @@ let main = Ring.make none
 let ghost = Ring.make (-1)
 let ghosts : (int, int) Hashtbl.t = Hashtbl.create 1024 (* key -> times in the ghost FIFO *)
 let resident = ref 0
-let misses = Atomic.make 0 (* pages read from disk: for the tests and benchmarks *)
+let misses = Atomic.make 0 (* pages read from disk: for cepheus status, the tests and benchmarks *)
+
+(* reads of a page in memory that the policy counts (not hot: the first read since the policy last looked at it),
+   for cepheus status; the reads of a hot page are counted nowhere: one array read and one comparison each *)
+let hits = Atomic.make 0
 let evicted = ref 0 (* pages out since the last full collection *)
 
 let key e = (e.b.tid lsl 32) lor e.k
 let freq e = Char.code (Bytes.unsafe_get e.b.tfreq e.k)
 
 let set_capacity bytes = capacity := max 16 (bytes / size)
+
+(* for cepheus status: the room in pages, and the pages in memory now (read without the lock: a moment's count) *)
+let room_pages () = !capacity
+let resident_pages () = !resident
 
 let forget_ghost g =
   match Hashtbl.find_opt ghosts g with
@@ -248,6 +256,7 @@ let[@inline never] touch b k =
   if !tracing then record b k;
   let f = b.frames.(k) in
   if f != absent then begin
+    Atomic.incr hits;
     if not !tracing then begin
       let c = Char.code (Bytes.unsafe_get b.freq k) in
       if c < 3 then Bytes.unsafe_set b.freq k (Char.unsafe_chr (c + 1));

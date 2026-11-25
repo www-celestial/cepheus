@@ -159,6 +159,9 @@ defaults, and the cache's size (`set_cache`).
 | an idle connection | `[clients] idle_timeout` seconds, 0 to 604,800 (0: no limit); default 600: a whole request within it from the previous request, and what the server sends taken within it; before Hello, 10 s from the accept (or `idle_timeout` when shorter, whatever it is) for the TLS handshake and the Hello; the clock checked after every read, inside the TLS handshake and a TLS record too | `Config.default_idle_timeout`, `Net.hello_s`, `Net.timeouts` |
 | a client's handshake | 5 s for connect, TLS and Hello (and a follow stream's Follow and Start), then the socket waits as long as it must; past it the attempt is given up as broken and tried again within the retry budget | `Client.handshake_timeout` |
 | a client's retry budget | 30 s of tries to connect again after a broken connection; then `unreachable` (a write in flight was applied once or not at all) | `Client.retry_budget` |
+| the log of slow questions and writes | `[log] slow_ms`, 0 to 3,600,000 ms (0: none); default 200: a question or a write at the server of that time or more gets a line, its constants written `?`; at most 10 lines a second (the next one counts those left out), each cut at 2,000 bytes, a write's properties the first 8 | `Config.default_slow_ms`, `Timings.lines_a_second`, `Timings.max_line` |
+| the times of `cepheus status` | a question's and a write's at the server, from the request read to the reply coded (a write's once its group is durable); p50, p99 and the maximum over the last 60 s (six slices of 10 s: 50 to 60 s of values), within 1/32 above (3.1 %), up to 2^34 µs (4.8 hours: a longer time counts there, the maximum exact); counts and sums since the start; a domain's slices its own, 960 counters (7.5 KiB) each, made at their first value: a database timed by d I/O domains holds 2 × 6 × d of them at most (360 KiB for d = 4) | `Timings.bits`, `Timings.slice_us`, `Timings.slices` |
+| a status's cost | a readdir and a stat a file of each database's journal and runs (a segment is 64 MiB: 16 a GiB of journal), a statvfs, the copy of each domain's slices; no lock of the server held while it is read | `Space`, `Timings.lines` |
 
 ## The file vault
 
@@ -182,6 +185,6 @@ defaults, and the cache's size (`set_cache`).
 
 | what | value | where |
 |---|---|---|
-| `Histogram` | exact below 256 µs, then 128 buckets per power of two: every percentile within 1/128 (0.8 %); 3,584 counters | `src/histogram.ml` |
+| `Histogram` | exact below 2 × 2^bits µs, then 2^bits buckets per power of two up to 2^34 µs: every percentile within 1/2^bits; 7 bits by default (1/128, 0.8 %; 3,584 counters), 5 for the server's times (1/32, 3.1 %; 960 counters) | `src/histogram.ml` |
 | the simulated disk's sector | 512 bytes, the unit of loss and of tearing | `Sim_disk.sector` |
 | benchmark runs | 21 (`RUNS`), median and its 95 % interval $[x(6), x(16)]$, coverage 97.3 % | `bench/stats.ml` |

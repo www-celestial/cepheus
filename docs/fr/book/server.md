@@ -92,6 +92,9 @@ key = "/etc/cepheus/srv1.key"      # its private key, readable by the server's u
 data = "/var/lib/cepheus"          # one directory a database inside it, and the server's own files
 cache = "4G"                       # the page cache of the runs: K, M, G or bytes; default 1G
 
+[log]
+slow_ms = 200                      # a question or a write of this many ms or more gets a line; 0: none; default 200
+
 [[database]]                       # at least one; names unique: lower-case letters, digits, '_', '-', at most 64
 name = "shop"
 [[database]]
@@ -145,6 +148,12 @@ name = "stock"
   n'a pas de réglage à lui (le `sqlite3_progress_handler` ou le `sqlite3_interrupt` d'un programme) ; Datomic prend le
   `:timeout` d'une requête. Les écritures n'ont pas de temps : un groupe est tout ou rien, et les budgets du writer le
   bornent ([limites](limits.md#les-écritures)).
+- `slow_ms` : une question (un Find, la première réponse d'un watch) ou une écriture qui prend ce nombre de
+  millisecondes ou plus au serveur, de sa requête à sa réponse (celle d'une écriture une fois son groupe durable),
+  reçoit une ligne dans le log du serveur, ses valeurs laissées de côté : `cepheus: slow question: database shop, token
+  shop-web, 1722.7 ms, 37074621 candidates, 20 rows, ok: find give x0 x1 where [x0 invoice/status ?] [x0
+  invoice/client x2] [x1 invoice/client x2] sort column 1 desc limit 20`. De 0 à 3 600 000 (une heure) ; 0 : aucune ligne. Ce que tient la ligne, et comment
+  la lire : [les questions et les écritures lentes](production.md#les-questions-et-les-écritures-lentes).
 
 ### tokens.toml
 
@@ -191,7 +200,10 @@ cepheus cluster cert NAME --dir DIR [--host H]...
                                          renewed one): DIR/NAME.pem, DIR/NAME.key
 cepheus serve --config FILE              run the server until SIGTERM or SIGINT
 cepheus stop --config FILE               SIGTERM to the server that holds FILE's data, and wait for it to end
-cepheus status --config FILE             what the server holds and does; an admin token in CEPHEUS_TOKEN
+cepheus status [--format text|prometheus] --config FILE
+                                         what the server holds and does, and its times; an admin token in
+                                         CEPHEUS_TOKEN; --format prometheus: in Prometheus's text format
+                                         (production.md, "What to watch")
 cepheus token add NAME --database DB=read|write|read:KIND,...;add:KIND,... ... [--admin] --config FILE
                                          a new token, printed once on stdout (cph_ and 43 characters); its hash goes
                                          to tokens.toml
@@ -233,7 +245,10 @@ passes du garbage collector du runtime OCaml depuis le démarrage ; le garbage c
 mémoire que plus rien n'utilise), `stopping`, et pour chaque base `database.NAME.group` (son groupe durable le plus
 récent), `.facts` et `.resent` (les écritures qui ont reçu une seconde fois leur réponse, tirée de la table des
 sessions, G14) ; `role` et les lignes des replicas (une replica est un second serveur qui garde une copie des bases
-d'un autre : [une replica](#ce-que-sert-une-replica)).
+d'un autre : [une replica](#ce-que-sert-une-replica)). Après elles, les temps du serveur : le cache de pages et le
+disque, et pour chaque base les octets de son journal et de ses runs, ses merges, et ses questions et ses écritures
+(les comptes depuis le démarrage, p50, p99 et maximum sur la dernière minute) ; `--format prometheus` affiche les
+mêmes nombres dans le format texte de Prometheus. Chaque ligne : [ce qu'il faut surveiller](production.md#ce-quil-faut-surveiller).
 
 ### Les fichiers du serveur
 

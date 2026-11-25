@@ -295,6 +295,17 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   rien, dont le serveur ne décode plus aucun tant qu'il tient un MiB de réponses ; après
   chacun, les descripteurs et les threads du processus sont ce qu'ils étaient, aucune connexion ni aucun watch ne reste,
   et une nouvelle connexion est servie.
+- `server_observe` : les percentiles des histogrammes face aux valeurs triées (4, 5 et 7 bits, jusqu'à 2^34 µs : à
+  1/2^bits près au-dessus, jamais au-delà du maximum ; deux moitiés fusionnées donnent les mêmes), la fenêtre de
+  `Timings` (des tranches qui entrent et sortent, une tranche reprise un tour plus tard), 1 200 000 temps comptés par
+  12 threads sur 4 domains pendant qu'un autre domain lit le status (chacun compté), `cepheus status --format
+  prometheus` relu par un parser de la grammaire du format d'exposition (HELP et TYPE d'abord, les lignes d'une
+  famille ensemble, les noms, les échappements de `\`, `"` et d'un saut de ligne, les valeurs, NaN), les formes des
+  questions et des écritures (aucune de leurs constantes dedans), `[log] slow_ms`. Puis un vrai serveur à
+  `slow_ms = 1` : une ligne pour un Find lent, un Find fini par son timeout de 50 ms, un watch et un grand groupe,
+  chacune avec sa base, le nom du token, les candidats, les lignes et l'issue ; les 3 021 valeurs du test et les deux
+  tokens cherchés dans son log et dans son texte Prometheus : aucun trouvé ; les lignes d'avant de `cepheus status`
+  dans leur ordre, les nouvelles là.
 - Chaque serveur que lancent ces tests tourne dans une session à lui (`setsid`) avec sa sortie dans un `serve.log` à
   côté de son `cluster.toml`, et il est arrêté à la fin de son test, même quand le test échoue (`test/serve.ml`) ; les
   tests ignorent SIGPIPE, pour qu'une écriture sur une connexion que le serveur a fermée soit une erreur, pas la mort du

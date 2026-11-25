@@ -159,6 +159,9 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | une connexion inactive | `[clients] idle_timeout` secondes, de 0 à 604 800 (0 : aucune limite) ; 600 par défaut : une requête entière dans ce délai depuis la requête précédente, et ce que le serveur envoie, pris dans ce délai ; avant Hello, 10 s depuis l'accept (ou `idle_timeout` quand il est plus court, quel qu'il soit) pour le handshake TLS et le Hello ; l'horloge regardée après chaque lecture, dans le handshake TLS et dans un record TLS (un bloc chiffré du flux TLS) aussi | `Config.default_idle_timeout`, `Net.hello_s`, `Net.timeouts` |
 | le handshake d'un client | 5 s pour la connexion, TLS et Hello (et le Follow et le Start d'un follow stream), ensuite le socket attend aussi longtemps qu'il le faut ; au-delà, la tentative est abandonnée comme coupée et retentée dans le budget de nouvelles tentatives | `Client.handshake_timeout` |
 | le budget de nouvelles tentatives d'un client | 30 s d'essais pour se reconnecter après une connexion coupée ; ensuite `unreachable` (une écriture en cours a été appliquée une fois ou pas du tout) | `Client.retry_budget` |
+| le log des questions et des écritures lentes | `[log] slow_ms`, de 0 à 3 600 000 ms (0 : aucun) ; 200 par défaut : une question ou une écriture au serveur de ce temps ou plus reçoit une ligne, ses constantes écrites `?` ; au plus 10 lignes par seconde (la suivante compte celles laissées de côté), chacune coupée à 2 000 octets, les propriétés d'une écriture les 8 premières | `Config.default_slow_ms`, `Timings.lines_a_second`, `Timings.max_line` |
+| les temps de `cepheus status` | ceux d'une question et d'une écriture au serveur, de la requête lue à la réponse codée (celle d'une écriture une fois son groupe durable) ; p50, p99 et le maximum sur les 60 dernières secondes (six tranches de 10 s : de 50 à 60 s de valeurs), à 1/32 près au-dessus (3,1 %), jusqu'à 2^34 µs (4,8 heures : un temps plus long compte là, le maximum exact) ; les comptes et les sommes depuis le démarrage ; les tranches d'un domain sont à lui, 960 compteurs (7,5 Kio) chacune, créées à leur première valeur : une base chronométrée par d domains d'I/O en tient au plus 2 × 6 × d (360 Kio pour d = 4) | `Timings.bits`, `Timings.slice_us`, `Timings.slices` |
+| ce que coûte un status | un readdir et un stat par fichier du journal et des runs de chaque base (un segment fait 64 Mio : 16 par Gio de journal), un statvfs, la copie des tranches de chaque domain ; aucun verrou du serveur tenu pendant la lecture | `Space`, `Timings.lines` |
 
 ## Le vault de fichiers
 
@@ -182,6 +185,6 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 
 | quoi | valeur | où |
 |---|---|---|
-| `Histogram` | exact sous 256 µs, ensuite 128 cases par puissance de deux : chaque percentile à 1/128 près (0,8 %) ; 3 584 compteurs | `src/histogram.ml` |
+| `Histogram` | exact sous 2 × 2^bits µs, ensuite 2^bits cases par puissance de deux jusqu'à 2^34 µs : chaque percentile à 1/2^bits près ; 7 bits par défaut (1/128, 0,8 % ; 3 584 compteurs), 5 pour les temps du serveur (1/32, 3,1 % ; 960 compteurs) | `src/histogram.ml` |
 | le secteur du disque simulé | 512 octets, l'unité de perte et de déchirure | `Sim_disk.sector` |
 | exécutions d'un benchmark | 21 (`RUNS`), la médiane et son intervalle à 95 % $[x(6), x(16)]$, une couverture de 97,3 % | `bench/stats.ml` |

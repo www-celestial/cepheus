@@ -358,7 +358,7 @@ let deliver_to_server w sc =
       Buffer.clear sc.to_server;
       Buffer.add_string sc.to_server rest
     end;
-    let used, why = Core.input c sc.sin 0 sc.sin_n in
+    let used, why = Core.input ~arrived:0 c sc.sin 0 sc.sin_n in
     Bytes.blit sc.sin used sc.sin 0 (sc.sin_n - used);
     sc.sin_n <- sc.sin_n - used;
     c.flush ();

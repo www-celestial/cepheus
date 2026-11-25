@@ -13,7 +13,9 @@
 # export on a real server (a round trip of the invoices app, hostile files), a replica (REPLICA_SEEDS
 # simulated seeds, 300 by default, then two real servers), a Raft cluster (RAFT_SEEDS simulated seeds of 3 servers, 100
 # by default, and RAFT_SEEDS5 of 5, 50, then three real servers), a real server killed SERVER_KILLS times (20) under
-# writing clients, cepheus verify, backup and restore (on files, then the restore drill on a real server killed).
+# writing clients, cepheus verify, backup and restore (on files, then the restore drill on a real server killed), the
+# times of questions and writes (their histograms and window, the log of the slow ones with no value in it, cepheus
+# status and its Prometheus text parsed back, on a real server).
 # Scratch databases go in $CEPHEUS_TMP (default: the system's temp dir).
 # The Cesia client, when a Cesia with its native interface is here: its engine, built against that Cesia's
 # cesia_v1.cmi (CESIA_NATIVE, its folder; found from the cesia command when unset: lib/native of a release, or the
@@ -80,6 +82,7 @@ CEPHEUS_TMP=$tmp $b/ops_unit.exe | tail -1
 rm -rf "$tmp/cepheus-drill"
 $b/server_backup.exe "$tmp/cepheus-drill" | tail -2
 rm -rf "$tmp/cepheus-drill"
+$b/server_observe.exe "$tmp/cepheus-observe" | tail -1
 if [ -n "$CESIA_NATIVE" ]; then
   mkdir -p native
   tag=$(cesia run tools/tag.ce)

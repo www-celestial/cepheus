@@ -45,6 +45,11 @@ type stop = {
   mutable until : int;  (* the monotonic clock's ms past which it ends; 0: not looked at yet *)
   gone : unit -> bool;  (* its asker is gone (the server: its connection closed) *)
   mutable look : int;  (* the clock's ms from which [gone] is called again *)
+  mutable own : int;
+  work : int Atomic.t;
+      (* the candidates its folds took (each fold's domains, its Nots', its windows'), added at each check and at each
+         fold's end: what the server's log of slow questions says (server/timings.ml). [own]: those of the asking
+         thread's own runners (one thread: no atomic), [work] those of the helping domains *)
 }
 
 let every = 1024
@@ -58,7 +63,10 @@ let stop ?(gone = fun () -> false) seconds =
     if seconds <= 0. || seconds >= 1e9 then max_int
     else (let x = seconds *. 1000. in let i = int_of_float x in if float_of_int i < x then i + 1 else max 1 i)
   in
-  { ms; seconds; until = 0; gone; look = 0 }
+  { ms; seconds; until = 0; gone; look = 0; own = 0; work = Atomic.make 0 }
+
+(* the candidates the question took so far *)
+let work_of (s : stop) = s.own + Atomic.get s.work
 
 (* the message of a deadline passed *)
 let timeout_message seconds = Printf.sprintf "the question took more than %g s, its time: ask a narrower one, or give it more time" seconds
@@ -503,12 +511,20 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
        iterators' own *)
     (* a domain of this question failed: set before its exception goes up, so that the others stop at their next check *)
     let abort = Atomic.make false in
-    let runner ticks =
+    let runner ~helper ticks =
       let env = Array.make n 0 and bound = Array.make n false and w = ref 0 and cell = [| 0 |] in
       (* the next count of candidates at which the budget, the stop and the other domains are looked at: the budget
          itself when there is nothing else to look at ([ticks] false: one comparison a candidate, as before them) *)
       let lim = ref (if ticks then min budget every else budget) in
+      (* the candidates already added to the stop's work *)
+      let told = ref 0 in
+      let tell () =
+        match stop with
+        | Some s -> (if helper then ignore (Atomic.fetch_and_add s.work (!w - !told)) else s.own <- s.own + (!w - !told)); told := !w
+        | None -> ()
+      in
       let[@inline never] over () =
+        tell ();
         if !w > budget then raise (Over_budget budget);
         if Atomic.get abort then raise Stopped;
         (match stop with Some s -> check s | None -> ());
@@ -773,12 +789,12 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
           end
         end
       in
-      env, bound, choose, iterate, admits, level, w, lim
+      env, bound, choose, iterate, admits, level, w, lim, tell
     in
     if n = 0 then step (init ()) [||]
     else begin
-      let env, bound, choose, iterate, admits, level, w0, lim0 = runner (match stop with Some _ -> true | None -> false) in
-      let flush w = ignore (Atomic.fetch_and_add work !w); w := 0 in
+      let env, bound, choose, iterate, admits, level, w0, lim0, tell0 = runner ~helper:false (match stop with Some _ -> true | None -> false) in
+      let flush w tell = ignore (Atomic.fetch_and_add work !w); tell (); w := 0 in
       let x0 = ord.(0) in
       let src, size = choose 0 in
       let d = if (not seq) && size / 2 >= !parallel_min then !domains else 1 in
@@ -786,7 +802,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
         let acc = ref (init ()) in
         level 0 acc;
         (match account with Some r -> r := !r + !w0 | None -> ());
-        flush w0;
+        flush w0 tell0;
         !acc
       end
       else begin
@@ -802,7 +818,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
            does not depend on the number of domains nor on which domain ran which slice *)
         let slices = max 1 (min !count (16 * d)) in
         let accs = Array.make slices None and next = Atomic.make 0 in
-        let run (env, bound, admits, level, w) =
+        let run (env, bound, admits, level, w, tell) =
           bound.(x0) <- true;
           let go = ref true in
           while !go do
@@ -820,7 +836,7 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
               accs.(s) <- Some !acc
             end
           done;
-          flush w
+          flush w tell
         in
         (* the first failure of a domain is the question's; it stops the others at their next check (Stopped) *)
         let failed = Atomic.make None in
@@ -836,9 +852,9 @@ let fold ?(seq = false) ?(sets = []) ?(budget = max_int) ?account ?stop (v : Sto
         (match stop with None -> lim0 := min budget (!w0 + every) | Some _ -> ());
         let wait, _ =
           Pool.help (d - 1) (fun () ->
-              guarded (fun () -> let e, b, _, _, a, l, w, _ = runner true in run (e, b, a, l, w)))
+              guarded (fun () -> let e, b, _, _, a, l, w, _, t = runner ~helper:true true in run (e, b, a, l, w, t)))
         in
-        guarded (fun () -> run (env, bound, admits, level, w0));
+        guarded (fun () -> run (env, bound, admits, level, w0, tell0));
         wait ();
         (match Atomic.get failed with Some e -> raise e | None -> ());
         let acc = ref (Option.get accs.(0)) in

@@ -1,6 +1,7 @@
 /* The monotonic clock (clock_gettime with CLOCK_MONOTONIC, which a change of the wall clock does not move), in
    milliseconds: an immediate int, no allocation, no release of the runtime (a vDSO call on Linux, about 20 ns). For a
-   question's deadline (src/query.ml), Raft's timeouts and leases (server/raft.ml). And a wait for a descriptor to be
+   question's deadline (src/query.ml), Raft's timeouts and leases (server/raft.ml); and in microseconds, for the times
+   of the server's questions and writes (server/timings.ml). And a wait for a descriptor to be
    readable, with a timeout (poll(2), which has no bound on the descriptor's number, unlike select's FD_SETSIZE), the
    runtime released meanwhile: the keep-alive of the questions' helpers (src/pool.ml). */
 
@@ -15,6 +16,13 @@ value cepheus_monotonic_ms(value unit) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return Val_long((long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+value cepheus_monotonic_us(value unit) {
+  (void)unit;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return Val_long((long)ts.tv_sec * 1000000 + ts.tv_nsec / 1000);
 }
 
 /* true when [fd] is readable within [ms] milliseconds; false at the timeout, or when the wait was interrupted */

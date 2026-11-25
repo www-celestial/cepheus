@@ -1,7 +1,8 @@
 # Running in production
 
 How to run a Cepheus server on a machine of its own: as a systemd service, with backups taken every night and a
-restore drill, what to watch in `cepheus status` and in the log, how to upgrade, and what to do after a crash or a
+restore drill, what to watch in `cepheus status` and in the log (the times of questions and writes, the slow ones,
+Prometheus), how to upgrade, and what to do after a crash or a
 power loss. The commands were run on a test machine; their output is shown with this page's paths. A first server on
 a laptop: [the quick start](quickstart.md). Every key of `cluster.toml` and every command: [the server](server.md).
 
@@ -325,28 +326,64 @@ minute for example, and keep the lines with their time:
 sudo -u cepheus sh -c 'CEPHEUS_TOKEN=$(cat /etc/cepheus/ops.token) cepheus status --config /etc/cepheus/cluster.toml'
 ```
 
+A shop's server, 14 s after its start on 100,000 invoices: 18,000 questions for a client's invoices, 70 writes of
+1,000 invoices, an import of 300,000 in one group, 500 single writes, then four questions that read much (a real
+run of the version this book describes):
+
 ```text
 server: cph-s-9fa7ee8710147141
 cluster: cph-c-59f1eb5ca605aacd
-uptime_ms: 6050
-connections: 2
-requests: 683
-gc_minor: 23
-gc_major: 3
+uptime_ms: 14195
+connections: 1
+requests: 18580
+gc_minor: 4040
+gc_major: 41
 stopping: false
+questions.timed_out: 1
+questions.cancelled: 0
+questions.helpers: 0
+domains: 8
+domains.cap: 128
 commit_buffer.rounds: 0
 commit_buffer.frames: 0
-commit_buffer.alone: 679
+commit_buffer.alone: 570
 role: primary
-database.shop.group: 6202
-database.shop.facts: 12428
-database.shop.resent: 1
+disk.free_bytes: 3799736320
+disk.size_bytes: 240065183744
+slow_ms: 200
+latency_window_s: 60
+cache.capacity_bytes: 4294967296
+cache.resident_bytes: 1835008
+cache.hits: 291
+cache.misses: 217
+database.shop.group: 673
+database.shop.facts: 1410532
+database.shop.resent: 0
 database.shop.followers: 0
-database.shop.frames: 679
-database.shop.follow_ns_a_frame: 2483
-database.shop.visible: 6217
+database.shop.frames: 571
+database.shop.follow_ns_a_frame: 1977
+database.shop.visible: 573
 database.shop.watches: 0
 database.shop.epoch: 1
+database.shop.journal_bytes: 1808294
+database.shop.runs_bytes: 6735456
+database.shop.merges: 1
+database.shop.merge_us_sum: 207384
+database.shop.merge_bytes: 2678640
+database.shop.questions: 18004
+database.shop.questions_slow: 4
+database.shop.question_us_sum: 6640904
+database.shop.question_us_p50: 8
+database.shop.question_us_p99: 17
+database.shop.question_us_max: 2357964
+database.shop.question_samples: 18004
+database.shop.writes: 571
+database.shop.writes_slow: 1
+database.shop.write_us_sum: 3708511
+database.shop.write_us_p50: 3135
+database.shop.write_us_p99: 26623
+database.shop.write_us_max: 624869
+database.shop.write_samples: 571
 ```
 
 | line | what it is | watch for |
@@ -370,6 +407,15 @@ database.shop.epoch: 1
 | `database.NAME.visible` | the visibility number the local readers share (G15) | it moves with the frames |
 | `database.NAME.watches` | live questions open ([Watch](cesia.md#watch-live-questions)) | more than the screens open |
 | `database.NAME.epoch` | the database's epoch: 1, and one more at each promotion of a replica ([what a replica serves](server.md#what-a-replica-serves)) and at each restore ([restoring to a group](#restoring-to-a-group-undoing-a-bad-write)) | a change you did not make |
+| `slow_ms`, `latency_window_s` | `[log] slow_ms` of `cluster.toml` (0: no line), and the window of the percentiles below: the last 60 s (six slices of 10 s, the current one and the five before it: between 50 and 60 s of values) | |
+| `cache.capacity_bytes`, `.resident_bytes` | the page cache's room (`[storage] cache`) and the pages it holds now, every database's together | `resident` at the room while `misses` rise: the cache is too small for what the questions read |
+| `cache.hits`, `cache.misses` | since the start: reads of a page in memory that the cache's policy counted, and pages read from the disk (each checked by its CRC). A page read again and again while the policy has not looked at it again counts once: a read of such a page is one array read, counted nowhere, so `hits` is not every read, and their ratio is that of the reads the policy saw ([the cache](theory.md)) | a rate of `misses` that grows while the questions stay the same |
+| `disk.free_bytes`, `.size_bytes` | the file system of the data folder: the bytes free for the server's user (statvfs's `f_bavail`), and its size | under the largest database's `runs_bytes` plus a day of journal: a full merge holds its runs twice while it runs ([disk space](operations.md#disk-space-and-merges)) |
+| `database.NAME.journal_bytes`, `.runs_bytes` | the bytes of its journal's segments and of its runs, read from the disk at each status (a stat a file) | the journal grows for ever; the runs about once the data |
+| `database.NAME.merges`, `.merge_us_sum`, `.merge_bytes` | since the start: merges installed, their time together in microseconds (a background merge's from its start to its catch-up), and the bytes of the runs they wrote | a mean time a merge that keeps growing at the same `merge_bytes` a merge: the disk |
+| `database.NAME.questions`, `.questions_slow`, `.question_us_sum` | since the start: questions answered at the server (a Find, a watch's first answer; a program's local reads are not), those that took `slow_ms` or more, and their time together, in microseconds | a rate of `questions_slow`: their lines in the log say which ([slow questions](#slow-questions-and-writes)) |
+| `database.NAME.question_us_p50`, `_p99`, `_max`, `.question_samples` | over the window: the time at the server in microseconds, from the request read to the reply coded, of the median question, the 99th percentile and the slowest, within 1/32 above (3.1 %); and how many questions the window holds (0: the times are 0) | a p99 that grows while `question_samples` stays the same: questions that read more, or a machine that has less |
+| `database.NAME.writes`, `.writes_slow`, `.write_us_sum`, `.write_us_p50`, `_p99`, `_max`, `.write_samples` | the same for the writes, from the request read to the reply coded once its group is durable: the wait for the writer, the fsync and the commit buffer are in it (a write answered again from its session's table, or refused before the writer, is not counted) | a p99 that grows: the disk's fsyncs (compare `commit_buffer.frames` / `.rounds`), a merge's switch, or large groups |
 
 Beside it, the disk: a full merge holds the database's base twice while it runs, and the journal keeps every group
 for ever, so keep free at least the size of the largest database's runs, and watch the journal's growth
@@ -384,6 +430,126 @@ for ever, so keep free at least the size of the largest database's runs, and wat
 | `database NAME: the sessions could not be saved` | the disk; the next start reads more of the journal |
 | `FILE not reloaded: MSG` | `tokens.toml` does not parse: the server keeps the tokens it had |
 | `database NAME stopped: MSG`, before an exit | a failed disk: see [after a crash](#after-a-crash-or-a-power-loss) |
+| `slow question: ...`, `slow write: ...` | below |
+
+### Slow questions and writes
+
+A question or a write that takes `[log] slow_ms` or more (200 ms by default; 0: none) gets one line; those of the
+server above:
+
+```text
+cepheus: slow question: database shop, token shop-web, 2092.8 ms, 36761990 candidates, 1 row, ok: find group count where [x0 invoice/client ?] [x1 invoice/status ?]
+cepheus: slow question: database shop, token shop-web, 1722.7 ms, 37074621 candidates, 20 rows, ok: find give x0 x1 where [x0 invoice/status ?] [x0 invoice/client x2] [x1 invoice/client x2] sort column 1 desc limit 20
+cepheus: slow question: database shop, token shop-web, 2358.0 ms, 36761990 candidates, ok: watch group count where [x0 invoice/client ?] [x1 invoice/status ?]
+cepheus: slow question: database shop, token shop-web, 303.0 ms, 20111134 candidates, 0 rows, timeout: find group count where [x0 invoice/status ?] [x1 invoice/status ?] [x2 invoice/status ?]
+cepheus: slow write: database shop, token shop-web, 624.9 ms, group 173, ok: 900000 operations (900000 adds) of invoice/status, invoice/total, invoice/client
+```
+
+- **What it holds**: the database, the name of the token (never the token), the time at the server (from the request
+  read to the reply coded; a write's once its group is durable), and the outcome: `ok`, or the code of its error
+  (`timeout`, `cancelled` when its program closed its connection, `too_large`, `invalid`, `conflict`...), never the
+  error's message, which may quote a value. A question then says its candidates (the count its work budget counts:
+  [limits](limits.md#questions)), its rows (a Find's; a watch's first answer gives none here) and its **shape**: its
+  select, its patterns with their properties' names, its variables `x0`, `x1`..., its conditions and its order, each
+  constant written `?` (a thing, a value, a range's bounds, a prefix, an `After`'s row; an `In`'s values counted, a
+  `Limit` given: a page's size, not a value of the data). A write says its operations by kind, the properties it
+  names (the first 8; "and others" past them) and its group.
+- **No value of the data, no token**: a property's name is the schema's, escaped as every name of the log (a byte
+  outside printable ASCII written `\ddd`), and a line is cut at 2,000 bytes. So the log can go where the data may not
+  (a log service), and a token that may read leaks nothing through it. `test/server_observe.ml` asks slow questions
+  and writes values of its own, then searches the log for each: none is found.
+- **At most 10 lines a second**: the next line written says how many were left out (`(and N slow questions or writes
+  not written since the line before)`), and `questions_slow` and `writes_slow` count every one. A machine slow for
+  everything writes 10 lines a second, not one a question.
+- **How to read it**: many candidates for few rows is a question that reads much to keep little: a more selective
+  pattern first (a constant), a range, or a page with `Sort` and `Limit` on the index path. Candidates near the rows,
+  and a long time, is a machine that is busy (the cores, the disk: `cache.misses`). A slow write with few operations is
+  a wait: the fsync (`write_us_p99`), a merge's switch, or a large group ahead of it in the writer.
+
+### With Prometheus
+
+`cepheus status --format prometheus` prints the same numbers in Prometheus's text exposition format, version 0.0.4
+(prometheus.io/docs/instrumenting/exposition_formats/): one family a key, in base units (seconds, bytes), a
+database's with the label `database`, a replica's or a Raft peer's with `peer`; the times of questions and writes as
+summaries (quantiles 0.5, 0.99 and 1, the maximum, over the window, NaN when it is empty; `_sum` and `_count` since
+the start, as a summary's are); the ids and the role as labels of a sample of 1, and no other text (an error's
+message is left out). It reads the server through its socket with the admin token, as `cepheus status` does, so the
+server opens no HTTP port: one listener, one way in. For node_exporter's textfile collector, from a timer or cron
+every minute (write beside, then rename, so that the collector never reads half a file):
+
+```sh
+#!/bin/sh
+# /usr/local/bin/cepheus-metrics: cepheus status for node_exporter (--collector.textfile.directory=/var/lib/node_exporter)
+set -eu
+out=/var/lib/node_exporter/cepheus.prom
+CEPHEUS_TOKEN=$(cat /etc/cepheus/ops.token) cepheus status --format prometheus --config /etc/cepheus/cluster.toml > "$out.tmp"
+mv "$out.tmp" "$out"
+```
+
+```text
+# HELP cepheus_database_question_seconds Time of a question at the server, from its request to its reply
+# TYPE cepheus_database_question_seconds summary
+cepheus_database_question_seconds_count{database="shop"} 18004
+cepheus_database_question_seconds_sum{database="shop"} 6.640904
+cepheus_database_question_seconds{database="shop",quantile="0.5"} 0.000008
+cepheus_database_question_seconds{database="shop",quantile="0.99"} 0.000017
+cepheus_database_question_seconds{database="shop",quantile="1"} 2.357964
+# HELP cepheus_database_writes_slow_total Writes that took the slow time or more
+# TYPE cepheus_database_writes_slow_total counter
+cepheus_database_writes_slow_total{database="shop"} 1
+```
+
+Alerts worth having: `rate(cepheus_database_questions_slow_total[5m]) > 0`, a
+`cepheus_database_write_seconds{quantile="0.99"}` above the disk's usual fsync, `cepheus_disk_free_bytes` under the
+largest `cepheus_database_runs_bytes`, and `time() - node_textfile_mtime_seconds{file="cepheus.prom"}` above a few
+minutes (the cron stopped, or the server does not answer).
+
+### What timing costs
+
+Each question and write is timed at the server by two reads of the monotonic clock (`clock_gettime` through the
+vDSO, 17 ns alone on the [benchmarks' machine](benchmarks.md)) and a record into three cache lines of its domain's
+slices (4 ns). The start is the read the connection makes anyway after its bytes come, for its idle limit, and the
+end gives the idle limit its last request, so a program that waits for each answer makes the server read the clock
+no more often than before. Measured with the processor's counters (`perf_event_open`, user space: the serving
+thread's instructions, the whole server's cycles), two servers up at once, each on a database of 100,000 things
+(swapped at each round), their bursts asked in ABBA order, 21 rounds, the servers on one core and the client on
+another:
+
+| a point question (a unique value) | instructions | cycles |
+|---|---|---|
+| one in flight (each answer awaited) | +215 a question, +0.85 % (25,220 before, every round) | not measurable: ±15 % from round to round (the thread's wake-up) |
+| 32 in flight | +86 a question (median), geometric mean +0.9 % (95 %: 0.1 to 1.75 %) | +4.1 % (95 %: 2.5 to 5.7 %) |
+
+With 32 in flight, questions read together need a read of the clock each at their end, amid their reads of memory,
+which that read waits for (the vDSO orders its read of the TSC): about 2.5 % of the 4.1 % (the same server without
+its clock reads and record: +1.6 %, interval -0.04 to 3.3 %). A same-code control (one function added, never run)
+gives 1.0014 (0.987 to 1.016): the floor of the method. A write waits for its fsync, about 4 ms on this disk: its
+time is lost in it (B/A 0.96, interval 0.94 to 1.17). `cepheus status` costs a readdir and a stat a file of each
+database, a statvfs and a copy of the slices, with no lock of the server held.
+
+### Beside the giants
+
+- **PostgreSQL** logs a statement that took at least `log_min_duration_statement` ("Causes the duration of each
+  completed statement to be logged if the statement ran for at least the specified amount of time", off by default),
+  its text with its values, which may put personal data in the log; Cepheus writes the shape, never the values.
+  `pg_stat_statements`, a contrib module loaded by `shared_preload_libraries`, keeps every statement's shape (its
+  constants replaced) with its calls, total and mean time, rows and blocks: better than Cepheus, which keeps no
+  table of shapes, only the slow ones' lines and a histogram a database. Its statistics are SQL views
+  (`pg_stat_database`, `pg_stat_bgwriter`...), read by an exporter of its own; its `blks_hit` counts every read of a
+  buffer, where Cepheus's `cache.hits` counts the policy's. Its `auto_explain` logs a slow statement's plan too;
+  Cepheus logs no plan. Neither has percentiles: pg_stat_statements has the mean, the minimum, the maximum and the
+  standard deviation.
+- **Timing's own cost**: PostgreSQL leaves `track_io_timing` off by default "as it will repeatedly query the operating
+  system for the current time, which may cause significant overhead on some platforms", and ships `pg_test_timing`
+  to measure that clock; `pg_stat_statements` reads the clock around every statement, as Cepheus does around every
+  question.
+- **SQLite** has none of this: a program times its own statements (`sqlite3_trace_v2`, `sqlite3_profile`).
+- **Datomic** Pro calls a function of the operator's every minute with its metrics (`datomic.metricsCallback`: for
+  each, such as a transaction's or a storage read's time, its count, sum, minimum and maximum), and Datomic Cloud
+  sends them to CloudWatch; no percentile either.
+- **Prometheus's exporters** for PostgreSQL and MySQL are other processes that connect with a user of their own;
+  `cepheus status --format prometheus` is that exporter, with the admin token, and no process that runs between two
+  polls.
 
 ## Upgrades
 
