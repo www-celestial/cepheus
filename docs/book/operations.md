@@ -439,6 +439,15 @@ the invoices: its join and its foreign key check each row after the copy. An inv
 dropped in silence by the join of PostgreSQL and SQLite; Cepheus refuses the file, naming the line, before it
 writes anything.
 
+The reader's bounds and its quote rule (a quote opens a field at a field's start only, blank lines dropped as they
+are passed, fields made up to the header's count) were measured against the build before them, the same evening on
+the same SSD (its btrfs 79 % full, other jobs' tests running beside, load 2.5 to 5.3), 5 rounds each in turn (4 of the
+build before: one round lost its port to another server): the invoices 11.35 s [11.28, 13.81] against 12.20 s [11.06,
+13.40], of which the first pass 3.20 s [3.14, 3.48] against 3.03 s [3.00, 3.16] (0.17 s, about 5 %: each byte's quote
+state; 18 of the 20 pairs slower), the command's peak 533 MB [518, 560] against 550 MB [530, 603], the clients 1.00 s
+against 0.99 s. The invoices took less than half the table's time because the server's writing did (8.13 s [7.99,
+10.64] against 11.7 to 38.1 s), so these are not set beside the table's PostgreSQL and SQLite.
+
 A file of 10 GiB (10,737,434,790 bytes, 192,506,762 rows: 13 clients' invoices over and over, in a folder compressed
 by btrfs, `chattr +c`, so that it held 1.2 GB of a disk with 7 GB free) whose last row has 3 decimals for cents is
 checked whole and refused at that line, nothing written: 253 s (42 MB/s), the command's peak 244 MB, against 130 MB
