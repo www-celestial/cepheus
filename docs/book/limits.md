@@ -161,7 +161,8 @@ defaults, and the cache's size (`set_cache`).
 |---|---|---|
 | a group | 256 MiB, as on a single server; a frame past 1 MiB goes through the log in pieces of 1 MiB, applied whole at its last piece; a request is 16 MiB on the wire (a larger group: a change of the rules' consequences) | `Cluster.frame_limit`, `Cluster.piece` |
 | an Append | 1 MiB of entries (at least one); 1,024 entries or 8 MiB in flight to a follower | `Raft.max_append_bytes`, `Raft.max_inflight`, `Raft.max_inflight_bytes` |
-| the log's start | cut each second behind what every journal holds forced and every server holds (the floor); a server silent for 5 minutes, or one that needs a copy, is not waited for | `Cluster.floor_ms`, `Raft.floor` |
+| the log's segments | 16 MiB: a new segment begins when the next round would pass it (a round larger than that is a segment of its own) | `Raftlog.segment_limit` |
+| the log's start | cut each second, by whole segments, behind what every journal holds forced and every server holds (the floor); a server silent for 5 minutes, or one that needs a copy, is not waited for | `Cluster.floor_ms`, `Raft.floor` |
 | a copy of the databases | frames of 1 MiB; refused when it would leave less than 64 MiB free; the source keeps its log after the copy's index for 60 s after its last byte; a refused or broken one tried again after 1 s, doubling up to 30 s | `Catchup.margin`, `Catchup.pin_ms`, `Cluster.start_fetch` |
 | a file's records | entries of about 1 MiB, at most 16 MiB of them waiting for their commit at a time; a follower without the cluster's `vault.key` tries again every 2 s | `Cluster.files_commit`, `Cluster.vault_retry` |
 | a handover at a clean stop | at most two election timeouts (1 s), then the stop goes on | `Raft.hand_over` |

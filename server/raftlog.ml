@@ -40,8 +40,9 @@ let rh = 36
 let rt = 16
 let state_magic = "cepheus raft state\n"
 
-(* a segment starts once the newest passes this size (64 MB; tests make it small) *)
-let segment_limit = ref (64 lsl 20)
+(* a segment starts once the newest passes this size (16 MiB: the log's start moves by whole segments, so a smaller one
+   frees the disk sooner behind the floor; tests make it smaller) *)
+let segment_limit = ref (16 lsl 20)
 
 (* the entries' bytes kept in memory (the newest), so that a leader sends without reading its disk *)
 let cache_limit = ref (64 lsl 20)

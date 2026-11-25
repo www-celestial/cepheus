@@ -330,7 +330,10 @@ type t = {
   mutable damage : string option;
   seqs : (string, seq) Hashtbl.t;  (* the apply thread's sequences of pieces not whole *)
   mutable redo : int list;  (* the vault entries up to the applied index at the start: applied again first *)
-  open_first : int Atomic.t;  (* the first entry they need *)
+  stable : int Atomic.t;
+      (* the newest applied index with no sequence of pieces open after it: a copy is made there, and the log is cut
+         behind it, never inside a frame's pieces (an applied index and the sequences read apart could be of two
+         moments: the apply thread advances one after the other) *)
   fetching : bool Atomic.t;  (* a copy of the databases is being taken from a peer *)
   mutable fetch_after : float;  (* the next try after a refused or broken one (under sm) *)
   mutable fetch_wait : float;
@@ -484,9 +487,11 @@ let disk_loop t () =
     in
     if ops = [] then go := false
     else
-      (* consecutive puts of one generation: one round *)
+      (* consecutive puts of one generation: one round, of 8 MiB at most (a frame's pieces are not one round of
+         its whole size: the round is encoded in memory) *)
+      let bytes = List.fold_left (fun n (_, d) -> n + Bytes.length d) 0 in
       let rec merge acc = function
-        | Put a :: Put b :: rest when a.gen = b.gen && b.first = a.first + List.length a.entries ->
+        | Put a :: Put b :: rest when a.gen = b.gen && b.first = a.first + List.length a.entries && bytes a.entries + bytes b.entries <= 8 lsl 20 ->
           merge acc (Put { a with entries = a.entries @ b.entries; commit = max a.commit b.commit } :: rest)
         | x :: rest -> merge (x :: acc) rest
         | [] -> List.rev acc
@@ -638,7 +643,7 @@ let serve_copy t name (l : Replica.link) =
     let start () =
       Mutex.protect t.m (fun () ->
           (* never inside a frame's pieces: the copy's follower would lack its first ones *)
-          x := min (Atomic.get t.applied) (Atomic.get t.open_first - 1);
+          x := Atomic.get t.stable;
           pin ();
           !x, Raft.term_at t.core !x)
     in
@@ -659,16 +664,31 @@ let tick_loop t () =
 
 (* ---- the state machine ---- *)
 
-(* the frame of a committed entry into its database (another leader's, or this one's of an earlier term) *)
-let apply_frame t id frame =
+(* a whole frame's first group, count and body length, if its header, body and trailer check (Journal.frame_parts's
+   rule), its body moved to the start of the same bytes: a frame of 100 MiB is not copied once more *)
+let frame_in_place b =
+  let n = Bytes.length b in
+  let u32 o = Int32.to_int (Bytes.get_int32_le b o) land 0xFFFFFFFF in
+  if n < frame_head + 16 || u32 0 <> 0x46485043 || u32 24 <> Crc32c.bytes b 0 24 then None
+  else
+    let len = u32 4 in
+    if len <> n - frame_head - 16 || u32 20 <> Crc32c.bytes b frame_head len then None
+    else if u32 (frame_head + len) <> len || u32 (frame_head + len + 4) <> u32 20 || u32 (frame_head + len + 8) <> u32 24 || u32 (frame_head + len + 12) <> 0x54485043 then None
+    else
+      let first = Int64.to_int (Bytes.get_int64_le b 8) and count = u32 16 in
+      if first < 1 || count < 1 then None else (Bytes.blit b frame_head b 0 len; Some (first, count, b, len))
+
+(* the frame of a committed entry into its database (another leader's, or this one's of an earlier term); a frame
+   whose bytes are this call's own ([own_bytes]) is checked in place *)
+let apply_frame ?(own_bytes = false) t id frame =
   match Hashtbl.find_opt t.dbs id with
   | None -> Error (Printf.sprintf "a committed frame of database id %s, which this server's cluster.toml does not hold" id)
   | Some d -> (
-    match Journal.frame_parts frame with
+    match if own_bytes then frame_in_place frame else Option.map (fun (f, c, b) -> f, c, b, Bytes.length b) (Journal.frame_parts frame) with
     | None -> Error (Printf.sprintf "database %s: a committed frame that does not check" d.name)
-    | Some (first, count, body) -> (
+    | Some (first, count, body, len) -> (
       let r = { Engine.w = ([], 0, ""); res = None; rm = Mutex.create (); rc = Condition.create () } in
-      if not (Engine.submit d.live (Engine.Apply (r, { first; count; body; len = Bytes.length body }))) then Error "the database is closed"
+      if not (Engine.submit d.live (Engine.Apply (r, { first; count; body; len }))) then Error "the database is closed"
       else begin
         Mutex.lock r.rm;
         while r.res = None do Condition.wait r.rc r.rm done;
@@ -755,7 +775,6 @@ let apply_loop t () =
          | None -> fail t (Printf.sprintf "committed entry %d is of an unknown kind" !i)
          | Some e -> (
            let whole = track t.seqs !i term e in
-           Atomic.set t.open_first (open_first t.seqs);
            match e, whole with
            | Noop, _ -> ()
            | Records { rid; keys; records }, _ -> (
@@ -768,10 +787,13 @@ let apply_loop t () =
              if own () then (match entry t q.sfirst with Some (_, d0) -> await_own t p.pid (Bytes.sub d0 piece_head (min frame_head (Bytes.length d0 - piece_head))) | None -> ())
              else
                match assemble t.rlog ~pend:(fun j -> Mutex.protect t.pm (fun () -> Hashtbl.find_opt t.pend j)) ~get:(entry t) ~from:q.sfirst ~upto:!i ~total:q.stotal with
-               | frame -> (match apply_frame t p.pid frame with Ok () -> () | Error m -> fail t m)
+               | frame -> (match apply_frame ~own_bytes:true t p.pid frame with Ok () -> () | Error m -> fail t m)
                | exception Raftlog.Damaged m -> fail t m))
        | exception Raftlog.Damaged m -> fail t m);
-      if t.failed = None && not !stopped then Atomic.set t.applied !i;
+      if t.failed = None && not !stopped then begin
+        Atomic.set t.applied !i;
+        if Hashtbl.length t.seqs = 0 then Atomic.set t.stable !i
+      end;
       incr i
     done;
     Mutex.protect t.m (fun () -> refresh t; Condition.broadcast t.wc)
@@ -808,7 +830,10 @@ let rec propose t id _first _count frame =
 
 (* entries proposed at once, under the core's lock (they follow each other in the log, in this term): Ok once the
    last one is committed *)
-and propose_all t entries =
+and propose_all t entries = Result.map ignore (propose_at t entries)
+
+(* the same, Ok with the last entry's index *)
+and propose_at t entries =
   Mutex.protect t.m (fun () ->
       if t.failed <> None || not (ready_locked t) then Error Engine.not_leader
       else
@@ -833,7 +858,7 @@ and propose_all t entries =
           Hashtbl.replace t.waiters i (t.core.term, r);
           run t;
           while !r = None do Condition.wait t.wc t.m done;
-          Option.get !r)
+          Result.map (fun () -> i) (Option.get !r))
 
 (* ---- the vault's files ---- *)
 
@@ -887,7 +912,14 @@ let files_commit t name ~domain ~root =
 let files_erase t name domain =
   match List.find_opt (fun d -> d.name = name) t.db_list with
   | None -> Error ("invalid", "no such database")
-  | Some d -> (match propose_all t [ encode_erase d.id domain ] with Ok () -> Ok () | Error e -> Error (Wire.code_of_error e))
+  | Some d -> (
+    match propose_at t [ encode_erase d.id domain ] with
+    | Error e -> Error (Wire.code_of_error e)
+    | Ok i ->
+      (* answered once this server's vault erased it too (the apply thread): a Load after the answer finds it erased *)
+      Mutex.protect t.m (fun () ->
+          while Atomic.get t.applied < i && t.failed = None && not (Atomic.get t.stopping) do Condition.wait t.wc t.m done);
+      if Atomic.get t.applied >= i then Ok () else Error ("no_leader", "the server stops: the erasure is committed, applied at its next start"))
 
 (* ---- start, recovery, stop ---- *)
 
@@ -955,7 +987,7 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
       serve_until = Atomic.make 0;
       outs = Array.mapi (fun _ p -> { peer = p; oq = Queue.create (); om = Mutex.create (); oc = Condition.create (); link = None; thread = None }) (Array.of_list cfg.peers);
       stopping = Atomic.make false; threads = []; failed = None; streams = Hashtbl.create 4; sm = Mutex.create (); damage = r.damage;
-      seqs = Hashtbl.create 4; redo = []; open_first = Atomic.make max_int;
+      seqs = Hashtbl.create 4; redo = []; stable = Atomic.make 0;
       fetching = Atomic.make false; fetch_after = 0.; fetch_wait = 0.; fetch_note = ""; files_note = "" }
   in
   List.iter (fun d -> Hashtbl.replace t.dbs d.id d; d.live.propose <- propose t d.id) dbs;
@@ -968,7 +1000,7 @@ let create (cfg : Config.t) (o : opened) (dbs : db list) =
       | Some e -> ignore (track t.seqs i tm e)
       | None -> ());
   t.redo <- List.rev t.redo;
-  Atomic.set t.open_first (open_first t.seqs);
+  Atomic.set t.stable (min (Atomic.get t.applied) (open_first t.seqs - 1));
   t
 
 let start t =
@@ -987,7 +1019,7 @@ let checkpoint t =
       let upto =
         Mutex.protect t.m (fun () ->
             let c = t.core in
-            min (min (a + 1) (Atomic.get t.open_first)) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c (now ()) + 1))))
+            min (min (a + 1) (Atomic.get t.stable + 1)) (min (c.commit + 1) (min (c.persisted + 1) (Raft.floor c (now ()) + 1))))
       in
       match Raftlog.cut_before t.rlog upto with
       | () -> Mutex.protect t.m (fun () -> Raft.compact t.core (min upto (Raftlog.first t.rlog)))

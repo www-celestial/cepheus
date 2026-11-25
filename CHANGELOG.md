@@ -182,6 +182,9 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 
 ### Fixes
 
+- `cepheus verify` (and the check of a backup) named as damage a run whose journal position is the end of a segment
+  that the next one follows (the frame after the run's groups began a new segment): a whole database was taken for a
+  damaged one. Such a position is now the start of the next segment's first frame, as the engine reads it.
 - `cepheus restore --replace` twice over one folder within a second failed (`ENOTEMPTY`): the folder moved aside took
   the name of the one moved aside before. It now takes a free one (`-2`, `-3`, ...).
 - A newest journal segment whose header does not check while it holds bytes past it, or where the newest run

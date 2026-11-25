@@ -854,7 +854,14 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
     err c ~id ~kind "invalid" "a malformed request (kind %d): %s" kind m;
     Close
   | req -> (
-    if Atomic.get c.srv.stopping then (err c ~id ~kind "stopping" "the server is stopping"; Continue)
+    if Atomic.get c.srv.stopping then begin
+      (* a Raft cluster's member that stops sends its programs to the leader (it handed its leadership over first) *)
+      (match if c.srv.raft then c.srv.lead () else None with
+       | Some x -> not_here c ~id ~kind x
+       | None when c.srv.raft -> not_here c ~id ~kind ("no_leader", "this server is stopping: try again", "")
+       | None -> err c ~id ~kind "stopping" "the server is stopping");
+      Continue
+    end
     else
       match req with
       | Wire.Hello _ when c.session <> 0 ->

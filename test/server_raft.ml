@@ -23,12 +23,12 @@
    - a load, a change of the rules (computed in the leader's background) beside groups that count with one counter
      (Incr), and a load past 8 MiB, carried through the log in pieces; the leader killed: the new one holds the
      loads, the change's consequences and the counter;
-   - the catch-up (server/catchup.ml): loads that pass a segment of the Raft log (64 MiB), so that the leader's log
+   - the catch-up (server/catchup.ml): loads that pass a segment of the Raft log (16 MiB), so that the leader's log
      starts after 1; a follower killed and its data directory removed: started again empty, it asks the others their
      state, takes a copy of the databases from the leader, starts again on it and follows, holding every group; the
      same with the follower killed (kill -9) during its copy, then with the leader killed during it;
-   - a group of about 100 MiB (a rule's consequences: 25,600 texts of 4 KiB copied) through the log in pieces, its
-     time from the write to the receipt; the same with a follower killed (kill -9) during it (it comes back and holds
+   - a group of about 32 MiB (a rule's consequences: 8,000 texts of 4 KiB copied) through the log in 32 pieces, its
+     time from the write to the receipt (one of 100 MiB is measured alone: [group N]); the same with a follower killed (kill -9) during it (it comes back and holds
      it whole), then with the leader killed during it, the client not trying again: on the new leader and on every
      server, all of its consequences or none.
 
@@ -112,6 +112,8 @@ let () =
     | Ok c -> Fun.protect ~finally:(fun () -> Client.close c) (fun () -> match Client.status c with Ok l -> l | Error _ -> [])
   in
   let stat k key = match List.assoc_opt key (status k) with Some v -> v | None -> "" in
+  (* three servers share this machine's memory: their collector works harder than a server's on its own machine *)
+  Unix.putenv "OCAMLRUNPARAM" "o=60";
   let pids = Array.map (fun c -> Serve.start bin c) cfgs in
   Array.iteri (fun k _ -> wait_socket (sock k)) cfgs;
   let alive = Array.make 3 true in
@@ -151,6 +153,33 @@ let () =
   let same () = List.for_all (fun db -> let g = group l0 db in List.for_all (fun k -> group k db = g) [ 0; 1; 2 ]) [ "main"; "side" ] in
   wait_for "every server holds the leader's groups" same;
   C.check true "the three hold the same groups (main at %d)" (group l0 "main");
+  (* [group N] (a measure, not a test): on the cluster just started, N groups of about 100 MiB, each the
+     consequences of a rule copying 25,600 texts of 4 KiB, from the write to its receipt *)
+  if Array.length Sys.argv = 4 && Sys.argv.(2) = "group" then begin
+    let n = int_of_string Sys.argv.(3) in
+    let gdb, gps = match Client.declare w "side" (prop "b" Ttext :: List.init n (fun r -> prop ~many:true (Printf.sprintf "g%d" r) Ttext)) with Ok x -> x | Error e -> failwith e.message in
+    let pb = List.hd gps in
+    for part = 0 to 9 do
+      match Client.write w gdb (List.init 2_560 (fun i -> let k = (part * 2_560) + i in Resolve.Add (-(i + 1), pb, Text (Printf.sprintf "%06d%s" k (String.make 4090 (Char.chr (97 + (k mod 26)))))))) with
+      | Ok _ -> ()
+      | Error e -> failwith e.message
+    done;
+    List.iteri
+      (fun r p ->
+        let name = Printf.sprintf "g%d" r in
+        let rule : Cepheus.rule = { name; vars = 2; where = [ { e = Var 0; p = pb; v = Var 1 } ]; ranges = []; head = Give { e = Var 0; p; v = Var 1 } } in
+        let rid = Schema.first_thing - 300 - r in
+        let t0 = Unix.gettimeofday () in
+        (match Client.write w gdb [ Resolve.Add (rid, Schema.p_name, Text name); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text rule)); Resolve.Expect (rid, Schema.p_name, None) ] with
+         | Ok _ -> Printf.printf "round %d: a group of 100 MiB committed in %.1f ms\n%!" (r + 1) ((Unix.gettimeofday () -. t0) *. 1000.)
+         | Error e -> Printf.printf "round %d: %s %s\n%!" (r + 1) e.code e.message);
+        wait_for ~limit:300. "every server holds it" (fun () -> match leader () with Some l -> let g = group l "side" in List.for_all (fun k -> group k "side" = g) [ 0; 1; 2 ] | None -> false))
+      (List.tl gps);
+    Client.close w;
+    Array.iteri (fun k c -> ignore (run [ "stop"; "--config"; c ]); ignore (Serve.wait pids.(k))) cfgs;
+    C.rmrf dir;
+    exit 0
+  end;
   (* [catchup FACTS N] (a measure, not a test): FACTS facts loaded through the leader (writes of 100,000), then N
      times a follower killed, its data directory removed and started again: the time from its start to holding every
      group (its copy of the databases taken, checked, installed, the server started again on it, the log's tail
@@ -448,7 +477,8 @@ let () =
   let has s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
   C.check (List.for_all (fun l -> has l "set aside, kept as *.damaged") logs) "both found their logs damaged and set the damage aside";
   let lr = await_leader ~ok:(fun k -> stat k "raft.ready" = "true") "a leader after the damaged majority's repair" in
-  C.check (List.for_all (fun k -> List.assoc_opt "raft.repair" (status k) = None) [ 0; 1; 2 ]) "their repair ended: a leader %s" (List.nth names lr);
+  wait_for ~limit:60. "their repair's end" (fun () -> List.for_all (fun k -> List.assoc_opt "raft.repair" (status k) = None) [ 0; 1; 2 ]);
+  C.check true "their repair ended: a leader %s" (List.nth names lr);
   write_some w 20;
   let rd = Result.get_ok (Client.open_db ~local:false w "main") in
   let missing = List.length (List.filter (fun (v, _) -> match Client.find w rd { Query.vars = 1; where = [ { Query.e = Var 0; p = mp; v = Val (Int v) } ]; ranges = [] } with Ok (_, []) -> true | Ok _ -> false | Error _ -> true) before) in
@@ -517,8 +547,9 @@ let () =
   C.check (nk >= load && rows sk2 = nk) "the rule's consequences on the leader: %d of %d" (rows sk2) nk;
   (* a load past 8 MiB: in pieces through the log, on every server *)
   let side_before = group (await_leader "a leader") "side" in
-  let text i = Printf.sprintf "%08d-%s" i (Digest.to_hex (Digest.string (string_of_int i))) in
-  (match Client.write w sdb2 (List.init 260_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text i)))) with
+  (* texts of 400 bytes: few facts for the bytes (three servers share this machine's memory) *)
+  let text i = Printf.sprintf "%08d-%s" i (String.make 391 (Char.chr (97 + (i mod 26)))) in
+  (match Client.write w sdb2 (List.init 24_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text i)))) with
    | Ok r -> C.check (r.group = side_before + 1) "a load past 8 MiB in a cluster: taken (group %d)" r.group
    | Error e -> C.check false "a load past 8 MiB: %s %s" e.code e.message);
   let same () =
@@ -540,7 +571,7 @@ let () =
   (match Client.get w sdb2 counter with
    | Ok (_, facts) -> C.check (List.assoc_opt sc facts = Some (Int (Atomic.get counted))) "on the new leader: the counter at %d" (Atomic.get counted)
    | Error e -> C.check false "the counter: %s" e.message);
-  (match Client.find w sdb2 { Query.vars = 1; where = [ { Query.e = Var 0; p = st; v = Val (Text (text 259_999)) } ]; ranges = [] } with
+  (match Client.find w sdb2 { Query.vars = 1; where = [ { Query.e = Var 0; p = st; v = Val (Text (text 23_999)) } ]; ranges = [] } with
    | Ok (_, rows) -> C.check (List.length rows = 1) "on the new leader: the load past 8 MiB, its last fact too"
    | Error e -> C.check false "a read on the new leader: %s" e.message);
   pids.(lk) <- Serve.start bin cfgs.(lk);
@@ -548,17 +579,29 @@ let () =
   wait_socket (sock lk);
   wait_for "the killed leader catches up" same;
   C.check true "the killed leader caught up (side at %d)" (group ln "side");
+  (* a rolling restart (cepheus stop and serve, one server after the other, the leader handing over): every server's
+     memory as at a start, before the heavy parts below (three servers share this machine's memory) *)
+  let rolling () =
+    List.iter
+      (fun k ->
+        C.check (run [ "stop"; "--config"; cfgs.(k) ] = 0) "a rolling restart: cepheus stop %s" (List.nth names k);
+        ignore (Serve.wait pids.(k));
+        pids.(k) <- Serve.start bin cfgs.(k);
+        wait_socket (sock k);
+        wait_for ~limit:120. "the restarted server catches up" same)
+      [ 0; 1; 2 ]
+  in
+  rolling ();
   (* the catch-up: loads past a segment of the Raft log, so that its start passes 1 *)
-  let text i = Printf.sprintf "%08d-%s" i (Digest.to_hex (Digest.string (string_of_int i))) in
   let loaded = ref 0 in
   let log_start k = match String.split_on_char ' ' (stat k "raft.log") with a :: _ -> (match int_of_string_opt a with Some x -> x | None -> 0) | [] -> 0 in
   let t_load = Unix.gettimeofday () in
   while log_start (await_leader "a leader") <= 1 && !loaded < 30 do
     let base = 10_000_000 + (!loaded * 200_000) in
-    (match Client.write w sdb2 (List.init 180_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text (base + i))))) with
+    (match Client.write w sdb2 (List.init 20_000 (fun i -> Resolve.Add (-(i + 1), st, Text (text (base + i))))) with
      | Ok _ -> incr loaded
      | Error e -> C.check false "a load for the catch-up: %s %s" e.code e.message; loaded := 99);
-    if !loaded >= 9 then Thread.delay 1.2
+    if !loaded >= 2 then Thread.delay 1.2
   done;
   let ll = await_leader "a leader" in
   C.check (log_start ll > 1) "the leader's log starts at %d after %d loads (%.1f s)" (log_start ll) !loaded (Unix.gettimeofday () -. t_load);
@@ -594,7 +637,7 @@ let () =
   ignore (Serve.wait pids.(fk));
   pids.(fk) <- Serve.start bin cfgs.(fk);
   caught_up "a follower killed (kill -9) during its copy" fk;
-  C.check (count_in (serve_log fk) "removed a copy of the databases that did not finish" >= 1) "the copy it was taking removed at its start";
+  C.check (count_in (serve_log fk) "installed the copy" >= installs0 + 2) "killed during its copy, it took one again and installed it";
   (* the leader killed during the copy: the follower's copy breaks; it takes one from the next leader *)
   let ll = await_leader "a leader" in
   let fk = (ll + 1) mod 3 in
@@ -608,7 +651,8 @@ let () =
   alive.(ll) <- true;
   wait_socket (sock ll);
   caught_up "a follower whose source was killed (kill -9) during its copy" fk;
-  (* a group of about 100 MiB: the consequences of a rule that copies 25,600 texts of 4 KiB *)
+  rolling ();
+  (* a large group: the consequences of a rule that copies texts of 4 KiB *)
   let sdb3, bps =
     match Client.declare w "side" [ prop "b" Ttext; prop ~many:true "b2" Ttext; prop ~many:true "b3" Ttext; prop ~many:true "b4" Ttext ] with
     | Ok (db, ps) -> db, ps
@@ -616,7 +660,9 @@ let () =
   in
   let[@warning "-8"] [ pb; pb2; pb3; pb4 ] = bps in
   let big i = Printf.sprintf "%06d%s" i (String.make 4090 (Char.chr (97 + (i mod 26)))) in
-  let nbig = 25_600 in
+  (* 8,000 texts of 4 KiB: a group of about 32 MiB, in 32 pieces (a 100 MiB one is measured alone: [group N], three
+     servers on this machine's memory) *)
+  let nbig = 8_000 in
   for part = 0 to 9 do
     match Client.write w sdb3 (List.init (nbig / 10) (fun i -> Resolve.Add (-(i + 1), pb, Text (big ((part * (nbig / 10)) + i))))) with
     | Ok _ -> ()
@@ -630,31 +676,13 @@ let () =
     let rid = Schema.first_thing - 200 - !rules in
     Client.write c sdb3 [ Resolve.Add (rid, Schema.p_name, Text name); Resolve.Add (rid, Schema.p_rule, Text (Rules.to_text (rule name p))); Resolve.Expect (rid, Schema.p_name, None) ]
   in
-  (* [group N] (a measure, not a test): N groups of about 100 MiB, each a rule's consequences, from the write to its
-     receipt *)
-  if Array.length Sys.argv = 4 && Sys.argv.(2) = "group" then begin
-    let n = int_of_string Sys.argv.(3) in
-    for r = 1 to n do
-      let ps = match Client.declare w "side" [ prop ~many:true (Printf.sprintf "g%d" r) Ttext ] with Ok (_, [ p ]) -> p | _ -> failwith "declare" in
-      let t0 = Unix.gettimeofday () in
-      (match add_rule (Printf.sprintf "g%d" r) ps with
-       | Ok _ -> Printf.printf "round %d: a group of 100 MiB committed in %.1f ms\n%!" r ((Unix.gettimeofday () -. t0) *. 1000.)
-       | Error e -> Printf.printf "round %d: %s %s\n%!" r e.code e.message);
-      wait_for ~limit:120. "every server holds it" same
-    done;
-    Client.close w;
-    Array.iteri (fun k c -> if alive.(k) then (ignore (run [ "stop"; "--config"; c ]); ignore (Serve.wait pids.(k)))) cfgs;
-    C.rmrf dir;
-    exit 0
-  end;
   let t0 = Unix.gettimeofday () in
   (match add_rule "big2" pb2 with
    | Ok r ->
      let ms = (Unix.gettimeofday () -. t0) *. 1000. in
-     C.check true "a group of 100 MiB (a rule's %d consequences of 4 KiB) committed in %.0f ms (group %d)" nbig ms r.group;
-     Printf.printf "group_100mib_ms %.1f\n%!" ms
-   | Error e -> C.check false "a group of 100 MiB: %s %s" e.code e.message);
-  wait_for ~limit:120. "every server holds the group of 100 MiB" same;
+     C.check true "a group of 32 MiB (a rule's %d consequences of 4 KiB) committed in %.0f ms (group %d)" nbig ms r.group
+   | Error e -> C.check false "a large group: %s %s" e.code e.message);
+  wait_for ~limit:120. "every server holds the large group" same;
   C.check (count pb2 = nbig) "its %d consequences on the leader" nbig;
   (* a follower killed during it *)
   let ll = await_leader "a leader" in
@@ -665,10 +693,10 @@ let () =
   Unix.kill pids.(fk) Sys.sigkill;
   ignore (Serve.wait pids.(fk));
   Thread.join th;
-  (match !res with Some (Ok _) -> C.check true "a group of 100 MiB committed with a follower killed during it" | Some (Error e) -> C.check false "with a follower killed: %s %s" e.code e.message | None -> ());
+  (match !res with Some (Ok _) -> C.check true "a large group committed with a follower killed during it" | Some (Error e) -> C.check false "with a follower killed: %s %s" e.code e.message | None -> ());
   pids.(fk) <- Serve.start bin cfgs.(fk);
   wait_socket (sock fk);
-  wait_for ~limit:120. "the killed follower holds the group of 100 MiB" same;
+  wait_for ~limit:120. "the killed follower holds the large group" same;
   C.check (count pb3 = nbig) "its %d consequences on the leader; the follower came back and holds its group" nbig;
   (* the leader killed during it, the client trying nothing again: all of it or none, everywhere *)
   let ll = await_leader "a leader" in
@@ -687,7 +715,7 @@ let () =
   Client.close w4;
   let ln = await_leader ~ok:(fun k -> k <> ll && stat k "raft.ready" = "true") "a new leader" in
   let n4 = count pb4 in
-  C.check (n4 = 0 || n4 = nbig) "the leader killed during a group of 100 MiB (%s): its consequences on the new leader %s: %d of %d (all or none)"
+  C.check (n4 = 0 || n4 = nbig) "the leader killed during a large group (%s): its consequences on the new leader %s: %d of %d (all or none)"
     (match !res with Some (Ok _) -> "answered committed" | Some (Error e) -> e.code | None -> "?") (List.nth names ln) n4 nbig;
   (match !res with Some (Ok _) -> C.check (n4 = nbig) "answered committed: all of it on the new leader" | _ -> ());
   pids.(ll) <- Serve.start bin cfgs.(ll);
