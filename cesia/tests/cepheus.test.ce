@@ -651,3 +651,74 @@ defn isAFileKindAKind()
   bug.Assert(value.Equal(listed, [{Id: id, Name: "a.pdf", Size: 3, Type: "application/pdf"}]), "List is a Find")
   cepheus.Put(Scans, "b", "bytes", t).Error.Code == "invalid" and cepheus.Read(Scans, id, t).Error.Code == "invalid"
 end
+
+(* ---- links that name a kind: Link(to, onDelete) and Delete of a thing ---- *)
+
+Customer = cepheus.Kind("customer", {Name: cepheus.Text(), City: cepheus.Text()})
+Order = cepheus.Kind("order", {Customer: cepheus.Link(to = "customer"), Total: cepheus.Money(2)})
+OrderLine = cepheus.Kind("orderline", {Order: cepheus.Link(to = "order", onDelete = "cascade"), Price: cepheus.Money(2)})
+Memo = cepheus.Kind("memo", {Text: cepheus.Text(), About: cepheus.Link(to = "order", onDelete = "clear")})
+Folder = cepheus.Kind("folder", {Name: cepheus.Text(), Parent: cepheus.Link(to = "folder", onDelete = "cascade")})
+
+defn books()
+  (** A fork with a customer, an order of two lines and a memo about it. *)
+  t = cepheus.Fork(cepheus.Empty, [Customer, Order, OrderLine, Memo, Folder])?
+  ada = cepheus.Insert(Customer, {Name: "Ada", City: "Lyon"}, t)?
+  order = cepheus.Insert(Order, {Customer: ada, Total: 30}, t)?
+  r1 = cepheus.Insert(OrderLine, {Order: order, Price: 10}, t)?
+  r2 = cepheus.Insert(OrderLine, {Order: order, Price: 20}, t)?
+  memo = cepheus.Insert(Memo, {Text: "call", About: order}, t)?
+  result.Ok({Db: t, Ada: ada, Order: order, R1: r1, R2: r2, Memo: memo})
+end
+
+defn isLinkToRefusesAThingOfAnotherKind()
+  b = books()?
+  wrong = cepheus.Insert(Order, {Customer: b.Memo, Total: 1}, b.Db)
+  right = cepheus.Insert(Order, {Customer: b.Ada, Total: 1}, b.Db)
+  wrong.Error.Code == "invalid" and text.Contains("order/Customer links to customer things only", wrong.Error.Message) and result.IsOk(right)
+end
+
+defn isLinkToANewThingOfTheGroup()
+  b = books()?
+  r = cepheus.Write([cepheus.Add(cepheus.New(1), Customer.Name, "Bo"), cepheus.Add(cepheus.New(2), Order.Customer, cepheus.New(1)),
+                     cepheus.Add(cepheus.New(2), Order.Total, 5)], b.Db)?
+  value.Len(r.Things) == 2
+end
+
+defn isDeleteRefusedWhileLinked()
+  b = books()?
+  refused = cepheus.Delete(Customer, b.Ada, b.Db)
+  still = cepheus.Get(Customer, b.Ada, b.Db)?
+  bug.Assert(still.Name == "Ada", "a refused Delete leaves the customer")
+  ada = b.Ada
+  order = b.Order
+  refused.Error.Code == "invalid" and text.Contains("customer #$ada cannot be deleted while the order #$order links to it (order/Customer: refuse)", refused.Error.Message)
+end
+
+defn isDeleteCascadesAndClears()
+  b = books()?
+  cepheus.Delete(Order, b.Order, b.Db)?
+  list.All([cepheus.Get(Order, b.Order, b.Db)? == missing, cepheus.Get(OrderLine, b.R1, b.Db)? == missing, cepheus.Get(OrderLine, b.R2, b.Db)? == missing,
+            value.Equal(cepheus.Get(Memo, b.Memo, b.Db)?, {Text: "call", About: missing}), result.IsOk(cepheus.Delete(Customer, b.Ada, b.Db))])
+end
+
+defn isDeleteOfATreeAndOfNothing()
+  b = books()?
+  root = cepheus.Insert(Folder, {Name: "root"}, b.Db)?
+  a = cepheus.Insert(Folder, {Name: "a", Parent: root}, b.Db)?
+  aa = cepheus.Insert(Folder, {Name: "aa", Parent: a}, b.Db)?
+  other = cepheus.Insert(Folder, {Name: "other", Parent: root}, b.Db)?
+  g = cepheus.Delete(Folder, a, b.Db, why = "tidy")?
+  nothing = cepheus.Delete(Folder, b.Ada, b.Db)?
+  list.All([cepheus.Get(Folder, aa, b.Db)? == missing, cepheus.Get(Folder, other, b.Db)?.Name == "other", nothing == g + 1])
+end
+
+defn isWatchSeesACascade()
+  b = books()?
+  w = cepheus.Watch(2, (r, p) -> {Where: [[r, OrderLine.Order, b.Order], [r, OrderLine.Price, p]], Give: {Line: r, Price: p}}, b.Db)?
+  first = fiber.Receive(w.Changes)?
+  cepheus.Delete(Order, b.Order, b.Db)?
+  gone = fiber.Receive(w.Changes)?
+  cepheus.Close(w)
+  value.Len(first.Rows) == 2 and value.Len(gone.Removed) == 2 and value.Len(gone.Added) == 0
+end
