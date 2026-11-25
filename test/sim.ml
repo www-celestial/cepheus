@@ -24,7 +24,7 @@ let sdir = "/db/snapshots"
 
 let props =
   [ prop "name" Ttext; prop ~many:true "tag" Ttext; prop "score" Tint; prop ~unique:true "mail" Ttext;
-    prop ~many:true "friend" Tlink; prop "at" Tdate; prop "w" Tfloat; prop "price" (Tmoney 2); prop "ok" Tbool ]
+    prop ~many:true "friend" Tlink; prop "at" Tdate; prop "w" Tfloat; prop "price" (Tmoney 2); prop "ok" Tbool; prop "boss" Tlink ]
 
 type w = {
   seed : int;
@@ -71,7 +71,9 @@ let declare_ops (v : Store.view) =
         while Schema.find v.schema !next <> None do incr next done;
         let p = !next in
         incr next;
-        ops := !ops @ List.map (fun (e, q, x) -> Add (e, q, x)) (Schema.facts p d)
+        ops := !ops @ List.map (fun (e, q, x) -> Add (e, q, x)) (Schema.facts p d);
+        (* a boss is a thing with a name; when it loses its name, the link goes (clear) *)
+        if d.name = "boss" then ops := !ops @ [ Add (p, Schema.p_to, Text "name"); Add (p, Schema.p_delete, Text "clear") ]
       end)
     props;
   !ops
@@ -109,7 +111,7 @@ let gen_ops w (v : Store.view) =
     let some () = if things = 0 then -1 else Schema.first_thing + Rng.int r things in
     let small = [| "a"; "b"; "c"; "d" |] in
     let one () =
-      match Rng.int r 15 with
+      match Rng.int r 17 with
       | 0 | 1 -> [ Add (-1, p "name", Text ("n" ^ Rng.pick r small)); Add (-1, p "score", Int (Rng.int r 5)) ]
       | 2 -> [ Add (some (), p "score", Int (Rng.int r 5)) ]
       | 3 -> [ Add (some (), p "tag", Text (Rng.pick r small)) ]
@@ -126,6 +128,9 @@ let gen_ops w (v : Store.view) =
         [ Add (-1, p "name", Text (String.make (Rng.int r 900) 'x')) ]
       (* a counter: replayed from the journal, its values must come back the same *)
       | 13 -> [ Incr (some (), p "score", Rng.int r 5 - 2, if Rng.bool r then Some (-1, p "score") else None) ]
+      (* a link that names a kind, and a Delete that clears the links to its thing *)
+      | 14 -> [ Add (some (), p "boss", Link (some ())) ]
+      | 15 -> [ Delete (some (), "name") ]
       | _ -> [ Retract (some (), p "friend", Link (some ())) ]
     in
     List.concat (List.init (1 + Rng.int r 3) (fun _ -> one ()))

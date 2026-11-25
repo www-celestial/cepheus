@@ -78,12 +78,14 @@ let run seed =
   let r = Rng.make seed in
   let db = fork empty in
   let[@warning "-8"] (Ok [ name; tag; score; status; friend; price; owner ]) = declare db props in
-  (* a rule half of the time: friends are friends both ways *)
+  (* a rule half of the time: friends are friends both ways; else, half of the time, an owner is a thing with a name,
+     and what it owns is deleted with it (a cascade, seen by the watches as the rows it takes away) *)
   if Rng.int r 2 = 0 then
     ignore
       (define db
          [ { name = "both-ways"; vars = 2; where = [ { e = Var 0; p = friend; v = Var 1 } ]; ranges = [];
-             head = Give { e = Var 1; p = friend; v = Var 0 } } ]);
+             head = Give { e = Var 1; p = friend; v = Var 0 } } ])
+  else if Rng.int r 2 = 0 then ignore (Result.get_ok (link_to db [ owner, "name", Cascade ]));
   let v = ref (view db) in
   let views = Hashtbl.create 256 in
   Hashtbl.replace views !v.group !v;
@@ -205,7 +207,8 @@ let run seed =
   in
   let random_ops () =
     let x = pick () in
-    match Rng.int r 8 with
+    match Rng.int r 9 with
+    | 8 -> [ Resolve.Delete (x, "name") ]
     | 0 | 1 ->
       [ Resolve.Add (-1, name, Text names.(Rng.int r 4)); Add (-1, status, Text statuses.(Rng.int r 3)); Add (-1, price, Money (Rng.int r 900));
         Add (-1, owner, Link (pick ())); Add (-1, score, Int (Rng.int r 100)) ]

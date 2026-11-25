@@ -241,6 +241,9 @@ let run seed =
     (define !db
        [ { name = "high"; vars = 2; where = [ { e = Var 0; p = score; v = Var 1 } ]; ranges = [ (1, Int 20, Int max_int) ];
            head = Give { e = Var 0; p = mark; v = Val (Bool true) } } ]);
+  (* a seed in three: links that name a kind, a thing with a name: an owner's link cleared, a friend's deleted with it *)
+  let linked = seed mod 3 = 0 in
+  if linked then ignore (Result.get_ok (link_to !db [ owner, "name", Clear; friend, "name", Cascade ]));
   let mdisk = Sim_disk.disk (Sim_disk.create (Rng.make seed)) in
   mdisk.mkdir "/merge";
   let merged = ref None in
@@ -270,6 +273,10 @@ let run seed =
     (if Array.length !things > 0 && Rng.int r 3 = 0 then
        let t = !things.(Rng.int r (Array.length !things)) in
        match Cepheus.values (view !db) t score with x :: _ -> ignore (write !db [ Retract (t, score, x) ]) | [] -> ());
+    (* and deletes: of a thing's name (its links follow), or its score *)
+    (if Array.length !things > 0 && Rng.int r 2 = 0 then
+       let t = !things.(Rng.int r (Array.length !things)) in
+       ignore (write !db [ Delete (t, if Rng.int r 3 = 0 then "score" else "name") ]));
     if Rng.int r 3 = 0 then begin
       let v = view !db in
       (* the delta and some of the runs, the newest: the writes after it go on top of its run *)
@@ -281,6 +288,19 @@ let run seed =
     end
   done;
   let views = view !db :: (match !merged with Some m -> [ m ] | None -> []) in
+  (* the links that name a kind hold in every view: an owner, a friend, is a thing with a name *)
+  if linked then
+    List.iter
+      (fun (v : Store.view) ->
+        let fl = C.F.elements (C.facts_of_view v) in
+        List.iter
+          (fun (e, p, x) ->
+            match x with
+            | Value.Link t when p = owner || p = friend ->
+              C.check (List.exists (fun (e', p', _) -> e' = t && p' = name) fl) "seed %d: #%d links to #%d, which has no name" seed e t
+            | _ -> ())
+          fl)
+      views;
   List.iter
     (fun (v : Store.view) ->
       let fl = C.F.elements (C.facts_of_view v) in

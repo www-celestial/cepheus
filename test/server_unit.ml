@@ -137,7 +137,8 @@ let rand_request r =
              after = (if Rng.bool r then None else Some (Array.init (Rng.int r 3) (fun _ -> rand_value r))) } in
     Wire.Find { db = 0; query = q; select; extra = []; order; timeout = 0 }
   | 4 ->
-    let op () = match Rng.int r 6 with
+    let op () = match Rng.int r 7 with
+      | 6 -> Resolve.Delete (Rng.int r 200 - 50, String.make (Rng.int r 9) (Char.chr (97 + Rng.int r 26)))
       | 0 -> Resolve.Add (Rng.int r 100 - 50, Rng.int r 40, rand_value r)
       | 1 -> Resolve.Retract (Rng.int r 100, Rng.int r 40, rand_value r)
       | 2 -> Resolve.Expect (Rng.int r 100, Rng.int r 40, Some (rand_value r))
@@ -236,7 +237,8 @@ let wire () =
   let good = ref true and tries = ref 0 in
   for _ = 1 to 2000 do
     let op () =
-      match Rng.int r 3 with
+      match Rng.int r 4 with
+      | 3 -> Resolve.Delete (Rng.int r 200 - 100, String.init (Rng.int r 12) (fun _ -> Char.chr (Rng.int r 256)))
       | 0 -> Resolve.Incr (Rng.int r 200 - 100, Rng.int r 70000, Rng.int r 1000 - 500, None)
       | 1 -> Resolve.Incr (Rng.int r 200 - 100, Rng.int r 40, (if Rng.bool r then max_int else min_int), Some (Rng.int r 200 - 100, Rng.int r 40))
       | _ -> Resolve.Add (Rng.int r 100, Rng.int r 40, rand_value r)
@@ -570,6 +572,22 @@ let rights_kinds () =
   check (denied (write k [ Incr (-1, 17, 1, Some (thing, 23)) ])) "kinds: an Incr into a kind not added is denied";
   check (denied (write a [ Incr (-1, 22, 1, Some (-2, 16)) ])) "kinds: add only, into another kind: denied";
   check (ok (write a [ Incr (-1, 22, 1, Some (-2, 17)) ])) "kinds: add only, within its kind: written";
+  (* links that name a kind: a link fact reads its kind; a Delete, and a retraction of a fact of a kind links name,
+     need every kind it may reach: to add to those a cascade or a clear reaches, to read those whose links refuse *)
+  let link p kind od = [ Resolve.Expect (p, Schema.p_to, None); Add (p, Schema.p_to, Text kind); Add (p, Schema.p_delete, Text od) ] in
+  check (ok (write w (declare 24 "transaction/Of" Tlink @ link 24 "compte" "cascade" @ declare 25 "secret/Of" Tlink @ link 25 "transaction" "refuse")))
+    "kinds: links declared";
+  let compte = match write w [ Add (-1, 16, Text "Cy") ] with Some (Wire.Receipt { things = (_, t) :: _; _ }) -> t | _ -> 0 in
+  check (ok (write k [ Add (-1, 17, Int 3); Add (-1, 24, Link compte) ])) "kinds: a link to a kind read";
+  check (denied (write a [ Add (-1, 17, Int 3); Add (-1, 24, Link compte) ])) "kinds: a link to a kind not read is denied (its refusal would tell)";
+  let tr = match write w [ Add (-1, 17, Int 4); Add (-1, 24, Link compte) ] with Some (Wire.Receipt { things = (_, t) :: _; _ }) -> t | _ -> 0 in
+  check (denied (write k [ Delete (compte, "compte") ])) "kinds: a Delete of a kind not added is denied";
+  check (denied (write w [ Delete (tr, "nothing") ]) = false) "kinds: a write token's Delete is not denied";
+  (* k adds transaction, reads compte and transaction, not secret: a transaction's deletion meets secret's refuse *)
+  check (denied (write k [ Delete (tr, "transaction") ])) "kinds: a Delete whose links refuse from a kind not read is denied";
+  check (denied (write k [ Retract (tr, 17, Int 4) ])) "kinds: so is a retraction of a fact of that kind";
+  check (ok (write w [ Delete (tr, "transaction") ])) "kinds: a write token deletes it";
+  check (ok (write w [ Delete (compte, "compte") ])) "kinds: and a compte, its transactions with it (cascade)";
   (* every operator under rights per kind, on random questions: denied when any pattern, those inside Not and Or too,
      names a kind the token may not read (16 and 17 read, 18 not); else the rows a write token gets, in the same
      order, whatever Sort, Limit and After a client sends (a cursor made by hand included) *)
@@ -1029,8 +1047,9 @@ let versions () =
     Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
-  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5) && welcome (hello 6) && welcome (hello 7)) "versions: a server speaks 1 to 7";
-  check (match hello 8 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 8";
+  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5) && welcome (hello 6) && welcome (hello 7)
+         && welcome (hello 8)) "versions: a server speaks 1 to 8";
+  check (match hello 9 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 9";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -1071,7 +1090,7 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 7; 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 8; 7; 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
      (* an Incr to a server of protocol 3 or older is refused in the program, never sent; a write without it is sent *)
      let db = { Client.handle = 0; group = 0; props = []; local = None; wants_local = false; retry_at = 0. } in
      check (Client.write c db [ Resolve.Incr (65536, 16, 1, None) ] = Error { code = "invalid"; message = Client.no_incr } && c.serial = 0)
@@ -1099,6 +1118,12 @@ let versions () =
        "versions: Less and Optional to a server of 6 are refused before they are sent";
      check (match Client.watch c db ~extra:opt { q with vars = 3 } with _ -> false | exception Invalid_argument m -> m = Client.no_less 6)
        "versions: and in a watch";
+     (* Delete, and a link that names a kind, to a server of protocol 7 or older: refused in the program, never sent *)
+     c.spoken <- 7;
+     check (Client.write c db [ Resolve.Delete (65536, "client") ] = Error { code = "invalid"; message = Client.no_delete 7 }
+            && Client.write c db [ Resolve.Add (16, Schema.p_to, Text "client") ] = Error { code = "invalid"; message = Client.no_delete 7 }
+            && c.serial = 0)
+       "versions: a Delete and a link that names a kind to a server of 7 are refused before they are sent";
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
   Thread.join old;
