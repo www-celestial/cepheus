@@ -907,7 +907,9 @@ whatever did it, a `Delete` or the `Retract` of its last field; the links follow
 and its links read and retract are at most the work budget of the group, a million for one `Delete` (10 x (100,000 +
 100 per operation), the rules' budget): past it, the group is refused whole, Code `"invalid"`, and nothing is done;
 delete the linking things first, in groups of their own. The things that link to a thing are found by the index by
-value, which holds every fact: one lookup a link property, whatever their number. Rules see a `Delete` as the
+value, which holds every fact: one lookup a link property, whatever their number (a refusal takes 6 µs whether
+10 or 10,000 invoices link to the client, a cascade about 1.4 µs a line: [measured](benchmarks.md#deletes-and-links-that-name-a-kind-2026-11-25)).
+Rules see a `Delete` as the
 retractions it makes: what they derive follows, and a `Never` is checked on the state after it. `Watch` sees them as
 any change: the rows they take away. A deleted thing stays in the history, as every group does. To delete things of a
 kind needs a token that may add to that kind and to every kind a cascade or a clear can reach from it, and read every

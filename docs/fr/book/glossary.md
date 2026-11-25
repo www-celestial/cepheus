@@ -79,6 +79,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **buffer pool** (le cache) — la mémoire où une base garde des pages de ses fichiers, en décidant elle-même ce qui
   reste ; celui de Cepheus contient les pages de 16 KiB des runs, 1 GiB par défaut.
   [architecture](architecture.md#les-pages-et-le-cache)
+- **cascade**, **clear**, **refuse** (à la suppression) — ce que fait un lien qui nomme un kind quand la chose vers
+  laquelle il pointe cesse d'être du kind (`onDelete`) : `cascade` supprime aussi la chose qui pointe, `clear` retire
+  le lien, `refuse` (par défaut) refuse le groupe ; les `ON DELETE CASCADE`, `SET NULL` et `RESTRICT` (ou `NO ACTION`)
+  de SQL. [Cesia](cesia.md#supprimer-une-chose)
 - **cardinality** (la cardinalité) — combien de valeurs une chose peut avoir pour une propriété : une (le défaut) ou
   plusieurs (`~many:true`). [concepts](concepts.md#les-propriétés-et-le-schéma)
 - **certificate** (un certificat) — une clé publique et un nom, signés par une certificate authority : ce qu'un serveur
@@ -183,6 +187,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **datom** — le fait de Datomic : entité, attribut, valeur, transaction, ajouté. Le fait de Cepheus, ce sont les trois
   premiers ; le groupe et l'indicateur d'ajout ou de retrait vivent dans le journal.
   [concepts](concepts.md#les-faits--le-modèle-entityattributevalue)
+- **Delete** (d'une chose ; supprimer) — l'opération qui supprime une chose d'un kind, le `DELETE` de SQL : les faits
+  de la chose du kind retirés au writer, et les liens vers elle suivis, en un seul groupe ; la chose reste dans
+  l'historique. [Cesia](cesia.md#supprimer-une-chose)
 - **delta** — les changements depuis le dernier merge, dans des persistent maps (des tables dont les anciennes versions
   restent valides) ; le niveau 0 du LSM-tree (C0), environ 170 octets par changement.
   [architecture](architecture.md#les-index--les-runs-et-le-delta) Dans le reasoner (la partie qui applique les
@@ -276,6 +283,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   serveur envoie chaque frame que fait le writer, avant son fsync, et les runs de la base ; le follower est la copie de
   la base que le lecteur en tire, en appliquant chaque frame comme l'a fait le serveur.
   [serveur](server.md#lectures-locales-g15)
+- **foreign key** (une clé étrangère) — en SQL, une colonne dont les valeurs doivent être les clés des lignes d'une
+  autre table (`REFERENCES client`) ; dans Cepheus, un lien qui nomme un kind (`Link(to = "client")`) : chaque chose
+  vers laquelle il pointe est de ce kind, vérifié à chaque écriture. [Cesia](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)
 - **fork** — une base temporaire qui part d'une vue : les mêmes écritures et les mêmes vérifications, rien sur le
   disque, rien à payer pour en faire un. [concepts](concepts.md#les-forks)
 - **frame** — l'unité d'une écriture et d'un fsync dans le journal : un en-tête, les groupes, un trailer.
@@ -352,6 +362,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **kind** (client Cesia) — une sorte de chose dans un programme Cesia : un nom et des champs, chacun une propriété d'un
   type (`client/City` pour le champ `City` du kind `client`) ; `Insert` et `Get` écrivent et lisent les champs d'une
   chose pour un kind sous la forme d'une map. [Cesia](cesia.md#les-kinds-et-les-valeurs-quils-tiennent)
+- **link that names a kind**, **of a kind** (un lien qui nomme un kind, d'un kind) — une propriété de lien avec un
+  kind (`cepheus/to`) : ses valeurs sont des choses de ce kind. Une chose est d'un kind tant qu'elle a un fait d'une
+  des propriétés du kind qu'une écriture a affirmé. [API](api.md#les-liens-qui-nomment-un-kind--les-foreign-keys)
 - **LEFT JOIN** (left outer join) — le join de SQL qui garde chaque ligne de son côté gauche même quand le côté
   droit n'a rien pour elle, les colonnes du côté droit étant alors NULL ; l'`Optional` de Cepheus, dont la cellule est
   alors `missing`. [Cesia](cesia.md#less-lessorequal-et-optional)

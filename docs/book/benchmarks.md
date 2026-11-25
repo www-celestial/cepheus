@@ -89,6 +89,63 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Deletes and links that name a kind (2026-11-25)
+
+**Method.** `bench/dbench.ml load`: 10,000 clients, 100,000 invoices (`invoice/client` names the kind client,
+`refuse`), 200,000 lines over them (`line/invoice`: `cascade`), and the measured things: clients of 0, 100 and 10,000
+invoices, invoices of 0, 100 and 10,000 lines, and of 0, 100 and 10,000 notes (`note/about`: `clear`), 680,681 facts
+merged into one run, on the SATA SSD. PostgreSQL 18.6 the same rows (`pg.sh fk load`, `bench/pg/fk.sql`), the
+referencing columns indexed, as a PostgreSQL user writes them, `REFERENCES client` with no action (`NO ACTION`, which
+refuses), `ON DELETE CASCADE` and `ON DELETE SET NULL`. Each side measures its engine's work and throws it away, so that
+every run deletes the same: Cepheus `dbench.exe delete`, the group of one `Delete` written to a fork of the database
+(the writer's resolve, nothing on the disk); PostgreSQL `pg.sh fk run`, the `DELETE` timed inside the server by a
+PL/pgSQL function in a subtransaction rolled back (a refusal by a foreign key caught), its plan kept by the session.
+5 rounds, each side a median of 21 runs; given: the median of the 5 rounds, and in brackets their least and largest.
+The machine was shared with other jobs: a load average (1 minute) of 2.7 to 3.1 on its 8 threads.
+
+| a Delete of | linking things | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---:|---|
+| a client, `refuse` (refused but for 0) | 0 | **5 µs** [5, 6] | 92 µs [74, 107] | Cepheus, 18 times |
+| | 100 | **6 µs** [5, 6.9] | 78 µs [78, 90] | Cepheus, 13 times |
+| | 10,000 | **6 µs** [6, 10] | 89 µs [81, 98] | Cepheus, 15 times |
+| an invoice, its lines `cascade` | 0 | **11.9 µs** [11, 16] | 120 µs [114, 133] | Cepheus, 10 times |
+| | 100 | **176 µs** [167, 186] | 193 µs [174, 200] | about the same |
+| | 10,000 | 27.3 ms [26.3, 30.3] | **5.16 ms** [5.06, 5.34] | PostgreSQL, 5.3 times |
+| an invoice, its notes' link `clear` | 0 | **11 µs** [4.1, 12.9] | 109 µs [106, 114] | Cepheus, 10 times |
+| | 100 | **93 µs** [85, 109] | 723 µs [667, 754] | Cepheus, 7.8 times |
+| | 10,000 | **11.1 ms** [10.8, 11.4] | 46.5 ms [45.3, 47.7] | Cepheus, 4.2 times |
+| &nbsp;&nbsp;beside: a group of `Retract` of the 20,000 facts of the 10,000 lines | | 21.6 ms [20.7, 22.4] | | |
+
+- **Finding the things that link to a thing** is one lookup in the index by value a link property that names the
+  kind, whatever their number: a refusal costs the same at 0, 100 or 10,000 invoices, since it needs one of them.
+  PostgreSQL's refusal runs the foreign key's query (`SELECT 1 FROM invoice WHERE client = $1 FOR KEY SHARE`) through
+  its trigger machinery, about 80 µs whatever the count.
+- **A cascade costs what retracting its facts costs**, plus a quarter for following the links (27.3 against 21.6 ms
+  at 10,000 lines): each retraction goes into the writer's persistent maps, about 1 µs a fact. PostgreSQL deletes a row
+  by marking it (its `xmax`), with no index touched until `VACUUM`: 0.5 µs a line, 5.3 times faster at 10,000. Making
+  Cepheus's large retractions cheaper, as its large additions are (the path of loads), is not built yet.
+- **A clear** retracts one fact a note: 1.1 µs a note against PostgreSQL's 4.6 µs, whose `SET NULL` updates each row:
+  a new version of it, and of its index entries.
+- PostgreSQL's times include the subtransaction that catches a refusal: 11 µs, measured by the same function around a
+  read of one row by its key (21 runs); Cepheus's fork costs nothing to make.
+
+**A link that names a kind costs a write almost nothing.** `dbench.exe write`: 200,000 groups of one invoice each
+(its link to a client and its total) on a fork, in 5 passes, the median pass; 5 rounds alternated with main before this
+work (105735c), built the same way, each on its own copy of the data; PostgreSQL: 10,000 `INSERT`s of a bill row in a
+PL/pgSQL loop, rolled back, into a table without a foreign key and one with (`REFERENCES account`), 5 passes.
+
+| one write of an invoice | Cepheus | PostgreSQL 18.6 |
+|---|---:|---:|
+| a link to any thing (no foreign key) | 3.90 µs [3.80, 4.21] (main), 3.96 µs [3.90, 4.11] (this) | 5.46 µs [5.33, 5.65] |
+| a link that names a kind (a foreign key) | **4.17 µs** [4.04, 4.31] | 15.1 µs [14.8, 16.1] |
+| the check's cost | 0.2 µs | 9.6 µs |
+
+- The check is one lookup: the linked thing has a fact of one of the kind's properties (the first one it tries, for a
+  client). PostgreSQL runs the foreign key's query through a trigger at each row, which triples an insert's cost.
+- **Writes are not slower.** Against main, on a database whose schema has no link that names a kind, 11 rounds
+  alternated (a load of 2.2 to 2.4): 1.02 times main's time [0.83, 1.16], within the machine's noise; on a schema with
+  links, a write of another property: 1.00 [0.94, 1.04], 5 rounds.
+
 ## Less, Optional and one shared counter (2026-11-25), at 1 million facts
 
 **Method.** The data of the other sections at 1 M facts (11,363 clients, 227,260 invoices, 56,797 follow links), loaded

@@ -144,6 +144,16 @@ sommes y sont exactes, `Sum` compris) et un Float en Cesia : un montant d'au plu
 1 234 567 890 123,45, écrit puis relu, donne les mêmes unités mineures (un flottant de 64 bits en est à moins d'une
 demi-unité) ; au-delà, ses derniers chiffres s'arrondissent.
 
+`cepheus.Link(to = "client")` est un lien qui **nomme un kind**, la **foreign key** (la clé étrangère) de SQL
+(`REFERENCES client`) : la chose vers laquelle il pointe doit être un client, c'est-à-dire avoir un fait du kind client
+qu'une écriture lui a donné (une valeur d'un de ses champs ; un fait que seule une règle donne ne fait d'aucune chose un
+client), vérifié par le serveur à chaque écriture sur l'état d'après le groupe, si bien qu'un client fait dans le même
+groupe compte. `to` prend le nom du kind, un Text, pour qu'un kind puisse pointer vers lui-même (le parent d'une
+catégorie, le chef d'un employé) et deux kinds l'un vers l'autre. `onDelete` dit ce que fait le lien quand sa chose
+cesse d'être un client : `"refuse"` (par défaut) refuse le groupe qui la laisserait ainsi, `"cascade"` supprime aussi
+la chose qui pointe, `"clear"` retire le lien ([supprimer une chose](#supprimer-une-chose)). Un `Link()` sans `to`
+prend l'id de n'importe quelle chose, comme avant.
+
 ## Insert, Get, Update
 
 ```cesia norun
@@ -906,7 +916,8 @@ Un **kind de fichiers** garde des fichiers dans la base : `Scans = cepheus.Files
 `cepheus.Put(Scans, name, bytes, db, type, owner, cold)` stocke un fichier et donne son id une fois ses octets et ses
 faits sur le disque du serveur ; `cepheus.Read(Scans, id, db, from, len)` donne ses octets, tous ou un intervalle
 (seuls les chunks, les morceaux du fichier, qui sont sous cet intervalle sont lus) ; `cepheus.List(Scans, db)` ses
-fichiers (un `Find`) ; `cepheus.Delete(Scans, id, db)` retire ses faits ; `cepheus.Erase(owner, db)` détruit la clé
+fichiers (un `Find`) ; `cepheus.Delete(Scans, id, db)` retire ses faits ([supprimer une chose](#supprimer-une-chose)) ;
+`cepheus.Erase(owner, db)` détruit la clé
 d'un propriétaire, après quoi chaque fichier qu'il possédait est illisible, partout où ses octets sont allés. Les droits
 d'un token sur le kind sont ses droits sur les fichiers. Comment les octets sont gardés (des chunks stockés une seule
 fois, compressés, scellés, vérifiés à chaque lecture) : [le vault](vault.md).
@@ -917,6 +928,71 @@ db = cepheus.Connect("cepheus://srv1:7400/shop", [Client, Scans], token = sys.En
 f = cepheus.Put(Scans, "2026-11.pdf", sys.Read("2026-11.pdf")?, db, type = "application/pdf", owner = ada)?
 head = cepheus.Read(Scans, f, db, from = 0, len = 1024)?
 ```
+
+## Supprimer une chose
+
+`cepheus.Delete(kind, id, db, by = 0, why = "")` supprime une chose d'un kind, le `DELETE` de SQL : au serveur, ses
+faits de ce kind (chaque valeur de chaque champ du kind) sont retirés, et chaque lien qui nomme le kind et pointe vers
+elle fait ce que dit son `onDelete`, le tout en un seul groupe : un `Ok` du numéro du groupe, ou un `Err` et rien
+d'écrit.
+
+```cesia norun
+Order = cepheus.Kind("order", {Client: cepheus.Link(to = "client"), Total: cepheus.Money(2)})
+Line = cepheus.Kind("line", {Order: cepheus.Link(to = "order", onDelete = "cascade"), Price: cepheus.Money(2)})
+db = result.Unwrap(cepheus.Connect(sys.Env("CEPHEUS_URL"), [Client, Invoice, Order, Line], token = sys.Env("CEPHEUS_TOKEN")))
+order = result.Unwrap(cepheus.Insert(Order, {Client: ada, Total: 30}, db))
+for price in [10, 20]
+  result.Unwrap(cepheus.Insert(Line, {Order: order, Price: price}, db))
+end
+io.Print(cepheus.Insert(Order, {Client: order, Total: 1}, db).Error.Message)
+io.Print(cepheus.Delete(Client, ada, db).Error.Message)
+io.Print(cepheus.Delete(Order, order, db))
+io.Print(cepheus.Find(1, (l) -> {Where: [[l, Line.Order, order]], Give: {Line: l}}, db))
+```
+
+```text
+order/Client links to client things only, and #65549 is not one
+the client #65536 cannot be deleted while the order #65549 links to it (order/Client: refuse)
+Ok(30)
+Ok([])
+```
+
+- **refuse** (par défaut) : un groupe qui laisse une chose qui n'est plus du kind alors qu'un lien de `"refuse"` pointe
+  encore vers elle est refusé en entier, avec le Code `"invalid"`, qui nomme le kind, la chose, une chose qui pointe
+  vers elle et la propriété.
+- **cascade** : la chose qui pointe est supprimée aussi, dans le kind de son lien (`Line.Order` est du kind line), comme
+  `Delete` le ferait, et les liens vers elle suivent à leur tour ; une chose atteinte deux fois n'est suivie qu'une
+  fois, si bien qu'un cycle (deux choses qui pointent l'une vers l'autre, une chose qui pointe vers elle-même, un arbre
+  de catégories) se termine.
+- **clear** : le lien est retiré ; la chose qui pointe garde ses autres champs.
+
+Exactement : une chose **cesse d'être** d'un kind quand un groupe la laisse sans aucun fait du kind qu'une écriture a
+affirmé, quoi que ce soit qui l'ait fait, un `Delete` ou le `Retract` de son dernier champ ; les liens suivent leur
+`onDelete` de la même façon. Un `Delete` d'une chose sans fait du kind ne change rien (un `Ok`, son groupe n'écrit
+aucun fait). Les faits qu'un `Delete` et ses liens lisent et retirent sont au plus le budget de travail du groupe, un
+million pour un seul `Delete` (10 x (100 000 + 100 par opération), le budget des règles) : au-delà, le groupe est
+refusé en entier, Code `"invalid"`, et rien n'est fait ; supprimez d'abord les choses qui pointent, dans des groupes à
+elles. Les choses qui pointent vers une chose sont trouvées par l'index par valeur, qui tient chaque fait : une seule
+recherche par propriété de lien, quel que soit leur nombre (un refus prend 6 µs, que 10 ou 10 000 factures pointent
+vers le client, une cascade environ 1,4 µs par ligne : [mesuré](benchmarks.md#les-suppressions-et-les-liens-qui-nomment-un-kind-2026-11-25)).
+Les règles voient un `Delete` comme les retraits qu'il
+fait : ce qu'elles dérivent suit, et un `Never` est vérifié sur l'état d'après. `Watch` les voit comme n'importe quel
+changement : les lignes qu'ils emportent. Une chose supprimée reste dans l'historique, comme chaque groupe. Supprimer
+des choses d'un kind demande un token qui peut ajouter à ce kind et à chaque kind qu'une cascade ou un clear peut
+atteindre à partir de lui, et lire chaque kind dont les liens le refusent (G16) : refusé en entier sinon, avant que
+rien ne soit fait. Aucune règle ne donne un lien qui nomme un kind (un ensemble de règles qui le ferait est refusé à
+`Define`).
+
+Les liens d'un kind sont déclarés par `Connect` (et `Fork`) avec le kind : une propriété qui n'a pas de `to` dans la base
+le reçoit, et le serveur vérifie chaque valeur qu'elle tient déjà (un `Err` qui en nomme une qui n'est pas une chose du
+kind) ; une qui nomme un autre kind, ou un autre `onDelete`, est un `Err` à `Connect` (les changer est une migration,
+pas encore construite). Un `Link()` sans `to` accepte une base où un autre programme en a déclaré un : ses écritures
+sont vérifiées de la même façon.
+
+Il y a un seul `Delete`, pour chaque kind. Sur un kind de [fichiers](#fichiers), il fait ce qu'il a toujours fait, les
+faits d'un fichier retirés, avec deux vérifications à lui : le groupe est refusé, Code `"conflict"`, si le fichier a
+changé entre-temps, et une chose qui n'est pas un fichier du kind est un `Err` de Code `"missing"` ; ses octets restent
+dans le vault tant que l'historique les cite.
 
 ## Les forks
 
@@ -1031,7 +1107,7 @@ attendu.
 |---|---|---|
 | `conflict` | un `Expect` du groupe n'a pas tenu | relire et décider à nouveau |
 | `unique` | une valeur d'une propriété `unique` est prise | une autre valeur, ou la chose qui l'a |
-| `invalid` | une valeur du mauvais type, un champ que le kind n'a pas, un kind non déclaré dans cette base, une question que le moteur refuse, une adresse sans `ca` par le réseau | corriger l'appel |
+| `invalid` | une valeur du mauvais type, un champ que le kind n'a pas, un kind non déclaré dans cette base, une question que le moteur refuse, une adresse sans `ca` par le réseau, un lien vers une chose qui n'est pas de son kind, une suppression qu'un lien refuse, une cascade au-delà du budget du groupe | corriger l'appel ; supprimer d'abord ce qui pointe vers elle |
 | `damaged` | une page d'un fichier de run ne s'est pas vérifiée contre son CRC | l'exploitation du serveur : [opérations](operations.md) |
 | `io`, `busy` | le disque du serveur a lâché, ou un autre processus tient la base | l'exploitation du serveur |
 | `closed` | la base a été fermée par `Close` | se reconnecter |
@@ -1201,6 +1277,9 @@ linearizable sans cela.
 
 - Les forks d'une base lue au serveur, que le serveur fera.
 - Un programme atteint une seule base par connexion : `Connect` à nouveau pour une autre.
+- Un changement du kind qu'un lien nomme, ou de son `onDelete`, sur une base qui l'a (une migration) ; `Delete` comme
+  opération de `Write`, à côté d'autres dans un même groupe ; une valeur par défaut pour un lien (le `SET DEFAULT` de
+  SQL) ; l'effacement d'une chose supprimée de l'historique.
 
 ## Références
 

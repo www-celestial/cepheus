@@ -89,6 +89,7 @@ type op =
   | Retract of int * int * value
   | Expect of int * int * value option     (* Some v: the fact holds before the group; None: the thing has no value *)
   | Incr of int * int * int * (int * int) option   (* thing, property, by, into: a counter the group increments *)
+  | Delete of int * string                 (* thing, kind: its facts of the kind retracted, the links followed *)
 type receipt = { group : int; things : (int * int) list }   (* the group's number; its new things, (-k, id) *)
 val write : db -> ?by:int -> ?why:string -> op list -> (receipt, error) result
 val thing : receipt -> int -> int
@@ -121,6 +122,12 @@ applique les groupes, un à la fois) le prend ; les groupes sont appliqués un �
   même compteur en même temps ne sont jamais en conflit et ne sautent jamais une valeur : chacun lit la valeur que le
   groupe d'avant a laissée, et un groupe refusé laisse le compteur tel qu'il était. Dans le journal, il est ce qu'il a
   fait : l'ancienne valeur retirée et la nouvelle ajoutée, comme le ferait un `Add`.
+- **`Delete (thing, kind)`** supprime une chose d'un kind : chaque fait de la chose d'une propriété de ce kind (le kind
+  de `client/name` est `client`, son nom avant le premier `/`) qu'une écriture a affirmé est retiré, par le writer, à
+  ce point du groupe ; puis, comme pour tout groupe qui laisse une chose sans aucun tel fait, les liens qui nomment le
+  kind et pointent vers elle suivent leur `on_delete` ([les liens qui nomment un
+  kind](#les-liens-qui-nomment-un-kind--les-foreign-keys)). Une chose sans fait du kind : rien à retirer. Dans le
+  journal, il est ce qu'il a fait : les retraits.
 
 Une facture prend le numéro suivant dans le groupe qui la crée, et un groupe refusé n'en prend aucun :
 
@@ -149,7 +156,9 @@ invalid: Incr counts on a one-valued int property of the program's: invoice/stat
 ```
 
 Erreurs : `Conflict` (un `Expect`) ; `Invalid` (une valeur du mauvais type, une chose qui n'a jamais été créée, un lien
-vers rien, un `Expect` sur une nouvelle chose, un `Incr` d'une propriété qui n'est pas une propriété `Int` du programme
+vers rien, un lien qui nomme un kind vers une chose qui n'en est pas, une suppression qu'un lien refuse, un `Delete` et
+ses liens au-delà du budget de travail du groupe, un `Delete` d'une nouvelle chose ou d'un kind sans propriété, un
+`Expect` sur une nouvelle chose, un `Incr` d'une propriété qui n'est pas une propriété `Int` du programme
 (à une seule valeur pour le compteur) ou dont la somme dépasse les 63 bits d'un int, une propriété qui n'existe pas, une propriété système sur une chose
 ordinaire, une propriété ordinaire sur une chose propriété, une règle du schéma, un groupe dont la frame du journal
 dépasserait 256 MiB) ; `Not_unique` ; `Damaged` (une page d'un run dont le groupe avait besoin n'a pas pu être lue ou ne
@@ -222,6 +231,63 @@ client/tag: text, many true, unique false
 client/phone: none
 again: 16
 invalid: client/email is declared already as another kind of property
+```
+
+### Les liens qui nomment un kind : les foreign keys
+
+```ocaml signature
+type on_delete = Refuse | Cascade | Clear
+val link : view -> int -> (string * on_delete) option
+val link_to : db -> (int * string * on_delete) list -> (unit, error) result
+```
+
+`link_to db [ (p, kind, on_delete) ]` fait que les propriétés de lien `p` nomment ces kinds, en un seul groupe
+(`~why:"cepheus: links"`), sous la forme des faits `[p cepheus/to kind]` et `[p cepheus/delete "refuse" | "cascade" |
+"clear"]` de la chose propriété (les propriétés 7 et 8, que chaque base connaît). Une propriété qui nomme déjà le même
+kind avec le même `on_delete` n'écrit rien ; une qui en nomme un autre, ou le même avec un autre `on_delete`, est
+`Invalid` ; le writer vérifie chaque valeur que la propriété tient déjà, et que le kind a une propriété. `link v p` est
+ce que `p` nomme dans une vue, `None` pour un lien vers n'importe quelle chose.
+
+Une chose est **d'un kind** tant qu'elle a un fait d'une des propriétés du kind qu'une écriture a affirmé (un fait
+seulement dérivé ne fait d'aucune chose une chose d'un kind). Alors, à chaque groupe, sur l'état d'après : chaque lien
+qui nomme un kind et que le groupe ajoute va vers une chose de ce kind (une chose faite dans le même groupe compte), ou
+le groupe est `Invalid` ; et pour chaque chose que le groupe laisse sans fait d'un kind, chaque fait qui pointe vers
+elle par une propriété qui nomme le kind fait ce que dit la propriété. `Refuse` refuse le groupe, en nommant le kind, la
+chose, une chose qui pointe vers elle et la propriété. `Cascade` supprime la chose qui pointe, dans le kind de sa
+propriété, comme un `Delete` (et les liens vers elle suivent à leur tour ; une chose atteinte deux fois n'est suivie
+qu'une fois, si bien que les cycles se terminent). `Clear` retire le lien. Le writer trouve les choses qui pointent vers
+une chose dans l'index par valeur, une recherche par propriété qui nomme le kind. Ce que les `Delete` d'un groupe et
+ses liens lisent et retirent est au plus `!work_budget` x (`!(fst rule_budget)` + `!(snd rule_budget)` x ses
+opérations), 1 001 000 pour un seul `Delete` par défaut : au-delà, le groupe est `Invalid` et rien n'est fait. Aucune
+règle ne donne un lien qui nomme un kind (`define` le refuse, et une règle sur une propriété variable qui en donnerait un
+refuse son groupe), si bien que chaque tel lien est écrit, et vérifié, par une écriture. Le chemin plus rapide d'un
+chargement (plus bas) vérifie aussi ses liens, et laisse le groupe au chemin ordinaire au moindre doute.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; client; total; invoice; price ]) =
+    declare db [ prop "client/name" Ttext; prop "invoice/client" Tlink; prop "invoice/total" Tint; prop "line/invoice" Tlink; prop "line/price" Tint ] in
+  ignore (link_to db [ (client, "client", Refuse); (invoice, "invoice", Cascade) ]);
+  let r = Result.get_ok (write db [ Add (-1, name, Text "Ada"); Add (-2, client, Link (-1)); Add (-2, total, Int 30);
+                                    Add (-3, invoice, Link (-2)); Add (-3, price, Int 10); Add (-4, invoice, Link (-2)); Add (-4, price, Int 20) ]) in
+  let ada = thing r (-1) and inv = thing r (-2) in
+  let say = function Ok (r : receipt) -> Printf.printf "group %d\n" r.group | Error e -> print_endline (message e) in
+  say (write db [ Add (-1, total, Int 5); Add (-1, client, Link inv) ]);
+  say (write db [ Delete (ada, "client") ]);
+  say (write db [ Delete (inv, "invoice") ]);
+  let v = view db in
+  Printf.printf "lines left: %d; invoice/client links to %s\n" (List.length (things v invoice (Link inv)))
+    (match link v client with Some (k, _) -> k | None -> "any thing")
+```
+
+```output
+invalid: invoice/client links to client things only, and #65537 is not one
+invalid: the client #65536 cannot be deleted while the invoice #65537 links to it (invoice/client: refuse)
+group 5
+lines left: 0; invoice/client links to client
 ```
 
 ## Règles

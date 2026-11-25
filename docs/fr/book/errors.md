@@ -95,6 +95,22 @@ Depuis `write` (les vérifications du writer, les mêmes sur une base et sur un 
 | `a group of N bytes is over the frame limit of 268435456` | le codage du groupe dépasse 256 MiB, le plus grand corps de frame : découpez-le ([limites](limits.md#les-écritures)) |
 | `thing numbers end at 2147483647: this group would make #N` | les nouvelles choses du groupe prendraient des numéros de chose au-delà de $2^{31} - 1$, le plus grand que tient un run ([limites](limits.md#choses-propriétés-valeurs)) ; la base ne peut plus créer de choses |
 
+Depuis `write`, les liens qui nomment un kind et `Delete` ([api](api.md#les-liens-qui-nomment-un-kind--les-foreign-keys)) :
+
+| message | quand |
+|---|---|
+| `NAME links to K things only, and #T is not one` | le groupe ajoute un lien de NAME (une propriété qui nomme le kind K) vers une chose qui n'a aucun fait de K après le groupe ; donnez à la chose un fait de K dans le même groupe, ou pointez vers une qui en a |
+| `the K #X cannot be deleted while the L #Y links to it (NAME: refuse)` | le groupe laisse X sans fait de K (un `Delete`, ou le retrait de son dernier fait de K) alors que Y, du kind L, pointe encore vers elle par NAME, dont les liens le refusent ; supprimez ou reliez Y d'abord, dans ce groupe ou avant |
+| `deleting the K #X (NAME: cascade): the links followed passed N facts, the work budget of a group of M operations: delete the things that link to it first, in groups of their own` | un `Delete` et les liens qu'il suit lisent ou retirent plus de $N = 10 \times (\mathit{base} + \mathit{per} \times M)$ faits (`work_budget`, `rule_budget`) ; rien n'est fait |
+| `Delete of a new thing`; `Delete: no thing #E`; `Delete: the kind K has no property in this database` | un `Delete` d'une chose négative (nouvelle), d'une chose jamais créée, ou d'un kind qu'aucune propriété de la vue n'a |
+| `NAME is a T: cepheus/to is for a link` | `cepheus/to` sur une propriété qui n'est pas un lien |
+| `NAME: cepheus/to is the name of a kind, without '/', not "S"`; `NAME: cepheus/delete is refuse, cascade or clear, not "S"`; `NAME has cepheus/delete without cepheus/to, the kind it links to` | les deux faits d'un lien mal écrits (à la main : `link_to` les écrit bien) |
+| `property P keeps cepheus/to or cepheus/delete without a name and a type` | un groupe a laissé la chose propriété P avec l'un d'eux mais ni nom ni type |
+| `NAME links to the kind K, which has no property` | un lien nomme un kind qu'aucune propriété de la base n'a (un nom mal tapé) |
+| `NAME cannot link to K things only: #E links to #T, which is not one` | un lien qui nomme un kind pour la première fois (ou un autre) alors qu'une valeur qu'il tient n'est pas une chose du kind |
+| `rule R gives NAME, a link that names a kind: no rule gives one` | `define` d'une règle dont la tête est un tel lien, un lien qui reçoit ce nom alors qu'une règle le donne, ou une règle sur une propriété variable qui en donnerait un |
+| `a group written meanwhile links NAME of #E to #T, which is no K thing under the change`; `a group written meanwhile leaves #Y linked by NAME to #X, which is no K thing any more` | (comme `Conflict`) un changement des règles en arrière-plan dont le groupe a déclaré un lien, pendant que des groupes écrits entre-temps le cassaient : refaites le changement |
+
 Depuis `write` avec des règles (le raisonnement du writer, le même sur une base et sur un fork ; [règles](rules.md)) :
 
 | message | quand |
@@ -137,11 +153,13 @@ Depuis `define`, ou une écriture des faits d'une règle (une règle est vérifi
 | `rule R takes a name and a definition only` / `rule R needs a name and a definition, and no type` | une chose règle avec `cepheus/many`, `cepheus/unique` ou `cepheus/type`, ou sans son nom |
 | `NAME is a property: it never becomes a rule` / `a rule never becomes a property (NAME)` | une chose du schéma changée d'une sorte en l'autre |
 
-Depuis `declare` et `snapshot` :
+Depuis `declare`, `link_to` et `snapshot` :
 
 | message | quand |
 |---|---|
 | `NAME is declared already as another kind of property` | `declare` avec un nom qui existe avec un autre type, une autre cardinalité ou un autre drapeau unique |
+| `NAME links to K things in this database, with on delete D, not to L things with E` | `link_to` (ou un kind donné à Connect) d'une propriété qui nomme déjà un autre kind, ou un autre `on_delete` : les changer est une migration |
+| `no property P` | `link_to` d'une propriété qui n'existe pas |
 | `a fork has no files` | `snapshot` sur un fork |
 
 Depuis `find` et `fold` (la question est mal formée) :
@@ -360,6 +378,9 @@ valeur `result.Err({Kind: "cepheus", Code, Message})`, avec les codes en minuscu
 | `invalid` | `this server speaks protocol 3 or older: Incr needs a server of protocol 4` | un groupe avec `cepheus.Incr`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur ([mises à jour](production.md#les-mises-à-jour)) |
 | `invalid` | `this server speaks protocol N: a question's timeout needs a server of protocol 6` | `Find` ou `Watch` avec `timeout`, sur une connexion à un serveur d'une version antérieure : refusé avant d'être envoyé | mettre à jour le serveur, ou laisser le temps au `question_timeout` du serveur |
 | `invalid` | `this server speaks protocol N: Less, LessOrEqual and Optional need a server of protocol 7` | `Find` ou `Watch` avec eux, sur une connexion à un serveur d'une version plus ancienne : refusé avant d'être envoyé | mettre le serveur à jour ([les mises à jour](production.md#les-mises-à-jour)) |
+| `invalid` | `this server speaks protocol N: Delete and links that name a kind need a server of protocol 8` | `Delete` d'une chose qui n'est pas un fichier, ou `Connect` avec un kind dont un `Link` a `to`, sur une connexion à un serveur d'une version plus ancienne : refusé avant d'être envoyé | mettre le serveur à jour ([les mises à jour](production.md#les-mises-à-jour)) |
+| `invalid` | `NAME links to K things only, and #T is not one`; `the K #X cannot be deleted while the L #Y links to it (NAME: refuse)`; le budget de travail d'un `Delete` | un lien vers une chose d'un autre kind ; une suppression qu'un lien refuse ; une cascade trop grande pour un seul groupe ([supprimer une chose](cesia.md#supprimer-une-chose)) | pointer vers une chose du kind ; supprimer d'abord ce qui pointe vers elle |
+| `denied` | `this token may not add to the kind K, which a deletion of a J reaches`; `this token may not read the kind K, whose links refuse the deletion of a J`; `this token may not read the kind K, which NAME links to` | un token qui a des droits par kind : un `Delete` (ou un retrait d'un fait d'un kind que des liens nomment) qui peut atteindre un kind qu'il ne peut pas écrire, ou parler d'un qu'il ne peut pas lire ; un lien vers un kind qu'il ne peut pas lire | un token qui a ces droits ([les droits](server.md#les-droits-g16)) |
 | `timeout` | `the question took more than N s, its time: ask a narrower one, or give it more time` | la question a dépassé son `timeout`, ou le `question_timeout` du serveur (un temps plus long que celui du serveur ne compte que d'un token admin) : dans la mémoire du programme ou au serveur, pareil | une question plus étroite, ou des pages ; un `timeout` plus long là où le serveur le permet |
 | `invalid` | `Prefix is for a text, not a T`; `Prefix takes 1 to 1024 bytes, not N`; `variable N of Prefix is the value of no pattern` | `Prefix` sur un autre type, un préfixe vide ou trop long | une variable texte que donne un pattern |
 | `invalid` | `Limit: at most 100000 rows a page, not N`; `In takes at most 100000 values, not N`; `a question takes at most 64 operators and their items, not N`; `a question's Ors make N questions to ask (the product of their alternatives): at most 64` | les bornes d'une question ([limites](limits.md#les-questions)) | demander page par page, découper la liste, ou poser plusieurs questions |
@@ -394,7 +415,8 @@ une liste, une opération (`as cepheus.Add, Retract, Expect or Incr makes it`), 
 {Name: variable}}`), un pattern (`[thing, property, value], or Above, Below or Between`), une variable ou l'identifiant
 d'une chose en premier dans un pattern, une variable ou un agrégat dans Give ; et à `cepheus.Kind` : un nom qui n'est
 pas fait de lettres minuscules, de chiffres, de `_` et de `-`, aucun champ, un champ nommé `kind`, un type qui n'est
-aucun de `Text()`, `Int()`, `Float()`, `Bool()`, `Date()`, `Link()`, `Money(scale)`, une échelle hors de 0 à 18 ; à
+aucun de `Text()`, `Int()`, `Float()`, `Bool()`, `Date()`, `Link()`, `Money(scale)`, une échelle hors de 0 à 18, un
+`to` qui n'est pas un nom de kind, un `onDelete` sans `to` ou autre que `"refuse"`, `"cascade"` et `"clear"` ; à
 `cepheus.Connect` : une adresse qui n'est pas `cepheus://host:port/database` (avec `?socket=DIR` pour seul
 paramètre) ; à `cepheus.Find` : plus de 12 variables.
 

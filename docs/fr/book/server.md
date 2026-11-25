@@ -484,7 +484,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | corps de la requête | corps de la réponse |
 |---|---|---|
-| 1 Hello | la version en varint (1 à 7), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
+| 1 Hello | la version en varint (1 à 8), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
 | 2 Open | le nom de la base | Opened : le handle (le numéro de la base ouverte sur cette connexion), le groupe le plus récent, les propriétés (id, nom, code du type, many, unique) ; au-delà de la limite des frames, en frames d'environ 1 MiB de propriétés, toutes sauf la dernière avec `more`, chacune avec son handle, son groupe et son nombre |
 | 3 Get | handle, chose | Facts : le groupe de la vue, le nombre, (propriété, valeur)... ; au-delà de la limite des frames, en frames d'environ 1 MiB de faits, toutes sauf la dernière avec `more`, chacune avec son groupe et son nombre |
 | 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte, 6 Less : deux variables, 7 LessOrEqual : deux variables, 8 Optional : un pattern, depuis la version 7), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) ; puis, depuis la version 6 et seulement quand le programme en donne un, le temps de la question en millisecondes (de 1 à une semaine ; l'ordre est alors envoyé, vide s'il le faut) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more` ; un Give sans Sort qui dépasse les cellules que le serveur tient, lignes fois colonnes, est envoyé à mesure que ses lignes sont trouvées, aucune n'est tenue) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne ; une cellule qu'un Optional a laissée sans valeur est le link $-2^{62}$, qu'aucune chose n'a (une valeur des lignes seulement) |
@@ -514,7 +514,13 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   `Group ([k...], [a...])` donne une ligne par clé distincte : les variables de la clé, puis les agrégats `Count`,
   `Sum x` (int, money), `Min x`, `Max x` (int, money, date), calculés dans le serveur sans construire les réponses (Q4
   plus bas : 100 lignes au lieu de 45 064).
-- **Les versions.** La version 7 ajoute les opérateurs Less, LessOrEqual et Optional (les tags 6 à 8) et rien
+- **Les versions.** La version 8 ajoute l'opération Delete (le tag 5, plus bas) et les liens qui nomment un kind (les
+  faits de `cepheus/to` et `cepheus/delete`, les propriétés 7 et 8, dans un Write) et rien d'autre : un programme de
+  version 8 se connecte à un serveur de 7 en 7, et un groupe avec un Delete ou l'un de ces faits est refusé dans le
+  programme (`invalid` : « this server speaks protocol 7: Delete and links that name a kind need a server of protocol
+  8 ») avant d'être envoyé, puisqu'un serveur plus ancien ferme la connexion sur une opération qu'il ne connaît pas et
+  ne connaît aucune propriété 7 ou 8 ; un Delete d'un fichier (le `Delete` du package Cesia sur un kind de fichiers) est
+  codé comme avant. La version 7 ajoute les opérateurs Less, LessOrEqual et Optional (les tags 6 à 8) et rien
   d'autre : un programme de version 7 se connecte à un serveur de 6 en 6, et une question avec l'un d'eux est refusée
   dans le programme (`invalid` : « this server speaks protocol 6: Less, LessOrEqual and Optional need a server of
   protocol 7 ») avant d'être envoyée, puisqu'un serveur plus ancien refuse un opérateur qu'il ne connaît pas ; une
@@ -532,7 +538,7 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   fichiers (Put, Piece, Load, Erase) et rien d'autre : un programme de version 3 se connecte à un serveur de 2 en 2
   (comme plus bas), et un fichier est refusé dans le programme (`invalid` : « this server speaks protocol 2 or older:
   files need a server of protocol 3 »). La version 2 ajoute les opérateurs et l'ordre de la question (plus bas) et rien
-  d'autre ; un serveur parle les versions 1 à 7, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
+  d'autre ; un serveur parle les versions 1 à 8, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
   dans Hello ; un serveur de version 1 se contente de la refuser (`version`) et ferme, et la bibliothèque se reconnecte
   en 1 : ses questions de patterns et de ranges reçoivent leur réponse comme avant, et une question avec `Not`, `Or`,
   `In`, `Prefix`, Sort, Limit ou After est refusée dans le programme (`invalid` : « this server speaks protocol 1: ...
@@ -544,7 +550,9 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
 - Une **opération** : 0 Add, 1 Retract, 2 Expect une valeur, 3 Expect aucune ; puis la chose (en zigzag : un id
   négatif est une nouvelle chose du groupe), la propriété, la valeur. 4 Incr (version 4) : la chose, la propriété,
   `by` (zigzag), puis un octet 0, ou 1 suivi de la chose (zigzag) et de la propriété d'`into`. Un token ajoute un
-  `Incr` quand il peut ajouter au kind du compteur et à celui d'`into` ([les droits](#les-droits-g16)).
+  `Incr` quand il peut ajouter au kind du compteur et à celui d'`into` ([les droits](#les-droits-g16)). 5 Delete
+  (version 8) : la chose (zigzag), puis le nom du kind (une string d'au plus 255 octets) : les faits de la chose de ce
+  kind retirés au writer, et les liens qui nomment le kind suivis ([supprimer une chose](cesia.md#supprimer-une-chose)).
 - Chaque lecture nomme le groupe de la vue qui lui a répondu, chaque reçu (Receipt, la réponse à une écriture) son
   groupe : un programme peut vérifier ce qu'il a lu contre ce qu'il a écrit.
 
@@ -1814,6 +1822,14 @@ Un token qui a des **droits par kind** (`{ read = ["client", "invoice"], add = [
   propriétés de ces kinds ; un groupe qui a un seul fait d'un autre kind est refusé en entier avec `denied`. Un `Incr`
   ajoute au kind de son compteur et à celui de son `into` : il lui faut les deux (comme un `Expect`, il apprend au
   token la valeur du compteur). Les règles sont pour les tokens `write` seulement : une règle lit chaque kind.
+- Un lien qui nomme un kind (`Link(to = "client")`) est aussi une lecture de ce kind : son écriture est refusée quand la
+  chose n'est pas un client, ce qui dit si elle en est un. Un fait d'un tel lien demande donc le droit de lire le kind
+  qu'il nomme. Un `Delete` d'une chose d'un kind, et un retrait d'un fait d'un kind que des liens nomment (il peut
+  laisser une chose sans fait du kind), peuvent atteindre chaque kind dont les liens le nomment, et ainsi de suite, par
+  le schéma : le token doit pouvoir ajouter au kind, et à chaque kind qu'un `cascade` ou un `clear` atteint, et lire
+  chaque kind dont les liens `refuse` (le refus nomme une de ses choses) ; sinon le groupe est refusé en entier avec
+  `denied`, en nommant le kind, avant que rien ne soit fait. Ce qui est atteint est celui du schéma, pas des données :
+  un token apprend la même chose quelles que soient les choses.
 - Il ne lit jamais dans sa propre mémoire : un lecteur local projette en mémoire (map) toute la base, si bien que le
   serveur refuse son `Follow`, et ses lectures vont au serveur. Les clients le font d'eux-mêmes.
 - Avec des règles, il ne lit une propriété que s'il lit le kind de la propriété **et chaque kind dont peuvent venir

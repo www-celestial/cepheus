@@ -312,6 +312,12 @@ Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparis
 
 ## Les transactions et l'isolation
 
+- **[Codd 1970]** E. F. Codd. A Relational Model of Data for Large Shared Data Banks. *Communications of the ACM*
+  13(6), 377–387, 1970. https://doi.org/10.1145/362384.362685
+  — La foreign key (clé étrangère) : une valeur d'une relation qui est la clé d'une autre, comme l'est un lien qui
+  nomme un kind (`Link(to = "client")`) ; ce qu'elle fait à la suppression, ce sont les actions référentielles de SQL
+  (ISO/IEC 9075-2 : `ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT`, `RESTRICT`, `NO ACTION`), dont Cepheus a
+  `cascade`, `clear` et `refuse`.
 - **[Khayyat 2015]** Z. Khayyat, W. Lucia, M. Singh, M. Ouzzani, P. Papotti, J.-A. Quiané-Ruiz, N. Tang, P. Kalnis.
   Lightning Fast and Space Efficient Inequality Joins. *PVLDB* 8(13), 2074–2085, 2015.
   https://doi.org/10.14778/2831360.2831362

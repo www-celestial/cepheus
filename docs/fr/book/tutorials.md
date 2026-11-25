@@ -15,7 +15,9 @@ suit est ce que PostgreSQL a répondu.
 
 Des clients et leurs factures, les données que tous les tutoriels utilisent. Un **kind** (une sorte) regroupe les
 propriétés d'une sorte de chose ; une **chose** (thing) est un numéro, son id ; une propriété à plusieurs valeurs
-(`many`) tient une liste (les téléphones d'un client) ; `Closed` est un drapeau qu'a un compte fermé.
+(`many`) tient une liste (les téléphones d'un client) ; `Closed` est un drapeau qu'a un compte fermé ;
+`Link(to = "client")` relie une facture à une chose qui doit être un client, la foreign key (clé étrangère) de SQL
+([tutoriel 10](#10-un-client-qui-a-des-factures-ne-se-supprime-pas-les-lignes-dune-facture-partent-avec-elle)).
 
 ```cesia norun
 use deps/www-celestial/cepheus/cesia/cepheus
@@ -29,7 +31,7 @@ use std/value
 
 Client = cepheus.Kind("client", {Name: cepheus.Text(), City: cepheus.Text(), Phone: cepheus.Text(many = true), Closed: cepheus.Bool()})
 Invoice = cepheus.Kind("invoice", {
-  Client: cepheus.Link(), Number: cepheus.Int(unique = true), Total: cepheus.Money(2), Status: cepheus.Text(),
+  Client: cepheus.Link(to = "client"), Number: cepheus.Int(unique = true), Total: cepheus.Money(2), Status: cepheus.Text(),
   Date: cepheus.Date(), Due: cepheus.Date(), PaidAt: cepheus.Date(),
 })
 
@@ -695,6 +697,148 @@ celui du `LEFT JOIN` de SQL, et de l'`OPTIONAL` de SPARQL, pour un pattern ([Pé
 aucune autre partie de la question, si bien que la question a un seul sens quel que soit l'ordre de ses parties.
 Mesuré : [plus bas](#ce-que-cela-coûte).
 
+## 10. Un client qui a des factures ne se supprime pas, les lignes d'une facture partent avec elle
+
+**Le problème.** Un client s'en va, ou a été saisi deux fois, et quelqu'un le supprime. Ses factures doivent rester, et
+garder leur client : une facture est une pièce comptable, gardée dix ans en France (Code de commerce, article L123-22),
+et une facture dont le client a disparu ne pointe vers rien. Un brouillon de facture qu'on jette, en revanche, emporte
+ses lignes : une ligne n'a pas de sens sans sa facture. Et la note d'un employé sur ce brouillon reste : elle perd
+seulement son lien.
+
+**La solution de Cepheus.** Un lien qui nomme un kind, `cepheus.Link(to = "client")`, que la base des tutoriels déclare
+pour `Invoice.Client` dès le début : à chaque écriture, la chose liée doit être un client, c'est-à-dire avoir un fait
+du kind client (un champ d'un client) ; c'est la **foreign key** (clé étrangère) de SQL, `REFERENCES client`.
+`onDelete` dit ce que fait un lien quand sa chose cesse d'être du kind : `"refuse"`, par défaut, refuse la
+suppression ; `"cascade"` supprime avec elle la chose qui pointe ; `"clear"` retire le lien.
+`cepheus.Delete(kind, id, db)` supprime une chose d'un kind, le `DELETE` de SQL : ses faits de ce kind sont retirés,
+et les liens vers elle suivent leur `onDelete`, en un seul groupe.
+
+```cesia norun
+Line = cepheus.Kind("line", {Invoice: cepheus.Link(to = "invoice", onDelete = "cascade"), Label: cepheus.Text(), Amount: cepheus.Money(2)})
+Note = cepheus.Kind("note", {About: cepheus.Link(to = "invoice", onDelete = "clear"), Text: cepheus.Text()})
+db = connect([Client, Invoice, Counter, Line, Note])
+io.Print(cepheus.Insert(Invoice, {Client: numbers, Total: 5, Status: "draft"}, db))
+```
+
+```text
+Err({Kind: "cepheus", Code: "invalid", Message: "invoice/Client links to client things only, and #65540 is not one"})
+```
+
+Pas à pas : `Connect` déclare les deux nouveaux kinds et leurs liens ; une facture dont le client est le compteur du
+tutoriel 1 est refusée, puisque cette chose n'est pas un client. Maintenant Ada, qui a des factures :
+
+```cesia norun
+io.Print(cepheus.Delete(Client, ada, db))
+io.Print(cepheus.Get(Client, ada, db))
+```
+
+```text
+Err({Kind: "cepheus", Code: "invalid", Message: "the client #65536 cannot be deleted while the invoice #65542 links to it (invoice/Client: refuse)"})
+Ok({Name: "Ada Martin", City: "Lyon", Phone: ["04 00 00 00 01", "06 00 00 00 01"], Closed: missing})
+```
+
+Sa suppression est refusée, en nommant une de ses factures, et rien n'a été écrit. Une nouvelle cliente, Eve, et un
+brouillon pour elle avec deux lignes et une note, puis jeté, pendant qu'un écran regarde les lignes du brouillon :
+
+```cesia norun
+eve = result.Unwrap(cepheus.Insert(Client, {Name: "Eve Roux", City: "Lille"}, db))
+draft = result.Unwrap(cepheus.Insert(Invoice, {Client: eve, Total: 120, Status: "draft"}, db))
+paper = result.Unwrap(cepheus.Insert(Line, {Invoice: draft, Label: "paper", Amount: 20}, db))
+ink = result.Unwrap(cepheus.Insert(Line, {Invoice: draft, Label: "ink", Amount: 100}, db))
+memo = result.Unwrap(cepheus.Insert(Note, {About: draft, Text: "Eve asked for a discount"}, db))
+w = result.Unwrap(cepheus.Watch(2, (l, a) -> {Where: [[l, Line.Invoice, draft], [l, Line.Amount, a]], Give: {Line: l, Amount: a}}, db))
+fiber.Receive(w.Changes)
+io.Print(cepheus.Delete(Invoice, draft, db, why = "draft thrown away"))
+io.Print(result.Unwrap(fiber.Receive(w.Changes)).Removed)
+cepheus.Close(w)
+io.Print(cepheus.Get(Invoice, draft, db), cepheus.Get(Line, paper, db), cepheus.Get(Line, ink, db), cepheus.Get(Note, memo, db))
+io.Print(cepheus.Delete(Client, eve, db), cepheus.Get(Client, eve, db))
+```
+
+```text
+Ok(190)
+[{Line: 65614, Amount: 100.0}, {Line: 65613, Amount: 20.0}]
+Ok(missing) Ok(missing) Ok(missing) Ok({About: missing, Text: "Eve asked for a discount"})
+Ok(191) Ok(missing)
+```
+
+Un seul groupe a supprimé le brouillon et ses deux lignes (`cascade`) et retiré le lien de la note (`clear`), et
+l'écran l'a reçu comme un seul changement qui emporte les deux lignes. Eve n'avait alors plus de facture, et est
+supprimée. Une chose supprimée reste dans l'historique : le journal garde chaque groupe, celui-ci aussi, avec qui et
+pourquoi ([Cepheus depuis Cesia](cesia.md#supprimer-une-chose)).
+
+**PostgreSQL** déclare la même chose avec `REFERENCES … ON DELETE` :
+
+```sql
+CREATE TABLE line (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                   invoice bigint NOT NULL REFERENCES invoice ON DELETE CASCADE,
+                   label text NOT NULL, amount numeric(12,2) NOT NULL);
+CREATE TABLE note (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                   invoice bigint REFERENCES invoice ON DELETE SET NULL, text text NOT NULL);
+INSERT INTO invoice (client, total, status, date) VALUES (99, 5, 'draft', now());
+DELETE FROM client WHERE name = 'Ada Martin';
+```
+
+```text
+ERROR:  insert or update on table "invoice" violates foreign key constraint "invoice_client_fkey"
+DETAIL:  Key (client)=(99) is not present in table "client".
+ERROR:  update or delete on table "client" violates foreign key constraint "invoice_client_fkey" on table "invoice"
+DETAIL:  Key (id)=(1) is still referenced from table "invoice".
+```
+
+```sql
+INSERT INTO client (name, city) VALUES ('Eve Roux', 'Lille') RETURNING id;
+INSERT INTO invoice (client, total, status, date) VALUES (5, 120, 'draft', now()) RETURNING id;
+INSERT INTO line (invoice, label, amount) VALUES (22, 'paper', 20), (22, 'ink', 100);
+INSERT INTO note (invoice, text) VALUES (22, 'Eve asked for a discount');
+DELETE FROM invoice WHERE id = 22;
+SELECT count(*) AS lines FROM line WHERE invoice = 22;
+SELECT invoice, text FROM note;
+DELETE FROM client WHERE name = 'Eve Roux';
+```
+
+```text
+ id
+----
+  5
+
+ id
+----
+ 22
+
+DELETE 1
+ lines
+-------
+     0
+
+ invoice |           text
+---------+--------------------------
+         | Eve asked for a discount
+
+DELETE 1
+```
+
+`REFERENCES client` sans `ON DELETE` est `NO ACTION`, qui refuse comme `RESTRICT` (il vérifie à la fin de
+l'instruction, ou de la transaction quand la contrainte est différée) ; `SET NULL` est le `clear` de Cepheus, et
+PostgreSQL a aussi `SET DEFAULT`, que Cepheus n'a pas : un lien n'a pas de valeur par défaut.
+
+**La différence.** Les trois mêmes réponses, et quatre différences. Trouver les lignes d'une facture à supprimer est
+une recherche par valeur dans les lignes : PostgreSQL n'indexe pas de lui-même la colonne qui pointe (« the
+declaration of a foreign key constraint does not automatically create an index on the referencing columns »,
+[Foreign Keys](https://www.postgresql.org/docs/18/ddl-constraints.html#DDL-CONSTRAINTS-FK)), si bien que sans un
+`CREATE INDEX ON line (invoice)` chaque facture supprimée lit toutes les lignes ; Cepheus indexe chaque fait dans les
+deux sens, par sa valeur aussi, si bien que les choses qui pointent vers une chose sont toujours à une recherche de là.
+PostgreSQL fait une cascade avec les droits du propriétaire des tables : un rôle qui peut supprimer des factures, et ne
+peut pas supprimer de lignes, supprime quand même leurs lignes (lancé sur PostgreSQL 18.6 : son `DELETE FROM line`
+refusé, son `DELETE FROM invoice` a ensuite emporté la ligne) ; un token de Cepheus ne supprime que s'il peut écrire
+chaque kind que sa suppression peut atteindre, et est refusé en entier sinon. Une cascade de Cepheus est bornée :
+au-delà du budget de travail du groupe (un million de faits pour un seul `Delete`) elle est refusée en entier, rien de
+fait, là où PostgreSQL supprime n'importe quel nombre de lignes, dans une seule transaction qui tient leurs locks. Et un
+client supprimé reste dans l'historique de Cepheus, là où la ligne de PostgreSQL a disparu une fois `VACUUM` passé ;
+effacer une chose de l'historique est une autre opération, pas encore construite. Une chose cesse aussi d'être un
+client quand son dernier fait de client est retiré, par `Retract` comme par `Delete`, et les liens vers elle suivent
+leur `onDelete` de la même façon. Mesuré : [plus bas](#ce-que-cela-coûte).
+
 ## Ce que cela coûte
 
 Mesuré sur les données des benchmarks à 1 million de faits (11 363 clients, 227 260 factures, 56 797 liens de suivi),
@@ -709,6 +853,11 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
 | chaque client avec les clients qu'il suit, 56 797 lignes | 29,4 ms | **16,4 ms** | PostgreSQL, 1,8 fois |
 | les liens de suivi vers un client plus récent (`Less(a, b)` ; `a < b`), 28 271 lignes | 14,7 ms | **3,97 ms** | PostgreSQL, 3,7 fois |
 | les factures sous le total d'une facture (`Less` ; `total < (SELECT ...)`), 122 962 lignes | 76,2 ms | **22,0 ms** | PostgreSQL, 3,5 fois |
+| un client qui a 10 000 factures, refusé (`Delete`, `refuse` ; `DELETE`, `REFERENCES`) | **6 µs** | 89 µs | Cepheus, 15 fois |
+| une facture et ses 100 lignes (`cascade` ; `ON DELETE CASCADE`) | **176 µs** | 193 µs | à peu près pareil |
+| une facture et ses 10 000 lignes | 27,3 ms | **5,16 ms** | PostgreSQL, 5,3 fois |
+| une facture et le lien de ses 10 000 notes (`clear` ; `ON DELETE SET NULL`) | **11,1 ms** | 46,5 ms | Cepheus, 4,2 fois |
+| la vérification d'un lien qui nomme un kind, à chaque écriture (celle d'une foreign key) | **0,2 µs** | 9,6 µs | Cepheus, 48 fois |
 
 - Un compteur que beaucoup d'écrivains partagent est là où un lock coûte le plus : PostgreSQL tient la ligne jusqu'à
   ce que chaque commit soit sur le disque, le writer de Cepheus lit le compteur à mesure qu'il applique chaque groupe,
@@ -719,6 +868,11 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
   PostgreSQL, dans un seul processus, est plus rapide que la lecture des faits un par un ; et le range plus haut tourne
   sur un seul des domains de Cepheus, puisqu'une question n'est partagée entre domains qu'à son premier niveau (ici,
   le seul total de la borne) : une façon de la partager plus loin n'est pas encore construite.
+- Les suppressions sont le travail du moteur, rien sur le disque, à une charge de 2,7 à 3,1, sur 680 681 faits et les
+  mêmes lignes ([les benchmarks](benchmarks.md#les-suppressions-et-les-liens-qui-nomment-un-kind-2026-11-25)). Trouver
+  ce qui pointe vers une chose est une seule recherche dans Cepheus, quel que soit leur nombre, là où PostgreSQL fait
+  passer la requête de sa foreign key par un trigger ; une grande cascade coûte à Cepheus ce que coûte le retrait de
+  ses faits (1 µs par fait), PostgreSQL ne fait que marquer ses lignes.
 
 ## Chaque tutoriel en une ligne
 
@@ -733,3 +887,4 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
 | [un stock jamais sous zéro](#7-un-stock-qui-ne-descend-jamais-sous-zéro) | `Incr` et une règle `Never` | `CHECK` et `UPDATE` | une contrainte sur n'importe quels faits, pas une ligne |
 | [payées en retard, des prêts dans un intervalle](#8-les-factures-payées-en-retard-les-prêts-entre-25-et-3-) | `Less`, `Between` sur un float | `a < b`, `BETWEEN` | le totalOrder sur les floats |
 | [les clients avec leur téléphone](#9-les-clients-avec-leur-téléphone-sils-en-ont-un) | `Optional` | `LEFT JOIN` | l'absent en dernier dans les deux sens, vivant avec `Watch` |
+| [un client qui a des factures gardé](#10-un-client-qui-a-des-factures-ne-se-supprime-pas-les-lignes-dune-facture-partent-avec-elle) | `Link(to, onDelete)`, `Delete` | `REFERENCES … ON DELETE` | des liens toujours indexés dans les deux sens ; une cascade demande les droits du token, et est bornée |

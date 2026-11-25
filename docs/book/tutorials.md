@@ -822,6 +822,11 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
 | every client with the clients each follows, 56,797 rows | 29.4 ms | **16.4 ms** | PostgreSQL, 1.8 times |
 | the follow links to a newer client (`Less(a, b)`; `a < b`), 28,271 rows | 14.7 ms | **3.97 ms** | PostgreSQL, 3.7 times |
 | the invoices below one invoice's total (`Less`; `total < (SELECT ...)`), 122,962 rows | 76.2 ms | **22.0 ms** | PostgreSQL, 3.5 times |
+| a client with 10,000 invoices, refused (`Delete`, `refuse`; `DELETE`, `REFERENCES`) | **6 µs** | 89 µs | Cepheus, 15 times |
+| an invoice and its 100 lines (`cascade`; `ON DELETE CASCADE`) | **176 µs** | 193 µs | about the same |
+| an invoice and its 10,000 lines | 27.3 ms | **5.16 ms** | PostgreSQL, 5.3 times |
+| an invoice and the link of its 10,000 notes (`clear`; `ON DELETE SET NULL`) | **11.1 ms** | 46.5 ms | Cepheus, 4.2 times |
+| the check of a link that names a kind, at each write (a foreign key's) | **0.2 µs** | 9.6 µs | Cepheus, 48 times |
 
 - A counter many writers share is where a lock costs most: PostgreSQL holds the row until each commit is on the disk,
   Cepheus's writer reads the counter as it applies each group, and the groups share their fsync.
@@ -831,6 +836,10 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
   process, is faster than reading the facts one by one; and the range above runs on one of Cepheus's domains, since a
   question is split across domains at its first level only (here, the one total of the bound): a way to split it
   further is not built yet.
+- The deletes are the engine's work, nothing on the disk, at a load of 2.7 to 3.1, on 680,681 facts and the same rows
+  ([the benchmarks](benchmarks.md#deletes-and-links-that-name-a-kind-2026-11-25)). Finding what links to a thing is one
+  lookup in Cepheus, whatever their number, where PostgreSQL runs its foreign key's query through a trigger; a large
+  cascade costs Cepheus what retracting its facts costs (1 µs a fact), PostgreSQL only marks its rows.
 
 ## Each tutorial in one line
 
