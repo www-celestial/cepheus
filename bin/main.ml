@@ -219,7 +219,8 @@ let verify_help =
    Checks a database's files as they are, changing nothing: every frame of its journal (its CRCs, its groups\n\
    numbered), every run (as an open checks it, and every page against its CRC), each run's place in the journal,\n\
    and the records of its vault by their CRCs. DIR is a database's folder (DATA/NAME), a backup's\n\
-   (DEST/DATE/NAME) or any copy. A database open in a server is checked up to the frame being written.\n\n\
+   (DEST/DATE/NAME) or any copy. A database open in a server is checked up to the frame being written (a frame\n\
+   that does not check while every byte of it is there is read again for a second, then damage).\n\n\
    Exit status: 0 whole; 1 damage found, each named on a line \"damaged: ...\"; 2 DIR holds no database, cannot\n\
    be read, or must first be recovered by its server (start it and stop it).\n"
 
@@ -229,15 +230,16 @@ let backup_help =
    while it serves: no stop and no token, as the server's user (who reads its data directory). Each copy holds\n\
    every group confirmed before its journal was copied, and its vault; it is checked as cepheus verify checks,\n\
    and ended after its last whole frame. The folder takes its dated name only once every copy is whole and\n\
-   forced (DEST/DATE.partial until then; the next backup removes one a killed backup left). One backup into\n\
-   DEST at a time. Taken on a replica, it costs the primary nothing. Prints a line a database, then the folder.\n\n\
+   forced (DEST/DATE.partial until then; the next backup removes one a killed backup left, and nothing else).\n\
+   DEST is this user's: one that other users may write is refused. One backup into DEST at a time. Taken on a\n\
+   replica, it costs the primary nothing. Prints a line a database, then the folder.\n\n\
    Exit status: 0 done; 1 a copy has damage (kept in DEST/DATE.damaged for a look); 2 refused or failed.\n"
 
 let restore_help =
   "usage: cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]\n\n\
    Restores the database of SRC (a backup's DEST/DATE/NAME, or a stopped database) into DIR: up to group N\n\
    (--to-group), or up to the last group written at or before T (--to-time 2026-11-24T14:05[:SS] in local\n\
-   time, or UTC with a final Z), else to SRC's last group. DIR must be new or empty; --replace moves a database\n\
+   time, or UTC with a final Z: exactly these digits, a day of the calendar), else to SRC's last group. DIR must be new or empty; --replace moves a database\n\
    there aside first (DIR.before-restore-DATE, never removed). The copy is made in DIR.restoring, opened (its\n\
    runs checked, the groups after its newest run replayed), verified, then renamed DIR. The restored database\n\
    writes its next groups in a new epoch, so that a replica holding later groups of the old history is refused,\n\
@@ -256,7 +258,7 @@ let ops cmd args =
       (match int_of_string_opt n with Some n -> to_group := Some n | None -> bad ("--to-group " ^ n ^ ": a group number"));
       go r
     | "--to-time" :: t :: r when cmd = "restore" ->
-      (match Ops.parse_time t with Some ms -> to_time := Some ms | None -> bad ("--to-time " ^ t ^ ": YYYY-MM-DDTHH:MM[:SS], or with a final Z for UTC"));
+      (match Ops.parse_time t with Some ms -> to_time := Some ms | None -> bad ("--to-time " ^ t ^ ": YYYY-MM-DDTHH:MM[:SS] (a day of the calendar, 00 to 59), or with a final Z for UTC"));
       go r
     | "--replace" :: r when cmd = "restore" -> replace := true; go r
     | x :: _ when String.length x > 1 && x.[0] = '-' -> bad ("unknown option " ^ x)

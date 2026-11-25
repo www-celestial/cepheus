@@ -148,10 +148,12 @@ dans l'ordre de leurs noms ; son [vault](vault.md) (le coffre de ses fichiers), 
 fichier que ses faits citent soit dans la copie. Puis chaque copie est vérifiée comme
 [`cepheus verify`](operations.md#la-vérification-scrubbing) vérifie une base (chaque frame du journal, c'est-à-dire
 chaque bloc écrit d'un seul tenant et vérifié par ses CRC ; chaque page des runs ; les enregistrements du vault),
-arrêtée après sa dernière frame entière (la frame en cours d'écriture au moment de la copie est laissée de côté),
-forcée sur le disque, et marquée fermée. Les copies sont faites dans `DEST/DATE.partial`, renommé `DEST/DATE`
-seulement quand toutes sont entières et forcées : un dossier daté est toujours entier ; une sauvegarde tuée en route
-laisse son dossier `.partial`, que la sauvegarde suivante retire.
+arrêtée après sa dernière frame entière (la frame en cours d'écriture au moment de la copie est laissée de côté ; une
+frame écrite entière qui ne se vérifie pas est un dommage, jamais laissée de côté en silence), forcée sur le disque, et
+marquée fermée. Les copies sont faites dans `DEST/DATE.partial`, renommé `DEST/DATE` seulement quand toutes sont
+entières et forcées : un dossier daté est toujours entier ; une sauvegarde tuée en route laisse son dossier
+`.partial`, que la sauvegarde suivante retire (ce nom seul, à cet utilisateur : rien d'autre dans DEST n'est jamais
+retiré). DEST appartient à l'utilisateur du serveur : un dossier où d'autres utilisateurs peuvent écrire est refusé.
 
 Une copie tient chaque groupe (une écriture, appliquée tout entière ou pas du tout) confirmé avant le début de la
 copie de son journal, y compris ceux du commit buffer (le journal commun du serveur, où les écritures de plusieurs
@@ -174,8 +176,9 @@ Une ligne par base (le groupe que tient sa copie, sa taille et son temps), puis 
 programme écrivait 200 groupes par seconde : le serveur était au groupe 4947 quand la sauvegarde a commencé, et la
 copie tient le groupe 4954. Le code de sortie : 0, fait ; 1, une copie a un dommage, nommé sur ses lignes (le dossier
 est gardé sous `DEST/DATE.damaged` pour qu'on le regarde : vérifiez la base en service une fois son serveur arrêté, et
-gardez les sauvegardes d'avant) ; 2, refusée ou échouée (une autre sauvegarde écrit dans DEST, une base dont le serveur
-s'est arrêté brutalement et doit d'abord la reprendre, un disque plein), et rien n'est nommé `DEST/DATE`.
+gardez les sauvegardes d'avant) ; 2, refusée ou échouée (une autre sauvegarde écrit dans DEST, un DEST où d'autres
+utilisateurs peuvent écrire, une base dont le serveur s'est arrêté brutalement et doit d'abord la reprendre, un disque
+plein), et rien n'est nommé `DEST/DATE`.
 `cepheus backup --help` dit la même chose.
 
 Chaque nuit à 3 h, sous l'utilisateur du serveur, avec `/etc/systemd/system/cepheus-backup.service` :
@@ -244,7 +247,9 @@ group 4954: written 2026-11-24 22:49:15, through the token app
 vérifié, les groupes d'après le run le plus récent rejoués), vérifie chaque frame et chaque page, et seulement alors la
 renomme `DIR` : une restauration qui échoue, ou qu'on tue, ne laisse pas de demi-base derrière elle (la restauration
 suivante retire ce qu'elle a laissé). Elle refuse un dossier qui tient une base (`--replace` met d'abord celle-ci de
-côté, sans jamais la retirer) ou qu'un serveur en marche tient. La dernière ligne nomme le groupe atteint ; celle
+côté, sans jamais la retirer, même une base qui a crashé) ou qu'un serveur en marche tient, et un dossier à côté d'un
+commit buffer qu'a laissé l'arrêt pas propre d'un serveur quand il tient des frames de cette base
+([sauvegarde et restauration](operations.md#sauvegarde-et-restauration)). La dernière ligne nomme le groupe atteint ; celle
 d'avant, quand et par quel token il a été écrit. L'exercice réussit quand la restauration finit avec le code 0 à un
 groupe au moins égal à celui que montrait le serveur en service quand la sauvegarde a commencé ; une sauvegarde qui ne
 se restaure pas nomme son dommage (code 1) : restaurez alors celle de la nuit d'avant. La restauration ouvre la copie
@@ -267,7 +272,8 @@ cepheus serve --config ~/drill/etc/cluster.toml
 Le journal garde chaque groupe, donc une restauration peut s'arrêter juste avant celui qui a fait le mal, comme la
 restauration à un instant donné de PostgreSQL (point-in-time recovery) arrête le rejeu de son WAL (son journal) à une
 cible. `--to-group N` restaure jusqu'au groupe N ; `--to-time T`, jusqu'au dernier groupe écrit à T ou avant
-(`2026-11-24T14:05`, ou `14:05:30`, à l'heure locale de la machine, ou en UTC avec un `Z` final). Le reçu d'une
+(`2026-11-24T14:05`, ou `14:05:30`, à l'heure locale de la machine, ou en UTC avec un `Z` final ; exactement ces
+chiffres et un jour du calendrier : `2026-02-31` ou `14:05:60` est refusé, jamais déplacé vers une autre heure). Le reçu d'une
 écriture nomme son groupe (`Group` en Cesia, `receipt.group` en OCaml), et la restauration affiche l'heure et le token
 du groupe atteint : restaurez d'abord dans un dossier d'essai, et regardez.
 

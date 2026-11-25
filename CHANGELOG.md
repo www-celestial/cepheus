@@ -79,12 +79,16 @@ stay as they are, or a later version reads and speaks both the old and the new.
   restore drill and what to watch ([production](docs/book/production.md)).
 - **Operations as commands.** `cepheus verify DIR` checks a database's files and changes nothing: every frame of the
   journal, every page of the runs, the runs against the journal, the vault's records, each damage named (exit status
-  1), a live database up to the frame being written. `cepheus backup --config FILE DEST` copies every database of a
-  running server, a replica's too, with no stop and no token, into `DEST/DATE`, named only once every copy is checked,
-  cut after its last whole frame and forced. `cepheus restore SRC DIR` restores one, opened and checked before it
-  takes its name; `--to-group N` or `--to-time T` stops before a bad write, as PostgreSQL's point-in-time recovery,
+  1), a live database up to the frame being written (a frame that does not check while every byte of it is there is
+  read again for a second, then damage: never cut in silence). `cepheus backup --config FILE DEST` copies every
+  database of a running server, a replica's too, with no stop and no token, into `DEST/DATE`, named only once every
+  copy is checked, cut after its last whole frame and forced; DEST is the user's own (one that others may write is
+  refused), and a backup removes there only the `DATE.partial` folders a backup left, never through a link.
+  `cepheus restore SRC DIR` restores one, opened and checked before it takes its name; `--to-group N` or `--to-time T`
+  (exactly its digits and a day of the calendar) stops before a bad write, as PostgreSQL's point-in-time recovery,
   and the restored database writes in a new epoch, so that a replica holding the old history's later groups is
-  refused rather than followed; `--replace` moves the database there aside, never removes it
+  refused rather than followed; `--replace` moves the database there aside, never removes it, even one that crashed
+  through a server's commit buffer (refused only while that buffer holds frames of it)
   ([backups](docs/book/production.md#backups), [verification](docs/book/operations.md#verification-scrubbing)). The
   backup script the production guide gave before still works, and its copies restore with `cepheus restore`.
 - An answer the server holds while it builds it (a Find with Sort or aggregates, a watch's first answer) is bounded
@@ -125,7 +129,11 @@ stay as they are, or a later version reads and speaks both the old and the new.
   unique values checked against the database and the file. The file is checked whole first: a bad row stops the
   import with its line and nothing is written (`--skip-bad` writes the good rows and lists the bad ones;
   `--upsert` changes the thing a unique value finds); then it is written in large groups of up to a million
-  operations, parsed by several domains while the server writes. `cepheus export DB --kind KIND [--format csv]` writes
+  operations, parsed by several domains while the server writes; a failure there, the connection lost included,
+  names the groups written. A quote opens a quoted field only at a field's start, so that a stray one makes its line
+  alone bad (PostgreSQL's COPY reads it as opening a quoted part, and loads the lines up to the next one as one row);
+  blank lines are read through, never held; a record's fields are made up to the header's count, its JSON holds at
+  most 100,000 values. `cepheus export DB --kind KIND [--format csv]` writes
   every thing of the kind at one group, named on stderr, its asserted facts and its links as their keys, read from one
   view on the server's machine. At 10 M facts (120,482 clients, 2.4 M invoices linked by e-mail), medians of seven rounds: 28.5 s, beside PostgreSQL's COPY and join 43.7 s and SQLite's .import 9.71 s; a file of 10 GiB checked whole in 244 MB ([import and export](docs/book/operations.md#import-and-export)).
 - A question has a **time**: `[clients] question_timeout` in `cluster.toml` (seconds, 30 by default, 0 for none), and a

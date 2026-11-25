@@ -101,8 +101,9 @@ les y perdre. Donc :
 
 Des données durables ont changé : une panne du disque, un fichier mal manipulé, un segment qui manque au milieu. Ne
 supprimez aucun fichier. Lancez `cepheus verify DIR` pour la liste complète (il ne change rien) ; restaurez la base
-depuis une sauvegarde (`cepheus restore BACKUP DIR --replace`, qui met de côté le dossier endommagé), qui peut se
-prendre sur une replica ([les sauvegardes depuis la replica](server.md#les-sauvegardes-depuis-la-replica)), ou
+depuis une sauvegarde (`cepheus restore BACKUP DIR --replace`, qui met de côté le dossier endommagé ; après un crash,
+elle est refusée tant que le commit buffer du serveur tient des frames de cette base, [plus bas](#sauvegarde-et-restauration)),
+qui peut se prendre sur une replica ([les sauvegardes depuis la replica](server.md#les-sauvegardes-depuis-la-replica)), ou
 promouvez sa replica. Le message nomme le segment et l'offset de la première frame mauvaise. Si et seulement si vous
 savez que la partie abîmée n'a jamais été confirmée (par exemple, la frame est la plus récente et la machine a perdu
 le courant pendant qu'elle l'écrivait), la fin peut être coupée à la main à cet offset (`truncate -s OFFSET SEGMENT`) :
@@ -148,7 +149,13 @@ sont écrits à côté puis renommés, donc une copie cohérente n'a besoin d'au
    après son corps, mais son trailer après son en-tête : une copie qui finit là où finissait le fichier ne tient
    jamais un trailer sans son en-tête) ; suivie d'une frame qui se vérifie, c'est un dommage. Chaque groupe confirmé
    avant que la copie de son segment commence est avant ce point : il a été écrit entier avant d'être confirmé, et les
-   frames sont ajoutées une à la fois ;
+   frames sont ajoutées une à la fois. Une frame en cours d'écriture montre ses octets à mesure qu'ils s'écrivent : une
+   frame est ajoutée en une seule écriture, qu'un lecteur voit dans l'ordre jusqu'à la taille qu'il lit, et l'en-tête
+   d'un grand groupe, écrit en dernier à sa place, se lit comme des zéros jusque-là. Donc une première frame qui ne se
+   vérifie pas alors que chacun de ses octets est là (son en-tête se vérifie et toute la longueur qu'il donne est là,
+   ou son en-tête est là, pas des zéros, et ne se vérifie pas) n'est pas une frame en cours d'écriture : le segment de
+   la base en service est relu dix fois en une seconde (un en-tête qui s'écrit à sa place est entier en quelques
+   microsecondes), et une frame qui reste ainsi est un dommage (code de sortie 1), jamais coupée ;
 4. `DIR/vault/`, après le journal : chaque pack (un fichier d'enregistrements du vault) et son index, puis ses `keys`
    (un fait ne nomme un fichier qu'une fois les enregistrements du fichier forcés, G22, donc chaque fichier que cite le
    journal copié est dans les packs copiés ; la clé d'un domaine est forcée avant son premier enregistrement, donc les
@@ -158,6 +165,16 @@ sont écrits à côté puis renommés, donc une copie cohérente n'a besoin d'au
 La copie laisse de côté `lock`, `closed`, `shared` et `sessions`. `cepheus backup` la vérifie ensuite comme le fait
 `cepheus verify`, la coupe après sa dernière frame entière, la force sur le disque et écrit son marqueur `closed` : une
 sauvegarde est une base fermée proprement, et un `cepheus verify` plus tard prend tout octet déchiré pour un dommage.
+Donc la frame la plus récente d'une base laissée par un processus mort, dont seul le trailer est cassé (la règle du
+crash la garde : la recovery réécrit le trailer depuis l'en-tête de la frame), voit d'abord son trailer réécrit dans la
+copie, comme le ferait l'ouverture suivante.
+
+DEST appartient à l'utilisateur : un dossier où d'autres utilisateurs peuvent écrire est refusé (ils pourraient y
+planter des noms), comme un dossier à un autre utilisateur. Une sauvegarde n'y supprime que ce qu'a laissé une
+sauvegarde qui n'a pas fini, un dossier de cet utilisateur nommé `DATE.partial` (`2026-11-24T224915.partial`, ou
+`...-2.partial`), jamais à travers un lien (link, un nom qui renvoie vers un autre fichier) : le `movie.partial` d'un
+autre programme reste. Son verrou, `DEST/cepheus-backup.lock`, s'ouvre comme un fichier de cet utilisateur, jamais à
+travers un lien.
 
 `cepheus restore SRC DIR [--to-group N | --to-time T]` copie dans `DIR.restoring`, dans le même ordre, les runs dont
 les groupes finissent à N ou avant et les segments jusqu'à celui qui commence à N + 1 (gardé réduit à son en-tête : un
@@ -167,10 +184,16 @@ récents la partagent, est codée de nouveau sans eux, à la même place, avec l
 la source et une base remplacée, ouvre la copie (ses runs vérifiés, les groupes d'après le
 plus récent rejoués), la ferme, la vérifie comme le fait `cepheus verify`, et la renomme `DIR` ; avec `--replace`, une
 base déjà dans `DIR` est d'abord renommée `DIR.before-restore-DATE`, jamais supprimée. Elle refuse une source ou une
-cible qu'un processus tient ouverte, une base écrite à travers le commit buffer d'un serveur et pas fermée proprement,
-et une cible dont le serveur ne s'est pas arrêté proprement (`DATA/server.wal.1` ou `.2` présents) : le démarrage
-suivant de ce serveur écrirait les frames du buffer dans le journal restauré. Le code de sortie des deux : 0 fait,
-1 un dommage trouvé, 2 refusé ou échoué ; aucune des deux ne laisse une demi-copie sous son nom final.
+cible qu'un processus tient ouverte, une source écrite à travers le commit buffer d'un serveur et pas fermée
+proprement, et une cible à côté d'un commit buffer qu'a laissé l'arrêt pas propre d'un serveur (`DATA/server.wal.1` ou
+`.2`, aucun serveur ne tenant le dossier des données) quand ce buffer tient des frames de la base restaurée ou de celle
+remplacée, ou ne se lit pas : le démarrage suivant du serveur les écrirait dans le journal restauré. Une cible qui a
+crashé pendant qu'on l'écrivait à travers le buffer est remplacée telle quelle (mise de côté, jamais lue).
+`--to-time T` prend `YYYY-MM-DDTHH:MM` ou `YYYY-MM-DDTHH:MM:SS` (une espace à la place du `T`), exactement ces
+chiffres, un jour du calendrier (années bissextiles comprises), des heures de 00 à 23, des minutes et des secondes de
+00 à 59, à l'heure locale de la machine (une heure que ses horloges sautent au passage à l'heure d'été est refusée)
+ou en UTC avec un `Z` final ; tout le reste est refusé, jamais déplacé vers une autre heure. Le code de sortie des
+deux : 0 fait, 1 un dommage trouvé, 2 refusé ou échoué ; aucune des deux ne laisse une demi-copie sous son nom final.
 
 ## La vérification (scrubbing)
 
@@ -192,8 +215,11 @@ seule) :
 
 La fin du segment le plus récent est lue selon l'état de la base : fermée proprement, chaque octet doit se vérifier ;
 laissée par un processus mort, une frame déchirée sans rien d'écrit après elle est une note (l'ouverture suivante la
-coupe) ; ouverte dans un serveur, la frame en cours d'écriture n'est pas vérifiée (une frame qui ne se vérifie pas
-suivie d'une frame qui se vérifie est un dommage, dans tous les états). Une base écrite à travers le commit
+coupe), comme une frame la plus récente dont seul le trailer est cassé (l'ouverture suivante le réécrit) ; ouverte
+dans un serveur, la frame en cours d'écriture n'est pas vérifiée, et une frame qui ne se vérifie pas alors que chacun
+de ses octets est là est relue pendant une seconde, puis tenue pour un dommage si elle reste ainsi
+([sauvegarde et restauration](#sauvegarde-et-restauration), point 3) ; une frame qui ne se vérifie pas suivie d'une
+frame qui se vérifie est un dommage, dans tous les états. Une base écrite à travers le commit
 buffer d'un serveur et pas fermée proprement est refusée : démarrez son serveur et arrêtez-le d'abord. Code de sortie
 0 : entière (la dernière ligne nomme le groupe) ; 1 : un dommage, une ligne `damaged:` chacun ; 2 : pas une base,
 illisible, ou refusée. Lancez-le sur les sauvegardes (`cepheus backup` le lance sur chaque copie) et de temps en temps
@@ -310,9 +336,16 @@ cepheus import shop clients.csv --kind client --config /etc/cepheus/cluster.toml
 **CSV** comme l'écrit la RFC 4180 (la description, par l'IETF, des valeurs séparées par des virgules) : une ligne
 d'en-tête, puis un enregistrement (record) par ligne ; un champ qui commence par un guillemet est entre guillemets et
 peut contenir des virgules et des sauts de ligne, `""` y étant un guillemet. Un guillemet ailleurs, ou un caractère
-après un guillemet fermant, est refusé : c'est un fichier cassé, pas une donnée. Un enregistrement finit à un saut de
-ligne hors des guillemets, LF ou CR LF ; les lignes vides sont sautées ; une marque d'ordre des octets UTF-8 au début
-(le BOM, les trois octets EF BB BF que certains éditeurs écrivent en premier) est sautée. Comme dans le `COPY` de
+après un guillemet fermant, est refusé : c'est un fichier cassé, pas une donnée. Un tel guillemet n'ouvre rien, si bien
+que sa ligne seule est mauvaise et que `--skip-bad` lit les lignes d'après (la grammaire de la RFC 4180 : un champ qui
+ne commence pas par un guillemet n'en contient aucun). Le `COPY` de PostgreSQL 18.6 lit au contraire un guillemet
+dans un champ comme le début d'une partie entre guillemets : les lignes `bob"x,2`, `carl,3` et `eve"y,5` y entrent
+comme une seule ligne de table, son nom `bobx,2`, `carl,3` et `evey` joints par des sauts de ligne, son nombre 5, sans
+erreur (mesuré). Un mauvais enregistrement qu'un guillemet au début d'un champ étend sur plusieurs lignes est nommé
+aussi avec sa dernière ligne. Un enregistrement finit à un saut de ligne hors des guillemets, LF ou CR LF ; les lignes
+vides sont sautées à mesure qu'elles sont lues (un fichier de lignes vides ne tient aucune mémoire) ; une marque
+d'ordre des octets UTF-8 au début (le BOM, les trois octets EF BB BF que certains éditeurs écrivent en premier) est
+sautée. Comme dans le `COPY` de
 PostgreSQL (sql-copy.html : « a NULL is written as an unquoted empty string, while an empty string data value is
 written with double quotes »), un champ vide sans guillemets n'est aucune valeur et `""` est le texte vide. Un export
 écrit CR LF, comme la RFC 4180.
@@ -334,7 +367,9 @@ Une valeur est lue selon le type de son champ, exactement :
 | `Link` | la clé de la chose liée (plus bas) | la clé, du type de la clé | la clé |
 | plusieurs valeurs | une liste JSON dans le champ : `"[""red"",""blue""]"` | une liste | une liste |
 
-Une date est gardée à la milliseconde : les chiffres plus fins (les microsecondes de PostgreSQL) sont coupés. L'argent
+Une date est gardée à la milliseconde : les chiffres plus fins (les microsecondes de PostgreSQL) sont coupés ; une
+date que son fuseau déplace hors des années 0 à 9999 en UTC (`0000-01-01T00:00:00+01:00`) est refusée, puisqu'un
+export ne pourrait pas la réécrire. L'argent
 (money) est lu depuis ses chiffres décimaux en unités mineures, si bien que `12.505` pour des centimes est refusé et
 que `0.1` vaut dix centimes, jamais 0.1000000000000000055. Un texte est vérifié en UTF-8 et un octet NUL refusé
 (PostgreSQL refuse `0x00` dans un texte aussi) ; un export refuse un texte qui en contient un (ni le CSV ni les JSON
@@ -357,7 +392,10 @@ et la raison, et **rien n'est écrit** :
 cepheus: clients.csv line 1204: Email "ada@example.com" is on line 7 too; nothing was written
 ```
 
-`--skip-bad` écrit les bonnes lignes et liste les mauvaises sur stderr, chacune avec sa ligne. `--upsert` change la
+`--skip-bad` écrit les bonnes lignes et liste les mauvaises sur stderr, chacune avec sa ligne. Un échec qui n'est pas
+un refus (la connexion au serveur perdue, le disque) arrête aussi l'import, à tout moment, en nommant les groupes
+écrits ; le groupe dont la réponse s'est perdue est nommé comme tel : il est peut-être dans la base, celui d'après les
+groupes nommés. `--upsert` change la
 chose que trouve une valeur unique de la ligne au lieu de la refuser : les valeurs de la ligne remplacent ses champs,
 un champ vide en laisse un tel quel, et un champ de plusieurs valeurs est refusé (`Write` change ceux-là) ; deux lignes
 du fichier avec une même valeur unique sont refusées même alors, comme le `ON CONFLICT DO UPDATE` de PostgreSQL refuse
@@ -410,8 +448,13 @@ suivi) ; ailleurs il le dit et s'arrête. Lire à un groupe passé (`--as-of`) a
   export demande `read` sur toute la base. La commande ouvre le fichier avec les droits de son utilisateur ; le serveur
   ne voit jamais un chemin.
 - Ce que contient un fichier est une donnée : un enregistrement fait au plus 8 MiB, si bien qu'un guillemet laissé
-  ouvert dans un fichier de 10 GB arrête l'import à sa ligne au lieu de lire le reste comme un seul champ ;
-  l'imbrication JSON est d'au plus 64 niveaux ; les textes sont vérifiés UTF-8 sans NUL.
+  ouvert dans un fichier de 10 GB arrête l'import à sa ligne au lieu de lire le reste comme un seul champ ; les champs
+  d'un enregistrement sont faits jusqu'au nombre de l'en-tête, un de plus compté et pas fait (8 MiB de virgules font
+  8,4 M champs, 740 MB à faire) ; le JSON d'un enregistrement tient au plus 100 000 valeurs, les éléments de ses
+  listes et les membres de ses objets, tous ses champs ensemble (la borne de `In`), et un en-tête au plus 100 000
+  colonnes ; l'imbrication JSON est d'au plus 64 niveaux ; les textes sont vérifiés UTF-8 sans NUL ; le fichier est
+  lu par le descripteur (file descriptor, le fichier ouvert) vérifié, jamais de nouveau par son chemin, si bien qu'un
+  fichier renommé par-dessus entre-temps n'est pas lu.
 - Un export écrit les valeurs exactement telles qu'elles sont, puisqu'un aller-retour en a besoin : un texte qui
   commence par `=`, `+`, `-` ou `@` est une formule pour un tableur qui ouvre le CSV (la CSV injection). Ouvrez un
   export dans un tableur comme du texte, ou écrivez le rapport par l'app (le CSV de l'app des factures protège ses

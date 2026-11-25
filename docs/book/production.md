@@ -135,9 +135,11 @@ before the journal is listed (a merge that removes one meanwhile leaves it reada
 segments, in the order of their names; its [vault](vault.md), after the journal, so that every file its facts cite is
 in the copy. Then each copy is checked as [`cepheus verify`](operations.md#verification-scrubbing) checks a database
 (every frame of the journal, every page of the runs, the vault's records), ended after its last whole frame (the frame
-being written when it was copied is left out), forced to the disk, and marked closed. The copies are made in
-`DEST/DATE.partial`, renamed `DEST/DATE` only once all of them are whole and forced: a dated folder is always whole;
-a backup killed midway leaves its `.partial` folder, which the next backup removes.
+being written when it was copied is left out; a frame written whole that does not check is damage, never left out in
+silence), forced to the disk, and marked closed. The copies are made in `DEST/DATE.partial`, renamed `DEST/DATE` only
+once all of them are whole and forced: a dated folder is always whole; a backup killed midway leaves its `.partial`
+folder, which the next backup removes (that name of this user's alone: nothing else in DEST is ever removed). DEST is
+the server's user's own: a folder that other users may write is refused.
 
 A copy holds every group confirmed before the copy of its journal started, the commit buffer's included (they are in
 the journal's page cache), and never a torn one. It leaves out `lock`, `shared` and `sessions`, and opens as a
@@ -157,8 +159,8 @@ A line a database (the group its copy holds, its size and time), then the folder
 200 groups a second: the server was at group 4947 when the backup started, and the copy holds group 4954. The exit
 status: 0, done; 1, a copy has damage, named on its lines (the folder is kept as `DEST/DATE.damaged` for a look:
 verify the live database once its server is stopped, and keep the backups before it); 2, refused or failed (another
-backup writes into DEST, a database whose server crashed and must recover it first, a full disk), and nothing is
-named `DEST/DATE`. `cepheus backup --help` says the same.
+backup writes into DEST, a DEST that other users may write, a database whose server crashed and must recover it
+first, a full disk), and nothing is named `DEST/DATE`. `cepheus backup --help` says the same.
 
 Every night at 3:00, as the server's user, with `/etc/systemd/system/cepheus-backup.service`:
 
@@ -221,7 +223,9 @@ group 4954: written 2026-11-24 22:49:15, through the token app
 `cepheus restore` copies the backup into `DIR.restoring`, opens it as a server opens a database (every run checked,
 the groups after the newest run replayed), checks every frame and page, and only then renames it `DIR`: a restore that
 fails, or is killed, leaves no half database behind (the next restore removes what it left). It refuses a folder that
-holds a database (`--replace` moves that one aside first, never removes it) or that a running server holds. The last
+holds a database (`--replace` moves that one aside first, never removes it, even one that crashed) or that a running
+server holds, and a folder beside a commit buffer that a server's unclean stop left when it holds frames of this
+database ([backup and restore](operations.md#backup-and-restore)). The last
 line names the group reached; the line before, when and through which token it was written. The drill passes when the
 restore ends with exit status 0 at a group at least the one the live server showed when the backup began; a backup
 that does not restore names its damage (exit status 1): restore the night before it. The restore opens the copy in
@@ -244,7 +248,8 @@ cepheus serve --config ~/drill/etc/cluster.toml
 The journal keeps every group, so a restore can stop just before the one that did the harm, as PostgreSQL's
 point-in-time recovery stops its WAL's replay at a target. `--to-group N` restores up to group N; `--to-time T`, up to
 the last group written at or before T (`2026-11-24T14:05`, or `14:05:30`, in the machine's local time, or UTC with a
-final `Z`). A write's receipt names its group (`Group` in Cesia, `receipt.group` in OCaml), and the restore prints the time and the token of the
+final `Z`; exactly these digits and a day of the calendar: `2026-02-31` or `14:05:60` is refused, never moved to
+another time). A write's receipt names its group (`Group` in Cesia, `receipt.group` in OCaml), and the restore prints the time and the token of the
 group it reached: restore to a scratch folder first, and look.
 
 ```sh
