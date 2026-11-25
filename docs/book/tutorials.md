@@ -153,7 +153,8 @@ the transaction ends, and a transaction ends after its commit is on the disk (an
 one before it to be written, so invoices are made one fsync at a time, whatever the number of clerks. Cepheus takes no
 lock: its one writer applies the groups in order, reading the counter at each, and the groups that arrive while the
 disk works share the next fsync (group commit), so 30 clerks wait for about one fsync together, not 30 one after the
-other (measured in [a stock that never goes below zero](#7-a-stock-that-never-goes-below-zero), the same counter).
+other. Measured with 64 writers on one counter: Cepheus 5,890 writes a second, PostgreSQL 154 ([what it
+costs](#what-it-costs)).
 
 ## 2. A job queue where each job is taken once
 
@@ -553,7 +554,8 @@ a question over any facts ("the lamps reserved never exceed the lamps in stock",
 PostgreSQL needs a trigger, and a trigger that reads other rows is fooled by two transactions at once (each reads
 the other's rows as they were before it) unless it runs under `SERIALIZABLE` or takes locks; Cepheus's one writer
 checks each group against the database the groups before it made. And the
-cost, as for tutorial 1's counter: each `UPDATE` of the lamp's row waits for the one before it to commit.
+cost, as for tutorial 1's counter: each `UPDATE` of the lamp's row waits for the one before it to commit, 154
+orders a second at most with 64 buyers, against 5,890 for Cepheus ([what it costs](#what-it-costs)).
 
 ## 8. Invoices paid late, loans between 2.5 and 3 %
 
@@ -608,7 +610,7 @@ SELECT c.name, l.rate FROM loan l JOIN client c ON c.id = l.client
 once the first is bound, the inequality join of [Khayyat 2015](references.md#joins). On floats, Cepheus orders as its
 `Sort` does, IEEE 754's totalOrder: $-0$ comes before $0$, so `Below(r, 0)` keeps a $-0$; PostgreSQL's `float8`
 holds $-0 = 0$, so `r < 0` leaves it out. Both put NaN after every number. Measured on the benchmarks' data:
-[below](#what-the-new-conditions-cost).
+[below](#what-it-costs).
 
 ## 9. Clients with their phone, if they have one
 
@@ -667,11 +669,30 @@ phone, largest first, starts with the clients who have none, unless the query sa
 missing value last in both directions. The meaning is SQL's `LEFT JOIN`, and SPARQL's `OPTIONAL`, for one pattern
 ([Pérez, Arenas and Gutierrez 2009](references.md#joins)), with one rule PostgreSQL does not need: the optional
 variable is in no other part of the question, so the question has one meaning whatever the order of its parts. Measured:
-[below](#what-the-new-conditions-cost).
+[below](#what-it-costs).
 
-## What the new conditions cost
+## What it costs
 
-(Measured in the next step.)
+Measured on the benchmarks' data at 1 million facts (11,363 clients, 227,260 invoices, 56,797 follow links), the same
+rows in PostgreSQL 18.6, on a machine that other jobs shared (a load average of 5 to 6.5 on its 8 threads); the
+method, every number and its range are in [the benchmarks](benchmarks.md#less-optional-and-one-shared-counter-2026-11-25-at-1-million-facts).
+
+| question | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---|
+| 64 writers on one counter (`Incr`; a counter row) | **5,890 writes a second** | 154 | Cepheus, 38 times |
+| the clients of a city with the clients each follows (`Optional`; `LEFT JOIN`), 490 rows | **0.099 ms** | 0.554 ms | Cepheus, 5.6 times |
+| every client with the clients each follows, 56,797 rows | 29.4 ms | **16.4 ms** | PostgreSQL, 1.8 times |
+| the follow links to a newer client (`Less(a, b)`; `a < b`), 28,271 rows | 14.7 ms | **3.97 ms** | PostgreSQL, 3.7 times |
+| the invoices below one invoice's total (`Less`; `total < (SELECT ...)`), 122,962 rows | 76.2 ms | **22.0 ms** | PostgreSQL, 3.5 times |
+
+- A counter many writers share is where a lock costs most: PostgreSQL holds the row until each commit is on the disk,
+  Cepheus's writer reads the counter as it applies each group, and the groups share their fsync.
+- `Optional` costs what the same join costs; on a selective question Cepheus's indexes win, over two whole tables
+  PostgreSQL's hash join does.
+- `Less` costs no more than filtering the rows in the program, but PostgreSQL's scan of a narrow table, in one
+  process, is faster than reading the facts one by one; and the range above runs on one of Cepheus's domains, since a
+  question is split across domains at its first level only (here, the one total of the bound): a way to split it
+  further is not built yet.
 
 ## Each tutorial in one line
 

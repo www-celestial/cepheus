@@ -558,6 +558,9 @@ rows (a row where B gave the variable a value that C then refuses is lost in one
 other); their *well-designed* patterns are those where the two agree. The items of `Where` have no order, so such a
 question would have no one meaning: it is refused.
 
+What they cost beside PostgreSQL, on the benchmarks' data: [benchmarks](benchmarks.md#less-optional-and-one-shared-counter-2026-11-25-at-1-million-facts)
+(`Optional` costs what the join costs; `Less` what filtering the rows in the program costs).
+
 ## Watch: live questions
 
 A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64, until = missing)` takes the same question as

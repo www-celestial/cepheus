@@ -89,6 +89,71 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Less, Optional and one shared counter (2026-11-25), at 1 million facts
+
+**Method.** The data of the other sections at 1 M facts (11,363 clients, 227,260 invoices, 56,797 follow links), loaded
+by `bench.exe load` and merged into one run; PostgreSQL 18.6 the same rows (`pg.sh load`), with an index on
+`invoice (total)` that `pg.sh ops` adds for the range below. The questions: Cepheus `bench.exe pages` in its process
+(the engine, up to 8 domains, the rows made as OCaml values); PostgreSQL the execution time of `EXPLAIN (ANALYZE,
+TIMING OFF)` (its engine, no row sent; it chose one process for each). 5 rounds, the two sides one after the other in
+each, each side a median of 5 calls; given: the median of the 5 rounds, and in brackets their least and largest. The
+machine was shared with other jobs' work this time: a load average (1 minute) of 6.2 to 6.5 on its 8 threads during
+these rounds, so the numbers are of a busy machine, both sides alike. The data on the SATA SSD (btrfs) of the other sections.
+
+| question | rows | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---:|---|
+| the follow links from a client to a newer one, `Less(a, b)`: a check of each link | 28,271 | 14.7 ms [14.2, 25.7] | 3.97 ms [3.95, 4.50], a `Seq Scan` with its `Filter` | PostgreSQL, 3.7 times |
+| &nbsp;&nbsp;the same, every link given and filtered by the program | | 18.1 ms [16.3, 26.9] | | |
+| the invoices whose total is below one invoice's, `Less(t, tx)`: a range of the totals' index | 122,962 | 76.2 ms [72.3, 97.6] | 22.0 ms [20.4, 41.0], a `Bitmap Index Scan` on `total` | PostgreSQL, 3.5 times |
+| &nbsp;&nbsp;the same range, its bound read first (`Below` of that total) | | 53.5 ms [52.8, 62.8] | | |
+| the 490 clients of city-7 with the clients each follows, `Optional` | 490 | **0.099 ms** [0.080, 0.163] | 0.554 ms [0.532, 0.784], a `Nested Loop Left Join` | Cepheus, 5.6 times |
+| &nbsp;&nbsp;the same as a join | | 0.110 ms [0.096, 0.212] | | |
+| every client with the clients each follows, `Optional` | 56,797 | 29.4 ms [28.7, 33.0] | 16.4 ms [13.4, 30.6], a `Hash Right Join` | PostgreSQL, 1.8 times |
+| &nbsp;&nbsp;the same as a join | | 30.2 ms [27.9, 40.9] | | |
+
+- **The answers** are the same on both sides (122,962, 490 and 56,797 rows) but for the first: "a < b" compares
+  ids, and Cepheus numbers its things in the order the 64 threads of the load wrote them, PostgreSQL by the client's
+  number, so the pairs kept differ a little (28,271 against 28,265 of the 56,797 links).
+- **`Optional` costs what the join costs** (0.099 against 0.110 ms, 29.4 against 30.2): looking up the thing's
+  values after the join is the work the join does at that pattern. Every client here follows at least 4 others, so no
+  row is missing: the measure is of the left join's way, not of missing rows. On a city's clients Cepheus is 5.6 times
+  faster (its indexes give the 490 clients and their links directly); over every client PostgreSQL's hash join of the
+  two tables, read whole in their order, is faster.
+- **`Less` costs no more than the program's own filter** (14.7 against 18.1 ms), but PostgreSQL's scan of a table of
+  two columns, in one process, reads a row in 70 ns where Cepheus reads the links' index fact by fact.
+- **`Less`'s range** reads the 122,962 totals below the bound from the sorted index, as the same range with its bound
+  read first does, but on one domain: a question is split across domains at its first level only, and there that level
+  is the one total of the bound: on one domain (`CEPHEUS_DOMAINS=1`, 3 rounds at a load of 2.7 to 3.9) the two take the
+  same, 61.3 ms against 60.5. Splitting at the first level that has many candidates would give the
+  range its 8 domains back: not built yet.
+
+**One counter that 64 writers increment** (tutorials [1](tutorials.md#1-invoice-numbers-with-no-gap) and
+[7](tutorials.md#7-a-stock-that-never-goes-below-zero)): each write its own group, forced to the disk, for 5 s; 5
+rounds; the load average 5.2 to 6.2. Cepheus: `bench/cesia/write.ce 64 5 counter`, 64 fibers of a Cesia program on
+one connection, each group an `Incr` of one counter, against a server of its own on the SSD; beside it the same program
+inserting an invoice of 4 facts a group. PostgreSQL: `COUNTER=1 pg.sh write`, pgbench with 64 connections, each
+transaction `UPDATE counter SET last = last + 1 WHERE id = 1`; beside it the same pgbench inserting an invoice row.
+
+| 64 writers | Cepheus | PostgreSQL 18.6 |
+|---|---:|---:|
+| one counter that every write increments | **5,890 a second** [4,578, 7,939], median latency 9.3 ms | 154 a second [8, 214], 231 ms |
+| a new row or thing each write, nothing shared | 6,636 a second [5,114, 8,670], 6.9 ms (\*) | 5,387 a second [4,392, 6,557], 9.5 ms |
+
+- PostgreSQL's row lock holds the counter until the transaction's commit is on the disk, so its 64 writers go one
+  fsync at a time: 35 times fewer writes than when they share nothing (one round fell to 8 a second, its latency 8.2 s:
+  a stall of the disk under the others' load, kept in the range). Cepheus's writer reads the counter as it applies
+  each group, and the groups that arrive while the disk works share its next fsync: the counter goes as fast as writes
+  that share nothing.
+- (\*) In other rounds (5, at a load of 3.1 to 3.4), alternated with the counter, which made 8,632 a second there
+  [6,298, 8,801]: a group of the counter is one fact, an insert four.
+
+**Q1 to Q5 are not slower.** Against main before this work (6707b9e), built the same way, on the same data, the two
+binaries alternated in each round (`bench.exe read`, 21 runs a question in each), new / old by the median of the
+rounds' ratios: in 5 rounds at a load of 7 to 11, Q1 0.92 [0.62, 1.07], Q2 0.95 [0.76, 1.16], Q3 1.17 [0.93, 1.68], Q4
+1.04 [0.84, 1.28], Q5 0.98 [0.87, 1.17]; Q3, the widest, again alone in 11 rounds at a load of 2.1 to 2.7: 1.02 [0.98,
+1.06] on 8 domains (the least of its runs 274 µs against 277), 1.05 [0.90, 1.33] on one. A question without the new
+conditions runs the test of a candidate it ran before them: their checks sit behind a flag that is false for it.
+
 ## Backup and restore (2026-11-24), at 10 million facts
 
 **Method.** `bench/ops.sh`, on the machine of the other sections (i7-4720HQ, 4 cores and 8 threads, 11 GB, a SATA
