@@ -23,6 +23,44 @@ let floats = [| 0.; -0.; 1.5; -2.25; nan; -.nan; infinity; neg_infinity; 1e300; 
 (* prefixes: of one text, of several, of none, a lone first byte of a two-byte character, a NUL *)
 let prefixes = [| "a"; "ab"; "abc"; "A"; "Ad"; "ad"; "\195"; "\195\132"; "zz"; "b"; "ab\000" |]
 
+(* dates: a few milliseconds apart, and the instants about the summer time changes of Paris and New York in 2026,
+   the last half hour of 2026 *)
+let dates = [| 1_700_000_000_000; 1_700_000_000_001; 1_700_000_000_002; 1_700_000_000_003; 1_700_000_000_004; 1774744200000; 1774746000000;
+               1774747800000; 1792888200000; 1792890000000; 1792891800000; 1798759800000; 1793511000000; 1793514600000 |]
+
+let units = [| "second"; "minute"; "hour"; "day"; "week"; "month"; "quarter"; "year"; "decade"; "century"; "millennium" |]
+let zones = [| "UTC"; "Europe/Paris"; "America/New_York"; "Australia/Lord_Howe" |]
+
+(* Trunc in UTC by the C library's calendar (this process runs in TZ=UTC: mktime is timegm), apart from Zone's; in
+   another zone, Zone's (its offsets are checked against the C library's in reports.exe) *)
+let trunc_oracle u z (x : Value.t) =
+  match x with
+  | Date ms when z = "UTC" ->
+    let s = if ms >= 0 then ms / 1000 else -(((-ms) + 999) / 1000) in
+    let tm = Unix.gmtime (float_of_int s) in
+    let at ?(mon = tm.tm_mon) ?(mday = tm.tm_mday) ?(year = tm.tm_year) () =
+      int_of_float (fst (Unix.mktime { tm with tm_year = year; tm_mon = mon; tm_mday = mday; tm_hour = 0; tm_min = 0; tm_sec = 0; tm_isdst = false }))
+    in
+    let y = tm.tm_year + 1900 in
+    let first y = 100 * ((y - 1) / 100) + 1 in
+    let r =
+      match u with
+      | "second" -> s
+      | "minute" -> s - tm.tm_sec
+      | "hour" -> s - tm.tm_sec - (60 * tm.tm_min)
+      | "day" -> at ()
+      | "week" -> at () - (86400 * ((tm.tm_wday + 6) mod 7))
+      | "month" -> at ~mday:1 ()
+      | "quarter" -> at ~mday:1 ~mon:(3 * (tm.tm_mon / 3)) ()
+      | "year" -> at ~mday:1 ~mon:0 ()
+      | "decade" -> at ~mday:1 ~mon:0 ~year:(y - (y mod 10) - 1900) ()
+      | "century" -> at ~mday:1 ~mon:0 ~year:(first y - 1900) ()
+      | _ -> at ~mday:1 ~mon:0 ~year:((1000 * ((y - 1) / 1000)) + 1 - 1900) ()
+    in
+    Value.Date (1000 * r)
+  | Date ms -> Value.Date (Zone.trunc (Zone.find z) (Zone.unit_of u) ms)
+  | x -> x
+
 let ints r = match Rng.int r 12 with 0 -> max_int | 1 -> min_int | 2 -> 0 | _ -> Rng.int r 40 - 10
 
 (* ---- the oracle ---- *)
@@ -132,11 +170,125 @@ let bindings_ask (fl : (int * int * Value.t) list) (q : Query.t) (extra : Ask.it
   let envs = List.fold_left expand envs (List.filter_map (function Ask.Optional p -> Some p | _ -> None) extra) in
   List.map (Array.map (function Some x -> x | None -> Value.Int 0)) envs
 
-(* the rows of a select, with their columns' types *)
-let rows_of (typs : Value.typ array) bs (sel : Wire.select) =
+(* ---- the oracle of the reports' aggregates (protocol 9): each computed again by brute force ---- *)
+
+(* a cell of a group: a value, or the list of Values *)
+type cell = One of Value.t | Many of Value.t list
+
+(* a value computed in floats in an order of its own (approx): compared within 1e-9, relative; the others exactly *)
+let approx_cols : bool array ref = ref [||]
+
+let bits x = let b = Buffer.create 8 in Value.encode b x; Buffer.contents b
+
+(* the different values, in Sort's order *)
+let distinct vs =
+  let t = Hashtbl.create 8 in
+  List.sort cmp_value (List.filter (fun x -> let k = bits x in if Hashtbl.mem t k then false else (Hashtbl.replace t k (); true)) vs)
+
+let small = function Value.Int a | Money a | Date a -> abs a < 1 lsl 20 && a <> min_int | Float _ -> false | _ -> false
+
+(* a + (b - a) f rounded half away from zero *)
+let lerp_int a b f = if f = 0. then a else a + Float.to_int (Float.round (float_of_int (b - a) *. f))
+
+let fl = function Value.Int a | Money a | Date a -> float_of_int a | Float f -> f | _ -> nan
+
+(* the oracle of one aggregate of protocol 9 over a group's values (Optionals' missing ones taken out), and whether
+   its value is approximate *)
+let report_agg (typs : Value.typ array) (a : Wire.agg) (all : Value.t list) =
+  let present = List.filter (fun x -> not (Value.is_missing x)) all in
+  let tx x = typs.(x) in
+  match a with
+  | Wire.Distinct _ -> One (Value.Int (List.length (distinct present))), false
+  | Values _ -> Many (distinct present), false
+  | Avg x -> (
+    let n = List.length all in
+    match tx x with
+    | Tmoney _ | Tdate ->
+      let s = List.fold_left (fun s v -> s + int_of v) 0 all in
+      let q = s / n and r = s mod n in
+      let q = if 2 * abs r >= n then (if s < 0 then q - 1 else q + 1) else q in
+      One (if tx x = Tdate then Value.Date q else Money q), false
+    | Tint when List.for_all small all -> One (Value.Float (float_of_int (List.fold_left (fun s v -> s + int_of v) 0 all) /. float_of_int n)), false
+    | Tfloat when List.exists (fun v -> Float.is_nan (fl v)) all || (List.mem (Value.Float infinity) all && List.mem (Value.Float neg_infinity) all) -> One (Float nan), false
+    | Tfloat when List.mem (Value.Float infinity) all -> One (Float infinity), false
+    | Tfloat when List.mem (Value.Float neg_infinity) all -> One (Float neg_infinity), false
+    | _ -> let xs = List.sort compare (List.map fl all) in One (Value.Float (List.fold_left ( +. ) 0. xs /. float_of_int n)), true)
+  | Variance (x, pop) | Stddev (x, pop) ->
+    let n = List.length all in
+    let fin v = match a with Stddev _ -> Float.sqrt v | _ -> v in
+    if (not pop) && n < 2 then One Value.missing, false
+    else if List.exists (fun v -> not (Float.is_finite (fl v))) all then One (Float nan), false
+    else begin
+      let scale = match tx x with Tmoney sc -> float_of_int (int_of_float (10. ** float_of_int sc)) | _ -> 1. in
+      let den = float_of_int (if pop then n * n else n * (n - 1)) *. scale *. scale in
+      if List.for_all small all then begin
+        let s1 = List.fold_left (fun s v -> s + int_of v) 0 all and s2 = List.fold_left (fun s v -> s + (int_of v * int_of v)) 0 all in
+        One (Float (fin (float_of_int ((n * s2) - (s1 * s1)) /. den))), false
+      end
+      else begin
+        let xs = List.sort compare (List.map fl all) in
+        let m = List.fold_left ( +. ) 0. xs /. float_of_int n in
+        let ss = List.fold_left (fun s v -> s +. ((v -. m) *. (v -. m))) 0. xs in
+        One (Float (fin (ss *. float_of_int n /. den))), true
+      end
+    end
+  | Quantile (x, p, discrete) ->
+    let sorted = Array.of_list (List.stable_sort cmp_value all) in
+    let n = Array.length sorted in
+    if discrete then One sorted.(max 1 (Float.to_int (Float.ceil (p *. float_of_int n))) - 1), false
+    else begin
+      let h = p *. float_of_int (n - 1) in
+      let lo = Float.to_int (Float.floor h) and hi = Float.to_int (Float.ceil h) in
+      let f = h -. Float.floor h in
+      let a = sorted.(lo) and b = sorted.(hi) in
+      match tx x with
+      | Tint | Tfloat -> One (Float (if lo = hi then fl a else fl a +. ((fl b -. fl a) *. f))), false
+      | Tmoney _ -> One (Money (if lo = hi then int_of a else lerp_int (int_of a) (int_of b) f)), false
+      | _ -> One (Date (if lo = hi then int_of a else lerp_int (int_of a) (int_of b) f)), false
+    end
+  | Count | Sum _ | Min _ | Max _ -> assert false
+
+let report_typ (typs : Value.typ array) (a : Wire.agg) =
+  match a with
+  | Wire.Distinct _ -> Value.Tint
+  | Values x | Quantile (x, _, true) -> typs.(x)
+  | Avg x | Quantile (x, _, false) -> (match typs.(x) with Tint -> Tfloat | t -> t)
+  | Variance _ | Stddev _ -> Tfloat
+  | Count -> Tint
+  | Sum x | Min x | Max x -> typs.(x)
+
+(* the rows of a select, with their columns' types: each row's cells (a list for Values) *)
+let groups_of (typs : Value.typ array) bs (sel : Wire.select) =
+  approx_cols := [||];
   match sel with
-  | Give g -> Array.map (fun x -> typs.(x)) g, List.map (fun b -> Array.map (fun x -> b.(x)) g) bs
-  | Group (keys, aggs) ->
+  | Give g -> Array.map (fun x -> typs.(x)) g, List.map (fun b -> Array.map (fun x -> One b.(x)) g) bs
+  | Group (keys, aggs) when Array.exists (function Wire.Count | Sum _ | Min _ | Max _ -> false | _ -> true) aggs ->
+    let t = Hashtbl.create 16 in
+    List.iter
+      (fun b ->
+        let k = Array.map (fun x -> b.(x)) keys in
+        let kk = String.concat "" (Array.to_list (Array.map bits k)) in
+        let _, l = try Hashtbl.find t kk with Not_found -> k, [] in
+        Hashtbl.replace t kk (k, b :: l))
+      bs;
+    let approx = Array.make (Array.length keys + Array.length aggs) false in
+    let agg bs i = function
+      | Wire.Count -> One (Value.Int (List.length bs))
+      | Sum x -> let s = List.fold_left (fun s b -> s + int_of b.(x)) 0 bs in One (match typs.(x) with Tmoney _ -> Money s | Tdate -> Date s | _ -> Int s)
+      | Min x -> One (List.fold_left (fun m b -> if cmp_value b.(x) m < 0 then b.(x) else m) (List.hd bs).(x) bs)
+      | Max x -> One (List.fold_left (fun m b -> if cmp_value b.(x) m > 0 then b.(x) else m) (List.hd bs).(x) bs)
+      | a ->
+        let x = match a with Avg x | Distinct x | Values x | Quantile (x, _, _) | Variance (x, _) | Stddev (x, _) -> x | _ -> 0 in
+        let c, ap = report_agg typs a (List.map (fun b -> b.(x)) bs) in
+        if ap then approx.(Array.length keys + i) <- true;
+        c
+    in
+    let ctyp = Array.append (Array.map (fun x -> typs.(x)) keys) (Array.map (report_typ typs) aggs) in
+    approx_cols := approx;
+    ctyp, Hashtbl.fold (fun _ (k, bs) acc -> Array.append (Array.map (fun x -> One x) k) (Array.mapi (fun i a -> agg bs i a) aggs) :: acc) t []
+  | Group _ -> (
+    match sel with
+    | Group (keys, aggs) ->
     (* groups by values as Cepheus tells them apart (floats by their bits: nan and -nan, 0 and -0 are two) *)
     let t = Hashtbl.create 16 in
     List.iter
@@ -153,10 +305,20 @@ let rows_of (typs : Value.typ array) bs (sel : Wire.select) =
       | Sum x -> let s = List.fold_left (fun s b -> s + int_of b.(x)) 0 bs in (match typs.(x) with Tmoney _ -> Money s | _ -> Int s)
       | Min x -> List.fold_left (fun m b -> if cmp_value b.(x) m < 0 then b.(x) else m) (List.hd bs).(x) bs
       | Max x -> List.fold_left (fun m b -> if cmp_value b.(x) m > 0 then b.(x) else m) (List.hd bs).(x) bs
+      | _ -> assert false
     in
     let ctyp = Array.append (Array.map (fun x -> typs.(x)) keys)
-        (Array.map (function Wire.Count -> Value.Tint | Sum x | Min x | Max x -> typs.(x)) aggs) in
-    ctyp, Hashtbl.fold (fun _ (k, bs) acc -> Array.append k (Array.map (agg bs) aggs) :: acc) t []
+        (Array.map (function Wire.Sum x | Min x | Max x -> typs.(x) | _ -> Value.Tint) aggs) in
+    ctyp, Hashtbl.fold (fun _ (k, bs) acc -> Array.map (fun x -> One x) (Array.append k (Array.map (agg bs) aggs)) :: acc) t []
+    | Give _ -> assert false)
+
+(* a group's rows: one a value of its longest list (one at least), a list's cell missing past its end *)
+let flatten (c : cell array) =
+  let n = Array.fold_left (fun m -> function Many l -> max m (List.length l) | One _ -> m) 1 c in
+  List.init n (fun i -> Array.map (function One x -> x | Many l -> (match List.nth_opt l i with Some x -> x | None -> Value.missing)) c)
+
+(* a group as the order sees it: a list takes no part *)
+let plain c = Array.map (function One x -> x | Many _ -> Value.Int 0) c
 
 let ordered cols (o : Top.order) =
   let listed = List.map (fun (k : Top.key) -> k.col) o.keys in
@@ -175,19 +337,30 @@ let cmp_row ord a b =
         | false, false -> let x = cmp_value a.(k.col) b.(k.col) in if k.desc then -x else x)
     0 ord
 
-let oracle cols rows (o : Top.order) =
+(* the groups in the order, after the cursor, the first k and their copies, each then its rows (a Values column takes
+   no part in the order: the cursor's is set aside too) *)
+let oracle cols groups (o : Top.order) =
   let ord = ordered cols o in
-  let rows = List.stable_sort (cmp_row ord) rows in
-  let rows = match o.after with None -> rows | Some a -> List.filter (fun r -> cmp_row ord r a > 0) rows in
-  if o.limit = 0 then rows
-  else begin
-    let first = List.filteri (fun i _ -> i < o.limit) rows in
-    match List.rev first with
-    | [] -> []
-    | last :: _ ->
-      (* the copies of the k-th row, which follow it *)
-      first @ List.filter (fun r -> cmp_row ord r last = 0) (List.filteri (fun i _ -> i >= o.limit) rows)
-  end
+  let groups = List.stable_sort (fun a b -> cmp_row ord (plain a) (plain b)) groups in
+  let groups =
+    match o.after with
+    | None -> groups
+    | Some a ->
+      let a = match groups with g :: _ -> Array.mapi (fun j x -> match g.(j) with Many _ -> Value.Int 0 | One _ -> x) a | [] -> a in
+      List.filter (fun r -> cmp_row ord (plain r) a > 0) groups
+  in
+  let groups =
+    if o.limit = 0 then groups
+    else begin
+      let first = List.filteri (fun i _ -> i < o.limit) groups in
+      match List.rev first with
+      | [] -> []
+      | last :: _ ->
+        (* the copies of the k-th row, which follow it *)
+        first @ List.filter (fun r -> cmp_row ord (plain r) (plain last) = 0) (List.filteri (fun i _ -> i >= o.limit) groups)
+    end
+  in
+  List.concat_map flatten groups
 
 (* ---- the engine ---- *)
 
@@ -204,12 +377,21 @@ let wired q extra sel (o : Top.order) =
   | Wire.Find f -> f.query, f.extra, f.select, f.order
   | _ -> assert false
 
-let same a b = List.length a = List.length b && List.for_all2 (fun x y -> Array.for_all2 Value.equal x y) a b
+(* a cell the oracle computed in floats in an order of its own: within 1e-9, relative *)
+let close (x : Value.t) (y : Value.t) =
+  match x, y with
+  | Float a, Float b -> Value.equal x y || (Float.is_nan a && Float.is_nan b) || Float.abs (a -. b) <= 1e-9 *. Float.max (Float.abs a) (Float.abs b)
+  | _ -> Value.equal x y
+
+let same a b =
+  let ap j = j < Array.length !approx_cols && !approx_cols.(j) in
+  List.length a = List.length b && List.for_all2 (fun x y -> Array.length x = Array.length y && Array.for_all Fun.id (Array.mapi (fun j c -> if ap j then close c y.(j) else Value.equal c y.(j)) x)) a b
 
 let show rows = String.concat " | " (List.map (fun r -> String.concat "," (Array.to_list (Array.map Value.to_string r))) rows)
 
 let questions = ref 0 and with_order = ref 0 and empties = ref 0 and with_ops = ref 0
 let with_less = ref 0 and with_optional = ref 0 and with_floats = ref 0 and with_missing = ref 0
+let with_trunc = ref 0 and with_report = ref 0
 
 (* Store.text_order: the texts of p in the order of their bytes, from a text on, merged over the runs and the delta:
    strictly in order, every text of p's facts at or after the start, none before it *)
@@ -260,7 +442,7 @@ let run seed =
                  (if Rng.int r 2 = 0 then Some (Resolve.Add (t, tag, Text names.(Rng.int r 4))) else None);
                  (if Rng.int r 3 > 0 then Some (Resolve.Add (t, score, Int (ints r))) else None);
                  (if Rng.int r 2 = 0 then Some (Resolve.Add (t, price, Money (Rng.int r 30))) else None);
-                 (if Rng.int r 2 = 0 then Some (Resolve.Add (t, when_, Date (1_700_000_000_000 + Rng.int r 5))) else None);
+                 (if Rng.int r 2 = 0 then Some (Resolve.Add (t, when_, Date dates.(Rng.int r (Array.length dates)))) else None);
                  (if Rng.int r 2 = 0 then Some (Resolve.Add (t, ratio, Float floats.(Rng.int r (Array.length floats)))) else None);
                  (if Rng.int r 2 = 0 then Some (Resolve.Add (t, ok, Bool (Rng.bool r))) else None);
                  (if Rng.int r 2 = 0 then Some (Resolve.Add (t, owner, pick ())) else None);
@@ -462,31 +644,81 @@ let run seed =
           end
         in
         let outs = List.filter (fun x -> outer.(x)) (List.init q.vars Fun.id) in
+        (* Truncs now and then: a date of the question (an Optional's too) truncated, numbered after the variables *)
+        let truncs =
+          match List.filter (fun x -> typs.(x) = Value.Tdate) outs with
+          | [] -> []
+          | ds when Rng.int r 3 = 0 ->
+            List.init (1 + Rng.int r 2) (fun i -> Ask.Trunc (q.vars + i, List.nth ds (Rng.int r (List.length ds)), units.(Rng.int r (Array.length units)), zones.(Rng.int r (Array.length zones))))
+          | _ -> []
+        in
+        let nt = List.length truncs in
+        let typs = Array.append typs (Array.make nt Value.Tdate) in
+        let outs = outs @ List.init nt (fun i -> q.vars + i) in
+        let src x = if x < q.vars then x else (match List.nth truncs (x - q.vars) with Ask.Trunc (_, y, _, _) -> y | _ -> x) in
+        let quants = [| 0.; 0.25; 0.5; 0.9; 1.; 1. /. 3. |] in
         let sel =
-          match Rng.int r 3 with
+          match Rng.int r 4 with
           | 0 -> Wire.Give (Array.of_list outs)
           | 1 -> let g = List.filter (fun _ -> Rng.int r 2 = 0) outs in Wire.Give (Array.of_list (if g = [] then [ 0 ] else g))
-          | _ ->
+          | 2 ->
             let keys = Array.of_list (List.filter (fun _ -> Rng.int r 2 = 0) outs) in
-            let outs' = List.filter (fun x -> not (List.mem x !opt_vars)) outs in
+            let outs' = List.filter (fun x -> not (List.mem (src x) !opt_vars)) outs in
             let aggs = List.filter_map (fun x -> if Rng.int r 3 = 0 && (match typs.(x) with Tint | Tmoney _ -> true | _ -> false) then Some (Wire.Sum x) else if Rng.int r 4 = 0 && (match typs.(x) with Tint | Tmoney _ | Tdate -> true | _ -> false) then Some (if Rng.bool r then Wire.Min x else Max x) else None) outs' in
             Wire.Group (keys, Array.of_list (Wire.Count :: aggs))
+          | _ ->
+            (* a report: the aggregates of protocol 9 beside the others *)
+            let keys = Array.of_list (List.filter (fun _ -> Rng.int r 2 = 0) outs) in
+            let outs' = List.filter (fun x -> not (List.mem (src x) !opt_vars)) outs in
+            let pick l = List.nth l (Rng.int r (List.length l)) in
+            let aggs =
+              List.filter_map
+                (fun x ->
+                  let t = typs.(x) in
+                  match Rng.int r 8 with
+                  | 0 when (match t with Tint | Tmoney _ | Tdate | Tfloat -> true | _ -> false) -> Some (Wire.Avg x)
+                  | 1 when (match t with Tint | Tmoney _ | Tfloat -> true | _ -> false) -> Some (if Rng.bool r then Wire.Variance (x, Rng.bool r) else Stddev (x, Rng.bool r))
+                  | 2 when (match t with Tint | Tmoney _ | Tdate | Tfloat -> true | _ -> false) -> Some (Wire.Quantile (x, quants.(Rng.int r (Array.length quants)), false))
+                  | 3 -> Some (Wire.Quantile (x, quants.(Rng.int r (Array.length quants)), true))
+                  | 4 when (match t with Tint | Tmoney _ -> true | _ -> false) -> Some (Wire.Sum x)
+                  | _ -> None)
+                outs'
+            in
+            (* Count of the different values and Values: an Optional's variable too, its missing values left out *)
+            let lists = List.filter_map (fun x -> match Rng.int r 5 with 0 -> Some (Wire.Distinct x) | 1 -> Some (Wire.Values x) | _ -> None) outs in
+            let aggs = aggs @ lists in
+            let aggs = if aggs = [] then [ Wire.Distinct (pick outs) ] else aggs in
+            Wire.Group (keys, Array.of_list (if Rng.bool r then Wire.Count :: aggs else aggs))
         in
+        let extra = extra @ truncs in
         if extra <> [] then incr with_ops;
         let rec has f = function Ask.Not l -> List.exists (has f) l | Or alts -> List.exists (List.exists (has f)) alts | i -> f i in
         if List.exists (has (function Ask.Less _ | Less_or_equal _ -> true | _ -> false)) extra then incr with_less;
         if List.exists (has (function Ask.Optional _ -> true | _ -> false)) extra then incr with_optional;
         if List.exists (fun (_, lo, _) -> match lo with Value.Float _ -> true | _ -> false) q.ranges
            || List.exists (has (function Ask.Range (_, Float _, _) -> true | _ -> false)) extra then incr with_floats;
-        let ctyp, rows = rows_of typs (if extra = [] then bindings fl q else bindings_ask fl q extra outer) sel in
+        let bs = if extra = [] then bindings fl q else bindings_ask fl q extra outer in
+        (* the Truncs' columns after the variables *)
+        let bs =
+          if truncs = [] then bs
+          else List.map (fun b -> Array.append b (Array.of_list (List.map (function Ask.Trunc (_, x, u, z) -> trunc_oracle u z b.(x) | _ -> assert false) truncs))) bs
+        in
+        if truncs <> [] then incr with_trunc;
+        (match sel with Group (_, aggs) when Array.exists (function Wire.Count | Sum _ | Min _ | Max _ -> false | _ -> true) aggs -> incr with_report | _ -> ());
+        let ctyp, groups = groups_of typs bs sel in
+        let rows = List.concat_map flatten groups in
+        let has_values = match sel with Group (_, aggs) -> Array.exists (function Wire.Values _ -> true | _ -> false) aggs | Give _ -> false in
         let cols = Array.length ctyp in
         if rows = [] then incr empties;
         if List.exists (Array.exists Value.is_missing) rows then incr with_missing;
         let o =
-          let keys = List.filter_map (fun c -> if Rng.int r 2 = 0 then Some { Top.col = c; desc = Rng.bool r } else None) (List.init cols Fun.id) in
+          (* a Values column is a list: no key of Sort *)
+          let listed c = match sel with Group (k, aggs) when c >= Array.length k -> (match aggs.(c - Array.length k) with Wire.Values _ -> true | _ -> false) | _ -> false in
+          let keys = List.filter_map (fun c -> if Rng.int r 2 = 0 && not (listed c) then Some { Top.col = c; desc = Rng.bool r } else None) (List.init cols Fun.id) in
           let keys = List.sort_uniq (fun (a : Top.key) b -> compare a.col b.col) keys in
           let keys = if keys <> [] && Rng.bool r then List.rev keys else keys in
-          let limit = if Rng.int r 4 = 0 then 0 else 1 + Rng.int r 7 in
+          (* Limit alone takes the first groups in the engine's order: of a report with Values, its rows are not known *)
+          let limit = if Rng.int r 4 = 0 || (keys = [] && has_values) then 0 else 1 + Rng.int r 7 in
           let after =
             if keys <> [] && Rng.int r 3 = 0 && rows <> [] then Some (List.nth rows (Rng.int r (List.length rows)))
             else None
@@ -508,7 +740,7 @@ let run seed =
                 | _ -> C.fail "seed %d: %s: a row that is not the answer's: %s" seed what (show [ r ])) got
           end
           else begin
-            let want = oracle cols rows o in
+            let want = oracle cols groups o in
             if same got want then C.check true "" else C.fail "seed %d: %s\n  got:  %s\n  want: %s" seed what (show got) (show want)
           end
         in
@@ -929,7 +1161,8 @@ let live seed =
         let typs = Ask.typs_of a in
         let denied = Core.unreadable table !v q extra <> None in
         C.check (denied = List.exists (fun (pt : Query.pattern) -> pt.p = owner) (Ask.patterns q extra)) "seed %d: live: the token's right" seed;
-        let _, want = rows_of typs (bindings_ask (if denied then fl else readable) q extra a.outer) sel in
+        let _, want = groups_of typs (bindings_ask (if denied then fl else readable) q extra a.outer) sel in
+        let want = List.concat_map flatten want in
         let key r = let b = Buffer.create 16 in Array.iter (Value.encode b) r; Buffer.contents b in
         let norm l = List.sort compare (List.map key l) in
         match !rows with
@@ -1010,12 +1243,15 @@ let less_optional () =
   refused "a range of a text" q2 [ Ask.Range (2, Text "a", Text "b") ] (Wire.Give [| 0 |]) "a range needs an int, float, date or money variable"
 
 let () =
+  (* the oracle's calendar of UTC: mktime is timegm *)
+  Unix.putenv "TZ" "UTC";
   let seeds = ref 300 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "S" ] (fun _ -> ()) "questions.exe";
   (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; ins (); less_optional (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
   Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path, %d given up for the heap path\n"
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
   Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
+  Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"
     !planners_checks (fst !planners_work) (snd !planners_work);
   Printf.printf "questions: %d checks of live questions with Not, Or, In and Prefix after a frame (%d frames answered by their keys, %d by the whole question)\n"

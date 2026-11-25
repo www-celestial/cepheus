@@ -566,7 +566,12 @@ let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order ~timeout =
         let a = Answer.answer ~ticket ~order ~extra ~budget ~stop v q sel in
         let typs = Array.init a.cols a.typ in
         rows := a.n;
-        send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do if a.missing i j then Value.encode b Value.missing else put_word b v typs.(j) (a.word i j) done) a.n)
+        send_rows c ~id ~kind v.group a.cols
+          (fun i b ->
+            for j = 0 to a.cols - 1 do
+              if a.missing i j then Value.encode b Value.missing else if a.computed j then Value.encode b (a.cell i j) else put_word b v typs.(j) (a.word i j)
+            done)
+          a.n)
   in
   let outcome =
     match

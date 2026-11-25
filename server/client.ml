@@ -50,6 +50,11 @@ let no_files = "this server speaks protocol 2 or older: files need a server of p
    connection on an operation it does not know) *)
 let no_incr = "this server speaks protocol 3 or older: Incr needs a server of protocol 4"
 
+(* Trunc, or an aggregate of a report (Avg, Count of a variable, Values, Quantile, Variance, Stddev), on a connection
+   to a server of protocol 8 or older: refused here, never sent (such a server refuses the request whole) *)
+let no_report spoken =
+  Printf.sprintf "this server speaks protocol %d: Trunc, Avg, Count(x), Values, Quantile, Variance and Stddev need a server of protocol 9" spoken
+
 let has_incr ops = List.exists (function Resolve.Incr _ -> true | _ -> false) ops
 
 (* a Delete, or a link that names a kind (the facts of cepheus/to and cepheus/delete), on a connection to a server of
@@ -563,6 +568,7 @@ let find c db ?(select = Wire.Give [||]) ?(extra = []) ?(order = Top.none) ?time
   | None when (extra <> [] || order <> Top.none) && c.spoken < 2 -> Error { code = "invalid"; message = older }
   | None when ms > 0 && c.spoken < 6 -> Error { code = "invalid"; message = no_timeout c.spoken }
   | None when c.spoken < 7 && Wire.needs_7 extra -> Error { code = "invalid"; message = no_less c.spoken }
+  | None when c.spoken < 9 && Wire.needs_9 extra select -> Error { code = "invalid"; message = no_report c.spoken }
   | None when List.length query.where > Wire.max_patterns -> Error { code = "invalid"; message = too_many_patterns query }
   | None -> (
     match read_call c (Wire.Find { db = db.handle; query; select; extra; order; timeout = ms }) with
@@ -736,6 +742,7 @@ let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) ?(order = To
   if order <> Top.none && c.spoken < 5 then invalid_arg (no_sorted_watch c.spoken);
   if ms > 0 && c.spoken < 6 then invalid_arg (no_timeout c.spoken);
   if c.spoken < 7 && Wire.needs_7 extra then invalid_arg (no_less c.spoken);
+  if c.spoken < 9 && Wire.needs_9 extra select then invalid_arg (no_report c.spoken);
   if List.length query.where > Wire.max_patterns then invalid_arg (too_many_patterns query);
   let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra; worder = order; wtimeout = ms }) in
   flush c;

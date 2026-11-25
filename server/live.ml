@@ -21,7 +21,12 @@
    lookup). A parameter fixed by a changed fact that no watch holds stops the search at once.
 
    Aggregates (Group): a row a key, kept by difference: the count and the sums add and subtract; a minimum or a
-   maximum that a removal takes away is asked again for its key only.
+   maximum that a removal takes away is asked again for its key only. The aggregates of protocol 9 follow by
+   difference too, exactly (Agg): an average's and a variance's exact sums subtract, a bag's count of a value goes
+   down; a key's rows (one a value of its Values) are replaced whole when any changes.
+
+   Trunc: a template computes a Trunc's column from its date's word as it gives a row (its variables after the
+   template's, parameters included); the question it watches is that of the dates.
 
    Not, Or, In and Prefix (Ask): the bindings a frame may change are those that agree with one of its facts at a
    pattern of the question, wherever the pattern is: for a pattern of the question, or one inside a Not or an
@@ -61,8 +66,9 @@ type msg =
   | Same of { group : int }  (** the answer at [group] is the one at the group the watch resumed from *)
   | Ended of { code : string; message : string }  (** the watch is over; "lagging": watch again from its group *)
 
-(* the state of a key of an aggregate: its bindings, and each aggregate's word (a sum, a minimum, a maximum) *)
-type key = { mutable n : int; acc : int array }
+(* the state of a key of an aggregate: its bindings, each aggregate's word (a count, a sum, a minimum, a maximum),
+   and the state of each aggregate of protocol 9 *)
+type key = { mutable n : int; acc : int array; st : Agg.state option array }
 
 (* a row of a window, in its order: every row of one window carries the same [cmp] *)
 type wrow = { cmp : row -> row -> int; r : row }
@@ -95,7 +101,7 @@ type sub = {
   mutable plus : row list;
   mutable minus : row list;
   net : (row, int) Hashtbl.t;  (* a projecting Give: rows added minus removed *)
-  before : (row, row option) Hashtbl.t;  (* Group: a touched key's row before the frame *)
+  before : (row, row list) Hashtbl.t;  (* Group: a touched key's rows before the frame *)
   dirty : (row, unit) Hashtbl.t;  (* Group: a key whose minimum or maximum was removed *)
   win : window option;  (* Sort and Limit *)
 }
@@ -107,8 +113,12 @@ and template = {
   np : int;
   pats : Query.pattern array;
   typs : Value.typ array;  (* of every variable of tq *)
-  give : int array;  (* Give: its columns; Group: the key's variables *)
+  give : int array;  (* Give: its columns; Group: the key's variables (a Trunc's: dbase + i) *)
+  qgive : int array;  (* the same, numbered as the question (a Trunc's: nq + i), for Answer *)
   aggs : Wire.agg array;  (* empty for Give *)
+  truncs : Ask.item list;  (* the question's Truncs *)
+  derived : (int * (int -> int)) array;  (* each Trunc's date (a variable of tq) and function *)
+  dbase : int;  (* the number of the first Trunc's column in [give]: tq.vars *)
   projecting : bool;  (* Give leaves out a variable: two bindings may give one row *)
   subs : (row, sub list) Hashtbl.t;  (* by parameters *)
   slots : (Value.t, int) Hashtbl.t array;  (* each parameter's values among the watches, counted *)
@@ -201,7 +211,7 @@ let fold_fixed (v : Store.view) (q : Query.t) asg ~drop (k : int array -> unit) 
 let projecting (q : Query.t) give = let seen = Array.make q.vars false in Array.iter (fun x -> seen.(x) <- true) give; Array.exists not seen
 
 (* the template of a question: its constants as parameters, in the order they appear; its key, and the parameters *)
-let templatize (q : Query.t) (sel : Wire.select) =
+let templatize ?(truncs = []) (q : Query.t) (sel : Wire.select) =
   let params = ref [] and np = ref 0 in
   let param x = let k = q.vars + !np in incr np; params := x :: !params; Query.Var k in
   let side = function Query.Var _ as t -> t | Thing c -> param (Value.Link c) | Val x -> param x in
@@ -211,13 +221,26 @@ let templatize (q : Query.t) (sel : Wire.select) =
   Wire.put_query b tq;
   Codec.put_varint b q.vars;
   Wire.put_select b sel;
+  if truncs <> [] then Wire.put_order b ~extra:truncs Top.none;
   tq, Buffer.contents b, Array.of_list (List.rev !params)
 
-let new_template (v : Store.view) key tq nq (sel : Wire.select) =
+(* a select's variables numbered for a template whose Truncs' columns start at [dbase] (the question's at [nq]) *)
+let renumber ~nq ~dbase (sel : Wire.select) =
+  let r x = if x >= nq then dbase + (x - nq) else x in
+  let ra : Wire.agg -> Wire.agg = function
+    | Count -> Count | Sum x -> Sum (r x) | Min x -> Min (r x) | Max x -> Max (r x) | Avg x -> Avg (r x)
+    | Distinct x -> Distinct (r x) | Values x -> Values (r x) | Quantile (x, p, d) -> Quantile (r x, p, d)
+    | Variance (x, b) -> Variance (r x, b) | Stddev (x, b) -> Stddev (r x, b)
+  in
+  match sel with Wire.Give g -> Wire.Give (Array.map r g) | Group (k, a) -> Group (Array.map r k, Array.map ra a)
+
+let new_template ?(truncs = []) (v : Store.view) key tq nq (sel : Wire.select) =
   let typs = Query.var_types v tq in
-  let give, aggs = match sel with Wire.Give g -> (if Array.length g = 0 then Array.init nq Fun.id else g), [||] | Group (k, a) -> k, a in
+  let derived = Ask.derived ~vars:nq ~outer:(fun _ -> true) typs truncs in
+  let qgive = match sel with Wire.Give g -> if Array.length g = 0 then Array.init nq Fun.id else g | Group (k, _) -> k in
+  let give, aggs = match renumber ~nq ~dbase:tq.vars sel with Wire.Give g -> (if Array.length g = 0 then Array.init nq Fun.id else g), [||] | Group (k, a) -> k, a in
   let q0 = { tq with vars = nq } in
-  { tkey = key; tq; nq; np = tq.vars - nq; pats = Array.of_list tq.where; typs; give; aggs;
+  { tkey = key; tq; nq; np = tq.vars - nq; pats = Array.of_list tq.where; typs; give; qgive; aggs; truncs; derived; dbase = tq.vars;
     projecting = (Array.length aggs = 0 && projecting q0 give); subs = Hashtbl.create 64;
     slots = Array.init (tq.vars - nq) (fun _ -> Hashtbl.create 8); count = 0; extra = []; outer = [||]; occ = [||] }
 
@@ -231,25 +254,33 @@ let occurrences (q : Query.t) extra =
   let of_item = function Ask.Not l -> group l | Or alts -> List.concat_map group alts | Optional p -> [ (p, Some [ Ask.Optional p ]) ] | _ -> [] in
   Array.of_list (List.map (fun p -> p, None) q.where @ List.concat_map of_item extra)
 
-let whole_template (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =
+let whole_template ?(truncs = []) (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =
   let a = Ask.compile v q extra in
+  let derived = Ask.derived ~vars:q.vars ~outer:(fun x -> a.outer.(x)) (Ask.typs_of a) truncs in
   let give, aggs =
     match sel with
     | Wire.Give g -> (if Array.length g = 0 then Array.of_list (List.filter (fun x -> a.outer.(x)) (List.init q.vars Fun.id)) else g), [||]
     | Group (k, a) -> k, a
   in
   (* an Optional's variable may be missing: no Sum, Min or Max of it, as Find refuses (Answer) *)
+  let src x = if x < q.vars then x else fst derived.(x - q.vars) in
   Array.iter
     (function
-      | Wire.Sum x | Min x | Max x when Array.exists (fun (o : Ask.opt) -> o.ov = x) a.opts ->
+      | Wire.Sum x | Min x | Max x when Array.exists (fun (o : Ask.opt) -> o.ov = src x) a.opts ->
         Query.bad "Sum, Min and Max take a variable of a pattern, not an Optional's, which may be missing: give its values, or Count the rows"
-      | _ -> ())
+      | g -> (
+        match Agg.var_of g with
+        | Some x when Agg.is_new g ->
+          let ty = if x < q.vars then (Ask.typs_of a).(x) else Value.Tdate in
+          Agg.check g ty ~optional:(Array.exists (fun (o : Ask.opt) -> o.ov = src x) a.opts)
+        | _ -> ()))
     aggs;
   (* its rows' columns, Ask.projector's: refused here as Find refuses them *)
-  let (_ : int array -> int array) = Ask.projector a give in
+  let (_ : int array -> int array) = if derived = [||] then Ask.projector a give else Ask.derived_projector ~vars:q.vars ~mask:(Array.length a.opts > 0) derived give in
   let projecting = Array.length aggs = 0 && Array.exists Fun.id (Array.mapi (fun x o -> o && not (Array.mem x give)) a.outer) in
-  { tkey = key; tq = q; nq = q.vars; np = 0; pats = Array.of_list (all_patterns q extra); typs = Ask.typs_of a; give; aggs;
-    projecting; subs = Hashtbl.create 4; slots = [||]; count = 0; extra; outer = a.outer; occ = occurrences q extra }
+  { tkey = key; tq = q; nq = q.vars; np = 0; pats = Array.of_list (all_patterns q extra); typs = Ask.typs_of a; give; qgive = give; aggs;
+    truncs; derived; dbase = q.vars; projecting; subs = Hashtbl.create 4; slots = [||]; count = 0; extra; outer = a.outer;
+    occ = occurrences q extra }
 
 (* the bindings of a question with operators that hold these values (an In of one value a variable) *)
 let fixed_bindings (v : Store.view) (q : Query.t) extra (fixes : (int * Value.t) list) =
@@ -258,59 +289,106 @@ let fixed_bindings (v : Store.view) (q : Query.t) extra (fixes : (int * Value.t)
 
 (* ---- the state of a watch ---- *)
 
-(* a binding's values; a binding of a question with Optionals has the mask of its missing variables after them *)
+(* a binding's values; a binding of a question with Optionals has the mask of its missing variables after them; a
+   Trunc's column (dbase + i) computed from its date's word, missing when the date is *)
+let word (t : template) (b : int array) x = if x < t.dbase then b.(x) else let s, f = t.derived.(x - t.dbase) in f b.(s)
+let vtyp (t : template) x = if x < t.dbase then t.typs.(x) else Value.Tdate
+let src (t : template) x = if x < t.dbase then x else fst t.derived.(x - t.dbase)
+
 let values (v : Store.view) (t : template) (b : int array) cols =
   let m = Array.length t.typs in
-  if Array.length b > m then Array.map (fun x -> if (b.(m) lsr x) land 1 = 1 then Value.missing else Store.value v t.typs.(x) b.(x)) cols
-  else Array.map (fun x -> Store.value v t.typs.(x) b.(x)) cols
+  if t.derived = [||] then begin
+    if Array.length b > m then Array.map (fun x -> if (b.(m) lsr x) land 1 = 1 then Value.missing else Store.value v t.typs.(x) b.(x)) cols
+    else Array.map (fun x -> Store.value v t.typs.(x) b.(x)) cols
+  end
+  else if Array.length b > m then Array.map (fun x -> if (b.(m) lsr src t x) land 1 = 1 then Value.missing else Store.value v (vtyp t x) (word t b x)) cols
+  else Array.map (fun x -> Store.value v (vtyp t x) (word t b x)) cols
+
+(* is the variable of aggregate i missing in b (an Optional's) *)
+let agg_missing (t : template) (b : int array) x = let m = Array.length t.typs in Array.length b > m && (b.(m) lsr src t x) land 1 = 1
 
 let agg_value (t : template) i w : Value.t =
   match t.aggs.(i) with
   | Wire.Count -> Int w
-  | Sum x | Min x | Max x -> (match t.typs.(x) with Tmoney _ -> Money w | Tdate -> Date w | _ -> Int w)
+  | Sum x | Min x | Max x -> (match vtyp t x with Tmoney _ -> Money w | Tdate -> Date w | _ -> Int w)
+  | _ -> Value.missing
 
 let agg_start (t : template) = Array.map (function Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) t.aggs
 
-let agg_add (t : template) (k : key) (b : int array) =
+let new_key (t : template) = { n = 0; acc = agg_start t; st = Array.map (fun a -> if Agg.is_new a then Some (Agg.fresh a) else None) t.aggs }
+
+(* an aggregate of protocol 9 given a binding that comes (sign 1) or goes (-1): exact sums and bags follow by
+   difference (a bag's words are the dictionary's, which keeps a text's or a float's number for the database's life) *)
+let agg_new (v : Store.view) (t : template) (k : key) i sign (b : int array) =
+  match k.st.(i), Agg.var_of t.aggs.(i) with
+  | Some st, Some x when not (agg_missing t b x) -> ignore (Agg.add v (vtyp t x) st sign (word t b x))
+  | _ -> ()
+
+let agg_add (v : Store.view) (t : template) (k : key) (b : int array) =
   k.n <- k.n + 1;
   Array.iteri
     (fun i a ->
       match a with
       | Wire.Count -> k.acc.(i) <- k.acc.(i) + 1
-      | Sum x -> k.acc.(i) <- k.acc.(i) + b.(x)
-      | Min x -> if b.(x) < k.acc.(i) then k.acc.(i) <- b.(x)
-      | Max x -> if b.(x) > k.acc.(i) then k.acc.(i) <- b.(x))
+      | Sum x -> k.acc.(i) <- k.acc.(i) + word t b x
+      | Min x -> let w = word t b x in if w < k.acc.(i) then k.acc.(i) <- w
+      | Max x -> let w = word t b x in if w > k.acc.(i) then k.acc.(i) <- w
+      | _ -> agg_new v t k i 1 b)
     t.aggs
 
 (* a removal: true when it takes away a minimum or a maximum, which must be asked again *)
-let agg_remove (t : template) (k : key) (b : int array) =
+let agg_remove (v : Store.view) (t : template) (k : key) (b : int array) =
   k.n <- k.n - 1;
   let again = ref false in
   Array.iteri
     (fun i a ->
       match a with
       | Wire.Count -> k.acc.(i) <- k.acc.(i) - 1
-      | Sum x -> k.acc.(i) <- k.acc.(i) - b.(x)
-      | Min x | Max x -> if b.(x) = k.acc.(i) then again := true)
+      | Sum x -> k.acc.(i) <- k.acc.(i) - word t b x
+      | Min x | Max x -> if word t b x = k.acc.(i) then again := true
+      | _ -> agg_new v t k i (-1) b)
     t.aggs;
   !again
 
-let key_row (t : template) kv (k : key) = if k.n <= 0 then None else Some (Array.append kv (Array.mapi (fun i w -> agg_value t i w) k.acc))
+(* a key's rows: its values, then its aggregates; one a value of its Values (Agg.flatten); none when it has no
+   binding *)
+let key_rows (v : Store.view) (t : template) kv (k : key) =
+  if k.n <= 0 then []
+  else if Array.for_all Option.is_none k.st then [ Array.append kv (Array.mapi (fun i w -> agg_value t i w) k.acc) ]
+  else begin
+    let cells =
+      Array.append (Array.map (fun x -> Agg.One x) kv)
+        (Array.mapi
+           (fun i a ->
+             match k.st.(i), Agg.var_of a with
+             | Some st, Some x -> (
+               let tx = vtyp t x in
+               match a with
+               | Wire.Values _ -> Agg.Many (Array.map (Store.value v tx) (Agg.sorted_values v tx st))
+               | _ -> Agg.One (Agg.result v a tx st))
+             | _ -> Agg.One (agg_value t i k.acc.(i)))
+           t.aggs)
+    in
+    Agg.flatten cells
+  end
 
-(* the key's state asked again on [v]: its bindings only (the question with the key fixed) *)
+(* the key's state asked again on [v]: its bindings only (the question with the key fixed; a Trunc's column is not a
+   variable of the question: its bindings are those whose Trunc gives the key's) *)
 let recount (v : Store.view) (s : sub) kv =
   let t = s.t in
+  let mine b = t.derived = [||] || compare (values v t b t.give) kv = 0 in
+  let k = new_key t in
   if t.extra <> [] then begin
-    let k = { n = 0; acc = agg_start t } in
-    List.iter (fun b -> agg_add t k b) (fixed_bindings v s.q t.extra (Array.to_list (Array.mapi (fun i x -> x, kv.(i)) t.give)));
+    let fixes = List.filter_map Fun.id (Array.to_list (Array.mapi (fun i x -> if x < t.dbase then Some (x, kv.(i)) else None) t.give)) in
+    List.iter (fun b -> if mine b then agg_add v t k b) (fixed_bindings v s.q t.extra fixes);
     k
   end
-  else
-  let asg = Array.make s.q.vars None in
-  Array.iteri (fun i x -> asg.(x) <- Some kv.(i)) t.give;
-  let k = { n = 0; acc = agg_start t } in
-  fold_fixed v s.q asg ~drop:(fun _ -> false) (fun b -> agg_add t k b);
-  k
+  else begin
+    let asg = Array.make s.q.vars None in
+    Array.iteri (fun i x -> if x < t.dbase then asg.(x) <- Some kv.(i)) t.give;
+    fold_fixed v s.q asg ~drop:(fun _ -> false) (fun b -> if mine b then agg_add v t k b);
+    k
+  end
 
 (* ---- Sort and Limit: a window ---- *)
 
@@ -347,7 +425,7 @@ let values_of (v : Store.view) (a : Answer.answer) =
 let ordered ?ticket ?(budget = !Answer.question_budget) ?stop (v : Store.view) (s : sub) (w : window) ~after ~limit =
   let t = s.t in
   let order = { w.order with Top.limit; after } in
-  let a = Answer.answer ?ticket ~weight ~order ~extra:t.extra ~budget ?stop v s.q (Wire.Give t.give) in
+  let a = Answer.answer ?ticket ~weight ~order ~extra:(t.extra @ t.truncs) ~budget ?stop v s.q (Wire.Give t.qgive) in
   values_of v a
 
 (* the window filled with the answer on [v]: its rows *)
@@ -399,8 +477,8 @@ let answer ?ticket ?budget ?stop (v : Store.view) (s : sub) =
   | None ->
   if Array.length t.aggs = 0 then begin
     let a =
-      if t.extra = [] then Answer.answer ?ticket ~weight ?budget ?stop v s.q (Wire.Give t.give)
-      else Answer.answer ?ticket ~weight ~extra:t.extra ~budget:(Option.value budget ~default:!Answer.question_budget) ?stop v s.q (Wire.Give t.give)
+      if t.extra = [] then Answer.answer ?ticket ~weight ~extra:t.truncs ?budget ?stop v s.q (Wire.Give t.qgive)
+      else Answer.answer ?ticket ~weight ~extra:(t.extra @ t.truncs) ~budget:(Option.value budget ~default:!Answer.question_budget) ?stop v s.q (Wire.Give t.qgive)
     in
     values_of v a
   end
@@ -414,7 +492,8 @@ let answer ?ticket ?budget ?stop (v : Store.view) (s : sub) =
           match g with
           | Wire.Count | Sum _ -> a.acc.(i) <- a.acc.(i) + b.acc.(i)
           | Min _ -> a.acc.(i) <- min a.acc.(i) b.acc.(i)
-          | Max _ -> a.acc.(i) <- max a.acc.(i) b.acc.(i))
+          | Max _ -> a.acc.(i) <- max a.acc.(i) b.acc.(i)
+          | _ -> (match a.st.(i), b.st.(i) with Some x, Some y -> Agg.merge x y | _ -> ()))
         t.aggs
     in
     let fold ~init ~merge ~step =
@@ -433,20 +512,23 @@ let answer ?ticket ?budget ?stop (v : Store.view) (s : sub) =
           let k =
             match Hashtbl.find_opt tbl kv with
             | Some k -> k
-            | None -> let k = { n = 0; acc = agg_start t } in Hashtbl.replace tbl kv k; added (Hashtbl.length tbl); k
+            | None -> let k = new_key t in Hashtbl.replace tbl kv k; added (Hashtbl.length tbl); k
           in
-          agg_add t k b;
+          agg_add v t k b;
           tbl)
     in
     Hashtbl.iter (fun kv k -> Hashtbl.replace s.keys kv k) tbl;
-    let rows = Hashtbl.fold (fun kv k acc -> match key_row t kv k with Some r -> r :: acc | None -> acc) s.keys [] in
+    let rows = Hashtbl.fold (fun kv k acc -> List.rev_append (key_rows v t kv k) acc) s.keys [] in
     List.sort compare rows
   end
 
-(* a question checked as Find checks it: its variables, its constants' types, its aggregates' variables *)
-let check (v : Store.view) (q : Query.t) (sel : Wire.select) =
+(* a question checked as Find checks it: its variables (its Truncs' after them), its constants' types, its
+   aggregates' variables *)
+let check ?(truncs = []) (v : Store.view) (q : Query.t) (sel : Wire.select) =
   let ty = Query.var_types v q in
-  let var x = if x < 0 || x >= q.vars then Query.bad "variable %d out of range" x in
+  let nd = Array.length (Ask.derived ~vars:q.vars ~outer:(fun _ -> true) ty truncs) in
+  let tyx x = if x < q.vars then ty.(x) else Value.Tdate in
+  let var x = if x < 0 || x >= q.vars + nd then Query.bad "variable %d out of range" x in
   ignore (Query.plan v q);
   match sel with
   | Wire.Give g -> Array.iter var g
@@ -455,10 +537,11 @@ let check (v : Store.view) (q : Query.t) (sel : Wire.select) =
     Array.iter
       (function
         | Wire.Count -> ()
-        | Sum x -> var x; (match ty.(x) with Tint | Tmoney _ -> () | t -> Query.bad "a sum of a %s variable" (Value.typ_name t))
+        | Sum x -> var x; (match tyx x with Tint | Tmoney _ -> () | t -> Query.bad "a sum of a %s variable" (Value.typ_name t))
         | Min x | Max x ->
           var x;
-          (match ty.(x) with Tint | Tmoney _ | Tdate -> () | t -> Query.bad "a min or max of a %s variable" (Value.typ_name t)))
+          (match tyx x with Tint | Tmoney _ | Tdate -> () | t -> Query.bad "a min or max of a %s variable" (Value.typ_name t))
+        | g -> (match Agg.var_of g with Some x -> var x; Agg.check g (tyx x) ~optional:false | None -> ()))
       aggs
 
 (* ---- a frame ---- *)
@@ -475,9 +558,9 @@ let take (v : Store.view) (s : sub) sign (b : int array) =
   end
   else begin
     let kv = values v t b t.give in
-    let k = match Hashtbl.find_opt s.keys kv with Some k -> k | None -> let k = { n = 0; acc = agg_start t } in Hashtbl.replace s.keys kv k; k in
-    if not (Hashtbl.mem s.before kv) then Hashtbl.replace s.before kv (key_row t kv k);
-    if sign > 0 then agg_add t k b else if agg_remove t k b then Hashtbl.replace s.dirty kv ()
+    let k = match Hashtbl.find_opt s.keys kv with Some k -> k | None -> let k = new_key t in Hashtbl.replace s.keys kv k; k in
+    if not (Hashtbl.mem s.before kv) then Hashtbl.replace s.before kv (key_rows v t kv k);
+    if sign > 0 then agg_add v t k b else if agg_remove v t k b then Hashtbl.replace s.dirty kv ()
   end
 
 (* the frame's change of a watch, its scratch cleared: None when its rows did not change *)
@@ -508,11 +591,12 @@ let finish (v1 : Store.view) (s : sub) =
             let k' = recount v1 s kv in
             Array.blit k'.acc 0 k.acc 0 (Array.length k.acc)
           end;
-          let now = key_row t kv k in
+          let now = key_rows v1 t kv k in
           if k.n <= 0 then Hashtbl.remove s.keys kv;
-          if old <> now then begin
-            Option.iter (fun x -> r := x :: !r) old;
-            Option.iter (fun x -> a := x :: !a) now
+          (* compare, not <>: a NaN is its own row again *)
+          if compare old now <> 0 then begin
+            r := List.rev_append (List.rev old) !r;
+            a := List.rev_append (List.rev now) !a
           end)
         s.before;
       Hashtbl.reset s.before;
@@ -879,7 +963,18 @@ let touched_since h (q : Query.t) n =
 let kept (s : sub) =
   match s.win with
   | Some w -> weight * w.n * max 1 (Array.length s.t.give)
-  | None -> if Array.length s.t.aggs = 0 then 0 else weight * Hashtbl.length s.keys * max 1 (Array.length s.t.give + Array.length s.t.aggs)
+  | None ->
+    if Array.length s.t.aggs = 0 then 0
+    else begin
+      (* and the bags' values (Agg.entry_cells each), the exact sums' limbs (eight words, about) *)
+      let extra =
+        Hashtbl.fold
+          (fun _ (k : key) n ->
+            Array.fold_left (fun n -> function Some (Agg.Bag b) -> n + (b.live * Agg.entry_cells) | Some (Agg.Sums _) -> n + 8 | None -> n) n k.st)
+          s.keys 0
+      in
+      (weight * Hashtbl.length s.keys * max 1 (Array.length s.t.give + Array.length s.t.aggs)) + (weight * extra)
+    end
 
 let subscribe ?(extra = []) ?(order = Top.none) ?ticket ?budget ?stop ?(admit = ignore) h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
   Mutex.protect h.hm (fun () ->
@@ -890,22 +985,24 @@ let subscribe ?(extra = []) ?(order = Top.none) ?ticket ?budget ?stop ?(admit = 
         if order.keys = [] then Query.bad "a watch's Limit needs Sort: the engine's order is no order a watch can keep"
       end;
       let v = h.view in
+      (* its Truncs are columns of its rows, not conditions: the template's own *)
+      let truncs, extra = Ask.truncs extra in
       let tq, key, params =
-        if extra = [] then (check v q sel; templatize q sel)
+        if extra = [] then (check ~truncs v q sel; templatize ~truncs q sel)
         else begin
           (* a question with Not, Or or In: one template a question, its constants its own *)
           let b = Buffer.create 64 in
           Buffer.add_char b 'W';
           Wire.put_query b q;
           Wire.put_select b sel;
-          Wire.put_order b ~extra Top.none;
+          Wire.put_order b ~extra:(extra @ truncs) Top.none;
           q, Buffer.contents b, [||]
         end
       in
       let t =
         match Hashtbl.find_opt h.templates key with
         | Some t -> t
-        | None -> if extra = [] then new_template v key tq q.vars sel else whole_template v key q sel extra
+        | None -> if extra = [] then new_template ~truncs v key tq q.vars sel else whole_template ~truncs v key q sel extra
       in
       (* the order checked as Find checks it (its columns, its Limit: a client's bytes) before a window is made of it *)
       let win = if order = Top.none then None else (Top.check (Array.length t.give) [||] order; Some (new_window order (Array.length t.give))) in

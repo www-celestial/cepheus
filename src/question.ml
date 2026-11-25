@@ -14,6 +14,12 @@ type item = Ask.item =
   | Optional of Query.pattern
       (** the pattern's value, or {!Value.missing}: its thing a variable that a pattern binds (or a thing's id), its
           value a variable in no other item; at the top of [items] only *)
+  | Trunc of int * int * string * string
+      (** [Trunc (y, x, unit, zone)]: y is the instant the unit of the date x starts in the zone's local time
+          ("second", "minute", "hour", "day", "week" (ISO 8601: Monday), "month", "quarter", "year", "decade",
+          "century", "millennium"; an IANA zone, as "Europe/Paris", or "UTC"): a variable computed from x, numbered after
+          the question's ([vars], [vars + 1], ... in the order of the Truncs), for [give] and [sort] only; at the top
+          of [items] only *)
 
 (** A key of [sort]: a column of [give], descending when [desc]. *)
 type key = Top.key = { col : int; desc : bool }

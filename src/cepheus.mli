@@ -395,3 +395,4 @@ module Snapshot = Snapshot
 module Store = Store
 module Value = Value
 module Wal = Wal
+module Zone = Zone

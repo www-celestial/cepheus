@@ -21,6 +21,7 @@ module Snapshot = Snapshot
 module Store = Store
 module Value = Value
 module Wal = Wal
+module Zone = Zone
 
 type value = Value.t = Int of int | Float of float | Bool of bool | Text of string | Date of int | Money of int | Link of int
 type typ = Value.typ = Tint | Tfloat | Tbool | Ttext | Tdate | Tmoney of int | Tlink
@@ -263,12 +264,16 @@ let ask ?timeout v (q : Question.t) =
     let where = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) q.items in
     let ranges = List.filter_map (function Ask.Range (x, lo, hi) -> Some (x, lo, hi) | _ -> None) q.items in
     let extra = List.filter (function Ask.Pattern _ | Ask.Range _ -> false | _ -> true) q.items in
+    (* its Truncs: columns computed from a date as a row is given *)
+    let truncs, extra = Ask.truncs extra in
     let base = { Query.vars = q.vars; where; ranges } in
     let t = Ask.compile v base extra in
+    let derived = Ask.derived ~vars:q.vars ~outer:(fun x -> t.outer.(x)) (Ask.typs_of t) truncs in
+    let nd = Array.length derived in
     let give = if Array.length q.give = 0 then Array.of_list (List.filter (fun x -> t.outer.(x)) (List.init q.vars Fun.id)) else q.give in
-    Array.iter (fun x -> if x < 0 || x >= q.vars || not t.outer.(x) then Query.bad "give: variable %d is not one of the question's" x) give;
+    Array.iter (fun x -> if x < 0 || x >= q.vars + nd || (x < q.vars && not t.outer.(x)) then Query.bad "give: variable %d is not one of the question's" x) give;
     let ty = Ask.typs_of t in
-    let typs = Array.map (fun x -> ty.(x)) give in
+    let typs = Array.map (fun x -> if x < q.vars then ty.(x) else Value.Tdate) give in
     let masked = Array.length t.opts > 0 in
     let src =
       { Top.fold =
@@ -277,8 +282,8 @@ let ask ?timeout v (q : Question.t) =
             | None -> Ask.fold ~seq ?stop v t ~init ~step ~merge
             | Some (Top.Range (x, lo, hi)) -> Ask.fold ~seq ?stop ~range:(x, lo, hi) v t ~init ~step ~merge
             | Some (Top.Words (x, ws)) -> Ask.fold ~seq ?stop ~words:(x, ws) v t ~init ~step ~merge);
-        project = Ask.projector t give;
-        var = (fun c -> Some give.(c));
+        project = (if nd = 0 then Ask.projector t give else Ask.derived_projector ~vars:q.vars ~mask:masked derived give);
+        var = (fun c -> if give.(c) < q.vars then Some give.(c) else None);
         lead = Top.lead v base;
         estimate = (fun () -> Ask.estimate v t) }
     in

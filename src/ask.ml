@@ -26,7 +26,12 @@
      TODS 2009) for one pattern, the LEFT JOIN. e is a variable that a pattern of the question binds (or a thing's
      id); y is a variable in no other item; at the top only. Bound last, after the join and its Nots: each binding
      of the other variables gives a row for each value of e's p, or one row where y is missing (bit y of the mask
-     after the variables, below). So the rows are those of the question without it, each once a value, or once. *)
+     after the variables, below). So the rows are those of the question without it, each once a value, or once.
+   - Trunc (y, x, unit, zone): y is the start of the unit (a day, a month...) of the date x in the zone's local time
+     (Zone.trunc): a variable computed from x, as SPARQL's BIND, numbered after the question's variables (vars, vars
+     + 1, ... in the order of the Truncs), for Give, Group and Sort only; at the top only. The join never sees it: a
+     question's answer and a watch compute y from x's word as they give a row (Answer, Live), so a report of months
+     is the question of its dates. *)
 
 type item =
   | Pattern of Query.pattern
@@ -38,6 +43,7 @@ type item =
   | Less of int * int  (** x < y *)
   | Less_or_equal of int * int  (** x <= y *)
   | Optional of Query.pattern  (** the pattern's value, or missing *)
+  | Trunc of int * int * string * string  (** y = the start of x's unit in the zone *)
 
 let bad = Query.bad
 
@@ -47,13 +53,13 @@ let vars_of_item = function
   | Pattern pt | Optional pt -> pattern_terms pt
   | Range (x, _, _) | In (x, _) | Prefix (x, _) -> [ x ]
   | Less (x, y) | Less_or_equal (x, y) -> [ x; y ]
-  | Not _ | Or _ -> []
+  | Not _ | Or _ | Trunc _ -> []
 
 (* every pattern of a question, those inside Not and Or too *)
 let patterns (q : Query.t) extra =
   let rec of_item = function
     | Pattern p | Optional p -> [ p ]
-    | Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ -> []
+    | Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ | Trunc _ -> []
     | Not l -> List.concat_map of_item l
     | Or alts -> List.concat_map (List.concat_map of_item) alts
   in
@@ -63,7 +69,7 @@ let flat_vars items = List.sort_uniq compare (List.concat_map vars_of_item items
 
 let pattern_vars items = List.sort_uniq compare (List.concat_map (function Pattern _ as i -> vars_of_item i | _ -> []) items)
 
-let simple = function Pattern _ | Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ -> true | Not _ | Or _ | Optional _ -> false
+let simple = function Pattern _ | Range _ | In _ | Prefix _ | Less _ | Less_or_equal _ -> true | Not _ | Or _ | Optional _ | Trunc _ -> false
 
 (* ---- what the question is: its variables, its types, and its conjunctions ---- *)
 
@@ -122,6 +128,7 @@ let types (v : Store.view) nvars items =
     | Less (x, y) | Less_or_equal (x, y) -> List.iter (fun x -> if x < 0 || x >= nvars then bad "variable %d out of range" x) [ x; y ]
     | Not l -> List.iter go l
     | Or alts -> List.iter (List.iter go) alts
+    | Trunc _ -> ()
   in
   List.iter go items;
   (* a range is for an int, a float, a date or money (and links and bools, inside the engine); Less for two
@@ -138,7 +145,7 @@ let types (v : Store.view) nvars items =
       | _ -> ())
     | Not l -> List.iter ranges l
     | Or alts -> List.iter (List.iter ranges) alts
-    | Pattern _ | In _ | Optional _ -> ()
+    | Pattern _ | In _ | Optional _ | Trunc _ -> ()
   in
   List.iter ranges items;
   ty
@@ -154,6 +161,8 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
   let rec size = function Not l -> 1 + List.fold_left (fun s i -> s + size i) 0 l | Or alts -> 1 + List.fold_left (fun s a -> s + List.fold_left (fun s i -> s + size i) 0 a) 0 alts | _ -> 1 in
   let ops = List.fold_left (fun s i -> s + size i) 0 extra in
   if ops > max_operators then bad "a question takes at most %d operators and their items, not %d" max_operators ops;
+  (* a Trunc is no condition of the join: Answer and Live take it out before (Ask.truncs) *)
+  List.iter (function Trunc _ -> bad "Trunc is for Give: its variable is computed as a row is given" | _ -> ()) extra;
   let rec ins = function In (_, l) -> if List.length l > max_in then bad "In takes at most %d values, not %d" max_in (List.length l) | Not l -> List.iter ins l | Or alts -> List.iter (List.iter ins) alts | _ -> () in
   List.iter ins extra;
   let conj = List.fold_left (fun c -> function Or alts -> c * max 1 (List.length alts) | _ -> c) 1 extra in
@@ -227,7 +236,7 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
       | Or alts -> List.iter (fun a -> List.iter (fun x -> claim x (`Or k)) (flat_vars a)) alts
       | Range (x, _, _) | In (x, _) | Prefix (x, _) -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x
       | Less (x, y) | Less_or_equal (x, y) -> List.iter (fun x -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x) [ x; y ]
-      | Pattern _ | Optional _ -> ())
+      | Pattern _ | Optional _ | Trunc _ -> ())
     extra;
   List.iter (fun (x, _, _) -> if not outer.(x) then bad "variable %d of a condition appears in no pattern" x) q.ranges;
   Array.iteri (fun x t -> if t = None then bad "variable %d appears in no pattern" x) typs;
@@ -254,7 +263,7 @@ let compile (v : Store.view) (q : Query.t) (extra : item list) : t =
         | In (x, l) -> { c with ins = c.ins @ [ (x, l) ] }
         | Prefix (x, p) -> { c with prefixes = c.prefixes @ [ (x, p) ] }
         | (Less _ | Less_or_equal _) as it -> { c with less = c.less @ Option.to_list (less_of it) }
-        | Not _ | Or _ | Optional _ -> c)
+        | Not _ | Or _ | Optional _ | Trunc _ -> c)
       c a
   in
   let conjs =
@@ -384,7 +393,7 @@ let not_check ~budget ?stop ~(spent : int Atomic.t) (v : Store.view) (t : t) at 
           | Prefix (x, pre) ->
             if local x >= 0 then sets := (local x, ws) :: !sets
             else (let t = Store.text v env.(at x) in if not (String.length t >= String.length pre && String.sub t 0 (String.length pre) = pre) then ok := false)
-          | Not _ | Or _ | Optional _ -> ())
+          | Not _ | Or _ | Optional _ | Trunc _ -> ())
         items (sets_of ());
       !ok
       &&
@@ -503,3 +512,40 @@ let missing (t : t) (env : int array) x = Array.length t.opts > 0 && (env.(t.var
 (* the planner's estimate of the work, all its questions *)
 let estimate (v : Store.view) (t : t) =
   List.fold_left (fun s (c : conj) -> let q, _, _, sets, _ = dense v t c in s +. Query.estimate ~sets v q) 0. t.conjs
+
+(* ---- Trunc: variables computed from a date ---- *)
+
+(* a question's Truncs apart from its other operators *)
+let truncs extra = List.partition (function Trunc _ -> true | _ -> false) extra
+
+(* The Truncs of a question of [vars] variables of types [ty] (a variable of the question when [outer]), checked:
+   each (x, its function of x's word); the i-th gives variable vars + i. Raises Query.Bad. *)
+let derived ~vars ~(outer : int -> bool) (ty : Value.typ array) (ts : item list) =
+  Array.of_list
+    (List.mapi
+       (fun i -> function
+         | Trunc (y, x, unit, zone) ->
+           if y <> vars + i then bad "Trunc gives variable %d, not %d: its variables come after the question's (%d to %d), in the order of the Truncs" (vars + i) y vars (vars + i);
+           if vars + i >= max_optional_var then bad "a question with Trunc has at most %d variables and Truncs" max_optional_var;
+           if x < 0 || x >= vars || not (outer x) then bad "Trunc takes a date variable of a pattern of the question, not variable %d" x;
+           if ty.(x) <> Value.Tdate then bad "Trunc takes a date, not a %s" (Value.typ_name ty.(x));
+           let f = try Zone.truncator ~unit ~zone with Zone.Bad m -> bad "%s" m in
+           x, f
+         | _ -> bad "a Trunc")
+       ts)
+
+(* the words of [give]'s columns of a binding, a Trunc's computed from its date's; with [mask] (the question has
+   Optionals: a binding's mask at index [vars]), the mask of the missing columns after them, as [projector] *)
+let derived_projector ~vars ~mask (d : (int * (int -> int)) array) (give : int array) =
+  let k = Array.length give in
+  if mask && k > max_optional_var then bad "a question with Optional gives at most %d columns, not %d" max_optional_var k;
+  let src x = if x < vars then x else fst d.(x - vars) in
+  let word x = if x < vars then (fun (env : int array) -> env.(x)) else (let s, f = d.(x - vars) in fun env -> f env.(s)) in
+  let words = Array.map word give and srcs = Array.map src give in
+  if not mask then fun env -> Array.map (fun w -> w env) words
+  else fun env ->
+    let r = Array.make (k + 1) 0 and m = env.(vars) in
+    for c = 0 to k - 1 do
+      if (m lsr srcs.(c)) land 1 = 1 then r.(k) <- r.(k) lor (1 lsl c) else r.(c) <- words.(c) env
+    done;
+    r
