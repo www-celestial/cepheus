@@ -290,6 +290,43 @@ let compare_postgres file =
    with End_of_file -> close_in ic);
   List.iter (fun (u, _) -> match Hashtbl.find_opt all u with Some n -> Printf.printf "%s: %d instants, %d differ\n" u n (Option.value (Hashtbl.find_opt diff u) ~default:0) | None -> ()) Zone.units
 
+(* the threats: a group's bag of values past the server's cells is too_large, its cells given back; a zone that is no
+   zone, a unit that is no unit, a Trunc out of its place, a quantile's fraction out of 0 to 1: Query.Bad, never an
+   exception of another kind *)
+let threats () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ n; d ]) = declare db [ prop "row/n" Tint; prop "row/day" Tdate ] in
+  ignore (write db (List.init 20_000 (fun i -> Resolve.Add (-1 - i, n, Int i))));
+  ignore (write db [ Resolve.Add (-1, d, Date 0) ]);
+  let v = view db in
+  let q = { Query.vars = 2; where = [ { e = Var 0; p = n; v = Var 1 } ]; ranges = [] } in
+  let cells = !Answer.max_cells in
+  Answer.max_cells := 10_000;
+  List.iter
+    (fun a ->
+      match Answer.with_ticket (fun ticket -> Answer.answer ~ticket v q (Wire.Group ([||], [| a |]))) with
+      | _ -> C.fail "threats: %s of 20,000 values within 10,000 cells" (Agg.name a)
+      | exception Answer.Too_large _ -> C.check (Atomic.get Answer.pool = 0) "threats: %s too large, its cells given back" (Agg.name a))
+    [ Wire.Values 1; Distinct 1; Quantile (1, 0.5, false) ];
+  Answer.max_cells := cells;
+  C.check ((Answer.answer v q (Wire.Group ([||], [| Wire.Distinct 1 |]))).n = 1) "threats: in a program's own memory, no bound";
+  let qd = { Query.vars = 2; where = [ { e = Var 0; p = d; v = Var 1 } ]; ranges = [] } in
+  List.iter
+    (fun (what, extra, sel) ->
+      match Answer.answer ~extra v qd sel with
+      | _ -> C.fail "threats: %s answered" what
+      | exception Query.Bad _ -> C.check true ""
+      | exception e -> C.fail "threats: %s raised %s" what (Printexc.to_string e))
+    [ "a zone of ../", [ Question.Ask.Trunc (2, 1, "month", "../../etc/passwd") ], Wire.Give [| 2 |];
+      "a zone that is none", [ Question.Ask.Trunc (2, 1, "month", "Mars/Olympus") ], Wire.Give [| 2 |];
+      "a unit", [ Question.Ask.Trunc (2, 1, "fortnight", "UTC") ], Wire.Give [| 2 |];
+      "a Trunc out of its place", [ Question.Ask.Trunc (5, 1, "day", "UTC") ], Wire.Give [| 5 |];
+      "a Trunc of an int", [ Question.Ask.Trunc (2, 0, "day", "UTC") ], Wire.Give [| 2 |];
+      "a Trunc in a Not", [ Question.Ask.Not [ Question.Ask.Trunc (2, 1, "day", "UTC") ] ], Wire.Give [| 1 |];
+      "a fraction of 2", [], Wire.Group ([||], [| Wire.Quantile (1, 2., false) |]);
+      "a fraction of NaN", [], Wire.Group ([||], [| Wire.Quantile (1, Float.nan, false) |]);
+      "a mean of a link", [], Wire.Group ([||], [| Wire.Avg 0 |]) ]
+
 let () =
   if Array.length Sys.argv = 3 && Sys.argv.(1) = "--postgres" then (compare_postgres Sys.argv.(2); exit 0);
   let r = Rng.make 2026 in
@@ -304,4 +341,5 @@ let () =
   order_free r;
   exact ();
   selection r;
+  threats ();
   C.finish "reports"

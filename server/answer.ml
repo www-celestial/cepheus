@@ -286,6 +286,8 @@ let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) 
     p.fold ~init:(fun () -> { tbl = Hashtbl.create 64; cells = 0 })
       ~merge:(fun a b ->
         Hashtbl.iter (fun k g -> match Hashtbl.find_opt a.tbl k with Some g' -> join g' g | None -> Hashtbl.replace a.tbl k g) b.tbl;
+        (* the fold's slices each count their own cells: what one has not charged yet goes on to the other *)
+        charge_cells a b.cells;
         a)
       ~step:(fun t env ->
         let k = key env in
@@ -294,6 +296,8 @@ let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) 
          | None -> let g = fresh () in add t g env; Hashtbl.replace t.tbl k g; charge_cells t width);
         t) ()
   in
+  (* and the last ones, under a grain *)
+  (match ticket with Some tk when tl.cells > 0 -> charge tk tl.cells; tl.cells <- 0 | _ -> ());
   let groups = Array.of_seq (Hashtbl.to_seq tl.tbl) in
   Array.sort (fun (a, _) (b, _) -> compare a b) groups;
   let typs = Array.init (nk + na) (fun j -> if j < nk then ty.(keys.(j)) else Agg.typ aggs.(j - nk) txs.(j - nk)) in
