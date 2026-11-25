@@ -182,6 +182,10 @@ let leap y = (y mod 4 = 0 && y mod 100 <> 0) || y mod 400 = 0
 let month_days y m = match m with 2 -> if leap y then 29 else 28 | 4 | 6 | 9 | 11 -> 30 | _ -> 31
 let day_ms = 86_400_000
 
+(* the instants RFC 3339 writes in UTC: from 0000-01-01T00:00:00Z to 9999-12-31T23:59:59.999Z *)
+let first_ms = days_of_civil 0 1 1 * day_ms
+let last_ms = (days_of_civil 10000 1 1 * day_ms) - 1
+
 let date_of_text s =
   let n = String.length s in
   let fail () = bad "%S is not a date (2026-11-24, 2026-11-24T10:30:00Z, 2026-11-24 10:30:00.123+01:00)" s in
@@ -234,7 +238,10 @@ let date_of_text s =
       end
       else fail ()
     in
-    (days * day_ms) + (((h * 3600) + (mi * 60) + !sec - (off * 60)) * 1000) + !ms
+    let t = (days * day_ms) + (((h * 3600) + (mi * 60) + !sec - (off * 60)) * 1000) + !ms in
+    (* its zone may move it out of the years 0 to 9999, which an export could not write back *)
+    if t < first_ms || t > last_ms then bad "%s is outside the years 0 to 9999 in UTC (RFC 3339 writes those only)" s;
+    t
   end
 
 (* RFC 3339 in UTC, the milliseconds only when there are some; years 0 to 9999 *)

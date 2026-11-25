@@ -70,7 +70,10 @@ let forms () =
   C.check (T.date_of_text "2024-02-29T00:00" = 1709164800000) "a leap day";
   C.check (T.date_text (-1) = "1969-12-31T23:59:59.999Z") "before 1970";
   List.iter (fun s -> C.check (bad (fun () -> T.date_of_text s)) "date %S refused" s)
-    [ "2026-02-29"; "2026-13-01"; "2026-11-24T24:00:00Z"; "2026-11-24T10:61"; "2026-11-24T10:30:60Z"; "26-11-24"; "2026-11-24T10:30:00+0"; "2026-11-24x"; "" ];
+    [ "2026-02-29"; "2026-13-01"; "2026-11-24T24:00:00Z"; "2026-11-24T10:61"; "2026-11-24T10:30:60Z"; "26-11-24"; "2026-11-24T10:30:00+0"; "2026-11-24x"; "";
+      "0000-01-01T00:00:00+01:00"; "9999-12-31T23:59:59-01:00" ];
+  (* a zone that keeps a date in the years 0 to 9999: as an export writes it back *)
+  C.check (T.date_text (T.date_of_text "0000-01-01T01:00:00+01:00") = "0000-01-01T00:00:00Z" && T.date_text (T.date_of_text "9999-12-31T22:59:59.999-01:00") = "9999-12-31T23:59:59.999Z") "the first and last instants";
   (* money: exact, at most its decimals *)
   for _ = 1 to 20_000 do
     let u = Rng.int r 2_000_000_000_000 - 1_000_000_000_000 and sc = Rng.int r 6 in
@@ -365,6 +368,7 @@ let hostile c cfg =
   refuse ~kind:"invoice" "an Int" "Number,Client\n12a,ada@x.org\n" "line 2: Number: \"12a\" is not a whole number";
   refuse ~kind:"invoice" "cents" "Number,Total\n5,12.505\n" "Total: 12.505 has more than 2 decimals";
   refuse ~kind:"invoice" "a day" "Number,Date\n7,2026-02-30\n" "2026-02-30 is not a day of the calendar";
+  refuse ~kind:"invoice" "a date its zone moves before the year 0" "Number,Date\n8,0000-01-01T00:00:00+01:00\n" "line 2: Date: 0000-01-01T00:00:00+01:00 is outside the years 0 to 9999";
   refuse "a NUL byte" "Name,Email\nA\000da,a6@x\n" "line 2: Name: a NUL byte";
   refuse "bytes not UTF-8" "Name,Email\nA\255da,a7@x\n" "Name: bytes that are not UTF-8";
   refuse "fields" "Name,Email\nA,a11@x,extra\n" "line 2: 3 fields, the header has 2";
