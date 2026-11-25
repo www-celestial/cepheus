@@ -21,7 +21,8 @@ T=$here/_build/default/bench/tbench.exe
 mkdir -p "$dir/csv"
 [ -f "$dir/csv/invoice.csv" ] || $T gen "$dir/csv" "$n"
 csv=$dir/csv
-port=$((7460 + $$ % 100))
+# The clients' port of the server: one the system gives free, as a port of the pid's met another server's.
+port=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
 peak() { awk '/VmHWM/ {print int($2 / 1024)}' "/proc/$1/status"; }
 now() { date +%s.%N; }
 # "seconds peak_mb" of a command: the wall clock, and the peak resident set of the largest process it ran (getrusage)

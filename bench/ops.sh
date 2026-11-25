@@ -39,13 +39,15 @@ cepheus)
   cep="$b/bin/main.exe"
   rm -rf "$root"; mkdir -p "$root"
   "$cep" cluster init ops --dir "$root/etc" > /dev/null
-  sed -i 's/^name = "main"/name = "shop"/' "$root/etc/cluster.toml"
+  # The clients' port: one the system gives free, where 7400 could be another server's.
+  port=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  sed -i "s/^name = \"main\"/name = \"shop\"/; s/127.0.0.1:7400/127.0.0.1:$port/" "$root/etc/cluster.toml"
   mkdir "$root/etc/data"
   t0=$(ms); SNAPSHOT=0 "$b/bench/bench.exe" load "$root/etc/data/shop" "$csv" "$facts" > "$root/load.out" 2>&1; t1=$(ms)
   echo "cepheus load: $((t1 - t0)) ms, $(size "$root/etc/data/shop") (journal $(size "$root/etc/data/shop/journal"), runs $(size "$root/etc/data/shop/snapshots"))"
   "$cep" serve --config "$root/etc/cluster.toml" 2> "$root/serve.log" &
   pid=$!
-  while [ ! -S "$root/etc/run/.s.cepheus.7400" ]; do sleep 0.1; done
+  while [ ! -S "$root/etc/run/.s.cepheus.$port" ]; do sleep 0.1; done
   last=$(grep -o 'shop at group [0-9]*' "$root/serve.log" | grep -o '[0-9]*$')
   mid=$((last / 2))
   echo "groups: $last, the middle: $mid; runs: $(ls "$root/etc/data/shop/snapshots")"
@@ -73,7 +75,9 @@ cepheus-replay)
   cep="$b/bin/main.exe"
   rm -rf "$root"; mkdir -p "$root"
   "$cep" cluster init ops --dir "$root/etc" > /dev/null
-  sed -i 's/^name = "main"/name = "shop"/' "$root/etc/cluster.toml"
+  # The clients' port: one the system gives free, where 7400 could be another server's.
+  port=$(python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+  sed -i "s/^name = \"main\"/name = \"shop\"/; s/127.0.0.1:7400/127.0.0.1:$port/" "$root/etc/cluster.toml"
   mkdir "$root/etc/data"
   SNAPSHOT=0 NOCSV=1 "$b/bench/bench.exe" load "$root/etc/data/shop" "$csv" "$facts" > "$root/load.out" 2>&1
   "$cep" backup --config "$root/etc/cluster.toml" "$root/backup" > /dev/null

@@ -259,6 +259,11 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 
 ### Fixes
 
+- `tools/test.sh` names the checks that failed: each step's output goes to a log of its own, and a step that fails
+  shows its `FAIL` lines, the end of its log and the log's path, which stays, where only its count showed (`vault_unit`
+  1 failure of 4,913, `rulechange` 6 of 192, under load, with no name). A step that passes shows its count, as before.
+  `bench/transfer.sh` and `bench/ops.sh` serve on a port the system gives free, where one derived from the process id,
+  or 7400, could be another server's.
 - A local reader's runs that a merge replaced leave the program's page cache once its states on the new base are
   published, as the server's do, and the pages that reads begun before take back leave at the next merge. Their pages
   stayed until the cache, 256 MiB, was full, a base's worth at each merge, and the reads made while the states moved

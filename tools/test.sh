@@ -36,55 +36,85 @@ fi
 export CESIA_NATIVE
 dune build --profile release 2>&1
 b=_build/default/test
-CEPHEUS_TMP=$tmp $b/unit.exe | tail -1
-$b/reasoning.exe | tail -1
-CEPHEUS_TMP=$tmp $b/rulechange.exe "${CHANGE_KILLS:-10}" | tail -1
-CEPHEUS_TMP=$tmp $b/owl.exe "${OWL_SEEDS:-200}" | tail -1
-$b/exhaustive.exe | tail -5
-$b/sim.exe --seeds "${SEEDS:-300}" | tail -2
+# A step: what it prints goes to a log of its own, and only its last lines, its count, show when it passes. When it
+# fails, the script shows the lines of its failed checks (FAIL ...), the end of its log, and the log's path, which stays,
+# and stops with its status. What it writes to stderr goes where it went.
+logs=$(mktemp -d "$tmp/cepheus-test.XXXXXX")
+kept=""
+trap '[ -n "$kept" ] || rm -rf "$logs"' EXIT
+steps=0
+step() {  # the lines to show, then the command
+  lines=$1
+  shift
+  steps=$((steps + 1))
+  log="$logs/$steps.log"
+  status=0
+  "$@" > "$log" || status=$?
+  if [ "$status" -eq 0 ]; then
+    tail -n "$lines" "$log"
+    return 0
+  fi
+  kept=yes
+  echo "FAILED with status $status: $*"
+  failed=$(grep -c '^FAIL' "$log" || true)
+  if [ "$failed" -gt 0 ]; then
+    grep '^FAIL' "$log" | head -50
+    [ "$failed" -le 50 ] || echo "... and $((failed - 50)) more FAIL lines"
+  fi
+  echo "its last lines:"
+  tail -n 10 "$log"
+  echo "its whole output: $log"
+  exit "$status"
+}
+step 1 env CEPHEUS_TMP="$tmp" $b/unit.exe
+step 1 $b/reasoning.exe
+step 1 env CEPHEUS_TMP="$tmp" $b/rulechange.exe "${CHANGE_KILLS:-10}"
+step 1 env CEPHEUS_TMP="$tmp" $b/owl.exe "${OWL_SEEDS:-200}"
+step 5 $b/exhaustive.exe
+step 2 $b/sim.exe --seeds "${SEEDS:-300}"
 # its stderr: the engine reporting the failures it is given (a cut whose fsync failed too)
-$b/wal_sim.exe --seeds "${BUFFER_SEEDS:-300}" 2> /dev/null | tail -2
+step 2 $b/wal_sim.exe --seeds "${BUFFER_SEEDS:-300}" 2> /dev/null
 rm -rf "$tmp/cepheus-crash"
-$b/crash.exe "$tmp/cepheus-crash" "${KILLS:-20}" | tail -2
+step 2 $b/crash.exe "$tmp/cepheus-crash" "${KILLS:-20}"
 rm -rf "$tmp/cepheus-crash"
-$b/bank.exe "$tmp/cepheus-bank" "${BANK_SECONDS:-2}" | tail -2
+step 2 $b/bank.exe "$tmp/cepheus-bank" "${BANK_SECONDS:-2}"
 rm -rf "$tmp/cepheus-seats"
-$b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-20}" | tail -2
+step 2 $b/seats.exe "$tmp/cepheus-seats" "${SEAT_KILLS:-20}"
 rm -rf "$tmp/cepheus-seats"
-CEPHEUS_TMP=$tmp $b/vault_unit.exe | tail -1
+step 1 env CEPHEUS_TMP="$tmp" $b/vault_unit.exe
 rm -rf "$tmp/cepheus-vault-crash"
-$b/vault_crash.exe "$tmp/cepheus-vault-crash" "${VAULT_KILLS:-20}" | tail -2
+step 2 $b/vault_crash.exe "$tmp/cepheus-vault-crash" "${VAULT_KILLS:-20}"
 rm -rf "$tmp/cepheus-vault-crash"
-CEPHEUS_TMP=$tmp $b/examples.exe | tail -1
-CEPHEUS_TMP=$tmp $b/server_unit.exe | tail -1
-$b/server_sim.exe --seeds "${SERVER_SEEDS:-200}" | tail -2
-$b/live_sim.exe --seeds "${LIVE_SEEDS:-100}" | tail -2
-$b/questions.exe --seeds "${QUESTION_SEEDS:-300}" | tail -2
+step 1 env CEPHEUS_TMP="$tmp" $b/examples.exe
+step 1 env CEPHEUS_TMP="$tmp" $b/server_unit.exe
+step 2 $b/server_sim.exe --seeds "${SERVER_SEEDS:-200}"
+step 2 $b/live_sim.exe --seeds "${LIVE_SEEDS:-100}"
+step 2 $b/questions.exe --seeds "${QUESTION_SEEDS:-300}"
 # the parts of reports: time zones against the C library's and PostgreSQL's, exact sums, bags, selection
-$b/reports.exe | tail -1
-$b/server_tls.exe "$tmp/cepheus-tls" | tail -1
-$b/server_limits.exe "$tmp/cepheus-limits" | tail -1
-$b/server_guard.exe "$tmp/cepheus-guard" | tail -1
-$b/server_transfer.exe "$tmp/cepheus-transfer" | tail -1
+step 1 $b/reports.exe
+step 1 $b/server_tls.exe "$tmp/cepheus-tls"
+step 1 $b/server_limits.exe "$tmp/cepheus-limits"
+step 1 $b/server_guard.exe "$tmp/cepheus-guard"
+step 1 $b/server_transfer.exe "$tmp/cepheus-transfer"
 # a replica: its simulation (REPLICA_SEEDS seeds, 300 by default; its stderr: the failures it gives the engines),
 # then two real servers over mutual TLS (copy, kill -9, refusals, handover, promote, the old primary following)
-$b/replica_sim.exe --seeds "${REPLICA_SEEDS:-300}" 2> /dev/null | tail -2
-$b/server_replica.exe "$tmp/cepheus-replica" | tail -1
+step 2 $b/replica_sim.exe --seeds "${REPLICA_SEEDS:-300}" 2> /dev/null
+step 1 $b/server_replica.exe "$tmp/cepheus-replica"
 # a Raft cluster: its simulation (3 servers, then 5), then three real servers (elections, a follower sending programs
 # to the leader, the leader killed under writes, refusals at the peer port)
-$b/raft_sim.exe --seeds "${RAFT_SEEDS:-100}" | tail -1
-$b/raft_sim.exe --servers 5 --seeds "${RAFT_SEEDS5:-50}" | tail -1
-$b/server_raft.exe "$tmp/cepheus-raft" | tail -1
+step 1 $b/raft_sim.exe --seeds "${RAFT_SEEDS:-100}"
+step 1 $b/raft_sim.exe --servers 5 --seeds "${RAFT_SEEDS5:-50}"
+step 1 $b/server_raft.exe "$tmp/cepheus-raft"
 rm -rf "$tmp/cepheus-server"
-$b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}" | tail -2
+step 2 $b/server_crash.exe "$tmp/cepheus-server" "${SERVER_KILLS:-20}"
 rm -rf "$tmp/cepheus-server"
 # the commands of operations: verify, backup and restore on files (to every kind of group, damage named), then the
 # restore drill on a real server (a backup while writing, one killed, the server killed, restored whole and to a group)
-CEPHEUS_TMP=$tmp $b/ops_unit.exe | tail -1
+step 1 env CEPHEUS_TMP="$tmp" $b/ops_unit.exe
 rm -rf "$tmp/cepheus-drill"
-$b/server_backup.exe "$tmp/cepheus-drill" | tail -2
+step 2 $b/server_backup.exe "$tmp/cepheus-drill"
 rm -rf "$tmp/cepheus-drill"
-$b/server_observe.exe "$tmp/cepheus-observe" | tail -1
+step 1 $b/server_observe.exe "$tmp/cepheus-observe"
 if [ -n "$CESIA_NATIVE" ]; then
   mkdir -p native
   tag=$(cesia run tools/tag.ce)
