@@ -149,7 +149,12 @@ let check ?(disk = Disk.read_only) ~tail ~live dir =
           if hi > c.last then damage "snapshots/%s holds groups up to %d, past the journal's end (group %d)" n hi c.last
           else
             let at_end = match newest with Some s -> p.segment = s.sfirst && p.offset = s.send && p.next = c.last + 1 | None -> false in
-            if not (at_end || Hashtbl.find_opt found (p.segment, p.offset) = Some p.next) then
+            (* or the end of a segment the next one follows: the frame after the run's groups began a new segment *)
+            let at_seg_end =
+              List.exists (fun (s : Journal.segment_check) -> s.sfirst = p.segment && s.send = p.offset && s.slast = p.next - 1) c.segments
+              && List.exists (fun (s : Journal.segment_check) -> s.sfirst = p.next) c.segments
+            in
+            if not (at_end || at_seg_end || Hashtbl.find_opt found (p.segment, p.offset) = Some p.next) then
               damage "snapshots/%s: its journal position (%s at offset %d, group %d) is not the start of a frame" n
                 (Journal.segment_name p.segment) p.offset p.next)
         (List.rev !good);

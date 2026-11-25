@@ -270,5 +270,37 @@ let () =
   if Sys.file_exists (d // "closed") then Sys.remove (d // "closed");
   Out_channel.with_open_bin (d // "shared") ignore;
   C.check (refused (fun () -> Ops.verify d)) "shared and not closed: refused";
+  (* a run whose journal position is the end of a segment that is no longer the newest: the frame after its groups
+     began a new segment (an open resumes from it); whole for verify, restore and restore to its group and after *)
+  let limit = !Journal.segment_limit in
+  Journal.segment_limit := 2000;
+  let se = root // "segend" in
+  let db = Result.get_ok (Cepheus.open_ se) in
+  let[@warning "-8"] (Ok [ p ]) = Cepheus.declare db [ Cepheus.prop "p" Ttext ] in
+  let w s = match Cepheus.write db [ Resolve.Add (-1, p, Text s) ] with Ok _ -> () | Error e -> C.fail "write: %s" (Cepheus.message e) in
+  w (String.make 1200 'a');
+  (match Cepheus.snapshot db with Ok () -> () | Error e -> C.fail "snapshot: %s" (Cepheus.message e));
+  w (String.make 1200 'b');
+  w "c";
+  Cepheus.close db;
+  Journal.segment_limit := limit;
+  let sid = Engine.read_meta Disk.real se in
+  let at_seg_end =
+    List.filter_map
+      (fun ((_, hi, _) as r) ->
+        let pos, _ = Snapshot.verify Disk.real (se // "snapshots") r sid in
+        if List.mem (Journal.segment_name pos.Journal.next) (segs se) then Some hi else None)
+      (Snapshot.list Disk.real (se // "snapshots"))
+  in
+  C.check (at_seg_end <> [] && List.length (segs se) >= 2) "a run at the end of a segment the next one follows (%d runs)" (List.length at_seg_end);
+  C.check (Ops.verify se = Ops.exit_ok) "a run at a segment's end: verify whole";
+  let sg = fst (facts se) in
+  List.iter
+    (fun (what, target, at) ->
+      let r = root // "segend-r" in
+      C.rmrf r;
+      C.check (Ops.restore ~target ~replace:false se r = Ops.exit_ok && fst (facts r) = at && Ops.verify r = Ops.exit_ok)
+        "a run at a segment's end: restore %s, at group %d and whole" what at)
+    ([ "to the end", Ops.End, sg ] @ List.concat_map (fun h -> [ Printf.sprintf "--to-group %d" h, Ops.Group h, h; Printf.sprintf "--to-group %d" (h + 1), Ops.Group (h + 1), h + 1 ]) at_seg_end);
   C.rmrf root;
   C.finish "ops"
