@@ -785,7 +785,10 @@ let check_segment ~tail ~newest ~frame ~on_group disk dir id s =
       && (let h = Bytes.create fh in
           disk.pread fd p h 0 fh;
           (not (Bytes.for_all (( = ) '\000') h))
-          && match header_at r p with None -> true | Some (len, _, _, _, _) -> p + fh + len + ft <= size)
+          &&
+          (* the header alone checked (header_at also needs the whole frame there, which a frame being appended is not) *)
+          let len = u32 h 4 in
+          if u32 h 0 = frame_magic && u32 h 24 = Crc32c.bytes h 0 24 && len <= max_body then p + fh + len + ft <= size else true)
     in
     let broken p =
       if newest && tail = Copy then
