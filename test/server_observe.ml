@@ -108,6 +108,18 @@ let () =
   C.check (status_of l "database.b.write_samples" = 1 && status_of l "database.b.write_us_max" = 9 && status_of l "database.b.writes" = 2)
     "a slice of the next turn begun again"
 
+(* the log: 10 lines a second at most, the next one written counting those left out *)
+let () =
+  let out = ref [] in
+  let t = Timings.create ~slow_ms:1 ~log:(fun l -> out := l :: !out) [| "a" |] in
+  for i = 1 to 25 do Timings.say t (Printf.sprintf "line %d" i) done;
+  let written = List.length !out in
+  Thread.delay 1.1;
+  Timings.say t "after";
+  let last = List.hd !out in
+  C.check (written >= 10 && written <= 20) "25 lines at once: %d written (10 a second)" written;
+  C.check (last = Printf.sprintf "after (and %d slow questions or writes not written since the line before)" (25 - written)) "the next line counts those left out: %s" last
+
 (* records from 4 domains of 3 threads each, a status read meanwhile: every value counted once *)
 let () =
   let t = Timings.create [| "a" |] in
@@ -419,8 +431,7 @@ let () =
   C.check (has_line [ "slow question: database main, token obs-writer"; "timeout: find group count where [x0 c/tag ?] [x1 c/tag ?] [x2 c/tag ?]" ]) "a line for the timeout";
   C.check (has_line [ "slow question: database main, token obs-writer"; "ok: watch group count" ]) "a line for the watch";
   C.check (has_line [ "slow write: database main, token obs-writer"; "group"; "ok: 4500 operations (4500 adds) of c/name, c/code, c/tag" ]) "a line for the large group";
-  C.check (List.length (List.filter (fun l -> contains l "slow write") slow) <= 10 && has_line [ "slow questions or writes not written since the line before" ])
-    "10 lines a second at most, the next one counting those left out";
+
   List.iter
     (fun l ->
       match String.index_opt l ',' with

@@ -19,6 +19,16 @@ val percentile : t -> float -> int
     bucket's highest value (never above the largest value recorded; the largest one in the last bucket, past 2^34 us);
     0 when [h] is empty. *)
 
+val bucket : bits:int -> int -> int
+(** the bucket of a value in a histogram of [bits], for a writer that keeps counters of its own (no loop: Timings) *)
+
+val buckets : bits:int -> int
+(** the buckets of a histogram of [bits] *)
+
+val add_buckets : t -> int array -> int -> sum:int -> max:int -> unit
+(** [add_buckets h a off ~sum ~max] adds the counters [a.(off)] ... [a.(off + buckets - 1)] to [h], their sum to its
+    total, [sum] to its sum and [max] to its maximum *)
+
 val total : t -> int
 val max : t -> int
 val sum : t -> int

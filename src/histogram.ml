@@ -87,6 +87,18 @@ let percentile h q =
     if !i = size h.bits - 1 then h.max else min h.max (upper h.bits !i)
   end
 
+(* for a writer that keeps its counters in an array of its own (Timings): the bucket of a value, the number of buckets,
+   and counters added to a histogram (its total their sum) *)
+let bucket ~bits v = index bits (if v < 0 then 0 else v)
+let buckets ~bits = size bits
+
+let add_buckets h (a : int array) off ~sum ~max:m =
+  let d = counts h and n = ref 0 in
+  for i = 0 to Array.length d - 1 do let c = Array.unsafe_get a (off + i) in d.(i) <- d.(i) + c; n := !n + c done;
+  h.total <- h.total + !n;
+  h.sum <- h.sum + sum;
+  if m > h.max then h.max <- m
+
 let total h = h.total
 let max h = h.max
 let sum h = h.sum

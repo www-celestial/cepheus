@@ -13,18 +13,21 @@
    "quantiles over a sliding time window" for a summary's quantiles, cumulative count and sum).
 
    No lock a value. A question is timed by its connection's thread, a write by the thread that answers it, each on one
-   of the server's domains; each domain records into slices of its own (its shard, by Domain.self_index), so two
+   of the server's domains; each domain records into a ring of its own (its shard, by Domain.self_index), so two
    domains never write one counter, and no domain waits for another. The threads of one domain run one at a time and
    switch only where the runtime polls (an allocation, a loop, a blocking call): a record reads its slice and writes
-   its counters with no such point between (Histogram.record has no loop; a slice, a ring and a shard are made, the
-   allocation done, before the place that is read again and written), so the threads of a domain never interleave
-   inside one record. A status reads every shard while their domains write: it copies their counters (a racy read of
-   ints, the old or the new value of each in OCaml 5's memory model: Dolan, Sivaramakrishnan, Madhavapeddy, PLDI
-   2018) and Histogram.merge_into takes the total as the sum of the counters it read, so the percentiles it gives are
-   those of a moment within its read.
+   its counters with no such point between (no loop, no allocation: Histogram.bucket has no loop, Array.fill is C; a
+   ring and a shard are made, the allocation done, before the place that is read again and written), so the threads
+   of a domain never interleave inside one record. A ring is one flat array, its six slices side by side, so that a
+   record reads three or four cache lines and follows no chain of pointers (a question's own work has pushed them out
+   of the nearest cache by then: each pointer followed costs a miss). A status reads every ring while their domains
+   write: it copies a slice's counters (a racy read of ints, the old or the new value of each in OCaml 5's memory
+   model: Dolan, Sivaramakrishnan, Madhavapeddy, PLDI 2018) between two reads of its number, which a slice begun again
+   sets to -1 first; a slice whose number changed meanwhile is left out of that status. Histogram.add_buckets takes
+   the total as the sum of the counters copied, so the percentiles it gives are those of a moment within its read.
 
-   Memory: a slice is 960 counters (7.5 KiB), made at its first value; a database timed by every one of d I/O domains,
-   questions and writes, holds at most 2 x 6 x d slices (360 KiB for d = 4), an idle one nothing.
+   Memory: a ring is six slices of 963 counters (46 KiB), made at its first value; a database timed by every one of d
+   I/O domains, questions and writes, holds at most 2 x d rings (370 KiB for d = 4), an idle one nothing.
 
    The log. A question or a write that takes [slow_ms] or more (0: none) is written on a line of the standard error:
    its database, its token's name (never the token), its time, its outcome (ok, or the code of its error: never the
@@ -44,16 +47,23 @@ let slice_us = 10_000_000
 let slices = 6
 let window_s = slices * slice_us / 1_000_000
 
+let nb = Histogram.buckets ~bits
+
+(* a slice in a ring: its number (-1 while it is begun again), the sum and the maximum of its times, its buckets *)
+let stride = 3 + nb
+
 (* one kind of request of one database, as one domain records it *)
 type ring = {
-  slots : (int * Histogram.t) array;  (* by slice number mod [slices]: the slice's number, its times *)
+  data : int array;  (* [slices] slices of [stride] counters, slice e at (e mod slices) * stride *)
   mutable count : int;  (* since the start *)
   mutable sum : int;  (* microseconds, since the start *)
   mutable slow : int;  (* past the threshold, since the start *)
 }
 
-(* a slice no value is ever recorded into: its number is no slice's *)
-let unused = (-1, Histogram.create ~bits ())
+let new_ring () =
+  let data = Array.make (slices * stride) 0 in
+  for s = 0 to slices - 1 do data.(s * stride) <- -1 done;
+  { data; count = 0; sum = 0; slow = 0 }
 
 type shard = { q : ring option array; w : ring option array }  (* questions and writes, by database index *)
 
@@ -99,31 +109,33 @@ let ring_of (a : ring option array) db =
   match Array.unsafe_get a db with
   | Some r -> r
   | None -> (
-    let o = Some { slots = Array.make slices unused; count = 0; sum = 0; slow = 0 } in
+    let o = Some (new_ring ()) in
     match Array.unsafe_get a db with
     | Some r -> r
     | None -> (Array.unsafe_set a db o; match o with Some r -> r | None -> assert false))
 
-(* [us] recorded at [now] (both in microseconds): true when it is past the threshold *)
+(* [us] recorded at [now] (both in microseconds): true when it is past the threshold. No allocation, no loop. *)
 let record t r ~now us =
+  let us = if us < 0 then 0 else us in
   let e = now / slice_us in
-  let i = e mod slices in
-  let pe, h = Array.unsafe_get r.slots i in
-  let h =
-    if pe = e then h
-    else begin
-      (* a slice begun again: made first, then the slot read again (another thread of the domain may have begun it) *)
-      let fresh = (e, Histogram.create ~bits ()) in
-      let pe, h = Array.unsafe_get r.slots i in
-      if pe = e then h else (Array.unsafe_set r.slots i fresh; snd fresh)
-    end
-  in
-  Histogram.record h us;
+  let b = e mod slices * stride and d = r.data in
+  if Array.unsafe_get d b <> e then begin
+    (* a slice begun again: its number -1 while its counters go back to 0 (a status reading it meanwhile leaves it out) *)
+    Array.unsafe_set d b (-1);
+    Array.fill d (b + 1) (stride - 1) 0;
+    Array.unsafe_set d b e
+  end;
+  Array.unsafe_set d (b + 1) (Array.unsafe_get d (b + 1) + us);
+  if us > Array.unsafe_get d (b + 2) then Array.unsafe_set d (b + 2) us;
+  let i = b + 3 + Histogram.bucket ~bits us in
+  Array.unsafe_set d i (Array.unsafe_get d i + 1);
   r.count <- r.count + 1;
   r.sum <- r.sum + us;
   if t.slow_us > 0 && us >= t.slow_us then (r.slow <- r.slow + 1; true) else false
 
-let question t db ~now us = record t (ring_of (shard t).q db) ~now us
+(* the calling domain's ring of a database's questions: a connection's thread keeps it (Core), its domain its own *)
+let question_ring t db = ring_of (shard t).q db
+let question t db ~now us = record t (question_ring t db) ~now us
 let write t db ~now us = record t (ring_of (shard t).w db) ~now us
 
 (* ---- the log ---- *)
@@ -235,7 +247,7 @@ let server_lines t = [ "slow_ms", string_of_int (slow_ms t); "latency_window_s",
 let lines t db ~now =
   let e = now / slice_us in
   let one (kind : shard -> ring option array) many one_ =
-    let acc = Histogram.create ~bits () and count = ref 0 and sum = ref 0 and slow = ref 0 in
+    let acc = Histogram.create ~bits () and count = ref 0 and sum = ref 0 and slow = ref 0 and copy = Array.make nb 0 in
     Array.iter
       (function
         | None -> ()
@@ -246,7 +258,16 @@ let lines t db ~now =
             count := !count + r.count;
             sum := !sum + r.sum;
             slow := !slow + r.slow;
-            Array.iter (fun (pe, h) -> if pe > e - slices && pe <= e then Histogram.merge_into acc h) r.slots))
+            for s = 0 to slices - 1 do
+              let b = s * stride in
+              let pe = r.data.(b) in
+              if pe > e - slices && pe <= e then begin
+                let ssum = r.data.(b + 1) and smax = r.data.(b + 2) in
+                Array.blit r.data (b + 3) copy 0 nb;
+                (* begun again meanwhile: left out *)
+                if r.data.(b) = pe then Histogram.add_buckets acc copy 0 ~sum:ssum ~max:smax
+              end
+            done))
       (Atomic.get t.shards);
     let k x = "database." ^ t.names.(db) ^ "." ^ x in
     [ k many, string_of_int !count; k (many ^ "_slow"), string_of_int !slow; k (one_ ^ "_us_sum"), string_of_int !sum;
@@ -254,3 +275,23 @@ let lines t db ~now =
       k (one_ ^ "_us_max"), string_of_int (Histogram.max acc); k (one_ ^ "_samples"), string_of_int (Histogram.total acc) ]
   in
   one (fun s -> s.q) "questions" "question" @ one (fun s -> s.w) "writes" "write"
+
+(* a database's question ring as a connection's thread keeps it: the ring and the domain it was made in *)
+type kept = { mutable rings : ring option array; mutable dom : int }
+
+let kept () = { rings = [||]; dom = -1 }
+
+(* a question recorded through the ring a connection keeps, looked up again only when its domain changed *)
+let question_kept t k db ~now us =
+  let dom = Domain.self_index () in
+  let r =
+    if k.dom = dom && db < Array.length k.rings then
+      match Array.unsafe_get k.rings db with Some r -> r | None -> let r = question_ring t db in k.rings.(db) <- Some r; r
+    else begin
+      let r = question_ring t db in
+      if k.dom <> dom || Array.length k.rings <> Array.length t.names then (k.rings <- Array.make (Array.length t.names) None; k.dom <- dom);
+      k.rings.(db) <- Some r;
+      r
+    end
+  in
+  record t r ~now us
