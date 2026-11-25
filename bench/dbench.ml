@@ -12,8 +12,9 @@
                                        which names client) or plain (bill/client, a link to any thing): microseconds a
                                        group, the median of 5 passes of N / 5
 
-   Without the links' facts (a Cepheus before them), [load] makes no link name a kind and [write to] is refused: the
-   plain writes still measure, so that the same program gives the A/B against that Cepheus. *)
+   Without the links' facts (a Cepheus before them), or with NOLINKS=1, [load] makes no link name a kind and [write to]
+   writes a link to any thing: the plain writes still measure, so that the same program gives the A/B against that
+   Cepheus. *)
 
 open Cepheus
 
@@ -44,7 +45,8 @@ let chunked db ops =
 let load dir =
   let db = Result.get_ok (open_ dir) in
   let[@warning "-8"] [ name; city; iclient; itotal; linvoice; lprice; nabout; ntext; _; _ ] = ids db in
-  let linked = links db iclient "client" "refuse" && links db linvoice "invoice" "cascade" && links db nabout "invoice" "clear" in
+  (* NOLINKS=1: no link names a kind, as before them (the A/B of writes against a Cepheus before them) *)
+  let linked = Sys.getenv_opt "NOLINKS" = None && links db iclient "client" "refuse" && links db linvoice "invoice" "cascade" && links db nabout "invoice" "clear" in
   let t0 = now () in
   (* clients *)
   let r = Result.get_ok (write db (List.concat (List.init 10_000 (fun k -> [ Add (-(k + 1), name, Text (Printf.sprintf "client-%d" k)); Add (-(k + 1), city, Text (Printf.sprintf "city-%d" (k mod 20))) ])))) in

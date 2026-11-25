@@ -4,15 +4,19 @@
 -- invoices of 0, 100 and 10,000 lines and of 0, 100 and 10,000 notes (invoice REFERENCES invoice ON DELETE SET NULL),
 -- the referencing columns indexed, as a PostgreSQL user writes them. Then the functions that time a DELETE, and a
 -- loop of inserts, inside the server, rolled back: the engine's work, as dbench.exe times its forks.
-DROP TABLE IF EXISTS note, line, bill, bill_fk, invoice, client CASCADE;
+DROP TABLE IF EXISTS note, line, bill, bill_fk, account, invoice, client CASCADE;
 CREATE TABLE client (id int PRIMARY KEY, name text NOT NULL, city text NOT NULL);
 CREATE TABLE invoice (id int PRIMARY KEY, client int NOT NULL REFERENCES client, total numeric(12,2) NOT NULL);
 CREATE TABLE line (id int PRIMARY KEY, invoice int NOT NULL REFERENCES invoice ON DELETE CASCADE, price numeric(12,2) NOT NULL);
 CREATE TABLE note (id int PRIMARY KEY, invoice int REFERENCES invoice ON DELETE SET NULL, text text NOT NULL);
 CREATE TABLE bill (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, client int NOT NULL, total numeric(12,2) NOT NULL);
-CREATE TABLE bill_fk (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, client int NOT NULL REFERENCES client, total numeric(12,2) NOT NULL);
+-- the inserts' table with a foreign key references a table of its own, so that its dead rows (the inserts are rolled
+-- back) never lie in the way of a DELETE of a client
+CREATE TABLE account (id int PRIMARY KEY);
+CREATE TABLE bill_fk (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY, client int NOT NULL REFERENCES account, total numeric(12,2) NOT NULL);
 INSERT INTO client SELECT k, 'client-' || k, 'city-' || (k % 20) FROM generate_series(1, 10000) k;
 INSERT INTO client VALUES (10001, 'zero', 'z'), (10002, 'hundred', 'z'), (10003, 'tenthousand', 'z');
+INSERT INTO account SELECT k FROM generate_series(1, 10000) k;
 INSERT INTO invoice SELECT k, 1 + (k % 10000), k % 25000 FROM generate_series(1, 100000) k;
 INSERT INTO invoice SELECT 100000 + k, 10002, 1 + k FROM generate_series(1, 100) k;
 INSERT INTO invoice SELECT 100100 + k, 10003, 2 + k FROM generate_series(1, 10000) k;

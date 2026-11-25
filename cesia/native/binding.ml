@@ -130,7 +130,9 @@ let kind ctx a =
               Some { Schema.kind = k; on_delete }
             | v, _ -> C.need ctx name "the name of a kind for to, as Link(to = \"client\")" v
           in
-          { fname; pname; typ = typ_of_text ctx name t scale; unique = bool ctx name unique; many = bool ctx name many; link }
+          let typ = typ_of_text ctx name t scale in
+          if link <> None && typ <> Value.Tlink then C.panic ctx (Printf.sprintf "%s: %s: to is for a link, as Link(to = \"client\")" name pname);
+          { fname; pname; typ; unique = bool ctx name unique; many = bool ctx name many; link }
         | _ -> C.need ctx name "a type of property, as cepheus.Text()" descs.(i))
       names
   in
