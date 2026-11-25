@@ -32,7 +32,6 @@ cent de celles ci-dessous (Q1 0,38 µs, Q2 1,57 µs, Q3 3,74 à 3,82 ms, Q4 231 
 | écritures durables, 256 clients, aussi vite qu'ils peuvent | 14 182 groupes/s (tours de 14 141 à 17 192) | 19 559 insertions/s (12 742 à 20 863) | égalité : les deux bornés par le débit de fsync du disque ; les tours d'un même côté diffèrent plus que les deux côtés |
 | écritures durables à un débit fixe de 2 000 par seconde, p99 | **0,1 à 1,7 s** | 0,6 à 6,1 s | Cepheus, sur ce disque bruyant |
 | plus grand que la mémoire : Q4, base de 245 MB, 32 MB de cache, processus limité à 128 MB | **385 ms** | 697 ms | Cepheus |
-| plus grand que la mémoire : Q5 | 102 s | **1,05 s** | **PostgreSQL**, de 100 fois (plus bas) |
 | avec le format de run 8 (2026-11-11) : Q4 sur 1, 2, 3, 4 cœurs | **128, 81,6, 57,8, 47,8 ms** | 233, 141, 107, 87,7 ms (1 à 4 processus) | Cepheus, 1,8 fois à chaque nombre : trois valeurs seules par facture, lues dans les colonnes du client, de la ville et du total |
 | avec le format de run 8 : Q5 sur 1, 2, 3, 4 cœurs | **250, 149, 100, 77,3 ms** | 1 010, 604, 602, 616 ms (il lance 1 worker au plus) | Cepheus, 4 à 8 fois : la colonne de `follows` et les intersections en leapfrog |
 | avec le format de run 8 : Q5 plus grand que la mémoire, limite de 128 MB, cache de 32 MB, à froid | **263 ms** (114 ms sur 3 cœurs ; 260 ms sous une limite de 48 MB) | 1,05 s (2026-11-08) | Cepheus, 4 fois : `follows` est maintenant une colonne à lui, 1,6 MB |
@@ -41,13 +40,13 @@ cent de celles ci-dessous (Q1 0,38 µs, Q2 1,57 µs, Q3 3,74 à 3,82 ms, Q4 231 
 
 **Là où PostgreSQL gagne, et pourquoi.**
 - *Q5 plus grand que la mémoire, jusqu'au format de run 8 (2026-11-11), qui garde les lignes de chaque propriété à
-  part dans un troisième ordre et fait passer les triangles sous une limite de 48 MB à 0,26 s (lignes ci-dessus).*
-  Cepheus range les lignes d'une base par chose, donc les liens follow d'un client se trouvent parmi les lignes de ses
-  20 factures ; la question des triangles lit des pages au hasard dans 120 MB de lignes, pour quelques octets chacune
-  (18,8 millions de pages lues en 6 exécutions avec un cache de 48 MB). PostgreSQL garde `follows` dans une table à
-  lui, 23 MB avec son index, qui tient dans ses 32 MB de buffers. Un troisième ordre des lignes de Cepheus (propriété,
-  puis chose) rendrait locale une propriété de beaucoup de choses, pour 10 octets de plus par fait ; il attend des
-  charges réelles pour décider ([théorie](theory.md#7-les-pages-et-le-cache)).
+  part dans un troisième ordre et fait passer les triangles à 263 ms sous une limite de 128 MB et à 260 ms sous une
+  limite de 48 MB (lignes ci-dessus).* Avant lui, Cepheus rangeait les lignes d'une base par chose seulement, donc les
+  liens follow d'un client se trouvaient parmi les lignes de ses 20 factures ; la question des triangles lisait des
+  pages au hasard dans 120 MB de lignes, pour quelques octets chacune (18,8 millions de pages lues en 6 exécutions avec
+  un cache de 48 MB). PostgreSQL garde `follows` dans une table à lui, 23 MB avec son index, qui tient dans ses 32 MB de
+  buffers ; la colonne de `follows` du format 8 prend 1,6 MB
+  ([benchmarks](benchmarks.md#le-column-order-et-les-intersections-en-leapfrog-2026-11-11-à-10-millions-de-faits)).
   Mesuré à nouveau sur le format de run 7 (2026-11-09), à froid (les pages des fichiers vidées avant chaque côté, ce
   que la série ci-dessus ne faisait pas), à côté de SQLite 3.54, PostgreSQL pas relancé : sous une limite de 128 MB, le
   run de 54,4 MB tient à côté du processus et les triangles prennent 1,10 s (SQLite 1,04 s ; le format 6 ne finissait
@@ -117,7 +116,7 @@ de 1 GiB), les deux sur un cœur, deux tours alternés
 | plus grand que la mémoire, à froid, limite de 128 MB, caches de 32 MB, Q1 à Q5 (2026-11-09) | **0,38 µs**, **0,65 µs**, **4,02 ms**, **240 ms**, 1,10 s | 0,87 µs, 1,40 µs, 97,5 ms, 496 ms, **1,04 s** | Cepheus sur Q1 à Q4 : son run de 54,4 MB tient sous la limite, le fichier de 136,4 MB de SQLite non ; **SQLite** sur Q5 de 6 % |
 | Q1, Q2, Q3, Q4, Q5 avec le format de run 8, un cœur (2026-11-11) | **0,39 µs**, **0,64 µs**, **2,87 ms**, **130 ms**, **256 ms** | 0,69 µs, 1,42 µs, 4,18 ms, 369 ms, 1,05 s | Cepheus sur les cinq, Q5 de 4,1 fois : le column order (les lignes de chaque propriété rangées à part) et les intersections en leapfrog ([benchmarks](benchmarks.md#le-column-order-et-les-intersections-en-leapfrog-2026-11-11-à-10-millions-de-faits)) |
 | plus grand que la mémoire avec le format de run 8, à froid, limite de 128 MB, caches de 32 MB, Q1 à Q5 | **0,44 µs**, **0,69 µs**, **3,13 ms**, **129 ms**, **263 ms** | 2,89 µs, 1,48 µs, 112 ms, 552 ms, 1,14 s | Cepheus sur les cinq ; sous une limite de 48 MB, ses triangles prennent 260 ms contre 1,02 s pour SQLite |
-| la même chose sous une limite de 48 MB, caches de 16 MB, où aucun des deux fichiers ne tient | **23,3 µs**, **0,66 µs**, **82,5 ms**, **300 ms**, plus de 2,5 min | 40,7 µs, 1,37 µs, 444 ms, 1,22 s, **1,02 s** | Cepheus sur Q1 à Q4 (1,7 à 5,4 fois) ; **SQLite** sur Q5 de plus de 100 fois : ses liens follow tiennent dans son cache, dans une table et un index à eux, là où Cepheus les lit dans ses thing blocks, parmi les factures |
+| sous une limite de 48 MB, caches de 16 MB, où aucun des deux fichiers ne tient, à froid : Q1 à Q4 avec le format de run 7 (2026-11-09), Q5 avec le format de run 8 (2026-11-11) | **23,3 µs**, **0,66 µs**, **82,5 ms**, **300 ms**, **260 ms** [249 ; 274] | 40,7 µs, 1,37 µs, 444 ms, 1,22 s, 1,02 s | Cepheus sur les cinq : Q1 à Q4 de 1,7 à 5,4 fois ; Q5 de 3,9 fois, lu dans la colonne de `follows` (1,6 MB), là où le format 7 lisait les liens follow dans ses thing blocks, parmi les factures, et prenait plus de 2,5 min par exécution ([benchmarks](benchmarks.md#le-column-order-et-les-intersections-en-leapfrog-2026-11-11-à-10-millions-de-faits)) |
 
 ## Par conception
 
@@ -229,8 +228,9 @@ transaction, son journal les drapeaux ajouté et retiré.
   ([concurrent data access](https://neo4j.com/docs/operations-manual/5/database-internals/concurrent-data-access/)).
   Les groupes de Cepheus sont strictly serializable sans aucun lock.
 - Les clusters : « The servers in a cluster use the Raft protocol to ensure consistency and safety »
-  ([routing](https://neo4j.com/docs/operations-manual/5/clustering/setup/routing/)) ; Cepheus prévoit Raft pour la
-  réplication.
+  ([routing](https://neo4j.com/docs/operations-manual/5/clustering/setup/routing/)) ; un cluster Cepheus de trois
+  serveurs utilise Raft lui aussi : il élit son leader et confirme une écriture une fois qu'une majorité la tient
+  ([Raft](server.md#un-cluster-de-trois-raft)).
 - *Là où Neo4j gagne* : Cypher, les algorithmes de graphe, le clustering, l'outillage.
 
 ### FoundationDB

@@ -1,7 +1,7 @@
 # A real app: invoices and clients
 
 This page builds a whole application on the stack, step by step, from `cesia new` to a service in production: an app
-of invoices and clients written in [Cesia](https://github.com/www-celestial/cesia), its data in a Cepheus server, its
+of invoices and clients written in [Cesia](https://github.com/www-celestial/cesia-lang), its data in a Cepheus server, its
 screens live through Cesia's `std/live`, and its end-to-end tests driving Firefox through Ceti. Its code is in
 [`examples/invoices`](https://github.com/www-celestial/cepheus/tree/main/examples/invoices) of this repository, about 1,600 lines of Cesia, and 460 of tests; each
 step below shows the part that matters and names the file that holds the rest. Every command was run as written, and
@@ -362,10 +362,10 @@ u.Db = if u.Role == "admin" env.Full else env.Books end
 ```
 
 **Passwords and sessions** (`auth.ce`). A password is kept as its Argon2id hash only (`crypto.HashPassword`, through
-libsodium: [cryptography](https://github.com/www-celestial/cesia/blob/main/docs/book/crypto.md)). An unknown login is
+libsodium: [cryptography](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/crypto.md)). An unknown login is
 checked against the hash of a password nobody has, so that it takes as long as a wrong password and the time of a
 reply tells nobody which logins exist; both get the same message. The hash runs away from the app's one thread
-(`c.Fn`'s `slow`: [a call that takes long](https://github.com/www-celestial/cesia/blob/main/docs/book/c.md#a-call-that-takes-long)):
+(`c.Fn`'s `slow`: [a call that takes long](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/c.md#a-call-that-takes-long)):
 while a visitor signs in, the other requests go on. At most half the machine's cores hash at once (64 MiB each), the
 others wait in a line of 64 a place, and one more gets a 500 at once: a flood of sign-ins takes a bounded memory
 ([the measures](#14-what-it-costs)). A session is 32 random bytes from the system
@@ -394,7 +394,7 @@ end
 ## 9. The live dashboard
 
 The dashboard's numbers are three **watches** ([live questions](cesia.md#watch-live-questions)), given to the page by
-`std/live` ([live screens](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#live-screens-stdlive)).
+`std/live` ([live screens](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/http.md#live-screens-stdlive)).
 `live.Route("/live", screen)` serves them; `screen` runs when a page connects, finds its user by the cookie of its
 request, and watches through the database of its role, each watch ended with the page (`until = s.Ended`):
 
@@ -545,11 +545,11 @@ The invoices go in groups of 20,000, about 480,000 facts each, so as to take the
 ([large groups](architecture.md#large-groups)). When this run was measured, a constraint, or a rule whose head is a
 property of one value, sent a large group to the ordinary path of the writer; and the app, started above, had defined
 its rules. Into a database where they are not defined yet, the seed defines them after the load, in one group that
-derives over all of it, and the whole seed takes 4.84 s ([what it costs](#14-what-it-costs)); here it took 12.5 s.
-Its `Define` then had nothing to write, but waited, as the first read after the load, for the program's copy of the
-database to take in the load's groups. Since the reasoner's step 3, the path of large groups checks constraints (with
-their `Not`) and one-valued heads after its fixpoint ([rules](rules.md#large-groups)): a load into a database that
-has the app's rules stays on that path (not measured again here).
+derives over all of it, and the whole seed takes 4.84 s ([what it costs](#14-what-it-costs)); here it took 12.5 s. Its
+`Define` then had nothing to write, but waited, as the first read after the load, for the program's copy of the database
+to take in the load's groups. Now the path of large groups checks constraints (with their `Not`) and one-valued heads
+after its fixpoint ([rules](rules.md#large-groups)): a load into a database that has the app's rules stays on that path
+(not measured again here).
 
 ## 12. End-to-end tests in Firefox
 
@@ -670,7 +670,7 @@ Stopped [systemd-run] /home/you/cesia/_build/default/src/bin/main.exe run --allo
 (With `cesia do` instead, the same stop gave `status=143`: the second signal.)
 
 **On every core.** The app holds no state of its own: sessions are in the database, so `cesia run --workers 4` runs
-four processes behind one port ([every core](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#every-core)).
+four processes behind one port ([every core](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/http.md#every-core)).
 Each one connects to Cepheus and keeps its own copy of the database's pages for its local reads (each reader holds
 its cache: [what it costs](server.md#what-it-costs)), and each one runs the minute's late check, which their `Expect`s
 keep from applying twice.
@@ -746,7 +746,7 @@ reading of the app's code and the engine's first load (13 ms, [what it costs](ce
 
 - With 50 clients at once, the app's one process serves them one after another: the latency is about 50 times a
   request's work, and the requests a second say what one core gives. `cesia run --workers 4` serves the same port
-  from 4 processes ([every core](https://github.com/www-celestial/cesia/blob/main/docs/book/http.md#every-core)).
+  from 4 processes ([every core](https://github.com/www-celestial/cesia-lang/blob/main/docs/book/http.md#every-core)).
 - The accountant's list costs 0.5 ms more alone, a round trip to the server through its socket (its token reads
   there, not in the app's memory), and serves more at 50, since the server's domains do the reading beside the app's
   core.
@@ -906,6 +906,4 @@ twice what this machine can hash, the app's memory peaked at 365 MB (150 MB with
 
 ## What is not built yet
 
-- A watch with an order and a limit (the latest ten payments): the dashboard watches a window of time and the page
-  sorts it.
 - Sign-ins limited by client: a Cesia handler's request carries no address of its client.

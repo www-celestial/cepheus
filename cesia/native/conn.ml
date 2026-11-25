@@ -55,13 +55,14 @@ and shared = {
   select : Wire.select;
   extra : Question.Ask.item list;
   order : Question.Top.order;  (* Sort and Limit *)
+  timeout : float option;  (* the seconds its first answer may take, at each new source (a fiber's, the first) *)
 }
 
 let queue_max = 256
 
-let new_shared ?(extra = []) ?(order = Question.Top.none) key query select =
+let new_shared ?(extra = []) ?(order = Question.Top.none) ?timeout key query select =
   { key; sm = Mutex.create (); rows = Hashtbl.create 16; group = 0; started = false; consumers = []; src = Nothing; lost = true;
-    finding = false; ended = None; parts = None; query; select; extra; order }
+    finding = false; ended = None; parts = None; query; select; extra; order; timeout }
 
 (* rows in the watch's order, when it has one *)
 let in_order sh (rows : Live.row list) =
@@ -380,7 +381,7 @@ let start cl =
       up = true; closed = false; reader = None; serial = cl.Client.serial; unanswered = Hashtbl.create 16; reading = false;
       caller = false; rtt = 50e-6 }
   in
-  t.reader <- Some (Domain.spawn (fun () -> read_loop t));
+  t.reader <- Some (Pool.spawn (fun () -> read_loop t));
   t
 
 (* a request sent now (or after the reconnection under way); its reply is waited for by [wait] *)

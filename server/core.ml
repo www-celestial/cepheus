@@ -49,6 +49,10 @@ type t = {
   mutable next_conn : int;
   watches : int Atomic.t;  (* the watches of every connection *)
   kept : int Atomic.t;  (* the cells their windows and groups keep (Live.kept) *)
+  question_timeout : float;  (* seconds a question may take (cluster.toml, [clients] question_timeout); 0: no limit *)
+  timed_out : int Atomic.t;  (* questions ended by their time *)
+  cancelled : int Atomic.t;  (* questions ended because their connection closed *)
+  timings : Timings.t;  (* the times of the questions and writes, by database, and the log of the slow ones *)
 }
 
 and conn = {
@@ -83,16 +87,28 @@ and conn = {
   failed : bool Atomic.t;  (* a thread other than the reading one failed: said at the end *)
   gone : unit -> bool;  (* the transport can send nothing more (the peer went): a long reply stops *)
   puts : (int, db * Files.put) Hashtbl.t;  (* the files being put, by the id of their Put (the reading thread only) *)
+  mutable mark : int;
+      (* the monotonic clock's microseconds at the end of the question just answered, among the frames of one input,
+         or when the input's bytes were read (Core.input ~arrived); 0 otherwise: the next frame's [t0], so that a
+         request reads the clock once, at its end (Timings) *)
+  mutable t0 : int;  (* the frame being handled: its start, when [mark] gave it; 0: read the clock *)
+  mutable qring : Timings.ring;
+      (* the ring its questions are recorded into: database [qdb]'s of domain [qdom] (its reading thread's), looked up
+         again when either changed; [||]: none yet *)
+  mutable qdb : int;
+  mutable qdom : int;
 }
 
 let create ~server_id ~cluster_id ~dbs ~tokens ~now ~new_session ?(max_inflight = 1024) ?(more = fun () -> [])
     ?(read_only = fun () -> None) ?(lead = fun () -> None) ?(raft = false) ?(members = []) ?(ops = fun _ -> None)
-    ?(files_commit = fun _ ~domain:_ ~root:_ -> Ok ()) ?(files_erase = fun _ _ -> Error ("invalid", "no Raft cluster")) () =
+    ?(files_commit = fun _ ~domain:_ ~root:_ -> Ok ()) ?(files_erase = fun _ _ -> Error ("invalid", "no Raft cluster"))
+    ?(question_timeout = 0.) ?(slow_ms = 0) () =
   let by_name = Hashtbl.create 8 in
   Array.iter (fun d -> Hashtbl.replace by_name d.name d) dbs;
   { server_id; cluster_id; dbs; by_name; tokens = Atomic.make tokens; stopping = Atomic.make false; now; new_session;
     max_inflight; more; read_only; lead; raft; files_commit; files_erase; members; ops; started = now (); served = Atomic.make 0; conns = Hashtbl.create 64; cm = Mutex.create (); next_conn = 1;
-    watches = Atomic.make 0; kept = Atomic.make 0 }
+    watches = Atomic.make 0; kept = Atomic.make 0; question_timeout; timed_out = Atomic.make 0; cancelled = Atomic.make 0;
+    timings = Timings.create ~slow_ms (Array.map (fun d -> d.name) dbs) }
 
 let connect ?(wake = ignore) ?(close = ignore) ?(gone = fun () -> false) srv ~flush ~submit =
   Mutex.protect srv.cm (fun () ->
@@ -102,7 +118,8 @@ let connect ?(wake = ignore) ?(close = ignore) ?(gone = fun () -> false) srv ~fl
         { srv; cid; token = None; seen = Tokens.empty; rights = [||]; kinds = [||]; session = 0; om = Mutex.create (); oc = Condition.create ();
           out = Buffer.create 4096; body = Buffer.create 4096; scratch = Buffer.create 1024; wbody = Buffer.create 256;
           inflight = 0; requests = 0; flush; submit; pm = Mutex.create (); pushes = Buffer.create 256; watching = []; kept_cells = 0;
-          closed = false; wake; close; failed = Atomic.make false; gone; puts = Hashtbl.create 2 }
+          closed = false; wake; close; failed = Atomic.make false; gone; puts = Hashtbl.create 2; mark = 0; t0 = 0;
+          qring = [||]; qdb = -1; qdom = -1 }
       in
       Hashtbl.replace srv.conns cid c;
       c)
@@ -382,7 +399,7 @@ let row_too_large n = raise (Row_too_large n)
    and is sent before the next rows are found (the output holds a frame at most); a peer gone stops the fold *)
 let stream_rows c ~id ~kind (v : Store.view) (typs : Value.typ array) rows =
   let cols = Array.length typs in
-  let b = c.body and r = Buffer.create 4096 and n = ref 0 in
+  let b = c.body and r = Buffer.create 4096 and n = ref 0 and all = ref 0 in
   let frame ~more =
     Buffer.clear b;
     Codec.put_varint b v.group;
@@ -398,6 +415,7 @@ let stream_rows c ~id ~kind (v : Store.view) (typs : Value.typ array) rows =
       let before = Buffer.length r in
       for j = 0 to cols - 1 do put_word r v typs.(j) row.(j) done;
       incr n;
+      incr all;
       if Buffer.length r >= chunk then begin
         if Buffer.length r > max_rows then begin
           (* the rows before this one go first; then it alone, if it fits *)
@@ -413,7 +431,8 @@ let stream_rows c ~id ~kind (v : Store.view) (typs : Value.typ array) rows =
         frame ~more:true;
         sent ()
       end);
-  frame ~more:false
+  frame ~more:false;
+  !all
 
 (* rows coded in frames of about a MiB: each frame but the last has the flag more *)
 let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
@@ -443,38 +462,95 @@ let send_rows c ~id ~kind group cols (row : int -> Buffer.t -> unit) nrows =
   in
   go 0
 
+(* ---- a question's time ----
+   A question has the server's question_timeout, or the time its program gives it (a Find's or a Watch's timeout, in
+   ms): a shorter one always; a longer one only for an admin token, so that a token that may read cannot give itself
+   more of the server's cores than the server gives every program. The time runs from the request's start; past it,
+   the question ends at its next check (Query.check) and the program is told timeout. The stop looks at the
+   connection too (gone: the program closed it), so that a question nobody waits for gives its domains back. *)
+let question_seconds c asked_ms =
+  let server = c.srv.question_timeout in
+  if asked_ms <= 0 then server
+  else
+    let asked = float_of_int asked_ms /. 1000. in
+    if server <= 0. || asked <= server then asked
+    else match c.token with Some t when t.admin -> asked | _ -> server
+
+let question_stop c asked_ms = Query.stop ~gone:c.gone (question_seconds c asked_ms)
+
+let timed_out c ~id ~kind seconds = Atomic.incr c.srv.timed_out; err c ~id ~kind "timeout" "%s" (Query.timeout_message seconds)
+let cancelled c = Atomic.incr c.srv.cancelled
+
+let token_name c = match c.token with Some t -> t.name | None -> "none"
+
+(* a request's start: the end of the question just before it among the frames read together, else the clock *)
+let start c = if c.t0 > 0 then c.t0 else Histogram.now_us ()
+
+(* a question answered (or ended), timed from [t0] (Timings): written in the log when it is slow, its shape made only
+   then *)
+let timed_question c d ~t0 ~stop ~rows ~outcome ~what (v : Store.view) q sel extra order =
+  let now = Histogram.now_us () in
+  let us = now - t0 in
+  c.mark <- now;
+  let dom = Domain.self_index () in
+  let r =
+    if c.qdb = d.index && c.qdom = dom then c.qring
+    else begin
+      let r = Timings.question_ring c.srv.timings d.index in
+      c.qring <- r; c.qdb <- d.index; c.qdom <- dom;
+      r
+    end
+  in
+  if Timings.record r ~now us then
+    Timings.say c.srv.timings
+      (Timings.question_line ~db:d.name ~token:(token_name c) ~us ~candidates:(Query.work_of stop) ~rows ~outcome
+         (what ^ " " ^ Timings.shape v q sel extra order))
+
 (* An answer is held whole, its cells charged to a ticket (Answer), then sent: the fold on several domains when it is
    large, as fast as before. A Give without Sort past its cells, or the pool's, is asked again and coded as its rows
    come (Answer.stream, on one domain), none held: it is never refused for its size (nothing was sent of the first
    try, which ends in the fold). The work budget and the memory one end the reply too_large, a damaged page met while
    the rows are coded (a text read from its run) damaged: after the frames sent, if any. *)
-let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order =
+let find c ~id ~kind d (q : Query.t) (sel : Wire.select) extra order ~timeout =
+  let t0 = start c in
   let v = d.view () in
   let budget = Answer.work_budget q extra in
+  let stop = question_stop c timeout in
+  let rows = ref 0 in
   let held () =
     Answer.with_ticket (fun ticket ->
-        let a = Answer.answer ~ticket ~order ~extra ~budget v q sel in
+        let a = Answer.answer ~ticket ~order ~extra ~budget ~stop v q sel in
         let typs = Array.init a.cols a.typ in
+        rows := a.n;
         send_rows c ~id ~kind v.group a.cols (fun i b -> for j = 0 to a.cols - 1 do put_word b v typs.(j) (a.word i j) done) a.n)
   in
-  match
-    match sel with
-    | Wire.Give give when order = Question.Top.none -> (
-      match held () with
-      | () -> ()
-      | exception (Answer.Too_large _ as e) -> (
-        match Answer.stream ~extra ~budget v q give with Some (typs, rows) -> stream_rows c ~id ~kind v typs rows | None -> raise e))
-    | _ -> held ()
-  with
-  | () -> ()
-  | exception Gone -> ()
-  | exception Row_too_large n ->
-    err c ~id ~kind "too_large" "a row of %d bytes is over the frame limit of %d: give fewer of its texts at once" n max_rows
-  | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
-  | exception Query.Over_budget n ->
-    err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
-  | exception Answer.Too_large m -> err c ~id ~kind "too_large" "%s" m
-  | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
+  let outcome =
+    match
+      match sel with
+      | Wire.Give give when order = Question.Top.none -> (
+        match held () with
+        | () -> ()
+        | exception (Answer.Too_large _ as e) -> (
+          match Answer.stream ~extra ~budget ~stop v q give with
+          | Some (typs, rs) -> rows := stream_rows c ~id ~kind v typs rs
+          | None -> raise e))
+      | _ -> held ()
+    with
+    | () -> "ok"
+    | exception Gone -> "cancelled"
+    | exception Query.Cancelled -> cancelled c; "cancelled"
+    | exception Query.Timeout t -> timed_out c ~id ~kind t; "timeout"
+    | exception Row_too_large n ->
+      err c ~id ~kind "too_large" "a row of %d bytes is over the frame limit of %d: give fewer of its texts at once" n max_rows;
+      "too_large"
+    | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m; "invalid"
+    | exception Query.Over_budget n ->
+      err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n;
+      "too_large"
+    | exception Answer.Too_large m -> err c ~id ~kind "too_large" "%s" m; "too_large"
+    | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m; "damaged"
+  in
+  timed_question c d ~t0 ~stop ~rows:(Some !rows) ~outcome ~what:"find" v q sel extra order
 
 (* ---- writes ---- *)
 
@@ -518,6 +594,7 @@ let write_bounds (v : Store.view) ops =
     end
 
 let write c ~id ~kind d ~serial ~floor ~by ~why ops =
+  let t0 = start c in
   if Origin.has_marker why then err c ~id ~kind "invalid" "a why may not start with the server's marker"
   else
     (* the state the write is checked against, read once *)
@@ -526,6 +603,8 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
     | Some (code, m) -> err c ~id ~kind code "%s" m
     | None ->
     let tok = Option.get c.token in
+    (* what its slow line would say of it, taken now: none of its operations is kept until its reply *)
+    let shape = Timings.write_shape ops in
     let not_in_flight () = Mutex.protect c.om (fun () -> c.inflight <- c.inflight - 1; Condition.broadcast c.oc) in
     (* the reply of a write, in the thread that ends it (it may be another connection's: a write sent again while
        the first was in flight): its failure ends this connection, never the thread's; out of flight at its end
@@ -554,6 +633,18 @@ let write c ~id ~kind d ~serial ~floor ~by ~why ops =
                 Wire.put_reply b (Wire.Err { code; message }); Wire.f_error
             in
             Wire.add_frame c.out ~id ~kind ~flags b);
+        (* its time: to its reply coded, its group durable, before it is sent *)
+        let now = Histogram.now_us () in
+        let us = now - t0 in
+        if Timings.write c.srv.timings d.index ~now us then begin
+          let group, outcome =
+            match res with
+            | Ok r -> r.group, "ok"
+            | Error e when Engine.is_not_leader e -> 0, "not_leader"
+            | Error e -> 0, fst (Wire.code_of_error e)
+          in
+          Timings.say c.srv.timings (Timings.write_line ~db:d.name ~token:tok.name ~us ~group ~outcome (Timings.write_text v shape))
+        end;
         c.flush ()
       with
       | () -> ()
@@ -711,7 +802,8 @@ let move_pushes c =
 let max_watches = ref 1024
 let max_server_watches = ref 65_536
 
-let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
+let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order ~timeout =
+  let t0 = start c in
   let tok = Option.get c.token in
   let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
   (* G16 at each message: the token may still read the database (the table is read again only when it changed) *)
@@ -798,14 +890,21 @@ let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order =
         c.kept_cells <- c.kept_cells + cells;
         c.watching <- (id, (h, s, cells)) :: c.watching)
   in
-  match Answer.with_ticket (fun ticket -> Live.subscribe ~extra ~order ~ticket ~budget:(Answer.work_budget q extra) ~admit h q sel ~from ~emit) with
-  | _ -> ()
-  | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m
-  | exception Answer.Too_large m -> err c ~id ~kind "too_large" "%s" m
-  | exception Query.Over_budget n ->
-    err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n
-  | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m
-  | exception Failure m -> err c ~id ~kind "stopping" "%s" m
+  let stop = question_stop c timeout in
+  let outcome =
+    match Answer.with_ticket (fun ticket -> Live.subscribe ~extra ~order ~ticket ~budget:(Answer.work_budget q extra) ~stop ~admit h q sel ~from ~emit) with
+    | _ -> "ok"
+    | exception Query.Cancelled -> cancelled c; "cancelled"
+    | exception Query.Timeout t -> timed_out c ~id ~kind t; "timeout"
+    | exception Query.Bad m -> err c ~id ~kind "invalid" "%s" m; "invalid"
+    | exception Answer.Too_large m -> err c ~id ~kind "too_large" "%s" m; "too_large"
+    | exception Query.Over_budget n ->
+      err c ~id ~kind "too_large" "the question passed the server's budget of %d candidates: ask a narrower one, or several" n;
+      "too_large"
+    | exception Pages.Unreadable m -> err c ~id ~kind "damaged" "%s" m; "damaged"
+    | exception Failure m -> err c ~id ~kind "stopping" "%s" m; "stopping"
+  in
+  timed_question c d ~t0 ~stop ~rows:None ~outcome ~what:"watch" (d.view ()) q sel extra order
 
 let unwatch c ~id ~kind w =
   let found = Mutex.protect c.pm (fun () ->
@@ -828,15 +927,23 @@ let status c =
   [ "server", srv.server_id; "cluster", srv.cluster_id; "uptime_ms", string_of_int (srv.now () - srv.started);
     "connections", string_of_int conns; "requests", string_of_int (reqs + Atomic.get srv.served);
     "gc_minor", string_of_int (Gc.quick_stat ()).minor_collections; "gc_major", string_of_int (Gc.quick_stat ()).major_collections;
-    "stopping", string_of_bool (Atomic.get srv.stopping) ]
+    "stopping", string_of_bool (Atomic.get srv.stopping);
+    "questions.timed_out", string_of_int (Atomic.get srv.timed_out); "questions.cancelled", string_of_int (Atomic.get srv.cancelled);
+    "questions.helpers", string_of_int (Pool.alive ()); "domains", string_of_int (Atomic.get Pool.live); "domains.cap", string_of_int Pool.cap ]
   @ srv.more ()
-  @ List.concat_map
-      (fun d ->
-        let v = d.view () in
-        [ "database." ^ d.name ^ ".group", string_of_int v.group; "database." ^ d.name ^ ".facts", string_of_int (Store.facts v);
-          "database." ^ d.name ^ ".resent", string_of_int d.sessions.resent ]
-        @ List.map (fun (k, x) -> "database." ^ d.name ^ "." ^ k, x) (d.more ()))
-      (Array.to_list srv.dbs)
+  @ Timings.server_lines srv.timings
+  @ [ "cache.capacity_bytes", string_of_int (Pages.room_pages () * Pages.size); "cache.resident_bytes", string_of_int (Pages.resident_pages () * Pages.size);
+      "cache.hits", string_of_int (Atomic.get Pages.hits); "cache.misses", string_of_int (Atomic.get Pages.misses) ]
+  @
+  let now = Histogram.now_us () in
+  List.concat_map
+    (fun d ->
+      let v = d.view () in
+      [ "database." ^ d.name ^ ".group", string_of_int v.group; "database." ^ d.name ^ ".facts", string_of_int (Store.facts v);
+        "database." ^ d.name ^ ".resent", string_of_int d.sessions.resent ]
+      @ List.map (fun (k, x) -> "database." ^ d.name ^ "." ^ k, x) (d.more ())
+      @ Timings.lines srv.timings d.index ~now)
+    (Array.to_list srv.dbs)
 
 type action =
   | Continue
@@ -928,7 +1035,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
         | _, Wire.Find f ->
           (match readable c ~id ~kind f.db with
            | None -> ()
-           | Some d -> if kinds_read c ~id ~kind d f.query f.extra then find c ~id ~kind d f.query f.select f.extra f.order);
+           | Some d -> if kinds_read c ~id ~kind d f.query f.extra then find c ~id ~kind d f.query f.select f.extra f.order ~timeout:f.timeout);
           Continue
         | _, Wire.Write w ->
           (match writable c ~id ~kind w.db with
@@ -938,7 +1045,7 @@ let handle c ~id ~kind ~flags (r : Codec.reader) =
         | _, Wire.Watch w ->
           (match readable c ~id ~kind w.db with
            | None -> ()
-           | Some d -> if kinds_read c ~id ~kind d w.query w.wextra then watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra ~order:w.worder);
+           | Some d -> if kinds_read c ~id ~kind d w.query w.wextra then watch c ~id ~kind d w.query w.select ~from:w.from ~extra:w.wextra ~order:w.worder ~timeout:w.wtimeout);
           Continue
         | _, Wire.Unwatch w -> unwatch c ~id ~kind w; Continue
         | _, (Wire.Put p as req) ->
@@ -1017,7 +1124,10 @@ let max_out = 1 lsl 20
    closes the connection before its body is read. A request that raises what it does not expect is answered internal and closes the connection
    ([fail]): the frames of its reply sent before (a Find's first rows) end with that error, which the client takes
    as the reply's end. A connection that another of its threads failed ([broke]) reads no more requests. *)
-let input c buf off stop =
+let input c ~arrived buf off stop =
+  (* the first frame's start: when its bytes were read (the monotonic clock's microseconds, Net's read for its idle
+     limit); 0: it reads the clock *)
+  c.mark <- arrived;
   let rec go o =
     if Atomic.get c.failed then o, Shut
     else if c.inflight >= c.srv.max_inflight then o, Full
@@ -1036,9 +1146,12 @@ let input c buf off stop =
       else if stop - o < 4 + len then o, Need
       else
         let id = Wire.u32 buf (o + 4) and kind = Bytes.get_uint8 buf (o + 8) and flags = Bytes.get_uint8 buf (o + 9) in
+        c.t0 <- c.mark;
+        c.mark <- 0;
         match handle c ~id ~kind ~flags (Codec.reader buf (o + Wire.header) (len - 6)) with
-        | exception e -> fail c ~id ~kind e; o + 4 + len, Shut
+        | exception e -> c.t0 <- 0; fail c ~id ~kind e; o + 4 + len, Shut
         | r -> (
+          c.t0 <- 0;
           (* a reply's scratch that grew past a chunk gives its memory back (a connection keeps 4 KiB of it) *)
           if Buffer.length c.body > chunk then Buffer.reset c.body;
           if Buffer.length c.scratch > chunk then Buffer.reset c.scratch;
@@ -1048,6 +1161,9 @@ let input c buf off stop =
           | Follows (d, id) -> o + 4 + len, Follow (d, id))
   in
   go off
+
+(* when the last frame of an input was answered: its question's end, read when it was timed (no clock read), else now *)
+let answered_at c = if c.mark > 0 then c.mark else Histogram.now_us ()
 
 (* the reading side waits here while the connection has its limit of writes in flight: it stops reading, the kernel's
    buffers fill, and the program's writes wait (back-pressure, design 3.5) *)

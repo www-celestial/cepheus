@@ -155,7 +155,8 @@ let fetch (cfg : Config.t) ~source ~id_of ~published ~decide ~send ~next =
     in
     if x < 1 then refuse "a copy at index %d" x;
     if n <> List.length cfg.databases then refuse "a copy of %d databases, where this server has %d" n (List.length cfg.databases);
-    let free = try Fdpass.free_bytes raft with Unix.Unix_error _ -> max_int in
+    (* the bytes free for this server's user on the file system of its Raft folder (statvfs, server/space.ml) *)
+    let free = try fst (Space.statvfs raft) with Unix.Unix_error _ -> max_int in
     if total > free - margin then
       refuse "a copy of %.1f MB, where %s has %.1f MB free (and keeps %d MB): not taken" (float_of_int total /. 1e6) raft (float_of_int free /. 1e6) (margin lsr 20);
     let seen = Hashtbl.create 8 in

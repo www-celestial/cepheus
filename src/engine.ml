@@ -17,6 +17,7 @@ type error =
   | Io of string
   | Busy of string
   | Closed
+  | Timeout of string
 
 (* A Raft cluster's server stopped leading before a write's frame was committed: the write was applied once or not
    at all (Busy with this very string, which the server tells apart by its address, so that the public type does not
@@ -33,6 +34,7 @@ let message = function
   | Io m -> "input/output error: " ^ m
   | Busy m -> "busy: " ^ m
   | Closed -> "the database is closed"
+  | Timeout m -> "timeout: " ^ m
 
 let of_resolve = function
   | Resolve.Conflict m -> Conflict m
@@ -57,6 +59,9 @@ type t = {
   mutable provisional : (Store.run * string) list;
       (* the provisional runs of the working view (changes of the rules' derived facts, level 0) and their files, under
          [pm]: removed once a merge that took them is installed, at a Raft take-back that drops them, at close *)
+  merged_runs : int Atomic.t;  (* merges installed since the open (cepheus status) *)
+  merged_us : int Atomic.t;  (* their time together, in microseconds: a background one's from its start to its catch-up *)
+  merged_bytes : int Atomic.t;  (* the bytes of the runs they wrote *)
 }
 
 type batch = {
@@ -190,13 +195,13 @@ let too_large size = Invalid (Printf.sprintf "a group of %d bytes is over the fr
 (* [a ()] beside [b ()]: on two domains where the disk takes calls from several at once, else one after the other (on
    the simulated disk, whose order of calls a seed replays); the first exception of either, once both have returned *)
 let beside (disk : Disk.t) a b =
-  if disk.parallel then begin
-    let d = Domain.spawn a in
+  (* a domain past the process's budget (Pool): one after the other *)
+  match if disk.parallel then Pool.try_spawn a else None with
+  | Some d ->
     let y = match b () with y -> Ok y | exception e -> Error e in
     let x = match Domain.join d with x -> Ok x | exception e -> Error e in
-    match x, y with Error e, _ | _, Error e -> raise e | Ok x, Ok y -> x, y
-  end
-  else
+    (match x, y with Error e, _ | _, Error e -> raise e | Ok x, Ok y -> x, y)
+  | None ->
     let x = a () in
     x, b ()
 
@@ -495,9 +500,18 @@ let install t (w : Snapshot.written) (v : Store.view) =
   sweep t
 
 (* A merge now of every run and the delta, with nothing in flight (working = published). *)
+(* a merge installed, for cepheus status: its time, its run's bytes *)
+let count_merge t (w : Snapshot.written) us =
+  Atomic.incr t.merged_runs;
+  ignore (Atomic.fetch_and_add t.merged_us us);
+  ignore (Atomic.fetch_and_add t.merged_bytes w.bytes)
+
 let compact t =
+  let t0 = Histogram.now_us () in
   let w = merge_begin ~all:true t t.working (Atomic.get t.at) in
-  match install t w w.view with () -> () | exception (Disk.Io _ as e) -> Snapshot.abandon t.disk w; raise e
+  match install t w w.view with
+  | () -> count_merge t w (Histogram.now_us () - t0)
+  | exception (Disk.Io _ as e) -> Snapshot.abandon t.disk w; raise e
 
 let snapshot t =
   match t.stopped with
@@ -633,6 +647,7 @@ let open_ ?(id_source = random_id) ?buffer ?raft ?bootstrap_time ?(bootstrap = t
         let t =
           { disk; dir; id; journal; working = !v; published = Atomic.make !v; stopped = None; notes;
             at = Atomic.make (Journal.position journal); merged = !merged; closed = Atomic.make false; pm = Mutex.create ();
+            merged_runs = Atomic.make 0; merged_us = Atomic.make 0; merged_bytes = Atomic.make 0;
             provisional = [] }
         in
         if !v.group = 0 && bootstrap then begin
@@ -704,7 +719,8 @@ type merger = {
   mutable log : Group.t list;  (* groups prepared since the merge started, newest first *)
   mutable logn : int;
   ready : ready option Atomic.t;  (* the file and the new lineage, and how many logged groups it holds *)
-  mutable dom : unit Domain.t option;
+  mutable dom : (unit -> unit) option;  (* its join (Writers.background: a domain, or a thread of the writer's) *)
+  mutable took : int;  (* microseconds from its start to its catch-up, once ready *)
 }
 
 let merges = Atomic.make 0 (* finished background merges, for the tests and benchmarks *)
@@ -722,10 +738,10 @@ let after_applied m applied =
 
 let start_merge ?(wake = ignore) ?tier t (from : Store.view) =
   let pos = Atomic.get t.at in
-  let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None } in
+  let m = { lm = Mutex.create (); log = []; logn = 0; ready = Atomic.make None; dom = None; took = 0 } in
   m.dom <-
     Some
-      (Domain.spawn (fun () ->
+      (Writers.background (fun () ->
            try
              let t0 = Journal.clock () in
              let w = merge_begin ~busy:(journal_busy ()) ?tier t from pos in
@@ -737,6 +753,7 @@ let start_merge ?(wake = ignore) ?tier t (from : Store.view) =
                applied := !applied + k;
                if k < catch_up then begin
                  Histogram.record merge_us (Journal.clock () - t0);
+                 m.took <- Journal.clock () - t0;
                  Atomic.set m.ready (Some (Done (w, !v, !applied)));
                  go := false
                end
@@ -837,7 +854,7 @@ type change = {
                                                    oldest first, and the writer's view after them *)
   mutable backlog : int;  (* the groups in [clog] *)
   out : outcome option Atomic.t;
-  mutable cdom : unit Domain.t option;
+  mutable cdom : (unit -> unit) option;  (* its join (Writers.background) *)
   born : int;  (* the writer's lineage when it started (Raft) *)
 }
 
@@ -1088,7 +1105,7 @@ type live = {
   c_sync : Condition.t;
   mutable to_sync : (batch * req array) option;
   mutable syncing : bool;
-  mutable domain : unit Domain.t option;
+  mutable joins : (unit -> unit) option;  (* its writer's and syncer's, threads of a writers' domain (Writers.run) *)
   mutable closed : bool;
   mutable merging : merger option;
   mutable retry : int;  (* after a failed merge, the next waits until the delta has this many changes *)
@@ -1183,7 +1200,7 @@ let finish_merge l =
   | None -> ()
   | Some m ->
     let t0 = Journal.clock () in
-    Option.iter Domain.join m.dom;
+    Option.iter (fun join -> join ()) m.dom;
     l.merging <- None;
     wait_idle l;
     let failed () = l.retry <- l.e.working.delta.dn + !compact_min in
@@ -1198,7 +1215,7 @@ let finish_merge l =
          !on_merge l.e.working v;
          install l.e w v
        with
-       | () -> l.retry <- 0; Atomic.incr merges
+       | () -> l.retry <- 0; Atomic.incr merges; count_merge l.e w m.took
        | exception Disk.Io msg ->
          prerr_endline ("cepheus: a merge could not be installed: " ^ msg);
          Snapshot.abandon l.e.disk w;
@@ -1401,7 +1418,7 @@ let rec poll_change l =
        | _ when ch.born <> l.lineage -> deliver ch.creq (Error not_leader)
        | Built b -> install_change l ch b
        | Ended e -> deliver ch.creq (Error e));
-      Option.iter Domain.join ch.cdom;
+      Option.iter (fun join -> join ()) ch.cdom;
       poll_change l)
   | None -> (
     match l.waiting with
@@ -1424,9 +1441,10 @@ let rec poll_change l =
           { creq = r; cops = r.w; stop = Atomic.make false; cm = Mutex.create (); clog = Queue.create (); backlog = 0; out = Atomic.make None;
             cdom = None; born = l.lineage }
         in
-        (* a domain the runtime cannot give (its limit) answers the change, never stops the writer *)
-        match Domain.spawn (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) l.e ch w) with
-        | d -> ch.cdom <- Some d; l.change <- Some ch
+        (* in a domain of its own, or past the process's budget a thread of the writer's (Writers.background); a thread
+           the system cannot give answers the change, never stops the writer *)
+        match Writers.background (fun () -> change_run ~wake:(fun () -> ignore (submit l Wake)) l.e ch w) with
+        | join -> ch.cdom <- Some join; l.change <- Some ch
         | exception e -> deliver r (Error (Busy ("a change of the rules could not start: " ^ Printexc.to_string e))); poll_change l
       end
     | _ -> ())
@@ -1434,7 +1452,7 @@ let rec poll_change l =
 (* waits for the change in the background and installs it (before a large group or a snapshot) *)
 let finish_change l =
   match l.change with
-  | Some ch -> Option.iter Domain.join ch.cdom; ch.cdom <- None; poll_change l
+  | Some ch -> Option.iter (fun join -> join ()) ch.cdom; ch.cdom <- None; poll_change l
   | None -> ()
 
 let writer l () =
@@ -1532,7 +1550,7 @@ let writer l () =
         (match l.change with
          | Some ch ->
            Atomic.set ch.stop true;
-           Option.iter Domain.join ch.cdom;
+           Option.iter (fun join -> join ()) ch.cdom;
            l.change <- None;
            (match Atomic.get ch.out with Some (Built b) -> drop_run l.e b | _ -> ());
            deliver ch.creq (Error Closed)
@@ -1554,14 +1572,11 @@ let writer l () =
 let start ?(follow = no_follow) ?(replica = false) ?(raft = false) e =
   let l =
     { e; m = Mutex.create (); c_req = Condition.create (); queue = []; sm = Mutex.create (); c_sync = Condition.create ();
-      to_sync = None; syncing = false; domain = None; closed = false; merging = None; retry = 0; follow; replica; raft;
+      to_sync = None; syncing = false; joins = None; closed = false; merging = None; retry = 0; follow; replica; raft;
       propose = (fun _ _ _ -> Error (Busy "no Raft yet")); rollback = false; change = None; waiting = []; lineage = 0; quiet = -1 }
   in
-  (* the writer and the syncer in a domain of their own: they never wait for the runtime lock of the clients *)
-  l.domain <- Some (Domain.spawn (fun () ->
-      let a = Thread.create (writer l) () and b = Thread.create (syncer l) () in
-      Thread.join a;
-      Thread.join b));
+  (* the writer and the syncer in a writers' domain (Writers.run): they never wait for the runtime lock of the clients *)
+  l.joins <- Some (Writers.run [ writer l; syncer l ]);
   l
 
 let call l make =
@@ -1593,5 +1608,5 @@ let promote l =
 let snapshot_live l = call l (fun r -> Snapshot r)
 
 let stop l =
-  if submit l Stop then Option.iter Domain.join l.domain;
+  if submit l Stop then Option.iter (fun join -> join ()) l.joins;
   close l.e

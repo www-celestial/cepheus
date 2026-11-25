@@ -22,7 +22,8 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - **Questions** of patterns joined by Generic Join, a worst-case optimal join (its time is bounded by the largest
   answer the data could give, the AGM bound, not by the sizes of the steps between); `Not`, `Or`, `In`, `Prefix` and
   ranges; `Sum`, `Count`, `Min` and `Max`; pages with `Sort`, `Limit` and `After`
-  ([questions](docs/book/concepts.md#questions)).
+  ([questions](docs/book/concepts.md#questions)). `find`, `ask` and `fold` take a `?timeout`, past which they give
+  `Error (Timeout _)`, a constructor added to `Cepheus.error` before the first release.
 - A **fork** is a database in the program's memory that starts as a view: written to with every check, never to the
   disk, made without a copy; the base of an application's tests and of what-if questions
   ([forks](docs/book/concepts.md#forks)).
@@ -69,7 +70,7 @@ stay as they are, or a later version reads and speaks both the old and the new.
   answer once its group is durable, and with `Sort` and `Limit` keep the first rows of an order as they change (the
   ten latest payments: ten rows held, a row that leaves them replaced by one page read after the last), the rule
   model-checked ([Sort and Limit in a watch](docs/book/cesia.md#sort-and-limit-in-a-watch)). The wire protocol is at
-  version 5 (a Watch's Sort and Limit); a program speaks 1 to 5 with a server of any of them.
+  version 6 (a question's time); a program speaks 1 to 6 with a server of any of them.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects
   a new leader by itself.
@@ -89,12 +90,16 @@ stay as they are, or a later version reads and speaks both the old and the new.
   restore drill and what to watch ([production](docs/book/production.md)).
 - **Operations as commands.** `cepheus verify DIR` checks a database's files and changes nothing: every frame of the
   journal, every page of the runs, the runs against the journal, the vault's records, each damage named (exit status
-  1), a live database up to the frame being written. `cepheus backup --config FILE DEST` copies every database of a
-  running server, a replica's too, with no stop and no token, into `DEST/DATE`, named only once every copy is checked,
-  cut after its last whole frame and forced. `cepheus restore SRC DIR` restores one, opened and checked before it
-  takes its name; `--to-group N` or `--to-time T` stops before a bad write, as PostgreSQL's point-in-time recovery,
+  1), a live database up to the frame being written (a frame that does not check while every byte of it is there is
+  read again for a second, then damage: never cut in silence). `cepheus backup --config FILE DEST` copies every
+  database of a running server, a replica's too, with no stop and no token, into `DEST/DATE`, named only once every
+  copy is checked, cut after its last whole frame and forced; DEST is the user's own (one that others may write is
+  refused), and a backup removes there only the `DATE.partial` folders a backup left, never through a link.
+  `cepheus restore SRC DIR` restores one, opened and checked before it takes its name; `--to-group N` or `--to-time T`
+  (exactly its digits and a day of the calendar) stops before a bad write, as PostgreSQL's point-in-time recovery,
   and the restored database writes in a new epoch, so that a replica holding the old history's later groups is
-  refused rather than followed; `--replace` moves the database there aside, never removes it
+  refused rather than followed; `--replace` moves the database there aside under a name no folder has, never removes it, even one that crashed
+  through a server's commit buffer (refused only while that buffer holds frames of it)
   ([backups](docs/book/production.md#backups), [verification](docs/book/operations.md#verification-scrubbing)). The
   backup script the production guide gave before still works, and its copies restore with `cepheus restore`.
 - An answer the server holds while it builds it (a Find with Sort or aggregates, a watch's first answer) is bounded
@@ -128,6 +133,55 @@ stay as they are, or a later version reads and speaks both the old and the new.
 - An error of the server's own files reaches a program as its code and a fixed message, its paths in the log only.
 - A connection whose replies not yet sent pass 1 MiB has no more of its requests decoded until they are sent, so that
   many small requests for large replies, never read, no longer pile their replies up in the server's memory.
+- **Import and export.** `cepheus import DB FILE --kind KIND` loads the things of a kind from CSV (RFC 4180, a header
+  row; PostgreSQL's rule for an empty field and "") or JSON lines, through the server with a token that writes:
+  each column a field (`--map` when the names differ), each value checked against its type (money read exactly from
+  its digits, dates as RFC 3339, texts UTF-8 without NUL), links found by the key of the thing linked (`--link`),
+  unique values checked against the database and the file. The file is checked whole first: a bad row stops the
+  import with its line and nothing is written (`--skip-bad` writes the good rows and lists the bad ones;
+  `--upsert` changes the thing a unique value finds); then it is written in large groups of up to a million
+  operations, parsed by several domains while the server writes; a failure there, the connection lost included,
+  names the groups written. A quote opens a quoted field only at a field's start, so that a stray one makes its line
+  alone bad (PostgreSQL's COPY reads it as opening a quoted part, and loads the lines up to the next one as one row);
+  blank lines are read through, never held; a record's fields are made up to the header's count, its JSON holds at
+  most 100,000 values. `cepheus export DB --kind KIND [--format csv]` writes
+  every thing of the kind at one group, named on stderr, its asserted facts and its links as their keys, read from one
+  view on the server's machine. At 10 M facts (120,482 clients, 2.4 M invoices linked by e-mail), medians of seven rounds: 28.5 s, beside PostgreSQL's COPY and join 43.7 s and SQLite's .import 9.71 s; a file of 10 GiB checked whole in 244 MB ([import and export](docs/book/operations.md#import-and-export)).
+- A question has a **time**: `[clients] question_timeout` in `cluster.toml` (seconds, 30 by default, 0 for none), and a
+  program's shorter `timeout` (from Cesia `Find(..., timeout = 2)` and `Watch`; from OCaml `?timeout` on `Client.find`
+  and `watch`, protocol 6), a longer one only from an admin token; past it the question ends with the code `timeout`,
+  its message naming the time. It is looked at every 1,024 candidates of each domain (a read of the monotonic clock:
+  under 1 % of a question, measured), as SQLite's progress handler and PostgreSQL's `statement_timeout`. Before it a
+  question's only bound was a budget of 1,000,000,000 lookups. A question that took more than 30 s now ends `timeout`: give
+  `question_timeout = 0`, or the program's own time from an admin token, to keep it. Writes have no time.
+- A question whose program closed its connection **stops**, its domains given back at once (the socket looked at with
+  `POLLRDHUP` at most every 10 ms, as PostgreSQL's `client_connection_check_interval`); before, it ran to its end.
+- **What is slow shows.** `[log] slow_ms` in `cluster.toml` (200 ms by default, 0 for none): a question or a write
+  that takes that long or more at the server gets a line in its log, with its database, its token's name, its time,
+  its outcome, a question's candidates, rows and shape, a write's operations, properties and group, each constant
+  written `?`: no value of the data and no token (a test searches the log for each of its values), 10 lines a second
+  at most ([slow questions and writes](docs/book/production.md#slow-questions-and-writes)). The log of a server that
+  had none of these lines gets them from 200 ms on: give `slow_ms = 0` to keep it as it was. `cepheus status` keeps
+  each of its lines and their order, and adds among them each database's questions and writes (counts since the
+  start, p50, p99 and maximum over the last minute, a write's to its group durable, within 3.1 %), merges (count,
+  time, bytes), journal and runs bytes, the page cache's room, hits and misses, and the disk's free bytes;
+  `cepheus status --format prometheus` prints them in Prometheus's text format, for node_exporter's textfile
+  collector, rather than a port of the server. Timing every question and write: a point question answered before the
+  next is asked costs the server 215 instructions more (+0.85 %), the clock read as often as before (the idle limit's
+  read is its start, its end the idle limit's last request, now on the monotonic clock); with 32 in flight, +4.1 % of
+  the server's cycles (a clock read at each question's end); a write's fsync hides it
+  ([what timing costs](docs/book/production.md#what-timing-costs)). `Cepheus.Histogram.create` takes `?bits`.
+- **Domains**: the databases' writers and syncers share the writers' domains (as many as the cores), not a domain each,
+  so a server of 200 databases holds 21 domains, where before about 120 databases took every domain OCaml allows (128
+  a process) and the next failed; large questions take their helping domains from one pool of the process (the cores
+  less one, parked between questions and gone after a second idle), where each spawned up to 7 domains of its own: 30
+  large questions at once all answer (before, about 18 took every domain, and the next failed `internal`), and one
+  takes 20 % less time at the server (10.5 ms against 13.4 ms, Q4 at 2 M facts), its domains no longer spawned. A merge,
+  a change of the rules or a part of a snapshot's reads past the process's domains runs on a thread, or on fewer
+  domains. The server's status says `domains`, `domains.cap`, `questions.helpers`, `questions.timed_out` and
+  `questions.cancelled`.
+- A Unix socket's path longer than Linux's 107 bytes is refused by the server at its start and by a program's
+  connection, each naming the path and its length; before, the server's log said only `PATH: File name too long`.
 
 ### From Cesia
 
@@ -186,7 +240,8 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   that the next one follows (the frame after the run's groups began a new segment): a whole database was taken for a
   damaged one. Such a position is now the start of the next segment's first frame, as the engine reads it.
 - `cepheus restore --replace` twice over one folder within a second failed (`ENOTEMPTY`): the folder moved aside took
-  the name of the one moved aside before. It now takes a free one (`-2`, `-3`, ...).
+  the name of the one moved aside before. It now takes a name no entry has (`-2`, `-3`, ...), never renamed over
+  another folder.
 - A newest journal segment whose header does not check while it holds bytes past it, or where the newest run
   resumes, is refused at open as damage (G6). Recovery took it for a segment torn at its creation and removed it, so
   one flipped bit in its 40 bytes opened the database without that segment's groups, with no error.

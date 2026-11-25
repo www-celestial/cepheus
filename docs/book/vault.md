@@ -210,15 +210,16 @@ destroyed): not built yet.
 
 ### Copies: what a replica lacks, by Merkle trees
 
-A replica needs the records it lacks, and only those. The vault's names are uniform 256-bit values: the first 16
-bits put each in one of 65,536 leaves of a **Merkle tree** (Merkle, "A Digital Signature Based on a Conventional
-Encryption Function", CRYPTO 1987), a leaf's digest the BLAKE2b-256 of its names sorted, a node's the BLAKE2b-256 of
-its 16 children's (four levels under the root). Two copies compare their trees from the root down, only where the
-digests differ, as the anti-entropy of Dynamo (DeCandia et al., SOSP 2007): for d records one copy lacks among n,
-at most 64 digests a difference and the names of at most d leaves cross, rather than n names. Records are copied as
-they are (sealed: the copy checks them by their CRCs, and needs no key to store them); the domains' keys go sealed by
-the master key, which the copies of one cluster share, and an erasure goes with them. Built and tested between two
-vaults of one process; the protocol between servers comes with replication (the server's design, section 8).
+A replica needs the records it lacks, and only those. The vault's names are uniform 256-bit values: the first 16 bits
+put each in one of 65,536 leaves of a **Merkle tree** (Merkle, "A Digital Signature Based on a Conventional Encryption
+Function", CRYPTO 1987), a leaf's digest the BLAKE2b-256 of its names sorted, a node's the BLAKE2b-256 of its 16
+children's (four levels under the root). Two copies compare their trees from the root down, only where the digests
+differ, as the anti-entropy of Dynamo (DeCandia et al., SOSP 2007): for d records one copy lacks among n, at most 64
+digests a difference and the names of at most d leaves cross, rather than n names. Records are copied as they are
+(sealed: the copy checks them by their CRCs, and needs no key to store them); the domains' keys go sealed by the master
+key, which the copies of one cluster share, and an erasure goes with them. Built and tested between two vaults of one
+process; the protocol between servers is not built: a replica does not copy the vault's files yet ([the
+server](server.md#a-replica)).
 
 ## Formats
 
@@ -381,7 +382,7 @@ even (ratios 0.96 to 1.05, every interval holding 1). Cesia programs do not link
 - **Cleaning**: chunks no fact cites (a put interrupted, the files of an erased owner) stay in the packs until a
   cleaning marks what the facts and the history cite and writes the packs again (as `restic prune`).
 - **Replication between servers**: the comparison and the copy are built; the protocol, its TLA+ model (every chunk
-  cited present on the replica), and the repair of a damaged chunk from a replica come with the replica of the
-  server's step 6.
+  cited present on the replica), and the repair of a damaged chunk from a replica are not: a
+  replica ([the server](server.md#a-replica)) does not copy the vault's files yet.
 - **A new master key** (every domain's key sealed again), and the journal's erasure of personal facts.
 - **An index of the names on disk** rather than in memory, for vaults of many terabytes.

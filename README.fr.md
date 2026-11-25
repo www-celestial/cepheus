@@ -14,6 +14,11 @@ propriétés d'un domaine, et leurs axiomes), est une bibliothèque de telles r�
 package `owl`), égalité (owl:sameAs) comprise, tenue par des classes de choses égales dont les faits vivent sur un seul
 représentant ([OWL 2 RL](docs/fr/book/rules.md#owl-2-rl-une-bibliothèque-de-règles)).
 
+**Documentation : https://www-celestial.github.io/cepheus/fr/** (en anglais : https://www-celestial.github.io/cepheus/)
+
+La famille : [Cesia](https://www-celestial.github.io/cesia-lang/) (le langage) · [Cemacs](https://www-celestial.github.io/cemacs/) (l'éditeur) ·
+[Cepheus](https://www-celestial.github.io/cepheus/) (la base de données) · [Ceti](https://www-celestial.github.io/ceti/) (le pilote de navigateur).
+
 ```ocaml
 open Cepheus
 
@@ -73,7 +78,7 @@ protocol octet par octet : [le serveur](docs/fr/book/server.md).
 
 ## Depuis Cesia
 
-Un programme [Cesia](https://github.com/www-celestial/cesia) atteint une base à travers le serveur, avec le package
+Un programme [Cesia](https://github.com/www-celestial/cesia-lang) atteint une base à travers le serveur, avec le package
 `cesia/cepheus` de ce dépôt : une seule fonction pour se connecter, et sur la machine du serveur ses lectures sont
 servies depuis sa propre mémoire, aussi linearizable que celles du serveur
 ([Cepheus depuis Cesia](docs/fr/book/cesia.md)) :

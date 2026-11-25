@@ -305,8 +305,8 @@ the usual one, both are given.
   every list (Veldhuizen 2014). A question's level intersects its slices so instead of looking each candidate up.
   [theory](theory.md)
 - **lease** — a permission that ends by itself after a time, unless renewed (Gray and Cheriton 1989). The design
-  proposed one for local reads; it was left for the visibility number, which needs no clock (leases come back between
-  machines). [server](server.md#the-rules-the-design-first-had-and-why-they-were-left)
+  proposed one for local reads; it was left for the visibility number, which needs no clock (between machines, a Raft
+  leader serves its reads under a lease). [server](server.md#the-rules-the-design-first-had-and-why-they-were-left)
 - **least model** — the smallest set of facts containing the asserted ones and closed under the rules: what a
   database with rules holds (G17). [rules](rules.md#what-the-database-holds-the-least-model)
 - **level**, **size ratio** — a place for runs with a capacity in an LSM-tree; each level is $T$ times larger than the
@@ -391,6 +391,8 @@ the usual one, both are given.
 - **property** — the attribute of a fact; itself a thing (16 to 65,535) with a name, a type and two flags.
 - **provenance** — where a fact comes from: here, a proof of it. [rules](rules.md#why)
 - **question** — Cepheus' query: patterns over variables. [concepts](concepts.md#questions)
+- **question timeout** — the time a question may take before it ends with the code `timeout`: the server's
+  `question_timeout` (30 s by default), or a program's shorter `timeout`. [server](server.md#clustertoml)
 - **radix sort** (least significant digit first) — a sort that sorts by the lowest digit, then the next, each pass a
   stable counting sort, so that the order of the lower digits is kept: $O(n \times \text{digits})$. A large group's values inside a
   property are sorted with 11-bit digits (Knuth, vol. 3, 5.2.5), each pass from one buffer to the other, and so are

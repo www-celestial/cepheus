@@ -10,10 +10,10 @@ external recv_ : Unix.file_descr -> Bytes.t -> int -> int -> int * Unix.file_des
 external map_ro_ : Unix.file_descr -> int -> page = "cepheus_fd_map_ro"
 
 (* the monotonic clock, in milliseconds (Raft's timeouts and leases: a change of the wall clock does not move it) *)
-external monotonic_ms : unit -> int = "cepheus_monotonic_ms" [@@noalloc]
+let monotonic_ms = Cepheus.Query.now_ms
 
-(* the bytes this process may still write on the file system that holds [path] (statvfs: Unix.Unix_error) *)
-external free_bytes : string -> int = "cepheus_free_bytes"
+(* the peer of a socket closed it, or the connection broke (poll, POLLRDHUP): never waits *)
+external peer_closed : Unix.file_descr -> bool = "cepheus_peer_closed" [@@noalloc]
 
 let max_fds = 64
 

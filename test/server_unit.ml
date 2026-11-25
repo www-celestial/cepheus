@@ -49,7 +49,7 @@ let config () =
      check (c.cache = 64 lsl 20 && c.port = 7400 && c.databases = [ "shop" ]) "config: values";
      check (Config.socket_path c = Some "/etc/cepheus/run/.s.cepheus.7400") "config: the socket's name";
      check (Config.tokens_path c = "/etc/cepheus/tokens.toml") "config: tokens beside";
-     check (c.max_connections = 512 && c.idle_timeout = 600) "config: the limits' defaults"
+     check (c.max_connections = 512 && c.idle_timeout = 600 && c.question_timeout = 30) "config: the limits' defaults"
    | exception Config.Bad m -> check false "config: %s" m);
   let refused edit what =
     let src = edit base in
@@ -77,6 +77,17 @@ let config () =
   refused (repl "socket = \"run\"" "socket = \"run\"\nmax_connections = 0") "max_connections 0";
   refused (repl "socket = \"run\"" "socket = \"run\"\nmax_connections = \"many\"") "max_connections as a string";
   refused (repl "socket = \"run\"" "socket = \"run\"\nidle_timeout = -1") "a negative idle_timeout";
+  (match Config.of_toml "/x/cluster.toml" (Toml.parse (repl "socket = \"run\"" "socket = \"run\"\nquestion_timeout = 0" base)) with
+   | c -> check (c.question_timeout = 0) "config: question_timeout 0 (no limit)"
+   | exception Config.Bad m -> check false "config: question_timeout 0: %s" m);
+  refused (repl "socket = \"run\"" "socket = \"run\"\nquestion_timeout = -1") "a negative question_timeout";
+  refused (repl "socket = \"run\"" "socket = \"run\"\nquestion_timeout = \"30s\"") "question_timeout as a string";
+  (* a Unix socket's path: 107 bytes at most (Linux's sun_path), else a message that names it, at start and at connect *)
+  let long = "/" ^ String.make 107 'x' in
+  let contains s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
+  check (Config.long_socket (String.sub long 0 107) = None && (match Config.long_socket long with Some m -> contains m "108 bytes" && contains m "107" | None -> false))
+    "config: a socket path of 108 bytes is named, with its length";
+  check (match Client.connect (Client.Unix_socket long) "cph_x" with Error m -> contains m "107" | Ok _ -> false) "client: a socket path of 108 bytes refused, named";
   refused (repl "socket = \"run\"" "socket = \"run\"\nidle_timeout = 604801") "an idle_timeout over a week";
   refused (repl "name = \"shop\"\n" "name = \"Shop!\"\n" |> fun f s -> let s = f s in repl "[[database]]\nname = \"shop\"" "[[database]]\nname = \"Shop!\"" s) "a bad database name"
 
@@ -124,7 +135,7 @@ let rand_request r =
       if Rng.bool r then Top.none
       else { Top.keys = List.init (Rng.int r 3) (fun _ -> { Top.col = Rng.int r 3; desc = Rng.bool r }); limit = Rng.int r 5;
              after = (if Rng.bool r then None else Some (Array.init (Rng.int r 3) (fun _ -> rand_value r))) } in
-    Wire.Find { db = 0; query = q; select; extra = []; order }
+    Wire.Find { db = 0; query = q; select; extra = []; order; timeout = 0 }
   | 4 ->
     let op () = match Rng.int r 6 with
       | 0 -> Resolve.Add (Rng.int r 100 - 50, Rng.int r 40, rand_value r)
@@ -140,7 +151,7 @@ let rand_request r =
     (* a Watch, with Sort and Limit or without (version 5) *)
     let q = { Query.vars = 1 + Rng.int r 3; where = List.init (Rng.int r 4) (fun _ -> { Query.e = rand_term r; p = Rng.int r 40; v = rand_term r }); ranges = [] } in
     let worder = if Rng.bool r then Top.none else { Top.keys = List.init (1 + Rng.int r 3) (fun _ -> { Top.col = Rng.int r 3; desc = Rng.bool r }); limit = Rng.int r 5; after = None } in
-    Wire.Watch { db = Rng.int r 4; query = q; select = Wire.Give (Array.init (Rng.int r 3) (fun _ -> Rng.int r 3)); from = Rng.int r 1000; wextra = []; worder }
+    Wire.Watch { db = Rng.int r 4; query = q; select = Wire.Give (Array.init (Rng.int r 3) (fun _ -> Rng.int r 3)); from = Rng.int r 1000; wextra = []; worder; wtimeout = 0 }
   | _ -> Wire.Admin "status"
 
 let wire () =
@@ -188,7 +199,7 @@ let wire () =
     let q = { Query.vars = 1 + Rng.int r 3; where = List.init (Rng.int r 3) (fun _ -> { Query.e = rand_term r; p = Rng.int r 40; v = rand_term r }); ranges = [] } in
     let extra = List.init (Rng.int r 3) (fun _ -> item 0) in
     let order = if Rng.bool r then Top.none else { Top.keys = [ { col = Rng.int r 3; desc = Rng.bool r } ]; limit = Rng.int r 9; after = if Rng.bool r then Some [| rand_value r |] else None } in
-    let req = Wire.Find { db = 0; query = q; select = Wire.Give [| 0 |]; extra; order } in
+    let req = Wire.Find { db = 0; query = q; select = Wire.Give [| 0 |]; extra; order; timeout = 0 } in
     let b = Buffer.create 64 in
     Wire.put_request b req;
     let bytes = Buffer.to_bytes b in
@@ -363,7 +374,7 @@ let rights () =
       Wire.put_request b req;
       Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -378,7 +389,7 @@ let rights () =
   let q = { Query.vars = 1; where = [ { Query.e = Var 0; p = Schema.p_name; v = Val (Text "cepheus/name") } ]; ranges = [] } in
   let requests db =
     [ "Open", Wire.Open (if db = 0 then "shop" else "stock"), `Read; "Get", Wire.Get { db; thing = 1 }, `Read;
-      "Find", Wire.Find { db; query = q; select = Wire.Give [||]; extra = []; order = Top.none }, `Read;
+      "Find", Wire.Find { db; query = q; select = Wire.Give [||]; extra = []; order = Top.none; timeout = 0 }, `Read;
       "Write", Wire.Write { db; serial = 0; floor = 0; by = 0; why = "t"; ops = [] }, `Write ]
   in
   let right tok db = match tok, db with "w", 0 -> `Write | "r", 0 -> `Read | "o", 1 -> `Write | _ -> `None in
@@ -420,10 +431,10 @@ let rights () =
      let a = Answer.answer ~order (d0.view ()) q (Wire.Give [| 1 |]) in
      List.init a.n (fun i -> [| Store.value (d0.view ()) (a.typ 0) (a.word i 0) |])
    in
-   (match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order }) with
+   (match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order; timeout = 0 }) with
     | Some (Wire.Rows r) -> check (List.length want = 2 && r.rows = want) "order: the server's rows are the engine's, sorted and cut"
     | _ -> check false "order: no rows");
-   match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order = { Top.none with after = Some [| Value.Text "a" |] } }) with
+   match ask (Wire.Find { db = 0; query = q; select = Wire.Give [| 1 |]; extra = []; order = { Top.none with after = Some [| Value.Text "a" |] }; timeout = 0 }) with
    | Some (Wire.Err { code = "invalid"; _ }) -> check true ""
    | _ -> check false "order: After without Sort is refused");
   (* an unknown token, and requests before Hello *)
@@ -449,7 +460,7 @@ let rights () =
   let c = Core.connect srv ~flush:(fun () -> ()) ~submit in
   let big = Bytes.create 10 in
   Bytes.set_int32_le big 0 (Int32.of_int (Wire.max_frame + 1));
-  check (snd (Core.input c big 0 10) = Core.Shut) "rights: a frame over 16 MiB closes"
+  check (snd (Core.input ~arrived:0 c big 0 10) = Core.Shut) "rights: a frame over 16 MiB closes"
 
 
 (* Every token file of the old forms reads the same and is written back byte for byte (the writer of main wrote
@@ -510,7 +521,7 @@ let rights_kinds () =
       Wire.put_request b req;
       Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -530,8 +541,8 @@ let rights_kinds () =
   check (ok made) "kinds: facts of three kinds";
   let thing = match made with Some (Wire.Receipt { things = (_, t) :: _; _ }) -> t | _ -> 0 in
   let q ps = { Query.vars = 2; where = List.map (fun p -> { Query.e = Var 0; p; v = Var 1 }) ps; ranges = [] } in
-  let find ask ps = ask (Wire.Find { db = 0; query = q ps; select = Wire.Give [||]; extra = []; order = Top.none }) in
-  let watch ask ps = ask (Wire.Watch { db = 0; query = q ps; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none }) in
+  let find ask ps = ask (Wire.Find { db = 0; query = q ps; select = Wire.Give [||]; extra = []; order = Top.none; timeout = 0 }) in
+  let watch ask ps = ask (Wire.Watch { db = 0; query = q ps; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none; wtimeout = 0 }) in
   check (match find k [ 17 ] with Some (Wire.Rows _) -> true | _ -> false) "kinds: a question on a kind read";
   check (denied (find k [ 18 ]) && denied (find k [ 16; 18 ])) "kinds: a question that touches a kind not read is denied";
   check (denied (watch k [ 18 ])) "kinds: a watch too, when it arrives";
@@ -585,7 +596,7 @@ let rights_kinds () =
       if Rng.bool r then Top.none
       else { Top.keys = [ { col = 1; desc = Rng.bool r } ]; limit = Rng.int r 4;
              after = (if Rng.bool r then Some [| Value.Link (65536 + Rng.int r 100); sample top |] else None) } in
-    let req = Wire.Find { db = 0; query = q; select = Wire.Give [| 0; 1 |]; extra = !extra; order } in
+    let req = Wire.Find { db = 0; query = q; select = Wire.Give [| 0; 1 |]; extra = !extra; order; timeout = 0 } in
     let readable = List.for_all (fun p -> p <> 18) !uses in
     ignore typ;
     match k req, w req with
@@ -595,11 +606,11 @@ let rights_kinds () =
     | _ -> incr leaks
   done;
   check (!leaks = 0 && !denials > 100 && !answered > 100) "kinds: every operator, Sort and After under rights per kind (%d denied, %d answered, %d wrong)" !denials !answered !leaks;
-  check (denied (k (Wire.Watch { db = 0; query = q [ 16 ]; select = Wire.Give [||]; from = 0; wextra = [ Ask.Not [ Pattern { e = Var 0; p = 18; v = Var 2 } ] ]; worder = Question.Top.none })))
+  check (denied (k (Wire.Watch { db = 0; query = q [ 16 ]; select = Wire.Give [||]; from = 0; wextra = [ Ask.Not [ Pattern { e = Var 0; p = 18; v = Var 2 } ] ]; worder = Question.Top.none; wtimeout = 0 })))
     "kinds: a watch with a Not over a kind not read is denied";
   (* the bounds, each with its error; the work budget; a cursor by hand that is not a row *)
   let invalid = function Some (Wire.Err { code = "invalid"; _ }) -> true | _ -> false in
-  let fq ?(extra = []) ?(order = Top.none) () = w (Wire.Find { db = 0; query = q [ 16 ]; select = Wire.Give [||]; extra; order }) in
+  let fq ?(extra = []) ?(order = Top.none) () = w (Wire.Find { db = 0; query = q [ 16 ]; select = Wire.Give [||]; extra; order; timeout = 0 }) in
   check (invalid (fq ~order:{ Top.keys = [ { col = 0; desc = false } ]; limit = Top.max_limit + 1; after = None } ())) "bounds: Limit";
   check (invalid (fq ~extra:[ Ask.In (1, List.init (Ask.max_in + 1) (fun i -> Value.Text (string_of_int i))) ] ())) "bounds: In's values";
   check (invalid (fq ~extra:(List.init 4 (fun _ -> Ask.Or [ [ Pattern { e = Var 0; p = 16; v = Var 1 } ]; [ Pattern { e = Var 0; p = 17; v = Var 2 } ];
@@ -663,7 +674,7 @@ let rights_derived () =
         Wire.put_request b req;
         Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
         let bytes = Buffer.to_bytes f in
-        ignore (Core.input c bytes 0 (Bytes.length bytes));
+        ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
         c.flush ();
         let s = Buffer.to_bytes out in
         Buffer.clear out;
@@ -750,7 +761,7 @@ let rights_derived () =
           List.iter
             (fun p ->
               let q = { Query.vars = 2; where = [ { Query.e = Var 0; p; v = Var 1 } ]; ranges = [] } in
-              match ask (Wire.Find { db = 0; query = q; select = Wire.Give [||]; extra = []; order = Top.none }) with
+              match ask (Wire.Find { db = 0; query = q; select = Wire.Give [||]; extra = []; order = Top.none; timeout = 0 }) with
               | Some (Wire.Err { code = "denied"; _ }) -> check (not (may p)) "rules and kinds: seed %d: a question on %d denied only when it may not be read" seed p
               | Some (Wire.Rows _) -> check (may p) "rules and kinds: seed %d: a question on %d answered only when it may be read" seed p
               | _ -> check false "rules and kinds: Find")
@@ -959,14 +970,14 @@ let versions () =
     Wire.put_request b (Wire.Hello { version; token = "cph_r"; program = "t"; session = 0 });
     Wire.add_frame f ~id:1 ~kind:Wire.k_hello ~flags:0 b;
     let bytes = Buffer.to_bytes f in
-    ignore (Core.input c bytes 0 (Bytes.length bytes));
+    ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
     c.flush ();
     let s = Buffer.to_bytes out in
     Wire.get_reply (Bytes.get_uint8 s 8) (Bytes.get_uint8 s 9) (Codec.reader s Wire.header (Wire.u32 s 0 - 6))
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
-  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5)) "versions: a server speaks 1 to 5";
-  check (match hello 6 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 6";
+  check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5) && welcome (hello 6)) "versions: a server speaks 1 to 6";
+  check (match hello 7 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 7";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -1007,7 +1018,7 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
      (* an Incr to a server of protocol 3 or older is refused in the program, never sent; a write without it is sent *)
      let db = { Client.handle = 0; group = 0; props = []; local = None; wants_local = false; retry_at = 0. } in
      check (Client.write c db [ Resolve.Incr (65536, 16, 1, None) ] = Error { code = "invalid"; message = Client.no_incr } && c.serial = 0)
@@ -1021,6 +1032,12 @@ let versions () =
      let order = { Top.keys = [ { col = 1; desc = true } ]; limit = 10; after = None } in
      check (match Client.watch c db ~order q with _ -> false | exception Invalid_argument m -> m = Client.no_sorted_watch 4)
        "versions: a watch with Sort and Limit to a server of 4 is refused before it is sent (%s)" (Client.no_sorted_watch 4);
+     (* a question's time to a server of protocol 5 or older is refused in the program, never sent *)
+     c.spoken <- 5;
+     check (Client.find c db ~timeout:1.0 q = Error { code = "invalid"; message = Client.no_timeout 5 })
+       "versions: a question's time to a server of 5 is refused before it is sent";
+     check (match Client.watch c db ~timeout:1.0 q with _ -> false | exception Invalid_argument m -> m = Client.no_timeout 5)
+       "versions: and a watch's";
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
   Thread.join old;
@@ -1086,7 +1103,7 @@ let files () =
     in
     let ask req =
       let bytes = frames req in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -1157,8 +1174,8 @@ let files () =
   Wire.put_request hb (Wire.Hello { version = Wire.version; token = "cph_w"; program = "t"; session = 0 });
   Wire.add_frame hf ~id:1 ~kind:Wire.k_hello ~flags:0 hb;
   let hbytes = Buffer.to_bytes hf in
-  ignore (Core.input sess hbytes 0 (Bytes.length hbytes));
-  List.iter (fun b -> ignore (Core.input sess b 0 (Bytes.length b))) starts;
+  ignore (Core.input ~arrived:0 sess hbytes 0 (Bytes.length hbytes));
+  List.iter (fun b -> ignore (Core.input ~arrived:0 sess b 0 (Bytes.length b))) starts;
   check (Hashtbl.length sess.Core.puts = Files.max_puts) "files: %d puts open at once at most" Files.max_puts;
   Core.disconnect sess;
   (* a token whose right to write goes in the middle of a put: its next piece ends the put, refused *)
@@ -1170,7 +1187,7 @@ let files () =
     (match req with Some r -> Wire.put_request b r | None -> Buffer.add_string b "more bytes");
     Wire.add_frame fr ~id ~kind ~flags b;
     let x = Buffer.to_bytes fr in
-    ignore (Core.input cl x 0 (Bytes.length x));
+    ignore (Core.input ~arrived:0 cl x 0 (Bytes.length x));
     cl.flush ()
   in
   frame ~id:1 ~kind:Wire.k_hello ~flags:0 (Some (Wire.Hello { version = Wire.version; token = "cph_w"; program = "t"; session = 0 }));
@@ -1316,7 +1333,7 @@ let watch_window () =
       Wire.put_request b req;
       Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       id
     in
     (* the messages given since, each: a push, or the error that ends a watch *)
@@ -1350,7 +1367,7 @@ let watch_window () =
   let scores = { Query.vars = 2; where = [ { Query.e = Var 0; p = pscore; v = Var 1 } ]; ranges = [] } in
   let top3 = { Top.keys = [ { col = 1; desc = true }; { col = 0; desc = false } ]; limit = 3; after = None } in
   let watch ?(send = wsend) ?(take = wtake) ?(sel = Wire.Give [||]) ?(q = scores) order =
-    ignore (send (Wire.Watch { db = 0; query = q; select = sel; from = 0; wextra = []; worder = order }));
+    ignore (send (Wire.Watch { db = 0; query = q; select = sel; from = 0; wextra = []; worder = order; wtimeout = 0 }));
     take ()
   in
   let row x n = [| Value.Link x; Value.Int n |] in
@@ -1453,7 +1470,7 @@ let answer_bounds () =
       Wire.put_request b req;
       Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       ignore (Core.move_pushes c);
       c.flush ();
       let s = Buffer.to_bytes out in
@@ -1471,14 +1488,14 @@ let answer_bounds () =
     | [] -> "none"
   in
   let cross = { Query.vars = 4; where = [ { Query.e = Var 0; p = score; v = Var 1 }; { e = Var 2; p = score; v = Var 3 } ]; ranges = [] } in
-  let find ?(q = cross) ?(sel = Wire.Give [||]) ?(order = Top.none) () = send (Wire.Find { db = 0; query = q; select = sel; extra = []; order }) in
+  let find ?(q = cross) ?(sel = Wire.Give [||]) ?(order = Top.none) () = send (Wire.Find { db = 0; query = q; select = sel; extra = []; order; timeout = 0 }) in
   let by1 = { Top.keys = [ { col = 1; desc = false } ]; limit = 0; after = None } in
   let saved_cells = !Answer.max_cells and saved_pool = !Answer.pool_cells in
   Answer.max_cells := 50_000;
   (* held answers: refused past their cells, the pool given back *)
   check (code (find ~order:by1 ()) = "too_large") "bounds: a sorted cross product past its cells is too_large";
   check (code (find ~sel:(Wire.Group ([| 0; 1; 2; 3 |], [| Wire.Count |])) ()) = "too_large") "bounds: a grouped one too";
-  check (code (send (Wire.Watch { db = 0; query = cross; select = Wire.Give [||]; from = 0; wextra = []; worder = Top.none })) = "too_large")
+  check (code (send (Wire.Watch { db = 0; query = cross; select = Wire.Give [||]; from = 0; wextra = []; worder = Top.none; wtimeout = 0 })) = "too_large")
     "bounds: a watch's first answer too, under the hub's lock";
   check (Atomic.get Answer.pool = 0) "bounds: every ticket given back (%d cells left)" (Atomic.get Answer.pool);
   (* a Give without Sort is streamed: every row, in frames of the flag more, the output never holding more than a frame *)
@@ -1504,7 +1521,7 @@ let answer_bounds () =
   let rep k = { Query.vars = 2; where = List.init k (fun _ -> { Query.e = Var 0; p = score; v = Var 1 }); ranges = [] } in
   check (code (find ~q:(rep 64) ()) = "ok") "bounds: a question of 64 patterns";
   let c2, send2, _ = conn () in
-  check (match send2 (Wire.Find { db = 0; query = rep 65; select = Wire.Give [||]; extra = []; order = Top.none }) with
+  check (match send2 (Wire.Find { db = 0; query = rep 65; select = Wire.Give [||]; extra = []; order = Top.none; timeout = 0 }) with
          | [ f ] -> (match reply_of f with Some (Wire.Err e) -> e.code = "invalid" && contains e.message "64 patterns" | _ -> false) | _ -> false)
     "bounds: 65 patterns are refused, before they are decoded";
   ignore c2;
@@ -1515,7 +1532,7 @@ let answer_bounds () =
   Answer.question_budget := saved_budget;
   (* the watches a connection keeps, and the server (F7) *)
   let one = { Query.vars = 1; where = [ { Query.e = Thing 65536; p = score; v = Var 0 } ]; ranges = [] } in
-  let watch ?(send = send) ?(q = one) ?(order = Top.none) () = send (Wire.Watch { db = 0; query = q; select = Wire.Give [||]; from = 0; wextra = []; worder = order }) in
+  let watch ?(send = send) ?(q = one) ?(order = Top.none) () = send (Wire.Watch { db = 0; query = q; select = Wire.Give [||]; from = 0; wextra = []; worder = order; wtimeout = 0 }) in
   let saved_w = !Core.max_watches and saved_sw = !Core.max_server_watches in
   Core.max_watches := 3;
   Core.max_server_watches := 5;
@@ -1547,6 +1564,107 @@ let answer_bounds () =
    names and values written before the bound (through the engine) come back in frames of the flag more, joined by the
    client; a text past its bound, and a group whose receipt would pass a frame, are refused before they are applied ---- *)
 
+(* ---- a question's time (cluster.toml's question_timeout, a request's timeout) and its asker gone: a cross product
+   of three patterns (600 people: 216 million bindings, seconds of work) ends at its deadline with the code timeout,
+   within twice its time; a shorter time of the program's is taken, a longer one only from an admin token; a
+   connection gone ends its question with no reply; the domains of a large question are back in the pool ---- *)
+
+let timeouts () =
+  let sim = Sim_disk.create (Rng.make 29) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/t";
+  let e = Result.get_ok (Engine.open_ disk "/t/shop") in
+  let v0 = Atomic.get e.published in
+  let hub = Live.create v0 ~tag:v0.group ~durable:max_int in
+  let d = { Core.name = "shop"; index = 0; dir = "/t/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> hub); files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/t/shop/vault" } in
+  let commit ops =
+    let b = Engine.prepare e [| ops, 0, "t" |] in
+    let r = (Engine.commit e b).(0) in
+    if b.count > 0 then Live.frame hub ~tag:b.after.group (List.rev b.groups) b.after;
+    r
+  in
+  let submit (_ : Core.db) ops _ _ k = k (commit ops) in
+  let ids, ops = Result.get_ok (Resolve.declare v0 [ { Schema.name = "person/score"; typ = Value.Tint; many = false; unique = false } ]) in
+  ignore (Result.get_ok (commit ops));
+  let score = List.hd ids in
+  let n = 600 in
+  ignore (Result.get_ok (commit (List.init n (fun i -> Resolve.Add (-(i + 1), score, Int i)))));
+  let toks =
+    Tokens.with_tokens Tokens.empty
+      [ { Tokens.name = "r"; hash = Tokens.hash_of_text "cph_r"; databases = [ "shop", Tokens.Read ]; admin = false };
+        { Tokens.name = "a"; hash = Tokens.hash_of_text "cph_a"; databases = [ "shop", Tokens.Read ]; admin = true } ]
+  in
+  let server question_timeout =
+    Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let k = ref 0 in fun () -> incr k; !k)
+      ~question_timeout ()
+  in
+  let conn ?(gone = fun () -> false) srv tok =
+    let out = Buffer.create 256 in
+    let rec c = lazy (Core.connect srv ~gone ~submit ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out)) in
+    let c = Lazy.force c in
+    let next = ref 1 in
+    let send req =
+      let id = !next in
+      incr next;
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
+      ignore (Core.move_pushes c);
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      match frames_of s with None -> check false "timeouts: frames not whole"; [] | Some fs -> fs
+    in
+    ignore (send (Wire.Hello { version = Wire.version; token = "cph_" ^ tok; program = "t"; session = 0 }));
+    send
+  in
+  let err fs = match List.rev fs with f :: _ -> (match reply_of f with Some (Wire.Err e) -> Some (e.code, e.message) | _ -> None) | [] -> None in
+  let triple = { Query.vars = 6; where = [ { Query.e = Var 0; p = score; v = Var 1 }; { e = Var 2; p = score; v = Var 3 }; { e = Var 4; p = score; v = Var 5 } ]; ranges = [] } in
+  let count = Wire.Group ([||], [| Wire.Count |]) in
+  let find ?(timeout = 0) ?(sel = count) send = send (Wire.Find { db = 0; query = triple; select = sel; extra = []; order = Top.none; timeout }) in
+  let timed f = let t0 = Unix.gettimeofday () in let r = f () in r, Unix.gettimeofday () -. t0 in
+  (* the server's time *)
+  let send = conn (server 0.1) "r" in
+  let fs, took = timed (fun () -> find send) in
+  check (match err fs with Some (code, m) -> code = "timeout" && contains m "0.1 s" | None -> false)
+    "timeouts: a cross product of three patterns ends timeout at the server's 0.1 s (%s)" (match err fs with Some (_, m) -> m | None -> "answered");
+  check (took < 0.2) "timeouts: within 0.2 s (%.3f s)" took;
+  (* streamed (a Give without Sort): its frames sent, then the error *)
+  let fs, took = timed (fun () -> find ~sel:(Wire.Give [||]) send) in
+  check ((match err fs with Some (code, _) -> code = "timeout" | None -> false) && took < 0.2) "timeouts: streamed rows end timeout too (%d frames, %.3f s)" (List.length fs) took;
+  (* a longer time asked by a token that is not admin: the server's *)
+  let fs, took = timed (fun () -> find ~timeout:10_000 send) in
+  check ((match err fs with Some (code, _) -> code = "timeout" | None -> false) && took < 0.2) "timeouts: a token's 10 s is the server's 0.1 s (%.3f s)" took;
+  (* an admin token's longer time is its own *)
+  let sa = conn (server 0.1) "a" in
+  let fs, took = timed (fun () -> find ~timeout:300 sa) in
+  check ((match err fs with Some (code, m) -> code = "timeout" && contains m "0.3 s" | None -> false) && took >= 0.29 && took < 0.6)
+    "timeouts: an admin token's 0.3 s (%.3f s)" took;
+  (* no time at the server: the program's own *)
+  let s0 = conn (server 0.) "r" in
+  let fs, took = timed (fun () -> find ~timeout:100 s0) in
+  check ((match err fs with Some (code, _) -> code = "timeout" | None -> false) && took < 0.2) "timeouts: a program's 0.1 s with none at the server (%.3f s)" took;
+  (* a watch's first answer, under its hub's lock *)
+  let fs, took = timed (fun () -> s0 (Wire.Watch { db = 0; query = triple; select = Wire.Give [||]; from = 0; wextra = []; worder = Top.none; wtimeout = 100 })) in
+  check ((match err fs with Some (code, _) -> code = "timeout" | None -> false) && took < 0.2) "timeouts: a watch's first answer (%.3f s)" took;
+  check (Atomic.get Answer.pool = 0) "timeouts: every ticket given back (%d cells)" (Atomic.get Answer.pool);
+  (* the asker gone: no reply, and soon *)
+  let left = Atomic.make false in
+  let sg = conn ~gone:(fun () -> Atomic.get left) (server 0.) "r" in
+  let quit = Thread.create (fun () -> Thread.delay 0.05; Atomic.set left true) () in
+  let fs, took = timed (fun () -> find sg) in
+  Thread.join quit;
+  check (fs = [] && took < 0.2) "timeouts: a question whose connection closed ends with no reply (%d frames, %.3f s)" (List.length fs) took;
+  (* Cepheus's own API *)
+  let v = Atomic.get e.published in
+  let r, took = timed (fun () -> Cepheus.fold ~timeout:0.1 v triple ~init:(fun () -> 0) ~step:(fun k _ -> k + 1) ~merge:( + )) in
+  check ((match r with Error (Cepheus.Timeout m) -> contains m "0.1 s" | _ -> false) && took < 0.2) "timeouts: Cepheus.fold ~timeout:0.1 (%.3f s)" took;
+  check (match Cepheus.find ~timeout:5. v { triple with vars = 2; where = [ List.hd triple.where ] } with Ok rows -> List.length rows = n | Error _ -> false)
+    "timeouts: a small question within its time"
+
 let reply_bounds () =
   let sim = Sim_disk.create (Rng.make 29) in
   let disk = Sim_disk.disk sim in
@@ -1570,7 +1688,7 @@ let reply_bounds () =
       Wire.put_request b req;
       Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      ignore (Core.input c bytes 0 (Bytes.length bytes));
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes));
       c.flush ();
       let s = Buffer.to_bytes out in
       Buffer.clear out;
@@ -1647,7 +1765,7 @@ let hello_once () =
     Wire.put_request b req;
     Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
     let bytes = Buffer.to_bytes f in
-    let why = snd (Core.input c bytes 0 (Bytes.length bytes)) in
+    let why = snd (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes)) in
     c.flush ();
     let s = Buffer.to_bytes out in
     Buffer.clear out;
@@ -1666,7 +1784,7 @@ let hello_once () =
     Wire.put_request b req;
     Wire.add_frame f ~id:1 ~kind:(Wire.request_kind req) ~flags:0 b;
     let bytes = Buffer.to_bytes f in
-    ignore (Core.input w bytes 0 (Bytes.length bytes));
+    ignore (Core.input ~arrived:0 w bytes 0 (Bytes.length bytes));
     w.flush ();
     let s = Buffer.to_bytes out in
     Buffer.clear out;
@@ -1737,7 +1855,7 @@ let guard () =
       Wire.put_request b req;
       Wire.add_frame f ~id ~kind:(Wire.request_kind req) ~flags:0 b;
       let bytes = Buffer.to_bytes f in
-      match Core.input c bytes 0 (Bytes.length bytes) with
+      match Core.input ~arrived:0 c bytes 0 (Bytes.length bytes) with
       | _, why -> id, Some why
       | exception x -> check false "guard: request %d raised %s out of Core.input" id (Printexc.to_string x); id, None
     in
@@ -1793,7 +1911,7 @@ let guard () =
   let names = { Query.vars = 2; where = [ { Query.e = Var 0; p = pname; v = Var 1 } ]; ranges = [] } in
   let g = conn () in
   g.bad_flush := true;
-  let id, why = g.send (Wire.Find { db = 0; query = names; select = Wire.Give [||]; extra = []; order = Top.none }) in
+  let id, why = g.send (Wire.Find { db = 0; query = names; select = Wire.Give [||]; extra = []; order = Top.none; timeout = 0 }) in
   (match g.take () with
    | Some ((first :: _ :: _) as fs) ->
      let last = List.nth fs (List.length fs - 1) in
@@ -1838,7 +1956,7 @@ let guard () =
   (* a push that fails (the thread of its pushes not made) ends its own connection, never the hub: another watch of the
      question gets every change *)
   let scores = { Query.vars = 2; where = [ { Query.e = Var 0; p = pscore; v = Var 1 } ]; ranges = [] } in
-  let watch g = ignore (g.send (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none })); ignore (g.take ()) in
+  let watch g = ignore (g.send (Wire.Watch { db = 0; query = scores; select = Wire.Give [||]; from = 0; wextra = []; worder = Question.Top.none; wtimeout = 0 })); ignore (g.take ()) in
   let a = conn () and b = conn () and wr = conn () in
   watch a;
   watch b;
@@ -1979,6 +2097,7 @@ let () =
   files_wire ();
   watch_window ();
   answer_bounds ();
+  timeouts ();
   reply_bounds ();
   hello_once ();
   pieces ();

@@ -295,7 +295,9 @@ and 658 ms), peak 79 to 105 MB; on one run of the levels since then, Q1 39.7 µs
 Q5 96.8 s. Q5 takes 97 to 102 s (PostgreSQL 1.05 s): a client's follow links lie among its invoices' rows (the base
 orders rows by thing), so the triangle question reads random pages of all 120 MB of by-thing rows for a few bytes
 each. A third order of the rows, by property then thing (as Hexastore [Weiss 2008] and RDF-3X [Neumann 2008] keep), would make one
-property of many things local; it costs 10 bytes a fact more. To decide on measurements of real workloads.
+property of many things local; it costs 10 bytes a fact more. It is built: the column order of run format 8
+(2026-11-11), with which the triangles under a 48 MB cap take 260 ms [249, 274] against SQLite's 1.02 s
+([benchmarks](benchmarks.md#the-column-order-and-leapfrog-intersections-2026-11-11-at-10-million-facts)).
 
 **What a merge cost, until it was written to a file.** A merge built the new base in memory (arrays for its sort,
 then its pages) beside the old one, and the pages of both lived on the OCaml heap: write runs with merges peaked at
@@ -570,12 +572,12 @@ value), things 1-2 bits (deltas 0 and 1), columns 3 bits, values by property (cl
 level 19 makes 29.4 MB of the same 94 MB frame (measured here, 2026-11-08; LZ4 at level 1, 56.6 MB): a coding that
 knows the structure beats the general compressors, with no C.
 
-## 12. What comes next, and why
+## 12. What is not built yet
 
-- **Larger than memory, the rest** (design, section 15): filters per run for the lookups by value (Bloom filters
-  sized per level as in Monkey [Dayan 2017]) if reads across runs need them; scheduling merges around the clients as
-  SILK [Balmau 2019] does. The column order (run format 8) took the triangles at a 48 MB cap from more than 2.5 minutes
-  a run (format 7) to 0.26 s on one core, against SQLite's 1.02 s ([benchmarks](benchmarks.md)).
+- **Larger than memory, the rest**: filters per run for the lookups by value (Bloom filters sized per level as in
+  Monkey [Dayan 2017]) if reads across runs need them; merges scheduled around the clients as SILK [Balmau 2019]
+  does. The column order (run format 8) took the triangles at a 48 MB cap from more than 2.5 minutes a run (format 7)
+  to 0.26 s on one core, against SQLite's 1.02 s ([benchmarks](benchmarks.md)).
 - **Questions closer to the kernels** (the prototype's 5 ms for Q4 and 90 ms for Q5, against 129 and 259 ms on one
   core): a level's candidates looked up a batch at a time (vectorized execution) where the per-binding
   calls now cost more than the reads; slices galloped inside the run rather than read into buffers (a gap-coded block
@@ -583,12 +585,14 @@ knows the structure beats the general compressors, with no C.
   once a helper domain no longer slows the GC's cycles (measured: a domain beside the pass by thing, idle or busy,
   kept 300 MB more of heap at the 4-group load's peak). An order-preserving dictionary rebuilt at each merge (Binnig
   et al. [Binnig 2009]) for ranges over texts.
-- **Rules, the next steps** ([rules](rules.md#what-is-not-here-yet)): the closure module for transitive properties
-  (Hu, Motik and Horrocks' modular materialisation, [Hu 2019]), rules specialised by the ontology, sorted parallel derivations,
-  equality by rewriting; subscriptions by the delta rules of DBSP.
-- **Replication**: Raft [Ongaro 2014] with protocol-aware recovery [Alagappan 2018]; the journal is the only replicated thing (Aurora [Verbitski 2017]).
-- **Many machines**: databases spread over machines, then storage on object stores (Socrates [Antonopoulos 2019]), then a database
-  partitioned by thing with a deterministic order of cross-partition groups (Calvin [Thomson 2012]) and distributed Generic Join
+- **Rules**: what [rules](rules.md#what-is-not-here-yet) lists. Built: the closure module for transitive properties
+  (Hu, Motik and Horrocks' modular materialisation, [Hu 2019]), rules specialised by the ontology, sorted parallel
+  derivations for loads, equality by rewriting; live questions by the delta rules of joins (DBSP [Budiu 2023]).
+- **Many machines**: built, a replica and a Raft cluster [Ongaro 2014] whose damaged server neither votes nor stands for
+  election until it is repaired (a rule informed by [Alagappan 2018]), the journal the only replicated thing (Aurora
+  [Verbitski 2017]), each server holding every database whole ([the server](server.md#a-cluster-of-three-raft)). Not
+  built: databases spread over machines; storage on object stores (Socrates [Antonopoulos 2019]); a database partitioned
+  by thing with a deterministic order of cross-partition groups (Calvin [Thomson 2012]) and distributed Generic Join
   (BiGJoin [Ammar 2018]).
 
 ## Further reading

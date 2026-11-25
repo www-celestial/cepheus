@@ -1,6 +1,6 @@
 # Cepheus from Cesia
 
-This chapter is for programmers who write in [Cesia](https://github.com/www-celestial/cesia): how a Cesia program
+This chapter is for programmers who write in [Cesia](https://github.com/www-celestial/cesia-lang): how a Cesia program
 reaches a Cepheus database, writes to it, reads it and asks it questions, what each call gives, what it costs, and
 what it guarantees. The examples below run as written, against a real server, each time the tests run
 (`test/cesia.sh`): what follows each one is what it printed.
@@ -306,6 +306,31 @@ Ok([{City: "Lyon", Total: 1280.5, Invoices: 2}])
 ```
 
 The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is not counted.
+
+**Its time.** `timeout = seconds` bounds a question: past it, `Find` is an `Err` of Code `"timeout"`, whose message
+names the time, and the work stops (within milliseconds: it is looked at every 1,024 candidates). At the server, the
+server's `question_timeout` (30 s by default, [the server](server.md#clustertoml)) is the most a question takes: a
+shorter `timeout` is the question's, a longer one counts only for an admin token. In the program's memory (on the
+server's machine) only the program's own `timeout` bounds it. A question the program stops waiting for (its
+connection closed) stops at the server too.
+
+```cesia norun
+names = result.Unwrap(cepheus.Fork(cepheus.Empty, [Client]))
+result.Unwrap(cepheus.Write([cepheus.Add(cepheus.New(k), Client.Name, "c$k") for k in 1..300], names))
+rows = cepheus.Find(6, (a, x, b, y, c, z) -> {
+  Where: [[a, Client.Name, x], [b, Client.Name, y], [c, Client.Name, z]],
+  Give: {Count: cepheus.Count()},
+}, names, timeout = 0.1)
+io.Print(rows.Error.Code)
+```
+
+```text
+timeout
+```
+
+Three patterns that share no variable are every triple of names (a cross product): 300 names make 27 million
+answers, a million $10^{18}$; the question ends at its time instead of holding the cores (here the program's, on a
+fork of its own: [forks](#forks)). `cepheus.Watch` takes the same `timeout`, for its first answer.
 
 ## Not, Or and In
 

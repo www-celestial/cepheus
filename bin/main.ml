@@ -2,7 +2,9 @@
 
      cepheus serve --config FILE                  run the server of FILE (cluster.toml) until SIGTERM or SIGINT
      cepheus stop --config FILE                   stop it (SIGTERM to the pid its data directory's lock names) and wait
-     cepheus status --config FILE                 what it holds and does (an admin token in CEPHEUS_TOKEN)
+     cepheus status [--format text|prometheus] --config FILE
+                                                  what it holds and does (an admin token in CEPHEUS_TOKEN): key: value
+                                                  lines, or Prometheus's text format (server/prometheus.ml)
      cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE
                                                   a new token, printed once; its hash goes to tokens.toml
      cepheus token list --config FILE             the tokens' names and rights (never the tokens)
@@ -29,12 +31,14 @@ let die fmt = Printf.ksprintf (fun m -> prerr_endline ("cepheus: " ^ m); exit 1)
 
 let usage () =
   prerr_string
-    "usage: cepheus serve|stop|status --config FILE\n\
+    "usage: cepheus serve|stop --config FILE\n\
+    \       cepheus status [--format text|prometheus] --config FILE\n\
     \       cepheus token add NAME [--database DB=read|write|read:KIND,...;add:KIND,...]... [--admin] --config FILE\n\
     \       cepheus token list|remove [NAME] --config FILE\n\
     \       cepheus cluster init|cert NAME --dir DIR [--host H]...\n\
     \       cepheus replicate PEER --config FILE\n\
     \       cepheus promote [--force] --config FILE\n\
+    \       cepheus import|export DB ... --config FILE (cepheus import --help)\n\
     \       cepheus verify DIR\n\
     \       cepheus backup --config FILE DEST\n\
     \       cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]\n\
@@ -43,6 +47,7 @@ let usage () =
 
 let hosts = ref []
 let force = ref false
+let format = ref "text"
 
 (* --config FILE, --database X (repeated), --admin, --dir DIR, --host H (repeated); the rest positional *)
 let parse args =
@@ -53,6 +58,7 @@ let parse args =
     | "--database" :: d :: r -> dbs := d :: !dbs; go r
     | "--admin" :: r -> admin := true; go r
     | "--force" :: r -> force := true; go r
+    | "--format" :: f :: r -> format := f; go r
     | "--dir" :: d :: r -> dir := Some d; go r
     | x :: _ when String.length x > 1 && x.[0] = '-' -> die "unknown option %s" x
     | x :: r -> pos := x :: !pos; go r
@@ -110,11 +116,13 @@ let client_address cfg =
   | None, None -> die "the configuration names no socket and no listen address"
 
 let status cfg =
+  if not (List.mem !format [ "text"; "prometheus" ]) then die "--format %s: text or prometheus" !format;
   let token = match Sys.getenv_opt "CEPHEUS_TOKEN" with Some t -> t | None -> die "CEPHEUS_TOKEN must hold an admin token" in
   match Client.connect ~program:"cepheus status" (client_address cfg) token with
   | Error m -> die "%s" m
   | Ok c -> (
     match Client.status c with
+    | Ok l when !format = "prometheus" -> print_string (Prometheus.of_status l)
     | Ok l -> List.iter (fun (k, v) -> Printf.printf "%s: %s\n" k v) l
     | Error e -> die "%s: %s" e.code e.message)
 
@@ -223,7 +231,8 @@ let verify_help =
    Checks a database's files as they are, changing nothing: every frame of its journal (its CRCs, its groups\n\
    numbered), every run (as an open checks it, and every page against its CRC), each run's place in the journal,\n\
    and the records of its vault by their CRCs. DIR is a database's folder (DATA/NAME), a backup's\n\
-   (DEST/DATE/NAME) or any copy. A database open in a server is checked up to the frame being written.\n\n\
+   (DEST/DATE/NAME) or any copy. A database open in a server is checked up to the frame being written (a frame\n\
+   that does not check while every byte of it is there is read again for a second, then damage).\n\n\
    Exit status: 0 whole; 1 damage found, each named on a line \"damaged: ...\"; 2 DIR holds no database, cannot\n\
    be read, or must first be recovered by its server (start it and stop it).\n"
 
@@ -233,16 +242,17 @@ let backup_help =
    while it serves: no stop and no token, as the server's user (who reads its data directory). Each copy holds\n\
    every group confirmed before its journal was copied, and its vault; it is checked as cepheus verify checks,\n\
    and ended after its last whole frame. The folder takes its dated name only once every copy is whole and\n\
-   forced (DEST/DATE.partial until then; the next backup removes one a killed backup left). One backup into\n\
-   DEST at a time. Taken on a replica, it costs the primary nothing. Prints a line a database, then the folder.\n\n\
+   forced (DEST/DATE.partial until then; the next backup removes one a killed backup left, and nothing else).\n\
+   DEST is this user's: one that other users may write is refused. One backup into DEST at a time. Taken on a\n\
+   replica, it costs the primary nothing. Prints a line a database, then the folder.\n\n\
    Exit status: 0 done; 1 a copy has damage (kept in DEST/DATE.damaged for a look); 2 refused or failed.\n"
 
 let restore_help =
   "usage: cepheus restore SRC DIR [--to-group N | --to-time T] [--replace]\n\n\
    Restores the database of SRC (a backup's DEST/DATE/NAME, or a stopped database) into DIR: up to group N\n\
    (--to-group), or up to the last group written at or before T (--to-time 2026-11-24T14:05[:SS] in local\n\
-   time, or UTC with a final Z), else to SRC's last group. DIR must be new or empty; --replace moves a database\n\
-   there aside first (DIR.before-restore-DATE, never removed). The copy is made in DIR.restoring, opened (its\n\
+   time, or UTC with a final Z: exactly these digits, a day of the calendar), else to SRC's last group. DIR must be new or empty; --replace moves a database\n\
+   there aside first (DIR.before-restore-DATE, -2 when taken, never removed). The copy is made in DIR.restoring, opened (its\n\
    runs checked, the groups after its newest run replayed), verified, then renamed DIR. The restored database\n\
    writes its next groups in a new epoch, so that a replica holding later groups of the old history is refused,\n\
    never followed. Stop the server of DIR first, and start it after.\n\n\
@@ -260,7 +270,7 @@ let ops cmd args =
       (match int_of_string_opt n with Some n -> to_group := Some n | None -> bad ("--to-group " ^ n ^ ": a group number"));
       go r
     | "--to-time" :: t :: r when cmd = "restore" ->
-      (match Ops.parse_time t with Some ms -> to_time := Some ms | None -> bad ("--to-time " ^ t ^ ": YYYY-MM-DDTHH:MM[:SS], or with a final Z for UTC"));
+      (match Ops.parse_time t with Some ms -> to_time := Some ms | None -> bad ("--to-time " ^ t ^ ": YYYY-MM-DDTHH:MM[:SS] (a day of the calendar, 00 to 59), or with a final Z for UTC"));
       go r
     | "--replace" :: r when cmd = "restore" -> replace := true; go r
     | x :: _ when String.length x > 1 && x.[0] = '-' -> bad ("unknown option " ^ x)
@@ -300,6 +310,7 @@ let ops cmd args =
 
 let () =
   match Array.to_list Sys.argv with
+  | _ :: ("import" | "export" as cmd) :: rest -> Transfer_cmd.main cmd rest
   | _ :: (("verify" | "backup" | "restore") as cmd) :: rest -> ops cmd rest
   | _ :: cmd :: rest -> (
     let config, dbs, admin, dir, pos = parse rest in

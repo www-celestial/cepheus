@@ -276,7 +276,15 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   qui s'arrête dans son handshake TLS (la poignée de main, l'échange qui ouvre la connexion chiffrée), une qui envoie
   son handshake TLS un octet à la fois, et une qui envoie un record TLS (un bloc chiffré du flux TLS) un octet à la fois
   après Hello sont fermées en moins de deux fois la limite (les silencieuses après `idle`) ; un client qui envoie des pings plus souvent reste ; un client inactif au-delà de la limite
-  lit à nouveau, sa bibliothèque se reconnectant d'elle-même.
+  lit à nouveau, sa bibliothèque se reconnectant d'elle-même. Puis un serveur de 200 bases (chacune prend une
+  écriture ; le processus tient 21 domains, sous le plafond de 128), 30 grandes questions envoyées à la fois (60 000
+  choses, chacune répartie entre des domains : chaque réponse exacte, aucune `internal`, les helpers dans les bornes du
+  pool), un produit cartésien qui a 0,1 s (`timeout` en moins de 0,3 s), et une question de plusieurs secondes dont le
+  programme ferme son socket (le serveur la compte annulée en moins d'une seconde).
+- Les temps des questions dans `server_unit` : un produit cartésien de trois patterns (216 millions de bindings) au
+  0,1 s du serveur finit en `timeout` en moins de 0,2 s, tenu ou envoyé en flux ; le temps plus long d'un token est
+  celui du serveur, celui d'un token admin le sien (0,3 s) ; le 0,1 s d'un programme sans temps au serveur ; la
+  première réponse d'un watch ; une connexion partie finit sa question sans réponse ; `Cepheus.fold ~timeout`.
 - `server_guard` : des connexions servies par le propre code du serveur sur de vrais sockets, sur une base dont les
   lectures lèvent une exception quand le test le dit (le bug d'une requête) : une requête qui lève une exception sur
   une connexion qui a un watch et une écriture en cours (l'écriture répondue, la requête `internal`, la connexion
@@ -287,6 +295,17 @@ x86-64 ; le code arm64 (`crc32cx`, `crc32cb`, la vérification par `getauxval`) 
   rien, dont le serveur ne décode plus aucun tant qu'il tient un MiB de réponses ; après
   chacun, les descripteurs et les threads du processus sont ce qu'ils étaient, aucune connexion ni aucun watch ne reste,
   et une nouvelle connexion est servie.
+- `server_observe` : les percentiles des histogrammes face aux valeurs triées (4, 5 et 7 bits, jusqu'à 2^34 µs : à
+  1/2^bits près au-dessus, jamais au-delà du maximum ; deux moitiés fusionnées donnent les mêmes), la fenêtre de
+  `Timings` (des tranches qui entrent et sortent, une tranche reprise un tour plus tard), 1 200 000 temps comptés par
+  12 threads sur 4 domains pendant qu'un autre domain lit le status (chacun compté), `cepheus status --format
+  prometheus` relu par un parser de la grammaire du format d'exposition (HELP et TYPE d'abord, les lignes d'une
+  famille ensemble, les noms, les échappements de `\`, `"` et d'un saut de ligne, les valeurs, NaN), les formes des
+  questions et des écritures (aucune de leurs constantes dedans), `[log] slow_ms`. Puis un vrai serveur à
+  `slow_ms = 1` : une ligne pour un Find lent, un Find fini par son timeout de 50 ms, un watch et un grand groupe,
+  chacune avec sa base, le nom du token, les candidats, les lignes et l'issue ; les 3 021 valeurs du test et les deux
+  tokens cherchés dans son log et dans son texte Prometheus : aucun trouvé ; les lignes d'avant de `cepheus status`
+  dans leur ordre, les nouvelles là.
 - Chaque serveur que lancent ces tests tourne dans une session à lui (`setsid`) avec sa sortie dans un `serve.log` à
   côté de son `cluster.toml`, et il est arrêté à la fin de son test, même quand le test échoue (`test/serve.ml`) ; les
   tests ignorent SIGPIPE, pour qu'une écriture sur une connexion que le serveur a fermée soit une erreur, pas la mort du
@@ -460,7 +479,8 @@ fichiers aléatoires se relisent comme écrites et 24 000 requêtes changées so
 
 ## Pas encore
 
-Les tests à la Jepsen sous des pannes de réseau viendront avec la réplication.
+Les tests à la Jepsen de vrais serveurs sous des pannes de réseau ne sont pas construits. La simulation d'un cluster
+Raft perd, duplique et réordonne des messages et coupe le réseau ([comment c'est prouvé](server.md#comment-cest-prouvé)).
 
 ## Model checking
 

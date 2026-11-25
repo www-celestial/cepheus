@@ -11,6 +11,11 @@ rules, is a library of such rules (`Cepheus.Owl`; from Cesia, the package `owl`)
 kept by classes of equal things whose facts live on one representative
 ([OWL 2 RL](docs/book/rules.md#owl-2-rl-a-library-of-rules)).
 
+**Documentation: https://www-celestial.github.io/cepheus/** (in French: https://www-celestial.github.io/cepheus/fr/)
+
+The family: [Cesia](https://www-celestial.github.io/cesia-lang/) (the language) · [Cemacs](https://www-celestial.github.io/cemacs/) (the editor) ·
+[Cepheus](https://www-celestial.github.io/cepheus/) (the database) · [Ceti](https://www-celestial.github.io/ceti/) (the browser driver).
+
 ```ocaml
 open Cepheus
 
@@ -63,7 +68,7 @@ wire protocol byte by byte: [the server](docs/book/server.md).
 
 ## From Cesia
 
-A [Cesia](https://github.com/www-celestial/cesia) program reaches a database through the server, with the package
+A [Cesia](https://github.com/www-celestial/cesia-lang) program reaches a database through the server, with the package
 `cesia/cepheus` of this repository: one function to connect, and on the server's machine its reads are served from its
 own memory, as linearizable as the server's ([Cepheus from Cesia](docs/book/cesia.md)):
 

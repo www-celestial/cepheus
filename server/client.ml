@@ -30,8 +30,9 @@ type t = {
   waiting : (int, unit) Hashtbl.t;  (* serials sent, not yet answered *)
   early : (int, (int * int * Bytes.t) list) Hashtbl.t;  (* replies that came before they were asked for *)
   mutable welcome : Wire.reply option;
-  mutable follows : (Unix.file_descr * unit Domain.t) list;  (* the follow streams of its databases *)
-  mutable spoken : int;  (* the protocol's version this connection speaks: 5, or less with a server that speaks no more *)
+  mutable follows : (Unix.file_descr * (unit -> unit)) list;
+      (* the follow streams of its databases, each a domain of its own, and its join *)
+  mutable spoken : int;  (* the protocol's version this connection speaks: 6, or less with a server that speaks no more *)
   mutable members : address list;  (* a Raft cluster's servers, from Welcome: where to go when this one is gone *)
 }
 
@@ -54,6 +55,21 @@ let has_incr ops = List.exists (function Resolve.Incr _ -> true | _ -> false) op
 (* a watch with Sort and Limit, on a connection to a server of protocol 4 or older: refused here, never sent (such a
    server refuses the watch's order) *)
 let no_sorted_watch spoken = Printf.sprintf "this server speaks protocol %d: a watch with Sort and Limit needs a server of protocol 5" spoken
+
+(* a question's time, on a connection to a server of protocol 5 or older: refused here, never sent (such a server
+   closes the connection on the bytes after the question) *)
+let no_timeout spoken = Printf.sprintf "this server speaks protocol %d: a question's timeout needs a server of protocol 6" spoken
+
+(* a question's time in seconds as the wire's milliseconds (0: none given), 1 ms to a week; an infinite, NaN or
+   negative time is the program's mistake *)
+let timeout_ms = function
+  | None -> 0
+  | Some t ->
+    if Float.is_nan t || t <= 0. then invalid_arg (Printf.sprintf "a question's timeout is a number of seconds above 0, not %g" t);
+    int_of_float (Float.ceil (Float.min (t *. 1000.) (float_of_int Wire.max_timeout)))
+
+(* the stop of a question read in the program's own memory: its time, if it has one *)
+let local_stop = function None -> None | Some t -> ignore (timeout_ms (Some t)); Some (Query.stop t)
 
 exception Broken of string
 
@@ -79,6 +95,7 @@ let set_timeouts fd t = Unix.setsockopt_float fd Unix.SO_RCVTIMEO t; Unix.setsoc
 let open_socket address =
   match address with
   | Unix_socket p ->
+    Option.iter failwith (Config.long_socket p);
     let fd = Unix.socket ~cloexec:true Unix.PF_UNIX Unix.SOCK_STREAM 0 in
     (try set_timeouts fd !handshake_timeout; Unix.connect fd (Unix.ADDR_UNIX p) with e -> Unix.close fd; raise e);
     fd
@@ -262,6 +279,7 @@ let rec reconnect c =
   | exception Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK | Unix.EINPROGRESS), _, _) ->
     Error (false, Printf.sprintf "no answer within %g s" !handshake_timeout)
   | exception Unix.Unix_error (e, _, _) -> Error (false, Unix.error_message e)
+  | exception Failure m -> Error (true, m)
 
 (* A write to a connection the server closed fails with EPIPE, never SIGPIPE: every write is a send with MSG_NOSIGNAL
    (Fdpass.write_all), so the library leaves the process's signals alone. *)
@@ -279,7 +297,7 @@ let close c =
    | None -> ());
   (* the follow streams end; their domains stop *)
   List.iter (fun (fd, _) -> try Unix.shutdown fd Unix.SHUTDOWN_ALL with Unix.Unix_error _ -> ()) c.follows;
-  List.iter (fun (_, d) -> Domain.join d) c.follows;
+  List.iter (fun (_, join) -> join ()) c.follows;
   c.follows <- []
 
 type error = { code : string; message : string }
@@ -415,10 +433,12 @@ let follow c handle =
           | _ -> None)
         | _ -> None
       with
-      | Some fol ->
-        let d = Domain.spawn (follow_loop fc fol) in
-        c.follows <- (fd, d) :: c.follows;
-        Some fol
+      | Some fol -> (
+        (* a domain of its own, counted (Pool), so that its frames never wait for the program's computation; the
+           Cesia client's engine has no systhreads to share one *)
+        match Pool.spawn (follow_loop fc fol) with
+        | d -> c.follows <- (fd, fun () -> Domain.join d) :: c.follows; Some fol
+        | exception _ -> fclose fc; None)
       | None -> fclose fc; None
       | exception Not_followed -> fclose fc; raise Not_followed
       | exception (Broken _ | Follower.Stream _ | Codec.Short | Unix.Unix_error _ | Failure _ | Wire.Malformed _) -> fclose fc; None))
@@ -511,19 +531,22 @@ let get c db thing =
     | Wire.Facts f -> Ok (f.group, f.facts)
     | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" }))
 
-let find c db ?(select = Wire.Give [||]) ?(extra = []) ?(order = Top.none) query =
+let find c db ?(select = Wire.Give [||]) ?(extra = []) ?(order = Top.none) ?timeout query =
+  let ms = timeout_ms timeout in
   match local_view c db with
   | Some v -> (
-    match Answer.answer ~order ~extra v query select with
+    match Answer.answer ~order ~extra ?stop:(local_stop timeout) v query select with
     | a ->
       let typs = Array.init a.cols a.typ in
       Ok (v.group, List.init a.n (fun i -> Array.init a.cols (fun j -> Store.value v typs.(j) (a.word i j))))
     | exception Query.Bad m -> Error { code = "invalid"; message = m }
+    | exception Query.Timeout t -> Error { code = "timeout"; message = Query.timeout_message t }
     | exception Pages.Unreadable m -> Error { code = "damaged"; message = m })
   | None when (extra <> [] || order <> Top.none) && c.spoken < 2 -> Error { code = "invalid"; message = older }
+  | None when ms > 0 && c.spoken < 6 -> Error { code = "invalid"; message = no_timeout c.spoken }
   | None when List.length query.where > Wire.max_patterns -> Error { code = "invalid"; message = too_many_patterns query }
   | None -> (
-    match read_call c (Wire.Find { db = db.handle; query; select; extra; order }) with
+    match read_call c (Wire.Find { db = db.handle; query; select; extra; order; timeout = ms }) with
     | Wire.Rows r -> Ok (r.group, r.rows)
     | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Find" }))
 
@@ -651,11 +674,13 @@ let rec declare ?(avoid = []) c name (props : Schema.prop list) =
 
 type pushed = Pushed of Wire.push | Ended of error
 
-let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) ?(order = Top.none) query =
+let watch c db ?(select = Wire.Give [||]) ?(from = 0) ?(extra = []) ?(order = Top.none) ?timeout query =
+  let ms = timeout_ms timeout in
   if extra <> [] && c.spoken < 2 then invalid_arg older;
   if order <> Top.none && c.spoken < 5 then invalid_arg (no_sorted_watch c.spoken);
+  if ms > 0 && c.spoken < 6 then invalid_arg (no_timeout c.spoken);
   if List.length query.where > Wire.max_patterns then invalid_arg (too_many_patterns query);
-  let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra; worder = order }) in
+  let id = send c (Wire.Watch { db = db.handle; query; select; from; wextra = extra; worder = order; wtimeout = ms }) in
   flush c;
   id
 

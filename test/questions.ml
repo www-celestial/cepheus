@@ -171,7 +171,7 @@ let engine ?(extra = []) v q sel o =
 (* the request through the wire: coded, read back *)
 let wired q extra sel (o : Top.order) =
   let b = Buffer.create 64 in
-  Wire.put_request b (Wire.Find { db = 0; query = q; select = sel; extra; order = o });
+  Wire.put_request b (Wire.Find { db = 0; query = q; select = sel; extra; order = o; timeout = 0 });
   let s = Buffer.contents b in
   match Wire.get_request Wire.k_find (Codec.reader (Bytes.of_string s) 0 (String.length s)) with
   | Wire.Find f -> f.query, f.extra, f.select, f.order

@@ -369,7 +369,7 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   intersecte ainsi ses slices au lieu de chercher chaque candidat. [théorie](theory.md)
 - **lease** — une permission qui prend fin d'elle-même après un temps, sauf si elle est renouvelée (Gray et Cheriton
   1989). La conception en proposait un pour les lectures locales ; il a été laissé au profit du numéro de visibilité,
-  qui n'a besoin d'aucune horloge (les leases reviendront entre machines).
+  qui n'a besoin d'aucune horloge (entre machines, le leader d'un cluster Raft sert ses lectures sous un lease).
   [serveur](server.md#les-règles-quavait-dabord-la-conception-et-pourquoi-elles-ont-été-laissées)
 - **least model** — le plus petit ensemble de faits qui contient les faits affirmés et qui est clos par les règles : ce
   que contient une base avec des règles (G17). [règles](rules.md#ce-que-tient-la-base--le-least-model)
@@ -474,6 +474,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **provenance** — l'origine d'un fait : ici, une preuve de ce fait. [règles](rules.md#why)
 - **question** — la query (la requête) de Cepheus : des patterns sur des variables.
   [concepts](concepts.md#les-questions)
+- **question timeout** — le temps qu'une question peut prendre avant de finir avec le code `timeout` : le
+  `question_timeout` du serveur (30 s par défaut), ou le `timeout` plus court d'un programme.
+  [serveur](server.md#clustertoml)
 - **radix sort** (least significant digit first) — un tri qui trie selon le chiffre le plus bas, puis le suivant,
   chaque passe étant un counting sort stable, pour que l'ordre des chiffres plus bas soit gardé :
   $O(n \times \text{chiffres})$. Les valeurs d'un grand groupe à l'intérieur d'une propriété sont triées avec des

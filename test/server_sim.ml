@@ -358,7 +358,7 @@ let deliver_to_server w sc =
       Buffer.clear sc.to_server;
       Buffer.add_string sc.to_server rest
     end;
-    let used, why = Core.input c sc.sin 0 sc.sin_n in
+    let used, why = Core.input ~arrived:0 c sc.sin 0 sc.sin_n in
     Bytes.blit sc.sin used sc.sin 0 (sc.sin_n - used);
     sc.sin_n <- sc.sin_n - used;
     c.flush ();
@@ -532,7 +532,7 @@ let send_watch (cl : client) sc cw =
   let id = cl.next_id in
   cl.next_id <- cl.next_id + 1;
   let body = Buffer.create 64 in
-  Wire.put_request body (Wire.Watch { db = 0; query = cw.wq; select = cw.wsel; from; wextra = []; worder = cw.word });
+  Wire.put_request body (Wire.Watch { db = 0; query = cw.wq; select = cw.wsel; from; wextra = []; worder = cw.word; wtimeout = 0 });
   Wire.add_frame sc.to_server ~id ~kind:Wire.k_watch ~flags:0 body;
   Hashtbl.replace sc.outstanding id (P_watch cw);
   cw.wid <- Some id
@@ -911,7 +911,7 @@ let client_step w (cl : client) =
               | x :: _ -> Wire.Group (key, [| Wire.Count; Wire.Sum x; Wire.Min x; Wire.Max x |])
               | [] -> Wire.Group (key, [| Wire.Count |]))
           in
-          send cl sc (Wire.Find { db = 0; query = q; select = sel; extra = []; order = Top.none }) (P_find (q, sel, cl.confirmed, known w)))
+          send cl sc (Wire.Find { db = 0; query = q; select = sel; extra = []; order = Top.none; timeout = 0 }) (P_find (q, sel, cl.confirmed, known w)))
       | 8 when Rng.bool w.r -> send cl sc (Wire.Admin "status") (P_other "status")
       | 8 -> (
         (* a watch: a new one, or one unwatched *)

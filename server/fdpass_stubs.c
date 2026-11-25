@@ -2,11 +2,11 @@
    another process over a Unix-domain socket and receiving them (sendmsg and recvmsg with one SCM_RIGHTS control
    message, unix(7)), and mapping a file's first page read-only and shared (mmap with PROT_READ and MAP_SHARED: the
    server's later stores to the page are seen at once, and the reader cannot write it). The interface is
-   server/fdpass.ml, which checks every offset and length before a call. And the monotonic clock (clock_gettime with
-   CLOCK_MONOTONIC, which a change of the wall clock does not move) for Raft's timeouts and leases (server/raft.ml).
-   And the bytes free on a file system (statvfs), so that a Raft server refuses a copy its disk cannot hold
-   (server/catchup.ml). */
+   server/fdpass.ml, which checks every offset and length before a call. And whether the peer of a socket has closed
+   it (poll with POLLRDHUP), so that a question whose program is gone stops (server/core.ml). */
 
+/* POLLRDHUP */
+#define _GNU_SOURCE
 #define CAML_NAME_SPACE
 #include <caml/alloc.h>
 #include <caml/bigarray.h>
@@ -17,10 +17,10 @@
 #include <caml/unixsupport.h>
 
 #include <errno.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/statvfs.h>
 #include <time.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
@@ -137,29 +137,23 @@ CAMLprim value cepheus_fd_map_ro(value fd, value len) {
   CAMLreturn(caml_ba_alloc_dims(CAML_BA_INT64 | CAML_BA_C_LAYOUT | CAML_BA_EXTERNAL, 1, p, (intnat)(l / 8)));
 }
 
-/* milliseconds of the monotonic clock: an immediate int, no allocation */
-value cepheus_monotonic_ms(value unit) {
-  (void)unit;
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return Val_long((long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-}
-
-/* the bytes an unprivileged process may still write on the file system of [path]: f_bavail blocks of f_frsize
-   (statvfs(3)), at most 2^62 */
-CAMLprim value cepheus_free_bytes(value path) {
-  CAMLparam1(path);
-  struct statvfs st;
-  char *p = caml_stat_strdup(String_val(path));
-  int r, err;
-  caml_enter_blocking_section();
-  r = statvfs(p, &st);
-  err = errno;
-  caml_leave_blocking_section();
-  caml_stat_free(p);
-  if (r != 0) caml_unix_error(err, "statvfs", path);
-  unsigned long long n = (unsigned long long)st.f_bavail * (unsigned long long)st.f_frsize;
-  if (st.f_frsize != 0 && n / st.f_frsize != (unsigned long long)st.f_bavail) n = 1ULL << 62;
-  if (n > (1ULL << 62)) n = 1ULL << 62;
-  CAMLreturn(Val_long((intnat)n));
+/* Has the peer closed the socket (or the connection broken): poll(2) with no timeout for POLLRDHUP, the peer's
+   shutdown of its side (Linux 2.6.17, TCP and Unix stream sockets), with POLLHUP and POLLERR; bytes the peer sent
+   before do not hide it. As PostgreSQL's client_connection_check_interval (WL_SOCKET_CLOSED). An immediate bool, no
+   allocation, no release of the runtime: the call does not wait. */
+value cepheus_peer_closed(value fd) {
+  struct pollfd p;
+  p.fd = Int_val(fd);
+#ifdef POLLRDHUP
+  p.events = POLLRDHUP;
+#else
+  p.events = 0;
+#endif
+  p.revents = 0;
+  if (poll(&p, 1, 0) <= 0) return Val_false;
+  return Val_bool((p.revents & (POLLHUP | POLLERR | POLLNVAL
+#ifdef POLLRDHUP
+                                | POLLRDHUP
+#endif
+                                )) != 0);
 }

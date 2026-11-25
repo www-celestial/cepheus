@@ -360,7 +360,9 @@ par son socket, 697 et 658 ms), pic de 79 à 105 MB ; sur un seul run des niveau
 parmi les lignes de ses factures (la base range les lignes par chose), donc la question des triangles lit des pages
 au hasard dans les 120 MB de lignes par chose, pour quelques octets chacune. Un troisième ordre des lignes, par
 propriété puis chose (comme le gardent Hexastore [Weiss 2008] et RDF-3X [Neumann 2008]), rendrait locale une propriété
-de beaucoup de choses ; il coûte 10 octets de plus par fait. À décider sur des mesures de charges réelles.
+de beaucoup de choses ; il coûte 10 octets de plus par fait. Il est construit : le column order du format de run 8
+(2026-11-11), avec lequel les triangles sous une limite de 48 MB prennent 260 ms [249, 274] contre 1,02 s pour SQLite
+([benchmarks](benchmarks.md#le-column-order-et-les-intersections-en-leapfrog-2026-11-11-à-10-millions-de-faits)).
 
 **Ce que coûtait un merge, jusqu'à ce qu'il soit écrit dans un fichier.** Un merge construisait la nouvelle base en
 mémoire (des tableaux pour son tri, puis ses pages) à côté de l'ancienne, et les pages des deux vivaient sur le tas
@@ -673,13 +675,13 @@ une fois chacun. Le groupe du chargement, 9,4 M de changements : sortes 0 bit (u
 niveau 19 fait 29,4 MB de la même frame de 94 MB (mesuré ici, 2026-11-08 ; LZ4 au niveau 1, 56,6 MB) : un codage qui
 connaît la structure bat les compresseurs généraux, sans C.
 
-## 12. Ce qui vient ensuite, et pourquoi
+## 12. Ce qui n'est pas encore construit
 
-- **Plus grand que la mémoire, le reste** (design, section 15) : des filtres par run pour les recherches par valeur
-  (des Bloom filters dimensionnés par niveau comme dans Monkey [Dayan 2017]) si les lectures à travers les runs en ont
-  besoin ; planifier les merges autour des clients comme le fait SILK [Balmau 2019]. Le column order (format de run 8)
-  a fait passer les triangles sous une limite de 48 MB de plus de 2,5 minutes par exécution (format 7) à 0,26 s sur un
-  cœur, contre 1,02 s pour SQLite ([benchmarks](benchmarks.md)).
+- **Plus grand que la mémoire, le reste** : des filtres par run pour les recherches par valeur (des Bloom filters
+  dimensionnés par niveau comme dans Monkey [Dayan 2017]) si les lectures à travers les runs en ont besoin ; des merges
+  placés autour des clients comme le fait SILK [Balmau 2019]. Le column order (format de run 8) a fait passer les
+  triangles sous une limite de 48 MB de plus de 2,5 minutes par exécution (format 7) à 0,26 s sur un cœur, contre 1,02 s
+  pour SQLite ([benchmarks](benchmarks.md)).
 - **Des questions plus proches des noyaux** (les 5 ms du prototype pour Q4 et 90 ms pour Q5, contre 129 et 259 ms sur
   un cœur) : les candidats d'un niveau recherchés par lots (vectorized execution, l'exécution par lots de valeurs) là où
   les appels par binding coûtent maintenant plus que les lectures ; des slices parcourues par galloping à l'intérieur du
@@ -688,14 +690,17 @@ connaît la structure bat les compresseurs généraux, sans C.
   plus les cycles du GC (mesuré : un domain à côté de la passe par chose, inactif ou occupé, gardait 300 MB de tas de
   plus au pic du chargement en 4 groupes). Un dictionnaire qui préserve l'ordre, reconstruit à chaque merge (Binnig et
   al. [Binnig 2009]), pour les intervalles sur des textes.
-- **Règles, les étapes suivantes** ([règles](rules.md#ce-qui-nest-pas-encore-là)) : le module de fermeture pour les propriétés
-  transitives (la materialisation modulaire de Hu, Motik et Horrocks, [Hu 2019]), des règles spécialisées par
-  l'ontologie, des dérivations parallèles triées, l'égalité par réécriture ; des abonnements par les
-  règles de delta de DBSP.
-- **Réplication** : Raft [Ongaro 2014] avec une recovery consciente du protocole [Alagappan 2018] ; le journal est la seule chose répliquée (Aurora [Verbitski 2017]).
-- **Plusieurs machines** : des bases réparties sur des machines, puis le stockage sur des object stores (Socrates [Antonopoulos 2019]), puis une base
-  partitionnée par chose avec un ordre déterministe des groupes entre partitions (Calvin [Thomson 2012]) et un Generic Join
-  distribué (BiGJoin [Ammar 2018]).
+- **Règles** : ce que liste la page des [règles](rules.md#ce-qui-nest-pas-encore-là). Construits : le module de
+  fermeture pour les propriétés transitives (la materialisation modulaire de Hu, Motik et Horrocks, [Hu 2019]), des
+  règles spécialisées par l'ontologie, des dérivations parallèles triées pour les chargements, l'égalité par
+  réécriture ; les questions vivantes par les règles de delta des joins (DBSP [Budiu 2023]).
+- **Plusieurs machines** : construits, une replica et un cluster Raft [Ongaro 2014] dont un serveur abîmé ne vote ni ne
+  se présente à une élection tant qu'il n'est pas réparé (une règle éclairée par [Alagappan 2018]), le journal la seule
+  chose répliquée (Aurora [Verbitski 2017]), chaque serveur tenant chaque base en entier ([le
+  serveur](server.md#un-cluster-de-trois-raft)). Pas construits : des bases réparties sur
+  des machines ; le stockage sur des object stores (Socrates [Antonopoulos 2019]) ; une base partitionnée par chose
+  avec un ordre déterministe des groupes entre partitions (Calvin [Thomson 2012]) et un Generic Join distribué
+  (BiGJoin [Ammar 2018]).
 
 ## Pour aller plus loin
 
