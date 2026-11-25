@@ -733,7 +733,25 @@ let optional_keys = C.keys [| "Optional" |]
 let range_keys = C.keys [| "Range"; "Low"; "High"; "Open" |]
 let aggregate_keys = C.keys [| "Sum"; "Min"; "Max"; "Count" |]
 
-type column = Var of int | Agg of Wire.agg
+(* the aggregates of reports (protocol 9) and Trunc, as the package's functions make them *)
+let report_keys = C.keys [| "Avg"; "Count"; "Values"; "Quantile"; "At"; "Discrete"; "Variance"; "Stddev"; "Population"; "Trunc"; "Unit"; "Zone" |]
+
+(* a field of Give: a variable, an aggregate, or a date truncated (a key, computed: Ask.Trunc) *)
+type column = Var of int | Agg of Wire.agg | Trunc of int * string * string
+
+(* the variable of a column, if it has one *)
+let col_var = function Var j | Trunc (j, _, _) -> Some j | Agg a -> Agg.var_of a
+
+(* a column with its variable renumbered *)
+let col_map f = function
+  | Var j -> Var (f j)
+  | Trunc (j, u, z) -> Trunc (f j, u, z)
+  | Agg a ->
+    Agg
+      (match a with
+       | Wire.Count -> Count | Sum x -> Sum (f x) | Min x -> Min (f x) | Max x -> Max (f x) | Avg x -> Avg (f x)
+       | Distinct x -> Distinct (f x) | Values x -> Values (f x) | Quantile (x, p, d) -> Quantile (f x, p, d)
+       | Variance (x, b) -> Variance (f x, b) | Stddev (x, b) -> Stddev (f x, b))
 
 (* a question as the program gives it: its patterns and ranges, its select, and for each field of Give its name, its
    column in the answer and its type *)
@@ -746,6 +764,7 @@ type question = {
   typs : Value.typ array;
   order : Question.Top.order;
   ren : int array;  (* each variable's number in [query], -1 when left out (in no item) *)
+  lists : bool array;  (* the fields of Give that are Values: lists *)
 }
 
 let question ?(uses = []) ctx name d qv nvars =
@@ -862,28 +881,53 @@ let question ?(uses = []) ctx name d qv nvars =
           (item_of ~top:true ~alt:false it))
       where;
     let names = C.names give and gvals = C.values give in
-    let cols =
-      Array.map
-        (fun g ->
-          match var g with
-          | Some j -> Var j
-          | None -> (
-            match g with
-            | C.Map m | C.Struct m -> (
-              match C.fields aggregate_keys m with
-              | [| s; C.Missing; C.Missing; C.Missing |] when var s <> None -> Agg (Wire.Sum (Option.get (var s)))
-              | [| C.Missing; s; C.Missing; C.Missing |] when var s <> None -> Agg (Wire.Min (Option.get (var s)))
-              | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> Agg (Wire.Max (Option.get (var s)))
-              | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> Agg Wire.Count
-              | _ -> C.need ctx name "a variable, or Sum, Min, Max or Count" g)
-            | _ -> C.need ctx name "a variable, or Sum, Min, Max or Count" g))
-        gvals
+    let what_col = "a variable, or Sum, Min, Max, Count, Avg, Values, Quantile, Median, Variance, Stddev or Trunc" in
+    (* a field of Give, None when it is none of them *)
+    let column_of g =
+      match var g with
+      | Some j -> Some (Var j)
+      | None -> (
+        match g with
+        | C.Map m | C.Struct m -> (
+          match C.fields aggregate_keys m with
+          | [| s; C.Missing; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Sum (Option.get (var s))))
+          | [| C.Missing; s; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Min (Option.get (var s))))
+          | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> Some (Agg (Wire.Max (Option.get (var s))))
+          | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> Some (Agg Wire.Count)
+          | _ -> (
+            let flag = function C.Missing | C.Bool false -> Some false | C.Bool true -> Some true | _ -> None in
+            let at = function C.Int i -> Some (float_of_int i) | C.Float f -> Some f | _ -> None in
+            match C.fields report_keys m with
+            | [| x; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
+              Option.map (fun j -> Agg (Wire.Avg j)) (var x)
+            | [| C.Missing; x; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
+              Option.map (fun j -> Agg (Wire.Distinct j)) (var x)
+            | [| C.Missing; C.Missing; x; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] ->
+              Option.map (fun j -> Agg (Wire.Values j)) (var x)
+            | [| C.Missing; C.Missing; C.Missing; x; p; d; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] -> (
+              match var x, at p, flag d with
+              | Some j, Some p, Some d -> Some (Agg (Wire.Quantile (j, p, d)))
+              | Some _, None, _ -> C.need ctx name "a fraction from 0 to 1 for Quantile" p
+              | _ -> None)
+            | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; x; C.Missing; pop; C.Missing; C.Missing; C.Missing |] -> (
+              match var x, flag pop with Some j, Some pop -> Some (Agg (Wire.Variance (j, pop))) | _ -> None)
+            | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; x; pop; C.Missing; C.Missing; C.Missing |] -> (
+              match var x, flag pop with Some j, Some pop -> Some (Agg (Wire.Stddev (j, pop))) | _ -> None)
+            | [| C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; x; u; z |] -> (
+              match var x, u, z with
+              | Some j, C.Text u, C.Text z -> Some (Trunc (j, u, z))
+              | Some _, C.Text _, _ -> C.need ctx name "a time zone's name for Trunc, as \"Europe/Paris\"" z
+              | Some _, _, _ -> C.need ctx name "a unit for Trunc, as \"month\"" u
+              | None, _, _ -> None)
+            | _ -> None))
+        | _ -> None)
     in
+    let cols = Array.map (fun g -> match column_of g with Some c -> c | None -> C.need ctx name what_col g) gvals in
     (* a variable in no item of Where, of Give, or of [uses] (a rule's Then), as an optional filter left out, is left
        out: the others numbered again in their order; with every variable used, the question as it is *)
     Array.iteri
-      (fun i c -> match c with
-        | (Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j)) when vtyp.(j) = None -> refuse "invalid" "Give's %s is a variable in no pattern of Where" names.(i)
+      (fun i c -> match col_var c with
+        | Some j when vtyp.(j) = None -> refuse "invalid" "Give's %s is a variable in no pattern of Where" names.(i)
         | _ -> ())
       cols;
     let used = Array.make nvars false in
@@ -896,11 +940,12 @@ let question ?(uses = []) ctx name d qv nvars =
       | Optional (q : Query.pattern) -> use_t q.e; use_t q.v
       | Not l -> List.iter use_item l
       | Or alts -> List.iter (List.iter use_item) alts
+      | Trunc (_, j, _, _) -> use j (* made below, from Give: not in Where *)
     in
     List.iter (fun (q : Query.pattern) -> use_t q.e; use_t q.v) !patterns;
     List.iter (fun (j, _, _) -> use j) !ranges;
     List.iter use_item !extra;
-    Array.iter (function Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j) -> use j | Agg Wire.Count -> ()) cols;
+    Array.iter (fun c -> Option.iter use (col_var c)) cols;
     let rec use_v v = match var v with Some j -> use j | None -> (match v with C.List l -> for i = 0 to C.length l - 1 do use_v (C.item ctx l i) done | C.Map m | C.Struct m -> Array.iter use_v (C.values m) | _ -> ()) in
     List.iter use_v uses;
     let ren = Array.make nvars (-1) in
@@ -922,31 +967,39 @@ let question ?(uses = []) ctx name d qv nvars =
           | Optional q -> Optional (rp q)
           | Not l -> Not (List.map ri l)
           | Or alts -> Or (List.map (List.map ri) alts)
+          | Trunc (y, j, u, z) -> Trunc (y, r j, u, z)
         in
-        let rc = function Var j -> Var (r j) | Agg (Wire.Sum j) -> Agg (Wire.Sum (r j)) | Agg (Wire.Min j) -> Agg (Wire.Min (r j)) | Agg (Wire.Max j) -> Agg (Wire.Max (r j)) | Agg Wire.Count -> Agg Wire.Count in
-        !nv, List.rev_map rp !patterns, List.map (fun (j, lo, hi) -> r j, lo, hi) !ranges, List.rev_map ri !extra, Array.map rc cols
+        !nv, List.rev_map rp !patterns, List.map (fun (j, lo, hi) -> r j, lo, hi) !ranges, List.rev_map ri !extra, Array.map (col_map r) cols
       end
     in
     let query = { Query.vars = nvars'; where = patterns; ranges } in
-    let keys_v = List.filter_map (function Var j -> Some j | Agg _ -> None) (Array.to_list wcols) in
-    let aggs = List.filter_map (function Agg g -> Some g | Var _ -> None) (Array.to_list wcols) in
+    (* each Trunc a variable after the question's (nvars', nvars' + 1, ...), in the order of Give: Ask.Trunc *)
+    let truncs = ref [] in
+    let keys_v =
+      List.filter_map
+        (function
+          | Var j -> Some j
+          | Trunc (j, u, z) -> let y = nvars' + List.length !truncs in truncs := !truncs @ [ Question.Ask.Trunc (y, j, u, z) ]; Some y
+          | Agg _ -> None)
+        (Array.to_list wcols)
+    in
+    let extra = extra @ !truncs in
+    let aggs = List.filter_map (function Agg g -> Some g | Var _ | Trunc _ -> None) (Array.to_list wcols) in
     let select = if aggs = [] then Wire.Give (Array.of_list keys_v) else Wire.Group (Array.of_list keys_v, Array.of_list aggs) in
     (* the column of the answer for each field of Give: keys first, then aggregates, in their order *)
     let nk = List.length keys_v in
     let at = Array.make (Array.length cols) 0 in
     let ki = ref 0 and ai = ref 0 in
-    Array.iteri (fun i c -> match c with Var _ -> at.(i) <- !ki; incr ki | Agg _ -> at.(i) <- nk + !ai; incr ai) cols;
-    let ctyp i = match cols.(i) with Var j | Agg (Wire.Sum j | Wire.Min j | Wire.Max j) -> (match vtyp.(j) with Some t -> t | None -> Value.Tint) | Agg Wire.Count -> Value.Tint in
+    Array.iteri (fun i c -> match c with Var _ | Trunc _ -> at.(i) <- !ki; incr ki | Agg _ -> at.(i) <- nk + !ai; incr ai) cols;
+    let vt j = match vtyp.(j) with Some t -> t | None -> Value.Tint in
+    let ctyp i = match cols.(i) with Var j -> vt j | Trunc _ -> Value.Tdate | Agg a -> Agg.typ a (match Agg.var_of a with Some j -> vt j | None -> Value.Tint) in
     let typs = Array.init (Array.length cols) ctyp in
+    (* the columns of Values: lists, a row of the answer a value (the package folds them back: records) *)
+    let lists = Array.map (function Agg (Wire.Values _) -> true | _ -> false) cols in
     (* Sort: each key a field of Give (its variable or its aggregate), Desc for descending; then every other field by
        name, so that rows equal in the order are the same row. After: a row with every field of Give. *)
     let field_of k =
-      let col_of g = match var g with Some j -> Some (Var j) | None -> (match g with C.Map m | C.Struct m -> (match C.fields aggregate_keys m with
-          | [| s; C.Missing; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Sum (Option.get (var s))))
-          | [| C.Missing; s; C.Missing; C.Missing |] when var s <> None -> Some (Agg (Wire.Min (Option.get (var s))))
-          | [| C.Missing; C.Missing; s; C.Missing |] when var s <> None -> Some (Agg (Wire.Max (Option.get (var s))))
-          | [| C.Missing; C.Missing; C.Missing; C.Bool true |] -> Some (Agg Wire.Count)
-          | _ -> None) | _ -> None) in
+      let col_of = column_of in
       let desc, g = match k with (C.Map m | C.Struct m) when (match C.fields desc_keys m with [| C.Missing |] -> false | _ -> true) -> true, (C.fields desc_keys m).(0) | _ -> false, k in
       match col_of g with
       | Some c -> (match List.find_opt (fun i -> cols.(i) = c) (List.init (Array.length cols) Fun.id) with
@@ -966,7 +1019,8 @@ let question ?(uses = []) ctx name d qv nvars =
         let keys =
           if user = [] then []
           else begin
-            let rest = List.filter (fun i -> not (List.mem_assoc i user)) (List.init (Array.length cols) Fun.id) in
+            (* a Values field is a list: no key of the order *)
+            let rest = List.filter (fun i -> not (List.mem_assoc i user) && not lists.(i)) (List.init (Array.length cols) Fun.id) in
             let rest = List.sort (fun a b -> compare names.(a) names.(b)) rest in
             List.map (fun (i, desc) -> { Question.Top.col = at.(i); desc }) user @ List.map (fun i -> { Question.Top.col = at.(i); desc = false }) rest
           end
@@ -980,10 +1034,13 @@ let question ?(uses = []) ctx name d qv nvars =
             let vals = C.fields (C.keys names) m in
             let a = Array.make (Array.length cols) (Value.Int 0) in
             (* an Optional's field may be missing: the row's cell is then missing too *)
-            let optional i = match wcols.(i) with Var j -> List.exists (function Question.Ask.Optional { v = Query.Var y; _ } -> y = j | _ -> false) extra | Agg _ -> false in
+            let optional i = match wcols.(i) with Var j | Trunc (j, _, _) -> List.exists (function Question.Ask.Optional { v = Query.Var y; _ } -> y = j | _ -> false) extra | Agg _ -> false in
+            (* a cell a report may leave missing: a sample's variance of one value *)
+            let may_miss i = match wcols.(i) with Agg (Wire.Variance (_, false) | Stddev (_, false)) -> true | _ -> false in
             Array.iteri
               (fun i x ->
-                if x = C.Missing && optional i then a.(at.(i)) <- Value.missing
+                if lists.(i) then a.(at.(i)) <- Value.Int 0 (* a list: no part of the order *)
+                else if x = C.Missing && (optional i || may_miss i) then a.(at.(i)) <- Value.missing
                 else begin
                   if x = C.Missing then refuse "invalid" "After needs every field of Give: %s is missing" names.(i);
                   a.(at.(i)) <- of_cesia names.(i) typs.(i) x
@@ -995,10 +1052,42 @@ let question ?(uses = []) ctx name d qv nvars =
         { Question.Top.keys; limit; after }
       end
     in
-    { query; extra; select; qkeys = C.keys names; at; typs; order; ren }
+    { query; extra; select; qkeys = C.keys names; at; typs; order; ren; lists }
 
 (* a row of the answer (values) as the program's map *)
 let record_of_row ctx qn (row : Value.t array) = C.record ctx qn.qkeys (Array.init (Array.length qn.at) (fun i -> to_cesia qn.typs.(i) row.(qn.at.(i))))
+
+(* the rows of an answer as the program's maps: with Values, a group's rows (one a value: their other cells the
+   same) folded into one map whose Values fields are lists, in the order of their first row *)
+let records ctx qn (rows : Value.t array list) =
+  if not (Array.exists Fun.id qn.lists) then Array.of_list (List.map (record_of_row ctx qn) rows)
+  else begin
+    let n = Array.length qn.at in
+    let key (row : Value.t array) =
+      let b = Buffer.create 32 in
+      Array.iteri (fun i j -> if not qn.lists.(i) then Value.encode b row.(j)) qn.at;
+      Buffer.contents b
+    in
+    let groups = Hashtbl.create 16 and order = ref [] in
+    List.iter
+      (fun row ->
+        let k = key row in
+        match Hashtbl.find_opt groups k with
+        | Some (first, acc) -> Hashtbl.replace groups k (first, row :: acc)
+        | None -> Hashtbl.replace groups k (row, [ row ]); order := k :: !order)
+      rows;
+    Array.of_list
+      (List.rev_map
+         (fun k ->
+           let first, rs = Hashtbl.find groups k in
+           let rs = List.rev rs in
+           C.record ctx qn.qkeys
+             (Array.init n (fun i ->
+                  if qn.lists.(i) then
+                    C.list ctx (Array.of_list (List.filter_map (fun (r : Value.t array) -> let x = r.(qn.at.(i)) in if Value.is_missing x then None else Some (to_cesia qn.typs.(i) x)) rs))
+                  else to_cesia qn.typs.(i) first.(qn.at.(i)))))
+         !order)
+  end
 
 (* a call's timeout = seconds: missing, or a number above 0 *)
 let timeout_of ctx name = function
@@ -1020,7 +1109,14 @@ let find ctx a =
       match local_state d with
       | Some v -> (
         match Answer.answer ~order:qn.order ~extra:qn.extra ?stop:(Client.local_stop timeout) v query select with
-        | ans -> Array.init ans.n (fun r -> C.record ctx keys (Array.init ncols (fun i -> if ans.missing r at.(i) then C.Missing else of_word v typs.(i) (ans.word r at.(i)))))
+        | ans when Array.exists Fun.id qn.lists -> records ctx qn (List.init ans.n (fun r -> Array.init ans.cols (fun j -> Answer.value v ans r j)))
+        | ans ->
+          Array.init ans.n (fun r ->
+              C.record ctx keys
+                (Array.init ncols (fun i ->
+                     if ans.missing r at.(i) then C.Missing
+                     else if ans.computed at.(i) then to_cesia typs.(i) (ans.cell r at.(i))
+                     else of_word v typs.(i) (ans.word r at.(i)))))
         | exception Query.Bad m -> refuse "invalid" "%s" m
         | exception Query.Timeout t -> refuse "timeout" "%s" (Query.timeout_message t)
         | exception Pages.Unreadable m -> refuse "damaged" "%s" m)
@@ -1030,10 +1126,11 @@ let find ctx a =
         | Server s when (qn.extra <> [] || qn.order <> Question.Top.none) && s.conn.cl.spoken < 2 -> refuse "invalid" "%s" Client.older
         | Server s when timeout <> None && s.conn.cl.spoken < 6 -> refuse "invalid" "%s" (Client.no_timeout s.conn.cl.spoken)
         | Server s when s.conn.cl.spoken < 7 && Wire.needs_7 qn.extra -> refuse "invalid" "%s" (Client.no_less s.conn.cl.spoken)
+        | Server s when s.conn.cl.spoken < 9 && Wire.needs_9 qn.extra qn.select -> refuse "invalid" "%s" (Client.no_report s.conn.cl.spoken)
         | Server _ when List.length query.where > Wire.max_patterns -> refuse "invalid" "%s" (Client.too_many_patterns query)
         | Server s -> (
           match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order; timeout = Client.timeout_ms timeout }) with
-          | Wire.Rows rw -> Array.of_list (List.map (fun row -> record_of_row ctx qn row) rw.rows)
+          | Wire.Rows rw -> records ctx qn rw.rows
           | rep -> server_error rep "Find"))
     in
     C.pay ctx (Array.length rows);
@@ -1073,6 +1170,7 @@ let find_source d (sh : Conn.shared) =
     | _ when sh.order <> Question.Top.none && s.conn.cl.spoken < 5 -> Conn.finish sh "invalid" (Client.no_sorted_watch s.conn.cl.spoken); true
     | _ when sh.timeout <> None && s.conn.cl.spoken < 6 -> Conn.finish sh "invalid" (Client.no_timeout s.conn.cl.spoken); true
     | _ when s.conn.cl.spoken < 7 && Wire.needs_7 sh.extra -> Conn.finish sh "invalid" (Client.no_less s.conn.cl.spoken); true
+    | _ when s.conn.cl.spoken < 9 && Wire.needs_9 sh.extra sh.select -> Conn.finish sh "invalid" (Client.no_report s.conn.cl.spoken); true
     | _ when List.length sh.query.where > Wire.max_patterns -> Conn.finish sh "invalid" (Client.too_many_patterns sh.query); true
     | _ ->
       Mutex.protect sh.sm (fun () -> sh.src <- Remote);
@@ -1089,10 +1187,10 @@ let stop_source d (sh : Conn.shared) =
 let message ctx qn = function
   | Conn.M_answer (g, rows) ->
     C.pay ctx (List.length rows);
-    C.ok ctx (C.record ctx message_keys [| Int g; C.list ctx (Array.of_list (List.map (record_of_row ctx qn) rows)); C.Missing; C.Missing |])
+    C.ok ctx (C.record ctx message_keys [| Int g; C.list ctx (records ctx qn rows); C.Missing; C.Missing |])
   | M_change (g, added, removed) ->
     C.pay ctx (List.length added + List.length removed);
-    let l rows = C.list ctx (Array.of_list (List.map (record_of_row ctx qn) rows)) in
+    let l rows = C.list ctx (records ctx qn rows) in
     C.ok ctx (C.record ctx message_keys [| Int g; C.Missing; l added; l removed |])
   | M_end (code, m) -> failure ctx code m
 

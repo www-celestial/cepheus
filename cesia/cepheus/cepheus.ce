@@ -100,8 +100,40 @@ Min(x) = {Min: x}
 (** An aggregate of Give: the largest value of a variable. *)
 Max(x) = {Max: x}
 
-(** An aggregate of Give: the number of answers of a group. *)
-Count() = {Count: true}
+(** An aggregate of Give: the number of answers of a group; Count(x), the number of different values of x in it (SQL's
+    COUNT(DISTINCT x)), an Optional's missing value not counted. *)
+Count(x = true) = {Count: x}
+
+(** An aggregate of Give: the mean of x in a group, from its exact sum (the same whatever the order of the rows). Of
+    ints and floats a Float; of money, money of its scale, rounded half away from zero; of dates, a date. *)
+Avg(x) = {Avg: x}
+
+(** An aggregate of Give: the different values of x in a group, a list in Sort's order (each once; an Optional's
+    missing value left out). Joined in Cesia, it is SQL's string_agg: text.Join(row.Tags, ", "). *)
+Values(x) = {Values: x}
+
+(** An aggregate of Give: the quantile p (0 to 1) of x in a group, between its two nearest values as PostgreSQL's
+    percentile_cont (Hyndman and Fan's definition 7): of ints and floats a Float, of money money, of dates a date; with
+    discrete = true, the first value whose rank reaches p, one of the values (percentile_disc, definition 1), of any
+    type. *)
+Quantile(x, p, discrete = false) = {Quantile: x, At: p, Discrete: discrete}
+
+(** An aggregate of Give: the median, Quantile(x, 0.5). *)
+Median(x) = Quantile(x, 0.5)
+
+(** An aggregate of Give: the variance of x in a group, of the sample (n - 1, PostgreSQL's variance and var_samp;
+    missing for one value) or of the whole population (population = true, var_pop): a Float, from exact sums. Of
+    money, in its units squared. *)
+Variance(x, population = false) = {Variance: x, Population: population}
+
+(** An aggregate of Give: the standard deviation, the square root of Variance (stddev, stddev_samp; stddev_pop). *)
+Stddev(x, population = false) = {Stddev: x, Population: population}
+
+(** A field of Give: the instant the unit of the date d starts in the zone's local time, a key of the rows: "second",
+    "minute", "hour", "day", "week" (ISO 8601: from Monday), "month", "quarter", "year", "decade", "century",
+    "millennium"; zone an IANA name, as "Europe/Paris" (summer time included), or "UTC". PostgreSQL's
+    date_trunc(unit, d, zone). *)
+Trunc(d, unit, zone = "UTC") = {Trunc: d, Unit: unit, Zone: zone}
 
 (** A key of Sort, in descending order: the largest first. A key without it is ascending. *)
 Desc(key) = {Desc: key}
@@ -174,7 +206,8 @@ end
     function of n variables that gives {Where, Give}: Where a list of patterns [thing, property, value], each a fact
     that must hold, where any part but the property may be a variable, and of conditions (Above, Below, Between, In,
     Prefix, Less, LessOrEqual, Not, Or) and Optional patterns; Give
-    a map of the variables, or of aggregates of them, to give. Each answer comes once. Optional: Sort, a list of
+    a map of the variables, or of aggregates of them (Sum, Min, Max, Count, Avg, Values, Quantile, Median, Variance,
+    Stddev), or of Trunc of a date, to give. Each answer comes once. Optional: Sort, a list of
     fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name; Limit, at
     most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in Sort's
     order: the next page. A variable in no item of Where and Give is left out, so a filter can be left out of Where

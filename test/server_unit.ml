@@ -129,13 +129,18 @@ let rand_request r =
   | 3 ->
     let q = { Query.vars = 1 + Rng.int r 3; where = List.init (Rng.int r 4) (fun _ -> { Query.e = rand_term r; p = Rng.int r 40; v = rand_term r });
               ranges = List.init (Rng.int r 2) (fun _ -> Rng.int r 3, rand_value r, rand_value r) } in
-    let select = if Rng.bool r then Wire.Give (Array.init (Rng.int r 3) (fun _ -> Rng.int r 3))
-      else Wire.Group ([| Rng.int r 3 |], [| Wire.Count; Wire.Sum 1; Wire.Min 0; Wire.Max 2 |]) in
+    let select = match Rng.int r 3 with
+      | 0 -> Wire.Give (Array.init (Rng.int r 3) (fun _ -> Rng.int r 3))
+      | 1 -> Wire.Group ([| Rng.int r 3 |], [| Wire.Count; Wire.Sum 1; Wire.Min 0; Wire.Max 2 |])
+      (* the aggregates of protocol 9 *)
+      | _ -> Wire.Group ([| Rng.int r 3 |], [| Wire.Avg 1; Distinct 0; Values 2; Quantile (1, float_of_int (Rng.int r 101) /. 100., Rng.bool r); Variance (1, Rng.bool r); Stddev (2, Rng.bool r) |]) in
+    (* and a Trunc now and then *)
+    let extra = if Rng.int r 4 = 0 then [ Ask.Trunc (q.vars, 0, "month", "Europe/Paris") ] else [] in
     let order =
       if Rng.bool r then Top.none
       else { Top.keys = List.init (Rng.int r 3) (fun _ -> { Top.col = Rng.int r 3; desc = Rng.bool r }); limit = Rng.int r 5;
              after = (if Rng.bool r then None else Some (Array.init (Rng.int r 3) (fun _ -> rand_value r))) } in
-    Wire.Find { db = 0; query = q; select; extra = []; order; timeout = 0 }
+    Wire.Find { db = 0; query = q; select; extra; order; timeout = 0 }
   | 4 ->
     let op () = match Rng.int r 7 with
       | 6 -> Resolve.Delete (Rng.int r 200 - 50, String.make (Rng.int r 9) (Char.chr (97 + Rng.int r 26)))
@@ -175,7 +180,7 @@ let wire () =
       (* a Find cut where its Sort, Limit and After begin is the same question without them: the section is optional,
          so that a server that does not know it reads every other question as before (a frame's length tells where
          its body ends: no connection cuts one) *)
-      | Wire.Find f' when (match q with Wire.Find f -> f.order <> Top.none && f'.order = Top.none && f'.query = f.query && f'.select = f.select | _ -> false) -> ()
+      | Wire.Find f' when (match q with Wire.Find f -> (f.order <> Top.none || f.extra <> []) && f'.order = Top.none && f'.extra = [] && f'.query = f.query && f'.select = f.select | _ -> false) -> ()
       (* a Watch likewise: without its Sort and Limit, it is the watch an older program sends *)
       | Wire.Watch w' when (match q with Wire.Watch w -> w.worder <> Top.none && w'.worder = Top.none && w'.query = w.query && w'.from = w.from | _ -> false) -> ()
       | _ -> ok := false
@@ -1048,8 +1053,8 @@ let versions () =
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
   check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5) && welcome (hello 6) && welcome (hello 7)
-         && welcome (hello 8)) "versions: a server speaks 1 to 8";
-  check (match hello 9 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 9";
+         && welcome (hello 8) && welcome (hello 9)) "versions: a server speaks 1 to 9";
+  check (match hello 10 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 10";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -1090,7 +1095,7 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 8; 7; 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 9; 8; 7; 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
      (* an Incr to a server of protocol 3 or older is refused in the program, never sent; a write without it is sent *)
      let db = { Client.handle = 0; group = 0; props = []; local = None; wants_local = false; retry_at = 0. } in
      check (Client.write c db [ Resolve.Incr (65536, 16, 1, None) ] = Error { code = "invalid"; message = Client.no_incr } && c.serial = 0)
@@ -1124,6 +1129,16 @@ let versions () =
             && Client.write c db [ Resolve.Add (16, Schema.p_to, Text "client") ] = Error { code = "invalid"; message = Client.no_delete 7 }
             && c.serial = 0)
        "versions: a Delete and a link that names a kind to a server of 7 are refused before they are sent";
+     (* a report's aggregates and Trunc to a server of protocol 8 or older: refused in the program, never sent *)
+     c.spoken <- 8;
+     let trunc = [ Ask.Trunc (2, 1, "month", "Europe/Paris") ] in
+     check (Client.find c db ~select:(Wire.Group ([| 0 |], [| Wire.Avg 1 |])) q = Error { code = "invalid"; message = Client.no_report 8 }
+            && Client.find c db ~select:(Wire.Group ([||], [| Wire.Values 1 |])) q = Error { code = "invalid"; message = Client.no_report 8 }
+            && Client.find c db ~extra:trunc ~select:(Wire.Group ([| 2 |], [| Wire.Count |])) q = Error { code = "invalid"; message = Client.no_report 8 }
+            && Client.find c db ~extra:trunc ~select:(Wire.Give [| 0; 2 |]) q = Error { code = "invalid"; message = Client.no_report 8 })
+       "versions: a report's aggregates and Trunc to a server of 8 are refused before they are sent";
+     check (match Client.watch c db ~select:(Wire.Group ([||], [| Wire.Quantile (1, 0.5, false) |])) q with _ -> false | exception Invalid_argument m -> m = Client.no_report 8)
+       "versions: and in a watch";
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
   Thread.join old;

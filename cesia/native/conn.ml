@@ -112,6 +112,18 @@ let deliver sh (m : Live.msg) =
       let copies n r acc = let rec go k acc = if k <= 0 then acc else go (k - 1) (r :: acc) in go n acc in
       Hashtbl.iter (fun r n -> let o = Option.value (Hashtbl.find_opt sh.rows r) ~default:0 in if n > o then added := copies (n - o) r !added) now;
       Hashtbl.iter (fun r o -> let n = Option.value (Hashtbl.find_opt now r) ~default:0 in if o > n then removed := copies (o - n) r !removed) sh.rows;
+      (* a report's Values: a group is several rows (one a value), which the program sees as one map: a group that
+         changed goes whole, and comes whole *)
+      (match sh.select with
+       | Wire.Group (keys, aggs) when Array.exists (function Wire.Values _ -> true | _ -> false) aggs ->
+         let nk = Array.length keys in
+         let key (r : Live.row) = let b = Buffer.create 32 in Array.iteri (fun j x -> if j < nk || (match aggs.(j - nk) with Wire.Values _ -> false | _ -> true) then Value.encode b x) r; Buffer.contents b in
+         let changed = Hashtbl.create 16 in
+         List.iter (fun r -> Hashtbl.replace changed (key r) ()) (!added @ !removed);
+         let whole tbl = Hashtbl.fold (fun r n acc -> if Hashtbl.mem changed (key r) then copies n r acc else acc) tbl [] in
+         added := whole now;
+         removed := whole sh.rows
+       | _ -> ());
       Hashtbl.reset sh.rows;
       Hashtbl.iter (fun r n -> Hashtbl.replace sh.rows r n) now;
       let g = max sh.group a.group in

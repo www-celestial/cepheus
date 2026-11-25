@@ -722,3 +722,71 @@ defn isWatchSeesACascade()
   cepheus.Close(w)
   value.Len(first.Rows) == 2 and value.Len(gone.Removed) == 2 and value.Len(gone.Added) == 0
 end
+
+(* ---- reports: Avg, Count(x), Values, Quantile, Median, Variance, Stddev, Trunc ---- *)
+
+defn isReportOfACity()
+  s = shop()?
+  rows = cepheus.Find(5, (c, i, city, total, st) -> {
+    Where: [[i, Invoice.Client, c], [c, Client.City, city], [i, Invoice.Total, total], [i, Invoice.Status, st]],
+    Give: {City: city, Mean: cepheus.Avg(total), Clients: cepheus.Count(c), Statuses: cepheus.Values(st), Middle: cepheus.Median(total),
+           Low: cepheus.Quantile(total, 0.25), Spread: cepheus.Stddev(total), Wide: cepheus.Variance(total, population = true)},
+    Sort: [city],
+  }, s.Db)?
+  lyon = rows[1]
+  paris = rows[2]
+  bug.Assert(value.Len(rows) == 2, "a row a city")
+  bug.Assert(lyon.Mean == 640.25 and lyon.Middle == 640.25 and lyon.Low == 360.38, "the mean and the quantiles of money are money: $(lyon)")
+  bug.Assert(lyon.Clients == 1 and value.Equal(lyon.Statuses, ["unpaid"]), "Count(c) counts the different clients, Values lists the statuses")
+  bug.Assert(lyon.Spread == 791.6060415383399 and lyon.Wide == 313320.0625, "the sample's spread and the population's variance: $(lyon)")
+  paris.Spread == missing and paris.Wide == 0.0 and paris.Mean == 10.0
+end
+
+defn isValuesOfManyValues()
+  s = shop()?
+  rows = cepheus.Find(3, (c, n, t) -> {Where: [[c, Client.Name, n], cepheus.Optional([c, Client.Tags, t])], Give: {Name: n, Tags: cepheus.Values(t), N: cepheus.Count(t)}, Sort: [n]}, s.Db)?
+  value.Equal(rows, [{Name: "Ada", Tags: ["early", "vip"], N: 2}, {Name: "Bo", Tags: [], N: 0}])
+end
+
+defn isQuantileOfTexts()
+  s = shop()?
+  rows = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n]], Give: {First: cepheus.Quantile(n, 0, discrete = true), Last: cepheus.Quantile(n, 1, discrete = true)}}, s.Db)?
+  value.Equal(rows, [{First: "Ada", Last: "Bo"}])
+end
+
+defn isTruncInAZone()
+  t = cepheus.Fork(cepheus.Empty, [Item])?
+  (* 2026-03-29 21:30 UTC is the 29th in Paris; 22:30 UTC the 30th (summer time: UTC+2) *)
+  cepheus.Insert(Item, {Price: 1, When: 1774819800, N: 1}, t)?
+  cepheus.Insert(Item, {Price: 2, When: 1774823400, N: 2}, t)?
+  cepheus.Insert(Item, {Price: 4, When: 1774823400.5, N: 3}, t)?
+  rows = cepheus.Find(3, (i, w, p) -> {Where: [[i, Item.When, w], [i, Item.Price, p]], Give: {Day: cepheus.Trunc(w, "day", zone = "Europe/Paris"), Total: cepheus.Sum(p)}, Sort: [cepheus.Trunc(w, "day", zone = "Europe/Paris")]}, t)?
+  utc = cepheus.Find(3, (i, w, p) -> {Where: [[i, Item.When, w], [i, Item.Price, p]], Give: {Day: cepheus.Trunc(w, "day"), Total: cepheus.Sum(p)}}, t)?
+  (* the 29th in Paris starts at 2026-03-28 23:00 UTC, the 30th at 2026-03-29 22:00 UTC *)
+  bug.Assert(value.Equal(rows, [{Day: 1774738800.0, Total: 1.0}, {Day: 1774821600.0, Total: 6.0}]), "two days of Paris: $(rows)")
+  value.Equal(utc, [{Day: 1774742400.0, Total: 7.0}])
+end
+
+defn isTruncRefusesABadZone()
+  s = shop()?
+  r = cepheus.Find(2, (i, d) -> {Where: [[i, Invoice.Due, d]], Give: {Day: cepheus.Trunc(d, "day", zone = "../../etc/passwd")}}, s.Db)
+  u = cepheus.Find(2, (i, d) -> {Where: [[i, Invoice.Due, d]], Give: {Day: cepheus.Trunc(d, "fortnight")}}, s.Db)
+  r.Error.Code == "invalid" and text.Contains("is not a time zone name", r.Error.Message) and u.Error.Code == "invalid"
+end
+
+defn isAvgRefusesAText()
+  s = shop()?
+  r = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n]], Give: {M: cepheus.Avg(n)}}, s.Db)
+  r.Error.Code == "invalid" and text.Contains("Avg is for ints, floats, money and dates", r.Error.Message)
+end
+
+defn isWatchOfAReport()
+  s = shop()?
+  w = cepheus.Watch(3, (i, st, t) -> {Where: [[i, Invoice.Status, st], [i, Invoice.Total, t]], Give: {Status: st, Mean: cepheus.Avg(t), Totals: cepheus.Values(t)}}, s.Db)?
+  first = fiber.Receive(w.Changes)?
+  cepheus.Insert(Invoice, {Client: s.Bo, Total: 30, Status: "paid", Lines: 1}, s.Db)?
+  change = fiber.Receive(w.Changes)?
+  cepheus.Close(w)
+  bug.Assert(value.Len(first.Rows) == 2, "two statuses: $(first)")
+  value.Equal(change.Added, [{Status: "paid", Mean: 20.0, Totals: [10.0, 30.0]}]) and value.Equal(change.Removed, [{Status: "paid", Mean: 10.0, Totals: [10.0]}])
+end
