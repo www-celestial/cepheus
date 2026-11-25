@@ -118,6 +118,9 @@ let chain t names files =
     | [] -> true
   in
   if not (rests built) then stream "the runs do not rest on one another";
+  (* the runs a merge replaced leave the page cache now, as the server's do (Engine): else their pages stayed resident
+     until the cache was full, a base's worth at each merge. A state still on them reads them again from their file *)
+  List.iter (fun (k, ((r : Store.run), _)) -> if not (List.mem_assoc k built) then Pages.drop r.a.pg) t.built;
   t.built <- built;
   base_of (List.map snd built)
 
