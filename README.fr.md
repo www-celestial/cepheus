@@ -14,6 +14,11 @@ propriétés d'un domaine, et leurs axiomes), est une bibliothèque de telles r�
 package `owl`), égalité (owl:sameAs) comprise, tenue par des classes de choses égales dont les faits vivent sur un seul
 représentant ([OWL 2 RL](docs/fr/book/rules.md#owl-2-rl-une-bibliothèque-de-règles)).
 
+**Documentation : https://www-celestial.github.io/cepheus/fr/** (en anglais : https://www-celestial.github.io/cepheus/)
+
+La famille : [Cesia](https://www-celestial.github.io/cesia-lang/fr/) (le langage) · [Cemacs](https://www-celestial.github.io/cemacs/fr/) (l'éditeur) ·
+[Cepheus](https://www-celestial.github.io/cepheus/fr/) (la base de données) · [Ceti](https://www-celestial.github.io/ceti/fr/) (le pilote de navigateur).
+
 ```ocaml
 open Cepheus
 
