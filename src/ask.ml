@@ -65,6 +65,12 @@ let patterns (q : Query.t) extra =
   in
   q.where @ List.concat_map of_item extra
 
+(* a variable for a message: the name of the property of the first pattern it is the value of (as invoice/total) *)
+let var_name (v : Store.view) (pats : Query.pattern list) x =
+  match List.find_opt (fun (pt : Query.pattern) -> pt.v = Query.Var x) pats with
+  | Some pt -> (match Schema.find v.schema pt.p with Some d -> d.name | None -> Printf.sprintf "property %d" pt.p)
+  | None -> Printf.sprintf "variable %d" x
+
 let flat_vars items = List.sort_uniq compare (List.concat_map vars_of_item items)
 
 let pattern_vars items = List.sort_uniq compare (List.concat_map (function Pattern _ as i -> vars_of_item i | _ -> []) items)
@@ -520,7 +526,7 @@ let truncs extra = List.partition (function Trunc _ -> true | _ -> false) extra
 
 (* The Truncs of a question of [vars] variables of types [ty] (a variable of the question when [outer]), checked:
    each (x, its function of x's word); the i-th gives variable vars + i. Raises Query.Bad. *)
-let derived ~vars ~(outer : int -> bool) (ty : Value.typ array) (ts : item list) =
+let derived ?(name = Printf.sprintf "variable %d") ~vars ~(outer : int -> bool) (ty : Value.typ array) (ts : item list) =
   Array.of_list
     (List.mapi
        (fun i -> function
@@ -530,7 +536,8 @@ let derived ~vars ~(outer : int -> bool) (ty : Value.typ array) (ts : item list)
            if x < 0 || x >= vars || not (outer x) then bad "Trunc takes a date variable of a pattern of the question, not variable %d" x;
            if ty.(x) <> Value.Tdate then bad "Trunc takes a date, not a %s" (Value.typ_name ty.(x));
            let f = try Zone.truncator ~unit ~zone with Zone.Bad m -> bad "%s" m in
-           x, f
+           (* a date in the least dates' 1,002 years: its unit may start before them, refused naming its property *)
+           x, (fun w -> if w >= Zone.safe_from then f w else match f w with r -> r | exception Zone.Bad m -> bad "Trunc of %s to the %s of %s: %s" (name x) unit (Value.to_string (Value.Date w)) m)
          | _ -> bad "a Trunc")
        ts)
 

@@ -257,6 +257,18 @@ let report_typ (typs : Value.typ array) (a : Wire.agg) =
   | Count -> Tint
   | Sum x | Min x | Max x -> typs.(x)
 
+(* an exact sum of ints as two ints (each value hi 2^31 + lo), None past the 63 bits of an int *)
+let exact_sum (xs : int list) =
+  let m = (1 lsl 31) - 1 in
+  let h, l = List.fold_left (fun (h, l) x -> h + (x asr 31), l + (x land m)) (0, 0) xs in
+  let h = h + (l asr 31) and l = l land m in
+  if h < -(1 lsl 31) || h > (1 lsl 31) - 1 then None else Some ((h lsl 31) lor l)
+
+(* a group's Sum past the 63 bits of an Int: the engine refuses the question, naming the Sum ("Sum of ...") *)
+exception Sum_past
+
+let group_sum bs x = match exact_sum (List.map (fun b -> int_of b.(x)) bs) with Some s -> s | None -> raise Sum_past
+
 (* the rows of a select, with their columns' types: each row's cells (a list for Values) *)
 let groups_of (typs : Value.typ array) bs (sel : Wire.select) =
   approx_cols := [||];
@@ -274,7 +286,7 @@ let groups_of (typs : Value.typ array) bs (sel : Wire.select) =
     let approx = Array.make (Array.length keys + Array.length aggs) false in
     let agg bs i = function
       | Wire.Count -> One (Value.Int (List.length bs))
-      | Sum x -> let s = List.fold_left (fun s b -> s + int_of b.(x)) 0 bs in One (match typs.(x) with Tmoney _ -> Money s | Tdate -> Date s | _ -> Int s)
+      | Sum x -> let s = group_sum bs x in One (match typs.(x) with Tmoney _ -> Money s | Tdate -> Date s | _ -> Int s)
       | Min x -> One (List.fold_left (fun m b -> if cmp_value b.(x) m < 0 then b.(x) else m) (List.hd bs).(x) bs)
       | Max x -> One (List.fold_left (fun m b -> if cmp_value b.(x) m > 0 then b.(x) else m) (List.hd bs).(x) bs)
       | a ->
@@ -302,7 +314,7 @@ let groups_of (typs : Value.typ array) bs (sel : Wire.select) =
       bs;
     let agg bs = function
       | Wire.Count -> Value.Int (List.length bs)
-      | Sum x -> let s = List.fold_left (fun s b -> s + int_of b.(x)) 0 bs in (match typs.(x) with Tmoney _ -> Money s | _ -> Int s)
+      | Sum x -> let s = group_sum bs x in (match typs.(x) with Tmoney _ -> Money s | _ -> Int s)
       | Min x -> List.fold_left (fun m b -> if cmp_value b.(x) m < 0 then b.(x) else m) (List.hd bs).(x) bs
       | Max x -> List.fold_left (fun m b -> if cmp_value b.(x) m > 0 then b.(x) else m) (List.hd bs).(x) bs
       | _ -> assert false
@@ -366,13 +378,6 @@ let oracle cols groups (o : Top.order) =
 (* ---- the oracle of windows and Each (protocol 10): each window computed again by brute force ---- *)
 
 let with_windows = ref 0 and with_each = ref 0 and window_cells = ref 0 and window_refusals = ref 0
-
-(* an exact sum of ints as two ints (each value hi 2^31 + lo), None past the 63 bits of an int *)
-let exact_sum (xs : int list) =
-  let m = (1 lsl 31) - 1 in
-  let h, l = List.fold_left (fun (h, l) x -> h + (x asr 31), l + (x land m)) (0, 0) xs in
-  let h = h + (l asr 31) and l = l land m in
-  if h < -(1 lsl 31) || h > (1 lsl 31) - 1 then None else Some ((h lsl 31) lor l)
 
 exception Overflow
 
@@ -481,7 +486,9 @@ let show rows = String.concat " | " (List.map (fun r -> String.concat "," (Array
 
 let questions = ref 0 and with_order = ref 0 and empties = ref 0 and with_ops = ref 0
 let with_less = ref 0 and with_optional = ref 0 and with_floats = ref 0 and with_missing = ref 0
-let with_trunc = ref 0 and with_report = ref 0 and split_checks = ref 0
+let with_trunc = ref 0 and with_report = ref 0 and split_checks = ref 0 and sum_refusals = ref 0
+
+let starts s pre = String.length s >= String.length pre && String.sub s 0 (String.length pre) = pre
 
 (* Store.text_order: the texts of p in the order of their bytes, from a text on, merged over the runs and the delta:
    strictly in order, every text of p's facts at or after the start, none before it *)
@@ -848,6 +855,32 @@ let run seed =
         in
         if truncs <> [] then incr with_trunc;
         (match sel with Group (_, aggs) when Array.exists (function Wire.Count | Sum _ | Min _ | Max _ -> false | _ -> true) aggs -> incr with_report | _ -> ());
+        if (match groups_of typs bs sel with _ -> false | exception Sum_past -> true) then begin
+          (* a group's Sum past 63 bits: every path refuses the question, naming it, whatever its order, its page and
+             its domains *)
+          incr sum_refusals;
+          let cols = match sel with Group (k, a) -> Array.length k + Array.length a | Give g -> Array.length g | Over _ -> 1 in
+          let o = if Rng.bool r then Top.none else { Top.keys = [ { col = Rng.int r cols; desc = Rng.bool r } ]; limit = Rng.int r 3; after = None } in
+          let refused name f =
+            match f () with
+            | got -> C.fail "seed %d: %s: a sum past 63 bits given: %s" seed name (show got)
+            | exception Query.Bad m -> C.check (starts m "Sum of ") "seed %d: %s: refused, but %s" seed name m
+          in
+          List.iter (fun (p, name) -> Top.path := p; refused name (fun () -> engine ~extra v q sel o)) [ (Top.Heap, "heap"); (Top.Index, "index"); (Top.Auto, "auto") ];
+          let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
+          Query.domains := 3;
+          Query.parallel_min := 1;
+          Query.probe_min := 1;
+          Query.probe_more := 1;
+          Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0)
+            (fun () -> refused "split" (fun () -> engine ~extra v q sel o));
+          let q', extra', sel', o' = wired q extra sel o in
+          refused "wired" (fun () -> engine ~extra:extra' v q' sel' o');
+          (* and a window over it (a report without Values) *)
+          let lists = match sel with Group (_, aggs) -> Array.exists (function Wire.Values _ -> true | _ -> false) aggs | _ -> false in
+          if o.keys <> [] && not lists then refused "windows" (fun () -> engine ~extra v q (Wire.Over (sel, [||], [| Wire.Running (Count, 0) |])) o)
+        end
+        else begin
         let ctyp, groups = groups_of typs bs sel in
         let rows = List.concat_map flatten groups in
         let has_values = match sel with Group (_, aggs) -> Array.exists (function Wire.Values _ -> true | _ -> false) aggs | Give _ -> false in
@@ -874,13 +907,13 @@ let run seed =
             (* Limit alone: k rows of the answer *)
             let want = List.length rows in
             C.check (List.length got = (if o.limit = 0 then want else min want o.limit)) "seed %d: %s: %d rows of %d (limit %d)" seed what (List.length got) want o.limit;
-            (* each row one of the answer's, as many times at most *)
-            let key r = let b = Buffer.create 16 in Array.iter (Value.encode b) r; Buffer.contents b in
-            let pool = Hashtbl.create 16 in
-            List.iter (fun r -> Hashtbl.replace pool (key r) (1 + try Hashtbl.find pool (key r) with Not_found -> 0)) rows;
-            List.iter (fun r -> match Hashtbl.find_opt pool (key r) with
-                | Some n when n > 0 -> Hashtbl.replace pool (key r) (n - 1)
-                | _ -> C.fail "seed %d: %s: a row that is not the answer's: %s" seed what (show [ r ])) got
+            (* each row one of the answer's, as many times at most (a cell the oracle computed in floats within its
+               rounding: close) *)
+            let pool = ref rows in
+            let rec take r acc = function [] -> None | x :: tl -> if same [ r ] [ x ] then Some (List.rev_append acc tl) else take r (x :: acc) tl in
+            List.iter (fun r -> match take r [] !pool with
+                | Some rest -> pool := rest
+                | None -> C.fail "seed %d: %s: a row that is not the answer's: %s" seed what (show [ r ])) got
           end
           else begin
             let want = oracle cols groups o in
@@ -985,6 +1018,7 @@ let run seed =
             let q', extra', sel', o' = wired q extra osel o in
             checkw "wired" (match engine ~extra:extra' v q' sel' o' with g -> Ok g | exception Query.Bad m -> Error m)
           end
+        end
         end
       done)
     views
@@ -1185,7 +1219,10 @@ let windows_big seeds =
     in
     let each = if Rng.bool r then [| (if report then 0 else 1) |] else [||] in
     ignore nkeys;
-    let base = engine ~extra v q sel { Top.keys; limit = 0; after = None } in
+    (* a client's (and month's) Sum past 63 bits: the report refused, naming it *)
+    match engine ~extra v q sel { Top.keys; limit = 0; after = None } with
+    | exception Query.Bad m when starts m "Sum of " -> incr sum_refusals
+    | base ->
     let o =
       let limit = if Rng.bool r then 0 else 1 + Rng.int r 50 in
       let after = if each = [||] && base <> [] && Rng.bool r then Some (List.nth base (Rng.int r (List.length base))) else None in
@@ -1605,7 +1642,7 @@ let () =
   Printf.printf "questions: %d ranges of a thing read from their first thing\n" (Atomic.get Query.seeks);
   Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
   Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
-  Printf.printf "questions: %d with windows or Each (%d with Each), %d windows' cells checked, %d running sums past 63 bits refused; %d pages after a cursor (%d read from a range of the first key)\n"
+  Printf.printf "questions: %d sums past 63 bits refused (every path); %d with windows or Each (%d with Each), %d windows' cells checked, %d running sums past 63 bits refused; %d pages after a cursor (%d read from a range of the first key)\n" !sum_refusals
     !with_windows !with_each !window_cells !window_refusals (Atomic.get Answer.paged) (Atomic.get Answer.ranged);
   Printf.printf "questions: %d answers split across 3 domains (%d levels split, %d by a probe; %d bag columns moved to a table a group), each the rows of one domain in their order\n" !split_checks (Atomic.get Query.splits) (Atomic.get Query.probed_splits) (Atomic.get Agg.owned);
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"

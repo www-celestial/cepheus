@@ -67,8 +67,9 @@ type msg =
   | Ended of { code : string; message : string }  (** the watch is over; "lagging": watch again from its group *)
 
 (* the state of a key of an aggregate: its bindings, each aggregate's word (a count, a sum, a minimum, a maximum),
-   and the state of each aggregate of protocol 9 *)
-type key = { mutable n : int; acc : int array; st : Agg.state option array }
+   the state of each aggregate of protocol 9, and a Sum's carry (Agg.wrapped: the times its word wrapped), [||]
+   until one wraps *)
+type key = { mutable n : int; acc : int array; st : Agg.state option array; mutable carry : int array }
 
 (* a row of a window, in its order: every row of one window carries the same [cmp] *)
 type wrow = { cmp : row -> row -> int; r : row }
@@ -95,6 +96,7 @@ type sub = {
   q : Query.t;  (* the question as asked *)
   emit : msg -> bool;  (* false: its queue is full (lagging) *)
   mutable gone : bool;
+  mutable failed : string option;  (* why the watch's question failed at this frame (Query.Bad): it ends invalid *)
   keys : (row, key) Hashtbl.t;  (* Group: the state of every key *)
   (* the frame being evaluated *)
   mutable touched : bool;
@@ -242,7 +244,7 @@ let renumber ~nq ~dbase (sel : Wire.select) =
 
 let new_template ?(truncs = []) (v : Store.view) key tq nq (sel : Wire.select) =
   let typs = Query.var_types v tq in
-  let derived = Ask.derived ~vars:nq ~outer:(fun _ -> true) typs truncs in
+  let derived = Ask.derived ~name:(fun x -> Ask.var_name v tq.where x) ~vars:nq ~outer:(fun _ -> true) typs truncs in
   let qgive = match sel with Wire.Give g -> if Array.length g = 0 then Array.init nq Fun.id else g | Group (k, _) -> k | Over _ -> refuse_over () in
   let give, aggs =
     match renumber ~nq ~dbase:tq.vars sel with Wire.Give g -> (if Array.length g = 0 then Array.init nq Fun.id else g), [||] | Group (k, a) -> k, a | Over _ -> refuse_over ()
@@ -264,7 +266,7 @@ let occurrences (q : Query.t) extra =
 
 let whole_template ?(truncs = []) (v : Store.view) key (q : Query.t) (sel : Wire.select) extra =
   let a = Ask.compile v q extra in
-  let derived = Ask.derived ~vars:q.vars ~outer:(fun x -> a.outer.(x)) (Ask.typs_of a) truncs in
+  let derived = Ask.derived ~name:(fun x -> Ask.var_name v (Ask.patterns q extra) x) ~vars:q.vars ~outer:(fun x -> a.outer.(x)) (Ask.typs_of a) truncs in
   let give, aggs =
     match sel with
     | Wire.Give g -> (if Array.length g = 0 then Array.of_list (List.filter (fun x -> a.outer.(x)) (List.init q.vars Fun.id)) else g), [||]
@@ -324,7 +326,14 @@ let agg_value (t : template) i w : Value.t =
 
 let agg_start (t : template) = Array.map (function Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) t.aggs
 
-let new_key (t : template) = { n = 0; acc = agg_start t; st = Array.map (fun a -> if Agg.is_new a then Some (Agg.fresh a) else None) t.aggs }
+let new_key (t : template) = { n = 0; acc = agg_start t; st = Array.map (fun a -> if Agg.is_new a then Some (Agg.fresh a) else None) t.aggs; carry = [||] }
+
+(* aggregate i's Sum wrapped [d] times more (Agg.wrapped) *)
+let[@inline never] carry_add (k : key) i d =
+  if Array.length k.carry = 0 then k.carry <- Array.make (Array.length k.acc) 0;
+  k.carry.(i) <- k.carry.(i) + d
+
+let carry_of (k : key) i = if Array.length k.carry = 0 then 0 else k.carry.(i)
 
 (* an aggregate of protocol 9 given a binding that comes (sign 1) or goes (-1): exact sums and bags follow by
    difference (a bag's words are the dictionary's, which keeps a text's or a float's number for the database's life) *)
@@ -339,7 +348,11 @@ let agg_add (v : Store.view) (t : template) (k : key) (b : int array) =
     (fun i a ->
       match a with
       | Wire.Count -> k.acc.(i) <- k.acc.(i) + 1
-      | Sum x -> k.acc.(i) <- k.acc.(i) + word t b x
+      | Sum x ->
+        let s = k.acc.(i) and w = word t b x in
+        let r = s + w in
+        k.acc.(i) <- r;
+        if Agg.wrapped s w r then carry_add k i (if w >= 0 then 1 else -1)
       | Min x -> let w = word t b x in if w < k.acc.(i) then k.acc.(i) <- w
       | Max x -> let w = word t b x in if w > k.acc.(i) then k.acc.(i) <- w
       | _ -> agg_new v t k i 1 b)
@@ -353,32 +366,49 @@ let agg_remove (v : Store.view) (t : template) (k : key) (b : int array) =
     (fun i a ->
       match a with
       | Wire.Count -> k.acc.(i) <- k.acc.(i) - 1
-      | Sum x -> k.acc.(i) <- k.acc.(i) - word t b x
+      | Sum x ->
+        let s = k.acc.(i) and w = word t b x in
+        let r = s - w in
+        k.acc.(i) <- r;
+        if Agg.wrapped_sub s w r then carry_add k i (if w < 0 then 1 else -1)
       | Min x | Max x -> if word t b x = k.acc.(i) then again := true
       | _ -> agg_new v t k i (-1) b)
     t.aggs;
   !again
 
+(* a key's Sum past the 63 bits of an Int (its carry not 0): refused, as Find refuses it (Answer.check_sums) *)
+let check_sums (v : Store.view) (t : template) kv (k : key) =
+  if Array.length k.carry > 0 then
+    Array.iteri
+      (fun i a ->
+        match a with
+        | Wire.Sum x when k.carry.(i) <> 0 -> Agg.past_sum (Ask.var_name v (Array.to_list t.pats) (src t x)) (Array.to_list (Array.map Agg.short kv))
+        | _ -> ())
+      t.aggs
+
 (* a key's rows: its values, then its aggregates; one a value of its Values (Agg.flatten); none when it has no
-   binding *)
+   binding. Raises Query.Bad for a Sum past 63 bits. *)
 let key_rows (v : Store.view) (t : template) kv (k : key) =
   if k.n <= 0 then []
-  else if Array.for_all Option.is_none k.st then [ Array.append kv (Array.mapi (fun i w -> agg_value t i w) k.acc) ]
   else begin
-    let cells =
-      Array.append (Array.map (fun x -> Agg.One x) kv)
-        (Array.mapi
-           (fun i a ->
-             match k.st.(i), Agg.var_of a with
-             | Some st, Some x -> (
-               let tx = vtyp t x in
-               match a with
-               | Wire.Values _ -> Agg.Many (Array.map (Store.value v tx) (Agg.sorted_values v tx st))
-               | _ -> Agg.One (Agg.result v a tx st))
-             | _ -> Agg.One (agg_value t i k.acc.(i)))
-           t.aggs)
-    in
-    Agg.flatten cells
+    check_sums v t kv k;
+    if Array.for_all Option.is_none k.st then [ Array.append kv (Array.mapi (fun i w -> agg_value t i w) k.acc) ]
+    else begin
+      let cells =
+        Array.append (Array.map (fun x -> Agg.One x) kv)
+          (Array.mapi
+             (fun i a ->
+               match k.st.(i), Agg.var_of a with
+               | Some st, Some x -> (
+                 let tx = vtyp t x in
+                 match a with
+                 | Wire.Values _ -> Agg.Many (Array.map (Store.value v tx) (Agg.sorted_values v tx st))
+                 | _ -> Agg.One (Agg.result v a tx st))
+               | _ -> Agg.One (agg_value t i k.acc.(i)))
+             t.aggs)
+      in
+      Agg.flatten cells
+    end
   end
 
 (* the key's state asked again on [v]: its bindings only (the question with the key fixed; a Trunc's column is not a
@@ -499,7 +529,14 @@ let answer ?ticket ?budget ?stop (v : Store.view) (s : sub) =
       Array.iteri
         (fun i g ->
           match g with
-          | Wire.Count | Sum _ -> a.acc.(i) <- a.acc.(i) + b.acc.(i)
+          | Wire.Count -> a.acc.(i) <- a.acc.(i) + b.acc.(i)
+          | Sum _ ->
+            let s = a.acc.(i) and w = b.acc.(i) in
+            let r = s + w in
+            a.acc.(i) <- r;
+            if Agg.wrapped s w r then carry_add a i (if w >= 0 then 1 else -1);
+            let c = carry_of b i in
+            if c <> 0 then carry_add a i c
           | Min _ -> a.acc.(i) <- min a.acc.(i) b.acc.(i)
           | Max _ -> a.acc.(i) <- max a.acc.(i) b.acc.(i)
           | _ -> (match a.st.(i), b.st.(i) with Some x, Some y -> Agg.merge x y | _ -> ()))
@@ -557,7 +594,7 @@ let check ?(truncs = []) (v : Store.view) (q : Query.t) (sel : Wire.select) =
 (* ---- a frame ---- *)
 
 (* a binding of the template, with its sign, given to the watch: into the frame's change *)
-let take (v : Store.view) (s : sub) sign (b : int array) =
+let take_rows (v : Store.view) (s : sub) sign (b : int array) =
   let t = s.t in
   s.touched <- true;
   if Array.length t.aggs = 0 then begin
@@ -572,6 +609,11 @@ let take (v : Store.view) (s : sub) sign (b : int array) =
     if not (Hashtbl.mem s.before kv) then Hashtbl.replace s.before kv (key_rows v t kv k);
     if sign > 0 then agg_add v t k b else if agg_remove v t k b then Hashtbl.replace s.dirty kv ()
   end
+
+(* the same, and a binding the watch's question cannot give (a Trunc of a date whose unit starts before the least
+   date) fails this watch alone: it ends invalid at the frame's end, the other watches go on *)
+let take (v : Store.view) (s : sub) sign (b : int array) =
+  if s.failed = None then match take_rows v s sign b with () -> () | exception Query.Bad m -> s.failed <- Some m
 
 (* the frame's change of a watch, its scratch cleared: None when its rows did not change *)
 let finish (v1 : Store.view) (s : sub) =
@@ -599,7 +641,8 @@ let finish (v1 : Store.view) (s : sub) =
           let k = Hashtbl.find s.keys kv in
           if Hashtbl.mem s.dirty kv && k.n > 0 then begin
             let k' = recount v1 s kv in
-            Array.blit k'.acc 0 k.acc 0 (Array.length k.acc)
+            Array.blit k'.acc 0 k.acc 0 (Array.length k.acc);
+            k.carry <- k'.carry
           end;
           let now = key_rows v1 t kv k in
           if k.n <= 0 then Hashtbl.remove s.keys kv;
@@ -858,7 +901,7 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
         let ts = Hashtbl.create 8 in
         Hashtbl.iter (fun p () -> List.iter (fun (t, _) -> Hashtbl.replace ts t.tkey t) (Option.value (Hashtbl.find_opt h.by_prop p) ~default:[])) props;
         let dplus = lazy (words v1 plus) and dminus = lazy (words v0 minus) in
-        let wholes = ref [] and broken = ref [] and over = ref [] in
+        let wholes = ref [] and broken = ref [] and over = ref [] and invalid = ref [] in
         (* what a question did not expect, in its changes or its rows, ends its own watches (failed); a damaged page
            ends every watch (below) *)
         let guard t f =
@@ -893,12 +936,17 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
            List.iter
              (fun s ->
                if ok s then
-                 guard s.t @@ fun () ->
-                 match finish v1 s with
-                 | Some (added, removed) -> out := (s, Change { group = v1.group; added; removed }) :: !out
-                 | None -> ()
-                 (* a window's refill past the budget: that watch ends *)
-                 | exception Query.Over_budget n -> over := (s, n) :: !over)
+                 match s.failed with
+                 | Some m -> invalid := (s, m) :: !invalid
+                 | None -> (
+                   guard s.t @@ fun () ->
+                   match finish v1 s with
+                   | Some (added, removed) -> out := (s, Change { group = v1.group; added; removed }) :: !out
+                   | None -> ()
+                   (* a window's refill past the budget: that watch ends *)
+                   | exception Query.Over_budget n -> over := (s, n) :: !over
+                   (* its rows cannot be given (a Sum past 63 bits): that watch ends, as Find refuses them *)
+                   | exception Query.Bad m -> invalid := (s, m) :: !invalid))
              (List.rev !touched);
            List.rev !out
          with
@@ -909,6 +957,7 @@ let frame h ~tag (groups : Group.t list) (v1 : Store.view) =
               remove h s;
               ignore (s.emit (Ended { code = "too_large"; message = Printf.sprintf "the question passed the server's budget of %d candidates" n })))
             (List.rev !over);
+          List.iter (fun (s, m) -> remove h s; ignore (s.emit (Ended { code = "invalid"; message = m }))) (List.rev !invalid);
           give h tag (List.filter (fun (s, _) -> not s.gone) (out @ List.rev !wholes))
         | exception (Pages.Unreadable m | Query.Bad m) -> end_all h "damaged" m)
       end;
@@ -1018,7 +1067,7 @@ let subscribe ?(extra = []) ?(order = Top.none) ?ticket ?budget ?stop ?(admit = 
       (* the order checked as Find checks it (its columns, its Limit: a client's bytes) before a window is made of it *)
       let win = if order = Top.none then None else (Top.check (Array.length t.give) [||] order; Some (new_window order (Array.length t.give))) in
       let s =
-        { sid = h.next; t; params; q; emit; gone = false; keys = Hashtbl.create 8; touched = false; plus = []; minus = [];
+        { sid = h.next; t; params; q; emit; gone = false; failed = None; keys = Hashtbl.create 8; touched = false; plus = []; minus = [];
           net = Hashtbl.create 8; before = Hashtbl.create 8; dirty = Hashtbl.create 8; win }
       in
       let first =

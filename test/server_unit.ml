@@ -1549,6 +1549,87 @@ let watch_window () =
    | _ -> ());
   check (match ktake () with [ Ok (Wire.Change c) ] -> List.length c.added = 1 && c.removed = [ top ] | _ -> false) "window: its refill, read with its own rights"
 
+(* ---- a Sum past 63 bits through the server: Find's reply is the error invalid, naming it, to a program of this
+   protocol and to one of protocol 1 (the errors it has always read); a watch that a write takes past them ends
+   invalid, the watch beside it goes on ---- *)
+
+let sums_wire () =
+  let sim = Sim_disk.create (Rng.make 29) in
+  let disk = Sim_disk.disk sim in
+  disk.mkdir "/s";
+  let e = Result.get_ok (Engine.open_ disk "/s/shop") in
+  let v0 = Atomic.get e.published in
+  let hub = Live.create v0 ~tag:v0.group ~durable:max_int in
+  let d = { Core.name = "shop"; index = 0; dir = "/s/shop"; view = (fun () -> Atomic.get e.published); sessions = Sessions.create ();
+            more = (fun () -> []); hub = (fun () -> hub); files = Files.cell ~disk ~master:(fun () -> Ok (String.make 32 'k')) "/s/shop/vault" } in
+  let submit (_ : Core.db) ops by why k =
+    let b = Engine.prepare e [| ops, by, why |] in
+    let r = (Engine.commit e b).(0) in
+    if b.count > 0 then Live.frame hub ~tag:b.after.group (List.rev b.groups) b.after;
+    k r
+  in
+  let props = [ { Schema.name = "bill/status"; typ = Value.Ttext; many = false; unique = false }; { Schema.name = "bill/total"; typ = Tint; many = false; unique = false } ] in
+  let ids, ops = Result.get_ok (Resolve.declare (Atomic.get e.published) props) in
+  submit d ops 0 "declare" (fun r -> ignore (Result.get_ok r));
+  let pstatus = List.nth ids 0 and ptotal = List.nth ids 1 in
+  let toks = Tokens.with_tokens Tokens.empty [ { Tokens.name = "w"; hash = Tokens.hash_of_text "cph_w"; databases = [ "shop", Tokens.Write ]; admin = false } ] in
+  let srv = Core.create ~server_id:"s" ~cluster_id:"c" ~dbs:[| d |] ~tokens:toks ~now:disk.now ~new_session:(let n = ref 0 in fun () -> incr n; !n) () in
+  (* a connection speaking [version]: what it sends, and the replies and pushes given since *)
+  let conn version =
+    let out = Buffer.create 256 in
+    let rec c = lazy (Core.connect srv ~flush:(fun () -> let cc = Lazy.force c in Buffer.add_buffer out cc.Core.out; Buffer.clear cc.Core.out) ~submit) in
+    let c = Lazy.force c in
+    let next = ref 1 in
+    let send req =
+      let b = Buffer.create 64 and f = Buffer.create 64 in
+      Wire.put_request b req;
+      Wire.add_frame f ~id:!next ~kind:(Wire.request_kind req) ~flags:0 b;
+      incr next;
+      let bytes = Buffer.to_bytes f in
+      ignore (Core.input ~arrived:0 c bytes 0 (Bytes.length bytes))
+    in
+    let take () =
+      ignore (Core.move_pushes c);
+      c.flush ();
+      let s = Buffer.to_bytes out in
+      Buffer.clear out;
+      match frames_of s with
+      | None -> check false "sums: frames not whole"; []
+      | Some fs ->
+        List.map
+          (fun (_, kind, flags, body) ->
+            let r = Codec.reader body 0 (Bytes.length body) in
+            if kind = Wire.k_watch && flags land Wire.f_error = 0 then `Push (Wire.get_push r) else `Reply (Wire.get_reply kind flags r))
+          fs
+    in
+    send (Wire.Hello { version; token = "cph_w"; program = "t"; session = 0 });
+    ignore (take ());
+    send, take
+  in
+  let send, take = conn Wire.version in
+  let write ops = send (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops }); ignore (take ()) in
+  let of_status st = { Query.vars = 2; where = [ { Query.e = Var 0; p = pstatus; v = Val (Text st) }; { e = Var 0; p = ptotal; v = Var 1 } ]; ranges = [] } in
+  let sums = Wire.Group ([||], [| Wire.Count; Wire.Sum 1 |]) in
+  let message = "Sum of bill/total passed the 63 bits of an Int: group by a key, or ask its Avg and Count (exact)" in
+  write [ Resolve.Add (-1, pstatus, Text "unpaid"); Add (-1, ptotal, Int max_int); Add (-2, pstatus, Text "paid"); Add (-2, ptotal, Int 5) ];
+  (* two watches of one template *)
+  send (Wire.Watch { db = 0; query = of_status "unpaid"; select = sums; from = 0; wextra = []; worder = Top.none; wtimeout = 0 });
+  send (Wire.Watch { db = 0; query = of_status "paid"; select = sums; from = 0; wextra = []; worder = Top.none; wtimeout = 0 });
+  check (List.length (List.filter (function `Push (Wire.Answer _) -> true | _ -> false) (take ())) = 2) "sums: two watches answered";
+  send (Wire.Write { db = 0; serial = 0; floor = 0; by = 0; why = "t"; ops = [ Resolve.Add (-1, pstatus, Text "unpaid"); Add (-1, ptotal, Int 1); Add (-2, pstatus, Text "paid"); Add (-2, ptotal, Int 6) ] });
+  let got = take () in
+  check (List.exists (function `Reply (Wire.Err { code = "invalid"; message = m }) -> m = message | _ -> false) got) "sums: the watch past 63 bits ends invalid, naming it";
+  check (List.exists (function `Push (Wire.Change c) -> c.added = [ [| Value.Int 2; Int 11 |] ] | _ -> false) got) "sums: the watch beside it goes on";
+  (* Find, by a program of this protocol and of protocol 1 *)
+  List.iter
+    (fun version ->
+      let send, take = if version = Wire.version then send, take else conn version in
+      send (Wire.Find { db = 0; query = of_status "unpaid"; select = sums; extra = []; order = Top.none; timeout = 0 });
+      check (match take () with [ `Reply (Wire.Err { code = "invalid"; message = m }) ] -> m = message | _ -> false) "sums: Find past 63 bits refused to a program of protocol %d" version;
+      send (Wire.Find { db = 0; query = of_status "paid"; select = sums; extra = []; order = Top.none; timeout = 0 });
+      check (match take () with [ `Reply (Wire.Rows r) ] -> r.rows = [ [| Value.Int 2; Int 11 |] ] | _ -> false) "sums: and within them, given (protocol %d)" version)
+    [ Wire.version; 1 ]
+
 (* ---- the bounds of an answer at the server (the review's F4, F6, F7): a cross product of two patterns that share no
    variable (600 people: 360,000 rows of 4 columns) asked every way; the patterns of a question; the watches a
    connection and the server keep ---- *)
@@ -2222,6 +2303,7 @@ let () =
   files ();
   files_wire ();
   watch_window ();
+  sums_wire ();
   answer_bounds ();
   timeouts ();
   reply_bounds ();

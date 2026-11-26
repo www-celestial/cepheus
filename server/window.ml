@@ -105,11 +105,19 @@ let members n groups (part : int -> int) =
 let compare_values = Top.compare_values
 
 (* a running sum past 63 bits, in the cell of its row: the question is refused only when that row is one it gives
-   (a row past the page's last is no part of the answer) *)
+   (a row past the page's last is no part of the answer), naming the column it sums ([col c]: a field's property, or
+   a report's aggregate) *)
 let past = Value.Text "running sum past 63 bits"
 
-let check_past (out : Value.t array array) idx =
-  Array.iter (fun w -> Array.iter (fun i -> if w.(i) == past then bad "Running's Sum passed the 63 bits of an Int: sum fewer rows (last = n)") idx) out
+let check_past ~(col : int -> string) (windows : Wire.window array) (out : Value.t array array) idx =
+  Array.iteri
+    (fun wi w ->
+      Array.iter
+        (fun i ->
+          if w.(i) == past then
+            bad "Running's Sum of %s passed the 63 bits of an Int: sum fewer rows (last = n)" (match windows.(wi) with Running (Sum c, _) -> col c | _ -> "a column"))
+        idx)
+    out
 
 (* Where the rows of a page start in their one group (After, Answer): the [skip] rows given first are the last of
    the rows before the page (as many as a frame or a Prev reaches back), whose values are not asked; [offset] rows of
