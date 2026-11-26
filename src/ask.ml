@@ -467,6 +467,28 @@ let expand (v : Store.view) (t : t) step =
   in
   go 0
 
+(* [expand] for a step that keeps no binding it is given ([shared]): each row written into [b] itself, one after the
+   other, an Optional's values read straight from the store, so that a binding costs no list and no copy a row; the
+   same rows in the same order: a value's row is [b] with the mask its Optional met ([mask]: the bits of the
+   Optionals before it), the word of a missing variable 0 *)
+let expand_shared (v : Store.view) (t : t) step =
+  let n = Array.length t.opts and m = t.vars in
+  let rec go k acc (b : int array) =
+    if k = n then step acc b
+    else begin
+      let o = t.opts.(k) in
+      let e = match o.oe with Query.Var x -> b.(x) | Thing c -> Query.rep v c | Val _ -> -1 in
+      let mask = b.(m) in
+      let r = ref acc and found = ref false in
+      if e >= 0 then Store.iter_values v e o.op (fun w -> found := true; b.(m) <- mask; b.(o.ov) <- w; r := go (k + 1) !r b);
+      if !found then !r else (b.(m) <- mask lor (1 lsl o.ov); b.(o.ov) <- 0; go (k + 1) acc b)
+    end
+  in
+  go 0
+
+(* no Not drops [env]: the checks one after the other, no closure made a binding *)
+let rec kept checks (env : int array) = match checks with [] -> true | h :: r -> (not (h env)) && kept r env
+
 (* a domain's accumulator with its binding's buffer, for a fold whose step keeps no binding ([shared]) *)
 type 'a with_buffer = { buf : int array; mutable inner : 'a }
 
@@ -476,25 +498,26 @@ let fold ?(seq = false) ?(any_order = false) ?(shared = false) ?(budget = max_in
   let spent = Atomic.make 0 in
   let width = if Array.length t.opts = 0 then t.vars else t.vars + 1 in
   let emit = if Array.length t.opts = 0 then step else expand v t step in
+  let emit_shared = if Array.length t.opts = 0 then step else expand_shared v t step in
   let run (c : conj) =
     let q, dense, back, sets, less = dense ?range ?words v t c in
     let checks = List.map (not_check ~budget ?stop ~spent v t (fun x -> dense.(x))) c.nots in
     let outer = Array.to_list (Array.mapi (fun d x -> d, x) back) |> List.filter (fun (_, x) -> t.outer.(x)) in
     let full env = let b = Array.make width 0 in List.iter (fun (d, x) -> b.(x) <- env.(d)) outer; b in
-    let keep env = List.for_all (fun h -> not (h env)) checks in
+    let keep env = kept checks env in
     if c.free = [] && shared then begin
       (* the buffer as [full] makes it: the question's variables of the binding, an Optional's value and the mask 0 *)
       let ds = Array.of_list (List.map fst outer) and xs = Array.of_list (List.map snd outer) and no = List.length outer in
       let ovs = Array.map (fun (o : opt) -> o.ov) t.opts and m = t.vars in
       let fill (b : int array) (env : int array) =
         for i = 0 to no - 1 do Array.unsafe_set b (Array.unsafe_get xs i) (Array.unsafe_get env (Array.unsafe_get ds i)) done;
-        if width > m then (Array.iter (fun y -> b.(y) <- 0) ovs; b.(m) <- 0)
+        if width > m then (for j = 0 to Array.length ovs - 1 do Array.unsafe_set b (Array.unsafe_get ovs j) 0 done; b.(m) <- 0)
       in
       let r =
         Query.fold ~seq ~any_order ~sets ~less ~budget ?stop v q
           ~init:(fun () -> { buf = Array.make width 0; inner = init () })
           ~merge:(fun a b -> a.inner <- merge a.inner b.inner; a)
-          ~step:(fun a env -> if keep env then (fill a.buf env; a.inner <- emit a.inner a.buf); a)
+          ~step:(fun a env -> if keep env then (fill a.buf env; a.inner <- emit_shared a.inner a.buf); a)
       in
       r.inner
     end

@@ -2042,4 +2042,57 @@ let () =
   close !db;
   Resolve.large_min := large
 
+let () =
+  section "ask: large answers, Optionals of many values and missing, on one domain and split";
+  let module Ask = Question.Ask in
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; follows; tag; age ]) =
+    declare db [ prop "person/name" Ttext; prop ~many:true "person/follows" Tlink; prop ~many:true "person/tag" Ttext; prop "person/age" Tint ]
+  in
+  let r = Rng.make 2031 in
+  let n = 1500 in
+  let made = Result.get_ok (write db (List.init n (fun k -> Add (-(k + 1), name, Text (Printf.sprintf "p%d" k))))) in
+  let id k = thing made (-(k + 1)) in
+  let ops =
+    List.concat
+      (List.init n (fun k ->
+           List.init (Rng.int r 7) (fun _ -> Add (id k, follows, Link (id (Rng.int r n))))
+           @ List.init (Rng.int r 4) (fun _ -> Add (id k, tag, Text (Printf.sprintf "t%d" (Rng.int r 20))))
+           @ if Rng.int r 3 = 0 then [] else [ Add (id k, age, Int (Rng.int r 90)) ]))
+  in
+  ignore (Result.get_ok (write db ops));
+  let v = view db in
+  (* the rows of before: every binding by the fold that keeps them (its Optionals' rows copied, Ask.expand), in the
+     engine's order, then the values of the columns given *)
+  let before (q : Question.t) =
+    let where = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) q.items in
+    let extra = List.filter (function Ask.Pattern _ -> false | _ -> true) q.items in
+    let t = Ask.compile v { Query.vars = q.vars; where; ranges = [] } extra in
+    let ty = Ask.typs_of t in
+    let bs = Ask.fold ~seq:true v t ~init:(fun () -> []) ~merge:(fun a b -> b @ a) ~step:(fun acc b -> b :: acc) in
+    List.rev_map (fun b -> Array.map (fun x -> if Ask.missing t b x then Value.missing else Store.value v ty.(x) b.(x)) q.give) bs
+  in
+  let asked d (q : Question.t) =
+    let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
+    Query.domains := d;
+    if d > 1 then (Query.parallel_min := 1; Query.probe_min := 1; Query.probe_more := 1);
+    Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0) (fun () -> Result.get_ok (ask v q))
+  in
+  let same a b = List.length a = List.length b && List.for_all2 (fun x y -> Array.length x = Array.length y && Array.for_all2 Value.equal x y) a b in
+  let opt e p x = Ask.Optional { Query.e; p; v = Query.Var x } in
+  let base = Ask.Pattern { Query.e = Var 0; p = name; v = Var 4 } in
+  (* three Optionals of one thing: many values (a product of rows), and missing ones *)
+  let chained = [ base; opt (Var 0) follows 1; opt (Var 0) tag 2; opt (Var 0) age 3 ] in
+  List.iter
+    (fun (what, vars, items, give) ->
+      let q = { Question.vars; items; give; sort = []; limit = 0; after = None } in
+      let want = before q in
+      C.check (List.length want > 600) "ask: %s: a large answer (%d rows)" what (List.length want);
+      C.check (same (asked 1 q) want) "ask: %s: on one domain, the rows of before in their order" what;
+      C.check (same (asked 4 q) want) "ask: %s: split across 4 domains, the same rows in the same order" what)
+    [ "one column", 5, chained, [| 1 |]; "two", 5, chained, [| 0; 1 |]; "three", 5, chained, [| 0; 1; 2 |]; "four", 5, chained, [| 0; 1; 2; 3 |];
+      "five", 5, chained, [| 0; 1; 2; 3; 4 |]; "a column twice", 5, chained, [| 2; 0; 2 |];
+      "follows and Less", 3, [ Ask.Pattern { Query.e = Var 0; p = follows; v = Var 1 }; Ask.Less (0, 1); Ask.Pattern { Query.e = Var 0; p = name; v = Var 2 } ], [| 0; 1; 2 |];
+      "a Not", 4, [ Ask.Pattern { Query.e = Var 0; p = name; v = Var 3 }; opt (Var 0) follows 1; Ask.Not [ Ask.Pattern { Query.e = Var 0; p = age; v = Var 2 } ] ], [| 0; 1 |] ]
+
 let () = C.finish "unit"

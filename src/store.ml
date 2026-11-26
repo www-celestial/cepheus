@@ -1873,6 +1873,11 @@ let base_read_things b p lo n (buf : int array) =
 
 let read_things v p lo n buf = base_read_things v.runs.(0).a p lo n buf
 
+(* the rows lo .. lo+n-1 of a slice of [slice_things] (of [slice_values]) given to f in their order: the things (the
+   values) [iter_things] ([iter_values]) gives, in a view of one run with no change of p (of e) *)
+let iter_slice_things v p lo n f = if n > 0 then scan v.runs.(0).a p lo (lo + n) (fun e _ _ -> f e)
+let iter_slice_values v e p lo n f = if n > 0 then cloop v.runs.(0).a p e lo (lo + n) f
+
 (* the things that hold p, each once: in thing order from the column of a view of one run with no change of p;
    otherwise as the facts come, seen once through a table *)
 let iter_holders v p f =

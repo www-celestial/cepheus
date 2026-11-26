@@ -258,9 +258,31 @@ let find ?timeout v q =
 
 module Question = Question
 
-(* a domain's rows of [ask], newest first, after the rows of the domains merged into it (their lists, the newest
-   first, each newest first); the word and value of each column in its row before *)
-type rows = { mutable rows : Value.t array list; mutable before : Value.t array list list; word : int array; last : Value.t array }
+(* a domain's rows of [ask], in chunks: the newest [cur] with [n] rows, then the full ones and those of the domains
+   merged into it ([full], the newest first, each with its count); the word and value of each column in its row
+   before. The list of the answer is made once at the end, from the last row back: a row costs one cell of a chunk
+   and one of the list, where a list a domain then joined cost two cells of a list *)
+type rows = { mutable cur : Value.t array array; mutable n : int; mutable full : (Value.t array array * int) list; word : int array; last : Value.t array }
+
+(* a chunk of 256 rows is a block of the minor heap (its 256 words, Max_young_wosize); the first ones smaller, so that
+   a small answer makes a small chunk *)
+let chunk_max = 256
+
+let push_row a (r : Value.t array) =
+  if a.n = Array.length a.cur then begin
+    if a.n > 0 then a.full <- (a.cur, a.n) :: a.full;
+    a.cur <- Array.make (min chunk_max (max 8 (2 * a.n))) [||];
+    a.n <- 0
+  end;
+  Array.unsafe_set a.cur a.n r;
+  a.n <- a.n + 1
+
+let rows_list a =
+  let l = ref [] in
+  let add (c, n) = for i = n - 1 downto 0 do l := Array.unsafe_get c i :: !l done in
+  add (a.cur, a.n);
+  List.iter add a.full;
+  !l
 
 let ask ?timeout v (q : Question.t) =
   let stop = stop_of timeout in
@@ -299,33 +321,39 @@ let ask ?timeout v (q : Question.t) =
          a domain's rows in a list, newest first, and the lists of the domains joined at the end in their order *)
       (* a column's value made again only when its word changes from the domain's row before (the outer variables of
          a join repeat over the inner ones): the same immutable value shared, one allocation the less a cell *)
-      let row a =
-        if nd > 0 then fun b -> values (src.project b)
+      let cell a (b : int array) i =
+        let x = Array.unsafe_get give i in
+        if masked && (Array.unsafe_get b q.vars lsr x) land 1 = 1 then Value.missing
+        else begin
+          let w = Array.unsafe_get b x in
+          let last = Array.unsafe_get a.last i in
+          if last != Value.missing && Array.unsafe_get a.word i = w then last
+          else begin
+            let y = Store.value v (Array.unsafe_get typs i) w in
+            Array.unsafe_set a.word i w;
+            Array.unsafe_set a.last i y;
+            y
+          end
+        end
+      in
+      (* a row of up to 4 columns made as an array literal (allocated in place, no call to the runtime) *)
+      let row =
+        if nd > 0 then fun _ b -> values (src.project b)
         else
-          fun (b : int array) ->
-            let r = Array.make k Value.missing in
-            for i = 0 to k - 1 do
-              let x = Array.unsafe_get give i in
-              if not (masked && (Array.unsafe_get b q.vars lsr x) land 1 = 1) then begin
-                let w = Array.unsafe_get b x in
-                let last = Array.unsafe_get a.last i in
-                if last != Value.missing && Array.unsafe_get a.word i = w then Array.unsafe_set r i last
-                else begin
-                  let y = Store.value v (Array.unsafe_get typs i) w in
-                  Array.unsafe_set a.word i w;
-                  Array.unsafe_set a.last i y;
-                  Array.unsafe_set r i y
-                end
-              end
-            done;
-            r
+          match k with
+          | 0 -> fun _ _ -> [||]
+          | 1 -> fun a b -> [| cell a b 0 |]
+          | 2 -> fun a b -> let c0 = cell a b 0 in let c1 = cell a b 1 in [| c0; c1 |]
+          | 3 -> fun a b -> let c0 = cell a b 0 in let c1 = cell a b 1 in let c2 = cell a b 2 in [| c0; c1; c2 |]
+          | 4 -> fun a b -> let c0 = cell a b 0 in let c1 = cell a b 1 in let c2 = cell a b 2 in let c3 = cell a b 3 in [| c0; c1; c2; c3 |]
+          | _ -> fun a b -> let r = Array.make k Value.missing in for i = 0 to k - 1 do Array.unsafe_set r i (cell a b i) done; r
       in
       let acc =
-        Ask.fold ~shared:true ?stop v t ~init:(fun () -> { rows = []; before = []; word = Array.make k 0; last = Array.make k Value.missing })
-          ~merge:(fun a b -> a.before <- b.before @ (a.rows :: a.before); a.rows <- b.rows; a)
-          ~step:(fun a b -> a.rows <- row a b :: a.rows; a)
+        Ask.fold ~shared:true ?stop v t ~init:(fun () -> { cur = [||]; n = 0; full = []; word = Array.make k 0; last = Array.make k Value.missing })
+          ~merge:(fun a b -> a.full <- b.full @ (if a.n > 0 then (a.cur, a.n) :: a.full else a.full); a.cur <- b.cur; a.n <- b.n; a)
+          ~step:(fun a b -> push_row a (row a b); a)
       in
-      Ok (List.fold_left (fun l part -> List.rev_append part l) (List.rev acc.rows) acc.before)
+      Ok (rows_list acc)
     end
     else Ok (List.map values (Array.to_list (Top.give ~masked v ~typs src order)))
   with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m) | Query.Timeout t -> Error (Timeout (Query.timeout_message t))
