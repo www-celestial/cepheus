@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="712" height="288" viewBox="0 0 712 288">
+<title>Une écriture avec une replica, répondue après le seul fsync du primary, et dans un cluster Raft, répondue dès qu'une majorité la tient</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.add{fill:#1a7f37}
+.del{fill:#cf222e}
+.bg{fill:#ffffff}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.rowadd{fill:#dafbe1;stroke:#1a7f37;stroke-width:1.2}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.axis{stroke:#8c959f;stroke-width:1}
+.fa{fill:#3a5ad9}
+.fs{fill:#57606a}
+.ldel{stroke:#cf222e;stroke-width:1.4;fill:none}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.add{fill:#3fb950}
+.del{fill:#f85149}
+.bg{fill:#0d1117}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.rowadd{fill:#12261e;stroke:#3fb950}
+.br{stroke:#8fa8ff}
+.gr{stroke:#9198a1}
+.axis{stroke:#6e7681}
+.fa{fill:#8fa8ff}
+.fs{fill:#9198a1}
+.ldel{stroke:#f85149}
+}
+</style>
+<rect class="bg" width="712" height="288"/>
+<text class="h" x="16" y="22">Un primary et sa replica : asynchrone</text>
+<text class="h" x="46" y="48" text-anchor="middle">programme</text>
+<line class="axis" x1="46" y1="56" x2="46" y2="268"/>
+<text class="h" x="150" y="48" text-anchor="middle">primary</text>
+<line class="axis" x1="150" y1="56" x2="150" y2="268"/>
+<text class="h" x="270" y="48" text-anchor="middle">replica</text>
+<line class="axis" x1="270" y1="56" x2="270" y2="268"/>
+<line class="gr" x1="46" y1="76" x2="144" y2="76"/>
+<polygon class="fs" points="150.0,76.0 142.0,72.0 142.0,80.0"/>
+<text class="s sm" x="98" y="71" text-anchor="middle">write</text>
+<rect class="cur" x="142" y="84" width="16" height="42" rx="3"/>
+<text class="a sm" x="162" y="109">fsync</text>
+<line class="br" x1="150" y1="140" x2="52" y2="140"/>
+<polygon class="fa" points="46.0,140.0 54.0,144.0 54.0,136.0"/>
+<text class="s sm" x="98" y="135" text-anchor="middle">Ok</text>
+<line class="gr" x1="150" y1="164" x2="264" y2="164"/>
+<polygon class="fs" points="270.0,164.0 262.0,160.0 262.0,168.0"/>
+<text class="s sm" x="210" y="159" text-anchor="middle">frame</text>
+<rect class="cur" x="262" y="172" width="16" height="42" rx="3"/>
+<text class="a sm" x="282" y="197">fsync</text>
+<path class="ldel" d="M 40 140 h -10 V 214 h 10"/>
+<text class="del sm" x="16" y="236">entre Ok et le fsync de la replica,</text>
+<text class="del sm" x="16" y="252">l'écriture est sur le primary seul : le lag</text>
+<text class="h" x="350" y="22">Raft, 3 serveurs : une majorité</text>
+<text class="h" x="374" y="48" text-anchor="middle">programme</text>
+<line class="axis" x1="374" y1="56" x2="374" y2="268"/>
+<text class="h" x="468" y="48" text-anchor="middle">leader</text>
+<line class="axis" x1="468" y1="56" x2="468" y2="268"/>
+<text class="h" x="568" y="48" text-anchor="middle">follower</text>
+<line class="axis" x1="568" y1="56" x2="568" y2="268"/>
+<text class="h" x="650" y="48" text-anchor="middle">follower</text>
+<line class="axis" x1="650" y1="56" x2="650" y2="268"/>
+<line class="gr" x1="374" y1="76" x2="462" y2="76"/>
+<polygon class="fs" points="468.0,76.0 460.0,72.0 460.0,80.0"/>
+<text class="s sm" x="421" y="71" text-anchor="middle">write</text>
+<rect class="cur" x="460" y="84" width="16" height="42" rx="3"/>
+<text class="a sm" x="456" y="118" text-anchor="end">log, fsync</text>
+<line class="gr" x1="468" y1="96" x2="562" y2="96"/>
+<polygon class="fs" points="568.0,96.0 560.0,92.0 560.0,100.0"/>
+<text class="s sm" x="518" y="91" text-anchor="middle">entry</text>
+<line class="gr" x1="468" y1="100" x2="645" y2="104"/>
+<polygon class="fs" points="650.0,104.0 642.1,99.8 641.9,107.8"/>
+<rect class="cur" x="560" y="104" width="16" height="40" rx="3"/>
+<text class="a sm" x="580" y="128">fsync</text>
+<rect class="cur" x="642" y="112" width="16" height="92" rx="3"/>
+<text class="a sm" x="662" y="162">fsync</text>
+<line class="gr" x1="568" y1="156" x2="484" y2="156"/>
+<polygon class="fs" points="478.0,156.0 486.0,160.0 486.0,152.0"/>
+<text class="s sm" x="518" y="151" text-anchor="middle">ack</text>
+<rect class="rowadd" x="408" y="168" width="120" height="22" rx="3"/>
+<text class="add sm" x="468" y="183" text-anchor="middle">2 sur 3 : committed</text>
+<line class="br" x1="468" y1="206" x2="380" y2="206"/>
+<polygon class="fa" points="374.0,206.0 382.0,210.0 382.0,202.0"/>
+<text class="s sm" x="421" y="201" text-anchor="middle">Ok</text>
+<line class="gr" x1="650" y1="214" x2="483" y2="222"/>
+<polygon class="fs" points="478.0,222.0 486.2,225.6 485.8,217.6"/>
+<text class="s sm" x="610" y="236" text-anchor="middle">le 3e peut venir plus tard</text>
+<text class="add sm" x="350" y="256">Ok dès que 2 des 3 la tiennent forcée : un leader</text>
+<text class="add sm" x="350" y="272">perdu ne perd aucune écriture confirmée</text>
+</svg>

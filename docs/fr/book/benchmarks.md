@@ -150,6 +150,8 @@ après l'autre.
 | une page de 51 après la 200 000e facture avec son total cumulé (`After` ; une sous-requête et une condition de keyset hors d'elle) | **76,7 ms** [69,2, 326] | 197 ms [183, 805] | Cepheus, 2,6 fois |
 | la première page de 51 avec son total cumulé | **97 µs** [89, 170] | 183 µs [165, 539] | Cepheus, 1,9 fois |
 
+![Une barre par question, sur une échelle logarithmique de combien de fois un côté est plus rapide : des barres bleues à droite où Cepheus est plus rapide, orange à gauche où c'est PostgreSQL. Cepheus est 1,3 à 3,2 fois plus rapide sur les totaux cumulés, les moyennes mobiles, la ligne d'avant, un rang de 100 groupes et les pages, et 7,9 fois sur le rapport mensuel ; PostgreSQL est plus rapide sur un rang d'un seul groupe (1,2 fois), les 3 dernières de chaque client par LATERAL (2,3 fois) et la dernière par DISTINCT ON (1,2 fois) ; un rang de 10 000 groupes est à peu près pareil.](images/bench-windows.svg)
+
 - **Une fenêtre est un seul passage.** Cepheus lit la question sur ses 8 domains, trie ses 245 000 lignes une fois, et
   chaque fenêtre est alors un passage sur chaque groupe (une somme cumulée, une moyenne mobile à partir de sommes
   exactes avec la ligne qui part retirée, la ligne d'avant). PostgreSQL lit les lignes par date dans son index sur
@@ -235,6 +237,8 @@ factures en mémoire avec 100 005 clients : le navigateur de données sur le kin
 | 1 000 000 | celles du tenant 3 par id, après celle du milieu | 7,10 ms [6,66 ms, 7,66 ms] | **32,0 µs [31,6 µs, 32,2 µs]** | 0,0044 | 60,0 µs [58,0 µs, 64,0 µs] | 1,90 |
 | 1 000 000 | celles du tenant 3 par id décroissant, la première page | 9,96 ms [9,35 ms, 11,7 ms] | **24,4 µs [24,1 µs, 24,6 µs]** | 0,0025 | 56,0 µs [55,0 µs, 61,0 µs] | 2,32 |
 | 1 000 000 | celles du tenant 3 par id décroissant, après celle du milieu | 7,23 ms [7,02 ms, 8,42 ms] | **34,0 µs [33,8 µs, 34,5 µs]** | 0,0048 | 66,0 µs [63,0 µs, 69,0 µs] | 1,92 |
+
+![Un graphique log-log du temps d'une page de 51 par id, après le milieu du kind, à 10 000, 100 000 et 1 000 000 de choses. Le tas d'avant, en gris pointillé, croît de 2,10 ms à 81,4 ms ; PostgreSQL, en orange, reste entre 51 et 60 µs ; Cepheus, en bleu, entre 24,1 et 25,7 µs.](images/bench-pages.svg)
 
 **Sur un fork de 100 000 items** (chaque fait dans son delta, la base d'un programme en mémoire) :
 
@@ -634,6 +638,8 @@ PostgreSQL 18.6 et SQLite 3.54 depuis les mêmes fichiers CSV.
 | une restauration jusqu'à la fin | **1,61 s** [1,48, 1,93] | 6,45 s [5,93, 7,70] | 2,65 s [2,08, 3,50] | Cepheus |
 | tout l'historique rejoué (11 tours) | 34,87 s [33,67, 36,19], depuis le journal seul (33,9 Mo) | **21,42 s** [12,89, 46,57], depuis une sauvegarde de base prise vide (48 Mo) et 403 Mo de WAL | aucune | PostgreSQL |
 | jusqu'au milieu de l'historique (pas le même travail) | 32,62 s [31,48, 35,56], 9,43 M de faits rejoués | 21,71 s [16,92, 35,40], la moitié du WAL du chargement rejouée | aucune | |
+
+![Trois barres par ligne, Cepheus en bleu, PostgreSQL en orange, SQLite en vert, chaque ligne à sa propre échelle : la taille de la base, 104,7, 284 et 136,4 Mo ; une sauvegarde en service, 1,16, 22,53 et 1,46 s ; la sauvegarde vérifiée, 565 ms, 95 ms et 2,83 s ; une restauration jusqu'au bout, 1,61, 6,45 et 2,65 s ; tout l'historique rejoué, 34,87 et 21,42 s, SQLite ne gardant pas d'historique.](images/bench-backup.svg)
 
 Tout l'historique rejoué est le même travail des deux côtés : Cepheus restaure une copie dont on a retiré les runs (le
 journal seul, chaque groupe rejoué : `bench/ops.sh cepheus-replay`), PostgreSQL se restaure depuis la sauvegarde de

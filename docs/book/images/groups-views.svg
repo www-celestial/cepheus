@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="712" height="330" viewBox="0 0 712 330">
+<title>Three groups and the view after each: a view is the state after one group, and never changes</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.h{font-weight:600}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.add{fill:#1a7f37}
+.del{fill:#cf222e}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.fs{fill:#57606a}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.add{fill:#3fb950}
+.del{fill:#f85149}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.box{fill:#1c2128;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.gr{stroke:#9198a1}
+.fs{fill:#9198a1}
+}
+</style>
+<rect class="bg" width="712" height="330"/>
+<text class="s" x="16" y="22">Groups 1 to 2: the system's properties, then client/name and client/city declared. The thing: #65536.</text>
+<rect class="box" x="16" y="36" width="216" height="92"/>
+<text xml:space="preserve" x="26" y="56"><tspan class="h">group 3</tspan><tspan class="s">,  by 7,  </tspan>"signup"</text>
+<text class="c add" xml:space="preserve" x="26" y="80">+ client/name "Ada Martin"</text>
+<text class="c add" xml:space="preserve" x="26" y="98">+ client/city "Lyon"</text>
+<line class="gr" x1="234" y1="82" x2="244" y2="82"/>
+<polygon class="fs" points="250.0,82.0 242.0,78.0 242.0,86.0"/>
+<line class="gr" x1="124" y1="130" x2="124" y2="150"/>
+<polygon class="fs" points="124.0,156.0 128.0,148.0 120.0,148.0"/>
+<rect class="row" x="16" y="160" width="216" height="70"/>
+<text class="s" x="26" y="178">the view at group 3</text>
+<text class="c" xml:space="preserve" x="26" y="198">client/name "Ada Martin"</text>
+<text class="c" xml:space="preserve" x="26" y="216">client/city "Lyon"</text>
+<rect class="box" x="252" y="36" width="216" height="92"/>
+<text xml:space="preserve" x="262" y="56"><tspan class="h">group 4</tspan><tspan class="s">,  by 7,  </tspan>"rename"</text>
+<text class="c del" xml:space="preserve" x="262" y="80">- client/name "Ada Martin"</text>
+<text class="c add" xml:space="preserve" x="262" y="98">+ client/name "Ada Durand"</text>
+<line class="gr" x1="470" y1="82" x2="480" y2="82"/>
+<polygon class="fs" points="486.0,82.0 478.0,78.0 478.0,86.0"/>
+<line class="gr" x1="360" y1="130" x2="360" y2="150"/>
+<polygon class="fs" points="360.0,156.0 364.0,148.0 356.0,148.0"/>
+<rect class="cur" x="252" y="160" width="216" height="70"/>
+<text class="a" x="262" y="178">the view at group 4</text>
+<text class="c" xml:space="preserve" x="262" y="198">client/name "Ada Durand"</text>
+<text class="c" xml:space="preserve" x="262" y="216">client/city "Lyon"</text>
+<rect class="box" x="488" y="36" width="216" height="92"/>
+<text xml:space="preserve" x="498" y="56"><tspan class="h">group 5</tspan><tspan class="s">,  by 9,  </tspan>"move"</text>
+<text class="c del" xml:space="preserve" x="498" y="80">- client/city "Lyon"</text>
+<text class="c add" xml:space="preserve" x="498" y="98">+ client/city "Paris"</text>
+<line class="gr" x1="596" y1="130" x2="596" y2="150"/>
+<polygon class="fs" points="596.0,156.0 600.0,148.0 592.0,148.0"/>
+<rect class="row" x="488" y="160" width="216" height="70"/>
+<text class="s" x="498" y="178">the view at group 5</text>
+<text class="c" xml:space="preserve" x="498" y="198">client/name "Ada Durand"</text>
+<text class="c" xml:space="preserve" x="498" y="216">client/city "Paris"</text>
+<text class="a" x="252" y="252">A reader that took this view reads the same</text>
+<text class="a" x="252" y="269">facts while group 5 is written, and after.</text>
+<text class="s" x="16" y="300">Nothing is erased: a change of value is a retraction (-) and an addition (+) of a later group,</text>
+<text class="s" x="16" y="317">and the journal keeps every group.</text>
+</svg>

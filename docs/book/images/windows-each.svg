@@ -1,21 +1,28 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="520" height="380" viewBox="0 0 520 380">
 <title>The invoices of 2028 by client, the latest first: Each by client and Limit 3 keep the first 3 of each</title>
 <style>
-text{font-family:system-ui, sans-serif;font-size:13px;fill:#1f2328}
-.c{font-family:ui-monospace, Menlo, Consolas, monospace;font-size:12.5px}
-.h{font-weight:600}
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
 .s{fill:#57606a}
 .a{fill:#3a5ad9}
 .off{fill:#8c959f}
-.row{fill:#fff;stroke:#d0d7de;stroke-width:1}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
 .cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
-.frame{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.2;stroke-dasharray:4 3}
-.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
-.gr{stroke:#57606a;stroke-width:1.2;fill:none}
 .cut{stroke:#8c959f;stroke-width:1}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.cut{stroke:#6e7681}
+}
 </style>
-<rect width="520" height="380" fill="#fff"/>
-<text class="c" x="16" y="22">Sort: [n, Desc(d)]   Limit: 3   Each: [n]</text>
+<rect class="bg" width="520" height="380"/>
+<text class="c" xml:space="preserve" x="16" y="22">Sort: [n, Desc(d)]   Limit: 3   Each: [n]</text>
 <rect class="cur" x="16" y="48" width="454" height="22"/>
 <text x="24" y="64">Ada Martin</text>
 <text x="150" y="64">May 12</text>

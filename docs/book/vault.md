@@ -81,6 +81,8 @@ the bytes of a range in pieces, reading only the chunks under it.
 
 ## How it works
 
+![Top, a file of 1,500,000 bytes as a bar of 19 chunks of different sizes, cut by the vault's chunker; the 2 chunks under the range of a Read of 65,536 bytes from byte 1,000,000 are highlighted. Middle, the same file with 100 bytes inserted at byte 400,000: only the chunk at the insertion is new, in red, and the 18 others are found stored. Bottom, a chunk's way: named by a keyed BLAKE2b-256, compressed by LZ4, sealed by AEGIS-256, stored once as a record of a pack.](images/vault-chunks.svg)
+
 ### Chunks cut by their content
 
 A file is cut into **chunks** by **FastCDC** (Xia, Zhou, Jiang, Feng, Hua, Hu, Liu, Zhang, "FastCDC: a Fast and Efficient

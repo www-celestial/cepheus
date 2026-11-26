@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="712" height="354" viewBox="0 0 712 354">
+<title>The server beside PostgreSQL: how many times faster each side is, measure by measure</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.bg{fill:#ffffff}
+.grid{stroke:#eaeef2;stroke-width:1}
+.axis{stroke:#8c959f;stroke-width:1}
+.s1{fill:#257de0}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.bg{fill:#0d1117}
+.grid{stroke:#262c36}
+.axis{stroke:#6e7681}
+.s1{fill:#338ced}
+}
+</style>
+<rect class="bg" width="712" height="354"/>
+<text class="h" x="16" y="22">The server beside PostgreSQL 18.6's, the median of the rounds</text>
+<text class="s sm" x="350" y="46" text-anchor="end">Cepheus · PostgreSQL</text>
+<text class="a sm" x="494" y="46">Cepheus faster →</text>
+<text class="sm" x="478" y="46" text-anchor="end">← PostgreSQL faster</text>
+<line class="grid" x1="432" y1="60" x2="432" y2="296"/>
+<text class="s sm" x="432" y="70" text-anchor="middle">2×</text>
+<line class="grid" x1="486" y1="60" x2="486" y2="296"/>
+<text class="s sm" x="486" y="70" text-anchor="middle">1×</text>
+<line class="grid" x1="540" y1="60" x2="540" y2="296"/>
+<text class="s sm" x="540" y="70" text-anchor="middle">2×</text>
+<line class="grid" x1="594" y1="60" x2="594" y2="296"/>
+<text class="s sm" x="594" y="70" text-anchor="middle">4×</text>
+<line class="grid" x1="648" y1="60" x2="648" y2="296"/>
+<text class="s sm" x="648" y="70" text-anchor="middle">8×</text>
+<line class="axis" x1="486" y1="60" x2="486" y2="296"/>
+<text class="sm" x="16" y="91">empty round trip, Unix socket</text>
+<text class="s sm" x="350" y="91" text-anchor="end">8.86 µs · 15.24 µs</text>
+<rect class="s1" x="486" y="81" width="42" height="13" rx="2"/>
+<text class="sm h" x="533" y="92">1.73×</text>
+<text class="sm" x="16" y="113">a point read, Unix socket</text>
+<text class="s sm" x="350" y="113" text-anchor="end">9.68 µs · 24.91 µs</text>
+<rect class="s1" x="486" y="103" width="75" height="13" rx="2"/>
+<text class="sm h" x="566" y="114">2.62×</text>
+<text class="sm" x="16" y="135">a point read, TCP + TLS 1.3</text>
+<text class="s sm" x="350" y="135" text-anchor="end">41.33 µs · 52.31 µs</text>
+<rect class="s1" x="486" y="125" width="18" height="13" rx="2"/>
+<text class="sm h" x="509" y="136">1.27×</text>
+<text class="sm" x="16" y="157">16 reads in flight, a read</text>
+<text class="s sm" x="350" y="157" text-anchor="end">1.30 µs · 9.05 µs</text>
+<rect class="s1" x="486" y="147" width="151" height="13" rx="2"/>
+<text class="sm h" x="642" y="158">6.95×</text>
+<text class="sm" x="16" y="179">8 clients, a read</text>
+<text class="s sm" x="350" y="179" text-anchor="end">3.71 µs · 6.27 µs</text>
+<rect class="s1" x="486" y="169" width="41" height="13" rx="2"/>
+<text class="sm h" x="532" y="180">1.71×</text>
+<text class="sm" x="16" y="201">64 clients, a read</text>
+<text class="s sm" x="350" y="201" text-anchor="end">3.14 µs · 7.00 µs</text>
+<rect class="s1" x="486" y="191" width="61" height="13" rx="2"/>
+<text class="sm h" x="552" y="202">2.2×</text>
+<text class="sm" x="16" y="223">256 clients, a read</text>
+<text class="s sm" x="350" y="223" text-anchor="end">2.88 µs · 12.83 µs</text>
+<rect class="s1" x="486" y="213" width="117" height="13" rx="2"/>
+<text class="sm h" x="608" y="224">4.5×</text>
+<text class="sm" x="16" y="245">Q3: the unpaid of a city</text>
+<text class="s sm" x="350" y="245" text-anchor="end">0.487 ms · 0.662 ms</text>
+<rect class="s1" x="486" y="235" width="26" height="13" rx="2"/>
+<text class="sm h" x="517" y="246">1.4×</text>
+<text class="sm" x="16" y="267">Q4: unpaid sum by city</text>
+<text class="s sm" x="350" y="267" text-anchor="end">12.37 ms · 18.47 ms</text>
+<rect class="s1" x="486" y="257" width="31" height="13" rx="2"/>
+<text class="sm h" x="522" y="268">1.5×</text>
+<text class="sm" x="16" y="289">a new TLS connection</text>
+<text class="s sm" x="350" y="289" text-anchor="end">2.60 ms · 4.28 ms</text>
+<rect class="s1" x="486" y="279" width="36" height="13" rx="2"/>
+<text class="sm h" x="527" y="290">1.6×</text>
+<text class="s" x="16" y="320">The same rows on both sides (1 M facts), 4 I/O domains against a process a connection; pgbench -M</text>
+<text class="s" x="16" y="337">prepared. Times: docs/book/server.md.</text>
+</svg>

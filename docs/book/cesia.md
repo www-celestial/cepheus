@@ -472,6 +472,8 @@ a row costs the same at any depth, where an offset counts every row it skips, an
 moves them by one. A row that is unchanged at both pages' groups comes once; one written between them shows at its
 place, if that place is after the cursor.
 
+![Two lists of invoices sorted by total, the largest first. Left, page 1 at its group: 300.00, 280.00 and 270.00, the last one the cursor. Right, the order after a new invoice of 1,000.00 written between the pages, in green at the top: After the cursor gives 250.00, 240.00 and 220.00; OFFSET 3 gives 270.00, 250.00 and 240.00, and shows 270.00 twice.](images/pages-after.svg)
+
 **How it is answered.** Two ways give the same rows ([theory](theory.md#4-generic-join)):
 
 - by a **heap**: every answer of the question, kept in a buffer of about twice k rows, sorted and cut back to its
@@ -627,6 +629,8 @@ way to 30); the spread of two values is their difference over $\sqrt 2$. The mon
 March, is April's in Paris (00:30 on 1 April, summer time), and Ada's first, of 23:30 UTC on 31 January, February's
 (00:30 on 1 February); February starts at 23:00 UTC on 31 January, April at 22:00 UTC on 31 March. Ada's second sale has two tags, Bo's last none: `Values` lists the different tags, `Count(t)` counts them,
 `Count(i)` counts the sales (`Count()` would count the rows, one a tag).
+
+![Left, the four rows of the Where: Ada Martin 10.00 and 30.00, Bo Lind 20.00 and 60.00. Arrows bring each client's two rows to one row of the report: Ada Martin with Mean 20.00, Median 20.00, Low 15.00 and Spread 14.14; Bo Lind with 40.00, 40.00, 30.00 and 28.28.](images/report-groups.svg)
 
 - `cepheus.Avg(x)`: the mean. Of ints and floats a Float; of money, money of its scale, rounded half away from zero
   (as a Float written to a money field is: 10.005 euros is 10.01); of dates, a date, rounded to the millisecond. It is
@@ -891,6 +895,8 @@ database before the group. `Sum` and `Count` follow by difference; `Min` and `Ma
 extremum went. Questions that differ only by their constants (the unpaid invoices of each client) share one
 **template**: a fact's change is computed once and its rows sent to the watches whose constants they match, so a
 group costs the same with 10 watches or 10,000 ([what it costs](#what-it-costs)).
+
+![Left, group 15 adds the unpaid invoice 65546 of Ada, of total 45, and group 16 marks it paid. Middle, the template unpaidOf(c) with its three patterns computes each change once (the delta query). Right, the watch of c = ada, shared by fibers A and B, gets the rows; the watch of c = bo gets nothing. Below, the three messages fiber A receives: the answer at group 14, then invoice 65546 added at group 15, then removed at group 16.](images/watch-flow.svg)
 
 ### Sort and Limit in a watch
 
@@ -1241,6 +1247,8 @@ server. What it reads is never stale: a read that starts after a write was confi
 other, sees that write. Reads are **linearizable** (Herlihy and Wing 1990: each read and write appears to take effect
 at one instant between its call and its answer, in an order that keeps real time), and with the groups, strictly
 serializable (G15).
+
+![Left, the server process, cepheus serve: its listeners (the Unix socket, and TCP with TLS 1.3), its I/O domains, a database with its writer, journal and runs, the commit buffer and the visibility page in /dev/shm. Right, three programs: one elsewhere reads over TCP and TLS in 41.3 µs; one on the same machine through the Unix socket in 9.7 µs; one with local reads receives the run files and the frames by the follow stream, maps the visibility page read-only and reads in its own memory in 0.22 µs.](images/server-reads.svg)
 
 How, in short ([server](server.md#local-reads-g15) tells it whole):
 
