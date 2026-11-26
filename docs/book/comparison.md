@@ -267,6 +267,34 @@ which SQL writes with `LATERAL` (PostgreSQL, MySQL 8.0.14) or `row_number()` in 
 - *Where SQL wins*: `RANGE` frames (a span of dates), `lead`, `ntile`, `percent_rank`, `cume_dist`, `first_value`,
   `nth_value`, the window of any expression, and windows in a materialized view; Cepheus refuses a watch of windows.
 
+### Sums past 63 bits
+
+A sum of integers can pass the integers it adds: each database chooses a wider result or an error, and when.
+Cepheus's Int is 63 bits ($-2^{62}$ to $2^{62} - 1$); a report's `Sum` keeps its total modulo $2^{63}$ and the times
+it wrapped, so it is refused (`invalid`, naming the field and the group) exactly when its total is no Int, whatever
+the order of the rows and the cores ([a sum is exact, or refused](cesia.md#find-questions)). Run here,
+PostgreSQL 18.6 and SQLite 3.54.1:
+
+| the values | PostgreSQL 18.6 | SQLite 3.54.1 | Cepheus |
+|---|---|---|---|
+| $2^{63} - 1$ (PostgreSQL's, SQLite's largest), 1, -5 | `9223372036854775803`, a `numeric` | `integer overflow` | (its largest is $2^{62} - 1$:) $2^{62} - 1$, 1, -5 gives $2^{62} - 5$ |
+| $2^{63} - 1$ twice | `18446744073709551614` | `integer overflow` | $2^{62} - 1$ twice: `invalid`, `Sum of ... passed the 63 bits of an Int` |
+
+- *Same*: no wrong total in silence. PostgreSQL's `sum` of an `integer` is a `bigint`, of a `bigint` a `numeric`
+  ([aggregate functions](https://www.postgresql.org/docs/18/functions-aggregate.html)); MySQL's `SUM()` and `AVG()`
+  "return a DECIMAL value for exact-value arguments (integer or DECIMAL)" ([MySQL 8.4, aggregate function
+  descriptions](https://dev.mysql.com/doc/refman/8.4/en/aggregate-functions.html)); SQLite's `sum()` "will throw an
+  "integer overflow" exception if all inputs are integers or NULL" and a partial sum passes 64 bits, at any point of
+  the sum, and its `total()` is a float ([aggregate functions](https://sqlite.org/lang_aggfunc.html)). PostgreSQL's
+  `date_trunc` of its earliest timestamps to their millennium is an error ("timestamp out of range"), as a `Trunc`
+  before Cepheus's least date is.
+- *Different*: SQLite refuses a sum whose total fits when a partial sum passes 64 bits (the first row above), so its
+  answer hangs on the order of the rows; Cepheus refuses only a total that is no Int, the same on any order and
+  number of cores.
+- *Where PostgreSQL and MySQL win*: a total past 63 bits is given exactly, as a `numeric` or a `DECIMAL`. Cepheus has
+  no wider integer: a new type of value every program would have to read. Its `Avg` is exact past them, and the mean
+  times `Count()` gives the total in floats.
+
 ## Further reading
 
 Berenson et al. 1995 and Fekete et al. 2005 for snapshot isolation and write skew; Kung and Robinson 1981 for
