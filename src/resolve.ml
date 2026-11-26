@@ -121,8 +121,18 @@ module Facts = struct
     let n = t.n in
     if n = 0 then v
     else begin
-      let o = Store.fact_order t.e t.p t.w n in
-      let pick a = Array.init n (fun i -> a.(o.(i))) in
+      (* the linking things come in the order of their ids, each one's facts by property and value: in order
+         already, most often *)
+      let sorted = ref true and i = ref 1 in
+      while !sorted && !i < n do
+        let j = !i - 1 in
+        let c = compare (t.e.(j) : int) t.e.(!i) in
+        let c = if c <> 0 then c else compare (t.p.(j) : int) t.p.(!i) in
+        if (if c <> 0 then c else compare (t.w.(j) : int) t.w.(!i)) >= 0 then sorted := false;
+        incr i
+      done;
+      let o = if !sorted then [||] else Store.fact_order t.e t.p t.w n in
+      let pick a = if !sorted then Array.sub a 0 n else Array.init n (fun i -> a.(o.(i))) in
       Store.set_sorted ~olds:(Array.make n 1) v (pick t.e) (pick t.p) (pick t.w) (Array.make n 0) n
     end
 end

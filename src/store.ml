@@ -1247,7 +1247,44 @@ module VM = struct
   (* the least x >= w whose keys w .. x add m facts or more (m >= 1); with [desc], the greatest x <= w whose keys
      x .. w do; None when there are fewer *)
   let nth w m ~desc t = if desc then reach_down (adds_above w t + m) t else reach_up (adds_below w t + m) t
+
+  (* the tree of the bindings ks.(lo .. hi-1), ds.(lo .. hi-1), the keys strictly increasing: built in O(n), each
+     node's two sides of heights that differ by at most 1 *)
+  let rec of_sorted (ks : int array) (ds : vdelta array) lo hi =
+    if hi <= lo then E else (let mid = (lo + hi) lsr 1 in create (of_sorted ks ds lo mid) ks.(mid) ds.(mid) (of_sorted ks ds (mid + 1) hi))
 end
+
+(* A stable sort of the indexes [o] by [key], least-significant digit first, 11 bits a pass (Knuth, volume 3, 5.2.5):
+   false (nothing done) when the keys' range passes the ints *)
+let radix_by (key : int -> int) (o : int array) =
+  let n = Array.length o in
+  let lo = ref max_int and hi = ref min_int in
+  Array.iter (fun j -> let k = key j in if k < !lo then lo := k; if k > !hi then hi := k) o;
+  if n = 0 || !hi - !lo < 0 then n = 0
+  else begin
+    let lo = !lo and range = !hi - !lo in
+    let o' = Array.make n 0 and cnt = Array.make 2048 0 in
+    let src = ref o and dst = ref o' and sh = ref 0 in
+    while !sh < 62 && range lsr !sh > 0 do
+      Array.fill cnt 0 2048 0;
+      let a = !src and b = !dst and s = !sh in
+      for i = 0 to n - 1 do let d = ((key (Array.unsafe_get a i) - lo) lsr s) land 2047 in Array.unsafe_set cnt d (Array.unsafe_get cnt d + 1) done;
+      let t = ref 0 in
+      for d = 0 to 2047 do let c = cnt.(d) in cnt.(d) <- !t; t := !t + c done;
+      for i = 0 to n - 1 do
+        let j = Array.unsafe_get a i in
+        let d = ((key j - lo) lsr s) land 2047 in
+        let at = Array.unsafe_get cnt d in
+        Array.unsafe_set cnt d (at + 1);
+        Array.unsafe_set b at j
+      done;
+      src := b;
+      dst := a;
+      sh := s + 11
+    done;
+    if !src != o then Array.blit !src 0 o 0 n;
+    true
+  end
 
 let[@inline] present st = st land 1 <> 0
 type pdelta = { pn : int; pk : int  (* values in pm *); pm : VM.t  (* value -> its things *) }
@@ -2286,23 +2323,34 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
       end
     done;
     de := im_add_sorted fk fv !nf !de;
-    (* the changes by (property, value, thing): a sort of their indexes by ints, no tuple *)
+    (* the changes by (property, value, thing): a sort of their indexes by ints, no tuple; many of them by stable
+       radix sorts by thing (when they do not come in its order already), by value, then by property: the same
+       order, the facts being distinct *)
     let m = !nc in
     let o = Array.init m Fun.id in
-    Array.stable_sort
-      (fun a b ->
-        let x = Array.unsafe_get cp a and y = Array.unsafe_get cp b in
-        if x <> y then compare (x : int) y
-        else
-          let x = Array.unsafe_get cw a and y = Array.unsafe_get cw b in
-          if x <> y then compare (x : int) y else compare (Array.unsafe_get ce a : int) (Array.unsafe_get ce b))
-      o;
+    let sorted_e = let ok = ref true in for j = 1 to m - 1 do if ce.(j) < ce.(j - 1) then ok := false done; !ok in
+    if not (m >= 256 && (sorted_e || radix_by (fun j -> Array.unsafe_get ce j) o) && radix_by (fun j -> Array.unsafe_get cw j) o && radix_by (fun j -> Array.unsafe_get cp j) o)
+    then begin
+      Array.iteri (fun i _ -> o.(i) <- i) o;
+      Array.stable_sort
+        (fun a b ->
+          let x = Array.unsafe_get cp a and y = Array.unsafe_get cp b in
+          if x <> y then compare (x : int) y
+          else
+            let x = Array.unsafe_get cw a and y = Array.unsafe_get cw b in
+            if x <> y then compare (x : int) y else compare (Array.unsafe_get ce a : int) (Array.unsafe_get ce b))
+        o
+    end;
     let dav = ref d.dav in
     let k = ref 0 in
     while !k < m do
       let p = cp.(o.(!k)) in
       let pd = match IM.find_opt p !dav with Some pd -> pd | None -> { pn = 0; pk = 0; pm = VM.empty } in
       let pm = ref pd.pm and pk = ref pd.pk and pn = ref pd.pn in
+      (* a property the delta holds no value of: its values' entries made in order, then their tree at once
+         (VM.of_sorted, O(n)), where one addition after the other copies a path each *)
+      let fresh = VM.is_empty pd.pm in
+      let fk = ref [] and fd = ref [] and nf = ref 0 in
       while !k < m && cp.(o.(!k)) = p do
         let w = cw.(o.(!k)) in
         let vold = VM.find_opt w !pm in
@@ -2328,9 +2376,17 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
           let ks = Array.init c (fun q -> ce.(o.(k0 + q))) and vs = Array.init c (fun q -> cst.(o.(k0 + q))) in
           vm := im_add_sorted ks vs c !vm
         end;
-        if IM.is_empty !vm then (pm := VM.remove w !pm; if vold <> None then decr pk)
+        if fresh then begin
+          (* nothing before: no removal, every entry new *)
+          if not (IM.is_empty !vm) then (fk := w :: !fk; fd := { vn = !vn; vm = !vm } :: !fd; incr nf; incr pk)
+        end
+        else if IM.is_empty !vm then (pm := VM.remove w !pm; if vold <> None then decr pk)
         else (pm := VM.add w { vn = !vn; vm = !vm } !pm; if vold = None then incr pk)
       done;
+      if fresh && !nf > 0 then begin
+        let ks = Array.of_list (List.rev !fk) and ds = Array.of_list (List.rev !fd) in
+        pm := VM.of_sorted ks ds 0 !nf
+      end;
       dav := (if VM.is_empty !pm then IM.remove p !dav else IM.add p { pn = !pn; pk = !pk; pm = !pm } !dav)
     done;
     { !v with delta = { de = !de; dav = !dav; dn = !dn; dnet = !dnet } }
