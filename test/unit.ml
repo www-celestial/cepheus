@@ -2122,6 +2122,38 @@ let () =
   done
 
 let () =
+  section "the values a property takes (Store.iter_taken), from the value index or the rows: each once, in order";
+  let r = Rng.make 5113 in
+  for round = 1 to 40 do
+    let db = fork empty in
+    let[@warning "-8"] (Ok ps) =
+      declare db [ prop ~many:true "x/link" Tlink; prop "x/int" Tint; prop ~many:true "x/text" Ttext; prop "x/money" (Tmoney 2); prop "x/date" Tdate; prop ~many:true "x/wide" Tint ]
+    in
+    let[@warning "-8"] [ link; int; text; money; date; wide ] = ps in
+    let n = 50 + Rng.int r 400 in
+    let made = Result.get_ok (write db (List.init n (fun k -> Add (-(k + 1), int, Int (Rng.int r (1 + round * 7)))))) in
+    let id k = thing made (-(k + 1)) in
+    ignore
+      (Result.get_ok
+         (write db
+            (List.concat
+               (List.init n (fun k ->
+                    List.init (Rng.int r 4) (fun _ -> Add (id k, link, Link (id (Rng.int r n))))
+                    @ [ Add (id k, text, Text (Printf.sprintf "t%d" (Rng.int r 30))); Add (id k, money, Money (Rng.int r 1000 - 500)); Add (id k, date, Date (Rng.int r 100_000));
+                        Add (id k, wide, Int ((Rng.int r 3 - 1) * (Rng.int r 1_000_000_000) * 1_000_000_000)) ])))));
+    let v = C.compact (view db) in
+    List.iter
+      (fun p ->
+        let all = ref [] in
+        Store.iter_prop v p (fun _ w -> all := w :: !all);
+        let want = List.sort_uniq compare !all in
+        let got = ref [] in
+        Store.iter_taken v p (fun w -> got := w :: !got);
+        C.check (List.rev !got = want) "iter_taken: round %d, property %d: its values each once in order (%d, %d)" round p (List.length !got) (List.length want))
+      ps
+  done
+
+let () =
   section "ask: large answers, Optionals of many values and missing, on one domain and split";
   let module Ask = Question.Ask in
   let db = fork empty in

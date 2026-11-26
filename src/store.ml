@@ -1032,6 +1032,30 @@ let base_iter_av b p w fn =
     scan b p lo hi (fun e _ _ -> fn e)
   end
 
+(* the values p takes in a part, each once, in value order, read from its value index's rank words (a bit a value,
+   no row decoded): what the rows by value give, one at a time and their copies skipped; false when p has no value
+   index (its rows are read then) *)
+let base_iter_indexed_values b p fn =
+  if p < 0 || p >= b.np || b.n = 0 || cpoff b p = cpoff b (p + 1) then true
+  else begin
+    let x = b.o_pidx + (32 * p) in
+    let w0 = ci64 b (x + 8) in
+    if w0 < 0 then false
+    else begin
+      let vlo = ci64 b x and words = ci64 b (x + 16) in
+      for j = 0 to words - 2 do
+        let bits = ref (ci64 b (b.o_vrank + ((w0 + j) lsl 3)) land 0xFFFFFFFF) in
+        let v0 = vlo + (j lsl 5) in
+        while !bits <> 0 do
+          let low = !bits land (- !bits) in
+          fn (v0 + popcount (low - 1));
+          bits := !bits lxor low
+        done
+      done;
+      true
+    end
+  end
+
 let base_iter_range b p lo hi fn =
   if p >= 0 && p < b.np && b.n > 0 && lo <= hi then begin
     let r0 = base_lower b p lo in
@@ -2046,8 +2070,10 @@ let iter_range_values v p lo hi f =
    values side by side; otherwise seen once through a table *)
 let iter_taken v p f =
   if Array.length v.runs = 1 && not (IM.mem p v.delta.dav) then begin
-    let last = ref 0 and first = ref true in
-    base_iter_p v.runs.(0).a p (fun _ w -> if !first || w <> !last then (first := false; last := w; f w))
+    if not (base_iter_indexed_values v.runs.(0).a p f) then begin
+      let last = ref 0 and first = ref true in
+      base_iter_p v.runs.(0).a p (fun _ w -> if !first || w <> !last then (first := false; last := w; f w))
+    end
   end
   else begin
     let seen = Hashtbl.create 256 in
