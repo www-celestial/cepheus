@@ -599,12 +599,13 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
         | W _, W _ -> bad "Less compares a variable")
       less;
     List.iter (fun (x, lo, hi) -> fchk.(x) <- (lo, hi) :: fchk.(x)) floats;
-    (* each variable's Less bounds as arrays (its level reads them at every binding, with no closure) *)
-    let dyn_y = Array.map (fun l -> Array.of_list (List.map (fun (y, _, _) -> y) l)) dyn
-    and dyn_g = Array.map (fun l -> Array.of_list (List.map (fun (_, g, _) -> g) l)) dyn
-    and dyn_s = Array.map (fun l -> Array.of_list (List.map (fun (_, _, st) -> st) l)) dyn in
     let has_chk = Array.init n (fun x -> dchk.(x) <> [] || fchk.(x) <> []) in
     let any_chk = Array.exists Fun.id has_chk and any_dyn = Array.exists (fun l -> l <> []) dyn in
+    (* each variable's Less bounds as arrays (its level reads them at every binding, with no closure); made only for a
+       question with such bounds, the only one that reads them, so that a small fold pays nothing for them *)
+    let dyn_y = if any_dyn then Array.map (fun l -> Array.of_list (List.map (fun (y, _, _) -> y) l)) dyn else [||]
+    and dyn_g = if any_dyn then Array.map (fun l -> Array.of_list (List.map (fun (_, g, _) -> g) l)) dyn else [||]
+    and dyn_s = if any_dyn then Array.map (fun l -> Array.of_list (List.map (fun (_, _, st) -> st) l)) dyn else [||] in
     let iv = intervals n (limits @ !more) in
     let sv = Array.make n [||] and has_set = Array.make n false in
     List.iter (fun (x, a) -> if has_set.(x) then sv.(x) <- Array.of_list (List.filter (in_sorted a) (Array.to_list sv.(x))) else (sv.(x) <- a; has_set.(x) <- true)) sets;
