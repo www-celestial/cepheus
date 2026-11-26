@@ -1084,7 +1084,7 @@ let question ?(uses = []) ctx name d qv nvars =
             (* the row's columns but its windows', computed from the order *)
             let a = Array.make (nk + na) (Value.Int 0) in
             (* an Optional's field may be missing: the row's cell is then missing too *)
-            let optional i = match wcols.(i) with Var j | Trunc (j, _, _) -> List.exists (function Question.Ask.Optional { v = Query.Var y; _ } -> y = j | _ -> false) extra | Agg _ -> false in
+            let optional i = match wcols.(i) with Var j | Trunc (j, _, _) -> List.exists (function Question.Ask.Optional { v = Query.Var y; _ } -> y = j | _ -> false) extra | Agg _ | Win _ -> false in
             (* a cell a report may leave missing: a sample's variance of one value *)
             let may_miss i = match wcols.(i) with Agg (Wire.Variance (_, false) | Stddev (_, false)) -> true | _ -> false in
             Array.iteri
