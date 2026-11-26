@@ -214,8 +214,17 @@ cited on the [comparison](comparison.md) page.
   — Section 6.4, hashing with linear probing: the runs' text tables, at most half full (about 1.5 probes for a text
   that is there, 2.5 for one that is not). Section 5.2.5, sorting by distribution: the counting sort and the stable least-significant-digit radix sort that
   sort a large group's facts (by thing, by property, then by value inside each property, 11-bit digits), and a change's
-  sink heads past 64 runs. Section 5.2.4, sorting by merging: the natural merge that sorts a change's sink heads,
-  which come as a few ascending runs.
+  sink heads past 64 runs, and the whole sorts of an answer whose first keys are inline words (`Top.sort_radix`: the
+  keys' words one after the other in one int, 11-bit digits). Section 5.2.4, sorting by merging: the natural merge
+  that sorts a change's sink heads, which come as a few ascending runs.
+- **[Herf 2001]** M. Herf. Radix Tricks. 2001. http://stereopsis.com/radix.html
+  — The counts of every pass of a radix sort made in one read of the keys, and a pass skipped when every key has the
+  same digit there: `Top.sort_radix`.
+- **[Graefe 2011]** G. Graefe. Modern B-Tree Techniques. *Foundations and Trends in Databases* 3(4), 2011, 203–402.
+  https://doi.org/10.1561/1900000028
+  — Keys of several columns in one B-tree (PostgreSQL's index on `(client, date)`), which reads the latest rows of
+  each client from the index: Cepheus has no index of two properties, so `Each` with `Limit` reads every row of the
+  question once.
 - **[Leis 2014]** V. Leis, P. Boncz, A. Kemper, T. Neumann. Morsel-Driven Parallelism: A NUMA-Aware Query
   Evaluation Framework for the Many-Core Age. *SIGMOD* 2014, 743–754. https://doi.org/10.1145/2588555.2610507
   — Work cut into small pieces ("morsels") that worker threads take in turn from a shared dispatcher, so that the

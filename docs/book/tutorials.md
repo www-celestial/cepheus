@@ -1358,8 +1358,9 @@ orders the rows by the client (its `DISTINCT ON` must lead the `ORDER BY`), so t
 `Each` keeps `Sort`'s order, here the latest first. Its `row_number()` numbers Ada and Bo, of the same revenue, in an
 order it does not promise (the `ORDER BY 1, 4` above sorts the output after it): `Rank` and `Running(Count())` follow
 `Sort`, then every other field of the row, so Ada comes before Bo at each run. `LATERAL` needs the clients' table to
-start from and an index on `(client, date)` for its 3 rows a client; `Each` needs neither: it keeps at most 6 rows of
-each client while it reads the invoices once, a row past a client's third latest set aside after one comparison.
+start from and an index on `(client, date)` for its 3 rows a client; `Each` needs neither: it keeps each client's 3
+latest in their order while it reads the invoices once, an invoice past a client's third latest set aside after one
+comparison, before it is made a row.
 
 ## What it costs
 

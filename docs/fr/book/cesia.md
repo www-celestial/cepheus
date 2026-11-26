@@ -545,6 +545,16 @@ ligne après laquelle commence la page).
   à 2,8, 8,5 à 11 et 81 à 99 ms), et le moteur de PostgreSQL 36 à 62 µs
   ([les benchmarks](benchmarks.md#les-pages-dun-kind-par-les-ids-de-ses-choses-2026-11-26-de-10-000-à-1-000-000-de-choses)).
 
+Le tri d'une réponse entière (sans `Limit`, ou les lignes qu'une fenêtre lit) de 4 096 lignes ou plus dont les
+premières clés sont des ints, des dates, de la money, des links ou des bools ne fait aucune comparaison : la clé de
+chaque ligne est faite des mots de ces colonnes l'un après l'autre, chacun compté depuis le plus petit de sa colonne
+(depuis le plus grand en ordre décroissant) sur autant de bits que l'écart de la colonne en demande, jusqu'à 62 bits,
+et les clés sont triées par un radix sort (un tri par les chiffres de la clé, sans comparaison) de 11 bits par passe
+(n déplacements par passe, une passe sautée quand toutes les clés ont le même chiffre à cet endroit :
+[Knuth 1998](references.md#les-index-et-la-compression), section 5.2.5, et [Herf 2001](references.md#les-index-et-la-compression)) ;
+les lignes dont les clés sont égales, quand la clé ne tenait pas tout l'ordre (un texte ou un float après ces clés,
+une colonne coupée à 62 bits), sont triées à nouveau par comparaisons. L'ordre est le même, ligne pour ligne.
+
 `Watch` prend aussi `Sort` et `Limit`, et garde les premières lignes de l'ordre à mesure qu'elles changent
 ([plus bas](#sort-et-limit-dans-un-watch)) ; il refuse `After`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que
 `Where`, `Give`, `Sort`, `Limit` et `After` : un `After` mal écrit donnerait sinon la première page encore et encore
@@ -882,9 +892,11 @@ cumulative qu'on peut retirer), que les sommes exactes permettent sans aucune er
 dériveraient ; `Min` et `Max` sur les n dernières lignes, qu'aucune soustraction ne défait, gardent une file des
 candidats du frame, chacun plus tard et meilleur que celui d'avant, donc chaque ligne entre et sort une seule fois
 ([Lemire 2006](references.md#les-fenêtres)). Une fenêtre coûte un passage sur ses lignes, quel que soit son frame. Avec
-`Each` et `Limit: k`, chaque groupe garde au plus 2k lignes pendant que la question est lue, sur chaque cœur, triées
-pour revenir à ses k premières quand il est plein, une ligne au-delà de la k-ième du groupe mise de côté après une
-seule comparaison : le travail est d'environ une comparaison par ligne, la mémoire de k lignes par groupe. Une page
+`Each` et `Limit: k`, chaque groupe garde ses k premières lignes pendant que la question est lue, sur chaque cœur :
+pour k jusqu'à 32 dans l'ordre, une ligne mise à sa place et celles au-delà de la k-ième (sauf ses copies) retirées
+aussitôt ; pour un k plus grand, au plus 2k lignes, triées pour revenir à ses k premières quand elles sont pleines. Un
+binding (une liaison des variables) au-delà de la k-ième du groupe est mis de côté après une seule comparaison, avant
+d'être fait ligne : le travail est d'environ une comparaison par ligne, la mémoire de k lignes par groupe. Une page
 après un curseur ne trie pas les lignes d'avant : un seul passage sur elles donne leur nombre, leurs sommes, leurs
 meilleures valeurs et les quelques dernières lignes qu'un frame ou un `Prev` demande, lues dans l'intervalle de la
 première clé avant le curseur quand c'est celle d'un index, et la page elle-même est lue comme l'est une page sans

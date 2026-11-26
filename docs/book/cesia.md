@@ -508,6 +508,14 @@ place, if that place is after the cursor.
   heap read the whole kind (2.1 to 2.8, 8.5 to 11 and 81 to 99 ms), and PostgreSQL's engine 36 to 62 µs
   ([the benchmarks](benchmarks.md#pages-of-a-kind-by-its-things-ids-2026-11-26-at-10000-to-1000000-things)).
 
+A sort of a whole answer (no `Limit`, or the rows a window reads) of 4,096 rows or more whose first keys are ints,
+dates, money, links or bools makes no comparison: each row's key is the words of those columns one after the other,
+each from its column's least (its greatest when descending) in as many bits as the column's range needs, up to 62 bits,
+and the keys are sorted by a radix sort of 11 bits a pass (n moves a pass, a pass skipped when every key has the same
+digit there: [Knuth 1998](references.md#indexes-and-compression), section 5.2.5, and [Herf 2001](references.md#indexes-and-compression)); rows whose keys are equal, when the key did not
+hold the whole order (a text or a float after those keys, a column cut at 62 bits), are sorted again by comparisons.
+The order is the same, row for row.
+
 `Watch` takes `Sort` and `Limit` too, and keeps the first rows of the order as they change
 ([below](#sort-and-limit-in-a-watch)); it refuses `After`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
 `Give`, `Sort`, `Limit` and `After`: a misspelt `After` would otherwise give the first page again and again (a
@@ -816,9 +824,10 @@ row that comes and takes out the one that goes (removable cumulative aggregation
 error at all, where sums of floats would drift; `Min` and `Max` over the last n rows, which no subtraction undoes, keep
 a queue of the frame's candidates, each later and better than the one before, so each row goes in and out once
 ([Lemire 2006](references.md#windows)). A window costs one pass of its rows, whatever its frame. With `Each` and
-`Limit: k`, each group keeps at most 2k rows while the question is read, on every core, sorted back to its first k
-when it fills, a row past the group's k-th set aside after one comparison: the work is about one comparison a row, the
-memory k rows a group. A page after a cursor does not sort the rows before it: one pass over them gives their count,
+`Limit: k`, each group keeps its first k rows while the question is read, on every core: for k up to 32 in the
+order, a row put at its place and those past the k-th (but its copies) dropped at once; for a larger k, at most 2k
+rows, sorted back to its first k when they fill. A binding past the group's k-th is set aside after one comparison,
+before it is made a row: the work is about one comparison a row, the memory k rows a group. A page after a cursor does not sort the rows before it: one pass over them gives their count,
 their sums, their best values and the last few rows a frame or a `Prev` needs, read from the range of the first key
 before the cursor when it is an index's, and the page itself is read as a page without windows is.
 

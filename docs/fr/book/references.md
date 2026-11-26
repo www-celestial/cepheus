@@ -240,7 +240,16 @@ Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparis
   significatif d'abord, qui trient les faits d'un grand groupe (par chose, par propriété, puis par valeur à l'intérieur
   de chaque propriété, avec des chiffres de 11 bits), et les têtes des sinks d'un changement au-delà de 64 suites. La
   section 5.2.4, le tri par fusion : le natural merge qui trie les têtes des sinks d'un changement, qui arrivent en
-  quelques suites croissantes.
+  quelques suites croissantes. Et la section 5.2.5 encore : les tris entiers d'une réponse dont les premières clés sont
+  des mots inline (`Top.sort_radix` : les mots des clés l'un après l'autre dans un int, des chiffres de 11 bits).
+- **[Herf 2001]** M. Herf. Radix Tricks. 2001. http://stereopsis.com/radix.html
+  — Les comptes de toutes les passes d'un radix sort faits en une seule lecture des clés, et une passe sautée quand
+  toutes les clés ont le même chiffre à cet endroit : `Top.sort_radix`.
+- **[Graefe 2011]** G. Graefe. Modern B-Tree Techniques. *Foundations and Trends in Databases* 3(4), 2011, 203–402.
+  https://doi.org/10.1561/1900000028
+  — Des clés de plusieurs colonnes dans un seul B-tree (l'index de PostgreSQL sur `(client, date)`), qui lit les
+  lignes les plus récentes de chaque client dans l'index : Cepheus n'a pas d'index de deux propriétés, donc `Each`
+  avec `Limit` lit une fois chaque ligne de la question.
 - **[Leis 2014]** V. Leis, P. Boncz, A. Kemper, T. Neumann. Morsel-Driven Parallelism: A NUMA-Aware Query
   Evaluation Framework for the Many-Core Age. *SIGMOD* 2014, 743–754. https://doi.org/10.1145/2588555.2610507
   — Un travail découpé en petits morceaux ("morsels") que des threads de travail prennent à tour de rôle chez un

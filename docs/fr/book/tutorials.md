@@ -1396,9 +1396,9 @@ factures viennent par client ; `Each` garde l'ordre de `Sort`, ici la plus réce
 Ada et Bo, du même chiffre d'affaires, dans un ordre qu'il ne promet pas (l'`ORDER BY 1, 4` ci-dessus trie la sortie
 après coup) : `Rank` et `Running(Count())` suivent `Sort`, puis chaque autre champ de la ligne, donc Ada vient avant Bo
 à chaque exécution. `LATERAL` a besoin de la table des clients pour partir et d'un index sur `(client, date)` pour ses
-3 lignes par client ; `Each` n'a besoin ni de l'une ni de l'autre : il garde au plus 6 lignes de chaque client pendant
-qu'il lit les factures une seule fois, une ligne au-delà de la troisième plus récente d'un client mise de côté après une
-seule comparaison.
+3 lignes par client ; `Each` n'a besoin ni de l'une ni de l'autre : il garde les 3 plus récentes de chaque client dans
+leur ordre pendant qu'il lit les factures une seule fois, une facture au-delà de la troisième plus récente d'un client
+mise de côté après une seule comparaison, avant d'être faite ligne.
 
 ## Ce que cela coûte
 
