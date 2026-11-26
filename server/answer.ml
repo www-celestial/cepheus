@@ -489,9 +489,27 @@ let keep_rows n ~after ~limit ~part ~same =
   done;
   Array.of_list (List.rev !out)
 
+(* the pages of windows after a cursor, and those of them whose rows before it were read from a range of the first key:
+   for the tests *)
+let paged = Atomic.make 0
+let ranged = Atomic.make 0
+
 (* the state of Each's first k rows of each group, a domain's: its groups' keys in a table (Answer's), each group's
-   buffer, the rows each has held at most (charged) *)
-type firsts = { gt : table; mutable bufs : Top.acc array; mutable held : int array }
+   buffer, the rows each has held at most (charged), and its k-th row at its last cut ([||]: none yet), past which a
+   row cannot be one of its first k: one comparison, where most rows of a large group would be pushed and sorted *)
+type firsts = { gt : table; mutable bufs : Top.acc array; mutable held : int array; mutable kth : int array array; cmp : int array -> int array -> int }
+
+(* what the rows at or before a page's cursor give its windows, a domain's: their count, each window's exact sums or
+   best value (a frame from the first row), the rows tied with the cursor and the different places (Rank), and the
+   last of them (in the reverse order) *)
+type prefix = {
+  mutable count : int;
+  sums : Agg.sums option array;
+  best : Value.t array;
+  ties : int array;
+  places : (string, unit) Hashtbl.t option array;
+  tail : Top.acc;
+}
 
 let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
   let ({ ask; ty; masked; var; fold; _ } as p) = prepare ~extra ~budget ?stop v q in
@@ -543,7 +561,8 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
         buf.(ne) <- !m
       end
     in
-    let rows =
+    (* the rows the windows read, where a page's start (with After), and the first of them to give *)
+    let rows, start, first =
       if ne > 0 && order.limit > 0 then begin
         (* the first k rows of each group: a buffer a group, cut back at 2 k rows *)
         let k = order.limit in
@@ -556,19 +575,29 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           if st.gt.n > n0 then begin
             if g >= Array.length st.bufs then begin
               let m = max 16 (2 * Array.length st.bufs) in
-              let b = Array.init m (fun i -> if i < Array.length st.bufs then st.bufs.(i) else Top.fresh ()) in
-              let h = Array.make m 0 in
-              Array.blit st.held 0 h 0 (Array.length st.held);
+              let old = Array.length st.bufs in
+              let b = Array.init m (fun i -> if i < old then st.bufs.(i) else Top.fresh ()) in
+              let h = Array.make m 0 and kt = Array.make m [||] in
+              Array.blit st.held 0 h 0 old;
+              Array.blit st.kth 0 kt 0 old;
               st.bufs <- b;
-              st.held <- h
+              st.held <- h;
+              st.kth <- kt
             end;
             cells st (weight * (kw + 4))
           end;
-          let b = st.bufs.(g) in
-          Top.push ~least:2 mk k b row;
-          if b.n > st.held.(g) then (st.held.(g) <- b.n; cells st width)
+          let kt = Array.unsafe_get st.kth g in
+          if Array.length kt = 0 || st.cmp row kt <= 0 then begin
+            let b = st.bufs.(g) in
+            if b.n = Array.length b.a then (let a = Array.make (max 4 (2 * b.n)) [||] in Array.blit b.a 0 a 0 b.n; b.a <- a);
+            b.a.(b.n) <- row;
+            b.n <- b.n + 1;
+            if b.n > st.held.(g) then (st.held.(g) <- b.n; cells st width);
+            (* cut back to its first k and their copies at 2 k rows, as Top's heap is *)
+            if b.n >= max 2 (2 * k) then (Top.sort_cut mk k b; st.kth.(g) <- b.a.(k - 1))
+          end
         in
-        let init () = { gt = table ~kw ~na:0 ~start:[||] ~cols:[||] (); bufs = [||]; held = [||] } in
+        let init () = { gt = table ~kw ~na:0 ~start:[||] ~cols:[||] (); bufs = [||]; held = [||]; kth = [||]; cmp = mk () } in
         let merge a b =
           for gb = 0 to b.gt.n - 1 do
             let buf = b.bufs.(gb) in
@@ -578,28 +607,127 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           a
         in
         let project = projector p give in
-        let st = fold ~init ~merge ~step:(fun st env -> into st (project env); st) () in
+        (* the buffers do not depend on the order of the rows: any domain, any order *)
+        let st = fold ~any_order:true ~init ~merge ~step:(fun st env -> into st (project env); st) () in
         (match ticket with Some tk when st.gt.cells > 0 -> charge tk st.gt.cells; st.gt.cells <- 0 | _ -> ());
         let firsts = List.init st.gt.n (fun g -> let b = st.bufs.(g) in Top.sort_cut mk k b; Array.sub b.a 0 b.n) in
         let all = Array.concat firsts in
         Array.stable_sort (mk ()) all;
-        all
+        all, None, 0
       end
       else
-        (* the first k rows and their copies without After (or every row); with After every row *)
-        let o = if order.after = None then order else { order with limit = 0; after = None } in
-        Top.give ~masked v ~typs (source give o.limit) o
+        match order.after with
+        | None ->
+          (* the first k rows and their copies (or every row): their windows read only rows before them *)
+          Top.give ~masked v ~typs (source give order.limit) order, None, 0
+        | Some a ->
+          (* a page after a cursor: its rows as without windows (the index path's seek kept), and what the rows at or
+             before the cursor give its windows, from one fold of them, none sorted: their count, the sums and the
+             best value of a frame from the first row, the rows tied with the cursor and the different places (Rank),
+             and the last m of them, as many as a frame or a Prev reaches back (a buffer of 2 m at most: Top's heap,
+             in the reverse order) *)
+          let page = Top.give ~masked v ~typs (source give order.limit) order in
+          let project = projector p give in
+          let cur = Array.mapi (fun i x -> Top.cell v typs.(i) (string_of_int i) x) a in
+          let m =
+            Array.fold_left
+              (fun m -> function
+                | Wire.Running (_, last) when last > 0 -> max m (last - 1)
+                | Running _ -> m
+                | Rank _ -> max m 1
+                | Prev (_, back) -> max m back)
+              0 windows
+          in
+          let rev = fun () -> let c = mk () in fun x y -> c y x in
+          let value_of (row : int array) c = if masked && Top.missing cols row c then Value.missing else Store.value v typs.(c) row.(c) in
+          let ranks = Array.map (function Wire.Rank (k, _) -> Some (Array.sub ord 0 k) | _ -> None) windows in
+          let place (row : int array) (o : Top.key array) = let b = Buffer.create 16 in Array.iter (fun (k : Top.key) -> Value.encode b (value_of row k.col)) o; Buffer.contents b in
+          let fresh () =
+            { count = 0;
+              sums = Array.map (function Wire.Running ((Sum _ | Avg _), 0) -> Some (Agg.value_sums ()) | _ -> None) windows;
+              best = Array.make (Array.length windows) Value.missing; ties = Array.make (Array.length windows) 0;
+              places = Array.map (function Wire.Rank (_, true) -> Some (Hashtbl.create 64) | _ -> None) windows; tail = Top.fresh () }
+          in
+          let step st env =
+            let row = project env in
+            if Top.compare_cursor ~masked v typs ord row cur <= 0 then begin
+              st.count <- st.count + 1;
+              Array.iteri
+                (fun i w ->
+                  match w, st.sums.(i) with
+                  | Wire.Running ((Sum c | Avg c), 0), Some s -> let x = value_of row c in if not (Value.is_missing x) then Agg.add_value s 1 x
+                  | Running (((Min c | Max c) as g), 0), _ ->
+                    let x = value_of row c and b = st.best.(i) in
+                    if not (Value.is_missing x) && (Value.is_missing b || (match g with Min _ -> -1 | _ -> 1) * Top.compare_values x b > 0) then st.best.(i) <- x
+                  | Rank _, _ -> (
+                    let o = Option.get ranks.(i) in
+                    if Top.compare_cursor ~masked v typs o row cur = 0 then st.ties.(i) <- st.ties.(i) + 1;
+                    match st.places.(i) with Some h -> let k = place row o in if not (Hashtbl.mem h k) then Hashtbl.add h k () | None -> ())
+                  | _ -> ())
+                windows;
+              if m > 0 then Top.push rev m st.tail row
+            end;
+            st
+          in
+          let merge x y =
+            x.count <- x.count + y.count;
+            Array.iteri (fun i s -> match s, y.sums.(i) with Some s, Some t -> Agg.merge (Agg.Sums s) (Agg.Sums t) | _ -> ()) x.sums;
+            Array.iteri
+              (fun i w ->
+                match w with
+                | Wire.Running (((Min _ | Max _) as g), 0) ->
+                  let b = y.best.(i) in
+                  if not (Value.is_missing b) && (Value.is_missing x.best.(i) || (match g with Min _ -> -1 | _ -> 1) * Top.compare_values b x.best.(i) > 0) then x.best.(i) <- b
+                | _ -> ())
+              windows;
+            Array.iteri (fun i t -> x.ties.(i) <- x.ties.(i) + t) y.ties;
+            Array.iteri (fun i h -> match h, y.places.(i) with Some h, Some g -> Hashtbl.iter (fun k () -> Hashtbl.replace h k ()) g | _ -> ()) x.places;
+            ignore (Top.append rev m x.tail y.tail);
+            x
+          in
+          (* the rows before the cursor's first key, when it is a value of an index: a range of it, so that an early
+             page reads few rows *)
+          let window =
+            let k = List.hd order.keys in
+            match (source give 0).var k.col, cur.(k.col) with
+            | Some x, Top.W w when (not masked) && Value.inline typs.(k.col) && typs.(k.col) <> Tbool ->
+              Some (if k.desc then Top.Range (x, Top.word_value typs.(k.col) w, Top.word_value typs.(k.col) max_int)
+                    else Top.Range (x, Top.word_value typs.(k.col) min_int, Top.word_value typs.(k.col) w))
+            | _ -> None
+          in
+          Atomic.incr paged;
+          if window <> None then Atomic.incr ranged;
+          let st = fold ~any_order:true ?window ~init:fresh ~merge ~step () in
+          if m > 0 then Top.sort_cut rev m st.tail;
+          let tail = Array.sub st.tail.a 0 st.tail.n in
+          let t = Array.length tail in
+          let tail = Array.init t (fun i -> tail.(t - 1 - i)) in
+          let places = Array.fold_left (fun n -> function Some h -> n + Hashtbl.length h | None -> n) 0 st.places in
+          charge_opt ((t * cols) + (4 * places));
+          let init =
+            Array.mapi
+              (fun i w ->
+                match w with
+                | Wire.Running ((Sum _ | Avg _), 0) -> Window.I_sums (Option.get st.sums.(i))
+                | Running ((Min _ | Max _), 0) -> I_best st.best.(i)
+                | Rank (k, _) when Array.length page > 0 ->
+                  let d = match st.places.(i) with Some h -> Hashtbl.length h | None -> 0 in
+                  let o = Array.sub ord 0 k in
+                  let tied = t > 0 && (if masked then Top.compare_masked else Top.compare_rows) v typs o tail.(t - 1) page.(0) = 0 in
+                  if tied then I_rank (st.count - st.ties.(i) + 1, d) else I_rank (st.count + 1, d + 1)
+                | _ -> I_none)
+              windows
+          in
+          Array.append tail page, Some { Window.skip = t; offset = st.count - t; init }, t
     in
     let n = Array.length rows in
     let part, groups =
       if ne = 0 then Array.make n 0, min n 1
       else begin
-        let buf = Array.make kw 0 in
-        partition n (fun i ->
-            key_of rows.(i) buf;
-            let b = Bytes.create (8 * kw) in
-            Array.iteri (fun j w -> Bytes.set_int64_le b (8 * j) (Int64.of_int w)) buf;
-            Bytes.unsafe_to_string b)
+        (* a group a key of words, in a table of open addressing: no allocation a row *)
+        let t = table ~kw ~na:0 ~start:[||] ~cols:[||] () in
+        let part = Array.init n (fun i -> key_of rows.(i) t.buf; group t) in
+        part, t.n
       end
     in
     let nw = Array.length windows in
@@ -608,16 +736,8 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     let cmp_k k = let o = Array.sub ord 0 k in if masked then Top.compare_masked v typs o else Top.compare_rows v typs o in
     let ties = Hashtbl.create 2 in
     let tie k = match Hashtbl.find_opt ties k with Some f -> f | None -> let c = cmp_k k in let f i j = c rows.(i) rows.(j) = 0 in Hashtbl.add ties k f; f in
-    let out = Window.compute ~view:v ~n ~groups ~part:(fun i -> part.(i)) ~get ~tie:(fun k -> tie k) ~typs:(fun c -> typs.(c)) windows in
-    let idx =
-      match order.after with
-      | None -> Array.init n Fun.id
-      | Some a ->
-        let cur = Array.mapi (fun i x -> Top.cell v typs.(i) (string_of_int i) x) a in
-        let full = cmp_k (Array.length ord) in
-        keep_rows n ~after:(fun i -> Top.compare_cursor ~masked v typs ord rows.(i) cur > 0) ~limit:order.limit ~part
-          ~same:(fun i j -> full rows.(i) rows.(j) = 0)
-    in
+    let out = Window.compute ?start ~view:v ~n ~groups ~part:(fun i -> part.(i)) ~get ~tie:(fun k -> tie k) ~typs:(fun c -> typs.(c)) windows in
+    let idx = Array.init (n - first) (fun i -> first + i) in
     Window.check_past out idx;
     let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
     { cols = cols + nw; n = Array.length idx; typ = (fun j -> if j < cols then typs.(j) else wt.(j - cols));

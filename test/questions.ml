@@ -1605,7 +1605,8 @@ let () =
   Printf.printf "questions: %d ranges of a thing read from their first thing\n" (Atomic.get Query.seeks);
   Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
   Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
-  Printf.printf "questions: %d with windows or Each (%d with Each), %d windows' cells checked, %d running sums past 63 bits refused\n" !with_windows !with_each !window_cells !window_refusals;
+  Printf.printf "questions: %d with windows or Each (%d with Each), %d windows' cells checked, %d running sums past 63 bits refused; %d pages after a cursor (%d read from a range of the first key)\n"
+    !with_windows !with_each !window_cells !window_refusals (Atomic.get Answer.paged) (Atomic.get Answer.ranged);
   Printf.printf "questions: %d answers split across 3 domains (%d levels split, %d by a probe; %d bag columns moved to a table a group), each the rows of one domain in their order\n" !split_checks (Atomic.get Query.splits) (Atomic.get Query.probed_splits) (Atomic.get Agg.owned);
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"
     !planners_checks (fst !planners_work) (snd !planners_work);

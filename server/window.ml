@@ -111,12 +111,22 @@ let past = Value.Text "running sum past 63 bits"
 let check_past (out : Value.t array array) idx =
   Array.iter (fun w -> Array.iter (fun i -> if w.(i) == past then bad "Running's Sum passed the 63 bits of an Int: sum fewer rows (last = n)") idx) out
 
+(* Where the rows of a page start in their one group (After, Answer): the [skip] rows given first are the last of
+   the rows before the page (as many as a frame or a Prev reaches back), whose values are not asked; [offset] rows of
+   the group come before them; and for each window, what the rows before the page give it: the exact sums and the
+   best value of every row before the page (the [skip] rows included), the place of the page's first row. *)
+type init = I_none | I_sums of Agg.sums | I_best of Value.t | I_rank of int * int
+type start = { skip : int; offset : int; init : init array }
+
 (* [compute ~view ~n ~groups ~part ~get ~tie ~typs windows]: each window's value for each of n rows given in Sort's
    order, [part i] the group of row i (0 to groups - 1), [get i c] column c of row i, [tie k i j] whether rows i and j
    are equal in the first k keys of Sort. out.(w).(i), [past] where a running sum passed 63 bits (check_past). *)
-let compute ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> Value.t) ~(tie : int -> int -> int -> bool)
+let compute ?start ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> Value.t) ~(tie : int -> int -> int -> bool)
     ~(typs : int -> Value.typ) (windows : Wire.window array) =
   let off, rows = members n groups part in
+  (* a page's one group: its rows' places from [offset], the first [skip] counted already *)
+  let skip, offset = match start with Some s -> s.skip, s.offset | None -> 0, 0 in
+  let init wi = match start with Some s -> s.init.(wi) | None -> I_none in
   (* a column's values once (a text's read once) *)
   let cache = Hashtbl.create 4 in
   let column c =
@@ -124,25 +134,27 @@ let compute ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> Value.t)
     | Some a -> a
     | None -> let a = Array.init n (fun i -> get i c) in Hashtbl.add cache c a; a
   in
-  Array.map
-    (fun (w : Wire.window) ->
+  Array.mapi
+    (fun wi (w : Wire.window) ->
       let out = Array.make n Value.missing in
       (match w with
        | Running (Count, last) ->
          for g = 0 to groups - 1 do
            for p = 0 to off.(g + 1) - off.(g) - 1 do
-             out.(rows.(off.(g) + p)) <- Int (if last > 0 then min (p + 1) last else p + 1)
+             let a = offset + p + 1 in
+             out.(rows.(off.(g) + p)) <- Int (if last > 0 then min a last else a)
            done
          done
        | Running (((Sum c | Avg c) as a), last) ->
          let x = column c and tx = typs c in
          let mk = match tx with Tmoney _ -> fun s -> Value.Money s | Tdate -> fun s -> Value.Date s | _ -> fun s -> Value.Int s in
          for g = 0 to groups - 1 do
-           let s = Agg.value_sums () in
+           (* from the first row, a page's sums start with every row before it, its first [skip] rows among them *)
+           let s, from = match init wi with I_sums s0 when last = 0 -> s0, skip | _ -> Agg.value_sums (), 0 in
            let o = off.(g) in
            for p = 0 to off.(g + 1) - o - 1 do
              let i = rows.(o + p) in
-             if not (Value.is_missing x.(i)) then Agg.add_value s 1 x.(i);
+             if p >= from && not (Value.is_missing x.(i)) then Agg.add_value s 1 x.(i);
              (if last > 0 && p >= last then let j = rows.(o + p - last) in if not (Value.is_missing x.(j)) then Agg.add_value s (-1) x.(j));
              out.(i) <-
                (if s.n <= 0 then Value.missing
@@ -158,7 +170,8 @@ let compute ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> Value.t)
        | Running (((Min c | Max c) as a), 0) ->
          let x = column c and sign = match a with Min _ -> -1 | _ -> 1 in
          for g = 0 to groups - 1 do
-           let best = ref Value.missing in
+           (* the best of every row before a page: a min or a max takes its first [skip] rows again, a same answer *)
+           let best = ref (match init wi with I_best b -> b | _ -> Value.missing) in
            for p = off.(g) to off.(g + 1) - 1 do
              let i = rows.(p) in
              let v = x.(i) in
@@ -193,7 +206,10 @@ let compute ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> Value.t)
            let rank = ref 0 and d = ref 0 in
            for p = off.(g) to off.(g + 1) - 1 do
              let i = rows.(p) in
-             if p = off.(g) || not (tie k rows.(p - 1) i) then (rank := p - off.(g) + 1; incr d);
+             let q = p - off.(g) in
+             (match init wi with
+              | I_rank (r0, d0) when q = skip -> rank := r0; d := d0
+              | _ -> if q = 0 || not (tie k rows.(p - 1) i) then (rank := offset + q + 1; incr d));
              out.(i) <- Int (if dense then !d else !rank)
            done
          done

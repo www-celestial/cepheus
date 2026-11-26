@@ -20,6 +20,8 @@
 #                                   inserts of a bill without and with a foreign key, microseconds an insert (5 passes)
 #   pg.sh reports ROOT load CSVDIR | run   the aggregates of reports beside bench/rbench.ml's (rbench.exe load's rows)
 #   pg.sh keyset ROOT load DIR | run DIR   pages of 51 of a kind by id, as bench/kbench.ml asks them (kbench.exe csv's files)
+#   pg.sh windows ROOT index | run   the window functions beside bench/wbench.ml's, on the rows of pg.sh reports load;
+#                                   index: the indexes a user makes for them (invoice (client, date), (date, id))
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -193,6 +195,47 @@ EOS
         psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
       done | stats "Sum by month in $z ($(psql -X -At -c "SELECT count(*) FROM ($sql) x") rows)"
     done
+    ;;
+  esac
+  ;;
+windows)
+  # pg.sh windows ROOT index: the indexes of the LATERAL form (each client's latest invoices) and of the pages;
+  # pg.sh windows ROOT run: each window over every invoice (1 group), each city's (100) and each client's (10,000),
+  # the 3 latest invoices of each client (row_number and LATERAL), the last one (DISTINCT ON), the monthly totals in
+  # Paris with their running total, the month before and the 3-month moving average, and pages of a running total,
+  # inside the server (engine only: EXPLAIN ANALYZE's execution time), RUNS runs each (21)
+  case "$3" in
+  index)
+    psql_ -c "CREATE INDEX IF NOT EXISTS rinvoice_client_date ON rinvoice (client, date DESC, id)" \
+      -c "CREATE INDEX IF NOT EXISTS rinvoice_date_id ON rinvoice (date, id)" -c "VACUUM ANALYZE rinvoice"
+    ;;
+  run)
+    runs=${RUNS:-21}
+    stats() { "$here/../../_build/default/bench/bench.exe" stats "$1"; }
+    timed() {  # label, SQL
+      for r in $(seq "$runs"); do
+        psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $2" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+      done | stats "$1 ($(psql -X -At -c "SELECT count(*) FROM ($2) x") rows)"
+    }
+    for g in one city client; do
+      case $g in
+      one) from="FROM rinvoice i"; part=""; cols="i.id, i.date, i.total"; name="1 group" ;;
+      city) from="FROM rinvoice i JOIN rclient c ON c.id = i.client"; part="PARTITION BY c.city "; cols="i.id, i.date, i.total, c.city"; name="100 groups (city)" ;;
+      client) from="FROM rinvoice i"; part="PARTITION BY i.client "; cols="i.id, i.date, i.total, i.client"; name="10,000 groups (client)" ;;
+      esac
+      timed "Running(Sum(t)) $name" "SELECT $cols, sum(i.total) OVER (${part}ORDER BY i.date, i.id ROWS UNBOUNDED PRECEDING) $from"
+      timed "Running(Avg(t), last = 3) $name" "SELECT $cols, avg(i.total) OVER (${part}ORDER BY i.date, i.id ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) $from"
+      timed "Rank() by total $name" "SELECT $cols, rank() OVER (${part}ORDER BY i.total DESC) $from"
+      timed "Prev(d) $name" "SELECT $cols, lag(i.date) OVER (${part}ORDER BY i.date, i.id) $from"
+    done
+    timed "the 3 latest invoices of each client (row_number)" "SELECT * FROM (SELECT id, date, total, client, row_number() OVER (PARTITION BY client ORDER BY date DESC, id) AS n FROM rinvoice) s WHERE n <= 3"
+    timed "the 3 latest invoices of each client (LATERAL)" "SELECT c.id, l.* FROM rclient c CROSS JOIN LATERAL (SELECT id, date, total FROM rinvoice i WHERE i.client = c.id ORDER BY date DESC, id LIMIT 3) l"
+    timed "the last invoice of each client (DISTINCT ON)" "SELECT DISTINCT ON (client) client, date, id, total FROM rinvoice ORDER BY client, date DESC, id"
+    timed "monthly totals in Paris with Running, Prev and a 3-month Avg (a report)" "SELECT m, s, sum(s) OVER w, lag(s) OVER w, avg(s) OVER (w ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) FROM (SELECT date_trunc('month', date, 'Europe/Paris') AS m, sum(total) AS s FROM rinvoice GROUP BY 1) x WINDOW w AS (ORDER BY m)"
+    cur=$(psql -X -At -F ',' -c "SELECT date, id FROM rinvoice ORDER BY date, id OFFSET 200000 LIMIT 1")
+    d=${cur%,*}; id=${cur#*,}
+    timed "a page of 51 after the 200,000th row, its running total" "SELECT * FROM (SELECT id, date, total, sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING) FROM rinvoice) s WHERE (date, id) > ('$d', $id) ORDER BY date, id LIMIT 51"
+    timed "the first page of 51, its running total" "SELECT id, date, total, sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING) FROM rinvoice ORDER BY date, id LIMIT 51"
     ;;
   esac
   ;;
