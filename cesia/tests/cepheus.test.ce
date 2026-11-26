@@ -813,3 +813,52 @@ defn isWatchOfAReport()
   bug.Assert(value.Len(first.Rows) == 2, "two statuses: $(first)")
   value.Equal(change.Added, [{Status: "paid", Mean: 20.0, Totals: [10.0, 30.0]}]) and value.Equal(change.Removed, [{Status: "paid", Mean: 10.0, Totals: [10.0]}])
 end
+
+(* ---- windows: Running, Rank, Prev; Each ---- *)
+
+defn isRunningTotalAndPrev()
+  s = shop()?
+  rows = cepheus.Find(3, (i, d, t) -> {
+    Where: [[i, Invoice.Due, d], [i, Invoice.Total, t]],
+    Give: {Due: d, Total: t, SoFar: cepheus.Running(cepheus.Sum(t)), N: cepheus.Running(cepheus.Count()), Before: cepheus.Prev(t)},
+    Sort: [d],
+  }, s.Db)?
+  value.Equal(rows, [{Due: 1794268800.0, Total: 1200.0, SoFar: 1200.0, N: 1, Before: missing},
+                     {Due: 1794355200.25, Total: 80.5, SoFar: 1280.5, N: 2, Before: 1200.0}])
+end
+
+defn isMovingAverageOfMoney()
+  t = items()?
+  rows = cepheus.Find(2, (i, p) -> {Where: [[i, Item.Price, p]], Give: {Price: p, Mean2: cepheus.Running(cepheus.Avg(p), last = 2)}, Sort: [p]}, t)?
+  (* money of its scale, half away from zero: (10.00 + 10.01) / 2 = 10.005, so 10.01 *)
+  value.Equal([r.Mean2 for r in rows], [10.0, 10.01, 10.02])
+end
+
+defn isLeaderboardOfAReport()
+  s = shop()?
+  rows = cepheus.Find(3, (c, i, t) -> {
+    Where: [[i, Invoice.Client, c], [i, Invoice.Total, t]],
+    Give: {Client: c, Total: cepheus.Sum(t), Place: cepheus.Rank(), SoFar: cepheus.Running(cepheus.Sum(cepheus.Sum(t)))},
+    Sort: [cepheus.Desc(cepheus.Sum(t))],
+  }, s.Db)?
+  value.Equal(rows, [{Client: s.Ada, Total: 1280.5, Place: 1, SoFar: 1280.5}, {Client: s.Bo, Total: 10.0, Place: 2, SoFar: 1290.5}])
+end
+
+defn isEachLimitIsAGroups()
+  s = shop()?
+  (* the largest invoice of each client: SQL's DISTINCT ON (client) *)
+  rows = cepheus.Find(3, (c, i, t) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Total, t]], Give: {Client: c, Total: t}, Sort: [cepheus.Desc(t)], Limit: 1, Each: [c]}, s.Db)?
+  value.Equal(rows, [{Client: s.Ada, Total: 1200.0}, {Client: s.Bo, Total: 10.0}])
+end
+
+defn isWindowRefusals()
+  s = shop()?
+  nosort = cepheus.Find(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {Total: t, SoFar: cepheus.Running(cepheus.Sum(t))}}, s.Db)
+  nofield = cepheus.Find(3, (c, i, t) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Total, t]], Give: {Client: c, Total: cepheus.Sum(t), SoFar: cepheus.Running(cepheus.Sum(t))}, Sort: [c]}, s.Db)
+  after = cepheus.Find(3, (c, i, t) -> {Where: [[i, Invoice.Client, c], [i, Invoice.Total, t]], Give: {Client: c, Total: t}, Sort: [t], Limit: 1, Each: [c], After: {Client: s.Ada, Total: 1.0}}, s.Db)
+  watched = cepheus.Watch(2, (i, t) -> {Where: [[i, Invoice.Total, t]], Give: {Total: t, Place: cepheus.Rank()}, Sort: [t]}, s.Db)
+  bug.Assert(nosort.Error.Code == "invalid" and text.Contains("needs Sort", nosort.Error.Message), "a window without Sort: $(nosort)")
+  bug.Assert(nofield.Error.Code == "invalid" and text.Contains("takes a field of Give", nofield.Error.Message), "Running of a variable of no field: $(nofield)")
+  bug.Assert(after.Error.Code == "invalid" and text.Contains("Each takes no After", after.Error.Message), "Each with After: $(after)")
+  watched.Error.Code == "invalid" and text.Contains("a watch has no windows", watched.Error.Message)
+end

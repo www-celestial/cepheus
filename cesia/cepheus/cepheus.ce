@@ -135,6 +135,27 @@ Stddev(x, population = false) = {Stddev: x, Population: population}
     date_trunc(unit, d, zone). *)
 Trunc(d, unit, zone = "UTC") = {Trunc: d, Unit: unit, Zone: zone}
 
+(** A field of Give, a window: the aggregate f over the rows from the first of its group (Each) to this one, in Sort's
+    order (SQL's f OVER (ORDER BY ... ROWS UNBOUNDED PRECEDING)), or over this row and the last - 1 before it (last = 3:
+    ROWS BETWEEN 2 PRECEDING AND CURRENT ROW). f is Sum, Avg, Min or Max of a field of Give, as types those
+    aggregates take, or Count(), the frame's rows: Running(Count()) is the row's number (row_number()). A missing value
+    is left out; a frame with none gives missing. In a report a row is a group: the running total of the groups'
+    sums is Running(Sum(Sum(t))), SQL's sum(sum(t)) OVER (...). Needs Sort; computed before After and Limit, so the
+    second page's total counts the first page's rows.
+
+      Give: {Day: d, Amount: t, Balance: cepheus.Running(cepheus.Sum(t)), Mean7: cepheus.Running(cepheus.Avg(t), last = 7)} *)
+Running(f, last = missing) = {Running: f, Last: last}
+
+(** A field of Give, a window: the row's place in Sort's order within its group (Each), the rows equal in Sort's keys
+    sharing it, the next place after them skipped: 1, 2, 2, 4 (SQL's rank()); dense = true: 1, 2, 2, 3 (dense_rank()).
+    The row's number, row_number(), is Running(Count()). *)
+Rank(dense = false) = {Rank: true, Dense: dense}
+
+(** A field of Give, a window: the field x of Give in the row back rows before this one, in Sort's order within its
+    group (Each); missing for the group's first back rows (SQL's lag(x, back)). The next row's value is Prev in the
+    reverse order. *)
+Prev(x, back = 1) = {Prev: x, Back: back}
+
 (** A key of Sort, in descending order: the largest first. A key without it is ascending. *)
 Desc(key) = {Desc: key}
 
@@ -208,10 +229,13 @@ end
     that must hold, where any part but the property may be a variable, and of conditions (Above, Below, Between, In,
     Prefix, Less, LessOrEqual, Not, Or) and Optional patterns; Give
     a map of the variables, or of aggregates of them (Sum, Min, Max, Count, Avg, Values, Quantile, Median, Variance,
-    Stddev), or of Trunc of a date, to give. Each answer comes once. Optional: Sort, a list of
-    fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name; Limit, at
-    most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in Sort's
-    order: the next page. A variable in no item of Where and Give is left out, so a filter can be left out of Where
+    Stddev), or of Trunc of a date, or windows (Running, Rank, Prev), to give. Each answer comes once. Optional: Sort,
+    a list of fields of Give (a variable or an aggregate, Desc for the largest first), then the other fields by name;
+    Limit, at most that many rows (and the copies of the last); After, the rows after a row of an earlier answer, in
+    Sort's order: the next page; Each, a list of fields of Give (variables or Trunc) that cut the rows into groups:
+    Limit is then each group's (the 3 latest invoices of each client; Limit: 1, the last one, SQL's DISTINCT ON) and
+    the windows start again at each group's first row (PARTITION BY), the rows still in Sort's order. A variable in no
+    item of Where and Give is left out, so a filter can be left out of Where
     without changing n. timeout: the seconds the question may take, past which it is an Err of Code "timeout"; at
     the server, the server's question_timeout is the most it takes (an admin token's may be longer).
 
