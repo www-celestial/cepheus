@@ -244,7 +244,7 @@ let range_bound (typ : Value.typ) (x : C.value) ~low ~strict =
   match typ, x with
   | Tdate, Float f -> scaled f 1000. "a date in seconds since 1970"
   | Tmoney sc, Float f -> scaled f (float_of_int pow10.(sc)) "an amount that fits"
-  | _ -> (match of_cesia "a range" typ x with Int w | Date w | Money w -> whole w | _ -> Some 0)
+  | _ -> (match of_cesia "a range" typ x with Int w | Date w | Money w | Link w -> whole w | _ -> Some 0)
 
 (* A bound of Above, Below or Between on a float, in IEEE 754's totalOrder (the order of Sort: -NaN, -infinity, ...,
    -0, +0, ..., +infinity, NaN): the float itself, or the next one in that order for Above, the one before for Below;
@@ -807,13 +807,14 @@ let question ?(uses = []) ctx name d qv nvars =
         match var x with
         | Some j -> (
           match vtyp.(j) with
-          | Some ((Tint | Tdate | Tmoney _) as t) ->
+          | Some ((Tint | Tdate | Tmoney _ | Tlink) as t) ->
             (* Above and Below are strict; each bound rounded toward the inside of the range; no word inside, an empty
-               range *)
+               range. A thing's bounds are ids (Ints), the order of Sort on things: the join reads its things from the
+               range's first (Query) *)
             let lo = if lo = C.Missing then Some min_int else range_bound t lo ~low:true ~strict:(strict = C.Text "low") in
             let hi = if hi = C.Missing then Some max_int else range_bound t hi ~low:false ~strict:(strict = C.Text "high") in
             let lo, hi = match lo, hi with Some lo, Some hi -> lo, hi | _ -> 1, 0 in
-            let mk w = match t with Tdate -> Value.Date w | Tmoney _ -> Money w | _ -> Int w in
+            let mk w = match t with Tdate -> Value.Date w | Tmoney _ -> Money w | Tlink -> Link w | _ -> Int w in
             j, mk lo, mk hi
           | Some Tfloat ->
             (* in totalOrder; Above and Below strict, the next float past the bound; none past it, an empty range *)
@@ -821,7 +822,7 @@ let question ?(uses = []) ctx name d qv nvars =
             let hi = if hi = C.Missing then Some greatest_float else float_bound hi ~low:false ~strict:(strict = C.Text "high") in
             let lo, hi = match lo, hi with Some lo, Some hi -> lo, hi | _ -> greatest_float, least_float in
             j, Value.Float lo, Value.Float hi
-          | Some t -> refuse "invalid" "Above, Below and Between are for ints, floats, dates and money, not a %s" (Value.typ_name t)
+          | Some t -> refuse "invalid" "Above, Below and Between are for ints, floats, dates, money and things, not a %s" (Value.typ_name t)
           | None -> refuse "invalid" "a variable of Above, Below or Between appears in no pattern")
         | None -> C.need ctx name "a variable first in Above, Below or Between" x)
       | _ -> C.need ctx name what (C.Map m)

@@ -138,9 +138,10 @@ Trunc(d, unit, zone = "UTC") = {Trunc: d, Unit: unit, Zone: zone}
 (** A key of Sort, in descending order: the largest first. A key without it is ascending. *)
 Desc(key) = {Desc: key}
 
-(** A condition of Where: x above v, for an int, a float, a date or money. A bound between two milliseconds or two
-    units of the money is rounded up, to the first value above it; Above the largest Int keeps nothing. Floats compare
-    as Sort orders them (IEEE 754's totalOrder): -0 before 0, NaN after infinity. *)
+(** A condition of Where: x above v, for an int, a float, a date, money or a thing (by its id, an Int: the things made
+    after it). A bound between two milliseconds or two units of the money is rounded up, to the first value above it;
+    Above the largest Int keeps nothing. Floats compare as Sort orders them (IEEE 754's totalOrder): -0 before 0, NaN
+    after infinity. *)
 Above(x, v) = {Range: x, Low: v, Open: "low"}
 
 (** A condition of Where: x below v. A bound between two milliseconds or two units of the money is rounded down;

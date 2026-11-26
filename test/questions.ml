@@ -414,8 +414,48 @@ let text_order seed (v : Store.view) fl p =
         (None :: List.map Option.some [ "a"; "ab"; "Ad"; "\195"; "zz"; "" ]))
     [ false; true ]
 
+(* Store.holders_from: the things that hold p (the fact (p, w)), in the order of their ids from a thing on, merged over
+   the runs and the delta: strictly in order, every thing of p's facts (of (p, w)) at or past the start, none before
+   it; and Store.count_holders: the facts of p of the things of a range, exact here (a delta of a few things) *)
+let holders seed (v : Store.view) fl p =
+  let facts = List.filter (fun (_, p', _) -> p' = p) fl in
+  let things = List.sort_uniq compare (List.map (fun (e, _, _) -> e) fl) in
+  let starts = min_int :: max_int :: 0 :: List.concat_map (fun e -> [ e - 1; e; e + 1 ]) things in
+  let values = None :: List.filter_map (fun (_, _, x) -> Option.map Option.some (Store.word v x)) facts in
+  List.iter
+    (fun value ->
+      let held = List.sort_uniq compare (List.filter_map (fun (e, _, x) -> match value with None -> Some e | Some w -> if Store.word v x = Some w then Some e else None) facts) in
+      List.iter
+        (fun desc ->
+          List.iter
+            (fun from ->
+              let next = Store.holders_from v p ?value ~desc ~from () in
+              let rec all acc = let e = next () in if e < 0 then List.rev acc else all (e :: acc) in
+              let got = all [] in
+              let want = List.filter (fun e -> if desc then e <= from else e >= from) held in
+              let want = if desc then List.rev want else want in
+              C.check (got = want) "seed %d: the things of %d%s (desc %b, from %d): %s, not %s" seed p
+                (match value with None -> "" | Some w -> Printf.sprintf " of value %d" w) desc from
+                (String.concat "," (List.map string_of_int got)) (String.concat "," (List.map string_of_int want)))
+            starts)
+        [ false; true ])
+    (List.sort_uniq compare values);
+  List.iter
+    (fun lo ->
+      List.iter
+        (fun len ->
+          let hi = if len < 0 then max_int else lo + len in
+          let want = List.length (List.filter (fun (e, _, _) -> e >= lo && e <= hi) facts) in
+          let got = Store.count_holders v p lo hi in
+          C.check (got = want) "seed %d: the facts of %d of the things %d to %d: %d, not %d" seed p lo hi got want)
+        [ 0; 1; 5; -1 ])
+    starts
+
 let run seed =
   let r = Rng.make seed in
+  (* a range of a thing whose pattern has a constant value: read from its first thing whatever the value's things, a
+     seed in two *)
+  Query.seek_min := if seed mod 2 = 0 then 0 else 64;
   let db = ref (fork empty) in
   let[@warning "-8"] (Ok [ name; tag; score; price; when_; ratio; ok; owner; friend; mark ]) = declare !db props in
   (* a rule: things whose score is 20 or more are marked (derived facts inside the questions) *)
@@ -488,6 +528,7 @@ let run seed =
       let fl = C.F.elements (C.facts_of_view v) in
       text_order seed v fl name;
       text_order seed v fl tag;
+      List.iter (holders seed v fl) [ name; tag; score; ok; owner; friend; mark ];
       let tv x = match x with
         | 0 -> Value.Ttext | 1 -> Tint | 2 -> Tmoney 2 | 3 -> Tdate | 4 -> Tfloat | 5 -> Tbool | 6 -> Tlink | _ -> Ttext in
       let prop_of = [| name; score; price; when_; ratio; ok; owner; tag; friend; mark |] in
@@ -789,8 +830,9 @@ let run seed =
 
 (* ---- a sorted page reads about the rows it gives ----
    A wide question (7 patterns of a thing, 8 variables, one of them a status of 3 values) sorted by an int, and a question sorted by
-   a text, first page, page after a row, and the largest first: the same rows as the heap path, from the delta and
-   from runs, and a work (Query.work, the candidates enumerated) of a few windows, not the whole answer's. *)
+   a text, first page, page after a row, and the largest first; the wide question and the things of one status sorted
+   by the thing: the same rows as the heap path, from the delta and from runs, and a work (Query.work, the candidates
+   enumerated) of a few windows, not the whole answer's. *)
 let pages () =
   let db = fork empty in
   let[@warning "-8"] (Ok (num :: status :: name :: rest)) =
@@ -816,6 +858,11 @@ let pages () =
   let pat p x = { Query.e = Var 0; p; v = Var x } in
   let wide = { Query.vars = 8; where = List.mapi (fun i p -> pat p (i + 1)) (num :: status :: name :: rest); ranges = [] } in
   let named = { Query.vars = 3; where = [ pat name 1; pat num 2 ]; ranges = [] } in
+  (* a list of the things of a value by their ids, as a tenant's things *)
+  let unpaid = { Query.vars = 2; where = [ { Query.e = Var 0; p = status; v = Val (Text "unpaid") }; pat num 1 ]; ranges = [] } in
+  (* and the things past the middle one (a range on the thing), by the thing *)
+  let mid = (Schema.first_thing + Store.max_thing v0) / 2 in
+  let past = { named with ranges = [ (0, Value.Link mid, Value.Link max_int) ] } in
   List.iter
     (fun (where, (v : Store.view)) ->
       List.iter
@@ -841,7 +888,10 @@ let pages () =
           C.check (same got want && List.length got = 21) "pages, %s, %s, next page: the rows of the heap path" where what;
           C.check (work <= most) "pages, %s, %s, next page: %d candidates, at most %d" where what work most)
         [ "7 patterns by an int", wide, 1, true, 3_000; "7 patterns by an int ascending", wide, 1, false, 3_000;
-          "by a text", named, 1, false, 1_000; "by a text, the largest first", named, 1, true, 1_000 ])
+          "by a text", named, 1, false, 1_000; "by a text, the largest first", named, 1, true, 1_000;
+          "7 patterns by the thing", wide, 0, false, 200; "7 patterns by the thing, the largest first", wide, 0, true, 200;
+          "the unpaid by the thing", unpaid, 0, false, 50; "the unpaid by the thing, the largest first", unpaid, 0, true, 50;
+          "past a thing by the thing", past, 0, false, 70; "past a thing by the thing, the largest first", past, 0, true, 70 ])
     [ "delta", v0; "a run", w.view ]
 
 (* ---- the planner against main's former one (every order for up to 7 variables, greedily beyond), its code as it was ---- *)
@@ -1278,8 +1328,9 @@ let () =
   let seeds = ref 300 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "S" ] (fun _ -> ()) "questions.exe";
   (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; ins (); less_optional (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
-  Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path, %d given up for the heap path\n"
-    !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
+  Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path (%d of a sort by a thing), %d given up for the heap path\n"
+    !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.held) (Atomic.get Top.gave_up);
+  Printf.printf "questions: %d ranges of a thing read from their first thing\n" (Atomic.get Query.seeks);
   Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
   Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
   Printf.printf "questions: %d answers split across 3 domains (%d levels split, %d by a probe; %d bag columns moved to a table a group), each the rows of one domain in their order\n" !split_checks (Atomic.get Query.splits) (Atomic.get Query.probed_splits) (Atomic.get Agg.owned);

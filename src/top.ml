@@ -42,8 +42,10 @@ type path = Auto | Heap | Index
 
 let path = ref Auto
 
-(* the windows the index path asked, and how many times it gave up for the heap path: for the tests *)
+(* the windows the index path asked, those of them read off the things that hold a property (a sort by a thing), and
+   how many times it gave up for the heap path: for the tests *)
 let windows = Atomic.make 0
+let held = Atomic.make 0
 let gave_up = Atomic.make 0
 
 let bad = Query.bad
@@ -211,15 +213,21 @@ let append mk cap a b =
 (* A window of the index path: one more range [lo <= x <= hi] on a variable, or the words it may take (sorted). *)
 type window = Range of int * Value.t * Value.t | Words of int * int array
 
+(* The index the index path reads for x, the first key's variable: [Value_of p], the property of a pattern that gives x
+   as its value (p's rows by value); [Holder], the property of a pattern whose thing is x, with the word of its value
+   when it is a constant (the things of p, or of the fact (p, w), by their ids), and the ids the question's ranges on
+   x leave, lo to hi. *)
+type lead = Value_of of int | Holder of { p : int; value : int option; lo : int; hi : int }
+
 (* [fold window ~seq ~init ~step ~merge]: the question's bindings (an env of index words a binding), within a window
    when one is given. [project env]: the row of a binding. [var col]: the
-   variable a column gives, if it is one. [lead x]: a property of a pattern that gives x as its value, if any.
+   variable a column gives, if it is one. [lead x]: the index of a pattern on x, if any ({!lead}).
    [estimate ()]: the planner's estimate of the question's work. *)
 type source = {
   fold : 'a. window option -> seq:bool -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> 'a;
   project : int array -> int array;
   var : int -> int option;
-  lead : int -> int option;
+  lead : int -> lead option;
   estimate : unit -> float;
 }
 
@@ -299,7 +307,7 @@ let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : sou
       match src.var first.col with
       | _ when after_missing -> None
       | Some x when (Value.inline typs.(first.col) && typs.(first.col) <> Tbool) || typs.(first.col) = Ttext ->
-        (match src.lead x with Some p -> Some (x, p) | None -> None)
+        (match src.lead x with Some l -> Some (x, l) | None -> None)
       | _ -> None
     in
     (* the windows of x's values in the order of the first key, from the cursor on: [next m] gives the next one, of
@@ -311,9 +319,9 @@ let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : sou
        facts (the page's rows when each fact gives one: a list without a filter reads its page and no more); each next
        one twice the one before, or more when the yield so far says the page needs more: the facts the missing rows
        need at the most hopeful yield (the Poisson bound below), which it needs with a probability of 99 % or more *)
-    let windowed next =
+    let windowed ?(opening = cap) next =
       let budget = Lazy.force estimate /. 2. in
-      let got = fresh () and spent = ref 0 and m = ref cap and over = ref false and found = ref None in
+      let got = fresh () and spent = ref 0 and m = ref opening and over = ref false and found = ref None in
       while !found = None && not !over do
         let win, facts, last = next !m in
         Atomic.incr windows;
@@ -403,12 +411,49 @@ let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : sou
           Array.sort compare ws;
           ((if Array.length ws = 0 then None else Some (Words (x, ws))), !facts, !ended))
     in
-    let index (x, p) =
-      if typs.(first.col) <> Ttext then ranges (x, p)
-      else if float_of_int (Store.delta_values v p) > Lazy.force estimate then
-        (* the delta's texts of p are sorted before the first window: past the heap's estimate, the heap answers *)
-        (Atomic.incr gave_up; heap None)
-      else texts (x, p)
+    (* a thing x that holds p (the fact (p, w) when the pattern's value is a constant): the things of the order from
+       the cursor on, read off p's column (off the rows of (p, w)) in the order of their ids, merged over the runs and
+       the delta (Store.holders_from); a window is the next m of them, the question asked with x one of them. A list
+       of a kind by its things' ids, from a cursor, reads its page and no more *)
+    let holders x p value lo hi =
+      let from =
+        match o.after with
+        | Some a -> (match cell v Tlink "" a.(first.col) with W w -> w | _ -> assert false)
+        | None -> if first.desc then max_int else min_int
+      in
+      (* from the cursor, or the first id the ranges on x leave; to their last *)
+      let from = if first.desc then min from hi else max from lo in
+      let next = Store.holders_from v p ?value ~desc:first.desc ~from () in
+      let next () = let e = next () in if e < lo || e > hi then -1 else e in
+      let ended = ref false in
+      (* after a cursor, its own thing first, whose rows may come after it in the order (by the other columns), and
+         then the page's: k + 1 things in the first window *)
+      windowed ~opening:(if o.after = None then cap else cap + 1) (fun m ->
+          Atomic.incr held;
+          let ws = ref (Array.make (min m 4096) 0) and k = ref 0 in
+          while (not !ended) && !k < m do
+            let e = next () in
+            if e < 0 then ended := true
+            else begin
+              if !k = Array.length !ws then (let a = Array.make (2 * !k) 0 in Array.blit !ws 0 a 0 !k; ws := a);
+              Array.unsafe_set !ws !k e;
+              incr k
+            end
+          done;
+          (* the words of a window, ascending: those of a descending walk reversed *)
+          let ws = Array.sub !ws 0 !k in
+          if first.desc then (let n = !k in for i = 0 to (n / 2) - 1 do let t = ws.(i) in ws.(i) <- ws.(n - 1 - i); ws.(n - 1 - i) <- t done);
+          ((if !k = 0 then None else Some (Words (x, ws))), !k, !ended))
+    in
+    let index (x, l) =
+      match l with
+      | Holder { p; value; lo; hi } -> holders x p value lo hi
+      | Value_of p ->
+        if typs.(first.col) <> Ttext then ranges (x, p)
+        else if float_of_int (Store.delta_values v p) > Lazy.force estimate then
+          (* the delta's texts of p are sorted before the first window: past the heap's estimate, the heap answers *)
+          (Atomic.incr gave_up; heap None)
+        else texts (x, p)
     in
     let use_index =
       cap > 0
@@ -419,15 +464,43 @@ let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : sou
     Array.sub acc.a 0 acc.n
   end
 
-(* a property of a pattern that gives x as its value, the one with the fewest facts: the index path reads it *)
+(* The index the index path reads for x: a property of a pattern that gives x as its value, the one with the fewest
+   facts; else, x a thing, a property of a pattern whose thing is x, the one with the fewest facts (of its constant
+   value when it has one, as a tenant's things): every row's x holds it, and lies in the question's ranges on x *)
 let lead (v : Store.view) (q : Query.t) x =
-  List.fold_left
-    (fun best (pt : Query.pattern) ->
-      match pt.v, best with
-      | Var y, None when y = x -> Some pt.p
-      | Var y, Some b when y = x && Store.count_prop v pt.p < Store.count_prop v b -> Some pt.p
-      | _ -> best)
-    None q.where
+  let by_value =
+    List.fold_left
+      (fun best (pt : Query.pattern) ->
+        match pt.v, best with
+        | Var y, None when y = x -> Some pt.p
+        | Var y, Some b when y = x && Store.count_prop v pt.p < Store.count_prop v b -> Some pt.p
+        | _ -> best)
+      None q.where
+  in
+  match by_value with
+  | Some p -> Some (Value_of p)
+  | None ->
+    let held =
+      List.filter_map
+        (fun (pt : Query.pattern) ->
+          match pt.e, pt.v with
+          | Var y, Var z when y = x && z <> x -> Some ((pt.p, None), Store.count_prop v pt.p)
+          | Var y, (Thing c | Val (Value.Link c)) when y = x -> let w = Query.rep v c in Some ((pt.p, Some w), Store.count_things v pt.p w)
+          | Var y, Val c when y = x -> (match Store.word v c with Some w -> Some ((pt.p, Some w), Store.count_things v pt.p w) | None -> None)
+          | _ -> None)
+        q.where
+    in
+    let lo, hi =
+      List.fold_left
+        (fun (lo, hi) (y, a, b) ->
+          match y = x, Store.word v a, Store.word v b with
+          | true, Some a, Some b -> Stdlib.max lo a, Stdlib.min hi b
+          | _ -> lo, hi)
+        (min_int, max_int) q.ranges
+    in
+    match List.sort (fun (_, a) (_, b) -> compare (a : int) b) held with
+    | ((p, value), _) :: _ -> Some (Holder { p; value; lo; hi })
+    | [] -> None
 
 (* rows held already (a group's key and aggregates), in the order [o]; [masked]: as [give]'s *)
 let sort_rows ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (o : order) (rows : int array array) =

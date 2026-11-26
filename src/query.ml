@@ -234,7 +234,12 @@ let order ?(sets = []) ?(less = []) (v : Store.view) nvars pats ranges =
       | pe, pv ->
         (match pe, pv with
          | V x, W w -> npat.(x) <- npat.(x) + 1; offer x (-1) (Store.count_things v pt.pp w) 0
-         | V x, V y -> let all = Store.count_prop v pt.pp in npat.(x) <- npat.(x) + 1; offer x y (max 1 (all / Store.distinct v pt.pp)) all
+         | V x, V y ->
+           let all = Store.count_prop v pt.pp in
+           (* a thing in a range: the facts of its things there, from the column's rank table *)
+           let un = match iv.(x) with Some (lo, hi) -> Store.count_holders v pt.pp lo hi | None -> all in
+           npat.(x) <- npat.(x) + 1;
+           offer x y (max 1 (all / Store.distinct v pt.pp)) un
          | W _, _ -> ());
         (match pe, pv with
          | W e, V y -> npat.(y) <- npat.(y) + 1; offer y (-1) (Store.count_values v e pt.pp) 0
@@ -426,6 +431,14 @@ let probe_min = ref every
    one domain and 4.2 split); the tests make it 1 *)
 let probe_more = ref 4
 
+(* a thing in a range whose pattern's value is bound: its candidates read from the first thing of the range among the
+   things of that value (two binary searches a run) when the value has [seek_min] things or more, else every thing of
+   the value checked against the range (a few: the search would cost more; the tests make it 0) *)
+let seek_min = ref 64
+
+(* the ranges of a thing read from their first thing (a seek), for the tests *)
+let seeks = Atomic.make 0
+
 (* A runner: one a domain of a question, its own binding, counts and caches, the view shared (Query.fold) *)
 type 'a runner = {
   env : int array;  (* the words of the variables bound so far *)
@@ -607,7 +620,11 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
       2
       *
       if has x pt.pe && has x pt.pv then Store.count_prop v pt.pp
-      else if has x pt.pe then match get pt.pv with Some w -> Store.count_things v pt.pp w | None -> Store.count_prop v pt.pp
+      else if has x pt.pe then
+        match get pt.pv, iv.(x) with
+        | Some w, _ -> Store.count_things v pt.pp w
+        | None, Some (lo, hi) -> Store.count_holders v pt.pp lo hi
+        | None, None -> Store.count_prop v pt.pp
       else
         match get pt.pe, iv.(x) with
         | Some e, _ -> if pt.many then Store.count_values v e pt.pp else -1
@@ -768,13 +785,23 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
         if y < 0 then accepts x c pt else keep y c pt
       in
       let count x pt = count_in iv get x pt in
+      (* a thing in a range, the candidates of a pattern whose thing it is: the things of p (of the fact (p, w)) from lo
+         to hi, in the order of their ids, read from there (Store.holders_from), not every thing of p checked *)
+      let seek p value lo hi f =
+        Atomic.incr seeks;
+        let next = Store.holders_from v p ?value ~desc:false ~from:lo () in
+        let e = ref (next ()) in
+        while !e >= 0 && !e <= hi do f !e; e := next () done
+      in
       (* the candidates themselves *)
       let iterate x pt f =
         if has x pt.pe && has x pt.pv then Store.iter_prop v pt.pp (fun e w -> if e = w then f e)
         else if has x pt.pe then
-          match get pt.pv with
-          | Some w -> Store.iter_things v pt.pp w f
-          | None -> if pt.many then Store.iter_holders v pt.pp f else Store.iter_prop v pt.pp (fun e _ -> f e)
+          match get pt.pv, iv.(x) with
+          | Some w, Some (lo, hi) when Store.count_things v pt.pp w >= !seek_min -> seek pt.pp (Some w) lo hi f
+          | Some w, _ -> Store.iter_things v pt.pp w f
+          | None, Some (lo, hi) -> seek pt.pp None lo hi f
+          | None, None -> if pt.many then Store.iter_holders v pt.pp f else Store.iter_prop v pt.pp (fun e _ -> f e)
         else
           match get pt.pe, iv.(x) with
           | Some e, _ -> Store.iter_values v e pt.pp f

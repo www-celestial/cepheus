@@ -716,6 +716,67 @@ let base_iter_pt b p fn =
     end
   end
 
+(* the highest bit set of a 32-bit word that is not 0 *)
+let top_bit x =
+  let x = ref x and r = ref 0 in
+  if !x lsr 16 <> 0 then (r := 16; x := !x lsr 16);
+  if !x lsr 8 <> 0 then (r := !r + 8; x := !x lsr 8);
+  if !x lsr 4 <> 0 then (r := !r + 4; x := !x lsr 4);
+  if !x lsr 2 <> 0 then (r := !r + 2; x := !x lsr 2);
+  if !x lsr 1 <> 0 then incr r;
+  !r
+
+(* The things of p in a part from thing e on, in the order of their ids (from e down with [desc]), e itself included:
+   [next ()] gives the next one, -1 after the last. The column's rank table, a word of 32 things at a time from e's
+   word: a seek in O(1), then a step a thing (a word without one of p's things, as another kind's, a step a word). *)
+let base_holders b p ~desc e =
+  if not (has_col b p) || ce b p 1 < 0 then fun () -> -1
+  else begin
+    let ra = ce b p 1 and tlo = ce b p 0 and words = ce b p 2 - 1 in
+    let word j = ci64 b (ra + (j lsl 3)) land 0xFFFFFFFF in
+    (* e - tlo, without wrapping for an e far below (min_int) *)
+    let d = if e < tlo then -1 else e - tlo in
+    let j = ref 0 and bits = ref 0 in
+    if desc then begin
+      if d < 0 then j := -1
+      else if d lsr 5 >= words then (j := words - 1; if words > 0 then bits := word (words - 1))
+      else (j := d lsr 5; bits := word !j land ((1 lsl ((d land 31) + 1)) - 1))
+    end
+    else if d < 0 then (if words > 0 then bits := word 0)
+    else if d lsr 5 >= words then j := words
+    else (j := d lsr 5; bits := word !j land lnot ((1 lsl (d land 31)) - 1));
+    let rec next () =
+      if !bits <> 0 then begin
+        if desc then (let h = top_bit !bits in bits := !bits lxor (1 lsl h); tlo + (!j lsl 5) + h)
+        else (let low = !bits land - !bits in bits := !bits lxor low; tlo + (!j lsl 5) + popcount (low - 1))
+      end
+      else if desc then (decr j; if !j < 0 then -1 else (bits := word !j; next ()))
+      else (incr j; if !j >= words then -1 else (bits := word !j; next ()))
+    in
+    next
+  end
+
+(* the first row in a part's column of p of the first thing >= e (p's rows when there is none): the things below e
+   from the rank table, then their rows from the offsets *)
+let base_rows_below b p e =
+  if not (has_col b p) || ce b p 1 < 0 then 0
+  else begin
+    let ra = ce b p 1 and tlo = ce b p 0 and words = ce b p 2 - 1 in
+    let d = if e < tlo then 0 else e - tlo in
+    let q =
+      if d <= 0 then 0
+      else if d lsr 5 >= words then ci64 b (ra + (words lsl 3)) lsr 32
+      else (let w = ci64 b (ra + ((d lsr 5) lsl 3)) in (w lsr 32) + popcount (w land 0xFFFFFFFF land ((1 lsl (d land 31)) - 1)))
+    in
+    let q0 = ce b p 3 in
+    if q <= q0 then q else q0 + cmono b (ce b p 6) (ce b p 7) (q - q0)
+  end
+
+(* the rows of p in a part whose thing is in [lo, hi] *)
+let base_count_holders b p lo hi =
+  if lo > hi then 0
+  else (if hi = max_int then base_rows_below b p max_int else base_rows_below b p (hi + 1)) - base_rows_below b p lo
+
 (* the value of (e, p) when e has exactly one: 1 and the value in cell.(0); 0: none; 2: several *)
 let value1 b e p (cell : int array) =
   let q = cthing b p e in
@@ -1727,8 +1788,9 @@ let read_values v e p lo n (buf : int array) =
     r := stop
   done
 
-let read_things v p lo n (buf : int array) =
-  let b = v.runs.(0).a and r1 = lo + n in
+(* rows lo .. lo+n-1 of p's rows by value in a part: their things into buf.(0 .. n-1) *)
+let base_read_things b p lo n (buf : int array) =
+  let r1 = lo + n in
   if lo < r1 then begin
     let p0 = cpoff b p in
     let rows = cpoff b (p + 1) - p0 and j0 = ci64 b (b.o_pblk + (8 * p)) in
@@ -1771,6 +1833,8 @@ let read_things v p lo n (buf : int array) =
       r := !r + (k1 - k0)
     done
   end
+
+let read_things v p lo n buf = base_read_things v.runs.(0).a p lo n buf
 
 (* the things that hold p, each once: in thing order from the column of a view of one run with no change of p;
    otherwise as the facts come, seen once through a table *)
@@ -1878,6 +1942,155 @@ let distinct v p =
   let rs = v.runs and n = ref 0 in
   for j = 0 to Array.length rs - 1 do n := !n + base_pdist rs.(j).a p done;
   max 1 (!n + match IM.find_opt p v.delta.dav with Some pd -> pd.pk | None -> 0)
+
+(* ---- The things of a property in the order of their ids: pages by a thing, and ranges of things ----
+   A page sorted by a thing that holds p (Sort on a thing, After its last one: Top's index path) and a range of a thing
+   variable (Query) read the things that hold p, or p with the value w, in the order of their ids from a thing on. A
+   part's things of p are its column's rank table (base_holders); its things of (p, w) are the rows of (p, w) by
+   value, which are in thing order within a value, so that a binary search finds the first one at or past a thing.
+   The delta's come from its map by thing (de) for p, from its map by value (dav) for (p, w). Merged over the runs
+   and the delta, each thing once. In a view of one run whose delta has no change of p, the run's things are the
+   view's; otherwise each is checked (has_value, mem: a newer run or the delta may have retracted its facts), and a
+   thing that only the delta gives p is the delta's. *)
+
+(* the things of (p, w) in a part from e on (from e down with [desc]): the first by a binary search among the rows of
+   (p, w), then their things read 128 rows at a time *)
+(* the first of the rows r0 .. r1-1 of a value of p (in thing order) whose thing is >= t, r1 when none is *)
+let av_first b p r0 r1 t =
+  let one = [| 0 |] in
+  let lo = ref r0 and hi = ref r1 in
+  while !lo < !hi do
+    let mid = (!lo + !hi) lsr 1 in
+    base_read_things b p mid 1 one;
+    if one.(0) < t then lo := mid + 1 else hi := mid
+  done;
+  !lo
+
+let base_holders_av b p w ~desc e =
+  let cell = [| 0; 0 |] in
+  let c = base_range_av b p w cell in
+  if c <= 0 then fun () -> -1
+  else begin
+    let r0 = cell.(1) in
+    let r1 = r0 + c in
+    let first t = av_first b p r0 r1 t in
+    (* the rows still to give: from [pos] up (to r1), or from [pos] down (to r0) with [desc]; the buffer holds the next
+       ones, in the order they are given *)
+    let pos = ref (if desc then (if e = max_int then r1 else first (e + 1)) - 1 else first e) in
+    let buf = Array.make 128 0 and bn = ref 0 and bi = ref 0 in
+    fun () ->
+      if !bi < !bn then (let t = buf.(!bi) in incr bi; t)
+      else if desc then begin
+        if !pos < r0 then -1
+        else begin
+          let a = max r0 (!pos - 127) in
+          let n = !pos - a + 1 in
+          base_read_things b p a n buf;
+          for i = 0 to (n / 2) - 1 do let t = buf.(i) in buf.(i) <- buf.(n - 1 - i); buf.(n - 1 - i) <- t done;
+          bn := n;
+          bi := 1;
+          pos := a - 1;
+          buf.(0)
+        end
+      end
+      else if !pos >= r1 then -1
+      else begin
+        let n = min 128 (r1 - !pos) in
+        base_read_things b p !pos n buf;
+        bn := n;
+        bi := 1;
+        pos := !pos + n;
+        buf.(0)
+      end
+  end
+
+(* the keys of an int map that [keep] takes, from e up (from e down with [desc]), e included; -1 after the last *)
+let im_from (m : 'a IM.t) ~desc e (keep : 'a -> bool) =
+  if not desc then begin
+    let s = ref (IM.to_seq_from e m) in
+    let rec next () = match !s () with Seq.Nil -> -1 | Seq.Cons ((k, d), s') -> s := s'; if keep d then k else next () in
+    next
+  end
+  else begin
+    let cur = ref e and fin = ref false in
+    let rec next () =
+      if !fin then -1
+      else
+        match IM.find_last_opt (fun k -> k <= !cur) m with
+        | None -> fin := true; -1
+        | Some (k, d) -> if k = min_int then fin := true else cur := k - 1; if keep d then k else next ()
+    in
+    next
+  end
+
+(* does a thing's delta hold a fact of p *)
+let delta_has_p p (td : tdelta) =
+  let rec go s = match s () with Seq.Cons (((p', _), st), s') when p' = p -> present st || go s' | _ -> false in
+  go (PW.to_seq_from (p, min_int) td.tf)
+
+(* The things that hold p (that hold the fact (p, w) with [value]), each once, in the order of their ids from [from]
+   on (from [from] down with [desc]), [from] included: [next ()] gives the next one, -1 after the last. A step costs
+   the merge of the runs' and the delta's next things, and for a view of several runs, or with changes of p, the
+   check of the thing given. *)
+let holders_from v p ?value ~desc ~from () =
+  let rs = v.runs in
+  let pd = IM.find_opt p v.delta.dav in
+  let srcs =
+    Array.of_list
+      (List.filter_map
+         (fun r ->
+           let b = r.a in
+           if not (has_p b p) then None
+           else Some (match value with None -> base_holders b p ~desc from | Some w -> base_holders_av b p w ~desc from))
+         (Array.to_list rs)
+      @
+      match value, pd with
+      | _, None -> []
+      | None, Some _ -> [ im_from v.delta.de ~desc from (delta_has_p p) ]
+      | Some w, Some pd -> (match VM.find_opt w pd.pm with Some vd -> [ im_from vd.vm ~desc from present ] | None -> []))
+  in
+  let check = Array.length rs > 1 || pd <> None in
+  let holds e = match value with None -> has_value v e p | Some w -> mem v e p w in
+  let k = Array.length srcs in
+  let head = Array.map (fun next -> next ()) srcs in
+  let rec next () =
+    let best = ref (-1) in
+    for j = 0 to k - 1 do
+      let h = head.(j) in
+      if h >= 0 && (!best < 0 || (if desc then h > !best else h < !best)) then best := h
+    done;
+    let e = !best in
+    if e < 0 then -1
+    else begin
+      for j = 0 to k - 1 do if head.(j) = e then head.(j) <- srcs.(j) () done;
+      if (not check) || holds e then e else next ()
+    end
+  in
+  next
+
+(* The facts of p whose thing is in [lo, hi]: each run's rows there, less its retractions, from its column's rank table
+   and offsets (O(1) a part), and the delta's net count of its things there, read one by one: exact while the delta
+   holds at most [delta_look] things in the range, an upper bound past them (the delta's additions of p count for the
+   rest). For the planner and the join's choice of a source, which an upper bound leaves right. *)
+let delta_look = 256
+
+let count_holders v p lo hi =
+  if lo > hi then 0
+  else begin
+    let n = ref 0 in
+    Array.iter (fun r -> n := !n + (if has_p r.a p then base_count_holders r.a p lo hi else 0) - if has_p r.t p then base_count_holders r.t p lo hi else 0) v.runs;
+    (match IM.find_opt p v.delta.dav with
+     | None -> ()
+     | Some pd ->
+       let s = ref (IM.to_seq_from lo v.delta.de) and left = ref delta_look in
+       while !left > 0 do
+         match !s () with
+         | Seq.Cons ((e, td), s') when e <= hi -> s := s'; decr left; (match IM.find_opt p td.tn with Some c -> n := !n + c | None -> ())
+         | _ -> left := -1
+       done;
+       if !left = 0 then (match !s () with Seq.Cons ((e, _), _) when e <= hi -> n := !n + VM.adds pd.pm | _ -> ()));
+    max 0 !n
+  end
 
 (* ---- Changing a view ---- *)
 

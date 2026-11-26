@@ -72,6 +72,29 @@ defn isFindRanges()
   value.Equal(below, [{T: 10.0}])
 end
 
+defn isFindPagesOfThings()
+  (** A list of a kind by its things' ids, a page after another (Sort on the thing and After), ascending and
+      descending, the things of one value of a field likewise; Above, Below and Between on a thing's id. *)
+  t = cepheus.Fork(cepheus.Empty, [Client])?
+  cities = ["Lyon", "Paris", "Lyon", "Paris", "Lyon", "Paris", "Lyon"]
+  ids = [cepheus.Insert(Client, {Name: "c$k", City: cities[k], Email: "c$k@x.fr"}, t)? for k in 1..7]
+  page(desc, after) = cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n]], Give: {Id: c}, Sort: [if desc cepheus.Desc(c) else c end], Limit: 3, After: after}, t)?
+  of(rows) = [r.Id for r in rows]
+  first = page(false, missing)
+  second = page(false, first[3])
+  last = page(true, missing)
+  before = page(true, last[3])
+  lyon = cepheus.Find(1, (c) -> {Where: [[c, Client.City, "Lyon"]], Give: {Id: c}, Sort: [c], Limit: 2, After: {Id: ids[1]}}, t)?
+  ranged(cond) = of(cepheus.Find(2, (c, n) -> {Where: [[c, Client.Name, n], cond(c)], Give: {Id: c}, Sort: [c]}, t)?)
+  list.All([
+    value.Equal(of(first), [ids[1], ids[2], ids[3]]), value.Equal(of(second), [ids[4], ids[5], ids[6]]),
+    value.Equal(of(last), [ids[7], ids[6], ids[5]]), value.Equal(of(before), [ids[4], ids[3], ids[2]]),
+    value.Equal(of(lyon), [ids[3], ids[5]]),
+    value.Equal(ranged((c) -> cepheus.Above(c, ids[5])), [ids[6], ids[7]]),
+    value.Equal(ranged((c) -> cepheus.Below(c, ids[2])), [ids[1]]),
+    value.Equal(ranged((c) -> cepheus.Between(c, ids[2], ids[4])), [ids[2], ids[3], ids[4]])])
+end
+
 Item = cepheus.Kind("item", {Price: cepheus.Money(2), When: cepheus.Date(), N: cepheus.Int()})
 
 defn items()
