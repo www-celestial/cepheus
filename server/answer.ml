@@ -608,17 +608,51 @@ let pair_plan (v : Store.view) (q : Query.t) ~give ~each ~(order : Top.order) =
    it holds of group c, [merge] two states *)
 let pair_answer (v : Store.view) (pp : pair_plan) ~k ~ask ~rows ~merge ~init =
   Atomic.incr pair_each;
-  let groups = Store.pair_groups v ~p1:pp.p1 ~p2:pp.p2 pp.clo pp.chi in
-  let ng = Array.length groups in
-  let cell = ref 0 in
   let from = if pp.desc then pp.dhi else pp.dlo in
-  let next = Array.map (fun w1 -> Store.pair_from v ~p1:pp.p1 ~p2:pp.p2 w1 ~desc:pp.desc ~from cell) groups in
-  (* each group's next thing (-1: none left) and its p2 value *)
-  let pend_e = Array.make ng (-1) and pend_w = Array.make ng 0 in
-  let pull g =
-    let e = next.(g) () in
-    if e < 0 || (if pp.desc then !cell < pp.dlo else !cell > pp.dhi) then pend_e.(g) <- -1 else (pend_e.(g) <- e; pend_w.(g) <- !cell)
+  let past w2 = if pp.desc then w2 < pp.dlo else w2 > pp.dhi in
+  (* the groups, and [pull g]: group g's next thing into pend_e.(g) (-1: none left) and its p2 value into pend_w.(g) *)
+  let groups, pull, pend_e, pend_w =
+    match Store.pair_part v ~p1:pp.p1 ~p2:pp.p2 with
+    | Some (b, k) ->
+      (* one run, the delta without a change of the pair: each group's rows read where they are *)
+      let g = Store.pr_groups b k in
+      let qs = Array.make g 0 and ws = Array.make g 0 and n = ref 0 in
+      for q = 0 to g - 1 do
+        let w = Store.pr_w1 b k q in
+        if w >= pp.clo && w <= pp.chi then (qs.(!n) <- q; ws.(!n) <- w; incr n)
+      done;
+      let ng = !n in
+      let r0 = Array.init ng (fun i -> Store.pr_start b k qs.(i)) and r1 = Array.init ng (fun i -> Store.pr_start b k (qs.(i) + 1)) in
+      let pos =
+        Array.init ng (fun i ->
+            if pp.desc then (if from = max_int then r1.(i) else Store.pr_lower b k r0.(i) r1.(i) (from + 1) min_int) - 1
+            else if from = min_int then r0.(i)
+            else Store.pr_lower b k r0.(i) r1.(i) from min_int)
+      in
+      let pend_e = Array.make ng (-1) and pend_w = Array.make ng 0 in
+      let pull g =
+        let r = pos.(g) in
+        if r < r0.(g) || r >= r1.(g) then pend_e.(g) <- -1
+        else begin
+          let w2 = Store.pr_w2 b k r in
+          if past w2 then pend_e.(g) <- -1
+          else (pend_e.(g) <- Store.pr_e b k r; pend_w.(g) <- w2; pos.(g) <- (if pp.desc then r - 1 else r + 1))
+        end
+      in
+      Array.sub ws 0 ng, pull, pend_e, pend_w
+    | None ->
+      let groups = Store.pair_groups v ~p1:pp.p1 ~p2:pp.p2 pp.clo pp.chi in
+      let ng = Array.length groups in
+      let cell = ref 0 in
+      let next = Array.map (fun w1 -> Store.pair_from v ~p1:pp.p1 ~p2:pp.p2 w1 ~desc:pp.desc ~from cell) groups in
+      let pend_e = Array.make ng (-1) and pend_w = Array.make ng 0 in
+      let pull g =
+        let e = next.(g) () in
+        if e < 0 || past !cell then pend_e.(g) <- -1 else (pend_e.(g) <- e; pend_w.(g) <- !cell)
+      in
+      groups, pull, pend_e, pend_w
   in
+  let ng = Array.length groups in
   for g = 0 to ng - 1 do pull g done;
   let out = ref (Array.make (max 16 (ng * k)) 0) and no = ref 0 in
   (* [need] more things of group g, then those tied with the last *)
@@ -636,7 +670,7 @@ let pair_answer (v : Store.view) (pp : pair_plan) ~k ~ask ~rows ~merge ~init =
   let fold () =
     let ws = Array.sub !out 0 !no in
     no := 0;
-    Array.sort compare ws;
+    Store.sort_ints ws;
     Atomic.incr pair_rounds;
     if Array.length ws = 0 then init () else ask ws
   in

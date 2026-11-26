@@ -177,7 +177,7 @@ let run seed =
       if Rng.int r 8 > 0 then ops := Resolve.Add (t, client, pick_client ()) :: !ops;
       if Rng.int r 8 > 0 then ops := Add (t, date, dt ()) :: !ops;
       ops := Add (t, total, Int (Rng.int r 50)) :: !ops;
-      if Rng.int r 2 = 0 then ops := Add (t, zone, Int (Rng.int r 4)) :: !ops;
+      if Rng.int r 2 = 0 then ops := Add (t, zone, Int (if Rng.int r 5 = 0 then [| min_int; max_int; -1; 1 lsl 40 |].(Rng.int r 4) else Rng.int r 4)) :: !ops;
       if Rng.int r 3 = 0 then ops := Add (t, tag, Text "x") :: !ops
     done;
     if Array.length !invoices > 0 then
@@ -217,9 +217,85 @@ let run seed =
   questions seed v r ~client ~date ~total ~zone ~tag ~name;
   pages seed v r ~client ~date ~total
 
-(* ---- on a real disk: format 9, reopen and replay, a replica's replay, damage, races ---- *)
+(* ---- live watches: a page of each client's invoices by date, Sort and Limit 3, kept by Live over writes and
+   merges; at every message the watch's rows must be the join's (the pair set aside) on the view of its group ---- *)
+
+let live_checks = ref 0
 
 let ok = function Ok r -> r | Error e -> failwith (message e)
+
+let rec remove_one x = function [] -> None | y :: t -> if y = x then Some t else Option.map (fun t -> y :: t) (remove_one x t)
+
+let live seed =
+  let r = Rng.make seed in
+  let db = fork empty in
+  let[@warning "-8"] [ client; date; total; _; _; name ] = ok (declare db props) in
+  ok (within db [ (date, client) ]);
+  let v = ref (view db) in
+  let views = Hashtbl.create 64 in
+  Hashtbl.replace views !v.group !v;
+  let hub = Live.create !v ~tag:!v.group ~durable:max_int in
+  let mdisk = Sim_disk.disk (Sim_disk.create (Rng.make seed)) in
+  mdisk.mkdir "/merge";
+  let write ops =
+    let n = !v.group + 1 in
+    match Resolve.resolve !v ~n ~time:n ~by:0 ~why:"" ops with
+    | Ok (v', g, temps) -> v := v'; Hashtbl.replace views n v'; Live.frame hub ~tag:v'.group [ g ] v'; List.map snd temps
+    | Error (Resolve.Conflict m | Invalid m | Not_unique m) -> C.fail "live %d: a write refused: %s" seed m; []
+  in
+  let cs = Array.of_list (write (List.init 4 (fun k -> Resolve.Add (-1 - k, name, Text (string_of_int k))))) in
+  let invoices = ref [||] in
+  let page c desc = { Query.vars = 3; where = [ { e = Var 0; p = client; v = Val (Link c) }; { e = Var 0; p = date; v = Var 1 }; { e = Var 0; p = total; v = Var 2 } ]; ranges = [] }, { Question.Top.keys = [ { col = 1; desc } ]; limit = 3; after = None } in
+  let join g q order =
+    let v = Hashtbl.find views g in
+    Question.Top.pairs := false;
+    Fun.protect ~finally:(fun () -> Question.Top.pairs := true) (fun () -> List.sort compare (rows_of v (Answer.answer ~order v q (Wire.Give [||]))))
+  in
+  let watches =
+    List.concat_map
+      (fun c ->
+        List.map
+          (fun desc ->
+            let q, order = page c desc in
+            let rows = ref [] and group = ref 0 in
+            let emit (m : Live.msg) =
+              (match m with
+               | Live.Answer a -> rows := a.rows; group := a.group
+               | Change ch ->
+                 List.iter (fun x -> match remove_one x !rows with Some l -> rows := l | None -> C.fail "live %d: a row removed that is not there" seed) ch.removed;
+                 rows := ch.added @ !rows;
+                 group := ch.group
+               | Same s -> group := s.group
+               | Ended e -> C.fail "live %d: a watch ended: %s" seed e.message);
+              incr live_checks;
+              if List.sort compare !rows <> join !group q order then C.fail "live %d: a watch of #%d's page%s at group %d differs from the join" seed c (if desc then " (down)" else "") !group;
+              true
+            in
+            ignore (Live.subscribe ~order hub q (Wire.Give [||]) ~from:0 ~emit))
+          [ true; false ])
+      (Array.to_list cs)
+  in
+  ignore watches;
+  for _ = 1 to 40 do
+    let dt () = Value.Date (1_700_000_000_000 + (1000 * Rng.int r 30)) in
+    (match Rng.int r 4 with
+     | 0 | 1 -> invoices := Array.append !invoices (Array.of_list (write [ Resolve.Add (-1, client, Link cs.(Rng.int r 4)); Add (-1, date, dt ()); Add (-1, total, Int (Rng.int r 9)) ]))
+     | 2 when Array.length !invoices > 0 ->
+       let i = !invoices.(Rng.int r (Array.length !invoices)) in
+       ignore (write [ (if Rng.bool r then Resolve.Add (i, date, dt ()) else Add (i, total, Int (Rng.int r 9))) ])
+     | _ when Array.length !invoices > 0 -> ignore (write [ Resolve.Add (!invoices.(Rng.int r (Array.length !invoices)), client, Link cs.(Rng.int r 4)) ])
+     | _ -> ());
+    if Rng.int r 6 = 0 then begin
+      let take = if Rng.bool r then 0 else Array.length !v.runs in
+      let w = Snapshot.merge mdisk "/merge" "0123456789abcdef" !v ~take ~level:(1 + take) { Journal.segment = 1; offset = 40; next = !v.group + 1 } in
+      Snapshot.install mdisk "/merge" w;
+      v := w.view;
+      Hashtbl.replace views !v.group !v;
+      Live.rebase hub !v
+    end
+  done
+
+(* ---- on a real disk: format 9, reopen and replay, a replica's replay, damage, races ---- *)
 
 let rec rm path =
   if Sys.file_exists path then
@@ -411,8 +487,9 @@ let disk_tests () =
 let () =
   let seeds = ref 100 and one = ref None in
   Arg.parse [ ("--seeds", Arg.Set_int seeds, "N"); ("--seed", Arg.Int (fun s -> one := Some s), "N") ] (fun _ -> ()) "pairs.exe";
-  (match !one with Some s -> run s | None -> for s = 1 to !seeds do run s done; disk_tests ());
+  (match !one with Some s -> run s; live s | None -> for s = 1 to !seeds do run s; if s <= 50 then live s done; disk_tests ());
   Printf.printf "  %d streams of a group checked, on %d views that read a pair\n" !stream_checks !ready_views;
+  Printf.printf "  %d messages of live watches checked against the join\n" !live_checks;
   Printf.printf "  %d questions on both paths, %d Each of them on the pair (%d folds), %d pages on the pair\n" !question_checks !on_pair
     (Atomic.get Answer.pair_rounds) (Atomic.get Question.Top.paired);
   C.finish "pairs"

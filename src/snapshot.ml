@@ -931,21 +931,96 @@ let prow r w1 w2 e =
   r.pw1.(r.pn) <- w1; r.pw2.(r.pn) <- w2; r.pe.(r.pn) <- e;
   r.pn <- r.pn + 1
 
-(* the order of a pair's rows by (w1, w2, e): they come in thing order, so two stable radix sorts, by w2 then by w1
-   (Knuth, volume 3, 5.2.5), or the comparisons' sort when a key's range passes the ints *)
-let prow_order r =
+(* The rows of a pair sorted by (w1, w2, e), in three arrays. They come in thing order, so a stable sort by w1 leaves
+   each group's rows in thing order: a counting sort when w1's range is within a few times the rows (a link to a thing:
+   one pass to count, one to place each row), else least-significant digit first, 11 bits a pass (Knuth, volume 3,
+   5.2.5), the rows themselves moved, read in order; then each group's rows, side by side, by w2, stable (by insertion
+   for a few, the comparisons' merge sort for more) *)
+let prow_sorted r =
   let n = r.pn in
-  let o = Array.init n Fun.id in
-  if not (Store.radix_by (fun j -> Array.unsafe_get r.pw2 j) o && Store.radix_by (fun j -> Array.unsafe_get r.pw1 j) o) then begin
-    Array.iteri (fun i _ -> o.(i) <- i) o;
-    Array.stable_sort
-      (fun a b ->
-        let x = r.pw1.(a) and y = r.pw1.(b) in
-        if x <> y then compare (x : int) y
-        else let x = r.pw2.(a) and y = r.pw2.(b) in if x <> y then compare (x : int) y else compare (r.pe.(a) : int) r.pe.(b))
-      o
+  let sw1 = Array.make n 0 and sw2 = Array.make n 0 and se = Array.make n 0 in
+  if n > 0 then begin
+    let mn = ref max_int and mx = ref min_int in
+    for i = 0 to n - 1 do let k = Array.unsafe_get r.pw1 i in if k < !mn then mn := k; if k > !mx then mx := k done;
+    let base = !mn and range = !mx - !mn in
+    if range >= 0 && range < max 65536 (4 * n) then begin
+      let cnt = Array.make (range + 2) 0 in
+      for i = 0 to n - 1 do let d = Array.unsafe_get r.pw1 i - base + 1 in Array.unsafe_set cnt d (Array.unsafe_get cnt d + 1) done;
+      for d = 1 to range + 1 do Array.unsafe_set cnt d (Array.unsafe_get cnt d + Array.unsafe_get cnt (d - 1)) done;
+      for i = 0 to n - 1 do
+        let w = Array.unsafe_get r.pw1 i in
+        let d = w - base in
+        let at = Array.unsafe_get cnt d in
+        Array.unsafe_set cnt d (at + 1);
+        Array.unsafe_set sw1 at w;
+        Array.unsafe_set sw2 at (Array.unsafe_get r.pw2 i);
+        Array.unsafe_set se at (Array.unsafe_get r.pe i)
+      done
+    end
+    else begin
+      (* digits of 11 bits, the rows moved between two sets of arrays; a range past the ints: by the bits as they are,
+         the signed order fixed by the top digit's sign *)
+      Array.blit r.pw1 0 sw1 0 n;
+      Array.blit r.pw2 0 sw2 0 n;
+      Array.blit r.pe 0 se 0 n;
+      let t1 = Array.make n 0 and t2 = Array.make n 0 and t3 = Array.make n 0 in
+      let src = ref (sw1, sw2, se) and dst = ref (t1, t2, t3) in
+      let cnt = Array.make 2048 0 in
+      let over = range < 0 in
+      let key w = if over then w lxor min_int else w - base in
+      let sh = ref 0 in
+      while !sh < 63 && (over || range lsr !sh > 0) do
+        Array.fill cnt 0 2048 0;
+        let a1, a2, a3 = !src and b1, b2, b3 = !dst and s = !sh in
+        for i = 0 to n - 1 do let d = (key (Array.unsafe_get a1 i) lsr s) land 2047 in Array.unsafe_set cnt d (Array.unsafe_get cnt d + 1) done;
+        let t = ref 0 in
+        for d = 0 to 2047 do let c = Array.unsafe_get cnt d in Array.unsafe_set cnt d !t; t := !t + c done;
+        for i = 0 to n - 1 do
+          let w = Array.unsafe_get a1 i in
+          let d = (key w lsr s) land 2047 in
+          let at = Array.unsafe_get cnt d in
+          Array.unsafe_set cnt d (at + 1);
+          Array.unsafe_set b1 at w;
+          Array.unsafe_set b2 at (Array.unsafe_get a2 i);
+          Array.unsafe_set b3 at (Array.unsafe_get a3 i)
+        done;
+        src := (b1, b2, b3);
+        dst := (a1, a2, a3);
+        sh := s + 11
+      done;
+      let a1, a2, a3 = !src in
+      if a1 != sw1 then (Array.blit a1 0 sw1 0 n; Array.blit a2 0 sw2 0 n; Array.blit a3 0 se 0 n)
+    end;
+    (* each group by w2, stable *)
+    let i = ref 0 in
+    while !i < n do
+      let w = Array.unsafe_get sw1 !i in
+      let j = ref (!i + 1) in
+      while !j < n && Array.unsafe_get sw1 !j = w do incr j done;
+      let lo = !i and hi = !j in
+      if hi - lo <= 32 then
+        for a = lo + 1 to hi - 1 do
+          let x2 = Array.unsafe_get sw2 a and xe = Array.unsafe_get se a in
+          let k = ref (a - 1) in
+          while !k >= lo && Array.unsafe_get sw2 !k > x2 do
+            Array.unsafe_set sw2 (!k + 1) (Array.unsafe_get sw2 !k);
+            Array.unsafe_set se (!k + 1) (Array.unsafe_get se !k);
+            decr k
+          done;
+          Array.unsafe_set sw2 (!k + 1) x2;
+          Array.unsafe_set se (!k + 1) xe
+        done
+      else begin
+        let o = Array.init (hi - lo) (fun q -> lo + q) in
+        Array.stable_sort (fun a b -> compare (Array.unsafe_get sw2 a : int) (Array.unsafe_get sw2 b)) o;
+        let x2 = Array.map (fun q -> sw2.(q)) o and xe = Array.map (fun q -> se.(q)) o in
+        Array.blit x2 0 sw2 lo (hi - lo);
+        Array.blit xe 0 se lo (hi - lo)
+      end;
+      i := hi
+    done
   end;
-  o
+  sw1, sw2, se
 
 (* the room of a pair's tables for at most n rows (and groups), each table's: the groups' values and first rows (Mono
    headers and bits), the rows' directory (24 bytes a block) and their bits (two fields of at most 63 bits a row) *)
@@ -967,17 +1042,17 @@ let pairs_out o ~at ~size (ps : (int * int * prows) array) =
   Array.iter
     (fun (p1, p2, r) ->
       let n = r.pn in
-      let ord = prow_order r in
+      let sw1, sw2, se = prow_sorted r in
       (* the groups: where w1 changes *)
       let g = ref 0 in
-      for i = 0 to n - 1 do if i = 0 || r.pw1.(ord.(i)) <> r.pw1.(ord.(i - 1)) then incr g done;
+      for i = 0 to n - 1 do if i = 0 || sw1.(i) <> sw1.(i - 1) then incr g done;
       let g = !g in
       let ss = List.map take (ptables (max n g)) in
       let w1h, w1b, sth, stb, dir, dat = match ss with [ a; b; c; d; e; f ] -> a, b, c, d, e, f | _ -> assert false in
       List.iter (put64 hs) [ p1; p2; n; g; w1h.pos; w1b.pos; sth.pos; stb.pos; dir.pos; dat.pos; 0; 0 ];
       let mw = mono w1h w1b and ms = mono sth stb in
       for i = 0 to n - 1 do
-        if i = 0 || r.pw1.(ord.(i)) <> r.pw1.(ord.(i - 1)) then (mono_add mw r.pw1.(ord.(i)); mono_add ms i)
+        if i = 0 || sw1.(i) <> sw1.(i - 1) then (mono_add mw sw1.(i); mono_add ms i)
       done;
       mono_add ms n;
       mono_cut mw;
@@ -989,16 +1064,17 @@ let pairs_out o ~at ~size (ps : (int * int * prows) array) =
         let m = min Store.tb (n - !j) in
         let lo2 = ref max_int and hi2 = ref min_int and lo3 = ref max_int and hi3 = ref min_int in
         for i = !j to !j + m - 1 do
-          let a = r.pw2.(ord.(i)) and e = r.pe.(ord.(i)) in
+          let a = sw2.(i) and e = se.(i) in
           if a < !lo2 then lo2 := a; if a > !hi2 then hi2 := a; if e < !lo3 then lo3 := e; if e > !hi3 then hi3 := e
         done;
         let ww = Pack.width (!hi2 - !lo2) and we = Pack.width (!hi3 - !lo3) in
         let b2 = Store.pbytes m ww and b3 = Store.pbytes m we in
         room sc (b2 + b3 + 8);
         Bytes.fill sc.sb 0 (b2 + b3 + 8) '\000';
+        let l2 = !lo2 and l3 = !lo3 and j0 = !j in
         for i = 0 to m - 1 do
-          Pack.put sc.sb (i * ww) (r.pw2.(ord.(!j + i)) - !lo2) ww;
-          Pack.put sc.sb ((8 * b2) + (i * we)) (r.pe.(ord.(!j + i)) - !lo3) we
+          Pack.put sc.sb (i * ww) (Array.unsafe_get sw2 (j0 + i) - l2) ww;
+          Pack.put sc.sb ((8 * b2) + (i * we)) (Array.unsafe_get se (j0 + i) - l3) we
         done;
         put64 dir !lo2;
         put64 dir !lo3;
@@ -1133,37 +1209,58 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
   let slot = Array.make (max 1 np) (-1) and nslot = ref 0 in
   Array.iter (fun (p2, p1) -> List.iter (fun p -> if slot.(p) < 0 then (slot.(p) <- !nslot; incr nslot)) [ p1; p2 ]) pairs;
   let a_has = Bytes.make (max 1 !nslot) '\000' and a_val = Array.make (max 1 !nslot) 0 and t_has = Bytes.make (max 1 !nslot) '\000' in
-  let noted = ref false in
+  (* the slots the thing under way touched, to clear after it *)
+  let ts = Array.make (max 1 !nslot) 0 and nts = ref 0 in
+  let ps1 = Array.map (fun (_, p1) -> slot.(p1)) pairs and ps2 = Array.map (fun (p2, _) -> slot.(p2)) pairs in
   let pa = Array.map (fun _ -> prows ()) pairs and pt = Array.map (fun _ -> prows ()) pairs in
   (* the state the run rests on: its pairs' values below it *)
   let under = if bottom || npair = 0 then None else Some (Store.of_runs ~schema:v.schema ~group:lo ~next_e:v.next_e (Array.sub rs take (nr - take))) in
+  let cell = [| 0 |] in
+  (* thing e's pairs, from what the new run holds of its paired properties: its values at the run's end (the value the
+     run adds, none when it only retracts one, the one below it otherwise) against those below it *)
   let pairs_of e =
-    Array.iteri
-      (fun j (p2, p1) ->
-        let s1 = slot.(p1) and s2 = slot.(p2) in
-        if Bytes.get a_has s1 <> '\000' || Bytes.get t_has s1 <> '\000' || Bytes.get a_has s2 <> '\000' || Bytes.get t_has s2 <> '\000' then begin
-          let lo1, lo2 = match under with None -> None, None | Some b -> Store.first_value b e p1, Store.first_value b e p2 in
-          let hi s l = if Bytes.get a_has s <> '\000' then Some a_val.(s) else if Bytes.get t_has s <> '\000' then None else l in
-          let hi1 = hi s1 lo1 and hi2 = hi s2 lo2 in
-          if lo1 <> hi1 || lo2 <> hi2 then begin
-            (match lo1, lo2 with Some a, Some b -> prow pt.(j) a b e | _ -> ());
-            match hi1, hi2 with Some a, Some b -> prow pa.(j) a b e | _ -> ()
-          end
-        end)
-      pairs;
-    Bytes.fill a_has 0 (Bytes.length a_has) '\000';
-    Bytes.fill t_has 0 (Bytes.length t_has) '\000';
-    noted := false
+    for j = 0 to npair - 1 do
+      let s1 = Array.unsafe_get ps1 j and s2 = Array.unsafe_get ps2 j in
+      let a1 = Bytes.unsafe_get a_has s1 <> '\000' and t1 = Bytes.unsafe_get t_has s1 <> '\000'
+      and a2 = Bytes.unsafe_get a_has s2 <> '\000' and t2 = Bytes.unsafe_get t_has s2 <> '\000' in
+      if a1 || t1 || a2 || t2 then begin
+        let p2, p1 = pairs.(j) in
+        let lh1, lw1, lh2, lw2 =
+          match under with
+          | None -> false, 0, false, 0
+          | Some b ->
+            let h1 = Store.runs_one b e p1 cell in
+            let w1 = cell.(0) in
+            let h2 = Store.runs_one b e p2 cell in
+            h1, w1, h2, cell.(0)
+        in
+        let hh1 = a1 || ((not t1) && lh1) and hw1 = if a1 then a_val.(s1) else lw1 in
+        let hh2 = a2 || ((not t2) && lh2) and hw2 = if a2 then a_val.(s2) else lw2 in
+        let lo_p = lh1 && lh2 and hi_p = hh1 && hh2 in
+        if lo_p <> hi_p || (lo_p && (lw1 <> hw1 || lw2 <> hw2)) then begin
+          if lo_p then prow pt.(j) lw1 lw2 e;
+          if hi_p then prow pa.(j) hw1 hw2 e
+        end
+      end
+    done;
+    for i = 0 to !nts - 1 do
+      let x = ts.(i) in
+      Bytes.unsafe_set a_has x '\000';
+      Bytes.unsafe_set t_has x '\000'
+    done;
+    nts := 0
   in
+  (* a fact of a paired property in the new run: its slot noted for the thing under way *)
+  let note s = if Bytes.unsafe_get a_has s = '\000' && Bytes.unsafe_get t_has s = '\000' then (ts.(!nts) <- s; incr nts) in
   match
     disk.truncate fd 0;
     (* ---- by thing: the rank tables, the blocks of 128 things held, their directory ---- *)
     let emit_a e p w d =
-      if npair > 0 && slot.(p) >= 0 then (Bytes.set a_has slot.(p) '\001'; a_val.(slot.(p)) <- w; noted := true);
+      if npair > 0 then (let s = Array.unsafe_get slot p in if s >= 0 then (note s; Bytes.unsafe_set a_has s '\001'; a_val.(s) <- w));
       row ta e p w d
     and emit_t e p w d =
       if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below";
-      if npair > 0 && slot.(p) >= 0 then (Bytes.set t_has slot.(p) '\001'; noted := true);
+      if npair > 0 then (let s = Array.unsafe_get slot p in if s >= 0 then (note s; Bytes.unsafe_set t_has s '\001'));
       row tt e p w d
     in
     (* a fact whose state is [f] in the new view and [b] below the merged runs (0 absent, 1 asserted, 2 derived) *)
@@ -1234,7 +1331,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
         in
         go (List.sort compare !entries)
       end;
-      if !noted then pairs_of e
+      if !nts > 0 then pairs_of e
     done;
     if !bi <> bulk.n then invalid_arg "Snapshot.merge: a fact of the large group is past the things";
     tblocks_end ta ne;

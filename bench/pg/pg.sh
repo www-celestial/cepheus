@@ -22,6 +22,10 @@
 #   pg.sh keyset ROOT load DIR | run DIR   pages of 51 of a kind by id, as bench/kbench.ml asks them (kbench.exe csv's files)
 #   pg.sh windows ROOT index | run   the window functions beside bench/wbench.ml's, on the rows of pg.sh reports load;
 #                                   index: the indexes a user makes for them (invoice (client, date), (date, id))
+#   pg.sh pairs ROOT                the questions of wbench.exe pair (an index of two properties) with the index of
+#                                   pg.sh windows ROOT index: the 3 latest invoices of each client (LATERAL), the last
+#                                   one (DISTINCT ON), the 10 latest of the client with the most invoices and the 10
+#                                   after them, inside the server (engine only), RUNS runs each (21)
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -238,6 +242,23 @@ windows)
     timed "the first page of 51, its running total" "SELECT id, date, total, sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING) FROM rinvoice ORDER BY date, id LIMIT 51"
     ;;
   esac
+  ;;
+pairs)
+  runs=${RUNS:-21}
+  stats() { "$here/../../_build/default/bench/bench.exe" stats "$1"; }
+  timed() {  # label, SQL
+    for r in $(seq "$runs"); do
+      psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $2" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+    done | stats "$1 ($(psql -X -At -c "SELECT count(*) FROM ($2) x") rows)"
+  }
+  timed "the 3 latest invoices of each client (LATERAL)" "SELECT c.id, l.* FROM rclient c CROSS JOIN LATERAL (SELECT id, date, total FROM rinvoice i WHERE i.client = c.id ORDER BY date DESC, id LIMIT 3) l"
+  timed "the last invoice of each client (DISTINCT ON)" "SELECT DISTINCT ON (client) client, date, id, total FROM rinvoice ORDER BY client, date DESC, id"
+  ck=$(psql -X -At -F ',' -c "SELECT client, count(*) FROM rinvoice GROUP BY client ORDER BY count(*) DESC, client LIMIT 1")
+  c=${ck%,*}; k=${ck#*,}
+  cur=$(psql -X -At -F ',' -c "SELECT date, id FROM rinvoice WHERE client = $c ORDER BY date DESC, id OFFSET 9 LIMIT 1")
+  d=${cur%,*}; id=${cur#*,}
+  timed "the 10 latest invoices of the busiest client ($k invoices)" "SELECT id, date, total FROM rinvoice WHERE client = $c ORDER BY date DESC, id LIMIT 10"
+  timed "the 10 after them (After)" "SELECT id, date, total FROM rinvoice WHERE client = $c AND (date < '$d' OR (date = '$d' AND id > $id)) ORDER BY date DESC, id LIMIT 10"
   ;;
 write)
   # RATE=r: r inserts a second in all (pgbench -R: a latency counts from the scheduled start, so a stall is never

@@ -1311,17 +1311,17 @@ let[@inline] present st = st land 1 <> 0
 type pdelta = { pn : int; pk : int  (* values in pm *); pm : VM.t  (* value -> its things *) }
 
 (* The delta's pairs (p2 within p1, Schema.within): for every thing whose p1 or p2 changed since the delta began, its
-   values of both in the view (byt), and the pairs (w2, thing) of those that hold both, by w1 (byg). A run's pair of
+   values of both in the view (byt), and the pairs (w1, w2, thing) of those that hold both (byg). A run's pair of
    such a thing is the runs' and not the view's: the delta's decides (Store.pair_from), as its entries decide the
-   runs' facts. A map of (w2, e) to nothing, not a Set: the Cesia package's engine links no Set. *)
-module PS = Map.Make (struct
-  type t = int * int
+   runs' facts. A map of (w1, w2, e) to nothing, not a Set: the Cesia package's engine links no Set. *)
+module PT = Map.Make (struct
+  type t = int * int * int
 
-  let compare ((a : int), (b : int)) (c, d) = if a <> c then compare a c else compare b d
+  let compare ((a : int), (b : int), (c : int)) (a', b', c') = if a <> a' then compare a a' else if b <> b' then compare b b' else compare c c'
 end)
 
 type pv = { w1 : int; h1 : bool; w2 : int; h2 : bool }  (* h1 (h2): it has a value of p1 (p2), w1 (w2) *)
-type prd = { pp1 : int; byt : pv IM.t; byg : unit PS.t IM.t }
+type prd = { pp1 : int; byt : pv IM.t; byg : unit PT.t  (* (w1, w2, e) *) }
 
 type delta = {
   de : tdelta IM.t;  (* by thing *)
@@ -2358,18 +2358,32 @@ let pair_from v ~p1 ~p2 w1 ~desc ~from (cell : int ref) =
     end
   done;
   let live j = pk.(j) >= 0 && pos.(j) >= r0.(j) && pos.(j) < r1.(j) in
-  (* the delta's pairs of w1 from [from] *)
-  let dseq =
+  (* the delta's pairs of w1 from [from]: ascending, its map's sequence from (w1, from); descending, the greatest key
+     below the last one, a search a step (the delta's pairs of a group are few) *)
+  let dnext =
     match dp with
-    | None -> ref Seq.empty
-    | Some d -> (
-      match IM.find_opt w1 d.byg with
-      | None -> ref Seq.empty
-      | Some s ->
-        if desc then ref (Seq.map fst (Seq.drop_while (fun ((a, _), ()) -> a > from) (PS.to_rev_seq s)))
-        else ref (Seq.map fst (PS.to_seq_from (from, min_int) s)))
+    | None -> fun () -> None
+    | Some d ->
+      if desc then begin
+        let tcmp ((a : int), (b : int), (c : int)) (a', b', c') = if a <> a' then compare a a' else if b <> b' then compare b b' else compare c c' in
+        (* the greatest key at or below (w1, from, max_int), then each time the greatest below the last *)
+        let cur = ref (w1, from, max_int) and first = ref true and fin = ref false in
+        fun () ->
+          if !fin then None
+          else begin
+            let strict = not !first in
+            first := false;
+            match PT.find_last_opt (fun k -> let c = tcmp k !cur in if strict then c < 0 else c <= 0) d.byg with
+            | Some (((a, b, c) as k), ()) when a = w1 -> cur := k; Some (b, c)
+            | _ -> fin := true; None
+          end
+      end
+      else begin
+        let sq = ref (PT.to_seq_from (w1, from, min_int) d.byg) in
+        fun () -> match !sq () with Seq.Cons (((a, b, c), ()), r) when a = w1 -> sq := r; Some (b, c) | _ -> sq := Seq.empty; None
+      end
   in
-  let dhead = ref (match !dseq () with Seq.Cons (x, r) -> dseq := r; Some x | Seq.Nil -> None) in
+  let dhead = ref (dnext ()) in
   let touched e = match dp with Some d -> IM.mem e d.byt | None -> false in
   (* run j's row (w2, e) is the view's: the delta does not decide e, and no newer run retracts it *)
   let shown j w2 e =
@@ -2415,7 +2429,7 @@ let pair_from v ~p1 ~p2 w1 ~desc ~from (cell : int ref) =
       | None -> -1
       | Some (w2, e) ->
         if !src = -1 then begin
-          dhead := (match !dseq () with Seq.Cons (x, r) -> dseq := r; Some x | Seq.Nil -> None);
+          dhead := dnext ();
           cell := w2;
           e
         end
@@ -2426,6 +2440,47 @@ let pair_from v ~p1 ~p2 w1 ~desc ~from (cell : int ref) =
         end
     in
     next
+  end
+
+(* the part and the index of the pair when the view is one run and its delta changed no pair of it: its groups and
+   rows are the view's, read as they are (a reader of every group, as Each) *)
+let pair_part v ~p1 ~p2 =
+  if Array.length v.runs <> 1 then None
+  else
+    match delta_pairs v p1 p2 with
+    | Some d when not (IM.is_empty d.byt) -> None
+    | _ -> let b = v.runs.(0).a in let k = pr_find b p1 p2 in if k < 0 then None else Some (b, k)
+
+(* the ints of a, distinct or not, sorted in place: a radix sort of 11 bits a pass over their range (Knuth, volume 3,
+   5.2.5), the comparisons' when the range passes the ints *)
+let sort_ints (a : int array) =
+  let n = Array.length a in
+  if n > 1 then begin
+    let mn = ref max_int and mx = ref min_int in
+    Array.iter (fun x -> if x < !mn then mn := x; if x > !mx then mx := x) a;
+    let range = !mx - !mn and base = !mn in
+    if range < 0 || n < 64 then Array.sort (fun (x : int) y -> compare x y) a
+    else begin
+      let cnt = Array.make 2048 0 and src = ref a and dst = ref (Array.make n 0) and sh = ref 0 in
+      while range lsr !sh > 0 do
+        Array.fill cnt 0 2048 0;
+        let x = !src and y = !dst and s = !sh in
+        for i = 0 to n - 1 do let d = ((Array.unsafe_get x i - base) lsr s) land 2047 in Array.unsafe_set cnt d (Array.unsafe_get cnt d + 1) done;
+        let t = ref 0 in
+        for d = 0 to 2047 do let c = Array.unsafe_get cnt d in Array.unsafe_set cnt d !t; t := !t + c done;
+        for i = 0 to n - 1 do
+          let v = Array.unsafe_get x i in
+          let d = ((v - base) lsr s) land 2047 in
+          let at = Array.unsafe_get cnt d in
+          Array.unsafe_set cnt d (at + 1);
+          Array.unsafe_set y at v
+        done;
+        src := y;
+        dst := x;
+        sh := s + 11
+      done;
+      if !src != a then Array.blit !src 0 a 0 n
+    end
   end
 
 (* The values w1 of the view's pair (p1, p2) within [lo, hi], sorted: every run's groups and the delta's, each once
@@ -2444,7 +2499,10 @@ let pair_groups v ~p1 ~p2 lo hi =
       end)
     v.runs;
   (match delta_pairs v p1 p2 with
-   | Some d -> parts := Array.of_list (List.filter_map (fun (w, s) -> if PS.is_empty s || w < lo || w > hi then None else Some w) (IM.bindings d.byg)) :: !parts
+   | Some d ->
+     let l = ref [] in
+     PT.iter (fun (w, _, _) () -> if w >= lo && w <= hi && (match !l with x :: _ -> x <> w | [] -> true) then l := w :: !l) d.byg;
+     parts := Array.of_list (List.rev !l) :: !parts
    | None -> ());
   match !parts with
   | [ a ] -> a
@@ -2471,15 +2529,32 @@ let pv_of v e p1 p2 =
   let a = first_value v e p1 and b = first_value v e p2 in
   { w1 = Option.value a ~default:0; h1 = a <> None; w2 = Option.value b ~default:0; h2 = b <> None }
 
-let byg_remove (x : pv) e byg =
-  if not (x.h1 && x.h2) then byg
-  else match IM.find_opt x.w1 byg with
-    | None -> byg
-    | Some s -> let s = PS.remove (x.w2, e) s in if PS.is_empty s then IM.remove x.w1 byg else IM.add x.w1 s byg
+(* the value of (e, p) in the runs, the delta aside (one value: a one-valued property); in [cell], true when there is
+   one: one bit of each run's rank table for a thing they do not hold (a new thing), one field read for a thing one
+   run holds *)
+let runs_one v e p (cell : int array) =
+  let rs = v.runs in
+  let n = Array.length rs in
+  if n = 0 then false
+  else if n = 1 then base_value1 rs.(0).a e p cell = 1
+  else begin
+    let h = holders_p v e p in
+    if h = 0 then false
+    else
+      let one = single h in
+      if one >= 0 then base_value1 rs.(one).a e p cell = 1
+      else match first_value { v with delta = empty_delta } e p with Some w -> cell.(0) <- w; true | None -> false
+  end
 
-let byg_add (x : pv) e byg =
-  if not (x.h1 && x.h2) then byg
-  else IM.add x.w1 (PS.add (x.w2, e) () (Option.value (IM.find_opt x.w1 byg) ~default:PS.empty)) byg
+let pv_runs v e p1 p2 =
+  let cell = [| 0 |] in
+  let h1 = runs_one v e p1 cell in
+  let w1 = cell.(0) in
+  let h2 = runs_one v e p2 cell in
+  { w1; h1; w2 = cell.(0); h2 }
+
+let byg_remove (x : pv) e byg = if not (x.h1 && x.h2) then byg else PT.remove (x.w1, x.w2, e) byg
+let byg_add (x : pv) e byg = if not (x.h1 && x.h2) then byg else PT.add (x.w1, x.w2, e) () byg
 
 (* the delta's pairs of p2 within p1 made from the delta's changes of p1 and p2 (a pair declared while the delta has
    some: once a declaration) *)
@@ -2489,7 +2564,7 @@ let pairs_build v p2 p1 =
     (fun p -> match IM.find_opt p v.delta.dav with Some pd -> VM.iter (fun _ (vd : vdelta) -> IM.iter (fun e _ -> es := IM.add e () !es) vd.vm) pd.pm | None -> ())
     [ p1; p2 ];
   IM.fold (fun e () d -> let x = pv_of v e p1 p2 in { d with byt = IM.add e x d.byt; byg = byg_add x e d.byg }) !es
-    { pp1 = p1; byt = IM.empty; byg = IM.empty }
+    { pp1 = p1; byt = IM.empty; byg = PT.empty }
 
 (* the pair p2 within p1 declared, undeclared or changed in v's schema: its delta's pairs made again *)
 let pairs_reset v p2 =
@@ -2505,7 +2580,8 @@ let[@inline never] pairs_after v e p w add =
         match IM.find_opt p2 !dpr with
         | Some d when d.pp1 = p1 ->
           let old = IM.find_opt e d.byt in
-          let cur = match old with Some c -> c | None -> pv_of v e p1 p2 in
+          (* its values before this change: the delta's, or the runs' for a thing whose pair the delta never changed *)
+          let cur = match old with Some c -> c | None -> pv_runs v e p1 p2 in
           let again () = first_value v e p in
           let nw =
             if p = p1 then (if add then { cur with w1 = w; h1 = true } else if cur.h1 && cur.w1 = w then (match again () with Some x -> { cur with w1 = x } | None -> { cur with h1 = false }) else cur)

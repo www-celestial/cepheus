@@ -1,6 +1,6 @@
 (* The measures beside PostgreSQL and SQLite, drawn from the tables of the book itself (docs/book/benchmarks.md and
    docs/book/server.md), so that a figure says what its table says: bench-windows.svg, bench-pages.svg,
-   bench-server.svg, bench-backup.svg, bench-pg-won.svg. A table that no longer has the rows a figure names stops the program. *)
+   bench-server.svg, bench-backup.svg, bench-pg-won.svg, bench-pairs.svg. A table that no longer has the rows a figure names stops the program. *)
 
 open Draw
 
@@ -278,9 +278,70 @@ let pg_won docs =
              "Le point gris : les binaires de main (af9fb51) ; le point en couleur : maintenant (d96aa73) ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane de 5 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. « Comme le serveur répond » fait les mots d'index de chaque ligne, pas ses valeurs. Temps : docs/book/benchmarks.md.") in
       860, y, tr l "The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question" "Les cas que PostgreSQL gagnait encore : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
 
+(* 6. an index of two properties: each question with main's binaries (a grey dot) and now, the pair declared (a coloured
+   one), on a log scale of PostgreSQL's time over Cepheus's *)
+let pairs docs =
+  let rows = table (Filename.concat docs "book/benchmarks.md") "## An index of two properties" in
+  let want =
+    [ "the 3 latest invoices", "Each, Limit: 3 (LATERAL)", "Each, Limit: 3 (LATERAL)";
+      "the last invoice", "Limit: 1 (DISTINCT ON)", "Limit: 1 (DISTINCT ON)";
+      "the 10 latest invoices", "a client's 10 latest (an index scan)", "les 10 dernières d'un client (index scan)";
+      "the 10 after them", "   the 10 after them (a keyset)", "   les 10 suivantes (un keyset)" ]
+  in
+  if List.length rows <> List.length want then failwith "benchmarks.md, An index of two properties: the table's rows changed";
+  let contains s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
+  let data l =
+    List.map2
+      (fun r (key, en, fr) ->
+        if not (contains (List.hd r) key) then failwith ("benchmarks.md, An index of two properties: no row " ^ key);
+        tr l en fr, get (List.nth r 1), get (List.nth r 2), get (List.nth r 3))
+      rows want
+  in
+  both docs "bench-pairs.svg" (fun l f ->
+      text f ~cls:"h" 16 22 (tr l "An index of two properties, at 1 million facts: main, then the pair declared" "Un index de deux propriétés, à 1 million de faits : main, puis la paire déclarée");
+      let top = 84 and rh = 24 in
+      let cx = 560 and k = 160. in
+      let x r = cx + int_of_float (k *. log10 r) in
+      let rs = data l in
+      let bottom = top + (List.length rs * rh) in
+      text f ~cls:"s sm" 380 (top - 30) ~anchor:"end" (tr l "main → now · PostgreSQL" "main → maintenant · PostgreSQL");
+      text f ~cls:"a sm" (cx + 8) (top - 30) (tr l "Cepheus faster →" "Cepheus plus rapide →");
+      text f ~cls:"sm" (cx - 8) (top - 30) ~anchor:"end" (tr l "← PostgreSQL faster" "← PostgreSQL plus rapide");
+      text f ~cls:"s sm" 742 (top - 30) (tr l "main → now" "main → maintenant");
+      List.iter
+        (fun r ->
+          let xr = x r in
+          line f "grid" xr (top - 16) xr bottom;
+          text f ~cls:"s sm" ~anchor:"middle" xr (top - 6) (nb l (if r < 1. then Printf.sprintf "%g×" (1. /. r) else Printf.sprintf "%g×" r)))
+        [ 0.5; 1.; 2.; 4.; 8. ];
+      line f "axis" cx (top - 16) cx bottom;
+      let side r = if r >= 1.1 then "a" else if r <= 1. /. 1.1 then "s2" else "s" in
+      let times r = Printf.sprintf "%.1f×" (if r >= 1. then r else 1. /. r) in
+      List.iteri
+        (fun i (label, (cm, sm), (cn, sn), (p, sp)) ->
+          let y = top + (i * rh) in
+          let yc = y + 11 in
+          let sub = String.starts_with ~prefix:" " label in
+          text f ~cls:(if sub then "s sm" else "sm") (if sub then 30 else 16) (y + 15) (String.trim label);
+          text f ~cls:"s sm" 380 (y + 15) ~anchor:"end" (nb l (sm ^ " → " ^ sn ^ " · " ^ sp));
+          let rm = p /. cm and rn = p /. cn in
+          let xm = x rm and xn = x rn in
+          if abs (xn - xm) > 16 then arrow f ~cls:"gr" xm yc (if xn > xm then xn - 7 else xn + 7) yc else line f "gr" xm yc xn yc;
+          circle f "bg" xm yc 6;
+          circle f "off" xm yc 4;
+          circle f "bg" xn yc 7;
+          circle f (match side rn with "a" -> "s1" | "s2" -> "s2" | _ -> "off") xn yc 5;
+          spans f ~cls:"sm" 742 (y + 15) [ side rm, nb l (times rm); "s", " → "; side rn ^ " h", nb l (times rn) ])
+        rs;
+      let y = para f ~n:120 16 (bottom + 24)
+          (tr l "The grey dot is main's binaries (ec4bb86, no index of two properties), the coloured one now (invoice/date within invoice/client), on a log scale of PostgreSQL 18.6's time over Cepheus's, PostgreSQL with its index on (client, date DESC, id): the median of 21 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. Times: docs/book/benchmarks.md."
+             "Le point gris : les binaires de main (ec4bb86, sans index de deux propriétés) ; le point en couleur : maintenant (invoice/date within invoice/client) ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus, PostgreSQL avec son index sur (client, date DESC, id) : la médiane de 21 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. Temps : docs/book/benchmarks.md.") in
+      860, y, tr l "An index of two properties: how many times faster each side was with main and is now, question by question" "Un index de deux propriétés : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
+
 let draw docs =
   windows docs;
   pages docs;
   server docs;
   backup docs;
-  pg_won docs
+  pg_won docs;
+  pairs docs
