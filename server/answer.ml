@@ -509,6 +509,7 @@ type prefix = {
   ties : int array;
   places : (string, unit) Hashtbl.t option array;
   tail : Top.acc;
+  mutable cells : int;  (* the places' cells not charged yet *)
 }
 
 let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
@@ -646,7 +647,8 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
             { count = 0;
               sums = Array.map (function Wire.Running ((Sum _ | Avg _), 0) -> Some (Agg.value_sums ()) | _ -> None) windows;
               best = Array.make (Array.length windows) Value.missing; ties = Array.make (Array.length windows) 0;
-              places = Array.map (function Wire.Rank (_, true) -> Some (Hashtbl.create 64) | _ -> None) windows; tail = Top.fresh () }
+              places = Array.map (function Wire.Rank (_, true) -> Some (Hashtbl.create 64) | _ -> None) windows; tail = Top.fresh ();
+              cells = 0 }
           in
           let step st env =
             let row = project env in
@@ -662,7 +664,16 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
                   | Rank _, _ -> (
                     let o = Option.get ranks.(i) in
                     if Top.compare_cursor ~masked v typs o row cur = 0 then st.ties.(i) <- st.ties.(i) + 1;
-                    match st.places.(i) with Some h -> let k = place row o in if not (Hashtbl.mem h k) then Hashtbl.add h k () | None -> ())
+                    match st.places.(i) with
+                    | Some h ->
+                      let k = place row o in
+                      if not (Hashtbl.mem h k) then begin
+                        Hashtbl.add h k ();
+                        (* a place's cells charged as they come, by grains: a dense rank of many places is bounded *)
+                        st.cells <- st.cells + (weight * 4);
+                        match ticket with Some tk when st.cells >= grain -> charge tk st.cells; st.cells <- 0 | _ -> ()
+                      end
+                    | None -> ())
                   | _ -> ())
                 windows;
               if m > 0 then Top.push rev m st.tail row
@@ -683,6 +694,7 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
             Array.iteri (fun i t -> x.ties.(i) <- x.ties.(i) + t) y.ties;
             Array.iteri (fun i h -> match h, y.places.(i) with Some h, Some g -> Hashtbl.iter (fun k () -> Hashtbl.replace h k ()) g | _ -> ()) x.places;
             ignore (Top.append rev m x.tail y.tail);
+            x.cells <- x.cells + y.cells;
             x
           in
           (* the rows before the cursor's first key, when it is a value of an index: a range of it, so that an early
@@ -702,8 +714,8 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           let tail = Array.sub st.tail.a 0 st.tail.n in
           let t = Array.length tail in
           let tail = Array.init t (fun i -> tail.(t - 1 - i)) in
-          let places = Array.fold_left (fun n -> function Some h -> n + Hashtbl.length h | None -> n) 0 st.places in
-          charge_opt ((t * cols) + (4 * places));
+          (match ticket with Some tk when st.cells > 0 -> charge tk st.cells | _ -> ());
+          charge_opt (t * cols);
           let init =
             Array.mapi
               (fun i w ->

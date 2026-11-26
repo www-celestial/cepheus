@@ -325,7 +325,39 @@ let threats () =
       "a Trunc in a Not", [ Question.Ask.Not [ Question.Ask.Trunc (2, 1, "day", "UTC") ] ], Wire.Give [| 1 |];
       "a fraction of 2", [], Wire.Group ([||], [| Wire.Quantile (1, 2., false) |]);
       "a fraction of NaN", [], Wire.Group ([||], [| Wire.Quantile (1, Float.nan, false) |]);
-      "a mean of a link", [], Wire.Group ([||], [| Wire.Avg 0 |]) ]
+      "a mean of a link", [], Wire.Group ([||], [| Wire.Avg 0 |]) ];
+  (* windows and Each (protocol 10): a huge answer, a dense rank of many places after a cursor, Each with a group a row,
+     past the server's cells: too_large, the cells given back; a frame, a Prev, a Rank out of bounds, a window
+     without Sort, Each with After, windows over windows: Query.Bad *)
+  let by = { Question.Top.keys = [ { col = 1; desc = false } ]; limit = 0; after = None } in
+  Answer.max_cells := 10_000;
+  List.iter
+    (fun (what, sel, o) ->
+      match Answer.with_ticket (fun ticket -> Answer.answer ~ticket ~order:o v q sel) with
+      | _ -> C.fail "threats: %s of 20,000 rows within 10,000 cells" what
+      | exception Answer.Too_large _ -> C.check (Atomic.get Answer.pool = 0) "threats: %s too large, its cells given back" what)
+    [ "a running sum", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Running (Sum 1, 0) |]), by;
+      "a dense rank after a cursor", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Rank (1, true) |]), { by with after = Some [| Value.Link max_int; Int 19_999 |]; limit = 5 };
+      "Each a row", Wire.Over (Wire.Give [| 0; 1 |], [| 1 |], [||]), { by with limit = 1 } ];
+  Answer.max_cells := cells;
+  C.check ((Answer.answer ~order:{ by with limit = 1 } v q (Wire.Over (Wire.Give [| 0; 1 |], [| 1 |], [||]))).n = 20_000) "threats: Each in a program's own memory, no bound";
+  List.iter
+    (fun (what, sel, o) ->
+      match Answer.answer ~order:o v q sel with
+      | _ -> C.fail "threats: %s answered" what
+      | exception Query.Bad _ -> C.check true ""
+      | exception e -> C.fail "threats: %s raised %s" what (Printexc.to_string e))
+    [ "a frame of 100,001 rows", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Running (Avg 1, 100_001) |]), by;
+      "a Prev of 0 rows", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Prev (1, 0) |]), by;
+      "a Rank of 2 keys of 1", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Rank (2, false) |]), by;
+      "a window without Sort", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Running (Count, 0) |]), Question.Top.none;
+      "Each with After", Wire.Over (Wire.Give [| 0; 1 |], [| 0 |], [||]), { by with limit = 1; after = Some [| Value.Link 1; Int 1 |] };
+      "Each and nothing", Wire.Over (Wire.Give [| 0; 1 |], [| 0 |], [||]), by;
+      "a running sum of a link", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Running (Sum 0, 0) |]), by;
+      "a running median", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Running (Quantile (1, 0.5, false), 0) |]), by;
+      "a window of no column", Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Prev (7, 1) |]), by;
+      "windows over windows", Wire.Over (Wire.Over (Wire.Give [| 0; 1 |], [||], [||]), [||], [| Wire.Prev (1, 1) |]), by;
+      "Each of an aggregate", Wire.Over (Wire.Group ([| 1 |], [| Wire.Count |]), [| 1 |], [||]), { by with limit = 1 } ]
 
 let () =
   if Array.length Sys.argv = 3 && Sys.argv.(1) = "--postgres" then (compare_postgres Sys.argv.(2); exit 0);
