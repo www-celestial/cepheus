@@ -1,0 +1,230 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="473" viewBox="0 0 860 473">
+<title>A whole sort by the bits of its keys: each row's key, the largest total first then the date, and its digits of 11 bits, sorted by a radix sort</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.w{fill:#ffffff}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.frame{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.2;stroke-dasharray:4 3}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.axis{stroke:#8c959f;stroke-width:1}
+.fa{fill:#3a5ad9}
+.s1{fill:#257de0}
+.s3{fill:#00b894}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.w{fill:#ffffff}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.frame{fill:#1f2a4d;stroke:#8fa8ff}
+.br{stroke:#8fa8ff}
+.axis{stroke:#6e7681}
+.fa{fill:#8fa8ff}
+.s1{fill:#338ced}
+.s3{fill:#00a888}
+}
+</style>
+<rect class="bg" width="860" height="473"/>
+<text class="c" xml:space="preserve" x="16" y="22">Sort: [Desc(t), d]</text>
+<text class="s" x="170" y="22">the invoices of 2028, 11 rows (the engine sorts this way from 4,096)</text>
+<text class="h sm" x="16" y="67">a row's key</text>
+<rect class="s1" x="150" y="50" width="170" height="26" rx="2"/>
+<rect class="s3" x="320" y="50" width="340" height="26" rx="2"/>
+<text class="w sm" x="158" y="67">1,100 − t: 17 bits</text>
+<text class="w sm" x="328" y="67">d − Jan 5, in ms: 34 bits</text>
+<text class="s sm" x="668" y="67">51 bits in one int</text>
+<line class="axis" x1="660" y1="80" x2="660" y2="90"/>
+<text class="s sm" x="605" y="96" text-anchor="middle">digit 0</text>
+<text class="a sm" x="605" y="112" text-anchor="middle">pass 1</text>
+<line class="axis" x1="550" y1="80" x2="550" y2="90"/>
+<text class="s sm" x="495" y="96" text-anchor="middle">digit 1</text>
+<text class="a sm" x="495" y="112" text-anchor="middle">pass 2</text>
+<line class="axis" x1="440" y1="80" x2="440" y2="90"/>
+<text class="s sm" x="385" y="96" text-anchor="middle">digit 2</text>
+<text class="a sm" x="385" y="112" text-anchor="middle">pass 3</text>
+<line class="axis" x1="330" y1="80" x2="330" y2="90"/>
+<text class="s sm" x="275" y="96" text-anchor="middle">digit 3</text>
+<text class="a sm" x="275" y="112" text-anchor="middle">pass 4</text>
+<line class="axis" x1="220" y1="80" x2="220" y2="90"/>
+<line class="axis" x1="150" y1="80" x2="150" y2="90"/>
+<text class="s sm" x="185" y="96" text-anchor="middle">digit 4</text>
+<text class="a sm" x="185" y="112" text-anchor="middle">pass 5</text>
+<text class="h sm" x="16" y="144">as read</text>
+<text class="s sm" x="336" y="128" text-anchor="end">digit</text>
+<text class="h sm" x="336" y="144" text-anchor="end">4</text>
+<text class="s sm" x="382" y="128" text-anchor="end">digit</text>
+<text class="h sm" x="382" y="144" text-anchor="end">3</text>
+<text class="s sm" x="428" y="128" text-anchor="end">digit</text>
+<text class="h sm" x="428" y="144" text-anchor="end">2</text>
+<text class="s sm" x="474" y="128" text-anchor="end">digit</text>
+<text class="h sm" x="474" y="144" text-anchor="end">1</text>
+<text class="s sm" x="520" y="128" text-anchor="end">digit</text>
+<text class="h sm" x="520" y="144" text-anchor="end">0</text>
+<text class="h sm" x="586" y="144">sorted</text>
+<rect class="row" x="16" y="152" width="512" height="19"/>
+<text class="sm" x="22" y="166">Ada Martin</text>
+<text class="sm" x="168" y="166" text-anchor="end">700</text>
+<text class="s sm" x="180" y="166">Jan 5</text>
+<text class="sm" x="336" y="166" text-anchor="end">39</text>
+<text class="sm" x="382" y="166" text-anchor="end">128</text>
+<text class="sm" x="428" y="166" text-anchor="end">0</text>
+<text class="sm" x="474" y="166" text-anchor="end">0</text>
+<text class="a sm" x="520" y="166" text-anchor="end">0</text>
+<rect class="frame" x="16" y="174" width="512" height="19"/>
+<text class="sm" x="22" y="188">Bo Lind</text>
+<text class="sm" x="168" y="188" text-anchor="end">500</text>
+<text class="s sm" x="180" y="188">Jan 20</text>
+<text class="sm" x="336" y="188" text-anchor="end">58</text>
+<text class="sm" x="382" y="188" text-anchor="end">1,216</text>
+<text class="sm" x="428" y="188" text-anchor="end">308</text>
+<text class="sm" x="474" y="188" text-anchor="end">2,028</text>
+<text class="a sm" x="520" y="188" text-anchor="end">1,024</text>
+<rect class="row" x="16" y="196" width="512" height="19"/>
+<text class="sm" x="22" y="210">Cy Moreau</text>
+<text class="sm" x="168" y="210" text-anchor="end">300</text>
+<text class="s sm" x="180" y="210">Feb 3</text>
+<text class="sm" x="336" y="210" text-anchor="end">78</text>
+<text class="sm" x="382" y="210" text-anchor="end">256</text>
+<text class="sm" x="428" y="210" text-anchor="end">597</text>
+<text class="sm" x="474" y="210" text-anchor="end">781</text>
+<text class="a sm" x="520" y="210" text-anchor="end">1,024</text>
+<rect class="frame" x="16" y="218" width="512" height="19"/>
+<text class="sm" x="22" y="232">Ada Martin</text>
+<text class="sm" x="168" y="232" text-anchor="end">500</text>
+<text class="s sm" x="180" y="232">Feb 17</text>
+<text class="sm" x="336" y="232" text-anchor="end">58</text>
+<text class="sm" x="382" y="232" text-anchor="end">1,216</text>
+<text class="sm" x="428" y="232" text-anchor="end">885</text>
+<text class="sm" x="474" y="232" text-anchor="end">1,582</text>
+<text class="a sm" x="520" y="232" text-anchor="end">1,024</text>
+<rect class="row" x="16" y="240" width="512" height="19"/>
+<text class="sm" x="22" y="254">Bo Lind</text>
+<text class="sm" x="168" y="254" text-anchor="end">900</text>
+<text class="s sm" x="180" y="254">Mar 2</text>
+<text class="sm" x="336" y="254" text-anchor="end">19</text>
+<text class="sm" x="382" y="254" text-anchor="end">1,088</text>
+<text class="sm" x="428" y="254" text-anchor="end">1,174</text>
+<text class="sm" x="474" y="254" text-anchor="end">335</text>
+<text class="a sm" x="520" y="254" text-anchor="end">1,024</text>
+<rect class="row" x="16" y="262" width="512" height="19"/>
+<text class="sm" x="22" y="276">Ada Martin</text>
+<text class="sm" x="168" y="276" text-anchor="end">600</text>
+<text class="s sm" x="180" y="276">Mar 15</text>
+<text class="sm" x="336" y="276" text-anchor="end">48</text>
+<text class="sm" x="382" y="276" text-anchor="end">1,696</text>
+<text class="sm" x="428" y="276" text-anchor="end">1,441</text>
+<text class="sm" x="474" y="276" text-anchor="end">1,957</text>
+<text class="a sm" x="520" y="276" text-anchor="end">0</text>
+<rect class="row" x="16" y="284" width="512" height="19"/>
+<text class="sm" x="22" y="298">Cy Moreau</text>
+<text class="sm" x="168" y="298" text-anchor="end">400</text>
+<text class="s sm" x="180" y="298">Apr 8</text>
+<text class="sm" x="336" y="298" text-anchor="end">68</text>
+<text class="sm" x="382" y="298" text-anchor="end">736</text>
+<text class="sm" x="428" y="298" text-anchor="end">1,935</text>
+<text class="sm" x="474" y="298" text-anchor="end">987</text>
+<text class="a sm" x="520" y="298" text-anchor="end">384</text>
+<rect class="frame" x="16" y="306" width="512" height="19"/>
+<text class="sm" x="22" y="320">Bo Lind</text>
+<text class="sm" x="168" y="320" text-anchor="end">500</text>
+<text class="s sm" x="180" y="320">Apr 22</text>
+<text class="sm" x="336" y="320" text-anchor="end">58</text>
+<text class="sm" x="382" y="320" text-anchor="end">1,217</text>
+<text class="sm" x="428" y="320" text-anchor="end">175</text>
+<text class="sm" x="474" y="320" text-anchor="end">1,788</text>
+<text class="a sm" x="520" y="320" text-anchor="end">384</text>
+<rect class="row" x="16" y="328" width="512" height="19"/>
+<text class="sm" x="22" y="342">Ada Martin</text>
+<text class="sm" x="168" y="342" text-anchor="end">1,100</text>
+<text class="s sm" x="180" y="342">May 12</text>
+<text class="sm" x="336" y="342" text-anchor="end">0</text>
+<text class="sm" x="382" y="342" text-anchor="end">1</text>
+<text class="sm" x="428" y="342" text-anchor="end">587</text>
+<text class="sm" x="474" y="342" text-anchor="end">1,762</text>
+<text class="a sm" x="520" y="342" text-anchor="end">384</text>
+<rect class="row" x="16" y="350" width="512" height="19"/>
+<text class="sm" x="22" y="364">Bo Lind</text>
+<text class="sm" x="168" y="364" text-anchor="end">1,000</text>
+<text class="s sm" x="180" y="364">Jun 1</text>
+<text class="sm" x="336" y="364" text-anchor="end">9</text>
+<text class="sm" x="382" y="364" text-anchor="end">1,569</text>
+<text class="sm" x="428" y="364" text-anchor="end">999</text>
+<text class="sm" x="474" y="364" text-anchor="end">1,736</text>
+<text class="a sm" x="520" y="364" text-anchor="end">384</text>
+<rect class="frame" x="16" y="372" width="512" height="19"/>
+<text class="sm" x="22" y="386">Cy Moreau</text>
+<text class="sm" x="168" y="386" text-anchor="end">500</text>
+<text class="s sm" x="180" y="386">Jun 19</text>
+<text class="sm" x="336" y="386" text-anchor="end">58</text>
+<text class="sm" x="382" y="386" text-anchor="end">1,217</text>
+<text class="sm" x="428" y="386" text-anchor="end">1,370</text>
+<text class="sm" x="474" y="386" text-anchor="end">1,303</text>
+<text class="a sm" x="520" y="386" text-anchor="end">384</text>
+<rect class="row" x="580" y="152" width="250" height="19"/>
+<text class="a sm" x="588" y="166">1</text>
+<text class="sm" x="610" y="166">Ada Martin</text>
+<text class="sm" x="750" y="166" text-anchor="end">1,100</text>
+<text class="s sm" x="760" y="166">May 12</text>
+<rect class="row" x="580" y="174" width="250" height="19"/>
+<text class="a sm" x="588" y="188">2</text>
+<text class="sm" x="610" y="188">Bo Lind</text>
+<text class="sm" x="750" y="188" text-anchor="end">1,000</text>
+<text class="s sm" x="760" y="188">Jun 1</text>
+<rect class="row" x="580" y="196" width="250" height="19"/>
+<text class="a sm" x="588" y="210">3</text>
+<text class="sm" x="610" y="210">Bo Lind</text>
+<text class="sm" x="750" y="210" text-anchor="end">900</text>
+<text class="s sm" x="760" y="210">Mar 2</text>
+<rect class="row" x="580" y="218" width="250" height="19"/>
+<text class="a sm" x="588" y="232">4</text>
+<text class="sm" x="610" y="232">Ada Martin</text>
+<text class="sm" x="750" y="232" text-anchor="end">700</text>
+<text class="s sm" x="760" y="232">Jan 5</text>
+<rect class="row" x="580" y="240" width="250" height="19"/>
+<text class="a sm" x="588" y="254">5</text>
+<text class="sm" x="610" y="254">Ada Martin</text>
+<text class="sm" x="750" y="254" text-anchor="end">600</text>
+<text class="s sm" x="760" y="254">Mar 15</text>
+<rect class="frame" x="580" y="262" width="250" height="19"/>
+<text class="a sm" x="588" y="276">6</text>
+<text class="sm" x="610" y="276">Bo Lind</text>
+<text class="sm" x="750" y="276" text-anchor="end">500</text>
+<text class="s sm" x="760" y="276">Jan 20</text>
+<rect class="frame" x="580" y="284" width="250" height="19"/>
+<text class="a sm" x="588" y="298">7</text>
+<text class="sm" x="610" y="298">Ada Martin</text>
+<text class="sm" x="750" y="298" text-anchor="end">500</text>
+<text class="s sm" x="760" y="298">Feb 17</text>
+<rect class="frame" x="580" y="306" width="250" height="19"/>
+<text class="a sm" x="588" y="320">8</text>
+<text class="sm" x="610" y="320">Bo Lind</text>
+<text class="sm" x="750" y="320" text-anchor="end">500</text>
+<text class="s sm" x="760" y="320">Apr 22</text>
+<rect class="frame" x="580" y="328" width="250" height="19"/>
+<text class="a sm" x="588" y="342">9</text>
+<text class="sm" x="610" y="342">Cy Moreau</text>
+<text class="sm" x="750" y="342" text-anchor="end">500</text>
+<text class="s sm" x="760" y="342">Jun 19</text>
+<rect class="row" x="580" y="350" width="250" height="19"/>
+<text class="a sm" x="588" y="364">10</text>
+<text class="sm" x="610" y="364">Cy Moreau</text>
+<text class="sm" x="750" y="364" text-anchor="end">400</text>
+<text class="s sm" x="760" y="364">Apr 8</text>
+<rect class="row" x="580" y="372" width="250" height="19"/>
+<text class="a sm" x="588" y="386">11</text>
+<text class="sm" x="610" y="386">Cy Moreau</text>
+<text class="sm" x="750" y="386" text-anchor="end">300</text>
+<text class="s sm" x="760" y="386">Feb 3</text>
+<line class="br" x1="534" y1="273" x2="568" y2="273"/>
+<polygon class="fa" points="574.0,273.0 566.0,269.0 566.0,277.0"/>
+<text class="s" x="16" y="412">5 passes, each a count of the 11 keys' digit and 11 moves, stable, no comparison: digit 0 first (blue), digit 4 last.</text>
+<text class="s" x="16" y="429">The 4 invoices of 500 (dashed) share their high bits; their dates, in the low bits, order them. The comparisons' sort</text>
+<text class="s" x="16" y="446">gives the same order, row for row.</text>
+</svg>

@@ -71,7 +71,7 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `bench.exe crc` | CRC-32C alone on 24 bytes, 4 KiB, 16 KiB, 1 MiB and 96 MiB from an odd offset: the time of a call and MB/s, median and 95 % interval over `RUNS` runs |
 | `sbench.exe watches DIR` | a change under a watch of `Not`, `Or`, `In` and `Prefix` (one hub each, the changes made in memory), against the question answered again in full: 21 changes each |
 | `rbench.exe load DIR CSVDIR`, `rbench.exe run DIR` | reports: the data (10,000 clients, 245,000 invoices) and its CSV for PostgreSQL; each aggregate over 1, 100 and 10,000 groups and the totals by month (`Trunc`), as the server answers them (`Answer.answer`) |
-| `abench.exe DIR`, `mbench.exe DIR` | the questions of before, for an A/B of two builds on one database, each file compiling against the build before the change: `abench` a Give of a join, groups, a sorted page, `Not`, a range, `Optional` (rbench's data); `mbench` small questions in loops, the fixed cost of a fold (a fold of one fact, `Prefix`, Q3 counted, `Not`, `Optional`, a sorted page, a find of every e-mail, Q4's fold; bench.exe's data) |
+| `abench.exe DIR [PAGES]`, `mbench.exe DIR` | the questions of before, for an A/B of two builds on one database, each file compiling against the build before the change: `abench` a Give of a join, groups, a sorted page, `Not`, a range, `Optional` (rbench's data), and with `PAGES` (bench.exe load's data) the questions of `bench.exe pages` that `Less` and `Optional` answer, as the server answers them (`Answer`: index words, no value made), as `Cepheus.ask` gives them (every row's values) and the join alone (a count); `mbench` small questions in loops, the fixed cost of a fold (a fold of one fact, `Prefix`, Q3 counted, `Not`, `Optional`, a sorted page, a find of every e-mail, Q4's fold; bench.exe's data) |
 | `kbench.exe load DIR N`, `run DIR`, `fork N`, `mixed DIR N`, `csv DIR OUT` | pages of a kind by its things' ids: N items (a name, a tenant, an int) in one run; a page of 51 by id ascending and descending, the first and the one after the middle item, a tenant's likewise, each checked against the ids it must give; on a fork filled in memory; on a fork whose delta holds N things of another kind and one item renamed; the items as CSV for `pg.sh keyset` |
 | `wbench.exe run DIR` | windows (protocol 10) on rbench's data: a running total, a moving mean of 3, a rank by total and the row before, over the 245,000 invoices in one group, each city's (100) and each client's (10,000); the 3 latest invoices of each client and the last one (`Each` and `Limit`); the monthly totals in Paris with their windows (a report); a page of 51 with its running total, the first and the one after the 200,000th row, beside the same pages without windows; `pg.sh windows ROOT index\|run` asks PostgreSQL the same (`OVER`, `LATERAL`, `DISTINCT ON`), with the indexes a user makes for them |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop; `COUNTER=1`: each transaction increments one shared counter row), `ops ROOT` (the questions of `bench.exe pages` that `Less` and `Optional` answer, with an index on `invoice (total)`), `keyset ROOT load\|run DIR` (kbench's pages: `WHERE id > $1 ORDER BY id LIMIT 51` on the primary key, a tenant's on `(tenant, id)`) |
@@ -92,6 +92,97 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## The cases PostgreSQL still won (2026-11-26), at 1 million facts
+
+**Method.** The questions of the sections below where PostgreSQL 18.6 was faster, on their data: `Less` and
+`Optional` on `bench.exe load`'s (11,363 clients, 227,260 invoices, 56,797 follow links; `bench.exe pages` beside
+`pg.sh ops`), the windows and `Each` on rbench's (245,000 invoices; `wbench.exe run` beside `pg.sh windows run`, with
+the indexes of [the windows' section](#windows-and-each-2026-11-26-at-1-million-facts)), the cascades on dbench's
+(`dbench.exe delete` beside `pg.sh fk run`, `ON DELETE CASCADE`). Three sides in each of 5 rounds, their order turned
+at each round: main's binaries (af9fb51), the change's (d96aa73), PostgreSQL; each a median of 5 runs (`Less`,
+`Optional`), 11 (windows) or 21 (deletes). Given: the median of the 5 rounds, in brackets their least and largest; the
+change over main, the median of the rounds' ratios [least, largest]. A load average of 2.5 to 5.9 on the 8 threads
+(other jobs' builds and tests). Where the time went was measured first, phase by phase (a scratch program timing each
+step and counting the words it allocates) and by 200 stack samples of one process under gdb, every 0.1 s.
+
+| question | main | now | now / main | PostgreSQL 18.6 | now |
+|---|---:|---:|---:|---:|---|
+| the follow links to a newer client (`Less(a, b)`), 28,250 rows, every value made | 10.8 ms [7.74, 18.5] | 8.50 ms [6.19, 9.37] | 0.78 [0.51, 1.10] | **3.64 ms** [3.55, 4.02] | PostgreSQL, 2.3 times (3.0 before) |
+| the same as the server answers it (index words, no value made) | 3.96 ms [3.55, 5.04] | 3.70 ms [3.40, 4.28] | 0.93 | 3.64 ms | about the same |
+| the invoices below one invoice's total (`Less`), 122,962 rows, every value made | 31.4 ms [26.1, 36.1] | 21.9 ms [20.1, 26.4] | 0.82 [0.62, 0.82] | **20.0 ms** [18.9, 22.4] | about the same (PostgreSQL 1.1 times; 1.6 before) |
+| the same as the server answers it | 11.8 ms [10.8, 13.9] | **10.5 ms** [10.0, 11.2] | 0.93 | 20.0 ms | Cepheus, 1.9 times |
+| every client with the clients each follows (`Optional`), 56,797 rows, every value made | 16.8 ms [15.8, 17.4] | 15.1 ms [13.9, 17.2] | 0.93 [0.83, 1.00] | **12.1 ms** [11.8, 13.4] | PostgreSQL, 1.2 times (1.4 before) |
+| the same as the server answers it | 9.59 ms [9.12, 11.8] | **10.0 ms** [9.41, 13.9] | 1.04 | 12.1 ms | Cepheus, 1.2 times |
+| a rank by total, `Rank()`, 1 group of 245,000 rows | 213 ms [203, 249] | **96.1 ms** [95.7, 106] | 0.45 [0.38, 0.51] | 181 ms [174, 183] | Cepheus, 1.9 times (PostgreSQL 1.2 before) |
+| the same, 100 groups | 236 ms [229, 271] | **115 ms** [111, 119] | 0.48 [0.42, 0.52] | 361 ms [349, 430] | Cepheus, 3.1 times (1.5 before) |
+| the same, 10,000 groups | 261 ms [254, 312] | **134 ms** [129, 151] | 0.50 [0.42, 0.59] | 244 ms [240, 307] | Cepheus, 1.8 times (about the same before) |
+| the 3 latest invoices of each client, `Each`, `Limit: 3`, 30,000 rows | 137 ms [131, 157] | 106 ms [103, 139] | 0.81 [0.67, 0.98] | `LATERAL`: **53.8 ms** [52.0, 57.0] | PostgreSQL, 2.0 times (2.5 before) |
+| the last invoice of each client, `Limit: 1`, 10,000 rows | 102 ms [101, 125] | **88.8 ms** [74.8, 97.0] | 0.83 [0.62, 0.96] | `DISTINCT ON`: 113 ms [110, 135] | Cepheus, 1.3 times (1.1 before) |
+| an invoice and its 10,000 lines, `cascade` | 30.0 ms [24.8, 32.3] | 21.8 ms [19.8, 24.0] | 0.74 [0.66, 0.89] | **5.18 ms** [5.00, 5.73] | PostgreSQL, 4.2 times (5.8 before) |
+| an invoice and its 100 lines | 215 µs [171, 321] | **148 µs** [128, 250] | 0.75 [0.40, 1.46] | 201 µs [177, 237] | Cepheus, 1.4 times (about the same before) |
+
+The rows "as the server answers it" are `abench.exe DIR PAGES` in the same rounds (`Answer.answer`: each row's index
+words made, not its values, as PostgreSQL's `EXPLAIN (ANALYZE, TIMING OFF)` makes its rows and sends none).
+
+![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, an arrow from the first to the second. The arrows point right, towards Cepheus, but one that moves within the noise (Optional as the server answers it, 9.59 to 10.0 ms). A rank of one group goes from PostgreSQL 1.2 times faster to Cepheus 1.9 times, of 100 and 10,000 groups to Cepheus 3.1 and 1.8 times, the last invoice of each client to Cepheus 1.3 times, a cascade of 100 lines to Cepheus 1.4 times, the Less range with every value to within 10 %; PostgreSQL stays faster on the Less check with every value (2.3 times, from 3.0), Optional with every value (1.2, from 1.4), the 3 latest of each client by LATERAL (2.0, from 2.5) and a cascade of 10,000 lines (4.2, from 5.8).](images/bench-pg-won.svg)
+
+- **A rank, and every whole sort: by the bits of the keys.** A rank of one group spent 144 of its 227 ms in the sort
+  by total, and the samples put about 60 % of the whole in the merge sort's comparisons of rows (`Array.stable_sort`,
+  one call of the comparator for each of n log2 n steps, each move a write barrier). A whole sort of 4,096 rows or
+  more whose first keys are inline words (ints, dates, money, links, booleans: words that keep their values' order)
+  now makes one int of at most 62 bits a row, those words one after the other, each from its column's least, and
+  sorts the rows by it with a least-significant-digit radix sort of 11 bits a pass ([Knuth 1998](references.md#indexes-and-compression),
+  section 5.2.5: n moves a pass and no comparison; [Herf 2001](references.md#indexes-and-compression): every pass's
+  counts in one read, a pass skipped when every key has the same digit there), stable; the rows of a run of equal keys
+  are sorted again by the comparisons when the key did not hold the whole order. The rank's places and a running
+  count are now an int a row, not a value the collector moves. The rank 2.2 times faster; every window's sort by date
+  gains too (a running total of one group 119 to 92.9 ms, by city 229 to 150).
+
+  ![Top, a row's key: 1,100 minus its total in 17 bits, then its date from January 5 in milliseconds in 34 bits, 51 bits in one int, cut into 5 digits of 11 bits, digit 0 on the right sorted first. Left, the 11 invoices of 2028 as read, each with its 5 digits; right, the same invoices sorted, 1,100 first, then 1,000, 900, 700, 600, the four of 500 in the order of their dates, then 400 and 300.](images/sort-radix.svg)
+
+- **`Each` with `Limit`: a binding compared before it is a row.** The 3 latest of each client spent about 115 of its
+  153 ms in the groups' buffers: every invoice made a row, compared with its group's k-th, and each buffer sorted and
+  cut back whenever it reached 2 k rows. Now a
+  binding is compared with its group's k-th row, read from the binding's words, before it is made a row: past it, no
+  allocation; for `Limit` up to 32, each group's buffer is kept in the order, a row put at its place (k comparisons at
+  most) and the rows past the k-th dropped at once, so no group is sorted at the end. **Where PostgreSQL still wins**:
+  its `LATERAL` reads 3 rows a client from its B-tree on `(client, date DESC, id)`, 30,000 rows, where Cepheus reads
+  the 245,000 invoices once (the samples: a quarter of the time reading each invoice's date, `Store.value1`). Only an
+  index of two properties would read as few rows; it is designed, not built (it needs a new run format and a
+  declaration, the owner's calls).
+- **`Less` and `Optional`: rows made from one buffer.** A `Less` check spent 58 % of its time making its rows'
+  values, the join 42 %; the samples of `Optional` over every client, 44 % in minor collections, each of which stops
+  every domain of the process. `Ask`'s bindings are now written into one buffer a domain, where each binding was a new
+  array, and `Cepheus.ask` makes each row's values from the binding with no row of words between, a column's value
+  shared with the row before while its word repeats (the outer variables of a join repeat over the inner ones). As
+  the server answers them (words, no value), Cepheus is as fast as PostgreSQL on the check, and faster on the range
+  and `Optional`. **Where PostgreSQL still wins**: when a program asks for every value, it makes 28,250 or 56,797 rows
+  of OCaml values, each an allocation the collector then scans; PostgreSQL's executor hands on tuples that point into
+  its buffers, and its time leaves out what its client pays to receive them.
+- **A cascade's retractions together.** The 10,000 lines' facts were retracted one fact after the other, each a walk
+  of the writer's persistent maps by thing and by value. They are now gathered, read in the view before any goes,
+  and retracted together by one `Store.set_sorted`, as a group of `Retract` is (a `clear`'s links too: 11.0 to
+  9.75 ms at 10,000 notes): ordered by (property, value, thing) by stable radix sorts of 11 bits when there are 256 or more, and a
+  property the delta holds no value of gets its tree of values built at once from them in order, in O(n), where one
+  addition after the other copied a path each. The cascade of 10,000 lines now costs what retracting its 20,000 facts
+  costs (21.8 against 20.4 ms). **Where PostgreSQL still wins**: it deletes a row by marking its version (`xmax`),
+  touching no index until `VACUUM`, 0.5 µs a line; Cepheus writes each retraction into its delta's maps by thing and
+  by value at once, about 1 µs a fact, so that the next question reads them with no vacuum.
+
+**No slowdown elsewhere** (`abench`, `kbench`, `mbench`, `rbench`, `bench.exe read`, writes, memory, start-up; main's
+binaries and the change's alternated in each round on the same databases): in 5 rounds after the merge of main (a load
+of 3.0 to 11.7), the memory at its peak 0.94 and 1.00 times main's, the start-up 0.99, `kbench`'s pages 0.93 to 0.98,
+`mbench`'s small questions 0.91 to 1.05 and `abench`'s 0.89 to 1.05 (the median of the rounds' ratios). `rbench`'s
+reports, `bench.exe read` and a write of plain groups came out 1.02 to 1.46 in those rounds, two of them while
+programs were being built on the machine: in 11 more rounds, old and new alternated (a load of 4.3 to 9.2), they gave
+0.97 to 1.24, 0.98 to 1.17 and 0.98, no case slower in more rounds than chance gives (a two-sided sign test: p 0.065
+or more), and the questions suspected first (the monthly report, the page after the 200,000th, `Sum` by city, asked in
+another program) allocated the same words on both sides. In 11 last rounds on one domain pinned to one core (`taskset
+-c 2`, `CEPHEUS_DOMAINS=1`, a load of 1.6 to 4.1), where other jobs and the domains' barriers move the times least,
+the reports gave 0.94 to 1.03 (the three cases nearest a sign, p 0.065, faster with the change), `bench.exe read` 0.99
+to 1.03, and the questions suspected first 1.00 to 1.05 (p 0.23 or more): no slowdown beyond the noise of a shared
+machine.
 
 ## Sums checked past 63 bits (2026-11-26), at 1 million facts
 
@@ -131,48 +222,52 @@ indexes a PostgreSQL user makes for these questions (`pg.sh windows index`: `rin
 one group, each city's (100 groups: a join with the clients) and each client's (10,000), as the server answers it
 (`wbench.exe run`: `Answer.answer`, no socket; every row made, as a program asks it) beside PostgreSQL's execution time
 (`EXPLAIN (ANALYZE, TIMING OFF)`, `pg.sh windows run`: every row made, none sent). 5 alternated rounds, each side a
-median of 11 runs; given: the median of the 5 rounds, and in brackets their least and largest. The machine was shared
-with other jobs' builds: a load average (1 minute) of 21.9 at the first round, 4.2 at the last, on its 8 threads, so
-the brackets are wide; both sides ran in each round, one after the other.
+median of 11 runs; given: the median of the 5 rounds, and in brackets their least and largest. The table is the
+measure of [the cases PostgreSQL still won](#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts), made after
+them on the same data and the same PostgreSQL (a load average of 2.5 to 5.9 on the 8 threads, other jobs' builds and
+tests); the first measure of these questions, under a load of 21.9 to 4.2, gave a rank of one group 252 ms against
+PostgreSQL's 216, the 3 latest of each client 131 ms against `LATERAL`'s 55.9 and the last one 151 ms against
+`DISTINCT ON`'s 127.
 
 | question | Cepheus | PostgreSQL 18.6 | |
 |---|---:|---:|---|
-| a running total, `Running(Sum(t))` (`sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING)`), 1 group | **155 ms** [110, 199] | 264 ms [229, 853] | Cepheus, 1.7 times |
-| the same, 100 groups (`PARTITION BY city`) | **358 ms** [234, 481] | 467 ms [344, 1,380] | Cepheus, 1.3 times |
-| the same, 10,000 groups (`PARTITION BY client`) | **170 ms** [161, 815] | 270 ms [267, 753] | Cepheus, 1.6 times |
-| a moving mean of 3, `Running(Avg(t), last = 3)` (`avg(total) OVER (... ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)`), 1 group | **141 ms** [118, 169] | 444 ms [327, 1,240] | Cepheus, 3.2 times |
-| the same, 100 groups | **282 ms** [252, 380] | 467 ms [411, 1,050] | Cepheus, 1.7 times |
-| the same, 10,000 groups | **185 ms** [168, 698] | 351 ms [327, 542] | Cepheus, 1.9 times |
-| a rank by total, `Rank()` (`rank() OVER (ORDER BY total DESC)`), 1 group | 252 ms [217, 321] | **216 ms** [195, 422] | PostgreSQL, 1.2 times |
-| the same, 100 groups | **281 ms** [232, 950] | 373 ms [334, 838] | Cepheus, 1.3 times |
-| the same, 10,000 groups | 260 ms [250, 1,040] | 270 ms [246, 353] | about the same |
-| the date before, `Prev(d)` (`lag(date) OVER (ORDER BY date, id)`), 1 group | **130 ms** [101, 153] | 293 ms [223, 879] | Cepheus, 2.3 times |
-| the same, 100 groups | **241 ms** [209, 842] | 351 ms [339, 1,260] | Cepheus, 1.5 times |
-| the same, 10,000 groups | **124 ms** [122, 516] | 262 ms [247, 641] | Cepheus, 2.1 times |
-| the 3 latest invoices of each client, `Each` and `Limit: 3`, 30,000 rows | 131 ms [126, 766] | `row_number() ... <= 3`: 141 ms [129, 329]; `LATERAL (... LIMIT 3)`: **55.9 ms** [50.8, 126] | PostgreSQL's `LATERAL` with its index, 2.3 times; `row_number()` about the same |
-| the last invoice of each client, `Limit: 1`, 10,000 rows | 151 ms [106, 627] | `DISTINCT ON`: **127 ms** [110, 299] | PostgreSQL, 1.2 times |
-| the monthly totals in Paris with their running total, the month before and the 3-month mean (a report of 121 rows) | **23.9 ms** [22.0, 117] | 188 ms [180, 233] | Cepheus, 7.9 times |
-| a page of 51 after the 200,000th invoice with its running total (`After`; a subquery and a keyset condition outside it) | **76.7 ms** [69.2, 326] | 197 ms [183, 805] | Cepheus, 2.6 times |
-| the first page of 51 with its running total | **97 µs** [89, 170] | 183 µs [165, 539] | Cepheus, 1.9 times |
+| a running total, `Running(Sum(t))` (`sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING)`), 1 group | **92.9 ms** [90.0, 121] | 228 ms [215, 256] | Cepheus, 2.5 times |
+| the same, 100 groups (`PARTITION BY city`) | **150 ms** [142, 163] | 379 ms [361, 413] | Cepheus, 2.5 times |
+| the same, 10,000 groups (`PARTITION BY client`) | **136 ms** [134, 147] | 261 ms [251, 307] | Cepheus, 1.9 times |
+| a moving mean of 3, `Running(Avg(t), last = 3)` (`avg(total) OVER (... ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)`), 1 group | **103 ms** [98.2, 108] | 298 ms [288, 323] | Cepheus, 2.9 times |
+| the same, 100 groups | **168 ms** [165, 181] | 444 ms [420, 560] | Cepheus, 2.6 times |
+| the same, 10,000 groups | **157 ms** [152, 198] | 328 ms [315, 377] | Cepheus, 2.1 times |
+| a rank by total, `Rank()` (`rank() OVER (ORDER BY total DESC)`), 1 group | **96.1 ms** [95.7, 106] | 181 ms [174, 183] | Cepheus, 1.9 times |
+| the same, 100 groups | **115 ms** [111, 119] | 361 ms [349, 430] | Cepheus, 3.1 times |
+| the same, 10,000 groups | **134 ms** [129, 151] | 244 ms [240, 307] | Cepheus, 1.8 times |
+| the date before, `Prev(d)` (`lag(date) OVER (ORDER BY date, id)`), 1 group | **84.5 ms** [82.5, 141] | 201 ms [193, 207] | Cepheus, 2.4 times |
+| the same, 100 groups | **134 ms** [123, 154] | 369 ms [353, 432] | Cepheus, 2.8 times |
+| the same, 10,000 groups | **111 ms** [108, 125] | 250 ms [241, 290] | Cepheus, 2.3 times |
+| the 3 latest invoices of each client, `Each` and `Limit: 3`, 30,000 rows | 106 ms [103, 139] | `row_number() ... <= 3`: 125 ms [122, 147]; `LATERAL (... LIMIT 3)`: **53.8 ms** [52.0, 57.0] | PostgreSQL's `LATERAL` with its index, 2.0 times; Cepheus, 1.2 times `row_number()` |
+| the last invoice of each client, `Limit: 1`, 10,000 rows | **88.8 ms** [74.8, 97.0] | `DISTINCT ON`: 113 ms [110, 135] | Cepheus, 1.3 times |
+| the monthly totals in Paris with their running total, the month before and the 3-month mean (a report of 121 rows) | **24.0 ms** [23.7, 28.3] | 196 ms [182, 239] | Cepheus, 8.2 times |
+| a page of 51 after the 200,000th invoice with its running total (`After`; a subquery and a keyset condition outside it) | **79.6 ms** [63.5, 103] | 195 ms [180, 225] | Cepheus, 2.5 times |
+| the first page of 51 with its running total | **95.1 µs** [79.2, 160] | 201 µs [191, 291] | Cepheus, 2.1 times |
 
-![One bar a question, on a log scale of how many times faster a side is: blue bars to the right where Cepheus is faster, orange to the left where PostgreSQL is. Cepheus is 1.3 to 3.2 times faster on the running totals, the moving means, the row before, a rank of 100 groups and the pages, and 7.9 times on the monthly report; PostgreSQL is faster on a rank of one group (1.2 times), the 3 latest of each client by LATERAL (2.3 times) and the last one by DISTINCT ON (1.2 times); a rank of 10,000 groups is about the same.](images/bench-windows.svg)
+![One bar a question, on a log scale of how many times faster a side is: blue bars to the right where Cepheus is faster, orange to the left where PostgreSQL is. Cepheus is 1.8 to 3.1 times faster on the running totals, the moving means, the ranks, the row before and the pages, 1.3 times on the last invoice of each client against DISTINCT ON, and 8.2 times on the monthly report; PostgreSQL is faster on the 3 latest of each client by LATERAL with its index (2.0 times).](images/bench-windows.svg)
 
-- **A window is one pass.** Cepheus reads the question on its 8 domains, sorts its 245,000 rows once, and each window
+- **A window is one pass.** Cepheus reads the question on its 8 domains, sorts its 245,000 rows once (by a radix sort
+  of their keys' words, [below](#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts)), and each window
   is then one pass over each group (a running sum, a moving mean from exact sums with the leaving row taken out, the
   row before). PostgreSQL reads the rows by date from its index on `(date, id)`, with no sort, and sorts them for the
   other orders (by total, by city or client first), in one process, its `WindowAgg` above; its moving `avg` of a
   `numeric` costs it more than a sum.
-- **Where PostgreSQL wins.** A rank over one group of 245,000 rows, a sort by total on both sides: PostgreSQL's
-  in-memory sort of narrow tuples is a little faster than Cepheus's sort of rows of index words with every other
-  column as tie-break. The 3 latest invoices of each client: with an index on `(client, date)`
+- **Where PostgreSQL wins.** The 3 latest invoices of each client: with an index on `(client, date)`
   PostgreSQL's `LATERAL` reads 3 rows a client from it, 30,000 rows; Cepheus has no index of two properties and reads
-  the 245,000 invoices once, each group keeping its 3 latest, a row past them set aside after one comparison: as fast as
-  PostgreSQL's `row_number()` over the same rows, 2.3 times `LATERAL`'s time. The last invoice of each client likewise,
-  against `DISTINCT ON` (a sort by client).
+  the 245,000 invoices once, each group keeping its 3 latest in order, a binding past them set aside after one
+  comparison before it is made a row: 1.2 times faster than PostgreSQL's `row_number()` over the same rows, 2.0 times
+  `LATERAL`'s time. The last invoice of each client, against `DISTINCT ON` (a sort by client), is now Cepheus's; so
+  is a rank of one group, a sort by total on both sides, since Cepheus's sort reads the bits of the totals' words
+  instead of comparing rows.
 - **Pages.** A page with its running total after the 200,000th row: Cepheus reads the page from the index of the dates
   as a page without windows (0.26 ms here) and the rows before the cursor in one pass, none sorted, for their sum;
   PostgreSQL computes the window over every row in its subquery, then keeps the page. The first page reads 51 rows on
-  both sides: Cepheus's window adds 11 µs to the page's 86 µs.
+  both sides: Cepheus's window adds 7 µs to the page's 88 µs.
 - **No slowdown of the questions of before.** `abench.exe` (a Give of a join, `Sum` and `Count` by city, `Min` and
   `Max` by client, a sorted group, a page, `Not`, a range, `Optional`) and `kbench.exe run` (pages of 51 of 1,000,000
   things by id, a tenant's, ascending and descending), the same files built on main (9cb2274) and on b3, alternated in

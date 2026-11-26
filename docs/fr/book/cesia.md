@@ -587,6 +587,8 @@ et les clés sont triées par un radix sort (un tri par les chiffres de la clé,
 les lignes dont les clés sont égales, quand la clé ne tenait pas tout l'ordre (un texte ou un float après ces clés,
 une colonne coupée à 62 bits), sont triées à nouveau par comparaisons. L'ordre est le même, ligne pour ligne.
 
+![En haut, la clé d'une ligne : 1 100 moins son total en 17 bits, puis sa date depuis le 5 janvier en millisecondes en 34 bits, 51 bits dans un int, coupés en 5 chiffres de 11 bits, le chiffre 0 à droite trié d'abord. À gauche, les 11 factures de 2028 dans l'ordre lu, chacune avec ses 5 chiffres ; à droite, les mêmes factures triées, 1 100 d'abord, puis 1 000, 900, 700, 600, les quatre de 500 dans l'ordre de leurs dates, puis 400 et 300.](images/sort-radix.svg)
+
 `Watch` prend aussi `Sort` et `Limit`, et garde les premières lignes de l'ordre à mesure qu'elles changent
 ([plus bas](#sort-et-limit-dans-un-watch)) ; il refuse `After`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que
 `Where`, `Give`, `Sort`, `Limit` et `After` : un `After` mal écrit donnerait sinon la première page encore et encore

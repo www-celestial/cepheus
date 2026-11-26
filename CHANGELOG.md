@@ -290,6 +290,19 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   things from its first, and `Above`, `Below` and `Between` take a thing's id, where they refused a link
   ([pages](docs/book/cesia.md#sort-limit-and-after-pages),
   [benchmarks](docs/book/benchmarks.md#pages-of-a-kind-by-its-things-ids-2026-11-26-at-10000-to-1000000-things)).
+- **The cases PostgreSQL still won, caught up** (2026-11-26, 1 M facts, 5 rounds alternated with main's binaries and
+  PostgreSQL 18.6): a whole sort of 4,096 rows or more whose first keys are inline words is a radix sort of 11 bits a
+  pass on one 62-bit key of those words (Knuth's 5.2.5, Herf 2001), ties sorted again by the comparisons when the key
+  is cut; `Each` with `Limit` compares a binding with its group's k-th row before making it a row, and keeps each
+  group's buffer in order up to `Limit: 32`; `Ask`'s bindings in one buffer a domain and `Cepheus.ask`'s rows made
+  from them; a cascade's or a clear's retractions gathered and made by one `Store.set_sorted`, itself sorting 256
+  changes or more by radix sorts. A rank of one group 213 to 96.1 ms (PostgreSQL 181: Cepheus now 1.9 times faster,
+  where PostgreSQL was 1.2), of 100 and 10,000 groups 2 times faster; the last invoice of each client 102 to 88.8 ms
+  (`DISTINCT ON` 113); the 3 latest of each 137 to 106 (`LATERAL` with its index 53.8: PostgreSQL still 2.0 times
+  faster, its B-tree on `(client, date)` reading 3 rows a client, Cepheus every invoice); `Less` 10.8 to 8.50 and 31.4
+  to 21.9 ms, `Optional` 16.8 to 15.1 with every value made (PostgreSQL 3.64, 20.0 and 12.1; as the server answers them
+  3.70, 10.5 and 10.0); a cascade of 10,000 lines 30.0 to 21.8 ms (PostgreSQL still 4.2 times faster: it marks a row
+  deleted and touches its indexes at `VACUUM`) ([benchmarks](docs/book/benchmarks.md#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts)).
 
 ### Fixes
 

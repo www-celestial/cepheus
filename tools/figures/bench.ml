@@ -1,6 +1,6 @@
 (* The measures beside PostgreSQL and SQLite, drawn from the tables of the book itself (docs/book/benchmarks.md and
    docs/book/server.md), so that a figure says what its table says: bench-windows.svg, bench-pages.svg,
-   bench-server.svg, bench-backup.svg. A table that no longer has the rows a figure names stops the program. *)
+   bench-server.svg, bench-backup.svg, bench-pg-won.svg. A table that no longer has the rows a figure names stops the program. *)
 
 open Draw
 
@@ -206,8 +206,81 @@ let backup docs =
              "Chaque ligne à sa propre échelle, la plus courte en gras. Tout l'historique rejoué est le même travail des deux côtés ; SQLite ne garde pas d'historique. Temps : docs/book/benchmarks.md.") in
       712, yb, tr l "Backup and restore beside PostgreSQL and SQLite: sizes and times at 10 million facts" "Sauvegarde et restauration à côté de PostgreSQL et SQLite : tailles et temps à 10 millions de faits")
 
+(* 5. the cases PostgreSQL still won: each question's ratio with main's binaries (a grey dot) and now (a coloured one),
+   on a log scale of PostgreSQL's time over Cepheus's *)
+let pg_won docs =
+  let rows = table (Filename.concat docs "book/benchmarks.md") "## The cases PostgreSQL still won" in
+  let want =
+    [ "Less(a, b)", "Less(a, b), every value", "Less(a, b), chaque valeur";
+      "the same as the server", "   as the server answers", "   comme le serveur répond";
+      "below one invoice's total", "Less, a range, every value", "Less, un intervalle, chaque valeur";
+      "the same as the server", "   as the server answers", "   comme le serveur répond";
+      "(`Optional`)", "Optional, every value", "Optional, chaque valeur";
+      "the same as the server", "   as the server answers", "   comme le serveur répond";
+      "`Rank()`, 1 group", "Rank(), 1 group", "Rank(), 1 groupe";
+      "the same, 100 groups", "Rank(), 100 groups", "Rank(), 100 groupes";
+      "the same, 10,000 groups", "Rank(), 10,000 groups", "Rank(), 10 000 groupes";
+      "the 3 latest", "Each, Limit: 3 (LATERAL)", "Each, Limit: 3 (LATERAL)";
+      "the last invoice", "Limit: 1 (DISTINCT ON)", "Limit: 1 (DISTINCT ON)";
+      "an invoice and its 10,000 lines", "cascade, 10,000 lines", "cascade, 10 000 lignes";
+      "an invoice and its 100 lines", "cascade, 100 lines", "cascade, 100 lignes" ]
+  in
+  if List.length rows <> List.length want then failwith "benchmarks.md, The cases PostgreSQL still won: the table's rows changed";
+  let contains s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
+  let data l =
+    List.map2
+      (fun r (key, en, fr) ->
+        if not (contains (List.hd r) key) then failwith ("benchmarks.md, The cases PostgreSQL still won: no row " ^ key);
+        tr l en fr, get (List.nth r 1), get (List.nth r 2), get (List.nth r 4))
+      rows want
+  in
+  both docs "bench-pg-won.svg" (fun l f ->
+      text f ~cls:"h" 16 22 (tr l "The cases PostgreSQL still won, at 1 million facts: main, then now" "Les cas que PostgreSQL gagnait encore, à 1 million de faits : main, puis maintenant");
+      let top = 84 and rh = 24 in
+      let cx = 598 and k = 219. in
+      let x r = cx + int_of_float (k *. log10 r) in
+      let rs = data l in
+      let bottom = top + (List.length rs * rh) in
+      text f ~cls:"s sm" 380 (top - 30) ~anchor:"end" (tr l "main → now · PostgreSQL" "main → maintenant · PostgreSQL");
+      text f ~cls:"a sm" (cx + 8) (top - 30) (tr l "Cepheus faster →" "Cepheus plus rapide →");
+      text f ~cls:"sm" (cx - 8) (top - 30) ~anchor:"end" (tr l "← PostgreSQL faster" "← PostgreSQL plus rapide");
+      text f ~cls:"s sm" 742 (top - 30) (tr l "main → now" "main → maintenant");
+      List.iter
+        (fun r ->
+          let xr = x r in
+          line f "grid" xr (top - 16) xr bottom;
+          text f ~cls:"s sm" ~anchor:"middle" xr (top - 6) (nb l (if r < 1. then Printf.sprintf "%g×" (1. /. r) else Printf.sprintf "%g×" r)))
+        [ 0.125; 0.25; 0.5; 1.; 2.; 4. ];
+      line f "axis" cx (top - 16) cx bottom;
+      let side r = if r >= 1.1 then "a" else if r <= 1. /. 1.1 then "s2" else "s" in
+      let times r = Printf.sprintf "%.1f×" (if r >= 1. then r else 1. /. r) in
+      List.iteri
+        (fun i (label, (cm, sm), (cn, sn), (p, sp)) ->
+          let y = top + (i * rh) in
+          let yc = y + 11 in
+          let sub = String.starts_with ~prefix:" " label in
+          text f ~cls:(if sub then "s sm" else "sm") (if sub then 30 else 16) (y + 15) (String.trim label);
+          let num s = match String.index_opt s ' ' with Some i -> String.sub s 0 i | None -> s in
+          let unit s = match String.index_opt s ' ' with Some i -> String.sub s (i + 1) (String.length s - i - 1) | None -> "" in
+          let before = if unit sm = unit sn then num sm else sm in
+          text f ~cls:"s sm" 380 (y + 15) ~anchor:"end" (nb l (before ^ " → " ^ sn ^ " · " ^ sp));
+          let rm = p /. cm and rn = p /. cn in
+          let xm = x rm and xn = x rn in
+          if abs (xn - xm) > 16 then arrow f ~cls:"gr" xm yc (if xn > xm then xn - 7 else xn + 7) yc else line f "gr" xm yc xn yc;
+          circle f "bg" xm yc 6;
+          circle f "off" xm yc 4;
+          circle f "bg" xn yc 7;
+          circle f (match side rn with "a" -> "s1" | "s2" -> "s2" | _ -> "off") xn yc 5;
+          spans f ~cls:"sm" 742 (y + 15) [ side rm, nb l (times rm); "s", " → "; side rn ^ " h", nb l (times rn) ])
+        rs;
+      let y = para f ~n:120 16 (bottom + 24)
+          (tr l "The grey dot is main's binaries (af9fb51), the coloured one now (d96aa73), on a log scale of PostgreSQL 18.6's time over Cepheus's: the median of 5 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. \"As the server answers\" makes each row's index words, not its values. Times: docs/book/benchmarks.md."
+             "Le point gris est les binaires de main (af9fb51), le point en couleur maintenant (d96aa73), sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane de 5 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. « Comme le serveur répond » fait les mots d'index de chaque ligne, pas ses valeurs. Temps : docs/book/benchmarks.md.") in
+      840, y, tr l "The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question" "Les cas que PostgreSQL gagnait encore : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
+
 let draw docs =
   windows docs;
   pages docs;
   server docs;
-  backup docs
+  backup docs;
+  pg_won docs

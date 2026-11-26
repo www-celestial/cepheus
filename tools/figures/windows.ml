@@ -1,6 +1,7 @@
 (* The figures of the windows (cesia.md, tutorials 13 and 14), drawn from the answers the engine gives on the rows of
    the tutorials, so that every number in them is the engine's: windows-running.svg, windows-each.svg,
-   windows-rank.svg. *)
+   windows-rank.svg; and sort-radix.svg, the invoices of tutorial 14 sorted by the engine's whole sort by the bits of
+   its keys (Top.sort_radix), checked against the comparisons' order. *)
 
 open Cepheus
 open Cepheus_server
@@ -165,3 +166,86 @@ let draw docs =
         (tr l "one by one, Ada before Bo since Sort then orders by every other field (the client's name)."
            "une à une, Ada avant Bo puisque Sort ordonne ensuite par chaque autre champ (le nom du client).");
       (match l with En -> 800 | Fr -> 840), yl + 32, tr l "A leaderboard with a tie: Rank, Rank(dense = true) and Running(Count())" "Un classement avec une égalité : Rank, Rank(dense = true) et Running(Count())")
+  ;
+  (* 4. a whole sort by the bits of its keys: the invoices of 2028 sorted by Top.sort_radix, Sort: [Desc(t), d]; each
+     row's key and its digits of 11 bits as the engine makes them *)
+  let words = Array.of_list (List.mapi (fun i (_, t, d) -> [| t * 100; d * 1000; i |]) half) in
+  let n = Array.length words in
+  let ord = [| { Question.Top.col = 0; desc = true }; { col = 1; desc = false } |] in
+  let cmp (x : int array) (y : int array) = match compare y.(0) x.(0) with 0 -> (match compare x.(1) y.(1) with 0 -> compare x.(2) y.(2) | c -> c) | c -> c in
+  let sorted = Array.copy words in
+  if not (Question.Top.sort_radix [| Value.Tmoney 2; Value.Tdate; Value.Tint |] ord cmp sorted n) then failwith "sort-radix.svg: no radix sort";
+  let by_cmp = Array.copy words in
+  Array.stable_sort cmp by_cmp;
+  if sorted <> by_cmp then failwith "sort-radix.svg: the radix sort's order is not the comparisons'";
+  let col j = Array.map (fun r -> r.(j)) words in
+  let lo_t = Array.fold_left min max_int (col 0) and hi_t = Array.fold_left max min_int (col 0) in
+  let lo_d = Array.fold_left min max_int (col 1) and hi_d = Array.fold_left max min_int (col 1) in
+  let bt = Question.Top.bits_of (hi_t - lo_t) and bd = Question.Top.bits_of (hi_d - lo_d) in
+  let db = Question.Top.digit_bits in
+  let key r = ((hi_t - r.(0)) lsl bd) lor (r.(1) - lo_d) in
+  let passes = (bt + bd + db - 1) / db in
+  let digit k d = (k lsr (d * db)) land ((1 lsl db) - 1) in
+  let who r = let c, _, _ = List.nth half r.(2) in c in
+  both docs "sort-radix.svg" (fun l f ->
+      code f 16 22 "Sort: [Desc(t), d]";
+      text f ~cls:"s" 170 22 (Printf.sprintf (trf l "the invoices of 2028, %d rows (the engine sorts this way from 4,096)" "les factures de 2028, %d lignes (le moteur trie ainsi dès 4 096)") n);
+      (* the key: 10 px a bit, bit 0 on the right *)
+      let bits = bt + bd in
+      let x0 = 150 and px = 10 and yb = 50 in
+      let xe = x0 + (bits * px) in
+      text f ~cls:"h sm" 16 (yb + 17) (tr l "a row's key" "la clé d'une ligne");
+      rect f ~r:2 "s1" x0 yb (bt * px) 26;
+      rect f ~r:2 "s3" (x0 + (bt * px)) yb (bd * px) 26;
+      text f ~cls:"w sm" (x0 + 8) (yb + 17) (Printf.sprintf (trf l "%s − t: %d bits" "%s − t : %d bits") (money l (Value.Money hi_t)) bt);
+      text f ~cls:"w sm" (x0 + (bt * px) + 8) (yb + 17) (Printf.sprintf (trf l "d − %s, in ms: %d bits" "d − %s, en ms : %d bits") (day_of l (Value.Date lo_d)) bd);
+      text f ~cls:"s sm" (xe + 8) (yb + 17) (Printf.sprintf (trf l "%d bits in one int" "%d bits dans un int") bits);
+      for d = 0 to passes - 1 do
+        let xr = xe - (d * db * px) and xl = max x0 (xe - ((d + 1) * db * px)) in
+        line f "axis" xr (yb + 30) xr (yb + 40);
+        if d = passes - 1 then line f "axis" xl (yb + 30) xl (yb + 40);
+        text f ~cls:"s sm" ~anchor:"middle" ((xl + xr) / 2) (yb + 46) (Printf.sprintf (trf l "digit %d" "chiffre %d") d);
+        text f ~cls:"a sm" ~anchor:"middle" ((xl + xr) / 2) (yb + 62) (Printf.sprintf (trf l "pass %d" "passe %d") (d + 1))
+      done;
+      (* the rows as read, their keys' digits; the rows sorted *)
+      let top = 152 and rh = 22 in
+      let dx d = 300 + ((passes - 1 - d) * 46) in
+      text f ~cls:"h sm" 16 (top - 8) (tr l "as read" "dans l'ordre lu");
+      for d = passes - 1 downto 0 do
+        text f ~cls:"s sm" ~anchor:"end" (dx d + 36) (top - 24) (tr l "digit" "chiffre");
+        text f ~cls:"h sm" ~anchor:"end" (dx d + 36) (top - 8) (string_of_int d)
+      done;
+      text f ~cls:"h sm" 586 (top - 8) (tr l "sorted" "triées");
+      Array.iteri
+        (fun i r ->
+          let y = top + (i * rh) in
+          rect f (if r.(0) = 50000 then "frame" else "row") 16 y 512 (rh - 3);
+          text f ~cls:"sm" 22 (y + 14) (who r);
+          text f ~cls:"sm" ~anchor:"end" 168 (y + 14) (money l (Value.Money r.(0)));
+          text f ~cls:"s sm" 180 (y + 14) (day_of l (Value.Date r.(1)));
+          let k = key r in
+          for d = passes - 1 downto 0 do text f ~cls:(if d = 0 then "a sm" else "sm") ~anchor:"end" (dx d + 36) (y + 14) (nb l (thousands (digit k d))) done)
+        words;
+      Array.iteri
+        (fun i r ->
+          let y = top + (i * rh) in
+          rect f (if r.(0) = 50000 then "frame" else "row") 580 y 250 (rh - 3);
+          text f ~cls:"a sm" 588 (y + 14) (string_of_int (i + 1));
+          text f ~cls:"sm" 610 (y + 14) (who r);
+          text f ~cls:"sm" ~anchor:"end" 750 (y + 14) (money l (Value.Money r.(0)));
+          text f ~cls:"s sm" 760 (y + 14) (day_of l (Value.Date r.(1))))
+        sorted;
+      let ym = top + (n * rh / 2) in
+      arrow f ~cls:"br" 534 ym 574 ym;
+      let ties = List.length (List.filter (fun (_, t, _) -> t = 500) half) in
+      let yl = top + (n * rh) + 18 in
+      let yl =
+        para f ~n:118 16 yl
+          (Printf.sprintf
+             (trf l "%d passes, each a count of the %d keys' digit and %d moves, stable, no comparison: digit 0 first (blue), digit %d last. The %d invoices of %s (dashed) share their high bits; their dates, in the low bits, order them. The comparisons' sort gives the same order, row for row."
+                "%d passes, chacune un compte du chiffre des %d clés et %d déplacements, stable, sans comparaison : le chiffre 0 d'abord (en bleu), le chiffre %d en dernier. Les %d factures de %s (en pointillés) partagent leurs bits hauts ; leurs dates, dans les bits bas, les ordonnent. Le tri par comparaisons donne le même ordre, ligne pour ligne.")
+             passes n n (passes - 1) ties (money l (Value.Money 50000)))
+      in
+      860, yl + 10,
+      tr l "A whole sort by the bits of its keys: each row's key, the largest total first then the date, and its digits of 11 bits, sorted by a radix sort"
+        "Un tri entier par les bits de ses clés : la clé de chaque ligne, le plus grand total d'abord puis la date, et ses chiffres de 11 bits, triés par un radix sort")

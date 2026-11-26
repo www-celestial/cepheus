@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="488" viewBox="0 0 840 488">
+<title>The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.off{fill:#8c959f}
+.bg{fill:#ffffff}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.grid{stroke:#eaeef2;stroke-width:1}
+.axis{stroke:#8c959f;stroke-width:1}
+.fs{fill:#57606a}
+.s1{fill:#257de0}
+.s2{fill:#f47230}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.gr{stroke:#9198a1}
+.grid{stroke:#262c36}
+.axis{stroke:#6e7681}
+.fs{fill:#9198a1}
+.s1{fill:#338ced}
+.s2{fill:#e76624}
+}
+</style>
+<rect class="bg" width="840" height="488"/>
+<text class="h" x="16" y="22">The cases PostgreSQL still won, at 1 million facts: main, then now</text>
+<text class="s sm" x="380" y="54" text-anchor="end">main → now · PostgreSQL</text>
+<text class="a sm" x="606" y="54">Cepheus faster →</text>
+<text class="sm" x="590" y="54" text-anchor="end">← PostgreSQL faster</text>
+<text class="s sm" x="742" y="54">main → now</text>
+<line class="grid" x1="401" y1="68" x2="401" y2="396"/>
+<text class="s sm" x="401" y="78" text-anchor="middle">8×</text>
+<line class="grid" x1="467" y1="68" x2="467" y2="396"/>
+<text class="s sm" x="467" y="78" text-anchor="middle">4×</text>
+<line class="grid" x1="533" y1="68" x2="533" y2="396"/>
+<text class="s sm" x="533" y="78" text-anchor="middle">2×</text>
+<line class="grid" x1="598" y1="68" x2="598" y2="396"/>
+<text class="s sm" x="598" y="78" text-anchor="middle">1×</text>
+<line class="grid" x1="663" y1="68" x2="663" y2="396"/>
+<text class="s sm" x="663" y="78" text-anchor="middle">2×</text>
+<line class="grid" x1="729" y1="68" x2="729" y2="396"/>
+<text class="s sm" x="729" y="78" text-anchor="middle">4×</text>
+<line class="axis" x1="598" y1="68" x2="598" y2="396"/>
+<text class="sm" x="16" y="99">Less(a, b), every value</text>
+<text class="s sm" x="380" y="99" text-anchor="end">10.8 → 8.50 ms · 3.64 ms</text>
+<line class="gr" x1="495" y1="95" x2="505" y2="95"/>
+<polygon class="fs" points="511.0,95.0 503.0,91.0 503.0,99.0"/>
+<circle class="bg" cx="495" cy="95" r="6"/>
+<circle class="off" cx="495" cy="95" r="4"/>
+<circle class="bg" cx="518" cy="95" r="7"/>
+<circle class="s2" cx="518" cy="95" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="99"><tspan class="s2">3.0×</tspan><tspan class="s"> → </tspan><tspan class="s2 h">2.3×</tspan></text>
+<text class="s sm" x="30" y="123">as the server answers</text>
+<text class="s sm" x="380" y="123" text-anchor="end">3.96 → 3.70 ms · 3.64 ms</text>
+<line class="gr" x1="590" y1="119" x2="597" y2="119"/>
+<circle class="bg" cx="590" cy="119" r="6"/>
+<circle class="off" cx="590" cy="119" r="4"/>
+<circle class="bg" cx="597" cy="119" r="7"/>
+<circle class="off" cx="597" cy="119" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="123"><tspan class="s">1.1×</tspan><tspan class="s"> → </tspan><tspan class="s h">1.0×</tspan></text>
+<text class="sm" x="16" y="147">Less, a range, every value</text>
+<text class="s sm" x="380" y="147" text-anchor="end">31.4 → 21.9 ms · 20.0 ms</text>
+<line class="gr" x1="556" y1="143" x2="577" y2="143"/>
+<polygon class="fs" points="583.0,143.0 575.0,139.0 575.0,147.0"/>
+<circle class="bg" cx="556" cy="143" r="6"/>
+<circle class="off" cx="556" cy="143" r="4"/>
+<circle class="bg" cx="590" cy="143" r="7"/>
+<circle class="off" cx="590" cy="143" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="147"><tspan class="s2">1.6×</tspan><tspan class="s"> → </tspan><tspan class="s h">1.1×</tspan></text>
+<text class="s sm" x="30" y="171">as the server answers</text>
+<text class="s sm" x="380" y="171" text-anchor="end">11.8 → 10.5 ms · 20.0 ms</text>
+<line class="gr" x1="648" y1="167" x2="659" y2="167"/>
+<circle class="bg" cx="648" cy="167" r="6"/>
+<circle class="off" cx="648" cy="167" r="4"/>
+<circle class="bg" cx="659" cy="167" r="7"/>
+<circle class="s1" cx="659" cy="167" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="171"><tspan class="a">1.7×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.9×</tspan></text>
+<text class="sm" x="16" y="195">Optional, every value</text>
+<text class="s sm" x="380" y="195" text-anchor="end">16.8 → 15.1 ms · 12.1 ms</text>
+<line class="gr" x1="567" y1="191" x2="577" y2="191"/>
+<circle class="bg" cx="567" cy="191" r="6"/>
+<circle class="off" cx="567" cy="191" r="4"/>
+<circle class="bg" cx="577" cy="191" r="7"/>
+<circle class="s2" cx="577" cy="191" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="195"><tspan class="s2">1.4×</tspan><tspan class="s"> → </tspan><tspan class="s2 h">1.2×</tspan></text>
+<text class="s sm" x="30" y="219">as the server answers</text>
+<text class="s sm" x="380" y="219" text-anchor="end">9.59 → 10.0 ms · 12.1 ms</text>
+<line class="gr" x1="620" y1="215" x2="616" y2="215"/>
+<circle class="bg" cx="620" cy="215" r="6"/>
+<circle class="off" cx="620" cy="215" r="4"/>
+<circle class="bg" cx="616" cy="215" r="7"/>
+<circle class="s1" cx="616" cy="215" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="219"><tspan class="a">1.3×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.2×</tspan></text>
+<text class="sm" x="16" y="243">Rank(), 1 group</text>
+<text class="s sm" x="380" y="243" text-anchor="end">213 → 96.1 ms · 181 ms</text>
+<line class="gr" x1="583" y1="239" x2="645" y2="239"/>
+<polygon class="fs" points="651.0,239.0 643.0,235.0 643.0,243.0"/>
+<circle class="bg" cx="583" cy="239" r="6"/>
+<circle class="off" cx="583" cy="239" r="4"/>
+<circle class="bg" cx="658" cy="239" r="7"/>
+<circle class="s1" cx="658" cy="239" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="243"><tspan class="s2">1.2×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.9×</tspan></text>
+<text class="sm" x="16" y="267">Rank(), 100 groups</text>
+<text class="s sm" x="380" y="267" text-anchor="end">236 → 115 ms · 361 ms</text>
+<line class="gr" x1="638" y1="263" x2="693" y2="263"/>
+<polygon class="fs" points="699.0,263.0 691.0,259.0 691.0,267.0"/>
+<circle class="bg" cx="638" cy="263" r="6"/>
+<circle class="off" cx="638" cy="263" r="4"/>
+<circle class="bg" cx="706" cy="263" r="7"/>
+<circle class="s1" cx="706" cy="263" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="267"><tspan class="a">1.5×</tspan><tspan class="s"> → </tspan><tspan class="a h">3.1×</tspan></text>
+<text class="sm" x="16" y="291">Rank(), 10,000 groups</text>
+<text class="s sm" x="380" y="291" text-anchor="end">261 → 134 ms · 244 ms</text>
+<line class="gr" x1="592" y1="287" x2="642" y2="287"/>
+<polygon class="fs" points="648.0,287.0 640.0,283.0 640.0,291.0"/>
+<circle class="bg" cx="592" cy="287" r="6"/>
+<circle class="off" cx="592" cy="287" r="4"/>
+<circle class="bg" cx="655" cy="287" r="7"/>
+<circle class="s1" cx="655" cy="287" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="291"><tspan class="s">1.1×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.8×</tspan></text>
+<text class="sm" x="16" y="315">Each, Limit: 3 (LATERAL)</text>
+<text class="s sm" x="380" y="315" text-anchor="end">137 → 106 ms · 53.8 ms</text>
+<line class="gr" x1="510" y1="311" x2="521" y2="311"/>
+<polygon class="fs" points="527.0,311.0 519.0,307.0 519.0,315.0"/>
+<circle class="bg" cx="510" cy="311" r="6"/>
+<circle class="off" cx="510" cy="311" r="4"/>
+<circle class="bg" cx="534" cy="311" r="7"/>
+<circle class="s2" cx="534" cy="311" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="315"><tspan class="s2">2.5×</tspan><tspan class="s"> → </tspan><tspan class="s2 h">2.0×</tspan></text>
+<text class="sm" x="16" y="339">Limit: 1 (DISTINCT ON)</text>
+<text class="s sm" x="380" y="339" text-anchor="end">102 → 88.8 ms · 113 ms</text>
+<line class="gr" x1="607" y1="335" x2="620" y2="335"/>
+<circle class="bg" cx="607" cy="335" r="6"/>
+<circle class="off" cx="607" cy="335" r="4"/>
+<circle class="bg" cx="620" cy="335" r="7"/>
+<circle class="s1" cx="620" cy="335" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="339"><tspan class="a">1.1×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.3×</tspan></text>
+<text class="sm" x="16" y="363">cascade, 10,000 lines</text>
+<text class="s sm" x="380" y="363" text-anchor="end">30.0 → 21.8 ms · 5.18 ms</text>
+<line class="gr" x1="431" y1="359" x2="449" y2="359"/>
+<polygon class="fs" points="455.0,359.0 447.0,355.0 447.0,363.0"/>
+<circle class="bg" cx="431" cy="359" r="6"/>
+<circle class="off" cx="431" cy="359" r="4"/>
+<circle class="bg" cx="462" cy="359" r="7"/>
+<circle class="s2" cx="462" cy="359" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="363"><tspan class="s2">5.8×</tspan><tspan class="s"> → </tspan><tspan class="s2 h">4.2×</tspan></text>
+<text class="sm" x="16" y="387">cascade, 100 lines</text>
+<text class="s sm" x="380" y="387" text-anchor="end">215 → 148 µs · 201 µs</text>
+<line class="gr" x1="592" y1="383" x2="614" y2="383"/>
+<polygon class="fs" points="620.0,383.0 612.0,379.0 612.0,387.0"/>
+<circle class="bg" cx="592" cy="383" r="6"/>
+<circle class="off" cx="592" cy="383" r="4"/>
+<circle class="bg" cx="627" cy="383" r="7"/>
+<circle class="s1" cx="627" cy="383" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="387"><tspan class="s">1.1×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.4×</tspan></text>
+<text class="s" x="16" y="420">The grey dot is main's binaries (af9fb51), the coloured one now (d96aa73), on a log scale of PostgreSQL 18.6's time over</text>
+<text class="s" x="16" y="437">Cepheus's: the median of 5 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange,</text>
+<text class="s" x="16" y="454">PostgreSQL; in grey, within 10 %. "As the server answers" makes each row's index words, not its values. Times:</text>
+<text class="s" x="16" y="471">docs/book/benchmarks.md.</text>
+</svg>

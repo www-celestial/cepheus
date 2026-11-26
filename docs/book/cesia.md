@@ -546,6 +546,8 @@ digit there: [Knuth 1998](references.md#indexes-and-compression), section 5.2.5,
 hold the whole order (a text or a float after those keys, a column cut at 62 bits), are sorted again by comparisons.
 The order is the same, row for row.
 
+![Top, a row's key: 1,100 minus its total in 17 bits, then its date from January 5 in milliseconds in 34 bits, 51 bits in one int, cut into 5 digits of 11 bits, digit 0 on the right sorted first. Left, the 11 invoices of 2028 as read, each with its 5 digits; right, the same invoices sorted, 1,100 first, then 1,000, 900, 700, 600, the four of 500 in the order of their dates, then 400 and 300.](images/sort-radix.svg)
+
 `Watch` takes `Sort` and `Limit` too, and keeps the first rows of the order as they change
 ([below](#sort-and-limit-in-a-watch)); it refuses `After`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
 `Give`, `Sort`, `Limit` and `After`: a misspelt `After` would otherwise give the first page again and again (a
