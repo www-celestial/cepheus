@@ -480,6 +480,18 @@ let past () =
   C.check (ask ~order:desc v q (running 0) = Error "Running's Sum of sale/amount passed the 63 bits of an Int: sum fewer rows (last = n)") "past: a running sum names its field: %s" (show (ask ~order:desc v q (running 0)));
   C.check (Result.is_error (ask ~order:desc v q (running 2))) "past: a frame of 2 rows past 63 bits";
   C.check (ask ~order:{ desc with limit = 1 } v q (running 0) |> Result.is_ok) "past: the first row alone, given";
+  (* past 2^63: three of the largest, refused; a frame of 2 over the largest and its opposite, given (the sums taken
+     out exactly) *)
+  let v3, amount3, _, _ = sales [ max_int; max_int - 1; max_int - 2 ] in
+  let q3 = { Query.vars = 2; where = [ { e = Var 0; p = amount3; v = Var 1 } ]; ranges = [] } in
+  C.check (Result.is_error (ask ~order:desc v3 q3 (running 0))) "past: a running sum past 2^63";
+  let v4, amount4, _, _ = sales [ max_int; 1; -1; - max_int ] in
+  let q4 = { Query.vars = 2; where = [ { e = Var 0; p = amount4; v = Var 1 } ]; ranges = [] } in
+  let by_thing = { Question.Top.keys = [ { col = 0; desc = false } ]; limit = 0; after = None } in
+  C.check (Result.is_error (ask ~order:by_thing v4 q4 (running 2))) "past: a frame of 2 past 2^62 in a row given";
+  let cursor = match ask ~order:by_thing v4 q4 (Wire.Give [| 0; 1 |]) with Ok rows -> Array.of_list (List.nth rows 1) | Error _ -> [||] in
+  C.check (match ask ~order:{ by_thing with after = Some cursor } v4 q4 (running 2) with Ok rows -> List.map (fun r -> List.nth r 2) rows = [ Value.Int 0; Int min_int ] | Error _ -> false)
+    "past: the rows after it, their frames back within the ints (1 - 1, -1 - max): %s" (show (ask ~order:{ by_thing with after = Some cursor } v4 q4 (running 2)));
   let by_town = { Query.vars = 3; where = [ { e = Var 0; p = town; v = Var 1 }; { e = Var 0; p = amount; v = Var 2 } ]; ranges = [] } in
   let asc = { Question.Top.keys = [ { col = 0; desc = false } ]; limit = 0; after = None } in
   C.check (ask ~order:asc v by_town (Wire.Over (Wire.Group ([| 1 |], [| Wire.Sum 2 |]), [||], [| Wire.Running (Sum 1, 0) |])) = Error "Running's Sum of Sum(sale/amount) passed the 63 bits of an Int: sum fewer rows (last = n)")
