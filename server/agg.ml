@@ -672,9 +672,9 @@ and csums = {
 }
 
 and cbag = {
-  mutable bg : int array;  (* an entry's group; -1: an empty slot *)
-  mutable bw : int array;  (* its word *)
-  mutable bc : int array;  (* its count *)
+  mutable be : int array;
+      (* the entries, three words each, side by side (one cache line a probe): the group (-1: an empty slot), the word,
+         its count *)
   mutable bused : int;
   mutable blive : int array;  (* group g's different values, in this table *)
   mutable btotal : int array;  (* group g's values, copies counted, its parts' too *)
@@ -683,11 +683,14 @@ and cbag = {
          at the end ([by_group]), not put again into this table one by one *)
 }
 
+(* n empty entries of a bag column *)
+let empty_entries n = let a = Array.make (3 * n) 0 in for i = 0 to n - 1 do a.(3 * i) <- -1 done; a
+
 let col (a : Wire.agg) (tx : Value.typ) =
   match a with
   | Avg _ -> Csums { csquare = false; cfloat = tx = Tfloat; q = [||]; full = [||] }
   | Variance _ | Stddev _ -> Csums { csquare = true; cfloat = tx = Tfloat; q = [||]; full = [||] }
-  | Distinct _ | Values _ | Quantile _ -> Cbag { bg = Array.make 16 (-1); bw = Array.make 16 0; bc = Array.make 16 0; bused = 0; blive = [||]; btotal = [||]; parts = [] }
+  | Distinct _ | Values _ | Quantile _ -> Cbag { be = empty_entries 16; bused = 0; blive = [||]; btotal = [||]; parts = [] }
   | Count | Sum _ | Min _ | Max _ -> invalid_arg "Agg.col"
 
 let grow_ints (a : int array) n = if Array.length a >= n then a else (let b = Array.make (max n (2 * Array.length a)) 0 in Array.blit a 0 b 0 (Array.length a); b)
@@ -713,37 +716,38 @@ let full_of s g =
 let bag_hash g w = let h = ((g * 0x2545F4914F6CDD1D) lxor w) * 0x2545F4914F6CDD1D in h lsr 17
 
 let bag_grow b =
-  let size = 2 * Array.length b.bg in
-  let bg = Array.make size (-1) and bw = Array.make size 0 and bc = Array.make size 0 in
-  let m = size - 1 in
-  for i = 0 to Array.length b.bg - 1 do
-    let g = b.bg.(i) in
+  let n = Array.length b.be / 3 in
+  let size = 2 * n in
+  let be = empty_entries size and m = size - 1 in
+  for i = 0 to n - 1 do
+    let g = b.be.(3 * i) in
     if g >= 0 then begin
-      let j = ref (bag_hash g b.bw.(i) land m) in
-      while bg.(!j) >= 0 do j := (!j + 1) land m done;
-      bg.(!j) <- g;
-      bw.(!j) <- b.bw.(i);
-      bc.(!j) <- b.bc.(i)
+      let w = b.be.((3 * i) + 1) in
+      let j = ref (bag_hash g w land m) in
+      while be.(3 * !j) >= 0 do j := (!j + 1) land m done;
+      be.(3 * !j) <- g;
+      be.((3 * !j) + 1) <- w;
+      be.((3 * !j) + 2) <- b.be.((3 * i) + 2)
     end
   done;
-  b.bg <- bg;
-  b.bw <- bw;
-  b.bc <- bc
+  b.be <- be
 
 (* [d] more copies (d > 0) of w in group g; true when it is a new entry: its cells *)
 let bag_add b g w d =
-  let m = Array.length b.bg - 1 in
+  let be = b.be in
+  let m = (Array.length be / 3) - 1 in
   let i = ref (bag_hash g w land m) in
-  while b.bg.(!i) >= 0 && (b.bg.(!i) <> g || b.bw.(!i) <> w) do i := (!i + 1) land m done;
+  while Array.unsafe_get be (3 * !i) >= 0 && (Array.unsafe_get be (3 * !i) <> g || Array.unsafe_get be ((3 * !i) + 1) <> w) do i := (!i + 1) land m done;
   b.btotal.(g) <- b.btotal.(g) + d;
-  if b.bg.(!i) >= 0 then (b.bc.(!i) <- b.bc.(!i) + d; false)
+  let o = 3 * !i in
+  if be.(o) >= 0 then (be.(o + 2) <- be.(o + 2) + d; false)
   else begin
-    b.bg.(!i) <- g;
-    b.bw.(!i) <- w;
-    b.bc.(!i) <- d;
+    be.(o) <- g;
+    be.(o + 1) <- w;
+    be.(o + 2) <- d;
     b.bused <- b.bused + 1;
     b.blive.(g) <- b.blive.(g) + 1;
-    if 2 * b.bused > Array.length b.bg then bag_grow b;
+    if 2 * b.bused > Array.length be / 3 then bag_grow b;
     true
   end
 
@@ -804,20 +808,28 @@ let by_group c n =
   | Cbag b ->
     let tables = (b, None) :: List.map (fun (t, m) -> (t, Some m)) b.parts in
     let off = Array.make (n + 1) 0 in
-    List.iter (fun (t, m) -> Array.iter (fun g -> if g >= 0 then (let g = match m with Some m -> m.(g) | None -> g in off.(g + 1) <- off.(g + 1) + 1)) t.bg) tables;
+    List.iter
+      (fun (t, m) ->
+        let be = t.be in
+        for i = 0 to (Array.length be / 3) - 1 do
+          let g = be.(3 * i) in
+          if g >= 0 then (let g = match m with Some m -> m.(g) | None -> g in off.(g + 1) <- off.(g + 1) + 1)
+        done)
+      tables;
     for g = 1 to n do off.(g) <- off.(g) + off.(g - 1) done;
     let at = Array.sub off 0 (max 1 n) and ks = Array.make off.(n) 0 and cs = Array.make off.(n) 0 in
     List.iter
       (fun (t, m) ->
-        Array.iteri
-          (fun i g ->
-            if g >= 0 then begin
-              let g = match m with Some m -> m.(g) | None -> g in
-              ks.(at.(g)) <- t.bw.(i);
-              cs.(at.(g)) <- t.bc.(i);
-              at.(g) <- at.(g) + 1
-            end)
-          t.bg)
+        let be = t.be in
+        for i = 0 to (Array.length be / 3) - 1 do
+          let g = be.(3 * i) in
+          if g >= 0 then begin
+            let g = match m with Some m -> m.(g) | None -> g in
+            ks.(at.(g)) <- be.((3 * i) + 1);
+            cs.(at.(g)) <- be.((3 * i) + 2);
+            at.(g) <- at.(g) + 1
+          end
+        done)
       tables;
     off, ks, cs
   | Csums _ -> [||], [||], [||]
