@@ -484,7 +484,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | corps de la requête | corps de la réponse |
 |---|---|---|
-| 1 Hello | la version en varint (1 à 9), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
+| 1 Hello | la version en varint (1 à 10), le token en string, le programme en string, la session en varint (0 : une nouvelle) | Welcome : l'id du serveur, l'id du cluster, la session, la limite des frames, la limite des écritures en cours ; un second Hello sur une connexion est `invalid` (son token reste celui du premier) |
 | 2 Open | le nom de la base | Opened : le handle (le numéro de la base ouverte sur cette connexion), le groupe le plus récent, les propriétés (id, nom, code du type, many, unique) ; au-delà de la limite des frames, en frames d'environ 1 MiB de propriétés, toutes sauf la dernière avec `more`, chacune avec son handle, son groupe et son nombre |
 | 3 Get | handle, chose | Facts : le groupe de la vue, le nombre, (propriété, valeur)... ; au-delà de la limite des frames, en frames d'environ 1 MiB de faits, toutes sauf la dernière avec `more`, chacune avec son groupe et son nombre |
 | 4 Find | handle, question, select, puis, seulement quand la question en a, ses opérateurs et son ordre : un octet 1, ses opérateurs (un nombre, puis chacun : 0 un pattern, 1 un range, 2 In : variable, nombre, valeurs, 3 Not : nombre, éléments, 4 Or : nombre d'alternatives, chacune un nombre et ses éléments, 5 Prefix : variable, texte, 6 Less : deux variables, 7 LessOrEqual : deux variables, 8 Optional : un pattern, depuis la version 7 ; 9 Trunc : sa variable, la variable de la date, l'unité et le fuseau (deux textes), depuis la version 9), Sort (un nombre, puis la colonne de chaque clé et un octet 1 quand elle est décroissante), Limit (0 : aucune), After (un octet 0, ou 1, un nombre et les valeurs) ; puis, depuis la version 6 et seulement quand le programme en donne un, le temps de la question en millisecondes (de 1 à une semaine ; l'ordre est alors envoyé, vide s'il le faut) | Rows (en frames d'environ 1 MiB, toutes sauf la dernière avec `more` ; un Give sans Sort qui dépasse les cellules que le serveur tient, lignes fois colonnes, est envoyé à mesure que ses lignes sont trouvées, aucune n'est tenue) : le groupe de la vue, les colonnes, le nombre, les valeurs ligne par ligne ; une cellule qu'un Optional a laissée sans valeur est le link $-2^{62}$, qu'aucune chose n'a (une valeur des lignes seulement) |
@@ -520,8 +520,19 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   avec `Values` est une ligne par valeur de sa liste, les autres cellules du groupe répétées (plusieurs `Values` : leurs
   listes côte à côte, une cellule après la fin d'une liste absente), ses lignes l'une après l'autre : une liste est
   plusieurs lignes, comme la liste d'une chose est plusieurs faits. Une cellule qu'un agrégat d'un rapport laisse vide
-  (la variance d'un échantillon d'une seule valeur) est absente.
-- **Les versions.** La version 9 ajoute les agrégats des rapports (les tags 4 à 9 des agrégats du select) et
+  (la variance d'un échantillon d'une seule valeur) est absente. À partir de la version 10,
+  `Over (select, [each...], [window...])` (le tag 2) : le select sur lequel il porte (un Give ou un Group), les
+  colonnes de ses lignes qui les coupent en groupes (un compte, puis chacune), puis ses fenêtres (un compte, puis
+  chacune : 0 `Running`, son agrégat codé comme celui d'un Group, `Count` ou `Sum`, `Avg`, `Min`, `Max` d'une colonne,
+  puis `last`, 0 pour un frame depuis la première ligne du groupe ; 1 `Rank`, les clés de Sort par lesquelles il classe
+  et un octet 1 pour dense ; 2 `Prev`, une colonne et `back`) ; la colonne de chaque fenêtre vient après celles de ses
+  lignes, dans cet ordre ([les fenêtres](cesia.md#les-fenêtres--running-rank-prev-each)). Au plus 64 fenêtres et 64
+  colonnes d'Each ; un `Over` d'un `Over` est refusé à la lecture.
+- **Les versions.** La version 10 ajoute les fenêtres et Each (le tag 2 du select) et rien d'autre : un programme de
+  version 10 se connecte à un serveur de 9 en 9, et une question avec elles est refusée dans le programme (`invalid` :
+  « this server speaks protocol 9: Running, Rank, Prev and Each need a server of protocol 10 ») avant d'être envoyée,
+  puisqu'un serveur plus ancien ne peut pas lire le select ; une question sans elles est codée comme avant. Un `Watch`
+  avec elles est refusé par chaque serveur (`invalid`). La version 9 ajoute les agrégats des rapports (les tags 4 à 9 des agrégats du select) et
   l'opérateur Trunc (le tag 9) et rien d'autre : un programme de version 9 se connecte à un serveur de 8 en 8, et une
   question avec l'un d'eux est refusée dans le programme (`invalid` : « this server speaks protocol 8: Trunc, Avg,
   Count(x), Values, Quantile, Variance and Stddev need a server of protocol 9 ») avant d'être envoyée, puisqu'un
@@ -549,7 +560,7 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
   fichiers (Put, Piece, Load, Erase) et rien d'autre : un programme de version 3 se connecte à un serveur de 2 en 2
   (comme plus bas), et un fichier est refusé dans le programme (`invalid` : « this server speaks protocol 2 or older:
   files need a server of protocol 3 »). La version 2 ajoute les opérateurs et l'ordre de la question (plus bas) et rien
-  d'autre ; un serveur parle les versions 1 à 9, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
+  d'autre ; un serveur parle les versions 1 à 10, et répond de la même façon à chaque connexion. Une bibliothèque dit 2
   dans Hello ; un serveur de version 1 se contente de la refuser (`version`) et ferme, et la bibliothèque se reconnecte
   en 1 : ses questions de patterns et de ranges reçoivent leur réponse comme avant, et une question avec `Not`, `Or`,
   `In`, `Prefix`, Sort, Limit ou After est refusée dans le programme (`invalid` : « this server speaks protocol 1: ...

@@ -617,7 +617,11 @@ partir de `x` à mesure que chaque ligne est donnée, comme le `BIND` de SPARQL,
 (le i-ième `Trunc` donne `vars + i`), en haut de `items` seulement, pour `give` et `sort`
 ([les rapports](cesia.md#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)). Par le serveur, le même
 élément, et les agrégats des rapports dans un select `Group` (`Avg`, `Distinct` pour `Count(x)`, `Values`,
-`Quantile`, `Variance`, `Stddev` : [le protocole](server.md#le-protocole)).
+`Quantile`, `Variance`, `Stddev` : [le protocole](server.md#le-protocole)). Les fenêtres et `Each` sont aussi celles
+d'un select, sur un `Give` ou un `Group` : `Wire.Over (Give [| ... |], each, [| Running (Sum 2, 0); Rank (1, false);
+Prev (1, 1) |])`, leurs colonnes celles de la réponse, comme le sont les clés de `Sort`, répondues par `Answer.answer`
+au serveur et dans un programme qui lit en local ([les fenêtres](cesia.md#les-fenêtres--running-rank-prev-each)) ;
+`ask` donne les lignes d'une question seules, comme il n'a pas d'agrégats.
 
 ```ocaml
 open Cepheus

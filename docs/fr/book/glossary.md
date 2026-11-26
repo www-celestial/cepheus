@@ -212,6 +212,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **deltas** (delta coding) — des nombres rangés sous la forme de leur différence avec le nombre d'avant : une suite
   croissante (les choses d'un chargement : 0 et 1) prend un bit ou deux par nombre. Les colonnes du journal le prennent
   bloc par bloc quand c'est plus court que le frame of reference. [formats](formats.md#un-groupe)
+- **dense rank** (le rang dense) — la place d'une ligne dans un ordre où les lignes égales sur les clés de l'ordre
+  partagent une place et où aucune place n'est sautée : 1, 2, 2, 3 ; `Rank(dense = true)`, le `dense_rank()` de SQL.
+  [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **dependency graph** (d'une history ; le graphe des dépendances) — les transactions comme nœuds, et une arête pour
   chaque raison pour laquelle l'une doit venir avant une autre : ww (elle a écrit la version que l'autre a remplacée),
   wr (l'autre a lu ce qu'elle a écrit), rw (une anti-dependency). La history est serializable quand le graphe n'a pas
@@ -242,6 +245,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   supprimés, puis dérive de nouveau celles qui ont encore une preuve (Gupta et al. 1993).
   [règles](rules.md#le-retrait--backwardforward)
 - **durable** — sur le disque lui-même, pas seulement dans la mémoire du noyau : couvert par un fsync terminé.
+- **Each** — la clé d'une question qui coupe ses lignes en groupes par des champs de `Give` : `Limit` est alors celle de
+  chaque groupe (les k premières lignes de chacun, le `LATERAL (... LIMIT k)` de SQL ; `Limit: 1`, `DISTINCT ON`) et
+  les fenêtres repartent de la première ligne de chaque groupe (`PARTITION BY`). Les lignes viennent toujours dans
+  l'ordre de `Sort`. [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **EDB, IDB** — extensional et intensional database : les faits affirmés, et les faits dérivés.
   [règles](rules.md#ce-que-tient-la-base--le-least-model)
 - **Elle** — le vérificateur qu'utilise Jepsen pour trouver des anomalies d'isolation dans l'historique enregistré
@@ -301,6 +308,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   disque, rien à payer pour en faire un. [concepts](concepts.md#les-forks)
 - **frame** — l'unité d'une écriture et d'un fsync dans le journal : un en-tête, les groupes, un trailer.
   [formats](formats.md#segment-de-journal-dirjournalfirst-group-20-digitsseg)
+- **frame** (le cadre d'une fenêtre) — les lignes que lit l'agrégat d'une fenêtre pour une ligne : de la première
+  ligne du groupe jusqu'à la ligne (`Running(f)`, le `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` de SQL), ou la
+  ligne et les n - 1 d'avant (`last = n`). Les frames `RANGE` de SQL, les lignes égales dans l'ordre comptées ensemble,
+  ne sont pas construits. [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **frame of reference** (FOR) — un bloc de nombres rangés sous la forme de leur plus petite valeur (la base) et, pour
   chacun, sa différence avec la base sur autant de bits qu'en demande la plus grande différence : des valeurs entre
   20 000 et 23 650 prennent 12 bits chacune, pas 64 (Goldstein et al. 1998 ; PFOR, sa forme patched, Zukowski et al.
@@ -450,6 +461,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **monotonic writes** — une session guarantee (une garantie donnée à une session ; Terry et al. 1994) : les écritures
   d'un programme sont appliquées dans l'ordre où il les a envoyées.
   [serveur](server.md#lordre-le-pipelining-et-la-back-pressure)
+- **moving average** (la moyenne mobile) — la moyenne des n dernières lignes à chaque ligne, qui lisse une série :
+  `Running(Avg(x), last = n)`, le `avg(x) OVER (... ROWS BETWEEN n - 1 PRECEDING AND CURRENT ROW)` de SQL.
+  [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **mutual TLS** — du TLS où les deux côtés montrent un certificat de la même CA ; entre serveurs Cepheus (un primary et
   ses replicas, sur le port des peers), pas pour les programmes, qui montrent un token. [serveur](server.md#tls)
 - **native package** (un package natif) — un package Cesia dont les fonctions sont, sous leur code Cesia, un moteur en
@@ -501,6 +515,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **pre-vote** — la question qu'un serveur Raft pose aux autres avant de se présenter à une élection : voteriez-vous
   pour moi ? Il n'augmente son term qu'avec une majorité de oui, si bien qu'un serveur coupé puis revenu ne perturbe
   pas le cluster (thèse d'Ongaro, 9.6). [serveur](server.md#les-élections)
+- **Prev** — la fenêtre qui donne un champ de la ligne `back` lignes avant (1 par défaut) dans l'ordre de `Sort` au
+  sein de son groupe, `missing` pour les premières lignes ; le `lag` de SQL. [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **primary** (le primary) — le serveur qui prend les écritures d'une base ; ses replicas copient ses groupes.
   [serveur](server.md#une-replica)
 - **promotion** (la promotion) — une replica dont on fait un primary (`cepheus promote`) : une nouvelle epoch, et les
@@ -528,6 +544,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **range restriction** (safety) — chaque variable de la tête d'une règle apparaît dans son corps : une règle ne donne
   de faits que sur ce que contient la base, et le least model est fini.
   [règles](rules.md#une-règle-est-une-question-avec-une-conclusion)
+- **Rank** — la fenêtre qui donne la place d'une ligne dans l'ordre de `Sort` au sein de son groupe, les lignes égales
+  sur les clés de `Sort` la partageant et les places qu'elles prennent sautées (1, 2, 2, 4 : le `rank()` de SQL) ;
+  `dense = true` n'en saute aucune. [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **rank table** (rank directory) — un bit pour chaque numéro de chose et, tous les 32 bits, combien de bits sont à 1
   avant eux : « la chose e est-elle là, et à quel slot ? », c'est un mot et un popcount (Jacobson 1989). Chaque partie
   d'un run en a une. [théorie](theory.md#3-index)
@@ -543,6 +562,10 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   directement ou à travers d'autres règles : « chaque ancêtre », à n'importe quelle profondeur.
   [règles](rules.md#une-règle-est-une-question-avec-une-conclusion)
 - **redo log** — un log de changements à appliquer de nouveau après un crash, jamais à défaire ; le journal en est un.
+- **removable cumulative aggregation** (l'agrégation cumulative qu'on peut retirer) — garder l'agrégat d'un frame qui
+  glisse en ajoutant la ligne qui arrive et en retirant celle qui part (Leis et al. 2015) : $O(1)$ par ligne pour une
+  somme, un compte ou une moyenne ; exacte avec des sommes exactes, là où des sommes de floats dérivent.
+  [références](references.md#les-fenêtres)
 - **replay** — appliquer les groupes du journal dans l'ordre pour reconstruire un état.
 - **Raft** — l'algorithme de consensus (la façon dont plusieurs serveurs s'accordent sur une même suite d'écritures)
   que fait tourner un cluster de trois serveurs ou plus (Ongaro et Ousterhout 2014) : un leader par term, élu par une
@@ -580,6 +603,8 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **round trip** — une requête et sa réponse : le temps entre l'envoi de l'une et la réception de l'autre, dont la plus
   grande part est le travail du noyau (les appels système, le réveil de l'autre processus).
   [serveur](server.md#la-vitesse-à-côté-de-postgresql)
+- **row number** (le numéro de ligne) — la place d'une ligne comptée une par une, égalités comprises :
+  `Running(Count())`, le `row_number()` de SQL. [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **row store**, **column store** — un row store garde ensemble les champs de chaque enregistrement (chercher un
   enregistrement lit un seul endroit), un column store les valeurs de chaque champ (parcourir un champ lit un seul
   endroit). Un run est les deux : par chose, un record par chose pour ses propriétés à une valeur (avec de petites
@@ -591,6 +616,12 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
 - **run**, **run file** — une structure triée du LSM-tree sur le disque : les changements d'un intervalle de groupes
   par-dessus les runs en dessous de lui, dans un fichier `DIR/snapshots/<lo>-<hi>.run`.
   [architecture](architecture.md#les-runs-sur-disque)
+- **Running** — la fenêtre qui donne un agrégat (`Sum`, `Avg`, `Min`, `Max` d'un champ de `Give`, ou `Count()`) sur
+  les lignes de la première du groupe jusqu'à la ligne, ou sur les n dernières (`last = n`) : un total cumulé, une
+  moyenne mobile. [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
+- **running total** (le total cumulé) — à chaque ligne la somme des lignes de la première jusqu'à elle, dans un ordre :
+  un solde après chaque paiement ; `Running(Sum(x))`, le `sum(x) OVER (ORDER BY ...)` de SQL.
+  [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **S3-FIFO** — la politique d'éviction du cache : trois files FIFO (small, main, ghost), rien n'est déplacé sur un hit
   (quand la page est déjà dans le cache ; Yang et al. 2023). [architecture](architecture.md#les-pages-et-le-cache)
 - **same** (« le même ») — la réponse du serveur à un watch repris `from` un groupe quand rien de ce que lit la
@@ -736,6 +767,9 @@ donné entre parenthèses. Là où le nom de Cepheus diffère du nom habituel, l
   de `Find` dans son ordre et les copies de la k-ième, tenues par les lignes de chaque frame comparées à sa dernière
   ligne, et remplies à nouveau par un `Find` d'une page après cette ligne quand une ligne en part ([Sort et Limit dans
   un watch](cesia.md#sort-et-limit-dans-un-watch)).
+- **window** (la fenêtre, d'une question), **window function** — un champ de la réponse calculé à partir d'autres
+  lignes de la réponse, lues dans un ordre : `Running`, `Rank`, `Prev` ; le `OVER (...)` de SQL. Calculé après les
+  lignes, avant qu'`After` et `Limit` coupent la page. [Cesia](cesia.md#les-fenêtres--running-rank-prev-each)
 - **working set** — les tableaux du reasoner pour un groupe : les faits qu'il a touchés, leurs états, leurs tours et
   leurs marques, dans des tables en open addressing avec des chaînes par (propriété, chose) et (propriété, valeur), hors
   de la vue du collector. [règles](rules.md#grands-groupes)

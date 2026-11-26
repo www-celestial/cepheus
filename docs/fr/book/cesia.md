@@ -752,6 +752,149 @@ qu'un message donne la map du groupe en entier.
 réponse, la borne de mémoire d'une question au serveur ([limites](limits.md#les-questions)) : au-delà, `Err` de Code
 `"too_large"`, jamais un serveur à court de mémoire.
 
+## Les fenêtres : Running, Rank, Prev, Each
+
+Une **window** (une fenêtre : un champ calculé à partir des autres lignes de la réponse) est un champ de `Give` dont
+la valeur vient des autres lignes de la réponse, lues dans l'ordre de `Sort` : un total cumulé, une moyenne mobile, la
+place de la ligne, la ligne d'avant. Et `Each` coupe les lignes en groupes : les fenêtres repartent de la première
+ligne de chaque groupe, et `Limit` est celle de chaque groupe.
+
+```cesia norun
+day(d) = date.FormatDate(date.FromUnix(d))
+for r in result.Unwrap(cepheus.Find(5, (i, c, n, a, d) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a], [i, Sale.Day, d]],
+  Give: {Name: n, Day: d, Amount: a, SoFar: cepheus.Running(cepheus.Sum(a)), Before: cepheus.Prev(a),
+         Mean2: cepheus.Running(cepheus.Avg(a), last = 2), Row: cepheus.Running(cepheus.Count())},
+  Sort: [d],
+}, sales))
+  io.Print(day(r.Day), r.Name, r.Amount, r.SoFar, r.Before, r.Mean2, r.Row)
+end
+(* each client's balance: the windows start again at each client's first sale *)
+for r in result.Unwrap(cepheus.Find(5, (i, c, n, a, d) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a], [i, Sale.Day, d]],
+  Give: {Name: n, Day: d, Amount: a, Balance: cepheus.Running(cepheus.Sum(a))},
+  Sort: [n, d],
+  Each: [n],
+}, sales))
+  io.Print(r.Name, day(r.Day), r.Amount, r.Balance)
+end
+(* the largest sale of each client: Limit is each group's *)
+io.Print(cepheus.Find(4, (i, c, n, a) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a]],
+  Give: {Name: n, Amount: a}, Sort: [cepheus.Desc(a)], Limit: 1, Each: [n],
+}, sales))
+(* the clients by their total, with their places: a window over a report's groups *)
+io.Print(cepheus.Find(4, (i, c, n, a) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a]],
+  Give: {Name: n, Total: cepheus.Sum(a), Place: cepheus.Rank(), SoFar: cepheus.Running(cepheus.Sum(cepheus.Sum(a)))},
+  Sort: [cepheus.Desc(cepheus.Sum(a))],
+}, sales))
+```
+
+```text
+2027-01-31 Ada Martin 10.0 10.0 missing 10.0 1
+2027-02-10 Bo Lind 20.0 30.0 10.0 15.0 2
+2027-02-10 Ada Martin 30.0 60.0 20.0 25.0 3
+2027-03-31 Bo Lind 60.0 120.0 30.0 45.0 4
+Ada Martin 2027-01-31 10.0 10.0
+Ada Martin 2027-02-10 30.0 40.0
+Bo Lind 2027-02-10 20.0 20.0
+Bo Lind 2027-03-31 60.0 80.0
+Ok([{Name: "Bo Lind", Amount: 60.0}, {Name: "Ada Martin", Amount: 30.0}])
+Ok([{Name: "Bo Lind", Total: 80.0, Place: 1, SoFar: 80.0}, {Name: "Ada Martin", Total: 40.0, Place: 2, SoFar: 120.0}])
+```
+
+![Six mois dans l'ordre de Sort, chacun avec son total. Le total cumulé d'un mois est la somme de janvier jusqu'à lui : 1 200, 2 000, 3 500... Pour avril, le frame de last = 3 couvre février, mars et avril, dont la moyenne est 1 066,67, et Prev donne les 1 500 de mars.](../../book/images/windows-running.svg)
+
+Le 10 février, la vente de Bo vient avant celle d'Ada : `Sort` ordonne les lignes d'un même jour par leurs autres
+champs, le montant d'abord (20 avant 30), donc le total cumulé, la ligne d'avant et le numéro de la ligne sont les
+mêmes à chaque exécution. La figure montre les mois du [tutoriel 13](tutorials.md#13-un-solde-mensuel-avec-un-total-cumulé-lécart-au-mois-précédent-et-une-moyenne-mobile-sur-3-mois) :
+chaque fenêtre lit les lignes dans l'ordre de `Sort`, de la première jusqu'à la ligne, ou les 3 dernières.
+
+- `cepheus.Running(f)` : l'agrégat f sur les lignes depuis la première du groupe de la ligne jusqu'à la ligne (le
+  `f(x) OVER (ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)` de SQL) ; `cepheus.Running(f, last = n)` :
+  sur la ligne et les n - 1 d'avant (`ROWS BETWEEN n - 1 PRECEDING AND CURRENT ROW`), moins pour les premières lignes
+  du groupe, comme le **frame** de SQL (le cadre : les lignes qu'un agrégat de fenêtre lit pour une ligne) tient les
+  lignes qu'il peut. f est `Sum`, `Avg`, `Min` ou `Max` d'un champ de `Give`, des types que ces agrégats prennent (une
+  somme d'ints ou de money, une moyenne d'ints, de floats, de money ou de dates, le plus petit ou le plus grand int,
+  money ou date), ou `Count()`, les lignes du frame : `Running(Count())` est le numéro de la ligne, le `row_number()` de
+  SQL.
+- `cepheus.Rank()` : la place de la ligne dans l'ordre de `Sort` au sein de son groupe, les lignes égales sur les clés
+  de `Sort` la partageant et les places qu'elles prennent sautées : 1, 2, 2, 4 (le `rank()` de SQL) ;
+  `cepheus.Rank(dense = true)` : aucune sautée, 1, 2, 2, 3 (`dense_rank()`).
+- `cepheus.Prev(x)` : le champ x de `Give` dans la ligne d'avant, dans l'ordre de `Sort` au sein du groupe (le
+  `lag(x)` de SQL) ; `cepheus.Prev(x, back = n)` : n lignes avant (`lag(x, n)`, le même mois l'an dernier :
+  `back = 12`) ; `missing` pour les premières lignes du groupe, comme `lag` donne `NULL`. La valeur de la ligne
+  suivante est `Prev` dans l'ordre inverse (le `lead` de SQL).
+- `Each: [x, ...]`, une clé de la question à côté de `Sort` et `Limit` : des champs de `Give` qui sont des variables
+  ou des `Trunc` (les clés d'un rapport), qui coupent les lignes en groupes (le `PARTITION BY` de SQL). Les fenêtres
+  repartent de la première ligne de chaque groupe ; `Limit: k` garde les k premières lignes de chaque groupe et les
+  copies de sa k-ième (le `LATERAL (... ORDER BY ... LIMIT k)` de SQL, ou `row_number() OVER (PARTITION BY ...) <=
+  k`) ; `Limit: 1` est le `DISTINCT ON` de SQL. Les lignes viennent toujours dans l'ordre de `Sort`, celui de toute la
+  réponse : pour avoir les lignes de chaque groupe ensemble, trier d'abord par le groupe.
+
+  | le sucre | sa forme simple | SQL |
+  |---|---|---|
+  | `cepheus.Running(cepheus.Count())` | (aucune : les lignes du frame comptées) | `row_number() OVER (...)` |
+  | `cepheus.Prev(x)` | `cepheus.Prev(x, back = 1)` | `lag(x) OVER (...)` |
+  | `Limit: 1, Each: [x]` | (aucune : la Limit de chaque groupe) | `DISTINCT ON (x)` |
+
+- **L'argument d'une fenêtre est un champ de `Give`**, écrit comme `Sort` écrit ses clés : une variable, un agrégat
+  ou un `Trunc` que `Give` donne. Ainsi des lignes égales dans l'ordre de `Sort` sont la même ligne, et la valeur d'une
+  fenêtre est la même à chaque exécution. Dans un rapport, une ligne est un groupe : le total cumulé des sommes des
+  groupes est `Running(Sum(Sum(t)))`, la `Sum` du champ `Sum(t)`, et la moyenne des totaux des trois derniers mois
+  `Running(Avg(Sum(t)), last = 3)`, comme SQL écrit `sum(sum(t)) OVER (...)` et `avg(sum(t)) OVER (...)`.
+- **L'ordre.** Une fenêtre a besoin de `Sort` (sans lui, `Err` de Code `"invalid"`, jamais des lignes dans un ordre
+  que personne n'a choisi). L'ordre de `Sort` est total : ses clés, puis chaque autre champ par son nom, donc
+  `Running` compte une par une, dans cet ordre, les lignes égales sur les clés (le `ROWS` de SQL). Le frame par défaut
+  de PostgreSQL pour `sum(x) OVER (ORDER BY ...)` est `RANGE` : les lignes égales sur l'`ORDER BY` partagent un seul
+  total, celui d'après la dernière d'entre elles ; avec un ordre unique les deux sont les mêmes. `Rank` compare les
+  clés données à `Sort`, pas les autres champs.
+- **Les pages.** Les fenêtres sont calculées avant `After` et `Limit` : un total cumulé sur la deuxième page continue
+  celui de la première, un `Rank` compte les lignes des pages d'avant, un `Prev` lit la dernière ligne de la page
+  d'avant. `Each` ne prend pas d'`After` (`Limit` est alors celle de chaque groupe, donc une page n'a pas de dernière
+  ligne) : paginer les groupes avec une question à eux, puis demander leurs lignes avec `In`.
+- **missing.** Une valeur absente (celle d'un `Optional`, un `Prev` de la première ligne, une variance d'une seule
+  valeur) est laissée de côté par `Sum`, `Avg`, `Min` et `Max`, comme SQL laisse de côté `NULL` ; un frame sans
+  aucune valeur donne `missing`. `Count()` compte les lignes du frame, quelles que soient leurs valeurs.
+- **Les types et l'exactitude.** Comme ceux des agrégats : une somme cumulée d'ints est un Int, de money de la money ;
+  une moyenne d'ints un Float, de money de la money de son échelle arrondie au plus proche en s'éloignant de zéro à
+  mi-chemin, de dates une date ; à partir de **sommes exactes**, donc une moyenne mobile sur un frame qui glisse a
+  les mêmes bits que la moyenne de ses lignes calculée à part. Une somme cumulée au-delà des 63 bits d'un Int est un
+  `Err` de Code `"invalid"` (dans une ligne que la réponse donne ; une somme au-delà dans une ligne après la page n'est
+  pas une erreur).
+- **Les erreurs.** Une fenêtre sans `Sort`, une fenêtre d'un champ que `Give` ne donne pas, une fenêtre comme clé de
+  `Sort`, `Running` de `Count(x)`, de `Values` ou d'un quantile, `last` ou `back` hors de 1 à 100 000, `Each` sans
+  `Sort`, `Each` sans `Limit` ni fenêtre, `Each` avec `After`, `Each` d'un agrégat, une fenêtre ou `Each` sur un
+  rapport avec `Values` : `Err` de Code `"invalid"`, qui le nomme ([erreurs](errors.md)).
+
+**Comment c'est répondu.** Les lignes sont faites comme sans fenêtres (les k premières de l'ordre pour une `Limit`,
+lues dans l'index de la première clé quand c'en est un, [pages](#sort-limit-et-after--des-pages)), les lignes de
+chaque groupe listées une fois dans l'ordre (un tri par comptage de leurs groupes), et chaque fenêtre est alors un
+passage sur chaque groupe, les méthodes de [Leis 2015](references.md#les-fenêtres) : un frame depuis la première
+ligne garde son agrégat au fil des lignes (la cumulative aggregation, l'agrégation cumulative) ; un frame des n
+dernières lignes ajoute la ligne qui arrive et retire celle qui part (la removable cumulative aggregation, l'agrégation
+cumulative qu'on peut retirer), que les sommes exactes permettent sans aucune erreur, là où des sommes de floats
+dériveraient ; `Min` et `Max` sur les n dernières lignes, qu'aucune soustraction ne défait, gardent une file des
+candidats du frame, chacun plus tard et meilleur que celui d'avant, donc chaque ligne entre et sort une seule fois
+([Lemire 2006](references.md#les-fenêtres)). Une fenêtre coûte un passage sur ses lignes, quel que soit son frame. Avec
+`Each` et `Limit: k`, chaque groupe garde au plus 2k lignes pendant que la question est lue, sur chaque cœur, triées
+pour revenir à ses k premières quand il est plein, une ligne au-delà de la k-ième du groupe mise de côté après une
+seule comparaison : le travail est d'environ une comparaison par ligne, la mémoire de k lignes par groupe. Une page
+après un curseur ne trie pas les lignes d'avant : un seul passage sur elles donne leur nombre, leurs sommes, leurs
+meilleures valeurs et les quelques dernières lignes qu'un frame ou un `Prev` demande, lues dans l'intervalle de la
+première clé avant le curseur quand c'est celle d'un index, et la page elle-même est lue comme l'est une page sans
+fenêtres.
+
+**Surveillé.** Un `Watch` d'une question avec des fenêtres ou `Each` est refusé (`invalid`) : un total cumulé, une
+place ou une ligne d'avant dépend de chaque ligne d'avant, et les premières lignes d'un groupe avec `Each` de chaque
+ligne du groupe, donc un seul changement changerait chaque ligne d'après. Surveiller la question sans elles et les
+calculer dans le programme, ou redemander `Find` quand le watch dit que les lignes ont changé.
+
+**Les bornes.** Au plus 64 fenêtres par question ; `last` et `back` au plus 100 000 lignes ; les lignes, les clés des
+groupes et les valeurs des fenêtres comptent dans les cellules de la réponse ([limites](limits.md#les-questions)) :
+au-delà, `Err` de Code `"too_large"`.
+
 ## Watch : les questions vivantes
 
 Une **question vivante** (live question) est un `Find` qui reste ouvert. `cepheus.Watch(n, question, db, size = 64, until = missing)`
@@ -1420,6 +1563,9 @@ linearizable sans cela.
 - Un changement du kind qu'un lien nomme, ou de son `onDelete`, sur une base qui l'a (une migration) ; `Delete` comme
   opération de `Write`, à côté d'autres dans un même groupe ; une valeur par défaut pour un lien (le `SET DEFAULT` de
   SQL) ; l'effacement d'une chose supprimée de l'historique.
+- Les fenêtres : les frames `RANGE` (les lignes égales dans l'ordre comptées ensemble, et les frames d'une durée de
+  dates), `Next` (le `lead` de SQL : `Prev` dans l'ordre inverse), `ntile`, `percent_rank`, une `Variance`, un
+  `Stddev` ou un quantile mobiles, et un watch d'une question avec des fenêtres ou `Each`.
 
 ## Références
 
@@ -1431,4 +1577,10 @@ linearizable sans cela.
   https://doi.org/10.1109/PDIS.1994.331722 — read your writes et monotonic writes, que gardent les appels d'une fiber.
 - **[Ongaro 2014b]** D. Ongaro. Consensus: Bridging Theory and Practice. Thèse de doctorat, Stanford, 2014, §6.3 —
   les numéros de session qui appliquent une seule fois une écriture renvoyée.
+- **[Leis 2015]** V. Leis, K. Kundhikanjana, A. Kemper, T. Neumann. Efficient Processing of Window Functions in
+  Analytical SQL Queries. *PVLDB* 8(10), 1058–1069, 2015. https://doi.org/10.14778/2794367.2794375 — l'agrégation
+  cumulative, et celle qu'on peut retirer, des fenêtres ([fenêtres](#les-fenêtres--running-rank-prev-each)).
+- **[Lemire 2006]** D. Lemire. Streaming Maximum-Minimum Filter Using No More than Three Comparisons per Element.
+  *Nordic Journal of Computing* 13(4), 328–339, 2006. https://arxiv.org/abs/cs/0610046 — `Min` et `Max` sur les n
+  dernières lignes.
 - Les autres travaux sur lesquels repose le serveur : [références](references.md#le-serveur).

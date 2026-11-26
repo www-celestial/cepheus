@@ -417,7 +417,14 @@ ex aequo), et par le moteur sur le chemin du heap (un tas qui garde les meilleur
 selon son propre choix, avant et après un aller-retour sur le réseau : les mêmes lignes, dans le même ordre ; découpées
 sur 3 domains à chaque niveau de deux candidats ou plus, ou avec leur premier niveau sondé, les lignes d'un seul domain,
 dans leur ordre, bit pour bit ; et des questions vivantes avec `Not`, `Or` et `In` vérifiées par l'oracle après chaque
-frame.
+frame. Avec des fenêtres et `Each` ([les fenêtres](cesia.md#les-fenêtres--running-rank-prev-each)), la valeur de chaque
+fenêtre est celle que donne sa définition sur les lignes dans l'ordre, chacune d'elles (celles d'une page aussi), et
+les lignes d'`Each` les k premières de chaque groupe et leurs copies ; *testé par* le même oracle, une question sur
+deux qui a Sort recevant des fenêtres et un `Each` au hasard (chaque frame, `Rank` avec des égalités, `Prev`, des
+cellules absentes, des sommes au-delà de 63 bits refusées seulement dans une ligne donnée, des pages après un curseur),
+et sur 700 factures avec des frames jusqu'à 40 lignes et jusqu'à 60 groupes, chaque fenêtre calculée à nouveau par
+force brute à partir des lignes dans l'ordre : les mêmes valeurs, exactes (une moyenne d'ints à un arrondi près,
+l'oracle divisant une fois en floats).
 
 ## G12 Les merges sont atomiques
 

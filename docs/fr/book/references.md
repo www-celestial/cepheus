@@ -366,6 +366,28 @@ Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparis
   — `avg`, `count(DISTINCT)`, `array_agg`, `string_agg`, `percentile_cont`, `percentile_disc`, `stddev`, `variance`
   et `date_trunc` avec un fuseau, les formes que les tutoriels mettent à côté de celles de Cepheus.
 
+## Les fenêtres
+
+- **[Leis 2015]** V. Leis, K. Kundhikanjana, A. Kemper, T. Neumann. Efficient Processing of Window Functions in
+  Analytical SQL Queries. *PVLDB* 8(10), 1058–1069, 2015. https://doi.org/10.14778/2794367.2794375
+  — L'opérateur de fenêtre d'une base en mémoire : les lignes partitionnées et triées une fois, puis l'agrégat de
+  chaque frame par la cumulative aggregation (un frame qui ne fait que grandir), la removable cumulative aggregation
+  (une somme qui retire la ligne qui quitte le frame ; en floats elle dérive, ce qu'évitent les sommes exactes de
+  Cepheus) ou un segment tree (n'importe quel frame, $O(\log n)$ par ligne). `Running`, `Rank` et `Prev` sont calculés
+  par les deux premières.
+- **[Lemire 2006]** D. Lemire. Streaming Maximum-Minimum Filter Using No More than Three Comparisons per Element.
+  *Nordic Journal of Computing* 13(4), 328–339, 2006. https://arxiv.org/abs/cs/0610046
+  — La plus petite ou la plus grande valeur d'une fenêtre qui glisse par une file monotone de ses candidats, chaque
+  valeur entrée et sortie une seule fois : `Running(Min(x), last = n)` et `Max`, $O(1)$ amorti par ligne là où un
+  segment tree prend $O(\log n)$.
+- **[PostgreSQL windows]** La documentation de PostgreSQL 18, 3.5 Window Functions, 4.2.8 Window Function Calls, 9.22
+  Window Functions, et le DISTINCT ON de SELECT. https://www.postgresql.org/docs/18/tutorial-window.html ,
+  https://www.postgresql.org/docs/18/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS ,
+  https://www.postgresql.org/docs/18/functions-window.html , https://www.postgresql.org/docs/18/sql-select.html#SQL-DISTINCT
+  — `OVER`, `PARTITION BY`, les frames `ROWS` et `RANGE` (`RANGE UNBOUNDED PRECEDING` par défaut avec un `ORDER BY`),
+  `rank`, `dense_rank`, `row_number`, `lag`, `LATERAL` et `DISTINCT ON`, les formes que les tutoriels mettent à côté
+  de celles de Cepheus.
+
 ## Les transactions et l'isolation
 
 - **[Codd 1970]** E. F. Codd. A Relational Model of Data for Large Shared Data Banks. *Communications of the ACM*
