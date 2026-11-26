@@ -504,9 +504,13 @@ let () =
   List.iter flip damaged;
   List.iter (fun k -> pids.(k) <- Serve.start bin cfgs.(k); alive.(k) <- true) damaged;
   List.iter (fun k -> wait_socket (sock k)) damaged;
-  let logs = List.map (fun k -> In_channel.with_open_bin (Filename.concat (Filename.dirname cfgs.(k)) "serve.log") In_channel.input_all) damaged in
+  (* each server's log line of the damage, waited for with a deadline: a server's socket may answer before the test
+     sees the line in its log (under load, 1 run in 70 read the log too soon) *)
   let has s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
-  C.check (List.for_all (fun l -> has l "set aside, kept as *.damaged") logs) "both found their logs damaged and set the damage aside";
+  let set_aside k = has (In_channel.with_open_bin (Filename.concat (Filename.dirname cfgs.(k)) "serve.log") In_channel.input_all) "set aside, kept as *.damaged" in
+  C.check
+    (match wait_for ~limit:30. "both servers' line of the damage set aside" (fun () -> List.for_all set_aside damaged) with () -> true | exception Failure _ -> false)
+    "both found their logs damaged and set the damage aside";
   let lr = await_leader ~ok:(fun k -> stat k "raft.ready" = "true") "a leader after the damaged majority's repair" in
   wait_for ~limit:60. "their repair's end" (fun () -> List.for_all (fun k -> List.assoc_opt "raft.repair" (status k) = None) [ 0; 1; 2 ]);
   C.check true "their repair ended: a leader %s" (List.nth names lr);
