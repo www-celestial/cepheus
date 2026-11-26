@@ -757,11 +757,16 @@ let run seed =
         Top.path := Auto;
         let on d pm pr =
           let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
+          let om0 = !Agg.own_min and of0 = !Agg.own_from in
           Query.domains := d;
           Query.parallel_min := pm;
           Query.probe_min := pr;
           Query.probe_more := 1;
-          Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0) (fun () -> engine ~extra v q sel o)
+          (* split, a report's bags move to a table a group at once *)
+          if d > 1 then (Agg.own_min := 0; Agg.own_from := 1);
+          Fun.protect
+            ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0; Agg.own_min := om0; Agg.own_from := of0)
+            (fun () -> engine ~extra v q sel o)
         in
         (match on 1 !Query.parallel_min 1 with
          | exception Query.Bad m -> C.fail "seed %d: one domain refused: %s" seed m
@@ -1277,7 +1282,7 @@ let () =
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
   Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
   Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
-  Printf.printf "questions: %d answers split across 3 domains (%d levels split, %d by a probe), each the rows of one domain in their order\n" !split_checks (Atomic.get Query.splits) (Atomic.get Query.probed_splits);
+  Printf.printf "questions: %d answers split across 3 domains (%d levels split, %d by a probe; %d bag columns moved to a table a group), each the rows of one domain in their order\n" !split_checks (Atomic.get Query.splits) (Atomic.get Query.probed_splits) (Atomic.get Agg.owned);
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"
     !planners_checks (fst !planners_work) (snd !planners_work);
   Printf.printf "questions: %d checks of live questions with Not, Or, In and Prefix after a frame (%d frames answered by their keys, %d by the whole question)\n"

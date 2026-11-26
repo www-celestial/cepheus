@@ -681,7 +681,20 @@ and cbag = {
   mutable parts : (cbag * int array) list;
       (* the tables merged into this one, each with its groups' numbers here: their entries are read with this one's
          at the end ([by_group]), not put again into this table one by one *)
+  mutable own : Bag.t option array;
+      (* a table a group, once the groups hold more than [!own_min] different values each on average (a city's
+         thousands of totals): a group's next rows then probe a table of its own, in the cache, not one of the
+         column's every value; [||] before *)
+  mutable groups : int;  (* the groups the column has room for *)
 }
+
+(* the different values a group holds on average past which each group gets a table of its own, looked at when the
+   column's table, of [own_from] entries or more, grows; the tests make them small *)
+let own_min = ref 64
+let own_from = ref 4096
+
+(* the bag columns moved to a table a group so far: for the tests *)
+let owned = Atomic.make 0
 
 (* n empty entries of a bag column *)
 let empty_entries n = let a = Array.make (3 * n) 0 in for i = 0 to n - 1 do a.(3 * i) <- -1 done; a
@@ -690,7 +703,7 @@ let col (a : Wire.agg) (tx : Value.typ) =
   match a with
   | Avg _ -> Csums { csquare = false; cfloat = tx = Tfloat; q = [||]; full = [||] }
   | Variance _ | Stddev _ -> Csums { csquare = true; cfloat = tx = Tfloat; q = [||]; full = [||] }
-  | Distinct _ | Values _ | Quantile _ -> Cbag { be = empty_entries 16; bused = 0; blive = [||]; btotal = [||]; parts = [] }
+  | Distinct _ | Values _ | Quantile _ -> Cbag { be = empty_entries 16; bused = 0; blive = [||]; btotal = [||]; parts = []; own = [||]; groups = 0 }
   | Count | Sum _ | Min _ | Max _ -> invalid_arg "Agg.col"
 
 let grow_ints (a : int array) n = if Array.length a >= n then a else (let b = Array.make (max n (2 * Array.length a)) 0 in Array.blit a 0 b 0 (Array.length a); b)
@@ -701,7 +714,11 @@ let col_room c n =
   | Csums s ->
     s.q <- grow_ints s.q (4 * n);
     if Array.length s.full < n then (let f = Array.make (max n (2 * Array.length s.full)) None in Array.blit s.full 0 f 0 (Array.length s.full); s.full <- f)
-  | Cbag b -> b.blive <- grow_ints b.blive n; b.btotal <- grow_ints b.btotal n
+  | Cbag b ->
+    b.blive <- grow_ints b.blive n;
+    b.btotal <- grow_ints b.btotal n;
+    if n > b.groups then b.groups <- n;
+    if Array.length b.own > 0 && Array.length b.own < n then (let o = Array.make (max n (2 * Array.length b.own)) None in Array.blit b.own 0 o 0 (Array.length b.own); b.own <- o)
 
 (* group g's state, made from its plain ints the first time *)
 let full_of s g =
@@ -732,23 +749,53 @@ let bag_grow b =
   done;
   b.be <- be
 
-(* [d] more copies (d > 0) of w in group g; true when it is a new entry: its cells *)
-let bag_add b g w d =
+(* the column's entries moved into a table a group ([own]) *)
+let to_own b =
+  let own = Array.make (max 1 (Array.length b.btotal)) None in
   let be = b.be in
-  let m = (Array.length be / 3) - 1 in
-  let i = ref (bag_hash g w land m) in
-  while Array.unsafe_get be (3 * !i) >= 0 && (Array.unsafe_get be (3 * !i) <> g || Array.unsafe_get be ((3 * !i) + 1) <> w) do i := (!i + 1) land m done;
-  b.btotal.(g) <- b.btotal.(g) + d;
-  let o = 3 * !i in
-  if be.(o) >= 0 then (be.(o + 2) <- be.(o + 2) + d; false)
+  for i = 0 to (Array.length be / 3) - 1 do
+    let g = be.(3 * i) in
+    if g >= 0 then begin
+      let t = match own.(g) with Some t -> t | None -> let t = Bag.create () in own.(g) <- Some t; t in
+      ignore (Bag.add t be.((3 * i) + 1) be.((3 * i) + 2))
+    end
+  done;
+  b.own <- own;
+  b.be <- empty_entries 1;
+  b.bused <- 0;
+  Atomic.incr owned
+
+(* [d] more copies (d > 0) of w in group g; true when it is a new entry: its cells *)
+let rec bag_add b g w d =
+  if Array.length b.own > 0 then begin
+    let t = match b.own.(g) with Some t -> t | None -> let t = Bag.create () in b.own.(g) <- Some t; t in
+    b.btotal.(g) <- b.btotal.(g) + d;
+    let fresh = Bag.add t w d in
+    if fresh then b.blive.(g) <- b.blive.(g) + 1;
+    fresh
+  end
   else begin
-    be.(o) <- g;
-    be.(o + 1) <- w;
-    be.(o + 2) <- d;
-    b.bused <- b.bused + 1;
-    b.blive.(g) <- b.blive.(g) + 1;
-    if 2 * b.bused > Array.length be / 3 then bag_grow b;
-    true
+    let be = b.be in
+    let m = (Array.length be / 3) - 1 in
+    let i = ref (bag_hash g w land m) in
+    while Array.unsafe_get be (3 * !i) >= 0 && (Array.unsafe_get be (3 * !i) <> g || Array.unsafe_get be ((3 * !i) + 1) <> w) do i := (!i + 1) land m done;
+    let o = 3 * !i in
+    if be.(o) >= 0 then (b.btotal.(g) <- b.btotal.(g) + d; be.(o + 2) <- be.(o + 2) + d; false)
+    else if 2 * (b.bused + 1) > Array.length be / 3 && b.bused >= !own_from && b.bused > !own_min * max 1 b.groups then begin
+      (* large groups: a table each, then this value *)
+      to_own b;
+      bag_add b g w d
+    end
+    else begin
+      b.btotal.(g) <- b.btotal.(g) + d;
+      be.(o) <- g;
+      be.(o + 1) <- w;
+      be.(o + 2) <- d;
+      b.bused <- b.bused + 1;
+      b.blive.(g) <- b.blive.(g) + 1;
+      if 2 * b.bused > Array.length be / 3 then bag_grow b;
+      true
+    end
   end
 
 (* a binding's word w of group g (a row that comes: Answer's); true when a bag gained an entry (its cells). An int's
@@ -807,30 +854,30 @@ let by_group c n =
   match c with
   | Cbag b ->
     let tables = (b, None) :: List.map (fun (t, m) -> (t, Some m)) b.parts in
+    (* each entry of a table, its group here: [f g word count] *)
+    let each f =
+      List.iter
+        (fun (t, m) ->
+          let here g = match m with Some m -> m.(g) | None -> g in
+          let be = t.be in
+          for i = 0 to (Array.length be / 3) - 1 do
+            let g = be.(3 * i) in
+            if g >= 0 then f (here g) be.((3 * i) + 1) be.((3 * i) + 2)
+          done;
+          Array.iteri
+            (fun g -> function
+              | Some (bag : Bag.t) ->
+                let g = here g in
+                for i = 0 to Array.length bag.keys - 1 do if bag.cnt.(i) > 0 then f g bag.keys.(i) bag.cnt.(i) done
+              | None -> ())
+            t.own)
+        tables
+    in
     let off = Array.make (n + 1) 0 in
-    List.iter
-      (fun (t, m) ->
-        let be = t.be in
-        for i = 0 to (Array.length be / 3) - 1 do
-          let g = be.(3 * i) in
-          if g >= 0 then (let g = match m with Some m -> m.(g) | None -> g in off.(g + 1) <- off.(g + 1) + 1)
-        done)
-      tables;
+    each (fun g _ _ -> off.(g + 1) <- off.(g + 1) + 1);
     for g = 1 to n do off.(g) <- off.(g) + off.(g - 1) done;
     let at = Array.sub off 0 (max 1 n) and ks = Array.make off.(n) 0 and cs = Array.make off.(n) 0 in
-    List.iter
-      (fun (t, m) ->
-        let be = t.be in
-        for i = 0 to (Array.length be / 3) - 1 do
-          let g = be.(3 * i) in
-          if g >= 0 then begin
-            let g = match m with Some m -> m.(g) | None -> g in
-            ks.(at.(g)) <- be.((3 * i) + 1);
-            cs.(at.(g)) <- be.((3 * i) + 2);
-            at.(g) <- at.(g) + 1
-          end
-        done)
-      tables;
+    each (fun g w c -> ks.(at.(g)) <- w; cs.(at.(g)) <- c; at.(g) <- at.(g) + 1);
     off, ks, cs
   | Csums _ -> [||], [||], [||]
 
