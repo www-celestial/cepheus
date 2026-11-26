@@ -411,7 +411,7 @@ let planner = ref (fun ~sets ~less v nvars pats ranges -> order ~sets ~less v nv
    [merge] joins two accumulators. A level of [parallel_min] candidates or more, wherever it is in the order, has its
    candidates split into slices run by [domains] domains, each slice with its own accumulator: a view needs no lock to
    be read. The first level of two candidates or more past the levels of one, when the planner expects
-   [parallel_min] candidates of work or more, is probed: its candidates run on one domain until their work, measured,
+   [probe_more] times [parallel_min] candidates of work or more, is probed: its candidates run on one domain until their work, measured,
    says that the rest is worth splitting (the fold's own section below). *)
 let parallel_min = ref 20_000
 let domains = ref (max 1 (min 8 (Domain.recommended_domain_count ())))
@@ -419,6 +419,12 @@ let domains = ref (max 1 (min 8 (Domain.recommended_domain_count ())))
 (* the work a probed level's candidates take, measured, before the rest may be split: [every] (the tests make it
    small) *)
 let probe_min = ref every
+
+(* a probe splits only where the planner expects, and the measure then says, [probe_more] times [parallel_min]
+   candidates of work: its numbers are an estimate and an extrapolation, a level's count an exact one. Below it, the
+   rows a question gives cost more than its candidates (a find of 11,363 texts, of 22,726 candidates, took 3.6 ms on
+   one domain and 4.2 split); the tests make it 1 *)
+let probe_more = ref 4
 
 (* A runner: one a domain of a question, its own binding, counts and caches, the view shared (Query.fold) *)
 type 'a runner = {
@@ -448,9 +454,15 @@ and 'a ctl = {
   mutable splitting : bool;  (* may [split] a level: the asking domain's runner, outside a split *)
   mutable split : int -> int -> int -> 'a ref -> bool;  (* level, source, doubled count: true when it ran the level *)
   mutable top : bool;  (* no level of two candidates or more met yet (the asking domain's runner) *)
+  mutable cap : int;  (* the question's budget over every domain (the fold's [spent]) *)
+  mutable spent : int Atomic.t;  (* the candidates of every domain, from the first split ([unshared] before) *)
+  mutable nsplit : int;  (* the splits the asking domain made *)
 }
 
 let no_split _ _ _ _ = false
+
+(* the count of a runner that shares none: never added to (a question that splits gets its own at its first split) *)
+let unshared = Atomic.make 0
 
 (* the leaves whose value a level reads and keeps ([kept]), each once: what a collected candidate carries *)
 let kept_leaves (ks : int array) = Array.of_list (List.sort_uniq compare (List.filter (fun y -> y >= 0) (Array.to_list ks)))
@@ -671,9 +683,8 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
        [domains] when it has [parallel_min] candidates or more, the split there was before splits of deeper levels;
        [budget] otherwise). So the budget never refuses what it took before, and does not depend on the number of
        domains that take part nor on which one ran what: the question's work is the same on one domain *)
-    let spent = Atomic.make 0 and cap = ref budget in
-    let runner ~helper ticks0 =
-      let ctl = { ticks = ticks0; shared = helper; cut = n; collecting = false; collect = ignore; splitting = false; split = no_split; top = true } in
+    let runner ~helper ~cap ~spent ticks0 =
+      let ctl = { ticks = ticks0; shared = helper; cut = n; collecting = false; collect = ignore; splitting = false; split = no_split; top = true; cap; spent; nsplit = 0 } in
       let env = Array.make n 0 and bound = Array.make n false and w = ref 0 and cell = [| 0 |] in
       (* the intervals, a runner's own when Less bounds a variable by the bindings before it *)
       let iv0 = iv in
@@ -711,7 +722,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
       in
       (* the next count of candidates at which the budget, the stop and the other domains are looked at: the budget
          itself when there is nothing else to look at ([ticks] false: one comparison a candidate, as before them) *)
-      let lim = ref (if ticks0 then min !cap every else !cap) in
+      let lim = ref (if ticks0 then min cap every else cap) in
       (* the candidates already added to the stop's work, and to the question's shared count *)
       let told = ref 0 and told_s = ref 0 in
       let tell () =
@@ -719,15 +730,15 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
         | Some s -> (if helper then ignore (Atomic.fetch_and_add s.work (!w - !told)) else s.own <- s.own + (!w - !told)); told := !w
         | None -> ()
       in
-      let settle () = let d = !w - !told_s in if d <> 0 then (told_s := !w; ignore (Atomic.fetch_and_add spent d)) in
+      let settle () = let d = !w - !told_s in if d <> 0 then (told_s := !w; ignore (Atomic.fetch_and_add ctl.spent d)) in
       let[@inline never] over () =
         tell ();
         (* the question's candidates: this runner's alone, or every domain's while others work beside it *)
-        let total = if ctl.shared then (settle (); Atomic.get spent) else !w in
-        if total > !cap then raise (Over_budget budget);
+        let total = if ctl.shared then (settle (); Atomic.get ctl.spent) else !w in
+        if total > ctl.cap then raise (Over_budget budget);
         if Atomic.get abort then raise Stopped;
         (match stop with Some s -> check s | None -> ());
-        let left = !cap - total in
+        let left = ctl.cap - total in
         lim := !w + if ctl.ticks && left > every then every else left
       in
       (* a leaf's value read at its thing's level ([kept]): the thing, and the value *)
@@ -1000,10 +1011,8 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
     in
     if n = 0 then step (init ()) [||]
     else begin
-      let m = runner ~helper:false (match stop with Some _ -> true | None -> false) in
+      let m = runner ~helper:false ~cap:budget ~spent:unshared (match stop with Some _ -> true | None -> false) in
       let d = if seq then 1 else !domains in
-      (* the splits this question made: its work is then the shared count *)
-      let nsplit = ref 0 in
       if d > 1 then begin
         (* the split's machinery, made at the first level of two candidates or more: a question that has none
            pays for none of it *)
@@ -1021,7 +1030,9 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
           let region i src pre (buf : int array) from len stride acc =
             let x = ord.(i) and cnt = len - from in
             if cnt > 0 then begin
-              incr nsplit;
+              (* the count every domain adds to, from this first split on *)
+              if m.ctl.nsplit = 0 then m.ctl.spent <- Atomic.make 0;
+              m.ctl.nsplit <- m.ctl.nsplit + 1;
               Atomic.incr splits;
               if pre && src = -1 then Atomic.incr probed_splits;
               let ys = kept_leaves kept.(i) in
@@ -1079,7 +1090,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
               let wait, _ =
                 Pool.help (d - 1) (fun () ->
                     guarded (fun () ->
-                        let r = runner ~helper:true true in
+                        let r = runner ~helper:true ~cap:m.ctl.cap ~spent:m.ctl.spent true in
                         Array.blit penv 0 r.env 0 n;
                         Array.blit pkt 0 r.kthing 0 n;
                         Array.blit pkw 0 r.kword 0 n;
@@ -1124,9 +1135,9 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
           in
           (* a level of [parallel_min] candidates or more (exact counts): split. Its source's candidates as they come (a
              leapfrog's level collected, in its order); then, the first level of two candidates or more past those of one
-             ([top]), when the planner expects [parallel_min] candidates of work or more: probed. Its candidates run here,
+             ([top]), when the planner expects [probe_more] times [parallel_min] candidates of work or more: probed. Its candidates run here,
              one after the other, until the work they took, measured (every candidate counted below them), says that
-             the rest would take [parallel_min] or more, at the same rate: the rest is split, if there are 2 a domain
+             the rest would take [probe_more] times [parallel_min] or more, at the same rate: the rest is split, if there are 2 a domain
              left at least. So a question is split only where a level offers that much (counted), or where its work was
              seen (measured): a small question never pays for the split, nor for the probe unless the planner expected a
              large one. *)
@@ -1137,18 +1148,15 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
               region i src true buf 0 len stride acc
             end
             else begin
-              (* the source's candidates: [c] at most (exact counts, or more for a property's values and holders) *)
-              let firsts = ref (Array.make (max 1 c) 0) and k = ref 0 in
-              let add cand =
-                if !k = Array.length !firsts then (let nb = Array.make (2 * !k) 0 in Array.blit !firsts 0 nb 0 !k; firsts := nb);
-                Array.unsafe_set !firsts !k cand;
-                incr k;
-                incr m.w
-              in
+              (* the source's candidates: [c] at most (its count is exact, or more for a property's values and
+                 holders), each counted *)
+              let firsts = Array.make (max 1 c) 0 and k = ref 0 in
+              let add cand = firsts.(!k) <- cand; incr k in
               m.bound.(x) <- true;
               if src = -2 then Array.iter add sv.(x) else m.iterate x by_var.(x).(src) add;
               m.bound.(x) <- false;
-              region i src false !firsts 0 !k 1 acc
+              m.w := !(m.w) + !k;
+              region i src false firsts 0 !k 1 acc
             end
           in
           let probed i acc =
@@ -1167,7 +1175,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
               m.level (i + 1) acc;
               incr j;
               let rest = len - !j and took = !(m.w) - w0 in
-              if rest >= 2 * d && took >= !probe_min && float_of_int took *. float_of_int rest >= float_of_int !parallel_min *. float_of_int !j then begin
+              if rest >= 2 * d && took >= !probe_min && float_of_int took *. float_of_int rest >= float_of_int (!probe_more * !parallel_min) *. float_of_int !j then begin
                 go := false;
                 m.bound.(x) <- false;
                 region i (-1) true buf !j len stride acc
@@ -1178,7 +1186,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
           fun i src size acc ->
             let c = size / 2 in
             if c >= !parallel_min then begin
-              if i = 0 then cap := (if budget > max_int / d then max_int else budget * d);
+              if i = 0 then m.ctl.cap <- (if budget > max_int / d then max_int else budget * d);
               m.ctl.top <- false;
               wide i src c acc;
               true
@@ -1191,7 +1199,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
           (fun i src size acc ->
             (* a level to split, or the first of two candidates or more when the planner expects much work: the
                machinery; otherwise no split, nothing made *)
-            if size / 2 >= !parallel_min || (m.ctl.top && cost >= float_of_int !parallel_min) then begin
+            if size / 2 >= !parallel_min || (m.ctl.top && cost >= float_of_int (!probe_more * !parallel_min)) then begin
               let f = match !hook with Some f -> f | None -> let f = made () in hook := Some f; f in
               f i src size acc
             end
@@ -1199,7 +1207,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
       end;
       let acc = ref (init ()) in
       m.level 0 acc;
-      (match account with Some r -> r := !r + (if !nsplit = 0 then !(m.w) else (m.settle (); Atomic.get spent)) | None -> ());
+      (match account with Some r -> r := !r + (if m.ctl.nsplit = 0 then !(m.w) else (m.settle (); Atomic.get m.ctl.spent)) | None -> ());
       m.flush ();
       !acc
     end

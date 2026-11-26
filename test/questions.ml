@@ -756,11 +756,12 @@ let run seed =
            in the same order as on one domain, bit for bit *)
         Top.path := Auto;
         let on d pm pr =
-          let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min in
+          let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
           Query.domains := d;
           Query.parallel_min := pm;
           Query.probe_min := pr;
-          Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0) (fun () -> engine ~extra v q sel o)
+          Query.probe_more := 1;
+          Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0) (fun () -> engine ~extra v q sel o)
         in
         (match on 1 !Query.parallel_min 1 with
          | exception Query.Bad m -> C.fail "seed %d: one domain refused: %s" seed m
