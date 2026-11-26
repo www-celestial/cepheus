@@ -393,6 +393,39 @@ written by hand. `After` is that, built in: it breaks ties by the other fields o
 in the order only when they are the same row, and needs no index chosen for it; the page after a row costs the same at
 any depth ([how it is answered](cesia.md#sort-limit-and-after-pages)).
 
+**A list of the clients by their ids**, as an admin page shows a kind: the same question, sorted by the thing; `Above`
+on a thing keeps the ones made after it.
+
+```cesia norun
+clients = (after) -> ((c, n) -> {
+  Where: [[c, Client.Name, n]],
+  Give: {Id: c, Name: n},
+  Sort: [c],
+  Limit: 2,
+  After: after,
+})
+one = result.Unwrap(cepheus.Find(2, clients(missing), db))
+io.Print(one)
+io.Print(cepheus.Find(2, clients(one[2]), db))
+io.Print(cepheus.Find(2, (c, n) -> {Where: [[c, Client.City, "Lyon"], [c, Client.Name, n], cepheus.Above(c, ada)], Give: {Name: n}, Sort: [c]}, db))
+```
+
+```text
+[{Id: 65536, Name: "Ada Martin"}, {Id: 65537, Name: "Bo Lind"}]
+Ok([{Id: 65538, Name: "Cy Moreau"}, {Id: 65539, Name: "Di Weber"}])
+Ok([{Name: "Di Weber"}])
+```
+
+```sql
+SELECT id, name FROM client ORDER BY id LIMIT 2;                       -- 1 Ada Martin, 2 Bo Lind
+SELECT id, name FROM client WHERE id > 2 ORDER BY id LIMIT 2;          -- 3 Cy Moreau, 4 Di Weber
+SELECT name FROM client WHERE city = 'Lyon' AND id > 1 ORDER BY id;    -- Di Weber
+```
+
+Both read a page from its cursor on: PostgreSQL its primary key's index, Cepheus the column of `Client.Name`, which
+keeps the things in the order of their ids; a page of 51 of a million things costs what a page of 51 of ten thousand
+costs ([what it costs](#what-it-costs)).
+
 ## 5. Clients with no invoice this year
 
 **The problem.** Marketing wants the clients who bought nothing this year, to call them. The answer is about what is
@@ -1074,6 +1107,7 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
 | the different statuses by city (`Count(s)`; `count(DISTINCT)`), 100 groups | **15.2 ms** | 190 ms | Cepheus, 13 times |
 | the mean invoice by client (`Avg`; `avg`), 10,000 groups | **36.5 ms** | 65.5 ms | Cepheus, 1.8 times |
 | the totals by month in Paris (`Trunc`; `date_trunc` with a zone), 121 groups | **20.9 ms** | 141 ms | Cepheus, 6.7 times |
+| a page of 51 of 1,000,000 things by id, after the middle one (`Sort` on the thing, `After`; `WHERE id > $1 ORDER BY id LIMIT 51`) | **25.2 µs** | 60 µs | Cepheus, 2.4 times |
 
 - A counter many writers share is where a lock costs most: PostgreSQL holds the row until each commit is on the disk,
   Cepheus's writer reads the counter as it applies each group, and the groups share their fsync.
@@ -1090,6 +1124,10 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
   benchmarks](benchmarks.md#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)): Cepheus
   wins at every number of groups, keeping each group's different values with their counts where PostgreSQL sorts its
   rows, a report by city or by client split across its cores, its groups in one flat table a core.
+- A page of a kind by its things' ids reads the property's column from the cursor on, one run of a million things, at
+  a load of 4.6 to 13 ([the benchmarks](benchmarks.md#pages-of-a-kind-by-its-things-ids-2026-11-26-at-10000-to-1000000-things)):
+  24 to 34 µs at any depth and size, where it read the whole kind before (81 to 99 ms at this size); PostgreSQL's
+  keyset query reads its primary key's B-tree from the cursor.
 
 ## Each tutorial in one line
 

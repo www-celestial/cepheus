@@ -306,7 +306,9 @@ joins deux à deux, comme en fait une base SQL, peut faire bien plus sur un grap
 
 **Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) et `cepheus.Between(x, lo, hi)`
 ($\mathit{lo} \le x \le \mathit{hi}$), pour une variable d'un Int, d'une Date ou de Money, lisent l'index trié : ce sont des intervalles de la
-question, pas des filtres après elle. Sur un Float, ils gardent les valeurs de leur côté dans l'ordre que donne `Sort`
+question, pas des filtres après elle. Sur une chose, ils prennent son id, un Int (`Above(c, bo)` : les clients faits
+après Bo), et lisent les choses de la propriété de son pattern à partir de la première de l'intervalle, dans l'ordre de
+leurs ids. Sur un Float, ils gardent les valeurs de leur côté dans l'ordre que donne `Sort`
 (le totalOrder d'IEEE 754 : $-0$ avant $0$, NaN après l'infini), chaque candidat vérifié ([plus bas](#less-lessorequal-et-optional)).
 Deux variables se comparent avec `cepheus.Less` et `cepheus.LessOrEqual` (même section). Toute autre condition est à
 Cesia, sur les lignes qu'elle donne (`list.Filter`).
@@ -525,7 +527,21 @@ ligne après laquelle commence la page).
   dont les lignes qui manquent ont besoin à ce rendement. Elle perd quand les lignes que veut la page sont loin dans
   l'ordre : les clients dont le nom commence par « ma », triés par nom, viennent après tous les « A » à « L » ; la
   marche abandonne alors après 2 fenêtres au lieu de 5 (en OCaml, 396 µs contre 657 quand elle allait jusqu'à son
-  budget, et 322 pour le heap seul, sur les données de l'application du [guide](app.md#14-ce-que-cela-coûte)).
+  budget, et 322 pour le heap seul, sur les données de l'application du [guide](app.md#14-ce-que-cela-coûte)) ;
+- **dans l'ordre des ids des choses**, quand la première clé est la chose d'un pattern : une liste d'un kind
+  par ses ids (`Sort: [c]` sur `[c, Client.Name, n]`), ou les choses d'une valeur d'un champ (les clients d'un tenant,
+  c'est-à-dire d'un locataire de la plateforme, `[c, Client.Tenant, t]`), dans les `Above`, `Below` et `Between` de la
+  question sur cette chose. Une fenêtre, ce sont les choses suivantes qui tiennent la propriété du pattern (qui tiennent
+  sa valeur, quand c'est une constante), lues dans la colonne de la propriété, que chaque run sur le disque garde dans
+  l'ordre des ids des choses, à partir du curseur, fusionnées sur les runs et les changements pas encore fusionnés ;
+  des patterns que tient la chose, celui qui a le moins de faits. La première fenêtre tient k choses, k + 1 après un
+  curseur (la chose du curseur d'abord : ses lignes peuvent venir après lui par les autres champs), les suivantes
+  grandissent comme plus haut, dans le même budget : une page des choses d'un kind lit ses k choses et rien de plus, à
+  n'importe quelle profondeur et quelle que soit la taille du kind. C'est la keyset query de PostgreSQL (la requête qui
+  reprend après la dernière clé lue) sur sa clé primaire, `WHERE id > $1 ORDER BY id LIMIT 50`, sans index à choisir :
+  une page de 51 sur 10 000, 100 000 ou 1 000 000 de choses prend 24 à 27 µs, là où le heap lisait tout le kind (2,1
+  à 2,8, 8,5 à 11 et 81 à 99 ms), et le moteur de PostgreSQL 36 à 62 µs
+  ([les benchmarks](benchmarks.md#les-pages-dun-kind-par-les-ids-de-ses-choses-2026-11-26-de-10-000-à-1-000-000-de-choses)).
 
 `Watch` prend aussi `Sort` et `Limit`, et garde les premières lignes de l'ordre à mesure qu'elles changent
 ([plus bas](#sort-et-limit-dans-un-watch)) ; il refuse `After`. Une question qui tient `Sort`, `Limit` ou `After` est refusée si elle tient une autre clé que

@@ -21,7 +21,7 @@ stay as they are, or a later version reads and speaks both the old and the new.
   ([isolation](docs/book/concepts.md#isolation-exactly-what-a-reader-and-a-writer-see)).
 - **Questions** of patterns joined by Generic Join, a worst-case optimal join (its time is bounded by the largest
   answer the data could give, the AGM bound, not by the sizes of the steps between); `Not`, `Or`, `In`, `Prefix` and
-  ranges (of ints, dates, money, and floats in IEEE 754's totalOrder); `Less` and `LessOrEqual` between two variables
+  ranges (of ints, dates, money, things by their ids, and floats in IEEE 754's totalOrder); `Less` and `LessOrEqual` between two variables
   (the later one sought in the sorted index from the other's value, the inequality join of Khayyat et al. 2015);
   `Optional`, SQL's `LEFT JOIN` of one property (SPARQL's `OPTIONAL`, Pérez et al. 2009: a missing cell sorts last
   both ways); `Sum`, `Count`, `Min` and `Max`; pages with `Sort`, `Limit` and `After`; **reports**: `Avg`, `Count(x)`
@@ -270,9 +270,21 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   now ahead of PostgreSQL at every number of groups; the questions of before as fast as they were (Q1 to Q5 0.97 to
   1.04, small questions in loops 0.96 to 1.03)
   ([benchmarks](docs/book/benchmarks.md#questions-split-past-a-narrow-first-level-and-lighter-groups-2026-11-26-at-1-million-facts)).
+- **A page sorted by a thing reads its page** (2026-11-26, 5 rounds alternated with main's binaries): a list of a kind
+  by its things' ids (`Sort` on the thing, `After` its last row), or the things of one value of a field (a tenant's),
+  reads the next things of the pattern's property from the cursor, in the order of their ids that each run's column
+  keeps, where the heap walked the whole kind at every page. A page of 51 of 10,000, 100,000 and 1,000,000 things
+  24 to 27 µs against 2.1 to 2.8, 8.5 to 11 and 81 to 99 ms, PostgreSQL 18.6's keyset query on its primary key 36 to
+  62 µs; in a program's own memory (every fact in the delta) 45 to 50 µs against 23 to 26 ms at 100,000; Centauri's
+  admin lists its 100,005 clients, every page of 50 in turn, in 40.6 s where it took 94.4. A range of a thing reads its
+  things from its first, and `Above`, `Below` and `Between` take a thing's id, where they refused a link
+  ([pages](docs/book/cesia.md#sort-limit-and-after-pages),
+  [benchmarks](docs/book/benchmarks.md#pages-of-a-kind-by-its-things-ids-2026-11-26-at-10000-to-1000000-things)).
 
 ### Fixes
 
+- `test/server_raft.ml` waits for the two damaged servers' line of the damage set aside, with a deadline of 30 s,
+  where it read their logs once after their sockets answered: 1 run in 70 failed under load.
 - `tools/test.sh` names the checks that failed: each step's output goes to a log of its own, and a step that fails
   shows its `FAIL` lines, the end of its log and the log's path, which stays, where only its count showed (`vault_unit`
   1 failure of 4,913, `rulechange` 6 of 192, under load, with no name). A step that passes shows its count, as before.

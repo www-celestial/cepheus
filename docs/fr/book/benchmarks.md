@@ -94,7 +94,8 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
 | `sbench.exe watches DIR` | un changement sous un watch (une question vivante, que le serveur tient à jour) de `Not`, `Or`, `In` et `Prefix` (un hub chacun, le hub étant le thread qui calcule les questions vivantes d'une base ; les changements faits en mémoire), contre la question à laquelle on répond de nouveau en entier : 21 changements chacun |
 | `rbench.exe load DIR CSVDIR`, `rbench.exe run DIR` | les rapports : les données (10 000 clients, 245 000 factures) et leur CSV pour PostgreSQL ; chaque agrégat sur 1, 100 et 10 000 groupes et les totaux par mois (`Trunc`), tels que le serveur y répond (`Answer.answer`) |
 | `abench.exe DIR`, `mbench.exe DIR` | les questions d'avant, pour un A/B de deux builds sur une même base, chaque fichier compilant contre le build d'avant le changement : `abench` un Give d'un join, des groupes, une page triée, `Not`, un range, `Optional` (les données de rbench) ; `mbench` de petites questions en boucle, le coût fixe d'un fold (un fold d'un seul fait, `Prefix`, Q3 compté, `Not`, `Optional`, une page triée, un find de chaque e-mail, le fold de Q4 ; les données de bench.exe) |
-| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop ; `COUNTER=1` : chaque transaction incrémente une même ligne de compteur partagée), `ops ROOT` (les questions de `bench.exe pages` auxquelles répondent `Less` et `Optional`, avec un index sur `invoice (total)`) |
+| `kbench.exe load DIR N`, `run DIR`, `fork N`, `mixed DIR N`, `csv DIR OUT` | des pages d'un kind par les ids de ses choses : N items (un nom, un tenant, un int) dans un seul run ; une page de 51 par id croissant et décroissant, la première et celle après l'item du milieu, celles d'un tenant de même, chacune vérifiée contre les ids qu'elle doit donner ; sur un fork rempli en mémoire ; sur un fork dont le delta tient N choses d'un autre kind et un item renommé ; les items en CSV pour `pg.sh keyset` |
+| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop ; `COUNTER=1` : chaque transaction incrémente une même ligne de compteur partagée), `ops ROOT` (les questions de `bench.exe pages` auxquelles répondent `Less` et `Optional`, avec un index sur `invoice (total)`), `keyset ROOT load\|run DIR` (les pages de kbench : `WHERE id > $1 ORDER BY id LIMIT 51` sur la clé primaire, celles d'un tenant sur `(tenant, id)`) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | le côté SQLite, un seul fichier `ROOT/bench.db` : `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | la sauvegarde et la restauration des trois côtés : `cepheus backup`, `verify`, `restore` jusqu'à la fin et jusqu'à un groupe ; `pg_basebackup`, `pg_verifybackup`, une restauration et une restauration à un instant donné ; `.backup`, `integrity_check` et `.restore` de SQLite ; tout l'historique rejoué (`-replay`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | la vente de places du [cas](case-seats.md) : `BUYERS` threads vendent toutes les places d'une salle de SEATS places ; le temps, et ce qui a mal tourné |
@@ -112,6 +113,107 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
+
+## Les pages d'un kind par les ids de ses choses (2026-11-26), de 10 000 à 1 000 000 de choses
+
+**Ce qui était lent.** L'admin de Centauri liste un kind page par page : `Find` de `[[t, Kind.Field, v]]`,
+`Give: {Id: t}`, `Sort: [t]`, `Limit: 51` (la page et le curseur de la suivante), `After` la dernière ligne. Sur un
+kind de 100 005 clients, une page prenait 35 à 46 ms, et toutes ses pages environ 2 minutes. Le chemin de l'index
+lisait les valeurs d'une propriété dans leur ordre : la première clé devait être la valeur d'un pattern. Une chose est
+la chose de ses patterns, donc le heap répondait : chaque binding du kind, deux candidats par chose, chacun comparé au
+curseur : tout le kind à chaque page, quelle que soit sa profondeur. `Above` sur une chose était refusé par le package
+Cesia, et dans le moteur un range sur une variable de chose était une vérification de chaque chose de sa propriété.
+
+**Ce qui a changé.** Un tri dont la première clé est la chose d'un pattern lit des fenêtres des choses suivantes qui
+tiennent la propriété du pattern (qui tiennent sa valeur, quand c'est une constante : les choses d'un tenant), à partir
+du curseur, dans l'ordre de leurs ids : la colonne d'une propriété dans chaque run garde ses choses dans cet ordre
+derrière une rank table (un mot pour 32 choses, qui dit lesquelles tiennent la propriété), les choses d'une valeur sont
+ses lignes par valeur, dans l'ordre des choses (une recherche binaire trouve le curseur), et celles du delta sont lues
+par chose ou par valeur, fusionnées ; la première fenêtre tient k choses, k + 1 après un curseur
+([pages](cesia.md#sort-limit-et-after--des-pages)). Un range sur une variable de chose lit ses choses à partir de la
+première du range, et le planner les y compte à partir des rank tables et des offsets ; `Above`, `Below` et `Between`
+prennent l'id d'une chose.
+
+**Méthode.** `kbench.exe load` (un kind de N items : un nom, un lien vers l'un de 10 tenants, un int ; un seul run,
+fusionné), les mêmes lignes dans PostgreSQL 18.6 (`pg.sh keyset` : une table des items, `id` sa clé primaire, un index
+sur `(tenant, id)`, les ids que Cepheus a donnés), sur le SSD SATA. Une page de 51, par id croissant et décroissant, la
+première et celle après l'item du milieu ; puis les choses du tenant 3 (un item sur 10) de même. Les binaires de main
+(12a5a24, *ancien*) à côté de ceux de cette version (*nouveau*), alternés à chaque tour : 5 tours, chaque côté une médiane de
+11 exécutions ; donnés : la médiane des 5 tours et entre crochets leur plus petit et leur plus grand ; *nouveau/ancien* : la
+médiane des rapports des tours. Cepheus : `ask` dans le processus, les lignes faites en valeurs, sur 8 domains au plus ;
+PostgreSQL : le temps de son moteur (`EXPLAIN (ANALYZE, TIMING OFF)`). Puis les mêmes pages sur un fork de 100 000
+items rempli en mémoire (`kbench.exe fork` : chaque fait dans son delta, comme la base en mémoire d'un programme), et
+les pages d'admin de Centauri dans un navigateur (`bench.mjs shell` de l'admin de Centauri, son application de
+factures en mémoire avec 100 005 clients : le navigateur de données sur le kind `client` rempli par All, chaque page de
+50 demandée à son tour). La machine était partagée : une charge moyenne (1 minute) de 4,6 à 13 sur ses 8 threads.
+
+**Des pages de 51**, un seul run (*PostgreSQL / nouveau* : la médiane de PostgreSQL sur celle de Cepheus) :
+
+| choses | page | ancien | nouveau | nouveau/ancien | PostgreSQL 18.6 | PostgreSQL / nouveau |
+|---|---|---:|---:|---:|---:|---:|
+| 10 000 | par id, la première page | 2,63 ms [2,60 ms, 2,67 ms] | **23,6 µs [23,3 µs, 23,8 µs]** | 0,0089 | 44,0 µs [40,0 µs, 52,0 µs] | 1,89 |
+| 10 000 | par id, après celui du milieu | 2,10 ms [2,08 ms, 2,54 ms] | **24,1 µs [23,8 µs, 24,8 µs]** | 0,0114 | 52,0 µs [49,0 µs, 54,0 µs] | 2,14 |
+| 10 000 | par id décroissant, la première page | 2,80 ms [2,74 ms, 3,38 ms] | **23,8 µs [23,4 µs, 24,4 µs]** | 0,0085 | 41,0 µs [41,0 µs, 45,0 µs] | 1,75 |
+| 10 000 | par id décroissant, après celui du milieu | 2,16 ms [2,14 ms, 2,65 ms] | **24,7 µs [24,3 µs, 25,3 µs]** | 0,0115 | 54,0 µs [51,0 µs, 57,0 µs] | 2,18 |
+| 10 000 | celles du tenant 3 par id, la première page | 206 µs [200 µs, 263 µs] | **24,8 µs [24,6 µs, 25,1 µs]** | 0,1190 | 53,0 µs [50,0 µs, 56,0 µs] | 2,11 |
+| 10 000 | celles du tenant 3 par id, après celle du milieu | 155 µs [149 µs, 205 µs] | **28,5 µs [28,1 µs, 28,8 µs]** | 0,1812 | 54,0 µs [53,0 µs, 59,0 µs] | 1,89 |
+| 10 000 | celles du tenant 3 par id décroissant, la première page | 218 µs [213 µs, 270 µs] | **24,4 µs [23,8 µs, 24,6 µs]** | 0,1127 | 50,0 µs [46,0 µs, 53,0 µs] | 2,10 |
+| 10 000 | celles du tenant 3 par id décroissant, après celle du milieu | 161 µs [155 µs, 202 µs] | **30,3 µs [29,6 µs, 34,8 µs]** | 0,1892 | 53,0 µs [50,0 µs, 59,0 µs] | 1,75 |
+| 100 000 | par id, la première page | 10,4 ms [10,2 ms, 11,3 ms] | **24,8 µs [24,5 µs, 26,1 µs]** | 0,0024 | 43,0 µs [42,0 µs, 72,0 µs] | 1,76 |
+| 100 000 | par id, après celui du milieu | 8,49 ms [8,36 ms, 9,34 ms] | **25,7 µs [25,4 µs, 26,2 µs]** | 0,0031 | 51,0 µs [49,0 µs, 58,0 µs] | 1,97 |
+| 100 000 | par id décroissant, la première page | 11,0 ms [10,9 ms, 14,1 ms] | **25,4 µs [25,1 µs, 25,8 µs]** | 0,0023 | 36,0 µs [35,0 µs, 45,0 µs] | 1,43 |
+| 100 000 | par id décroissant, après celui du milieu | 8,85 ms [8,70 ms, 11,1 ms] | **26,8 µs [26,4 µs, 27,3 µs]** | 0,0030 | 53,0 µs [51,0 µs, 58,0 µs] | 1,99 |
+| 100 000 | celles du tenant 3 par id, la première page | 2,05 ms [2,02 ms, 2,56 ms] | **28,5 µs [28,2 µs, 28,6 µs]** | 0,0139 | 62,0 µs [59,0 µs, 64,0 µs] | 2,17 |
+| 100 000 | celles du tenant 3 par id, après celle du milieu | 1,52 ms [1,49 ms, 1,89 ms] | **32,9 µs [32,6 µs, 33,0 µs]** | 0,0214 | 64,0 µs [63,0 µs, 65,0 µs] | 1,96 |
+| 100 000 | celles du tenant 3 par id décroissant, la première page | 2,17 ms [2,13 ms, 2,72 ms] | **24,9 µs [24,3 µs, 24,9 µs]** | 0,0113 | 52,0 µs [51,0 µs, 55,0 µs] | 2,14 |
+| 100 000 | celles du tenant 3 par id décroissant, après celle du milieu | 1,59 ms [1,55 ms, 2,04 ms] | **33,6 µs [33,0 µs, 33,8 µs]** | 0,0210 | 63,0 µs [61,0 µs, 67,0 µs] | 1,88 |
+| 1 000 000 | par id, la première page | 93,2 ms [90,8 ms, 111 ms] | **24,7 µs [24,5 µs, 46,4 µs]** | 0,0003 | 42,0 µs [41,0 µs, 46,0 µs] | 1,67 |
+| 1 000 000 | par id, après celui du milieu | 81,4 ms [77,3 ms, 104 ms] | **25,2 µs [24,9 µs, 29,2 µs]** | 0,0003 | 60,0 µs [58,0 µs, 64,0 µs] | 2,36 |
+| 1 000 000 | par id décroissant, la première page | 99,2 ms [96,1 ms, 117 ms] | **24,6 µs [24,0 µs, 25,1 µs]** | 0,0003 | 41,0 µs [40,0 µs, 44,0 µs] | 1,70 |
+| 1 000 000 | par id décroissant, après celui du milieu | 82,4 ms [80,7 ms, 98,2 ms] | **25,3 µs [24,9 µs, 27,3 µs]** | 0,0003 | 62,0 µs [60,0 µs, 70,0 µs] | 2,45 |
+| 1 000 000 | celles du tenant 3 par id, la première page | 9,51 ms [8,54 ms, 10,9 ms] | **29,1 µs [28,7 µs, 29,9 µs]** | 0,0031 | 57,0 µs [57,0 µs, 59,0 µs] | 1,96 |
+| 1 000 000 | celles du tenant 3 par id, après celle du milieu | 7,10 ms [6,66 ms, 7,66 ms] | **32,0 µs [31,6 µs, 32,2 µs]** | 0,0044 | 60,0 µs [58,0 µs, 64,0 µs] | 1,90 |
+| 1 000 000 | celles du tenant 3 par id décroissant, la première page | 9,96 ms [9,35 ms, 11,7 ms] | **24,4 µs [24,1 µs, 24,6 µs]** | 0,0025 | 56,0 µs [55,0 µs, 61,0 µs] | 2,32 |
+| 1 000 000 | celles du tenant 3 par id décroissant, après celle du milieu | 7,23 ms [7,02 ms, 8,42 ms] | **34,0 µs [33,8 µs, 34,5 µs]** | 0,0048 | 66,0 µs [63,0 µs, 69,0 µs] | 1,92 |
+
+**Sur un fork de 100 000 items** (chaque fait dans son delta, la base d'un programme en mémoire) :
+
+| page | ancien | nouveau | nouveau/ancien |
+|---|---:|---:|---:|
+| par id, la première page | 25,4 ms [25,1 ms, 31,3 ms] | **44,8 µs [44,6 µs, 45,0 µs]** | 0,0018 |
+| par id, après celui du milieu | 23,4 ms [23,1 ms, 24,2 ms] | **45,5 µs [45,0 µs, 45,8 µs]** | 0,0019 |
+| par id décroissant, la première page | 25,8 ms [25,2 ms, 27,1 ms] | **47,5 µs [47,1 µs, 47,6 µs]** | 0,0018 |
+| par id décroissant, après celui du milieu | 23,7 ms [23,2 ms, 24,2 ms] | **49,8 µs [48,6 µs, 51,2 µs]** | 0,0021 |
+| celles du tenant 3 par id, la première page | 2,11 ms [2,06 ms, 3,04 ms] | **33,9 µs [33,3 µs, 34,2 µs]** | 0,0162 |
+| celles du tenant 3 par id, après celle du milieu | 1,57 ms [1,56 ms, 2,42 ms] | **35,1 µs [34,4 µs, 35,3 µs]** | 0,0224 |
+| celles du tenant 3 par id décroissant, la première page | 2,19 ms [2,15 ms, 3,32 ms] | **36,5 µs [36,2 µs, 37,2 µs]** | 0,0166 |
+| celles du tenant 3 par id décroissant, après celle du milieu | 1,68 ms [1,61 ms, 2,40 ms] | **38,9 µs [38,1 µs, 64,0 µs]** | 0,0236 |
+
+
+**À côté d'un delta d'un autre kind** (`kbench.exe mixed` : le run de 1 000 000 d'items, sur un fork dont le delta
+tient 100 000 choses d'un autre kind, faites après eux, et un item renommé ; 3 tours alternés, cette version contre son
+premier commit, ed44295, qui lisait le delta dans sa map par chose jusqu'à la chose suivante de la propriété) : les
+choses de la propriété dans le delta, lues dans sa map par valeur (deux entrées), mettent une page de 51 par id à 25 à
+27 µs, là où lire chaque chose plus récente du delta prenait 8,7 ms en croissant et 11,8 ms en décroissant ; les pages
+des tableaux plus haut les mêmes, 0,99 à 1,04 fois.
+
+**L'admin de Centauri** (le headless shell de Chrome, 5 tours, la médiane et [le plus petit, le plus grand]) : le
+navigateur de données rempli avec les 100 005 clients, chaque page de 50 demandée à son tour (All), 94,4 s [92,1, 109,6]
+avec le moteur de main, **40,6 s** [38,4, 46,5] avec celui-ci : 47 ms par page avant, 20 ms maintenant, dont le `Find`
+de la page prend environ 0,05 ms ; le reste est le travail de l'admin autour de lui (les champs de chaque ligne lus par
+un `Get`, son JSON, la page envoyée et son tableau rempli).
+
+- Une page coûte ses lignes : 24 à 34 µs à chaque taille et à chaque profondeur, là où le coût du heap grandissait
+  avec le kind (2,1 à 2,8 ms à 10 000 choses, 8,5 à 11 ms à 100 000, 81 à 99 ms à 1 000 000), 87 à 4 000 fois moins ;
+  les choses d'un tenant (une sur 10), 5 à 410 fois moins. Dans le delta, une page prend 45 à 50 µs (chaque chose
+  vérifiée contre les changements du delta), 480 à 570 fois moins que les 23 à 26 ms du heap ; celles d'un tenant 34 à
+  39 µs, 43 à 62 fois moins.
+- La keyset query de PostgreSQL lit le B-tree de sa clé primaire à partir du curseur et les lignes de la page : 36 à
+  66 µs de son moteur seul, 1,4 à 2,5 fois celui de Cepheus, qui lit la colonne de la propriété dans l'ordre des ids (un
+  mot de la rank table pour 32 choses) et fait les valeurs des lignes dans le même temps. Une page après celle du
+  milieu coûte à PostgreSQL 1 à 21 µs de plus que la première (la descente de son B-tree jusqu'au curseur), à Cepheus
+  0,5 à 1,4 µs par id (un mot de la rank table) et 3 à 10 µs pour celles d'un tenant (deux recherches binaires parmi
+  les lignes de la valeur du tenant).
 
 ## Les questions découpées après un premier niveau étroit, et des groupes plus légers (2026-11-26), à 1 million de faits
 

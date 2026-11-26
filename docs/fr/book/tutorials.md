@@ -407,6 +407,39 @@ cela, intégré : il départage par les autres champs de la ligne elle-même, si
 l'ordre que si elles sont la même ligne, et n'a besoin d'aucun index choisi pour lui ; la page après une ligne coûte
 la même chose à toute profondeur ([comment on y répond](cesia.md#sort-limit-et-after--des-pages)).
 
+**Une liste des clients par leurs ids**, comme une page d'admin montre un kind : la même question, triée par la chose ;
+`Above` sur une chose garde celles faites après elle.
+
+```cesia norun
+clients = (after) -> ((c, n) -> {
+  Where: [[c, Client.Name, n]],
+  Give: {Id: c, Name: n},
+  Sort: [c],
+  Limit: 2,
+  After: after,
+})
+one = result.Unwrap(cepheus.Find(2, clients(missing), db))
+io.Print(one)
+io.Print(cepheus.Find(2, clients(one[2]), db))
+io.Print(cepheus.Find(2, (c, n) -> {Where: [[c, Client.City, "Lyon"], [c, Client.Name, n], cepheus.Above(c, ada)], Give: {Name: n}, Sort: [c]}, db))
+```
+
+```text
+[{Id: 65536, Name: "Ada Martin"}, {Id: 65537, Name: "Bo Lind"}]
+Ok([{Id: 65538, Name: "Cy Moreau"}, {Id: 65539, Name: "Di Weber"}])
+Ok([{Name: "Di Weber"}])
+```
+
+```sql
+SELECT id, name FROM client ORDER BY id LIMIT 2;                       -- 1 Ada Martin, 2 Bo Lind
+SELECT id, name FROM client WHERE id > 2 ORDER BY id LIMIT 2;          -- 3 Cy Moreau, 4 Di Weber
+SELECT name FROM client WHERE city = 'Lyon' AND id > 1 ORDER BY id;    -- Di Weber
+```
+
+Les deux lisent une page à partir de son curseur : PostgreSQL l'index de sa clé primaire, Cepheus la colonne de
+`Client.Name`, qui garde les choses dans l'ordre de leurs ids ; une page de 51 sur un million de choses coûte ce que
+coûte une page de 51 sur dix mille ([ce que cela coûte](#ce-que-cela-coûte)).
+
 ## 5. Les clients sans facture cette année
 
 **Le problème.** Le marketing veut les clients qui n'ont rien acheté cette année, pour les appeler. La réponse porte
@@ -1108,6 +1141,7 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
 | les statuts différents par ville (`Count(s)` ; `count(DISTINCT)`), 100 groupes | **15,2 ms** | 190 ms | Cepheus, 13 fois |
 | la facture moyenne par client (`Avg` ; `avg`), 10 000 groupes | **36,5 ms** | 65,5 ms | Cepheus, 1,8 fois |
 | les totaux par mois à Paris (`Trunc` ; `date_trunc` avec un fuseau), 121 groupes | **20,9 ms** | 141 ms | Cepheus, 6,7 fois |
+| une page de 51 sur 1 000 000 de choses par id, après celle du milieu (`Sort` sur la chose, `After` ; `WHERE id > $1 ORDER BY id LIMIT 51`) | **25,2 µs** | 60 µs | Cepheus, 2,4 fois |
 
 - Un compteur que beaucoup d'écrivains partagent est là où un lock coûte le plus : PostgreSQL tient la ligne jusqu'à
   ce que chaque commit soit sur le disque, le writer de Cepheus lit le compteur à mesure qu'il applique chaque groupe,
@@ -1128,6 +1162,10 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
   Cepheus gagne à tous les nombres de groupes, en gardant les valeurs différentes de chaque groupe avec leurs comptes là
   où PostgreSQL trie ses lignes, un rapport par ville ou par client découpé sur ses cœurs, ses groupes dans une seule
   table plate par cœur.
+- Une page d'un kind par les ids de ses choses lit la colonne de la propriété à partir du curseur, un seul run d'un
+  million de choses, à une charge de 4,6 à 13 ([les benchmarks](benchmarks.md#les-pages-dun-kind-par-les-ids-de-ses-choses-2026-11-26-de-10-000-à-1-000-000-de-choses)) :
+  24 à 34 µs à toute profondeur et toute taille, là où elle lisait tout le kind avant (81 à 99 ms à cette taille) ; la
+  keyset query de PostgreSQL lit le B-tree de sa clé primaire à partir du curseur.
 
 ## Chaque tutoriel en une ligne
 

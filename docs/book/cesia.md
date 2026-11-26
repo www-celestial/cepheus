@@ -291,7 +291,8 @@ makes, can do much more on a graph ([theory](theory.md#4-generic-join)). Each an
 
 **Conditions.** `cepheus.Above(x, v)` ($x > v$), `cepheus.Below(x, v)` ($x < v$) and `cepheus.Between(x, lo, hi)`
 ($\mathit{lo} \le x \le \mathit{hi}$), for a variable of an Int, a Date or Money, read the sorted index: they are ranges of the question, not
-filters after it. On a Float they keep the values on their side in the order `Sort` gives (IEEE 754's totalOrder:
+filters after it. On a thing they take its id, an Int (`Above(c, bo)`: the clients made after Bo), and read the things
+of its pattern's property from the range's first, in the order of their ids. On a Float they keep the values on their side in the order `Sort` gives (IEEE 754's totalOrder:
 $-0$ before $0$, NaN after infinity), each candidate checked ([below](#less-lessorequal-and-optional)). Two variables
 compare with `cepheus.Less` and `cepheus.LessOrEqual` (same section). Any other condition is Cesia's, on the rows it
 gives (`list.Filter`). A Date is kept to the
@@ -491,7 +492,19 @@ place, if that place is after the cursor.
   yield. It loses when the rows the page wants lie far in the order: the clients whose name starts with "ma", sorted
   by name, sit after every "A" to "L"; the walk then gives up after 2 windows instead of 5 (in OCaml, 396 µs against
   657 when it walked to its budget, and 322 for the heap alone, on the app's data of
-  [the guide](app.md#14-what-it-costs)).
+  [the guide](app.md#14-what-it-costs));
+- **in the order of the things' ids**, when the first key is the thing of a pattern: a list of a kind by its
+  ids (`Sort: [c]` over `[c, Client.Name, n]`), or the things of one value of a field (a tenant's clients,
+  `[c, Client.Tenant, t]`), within the question's `Above`, `Below` and `Between` on that thing. A window is the next
+  things that hold the pattern's property (that hold its value, when it is a constant), read from the property's
+  column, which each run on disk keeps in the order of the things' ids, from the cursor on, merged over the runs and
+  the changes not yet merged; of the patterns the thing holds, the one of the fewest facts. The first window holds k
+  things, k + 1 after a cursor (the cursor's own thing first: its rows may come after it by the other fields), the
+  next ones grow as above, within the same budget: a page of a kind's things reads its k things and no more, at any
+  depth and whatever the kind's size. This is PostgreSQL's keyset query on its primary key, `WHERE id > $1 ORDER BY id
+  LIMIT 50`, with no index to choose: a page of 51 of 10,000, 100,000 or 1,000,000 things takes 24 to 27 µs, where the
+  heap read the whole kind (2.1 to 2.8, 8.5 to 11 and 81 to 99 ms), and PostgreSQL's engine 36 to 62 µs
+  ([the benchmarks](benchmarks.md#pages-of-a-kind-by-its-things-ids-2026-11-26-at-10000-to-1000000-things)).
 
 `Watch` takes `Sort` and `Limit` too, and keeps the first rows of the order as they change
 ([below](#sort-and-limit-in-a-watch)); it refuses `After`. A question that holds `Sort`, `Limit` or `After` is refused if it holds another key than `Where`,
