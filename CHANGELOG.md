@@ -32,7 +32,17 @@ stay as they are, or a later version reads and speaks both the old and the new.
   millennium in an IANA time zone, read from the system's TZif files with their POSIX rules: PostgreSQL's
   `date_trunc(unit, d, zone)`) as a key of the rows ([reports](docs/book/cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc),
   tutorials [11](docs/book/tutorials.md#11-a-monthly-report-of-sales-by-client-in-the-companys-time-zone) and
-  [12](docs/book/tutorials.md#12-the-median-and-spread-of-payment-delays-the-list-of-products-of-each-invoice))
+  [12](docs/book/tutorials.md#12-the-median-and-spread-of-payment-delays-the-list-of-products-of-each-invoice));
+  **windows**: `Running` (a running total, a moving mean of the last n rows, a running `Min`, `Max` or `Count()`, the
+  row's number), `Rank` (`rank()`, `dense_rank()`) and `Prev` (`lag`), fields of `Give` computed over the answer's rows
+  in `Sort`'s order (a report's groups too: `Running(Sum(Sum(t)))`, SQL's `sum(sum(t)) OVER`), before `After` and
+  `Limit` (a page's running total goes on from the page before, read by one pass over the rows before it, none
+  sorted), from exact sums taken out as a frame slides and a monotone queue for `Min` and `Max` (Leis et al. 2015,
+  Lemire 2006), and **`Each`** (`PARTITION BY`; `Limit` each group's: the 3 latest invoices of each client, SQL's
+  `LATERAL ... LIMIT 3`, and `Limit: 1`, `DISTINCT ON`), protocol 10 (`Wire.Over`); a watch refuses them
+  ([windows](docs/book/cesia.md#windows-running-rank-prev-each), tutorials
+  [13](docs/book/tutorials.md#13-a-monthly-balance-with-a-running-total-the-change-from-last-month-and-a-3-month-moving-average)
+  and [14](docs/book/tutorials.md#14-the-3-latest-invoices-of-each-client-the-last-one-of-each-a-leaderboard-of-clients-by-revenue))
   ([questions](docs/book/concepts.md#questions), [Less and Optional](docs/book/cesia.md#less-lessorequal-and-optional)). `find`, `ask` and `fold` take a `?timeout`, past which they give
   `Error (Timeout _)`, a constructor added to `Cepheus.error` before the first release.
 - **Links that name a kind**, SQL's foreign keys: a link property names a kind (`Link(to = "client")` in Cesia,
@@ -89,8 +99,8 @@ stay as they are, or a later version reads and speaks both the old and the new.
   answer once its group is durable, and with `Sort` and `Limit` keep the first rows of an order as they change (the
   ten latest payments: ten rows held, a row that leaves them replaced by one page read after the last), the rule
   model-checked ([Sort and Limit in a watch](docs/book/cesia.md#sort-and-limit-in-a-watch)). The wire protocol is at
-  version 9 (the aggregates of reports and Trunc; 8: the operation Delete and the links that name a kind); a program
-  speaks 1 to 9 with a server of any of them. A token with rights per kind deletes a thing only if it may add to every kind the deletion can reach and read
+  version 10 (the windows and Each; 9: the aggregates of reports and Trunc; 8: the operation Delete and the links that
+  name a kind); a program speaks 1 to 10 with a server of any of them. A token with rights per kind deletes a thing only if it may add to every kind the deletion can reach and read
   every kind whose links refuse it.
 - A **replica** on another machine keeps a copy of every database over mutual TLS, promoted by hand with `cepheus
   promote`; three servers or more form a **Raft** cluster, which confirms a write once a majority holds it and elects

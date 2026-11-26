@@ -586,7 +586,11 @@ given every variable, has the rows `find` gives.
 row is given, as SPARQL's `BIND`, numbered after the question's (the i-th `Trunc` gives `vars + i`), at the top of
 `items` only, for `give` and `sort` ([reports](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)).
 Through the server, the same item, and the aggregates of reports in a `Group` select (`Avg`, `Distinct` for
-`Count(x)`, `Values`, `Quantile`, `Variance`, `Stddev`: [the protocol](server.md#the-protocol)).
+`Count(x)`, `Values`, `Quantile`, `Variance`, `Stddev`: [the protocol](server.md#the-protocol)). Windows and `Each`
+are a select's too, over a `Give` or a `Group`: `Wire.Over (Give [| ... |], each, [| Running (Sum 2, 0); Rank (1,
+false); Prev (1, 1) |])`, their columns the answer's, as `Sort`'s keys are, answered by `Answer.answer` at the server
+and in a program that reads locally ([windows](cesia.md#windows-running-rank-prev-each)); `ask` gives a question's rows
+alone, as it has no aggregates.
 
 ```ocaml
 open Cepheus

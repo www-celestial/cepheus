@@ -356,7 +356,13 @@ derived facts, retractions, runs merged at random) and random questions with pat
 groups, the order value by value, the cursor, the ties), and by the engine on the heap path, the index path and its own
 choice, before and after a trip through the wire: the same rows, in the same order; split across 3 domains at every
 level of two candidates or more, or with their first level probed, the rows of one domain, in their order, bit for
-bit; and live questions with `Not`, `Or` and `In` checked against the oracle after every frame.
+bit; and live questions with `Not`, `Or` and `In` checked against the oracle after every frame. With windows and
+`Each` ([windows](cesia.md#windows-running-rank-prev-each)), each window's value is the one its definition gives over
+the rows in the order, every one of them (a page's too), and `Each`'s rows the first k of each group and their copies;
+*tested by* the same oracle, a question in two that has Sort given random windows and `Each` (every frame, `Rank` with
+ties, `Prev`, missing cells, sums past 63 bits refused only in a row given, pages after a cursor), and over 700
+invoices with frames of up to 40 rows and up to 60 groups, each window computed again by brute force from the rows in
+the order: the same values, exact (a mean of ints within a rounding, the oracle dividing once in floats).
 
 ## G12 Merges are atomic
 

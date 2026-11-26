@@ -348,6 +348,25 @@ cited on the [comparison](comparison.md) page.
   — `avg`, `count(DISTINCT)`, `array_agg`, `string_agg`, `percentile_cont`, `percentile_disc`, `stddev`, `variance`
   and `date_trunc` with a zone, the forms the tutorials set beside Cepheus's.
 
+## Windows
+
+- **[Leis 2015]** V. Leis, K. Kundhikanjana, A. Kemper, T. Neumann. Efficient Processing of Window Functions in
+  Analytical SQL Queries. *PVLDB* 8(10), 1058–1069, 2015. https://doi.org/10.14778/2794367.2794375
+  — The window operator of a main-memory database: the rows partitioned and sorted once, then each frame's aggregate
+  by cumulative aggregation (a frame that only grows), removable cumulative aggregation (a sum that takes out the row
+  leaving the frame; in floats it drifts, which Cepheus's exact sums avoid) or a segment tree (any frame, $O(\log n)$ a
+  row). `Running`, `Rank` and `Prev` are computed by the first two.
+- **[Lemire 2006]** D. Lemire. Streaming Maximum-Minimum Filter Using No More than Three Comparisons per Element.
+  *Nordic Journal of Computing* 13(4), 328–339, 2006. https://arxiv.org/abs/cs/0610046
+  — The least or largest value of a sliding window by a monotone queue of its candidates, each value in and out once:
+  `Running(Min(x), last = n)` and `Max`, $O(1)$ amortized a row where a segment tree takes $O(\log n)$.
+- **[PostgreSQL windows]** PostgreSQL 18 documentation, 3.5 Window Functions, 4.2.8 Window Function Calls, 9.22 Window
+  Functions, and SELECT's DISTINCT ON. https://www.postgresql.org/docs/18/tutorial-window.html ,
+  https://www.postgresql.org/docs/18/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS ,
+  https://www.postgresql.org/docs/18/functions-window.html , https://www.postgresql.org/docs/18/sql-select.html#SQL-DISTINCT
+  — `OVER`, `PARTITION BY`, the frames `ROWS` and `RANGE` (`RANGE UNBOUNDED PRECEDING` the default with an `ORDER BY`),
+  `rank`, `dense_rank`, `row_number`, `lag`, `LATERAL` and `DISTINCT ON`, the forms the tutorials set beside Cepheus's.
+
 ## Transactions and isolation
 
 - **[Codd 1970]** E. F. Codd. A Relational Model of Data for Large Shared Data Banks. *Communications of the ACM*

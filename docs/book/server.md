@@ -434,7 +434,7 @@ flags  = bit 0 more: the reply continues in the next frame of this id (the rows 
 
 | kind | request body | reply body |
 |---|---|---|
-| 1 Hello | version varint (1 to 9), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
+| 1 Hello | version varint (1 to 10), token string, program string, session varint (0: a new one) | Welcome: server id, cluster id, session, frame limit, writes in flight limit; a second Hello on a connection is `invalid` (its token stays the first's) |
 | 2 Open | database name | Opened: handle, newest group, the properties (id, name, type code, many, unique); past the frame limit, in frames of about 1 MiB of properties, all but the last with `more`, each with its handle, group and count |
 | 3 Get | handle, thing | Facts: the view's group, count, (property, value)...; past the frame limit, in frames of about 1 MiB of facts, all but the last with `more`, each with its group and count |
 | 4 Find | handle, question, select, then, only when the question has them, its operators and order: a byte 1, its operators (a count, then each: 0 a pattern, 1 a range, 2 In: variable, count, values, 3 Not: count, items, 4 Or: count of alternatives, each a count and its items, 5 Prefix: variable, text, 6 Less: two variables, 7 LessOrEqual: two variables, 8 Optional: a pattern, from version 7; 9 Trunc: its variable, the date's variable, the unit and the zone (two texts), from version 9), Sort (a count, then each key's column and a byte 1 when descending), Limit (0: none), After (a byte 0, or 1, a count and the values); then, from version 6 and only when the program gives one, the question's time in milliseconds (1 to a week; the order is then sent, empty if need be) | Rows (in frames of about 1 MiB, all but the last with `more`; a Give without Sort past the server's cells sent as its rows are found, none held): the view's group, columns, count, values row by row; a cell an Optional left without a value is the link $-2^{62}$, which no thing has (a value of rows only) |
@@ -468,8 +468,18 @@ On a follow stream the server pushes (request id 0):
   variable, a byte) ([reports](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc)). A row of a group
   with `Values` is one row a value of its list, the group's other cells repeated (several `Values`: their lists side by
   side, a cell past a list's end missing), its rows one after the other: a list is several rows, as a list of a thing
-  is several facts. A cell a report's aggregate leaves empty (a sample's variance of one value) is missing.
-- **Versions.** Version 9 adds the aggregates of reports (tags 4 to 9 of the select's aggregates) and the operator
+  is several facts. A cell a report's aggregate leaves empty (a sample's variance of one value) is missing. From
+  version 10, `Over (select, [each...], [window...])` (tag 2): the select it is over (a Give or a Group), the columns
+  of its rows that cut them into groups (a count, then each), then its windows (a count, then each: 0 `Running`, its
+  aggregate coded as a Group's, `Count` or `Sum`, `Avg`, `Min`, `Max` of a column, then `last`, 0 for a frame from the
+  group's first row; 1 `Rank`, the keys of Sort it ranks by and a byte 1 for dense; 2 `Prev`, a column and `back`); each
+  window's column comes after its rows' own, in that order ([windows](cesia.md#windows-running-rank-prev-each)). At
+  most 64 windows and 64 columns of Each; an `Over` of an `Over` is refused when it is read.
+- **Versions.** Version 10 adds the windows and Each (tag 2 of the select) and nothing else: a program of version 10
+  connects to a server of 9 in 9, and a question with them is refused in the program (`invalid`: "this server speaks
+  protocol 9: Running, Rank, Prev and Each need a server of protocol 10") before it is sent, since an older server
+  cannot read the select; a question without them is coded as before. A `Watch` with them is refused by every server
+  (`invalid`). Version 9 adds the aggregates of reports (tags 4 to 9 of the select's aggregates) and the operator
   Trunc (tag 9) and nothing else: a program of version 9 connects to a server of 8 in 8, and a question with one of
   them is refused in the program (`invalid`: "this server speaks protocol 8: Trunc, Avg, Count(x), Values, Quantile,
   Variance and Stddev need a server of protocol 9") before it is sent, since an older server refuses the request whole;
@@ -494,7 +504,7 @@ On a follow stream the server pushes (request id 0):
   older: Incr needs a server of protocol 4") before it is sent. Version 3 adds the files (Put, Piece, Load, Erase) and
   nothing else: a program of version 3 connects to a server of 2 in 2 (as below), and a file is refused in the program
   (`invalid`: "this server speaks protocol 2 or older: files need a server of protocol 3"). Version 2 adds the
-  question's operators and order (below) and nothing else; a server speaks 1 to 9, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
+  question's operators and order (below) and nothing else; a server speaks 1 to 10, and answers each connection alike. A library says 2 in Hello; a server of version 1 only refuses it (`version`)
   and closes, and the library connects again in 1: its questions of patterns and ranges are answered as before, and
   one with `Not`, `Or`, `In`, `Prefix`, Sort, Limit or After is refused in the program (`invalid`: "this server speaks
   protocol 1: ... need a server of protocol 2") rather than sent. A program of version 1 is served by a server of 2

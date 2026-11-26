@@ -175,6 +175,8 @@ the usual one, both are given.
 - **deltas** (delta coding) — numbers stored as their differences from the number before: a growing sequence (the
   things of a load: 0 and 1) takes a bit or two a number. The journal's columns take it block by block when it is
   shorter than the frame of reference. [formats](formats.md#a-group)
+- **dense rank** — a row's place in an order in which rows equal in the order's keys share a place and no place is
+  skipped: 1, 2, 2, 3; `Rank(dense = true)`, SQL's `dense_rank()`. [Cesia](cesia.md#windows-running-rank-prev-each)
 - **dependency graph** (of a history) — the transactions as nodes, and an edge for each way one must come before
   another: ww (it wrote the version the other replaced), wr (the other read what it wrote), rw (an anti-dependency).
   The history is serializable when the graph has no cycle (Adya 1999).
@@ -197,6 +199,9 @@ the usual one, both are given.
 - **DRed** (delete and rederive) — the maintenance algorithm that deletes every consequence of the deleted facts, then
   derives again those that still have a proof (Gupta et al. 1993). [rules](rules.md#retraction-backwardforward)
 - **durable** — on the disk itself, not only in the kernel's memory: covered by a finished fsync.
+- **Each** — the key of a question that cuts its rows into groups by fields of `Give`: `Limit` is then each group's
+  (the first k rows of each, SQL's `LATERAL (... LIMIT k)`; `Limit: 1`, `DISTINCT ON`) and the windows start again at
+  each group's first row (`PARTITION BY`). The rows still come in `Sort`'s order. [Cesia](cesia.md#windows-running-rank-prev-each)
 - **EDB, IDB** — extensional and intensional database: the asserted facts, and the derived ones.
   [rules](rules.md#what-the-database-holds-the-least-model)
 - **Elle** — the checker Jepsen uses to find isolation anomalies in a database's recorded history, by inferring its
@@ -246,6 +251,9 @@ the usual one, both are given.
   [concepts](concepts.md#forks)
 - **frame** — the unit of one write and one fsync in the journal: a header, the groups, a trailer.
   [formats](formats.md#journal-segment-dirjournalfirst-group-20-digitsseg)
+- **frame** — the rows a window's aggregate reads for a row: from the group's first row to the row (`Running(f)`, SQL's
+  `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`), or the row and the n - 1 before it (`last = n`). SQL's `RANGE`
+  frames, rows equal in the order counted together, are not built. [Cesia](cesia.md#windows-running-rank-prev-each)
 - **frame of reference** (FOR) — a block of numbers stored as their least value (the base) and, for each, its
   difference from the base in as many bits as the largest difference needs: values between 20,000 and 23,650 take
   12 bits each, not 64 (Goldstein et al. 1998; PFOR, its patched form, Zukowski et al. 2006).
@@ -378,6 +386,8 @@ the usual one, both are given.
   [formats](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)
 - **monotonic writes** — a session guarantee (Terry et al. 1994): a program's writes are applied in the order it sent
   them. [server](server.md#order-pipelining-and-back-pressure)
+- **moving average** — the mean of the last n rows at each row, which smooths a series: `Running(Avg(x), last = n)`,
+  SQL's `avg(x) OVER (... ROWS BETWEEN n - 1 PRECEDING AND CURRENT ROW)`. [Cesia](cesia.md#windows-running-rank-prev-each)
 - **mutual TLS** — TLS where both sides show a certificate of the same CA; between Cepheus servers (a primary and its
   replicas, on the peer port), not for programs, which show a token. [server](server.md#tls)
 - **native package** — a Cesia package whose functions are, under their Cesia code, an engine in OCaml compiled once:
@@ -421,6 +431,8 @@ the usual one, both are given.
 - **pre-vote** — a Raft server's question to the others before it stands for election: would you vote for me? It
   raises its term only with a majority of yeses, so a server cut off and back does not disrupt the cluster (Ongaro's
   thesis 9.6). [server](server.md#elections)
+- **Prev** — the window that gives a field of the row `back` rows before (1 by default) in `Sort`'s order within its
+  group, `missing` for the first rows; SQL's `lag`. [Cesia](cesia.md#windows-running-rank-prev-each)
 - **primary** — the server that takes the writes of a database; its replicas copy its groups. [server](server.md#a-replica)
 - **promotion** — a replica made a primary (`cepheus promote`): a new epoch, and writes taken. [server](server.md#promotion-by-hand)
 - **proof** — a tree whose leaves are asserted facts and whose nodes are rule instances, each node's children the
@@ -440,6 +452,9 @@ the usual one, both are given.
   its indexes by thing when it does not come in thing order. [theory](theory.md#9-levels-on-disk-and-large-groups)
 - **range restriction** (safety) — every variable of a rule's head appears in its body: a rule gives facts only about
   what the database holds, and the least model is finite. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
+- **Rank** — the window that gives a row's place in `Sort`'s order within its group, rows equal in `Sort`'s keys
+  sharing it and the places they take skipped (1, 2, 2, 4: SQL's `rank()`); `dense = true` skips none.
+  [Cesia](cesia.md#windows-running-rank-prev-each)
 - **rank table** (rank directory) — a bit for each thing number and, every 32 bits, how many bits are set before
   them: "is thing e here, and at which slot?" is one word and one popcount (Jacobson 1989). Each part of a run has one.
   [theory](theory.md#3-indexes)
@@ -453,6 +468,9 @@ the usual one, both are given.
 - **recursive rule** — a rule whose head's property is read by its own body, directly or through other rules:
   "every ancestor", at any depth. [rules](rules.md#a-rule-is-a-question-with-a-conclusion)
 - **redo log** — a log of changes to apply again after a crash, never to undo; the journal is one.
+- **removable cumulative aggregation** — keeping a sliding frame's aggregate by adding the row that comes and taking
+  out the one that goes (Leis et al. 2015): $O(1)$ a row for a sum, a count or a mean; exact with exact sums, where
+  sums of floats drift. [references](references.md#windows)
 - **replay** — applying the journal's groups in order to rebuild a state.
 - **Raft** — the consensus algorithm a cluster of three or more servers runs (Ongaro and Ousterhout 2014): one
   leader a term, elected by a majority; a write confirmed once a majority holds it forced. [server](server.md#a-cluster-of-three-raft)
@@ -484,6 +502,8 @@ the usual one, both are given.
   flight at a time. [the server](server.md#many-databases-one-fsync-the-commit-buffer)
 - **round trip** — a request and its reply: the time between sending one and receiving the other, most of it the
   kernel's work (system calls, waking the other process). [server](server.md#speed-beside-postgresql)
+- **row number** — a row's place counted one by one, ties included: `Running(Count())`, SQL's `row_number()`.
+  [Cesia](cesia.md#windows-running-rank-prev-each)
 - **row store**, **column store** — a row store keeps each record's fields together (a lookup of a record reads one
   place), a column store each field's values together (a scan of a field reads one place). A run is both: by thing a
   record a thing for its one-valued properties (with small columns for the others), by property a column of each
@@ -493,6 +513,11 @@ the usual one, both are given.
   the same values. A schema thing (`cepheus/name`, `cepheus/rule`). [rules](rules.md)
 - **run**, **run file** — one sorted structure of the LSM-tree on disk: the changes of a range of groups on top of the
   runs below it, in a file `DIR/snapshots/<lo>-<hi>.run`. [architecture](architecture.md#runs-on-disk)
+- **Running** — the window that gives an aggregate (`Sum`, `Avg`, `Min`, `Max` of a field of `Give`, or `Count()`)
+  over the rows from the group's first to the row, or over the last n (`last = n`): a running total, a moving average.
+  [Cesia](cesia.md#windows-running-rank-prev-each)
+- **running total** — at each row the sum of the rows from the first to it, in an order: a balance after each payment;
+  `Running(Sum(x))`, SQL's `sum(x) OVER (ORDER BY ...)`. [Cesia](cesia.md#windows-running-rank-prev-each)
 - **S3-FIFO** — the eviction policy of the cache: three FIFO queues (small, main, ghost), nothing moved on a hit (Yang
   et al. 2023). [architecture](architecture.md#pages-and-the-cache)
 - **same** — the server's answer to a watch resumed `from` a group when nothing the question reads changed since: the
@@ -612,6 +637,9 @@ the usual one, both are given.
 - **window** (of a watch) — the rows a watch with `Sort` and `Limit` holds: `Find`'s first k rows in its order and
   the copies of the k-th, kept by each frame's rows compared with its last row, and refilled by one page `Find` after
   that row when a row leaves it ([Sort and Limit in a watch](cesia.md#sort-and-limit-in-a-watch)).
+- **window** (of a question), **window function** — a field of the answer computed from other rows of the answer, read in an order:
+  `Running`, `Rank`, `Prev`; SQL's `OVER (...)`. Computed after the rows, before `After` and `Limit` cut the page.
+  [Cesia](cesia.md#windows-running-rank-prev-each)
 - **working set** — the reasoner's arrays for one group: the facts it touched, their states, rounds and marks, in
   open-addressing tables with chains by (property, thing) and (property, value), out of the collector's sight.
   [rules](rules.md#large-groups)

@@ -1448,6 +1448,9 @@ linearizable without it.
 - A change of the kind a link names, or of its `onDelete`, on a database that has it (a migration); `Delete` as an
   operation of `Write`, beside others in one group; a default value for a link (SQL's `SET DEFAULT`); erasing a
   deleted thing from the history.
+- Windows: `RANGE` frames (rows equal in the order counted together, and frames of a span of dates), `Next` (SQL's
+  `lead`: `Prev` in the reverse order), `ntile`, `percent_rank`, a moving `Variance`, `Stddev` or quantile, and a
+  watch of a question with windows or `Each`.
 
 ## References
 
@@ -1459,4 +1462,10 @@ linearizable without it.
   https://doi.org/10.1109/PDIS.1994.331722 — read your writes and monotonic writes, which one fiber's calls keep.
 - **[Ongaro 2014b]** D. Ongaro. Consensus: Bridging Theory and Practice. PhD dissertation, Stanford, 2014, §6.3 —
   the session numbers that apply a resent write once.
+- **[Leis 2015]** V. Leis, K. Kundhikanjana, A. Kemper, T. Neumann. Efficient Processing of Window Functions in
+  Analytical SQL Queries. *PVLDB* 8(10), 1058–1069, 2015. https://doi.org/10.14778/2794367.2794375 — the windows'
+  cumulative and removable cumulative aggregation ([windows](#windows-running-rank-prev-each)).
+- **[Lemire 2006]** D. Lemire. Streaming Maximum-Minimum Filter Using No More than Three Comparisons per Element.
+  *Nordic Journal of Computing* 13(4), 328–339, 2006. https://arxiv.org/abs/cs/0610046 — `Min` and `Max` over the last
+  n rows.
 - The other works the server rests on: [references](references.md#the-server).

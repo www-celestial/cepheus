@@ -198,6 +198,23 @@ From `ask` and from a report (`Trunc`, and the aggregates of protocol 9 through 
 | `Avg takes a variable of a pattern, not an Optional's, which may be missing: ...` (and `Quantile`, `Variance`, `Stddev`) | an aggregate of an `Optional`'s variable (`Count(x)` and `Values` leave its missing values out) |
 | `Sort's keys are not a Values column: it is a list` | a `Values` field as a key of `Sort` |
 
+From a select with windows or `Each` (protocol 10: `Wire.Over`, the Cesia package's `Running`, `Rank`, `Prev` and
+`Each`):
+
+| message | when |
+|---|---|
+| `Running needs Sort: a window reads the rows in an order` (and `Rank`, `Prev`); `Each needs Sort: the first rows of each group, or its windows, are in an order` | a window or `Each` without `Sort` |
+| `Each is for Limit or a window (Running, Rank, Prev): this question has neither` | `Each` that would change nothing |
+| `Each takes no After: with Each, Limit is each group's, so a page has no last row to go on from; ask a page of the groups, then their rows (In)` | `Each` with `After` |
+| `Each takes the keys of a report, not its aggregates: column N`; `Each: column N twice`; `Each: column N out of range` | `Each` of an aggregate, of one field twice, or of no column |
+| `Running's Sum is of ints and money, not a T`; `Running's Avg is of ints, floats, money and dates, not a T`; `Running's Min is of ints, money and dates, not a T` (and `Max`) | a window aggregate of a type the aggregate does not take |
+| `Running takes Sum, Avg, Min or Max of a column, or Count(), not A` | `Running` of `Count(x)`, `Values`, a quantile, a variance |
+| `Running's last is 1 to 100000 rows (0: from the first row), not N`; `Prev goes back 1 to 100000 rows, not N`; `Rank ranks by 1 to K keys of Sort, not N` | a frame, a `Prev` or a `Rank` out of its bounds |
+| `Running: column N out of range` (and `Prev`); `Running takes no Values column: it is a list` | a window of no column, or of a list |
+| `windows and Each are not for a report with Values: a group is then several rows, one a value`; `windows over windows: Over takes a Give or a Group` | a window over a report with `Values`, or over windows |
+| `Running's Sum passed the 63 bits of an Int: sum fewer rows (last = n)` | a running sum past $2^{62}$ in a row the answer gives |
+| `at most 64 windows, not N` | more windows than a question has variables |
+
 ### Templates and equality
 
 | message | when |
@@ -376,6 +393,9 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `invalid` | `this server speaks protocol N: Less, LessOrEqual and Optional need a server of protocol 7` | `Find` or `Watch` with them, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
 | `invalid` | `this server speaks protocol N: Delete and links that name a kind need a server of protocol 8` | `Delete` of a thing that is no file, or `Connect` with a kind whose `Link` has `to`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
 | `invalid` | `this server speaks protocol N: Trunc, Avg, Count(x), Values, Quantile, Variance and Stddev need a server of protocol 9` | `Find` or `Watch` with a report's aggregate or a `Trunc`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `this server speaks protocol N: Running, Rank, Prev and Each need a server of protocol 10` | `Find` with windows or `Each`, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)) |
+| `invalid` | `Running's t takes a field of Give (a variable, an aggregate or a Trunc that Give gives): give it too, as Amount: t` (and `Prev`); `Each takes fields of Give: give the variable too, as Client: c`; `Each takes the keys of the rows (a variable or a Trunc of Give), not an aggregate`; `Sort's keys are not windows: a window's value is computed from the order` | a window of a variable `Give` does not give (in a report: `Running(Sum(t))` where the row is a group, `Running(Sum(Sum(t)))` the running total of its sums), `Each` of no field or of an aggregate, a window as a key of `Sort` ([windows](cesia.md#windows-running-rank-prev-each)) | give the field; in a report, the window of the aggregate's field |
+| `invalid` | `Running needs Sort: ...`; `Each takes no After: ...`; `Running's last is 1 to 100000 rows ...`; `Running's Sum passed the 63 bits of an Int: ...`; every message of windows above | a window or `Each` the engine refuses ([windows](cesia.md#windows-running-rank-prev-each)) | as the message says |
 | `invalid` | `"N" is not a time zone name: ...`; `no time zone N in the zone database (DIR): ...`; `Trunc takes a unit of ...`; `Avg is for ints, floats, money and dates, not a T`; `Quantile's fraction is from 0 to 1, not P`; `Sort's keys are not a Values column: it is a list` | a report's zone, unit, type or fraction that is not one ([reports](cesia.md#reports-avg-countx-values-quantile-variance-stddev-trunc); every message above, in `Find` and `Watch`) | an IANA zone name (`"Europe/Paris"`), a unit of the list, an aggregate of a type it takes |
 | `invalid` | `NAME links to K things only, and #T is not one`; `the K #X cannot be deleted while the L #Y links to it (NAME: refuse)`; the work budget of a `Delete` | a link to a thing of another kind; a deletion a link refuses; a cascade too large for one group ([deleting a thing](cesia.md#deleting-a-thing)) | link to a thing of the kind; delete what links to it first |
 | `denied` | `this token may not add to the kind K, which a deletion of a J reaches`; `this token may not read the kind K, whose links refuse the deletion of a J`; `this token may not read the kind K, which NAME links to` | a token with rights per kind: a `Delete` (or a retraction of a fact of a kind links name) that may reach a kind it may not write, or tell of one it may not read; a link to a kind it may not read | a token with those rights ([rights](server.md#rights-g16)) |
@@ -392,6 +412,7 @@ The Cesia client ([Cepheus from Cesia](cesia.md)) gives every error above, and t
 | `too_large` | `a row of N bytes is over the frame limit of 16777152: give fewer of its texts at once` | a Find (or a watch) whose row alone passes a frame | give fewer text columns |
 | `invalid` | `a question has at most 64 patterns, not N: ask several, or name a part with a rule` | a question of more patterns, refused by the client before it is sent (a hand-written client's is refused by the server, which closes the connection) | split it, or name a part with a rule |
 | `invalid` | `a watch has no After: its rows are the first of its order, as they change`; `a watch's Limit needs Sort: the engine's order is no order a watch can keep`; `a watch of aggregates keeps every group: Sort and Limit are for a watch of Give` | `Watch` with After, with Limit and no Sort, or with Sort or Limit and aggregates | a watch of `Give` with `Sort` (and `Limit`); for the next page, `Find` with `After` |
+| `invalid` | `a watch has no windows (Running, Rank, Prev) or Each: each row's value hangs on the rows before it, so one change would change every row after it; watch the question without them, or ask Find again at each change` | `Watch` with a window or `Each` | watch the question without them and compute them in the program, or `Find` again at each change |
 | `invalid` | `this server speaks protocol N: a watch with Sort and Limit needs a server of protocol 5` | a watch with Sort or Limit, on a connection to a server of an earlier release: refused before it is sent | upgrade the server ([upgrades](production.md#upgrades)), or watch without them |
 | `invalid` | `H is reached over the network: give the cluster's certificate authority, ca = "/etc/cepheus/ca.pem"` | Connect over TCP without `ca` | the cluster's `ca.pem` (made by `cepheus cluster init`) |
 | `invalid` | `a fork starts from Empty, another fork, or a database read on the server's machine; this one is read at the server` | Fork of a database reached over the network | fork `cepheus.Empty`, or run on the server's machine |
