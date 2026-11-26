@@ -2028,6 +2028,76 @@ let delta_has_p p (td : tdelta) =
   let rec go s = match s () with Seq.Cons (((p', _), st), s') when p' = p -> present st || go s' | _ -> false in
   go (PW.to_seq_from (p, min_int) td.tf)
 
+(* The delta's things with a fact of p, in the order of their ids from [from] (down with [desc]), read from its map by
+   thing, which holds every thing the delta changed: [scan bound] gives the next one up to [bound] (down to it), -2
+   when there is none so far (the scan stops at bound: a thing past it is read again at the next call), -1 after the
+   last. So the things of other properties the delta changed are read only within the stretch of ids the runs' things
+   reach (a page of clients beside a delta of new invoices reads none past the page) *)
+let delta_scan (de : tdelta IM.t) p ~desc from =
+  if not desc then begin
+    let s = ref (IM.to_seq_from from de) and pend = ref None in
+    fun bound ->
+      let rec go () =
+        let item = match !pend with Some _ as x -> pend := None; x | None -> (match !s () with Seq.Nil -> None | Seq.Cons (x, s') -> s := s'; Some x) in
+        match item with
+        | None -> -1
+        | Some (k, td) -> if k > bound then (pend := item; -2) else if delta_has_p p td then k else go ()
+      in
+      go ()
+  end
+  else begin
+    let cur = ref from and fin = ref false in
+    fun bound ->
+      let rec go () =
+        if !fin then -1
+        else
+          match IM.find_last_opt (fun k -> k <= !cur) de with
+          | None -> fin := true; -1
+          | Some (k, td) ->
+            if k < bound then -2
+            else begin
+              if k = min_int then fin := true else cur := k - 1;
+              if delta_has_p p td then k else go ()
+            end
+      in
+      go ()
+  end
+
+(* The things the delta gives p (each a present entry of p), sorted and distinct, when the delta holds at most
+   [delta_few] entries of p (read from its map by value: a few changes of p, as a client renamed beside a delta of new
+   invoices); None past them (the delta's map by thing is scanned then, delta_scan; the tests make it 0) *)
+let delta_few = ref 512
+
+let delta_holders (pd : pdelta) =
+  let n = ref 0 and out = ref [] in
+  (* a value an entry at least: past [delta_few] values, no walk *)
+  if pd.pk > !delta_few then None
+  else
+  match VM.iter (fun _ (vd : vdelta) -> IM.iter (fun e st -> incr n; if !n > !delta_few then raise_notrace Exit; if present st then out := e :: !out) vd.vm) pd.pm with
+  | () -> let a = Array.of_list !out in Array.sort compare a; Some a
+  | exception Exit -> None
+
+(* the ints of a sorted array from [from] on (from it down with [desc]), [from] included; -1 after the last *)
+let sorted_from (a : int array) ~desc from =
+  let n = Array.length a in
+  let lo = ref 0 and hi = ref n in
+  (* the first place whose value is >= from (> from with [desc]) *)
+  while !lo < !hi do
+    let mid = (!lo + !hi) lsr 1 in
+    if (if desc then a.(mid) <= from else a.(mid) < from) then lo := mid + 1 else hi := mid
+  done;
+  let i = ref (if desc then !lo - 1 else !lo) and last = ref (-1) in
+  fun () ->
+    let rec go () =
+      if !i < 0 || !i >= n then -1
+      else begin
+        let x = a.(!i) in
+        if desc then decr i else incr i;
+        if x = !last then go () else (last := x; x)
+      end
+    in
+    go ()
+
 (* The things that hold p (that hold the fact (p, w) with [value]), each once, in the order of their ids from [from]
    on (from [from] down with [desc]), [from] included: [next ()] gives the next one, -1 after the last. A step costs
    the merge of the runs' and the delta's next things, and for a view of several runs, or with changes of p, the
@@ -2035,6 +2105,8 @@ let delta_has_p p (td : tdelta) =
 let holders_from v p ?value ~desc ~from () =
   let rs = v.runs in
   let pd = IM.find_opt p v.delta.dav in
+  (* the things the delta gives p, when it holds a few changes of p *)
+  let few = match value, pd with None, Some pd -> delta_holders pd | _ -> None in
   let srcs =
     Array.of_list
       (List.filter_map
@@ -2045,24 +2117,30 @@ let holders_from v p ?value ~desc ~from () =
          (Array.to_list rs)
       @
       match value, pd with
-      | _, None -> []
-      | None, Some _ -> [ im_from v.delta.de ~desc from (delta_has_p p) ]
-      | Some w, Some pd -> (match VM.find_opt w pd.pm with Some vd -> [ im_from vd.vm ~desc from present ] | None -> []))
+      | Some w, Some pd -> (match VM.find_opt w pd.pm with Some vd -> [ im_from vd.vm ~desc from present ] | None -> [])
+      | None, Some _ -> (match few with Some a -> [ sorted_from a ~desc from ] | None -> [])
+      | _, None -> [])
   in
+  (* past a few changes of p, the things the delta changed scanned by thing, up to the runs' next thing *)
+  let scan = match value, pd, few with None, Some _, None -> Some (delta_scan v.delta.de p ~desc from) | _ -> None in
   let check = Array.length rs > 1 || pd <> None in
   let holds e = match value with None -> has_value v e p | Some w -> mem v e p w in
   let k = Array.length srcs in
   let head = Array.map (fun next -> next ()) srcs in
+  (* the scan's next thing: -2 not read yet (or none up to the bound it was read to), -1 none left *)
+  let dhead = ref (-2) in
+  let first a b = if a < 0 then b else if b < 0 then a else if desc then Stdlib.max a b else Stdlib.min a b in
   let rec next () =
     let best = ref (-1) in
-    for j = 0 to k - 1 do
-      let h = head.(j) in
-      if h >= 0 && (!best < 0 || (if desc then h > !best else h < !best)) then best := h
-    done;
-    let e = !best in
+    for j = 0 to k - 1 do best := first !best head.(j) done;
+    (match scan with
+     | Some sc when !dhead = -2 -> dhead := sc (if !best >= 0 then !best else if desc then min_int else max_int)
+     | _ -> ());
+    let e = first !best (if !dhead >= 0 then !dhead else -1) in
     if e < 0 then -1
     else begin
       for j = 0 to k - 1 do if head.(j) = e then head.(j) <- srcs.(j) () done;
+      if !dhead = e then dhead := -2;
       if (not check) || holds e then e else next ()
     end
   in

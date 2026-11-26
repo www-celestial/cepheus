@@ -4,7 +4,7 @@
 
 type item = Ask.item =
   | Pattern of Query.pattern
-  | Range of int * Value.t * Value.t  (** [lo <= x <= hi], an int, date or money variable *)
+  | Range of int * Value.t * Value.t  (** [lo <= x <= hi], an int, date, money or thing (link) variable *)
   | In of int * Value.t list  (** x is one of the values (at most 10,000) *)
   | Prefix of int * string  (** the text x starts with these bytes (1 to 1,024) *)
   | Not of item list  (** none of these patterns and conditions holds, for any value of its own variables (1 to 4) *)

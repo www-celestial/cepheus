@@ -19,6 +19,7 @@
 #                                   each, as dbench.exe delete prints them ("cascade 100 123.4", microseconds); then
 #                                   inserts of a bill without and with a foreign key, microseconds an insert (5 passes)
 #   pg.sh reports ROOT load CSVDIR | run   the aggregates of reports beside bench/rbench.ml's (rbench.exe load's rows)
+#   pg.sh keyset ROOT load DIR | run DIR   pages of 51 of a kind by id, as bench/kbench.ml asks them (kbench.exe csv's files)
 #   pg.sh stop ROOT
 set -e
 cmd=$1; root=$2
@@ -256,6 +257,44 @@ fk)
         echo "SELECT 'write to ' || round(t_bill_fk(10000)::numeric, 3);"
       done
     } | psql -X -q -At -v ON_ERROR_STOP=1
+    ;;
+  esac
+  ;;
+keyset)
+  # pg.sh keyset ROOT load DIR: kbench.exe csv's items of 10,000, 100,000 and 1,000,000 (DIR/k10000.csv ...), each a
+  # table item_N (id the primary key, an index on (tenant, id): a tenant's things by id);
+  # pg.sh keyset ROOT run DIR: a page of 51 by id, the first and the one after the middle item, ascending and
+  # descending, then tenant 3's (the keyset query: WHERE id > $last ORDER BY id LIMIT 51), inside the server (engine
+  # only: EXPLAIN ANALYZE's execution time), RUNS runs each (21)
+  case "$3" in
+  load)
+    for n in 10000 100000 1000000; do
+      psql_ <<EOS
+DROP TABLE IF EXISTS item_$n;
+CREATE TABLE item_$n (id bigint PRIMARY KEY, name text NOT NULL, tenant bigint NOT NULL, n int NOT NULL);
+\copy item_$n FROM '$4/k$n.csv' WITH (FORMAT csv)
+CREATE INDEX ON item_$n (tenant, id);
+VACUUM ANALYZE item_$n;
+EOS
+    done
+    ;;
+  run)
+    runs=${RUNS:-21}
+    stats() { "$here/../../_build/default/bench/bench.exe" stats "$1"; }
+    for n in 10000 100000 1000000; do
+      read -r mid mid3 t3 < "$4/k$n.csv.cursors"
+      for q in "by id, first page:ORDER BY id LIMIT 51" "by id, deep page:WHERE id > $mid ORDER BY id LIMIT 51" \
+               "by id, first page, desc:ORDER BY id DESC LIMIT 51" "by id, deep page, desc:WHERE id < $mid ORDER BY id DESC LIMIT 51" \
+               "tenant 3 by id, first page:WHERE tenant = $t3 ORDER BY id LIMIT 51" \
+               "tenant 3 by id, deep page:WHERE tenant = $t3 AND id > $mid3 ORDER BY id LIMIT 51" \
+               "tenant 3 by id, first page, desc:WHERE tenant = $t3 ORDER BY id DESC LIMIT 51" \
+               "tenant 3 by id, deep page, desc:WHERE tenant = $t3 AND id < $mid3 ORDER BY id DESC LIMIT 51"; do
+        label=${q%%:*}; sql="SELECT id FROM item_$n ${q#*:}"
+        for r in $(seq "$runs"); do
+          psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+        done | stats "$n items, $label"
+      done
+    done
     ;;
   esac
   ;;

@@ -429,9 +429,19 @@ let holders seed (v : Store.view) fl p =
         (fun desc ->
           List.iter
             (fun from ->
-              let next = Store.holders_from v p ?value ~desc ~from () in
-              let rec all acc = let e = next () in if e < 0 then List.rev acc else all (e :: acc) in
-              let got = all [] in
+              (* the delta's things of p from its map by value (a few changes of p), and scanned by thing *)
+              let got =
+                List.map
+                  (fun few ->
+                    let keep = !Store.delta_few in
+                    Store.delta_few := few;
+                    Fun.protect ~finally:(fun () -> Store.delta_few := keep) (fun () ->
+                        let next = Store.holders_from v p ?value ~desc ~from () in
+                        let rec all acc = let e = next () in if e < 0 then List.rev acc else all (e :: acc) in
+                        all []))
+                  [ 512; 0 ]
+              in
+              let got = match got with [ a; b ] when a = b -> a | a :: _ -> -1 :: a | [] -> [] in
               let want = List.filter (fun e -> if desc then e <= from else e >= from) held in
               let want = if desc then List.rev want else want in
               C.check (got = want) "seed %d: the things of %d%s (desc %b, from %d): %s, not %s" seed p
@@ -456,6 +466,8 @@ let run seed =
   (* a range of a thing whose pattern has a constant value: read from its first thing whatever the value's things, a
      seed in two *)
   Query.seek_min := if seed mod 2 = 0 then 0 else 64;
+  (* the delta's things of a property scanned by thing (past a few changes of it) a seed in three *)
+  Store.delta_few := if seed mod 3 = 1 then 0 else 512;
   let db = ref (fork empty) in
   let[@warning "-8"] (Ok [ name; tag; score; price; when_; ratio; ok; owner; friend; mark ]) = declare !db props in
   (* a rule: things whose score is 20 or more are marked (derived facts inside the questions) *)

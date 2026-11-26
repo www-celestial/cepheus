@@ -8,8 +8,11 @@
      kbench.exe load DIR N     the kind of N things through the writer, in groups of 10,000 things, then a snapshot
      kbench.exe run DIR        the pages; CEPHEUS_DOMAINS=d on d domains at most
      kbench.exe fork N         the same pages on a fork of N items filled in memory (every fact in its delta)
+     kbench.exe mixed DIR N    DIR's pages on a fork of its view whose delta holds N things of another kind, made after
+                               every item, and one item renamed (a change of the items' property in the delta)
      kbench.exe csv DIR OUT    the items as PostgreSQL's COPY reads them (id,name,tenant,n), with Cepheus's ids, and
-                               the cursors of the deep pages (OUT.cursors: the middle item, the middle item of tenant 3) *)
+                               the cursors of the deep pages (OUT.cursors: the middle item, the middle item of tenant 3,
+                               tenant 3's id) *)
 
 open Cepheus
 
@@ -104,11 +107,30 @@ let in_memory n =
   Printf.printf "a fork of %d items, filled in %.1f s\n%!" n t;
   pages (view db)
 
+(* the pages of DIR's items on a fork of its view, whose delta holds N things of another kind (made after every item)
+   and a change of one item's name: the runs' items beside a delta that changed their property *)
+let mixed dir n =
+  let db = ok (open_ dir) in
+  let f = fork (view db) in
+  let[@warning "-8"] [ note ] = ok (declare f [ prop "note/text" Ttext ]) in
+  let name, _, _, _ = schema (view f) in
+  let k = ref 0 in
+  while !k < n do
+    let m = min per_group (n - !k) in
+    ignore (ok (write f (List.init m (fun j -> Resolve.Add (-1 - j, note, Text (Printf.sprintf "note %d" (!k + j)))))));
+    k := !k + m
+  done;
+  let all, _, _ = ids (view f) in
+  ignore (ok (write f [ Resolve.Add (all.(1), name, Text "item 1, renamed") ]));
+  Printf.printf "a fork of %s with %d things of another kind in its delta, and one item renamed\n%!" dir n;
+  pages (view f);
+  close db
+
 let csv dir out =
   let db = ok (open_ dir) in
   let v = view db in
   let name, tenant, num, _ = schema v in
-  let all, of3, _ = ids v in
+  let all, of3, t3 = ids v in
   let oc = open_out out in
   Array.iter
     (fun e ->
@@ -120,7 +142,7 @@ let csv dir out =
     all;
   close_out oc;
   let oc = open_out (out ^ ".cursors") in
-  Printf.fprintf oc "%d %d\n" all.(Array.length all / 2) of3.(Array.length of3 / 2);
+  Printf.fprintf oc "%d %d %d\n" all.(Array.length all / 2) of3.(Array.length of3 / 2) t3;
   close_out oc;
   close db
 
@@ -130,4 +152,5 @@ let () =
   | [| _; "run"; dir |] -> run dir
   | [| _; "csv"; dir; out |] -> csv dir out
   | [| _; "fork"; n |] -> in_memory (int_of_string n)
-  | _ -> prerr_endline "kbench.exe load DIR N | run DIR | fork N | csv DIR OUT"; exit 2
+  | [| _; "mixed"; dir; n |] -> mixed dir (int_of_string n)
+  | _ -> prerr_endline "kbench.exe load DIR N | run DIR | fork N | mixed DIR N | csv DIR OUT"; exit 2
