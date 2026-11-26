@@ -1,12 +1,12 @@
-(* The wire protocol, versions 1 to 9. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
+(* The wire protocol, versions 1 to 10. Version 2 adds the question's extension (Not, Or, In, Prefix, Sort, Limit,
    After: below), version 3 the files of the vault (Put, Piece, Load: below), version 4 the operation Incr (tag 4 of
    put_op), version 5 a Watch's Sort and Limit (its extension's order, which an older server refuses), version 6 a
    question's time (a Find's or a Watch's, after its extension), version 7 the operators Less, Less_or_equal and
    Optional (tags 6, 7 and 8 of put_item; a missing cell of a row is Value.missing, the link -2^62, which no thing
    has), version 8 the operation Delete (tag 5 of put_op) and the links that name a kind (the facts of cepheus/to and
    cepheus/delete, properties 7 and 8, in a Write), version 9 the aggregates of reports (Avg, Distinct, Values,
-   Quantile, Variance and Stddev: tags 4 to 9 of put_select's aggregates) and Trunc (tag 9 of put_item), and nothing
-   else: a server speaks all nine, a program says in
+   Quantile, Variance and Stddev: tags 4 to 9 of put_select's aggregates) and Trunc (tag 9 of put_item), version 10
+   the windows and Each (Over, tag 2 of put_select), and nothing else: a server speaks all ten, a program says in
    Hello the version it speaks, and against an older server a program speaks that server's version (Client.hello)
    and asks nothing that version lacks. A connection carries frames both ways:
 
@@ -21,7 +21,7 @@ open Cepheus
 module Ask = Question.Ask
 module Top = Question.Top
 
-let version = 9
+let version = 10
 
 (* the oldest version a server still speaks *)
 let oldest = 1
@@ -74,9 +74,24 @@ type agg =
   | Variance of int * bool  (** of the sample (n - 1), or of the population when true *)
   | Stddev of int * bool
 
+(** A window of version 10: a column computed from the rows of the answer in Sort's order, within each group of
+    Each (Window, docs/book/cesia.md "Windows"); its columns are those of the answer it is over, as Sort's keys. *)
+type window =
+  | Running of agg * int
+      (** [Running (a, last)]: the aggregate [a] (Count, Sum c, Avg c, Min c or Max c: c a column of the answer) over
+          the rows from the group's first to this one ([last] 0, SQL's ROWS UNBOUNDED PRECEDING), or over this row and
+          the [last - 1] before it (ROWS BETWEEN last - 1 PRECEDING AND CURRENT ROW) *)
+  | Rank of int * bool
+      (** [Rank (keys, dense)]: the row's place, rows equal in the first [keys] keys of Sort sharing it: rank(), or
+          dense_rank() when [dense] *)
+  | Prev of int * int  (** [Prev (c, back)]: column c of the row [back] rows before this one in its group (lag) *)
+
 type select =
   | Give of int array  (** the variables to give, in this order; empty: all of them *)
   | Group of int array * agg array  (** one row a distinct key: the key's variables, then the aggregates *)
+  | Over of select * int array * window array
+      (** version 10: the rows of a Give or a Group, each with its windows' columns after its own; [each]: columns of
+          those rows (its keys), Limit and the windows then each group's (SQL's PARTITION BY, LATERAL ... LIMIT k) *)
 
 type request =
   | Hello of { version : int; token : string; program : string; session : int }
@@ -188,27 +203,41 @@ let get_query r : Query.t =
   let ranges = List.init (count r) (fun _ -> let x = Codec.get_varint r in let lo = Value.decode r in let hi = Value.decode r in x, lo, hi) in
   { vars; where; ranges }
 
-let put_select b : select -> unit = function
+let rec put_select b : select -> unit = function
   | Give give -> Buffer.add_char b '\000'; Codec.put_varint b (Array.length give); Array.iter (Codec.put_varint b) give
   | Group (keys, aggs) ->
     Buffer.add_char b '\001';
     Codec.put_varint b (Array.length keys);
     Array.iter (Codec.put_varint b) keys;
     Codec.put_varint b (Array.length aggs);
+    Array.iter (put_agg b) aggs
+  (* version 10: the select it is over, Each's columns, then each window: 0 Running (its aggregate, coded as a
+     Group's, and last), 1 Rank (keys, a byte 1 when dense), 2 Prev (column, back) *)
+  | Over (base, each, windows) ->
+    Buffer.add_char b '\002';
+    put_select b base;
+    Codec.put_varint b (Array.length each);
+    Array.iter (Codec.put_varint b) each;
+    Codec.put_varint b (Array.length windows);
     Array.iter
       (function
-        | Count -> Buffer.add_char b '\000'
-        | Sum x -> Buffer.add_char b '\001'; Codec.put_varint b x
-        | Min x -> Buffer.add_char b '\002'; Codec.put_varint b x
-        | Max x -> Buffer.add_char b '\003'; Codec.put_varint b x
-        (* version 9 *)
-        | Avg x -> Buffer.add_char b '\004'; Codec.put_varint b x
-        | Distinct x -> Buffer.add_char b '\005'; Codec.put_varint b x
-        | Values x -> Buffer.add_char b '\006'; Codec.put_varint b x
-        | Quantile (x, p, d) -> Buffer.add_char b '\007'; Codec.put_varint b x; Codec.put_u64 b (Int64.bits_of_float p); Buffer.add_char b (if d then '\001' else '\000')
-        | Variance (x, pop) -> Buffer.add_char b '\008'; Codec.put_varint b x; Buffer.add_char b (if pop then '\001' else '\000')
-        | Stddev (x, pop) -> Buffer.add_char b '\009'; Codec.put_varint b x; Buffer.add_char b (if pop then '\001' else '\000'))
-      aggs
+        | Running (a, last) -> Buffer.add_char b '\000'; put_agg b a; Codec.put_varint b last
+        | Rank (keys, dense) -> Buffer.add_char b '\001'; Codec.put_varint b keys; Buffer.add_char b (if dense then '\001' else '\000')
+        | Prev (c, back) -> Buffer.add_char b '\002'; Codec.put_varint b c; Codec.put_varint b back)
+      windows
+
+and put_agg b = function
+  | Count -> Buffer.add_char b '\000'
+  | Sum x -> Buffer.add_char b '\001'; Codec.put_varint b x
+  | Min x -> Buffer.add_char b '\002'; Codec.put_varint b x
+  | Max x -> Buffer.add_char b '\003'; Codec.put_varint b x
+  (* version 9 *)
+  | Avg x -> Buffer.add_char b '\004'; Codec.put_varint b x
+  | Distinct x -> Buffer.add_char b '\005'; Codec.put_varint b x
+  | Values x -> Buffer.add_char b '\006'; Codec.put_varint b x
+  | Quantile (x, p, d) -> Buffer.add_char b '\007'; Codec.put_varint b x; Codec.put_u64 b (Int64.bits_of_float p); Buffer.add_char b (if d then '\001' else '\000')
+  | Variance (x, pop) -> Buffer.add_char b '\008'; Codec.put_varint b x; Buffer.add_char b (if pop then '\001' else '\000')
+  | Stddev (x, pop) -> Buffer.add_char b '\009'; Codec.put_varint b x; Buffer.add_char b (if pop then '\001' else '\000')
 
 let get_vars r = Array.init (count r) (fun _ -> Codec.get_varint r)
 
@@ -262,9 +291,15 @@ let needs_7 extra = List.exists newer extra
 (* does a question hold what version 9 adds: Trunc, or an aggregate of a report *)
 let rec has_trunc = function Ask.Trunc _ -> true | Not l -> List.exists has_trunc l | Or alts -> List.exists (List.exists has_trunc) alts | _ -> false
 
-let needs_9 extra (sel : select) =
+let rec needs_9 extra (sel : select) =
   List.exists has_trunc extra
-  || match sel with Give _ -> false | Group (_, aggs) -> Array.exists (function Count | Sum _ | Min _ | Max _ -> false | _ -> true) aggs
+  || match sel with
+     | Give _ -> false
+     | Group (_, aggs) -> Array.exists (function Count | Sum _ | Min _ | Max _ -> false | _ -> true) aggs
+     | Over (base, _, _) -> needs_9 [] base
+
+(* does a question hold what version 10 adds: windows or Each *)
+let needs_10 (sel : select) = match sel with Over _ -> true | Give _ | Group _ -> false
 
 let put_order b ?(extra = []) (o : Top.order) =
   Buffer.add_char b '\001';
@@ -302,34 +337,58 @@ let get_timeout r =
     let t = Codec.get_varint r in
     if t < 1 || t > max_timeout then raise (Malformed "a question's time is 1 ms to a week") else t
 
-let get_select r : select =
+(* the windows of a select at most, and the columns of its Each: as many as a question's variables may be *)
+let max_windows = 64
+
+let get_agg r : agg =
+  match Codec.get_byte r with
+  | 0 -> Count
+  | 1 -> Sum (Codec.get_varint r)
+  | 2 -> Min (Codec.get_varint r)
+  | 3 -> Max (Codec.get_varint r)
+  | 4 -> Avg (Codec.get_varint r)
+  | 5 -> Distinct (Codec.get_varint r)
+  | 6 -> Values (Codec.get_varint r)
+  | 7 ->
+    let x = Codec.get_varint r in
+    let p = Int64.float_of_bits (Codec.get_u64 r) in
+    let d = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
+    Quantile (x, p, d)
+  | 8 | 9 as t ->
+    let x = Codec.get_varint r in
+    let pop = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
+    if t = 8 then Variance (x, pop) else Stddev (x, pop)
+  | _ -> raise Codec.Short
+
+let get_plain r : select =
   match Codec.get_byte r with
   | 0 -> Give (get_vars r)
-  | 1 ->
-    let keys = get_vars r in
-    let aggs =
-      Array.init (count r) (fun _ ->
-          match Codec.get_byte r with
-          | 0 -> Count
-          | 1 -> Sum (Codec.get_varint r)
-          | 2 -> Min (Codec.get_varint r)
-          | 3 -> Max (Codec.get_varint r)
-          | 4 -> Avg (Codec.get_varint r)
-          | 5 -> Distinct (Codec.get_varint r)
-          | 6 -> Values (Codec.get_varint r)
-          | 7 ->
-            let x = Codec.get_varint r in
-            let p = Int64.float_of_bits (Codec.get_u64 r) in
-            let d = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
-            Quantile (x, p, d)
-          | 8 | 9 as t ->
-            let x = Codec.get_varint r in
-            let pop = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
-            if t = 8 then Variance (x, pop) else Stddev (x, pop)
-          | _ -> raise Codec.Short)
-    in
-    Group (keys, aggs)
+  | 1 -> let keys = get_vars r in Group (keys, Array.init (count r) (fun _ -> get_agg r))
+  | 2 -> raise (Malformed "windows over windows: Over takes a Give or a Group")
   | _ -> raise Codec.Short
+
+let get_select r : select =
+  if Codec.at_end r then raise Codec.Short;
+  if Bytes.get r.Codec.buf r.Codec.pos <> '\002' then get_plain r
+  else begin
+    ignore (Codec.get_byte r);
+    let base = get_plain r in
+    let each = get_vars r in
+    let n = count r in
+    if n > max_windows || Array.length each > max_windows then raise (Malformed (Printf.sprintf "a select has at most %d windows and %d columns of Each" max_windows max_windows));
+    let windows =
+      Array.init n (fun _ ->
+          match Codec.get_byte r with
+          | 0 -> let a = get_agg r in Running (a, Codec.get_varint r)
+          | 1 ->
+            let keys = Codec.get_varint r in
+            let dense = match Codec.get_byte r with 0 -> false | 1 -> true | _ -> raise Codec.Short in
+            Rank (keys, dense)
+          | 2 -> let c = Codec.get_varint r in Prev (c, Codec.get_varint r)
+          | _ -> raise (Malformed "a window this server does not know"))
+    in
+    Over (base, each, windows)
+  end
 
 let put_op b = function
   | Resolve.Add (e, p, v) -> Buffer.add_char b '\000'; Codec.put_int b e; Codec.put_varint b p; Value.encode b v

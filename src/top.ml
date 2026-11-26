@@ -194,15 +194,17 @@ let sort_cut mk cap t =
   t.a <- s;
   t.n <- n
 
-let push mk cap t row =
+(* a row into the buffer, cut back to its first [cap] rows (and their copies) once it holds max(least, 2 cap): 64 rows
+   at least for one buffer of a domain, fewer for the many buffers of Each's groups (Answer) *)
+let push ?(least = 64) mk cap t row =
   if t.n = Array.length t.a then begin
-    let a = Array.make (max 64 (2 * t.n)) [||] in
+    let a = Array.make (max (min least 64) (2 * t.n)) [||] in
     Array.blit t.a 0 a 0 t.n;
     t.a <- a
   end;
   t.a.(t.n) <- row;
   t.n <- t.n + 1;
-  if cap > 0 && t.n >= max 64 (2 * cap) then sort_cut mk cap t
+  if cap > 0 && t.n >= max least (2 * cap) then sort_cut mk cap t
 
 let append mk cap a b =
   for i = 0 to b.n - 1 do push mk cap a b.a.(i) done;

@@ -451,33 +451,217 @@ let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) 
   Option.iter (fun t -> charge t (Array.length rows * width)) ticket;
   of_values (nk + na) typs rows
 
-let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
+(* ---- windows and Each (protocol 10): Over ----
+   The rows of a Give or a report in Sort's order, then each window's column computed over them (Window), each group
+   of Each apart; then After and Limit. So a window reads every row before the page's: a page's running total counts
+   the rows of the pages before it, its Rank and Prev see them. The rows a window needs, by case:
+   - no After: Limit k alone, the first k rows and their copies (Top.give: the heap or the index path, a sorted
+     page's seek kept), whose windows read only rows before them; with Each, the first k of each group, a buffer of at
+     most 2 k rows a group, cut back to its first k as Top's heap is (O(n log k) comparisons, O(groups k) rows held);
+     no Limit, every row sorted;
+   - After (no Each): every row sorted, the windows computed, then the rows after the cursor and the first k of them.
+   Their cells, the groups' keys and the windows' values are charged to the ticket. *)
+
+(* rows into groups by a key: 0, 1, ... in the order of their first rows *)
+let partition n (key : int -> string) =
+  let t = Hashtbl.create 64 and part = Array.make n 0 in
+  for i = 0 to n - 1 do
+    let k = key i in
+    match Hashtbl.find_opt t k with
+    | Some g -> part.(i) <- g
+    | None -> let g = Hashtbl.length t in Hashtbl.add t k g; part.(i) <- g
+  done;
+  part, Hashtbl.length t
+
+(* the rows to keep of [n] rows in Sort's order: those after the cursor [after] (if any), then the first [limit] of
+   each group (the whole answer's without Each) and the copies of its [limit]-th, which follow it; [same i j]: rows i
+   and j are the same row *)
+let keep_rows n ~after ~limit ~part ~same =
+  let groups = Array.fold_left (fun m g -> max m (g + 1)) 1 part in
+  let cnt = Array.make groups 0 and last = Array.make groups (-1) in
+  let out = ref [] in
+  for i = 0 to n - 1 do
+    if after i then begin
+      let g = part.(i) in
+      if limit = 0 || cnt.(g) < limit then (cnt.(g) <- cnt.(g) + 1; last.(g) <- i; out := i :: !out)
+      else if same last.(g) i then out := i :: !out
+    end
+  done;
+  Array.of_list (List.rev !out)
+
+(* the state of Each's first k rows of each group, a domain's: its groups' keys in a table (Answer's), each group's
+   buffer, the rows each has held at most (charged) *)
+type firsts = { gt : table; mutable bufs : Top.acc array; mutable held : int array }
+
+let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
   let ({ ask; ty; masked; var; fold; _ } as p) = prepare ~extra ~budget ?stop v q in
   (* an Optional's variable may be missing: no Sum, Min or Max of it (nor of a Trunc of it) *)
   let optional x =
     let x = if x < q.vars then x else fst p.derived.(x - q.vars) in
     match ask with Some a -> Array.exists (fun (o : Ask.opt) -> o.ov = x) a.opts | None -> false
   in
+  (* the rows of a Give in an order, as Top reads them: [limit] the rows each fold's accumulator holds at most *)
+  let source give limit =
+    let bound = if limit > 0 then max 64 (2 * limit) else max_int in
+    let base = match ticket with Some t -> Atomic.get t.used | None -> 0 in
+    { Top.fold =
+        (fun window ~seq ~init ~step ~merge ->
+          match ticket with
+          | None -> fold ~seq ?window ~init ~step ~merge ()
+          | Some t -> counted t ~base ~cols:(weight * max 1 (Array.length give)) ~bound (fun ~init ~step ~merge -> fold ~seq ?window ~init ~step ~merge ()) ~init ~step ~merge);
+      project = projector p give;
+      (* a Trunc's column has no index of its own: the heap path sorts it *)
+      var = (fun c -> if give.(c) < q.vars then Some give.(c) else None);
+      lead = lead v q;
+      estimate = (fun () -> match ask with None -> Query.estimate v q | Some a -> Ask.estimate v a) }
+  in
+  let charge_opt n = match ticket with Some t -> charge t (weight * n) | None -> () in
   match sel with
   | Wire.Give give when order <> Top.none ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;
     let typs = Array.map (fun x -> ty.(x)) give in
-    let bound = if order.limit > 0 then max 64 (2 * order.limit) else max_int in
-    let base = match ticket with Some t -> Atomic.get t.used | None -> 0 in
-    let src =
-      { Top.fold =
-          (fun window ~seq ~init ~step ~merge ->
-            match ticket with
-            | None -> fold ~seq ?window ~init ~step ~merge ()
-            | Some t -> counted t ~base ~cols:(weight * max 1 (Array.length give)) ~bound (fun ~init ~step ~merge -> fold ~seq ?window ~init ~step ~merge ()) ~init ~step ~merge);
-        project = projector p give;
-        (* a Trunc's column has no index of its own: the heap path sorts it *)
-        var = (fun c -> if give.(c) < q.vars then Some give.(c) else None);
-        lead = lead v q;
-        estimate = (fun () -> match ask with None -> Query.estimate v q | Some a -> Ask.estimate v a) }
+    of_rows ~masked (Array.length give) typs (Top.give ~masked v ~typs (source give order.limit) order)
+  | Wire.Over (Wire.Over _, _, _) -> Query.bad "windows over windows: Over takes a Give or a Group"
+  | Wire.Over ((Wire.Give give), each, windows) ->
+    let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
+    Array.iter var give;
+    let cols = Array.length give in
+    let typs = Array.map (fun x -> ty.(x)) give in
+    Top.check cols typs order;
+    Window.check ~cols ~typs:(fun c -> typs.(c)) ~key:(fun _ -> true) ~list:(fun _ -> false) each windows order;
+    let ord = Top.full cols order.keys in
+    let mk = Top.sorter ~masked v typs ord in
+    let ne = Array.length each in
+    (* a row's group: its Each columns' words, and with Optionals whether each is missing *)
+    let kw = if masked then ne + 1 else ne in
+    let key_of (row : int array) (buf : int array) =
+      for j = 0 to ne - 1 do buf.(j) <- row.(each.(j)) done;
+      if masked then begin
+        let m = ref 0 in
+        for j = 0 to ne - 1 do if Top.missing cols row each.(j) then m := !m lor (1 lsl j) done;
+        buf.(ne) <- !m
+      end
     in
-    of_rows ~masked (Array.length give) typs (Top.give ~masked v ~typs src order)
+    let rows =
+      if ne > 0 && order.limit > 0 then begin
+        (* the first k rows of each group: a buffer a group, cut back at 2 k rows *)
+        let k = order.limit in
+        let width = weight * max 1 cols in
+        let cells (st : firsts) n = st.gt.cells <- st.gt.cells + n; match ticket with Some tk when st.gt.cells >= grain -> charge tk st.gt.cells; st.gt.cells <- 0 | _ -> () in
+        let into st row =
+          key_of row st.gt.buf;
+          let n0 = st.gt.n in
+          let g = group st.gt in
+          if st.gt.n > n0 then begin
+            if g >= Array.length st.bufs then begin
+              let m = max 16 (2 * Array.length st.bufs) in
+              let b = Array.init m (fun i -> if i < Array.length st.bufs then st.bufs.(i) else Top.fresh ()) in
+              let h = Array.make m 0 in
+              Array.blit st.held 0 h 0 (Array.length st.held);
+              st.bufs <- b;
+              st.held <- h
+            end;
+            cells st (weight * (kw + 4))
+          end;
+          let b = st.bufs.(g) in
+          Top.push ~least:2 mk k b row;
+          if b.n > st.held.(g) then (st.held.(g) <- b.n; cells st width)
+        in
+        let init () = { gt = table ~kw ~na:0 ~start:[||] ~cols:[||] (); bufs = [||]; held = [||] } in
+        let merge a b =
+          for gb = 0 to b.gt.n - 1 do
+            let buf = b.bufs.(gb) in
+            for i = 0 to buf.n - 1 do into a buf.a.(i) done
+          done;
+          cells a b.gt.cells;
+          a
+        in
+        let project = projector p give in
+        let st = fold ~init ~merge ~step:(fun st env -> into st (project env); st) () in
+        (match ticket with Some tk when st.gt.cells > 0 -> charge tk st.gt.cells; st.gt.cells <- 0 | _ -> ());
+        let firsts = List.init st.gt.n (fun g -> let b = st.bufs.(g) in Top.sort_cut mk k b; Array.sub b.a 0 b.n) in
+        let all = Array.concat firsts in
+        Array.stable_sort (mk ()) all;
+        all
+      end
+      else
+        (* the first k rows and their copies without After (or every row); with After every row *)
+        let o = if order.after = None then order else { order with limit = 0; after = None } in
+        Top.give ~masked v ~typs (source give o.limit) o
+    in
+    let n = Array.length rows in
+    let part, groups =
+      if ne = 0 then Array.make n 0, min n 1
+      else begin
+        let buf = Array.make kw 0 in
+        partition n (fun i ->
+            key_of rows.(i) buf;
+            let b = Bytes.create (8 * kw) in
+            Array.iteri (fun j w -> Bytes.set_int64_le b (8 * j) (Int64.of_int w)) buf;
+            Bytes.unsafe_to_string b)
+      end
+    in
+    let nw = Array.length windows in
+    charge_opt (n * (2 + nw));
+    let get i c = if masked && Top.missing cols rows.(i) c then Value.missing else Store.value v typs.(c) rows.(i).(c) in
+    let cmp_k k = let o = Array.sub ord 0 k in if masked then Top.compare_masked v typs o else Top.compare_rows v typs o in
+    let ties = Hashtbl.create 2 in
+    let tie k = match Hashtbl.find_opt ties k with Some f -> f | None -> let c = cmp_k k in let f i j = c rows.(i) rows.(j) = 0 in Hashtbl.add ties k f; f in
+    let out = Window.compute ~view:v ~n ~groups ~part:(fun i -> part.(i)) ~get ~tie:(fun k -> tie k) ~typs:(fun c -> typs.(c)) windows in
+    let idx =
+      match order.after with
+      | None -> Array.init n Fun.id
+      | Some a ->
+        let cur = Array.mapi (fun i x -> Top.cell v typs.(i) (string_of_int i) x) a in
+        let full = cmp_k (Array.length ord) in
+        keep_rows n ~after:(fun i -> Top.compare_cursor ~masked v typs ord rows.(i) cur > 0) ~limit:order.limit ~part
+          ~same:(fun i j -> full rows.(i) rows.(j) = 0)
+    in
+    Window.check_past out idx;
+    let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
+    { cols = cols + nw; n = Array.length idx; typ = (fun j -> if j < cols then typs.(j) else wt.(j - cols));
+      word = (fun i j -> if j < cols then rows.(idx.(i)).(j) else 0);
+      missing = (fun i j -> if j < cols then masked && Top.missing cols rows.(idx.(i)) j else Value.is_missing out.(j - cols).(idx.(i)));
+      computed = (fun j -> j >= cols); cell = (fun i j -> out.(j - cols).(idx.(i))) }
+  | Wire.Over ((Wire.Group (keys, aggs) as base), each, windows) ->
+    Array.iter var keys;
+    Array.iter (fun a -> Option.iter var (Agg.var_of a)) aggs;
+    if Array.exists (function Wire.Values _ -> true | _ -> false) aggs then
+      Query.bad "windows and Each are not for a report with Values: a group is then several rows, one a value";
+    let nk = Array.length keys in
+    let cols = nk + Array.length aggs in
+    let typs = Array.init cols (fun j -> if j < nk then ty.(keys.(j)) else let a = aggs.(j - nk) in Agg.typ a (match Agg.var_of a with Some x -> ty.(x) | None -> Value.Tint)) in
+    Top.check cols typs order;
+    Window.check ~cols ~typs:(fun c -> typs.(c)) ~key:(fun c -> c < nk) ~list:(fun _ -> false) each windows order;
+    (* every group, in the order: the windows read them all *)
+    let a = answer ~order:{ order with limit = 0; after = None } ~extra ~budget ?stop ?ticket ~weight v q base in
+    let rows = Array.init a.n (fun i -> Array.init cols (fun j -> value v a i j)) in
+    let n = a.n in
+    let ord = Top.full cols order.keys in
+    let part, groups =
+      if each = [||] then Array.make n 0, min n 1
+      else partition n (fun i -> let b = Buffer.create 16 in Array.iter (fun c -> Value.encode b rows.(i).(c)) each; Buffer.contents b)
+    in
+    let nw = Array.length windows in
+    charge_opt (n * (2 + nw));
+    let cmp_k k = let o = Array.sub ord 0 k in fun i j -> Top.compare_value_rows o rows.(i) rows.(j) in
+    let out =
+      Window.compute ~view:v ~n ~groups ~part:(fun i -> part.(i)) ~get:(fun i c -> rows.(i).(c)) ~tie:(fun k -> let c = cmp_k k in fun i j -> c i j = 0)
+        ~typs:(fun c -> typs.(c)) windows
+    in
+    let after =
+      match order.after with
+      | None -> fun _ -> true
+      | Some cur ->
+        Array.iteri (fun j x -> if not (Value.is_missing x || Value.has_type typs.(j) x) then Query.bad "After's column %d needs a %s, not %s" j (Value.typ_name typs.(j)) (Value.to_string x)) cur;
+        fun i -> Top.compare_value_rows ord rows.(i) cur > 0
+    in
+    let full = cmp_k (Array.length ord) in
+    let idx = keep_rows n ~after ~limit:order.limit ~part ~same:(fun i j -> full i j = 0) in
+    Window.check_past out idx;
+    let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
+    of_values (cols + nw) (Array.append typs wt) (Array.map (fun i -> Array.init (cols + nw) (fun j -> if j < cols then rows.(i).(j) else out.(j - cols).(i))) idx)
   | Wire.Give give ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;

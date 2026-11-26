@@ -362,6 +362,96 @@ let oracle cols groups (o : Top.order) =
   in
   List.concat_map flatten groups
 
+
+(* ---- the oracle of windows and Each (protocol 10): each window computed again by brute force ---- *)
+
+let with_windows = ref 0 and with_each = ref 0 and window_cells = ref 0 and window_refusals = ref 0
+
+(* an exact sum of ints as two ints (each value hi 2^31 + lo), None past the 63 bits of an int *)
+let exact_sum (xs : int list) =
+  let m = (1 lsl 31) - 1 in
+  let h, l = List.fold_left (fun (h, l) x -> h + (x asr 31), l + (x land m)) (0, 0) xs in
+  let h = h + (l asr 31) and l = l land m in
+  if h < -(1 lsl 31) || h > (1 lsl 31) - 1 then None else Some ((h lsl 31) lor l)
+
+exception Overflow
+
+(* the windows' values of rows sorted in the order [ord], each group of [each] apart; [ctyp] the columns' types; and
+   whether each window's values are approximate (an Avg in floats) *)
+let window_oracle (ctyp : Value.typ array) ord (each : int array) (windows : Wire.window array) (rows : Value.t array list) =
+  let rows = Array.of_list rows in
+  let n = Array.length rows in
+  let key i = String.concat "" (Array.to_list (Array.map (fun c -> bits rows.(i).(c)) each)) in
+  let before i = List.filter (fun j -> j < i && key j = key i) (List.init n Fun.id) in
+  let tie k i j = cmp_row (List.filteri (fun x _ -> x < k) ord) rows.(i) rows.(j) = 0 in
+  let approx = Array.make (Array.length windows) false in
+  let out =
+    Array.mapi
+      (fun wi (w : Wire.window) ->
+        Array.init n (fun i ->
+            (* a sum past 63 bits: None, the engine refuses the question when that row is one it gives *)
+            try Some (
+            let prev = before i in
+            let p = List.length prev in
+            match w with
+            | Running (a, last) -> (
+              let frame = List.filteri (fun x _ -> last = 0 || x >= p - (last - 1)) (prev @ [ i ]) in
+              let vals c = List.filter (fun x -> not (Value.is_missing x)) (List.map (fun j -> rows.(j).(c)) frame) in
+              match a with
+              | Wire.Count -> Value.Int (List.length frame)
+              | Sum c -> (
+                match vals c with
+                | [] -> Value.missing
+                | vs -> (match exact_sum (List.map int_of vs) with None -> raise Overflow | Some x -> (match ctyp.(c) with Tmoney _ -> Money x | _ -> Int x)))
+              | Avg c -> (
+                match vals c, ctyp.(c) with
+                | [], _ -> Value.missing
+                | vs, Tint when exact_sum (List.map int_of vs) <> None ->
+                  (* the exact sum, then one division: within a rounding of the engine's *)
+                  approx.(wi) <- true;
+                  Value.Float (float_of_int (Option.get (exact_sum (List.map int_of vs))) /. float_of_int (List.length vs))
+                | vs, _ -> (match report_agg ctyp (Wire.Avg c) vs with One x, ap -> if ap then approx.(wi) <- true; x | Many _, _ -> assert false))
+              | Min c | Max c -> (
+                match vals c with
+                | [] -> Value.missing
+                | v0 :: vs ->
+                  let better x y = let d = cmp_value x y in match a with Min _ -> d < 0 | _ -> d > 0 in
+                  List.fold_left (fun m x -> if better x m then x else m) v0 vs)
+              | _ -> assert false)
+            | Rank (k, dense) ->
+              let tied = List.filter (fun j -> not (tie k j i)) prev in
+              if not dense then Value.Int (1 + List.length tied)
+              else begin
+                (* the places before: a new one at each row not tied with the one before it *)
+                let all = prev @ [ i ] in
+                let rec places acc last = function [] -> acc | j :: tl -> (match last with Some l when tie k l j -> places acc last tl | _ -> places (acc + 1) (Some j) tl) in
+                Value.Int (places 0 None all)
+              end
+            | Prev (c, back) -> if p >= back then rows.(List.nth prev (p - back)).(c) else Value.missing)
+            with Overflow -> None))
+      windows
+  in
+  out, approx
+
+(* random windows and Each over a select's rows: [cols] columns of types [ctyp], [keys] of them keys *)
+let random_windows r (ctyp : Value.typ array) ~nkeys ~sorts =
+  let cols = Array.length ctyp in
+  let pick l = List.nth l (Rng.int r (List.length l)) in
+  let of_types ts = List.filter (fun c -> List.exists (fun t -> match t, ctyp.(c) with `I, Value.Tint | `M, Tmoney _ | `D, Tdate | `F, Tfloat -> true | _ -> false) ts) (List.init cols Fun.id) in
+  let last () = if Rng.bool r then 0 else 1 + Rng.int r 4 in
+  let one () =
+    match Rng.int r 7 with
+    | 0 -> Some (Wire.Running (Count, last ()))
+    | 1 -> (match of_types [ `I; `M ] with [] -> None | l -> Some (Wire.Running (Sum (pick l), last ())))
+    | 2 -> (match of_types [ `I; `M; `D; `F ] with [] -> None | l -> Some (Wire.Running (Avg (pick l), last ())))
+    | 3 -> (match of_types [ `I; `M; `D ] with [] -> None | l -> Some (Wire.Running ((if Rng.bool r then Min (pick l) else Max (pick l)), last ())))
+    | 4 -> Some (Wire.Rank (1 + Rng.int r sorts, Rng.bool r))
+    | _ -> Some (Wire.Prev (Rng.int r cols, 1 + Rng.int r 3))
+  in
+  let windows = List.filter_map (fun _ -> one ()) (List.init (Rng.int r 4) Fun.id) in
+  let each = if nkeys = 0 || Rng.int r 3 = 0 then [] else List.sort_uniq compare (List.init (1 + Rng.int r 2) (fun _ -> Rng.int r nkeys)) in
+  Array.of_list each, Array.of_list windows
+
 (* ---- the engine ---- *)
 
 let engine ?(extra = []) v q sel o =
@@ -836,7 +926,66 @@ let run seed =
              [ (1, 1); (12, 1); (64, 1) ]);
         let q', extra', sel', o' = wired q extra sel o in
         Top.path := Auto;
-        (match engine ~extra:extra' v q' sel' o' with got -> check "wired" got | exception Query.Bad m -> C.fail "seed %d: wired refused: %s" seed m)
+        (match engine ~extra:extra' v q' sel' o' with got -> check "wired" got | exception Query.Bad m -> C.fail "seed %d: wired refused: %s" seed m);
+        (* the same rows with windows and Each (protocol 10), a question in two that has Sort and no Values *)
+        if o.keys <> [] && (not has_values) && Rng.bool r then begin
+          let nkeys = match sel with Group (k, _) -> Array.length k | _ -> cols in
+          let each, windows = random_windows r ctyp ~nkeys ~sorts:(List.length o.keys) in
+          (* with Each: no After, and a Limit when there is no window *)
+          let o = if each = [||] then o else { o with after = None; limit = (if windows = [||] && o.limit = 0 then 1 + Rng.int r 3 else o.limit) } in
+          if each <> [||] || windows <> [||] then begin
+            incr with_windows;
+            if each <> [||] then incr with_each;
+            let osel = Wire.Over (sel, each, windows) in
+            let ord = ordered cols o in
+            let sorted = List.stable_sort (fun a b -> cmp_row ord a b) (List.map plain groups) in
+            let want =
+              match window_oracle ctyp ord each windows sorted with
+              | out, approx ->
+                let sorted = Array.of_list sorted in
+                let n = Array.length sorted in
+                let key i = String.concat "" (Array.to_list (Array.map (fun c -> bits sorted.(i).(c)) each)) in
+                let after i = match o.after with None -> true | Some a -> cmp_row ord sorted.(i) a > 0 in
+                let cnt = Hashtbl.create 8 and last = Hashtbl.create 8 in
+                let keep =
+                  List.filter
+                    (fun i ->
+                      after i
+                      &&
+                      let k = key i in
+                      let c = Option.value (Hashtbl.find_opt cnt k) ~default:0 in
+                      if o.limit = 0 || c < o.limit then (Hashtbl.replace cnt k (c + 1); Hashtbl.replace last k i; true)
+                      else cmp_row ord sorted.(Hashtbl.find last k) sorted.(i) = 0)
+                    (List.init n Fun.id)
+                in
+                if List.exists (fun i -> Array.exists (fun w -> w.(i) = None) out) keep then None
+                else Some (List.map (fun i -> Array.append sorted.(i) (Array.map (fun w -> Option.get w.(i)) out)) keep, approx)
+            in
+            let ap j = j >= cols && match want with Some (_, a) -> a.(j - cols) | None -> false in
+            let same_w a b = List.length a = List.length b && List.for_all2 (fun x y -> Array.length x = Array.length y && Array.for_all Fun.id (Array.mapi (fun j c -> if ap j then close c y.(j) else Value.equal c y.(j)) x)) a b in
+            let checkw name got =
+              match want, got with
+              | Some (w, _), Ok g -> window_cells := !window_cells + List.fold_left (fun s r -> s + Array.length r - cols) 0 g;
+                if same_w g w then C.check true "" else C.fail "seed %d: %s windows %s\n  got:  %s\n  want: %s" seed name (Timings.shape v q osel extra o) (show g) (show w)
+              | None, Error m when String.length m >= 13 && String.sub m 0 13 = "Running's Sum" -> incr window_refusals; C.check true ""
+              | None, Ok g -> C.fail "seed %d: %s windows: a sum past 63 bits given: %s" seed name (show g)
+              | _, Error m -> C.fail "seed %d: %s windows refused: %s" seed name m
+            in
+            let eng () = match engine ~extra v q osel o with g -> Ok g | exception Query.Bad m -> Error m in
+            List.iter (fun (p, name) -> Top.path := p; checkw name (eng ())) [ (Top.Heap, "heap"); (Top.Index, "index"); (Top.Auto, "auto") ];
+            Top.path := Auto;
+            (* split across 3 domains at every level (Each's buffers of a group merged from each domain's) *)
+            let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
+            Query.domains := 3;
+            Query.parallel_min := 1;
+            Query.probe_min := 1;
+            Query.probe_more := 1;
+            Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0)
+              (fun () -> checkw "split" (eng ()));
+            let q', extra', sel', o' = wired q extra osel o in
+            checkw "wired" (match engine ~extra:extra' v q' sel' o' with g -> Ok g | exception Query.Bad m -> Error m)
+          end
+        end
       done)
     views
 
@@ -980,6 +1129,117 @@ end
    fields, constants, ranges), answered with each planner: the same rows (as a multiset without Sort, the same rows in
    the same order with Sort and Limit). The work of each, summed, is printed. Then the bounds of the search: questions
    of 63 variables, of 12 variables all linked, and of 5,000 patterns are planned in bounded time. *)
+
+(* ---- windows over larger groups: frames up to 40 rows, Min and Max over a sliding frame, exact sums of extreme
+   ints, floats and money, Each with 1 to 60 groups, pages after a cursor; the base rows from the engine (checked
+   above), each window by brute force ---- *)
+let windows_big seeds =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ client; amount; price; ratio; day ]) =
+    declare db [ prop "client" Tint; prop "amount" Tint; prop "price" (Tmoney 2); prop "ratio" Tfloat; prop "day" Tdate ]
+  in
+  let r = Rng.make 7 in
+  let n = 700 in
+  let ops =
+    List.concat
+      (List.init n (fun k ->
+           let t = -1 - k in
+           [ Resolve.Add (t, client, Int (Rng.int r 60)); Add (t, amount, Int (match Rng.int r 30 with 0 -> max_int / 3 | 1 -> min_int / 3 | _ -> Rng.int r 2000 - 1000));
+             Add (t, day, Date (1_700_000_000_000 + (86_400_000 * Rng.int r 400))) ]
+           @ (if Rng.int r 5 > 0 then [ Resolve.Add (t, price, Money (Rng.int r 100_000 - 20_000)) ] else [])
+           (* a nan or an infinity as it is: infinity times 0 is the processor's own nan, a payload the oracle's
+              totalOrder does not tell apart *)
+           @ (if Rng.int r 4 > 0 then [ Resolve.Add (t, ratio, Float (let f = floats.(Rng.int r (Array.length floats)) in if Float.is_finite f then f *. float_of_int (Rng.int r 7) else f)) ] else [])))
+  in
+  (match write db ops with Ok _ -> () | Error e -> C.fail "windows: a write failed: %s" (message e));
+  let v = view db in
+  let q = { Query.vars = 6; where = [ { e = Var 0; p = client; v = Var 1 }; { e = Var 0; p = amount; v = Var 2 }; { e = Var 0; p = day; v = Var 3 } ]; ranges = [] } in
+  let extra = [ Ask.Optional { e = Var 0; p = price; v = Var 4 }; Ask.Optional { e = Var 0; p = ratio; v = Var 5 } ] in
+  for seed = 1 to seeds do
+    let r = Rng.make (5000 + seed) in
+    (* a Give of the thing, its client, amount, day, price and ratio; or a report by client (and month) *)
+    let report = Rng.int r 3 = 0 in
+    let sel, ctyp =
+      if report then
+        let month = Rng.bool r in
+        (if month then Wire.Group ([| 1; 6 |], [| Wire.Count; Sum 2; Max 3 |]) else Wire.Group ([| 1 |], [| Wire.Count; Sum 2; Min 3 |])),
+        if month then [| Value.Tint; Tdate; Tint; Tint; Tdate |] else [| Value.Tint; Tint; Tint; Tdate |]
+      else Wire.Give [| 0; 1; 2; 3; 4; 5 |], [| Value.Tlink; Tint; Tint; Tdate; Tmoney 2; Tfloat |]
+    in
+    let extra = if report then extra @ (match sel with Wire.Group (k, _) when Array.length k = 2 -> [ Ask.Trunc (6, 3, "month", "Europe/Paris") ] | _ -> []) else extra in
+    let cols = Array.length ctyp in
+    let nkeys = match sel with Wire.Group (k, _) -> Array.length k | _ -> cols in
+    let keys = List.sort_uniq (fun (a : Top.key) b -> compare a.col b.col) (List.init (1 + Rng.int r 2) (fun _ -> { Top.col = Rng.int r cols; desc = Rng.bool r })) in
+    let pick l = List.nth l (Rng.int r (List.length l)) in
+    let of_t f = List.filter (fun c -> f ctyp.(c)) (List.init cols Fun.id) in
+    let last () = if Rng.int r 3 = 0 then 0 else 1 + Rng.int r 40 in
+    let windows =
+      Array.init (1 + Rng.int r 3) (fun _ ->
+          match Rng.int r 6 with
+          | 0 -> Wire.Running (Sum (pick (of_t (function Value.Tint | Tmoney _ -> true | _ -> false))), last ())
+          | 1 -> Wire.Running (Avg (pick (of_t (function Value.Tint | Tmoney _ | Tdate | Tfloat -> true | _ -> false))), last ())
+          | 2 -> Wire.Running (Max (pick (of_t (function Value.Tint | Tmoney _ | Tdate -> true | _ -> false))), last ())
+          | 3 -> Wire.Running (Min (pick (of_t (function Value.Tint | Tmoney _ | Tdate -> true | _ -> false))), last ())
+          | 4 -> Wire.Rank (1 + Rng.int r (List.length keys), Rng.bool r)
+          | _ -> Wire.Prev (Rng.int r cols, 1 + Rng.int r 30))
+    in
+    let each = if Rng.bool r then [| (if report then 0 else 1) |] else [||] in
+    ignore nkeys;
+    let base = engine ~extra v q sel { Top.keys; limit = 0; after = None } in
+    let o =
+      let limit = if Rng.bool r then 0 else 1 + Rng.int r 50 in
+      let after = if each = [||] && base <> [] && Rng.bool r then Some (List.nth base (Rng.int r (List.length base))) else None in
+      { Top.keys; limit; after }
+    in
+    let ord = ordered cols o in
+    let out, approx = window_oracle ctyp ord each windows base in
+    begin
+
+      let rows = Array.of_list base in
+      let key i = String.concat "" (Array.to_list (Array.map (fun c -> bits rows.(i).(c)) each)) in
+      let cnt = Hashtbl.create 8 and lastk = Hashtbl.create 8 in
+      let keep =
+        List.filter
+          (fun i ->
+            (match o.after with None -> true | Some a -> cmp_row ord rows.(i) a > 0)
+            &&
+            let k = key i in
+            let c = Option.value (Hashtbl.find_opt cnt k) ~default:0 in
+            if o.limit = 0 || c < o.limit then (Hashtbl.replace cnt k (c + 1); Hashtbl.replace lastk k i; true)
+            else cmp_row ord rows.(Hashtbl.find lastk k) rows.(i) = 0)
+          (List.init (Array.length rows) Fun.id)
+      in
+      if List.exists (fun i -> Array.exists (fun w -> w.(i) = None) out) keep then
+        (match engine ~extra v q (Wire.Over (sel, each, windows)) o with _ -> C.fail "windows %d: a sum past 63 bits given" seed | exception Query.Bad _ -> incr window_refusals)
+      else
+      let want = List.map (fun i -> Array.append rows.(i) (Array.map (fun w -> Option.get w.(i)) out)) keep in
+      List.iter
+        (fun (p, name) ->
+          Top.path := p;
+          match engine ~extra v q (Wire.Over (sel, each, windows)) o with
+          | got ->
+            incr with_windows;
+            window_cells := !window_cells + (List.length got * Array.length windows);
+            let ok =
+              List.length got = List.length want
+              && List.for_all2 (fun a b -> Array.for_all Fun.id (Array.mapi (fun j x -> if j >= cols && approx.(j - cols) then close x b.(j) else Value.equal x b.(j)) a)) got want
+            in
+            if ok then C.check true ""
+            else begin
+              let rec first i = function
+                | a :: ta, b :: tb -> if Array.length a = Array.length b && Array.for_all2 (fun x y -> Value.equal x y) a b then first (i + 1) (ta, tb) else Printf.sprintf "row %d:\n  got:  %s\n  want: %s" i (show [ a ]) (show [ b ])
+                | _ -> Printf.sprintf "lengths %d %d" (List.length got) (List.length want)
+              in
+              C.fail "windows %d %s: %s\n  %s\n  after: %s\n  windows: %s" seed name (Timings.shape v q (Wire.Over (sel, each, windows)) extra o) (first 0 (got, want))
+                (match o.after with Some a -> show [ a ] | None -> "-")
+                (String.concat "; " (Array.to_list (Array.map (function Wire.Running (a, l) -> Printf.sprintf "%s %s last %d" (Agg.name a) (match Agg.var_of a with Some c -> string_of_int c | None -> "") l | Rank (k, d) -> Printf.sprintf "rank %d %b" k d | Prev (c, b) -> Printf.sprintf "prev %d %d" c b) windows)))
+            end
+          | exception Query.Bad m -> C.fail "windows %d %s refused: %s" seed name m)
+        [ (Top.Heap, "heap"); (Top.Auto, "auto") ];
+      Top.path := Auto
+    end
+  done
+
 let planners_work = ref (0, 0) and planners_checks = ref 0
 
 let planners seeds =
@@ -1339,12 +1599,13 @@ let () =
   Unix.putenv "TZ" "UTC";
   let seeds = ref 300 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "S" ] (fun _ -> ()) "questions.exe";
-  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; ins (); less_optional (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
+  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; windows_big !seeds; ins (); less_optional (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
   Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path (%d of a sort by a thing), %d given up for the heap path\n"
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.held) (Atomic.get Top.gave_up);
   Printf.printf "questions: %d ranges of a thing read from their first thing\n" (Atomic.get Query.seeks);
   Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
   Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
+  Printf.printf "questions: %d with windows or Each (%d with Each), %d windows' cells checked, %d running sums past 63 bits refused\n" !with_windows !with_each !window_cells !window_refusals;
   Printf.printf "questions: %d answers split across 3 domains (%d levels split, %d by a probe; %d bag columns moved to a table a group), each the rows of one domain in their order\n" !split_checks (Atomic.get Query.splits) (Atomic.get Query.probed_splits) (Atomic.get Agg.owned);
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"
     !planners_checks (fst !planners_work) (snd !planners_work);

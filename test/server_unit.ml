@@ -134,6 +134,16 @@ let rand_request r =
       | 1 -> Wire.Group ([| Rng.int r 3 |], [| Wire.Count; Wire.Sum 1; Wire.Min 0; Wire.Max 2 |])
       (* the aggregates of protocol 9 *)
       | _ -> Wire.Group ([| Rng.int r 3 |], [| Wire.Avg 1; Distinct 0; Values 2; Quantile (1, float_of_int (Rng.int r 101) /. 100., Rng.bool r); Variance (1, Rng.bool r); Stddev (2, Rng.bool r) |]) in
+    (* windows and Each over it now and then (version 10) *)
+    let select =
+      if Rng.int r 3 > 0 then select
+      else
+        Wire.Over (select, Array.init (Rng.int r 3) (fun _ -> Rng.int r 3),
+          Array.init (Rng.int r 4) (fun _ ->
+              match Rng.int r 3 with
+              | 0 -> Wire.Running ((match Rng.int r 5 with 0 -> Wire.Count | 1 -> Sum 1 | 2 -> Avg 2 | 3 -> Min 0 | _ -> Max 1), Rng.int r 300)
+              | 1 -> Rank (Rng.int r 4, Rng.bool r)
+              | _ -> Prev (Rng.int r 3, 1 + Rng.int r 200))) in
     (* and a Trunc now and then *)
     let extra = if Rng.int r 4 = 0 then [ Ask.Trunc (q.vars, 0, "month", "Europe/Paris") ] else [] in
     let order =
@@ -1053,8 +1063,8 @@ let versions () =
   in
   let welcome = function Wire.Welcome _ -> true | _ -> false in
   check (welcome (hello 1) && welcome (hello 2) && welcome (hello 3) && welcome (hello 4) && welcome (hello 5) && welcome (hello 6) && welcome (hello 7)
-         && welcome (hello 8) && welcome (hello 9)) "versions: a server speaks 1 to 9";
-  check (match hello 10 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 10";
+         && welcome (hello 8) && welcome (hello 9) && welcome (hello 10)) "versions: a server speaks 1 to 10";
+  check (match hello 11 with Wire.Err { code = "version"; _ } -> true | _ -> false) "versions: and refuses 11";
   (* a program against a server of protocol 1 *)
   let base = try Sys.getenv "CEPHEUS_TMP" with Not_found -> Filename.get_temp_dir_name () in
   let path = Filename.concat base (Printf.sprintf "cph-v1-%d.sock" (Unix.getpid ())) in
@@ -1095,7 +1105,7 @@ let versions () =
       done) () in
   (match Client.connect (Client.Unix_socket path) "cph_r" with
    | Ok c ->
-     check (c.spoken = 1 && List.rev !seen = [ 9; 8; 7; 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
+     check (c.spoken = 1 && List.rev !seen = [ 10; 9; 8; 7; 6; 5; 4; 3; 2; 1 ]) "versions: a program connects again in 1 to a server of 1 (spoke %s)" (String.concat "," (List.map string_of_int (List.rev !seen)));
      (* an Incr to a server of protocol 3 or older is refused in the program, never sent; a write without it is sent *)
      let db = { Client.handle = 0; group = 0; props = []; local = None; wants_local = false; retry_at = 0. } in
      check (Client.write c db [ Resolve.Incr (65536, 16, 1, None) ] = Error { code = "invalid"; message = Client.no_incr } && c.serial = 0)
@@ -1138,6 +1148,15 @@ let versions () =
             && Client.find c db ~extra:trunc ~select:(Wire.Give [| 0; 2 |]) q = Error { code = "invalid"; message = Client.no_report 8 })
        "versions: a report's aggregates and Trunc to a server of 8 are refused before they are sent";
      check (match Client.watch c db ~select:(Wire.Group ([||], [| Wire.Quantile (1, 0.5, false) |])) q with _ -> false | exception Invalid_argument m -> m = Client.no_report 8)
+       "versions: and in a watch";
+     (* windows and Each to a server of protocol 9 or older: refused in the program, never sent *)
+     c.spoken <- 9;
+     let sorted = { Top.keys = [ { col = 1; desc = false } ]; limit = 3; after = None } in
+     check (Client.find c db ~order:sorted ~select:(Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Running (Sum 1, 0) |])) q = Error { code = "invalid"; message = Client.no_window 9 }
+            && Client.find c db ~order:sorted ~select:(Wire.Over (Wire.Give [| 0; 1 |], [| 0 |], [||])) q = Error { code = "invalid"; message = Client.no_window 9 }
+            && Client.find c db ~order:sorted ~select:(Wire.Over (Wire.Group ([| 0 |], [| Wire.Sum 1 |]), [||], [| Wire.Rank (1, false) |])) q = Error { code = "invalid"; message = Client.no_window 9 })
+       "versions: windows and Each to a server of 9 are refused before they are sent";
+     check (match Client.watch c db ~select:(Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Prev (1, 1) |])) q with _ -> false | exception Invalid_argument m -> m = Client.no_window 9)
        "versions: and in a watch";
      Client.close c
    | Error m -> check false "versions: no connection to a server of 1: %s" m);
@@ -1497,6 +1516,11 @@ let watch_window () =
   check (bad { top3 with keys = [ { col = -1; desc = true } ] } && bad { top3 with limit = -1 }) "window: a negative column or Limit is refused";
   check (match watch ~sel:(Wire.Group ([||], [| Wire.Count |])) { top3 with keys = [ { col = 0; desc = true } ] } with [ Error "invalid" ] -> true | _ -> false)
     "window: aggregates are refused";
+  (* windows and Each (protocol 10): no watch's, with Sort or without *)
+  check (match watch ~sel:(Wire.Over (Wire.Give [||], [||], [| Wire.Running (Sum 1, 0) |])) top3 with [ Error "invalid" ] -> true | _ -> false)
+    "window: a watch of a running sum is refused";
+  check (match watch ~sel:(Wire.Over (Wire.Give [||], [| 0 |], [||])) Top.none with [ Error "invalid" ] -> true | _ -> false)
+    "window: a watch of Each is refused";
   let saved = !Answer.question_budget in
   Answer.question_budget := 2;
   check (match watch top3 with [ Error "too_large" ] -> true | _ -> false) "window: its first answer within the server's budget";

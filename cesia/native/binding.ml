@@ -725,7 +725,7 @@ let variables ctx a =
   let n = int ctx "cepheus.Find" a.(0) in
   C.list ctx (Array.init n (fun k -> C.Handle ("cepheus.variable", k)))
 
-let question_keys = C.keys [| "Where"; "Give"; "Sort"; "Limit"; "After" |]
+let question_keys = C.keys [| "Where"; "Give"; "Sort"; "Limit"; "After"; "Each" |]
 let desc_keys = C.keys [| "Desc" |]
 let op_keys = C.keys [| "Not"; "Or"; "And"; "In"; "Values"; "Prefix"; "Text" |]
 let less_keys = C.keys [| "Less"; "Than"; "Equal" |]
@@ -736,16 +736,21 @@ let aggregate_keys = C.keys [| "Sum"; "Min"; "Max"; "Count" |]
 (* the aggregates of reports (protocol 9) and Trunc, as the package's functions make them *)
 let report_keys = C.keys [| "Avg"; "Count"; "Values"; "Quantile"; "At"; "Discrete"; "Variance"; "Stddev"; "Population"; "Trunc"; "Unit"; "Zone" |]
 
-(* a field of Give: a variable, an aggregate, or a date truncated (a key, computed: Ask.Trunc) *)
-type column = Var of int | Agg of Wire.agg | Trunc of int * string * string
+(* the windows (protocol 10), as the package's Running, Rank and Prev make them *)
+let window_keys = C.keys [| "Running"; "Last"; "Rank"; "Dense"; "Prev"; "Back" |]
+
+(* a field of Give: a variable, an aggregate, a date truncated (a key, computed: Ask.Trunc), or a window, whose
+   columns are fields of Give (their places in it), made columns of the answer once they are known *)
+type column = Var of int | Agg of Wire.agg | Trunc of int * string * string | Win of Wire.window
 
 (* the variable of a column, if it has one *)
-let col_var = function Var j | Trunc (j, _, _) -> Some j | Agg a -> Agg.var_of a
+let col_var = function Var j | Trunc (j, _, _) -> Some j | Agg a -> Agg.var_of a | Win _ -> None
 
 (* a column with its variable renumbered *)
 let col_map f = function
   | Var j -> Var (f j)
   | Trunc (j, u, z) -> Trunc (f j, u, z)
+  | Win w -> Win w
   | Agg a ->
     Agg
       (match a with
@@ -769,9 +774,9 @@ type question = {
 
 let question ?(uses = []) ctx name d qv nvars =
     let q = map_of ctx name qv in
-    let where, give, sort, limit, after =
+    let where, give, sort, limit, after, each =
       match C.fields question_keys q with
-      | [| C.List w; (C.Map g | C.Struct g); sort; limit; after |] -> Array.init (C.length w) (C.item ctx w), g, sort, limit, after
+      | [| C.List w; (C.Map g | C.Struct g); sort; limit; after; each |] -> Array.init (C.length w) (C.item ctx w), g, sort, limit, after, each
       | _ -> C.need ctx name "a question {Where: [patterns], Give: {Name: variable}}" qv
     in
     let var = function C.Handle ("cepheus.variable", k) when k < nvars -> Some k | _ -> None in
@@ -923,7 +928,42 @@ let question ?(uses = []) ctx name d qv nvars =
             | _ -> None))
         | _ -> None)
     in
-    let cols = Array.map (fun g -> match column_of g with Some c -> c | None -> C.need ctx name what_col g) gvals in
+    (* a window: a map of Running, Rank or Prev *)
+    let window_of g = match g with (C.Map m | C.Struct m) -> (match C.fields window_keys m with [| C.Missing; _; C.Missing; _; C.Missing; _ |] -> None | f -> Some f) | _ -> None in
+    let cols0 = Array.map (fun g -> if window_of g <> None then None else match column_of g with Some c -> Some c | None -> C.need ctx name what_col g) gvals in
+    (* a window's argument: a field of Give that is no window, by its expression (as Sort's keys); the place of the
+       field in Give, made a column of the answer below *)
+    let field_of_arg what x =
+      let no () = refuse "invalid" "%s takes a field of Give (a variable, an aggregate or a Trunc that Give gives): give it too, as Amount: t" what in
+      match column_of x with
+      | None -> if window_of x <> None then refuse "invalid" "%s takes a field of Give, not another window" what else no ()
+      | Some c -> (match List.find_opt (fun i -> cols0.(i) = Some c) (List.init (Array.length cols0) Fun.id) with Some i -> i | None -> no ())
+    in
+    let count_of n what = function C.Missing -> n | C.Int k -> k | v -> C.need ctx name what v in
+    let win g =
+      match window_of g with
+      | Some [| f; last; C.Missing; _; C.Missing; _ |] ->
+        let running = "Running takes Sum, Avg, Min or Max of a field of Give, or Count()" in
+        let a =
+          match f with
+          | C.Map m | C.Struct m -> (
+            match C.fields aggregate_keys m, C.fields report_keys m with
+            | [| C.Missing; C.Missing; C.Missing; C.Bool true |], _ -> Wire.Count
+            | [| x; C.Missing; C.Missing; C.Missing |], _ when x <> C.Missing -> Sum (field_of_arg "Running's Sum" x)
+            | [| C.Missing; x; C.Missing; C.Missing |], _ when x <> C.Missing -> Min (field_of_arg "Running's Min" x)
+            | [| C.Missing; C.Missing; x; C.Missing |], _ when x <> C.Missing -> Max (field_of_arg "Running's Max" x)
+            | _, [| x; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing; C.Missing |] when x <> C.Missing ->
+              Avg (field_of_arg "Running's Avg" x)
+            | _ -> refuse "invalid" "%s" running)
+          | _ -> refuse "invalid" "%s" running
+        in
+        Win (Wire.Running (a, count_of 0 "a number of rows for Running's last" last))
+      | Some [| C.Missing; _; C.Bool true; dense; C.Missing; _ |] ->
+        Win (Wire.Rank (0, (match dense with C.Bool b -> b | C.Missing -> false | v -> C.need ctx name "true or false for Rank's dense" v)))
+      | Some [| C.Missing; _; C.Missing; _; x; back |] -> Win (Wire.Prev (field_of_arg "Prev" x, count_of 1 "a number of rows for Prev's back" back))
+      | _ -> C.need ctx name "Running, Rank or Prev" C.Missing
+    in
+    let cols = Array.mapi (fun i c -> match c with Some c -> c | None -> win gvals.(i)) cols0 in
     (* a variable in no item of Where, of Give, or of [uses] (a rule's Then), as an optional filter left out, is left
        out: the others numbered again in their order; with every variable used, the question as it is *)
     Array.iteri
@@ -981,19 +1021,26 @@ let question ?(uses = []) ctx name d qv nvars =
         (function
           | Var j -> Some j
           | Trunc (j, u, z) -> let y = nvars' + List.length !truncs in truncs := !truncs @ [ Question.Ask.Trunc (y, j, u, z) ]; Some y
-          | Agg _ -> None)
+          | Agg _ | Win _ -> None)
         (Array.to_list wcols)
     in
     let extra = extra @ !truncs in
-    let aggs = List.filter_map (function Agg g -> Some g | Var _ | Trunc _ -> None) (Array.to_list wcols) in
-    let select = if aggs = [] then Wire.Give (Array.of_list keys_v) else Wire.Group (Array.of_list keys_v, Array.of_list aggs) in
-    (* the column of the answer for each field of Give: keys first, then aggregates, in their order *)
+    let aggs = List.filter_map (function Agg g -> Some g | Var _ | Trunc _ | Win _ -> None) (Array.to_list wcols) in
+    let base = if aggs = [] then Wire.Give (Array.of_list keys_v) else Wire.Group (Array.of_list keys_v, Array.of_list aggs) in
+    (* the column of the answer for each field of Give: keys first, then aggregates, in their order, then windows *)
     let nk = List.length keys_v in
+    let na = List.length aggs in
     let at = Array.make (Array.length cols) 0 in
-    let ki = ref 0 and ai = ref 0 in
-    Array.iteri (fun i c -> match c with Var _ | Trunc _ -> at.(i) <- !ki; incr ki | Agg _ -> at.(i) <- nk + !ai; incr ai) cols;
+    let ki = ref 0 and ai = ref 0 and wi = ref 0 in
+    Array.iteri (fun i c -> match c with Var _ | Trunc _ -> at.(i) <- !ki; incr ki | Agg _ -> at.(i) <- nk + !ai; incr ai | Win _ -> at.(i) <- nk + na + !wi; incr wi) cols;
     let vt j = match vtyp.(j) with Some t -> t | None -> Value.Tint in
-    let ctyp i = match cols.(i) with Var j -> vt j | Trunc _ -> Value.Tdate | Agg a -> Agg.typ a (match Agg.var_of a with Some j -> vt j | None -> Value.Tint) in
+    let rec ctyp i =
+      match cols.(i) with
+      | Var j -> vt j
+      | Trunc _ -> Value.Tdate
+      | Agg a -> Agg.typ a (match Agg.var_of a with Some j -> vt j | None -> Value.Tint)
+      | Win w -> Window.typ ctyp w (* its columns are still fields of Give here *)
+    in
     let typs = Array.init (Array.length cols) ctyp in
     (* the columns of Values: lists, a row of the answer a value (the package folds them back: records) *)
     let lists = Array.map (function Agg (Wire.Values _) -> true | _ -> false) cols in
@@ -1006,6 +1053,7 @@ let question ?(uses = []) ctx name d qv nvars =
       | Some c -> (match List.find_opt (fun i -> cols.(i) = c) (List.init (Array.length cols) Fun.id) with
           | Some i -> i, desc
           | None -> refuse "invalid" "Sort's keys are fields of Give: a variable or an aggregate that Give gives")
+      | None when window_of g <> None -> refuse "invalid" "Sort's keys are not windows: a window's value is computed from the order"
       | None -> C.need ctx name "a key of Sort: a variable or an aggregate of Give, or Desc of one" k
     in
     let order =
@@ -1014,14 +1062,14 @@ let question ?(uses = []) ctx name d qv nvars =
         (* a question that uses the newer keys is newer code: a key the package does not know is a mistake there (a
            misspelt After would give the first page for ever), and no question that worked before is refused *)
         Array.iter
-          (fun k -> if not (List.mem k [ "Where"; "Give"; "Sort"; "Limit"; "After" ]) then refuse "invalid" "a question has no key %s: Where, Give, Sort, Limit and After" k)
+          (fun k -> if not (List.mem k [ "Where"; "Give"; "Sort"; "Limit"; "After"; "Each" ]) then refuse "invalid" "a question has no key %s: Where, Give, Sort, Limit, After and Each" k)
           (C.names q);
         let user = match sort with C.Missing -> [] | C.List l -> List.init (C.length l) (fun i -> field_of (C.item ctx l i)) | v -> C.need ctx name "a list of keys for Sort" v in
         let keys =
           if user = [] then []
           else begin
             (* a Values field is a list: no key of the order *)
-            let rest = List.filter (fun i -> not (List.mem_assoc i user) && not lists.(i)) (List.init (Array.length cols) Fun.id) in
+            let rest = List.filter (fun i -> not (List.mem_assoc i user) && not lists.(i) && (match cols.(i) with Win _ -> false | _ -> true)) (List.init (Array.length cols) Fun.id) in
             let rest = List.sort (fun a b -> compare names.(a) names.(b)) rest in
             List.map (fun (i, desc) -> { Question.Top.col = at.(i); desc }) user @ List.map (fun i -> { Question.Top.col = at.(i); desc = false }) rest
           end
@@ -1033,14 +1081,16 @@ let question ?(uses = []) ctx name d qv nvars =
           | C.Map m | C.Struct m ->
             if user = [] then refuse "invalid" "After needs Sort: the rows after a row, in an order";
             let vals = C.fields (C.keys names) m in
-            let a = Array.make (Array.length cols) (Value.Int 0) in
+            (* the row's columns but its windows', computed from the order *)
+            let a = Array.make (nk + na) (Value.Int 0) in
             (* an Optional's field may be missing: the row's cell is then missing too *)
             let optional i = match wcols.(i) with Var j | Trunc (j, _, _) -> List.exists (function Question.Ask.Optional { v = Query.Var y; _ } -> y = j | _ -> false) extra | Agg _ -> false in
             (* a cell a report may leave missing: a sample's variance of one value *)
             let may_miss i = match wcols.(i) with Agg (Wire.Variance (_, false) | Stddev (_, false)) -> true | _ -> false in
             Array.iteri
               (fun i x ->
-                if lists.(i) then a.(at.(i)) <- Value.Int 0 (* a list: no part of the order *)
+                if (match cols.(i) with Win _ -> true | _ -> false) then () (* a window: no part of the order *)
+                else if lists.(i) then a.(at.(i)) <- Value.Int 0 (* a list: no part of the order *)
                 else if x = C.Missing && (optional i || may_miss i) then a.(at.(i)) <- Value.missing
                 else begin
                   if x = C.Missing then refuse "invalid" "After needs every field of Give: %s is missing" names.(i);
@@ -1053,6 +1103,36 @@ let question ?(uses = []) ctx name d qv nvars =
         { Question.Top.keys; limit; after }
       end
     in
+    (* Each: fields of Give that are keys (a variable or a Trunc), its columns of the answer *)
+    let each =
+      match each with
+      | C.Missing -> [||]
+      | C.List l ->
+        Array.init (C.length l) (fun k ->
+            let x = C.item ctx l k in
+            match column_of x with
+            | Some ((Var _ | Trunc _) as c) -> (
+              match List.find_opt (fun i -> cols.(i) = c) (List.init (Array.length cols) Fun.id) with
+              | Some i -> at.(i)
+              | None -> refuse "invalid" "Each takes fields of Give: give the variable too, as Client: c")
+            | Some _ -> refuse "invalid" "Each takes the keys of the rows (a variable or a Trunc of Give), not an aggregate"
+            | None -> C.need ctx name "a variable of Give for Each" x)
+      | v -> C.need ctx name "a list of variables for Each" v
+    in
+    (* the windows, their fields of Give made columns of the answer; Rank by the keys Sort was given *)
+    let users = match sort with C.List l -> C.length l | _ -> 0 in
+    let windows =
+      List.filter_map
+        (function
+          | Win (Wire.Running (a, last)) ->
+            let a = match a with Wire.Count -> Wire.Count | Sum i -> Sum at.(i) | Avg i -> Avg at.(i) | Min i -> Min at.(i) | Max i -> Max at.(i) | a -> a in
+            Some (Wire.Running (a, last))
+          | Win (Rank (_, dense)) -> Some (Wire.Rank (users, dense))
+          | Win (Prev (i, back)) -> Some (Wire.Prev (at.(i), back))
+          | _ -> None)
+        (Array.to_list cols)
+    in
+    let select = if windows = [] && each = [||] then base else Wire.Over (base, each, Array.of_list windows) in
     { query; extra; select; qkeys = C.keys names; at; typs; order; ren; lists }
 
 (* a row of the answer (values) as the program's map *)
@@ -1128,6 +1208,7 @@ let find ctx a =
         | Server s when timeout <> None && s.conn.cl.spoken < 6 -> refuse "invalid" "%s" (Client.no_timeout s.conn.cl.spoken)
         | Server s when s.conn.cl.spoken < 7 && Wire.needs_7 qn.extra -> refuse "invalid" "%s" (Client.no_less s.conn.cl.spoken)
         | Server s when s.conn.cl.spoken < 9 && Wire.needs_9 qn.extra qn.select -> refuse "invalid" "%s" (Client.no_report s.conn.cl.spoken)
+        | Server s when s.conn.cl.spoken < 10 && Wire.needs_10 qn.select -> refuse "invalid" "%s" (Client.no_window s.conn.cl.spoken)
         | Server _ when List.length query.where > Wire.max_patterns -> refuse "invalid" "%s" (Client.too_many_patterns query)
         | Server s -> (
           match Conn.read (park ctx) s.conn (Wire.Find { db = s.cdb.handle; query; select; extra = qn.extra; order = qn.order; timeout = Client.timeout_ms timeout }) with
@@ -1202,6 +1283,8 @@ let watch ctx a =
     let nvars = int ctx name a.(2) in
     let timeout = timeout_of ctx name (if Array.length a > 3 then a.(3) else C.Missing) in
     let qn = question ctx name d a.(1) nvars in
+    (* windows and Each: no watch's, whatever the source (Live) *)
+    if Wire.needs_10 qn.select then (try Live.refuse_over () with Query.Bad m -> refuse "invalid" "%s" m);
     let b = Buffer.create 64 in
     Wire.put_query b qn.query;
     Wire.put_select b qn.select;

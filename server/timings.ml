@@ -185,9 +185,18 @@ let shape (v : Store.view) (q : Query.t) (sel : Wire.select) extra (order : Top.
     | Optional pt -> add " Optional("; pattern pt; add " )"
     | Trunc (y, x, u, _) -> add (Printf.sprintf " %s = Trunc(%s, %s, ?)" (var y) (var x) (Fault.escape u))
   in
-  (match sel with
+  let rec select = function
    | Wire.Give [||] -> add "give all"
    | Give g -> add "give"; Array.iter (fun x -> add (" " ^ var x)) g
+   | Over (base, each, windows) ->
+     select base;
+     if each <> [||] then (add " each"; Array.iter (fun c -> add (Printf.sprintf " %d" c)) each);
+     Array.iter
+       (function
+         | Wire.Running (a, last) -> add (Printf.sprintf " running %s%s" (String.lowercase_ascii (Agg.name a)) (if last > 0 then Printf.sprintf " last %d" last else ""))
+         | Rank (k, d) -> add (Printf.sprintf " rank %d%s" k (if d then " dense" else ""))
+         | Prev (c, b) -> add (Printf.sprintf " prev %d back %d" c b))
+       windows
    | Group (keys, aggs) ->
      add "group";
      Array.iter (fun x -> add (" " ^ var x)) keys;
@@ -198,7 +207,9 @@ let shape (v : Store.view) (q : Query.t) (sel : Wire.select) extra (order : Top.
          | Quantile (x, _, d) -> add (Printf.sprintf " quantile %s ?%s" (var x) (if d then " discrete" else ""))
          | Variance (x, pop) -> add (Printf.sprintf " variance %s%s" (var x) (if pop then " population" else ""))
          | Stddev (x, pop) -> add (Printf.sprintf " stddev %s%s" (var x) (if pop then " population" else "")))
-       aggs);
+       aggs
+  in
+  select sel;
   add " where";
   List.iter pattern q.where;
   List.iter (fun (x, _, _) -> add (Printf.sprintf " Range(%s, ?, ?)" (var x))) q.ranges;

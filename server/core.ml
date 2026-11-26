@@ -856,7 +856,10 @@ let max_server_watches = ref 65_536
 let watch c ~id ~kind d (q : Query.t) (sel : Wire.select) ~from ~extra ~order ~timeout =
   let t0 = start c in
   let tok = Option.get c.token in
-  let cols = match sel with Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a in
+  let rec columns = function
+    | Wire.Give [||] -> q.vars | Give g -> Array.length g | Group (k, a) -> Array.length k + Array.length a | Over (b, _, w) -> columns b + Array.length w
+  in
+  let cols = columns sel in
   (* G16 at each message: the token may still read the database (the table is read again only when it changed) *)
   let seen = ref (Atomic.get c.srv.tokens) and reads = ref true in
   let allowed () =

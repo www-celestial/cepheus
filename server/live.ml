@@ -224,6 +224,12 @@ let templatize ?(truncs = []) (q : Query.t) (sel : Wire.select) =
   if truncs <> [] then Wire.put_order b ~extra:truncs Top.none;
   tq, Buffer.contents b, Array.of_list (List.rev !params)
 
+(* Windows and Each (protocol 10) are no watch's: a running total, a rank or a previous row hangs on every row before
+   it, and Each's first rows of a group on every row of the group, so a change of one row would change the rows after
+   it, the whole answer again at each frame; the program watches the question without them, or asks Find again *)
+let refuse_over () =
+  Query.bad "a watch has no windows (Running, Rank, Prev) or Each: each row's value hangs on the rows before it, so one change would change every row after it; watch the question without them, or ask Find again at each change"
+
 (* a select's variables numbered for a template whose Truncs' columns start at [dbase] (the question's at [nq]) *)
 let renumber ~nq ~dbase (sel : Wire.select) =
   let r x = if x >= nq then dbase + (x - nq) else x in
@@ -232,13 +238,15 @@ let renumber ~nq ~dbase (sel : Wire.select) =
     | Distinct x -> Distinct (r x) | Values x -> Values (r x) | Quantile (x, p, d) -> Quantile (r x, p, d)
     | Variance (x, b) -> Variance (r x, b) | Stddev (x, b) -> Stddev (r x, b)
   in
-  match sel with Wire.Give g -> Wire.Give (Array.map r g) | Group (k, a) -> Group (Array.map r k, Array.map ra a)
+  match sel with Wire.Give g -> Wire.Give (Array.map r g) | Group (k, a) -> Group (Array.map r k, Array.map ra a) | Over _ -> refuse_over ()
 
 let new_template ?(truncs = []) (v : Store.view) key tq nq (sel : Wire.select) =
   let typs = Query.var_types v tq in
   let derived = Ask.derived ~vars:nq ~outer:(fun _ -> true) typs truncs in
-  let qgive = match sel with Wire.Give g -> if Array.length g = 0 then Array.init nq Fun.id else g | Group (k, _) -> k in
-  let give, aggs = match renumber ~nq ~dbase:tq.vars sel with Wire.Give g -> (if Array.length g = 0 then Array.init nq Fun.id else g), [||] | Group (k, a) -> k, a in
+  let qgive = match sel with Wire.Give g -> if Array.length g = 0 then Array.init nq Fun.id else g | Group (k, _) -> k | Over _ -> refuse_over () in
+  let give, aggs =
+    match renumber ~nq ~dbase:tq.vars sel with Wire.Give g -> (if Array.length g = 0 then Array.init nq Fun.id else g), [||] | Group (k, a) -> k, a | Over _ -> refuse_over ()
+  in
   let q0 = { tq with vars = nq } in
   { tkey = key; tq; nq; np = tq.vars - nq; pats = Array.of_list tq.where; typs; give; qgive; aggs; truncs; derived; dbase = tq.vars;
     projecting = (Array.length aggs = 0 && projecting q0 give); subs = Hashtbl.create 64;
@@ -261,6 +269,7 @@ let whole_template ?(truncs = []) (v : Store.view) key (q : Query.t) (sel : Wire
     match sel with
     | Wire.Give g -> (if Array.length g = 0 then Array.of_list (List.filter (fun x -> a.outer.(x)) (List.init q.vars Fun.id)) else g), [||]
     | Group (k, a) -> k, a
+    | Over _ -> refuse_over ()
   in
   (* an Optional's variable may be missing: no Sum, Min or Max of it, as Find refuses (Answer) *)
   let src x = if x < q.vars then x else fst derived.(x - q.vars) in
@@ -531,7 +540,8 @@ let check ?(truncs = []) (v : Store.view) (q : Query.t) (sel : Wire.select) =
   let var x = if x < 0 || x >= q.vars + nd then Query.bad "variable %d out of range" x in
   ignore (Query.plan v q);
   match sel with
-  | Wire.Give g -> Array.iter var g
+  | Wire.Over _ -> refuse_over ()
+  | Give g -> Array.iter var g
   | Group (keys, aggs) ->
     Array.iter var keys;
     Array.iter
@@ -979,8 +989,9 @@ let kept (s : sub) =
 let subscribe ?(extra = []) ?(order = Top.none) ?ticket ?budget ?stop ?(admit = ignore) h (q : Query.t) (sel : Wire.select) ~from ~(emit : msg -> bool) =
   Mutex.protect h.hm (fun () ->
       (match h.stopped with Some (code, m) -> raise (Failure (code ^ ": " ^ m)) | None -> ());
+      (match sel with Wire.Over _ -> refuse_over () | Give _ | Group _ -> ());
       if order <> Top.none then begin
-        (match sel with Wire.Group _ -> Query.bad "a watch of aggregates keeps every group: Sort and Limit are for a watch of Give" | Give _ -> ());
+        (match sel with Wire.Group _ -> Query.bad "a watch of aggregates keeps every group: Sort and Limit are for a watch of Give" | Give _ | Over _ -> ());
         if order.after <> None then Query.bad "a watch has no After: its rows are the first of its order, as they change";
         if order.keys = [] then Query.bad "a watch's Limit needs Sort: the engine's order is no order a watch can keep"
       end;

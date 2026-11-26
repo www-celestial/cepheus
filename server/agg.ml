@@ -479,24 +479,37 @@ let check (a : Wire.agg) (tx : Value.typ) ~optional =
 
 (* a binding's word of the variable, [sign] 1 (a row that comes) or -1 (one that goes); true when a bag gained an
    entry (a new value: its cells) *)
+let add_float_sums s sign f =
+  if Float.is_nan f then s.nan <- s.nan + sign
+  else if f = Float.infinity then s.pinf <- s.pinf + sign
+  else if f = Float.neg_infinity then s.ninf <- s.ninf + sign
+  else begin
+    s.spilled <- true;
+    Exact.add_float (x1 s) sign f;
+    if s.square then Exact.add_square_float (x2 s) sign f
+  end
+
 let add (v : Store.view) (tx : Value.typ) st sign w =
   match st with
   | Bag b -> Bag.add b w sign
   | Sums s ->
     s.n <- s.n + sign;
     (match tx with
-     | Tfloat ->
-       let f = Query.float_of_word v w in
-       if Float.is_nan f then s.nan <- s.nan + sign
-       else if f = Float.infinity then s.pinf <- s.pinf + sign
-       else if f = Float.neg_infinity then s.ninf <- s.ninf + sign
-       else begin
-         s.spilled <- true;
-         Exact.add_float (x1 s) sign f;
-         if s.square then Exact.add_square_float (x2 s) sign f
-       end
+     | Tfloat -> add_float_sums s sign (Query.float_of_word v w)
      | _ -> add_int_sums s sign w);
     false
+
+(* a value into exact sums, [add]'s of its word from the value itself (a report's computed cell, a window's row): an
+   int, a date or money its int, a float its float; [sign] 1 (a row that comes) or -1 (one that goes) *)
+let add_value s sign (x : Value.t) =
+  s.n <- s.n + sign;
+  match x with
+  | Int w | Money w | Date w -> add_int_sums s sign w
+  | Float f -> add_float_sums s sign f
+  | _ -> invalid_arg "Agg.add_value"
+
+(* fresh exact sums of the values themselves (no squares): a window's *)
+let value_sums () = { e1 = None; e2 = None; square = false; n = 0; nan = 0; pinf = 0; ninf = 0; f1 = 0; f2 = 0; k = 0; spilled = false }
 
 let merge a b =
   match a, b with
@@ -639,6 +652,20 @@ let result (v : Store.view) (a : Wire.agg) (tx : Value.typ) st : Value.t =
   | Distinct _, Bag b -> Int b.live
   | Quantile (_, p, discrete), Bag b -> let ks, cs = Bag.entries b in quantile v tx p discrete ks cs b.total
   | _ -> invalid_arg "Agg.result"
+
+(* the exact sum of ints (money, dates) when it is an int of 63 bits, else None (a sum past them) *)
+let sum_int s =
+  if not s.spilled then Some s.f1
+  else begin
+    settle s;
+    let neg, m, e = Exact.value (x1 s) in
+    let m = Exact.shift_limbs m e in
+    let b = Exact.bitlen m in
+    (* min_int, -2^62, the one int whose magnitude has 63 bits *)
+    if b = 63 && neg && Exact.compare_mag m (Exact.shift_left (Exact.of_int 1) 62) = 0 then Some min_int
+    else if b > 62 then None
+    else (let x = Array.fold_right (fun l acc -> (acc lsl Exact.bits) lor l) m 0 in Some (if neg then -x else x))
+  end
 
 (* the cells a bag's new value takes (its two words, the table at most half full) *)
 let entry_cells = 4
