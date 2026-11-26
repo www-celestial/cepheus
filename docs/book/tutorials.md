@@ -393,6 +393,8 @@ written by hand. `After` is that, built in: it breaks ties by the other fields o
 in the order only when they are the same row, and needs no index chosen for it; the page after a row costs the same at
 any depth ([how it is answered](cesia.md#sort-limit-and-after-pages)).
 
+![Two lists of invoices sorted by total, the largest first. Left, page 1 at its group: 300.00, 280.00 and 270.00, the last one the cursor. Right, the order after a new invoice of 1,000.00 written between the pages, in green at the top: After the cursor gives 250.00, 240.00 and 220.00; OFFSET 3 gives 270.00, 250.00 and 240.00, and shows 270.00 twice.](images/pages-after.svg)
+
 **A list of the clients by their ids**, as an admin page shows a kind: the same question, sorted by the thing; `Above`
 on a thing keeps the ones made after it.
 

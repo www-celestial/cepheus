@@ -1,22 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="780" height="278" viewBox="0 0 780 278">
 <title>The months of 2028 in Sort's order, a running total, the month before and a moving mean of 3</title>
 <style>
-text{font-family:system-ui, sans-serif;font-size:13px;fill:#1f2328}
-.c{font-family:ui-monospace, Menlo, Consolas, monospace;font-size:12.5px}
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
 .h{font-weight:600}
 .s{fill:#57606a}
 .a{fill:#3a5ad9}
 .off{fill:#8c959f}
-.row{fill:#fff;stroke:#d0d7de;stroke-width:1}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
 .cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
 .frame{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.2;stroke-dasharray:4 3}
 .br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
 .gr{stroke:#57606a;stroke-width:1.2;fill:none}
-.cut{stroke:#8c959f;stroke-width:1}
+.fs{fill:#57606a}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.frame{fill:#1f2a4d;stroke:#8fa8ff}
+.br{stroke:#8fa8ff}
+.gr{stroke:#9198a1}
+.fs{fill:#9198a1}
+}
 </style>
-<rect width="780" height="278" fill="#fff"/>
-<text class="c" x="16" y="22">Sort: [month(d)]   Give: {Month, Billed: Sum(t), SoFar: Running(Sum(Sum(t))),</text>
-<text class="c" x="16" y="39">                        Before: Prev(Sum(t)), Mean3: Running(Avg(Sum(t)), last = 3)}</text>
+<rect class="bg" width="780" height="278"/>
+<text class="c" xml:space="preserve" x="16" y="22">Sort: [month(d)]   Give: {Month, Billed: Sum(t), SoFar: Running(Sum(Sum(t))),</text>
+<text class="c" xml:space="preserve" x="16" y="39">                        Before: Prev(Sum(t)), Mean3: Running(Avg(Sum(t)), last = 3)}</text>
 <text class="h" x="24" y="56">Month</text>
 <text class="h" x="218" y="56" text-anchor="end">Billed</text>
 <text class="h" x="326" y="56" text-anchor="end">SoFar</text>
@@ -64,8 +78,8 @@ text{font-family:system-ui, sans-serif;font-size:13px;fill:#1f2328}
 <path class="br" d="M 590 66 h 8 V 170 h -8"/>
 <text class="s" x="606" y="112">SoFar: the sum of</text>
 <text class="s" x="606" y="128">January to April, 4,400</text>
-<path class="gr" d="M 222 133 C 288 133, 370 161, 396 161"/>
-<path d="M 400 161 l -7 -4 v 8 z" fill="#57606a"/>
+<path class="gr" d="M 222 133 C 311 133, 311 161, 394 161"/>
+<polygon class="fs" points="400.0,161.0 392.0,157.0 392.0,165.0"/>
 <text class="s" x="16" y="246">April's frame of last = 3 (dashed): February, March and April, mean 1,066.67. Prev(Sum(t)): March's 1,500.</text>
 <text class="s" x="16" y="264">January has no month before it: Before is missing; its frame is January alone, February's two months.</text>
 </svg>

@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="712" height="344" viewBox="0 0 712 344">
+<title>Un fichier coupé en chunks selon son contenu, les chunks que lit une lecture d'une plage, et une insertion qui laisse les autres chunks tels quels</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.rowdel{fill:#ffebe9;stroke:#cf222e;stroke-width:1.2}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.fs{fill:#57606a}
+.ldel{stroke:#cf222e;stroke-width:1.4;fill:none}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.box{fill:#1c2128;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.rowdel{fill:#2d1517;stroke:#f85149}
+.br{stroke:#8fa8ff}
+.gr{stroke:#9198a1}
+.fs{fill:#9198a1}
+.ldel{stroke:#f85149}
+}
+</style>
+<rect class="bg" width="712" height="344"/>
+<text class="h" x="16" y="22">Un fichier de 1 500 000 octets, coupé selon son contenu : 19 chunks de 16 à 256 Kio</text>
+<rect class="row" x="16" y="34" width="38" height="28"/>
+<rect class="row" x="54" y="34" width="31" height="28"/>
+<rect class="row" x="85" y="34" width="44" height="28"/>
+<rect class="row" x="129" y="34" width="30" height="28"/>
+<rect class="row" x="159" y="34" width="36" height="28"/>
+<rect class="row" x="195" y="34" width="38" height="28"/>
+<rect class="row" x="233" y="34" width="47" height="28"/>
+<rect class="row" x="280" y="34" width="35" height="28"/>
+<rect class="row" x="315" y="34" width="30" height="28"/>
+<rect class="row" x="345" y="34" width="36" height="28"/>
+<rect class="row" x="381" y="34" width="34" height="28"/>
+<rect class="row" x="415" y="34" width="34" height="28"/>
+<rect class="cur" x="449" y="34" width="37" height="28"/>
+<rect class="cur" x="486" y="34" width="39" height="28"/>
+<rect class="row" x="525" y="34" width="49" height="28"/>
+<rect class="row" x="574" y="34" width="30" height="28"/>
+<rect class="row" x="604" y="34" width="30" height="28"/>
+<rect class="row" x="634" y="34" width="31" height="28"/>
+<rect class="row" x="665" y="34" width="31" height="28"/>
+<path class="br" d="M 469 32 v -6 h 30 v 6"/>
+<text class="a sm" x="484" y="78" text-anchor="middle">Read(..., from = 1_000_000, len = 65_536) : les 2 chunks sous la plage</text>
+<text class="h" x="16" y="110">Le même fichier avec 100 octets insérés à l'octet 400 000</text>
+<rect class="row" x="16" y="122" width="38" height="28"/>
+<rect class="row" x="54" y="122" width="31" height="28"/>
+<rect class="row" x="85" y="122" width="44" height="28"/>
+<rect class="row" x="129" y="122" width="30" height="28"/>
+<rect class="row" x="159" y="122" width="36" height="28"/>
+<rect class="rowdel" x="195" y="122" width="38" height="28"/>
+<rect class="row" x="233" y="122" width="47" height="28"/>
+<rect class="row" x="280" y="122" width="35" height="28"/>
+<rect class="row" x="315" y="122" width="30" height="28"/>
+<rect class="row" x="345" y="122" width="36" height="28"/>
+<rect class="row" x="381" y="122" width="34" height="28"/>
+<rect class="row" x="415" y="122" width="34" height="28"/>
+<rect class="row" x="449" y="122" width="37" height="28"/>
+<rect class="row" x="486" y="122" width="39" height="28"/>
+<rect class="row" x="525" y="122" width="49" height="28"/>
+<rect class="row" x="574" y="122" width="30" height="28"/>
+<rect class="row" x="604" y="122" width="31" height="28"/>
+<rect class="row" x="635" y="122" width="30" height="28"/>
+<rect class="row" x="665" y="122" width="31" height="28"/>
+<line class="ldel" x1="197" y1="116" x2="197" y2="156"/>
+<text class="s sm" x="16" y="172">18 de ses 19 chunks trouvés stockés (1 418 282 octets sur 1 500 100) : seuls les chunks de l'insertion sont neufs (en rouge)</text>
+<rect class="cur" x="16" y="196" width="124" height="44" rx="4"/>
+<text class="h sm" x="24" y="214">un chunk</text>
+<text class="s sm" x="24" y="231">ses octets</text>
+<line class="gr" x1="142" y1="218" x2="146" y2="218"/>
+<polygon class="fs" points="152.0,218.0 144.0,214.0 144.0,222.0"/>
+<rect class="box" x="154" y="196" width="124" height="44" rx="4"/>
+<text class="h sm" x="162" y="214">nommé</text>
+<text class="s sm" x="162" y="231">BLAKE2b-256, keyed</text>
+<line class="gr" x1="280" y1="218" x2="284" y2="218"/>
+<polygon class="fs" points="290.0,218.0 282.0,214.0 282.0,222.0"/>
+<rect class="box" x="292" y="196" width="124" height="44" rx="4"/>
+<text class="h sm" x="300" y="214">compressé</text>
+<text class="s sm" x="300" y="231">LZ4 (cold : Zstd)</text>
+<line class="gr" x1="418" y1="218" x2="422" y2="218"/>
+<polygon class="fs" points="428.0,218.0 420.0,214.0 420.0,222.0"/>
+<rect class="box" x="430" y="196" width="124" height="44" rx="4"/>
+<text class="h sm" x="438" y="214">scellé</text>
+<text class="s sm" x="438" y="231">AEGIS-256</text>
+<line class="gr" x1="556" y1="218" x2="560" y2="218"/>
+<polygon class="fs" points="566.0,218.0 558.0,214.0 558.0,222.0"/>
+<rect class="box" x="568" y="196" width="124" height="44" rx="4"/>
+<text class="h sm" x="576" y="214">stocké une fois</text>
+<text class="s sm" x="576" y="231">un record d'un pack</text>
+<text class="s" x="16" y="266">Un nœud liste jusqu'à 1 024 enfants, chacun avec l'octet où il finit ; la racine nomme le</text>
+<text class="s" x="16" y="283">fichier. Une lecture descend de la racine aux chunks sous sa plage, par une recherche</text>
+<text class="s" x="16" y="300">dichotomique des fins : une lecture de 4 Kio lit un chunk, deux là où elle passe une</text>
+<text class="s" x="16" y="317">coupe.</text>
+</svg>

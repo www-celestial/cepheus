@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="712" height="248" viewBox="0 0 712 248">
+<title>Un rapport : les lignes groupées par le nom du client, et les agrégats de chaque groupe</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.fs{fill:#57606a}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.br{stroke:#8fa8ff}
+.gr{stroke:#9198a1}
+.fs{fill:#9198a1}
+}
+</style>
+<rect class="bg" width="712" height="248"/>
+<text class="c" xml:space="preserve" x="16" y="22">Give: {Name: n, Mean: Avg(a), Median: Median(a),</text>
+<text class="c" xml:space="preserve" x="16" y="39">       Low: Quantile(a, 0.25), Spread: Stddev(a)}</text>
+<text class="h" x="16" y="66">Les lignes du Where</text>
+<text class="h" x="262" y="66">Une ligne par valeur de la clé n</text>
+<rect class="row" x="16" y="80" width="180" height="22"/>
+<text x="26" y="96">Ada Martin</text>
+<text x="186" y="96" text-anchor="end">10,00</text>
+<rect class="row" x="16" y="106" width="180" height="22"/>
+<text x="26" y="122">Ada Martin</text>
+<text x="186" y="122" text-anchor="end">30,00</text>
+<rect class="row" x="16" y="142" width="180" height="22"/>
+<text x="26" y="158">Bo Lind</text>
+<text x="186" y="158" text-anchor="end">20,00</text>
+<rect class="row" x="16" y="168" width="180" height="22"/>
+<text x="26" y="184">Bo Lind</text>
+<text x="186" y="184" text-anchor="end">60,00</text>
+<text class="s sm" x="272" y="92">Name</text>
+<text class="s sm" x="450" y="92" text-anchor="end">Mean</text>
+<text class="s sm" x="530" y="92" text-anchor="end">Median</text>
+<text class="s sm" x="610" y="92" text-anchor="end">Low</text>
+<text class="s sm" x="690" y="92" text-anchor="end">Spread</text>
+<path class="br" d="M 202 82 h 8 V 126 h -8"/>
+<line class="gr" x1="212" y1="104" x2="253" y2="112"/>
+<polygon class="fs" points="258.0,113.0 250.9,107.5 249.4,115.4"/>
+<rect class="cur" x="262" y="102" width="438" height="22"/>
+<text x="272" y="118">Ada Martin</text>
+<text class="a" x="450" y="118" text-anchor="end">20,00</text>
+<text class="a" x="530" y="118" text-anchor="end">20,00</text>
+<text class="a" x="610" y="118" text-anchor="end">15,00</text>
+<text class="a" x="690" y="118" text-anchor="end">14,14</text>
+<path class="br" d="M 202 144 h 8 V 188 h -8"/>
+<line class="gr" x1="212" y1="166" x2="253" y2="173"/>
+<polygon class="fs" points="258.0,173.0 250.7,167.8 249.5,175.8"/>
+<rect class="cur" x="262" y="162" width="438" height="22"/>
+<text x="272" y="178">Bo Lind</text>
+<text class="a" x="450" y="178" text-anchor="end">40,00</text>
+<text class="a" x="530" y="178" text-anchor="end">40,00</text>
+<text class="a" x="610" y="178" text-anchor="end">30,00</text>
+<text class="a" x="690" y="178" text-anchor="end">28,28</text>
+<text class="s" x="16" y="218">Ada : la moyenne de 10 et 30 est 20,00, la médiane aussi ; Low est 10 plus un quart du chemin</text>
+<text class="s" x="16" y="235">vers 30, 15,00 ; Spread, l'écart des deux sur √2, 14,14.</text>
+</svg>

@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="840" height="190" viewBox="0 0 840 190">
+<title>Un classement avec une égalité : Rank, Rank(dense = true) et Running(Count())</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.h{font-weight:600}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.br{stroke:#8fa8ff}
+}
+</style>
+<rect class="bg" width="840" height="190"/>
+<text class="c" xml:space="preserve" x="16" y="22">Sort: [Desc(Sum(t))]</text>
+<text class="h" x="16" y="50">Client</text>
+<text class="h" x="150" y="50">Chiffre</text>
+<text class="h" x="262" y="50">Rank()</text>
+<text class="h" x="352" y="50">Rank(dense = true)</text>
+<text class="h" x="506" y="50">Running(Count())</text>
+<rect class="row" x="16" y="60" width="620" height="24"/>
+<text x="24" y="77">Ada Martin</text>
+<text x="230" y="77" text-anchor="end">2 900</text>
+<text class="a" x="290" y="77">1</text>
+<text class="a" x="410" y="77">1</text>
+<text class="a" x="560" y="77">1</text>
+<rect class="row" x="16" y="88" width="620" height="24"/>
+<text x="24" y="105">Bo Lind</text>
+<text x="230" y="105" text-anchor="end">2 900</text>
+<text class="a" x="290" y="105">1</text>
+<text class="a" x="410" y="105">1</text>
+<text class="a" x="560" y="105">2</text>
+<rect class="row" x="16" y="116" width="620" height="24"/>
+<text x="24" y="133">Cy Moreau</text>
+<text x="230" y="133" text-anchor="end">1 200</text>
+<text class="a" x="290" y="133">3</text>
+<text class="a" x="410" y="133">2</text>
+<text class="a" x="560" y="133">3</text>
+<path class="br" d="M 646 62 h 8 V 110 h -8"/>
+<text class="s" x="662" y="74">égaux pour la clé de Sort :</text>
+<text class="s" x="662" y="90">une seule place</text>
+<text class="s" x="16" y="158">Rank() saute la place que prend l'égalité (pas de 2e) ; Rank(dense = true) n'en saute aucune ; Running(Count()) numérote les lignes</text>
+<text class="s" x="16" y="176">une à une, Ada avant Bo puisque Sort ordonne ensuite par chaque autre champ (le nom du client).</text>
+</svg>

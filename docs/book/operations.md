@@ -5,7 +5,7 @@ verification, memory and disk space, import and export, and the tools of the rep
 
 ## Files
 
-```
+```text
 DIR/cepheus                       the database's id (16 random bytes) and format, written once, atomically, with a CRC
 DIR/lock                          held (lockf) while the database is open: one process at a time
 DIR/closed                        left by a clean close (everything durable), removed by the next open

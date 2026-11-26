@@ -136,6 +136,8 @@ thread or domain (an OCaml 5 domain is a thread of execution that runs in parall
 as long as it is held, however many groups come after it; the memory it keeps is only what differs from the newer
 views (a persistent data structure, [architecture](architecture.md#indexes-the-runs-and-the-delta)).
 
+![Three groups of one client, #65536, side by side: group 3 adds its name Ada Martin and its city Lyon; group 4 retracts Ada Martin and adds Ada Durand; group 5 retracts Lyon and adds Paris. Under each group, the view after it: Ada Martin in Lyon, then Ada Durand in Lyon, then Ada Durand in Paris. A reader holding the view at group 4 keeps reading Lyon while group 5 is written.](images/groups-views.svg)
+
 ## Isolation: exactly what a reader and a writer see
 
 **Isolation** says what one transaction can see of the others running at the same time. The standard levels, from
@@ -241,6 +243,8 @@ let () =
 #65541 money 3000
 sum 15000
 ```
+
+![On the left, the 14 facts of the view, one a row (thing, property, value); on the right, the question's 4 patterns with the number of facts each matches alone, and its 2 answers. A number beside a fact names the answers that use it: the city of Lyon serves both, the 3 facts of invoice 65538 answer 1, those of invoice 65541 answer 2; the paid invoice and those of Paris match some patterns, not all.](images/facts-question.svg)
 
 ## Forks
 

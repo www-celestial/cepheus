@@ -63,6 +63,8 @@ invalid: [#65539 thing/type #65537] is derived by rule is-a from [#65539 thing/t
 x has 0 types
 ```
 
+![The rule is-a above two columns. Left, group 5 adds that thing #65539 has the type #65536 (invoice): with the two class/parent facts, the writer derives its types #65537 (document) and #65538 (record), marked derived by is-a. Right, group 6 retracts the type invoice: the two derived types have no proof left and go with it, struck out in red. Below, the proof that why gives for the type record, and the error that the retraction of a derived fact alone gets.](images/rules-derive.svg)
+
 - The rule is **recursive**: its head's property, `thing/type`, is also in its body, so a derived fact (x is a
   document) can start the rule again (x is a record). Recursion is what a question alone cannot do: "every kind of
   document", at any depth.

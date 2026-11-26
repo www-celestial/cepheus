@@ -65,6 +65,8 @@ invalid: [#65539 thing/type #65537] is derived by rule is-a from [#65539 thing/t
 x has 0 types
 ```
 
+![La règle is-a au-dessus de deux colonnes. À gauche, le groupe 5 ajoute que la chose #65539 a le type #65536 (invoice) : avec les deux faits class/parent, le writer dérive ses types #65537 (document) et #65538 (record), marqués dérivés par is-a. À droite, le groupe 6 retire le type invoice : les deux types dérivés n'ont plus de preuve et partent avec lui, barrés en rouge. En dessous, la preuve que donne why pour le type record, et l'erreur qu'obtient le retrait d'un fait dérivé seul.](images/rules-derive.svg)
+
 - La règle est **récursive** : la propriété de sa tête, `thing/type`, est aussi dans son corps, donc un fait dérivé
   (x est un document) peut relancer la règle (x est un enregistrement). La récursion est ce
   qu'une question seule ne sait pas faire : « chaque sorte de document », à n'importe quelle profondeur.

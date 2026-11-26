@@ -1,5 +1,5 @@
-; the figures of the book's windows, drawn from the engine's answers: dune exec tools/figures/figures.exe -- docs/book/images
+; the figures of the book, drawn from the engine's answers, the vault's chunker and the tables of the benchmarks: dune exec tools/figures/figures.exe -- docs
 (executable
  (name figures)
- (libraries cepheus cepheus_server unix)
+ (libraries cepheus cepheus_server cepheus_vault str unix)
  (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

@@ -148,6 +148,8 @@ quel que soit le nombre de groupes qui viennent après elle ; la mémoire qu'ell
 vues plus récentes (une persistent data structure, une structure dont les anciennes versions restent lisibles après un
 changement, [architecture](architecture.md#les-index--les-runs-et-le-delta)).
 
+![Trois groupes d'un client, #65536, côte à côte : le groupe 3 ajoute son nom Ada Martin et sa ville Lyon ; le groupe 4 retire Ada Martin et ajoute Ada Durand ; le groupe 5 retire Lyon et ajoute Paris. Sous chaque groupe, la vue après lui : Ada Martin à Lyon, puis Ada Durand à Lyon, puis Ada Durand à Paris. Un lecteur qui tient la vue au groupe 4 lit toujours Lyon pendant que le groupe 5 s'écrit.](images/groups-views.svg)
+
 ## L'isolation : exactement ce que voient un lecteur et un writer
 
 L'**isolation** dit ce qu'une transaction peut voir des autres qui tournent en même temps. Les niveaux standard, du plus
@@ -263,6 +265,8 @@ let () =
 #65541 money 3000
 sum 15000
 ```
+
+![À gauche, les 14 faits de la vue, un par ligne (chose, propriété, valeur) ; à droite, les 4 motifs de la question avec le nombre de faits que chacun touche seul, et ses 2 réponses. Un numéro à côté d'un fait nomme les réponses qui l'utilisent : la ville de Lyon sert les deux, les 3 faits de la facture 65538 la réponse 1, ceux de la facture 65541 la réponse 2 ; la facture payée et celles de Paris touchent des motifs, pas tous.](images/facts-question.svg)
 
 ## Les forks
 

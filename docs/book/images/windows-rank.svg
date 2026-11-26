@@ -1,21 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="800" height="190" viewBox="0 0 800 190">
 <title>A leaderboard with a tie: Rank, Rank(dense = true) and Running(Count())</title>
 <style>
-text{font-family:system-ui, sans-serif;font-size:13px;fill:#1f2328}
-.c{font-family:ui-monospace, Menlo, Consolas, monospace;font-size:12.5px}
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
 .h{font-weight:600}
 .s{fill:#57606a}
 .a{fill:#3a5ad9}
-.off{fill:#8c959f}
-.row{fill:#fff;stroke:#d0d7de;stroke-width:1}
-.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
-.frame{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.2;stroke-dasharray:4 3}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
 .br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
-.gr{stroke:#57606a;stroke-width:1.2;fill:none}
-.cut{stroke:#8c959f;stroke-width:1}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.br{stroke:#8fa8ff}
+}
 </style>
-<rect width="800" height="190" fill="#fff"/>
-<text class="c" x="16" y="22">Sort: [Desc(Sum(t))]</text>
+<rect class="bg" width="800" height="190"/>
+<text class="c" xml:space="preserve" x="16" y="22">Sort: [Desc(Sum(t))]</text>
 <text class="h" x="16" y="50">Client</text>
 <text class="h" x="150" y="50">Revenue</text>
 <text class="h" x="262" y="50">Rank()</text>

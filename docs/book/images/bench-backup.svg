@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="712" height="424" viewBox="0 0 712 424">
+<title>Backup and restore beside PostgreSQL and SQLite: sizes and times at 10 million facts</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.off{fill:#8c959f}
+.bg{fill:#ffffff}
+.s1{fill:#257de0}
+.s2{fill:#f47230}
+.s3{fill:#00b894}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.s1{fill:#338ced}
+.s2{fill:#e76624}
+.s3{fill:#00a888}
+}
+</style>
+<rect class="bg" width="712" height="424"/>
+<text class="h" x="16" y="22">Backup and restore at 10 M facts, the median of 21 rounds</text>
+<rect class="s1" x="16" y="36" width="12" height="12" rx="2"/>
+<text class="sm" x="34" y="46">Cepheus</text>
+<rect class="s2" x="166" y="36" width="12" height="12" rx="2"/>
+<text class="sm" x="184" y="46">PostgreSQL 18.6</text>
+<rect class="s3" x="316" y="36" width="12" height="12" rx="2"/>
+<text class="sm" x="334" y="46">SQLite 3.54</text>
+<text class="sm" x="16" y="96">the database's size</text>
+<rect class="s1" x="250" y="76" width="121" height="13" rx="2"/>
+<text class="sm h" x="377" y="87">104.7 MB</text>
+<rect class="s2" x="250" y="92" width="330" height="13" rx="2"/>
+<text class="s sm" x="586" y="103">284 MB</text>
+<rect class="s3" x="250" y="108" width="158" height="13" rx="2"/>
+<text class="s sm" x="414" y="119">136.4 MB</text>
+<text class="sm" x="16" y="158">a backup, while it serves</text>
+<rect class="s1" x="250" y="138" width="16" height="13" rx="2"/>
+<text class="sm h" x="272" y="149">1.16 s</text>
+<rect class="s2" x="250" y="154" width="330" height="13" rx="2"/>
+<text class="s sm" x="586" y="165">22.53 s</text>
+<rect class="s3" x="250" y="170" width="21" height="13" rx="2"/>
+<text class="s sm" x="277" y="181">1.46 s</text>
+<text class="sm" x="16" y="220">the backup checked</text>
+<rect class="s1" x="250" y="200" width="65" height="13" rx="2"/>
+<text class="s sm" x="321" y="211">565 ms</text>
+<rect class="s2" x="250" y="216" width="11" height="13" rx="2"/>
+<text class="sm h" x="267" y="227">95 ms</text>
+<rect class="s3" x="250" y="232" width="330" height="13" rx="2"/>
+<text class="s sm" x="586" y="243">2.83 s</text>
+<text class="sm" x="16" y="282">a restore to the end</text>
+<rect class="s1" x="250" y="262" width="82" height="13" rx="2"/>
+<text class="sm h" x="338" y="273">1.61 s</text>
+<rect class="s2" x="250" y="278" width="330" height="13" rx="2"/>
+<text class="s sm" x="586" y="289">6.45 s</text>
+<rect class="s3" x="250" y="294" width="135" height="13" rx="2"/>
+<text class="s sm" x="391" y="305">2.65 s</text>
+<text class="sm" x="16" y="344">the whole history replayed</text>
+<rect class="s1" x="250" y="324" width="330" height="13" rx="2"/>
+<text class="s sm" x="586" y="335">34.87 s</text>
+<rect class="s2" x="250" y="340" width="202" height="13" rx="2"/>
+<text class="sm h" x="458" y="351">21.42 s</text>
+<text class="off sm" x="254" y="367">none: no history</text>
+<text class="s" x="16" y="390">Each row on its own scale, its shortest in bold. The whole history replayed is the same work on both</text>
+<text class="s" x="16" y="407">sides; SQLite keeps no history. Times: docs/book/benchmarks.md.</text>
+</svg>

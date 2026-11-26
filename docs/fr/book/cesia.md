@@ -503,6 +503,8 @@ chaque ligne qu'il saute, et une ligne écrite entre deux pages les décale d'un
 deux pages vient une fois ; une ligne écrite entre elles se montre à sa place, si cette place est après le curseur (la
 ligne après laquelle commence la page).
 
+![Deux listes de factures triées par total, la plus grande d'abord. À gauche, la page 1 à son groupe : 300,00, 280,00 et 270,00, la dernière étant le curseur. À droite, l'ordre après une nouvelle facture de 1 000,00 écrite entre les pages, en vert en haut : After le curseur donne 250,00, 240,00 et 220,00 ; OFFSET 3 donne 270,00, 250,00 et 240,00, et montre 270,00 deux fois.](images/pages-after.svg)
+
 **Comment on y répond.** Deux façons donnent les mêmes lignes ([théorie](theory.md#4-generic-join)) :
 
 - par un **heap** (un tas : une structure qui garde à portée les meilleures lignes) : chaque réponse de la question,
@@ -676,6 +678,8 @@ de 23 h 30 UTC le 31 janvier, de février (0 h 30 le 1er février) ; février co
 22 h UTC le 31 mars. La deuxième vente d'Ada a deux tags, la dernière de Bo aucun : `Values` donne la liste des tags
 différents, `Count(t)` les compte, `Count(i)` compte les ventes (`Count()` compterait les lignes, une par tag).
 
+![À gauche, les quatre lignes du Where : Ada Martin 10,00 et 30,00, Bo Lind 20,00 et 60,00. Des flèches mènent les deux lignes de chaque client à une ligne du rapport : Ada Martin avec Mean 20,00, Median 20,00, Low 15,00 et Spread 14,14 ; Bo Lind avec 40,00, 40,00, 30,00 et 28,28.](images/report-groups.svg)
+
 - `cepheus.Avg(x)` : la moyenne. D'ints et de floats un Float ; de money, de la money de son échelle, arrondie au plus
   proche en s'éloignant de zéro à mi-chemin (comme l'est un Float écrit dans un champ de money : 10,005 euros fait
   10,01) ; de dates, une date, arrondie à la milliseconde. C'est la somme exacte divisée une seule fois : la même quel
@@ -804,7 +808,7 @@ Ok([{Name: "Bo Lind", Amount: 60.0}, {Name: "Ada Martin", Amount: 30.0}])
 Ok([{Name: "Bo Lind", Total: 80.0, Place: 1, SoFar: 80.0}, {Name: "Ada Martin", Total: 40.0, Place: 2, SoFar: 120.0}])
 ```
 
-![Six mois dans l'ordre de Sort, chacun avec son total. Le total cumulé d'un mois est la somme de janvier jusqu'à lui : 1 200, 2 000, 3 500... Pour avril, le frame de last = 3 couvre février, mars et avril, dont la moyenne est 1 066,67, et Prev donne les 1 500 de mars.](../../book/images/windows-running.svg)
+![Six mois dans l'ordre de Sort, chacun avec son total. Le total cumulé d'un mois est la somme de janvier jusqu'à lui : 1 200, 2 000, 3 500... Pour avril, le frame de last = 3 couvre février, mars et avril, dont la moyenne est 1 066,67, et Prev donne les 1 500 de mars.](images/windows-running.svg)
 
 Le 10 février, la vente de Bo vient avant celle d'Ada : `Sort` ordonne les lignes d'un même jour par leurs autres
 champs, le montant d'abord (20 avant 30), donc le total cumulé, la ligne d'avant et le numéro de la ligne sont les
@@ -968,6 +972,8 @@ redemandés pour la clé dont l'extremum est parti. Les questions qui ne diffèr
 impayées de chaque client) partagent un seul **template** (un modèle de question, dont les constantes deviennent des
 paramètres) : le changement d'un fait se calcule une fois et ses lignes vont aux watches dont les constantes leur
 correspondent, si bien qu'un groupe coûte autant avec 10 watches qu'avec 10 000 ([ce que cela coûte](#ce-que-cela-coûte)).
+
+![À gauche, le groupe 15 ajoute la facture impayée 65546 d'Ada, de total 45, et le groupe 16 la marque payée. Au milieu, le template unpaidOf(c) et ses trois motifs calcule chaque changement une fois (la delta query). À droite, la watch de c = ada, partagée par les fibers A et B, reçoit les lignes ; celle de c = bo ne reçoit rien. En dessous, les trois messages que reçoit la fiber A : la réponse au groupe 14, puis la facture 65546 ajoutée au groupe 15, puis retirée au groupe 16.](images/watch-flow.svg)
 
 
 ### Sort et Limit dans un watch
@@ -1339,6 +1345,8 @@ jusqu'au serveur. Ce qu'il lit n'est jamais périmé : une lecture qui commence 
 ce programme ou à n'importe quel autre, voit cette écriture. Les lectures sont **linearizable** (Herlihy et Wing 1990 :
 chaque lecture et chaque écriture semble prendre effet à un instant entre son appel et sa réponse, dans un ordre qui
 respecte le temps réel), et, avec les groupes, strictly serializable (G15).
+
+![À gauche, le processus du serveur, cepheus serve : ses listeners (le socket Unix, et TCP avec TLS 1.3), ses I/O domains, une base avec son writer, son journal et ses runs, le commit buffer et la page de visibilité dans /dev/shm. À droite, trois programmes : l'un, ailleurs, lit par TCP et TLS en 41,3 µs ; l'un, sur la même machine, par le socket Unix en 9,7 µs ; l'un, en lecture locale, reçoit les fichiers run et les frames par le follow stream, mappe la page de visibilité en lecture seule et lit dans sa propre mémoire en 0,22 µs.](images/server-reads.svg)
 
 Comment, en bref ([le serveur](server.md#lectures-locales-g15) le raconte en entier) :
 

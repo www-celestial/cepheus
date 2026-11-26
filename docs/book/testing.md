@@ -166,7 +166,7 @@ UndefinedBehaviorSanitizer; each input is a CRC to extend from, an offset, a len
 the bytes as `Crc32c` checks before every call, and the result is compared with the definition computed bit by bit,
 whole and cut in two. Run it with clang:
 
-```
+```sh
 clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -I "$(ocamlfind ocamlc -where)" \
   test/fuzz_crc32c.c src/crc32c_stubs.c -o fuzz_crc32c && ./fuzz_crc32c -max_len=65536 -max_total_time=300
 ```
@@ -347,7 +347,7 @@ start the harness makes a CA, a server's certificate for 127.0.0.1 and a client'
 The seeds are a ClientHello captured from `openssl s_client`, a server's first flight from `openssl s_server` with
 the test certificates, and whole conversations. Run it with clang:
 
-```
+```sh
 clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -DCEPHEUS_TLS_CORE_ONLY \
   test/fuzz_tls.c server/tls_stubs.c -lssl -lcrypto -o fuzz_tls && ./fuzz_tls -max_len=16384 -max_total_time=300
 ```

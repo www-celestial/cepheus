@@ -64,6 +64,8 @@ writing one group at a time and an fsync of $f$, the rate approaches $N / (1.5 f
 can resolve ([theory](theory.md#2-group-commit)). Measured: 181 groups a second for 1 client, 7,147 for 64, 14,141 to
 17,192 for 256 (the disk is the limit; PostgreSQL's inserts are on par).
 
+![Top, a timeline of 9 ms in three lanes: programs send the writes w1 to w5; the writer resolves each as it comes; the syncer writes and forces frame 1 with w1 alone, while w2, w3 and w4 wait together for frame 2, forced next; the end of each frame answers its programs. Bottom, a journal segment: its 40-byte header, then each frame as a 28-byte header, its groups in columns and a 16-byte trailer, only ever appended to.](images/journal-commit.svg)
+
 ## Recovery: torn writes and damage
 
 **Recovery** is what an open does after a crash: it rebuilds the state from the runs on disk and the journal after

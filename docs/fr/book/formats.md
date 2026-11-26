@@ -43,7 +43,7 @@ qui a `shared` et pas `closed` (`Busy`) : ses frames confirmées les plus récen
 
 ## Segment de journal `DIR/journal/<first group, 20 digits>.seg`
 
-```
+```text
 header, 40 bytes:  0 magic "CPHJ" (0x4A485043) u32 | 4 format u32 (2) | 8 database id, 16 bytes
                    | 24 first group u64 | 32 zero u32 | 36 CRC of bytes 0..36 u32
 frames, one after the other:
@@ -84,7 +84,7 @@ replay (la relecture du journal) les applique l'un après l'autre, et un groupe 
 fait (un fait ajouté, puis retiré, dans la même écriture), ou les faits d'une propriété retirés avant la propriété
 elle-même.
 
-```
+```text
 number varint | time int (ms) | by int | why string | first new thing varint | count of new things varint
 | count of changes n varint
 | if n > 0:
@@ -148,7 +148,7 @@ Zukowski et al. 2006) : un bloc de valeurs est rangé comme une base et, pour ch
 en autant de bits qu'en demande la plus grande différence du bloc (le bit packing des colonnes du journal, plus haut) ;
 toute valeur se lit en $O(1)$ sans décoder ses voisines.
 
-```
+```text
 header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (9) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0
@@ -173,7 +173,7 @@ zéros ; aucune lecture d'un run n'en atteint jamais une, sauf au-delà du derni
 
 **Les sections d'une partie**, dans cet ordre, chacune à un multiple de 8 octets :
 
-```
+```text
 erank   (ceil(ne/32) + 1) u64     the rank table of things
 tdir    (thing blocks + 1) u64    the byte offset of each thing block from tdata; the last, the end of the last block
 tdata                             the thing blocks
@@ -227,7 +227,7 @@ le statut et le total d'une facture : une recherche lit un seul champ du record 
 est une **colonne** du bloc (les offsets de ses slots et ses valeurs : les follows d'un client, ou les propriétés des
 quelques clients parmi un bloc de factures).
 
-```
+```text
 thing block (at tdata + tdir[s / 128]; a block that fits in a page never crosses one: the merge starts it on the next
 page otherwise):
   0 B u16 (its slots) | 2 m u16 (its entries) | 4 hv u8 (1: a record's first bit says its slot has values in a
@@ -255,7 +255,7 @@ puis par chose ; `pdist[p]` compte ses valeurs distinctes. Les lignes de chaque 
 blocks** (blocs de lignes) de 128 (le premier de la propriété p est le bloc `pblk[p]`) ; un bloc ne traverse jamais une
 page :
 
-```
+```text
 row block (at vdata + vdir[j].offset; its first value vdir[j].first):
   0 wv u8 (bits a value, the flag included) | 1 fl u8 (1: each value's lowest bit is its derived flag)
   | 2 wt u8 (bits a thing) | 3 gaps u8 | 4 the least thing u32
@@ -281,7 +281,7 @@ l'ordre des choses, les valeurs d'une chose triées : le vertical partitioning (
 compte, un test d'appartenance) lit ici ; les thing blocks servent « tous les faits d'une chose » (un bloc, toutes ses
 propriétés) et les merges. L'entrée `cp[p]` :
 
-```
+```text
 tlo    the thing of bit 0 of p's first rank word (a multiple of 32)
 rank   the byte (in the run) of p's first rank word; -1: p has no rows in the part (the other fields unused)
 words  its rank words: word j holds which of the things tlo + 32j .. tlo + 32j + 31 hold p (low 32 bits) and how
@@ -316,7 +316,7 @@ hash, le suivant quand il est pris. Le hash d'un texte $s$ de $n$ octets, en ari
 modulo $2^{63}$), avec $K =$
 0x2545F4914F6CDD1D (le multiplicateur de xorshift64*, Vigna 2016) :
 
-```
+```text
 h := n * K
 for each group g of 7 bytes of s (little-endian; the last group padded with zeros): h := (h xor g) * K
 h := h xor (h lsr 32); h := h * K; h := h xor (h lsr 29)
@@ -399,7 +399,7 @@ vault : là où Cepheus garde les octets des fichiers ; un pack : un fichier où
 **L'origine d'un groupe** (dans son `why`, pour les groupes écrits par le serveur ;
 [serveur](server.md#écritures-appliquées-une-seule-fois-les-sessions-g14)) :
 
-```
+```text
 why = "\000cph1\000" (6 bytes) | session varint | serial varint | floor varint | token name (varint length, bytes)
     | the program's why (the rest)
 ```
@@ -409,7 +409,7 @@ commence par eux.
 
 **`DATA/NAME/sessions`**, le checkpoint de la table des sessions (écrit à côté, forcé, renommé, le répertoire forcé) :
 
-```
+```text
 magic "cepheus sessions\n" (17 bytes) | format varint (1) | group varint (every receipt up to it is here)
 | count varint | each session: id varint | token name (length, bytes) | floor varint | highest applied serial varint
                  | time of its last write (zigzag, ms) | count varint | each receipt: serial, group, first new thing (varints)
@@ -425,7 +425,7 @@ tourne.
 **`DATA/server.wal.1` et `DATA/server.wal.2`**, les deux fichiers du commit buffer, qui alternent (`src/wal.ml` ;
 [le serveur](server.md#plusieurs-bases-un-seul-fsync--le-commit-buffer)) :
 
-```
+```text
 file   = header, 40 bytes: 0 magic "CPHW" (0x57485043) u32 | 4 format u32 (1) | 8 generation u64 | 16 zero, 20 bytes
                            | 36 CRC of the 36 bytes before
        | rounds, from offset 40
@@ -450,7 +450,7 @@ journal ; un fichier dont l'en-tête ne passe pas la vérification est un dommag
 écritures, par l'algorithme de consensus Raft ; `server/raftlog.ml` ;
 [le serveur](server.md#un-cluster-de-trois-raft)), le dossier en mode 0700, chaque fichier en 0600 :
 
-```
+```text
 state    = magic "cepheus raft state\n" (19 bytes) | term u64 | vote (varint length, a peer's name; empty: none)
          | repair u64 (0, or the newest index a damaged log may have acknowledged) | CRC-32C u32 of everything before
 log.<first index, 20 digits> = header, 52 bytes: 0 magic "CPHL" (0x4C485043) u32 | 4 format u32 (1)

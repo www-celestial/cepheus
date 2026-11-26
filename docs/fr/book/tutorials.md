@@ -407,6 +407,8 @@ cela, intégré : il départage par les autres champs de la ligne elle-même, si
 l'ordre que si elles sont la même ligne, et n'a besoin d'aucun index choisi pour lui ; la page après une ligne coûte
 la même chose à toute profondeur ([comment on y répond](cesia.md#sort-limit-et-after--des-pages)).
 
+![Deux listes de factures triées par total, la plus grande d'abord. À gauche, la page 1 à son groupe : 300,00, 280,00 et 270,00, la dernière étant le curseur. À droite, l'ordre après une nouvelle facture de 1 000,00 écrite entre les pages, en vert en haut : After le curseur donne 250,00, 240,00 et 220,00 ; OFFSET 3 donne 270,00, 250,00 et 240,00, et montre 270,00 deux fois.](images/pages-after.svg)
+
 **Une liste des clients par leurs ids**, comme une page d'admin montre un kind : la même question, triée par la chose ;
 `Above` sur une chose garde celles faites après elle.
 
@@ -1168,7 +1170,7 @@ end
 2028-06-01 1500.0 7000.0 1100.0 400.0 1166.67
 ```
 
-![Six mois dans l'ordre de Sort, chacun avec son total. Le total cumulé d'un mois est la somme de janvier jusqu'à lui : 1 200, 2 000, 3 500... Pour avril, le frame de last = 3 couvre février, mars et avril, dont la moyenne est 1 066,67, et Prev donne les 1 500 de mars.](../../book/images/windows-running.svg)
+![Six mois dans l'ordre de Sort, chacun avec son total. Le total cumulé d'un mois est la somme de janvier jusqu'à lui : 1 200, 2 000, 3 500... Pour avril, le frame de last = 3 couvre février, mars et avril, dont la moyenne est 1 066,67, et Prev donne les 1 500 de mars.](images/windows-running.svg)
 
 Pas à pas : `Sort` met les mois dans l'ordre, et chaque fenêtre les lit dans cet ordre. `SoFar` est la somme de
 `Billed` de janvier jusqu'au mois ; `Before` est le `Billed` du mois d'avant, absent pour janvier, qui n'en a pas
@@ -1306,7 +1308,7 @@ Cy Moreau 2028-02-03 300.0
 [{Client: "Cy Moreau", Date: "2028-06-19"}, {Client: "Bo Lind", Date: "2028-06-01"}, {Client: "Ada Martin", Date: "2028-05-12"}]
 ```
 
-![Les factures de 2028 triées par client, puis par date de la plus récente : avec Each par client et Limit 3, les trois premières lignes de chaque client sont gardées et les autres laissées de côté ; avec Limit 1, la première de chacun.](../../book/images/windows-each.svg)
+![Les factures de 2028 triées par client, puis par date de la plus récente : avec Each par client et Limit 3, les trois premières lignes de chaque client sont gardées et les autres laissées de côté ; avec Limit 1, la première de chacun.](images/windows-each.svg)
 
 Les lignes viennent toujours dans l'ordre de `Sort` : triées d'abord par le client, les lignes de chaque client sont
 ensemble ; les dernières factures, triées par la date seule, viennent de la plus récente, quel que soit le client. Le
@@ -1329,7 +1331,7 @@ end
 3 2 3 Cy Moreau 1200.0
 ```
 
-![Trois clients triés par chiffre d'affaires, le plus grand d'abord : Ada et Bo ont tous deux 2 900, Cy 1 200. Rank donne 1, 1, 3 ; Rank(dense = true) 1, 1, 2 ; Running(Count()), le numéro de la ligne, 1, 2, 3.](../../book/images/windows-rank.svg)
+![Trois clients triés par chiffre d'affaires, le plus grand d'abord : Ada et Bo ont tous deux 2 900, Cy 1 200. Rank donne 1, 1, 3 ; Rank(dense = true) 1, 1, 2 ; Running(Count()), le numéro de la ligne, 1, 2, 3.](images/windows-rank.svg)
 
 **PostgreSQL** écrit les 3 dernières de chacun avec `LATERAL` (un index sur `(client, date)` lui fait lire 3 lignes par
 client) ou avec `row_number()` dans une sous-requête, la dernière avec `DISTINCT ON`, et les places avec `rank()` :

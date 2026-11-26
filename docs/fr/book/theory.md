@@ -467,7 +467,7 @@ hors du dépôt : les groupes du chargement dans l'ordre, de petits groupes d'un
 chaque politique ; les faits qu'écrit chaque merge sont comptés, ainsi que les runs qu'une lecture visiterait après
 chaque groupe) :
 
-```
+```text
 policy (B = 200,000)        facts written   amplification   runs at most   runs on average
 one level (before)          145 M           14.5            1              1
 leveling, T = 4              58 M            5.8            3              2.1

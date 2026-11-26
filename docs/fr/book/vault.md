@@ -92,6 +92,8 @@ couvrent.
 
 ## Comment ça marche
 
+![En haut, un fichier de 1 500 000 octets en une barre de 19 chunks de tailles diverses, coupés par le chunker du vault ; les 2 chunks sous la plage d'un Read de 65 536 octets depuis l'octet 1 000 000 sont mis en avant. Au milieu, le même fichier avec 100 octets insérés à l'octet 400 000 : seul le chunk de l'insertion est neuf, en rouge, et les 18 autres sont trouvés stockés. En bas, le chemin d'un chunk : nommé par un BLAKE2b-256 à clé, compressé par LZ4, scellé par AEGIS-256, stocké une fois comme un record d'un pack.](images/vault-chunks.svg)
+
 ### Des chunks coupés selon leur contenu
 
 Un fichier est découpé en **chunks** par **FastCDC** (un content-defined chunking : un découpage décidé par le contenu
@@ -268,7 +270,7 @@ serveur](server.md#une-replica)).
 
 ## Formats
 
-```
+```text
 DIR/vault/                      0700
 DIR/vault/lock                  held while the vault is open
 DIR/vault/keys                  "CPHVKEYS" | u32 format (1) | u32 CRC-32C of the 12 bytes before, then entries of 112 bytes:

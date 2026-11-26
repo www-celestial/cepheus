@@ -1,0 +1,149 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="712" height="372" viewBox="0 0 712 372">
+<title>Les faits d'une vue et une question de 4 motifs : les faits qu'utilise chaque réponse</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.w{fill:#ffffff}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.off{fill:#8c959f}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.box{fill:#f6f8fa;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.s1{fill:#257de0}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.w{fill:#ffffff}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.box{fill:#1c2128;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.s1{fill:#338ced}
+}
+</style>
+<rect class="bg" width="712" height="372"/>
+<text class="h" x="16" y="22">Les faits de la vue</text>
+<text class="s sm" x="22" y="44">thing</text>
+<text class="s sm" x="80" y="44">property</text>
+<text class="s sm" x="200" y="44">value</text>
+<text class="s sm" x="290" y="44">réponses</text>
+<rect class="cur" x="16" y="52" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="66">#65536</text>
+<text class="c" xml:space="preserve" x="80" y="66">client/city</text>
+<text class="c" xml:space="preserve" x="200" y="66">"Lyon"</text>
+<circle class="s1" cx="300" cy="61" r="8"/>
+<text class="w h sm" x="300" y="65" text-anchor="middle">1</text>
+<circle class="s1" cx="322" cy="61" r="8"/>
+<text class="w h sm" x="322" y="65" text-anchor="middle">2</text>
+<rect class="row" x="16" y="74" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="88">#65537</text>
+<text class="c" xml:space="preserve" x="80" y="88">client/city</text>
+<text class="c" xml:space="preserve" x="200" y="88">"Paris"</text>
+<text class="off sm" x="296" y="88">-</text>
+<rect class="cur" x="16" y="96" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="110">#65538</text>
+<text class="c" xml:space="preserve" x="80" y="110">invoice/client</text>
+<text class="c" xml:space="preserve" x="200" y="110">#65536</text>
+<circle class="s1" cx="300" cy="105" r="8"/>
+<text class="w h sm" x="300" y="109" text-anchor="middle">1</text>
+<rect class="cur" x="16" y="118" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="132">#65538</text>
+<text class="c" xml:space="preserve" x="80" y="132">invoice/status</text>
+<text class="c" xml:space="preserve" x="200" y="132">"unpaid"</text>
+<circle class="s1" cx="300" cy="127" r="8"/>
+<text class="w h sm" x="300" y="131" text-anchor="middle">1</text>
+<rect class="cur" x="16" y="140" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="154">#65538</text>
+<text class="c" xml:space="preserve" x="80" y="154">invoice/total</text>
+<text class="c" xml:space="preserve" x="200" y="154">120,00</text>
+<circle class="s1" cx="300" cy="149" r="8"/>
+<text class="w h sm" x="300" y="153" text-anchor="middle">1</text>
+<rect class="row" x="16" y="162" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="176">#65539</text>
+<text class="c" xml:space="preserve" x="80" y="176">invoice/client</text>
+<text class="c" xml:space="preserve" x="200" y="176">#65536</text>
+<text class="off sm" x="296" y="176">-</text>
+<rect class="row" x="16" y="184" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="198">#65539</text>
+<text class="c" xml:space="preserve" x="80" y="198">invoice/status</text>
+<text class="c" xml:space="preserve" x="200" y="198">"paid"</text>
+<text class="off sm" x="296" y="198">-</text>
+<rect class="row" x="16" y="206" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="220">#65539</text>
+<text class="c" xml:space="preserve" x="80" y="220">invoice/total</text>
+<text class="c" xml:space="preserve" x="200" y="220">50,00</text>
+<text class="off sm" x="296" y="220">-</text>
+<rect class="row" x="16" y="228" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="242">#65540</text>
+<text class="c" xml:space="preserve" x="80" y="242">invoice/client</text>
+<text class="c" xml:space="preserve" x="200" y="242">#65537</text>
+<text class="off sm" x="296" y="242">-</text>
+<rect class="row" x="16" y="250" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="264">#65540</text>
+<text class="c" xml:space="preserve" x="80" y="264">invoice/status</text>
+<text class="c" xml:space="preserve" x="200" y="264">"unpaid"</text>
+<text class="off sm" x="296" y="264">-</text>
+<rect class="row" x="16" y="272" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="286">#65540</text>
+<text class="c" xml:space="preserve" x="80" y="286">invoice/total</text>
+<text class="c" xml:space="preserve" x="200" y="286">70,00</text>
+<text class="off sm" x="296" y="286">-</text>
+<rect class="cur" x="16" y="294" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="308">#65541</text>
+<text class="c" xml:space="preserve" x="80" y="308">invoice/client</text>
+<text class="c" xml:space="preserve" x="200" y="308">#65536</text>
+<circle class="s1" cx="300" cy="303" r="8"/>
+<text class="w h sm" x="300" y="307" text-anchor="middle">2</text>
+<rect class="cur" x="16" y="316" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="330">#65541</text>
+<text class="c" xml:space="preserve" x="80" y="330">invoice/status</text>
+<text class="c" xml:space="preserve" x="200" y="330">"unpaid"</text>
+<circle class="s1" cx="300" cy="325" r="8"/>
+<text class="w h sm" x="300" y="329" text-anchor="middle">2</text>
+<rect class="cur" x="16" y="338" width="330" height="19"/>
+<text class="c" xml:space="preserve" x="22" y="352">#65541</text>
+<text class="c" xml:space="preserve" x="80" y="352">invoice/total</text>
+<text class="c" xml:space="preserve" x="200" y="352">30,00</text>
+<circle class="s1" cx="300" cy="347" r="8"/>
+<text class="w h sm" x="300" y="351" text-anchor="middle">2</text>
+<text class="h" x="366" y="22">La question : 4 motifs</text>
+<text class="s sm" x="696" y="44" text-anchor="end">faits qu'il touche seul</text>
+<rect class="box" x="366" y="52" width="330" height="22"/>
+<text class="c" xml:space="preserve" x="374" y="67">[?c, client/city, "Lyon"]</text>
+<text class="a" x="688" y="67" text-anchor="end">1</text>
+<rect class="box" x="366" y="78" width="330" height="22"/>
+<text class="c" xml:space="preserve" x="374" y="93">[?i, invoice/client, ?c]</text>
+<text class="a" x="688" y="93" text-anchor="end">4</text>
+<rect class="box" x="366" y="104" width="330" height="22"/>
+<text class="c" xml:space="preserve" x="374" y="119">[?i, invoice/status, "unpaid"]</text>
+<text class="a" x="688" y="119" text-anchor="end">3</text>
+<rect class="box" x="366" y="130" width="330" height="22"/>
+<text class="c" xml:space="preserve" x="374" y="145">[?i, invoice/total, ?t]</text>
+<text class="a" x="688" y="145" text-anchor="end">4</text>
+<text class="h" x="366" y="186">La réponse : 2 liaisons</text>
+<text class="s sm" x="366" y="203">chacune fait de chaque motif un fait</text>
+<text class="c s" xml:space="preserve" x="402" y="226">?c</text>
+<text class="c s" xml:space="preserve" x="486" y="226">?i</text>
+<text class="c s" xml:space="preserve" x="586" y="226">?t</text>
+<rect class="cur" x="366" y="234" width="330" height="22"/>
+<circle class="s1" cx="380" cy="245" r="8"/>
+<text class="w h sm" x="380" y="249" text-anchor="middle">1</text>
+<text class="c" xml:space="preserve" x="402" y="249">#65536</text>
+<text class="c" xml:space="preserve" x="486" y="249">#65538</text>
+<text class="c" xml:space="preserve" x="586" y="249">120,00</text>
+<rect class="cur" x="366" y="260" width="330" height="22"/>
+<circle class="s1" cx="380" cy="271" r="8"/>
+<text class="w h sm" x="380" y="275" text-anchor="middle">2</text>
+<text class="c" xml:space="preserve" x="402" y="275">#65536</text>
+<text class="c" xml:space="preserve" x="486" y="275">#65541</text>
+<text class="c" xml:space="preserve" x="586" y="275">30,00</text>
+<text class="s" x="366" y="306">Un fait peut servir plusieurs réponses : la ville</text>
+<text class="s" x="366" y="323">de Lyon, les deux. La facture payée et celles de</text>
+<text class="s" x="366" y="340">Paris touchent une partie des motifs, pas tous.</text>
+</svg>

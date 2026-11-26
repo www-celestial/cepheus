@@ -71,6 +71,8 @@ seconde, jusqu'à ce que le writer peut résoudre ([théorie](theory.md#2-group-
 seconde pour 1 client, 7 147 pour 64, 14 141 à 17 192 pour 256 (le disque est la limite ; les insertions de PostgreSQL
 sont au même niveau).
 
+![En haut, une frise de 9 ms en trois couloirs : les programmes envoient les écritures w1 à w5 ; le writer résout chacune à son arrivée ; le syncer écrit et force la frame 1 avec w1 seule, pendant que w2, w3 et w4 attendent ensemble la frame 2, forcée ensuite ; la fin de chaque frame répond à ses programmes. En bas, un segment du journal : son en-tête de 40 octets, puis chaque frame en un en-tête de 28 octets, ses groupes en colonnes et un trailer de 16 octets, auquel on ne fait qu'ajouter.](images/journal-commit.svg)
+
 ## La recovery : torn writes et dommages
 
 La **recovery** est ce que fait une ouverture après un crash : elle rebâtit l'état à partir des runs sur disque et du

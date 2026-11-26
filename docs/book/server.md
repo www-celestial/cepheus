@@ -18,7 +18,7 @@ A **server** here is a long-running process that owns the databases' files and a
 through a path in the file system; **TCP** links two machines, or two processes of one machine through the
 **loopback** address 127.0.0.1). A program is a **client**: it connects, proves who it is, and sends requests.
 
-```
+```text
 cepheus serve --config /etc/cepheus/cluster.toml
 ├── listeners     the Unix socket DIR/.s.cepheus.PORT (same machine) and TCP host:port with TLS 1.3
 ├── I/O domains   k OCaml domains; a thread a connection, spread over them
@@ -28,6 +28,8 @@ cepheus serve --config /etc/cepheus/cluster.toml
 ├── tokens        tokens.toml, beside cluster.toml, read again when it changes
 └── one cache     the page cache of every database's runs ([storage] cache)
 ```
+
+![Left, the server process, cepheus serve: its listeners (the Unix socket, and TCP with TLS 1.3), its I/O domains, a database with its writer, journal and runs, the commit buffer and the visibility page in /dev/shm. Right, three programs: one elsewhere reads over TCP and TLS in 41.3 µs; one on the same machine through the Unix socket in 9.7 µs; one with local reads receives the run files and the frames by the follow stream, maps the visibility page read-only and reads in its own memory in 0.22 µs.](images/server-reads.svg)
 
 Why a server rather than a library opened by each program:
 
@@ -165,7 +167,7 @@ admin = true
 
 ### Commands
 
-```
+```text
 cepheus cluster init NAME --dir DIR [--host H]...
                                          a new cluster: its CA (DIR/ca.pem, DIR/ca.key), the certificate of its first
                                          peer srv1 for the hosts H (default localhost and 127.0.0.1: DIR/srv1.pem,
@@ -226,7 +228,7 @@ numbers in Prometheus's text format. Every line: [what to watch](production.md#w
 
 ### Files of the server
 
-```
+```text
 DATA/cepheus.lock          held (lockf) while the server runs: one server a data directory; holds its pid
 DATA/cepheus.server        the server's id, made at its first start
 DATA/NAME/                 a database: its files as in operations.md, and
@@ -304,7 +306,7 @@ change is made durable before it counts), so the commits of all of them group.
 **What it does.** The server keeps one log of its own, the **commit buffer** (`DATA/server.wal.1` and `.2`,
 `src/wal.ml`; byte layout in [formats](formats.md#the-servers-files)):
 
-```
+```text
 database d1: frame -> d1's journal (written, no fsync) --+
 database d2: frame -> d2's journal (written, no fsync) --+--> a round: d1's frame | d2's frame | ...
 database dN: frame -> dN's journal (written, no fsync) --+      appended to DATA/server.wal.N, one fsync,
@@ -413,7 +415,7 @@ server of two databases, killed 20 times under writing clients: every receipt's 
 A connection carries **frames** both ways. A frame is a length first, so a reader takes a whole frame without
 parsing it, and refuses one over the limit before reading it:
 
-```
+```text
 frame  = length u32 LE (the bytes after this field, 6 to 16 MiB + 6) | id u32 LE | kind u8 | flags u8 | body
 flags  = bit 0 more: the reply continues in the next frame of this id (the rows of a Find)
          bit 1 error: the body is an error
@@ -549,7 +551,7 @@ On a follow stream the server pushes (request id 0):
 
 A `Watch` keeps a question answered. Its pushes come on the Watch's id, kind 11, each a message:
 
-```
+```text
 answer = 0 | group | cols | count | rows                          the whole answer at group
 change = 1 | group | cols | added: count | rows | removed: count | rows
 same   = 2 | group                                                 nothing the question reads changed since from
@@ -712,7 +714,7 @@ checked by its CRC as it arrives (G7), and a delta of the newest groups, which i
 (`Resolve.replay`). The server sends it, over a second connection to the Unix socket (the **follow stream**, opened
 by the request `Follow`):
 
-```
+```text
 Follow {db}            the reader's right is checked (G16); then, over this connection only:
 Start  {id, n, runs}   the descriptors of the visibility page and of each run file, passed by the kernel (SCM_RIGHTS)
 Frame  {0, groups}     the groups after the newest run, up to the state visible under n (a catch-up)
@@ -1170,6 +1172,8 @@ takes every write; it confirms a write only once a **majority** of the servers (
 their disks; when the leader is lost (its machine, its network, its process), the others elect a new one by
 themselves, and no write the old leader confirmed is lost. A cluster of 3 survives the loss of 1 server, 5 of 2.
 
+![Two sequence diagrams of one write. Left, a primary and its replica: the primary forces the write, answers Ok, and only then sends the frame, which the replica forces later; between the two, the write is on the primary alone. Right, Raft with 3 servers: the leader forces the entry in its log while it sends it to both followers; once one follower's fsync is acknowledged, 2 of 3 hold it, it is committed, and the program gets Ok; the third follower may come later.](images/replica-raft.svg)
+
 ### Setting one up
 
 The same `cluster.toml` on every machine but `me`, three `[[peer]]` and `[tls]`; each `[[peer]]` may say where
@@ -1323,6 +1327,8 @@ fsync for the vote), and the new leader's no-op (one fsync): measured [below](#w
 longer by default ("By default, etcd uses a 100ms heartbeat interval", "By default, etcd uses a 1000ms election
 timeout", its tuning guide for v3.5), and asks that "Election timeouts must be at least 10 times the round-trip time":
 on a LAN (0.1 to 0.5 ms) 500 ms is a thousand round trips.
+
+![A timeline from 0 to 1,500 ms in four lanes. srv1, the leader, sent a heartbeat every 50 ms and is killed at 0. srv2 and srv3 wait out their election timeout, 500 ms plus up to 500 more; srv2 times out first, wins the pre-vote and the vote, commits its no-op and is ready at 893 ms. The program's writes wait, and its first write is committed at 910 ms. Under the axis, the spread of 21 failovers: a leader ready between 557 and 1,395 ms.](images/raft-failover.svg)
 
 ### A clean stop of the leader: leadership handed over
 
@@ -1825,6 +1831,8 @@ median of 4.8; in the 19 rounds begun below 2, a point read took 8.87 µs and 8 
 | Q4, the unpaid sum and count by city (100 rows, aggregated in the server), $n = 11$ | 12.37 ms [11.35, 13.87] | 18.47 ms [18.36, 19.23] | 1.5× |
 | a new connection with TLS and its first request, $n = 7$ | 2.60 ms [2.53, 2.76] | 4.28 ms [4.24, 4.56] | 1.6× |
 | a new connection, Unix socket (PostgreSQL's fork of a backend), $n = 7$ | | 2.03 ms [2.01, 2.04] | |
+
+![One bar a measure, on a log scale of how many times faster Cepheus's server is than PostgreSQL's; every bar is on Cepheus's side: 1.73 times on an empty round trip, 2.62 on a point read through the Unix socket, 1.27 through TCP and TLS, 6.95 with 16 reads in flight, 1.71, 2.2 and 4.5 with 8, 64 and 256 clients, 1.4 and 1.5 on Q3 and Q4, 1.6 on a new TLS connection.](images/bench-server.svg)
 
 What it says:
 
