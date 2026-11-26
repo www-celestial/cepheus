@@ -136,6 +136,25 @@ val link_to : db -> (int * string * on_delete) list -> (unit, error) result
     that name them already are left). The writer checks every value they hold already; a property that names another
     kind, or the same with another [on_delete], is {!Invalid}. *)
 
+(** {2 An index of two properties: within}
+
+    A one-valued property p2 declared within a one-valued property p1 of its kind ([invoice/date] within
+    [invoice/client]) has, in every run of the database (run format 10, [docs/book/formats.md]), the things of each
+    value of p1 in the order of their p2 values: a key of two columns, as PostgreSQL's index on (client, date). "The 3
+    latest invoices of each client" (Each and Limit 3, sorted by the date) then reads 3 rows a client, and a page of
+    one client's invoices by date (Sort, Limit, After) reads its page, not the dates of every invoice. A write of p1 or
+    p2 keeps it (about 1 us a fact); a write of any other property pays nothing. The pair serves a question once every
+    run holds it: the runs written before the declaration hold none until a merge rewrites them ({!snapshot} rewrites
+    them all); until then the questions are answered without it, with the same rows. *)
+
+val within : db -> (int * int) list -> (unit, error) result
+(** [within db [ (date, client) ]]: each p2 ordered within its p1, in one group (the fact [p2 cepheus/within p1] of
+    p2's property thing; those declared already are left). {!Invalid} when p1 or p2 is no property, takes many values,
+    they are not of one kind (the name before ['/']), p2 is a text or a float (its words do not keep the order of its
+    values), p2 is named within two properties, or p2 is within another p1 already (a change is a migration: write
+    [Retract (p2, Schema.p_within, Link p1)] first). Undeclared by that retraction: the runs' pairs are then unused,
+    and gone at the next merge of each run. *)
+
 (** {1 Rules}
 
     A rule derives facts from facts: for every answer of its body (a question's patterns and ranges), the fact of its

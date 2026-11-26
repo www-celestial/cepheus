@@ -24,7 +24,8 @@ let sdir = "/db/snapshots"
 
 let props =
   [ prop "name" Ttext; prop ~many:true "tag" Ttext; prop "score" Tint; prop ~unique:true "mail" Ttext;
-    prop ~many:true "friend" Tlink; prop "at" Tdate; prop "w" Tfloat; prop "price" (Tmoney 2); prop "ok" Tbool; prop "boss" Tlink ]
+    prop ~many:true "friend" Tlink; prop "at" Tdate; prop "w" Tfloat; prop "price" (Tmoney 2); prop "ok" Tbool; prop "boss" Tlink;
+    prop "inv/client" Tlink; prop "inv/due" Tdate ]
 
 type w = {
   seed : int;
@@ -76,6 +77,11 @@ let declare_ops (v : Store.view) =
         if d.name = "boss" then ops := !ops @ [ Add (p, Schema.p_to, Text "name"); Add (p, Schema.p_delete, Text "clear") ]
       end)
     props;
+  (* an invoice's due date ordered within its client (Cepheus.within: the runs' pairs, run format 10) *)
+  (match List.find_map (function Add (p, q, Text "inv/client") when q = Schema.p_name -> Some p | _ -> None) !ops,
+         List.find_map (function Add (p, q, Text "inv/due") when q = Schema.p_name -> Some p | _ -> None) !ops with
+   | Some c, Some d -> ops := !ops @ [ Add (d, Schema.p_within, Link c) ]
+   | _ -> ());
   !ops
 
 (* rules over the properties, defined by the group after they are declared: a symmetric link, a tag that gives
@@ -111,7 +117,7 @@ let gen_ops w (v : Store.view) =
     let some () = if things = 0 then -1 else Schema.first_thing + Rng.int r things in
     let small = [| "a"; "b"; "c"; "d" |] in
     let one () =
-      match Rng.int r 17 with
+      match Rng.int r 20 with
       | 0 | 1 -> [ Add (-1, p "name", Text ("n" ^ Rng.pick r small)); Add (-1, p "score", Int (Rng.int r 5)) ]
       | 2 -> [ Add (some (), p "score", Int (Rng.int r 5)) ]
       | 3 -> [ Add (some (), p "tag", Text (Rng.pick r small)) ]
@@ -131,6 +137,10 @@ let gen_ops w (v : Store.view) =
       (* a link that names a kind, and a Delete that clears the links to its thing *)
       | 14 -> [ Add (some (), p "boss", Link (some ())) ]
       | 15 -> [ Delete (some (), "name") ]
+      (* invoices: a client and a due date (their pair), changed, retracted *)
+      | 16 -> [ Add (-1, p "inv/client", Link (some ())); Add (-1, p "inv/due", Date (Rng.int r 50)) ]
+      | 17 -> [ (if Rng.bool r then Add (some (), p "inv/client", Link (some ())) else Add (some (), p "inv/due", Date (Rng.int r 50))) ]
+      | 18 -> [ Delete (some (), "inv") ]
       | _ -> [ Retract (some (), p "friend", Link (some ())) ]
     in
     List.concat (List.init (1 + Rng.int r 3) (fun _ -> one ()))
@@ -153,6 +163,7 @@ let check_published w =
   let got = C.facts_of_view v and want = model w v.group in
   if not (C.F.equal got want) then fail w "published view at %d differs from the model: %s" v.group (C.show_diff got want);
   check_rules w v "published";
+  if C.pairs_hold (Printf.sprintf "seed %d: the published view at %d" w.seed v.group) v > 0 then count "views whose pairs were checked";
   (* questions on the view: the answers of the naive evaluator on the model, within the Generic Join bound (G11) *)
   for _ = 1 to 3 do
     match C.random_query w.r v want (List.map (fun (d : prop) -> d.name) props) with

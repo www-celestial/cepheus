@@ -668,12 +668,18 @@ let link_of c db p =
        | Some kind -> Some { Schema.kind; on_delete = Option.value ~default:Schema.Refuse (Option.bind (one Schema.p_delete) Schema.on_delete_of) })
   | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" })
 
+(* the property a property of the database is ordered within, from the facts of the property thing (a Get) *)
+let within_of c db p =
+  match read_call c (Wire.Get { db = db.handle; thing = p }) with
+  | Wire.Facts f -> Ok (List.find_map (fun (q, (x : Value.t)) -> match x with Link p1 when q = Schema.p_within -> Some p1 | _ -> None) f.facts)
+  | r -> Error (match result r with Error e -> e | Ok _ -> { code = "protocol"; message = "an unexpected reply to Get" })
+
 (* the properties' ids for these names, declaring the missing ones in one write (as Cepheus.declare): the schema is
    read with Open again, and a declaration that lost a race for an id is made again without the ids it tried. Open
    lists the properties only: an id held by a rule (a schema thing too) is found by that conflict, and skipped.
    [links]: (name, link) of link properties that name a kind, declared in the same write (Resolve.link_ops); the kind
    an existing one names is read from its facts. *)
-let rec declare ?(avoid = []) ?(links = []) c name (props : Schema.prop list) =
+let rec declare ?(avoid = []) ?(links = []) ?(withins = []) c name (props : Schema.prop list) =
   match open_db ~local:false c name with
   | Error e -> Error e
   | Ok db ->
@@ -721,6 +727,31 @@ let rec declare ?(avoid = []) ?(links = []) c name (props : Schema.prop list) =
         | Ok l -> Ok l
         | Error m -> Error { code = "invalid"; message = m })
     in
+    (* the pairs (p2 within p1, by name), likewise: the p1 an existing p2 is within read from its facts *)
+    let wops =
+      match lops with
+      | Error e -> Error e
+      | Ok _ -> (
+        let named = List.map (fun (n2, n1) -> id_of n2, n2, id_of n1, n1) withins in
+        let current = Hashtbl.create 4 in
+        let read =
+          List.fold_left
+            (fun acc (p2, _, _, _) ->
+              match acc with
+              | Error _ -> acc
+              | Ok () when fresh p2 -> Hashtbl.replace current p2 None; acc
+              | Ok () -> (match within_of c db p2 with Ok w -> Hashtbl.replace current p2 w; Ok () | Error e -> Error e))
+            (Ok ()) named
+        in
+        let name_of p = match List.find_opt (fun (q, _) -> q = p) db.props with Some (_, d) -> d.Schema.name | None -> string_of_int p in
+        match read with
+        | Error e -> Error e
+        | Ok () -> (
+          match Resolve.within_ops (fun p -> Option.map (fun p1 -> p1, name_of p1) (Option.join (Hashtbl.find_opt current p))) named with
+          | Ok l -> Ok l
+          | Error m -> Error { code = "invalid"; message = m }))
+    in
+    let lops = match lops, wops with Ok l, Ok w -> Ok (l @ w) | (Error e, _) | (_, Error e) -> Error e in
     match lops with
     | Error e -> Error e
     | Ok lops -> (
@@ -731,7 +762,7 @@ let rec declare ?(avoid = []) ?(links = []) c name (props : Schema.prop list) =
         | Ok _ -> ( match open_db c name with Ok db -> Ok (db, List.rev !ids) | Error e -> Error e)
         | Error { code = "conflict"; _ } ->
           let tried = List.filter_map (function Resolve.Expect (p, q, None) when q = Schema.p_name -> Some p | _ -> None) !ops in
-          declare ~avoid:(tried @ avoid) ~links c name props
+          declare ~avoid:(tried @ avoid) ~links ~withins c name props
         | Error e -> Error e)
 
 (* ---- live questions ----

@@ -25,6 +25,10 @@
      text order   (run format 9) for each text property, the distinct texts of its rows in the part, in the order of
                   their bytes: a start for each property, then u32 text ids, so that the texts with a prefix are one
                   stretch of it, found by two binary searches (Prefix, and Sort on a text)
+     pairs        (run format 10) for each declared pair p2 within p1 (Schema.within), the rows (w1, w2, thing) of the
+                  things whose pair the run changes, sorted: the things of each value w1 of p1 in the order of their p2
+                  values w2, so that "the 3 latest invoices of each client" reads 3 rows a client (Graefe, "Modern
+                  B-Tree Techniques", 2011: a key of two columns)
 
    Every lookup is a rank, an offset and the answer, on each run that holds the thing (the rank table says so with
    one bit) and on the delta; every count is exact. *)
@@ -62,11 +66,13 @@ type base = {
   o_cmh : int;  (* their offsets for things of several values: Mono headers, then bits *)
   o_cmb : int;
   o_tord : int;  (* (np + 1) u64: each text property's first entry; then u32 text ids, each property's in byte order *)
+  o_pairs : int;  (* the pairs (run format 10): their count, an entry of 96 bytes each, their tables; = len in format 9 *)
   len : int;  (* the end of the part's sections *)
   d0 : int;  (* every thing from d0 to ne - 1 is held: its slot is r0 + (e - d0), with no rank to read *)
   e_lo : int;  (* no thing below e_lo is held: a run of a load's new things says no for the others without a read *)
   r0 : int;
   cols : int array;  (* the columns' entries (8 ints a property, as o_cp holds them), read once *)
+  prs : int array;  (* the pairs' entries (12 ints a pair, as o_pairs holds them), read once *)
 }
 
 type run = {
@@ -113,7 +119,7 @@ let pbytes n w = Pack.bytes n w
    upper bounds, and the bytes past the counts are never written (logical pages no file page holds, Snapshot): what a
    section's room is, from [n_cap] rows, [k_cap] things, [np] properties, [vb_cap] row blocks (each property's rows
    start a block), [vwords] rank words and [vm_blocks] offset blocks of the value indexes, [ns] texts of [sblob] bytes. *)
-type rooms = { tdata : int; vdata : int; vmb : int; smb : int; crank : int; cdir : int; cdata : int; cmh : int; cmb : int; tord : int }
+type rooms = { tdata : int; vdata : int; vmb : int; smb : int; crank : int; cdir : int; cdata : int; cmh : int; cmb : int; tord : int; pairs : int }
 
 let wmax = 64
 
@@ -140,7 +146,7 @@ let rooms ~n_cap ~k_cap ~np ~vb_cap ~vm_blocks ~ns ~sblob ~ne ~caps =
   let sum f = Array.fold_left (fun n cap -> if cap > 0 then n + al (f cap) else n) 0 caps in
   { tdata; vdata; vmb = (vm_blocks * pbytes tb (Pack.width (n_cap + 1))) + 8; smb = (blocks128 (ns + 1) * pbytes tb (Pack.width (sblob + 1))) + 8;
     crank = sum (fun _ -> crank_room ne); cdir = sum cdir_room; cdata = sum cdata_room; cmh = sum cmh_room; cmb = sum cmb_room;
-    tord = (8 * (np + 1)) + (4 * n_cap) + 8 }
+    tord = (8 * (np + 1)) + (4 * n_cap) + 8; pairs = 8 }
 
 (* The sections of a part from offset [at]. *)
 let layout ?(pg = Pages.empty) ~at ~n ~ne ~k ~k_cap ~np ~ns ~sblob ~hbits ~vb_cap ~vwords ~vm_blocks (r : rooms) () =
@@ -169,24 +175,36 @@ let layout ?(pg = Pages.empty) ~at ~n ~ne ~k ~k_cap ~np ~ns ~sblob ~hbits ~vb_ca
   let o_cmh = sec r.cmh in
   let o_cmb = sec r.cmb in
   let o_tord = sec r.tord in
+  let o_pairs = sec r.pairs in
   { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
     o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb;
-    o_tord; len = !off; d0 = ne; r0 = k; e_lo = 0; cols = [||] }
+    o_tord; o_pairs; len = !off; d0 = ne; r0 = k; e_lo = 0; cols = [||]; prs = [||] }
 
-(* the offsets of a part, as a run's header lists them, and back *)
+(* the offsets of a part, as a run's header lists them (format 10: 25, the pairs' the 24th), and back (format 9: 24,
+   no pairs: the section empty at the part's end) *)
 let offsets b =
   [ b.o_erank; b.o_tdir; b.o_tdata; b.o_poff; b.o_pblk; b.o_pdist; b.o_pidx; b.o_vdir; b.o_vdata; b.o_vrank; b.o_vmh;
-    b.o_vmb; b.o_smh; b.o_smb; b.o_sblob; b.o_shash; b.o_cp; b.o_crank; b.o_cdir; b.o_cdata; b.o_cmh; b.o_cmb; b.o_tord; b.len ]
+    b.o_vmb; b.o_smh; b.o_smb; b.o_sblob; b.o_shash; b.o_cp; b.o_crank; b.o_cdir; b.o_cdata; b.o_cmh; b.o_cmb; b.o_tord;
+    b.o_pairs; b.len ]
 
-let of_offsets ~pg ~n ~ne ~k ~np ~ns ~sblob ~hbits = function
-  | [ o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx; o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb;
-      o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb; o_tord; len ] ->
+let of_offsets ~pg ~n ~ne ~k ~np ~ns ~sblob ~hbits l =
+  let mk o_erank o_tdir o_tdata o_poff o_pblk o_pdist o_pidx o_vdir o_vdata o_vrank o_vmh o_vmb o_smh o_smb o_sblob
+      o_shash o_cp o_crank o_cdir o_cdata o_cmh o_cmb o_tord o_pairs len =
     { pg; hot = pg.Pages.hot; n; ne; k; np; ns; sblob; hbits; o_erank; o_tdir; o_tdata; o_poff; o_pblk; o_pdist; o_pidx;
       o_vdir; o_vdata; o_vrank; o_vmh; o_vmb; o_smh; o_smb; o_sblob; o_shash; o_cp; o_crank; o_cdir; o_cdata; o_cmh; o_cmb;
-      o_tord; len; d0 = ne; r0 = k; e_lo = 0; cols = [||] }
+      o_tord; o_pairs; len; d0 = ne; r0 = k; e_lo = 0; cols = [||]; prs = [||] }
+  in
+  match l with
+  | [ a; b; c; d; e; f; g; h; i; j; k; l; m; n; o; p; q; r; s; t; u; v; w; x; len ] -> mk a b c d e f g h i j k l m n o p q r s t u v w x len
+  | [ a; b; c; d; e; f; g; h; i; j; k; l; m; n; o; p; q; r; s; t; u; v; w; len ] -> mk a b c d e f g h i j k l m n o p q r s t u v w len len
   | _ -> invalid_arg "Store.of_offsets"
 
-let noffsets = 24
+(* the offsets of a part in a run's header: format 10's, format 9's *)
+let noffsets = 25
+let noffsets9 = 24
+
+(* a pair's entry in o_pairs: 12 u64 (96 bytes) *)
+let pair_words = 12
 
 (* the hash table of ns texts: the least power of two of at least 2 ns slots (load at most 1/2) *)
 let hbits_for ns = let b = ref 0 in while 1 lsl !b < 2 * ns do incr b done; !b
@@ -194,7 +212,7 @@ let hbits_for ns = let b = ref 0 in while 1 lsl !b < 2 * ns do incr b done; !b
 (* a part with nothing: every lookup answers at once, without a page *)
 let nothing =
   layout ~at:0 ~n:0 ~ne:0 ~k:0 ~k_cap:0 ~np:0 ~ns:0 ~sblob:0 ~hbits:0 ~vb_cap:0 ~vwords:0 ~vm_blocks:0
-    { tdata = 0; vdata = 0; vmb = 0; smb = 0; crank = 0; cdir = 0; cdata = 0; cmh = 0; cmb = 0; tord = 0 } ()
+    { tdata = 0; vdata = 0; vmb = 0; smb = 0; crank = 0; cdir = 0; cdata = 0; cmh = 0; cmb = 0; tord = 0; pairs = 0 } ()
 
 external get64u : Bytes.t -> int -> int64 = "%caml_bytes_get64u"
 external get32u : Bytes.t -> int -> int32 = "%caml_bytes_get32u"
@@ -351,10 +369,13 @@ let dense b =
     { b with d0 = !d0; r0; e_lo = min e_lo !d0 }
   end
 
-(* a part as it is read: d0 and r0, and its columns' entries in memory (np 64-byte entries: a few KB) *)
+(* a part as it is read: d0 and r0, its columns' entries in memory (np 64-byte entries: a few KB), and its pairs'
+   (format 10: a count, then 96 bytes a pair; none in format 9, whose section is empty) *)
 let ready b =
   let b = dense b in
-  { b with cols = Array.init (8 * b.np) (fun i -> ci64 b (b.o_cp + (8 * i))) }
+  let q = if b.o_pairs + 8 <= b.len then ci64 b b.o_pairs else 0 in
+  { b with cols = Array.init (8 * b.np) (fun i -> ci64 b (b.o_cp + (8 * i)));
+           prs = Array.init (pair_words * q) (fun i -> ci64 b (b.o_pairs + 8 + (8 * i))) }
 
 (* [f b x] again until it misses no page; for a raising reader, or a lookup made of them *)
 let rec safe f b x = match f b x with r -> ended r | exception Miss k -> fault b k; safe f b x
@@ -1289,14 +1310,28 @@ let radix_by (key : int -> int) (o : int array) =
 let[@inline] present st = st land 1 <> 0
 type pdelta = { pn : int; pk : int  (* values in pm *); pm : VM.t  (* value -> its things *) }
 
+(* The delta's pairs (p2 within p1, Schema.within): for every thing whose p1 or p2 changed since the delta began, its
+   values of both in the view (byt), and the pairs (w2, thing) of those that hold both, by w1 (byg). A run's pair of
+   such a thing is the runs' and not the view's: the delta's decides (Store.pair_from), as its entries decide the
+   runs' facts. A map of (w2, e) to nothing, not a Set: the Cesia package's engine links no Set. *)
+module PS = Map.Make (struct
+  type t = int * int
+
+  let compare ((a : int), (b : int)) (c, d) = if a <> c then compare a c else compare b d
+end)
+
+type pv = { w1 : int; h1 : bool; w2 : int; h2 : bool }  (* h1 (h2): it has a value of p1 (p2), w1 (w2) *)
+type prd = { pp1 : int; byt : pv IM.t; byg : unit PS.t IM.t }
+
 type delta = {
   de : tdelta IM.t;  (* by thing *)
   dav : pdelta IM.t;  (* by property, then value *)
+  dpr : prd IM.t;  (* the declared pairs', by p2 *)
   dn : int;  (* changes made: what a merge folds in *)
   dnet : int;  (* net count of facts *)
 }
 
-let empty_delta = { de = IM.empty; dav = IM.empty; dn = 0; dnet = 0 }
+let empty_delta = { de = IM.empty; dav = IM.empty; dpr = IM.empty; dn = 0; dnet = 0 }
 
 type touched = { mutable bits : Bytes.t }
 
@@ -2207,6 +2242,284 @@ let count_holders v p lo hi =
     max 0 !n
   end
 
+(* ---- Pairs (run format 10): the things of each value w1 of p1 in the order of their values w2 of p2 ----
+   A declared pair (Schema.within: p2 cepheus/within p1, both one-valued, of one kind, p2 an inline value) is a key
+   of two columns (Graefe, "Modern B-Tree Techniques", Foundations and Trends in Databases 3(4), 2011, multi-column
+   keys), kept as every index of Cepheus is, in the runs of the LSM tree (O'Neil et al. 1996) and in the delta:
+     a part's section    for each pair it holds, its rows (w1, w2, e) sorted: the groups (each distinct w1: a monotone
+                         sequence of their values, one of their first rows), the rows (w2, e) in blocks of 128, a frame
+                         of reference a block for each column (a directory entry of 24 bytes: the w2 base, the e base,
+                         the byte of the block's bits lsl 16 lor w2's bits lsl 8 lor e's bits; then the w2 fields, then
+                         the e fields, each run of fields to a whole byte). Part a holds the pairs of the things the run
+                         changes as they are at its end, when they differ from below it; part t those of below it
+     the delta           every thing whose p1 or p2 changed since the delta began: its values of both in the view, and
+                         the pairs of those that hold both, by w1 (prd)
+   A view reads a pair only when every one of its runs holds it (a run of format 9, or written before the pair was
+   declared, holds none: the plain join answers, the same rows). A row (w1, w2, e) of run j is the view's when the
+   delta has no entry for e (its byt) and no newer run retracts it (its part t holds it); the delta's pairs are the
+   view's. A run adds only pairs absent below it and retracts only pairs present below it, as its facts. *)
+
+(* a part's pair k: its 12 words (p1, p2, rows, groups, the groups' values' Mono headers and bits, their first rows'
+   Mono headers and bits, the rows' directory, the rows' data) *)
+let[@inline] pr b k i = Array.unsafe_get b.prs ((k * pair_words) + i)
+
+(* the part's pair (p1, p2), or -1 *)
+let pr_find b p1 p2 =
+  let n = Array.length b.prs / pair_words and r = ref (-1) and k = ref 0 in
+  while !r < 0 && !k < n do
+    if pr b !k 1 = p2 && pr b !k 0 = p1 then r := !k;
+    incr k
+  done;
+  !r
+
+let[@inline] pr_rows b k = pr b k 2
+let[@inline] pr_groups b k = pr b k 3
+
+(* group q's value w1, its first row *)
+let[@inline] pr_w1 b k q = cmono b (pr b k 4) (pr b k 5) q
+let[@inline] pr_start b k q = cmono b (pr b k 6) (pr b k 7) q
+
+(* row r's w2, its thing *)
+let[@inline] pr_w2 b k r =
+  let d = pr b k 8 + (24 * (r lsr 7)) in
+  let h = ci64 b (d + 16) in
+  let ww = (h lsr 8) land 0xFF in
+  ci64 b d + cfield b (pr b k 9 + (h lsr 16)) ((r land 127) * ww) ww
+
+let[@inline] pr_e b k r =
+  let j = r lsr 7 in
+  let d = pr b k 8 + (24 * j) in
+  let h = ci64 b (d + 16) in
+  let ww = (h lsr 8) land 0xFF and we = h land 0xFF in
+  let nb = min tb (pr_rows b k - (j lsl 7)) in
+  ci64 b (d + 8) + cfield b (pr b k 9 + (h lsr 16) + pbytes nb ww) ((r land 127) * we) we
+
+(* the group of w1 in pair k, or -1: a binary search of the groups' values *)
+let pr_group b k w1 =
+  let lo = ref 0 and hi = ref (pr_groups b k) in
+  while !lo < !hi do
+    let mid = (!lo + !hi) lsr 1 in
+    if pr_w1 b k mid < w1 then lo := mid + 1 else hi := mid
+  done;
+  if !lo < pr_groups b k && pr_w1 b k !lo = w1 then !lo else -1
+
+(* the first of the rows r0 .. r1-1 (sorted by (w2, e)) at or after (w2, e) *)
+let pr_lower b k r0 r1 w2 e =
+  let lo = ref r0 and hi = ref r1 in
+  while !lo < !hi do
+    let mid = (!lo + !hi) lsr 1 in
+    let x = pr_w2 b k mid in
+    if x < w2 || (x = w2 && pr_e b k mid < e) then lo := mid + 1 else hi := mid
+  done;
+  !lo
+
+(* does the part hold the row (w1, w2, e) of its pair (p1, p2) *)
+let pr_mem b p1 p2 w1 w2 e =
+  let k = pr_find b p1 p2 in
+  k >= 0
+  && pr_rows b k > 0
+  &&
+  let q = pr_group b k w1 in
+  q >= 0
+  &&
+  let r0 = pr_start b k q and r1 = pr_start b k (q + 1) in
+  let r = pr_lower b k r0 r1 w2 e in
+  r < r1 && pr_w2 b k r = w2 && pr_e b k r = e
+
+(* can the view read the pair (p1, p2): declared, and held by every run *)
+let pair_ready v ~p1 ~p2 =
+  Schema.within v.schema p2 = Some p1 && Array.for_all (fun r -> pr_find r.a p1 p2 >= 0) v.runs
+
+(* the delta's pairs of p2, when its p1 is p1 *)
+let delta_pairs v p1 p2 = match IM.find_opt p2 v.delta.dpr with Some d when d.pp1 = p1 -> Some d | _ -> None
+
+(* The things of w1 in the order of their p2 values (w2, then the thing), from [from] on (from it down with [desc]),
+   [from] included: [next ()] gives the next thing and puts its w2 in [cell], -1 after the last. One run and no change
+   of the pair in the delta: its rows as they are; otherwise the runs' rows and the delta's merged, each run's row
+   checked against the delta and the newer runs' retractions. The pair must be ready (pair_ready). *)
+let pair_from v ~p1 ~p2 w1 ~desc ~from (cell : int ref) =
+  let rs = v.runs in
+  let dp = delta_pairs v p1 p2 in
+  (* each run's rows of w1: its part, pair, first and last row, and the next row to give *)
+  let nr = Array.length rs in
+  let pk = Array.make nr (-1) and r0 = Array.make nr 0 and r1 = Array.make nr 0 and pos = Array.make nr 0 in
+  for j = 0 to nr - 1 do
+    let b = rs.(j).a in
+    let k = pr_find b p1 p2 in
+    if k >= 0 && pr_rows b k > 0 then begin
+      let q = pr_group b k w1 in
+      if q >= 0 then begin
+        pk.(j) <- k;
+        r0.(j) <- pr_start b k q;
+        r1.(j) <- pr_start b k (q + 1);
+        (* asc: the first row at or after (from, min_int); desc: the last at or before (from, max_int) *)
+        pos.(j) <- (if desc then (if from = max_int then r1.(j) else pr_lower b k r0.(j) r1.(j) (from + 1) min_int) - 1 else pr_lower b k r0.(j) r1.(j) from min_int)
+      end
+    end
+  done;
+  let live j = pk.(j) >= 0 && pos.(j) >= r0.(j) && pos.(j) < r1.(j) in
+  (* the delta's pairs of w1 from [from] *)
+  let dseq =
+    match dp with
+    | None -> ref Seq.empty
+    | Some d -> (
+      match IM.find_opt w1 d.byg with
+      | None -> ref Seq.empty
+      | Some s ->
+        if desc then ref (Seq.map fst (Seq.drop_while (fun ((a, _), ()) -> a > from) (PS.to_rev_seq s)))
+        else ref (Seq.map fst (PS.to_seq_from (from, min_int) s)))
+  in
+  let dhead = ref (match !dseq () with Seq.Cons (x, r) -> dseq := r; Some x | Seq.Nil -> None) in
+  let touched e = match dp with Some d -> IM.mem e d.byt | None -> false in
+  (* run j's row (w2, e) is the view's: the delta does not decide e, and no newer run retracts it *)
+  let shown j w2 e =
+    (not (touched e))
+    &&
+    let ok = ref true and i = ref 0 in
+    while !ok && !i < j do
+      let t = rs.(!i).t in
+      if Array.length t.prs > 0 && pr_mem t p1 p2 w1 w2 e then ok := false;
+      incr i
+    done;
+    !ok
+  in
+  if nr = 1 && dp = None then begin
+    (* one run, no change of the pair: its rows as they are *)
+    let b = rs.(0).a and k = pk.(0) in
+    fun () ->
+      if not (live 0) then -1
+      else begin
+        let r = pos.(0) in
+        pos.(0) <- (if desc then r - 1 else r + 1);
+        cell := pr_w2 b k r;
+        pr_e b k r
+      end
+  end
+  else begin
+    let better (w, e) (w', e') = if desc then w > w' || (w = w' && e > e') else w < w' || (w = w' && e < e') in
+    let rec next () =
+      (* the best head among the runs and the delta *)
+      let best = ref None and src = ref (-2) in
+      for j = 0 to nr - 1 do
+        if live j then begin
+          let b = rs.(j).a in
+          let x = (pr_w2 b pk.(j) pos.(j), pr_e b pk.(j) pos.(j)) in
+          match !best with Some y when not (better x y) -> () | _ -> best := Some x; src := j
+        end
+      done;
+      (match !dhead, !best with
+       | Some x, Some y when better x y -> best := Some x; src := -1
+       | Some x, None -> best := Some x; src := -1
+       | _ -> ());
+      match !best with
+      | None -> -1
+      | Some (w2, e) ->
+        if !src = -1 then begin
+          dhead := (match !dseq () with Seq.Cons (x, r) -> dseq := r; Some x | Seq.Nil -> None);
+          cell := w2;
+          e
+        end
+        else begin
+          let j = !src in
+          pos.(j) <- (if desc then pos.(j) - 1 else pos.(j) + 1);
+          if shown j w2 e then (cell := w2; e) else next ()
+        end
+    in
+    next
+  end
+
+(* The values w1 of the view's pair (p1, p2) within [lo, hi], sorted: every run's groups and the delta's, each once
+   (a group whose rows are all retracted gives no thing, and costs a seek). The pair must be ready. *)
+let pair_groups v ~p1 ~p2 lo hi =
+  let parts = ref [] in
+  Array.iter
+    (fun r ->
+      let b = r.a in
+      let k = pr_find b p1 p2 in
+      if k >= 0 then begin
+        let g = pr_groups b k in
+        let a = Array.make g 0 and n = ref 0 in
+        for q = 0 to g - 1 do let w = pr_w1 b k q in if w >= lo && w <= hi then (a.(!n) <- w; incr n) done;
+        parts := Array.sub a 0 !n :: !parts
+      end)
+    v.runs;
+  (match delta_pairs v p1 p2 with
+   | Some d -> parts := Array.of_list (List.filter_map (fun (w, s) -> if PS.is_empty s || w < lo || w > hi then None else Some w) (IM.bindings d.byg)) :: !parts
+   | None -> ());
+  match !parts with
+  | [ a ] -> a
+  | l ->
+    let a = Array.concat l in
+    Array.sort compare a;
+    let n = Array.length a in
+    if n = 0 then a
+    else begin
+      let m = ref 1 in
+      for i = 1 to n - 1 do if a.(i) <> a.(!m - 1) then (a.(!m) <- a.(i); incr m) done;
+      Array.sub a 0 !m
+    end
+
+(* ---- keeping the delta's pairs ---- *)
+
+(* the first value of (e, p) in v, if any (a one-valued property: its value at the end of a group) *)
+let first_value v e p =
+  let r = ref None in
+  (try iter_values v e p (fun w -> r := Some w; raise_notrace Exit) with Exit -> ());
+  !r
+
+let pv_of v e p1 p2 =
+  let a = first_value v e p1 and b = first_value v e p2 in
+  { w1 = Option.value a ~default:0; h1 = a <> None; w2 = Option.value b ~default:0; h2 = b <> None }
+
+let byg_remove (x : pv) e byg =
+  if not (x.h1 && x.h2) then byg
+  else match IM.find_opt x.w1 byg with
+    | None -> byg
+    | Some s -> let s = PS.remove (x.w2, e) s in if PS.is_empty s then IM.remove x.w1 byg else IM.add x.w1 s byg
+
+let byg_add (x : pv) e byg =
+  if not (x.h1 && x.h2) then byg
+  else IM.add x.w1 (PS.add (x.w2, e) () (Option.value (IM.find_opt x.w1 byg) ~default:PS.empty)) byg
+
+(* the delta's pairs of p2 within p1 made from the delta's changes of p1 and p2 (a pair declared while the delta has
+   some: once a declaration) *)
+let pairs_build v p2 p1 =
+  let es = ref IM.empty in
+  List.iter
+    (fun p -> match IM.find_opt p v.delta.dav with Some pd -> VM.iter (fun _ (vd : vdelta) -> IM.iter (fun e _ -> es := IM.add e () !es) vd.vm) pd.pm | None -> ())
+    [ p1; p2 ];
+  IM.fold (fun e () d -> let x = pv_of v e p1 p2 in { d with byt = IM.add e x d.byt; byg = byg_add x e d.byg }) !es
+    { pp1 = p1; byt = IM.empty; byg = IM.empty }
+
+(* the pair p2 within p1 declared, undeclared or changed in v's schema: its delta's pairs made again *)
+let pairs_reset v p2 =
+  let dpr = IM.remove p2 v.delta.dpr in
+  let dpr = match Schema.within v.schema p2 with Some p1 -> IM.add p2 (pairs_build v p2 p1) dpr | None -> dpr in
+  { v with delta = { v.delta with dpr } }
+
+(* (e, p, w) came into v ([add]) or left it, p the p1 or the p2 of declared pairs: their delta's entries of e *)
+let[@inline never] pairs_after v e p w add =
+  let dpr = ref v.delta.dpr in
+  Schema.iter_pairs v.schema (fun p2 p1 ->
+      if p = p1 || p = p2 then
+        match IM.find_opt p2 !dpr with
+        | Some d when d.pp1 = p1 ->
+          let old = IM.find_opt e d.byt in
+          let cur = match old with Some c -> c | None -> pv_of v e p1 p2 in
+          let again () = first_value v e p in
+          let nw =
+            if p = p1 then (if add then { cur with w1 = w; h1 = true } else if cur.h1 && cur.w1 = w then (match again () with Some x -> { cur with w1 = x } | None -> { cur with h1 = false }) else cur)
+            else if add then { cur with w2 = w; h2 = true }
+            else if cur.h2 && cur.w2 = w then (match again () with Some x -> { cur with w2 = x } | None -> { cur with h2 = false })
+            else cur
+          in
+          let byg = match old with Some o -> byg_remove o e d.byg | None -> d.byg in
+          dpr := IM.add p2 { d with byt = IM.add e nw d.byt; byg = byg_add nw e byg } !dpr
+        | _ ->
+          (* none yet (or another p1's): made from the delta, this change in it *)
+          dpr := IM.add p2 (pairs_build v p2 p1) !dpr);
+  { v with delta = { v.delta with dpr = !dpr } }
+
 (* ---- Changing a view ---- *)
 
 (* an entry's net count against the runs: in the view, minus in the runs; -1 is no entry *)
@@ -2235,7 +2548,8 @@ let[@inline never] change v e p w ~td ~old st =
     else VM.add w { vn = vd.vn + diff; vm } pd.pm, if vold = None then pd.pk + 1 else pd.pk
   in
   let dav = if VM.is_empty pm then IM.remove p d.dav else IM.add p { pn = pd.pn + diff; pk; pm } d.dav in
-  { v with delta = { de; dav; dn = d.dn + 1; dnet = d.dnet + diff } }
+  let v = { v with delta = { de; dav; dpr = d.dpr; dn = d.dn + 1; dnet = d.dnet + diff } } in
+  if diff <> 0 && Schema.paired v.schema p then pairs_after v e p w (diff > 0) else v
 
 (* the entry for a state (0 absent, 1 asserted, 2 only derived) over a state of the runs; -1 when they agree *)
 let[@inline] entry s rs =
@@ -2389,7 +2703,16 @@ let[@inline never] set_sorted ?olds v (es : int array) (ps : int array) (ws : in
       end;
       dav := (if VM.is_empty !pm then IM.remove p !dav else IM.add p { pn = !pn; pk = !pk; pm = !pm } !dav)
     done;
-    { !v with delta = { de = !de; dav = !dav; dn = !dn; dnet = !dnet } }
+    let v = { !v with delta = { de = !de; dav = !dav; dpr = d.dpr; dn = !dn; dnet = !dnet } } in
+    if not (Schema.has_pairs v.schema) then v
+    else begin
+      (* the pairs of the things whose p1 or p2 came or left, in the changes' order *)
+      let v = ref v in
+      for c = 0 to m - 1 do
+        if cdiff.(c) <> 0 && Schema.paired !v.schema cp.(c) then v := pairs_after !v ce.(c) cp.(c) cw.(c) (cdiff.(c) > 0)
+      done;
+      !v
+    end
   end
 
 (* the order of n facts by (thing, property, value): a permutation of 0 .. n-1, sorted by comparisons of ints (no

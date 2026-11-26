@@ -18,13 +18,32 @@ exception Fail of error
 let fail e = raise (Fail e)
 let invalid fmt = Printf.ksprintf (fun s -> fail (Invalid s)) fmt
 
-(* What a schema thing is, from its facts in v: a property (a name and a type), a rule (a name and a definition), or
-   nothing yet. *)
-type thing = Prop of Schema.prop * Schema.link option | Rule of string * string | Nothing
+(* What a schema thing is, from its facts in v: a property (a name and a type, the kind its links name, the property
+   it is ordered within), a rule (a name and a definition), or nothing yet. *)
+type thing = Prop of Schema.prop * Schema.link option * int option | Rule of string * string | Nothing
+
+(* p2 cepheus/within p1, checked on the facts of both property things (p1 may be declared in the same group): both
+   one-valued, of one kind, p2 an inline value, whose words keep the order of its values *)
+let within_check (v : Store.view) (d2 : Schema.prop) p2 p1 =
+  let one q = let r = ref None in Store.iter_values v p1 q (fun w -> r := Some w); !r in
+  if p1 = p2 then Error (Printf.sprintf "%s: cepheus/within names the property itself; it names the property of the groups, as invoice/client" d2.name)
+  else
+    match one Schema.p_name, Option.bind (one Schema.p_type) Value.of_code, one Schema.p_rule with
+    | Some nw, Some _, None ->
+      let n1 = Store.text v nw and many1 = match one Schema.p_many with Some w -> w <> 0 | None -> false in
+      if d2.many then Error (Printf.sprintf "%s takes many values: cepheus/within orders a one-valued property" d2.name)
+      else if many1 then Error (Printf.sprintf "%s is within %s, which takes many values: the groups are a one-valued property's" d2.name n1)
+      else if Schema.kind_of n1 <> Schema.kind_of d2.name then
+        Error (Printf.sprintf "%s is within %s: they are not of one kind (%s, %s)" d2.name n1 (Schema.kind_of d2.name) (Schema.kind_of n1))
+      else if not (Value.inline d2.typ) then
+        Error (Printf.sprintf "%s is a %s: cepheus/within orders an int, a date, money, a link or a bool, whose words keep the order of the values" d2.name (Value.typ_name d2.typ))
+      else Ok ()
+    | _ -> Error (Printf.sprintf "%s: cepheus/within names #%d, which is not a property" d2.name p1)
 
 let read_thing (v : Store.view) p =
   let one q = let r = ref None in Store.iter_values v p q (fun w -> r := Some w); !r in
   let has_link () = Store.has_value v p Schema.p_to || Store.has_value v p Schema.p_delete in
+  let has_within () = Store.has_value v p Schema.p_within in
   match one Schema.p_name, one Schema.p_type, one Schema.p_rule with
   | Some nw, Some tw, None -> (
     match Value.of_code tw with
@@ -32,39 +51,53 @@ let read_thing (v : Store.view) p =
     | Some typ -> (
       let flag q = match one q with Some w -> w <> 0 | None -> false in
       let d = { Schema.name = Store.text v nw; typ; many = flag Schema.p_many; unique = flag Schema.p_unique } in
-      match one Schema.p_to, one Schema.p_delete with
-      | None, None -> Ok (Prop (d, None))
-      | None, Some _ -> Error (Printf.sprintf "%s has cepheus/delete without cepheus/to, the kind it links to" d.name)
-      | Some kw, dw -> (
-        let kind = Store.text v kw in
-        if typ <> Value.Tlink then Error (Printf.sprintf "%s is a %s: cepheus/to is for a link" d.name (Value.typ_name typ))
-        else if kind = "" || String.contains kind '/' then
-          Error (Printf.sprintf "%s: cepheus/to is the name of a kind, without '/', not %S" d.name kind)
-        else
-          match dw with
-          | None -> Ok (Prop (d, Some { Schema.kind; on_delete = Refuse }))
-          | Some dw -> (
-            match Schema.on_delete_of (Store.text v dw) with
-            | Some on_delete -> Ok (Prop (d, Some { Schema.kind; on_delete }))
-            | None -> Error (Printf.sprintf "%s: cepheus/delete is refuse, cascade or clear, not %S" d.name (Store.text v dw))))))
+      let link =
+        match one Schema.p_to, one Schema.p_delete with
+        | None, None -> Ok None
+        | None, Some _ -> Error (Printf.sprintf "%s has cepheus/delete without cepheus/to, the kind it links to" d.name)
+        | Some kw, dw -> (
+          let kind = Store.text v kw in
+          if typ <> Value.Tlink then Error (Printf.sprintf "%s is a %s: cepheus/to is for a link" d.name (Value.typ_name typ))
+          else if kind = "" || String.contains kind '/' then
+            Error (Printf.sprintf "%s: cepheus/to is the name of a kind, without '/', not %S" d.name kind)
+          else
+            match dw with
+            | None -> Ok (Some { Schema.kind; on_delete = Refuse })
+            | Some dw -> (
+              match Schema.on_delete_of (Store.text v dw) with
+              | Some on_delete -> Ok (Some { Schema.kind; on_delete })
+              | None -> Error (Printf.sprintf "%s: cepheus/delete is refuse, cascade or clear, not %S" d.name (Store.text v dw))))
+      in
+      match link with
+      | Error m -> Error m
+      | Ok l -> (
+        match one Schema.p_within with
+        | None -> Ok (Prop (d, l, None))
+        | Some p1 -> (match within_check v d p p1 with Ok () -> Ok (Prop (d, l, Some p1)) | Error m -> Error m))))
   | Some nw, None, Some rw ->
-    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique || has_link () then
+    if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique || has_link () || has_within () then
       Error (Printf.sprintf "rule %d takes a name and a definition only" p)
     else Ok (Rule (Store.text v nw, Store.text v rw))
   | None, None, None ->
     if Store.has_value v p Schema.p_many || Store.has_value v p Schema.p_unique then
       Error (Printf.sprintf "property %d keeps cepheus/many or cepheus/unique without a name and a type" p)
     else if has_link () then Error (Printf.sprintf "property %d keeps cepheus/to or cepheus/delete without a name and a type" p)
+    else if has_within () then Error (Printf.sprintf "property %d keeps cepheus/within without a name and a type" p)
     else Ok Nothing
   | _, _, Some _ -> Error (Printf.sprintf "rule %d needs a name and a definition, and no type" p)
   | _ -> Error (Printf.sprintf "property %d needs both a name and a type" p)
 
 let install_thing schema p = function
-  | Ok (Prop (d, l)) -> Schema.set_rule (Schema.set_link (Schema.set schema p (Some d)) p l) p None
-  | Ok (Rule (n, t)) -> Schema.set_rule (Schema.set_link (Schema.set schema p None) p None) p (Some (n, t))
-  | Ok Nothing | Error _ -> Schema.set_rule (Schema.set_link (Schema.set schema p None) p None) p None
+  | Ok (Prop (d, l, w)) -> Schema.set_within (Schema.set_rule (Schema.set_link (Schema.set schema p (Some d)) p l) p None) p w
+  | Ok (Rule (n, t)) -> Schema.set_within (Schema.set_rule (Schema.set_link (Schema.set schema p None) p None) p (Some (n, t))) p None
+  | Ok Nothing | Error _ -> Schema.set_within (Schema.set_rule (Schema.set_link (Schema.set schema p None) p None) p None) p None
 
-let refresh (v : Store.view) p = { v with schema = install_thing v.schema p (read_thing v p) }
+(* a property thing's facts changed: its schema entry read again; a pair declared, undeclared or changed has the
+   delta's entries of its things made again (Store.pairs_reset) *)
+let refresh (v : Store.view) p =
+  let schema = install_thing v.schema p (read_thing v p) in
+  let v' = { v with schema } in
+  if Schema.within schema p <> Schema.within v.schema p then Store.pairs_reset v' p else v'
 
 let desc (v : Store.view) p =
   match Schema.find v.schema p with Some d -> d | None -> invalid "no property %d" p
@@ -367,7 +400,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
         match read_thing !v p, Schema.find v0.schema p, Schema.rule v0.schema p with
         | Error m, _, _ -> invalid "%s" m
         | Ok (Rule _), Some a, _ -> invalid "%s is a property: it never becomes a rule" a.name
-        | Ok (Prop (d, _)), _, Some _ -> invalid "a rule never becomes a property (%s)" d.name
+        | Ok (Prop (d, _, _)), _, Some _ -> invalid "a rule never becomes a property (%s)" d.name
         | _ -> ())
       touched;
     if Schema.rules_key !v.schema <> Schema.rules_key v0.schema || Hashtbl.length touched > 0 then begin
@@ -459,7 +492,13 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
                 | Some e' when e' <> e -> invalid "%s cannot become unique: two things share a value" b.name
                 | _ -> Hashtbl.replace seen w e)
           end
-        | Some a, None -> if Store.count_prop v p > 0 then invalid "%s still has values" a.name
+        | Some a, None ->
+          if Store.count_prop v p > 0 then invalid "%s still has values" a.name;
+          List.iter
+            (fun (p2, p1) ->
+              if p1 = p && p2 <> p then
+                invalid "%s is ordered within %s: retract its cepheus/within first" (prop_name v p2) a.name)
+            (Schema.pairs v.schema)
         | None, _ -> ())
       touched;
     (* a link that names a kind for the first time, or another: every value it has is a thing of that kind *)
@@ -1116,4 +1155,25 @@ let link_ops current (links : (int * string * Schema.link) list) =
         ops := Add (p, Schema.p_delete, Value.Text (Schema.on_delete_name l.on_delete)) :: Add (p, Schema.p_to, Value.Text l.kind)
                :: Expect (p, Schema.p_to, None) :: !ops)
     links;
+  match !bad with Some m -> Error m | None -> Ok (List.rev !ops)
+
+(* The operations that order properties within others: (p2, its name, p1, its name), [current] the p1 each p2 is within
+   now and its name (None for one declared in the same group). One within none gets its fact, with an Expect that it still is
+   within none (a declaration that lost a race is refused, and read again); one within another p1, or named within two
+   in the list, is an Error: a change is a migration (retract the fact first). *)
+let within_ops current (pairs : (int * string * int * string) list) =
+  let ops = ref [] and bad = ref None and seen = Hashtbl.create 4 in
+  let say m = if !bad = None then bad := Some m in
+  List.iter
+    (fun (p2, n2, p1, n1) ->
+      match Hashtbl.find_opt seen p2 with
+      | Some (p1', n1') when p1' <> p1 -> say (Printf.sprintf "%s is named within both %s and %s: a property is ordered within one" n2 n1' n1)
+      | Some _ -> ()
+      | None -> (
+        Hashtbl.add seen p2 (p1, n1);
+        match current p2 with
+        | Some (p1', _) when p1' = p1 -> ()
+        | Some (_, n1') -> say (Printf.sprintf "%s is ordered within %s in this database, not within %s: retract its cepheus/within first" n2 n1' n1)
+        | None -> ops := Add (p2, Schema.p_within, Value.Link p1) :: Expect (p2, Schema.p_within, None) :: !ops))
+    pairs;
   match !bad with Some m -> Error m | None -> Ok (List.rev !ops)

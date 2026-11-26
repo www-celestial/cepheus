@@ -349,7 +349,18 @@ type window = Range of int * Value.t * Value.t | Words of int * int array
    as its value (p's rows by value); [Holder], the property of a pattern whose thing is x, with the word of its value
    when it is a constant (the things of p, or of the fact (p, w), by their ids), and the ids the question's ranges on
    x leave, lo to hi. *)
-type lead = Value_of of int | Holder of { p : int; value : int option; lo : int; hi : int }
+type lead =
+  | Value_of of int
+  | Holder of { p : int; value : int option; lo : int; hi : int }
+  | Within of { p1 : int; p2 : int; w1 : int; thing : int; lo : int; hi : int }
+      (** x is the value of [thing]'s p2, a pair within p1 (Cepheus.within) whose p1 the question fixes to w1: the
+          things of w1 in the order of p2, read off the pair from the cursor on (a page of one client's invoices by
+          date), within the question's ranges on x, lo to hi *)
+
+(* a page of one group over its pair; false: the plain index path (the tests compare both); [paired]: the pages read
+   so, for the tests *)
+let pairs = ref true
+let paired = Atomic.make 0
 
 (* [fold window ~seq ~init ~step ~merge]: the question's bindings (an env of index words a binding), within a window
    when one is given. [project env]: the row of a binding. [var col]: the
@@ -578,8 +589,41 @@ let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : sou
           if first.desc then (let n = !k in for i = 0 to (n / 2) - 1 do let t = ws.(i) in ws.(i) <- ws.(n - 1 - i); ws.(n - 1 - i) <- t done);
           ((if !k = 0 then None else Some (Words (x, ws))), !k, !ended))
     in
+    (* the things of a group in the order of p2 from the cursor on (a pair, Store.pair_from): a window is the next m
+       of them and those tied with the m-th (the same p2 value: their rows may come in either order), the question
+       asked with the thing one of them; every row of a later window comes after every row of an earlier one *)
+    let within p1 p2 w1 thing lo hi =
+      let ty = typs.(first.col) in
+      let from =
+        match o.after with
+        | Some a -> (match cell v ty "" a.(first.col) with W w -> w | _ -> assert false)
+        | None -> if first.desc then max_int else min_int
+      in
+      let from = if first.desc then min from hi else max from lo in
+      Atomic.incr paired;
+      let w2 = ref 0 in
+      let next = Store.pair_from v ~p1 ~p2 w1 ~desc:first.desc ~from w2 in
+      let pend = ref (-1) and pw = ref 0 in
+      let pull () =
+        let e = next () in
+        if e < 0 || (if first.desc then !w2 < lo else !w2 > hi) then pend := -1 else (pend := e; pw := !w2)
+      in
+      pull ();
+      windowed (fun m ->
+          let ws = ref [] and k = ref 0 and last = ref 0 in
+          while !pend >= 0 && (!k < m || !pw = !last) do
+            ws := !pend :: !ws;
+            last := !pw;
+            incr k;
+            pull ()
+          done;
+          let ws = Array.of_list !ws in
+          Array.sort compare ws;
+          ((if !k = 0 then None else Some (Words (thing, ws))), !k, !pend < 0))
+    in
     let index (x, l) =
       match l with
+      | Within { p1; p2; w1; thing; lo; hi } -> within p1 p2 w1 thing lo hi
       | Holder { p; value; lo; hi } -> holders x p value lo hi
       | Value_of p ->
         if typs.(first.col) <> Ttext then ranges (x, p)
@@ -601,6 +645,37 @@ let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : sou
    facts; else, x a thing, a property of a pattern whose thing is x, the one with the fewest facts (of its constant
    value when it has one, as a tenant's things): every row's x holds it, and lies in the question's ranges on x *)
 let lead (v : Store.view) (q : Query.t) x =
+  let ranged () =
+    List.fold_left
+      (fun (lo, hi) (y, a, b) ->
+        match y = x, Store.word v a, Store.word v b with
+        | true, Some a, Some b -> Stdlib.max lo a, Stdlib.min hi b
+        | _ -> lo, hi)
+      (min_int, max_int) q.ranges
+  in
+  (* x the p2 of a thing i whose p1 is a constant, the pair ready in every run *)
+  let within =
+    if not (!pairs && Schema.has_pairs v.schema) then None
+    else
+      List.find_map
+        (fun (pt : Query.pattern) ->
+          match pt.e, pt.v with
+          | Var i, Var y when y = x && i <> x -> (
+            match Schema.within v.schema pt.p with
+            | Some p1 when Store.pair_ready v ~p1 ~p2:pt.p ->
+              List.find_map
+                (fun (pc : Query.pattern) ->
+                  if pc.p <> p1 || pc.e <> Var i then None
+                  else
+                    let w = match pc.v with Thing c | Val (Value.Link c) -> Some (Query.rep v c) | Val c -> Store.word v c | Var _ -> None in
+                    Option.map (fun w1 -> let lo, hi = ranged () in Within { p1; p2 = pt.p; w1; thing = i; lo; hi }) w)
+                q.where
+            | _ -> None)
+          | _ -> None)
+        q.where
+  in
+  if within <> None then within
+  else
   let by_value =
     List.fold_left
       (fun best (pt : Query.pattern) ->

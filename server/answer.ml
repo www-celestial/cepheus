@@ -261,6 +261,23 @@ let rehash t =
   t.slots <- sl
 
 (* the group of the key in [t.buf]; a new one is made the last, [t.n] one more *)
+(* the group of the key in t.buf, if the table has it *)
+let find_group t =
+  let kw = t.kw and buf = t.buf and keys = t.keys in
+  let m = Array.length t.slots - 1 in
+  let i = ref (key_hash buf 0 kw land m) and g = ref (-2) in
+  while !g = -2 do
+    let s = Array.unsafe_get t.slots !i in
+    if s = 0 then g := -1
+    else begin
+      let o = (s - 1) * kw in
+      let j = ref 0 in
+      while !j < kw && Array.unsafe_get keys (o + !j) = Array.unsafe_get buf !j do incr j done;
+      if !j = kw then g := s - 1 else i := (!i + 1) land m
+    end
+  done;
+  if !g < 0 then None else Some !g
+
 let group t =
   let kw = t.kw and buf = t.buf and keys = t.keys in
   let m = Array.length t.slots - 1 in
@@ -539,6 +556,107 @@ let keep_rows n ~after ~limit ~part ~same =
 let paged = Atomic.make 0
 let ranged = Atomic.make 0
 
+(* Each with Limit k over a declared pair (Cepheus.within): Each's column a variable c, Sort's first key a variable d,
+   and patterns [i, p1, c] and [i, p2, d] with p2 within p1, which every run of the view holds (Store.pair_ready).
+   Then the rows of a group c are those of its things i, and its first k rows are among those of its things of the
+   first p2 values in the order: each group's first k things in that order (and the things tied with the k-th) are
+   read off the pair, and the question is asked with i one of them (a window of the fold, as the index path's). A
+   group whose things gave fewer than k rows (a filter of the question dropped some) and has more takes the next ones,
+   twice as many each time, until it has k rows or none is left. The same rows as the plain join's: every row of a
+   group with a value d past the last things read comes after its k rows found. [use_pairs] false: the plain join
+   (the tests compare both); [pair_each]: the questions answered so, [pair_rounds] their folds, for the tests. *)
+let use_pairs = ref true
+let pair_each = Atomic.make 0
+let pair_rounds = Atomic.make 0
+
+type pair_plan = { p1 : int; p2 : int; thing : int; desc : bool; clo : int; chi : int; dlo : int; dhi : int }
+
+let pair_plan (v : Store.view) (q : Query.t) ~give ~each ~(order : Top.order) =
+  if not (!use_pairs && Schema.has_pairs v.schema && Array.length each = 1 && order.limit > 0) then None
+  else
+    match order.keys with
+    | [] -> None
+    | k0 :: _ ->
+      let c = give.(each.(0)) and d = give.(k0.col) in
+      if c >= q.vars || d >= q.vars || c = d then None
+      else
+        List.find_map
+          (fun (pd : Query.pattern) ->
+            match pd.e, pd.v with
+            | Var i, Var d' when d' = d && i <> c && i <> d -> (
+              match Schema.within v.schema pd.p with
+              | Some p1
+                when List.exists (fun (pc : Query.pattern) -> pc.p = p1 && pc.e = Var i && pc.v = Var c) q.where
+                     && Store.pair_ready v ~p1 ~p2:pd.p ->
+                (* the ranges on c and d, as words *)
+                let range x =
+                  List.fold_left
+                    (fun (lo, hi) (y, a, b) ->
+                      match y = x, Store.word v a, Store.word v b with
+                      | true, Some a, Some b -> Stdlib.max lo a, Stdlib.min hi b
+                      | true, _, _ -> 1, 0
+                      | _ -> lo, hi)
+                    (min_int, max_int) q.ranges
+                in
+                let clo, chi = range c and dlo, dhi = range d in
+                Some { p1; p2 = pd.p; thing = i; desc = k0.desc; clo; chi; dlo; dhi }
+              | _ -> None)
+            | _ -> None)
+          q.where
+
+(* the rounds of a pair plan: [ask ws] the question's state with i one of the things ws (sorted), [rows st c] the rows
+   it holds of group c, [merge] two states *)
+let pair_answer (v : Store.view) (pp : pair_plan) ~k ~ask ~rows ~merge ~init =
+  Atomic.incr pair_each;
+  let groups = Store.pair_groups v ~p1:pp.p1 ~p2:pp.p2 pp.clo pp.chi in
+  let ng = Array.length groups in
+  let cell = ref 0 in
+  let from = if pp.desc then pp.dhi else pp.dlo in
+  let next = Array.map (fun w1 -> Store.pair_from v ~p1:pp.p1 ~p2:pp.p2 w1 ~desc:pp.desc ~from cell) groups in
+  (* each group's next thing (-1: none left) and its p2 value *)
+  let pend_e = Array.make ng (-1) and pend_w = Array.make ng 0 in
+  let pull g =
+    let e = next.(g) () in
+    if e < 0 || (if pp.desc then !cell < pp.dlo else !cell > pp.dhi) then pend_e.(g) <- -1 else (pend_e.(g) <- e; pend_w.(g) <- !cell)
+  in
+  for g = 0 to ng - 1 do pull g done;
+  let out = ref (Array.make (max 16 (ng * k)) 0) and no = ref 0 in
+  (* [need] more things of group g, then those tied with the last *)
+  let take g need =
+    let n = ref 0 and last = ref 0 in
+    while pend_e.(g) >= 0 && (!n < need || pend_w.(g) = !last) do
+      if !no = Array.length !out then (let a = Array.make (2 * !no) 0 in Array.blit !out 0 a 0 !no; out := a);
+      !out.(!no) <- pend_e.(g);
+      incr no;
+      last := pend_w.(g);
+      incr n;
+      pull g
+    done
+  in
+  let fold () =
+    let ws = Array.sub !out 0 !no in
+    no := 0;
+    Array.sort compare ws;
+    Atomic.incr pair_rounds;
+    if Array.length ws = 0 then init () else ask ws
+  in
+  for g = 0 to ng - 1 do take g k done;
+  let st = ref (fold ()) in
+  (* the groups short of k rows that have more things: twice as many each round *)
+  let more = ref 1 in
+  let short () = List.filter (fun g -> pend_e.(g) >= 0 && rows !st groups.(g) < k) (List.init ng Fun.id) in
+  let rec go () =
+    match short () with
+    | [] -> ()
+    | l ->
+      more := 2 * !more;
+      List.iter (fun g -> take g (Stdlib.max 1 (k - rows !st groups.(g)) * !more)) l;
+      st := merge !st (fold ());
+      go ()
+  in
+  go ();
+  !st
+
 (* the state of Each's first k rows of each group, a domain's: its groups' keys in a table (Answer's), each group's
    buffer, the rows each has held at most (charged), and its k-th row at its last cut ([||]: none yet), past which a
    row cannot be one of its first k: one comparison, where most rows of a large group would be pushed and sorted *)
@@ -709,7 +827,20 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           a
         in
         (* the buffers do not depend on the order of the rows: any domain, any order *)
-        let st = fold ~any_order:true ~init ~merge ~step () in
+        let st =
+          match pair_plan v q ~give ~each ~order with
+          | None -> fold ~any_order:true ~init ~merge ~step ()
+          | Some pp ->
+            (* a group's rows held: its buffer's, found by its key (the group's value, then the mask of a question with
+               Optionals, 0: c is a pattern's) *)
+            let rows (st : firsts) c =
+              let t = st.gt in
+              t.buf.(0) <- c;
+              if kw > 1 then t.buf.(1) <- 0;
+              match find_group t with Some g -> st.bufs.(g).n | None -> 0
+            in
+            pair_answer v pp ~k ~init ~merge ~rows ~ask:(fun ws -> fold ~any_order:true ~window:(Top.Words (pp.thing, ws)) ~init ~merge ~step ())
+        in
         (match ticket with Some tk when st.gt.cells > 0 -> charge tk st.gt.cells; st.gt.cells <- 0 | _ -> ());
         let firsts = List.init st.gt.n (fun g -> let b = st.bufs.(g) in if not small then Top.sort_cut mk k b; Array.sub b.a 0 b.n) in
         let all = { Top.a = Array.concat firsts; n = 0 } in

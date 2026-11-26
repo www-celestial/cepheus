@@ -13,6 +13,7 @@ let p_rule = 5
 let p_same = 6
 let p_to = 7
 let p_delete = 8
+let p_within = 9
 let first_prop = 16
 let first_thing = 65536
 let last_thing = (1 lsl 31) - 1
@@ -26,7 +27,8 @@ let system =
      Some { name = "cepheus/rule"; typ = Value.Ttext; many = false; unique = false };
      Some { name = "cepheus/same"; typ = Value.Tlink; many = false; unique = false };
      Some { name = "cepheus/to"; typ = Value.Ttext; many = false; unique = false };
-     Some { name = "cepheus/delete"; typ = Value.Ttext; many = false; unique = false } |]
+     Some { name = "cepheus/delete"; typ = Value.Ttext; many = false; unique = false };
+     Some { name = "cepheus/within"; typ = Value.Tlink; many = false; unique = false } |]
 
 (* ---- links that name a kind: Link(to = "client") ----
    A property's kind is its name before its first '/' (the whole name without one): client/City is of the kind
@@ -67,6 +69,8 @@ type t = {
   rules : (string * string) IM.t;
   rkey : int;
   links : link IM.t;
+  within : int IM.t;  (* p2 -> p1: the declared pairs (p2 cepheus/within p1) *)
+  paired : Bytes.t;  (* by property id: 1 when it is the p1 or the p2 of a declared pair; empty when none *)
   ix : index option Atomic.t;  (* made at the first use, for this table of properties and links *)
 }
 
@@ -76,7 +80,7 @@ let initial =
   let names = ref SM.empty in
   Array.iteri (fun i -> function Some p -> names := SM.add p.name i !names | None -> ()) system;
   { props = Array.append system (Array.make (first_prop - Array.length system) None); names = !names; rules = IM.empty; rkey = 0;
-    links = IM.empty; ix = Atomic.make None }
+    links = IM.empty; within = IM.empty; paired = Bytes.empty; ix = Atomic.make None }
 
 let find s p = if p >= 0 && p < Array.length s.props then Array.unsafe_get s.props p else None
 let by_name s n = SM.find_opt n s.names
@@ -121,6 +125,32 @@ let set_link s p l =
   | None, None -> s
   | Some a, Some b when a = b -> s
   | _ -> { s with links = (match l with Some l -> IM.add p l s.links | None -> IM.remove p s.links); ix = Atomic.make None }
+
+(* ---- pairs: p2 cepheus/within p1 ----
+   A declared pair: the things of p1's values in the order of their p2 values, an index of two properties (Store,
+   run format 10). p1 and p2 one-valued properties of one kind, p2 of an inline type. *)
+let within s p2 = if IM.is_empty s.within then None else IM.find_opt p2 s.within
+let has_pairs s = not (IM.is_empty s.within)
+let pairs s = IM.bindings s.within
+let iter_pairs s f = if not (IM.is_empty s.within) then IM.iter f s.within
+let[@inline] paired s p = p >= 0 && p < Bytes.length s.paired && Bytes.unsafe_get s.paired p <> '\000'
+
+let set_within s p2 p1 =
+  match IM.find_opt p2 s.within, p1 with
+  | None, None -> s
+  | Some a, Some b when a = b -> s
+  | _ ->
+    let within = match p1 with Some p1 -> IM.add p2 p1 s.within | None -> IM.remove p2 s.within in
+    let paired =
+      if IM.is_empty within then Bytes.empty
+      else begin
+        let top = IM.fold (fun p2 p1 m -> max m (max p1 p2)) within 0 in
+        let b = Bytes.make (top + 1) '\000' in
+        IM.iter (fun p2 p1 -> Bytes.set b p1 '\001'; Bytes.set b p2 '\001') within;
+        b
+      end
+    in
+    { s with within; paired }
 
 let make_index s =
   let n = Array.length s.props in

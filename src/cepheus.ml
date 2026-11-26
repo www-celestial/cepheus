@@ -99,6 +99,23 @@ let rec link_to db links =
       | Error (Conflict _) -> link_to db links (* another writer named a kind for one of them meanwhile: read again *)
       | Error e -> Error e))
 
+(* [within db [ (date, client) ]]: each p2 ordered within its p1, in one group (Resolve.within_ops); a declaration
+   that lost a race is read again *)
+let rec within db pairs =
+  let v = view db in
+  let name p = match Schema.find v.schema p with Some d -> d.name | None -> string_of_int p in
+  match List.find_opt (fun p -> Schema.find v.schema p = None || Schema.is_system p) (List.concat_map (fun (p2, p1) -> [ p2; p1 ]) pairs) with
+  | Some p -> Error (Invalid (Printf.sprintf "no property %d" p))
+  | None -> (
+    match Resolve.within_ops (fun p2 -> Option.map (fun p1 -> p1, name p1) (Schema.within v.schema p2)) (List.map (fun (p2, p1) -> p2, name p2, p1, name p1) pairs) with
+    | Error m -> Error (Invalid m)
+    | Ok [] -> Ok ()
+    | Ok ops -> (
+      match write db ~why:"cepheus: within" ops with
+      | Ok _ -> Ok ()
+      | Error (Conflict _) -> within db pairs (* another writer declared one of them meanwhile: read again *)
+      | Error e -> Error e))
+
 let rec declare db props =
   match Resolve.declare (view db) props with
   | Error m -> Error (Invalid m)

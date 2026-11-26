@@ -60,7 +60,7 @@ let entry t i = if i >= 0 && i < t.count then Array.unsafe_get t.items i else No
 
 (* ---- kinds: declared by the program, the same for every database it reaches ---- *)
 
-type field = { fname : string; pname : string; typ : Value.typ; many : bool; unique : bool; link : Schema.link option }
+type field = { fname : string; pname : string; typ : Value.typ; many : bool; unique : bool; link : Schema.link option; within : string option }
 
 type kind = {
   kname : string;
@@ -75,7 +75,7 @@ type kind = {
 let kinds : kind table = table ()
 let properties : (kind * int) table = table ()
 let kind_key = C.keys [| "kind" |]
-let type_keys = C.keys [| "Type"; "Scale"; "Unique"; "Many"; "To"; "OnDelete" |]
+let type_keys = C.keys [| "Type"; "Scale"; "Unique"; "Many"; "To"; "OnDelete"; "Within" |]
 
 let valid_kind_name s =
   s <> "" && String.for_all (fun c -> (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c = '_' || c = '-') s
@@ -108,7 +108,7 @@ let kind ctx a =
         if fname = "kind" then C.panic ctx (name ^ ": kind is the name the package keeps for itself: name the field otherwise");
         let d = map_of ctx name descs.(i) in
         match C.fields type_keys d with
-        | [| Text t; scale; unique; many; to_; od |] ->
+        | [| Text t; scale; unique; many; to_; od; within |] ->
           let pname = kname ^ "/" ^ fname in
           (* Link(to = "client", onDelete = "cascade"): the kind its things are of, by its name *)
           let link =
@@ -132,7 +132,16 @@ let kind ctx a =
           in
           let typ = typ_of_text ctx name t scale in
           if link <> None && typ <> Value.Tlink then C.panic ctx (Printf.sprintf "%s: %s: to is for a link, as Link(to = \"client\")" name pname);
-          { fname; pname; typ; unique = bool ctx name unique; many = bool ctx name many; link }
+          (* Date(within = "Client"): another field of the kind, by its name *)
+          let within =
+            match within with
+            | C.Missing -> None
+            | C.Text f when f <> fname && Array.mem f names -> Some (kname ^ "/" ^ f)
+            | C.Text f ->
+              C.panic ctx (Printf.sprintf "%s: %s is within %S, which is not another field of the kind %s: Date(within = \"Client\")" name pname f kname)
+            | v -> C.need ctx name "the name of another field of the kind for within, as Date(within = \"Client\")" v
+          in
+          { fname; pname; typ; unique = bool ctx name unique; many = bool ctx name many; link; within }
         | _ -> C.need ctx name "a type of property, as cepheus.Text()" descs.(i))
       names
   in
@@ -156,6 +165,9 @@ let property_of ctx name = function
   | v -> C.need ctx name "a property of a kind, as Client.City" v
 
 let props_of (k : kind) = Array.to_list (Array.map (fun f -> { Schema.name = f.pname; typ = f.typ; many = f.many; unique = f.unique }) k.fields)
+
+(* the fields of a kind ordered within another: (property's name, the other's) *)
+let withins_of (k : kind) = Array.to_list (Array.of_seq (Seq.filter_map (fun f -> Option.map (fun w -> f.pname, w) f.within) (Array.to_seq k.fields)))
 
 (* the links of a kind that name a kind: (property's name, link) *)
 let links_of (k : kind) = Array.to_list (Array.of_seq (Seq.filter_map (fun f -> Option.map (fun l -> f.pname, l) f.link) (Array.to_seq k.fields)))
@@ -428,6 +440,7 @@ let connect ctx a =
   in
   Option.iter (C.need_read ctx) ca;
   let props = List.concat_map props_of (Array.to_list ks) and links = List.concat_map links_of (Array.to_list ks) in
+  let withins = List.concat_map withins_of (Array.to_list ks) in
   (* the handshake, the declarations (a write: an fsync) and the Opens wait at the server: in a domain of their own,
      the calling fiber parked meanwhile, so that the program's other fibers run (a silent peer holds only this call,
      for the handshake's time) *)
@@ -448,7 +461,7 @@ let connect ctx a =
     let fail code m = Client.close cl; refuse code "%s" m in
     (* declare reads the schema at the server, and opens the database to read it here once it wrote *)
     let cdb =
-      match Client.declare ~links cl dbname props with
+      match Client.declare ~links ~withins cl dbname props with
       | Ok (db, _) when db.wants_local -> db
       | Ok _ -> (match Client.open_db cl dbname with Ok d -> d | Error e -> fail e.code e.message)
       | Error e -> fail e.code e.message
@@ -1335,15 +1348,23 @@ let fork ctx a =
     in
     let ks = Array.map (kind_of ctx name) (list_of ctx name a.(1)) in
     let props = List.concat_map props_of (Array.to_list ks) and links = List.concat_map links_of (Array.to_list ks) in
+    let withins = List.concat_map withins_of (Array.to_list ks) in
     let declared =
       match Resolve.declare from props with
       | Error m -> refuse "invalid" "%s" m
       | Ok (ids, ops) -> (
-        (* the links, in the same group: by the id each property has now, in the fork or in this group *)
+        (* the links and the pairs, in the same group: by the id each property has now, in the fork or in this group *)
         let id_of n = List.assoc n (List.combine (List.map (fun (d : Schema.prop) -> d.name) props) ids) in
+        let name_of p = match Schema.find from.schema p with Some d -> d.name | None -> string_of_int p in
         match Resolve.link_ops (Schema.link from.schema) (List.map (fun (n, l) -> id_of n, n, l) links) with
         | Error m -> refuse "invalid" "%s" m
-        | Ok lops -> ops @ lops)
+        | Ok lops -> (
+          match
+            Resolve.within_ops (fun p2 -> Option.map (fun p1 -> p1, name_of p1) (Schema.within from.schema p2))
+              (List.map (fun (n2, n1) -> id_of n2, n2, id_of n1, n1) withins)
+          with
+          | Error m -> refuse "invalid" "%s" m
+          | Ok wops -> ops @ lops @ wops))
     in
     let v =
       match declared with

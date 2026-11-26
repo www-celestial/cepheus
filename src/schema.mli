@@ -22,6 +22,13 @@ val p_delete : int
 (** [cepheus/delete], 8: on a link property that names a kind, what its facts do when the thing they link to stops
     being of that kind: "refuse" (the default), "cascade" or "clear". *)
 
+val p_within : int
+(** [cepheus/within], 9: on a property p2, the property p1 it is ordered within (Date(within = "client")): a link to
+    p1's property thing. The things of each value of p1 in the order of their p2 values are then an index of the runs
+    (run format 10, a section [pairs]): "the 3 latest invoices of each client" reads 3 rows a client. p1 and p2
+    one-valued, of one kind, p2 an inline value (an int, a date, money, a link or a bool). Known to every database, as
+    [cepheus/to]; no group 1 declares it. *)
+
 val first_prop : int
 (** 16: the first id of a property of the application; property ids are below {!first_thing}. *)
 
@@ -82,6 +89,23 @@ val link : t -> int -> link option
 val has_links : t -> bool
 val links : t -> (int * link) list
 val set_link : t -> int -> link option -> t
+
+(** {1 Pairs: an index of two properties} *)
+
+val within : t -> int -> int option
+(** [within s p2]: the p1 that p2 is declared within, if one. *)
+
+val has_pairs : t -> bool
+val pairs : t -> (int * int) list
+(** The declared pairs, (p2, p1), by p2. *)
+
+val iter_pairs : t -> (int -> int -> unit) -> unit
+(** [f p2 p1] for each declared pair, by p2. *)
+
+val paired : t -> int -> bool
+(** Is the property the p1 or the p2 of a declared pair: one test of a byte (a database with none: a length). *)
+
+val set_within : t -> int -> int option -> t
 
 type index = private {
   pkind : int array;  (** by property id: its kind's number, -1 for no property *)

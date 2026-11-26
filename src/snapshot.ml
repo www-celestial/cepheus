@@ -26,12 +26,21 @@
 
 let magic = 0x53485043 (* "CPHS" *)
 
-(* format 9: format 8 and the text order (Prefix); format 8: format 7 and the column order; format 7: the sections
-   coded in blocks by a frame of reference, a page table. Formats 7 and 8 are set aside at open and their groups
+(* format 10: format 9 and the pairs (an index of two properties, Store), a 25th offset a part; format 9: format 8 and
+   the text order (Prefix); format 8: format 7 and the column order; format 7: the sections coded in blocks by a frame
+   of reference, a page table. A run of format 9 is read as it is, without pairs (a view that holds one reads no pair:
+   the plain join answers), until a merge rewrites it; formats 7 and 8 are set aside at open and their groups
    replayed, as formats 5 and 6 (fixed 8-byte value words, the flag of a derived fact in bit 63 in format 6) are set
    aside at open, their groups replayed from the journal, as formats 1 to 4 were *)
-let format = 9
+let format = 10
 let header = 4096
+
+(* for the tests: merges write runs of format 9 (no pairs, 24 offsets a part), as the version before did *)
+let format9 = ref false
+
+(* a part's offsets in a header of that format, and the header's u64 fields *)
+let offsets_of fmt = if fmt = 9 then Store.noffsets9 else Store.noffsets
+let fields_of fmt = 15 + offsets_of fmt + 4 + offsets_of fmt + 2
 
 let name lo hi = Printf.sprintf "%020d-%020d.run" lo hi
 let tmp_suffix = ".tmp"
@@ -907,6 +916,103 @@ let index_of bd p =
 (* the most runs a merge takes: the pass by thing keeps a thing's sources in the bits of an int, two a run *)
 let max_take = 31
 
+(* ---- the pairs of a part (format 10): rows (w1, w2, e) gathered by the pass by thing, sorted, then written ---- *)
+
+(* the rows of a pair in one part, as they come *)
+type prows = { mutable pw1 : int array; mutable pw2 : int array; mutable pe : int array; mutable pn : int }
+
+let prows () = { pw1 = Array.make 64 0; pw2 = Array.make 64 0; pe = Array.make 64 0; pn = 0 }
+
+let prow r w1 w2 e =
+  if r.pn = Array.length r.pw1 then begin
+    let g a = let b = Array.make (2 * r.pn) 0 in Array.blit a 0 b 0 r.pn; b in
+    r.pw1 <- g r.pw1; r.pw2 <- g r.pw2; r.pe <- g r.pe
+  end;
+  r.pw1.(r.pn) <- w1; r.pw2.(r.pn) <- w2; r.pe.(r.pn) <- e;
+  r.pn <- r.pn + 1
+
+(* the order of a pair's rows by (w1, w2, e): they come in thing order, so two stable radix sorts, by w2 then by w1
+   (Knuth, volume 3, 5.2.5), or the comparisons' sort when a key's range passes the ints *)
+let prow_order r =
+  let n = r.pn in
+  let o = Array.init n Fun.id in
+  if not (Store.radix_by (fun j -> Array.unsafe_get r.pw2 j) o && Store.radix_by (fun j -> Array.unsafe_get r.pw1 j) o) then begin
+    Array.iteri (fun i _ -> o.(i) <- i) o;
+    Array.stable_sort
+      (fun a b ->
+        let x = r.pw1.(a) and y = r.pw1.(b) in
+        if x <> y then compare (x : int) y
+        else let x = r.pw2.(a) and y = r.pw2.(b) in if x <> y then compare (x : int) y else compare (r.pe.(a) : int) r.pe.(b))
+      o
+  end;
+  o
+
+(* the room of a pair's tables for at most n rows (and groups), each table's: the groups' values and first rows (Mono
+   headers and bits), the rows' directory (24 bytes a block) and their bits (two fields of at most 63 bits a row) *)
+let ptables n =
+  let b = Store.blocks128 in
+  [ 16 * b n; (b n * Store.pbytes Store.tb 63) + 8; 16 * b (n + 1); (b (n + 1) * Store.pbytes Store.tb 63) + 8; 24 * b n;
+    (b n * 2 * Store.pbytes Store.tb 63) + 8 ]
+
+let proom caps = 8 + (8 * Store.pair_words * Array.length caps) + Array.fold_left (fun m n -> List.fold_left (fun m x -> m + Store.al x) m (ptables n)) 0 caps
+
+(* A part's pairs section at [at], of [size] bytes: the count, an entry of 12 words a pair, then each pair's tables
+   (laid out by its rows), the rest of the room zeros *)
+let pairs_out o ~at ~size (ps : (int * int * prows) array) =
+  let pos = ref at in
+  let take bytes = let s = stream o !pos bytes in pos := Store.al (!pos + bytes); s in
+  let hs = take (8 + (8 * Store.pair_words * Array.length ps)) in
+  put64 hs (Array.length ps);
+  let sc = { sb = Bytes.create 4096 } in
+  Array.iter
+    (fun (p1, p2, r) ->
+      let n = r.pn in
+      let ord = prow_order r in
+      (* the groups: where w1 changes *)
+      let g = ref 0 in
+      for i = 0 to n - 1 do if i = 0 || r.pw1.(ord.(i)) <> r.pw1.(ord.(i - 1)) then incr g done;
+      let g = !g in
+      let ss = List.map take (ptables (max n g)) in
+      let w1h, w1b, sth, stb, dir, dat = match ss with [ a; b; c; d; e; f ] -> a, b, c, d, e, f | _ -> assert false in
+      List.iter (put64 hs) [ p1; p2; n; g; w1h.pos; w1b.pos; sth.pos; stb.pos; dir.pos; dat.pos; 0; 0 ];
+      let mw = mono w1h w1b and ms = mono sth stb in
+      for i = 0 to n - 1 do
+        if i = 0 || r.pw1.(ord.(i)) <> r.pw1.(ord.(i - 1)) then (mono_add mw r.pw1.(ord.(i)); mono_add ms i)
+      done;
+      mono_add ms n;
+      mono_cut mw;
+      mono_cut ms;
+      (* the rows, 128 a block: each column from its least value, in as many bits as its range needs *)
+      let off = ref 0 in
+      let j = ref 0 in
+      while !j < n do
+        let m = min Store.tb (n - !j) in
+        let lo2 = ref max_int and hi2 = ref min_int and lo3 = ref max_int and hi3 = ref min_int in
+        for i = !j to !j + m - 1 do
+          let a = r.pw2.(ord.(i)) and e = r.pe.(ord.(i)) in
+          if a < !lo2 then lo2 := a; if a > !hi2 then hi2 := a; if e < !lo3 then lo3 := e; if e > !hi3 then hi3 := e
+        done;
+        let ww = Pack.width (!hi2 - !lo2) and we = Pack.width (!hi3 - !lo3) in
+        let b2 = Store.pbytes m ww and b3 = Store.pbytes m we in
+        room sc (b2 + b3 + 8);
+        Bytes.fill sc.sb 0 (b2 + b3 + 8) '\000';
+        for i = 0 to m - 1 do
+          Pack.put sc.sb (i * ww) (r.pw2.(ord.(!j + i)) - !lo2) ww;
+          Pack.put sc.sb ((8 * b2) + (i * we)) (r.pe.(ord.(!j + i)) - !lo3) we
+        done;
+        put64 dir !lo2;
+        put64 dir !lo3;
+        put64 dir ((!off lsl 16) lor (ww lsl 8) lor we);
+        put_sub dat sc.sb 0 (b2 + b3);
+        off := !off + b2 + b3;
+        j := !j + m
+      done;
+      List.iter close ss)
+    ps;
+  close hs;
+  if !pos > at + size then invalid_arg "Snapshot.merge: the pairs are longer than their room";
+  close (stream o !pos (at + size - !pos))
+
 (* The merge of [v]'s delta and its [take] newest runs into one run at [level], with [pos] the journal position replay
    starts from (pos.next <= v.group + 1). Written under a temporary name and forced (also on the way, while [busy]
    says clients write; with [~sync:false], not at the end: [force] does it later, or [install]); [install] gives it its
@@ -972,8 +1078,15 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
   let a_vb, a_vw, a_vm = vcap ba idx_a np and t_vb, t_vw, t_vm = vcap bt idx_t t_np in
   let hbits = Store.hbits_for ns in
   let caps_a = Array.init np (fun p -> ba.rows.(p)) and caps_t = Array.init t_np (fun p -> bt.rows.(p)) in
+  (* the declared pairs (p2, p1), by p2, and a bound of each one's rows: a thing whose pair the run changes holds a
+     fact of p1 or p2 in the new run *)
+  let pairs = Array.of_list (List.filter (fun (p2, p1) -> p1 < np && p2 < np) (Schema.pairs v.schema)) in
+  let pcap = Array.map (fun (p2, p1) -> ba.rows.(p1) + ba.rows.(p2) + bt.rows.(p1) + bt.rows.(p2)) pairs in
   let ra = Store.rooms ~n_cap:a_ncap ~k_cap:a_kcap ~np ~vb_cap:a_vb ~vm_blocks:a_vm ~ns ~sblob:!sblob ~ne ~caps:caps_a in
   let rt = Store.rooms ~n_cap:t_ncap ~k_cap:t_kcap ~np:t_np ~vb_cap:t_vb ~vm_blocks:t_vm ~ns:0 ~sblob:0 ~ne:t_ne ~caps:caps_t in
+  let fmt = if !format9 then 9 else format in
+  let pairs = if fmt = 9 then [||] else pairs and pcap = if fmt = 9 then [||] else pcap in
+  let ra = { ra with pairs = (if fmt = 9 then 0 else proom pcap) } and rt = { rt with pairs = (if fmt = 9 then 0 else proom (if bottom then Array.map (fun _ -> 0) pcap else pcap)) } in
   let la =
     Store.layout ~at:0 ~n:0 ~ne ~k:0 ~k_cap:a_kcap ~np ~ns ~sblob:!sblob ~hbits ~vb_cap:a_vb ~vwords:a_vw ~vm_blocks:a_vm ra ()
   in
@@ -1015,11 +1128,44 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
       (stream o lt.o_tdir (8 * (Store.blocks128 t_kcap + 1))) (stream o lt.o_tdata rt.tdata)
   in
   let na = ref 0 and nt = ref 0 in
+  (* the pairs: each paired property's slot, its value added and whether it is retracted for the thing under way *)
+  let npair = Array.length pairs in
+  let slot = Array.make (max 1 np) (-1) and nslot = ref 0 in
+  Array.iter (fun (p2, p1) -> List.iter (fun p -> if slot.(p) < 0 then (slot.(p) <- !nslot; incr nslot)) [ p1; p2 ]) pairs;
+  let a_has = Bytes.make (max 1 !nslot) '\000' and a_val = Array.make (max 1 !nslot) 0 and t_has = Bytes.make (max 1 !nslot) '\000' in
+  let noted = ref false in
+  let pa = Array.map (fun _ -> prows ()) pairs and pt = Array.map (fun _ -> prows ()) pairs in
+  (* the state the run rests on: its pairs' values below it *)
+  let under = if bottom || npair = 0 then None else Some (Store.of_runs ~schema:v.schema ~group:lo ~next_e:v.next_e (Array.sub rs take (nr - take))) in
+  let pairs_of e =
+    Array.iteri
+      (fun j (p2, p1) ->
+        let s1 = slot.(p1) and s2 = slot.(p2) in
+        if Bytes.get a_has s1 <> '\000' || Bytes.get t_has s1 <> '\000' || Bytes.get a_has s2 <> '\000' || Bytes.get t_has s2 <> '\000' then begin
+          let lo1, lo2 = match under with None -> None, None | Some b -> Store.first_value b e p1, Store.first_value b e p2 in
+          let hi s l = if Bytes.get a_has s <> '\000' then Some a_val.(s) else if Bytes.get t_has s <> '\000' then None else l in
+          let hi1 = hi s1 lo1 and hi2 = hi s2 lo2 in
+          if lo1 <> hi1 || lo2 <> hi2 then begin
+            (match lo1, lo2 with Some a, Some b -> prow pt.(j) a b e | _ -> ());
+            match hi1, hi2 with Some a, Some b -> prow pa.(j) a b e | _ -> ()
+          end
+        end)
+      pairs;
+    Bytes.fill a_has 0 (Bytes.length a_has) '\000';
+    Bytes.fill t_has 0 (Bytes.length t_has) '\000';
+    noted := false
+  in
   match
     disk.truncate fd 0;
     (* ---- by thing: the rank tables, the blocks of 128 things held, their directory ---- *)
-    let emit_a e p w d = row ta e p w d
-    and emit_t e p w d = if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below"; row tt e p w d in
+    let emit_a e p w d =
+      if npair > 0 && slot.(p) >= 0 then (Bytes.set a_has slot.(p) '\001'; a_val.(slot.(p)) <- w; noted := true);
+      row ta e p w d
+    and emit_t e p w d =
+      if bottom then invalid_arg "Snapshot.merge: a retraction with nothing below";
+      if npair > 0 && slot.(p) >= 0 then (Bytes.set t_has slot.(p) '\001'; noted := true);
+      row tt e p w d
+    in
     (* a fact whose state is [f] in the new view and [b] below the merged runs (0 absent, 1 asserted, 2 derived) *)
     let out e p w f b =
       if f <> b then begin
@@ -1050,7 +1196,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
         (* the large group's rows alone, as they are *)
         for r = b0 to !bi - 1 do
           let i = Bulk.row bulk r in
-          row ta e (Bulk.prop bulk i) (Bulk.word bulk i) (Bulk.derived bulk i)
+          emit_a e (Bulk.prop bulk i) (Bulk.word bulk i) (Bulk.derived bulk i)
         done
       else if !nh = 0 && nb = 0 && Option.is_some td then
         (* the delta alone: its entries, in (p, w) order, as they are *)
@@ -1087,7 +1233,8 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
             go rest
         in
         go (List.sort compare !entries)
-      end
+      end;
+      if !noted then pairs_of e
     done;
     if !bi <> bulk.n then invalid_arg "Snapshot.merge: a fact of the large group is past the things";
     tblocks_end ta ne;
@@ -1281,6 +1428,11 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
     let tz = stream o lt.o_tord rt.tord in
     for _ = 0 to t_np do put64 tz 0 done;
     close tz;
+    (* ---- the pairs (format 10): each declared pair's rows of the part, sorted ---- *)
+    if fmt >= 10 then begin
+      pairs_out o ~at:la.o_pairs ~size:ra.pairs (Array.mapi (fun j (p2, p1) -> p1, p2, pa.(j)) pairs);
+      pairs_out o ~at:lt.o_pairs ~size:rt.pairs (Array.mapi (fun j (p2, p1) -> p1, p2, pt.(j)) pairs)
+    end;
     if Hashtbl.length o.open_pages <> 0 then invalid_arg "Snapshot.merge: a page was left unwritten";
     flush o;
     (* the page table, the header, and the file forced *)
@@ -1292,11 +1444,13 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
     disk.pwrite fd (header + (o.next * Pages.size)) table 0 (8 * npages);
     let h = Bytes.make header '\000' in
     Bytes.set_int32_le h 0 (Int32.of_int magic);
-    Bytes.set_int32_le h 4 (Int32.of_int format);
+    Bytes.set_int32_le h 4 (Int32.of_int fmt);
     Bytes.blit_string id 0 h 8 16;
+    (* format 9: without the pairs' offset (its section empty, at the part's end) *)
+    let offs (l : Store.base) = if fmt >= 10 then Store.offsets l else List.filteri (fun i _ -> i <> Store.noffsets - 2) (Store.offsets l) in
     let fields =
       [ v.group; lo; level; v.next_e; pos.segment; pos.offset; pos.next; s0; !na; ne; ta.things; np; ns; !sblob; hbits ]
-      @ Store.offsets la @ [ !nt; t_ne; tt.things; t_np ] @ Store.offsets lt @ [ len; o.next ]
+      @ offs la @ [ !nt; t_ne; tt.things; t_np ] @ offs lt @ [ len; o.next ]
     in
     List.iteri (fun k x -> Bytes.set_int64_le h (24 + (8 * k)) (Int64.of_int x)) fields;
     let e = 24 + (8 * List.length fields) in
@@ -1353,20 +1507,21 @@ let check_and_build disk dir (lo0, hi0, file) id =
     let h = Bytes.create header in
     disk.pread fd 0 h 0 header;
     if u32 h 0 <> magic then bad "not a run";
-    let nfields = 15 + Store.noffsets + 4 + Store.noffsets + 2 in
-    let e = 24 + (8 * nfields) in
     let fmt = u32 h 4 in
-    if fmt <> format then bad "an earlier format (%d), the journal is replayed" fmt;
+    if fmt <> format && fmt <> 9 then bad "an earlier format (%d), the journal is replayed" fmt;
+    let noffsets = offsets_of fmt in
+    let nfields = fields_of fmt in
+    let e = 24 + (8 * nfields) in
     if u32 h (e + 4) <> Crc32c.bytes h 0 (e + 4) then bad "its header does not check";
     if Bytes.sub_string h 8 16 <> id then bad "a run of another database";
     let g k = Int64.to_int (Bytes.get_int64_le h (24 + (8 * k))) in
     let hi = g 0 and lo = g 1 and level = g 2 and next_e = g 3 and seg = g 4 and off = g 5 and next = g 6 and s0 = g 7 in
     let an = g 8 and ane = g 9 and ak = g 10 and anp = g 11 and ans = g 12 and asb = g 13 and hbits = g 14 in
-    let aoffs = List.init Store.noffsets (fun i -> g (15 + i)) in
-    let tbase = 15 + Store.noffsets in
+    let aoffs = List.init noffsets (fun i -> g (15 + i)) in
+    let tbase = 15 + noffsets in
     let tn = g tbase and tne = g (tbase + 1) and tk = g (tbase + 2) and tnp = g (tbase + 3) in
-    let toffs = List.init Store.noffsets (fun i -> g (tbase + 4 + i)) in
-    let len = g (tbase + 4 + Store.noffsets) and phys = g (tbase + 5 + Store.noffsets) in
+    let toffs = List.init noffsets (fun i -> g (tbase + 4 + i)) in
+    let len = g (tbase + 4 + noffsets) and phys = g (tbase + 5 + noffsets) in
     if lo <> lo0 || hi <> hi0 then bad "its groups are not those of its name";
     (* level 0 is a change's provisional run (Engine), whose state is no group's: never named *)
     if level < 1 then bad "its level is 0, a provisional run's";
@@ -1376,8 +1531,8 @@ let check_and_build disk dir (lo0, hi0, file) id =
        || (ans > 0 && 1 lsl hbits < 2 * ans)
     then bad "bad counts";
     let mono_offs l = let rec ok = function a :: (b :: _ as r) -> a <= b && ok r | _ -> true in ok l in
-    if not (mono_offs (aoffs @ toffs)) || List.nth toffs 0 <> List.nth aoffs (Store.noffsets - 1)
-       || List.nth toffs (Store.noffsets - 1) <> len
+    if not (mono_offs (aoffs @ toffs)) || List.nth toffs 0 <> List.nth aoffs (noffsets - 1)
+       || List.nth toffs (noffsets - 1) <> len
     then bad "its sections are out of order";
     if next < 1 || next > hi + 1 then bad "its journal position is after its group";
     let npages = Pages.pages len in
@@ -1545,6 +1700,52 @@ let check_and_build disk dir (lo0, hi0, file) id =
         done)
       [ a, "its additions"; t, "its retractions" ];
     if a.ns > 0 then mono (fun i -> Store.safe (fun b i -> Store.soff b i) a i) a.ns a.sblob "the text offsets";
+    (* the pairs (format 10): their count and entries within the section; each pair's tables within it, in order;
+       its groups' values strictly increasing, their first rows from 0 to its rows; its row blocks within its data *)
+    List.iter
+      (fun ((b : Store.base), what) ->
+        let size = b.len - b.o_pairs in
+        if fmt >= 10 then begin
+          if size < 8 then bad "the pairs of %s are out of their room" what;
+          let q = Store.safe Store.i64 b b.o_pairs in
+          if q < 0 || q > Schema.first_thing || 8 + (8 * Store.pair_words * q) > size then bad "the pairs of %s are out of their room" what;
+          let prev = ref (b.o_pairs + 8 + (8 * Store.pair_words * q)) and last_p2 = ref (-1) in
+          for k = 0 to q - 1 do
+            let x = b.o_pairs + 8 + (8 * Store.pair_words * k) in
+            let g i = Store.safe Store.i64 b (x + (8 * i)) in
+            let p1 = g 0 and p2 = g 1 and n = g 2 and gs = g 3 in
+            let pf fmt = Printf.ksprintf (fun m -> bad "the pair %d within %d of %s %s" p2 p1 what m) fmt in
+            if p1 < Schema.first_prop || p2 < Schema.first_prop || p1 >= Schema.first_thing || p2 >= Schema.first_thing || p1 = p2 || p2 <= !last_p2 then pf "names no pair";
+            last_p2 := p2;
+            if n < 0 || gs < 0 || gs > n || (n = 0) <> (gs = 0) || n > Schema.last_thing then pf "has bad counts";
+            let tables = List.init 6 (fun i -> g (4 + i)) and rooms = ptables (max n gs) in
+            List.iter2
+              (fun at r ->
+                if at < !prev || at land 7 <> 0 || at + r > b.len then pf "is out of its room";
+                prev := Store.al (at + r))
+              tables rooms;
+            if n > 0 then begin
+              let w1h = g 4 and w1b = g 5 and sth = g 6 and stb = g 7 and dir = g 8 and data = g 9 in
+              if not (Store.check_offsets b sth stb gs n) then pf "has its groups' rows out of order";
+              let w = ref (Store.cmono b w1h w1b 0) in
+              for i = 1 to gs - 1 do
+                let x = Store.cmono b w1h w1b i in
+                if x <= !w then pf "has its groups out of order";
+                w := x
+              done;
+              let room = List.nth rooms 5 and off = ref 0 in
+              for j = 0 to Store.blocks128 n - 1 do
+                let h = Store.ci64 b (dir + (24 * j) + 16) in
+                let m = min Store.tb (n - (j lsl 7)) and ww = (h lsr 8) land 0xFF and we = h land 0xFF in
+                if h lsr 16 <> !off || ww > 63 || we > 63 then pf "has its rows' blocks out of order";
+                off := !off + Store.pbytes m ww + Store.pbytes m we;
+                if !off > room then pf "has its rows out of their room"
+              done;
+              ignore data
+            end
+          done
+        end)
+      [ a, "its additions"; t, "its retractions" ];
     { Store.a = Store.ready a; t = Store.ready t; lo; hi; level; s0 }, next_e, { Journal.segment = seg; offset = off; next }
   with
   | r -> r
@@ -1618,7 +1819,7 @@ let file_page disk path k =
   let h = Bytes.create header in
   disk.pread fd 0 h 0 header;
   let g i = Int64.to_int (Bytes.get_int64_le h (24 + (8 * i))) in
-  let base = 15 + Store.noffsets + 4 + Store.noffsets in
+  let base = fields_of (u32 h 4) - 2 in
   let phys = g (base + 1) in
   let b = Bytes.create 8 in
   disk.pread fd (header + (phys * Pages.size) + (8 * k)) b 0 8;
@@ -1631,7 +1832,7 @@ let file_pages disk path =
   Fun.protect ~finally:(fun () -> disk.close fd) @@ fun () ->
   let h = Bytes.create header in
   disk.pread fd 0 h 0 header;
-  Int64.to_int (Bytes.get_int64_le h (24 + (8 * (15 + Store.noffsets + 4 + Store.noffsets + 1))))
+  Int64.to_int (Bytes.get_int64_le h (24 + (8 * (fields_of (u32 h 4) - 1))))
 
 (* Every page of a run file read and checked against its CRC, in the file's order, by reads of up to 64 pages: for
    cepheus verify, on a run larger than the cache (check_and_build reads and checks a smaller one whole). After
@@ -1642,7 +1843,7 @@ let check_pages disk dir file =
   let h = Bytes.create header in
   disk.pread fd 0 h 0 header;
   let g k = Int64.to_int (Bytes.get_int64_le h (24 + (8 * k))) in
-  let base = 15 + Store.noffsets + 4 + Store.noffsets in
+  let base = fields_of (u32 h 4) - 2 in
   let len = g base and phys = g (base + 1) in
   let npages = Pages.pages len in
   let table = Bytes.create (8 * npages) in

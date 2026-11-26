@@ -862,3 +862,43 @@ defn isWindowRefusals()
   bug.Assert(after.Error.Code == "invalid" and text.Contains("Each takes no After", after.Error.Message), "Each with After: $(after)")
   watched.Error.Code == "invalid" and text.Contains("a watch has no windows", watched.Error.Message)
 end
+
+(* ---- an index of two fields: within ---- *)
+
+Buyer = cepheus.Kind("buyer", {Name: cepheus.Text()})
+Receipt = cepheus.Kind("receipt", {Buyer: cepheus.Link(to = "buyer"), Date: cepheus.Date(within = "Buyer"), Total: cepheus.Money(2)})
+
+defn receipts()
+  (** A fork with two buyers and five receipts, the dates of one buyer's out of order. *)
+  t = cepheus.Fork(cepheus.Empty, [Buyer, Receipt])?
+  ada = cepheus.Insert(Buyer, {Name: "Ada"}, t)?
+  bo = cepheus.Insert(Buyer, {Name: "Bo"}, t)?
+  cepheus.Insert(Receipt, {Buyer: ada, Date: 300, Total: 3}, t)?
+  cepheus.Insert(Receipt, {Buyer: ada, Date: 100, Total: 1}, t)?
+  cepheus.Insert(Receipt, {Buyer: bo, Date: 200, Total: 20}, t)?
+  cepheus.Insert(Receipt, {Buyer: ada, Date: 200, Total: 2}, t)?
+  cepheus.Insert(Receipt, {Buyer: bo, Date: 100, Total: 10}, t)?
+  result.Ok({Db: t, Ada: ada, Bo: bo})
+end
+
+defn isWithinGivesTheLatestOfEach()
+  b = receipts()?
+  (* the 2 latest receipts of each buyer: LATERAL (... ORDER BY date DESC LIMIT 2) *)
+  rows = cepheus.Find(4, (c, i, d, t) -> {Where: [[i, Receipt.Buyer, c], [i, Receipt.Date, d], [i, Receipt.Total, t]], Give: {Buyer: c, Date: d, Total: t}, Sort: [cepheus.Desc(d)], Limit: 2, Each: [c]}, b.Db)?
+  value.Equal(rows, [{Buyer: b.Ada, Date: 300.0, Total: 3.0}, {Buyer: b.Ada, Date: 200.0, Total: 2.0}, {Buyer: b.Bo, Date: 200.0, Total: 20.0}, {Buyer: b.Bo, Date: 100.0, Total: 10.0}])
+end
+
+defn isWithinGivesAPageOfOne()
+  b = receipts()?
+  ada = b.Ada
+  first = cepheus.Find(3, (i, d, t) -> {Where: [[i, Receipt.Buyer, ada], [i, Receipt.Date, d], [i, Receipt.Total, t]], Give: {Date: d, Total: t}, Sort: [d], Limit: 2}, b.Db)?
+  next = cepheus.Find(3, (i, d, t) -> {Where: [[i, Receipt.Buyer, ada], [i, Receipt.Date, d], [i, Receipt.Total, t]], Give: {Date: d, Total: t}, Sort: [d], Limit: 2, After: first[2]}, b.Db)?
+  value.Equal(first, [{Date: 100.0, Total: 1.0}, {Date: 200.0, Total: 2.0}]) and value.Equal(next, [{Date: 300.0, Total: 3.0}])
+end
+
+Note = cepheus.Kind("note", {Tags: cepheus.Text(many = true), Date: cepheus.Date(within = "Tags")})
+
+defn isWithinRefusesAFieldOfManyValues()
+  r = cepheus.Fork(cepheus.Empty, [Note])
+  r.Error.Code == "invalid" and text.Contains("note/Date is within note/Tags, which takes many values", r.Error.Message)
+end

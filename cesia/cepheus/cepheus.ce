@@ -10,20 +10,26 @@ use std/result
 (** A text property: a field of a kind. unique: no two things share a value; many: a list of values.
 
       Text().Type --> "text" *)
-Text(unique = false, many = false) = {Type: "text", Unique: unique, Many: many}
+Text(unique = false, many = false) = {Type: "text", Unique: unique, Many: many, Within: missing}
 
 (** A whole number of 63 bits. *)
-Int(unique = false, many = false) = {Type: "int", Unique: unique, Many: many}
+Int(unique = false, many = false, within = missing) = {Type: "int", Unique: unique, Many: many, Within: within}
 
 (** A 64-bit float. *)
-Float(unique = false, many = false) = {Type: "float", Unique: unique, Many: many}
+Float(unique = false, many = false) = {Type: "float", Unique: unique, Many: many, Within: missing}
 
 (** true or false. *)
-Bool(unique = false, many = false) = {Type: "bool", Unique: unique, Many: many}
+Bool(unique = false, many = false, within = missing) = {Type: "bool", Unique: unique, Many: many, Within: within}
 
 (** An instant, as the seconds since 1970 in UTC that sys.Now gives, kept to the millisecond: below 4.6e15 s either
-    way, so that its milliseconds are an Int. *)
-Date(unique = false, many = false) = {Type: "date", Unique: unique, Many: many}
+    way, so that its milliseconds are an Int. within, the name of another field of the kind (one value each): the
+    database keeps the things of each value of that field in the order of this one, an index of two fields, as
+    PostgreSQL's index on (client, date): "the 3 latest invoices of each client" (Each: [c], Limit: 3, sorted by the
+    date) reads 3 rows a client, a page of one client's invoices by date reads its page. Int, Bool, Money and Link take
+    it too; a field of many values, a Text or a Float do not.
+
+      Invoice = Kind("invoice", {Client: Link(to = "client"), Date: Date(within = "Client"), Total: Money(2)}) *)
+Date(unique = false, many = false, within = missing) = {Type: "date", Unique: unique, Many: many, Within: within}
 
 (** Another thing of the database: its id. to, the name of a kind: the thing must be of that kind, as SQL's foreign
     key: it has a fact of the kind (a field the database holds for it), checked at each write, a thing made in the same
@@ -32,10 +38,10 @@ Date(unique = false, many = false) = {Type: "date", Unique: unique, Many: many}
     the linking thing too, in its own kind, and so on; "clear" retracts the link. Without to, any thing's id.
 
       Line = Kind("line", {Invoice: Link(to = "invoice", onDelete = "cascade"), Price: Money(2)}) *)
-Link(unique = false, many = false, to = missing, onDelete = missing) = {Type: "link", Unique: unique, Many: many, To: to, OnDelete: onDelete}
+Link(unique = false, many = false, to = missing, onDelete = missing, within = missing) = {Type: "link", Unique: unique, Many: many, To: to, OnDelete: onDelete, Within: within}
 
 (** An exact decimal of scale digits after the point, as Money(2) for cents: read as a Float, kept in minor units. *)
-Money(scale, unique = false, many = false) = {Type: "money", Scale: scale, Unique: unique, Many: many}
+Money(scale, unique = false, many = false, within = missing) = {Type: "money", Scale: scale, Unique: unique, Many: many, Within: within}
 
 (** A kind of thing: its name, in small letters, and its fields, each a property of a type. It gives a map of its fields,
     each a property to name in a question (Client.City), and the field kind, which the package keeps for itself. The

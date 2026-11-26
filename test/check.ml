@@ -737,3 +737,41 @@ let eq_diff ?ptyp (v : Store.view) =
     err "missing %s; extra %s" (show (F.diff want !got)) (show (F.diff !got want))
   end;
   !bad, List.rev !errors
+
+(* ---- pairs (Cepheus.within): each group's things in p2's order, by brute force over the facts ---- *)
+
+(* the things of each w1 for the pair p2 within p1, (w2, e) sorted *)
+let pair_groups_of (fl : F.t) (v : Store.view) p1 p2 =
+  let word x = match Store.word v x with Some w -> w | None -> 0 in
+  let one = Hashtbl.create 64 and two = Hashtbl.create 64 in
+  F.iter (fun (e, p, x) -> if p = p1 then Hashtbl.replace one e (word x); if p = p2 then Hashtbl.replace two e (word x)) fl;
+  let g = Hashtbl.create 64 in
+  Hashtbl.iter (fun e w1 -> match Hashtbl.find_opt two e with Some w2 -> Hashtbl.replace g w1 ((w2, e) :: Option.value (Hashtbl.find_opt g w1) ~default:[]) | None -> ()) one;
+  Hashtbl.filter_map_inplace (fun _ l -> Some (List.sort compare l)) g;
+  g
+
+(* every pair the view reads holds: its groups, each group's things in both orders from its start; [what] names the
+   view in a failure; the pairs read *)
+let pairs_hold what (v : Store.view) =
+  let n = ref 0 in
+  let fl = lazy (facts_of_view v) in
+  Schema.iter_pairs v.schema (fun p2 p1 ->
+      if Store.pair_ready v ~p1 ~p2 then begin
+        incr n;
+        let g = pair_groups_of (Lazy.force fl) v p1 p2 in
+        let groups = Store.pair_groups v ~p1 ~p2 min_int max_int in
+        Hashtbl.iter (fun w1 _ -> if not (Array.mem w1 groups) then fail "%s: the group %d of pair %d within %d is not among the groups" what w1 p2 p1) g;
+        Array.iter
+          (fun w1 ->
+            let want = Option.value (Hashtbl.find_opt g w1) ~default:[] in
+            List.iter
+              (fun desc ->
+                let cell = ref 0 in
+                let next = Store.pair_from v ~p1 ~p2 w1 ~desc ~from:(if desc then max_int else min_int) cell in
+                let rec all acc = let e = next () in if e < 0 then List.rev acc else all ((!cell, e) :: acc) in
+                incr checks;
+                if all [] <> (if desc then List.rev want else want) then fail "%s: pair %d within %d, group %d%s differs from the facts" what p2 p1 w1 (if desc then " (down)" else ""))
+              [ false; true ])
+          groups
+      end);
+  !n
