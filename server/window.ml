@@ -94,6 +94,8 @@ let check ~cols ~(typs : int -> Value.typ) ~key ~list (each : int array) (window
 (* The rows of each group in their order: [off.(g)] to [off.(g + 1) - 1] in [rows], by a counting sort of the
    groups of rows 0 to n - 1 (each group's in the order of the rows) *)
 let members n groups (part : int -> int) =
+  if groups <= 1 then ([| 0; n |], Array.init n Fun.id)
+  else
   let off = Array.make (groups + 1) 0 in
   let gs = Array.init n part in
   Array.iter (fun g -> off.(g + 1) <- off.(g + 1) + 1) gs;
@@ -202,6 +204,7 @@ let compute ?start ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> V
          done
        | Running (_, _) -> assert false
        | Rank (k, dense) ->
+         let tie = tie k in
          for g = 0 to groups - 1 do
            let rank = ref 0 and d = ref 0 in
            for p = off.(g) to off.(g + 1) - 1 do
@@ -209,7 +212,7 @@ let compute ?start ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> V
              let q = p - off.(g) in
              (match init wi with
               | I_rank (r0, d0) when q = skip -> rank := r0; d := d0
-              | _ -> if q = 0 || not (tie k rows.(p - 1) i) then (rank := offset + q + 1; incr d));
+              | _ -> if q = 0 || not (tie rows.(p - 1) i) then (rank := offset + q + 1; incr d));
              out.(i) <- Int (if dense then !d else !rank)
            done
          done

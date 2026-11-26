@@ -258,6 +258,10 @@ let find ?timeout v q =
 
 module Question = Question
 
+(* a domain's rows of [ask], newest first, after the rows of the domains merged into it (their lists, the newest
+   first, each newest first); the word and value of each column in its row before *)
+type rows = { mutable rows : Value.t array list; mutable before : Value.t array list list; word : int array; last : Value.t array }
+
 let ask ?timeout v (q : Question.t) =
   let stop = stop_of timeout in
   try
@@ -279,9 +283,9 @@ let ask ?timeout v (q : Question.t) =
       { Top.fold =
           (fun window ~seq ~init ~step ~merge ->
             match window with
-            | None -> Ask.fold ~seq ?stop v t ~init ~step ~merge
-            | Some (Top.Range (x, lo, hi)) -> Ask.fold ~seq ?stop ~range:(x, lo, hi) v t ~init ~step ~merge
-            | Some (Top.Words (x, ws)) -> Ask.fold ~seq ?stop ~words:(x, ws) v t ~init ~step ~merge);
+            | None -> Ask.fold ~seq ~shared:true ?stop v t ~init ~step ~merge
+            | Some (Top.Range (x, lo, hi)) -> Ask.fold ~seq ~shared:true ?stop ~range:(x, lo, hi) v t ~init ~step ~merge
+            | Some (Top.Words (x, ws)) -> Ask.fold ~seq ~shared:true ?stop ~words:(x, ws) v t ~init ~step ~merge);
         project = (if nd = 0 then Ask.projector t give else Ask.derived_projector ~vars:q.vars ~mask:masked derived give);
         var = (fun c -> if give.(c) < q.vars then Some give.(c) else None);
         lead = Top.lead v base;
@@ -290,9 +294,39 @@ let ask ?timeout v (q : Question.t) =
     let order = { Top.keys = q.sort; limit = q.limit; after = q.after } in
     let k = Array.length give in
     let values r = Array.init k (fun i -> if masked && Top.missing k r i then Value.missing else Store.value v typs.(i) r.(i)) in
-    if order = Top.none then
-      (* each row's values made in the step, by the domain that found it *)
-      Ok (List.rev (Ask.fold ?stop v t ~init:(fun () -> []) ~merge:(fun a b -> b @ a) ~step:(fun acc env -> values (src.project env) :: acc)))
+    if order = Top.none then begin
+      (* each row's values made in the step, by the domain that found it, from its binding (no row of words between);
+         a domain's rows in a list, newest first, and the lists of the domains joined at the end in their order *)
+      (* a column's value made again only when its word changes from the domain's row before (the outer variables of
+         a join repeat over the inner ones): the same immutable value shared, one allocation the less a cell *)
+      let row a =
+        if nd > 0 then fun b -> values (src.project b)
+        else
+          fun (b : int array) ->
+            let r = Array.make k Value.missing in
+            for i = 0 to k - 1 do
+              let x = Array.unsafe_get give i in
+              if not (masked && (Array.unsafe_get b q.vars lsr x) land 1 = 1) then begin
+                let w = Array.unsafe_get b x in
+                let last = Array.unsafe_get a.last i in
+                if last != Value.missing && Array.unsafe_get a.word i = w then Array.unsafe_set r i last
+                else begin
+                  let y = Store.value v (Array.unsafe_get typs i) w in
+                  Array.unsafe_set a.word i w;
+                  Array.unsafe_set a.last i y;
+                  Array.unsafe_set r i y
+                end
+              end
+            done;
+            r
+      in
+      let acc =
+        Ask.fold ~shared:true ?stop v t ~init:(fun () -> { rows = []; before = []; word = Array.make k 0; last = Array.make k Value.missing })
+          ~merge:(fun a b -> a.before <- b.before @ (a.rows :: a.before); a.rows <- b.rows; a)
+          ~step:(fun a b -> a.rows <- row a b :: a.rows; a)
+      in
+      Ok (List.fold_left (fun l part -> List.rev_append part l) (List.rev acc.rows) acc.before)
+    end
     else Ok (List.map values (Array.to_list (Top.give ~masked v ~typs src order)))
   with Query.Bad m -> Error (Invalid m) | Pages.Unreadable m -> Error (Damaged m) | Query.Timeout t -> Error (Timeout (Query.timeout_message t))
 

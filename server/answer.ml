@@ -168,10 +168,11 @@ let prepare ~extra ~budget ?stop (v : Store.view) (q : Query.t) =
     | None, None -> Query.fold ?seq ?any_order ~budget ?stop v q ~init ~step ~merge
     | None, Some (Top.Range (x, lo, hi)) -> Query.fold ?seq ?any_order ~budget ?stop v { q with ranges = (x, lo, hi) :: q.ranges } ~init ~step ~merge
     | None, Some (Top.Words (x, ws)) -> Query.fold ?seq ?any_order ~sets:[ (x, ws) ] ~budget ?stop v q ~init ~step ~merge
-    | Some a, None -> Ask.fold ?seq ?any_order ~budget ?stop v a ~init ~step ~merge
-    | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ?any_order ~budget ?stop ~range:(x, lo, hi) v a ~init ~step ~merge
-    | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ?any_order ~budget ?stop ~words:(x, ws) v a ~init ~step ~merge
+    | Some a, None -> Ask.fold ?seq ?any_order ~shared:true ~budget ?stop v a ~init ~step ~merge
+    | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ?any_order ~shared:true ~budget ?stop ~range:(x, lo, hi) v a ~init ~step ~merge
+    | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ?any_order ~shared:true ~budget ?stop ~words:(x, ws) v a ~init ~step ~merge
   in
+  (* every step of the answers reads its binding and keeps none: an Ask's bindings in one buffer a domain *)
   let masked = match ask with Some a -> Array.length a.opts > 0 | None -> false in
   { ask; ty; masked; nv = q.vars; derived; var; fold }
 
@@ -497,6 +498,9 @@ let ranged = Atomic.make 0
 (* the state of Each's first k rows of each group, a domain's: its groups' keys in a table (Answer's), each group's
    buffer, the rows each has held at most (charged), and its k-th row at its last cut ([||]: none yet), past which a
    row cannot be one of its first k: one comparison, where most rows of a large group would be pushed and sorted *)
+(* Each's Limit k up to which a group's buffer is kept in the order, a row at its place (the tests make it 0 or large) *)
+let small_each = ref 32
+
 type firsts = { gt : table; mutable bufs : Top.acc array; mutable held : int array; mutable kth : int array array; cmp : int array -> int array -> int }
 
 (* what the rows at or before a page's cursor give its windows, a domain's: their count, each window's exact sums or
@@ -565,12 +569,17 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     (* the rows the windows read, where a page's start (with After), and the first of them to give *)
     let rows, start, first =
       if ne > 0 && order.limit > 0 then begin
-        (* the first k rows of each group: a buffer a group, cut back at 2 k rows *)
+        (* the first k rows of each group: a buffer a group. A binding is compared with its group's k-th row before
+           it is made a row (a binding past it is no row of the answer, and costs no allocation); for k of at most
+           [small_each], the buffer is kept in the order, each row put at its place (k comparisons at most) and the
+           rows past the k-th but its copies dropped at once; for a larger k, cut back to its first k at 2 k rows, as
+           Top's heap is (O(n log k) comparisons, O(groups k) rows held) *)
         let k = order.limit in
+        let small = k <= !small_each in
         let width = weight * max 1 cols in
         let cells (st : firsts) n = st.gt.cells <- st.gt.cells + n; match ticket with Some tk when st.gt.cells >= grain -> charge tk st.gt.cells; st.gt.cells <- 0 | _ -> () in
-        let into st row =
-          key_of row st.gt.buf;
+        (* the group of the key in st.gt.buf, its buffer made when it is new *)
+        let group_of st =
           let n0 = st.gt.n in
           let g = group st.gt in
           if st.gt.n > n0 then begin
@@ -587,16 +596,62 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
             end;
             cells st (weight * (kw + 4))
           end;
-          let kt = Array.unsafe_get st.kth g in
-          if Array.length kt = 0 || st.cmp row kt <= 0 then begin
-            let b = st.bufs.(g) in
-            if b.n = Array.length b.a then (let a = Array.make (max 4 (2 * b.n)) [||] in Array.blit b.a 0 a 0 b.n; b.a <- a);
+          g
+        in
+        (* the k-th row of a group's buffer, past which a row cannot be one of its first k: [||] while it has none *)
+        let kth st g = if small then (let b = st.bufs.(g) in if b.n >= k then b.a.(k - 1) else [||]) else Array.unsafe_get st.kth g in
+        let insert st g row =
+          let b = st.bufs.(g) in
+          if b.n = Array.length b.a then (let a = Array.make (max 4 (2 * b.n)) [||] in Array.blit b.a 0 a 0 b.n; b.a <- a);
+          if small then begin
+            (* at its place: after the rows that come before it or equal it *)
+            let i = ref b.n in
+            while !i > 0 && st.cmp b.a.(!i - 1) row > 0 do b.a.(!i) <- b.a.(!i - 1); decr i done;
+            b.a.(!i) <- row;
+            b.n <- b.n + 1;
+            if b.n > st.held.(g) then (st.held.(g) <- b.n; cells st width);
+            if b.n > k then begin
+              let kt = b.a.(k - 1) in
+              while b.n > k && st.cmp b.a.(b.n - 1) kt <> 0 do b.n <- b.n - 1; b.a.(b.n) <- [||] done
+            end
+          end
+          else begin
             b.a.(b.n) <- row;
             b.n <- b.n + 1;
             if b.n > st.held.(g) then (st.held.(g) <- b.n; cells st width);
             (* cut back to its first k and their copies at 2 k rows, as Top's heap is *)
             if b.n >= max 2 (2 * k) then (Top.sort_cut mk k b; st.kth.(g) <- b.a.(k - 1))
           end
+        in
+        (* a row (of another domain's buffers) *)
+        let into st row =
+          key_of row st.gt.buf;
+          let g = group_of st in
+          let kt = kth st g in
+          if Array.length kt = 0 || st.cmp row kt <= 0 then insert st g row
+        in
+        (* a binding: its key and its comparison with the k-th row read from it, its row made only when it is one *)
+        let key_env = key_into p (Array.map (fun c -> give.(c)) each) in
+        let words = Array.map (getter p) give and miss = Array.map (misser p) give in
+        let cmp_env (env : int array) (row : int array) =
+          let c = ref 0 and i = ref 0 in
+          while !c = 0 && !i < Array.length ord do
+            let o = ord.(!i) in
+            let col = o.Top.col in
+            let ma = masked && miss.(col) env and mb = masked && Top.missing cols row col in
+            if ma || mb then c := (if ma = mb then 0 else if ma then 1 else -1)
+            else (let x = Top.compare_words v typs.(col) (words.(col) env) row.(col) in c := if o.desc then -x else x);
+            incr i
+          done;
+          !c
+        in
+        let project = projector p give in
+        let step st env =
+          key_env env st.gt.buf;
+          let g = group_of st in
+          let kt = kth st g in
+          if Array.length kt = 0 || cmp_env env kt <= 0 then insert st g (project env);
+          st
         in
         let init () = { gt = table ~kw ~na:0 ~start:[||] ~cols:[||] (); bufs = [||]; held = [||]; kth = [||]; cmp = mk () } in
         let merge a b =
@@ -607,14 +662,14 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           cells a b.gt.cells;
           a
         in
-        let project = projector p give in
         (* the buffers do not depend on the order of the rows: any domain, any order *)
-        let st = fold ~any_order:true ~init ~merge ~step:(fun st env -> into st (project env); st) () in
+        let st = fold ~any_order:true ~init ~merge ~step () in
         (match ticket with Some tk when st.gt.cells > 0 -> charge tk st.gt.cells; st.gt.cells <- 0 | _ -> ());
-        let firsts = List.init st.gt.n (fun g -> let b = st.bufs.(g) in Top.sort_cut mk k b; Array.sub b.a 0 b.n) in
-        let all = Array.concat firsts in
-        Array.stable_sort (mk ()) all;
-        all, None, 0
+        let firsts = List.init st.gt.n (fun g -> let b = st.bufs.(g) in if not small then Top.sort_cut mk k b; Array.sub b.a 0 b.n) in
+        let all = { Top.a = Array.concat firsts; n = 0 } in
+        all.n <- Array.length all.a;
+        Top.sort_cut ?fast:(if masked then None else Some (typs, ord)) mk 0 all;
+        all.a, None, 0
       end
       else
         match order.after with

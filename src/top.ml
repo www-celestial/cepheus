@@ -186,10 +186,140 @@ let sorter ?(masked = false) v (typs : Value.typ array) (ord : key array) =
       done;
       !c
 
-let sort_cut mk cap t =
+(* ---- a whole sort by the bits of its keys ----
+   Many rows whose first keys are inline words (ints, dates, money, links, bools: their words keep their order): each
+   row's key is those words one after the other, each from the column's least word (from its greatest, descending), in
+   as many bits as the column's range of words needs, in one int of at most 62 bits (the columns that fit, then the
+   high bits of the next one); the rows sorted by that int by a least-significant-digit radix sort of 11 bits a pass
+   (Knuth, The Art of Computer Programming, volume 3, section 5.2.5: n moves a pass and no comparison, where the
+   comparisons' merge sort makes n log2 n calls of the comparator), every pass's counts made in one read of the keys
+   and a pass skipped when every key has the same digit there (Herf, "Radix Tricks", 2001), stable; then, when the key
+   did not hold the whole order (a column cut, a text or float key after them, a range wider than the ints), the
+   rows of each run of equal keys sorted again by the comparisons. The order is the comparisons' order: the key orders
+   rows as their first columns do, and the rest of the order sorts its ties. *)
+
+(* the rows a sort needs at least to take this way (the tests make it small) *)
+let radix_min = ref 4096
+
+(* the sorts made this way, for the tests *)
+let radix_sorts = Atomic.make 0
+
+let digit_bits = 11
+
+(* bits of a range r >= 0: 0 for 0 *)
+let bits_of r = let b = ref 0 in while !b < 62 && r lsr !b > 0 do incr b done; !b
+
+(* [a.(0 .. n-1)] sorted by [ord] as [cmp] sorts them; false (nothing done) when the first key is no inline word *)
+let sort_radix (typs : Value.typ array) (ord : key array) cmp (a : int array array) n =
+  let nk = Array.length ord in
+  let m = ref 0 in
+  while !m < nk && Value.inline typs.(ord.(!m).col) do incr m done;
+  let m = !m in
+  if m = 0 || n < 2 then false
+  else begin
+    Atomic.incr radix_sorts;
+    let col = Array.init m (fun j -> ord.(j).col) and desc = Array.init m (fun j -> ord.(j).desc) in
+    let lo = Array.make m max_int and hi = Array.make m min_int in
+    for i = 0 to n - 1 do
+      let r = Array.unsafe_get a i in
+      for j = 0 to m - 1 do
+        let w = Array.unsafe_get r (Array.unsafe_get col j) in
+        if w < Array.unsafe_get lo j then Array.unsafe_set lo j w;
+        if w > Array.unsafe_get hi j then Array.unsafe_set hi j w
+      done
+    done;
+    (* each column's word from its least (greatest, descending): halved when the range passes the ints *)
+    let halved = Array.init m (fun j -> hi.(j) - lo.(j) < 0) in
+    let width = Array.init m (fun j -> if halved.(j) then 62 else bits_of (hi.(j) - lo.(j))) in
+    (* the bits each column gives the key: all of them while they fit, then the high ones of the next *)
+    let take = Array.make m 0 and used = ref 0 in
+    for j = 0 to m - 1 do
+      let t = min width.(j) (62 - !used) in
+      take.(j) <- t;
+      used := !used + t
+    done;
+    let whole = m = nk && Array.for_all Fun.id (Array.init m (fun j -> take.(j) = width.(j) && not halved.(j))) in
+    let keys = Array.make n 0 in
+    for i = 0 to n - 1 do
+      let r = Array.unsafe_get a i in
+      let k = ref 0 in
+      for j = 0 to m - 1 do
+        let t = Array.unsafe_get take j in
+        if t > 0 then begin
+          let w = Array.unsafe_get r (Array.unsafe_get col j) and l = Array.unsafe_get lo j and h = Array.unsafe_get hi j in
+          let d =
+            if Array.unsafe_get halved j then (if Array.unsafe_get desc j then (h asr 1) - (w asr 1) else (w asr 1) - (l asr 1))
+            else if Array.unsafe_get desc j then h - w
+            else w - l
+          in
+          k := (!k lsl t) lor (d lsr (Array.unsafe_get width j - t))
+        end
+      done;
+      Array.unsafe_set keys i !k
+    done;
+    (* the counts of every pass at once *)
+    let size = 1 lsl digit_bits and mask = (1 lsl digit_bits) - 1 in
+    let passes = (!used + digit_bits - 1) / digit_bits in
+    let counts = Array.make (max 1 passes * size) 0 in
+    for i = 0 to n - 1 do
+      let k = Array.unsafe_get keys i in
+      for d = 0 to passes - 1 do
+        let c = (d * size) + ((k lsr (d * digit_bits)) land mask) in
+        Array.unsafe_set counts c (Array.unsafe_get counts c + 1)
+      done
+    done;
+    let keys = ref keys and idx = ref (Array.init n Fun.id) in
+    let keys' = ref (Array.make n 0) and idx' = ref (Array.make n 0) in
+    for d = 0 to passes - 1 do
+      let base = d * size in
+      (* a digit every key has: nothing to move *)
+      let one = ref false in
+      for b = 0 to size - 1 do if counts.(base + b) = n then one := true done;
+      if not !one then begin
+        let at = Array.make size 0 in
+        let s = ref 0 in
+        for b = 0 to size - 1 do at.(b) <- !s; s := !s + counts.(base + b) done;
+        let ks = !keys and is = !idx and ks' = !keys' and is' = !idx' in
+        let sh = d * digit_bits in
+        for i = 0 to n - 1 do
+          let k = Array.unsafe_get ks i in
+          let b = (k lsr sh) land mask in
+          let p = Array.unsafe_get at b in
+          Array.unsafe_set at b (p + 1);
+          Array.unsafe_set ks' p k;
+          Array.unsafe_set is' p (Array.unsafe_get is i)
+        done;
+        keys := ks'; keys' := ks; idx := is'; idx' := is
+      end
+    done;
+    let ks = !keys and is = !idx in
+    let sorted = Array.init n (fun i -> Array.unsafe_get a (Array.unsafe_get is i)) in
+    Array.blit sorted 0 a 0 n;
+    if not whole then begin
+      (* each run of equal keys: the rest of the order *)
+      let i = ref 0 in
+      while !i < n do
+        let j = ref (!i + 1) in
+        while !j < n && Array.unsafe_get ks !j = Array.unsafe_get ks !i do incr j done;
+        if !j - !i > 1 then begin
+          let s = Array.sub a !i (!j - !i) in
+          Array.stable_sort cmp s;
+          Array.blit s 0 a !i (!j - !i)
+        end;
+        i := !j
+      done
+    end;
+    true
+  end
+
+(* [fast]: the rows' types and order, when no cell is missing: a whole sort of [radix_min] rows or more by
+   [sort_radix] *)
+let sort_cut ?fast mk cap t =
   let cmp = mk () in
   let s = Array.sub t.a 0 t.n in
-  Array.stable_sort cmp s;
+  (match fast with
+   | Some (typs, ord) when t.n >= !radix_min && sort_radix typs ord cmp s t.n -> ()
+   | _ -> Array.stable_sort cmp s);
   let n = if cap > 0 && t.n > cap then (let m = ref cap in while !m < t.n && cmp s.(cap - 1) s.(!m) = 0 do incr m done; !m) else t.n in
   t.a <- s;
   t.n <- n
@@ -292,12 +422,13 @@ let give ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (src : sou
         fun row -> compare_cursor ~masked v typs ord row cur > 0
     in
     let cap = o.limit in
+    let fast = if masked then None else Some (typs, ord) in
     let heap range =
       let acc =
         src.fold range ~seq:false ~init:fresh ~merge:(append mk cap)
           ~step:(fun t env -> let r = src.project env in if keep r then push mk cap t r; t)
       in
-      sort_cut mk cap acc;
+      sort_cut ?fast mk cap acc;
       acc
     in
     let first = List.hd o.keys in
@@ -519,6 +650,6 @@ let sort_rows ?(masked = false) (v : Store.view) ~(typs : Value.typ array) (o : 
         Array.of_list (List.filter (fun r -> compare_cursor ~masked v typs ord r cur > 0) (Array.to_list rows))
     in
     let t = { a = Array.copy rows; n = Array.length rows } in
-    sort_cut (sorter ~masked v typs ord) o.limit t;
+    sort_cut ?fast:(if masked then None else Some (typs, ord)) (sorter ~masked v typs ord) o.limit t;
     Array.sub t.a 0 t.n
   end

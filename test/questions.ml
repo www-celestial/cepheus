@@ -551,6 +551,8 @@ let holders seed (v : Store.view) fl p =
         [ 0; 1; 5; -1 ])
     starts
 
+let ask_checks = ref 0
+
 let run seed =
   let r = Rng.make seed in
   (* a range of a thing whose pattern has a constant value: read from its first thing whatever the value's things, a
@@ -558,6 +560,10 @@ let run seed =
   Query.seek_min := if seed mod 2 = 0 then 0 else 64;
   (* the delta's things of a property scanned by thing (past a few changes of it) a seed in three *)
   Store.delta_few := if seed mod 3 = 1 then 0 else 512;
+  (* a whole sort by the bits of its keys (Top.sort_radix) at every size, a seed in two *)
+  Top.radix_min := if seed mod 2 = 1 then 2 else 4096;
+  (* Each's buffers kept in the order (Limit up to 32), or cut back at 2 k rows, a seed in three *)
+  Answer.small_each := if seed mod 3 = 0 then 0 else 32;
   let db = ref (fork empty) in
   let[@warning "-8"] (Ok [ name; tag; score; price; when_; ratio; ok; owner; friend; mark ]) = declare !db props in
   (* a rule: things whose score is 20 or more are marked (derived facts inside the questions) *)
@@ -894,6 +900,30 @@ let run seed =
           | exception Query.Bad m -> C.fail "seed %d: %s refused: %s" seed name m
         in
         run_path Top.Heap "heap"; run_path Top.Index "index"; run_path Top.Auto "auto";
+        (* the same question by Cepheus.ask, its rows as values; without an order, on one domain and split across 3 at
+           every level: the same rows in the same order *)
+        (match sel with
+         | Wire.Give give ->
+           let question =
+             { Question.vars = q.vars; items = List.map (fun pt -> Ask.Pattern pt) q.where @ List.map (fun (x, lo, hi) -> Ask.Range (x, lo, hi)) q.ranges @ extra;
+               give; sort = o.keys; limit = o.limit; after = o.after }
+           in
+           let asked d =
+             let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
+             Query.domains := d;
+             if d > 1 then (Query.parallel_min := 1; Query.probe_min := 1; Query.probe_more := 1);
+             Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0) (fun () -> ask v question)
+           in
+           (match asked 1 with
+            | Error e -> C.fail "seed %d: ask refused: %s" seed (message e)
+            | Ok one ->
+              incr ask_checks;
+              check "ask" one;
+              if o = Top.none then
+                match asked 3 with
+                | Ok got -> C.check (List.length got = List.length one && List.for_all2 (fun a b -> Array.length a = Array.length b && Array.for_all2 Value.equal a b) got one) "seed %d: ask on 3 domains: other rows or another order" seed
+                | Error e -> C.fail "seed %d: ask on 3 domains refused: %s" seed (message e))
+         | _ -> ());
         (* split across 3 domains: at every level of two candidates or more, or with the first level of two or more
            probed (run here until its candidates' work is seen) and the levels of 12 or 64 or more split: the same rows
            in the same order as on one domain, bit for bit *)
@@ -1527,6 +1557,48 @@ let live seed =
    Less between a bound int and the values of a property reads the range of the sorted index past it, not the whole
    property (Khayyat et al. 2015): the work of the answer. Optional gives every row, the missing ones last in both
    orders, and the pages after a missing cell. The mistakes are refused with their reason. *)
+(* A whole sort by the bits of its keys (Top.sort_radix) against the comparisons' sort: rows of 1 to 5 columns of every
+   inline type and texts, words of a small range, the extremes of the ints, a constant column, copies of rows; keys
+   ascending and descending, a text key after inline ones or first; 2 to 600 rows. The same order, row for row. *)
+let radix () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name ]) = declare db [ prop "name" Ttext ] in
+  (match write db (List.mapi (fun i s -> Resolve.Add (-1 - i, name, Text s)) (Array.to_list names)) with Ok _ -> () | Error e -> C.fail "radix: %s" (message e));
+  let v = view db in
+  let texts = Array.of_list (List.filter_map (fun s -> Store.word v (Text s)) (Array.to_list names)) in
+  let r = Rng.make 4242 in
+  let types = [| Value.Tint; Tdate; Tmoney 2; Tlink; Tbool; Ttext |] in
+  let keep = !Top.radix_min in
+  Top.radix_min := 2;
+  for t = 1 to 3000 do
+    let cols = 1 + Rng.int r 5 in
+    let typs = Array.init cols (fun c -> if c = 0 && Rng.int r 4 > 0 then types.(Rng.int r 5) else types.(Rng.int r 6)) in
+    let law = Array.init cols (fun _ -> Rng.int r 4) in
+    let word c =
+      match typs.(c) with
+      | Ttext -> texts.(Rng.int r (Array.length texts))
+      | Tbool -> Rng.int r 2
+      | _ -> (
+        match law.(c) with
+        | 0 -> Rng.int r 10
+        | 1 -> [| min_int; max_int; 0; -1; 1; min_int + 1; max_int - 1 |].(Rng.int r 7)
+        | 2 -> 7
+        | _ -> Rng.int r 1_000_000_000 - 500_000_000)
+    in
+    let n = 2 + Rng.int r 600 in
+    let base = Array.init (1 + Rng.int r n) (fun _ -> Array.init cols word) in
+    let rows = Array.init n (fun _ -> Array.copy base.(Rng.int r (Array.length base))) in
+    let keys = List.sort_uniq (fun (a : Top.key) b -> compare a.col b.col) (List.init (1 + Rng.int r cols) (fun _ -> { Top.col = Rng.int r cols; desc = Rng.bool r })) in
+    let ord = Top.full cols (List.sort (fun _ _ -> if Rng.bool r then 1 else -1) keys) in
+    let mk = Top.sorter v typs ord in
+    let want = Array.copy rows in
+    Array.stable_sort (mk ()) want;
+    let got = { Top.a = Array.copy rows; n } in
+    Top.sort_cut ~fast:(typs, ord) mk 0 got;
+    C.check (got.a = want) "radix %d: %d rows of %d columns, the order differs" t n cols
+  done;
+  Top.radix_min := keep
+
 let less_optional () =
   let db = fork empty in
   let[@warning "-8"] (Ok [ num; phone; rate; nick ]) =
@@ -1599,11 +1671,11 @@ let () =
   Unix.putenv "TZ" "UTC";
   let seeds = ref 300 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "S" ] (fun _ -> ()) "questions.exe";
-  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; windows_big !seeds; ins (); less_optional (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
+  (match !one with Some s -> run s; live s | None -> pages (); planners !seeds; windows_big !seeds; ins (); radix (); less_optional (); for s = 1 to !seeds do run s; if s mod 3 = 0 then live s done);
   Printf.printf "questions: %d questions (%d with an order, %d with Not, Or or In, %d empty), %d windows of the index path (%d of a sort by a thing), %d given up for the heap path\n"
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.held) (Atomic.get Top.gave_up);
-  Printf.printf "questions: %d ranges of a thing read from their first thing\n" (Atomic.get Query.seeks);
-  Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
+  Printf.printf "questions: %d ranges of a thing read from their first thing, %d sorts by the bits of their keys\n" (Atomic.get Query.seeks) (Atomic.get Top.radix_sorts);
+  Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float; %d asked by Cepheus.ask too\n" !with_less !with_optional !with_missing !with_floats !ask_checks;
   Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
   Printf.printf "questions: %d with windows or Each (%d with Each), %d windows' cells checked, %d running sums past 63 bits refused; %d pages after a cursor (%d read from a range of the first key)\n"
     !with_windows !with_each !window_cells !window_refusals (Atomic.get Answer.paged) (Atomic.get Answer.ranged);

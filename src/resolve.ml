@@ -101,6 +101,32 @@ let apply_change (v : Store.view) (c : Group.change) =
   if s > 0 then (let v, w = Store.word_intern v c.v in apply_word v c w s)
   else match Store.word v c.v with Some w -> apply_word v c w s | None -> v, false
 
+(* Facts to retract together: their things, properties and words, asserted in the view they were read from *)
+module Facts = struct
+  type t = { mutable e : int array; mutable p : int array; mutable w : int array; mutable n : int }
+
+  let create () = { e = Array.make 64 0; p = Array.make 64 0; w = Array.make 64 0; n = 0 }
+
+  let push t e p w =
+    if t.n = Array.length t.e then begin
+      let grow a = let b = Array.make (2 * t.n) 0 in Array.blit a 0 b 0 t.n; b in
+      t.e <- grow t.e; t.p <- grow t.p; t.w <- grow t.w
+    end;
+    t.e.(t.n) <- e; t.p.(t.n) <- p; t.w.(t.n) <- w;
+    t.n <- t.n + 1
+
+  (* the view with them all retracted, as one retraction after the other leaves it: in the order of (thing,
+     property, word) that Store.set_sorted takes, each asserted (state 1) before *)
+  let retract t (v : Store.view) =
+    let n = t.n in
+    if n = 0 then v
+    else begin
+      let o = Store.fact_order t.e t.p t.w n in
+      let pick a = Array.init n (fun i -> a.(o.(i))) in
+      Store.set_sorted ~olds:(Array.make n 1) v (pick t.e) (pick t.p) (pick t.w) (Array.make n 0) n
+    end
+end
+
 (* [reason]: what the rules make of the group's asserted changes (Reason.run; the background path of a change gives
    its own, Engine) *)
 let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.run ~v0 v changes words) (v0 : Store.view) ~n ~time ~by ~why ops =
@@ -268,16 +294,31 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
                     let what () = Printf.sprintf "deleting the %s #%d (%s: %s)" ix.kinds.(k) x (prop_name !v l) (Schema.on_delete_name od) in
                     let ys = ref [] in
                     Store.iter_things !v l x (fun y -> ys := y :: !ys);
+                    (* the facts the linking things lose, read in the view before any of them goes (each thing's
+                       own facts, which no other linking thing's retraction touches) and retracted together at the
+                       end (Store.set_sorted: one walk of the maps a thing and a value, where a retraction one by one
+                       walks both for each fact); the group's changes in the order of before *)
+                    let batch = Facts.create () in
+                    let gather e p x w = out := { Group.kind = Retracted; e; p; v = x } :: !out; outw := w :: !outw; Facts.push batch e p w in
                     List.iter
                       (fun y ->
                         tick what;
                         if Store.state !v y l x = 1 then begin
                           (match od with
-                           | Schema.Clear -> assert_word false y l (Value.Link x) !v x
-                           | _ -> retract_kind ix y lk what);
+                           | Schema.Clear -> gather y l (Value.Link x) x
+                           | _ ->
+                             Array.iter
+                               (fun p ->
+                                 if Store.has_value !v y p then begin
+                                   let d = desc !v p and ws = ref [] in
+                                   Store.iter_values_st !v y p (fun w st -> if st = 1 then ws := w :: !ws);
+                                   List.iter (fun w -> tick what; gather y p (Store.value !v d.typ w) w) (List.rev !ws)
+                                 end)
+                               ix.Schema.members.(lk));
                           if Schema.named ix l then Queue.push (y, lk) queue
                         end)
-                      (List.rev !ys)
+                      (List.rev !ys);
+                    v := Facts.retract batch !v
                   end)
                 ix.linkers.(k)
             end

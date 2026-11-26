@@ -1924,6 +1924,89 @@ let () =
   C.check (match write db [ Delete (thing r (-1), "invoice") ] with Error (Invalid m) -> contains m "line-has-invoice" | _ -> false)
     "links: Never sees the link a clear retracts"
 
+(* Cascades, their retractions made together (Resolve.Facts, Store.set_sorted), against the same facts retracted one by
+   one: random kinds that link (a tree of cascades, a many-valued clear, a refuse), their facts in runs and in the
+   delta, random Deletes; a Delete's group must give the changes, in their order, and the view (its facts and every
+   count) that a group of a Retract of each fact it lost gives, the path of one fact at a time *)
+let () =
+  section "links: a cascade's retractions together, the same as one by one";
+  let r = Rng.make 2611 in
+  let cases = ref 0 and lost = ref 0 in
+  for round = 1 to 60 do
+    let db = fork empty in
+    let[@warning "-8"] (Ok [ aname; bup; bnum; bself; cup; cnum; dof; dtext; eref ]) =
+      declare db
+        [ prop "a/name" Ttext; prop "b/up" Tlink; prop "b/num" Tint; prop "b/self" Tlink; prop "c/up" Tlink; prop "c/num" (Tmoney 2);
+          prop ~many:true "d/of" Tlink; prop "d/text" Ttext; prop "e/ref" Tlink ]
+    in
+    ignore (link_to db [ bup, "a", Cascade; bself, "b", Cascade; cup, "b", Cascade; dof, "b", Clear; eref, "a", Refuse ]);
+    let ok ops = match write db ops with Ok rc -> rc | Error e -> failwith ("links: " ^ message e) in
+    let na = 3 + Rng.int r 5 in
+    let ra = ok (List.init na (fun k -> Add (-1 - k, aname, Text (Printf.sprintf "a%d" k)))) in
+    let a_ = Array.init na (fun k -> thing ra (-1 - k)) in
+    let bs = ref [||] in
+    (* b things over the a things, some under another b; then c and d things over the b things; in layers merged at
+       random, so that the facts are in runs and in the delta *)
+    let v =
+      C.layered r (view db) 4 (fun f ->
+          let nb = Rng.int r 30 in
+          let rb =
+            Result.get_ok
+              (write f
+                 (List.concat
+                    (List.init nb (fun k ->
+                         let t = -1 - k in
+                         [ Add (t, bup, Link a_.(Rng.int r na)); Add (t, bnum, Int (Rng.int r 5)) ]
+                         @ (if Array.length !bs > 0 && Rng.int r 3 = 0 then [ Add (t, bself, Link !bs.(Rng.int r (Array.length !bs))) ] else [])))))
+          in
+          bs := Array.append !bs (Array.of_list (List.map snd rb.things));
+          let nb = Array.length !bs in
+          if nb > 0 then
+            ignore
+              (Result.get_ok
+                 (write f
+                    (List.concat
+                       (List.init (Rng.int r 40) (fun k ->
+                            let t = -1 - k in
+                            if Rng.bool r then [ Add (t, cup, Link !bs.(Rng.int r nb)); Add (t, cnum, Money (Rng.int r 3)) ]
+                            else Add (t, dtext, Text "n") :: List.init (1 + Rng.int r 3) (fun _ -> Add (t, dof, Link !bs.(Rng.int r nb))))))));
+          (* now and then a Retract of a b's or a c's fact, and an e that refuses *)
+          if nb > 0 && Rng.int r 3 = 0 then (let b = !bs.(Rng.int r nb) in ignore (write f (List.map (fun (p, x) -> Retract (b, p, x)) (List.filter (fun (p, _) -> p = bnum) (get (view f) b)))));
+          if Rng.int r 4 = 0 then ignore (write f [ Add (-1, eref, Link a_.(Rng.int r na)) ]);
+          view f)
+    in
+    for _ = 1 to 6 do
+      let ops =
+        match Rng.int r 4 with
+        | 0 when Array.length !bs > 0 -> [ Delete (!bs.(Rng.int r (Array.length !bs)), "b") ]
+        | 1 -> [ Retract (a_.(Rng.int r na), aname, Text "x"); Delete (a_.(Rng.int r na), "a") ]
+        | _ -> List.init (1 + Rng.int r 2) (fun _ -> Delete (a_.(Rng.int r na), "a"))
+      in
+      match Resolve.resolve v ~n:(v.group + 1) ~time:0 ~by:0 ~why:"" ops with
+      | Error _ -> ()
+      | Ok (v1, g, _) ->
+        incr cases;
+        lost := !lost + Array.length g.changes;
+        (* the same facts, a Retract each, in the order of the changes *)
+        let one = List.map (fun (c : Group.change) -> Retract (c.e, c.p, c.v)) (Array.to_list g.changes) in
+        (match Resolve.resolve v ~n:(v.group + 1) ~time:0 ~by:0 ~why:"" one with
+         | Error e -> C.fail "links round %d: the retractions one by one refused: %s" round (Resolve.error_message e)
+         | Ok (v2, g2, _) ->
+           let key (c : Group.change) = c.kind, c.e, c.p, c.v in
+           C.check (Array.map key g.changes = Array.map key g2.changes) "links round %d: the changes, in their order" round;
+           C.check (C.F.equal (C.facts_of_view v1) (C.facts_of_view v2)) "links round %d: the facts" round;
+           C.check (Store.facts v1 = Store.facts v2) "links round %d: the count of facts" round;
+           List.iter
+             (fun p ->
+               C.check (Store.count_prop v1 p = Store.count_prop v2 p) "links round %d: the count of property %d" round p;
+               Array.iter (fun x -> C.check (Store.count_things v1 p x = Store.count_things v2 p x && Store.count_values v1 x p = Store.count_values v2 x p) "links round %d: the counts of %d on %d" round p x) (Array.append a_ !bs))
+             [ bup; bnum; bself; cup; cnum; dof; dtext ];
+           (* and merged: the same run *)
+           C.check (C.F.equal (C.facts_of_view (C.compact v1)) (C.facts_of_view v2)) "links round %d: merged, the same facts" round)
+    done
+  done;
+  C.check (!cases > 100 && !lost > 1000) "links: cascades enough (%d, %d facts)" !cases !lost
+
 let () =
   section "links: durable, after a power loss, and the large path";
   let sim = Sim_disk.create (Rng.make 91) in
