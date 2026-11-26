@@ -18,7 +18,7 @@ A **server** here is a long-running process that owns the databases' files and a
 through a path in the file system; **TCP** links two machines, or two processes of one machine through the
 **loopback** address 127.0.0.1). A program is a **client**: it connects, proves who it is, and sends requests.
 
-```
+```text
 cepheus serve --config /etc/cepheus/cluster.toml
 ├── listeners     the Unix socket DIR/.s.cepheus.PORT (same machine) and TCP host:port with TLS 1.3
 ├── I/O domains   k OCaml domains; a thread a connection, spread over them
@@ -165,7 +165,7 @@ admin = true
 
 ### Commands
 
-```
+```text
 cepheus cluster init NAME --dir DIR [--host H]...
                                          a new cluster: its CA (DIR/ca.pem, DIR/ca.key), the certificate of its first
                                          peer srv1 for the hosts H (default localhost and 127.0.0.1: DIR/srv1.pem,
@@ -226,7 +226,7 @@ numbers in Prometheus's text format. Every line: [what to watch](production.md#w
 
 ### Files of the server
 
-```
+```text
 DATA/cepheus.lock          held (lockf) while the server runs: one server a data directory; holds its pid
 DATA/cepheus.server        the server's id, made at its first start
 DATA/NAME/                 a database: its files as in operations.md, and
@@ -304,7 +304,7 @@ change is made durable before it counts), so the commits of all of them group.
 **What it does.** The server keeps one log of its own, the **commit buffer** (`DATA/server.wal.1` and `.2`,
 `src/wal.ml`; byte layout in [formats](formats.md#the-servers-files)):
 
-```
+```text
 database d1: frame -> d1's journal (written, no fsync) --+
 database d2: frame -> d2's journal (written, no fsync) --+--> a round: d1's frame | d2's frame | ...
 database dN: frame -> dN's journal (written, no fsync) --+      appended to DATA/server.wal.N, one fsync,
@@ -413,7 +413,7 @@ server of two databases, killed 20 times under writing clients: every receipt's 
 A connection carries **frames** both ways. A frame is a length first, so a reader takes a whole frame without
 parsing it, and refuses one over the limit before reading it:
 
-```
+```text
 frame  = length u32 LE (the bytes after this field, 6 to 16 MiB + 6) | id u32 LE | kind u8 | flags u8 | body
 flags  = bit 0 more: the reply continues in the next frame of this id (the rows of a Find)
          bit 1 error: the body is an error
@@ -549,7 +549,7 @@ On a follow stream the server pushes (request id 0):
 
 A `Watch` keeps a question answered. Its pushes come on the Watch's id, kind 11, each a message:
 
-```
+```text
 answer = 0 | group | cols | count | rows                          the whole answer at group
 change = 1 | group | cols | added: count | rows | removed: count | rows
 same   = 2 | group                                                 nothing the question reads changed since from
@@ -712,7 +712,7 @@ checked by its CRC as it arrives (G7), and a delta of the newest groups, which i
 (`Resolve.replay`). The server sends it, over a second connection to the Unix socket (the **follow stream**, opened
 by the request `Follow`):
 
-```
+```text
 Follow {db}            the reader's right is checked (G16); then, over this connection only:
 Start  {id, n, runs}   the descriptors of the visibility page and of each run file, passed by the kernel (SCM_RIGHTS)
 Frame  {0, groups}     the groups after the newest run, up to the state visible under n (a catch-up)

@@ -36,7 +36,7 @@ its newest confirmed frames may be in the server's `DATA/server.wal.1` or `.2` a
 
 ## Journal segment `DIR/journal/<first group, 20 digits>.seg`
 
-```
+```text
 header, 40 bytes:  0 magic "CPHJ" (0x4A485043) u32 | 4 format u32 (2) | 8 database id, 16 bytes
                    | 24 first group u64 | 32 zero u32 | 36 CRC of bytes 0..36 u32
 frames, one after the other:
@@ -72,7 +72,7 @@ each value column. The changes keep their order: replay applies them one after t
 changes of one fact (a fact added, then retracted, in the same write), or a property's facts retracted before the
 property itself.
 
-```
+```text
 number varint | time int (ms) | by int | why string | first new thing varint | count of new things varint
 | count of changes n varint
 | if n > 0:
@@ -132,7 +132,7 @@ Zukowski et al. 2006): a block of values is stored as a base and, for each value
 many bits as the block's largest difference needs (the bit packing of the journal's columns, above); any value is
 read in $O(1)$ without decoding its neighbours.
 
-```
+```text
 header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (9) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0
@@ -155,7 +155,7 @@ no file page holds reads as zeros; no read of a run ever reaches one but past a 
 
 **The sections of a part**, in this order, each at a multiple of 8 bytes:
 
-```
+```text
 erank   (ceil(ne/32) + 1) u64     the rank table of things
 tdir    (thing blocks + 1) u64    the byte offset of each thing block from tdata; the last, the end of the last block
 tdata                             the thing blocks
@@ -205,7 +205,7 @@ column of its own (an invoice's client, date, status and total: a lookup reads o
 any other property is a **column** of the block (its slots' offsets and its values: a client's follows, or the
 properties of the few clients among a block of invoices).
 
-```
+```text
 thing block (at tdata + tdir[s / 128]; a block that fits in a page never crosses one: the merge starts it on the next
 page otherwise):
   0 B u16 (its slots) | 2 m u16 (its entries) | 4 hv u8 (1: a record's first bit says its slot has values in a
@@ -231,7 +231,7 @@ from the pages field by field, so a lookup stays $O(\log n)$.
 `pdist[p]` counts its distinct values. Each property's rows are cut in **row blocks** of 128 (property p's first is
 block `pblk[p]`); a block never crosses a page:
 
-```
+```text
 row block (at vdata + vdir[j].offset; its first value vdir[j].first):
   0 wv u8 (bits a value, the flag included) | 1 fl u8 (1: each value's lowest bit is its derived flag)
   | 2 wt u8 (bits a thing) | 3 gaps u8 | 4 the least thing u32
@@ -255,7 +255,7 @@ values of one thing sorted: vertical partitioning (Abadi, Marcus, Madden, Hollen
 property alone. Every lookup of a thing's property in a part (its values, their count, a membership test) reads here;
 the thing blocks serve "every fact of a thing" (one block, all its properties) and the merges. Entry `cp[p]`:
 
-```
+```text
 tlo    the thing of bit 0 of p's first rank word (a multiple of 32)
 rank   the byte (in the run) of p's first rank word; -1: p has no rows in the part (the other fields unused)
 words  its rank words: word j holds which of the things tlo + 32j .. tlo + 32j + 31 hold p (low 32 bits) and how
@@ -288,7 +288,7 @@ soff (i+1))`. `shash` is an open-addressing hash table with linear probing (Knut
 is taken. The hash of a text $s$ of $n$ bytes, in 63-bit arithmetic (OCaml's ints: modulo $2^{63}$), with $K =$
 0x2545F4914F6CDD1D (the multiplier of xorshift64*, Vigna 2016):
 
-```
+```text
 h := n * K
 for each group g of 7 bytes of s (little-endian; the last group padded with zeros): h := (h xor g) * K
 h := h xor (h lsr 32); h := h * K; h := h xor (h lsr 29)
@@ -361,7 +361,7 @@ The keys' file, the packs, their indexes, a record and a node, byte by byte: [th
 
 **A group's origin** (in its `why`, for groups written through the server; [server](server.md#writes-applied-once-sessions-g14)):
 
-```
+```text
 why = "\000cph1\000" (6 bytes) | session varint | serial varint | floor varint | token name (varint length, bytes)
     | the program's why (the rest)
 ```
@@ -371,7 +371,7 @@ with them.
 
 **`DATA/NAME/sessions`**, the session table's checkpoint (written beside, forced, renamed, the directory forced):
 
-```
+```text
 magic "cepheus sessions\n" (17 bytes) | format varint (1) | group varint (every receipt up to it is here)
 | count varint | each session: id varint | token name (length, bytes) | floor varint | highest applied serial varint
                  | time of its last write (zigzag, ms) | count varint | each receipt: serial, group, first new thing (varints)
@@ -386,7 +386,7 @@ A checkpoint whose CRC does not match is ignored: the journal is read from its s
 **`DATA/server.wal.1` and `DATA/server.wal.2`**, the commit buffer's two files, which alternate (`src/wal.ml`;
 [the server](server.md#many-databases-one-fsync-the-commit-buffer)):
 
-```
+```text
 file   = header, 40 bytes: 0 magic "CPHW" (0x57485043) u32 | 4 format u32 (1) | 8 generation u64 | 16 zero, 20 bytes
                            | 36 CRC of the 36 bytes before
        | rounds, from offset 40
@@ -408,7 +408,7 @@ follows it, and damage otherwise, as in a journal; a file whose header does not 
 **`DATA/raft/`**, a Raft cluster's log and state (`server/raftlog.ml`; [the server](server.md#a-cluster-of-three-raft)),
 the folder 0700, every file 0600:
 
-```
+```text
 state    = magic "cepheus raft state\n" (19 bytes) | term u64 | vote (varint length, a peer's name; empty: none)
          | repair u64 (0, or the newest index a damaged log may have acknowledged) | CRC-32C u32 of everything before
 log.<first index, 20 digits> = header, 52 bytes: 0 magic "CPHL" (0x4C485043) u32 | 4 format u32 (1)

@@ -22,7 +22,7 @@ un **Unix-domain socket** relie deux processus d'une même machine par un chemin
 relie deux machines, ou deux processus d'une même machine par l'adresse **loopback** 127.0.0.1, l'adresse de la
 machine elle-même). Un programme est un **client** : il se connecte, prouve qui il est, et envoie des requêtes.
 
-```
+```text
 cepheus serve --config /etc/cepheus/cluster.toml
 ├── listeners     the Unix socket DIR/.s.cepheus.PORT (same machine) and TCP host:port with TLS 1.3
 ├── I/O domains   k OCaml domains; a thread a connection, spread over them
@@ -189,7 +189,7 @@ admin = true
 
 ### Les commandes
 
-```
+```text
 cepheus cluster init NAME --dir DIR [--host H]...
                                          a new cluster: its CA (DIR/ca.pem, DIR/ca.key), the certificate of its first
                                          peer srv1 for the hosts H (default localhost and 127.0.0.1: DIR/srv1.pem,
@@ -252,7 +252,7 @@ mêmes nombres dans le format texte de Prometheus. Chaque ligne : [ce qu'il faut
 
 ### Les fichiers du serveur
 
-```
+```text
 DATA/cepheus.lock          held (lockf) while the server runs: one server a data directory; holds its pid
 DATA/cepheus.server        the server's id, made at its first start
 DATA/NAME/                 a database: its files as in operations.md, and
@@ -339,7 +339,7 @@ le fichier où chaque changement est rendu durable avant de compter), si bien qu
 **Ce qu'il fait.** Le serveur tient un journal à lui, le **commit buffer** (`DATA/server.wal.1` et `.2`,
 `src/wal.ml` ; la disposition de ses octets dans [formats](formats.md#les-fichiers-du-serveur)) :
 
-```
+```text
 database d1: frame -> d1's journal (written, no fsync) --+
 database d2: frame -> d2's journal (written, no fsync) --+--> a round: d1's frame | d2's frame | ...
 database dN: frame -> dN's journal (written, no fsync) --+      appended to DATA/server.wal.N, one fsync,
@@ -462,7 +462,7 @@ Le framing est le découpage d'une connexion en messages. Une connexion porte de
 seul bloc) dans les deux sens. Une frame commence par sa longueur : un lecteur prend donc une frame entière sans
 l'analyser, et refuse une frame qui dépasse la limite avant de la lire :
 
-```
+```text
 frame  = length u32 LE (the bytes after this field, 6 to 16 MiB + 6) | id u32 LE | kind u8 | flags u8 | body
 flags  = bit 0 more: the reply continues in the next frame of this id (the rows of a Find)
          bit 1 error: the body is an error
@@ -611,7 +611,7 @@ Sur un follow stream, le serveur pousse (id de requête 0) :
 Un `Watch` tient une question à jour : c'est une question vivante (live question), qu'on appelle aussi un watch. Ses
 pushes arrivent sur l'id du Watch, kind 11, chacun un message :
 
-```
+```text
 answer = 0 | group | cols | count | rows                          the whole answer at group
 change = 1 | group | cols | added: count | rows | removed: count | rows
 same   = 2 | group                                                 nothing the question reads changed since from
@@ -797,7 +797,7 @@ groupes les plus récents (leurs changements, en mémoire), qu'il applique lui-m
 (`Resolve.replay`). Le serveur les lui envoie sur une seconde connexion au Unix socket (le **follow stream**, le flux
 qui le tient à jour, ouvert par la requête `Follow`) :
 
-```
+```text
 Follow {db}            the reader's right is checked (G16); then, over this connection only:
 Start  {id, n, runs}   the descriptors of the visibility page and of each run file, passed by the kernel (SCM_RIGHTS)
 Frame  {0, groups}     the groups after the newest run, up to the state visible under n (a catch-up)

@@ -223,7 +223,7 @@ server](server.md#a-replica)).
 
 ## Formats
 
-```
+```text
 DIR/vault/                      0700
 DIR/vault/lock                  held while the vault is open
 DIR/vault/keys                  "CPHVKEYS" | u32 format (1) | u32 CRC-32C of the 12 bytes before, then entries of 112 bytes:

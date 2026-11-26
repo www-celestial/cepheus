@@ -195,7 +195,7 @@ UndefinedBehaviorSanitizer ; chaque entrée est un CRC à prolonger, un offset, 
 gardés dans les octets comme le vérifie `Crc32c` avant chaque appel, et le résultat est comparé à la définition calculée
 bit par bit, en entier et coupé en deux. Lancez-le avec clang :
 
-```
+```sh
 clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -I "$(ocamlfind ocamlc -where)" \
   test/fuzz_crc32c.c src/crc32c_stubs.c -o fuzz_crc32c && ./fuzz_crc32c -max_len=65536 -max_total_time=300
 ```
@@ -401,7 +401,7 @@ entrée choisit ce que pilote le reste :
 Les seeds sont un ClientHello capturé avec `openssl s_client`, un premier envoi de serveur avec `openssl s_server` et
 les certificats de test, et des conversations entières. Lancez-le avec clang :
 
-```
+```sh
 clang -g -O1 -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all -DCEPHEUS_TLS_CORE_ONLY \
   test/fuzz_tls.c server/tls_stubs.c -lssl -lcrypto -o fuzz_tls && ./fuzz_tls -max_len=16384 -max_total_time=300
 ```

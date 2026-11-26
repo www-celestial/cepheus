@@ -393,7 +393,7 @@ The numbers, from a model of the 10 M load of the benchmarks (a short script kep
 repository: the groups of the load in order, small groups of a client each, the merges each policy makes; the facts
 each merge writes counted, and the runs a read would visit after each group):
 
-```
+```text
 policy (B = 200,000)        facts written   amplification   runs at most   runs on average
 one level (before)          145 M           14.5            1              1
 leveling, T = 4              58 M            5.8            3              2.1
