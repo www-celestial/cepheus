@@ -407,19 +407,19 @@ clients = (after) -> ((c, n) -> {
 one = result.Unwrap(cepheus.Find(2, clients(missing), db))
 io.Print(one)
 io.Print(cepheus.Find(2, clients(one[2]), db))
-io.Print(cepheus.Find(2, (c, n) -> {Where: [[c, Client.City, "Lyon"], [c, Client.Name, n], cepheus.Above(c, ada)], Give: {Name: n}, Sort: [c]}, db))
+io.Print(cepheus.Find(2, (c, n) -> {Where: [[c, Client.City, "Lyon"], [c, Client.Name, n], cepheus.Above(c, ada)], Give: {Id: c, Name: n}, Sort: [c]}, db))
 ```
 
 ```text
 [{Id: 65536, Name: "Ada Martin"}, {Id: 65537, Name: "Bo Lind"}]
 Ok([{Id: 65538, Name: "Cy Moreau"}, {Id: 65539, Name: "Di Weber"}])
-Ok([{Name: "Di Weber"}])
+Ok([{Id: 65539, Name: "Di Weber"}])
 ```
 
 ```sql
 SELECT id, name FROM client ORDER BY id LIMIT 2;                       -- 1 Ada Martin, 2 Bo Lind
 SELECT id, name FROM client WHERE id > 2 ORDER BY id LIMIT 2;          -- 3 Cy Moreau, 4 Di Weber
-SELECT name FROM client WHERE city = 'Lyon' AND id > 1 ORDER BY id;    -- Di Weber
+SELECT id, name FROM client WHERE city = 'Lyon' AND id > 1 ORDER BY id; -- 4 Di Weber
 ```
 
 Both read a page from its cursor on: PostgreSQL its primary key's index, Cepheus the column of `Client.Name`, which
