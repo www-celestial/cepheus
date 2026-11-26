@@ -341,6 +341,37 @@ moyennes, les médianes et les quantiles, les dispersions, les listes de valeurs
 le jour, le mois ou l'année d'une date dans un fuseau horaire sont dans
 [les rapports](#les-rapports--avg-countx-values-quantile-variance-stddev-trunc).
 
+**Une somme est exacte, ou refusée.** Une `Sum` d'ints ou de money est exacte tant que son total est un Int, de
+$-2^{62}$ à $2^{62} - 1$ (environ $\pm 4{,}6 \times 10^{18}$) : 46 billiards d'euros en centimes, mais 4,6 unités
+d'une `Money(18)` (une money d'échelle s se somme jusqu'à $2^{62} / 10^s$ unités). Quel que soit l'ordre des lignes
+et les cœurs qui les additionnent, un total qui passe le plus grand Int en chemin et y revient est donné ; un total
+au-delà n'est jamais donné « wrappé », c'est-à-dire repassé de l'autre côté des entiers : `Find` est un `Err` de Code
+`"invalid"` qui nomme le champ et le groupe, et un watch de cette somme finit avec cet `Err` à l'écriture qui la fait
+passer au-delà (les autres watches continuent). `Count()` ne peut pas les dépasser : il ajoute 1 par réponse, et
+$2^{62}$ réponses prennent 146 ans à une par nanoseconde.
+
+```cesia norun
+Meter = cepheus.Kind("meter", {Site: cepheus.Text(), Pulses: cepheus.Int()})
+meters = result.Unwrap(cepheus.Fork(cepheus.Empty, [Meter]))
+for x in [["north", 4611686018427387903], ["north", 1], ["south", 4611686018427387903], ["south", 1], ["south", -1]]
+  result.Unwrap(cepheus.Insert(Meter, {Site: x[1], Pulses: x[2]}, meters))
+pulses = (site) -> cepheus.Find(2, (m, p) -> {Where: [[m, Meter.Site, site], [m, Meter.Pulses, p]], Give: {Total: cepheus.Sum(p), N: cepheus.Count()}}, meters)
+io.Print(pulses("north"))
+io.Print(pulses("south"))
+```
+
+```text
+Err({Kind: "cepheus", Code: "invalid", Message: "Sum of meter/Pulses passed the 63 bits of an Int: group by a key, or ask its Avg and Count (exact)"})
+Ok([{Total: 4611686018427387903, N: 3}])
+```
+
+Le total du nord, $2^{62}$, est un de plus que le plus grand Int ; celui du sud le dépasse et y revient. `Avg` est
+exact au-delà de 63 bits (sa somme a autant de parties qu'il lui en faut,
+[les rapports](#les-rapports--avg-countx-values-quantile-variance-stddev-trunc)), donc sa moyenne fois `Count()` donne
+un tel total en floats. La `sum` d'un `bigint` de PostgreSQL y est un `numeric`, exact ; la `sum` de SQLite échoue avec
+« integer overflow » dès qu'une somme partielle dépasse ses 64 bits, même quand le total n'y serait pas
+([la comparaison](comparison.md#les-sommes-au-delà-de-63-bits)).
+
 **Son temps.** `timeout = secondes` borne une question : au-delà, `Find` est un `Err` de Code `"timeout"`, dont le
 message nomme le temps, et le travail s'arrête (en quelques millisecondes : il est regardé tous les 1 024 candidats).
 Au serveur, le `question_timeout` du serveur (30 s par défaut, [le serveur](server.md#clustertoml)) est le plus
@@ -724,7 +755,10 @@ différents, `Count(t)` les compte, `Count(i)` compte les ventes (`Count()` comp
   d'un Optional sont refusés (`invalid`), comme l'est `Sum`. Un `Trunc` d'une date absente est absent.
 - **Erreurs.** Un fuseau qui n'en est pas un (`"Europe/Pariss"`, ou un nom qui n'est aucun fuseau de la base, comme
   `"../etc/passwd"`), une unité qui n'en est pas une, `Avg` d'un texte, une fraction hors de 0 à 1 : `Err` de Code
-  `"invalid"`, qui les nomme ([erreurs](errors.md)).
+  `"invalid"`, qui les nomme ([erreurs](errors.md)). Un `Trunc` d'une date parmi les plus petites (146 millions
+  d'années avant 1970) dont l'unité commence avant la plus petite date est un `Err` de Code `"invalid"` qui nomme son
+  champ, jamais une date wrappée (une `Sum` au-delà de 63 bits aussi, [plus haut](#find--les-questions)) ; un
+  `Quantile` entre deux valeurs reste entre elles.
 
 **Comment on y répond.** Chaque groupe garde, à côté de sa clé, ce dont a besoin chaque agrégat, à mesure que les
 lignes viennent, sur chaque cœur qui les lit, fusionné à la fin. La moyenne, la variance et l'écart type viennent de
@@ -865,8 +899,8 @@ chaque fenêtre lit les lignes dans l'ordre de `Sort`, de la première jusqu'à 
   une moyenne d'ints un Float, de money de la money de son échelle arrondie au plus proche en s'éloignant de zéro à
   mi-chemin, de dates une date ; à partir de **sommes exactes**, donc une moyenne mobile sur un frame qui glisse a
   les mêmes bits que la moyenne de ses lignes calculée à part. Une somme cumulée au-delà des 63 bits d'un Int est un
-  `Err` de Code `"invalid"` (dans une ligne que la réponse donne ; une somme au-delà dans une ligne après la page n'est
-  pas une erreur).
+  `Err` de Code `"invalid"` qui nomme le champ qu'elle somme (dans une ligne que la réponse donne ; une somme au-delà
+  dans une ligne après la page n'est pas une erreur).
 - **Les erreurs.** Une fenêtre sans `Sort`, une fenêtre d'un champ que `Give` ne donne pas, une fenêtre comme clé de
   `Sort`, `Running` de `Count(x)`, de `Values` ou d'un quantile, `last` ou `back` hors de 1 à 100 000, `Each` sans
   `Sort`, `Each` sans `Limit` ni fenêtre, `Each` avec `After`, `Each` d'un agrégat, une fenêtre ou `Each` sur un
@@ -936,7 +970,9 @@ Ok({Group: 16, Rows: missing, Added: [], Removed: [{Invoice: 65546, Total: 45.0}
 - Les lignes sont celles de `Find`, avec leurs répétitions : un `Give` qui laisse de côté une variable donne une ligne
   pour chaque binding, comme le fait `Find`. Les agrégats (`Sum`, `Count`, `Min`, `Max`, et ceux d'un rapport :
   `Avg`, `Values`, `Quantile`...) se suivent aussi : un changement retire alors l'ancienne ligne d'un groupe et ajoute
-  la nouvelle.
+  la nouvelle. Une écriture qui fait passer la `Sum` d'un groupe au-delà des 63 bits d'un Int finit ce watch avec
+  l'`Err` de `Find` (`"invalid"`, qui nomme le champ), comme une qui apporte une date dont le `Trunc` commence avant la
+  plus petite date ; les autres watches du programme continuent.
 - **Pas de trou, pas de répétition.** Quand la connexion casse ou que le serveur redémarre, le watch reprend de
   lui-même au groupe de son dernier message : le serveur répond que rien de ce que lit la question n'a changé depuis
   (et rien ne vient), ou par la réponse à son groupe le plus récent, que le package transforme en changement à partir
