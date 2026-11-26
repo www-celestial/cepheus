@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="840" height="488" viewBox="0 0 840 488">
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="488" viewBox="0 0 860 488">
 <title>The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question</title>
 <style>
 text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
@@ -28,7 +28,7 @@ text{fill:#e6edf3}
 .s2{fill:#e76624}
 }
 </style>
-<rect class="bg" width="840" height="488"/>
+<rect class="bg" width="860" height="488"/>
 <text class="h" x="16" y="22">The cases PostgreSQL still won, at 1 million facts: main, then now</text>
 <text class="s sm" x="380" y="54" text-anchor="end">main → now · PostgreSQL</text>
 <text class="a sm" x="606" y="54">Cepheus faster →</text>

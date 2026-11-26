@@ -275,8 +275,8 @@ let pg_won docs =
         rs;
       let y = para f ~n:120 16 (bottom + 24)
           (tr l "The grey dot is main's binaries (af9fb51), the coloured one now (d96aa73), on a log scale of PostgreSQL 18.6's time over Cepheus's: the median of 5 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. \"As the server answers\" makes each row's index words, not its values. Times: docs/book/benchmarks.md."
-             "Le point gris est les binaires de main (af9fb51), le point en couleur maintenant (d96aa73), sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane de 5 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. « Comme le serveur répond » fait les mots d'index de chaque ligne, pas ses valeurs. Temps : docs/book/benchmarks.md.") in
-      840, y, tr l "The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question" "Les cas que PostgreSQL gagnait encore : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
+             "Le point gris : les binaires de main (af9fb51) ; le point en couleur : maintenant (d96aa73) ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane de 5 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. « Comme le serveur répond » fait les mots d'index de chaque ligne, pas ses valeurs. Temps : docs/book/benchmarks.md.") in
+      860, y, tr l "The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question" "Les cas que PostgreSQL gagnait encore : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
 
 let draw docs =
   windows docs;
