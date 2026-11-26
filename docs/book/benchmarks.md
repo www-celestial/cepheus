@@ -93,6 +93,62 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Windows and Each (2026-11-26), at 1 million facts
+
+**Method.** The data of the reports' section below (`rbench.exe load`: 10,000 clients of 100 cities, 245,000 invoices,
+990,000 facts in one run, on the SATA SSD), and the same rows in PostgreSQL 18.6 (`pg.sh reports load`), with the two
+indexes a PostgreSQL user makes for these questions (`pg.sh windows index`: `rinvoice (client, date DESC, id)` for
+`LATERAL`, `rinvoice (date, id)` for the pages). Each window over the 245,000 invoices with their date and total, in
+one group, each city's (100 groups: a join with the clients) and each client's (10,000), as the server answers it
+(`wbench.exe run`: `Answer.answer`, no socket; every row made, as a program asks it) beside PostgreSQL's execution time
+(`EXPLAIN (ANALYZE, TIMING OFF)`, `pg.sh windows run`: every row made, none sent). 5 alternated rounds, each side a
+median of 11 runs; given: the median of the 5 rounds, and in brackets their least and largest. The machine was shared
+with other jobs' builds: a load average (1 minute) of 21.9 at the first round, 4.2 at the last, on its 8 threads, so
+the brackets are wide; both sides ran in each round, one after the other.
+
+| question | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---|
+| a running total, `Running(Sum(t))` (`sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING)`), 1 group | **155 ms** [110, 199] | 264 ms [229, 853] | Cepheus, 1.7 times |
+| the same, 100 groups (`PARTITION BY city`) | **358 ms** [234, 481] | 467 ms [344, 1,380] | Cepheus, 1.3 times |
+| the same, 10,000 groups (`PARTITION BY client`) | **170 ms** [161, 815] | 270 ms [267, 753] | Cepheus, 1.6 times |
+| a moving mean of 3, `Running(Avg(t), last = 3)` (`avg(total) OVER (... ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)`), 1 group | **141 ms** [118, 169] | 444 ms [327, 1,240] | Cepheus, 3.2 times |
+| the same, 100 groups | **282 ms** [252, 380] | 467 ms [411, 1,050] | Cepheus, 1.7 times |
+| the same, 10,000 groups | **185 ms** [168, 698] | 351 ms [327, 542] | Cepheus, 1.9 times |
+| a rank by total, `Rank()` (`rank() OVER (ORDER BY total DESC)`), 1 group | 252 ms [217, 321] | **216 ms** [195, 422] | PostgreSQL, 1.2 times |
+| the same, 100 groups | **281 ms** [232, 950] | 373 ms [334, 838] | Cepheus, 1.3 times |
+| the same, 10,000 groups | 260 ms [250, 1,040] | 270 ms [246, 353] | about the same |
+| the date before, `Prev(d)` (`lag(date) OVER (ORDER BY date, id)`), 1 group | **130 ms** [101, 153] | 293 ms [223, 879] | Cepheus, 2.3 times |
+| the same, 100 groups | **241 ms** [209, 842] | 351 ms [339, 1,260] | Cepheus, 1.5 times |
+| the same, 10,000 groups | **124 ms** [122, 516] | 262 ms [247, 641] | Cepheus, 2.1 times |
+| the 3 latest invoices of each client, `Each` and `Limit: 3`, 30,000 rows | 131 ms [126, 766] | `row_number() ... <= 3`: 141 ms [129, 329]; `LATERAL (... LIMIT 3)`: **55.9 ms** [50.8, 126] | PostgreSQL's `LATERAL` with its index, 2.3 times; `row_number()` about the same |
+| the last invoice of each client, `Limit: 1`, 10,000 rows | 151 ms [106, 627] | `DISTINCT ON`: **127 ms** [110, 299] | PostgreSQL, 1.2 times |
+| the monthly totals in Paris with their running total, the month before and the 3-month mean (a report of 121 rows) | **23.9 ms** [22.0, 117] | 188 ms [180, 233] | Cepheus, 7.9 times |
+| a page of 51 after the 200,000th invoice with its running total (`After`; a subquery and a keyset condition outside it) | **76.7 ms** [69.2, 326] | 197 ms [183, 805] | Cepheus, 2.6 times |
+| the first page of 51 with its running total | **97 µs** [89, 170] | 183 µs [165, 539] | Cepheus, 1.9 times |
+
+- **A window is one pass.** Cepheus reads the question on its 8 domains, sorts its 245,000 rows once, and each window
+  is then one pass over each group (a running sum, a moving mean from exact sums with the leaving row taken out, the
+  row before). PostgreSQL reads the rows by date from its index on `(date, id)`, with no sort, and sorts them for the
+  other orders (by total, by city or client first), in one process, its `WindowAgg` above; its moving `avg` of a
+  `numeric` costs it more than a sum.
+- **Where PostgreSQL wins.** A rank over one group of 245,000 rows, a sort by total on both sides: PostgreSQL's
+  in-memory sort of narrow tuples is a little faster than Cepheus's sort of rows of index words with every other
+  column as tie-break. The 3 latest invoices of each client: with an index on `(client, date)`
+  PostgreSQL's `LATERAL` reads 3 rows a client from it, 30,000 rows; Cepheus has no index of two properties and reads
+  the 245,000 invoices once, each group keeping its 3 latest, a row past them set aside after one comparison: as fast as
+  PostgreSQL's `row_number()` over the same rows, 2.3 times `LATERAL`'s time. The last invoice of each client likewise,
+  against `DISTINCT ON` (a sort by client).
+- **Pages.** A page with its running total after the 200,000th row: Cepheus reads the page from the index of the dates
+  as a page without windows (0.26 ms here) and the rows before the cursor in one pass, none sorted, for their sum;
+  PostgreSQL computes the window over every row in its subquery, then keeps the page. The first page reads 51 rows on
+  both sides: Cepheus's window adds 11 µs to the page's 86 µs.
+- **No slowdown of the questions of before.** `abench.exe` (a Give of a join, `Sum` and `Count` by city, `Min` and
+  `Max` by client, a sorted group, a page, `Not`, a range, `Optional`) and `kbench.exe run` (pages of 51 of 1,000,000
+  things by id, a tenant's, ascending and descending), the same files built on main (9cb2274) and on b3, alternated in
+  each round on the same databases: new/old 0.37 to 1.00 (the median of the rounds' ratios; their least and largest
+  0.18 and 4.96, the noise of a loaded machine on sub-millisecond questions); a page of 51 by id 24 to 41 µs (the
+  seek's 25 µs kept).
+
 ## Pages of a kind by its things' ids (2026-11-26), at 10,000 to 1,000,000 things
 
 **What was slow.** Centauri's admin lists a kind page by page: `Find` of `[[t, Kind.Field, v]]`, `Give: {Id: t}`,

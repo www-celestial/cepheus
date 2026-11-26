@@ -1382,6 +1382,11 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
 | the mean invoice by client (`Avg`; `avg`), 10,000 groups | **36.5 ms** | 65.5 ms | Cepheus, 1.8 times |
 | the totals by month in Paris (`Trunc`; `date_trunc` with a zone), 121 groups | **20.9 ms** | 141 ms | Cepheus, 6.7 times |
 | a page of 51 of 1,000,000 things by id, after the middle one (`Sort` on the thing, `After`; `WHERE id > $1 ORDER BY id LIMIT 51`) | **25.2 µs** | 60 µs | Cepheus, 2.4 times |
+| a running total of 245,000 invoices, by date (`Running(Sum(t))`; `sum(total) OVER (ORDER BY date ...)`) | **155 ms** | 264 ms | Cepheus, 1.7 times |
+| a moving mean of 3 of each client's invoices (`Running(Avg(t), last = 3)`, `Each`; `avg(...) OVER (PARTITION BY client ... ROWS 2 PRECEDING)`) | **185 ms** | 351 ms | Cepheus, 1.9 times |
+| the 3 latest invoices of each of 10,000 clients (`Each`, `Limit: 3`; `LATERAL` with an index on `(client, date)`) | 131 ms | **55.9 ms** | PostgreSQL, 2.3 times |
+| the monthly totals with their running total, the month before and a 3-month mean (a report; `sum(sum(...)) OVER`, `lag`, `avg`) | **23.9 ms** | 188 ms | Cepheus, 7.9 times |
+| a page of 51 with its running total after the 200,000th invoice (`After`; a subquery and a keyset condition) | **76.7 ms** | 197 ms | Cepheus, 2.6 times |
 
 - A counter many writers share is where a lock costs most: PostgreSQL holds the row until each commit is on the disk,
   Cepheus's writer reads the counter as it applies each group, and the groups share their fsync.
@@ -1402,6 +1407,11 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
   a load of 4.6 to 13 ([the benchmarks](benchmarks.md#pages-of-a-kind-by-its-things-ids-2026-11-26-at-10000-to-1000000-things)):
   24 to 34 µs at any depth and size, where it read the whole kind before (81 to 99 ms at this size); PostgreSQL's
   keyset query reads its primary key's B-tree from the cursor.
+- The windows are the engine's work on 990,000 facts, at a load of 4.2 to 21.9 ([the
+  benchmarks](benchmarks.md#windows-and-each-2026-11-26-at-1-million-facts)): one pass a window over rows sorted once,
+  exact sums taken out as a frame slides; a page reads the rows before it in one pass, none sorted. PostgreSQL's
+  `LATERAL` with an index on `(client, date)` reads 3 rows a client, where Cepheus, with no index of two properties,
+  reads every invoice once (as fast as PostgreSQL's `row_number()` over them).
 
 ## Each tutorial in one line
 

@@ -1422,6 +1422,11 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
 | la facture moyenne par client (`Avg` ; `avg`), 10 000 groupes | **36,5 ms** | 65,5 ms | Cepheus, 1,8 fois |
 | les totaux par mois à Paris (`Trunc` ; `date_trunc` avec un fuseau), 121 groupes | **20,9 ms** | 141 ms | Cepheus, 6,7 fois |
 | une page de 51 sur 1 000 000 de choses par id, après celle du milieu (`Sort` sur la chose, `After` ; `WHERE id > $1 ORDER BY id LIMIT 51`) | **25,2 µs** | 60 µs | Cepheus, 2,4 fois |
+| un total cumulé de 245 000 factures, par date (`Running(Sum(t))` ; `sum(total) OVER (ORDER BY date ...)`) | **155 ms** | 264 ms | Cepheus, 1,7 fois |
+| une moyenne mobile de 3 des factures de chaque client (`Running(Avg(t), last = 3)`, `Each` ; `avg(...) OVER (PARTITION BY client ... ROWS 2 PRECEDING)`) | **185 ms** | 351 ms | Cepheus, 1,9 fois |
+| les 3 dernières factures de chacun de 10 000 clients (`Each`, `Limit: 3` ; `LATERAL` avec un index sur `(client, date)`) | 131 ms | **55,9 ms** | PostgreSQL, 2,3 fois |
+| les totaux mensuels avec leur total cumulé, le mois d'avant et une moyenne sur 3 mois (un rapport ; `sum(sum(...)) OVER`, `lag`, `avg`) | **23,9 ms** | 188 ms | Cepheus, 7,9 fois |
+| une page de 51 avec son total cumulé après la 200 000e facture (`After` ; une sous-requête et une condition de keyset) | **76,7 ms** | 197 ms | Cepheus, 2,6 fois |
 
 - Un compteur que beaucoup d'écrivains partagent est là où un lock coûte le plus : PostgreSQL tient la ligne jusqu'à
   ce que chaque commit soit sur le disque, le writer de Cepheus lit le compteur à mesure qu'il applique chaque groupe,
@@ -1446,6 +1451,12 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
   million de choses, à une charge de 4,6 à 13 ([les benchmarks](benchmarks.md#les-pages-dun-kind-par-les-ids-de-ses-choses-2026-11-26-de-10-000-à-1-000-000-de-choses)) :
   24 à 34 µs à toute profondeur et toute taille, là où elle lisait tout le kind avant (81 à 99 ms à cette taille) ; la
   keyset query de PostgreSQL lit le B-tree de sa clé primaire à partir du curseur.
+- Les fenêtres sont le travail du moteur sur 990 000 faits, à une charge de 4,2 à 21,9 ([les
+  benchmarks](benchmarks.md#les-fenêtres-et-each-2026-11-26-à-1-million-de-faits)) : un seul passage par fenêtre sur des
+  lignes triées une fois, des sommes exactes retirées quand un frame glisse ; une page lit les lignes avant elle en un
+  seul passage, aucune triée. Le `LATERAL` de PostgreSQL avec un index sur `(client, date)` lit 3 lignes par client, là
+  où Cepheus, sans index de deux propriétés, lit chaque facture une seule fois (aussi vite que le `row_number()` de
+  PostgreSQL sur elles).
 
 ## Chaque tutoriel en une ligne
 

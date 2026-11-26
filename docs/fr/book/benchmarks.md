@@ -115,6 +115,65 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
 
+## Les fenêtres et Each (2026-11-26), à 1 million de faits
+
+**Méthode.** Les données de la section des rapports plus bas (`rbench.exe load` : 10 000 clients de 100 villes,
+245 000 factures, 990 000 faits dans un seul run, sur le SSD SATA), et les mêmes lignes dans PostgreSQL 18.6 (`pg.sh
+reports load`), avec les deux index qu'un utilisateur de PostgreSQL fait pour ces questions (`pg.sh windows index` :
+`rinvoice (client, date DESC, id)` pour `LATERAL`, `rinvoice (date, id)` pour les pages). Chaque fenêtre sur les
+245 000 factures avec leur date et leur total, en un seul groupe, celui de chaque ville (100 groupes : une jointure
+avec les clients) et de chaque client (10 000), comme le serveur y répond (`wbench.exe run` : `Answer.answer`, sans
+socket ; chaque ligne faite, comme un programme la demande) à côté du temps d'exécution de PostgreSQL
+(`EXPLAIN (ANALYZE, TIMING OFF)`, `pg.sh windows run` : chaque ligne faite, aucune envoyée). 5 tours alternés, chaque
+côté une médiane de 11 exécutions ; donnés : la médiane des 5 tours, et entre crochets leur plus petit et leur plus
+grand. La machine était partagée avec les builds d'autres jobs : une charge moyenne (sur 1 minute) de 21,9 au premier
+tour, 4,2 au dernier, sur ses 8 threads, donc les crochets sont larges ; les deux côtés ont tourné à chaque tour, l'un
+après l'autre.
+
+| question | Cepheus | PostgreSQL 18.6 | |
+|---|---:|---:|---|
+| un total cumulé, `Running(Sum(t))` (`sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING)`), 1 groupe | **155 ms** [110, 199] | 264 ms [229, 853] | Cepheus, 1,7 fois |
+| le même, 100 groupes (`PARTITION BY city`) | **358 ms** [234, 481] | 467 ms [344, 1 380] | Cepheus, 1,3 fois |
+| le même, 10 000 groupes (`PARTITION BY client`) | **170 ms** [161, 815] | 270 ms [267, 753] | Cepheus, 1,6 fois |
+| une moyenne mobile de 3, `Running(Avg(t), last = 3)` (`avg(total) OVER (... ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)`), 1 groupe | **141 ms** [118, 169] | 444 ms [327, 1 240] | Cepheus, 3,2 fois |
+| la même, 100 groupes | **282 ms** [252, 380] | 467 ms [411, 1 050] | Cepheus, 1,7 fois |
+| la même, 10 000 groupes | **185 ms** [168, 698] | 351 ms [327, 542] | Cepheus, 1,9 fois |
+| un rang par total, `Rank()` (`rank() OVER (ORDER BY total DESC)`), 1 groupe | 252 ms [217, 321] | **216 ms** [195, 422] | PostgreSQL, 1,2 fois |
+| le même, 100 groupes | **281 ms** [232, 950] | 373 ms [334, 838] | Cepheus, 1,3 fois |
+| le même, 10 000 groupes | 260 ms [250, 1 040] | 270 ms [246, 353] | à peu près pareil |
+| la date d'avant, `Prev(d)` (`lag(date) OVER (ORDER BY date, id)`), 1 groupe | **130 ms** [101, 153] | 293 ms [223, 879] | Cepheus, 2,3 fois |
+| la même, 100 groupes | **241 ms** [209, 842] | 351 ms [339, 1 260] | Cepheus, 1,5 fois |
+| la même, 10 000 groupes | **124 ms** [122, 516] | 262 ms [247, 641] | Cepheus, 2,1 fois |
+| les 3 dernières factures de chaque client, `Each` et `Limit: 3`, 30 000 lignes | 131 ms [126, 766] | `row_number() ... <= 3` : 141 ms [129, 329] ; `LATERAL (... LIMIT 3)` : **55,9 ms** [50,8, 126] | le `LATERAL` de PostgreSQL avec son index, 2,3 fois ; `row_number()` à peu près pareil |
+| la dernière facture de chaque client, `Limit: 1`, 10 000 lignes | 151 ms [106, 627] | `DISTINCT ON` : **127 ms** [110, 299] | PostgreSQL, 1,2 fois |
+| les totaux mensuels à Paris avec leur total cumulé, le mois d'avant et la moyenne sur 3 mois (un rapport de 121 lignes) | **23,9 ms** [22,0, 117] | 188 ms [180, 233] | Cepheus, 7,9 fois |
+| une page de 51 après la 200 000e facture avec son total cumulé (`After` ; une sous-requête et une condition de keyset hors d'elle) | **76,7 ms** [69,2, 326] | 197 ms [183, 805] | Cepheus, 2,6 fois |
+| la première page de 51 avec son total cumulé | **97 µs** [89, 170] | 183 µs [165, 539] | Cepheus, 1,9 fois |
+
+- **Une fenêtre est un seul passage.** Cepheus lit la question sur ses 8 domains, trie ses 245 000 lignes une fois, et
+  chaque fenêtre est alors un passage sur chaque groupe (une somme cumulée, une moyenne mobile à partir de sommes
+  exactes avec la ligne qui part retirée, la ligne d'avant). PostgreSQL lit les lignes par date dans son index sur
+  `(date, id)`, sans tri, et les trie pour les autres ordres (par total, par ville ou client d'abord), dans un seul
+  process, son `WindowAgg` au-dessus ; son `avg` mobile d'un `numeric` lui coûte plus qu'une somme.
+- **Là où PostgreSQL gagne.** Un rang sur un seul groupe de 245 000 lignes, un tri par total des deux côtés : le tri en
+  mémoire de tuples étroits de PostgreSQL est un peu plus rapide que celui de Cepheus, sur des lignes de mots d'index
+  avec chaque autre colonne pour départager. Les 3 dernières factures de chaque client : avec un index sur
+  `(client, date)`, le `LATERAL` de PostgreSQL y lit 3 lignes par client, 30 000 lignes ; Cepheus n'a pas d'index de
+  deux propriétés et lit les 245 000 factures une seule fois, chaque groupe gardant ses 3 plus récentes, une ligne
+  au-delà mise de côté après une seule comparaison : aussi rapide que le `row_number()` de PostgreSQL sur les mêmes
+  lignes, 2,3 fois le temps de `LATERAL`. La dernière facture de chaque client de même, contre `DISTINCT ON` (un tri
+  par client).
+- **Les pages.** Une page avec son total cumulé après la 200 000e ligne : Cepheus lit la page dans l'index des dates
+  comme une page sans fenêtres (0,26 ms ici) et les lignes avant le curseur en un seul passage, aucune triée, pour leur
+  somme ; PostgreSQL calcule la fenêtre sur chaque ligne de sa sous-requête, puis garde la page. La première page lit
+  51 lignes des deux côtés : la fenêtre de Cepheus ajoute 11 µs aux 86 µs de la page.
+- **Pas de ralentissement des questions d'avant.** `abench.exe` (un Give d'une jointure, `Sum` et `Count` par ville,
+  `Min` et `Max` par client, un groupe trié, une page, `Not`, un intervalle, `Optional`) et `kbench.exe run` (des pages
+  de 51 sur 1 000 000 de choses par id, celles d'un tenant, croissantes et décroissantes), les mêmes fichiers construits
+  sur main (9cb2274) et sur b3, alternés à chaque tour sur les mêmes bases : nouveau/ancien 0,37 à 1,00 (la médiane des
+  rapports des tours ; leurs plus petit et plus grand 0,18 et 4,96, le bruit d'une machine chargée sur des questions de
+  moins d'une milliseconde) ; une page de 51 par id en 24 à 41 µs (les 25 µs du seek gardés).
+
 ## Les pages d'un kind par les ids de ses choses (2026-11-26), de 10 000 à 1 000 000 de choses
 
 **Ce qui était lent.** L'admin de Centauri liste un kind page par page : `Find` de `[[t, Kind.Field, v]]`,
