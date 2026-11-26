@@ -1,0 +1,71 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="278" viewBox="0 0 780 278">
+<title>The months of 2028 in Sort's order, a running total, the month before and a moving mean of 3</title>
+<style>
+text{font-family:system-ui, sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace, Menlo, Consolas, monospace;font-size:12.5px}
+.h{font-weight:600}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.off{fill:#8c959f}
+.row{fill:#fff;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.frame{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.2;stroke-dasharray:4 3}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.cut{stroke:#8c959f;stroke-width:1}
+</style>
+<rect width="780" height="278" fill="#fff"/>
+<text class="c" x="16" y="22">Sort: [month(d)]   Give: {Month, Billed: Sum(t), SoFar: Running(Sum(Sum(t))),</text>
+<text class="c" x="16" y="39">                        Before: Prev(Sum(t)), Mean3: Running(Avg(Sum(t)), last = 3)}</text>
+<text class="h" x="24" y="56">Month</text>
+<text class="h" x="218" y="56" text-anchor="end">Billed</text>
+<text class="h" x="326" y="56" text-anchor="end">SoFar</text>
+<text class="h" x="450" y="56" text-anchor="end">Before</text>
+<text class="h" x="560" y="56" text-anchor="end">Mean3</text>
+<rect class="row" x="16" y="64" width="560" height="24"/>
+<text x="24" y="81">January</text>
+<text x="218" y="81" text-anchor="end">1,200</text>
+<text x="326" y="81" text-anchor="end">1,200</text>
+<text class="off" x="450" y="81" text-anchor="end">missing</text>
+<text x="560" y="81" text-anchor="end">1,200</text>
+<rect class="row" x="16" y="92" width="560" height="24"/>
+<rect class="frame" x="130" y="94" width="92" height="20"/>
+<text x="24" y="109">February</text>
+<text x="218" y="109" text-anchor="end">800</text>
+<text x="326" y="109" text-anchor="end">2,000</text>
+<text x="450" y="109" text-anchor="end">1,200</text>
+<text x="560" y="109" text-anchor="end">1,000</text>
+<rect class="row" x="16" y="120" width="560" height="24"/>
+<rect class="frame" x="130" y="122" width="92" height="20"/>
+<text x="24" y="137">March</text>
+<text x="218" y="137" text-anchor="end">1,500</text>
+<text x="326" y="137" text-anchor="end">3,500</text>
+<text x="450" y="137" text-anchor="end">800</text>
+<text x="560" y="137" text-anchor="end">1,166.67</text>
+<rect class="cur" x="16" y="148" width="560" height="24"/>
+<rect class="frame" x="130" y="150" width="92" height="20"/>
+<text x="24" y="165">April</text>
+<text x="218" y="165" text-anchor="end">900</text>
+<text class="a" x="326" y="165" text-anchor="end">4,400</text>
+<text class="a" x="450" y="165" text-anchor="end">1,500</text>
+<text class="a" x="560" y="165" text-anchor="end">1,066.67</text>
+<rect class="row" x="16" y="176" width="560" height="24"/>
+<text x="24" y="193">May</text>
+<text x="218" y="193" text-anchor="end">1,100</text>
+<text x="326" y="193" text-anchor="end">5,500</text>
+<text x="450" y="193" text-anchor="end">900</text>
+<text x="560" y="193" text-anchor="end">1,166.67</text>
+<rect class="row" x="16" y="204" width="560" height="24"/>
+<text x="24" y="221">June</text>
+<text x="218" y="221" text-anchor="end">1,500</text>
+<text x="326" y="221" text-anchor="end">7,000</text>
+<text x="450" y="221" text-anchor="end">1,100</text>
+<text x="560" y="221" text-anchor="end">1,166.67</text>
+<path class="br" d="M 590 66 h 8 V 170 h -8"/>
+<text class="s" x="606" y="112">SoFar: the sum of</text>
+<text class="s" x="606" y="128">January to April, 4,400</text>
+<path class="gr" d="M 222 133 C 288 133, 370 161, 396 161"/>
+<path d="M 400 161 l -7 -4 v 8 z" fill="#57606a"/>
+<text class="s" x="16" y="246">April's frame of last = 3 (dashed): February, March and April, mean 1,066.67. Prev(Sum(t)): March's 1,500.</text>
+<text class="s" x="16" y="264">January has no month before it: Before is missing; its frame is January alone, February's two months.</text>
+</svg>

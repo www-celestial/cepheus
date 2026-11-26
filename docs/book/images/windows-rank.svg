@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="190" viewBox="0 0 800 190">
+<title>A leaderboard with a tie: Rank, Rank(dense = true) and Running(Count())</title>
+<style>
+text{font-family:system-ui, sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace, Menlo, Consolas, monospace;font-size:12.5px}
+.h{font-weight:600}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.off{fill:#8c959f}
+.row{fill:#fff;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.frame{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.2;stroke-dasharray:4 3}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.cut{stroke:#8c959f;stroke-width:1}
+</style>
+<rect width="800" height="190" fill="#fff"/>
+<text class="c" x="16" y="22">Sort: [Desc(Sum(t))]</text>
+<text class="h" x="16" y="50">Client</text>
+<text class="h" x="150" y="50">Revenue</text>
+<text class="h" x="262" y="50">Rank()</text>
+<text class="h" x="352" y="50">Rank(dense = true)</text>
+<text class="h" x="506" y="50">Running(Count())</text>
+<rect class="row" x="16" y="60" width="620" height="24"/>
+<text x="24" y="77">Ada Martin</text>
+<text x="230" y="77" text-anchor="end">2,900</text>
+<text class="a" x="290" y="77">1</text>
+<text class="a" x="410" y="77">1</text>
+<text class="a" x="560" y="77">1</text>
+<rect class="row" x="16" y="88" width="620" height="24"/>
+<text x="24" y="105">Bo Lind</text>
+<text x="230" y="105" text-anchor="end">2,900</text>
+<text class="a" x="290" y="105">1</text>
+<text class="a" x="410" y="105">1</text>
+<text class="a" x="560" y="105">2</text>
+<rect class="row" x="16" y="116" width="620" height="24"/>
+<text x="24" y="133">Cy Moreau</text>
+<text x="230" y="133" text-anchor="end">1,200</text>
+<text class="a" x="290" y="133">3</text>
+<text class="a" x="410" y="133">2</text>
+<text class="a" x="560" y="133">3</text>
+<path class="br" d="M 646 62 h 8 V 110 h -8"/>
+<text class="s" x="662" y="74">equal in Sort's key:</text>
+<text class="s" x="662" y="90">one place</text>
+<text class="s" x="16" y="158">Rank() skips the place the tie takes (no 2nd); Rank(dense = true) skips none; Running(Count()) numbers the rows</text>
+<text class="s" x="16" y="176">one by one, Ada before Bo since Sort then orders by every other field (the client's name).</text>
+</svg>

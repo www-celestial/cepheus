@@ -74,6 +74,9 @@ let run dir =
       (Answer.answer ~order:{ by_date with limit = 51; after = Some cursor } v q1 (Wire.Over (Wire.Give give1, [||], [| Wire.Running (Sum 2, 0) |]))).n);
   measure "the first page of 51, its running total" (fun () ->
       (Answer.answer ~order:{ by_date with limit = 51 } v q1 (Wire.Over (Wire.Give give1, [||], [| Wire.Running (Sum 2, 0) |]))).n);
+  (* the same pages without windows: what a window adds *)
+  measure "a page of 51 after the 200,000th row, no window" (fun () -> (Answer.answer ~order:{ by_date with limit = 51; after = Some cursor } v q1 (Wire.Give give1)).n);
+  measure "the first page of 51, no window" (fun () -> (Answer.answer ~order:{ by_date with limit = 51 } v q1 (Wire.Give give1)).n);
   close db
 
 let () =

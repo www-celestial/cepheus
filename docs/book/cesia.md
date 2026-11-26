@@ -695,6 +695,137 @@ protocol; the package folds them into one map, so a message gives the group's ma
 memory bound of a question ([limits](limits.md#questions)): past it, `Err` of Code `"too_large"`, never a server out
 of memory.
 
+## Windows: Running, Rank, Prev, Each
+
+A **window** is a field of `Give` whose value comes from the other rows of the answer, read in `Sort`'s order: a
+running total, a moving mean, the row's place, the row before. And `Each` cuts the rows into groups: the windows start
+again at each group's first row, and `Limit` is each group's.
+
+```cesia norun
+day(d) = date.FormatDate(date.FromUnix(d))
+for r in result.Unwrap(cepheus.Find(5, (i, c, n, a, d) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a], [i, Sale.Day, d]],
+  Give: {Name: n, Day: d, Amount: a, SoFar: cepheus.Running(cepheus.Sum(a)), Before: cepheus.Prev(a),
+         Mean2: cepheus.Running(cepheus.Avg(a), last = 2), Row: cepheus.Running(cepheus.Count())},
+  Sort: [d],
+}, sales))
+  io.Print(day(r.Day), r.Name, r.Amount, r.SoFar, r.Before, r.Mean2, r.Row)
+end
+(* each client's balance: the windows start again at each client's first sale *)
+for r in result.Unwrap(cepheus.Find(5, (i, c, n, a, d) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a], [i, Sale.Day, d]],
+  Give: {Name: n, Day: d, Amount: a, Balance: cepheus.Running(cepheus.Sum(a))},
+  Sort: [n, d],
+  Each: [n],
+}, sales))
+  io.Print(r.Name, day(r.Day), r.Amount, r.Balance)
+end
+(* the largest sale of each client: Limit is each group's *)
+io.Print(cepheus.Find(4, (i, c, n, a) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a]],
+  Give: {Name: n, Amount: a}, Sort: [cepheus.Desc(a)], Limit: 1, Each: [n],
+}, sales))
+(* the clients by their total, with their places: a window over a report's groups *)
+io.Print(cepheus.Find(4, (i, c, n, a) -> {
+  Where: [[i, Sale.Client, c], [c, Client.Name, n], [i, Sale.Amount, a]],
+  Give: {Name: n, Total: cepheus.Sum(a), Place: cepheus.Rank(), SoFar: cepheus.Running(cepheus.Sum(cepheus.Sum(a)))},
+  Sort: [cepheus.Desc(cepheus.Sum(a))],
+}, sales))
+```
+
+```text
+2027-01-31 Ada Martin 10.0 10.0 missing 10.0 1
+2027-02-10 Bo Lind 20.0 30.0 10.0 15.0 2
+2027-02-10 Ada Martin 30.0 60.0 20.0 25.0 3
+2027-03-31 Bo Lind 60.0 120.0 30.0 45.0 4
+Ada Martin 2027-01-31 10.0 10.0
+Ada Martin 2027-02-10 30.0 40.0
+Bo Lind 2027-02-10 20.0 20.0
+Bo Lind 2027-03-31 60.0 80.0
+Ok([{Name: "Bo Lind", Amount: 60.0}, {Name: "Ada Martin", Amount: 30.0}])
+Ok([{Name: "Bo Lind", Total: 80.0, Place: 1, SoFar: 80.0}, {Name: "Ada Martin", Total: 40.0, Place: 2, SoFar: 120.0}])
+```
+
+![Six months in Sort's order, each with its total. The running total of a month is the sum from January to it: 1,200, 2,000, 3,500... For April, the frame of last = 3 covers February, March and April, whose mean is 1,066.67, and Prev gives March's 1,500.](images/windows-running.svg)
+
+On 10 February Bo's sale comes before Ada's: `Sort` orders the rows of one day by their other fields, the amount
+first (20 before 30), so the running total, the row before and the row's number are the same at each run. The figure
+shows the months of [tutorial 13](tutorials.md#13-a-monthly-balance-with-a-running-total-the-change-from-last-month-and-a-3-month-moving-average):
+each window reads the rows in `Sort`'s order, from the first one to the row, or the last 3 of them.
+
+- `cepheus.Running(f)`: the aggregate f over the rows from the first of the row's group to the row (SQL's
+  `f(x) OVER (ORDER BY ... ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)`); `cepheus.Running(f, last = n)`: over the
+  row and the n - 1 before it (`ROWS BETWEEN n - 1 PRECEDING AND CURRENT ROW`), fewer for the group's first rows, as
+  SQL's frame holds the rows it can. f is `Sum`, `Avg`, `Min` or `Max` of a field of `Give`, of the types those
+  aggregates take (a sum of ints or money, a mean of ints, floats, money or dates, the least or the largest int, money
+  or date), or `Count()`, the frame's rows: `Running(Count())` is the row's number, SQL's `row_number()`.
+- `cepheus.Rank()`: the row's place in `Sort`'s order within its group, the rows equal in `Sort`'s keys sharing it and
+  the places they take skipped: 1, 2, 2, 4 (SQL's `rank()`); `cepheus.Rank(dense = true)`: none skipped, 1, 2, 2, 3
+  (`dense_rank()`).
+- `cepheus.Prev(x)`: the field x of `Give` in the row before, in `Sort`'s order within the group (SQL's `lag(x)`);
+  `cepheus.Prev(x, back = n)`: n rows before (`lag(x, n)`, the same month last year: `back = 12`); `missing` for the
+  group's first rows, as `lag` gives `NULL`. The next row's value is `Prev` in the reverse order (SQL's `lead`).
+- `Each: [x, ...]`, a key of the question beside `Sort` and `Limit`: fields of `Give` that are variables or `Trunc`s
+  (a report's keys), which cut the rows into groups (SQL's `PARTITION BY`). The windows start again at each group's
+  first row; `Limit: k` keeps the first k rows of each group and the copies of its k-th (SQL's `LATERAL (... ORDER BY
+  ... LIMIT k)`, or `row_number() OVER (PARTITION BY ...) <= k`); `Limit: 1` is SQL's `DISTINCT ON`. The rows still
+  come in `Sort`'s order, the whole answer's: to have each group's rows together, sort by the group first.
+
+  | sugar | its plain form | SQL |
+  |---|---|---|
+  | `cepheus.Running(cepheus.Count())` | (none: the frame's rows counted) | `row_number() OVER (...)` |
+  | `cepheus.Prev(x)` | `cepheus.Prev(x, back = 1)` | `lag(x) OVER (...)` |
+  | `Limit: 1, Each: [x]` | (none: Limit of each group) | `DISTINCT ON (x)` |
+
+- **The argument of a window is a field of `Give`**, written as `Sort` writes its keys: a variable, an aggregate or a
+  `Trunc` that `Give` gives. So rows equal in `Sort`'s order are the same row, and a window's value is the same at each
+  run. In a report a row is a group: the running total of the groups' sums is `Running(Sum(Sum(t)))`, the `Sum` of the
+  field `Sum(t)`, and the mean of the last three months' totals `Running(Avg(Sum(t)), last = 3)`, as SQL writes
+  `sum(sum(t)) OVER (...)` and `avg(sum(t)) OVER (...)`.
+- **The order.** A window needs `Sort` (without it, `Err` of Code `"invalid"`, never rows in an order no one chose).
+  `Sort`'s order is total: its keys, then every other field by name, so `Running` counts rows equal in the keys one by
+  one, in that order (SQL's `ROWS`). PostgreSQL's default frame for `sum(x) OVER (ORDER BY ...)` is `RANGE`: rows equal
+  in the `ORDER BY` share one total, the one after the last of them; with a unique order the two are the same. `Rank`
+  compares the keys `Sort` was given, not the other fields.
+- **Pages.** The windows are computed before `After` and `Limit`: a running total on the second page goes on from the
+  first page's, a `Rank` counts the rows of the pages before, a `Prev` reads the last row of the page before. `Each`
+  takes no `After` (`Limit` is then each group's, so a page has no last row): page the groups with a question of
+  their own, then ask their rows with `In`.
+- **missing.** A missing value (an `Optional`'s, a `Prev` of the first row, a variance of one value) is left out of
+  `Sum`, `Avg`, `Min` and `Max`, as SQL leaves out `NULL`; a frame with no value gives `missing`. `Count()` counts the
+  frame's rows, whatever their values.
+- **Types and exactness.** As the aggregates': a running sum of ints is an Int, of money money; a mean of ints a
+  Float, of money money of its scale rounded half away from zero, of dates a date; from **exact sums**, so a moving
+  mean over a frame that slides is the same bits as the mean of its rows computed apart. A running sum past the 63 bits
+  of an Int is `Err` of Code `"invalid"` (in a row the answer gives; a sum past them in a row after the page is no
+  error).
+- **Errors.** A window without `Sort`, a window of a field `Give` does not give, a window as a key of `Sort`, `Running`
+  of `Count(x)`, `Values` or a quantile, `last` or `back` outside 1 to 100,000, `Each` without `Sort`, `Each` without
+  `Limit` or a window, `Each` with `After`, `Each` of an aggregate, a window or `Each` over a report with `Values`:
+  `Err` of Code `"invalid"`, naming it ([errors](errors.md)).
+
+**How it is answered.** The rows are made as without windows (the first k of the order for a `Limit`, read off the
+index of the first key when it is one, [pages](#sort-limit-and-after-pages)), each group's listed in order once (a
+counting sort of their groups), and each window is then one pass over each group, the methods of [Leis 2015](references.md#windows):
+a frame from the first row keeps its aggregate as it goes (cumulative aggregation); a frame of the last n rows adds the
+row that comes and takes out the one that goes (removable cumulative aggregation), which the exact sums allow with no
+error at all, where sums of floats would drift; `Min` and `Max` over the last n rows, which no subtraction undoes, keep
+a queue of the frame's candidates, each later and better than the one before, so each row goes in and out once
+([Lemire 2006](references.md#windows)). A window costs one pass of its rows, whatever its frame. With `Each` and
+`Limit: k`, each group keeps at most 2k rows while the question is read, on every core, sorted back to its first k
+when it fills, a row past the group's k-th set aside after one comparison: the work is about one comparison a row, the
+memory k rows a group. A page after a cursor does not sort the rows before it: one pass over them gives their count,
+their sums, their best values and the last few rows a frame or a `Prev` needs, read from the range of the first key
+before the cursor when it is an index's, and the page itself is read as a page without windows is.
+
+**Watched.** A `Watch` of a question with windows or `Each` is refused (`invalid`): a running total, a place or a row
+before hangs on every row before it, and `Each`'s first rows of a group on every row of the group, so one change would
+change every row after it. Watch the question without them and compute them in the program, or ask `Find` again when
+the watch says the rows changed.
+
+**Bounds.** At most 64 windows a question; `last` and `back` at most 100,000 rows; the rows, the groups' keys and the
+windows' values count in the answer's cells ([limits](limits.md#questions)): past them, `Err` of Code `"too_large"`.
+
 ## Watch: live questions
 
 A **live question** is a `Find` that stays open. `cepheus.Watch(n, question, db, size = 64, until = missing)` takes the same question as

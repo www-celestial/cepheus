@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="380" viewBox="0 0 520 380">
+<title>The invoices of 2028 by client, the latest first: Each by client and Limit 3 keep the first 3 of each</title>
+<style>
+text{font-family:system-ui, sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace, Menlo, Consolas, monospace;font-size:12.5px}
+.h{font-weight:600}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.off{fill:#8c959f}
+.row{fill:#fff;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.frame{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.2;stroke-dasharray:4 3}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.cut{stroke:#8c959f;stroke-width:1}
+</style>
+<rect width="520" height="380" fill="#fff"/>
+<text class="c" x="16" y="22">Sort: [n, Desc(d)]   Limit: 3   Each: [n]</text>
+<rect class="cur" x="16" y="48" width="454" height="22"/>
+<text x="24" y="64">Ada Martin</text>
+<text x="150" y="64">May 12</text>
+<text x="290" y="64" text-anchor="end">1,100</text>
+<text class="a" x="312" y="64">1st: Limit: 1 keeps it</text>
+<rect class="row" x="16" y="74" width="454" height="22"/>
+<text x="24" y="90">Ada Martin</text>
+<text x="150" y="90">Mar 15</text>
+<text x="290" y="90" text-anchor="end">600</text>
+<text class="s" x="312" y="90">2nd of Ada Martin</text>
+<rect class="row" x="16" y="100" width="454" height="22"/>
+<text x="24" y="116">Ada Martin</text>
+<text x="150" y="116">Feb 17</text>
+<text x="290" y="116" text-anchor="end">500</text>
+<text class="s" x="312" y="116">3rd of Ada Martin</text>
+<rect class="row" x="16" y="126" width="454" height="22"/>
+<text class="off" x="24" y="142">Ada Martin</text>
+<text class="off" x="150" y="142">Jan 5</text>
+<text class="off" x="290" y="142" text-anchor="end">700</text>
+<line class="cut" x1="20" y1="137" x2="300" y2="137"/>
+<text class="off" x="312" y="142">after the 3rd: left out</text>
+<line class="cut" x1="16" y1="155" x2="470" y2="155"/>
+<rect class="cur" x="16" y="160" width="454" height="22"/>
+<text x="24" y="176">Bo Lind</text>
+<text x="150" y="176">Jun 1</text>
+<text x="290" y="176" text-anchor="end">1,000</text>
+<text class="a" x="312" y="176">1st: Limit: 1 keeps it</text>
+<rect class="row" x="16" y="186" width="454" height="22"/>
+<text x="24" y="202">Bo Lind</text>
+<text x="150" y="202">Apr 22</text>
+<text x="290" y="202" text-anchor="end">500</text>
+<text class="s" x="312" y="202">2nd of Bo Lind</text>
+<rect class="row" x="16" y="212" width="454" height="22"/>
+<text x="24" y="228">Bo Lind</text>
+<text x="150" y="228">Mar 2</text>
+<text x="290" y="228" text-anchor="end">900</text>
+<text class="s" x="312" y="228">3rd of Bo Lind</text>
+<rect class="row" x="16" y="238" width="454" height="22"/>
+<text class="off" x="24" y="254">Bo Lind</text>
+<text class="off" x="150" y="254">Jan 20</text>
+<text class="off" x="290" y="254" text-anchor="end">500</text>
+<line class="cut" x1="20" y1="249" x2="300" y2="249"/>
+<text class="off" x="312" y="254">after the 3rd: left out</text>
+<line class="cut" x1="16" y1="267" x2="470" y2="267"/>
+<rect class="cur" x="16" y="272" width="454" height="22"/>
+<text x="24" y="288">Cy Moreau</text>
+<text x="150" y="288">Jun 19</text>
+<text x="290" y="288" text-anchor="end">500</text>
+<text class="a" x="312" y="288">1st: Limit: 1 keeps it</text>
+<rect class="row" x="16" y="298" width="454" height="22"/>
+<text x="24" y="314">Cy Moreau</text>
+<text x="150" y="314">Apr 8</text>
+<text x="290" y="314" text-anchor="end">400</text>
+<text class="s" x="312" y="314">2nd of Cy Moreau</text>
+<rect class="row" x="16" y="324" width="454" height="22"/>
+<text x="24" y="340">Cy Moreau</text>
+<text x="150" y="340">Feb 3</text>
+<text x="290" y="340" text-anchor="end">300</text>
+<text class="s" x="312" y="340">3rd of Cy Moreau</text>
+<text class="s" x="16" y="366">11 invoices read once; 9 kept: the first 3 rows of each client in Sort's order.</text>
+</svg>

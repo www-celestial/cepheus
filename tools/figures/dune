@@ -1,0 +1,5 @@
+; the figures of the book's windows, drawn from the engine's answers: dune exec tools/figures/figures.exe -- docs/book/images
+(executable
+ (name figures)
+ (libraries cepheus cepheus_server unix)
+ (flags (:standard -w +a-4-9-40-41-42-44-45-50-70)))

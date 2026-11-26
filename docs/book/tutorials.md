@@ -1085,6 +1085,280 @@ different values with their counts and selects the k-th (Hoare's selection, abou
 payments with a hundred different delays holds a hundred entries. PostgreSQL computes the delay from the dates in the
 question (`paid_at - due`); Cepheus needs it as a fact until a question has arithmetic.
 
+## 13. A monthly balance with a running total, the change from last month and a 3-month moving average
+
+**The problem.** The finance team follows what is billed each month of 2028: the month's total, the total since
+January, the change from the month before, and the mean of the last three months, which smooths a month that is high
+or low by chance. And each client's statement lists its invoices one page at a time, with the balance after each
+invoice: on page 2 the balance must go on from page 1, not start again at zero.
+
+**The Cepheus solution.** Three **windows**, fields of `Give` whose value comes from the rows around the row, in
+`Sort`'s order ([Windows](cesia.md#windows-running-rank-prev-each)): `cepheus.Running(f)`, the aggregate f over the rows
+from the first one to this one (a running total, SQL's `sum(...) OVER (ORDER BY ...)`), and over the last n rows with
+`last = n` (a moving average, `ROWS BETWEEN n - 1 PRECEDING AND CURRENT ROW`); `cepheus.Prev(x)`, the field x of the
+row before (SQL's `lag`). In a report a row is a month: the running total of the months' totals is
+`Running(Sum(Sum(t)))`, the sum of the field `Sum(t)`, as SQL writes `sum(sum(total)) OVER (...)`. Eleven invoices of
+January to June 2028:
+
+```cesia norun
+half = [[ada, 700, 1830675600], [bo, 500, 1831971600], [cy, 300, 1833181200], [ada, 500, 1834390800],
+        [bo, 900, 1835600400], [ada, 600, 1836723600], [cy, 400, 1838793600], [bo, 500, 1840003200],
+        [ada, 1100, 1841731200], [bo, 1000, 1843459200], [cy, 500, 1845014400]]
+for x in half
+  result.Unwrap(cepheus.Insert(Invoice, {Client: x[1], Total: x[2], Status: "unpaid", Date: x[3]}, db))
+end
+month(d) = cepheus.Trunc(d, "month")
+balance = (i, d, t) -> {
+  Where: [[i, Invoice.Date, d], cepheus.Between(d, 1830297600, 1861919999), [i, Invoice.Total, t]],
+  Give: {Month: month(d), Billed: cepheus.Sum(t), SoFar: cepheus.Running(cepheus.Sum(cepheus.Sum(t))),
+         Before: cepheus.Prev(cepheus.Sum(t)), Mean3: cepheus.Running(cepheus.Avg(cepheus.Sum(t)), last = 3)},
+  Sort: [month(d)],
+}
+defn fromLast(r)
+  (** The change from the month before: none for the first month. *)
+  if r.Before == missing
+    return missing
+  end
+  r.Billed - r.Before
+end
+for r in result.Unwrap(cepheus.Find(3, balance, db))
+  io.Print(date.FormatDate(date.FromUnix(r.Month)), r.Billed, r.SoFar, r.Before, fromLast(r), r.Mean3)
+end
+```
+
+```text
+2028-01-01 1200.0 1200.0 missing missing 1200.0
+2028-02-01 800.0 2000.0 1200.0 -400.0 1000.0
+2028-03-01 1500.0 3500.0 800.0 700.0 1166.67
+2028-04-01 900.0 4400.0 1500.0 -600.0 1066.67
+2028-05-01 1100.0 5500.0 900.0 200.0 1166.67
+2028-06-01 1500.0 7000.0 1100.0 400.0 1166.67
+```
+
+![Six months in Sort's order, each with its total. The running total of a month is the sum from January to it: 1,200, 2,000, 3,500... For April, the frame of last = 3 covers February, March and April, whose mean is 1,066.67, and Prev gives March's 1,500.](images/windows-running.svg)
+
+Step by step: `Sort` puts the months in order, and each window reads them in that order. `SoFar` is the sum of
+`Billed` from January to the month; `Before` is the month before's `Billed`, missing for January, which has none (as
+SQL's `lag` gives `NULL`); the change is computed in the program from the two. `Mean3` is the mean of the month and the
+two before it: January's is its own total and February's the mean of two months, as SQL's frame holds the rows it can.
+The mean of money is money, rounded half away from zero to the cent, from the exact sum.
+
+**The statement, a page at a time.** Ada's invoices of 2028 with the balance after each, two a page:
+
+```cesia norun
+statement = (after) -> ((i, d, t) -> {
+  Where: [[i, Invoice.Client, ada], [i, Invoice.Date, d], cepheus.Between(d, 1830297600, 1861919999), [i, Invoice.Total, t]],
+  Give: {Invoice: i, Date: d, Total: t, Balance: cepheus.Running(cepheus.Sum(t))},
+  Sort: [d],
+  Limit: 2,
+  After: after,
+})
+one = result.Unwrap(cepheus.Find(3, statement(missing), db))
+two = result.Unwrap(cepheus.Find(3, statement(one[2]), db))
+for r in list.Concat(one, two)
+  io.Print(date.FormatDate(date.FromUnix(r.Date)), r.Total, r.Balance)
+end
+```
+
+```text
+2028-01-05 700.0 700.0
+2028-02-17 500.0 1200.0
+2028-03-15 600.0 1800.0
+2028-05-12 1100.0 2900.0
+```
+
+The second page starts after the first page's last row and its balance goes on from 1,200: a window is computed over
+every row before the page, then `After` and `Limit` cut the page. Cepheus does not sort those rows to do it: one pass
+over them gives their sum, and the page itself is read from the index of the dates, as a page without windows is
+([how it is answered](cesia.md#windows-running-rank-prev-each)).
+
+**PostgreSQL** writes the same windows with `OVER`, and a window over a report's groups with an aggregate inside
+another:
+
+```sql
+SELECT date_trunc('month', date) AS month, sum(total) AS billed,
+       sum(sum(total)) OVER w AS so_far, lag(sum(total)) OVER w AS before,
+       sum(total) - lag(sum(total)) OVER w AS change,
+       avg(sum(total)) OVER (w ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS mean3
+  FROM invoice WHERE date >= '2028-01-01' AND date < '2029-01-01'
+ GROUP BY 1 WINDOW w AS (ORDER BY date_trunc('month', date)) ORDER BY 1;
+```
+
+```text
+         month          | billed  | so_far  | before  | change  |         mean3
+------------------------+---------+---------+---------+---------+-----------------------
+ 2028-01-01 00:00:00+00 | 1200.00 | 1200.00 |         |         | 1200.0000000000000000
+ 2028-02-01 00:00:00+00 |  800.00 | 2000.00 | 1200.00 | -400.00 | 1000.0000000000000000
+ 2028-03-01 00:00:00+00 | 1500.00 | 3500.00 |  800.00 |  700.00 | 1166.6666666666666667
+ 2028-04-01 00:00:00+00 |  900.00 | 4400.00 | 1500.00 | -600.00 | 1066.6666666666666667
+ 2028-05-01 00:00:00+00 | 1100.00 | 5500.00 |  900.00 |  200.00 | 1166.6666666666666667
+ 2028-06-01 00:00:00+00 | 1500.00 | 7000.00 | 1100.00 |  400.00 | 1166.6666666666666667
+```
+
+(The session's zone is UTC here, as the months of `Trunc(d, "month")` are.) The statement's second page, after Ada's
+invoice of 17 February (its id is 4 in PostgreSQL): the keyset condition
+must stay outside the window, or the balance starts again at the page (the first query below), so the window goes in
+a subquery that reads every row before the page (the second):
+
+```sql
+SELECT date::date, total, sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING) AS balance
+  FROM invoice WHERE client = 1 AND date >= '2028-01-01' AND (date, id) > ('2028-02-17 09:00+00', 4)
+ ORDER BY date, id LIMIT 2;
+SELECT date::date, total, balance FROM (SELECT date, total, id, sum(total) OVER (ORDER BY date, id ROWS UNBOUNDED PRECEDING) AS balance
+                 FROM invoice WHERE client = 1 AND date >= '2028-01-01') s
+ WHERE (date, id) > ('2028-02-17 09:00+00', 4) ORDER BY date, id LIMIT 2;
+```
+
+```text
+    date    |  total  | balance
+------------+---------+---------
+ 2028-03-15 |  600.00 |  600.00
+ 2028-05-12 | 1100.00 | 1700.00
+
+    date    |  total  | balance
+------------+---------+---------
+ 2028-03-15 |  600.00 | 1800.00
+ 2028-05-12 | 1100.00 | 2900.00
+```
+
+**The difference.** The same months, totals, changes and means. Three differences. PostgreSQL's `avg` of a `numeric`
+gives 16 decimals (1166.6666666666666667), Cepheus's mean of money is money, to the cent, from the exact sum, the same
+whatever the order of the rows. PostgreSQL's default frame for `sum(...) OVER (ORDER BY ...)` is `RANGE`: rows equal in
+the `ORDER BY` share one total, the one after the last of them; `Running` counts the rows one by one (`ROWS`), and
+since `Sort` breaks ties by every other field, its order and its totals are the same at each run (with a unique order,
+as months, both frames give the same). And the page after a cursor: in SQL the cursor must be kept out of the window
+by hand, else the balance restarts on each page, a mistake no error shows; with `After` the window always reads the
+rows before the page.
+
+## 14. The 3 latest invoices of each client, the last one of each, a leaderboard of clients by revenue
+
+**The problem.** The account managers' screen shows, for each client, the three latest invoices of the year; the
+collections desk wants only the last invoice of each client; and the sales director ranks the clients by revenue,
+two clients of the same revenue sharing a place.
+
+**The Cepheus solution.** `Each`, a list of fields of `Give` that cut the rows into groups: `Limit` is then each
+group's, the first k rows of each in `Sort`'s order (SQL's `LATERAL (... LIMIT 3)`, or `row_number() OVER (PARTITION
+BY ...)` kept at 3 or below); `Limit: 1` is the first row of each group, SQL's `DISTINCT ON`. And `cepheus.Rank()`,
+the place of the row in `Sort`'s order, rows equal in `Sort`'s keys sharing it (SQL's `rank()`), `Rank(dense = true)`
+with no place skipped (`dense_rank()`), `Running(Count())` the row's number (`row_number()`).
+
+```cesia norun
+latest = (i, c, n, d, t) -> {
+  Where: [[i, Invoice.Date, d], cepheus.Between(d, 1830297600, 1861919999), [i, Invoice.Client, c], [c, Client.Name, n], [i, Invoice.Total, t]],
+  Give: {Client: n, Date: d, Total: t},
+  Sort: [n, cepheus.Desc(d)],
+  Limit: 3,
+  Each: [n],
+}
+for r in result.Unwrap(cepheus.Find(5, latest, db))
+  io.Print(r.Client, date.FormatDate(date.FromUnix(r.Date)), r.Total)
+end
+last = (i, c, n, d, t) -> {Where: latest(i, c, n, d, t).Where, Give: latest(i, c, n, d, t).Give, Sort: [cepheus.Desc(d)], Limit: 1, Each: [n]}
+io.Print([{Client: r.Client, Date: date.FormatDate(date.FromUnix(r.Date))} for r in result.Unwrap(cepheus.Find(5, last, db))])
+```
+
+```text
+Ada Martin 2028-05-12 1100.0
+Ada Martin 2028-03-15 600.0
+Ada Martin 2028-02-17 500.0
+Bo Lind 2028-06-01 1000.0
+Bo Lind 2028-04-22 500.0
+Bo Lind 2028-03-02 900.0
+Cy Moreau 2028-06-19 500.0
+Cy Moreau 2028-04-08 400.0
+Cy Moreau 2028-02-03 300.0
+[{Client: "Cy Moreau", Date: "2028-06-19"}, {Client: "Bo Lind", Date: "2028-06-01"}, {Client: "Ada Martin", Date: "2028-05-12"}]
+```
+
+![The invoices of 2028 sorted by client, then by date from the latest: with Each by client and Limit 3, the first three rows of each client are kept and the others left out; with Limit 1, the first of each.](images/windows-each.svg)
+
+The rows still come in `Sort`'s order: sorted by the client first, each client's rows are together; the last invoices,
+sorted by date alone, come from the latest, whoever the client. The leaderboard is a report with its places:
+
+```cesia norun
+board = (i, c, n, t, d) -> {
+  Where: [[i, Invoice.Date, d], cepheus.Between(d, 1830297600, 1861919999), [i, Invoice.Client, c], [c, Client.Name, n], [i, Invoice.Total, t]],
+  Give: {Client: n, Revenue: cepheus.Sum(t), Place: cepheus.Rank(), Dense: cepheus.Rank(dense = true), Row: cepheus.Running(cepheus.Count())},
+  Sort: [cepheus.Desc(cepheus.Sum(t))],
+}
+for r in result.Unwrap(cepheus.Find(5, board, db))
+  io.Print(r.Place, r.Dense, r.Row, r.Client, r.Revenue)
+end
+```
+
+```text
+1 1 1 Ada Martin 2900.0
+1 1 2 Bo Lind 2900.0
+3 2 3 Cy Moreau 1200.0
+```
+
+![Three clients sorted by revenue, the largest first: Ada and Bo both 2,900, Cy 1,200. Rank gives 1, 1, 3; Rank(dense = true) 1, 1, 2; Running(Count()), the row's number, 1, 2, 3.](images/windows-rank.svg)
+
+**PostgreSQL** writes the 3 latest of each with `LATERAL` (an index on `(client, date)` makes it read 3 rows a
+client) or with `row_number()` in a subquery, the last one with `DISTINCT ON`, and the places with `rank()`:
+
+```sql
+SELECT c.name, l.date::date, l.total FROM client c
+  CROSS JOIN LATERAL (SELECT date, total FROM invoice i WHERE i.client = c.id AND date >= '2028-01-01'
+                      ORDER BY date DESC LIMIT 3) l
+ ORDER BY c.name, l.date DESC;
+SELECT name, date::date, total FROM (
+  SELECT c.name, i.date, i.total, row_number() OVER (PARTITION BY c.name ORDER BY i.date DESC) AS n
+    FROM invoice i JOIN client c ON c.id = i.client WHERE i.date >= '2028-01-01') s
+ WHERE n <= 3 ORDER BY name, date DESC;
+SELECT DISTINCT ON (c.name) c.name, i.date::date FROM invoice i JOIN client c ON c.id = i.client
+ WHERE i.date >= '2028-01-01' ORDER BY c.name, i.date DESC;
+SELECT rank() OVER w AS place, dense_rank() OVER w AS dense, row_number() OVER w AS row, c.name, sum(i.total) AS revenue
+  FROM invoice i JOIN client c ON c.id = i.client WHERE i.date >= '2028-01-01'
+ GROUP BY c.name WINDOW w AS (ORDER BY sum(i.total) DESC) ORDER BY 1, 4;
+```
+
+```text
+    name    |    date    |  total
+------------+------------+---------
+ Ada Martin | 2028-05-12 | 1100.00
+ Ada Martin | 2028-03-15 |  600.00
+ Ada Martin | 2028-02-17 |  500.00
+ Bo Lind    | 2028-06-01 | 1000.00
+ Bo Lind    | 2028-04-22 |  500.00
+ Bo Lind    | 2028-03-02 |  900.00
+ Cy Moreau  | 2028-06-19 |  500.00
+ Cy Moreau  | 2028-04-08 |  400.00
+ Cy Moreau  | 2028-02-03 |  300.00
+
+    name    |    date    |  total
+------------+------------+---------
+ Ada Martin | 2028-05-12 | 1100.00
+ Ada Martin | 2028-03-15 |  600.00
+ Ada Martin | 2028-02-17 |  500.00
+ Bo Lind    | 2028-06-01 | 1000.00
+ Bo Lind    | 2028-04-22 |  500.00
+ Bo Lind    | 2028-03-02 |  900.00
+ Cy Moreau  | 2028-06-19 |  500.00
+ Cy Moreau  | 2028-04-08 |  400.00
+ Cy Moreau  | 2028-02-03 |  300.00
+
+    name    |    date
+------------+------------
+ Ada Martin | 2028-05-12
+ Bo Lind    | 2028-06-01
+ Cy Moreau  | 2028-06-19
+
+ place | dense | row |    name    | revenue
+-------+-------+-----+------------+---------
+     1 |     1 |   1 | Ada Martin | 2900.00
+     1 |     1 |   2 | Bo Lind    | 2900.00
+     3 |     2 |   3 | Cy Moreau  | 1200.00
+```
+
+**The difference.** The same invoices and the same places, and one thing PostgreSQL leaves open. Its `DISTINCT ON`
+orders the rows by the client (its `DISTINCT ON` must lead the `ORDER BY`), so the last invoices come by client;
+`Each` keeps `Sort`'s order, here the latest first. Its `row_number()` numbers Ada and Bo, of the same revenue, in an
+order it does not promise (the `ORDER BY 1, 4` above sorts the output after it): `Rank` and `Running(Count())` follow
+`Sort`, then every other field of the row, so Ada comes before Bo at each run. `LATERAL` needs the clients' table to
+start from and an index on `(client, date)` for its 3 rows a client; `Each` needs neither: it keeps at most 6 rows of
+each client while it reads the invoices once, a row past a client's third latest set aside after one comparison.
+
 ## What it costs
 
 Measured on the benchmarks' data at 1 million facts (11,363 clients, 227,260 invoices, 56,797 follow links), the same
