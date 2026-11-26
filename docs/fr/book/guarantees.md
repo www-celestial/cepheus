@@ -414,7 +414,9 @@ règle, des retraits, des runs fusionnés au hasard) et des questions aléatoire
 `Not`, `Or`, `And` et `In`, et un select, Sort, Limit et After aléatoires, répondues par un oracle (un évaluateur de
 référence) en force brute sur chaque fait (les bindings, les groupes, l'ordre valeur par valeur, le curseur, les
 ex aequo), et par le moteur sur le chemin du heap (un tas qui garde les meilleures lignes), sur le chemin de l'index et
-selon son propre choix, avant et après un aller-retour sur le réseau : les mêmes lignes, dans le même ordre ; découpées
+selon son propre choix, avant et après un aller-retour sur le réseau : les mêmes lignes, dans le même ordre, la `Sum` d'un groupe l'exacte
+ou, quand son total exact n'est pas un Int (les entiers extrêmes des états en font), la question refusée sur chaque
+chemin, `Sum of ...` ([une somme est exacte, ou refusée](cesia.md#find--les-questions)) ; découpées
 sur 3 domains à chaque niveau de deux candidats ou plus, ou avec leur premier niveau sondé, les lignes d'un seul domain,
 dans leur ordre, bit pour bit ; et des questions vivantes avec `Not`, `Or` et `In` vérifiées par l'oracle après chaque
 frame. Avec des fenêtres et `Each` ([les fenêtres](cesia.md#les-fenêtres--running-rank-prev-each)), la valeur de chaque

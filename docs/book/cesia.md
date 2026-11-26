@@ -336,6 +336,7 @@ Meter = cepheus.Kind("meter", {Site: cepheus.Text(), Pulses: cepheus.Int()})
 meters = result.Unwrap(cepheus.Fork(cepheus.Empty, [Meter]))
 for x in [["north", 4611686018427387903], ["north", 1], ["south", 4611686018427387903], ["south", 1], ["south", -1]]
   result.Unwrap(cepheus.Insert(Meter, {Site: x[1], Pulses: x[2]}, meters))
+end
 pulses = (site) -> cepheus.Find(2, (m, p) -> {Where: [[m, Meter.Site, site], [m, Meter.Pulses, p]], Give: {Total: cepheus.Sum(p), N: cepheus.Count()}}, meters)
 io.Print(pulses("north"))
 io.Print(pulses("south"))
