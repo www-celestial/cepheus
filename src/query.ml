@@ -448,7 +448,7 @@ type 'a runner = {
 and 'a ctl = {
   mutable ticks : bool;  (* looks at them every [every] candidates (else at the budget only) *)
   mutable shared : bool;  (* other domains work for the question: its budget is their count and its own *)
-  mutable cut : int;  (* the level past which the bindings are collected ([collecting]), not stepped *)
+  mutable cut : int;  (* the level whose candidates are collected ([collecting]) is the one before it *)
   mutable collecting : bool;
   mutable collect : unit -> unit;
   mutable splitting : bool;  (* may [split] a level: the asking domain's runner, outside a split *)
@@ -899,9 +899,8 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
           keys.(xi).(j) <- key
         end
       in
-      (* [cut] is n but while the asking domain collects a level's candidates (the fold's [collect_level]) *)
       let rec level i acc =
-        if i = ctl.cut then (if ctl.collecting then ctl.collect () else acc := step !acc env)
+        if i = n then acc := step !acc env
         else begin
           let x = ord.(i) in
           let f = func.(i) in
@@ -933,7 +932,11 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
         if ctl.splitting && size >= 4 && ctl.split i src size acc then ()
         else begin
           bound.(x) <- true;
-          (if leap.(i) && src >= 0 && slice.(i).(src) && size >= 4 then leapfrog i src size acc
+          (* the asking domain collecting this level's candidates (the fold's [collect_level]): each one given to
+             [collect], not to the next level *)
+          let coll = ctl.collecting && i + 1 = ctl.cut in
+          (if leap.(i) && src >= 0 && slice.(i).(src) && size >= 4 then leapfrog i src size coll acc
+           else if coll then candidates i src (fun c -> env.(x) <- c; ctl.collect ())
            else candidates i src (fun c -> env.(x) <- c; level (i + 1) acc));
           bound.(x) <- false
         end
@@ -941,7 +944,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
          times the source's are read into their buffers, then the iterators, in the order of their keys, each seek the
          largest key in turn by galloping (Bentley, Yao 1976): a key all reach is a candidate, checked against the
          level's other patterns. Read: at most 1 + 8 (k - 1) times the source's count; compared: O(m log (n / m)) *)
-      and leapfrog i src size acc =
+      and leapfrog i src size coll acc =
         let x = ord.(i) and ps = by_var.(ord.(i)) and cs = counts.(ord.(i)) and xi = ord.(i) in
         let parts = partss.(i) and pos = poss.(i) in
         (* [lf]: the intersected patterns but the source (which [others] skips by its place), as bits: only patterns
@@ -952,7 +955,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
           if j <> src && j < 62 && slice.(i).(j) && cs.(j) <= 8 * size && !k < 62 then (parts.(!k) <- j; incr k; lf := !lf lor (1 lsl j))
         done;
         let k = !k and lf = !lf in
-        if k < 2 then candidates i src (fun c -> env.(x) <- c; level (i + 1) acc)
+        if k < 2 then candidates i src (fun c -> env.(x) <- c; if coll then ctl.collect () else level (i + 1) acc)
         else begin
           let empty = ref false in
           for q = 0 to k - 1 do
@@ -968,7 +971,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
             while !ia < na && !jb < nb do
               let u = Array.unsafe_get a !ia and t = Array.unsafe_get b !jb in
               if u = t then begin
-                if in_range x u && others i src lf u then (env.(x) <- u; level (i + 1) acc);
+                if in_range x u && others i src lf u then (env.(x) <- u; if coll then ctl.collect () else level (i + 1) acc);
                 incr ia;
                 incr jb
               end
@@ -992,7 +995,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
               let xk = key !p in
               if xk = !hi then begin
                 (* every iterator is at the key *)
-                if in_range x xk && others i src lf xk then (env.(x) <- xk; level (i + 1) acc);
+                if in_range x xk && others i src lf xk then (env.(x) <- xk; if coll then ctl.collect () else level (i + 1) acc);
                 pos.(!p) <- pos.(!p) + 1;
                 if pos.(!p) >= lens.(xi).(parts.(!p)) then stop := true
                 else (hi := key !p; p := if !p + 1 = k then 0 else !p + 1)
