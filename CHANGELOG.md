@@ -302,7 +302,9 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   with that error at the write that takes it past, the other watches go on. PostgreSQL gives such a total as a `numeric`;
   SQLite 3.54.1 refuses a sum as soon as a partial sum overflows, even when its total fits
   ([comparison](docs/book/comparison.md#sums-past-63-bits), [limits](docs/book/limits.md#questions)). The cost,
-  measured ([benchmarks](docs/book/benchmarks.md)): none within the noise.
+  measured ([benchmarks](docs/book/benchmarks.md#sums-checked-past-63-bits-2026-11-26-at-1-million-facts)): about 7
+  instructions a row, no slowdown beyond the noise of the rounds (a `Sum` of 245,000 rows moved by 1 to 5 %, as the
+  aggregates it does not touch did).
 - `Trunc` of a date of the least ones (146 million years before 1970) to a year, a decade, a century or a millennium
   that starts before the least date is refused (`invalid`, naming its field): its start, 1000 times its seconds,
   wrapped to a date 146 million years after 1970. The least date's own second wrapped the same way (the floor of its

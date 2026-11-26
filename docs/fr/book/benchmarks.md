@@ -115,6 +115,38 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
 
+## Les sommes vérifiées au-delà de 63 bits (2026-11-26), à 1 million de faits
+
+**Méthode.** La `Sum` d'un rapport teste maintenant les signes de chaque addition et garde une retenue (un « carry »)
+quand elle « wrappe », c'est-à-dire repasse de l'autre côté des entiers ([une somme est exacte, ou
+refusée](cesia.md#find--les-questions)) : environ 7 instructions de plus par ligne, l'appel du carry hors de la
+boucle. Mesuré par `rbench.exe run` sur les données de [la section des
+rapports](#les-rapports--avg-countx-values-quantile-stddev-trunc-2026-11-26-à-1-million-de-faits) (245 000 factures,
+chacune une ligne de la somme), le même fichier compilé sur main (d19ff13) et sur le changement, alternés à chaque
+tour (main d'abord aux tours impairs), chaque processus dans un scope de 3 Go, sur 1 domain (`CEPHEUS_DOMAINS=1`) :
+(a) 21 tours de 11 exécutions, une charge moyenne de 6,6 au premier, 1,4 au dernier ; (b) fixé sur un cœur
+(`taskset -c 2`), 15 tours de 21 exécutions, une charge de 6,0 à 1,4 ; (c) la vérification seule : le changement
+contre lui-même avec ses deux boucles de `Sum` remises comme avant (le même code ailleurs, donc la même disposition du
+reste), fixé sur un cœur, 15 tours de 21 exécutions, sous des charges d'autres jobs de 3,1 à 16. Donnés : la médiane
+des médianes des tours, entre crochets la plus petite et la plus grande, et la médiane des rapports des tours (après
+sur avant) avec le plus petit et le plus grand.
+
+| question | avant (main) | avec la vérification | après/avant (a), 1 domain | (b), un cœur | (c), la vérification seule |
+|---|---:|---:|---:|---:|---:|
+| `Sum` de chaque facture, 1 groupe | 25,2 ms [24,6, 76,0] | 26,6 ms [25,7, 29,3] | 1,036 [0,17, 1,50] | 1,051 [0,36, 1,17] | 1,016 [0,41, 2,86] |
+| par ville, 100 groupes | 33,5 ms [32,4, 111] | 34,4 ms [33,3, 49,9] | 0,986 [0,49, 3,01] | 1,030 [0,31, 1,50] | 0,948 [0,40, 2,20] |
+| par client, 10 000 groupes | 56,2 ms [52,7, 138] | 58,2 ms [56,4, 65,6] | 0,993 [0,83, 1,98] | 1,013 [0,41, 1,12] | 0,889 [0,55, 1,34] |
+| par mois à Paris (`Trunc`, un rapport) | 75,6 ms [70,6, 159] | 78,4 ms [75,2, 84,4] | 1,028 [0,89, 1,40] | 1,022 [0,49, 1,16] | 1,005 [0,33, 3,32] |
+| par mois en UTC | 66,1 ms [59,6, 100] | 66,0 ms [62,6, 81,1] | 0,973 [0,68, 1,35] | 1,017 [0,68, 1,24] | 1,062 [0,35, 3,05] |
+| (inchangé) `Avg`, 1 groupe | 27,6 ms [27,0, 40,2] | 28,2 ms [27,1, 29,3] | 1,013 [0,27, 1,65] | 1,020 [0,71, 1,06] | 1,182 [0,38, 4,06] |
+| (inchangé) `Stddev`, 10 000 groupes | 69,4 ms [66,5, 140] | 70,5 ms [68,3, 129] | 1,064 [0,92, 1,76] | 1,029 [0,51, 1,85] | 1,000 [0,42, 3,02] |
+
+Les temps sont ceux de (b). Aucun coût ne se voit au-delà du bruit : les sommes ont bougé des mêmes 1 à 5 % que les
+agrégats que le changement ne touche pas, et la vérification seule, la seule différence entre ses deux côtés, a fait
+bouger les sommes dans les deux sens (0,89 à 1,06). Une ligne de ces sommes coûte environ 100 ns (le candidat de la
+jointure, le hash de son groupe) ; la vérification ajoute deux cycles machine environ, moins de 1 %, que ces tours ne
+peuvent pas distinguer. La `Sum` d'un watch (Live) a le même test, à chaque binding qu'un frame ajoute ou retire.
+
 ## Les fenêtres et Each (2026-11-26), à 1 million de faits
 
 **Méthode.** Les données de la section des rapports plus bas (`rbench.exe load` : 10 000 clients de 100 villes,
