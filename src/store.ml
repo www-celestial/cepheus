@@ -1126,7 +1126,149 @@ let rec base_find_text b s h =
 
 (* ---- Dictionary, delta, views ---- *)
 
-module IM = Map.Make (Int)
+(* Maps of ints: the balanced trees of Stdlib's Map.Make (Int), the same functions, written out (they follow
+   OCaml 5.5's stdlib/map.ml: AVL trees whose two sides' heights differ by at most 2, persistent by path copying),
+   with one more: [of_sorted], the tree of sorted bindings made in O(n), a node a binding. Map's own ways from sorted
+   keys copy a path a key (adds, O(n log n)), or split and join by unions (O(n), about 65 words a binding where a node
+   is 6): a cascade of 10,000 lines made two such maps a group. *)
+module IM = struct
+  type 'a t = Empty | Node of { l : 'a t; v : int; d : 'a; r : 'a t; h : int }
+
+  let empty = Empty
+  let is_empty = function Empty -> true | Node _ -> false
+  let[@inline] height = function Empty -> 0 | Node { h; _ } -> h
+
+  let create l x d r =
+    let hl = height l and hr = height r in
+    Node { l; v = x; d; r; h = (if hl >= hr then hl + 1 else hr + 1) }
+
+  let singleton x d = Node { l = Empty; v = x; d; r = Empty; h = 1 }
+
+  let bal l x d r =
+    let hl = height l and hr = height r in
+    if hl > hr + 2 then begin
+      match l with
+      | Empty -> invalid_arg "IM.bal"
+      | Node { l = ll; v = lv; d = ld; r = lr; _ } ->
+        if height ll >= height lr then create ll lv ld (create lr x d r)
+        else begin
+          match lr with
+          | Empty -> invalid_arg "IM.bal"
+          | Node { l = lrl; v = lrv; d = lrd; r = lrr; _ } -> create (create ll lv ld lrl) lrv lrd (create lrr x d r)
+        end
+    end
+    else if hr > hl + 2 then begin
+      match r with
+      | Empty -> invalid_arg "IM.bal"
+      | Node { l = rl; v = rv; d = rd; r = rr; _ } ->
+        if height rr >= height rl then create (create l x d rl) rv rd rr
+        else begin
+          match rl with
+          | Empty -> invalid_arg "IM.bal"
+          | Node { l = rll; v = rlv; d = rld; r = rlr; _ } -> create (create l x d rll) rlv rld (create rlr rv rd rr)
+        end
+    end
+    else Node { l; v = x; d; r; h = (if hl >= hr then hl + 1 else hr + 1) }
+
+  let rec add (x : int) data = function
+    | Empty -> Node { l = Empty; v = x; d = data; r = Empty; h = 1 }
+    | Node { l; v; d; r; h } as m ->
+      if x = v then (if d == data then m else Node { l; v = x; d = data; r; h })
+      else if x < v then (let ll = add x data l in if l == ll then m else bal ll v d r)
+      else (let rr = add x data r in if r == rr then m else bal l v d rr)
+
+  let rec find (x : int) = function Empty -> raise Not_found | Node { l; v; d; r; _ } -> if x = v then d else find x (if x < v then l else r)
+  let rec find_opt (x : int) = function Empty -> None | Node { l; v; d; r; _ } -> if x = v then Some d else find_opt x (if x < v then l else r)
+  let rec mem (x : int) = function Empty -> false | Node { l; v; r; _ } -> x = v || mem x (if x < v then l else r)
+
+  let rec min_binding = function Empty -> raise Not_found | Node { l = Empty; v; d; _ } -> v, d | Node { l; _ } -> min_binding l
+
+  let rec remove_min_binding = function
+    | Empty -> invalid_arg "IM.remove_min_elt"
+    | Node { l = Empty; r; _ } -> r
+    | Node { l; v; d; r; _ } -> bal (remove_min_binding l) v d r
+
+  let merge t1 t2 =
+    match t1, t2 with
+    | Empty, t | t, Empty -> t
+    | _ -> let x, d = min_binding t2 in bal t1 x d (remove_min_binding t2)
+
+  let rec remove (x : int) = function
+    | Empty -> Empty
+    | Node { l; v; d; r; _ } as m ->
+      if x = v then merge l r
+      else if x < v then (let ll = remove x l in if l == ll then m else bal ll v d r)
+      else (let rr = remove x r in if r == rr then m else bal l v d rr)
+
+  let rec iter f = function Empty -> () | Node { l; v; d; r; _ } -> iter f l; f v d; iter f r
+  let rec fold f m acc = match m with Empty -> acc | Node { l; v; d; r; _ } -> fold f r (f v d (fold f l acc))
+  let rec cardinal = function Empty -> 0 | Node { l; r; _ } -> cardinal l + 1 + cardinal r
+  let rec bindings_aux acc = function Empty -> acc | Node { l; v; d; r; _ } -> bindings_aux ((v, d) :: bindings_aux acc r) l
+  let bindings m = bindings_aux [] m
+
+  (* the binding of the greatest key whose [f] holds, [f] monotonically decreasing *)
+  let rec find_last_aux v0 d0 f = function Empty -> Some (v0, d0) | Node { l; v; d; r; _ } -> if f v then find_last_aux v d f r else find_last_aux v0 d0 f l
+  let rec find_last_opt f = function Empty -> None | Node { l; v; d; r; _ } -> if f v then find_last_aux v d f r else find_last_opt f l
+
+  let rec add_min_binding k x = function Empty -> singleton k x | Node { l; v; d; r; _ } -> bal (add_min_binding k x l) v d r
+  let rec add_max_binding k x = function Empty -> singleton k x | Node { l; v; d; r; _ } -> bal l v d (add_max_binding k x r)
+
+  let rec join l v d r =
+    match l, r with
+    | Empty, _ -> add_min_binding v d r
+    | _, Empty -> add_max_binding v d l
+    | Node { l = ll; v = lv; d = ld; r = lr; h = lh }, Node { l = rl; v = rv; d = rd; r = rr; h = rh } ->
+      if lh > rh + 2 then bal ll lv ld (join lr v d r) else if rh > lh + 2 then bal (join l v d rl) rv rd rr else create l v d r
+
+  let concat t1 t2 =
+    match t1, t2 with
+    | Empty, t | t, Empty -> t
+    | _ -> let x, d = min_binding t2 in join t1 x d (remove_min_binding t2)
+
+  let concat_or_join t1 v d t2 = match d with Some d -> join t1 v d t2 | None -> concat t1 t2
+
+  let rec split (x : int) = function
+    | Empty -> Empty, None, Empty
+    | Node { l; v; d; r; _ } ->
+      if x = v then l, Some d, r
+      else if x < v then (let ll, pres, rl = split x l in ll, pres, join rl v d r)
+      else (let lr, pres, rr = split x r in join l v d lr, pres, rr)
+
+  let rec union f s1 s2 =
+    match s1, s2 with
+    | Empty, s | s, Empty -> s
+    | Node { l = l1; v = v1; d = d1; r = r1; h = h1 }, Node { l = l2; v = v2; d = d2; r = r2; h = h2 } ->
+      if h1 >= h2 then begin
+        let l2, d2, r2 = split v1 s2 in
+        let l = union f l1 l2 and r = union f r1 r2 in
+        match d2 with None -> join l v1 d1 r | Some d2 -> concat_or_join l v1 (f v1 d1 d2) r
+      end
+      else begin
+        let l1, d1, r1 = split v2 s1 in
+        let l = union f l1 l2 and r = union f r1 r2 in
+        match d1 with None -> join l v2 d2 r | Some d1 -> concat_or_join l v2 (f v2 d1 d2) r
+      end
+
+  type 'a enumeration = End | More of int * 'a * 'a t * 'a enumeration
+
+  let rec cons_enum m e = match m with Empty -> e | Node { l; v; d; r; _ } -> cons_enum l (More (v, d, r, e))
+  let rec seq_of_enum_ c () = match c with End -> Seq.Nil | More (k, v, t, rest) -> Seq.Cons ((k, v), seq_of_enum_ (cons_enum t rest))
+  let to_seq m = seq_of_enum_ (cons_enum m End)
+
+  let to_seq_from (low : int) m =
+    let rec aux low m c =
+      match m with
+      | Empty -> c
+      | Node { l; v; d; r; _ } -> if v = low then More (v, d, r, c) else if v < low then aux low r c else aux low l (More (v, d, r, c))
+    in
+    seq_of_enum_ (aux low m End)
+
+  (* the tree of the bindings ks.(lo .. hi-1), vs.(lo .. hi-1), the keys strictly increasing: in O(n), a node a
+     binding, each node's two sides of heights that differ by at most 1 *)
+  let rec of_sorted (ks : int array) (vs : 'a array) lo hi =
+    if hi <= lo then Empty else (let mid = (lo + hi) lsr 1 in create (of_sorted ks vs lo mid) ks.(mid) vs.(mid) (of_sorted ks vs (mid + 1) hi))
+end
+
 module SM = Map.Make (String)
 
 module PW = Map.Make (struct
@@ -2256,17 +2398,9 @@ let[@inline never] swap v e p w s =
 
 let set v e p w s = fst (swap v e p w s)
 
-(* A map of n keys from [ks] (strictly increasing) with their values [vs], in O(n): its halves built apart and joined
-   by unions of maps whose keys do not interleave (Map's union of such maps follows one spine: O(log^2) a union, so
-   T(n) = 2 T(n/2) + O(log^2 n) = O(n)), where n insertions one by one would copy a path each: O(n log n) blocks *)
-let rec im_of_sorted (ks : int array) (vs : 'a array) lo hi =
-  if hi <= lo then IM.empty
-  else if hi - lo = 1 then IM.singleton ks.(lo) vs.(lo)
-  else begin
-    let mid = (lo + hi) / 2 in
-    let l = IM.add ks.(mid) vs.(mid) (im_of_sorted ks vs lo mid) in
-    IM.union (fun _ a _ -> Some a) l (im_of_sorted ks vs (mid + 1) hi)
-  end
+(* A map of n keys from [ks] (strictly increasing) with their values [vs], in O(n), a node a key (IM.of_sorted), where
+   n insertions one by one would copy a path each: O(n log n) blocks *)
+let im_of_sorted (ks : int array) (vs : 'a array) lo hi = IM.of_sorted ks vs lo hi
 
 (* [m] with the sorted keys and values added (none of them removals): one by one when they are few, else by a union
    with the map they make (O(k log(n/k + 1)) for k keys into n) *)

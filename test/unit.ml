@@ -2002,45 +2002,124 @@ let () =
                Array.iter (fun x -> C.check (Store.count_things v1 p x = Store.count_things v2 p x && Store.count_values v1 x p = Store.count_values v2 x p) "links round %d: the counts of %d on %d" round p x) (Array.append a_ !bs))
              [ bup; bnum; bself; cup; cnum; dof; dtext ];
            (* and merged: the same run *)
-           C.check (C.F.equal (C.facts_of_view (C.compact v1)) (C.facts_of_view v2)) "links round %d: merged, the same facts" round)
+           C.check (C.F.equal (C.facts_of_view (C.compact v1)) (C.facts_of_view v2)) "links round %d: merged, the same facts" round;
+           (* the group replayed from its changes, as a restart, a replica and a Raft follower apply it (Resolve.replay,
+              a change at a time): the same facts and counts as the writer's batch *)
+           let v3 = Resolve.replay v g in
+           C.check (C.F.equal (C.facts_of_view v3) (C.facts_of_view v1) && Store.facts v3 = Store.facts v1) "links round %d: replayed, the same facts" round)
     done
   done;
   C.check (!cases > 100 && !lost > 1000) "links: cascades enough (%d, %d facts)" !cases !lost
 
 let () =
-  section "links: durable, after a power loss, and the large path";
-  let sim = Sim_disk.create (Rng.make 91) in
-  let disk = Sim_disk.disk sim in
-  let large = !Resolve.large_min in
-  Resolve.large_min := 50;
-  let opened () = Result.get_ok (open_on disk "/links") in
-  let db = ref (opened ()) in
-  let[@warning "-8"] (Ok [ cname; iclient; inum; lprice; linvoice ]) =
-    declare !db [ prop "client/name" Ttext; prop "invoice/client" Tlink; prop "invoice/number" Tint; prop "line/price" Tint; prop "line/invoice" Tlink ]
+  section "links: a large cascade cut by a power loss at every disk call, and raced by writes in one batch";
+  let props = [ prop "inv/num" Tint; prop "line/inv" Tlink; prop "line/price" (Tmoney 2) ] in
+  (* a database of 3 invoices, 600 lines of the first (in a merged run or in the journal), 20 of the others *)
+  let made merged =
+    let sim = Sim_disk.create (Rng.make (if merged then 12 else 11)) in
+    let disk = Sim_disk.disk sim in
+    let db = Result.get_ok (open_on disk "/cut") in
+    let[@warning "-8"] (Ok [ num; linv; price ]) = declare db props in
+    ignore (Result.get_ok (link_to db [ linv, "inv", Cascade ]));
+    let ri = Result.get_ok (write db (List.init 3 (fun k -> Add (-(k + 1), num, Int k)))) in
+    let inv k = thing ri (-(k + 1)) in
+    ignore (Result.get_ok (write db (List.concat (List.init 600 (fun k -> [ Add (-(k + 1), linv, Link (inv 0)); Add (-(k + 1), price, Money k) ])))));
+    if merged then ignore (Result.get_ok (snapshot db));
+    ignore (Result.get_ok (write db (List.concat (List.init 20 (fun k -> [ Add (-(k + 1), linv, Link (inv (1 + (k mod 2)))); Add (-(k + 1), price, Money k) ])))));
+    close db;
+    sim, disk, num, linv, inv 0
   in
-  C.check (Result.is_ok (link_to !db [ iclient, "client", Refuse; linvoice, "invoice", Cascade ])) "links: declared on a database";
-  (* a load: 40 clients, 40 invoices of them, by the large path *)
-  let ops = List.concat (List.init 40 (fun k -> [ Add (-(k + 1), cname, Text (Printf.sprintf "c%d" k)); Add (-(k + 41), inum, Int k); Add (-(k + 41), iclient, Link (-(k + 1))) ])) in
-  C.check (Resolve.resolve_large (view !db) ~n:((view !db).group + 1) ~time:0 ~by:0 ~why:"" ops <> None) "links: a load whose links hold takes the large path";
-  let r = Result.get_ok (write !db ops) in
-  let bad = List.concat (List.init 30 (fun k -> [ Add (-(k + 1), inum, Int (100 + k)); Add (-(k + 1), iclient, Link (thing r (-(41 + k)))) ])) in
-  C.check (Resolve.resolve_large (view !db) ~n:((view !db).group + 1) ~time:0 ~by:0 ~why:"" bad = None) "links: a load with a link to an invoice leaves the large path";
-  C.check (match write !db bad with Error (Invalid _) -> true | _ -> false) "links: and is refused";
-  let inv = thing r (-41) in
-  ignore (Result.get_ok (write !db [ Add (-1, lprice, Int 3); Add (-1, linvoice, Link inv); Add (-2, lprice, Int 4); Add (-2, linvoice, Link inv) ]));
-  ignore (Result.get_ok (write !db [ Delete (inv, "invoice") ]));
-  let before = C.facts_of_view (view !db) in
-  Sim_disk.crash sim;
-  db := opened ();
-  C.check (C.F.equal (C.facts_of_view (view !db)) before) "links: after a power loss, the cascade's group replayed the same";
-  C.check (link (view !db) linvoice = Some ("invoice", Cascade)) "links: and the links read back from the journal";
-  ignore (Result.get_ok (snapshot !db));
-  close !db;
-  db := opened ();
-  C.check (link (view !db) iclient = Some ("client", Refuse) && C.F.equal (C.facts_of_view (view !db)) before) "links: and from a merged run";
-  C.check (match write !db [ Delete (thing r (-2), "client") ] with Error (Invalid _) -> true | _ -> false) "links: refuse, after the reopen";
-  close !db;
-  Resolve.large_min := large
+  List.iter
+    (fun merged ->
+      (* each mutating disk call of the cascade's commit, in turn, the one a power loss stops at: the database opens
+         again at the state before the cascade or after it, never between *)
+      let k = ref 0 and go = ref true and befores = ref 0 and afters = ref 0 in
+      while !go do
+        let sim, disk, _, _, inv = made merged in
+        let e = Result.get_ok (Engine.open_ disk "/cut") in
+        let before = C.facts_of_view e.working in
+        let after = let f = fork e.working in ignore (Result.get_ok (write f [ Delete (inv, "inv") ])); C.facts_of_view (view f) in
+        Sim_disk.crash_after sim !k;
+        (match Engine.commit e (Engine.prepare e [| [ Delete (inv, "inv") ], 0, "" |]) with
+         | _ -> Sim_disk.crash_after sim (-1); go := false; Engine.close e
+         | exception Sim_disk.Crash -> ());
+        Sim_disk.crash sim;
+        let db = Result.get_ok (open_on disk "/cut") in
+        let now = C.facts_of_view (view db) in
+        if C.F.equal now before then incr befores
+        else if C.F.equal now after then incr afters
+        else C.fail "links: %s, a power loss at disk call %d of the cascade: neither the state before it nor after" (if merged then "merged" else "in the journal") !k;
+        close db;
+        incr k
+      done;
+      C.check (!befores > 0 && !afters > 0) "links: %s, the cascade cut at each of its %d disk calls (%d states before it, %d after)" (if merged then "merged" else "in the journal") !k !befores !afters)
+    [ false; true ];
+  (* the cascade raced by writes of the same things, in one batch of the writer in every order: a line added to the
+     invoice, the invoice given a number again, the Delete; each order's state the same as the groups one after the
+     other on a fork, and no line left linking to an invoice that is not one *)
+  let _, disk, num, linv, inv = made false in
+  let e = Result.get_ok (Engine.open_ disk "/cut") in
+  let v0 = e.working in
+  let gs = [| [ Add (-1, linv, Link inv) ]; [ Add (inv, num, Int 9) ]; [ Delete (inv, "inv") ] |] in
+  List.iter
+    (fun order ->
+      let f = fork v0 in
+      List.iter (fun i -> ignore (write f gs.(i))) order;
+      let b = Engine.prepare e (Array.of_list (List.map (fun i -> gs.(i), 0, "") order)) in
+      let v = b.Engine.after in
+      C.check (C.F.equal (C.facts_of_view v) (C.facts_of_view (view f))) "links: raced in the order %s, the state of the groups one after the other" (String.concat "," (List.map string_of_int order));
+      let dangling = ref 0 in
+      Store.iter_prop v linv (fun _ w -> if Store.count_values v w num = 0 then incr dangling);
+      C.check (!dangling = 0) "links: raced in the order %s, no line links to a deleted invoice (%d)" (String.concat "," (List.map string_of_int order)) !dangling;
+      e.working <- v0)
+    [ [ 0; 1; 2 ]; [ 0; 2; 1 ]; [ 1; 0; 2 ]; [ 1; 2; 0 ]; [ 2; 0; 1 ]; [ 2; 1; 0 ] ];
+  Engine.close e
+
+let () =
+  section "maps of ints (Store.IM): the same as Stdlib's Map, and balanced";
+  let module M = Map.Make (Int) in
+  let module IM = Store.IM in
+  let rec balanced = function
+    | IM.Empty -> Some 0
+    | IM.Node { l; r; h; v; _ } -> (
+      match balanced l, balanced r with
+      | Some hl, Some hr when abs (hl - hr) <= 2 && h = 1 + max hl hr
+                             && (match l with IM.Node n -> n.v < v | IM.Empty -> true) && (match r with IM.Node n -> n.v > v | IM.Empty -> true) -> Some h
+      | _ -> None)
+  in
+  let same m im = M.bindings m = IM.bindings im && M.cardinal m = IM.cardinal im && balanced im <> None in
+  let r = Rng.make 4242 in
+  for round = 1 to 300 do
+    let range = 1 + Rng.int r (if round mod 3 = 0 then 40 else 5000) in
+    let m = ref M.empty and im = ref IM.empty in
+    for _ = 1 to Rng.int r 400 do
+      let k = Rng.int r range - (range / 2) and x = Rng.int r 1000 in
+      match Rng.int r 5 with
+      | 0 -> m := M.remove k !m; im := IM.remove k !im
+      | _ -> m := M.add k x !m; im := IM.add k x !im
+    done;
+    C.check (same !m !im) "IM: round %d: the bindings of the adds and removes" round;
+    let k = Rng.int r range - (range / 2) in
+    C.check (M.find_opt k !m = IM.find_opt k !im && M.mem k !m = IM.mem k !im) "IM: round %d: find_opt, mem" round;
+    C.check (M.find_last_opt (fun x -> x <= k) !m = IM.find_last_opt (fun x -> x <= k) !im) "IM: round %d: find_last_opt" round;
+    C.check (List.of_seq (M.to_seq_from k !m) = List.of_seq (IM.to_seq_from k !im) && List.of_seq (M.to_seq !m) = List.of_seq (IM.to_seq !im)) "IM: round %d: to_seq, to_seq_from" round;
+    C.check (M.fold (fun k x a -> (k, x) :: a) !m [] = IM.fold (fun k x a -> (k, x) :: a) !im [] && (let l = ref [] in IM.iter (fun k x -> l := (k, x) :: !l) !im; List.rev !l = M.bindings !m)) "IM: round %d: fold, iter" round;
+    (* a union with another map, the first's value kept where both have the key *)
+    let m2 = ref M.empty and im2 = ref IM.empty in
+    for _ = 1 to Rng.int r 300 do let k = Rng.int r range - (range / 2) in m2 := M.add k (-k) !m2; im2 := IM.add k (-k) !im2 done;
+    C.check (same (M.union (fun _ a _ -> Some a) !m !m2) (IM.union (fun _ a _ -> Some a) !im !im2)) "IM: round %d: union" round;
+    C.check (same (M.union (fun _ _ _ -> None) !m !m2) (IM.union (fun _ _ _ -> None) !im !im2)) "IM: round %d: union dropping the common keys" round;
+    (* of_sorted: the map of sorted bindings, then changed as any *)
+    let ks = Array.of_list (List.map fst (M.bindings !m)) and vs = Array.of_list (List.map snd (M.bindings !m)) in
+    let n = Array.length ks in
+    let lo = if n = 0 then 0 else Rng.int r (n + 1) in
+    let hi = lo + Rng.int r (n - lo + 1) in
+    let want = M.filter (fun k _ -> Array.exists (( = ) k) (Array.sub ks lo (hi - lo))) !m in
+    let built = IM.of_sorted ks vs lo hi in
+    C.check (same want built) "IM: round %d: of_sorted of %d bindings" round (hi - lo);
+    C.check (same (M.add k 7 (M.remove (k + 1) want)) (IM.add k 7 (IM.remove (k + 1) built))) "IM: round %d: of_sorted's map changed" round;
+    C.check (IM.remove (range * 10) !im == !im && (match IM.find_opt k !im with Some x -> IM.add k x !im == !im | None -> true)) "IM: round %d: a change that changes nothing is the map itself" round
+  done
 
 let () =
   section "ask: large answers, Optionals of many values and missing, on one domain and split";

@@ -137,6 +137,34 @@ module Facts = struct
     end
 end
 
+(* The asserted changes of a group as they are made, and the word of each one's value: in arrays that grow, where two
+   lists (two cells a change) were reversed into arrays at the end; [iter_newest] meets them as the lists did, the
+   newest first *)
+module Out = struct
+  let none = { Group.kind = Group.Added; e = 0; p = 0; v = Value.Int 0 }
+
+  type t = { mutable c : Group.change array; mutable w : int array; mutable n : int }
+
+  let create () = { c = [||]; w = [||]; n = 0 }
+
+  let push t (c : Group.change) w =
+    if t.n = Array.length t.c then begin
+      let m = max 4 (2 * t.n) in
+      let c' = Array.make m none and w' = Array.make m 0 in
+      Array.blit t.c 0 c' 0 t.n;
+      Array.blit t.w 0 w' 0 t.n;
+      t.c <- c';
+      t.w <- w'
+    end;
+    Array.unsafe_set t.c t.n c;
+    Array.unsafe_set t.w t.n w;
+    t.n <- t.n + 1
+
+  let iter_newest f t = for i = t.n - 1 downto 0 do f (Array.unsafe_get t.c i) done
+  let changes t = Array.sub t.c 0 t.n
+  let words t = Array.sub t.w 0 t.n
+end
+
 (* [reason]: what the rules make of the group's asserted changes (Reason.run; the background path of a change gives
    its own, Engine) *)
 let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.run ~v0 v changes words) (v0 : Store.view) ~n ~time ~by ~why ops =
@@ -169,7 +197,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
           if not ok then fail (Conflict (Printf.sprintf "#%d does not have %s for %s (property %d)" e (Value.to_string x) d.name p))
         | _ -> ())
       ops;
-    let v = ref { v0 with next_e = !next } and out = ref [] and outw = ref [] in
+    let v = ref { v0 with next_e = !next } and out = Out.create () in
     (* an asserted change, with the state the fact had (one lookup does both): an addition of a fact a rule derives
        makes it asserted too; a retraction of a fact only derived is refused, naming the rule (choice 10.4 of the
        reasoner design) *)
@@ -190,8 +218,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
       | None -> v := vi
       | Some kind ->
         v := if Schema.is_system p && Schema.is_prop_space e then refresh v1 e else v1;
-        out := { Group.kind; e; p; v = x } :: !out;
-        outw := w :: !outw
+        Out.push out { Group.kind; e; p; v = x } w
     in
     (* a retraction of a value the view has no word for (an unknown text) retracts nothing *)
     let assert_change add e p x =
@@ -288,7 +315,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
          own kind (a thing reached twice is followed once: cycles end), clear retracts the link, refuse leaves it to
          the check below *)
       let queue = Queue.create () in
-      List.iter (fun (c : Group.change) -> if c.kind = Retracted && Schema.named ix c.p then Queue.push (c.e, ix.pkind.(c.p)) queue) !out;
+      Out.iter_newest (fun (c : Group.change) -> if c.kind = Retracted && Schema.named ix c.p then Queue.push (c.e, ix.pkind.(c.p)) queue) out;
       if not (Queue.is_empty queue) then begin
         let seen = Hashtbl.create 16 and lost = ref [] in
         while not (Queue.is_empty queue) do
@@ -309,7 +336,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
                        end (Store.set_sorted: one walk of the maps a thing and a value, where a retraction one by one
                        walks both for each fact); the group's changes in the order of before *)
                     let batch = Facts.create () in
-                    let gather e p x w = out := { Group.kind = Retracted; e; p; v = x } :: !out; outw := w :: !outw; Facts.push batch e p w in
+                    let gather e p x w = Out.push out { Group.kind = Retracted; e; p; v = x } w; Facts.push batch e p w in
                     List.iter
                       (fun y ->
                         tick what;
@@ -348,7 +375,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
           (List.rev !lost)
       end;
       (* a link added: to a thing of its kind after the group *)
-      List.iter
+      Out.iter_newest
         (fun (c : Group.change) ->
           if c.kind = Added && c.p < Array.length ix.pto && ix.pto.(c.p) >= 0 then
             match c.v with
@@ -356,9 +383,9 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
               let k = ix.pto.(c.p) in
               if not (is_kind !v ix t k) then invalid "%s links to %s things only, and #%d is not one" (prop_name !v c.p) ix.kinds.(k) t
             | _ -> ())
-        !out
+        out
     end;
-    let changes = Array.of_list (List.rev !out) in
+    let changes = Out.changes out in
     (* the schema things this group touched: properties checked below, rules here, before they run *)
     let touched = Hashtbl.create 2 in
     Array.iter (fun (c : Group.change) -> if Schema.is_prop_space c.e then Hashtbl.replace touched c.e ()) changes;
@@ -427,7 +454,7 @@ let resolve ?(bootstrap = false) ?(reason = fun ~v0 v changes words -> Reason.ru
     end;
     (* the rules: what they derive from this group, and what they no longer derive *)
     let v, changes =
-      match reason ~v0 !v changes (Array.of_list (List.rev !outw)) with
+      match reason ~v0 !v changes (Out.words out) with
       | r -> r
       | exception Reason.Refused m -> invalid "%s" m
     in
