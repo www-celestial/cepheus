@@ -708,6 +708,15 @@ let () =
   C.check (state () = (None, None, None, None)) "all or nothing";
   ignore (ok (write db [ Add (-1, amount, Int max_int); Add (-2, amount, Int 1); Add (-3, amount, Int (-1)); Add (inv, line, Link (-1)); Add (inv, line, Link (-2)); Add (inv, line, Link (-3)) ]));
   C.check (one total = Some (Int max_int)) "max_int + 1 - 1, exactly";
+  (* past 2^63 too: three more of the largest int refused; three of the least beside them, -3 + max_int, exactly *)
+  refused_with "a sum past 2^63" "past the largest int"
+    (write db [ Add (-1, amount, Int max_int); Add (-2, amount, Int max_int); Add (-3, amount, Int max_int); Add (inv, line, Link (-1)); Add (inv, line, Link (-2)); Add (inv, line, Link (-3)) ]);
+  C.check (one total = Some (Int max_int)) "all or nothing, past 2^63";
+  let r6 = ok (write db [ Add (-1, amount, Int max_int); Add (-2, amount, Int max_int); Add (-3, amount, Int max_int); Add (-4, amount, Int min_int); Add (-5, amount, Int min_int); Add (-6, amount, Int min_int);
+                          Add (inv, line, Link (-1)); Add (inv, line, Link (-2)); Add (inv, line, Link (-3)); Add (inv, line, Link (-4)); Add (inv, line, Link (-5)); Add (inv, line, Link (-6)) ]) in
+  C.check (one total = Some (Int (max_int - 3))) "past 2^63 and back, exactly: %s" (match one total with Some x -> Value.to_string x | None -> "none");
+  ignore (ok (write db (List.init 6 (fun k -> Retract (inv, line, Link (thing r6 (-1 - k)))))));
+  C.check (one total = Some (Int max_int)) "those lines gone, by difference past 2^63: the total before";
   (* the aggregate's property: no write asserts it, no other rule gives it *)
   refused_with "a write of an aggregate's property" "given by an aggregate rule" (write db [ Add (inv, total, Int 3) ]);
   refused_with "a retraction of an aggregate's fact" "given by an aggregate rule" (write db [ Retract (inv, total, Int max_int) ]);

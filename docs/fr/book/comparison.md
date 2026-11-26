@@ -287,6 +287,36 @@ petites et plus grandes valeurs et des comptes sur les lignes jusqu'ici ou les n
   `first_value`, `nth_value`, la fenêtre de n'importe quelle expression, et les fenêtres dans une vue matérialisée ;
   Cepheus refuse un watch de fenêtres.
 
+### Les sommes au-delà de 63 bits
+
+Une somme d'entiers peut dépasser les entiers qu'elle additionne : chaque base choisit un résultat plus large ou une
+erreur, et quand. L'Int de Cepheus a 63 bits ($-2^{62}$ à $2^{62} - 1$) ; la `Sum` d'un rapport garde son total modulo
+$2^{63}$ et le nombre de fois qu'il a « wrappé » (repassé de l'autre côté des entiers), donc elle est refusée
+(`invalid`, qui nomme le champ et le groupe) exactement quand son total n'est pas un Int, quels que soient l'ordre des
+lignes et les cœurs ([une somme est exacte, ou refusée](cesia.md#find--les-questions)). Exécutés ici,
+PostgreSQL 18.6 et SQLite 3.54.1 :
+
+| les valeurs | PostgreSQL 18.6 | SQLite 3.54.1 | Cepheus |
+|---|---|---|---|
+| $2^{63} - 1$ (le plus grand de PostgreSQL, de SQLite), 1, -5 | `9223372036854775803`, un `numeric` | `integer overflow` | (son plus grand est $2^{62} - 1$ :) $2^{62} - 1$, 1, -5 donne $2^{62} - 5$ |
+| $2^{63} - 1$ deux fois | `18446744073709551614` | `integer overflow` | $2^{62} - 1$ deux fois : `invalid`, `Sum of ... passed the 63 bits of an Int` |
+
+- *Pareil* : aucun total faux en silence. La `sum` d'un `integer` de PostgreSQL est un `bigint`, d'un `bigint` un
+  `numeric` ([aggregate functions](https://www.postgresql.org/docs/18/functions-aggregate.html)) ; `SUM()` et `AVG()`
+  de MySQL « return a DECIMAL value for exact-value arguments (integer or DECIMAL) » ([MySQL 8.4, aggregate function
+  descriptions](https://dev.mysql.com/doc/refman/8.4/en/aggregate-functions.html)) ; la `sum()` de SQLite « will throw
+  an "integer overflow" exception if all inputs are integers or NULL » et qu'une somme partielle dépasse 64 bits, à
+  n'importe quel moment de la somme, et son `total()` est un float ([aggregate
+  functions](https://sqlite.org/lang_aggfunc.html)). Le `date_trunc` de PostgreSQL de ses plus petits timestamps à
+  leur millénaire est une erreur (« timestamp out of range »), comme l'est un `Trunc` avant la plus petite date de
+  Cepheus.
+- *Différent* : SQLite refuse une somme dont le total tient quand une somme partielle dépasse 64 bits (la première
+  ligne plus haut), donc sa réponse dépend de l'ordre des lignes ; Cepheus ne refuse qu'un total qui n'est pas un
+  Int, le même sur n'importe quel ordre et nombre de cœurs.
+- *Là où PostgreSQL et MySQL gagnent* : un total au-delà de 63 bits est donné exactement, comme `numeric` ou
+  `DECIMAL`. Cepheus n'a pas d'entier plus large : un nouveau type de valeur que chaque programme devrait lire. Son
+  `Avg` est exact au-delà, et la moyenne fois `Count()` donne le total en floats.
+
 ## Pour aller plus loin
 
 Berenson et al. 1995 et Fekete et al. 2005 pour la snapshot isolation et le write skew ; Kung et Robinson 1981 pour la

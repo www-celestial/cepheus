@@ -155,7 +155,7 @@ let prepare ~extra ~budget ?stop (v : Store.view) (q : Query.t) =
   let truncs, extra = Ask.truncs extra in
   let ask = if extra = [] then None else Some (Ask.compile v q extra) in
   let ty = match ask with None -> Query.types v q | Some a -> Ask.typs_of a in
-  let derived = Ask.derived ~vars:q.vars ~outer:(fun x -> match ask with Some a -> a.outer.(x) | None -> true) ty truncs in
+  let derived = Ask.derived ~name:(fun x -> Ask.var_name v (Ask.patterns q extra) x) ~vars:q.vars ~outer:(fun x -> match ask with Some a -> a.outer.(x) | None -> true) ty truncs in
   let ty = if derived = [||] then ty else Array.append ty (Array.make (Array.length derived) Value.Tdate) in
   let var x =
     if x < 0 || x >= q.vars + Array.length derived then Query.bad "variable %d out of range" x;
@@ -231,11 +231,19 @@ type table = {
   mutable n : int;
   buf : int array;  (* a binding's key, made here: the table's domain's own *)
   mutable cells : int;  (* the cells the table has not charged yet *)
+  mutable carry : int array;  (* a Sum's carry at g na + i (Agg.wrapped), [||] until one wraps *)
 }
 
 let table ~kw ~na ~start ~(cols : (unit -> Agg.col) option array) () =
   { kw; na; start; cols = Array.map (Option.map (fun mk -> mk ())) cols; keys = Array.make (16 * max 1 kw) 0;
-    vals = Array.make (16 * max 1 na) 0; slots = Array.make 32 0; n = 0; buf = Array.make (max 1 kw) 0; cells = 0 }
+    vals = Array.make (16 * max 1 na) 0; slots = Array.make 32 0; n = 0; buf = Array.make (max 1 kw) 0; cells = 0; carry = [||] }
+
+(* the Sum at [k] (g na + i) wrapped [d] times more: its carry, the table's made at the first *)
+let[@inline never] carry_add t k d =
+  if Array.length t.carry <= k then t.carry <- Agg.grow_ints t.carry (max (k + 1) (t.n * t.na));
+  t.carry.(k) <- t.carry.(k) + d
+
+let carry_of t k = if k < Array.length t.carry then t.carry.(k) else 0
 
 let key_hash (k : int array) o kw =
   let h = ref kw in
@@ -291,7 +299,14 @@ let merge_tables (aggs : Wire.agg array) a b =
     for i = 0 to na - 1 do
       let y = b.vals.(ob + i) in
       match aggs.(i) with
-      | Wire.Count | Sum _ -> va.(oa + i) <- va.(oa + i) + y
+      | Wire.Count -> va.(oa + i) <- va.(oa + i) + y
+      | Sum _ ->
+        let s = va.(oa + i) in
+        let r = s + y in
+        va.(oa + i) <- r;
+        if Agg.wrapped s y r then carry_add a (oa + i) (if y >= 0 then 1 else -1);
+        let c = carry_of b (ob + i) in
+        if c <> 0 then carry_add a (oa + i) c
       | Min _ -> if y < va.(oa + i) then va.(oa + i) <- y
       | Max _ -> if y > va.(oa + i) then va.(oa + i) <- y
       | _ -> ()
@@ -311,6 +326,30 @@ let sorted t =
       if !j = kw then 0 else compare (Array.unsafe_get keys (oa + !j) : int) (Array.unsafe_get keys (ob + !j)))
     ord;
   ord
+
+(* an aggregate for a message: Sum(invoice/total), Count() *)
+let agg_text name (a : Wire.agg) = match Agg.var_of a with Some x -> Printf.sprintf "%s(%s)" (Agg.name a) (name x) | None -> Agg.name a ^ "()"
+
+(* A Sum past the 63 bits of an Int in a group (its carry not 0): the question refused, naming the Sum's variable by
+   its property ([name]) and the first such group in [groups]' order by its keys' values ([key j g]), so that the
+   same question gives the same message whatever the domains. A group cut by Limit or After is no less refused: Sort
+   may order by that sum, and a report is its groups' sums. *)
+let check_sums ~(name : int -> string) ~(key : int -> int -> Value.t) nk (aggs : Wire.agg array) (t : table) groups =
+  if Array.length t.carry > 0 then
+    Array.iter
+      (fun g ->
+        Array.iteri
+          (fun i a ->
+            match a with
+            | Wire.Sum x when carry_of t ((g * t.na) + i) <> 0 -> Agg.past_sum (name x) (List.init nk (fun j -> Agg.short (key j g)))
+            | _ -> ())
+          aggs)
+      groups
+
+(* group g's key j as a value (a message's) *)
+let key_value (v : Store.view) (ty : Value.typ array) keys ~masked (t : table) j g =
+  let nk = Array.length keys in
+  if masked && (t.keys.((g * t.kw) + nk) lsr j) land 1 = 1 then Value.missing else Store.value v ty.(keys.(j)) t.keys.((g * t.kw) + j)
 
 (* a binding's key into [buf]: the words of [keys] (a Trunc's computed), and with Optionals the mask of the missing
    ones after them, as [projector] gives them *)
@@ -342,7 +381,7 @@ let agg_word (ty : Value.typ array) (a : Wire.agg) w : Value.t =
   | None -> Int w
   | Some x -> (match ty.(x) with Tmoney _ -> Money w | Tdate -> Date w | _ -> Int w)
 
-let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) ~optional keys aggs =
+let report ~(order : Top.order) ?ticket ~weight ~name (v : Store.view) (p : prepared) ~optional keys aggs =
   let ty = p.ty in
   Array.iter p.var keys;
   Array.iter
@@ -387,7 +426,11 @@ let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) 
         for i = 0 to na - 1 do
           match aggs.(i) with
           | Wire.Count -> vals.(o + i) <- vals.(o + i) + 1
-          | Sum _ -> vals.(o + i) <- vals.(o + i) + gets.(i) env
+          | Sum _ ->
+            let s = vals.(o + i) and x = gets.(i) env in
+            let r = s + x in
+            vals.(o + i) <- r;
+            if Agg.wrapped s x r then carry_add t (o + i) (if x >= 0 then 1 else -1)
           | Min _ -> let x = gets.(i) env in if x < vals.(o + i) then vals.(o + i) <- x
           | Max _ -> let x = gets.(i) env in if x > vals.(o + i) then vals.(o + i) <- x
           | _ -> (
@@ -400,6 +443,7 @@ let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) 
   (* and the last ones, under a grain *)
   (match ticket with Some tk when tl.cells > 0 -> charge tk tl.cells; tl.cells <- 0 | _ -> ());
   let groups = sorted tl in
+  check_sums ~name ~key:(key_value v ty keys ~masked:p.masked tl) nk aggs tl groups;
   let by = Array.map (function Some c -> Agg.by_group c tl.n | None -> [||], [||], [||]) tl.cols in
   (* the order of a bag column's words, once a column (a text's read once) *)
   let cmps = Array.mapi (fun i a -> match a with Wire.Values _ | Quantile _ -> Agg.order v txs.(i) | _ -> Agg.int_order) aggs in
@@ -518,6 +562,8 @@ type prefix = {
 
 let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?(weight = 1) (v : Store.view) (q : Query.t) (sel : Wire.select) =
   let ({ ask; ty; masked; var; fold; _ } as p) = prepare ~extra ~budget ?stop v q in
+  (* a variable named for a message (a Sum past 63 bits): its property *)
+  let name x = Ask.var_name v (Ask.patterns q extra) x in
   (* an Optional's variable may be missing: no Sum, Min or Max of it (nor of a Trunc of it) *)
   let optional x =
     let x = if x < q.vars then x else fst p.derived.(x - q.vars) in
@@ -805,7 +851,7 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     let tie k = match Hashtbl.find_opt ties k with Some f -> f | None -> let c = cmp_k k in let f i j = c rows.(i) rows.(j) = 0 in Hashtbl.add ties k f; f in
     let out = Window.compute ?start ~view:v ~n ~groups ~part:(fun i -> part.(i)) ~get ~tie:(fun k -> tie k) ~typs:(fun c -> typs.(c)) windows in
     let idx = Array.init (n - first) (fun i -> first + i) in
-    Window.check_past out idx;
+    Window.check_past ~col:(fun c -> name give.(c)) windows out idx;
     let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
     { cols = cols + nw; n = Array.length idx; typ = (fun j -> if j < cols then typs.(j) else wt.(j - cols));
       word = (fun i j -> if j < cols then rows.(idx.(i)).(j) else 0);
@@ -846,7 +892,7 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     in
     let full = cmp_k (Array.length ord) in
     let idx = keep_rows n ~after ~limit:order.limit ~part ~same:(fun i j -> full i j = 0) in
-    Window.check_past out idx;
+    Window.check_past ~col:(fun c -> if c < nk then name keys.(c) else agg_text name aggs.(c - nk)) windows out idx;
     let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
     of_values (cols + nw) (Array.append typs wt) (Array.map (fun i -> Array.init (cols + nw) (fun j -> if j < cols then rows.(i).(j) else Window.cell out.(j - cols) i)) idx)
   | Wire.Give give ->
@@ -876,7 +922,7 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     let acc = fold ~init:(fun () -> { a = [||]; n = 0 }) ~merge:append ~step () in
     { cols = k; n = acc.n / max 1 stride; typ = (fun j -> ty.(give.(j))); word = (fun i j -> acc.a.((i * stride) + j));
       missing = (if masked then fun i j -> (acc.a.((i * stride) + k) lsr j) land 1 = 1 else none_missing); computed = none_computed; cell = no_cell }
-  | Wire.Group (keys, aggs) when p.derived <> [||] || Array.exists Agg.is_new aggs -> report ~order ?ticket ~weight v p ~optional keys aggs
+  | Wire.Group (keys, aggs) when p.derived <> [||] || Array.exists Agg.is_new aggs -> report ~order ?ticket ~weight ~name v p ~optional keys aggs
   | Wire.Group (keys, aggs) ->
     Array.iter var keys;
     Array.iter
@@ -911,7 +957,11 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           for i = 0 to na - 1 do
             match aggs.(i) with
             | Wire.Count -> vals.(o + i) <- vals.(o + i) + 1
-            | Wire.Sum x -> vals.(o + i) <- vals.(o + i) + env.(x)
+            | Wire.Sum x ->
+              let s = vals.(o + i) and w = env.(x) in
+              let r = s + w in
+              vals.(o + i) <- r;
+              if Agg.wrapped s w r then carry_add t (o + i) (if w >= 0 then 1 else -1)
             | Wire.Min x -> if env.(x) < vals.(o + i) then vals.(o + i) <- env.(x)
             | Wire.Max x -> if env.(x) > vals.(o + i) then vals.(o + i) <- env.(x)
             | _ -> ()
@@ -920,6 +970,7 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     in
     (* in the order of the keys' words: an answer that does not depend on the number of domains *)
     let groups = sorted tl in
+    check_sums ~name ~key:(key_value v ty keys ~masked tl) nk aggs tl groups;
     let typ j =
       if j < nk then ty.(keys.(j))
       else match aggs.(j - nk) with Wire.Sum y | Wire.Min y | Wire.Max y -> ty.(y) | _ -> Value.Tint

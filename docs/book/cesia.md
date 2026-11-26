@@ -323,6 +323,36 @@ The invoice of 10 is below 50: Bo's city is Lyon now, and his only invoice is no
 quantiles, spreads, lists of values, the different values counted, and a date's day, month or year in a time zone are
 in [Reports](#reports-avg-countx-values-quantile-variance-stddev-trunc).
 
+**A sum is exact, or refused.** A `Sum` of ints or money is exact while its total is an Int, from $-2^{62}$ to
+$2^{62} - 1$ (about $\pm 4.6 \times 10^{18}$): 46 quadrillion euros in cents, but 4.6 units of `Money(18)` (money of
+scale s sums to $2^{62} / 10^s$ units). Whatever the order of the rows and the cores that add them, a total that
+passes the largest Int on the way and comes back within it is given; a total past it is never given wrapped around:
+`Find` is an `Err` of Code `"invalid"` that names the field and the group, and a watch of it ends with that `Err` at
+the write that takes it past (the other watches go on). `Count()` cannot pass them: it adds 1 an answer, and $2^{62}$
+answers take 146 years at one a nanosecond.
+
+```cesia norun
+Meter = cepheus.Kind("meter", {Site: cepheus.Text(), Pulses: cepheus.Int()})
+meters = result.Unwrap(cepheus.Fork(cepheus.Empty, [Meter]))
+for x in [["north", 4611686018427387903], ["north", 1], ["south", 4611686018427387903], ["south", 1], ["south", -1]]
+  result.Unwrap(cepheus.Insert(Meter, {Site: x[1], Pulses: x[2]}, meters))
+end
+pulses = (site) -> cepheus.Find(2, (m, p) -> {Where: [[m, Meter.Site, site], [m, Meter.Pulses, p]], Give: {Total: cepheus.Sum(p), N: cepheus.Count()}}, meters)
+io.Print(pulses("north"))
+io.Print(pulses("south"))
+```
+
+```text
+Err({Kind: "cepheus", Code: "invalid", Message: "Sum of meter/Pulses passed the 63 bits of an Int: group by a key, or ask its Avg and Count (exact)"})
+Ok([{Total: 4611686018427387903, N: 3}])
+```
+
+The north's total, $2^{62}$, is one past the largest Int; the south's passes it and comes back. `Avg` is exact past 63
+bits (its sum has as many parts as it needs, [reports](#reports-avg-countx-values-quantile-variance-stddev-trunc)), so
+its mean times `Count()` gives such a total in floats. PostgreSQL's `sum` of a `bigint` is a `numeric` there, exact;
+SQLite's `sum` fails with "integer overflow" as soon as a partial sum passes its 64 bits, even when the total would
+not ([comparison](comparison.md#sums-past-63-bits)).
+
 **Its time.** `timeout = seconds` bounds a question: past it, `Find` is an `Err` of Code `"timeout"`, whose message
 names the time, and the work stops (within milliseconds: it is looked at every 1,024 candidates). At the server, the
 server's `question_timeout` (30 s by default, [the server](server.md#clustertoml)) is the most a question takes: a
@@ -678,7 +708,9 @@ March, is April's in Paris (00:30 on 1 April, summer time), and Ada's first, of 
   (`invalid`), as `Sum` is. A `Trunc` of a missing date is missing.
 - **Errors.** A zone that is not one (`"Europe/Pariss"`, or a name that is no zone of the database, as
   `"../etc/passwd"`), a unit that is not one, `Avg` of a text, a fraction outside 0 to 1: `Err` of Code `"invalid"`,
-  naming it ([errors](errors.md)).
+  naming it ([errors](errors.md)). A `Trunc` of a date of the least ones (146 million years before 1970) whose unit
+  starts before the least date is an `Err` of Code `"invalid"` naming its field, never a date wrapped around (a
+  `Sum` past 63 bits too, [above](#find-questions)); a `Quantile` between two values stays between them.
 
 **How it is answered.** Each group keeps, beside its key, what each aggregate needs, as the rows come, on every core
 that reads them, merged at the end. The mean, the variance and the standard deviation come from **exact sums**: the
@@ -809,8 +841,8 @@ each window reads the rows in `Sort`'s order, from the first one to the row, or 
 - **Types and exactness.** As the aggregates': a running sum of ints is an Int, of money money; a mean of ints a
   Float, of money money of its scale rounded half away from zero, of dates a date; from **exact sums**, so a moving
   mean over a frame that slides is the same bits as the mean of its rows computed apart. A running sum past the 63 bits
-  of an Int is `Err` of Code `"invalid"` (in a row the answer gives; a sum past them in a row after the page is no
-  error).
+  of an Int is `Err` of Code `"invalid"` naming the field it sums (in a row the answer gives; a sum past them in a row
+  after the page is no error).
 - **Errors.** A window without `Sort`, a window of a field `Give` does not give, a window as a key of `Sort`, `Running`
   of `Count(x)`, `Values` or a quantile, `last` or `back` outside 1 to 100,000, `Each` without `Sort`, `Each` without
   `Limit` or a window, `Each` with `After`, `Each` of an aggregate, a window or `Each` over a report with `Values`:
@@ -873,7 +905,9 @@ Ok({Group: 16, Rows: missing, Added: [], Removed: [{Invoice: 65546, Total: 45.0}
   shows a write that a crash could undo.
 - The rows are `Find`'s, with their repeats: a `Give` that leaves out a variable gives a row for each binding, as
   `Find` does. Aggregates (`Sum`, `Count`, `Min`, `Max`, and a report's: `Avg`, `Values`, `Quantile`...) are watched
-  too: a change then removes a group's old row and adds its new one.
+  too: a change then removes a group's old row and adds its new one. A write that takes a group's `Sum` past the 63
+  bits of an Int ends that watch with `Find`'s `Err` (`"invalid"`, naming the field), as one that brings a date whose
+  `Trunc` starts before the least date; the program's other watches go on.
 - **No gap, no repeat.** When the connection breaks or the server restarts, the watch goes on by itself from the group
   of its last message: the server answers that nothing the question reads changed since (and nothing comes), or with
   the answer at its newest group, which the package turns into the change from the rows it holds. The program sees no

@@ -272,7 +272,7 @@ let ask ?timeout v (q : Question.t) =
     let truncs, extra = Ask.truncs extra in
     let base = { Query.vars = q.vars; where; ranges } in
     let t = Ask.compile v base extra in
-    let derived = Ask.derived ~vars:q.vars ~outer:(fun x -> t.outer.(x)) (Ask.typs_of t) truncs in
+    let derived = Ask.derived ~name:(fun x -> Ask.var_name v (Ask.patterns base extra) x) ~vars:q.vars ~outer:(fun x -> t.outer.(x)) (Ask.typs_of t) truncs in
     let nd = Array.length derived in
     let give = if Array.length q.give = 0 then Array.of_list (List.filter (fun x -> t.outer.(x)) (List.init q.vars Fun.id)) else q.give in
     Array.iter (fun x -> if x < 0 || x >= q.vars + nd || (x < q.vars && not t.outer.(x)) then Query.bad "give: variable %d is not one of the question's" x) give;

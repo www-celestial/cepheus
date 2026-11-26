@@ -40,7 +40,10 @@ let utc = { name = "UTC"; trans = [||]; offs = [||]; first = 0; rule = None }
 
 (* ---- the civil calendar (proleptic Gregorian), days since 1970-01-01: Hinnant's algorithms ---- *)
 
-let fdiv a b = if a >= 0 then a / b else -(((-a) + b - 1) / b)
+(* the floor of a / b, b > 0: OCaml's division goes toward 0, so one less for a negative a with a remainder. No -a,
+   which the least int has not: -((-a + b - 1) / b) wrapped there, the second of the least date read as one 146
+   million years after 1970 *)
+let fdiv a b = let q = a / b in if a >= 0 || q * b = a then q else q - 1
 let fmod a b = a - (b * fdiv a b)
 
 let days_from_civil y m d =
@@ -340,16 +343,29 @@ let floor_local u lsec =
        | Millennium -> days_from_civil ((1000 * fdiv (y - 1) 1000) + 1) 1 1
        | Second | Minute | Hour -> days)
 
-(* Trunc of an instant in milliseconds: the instant its unit starts, in milliseconds *)
+(* The least second whose milliseconds are a date, an Int: -4,611,686,018,427,387 (the least date is -2^62 ms, 146
+   million years before 1970). A unit that starts before it, a year of a date in the least one's (or a second of the
+   least date itself), has no start a date can hold: refused, where 1000 s wrapped past the ints to a date 146 million
+   years after 1970. Its start is never after the instant, so no unit passes the largest date. *)
+let least_second = min_int / 1000 (* toward 0: the ceiling *)
+
+(* the dates whose every unit starts at a date: from the least one and 1,002 years and 3 days (a millennium, a zone's
+   offset, the day earliest walks back) *)
+let safe_from = min_int + (1000 * 86400 * ((366 * 1002) + 3))
+
+let ms_of s = if s < least_second then bad "its unit starts before the least date, -2^62 ms (146 million years before 1970)" else 1000 * s
+
+(* Trunc of an instant in milliseconds: the instant its unit starts, in milliseconds. Raises Bad when it starts
+   before the least date. *)
 let trunc z u ms =
   let t = fdiv ms 1000 in
-  if z == utc then 1000 * floor_local u t
+  if z == utc then ms_of (floor_local u t)
   else begin
     let o = offset z t in
     let l0 = floor_local u (t + o) in
     match u with
-    | Second | Minute | Hour -> 1000 * max (l0 - o) (prev z t)
-    | _ -> 1000 * earliest z l0
+    | Second | Minute | Hour -> ms_of (max (l0 - o) (prev z t))
+    | _ -> ms_of (earliest z l0)
   end
 
 (* A Trunc's function of a date's index word (its milliseconds): a day and longer units remember the start of the
@@ -370,7 +386,7 @@ let truncator ~unit ~zone =
       let k, r = memo.(slot) in
       if k = l0 then r
       else begin
-        let r = 1000 * earliest z l0 in
+        let r = ms_of (earliest z l0) in
         memo.(slot) <- (l0, r);
         r
       end

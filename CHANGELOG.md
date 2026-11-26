@@ -293,6 +293,25 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
 
 ### Fixes
 
+- A `Sum` of ints or money past the 63 bits of an Int is refused, never given wrapped around. A report's sum (and a
+  watch's, kept by difference) wrapped silently: four times the largest Int summed to -4, three times to the largest
+  less 2, a total that looked right. Each group's Sum now keeps, beside its word, the times it wrapped (one test of
+  signs an addition, a carry made at the first wrap), so a question is refused (`invalid`, `Sum of invoice/total
+  passed the 63 bits of an Int in the group "Lyon": ...`) exactly when its exact total is no Int, whatever the order
+  of the rows and the number of cores: a total that passes the largest Int and comes back is given; a watch of it ends
+  with that error at the write that takes it past, the other watches go on. PostgreSQL gives such a total as a `numeric`;
+  SQLite 3.54.1 refuses a sum as soon as a partial sum overflows, even when its total fits
+  ([comparison](docs/book/comparison.md#sums-past-63-bits), [limits](docs/book/limits.md#questions)). The cost,
+  measured ([benchmarks](docs/book/benchmarks.md#sums-checked-past-63-bits-2026-11-26-at-1-million-facts)): about 7
+  instructions a row, no slowdown beyond the noise of the rounds (a `Sum` of 245,000 rows moved by 1 to 5 %, as the
+  aggregates it does not touch did).
+- `Trunc` of a date of the least ones (146 million years before 1970) to a year, a decade, a century or a millennium
+  that starts before the least date is refused (`invalid`, naming its field): its start, 1000 times its seconds,
+  wrapped to a date 146 million years after 1970. The least date's own second wrapped the same way (the floor of its
+  milliseconds by 1000 negated the least int): now its floor is taken without it, and refused too.
+- A running `Sum` past 63 bits names the field it sums (`Running's Sum of invoice/total passed ...`); a `Quantile`
+  between two values of money or dates is kept between them when their difference passes the ints.
+
 - `test/server_raft.ml` waits for the two damaged servers' line of the damage set aside, with a deadline of 30 s,
   where it read their logs once after their sockets answered: 1 run in 70 failed under load.
 - `tools/test.sh` names the checks that failed: each step's output goes to a log of its own, and a step that fails

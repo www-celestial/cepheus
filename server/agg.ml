@@ -539,13 +539,18 @@ let order (v : Store.view) (tx : Value.typ) : int -> int -> int =
     fun a b -> if a = b then 0 else String.compare (text a) (text b)
   | _ -> fun (a : int) b -> if a < b then -1 else if a > b then 1 else 0
 
-(* a + (b - a) f rounded half away from zero, a <= b, as an int *)
+(* a + (b - a) f rounded half away from zero, a <= b, as an int: b - a in floats when it passes the ints (a below 0,
+   b above), whose rounding then keeps it within [a, b], clamped there so that no rounding gives a value outside the
+   two (a float of 2^62 is no int) *)
 let lerp_int a b f =
   if f = 0. then a
   else
     let d = b - a in
     if d >= 0 then a + Float.to_int (Float.round (float_of_int d *. f))
-    else Float.to_int (Float.round (float_of_int a +. ((float_of_int b -. float_of_int a) *. f)))
+    else begin
+      let x = Float.round (float_of_int a +. ((float_of_int b -. float_of_int a) *. f)) in
+      if x <= float_of_int a then a else if x >= float_of_int b then b else Float.to_int x
+    end
 
 (* a group's different values, in Sort's order *)
 let sorted_values (v : Store.view) (tx : Value.typ) st =
@@ -666,6 +671,27 @@ let sum_int s =
     else if b > 62 then None
     else (let x = Array.fold_right (fun l acc -> (acc lsl Exact.bits) lor l) m 0 in Some (if neg then -x else x))
   end
+
+(* ---- a plain Sum's word, checked (Count, Sum, Min and Max: Answer's tables of groups, Live's keys) ----
+   A group's Sum of ints (money) is kept as OCaml adds ints, modulo 2^63, in its word, and the times it wrapped
+   beside it: its carry, +1 an addition that passed the largest int, -1 one that passed the least, made only at the
+   first (most reports never wrap). The exact sum is the word + carry 2^63: an Int exactly when the carry is 0, so a
+   sum that passes 2^62 on the way and comes back is right, and one that ends past it is refused whatever the order
+   of its rows and the domains that added them. An addition s + x wrapped when s and x have one sign and the result
+   the other (Warren, Hacker's Delight, 2-13): [wrapped s x (s + x)], upward when x >= 0; a subtraction s - x when s
+   and x have different signs and the result is not s's: [wrapped_sub s x (s - x)], upward when x < 0. *)
+let[@inline] wrapped s x r = (s lxor r) land (x lxor r) < 0
+let[@inline] wrapped_sub s x r = (s lxor x) land (s lxor r) < 0
+
+(* a value of a key for a message: a long text cut *)
+let short (x : Value.t) = let s = Value.to_string x in if String.length s > 64 then String.sub s 0 60 ^ "..." else s
+
+(* a Sum past 63 bits refused: its variable's property, the values of its group's keys (none: the report's one
+   group) *)
+let past_sum name (keys : string list) =
+  match keys with
+  | [] -> Query.bad "Sum of %s passed the 63 bits of an Int: group by a key, or ask its Avg and Count (exact)" name
+  | _ -> Query.bad "Sum of %s passed the 63 bits of an Int in the group %s: group by a finer key, or ask its Avg and Count (exact)" name (String.concat ", " keys)
 
 (* the cells a bag's new value takes (its two words, the table at most half full) *)
 let entry_cells = 4

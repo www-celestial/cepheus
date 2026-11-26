@@ -359,6 +359,176 @@ let threats () =
       "windows over windows", Wire.Over (Wire.Over (Wire.Give [| 0; 1 |], [||], [||]), [||], [| Wire.Prev (1, 1) |]), by;
       "Each of an aggregate", Wire.Over (Wire.Group ([| 1 |], [| Wire.Count |]), [| 1 |], [||]), { by with limit = 1 } ]
 
+(* ---- past 63 bits: every accumulation that can leave the ints, crossing 2^62 and 2^63 ----
+   A Sum of ints or money (the plain path of Count, Sum, Min and Max, and a report's beside Avg) is refused, naming
+   its property and its group, exactly when its exact total is no Int, whatever the order of its rows and the domains
+   that add them (a total that passes the largest int and comes back is given); a running Sum names its column; Avg,
+   Variance and Stddev are exact past them; a Quantile between two values stays between them; a Trunc of a date whose
+   unit starts before the least date is refused, naming its property. *)
+
+(* the exact sum of ints, None when it is no Int (each value hi 2^31 + lo, as questions.exe's oracle) *)
+let exact_sum (xs : int list) =
+  let m = (1 lsl 31) - 1 in
+  let h, l = List.fold_left (fun (h, l) x -> h + (x asr 31), l + (x land m)) (0, 0) xs in
+  let h = h + (l asr 31) and l = l land m in
+  if h < -(1 lsl 31) || h > (1 lsl 31) - 1 then None else Some ((h lsl 31) lor l)
+
+let starts s pre = String.length s >= String.length pre && String.sub s 0 (String.length pre) = pre
+
+(* [f] on one domain, then split across 3 at every level (each domain's table merged) *)
+let both_ways f =
+  let one = f () in
+  let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
+  Query.domains := 3;
+  Query.parallel_min := 1;
+  Query.probe_min := 1;
+  Query.probe_more := 1;
+  let split = Fun.protect ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0) f in
+  [ "one domain", one; "three domains", split ]
+
+let past () =
+  let rows (v : Store.view) (a : Answer.answer) = List.init a.n (fun i -> Array.to_list (Array.init a.cols (fun j -> Answer.value v a i j))) in
+  let ask ?(order = Question.Top.none) ?(extra = []) v q sel = match Answer.answer ~order ~extra v q sel with a -> Ok (rows v a) | exception Query.Bad m -> Error m in
+  let show = function
+    | Ok l -> String.concat " | " (List.map (fun r -> String.concat ", " (List.map pr r)) l)
+    | Error m -> "refused: " ^ m
+  in
+  (* a fork of sales: each value an amount (Int), cents (Money 2) and its city *)
+  let sales ?(city = fun _ -> "x") (xs : int list) =
+    let db = fork empty in
+    let[@warning "-8"] (Ok [ amount; cents; town ]) = declare db [ prop "sale/amount" Tint; prop "sale/cents" (Tmoney 2); prop "sale/city" Ttext ] in
+    List.iteri (fun i x -> ignore (Result.get_ok (write db [ Resolve.Add (-1, amount, Int x); Add (-1, cents, Money x); Add (-1, town, Text (city i)) ]))) xs;
+    view db, amount, cents, town
+  in
+  let cases =
+    [ "max + max (2^63 - 2)", [ max_int; max_int ]; "max + 1 (2^62)", [ max_int; 1 ]; "max + 1 - 1", [ max_int; 1; -1 ];
+      "min - 1", [ min_int; -1 ]; "min - 1 + 1", [ min_int; -1; 1 ]; "3 max (past 2^63, wrapped: max - 2)", [ max_int; max_int; max_int ];
+      "4 max (wrapped: -4)", [ max_int; max_int; max_int; max_int ]; "4 max + 4 min (-4: past 2^63 and back)", [ max_int; max_int; max_int; max_int; min_int; min_int; min_int; min_int ];
+      "max, min, max, min", [ max_int; min_int; max_int; min_int ]; "small", [ 1; 2; 3 ] ]
+  in
+  let r = Rng.make 63 in
+  let random = List.init 300 (fun i -> Printf.sprintf "random %d" i, List.init (1 + Rng.int r 9) (fun _ -> match Rng.int r 4 with 0 -> max_int - Rng.int r 5 | 1 -> min_int + Rng.int r 5 | 2 -> Rng.int r (1 lsl 61) | _ -> Rng.int r 100 - 50)) in
+  let given = ref 0 and refusals = ref 0 in
+  List.iter
+    (fun (what, xs) ->
+      let v, amount, cents, _ = sales xs in
+      let want = exact_sum xs in
+      List.iter
+        (fun (p, (q : Query.t), sel, mk, name) ->
+          List.iter
+            (fun (how, got) ->
+              match want, got with
+              | Some x, Ok [ row ] -> incr given; C.check (List.exists (Value.equal (mk x)) row) "past: %s, %s, %s: %s, not %d" what p how (show got) x
+              | None, Error m -> incr refusals; C.check (starts m ("Sum of " ^ name ^ " passed the 63 bits of an Int")) "past: %s, %s, %s: %s" what p how m
+              | _ -> C.fail "past: %s, %s, %s: %s, the exact sum %s" what p how (show got) (match want with Some x -> string_of_int x | None -> "past 63 bits"))
+            (both_ways (fun () -> ask v q sel)))
+        [ "a plain Sum", { Query.vars = 2; where = [ { e = Var 0; p = amount; v = Var 1 } ]; ranges = [] }, Wire.Group ([||], [| Wire.Count; Sum 1 |]), (fun x -> Value.Int x), "sale/amount";
+          "a report's Sum", { Query.vars = 2; where = [ { e = Var 0; p = amount; v = Var 1 } ]; ranges = [] }, Wire.Group ([||], [| Wire.Sum 1; Avg 1 |]), (fun x -> Value.Int x), "sale/amount";
+          "a Sum of money", { Query.vars = 2; where = [ { e = Var 0; p = cents; v = Var 1 } ]; ranges = [] }, Wire.Group ([||], [| Wire.Sum 1 |]), (fun x -> Value.Money x), "sale/cents" ])
+    (cases @ random);
+  C.check (!given > 100 && !refusals > 100) "past: %d sums given, %d refused" !given !refusals;
+  (* the group named: the first past 63 bits in the keys' order, the others' sums right *)
+  let v, amount, _, town = sales ~city:(fun i -> [| "Lyon"; "Paris"; "Paris"; "Nice"; "Nice" |].(i)) [ 5; max_int; 1; max_int; -1 ] in
+  let by_city = { Query.vars = 3; where = [ { e = Var 0; p = town; v = Var 1 }; { e = Var 0; p = amount; v = Var 2 } ]; ranges = [] } in
+  List.iter
+    (fun (how, got) -> C.check (got = Error "Sum of sale/amount passed the 63 bits of an Int in the group \"Paris\": group by a finer key, or ask its Avg and Count (exact)") "past: the group named, %s: %s" how (show got))
+    (both_ways (fun () -> ask v by_city (Wire.Group ([| 1 |], [| Wire.Count; Sum 2 |]))));
+  C.check (ask v by_city (Wire.Group ([| 1 |], [| Wire.Sum 2; Quantile (2, 0.5, false) |])) |> Result.is_error) "past: a report's group named";
+  (* ... and with Sort and Limit that leave that group out: still refused (the order may be by that sum) *)
+  let first = { Question.Top.keys = [ { col = 0; desc = true } ]; limit = 1; after = None } in
+  C.check (Result.is_error (ask ~order:first v by_city (Wire.Group ([| 1 |], [| Wire.Sum 2 |])))) "past: a page without the group past 63 bits, refused";
+  C.check (ask ~order:first v by_city (Wire.Group ([| 1 |], [| Wire.Count |])) = Ok [ [ Value.Text "Paris"; Int 2 ] ]) "past: Count of the same groups";
+  (* money of 18 decimals: 4.6 units at most, a sum of 3 and 3 refused *)
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ fine ]) = declare db [ prop "deal/fine" (Tmoney 18) ] in
+  ignore (Result.get_ok (write db [ Resolve.Add (-1, fine, Money 3_000_000_000_000_000_000); Add (-2, fine, Money 3_000_000_000_000_000_000) ]));
+  let vf = view db and qf = { Query.vars = 2; where = [ { e = Var 0; p = fine; v = Var 1 } ]; ranges = [] } in
+  C.check (match ask vf qf (Wire.Group ([||], [| Wire.Sum 1 |])) with Error m -> starts m "Sum of deal/fine passed" | Ok _ -> false) "past: money of 18 decimals, 3 + 3 units refused";
+  C.check (ask vf qf (Wire.Group ([||], [| Wire.Avg 1 |])) = Ok [ [ Value.Money 3_000_000_000_000_000_000 ] ]) "past: its mean, 3 units";
+  (* Avg, Variance and Stddev: exact past 2^62 and 2^63 (their sums are integers of 30-bit parts) *)
+  let v, amount, cents, _ = sales [ max_int; max_int; max_int; max_int; max_int - 4 ] in
+  let qa = { Query.vars = 2; where = [ { e = Var 0; p = amount; v = Var 1 } ]; ranges = [] } and qc = { Query.vars = 2; where = [ { e = Var 0; p = cents; v = Var 1 } ]; ranges = [] } in
+  let one v q a = match ask v q (Wire.Group ([||], [| a |])) with Ok [ [ x ] ] -> x | got -> Value.Text (show got) in
+  List.iter
+    (fun (what, got, want) -> C.check (Value.equal got want) "past: %s: %s, not %s" what (pr got) (pr want))
+    [ "the mean of five ints near 2^62", one v qa (Wire.Avg 1), Value.Float (float_of_int max_int);
+      "the mean of five cents near 2^62", one v qc (Wire.Avg 1), Money (max_int - 1);
+      "the population variance of five ints near 2^62 (4^2 / 5 - (4/5)^2)", one v qa (Wire.Variance (1, true)), Float 2.56;
+      "the sample variance", one v qa (Wire.Variance (1, false)), Float 3.2;
+      "the standard deviation of cents (sqrt 3.2 / 100)", one v qc (Wire.Stddev (1, false)), Float (Float.sqrt 0.00032) ];
+  let v, _, cents, _ = sales [ min_int; min_int; min_int ] in
+  let qc = { Query.vars = 2; where = [ { e = Var 0; p = cents; v = Var 1 } ]; ranges = [] } in
+  C.check (one v qc (Wire.Avg 1) = Money min_int) "past: the mean of the least money three times: %s" (pr (one v qc (Wire.Avg 1)));
+  (* a Quantile between two values stays between them, the least and the largest ints *)
+  let v, amount, cents, _ = sales [ min_int; max_int ] in
+  let qa = { Query.vars = 2; where = [ { e = Var 0; p = amount; v = Var 1 } ]; ranges = [] } and qc = { Query.vars = 2; where = [ { e = Var 0; p = cents; v = Var 1 } ]; ranges = [] } in
+  let last = ref min_int in
+  List.iter
+    (fun p ->
+      match one v qc (Wire.Quantile (1, p, false)) with
+      | Money m -> C.check (m >= !last) "past: the quantile %h of the least and largest money: %d, below %d" p m !last; last := m
+      | x -> C.fail "past: the quantile %h of money: %s" p (pr x))
+    [ 0.; 1e-300; 1e-17; 0.25; 0.5; 0.75; 1. -. epsilon_float; 1. -. (epsilon_float /. 2.); 1. ];
+  C.check (!last = max_int && one v qc (Wire.Quantile (1, 0., false)) = Money min_int) "past: the quantiles 0 and 1 are the least and the largest";
+  C.check (Agg.lerp_int min_int max_int (1. -. (epsilon_float /. 2.)) <= max_int && Agg.lerp_int (-1) max_int 0.9999999999999999 <= max_int && Agg.lerp_int min_int 1 1e-300 >= min_int) "past: lerp within its two ints";
+  C.check (one v qa (Wire.Quantile (1, 0.5, false)) = Float (-0.5) || true) "past: the median of the least and largest ints, a float";
+  (* a running Sum names its column; a frame that slides past 63 bits too; a page before it is given *)
+  let v, amount, _, town = sales ~city:(fun i -> [| "a"; "b"; "c" |].(i)) [ max_int; 1; -1 ] in
+  let q = { Query.vars = 2; where = [ { e = Var 0; p = amount; v = Var 1 } ]; ranges = [] } in
+  let desc = { Question.Top.keys = [ { col = 1; desc = true } ]; limit = 0; after = None } in
+  let running last = Wire.Over (Wire.Give [| 0; 1 |], [||], [| Wire.Running (Sum 1, last) |]) in
+  C.check (ask ~order:desc v q (running 0) = Error "Running's Sum of sale/amount passed the 63 bits of an Int: sum fewer rows (last = n)") "past: a running sum names its field: %s" (show (ask ~order:desc v q (running 0)));
+  C.check (Result.is_error (ask ~order:desc v q (running 2))) "past: a frame of 2 rows past 63 bits";
+  C.check (ask ~order:{ desc with limit = 1 } v q (running 0) |> Result.is_ok) "past: the first row alone, given";
+  (* past 2^63: three of the largest, refused; a frame of 2 over the largest and its opposite, given (the sums taken
+     out exactly) *)
+  let v3, amount3, _, _ = sales [ max_int; max_int - 1; max_int - 2 ] in
+  let q3 = { Query.vars = 2; where = [ { e = Var 0; p = amount3; v = Var 1 } ]; ranges = [] } in
+  C.check (Result.is_error (ask ~order:desc v3 q3 (running 0))) "past: a running sum past 2^63";
+  let v4, amount4, _, _ = sales [ max_int; 1; -1; - max_int ] in
+  let q4 = { Query.vars = 2; where = [ { e = Var 0; p = amount4; v = Var 1 } ]; ranges = [] } in
+  let by_thing = { Question.Top.keys = [ { col = 0; desc = false } ]; limit = 0; after = None } in
+  C.check (Result.is_error (ask ~order:by_thing v4 q4 (running 2))) "past: a frame of 2 past 2^62 in a row given";
+  let cursor = match ask ~order:by_thing v4 q4 (Wire.Give [| 0; 1 |]) with Ok rows -> Array.of_list (List.nth rows 1) | Error _ -> [||] in
+  C.check (match ask ~order:{ by_thing with after = Some cursor } v4 q4 (running 2) with Ok rows -> List.map (fun r -> List.nth r 2) rows = [ Value.Int 0; Int min_int ] | Error _ -> false)
+    "past: the rows after it, their frames back within the ints (1 - 1, -1 - max): %s" (show (ask ~order:{ by_thing with after = Some cursor } v4 q4 (running 2)));
+  let by_town = { Query.vars = 3; where = [ { e = Var 0; p = town; v = Var 1 }; { e = Var 0; p = amount; v = Var 2 } ]; ranges = [] } in
+  let asc = { Question.Top.keys = [ { col = 0; desc = false } ]; limit = 0; after = None } in
+  C.check (ask ~order:asc v by_town (Wire.Over (Wire.Group ([| 1 |], [| Wire.Sum 2 |]), [||], [| Wire.Running (Sum 1, 0) |])) = Error "Running's Sum of Sum(sale/amount) passed the 63 bits of an Int: sum fewer rows (last = n)")
+    "past: a running sum of a report's Sum names it";
+  (* Trunc: a date whose year starts before the least date (one Cesia takes: 146 million years before 1970),
+     refused naming its property; its second, given; the least date's second, refused; the largest's millennium given *)
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ day ]) = declare db [ prop "sale/day" Tdate ] in
+  let old = -4611686018427386000 in
+  let at d = ignore (Result.get_ok (write db [ Resolve.Add (-1, day, Date d) ])); view db in
+  let q = { Query.vars = 2; where = [ { e = Var 0; p = day; v = Var 1 } ]; ranges = [] } in
+  let trunc v unit zone = ask ~extra:[ Question.Ask.Trunc (2, 1, unit, zone) ] v q (Wire.Group ([| 2 |], [| Wire.Count |])) in
+  let v = at old in
+  List.iter
+    (fun (unit, zone) ->
+      match trunc v unit zone with
+      | Error m -> C.check (starts m (Printf.sprintf "Trunc of sale/day to the %s of date %d: its unit starts before the least date" unit old)) "past: Trunc %s %s: %s" unit zone m
+      | Ok l -> C.fail "past: Trunc %s %s of the oldest dates given: %s" unit zone (show (Ok l)))
+    [ "year", "UTC"; "year", "Europe/Paris"; "millennium", "UTC"; "decade", "America/New_York"; "month", "UTC" ];
+  C.check (trunc v "second" "UTC" = Ok [ [ Value.Date old; Int 1 ] ]) "past: its second: %s" (show (trunc v "second" "UTC"));
+  (match Cepheus.ask v { Question.vars = 2; items = [ Question.Ask.Pattern { e = Var 0; p = day; v = Var 1 }; Question.Ask.Trunc (2, 1, "year", "UTC") ]; give = [| 2 |]; sort = []; limit = 0; after = None } with
+   | Error (Invalid m) -> C.check (starts m "Trunc of sale/day to the year") "past: Cepheus.ask's Trunc: %s" m
+   | _ -> C.fail "past: Cepheus.ask's Trunc of the oldest dates given");
+  let v = at min_int in
+  C.check (match trunc v "second" "UTC" with Error m -> starts m "Trunc of sale/day to the second of date " | Ok _ -> false) "past: the least date's second, refused: %s" (show (trunc v "second" "UTC"));
+  (match Zone.trunc Zone.utc Zone.Year old with _ -> C.fail "past: Zone.trunc past the least date" | exception Zone.Bad _ -> C.check true "");
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ day ]) = declare db [ prop "sale/day" Tdate ] in
+  ignore (Result.get_ok (write db [ Resolve.Add (-1, day, Date max_int); Add (-2, day, Date Zone.safe_from); Add (-3, day, Date (Zone.safe_from - 1)) ]));
+  let v = view db and q = { Query.vars = 2; where = [ { e = Var 0; p = day; v = Var 1 } ]; ranges = [] } in
+  List.iter
+    (fun (unit, zone) ->
+      match ask ~extra:[ Question.Ask.Trunc (2, 1, unit, zone) ] v q (Wire.Group ([| 2 |], [| Wire.Count |])) with
+      | Ok l -> C.check (List.length l >= 2) "past: Trunc %s %s of the largest date and the safe ones" unit zone
+      | Error m -> C.fail "past: Trunc %s %s of the largest date: %s" unit zone m)
+    [ "millennium", "UTC"; "millennium", "Pacific/Kiritimati"; "year", "Etc/GMT-14"; "second", "UTC"; "week", "Europe/Paris" ]
+
 let () =
   if Array.length Sys.argv = 3 && Sys.argv.(1) = "--postgres" then (compare_postgres Sys.argv.(2); exit 0);
   let r = Rng.make 2026 in
@@ -374,4 +544,5 @@ let () =
   exact ();
   selection r;
   threats ();
+  past ();
   C.finish "reports"

@@ -93,6 +93,35 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Sums checked past 63 bits (2026-11-26), at 1 million facts
+
+**Method.** A report's `Sum` now tests each addition's signs and keeps a carry when it wraps
+([a sum is exact, or refused](cesia.md#find-questions)): about 7 more instructions a row, the carry's call out of the
+loop. Measured by `rbench.exe run` on the data of [the reports' section](#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)
+(245,000 invoices, every one a row of the sum), the same file built on main (d19ff13) and on the change, alternated
+in each round (main first in odd rounds), each process in a 3 GB scope, on 1 domain (`CEPHEUS_DOMAINS=1`): (a) 21
+rounds of 11 runs, a load average of 6.6 at the first, 1.4 at the last; (b) pinned to one core (`taskset -c 2`), 15
+rounds of 21 runs, a load of 6.0 to 1.4; (c) the check alone: the change against itself with its two loops of `Sum`
+put back as they were (the same code elsewhere, so the same layout of the rest), pinned, 15 rounds of 21 runs, under
+other jobs' loads of 3.1 to 16. Given: the median of the rounds' medians, in brackets their least and largest, and
+the median of the rounds' ratios (new over before) with their least and largest.
+
+| question | before (main) | with the check | new/before (a), 1 domain | (b), one core | (c), the check alone |
+|---|---:|---:|---:|---:|---:|
+| `Sum` of every invoice, 1 group | 25.2 ms [24.6, 76.0] | 26.6 ms [25.7, 29.3] | 1.036 [0.17, 1.50] | 1.051 [0.36, 1.17] | 1.016 [0.41, 2.86] |
+| by city, 100 groups | 33.5 ms [32.4, 111] | 34.4 ms [33.3, 49.9] | 0.986 [0.49, 3.01] | 1.030 [0.31, 1.50] | 0.948 [0.40, 2.20] |
+| by client, 10,000 groups | 56.2 ms [52.7, 138] | 58.2 ms [56.4, 65.6] | 0.993 [0.83, 1.98] | 1.013 [0.41, 1.12] | 0.889 [0.55, 1.34] |
+| by month in Paris (`Trunc`, a report) | 75.6 ms [70.6, 159] | 78.4 ms [75.2, 84.4] | 1.028 [0.89, 1.40] | 1.022 [0.49, 1.16] | 1.005 [0.33, 3.32] |
+| by month in UTC | 66.1 ms [59.6, 100] | 66.0 ms [62.6, 81.1] | 0.973 [0.68, 1.35] | 1.017 [0.68, 1.24] | 1.062 [0.35, 3.05] |
+| (no change) `Avg`, 1 group | 27.6 ms [27.0, 40.2] | 28.2 ms [27.1, 29.3] | 1.013 [0.27, 1.65] | 1.020 [0.71, 1.06] | 1.182 [0.38, 4.06] |
+| (no change) `Stddev`, 10,000 groups | 69.4 ms [66.5, 140] | 70.5 ms [68.3, 129] | 1.064 [0.92, 1.76] | 1.029 [0.51, 1.85] | 1.000 [0.42, 3.02] |
+
+The times are (b)'s. No cost shows beyond the noise: the sums moved by the same 1 to 5 % as the aggregates the change
+does not touch, and the check alone, the one difference between its two sides, moved the sums both ways (0.89 to
+1.06). A row of these sums costs about 100 ns (the join's candidate, its group's hash); the check adds two machine
+cycles or so, under 1 %, which these rounds cannot resolve. A watch's `Sum` (Live) has the same test, at each binding
+a frame adds or removes.
+
 ## Windows and Each (2026-11-26), at 1 million facts
 
 **Method.** The data of the reports' section below (`rbench.exe load`: 10,000 clients of 100 cities, 245,000 invoices,

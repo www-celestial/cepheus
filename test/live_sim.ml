@@ -311,9 +311,71 @@ let run seed =
   (* no change since a watch's last message: its rows are the answer now *)
   List.iter (fun w -> if w.started && w.sub <> None && w.ended = None then check_now w !v.group "the end") !watches
 
+(* Past 63 bits at a frame: a watch of a Sum that a write takes past them ends invalid, naming it (as Find refuses
+   it), by an addition and by a removal, upward and downward; the watches beside it (one of the same template, other
+   constants) go on; a Sum that passes them and comes back within one frame is given; a watch of one past them is
+   refused; a watch whose new date's year starts before the least date (Trunc) ends invalid, the others go on *)
+let past () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ status; total; due ]) = declare db [ prop "bill/status" Ttext; prop "bill/total" Tint; prop "bill/due" Tdate ] in
+  let v = ref (view db) in
+  let hub = Live.create !v ~tag:!v.group ~durable:max_int in
+  let write ops =
+    let n = !v.group + 1 in
+    match Resolve.resolve !v ~n ~time:n ~by:0 ~why:"" ops with
+    | Ok (v', g, temps) -> v := v'; Live.frame hub ~tag:v'.group [ g ] v'; List.map snd temps
+    | Error (Resolve.Conflict m | Invalid m | Not_unique m) -> C.fail "past: a write refused: %s" m; []
+  in
+  let of_status st = { Query.vars = 2; where = [ { e = Var 0; p = status; v = Val (Text st) }; { e = Var 0; p = total; v = Var 1 } ]; ranges = [] } in
+  let watch ?(extra = []) q sel =
+    let msgs = ref [] in
+    ignore (Live.subscribe ~extra hub q sel ~from:0 ~emit:(fun m -> msgs := m :: !msgs; true));
+    msgs
+  in
+  let sums = Wire.Group ([||], [| Wire.Count; Sum 1 |]) in
+  let last (m : Live.msg list ref) = match !m with x :: _ -> Some x | [] -> None in
+  let rows = function Some (Live.Answer a) -> a.rows | Some (Change c) -> c.added | _ -> [] in
+  let ended m = match last m with Some (Live.Ended e) -> Some (e.code, e.message) | _ -> None in
+  let bill st x = [ Resolve.Add (-1, status, Text st); Add (-1, total, Int x) ] in
+  let unpaid = watch (of_status "unpaid") sums and paid = watch (of_status "paid") sums and late = watch (of_status "late") sums in
+  let days = watch ~extra:[ Question.Ask.Trunc (2, 1, "year", "UTC") ] { Query.vars = 2; where = [ { e = Var 0; p = due; v = Var 1 } ]; ranges = [] } (Wire.Group ([| 2 |], [| Wire.Count |])) in
+  ignore (write (bill "unpaid" max_int @ [ Resolve.Add (-2, status, Text "paid"); Add (-2, total, Int 5) ]));
+  C.check (rows (last unpaid) = [ [| Int 1; Int max_int |] ] && rows (last paid) = [ [| Int 1; Int 5 |] ]) "past: the sums up to the largest int";
+  ignore (write (bill "unpaid" 1 @ [ Resolve.Add (-2, status, Text "paid"); Add (-2, total, Int 6) ]));
+  C.check (ended unpaid = Some ("invalid", "Sum of bill/total passed the 63 bits of an Int: group by a key, or ask its Avg and Count (exact)"))
+    "past: a watch of a Sum past 2^62 by an addition ends invalid, naming it: %s" (match ended unpaid with Some (_, m) -> m | None -> "not ended");
+  C.check (rows (last paid) = [ [| Int 2; Int 11 |] ] && ended paid = None) "past: the watch of the same template beside it goes on";
+  (match Live.subscribe hub (of_status "unpaid") sums ~from:0 ~emit:(fun _ -> true) with
+   | _ -> C.fail "past: a watch of a Sum past 63 bits taken"
+   | exception Query.Bad m -> C.check (String.length m > 7 && String.sub m 0 7 = "Sum of ") "past: a watch of a Sum past 63 bits refused: %s" m);
+  (* past 2^62 and back within one frame (one group): given, the largest int exactly *)
+  ignore (write (bill "late" max_int @ [ Resolve.Add (-2, status, Text "late"); Add (-2, total, Int max_int); Add (-3, status, Text "late"); Add (-3, total, Int (-max_int)) ]));
+  C.check (rows (last late) = [ [| Int 3; Int max_int |] ] && ended late = None) "past: past 2^62 and back in one frame, given";
+  (* by a removal: upward (a -1 taken away from the largest int), downward (a 1 from the least) *)
+  let up = watch (of_status "up") sums and down = watch (of_status "down") sums in
+  let u = write (bill "up" max_int @ [ Resolve.Add (-2, status, Text "up"); Add (-2, total, Int (-1)); Add (-3, status, Text "up"); Add (-3, total, Int 1) ]) in
+  let d = write (bill "down" min_int @ [ Resolve.Add (-2, status, Text "down"); Add (-2, total, Int 1); Add (-3, status, Text "down"); Add (-3, total, Int (-1)) ]) in
+  C.check (rows (last up) = [ [| Int 3; Int max_int |] ] && rows (last down) = [ [| Int 3; Int min_int |] ]) "past: the largest and the least ints, exactly";
+  (match u, d with
+   | [ _; um1; _ ], [ _; dp1; _ ] ->
+     ignore (write [ Resolve.Retract (um1, total, Int (-1)) ]);
+     ignore (write [ Resolve.Retract (dp1, total, Int 1) ]);
+     C.check (match ended up, ended down with Some ("invalid", a), Some ("invalid", b) -> String.sub a 0 7 = "Sum of " && String.sub b 0 7 = "Sum of " | _ -> false)
+       "past: a removal past the largest and the least ints ends the watch invalid"
+   | _ -> C.fail "past: the things of the writes");
+  (* Trunc at a frame: a date of 146 million years before 1970, its year before the least date *)
+  ignore (write [ Resolve.Add (-1, due, Date 1_700_000_000_000) ]);
+  C.check (rows (last days) <> [] && ended days = None) "past: a watch of the years of the dues";
+  let others = watch (of_status "paid") sums in
+  ignore (write [ Resolve.Add (-1, due, Date (-4611686018427386000)); Add (-2, status, Text "paid"); Add (-2, total, Int 1) ]);
+  C.check (match ended days with Some ("invalid", m) -> String.length m > 21 && String.sub m 0 21 = "Trunc of bill/due to " | _ -> false)
+    "past: a Trunc past the least date at a frame ends its watch invalid: %s" (match ended days with Some (_, m) -> m | None -> "not ended");
+  C.check (rows (last others) = [ [| Int 3; Int 12 |] ] && rows (last paid) = [ [| Int 3; Int 12 |] ]) "past: the other watches of the frame go on"
+
 let () =
   let seeds = ref 400 and one = ref None in
   Arg.parse [ "--seeds", Arg.Set_int seeds, "N"; "--seed", Arg.Int (fun s -> one := Some s), "N" ] ignore "live_sim.exe";
+  past ();
   (match !one with Some s -> run s | None -> for s = 1 to !seeds do run s done);
   Printf.printf "live: %d messages checked (%d same, %d lagging; %d checks of a window against Find; %d of a report)\n" !messages !sames !laggings !windows !reports;
   C.finish "live"
