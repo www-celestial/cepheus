@@ -354,8 +354,9 @@ cut as the chapter says. *Tested by* `test/questions.ml`: random states (every t
 derived facts, retractions, runs merged at random) and random questions with patterns, ranges, `Not`, `Or`, `And` and
 `In` and a random select, Sort, Limit and After, answered by a brute-force oracle over every fact (the bindings, the
 groups, the order value by value, the cursor, the ties), and by the engine on the heap path, the index path and its own
-choice, before and after a trip through the wire: the same rows, in the same order; and live questions with `Not`,
-`Or` and `In` checked against the oracle after every frame.
+choice, before and after a trip through the wire: the same rows, in the same order; split across 3 domains at every
+level of two candidates or more, or with their first level probed, the rows of one domain, in their order, bit for
+bit; and live questions with `Not`, `Or` and `In` checked against the oracle after every frame.
 
 ## G12 Merges are atomic
 

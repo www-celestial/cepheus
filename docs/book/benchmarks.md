@@ -70,6 +70,8 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `bench.exe cpu DIR N` | the writer's work alone: N 5-fact groups into a fork of the database (no disk) |
 | `bench.exe crc` | CRC-32C alone on 24 bytes, 4 KiB, 16 KiB, 1 MiB and 96 MiB from an odd offset: the time of a call and MB/s, median and 95 % interval over `RUNS` runs |
 | `sbench.exe watches DIR` | a change under a watch of `Not`, `Or`, `In` and `Prefix` (one hub each, the changes made in memory), against the question answered again in full: 21 changes each |
+| `rbench.exe load DIR CSVDIR`, `rbench.exe run DIR` | reports: the data (10,000 clients, 245,000 invoices) and its CSV for PostgreSQL; each aggregate over 1, 100 and 10,000 groups and the totals by month (`Trunc`), as the server answers them (`Answer.answer`) |
+| `abench.exe DIR`, `mbench.exe DIR` | the questions of before, for an A/B of two builds on one database, each file compiling against the build before the change: `abench` a Give of a join, groups, a sorted page, `Not`, a range, `Optional` (rbench's data); `mbench` small questions in loops, the fixed cost of a fold (a fold of one fact, `Prefix`, Q3 counted, `Not`, `Optional`, a sorted page, a find of every e-mail, Q4's fold; bench.exe's data) |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop; `COUNTER=1`: each transaction increments one shared counter row), `ops ROOT` (the questions of `bench.exe pages` that `Less` and `Optional` answer, with an index on `invoice (total)`) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | backup and restore on the three sides: `cepheus backup`, `verify`, `restore` to the end and to a group; `pg_basebackup`, `pg_verifybackup`, a restore and a point-in-time recovery; SQLite's `.backup`, `integrity_check`, `.restore`; the whole history replayed (`-replay`) |
@@ -89,6 +91,118 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## Questions split past a narrow first level, and lighter groups (2026-11-26), at 1 million facts
+
+**What was slow.** Each part of the questions was timed apart on the data below (one domain against eight, the join
+alone against the join and its groups), under the lock:
+
+- The engine split a question across its domains at its first level only, and only when that level had 20,000
+  candidates or more. The invoices whose total is below one invoice's start from that one total (the order: the total,
+  the totals below it, their invoices): the 122,962 invoices ran on one domain, 37 to 39 ms on 1 and 2 domains and no
+  less on 8. A report by city starts from the 10,000 clients, fewer candidates than the 245,000 invoices, so the
+  planner's first: on one domain too, 45 ms on 8 domains as on 1.
+- A report of 10,000 groups starts from the invoices and was split, but each of its 128 slices built its own hash
+  table, a key array made and hashed by OCaml's polymorphic hash for every row and an object a group a slice; the 128
+  tables were then merged on one domain (32 ms of a `Sum`'s 85), the groups sorted by the polymorphic comparison
+  (5.6 ms), and a median's bags merged by putting each value again into one table (25 to 95 ms).
+- `Cepheus.ask` made its rows' values on one domain after the fold (122,962 rows for the range above).
+
+**What changed.** A level of 20,000 candidates or more is split wherever it comes in the order; the first level of two
+candidates or more past those of one, when the planner expects 80,000 candidates of work or more, runs on the asking
+domain until its candidates' measured work says the rest takes that much, and the rest is split
+([architecture](architecture.md#one-writer-threads-and-domains)). A Group's groups are numbers in one table of open
+addressing over their keys' words (a row costs a hash and no allocation), their Count, Sum, Min and Max in one flat
+array, a mean's exact sums in four ints a group, every group's bag in one table a column (a table a group once the
+groups hold more than 64 different values each: a city's thousands of totals); a table a domain (these
+aggregates do not depend on the rows' order), merged at the end, the domains' bags read together then rather than put
+again, the groups sorted by an int comparison. `ask` makes each row's values in its step, on the domain that found it.
+
+**Method.** The data of the two sections below (`bench.exe load`, 1 M facts; `rbench.exe load`, 990,000), each merged
+into one run, on the SATA SSD; PostgreSQL 18.6 the same rows. Main's binaries (8a97c5d, *old*) beside this version's
+(*new*), built the same way and alternated in each round: 5 rounds, each side a median of 11 runs (5 for `bench.exe
+pages`); given: the median of the 5 rounds and in brackets their least and largest; *new/old*: the median of the
+rounds' ratios, in brackets their least and largest. `CEPHEUS_DOMAINS` 8 (the default here: 4 cores, 8 threads), 4, 2
+and 1 for `rbench.exe` and `bench.exe read` (`bench.exe pages` runs on 8). PostgreSQL: its engine's time (`EXPLAIN
+(ANALYZE, TIMING OFF)`), 2 workers allowed. The machine was shared: a load average (1 minute) of 1.7 to 3.3 on its 8
+threads.
+
+**Reports**, 8 domains (beside PostgreSQL: [the next section](#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)):
+
+| question | old | new | new/old |
+|---|---:|---:|---:|
+| Sum 1 group | 13.5 ms [13.3, 17.6] | 12.0 ms [10.5, 15.3] | 0.81 [0.70, 1.15] |
+| Avg 1 group | 13.5 ms [13.3, 15.4] | 11.6 ms [11.4, 13.5] | 0.87 [0.85, 0.98] |
+| Count(status) 1 group | 18.2 ms [18.0, 30.1] | 17.0 ms [15.6, 18.1] | 0.87 [0.60, 0.95] |
+| Values(status) 1 group | 18.2 ms [18.0, 19.1] | 17.9 ms [14.9, 23.3] | 0.94 [0.82, 1.28] |
+| Median 1 group | 28.1 ms [27.5, 28.2] | 28.8 ms [26.8, 30.6] | 1.02 [0.95, 1.09] |
+| Stddev 1 group | 13.7 ms [13.3, 13.9] | 12.0 ms [11.7, 14.0] | 0.87 [0.87, 1.01] |
+| Sum 100 groups (city) | 46.5 ms [45.9, 52.1] | 9.68 ms [9.25, 11.3] | 0.21 [0.19, 0.23] |
+| Avg 100 groups (city) | 52.0 ms [50.5, 56.5] | 11.0 ms [10.3, 12.5] | 0.22 [0.20, 0.23] |
+| Count(status) 100 groups (city) | 72.4 ms [71.4, 81.7] | 15.2 ms [14.7, 17.8] | 0.21 [0.19, 0.25] |
+| Values(status) 100 groups (city) | 73.2 ms [72.6, 94.0] | 15.2 ms [15.0, 17.6] | 0.21 [0.16, 0.24] |
+| Median 100 groups (city) | 93.1 ms [88.3, 93.7] | 39.6 ms [38.4, 45.8] | 0.45 [0.42, 0.49] |
+| Stddev 100 groups (city) | 51.3 ms [50.4, 53.6] | 11.4 ms [10.9, 14.1] | 0.23 [0.21, 0.26] |
+| Sum 10,000 groups (client) | 83.4 ms [80.9, 91.9] | 26.1 ms [25.0, 33.3] | 0.31 [0.30, 0.41] |
+| Avg 10,000 groups (client) | 151 ms [142, 163] | 36.5 ms [35.1, 46.4] | 0.24 [0.23, 0.31] |
+| Count(status) 10,000 groups (client) | 200 ms [195, 225] | 57.7 ms [55.1, 76.9] | 0.29 [0.28, 0.38] |
+| Values(status) 10,000 groups (client) | 227 ms [221, 251] | 73.6 ms [70.5, 95.1] | 0.33 [0.31, 0.41] |
+| Median 10,000 groups (client) | 285 ms [279, 306] | 82.3 ms [79.3, 106] | 0.29 [0.28, 0.35] |
+| Stddev 10,000 groups (client) | 160 ms [142, 164] | 38.0 ms [35.5, 47.2] | 0.27 [0.22, 0.29] |
+| Sum by month in Paris (Trunc) | 31.7 ms [28.7, 36.8] | 20.9 ms [20.4, 24.7] | 0.69 [0.66, 0.75] |
+| Sum by month in UTC (Trunc) | 26.6 ms [26.4, 39.7] | 19.0 ms [18.2, 24.3] | 0.70 [0.61, 0.73] |
+
+**On 1, 2, 4 and 8 domains** (`CEPHEUS_DOMAINS`), new (old):
+
+| question | 1 | 2 | 4 | 8 |
+|---|---:|---:|---:|---:|
+| Sum 1 group | 26.6 (32.8) | 23.4 (22.8) | 14.1 (16.8) | 12.0 (13.5) |
+| Sum 100 groups (city) | 36.0 (45.4) | 19.6 (45.7) | 10.7 (44.9) | 9.68 (46.5) |
+| Median 100 groups (city) | 87.3 (91.5) | 61.1 (90.1) | 44.2 (92.7) | 39.6 (93.1) |
+| Avg 10,000 groups (client) | 71.0 (121) | 49.2 (191) | 38.4 (158) | 36.5 (151) |
+| Median 10,000 groups (client) | 141 (229) | 102 (318) | 88.0 (292) | 82.3 (285) |
+
+**Less and Optional** (`bench.exe pages`, 8 domains), beside PostgreSQL's engine (`pg.sh ops`):
+
+| question | old | new | new/old | PostgreSQL 18.6 |
+|---|---:|---:|---:|---:|
+| the follow links to a newer client, `Less(a, b)` | 11.0 ms [10.6, 11.4] | 8.76 ms [8.41, 9.31] | 0.79 [0.77, 0.84] | 3.82 ms [3.60, 4.14] |
+| the invoices below one invoice's total, `Less(t, tx)` | 57.5 ms [54.3, 59.4] | 28.0 ms [27.3, 30.7] | 0.51 [0.46, 0.53] | 19.0 ms [18.9, 19.6] |
+| &nbsp;&nbsp;the same range, its bound read first | 39.3 ms [38.0, 39.9] | 26.7 ms [25.8, 27.8] | 0.69 [0.66, 0.70] |  |
+| every client with the clients each follows, `Optional` | 21.9 ms [21.4, 22.9] | 16.7 ms [15.7, 17.7] | 0.76 [0.72, 0.81] | 12.5 ms [12.2, 13.2] |
+| &nbsp;&nbsp;the same as a join | 24.6 ms [23.7, 27.8] | 18.8 ms [18.2, 19.2] | 0.76 [0.69, 0.78] |  |
+
+**The questions of before**: Q1 to Q5 (`bench.exe read`) and small questions in loops (`mbench.ml`: the fixed cost of
+a fold), new/old:
+
+| question | 1 domain | 8 domains |
+|---|---:|---:|
+| Q1, an invoice by its id | 1.00 [0.97, 1.03] | 1.00 [0.92, 1.08] |
+| Q2, a client by e-mail | 1.00 [0.98, 1.04] | 1.00 [0.97, 1.02] |
+| Q3, the unpaid invoices of a city (396 rows) | 1.02 [1.01, 1.06] | 1.01 [0.98, 1.03] |
+| Q4, the unpaid sum by city (45,064 invoices) | 1.03 [0.98, 1.04] | 1.00 [0.92, 1.13] |
+| Q5, the triangles of the follow links | 1.00 [0.97, 1.00] | 1.01 [0.98, 1.03] |
+| a fold of one fact (a thing's name) | 0.99 [0.99, 1.09] | 1.00 [0.82, 1.08] |
+| `Prefix`, one e-mail (`ask`) | 0.99 [0.98, 1.04] | 1.00 [0.95, 1.15] |
+| Q3 counted (`fold`) | 1.01 [1.00, 1.05] | 0.99 [0.98, 1.00] |
+| `Not`, a city's clients with no unpaid invoice (`ask`) | 1.03 [0.99, 1.04] | 1.00 [0.93, 1.24] |
+| `Optional`, a city's clients and their follows (`ask`) | 0.99 [0.97, 1.04] | 0.97 [0.89, 0.99] |
+| a page of 20, the largest totals first (`ask`) | 0.99 [0.97, 1.06] | 1.01 [0.94, 1.01] |
+| every e-mail (`find`, 11,363 texts) | 1.01 [0.94, 1.06] | 0.96 [0.95, 1.04] |
+| Q4's fold alone | 1.00 [0.99, 1.10] | 1.01 [0.84, 1.08] |
+
+- **Reports**: 3 to 5 times faster at 100 and 10,000 groups on 8 domains (a median of 100 groups 2.2 times); on one
+  domain 1.1 to 1.8 times, the flat tables. PostgreSQL is now behind at every number of groups ([the next section](#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)).
+- **The range below one invoice's total** splits at its second level now; its time is then the values it makes: the
+  same range with its bound read first takes as long.
+- **What still loses**: a check of each follow link, `Less(a, b)` (8.76 ms against PostgreSQL's 3.82 ms: its scan of a
+  table of two columns reads a row in 70 ns, where Cepheus reads the links' index fact by fact and makes each row's
+  values); the range below one invoice's total (28.0 ms against 19.0 ms: the 122,962 rows made as OCaml values, a
+  program's reader's work, where PostgreSQL's engine sends none); every client with the clients each follows (16.7 ms
+  against 12.5 ms: PostgreSQL's hash join of two whole tables).
+- **Nothing before slower**: Q1 to Q5 on 1, 2, 4 and 8 domains 0.97 to 1.04 (the medians of the rounds' ratios; Q4
+  on one domain 1.03, and its fold alone in a loop 1.00), the small questions in loops 0.96 to 1.03: the split's
+  machinery is made only for a level to split or to probe, so a fold that has none allocates what it did.
+
 ## Reports: Avg, Count(x), Values, Quantile, Stddev, Trunc (2026-11-26), at 1 million facts
 
 **Method.** `bench/rbench.ml load`: 10,000 clients (a city among 100) and 245,000 invoices (a client, a total of 0.01
@@ -100,52 +214,54 @@ groups), each side reading only what the aggregate needs: Cepheus the engine's a
 `Answer.answer`, what the server computes, no socket), PostgreSQL the execution time of `EXPLAIN (ANALYZE, TIMING OFF)`
 (`pg.sh reports run`: inside the server, no socket, its default of 2 parallel workers). 5 alternated rounds, each side a
 median of 11 runs; given: the median of the 5 rounds, and in brackets their least and largest. The same answers both
-sides (rows counted; a `Values` group is one row a status at Cepheus, one array at PostgreSQL). The machine was shared:
-a load average (1 minute) of 3.6 to 6.6 on its 8 threads.
+sides (rows counted; a `Values` group is one row a status at Cepheus, one array at PostgreSQL). Measured again the same
+day after the split past a narrow first level and the flat tables of groups ([the section
+above](#questions-split-past-a-narrow-first-level-and-lighter-groups-2026-11-26-at-1-million-facts), which gives the
+numbers before them); the machine was shared: a load average (1 minute) of 1.9 to 2.5 on its 8 threads.
 
 | aggregate | groups | Cepheus | PostgreSQL 18.6 | |
 |---|---:|---:|---:|---|
-| `Sum` (the aggregate of before; `sum`) | 1 | **14.1 ms** [13.2, 14.9] | 16.3 ms [15.5, 29.8] | about the same |
-| | 100 | **47.1 ms** [46.5, 89.5] | 60.7 ms [58.2, 85.0] | Cepheus, 1.3 times |
-| | 10,000 | 91.7 ms [82.3, 106] | **72.4 ms** [69.4, 73.2] | PostgreSQL, 1.3 times |
-| `Avg` (`avg`) | 1 | 15.7 ms [13.4, 24.0] | 16.3 ms [15.6, 16.8] | about the same |
-| | 100 | **51.5 ms** [50.0, 58.9] | 59.3 ms [58.1, 104] | Cepheus, 1.2 times |
-| | 10,000 | 155 ms [146, 170] | **73.8 ms** [70.4, 76.1] | PostgreSQL, 2.1 times |
-| `Count(status)` (`count(DISTINCT status)`) | 1 | **21.8 ms** [18.9, 22.6] | 61.2 ms [59.8, 64.0] | Cepheus, 2.8 times |
-| | 100 | **73.9 ms** [72.8, 84.6] | 208 ms [200, 331] | Cepheus, 2.8 times |
-| | 10,000 | 217 ms [204, 252] | **180 ms** [174, 187] | PostgreSQL, 1.2 times |
-| `Values(status)` (`array_agg(DISTINCT status)`) | 1 | **21.9 ms** [18.5, 23.4] | 61.5 ms [59.8, 64.2] | Cepheus, 2.8 times |
-| | 100 | **74.7 ms** [73.9, 86.1] | 206 ms [206, 227] | Cepheus, 2.8 times |
-| | 10,000 | 231 ms [215, 273] | **186 ms** [178, 190] | PostgreSQL, 1.2 times |
-| `Median(total)` (`percentile_cont(0.5) WITHIN GROUP (ORDER BY total)`) | 1 | **30.8 ms** [29.0, 34.2] | 64.5 ms [62.9, 65.4] | Cepheus, 2.1 times |
-| | 100 | **88.3 ms** [87.9, 96.4] | 209 ms [206, 214] | Cepheus, 2.4 times |
-| | 10,000 | 305 ms [284, 634] | **143 ms** [139, 150] | PostgreSQL, 2.1 times |
-| `Stddev(total)` (`stddev`) | 1 | **15.8 ms** [13.7, 16.6] | 28.6 ms [27.7, 34.6] | Cepheus, 1.8 times |
-| | 100 | **51.6 ms** [49.8, 59.0] | 83.5 ms [77.1, 91.6] | Cepheus, 1.6 times |
-| | 10,000 | 178 ms [149, 226] | **128 ms** [127, 388] | PostgreSQL, 1.4 times |
-| `Sum` by `Trunc(date, "month", zone = "Europe/Paris")` (`date_trunc('month', date, 'Europe/Paris')`) | 121 | **43.3 ms** [32.2, 124] | 181 ms [171, 499] | Cepheus, 4.2 times |
-| `Sum` by `Trunc(date, "month")` (UTC) | 120 | **34.5 ms** [32.2, 57.7] | 165 ms [163, 213] | Cepheus, 4.8 times |
+| `Sum` (the aggregate of before; `sum`) | 1 | **12.0 ms** [10.5, 15.3] | 13.4 ms [13.3, 15.7] | Cepheus, 1.1 times |
+| | 100 | **9.68 ms** [9.25, 11.3] | 57.8 ms [50.6, 72.6] | Cepheus, 6.0 times |
+| | 10,000 | **26.1 ms** [25.0, 33.3] | 63.7 ms [63.2, 93.4] | Cepheus, 2.4 times |
+| `Avg` (`avg`) | 1 | **11.6 ms** [11.4, 13.5] | 13.6 ms [13.4, 15.7] | Cepheus, 1.2 times |
+| | 100 | **11.0 ms** [10.3, 12.5] | 53.1 ms [50.5, 68.8] | Cepheus, 4.8 times |
+| | 10,000 | **36.5 ms** [35.1, 46.4] | 65.5 ms [64.6, 68.2] | Cepheus, 1.8 times |
+| `Count(status)` (`count(DISTINCT status)`) | 1 | **17.0 ms** [15.6, 18.1] | 54.2 ms [53.7, 64.8] | Cepheus, 3.2 times |
+| | 100 | **15.2 ms** [14.7, 17.8] | 190 ms [188, 253] | Cepheus, 13 times |
+| | 10,000 | **57.7 ms** [55.1, 76.9] | 169 ms [166, 178] | Cepheus, 2.9 times |
+| `Values(status)` (`array_agg(DISTINCT status)`) | 1 | **17.9 ms** [14.9, 23.3] | 53.6 ms [53.3, 67.7] | Cepheus, 3.0 times |
+| | 100 | **15.2 ms** [15.0, 17.6] | 201 ms [197, 262] | Cepheus, 13 times |
+| | 10,000 | **73.6 ms** [70.5, 95.1] | 171 ms [170, 181] | Cepheus, 2.3 times |
+| `Median(total)` (`percentile_cont(0.5) WITHIN GROUP (ORDER BY total)`) | 1 | **28.8 ms** [26.8, 30.6] | 56.9 ms [56.6, 66.4] | Cepheus, 2.0 times |
+| | 100 | **39.6 ms** [38.4, 45.8] | 200 ms [192, 254] | Cepheus, 5.0 times |
+| | 10,000 | **82.3 ms** [79.3, 106] | 135 ms [133, 141] | Cepheus, 1.6 times |
+| `Stddev(total)` (`stddev`) | 1 | **12.0 ms** [11.7, 14.0] | 25.0 ms [24.9, 29.2] | Cepheus, 2.1 times |
+| | 100 | **11.4 ms** [10.9, 14.1] | 66.6 ms [64.3, 87.4] | Cepheus, 5.9 times |
+| | 10,000 | **38.0 ms** [35.5, 47.2] | 112 ms [107, 128] | Cepheus, 2.9 times |
+| `Sum` by `Trunc(date, "month", zone = "Europe/Paris")` (`date_trunc('month', date, 'Europe/Paris')`) | 121 | **20.9 ms** [20.4, 24.7] | 141 ms [138, 174] | Cepheus, 6.7 times |
+| `Sum` by `Trunc(date, "month")` (UTC) | 120 | **19.0 ms** [18.2, 24.3] | 132 ms [129, 163] | Cepheus, 7.0 times |
 
-- **Few groups, Cepheus; many, PostgreSQL.** PostgreSQL's `count(DISTINCT)`, `array_agg(DISTINCT)` and
-  `percentile_cont` sort each group's rows (a sort of 245,000 rows for one group), where Cepheus keeps each group's
-  different values with their counts (3 statuses, about 92,000 totals) and selects the median's rank. The question of
-  one group runs on Cepheus's 8 domains (68 ms on 1 for its `Sum`, 24 on 8, measured with `CEPHEUS_DOMAINS`); those of
-  100 and 10,000 groups start from the cities or the clients, the variable with the fewest candidates, too few for the
-  engine to split the question across its cores (it splits at the first level when there are 20,000 candidates or
-  more), so they run on one core, against PostgreSQL's 2 workers and its leader, and still win at 100 groups. At
-  10,000 groups each group's state is an object of its own, and PostgreSQL's hash aggregate is 1.2 to 2.1 times
-  faster. A flatter state for the groups (a mean's sums in the group's row of ints), and a split of such questions at
-  their second level, are not built yet.
-- **Exact costs little.** A mean or a spread from exact sums costs what a sum costs, within a tenth, at 1 and 100
-  groups: an int's sums stay in plain ints while they cannot overflow (a value of at most 26 bits, a thousand squares),
-  and the limbs are made only past that.
+- **Cepheus at every number of groups.** PostgreSQL's `count(DISTINCT)`, `array_agg(DISTINCT)` and `percentile_cont`
+  sort each group's rows (a sort of 245,000 rows for one group), where Cepheus keeps each group's different values with
+  their counts (3 statuses, about 92,000 totals) and selects the median's rank. The questions of 100 and 10,000 groups
+  run on Cepheus's 8 domains now: the first starts from the 10,000 clients, a level too small to split by its count,
+  whose candidates' measured work (about 50 candidates a client) splits the rest; the second from the 245,000 invoices,
+  as before, its groups now in one flat table a domain (a mean's exact sums in four ints a group, a group's different
+  values in its column's one table) where each of 128 slices built a hash table of objects. PostgreSQL ran its 2
+  workers and its leader. One group is closest for `Sum` and `Avg` (1.1 to 1.2 times): a single scan of 245,000 rows,
+  both sides on their cores.
+- **Exact costs little.** A mean or a spread from exact sums costs what a sum costs, within a sixth at 1 and 100
+  groups, two fifths more at 10,000 (each group's result computed from its sums): an int's sums stay in plain ints while
+  they cannot overflow (a value of at most 26 bits, a thousand squares), and the limbs are made only past that.
 - **Trunc** reads the zone's offset by a binary search of its transitions and remembers the start of the last 1,024
-  months it found: 0.04 µs a row more than UTC's. PostgreSQL's whole question costs 0.7 µs a row, its `date_trunc`
+  months it found: 0.01 µs a row more than UTC's here. PostgreSQL's whole question costs 0.6 µs a row, its `date_trunc`
   converting each row's instant to a local time and back.
-- **No slowdown of the questions of before.** `abench.exe`, the same file built on main (d9431f6) and on this branch,
-  alternated in each round on the same database: a Give of a join, `Sum` and `Count` by city, `Min` and `Max` by
-  client, a sorted group, a page, `Not`, a range and `Optional`: new/old 0.93 to 1.01 (median of the rounds' ratios;
-  their least and largest 0.65 and 1.31, the noise of a shared machine on sub-millisecond questions).
+- **No slowdown of the questions of before**, when reports came: `abench.exe`, the same file built on main
+  (d9431f6) and on that branch, alternated in each round on the same database: a Give of a join, `Sum` and `Count` by
+  city, `Min` and `Max` by client, a sorted group, a page, `Not`, a range and `Optional`: new/old 0.93 to 1.01 (median
+  of the rounds' ratios; their least and largest 0.65 and 1.31, the noise of a shared machine on sub-millisecond
+  questions). The split's own A/B: [the section above](#questions-split-past-a-narrow-first-level-and-lighter-groups-2026-11-26-at-1-million-facts).
 
 ## Deletes and links that name a kind (2026-11-25)
 
@@ -214,33 +330,36 @@ TIMING OFF)` (its engine, no row sent; it chose one process for each). 5 rounds,
 each, each side a median of 5 calls; given: the median of the 5 rounds, and in brackets their least and largest. The
 machine was shared with other jobs' work this time: a load average (1 minute) of 6.2 to 6.5 on its 8 threads during
 these rounds, so the numbers are of a busy machine, both sides alike. The data on the SATA SSD (btrfs) of the other sections.
+The table of `Less` and `Optional` was measured again on 2026-11-26, after the split past a narrow first level ([the
+section above](#questions-split-past-a-narrow-first-level-and-lighter-groups-2026-11-26-at-1-million-facts)), on the same generator's data loaded again, at a load of 2.2 to 3.3; the counter's numbers are of
+the 25th.
 
 | question | rows | Cepheus | PostgreSQL 18.6 | |
 |---|---:|---:|---:|---|
-| the follow links from a client to a newer one, `Less(a, b)`: a check of each link | 28,271 | 14.7 ms [14.2, 25.7] | 3.97 ms [3.95, 4.50], a `Seq Scan` with its `Filter` | PostgreSQL, 3.7 times |
-| &nbsp;&nbsp;the same, every link given and filtered by the program | | 18.1 ms [16.3, 26.9] | | |
-| the invoices whose total is below one invoice's, `Less(t, tx)`: a range of the totals' index | 122,962 | 76.2 ms [72.3, 97.6] | 22.0 ms [20.4, 41.0], a `Bitmap Index Scan` on `total` | PostgreSQL, 3.5 times |
-| &nbsp;&nbsp;the same range, its bound read first (`Below` of that total) | | 53.5 ms [52.8, 62.8] | | |
-| the 490 clients of city-7 with the clients each follows, `Optional` | 490 | **0.099 ms** [0.080, 0.163] | 0.554 ms [0.532, 0.784], a `Nested Loop Left Join` | Cepheus, 5.6 times |
-| &nbsp;&nbsp;the same as a join | | 0.110 ms [0.096, 0.212] | | |
-| every client with the clients each follows, `Optional` | 56,797 | 29.4 ms [28.7, 33.0] | 16.4 ms [13.4, 30.6], a `Hash Right Join` | PostgreSQL, 1.8 times |
-| &nbsp;&nbsp;the same as a join | | 30.2 ms [27.9, 40.9] | | |
+| the follow links from a client to a newer one, `Less(a, b)`: a check of each link | 28,250 | 8.76 ms [8.41, 9.31] | **3.82 ms** [3.60, 4.14], a `Seq Scan` with its `Filter` | PostgreSQL, 2.3 times |
+| &nbsp;&nbsp;the same, every link given and filtered by the program | | 14.2 ms [12.4, 15.4] | | |
+| the invoices whose total is below one invoice's, `Less(t, tx)`: a range of the totals' index | 122,962 | 28.0 ms [27.3, 30.7] | **19.0 ms** [18.9, 19.6], a `Bitmap Index Scan` on `total` | PostgreSQL, 1.5 times |
+| &nbsp;&nbsp;the same range, its bound read first (`Below` of that total) | | 26.7 ms [25.8, 27.8] | | |
+| the 490 clients of city-7 with the clients each follows, `Optional` | 490 | **0.077 ms** [0.069, 0.087] | 0.441 ms [0.428, 0.444], a `Nested Loop Left Join` | Cepheus, 5.7 times |
+| &nbsp;&nbsp;the same as a join | | 0.091 ms [0.083, 0.115] | | |
+| every client with the clients each follows, `Optional` | 56,797 | 16.7 ms [15.7, 17.7] | **12.5 ms** [12.2, 13.2], a `Hash Right Join` | PostgreSQL, 1.3 times |
+| &nbsp;&nbsp;the same as a join | | 18.8 ms [18.2, 19.2] | | |
 
 - **The answers** are the same on both sides (122,962, 490 and 56,797 rows) but for the first: "a < b" compares
   ids, and Cepheus numbers its things in the order the 64 threads of the load wrote them, PostgreSQL by the client's
-  number, so the pairs kept differ a little (28,271 against 28,265 of the 56,797 links).
-- **`Optional` costs what the join costs** (0.099 against 0.110 ms, 29.4 against 30.2): looking up the thing's
+  number, so the pairs kept differ a little (28,250 against 28,265 of the 56,797 links).
+- **`Optional` costs what the join costs** (0.077 against 0.091 ms, 16.7 against 18.8): looking up the thing's
   values after the join is the work the join does at that pattern. Every client here follows at least 4 others, so no
-  row is missing: the measure is of the left join's way, not of missing rows. On a city's clients Cepheus is 5.6 times
+  row is missing: the measure is of the left join's way, not of missing rows. On a city's clients Cepheus is 5.7 times
   faster (its indexes give the 490 clients and their links directly); over every client PostgreSQL's hash join of the
-  two tables, read whole in their order, is faster.
-- **`Less` costs no more than the program's own filter** (14.7 against 18.1 ms), but PostgreSQL's scan of a table of
-  two columns, in one process, reads a row in 70 ns where Cepheus reads the links' index fact by fact.
+  two tables, read whole in their order, is faster, 1.3 times now (1.8 before the split).
+- **`Less` costs less than the program's own filter** (8.8 against 14.2 ms), but PostgreSQL's scan of a table of two
+  columns, in one process, reads a row in 70 ns where Cepheus reads the links' index fact by fact and makes each row's
+  values.
 - **`Less`'s range** reads the 122,962 totals below the bound from the sorted index, as the same range with its bound
-  read first does, but on one domain: a question is split across domains at its first level only, and there that level
-  is the one total of the bound: on one domain (`CEPHEUS_DOMAINS=1`, 3 rounds at a load of 2.7 to 3.9) the two take the
-  same, 61.3 ms against 60.5. Splitting at the first level that has many candidates would give the
-  range its 8 domains back: not built yet.
+  read first does (28.0 against 26.7 ms): split at its second level now, where it ran on one domain before, the
+  question being split at its first level only, there the one total of the bound (55 to 57 ms: [the section
+  above](#questions-split-past-a-narrow-first-level-and-lighter-groups-2026-11-26-at-1-million-facts)). What is left is making its rows' values, which PostgreSQL's engine does not.
 
 **One counter that 64 writers increment** (tutorials [1](tutorials.md#1-invoice-numbers-with-no-gap) and
 [7](tutorials.md#7-a-stock-that-never-goes-below-zero)): each write its own group, forced to the disk, for 5 s; 5

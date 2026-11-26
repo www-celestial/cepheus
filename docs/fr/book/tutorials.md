@@ -1095,39 +1095,39 @@ benchmarks](benchmarks.md#less-optional-et-un-compteur-partagé-2026-11-25-à-1-
 | question | Cepheus | PostgreSQL 18.6 | |
 |---|---:|---:|---|
 | 64 écrivains sur un même compteur (`Incr` ; une ligne de compteur) | **5 890 écritures par seconde** | 154 | Cepheus, 38 fois |
-| les clients d'une ville avec les clients que chacun suit (`Optional` ; `LEFT JOIN`), 490 lignes | **0,099 ms** | 0,554 ms | Cepheus, 5,6 fois |
-| chaque client avec les clients qu'il suit, 56 797 lignes | 29,4 ms | **16,4 ms** | PostgreSQL, 1,8 fois |
-| les liens de suivi vers un client plus récent (`Less(a, b)` ; `a < b`), 28 271 lignes | 14,7 ms | **3,97 ms** | PostgreSQL, 3,7 fois |
-| les factures sous le total d'une facture (`Less` ; `total < (SELECT ...)`), 122 962 lignes | 76,2 ms | **22,0 ms** | PostgreSQL, 3,5 fois |
+| les clients d'une ville avec les clients que chacun suit (`Optional` ; `LEFT JOIN`), 490 lignes | **0,077 ms** | 0,441 ms | Cepheus, 5,7 fois |
+| chaque client avec les clients qu'il suit, 56 797 lignes | 16,7 ms | **12,5 ms** | PostgreSQL, 1,3 fois |
+| les liens de suivi vers un client plus récent (`Less(a, b)` ; `a < b`), 28 250 lignes | 8,76 ms | **3,82 ms** | PostgreSQL, 2,3 fois |
+| les factures sous le total d'une facture (`Less` ; `total < (SELECT ...)`), 122 962 lignes | 28,0 ms | **19,0 ms** | PostgreSQL, 1,5 fois |
 | un client qui a 10 000 factures, refusé (`Delete`, `refuse` ; `DELETE`, `REFERENCES`) | **6 µs** | 89 µs | Cepheus, 15 fois |
 | une facture et ses 100 lignes (`cascade` ; `ON DELETE CASCADE`) | **176 µs** | 193 µs | à peu près pareil |
 | une facture et ses 10 000 lignes | 27,3 ms | **5,16 ms** | PostgreSQL, 5,3 fois |
 | une facture et le lien de ses 10 000 notes (`clear` ; `ON DELETE SET NULL`) | **11,1 ms** | 46,5 ms | Cepheus, 4,2 fois |
 | la vérification d'un lien qui nomme un kind, à chaque écriture (celle d'une foreign key) | **0,2 µs** | 9,6 µs | Cepheus, 48 fois |
-| le total médian de 245 000 factures (`Median` ; `percentile_cont`), 1 groupe | **30,8 ms** | 64,5 ms | Cepheus, 2,1 fois |
-| les statuts différents par ville (`Count(s)` ; `count(DISTINCT)`), 100 groupes | **73,9 ms** | 208 ms | Cepheus, 2,8 fois |
-| la facture moyenne par client (`Avg` ; `avg`), 10 000 groupes | 155 ms | **73,8 ms** | PostgreSQL, 2,1 fois |
-| les totaux par mois à Paris (`Trunc` ; `date_trunc` avec un fuseau), 121 groupes | **43,3 ms** | 181 ms | Cepheus, 4,2 fois |
+| le total médian de 245 000 factures (`Median` ; `percentile_cont`), 1 groupe | **28,8 ms** | 56,9 ms | Cepheus, 2,0 fois |
+| les statuts différents par ville (`Count(s)` ; `count(DISTINCT)`), 100 groupes | **15,2 ms** | 190 ms | Cepheus, 13 fois |
+| la facture moyenne par client (`Avg` ; `avg`), 10 000 groupes | **36,5 ms** | 65,5 ms | Cepheus, 1,8 fois |
+| les totaux par mois à Paris (`Trunc` ; `date_trunc` avec un fuseau), 121 groupes | **20,9 ms** | 141 ms | Cepheus, 6,7 fois |
 
 - Un compteur que beaucoup d'écrivains partagent est là où un lock coûte le plus : PostgreSQL tient la ligne jusqu'à
   ce que chaque commit soit sur le disque, le writer de Cepheus lit le compteur à mesure qu'il applique chaque groupe,
   et les groupes partagent leur fsync.
 - `Optional` coûte ce que coûte le même join ; sur une question sélective les index de Cepheus gagnent, sur deux
   tables entières c'est le hash join de PostgreSQL.
-- `Less` ne coûte pas plus que filtrer les lignes dans le programme, mais le parcours d'une table étroite par
-  PostgreSQL, dans un seul processus, est plus rapide que la lecture des faits un par un ; et le range plus haut tourne
-  sur un seul des domains de Cepheus, puisqu'une question n'est partagée entre domains qu'à son premier niveau (ici,
-  le seul total de la borne) : une façon de la partager plus loin n'est pas encore construite.
+- `Less` coûte moins que filtrer les lignes dans le programme, mais le parcours d'une table étroite par PostgreSQL,
+  dans un seul processus, est plus rapide que la lecture des faits un par un ; le range plus haut, découpé sur les
+  cœurs de Cepheus à son deuxième niveau (après le seul total de la borne), passe le plus clair de son temps à faire
+  les valeurs de ses lignes.
 - Les suppressions sont le travail du moteur, rien sur le disque, à une charge de 2,7 à 3,1, sur 680 681 faits et les
   mêmes lignes ([les benchmarks](benchmarks.md#les-suppressions-et-les-liens-qui-nomment-un-kind-2026-11-25)). Trouver
   ce qui pointe vers une chose est une seule recherche dans Cepheus, quel que soit leur nombre, là où PostgreSQL fait
   passer la requête de sa foreign key par un trigger ; une grande cascade coûte à Cepheus ce que coûte le retrait de
   ses faits (1 µs par fait), PostgreSQL ne fait que marquer ses lignes.
-- Les rapports sont le travail du moteur, sur 990 000 faits à une charge de 3,6 à 6,6 ([les
+- Les rapports sont le travail du moteur, sur 990 000 faits à une charge de 1,9 à 2,5 ([les
   benchmarks](benchmarks.md#les-rapports--avg-countx-values-quantile-stddev-trunc-2026-11-26-à-1-million-de-faits)) :
-  avec peu de groupes Cepheus gagne, en gardant les valeurs différentes de chaque groupe avec leurs comptes là où
-  PostgreSQL trie ses lignes ; avec 10 000 groupes c'est le hash aggregate de PostgreSQL, la question tournant sur un
-  seul des cœurs de Cepheus.
+  Cepheus gagne à tous les nombres de groupes, en gardant les valeurs différentes de chaque groupe avec leurs comptes là
+  où PostgreSQL trie ses lignes, un rapport par ville ou par client découpé sur ses cœurs, ses groupes dans une seule
+  table plate par cœur.
 
 ## Chaque tutoriel en une ligne
 

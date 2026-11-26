@@ -341,10 +341,18 @@ young values and runtime lock; the **threads** (systhreads) of one domain share 
 the writer and the syncer in a writers' domain, where no client's thread runs, so that they never wait for the runtime
 lock of the client threads (the databases of a process share as many writers' domains as the machine has cores: a
 domain is dear in OCaml 5, 0.2 ms to spawn, and each one alive slows every minor collection, which stops them all);
-each merge runs in its own domain; and a large question (20,000 candidates or more for its first variable) splits them
-into slices that up to `Query.domains` domains take in turn (the machine's recommended count, at most 8: the question's
-own and the process's helpers, parked between questions, `Pool`), each with its own accumulator, merged in slice
-order so that the answer does not depend on the number of domains. A process never holds more domains than OCaml's cap
+each merge runs in its own domain; and a large question splits the candidates of one of its levels into slices that
+up to `Query.domains` domains take in turn (the machine's recommended count, at most 8: the question's own and the
+process's helpers, parked between questions, `Pool`). The level split is one of 20,000 candidates or more (exact
+counts), wherever it comes in the order: past a level of one candidate too (the invoices whose total is below one
+invoice's: the one total first, then the 122,962 below it, split). Or it is the first level of two candidates or more
+past those of one, when the planner expects four times that work or more (80,000 candidates: an estimate asks for more
+than a count): its candidates run on the asking domain until their work, measured, says the rest would take that much
+at the same rate, and the rest is split (the 10,000 clients of a report by city: about 50 candidates a client). So a
+small question never pays for a split. Each slice
+has its own accumulator, merged in slice order so that the answer does not depend on the number of domains (a
+report's groups, whose sums and bags do not depend on the order of the rows, one table a domain); the candidates of
+every domain count together against the question's budget ([limits](limits.md#questions)). A process never holds more domains than OCaml's cap
 less a margin: a merge or a helper it cannot have runs on a thread, or the question on fewer domains
 ([limits](limits.md#files-and-the-platform)). A
 view needs no lock to be read, which is what makes this split free. The unpaid sum per city over 453,866 invoices takes

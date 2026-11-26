@@ -95,7 +95,10 @@ beaucoup d'entrées aléatoires contre un modèle de référence écrit indépen
    petit ; chaque mauvais type, chaque mauvaise sorte de propriété et chaque mauvaise chose refusés, le compteur laissé
    tel quel) ; 300 bases aléatoires × 15 questions aléatoires
    contre un évaluateur naïf, chacune dans la borne de Generic Join calculée à partir des seuls faits
-   (`Check.gj_bound`, contre `Query.work` ; les slices du leapfrog comptées là où il peut les lire) ; les coûts : des
+   (`Check.gj_bound`, contre `Query.work` ; les slices du leapfrog comptées là où il peut les lire) ; des questions
+   découpées sur 3 domains après un niveau d'un seul candidat et avec leur premier niveau sondé : les lignes d'un seul
+   domain dans leur ordre, les mêmes candidats, refusées un candidat au-delà de leur budget et prises à ce budget ; les
+   coûts : des
    questions où une liste est bien plus grande que la réponse, et des recherches sur une chose de 40 000 valeurs, en
    base et en delta ; un merge (la fusion de runs triés en un seul) garde chaque fait et chaque réponse, et un merge d'un
    run de 8 fois le cache (ses pages dans le fichier, 120 000 choses) tient au plus quelques pages ouvertes (19
