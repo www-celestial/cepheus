@@ -248,6 +248,25 @@ journal the added and retracted flags.
   servers ([Raft](server.md#a-cluster-of-three-raft)), but each server holds every database whole and one leader takes
   every write.
 
+### Windows: a running total, a rank, the row before, the first rows of each group
+
+PostgreSQL has had window functions since 8.4 (2009), SQLite since 3.25.0 (2018), MySQL since 8.0; Datomic's Datalog
+has aggregates and no windows. Cepheus has `Running` (sums, means, least and largest values and counts over the rows so
+far or the last n), `Rank` (with ties, dense or not) and `Prev` (`lag`), and `Each` for the first k rows of each group,
+which SQL writes with `LATERAL` (PostgreSQL, MySQL 8.0.14) or `row_number()` in a subquery, and the first one with
+`DISTINCT ON` (PostgreSQL only) ([windows](cesia.md#windows-running-rank-prev-each)).
+- *Same*: the meaning of `sum(...) OVER (... ROWS ...)`, `avg`, `min`, `max`, `count(*)`, `rank()`, `dense_rank()`,
+  `row_number()` and `lag(x, n)`; `NULL`s (Cepheus's missing values) left out; a window over a report's groups
+  (`Running(Sum(Sum(t)))`, SQL's `sum(sum(t)) OVER`).
+- *Different*: `Running` counts rows one by one (`ROWS`), where SQL's default frame with an `ORDER BY` is `RANGE`
+  (rows equal in the order share a total); `Sort` breaks ties by every field, so a window's values are the same at each
+  run, where SQL leaves the order of ties open; a page after a cursor reads its windows over every row before it, where
+  SQL's keyset condition must be kept out of the window by hand (a subquery), else the totals restart at each page; a
+  moving mean of money is money, from exact sums, where SQL's `avg` of `numeric` has 16 decimals and of `float8`
+  depends on the order of the rows.
+- *Where SQL wins*: `RANGE` frames (a span of dates), `lead`, `ntile`, `percent_rank`, `cume_dist`, `first_value`,
+  `nth_value`, the window of any expression, and windows in a materialized view; Cepheus refuses a watch of windows.
+
 ## Further reading
 
 Berenson et al. 1995 and Fekete et al. 2005 for snapshot isolation and write skew; Kung and Robinson 1981 for

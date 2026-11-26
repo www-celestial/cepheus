@@ -265,6 +265,28 @@ transaction, son journal les drapeaux ajouté et retiré.
   survit lui aussi à la perte d'une minorité de ses serveurs ([Raft](server.md#un-cluster-de-trois-raft)), mais chaque
   serveur tient chaque base entière et un seul leader prend toutes les écritures.
 
+### Les fenêtres : un total cumulé, un rang, la ligne d'avant, les premières lignes de chaque groupe
+
+PostgreSQL a des window functions (des fenêtres) depuis la 8.4 (2009), SQLite depuis la 3.25.0 (2018), MySQL depuis la
+8.0 ; le Datalog de Datomic a des agrégats et pas de fenêtres. Cepheus a `Running` (des sommes, des moyennes, les plus
+petites et plus grandes valeurs et des comptes sur les lignes jusqu'ici ou les n dernières), `Rank` (avec les
+égalités, dense ou non) et `Prev` (`lag`), et `Each` pour les k premières lignes de chaque groupe, que SQL écrit avec
+`LATERAL` (PostgreSQL, MySQL 8.0.14) ou `row_number()` dans une sous-requête, et la première avec `DISTINCT ON`
+(PostgreSQL seulement) ([les fenêtres](cesia.md#les-fenêtres--running-rank-prev-each)).
+- *Pareil* : le sens de `sum(...) OVER (... ROWS ...)`, `avg`, `min`, `max`, `count(*)`, `rank()`, `dense_rank()`,
+  `row_number()` et `lag(x, n)` ; les `NULL` (les valeurs absentes de Cepheus) laissés de côté ; une fenêtre sur les
+  groupes d'un rapport (`Running(Sum(Sum(t)))`, le `sum(sum(t)) OVER` de SQL).
+- *Différent* : `Running` compte les lignes une par une (`ROWS`), là où le frame par défaut de SQL avec un `ORDER BY`
+  est `RANGE` (les lignes égales dans l'ordre partagent un total) ; `Sort` départage les égalités par chaque champ, donc
+  les valeurs d'une fenêtre sont les mêmes à chaque exécution, là où SQL laisse ouvert l'ordre des égalités ; une page
+  après un curseur lit ses fenêtres sur chaque ligne avant elle, là où la condition de keyset de SQL doit être tenue
+  hors de la fenêtre à la main (une sous-requête), sinon les totaux repartent à chaque page ; une moyenne mobile de
+  money est de la money, à partir de sommes exactes, là où le `avg` de SQL d'un `numeric` a 16 décimales et d'un
+  `float8` dépend de l'ordre des lignes.
+- *Là où SQL gagne* : les frames `RANGE` (une durée de dates), `lead`, `ntile`, `percent_rank`, `cume_dist`,
+  `first_value`, `nth_value`, la fenêtre de n'importe quelle expression, et les fenêtres dans une vue matérialisée ;
+  Cepheus refuse un watch de fenêtres.
+
 ## Pour aller plus loin
 
 Berenson et al. 1995 et Fekete et al. 2005 pour la snapshot isolation et le write skew ; Kung et Robinson 1981 pour la
