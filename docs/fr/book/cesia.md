@@ -155,6 +155,20 @@ cesse d'être un client : `"refuse"` (par défaut) refuse le groupe qui la laiss
 la chose qui pointe, `"clear"` retire le lien ([supprimer une chose](#supprimer-une-chose)). Un `Link()` sans `to`
 prend l'id de n'importe quelle chose, comme avant.
 
+`cepheus.Date(within = "Client")` range un champ **dans un autre** champ de sa kind : un **index de deux champs**, comme
+le `CREATE INDEX ON invoice (client, date)` de SQL. La base garde, pour chaque valeur de `Client`, ses choses dans
+l'ordre de leur `Date`, de sorte que « les 3 dernières factures de chaque client » (`Each: [c]`, `Limit: 3`,
+`Sort: [cepheus.Desc(d)]`) lit 3 lignes par client, et qu'une page des factures d'un client par date (`Sort`, `Limit`,
+`After`) lit sa page, pas les dates de toutes les factures
+([tutoriel 15](tutorials.md#15-les-dernières-factures-de-chaque-client-lues-dans-un-index-de-deux-champs)). `within`
+nomme un autre champ de la kind par son nom dans la map de la kind, tous deux d'une seule valeur (pas `many = true`) ;
+`Int`, `Bool`, `Date`, `Money` et `Link` le prennent, dont les valeurs gardent leur ordre dans l'index ; `Text` et
+`Float` non. `Connect` (et `Fork`) le déclare avec la kind, dans le même groupe : une base qui a déjà les champs reçoit
+l'index, que ses questions lisent dès que ses runs sont de nouveau fusionnés (le serveur fusionne au fil des écritures ;
+jusque-là, sans lui, les mêmes lignes). Un champ déjà rangé dans un autre champ, au `Connect`, est un `Err` (un
+changement est une migration). Une écriture de l'un des deux champs coûte 0,5 à 0,9 µs de plus par fait ; une écriture
+des autres champs de la kind, rien.
+
 ## Insert, Get, Update
 
 ```cesia norun
@@ -933,7 +947,10 @@ candidats du frame, chacun plus tard et meilleur que celui d'avant, donc chaque 
 pour k jusqu'à 32 dans l'ordre, une ligne mise à sa place et celles au-delà de la k-ième (sauf ses copies) retirées
 aussitôt ; pour un k plus grand, au plus 2k lignes, triées pour revenir à ses k premières quand elles sont pleines. Un
 binding (une liaison des variables) au-delà de la k-ième du groupe est mis de côté après une seule comparaison, avant
-d'être fait ligne : le travail est d'environ une comparaison par ligne, la mémoire de k lignes par groupe. Une page
+d'être fait ligne : le travail est d'environ une comparaison par ligne, la mémoire de k lignes par groupe. Quand le
+champ de `Each` est un lien `[i, Invoice.Client, c]` et le premier champ de `Sort` la date `[i, Invoice.Date, d]`
+déclarée `within` lui, les k premières factures de chaque groupe sont lues dans l'index (et celles à égalité avec la
+k-ième), et la question est posée sur elles seules : k lignes par groupe, pas chaque facture. Une page
 après un curseur ne trie pas les lignes d'avant : un seul passage sur elles donne leur nombre, leurs sommes, leurs
 meilleures valeurs et les quelques dernières lignes qu'un frame ou un `Prev` demande, lues dans l'intervalle de la
 première clé avant le curseur quand c'est celle d'un index, et la page elle-même est lue comme l'est une page sans
@@ -1619,6 +1636,9 @@ linearizable sans cela.
 
 - Les forks d'une base lue au serveur, que le serveur fera.
 - Un programme atteint une seule base par connexion : `Connect` à nouveau pour une autre.
+- Un changement du champ dans lequel un champ est rangé (`within`), sur une base qui l'a (une migration : retirer son
+  fait `cepheus/within`, puis `Connect` avec le nouveau) ; `within` sur un `Text` (dans l'ordre de ses octets) ou un
+  `Float`.
 - Un changement du kind qu'un lien nomme, ou de son `onDelete`, sur une base qui l'a (une migration) ; `Delete` comme
   opération de `Write`, à côté d'autres dans un même groupe ; une valeur par défaut pour un lien (le `SET DEFAULT` de
   SQL) ; l'effacement d'une chose supprimée de l'historique.

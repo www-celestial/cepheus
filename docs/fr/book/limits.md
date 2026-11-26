@@ -69,7 +69,8 @@ application utilise les valeurs par défaut, et la taille du cache (`set_cache`)
 | page | 16 KiB (16 384 octets) | `Pages.bits` (14) |
 | table des pages | 8 octets par page de la disposition du run (la page du fichier qui la contient, son CRC) | `Snapshot.merge` |
 | thing block, row block, bloc d'offsets | 128 choses, 128 lignes d'une propriété, 128 offsets | `Store.tb` |
-| format des runs | 9 ; les runs des formats 5 à 8 et les snapshots des formats 1 à 4 (`<group>.snap`) sont mis de côté à l'ouverture, le journal rejoué, et le premier merge les supprime | `Snapshot.format` |
+| format des runs | 10 ; les runs du format 9 sont lus tels qu'ils sont (sans paires), ceux des formats 5 à 8 et les snapshots des formats 1 à 4 (`<group>.snap`) sont mis de côté à l'ouverture, le journal rejoué, et le premier merge les supprime | `Snapshot.format` |
+| paires (`within`) | autant de paires déclarées qu'on veut, une propriété dans une seule autre ; un merge tient en mémoire les lignes de chaque paire de son run pendant qu'il l'écrit, 24 octets par ligne et autant pour leur tri (un bottom run de 2,5 M de factures : environ 120 Mo) ; une paire n'est lue que quand chaque run la tient | `Snapshot.merge`, `Store.pair_ready` |
 | format du journal | 2 ; un journal de format 1 est converti une fois à l'ouverture | `Journal.format`, `Journal.convert` |
 
 ## La mémoire et le cache

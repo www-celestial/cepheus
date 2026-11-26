@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="468" viewBox="0 0 860 468">
+<title>The index of two properties of tutorial 15: the invoices by id, and their pairs by client, then date</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.h{font-weight:600}
+.s{fill:#57606a}
+.off{fill:#8c959f}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.fa{fill:#3a5ad9}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.br{stroke:#8fa8ff}
+.fa{fill:#8fa8ff}
+}
+</style>
+<rect class="bg" width="860" height="468"/>
+<text class="h" x="16" y="22">The invoices, in the order of their ids</text>
+<text class="h" x="400" y="22">The run's pairs: invoice/date within invoice/client</text>
+<text class="c" xml:space="preserve" x="16" y="44">invoice   client       date</text>
+<rect class="row" x="16" y="54" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="67">#65539    Ada Martin   Jan 5</text>
+<rect class="row" x="16" y="76" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="89">#65540    Bo Lind      Jan 20</text>
+<rect class="row" x="16" y="98" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="111">#65541    Cy Moreau    Feb 3</text>
+<rect class="row" x="16" y="120" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="133">#65542    Ada Martin   Feb 17</text>
+<rect class="row" x="16" y="142" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="155">#65543    Bo Lind      Mar 2</text>
+<rect class="row" x="16" y="164" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="177">#65544    Ada Martin   Mar 15</text>
+<rect class="row" x="16" y="186" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="199">#65545    Cy Moreau    Apr 8</text>
+<rect class="row" x="16" y="208" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="221">#65546    Bo Lind      Apr 22</text>
+<rect class="row" x="16" y="230" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="243">#65547    Ada Martin   May 12</text>
+<rect class="row" x="16" y="252" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="265">#65548    Bo Lind      Jun 1</text>
+<rect class="row" x="16" y="274" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="287">#65549    Cy Moreau    Jun 19</text>
+<text class="c s" xml:space="preserve" x="400" y="67">group Ada Martin (#65536), first row 0</text>
+<rect class="row" x="400" y="76" width="300" height="18"/>
+<text class="c off" xml:space="preserve" x="408" y="89">row  0   Jan 5     #65539</text>
+<rect class="cur" x="400" y="98" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="111">row  1   Feb 17    #65542</text>
+<rect class="cur" x="400" y="120" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="133">row  2   Mar 15    #65544</text>
+<rect class="cur" x="400" y="142" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="155">row  3   May 12    #65547</text>
+<line class="br" x1="716" y1="156" x2="716" y2="108"/>
+<polygon class="fa" points="716.0,102.0 712.0,110.0 720.0,110.0"/>
+<text class="c s" xml:space="preserve" x="400" y="185">group Bo Lind (#65537), first row 4</text>
+<rect class="row" x="400" y="194" width="300" height="18"/>
+<text class="c off" xml:space="preserve" x="408" y="207">row  4   Jan 20    #65540</text>
+<rect class="cur" x="400" y="216" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="229">row  5   Mar 2     #65543</text>
+<rect class="cur" x="400" y="238" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="251">row  6   Apr 22    #65546</text>
+<rect class="cur" x="400" y="260" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="273">row  7   Jun 1     #65548</text>
+<line class="br" x1="716" y1="274" x2="716" y2="226"/>
+<polygon class="fa" points="716.0,220.0 712.0,228.0 720.0,228.0"/>
+<text class="c s" xml:space="preserve" x="400" y="303">group Cy Moreau (#65538), first row 8</text>
+<rect class="cur" x="400" y="312" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="325">row  8   Feb 3     #65541</text>
+<rect class="cur" x="400" y="334" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="347">row  9   Apr 8     #65545</text>
+<rect class="cur" x="400" y="356" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="369">row 10   Jun 19    #65549</text>
+<line class="br" x1="716" y1="370" x2="716" y2="322"/>
+<polygon class="fa" points="716.0,316.0 712.0,324.0 720.0,324.0"/>
+<text class="s" x="16" y="400">11 rows, sorted by (client, date, invoice), 3 groups. Each with Limit: 3, the latest first, reads each group</text>
+<text class="s" x="16" y="417">from its end, 3 rows (in blue), and asks the question with the invoice one of them; a page of one client by</text>
+<text class="s" x="16" y="434">date seeks its cursor's date in the group, then reads its page. Read off a run the engine wrote</text>
+<text class="s" x="16" y="451">(Snapshot.merge, run format 10).</text>
+</svg>

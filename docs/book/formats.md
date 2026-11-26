@@ -124,23 +124,25 @@ segments are never used.
 
 A run holds the changes of groups lo+1 .. hi on top of the state at group lo (lo = 0: a bottom run, the whole state
 at hi). The database's state on disk is a chain of runs from 0, each resting on the end of the one below it, plus the
-journal after the newest one. Format 9 holds each fact three times: by thing, by property and value, and by property
+journal after the newest one. Format 10 holds each fact three times: by thing, by property and value, and by property
 and thing (the **column order**: each property's rows apart, in thing order), and, for each text property, its
-distinct texts in the order of their bytes (the **text order**: `Prefix`). It codes every section with a **frame
+distinct texts in the order of their bytes (the **text order**: `Prefix`), and, for each declared pair of properties
+(`cepheus/within`, [`Cepheus.within`](api.md#an-index-of-two-properties-within)), the things of each value of the one
+in the order of their values of the other (the **pairs**). It codes every section with a **frame
 of reference** (Goldstein et al. 1998,
 Zukowski et al. 2006): a block of values is stored as a base and, for each value, its difference from the base in as
 many bits as the block's largest difference needs (the bit packing of the journal's columns, above); any value is
 read in $O(1)$ without decoding its neighbours.
 
 ```text
-header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (9) | 8 database id, 16 bytes
+header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (10) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0
-  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 24 section
+  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 25 section
     offsets (below, the last one the part's end)
-  | part t: rows n | thing range ne | things k | properties np | its 24 section offsets
+  | part t: rows n | thing range ne | things k | properties np | its 25 section offsets
   | layout length | file pages P
-  | 576 CRC of the page table u32 | 580 CRC of bytes 0..580 u32 | zeros to 4096
+  | 592 CRC of the page table u32 | 596 CRC of bytes 0..596 u32 | zeros to 4096
 pages: P pages of 16 KiB at 4096 + 16384 f
 page table, at 4096 + 16384 P: for each page k of the layout (ceil(layout length / 16384) of them), 8 bytes: the file
   page f that holds it (u32; 0xFFFFFFFF: none, the page reads as zeros) | the page's CRC-32C (u32)
@@ -182,6 +184,7 @@ cmb                               their bits
 tord    (np + 1) u64, then u32s   the text order: each property's first entry (the last, the count of all), then the
                                   distinct texts of each text property's rows in the part, as text ids, in the order
                                   of their bytes (part t: only the np + 1 zeros)
+pairs   8 + 96 q bytes, tables    the pairs (format 10): their count q, an entry each, then each one's tables (below)
 ```
 
 **The text order** (format 9). The merge gathers each text property's distinct text ids as it writes that property's
@@ -190,6 +193,38 @@ code points), and writes the ids. The texts that start with a prefix are one str
 searches, each step a text read through the cache; a view's texts with a prefix are the union of every run's stretch
 and of the delta's texts of the property (at most a merge's threshold of them, looked at one by one): a superset of
 the texts its facts hold, which the join then checks. Four bytes a distinct text a run.
+
+**The pairs** (format 10). For each pair the schema declares when the merge writes the run (`p2 cepheus/within p1`:
+p1 and p2 one-valued properties of one kind, p2 an int, a date, money, a link or a bool, whose words keep the order of
+its values), the rows (w1, w2, e) of the things e whose pair the run changes: in part a, as they are at the run's end
+(w1 e's value of p1, w2 its value of p2), when e holds both there and they differ from below the run; in part t, as they
+are below the run, when e held both there and they differ at its end. So a run adds only pairs absent below it and
+retracts only pairs present below it, as its facts; a bottom run holds in part a the pair of every thing that has both,
+and nothing in part t. The rows are sorted by (w1, w2, e): the things of each value of p1 in the order of their values
+of p2, ties by thing (Graefe, "Modern B-Tree Techniques", 2011: a key of two columns).
+
+```text
+pairs (at the part's 24th offset, to its end):
+  0 q u64                      the pairs the part holds, by p2
+  8 q entries of 12 u64:       p1 | p2 | rows n | groups g | w1 headers | w1 bits | first rows' headers | first rows'
+                               bits | dir | data | 0 | 0  (each table's byte in the run; g = 0 when n = 0)
+  each pair's tables, in that order, each at a multiple of 8:
+    w1           the groups' values of p1, strictly increasing: a monotone sequence (below) of g entries
+    first rows   a monotone sequence of g + 1 entries, from 0 to n: group j's rows are first(j) .. first(j + 1) - 1
+    dir          24 bytes a block of 128 rows (the last one shorter): its least w2 i64 | its least thing i64 | the byte
+                 of its bits from data lsl 16 lor ww lsl 8 lor we (u64)
+    data         each block: its rows' w2 - least w2 in ww bits each, to a whole byte, then their e - least thing in
+                 we bits each, to a whole byte (fields of w bits as the columns', w at most 63)
+```
+
+The section has the room of a bound of each pair's rows (the facts of p1 and p2 the merge takes, a row a thing at
+most), each table the room of that bound; only the bytes it holds go to the file. A view reads a pair only when the
+schema declares it and every one of its runs holds it in part a (a run of format 9, or one written while the pair was
+not declared, holds none: the plain join answers the questions, with the same rows). A row (w1, w2, e) of a run is the
+view's when no newer run holds it in part t and the delta has no change of e's p1 or p2; the delta's own are the
+view's (`Store.pair_from`). The rows of one w1 are found by a binary search of the groups' values ($O(\log g)$ fields,
+then two offsets), those from a value of w2 by one of the group's rows; "the 3 latest invoices of each client" reads 3
+rows a client. 245,000 invoices take 1.9 MB (7.8 bytes a row: dates of 38 bits, things of 18).
 
 Part a holds the facts the run adds, part t the facts of the runs below it that it retracts (empty in a bottom run);
 a run adds only facts absent below it and retracts only facts present below it, so every count of a view is a sum of
@@ -299,7 +334,10 @@ probes for a text that is there (Knuth 6.4, at half load). Nothing reads the tex
 list of ids (`ssort`) is gone.
 
 **Writing.** A merge is the one way to write a run (`Snapshot.merge`): the delta, the newest runs of the view, and a
-large group's sorted facts, merged in the order of each section and streamed into `<lo>-<hi>.run.tmp`. The columns
+large group's sorted facts, merged in the order of each section and streamed into `<lo>-<hi>.run.tmp`. The pairs are
+noted as the pass by thing writes each thing's facts of p1 and p2 (the values below the run read in the runs it rests
+on, for a run that is not a bottom one), held in memory (24 bytes a row, and as much again for their sort), sorted by
+a radix sort by w1, then each group's rows by w2, and written after the text order. The columns
 are written by the pass by thing (its rows arrive in thing order for each property); the presence of each property's
 things is kept as one bit a thing until the pass ends, then written as rank tables, one for the properties held by the
 same things; a page of the
@@ -320,8 +358,11 @@ holds the change's frame with every derived fact, so nothing on the disk depends
 runs, and checks each run: its header, its page table (by its CRC, and that it maps each file page at most once),
 the order of its sections, its rank tables, the thing blocks' directory (in order, within its room), the property
 offsets, the row blocks (as many as each property's rows need, in order), the value indexes (within their room), the
-text offsets, and each column (its entry within its sections, its rank table's counts, its offsets from 0 to its rows
-each larger than the one before, its blocks in order and within their room, its rows those of the property by value);
+text offsets, each column (its entry within its sections, its rank table's counts, its offsets from 0 to its rows
+each larger than the one before, its blocks in order and within their room, its rows those of the property by value),
+and the pairs (their count and entries within the section, each pair two property ids and by p2, its counts, its
+tables in order within the section, its groups' values strictly increasing, its first rows from 0 to its rows, its
+blocks' bits in order within its data);
 a run that does not check is set aside and the choice made again without it. A run that fits in the cache is read and
 checked whole at open; a larger one has the pages its checks read (its tables) read and checked first, when the
 cache has room for them all. Either way the pages are read in the file's order, the file pages that follow one another
@@ -336,9 +377,21 @@ A page is the unit of the cache: it is read from the file whole (16,384 bytes at
 table), checked against its CRC, and only then served. A field of 2, 4 or 8 bytes in a table is aligned to its size,
 so none crosses a page; a bit-packed field may, and is then read from both pages.
 
+**Format 9** (format 10 without the pairs: 24 section offsets a part, the header's CRCs at 576 and 580) is read as it
+is, at open, with nothing replayed: its parts hold no pair, so a view that holds such a run reads no pair, and the
+next merge that rewrites it writes format 10 (`Cepheus.snapshot` rewrites every run). A version that reads format 9
+sets a run of format 10 aside (it says "an earlier format (10)") and replays the journal, whose format did not change;
+a database whose journal holds a fact of `cepheus/within` (property 9) does not open there: that version knows no
+property 9, as one before `cepheus/to` knew no property 7. It stops at the group of the declaration ("damaged: group
+N uses property 9, which does not exist") after it has replayed the groups before it and merged them into runs of
+format 9, the run of format 10 dropped; nothing is lost, since the journal holds every group: the version that knows
+`within` opens the database again, the same facts and answers, and reads the pair again once a merge has rewritten
+those runs. Checked with main's binary (ec4bb86) and this one on copies of a database of 1 million facts: the facts and
+the answers of `Each` with `Limit: 3` and `Limit: 1` and of a client's two pages the same at every step, both ways.
+
 **Format 8** (format 9 without the text order) and **format 7** (format 8 without the column order) are set aside
 at open in the same way: their groups replayed from the journal (a 10 M-fact database from format 7: 5.2 s, once),
-the first merge writing format 9. A version that reads format 8 sets a run of format 9 aside the same way (it says
+the first merge writing format 10. A version that reads format 8 sets a run of format 9 aside the same way (it says
 "an earlier format (9)") and replays the journal, whose format did not change.
 
 **Formats 5 and 6** (every fact twice in fixed words: by thing a u16 property and an i64 value, by property an i64

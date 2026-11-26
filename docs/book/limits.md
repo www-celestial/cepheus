@@ -69,7 +69,8 @@ defaults, and the cache's size (`set_cache`).
 | page | 16 KiB (16,384 bytes) | `Pages.bits` (14) |
 | page table | 8 bytes a page of the run's layout (the file page that holds it, its CRC) | `Snapshot.merge` |
 | thing block, row block, offsets block | 128 things, 128 rows of a property, 128 offsets | `Store.tb` |
-| run format | 9; runs of formats 5 to 8 and the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
+| run format | 10; runs of format 9 are read as they are (no pairs), those of formats 5 to 8 and the snapshots of formats 1 to 4 (`<group>.snap`) are set aside at open, the journal replayed, and the first merge removes them | `Snapshot.format` |
+| pairs (`within`) | any number of declared pairs, a property within one other; a merge holds the rows of each pair of its run in memory while it writes it, 24 bytes a row and as much again for their sort (a bottom run of 2.5 M invoices: about 120 MB); a pair is read only when every run holds it | `Snapshot.merge`, `Store.pair_ready` |
 | journal format | 2; a journal of format 1 is converted once at open | `Journal.format`, `Journal.convert` |
 
 ## Memory and the cache

@@ -145,6 +145,18 @@ its thing stops being a client: `"refuse"` (the default) refuses the group that 
 the linking thing too, `"clear"` retracts the link ([deleting a thing](#deleting-a-thing)). A `Link()` without `to`
 takes any thing's id, as before.
 
+`cepheus.Date(within = "Client")` orders a field **within another** field of its kind: an **index of two fields**, as
+SQL's `CREATE INDEX ON invoice (client, date)`. The database keeps, for each value of `Client`, its things in the order
+of their `Date`, so that "the 3 latest invoices of each client" (`Each: [c]`, `Limit: 3`, `Sort: [cepheus.Desc(d)]`)
+reads 3 rows a client, and a page of one client's invoices by date (`Sort`, `Limit`, `After`) reads its page, not the
+dates of every invoice ([tutorial 15](tutorials.md#15-the-latest-invoices-of-each-client-read-off-an-index-of-two-fields)).
+`within` names another field of the kind by its name in the kind's map, both of one value (not `many = true`); `Int`,
+`Bool`, `Date`, `Money` and `Link` take it, whose values keep their order in the index; `Text` and `Float` do not.
+`Connect` (and `Fork`) declares it with the kind, in the same group: a database that has the fields already gets the
+index, which its questions read once its runs are merged again (the server merges as writes come; until then, without
+it, the same rows). A field ordered within another field already, at `Connect`, is an `Err` (a change is a migration).
+A write of either field costs 0.5 to 0.9 µs more a fact; a write of the kind's other fields, nothing.
+
 ## Insert, Get, Update
 
 ```cesia norun
@@ -861,7 +873,10 @@ a queue of the frame's candidates, each later and better than the one before, so
 `Limit: k`, each group keeps its first k rows while the question is read, on every core: for k up to 32 in the
 order, a row put at its place and those past the k-th (but its copies) dropped at once; for a larger k, at most 2k
 rows, sorted back to its first k when they fill. A binding past the group's k-th is set aside after one comparison,
-before it is made a row: the work is about one comparison a row, the memory k rows a group. A page after a cursor does not sort the rows before it: one pass over them gives their count,
+before it is made a row: the work is about one comparison a row, the memory k rows a group. When `Each`'s field is a
+link `[i, Invoice.Client, c]` and `Sort`'s first field the date `[i, Invoice.Date, d]` that is declared `within` it,
+each group's first k invoices are read off the index (and those tied with the k-th), and the question is asked on
+them alone: k rows a group, not every invoice. A page after a cursor does not sort the rows before it: one pass over them gives their count,
 their sums, their best values and the last few rows a frame or a `Prev` needs, read from the range of the first key
 before the cursor when it is an index's, and the page itself is read as a page without windows is.
 
@@ -1498,6 +1513,8 @@ linearizable without it.
 
 - Forks of a database read at the server, which the server will make.
 - A program reaches one database a connection: `Connect` again for another.
+- A change of the field a field is `within`, on a database that has it (a migration: retract its `cepheus/within`
+  fact, then `Connect` with the new one); `within` on a `Text` (in the order of its bytes) or a `Float`.
 - A change of the kind a link names, or of its `onDelete`, on a database that has it (a migration); `Delete` as an
   operation of `Write`, beside others in one group; a default value for a link (SQL's `SET DEFAULT`); erasing a
   deleted thing from the history.

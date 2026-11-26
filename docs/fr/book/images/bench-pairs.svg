@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="289" viewBox="0 0 860 289">
+<title>Un index de deux propriétés : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.off{fill:#8c959f}
+.bg{fill:#ffffff}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.grid{stroke:#eaeef2;stroke-width:1}
+.axis{stroke:#8c959f;stroke-width:1}
+.fs{fill:#57606a}
+.s1{fill:#257de0}
+.s2{fill:#f47230}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.gr{stroke:#9198a1}
+.grid{stroke:#262c36}
+.axis{stroke:#6e7681}
+.fs{fill:#9198a1}
+.s1{fill:#338ced}
+.s2{fill:#e76624}
+}
+</style>
+<rect class="bg" width="860" height="289"/>
+<text class="h" x="16" y="22">Un index de deux propriétés, à 1 million de faits : main, puis la paire déclarée</text>
+<text class="s sm" x="380" y="54" text-anchor="end">main → maintenant · PostgreSQL</text>
+<text class="a sm" x="568" y="54">Cepheus plus rapide →</text>
+<text class="sm" x="552" y="54" text-anchor="end">← PostgreSQL plus rapide</text>
+<text class="s sm" x="742" y="54">main → maintenant</text>
+<line class="grid" x1="512" y1="68" x2="512" y2="180"/>
+<text class="s sm" x="512" y="78" text-anchor="middle">2×</text>
+<line class="grid" x1="560" y1="68" x2="560" y2="180"/>
+<text class="s sm" x="560" y="78" text-anchor="middle">1×</text>
+<line class="grid" x1="608" y1="68" x2="608" y2="180"/>
+<text class="s sm" x="608" y="78" text-anchor="middle">2×</text>
+<line class="grid" x1="656" y1="68" x2="656" y2="180"/>
+<text class="s sm" x="656" y="78" text-anchor="middle">4×</text>
+<line class="grid" x1="704" y1="68" x2="704" y2="180"/>
+<text class="s sm" x="704" y="78" text-anchor="middle">8×</text>
+<line class="axis" x1="560" y1="68" x2="560" y2="180"/>
+<text class="sm" x="16" y="99">Each, Limit: 3 (LATERAL)</text>
+<text class="s sm" x="380" y="99" text-anchor="end">111 ms → 30,4 ms · 53,5 ms</text>
+<line class="gr" x1="510" y1="95" x2="586" y2="95"/>
+<polygon class="fs" points="592.0,95.0 584.0,91.0 584.0,99.0"/>
+<circle class="bg" cx="510" cy="95" r="6"/>
+<circle class="off" cx="510" cy="95" r="4"/>
+<circle class="bg" cx="599" cy="95" r="7"/>
+<circle class="s1" cx="599" cy="95" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="99"><tspan class="s2">2,1×</tspan><tspan class="s"> → </tspan><tspan class="a h">1,8×</tspan></text>
+<text class="sm" x="16" y="123">Limit: 1 (DISTINCT ON)</text>
+<text class="s sm" x="380" y="123" text-anchor="end">81,2 ms → 13,0 ms · 118 ms</text>
+<line class="gr" x1="585" y1="119" x2="700" y2="119"/>
+<polygon class="fs" points="706.0,119.0 698.0,115.0 698.0,123.0"/>
+<circle class="bg" cx="585" cy="119" r="6"/>
+<circle class="off" cx="585" cy="119" r="4"/>
+<circle class="bg" cx="713" cy="119" r="7"/>
+<circle class="s1" cx="713" cy="119" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="123"><tspan class="a">1,5×</tspan><tspan class="s"> → </tspan><tspan class="a h">9,1×</tspan></text>
+<text class="sm" x="16" y="147">les 10 dernières d'un client (index scan)</text>
+<text class="s sm" x="380" y="147" text-anchor="end">74,2 µs → 13,1 µs · 99,0 µs</text>
+<line class="gr" x1="580" y1="143" x2="687" y2="143"/>
+<polygon class="fs" points="693.0,143.0 685.0,139.0 685.0,147.0"/>
+<circle class="bg" cx="580" cy="143" r="6"/>
+<circle class="off" cx="580" cy="143" r="4"/>
+<circle class="bg" cx="700" cy="143" r="7"/>
+<circle class="s1" cx="700" cy="143" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="147"><tspan class="a">1,3×</tspan><tspan class="s"> → </tspan><tspan class="a h">7,6×</tspan></text>
+<text class="s sm" x="30" y="171">les 10 suivantes (un keyset)</text>
+<text class="s sm" x="380" y="171" text-anchor="end">78,0 µs → 52,9 µs · 152 µs</text>
+<line class="gr" x1="606" y1="167" x2="620" y2="167"/>
+<polygon class="fs" points="626.0,167.0 618.0,163.0 618.0,171.0"/>
+<circle class="bg" cx="606" cy="167" r="6"/>
+<circle class="off" cx="606" cy="167" r="4"/>
+<circle class="bg" cx="633" cy="167" r="7"/>
+<circle class="s1" cx="633" cy="167" r="5"/>
+<text class="sm" xml:space="preserve" x="742" y="171"><tspan class="a">1,9×</tspan><tspan class="s"> → </tspan><tspan class="a h">2,9×</tspan></text>
+<text class="s" x="16" y="204">Le point gris : les binaires de main (ec4bb86, sans index de deux propriétés) ; le point en couleur : maintenant</text>
+<text class="s" x="16" y="221">(invoice/date within invoice/client) ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus,</text>
+<text class="s" x="16" y="238">PostgreSQL avec son index sur (client, date DESC, id) : la médiane de 21 tours alternés sur les mêmes lignes. Un</text>
+<text class="s" x="16" y="255">rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. Temps :</text>
+<text class="s" x="16" y="272">docs/book/benchmarks.md.</text>
+</svg>

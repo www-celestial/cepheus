@@ -140,23 +140,25 @@ nomment dans les anciens segments ne servent donc jamais.
 
 Un run tient les changements des groupes lo+1 .. hi par-dessus l'état au groupe lo (lo = 0 : un bottom run, tout
 l'état à hi). L'état de la base sur disque est une chaîne de runs depuis 0, chacun reposant sur la fin de celui d'en
-dessous, plus le journal après le plus récent. Le format 9 tient chaque fait trois fois : par chose, par propriété et
+dessous, plus le journal après le plus récent. Le format 10 tient chaque fait trois fois : par chose, par propriété et
 valeur, et par propriété et chose (le **column order** : les lignes de chaque propriété à part, dans l'ordre des
 choses), et, pour chaque propriété texte, ses textes distincts dans l'ordre de leurs octets (le **text order** :
-`Prefix`). Il code chaque section en **frame of reference** (Goldstein et al. 1998,
+`Prefix`), et, pour chaque paire de propriétés déclarée (`cepheus/within`,
+[`Cepheus.within`](api.md#un-index-de-deux-propriétés--within)), les choses de chaque valeur de l'une dans l'ordre de
+leurs valeurs de l'autre (les **pairs**, les paires). Il code chaque section en **frame of reference** (Goldstein et al. 1998,
 Zukowski et al. 2006) : un bloc de valeurs est rangé comme une base et, pour chaque valeur, sa différence avec la base
 en autant de bits qu'en demande la plus grande différence du bloc (le bit packing des colonnes du journal, plus haut) ;
 toute valeur se lit en $O(1)$ sans décoder ses voisines.
 
 ```text
-header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (9) | 8 database id, 16 bytes
+header, 4096 bytes:  0 magic "CPHS" (0x53485043) u32 | 4 format u32 (10) | 8 database id, 16 bytes
   | then u64 fields from 24: hi | lo | level | next thing | journal segment | journal offset | journal group at that
     offset | first text id s0
-  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 24 section
+  | part a: rows n | thing range ne | things k | properties np | texts ns | text bytes | hash bits | its 25 section
     offsets (below, the last one the part's end)
-  | part t: rows n | thing range ne | things k | properties np | its 24 section offsets
+  | part t: rows n | thing range ne | things k | properties np | its 25 section offsets
   | layout length | file pages P
-  | 576 CRC of the page table u32 | 580 CRC of bytes 0..580 u32 | zeros to 4096
+  | 592 CRC of the page table u32 | 596 CRC of bytes 0..596 u32 | zeros to 4096
 pages: P pages of 16 KiB at 4096 + 16384 f
 page table, at 4096 + 16384 P: for each page k of the layout (ceil(layout length / 16384) of them), 8 bytes: the file
   page f that holds it (u32; 0xFFFFFFFF: none, the page reads as zeros) | the page's CRC-32C (u32)
@@ -200,6 +202,7 @@ cmb                               their bits
 tord    (np + 1) u64, then u32s   the text order: each property's first entry (the last, the count of all), then the
                                   distinct texts of each text property's rows in the part, as text ids, in the order
                                   of their bytes (part t: only the np + 1 zeros)
+pairs   8 + 96 q bytes, tables    the pairs (format 10): their count q, an entry each, then each one's tables (below)
 ```
 
 **Le text order** (format 9). Le merge rassemble les numéros de texte distincts de chaque propriété texte pendant
@@ -210,6 +213,42 @@ fois, les trie par leurs octets (UTF-8 : l'ordre de leurs code points, les numé
 préfixe sont l'union du tronçon de chaque run et des textes de la propriété dans le delta (au plus un seuil de merge
 d'entre eux, regardés un par un) : un sur-ensemble des textes que tiennent ses faits, que le join (la jointure des
 patterns de la question) vérifie ensuite. Quatre octets par texte distinct et par run.
+
+**Les pairs** (format 10). Pour chaque paire que le schéma déclare quand le merge écrit le run (`p2 cepheus/within
+p1` : p1 et p2 des propriétés à une valeur d'une même kind, p2 un int, une date, de la monnaie, un lien ou un bool,
+dont les mots gardent l'ordre des valeurs), les lignes (w1, w2, e) des choses e dont le run change la paire : dans la
+partie a, telles qu'elles sont à la fin du run (w1 la valeur de p1 de e, w2 sa valeur de p2), quand e tient les deux
+là et qu'elles diffèrent de celles d'en dessous du run ; dans la partie t, telles qu'elles sont en dessous du run,
+quand e y tenait les deux et qu'elles diffèrent à sa fin. Un run n'ajoute donc que des paires absentes en dessous de
+lui et ne retire que des paires présentes en dessous de lui, comme ses faits ; un bottom run tient dans sa partie a la
+paire de chaque chose qui a les deux, et rien dans sa partie t. Les lignes sont triées par (w1, w2, e) : les choses de
+chaque valeur de p1 dans l'ordre de leurs valeurs de p2, à égalité par chose (Graefe, « Modern B-Tree Techniques »,
+2011 : une clé de deux colonnes).
+
+```text
+pairs (at the part's 24th offset, to its end):
+  0 q u64                      the pairs the part holds, by p2
+  8 q entries of 12 u64:       p1 | p2 | rows n | groups g | w1 headers | w1 bits | first rows' headers | first rows'
+                               bits | dir | data | 0 | 0  (each table's byte in the run; g = 0 when n = 0)
+  each pair's tables, in that order, each at a multiple of 8:
+    w1           the groups' values of p1, strictly increasing: a monotone sequence (below) of g entries
+    first rows   a monotone sequence of g + 1 entries, from 0 to n: group j's rows are first(j) .. first(j + 1) - 1
+    dir          24 bytes a block of 128 rows (the last one shorter): its least w2 i64 | its least thing i64 | the byte
+                 of its bits from data lsl 16 lor ww lsl 8 lor we (u64)
+    data         each block: its rows' w2 - least w2 in ww bits each, to a whole byte, then their e - least thing in
+                 we bits each, to a whole byte (fields of w bits as the columns', w at most 63)
+```
+
+La section a la place d'une borne des lignes de chaque paire (les faits de p1 et p2 que prend le merge, une ligne par
+chose au plus), chaque table la place de cette borne ; seuls les octets qu'elle tient vont au fichier. Une vue ne lit
+une paire que quand le schéma la déclare et que chacun de ses runs la tient dans sa partie a (un run du format 9, ou
+écrit pendant que la paire n'était pas déclarée, n'en tient aucune : le join ordinaire répond aux questions, avec les
+mêmes lignes). Une ligne (w1, w2, e) d'un run est celle de la vue quand aucun run plus récent ne la tient dans sa partie
+t et que le delta n'a aucun changement du p1 ou du p2 de e ; celles du delta lui-même sont celles de la vue
+(`Store.pair_from`). Les lignes d'un w1 se trouvent par une binary search des valeurs des groupes ($O(\log g)$ champs,
+puis deux offsets), celles à partir d'une valeur de w2 par une autre dans les lignes du groupe ; « les 3 dernières
+factures de chaque client » lit 3 lignes par client. 245 000 factures prennent 1,9 Mo (7,8 octets par ligne : des dates
+de 38 bits, des choses de 18).
 
 La partie a tient les faits que le run ajoute, la partie t les faits des runs d'en dessous qu'il retire (vide dans un
 bottom run) ; un run n'ajoute que des faits absents en dessous de lui et ne retire que des faits présents en dessous de
@@ -328,7 +367,10 @@ octets : la liste triée de numéros du format 6 (`ssort`) a disparu.
 
 **Écriture.** Un merge est la seule façon d'écrire un run (`Snapshot.merge`) : le delta, les runs les plus récents de
 la vue, et les faits triés d'un grand groupe, fusionnés dans l'ordre de chaque section et déversés dans
-`<lo>-<hi>.run.tmp`. Les colonnes sont écrites par la passe par chose (ses lignes arrivent dans l'ordre des choses
+`<lo>-<hi>.run.tmp`. Les paires sont notées pendant que la passe par chose écrit les faits de p1 et p2 de chaque chose
+(les valeurs d'en dessous du run lues dans les runs sur lesquels il repose, pour un run qui n'est pas un bottom run),
+gardées en mémoire (24 octets par ligne, et autant pour leur tri), triées par un radix sort par w1, puis les lignes de
+chaque groupe par w2, et écrites après le text order. Les colonnes sont écrites par la passe par chose (ses lignes arrivent dans l'ordre des choses
 pour chaque propriété) ; la présence des choses de chaque propriété est gardée comme un bit par chose jusqu'à la fin de
 la passe, puis écrite en rank tables, une pour les propriétés tenues par les mêmes choses ; une page de la
 disposition part (son CRC calculé, écrite comme la page suivante du fichier, admise dans le cache, sauf pour le run
@@ -353,7 +395,10 @@ chaque page du fichier au plus une fois), l'ordre de ses sections, ses rank tabl
 (dans l'ordre, dans sa place), les offsets des propriétés, les row blocks (autant qu'en demandent les lignes de chaque
 propriété, dans l'ordre), les value indexes (dans leur place), les offsets des textes, et chaque colonne (son entrée
 dans ses sections, les comptes de sa rank table, ses offsets de 0 à ses lignes chacun plus grand que le précédent, ses
-blocs dans l'ordre et dans leur place, ses lignes celles de la propriété par valeur) ; un run qui ne se vérifie pas est
+blocs dans l'ordre et dans leur place, ses lignes celles de la propriété par valeur), et les paires (leur compte et
+leurs entrées dans la section, chaque paire deux numéros de propriété et dans l'ordre de p2, ses comptes, ses tables
+dans l'ordre et dans la section, les valeurs de ses groupes strictement croissantes, ses premières lignes de 0 à ses
+lignes, les bits de ses blocs dans l'ordre et dans ses données) ; un run qui ne se vérifie pas est
 mis de côté et le choix refait sans lui. Un run qui tient dans le cache est lu et vérifié en entier à l'ouverture ;
 pour un run plus grand, les pages que lisent ses vérifications (ses tables) sont lues et vérifiées d'abord, quand le
 cache a de la place pour elles toutes. Dans les deux cas, les pages sont lues dans l'ordre du fichier, les pages du
@@ -370,9 +415,22 @@ Une page est l'unité du cache : elle est lue du fichier en entier (16 384 octet
 table), vérifiée contre son CRC, et servie seulement ensuite. Un champ de 2, 4 ou 8 octets dans une table est aligné sur
 sa taille, donc aucun ne traverse une page ; un champ serré au bit près le peut, et il est alors lu dans les deux pages.
 
+Le **format 9** (le format 10 sans les paires : 24 offsets de section par partie, les CRC de l'en-tête à 576 et 580)
+est lu tel qu'il est, à l'ouverture, sans rien rejouer : ses parties ne tiennent aucune paire, donc une vue qui tient un
+tel run ne lit aucune paire, et le merge suivant qui le réécrit écrit le format 10 (`Cepheus.snapshot` réécrit chaque
+run). Une version qui lit le format 9 met de côté un run du format 10 (elle dit "an earlier format (10)") et rejoue le
+journal, dont le format n'a pas changé ; une base dont le journal tient un fait de `cepheus/within` (la propriété 9)
+ne s'ouvre pas là : cette version ne connaît pas de propriété 9, comme celle d'avant `cepheus/to` ne connaissait pas la
+propriété 7. Elle s'arrête au groupe de la déclaration ("damaged: group N uses property 9, which does not exist") après
+avoir rejoué les groupes d'avant et les avoir fusionnés en runs du format 9, le run du format 10 retiré ; rien n'est
+perdu, puisque le journal tient chaque groupe : la version qui connaît `within` ouvre la base à nouveau, les mêmes faits
+et les mêmes réponses, et lit de nouveau la paire dès qu'un merge a réécrit ces runs. Vérifié avec le binaire de main
+(ec4bb86) et celui-ci sur des copies d'une base d'un million de faits : les faits et les réponses de `Each` avec
+`Limit: 3` et `Limit: 1` et des deux pages d'un client les mêmes à chaque étape, dans les deux sens.
+
 Le **format 8** (le format 9 sans le text order) et le **format 7** (le format 8 sans le column order) sont mis de côté
 à l'ouverture de la même façon : leurs groupes rejoués depuis le journal (une base de 10 M de faits depuis le format 7 :
-5,2 s, une seule fois), le premier merge écrivant le format 9. Une version qui lit le format 8 met de côté de la même
+5,2 s, une seule fois), le premier merge écrivant le format 10. Une version qui lit le format 8 met de côté de la même
 façon un run du format 9 (elle dit "an earlier format (9)") et rejoue le journal, dont le format n'a pas changé.
 
 Les **formats 5 et 6** (chaque fait deux fois en mots fixes : par chose une propriété u16 et une valeur i64, par

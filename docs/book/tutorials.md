@@ -1362,6 +1362,124 @@ start from and an index on `(client, date)` for its 3 rows a client; `Each` need
 latest in their order while it reads the invoices once, an invoice past a client's third latest set aside after one
 comparison, before it is made a row.
 
+## 15. The latest invoices of each client, read off an index of two fields
+
+**The problem.** Tutorial 14's screen of the account managers, at the size of a real company: tens of thousands of
+clients, hundreds of thousands of invoices. `Each` keeps each client's 3 latest while it reads every invoice once, and
+a client's own page, its invoices the latest first, reads every invoice of the client to give the first two. Both
+should read what they show and little more.
+
+**The Cepheus solution.** `within`, an **index of two fields**: `cepheus.Date(within = "Client")` keeps, for each
+client, its invoices in the order of their date, as one list a client. The kind is declared again with it, the same
+fields (`Connect` adds what the database lacks: here, the index), and the questions do not change: `Each` by the
+client sorted by the date reads, for each client, its first 3 invoices off the index (and those tied with the third),
+then asks the question on them alone; a page of one client sorted by the date reads its page from the cursor on.
+
+```cesia norun
+Dated = cepheus.Kind("invoice", {
+  Client: cepheus.Link(to = "client"), Number: cepheus.Int(unique = true), Total: cepheus.Money(2), Status: cepheus.Text(),
+  Date: cepheus.Date(within = "Client"), Due: cepheus.Date(), PaidAt: cepheus.Date(),
+})
+indexed = connect([Client, Dated])
+latest = (i, c, n, d, t) -> {
+  Where: [[i, Dated.Client, c], [i, Dated.Date, d], cepheus.Between(d, 1830297600, 1861919999), [c, Client.Name, n], [i, Dated.Total, t]],
+  Give: {Client: c, Name: n, Date: d, Total: t},
+  Sort: [cepheus.Desc(d)],
+  Limit: 3,
+  Each: [c],
+}
+for r in result.Unwrap(cepheus.Find(5, latest, indexed))
+  io.Print(r.Name, date.FormatDate(date.FromUnix(r.Date)), r.Total)
+end
+mine = (i, d, t) -> {
+  Where: [[i, Dated.Client, ada], [i, Dated.Date, d], cepheus.Between(d, 1830297600, 1861919999), [i, Dated.Total, t]],
+  Give: {Date: d, Total: t},
+  Sort: [cepheus.Desc(d)],
+  Limit: 2,
+}
+first = result.Unwrap(cepheus.Find(3, mine, indexed))
+more = (i, d, t) -> {Where: mine(i, d, t).Where, Give: mine(i, d, t).Give, Sort: mine(i, d, t).Sort, Limit: 2, After: first[2]}
+second = result.Unwrap(cepheus.Find(3, more, indexed))
+io.Print([date.FormatDate(date.FromUnix(r.Date)) for r in first], [date.FormatDate(date.FromUnix(r.Date)) for r in second])
+```
+
+```text
+Cy Moreau 2028-06-19 500.0
+Bo Lind 2028-06-01 1000.0
+Ada Martin 2028-05-12 1100.0
+Bo Lind 2028-04-22 500.0
+Cy Moreau 2028-04-08 400.0
+Ada Martin 2028-03-15 600.0
+Bo Lind 2028-03-02 900.0
+Ada Martin 2028-02-17 500.0
+Cy Moreau 2028-02-03 300.0
+["2028-05-12", "2028-03-15"] ["2028-02-17", "2028-01-05"]
+```
+
+The same rows as tutorial 14's, in `Sort`'s order (the latest first, whoever the client): the index changes what is
+read, never the answer. It is kept in each run of the database and in its recent changes, as every index of Cepheus:
+
+![The invoices of 2028 in the order of their ids, each with its client and its date; beside them, the index of invoice/Date within invoice/Client as a run holds it: one group a client (Ada Martin, Bo Lind, Cy Moreau), its first row and its rows (date, invoice) sorted by the date. Each, Limit: 3, the latest first, reads the last 3 rows of each group, 9 rows in all; a page of Ada's from a cursor reads its rows from the cursor's date down.](images/pair-layout.svg)
+
+A question reads the index once every run holds it: a run written before the declaration holds none until the next
+merge rewrites it (the server merges as the writes come, and `cepheus snapshot` rewrites them all), and until then the
+question is answered without it, with the same rows. Each write of an invoice's client or date keeps the index of the
+recent changes, 0.5 to 0.9 µs a fact (a new invoice 6.1 to 7.1 µs, a date changed 3.1 to 4.9 µs); a write of its
+other fields pays nothing.
+
+**PostgreSQL** makes the index on `(client, date)` and writes the 3 latest of each with `LATERAL`, which reads 3 rows
+of the index a client, and a client's page by a keyset condition on the date:
+
+```sql
+CREATE INDEX invoice_client_date ON invoice (client, date DESC);
+SELECT c.name, l.date::date, l.total FROM client c
+  CROSS JOIN LATERAL (SELECT date, total FROM invoice i WHERE i.client = c.id AND date >= '2028-01-01' AND date < '2029-01-01'
+                      ORDER BY date DESC LIMIT 3) l
+ ORDER BY l.date DESC;
+SELECT date::date, total FROM invoice WHERE client = 1 AND date >= '2028-01-01' AND date < '2029-01-01'
+ ORDER BY date DESC LIMIT 2;
+SELECT date::date, total FROM invoice WHERE client = 1 AND date >= '2028-01-01' AND date < '2028-03-15 09:00:00+00'
+ ORDER BY date DESC LIMIT 2;
+```
+
+```text
+    name    |    date    |  total
+------------+------------+---------
+ Cy Moreau  | 2028-06-19 |  500.00
+ Bo Lind    | 2028-06-01 | 1000.00
+ Ada Martin | 2028-05-12 | 1100.00
+ Bo Lind    | 2028-04-22 |  500.00
+ Cy Moreau  | 2028-04-08 |  400.00
+ Ada Martin | 2028-03-15 |  600.00
+ Bo Lind    | 2028-03-02 |  900.00
+ Ada Martin | 2028-02-17 |  500.00
+ Cy Moreau  | 2028-02-03 |  300.00
+
+    date    |  total
+------------+---------
+ 2028-05-12 | 1100.00
+ 2028-03-15 |  600.00
+
+    date    | total
+------------+--------
+ 2028-02-17 | 500.00
+ 2028-01-05 | 700.00
+```
+
+**The difference.** The same rows, and the same index: a key of two columns, kept sorted (Graefe 2011). PostgreSQL's
+`LATERAL` needs the clients' table to start from (a client with no invoice is a row it reads too) and its keyset page
+a condition written by hand on the last row's date; Cepheus's question is tutorial 14's, and its page's `After` is the
+last row. Measured on 10,000 clients and 245,000 invoices ([the benchmarks](benchmarks.md#an-index-of-two-properties-2026-11-26-at-1-million-facts)),
+the 3 latest invoices of each client take 30.4 ms against `LATERAL`'s 53.5 (111 ms without the index), the last of
+each 13.0 ms against `DISTINCT ON`'s 118, a client's 10 latest 13.1 µs against an index scan's 99.0 and the 10 after
+them 52.9 µs against a keyset's 152; the index takes 1.9 MB of the run's 10.6, PostgreSQL's 9.95 MB beside its table:
+
+![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, the pair declared, an arrow from the first to the second. The 3 latest invoices of each client go from PostgreSQL's LATERAL 2.1 times faster to Cepheus 1.8 times; the last invoice of each client from Cepheus 1.5 times to 9.1 times against DISTINCT ON; the 10 latest of the busiest client from 1.3 to 7.6 times against an index scan; the 10 after them from 1.9 to 2.9 times against a keyset.](images/bench-pairs.svg)
+
+**Where PostgreSQL still wins**: it makes as many indexes of a table as it is asked, on any columns, three or more in
+one key; Cepheus orders a field within one other field at most, so a second order of the dates (within the zone, say)
+reads every invoice, as tutorial 14 does.
+
 ## What it costs
 
 Measured on the benchmarks' data at 1 million facts (11,363 clients, 227,260 invoices, 56,797 follow links), the same
@@ -1391,6 +1509,7 @@ of 2.5 to 5.9).
 | a running total of 245,000 invoices, by date (`Running(Sum(t))`; `sum(total) OVER (ORDER BY date ...)`) | **92.9 ms** | 228 ms | Cepheus, 2.5 times |
 | a moving mean of 3 of each client's invoices (`Running(Avg(t), last = 3)`, `Each`; `avg(...) OVER (PARTITION BY client ... ROWS 2 PRECEDING)`) | **157 ms** | 328 ms | Cepheus, 2.1 times |
 | the 3 latest invoices of each of 10,000 clients (`Each`, `Limit: 3`; `LATERAL` with an index on `(client, date)`) | 106 ms | **53.8 ms** | PostgreSQL, 2.0 times |
+| the same, the date declared `within` the client ([tutorial 15](#15-the-latest-invoices-of-each-client-read-off-an-index-of-two-fields)) | **30.4 ms** | 53.5 ms | Cepheus, 1.8 times |
 | the monthly totals with their running total, the month before and a 3-month mean (a report; `sum(sum(...)) OVER`, `lag`, `avg`) | **24.0 ms** | 196 ms | Cepheus, 8.2 times |
 | a page of 51 with its running total after the 200,000th invoice (`After`; a subquery and a keyset condition) | **79.6 ms** | 195 ms | Cepheus, 2.5 times |
 
@@ -1420,7 +1539,9 @@ of 2.5 to 5.9).
   benchmarks](benchmarks.md#windows-and-each-2026-11-26-at-1-million-facts)): one pass a window over rows sorted once,
   exact sums taken out as a frame slides; a page reads the rows before it in one pass, none sorted. PostgreSQL's
   `LATERAL` with an index on `(client, date)` reads 3 rows a client, where Cepheus, with no index of two properties,
-  reads every invoice once (1.2 times faster than PostgreSQL's `row_number()` over them).
+  reads every invoice once (1.2 times faster than PostgreSQL's `row_number()` over them); with one, the date `within`
+  the client, it reads 3 rows a client too, 1.8 times faster than `LATERAL` ([the
+  benchmarks](benchmarks.md#an-index-of-two-properties-2026-11-26-at-1-million-facts), 21 rounds at a load of 2.1 to 4.2).
 
 The questions where PostgreSQL was faster, with main's binaries and now ([the benchmarks](benchmarks.md#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts)):
 
@@ -1444,3 +1565,4 @@ The questions where PostgreSQL was faster, with main's binaries and now ([the be
 | [the median of delays, the list of products](#12-the-median-and-spread-of-payment-delays-the-list-of-products-of-each-invoice) | `Median`, `Quantile`, `Stddev`, `Values` | `percentile_cont`, `stddev`, `array_agg`, `string_agg` | exact sums: the same bits in any order; a bag of values a group |
 | [a running total, a moving mean, a paged statement](#13-a-monthly-balance-with-a-running-total-the-change-from-last-month-and-a-3-month-moving-average) | `Running(Sum(...))`, `Running(Avg(...), last = 3)`, `Prev` | `sum(...) OVER`, `avg(...) OVER (ROWS ...)`, `lag` | rows counted one by one in a total order; a page's balance goes on from the page before, with no subquery |
 | [the 3 latest of each client, a leaderboard](#14-the-3-latest-invoices-of-each-client-the-last-one-of-each-a-leaderboard-of-clients-by-revenue) | `Each` with `Limit`, `Rank`, `Running(Count())` | `LATERAL`, `row_number()`, `DISTINCT ON`, `rank()` | no index or outer table needed; ties ordered the same at each run |
+| [the latest of each client, off an index](#15-the-latest-invoices-of-each-client-read-off-an-index-of-two-fields) | `Date(within = "Client")`, the same `Each` and pages | `CREATE INDEX ON invoice (client, date)`, `LATERAL`, a keyset | the same question, k rows a client read; the index kept in every run, read once every run has it |

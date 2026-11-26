@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="468" viewBox="0 0 860 468">
+<title>L'index de deux propriétés du tutoriel 15 : les factures par id, et leurs paires par client, puis par date</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.c{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+.h{font-weight:600}
+.s{fill:#57606a}
+.off{fill:#8c959f}
+.bg{fill:#ffffff}
+.row{fill:#ffffff;stroke:#d0d7de;stroke-width:1}
+.cur{fill:#eef1fc;stroke:#3a5ad9;stroke-width:1.6}
+.br{stroke:#3a5ad9;stroke-width:1.4;fill:none}
+.fa{fill:#3a5ad9}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.row{fill:#161b22;stroke:#3d444d}
+.cur{fill:#1f2a4d;stroke:#8fa8ff}
+.br{stroke:#8fa8ff}
+.fa{fill:#8fa8ff}
+}
+</style>
+<rect class="bg" width="860" height="468"/>
+<text class="h" x="16" y="22">Les factures, dans l'ordre de leurs ids</text>
+<text class="h" x="400" y="22">Les paires du run : invoice/date within invoice/client</text>
+<text class="c" xml:space="preserve" x="16" y="44">facture   client       date</text>
+<rect class="row" x="16" y="54" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="67">#65539    Ada Martin   5 janvier</text>
+<rect class="row" x="16" y="76" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="89">#65540    Bo Lind      20 janvier</text>
+<rect class="row" x="16" y="98" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="111">#65541    Cy Moreau    3 février</text>
+<rect class="row" x="16" y="120" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="133">#65542    Ada Martin   17 février</text>
+<rect class="row" x="16" y="142" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="155">#65543    Bo Lind      2 mars</text>
+<rect class="row" x="16" y="164" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="177">#65544    Ada Martin   15 mars</text>
+<rect class="row" x="16" y="186" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="199">#65545    Cy Moreau    8 avril</text>
+<rect class="row" x="16" y="208" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="221">#65546    Bo Lind      22 avril</text>
+<rect class="row" x="16" y="230" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="243">#65547    Ada Martin   12 mai</text>
+<rect class="row" x="16" y="252" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="265">#65548    Bo Lind      1 juin</text>
+<rect class="row" x="16" y="274" width="330" height="18"/>
+<text class="c" xml:space="preserve" x="24" y="287">#65549    Cy Moreau    19 juin</text>
+<text class="c s" xml:space="preserve" x="400" y="67">groupe Ada Martin (#65536), première ligne 0</text>
+<rect class="row" x="400" y="76" width="300" height="18"/>
+<text class="c off" xml:space="preserve" x="408" y="89">ligne  0 5 janvier  #65539</text>
+<rect class="cur" x="400" y="98" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="111">ligne  1 17 février  #65542</text>
+<rect class="cur" x="400" y="120" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="133">ligne  2 15 mars   #65544</text>
+<rect class="cur" x="400" y="142" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="155">ligne  3 12 mai    #65547</text>
+<line class="br" x1="716" y1="156" x2="716" y2="108"/>
+<polygon class="fa" points="716.0,102.0 712.0,110.0 720.0,110.0"/>
+<text class="c s" xml:space="preserve" x="400" y="185">groupe Bo Lind (#65537), première ligne 4</text>
+<rect class="row" x="400" y="194" width="300" height="18"/>
+<text class="c off" xml:space="preserve" x="408" y="207">ligne  4 20 janvier  #65540</text>
+<rect class="cur" x="400" y="216" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="229">ligne  5 2 mars    #65543</text>
+<rect class="cur" x="400" y="238" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="251">ligne  6 22 avril  #65546</text>
+<rect class="cur" x="400" y="260" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="273">ligne  7 1 juin    #65548</text>
+<line class="br" x1="716" y1="274" x2="716" y2="226"/>
+<polygon class="fa" points="716.0,220.0 712.0,228.0 720.0,228.0"/>
+<text class="c s" xml:space="preserve" x="400" y="303">groupe Cy Moreau (#65538), première ligne 8</text>
+<rect class="cur" x="400" y="312" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="325">ligne  8 3 février  #65541</text>
+<rect class="cur" x="400" y="334" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="347">ligne  9 8 avril   #65545</text>
+<rect class="cur" x="400" y="356" width="300" height="18"/>
+<text class="c" xml:space="preserve" x="408" y="369">ligne 10 19 juin   #65549</text>
+<line class="br" x1="716" y1="370" x2="716" y2="322"/>
+<polygon class="fa" points="716.0,316.0 712.0,324.0 720.0,324.0"/>
+<text class="s" x="16" y="400">11 lignes, triées par (client, date, facture), 3 groupes. Each avec Limit: 3, la plus récente d'abord, lit</text>
+<text class="s" x="16" y="417">chaque groupe par sa fin, 3 lignes (en bleu), et pose la question avec la facture l'une d'elles ; une page</text>
+<text class="s" x="16" y="434">d'un client par date cherche la date de son curseur dans le groupe, puis lit sa page. Lu dans un run que le</text>
+<text class="s" x="16" y="451">moteur a écrit (Snapshot.merge, le format de run 10).</text>
+</svg>

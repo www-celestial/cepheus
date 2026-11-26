@@ -8,6 +8,20 @@ stay as they are, or a later version reads and speaks both the old and the new.
 
 ### The database
 
+- **An index of two properties**: `cepheus/within` (property 9), `Cepheus.within db [ (date, client) ]`, Cesia's
+  `Date(within = "Client")` (and `Int`, `Bool`, `Money`, `Link`): the things of each value of a one-valued property in
+  the order of another's of their kind, kept in every run (run format 10, a section `pairs` a part; format 9 read as
+  it is, the first merge writing 10) and in the recent changes, as PostgreSQL's index on `(client, date)`. "The 3
+  latest invoices of each client" (`Each`, `Limit: 3`) reads 3 rows a client, a page of one client's invoices by date
+  reads its page; the same rows as without it, which the questions read until every run holds the pair. At 245,000
+  invoices: the 3 latest of each client 30.4 ms (111 before, PostgreSQL's `LATERAL` 53.5), the last of each 13.0 ms
+  (`DISTINCT ON` 118), a client's page 13.1 µs (an index scan 99.0); a write of either property 0.5 to 0.9 µs more a
+  fact, of any other nothing; the run 1.9 MB larger (7.8 bytes a row), its open 7.0 to 8.5 ms, a merge 22 % longer. A
+  database of format 9 opens and answers as before; a version before this one opens a database of format 10 by
+  replaying its journal, and stops at a declared pair (it knows no property 9), nothing lost
+  ([formats](docs/book/formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun), [tutorial
+  15](docs/book/tutorials.md#15-the-latest-invoices-of-each-client-read-off-an-index-of-two-fields),
+  [benchmarks](docs/book/benchmarks.md#an-index-of-two-properties-2026-11-26-at-1-million-facts)).
 - A database of **facts**, `(thing, property, value)`: the entity–attribute–value model, Datomic's datoms. A
   property is declared once with its type (`Int`, `Float`, `Bool`, `Text`, `Date`, `Money` with 0 to 18 decimal
   digits, `Link`), and whether it takes many values or a unique one ([concepts](docs/book/concepts.md)).

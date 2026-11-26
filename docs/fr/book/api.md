@@ -290,6 +290,67 @@ group 5
 lines left: 0; invoice/client links to client
 ```
 
+### Un index de deux propriétés : within
+
+```ocaml signature
+val within : db -> (int * int) list -> (unit, error) result
+```
+
+`within db [ (p2, p1) ]` range chaque propriété p2 dans la propriété p1, en un groupe (`~why:"cepheus: within"`),
+comme le fait `[p2 cepheus/within p1]` de la chose propriété de p2, un lien vers celle de p1 (la propriété 9, que
+toute base connaît) : les runs gardent alors, pour chaque valeur de p1, ses choses dans l'ordre de leurs valeurs de p2
+(le format de run 10, [les pairs](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)), un index de deux
+propriétés comme l'index de PostgreSQL sur `(client, date)`. Un p2 déjà dans son p1 n'écrit rien. `Invalid` : p1 ou p2
+n'est pas une propriété ou en est une du système, prend plusieurs valeurs, ils ne sont pas d'une même kind (le nom
+avant `'/'`), p2 est un texte ou un float (ses mots ne gardent pas l'ordre de ses valeurs), p2 est nommé dans deux
+propriétés, ou p2 est déjà dans un autre p1 (un changement est une migration : retirer le fait d'abord) ; une
+déclaration qui a perdu une course pour p2 est relue. `Schema.within v.schema p2` est le p1 de p2 dans une vue.
+
+Deux questions lisent la paire dès que chaque run de la vue la tient : Each avec `Limit k` trié par p2 (Each une
+variable c, la première clé de Sort une variable d, les patterns `[i, p1, c]` et `[i, p2, d]` : les k premières choses
+de chaque groupe et celles à égalité avec la k-ième, la question ensuite posée avec i l'une d'elles, un groupe que ses
+filtres ont laissé à moins de k lignes lisant plus loin), et une page d'une valeur de p1 triée par p2 (`[i, p1,
+constante]` et `[i, p2, d]`, d la première clé de Sort, avec ou sans After : ses choses à partir du curseur, la question
+posée sur elles). Chacune répond les mêmes lignes que sans la paire ; les runs écrits avant la déclaration n'en tiennent
+aucune jusqu'à ce qu'un merge les réécrive (`snapshot` les réécrit tous), et jusque-là les questions lisent le join
+ordinaire. Une écriture de p1 ou p2 tient à jour les paires du delta (0,5 à 0,9 µs par fait, [les benchmarks](benchmarks.md#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits)) ; une écriture de toute
+autre propriété ne paie rien. Défait par `Retract (p2, Schema.p_within, Link p1)` : rien à écrire que le fait, les
+paires des runs inutilisées dès lors, et parties de chaque run à son merge suivant.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; client; date; total ]) =
+    declare db [ prop "client/name" Ttext; prop "invoice/client" Tlink; prop "invoice/date" Tdate; prop "invoice/total" Tint ] in
+  ignore (within db [ (date, client) ]);
+  let r = Result.get_ok (write db [ Add (-1, name, Text "Ada"); Add (-2, name, Text "Bo") ]) in
+  let ada = thing r (-1) and bo = thing r (-2) in
+  List.iter
+    (fun (c, d, t) -> ignore (write db [ Add (-1, client, Link c); Add (-1, date, Date (d * 86_400_000)); Add (-1, total, Int t) ]))
+    [ (ada, 3, 30); (ada, 1, 10); (bo, 2, 20); (ada, 2, 20); (bo, 1, 5) ];
+  let v = view db in
+  Printf.printf "invoice/date within %s\n" (match Schema.within v.schema date with Some p -> (Option.get (describe v p)).name | None -> "none");
+  (* a page of Ada's invoices, the latest first: read off the pair from its start *)
+  let q = { Question.vars = 3; items = [ Pattern { e = Var 0; p = client; v = Thing ada }; Pattern { e = Var 0; p = date; v = Var 1 };
+                                         Pattern { e = Var 0; p = total; v = Var 2 } ];
+            give = [| 1; 2 |]; sort = [ { col = 0; desc = true } ]; limit = 2; after = None } in
+  List.iter (fun row -> Printf.printf "%s %s\n" (Value.to_string row.(0)) (Value.to_string row.(1))) (Result.get_ok (ask v q));
+  (match within db [ (date, name) ] with Ok () -> () | Error e -> print_endline (message e));
+  (* undeclared: the fact retracted *)
+  ignore (write db [ Retract (date, Schema.p_within, Link client) ]);
+  Printf.printf "after the retraction: %s\n" (match Schema.within (view db).schema date with Some _ -> "within" | None -> "within none")
+```
+
+```output
+invoice/date within invoice/client
+date 259200000 30
+date 172800000 20
+invalid: invoice/date is ordered within invoice/client in this database, not within client/name: retract its cepheus/within first
+after the retraction: within none
+```
+
 ## Règles
 
 ```ocaml signature

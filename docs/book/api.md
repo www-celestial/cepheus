@@ -278,6 +278,66 @@ group 5
 lines left: 0; invoice/client links to client
 ```
 
+### An index of two properties: within
+
+```ocaml signature
+val within : db -> (int * int) list -> (unit, error) result
+```
+
+`within db [ (p2, p1) ]` orders each property p2 within the property p1, in one group (`~why:"cepheus: within"`), as
+the fact `[p2 cepheus/within p1]` of p2's property thing, a link to p1's (property 9, which every database knows): the
+runs then keep, for each value of p1, its things in the order of their values of p2 (run format 10, [the
+pairs](formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun)), an index of two properties as PostgreSQL's index on
+`(client, date)`. A p2 within its p1 already writes nothing. `Invalid`: p1 or p2 is no property or a system one, takes
+many values, they are not of one kind (the name before `'/'`), p2 is a text or a float (its words do not keep the order
+of its values), p2 is named within two properties, or p2 is within another p1 already (a change is a migration: retract
+the fact first); a declaration that lost a race for p2 is read again. `Schema.within v.schema p2` is the p1 of p2 in a
+view.
+
+Two questions read the pair once every run of the view holds it: Each with `Limit k` sorted by p2 (Each a variable c,
+Sort's first key a variable d, the patterns `[i, p1, c]` and `[i, p2, d]`: each group's first k things and those tied
+with the k-th, the question then asked with i one of them, a group whose filters left it short of k rows reading
+further), and a page of one value of p1 sorted by p2 (`[i, p1, constant]` and `[i, p2, d]`, d Sort's first key, with
+or without After: its things from the cursor on, the question asked on them). Each answers the same rows as without the
+pair; the runs written before the declaration hold none until a merge rewrites them (`snapshot` rewrites them all), and
+until then the questions read the plain join. A write of p1 or p2 keeps the delta's pairs (0.5 to 0.9 µs a fact, [the benchmarks](benchmarks.md#an-index-of-two-properties-2026-11-26-at-1-million-facts)); a write
+of any other property pays nothing. Undeclared by `Retract (p2, Schema.p_within, Link p1)`: nothing to write but the
+fact, the runs' pairs unused from then on, and gone from each run at its next merge.
+
+```ocaml
+open Cepheus
+
+let () =
+  let db = fork empty in
+  let[@warning "-8"] (Ok [ name; client; date; total ]) =
+    declare db [ prop "client/name" Ttext; prop "invoice/client" Tlink; prop "invoice/date" Tdate; prop "invoice/total" Tint ] in
+  ignore (within db [ (date, client) ]);
+  let r = Result.get_ok (write db [ Add (-1, name, Text "Ada"); Add (-2, name, Text "Bo") ]) in
+  let ada = thing r (-1) and bo = thing r (-2) in
+  List.iter
+    (fun (c, d, t) -> ignore (write db [ Add (-1, client, Link c); Add (-1, date, Date (d * 86_400_000)); Add (-1, total, Int t) ]))
+    [ (ada, 3, 30); (ada, 1, 10); (bo, 2, 20); (ada, 2, 20); (bo, 1, 5) ];
+  let v = view db in
+  Printf.printf "invoice/date within %s\n" (match Schema.within v.schema date with Some p -> (Option.get (describe v p)).name | None -> "none");
+  (* a page of Ada's invoices, the latest first: read off the pair from its start *)
+  let q = { Question.vars = 3; items = [ Pattern { e = Var 0; p = client; v = Thing ada }; Pattern { e = Var 0; p = date; v = Var 1 };
+                                         Pattern { e = Var 0; p = total; v = Var 2 } ];
+            give = [| 1; 2 |]; sort = [ { col = 0; desc = true } ]; limit = 2; after = None } in
+  List.iter (fun row -> Printf.printf "%s %s\n" (Value.to_string row.(0)) (Value.to_string row.(1))) (Result.get_ok (ask v q));
+  (match within db [ (date, name) ] with Ok () -> () | Error e -> print_endline (message e));
+  (* undeclared: the fact retracted *)
+  ignore (write db [ Retract (date, Schema.p_within, Link client) ]);
+  Printf.printf "after the retraction: %s\n" (match Schema.within (view db).schema date with Some _ -> "within" | None -> "within none")
+```
+
+```output
+invoice/date within invoice/client
+date 259200000 30
+date 172800000 20
+invalid: invoice/date is ordered within invoice/client in this database, not within client/name: retract its cepheus/within first
+after the retraction: within none
+```
+
 ## Rules
 
 ```ocaml signature

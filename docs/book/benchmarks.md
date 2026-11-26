@@ -74,6 +74,7 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `abench.exe DIR [PAGES]`, `mbench.exe DIR` | the questions of before, for an A/B of two builds on one database, each file compiling against the build before the change: `abench` a Give of a join, groups, a sorted page, `Not`, a range, `Optional` (rbench's data), and with `PAGES` (bench.exe load's data) the questions of `bench.exe pages` that `Less` and `Optional` answer, as the server answers them (`Answer`: index words, no value made), as `Cepheus.ask` gives them (every row's values) and the join alone (a count); `mbench` small questions in loops, the fixed cost of a fold (a fold of one fact, `Prefix`, Q3 counted, `Not`, `Optional`, a sorted page, a find of every e-mail, Q4's fold; bench.exe's data) |
 | `kbench.exe load DIR N`, `run DIR`, `fork N`, `mixed DIR N`, `csv DIR OUT` | pages of a kind by its things' ids: N items (a name, a tenant, an int) in one run; a page of 51 by id ascending and descending, the first and the one after the middle item, a tenant's likewise, each checked against the ids it must give; on a fork filled in memory; on a fork whose delta holds N things of another kind and one item renamed; the items as CSV for `pg.sh keyset` |
 | `wbench.exe run DIR` | windows (protocol 10) on rbench's data: a running total, a moving mean of 3, a rank by total and the row before, over the 245,000 invoices in one group, each city's (100) and each client's (10,000); the 3 latest invoices of each client and the last one (`Each` and `Limit`); the monthly totals in Paris with their windows (a report); a page of 51 with its running total, the first and the one after the 200,000th row, beside the same pages without windows; `pg.sh windows ROOT index\|run` asks PostgreSQL the same (`OVER`, `LATERAL`, `DISTINCT ON`), with the indexes a user makes for them |
+| `wbench.exe pair DIR`, `writes DIR`, `within DIR`, `merge DIR` | an index of two properties on rbench's data: the 3 latest invoices of each client and the last one (`Each`, `Limit`), the 10 latest of the client with the most invoices and the 10 after them (`After`), the open and the memory; writes on a fork (a new invoice, its date changed, its total changed: 2,000 groups a round, resolved and applied, no journal); `within` declares `invoice/date` within `invoice/client` and merges; `merge` writes 100 new invoices and merges every run into one, its time and the file's size; `pg.sh pairs ROOT` asks PostgreSQL the same (`LATERAL`, `DISTINCT ON`, an index scan and a keyset) with the index of `pg.sh windows ROOT index` |
 | `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop; `COUNTER=1`: each transaction increments one shared counter row), `ops ROOT` (the questions of `bench.exe pages` that `Less` and `Optional` answer, with an index on `invoice (total)`), `keyset ROOT load\|run DIR` (kbench's pages: `WHERE id > $1 ORDER BY id LIMIT 51` on the primary key, a tenant's on `(tenant, id)`) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | backup and restore on the three sides: `cepheus backup`, `verify`, `restore` to the end and to a group; `pg_basebackup`, `pg_verifybackup`, a restore and a point-in-time recovery; SQLite's `.backup`, `integrity_check`, `.restore`; the whole history replayed (`-replay`) |
@@ -92,6 +93,72 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
+
+## An index of two properties (2026-11-26), at 1 million facts
+
+**Method.** rbench's data (`rbench.exe load`: 10,000 clients of 100 cities, 245,000 invoices, 990,040 facts in one
+bottom run, on the SATA SSD). Four sides in each of 21 rounds, their order turned at each round: main's binaries
+(ec4bb86) on the database as main writes it (format 9); this change's binaries on the same files (format 9 read as it
+is: no pair); the same binaries on a copy where `invoice/date` is declared `within` `invoice/client`, then merged
+(format 10, the pair read); PostgreSQL 18.6 with its B-tree on `(client, date DESC, id)` (`pg.sh windows ROOT index`),
+its time the `Execution Time` of `EXPLAIN (ANALYZE, TIMING OFF)`: the engine alone, as `Answer.answer` is Cepheus's
+(each row's index words made, no value, nothing sent). Each side a median of 3 runs (`wbench.exe pair`, `pg.sh
+pairs`). Then, in the same rounds and in turned orders, the writes (`wbench.exe writes`: 2,000 groups on a fork of the
+database, resolved and applied, no journal: the engine's own cost; the median of 3 rounds of them) and a merge of the
+run and 100 new invoices into one (`wbench.exe merge`, on a fresh copy each time). Given: the median of the 21 rounds'
+medians, in brackets their least and largest; a ratio, the median of the rounds' ratios [least, largest], with a
+two-sided sign test on the rounds where a side was faster. A load average of 2.1 to 4.2 on the 8 threads (other jobs'
+builds and tests). Where the time goes was measured after, by 200 stack samples of one process on one core under gdb,
+every 0.1 s.
+
+| question | main | now, the pair declared | PostgreSQL 18.6 | now / main | now |
+|---|---:|---:|---:|---:|---|
+| the 3 latest invoices of each client, `Each`, `Limit: 3`, 30,000 rows | 111 ms [99.3, 194] | **30.4 ms** [25.0, 62.7] | `LATERAL`: 53.5 ms [50.2, 105] | 0.27 [0.18, 0.56] | Cepheus, 1.8 times, faster in 20 rounds of 21 (PostgreSQL 2.1 times before) |
+| the last invoice of each client, `Limit: 1`, 10,000 rows | 81.2 ms [66.7, 155] | **13.0 ms** [11.9, 25.8] | `DISTINCT ON`: 118 ms [110, 158] | 0.17 [0.09, 0.29] | Cepheus, 9.1 times (1.5 before) |
+| the 10 latest invoices of the busiest client (44 invoices), `Sort`, `Limit: 10` | 74.2 µs [69.9, 136] | **13.1 µs** [11.9, 27.9] | an index scan: 99.0 µs [96.0, 113] | 0.17 [0.10, 0.37] | Cepheus, 7.6 times (1.3 before) |
+| the 10 after them, `After` | 78.0 µs [72.0, 156] | **52.9 µs** [27.9, 64.1] | a keyset: 152 µs [144, 204] | 0.53 [0.35, 0.85] | Cepheus, 2.9 times (1.9 before) |
+
+The sign tests of the four: p < 0.0001 against main and against PostgreSQL. The same binaries on the database of
+format 9 (no pair) gave main's times: 1.00, 1.02, 1.00 and 1.00 times main's (p 0.38 or more).
+
+| what the pair costs | main | now, format 9 | now, the pair declared | the pair / main |
+|---|---:|---:|---:|---|
+| the open (start-up), its run read and checked | 7.00 ms [6.43, 8.05] | 7.04 ms [6.32, 15.7] | 8.49 ms [7.10, 22.9] | 1.18 [1.00, 3.41], p 0.0002 |
+| the memory at its peak, the four questions | 124 MB [107, 146] | 128 MB [111, 142] | **92.8 MB** [86.6, 101] | 0.75 [0.62, 0.87] |
+| a write: a new invoice (client, date, total, status) | 6.2 µs [5.4, 6.8] | 6.1 µs [5.4, 8.9] | 7.1 µs [6.4, 8.2] | 1.14 [0.97, 1.53], p 0.00002 |
+| a write: an invoice's date changed (a paired property) | 3.1 µs [2.8, 3.5] | 3.1 µs [2.8, 4.6] | 4.9 µs [4.5, 6.4] | 1.59 [1.36, 1.97], p 0.000001 |
+| a write: an invoice's total changed (a plain one) | 3.1 µs [2.8, 3.7] | 3.1 µs [2.8, 6.1] | 3.2 µs [2.9, 3.9] | 1.02 [0.83, 1.29], p 0.5: the same |
+| the merge of the run and 100 new invoices into one | 224 ms [182, 937] | 206 ms [183, 314] | 262 ms [222, 1,230] | 1.22 [0.34, 3.67], p 0.007 |
+| the run's file | 8.6 MB | 8.6 MB | 10.6 MB | 1.22: the pair 1.9 MB, 7.8 bytes a row |
+
+![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, the pair declared, an arrow from the first to the second. The 3 latest invoices of each client go from PostgreSQL's LATERAL 2.1 times faster to Cepheus 1.8 times; the last invoice of each client from Cepheus 1.5 times to 9.1 times against DISTINCT ON; the 10 latest of the busiest client from 1.3 to 7.6 times against an index scan; the 10 after them from 1.9 to 2.9 times against a keyset.](images/bench-pairs.svg)
+
+- **`Each` with `Limit`, off the pair.** The 3 latest invoices of each client read 30,000 rows of the pair (the last
+  3 of each group, and those tied with the third), then ask the question with the invoice one of those 30,000 things:
+  the 245,000 invoices are no longer read. Where its 30 ms go now (the samples, on one core, where it takes 29.8 ms):
+  about half in the question asked on those things (a quarter in `Each`'s buffer of each group, which finds the group
+  by its client in a table and keeps its rows in order; a seventh in reading each invoice's three values, `Store.value1`),
+  a sixth in the sort of the 30,000 rows by date (the answer is in `Sort`'s order, the latest first, whoever the
+  client), a seventh in the collector (each row an array), a twentieth in reading the pair. The fold of the question
+  alone over 30,000 things takes 2.0 ms on the 8 cores: what remains is the rows' work, the same as without the pair,
+  for 30,000 rows in place of 245,000. The design expected 15 to 25 ms; the median is 30.4 ms, the least 25.0.
+- **A page of one client.** The 10 latest of a client read its group's last 10 rows (a binary search of the groups'
+  values, then of the group's rows), and the 10 after them its rows from the cursor's date down; PostgreSQL's
+  index scan and keyset read the same 10 rows of its B-tree, and spend the difference in its executor's fixed costs.
+- **What it costs.** A run holds the pair in 1.9 MB (7.8 bytes a row: dates of 38 bits, things of 18, a frame of
+  reference a block of 128 rows), where PostgreSQL's B-tree on `(client, date DESC, id)` takes 9.95 MB beside its
+  table's 14.8 MB (`pg_relation_size`). The open reads and checks those bytes as the rest of the run (0.8 ms a MB): 7.0
+  to 8.5 ms, and a database of format 9 opens as fast as before. A write of the client or the date keeps the delta's
+  pairs: 0.5 µs a fact added (a new invoice, two of them), 0.9 µs a fact of a date changed (its old value retracted,
+  its new one added); a write of any other property, nothing. A merge sorts the pair's rows (a counting sort by client,
+  then each group by date) and writes them: 56 ms more for 245,000 rows. The memory is lower with the pair: the
+  questions no longer read the pages of every invoice's date.
+- **Where PostgreSQL still wins.** None of these four questions. It still offers what Cepheus does not: any number of
+  indexes on any columns of a table, and keys of three columns or more, where Cepheus orders a property within one
+  other property at most (`invoice/date` within `invoice/client`, not also within `invoice/zone`), so a second order
+  of the same property reads every invoice as before; and its index, made by `CREATE INDEX`, serves its first query,
+  where a run written before a declaration holds no pair until a merge rewrites it (the questions read the plain join
+  until then, with the same rows).
 
 ## The cases PostgreSQL still won (2026-11-26), at 1 million facts
 
@@ -150,7 +217,8 @@ words made, not its values, as PostgreSQL's `EXPLAIN (ANALYZE, TIMING OFF)` make
   its `LATERAL` reads 3 rows a client from its B-tree on `(client, date DESC, id)`, 30,000 rows, where Cepheus reads
   the 245,000 invoices once (the samples: a quarter of the time reading each invoice's date, `Store.value1`). Only an
   index of two properties would read as few rows; it is designed, not built (it needs a new run format and a
-  declaration, the owner's calls).
+  declaration, the owner's calls). Built since: [an index of two
+  properties](#an-index-of-two-properties-2026-11-26-at-1-million-facts), 30.4 ms against `LATERAL`'s 53.5.
 - **`Less` and `Optional`: rows made from one buffer.** A `Less` check spent 58 % of its time making its rows'
   values, the join 42 %; the samples of `Optional` over every client, 44 % in minor collections, each of which stops
   every domain of the process. `Ask`'s bindings are now written into one buffer a domain, where each binding was a new
