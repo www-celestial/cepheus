@@ -408,14 +408,73 @@ let order ?(sets = []) ?(less = []) (v : Store.view) nvars pats ranges =
 let planner = ref (fun ~sets ~less v nvars pats ranges -> order ~sets ~less v nvars pats ranges)
 
 (* Questions run as a fold: [init ()] makes an accumulator, [step acc env] adds a binding (the buffer [env] is reused),
-   [merge] joins two accumulators. Above [parallel_min] candidates for the first variable, the candidates are split
-   into slices run by [domains] domains, each slice with its own accumulator: a view needs no lock to be read. *)
+   [merge] joins two accumulators. A level of [parallel_min] candidates or more, wherever it is in the order, has its
+   candidates split into slices run by [domains] domains, each slice with its own accumulator: a view needs no lock to
+   be read. The first level of two candidates or more past the levels of one, when the planner expects
+   [probe_more] times [parallel_min] candidates of work or more, is probed: its candidates run on one domain until their work, measured,
+   says that the rest is worth splitting (the fold's own section below). *)
 let parallel_min = ref 20_000
 let domains = ref (max 1 (min 8 (Domain.recommended_domain_count ())))
+
+(* the work a probed level's candidates take, measured, before the rest may be split: [every] (the tests make it
+   small) *)
+let probe_min = ref every
+
+(* a probe splits only where the planner expects, and the measure then says, [probe_more] times [parallel_min]
+   candidates of work: its numbers are an estimate and an extrapolation, a level's count an exact one. Below it, the
+   rows a question gives cost more than its candidates (a find of 11,363 texts, of 22,726 candidates, took 3.6 ms on
+   one domain and 4.2 split); the tests make it 1 *)
+let probe_more = ref 4
+
+(* A runner: one a domain of a question, its own binding, counts and caches, the view shared (Query.fold) *)
+type 'a runner = {
+  env : int array;  (* the words of the variables bound so far *)
+  bound : bool array;
+  kthing : int array;  (* a leaf's value read at its thing's level: the thing, and the value ([kept]) *)
+  kword : int array;
+  w : int ref;  (* its candidates *)
+  iterate : int -> pat -> (int -> unit) -> unit;
+  admits : int -> int -> int -> bool;
+  level : int -> 'a ref -> unit;
+  general : int -> 'a ref -> unit;
+  bounds : int -> bool;
+  over : unit -> unit;  (* the budget, the stop and the other domains looked at, and the next count to look at them *)
+  settle : unit -> unit;  (* its candidates added to the question's shared count *)
+  flush : unit -> unit;  (* its candidates added to [work] and to the stop's work, at its end *)
+  ctl : 'a ctl;
+}
+
+(* what a runner does besides its levels: one record, made once a runner *)
+and 'a ctl = {
+  mutable ticks : bool;  (* looks at them every [every] candidates (else at the budget only) *)
+  mutable shared : bool;  (* other domains work for the question: its budget is their count and its own *)
+  mutable cut : int;  (* the level whose candidates are collected ([collecting]) is the one before it *)
+  mutable collecting : bool;
+  mutable collect : unit -> unit;
+  mutable splitting : bool;  (* may [split] a level: the asking domain's runner, outside a split *)
+  mutable split : int -> int -> int -> 'a ref -> bool;  (* level, source, doubled count: true when it ran the level *)
+  mutable top : bool;  (* no level of two candidates or more met yet (the asking domain's runner) *)
+  mutable cap : int;  (* the question's budget over every domain (the fold's [spent]) *)
+  mutable spent : int Atomic.t;  (* the candidates of every domain, from the first split ([unshared] before) *)
+  mutable nsplit : int;  (* the splits the asking domain made *)
+}
+
+let no_split _ _ _ _ = false
+
+(* the count of a runner that shares none: never added to (a question that splits gets its own at its first split) *)
+let unshared = Atomic.make 0
+
+(* the leaves whose value a level reads and keeps ([kept]), each once: what a collected candidate carries *)
+let kept_leaves (ks : int array) = Array.of_list (List.sort_uniq compare (List.filter (fun y -> y >= 0) (Array.to_list ks)))
 
 (* the candidates enumerated by every question so far (each runner adds its count when it ends): for the tests,
    which hold the work of a question to the Generic Join bound, and for the benchmarks *)
 let work = Atomic.make 0
+
+(* the levels split across domains so far, and those of them that a probe split (its candidates' work measured first):
+   for the tests and the benchmarks *)
+let splits = Atomic.make 0
+let probed_splits = Atomic.make 0
 
 (* What a question will do: its patterns with a variable, its ranges, and the order of its variables; None when it
    has no answer (a constant the view has never seen, or a pattern without variables that is not a fact). *)
@@ -485,10 +544,10 @@ let less_pairs (v : Store.view) q (less : less list) =
         (fun l -> match l.lx, l.ly with V x, V y when x <> y && x < q.vars && y < q.vars && Value.inline ty.(x) && ty.(x) = ty.(y) -> [ (x, y); (y, x) ] | _ -> [])
         less
 
-let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?stop (v : Store.view) q ~init ~step ~merge =
+let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?stop (v : Store.view) q ~init ~step ~merge =
   match plan ~sets ~less:(less_pairs v q less) v q with
   | None -> init ()
-  | Some { pats; limits; floats; ty; ord; cost = _ } ->
+  | Some { pats; limits; floats; ty; ord; cost } ->
     let n = q.vars in
     let by_var = Array.init n (fun x -> List.filter (fun pt -> has x pt.pe || has x pt.pv) pats) in
     let lvl = Array.make n 0 in
@@ -619,7 +678,13 @@ let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?
        iterators' own *)
     (* a domain of this question failed: set before its exception goes up, so that the others stop at their next check *)
     let abort = Atomic.make false in
-    let runner ~helper ticks =
+    (* the candidates of every domain of the question, added by each at its looks (every [every] candidates) and at its
+       end while others work beside it, against [cap]: [budget] a domain its first level is split into ([budget] times
+       [domains] when it has [parallel_min] candidates or more, the split there was before splits of deeper levels;
+       [budget] otherwise). So the budget never refuses what it took before, and does not depend on the number of
+       domains that take part nor on which one ran what: the question's work is the same on one domain *)
+    let runner ~helper ~cap ~spent ticks0 =
+      let ctl = { ticks = ticks0; shared = helper; cut = n; collecting = false; collect = ignore; splitting = false; split = no_split; top = true; cap; spent; nsplit = 0 } in
       let env = Array.make n 0 and bound = Array.make n false and w = ref 0 and cell = [| 0 |] in
       (* the intervals, a runner's own when Less bounds a variable by the bindings before it *)
       let iv0 = iv in
@@ -657,20 +722,24 @@ let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?
       in
       (* the next count of candidates at which the budget, the stop and the other domains are looked at: the budget
          itself when there is nothing else to look at ([ticks] false: one comparison a candidate, as before them) *)
-      let lim = ref (if ticks then min budget every else budget) in
-      (* the candidates already added to the stop's work *)
-      let told = ref 0 in
+      let lim = ref (if ticks0 then min cap every else cap) in
+      (* the candidates already added to the stop's work, and to the question's shared count *)
+      let told = ref 0 and told_s = ref 0 in
       let tell () =
         match stop with
         | Some s -> (if helper then ignore (Atomic.fetch_and_add s.work (!w - !told)) else s.own <- s.own + (!w - !told)); told := !w
         | None -> ()
       in
+      let settle () = let d = !w - !told_s in if d <> 0 then (told_s := !w; ignore (Atomic.fetch_and_add ctl.spent d)) in
       let[@inline never] over () =
         tell ();
-        if !w > budget then raise (Over_budget budget);
+        (* the question's candidates: this runner's alone, or every domain's while others work beside it *)
+        let total = if ctl.shared then (settle (); Atomic.get ctl.spent) else !w in
+        if total > ctl.cap then raise (Over_budget budget);
         if Atomic.get abort then raise Stopped;
         (match stop with Some s -> check s | None -> ());
-        lim := if budget - !w <= every then budget else !w + every
+        let left = ctl.cap - total in
+        lim := !w + if ctl.ticks && left > every then every else left
       in
       (* a leaf's value read at its thing's level ([kept]): the thing, and the value *)
       let kthing = Array.make n (-1) and kword = Array.make n 0 and kcell = [| 0 |] in
@@ -859,15 +928,23 @@ let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?
       and general i acc =
         let x = ord.(i) in
         let src, size = choose i in
-        bound.(x) <- true;
-        (if leap.(i) && src >= 0 && slice.(i).(src) && size >= 4 then leapfrog i src size acc
-         else candidates i src (fun c -> env.(x) <- c; level (i + 1) acc));
-        bound.(x) <- false
+        (* two candidates or more on the asking domain: the fold may split them ([split]) *)
+        if ctl.splitting && size >= 4 && ctl.split i src size acc then ()
+        else begin
+          bound.(x) <- true;
+          (* the asking domain collecting this level's candidates (the fold's [collect_level]): each one given to
+             [collect], not to the next level *)
+          let coll = ctl.collecting && i + 1 = ctl.cut in
+          (if leap.(i) && src >= 0 && slice.(i).(src) && size >= 4 then leapfrog i src size coll acc
+           else if coll then candidates i src (fun c -> env.(x) <- c; ctl.collect ())
+           else candidates i src (fun c -> env.(x) <- c; level (i + 1) acc));
+          bound.(x) <- false
+        end
       (* Leapfrog Triejoin's intersection (Veldhuizen 2014): the source and every other slice whose count is at most 8
          times the source's are read into their buffers, then the iterators, in the order of their keys, each seek the
          largest key in turn by galloping (Bentley, Yao 1976): a key all reach is a candidate, checked against the
          level's other patterns. Read: at most 1 + 8 (k - 1) times the source's count; compared: O(m log (n / m)) *)
-      and leapfrog i src size acc =
+      and leapfrog i src size coll acc =
         let x = ord.(i) and ps = by_var.(ord.(i)) and cs = counts.(ord.(i)) and xi = ord.(i) in
         let parts = partss.(i) and pos = poss.(i) in
         (* [lf]: the intersected patterns but the source (which [others] skips by its place), as bits: only patterns
@@ -878,7 +955,7 @@ let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?
           if j <> src && j < 62 && slice.(i).(j) && cs.(j) <= 8 * size && !k < 62 then (parts.(!k) <- j; incr k; lf := !lf lor (1 lsl j))
         done;
         let k = !k and lf = !lf in
-        if k < 2 then candidates i src (fun c -> env.(x) <- c; level (i + 1) acc)
+        if k < 2 then candidates i src (fun c -> env.(x) <- c; if coll then ctl.collect () else level (i + 1) acc)
         else begin
           let empty = ref false in
           for q = 0 to k - 1 do
@@ -894,7 +971,7 @@ let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?
             while !ia < na && !jb < nb do
               let u = Array.unsafe_get a !ia and t = Array.unsafe_get b !jb in
               if u = t then begin
-                if in_range x u && others i src lf u then (env.(x) <- u; level (i + 1) acc);
+                if in_range x u && others i src lf u then (env.(x) <- u; if coll then ctl.collect () else level (i + 1) acc);
                 incr ia;
                 incr jb
               end
@@ -918,7 +995,7 @@ let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?
               let xk = key !p in
               if xk = !hi then begin
                 (* every iterator is at the key *)
-                if in_range x xk && others i src lf xk then (env.(x) <- xk; level (i + 1) acc);
+                if in_range x xk && others i src lf xk then (env.(x) <- xk; if coll then ctl.collect () else level (i + 1) acc);
                 pos.(!p) <- pos.(!p) + 1;
                 if pos.(!p) >= lens.(xi).(parts.(!p)) then stop := true
                 else (hi := key !p; p := if !p + 1 = k then 0 else !p + 1)
@@ -932,78 +1009,210 @@ let fold ?(seq = false) ?(sets = []) ?(less = []) ?(budget = max_int) ?account ?
           end
         end
       in
-      env, bound, choose, iterate, admits, level, w, lim, tell
+      let flush () = ignore (Atomic.fetch_and_add work !w); tell (); w := 0 in
+      { env; bound; kthing; kword; w; iterate; admits; level; general; bounds; over; settle; flush; ctl }
     in
     if n = 0 then step (init ()) [||]
     else begin
-      let env, bound, choose, iterate, admits, level, w0, lim0, tell0 = runner ~helper:false (match stop with Some _ -> true | None -> false) in
-      let flush w tell = ignore (Atomic.fetch_and_add work !w); tell (); w := 0 in
-      let x0 = ord.(0) in
-      let src, size = choose 0 in
-      let d = if (not seq) && size / 2 >= !parallel_min then !domains else 1 in
-      if d <= 1 then begin
-        let acc = ref (init ()) in
-        level 0 acc;
-        (match account with Some r -> r := !r + !w0 | None -> ());
-        flush w0 tell0;
-        !acc
-      end
-      else begin
-        (* the first level's source, as it comes (exactly [size] / 2 candidates, at most 1 for a one-valued
-           property); each slice checks its own against the level's other patterns, so that no domain does the
-           first level alone *)
-        let firsts = Array.make ((size + 1) / 2) 0 and count = ref 0 in
-        bound.(x0) <- true;
-        if src = -2 then Array.iter (fun c -> firsts.(!count) <- c; incr count; incr w0) sv.(x0)
-        else iterate x0 by_var.(x0).(src) (fun c -> firsts.(!count) <- c; incr count; incr w0);
-        (* slices of the candidates, taken in turn by the domains from a shared counter (a domain that meets the
-           expensive candidates takes fewer slices), each with its own accumulator, merged in slice order: the answer
-           does not depend on the number of domains nor on which domain ran which slice *)
-        let slices = max 1 (min !count (16 * d)) in
-        let accs = Array.make slices None and next = Atomic.make 0 in
-        let run (env, bound, admits, level, w, tell) =
-          bound.(x0) <- true;
-          let go = ref true in
-          while !go do
-            let s = Atomic.fetch_and_add next 1 in
-            if s >= slices then go := false
-            else begin
-              let acc = ref (init ()) in
-              for k = s * !count / slices to ((s + 1) * !count / slices) - 1 do
-                let c = firsts.(k) in
-                if admits 0 src c then begin
-                  env.(x0) <- c;
-                  level 1 acc
-                end
-              done;
-              accs.(s) <- Some !acc
+      let m = runner ~helper:false ~cap:budget ~spent:unshared (match stop with Some _ -> true | None -> false) in
+      let d = if seq then 1 else !domains in
+      if d > 1 then begin
+        (* the split's machinery, made at the first level of two candidates or more: a question that has none
+           pays for none of it *)
+        let made () =
+          (* ---- a level split across the domains ----
+             [region i src pre buf from len stride acc]: the candidates buf.(from .. len - 1) of level i (the levels before
+             it bound in the asking domain's runner [m]), cut into slices taken in turn by the domains from a shared
+             counter (a domain that meets the expensive candidates takes fewer slices), each slice with its own
+             accumulator, merged into [acc] in slice order: the answer does not depend on the number of domains nor on
+             which domain ran which slice. [pre]: the candidates passed the level's checks already, each with the values
+             its checks kept for the leaves ([stride] words a candidate); otherwise they are the source's, as it gives
+             them, and each slice checks its own against the level's other patterns, so that no domain does the level
+             alone. [any_order]: the merge does not depend on the order of the bindings (a report's groups), so a
+             domain folds every slice it takes into one accumulator: one table a domain, not one a slice. *)
+          let region i src pre (buf : int array) from len stride acc =
+            let x = ord.(i) and cnt = len - from in
+            if cnt > 0 then begin
+              (* the count every domain adds to, from this first split on *)
+              if m.ctl.nsplit = 0 then m.ctl.spent <- Atomic.make 0;
+              m.ctl.nsplit <- m.ctl.nsplit + 1;
+              Atomic.incr splits;
+              if pre && src = -1 then Atomic.incr probed_splits;
+              let ys = kept_leaves kept.(i) in
+              let slices = max 1 (min cnt (16 * d)) in
+              let accs = if any_order then [||] else Array.make slices None and next = Atomic.make 0 in
+              (* the asking domain's binding of the levels before i, its leaves' values, for the helpers *)
+              let penv = Array.copy m.env and pkt = Array.copy m.kthing and pkw = Array.copy m.kword in
+              let run (r : _ runner) (own : _ ref option) =
+                r.bound.(x) <- true;
+                let go = ref true in
+                while !go do
+                  let s = Atomic.fetch_and_add next 1 in
+                  if s >= slices then go := false
+                  else begin
+                    let a = match own with Some a -> a | None -> ref (init ()) in
+                    for k = from + (s * cnt / slices) to from + ((s + 1) * cnt / slices) - 1 do
+                      if pre then begin
+                        let o = k * stride in
+                        r.env.(x) <- buf.(o);
+                        for q = 0 to Array.length ys - 1 do
+                          r.kthing.(ys.(q)) <- buf.(o + 1 + (2 * q));
+                          r.kword.(ys.(q)) <- buf.(o + 2 + (2 * q))
+                        done;
+                        r.level (i + 1) a
+                      end
+                      else begin
+                        let c = buf.(k) in
+                        if r.admits i src c then (r.env.(x) <- c; r.level (i + 1) a)
+                      end
+                    done;
+                    if not any_order then accs.(s) <- Some !a
+                  end
+                done;
+                r.bound.(x) <- false;
+                r.settle ()
+              in
+              (* the first failure of a domain is the question's; it stops the others at their next check (Stopped) *)
+              let failed = Atomic.make None in
+              let guarded f =
+                match f () with
+                | () -> ()
+                | exception e ->
+                  (match e with Stopped -> () | e -> ignore (Atomic.compare_and_set failed None (Some e)));
+                  Atomic.set abort true
+              in
+              (* this domain looks at the others every [every] candidates while they work, its count shared from now *)
+              let ticks0 = m.ctl.ticks in
+              m.ctl.shared <- true;
+              m.ctl.ticks <- true;
+              m.over ();
+              m.ctl.splitting <- false;
+              (* the other domains from the pool (Pool: as many as it has free, maybe none), each with its own runner and
+                 the binding of the levels before i *)
+              let hacc = Array.make (max 0 (d - 1)) None and hn = Atomic.make 0 in
+              let wait, _ =
+                Pool.help (d - 1) (fun () ->
+                    guarded (fun () ->
+                        let r = runner ~helper:true ~cap:m.ctl.cap ~spent:m.ctl.spent true in
+                        Array.blit penv 0 r.env 0 n;
+                        Array.blit pkt 0 r.kthing 0 n;
+                        Array.blit pkw 0 r.kword 0 n;
+                        for k = 0 to i - 1 do r.bound.(ord.(k)) <- true done;
+                        if any_dyn && dyn.(x) <> [] then ignore (r.bounds x);
+                        let own = if any_order then Some (ref (init ())) else None in
+                        Fun.protect ~finally:r.flush (fun () -> run r own);
+                        match own with Some a -> hacc.(Atomic.fetch_and_add hn 1) <- Some !a | None -> ()))
+              in
+              guarded (fun () -> run m (if any_order then Some acc else None));
+              wait ();
+              m.ctl.splitting <- true;
+              m.ctl.ticks <- ticks0;
+              (match Atomic.get failed with Some e -> raise e | None -> ());
+              (* the budget with the helpers' candidates, and the next look *)
+              m.over ();
+              Array.iter (function Some a -> acc := merge !acc a | None -> ()) (if any_order then hacc else accs)
             end
-          done;
-          flush w tell
+          in
+          (* the candidates of level i that pass its checks, collected by the asking domain in the level's own order (a
+             leapfrog's too), each with the values its checks kept for the leaves: the words, their number, the stride *)
+          let collect_level i acc =
+            let x = ord.(i) and ys = kept_leaves kept.(i) in
+            let stride = 1 + (2 * Array.length ys) in
+            let buf = ref (Array.make (16 * stride) 0) and len = ref 0 in
+            m.ctl.collect <-
+              (fun () ->
+                let o = !len * stride in
+                if o + stride > Array.length !buf then (let nb = Array.make (2 * Array.length !buf) 0 in Array.blit !buf 0 nb 0 o; buf := nb);
+                let b = !buf in
+                b.(o) <- m.env.(x);
+                for q = 0 to Array.length ys - 1 do
+                  b.(o + 1 + (2 * q)) <- m.kthing.(ys.(q));
+                  b.(o + 2 + (2 * q)) <- m.kword.(ys.(q))
+                done;
+                incr len);
+            m.ctl.splitting <- false;
+            m.ctl.cut <- i + 1;
+            m.ctl.collecting <- true;
+            Fun.protect ~finally:(fun () -> m.ctl.splitting <- true; m.ctl.cut <- n; m.ctl.collecting <- false) (fun () -> m.general i acc);
+            !buf, !len, stride
+          in
+          (* a level of [parallel_min] candidates or more (exact counts): split. Its source's candidates as they come (a
+             leapfrog's level collected, in its order); then, the first level of two candidates or more past those of one
+             ([top]), when the planner expects [probe_more] times [parallel_min] candidates of work or more: probed. Its candidates run here,
+             one after the other, until the work they took, measured (every candidate counted below them), says that
+             the rest would take [probe_more] times [parallel_min] or more, at the same rate: the rest is split, if there are 2 a domain
+             left at least. So a question is split only where a level offers that much (counted), or where its work was
+             seen (measured): a small question never pays for the split, nor for the probe unless the planner expected a
+             large one. *)
+          let wide i src c acc =
+            let x = ord.(i) in
+            if leap.(i) && src >= 0 && slice.(i).(src) then begin
+              let buf, len, stride = collect_level i acc in
+              region i src true buf 0 len stride acc
+            end
+            else begin
+              (* the source's candidates: [c] at most (its count is exact, or more for a property's values and
+                 holders), each counted *)
+              let firsts = Array.make (max 1 c) 0 and k = ref 0 in
+              let add cand = firsts.(!k) <- cand; incr k in
+              m.bound.(x) <- true;
+              if src = -2 then Array.iter add sv.(x) else m.iterate x by_var.(x).(src) add;
+              m.bound.(x) <- false;
+              m.w := !(m.w) + !k;
+              region i src false firsts 0 !k 1 acc
+            end
+          in
+          let probed i acc =
+            let x = ord.(i) and ys = kept_leaves kept.(i) in
+            let buf, len, stride = collect_level i acc in
+            if len >= 2 then m.ctl.top <- false;
+            let w0 = !(m.w) and j = ref 0 and go = ref true in
+            m.bound.(x) <- true;
+            while !go && !j < len do
+              let o = !j * stride in
+              m.env.(x) <- buf.(o);
+              for q = 0 to Array.length ys - 1 do
+                m.kthing.(ys.(q)) <- buf.(o + 1 + (2 * q));
+                m.kword.(ys.(q)) <- buf.(o + 2 + (2 * q))
+              done;
+              m.level (i + 1) acc;
+              incr j;
+              let rest = len - !j and took = !(m.w) - w0 in
+              if rest >= 2 * d && took >= !probe_min && float_of_int took *. float_of_int rest >= float_of_int (!probe_more * !parallel_min) *. float_of_int !j then begin
+                go := false;
+                m.bound.(x) <- false;
+                region i (-1) true buf !j len stride acc
+              end
+            done;
+            m.bound.(x) <- false
+          in
+          fun i src size acc ->
+            let c = size / 2 in
+            if c >= !parallel_min then begin
+              if i = 0 then m.ctl.cap <- (if budget > max_int / d then max_int else budget * d);
+              m.ctl.top <- false;
+              wide i src c acc;
+              true
+            end
+            else (probed i acc; true)
         in
-        (* the first failure of a domain is the question's; it stops the others at their next check (Stopped) *)
-        let failed = Atomic.make None in
-        let guarded f =
-          match f () with
-          | () -> ()
-          | exception e ->
-            (match e with Stopped -> () | e -> ignore (Atomic.compare_and_set failed None (Some e)));
-            Atomic.set abort true
-        in
-        (* the other domains from the pool (Pool: as many as it has free, maybe none), each with its own runner; this
-           one looks at the others from now on *)
-        (match stop with None -> lim0 := min budget (!w0 + every) | Some _ -> ());
-        let wait, _ =
-          Pool.help (d - 1) (fun () ->
-              guarded (fun () -> let e, b, _, _, a, l, w, _, t = runner ~helper:true true in run (e, b, a, l, w, t)))
-        in
-        guarded (fun () -> run (env, bound, admits, level, w0, tell0));
-        wait ();
-        (match Atomic.get failed with Some e -> raise e | None -> ());
-        let acc = ref (Option.get accs.(0)) in
-        for s = 1 to slices - 1 do acc := merge !acc (Option.get accs.(s)) done;
-        !acc
-      end
+        let hook = ref None in
+        m.ctl.splitting <- true;
+        m.ctl.split <-
+          (fun i src size acc ->
+            (* a level to split, or the first of two candidates or more when the planner expects much work: the
+               machinery; otherwise no split, nothing made *)
+            if size / 2 >= !parallel_min || (m.ctl.top && cost >= float_of_int (!probe_more * !parallel_min)) then begin
+              let f = match !hook with Some f -> f | None -> let f = made () in hook := Some f; f in
+              f i src size acc
+            end
+            else (m.ctl.top <- false; false))
+      end;
+      let acc = ref (init ()) in
+      m.level 0 acc;
+      (match account with Some r -> r := !r + (if m.ctl.nsplit = 0 then !(m.w) else (m.settle (); Atomic.get m.ctl.spent)) | None -> ());
+      m.flush ();
+      !acc
     end
 
 let rows ?stop (v : Store.view) q =

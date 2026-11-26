@@ -1061,36 +1061,35 @@ method, every number and its range are in [the benchmarks](benchmarks.md#less-op
 | question | Cepheus | PostgreSQL 18.6 | |
 |---|---:|---:|---|
 | 64 writers on one counter (`Incr`; a counter row) | **5,890 writes a second** | 154 | Cepheus, 38 times |
-| the clients of a city with the clients each follows (`Optional`; `LEFT JOIN`), 490 rows | **0.099 ms** | 0.554 ms | Cepheus, 5.6 times |
-| every client with the clients each follows, 56,797 rows | 29.4 ms | **16.4 ms** | PostgreSQL, 1.8 times |
-| the follow links to a newer client (`Less(a, b)`; `a < b`), 28,271 rows | 14.7 ms | **3.97 ms** | PostgreSQL, 3.7 times |
-| the invoices below one invoice's total (`Less`; `total < (SELECT ...)`), 122,962 rows | 76.2 ms | **22.0 ms** | PostgreSQL, 3.5 times |
+| the clients of a city with the clients each follows (`Optional`; `LEFT JOIN`), 490 rows | **0.077 ms** | 0.441 ms | Cepheus, 5.7 times |
+| every client with the clients each follows, 56,797 rows | 16.7 ms | **12.5 ms** | PostgreSQL, 1.3 times |
+| the follow links to a newer client (`Less(a, b)`; `a < b`), 28,250 rows | 8.76 ms | **3.82 ms** | PostgreSQL, 2.3 times |
+| the invoices below one invoice's total (`Less`; `total < (SELECT ...)`), 122,962 rows | 28.0 ms | **19.0 ms** | PostgreSQL, 1.5 times |
 | a client with 10,000 invoices, refused (`Delete`, `refuse`; `DELETE`, `REFERENCES`) | **6 µs** | 89 µs | Cepheus, 15 times |
 | an invoice and its 100 lines (`cascade`; `ON DELETE CASCADE`) | **176 µs** | 193 µs | about the same |
 | an invoice and its 10,000 lines | 27.3 ms | **5.16 ms** | PostgreSQL, 5.3 times |
 | an invoice and the link of its 10,000 notes (`clear`; `ON DELETE SET NULL`) | **11.1 ms** | 46.5 ms | Cepheus, 4.2 times |
 | the check of a link that names a kind, at each write (a foreign key's) | **0.2 µs** | 9.6 µs | Cepheus, 48 times |
-| the median total of 245,000 invoices (`Median`; `percentile_cont`), 1 group | **30.8 ms** | 64.5 ms | Cepheus, 2.1 times |
-| the different statuses by city (`Count(s)`; `count(DISTINCT)`), 100 groups | **73.9 ms** | 208 ms | Cepheus, 2.8 times |
-| the mean invoice by client (`Avg`; `avg`), 10,000 groups | 155 ms | **73.8 ms** | PostgreSQL, 2.1 times |
-| the totals by month in Paris (`Trunc`; `date_trunc` with a zone), 121 groups | **43.3 ms** | 181 ms | Cepheus, 4.2 times |
+| the median total of 245,000 invoices (`Median`; `percentile_cont`), 1 group | **28.8 ms** | 56.9 ms | Cepheus, 2.0 times |
+| the different statuses by city (`Count(s)`; `count(DISTINCT)`), 100 groups | **15.2 ms** | 190 ms | Cepheus, 13 times |
+| the mean invoice by client (`Avg`; `avg`), 10,000 groups | **36.5 ms** | 65.5 ms | Cepheus, 1.8 times |
+| the totals by month in Paris (`Trunc`; `date_trunc` with a zone), 121 groups | **20.9 ms** | 141 ms | Cepheus, 6.7 times |
 
 - A counter many writers share is where a lock costs most: PostgreSQL holds the row until each commit is on the disk,
   Cepheus's writer reads the counter as it applies each group, and the groups share their fsync.
 - `Optional` costs what the same join costs; on a selective question Cepheus's indexes win, over two whole tables
   PostgreSQL's hash join does.
-- `Less` costs no more than filtering the rows in the program, but PostgreSQL's scan of a narrow table, in one
-  process, is faster than reading the facts one by one; and the range above runs on one of Cepheus's domains, since a
-  question is split across domains at its first level only (here, the one total of the bound): a way to split it
-  further is not built yet.
+- `Less` costs less than filtering the rows in the program, but PostgreSQL's scan of a narrow table, in one process,
+  is faster than reading the facts one by one; the range above, split across Cepheus's cores at its second level (past
+  the one total of the bound), spends most of its time making its rows' values.
 - The deletes are the engine's work, nothing on the disk, at a load of 2.7 to 3.1, on 680,681 facts and the same rows
   ([the benchmarks](benchmarks.md#deletes-and-links-that-name-a-kind-2026-11-25)). Finding what links to a thing is one
   lookup in Cepheus, whatever their number, where PostgreSQL runs its foreign key's query through a trigger; a large
   cascade costs Cepheus what retracting its facts costs (1 µs a fact), PostgreSQL only marks its rows.
-- The reports are the engine's work, on 990,000 facts at a load of 3.6 to 6.6 ([the
-  benchmarks](benchmarks.md#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)): with few
-  groups Cepheus wins, keeping each group's different values with their counts where PostgreSQL sorts its rows; with
-  10,000 groups PostgreSQL's hash aggregate does, the question running on one of Cepheus's cores.
+- The reports are the engine's work, on 990,000 facts at a load of 1.9 to 2.5 ([the
+  benchmarks](benchmarks.md#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)): Cepheus
+  wins at every number of groups, keeping each group's different values with their counts where PostgreSQL sorts its
+  rows, a report by city or by client split across its cores, its groups in one flat table a core.
 
 ## Each tutorial in one line
 

@@ -257,6 +257,20 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   the 10 M facts 5.13 s against `COPY`'s 30.87; durable writes on par with PostgreSQL, both bound by the disk's fsync
   ([comparison](docs/book/comparison.md)).
 
+- **A question splits across the cores past a narrow first level, and reports keep their groups in flat tables**
+  (2026-11-26, 1 M facts, 8 domains on 4 cores, 5 rounds alternated with main's binaries): a level of 20,000
+  candidates or more is split wherever it comes in the order; the first level of two candidates or more past those of
+  one, when the planner expects 80,000 candidates of work, runs until its candidates' measured work says the rest is
+  worth splitting; the candidates of every domain count together against the question's budget, which never refuses
+  what it took before. A Group's groups sit in one table of open addressing a domain (a row costs a hash and no
+  allocation; a mean's exact sums in four ints a group; the bags of small groups in one table a column, of large ones
+  a table a group). The invoices below
+  one invoice's total 28.0 ms against 57.5 (PostgreSQL 19.0); a report by city 2 to 5 times faster (`Sum` 9.7 ms
+  against 46.5, PostgreSQL 57.8), by client 3 to 4 times (the mean invoice 36.5 ms against 151, PostgreSQL 65.5), Cepheus
+  now ahead of PostgreSQL at every number of groups; the questions of before as fast as they were (Q1 to Q5 0.97 to
+  1.04, small questions in loops 0.96 to 1.03)
+  ([benchmarks](docs/book/benchmarks.md#questions-split-past-a-narrow-first-level-and-lighter-groups-2026-11-26-at-1-million-facts)).
+
 ### Fixes
 
 - `tools/test.sh` names the checks that failed: each step's output goes to a log of its own, and a step that fails

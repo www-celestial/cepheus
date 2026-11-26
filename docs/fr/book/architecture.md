@@ -393,10 +393,19 @@ même domain partagent ce lock et passent chacun leur tour. Cepheus met le write
 writers, où ne tourne aucun thread client, pour qu'ils n'attendent jamais le runtime lock des threads clients (les bases
 d'un processus partagent autant de domains des writers que la machine a de cœurs : un domain coûte cher en OCaml 5,
 0,2 ms à lancer, et chacun en vie ralentit chaque collection mineure, qui les arrête tous) ; chaque merge tourne dans
-son propre domain ; et une grande question (20 000 candidats ou plus pour sa première variable) les découpe en slices
-(des tranches) que jusqu'à `Query.domains` domains prennent à tour de rôle (le nombre recommandé pour la machine, au plus
-8 : celui de la question et les helpers du processus, garés entre deux questions, `Pool`), chacun avec son propre
-accumulateur, fusionnés dans l'ordre des slices pour que la réponse ne dépende pas du nombre de domains. Un processus ne
+son propre domain ; et une grande question découpe les candidats d'un de ses niveaux en slices (des tranches) que
+jusqu'à `Query.domains` domains prennent à tour de rôle (le nombre recommandé pour la machine, au plus 8 : celui de la
+question et les helpers du processus, garés entre deux questions, `Pool`). Le niveau découpé en est un de 20 000
+candidats ou plus (des comptes exacts), où qu'il vienne dans l'ordre : après un niveau d'un seul candidat aussi (les
+factures dont le total est sous celui d'une facture : ce total d'abord, puis les 122 962 en dessous, découpés). Ou bien
+c'est le premier niveau de deux candidats ou plus après ceux d'un seul, quand le planner attend quatre fois ce travail
+ou plus (80 000 candidats : une estimation demande plus qu'un compte) : ses candidats tournent sur le domain qui pose
+la question jusqu'à ce que leur travail, mesuré, dise que le reste en prendrait autant au même rythme, et le reste est
+découpé (les 10 000 clients d'un rapport par ville :
+environ 50 candidats par client). Ainsi une petite question ne paie jamais de découpage. Chaque slice a son propre
+accumulateur, fusionnés dans l'ordre des slices pour que la réponse ne dépende pas du nombre de domains (les groupes
+d'un rapport, dont les sommes et les sacs ne dépendent pas de l'ordre des lignes, une table par domain) ; les candidats
+de tous les domains comptent ensemble contre le budget de la question ([limites](limits.md#les-questions)). Un processus ne
 tient jamais plus de domains que le plafond d'OCaml moins une marge : un merge ou un helper qu'il ne peut avoir tourne
 sur un thread, ou la question sur moins de domains ([limites](limits.md#les-fichiers-et-la-plateforme)). Une vue n'a
 besoin d'aucun lock pour être lue, ce qui rend ce découpage gratuit. La somme des impayés par ville sur 453 866 factures

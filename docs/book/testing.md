@@ -83,7 +83,9 @@ checks a property on many random inputs against a reference model written indepe
    ones numbered 1 to n, no gap, no number twice, the same after a power loss; two in one group; to the largest int
    and past it, past the smallest; every wrong type, kind and thing refused, the counter left as it was); 300 random databases × 15 random questions against a naive evaluator, each within
    the Generic Join bound computed from the facts alone (`Check.gj_bound`, against `Query.work`; the leapfrog's slices
-   counted where it may read them); costs: questions
+   counted where it may read them); questions split across 3 domains past a level of one candidate and with their first
+   level probed: the rows of one domain in their order, the same candidates, refused one candidate past their budget and
+   taken at it; costs: questions
    where one list is far larger than the answer, and lookups on a thing with 40,000 values, base and delta; a merge
    keeps every fact and every answer, and a merge of a run 8 times the cache (its pages in the file, 120,000 things)
    holds at most a few pages open (19 measured, bound 24: the 18 streams of the pass by property, and the column order's) and never more

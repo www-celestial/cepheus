@@ -391,7 +391,7 @@ let show rows = String.concat " | " (List.map (fun r -> String.concat "," (Array
 
 let questions = ref 0 and with_order = ref 0 and empties = ref 0 and with_ops = ref 0
 let with_less = ref 0 and with_optional = ref 0 and with_floats = ref 0 and with_missing = ref 0
-let with_trunc = ref 0 and with_report = ref 0
+let with_trunc = ref 0 and with_report = ref 0 and split_checks = ref 0
 
 (* Store.text_order: the texts of p in the order of their bytes, from a text on, merged over the runs and the delta:
    strictly in order, every text of p's facts at or after the start, none before it *)
@@ -751,6 +751,36 @@ let run seed =
           | exception Query.Bad m -> C.fail "seed %d: %s refused: %s" seed name m
         in
         run_path Top.Heap "heap"; run_path Top.Index "index"; run_path Top.Auto "auto";
+        (* split across 3 domains: at every level of two candidates or more, or with the first level of two or more
+           probed (run here until its candidates' work is seen) and the levels of 12 or 64 or more split: the same rows
+           in the same order as on one domain, bit for bit *)
+        Top.path := Auto;
+        let on d pm pr =
+          let d0 = !Query.domains and pm0 = !Query.parallel_min and pr0 = !Query.probe_min and pq0 = !Query.probe_more in
+          let om0 = !Agg.own_min and of0 = !Agg.own_from in
+          Query.domains := d;
+          Query.parallel_min := pm;
+          Query.probe_min := pr;
+          Query.probe_more := 1;
+          (* split, a report's bags move to a table a group at once *)
+          if d > 1 then (Agg.own_min := 0; Agg.own_from := 1);
+          Fun.protect
+            ~finally:(fun () -> Query.domains := d0; Query.parallel_min := pm0; Query.probe_min := pr0; Query.probe_more := pq0; Agg.own_min := om0; Agg.own_from := of0)
+            (fun () -> engine ~extra v q sel o)
+        in
+        (match on 1 !Query.parallel_min 1 with
+         | exception Query.Bad m -> C.fail "seed %d: one domain refused: %s" seed m
+         | one ->
+           List.iter
+             (fun (pm, pr) ->
+               match on 3 pm pr with
+               | got ->
+                 incr split_checks;
+                 if List.length got = List.length one && List.for_all2 (fun a b -> Array.length a = Array.length b && Array.for_all2 Value.equal a b) got one then
+                   C.check true ""
+                 else C.fail "seed %d: split (parallel_min %d): not the rows of one domain\n  got:  %s\n  want: %s" seed pm (show got) (show one)
+               | exception Query.Bad m -> C.fail "seed %d: split (parallel_min %d) refused: %s" seed pm m)
+             [ (1, 1); (12, 1); (64, 1) ]);
         let q', extra', sel', o' = wired q extra sel o in
         Top.path := Auto;
         (match engine ~extra:extra' v q' sel' o' with got -> check "wired" got | exception Query.Bad m -> C.fail "seed %d: wired refused: %s" seed m)
@@ -1252,6 +1282,7 @@ let () =
     !questions !with_order !with_ops !empties (Atomic.get Top.windows) (Atomic.get Top.gave_up);
   Printf.printf "questions: %d with Less, %d with Optional (%d with a missing cell), %d with a range of a float\n" !with_less !with_optional !with_missing !with_floats;
   Printf.printf "questions: %d reports with Avg, Count(x), Values, Quantile, Variance or Stddev, %d with Trunc\n" !with_report !with_trunc;
+  Printf.printf "questions: %d answers split across 3 domains (%d levels split, %d by a probe; %d bag columns moved to a table a group), each the rows of one domain in their order\n" !split_checks (Atomic.get Query.splits) (Atomic.get Query.probed_splits) (Atomic.get Agg.owned);
   Printf.printf "questions: %d questions with each planner, the same rows; their work %d candidates, %d with the former one\n"
     !planners_checks (fst !planners_work) (snd !planners_work);
   Printf.printf "questions: %d checks of live questions with Not, Or, In and Prefix after a frame (%d frames answered by their keys, %d by the whole question)\n"

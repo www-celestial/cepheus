@@ -147,7 +147,8 @@ type prepared = {
   nv : int;
   derived : (int * (int -> int)) array;
   var : int -> unit;
-  fold : 'a. ?seq:bool -> ?window:Top.window -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> unit -> 'a;
+  fold :
+    'a. ?seq:bool -> ?any_order:bool -> ?window:Top.window -> init:(unit -> 'a) -> step:('a -> int array -> 'a) -> merge:('a -> 'a -> 'a) -> unit -> 'a;
 }
 
 let prepare ~extra ~budget ?stop (v : Store.view) (q : Query.t) =
@@ -162,14 +163,14 @@ let prepare ~extra ~budget ?stop (v : Store.view) (q : Query.t) =
     | Some a when x < q.vars && not a.outer.(x) -> Query.bad "variable %d is a Not's or an Or's own: Give and Sort take the question's variables" x
     | _ -> ()
   in
-  let fold ?seq ?window ~init ~step ~merge () =
+  let fold ?seq ?any_order ?window ~init ~step ~merge () =
     match ask, window with
-    | None, None -> Query.fold ?seq ~budget ?stop v q ~init ~step ~merge
-    | None, Some (Top.Range (x, lo, hi)) -> Query.fold ?seq ~budget ?stop v { q with ranges = (x, lo, hi) :: q.ranges } ~init ~step ~merge
-    | None, Some (Top.Words (x, ws)) -> Query.fold ?seq ~sets:[ (x, ws) ] ~budget ?stop v q ~init ~step ~merge
-    | Some a, None -> Ask.fold ?seq ~budget ?stop v a ~init ~step ~merge
-    | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ~budget ?stop ~range:(x, lo, hi) v a ~init ~step ~merge
-    | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ~budget ?stop ~words:(x, ws) v a ~init ~step ~merge
+    | None, None -> Query.fold ?seq ?any_order ~budget ?stop v q ~init ~step ~merge
+    | None, Some (Top.Range (x, lo, hi)) -> Query.fold ?seq ?any_order ~budget ?stop v { q with ranges = (x, lo, hi) :: q.ranges } ~init ~step ~merge
+    | None, Some (Top.Words (x, ws)) -> Query.fold ?seq ?any_order ~sets:[ (x, ws) ] ~budget ?stop v q ~init ~step ~merge
+    | Some a, None -> Ask.fold ?seq ?any_order ~budget ?stop v a ~init ~step ~merge
+    | Some a, Some (Top.Range (x, lo, hi)) -> Ask.fold ?seq ?any_order ~budget ?stop ~range:(x, lo, hi) v a ~init ~step ~merge
+    | Some a, Some (Top.Words (x, ws)) -> Ask.fold ?seq ?any_order ~budget ?stop ~words:(x, ws) v a ~init ~step ~merge
   in
   let masked = match ask with Some a -> Array.length a.opts > 0 | None -> false in
   { ask; ty; masked; nv = q.vars; derived; var; fold }
@@ -211,22 +212,134 @@ let stream ?(extra = []) ?(budget = max_int) ?stop (v : Store.view) (q : Query.t
     in
     Some (Array.map (fun x -> ty.(x)) give, rows)
 
-(* ---- a report: Group with Truncs or aggregates of protocol 9 ----
-   Each group holds its key's words, the words of its Count, Sum, Min and Max (as the plain path does), and the state
-   of each other aggregate (Agg: exact sums, a bag); a table a domain, joined at the end. Its rows are then values:
-   the groups in the order of their keys' words (as the plain path), or sorted and cut by Sort, Limit and After as
-   groups (a Values column takes no part in the order: no two groups have one key), and each group then a row a value
-   of its Values (Agg.flatten). The cells of the keys, of the bags' new values and of the rows are charged to the
-   ticket. *)
-type group = { w : int array; st : Agg.state option array }
+(* ---- the groups of a Group: one table of open addressing over the key words, in flat arrays ----
+   A group is a number: its key's words at that place in one array (with Optionals, the mask of its missing columns
+   after them), its Count, Sum, Min and Max in another, the states of its other aggregates in their columns (Agg.col:
+   four ints of exact sums, or its entries in the column's one bag), found by its key's hash (linear probing, the
+   table at most half full): a binding costs a hash and no allocation, a new group a few words. A table a domain (the
+   fold's [any_order]: these aggregates do not depend on the order of the bindings), merged at the end; the groups
+   then in the order of their keys' words, whatever the number of domains. *)
+type table = {
+  kw : int;  (* a key's words *)
+  na : int;
+  start : int array;  (* a new group's Count, Sum, Min and Max: 0, 0, max_int, min_int *)
+  cols : Agg.col option array;  (* the aggregates of protocol 9 *)
+  mutable keys : int array;  (* group g's key at g kw *)
+  mutable vals : int array;  (* group g's Count, Sum, Min and Max at g na *)
+  mutable slots : int array;  (* 1 + a group, 0 an empty slot; a power of 2 *)
+  mutable n : int;
+  buf : int array;  (* a binding's key, made here: the table's domain's own *)
+  mutable cells : int;  (* the cells the table has not charged yet *)
+}
 
+let table ~kw ~na ~start ~(cols : (unit -> Agg.col) option array) () =
+  { kw; na; start; cols = Array.map (Option.map (fun mk -> mk ())) cols; keys = Array.make (16 * max 1 kw) 0;
+    vals = Array.make (16 * max 1 na) 0; slots = Array.make 32 0; n = 0; buf = Array.make (max 1 kw) 0; cells = 0 }
+
+let key_hash (k : int array) o kw =
+  let h = ref kw in
+  for j = o to o + kw - 1 do h := (!h + Array.unsafe_get k j) * 0x2545F4914F6CDD1D done;
+  !h lxor (!h lsr 29)
+
+let rehash t =
+  let size = 2 * Array.length t.slots in
+  let sl = Array.make size 0 and m = size - 1 in
+  for g = 0 to t.n - 1 do
+    let i = ref (key_hash t.keys (g * t.kw) t.kw land m) in
+    while sl.(!i) <> 0 do i := (!i + 1) land m done;
+    sl.(!i) <- g + 1
+  done;
+  t.slots <- sl
+
+(* the group of the key in [t.buf]; a new one is made the last, [t.n] one more *)
+let group t =
+  let kw = t.kw and buf = t.buf and keys = t.keys in
+  let m = Array.length t.slots - 1 in
+  let i = ref (key_hash buf 0 kw land m) and g = ref (-1) in
+  while !g < 0 do
+    let s = Array.unsafe_get t.slots !i in
+    if s = 0 then begin
+      let ng = t.n in
+      t.keys <- Agg.grow_ints t.keys ((ng + 1) * kw);
+      t.vals <- Agg.grow_ints t.vals ((ng + 1) * t.na);
+      Array.blit buf 0 t.keys (ng * kw) kw;
+      Array.blit t.start 0 t.vals (ng * t.na) t.na;
+      Array.iter (function Some c -> Agg.col_room c (ng + 1) | None -> ()) t.cols;
+      t.slots.(!i) <- ng + 1;
+      t.n <- ng + 1;
+      g := ng;
+      if 2 * t.n > Array.length t.slots then rehash t
+    end
+    else begin
+      let o = (s - 1) * kw in
+      let j = ref 0 in
+      while !j < kw && Array.unsafe_get keys (o + !j) = Array.unsafe_get buf !j do incr j done;
+      if !j = kw then g := s - 1 else i := (!i + 1) land m
+    end
+  done;
+  !g
+
+(* the groups of b into a: their keys found or made, their aggregates joined *)
+let merge_tables (aggs : Wire.agg array) a b =
+  let na = a.na and map = Array.make (max 1 b.n) 0 in
+  for gb = 0 to b.n - 1 do
+    Array.blit b.keys (gb * b.kw) a.buf 0 a.kw;
+    let ga = group a in
+    map.(gb) <- ga;
+    let va = a.vals and oa = ga * na and ob = gb * na in
+    for i = 0 to na - 1 do
+      let y = b.vals.(ob + i) in
+      match aggs.(i) with
+      | Wire.Count | Sum _ -> va.(oa + i) <- va.(oa + i) + y
+      | Min _ -> if y < va.(oa + i) then va.(oa + i) <- y
+      | Max _ -> if y > va.(oa + i) then va.(oa + i) <- y
+      | _ -> ()
+    done
+  done;
+  Array.iteri (fun i c -> match c, b.cols.(i) with Some ca, Some cb -> Agg.col_merge ca cb map b.n | _ -> ()) a.cols;
+  a
+
+(* the groups in the order of their keys' words *)
+let sorted t =
+  let ord = Array.init t.n Fun.id and kw = t.kw and keys = t.keys in
+  Array.sort
+    (fun a b ->
+      let oa = a * kw and ob = b * kw in
+      let j = ref 0 in
+      while !j < kw && Array.unsafe_get keys (oa + !j) = Array.unsafe_get keys (ob + !j) do incr j done;
+      if !j = kw then 0 else compare (Array.unsafe_get keys (oa + !j) : int) (Array.unsafe_get keys (ob + !j)))
+    ord;
+  ord
+
+(* a binding's key into [buf]: the words of [keys] (a Trunc's computed), and with Optionals the mask of the missing
+   ones after them, as [projector] gives them *)
+let key_into (p : prepared) keys : int array -> int array -> unit =
+  let nk = Array.length keys in
+  if (not p.masked) && p.derived = [||] then fun env buf -> for j = 0 to nk - 1 do Array.unsafe_set buf j env.(keys.(j)) done
+  else begin
+    let words = Array.map (getter p) keys and miss = Array.map (misser p) keys in
+    if not p.masked then fun env buf -> for j = 0 to nk - 1 do buf.(j) <- words.(j) env done
+    else
+      fun env buf ->
+        let m = ref 0 in
+        for j = 0 to nk - 1 do
+          if miss.(j) env then (buf.(j) <- 0; m := !m lor (1 lsl j)) else buf.(j) <- words.(j) env
+        done;
+        buf.(nk) <- !m
+  end
+
+let start_of aggs = Array.map (function Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) aggs
+
+(* ---- a report: Group with Truncs or aggregates of protocol 9 ----
+   Its groups in a table (above): the words of its Count, Sum, Min and Max as the plain path's, the state of each
+   other aggregate in its column (Agg: exact sums, a bag). Its rows are then values: the groups in the order of their
+   keys' words (as the plain path), or sorted and cut by Sort, Limit and After as groups (a Values column takes no
+   part in the order: no two groups have one key), and each group then a row a value of its Values (Agg.flatten). The
+   cells of the keys, of the bags' new values and of the rows are charged to the ticket. *)
 let agg_word (ty : Value.typ array) (a : Wire.agg) w : Value.t =
   match Agg.var_of a with
   | None -> Int w
   | Some x -> (match ty.(x) with Tmoney _ -> Money w | Tdate -> Date w | _ -> Int w)
-
-(* a per-domain table and the cells it has not charged yet *)
-type tally = { tbl : (int array, group) Hashtbl.t; mutable cells : int }
 
 let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) ~optional keys aggs =
   let ty = p.ty in
@@ -245,71 +358,61 @@ let report ~(order : Top.order) ?ticket ~weight (v : Store.view) (p : prepared) 
       | a, Some x -> p.var x; Agg.check a ty.(x) ~optional:(optional x))
     aggs;
   let nk = Array.length keys and na = Array.length aggs in
-  let key = if p.masked || p.derived <> [||] then projector p keys else fun env -> Array.init nk (fun i -> env.(keys.(i))) in
+  let kw = if p.masked then nk + 1 else nk in
+  let key = key_into p keys in
   let gets = Array.map (fun a -> match Agg.var_of a with Some x -> getter p x | None -> fun _ -> 0) aggs in
   let misses = Array.map (fun a -> match Agg.var_of a with Some x -> misser p x | None -> fun _ -> false) aggs in
   let txs = Array.map (fun a -> match Agg.var_of a with Some x -> ty.(x) | None -> Value.Tint) aggs in
   let width = weight * max 1 (nk + na) in
-  let charge_cells (t : tally) n =
+  let charge_cells (t : table) n =
     match ticket with
     | None -> ()
     | Some tk -> t.cells <- t.cells + n; if t.cells >= grain then (charge tk t.cells; t.cells <- 0)
   in
-  let fresh () =
-    { w = Array.map (function Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) aggs;
-      st = Array.map (fun a -> if Agg.is_new a then Some (Agg.fresh a) else None) aggs }
-  in
-  let add (t : tally) (g : group) env =
-    for i = 0 to na - 1 do
-      match aggs.(i) with
-      | Wire.Count -> g.w.(i) <- g.w.(i) + 1
-      | Sum _ -> g.w.(i) <- g.w.(i) + gets.(i) env
-      | Min _ -> let x = gets.(i) env in if x < g.w.(i) then g.w.(i) <- x
-      | Max _ -> let x = gets.(i) env in if x > g.w.(i) then g.w.(i) <- x
-      | _ -> (
-        match g.st.(i) with
-        | Some st when not (misses.(i) env) -> if Agg.add v txs.(i) st 1 (gets.(i) env) then charge_cells t (weight * Agg.entry_cells)
-        | _ -> ())
-    done
-  in
-  let join (a : group) (b : group) =
-    for i = 0 to na - 1 do
-      match aggs.(i), a.st.(i), b.st.(i) with
-      | (Wire.Count | Sum _), _, _ -> a.w.(i) <- a.w.(i) + b.w.(i)
-      | Min _, _, _ -> a.w.(i) <- min a.w.(i) b.w.(i)
-      | Max _, _, _ -> a.w.(i) <- max a.w.(i) b.w.(i)
-      | _, Some x, Some y -> Agg.merge x y
-      | _ -> ()
-    done
-  in
+  let cols = Array.mapi (fun i a -> if Agg.is_new a then Some (fun () -> Agg.col a txs.(i)) else None) aggs in
   let tl =
-    p.fold ~init:(fun () -> { tbl = Hashtbl.create 64; cells = 0 })
+    p.fold ~any_order:true ~init:(table ~kw ~na ~start:(start_of aggs) ~cols)
       ~merge:(fun a b ->
-        Hashtbl.iter (fun k g -> match Hashtbl.find_opt a.tbl k with Some g' -> join g' g | None -> Hashtbl.replace a.tbl k g) b.tbl;
-        (* the fold's slices each count their own cells: what one has not charged yet goes on to the other *)
+        let a = merge_tables aggs a b in
+        (* each table counts its own cells: what one has not charged yet goes on to the other *)
         charge_cells a b.cells;
         a)
       ~step:(fun t env ->
-        let k = key env in
-        (match Hashtbl.find_opt t.tbl k with
-         | Some g -> add t g env
-         | None -> let g = fresh () in add t g env; Hashtbl.replace t.tbl k g; charge_cells t width);
+        key env t.buf;
+        let n0 = t.n in
+        let g = group t in
+        if t.n > n0 then charge_cells t width;
+        let o = g * na and vals = t.vals in
+        for i = 0 to na - 1 do
+          match aggs.(i) with
+          | Wire.Count -> vals.(o + i) <- vals.(o + i) + 1
+          | Sum _ -> vals.(o + i) <- vals.(o + i) + gets.(i) env
+          | Min _ -> let x = gets.(i) env in if x < vals.(o + i) then vals.(o + i) <- x
+          | Max _ -> let x = gets.(i) env in if x > vals.(o + i) then vals.(o + i) <- x
+          | _ -> (
+            match t.cols.(i) with
+            | Some c when not (misses.(i) env) -> if Agg.col_add v txs.(i) c g (gets.(i) env) then charge_cells t (weight * Agg.entry_cells)
+            | _ -> ())
+        done;
         t) ()
   in
   (* and the last ones, under a grain *)
   (match ticket with Some tk when tl.cells > 0 -> charge tk tl.cells; tl.cells <- 0 | _ -> ());
-  let groups = Array.of_seq (Hashtbl.to_seq tl.tbl) in
-  Array.sort (fun (a, _) (b, _) -> compare a b) groups;
+  let groups = sorted tl in
+  let by = Array.map (function Some c -> Agg.by_group c tl.n | None -> [||], [||], [||]) tl.cols in
+  (* the order of a bag column's words, once a column (a text's read once) *)
+  let cmps = Array.mapi (fun i a -> match a with Wire.Values _ | Quantile _ -> Agg.order v txs.(i) | _ -> Agg.int_order) aggs in
   let typs = Array.init (nk + na) (fun j -> if j < nk then ty.(keys.(j)) else Agg.typ aggs.(j - nk) txs.(j - nk)) in
-  let cells (k, g) =
+  let cells g =
+    let ok = g * kw in
     Array.init (nk + na) (fun j ->
-        if j < nk then Agg.One (if p.masked && (k.(nk) lsr j) land 1 = 1 then Value.missing else Store.value v ty.(keys.(j)) k.(j))
+        if j < nk then Agg.One (if p.masked && (tl.keys.(ok + nk) lsr j) land 1 = 1 then Value.missing else Store.value v ty.(keys.(j)) tl.keys.(ok + j))
         else begin
           let i = j - nk in
-          match aggs.(i), g.st.(i) with
-          | Wire.Values _, Some st -> Agg.Many (Array.map (Store.value v txs.(i)) (Agg.sorted_values v txs.(i) st))
-          | a, Some st -> Agg.One (Agg.result v a txs.(i) st)
-          | a, None -> Agg.One (agg_word ty a g.w.(i))
+          match aggs.(i), tl.cols.(i) with
+          | Wire.Values _, Some _ -> Agg.Many (Array.map (Store.value v txs.(i)) (Agg.col_values cmps.(i) g by.(i)))
+          | a, Some c -> Agg.One (Agg.col_result ~cmp:cmps.(i) v a txs.(i) c g by.(i))
+          | a, None -> Agg.One (agg_word ty a tl.vals.((g * na) + i))
         end)
   in
   let gs = Array.map cells groups in
@@ -420,60 +523,55 @@ let answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?ticket ?
       aggs;
     let nk = Array.length keys and na = Array.length aggs in
     (* a group's key: its words, and with Optionals the mask of its missing ones after them *)
-    let key = if masked then projector p keys else fun env -> Array.init nk (fun i -> env.(keys.(i))) in
+    let kw = if masked then nk + 1 else nk in
+    let key = key_into p keys in
     (* a key's cells, charged by grains of keys *)
     let width = weight * max 1 (nk + na) in
     let every = max 1 (grain / width) in
-    let added = match ticket with None -> ignore | Some t -> fun n -> if n mod every = 0 then charge t (every * width) in
     (* key words -> aggregate words, a table a domain, joined at the end *)
-    let fresh () = Array.init na (fun i -> match aggs.(i) with Wire.Min _ -> max_int | Wire.Max _ -> min_int | _ -> 0) in
-    let add (st : int array) env =
-      for i = 0 to na - 1 do
-        match aggs.(i) with
-        | Wire.Count -> st.(i) <- st.(i) + 1
-        | Wire.Sum x -> st.(i) <- st.(i) + env.(x)
-        | Wire.Min x -> if env.(x) < st.(i) then st.(i) <- env.(x)
-        | Wire.Max x -> if env.(x) > st.(i) then st.(i) <- env.(x)
-        | _ -> ()
-      done
-    in
-    let join (a : int array) (b : int array) =
-      for i = 0 to na - 1 do
-        match aggs.(i) with
-        | Wire.Count | Wire.Sum _ -> a.(i) <- a.(i) + b.(i)
-        | Wire.Min _ -> a.(i) <- min a.(i) b.(i)
-        | Wire.Max _ -> a.(i) <- max a.(i) b.(i)
-        | _ -> ()
-      done
-    in
-    let tbl =
-      fold ~init:(fun () -> Hashtbl.create 64)
-        ~merge:(fun a b ->
-          Hashtbl.iter (fun k s -> match Hashtbl.find_opt a k with Some s' -> join s' s | None -> Hashtbl.replace a k s) b;
-          a)
+    let tl =
+      fold ~any_order:true ~init:(table ~kw ~na ~start:(start_of aggs) ~cols:(Array.make na None)) ~merge:(merge_tables aggs)
         ~step:(fun t env ->
-          let k = key env in
-          (match Hashtbl.find_opt t k with
-           | Some s -> add s env
-           | None -> let s = fresh () in add s env; Hashtbl.replace t k s; added (Hashtbl.length t));
+          key env t.buf;
+          let n0 = t.n in
+          let g = group t in
+          (match ticket with Some tk when t.n > n0 && t.n mod every = 0 -> charge tk (every * width) | _ -> ());
+          let o = g * na and vals = t.vals in
+          for i = 0 to na - 1 do
+            match aggs.(i) with
+            | Wire.Count -> vals.(o + i) <- vals.(o + i) + 1
+            | Wire.Sum x -> vals.(o + i) <- vals.(o + i) + env.(x)
+            | Wire.Min x -> if env.(x) < vals.(o + i) then vals.(o + i) <- env.(x)
+            | Wire.Max x -> if env.(x) > vals.(o + i) then vals.(o + i) <- env.(x)
+            | _ -> ()
+          done;
           t) ()
     in
-    let groups = Array.of_seq (Hashtbl.to_seq tbl) in
     (* in the order of the keys' words: an answer that does not depend on the number of domains *)
-    Array.sort compare groups;
+    let groups = sorted tl in
     let typ j =
       if j < nk then ty.(keys.(j))
       else match aggs.(j - nk) with Wire.Sum y | Wire.Min y | Wire.Max y -> ty.(y) | _ -> Value.Tint
     in
+    let keys = tl.keys and vals = tl.vals in
     if order = Top.none then begin
-      let word i j = let k, s = groups.(i) in if j < nk then k.(j) else s.(j - nk) in
-      let missing = if masked then fun i j -> j < nk && (fst groups.(i)).(nk) lsr j land 1 = 1 else none_missing in
+      let word i j = let g = groups.(i) in if j < nk then keys.((g * kw) + j) else vals.((g * na) + j - nk) in
+      let missing = if masked then fun i j -> j < nk && (keys.((groups.(i) * kw) + nk) lsr j) land 1 = 1 else none_missing in
       { cols = nk + na; n = Array.length groups; typ; word; missing; computed = none_computed; cell = no_cell }
     end
     else begin
       (* the rows of the sort, a copy of the groups (and the mask of their keys after them) *)
       Option.iter (fun t -> charge t (Array.length groups * width)) ticket;
       let typs = Array.init (nk + na) typ in
-      let rows = Array.map (fun (k, s) -> if masked then Array.concat [ Array.sub k 0 nk; s; [| k.(nk) |] ] else Array.append k s) groups in
+      let rows =
+        Array.map
+          (fun g ->
+            let r = Array.make (if masked then nk + na + 1 else nk + na) 0 in
+            Array.blit keys (g * kw) r 0 nk;
+            Array.blit vals (g * na) r nk na;
+            if masked then r.(nk + na) <- keys.((g * kw) + nk);
+            r)
+          groups
+      in
       of_rows ~masked (nk + na) typs (Top.sort_rows ~masked v ~typs order rows)
     end
