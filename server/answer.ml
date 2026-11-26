@@ -809,8 +809,8 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
     { cols = cols + nw; n = Array.length idx; typ = (fun j -> if j < cols then typs.(j) else wt.(j - cols));
       word = (fun i j -> if j < cols then rows.(idx.(i)).(j) else 0);
-      missing = (fun i j -> if j < cols then masked && Top.missing cols rows.(idx.(i)) j else Value.is_missing out.(j - cols).(idx.(i)));
-      computed = (fun j -> j >= cols); cell = (fun i j -> out.(j - cols).(idx.(i))) }
+      missing = (fun i j -> if j < cols then masked && Top.missing cols rows.(idx.(i)) j else Window.missing out.(j - cols) idx.(i));
+      computed = (fun j -> j >= cols); cell = (fun i j -> Window.cell out.(j - cols) idx.(i)) }
   | Wire.Over ((Wire.Group (keys, aggs) as base), each, windows) ->
     Array.iter var keys;
     Array.iter (fun a -> Option.iter var (Agg.var_of a)) aggs;
@@ -848,7 +848,7 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     let idx = keep_rows n ~after ~limit:order.limit ~part ~same:(fun i j -> full i j = 0) in
     Window.check_past out idx;
     let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
-    of_values (cols + nw) (Array.append typs wt) (Array.map (fun i -> Array.init (cols + nw) (fun j -> if j < cols then rows.(i).(j) else out.(j - cols).(i))) idx)
+    of_values (cols + nw) (Array.append typs wt) (Array.map (fun i -> Array.init (cols + nw) (fun j -> if j < cols then rows.(i).(j) else Window.cell out.(j - cols) i)) idx)
   | Wire.Give give ->
     let give = if Array.length give = 0 then Array.init q.vars Fun.id else give in
     Array.iter var give;

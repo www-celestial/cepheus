@@ -110,8 +110,15 @@ let compare_values = Top.compare_values
    (a row past the page's last is no part of the answer) *)
 let past = Value.Text "running sum past 63 bits"
 
-let check_past (out : Value.t array array) idx =
-  Array.iter (fun w -> Array.iter (fun i -> if w.(i) == past then bad "Running's Sum passed the 63 bits of an Int: sum fewer rows (last = n)") idx) out
+(* a window's values for the rows: an int a row for a count or a place (Running(Count()), Rank: never missing, no
+   value made a row, nothing for the collector to move), values otherwise *)
+type column = Ints of int array | Values of Value.t array
+
+let cell col i = match col with Ints a -> Value.Int a.(i) | Values a -> a.(i)
+let missing col i = match col with Ints _ -> false | Values a -> Value.is_missing a.(i)
+
+let check_past (out : column array) idx =
+  Array.iter (function Ints _ -> () | Values w -> Array.iter (fun i -> if w.(i) == past then bad "Running's Sum passed the 63 bits of an Int: sum fewer rows (last = n)") idx) out
 
 (* Where the rows of a page start in their one group (After, Answer): the [skip] rows given first are the last of
    the rows before the page (as many as a frame or a Prev reaches back), whose values are not asked; [offset] rows of
@@ -122,7 +129,8 @@ type start = { skip : int; offset : int; init : init array }
 
 (* [compute ~view ~n ~groups ~part ~get ~tie ~typs windows]: each window's value for each of n rows given in Sort's
    order, [part i] the group of row i (0 to groups - 1), [get i c] column c of row i, [tie k i j] whether rows i and j
-   are equal in the first k keys of Sort. out.(w).(i), [past] where a running sum passed 63 bits (check_past). *)
+   are equal in the first k keys of Sort. A column a window (cell, missing), [past] where a running sum passed 63 bits
+   (check_past). *)
 let compute ?start ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> Value.t) ~(tie : int -> int -> int -> bool)
     ~(typs : int -> Value.typ) (windows : Wire.window array) =
   let off, rows = members n groups part in
@@ -138,15 +146,35 @@ let compute ?start ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> V
   in
   Array.mapi
     (fun wi (w : Wire.window) ->
+      match w with
+      | Running (Count, last) ->
+        let out = Array.make n 0 in
+        for g = 0 to groups - 1 do
+          for p = 0 to off.(g + 1) - off.(g) - 1 do
+            let a = offset + p + 1 in
+            out.(rows.(off.(g) + p)) <- (if last > 0 then min a last else a)
+          done
+        done;
+        Ints out
+      | Rank (k, dense) ->
+        let out = Array.make n 0 in
+        let tie = tie k in
+        for g = 0 to groups - 1 do
+          let rank = ref 0 and d = ref 0 in
+          for p = off.(g) to off.(g + 1) - 1 do
+            let i = rows.(p) in
+            let q = p - off.(g) in
+            (match init wi with
+             | I_rank (r0, d0) when q = skip -> rank := r0; d := d0
+             | _ -> if q = 0 || not (tie rows.(p - 1) i) then (rank := offset + q + 1; incr d));
+            out.(i) <- (if dense then !d else !rank)
+          done
+        done;
+        Ints out
+      | _ ->
       let out = Array.make n Value.missing in
       (match w with
-       | Running (Count, last) ->
-         for g = 0 to groups - 1 do
-           for p = 0 to off.(g + 1) - off.(g) - 1 do
-             let a = offset + p + 1 in
-             out.(rows.(off.(g) + p)) <- Int (if last > 0 then min a last else a)
-           done
-         done
+       | Running (Count, _) | Rank _ -> assert false
        | Running (((Sum c | Avg c) as a), last) ->
          let x = column c and tx = typs c in
          let mk = match tx with Tmoney _ -> fun s -> Value.Money s | Tdate -> fun s -> Value.Date s | _ -> fun s -> Value.Int s in
@@ -203,23 +231,10 @@ let compute ?start ~(view : Store.view) ~n ~groups ~part ~(get : int -> int -> V
            done
          done
        | Running (_, _) -> assert false
-       | Rank (k, dense) ->
-         let tie = tie k in
-         for g = 0 to groups - 1 do
-           let rank = ref 0 and d = ref 0 in
-           for p = off.(g) to off.(g + 1) - 1 do
-             let i = rows.(p) in
-             let q = p - off.(g) in
-             (match init wi with
-              | I_rank (r0, d0) when q = skip -> rank := r0; d := d0
-              | _ -> if q = 0 || not (tie rows.(p - 1) i) then (rank := offset + q + 1; incr d));
-             out.(i) <- Int (if dense then !d else !rank)
-           done
-         done
        | Prev (c, back) ->
          let x = column c in
          for g = 0 to groups - 1 do
            for p = off.(g) + back to off.(g + 1) - 1 do out.(rows.(p)) <- x.(rows.(p - back)) done
          done);
-      out)
+      Values out)
     windows

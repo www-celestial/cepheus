@@ -3,7 +3,11 @@
    its median and interval (Stats): Give of a join, the groups of Sum, Count, Min and Max (100 and 10,000), a sorted
    page, Not, Less, Optional.
 
-     abench.exe DIR *)
+     abench.exe DIR [PAGES]
+
+   PAGES: bench.exe load's data; then the questions of bench.exe pages that Less and Optional answer, as the server
+   answers them (Answer: the rows as index words, no value made, what the server codes onto the wire), beside
+   Cepheus.ask's (every row's values made in the program), and the join alone (a count, no row) *)
 
 open Cepheus
 open Cepheus_server
@@ -43,4 +47,29 @@ let () =
   measure "Optional: invoices of city-7 and their status" (fun () ->
       a ~extra:[ Ask.Optional { e = Var 0; p = status; v = Var 3 } ]
         { Query.vars = 4; where = [ { e = Var 1; p = city; v = Val (Text "city-7") }; { e = Var 0; p = client; v = Var 1 }; { e = Var 0; p = total; v = Var 2 } ]; ranges = [] } (Wire.Give [| 0; 3 |]));
-  close db
+  close db;
+  if Array.length Sys.argv > 2 then begin
+    let db = ok (open_ Sys.argv.(2)) in
+    let v = view db in
+    let p n = Option.get (property v n) in
+    let follows = p "client/follows" and name = p "client/name" and total = p "invoice/total" and mail = p "client/email" in
+    let fol = { Query.e = Var 0; p = follows; v = Var 1 } in
+    let x = match things v mail (Text "c7@example.com") with [ c ] -> c + 1 | _ -> failwith "email" in
+    let cases =
+      [ "the follow links to a newer client, Less(a, b)", { Question.vars = 2; items = [ Question.Pattern fol; Question.Less (0, 1) ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None };
+        "the invoices below one invoice's total, Less(t, tx)",
+        { Question.vars = 3; items = [ Question.Pattern { e = Thing x; p = total; v = Var 0 }; Question.Pattern { e = Var 1; p = total; v = Var 2 }; Question.Less (2, 0) ]; give = [| 1 |]; sort = []; limit = 0; after = None };
+        "every client with the clients each follows, Optional", { Question.vars = 3; items = [ Question.Pattern { e = Var 0; p = name; v = Var 2 }; Question.Optional fol ]; give = [| 0; 1 |]; sort = []; limit = 0; after = None } ]
+    in
+    List.iter
+      (fun (name, (q : Question.t)) ->
+        let where = List.filter_map (function Ask.Pattern p -> Some p | _ -> None) q.items in
+        let extra = List.filter (function Ask.Pattern _ -> false | _ -> true) q.items in
+        let base = { Query.vars = q.vars; where; ranges = [] } in
+        measure (name ^ ": its answer (words)") (fun () -> (Answer.answer ~extra v base (Wire.Give q.give)).n);
+        measure (name ^ ": its values (ask)") (fun () -> List.length (ok (ask v q)));
+        let t = Ask.compile v base extra in
+        measure (name ^ ": the join alone (a count)") (fun () -> Ask.fold v t ~init:(fun () -> 0) ~step:(fun n _ -> n + 1) ~merge:( + )))
+      cases;
+    close db
+  end
