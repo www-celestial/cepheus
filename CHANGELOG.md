@@ -14,9 +14,10 @@ stay as they are, or a later version reads and speaks both the old and the new.
   it is, the first merge writing 10) and in the recent changes, as PostgreSQL's index on `(client, date)`. "The 3
   latest invoices of each client" (`Each`, `Limit: 3`) reads 3 rows a client, a page of one client's invoices by date
   reads its page; the same rows as without it, which the questions read until every run holds the pair. At 245,000
-  invoices: the 3 latest of each client 30.4 ms (111 before, PostgreSQL's `LATERAL` 53.5), the last of each 13.0 ms
-  (`DISTINCT ON` 118), a client's page 13.1 µs (an index scan 99.0); a write of either property 0.5 to 0.9 µs more a
-  fact, of any other nothing; the run 1.9 MB larger (7.8 bytes a row), its open 7.0 to 8.5 ms, a merge 22 % longer. A
+  invoices: the 3 latest of each client 30.8 ms (131 before, PostgreSQL's `LATERAL` 52.3), the last of each 12.4 ms
+  (`DISTINCT ON` 115), a client's page 13.1 µs (an index scan 100); a write of either property 0.5 to 0.9 µs more a
+  fact, of any other nothing; the run 1.9 MB larger (7.8 bytes a row), its open 7.3 to 8.6 ms, a merge about 30 ms
+  longer (12 %). A
   database of format 9 opens and answers as before; a version before this one opens a database of format 10 by
   replaying its journal, and stops at a declared pair (it knows no property 9), nothing lost
   ([formats](docs/book/formats.md#run-dirsnapshotslo-20-digits-hi-20-digitsrun), [tutorial

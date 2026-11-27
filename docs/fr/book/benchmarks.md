@@ -120,7 +120,7 @@ HdrHistogram et wrk2.
 
 **Méthode.** Les données de rbench (`rbench.exe load` : 10 000 clients de 100 villes, 245 000 factures, 990 040 faits
 dans un seul run du bas, sur le SSD SATA). Quatre côtés à chacun des 21 tours, leur ordre tourné à chaque tour : les
-binaires de main (ec4bb86) sur la base telle que main l'écrit (format 9) ; les binaires de ce changement sur les mêmes
+binaires de main (e3a9b29) sur la base telle que main l'écrit (format 9) ; les binaires de ce changement sur les mêmes
 fichiers (le format 9 lu tel qu'il est : sans paire) ; les mêmes binaires sur une copie où `invoice/date` est déclarée
 `within` `invoice/client`, puis fusionnée (format 10, la paire lue) ; PostgreSQL 18.6 avec son B-tree sur `(client,
 date DESC, id)` (`pg.sh windows ROOT index`), son temps l'`Execution Time` d'`EXPLAIN (ANALYZE, TIMING OFF)` : le moteur
@@ -130,43 +130,46 @@ ordres tournés, les écritures (`wbench.exe writes` : 2 000 groupes sur un fork
 journal : le coût du moteur seul ; la médiane de 3 tours d'entre eux) et un merge du run et de 100 nouvelles factures en
 un seul (`wbench.exe merge`, sur une copie fraîche à chaque fois). Donnés : la médiane des médianes des 21 tours, entre
 crochets leur plus petite et leur plus grande ; un rapport, la médiane des rapports des tours [plus petit, plus grand],
-avec un test des signes bilatéral sur les tours où un côté était plus rapide. Une charge moyenne de 2,1 à 4,2 sur les
-8 threads (les builds et les tests d'autres jobs). Où le temps passe a été mesuré ensuite, par 200 échantillons de la
-pile d'un process sur un seul cœur sous gdb, toutes les 0,1 s.
+avec un test des signes bilatéral sur les tours où un côté était plus rapide. Mesuré à nouveau le 2026-11-27, une
+fois les lignes avec chaque valeur faite de main entrées dans ce changement : chaque côté épinglé sur deux cœurs
+physiques (4 CPU logiques par `taskset`, le serveur de PostgreSQL aussi), le benchmark d'un autre job sur les deux
+autres, une charge moyenne de 3,6 à 6,2 sur les 8 threads. Où le temps passe a été mesuré avant ce merge, par 200
+échantillons de la pile d'un process sur un seul cœur sous gdb, toutes les 0,1 s.
 
 | question | main | maintenant, la paire déclarée | PostgreSQL 18.6 | maintenant / main | maintenant |
 |---|---:|---:|---:|---:|---|
-| les 3 dernières factures de chaque client, `Each`, `Limit: 3`, 30 000 lignes | 111 ms [99,3, 194] | **30,4 ms** [25,0, 62,7] | `LATERAL` : 53,5 ms [50,2, 105] | 0,27 [0,18, 0,56] | Cepheus, 1,8 fois, plus rapide à 20 tours sur 21 (PostgreSQL 2,1 fois avant) |
-| la dernière facture de chaque client, `Limit: 1`, 10 000 lignes | 81,2 ms [66,7, 155] | **13,0 ms** [11,9, 25,8] | `DISTINCT ON` : 118 ms [110, 158] | 0,17 [0,09, 0,29] | Cepheus, 9,1 fois (1,5 avant) |
-| les 10 dernières factures du client qui en a le plus (44 factures), `Sort`, `Limit: 10` | 74,2 µs [69,9, 136] | **13,1 µs** [11,9, 27,9] | un index scan : 99,0 µs [96,0, 113] | 0,17 [0,10, 0,37] | Cepheus, 7,6 fois (1,3 avant) |
-| les 10 suivantes, `After` | 78,0 µs [72,0, 156] | **52,9 µs** [27,9, 64,1] | un keyset : 152 µs [144, 204] | 0,53 [0,35, 0,85] | Cepheus, 2,9 fois (1,9 avant) |
+| les 3 dernières factures de chaque client, `Each`, `Limit: 3`, 30 000 lignes | 131 ms [122, 258] | **30,8 ms** [26,8, 78,9] | `LATERAL` : 52,3 ms [49,9, 111] | 0,23 [0,13, 0,60] | Cepheus, 1,7 fois, plus rapide à 21 tours sur 21 (PostgreSQL 2,5 fois avant) |
+| la dernière facture de chaque client, `Limit: 1`, 10 000 lignes | 95,6 ms [90,9, 227] | **12,4 ms** [11,7, 31,3] | `DISTINCT ON` : 115 ms [109, 163] | 0,13 [0,09, 0,23] | Cepheus, 9,3 fois (1,2 avant) |
+| les 10 dernières factures du client qui en a le plus (44 factures), `Sort`, `Limit: 10` | 60,1 µs [56,0, 121] | **13,1 µs** [11,9, 27,2] | un index scan : 100 µs [94,0, 155] | 0,22 [0,11, 0,42] | Cepheus, 7,6 fois (1,7 avant) |
+| les 10 suivantes, `After` | 62,9 µs [57,9, 232] | **47,9 µs** [28,9, 79,2] | un keyset : 157 µs [141, 232] | 0,52 [0,15, 1,34] | Cepheus, 3,3 fois (2,5 avant) |
 
-Les tests des signes des quatre : p < 0,0001 contre main et contre PostgreSQL. Les mêmes binaires sur la base du
-format 9 (sans paire) ont donné les temps de main : 1,00, 1,02, 1,00 et 1,00 fois ceux de main (p 0,38 ou plus).
+Les tests des signes des quatre : p 0,0002 ou moins contre main (les 10 suivantes plus rapides à 19 tours sur 21, les
+autres à 21), p < 0,000001 contre PostgreSQL. Les mêmes binaires sur la base du format 9 (sans paire) ont donné les
+temps de main : 0,96, 1,00, 0,98 et 0,95 fois ceux de main (p 0,064 ou plus).
 
 | ce que coûte la paire | main | maintenant, format 9 | maintenant, la paire déclarée | la paire / main |
 |---|---:|---:|---:|---|
-| l'ouverture (le démarrage), son run lu et vérifié | 7,00 ms [6,43, 8,05] | 7,04 ms [6,32, 15,7] | 8,49 ms [7,10, 22,9] | 1,18 [1,00, 3,41], p 0,0002 |
-| la mémoire à son pic, les quatre questions | 124 MB [107, 146] | 128 MB [111, 142] | **92,8 MB** [86,6, 101] | 0,75 [0,62, 0,87] |
-| une écriture : une nouvelle facture (client, date, total, statut) | 6,2 µs [5,4, 6,8] | 6,1 µs [5,4, 8,9] | 7,1 µs [6,4, 8,2] | 1,14 [0,97, 1,53], p 0,00002 |
-| une écriture : la date d'une facture changée (une propriété de la paire) | 3,1 µs [2,8, 3,5] | 3,1 µs [2,8, 4,6] | 4,9 µs [4,5, 6,4] | 1,59 [1,36, 1,97], p 0,000001 |
-| une écriture : le total d'une facture changé (une propriété ordinaire) | 3,1 µs [2,8, 3,7] | 3,1 µs [2,8, 6,1] | 3,2 µs [2,9, 3,9] | 1,02 [0,83, 1,29], p 0,5 : le même |
-| le merge du run et de 100 nouvelles factures en un seul | 224 ms [182, 937] | 206 ms [183, 314] | 262 ms [222, 1 230] | 1,22 [0,34, 3,67], p 0,007 |
+| l'ouverture (le démarrage), son run lu et vérifié | 7,33 ms [7,09, 15,8] | 7,55 ms [6,92, 28,8] | 8,58 ms [7,63, 57,4] | 1,15 [0,54, 7,90], p 0,007 |
+| la mémoire à son pic, les quatre questions | 96,7 MB [84,9, 110] | 96,2 MB [84,1, 109] | **87,2 MB** [71,6, 96,2] | 0,91 [0,71, 1,06] |
+| une écriture : une nouvelle facture (client, date, total, statut) | 5,6 µs [5,0, 8,8] | 5,5 µs [4,8, 6,5] | 6,5 µs [5,5, 13,1] | 1,22 [0,66, 2,31], p 0,002 |
+| une écriture : la date d'une facture changée (une propriété de la paire) | 2,8 µs [2,7, 4,9] | 2,9 µs [2,7, 4,9] | 4,6 µs [4,2, 7,2] | 1,60 [1,01, 2,51], p 0,000001 |
+| une écriture : le total d'une facture changé (une propriété ordinaire) | 2,9 µs [2,7, 5,3] | 2,9 µs [2,6, 5,1] | 3,0 µs [2,7, 4,7] | 1,04 [0,56, 1,62], p 0,66 : le même |
+| le merge du run et de 100 nouvelles factures en un seul | 228 ms [178, 340] | 226 ms [173, 768] | 256 ms [220, 384] | 1,07 [0,67, 2,00], p 0,66 |
 | le fichier du run | 8,6 MB | 8,6 MB | 10,6 MB | 1,22 : la paire 1,9 MB, 7,8 octets par ligne |
 
-![Une ligne par question, sur une échelle logarithmique du nombre de fois qu'un côté est plus rapide, un point gris pour les binaires de main et un point en couleur pour maintenant, la paire déclarée, une flèche du premier au second. Les 3 dernières factures de chaque client passent du LATERAL de PostgreSQL 2,1 fois plus rapide à Cepheus 1,8 fois ; la dernière facture de chaque client de Cepheus 1,5 fois à 9,1 fois contre DISTINCT ON ; les 10 dernières du client qui en a le plus de 1,3 à 7,6 fois contre un index scan ; les 10 suivantes de 1,9 à 2,9 fois contre un keyset.](images/bench-pairs.svg)
+![Une ligne par question, sur une échelle logarithmique du nombre de fois qu'un côté est plus rapide, un point gris pour les binaires de main et un point en couleur pour maintenant, la paire déclarée, une flèche du premier au second. Les 3 dernières factures de chaque client passent du LATERAL de PostgreSQL 2,5 fois plus rapide à Cepheus 1,7 fois ; la dernière facture de chaque client de Cepheus 1,2 fois à 9,3 fois contre DISTINCT ON ; les 10 dernières du client qui en a le plus de 1,7 à 7,6 fois contre un index scan ; les 10 suivantes de 2,5 à 3,3 fois contre un keyset.](images/bench-pairs.svg)
 
 - **`Each` avec `Limit`, dans la paire.** Les 3 dernières factures de chaque client lisent 30 000 lignes de la paire
   (les 3 dernières de chaque groupe, et celles à égalité avec la troisième), puis posent la question avec la facture
-  l'une de ces 30 000 choses : les 245 000 factures ne sont plus lues. Où passent ses 30 ms maintenant (les
-  échantillons, sur un seul cœur, où elle prend 29,8 ms) : environ la moitié dans la question posée sur ces choses (un
+  l'une de ces 30 000 choses : les 245 000 factures ne sont plus lues. Où passent ses 30 ms (les échantillons, avant
+  le merge de main, sur un seul cœur, où elle prenait 29,8 ms) : environ la moitié dans la question posée sur ces choses (un
   quart dans le buffer de chaque groupe de `Each`, qui trouve le groupe par son client dans une table et garde ses
   lignes dans l'ordre ; un septième à lire les trois valeurs de chaque facture, `Store.value1`), un sixième dans le tri
   des 30 000 lignes par date (la réponse est dans l'ordre de `Sort`, la plus récente d'abord, quel que soit le client),
   un septième dans le collector (le ramasse-miettes : chaque ligne est un tableau), un vingtième à lire la paire. Le
   fold de la question seul sur 30 000 choses prend 2,0 ms sur les 8 cœurs : ce qui reste est le travail des lignes, le
   même que sans la paire, pour 30 000 lignes au lieu de 245 000. La conception attendait 15 à 25 ms ; la médiane est de
-  30,4 ms, la plus petite de 25,0.
+  30,8 ms, la plus petite de 26,8.
 - **Une page d'un client.** Les 10 dernières d'un client lisent les 10 dernières lignes de son groupe (une recherche
   dichotomique dans les valeurs des groupes, puis dans les lignes du groupe), et les 10 suivantes ses lignes depuis la
   date du curseur en descendant ; l'index scan et le keyset de PostgreSQL lisent les mêmes 10 lignes de son B-tree, et
@@ -174,15 +177,23 @@ format 9 (sans paire) ont donné les temps de main : 1,00, 1,02, 1,00 et 1,00 fo
 - **Ce que cela coûte.** Un run tient la paire en 1,9 MB (7,8 octets par ligne : des dates de 38 bits, des choses de 18,
   un frame of reference par bloc de 128 lignes), là où le B-tree de PostgreSQL sur `(client, date DESC, id)` prend
   9,95 MB à côté des 14,8 MB de sa table (`pg_relation_size`). L'ouverture lit et vérifie ces octets comme le reste du
-  run (0,8 ms par MB) : 7,0 à 8,5 ms, et une base du format 9 s'ouvre aussi vite qu'avant. Une écriture du client ou de
+  run (0,7 ms par MB) : 7,3 à 8,6 ms, et une base du format 9 s'ouvre aussi vite qu'avant. Une écriture du client ou de
   la date tient à jour les paires du delta : 0,5 µs par fait ajouté (une nouvelle facture, deux d'entre eux), 0,9 µs par
   fait d'une date changée (son ancienne valeur retirée, sa nouvelle ajoutée) ; une écriture de toute autre propriété,
   rien. Un merge trie les lignes de la paire (un tri par comptage par client, puis chaque groupe par date) et les
-  écrit : 56 ms de plus pour 245 000 lignes. La mémoire est plus basse avec la paire : les questions ne lisent plus les
-  pages de la date de chaque facture.
+  écrit : environ 30 ms de plus pour 245 000 lignes entre les médianes (256 ms contre 228 ; le rapport des tours 1,07,
+  dans leur bruit). La mémoire est plus basse avec la paire : les questions ne lisent plus les pages de la date de
+  chaque facture.
+- **Un crash que ces tours ont trouvé, dans main aussi.** Un premier passage de ces tours a perdu 2 de ses 63
+  exécutions des binaires de ce changement à l'ouverture, avec `Sys_error "Mutex.lock: Resource deadlock avoided"` :
+  le finaliser d'un run fermait son fichier par le disque réel, dont il pouvait trouver le lock de la table tenu par
+  son propre thread (un finaliser s'exécute à une allocation de ce que faisait le thread, trois domains lisant des
+  pages à côté), et les binaires de main ont le même code. Maintenant le finaliser ne fait que mettre le descripteur
+  sur une liste, et l'appel suivant du disque le ferme (`Disk.close_when_gone` ; un test unitaire échouait à chaque
+  fois avant, passe après) ; les tours ci-dessus ont tourné après la correction, aucun perdu.
 - **Là où PostgreSQL gagne encore.** Aucune de ces quatre questions. Il offre encore ce que Cepheus n'offre pas :
   autant d'index qu'on veut sur n'importe quelles colonnes d'une table, et des clés de trois colonnes ou plus, là où
-  Cepheus ordonne une propriété à l'intérieur d'une autre propriété au plus (`invoice/date` within `invoice/client`, pas
+  Cepheus ordonne une propriété à l'intérieur d'une autre propriété au plus, par choix (`invoice/date` within `invoice/client`, pas
   aussi within `invoice/zone`), donc un second ordre de la même propriété lit chaque facture comme avant ; et son index,
   fait par `CREATE INDEX`, sert dès sa première requête, là où un run écrit avant une déclaration ne tient aucune paire
   jusqu'à ce qu'un merge le réécrive (les questions lisent la jointure ordinaire jusque-là, avec les mêmes lignes).
@@ -413,7 +424,7 @@ n'en envoie aucune).
   quart du temps à lire la date de chaque facture, `Store.value1`). Seul un index de deux propriétés lirait aussi peu
   de lignes ; il est conçu, pas construit (il demande un nouveau format de run et une déclaration, des choix du
   propriétaire). Construit depuis : [un index de deux
-  propriétés](#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits), 30,4 ms contre 53,5 pour le `LATERAL`.
+  propriétés](#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits), 30,8 ms contre 52,3 pour le `LATERAL`.
 - **`Less` et `Optional` : des lignes faites depuis un seul buffer.** Un check de `Less` passait 58 % de son temps à
   faire les valeurs de ses lignes, la jointure 42 % ; les échantillons d'`Optional` sur chaque client, 44 % dans les
   minor collections (les collections du petit heap des valeurs jeunes), dont chacune arrête chaque domain du process.

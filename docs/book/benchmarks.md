@@ -98,7 +98,7 @@ wrk2 tools.
 
 **Method.** rbench's data (`rbench.exe load`: 10,000 clients of 100 cities, 245,000 invoices, 990,040 facts in one
 bottom run, on the SATA SSD). Four sides in each of 21 rounds, their order turned at each round: main's binaries
-(ec4bb86) on the database as main writes it (format 9); this change's binaries on the same files (format 9 read as it
+(e3a9b29) on the database as main writes it (format 9); this change's binaries on the same files (format 9 read as it
 is: no pair); the same binaries on a copy where `invoice/date` is declared `within` `invoice/client`, then merged
 (format 10, the pair read); PostgreSQL 18.6 with its B-tree on `(client, date DESC, id)` (`pg.sh windows ROOT index`),
 its time the `Execution Time` of `EXPLAIN (ANALYZE, TIMING OFF)`: the engine alone, as `Answer.answer` is Cepheus's
@@ -107,55 +107,66 @@ pairs`). Then, in the same rounds and in turned orders, the writes (`wbench.exe 
 database, resolved and applied, no journal: the engine's own cost; the median of 3 rounds of them) and a merge of the
 run and 100 new invoices into one (`wbench.exe merge`, on a fresh copy each time). Given: the median of the 21 rounds'
 medians, in brackets their least and largest; a ratio, the median of the rounds' ratios [least, largest], with a
-two-sided sign test on the rounds where a side was faster. A load average of 2.1 to 4.2 on the 8 threads (other jobs'
-builds and tests). Where the time goes was measured after, by 200 stack samples of one process on one core under gdb,
-every 0.1 s.
+two-sided sign test on the rounds where a side was faster. Measured again on 2026-11-27, once main's rows with every
+value made had come into this change: every side pinned to two physical cores (4 logical CPUs by `taskset`,
+PostgreSQL's server too), another job's benchmark on the other two, a load average of 3.6 to 6.2 on the 8 threads.
+Where the time goes was measured before that merge, by 200 stack samples of one process on one core under gdb, every
+0.1 s.
 
 | question | main | now, the pair declared | PostgreSQL 18.6 | now / main | now |
 |---|---:|---:|---:|---:|---|
-| the 3 latest invoices of each client, `Each`, `Limit: 3`, 30,000 rows | 111 ms [99.3, 194] | **30.4 ms** [25.0, 62.7] | `LATERAL`: 53.5 ms [50.2, 105] | 0.27 [0.18, 0.56] | Cepheus, 1.8 times, faster in 20 rounds of 21 (PostgreSQL 2.1 times before) |
-| the last invoice of each client, `Limit: 1`, 10,000 rows | 81.2 ms [66.7, 155] | **13.0 ms** [11.9, 25.8] | `DISTINCT ON`: 118 ms [110, 158] | 0.17 [0.09, 0.29] | Cepheus, 9.1 times (1.5 before) |
-| the 10 latest invoices of the busiest client (44 invoices), `Sort`, `Limit: 10` | 74.2 µs [69.9, 136] | **13.1 µs** [11.9, 27.9] | an index scan: 99.0 µs [96.0, 113] | 0.17 [0.10, 0.37] | Cepheus, 7.6 times (1.3 before) |
-| the 10 after them, `After` | 78.0 µs [72.0, 156] | **52.9 µs** [27.9, 64.1] | a keyset: 152 µs [144, 204] | 0.53 [0.35, 0.85] | Cepheus, 2.9 times (1.9 before) |
+| the 3 latest invoices of each client, `Each`, `Limit: 3`, 30,000 rows | 131 ms [122, 258] | **30.8 ms** [26.8, 78.9] | `LATERAL`: 52.3 ms [49.9, 111] | 0.23 [0.13, 0.60] | Cepheus, 1.7 times, faster in 21 rounds of 21 (PostgreSQL 2.5 times before) |
+| the last invoice of each client, `Limit: 1`, 10,000 rows | 95.6 ms [90.9, 227] | **12.4 ms** [11.7, 31.3] | `DISTINCT ON`: 115 ms [109, 163] | 0.13 [0.09, 0.23] | Cepheus, 9.3 times (1.2 before) |
+| the 10 latest invoices of the busiest client (44 invoices), `Sort`, `Limit: 10` | 60.1 µs [56.0, 121] | **13.1 µs** [11.9, 27.2] | an index scan: 100 µs [94.0, 155] | 0.22 [0.11, 0.42] | Cepheus, 7.6 times (1.7 before) |
+| the 10 after them, `After` | 62.9 µs [57.9, 232] | **47.9 µs** [28.9, 79.2] | a keyset: 157 µs [141, 232] | 0.52 [0.15, 1.34] | Cepheus, 3.3 times (2.5 before) |
 
-The sign tests of the four: p < 0.0001 against main and against PostgreSQL. The same binaries on the database of
-format 9 (no pair) gave main's times: 1.00, 1.02, 1.00 and 1.00 times main's (p 0.38 or more).
+The sign tests of the four: p 0.0002 or less against main (the 10 after them faster in 19 rounds of 21, the others in
+21), p < 0.000001 against PostgreSQL. The same binaries on the database of format 9 (no pair) gave main's times: 0.96,
+1.00, 0.98 and 0.95 times main's (p 0.064 or more).
 
 | what the pair costs | main | now, format 9 | now, the pair declared | the pair / main |
 |---|---:|---:|---:|---|
-| the open (start-up), its run read and checked | 7.00 ms [6.43, 8.05] | 7.04 ms [6.32, 15.7] | 8.49 ms [7.10, 22.9] | 1.18 [1.00, 3.41], p 0.0002 |
-| the memory at its peak, the four questions | 124 MB [107, 146] | 128 MB [111, 142] | **92.8 MB** [86.6, 101] | 0.75 [0.62, 0.87] |
-| a write: a new invoice (client, date, total, status) | 6.2 µs [5.4, 6.8] | 6.1 µs [5.4, 8.9] | 7.1 µs [6.4, 8.2] | 1.14 [0.97, 1.53], p 0.00002 |
-| a write: an invoice's date changed (a paired property) | 3.1 µs [2.8, 3.5] | 3.1 µs [2.8, 4.6] | 4.9 µs [4.5, 6.4] | 1.59 [1.36, 1.97], p 0.000001 |
-| a write: an invoice's total changed (a plain one) | 3.1 µs [2.8, 3.7] | 3.1 µs [2.8, 6.1] | 3.2 µs [2.9, 3.9] | 1.02 [0.83, 1.29], p 0.5: the same |
-| the merge of the run and 100 new invoices into one | 224 ms [182, 937] | 206 ms [183, 314] | 262 ms [222, 1,230] | 1.22 [0.34, 3.67], p 0.007 |
+| the open (start-up), its run read and checked | 7.33 ms [7.09, 15.8] | 7.55 ms [6.92, 28.8] | 8.58 ms [7.63, 57.4] | 1.15 [0.54, 7.90], p 0.007 |
+| the memory at its peak, the four questions | 96.7 MB [84.9, 110] | 96.2 MB [84.1, 109] | **87.2 MB** [71.6, 96.2] | 0.91 [0.71, 1.06] |
+| a write: a new invoice (client, date, total, status) | 5.6 µs [5.0, 8.8] | 5.5 µs [4.8, 6.5] | 6.5 µs [5.5, 13.1] | 1.22 [0.66, 2.31], p 0.002 |
+| a write: an invoice's date changed (a paired property) | 2.8 µs [2.7, 4.9] | 2.9 µs [2.7, 4.9] | 4.6 µs [4.2, 7.2] | 1.60 [1.01, 2.51], p 0.000001 |
+| a write: an invoice's total changed (a plain one) | 2.9 µs [2.7, 5.3] | 2.9 µs [2.6, 5.1] | 3.0 µs [2.7, 4.7] | 1.04 [0.56, 1.62], p 0.66: the same |
+| the merge of the run and 100 new invoices into one | 228 ms [178, 340] | 226 ms [173, 768] | 256 ms [220, 384] | 1.07 [0.67, 2.00], p 0.66 |
 | the run's file | 8.6 MB | 8.6 MB | 10.6 MB | 1.22: the pair 1.9 MB, 7.8 bytes a row |
 
-![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, the pair declared, an arrow from the first to the second. The 3 latest invoices of each client go from PostgreSQL's LATERAL 2.1 times faster to Cepheus 1.8 times; the last invoice of each client from Cepheus 1.5 times to 9.1 times against DISTINCT ON; the 10 latest of the busiest client from 1.3 to 7.6 times against an index scan; the 10 after them from 1.9 to 2.9 times against a keyset.](images/bench-pairs.svg)
+![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, the pair declared, an arrow from the first to the second. The 3 latest invoices of each client go from PostgreSQL's LATERAL 2.5 times faster to Cepheus 1.7 times; the last invoice of each client from Cepheus 1.2 times to 9.3 times against DISTINCT ON; the 10 latest of the busiest client from 1.7 to 7.6 times against an index scan; the 10 after them from 2.5 to 3.3 times against a keyset.](images/bench-pairs.svg)
 
 - **`Each` with `Limit`, off the pair.** The 3 latest invoices of each client read 30,000 rows of the pair (the last
   3 of each group, and those tied with the third), then ask the question with the invoice one of those 30,000 things:
-  the 245,000 invoices are no longer read. Where its 30 ms go now (the samples, on one core, where it takes 29.8 ms):
+  the 245,000 invoices are no longer read. Where its 30 ms go (the samples, before the merge of main, on one core,
+  where it took 29.8 ms):
   about half in the question asked on those things (a quarter in `Each`'s buffer of each group, which finds the group
   by its client in a table and keeps its rows in order; a seventh in reading each invoice's three values, `Store.value1`),
   a sixth in the sort of the 30,000 rows by date (the answer is in `Sort`'s order, the latest first, whoever the
   client), a seventh in the collector (each row an array), a twentieth in reading the pair. The fold of the question
   alone over 30,000 things takes 2.0 ms on the 8 cores: what remains is the rows' work, the same as without the pair,
-  for 30,000 rows in place of 245,000. The design expected 15 to 25 ms; the median is 30.4 ms, the least 25.0.
+  for 30,000 rows in place of 245,000. The design expected 15 to 25 ms; the median is 30.8 ms, the least 26.8.
 - **A page of one client.** The 10 latest of a client read its group's last 10 rows (a binary search of the groups'
   values, then of the group's rows), and the 10 after them its rows from the cursor's date down; PostgreSQL's
   index scan and keyset read the same 10 rows of its B-tree, and spend the difference in its executor's fixed costs.
 - **What it costs.** A run holds the pair in 1.9 MB (7.8 bytes a row: dates of 38 bits, things of 18, a frame of
   reference a block of 128 rows), where PostgreSQL's B-tree on `(client, date DESC, id)` takes 9.95 MB beside its
-  table's 14.8 MB (`pg_relation_size`). The open reads and checks those bytes as the rest of the run (0.8 ms a MB): 7.0
-  to 8.5 ms, and a database of format 9 opens as fast as before. A write of the client or the date keeps the delta's
+  table's 14.8 MB (`pg_relation_size`). The open reads and checks those bytes as the rest of the run (0.7 ms a MB): 7.3
+  to 8.6 ms, and a database of format 9 opens as fast as before. A write of the client or the date keeps the delta's
   pairs: 0.5 µs a fact added (a new invoice, two of them), 0.9 µs a fact of a date changed (its old value retracted,
   its new one added); a write of any other property, nothing. A merge sorts the pair's rows (a counting sort by client,
-  then each group by date) and writes them: 56 ms more for 245,000 rows. The memory is lower with the pair: the
-  questions no longer read the pages of every invoice's date.
+  then each group by date) and writes them: about 30 ms more for 245,000 rows between the medians (256 ms against
+  228; the rounds' ratio 1.07, within their noise). The memory is lower with the pair: the questions no longer read
+  the pages of every invoice's date.
+- **A crash these rounds found, in main too.** A first pass of these rounds lost 2 of its 63 runs of this change's
+  binaries at the open, with `Sys_error "Mutex.lock: Resource deadlock avoided"`: a run's finaliser closed its file
+  through the real disk, whose table lock it could find held by its own thread (a finaliser runs at an allocation of
+  whatever the thread was doing, three domains reading pages beside it), and main's binaries hold the same code. Now
+  the finaliser only puts the descriptor on a list, and the disk's next call closes it (`Disk.close_when_gone`; a unit
+  test failed every time before, passes after); the rounds above ran after the fix, none lost.
 - **Where PostgreSQL still wins.** None of these four questions. It still offers what Cepheus does not: any number of
   indexes on any columns of a table, and keys of three columns or more, where Cepheus orders a property within one
-  other property at most (`invoice/date` within `invoice/client`, not also within `invoice/zone`), so a second order
+  other property at most, by design (`invoice/date` within `invoice/client`, not also within `invoice/zone`), so a second order
   of the same property reads every invoice as before; and its index, made by `CREATE INDEX`, serves its first query,
   where a run written before a declaration holds no pair until a merge rewrites it (the questions read the plain join
   until then, with the same rows).
@@ -363,7 +374,7 @@ words made, not its values, as PostgreSQL's `EXPLAIN (ANALYZE, TIMING OFF)` make
   the 245,000 invoices once (the samples: a quarter of the time reading each invoice's date, `Store.value1`). Only an
   index of two properties would read as few rows; it is designed, not built (it needs a new run format and a
   declaration, the owner's calls). Built since: [an index of two
-  properties](#an-index-of-two-properties-2026-11-26-at-1-million-facts), 30.4 ms against `LATERAL`'s 53.5.
+  properties](#an-index-of-two-properties-2026-11-26-at-1-million-facts), 30.8 ms against `LATERAL`'s 52.3.
 - **`Less` and `Optional`: rows made from one buffer.** A `Less` check spent 58 % of its time making its rows'
   values, the join 42 %; the samples of `Optional` over every client, 44 % in minor collections, each of which stops
   every domain of the process. `Ask`'s bindings are now written into one buffer a domain, where each binding was a new
