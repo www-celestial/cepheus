@@ -123,6 +123,18 @@ cited on the [comparison](comparison.md) page.
 - **[Leis 2023]** V. Leis, A. Alhomssi, T. Ziegler, Y. Loeck, C. Dietrich. Virtual-Memory Assisted Buffer Management.
   *Proceedings of the ACM on Management of Data* 1(1), 1–25 (SIGMOD 2023). https://doi.org/10.1145/3588687
   — The database decides what to read and evict, even when the memory mapping is used as a page table.
+- **[Sivaramakrishnan 2020]** K. C. Sivaramakrishnan, S. Dolan, L. White, S. Jaffer, T. Kelly, A. Sahoo, S. Parimala,
+  A. Dhiman, A. Madhavapeddy. Retrofitting Parallelism onto OCaml. *Proceedings of the ACM on Programming Languages*
+  4 (ICFP), 1–30, 2020. https://doi.org/10.1145/3408995
+  — OCaml 5's collector: a minor heap a domain, where an allocation is a pointer bump, and minor collections that stop
+  every domain, each copying its live young blocks into the major heap (promotion). So the rows of a large answer
+  that are alive at a minor collection are copied once, a block each, and the fewer blocks a row has, the less it
+  costs; an answer made and dropped between two collections costs no copy.
+- **[Abadi 2007b]** D. J. Abadi, D. S. Myers, D. J. DeWitt, S. R. Madden. Materialization Strategies in a
+  Column-Oriented DBMS. *ICDE* 2007, 466–475. https://doi.org/10.1109/ICDE.2007.367892
+  — Late materialization: a column store carries positions through its operators and makes the tuples only at the
+  end. Cepheus's join carries index words, the server sends them so, and `Cepheus.ask` makes each row's values only
+  once its binding is an answer, from the binding.
 - **[Harizopoulos 2008]** S. Harizopoulos, D. J. Abadi, S. Madden, M. Stonebraker. OLTP Through the Looking Glass, and
   What We Found There. *SIGMOD* 2008, 981–992. https://doi.org/10.1145/1376616.1376713
   — In a classic engine, locking, latching, logging and the buffer manager take most of the time: Cepheus has one
@@ -421,6 +433,16 @@ cited on the [comparison](comparison.md) page.
 - **[Okasaki 1998]** C. Okasaki. Purely Functional Data Structures. Cambridge University Press, 1998.
   https://doi.org/10.1017/CBO9780511530104
   — Persistent balanced trees, the delta's maps.
+- **[Adelson-Velsky 1962]** G. M. Adelson-Velsky, E. M. Landis. An Algorithm for the Organization of Information.
+  *Soviet Mathematics Doklady* 3, 1259–1263, 1962.
+  — The AVL tree, whose two sides' heights differ by at most one; OCaml's `Map`, and the delta's maps of ints
+  (`Store.IM`), allow two. A tree of n sorted keys is built in O(n), a node a key, by taking the middle key as the
+  root of the trees of the two halves: a cascade's 10,000 things into the delta at once.
+- **[Blelloch 2016]** G. E. Blelloch, D. Ferizovic, Y. Sun. Just Join for Parallel Ordered Sets. *SPAA* 2016,
+  253–264. https://doi.org/10.1145/2935764.2935768
+  — Union, split and join of balanced trees, each in O(log n) or O(m log(n/m + 1)): what OCaml's `Map.union` does,
+  and why a map of n sorted keys built by unions of its halves costs O(n) steps but some 65 words a key in nodes
+  made and dropped, against 6 for one node a key.
 - **[Kemper 2011]** A. Kemper, T. Neumann. HyPer: A Hybrid OLTP&OLAP Main Memory Database System Based on Virtual
   Memory Snapshots. *ICDE* 2011, 195–206. https://doi.org/10.1109/ICDE.2011.5767867
   — A consistent snapshot by `fork()` of the process: the same need, met by persistence instead.

@@ -1,6 +1,7 @@
 (* The measures beside PostgreSQL and SQLite, drawn from the tables of the book itself (docs/book/benchmarks.md and
    docs/book/server.md), so that a figure says what its table says: bench-windows.svg, bench-pages.svg,
-   bench-server.svg, bench-backup.svg, bench-pg-won.svg. A table that no longer has the rows a figure names stops the program. *)
+   bench-server.svg, bench-backup.svg, bench-pg-won.svg, bench-rows.svg. A table that no longer has the rows a figure
+   names stops the program. *)
 
 open Draw
 
@@ -206,51 +207,38 @@ let backup docs =
              "Chaque ligne à sa propre échelle, la plus courte en gras. Tout l'historique rejoué est le même travail des deux côtés ; SQLite ne garde pas d'historique. Temps : docs/book/benchmarks.md.") in
       712, yb, tr l "Backup and restore beside PostgreSQL and SQLite: sizes and times at 10 million facts" "Sauvegarde et restauration à côté de PostgreSQL et SQLite : tailles et temps à 10 millions de faits")
 
-(* 5. the cases PostgreSQL still won: each question's ratio with main's binaries (a grey dot) and now (a coloured one),
-   on a log scale of PostgreSQL's time over Cepheus's *)
-let pg_won docs =
-  let rows = table (Filename.concat docs "book/benchmarks.md") "## The cases PostgreSQL still won" in
-  let want =
-    [ "Less(a, b)", "Less(a, b), every value", "Less(a, b), chaque valeur";
-      "the same as the server", "   as the server answers", "   comme le serveur répond";
-      "below one invoice's total", "Less, a range, every value", "Less, un intervalle, chaque valeur";
-      "the same as the server", "   as the server answers", "   comme le serveur répond";
-      "(`Optional`)", "Optional, every value", "Optional, chaque valeur";
-      "the same as the server", "   as the server answers", "   comme le serveur répond";
-      "`Rank()`, 1 group", "Rank(), 1 group", "Rank(), 1 groupe";
-      "the same, 100 groups", "Rank(), 100 groups", "Rank(), 100 groupes";
-      "the same, 10,000 groups", "Rank(), 10,000 groups", "Rank(), 10 000 groupes";
-      "the 3 latest", "Each, Limit: 3 (LATERAL)", "Each, Limit: 3 (LATERAL)";
-      "the last invoice", "Limit: 1 (DISTINCT ON)", "Limit: 1 (DISTINCT ON)";
-      "an invoice and its 10,000 lines", "cascade, 10,000 lines", "cascade, 10 000 lignes";
-      "an invoice and its 100 lines", "cascade, 100 lines", "cascade, 100 lignes" ]
-  in
-  if List.length rows <> List.length want then failwith "benchmarks.md, The cases PostgreSQL still won: the table's rows changed";
+(* each question's ratio with main's binaries (a grey dot) and now (a coloured one), on a log scale of PostgreSQL's time
+   over Cepheus's: the rows of the first table under [heading], [want] naming each (a text its first cell holds) and
+   its label in English and French; the cells of main, now and PostgreSQL at [cols]; [cx] the x of a ratio of 1, [k]
+   the width of a factor of 10, [right] the x of the ratios' column, [width] the figure's *)
+let dumbbell ?(cx = 598) ?(k = 219.) ?(right = 742) ?(width = 860) docs ~file ~heading ~want ~cols:(cm, cn, cp) ~ticks ~title ~note ~alt =
+  let rows = table (Filename.concat docs "book/benchmarks.md") heading in
+  let where = "benchmarks.md, " ^ String.sub heading 3 (String.length heading - 3) in
+  if List.length rows <> List.length want then failwith (where ^ ": the table's rows changed");
   let contains s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
   let data l =
     List.map2
       (fun r (key, en, fr) ->
-        if not (contains (List.hd r) key) then failwith ("benchmarks.md, The cases PostgreSQL still won: no row " ^ key);
-        tr l en fr, get (List.nth r 1), get (List.nth r 2), get (List.nth r 4))
+        if not (contains (List.hd r) key) then failwith (where ^ ": no row " ^ key);
+        tr l en fr, get (List.nth r cm), get (List.nth r cn), get (List.nth r cp))
       rows want
   in
-  both docs "bench-pg-won.svg" (fun l f ->
-      text f ~cls:"h" 16 22 (tr l "The cases PostgreSQL still won, at 1 million facts: main, then now" "Les cas que PostgreSQL gagnait encore, à 1 million de faits : main, puis maintenant");
+  both docs file (fun l f ->
+      text f ~cls:"h" 16 22 (title l);
       let top = 84 and rh = 24 in
-      let cx = 598 and k = 219. in
       let x r = cx + int_of_float (k *. log10 r) in
       let rs = data l in
       let bottom = top + (List.length rs * rh) in
       text f ~cls:"s sm" 380 (top - 30) ~anchor:"end" (tr l "main → now · PostgreSQL" "main → maintenant · PostgreSQL");
       text f ~cls:"a sm" (cx + 8) (top - 30) (tr l "Cepheus faster →" "Cepheus plus rapide →");
       text f ~cls:"sm" (cx - 8) (top - 30) ~anchor:"end" (tr l "← PostgreSQL faster" "← PostgreSQL plus rapide");
-      text f ~cls:"s sm" 742 (top - 30) (tr l "main → now" "main → maintenant");
+      text f ~cls:"s sm" right (top - 30) (tr l "main → now" "main → maintenant");
       List.iter
         (fun r ->
           let xr = x r in
           line f "grid" xr (top - 16) xr bottom;
           text f ~cls:"s sm" ~anchor:"middle" xr (top - 6) (nb l (if r < 1. then Printf.sprintf "%g×" (1. /. r) else Printf.sprintf "%g×" r)))
-        [ 0.125; 0.25; 0.5; 1.; 2.; 4. ];
+        ticks;
       line f "axis" cx (top - 16) cx bottom;
       let side r = if r >= 1.1 then "a" else if r <= 1. /. 1.1 then "s2" else "s" in
       let times r = Printf.sprintf "%.1f×" (if r >= 1. then r else 1. /. r) in
@@ -271,16 +259,58 @@ let pg_won docs =
           circle f "off" xm yc 4;
           circle f "bg" xn yc 7;
           circle f (match side rn with "a" -> "s1" | "s2" -> "s2" | _ -> "off") xn yc 5;
-          spans f ~cls:"sm" 742 (y + 15) [ side rm, nb l (times rm); "s", " → "; side rn ^ " h", nb l (times rn) ])
+          spans f ~cls:"sm" right (y + 15) [ side rm, nb l (times rm); "s", " → "; side rn ^ " h", nb l (times rn) ])
         rs;
-      let y = para f ~n:120 16 (bottom + 24)
-          (tr l "The grey dot is main's binaries (af9fb51), the coloured one now (d96aa73), on a log scale of PostgreSQL 18.6's time over Cepheus's: the median of 5 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. \"As the server answers\" makes each row's index words, not its values. Times: docs/book/benchmarks.md."
-             "Le point gris : les binaires de main (af9fb51) ; le point en couleur : maintenant (d96aa73) ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane de 5 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. « Comme le serveur répond » fait les mots d'index de chaque ligne, pas ses valeurs. Temps : docs/book/benchmarks.md.") in
-      860, y, tr l "The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question" "Les cas que PostgreSQL gagnait encore : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
+      let y = para f ~n:120 16 (bottom + 24) (note l) in
+      width, y, alt l)
+
+(* 5. the cases PostgreSQL still won *)
+let pg_won docs =
+  dumbbell docs ~file:"bench-pg-won.svg" ~heading:"## The cases PostgreSQL still won" ~cols:(1, 2, 4) ~ticks:[ 0.125; 0.25; 0.5; 1.; 2.; 4. ]
+    ~want:
+      [ "Less(a, b)", "Less(a, b), every value", "Less(a, b), chaque valeur";
+        "the same as the server", "   as the server answers", "   comme le serveur répond";
+        "below one invoice's total", "Less, a range, every value", "Less, un intervalle, chaque valeur";
+        "the same as the server", "   as the server answers", "   comme le serveur répond";
+        "(`Optional`)", "Optional, every value", "Optional, chaque valeur";
+        "the same as the server", "   as the server answers", "   comme le serveur répond";
+        "`Rank()`, 1 group", "Rank(), 1 group", "Rank(), 1 groupe";
+        "the same, 100 groups", "Rank(), 100 groups", "Rank(), 100 groupes";
+        "the same, 10,000 groups", "Rank(), 10,000 groups", "Rank(), 10 000 groupes";
+        "the 3 latest", "Each, Limit: 3 (LATERAL)", "Each, Limit: 3 (LATERAL)";
+        "the last invoice", "Limit: 1 (DISTINCT ON)", "Limit: 1 (DISTINCT ON)";
+        "an invoice and its 10,000 lines", "cascade, 10,000 lines", "cascade, 10 000 lignes";
+        "an invoice and its 100 lines", "cascade, 100 lines", "cascade, 100 lignes" ]
+    ~title:(fun l -> tr l "The cases PostgreSQL still won, at 1 million facts: main, then now" "Les cas que PostgreSQL gagnait encore, à 1 million de faits : main, puis maintenant")
+    ~note:(fun l ->
+      tr l "The grey dot is main's binaries (af9fb51), the coloured one now (d96aa73), on a log scale of PostgreSQL 18.6's time over Cepheus's: the median of 5 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. \"As the server answers\" makes each row's index words, not its values. Times: docs/book/benchmarks.md."
+        "Le point gris : les binaires de main (af9fb51) ; le point en couleur : maintenant (d96aa73) ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane de 5 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. « Comme le serveur répond » fait les mots d'index de chaque ligne, pas ses valeurs. Temps : docs/book/benchmarks.md.")
+    ~alt:(fun l -> tr l "The cases PostgreSQL still won: how many times faster each side was with main and is now, question by question" "Les cas que PostgreSQL gagnait encore : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
+
+(* 6. rows with every value made, and cascades: each question in the two scopes beside PostgreSQL *)
+let rows docs =
+  dumbbell ~cx:570 ~k:150. ~right:782 ~width:900 docs ~file:"bench-rows.svg" ~heading:"## Rows with every value made, and cascades"
+    ~cols:(1, 2, 4) ~ticks:[ 0.25; 0.5; 1.; 2.; 4.; 8.; 16. ]
+    ~want:
+      [ "newer client", "Less(a, b), every value", "Less(a, b), chaque valeur";
+        "the engine alone", "   the engine alone", "   le moteur seul";
+        "below one invoice's total", "Less, a range, every value", "Less, un intervalle, chaque valeur";
+        "the engine alone", "   the engine alone", "   le moteur seul";
+        "(`Optional`)", "Optional, every value", "Optional, chaque valeur";
+        "the engine alone", "   the engine alone", "   le moteur seul";
+        "10,000 lines", "cascade, 10,000 lines", "cascade, 10 000 lignes";
+        "100 lines", "cascade, 100 lines", "cascade, 100 lignes";
+        "10,000 notes", "clear, 10,000 notes", "clear, 10 000 notes" ]
+    ~title:(fun l -> tr l "Rows with every value made, and cascades, at 1 million facts: main, then now" "Les lignes avec chaque valeur faite, et les cascades, à 1 million de faits : main, puis maintenant")
+    ~note:(fun l ->
+      tr l "The grey dot is main's binaries (ec4bb86), the coloured one now, on a log scale of PostgreSQL 18.6's time over Cepheus's: the median of the rounds alternated on the same rows, Cepheus on 8 domains, PostgreSQL in one process. Every value: Cepheus.ask beside a program that receives PostgreSQL's rows through libpq; the engine alone: Cepheus's index words as its server answers, beside PostgreSQL's EXPLAIN ANALYZE; the cascades on a fork thrown away, PostgreSQL's rolled back. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. Times: docs/book/benchmarks.md."
+        "Le point gris : les binaires de main (ec4bb86) ; le point en couleur : maintenant ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane des tours alternés sur les mêmes lignes, Cepheus sur 8 domains, PostgreSQL dans un seul process. Chaque valeur : Cepheus.ask à côté d'un programme qui reçoit les lignes de PostgreSQL par libpq ; le moteur seul : les mots d'index de Cepheus comme son serveur répond, à côté de l'EXPLAIN ANALYZE de PostgreSQL ; les cascades sur un fork jeté, celles de PostgreSQL annulées. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. Temps : docs/book/benchmarks.md.")
+    ~alt:(fun l -> tr l "Rows with every value made, and cascades: how many times faster each side was with main and is now, in each scope" "Les lignes avec chaque valeur faite, et les cascades : combien de fois chaque côté était plus rapide avec main et l'est maintenant, dans chaque périmètre")
 
 let draw docs =
   windows docs;
   pages docs;
   server docs;
   backup docs;
-  pg_won docs
+  pg_won docs;
+  rows docs

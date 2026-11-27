@@ -96,7 +96,7 @@ La méthode suit Raasveldt et al. [Raasveldt 2018] pour l'équité, et Hoefler e
 | `abench.exe DIR [PAGES]`, `mbench.exe DIR` | les questions d'avant, pour un A/B de deux builds sur une même base, chaque fichier compilant contre le build d'avant le changement : `abench` un Give d'un join, des groupes, une page triée, `Not`, un range, `Optional` (les données de rbench), et avec `PAGES` (les données de bench.exe load) les questions de `bench.exe pages` auxquelles `Less` et `Optional` répondent, comme le serveur y répond (`Answer` : des mots de l'index, aucune valeur faite), comme `Cepheus.ask` les donne (les valeurs de chaque ligne) et le join seul (un compte) ; `mbench` de petites questions en boucle, le coût fixe d'un fold (un fold d'un seul fait, `Prefix`, Q3 compté, `Not`, `Optional`, une page triée, un find de chaque e-mail, le fold de Q4 ; les données de bench.exe) |
 | `kbench.exe load DIR N`, `run DIR`, `fork N`, `mixed DIR N`, `csv DIR OUT` | des pages d'un kind par les ids de ses choses : N items (un nom, un tenant, un int) dans un seul run ; une page de 51 par id croissant et décroissant, la première et celle après l'item du milieu, celles d'un tenant de même, chacune vérifiée contre les ids qu'elle doit donner ; sur un fork rempli en mémoire ; sur un fork dont le delta tient N choses d'un autre kind et un item renommé ; les items en CSV pour `pg.sh keyset` |
 | `wbench.exe run DIR` | les fenêtres (le protocole 10) sur les données de rbench : un total cumulé, une moyenne mobile de 3, un rang par total et la ligne d'avant, sur les 245 000 factures en un seul groupe, celui de chaque ville (100) et de chaque client (10 000) ; les 3 dernières factures de chaque client et la dernière (`Each` et `Limit`) ; les totaux mensuels à Paris avec leurs fenêtres (un rapport) ; une page de 51 avec son total cumulé, la première et celle après la 200 000e ligne, à côté des mêmes pages sans fenêtres ; `pg.sh windows ROOT index\|run` demande la même chose à PostgreSQL (`OVER`, `LATERAL`, `DISTINCT ON`), avec les index qu'un utilisateur fait pour elles |
-| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop ; `COUNTER=1` : chaque transaction incrémente une même ligne de compteur partagée), `ops ROOT` (les questions de `bench.exe pages` auxquelles répondent `Less` et `Optional`, avec un index sur `invoice (total)`), `keyset ROOT load\|run DIR` (les pages de kbench : `WHERE id > $1 ORDER BY id LIMIT 51` sur la clé primaire, celles d'un tenant sur `(tenant, id)`) |
+| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | le côté PostgreSQL, sur un cluster à lui (`ROOT/data`, port 5544) : `start ROOT MEM` plafonne la mémoire du serveur (`SHARED=32MB` fixe `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` workers parallèles par requête, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r` : open loop ; `COUNTER=1` : chaque transaction incrémente une même ligne de compteur partagée), `ops ROOT` (les questions de `bench.exe pages` auxquelles répondent `Less` et `Optional`, avec un index sur `invoice (total)`, dans trois périmètres : le moteur seul, chaque valeur sérialisée au serveur par le `SERIALIZE TEXT` d'`EXPLAIN`, chaque valeur reçue par un programme par libpq, la latence moyenne de pgbench), `keyset ROOT load\|run DIR` (les pages de kbench : `WHERE id > $1 ORDER BY id LIMIT 51` sur la clé primaire, celles d'un tenant sur `(tenant, id)`) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | le côté SQLite, un seul fichier `ROOT/bench.db` : `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | la sauvegarde et la restauration des trois côtés : `cepheus backup`, `verify`, `restore` jusqu'à la fin et jusqu'à un groupe ; `pg_basebackup`, `pg_verifybackup`, une restauration et une restauration à un instant donné ; `.backup`, `integrity_check` et `.restore` de SQLite ; tout l'historique rejoué (`-replay`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | la vente de places du [cas](case-seats.md) : `BUYERS` threads vendent toutes les places d'une salle de SEATS places ; le temps, et ce qui a mal tourné |
@@ -114,6 +114,167 @@ Difficult: Common Pitfalls in Database Performance Testing", DBTest 2018. [Hoefl
 Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of Computer and Communication Systems",
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
+
+## Les lignes avec chaque valeur faite, et les cascades (2026-11-26), à 1 million de faits
+
+**Méthode.** Les trois questions que PostgreSQL 18.6 gagnait encore dans [la section plus
+bas](#les-cas-que-postgresql-gagnait-encore-2026-11-26-à-1-million-de-faits) (un check `Less(a, b)` des liens de suivi
+et `Optional` sur chaque client, chacun avec chaque valeur faite, et une cascade de 10 000 lignes), avec à côté
+l'intervalle de `Less`, la cascade de 100 lignes et le `clear` de 10 000 notes, sur les mêmes données. Le temps de
+PostgreSQL dans cette section, `EXPLAIN (ANALYZE, TIMING OFF)`, exécute le plan et ne fait aucune sortie : chaque côté
+est donc maintenant mesuré dans les deux mêmes périmètres (le scope : ce que le temps compte). **Le moteur seul** : les
+mots d'index de Cepheus comme son serveur répond (`Answer.answer`) à côté de cet `EXPLAIN`. **Chaque valeur faite** :
+les lignes de valeurs de `Cepheus.ask` dans le programme qui demande, à côté d'un programme qui reçoit chacune des
+lignes de PostgreSQL par libpq (la bibliothèque client de PostgreSQL ; pgbench, un client, des prepared statements sur
+le socket Unix : libpq lit chaque ligne dans son résultat) ; entre les deux, `EXPLAIN` avec `SERIALIZE TEXT` (PostgreSQL
+17 et après : chaque valeur faite dans sa forme texte au serveur, aucune envoyée). `abench.exe DIR PAGES` et
+`dbench.exe delete` du côté de Cepheus, `pg.sh ops` et `pg.sh fk run` du côté de PostgreSQL. Cepheus sur 8 domains (son
+défaut, un par thread), PostgreSQL comme il planifie (un seul process pour chacune de ces questions : aucun worker
+parallèle). Trois côtés à chacun des 21 tours, leur ordre tourné à chaque tour : les binaires de main (ec4bb86), ceux du
+changement, PostgreSQL ; chacun une médiane de 11 exécutions (les questions de PostgreSQL : 3 exécutions de chaque
+périmètre ; les suppressions sur un fork jeté, celles de PostgreSQL dans une sous-transaction annulée). Donnés : la
+médiane des tours, entre crochets leur plus petit et leur plus grand ; maintenant sur main, la médiane des rapports des
+tours [plus petit, plus grand] et les tours où maintenant était plus rapide. Une charge moyenne de 2,0 à 4,0 sur les 8
+threads (les tests d'autres jobs). Cepheus compte 28 262 liens de suivi vers un client plus récent et PostgreSQL
+28 265 : les ids que le générateur donne à 3 clients ne sont pas dans l'ordre des ids de leurs choses. Où le temps
+passait a été mesuré d'abord, phase par phase (un programme de travail qui chronomètre chaque phase et compte les mots
+qu'elle alloue), par site d'allocation (le `Gc.Memprof` d'OCaml, qui échantillonne les allocations) et par des
+échantillons de la pile d'un process sous gdb.
+
+| question | main | maintenant | maintenant / main | PostgreSQL 18.6 | maintenant |
+|---|---:|---:|---:|---:|---|
+| les liens de suivi vers un client plus récent (`Less(a, b)`), 28 262 lignes, chaque valeur faite | 7,58 ms [6,36, 13,8] | **4,47 ms** [3,40, 7,22] | 0,60 [0,32, 0,94], 21/21 | 6,69 ms [6,15, 11,3] | Cepheus, 1,5 fois (PostgreSQL 1,1 avant) |
+| la même, le moteur seul (des mots de l'index ; `EXPLAIN ANALYZE`) | 3,62 ms [3,37, 8,76] | **2,24 ms** [2,04, 3,93] | 0,61 [0,26, 0,80], 21/21 | 3,68 ms [3,53, 6,10] | Cepheus, 1,6 fois (à peu près pareil avant) |
+| les factures sous le total d'une facture (`Less`), 122 962 lignes, chaque valeur faite | 21,9 ms [20,2, 36,3] | **18,2 ms** [17,1, 33,3] | 0,85 [0,56, 1,60], 20/21 | 28,7 ms [26,7, 36,5] | Cepheus, 1,6 fois (1,3 avant) |
+| la même, le moteur seul | 10,1 ms [9,06, 17,5] | **8,19 ms** [7,67, 16,0] | 0,84 [0,49, 1,32], 18/21 | 19,4 ms [18,4, 24,3] | Cepheus, 2,4 fois (1,9 avant) |
+| chaque client avec les clients qu'il suit (`Optional`), 56 797 lignes, chaque valeur faite | 15,7 ms [14,1, 31,6] | **8,82 ms** [8,02, 16,9] | 0,54 [0,26, 0,99], 21/21 | 17,5 ms [16,2, 20,5] | Cepheus, 2,0 fois (1,1 avant) |
+| la même, le moteur seul | 9,52 ms [8,83, 37,1] | **5,67 ms** [5,05, 9,80] | 0,59 [0,18, 1,03], 20/21 | 12,1 ms [11,5, 13,1] | Cepheus, 2,1 fois (1,3 avant) |
+| une facture et ses 10 000 lignes, `cascade` | 19,9 ms [19,2, 21,3] | 16,7 ms [15,6, 24,1] | 0,84 [0,78, 1,24], 18/21 | **4,92 ms** [4,57, 8,14] | PostgreSQL, 3,4 fois (4,0 avant) |
+| une facture et ses 100 lignes | 140 µs [132, 222] | **129 µs** [117, 197] | 0,93 [0,58, 1,38], 15/21 | 171 µs [120, 317] | Cepheus, 1,3 fois (1,2 avant) |
+| une facture et le lien de ses 10 000 notes, `clear` | 9,50 ms [8,65, 12,1] | **6,21 ms** [5,14, 7,84] | 0,64 [0,55, 0,81], 21/21 | 88,7 ms [74,0, 104] | Cepheus, 14 fois (9,3 avant) |
+
+Le `clear` de PostgreSQL a ralenti au fil des tours, de 74 à 104 ms par tour : chaque `SET NULL` annulé laisse 10 000
+versions mortes de lignes jusqu'à ce que l'autovacuum les prenne ; il prenait 46,5 ms dans [la section des
+suppressions](#les-suppressions-et-les-liens-qui-nomment-un-kind-2026-11-25).
+
+Les mêmes questions dans chaque périmètre, les médianes des tours ; Cepheus sur 8 domains, et entre crochets sur un seul
+domain épinglé à un cœur (`taskset -c 2`, `CEPHEUS_DOMAINS=1`, 11 tours de plus de main et maintenant alternés).
+PostgreSQL a exécuté chacune dans un seul process (ses plans : aucun worker parallèle).
+
+| question | PostgreSQL : le moteur seul | chaque valeur sérialisée | chaque valeur reçue (libpq) | Cepheus : le join seul (un compte) | les mots d'index (`Answer`) | chaque valeur (`Cepheus.ask`) |
+|---|---:|---:|---:|---:|---:|---:|
+| les liens de suivi vers un client plus récent (`Less(a, b)`) | 3,68 ms | 6,33 ms | 6,69 ms | 1,61 ms [4,61 ms] | 2,24 ms [5,07 ms] | 4,47 ms [8,44 ms] |
+| les factures sous le total d'une facture (`Less`) | 19,4 ms | 27,1 ms | 28,7 ms | 8,48 ms [18,1 ms] | 8,19 ms [19,1 ms] | 18,2 ms [33,9 ms] |
+| chaque client avec les clients qu'il suit (`Optional`) | 12,1 ms | 18,0 ms | 17,5 ms | 5,25 ms [4,93 ms] | 5,67 ms [6,26 ms] | 8,82 ms [10,4 ms] |
+
+![Une ligne par question, sur une échelle logarithmique de combien de fois un côté est plus rapide, un point gris pour les binaires de main et un point en couleur pour maintenant, une flèche du premier au second. Avec chaque valeur faite, le check de Less : Cepheus, 1,5 fois (PostgreSQL 1,1 avant) ; l'intervalle de Less : Cepheus, 1,6 fois (1,3 avant) ; Optional sur chaque client : Cepheus, 2,0 fois (1,1 avant). Le moteur seul : Cepheus, 1,6 fois (à peu près pareil avant), Cepheus, 2,4 fois (1,9 avant) et Cepheus, 2,1 fois (1,3 avant). Une cascade de 100 lignes : Cepheus, 1,3 fois (1,2 avant) ; un clear de 10 000 notes : Cepheus, 14 fois (9,3 avant) ; une cascade de 10 000 lignes : PostgreSQL, 3,4 fois (4,0 avant).](images/bench-rows.svg)
+
+- **`Less` et `Optional` : où le temps passait.** Sur main, le check de `Less` prenait 2,6 à 3,0 ms pour son join, 3,5
+  avec ses mots d'index et 6,8 à 7,8 avec chaque valeur, dont 1,2 dans les minor collections du domain qui demande (les
+  collectes du jeune tas, le minor heap, où chaque domain alloue). Le join faisait environ un million de mots de déchets
+  par appel : à chaque binding de son premier niveau, les bornes de `Less` en closures et en références (18 mots), les
+  closures des candidats du niveau suivant (environ 30), le compte d'une slice rendu en tuple dans une option, et la
+  closure d'`Ask` qui garde un binding (4 mots par binding) ; et chaque binding du premier niveau cherchait trois fois
+  dans l'index des valeurs, pour compter sa slice, pour compter ses choses et pour les lire. Une ligne de valeurs
+  coûtait deux cellules de liste, un `Array.make` (un appel au runtime en C) et une closure (une application partielle).
+  `Optional` sur chaque client faisait une liste des valeurs de chaque client, la renversait, et copiait chaque ligne
+  hors du buffer. Les minor collections d'OCaml 5 arrêtent chaque domain et copient chaque jeune bloc encore vivant dans
+  le major heap ([Sivaramakrishnan 2020](references.md#la-gestion-des-buffers-et-le-cache)) : chaque ligne d'une réponse
+  est vivante, donc chaque bloc d'une ligne est copié une fois.
+- **Ce qui a changé, chaque point mesuré seul** (21 tours alternés avec le build d'avant lui ; la médiane des rapports
+  des tours, et un sign test bilatéral sur les tours ; chacun gardé parce qu'il gagnait et ne coûtait rien ailleurs) :
+  1. Les lignes d'`Optional` écrites l'une après l'autre dans le buffer partagé du fold, sans liste des valeurs d'une
+     chose ni copie par ligne, et les `Not` vérifiés sans closure par binding : le join d'`Optional` 0,55, ses mots
+     d'index 0,79, ses valeurs 0,81 (p < 0,001).
+  2. Les lignes de `Cepheus.ask` rassemblées par chaque domain en morceaux d'au plus 256, un bloc du minor heap chacun,
+     et mises en liste une seule fois à la fin depuis la dernière ligne (une cellule de liste par ligne) ; une ligne
+     d'au plus 4 colonnes faite comme un littéral de tableau, dans le minor heap sans appel en C ; aucune application
+     partielle : les valeurs du check 0,87 (p 0,027), celles d'`Optional` 0,70 (p 0,0002).
+  3. Les lignes d'`Optional` du serveur poussées en mots, cellule par cellule, un mot ou 0 et le masque après eux,
+     sans tableau par ligne : les mots d'index d'`Optional` 0,80 (p 0,0002).
+  4. Les bornes de `Less` lues dans des tableaux faits une fois par question qui en a, sans closure à chaque binding ;
+     le compte d'une slice sans tuple ni option ; les candidats d'un niveau lus directement dans les lignes du run que
+     son compte a trouvées, sans deuxième ni troisième recherche : le join du check 0,83 (p 0,0015), ses valeurs 0,91
+     (p 0,027).
+  5. Les valeurs que prend une propriété lues dans les mots de rang de son index des valeurs, un bit par valeur et
+     aucune ligne décodée, là où chaque ligne par valeur était lue et les doublons sautés (le premier niveau du check :
+     les clients qui suivent quelqu'un) : le join 0,60, les mots d'index 0,72, les valeurs 0,81 (plus rapide dans 18 à
+     21 des 21 tours).
+
+  C'est la late materialization, la matérialisation tardive
+  ([Abadi 2007b](references.md#la-gestion-des-buffers-et-le-cache)) : le join porte des mots d'index, le serveur les
+  envoie ainsi, et les valeurs d'une ligne ne sont faites qu'une fois son binding devenu une réponse. `Cepheus.ask` et
+  l'API de Cesia donnent les mêmes types et les mêmes valeurs dans le même ordre : un test compare les lignes de grandes
+  réponses, avec des `Optional` nombreux et manquants, sur un seul domain et découpées sur quatre, avec les lignes
+  d'avant.
+- **Là où PostgreSQL gagne encore sur ces questions.** Sur un seul cœur, sans domain avec qui partager le travail : le
+  check de `Less`, auquel PostgreSQL répond par un seul parcours séquentiel d'une table de deux colonnes avec un filtre,
+  reste à PostgreSQL, 8,44 ms avec chaque valeur contre 6,69 par libpq (1,3 fois) et 5,07 ms pour les mots d'index
+  contre 3,68 pour son moteur (1,4 fois) : le join de Cepheus parcourt les liens par valeur, un niveau par variable,
+  environ 80 ns par lien (4,61 ms pour le join seul) contre 65 ns par ligne du parcours de PostgreSQL. L'intervalle de
+  `Less` avec chaque valeur aussi, 33,9 ms contre 28,7 (1,2 fois ; son moteur seul pareil, 19,1 contre 19,4). `Optional`
+  reste à Cepheus sur un seul cœur (10,4 ms contre 17,5, 6,26 contre 12,1). Les valeurs d'une ligne sont des blocs OCaml
+  qu'une minor collection copie quand elle les trouve vivants (9 mots par ligne de deux colonnes) : une question de
+  227 260 lignes (chaque facture et son statut) prend 62,7 ms avec chaque valeur contre 20,8 pour son join, 2,07
+  millions de mots promus ; les lignes de PostgreSQL vont au socket en octets, jamais dans un tas que le GC parcourt. Et
+  `Cepheus.ask` répond dans le programme qui demande, sans socket : un programme qui demande au serveur de Cepheus
+  reçoit des mots d'index et paie ses propres valeurs.
+- **Une cascade : les maps d'ints construites en une passe.** Sur un seul domain, la cascade de 10 000 lignes de main
+  prenait 24 ms : la lecture des faits des lignes 1,6, `Store.set_sorted` 13 (2,2 millions de mots alloués, 0,6 million
+  promus, 6 ms de collectes), le reste environ 10 (la liste des changements du groupe, les vérifications) ; les
+  collectes faisaient la moitié du tout (3,3 millions de mots alloués, 1 million promus, 1,7 à 1,9 cycles majeurs par
+  appel). Les maps d'ints du delta (par chose, les choses d'une valeur, les comptes d'une chose) étaient construites à
+  partir de leurs liaisons triées par des unions de moitiés
+  ([Blelloch 2016](references.md#les-structures-persistantes-et-les-forks) : chaque union en O(m log(n/m + 1)) pas, mais
+  environ 65 mots par liaison en nœuds faits et jetés). Elles sont maintenant `Store.IM`, les arbres AVL (des arbres
+  binaires équilibrés par la hauteur) du `Map` de la Stdlib
+  ([Adelson-Velsky 1962](references.md#les-structures-persistantes-et-les-forks)) écrits en clair avec une fonction de
+  plus, `of_sorted` : la liaison du milieu la racine des arbres des deux moitiés, en O(n), un nœud de 6 mots par
+  liaison. Les changements d'un groupe et leurs mots vont dans deux tableaux qui grandissent, à partir de 4, là où deux
+  listes étaient renversées à la fin. Une cascade de 10 000 lignes alloue 2,12 millions de mots là où elle en allouait
+  3,27. Sur 21 tours alternés avec le build d'avant : une cascade de 10 000 lignes 0,83 (plus rapide dans 20 des 21
+  tours, p < 0,0001), de 100 lignes 0,81, un `clear` de 100 notes 0,66 et de 10 000 0,68, un `Retract` des faits des
+  10 000 lignes 0,92 ; un `Delete` refusé d'emblée, chronométré seul par `dbench` (une horloge de 1 µs, chaque appel
+  après un print), de 6,0 à 6,9 µs dans les tours du tableau (plus lent dans 17 à 18 des 21) ; chronométré 20 000 fois
+  de suite sur un seul cœur, le même travail : refusé sans ligne de 7,30 à 7,19 µs, avec 100 lignes de 7,88 à 7,96, une
+  cascade et un clear de rien 0,99 et 1,00 fois ceux de main (8 tours). Un appel seul et à froid est plus lent d'environ
+  0,5 µs ; sa cause n'a pas été trouvée.
+
+  Rien ne change sur le disque : les octets du journal sont les mêmes, seule la construction des maps du delta en
+  mémoire a changé. Chaque menace a un test : les maps contre le `Map` de la Stdlib (300 tours d'opérations au hasard,
+  les arbres restés équilibrés) ; une cascade rejouée depuis ses changements comme un redémarrage, une réplique et un
+  follower de Raft l'appliquent (`Resolve.replay`), avec les mêmes faits ; une coupure de courant à chaque appel disque
+  du commit d'une cascade de 600 lignes, dans le journal et dans un run fusionné : la base s'ouvre comme avant ou comme
+  après, rien entre les deux ; la cascade en course avec des écritures des mêmes choses dans un seul batch du writer,
+  dans les 6 ordres : l'état des groupes l'un après l'autre, aucune ligne liée à une facture supprimée ; les watches
+  qui voient des cascades dans la simulation live (les lignes de chaque watch contre la question répondue de nouveau).
+
+  **Là où PostgreSQL gagne encore** : une cascade de 10 000 lignes, 3,4 fois plus rapide. Il marque la version de chaque
+  ligne supprimée (`xmax`) et ne touche aucun index avant `VACUUM`, environ 0,5 µs par ligne ; Cepheus écrit chaque
+  retrait dans les maps de son delta par chose et par valeur tout de suite, environ 0,8 µs par fait (2 faits par ligne),
+  pour que la question suivante les lise sans vacuum et qu'aucun index ne garde une ligne morte : le compromis du
+  design, gardé. Ce que PostgreSQL laisse pour plus tard, sur une copie neuve de son cluster (son cache froid, 5
+  exécutions) : après le `DELETE` de la facture et de ses 10 000 lignes validé (26,6 ms là), le `VACUUM` de la table des
+  lignes prend 30,2 ms et celui des factures 5,8 ; les retraits de Cepheus rejoignent ses runs au merge suivant, comme
+  chaque écriture.
+
+**Pas de ralentissement ailleurs** (les binaires de main et maintenant alternés à chaque tour sur les mêmes bases,
+chaque process dans un scope de 3 Go ; la médiane des rapports des tours, maintenant sur main, et un sign test bilatéral
+sur les tours). Sur 8 domains, 11 tours (une charge de 2,0 à 4,8) : la mémoire à son pic 1,01 et 1,02 fois celle de
+main ; le démarrage 0,97 (plus rapide dans 11 des 11 tours) ; les pages de `kbench` 0,97 à 1,01 ; les rapports de
+`rbench` 0,95 à 1,03, aucun plus lent dans plus de tours que le hasard n'en donne (p 0,23 ou plus) ; `bench.exe read`
+0,92 à 1,01 ; une écriture de groupes simples 0,94 ; les fenêtres de `wbench` 0,98 à 1,05 (la dernière facture de chaque
+client 1,05, plus lente dans 8 des 11 tours, p 0,23) et ses pages de 51 0,64 à 0,67 (plus rapides : leurs niveaux lisent
+des slices comme les joins plus haut ; quel changement le donne n'a pas été mesuré seul) ; les autres questions
+d'`abench`, dans les tours du tableau, 0,84 à 1,01 ; les petites questions de `mbench` 0,51 à 1,04 (`Optional` d'une
+ville 0,51). Sur un seul domain épinglé à un cœur (`taskset -c 2`, `CEPHEUS_DOMAINS=1`), 11 tours (une charge de 1,2 à
+4,5) : les rapports 0,95 à 1,04 (p 0,23 ou plus pour ceux au-dessus de 1), `bench.exe read` 0,95 à 1,00, `mbench` 0,46 à
+1,04. Un cas a bougé dans le même sens dans les deux : le point fold de `mbench` (un fold qui lit un seul fait, le nom
+d'un client, 1,9 µs), 1,04, plus lent dans 17 des 22 tours (p 0,017) : `Query.fold` faisait les tableaux des bornes de
+`Less` pour chaque question, trois petits tableaux et leurs closures. Ils ne sont maintenant faits que pour une question
+avec `Less`, la seule qui les lit : sur 21 tours de main, d'avant et de maintenant sur un seul cœur épinglé, sous une
+charge de 1,4 à 6,1, les médianes du point fold étaient 1,96 µs, 2,03 et 1,97 ; maintenant sur avant 0,97 (plus rapide
+dans 15 des 21 tours, p 0,041), maintenant sur main 1,00 (p 1,0).
 
 ## Les cas que PostgreSQL gagnait encore (2026-11-26), à 1 million de faits
 
@@ -190,7 +351,9 @@ n'en envoie aucune).
   rapide que PostgreSQL sur le check, et plus rapide sur l'intervalle et `Optional`. **Là où PostgreSQL gagne
   encore** : quand un programme demande chaque valeur, Cepheus fait 28 250 ou 56 797 lignes de valeurs OCaml, chacune
   une allocation que le GC parcourt ensuite ; l'executor de PostgreSQL passe des tuples qui pointent dans ses buffers,
-  et son temps laisse de côté ce que son client paie pour les recevoir.
+  et son temps laisse de côté ce que son client paie pour les recevoir. Mesuré depuis dans le même périmètre des deux
+  côtés, et rendu moins coûteux : [les lignes avec chaque valeur
+  faite](#les-lignes-avec-chaque-valeur-faite-et-les-cascades-2026-11-26-à-1-million-de-faits).
 - **Les retraits d'une cascade ensemble.** Les faits des 10 000 lignes étaient retirés un fait après l'autre, chacun un
   parcours des maps persistantes du writer par chose et par valeur. Ils sont maintenant rassemblés, lus dans la vue
   d'avant qu'aucun ne parte, et retirés ensemble par un seul `Store.set_sorted`, comme un groupe de `Retract` l'est
@@ -201,7 +364,8 @@ n'en envoie aucune).
   20 000 faits (21,8 contre 20,4 ms). **Là où PostgreSQL gagne encore** : il supprime une ligne en marquant sa version
   (`xmax`), sans toucher aucun index avant `VACUUM`, 0,5 µs par ligne ; Cepheus écrit chaque retrait dans les maps de
   son delta par chose et par valeur à la fois, environ 1 µs par fait, si bien que la question suivante les lit sans
-  vacuum.
+  vacuum. Ses maps construites depuis en une passe : [les
+  cascades](#les-lignes-avec-chaque-valeur-faite-et-les-cascades-2026-11-26-à-1-million-de-faits).
 
 **Pas de ralentissement ailleurs** (`abench`, `kbench`, `mbench`, `rbench`, `bench.exe read`, les écritures, la
 mémoire, le démarrage ; les binaires de main et ceux du changement alternés à chaque tour sur les mêmes bases) : en 5

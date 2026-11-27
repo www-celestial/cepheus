@@ -139,6 +139,19 @@ Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparis
 - **[Leis 2023]** V. Leis, A. Alhomssi, T. Ziegler, Y. Loeck, C. Dietrich. Virtual-Memory Assisted Buffer Management.
   *Proceedings of the ACM on Management of Data* 1(1), 1–25 (SIGMOD 2023). https://doi.org/10.1145/3588687
   — La base décide quoi lire et quoi évincer, même quand le mapping de la mémoire sert de table des pages.
+- **[Sivaramakrishnan 2020]** K. C. Sivaramakrishnan, S. Dolan, L. White, S. Jaffer, T. Kelly, A. Sahoo, S. Parimala,
+  A. Dhiman, A. Madhavapeddy. Retrofitting Parallelism onto OCaml. *Proceedings of the ACM on Programming Languages*
+  4 (ICFP), 1–30, 2020. https://doi.org/10.1145/3408995
+  — Le collector (le ramasse-miettes) d'OCaml 5 : un minor heap (le tas des jeunes objets) par domain, où une
+  allocation avance un pointeur, et des minor collections qui arrêtent tous les domains, chacun copiant ses blocs
+  jeunes encore vivants dans le major heap (la promotion). Les lignes d'une grande réponse vivantes à une minor
+  collection sont donc copiées une fois, un bloc à la fois, et moins une ligne a de blocs, moins elle coûte ; une
+  réponse faite et jetée entre deux collections ne coûte aucune copie.
+- **[Abadi 2007b]** D. J. Abadi, D. S. Myers, D. J. DeWitt, S. R. Madden. Materialization Strategies in a
+  Column-Oriented DBMS. *ICDE* 2007, 466–475. https://doi.org/10.1109/ICDE.2007.367892
+  — La late materialization (les tuples faits tard) : un column store porte des positions à travers ses opérateurs et
+  ne fait les tuples qu'à la fin. La jointure de Cepheus porte des mots d'index, le serveur les envoie tels quels, et
+  `Cepheus.ask` ne fait les valeurs d'une ligne qu'une fois son binding devenu une réponse, à partir du binding.
 - **[Harizopoulos 2008]** S. Harizopoulos, D. J. Abadi, S. Madden, M. Stonebraker. OLTP Through the Looking Glass, and
   What We Found There. *SIGMOD* 2008, 981–992. https://doi.org/10.1145/1376616.1376713
   — Dans un moteur classique, le locking, le latching, le logging et le buffer manager prennent la plus grande partie
@@ -461,6 +474,17 @@ Neo4j, FoundationDB, CockroachDB) est citée dans la page [comparaison](comparis
 - **[Okasaki 1998]** C. Okasaki. Purely Functional Data Structures. Cambridge University Press, 1998.
   https://doi.org/10.1017/CBO9780511530104
   — Les arbres équilibrés persistants, les maps du delta.
+- **[Adelson-Velsky 1962]** G. M. Adelson-Velsky, E. M. Landis. An Algorithm for the Organization of Information.
+  *Soviet Mathematics Doklady* 3, 1259–1263, 1962.
+  — L'arbre AVL, dont les hauteurs des deux côtés diffèrent d'au plus un ; le `Map` d'OCaml, et les maps d'entiers
+  du delta (`Store.IM`), en admettent deux. Un arbre de n clés triées se construit en O(n), un nœud par clé, en
+  prenant la clé du milieu comme racine des arbres des deux moitiés : les 10 000 choses d'une cascade d'un coup dans
+  le delta.
+- **[Blelloch 2016]** G. E. Blelloch, D. Ferizovic, Y. Sun. Just Join for Parallel Ordered Sets. *SPAA* 2016,
+  253–264. https://doi.org/10.1145/2935764.2935768
+  — L'union, la coupe (split) et le recollement (join) d'arbres équilibrés, chacun en O(log n) ou O(m log(n/m + 1)) :
+  ce que fait `Map.union` d'OCaml, et pourquoi une map de n clés triées construite par unions de ses moitiés coûte
+  O(n) étapes mais quelque 65 mots par clé en nœuds faits puis jetés, contre 6 pour un nœud par clé.
 - **[Kemper 2011]** A. Kemper, T. Neumann. HyPer: A Hybrid OLTP&OLAP Main Memory Database System Based on Virtual
   Memory Snapshots. *ICDE* 2011, 195–206. https://doi.org/10.1109/ICDE.2011.5767867
   — Un snapshot cohérent par un `fork()` du processus : le même besoin, satisfait plutôt par la persistance.
