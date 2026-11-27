@@ -36,11 +36,19 @@ CEPHEUS_TOKEN=$($B token add docs $rights --config "$cfg" 2>/dev/null)
 CEPHEUS_OWL_KINDS=$($B token add owlkinds --database "owl=read:person;add:person" --config "$cfg" 2>/dev/null)
 export CEPHEUS_TOKEN CEPHEUS_OWL_KINDS
 # the server in a session of its own, its output in a log: it never holds the pipes of the script's caller; stopped
-# when the script ends, whatever ends it
+# when the script ends, whatever ends it. Started when its log has one more ready line than before (the log is
+# appended to: a restart's server writes the second) and its socket is there: its databases open in about a second on
+# an idle machine and several on a loaded one, so the wait is bounded at 120 s, and a server that exits ends it at once
 serve() {
+  : >> "$tmp/serve.log"
+  r=$(grep -c ready "$tmp/serve.log" || true)
   setsid $B serve --config "$cfg" < /dev/null >> "$tmp/serve.log" 2>&1 &
   echo $! > "$tmp/pid"
-  for _ in $(seq 100); do [ -S "$tmp/s/r/.s.cepheus.$port" ] && grep -q ready "$tmp/serve.log" && return 0; sleep 0.05; done
+  for _ in $(seq 2400); do
+    [ "$(grep -c ready "$tmp/serve.log")" -gt "$r" ] && [ -S "$tmp/s/r/.s.cepheus.$port" ] && return 0
+    kill -0 "$(cat "$tmp/pid")" 2>/dev/null || break
+    sleep 0.05
+  done
   echo "the server did not start:"; cat "$tmp/serve.log"; exit 1
 }
 prog=""
