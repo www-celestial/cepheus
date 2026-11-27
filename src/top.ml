@@ -391,33 +391,37 @@ let sort_flat ?(masked = false) v (typs : Value.typ array) (ord : key array) (a 
   if m0 = 0 || n < max 2 !flat_min then by_cmp ()
   else begin
     let col = Array.init m0 (fun j -> ord.(j).col) and desc = Array.init m0 (fun j -> ord.(j).desc) in
-    let lo = Array.make m0 max_int and hi = Array.make m0 min_int and gone = Array.make m0 false in
-    for i = 0 to n - 1 do
-      let o = i * w in
-      for j = 0 to m0 - 1 do
-        let c = Array.unsafe_get col j in
-        if miss o c then Array.unsafe_set gone j true
-        else begin
-          let x = Array.unsafe_get a (o + c) in
-          if x < Array.unsafe_get lo j then Array.unsafe_set lo j x;
-          if x > Array.unsafe_get hi j then Array.unsafe_set hi j x
-        end
-      done
+    let lo = Array.make m0 max_int and hi = Array.make m0 min_int in
+    let halved = Array.make m0 false and width = Array.make m0 0 and take = Array.make m0 0 in
+    (* the key's columns one at a time, each one's range read in a pass of its own, while the key has room left beside
+       the row's number: a column missing in some row ends the key. The room: up to the last radix pass the first
+       column needs (11 bits a pass, with the row's number), so that a second column fills that pass and adds none
+       (a date of 38 bits and 15 of numbers: 53 bits, 5 passes, where 62 took 6; a date of 12 bits: 3 passes, where 6),
+       the rows of equal keys sorted by the comparisons *)
+    let ib = bits_of (n - 1) in
+    let m = ref 0 and used = ref 0 and gone = ref false and room = ref (62 - ib) in
+    while !m < m0 && (not !gone) && !used < !room do
+      let j = !m and c = col.(!m) in
+      let l = ref max_int and h = ref min_int in
+      for i = 0 to n - 1 do
+        let o = i * w in
+        if miss o c then gone := true
+        else (let x = Array.unsafe_get a (o + c) in if x < !l then l := x; if x > !h then h := x)
+      done;
+      if not !gone then begin
+        lo.(j) <- !l;
+        hi.(j) <- !h;
+        halved.(j) <- !h - !l < 0;
+        width.(j) <- (if halved.(j) then 62 else bits_of (!h - !l));
+        take.(j) <- min width.(j) (!room - !used);
+        used := !used + take.(j);
+        if j = 0 then room := min (62 - ib) ((11 * ((take.(0) + ib + 10) / 11)) - ib);
+        incr m
+      end
     done;
-    let m = ref 0 in
-    while !m < m0 && not gone.(!m) do incr m done;
     let m = !m in
     if m = 0 then by_cmp ()
     else begin
-      let halved = Array.init m (fun j -> hi.(j) - lo.(j) < 0) in
-      let width = Array.init m (fun j -> if halved.(j) then 62 else bits_of (hi.(j) - lo.(j))) in
-      let ib = bits_of (n - 1) in
-      let take = Array.make m 0 and used = ref 0 in
-      for j = 0 to m - 1 do
-        let t = min width.(j) (62 - ib - !used) in
-        take.(j) <- t;
-        used := !used + t
-      done;
       let whole = m = nk && Array.for_all Fun.id (Array.init m (fun j -> take.(j) = width.(j) && not halved.(j))) in
       let keys = Array.make n 0 in
       for i = 0 to n - 1 do

@@ -703,6 +703,9 @@ let index_of (ws : int array) =
    than k rows (a filter of the question dropped some) and has more takes the next ones, twice as many each time,
    until it has k rows or none is left. The rows, each row's group (its number among the pair's groups, which come
    sorted by w1), the number of groups. *)
+(* the span of things, in times their number, up to which pair_rows places them by a bitmap (the tests make it 0) *)
+let dense = ref 32
+
 let pair_rows (v : Store.view) (pp : pair_plan) ~k ~w ~col ~(ask : int array -> int array -> int array -> flat) =
   Atomic.incr pair_each;
   let from = if pp.desc then pp.dhi else pp.dlo in
@@ -793,7 +796,24 @@ let pair_rows (v : Store.view) (pp : pair_plan) ~k ~w ~col ~(ask : int array -> 
     let mn = ref max_int and mx = ref min_int in
     for i = 0 to n - 1 do let e = Array.unsafe_get es i in if e < !mn then mn := e; if e > !mx then mx := e done;
     let ib = Top.bits_of (max 1 (n - 1)) in
-    if n >= 2 && !mx - !mn >= 0 && Top.bits_of (!mx - !mn) + ib <= 62 then begin
+    let span = !mx - !mn in
+    (* things over a span of at most [dense] times their number (things made together are numbered together): a bit a
+       thing, each thing's place the bits set before its own (a count a word of 32 bits, and one popcount), no sort *)
+    let words = if n >= 2 && span >= 0 && span < !dense * n then (span lsr 5) + 1 else 0 in
+    let bits = Array.make words 0 in
+    for i = 0 to (if words > 0 then n - 1 else -1) do
+      let d = Array.unsafe_get es i - !mn in
+      Array.unsafe_set bits (d lsr 5) (Array.unsafe_get bits (d lsr 5) lor (1 lsl (d land 31)))
+    done;
+    let before = Array.make words 0 and set = ref 0 in
+    for j = 0 to words - 1 do Array.unsafe_set before j !set; set := !set + Store.popcount (Array.unsafe_get bits j) done;
+    if words > 0 && !set = n then
+      for i = 0 to n - 1 do
+        let d = Array.unsafe_get es i - !mn in
+        let j = d lsr 5 in
+        put (Array.unsafe_get before j + Store.popcount (Array.unsafe_get bits j land ((1 lsl (d land 31)) - 1))) i
+      done
+    else if n >= 2 && span >= 0 && Top.bits_of span + ib <= 62 then begin
       let keys = Array.make n 0 in
       for i = 0 to n - 1 do Array.unsafe_set keys i (((Array.unsafe_get es i - !mn) lsl ib) lor i) done;
       Store.sort_ints keys;

@@ -189,7 +189,8 @@ let shapes seed (v : Store.view) r ~client ~date ~total ~zone ~tag =
         (if desc then ", descending" else "") (if windows <> [||] then ", a window" else "") in
     Question.Top.flat_min := if Rng.bool r then 2 else 64;
     Answer.pair_drop := Rng.int r 4 > 0;
-    Fun.protect ~finally:(fun () -> Question.Top.flat_min := 64; Answer.pair_drop := true) (fun () -> coded seed what ~extra v q sel order)
+    Answer.dense := if Rng.bool r then 0 else 32;
+    Fun.protect ~finally:(fun () -> Question.Top.flat_min := 64; Answer.pair_drop := true; Answer.dense := 32) (fun () -> coded seed what ~extra v q sel order)
   done
 
 (* the question of the pair alone (i, c and d: each thing read off it is a row, no fold), with ranges on d and c, or
