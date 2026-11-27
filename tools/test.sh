@@ -9,7 +9,8 @@
 # examples, the server: its units and rights, its simulation (SERVER_SEEDS seeds, 200 by default), live questions
 # against the naive evaluator (LIVE_SEEDS seeds, 100 by default), questions with Sort, Limit and After against a
 # brute-force oracle (QUESTION_SEEDS seeds, 300 by default), the indexes of two properties (PAIR_SEEDS seeds, 300 by
-# default: each group's things against the facts, both paths' answers, live watches, format 9, damage), TLS and the
+# default: each group's things against the facts, both paths' answers, the same bytes as the server codes them, live
+# watches, format 9, damage), TLS and the
 # limits of connections on a real server, requests that make the server fail over real sockets, cepheus import and
 # export on a real server (a round trip of the invoices app, hostile files), a replica (REPLICA_SEEDS
 # simulated seeds, 300 by default, then two real servers), a Raft cluster (RAFT_SEEDS simulated seeds of 3 servers, 100
