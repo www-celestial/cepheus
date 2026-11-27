@@ -288,8 +288,10 @@ des lecteurs qui appellent. Les pages évincées ne sont jamais réutilisées su
 l'éviction garde encore les anciens octets, qui sont justes, et le GC (le garbage collector, la partie qui libère la
 mémoire que plus rien n'utilise) les libère ; une collection complète après chaque quart du cache évincé garde les
 pages en mémoire sous 1,25 fois le cache. Les FIFOs de la politique (les files de S3-FIFO, plus bas) tiennent les tables d'un run (ses
-pages, `hot` et les compteurs), jamais le run lui-même, dont le fichier est fermé par un finaliser (une fonction que
-le GC appelle quand il libère une valeur) une fois qu'aucune vue ne tient le run : un run qu'un merge a remplacé les
+pages, `hot` et les compteurs), jamais le run lui-même, dont le fichier est fermé une fois qu'aucune vue ne tient le
+run (son finaliser, une fonction que le GC appelle quand il libère une valeur, rend le descripteur au disque, qui le
+ferme à son appel suivant : un finaliser s'exécute au milieu de ce que faisait le thread, dans le lock du disque
+lui-même aussi) : un run qu'un merge a remplacé les
 quitte aussitôt, ses pages retirées et ses entrées supprimées (un passage sur les FIFOs par merge), et une page qu'une
 vue plus ancienne lit ensuite de lui y entre comme une autre, sans garder son fichier ouvert.
 

@@ -102,6 +102,7 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 | `type fd`, `exception Io of string` | an open file; a failed call (`CALL PATH: REASON`) |
 | `type t` | 16 operations: `exists`, `mkdir`, `readdir` (sorted), `openf path create`, `size`, `pread`, `pwrite` (exactly the bytes asked), `truncate`, `fsync`, `close`, `rename` (atomic), `remove`, `sync_dir` (makes a directory's names durable), `lock`, `unlock`, `now` (ms); and `parallel`: calls may come from several domains at once, each on its own files (`true` for the real disk; `false` for the simulated one, so that the engine makes them one after the other and a seed replays them) |
 | `real` | the machine's file system (`lseek` then `read` or `write`; `lockf` locks, held in a table keyed by the lock file's device and inode, so that every path to one file is one lock) |
+| `close_when_gone fd v` | a descriptor of `real` or `read_only` closed once `v` is garbage (a run's pages): the finaliser only puts it on a list with no lock, and the disk's next call on any file closes it, outside its lock; a finaliser that closed it itself ran inside that lock at times (an allocation of the same thread there) and raised EDEADLK |
 | `read_all`, `write_file` | a whole file; a file written durably and atomically (beside it, fsync, rename, fsync of the directory) |
 
 ## `Sim_disk`: the simulated disk (`src/sim_disk.mli`)

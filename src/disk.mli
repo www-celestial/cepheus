@@ -36,6 +36,11 @@ type t = {
 val real : t
 (** The machine's file system. Reads and writes go through [lseek] and [read] or [write]. *)
 
+val close_when_gone : fd -> 'a -> unit
+(** [close_when_gone fd v]: a descriptor of {!real} or {!read_only} closed once [v] is garbage (a run's pages), by the
+    process's next call of those disks on any file, never by the finaliser itself: a finaliser runs at whatever
+    allocation its thread is at, inside the disk's own lock too, which it could not take again. *)
+
 val read_only : t
 (** The machine's file system for a reader that changes nothing (cepheus verify): files opened read-only and never
     made; every call that would write raises {!Io}. *)

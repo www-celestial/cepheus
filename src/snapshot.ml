@@ -1557,7 +1557,7 @@ let merge ?(busy = fun () -> false) ?(bulk = no_bulk) ?(sync = true) ?file disk 
     if sync then disk.fsync fd
   with
   | () ->
-    if disk == Disk.real then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
+    if disk == Disk.real then Disk.close_when_gone fd pg;
     let part (l : Store.base) ~n ~k = Store.ready { l with pg; hot = pg.Pages.hot; n; k; r0 = k } in
     let a = part la ~n:!na ~k:ta.things and t = part lt ~n:!nt ~k:tt.things in
     let run = { Store.a; t; lo; hi = v.group; level; s0 } in
@@ -1659,7 +1659,7 @@ let check_and_build disk dir (lo0, hi0, file) id =
       end
     in
     let pg = Pages.on_file len (load_from fd) in
-    if disk == Disk.real || disk == Disk.read_only then Gc.finalise (fun _ -> try disk.close fd with Disk.Io _ -> ()) pg;
+    if disk == Disk.real || disk == Disk.read_only then Disk.close_when_gone fd pg;
     let a = Store.of_offsets ~pg ~n:an ~ne:ane ~k:ak ~np:anp ~ns:ans ~sblob:asb ~hbits aoffs in
     let t = Store.of_offsets ~pg ~n:tn ~ne:tne ~k:tk ~np:tnp ~ns:0 ~sblob:0 ~hbits:0 toffs in
     (* Pages read and checked now, then into the cache: the pages [ks] (logical numbers) that the file holds, in the

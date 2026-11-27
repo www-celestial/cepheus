@@ -37,10 +37,29 @@ let locked f = Mutex.protect m f
 let unix name path f =
   try f () with Unix.Unix_error (e, _, _) -> raise (Io (Printf.sprintf "%s %s: %s" name path (Unix.error_message e)))
 
-let get fd =
+let find fd =
   match locked (fun () -> Hashtbl.find_opt table fd) with
   | Some x -> x
   | None -> raise (Io (Printf.sprintf "file %d is closed" fd))
+
+let close_fd fd =
+  let ufd, p = find fd in
+  locked (fun () -> Hashtbl.remove table fd);
+  unix "close" p (fun () -> Unix.close ufd)
+
+(* A finaliser runs at whatever allocation its thread is at, inside [locked] too, where taking [m] again raises
+   (OCaml's mutexes check their owner: EDEADLK). So a descriptor whose owner is garbage only goes on [dropped], with no
+   lock (close_when_gone), and the next call of the real disk closes it, outside the lock *)
+let dropped = Atomic.make []
+
+let reap () =
+  match Atomic.get dropped with
+  | [] -> ()
+  | _ -> List.iter (fun fd -> try close_fd fd with Io _ -> ()) (Atomic.exchange dropped [])
+
+let get fd =
+  reap ();
+  find fd
 
 let rec write_all ufd buf pos len path =
   if len > 0 then begin
@@ -91,6 +110,7 @@ let real =
     readdir = (fun p -> unix "readdir" p (fun () -> List.sort compare (Array.to_list (Sys.readdir p))));
     openf =
       (fun p create ->
+        reap ();
         let flags = Unix.O_RDWR :: Unix.O_CLOEXEC :: (if create then [ Unix.O_CREAT ] else []) in
         let ufd = unix "open" p (fun () -> Unix.openfile p flags 0o600) in
         locked (fun () ->
@@ -122,9 +142,8 @@ let real =
         unix "fsync" p (fun () -> Unix.fsync ufd));
     close =
       (fun fd ->
-        let ufd, p = get fd in
-        locked (fun () -> Hashtbl.remove table fd);
-        unix "close" p (fun () -> Unix.close ufd));
+        reap ();
+        close_fd fd);
     rename = (fun a b -> unix "rename" a (fun () -> Unix.rename a b));
     remove = (fun p -> unix "unlink" p (fun () -> Unix.unlink p));
     sync_dir =
@@ -149,6 +168,10 @@ let real =
     parallel = true;
   }
 
+let close_when_gone fd v =
+  let rec push () = let l = Atomic.get dropped in if not (Atomic.compare_and_set dropped l (fd :: l)) then push () in
+  Gc.finalise (fun _ -> push ()) v
+
 (* The machine's file system for a reader that changes nothing (cepheus verify, the files a backup copies): files opened
    read-only, never made; every call that would write raises Io. *)
 let read_only =
@@ -158,6 +181,7 @@ let read_only =
     mkdir = (fun p -> refused "mkdir" p);
     openf =
       (fun p _ ->
+        reap ();
         let ufd = unix "open" p (fun () -> Unix.openfile p [ Unix.O_RDONLY; Unix.O_CLOEXEC ] 0) in
         locked (fun () ->
             let fd = !next in

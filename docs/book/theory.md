@@ -233,8 +233,9 @@ nothing before they return); the loops that call a function per row, which save 
 anyway, use readers that call. Evicted pages are never reused in place: a reader that raced with the eviction still
 holds the old bytes, which are right, and the GC frees them; a full collection after each quarter of the cache
 evicted keeps the pages in memory under 1.25 times the cache. The policy's FIFOs hold a run's tables (its pages,
-`hot` and counters), never the run, whose file is closed by a finaliser once no view holds the run: a run a merge
-replaced leaves them at once, its pages taken out and its entries removed (one pass over the FIFOs a merge), and a
+`hot` and counters), never the run, whose file is closed once no view holds the run (its finaliser hands the
+descriptor to the disk, which closes it at its next call: a finaliser runs inside whatever the thread was doing,
+the disk's own lock too): a run a merge replaced leaves them at once, its pages taken out and its entries removed (one pass over the FIFOs a merge), and a
 page an older view reads of it afterwards enters them as any other, without keeping its file open.
 
 **Cost when everything is in memory**, 10 M facts, release build, 11 runs x 2 rounds alternated, against milestone

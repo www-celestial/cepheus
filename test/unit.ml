@@ -894,6 +894,40 @@ let () =
     | _ -> C.fail "seed %d: unexpected snapshot load" seed
   done
 
+(* descriptors closed once their owner is garbage (a run's pages), while this thread opens and closes files: three
+   domains allocating beside it interrupt it at any allocation, inside the real disk's lock too, where a finaliser
+   that took that lock again raised EDEADLK (seen at an open, 1 in 60, on 4 cores); every descriptor closed after *)
+let () =
+  section "the real disk: descriptors closed by finalisers while the files' table is locked";
+  let dir = C.tmpdir "finalclose" in
+  Disk.real.mkdir dir;
+  let path = Filename.concat dir "f" in
+  let fd0 = Disk.real.openf path true in
+  Disk.real.pwrite fd0 0 (Bytes.make 16 'x') 0 16;
+  let open_fds () = if Sys.file_exists "/proc/self/fd" then Array.length (Sys.readdir "/proc/self/fd") else 0 in
+  let before = open_fds () in
+  let stop = Atomic.make false in
+  let busy = List.init 3 (fun _ -> Domain.spawn (fun () -> while not (Atomic.get stop) do ignore (Sys.opaque_identity (Bytes.create 65536)) done)) in
+  let raised = ref None in
+  (try
+     for _ = 1 to 400 do
+       for _ = 1 to 20 do
+         let fd = Disk.real.openf path false in
+         Disk.close_when_gone fd (ref fd)
+       done;
+       for _ = 1 to 200 do
+         Disk.real.close (Disk.read_only.openf path false)
+       done
+     done
+   with e -> raised := Some (Printexc.to_string e));
+  Atomic.set stop true;
+  List.iter Domain.join busy;
+  C.check (!raised = None) "finalisers' closes beside opens and closes: %s" (Option.value !raised ~default:"none raised");
+  Gc.full_major ();
+  Disk.real.close (Disk.real.openf path false);
+  C.check (open_fds () <= before) "every descriptor given to a finaliser closed by the next call of the disk: %d open, %d before" (open_fds ()) before;
+  Disk.real.close fd0
+
 (* a run of 600 pages and more on the real disk: its pages read and checked at open by several domains, each with
    its own descriptor; a damaged page sets it aside *)
 let () =

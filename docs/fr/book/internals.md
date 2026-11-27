@@ -102,6 +102,7 @@ p50 301 us, p99 5000 us, max 5000 us, of 5
 | `type fd`, `exception Io of string` | un fichier ouvert ; un appel qui a échoué (`CALL PATH: REASON`) |
 | `type t` | 16 opérations : `exists`, `mkdir`, `readdir` (trié), `openf path create`, `size`, `pread`, `pwrite` (exactement les octets demandés), `truncate`, `fsync`, `close`, `rename` (atomique), `remove`, `sync_dir` (rend durables les noms d'un répertoire), `lock`, `unlock`, `now` (ms) ; et `parallel` : les appels peuvent venir de plusieurs domains à la fois, chacun sur ses propres fichiers (`true` pour le vrai disque ; `false` pour le disque simulé, pour que le moteur les fasse l'un après l'autre et qu'une seed les rejoue) |
 | `real` | le système de fichiers de la machine (`lseek` puis `read` ou `write` ; des locks `lockf`, tenus dans une table dont la clé est le device et l'inode du fichier de lock, pour que tous les chemins vers un même fichier soient un seul lock) |
+| `close_when_gone fd v` | un descripteur de `real` ou `read_only` fermé une fois que `v` est libérable (les pages d'un run) : le finaliser ne fait que le mettre sur une liste, sans lock, et l'appel suivant du disque, sur n'importe quel fichier, le ferme, hors de son lock ; un finaliser qui le fermait lui-même s'exécutait parfois dans ce lock (une allocation du même thread à cet endroit) et levait EDEADLK |
 | `read_all`, `write_file` | un fichier entier ; un fichier écrit de façon durable et atomique (à côté, fsync, renommage, fsync du répertoire) |
 
 ## `Sim_disk` : le disque simulé (`src/sim_disk.mli`)
