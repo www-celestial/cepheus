@@ -14,7 +14,7 @@ module C = Check
 
 let props =
   [ prop "inv/client" Tlink; prop "inv/date" Tdate; prop "inv/total" Tint; prop "inv/zone" Tint; prop ~many:true "inv/tag" Ttext;
-    prop "cl/name" Ttext ]
+    prop "cl/name" Ttext; prop "inv/label" Ttext ]
 
 (* the things of w1 for the pair p2 within p1, (w2, e) sorted, by brute force over the facts *)
 let brute (fl : C.F.t) p1 p2 =
@@ -125,6 +125,157 @@ let questions seed (v : Store.view) r ~client ~date ~total ~zone ~tag ~name =
     both seed v (Printf.sprintf "Each Limit %d, variant %d%s" k variant (if desc then ", descending" else "")) ~extra q (Wire.Over (Wire.Give give, [| 3 |], windows)) order
   done
 
+(* ---- Each over the pair against the plain join, as the server codes the answers: the same bytes ----
+   The Give's columns in any order, with or without the invoice (its rows then repeat: copies of a group's k-th row,
+   which both paths keep) and its total; a second key; Limit 1, 3, 7 or larger than any group; ascending or
+   descending; an Optional (missing cells), a filter the pair does not know, a window; the flat rows sorted by the
+   comparisons alone or by their keys (Top.flat_min 2 or 64). *)
+
+let encoded (v : Store.view) (a : Answer.answer) =
+  let b = Buffer.create 256 in
+  let typs = Array.init a.cols a.typ in
+  Codec.put_int b a.cols;
+  Codec.put_int b a.n;
+  for i = 0 to a.n - 1 do
+    for j = 0 to a.cols - 1 do
+      if a.missing i j then Value.encode b Value.missing else if a.computed j then Value.encode b (a.cell i j) else Core.put_word b v typs.(j) (a.word i j)
+    done
+  done;
+  Buffer.contents b
+
+let shape_checks = ref 0
+let shapes_on_pair = ref 0
+
+let shapes seed (v : Store.view) r ~client ~date ~total ~zone ~tag =
+  for _ = 1 to 8 do
+    (* i 0, d 1, t 2, c 3, then x 4: a zone (a pattern), or a tag (an Optional: its cell missing) *)
+    let variant = Rng.int r 4 in
+    let where = [ { Query.e = Var 0; p = client; v = Var 3 }; { e = Var 0; p = date; v = Var 1 }; { e = Var 0; p = total; v = Var 2 } ] in
+    let where, vars = if variant = 1 then where @ [ { e = Var 0; p = zone; v = Var 4 } ], 5 else where, if variant = 2 then 5 else 4 in
+    let extra = if variant = 2 then [ Question.Ask.Optional { e = Var 0; p = tag; v = Var 4 } ] else [] in
+    let ranges = if variant = 3 then [ (2, Value.Int 5, Value.Int 40) ] else [] in
+    let q = { Query.vars; where; ranges } in
+    (* the Give: d and c, the others or not, shuffled *)
+    let others = List.filter (fun _ -> Rng.int r 3 > 0) (List.filter (fun x -> x <> 1 && x <> 3) (List.init vars Fun.id)) in
+    let give = Array.of_list (1 :: 3 :: others) in
+    for i = Array.length give - 1 downto 1 do let j = Rng.int r (i + 1) in let t = give.(i) in give.(i) <- give.(j); give.(j) <- t done;
+    let col x = let rec f i = if give.(i) = x then i else f (i + 1) in f 0 in
+    let has x = Array.mem x give in
+    let k = [| 1; 3; 7; 1000 |].(Rng.int r 4) and desc = Rng.bool r in
+    let second = if has 2 && Rng.bool r then [ { Question.Top.col = col 2; desc = Rng.bool r } ] else [] in
+    let order = { Question.Top.keys = { col = col 1; desc } :: second; limit = k; after = None } in
+    let windows = if has 2 && Rng.int r 4 = 0 then [| Wire.Running (Sum (col 2), 0) |] else [||] in
+    let sel = Wire.Over (Wire.Give give, [| col 3 |], windows) in
+    Question.Top.flat_min := if Rng.bool r then 2 else 64;
+    Answer.pair_drop := Rng.int r 4 > 0;
+    let ask () = match Answer.answer ~order ~extra v q sel with a -> Ok (encoded v a, rows_of v a) | exception Query.Bad m -> Error m in
+    let before = Atomic.get Answer.pair_each in
+    let with_pair = ask () in
+    let used = Atomic.get Answer.pair_each > before in
+    if used then incr shapes_on_pair;
+    Answer.use_pairs := false;
+    let plain = Fun.protect ~finally:(fun () -> Answer.use_pairs := true) ask in
+    Question.Top.flat_min := 64;
+    Answer.pair_drop := true;
+    incr shape_checks;
+    let what = Printf.sprintf "Each Limit %d of Give [%s], keys %d, variant %d%s%s" k (String.concat " " (Array.to_list (Array.map string_of_int give))) (List.length order.keys) variant
+        (if desc then ", descending" else "") (if windows <> [||] then ", a window" else "") in
+    match with_pair, plain with
+    | Ok (a, _), Ok (b, _) when a = b -> ()
+    | Error a, Error b when a = b -> ()
+    | _ ->
+      let show = function Ok (_, rows) -> show rows | Error m -> "refused: " ^ m in
+      C.fail "seed %d: %s (%d runs%s): the pair's bytes differ from the join's\n  pair:\n    %s\n  join:\n    %s" seed what (Array.length v.runs)
+        (if used then ", on the pair" else "") (show with_pair) (show plain)
+  done
+
+(* the question of the pair alone (i, c and d: each thing read off it is a row, no fold), with ranges on d and c, or
+   on a variable the question does not have (refused by both paths) *)
+let direct seed (v : Store.view) r ~client ~date =
+  for _ = 1 to 4 do
+    let ranges =
+      (if Rng.bool r then (let a = 1_700_000_000_000 + (1000 * Rng.int r 40) in [ (1, Value.Date a, Value.Date (a + (1000 * Rng.int r 30))) ]) else [])
+      @ (if Rng.int r 4 = 0 then [ (2, Value.Link 0, Value.Link max_int) ] else [])
+      @ if Rng.int r 10 = 0 then [ (7, Value.Int 0, Value.Int 1) ] else []
+    in
+    let q = { Query.vars = 3; where = [ { Query.e = Var 0; p = client; v = Var 2 }; { e = Var 0; p = date; v = Var 1 } ]; ranges } in
+    let give = [| [| 0; 1; 2 |]; [| 2; 1 |]; [| 1; 0; 2 |]; [| 1; 2 |] |].(Rng.int r 4) in
+    let col x = let rec f i = if give.(i) = x then i else f (i + 1) in f 0 in
+    let k = [| 1; 2; 3; 1000 |].(Rng.int r 4) and desc = Rng.bool r in
+    let order = { Question.Top.keys = [ { col = col 1; desc } ]; limit = k; after = None } in
+    let ask () = match Answer.answer ~order v q (Wire.Over (Wire.Give give, [| col 2 |], [||])) with a -> Ok (encoded v a, rows_of v a) | exception Query.Bad m -> Error m in
+    let before = Atomic.get Answer.pair_each in
+    let with_pair = ask () in
+    if Atomic.get Answer.pair_each > before then incr shapes_on_pair;
+    Answer.use_pairs := false;
+    let plain = Fun.protect ~finally:(fun () -> Answer.use_pairs := true) ask in
+    incr shape_checks;
+    match with_pair, plain with
+    | Ok (a, _), Ok (b, _) when a = b -> ()
+    | Error a, Error b when a = b -> ()
+    | _ ->
+      let show = function Ok (_, rows) -> show rows | Error m -> "refused: " ^ m in
+      C.fail "seed %d: the pair alone, Limit %d%s, Give [%s], %d ranges: the pair's bytes differ from the join's\n  pair:\n    %s\n  join:\n    %s" seed k
+        (if desc then ", descending" else "") (String.concat " " (Array.to_list (Array.map string_of_int give))) (List.length ranges) (show with_pair) (show plain)
+  done
+
+(* many invoices of few clients, dates and totals of few values (ties everywhere), some without a date or a client,
+   some with tags: one run (the pair read in place), then a delta on top (the pair merged with it), then three runs *)
+(* Each over a pair whose groups are texts (inv/zone within inv/label: a text's words are in no order), sorted by the
+   zone, with a range on the zone, or on the label (refused by both paths: a range takes an int, a float, a date or
+   money) *)
+let labels seed (v : Store.view) r ~zone ~total ~label =
+  for _ = 1 to 4 do
+    let q =
+      { Query.vars = 4; where = [ { Query.e = Var 0; p = label; v = Var 3 }; { e = Var 0; p = zone; v = Var 1 }; { e = Var 0; p = total; v = Var 2 } ];
+        ranges = (match Rng.int r 3 with 0 -> [ (1, Value.Int 0, Value.Int 1) ] | 1 -> [ (3, Value.Text "b", Value.Text "m") ] | _ -> []) }
+    in
+    let k = [| 1; 2; 1000 |].(Rng.int r 3) and desc = Rng.bool r in
+    let order = { Question.Top.keys = [ { col = 1; desc } ]; limit = k; after = None } in
+    let ask () = match Answer.answer ~order v q (Wire.Over (Wire.Give [| 0; 1; 2; 3 |], [| 3 |], [||])) with a -> Ok (encoded v a) | exception Query.Bad m -> Error m in
+    let before = Atomic.get Answer.pair_each in
+    let with_pair = ask () in
+    if Atomic.get Answer.pair_each > before then incr shapes_on_pair;
+    Answer.use_pairs := false;
+    let plain = Fun.protect ~finally:(fun () -> Answer.use_pairs := true) ask in
+    incr shape_checks;
+    if with_pair <> plain then
+      C.fail "seed %d: Each by a text group, Limit %d%s, %d ranges: the pair's answer differs from the join's (%s / %s)" seed k (if desc then ", descending" else "")
+        (List.length q.ranges) (match with_pair with Ok _ -> "rows" | Error m -> m) (match plain with Ok _ -> "rows" | Error m -> m)
+  done
+
+let crowd seed =
+  let r = Rng.make (1000 + seed) in
+  let db = ref (fork empty) in
+  let[@warning "-8"] (Ok [ client; date; total; zone; tag; name; label ]) = declare !db props in
+  (match within !db [ (date, client); (zone, label) ] with Ok () -> () | Error e -> C.fail "seed %d: within: %s" seed (message e));
+  let cs = (match write !db (List.init (2 + Rng.int r 30) (fun k -> Resolve.Add (-1 - k, name, Text (Printf.sprintf "c%d" k)))) with Ok rc -> Array.of_list (List.map snd rc.things) | Error e -> failwith (message e)) in
+  let invoices n =
+    let ops = ref [] in
+    for j = 1 to n do
+      let t = -1 - j in
+      if Rng.int r 20 > 0 then ops := Resolve.Add (t, client, Link cs.(Rng.int r (Array.length cs))) :: !ops;
+      if Rng.int r 20 > 0 then ops := Add (t, date, Date (1_700_000_000_000 + (1000 * Rng.int r (1 + Rng.int r 60)))) :: !ops;
+      ops := Add (t, total, Int (Rng.int r 50)) :: !ops;
+      if Rng.int r 2 = 0 then ops := Add (t, zone, Int (Rng.int r 3)) :: !ops;
+      if Rng.int r 3 > 0 then ops := Add (t, label, Text [| "a"; "c"; "k"; "z" |].(Rng.int r 4)) :: !ops;
+      if Rng.int r 4 = 0 then ops := Add (t, tag, Text (if Rng.bool r then "x" else "y")) :: !ops
+    done;
+    match write !db (List.rev !ops) with Ok _ -> () | Error e -> C.fail "seed %d: a write: %s" seed (message e)
+  in
+  invoices (50 + Rng.int r 600);
+  db := fork (C.compact (view !db));
+  shapes seed (view !db) r ~client ~date ~total ~zone ~tag;
+  direct seed (view !db) r ~client ~date;
+  labels seed (view !db) r ~zone ~total ~label;
+  invoices (1 + Rng.int r 40);
+  shapes seed (view !db) r ~client ~date ~total ~zone ~tag;
+  db := fork (C.push (view !db));
+  invoices (1 + Rng.int r 40);
+  db := fork (C.push (view !db));
+  shapes seed (view !db) r ~client ~date ~total ~zone ~tag;
+  direct seed (view !db) r ~client ~date
+
 (* a page of one client's invoices sorted by date, with After: on the pair (the index path forced, so that a small
    group takes it too) and by the heap, the plain join *)
 let pages seed (v : Store.view) r ~client ~date ~total =
@@ -154,7 +305,7 @@ let pages seed (v : Store.view) r ~client ~date ~total =
 let run seed =
   let r = Rng.make seed in
   let db = ref (fork empty) in
-  let[@warning "-8"] (Ok [ client; date; total; zone; tag; name ]) = declare !db props in
+  let[@warning "-8"] (Ok [ client; date; total; zone; tag; name; _ ]) = declare !db props in
   let declared = ref false in
   let declare_now () =
     (match within !db (if seed mod 2 = 0 then [ (date, client) ] else [ (date, client); (total, zone) ]) with
@@ -208,6 +359,7 @@ let run seed =
     end;
     check_pairs seed (view !db) r;
     questions seed (view !db) r ~client ~date ~total ~zone ~tag ~name;
+    shapes seed (view !db) r ~client ~date ~total ~zone ~tag;
     pages seed (view !db) r ~client ~date ~total
   done;
   (* the end: one run, every pair held *)
@@ -229,7 +381,7 @@ let rec remove_one x = function [] -> None | y :: t -> if y = x then Some t else
 let live seed =
   let r = Rng.make seed in
   let db = fork empty in
-  let[@warning "-8"] [ client; date; total; _; _; name ] = ok (declare db props) in
+  let[@warning "-8"] [ client; date; total; _; _; name; _ ] = ok (declare db props) in
   ok (within db [ (date, client) ]);
   let v = ref (view db) in
   let views = Hashtbl.create 64 in
@@ -364,7 +516,7 @@ let disk_tests () =
   (* 1. a database of format 9, as the version before wrote it *)
   Snapshot.format9 := true;
   let db = ok (open_ dir) in
-  let[@warning "-8"] [ client; date; total; _; _; name ] = ok (declare db props) in
+  let[@warning "-8"] [ client; date; total; _; _; name; _ ] = ok (declare db props) in
   ignore (shop db r ~client ~date ~total ~name 200 4000);
   ok (snapshot db);
   let a0 = answers (view db) ~client ~date ~total in
@@ -487,9 +639,11 @@ let disk_tests () =
 let () =
   let seeds = ref 100 and one = ref None in
   Arg.parse [ ("--seeds", Arg.Set_int seeds, "N"); ("--seed", Arg.Int (fun s -> one := Some s), "N") ] (fun _ -> ()) "pairs.exe";
-  (match !one with Some s -> run s; live s | None -> for s = 1 to !seeds do run s; if s <= 50 then live s done; disk_tests ());
+  (match !one with Some s -> run s; crowd s; live s | None -> for s = 1 to !seeds do run s; crowd s; if s <= 50 then live s done; disk_tests ());
   Printf.printf "  %d streams of a group checked, on %d views that read a pair\n" !stream_checks !ready_views;
   Printf.printf "  %d messages of live watches checked against the join\n" !live_checks;
   Printf.printf "  %d questions on both paths, %d Each of them on the pair (%d folds), %d pages on the pair\n" !question_checks !on_pair
     (Atomic.get Answer.pair_rounds) (Atomic.get Question.Top.paired);
+  Printf.printf "  %d answers of Each coded on both paths, %d of them on the pair (%d asked without a pattern of the pair, %d with no fold): the same bytes\n"
+    !shape_checks !shapes_on_pair (Atomic.get Answer.pair_asked) (Atomic.get Answer.pair_direct);
   C.finish "pairs"

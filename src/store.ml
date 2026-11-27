@@ -2467,6 +2467,44 @@ let[@inline] pr_e b k r =
   let nb = min tb (pr_rows b k - (j lsl 7)) in
   ci64 b (d + 8) + cfield b (pr b k 9 + (h lsr 16) + pbytes nb ww) ((r land 127) * we) we
 
+(* A reader of pair k's rows that keeps the directory entry of the block it read last: the rows of a group, read one
+   after another, cost a field each for w2 and for e (pr_w2 and pr_e read the entry again for each row) *)
+type pr_cursor = {
+  cb : base;
+  ck : int;
+  mutable cj : int;  (* the block whose entry the fields hold, -1: none yet *)
+  mutable w2b : int;  (* its w2 base, its e base *)
+  mutable eb : int;
+  mutable w2at : int;  (* the byte of its w2 fields, their width; the byte of its e fields, their width *)
+  mutable ww : int;
+  mutable eat : int;
+  mutable we : int;
+}
+
+let pr_cursor b k = { cb = b; ck = k; cj = -1; w2b = 0; eb = 0; w2at = 0; ww = 0; eat = 0; we = 0 }
+
+let[@inline never] pr_block c j =
+  let b = c.cb and k = c.ck in
+  let d = pr b k 8 + (24 * j) in
+  let h = ci64 b (d + 16) in
+  let ww = (h lsr 8) land 0xFF in
+  c.cj <- j;
+  c.w2b <- ci64 b d;
+  c.eb <- ci64 b (d + 8);
+  c.w2at <- pr b k 9 + (h lsr 16);
+  c.ww <- ww;
+  c.eat <- c.w2at + pbytes (min tb (pr_rows b k - (j lsl 7))) ww;
+  c.we <- h land 0xFF
+
+(* row r's w2, its thing *)
+let[@inline] pr_cw2 c r =
+  if r lsr 7 <> c.cj then pr_block c (r lsr 7);
+  c.w2b + cfield c.cb c.w2at ((r land 127) * c.ww) c.ww
+
+let[@inline] pr_ce c r =
+  if r lsr 7 <> c.cj then pr_block c (r lsr 7);
+  c.eb + cfield c.cb c.eat ((r land 127) * c.we) c.we
+
 (* the group of w1 in pair k, or -1: a binary search of the groups' values *)
 let pr_group b k w1 =
   let lo = ref 0 and hi = ref (pr_groups b k) in
@@ -2625,17 +2663,21 @@ let pair_part v ~p1 ~p2 =
     | _ -> let b = v.runs.(0).a in let k = pr_find b p1 p2 in if k < 0 then None else Some (b, k)
 
 (* the ints of a, distinct or not, sorted in place: a radix sort of 11 bits a pass over their range (Knuth, volume 3,
-   5.2.5), the comparisons' when the range passes the ints *)
+   5.2.5), the comparisons' when the range passes the ints. The passes stop at the range's last bit: a shift of 64 or
+   more is the shift modulo 64 on x86 (range lsr 66 is range lsr 2), so that a range of 56 bits or more took 29 passes
+   instead of 6, the ints still sorted. (The high digit first, then each bucket by insertion or by its low digits,
+   took 0.9 ms for 30,000 ints of 62 bits spread over their range, against 1.5, but 4.2 against 0.8 for ints sharing
+   their high bits and 47 against 5.2 for 100,000: each bucket's passes pay for their 2,048 counts.) *)
 let sort_ints (a : int array) =
   let n = Array.length a in
   if n > 1 then begin
     let mn = ref max_int and mx = ref min_int in
-    Array.iter (fun x -> if x < !mn then mn := x; if x > !mx then mx := x) a;
+    for i = 0 to n - 1 do let x = Array.unsafe_get a i in if x < !mn then mn := x; if x > !mx then mx := x done;
     let range = !mx - !mn and base = !mn in
     if range < 0 || n < 64 then Array.sort (fun (x : int) y -> compare x y) a
     else begin
       let cnt = Array.make 2048 0 and src = ref a and dst = ref (Array.make n 0) and sh = ref 0 in
-      while range lsr !sh > 0 do
+      while !sh < 62 && range lsr !sh > 0 do
         Array.fill cnt 0 2048 0;
         let x = !src and y = !dst and s = !sh in
         for i = 0 to n - 1 do let d = ((Array.unsafe_get x i - base) lsr s) land 2047 in Array.unsafe_set cnt d (Array.unsafe_get cnt d + 1) done;

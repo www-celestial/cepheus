@@ -340,6 +340,123 @@ let append mk cap a b =
   for i = 0 to b.n - 1 do push mk cap a b.a.(i) done;
   a
 
+(* ---- a sort of rows laid flat ----
+   [n] rows of [w] words one after another in [a] (the [cols] columns of [typs], then with [masked] the mask of the
+   missing ones), in the order [ord], as compare_rows and compare_masked order them: the rows' numbers, sorted. Read in
+   their order, the rows cost no pointer each (sort_radix's rows are arrays wherever the heap put them: a cache miss
+   a row a pass). The leading keys that are inline words and missing in no row make one key, as sort_radix's (each
+   column's word from its least, or from its greatest descending, in the bits its range needs), cut to leave room for
+   the row's number in the low bits: those ints sorted by Store.sort_ints (a least-significant-digit radix sort,
+   Knuth volume 3, 5.2.5); then, when the key did not hold the whole order, each run of equal keys by the comparisons,
+   in the order of the rows' numbers. Otherwise, and below [flat_min] rows, a stable sort by the comparisons. Texts
+   are read once a sort. *)
+let flat_min = ref 64
+
+(* rows i and j of [a] compared in [ord], as compare_rows (compare_masked) compares them *)
+let compare_flat ?(masked = false) v (typs : Value.typ array) (ord : key array) (a : int array) w =
+  let cols = Array.length typs and nk = Array.length ord in
+  let memo = Hashtbl.create 16 in
+  let text x = match Hashtbl.find_opt memo x with Some s -> s | None -> let s = Store.text v x in Hashtbl.add memo x s; s in
+  let[@inline] miss o c = masked && (Array.unsafe_get a (o + cols) lsr c) land 1 = 1 in
+  fun i j ->
+    let oi = i * w and oj = j * w in
+    let c = ref 0 and k = ref 0 in
+    while !c = 0 && !k < nk do
+      let key = Array.unsafe_get ord !k in
+      let col = key.col in
+      let ma = miss oi col and mb = miss oj col in
+      if ma || mb then c := by_mask ma mb
+      else begin
+        let x = Array.unsafe_get a (oi + col) and y = Array.unsafe_get a (oj + col) in
+        let r =
+          if x = y then 0
+          else match typs.(col) with Ttext -> String.compare (text x) (text y) | Tfloat -> total_order (float_of_word v x) (float_of_word v y) | _ -> compare x y
+        in
+        c := if key.desc then -r else r
+      end;
+      incr k
+    done;
+    !c
+
+let sort_flat ?(masked = false) v (typs : Value.typ array) (ord : key array) (a : int array) w n =
+  let cols = Array.length typs and nk = Array.length ord in
+  let cmp = compare_flat ~masked v typs ord a w in
+  let[@inline] miss o c = masked && (Array.unsafe_get a (o + cols) lsr c) land 1 = 1 in
+  let by_cmp () = let p = Array.init n Fun.id in Array.stable_sort cmp p; p in
+  let m0 = ref 0 in
+  while !m0 < nk && Value.inline typs.(ord.(!m0).col) do incr m0 done;
+  let m0 = !m0 in
+  if m0 = 0 || n < max 2 !flat_min then by_cmp ()
+  else begin
+    let col = Array.init m0 (fun j -> ord.(j).col) and desc = Array.init m0 (fun j -> ord.(j).desc) in
+    let lo = Array.make m0 max_int and hi = Array.make m0 min_int and gone = Array.make m0 false in
+    for i = 0 to n - 1 do
+      let o = i * w in
+      for j = 0 to m0 - 1 do
+        let c = Array.unsafe_get col j in
+        if miss o c then Array.unsafe_set gone j true
+        else begin
+          let x = Array.unsafe_get a (o + c) in
+          if x < Array.unsafe_get lo j then Array.unsafe_set lo j x;
+          if x > Array.unsafe_get hi j then Array.unsafe_set hi j x
+        end
+      done
+    done;
+    let m = ref 0 in
+    while !m < m0 && not gone.(!m) do incr m done;
+    let m = !m in
+    if m = 0 then by_cmp ()
+    else begin
+      let halved = Array.init m (fun j -> hi.(j) - lo.(j) < 0) in
+      let width = Array.init m (fun j -> if halved.(j) then 62 else bits_of (hi.(j) - lo.(j))) in
+      let ib = bits_of (n - 1) in
+      let take = Array.make m 0 and used = ref 0 in
+      for j = 0 to m - 1 do
+        let t = min width.(j) (62 - ib - !used) in
+        take.(j) <- t;
+        used := !used + t
+      done;
+      let whole = m = nk && Array.for_all Fun.id (Array.init m (fun j -> take.(j) = width.(j) && not halved.(j))) in
+      let keys = Array.make n 0 in
+      for i = 0 to n - 1 do
+        let o = i * w in
+        let k = ref 0 in
+        for j = 0 to m - 1 do
+          let t = Array.unsafe_get take j in
+          if t > 0 then begin
+            let x = Array.unsafe_get a (o + Array.unsafe_get col j) and l = Array.unsafe_get lo j and h = Array.unsafe_get hi j in
+            let d =
+              if Array.unsafe_get halved j then (if Array.unsafe_get desc j then (h asr 1) - (x asr 1) else (x asr 1) - (l asr 1))
+              else if Array.unsafe_get desc j then h - x
+              else x - l
+            in
+            k := (!k lsl t) lor (d lsr (Array.unsafe_get width j - t))
+          end
+        done;
+        Array.unsafe_set keys i ((!k lsl ib) lor i)
+      done;
+      Store.sort_ints keys;
+      let low = (1 lsl ib) - 1 in
+      let p = Array.init n (fun i -> Array.unsafe_get keys i land low) in
+      if not whole then begin
+        (* each run of equal keys: the rest of the order *)
+        let i = ref 0 in
+        while !i < n do
+          let ki = Array.unsafe_get keys !i lsr ib in
+          let j = ref (!i + 1) in
+          while !j < n && Array.unsafe_get keys !j lsr ib = ki do incr j done;
+          if !j - !i > 1 then begin
+            let s = Array.sub p !i (!j - !i) in
+            Array.stable_sort cmp s;
+            Array.blit s 0 p !i (!j - !i)
+          end;
+          i := !j
+        done
+      end;
+      p
+    end
+  end
+
 (* ---- the answer ---- *)
 
 (* A window of the index path: one more range [lo <= x <= hi] on a variable, or the words it may take (sorted). *)

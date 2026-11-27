@@ -598,15 +598,112 @@ let pair_plan (v : Store.view) (q : Query.t) ~give ~each ~(order : Top.order) =
                       | _ -> lo, hi)
                     (min_int, max_int) q.ranges
                 in
-                let clo, chi = range c and dlo, dhi = range d in
+                (* a range read off the pair's words when their order is the values' (p2's always is: an inline
+                   value; p1 may be a text, whose words are in no order: its range is the fold's alone) *)
+                let clo, chi = match Schema.find v.schema p1 with Some d1 when Value.inline d1.typ -> range c | _ -> min_int, max_int in
+                let dlo, dhi = range d in
                 Some { p1; p2 = pd.p; thing = i; desc = k0.desc; clo; chi; dlo; dhi }
               | _ -> None)
             | _ -> None)
           q.where
 
-(* the rounds of a pair plan: [ask ws] the question's state with i one of the things ws (sorted), [rows st c] the rows
-   it holds of group c, [merge] two states *)
-let pair_answer (v : Store.view) (pp : pair_plan) ~k ~ask ~rows ~merge ~init =
+(* What the fold of a pair plan's things still has to read. Each thing read off the pair comes with its p1 and p2
+   values, w1 and w2: the patterns [i p1 c] and [i p2 d] hold for it, and the fold need not look them up again (two
+   lookups a thing of three, for the latest invoices with their totals) when c, or d, is in no other pattern of the
+   question. [Asked]: the question without them, its variables numbered again ([vars]: each variable's new number,
+   -1 for c or d left out), the ranges on c and d left to the pair's reading (it keeps the things within them, as
+   words: c's only when p1's words keep the values' order); [Direct]: nothing is left, each thing is a row (i, c, d);
+   [Whole]: the question as it is (one with Not, Or, Optional or Trunc, a variable in no pattern or out of range,
+   which the fold refuses as the plain join does). [pair_drop] false: always Whole, for the tests. *)
+let pair_drop = ref true
+
+(* the pair plans asked without a pattern of the pair, and those that needed no fold, for the tests *)
+let pair_asked = Atomic.make 0
+let pair_direct = Atomic.make 0
+
+type pair_question = Whole | Direct | Asked of Query.t * int array
+
+let pair_question (v : Store.view) (q : Query.t) (pp : pair_plan) ~c ~d ~plain =
+  let i = pp.thing in
+  let is_pc (pt : Query.pattern) = pt.p = pp.p1 && pt.e = Var i && pt.v = Var c in
+  let is_pd (pt : Query.pattern) = pt.p = pp.p2 && pt.e = Var i && pt.v = Var d in
+  let mentions x (pt : Query.pattern) = pt.e = Var x || pt.v = Var x in
+  let within = function Query.Var x -> x >= 0 && x < q.vars | _ -> true in
+  if
+    not
+      (!pair_drop && plain
+      && List.for_all (fun (pt : Query.pattern) -> within pt.e && within pt.v) q.where
+      && List.for_all (fun (x, _, _) -> x >= 0 && x < q.vars) q.ranges
+      && List.for_all (fun x -> List.exists (mentions x) q.where) (List.init q.vars Fun.id))
+  then Whole
+  else begin
+    let only x self = List.for_all (fun pt -> self pt || not (mentions x pt)) q.where in
+    let ordered = match Schema.find v.schema pp.p1 with Some d1 -> Value.inline d1.typ | None -> false in
+    let drop_c = only c is_pc && (ordered || not (List.exists (fun (x, _, _) -> x = c) q.ranges)) in
+    let drop_d = only d is_pd in
+    let left drop_c drop_d = List.filter (fun pt -> not ((drop_c && is_pc pt) || (drop_d && is_pd pt))) q.where in
+    let where = left drop_c drop_d in
+    if where = [] && List.for_all (fun (x, _, _) -> x = c || x = d) q.ranges then Direct
+    else begin
+      (* i in a pattern still: d's kept when nothing else names i *)
+      let drop_d = drop_d && List.exists (mentions i) where in
+      let where = left drop_c drop_d in
+      if not (drop_c || drop_d) then Whole
+      else begin
+        let vars = Array.make q.vars (-1) and n = ref 0 in
+        for x = 0 to q.vars - 1 do if List.exists (mentions x) where then (vars.(x) <- !n; incr n) done;
+        let side = function Query.Var x -> Query.Var vars.(x) | t -> t in
+        Asked
+          ( { Query.vars = !n; where = List.map (fun (pt : Query.pattern) -> { pt with e = side pt.e; v = side pt.v }) where;
+              ranges = List.filter_map (fun (x, lo, hi) -> if vars.(x) >= 0 then Some (vars.(x), lo, hi) else None) q.ranges },
+            vars )
+      end
+    end
+  end
+
+(* rows laid flat, a domain's: [w] words a row one after another (Top.sort_flat), [fn] rows, [fc] the cells not
+   charged yet, [fh] the place of the last thing found among the fold's things (Asked) *)
+type flat = { mutable fa : int array; mutable fn : int; mutable fc : int; mutable fh : int }
+
+let flat_append w a b =
+  if b.fn > 0 then begin
+    let need = (a.fn + b.fn) * w in
+    if need > Array.length a.fa then (let x = Array.make (max need (2 * Array.length a.fa)) 0 in Array.blit a.fa 0 x 0 (a.fn * w); a.fa <- x);
+    Array.blit b.fa 0 a.fa (a.fn * w) (b.fn * w);
+    a.fn <- a.fn + b.fn
+  end;
+  a.fc <- a.fc + b.fc;
+  a
+
+(* the number of w1 among the values ws (sorted, distinct), -1 when it is none: a table when they are dense (things
+   made together are numbered together), a binary search otherwise *)
+let index_of (ws : int array) =
+  let n = Array.length ws in
+  if n = 0 then fun _ -> -1
+  else begin
+    let lo = ws.(0) and hi = ws.(n - 1) in
+    if hi - lo >= 0 && hi - lo < (4 * n) + 1024 then begin
+      let t = Array.make (hi - lo + 1) (-1) in
+      Array.iteri (fun g w -> t.(w - lo) <- g) ws;
+      fun w -> if w < lo || w > hi then -1 else Array.unsafe_get t (w - lo)
+    end
+    else
+      fun w ->
+        let a = ref 0 and b = ref n in
+        while !a < !b do
+          let mid = (!a + !b) lsr 1 in
+          if Array.unsafe_get ws mid < w then a := mid + 1 else b := mid
+        done;
+        if !a < n && ws.(!a) = w then !a else -1
+  end
+
+(* The rows of a pair plan's Each, flat: [ask ws] the question's rows with i one of the things ws (sorted), [w] words
+   a row, [col] its Each column (c's word: its group's w1). Each group's first k things in the order and those tied
+   with the k-th are read off the pair, and the question asked of them all at once; a group whose things gave fewer
+   than k rows (a filter of the question dropped some) and has more takes the next ones, twice as many each time,
+   until it has k rows or none is left. The rows, each row's group (its number among the pair's groups, which come
+   sorted by w1), the number of groups. *)
+let pair_rows (v : Store.view) (pp : pair_plan) ~k ~w ~col ~(ask : int array -> int array -> int array -> flat) =
   Atomic.incr pair_each;
   let from = if pp.desc then pp.dhi else pp.dlo in
   let past w2 = if pp.desc then w2 < pp.dlo else w2 > pp.dhi in
@@ -622,7 +719,12 @@ let pair_answer (v : Store.view) (pp : pair_plan) ~k ~ask ~rows ~merge ~init =
         if w >= pp.clo && w <= pp.chi then (qs.(!n) <- q; ws.(!n) <- w; incr n)
       done;
       let ng = !n in
-      let r0 = Array.init ng (fun i -> Store.pr_start b k qs.(i)) and r1 = Array.init ng (fun i -> Store.pr_start b k (qs.(i) + 1)) in
+      (* group i's rows r0.(i) .. r1.(i) - 1: the next group's first row is its end *)
+      let r0 = Array.make ng 0 and r1 = Array.make ng 0 in
+      for i = 0 to ng - 1 do
+        r0.(i) <- (if i > 0 && qs.(i - 1) = qs.(i) - 1 then r1.(i - 1) else Store.pr_start b k qs.(i));
+        r1.(i) <- Store.pr_start b k (qs.(i) + 1)
+      done;
       let pos =
         Array.init ng (fun i ->
             if pp.desc then (if from = max_int then r1.(i) else Store.pr_lower b k r0.(i) r1.(i) (from + 1) min_int) - 1
@@ -630,13 +732,15 @@ let pair_answer (v : Store.view) (pp : pair_plan) ~k ~ask ~rows ~merge ~init =
             else Store.pr_lower b k r0.(i) r1.(i) from min_int)
       in
       let pend_e = Array.make ng (-1) and pend_w = Array.make ng 0 in
+      (* a group's rows are read one after another: the block's entry read once *)
+      let c = Store.pr_cursor b k in
       let pull g =
         let r = pos.(g) in
         if r < r0.(g) || r >= r1.(g) then pend_e.(g) <- -1
         else begin
-          let w2 = Store.pr_w2 b k r in
+          let w2 = Store.pr_cw2 c r in
           if past w2 then pend_e.(g) <- -1
-          else (pend_e.(g) <- Store.pr_e b k r; pend_w.(g) <- w2; pos.(g) <- (if pp.desc then r - 1 else r + 1))
+          else (pend_e.(g) <- Store.pr_ce c r; pend_w.(g) <- w2; pos.(g) <- (if pp.desc then r - 1 else r + 1))
         end
       in
       Array.sub ws 0 ng, pull, pend_e, pend_w
@@ -653,43 +757,85 @@ let pair_answer (v : Store.view) (pp : pair_plan) ~k ~ask ~rows ~merge ~init =
       groups, pull, pend_e, pend_w
   in
   let ng = Array.length groups in
-  for g = 0 to ng - 1 do pull g done;
-  let out = ref (Array.make (max 16 (ng * k)) 0) and no = ref 0 in
+  (* the things taken, each with its w2 and its group *)
+  let out = ref (Array.make (max 16 (ng * k)) 0) and out_w = ref (Array.make (max 16 (ng * k)) 0) and out_g = ref (Array.make (max 16 (ng * k)) 0) in
+  let no = ref 0 in
   (* [need] more things of group g, then those tied with the last *)
   let take g need =
     let n = ref 0 and last = ref 0 in
     while pend_e.(g) >= 0 && (!n < need || pend_w.(g) = !last) do
-      if !no = Array.length !out then (let a = Array.make (2 * !no) 0 in Array.blit !out 0 a 0 !no; out := a);
+      if !no = Array.length !out then begin
+        let grow a = let b = Array.make (2 * !no) 0 in Array.blit !a 0 b 0 !no; a := b in
+        grow out; grow out_w; grow out_g
+      end;
       !out.(!no) <- pend_e.(g);
+      !out_w.(!no) <- pend_w.(g);
+      !out_g.(!no) <- g;
       incr no;
       last := pend_w.(g);
       incr n;
       pull g
     done
   in
+  (* the things taken, sorted, with their w1 and w2 in the same order: the things are distinct (a thing is in one
+     group, and each is taken once), their offsets from the least and their places one int each when they fit *)
   let fold () =
-    let ws = Array.sub !out 0 !no in
+    let n = !no and es = !out in
     no := 0;
-    Store.sort_ints ws;
+    let perm =
+      if n < 2 then Array.init n Fun.id
+      else begin
+        let mn = ref max_int and mx = ref min_int in
+        for i = 0 to n - 1 do let e = es.(i) in if e < !mn then mn := e; if e > !mx then mx := e done;
+        let ib = Top.bits_of (n - 1) in
+        if !mx - !mn >= 0 && Top.bits_of (!mx - !mn) + ib <= 62 then begin
+          let keys = Array.init n (fun i -> ((es.(i) - !mn) lsl ib) lor i) in
+          Store.sort_ints keys;
+          let low = (1 lsl ib) - 1 in
+          Array.map (fun x -> x land low) keys
+        end
+        else (let p = Array.init n Fun.id in Array.sort (fun a b -> compare (es.(a) : int) es.(b)) p; p)
+      end
+    in
+    let ws = Array.map (fun i -> es.(i)) perm and w1s = Array.map (fun i -> groups.(!out_g.(i))) perm and w2s = Array.map (fun i -> !out_w.(i)) perm in
     Atomic.incr pair_rounds;
-    if Array.length ws = 0 then init () else ask ws
+    ask ws w1s w2s
   in
-  for g = 0 to ng - 1 do take g k done;
-  let st = ref (fold ()) in
+  for g = 0 to ng - 1 do pull g; take g k done;
+  let rows = fold () in
+  let group = index_of groups in
+  let gid = ref [||] and cnt = Array.make ng 0 in
+  (* the groups of rows from .. rows.fn - 1 *)
+  let note from =
+    if rows.fn > Array.length !gid then (let a = Array.make (max rows.fn (2 * Array.length !gid)) 0 in Array.blit !gid 0 a 0 from; gid := a);
+    let a = !gid and fa = rows.fa in
+    for r = from to rows.fn - 1 do
+      let g = group (Array.unsafe_get fa ((r * w) + col)) in
+      if g < 0 then failwith "a row of the pair's things outside the pair's groups";
+      Array.unsafe_set a r g;
+      Array.unsafe_set cnt g (Array.unsafe_get cnt g + 1)
+    done
+  in
+  note 0;
   (* the groups short of k rows that have more things: twice as many each round *)
   let more = ref 1 in
-  let short () = List.filter (fun g -> pend_e.(g) >= 0 && rows !st groups.(g) < k) (List.init ng Fun.id) in
   let rec go () =
-    match short () with
-    | [] -> ()
-    | l ->
-      more := 2 * !more;
-      List.iter (fun g -> take g (Stdlib.max 1 (k - rows !st groups.(g)) * !more)) l;
-      st := merge !st (fold ());
+    let any = ref false in
+    for g = 0 to ng - 1 do
+      if pend_e.(g) >= 0 && cnt.(g) < k then begin
+        if not !any then (any := true; more := 2 * !more);
+        take g (Stdlib.max 1 (k - cnt.(g)) * !more)
+      end
+    done;
+    if !any then begin
+      let n0 = rows.fn in
+      ignore (flat_append w rows (fold ()));
+      note n0;
       go ()
+    end
   in
   go ();
-  !st
+  rows, !gid, ng
 
 (* the state of Each's first k rows of each group, a domain's: its groups' keys in a table (Answer's), each group's
    buffer, the rows each has held at most (charged), and its k-th row at its last cut ([||]: none yet), past which a
@@ -764,6 +910,151 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
         buf.(ne) <- !m
       end
     in
+    let nw = Array.length windows in
+    (* the answer of [rows] from [first] on, their windows computed (where a page's start, with After) *)
+    let finish (rows : int array array) start first =
+      let n = Array.length rows in
+      charge_opt (n * (2 + nw));
+      if nw = 0 then
+        (* no window: no group of a row to find *)
+        { cols; n = n - first; typ = (fun j -> typs.(j)); word = (fun i j -> rows.(first + i).(j));
+          missing = (if masked then fun i j -> Top.missing cols rows.(first + i) j else none_missing); computed = none_computed; cell = no_cell }
+      else begin
+        let part, groups =
+          if ne = 0 then Array.make n 0, min n 1
+          else begin
+            (* a group a key of words, in a table of open addressing: no allocation a row *)
+            let t = table ~kw ~na:0 ~start:[||] ~cols:[||] () in
+            let part = Array.init n (fun i -> key_of rows.(i) t.buf; group t) in
+            part, t.n
+          end
+        in
+        let get i c = if masked && Top.missing cols rows.(i) c then Value.missing else Store.value v typs.(c) rows.(i).(c) in
+        let cmp_k k = let o = Array.sub ord 0 k in if masked then Top.compare_masked v typs o else Top.compare_rows v typs o in
+        let ties = Hashtbl.create 2 in
+        let tie k = match Hashtbl.find_opt ties k with Some f -> f | None -> let c = cmp_k k in let f i j = c rows.(i) rows.(j) = 0 in Hashtbl.add ties k f; f in
+        let out = Window.compute ?start ~view:v ~n ~groups ~part:(fun i -> part.(i)) ~get ~tie:(fun k -> tie k) ~typs:(fun c -> typs.(c)) windows in
+        let idx = Array.init (n - first) (fun i -> first + i) in
+        Window.check_past ~col:(fun c -> name give.(c)) windows out idx;
+        let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
+        { cols = cols + nw; n = Array.length idx; typ = (fun j -> if j < cols then typs.(j) else wt.(j - cols));
+          word = (fun i j -> if j < cols then rows.(idx.(i)).(j) else 0);
+          missing = (fun i j -> if j < cols then masked && Top.missing cols rows.(idx.(i)) j else Window.missing out.(j - cols) idx.(i));
+          computed = (fun j -> j >= cols); cell = (fun i j -> Window.cell out.(j - cols) idx.(i)) }
+      end
+    in
+    begin match if ne > 0 && order.limit > 0 then pair_plan v q ~give ~each ~order else None with
+    | Some pp ->
+      (* Each over a declared pair: the things of each group's first k rows read off it, the question's rows of them
+         laid flat (one array a domain, no group nor row made while the join runs), sorted once by the whole order,
+         then each group's first k rows and their copies kept in that order: no buffer a group, no second sort *)
+      let k = order.limit in
+      let w = if masked then cols + 1 else cols in
+      ignore (projector p give);
+      let words = Array.map (getter p) give and miss = Array.map (misser p) give in
+      let width = weight * max 1 cols in
+      (* room for one more row: its first word *)
+      let room st =
+        let o = st.fn * w in
+        if o + w > Array.length st.fa then (let x = Array.make (Stdlib.max (64 * w) (2 * Array.length st.fa)) 0 in Array.blit st.fa 0 x 0 o; st.fa <- x);
+        o
+      in
+      let added st =
+        st.fn <- st.fn + 1;
+        st.fc <- st.fc + width;
+        match ticket with Some tk when st.fc >= grain -> charge tk st.fc; st.fc <- 0 | _ -> ()
+      in
+      let step st env =
+        let o = room st in
+        let a = st.fa in
+        if masked then begin
+          let m = ref 0 in
+          for c = 0 to cols - 1 do
+            if (Array.unsafe_get miss c) env then (m := !m lor (1 lsl c); Array.unsafe_set a (o + c) 0) else Array.unsafe_set a (o + c) ((Array.unsafe_get words c) env)
+          done;
+          Array.unsafe_set a (o + cols) !m
+        end
+        else for c = 0 to cols - 1 do Array.unsafe_set a (o + c) ((Array.unsafe_get words c) env) done;
+        added st;
+        st
+      in
+      let init () = { fa = [||]; fn = 0; fc = 0; fh = 0 } in
+      let c = give.(each.(0)) and d = give.((List.hd order.keys).col) in
+      (* a column's word from the thing's w1 (-1) or w2 (-2), or from the binding's variable *)
+      let from vars = Array.map (fun x -> if x = c && vars.(c) < 0 then -1 else if x = d && vars.(d) < 0 then -2 else vars.(x)) give in
+      let ask =
+        match pair_question v q pp ~c ~d ~plain:(p.ask = None && p.derived = [||]) with
+        | Whole ->
+          (* no thing too: the fold makes the question's checks, and refuses it as the plain join does *)
+          fun ws _ _ -> fold ~any_order:true ~window:(Top.Words (pp.thing, ws)) ~init ~merge:(flat_append w) ~step ()
+        | Direct ->
+          (* each thing a row: i, c and d *)
+          Atomic.incr pair_direct;
+          let src = from (Array.init q.vars (fun x -> if x = pp.thing then 0 else -1)) in
+          fun ws w1s w2s ->
+            let st = init () in
+            Array.iteri
+              (fun t e ->
+                let o = room st in
+                for j = 0 to cols - 1 do
+                  let s = Array.unsafe_get src j in
+                  Array.unsafe_set st.fa (o + j) (if s = 0 then e else if s = -1 then w1s.(t) else w2s.(t))
+                done;
+                added st)
+              ws;
+            st
+        | Asked (q', vars) ->
+          Atomic.incr pair_asked;
+          let src = from vars and x = vars.(pp.thing) in
+          let cur = ref ([||], [||], [||]) in
+          (* the binding's thing among the fold's things: the next one in the slice, or a binary search *)
+          let place st (ws : int array) e =
+            let h = st.fh in
+            if h < Array.length ws && Array.unsafe_get ws h = e then h
+            else if h + 1 < Array.length ws && Array.unsafe_get ws (h + 1) = e then (st.fh <- h + 1; h + 1)
+            else begin
+              let lo = ref 0 and hi = ref (Array.length ws) in
+              while !lo < !hi do let mid = (!lo + !hi) lsr 1 in if Array.unsafe_get ws mid < e then lo := mid + 1 else hi := mid done;
+              st.fh <- !lo;
+              !lo
+            end
+          in
+          let step st env =
+            let o = room st in
+            let ws, w1s, w2s = !cur in
+            let t = place st ws env.(x) in
+            for j = 0 to cols - 1 do
+              let s = Array.unsafe_get src j in
+              Array.unsafe_set st.fa (o + j) (if s >= 0 then env.(s) else if s = -1 then w1s.(t) else w2s.(t))
+            done;
+            added st;
+            st
+          in
+          fun ws w1s w2s ->
+            cur := (ws, w1s, w2s);
+            Query.fold ~any_order:true ~sets:[ (x, ws) ] ~budget ?stop v q' ~init ~step ~merge:(flat_append w)
+      in
+      let rows, gid, ng = pair_rows v pp ~k ~w ~col:each.(0) ~ask in
+      (match ticket with Some tk when rows.fc > 0 -> charge tk rows.fc; rows.fc <- 0 | _ -> ());
+      let fa = rows.fa and n = rows.fn in
+      let perm = Top.sort_flat ~masked v typs ord fa w n in
+      (* in the order, each group's first k rows, then those equal to its k-th (its copies) *)
+      let same = Top.compare_flat ~masked v typs ord fa w in
+      let cnt = Array.make ng 0 and last = Array.make ng 0 and kept = Array.make n 0 and nk = ref 0 in
+      for i = 0 to n - 1 do
+        let r = Array.unsafe_get perm i in
+        let g = Array.unsafe_get gid r in
+        if cnt.(g) < k then (cnt.(g) <- cnt.(g) + 1; last.(g) <- r; kept.(!nk) <- r; incr nk)
+        else if same last.(g) r = 0 then (kept.(!nk) <- r; incr nk)
+      done;
+      let nk = !nk in
+      if nw = 0 then begin
+        charge_opt (nk * 2);
+        { cols; n = nk; typ = (fun j -> typs.(j)); word = (fun i j -> fa.((kept.(i) * w) + j));
+          missing = (if masked then fun i j -> (fa.((kept.(i) * w) + cols) lsr j) land 1 = 1 else none_missing); computed = none_computed; cell = no_cell }
+      end
+      else finish (Array.init nk (fun i -> Array.sub fa (kept.(i) * w) w)) None 0
+    | None ->
     (* the rows the windows read, where a page's start (with After), and the first of them to give *)
     let rows, start, first =
       if ne > 0 && order.limit > 0 then begin
@@ -861,20 +1152,7 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           a
         in
         (* the buffers do not depend on the order of the rows: any domain, any order *)
-        let st =
-          match pair_plan v q ~give ~each ~order with
-          | None -> fold ~any_order:true ~init ~merge ~step ()
-          | Some pp ->
-            (* a group's rows held: its buffer's, found by its key (the group's value, then the mask of a question with
-               Optionals, 0: c is a pattern's) *)
-            let rows (st : firsts) c =
-              let t = st.gt in
-              t.buf.(0) <- c;
-              if kw > 1 then t.buf.(1) <- 0;
-              match find_group t with Some g -> st.bufs.(g).n | None -> 0
-            in
-            pair_answer v pp ~k ~init ~merge ~rows ~ask:(fun ws -> fold ~any_order:true ~window:(Top.Words (pp.thing, ws)) ~init ~merge ~step ())
-        in
+        let st = fold ~any_order:true ~init ~merge ~step () in
         (match ticket with Some tk when st.gt.cells > 0 -> charge tk st.gt.cells; st.gt.cells <- 0 | _ -> ());
         let firsts = List.init st.gt.n (fun g -> let b = st.bufs.(g) in if not small then Top.sort_cut mk k b; Array.sub b.a 0 b.n) in
         let all = { Top.a = Array.concat firsts; n = 0 } in
@@ -998,30 +1276,8 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
           in
           Array.append tail page, Some { Window.skip = t; offset = st.count - t; init }, t
     in
-    let n = Array.length rows in
-    let part, groups =
-      if ne = 0 then Array.make n 0, min n 1
-      else begin
-        (* a group a key of words, in a table of open addressing: no allocation a row *)
-        let t = table ~kw ~na:0 ~start:[||] ~cols:[||] () in
-        let part = Array.init n (fun i -> key_of rows.(i) t.buf; group t) in
-        part, t.n
-      end
-    in
-    let nw = Array.length windows in
-    charge_opt (n * (2 + nw));
-    let get i c = if masked && Top.missing cols rows.(i) c then Value.missing else Store.value v typs.(c) rows.(i).(c) in
-    let cmp_k k = let o = Array.sub ord 0 k in if masked then Top.compare_masked v typs o else Top.compare_rows v typs o in
-    let ties = Hashtbl.create 2 in
-    let tie k = match Hashtbl.find_opt ties k with Some f -> f | None -> let c = cmp_k k in let f i j = c rows.(i) rows.(j) = 0 in Hashtbl.add ties k f; f in
-    let out = Window.compute ?start ~view:v ~n ~groups ~part:(fun i -> part.(i)) ~get ~tie:(fun k -> tie k) ~typs:(fun c -> typs.(c)) windows in
-    let idx = Array.init (n - first) (fun i -> first + i) in
-    Window.check_past ~col:(fun c -> name give.(c)) windows out idx;
-    let wt = Array.map (Window.typ (fun c -> typs.(c))) windows in
-    { cols = cols + nw; n = Array.length idx; typ = (fun j -> if j < cols then typs.(j) else wt.(j - cols));
-      word = (fun i j -> if j < cols then rows.(idx.(i)).(j) else 0);
-      missing = (fun i j -> if j < cols then masked && Top.missing cols rows.(idx.(i)) j else Window.missing out.(j - cols) idx.(i));
-      computed = (fun j -> j >= cols); cell = (fun i j -> Window.cell out.(j - cols) idx.(i)) }
+    finish rows start first
+    end
   | Wire.Over ((Wire.Group (keys, aggs) as base), each, windows) ->
     Array.iter var keys;
     Array.iter (fun a -> Option.iter var (Agg.var_of a)) aggs;

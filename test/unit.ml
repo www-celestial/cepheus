@@ -2240,4 +2240,69 @@ let () =
       "follows and Less", 3, [ Ask.Pattern { Query.e = Var 0; p = follows; v = Var 1 }; Ask.Less (0, 1); Ask.Pattern { Query.e = Var 0; p = name; v = Var 2 } ], [| 0; 1; 2 |];
       "a Not", 4, [ Ask.Pattern { Query.e = Var 0; p = name; v = Var 3 }; opt (Var 0) follows 1; Ask.Not [ Ask.Pattern { Query.e = Var 0; p = age; v = Var 2 } ] ], [| 0; 1 |] ]
 
+(* Store.sort_ints (the high digit first, then each bucket by insertion or by its low digits) against Array.sort, on
+   every shape of range; Top.sort_flat (rows laid flat) against a stable sort of the rows by Top.compare_rows and
+   compare_masked: the same order, and rows equal in the order kept in the order of their numbers *)
+let () =
+  section "sorts of ints and of flat rows";
+  let r = Random.State.make [| 11 |] in
+  let any () = Random.State.bits r lor (Random.State.bits r lsl 30) lor (Random.State.bits r lsl 60) in
+  let shapes =
+    [ "62 bits", (fun _ -> any () land max_int); "any int", (fun _ -> any ()); "18 bits", (fun _ -> Random.State.int r 245_000);
+      "negative", (fun _ -> - Random.State.int r 1_000_000); "high bits shared", (fun _ -> (1 lsl 61) + Random.State.int r 5000);
+      "a date and a number", (fun i -> ((1_700_000_000_000 + (1000 * Random.State.int r 40)) lsl 15) lor (i land 0x7FFF)); "all equal", (fun _ -> 42);
+      "two values", (fun _ -> if Random.State.bool r then min_int else max_int); "buckets of 33", (fun i -> (i / 33) lsl 51) ]
+  in
+  List.iter
+    (fun (what, f) ->
+      List.iter
+        (fun n ->
+          let a = Array.init n f in
+          let want = Array.copy a in
+          Array.sort compare want;
+          Store.sort_ints a;
+          C.check (a = want) "sort_ints, %s, %d ints: Array.sort's order" what n)
+        [ 0; 1; 2; 63; 64; 65; 100; 1000; 5000; 40_000 ])
+    shapes;
+  let v = Cepheus.view (fork Cepheus.empty) in
+  let keep = !Question.Top.flat_min in
+  List.iter
+    (fun n ->
+      for trial = 1 to 12 do
+        (* 3 columns: an int of a narrow or a wide range, a date of few values (ties), a link; with a mask or not *)
+        let masked = trial mod 3 = 0 in
+        let cols = 3 in
+        let w = if masked then cols + 1 else cols in
+        let wide = trial mod 2 = 0 in
+        let rows =
+          Array.init n (fun _ ->
+              let row = Array.make w 0 in
+              row.(0) <- (if wide then any () else Random.State.int r 50);
+              row.(1) <- 1_700_000_000_000 + (1000 * Random.State.int r 7);
+              row.(2) <- Random.State.int r 4;
+              if masked then begin
+                let m = Random.State.int r 8 land Random.State.int r 8 in
+                for c = 0 to cols - 1 do if (m lsr c) land 1 = 1 then row.(c) <- 0 done;
+                row.(cols) <- m
+              end;
+              row)
+        in
+        let typs = [| Value.Tint; Value.Tdate; Value.Tlink |] in
+        let keys = List.filteri (fun i _ -> i < 1 + Random.State.int r 3) (List.sort (fun _ _ -> if Random.State.bool r then 1 else -1) [ 0; 1; 2 ]) in
+        let ord = Question.Top.full cols (List.map (fun c -> { Question.Top.col = c; desc = Random.State.bool r }) keys) in
+        let flat = Array.concat (Array.to_list rows) in
+        let cmp = if masked then Question.Top.compare_masked v typs ord else Question.Top.compare_rows v typs ord in
+        let want = Array.init n Fun.id in
+        Array.stable_sort (fun i j -> cmp rows.(i) rows.(j)) want;
+        List.iter
+          (fun m ->
+            Question.Top.flat_min := m;
+            let got = Question.Top.sort_flat ~masked v typs ord flat w n in
+            C.check (got = want) "sort_flat, %d rows, trial %d (%s, %s, flat_min %d): the stable order of compare_rows" n trial
+              (if masked then "missing cells" else "no mask") (if wide then "a wide int" else "a narrow one") m)
+          [ 2; 64 ]
+      done)
+    [ 0; 1; 2; 5; 64; 300; 3000 ];
+  Question.Top.flat_min := keep
+
 let () = C.finish "unit"
