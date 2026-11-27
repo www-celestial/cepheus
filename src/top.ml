@@ -382,7 +382,9 @@ let sort_flat ?(masked = false) v (typs : Value.typ array) (ord : key array) (a 
   let cols = Array.length typs and nk = Array.length ord in
   let cmp = compare_flat ~masked v typs ord a w in
   let[@inline] miss o c = masked && (Array.unsafe_get a (o + cols) lsr c) land 1 = 1 in
-  let by_cmp () = let p = Array.init n Fun.id in Array.stable_sort cmp p; p in
+  (* int arrays filled by loops: Array.init makes a polymorphic array, each cell set by caml_modify *)
+  let numbers () = let p = Array.make n 0 in for i = 0 to n - 1 do Array.unsafe_set p i i done; p in
+  let by_cmp () = let p = numbers () in Array.stable_sort cmp p; p in
   let m0 = ref 0 in
   while !m0 < nk && Value.inline typs.(ord.(!m0).col) do incr m0 done;
   let m0 = !m0 in
@@ -437,7 +439,8 @@ let sort_flat ?(masked = false) v (typs : Value.typ array) (ord : key array) (a 
       done;
       Store.sort_ints keys;
       let low = (1 lsl ib) - 1 in
-      let p = Array.init n (fun i -> Array.unsafe_get keys i land low) in
+      let p = Array.make n 0 in
+      for i = 0 to n - 1 do Array.unsafe_set p i (Array.unsafe_get keys i land low) done;
       if not whole then begin
         (* each run of equal keys: the rest of the order *)
         let i = ref 0 in

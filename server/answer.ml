@@ -725,12 +725,13 @@ let pair_rows (v : Store.view) (pp : pair_plan) ~k ~w ~col ~(ask : int array -> 
         r0.(i) <- (if i > 0 && qs.(i - 1) = qs.(i) - 1 then r1.(i - 1) else Store.pr_start b k qs.(i));
         r1.(i) <- Store.pr_start b k (qs.(i) + 1)
       done;
-      let pos =
-        Array.init ng (fun i ->
-            if pp.desc then (if from = max_int then r1.(i) else Store.pr_lower b k r0.(i) r1.(i) (from + 1) min_int) - 1
-            else if from = min_int then r0.(i)
-            else Store.pr_lower b k r0.(i) r1.(i) from min_int)
-      in
+      let pos = Array.make ng 0 in
+      for i = 0 to ng - 1 do
+        pos.(i) <-
+          (if pp.desc then (if from = max_int then r1.(i) else Store.pr_lower b k r0.(i) r1.(i) (from + 1) min_int) - 1
+           else if from = min_int then r0.(i)
+           else Store.pr_lower b k r0.(i) r1.(i) from min_int)
+      done;
       let pend_e = Array.make ng (-1) and pend_w = Array.make ng 0 in
       (* a group's rows are read one after another: the block's entry read once *)
       let c = Store.pr_cursor b k in
@@ -780,24 +781,31 @@ let pair_rows (v : Store.view) (pp : pair_plan) ~k ~w ~col ~(ask : int array -> 
   (* the things taken, sorted, with their w1 and w2 in the same order: the things are distinct (a thing is in one
      group, and each is taken once), their offsets from the least and their places one int each when they fit *)
   let fold () =
-    let n = !no and es = !out in
+    let n = !no and es = !out and ow = !out_w and og = !out_g in
     no := 0;
-    let perm =
-      if n < 2 then Array.init n Fun.id
-      else begin
-        let mn = ref max_int and mx = ref min_int in
-        for i = 0 to n - 1 do let e = es.(i) in if e < !mn then mn := e; if e > !mx then mx := e done;
-        let ib = Top.bits_of (n - 1) in
-        if !mx - !mn >= 0 && Top.bits_of (!mx - !mn) + ib <= 62 then begin
-          let keys = Array.init n (fun i -> ((es.(i) - !mn) lsl ib) lor i) in
-          Store.sort_ints keys;
-          let low = (1 lsl ib) - 1 in
-          Array.map (fun x -> x land low) keys
-        end
-        else (let p = Array.init n Fun.id in Array.sort (fun a b -> compare (es.(a) : int) es.(b)) p; p)
-      end
+    (* int arrays filled by loops: Array.map and Array.init make a polymorphic array, each cell set by caml_modify *)
+    let ws = Array.make n 0 and w1s = Array.make n 0 and w2s = Array.make n 0 in
+    let put p i =
+      Array.unsafe_set ws p (Array.unsafe_get es i);
+      Array.unsafe_set w1s p (Array.unsafe_get groups (Array.unsafe_get og i));
+      Array.unsafe_set w2s p (Array.unsafe_get ow i)
     in
-    let ws = Array.map (fun i -> es.(i)) perm and w1s = Array.map (fun i -> groups.(!out_g.(i))) perm and w2s = Array.map (fun i -> !out_w.(i)) perm in
+    let mn = ref max_int and mx = ref min_int in
+    for i = 0 to n - 1 do let e = Array.unsafe_get es i in if e < !mn then mn := e; if e > !mx then mx := e done;
+    let ib = Top.bits_of (max 1 (n - 1)) in
+    if n >= 2 && !mx - !mn >= 0 && Top.bits_of (!mx - !mn) + ib <= 62 then begin
+      let keys = Array.make n 0 in
+      for i = 0 to n - 1 do Array.unsafe_set keys i (((Array.unsafe_get es i - !mn) lsl ib) lor i) done;
+      Store.sort_ints keys;
+      let low = (1 lsl ib) - 1 in
+      for p = 0 to n - 1 do put p (Array.unsafe_get keys p land low) done
+    end
+    else begin
+      let perm = Array.make n 0 in
+      for i = 0 to n - 1 do Array.unsafe_set perm i i done;
+      Array.sort (fun a b -> compare (es.(a) : int) es.(b)) perm;
+      for p = 0 to n - 1 do put p (Array.unsafe_get perm p) done
+    end;
     Atomic.incr pair_rounds;
     ask ws w1s w2s
   in
