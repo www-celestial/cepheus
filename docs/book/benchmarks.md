@@ -94,6 +94,86 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", talk, Strange Loop 2015, and the HdrHistogram and
 wrk2 tools.
 
+## `Each` over an index of two properties, its rows laid flat (2026-11-27), at 1 million facts
+
+**Method.** The data, the questions and PostgreSQL's side of [the section
+below](#an-index-of-two-properties-2026-11-26-at-1-million-facts): rbench's 10,000 clients and 245,000 invoices in one
+bottom run; PostgreSQL 18.6 with its B-tree on `(client, date DESC, id)`, its time the `Execution Time` of
+`EXPLAIN (ANALYZE, TIMING OFF)`, the engine alone as `Answer.answer` is Cepheus's. Five sides in each of 21 rounds,
+their order turned at each round: main's binaries (636fe67) and this change's, on the copy where `invoice/date` is
+declared `within` `invoice/client` (the pair read) and on the database of format 9 (no pair: `Each`'s plain way, which
+this change keeps); PostgreSQL. Each side a median of 3 runs (`wbench.exe pair`, `pg.sh pairs`). Given: the median of
+the 21 rounds' medians, in brackets their least and largest; a ratio, the median of the rounds' ratios [least, largest];
+p, the two-sided Mann-Whitney U test of the two sides' 21 medians ([Mann
+1947](references.md#benchmarking-and-statistics): does one side's time tend to be smaller, with no assumption on its
+distribution). Every side pinned to two physical cores (4 logical CPUs by `taskset`, PostgreSQL's server too, 4
+domains), another job's benchmark on the other two, a load average of 7.9 to 12.6 on the 8 threads. Where the time goes:
+each phase timed by a build that prints them (100 questions, 4 domains, the mean of the last 20), and 200 stack samples
+of one process on one core under gdb, every 0.1 s.
+
+| question | main, the pair declared | now, the pair declared | PostgreSQL 18.6 | now / main | now |
+|---|---:|---:|---:|---:|---|
+| the 3 latest invoices of each client, `Each`, `Limit: 3`, 30,000 rows | 35.0 ms [30.0, 260] | **14.0 ms** [10.2, 90.7] | `LATERAL`: 61.3 ms [51.6, 264] | 0.38 [0.07, 1.44] | Cepheus, 4.4 times, faster in 21 rounds of 21 (1.8 times with main) |
+| the last invoice of each client, `Limit: 1`, 10,000 rows | 14.7 ms [12.3, 73.0] | **4.87 ms** [4.15, 32.8] | `DISTINCT ON`: 141 ms [112, 408] | 0.36 [0.13, 1.56] | Cepheus, 29 times (9.6 with main) |
+| the 10 latest invoices of the busiest client (44 invoices), `Sort`, `Limit: 10` | 14.1 µs [11.9, 97.0] | **14.1 µs** [12.9, 58.9] | an index scan: 106 µs [99.0, 345] | 1.00 [0.50, 3.29] | Cepheus, 7.5 times (7.5 with main) |
+| the 10 after them, `After` | 33.9 µs [27.9, 249] | **35.0 µs** [30.0, 168] | a keyset: 155 µs [144, 727] | 1.00 [0.32, 2.13] | Cepheus, 4.4 times (4.6 with main) |
+| the 3 latest invoices of each client, no pair declared (format 9) | 169 ms [146, 386] | 175 ms [128, 494] | `LATERAL`: **61.3 ms** [51.6, 264] | 0.94 [0.34, 3.18] | PostgreSQL, 2.9 times (2.8 with main) |
+
+The Mann-Whitney tests: now against main, p 0.000002 for the 3 latest invoices of each client (now faster in 20 rounds
+of 21) and p < 0.000001 for the last of each (20 of 21); the page of one client and the one after it, p 0.53 and 0.77:
+main's times, as they should be (their path did not change). Now against PostgreSQL, p < 0.000001 for the four. Without
+the pair, now against main p 0.63 (and 0.96 for the last of each, 118 ms against 117): the same. The memory at its peak
+over the four questions, the pair declared: 78.3 MB [70.7, 92.2] against main's 81.7 [69.3, 98.0] (p 0.17); without it,
+94.6 against 95.9 (p 0.67). On a calmer machine (a load of 2 to 5), each question timed 21 times, three times over, the
+medians (`prof.exe timed`): the 3 latest invoices of each client 9.7 ms against main's 31.8 on 4 domains, 10.2 against
+35.6 on one; the last of each 4.8 against 13.2 on 4 domains.
+
+![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries (the pair read, a buffer a group in Each) and a coloured one for now (the rows laid flat, sorted once), an arrow from the first to the second. Against PostgreSQL's LATERAL, the 3 latest invoices of each client go from Cepheus 1.8 times faster to 4.4 times; the last invoice of each client from 9.6 times to 29 times against DISTINCT ON; the 10 latest of the busiest client stay 7.5 times faster than an index scan and the 10 after them about 4.5 times faster than a keyset; the 3 latest invoices of each client without the pair stay PostgreSQL's, 2.8 to 2.9 times faster.](images/bench-pairs.svg)
+
+| where the 3 latest invoices of each client go (4 domains) | main | now |
+|---|---:|---:|
+| the things read off the pair, now with their client and date, in their ids' order | 3.0 ms | 2.7 ms |
+| the question asked of them and its rows kept (main: `Each`'s buffers, merged; now: laid flat), a group short of rows given more | 22.3 ms | 4.9 ms |
+| the 30,000 rows gathered and sorted by the whole order | 8.9 ms | 1.9 ms |
+| each client's first 3 rows kept, in that order | in the buffers | 0.4 ms |
+| the sum of the phases (each the mean of 20 questions) | 34.2 ms | 9.9 ms |
+| the whole question, the median of 63 (`prof.exe timed`) | 31.8 ms | **9.7 ms** |
+
+- **What changed.** Before, the question was asked of the 30,000 things read off the pair with `Each`'s general state: a
+  table of the groups by their client, a buffer a group, each row an array put at its place in its buffer, every
+  domain's buffers merged row by row, then every group's rows gathered and sorted again by date; and, for windows the
+  question did not have, a second table of each row's group. Each row cost about 540 ns there beyond the fold's own
+  work, mostly in waiting for memory: a binding's group is wherever its client fell (a slot of the table, its key, the
+  buffer's record, its array, its k-th row, one cache miss each), the rows to sort are 30,000 arrays wherever the heap
+  put them, and the collector, which stops every domain at each minor collection, found 30,000 rows made arrays and up
+  to 10,000 buffers a domain. Now each thing read off the pair comes with its client and its date (the pair holds both),
+  and the things are put in the order of their ids by a bit each in a bitmap of their span (each one's place the bits
+  set before its own: no sort); the question is asked without its patterns of the pair (`[i invoice/client c]`,
+  `[i invoice/date d]`), so the fold reads one value a thing, its total, where it read three; each row is written as
+  words at the end of one array a domain; the rows are sorted once, by one int a row: the date's bits and the row's
+  number, in as many radix passes of 11 bits as the date needs (`Top.sort_flat`, `Store.sort_ints`: 5 passes for 30,000
+  rows, the rows of one date sorted by the comparisons); and one pass in that order keeps each client's first 3 rows and
+  their copies. With no window, the answer is read from that array: no row is made. A question that reads a value the
+  pair has not, or none (each thing then a row), and one with `Not`, `Or`, `Optional` or `Trunc` (asked as it is, with
+  the same rows) take this way too; the tests compare both paths' answers byte for byte as the server codes them.
+- **Two slow spots found on the way.** `Store.sort_ints` went on with its passes while the range shifted right by the
+  pass's bits was not 0, and a shift of 64 or more is the shift modulo 64 on x86: a range of 56 bits or more took 29
+  passes instead of 6 (the ints still sorted, the extra passes sorting them again; 6.8 ms against 1.5 for 30,000 ints of
+  62 bits). `Array.map` and `Array.init` make a polymorphic array and set each cell through `caml_modify`: a tenth of
+  the samples on one core, now plain loops.
+- **A wrong answer found on the way.** A range on the groups' variable was read off the pair's words even when the
+  groups are a text (whose words are in no order): an `Each` by a text field with a range on it answered rows where the
+  join refuses the question ("a range needs an int, float, date or money variable"). The pair now leaves such a range to
+  the question's checks, which run even when no thing was read off the pair.
+- **What did not change.** The page of one client (the 10 latest and the 10 after them) reads the pair as before (its
+  times here are main's, within their noise). `Each` without the pair keeps its buffers (0.94 [0.34, 3.18] times main's,
+  p 0.63); writes, merges, the files and the open are the same code as main's, not measured again
+  ([below](#an-index-of-two-properties-2026-11-26-at-1-million-facts)).
+- **Where PostgreSQL still wins.** `Each` without the pair: 61.3 ms against 175, PostgreSQL 2.9 times faster: its index
+  on `(client, date DESC, id)` reads 3 rows a client, where Cepheus reads all 245,000 invoices and keeps each client's 3
+  latest. Declaring the pair is the way (one fact, then a merge); an index of three columns or more, or two orders of
+  one property, Cepheus has not.
+
 ## An index of two properties (2026-11-26), at 1 million facts
 
 **Method.** rbench's data (`rbench.exe load`: 10,000 clients of 100 cities, 245,000 invoices, 990,040 facts in one
@@ -134,8 +214,6 @@ The sign tests of the four: p 0.0002 or less against main (the 10 after them fas
 | the merge of the run and 100 new invoices into one | 228 ms [178, 340] | 226 ms [173, 768] | 256 ms [220, 384] | 1.07 [0.67, 2.00], p 0.66 |
 | the run's file | 8.6 MB | 8.6 MB | 10.6 MB | 1.22: the pair 1.9 MB, 7.8 bytes a row |
 
-![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, the pair declared, an arrow from the first to the second. The 3 latest invoices of each client go from PostgreSQL's LATERAL 2.5 times faster to Cepheus 1.7 times; the last invoice of each client from Cepheus 1.2 times to 9.3 times against DISTINCT ON; the 10 latest of the busiest client from 1.7 to 7.6 times against an index scan; the 10 after them from 2.5 to 3.3 times against a keyset.](images/bench-pairs.svg)
-
 - **`Each` with `Limit`, off the pair.** The 3 latest invoices of each client read 30,000 rows of the pair (the last
   3 of each group, and those tied with the third), then ask the question with the invoice one of those 30,000 things:
   the 245,000 invoices are no longer read. Where its 30 ms go (the samples, before the merge of main, on one core,
@@ -146,6 +224,8 @@ The sign tests of the four: p 0.0002 or less against main (the 10 after them fas
   client), a seventh in the collector (each row an array), a twentieth in reading the pair. The fold of the question
   alone over 30,000 things takes 2.0 ms on the 8 cores: what remains is the rows' work, the same as without the pair,
   for 30,000 rows in place of 245,000. The design expected 15 to 25 ms; the median is 30.8 ms, the least 26.8.
+  Since, 14.0 ms (9.7 on a calmer machine): [its rows laid
+  flat](#each-over-an-index-of-two-properties-its-rows-laid-flat-2026-11-27-at-1-million-facts).
 - **A page of one client.** The 10 latest of a client read its group's last 10 rows (a binary search of the groups'
   values, then of the group's rows), and the 10 after them its rows from the cursor's date down; PostgreSQL's
   index scan and keyset read the same 10 rows of its B-tree, and spend the difference in its executor's fixed costs.
@@ -374,7 +454,9 @@ words made, not its values, as PostgreSQL's `EXPLAIN (ANALYZE, TIMING OFF)` make
   the 245,000 invoices once (the samples: a quarter of the time reading each invoice's date, `Store.value1`). Only an
   index of two properties would read as few rows; it is designed, not built (it needs a new run format and a
   declaration, the owner's calls). Built since: [an index of two
-  properties](#an-index-of-two-properties-2026-11-26-at-1-million-facts), 30.8 ms against `LATERAL`'s 52.3.
+  properties](#an-index-of-two-properties-2026-11-26-at-1-million-facts), 30.8 ms against `LATERAL`'s 52.3; then
+  [its rows laid flat](#each-over-an-index-of-two-properties-its-rows-laid-flat-2026-11-27-at-1-million-facts), 14.0 ms
+  against 61.3 in the same rounds.
 - **`Less` and `Optional`: rows made from one buffer.** A `Less` check spent 58 % of its time making its rows'
   values, the join 42 %; the samples of `Optional` over every client, 44 % in minor collections, each of which stops
   every domain of the process. `Ask`'s bindings are now written into one buffer a domain, where each binding was a new

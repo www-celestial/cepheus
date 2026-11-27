@@ -761,3 +761,7 @@ cited on the [comparison](comparison.md) page.
 - **[Cooper 2010]** B. F. Cooper, A. Silberstein, E. Tam, R. Ramakrishnan, R. Sears. Benchmarking Cloud Serving
   Systems with YCSB. *SoCC* 2010, 143–154. https://doi.org/10.1145/1807128.1807152
   — The Zipf exponent 0.99 of YCSB, used for the traces.
+- **[Mann 1947]** H. B. Mann, D. R. Whitney. On a Test of Whether one of Two Random Variables is Stochastically Larger
+  than the Other. *The Annals of Mathematical Statistics* 18(1), 50–60, 1947. https://doi.org/10.1214/aoms/1177730491
+  — The U test of two sides' rounds: does one side's time tend to be smaller, with no assumption on its distribution;
+  two-sided, by its normal approximation with the correction for ties.

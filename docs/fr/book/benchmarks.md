@@ -116,6 +116,93 @@ Results", SC 2015. [Le Boudec 2010] J.-Y. Le Boudec, "Performance Evaluation of 
 EPFL Press, 2010. [Tene 2015] G. Tene, "How NOT to Measure Latency", conférence, Strange Loop 2015, et les outils
 HdrHistogram et wrk2.
 
+## `Each` sur un index de deux propriétés, ses lignes mises à plat (2026-11-27), à 1 million de faits
+
+**Méthode.** Les données, les questions et le côté PostgreSQL de [la section
+suivante](#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits) : les 10 000 clients et 245 000 factures de
+rbench dans un seul run du bas ; PostgreSQL 18.6 avec son B-tree sur `(client, date DESC, id)`, son temps
+l'`Execution Time` d'`EXPLAIN (ANALYZE, TIMING OFF)`, le moteur seul comme `Answer.answer` l'est pour Cepheus. Cinq
+côtés à chacun des 21 tours, leur ordre tourné à chaque tour : les binaires de main (636fe67) et ceux de ce changement,
+sur la copie où `invoice/date` est déclarée `within` `invoice/client` (la paire lue) et sur la base de format 9 (sans
+paire : la façon ordinaire d'`Each`, que ce changement garde) ; PostgreSQL. Chaque côté une médiane de 3 exécutions
+(`wbench.exe pair`, `pg.sh pairs`). Donnés : la médiane des médianes des 21 tours, entre crochets leur plus petite et
+leur plus grande ; un rapport, la médiane des rapports des tours [plus petit, plus grand] ; p, le test U de Mann-Whitney
+bilatéral sur les 21 médianes des deux côtés ([Mann 1947](references.md#le-benchmarking-et-les-statistiques) : le temps
+d'un côté tend-il à être plus petit, sans hypothèse sur sa loi). Chaque côté épinglé sur deux cœurs physiques (4 CPU
+logiques par `taskset`, le serveur de PostgreSQL aussi, 4 domains), le benchmark d'un autre job sur les deux autres, une
+charge moyenne de 7,9 à 12,6 sur les 8 threads. Où le temps passe : chaque phase chronométrée par une version qui les
+affiche (100 questions, 4 domains, la moyenne des 20 dernières), et 200 échantillons de la pile d'un process sur un seul
+cœur sous gdb, toutes les 0,1 s.
+
+| question | main, la paire déclarée | maintenant, la paire déclarée | PostgreSQL 18.6 | maintenant / main | maintenant |
+|---|---:|---:|---:|---:|---|
+| les 3 dernières factures de chaque client, `Each`, `Limit: 3`, 30 000 lignes | 35,0 ms [30,0, 260] | **14,0 ms** [10,2, 90,7] | `LATERAL` : 61,3 ms [51,6, 264] | 0,38 [0,07, 1,44] | Cepheus, 4,4 fois, plus rapide à 21 tours sur 21 (1,8 fois avec main) |
+| la dernière facture de chaque client, `Limit: 1`, 10 000 lignes | 14,7 ms [12,3, 73,0] | **4,87 ms** [4,15, 32,8] | `DISTINCT ON` : 141 ms [112, 408] | 0,36 [0,13, 1,56] | Cepheus, 29 fois (9,6 avec main) |
+| les 10 dernières factures du client qui en a le plus (44 factures), `Sort`, `Limit: 10` | 14,1 µs [11,9, 97,0] | **14,1 µs** [12,9, 58,9] | un index scan : 106 µs [99,0, 345] | 1,00 [0,50, 3,29] | Cepheus, 7,5 fois (7,5 avec main) |
+| les 10 suivantes, `After` | 33,9 µs [27,9, 249] | **35,0 µs** [30,0, 168] | un keyset : 155 µs [144, 727] | 1,00 [0,32, 2,13] | Cepheus, 4,4 fois (4,6 avec main) |
+| les 3 dernières factures de chaque client, sans paire déclarée (format 9) | 169 ms [146, 386] | 175 ms [128, 494] | `LATERAL` : **61,3 ms** [51,6, 264] | 0,94 [0,34, 3,18] | PostgreSQL, 2,9 fois (2,8 avec main) |
+
+Les tests de Mann-Whitney : maintenant contre main, p 0,000002 pour les 3 dernières factures de chaque client
+(maintenant plus rapide à 20 tours sur 21) et p < 0,000001 pour la dernière de chacun (20 sur 21) ; la page d'un client
+et la suivante, p 0,53 et 0,77 : les temps de main, comme il se doit (leur chemin n'a pas changé). Maintenant contre
+PostgreSQL, p < 0,000001 pour les quatre. Sans la paire, maintenant contre main p 0,63 (et 0,96 pour la dernière de
+chacun, 118 ms contre 117) : les mêmes. La mémoire à son pic sur les quatre questions, la paire déclarée : 78,3 MB
+[70,7, 92,2] contre 81,7 [69,3, 98,0] pour main (p 0,17) ; sans elle, 94,6 contre 95,9 (p 0,67). Sur une machine plus
+calme (une charge de 2 à 5), chaque question chronométrée 21 fois, trois fois de suite, les médianes
+(`prof.exe timed`) : les 3 dernières factures de chaque client 9,7 ms contre 31,8 pour main sur 4 domains, 10,2 contre
+35,6 sur un seul ; la dernière de chacun 4,8 contre 13,2 sur 4 domains.
+
+![Une ligne par question, sur une échelle logarithmique du nombre de fois qu'un côté est plus rapide, un point gris pour les binaires de main (la paire lue, un buffer par groupe dans Each) et un point en couleur pour maintenant (les lignes mises à plat, triées une fois), une flèche du premier au second. Contre le LATERAL de PostgreSQL, les 3 dernières factures de chaque client passent de Cepheus 1,8 fois plus rapide à 4,4 fois ; la dernière facture de chaque client de 9,6 à 29 fois contre DISTINCT ON ; les 10 dernières du client qui en a le plus restent 7,5 fois plus rapides qu'un index scan et les 10 suivantes environ 4,5 fois plus rapides qu'un keyset ; les 3 dernières factures de chaque client sans la paire restent à PostgreSQL, 2,8 à 2,9 fois plus rapide.](images/bench-pairs.svg)
+
+| où vont les 3 dernières factures de chaque client (4 domains) | main | maintenant |
+|---|---:|---:|
+| les choses lues sur la paire, maintenant avec leur client et leur date, dans l'ordre de leurs ids | 3,0 ms | 2,7 ms |
+| la question posée sur elles et ses lignes gardées (main : les buffers d'`Each`, fusionnés ; maintenant : à plat), un groupe à qui il manque des lignes servi à nouveau | 22,3 ms | 4,9 ms |
+| les 30 000 lignes rassemblées et triées par tout l'ordre | 8,9 ms | 1,9 ms |
+| les 3 premières lignes de chaque client gardées, dans cet ordre | dans les buffers | 0,4 ms |
+| la somme des phases (chacune la moyenne de 20 questions) | 34,2 ms | 9,9 ms |
+| la question entière, la médiane de 63 (`prof.exe timed`) | 31,8 ms | **9,7 ms** |
+
+- **Ce qui a changé.** Avant, la question était posée aux 30 000 choses lues sur la paire avec l'état général d'`Each` :
+  une table des groupes par leur client, un buffer (une mémoire tampon) par groupe, chaque ligne un tableau mis à sa
+  place dans son buffer, les buffers de chaque domain fusionnés ligne par ligne, puis les lignes de tous les groupes
+  rassemblées et triées à nouveau par date ; et, pour des fenêtres que la question n'avait pas, une seconde table du
+  groupe de chaque ligne. Chaque ligne y coûtait environ 540 ns en plus du travail du fold lui-même, surtout à attendre
+  la mémoire : le groupe d'un binding est là où son client est tombé (une case de la table, sa clé, l'enregistrement du
+  buffer, son tableau, sa k-ième ligne, un cache miss chacun, la donnée absente du cache du processeur), les lignes à
+  trier sont 30 000 tableaux là où le tas les a mis, et le collector (le ramasse-miettes), qui arrête chaque domain à
+  chaque collection mineure, trouvait 30 000 lignes faites tableaux et jusqu'à 10 000 buffers par domain. Maintenant
+  chaque chose lue sur la paire vient avec son client et sa date (la paire tient les deux), et les choses sont mises
+  dans l'ordre de leurs ids par un bit chacune dans une bitmap (un tableau de bits) de leur étendue (la place de
+  chacune, les bits posés avant le sien : aucun tri) ; la question est posée sans ses patterns de la paire
+  (`[i invoice/client c]`, `[i invoice/date d]`), si bien que le fold lit une valeur par chose, son total, là où il en
+  lisait trois ; chaque ligne est écrite en mots à la fin d'un seul tableau par domain ; les lignes sont triées une
+  fois, par un int par ligne : les bits de la date et le numéro de la ligne, en autant de passes de radix de 11 bits que
+  la date en demande (`Top.sort_flat`, `Store.sort_ints` : 5 passes pour 30 000 lignes, les lignes d'une même date
+  triées par comparaisons) ; et une passe dans cet ordre garde les 3 premières lignes de chaque client et leurs copies.
+  Sans fenêtre, la réponse est lue dans ce tableau : aucune ligne n'est faite. Une question qui lit une valeur que la
+  paire n'a pas, ou aucune (chaque chose est alors une ligne), et une avec `Not`, `Or`, `Optional` ou `Trunc` (posée
+  telle quelle, avec les mêmes lignes) prennent aussi ce chemin ; les tests comparent les réponses des deux chemins
+  octet par octet, telles que le serveur les code.
+- **Deux lenteurs trouvées en chemin.** `Store.sort_ints` continuait ses passes tant que l'étendue décalée à droite des
+  bits de la passe n'était pas 0, et un décalage de 64 ou plus est le décalage modulo 64 sur x86 : une étendue de 56
+  bits ou plus prenait 29 passes au lieu de 6 (les ints toujours triés, les passes en trop les triant à nouveau ; 6,8 ms
+  contre 1,5 pour 30 000 ints de 62 bits). `Array.map` et `Array.init` font un tableau polymorphe et posent chaque case
+  par `caml_modify` : un dixième des échantillons sur un cœur, maintenant de simples boucles.
+- **Une réponse fausse trouvée en chemin.** Un intervalle sur la variable des groupes était lu sur les mots de la paire
+  même quand les groupes sont un texte (dont les mots ne sont dans aucun ordre) : un `Each` par un champ texte avec un
+  intervalle dessus répondait des lignes là où la jointure refuse la question (« a range needs an int, float, date or
+  money variable »). La paire laisse maintenant un tel intervalle aux vérifications de la question, qui tournent même
+  quand aucune chose n'a été lue sur la paire.
+- **Ce qui n'a pas changé.** La page d'un client (les 10 dernières et les 10 suivantes) lit la paire comme avant (ses
+  temps ici sont ceux de main, dans leur bruit). `Each` sans la paire garde ses buffers (0,94 [0,34, 3,18] fois le temps
+  de main, p 0,63) ; les écritures, les merges, les fichiers et l'ouverture sont le même code que celui de main, pas
+  mesurés à nouveau ([plus bas](#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits)).
+- **Où PostgreSQL gagne encore.** `Each` sans la paire : 61,3 ms contre 175, PostgreSQL 2,9 fois plus rapide : son index
+  sur `(client, date DESC, id)` lit 3 lignes par client, là où Cepheus lit les 245 000 factures et garde les 3 dernières
+  de chaque client. Déclarer la paire en est le moyen (un fait, puis un merge) ; un index de trois colonnes ou plus, ou
+  deux ordres d'une même propriété, Cepheus ne les a pas.
+
 ## Un index de deux propriétés (2026-11-26), à 1 million de faits
 
 **Méthode.** Les données de rbench (`rbench.exe load` : 10 000 clients de 100 villes, 245 000 factures, 990 040 faits
@@ -157,8 +244,6 @@ temps de main : 0,96, 1,00, 0,98 et 0,95 fois ceux de main (p 0,064 ou plus).
 | le merge du run et de 100 nouvelles factures en un seul | 228 ms [178, 340] | 226 ms [173, 768] | 256 ms [220, 384] | 1,07 [0,67, 2,00], p 0,66 |
 | le fichier du run | 8,6 MB | 8,6 MB | 10,6 MB | 1,22 : la paire 1,9 MB, 7,8 octets par ligne |
 
-![Une ligne par question, sur une échelle logarithmique du nombre de fois qu'un côté est plus rapide, un point gris pour les binaires de main et un point en couleur pour maintenant, la paire déclarée, une flèche du premier au second. Les 3 dernières factures de chaque client passent du LATERAL de PostgreSQL 2,5 fois plus rapide à Cepheus 1,7 fois ; la dernière facture de chaque client de Cepheus 1,2 fois à 9,3 fois contre DISTINCT ON ; les 10 dernières du client qui en a le plus de 1,7 à 7,6 fois contre un index scan ; les 10 suivantes de 2,5 à 3,3 fois contre un keyset.](images/bench-pairs.svg)
-
 - **`Each` avec `Limit`, dans la paire.** Les 3 dernières factures de chaque client lisent 30 000 lignes de la paire
   (les 3 dernières de chaque groupe, et celles à égalité avec la troisième), puis posent la question avec la facture
   l'une de ces 30 000 choses : les 245 000 factures ne sont plus lues. Où passent ses 30 ms (les échantillons, avant
@@ -169,7 +254,8 @@ temps de main : 0,96, 1,00, 0,98 et 0,95 fois ceux de main (p 0,064 ou plus).
   un septième dans le collector (le ramasse-miettes : chaque ligne est un tableau), un vingtième à lire la paire. Le
   fold de la question seul sur 30 000 choses prend 2,0 ms sur les 8 cœurs : ce qui reste est le travail des lignes, le
   même que sans la paire, pour 30 000 lignes au lieu de 245 000. La conception attendait 15 à 25 ms ; la médiane est de
-  30,8 ms, la plus petite de 26,8.
+  30,8 ms, la plus petite de 26,8. Depuis, 14,0 ms (9,7 sur une machine plus calme) : [ses lignes mises à
+  plat](#each-sur-un-index-de-deux-propriétés-ses-lignes-mises-à-plat-2026-11-27-à-1-million-de-faits).
 - **Une page d'un client.** Les 10 dernières d'un client lisent les 10 dernières lignes de son groupe (une recherche
   dichotomique dans les valeurs des groupes, puis dans les lignes du groupe), et les 10 suivantes ses lignes depuis la
   date du curseur en descendant ; l'index scan et le keyset de PostgreSQL lisent les mêmes 10 lignes de son B-tree, et
@@ -424,7 +510,10 @@ n'en envoie aucune).
   quart du temps à lire la date de chaque facture, `Store.value1`). Seul un index de deux propriétés lirait aussi peu
   de lignes ; il est conçu, pas construit (il demande un nouveau format de run et une déclaration, des choix du
   propriétaire). Construit depuis : [un index de deux
-  propriétés](#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits), 30,8 ms contre 52,3 pour le `LATERAL`.
+  propriétés](#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits), 30,8 ms contre 52,3 pour le `LATERAL` ;
+  puis [ses lignes mises à
+  plat](#each-sur-un-index-de-deux-propriétés-ses-lignes-mises-à-plat-2026-11-27-à-1-million-de-faits), 14,0 ms contre
+  61,3 dans les mêmes tours.
 - **`Less` et `Optional` : des lignes faites depuis un seul buffer.** Un check de `Less` passait 58 % de son temps à
   faire les valeurs de ses lignes, la jointure 42 % ; les échantillons d'`Optional` sur chaque client, 44 % dans les
   minor collections (les collections du petit heap des valeurs jeunes), dont chacune arrête chaque domain du process.

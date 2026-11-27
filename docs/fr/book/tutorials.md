@@ -1510,13 +1510,14 @@ SELECT date::date, total FROM invoice WHERE client = 1 AND date >= '2028-01-01' 
 `LATERAL` de PostgreSQL a besoin de la table des clients pour partir (un client sans facture est une ligne qu'il lit
 aussi) et sa page keyset d'une condition écrite à la main sur la date de la dernière ligne ; la question de Cepheus est
 celle du tutoriel 14, et l'`After` de sa page est la dernière ligne. Mesuré sur 10 000 clients et 245 000 factures
-([les benchmarks](benchmarks.md#un-index-de-deux-propriétés-2026-11-26-à-1-million-de-faits)), les 3 dernières
-factures de chaque client prennent 30,8 ms contre 52,3 pour le `LATERAL` (131 ms sans l'index), la dernière de chacun
-12,4 ms contre 115 pour `DISTINCT ON`, les 10 dernières d'un client 13,1 µs contre 100 pour un index scan et les 10
-suivantes 47,9 µs contre 157 pour un keyset ; l'index prend 1,9 MB des 10,6 du run, celui de PostgreSQL 9,95 MB à côté
-de sa table :
+([les
+benchmarks](benchmarks.md#each-sur-un-index-de-deux-propriétés-ses-lignes-mises-à-plat-2026-11-27-à-1-million-de-faits)),
+les 3 dernières factures de chaque client prennent 14,0 ms contre 61,3 pour le `LATERAL` (175 ms sans l'index), la
+dernière de chacun 4,87 ms contre 141 pour `DISTINCT ON`, les 10 dernières d'un client 14,1 µs contre 106 pour un index
+scan et les 10 suivantes 35,0 µs contre 155 pour un keyset ; l'index prend 1,9 MB des 10,6 du run, celui de PostgreSQL
+9,95 MB à côté de sa table :
 
-![Une ligne par question, sur une échelle logarithmique du nombre de fois qu'un côté est plus rapide, un point gris pour les binaires de main et un point en couleur pour maintenant, la paire déclarée, une flèche du premier au second. Les 3 dernières factures de chaque client passent du LATERAL de PostgreSQL 2,5 fois plus rapide à Cepheus 1,7 fois ; la dernière facture de chaque client de Cepheus 1,2 fois à 9,3 fois contre DISTINCT ON ; les 10 dernières du client qui en a le plus de 1,7 à 7,6 fois contre un index scan ; les 10 suivantes de 2,5 à 3,3 fois contre un keyset.](images/bench-pairs.svg)
+![Une ligne par question, sur une échelle logarithmique du nombre de fois qu'un côté est plus rapide, un point gris pour les binaires de main (la paire lue, un buffer par groupe dans Each) et un point en couleur pour maintenant (les lignes mises à plat, triées une fois), une flèche du premier au second. Contre le LATERAL de PostgreSQL, les 3 dernières factures de chaque client passent de Cepheus 1,8 fois plus rapide à 4,4 fois ; la dernière facture de chaque client de 9,6 à 29 fois contre DISTINCT ON ; les 10 dernières du client qui en a le plus restent 7,5 fois plus rapides qu'un index scan et les 10 suivantes environ 4,5 fois plus rapides qu'un keyset ; les 3 dernières factures de chaque client sans la paire restent à PostgreSQL, 2,8 à 2,9 fois plus rapide.](images/bench-pairs.svg)
 
 **Là où PostgreSQL gagne encore** : il fait autant d'index d'une table qu'on lui en demande, sur n'importe quelles
 colonnes, trois ou plus dans une même clé ; Cepheus ordonne un champ à l'intérieur d'un autre champ au plus, donc un
@@ -1556,7 +1557,7 @@ celles de PostgreSQL par libpq.
 | un total cumulé de 245 000 factures, par date (`Running(Sum(t))` ; `sum(total) OVER (ORDER BY date ...)`) | **92,9 ms** | 228 ms | Cepheus, 2,5 fois |
 | une moyenne mobile de 3 des factures de chaque client (`Running(Avg(t), last = 3)`, `Each` ; `avg(...) OVER (PARTITION BY client ... ROWS 2 PRECEDING)`) | **157 ms** | 328 ms | Cepheus, 2,1 fois |
 | les 3 dernières factures de chacun de 10 000 clients (`Each`, `Limit: 3` ; `LATERAL` avec un index sur `(client, date)`) | 106 ms | **53,8 ms** | PostgreSQL, 2,0 fois |
-| la même, la date déclarée `within` le client ([tutoriel 15](#15-les-dernières-factures-de-chaque-client-lues-dans-un-index-de-deux-champs)) | **30,8 ms** | 52,3 ms | Cepheus, 1,7 fois |
+| la même, la date déclarée `within` le client ([tutoriel 15](#15-les-dernières-factures-de-chaque-client-lues-dans-un-index-de-deux-champs)) | **14,0 ms** | 61,3 ms | Cepheus, 4,4 fois |
 | les totaux mensuels avec leur total cumulé, le mois d'avant et une moyenne sur 3 mois (un rapport ; `sum(sum(...)) OVER`, `lag`, `avg`) | **24,0 ms** | 196 ms | Cepheus, 8,2 fois |
 | une page de 51 avec son total cumulé après la 200 000e facture (`After` ; une sous-requête et une condition de keyset) | **79,6 ms** | 195 ms | Cepheus, 2,5 fois |
 

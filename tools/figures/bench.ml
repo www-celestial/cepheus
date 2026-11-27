@@ -307,42 +307,46 @@ let rows docs =
         "Le point gris : les binaires de main (ec4bb86) ; le point en couleur : maintenant ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus : la médiane des tours alternés sur les mêmes lignes, Cepheus sur 8 domains, PostgreSQL dans un seul process. Chaque valeur : Cepheus.ask à côté d'un programme qui reçoit les lignes de PostgreSQL par libpq ; le moteur seul : les mots d'index de Cepheus comme son serveur répond, à côté de l'EXPLAIN ANALYZE de PostgreSQL ; les cascades sur un fork jeté, celles de PostgreSQL annulées. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. Temps : docs/book/benchmarks.md.")
     ~alt:(fun l -> tr l "Rows with every value made, and cascades: how many times faster each side was with main and is now, in each scope" "Les lignes avec chaque valeur faite, et les cascades : combien de fois chaque côté était plus rapide avec main et l'est maintenant, dans chaque périmètre")
 
-(* 6. an index of two properties: each question with main's binaries (a grey dot) and now, the pair declared (a coloured
-   one), on a log scale of PostgreSQL's time over Cepheus's *)
+(* 6. an index of two properties: each question with main's binaries (a grey dot: the pair read, Each's buffer a
+   group) and now (a coloured one: its rows laid flat), on a log scale of PostgreSQL's time over Cepheus's; the same
+   question on the database without the pair last *)
 let pairs docs =
-  let rows = table (Filename.concat docs "book/benchmarks.md") "## An index of two properties" in
+  let rows = table (Filename.concat docs "book/benchmarks.md") "## `Each` over an index of two properties" in
   let want =
     [ "the 3 latest invoices", "Each, Limit: 3 (LATERAL)", "Each, Limit: 3 (LATERAL)";
       "the last invoice", "Limit: 1 (DISTINCT ON)", "Limit: 1 (DISTINCT ON)";
       "the 10 latest invoices", "a client's 10 latest (an index scan)", "les 10 dernières d'un client (index scan)";
-      "the 10 after them", "   the 10 after them (a keyset)", "   les 10 suivantes (un keyset)" ]
+      "the 10 after them", "   the 10 after them (a keyset)", "   les 10 suivantes (un keyset)";
+      "no pair", "Each, Limit: 3, no pair (LATERAL)", "Each, Limit: 3, sans paire (LATERAL)" ]
   in
-  if List.length rows <> List.length want then failwith "benchmarks.md, An index of two properties: the table's rows changed";
+  if List.length rows <> List.length want then failwith "benchmarks.md, Each over an index of two properties: the table's rows changed";
   let contains s sub = let n = String.length sub in let rec go i = i + n <= String.length s && (String.sub s i n = sub || go (i + 1)) in go 0 in
   let data l =
     List.map2
       (fun r (key, en, fr) ->
-        if not (contains (List.hd r) key) then failwith ("benchmarks.md, An index of two properties: no row " ^ key);
+        if not (contains (List.hd r) key) then failwith ("benchmarks.md, Each over an index of two properties: no row " ^ key);
         tr l en fr, get (List.nth r 1), get (List.nth r 2), get (List.nth r 3))
       rows want
   in
   both docs "bench-pairs.svg" (fun l f ->
-      text f ~cls:"h" 16 22 (tr l "An index of two properties, at 1 million facts: main, then the pair declared" "Un index de deux propriétés, à 1 million de faits : main, puis la paire déclarée");
+      text f ~cls:"h" 16 22 (tr l "Each over an index of two properties, at 1 million facts: main, then now" "Each sur un index de deux propriétés, à 1 million de faits : main, puis maintenant");
       let top = 84 and rh = 24 in
-      let cx = 560 and k = 160. in
+      (* from a quarter to 64 times: the last invoice of each client is past 16 times now *)
+      let cx = 500 and k = 115. in
       let x r = cx + int_of_float (k *. log10 r) in
       let rs = data l in
       let bottom = top + (List.length rs * rh) in
       text f ~cls:"s sm" 380 (top - 30) ~anchor:"end" (tr l "main → now · PostgreSQL" "main → maintenant · PostgreSQL");
-      text f ~cls:"a sm" (cx + 8) (top - 30) (tr l "Cepheus faster →" "Cepheus plus rapide →");
-      text f ~cls:"sm" (cx - 8) (top - 30) ~anchor:"end" (tr l "← PostgreSQL faster" "← PostgreSQL plus rapide");
+      (* a line above the columns' heading: the French one is long *)
+      text f ~cls:"a sm" (cx + 8) (top - 46) (tr l "Cepheus faster →" "Cepheus plus rapide →");
+      text f ~cls:"sm" (cx - 8) (top - 46) ~anchor:"end" (tr l "← PostgreSQL faster" "← PostgreSQL plus rapide");
       text f ~cls:"s sm" 742 (top - 30) (tr l "main → now" "main → maintenant");
       List.iter
         (fun r ->
           let xr = x r in
           line f "grid" xr (top - 16) xr bottom;
           text f ~cls:"s sm" ~anchor:"middle" xr (top - 6) (nb l (if r < 1. then Printf.sprintf "%g×" (1. /. r) else Printf.sprintf "%g×" r)))
-        [ 0.5; 1.; 2.; 4.; 8. ];
+        [ 0.5; 1.; 2.; 4.; 8.; 16.; 32.; 64. ];
       line f "axis" cx (top - 16) cx bottom;
       let side r = if r >= 1.1 then "a" else if r <= 1. /. 1.1 then "s2" else "s" in
       let times r = Printf.sprintf "%.1f×" (if r >= 1. then r else 1. /. r) in
@@ -363,9 +367,9 @@ let pairs docs =
           spans f ~cls:"sm" 742 (y + 15) [ side rm, nb l (times rm); "s", " → "; side rn ^ " h", nb l (times rn) ])
         rs;
       let y = para f ~n:120 16 (bottom + 24)
-          (tr l "The grey dot is main's binaries (e3a9b29, no index of two properties), the coloured one now (invoice/date within invoice/client), on a log scale of PostgreSQL 18.6's time over Cepheus's, PostgreSQL with its index on (client, date DESC, id): the median of 21 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. Times: docs/book/benchmarks.md."
-             "Le point gris : les binaires de main (e3a9b29, sans index de deux propriétés) ; le point en couleur : maintenant (invoice/date within invoice/client) ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus, PostgreSQL avec son index sur (client, date DESC, id) : la médiane de 21 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. Temps : docs/book/benchmarks.md.") in
-      860, y, tr l "An index of two properties: how many times faster each side was with main and is now, question by question" "Un index de deux propriétés : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
+          (tr l "The grey dot is main's binaries (636fe67: the pair read, a buffer a group in Each), the coloured one now (the rows laid flat, sorted once), invoice/date within invoice/client, the last row on the database without it; on a log scale of PostgreSQL 18.6's time over Cepheus's, PostgreSQL with its index on (client, date DESC, id): the median of 21 rounds alternated on the same rows. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. Times: docs/book/benchmarks.md."
+             "Le point gris : les binaires de main (636fe67 : la paire lue, un buffer par groupe dans Each) ; le point en couleur : maintenant (les lignes mises à plat, triées une fois), invoice/date within invoice/client, la dernière ligne sur la base sans elle ; sur une échelle logarithmique du temps de PostgreSQL 18.6 sur celui de Cepheus, PostgreSQL avec son index sur (client, date DESC, id) : la médiane de 21 tours alternés sur les mêmes lignes. Un rapport en bleu, Cepheus est plus rapide ; en orange, PostgreSQL ; en gris, à 10 % près. Temps : docs/book/benchmarks.md.") in
+      860, y, tr l "Each over an index of two properties: how many times faster each side was with main and is now, question by question" "Each sur un index de deux propriétés : combien de fois chaque côté était plus rapide avec main et l'est maintenant, question par question")
 
 let draw docs =
   windows docs;
