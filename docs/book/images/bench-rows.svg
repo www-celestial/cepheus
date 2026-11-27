@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="426" viewBox="0 0 900 426">
+<title>Rows with every value made, and cascades: how many times faster each side was with main and is now, in each scope</title>
+<style>
+text{font-family:system-ui,sans-serif;font-size:13px;fill:#1f2328}
+.h{font-weight:600}
+.sm{font-size:11.5px}
+.s{fill:#57606a}
+.a{fill:#3a5ad9}
+.off{fill:#8c959f}
+.bg{fill:#ffffff}
+.gr{stroke:#57606a;stroke-width:1.2;fill:none}
+.grid{stroke:#eaeef2;stroke-width:1}
+.axis{stroke:#8c959f;stroke-width:1}
+.fs{fill:#57606a}
+.s1{fill:#257de0}
+.s2{fill:#f47230}
+@media (prefers-color-scheme:dark){
+text{fill:#e6edf3}
+.s{fill:#9198a1}
+.a{fill:#8fa8ff}
+.off{fill:#6e7681}
+.bg{fill:#0d1117}
+.gr{stroke:#9198a1}
+.grid{stroke:#262c36}
+.axis{stroke:#6e7681}
+.fs{fill:#9198a1}
+.s1{fill:#338ced}
+.s2{fill:#e76624}
+}
+</style>
+<rect class="bg" width="900" height="426"/>
+<text class="h" x="16" y="22">Rows with every value made, and cascades, at 1 million facts: main, then now</text>
+<text class="s sm" x="380" y="54" text-anchor="end">main → now · PostgreSQL</text>
+<text class="a sm" x="578" y="54">Cepheus faster →</text>
+<text class="sm" x="562" y="54" text-anchor="end">← PostgreSQL faster</text>
+<text class="s sm" x="782" y="54">main → now</text>
+<line class="grid" x1="480" y1="68" x2="480" y2="300"/>
+<text class="s sm" x="480" y="78" text-anchor="middle">4×</text>
+<line class="grid" x1="525" y1="68" x2="525" y2="300"/>
+<text class="s sm" x="525" y="78" text-anchor="middle">2×</text>
+<line class="grid" x1="570" y1="68" x2="570" y2="300"/>
+<text class="s sm" x="570" y="78" text-anchor="middle">1×</text>
+<line class="grid" x1="615" y1="68" x2="615" y2="300"/>
+<text class="s sm" x="615" y="78" text-anchor="middle">2×</text>
+<line class="grid" x1="660" y1="68" x2="660" y2="300"/>
+<text class="s sm" x="660" y="78" text-anchor="middle">4×</text>
+<line class="grid" x1="705" y1="68" x2="705" y2="300"/>
+<text class="s sm" x="705" y="78" text-anchor="middle">8×</text>
+<line class="grid" x1="750" y1="68" x2="750" y2="300"/>
+<text class="s sm" x="750" y="78" text-anchor="middle">16×</text>
+<line class="axis" x1="570" y1="68" x2="570" y2="300"/>
+<text class="sm" x="16" y="99">Less(a, b), every value</text>
+<text class="s sm" x="380" y="99" text-anchor="end">7.58 → 4.47 ms · 6.69 ms</text>
+<line class="gr" x1="562" y1="95" x2="583" y2="95"/>
+<polygon class="fs" points="589.0,95.0 581.0,91.0 581.0,99.0"/>
+<circle class="bg" cx="562" cy="95" r="6"/>
+<circle class="off" cx="562" cy="95" r="4"/>
+<circle class="bg" cx="596" cy="95" r="7"/>
+<circle class="s1" cx="596" cy="95" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="99"><tspan class="s2">1.1×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.5×</tspan></text>
+<text class="s sm" x="30" y="123">the engine alone</text>
+<text class="s sm" x="380" y="123" text-anchor="end">3.62 → 2.24 ms · 3.68 ms</text>
+<line class="gr" x1="571" y1="119" x2="589" y2="119"/>
+<polygon class="fs" points="595.0,119.0 587.0,115.0 587.0,123.0"/>
+<circle class="bg" cx="571" cy="119" r="6"/>
+<circle class="off" cx="571" cy="119" r="4"/>
+<circle class="bg" cx="602" cy="119" r="7"/>
+<circle class="s1" cx="602" cy="119" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="123"><tspan class="s">1.0×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.6×</tspan></text>
+<text class="sm" x="16" y="147">Less, a range, every value</text>
+<text class="s sm" x="380" y="147" text-anchor="end">21.9 → 18.2 ms · 28.7 ms</text>
+<line class="gr" x1="587" y1="143" x2="599" y2="143"/>
+<circle class="bg" cx="587" cy="143" r="6"/>
+<circle class="off" cx="587" cy="143" r="4"/>
+<circle class="bg" cx="599" cy="143" r="7"/>
+<circle class="s1" cx="599" cy="143" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="147"><tspan class="a">1.3×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.6×</tspan></text>
+<text class="s sm" x="30" y="171">the engine alone</text>
+<text class="s sm" x="380" y="171" text-anchor="end">10.1 → 8.19 ms · 19.4 ms</text>
+<line class="gr" x1="612" y1="167" x2="626" y2="167"/>
+<circle class="bg" cx="612" cy="167" r="6"/>
+<circle class="off" cx="612" cy="167" r="4"/>
+<circle class="bg" cx="626" cy="167" r="7"/>
+<circle class="s1" cx="626" cy="167" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="171"><tspan class="a">1.9×</tspan><tspan class="s"> → </tspan><tspan class="a h">2.4×</tspan></text>
+<text class="sm" x="16" y="195">Optional, every value</text>
+<text class="s sm" x="380" y="195" text-anchor="end">15.7 → 8.82 ms · 17.5 ms</text>
+<line class="gr" x1="577" y1="191" x2="601" y2="191"/>
+<polygon class="fs" points="607.0,191.0 599.0,187.0 599.0,195.0"/>
+<circle class="bg" cx="577" cy="191" r="6"/>
+<circle class="off" cx="577" cy="191" r="4"/>
+<circle class="bg" cx="614" cy="191" r="7"/>
+<circle class="s1" cx="614" cy="191" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="195"><tspan class="a">1.1×</tspan><tspan class="s"> → </tspan><tspan class="a h">2.0×</tspan></text>
+<text class="s sm" x="30" y="219">the engine alone</text>
+<text class="s sm" x="380" y="219" text-anchor="end">9.52 → 5.67 ms · 12.1 ms</text>
+<line class="gr" x1="585" y1="215" x2="606" y2="215"/>
+<polygon class="fs" points="612.0,215.0 604.0,211.0 604.0,219.0"/>
+<circle class="bg" cx="585" cy="215" r="6"/>
+<circle class="off" cx="585" cy="215" r="4"/>
+<circle class="bg" cx="619" cy="215" r="7"/>
+<circle class="s1" cx="619" cy="215" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="219"><tspan class="a">1.3×</tspan><tspan class="s"> → </tspan><tspan class="a h">2.1×</tspan></text>
+<text class="sm" x="16" y="243">cascade, 10,000 lines</text>
+<text class="s sm" x="380" y="243" text-anchor="end">19.9 → 16.7 ms · 4.92 ms</text>
+<line class="gr" x1="479" y1="239" x2="491" y2="239"/>
+<circle class="bg" cx="479" cy="239" r="6"/>
+<circle class="off" cx="479" cy="239" r="4"/>
+<circle class="bg" cx="491" cy="239" r="7"/>
+<circle class="s2" cx="491" cy="239" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="243"><tspan class="s2">4.0×</tspan><tspan class="s"> → </tspan><tspan class="s2 h">3.4×</tspan></text>
+<text class="sm" x="16" y="267">cascade, 100 lines</text>
+<text class="s sm" x="380" y="267" text-anchor="end">140 → 129 µs · 171 µs</text>
+<line class="gr" x1="583" y1="263" x2="588" y2="263"/>
+<circle class="bg" cx="583" cy="263" r="6"/>
+<circle class="off" cx="583" cy="263" r="4"/>
+<circle class="bg" cx="588" cy="263" r="7"/>
+<circle class="s1" cx="588" cy="263" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="267"><tspan class="a">1.2×</tspan><tspan class="s"> → </tspan><tspan class="a h">1.3×</tspan></text>
+<text class="sm" x="16" y="291">clear, 10,000 notes</text>
+<text class="s sm" x="380" y="291" text-anchor="end">9.50 → 6.21 ms · 88.7 ms</text>
+<line class="gr" x1="715" y1="287" x2="730" y2="287"/>
+<polygon class="fs" points="736.0,287.0 728.0,283.0 728.0,291.0"/>
+<circle class="bg" cx="715" cy="287" r="6"/>
+<circle class="off" cx="715" cy="287" r="4"/>
+<circle class="bg" cx="743" cy="287" r="7"/>
+<circle class="s1" cx="743" cy="287" r="5"/>
+<text class="sm" xml:space="preserve" x="782" y="291"><tspan class="a">9.3×</tspan><tspan class="s"> → </tspan><tspan class="a h">14.3×</tspan></text>
+<text class="s" x="16" y="324">The grey dot is main's binaries (ec4bb86), the coloured one now, on a log scale of PostgreSQL 18.6's time over</text>
+<text class="s" x="16" y="341">Cepheus's: the median of the rounds alternated on the same rows, Cepheus on 8 domains, PostgreSQL in one process. Every</text>
+<text class="s" x="16" y="358">value: Cepheus.ask beside a program that receives PostgreSQL's rows through libpq; the engine alone: Cepheus's index</text>
+<text class="s" x="16" y="375">words as its server answers, beside PostgreSQL's EXPLAIN ANALYZE; the cascades on a fork thrown away, PostgreSQL's</text>
+<text class="s" x="16" y="392">rolled back. A ratio in blue, Cepheus is faster; in orange, PostgreSQL; in grey, within 10 %. Times:</text>
+<text class="s" x="16" y="409">docs/book/benchmarks.md.</text>
+</svg>

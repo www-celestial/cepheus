@@ -1067,6 +1067,18 @@ let rec answer ?(order = Top.none) ?(extra = []) ?(budget = max_int) ?stop ?tick
     (* a row's words, and with Optionals the mask of its missing cells after them (Ask.projector's) *)
     let row =
       if not masked && p.derived = [||] then fun acc env -> for i = 0 to k - 1 do push acc env.(give.(i)) done
+      else if p.derived = [||] then begin
+        (* with Optionals: each cell's word, or 0 and its bit in the mask, pushed as they come (no row made) *)
+        if k > Ask.max_optional_var then Query.bad "a question with Optional gives at most %d columns, not %d" Ask.max_optional_var k;
+        let m = p.nv in
+        fun acc env ->
+          let mask = env.(m) and r = ref 0 in
+          for c = 0 to k - 1 do
+            let x = give.(c) in
+            if (mask lsr x) land 1 = 1 then (r := !r lor (1 lsl c); push acc 0) else push acc env.(x)
+          done;
+          push acc !r
+      end
       else begin
         let project = projector p give in
         let w = if masked then k + 1 else k in

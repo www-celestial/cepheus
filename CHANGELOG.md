@@ -317,6 +317,20 @@ The invoices app's questions (2026-11-19), one client, µs, the median of 101 ro
   to 21.9 ms, `Optional` 16.8 to 15.1 with every value made (PostgreSQL 3.64, 20.0 and 12.1; as the server answers them
   3.70, 10.5 and 10.0); a cascade of 10,000 lines 30.0 to 21.8 ms (PostgreSQL still 4.2 times faster: it marks a row
   deleted and touches its indexes at `VACUUM`) ([benchmarks](docs/book/benchmarks.md#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts)).
+- **Rows with every value made, and cascades** (2026-11-26, 1 M facts, rounds alternated with main's binaries and
+  PostgreSQL 18.6, each side in the same scope): `Optional`'s rows written into the fold's shared buffer,
+  `Cepheus.ask`'s rows gathered in chunks and listed once (a row of up to 4 columns made in place), the server's
+  `Optional` rows pushed as words, `Less`'s bounds with no closure and a counted slice read straight from its run, the
+  values a property takes read from its value index's rank words; a cascade's maps of ints built in one pass
+  (`Store.IM.of_sorted`, O(n), where unions of halves made some 65 words a binding) and its changes gathered in arrays.
+  With every value made, beside a program that receives PostgreSQL's rows through libpq: the `Less` check 7.58 to
+  4.47 ms (PostgreSQL 6.69), the `Less` range 21.9 to 18.2 (28.7), `Optional` over every client 15.7 to 8.82 (17.5); the
+  engine alone, beside `EXPLAIN ANALYZE`: 3.62 to 2.24 (3.68), 10.1 to 8.19 (19.4), 9.52 to 5.67 (12.1); a cascade of
+  10,000 lines 19.9 to 16.7 ms (PostgreSQL 4.92, still 3.4 times faster: it marks its rows and leaves its indexes to
+  `VACUUM`), a `clear` of 10,000 notes 9.50 to 6.21 ms; Cepheus on 8 domains, PostgreSQL in one process (on one core
+  PostgreSQL's sequential scan still answers the `Less` check 1.3 times faster). The same answers, of the same types, in
+  the same order; the same bytes on the disk
+  ([benchmarks](docs/book/benchmarks.md#rows-with-every-value-made-and-cascades-2026-11-26-at-1-million-facts)).
 
 ### Fixes
 

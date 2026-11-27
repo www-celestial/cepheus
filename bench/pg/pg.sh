@@ -9,7 +9,10 @@
 #                              WORKERS=k allows k parallel workers a query (k + 1 processes; default: PostgreSQL's, 2);
 #                              QS=Q4,Q5 only those; RUNS runs each (21), summarised by bench.exe stats
 #   pg.sh ops ROOT             the questions of bench.exe pages that Less and Optional answer (a < b, a range below a
-#                              value, LEFT JOIN), inside the server (engine only); RUNS runs each (21); adds an index
+#                              value, LEFT JOIN) in three scopes: inside the server (engine only: no output made), with
+#                              every value made into its text form at the server (EXPLAIN's SERIALIZE TEXT, not sent),
+#                              every value received by a program (pgbench, one client, prepared, the mean latency of a
+#                              2-second run: libpq reads each row into its result); RUNS runs each (21); adds an index
 #                              on invoice (total), as a user who asks that question makes
 #   pg.sh write ROOT NCLIENTS CLIENTS SECS   durable inserts of an invoice row; RATE=r inserts a second in all (open loop);
 #                              COUNTER=1: each transaction increments one counter row that every client shares instead
@@ -153,6 +156,14 @@ ops)
     for r in $(seq "$runs"); do
       psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
     done | stats "$q engine only"
+    for r in $(seq "$runs"); do
+      psql -X -At -c "EXPLAIN (ANALYZE, TIMING OFF, SERIALIZE TEXT) $sql" | sed -n 's/Execution Time: \([0-9.]*\) ms/\1/p'
+    done | stats "$q every value made (serialized)"
+    printf '%s;\n' "$sql" > "$root/ops-$q.sql"
+    for r in $(seq "$runs"); do
+      pgbench -n -M prepared -c 1 -j 1 -T 2 -f "$root/ops-$q.sql" 2>/dev/null | sed -n 's/latency average = \([0-9.]*\) ms/\1/p'
+    done | stats "$q every value received (libpq)"
+    rm -f "$root/ops-$q.sql"
   done
   ;;
 reports)

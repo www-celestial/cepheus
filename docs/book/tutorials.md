@@ -1486,20 +1486,22 @@ Measured on the benchmarks' data at 1 million facts (11,363 clients, 227,260 inv
 rows in PostgreSQL 18.6, on a machine that other jobs shared (a load average of 5 to 6.5 on its 8 threads); the
 method, every number and its range are in [the benchmarks](benchmarks.md#less-optional-and-one-shared-counter-2026-11-25-at-1-million-facts);
 the rows of `Less`, `Optional`, the cascades and the windows were measured again after the work on [the cases
-PostgreSQL still won](benchmarks.md#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts) (2026-11-26, a load
-of 2.5 to 5.9).
+PostgreSQL still won](benchmarks.md#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts) (2026-11-26, a load of
+2.5 to 5.9), and those of `Less`, `Optional` over every client and the cascades once more after [rows with every value
+made](benchmarks.md#rows-with-every-value-made-and-cascades-2026-11-26-at-1-million-facts) (a load of 2.0 to 4.0), with
+every value received on both sides: `Cepheus.ask`'s rows beside a program that receives PostgreSQL's through libpq.
 
 | question | Cepheus | PostgreSQL 18.6 | |
 |---|---:|---:|---|
 | 64 writers on one counter (`Incr`; a counter row) | **5,890 writes a second** | 154 | Cepheus, 38 times |
 | the clients of a city with the clients each follows (`Optional`; `LEFT JOIN`), 490 rows | **0.077 ms** | 0.441 ms | Cepheus, 5.7 times |
-| every client with the clients each follows, 56,797 rows | 15.1 ms | **12.1 ms** | PostgreSQL, 1.2 times |
-| the follow links to a newer client (`Less(a, b)`; `a < b`), 28,250 rows | 8.50 ms | **3.64 ms** | PostgreSQL, 2.3 times |
-| the invoices below one invoice's total (`Less`; `total < (SELECT ...)`), 122,962 rows | 21.9 ms | **20.0 ms** | about the same |
+| every client with the clients each follows, 56,797 rows | **8.82 ms** | 17.5 ms | Cepheus, 2.0 times |
+| the follow links to a newer client (`Less(a, b)`; `a < b`), 28,262 rows | **4.47 ms** | 6.69 ms | Cepheus, 1.5 times |
+| the invoices below one invoice's total (`Less`; `total < (SELECT ...)`), 122,962 rows | **18.2 ms** | 28.7 ms | Cepheus, 1.6 times |
 | a client with 10,000 invoices, refused (`Delete`, `refuse`; `DELETE`, `REFERENCES`) | **6 µs** | 89 µs | Cepheus, 15 times |
-| an invoice and its 100 lines (`cascade`; `ON DELETE CASCADE`) | **148 µs** | 201 µs | Cepheus, 1.4 times |
-| an invoice and its 10,000 lines | 21.8 ms | **5.18 ms** | PostgreSQL, 4.2 times |
-| an invoice and the link of its 10,000 notes (`clear`; `ON DELETE SET NULL`) | **11.1 ms** | 46.5 ms | Cepheus, 4.2 times |
+| an invoice and its 100 lines (`cascade`; `ON DELETE CASCADE`) | **129 µs** | 171 µs | Cepheus, 1.3 times |
+| an invoice and its 10,000 lines | 16.7 ms | **4.92 ms** | PostgreSQL, 3.4 times |
+| an invoice and the link of its 10,000 notes (`clear`; `ON DELETE SET NULL`) | **6.21 ms** | 88.7 ms | Cepheus, 14 times |
 | the check of a link that names a kind, at each write (a foreign key's) | **0.2 µs** | 9.6 µs | Cepheus, 48 times |
 | the median total of 245,000 invoices (`Median`; `percentile_cont`), 1 group | **28.8 ms** | 56.9 ms | Cepheus, 2.0 times |
 | the different statuses by city (`Count(s)`; `count(DISTINCT)`), 100 groups | **15.2 ms** | 190 ms | Cepheus, 13 times |
@@ -1515,18 +1517,19 @@ of 2.5 to 5.9).
 
 - A counter many writers share is where a lock costs most: PostgreSQL holds the row until each commit is on the disk,
   Cepheus's writer reads the counter as it applies each group, and the groups share their fsync.
-- `Optional` costs what the same join costs; on a selective question Cepheus's indexes win, over two whole tables
-  PostgreSQL's hash join does.
-- `Less` costs less than filtering the rows in the program. As the server answers it (its rows' index words), the
-  check is as fast as PostgreSQL's scan of a narrow table and the range above, split across Cepheus's cores at its
-  second level (past the one total of the bound), 1.9 times faster; with every value made for a program, as the table
-  gives them, PostgreSQL's check is still 2.3 times faster and the range about the same: making the rows' values is
-  most of Cepheus's time.
+- `Optional` costs what the same join costs, a missing cell a bit of a mask: on a selective question Cepheus's indexes
+  win, and over two whole tables, every value received, Cepheus is 2.0 times faster than PostgreSQL's hash join.
+- `Less` costs less than filtering the rows in the program. With every value made for a program, as the table gives
+  them, Cepheus is 1.5 times faster on the check and 1.6 times on the range above, split across its cores at its second
+  level (past the one total of the bound); as the server answers them (their rows' index words) beside PostgreSQL's
+  engine alone, 1.6 and 2.4 times. The join carries index words, and a row's values are made only once it is an answer.
+  These are on the machine's 8 domains, PostgreSQL in one process: on one core, PostgreSQL's sequential scan of the
+  narrow table still answers the check 1.3 times faster.
 - The deletes are the engine's work, nothing on the disk, at a load of 2.7 to 3.1, on 680,681 facts and the same rows
   ([the benchmarks](benchmarks.md#deletes-and-links-that-name-a-kind-2026-11-25)). Finding what links to a thing is one
   lookup in Cepheus, whatever their number, where PostgreSQL runs its foreign key's query through a trigger; a large
-  cascade costs Cepheus what retracting its facts costs (1 µs a fact, all retracted together), PostgreSQL only marks
-  its rows.
+  cascade costs Cepheus what retracting its facts costs (0.8 µs a fact, all retracted together into maps built in one
+  pass), PostgreSQL only marks its rows and leaves its indexes to `VACUUM`.
 - The reports are the engine's work, on 990,000 facts at a load of 1.9 to 2.5 ([the
   benchmarks](benchmarks.md#reports-avg-countx-values-quantile-stddev-trunc-2026-11-26-at-1-million-facts)): Cepheus
   wins at every number of groups, keeping each group's different values with their counts where PostgreSQL sorts its
@@ -1546,6 +1549,11 @@ of 2.5 to 5.9).
 The questions where PostgreSQL was faster, with main's binaries and now ([the benchmarks](benchmarks.md#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts)):
 
 ![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, an arrow from the first to the second. The arrows point right, towards Cepheus, but one that moves within the noise (Optional as the server answers it, 9.59 to 10.0 ms). A rank of one group goes from PostgreSQL 1.2 times faster to Cepheus 1.9 times, of 100 and 10,000 groups to Cepheus 3.1 and 1.8 times, the last invoice of each client to Cepheus 1.3 times, a cascade of 100 lines to Cepheus 1.4 times, the Less range with every value to within 10 %; PostgreSQL stays faster on the Less check with every value (2.3 times, from 3.0), Optional with every value (1.2, from 1.4), the 3 latest of each client by LATERAL (2.0, from 2.5) and a cascade of 10,000 lines (4.2, from 5.8).](images/bench-pg-won.svg)
+
+The same questions with every value made, in the same scope on both sides, and the cascades, measured since ([the
+benchmarks](benchmarks.md#rows-with-every-value-made-and-cascades-2026-11-26-at-1-million-facts)):
+
+![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, an arrow from the first to the second. With every value made, the Less check: Cepheus, 1.5 times (PostgreSQL 1.1 before); the Less range: Cepheus, 1.6 times (1.3 before); Optional over every client: Cepheus, 2.0 times (1.1 before). The engine alone: Cepheus, 1.6 times (about the same before), Cepheus, 2.4 times (1.9 before) and Cepheus, 2.1 times (1.3 before). A cascade of 100 lines: Cepheus, 1.3 times (1.2 before); a clear of 10,000 notes: Cepheus, 14 times (9.3 before); a cascade of 10,000 lines: PostgreSQL, 3.4 times (4.0 before).](images/bench-rows.svg)
 
 ## Each tutorial in one line
 

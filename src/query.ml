@@ -601,6 +601,11 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
     List.iter (fun (x, lo, hi) -> fchk.(x) <- (lo, hi) :: fchk.(x)) floats;
     let has_chk = Array.init n (fun x -> dchk.(x) <> [] || fchk.(x) <> []) in
     let any_chk = Array.exists Fun.id has_chk and any_dyn = Array.exists (fun l -> l <> []) dyn in
+    (* each variable's Less bounds as arrays (its level reads them at every binding, with no closure); made only for a
+       question with such bounds, the only one that reads them, so that a small fold pays nothing for them *)
+    let dyn_y = if any_dyn then Array.map (fun l -> Array.of_list (List.map (fun (y, _, _) -> y) l)) dyn else [||]
+    and dyn_g = if any_dyn then Array.map (fun l -> Array.of_list (List.map (fun (_, g, _) -> g) l)) dyn else [||]
+    and dyn_s = if any_dyn then Array.map (fun l -> Array.of_list (List.map (fun (_, _, st) -> st) l)) dyn else [||] in
     let iv = intervals n (limits @ !more) in
     let sv = Array.make n [||] and has_set = Array.make n false in
     List.iter (fun (x, a) -> if has_set.(x) then sv.(x) <- Array.of_list (List.filter (in_sorted a) (Array.to_list sv.(x))) else (sv.(x) <- a; has_set.(x) <- true)) sets;
@@ -725,16 +730,16 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
       (* a variable bounded by Less, at its level: its interval from its own and the other sides' words; false when
          it is empty *)
       let bounds x =
-        let lo, hi = match iv0.(x) with None -> min_int, max_int | Some (a, b) -> a, b in
-        let lo = ref lo and hi = ref hi and ok = ref true in
-        List.iter
-          (fun (y, greater, strict) ->
-            let o = env.(y) in
-            if greater then (if not strict then lo := max !lo o else if o = max_int then ok := false else lo := max !lo (o + 1))
-            else if not strict then hi := min !hi o
-            else if o = min_int then ok := false
-            else hi := min !hi (o - 1))
-          dyn.(x);
+        let lo = ref min_int and hi = ref max_int and ok = ref true in
+        (match iv0.(x) with None -> () | Some (a, b) -> lo := a; hi := b);
+        let ys = dyn_y.(x) and gs = dyn_g.(x) and ss = dyn_s.(x) in
+        for j = 0 to Array.length ys - 1 do
+          let o = env.(Array.unsafe_get ys j) and greater = Array.unsafe_get gs j and strict = Array.unsafe_get ss j in
+          if greater then (if not strict then lo := max !lo o else if o = max_int then ok := false else lo := max !lo (o + 1))
+          else if not strict then hi := min !hi o
+          else if o = min_int then ok := false
+          else hi := min !hi (o - 1)
+        done;
         !ok && !lo <= !hi && (let r = Some (!lo, !hi) in iv.(x) <- r; ivs.(x) <- r; true)
       in
       (* the next count of candidates at which the budget, the stop and the other domains are looked at: the budget
@@ -816,20 +821,21 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
       let ckeys = Array.map (fun ps -> Array.make (Array.length ps) 0) by_var
       and cvals = Array.map (fun ps -> Array.make (Array.length ps) (-1)) by_var
       and clos = Array.map (fun ps -> Array.make (Array.length ps) (-1)) by_var
-      and cell2 = [| 0; 0 |] in
-      (* a slice's exact count, and where its rows start when they can be read straight (Store.slice_values) *)
+      and cell2 = [| 0; 0 |] and slo = [| 0 |] in
+      (* a slice's exact count, and where its rows start when they can be read straight (Store.slice_values) in
+         slo.(0) (-1 otherwise); its other side is known (a word, or a variable bound before) *)
+      let known = function W w -> w | V y -> env.(y) in
       let slice_count x pt =
+        slo.(0) <- -1;
         if has x pt.pe then begin
-          match get pt.pv with
-          | Some w -> let c = Store.slice_things v pt.pp w cell2 in if c >= 0 then (cell2.(1), 2 * c) else (-1, count x pt)
-          | None -> -1, count x pt
+          let c = Store.slice_things v pt.pp (known pt.pv) cell2 in
+          if c >= 0 then (slo.(0) <- cell2.(1); 2 * c) else count x pt
         end
         else if pt.many then begin
-          match get pt.pe with
-          | Some e -> let c = Store.slice_values v e pt.pp cell2 in if c >= 0 then (cell2.(1), 2 * c) else (-1, count x pt)
-          | None -> -1, count x pt
+          let c = Store.slice_values v (known pt.pe) pt.pp cell2 in
+          if c >= 0 then (slo.(0) <- cell2.(1); 2 * c) else count x pt
         end
-        else -1, count x pt
+        else count x pt
       in
       let choose i =
         let x = ord.(i) in
@@ -841,7 +847,7 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
             else if sl.(j) then begin
               let key = match other x ps.(j) with W w -> w | V y -> env.(y) in
               if cvals.(x).(j) >= 0 && ckeys.(x).(j) = key then cvals.(x).(j)
-              else (let lo, c = slice_count x ps.(j) in cvals.(x).(j) <- c; ckeys.(x).(j) <- key; clos.(x).(j) <- lo; c)
+              else (let c = slice_count x ps.(j) in cvals.(x).(j) <- c; ckeys.(x).(j) <- key; clos.(x).(j) <- slo.(0); c)
             end
             else count x ps.(j)
           in
@@ -880,18 +886,29 @@ let fold ?(seq = false) ?(any_order = false) ?(sets = []) ?(less = []) ?(budget 
                 if !ok then f c
               end)
             sv.(x)
-        else if src >= 0 then
-          iterate x ps.(src) (fun c ->
-              incr w;
-              if !w > !lim then over ();
-              if in_range x c then begin
-                let ok = ref true and j = ref 0 in
-                while !ok && !j < Array.length ps do
-                  if !j <> src && (not sk.(!j)) && not (test i !j x c ps.(!j)) then ok := false;
-                  incr j
-                done;
-                if !ok then f c
-              end)
+        else if src >= 0 then begin
+          let each c =
+            incr w;
+            if !w > !lim then over ();
+            if in_range x c then begin
+              let ok = ref true and j = ref 0 in
+              while !ok && !j < Array.length ps do
+                if !j <> src && (not sk.(!j)) && not (test i !j x c ps.(!j)) then ok := false;
+                incr j
+              done;
+              if !ok then f c
+            end
+          in
+          let pt = ps.(src) in
+          (* a slice that [choose] counted for this binding, its rows in the one run: read from its first row, the
+             same candidates in the same order as [iterate] gives them, without looking the slice up again (a thing in a
+             range of many rows is still sought from its first thing) *)
+          let lo = clos.(x).(src) and c2 = cvals.(x).(src) in
+          if lo >= 0 && slice.(i).(src) && c2 >= 0 && ckeys.(x).(src) = known (other x pt)
+             && ((not (has x pt.pe)) || iv.(x) = None || c2 / 2 < !seek_min)
+          then (if has x pt.pe then Store.iter_slice_things v pt.pp lo (c2 / 2) each else Store.iter_slice_values v (known pt.pe) pt.pp lo (c2 / 2) each)
+          else iterate x pt each
+        end
       in
       (* the leapfrog's buffers, a level's pattern each: its candidates, how many, and the known side they were read for *)
       let bufs = Array.map (fun ps -> Array.map (fun _ -> ref [||]) ps) by_var

@@ -75,7 +75,7 @@ Following Raasveldt et al. [Raasveldt 2018] for fairness, and Hoefler and Belli 
 | `kbench.exe load DIR N`, `run DIR`, `fork N`, `mixed DIR N`, `csv DIR OUT` | pages of a kind by its things' ids: N items (a name, a tenant, an int) in one run; a page of 51 by id ascending and descending, the first and the one after the middle item, a tenant's likewise, each checked against the ids it must give; on a fork filled in memory; on a fork whose delta holds N things of another kind and one item renamed; the items as CSV for `pg.sh keyset` |
 | `wbench.exe run DIR` | windows (protocol 10) on rbench's data: a running total, a moving mean of 3, a rank by total and the row before, over the 245,000 invoices in one group, each city's (100) and each client's (10,000); the 3 latest invoices of each client and the last one (`Each` and `Limit`); the monthly totals in Paris with their windows (a report); a page of 51 with its running total, the first and the one after the 200,000th row, beside the same pages without windows; `pg.sh windows ROOT index\|run` asks PostgreSQL the same (`OVER`, `LATERAL`, `DISTINCT ON`), with the indexes a user makes for them |
 | `wbench.exe pair DIR`, `writes DIR`, `within DIR`, `merge DIR` | an index of two properties on rbench's data: the 3 latest invoices of each client and the last one (`Each`, `Limit`), the 10 latest of the client with the most invoices and the 10 after them (`After`), the open and the memory; writes on a fork (a new invoice, its date changed, its total changed: 2,000 groups a round, resolved and applied, no journal); `within` declares `invoice/date` within `invoice/client` and merges; `merge` writes 100 new invoices and merges every run into one, its time and the file's size; `pg.sh pairs ROOT` asks PostgreSQL the same (`LATERAL`, `DISTINCT ON`, an index scan and a keyset) with the index of `pg.sh windows ROOT index` |
-| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop; `COUNTER=1`: each transaction increments one shared counter row), `ops ROOT` (the questions of `bench.exe pages` that `Less` and `Optional` answer, with an index on `invoice (total)`), `keyset ROOT load\|run DIR` (kbench's pages: `WHERE id > $1 ORDER BY id LIMIT 51` on the primary key, a tenant's on `(tenant, id)`) |
+| `bench/pg/pg.sh init\|start\|load\|read\|write\|stop ROOT ...` | PostgreSQL's side on a cluster of its own (`ROOT/data`, port 5544): `start ROOT MEM` caps the server's memory (`SHARED=32MB` sets `shared_buffers`), `read ROOT NCLIENTS` (`WORKERS=k` parallel workers a query, `QS`, `RUNS`), `write ROOT NCLIENTS CLIENTS SECS` (`RATE=r`: open loop; `COUNTER=1`: each transaction increments one shared counter row), `ops ROOT` (the questions of `bench.exe pages` that `Less` and `Optional` answer, with an index on `invoice (total)`, in three scopes: the engine alone, every value serialized at the server by `EXPLAIN`'s `SERIALIZE TEXT`, every value received by a program through libpq, pgbench's mean latency), `keyset ROOT load\|run DIR` (kbench's pages: `WHERE id > $1 ORDER BY id LIMIT 51` on the primary key, a tenant's on `(tenant, id)`) |
 | `bench/sqlite/sqlite.sh load\|read ROOT ...` | SQLite's side, one file `ROOT/bench.db`: `load ROOT CSVDIR`, `read ROOT NCLIENTS` (`QS`, `RUNS`, `CACHE_MB`) |
 | `bench/ops.sh cepheus\|cepheus-replay\|pg\|pg-replay\|sqlite ROOT CSVDIR ...` | backup and restore on the three sides: `cepheus backup`, `verify`, `restore` to the end and to a group; `pg_basebackup`, `pg_verifybackup`, a restore and a point-in-time recovery; SQLite's `.backup`, `integrity_check`, `.restore`; the whole history replayed (`-replay`) |
 | `test/seats.exe DIR 0 SEED naive\|expect SEATS` | the sale of seats of the [case](case-seats.md): `BUYERS` threads sell out a hall of SEATS seats, the time and what went wrong |
@@ -160,6 +160,151 @@ format 9 (no pair) gave main's times: 1.00, 1.02, 1.00 and 1.00 times main's (p 
   where a run written before a declaration holds no pair until a merge rewrites it (the questions read the plain join
   until then, with the same rows).
 
+## Rows with every value made, and cascades (2026-11-26), at 1 million facts
+
+**Method.** The three questions PostgreSQL 18.6 still won in [the section
+below](#the-cases-postgresql-still-won-2026-11-26-at-1-million-facts) (a `Less(a, b)` check of the follow links and
+`Optional` over every client, each with every value made, and a cascade of 10,000 lines), with the `Less` range, the
+cascade of 100 lines and the `clear` of 10,000 notes beside them, on the same data. PostgreSQL's time in that section,
+`EXPLAIN (ANALYZE, TIMING OFF)`, runs the plan and makes no output: so each side is now measured in the same two scopes.
+**The engine alone**: Cepheus's index words as its server answers (`Answer.answer`) beside that `EXPLAIN`. **Every value
+made**: `Cepheus.ask`'s rows of values in the program that asks, beside a program that receives each of PostgreSQL's
+rows through libpq (pgbench, one client, prepared statements over the Unix socket: libpq reads every row into its
+result); between the two, `EXPLAIN`'s `SERIALIZE TEXT` (PostgreSQL 17 and later: every value made into its text form at
+the server, none sent). `abench.exe DIR PAGES` and `dbench.exe delete` on Cepheus's side, `pg.sh ops` and `pg.sh fk run`
+on PostgreSQL's. Cepheus on 8 domains (its default, one a thread), PostgreSQL as it plans (one process for each of these
+questions: no parallel worker). Three sides in each of 21 rounds, their order turned at each round: main's binaries
+(ec4bb86), the change's, PostgreSQL; each a median of 11 runs (PostgreSQL's questions: 3 runs of each scope; the deletes
+on a fork thrown away, PostgreSQL's in a subtransaction rolled back). Given: the median of the rounds, in brackets their
+least and largest; now over main, the median of the rounds' ratios [least, largest] and the rounds where now was faster.
+A load average of 2.0 to 4.0 on the 8 threads (other jobs' tests). Cepheus counts 28,262 follow links to a newer client
+and PostgreSQL 28,265: the generator's ids of 3 clients are not in the order of their things' ids. Where the time went
+was measured first, phase by phase (a scratch program timing each phase and counting the words it allocates), by
+allocation site (OCaml's `Gc.Memprof`) and by stack samples of one process under gdb.
+
+| question | main | now | now / main | PostgreSQL 18.6 | now |
+|---|---:|---:|---:|---:|---|
+| the follow links to a newer client (`Less(a, b)`), 28,262 rows, every value made | 7.58 ms [6.36, 13.8] | **4.47 ms** [3.40, 7.22] | 0.60 [0.32, 0.94], 21/21 | 6.69 ms [6.15, 11.3] | Cepheus, 1.5 times (PostgreSQL 1.1 before) |
+| the same, the engine alone (index words; `EXPLAIN ANALYZE`) | 3.62 ms [3.37, 8.76] | **2.24 ms** [2.04, 3.93] | 0.61 [0.26, 0.80], 21/21 | 3.68 ms [3.53, 6.10] | Cepheus, 1.6 times (about the same before) |
+| the invoices below one invoice's total (`Less`), 122,962 rows, every value made | 21.9 ms [20.2, 36.3] | **18.2 ms** [17.1, 33.3] | 0.85 [0.56, 1.60], 20/21 | 28.7 ms [26.7, 36.5] | Cepheus, 1.6 times (1.3 before) |
+| the same, the engine alone | 10.1 ms [9.06, 17.5] | **8.19 ms** [7.67, 16.0] | 0.84 [0.49, 1.32], 18/21 | 19.4 ms [18.4, 24.3] | Cepheus, 2.4 times (1.9 before) |
+| every client with the clients each follows (`Optional`), 56,797 rows, every value made | 15.7 ms [14.1, 31.6] | **8.82 ms** [8.02, 16.9] | 0.54 [0.26, 0.99], 21/21 | 17.5 ms [16.2, 20.5] | Cepheus, 2.0 times (1.1 before) |
+| the same, the engine alone | 9.52 ms [8.83, 37.1] | **5.67 ms** [5.05, 9.80] | 0.59 [0.18, 1.03], 20/21 | 12.1 ms [11.5, 13.1] | Cepheus, 2.1 times (1.3 before) |
+| an invoice and its 10,000 lines, `cascade` | 19.9 ms [19.2, 21.3] | 16.7 ms [15.6, 24.1] | 0.84 [0.78, 1.24], 18/21 | **4.92 ms** [4.57, 8.14] | PostgreSQL, 3.4 times (4.0 before) |
+| an invoice and its 100 lines | 140 µs [132, 222] | **129 µs** [117, 197] | 0.93 [0.58, 1.38], 15/21 | 171 µs [120, 317] | Cepheus, 1.3 times (1.2 before) |
+| an invoice and the link of its 10,000 notes, `clear` | 9.50 ms [8.65, 12.1] | **6.21 ms** [5.14, 7.84] | 0.64 [0.55, 0.81], 21/21 | 88.7 ms [74.0, 104] | Cepheus, 14 times (9.3 before) |
+
+PostgreSQL's `clear` slowed over the rounds, from 74 to 104 ms a round: each `SET NULL` rolled back leaves 10,000 dead
+versions of rows until autovacuum takes them; it took 46.5 ms in [the deletes'
+section](#deletes-and-links-that-name-a-kind-2026-11-25).
+
+The same questions in each scope, the medians of the rounds; Cepheus on 8 domains, and in brackets on one domain
+pinned to one core (`taskset -c 2`, `CEPHEUS_DOMAINS=1`, 11 more rounds of main and now alternated). PostgreSQL ran
+each in one process (its plans: no parallel worker).
+
+| question | PostgreSQL: the engine alone | every value serialized | every value received (libpq) | Cepheus: the join alone (a count) | the index words (`Answer`) | every value (`Cepheus.ask`) |
+|---|---:|---:|---:|---:|---:|---:|
+| the follow links to a newer client (`Less(a, b)`) | 3.68 ms | 6.33 ms | 6.69 ms | 1.61 ms [4.61 ms] | 2.24 ms [5.07 ms] | 4.47 ms [8.44 ms] |
+| the invoices below one invoice's total (`Less`) | 19.4 ms | 27.1 ms | 28.7 ms | 8.48 ms [18.1 ms] | 8.19 ms [19.1 ms] | 18.2 ms [33.9 ms] |
+| every client with the clients each follows (`Optional`) | 12.1 ms | 18.0 ms | 17.5 ms | 5.25 ms [4.93 ms] | 5.67 ms [6.26 ms] | 8.82 ms [10.4 ms] |
+
+![One row a question, on a log scale of how many times faster a side is, a grey dot for main's binaries and a coloured one for now, an arrow from the first to the second. With every value made, the Less check: Cepheus, 1.5 times (PostgreSQL 1.1 before); the Less range: Cepheus, 1.6 times (1.3 before); Optional over every client: Cepheus, 2.0 times (1.1 before). The engine alone: Cepheus, 1.6 times (about the same before), Cepheus, 2.4 times (1.9 before) and Cepheus, 2.1 times (1.3 before). A cascade of 100 lines: Cepheus, 1.3 times (1.2 before); a clear of 10,000 notes: Cepheus, 14 times (9.3 before); a cascade of 10,000 lines: PostgreSQL, 3.4 times (4.0 before).](images/bench-rows.svg)
+
+- **`Less` and `Optional`: where the time went.** On main, the `Less` check took 2.6 to 3.0 ms for its join, 3.5 with
+  its index words and 6.8 to 7.8 with every value, of which 1.2 in the asking domain's minor collections. The join made
+  about a million words of garbage a call: at each binding of its first level, `Less`'s bounds as closures and
+  references (18 words), the closures of the next level's candidates (about 30), a slice's count returned as a tuple in
+  an option, and `Ask`'s closure that keeps a binding (4 words a binding); and each binding of the first level searched
+  the value index three times, to count its slice, to count its things and to read them. A row of values cost two list
+  cells, an `Array.make` (a call into the C runtime) and a closure (a partial application). `Optional` over every client
+  made a list of each client's values, reversed it, and copied each row out of the buffer. OCaml 5's minor collections
+  stop every domain and copy each young block still alive into the major heap
+  ([Sivaramakrishnan 2020](references.md#buffer-management-and-caching)): every row of an answer is alive, so every
+  block of a row is copied once.
+- **What changed, each measured on its own** (21 rounds alternated with the build before it; the median of the
+  rounds' ratios, and a two-sided sign test on the rounds; each kept because it won and cost nothing elsewhere):
+  1. `Optional`'s rows written one after the other into the fold's shared buffer, with no list of a thing's values and
+     no copy a row, and the `Not`s checked with no closure a binding: `Optional`'s join 0.55, its index words 0.79,
+     its values 0.81 (p < 0.001).
+  2. `Cepheus.ask`'s rows gathered by each domain in chunks of up to 256, a block of the minor heap each, and listed
+     once at the end from the last row back (one list cell a row); a row of up to 4 columns made as an array literal,
+     in the minor heap with no C call; no partial application: the check's values 0.87 (p 0.027), `Optional`'s 0.70
+     (p 0.0002).
+  3. The server's `Optional` rows pushed as words, cell by cell, a word or 0 and the mask after them, with no row
+     array: `Optional`'s index words 0.80 (p 0.0002).
+  4. `Less`'s bounds read from arrays made once a question that has them, no closure at each binding; a slice's count
+     with no tuple and no option; a level's candidates read straight from the rows of the run its count found, with no
+     second and third search: the check's join 0.83 (p 0.0015), its values 0.91 (p 0.027).
+  5. The values a property takes read from its value index's rank words, a bit a value and no row decoded, where every
+     row by value was read and the copies skipped (the check's first level: the clients that follow someone): the join
+     0.60, the index words 0.72, the values 0.81 (faster in 18 to 21 of the 21 rounds).
+
+  This is late materialization ([Abadi 2007b](references.md#buffer-management-and-caching)): the join carries index
+  words, the server sends them so, and a row's values are made only once its binding is an answer. `Cepheus.ask` and
+  Cesia's API give the same types and the same values in the same order: a test compares the rows of large answers, with
+  `Optional`s many and missing, on one domain and split across four, with the rows of before.
+- **Where PostgreSQL still wins on these questions.** On one core, with no domain to share the work: the `Less` check,
+  which PostgreSQL answers by one sequential scan of a table of two columns with a filter, stays PostgreSQL's, 8.44 ms
+  with every value against 6.69 through libpq (1.3 times) and 5.07 ms for the index words against 3.68 for its engine
+  (1.4 times): Cepheus's join walks the links by value, a level a variable, about 80 ns a link (4.61 ms for the join
+  alone) against 65 ns a row of PostgreSQL's scan. The `Less` range with every value too, 33.9 ms against 28.7
+  (1.2 times; its engine alone the same, 19.1 against 19.4). `Optional` stays Cepheus's on one core (10.4 ms against
+  17.5, 6.26 against 12.1). A row's values are OCaml blocks that a minor collection copies when it finds them alive (9
+  words a row of two columns): a question of 227,260 rows (every invoice and its status) takes 62.7 ms with every value
+  against 20.8 for its join, 2.07 million words promoted; PostgreSQL's rows go to the socket as bytes, never into a
+  collected heap. And `Cepheus.ask` answers in the program that asks, with no socket: a program asking Cepheus's server
+  receives index words and pays for its own values.
+- **A cascade: the maps of ints built in one pass.** On one domain, main's cascade of 10,000 lines took 24 ms: reading
+  the lines' facts 1.6, `Store.set_sorted` 13 (2.2 million words allocated, 0.6 million promoted, 6 ms of collections),
+  the rest about 10 (the list of the group's changes, the checks); the collections were half of all (3.3 million words
+  allocated, 1 million promoted, 1.7 to 1.9 major cycles a call). The delta's maps of ints (by thing, a value's things,
+  a thing's counts) were built from their sorted bindings by unions of halves
+  ([Blelloch 2016](references.md#persistent-structures-and-forks): each union in O(m log(n/m + 1)) steps, but about 65
+  words a binding in nodes made and dropped). They are now `Store.IM`, the AVL trees of Stdlib's `Map`
+  ([Adelson-Velsky 1962](references.md#persistent-structures-and-forks)) written out with one more function,
+  `of_sorted`: the middle binding the root of the trees of the two halves, in O(n), one node of 6 words a binding. A
+  group's changes and their words go into two arrays that grow, from 4, where two lists were reversed at the end. A
+  cascade of 10,000 lines allocates 2.12 million words where it allocated 3.27. In 21 rounds alternated with the build
+  before: a cascade of 10,000 lines 0.83 (faster in 20 of 21 rounds, p < 0.0001), of 100 lines 0.81, a `clear` of 100
+  notes 0.66 and of 10,000 0.68, a `Retract` of the 10,000 lines' facts 0.92; a `Delete` refused at once, timed alone by
+  `dbench` (a clock of 1 µs, each call after a print), 6.0 to 6.9 µs in the rounds of the table (slower in 17 to 18 of
+  21); timed 20,000 at a time on one core, the same work: refused with no line 7.30 to 7.19 µs, with 100 lines 7.88 to
+  7.96, a cascade and a clear of nothing 0.99 and 1.00 times main's (8 rounds). A call alone and cold is some 0.5 µs
+  slower; its cause was not found.
+
+  Nothing changes on the disk: the journal's bytes are the same, only how the delta's maps are built in memory
+  changed. Each threat has a test: the maps against Stdlib's `Map` (300 rounds of random operations, the trees kept
+  balanced); a cascade replayed from its changes as a restart, a replica and a Raft follower apply it
+  (`Resolve.replay`), giving the same facts; a power loss at each disk call of a 600-line cascade's commit, in the
+  journal and in a merged run: the database opens as it was before or after, nothing between; the cascade raced by
+  writes of the same things in one batch of the writer, in all 6 orders: the groups' state one after the other, no
+  line linking to a deleted invoice; the watches seeing cascades in the live simulation (each watch's rows against
+  the question answered again).
+
+  **Where PostgreSQL still wins**: a cascade of 10,000 lines, 3.4 times faster. It marks each deleted row's version
+  (`xmax`) and touches no index until `VACUUM`, about 0.5 µs a line; Cepheus writes each retraction into its delta's
+  maps by thing and by value at once, about 0.8 µs a fact (2 facts a line), so that the next question reads them with no
+  vacuum and no index holds a dead row: the design's trade, kept. What PostgreSQL leaves for later, on a fresh copy of
+  its cluster (its cache cold, 5 runs): after the `DELETE` of the invoice and its 10,000 lines committed (26.6 ms
+  there), `VACUUM` of the lines' table takes 30.2 ms and of the invoices' 5.8; Cepheus's retractions reach its runs at
+  the next merge, as every write does.
+
+**No slowdown elsewhere** (main's binaries and now alternated in each round on the same databases, each process in a
+3 GB scope; the median of the rounds' ratios, now over main, and a two-sided sign test on the rounds). On 8 domains, 11
+rounds (a load of 2.0 to 4.8): the memory at its peak 1.01 and 1.02 times main's; the start-up 0.97 (faster in 11 of 11
+rounds); `kbench`'s pages 0.97 to 1.01; `rbench`'s reports 0.95 to 1.03, none slower in more rounds than chance gives
+(p 0.23 or more); `bench.exe read` 0.92 to 1.01; a write of plain groups 0.94; `wbench`'s windows 0.98 to 1.05 (the last
+invoice of each client 1.05, slower in 8 of 11 rounds, p 0.23) and its pages of 51 0.64 to 0.67 (faster: their levels
+read slices as the joins above do; which change gives it was not measured on its own); `abench`'s other questions, in
+the rounds of the table, 0.84 to 1.01; `mbench`'s small questions 0.51 to 1.04 (`Optional` of a city 0.51). On one
+domain pinned to one core (`taskset -c 2`, `CEPHEUS_DOMAINS=1`), 11 rounds (a load of 1.2 to 4.5): the reports 0.95 to
+1.04 (p 0.23 or more for those above 1), `bench.exe read` 0.95 to 1.00, `mbench` 0.46 to 1.04. One case moved the same
+way in both: `mbench`'s point fold (one client's name, 1.9 µs), 1.04, slower in 17 of the 22 rounds (p 0.017):
+`Query.fold` made the arrays of `Less`'s bounds for every question, three small arrays and their closures. They are now
+made only for a question with `Less`, the only one that reads them: in 21 rounds of main, before and now on one pinned
+core, under a load of 1.4 to 6.1, the point fold's medians were 1.96 µs, 2.03 and 1.97; now over before 0.97 (faster in
+15 of the 21 rounds, p 0.041), now over main 1.00 (p 1.0).
+
 ## The cases PostgreSQL still won (2026-11-26), at 1 million facts
 
 **Method.** The questions of the sections below where PostgreSQL 18.6 was faster, on their data: `Less` and
@@ -227,7 +372,9 @@ words made, not its values, as PostgreSQL's `EXPLAIN (ANALYZE, TIMING OFF)` make
   the server answers them (words, no value), Cepheus is as fast as PostgreSQL on the check, and faster on the range
   and `Optional`. **Where PostgreSQL still wins**: when a program asks for every value, it makes 28,250 or 56,797 rows
   of OCaml values, each an allocation the collector then scans; PostgreSQL's executor hands on tuples that point into
-  its buffers, and its time leaves out what its client pays to receive them.
+  its buffers, and its time leaves out what its client pays to receive them. Measured since in the same scope on both
+  sides, and made cheaper: [rows with every value
+  made](#rows-with-every-value-made-and-cascades-2026-11-26-at-1-million-facts).
 - **A cascade's retractions together.** The 10,000 lines' facts were retracted one fact after the other, each a walk
   of the writer's persistent maps by thing and by value. They are now gathered, read in the view before any goes,
   and retracted together by one `Store.set_sorted`, as a group of `Retract` is (a `clear`'s links too: 11.0 to
@@ -236,7 +383,8 @@ words made, not its values, as PostgreSQL's `EXPLAIN (ANALYZE, TIMING OFF)` make
   addition after the other copied a path each. The cascade of 10,000 lines now costs what retracting its 20,000 facts
   costs (21.8 against 20.4 ms). **Where PostgreSQL still wins**: it deletes a row by marking its version (`xmax`),
   touching no index until `VACUUM`, 0.5 µs a line; Cepheus writes each retraction into its delta's maps by thing and
-  by value at once, about 1 µs a fact, so that the next question reads them with no vacuum.
+  by value at once, about 1 µs a fact, so that the next question reads them with no vacuum. Its maps since built in one
+  pass: [cascades](#rows-with-every-value-made-and-cascades-2026-11-26-at-1-million-facts).
 
 **No slowdown elsewhere** (`abench`, `kbench`, `mbench`, `rbench`, `bench.exe read`, writes, memory, start-up; main's
 binaries and the change's alternated in each round on the same databases): in 5 rounds after the merge of main (a load
